@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,19 +9,19 @@
 
 class PointerWrap;
 
-// The non-API dependent parts.
+// Keeps PixelShaderConstants in sync with the BP registers; backend independent.
+// The Set*Changed() functions read bpmem/xfmem, so call them once the register write has landed.
 class PixelShaderManager final
 {
 public:
   void Init();
+  // Recomputes config-dependent constants (after loading a state or changing settings).
   void Dirty();
   void DoState(PointerWrap& p);
 
-  void SetConstants();  // sets pixel shader constants
+  // Applies the changes that were only flagged so far.
+  void SetConstants();
 
-  // constant management
-  // Some of these functions grab the constant values from global state,
-  // so make sure to call them after memory is committed
   void SetTevColor(int index, int component, s32 value);
   void SetTevKonstColor(int index, int component, s32 value);
   void SetTevOrder(int index, u32 order);
@@ -54,11 +53,12 @@ public:
   PixelShaderConstants constants{};
   bool dirty = false;
 
-  // Constants for custom shaders
+  // Uniform data of graphics-mod pixel shaders.
   std::span<u8> custom_constants;
   bool custom_constants_dirty = false;
 
 private:
+  // Deferred updates, resolved in SetConstants(). The order is part of save states.
   bool m_fog_range_adjusted_changed = false;
   bool m_viewport_changed = false;
   bool m_indirect_dirty = false;

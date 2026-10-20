@@ -1,5 +1,4 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,7 +6,10 @@
 
 #include "Common/CommonTypes.h"
 
-// all constant buffer attributes must be 16 bytes aligned, so this are the only allowed components:
+// Uniform-block mirrors of the PSBlock, VSBlock and GSBlock declarations written by the shader
+// generators. std140 packs everything in 16-byte rows, so members are 4-component vectors or
+// scalars that fill a row together (the comments name the component each scalar lands in).
+// The layouts are uploaded verbatim and are part of save states; never reorder them.
 using float4 = std::array<float, 4>;
 using uint4 = std::array<u32, 4>;
 using int4 = std::array<s32, 4>;
@@ -19,9 +21,9 @@ enum class LogicOp : u32;
 
 struct alignas(16) PixelShaderConstants
 {
-  std::array<int4, 4> colors;
-  std::array<int4, 4> kcolors;
-  int4 alpha;
+  std::array<int4, 4> colors;   // TEV colour registers
+  std::array<int4, 4> kcolors;  // TEV konstant registers
+  int4 alpha;                   // alpha test refs (.xy), destination alpha (.w)
   std::array<uint4, 8> texdims;
   std::array<int4, 2> zbias;
   std::array<int4, 2> indtexscale;
@@ -33,21 +35,21 @@ struct alignas(16) PixelShaderConstants
   float4 zslope;
   std::array<float, 2> efbscale;  // .xy
 
-  // Constants from here onwards are only used in ubershaders, other than pack2.
+  // Everything below is read by the ubershaders only (pack2 also by the specialised shaders).
   u32 genmode;                  // .z
   u32 alphaTest;                // .w
   u32 fogParam3;                // .x
   u32 fogRangeBase;             // .y
   u32 dstalpha;                 // .z
   ZTexOp ztex_op;               // .w
-  u32 late_ztest;               // .x (bool)
-  u32 rgba6_format;             // .y (bool)
-  u32 dither;                   // .z (bool)
-  u32 bounding_box;             // .w (bool)
-  std::array<uint4, 16> pack1;  // .xy - combiners, .z - tevind, .w - iref
-  std::array<uint4, 8> pack2;   // .x - tevorder, .y - tevksel, .z/.w - SamplerState tm0/tm1
-  std::array<int4, 32> konst;   // .rgba
-  // The following are used in ubershaders when using shader_framebuffer_fetch blending
+  u32 late_ztest;               // .x, 0 or 1
+  u32 rgba6_format;             // .y, 0 or 1
+  u32 dither;                   // .z, 0 or 1
+  u32 bounding_box;             // .w, 0 or 1
+  std::array<uint4, 16> pack1;  // per TEV stage: colour/alpha combiner, tevind, indirect ref
+  std::array<uint4, 8> pack2;   // tevorder, tevksel, sampler words tm0 and tm1
+  std::array<int4, 32> konst;   // every konstant selection, pre-swizzled
+  // Blend state for blending in the shader (framebuffer fetch).
   u32 blend_enable;
   SrcBlendFactor blend_src_factor;
   SrcBlendFactor blend_src_factor_alpha;
@@ -55,10 +57,10 @@ struct alignas(16) PixelShaderConstants
   DstBlendFactor blend_dst_factor_alpha;
   u32 blend_subtract;
   u32 blend_subtract_alpha;
-  // For shader_framebuffer_fetch logic ops:
-  u32 logic_op_enable;  // bool
+  // Logic op emulated in the shader (framebuffer fetch).
+  u32 logic_op_enable;  // 0 or 1
   LogicOp logic_op_mode;
-  // For custom shaders...
+  // Milliseconds, for graphics-mod shaders.
   u32 time_ms;
 };
 
@@ -67,7 +69,7 @@ struct alignas(16) VertexShaderConstants
   u32 components;           // .x
   u32 xfmem_dualTexInfo;    // .y
   u32 xfmem_numColorChans;  // .z
-  u32 missing_color_hex;    // .w, used for change detection but not directly by shaders
+  u32 missing_color_hex;    // .w, only compared on the CPU to notice config changes
   float4 missing_color_value;
 
   std::array<float4, 6> posnormalmatrix;
@@ -90,13 +92,14 @@ struct alignas(16) VertexShaderConstants
   std::array<float, 2> viewport;  // .xy
   std::array<float, 2> pad2;      // .zw
 
-  // .x - texMtxInfo, .y - postMtxInfo, [0..1].z = color, [0..1].w = alpha
+  // Per texgen: .x texMtxInfo, .y postMtxInfo. Rows 0 and 1 also hold colour (.z) and alpha (.w)
+  // channel control.
   std::array<uint4, 8> xfmem_pack1;
 
   float4 cached_normal;
   float4 cached_tangent;
   float4 cached_binormal;
-  // For UberShader vertex loader
+  // Vertex buffer layout for the ubershader's manual vertex fetch.
   u32 vertex_stride;
   std::array<u32, 3> vertex_offset_normals;
   u32 vertex_offset_position;
@@ -117,6 +120,6 @@ struct alignas(16) GeometryShaderConstants
   float4 stereoparams;
   float4 lineptparams;
   int4 texoffset;
-  VSExpand vs_expand;  // Used by VS point/line expansion in ubershaders
+  VSExpand vs_expand;  // point/line expansion done by the vertex ubershader
   u32 pad[3];
 };

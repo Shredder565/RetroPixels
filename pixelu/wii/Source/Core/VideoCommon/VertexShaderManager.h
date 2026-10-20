@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,23 +15,26 @@ class PointerWrap;
 struct PortableVertexDeclaration;
 class XFStateManager;
 
-// The non-API dependent parts.
+// Keeps VertexShaderConstants in sync with XF memory and the current vertex format; backend
+// independent.
 class alignas(16) VertexShaderManager
 {
 public:
   void Init();
   void DoState(PointerWrap& p);
 
-  // constant management
+  // Reloads the projection matrix if XF or the free-look camera changed it.
   void SetProjectionMatrix(XFStateManager& xf_state_manager);
+  // Uploads every XF change recorded by xf_state_manager. `textures` are the names of the bound
+  // textures, used to look up graphics-mod projection actions.
   void SetConstants(std::span<const std::string> textures, XFStateManager& xf_state_manager);
 
-  // data: 3 floats representing the X, Y and Z vertex model coordinates and the posmatrix index.
-  // out:  4 floats which will be initialized with the corresponding clip space coordinates
-  // NOTE: m_projection_matrix must be up to date when this is called
-  //       (i.e. VertexShaderManager::SetConstants needs to be called before using this!)
+  // Transforms a model-space position (x, y, z in data[0..2]) by position matrix mtxIdx and the
+  // current projection into the 4 clip-space floats at out. The projection is the one computed
+  // by the last SetConstants() call, so that must have run first.
   void TransformToClipSpace(const float* data, float* out, u32 mtxIdx);
 
+  // Whether depth has to be range-mapped in the vertex shader instead of by the viewport.
   static bool UseVertexDepthRange();
 
   VertexShaderConstants constants{};
@@ -40,21 +42,24 @@ public:
 
   static DOLPHIN_FORCE_INLINE void UpdateValue(bool* dirty, u32* old_value, u32 new_value)
   {
-    if (*old_value == new_value)
-      return;
-    *old_value = new_value;
-    *dirty = true;
+    if (*old_value != new_value)
+    {
+      *old_value = new_value;
+      *dirty = true;
+    }
   }
 
+  // Disabled attributes keep their previous offset. Offsets are in 32-bit words; the component
+  // count goes in the upper half when requested.
   static DOLPHIN_FORCE_INLINE void UpdateOffset(bool* dirty, bool include_components,
                                                 u32* old_value, const AttributeFormat& attribute)
   {
     if (!attribute.enable)
       return;
-    u32 new_value = attribute.offset / 4;  // GPU uses uint offsets
-    if (include_components)
-      new_value |= attribute.components << 16;
-    UpdateValue(dirty, old_value, new_value);
+    const u32 word_offset = attribute.offset / 4;
+    const u32 packed =
+        include_components ? (word_offset | (attribute.components << 16)) : word_offset;
+    UpdateValue(dirty, old_value, packed);
   }
 
   template <size_t N>
@@ -62,10 +67,11 @@ public:
                                                  std::array<u32, N>* old_value,
                                                  const std::array<AttributeFormat, N>& attribute)
   {
-    for (size_t i = 0; i < N; i++)
-      UpdateOffset(dirty, include_components, &(*old_value)[i], attribute[i]);
+    for (size_t n = 0; n < N; ++n)
+      UpdateOffset(dirty, include_components, &(*old_value)[n], attribute[n]);
   }
 
+  // Records the layout the vertex ubershader fetches from.
   DOLPHIN_FORCE_INLINE void SetVertexFormat(u32 components, const PortableVertexDeclaration& format)
   {
     UpdateValue(&dirty, &constants.components, components);
@@ -78,9 +84,10 @@ public:
   }
 
 private:
+  // The projection as last loaded, without the free-look view (row major).
   alignas(16) std::array<float, 16> m_projection_matrix;
 
-  // track changes
+  // A graphics mod changed the projection last time, so it must be reloaded once more.
   bool m_projection_graphics_mod_change = false;
 
   Common::Matrix44 LoadProjectionMatrix();

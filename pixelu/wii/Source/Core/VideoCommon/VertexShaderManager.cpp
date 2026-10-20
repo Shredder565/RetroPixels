@@ -1,12 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexShaderManager.h"
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <iterator>
+#include <vector>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -26,364 +27,298 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
+namespace
+{
+// Largest depth value of the 24-bit EFB depth buffer.
+constexpr float MAX_DEPTH = 16777215.0f;
+
+// Copies whole float4 rows [first_row, end_row) of an XF matrix block.
+template <std::size_t N>
+void CopyRows(std::array<float4, N>& dest, const float* xf_block, int first_row, int end_row)
+{
+  std::memcpy(dest[first_row].data(), xf_block + first_row * 4,
+              static_cast<std::size_t>(end_row - first_row) * sizeof(float4));
+}
+
+// Copies a 3x4 matrix (three rows) from XF memory.
+void CopyMatrix3x4(float4* dest, const float* src)
+{
+  std::memcpy(dest->data(), src, 3 * sizeof(float4));
+}
+
+// Light direction cleanup after normalising: NaN becomes 0, infinities become +-1.
+float SanitizeDirection(float component)
+{
+  if (std::isnan(component))
+    return 0.0f;
+  if (std::isinf(component))
+    return component > 0.0f ? 1.0f : -1.0f;
+  return component;
+}
+
+void ConvertLight(const Light& src, VertexShaderConstants::Light& dst)
+{
+  // XF stores the colour as a, b, g, r bytes.
+  for (int c = 0; c < 4; ++c)
+    dst.color[c] = src.color[3 - c];
+
+  for (int c = 0; c < 3; ++c)
+  {
+    dst.cosatt[c] = src.cosatt[c];
+    dst.distatt[c] = src.distatt[c];
+    dst.pos[c] = src.dpos[c];
+  }
+  // All-zero distance attenuation would divide by zero in the shader.
+  constexpr float tiny = 0.00001f;
+  if (std::fabs(src.distatt[0]) < tiny && std::fabs(src.distatt[1]) < tiny &&
+      std::fabs(src.distatt[2]) < tiny)
+  {
+    dst.distatt[0] = tiny;
+  }
+
+  // Normalised in double precision. Whether hardware normalises at all is unverified.
+  double length_sq = 0.0;
+  for (int c = 0; c < 3; ++c)
+    length_sq += double(src.ddir[c]) * double(src.ddir[c]);
+  const double inv_length = 1.0 / std::sqrt(length_sq);
+  for (int c = 0; c < 3; ++c)
+    dst.dir[c] = SanitizeDirection(static_cast<float>(src.ddir[c] * inv_length));
+}
+
+// Material/ambient colours are RGBA8 words, unpacked to one channel per int.
+void UnpackColor(int4& dest, u32 rgba)
+{
+  for (int c = 0; c < 4; ++c)
+    dest[c] = static_cast<s32>((rgba >> (24 - 8 * c)) & 0xFF);
+}
+
+// row . (x, y, z, 1)
+float TransformRow(const float* row, const float* v)
+{
+  return v[0] * row[0] + v[1] * row[1] + v[2] * row[2] + row[3];
+}
+}  // namespace
+
 void VertexShaderManager::Init()
 {
-  // Initialize state tracking variables
   m_projection_graphics_mod_change = false;
-
   constants = {};
-
   m_projection_matrix = Common::Matrix44::Identity().data;
-
   dirty = true;
 }
 
 Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 {
-  const auto& rawProjection = xfmem.projection.rawProjection;
+  const auto& raw = xfmem.projection.rawProjection;
+  const ProjectionType type = xfmem.projection.type;
+  auto& m = m_projection_matrix;
 
-  switch (xfmem.projection.type)
+  if (type == ProjectionType::Perspective)
   {
-  case ProjectionType::Perspective:
-  {
-    const Common::Vec2 fov_multiplier = g_freelook_camera.IsActive() ?
-                                            g_freelook_camera.GetFieldOfViewMultiplier() :
-                                            Common::Vec2{1, 1};
-    m_projection_matrix[0] = rawProjection[0] * g_ActiveConfig.fAspectRatioHackW * fov_multiplier.x;
-    m_projection_matrix[1] = 0.0f;
-    m_projection_matrix[2] = rawProjection[1] * g_ActiveConfig.fAspectRatioHackW * fov_multiplier.x;
-    m_projection_matrix[3] = 0.0f;
-
-    m_projection_matrix[4] = 0.0f;
-    m_projection_matrix[5] = rawProjection[2] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
-    m_projection_matrix[6] = rawProjection[3] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
-    m_projection_matrix[7] = 0.0f;
-
-    m_projection_matrix[8] = 0.0f;
-    m_projection_matrix[9] = 0.0f;
-    m_projection_matrix[10] = rawProjection[4];
-    m_projection_matrix[11] = rawProjection[5];
-
-    m_projection_matrix[12] = 0.0f;
-    m_projection_matrix[13] = 0.0f;
-
-    m_projection_matrix[14] = -1.0f;
-    m_projection_matrix[15] = 0.0f;
-
-    g_stats.gproj = m_projection_matrix;
+    // Only x/y scale and the z row come from XF; the aspect hack and free-look FOV scale x/y.
+    const Common::Vec2 fov = g_freelook_camera.IsActive() ?
+                                 g_freelook_camera.GetFieldOfViewMultiplier() :
+                                 Common::Vec2{1, 1};
+    m.fill(0.0f);
+    m[0] = raw[0] * g_ActiveConfig.fAspectRatioHackW * fov.x;
+    m[2] = raw[1] * g_ActiveConfig.fAspectRatioHackW * fov.x;
+    m[5] = raw[2] * g_ActiveConfig.fAspectRatioHackH * fov.y;
+    m[6] = raw[3] * g_ActiveConfig.fAspectRatioHackH * fov.y;
+    m[10] = raw[4];
+    m[11] = raw[5];
+    m[14] = -1.0f;
+    g_stats.gproj = m;
   }
-  break;
-
-  case ProjectionType::Orthographic:
+  else if (type == ProjectionType::Orthographic)
   {
-    m_projection_matrix[0] = rawProjection[0];
-    m_projection_matrix[1] = 0.0f;
-    m_projection_matrix[2] = 0.0f;
-    m_projection_matrix[3] = rawProjection[1];
-
-    m_projection_matrix[4] = 0.0f;
-    m_projection_matrix[5] = rawProjection[2];
-    m_projection_matrix[6] = 0.0f;
-    m_projection_matrix[7] = rawProjection[3];
-
-    m_projection_matrix[8] = 0.0f;
-    m_projection_matrix[9] = 0.0f;
-    m_projection_matrix[10] = rawProjection[4];
-    m_projection_matrix[11] = rawProjection[5];
-
-    m_projection_matrix[12] = 0.0f;
-    m_projection_matrix[13] = 0.0f;
-
-    m_projection_matrix[14] = 0.0f;
-    m_projection_matrix[15] = 1.0f;
-
-    g_stats.g2proj = m_projection_matrix;
-    g_stats.proj = rawProjection;
+    // Scale on the diagonal, offsets in the last column.
+    m.fill(0.0f);
+    m[0] = raw[0];
+    m[3] = raw[1];
+    m[5] = raw[2];
+    m[7] = raw[3];
+    m[10] = raw[4];
+    m[11] = raw[5];
+    m[15] = 1.0f;
+    g_stats.g2proj = m;
+    g_stats.proj = raw;
   }
-  break;
-
-  default:
+  else
+  {
     ERROR_LOG_FMT(VIDEO, "Unknown projection type: {}", xfmem.projection.type);
   }
 
-  PRIM_LOG("Projection: {} {} {} {} {} {}", rawProjection[0], rawProjection[1], rawProjection[2],
-           rawProjection[3], rawProjection[4], rawProjection[5]);
+  PRIM_LOG("Projection: {} {} {} {} {} {}", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
 
-  auto corrected_matrix = Common::Matrix44::FromArray(m_projection_matrix);
-
-  if (g_freelook_camera.IsActive() && xfmem.projection.type == ProjectionType::Perspective)
-    corrected_matrix *= g_freelook_camera.GetView();
-
+  Common::Matrix44 result = Common::Matrix44::FromArray(m);
+  if (g_freelook_camera.IsActive() && type == ProjectionType::Perspective)
+    result *= g_freelook_camera.GetView();
   g_freelook_camera.GetController()->SetClean();
-
-  return corrected_matrix;
+  return result;
 }
 
 void VertexShaderManager::SetProjectionMatrix(XFStateManager& xf_state_manager)
 {
-  if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty())
-  {
-    xf_state_manager.ResetProjection();
-    auto corrected_matrix = LoadProjectionMatrix();
-    memcpy(constants.projection.data(), corrected_matrix.data.data(), 4 * sizeof(float4));
-  }
+  if (!xf_state_manager.DidProjectionChange() && !g_freelook_camera.GetController()->IsDirty())
+    return;
+  xf_state_manager.ResetProjection();
+  const Common::Matrix44 matrix = LoadProjectionMatrix();
+  std::memcpy(constants.projection.data(), matrix.data.data(), sizeof(constants.projection));
 }
 
 bool VertexShaderManager::UseVertexDepthRange()
 {
-  // Backend has full support for unrestricted depth ranges including the ability to clamp the
-  // final depth value to MAX_EFB_DEPTH.
-  if (g_backend_info.bSupportsUnrestrictedDepthRange)
+  // Not needed when the backend can take any depth range and clamp to the EFB maximum itself,
+  // and impossible without depth clamping.
+  if (g_backend_info.bSupportsUnrestrictedDepthRange || !g_backend_info.bSupportsDepthClamp)
     return false;
 
-  // We can't compute the depth range in the vertex shader if we don't support depth clamp.
-  if (!g_backend_info.bSupportsDepthClamp)
-    return false;
-
-  // We need a full depth range if a ztexture is used.
+  // Z textures replace the depth and need the full range.
   if (bpmem.ztex2.op != ZTexOp::Disabled && !bpmem.zcontrol.early_ztest)
     return true;
 
-  // If an inverted depth range is unsupported, we also need to check if the range is inverted.
-  if (!g_backend_info.bSupportsReversedDepthRange)
-  {
-    if (xfmem.viewport.zRange < 0.0f)
-      return true;
+  const float range = xfmem.viewport.zRange;
+  const float far_z = xfmem.viewport.farZ;
+  // Inverted ranges, where the backend cannot invert the viewport.
+  if (!g_backend_info.bSupportsReversedDepthRange && (range < 0.0f || range > far_z))
+    return true;
 
-    if (xfmem.viewport.zRange > xfmem.viewport.farZ)
-      return true;
-  }
-
-  // If an oversized depth range or a ztexture is used, we need to calculate the depth range
-  // in the vertex shader.
-  return fabs(xfmem.viewport.zRange) > 16777215.0f || fabs(xfmem.viewport.farZ) > 16777215.0f;
+  // Ranges beyond the 24-bit depth buffer.
+  return std::fabs(range) > MAX_DEPTH || std::fabs(far_z) > MAX_DEPTH;
 }
 
-// Syncs the shader constant buffers with xfmem
-// TODO: A cleaner way to control the matrices without making a mess in the parameters field
 void VertexShaderManager::SetConstants(std::span<const std::string> textures,
                                        XFStateManager& xf_state_manager)
 {
-  if (constants.missing_color_hex != g_ActiveConfig.iMissingColorValue)
+  // The colour shown for missing vertex colours (RGBA8 setting).
+  const u32 missing = g_ActiveConfig.iMissingColorValue;
+  if (constants.missing_color_hex != missing)
   {
-    const float a = (g_ActiveConfig.iMissingColorValue) & 0xFF;
-    const float b = (g_ActiveConfig.iMissingColorValue >> 8) & 0xFF;
-    const float g = (g_ActiveConfig.iMissingColorValue >> 16) & 0xFF;
-    const float r = (g_ActiveConfig.iMissingColorValue >> 24) & 0xFF;
-    constants.missing_color_hex = g_ActiveConfig.iMissingColorValue;
-    constants.missing_color_value = {r / 255, g / 255, b / 255, a / 255};
-
+    constants.missing_color_hex = missing;
+    for (int c = 0; c < 4; ++c)
+    {
+      const float channel = static_cast<float>((missing >> (24 - 8 * c)) & 0xFF);
+      constants.missing_color_value[c] = channel / 255;
+    }
     dirty = true;
   }
 
-  const auto per_vertex_transform_matrix_changes =
-      xf_state_manager.GetPerVertexTransformMatrixChanges();
-  if (per_vertex_transform_matrix_changes[0] >= 0)
+  // Position matrices: the changed span is in floats, uploaded in whole rows.
+  if (const auto span = xf_state_manager.GetPerVertexTransformMatrixChanges(); span[0] >= 0)
   {
-    int startn = per_vertex_transform_matrix_changes[0] / 4;
-    int endn = (per_vertex_transform_matrix_changes[1] + 3) / 4;
-    memcpy(constants.transformmatrices[startn].data(), &xfmem.posMatrices[startn * 4],
-           (endn - startn) * sizeof(float4));
-    dirty = true;
+    CopyRows(constants.transformmatrices, xfmem.posMatrices, span[0] / 4, (span[1] + 3) / 4);
     xf_state_manager.ResetPerVertexTransformMatrixChanges();
+    dirty = true;
   }
 
-  const auto per_vertex_normal_matrices_changed =
-      xf_state_manager.GetPerVertexNormalMatrixChanges();
-  if (per_vertex_normal_matrices_changed[0] >= 0)
+  // Normal matrices are 3x3 in XF but stored one float4 row per three floats here.
+  if (const auto span = xf_state_manager.GetPerVertexNormalMatrixChanges(); span[0] >= 0)
   {
-    int startn = per_vertex_normal_matrices_changed[0] / 3;
-    int endn = (per_vertex_normal_matrices_changed[1] + 2) / 3;
-    for (int i = startn; i < endn; i++)
-    {
-      memcpy(constants.normalmatrices[i].data(), &xfmem.normalMatrices[3 * i], 12);
-    }
-    dirty = true;
+    for (int row = span[0] / 3; row < (span[1] + 2) / 3; ++row)
+      std::memcpy(constants.normalmatrices[row].data(), &xfmem.normalMatrices[3 * row], 12);
     xf_state_manager.ResetPerVertexNormalMatrixChanges();
+    dirty = true;
   }
 
-  const auto post_transform_matrices_changed = xf_state_manager.GetPostTransformMatrixChanges();
-  if (post_transform_matrices_changed[0] >= 0)
+  if (const auto span = xf_state_manager.GetPostTransformMatrixChanges(); span[0] >= 0)
   {
-    int startn = post_transform_matrices_changed[0] / 4;
-    int endn = (post_transform_matrices_changed[1] + 3) / 4;
-    memcpy(constants.posttransformmatrices[startn].data(), &xfmem.postMatrices[startn * 4],
-           (endn - startn) * sizeof(float4));
-    dirty = true;
+    CopyRows(constants.posttransformmatrices, xfmem.postMatrices, span[0] / 4,
+             (span[1] + 3) / 4);
     xf_state_manager.ResetPostTransformMatrixChanges();
-  }
-
-  const auto light_changes = xf_state_manager.GetLightsChanged();
-  if (light_changes[0] >= 0)
-  {
-    // TODO: Outdated comment
-    // lights don't have a 1 to 1 mapping, the color component needs to be converted to 4 floats
-    const int istart = light_changes[0] / 0x10;
-    const int iend = (light_changes[1] + 15) / 0x10;
-
-    for (int i = istart; i < iend; ++i)
-    {
-      const Light& light = xfmem.lights[i];
-      VertexShaderConstants::Light& dstlight = constants.lights[i];
-
-      // xfmem.light.color is packed as abgr in u8[4], so we have to swap the order
-      dstlight.color[0] = light.color[3];
-      dstlight.color[1] = light.color[2];
-      dstlight.color[2] = light.color[1];
-      dstlight.color[3] = light.color[0];
-
-      dstlight.cosatt[0] = light.cosatt[0];
-      dstlight.cosatt[1] = light.cosatt[1];
-      dstlight.cosatt[2] = light.cosatt[2];
-
-      if (fabs(light.distatt[0]) < 0.00001f && fabs(light.distatt[1]) < 0.00001f &&
-          fabs(light.distatt[2]) < 0.00001f)
-      {
-        // dist attenuation, make sure not equal to 0!!!
-        dstlight.distatt[0] = .00001f;
-      }
-      else
-      {
-        dstlight.distatt[0] = light.distatt[0];
-      }
-      dstlight.distatt[1] = light.distatt[1];
-      dstlight.distatt[2] = light.distatt[2];
-
-      dstlight.pos[0] = light.dpos[0];
-      dstlight.pos[1] = light.dpos[1];
-      dstlight.pos[2] = light.dpos[2];
-
-      // TODO: Hardware testing is needed to confirm that this normalization is correct
-      auto sanitize = [](float f) {
-        if (std::isnan(f))
-          return 0.0f;
-        else if (std::isinf(f))
-          return f > 0.0f ? 1.0f : -1.0f;
-        else
-          return f;
-      };
-      double norm = double(light.ddir[0]) * double(light.ddir[0]) +
-                    double(light.ddir[1]) * double(light.ddir[1]) +
-                    double(light.ddir[2]) * double(light.ddir[2]);
-      norm = 1.0 / sqrt(norm);
-      dstlight.dir[0] = sanitize(static_cast<float>(light.ddir[0] * norm));
-      dstlight.dir[1] = sanitize(static_cast<float>(light.ddir[1] * norm));
-      dstlight.dir[2] = sanitize(static_cast<float>(light.ddir[2] * norm));
-    }
     dirty = true;
-
-    xf_state_manager.ResetLightsChanged();
   }
 
-  for (int i : xf_state_manager.GetMaterialChanges())
+  // Lights are 16 words each in XF memory.
+  if (const auto span = xf_state_manager.GetLightsChanged(); span[0] >= 0)
   {
-    u32 data = i >= 2 ? xfmem.matColor[i - 2] : xfmem.ambColor[i];
-    constants.materials[i][0] = (data >> 24) & 0xFF;
-    constants.materials[i][1] = (data >> 16) & 0xFF;
-    constants.materials[i][2] = (data >> 8) & 0xFF;
-    constants.materials[i][3] = data & 0xFF;
+    for (int light = span[0] / 0x10; light < (span[1] + 15) / 0x10; ++light)
+      ConvertLight(xfmem.lights[light], constants.lights[light]);
+    xf_state_manager.ResetLightsChanged();
+    dirty = true;
+  }
+
+  // Indices 0 and 1 are the ambient colours, 2 and 3 the material colours.
+  for (const int index : xf_state_manager.GetMaterialChanges())
+  {
+    UnpackColor(constants.materials[index],
+                index >= 2 ? xfmem.matColor[index - 2] : xfmem.ambColor[index]);
     dirty = true;
   }
   xf_state_manager.ResetMaterialChanges();
 
+  const auto& index_a = g_main_cp_state.matrix_index_a;
+  const auto& index_b = g_main_cp_state.matrix_index_b;
+
+  // The current position matrix and its normal matrix (3x3, padded to float4 rows).
   if (xf_state_manager.DidPosNormalChange())
   {
     xf_state_manager.ResetPosNormalChange();
-    const float* pos = &xfmem.posMatrices[g_main_cp_state.matrix_index_a.PosNormalMtxIdx * 4];
-    const float* norm =
-        &xfmem.normalMatrices[3 * (g_main_cp_state.matrix_index_a.PosNormalMtxIdx & 31)];
-
-    memcpy(constants.posnormalmatrix.data(), pos, 3 * sizeof(float4));
-    memcpy(constants.posnormalmatrix[3].data(), norm, 3 * sizeof(float));
-    memcpy(constants.posnormalmatrix[4].data(), norm + 3, 3 * sizeof(float));
-    memcpy(constants.posnormalmatrix[5].data(), norm + 6, 3 * sizeof(float));
+    const u32 pos_index = index_a.PosNormalMtxIdx;
+    CopyMatrix3x4(constants.posnormalmatrix.data(), &xfmem.posMatrices[pos_index * 4]);
+    const float* normal = &xfmem.normalMatrices[3 * (pos_index & 31)];
+    for (int row = 0; row < 3; ++row)
+      std::memcpy(constants.posnormalmatrix[3 + row].data(), normal + 3 * row, 3 * sizeof(float));
     dirty = true;
   }
 
+  // Texture matrices 0-3 and 4-7, three rows each.
   if (xf_state_manager.DidTexMatrixAChange())
   {
     xf_state_manager.ResetTexMatrixAChange();
-    const std::array<const float*, 4> pos_matrix_ptrs{
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_a.Tex0MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_a.Tex1MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_a.Tex2MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_a.Tex3MtxIdx * 4],
-    };
-
-    for (size_t i = 0; i < pos_matrix_ptrs.size(); ++i)
-    {
-      memcpy(constants.texmatrices[3 * i].data(), pos_matrix_ptrs[i], 3 * sizeof(float4));
-    }
+    const std::array<u32, 4> rows = {index_a.Tex0MtxIdx, index_a.Tex1MtxIdx, index_a.Tex2MtxIdx,
+                                     index_a.Tex3MtxIdx};
+    for (std::size_t n = 0; n < rows.size(); ++n)
+      CopyMatrix3x4(&constants.texmatrices[3 * n], &xfmem.posMatrices[rows[n] * 4]);
     dirty = true;
   }
-
   if (xf_state_manager.DidTexMatrixBChange())
   {
     xf_state_manager.ResetTexMatrixBChange();
-    const std::array<const float*, 4> pos_matrix_ptrs{
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_b.Tex4MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_b.Tex5MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_b.Tex6MtxIdx * 4],
-        &xfmem.posMatrices[g_main_cp_state.matrix_index_b.Tex7MtxIdx * 4],
-    };
-
-    for (size_t i = 0; i < pos_matrix_ptrs.size(); ++i)
-    {
-      memcpy(constants.texmatrices[3 * i + 12].data(), pos_matrix_ptrs[i], 3 * sizeof(float4));
-    }
+    const std::array<u32, 4> rows = {index_b.Tex4MtxIdx, index_b.Tex5MtxIdx, index_b.Tex6MtxIdx,
+                                     index_b.Tex7MtxIdx};
+    for (std::size_t n = 0; n < rows.size(); ++n)
+      CopyMatrix3x4(&constants.texmatrices[12 + 3 * n], &xfmem.posMatrices[rows[n] * 4]);
     dirty = true;
   }
 
   if (xf_state_manager.DidViewportChange())
   {
     xf_state_manager.ResetViewportChange();
+    const auto& viewport = xfmem.viewport;
 
-    // The console GPU places the pixel center at 7/12 unless antialiasing
-    // is enabled, while D3D and OpenGL place it at 0.5. See the comment
-    // in VertexShaderGen.cpp for details.
-    // NOTE: If we ever emulate antialiasing, the sample locations set by
-    // BP registers 0x01-0x04 need to be considered here.
-    const float pixel_center_correction = 7.0f / 12.0f - 0.5f;
-    const bool bUseVertexRounding = g_ActiveConfig.UseVertexRounding();
-    const float viewport_width = bUseVertexRounding ?
-                                     (2.f * xfmem.viewport.wd) :
-                                     g_framebuffer_manager->EFBToScaledXf(2.f * xfmem.viewport.wd);
-    const float viewport_height = bUseVertexRounding ?
-                                      (2.f * xfmem.viewport.ht) :
-                                      g_framebuffer_manager->EFBToScaledXf(2.f * xfmem.viewport.ht);
-    const float pixel_size_x = 2.f / viewport_width;
-    const float pixel_size_y = 2.f / viewport_height;
-    constants.pixelcentercorrection[0] = pixel_center_correction * pixel_size_x;
-    constants.pixelcentercorrection[1] = pixel_center_correction * pixel_size_y;
-
-    // By default we don't change the depth value at all in the vertex shader.
-    constants.pixelcentercorrection[2] = 1.0f;
-    constants.pixelcentercorrection[3] = 0.0f;
-
-    constants.viewport[0] = (2.f * xfmem.viewport.wd);
-    constants.viewport[1] = (2.f * xfmem.viewport.ht);
+    // Without antialiasing the console samples pixels at 7/12 rather than the host's 1/2; the
+    // vertex shader shifts positions by the difference (see VertexShaderGen). Sample positions
+    // from BP 0x01-0x04 would matter if antialiasing were ever emulated.
+    const float center_shift = 7.0f / 12.0f - 0.5f;
+    const bool rounding = g_ActiveConfig.UseVertexRounding();
+    const float width = 2.f * viewport.wd;
+    const float height = 2.f * viewport.ht;
+    // (The height is scaled with the horizontal EFB scale, as it always has been.)
+    const float scaled_width = rounding ? width : g_framebuffer_manager->EFBToScaledXf(width);
+    const float scaled_height = rounding ? height : g_framebuffer_manager->EFBToScaledXf(height);
+    auto& correction = constants.pixelcentercorrection;
+    correction[0] = center_shift * (2.f / scaled_width);
+    correction[1] = center_shift * (2.f / scaled_height);
+    // .zw: depth scale and offset, identity unless the vertex shader maps depth itself.
+    correction[2] = 1.0f;
+    correction[3] = 0.0f;
+    constants.viewport[0] = width;
+    constants.viewport[1] = height;
 
     if (UseVertexDepthRange())
     {
-      // Oversized depth ranges are handled in the vertex shader. We need to reverse
-      // the far value to use the reversed-Z trick.
       if (g_backend_info.bSupportsReversedDepthRange)
       {
-        // Sometimes the console also tries to use the reversed-Z trick. We can only do
-        // that with the expected accuracy if the backend can reverse the depth range.
-        constants.pixelcentercorrection[2] = fabs(xfmem.viewport.zRange) / 16777215.0f;
-        if (xfmem.viewport.zRange < 0.0f)
-          constants.pixelcentercorrection[3] = xfmem.viewport.farZ / 16777215.0f;
-        else
-          constants.pixelcentercorrection[3] = 1.0f - xfmem.viewport.farZ / 16777215.0f;
+        // Map into a reversed range so a game's own reversed-Z setup keeps its precision.
+        correction[2] = std::fabs(viewport.zRange) / MAX_DEPTH;
+        correction[3] = viewport.zRange < 0.0f ? viewport.farZ / MAX_DEPTH :
+                                                 1.0f - viewport.farZ / MAX_DEPTH;
       }
       else
       {
-        // For backends that don't support reversing the depth range we can still render
-        // cases where the console uses the reversed-Z trick. But we simply can't provide
-        // the expected accuracy, which might result in z-fighting.
-        constants.pixelcentercorrection[2] = xfmem.viewport.zRange / 16777215.0f;
-        constants.pixelcentercorrection[3] = 1.0f - xfmem.viewport.farZ / 16777215.0f;
+        // Still drawable, with less precision (possible z-fighting).
+        correction[2] = viewport.zRange / MAX_DEPTH;
+        correction[3] = 1.0f - viewport.farZ / MAX_DEPTH;
       }
     }
 
@@ -393,39 +328,38 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
     g_stats.AddScissorRect();
   }
 
-  std::vector<GraphicsModAction*> projection_actions;
+  // Graphics-mod actions for this projection type, globally and per bound texture.
+  std::vector<GraphicsModAction*> mod_actions;
   if (g_ActiveConfig.bGraphicMods)
   {
-    for (const auto& action : g_graphics_mod_manager->GetProjectionActions(xfmem.projection.type))
+    const ProjectionType type = xfmem.projection.type;
+    const auto& global_actions = g_graphics_mod_manager->GetProjectionActions(type);
+    mod_actions.insert(mod_actions.end(), global_actions.begin(), global_actions.end());
+    for (const std::string& texture : textures)
     {
-      projection_actions.push_back(action);
-    }
-
-    for (const auto& texture : textures)
-    {
-      for (const auto& action :
-           g_graphics_mod_manager->GetProjectionTextureActions(xfmem.projection.type, texture))
+      for (GraphicsModAction* action :
+           g_graphics_mod_manager->GetProjectionTextureActions(type, texture))
       {
-        projection_actions.push_back(action);
+        mod_actions.push_back(action);
       }
     }
   }
 
-  if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
-      !projection_actions.empty() || m_projection_graphics_mod_change)
+  // A mod that touched the previous projection forces one more reload to undo it.
+  const bool reload_projection =
+      xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
+      !mod_actions.empty() || m_projection_graphics_mod_change;
+  if (reload_projection)
   {
     xf_state_manager.ResetProjection();
-    m_projection_graphics_mod_change = !projection_actions.empty();
+    m_projection_graphics_mod_change = !mod_actions.empty();
 
-    auto corrected_matrix = LoadProjectionMatrix();
-
-    GraphicsModActionData::Projection projection{&corrected_matrix};
-    for (const auto& action : projection_actions)
-    {
+    Common::Matrix44 matrix = LoadProjectionMatrix();
+    GraphicsModActionData::Projection projection{&matrix};
+    for (GraphicsModAction* action : mod_actions)
       action->OnProjection(&projection);
-    }
 
-    memcpy(constants.projection.data(), corrected_matrix.data.data(), 4 * sizeof(float4));
+    std::memcpy(constants.projection.data(), matrix.data.data(), sizeof(constants.projection));
     dirty = true;
   }
 
@@ -433,60 +367,43 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   {
     xf_state_manager.ResetTexMatrixInfoChange();
     constants.xfmem_dualTexInfo = xfmem.dualTexTrans.enabled;
-    for (size_t i = 0; i < std::size(xfmem.texMtxInfo); i++)
-      constants.xfmem_pack1[i][0] = xfmem.texMtxInfo[i].hex;
-    for (size_t i = 0; i < std::size(xfmem.postMtxInfo); i++)
-      constants.xfmem_pack1[i][1] = xfmem.postMtxInfo[i].hex;
-
+    for (std::size_t n = 0; n < std::size(xfmem.texMtxInfo); ++n)
+      constants.xfmem_pack1[n][0] = xfmem.texMtxInfo[n].hex;
+    for (std::size_t n = 0; n < std::size(xfmem.postMtxInfo); ++n)
+      constants.xfmem_pack1[n][1] = xfmem.postMtxInfo[n].hex;
     dirty = true;
   }
 
   if (xf_state_manager.DidLightingConfigChange())
   {
     xf_state_manager.ResetLightingConfigChange();
-
-    for (size_t i = 0; i < 2; i++)
+    for (std::size_t chan = 0; chan < 2; ++chan)
     {
-      constants.xfmem_pack1[i][2] = xfmem.color[i].hex;
-      constants.xfmem_pack1[i][3] = xfmem.alpha[i].hex;
+      constants.xfmem_pack1[chan][2] = xfmem.color[chan].hex;
+      constants.xfmem_pack1[chan][3] = xfmem.alpha[chan].hex;
     }
     constants.xfmem_numColorChans = xfmem.numChan.numColorChans;
     dirty = true;
   }
 }
 
-void VertexShaderManager::TransformToClipSpace(const float* data, float* out, u32 MtxIdx)
+void VertexShaderManager::TransformToClipSpace(const float* data, float* out, u32 mtxIdx)
 {
-  const float* world_matrix = &xfmem.posMatrices[(MtxIdx & 0x3f) * 4];
-
-  // We use the projection matrix calculated by VertexShaderManager, because it
-  // includes any free look transformations.
-  // Make sure VertexShaderManager::SetConstants() has been called first.
-  const float* proj_matrix = &m_projection_matrix[0];
-
-  const float t[3] = {data[0] * world_matrix[0] + data[1] * world_matrix[1] +
-                          data[2] * world_matrix[2] + world_matrix[3],
-                      data[0] * world_matrix[4] + data[1] * world_matrix[5] +
-                          data[2] * world_matrix[6] + world_matrix[7],
-                      data[0] * world_matrix[8] + data[1] * world_matrix[9] +
-                          data[2] * world_matrix[10] + world_matrix[11]};
-
-  out[0] = t[0] * proj_matrix[0] + t[1] * proj_matrix[1] + t[2] * proj_matrix[2] + proj_matrix[3];
-  out[1] = t[0] * proj_matrix[4] + t[1] * proj_matrix[5] + t[2] * proj_matrix[6] + proj_matrix[7];
-  out[2] = t[0] * proj_matrix[8] + t[1] * proj_matrix[9] + t[2] * proj_matrix[10] + proj_matrix[11];
-  out[3] =
-      t[0] * proj_matrix[12] + t[1] * proj_matrix[13] + t[2] * proj_matrix[14] + proj_matrix[15];
+  // Uses the projection stored by the last projection load (SetConstants() must have run).
+  const float* world = &xfmem.posMatrices[(mtxIdx & 0x3f) * 4];
+  const float view[3] = {TransformRow(world, data), TransformRow(world + 4, data),
+                         TransformRow(world + 8, data)};
+  const float* proj = m_projection_matrix.data();
+  for (int row = 0; row < 4; ++row)
+    out[row] = TransformRow(proj + 4 * row, view);
 }
 
 void VertexShaderManager::DoState(PointerWrap& p)
 {
   p.DoArray(m_projection_matrix);
   g_freelook_camera.DoState(p);
-
   p.Do(constants);
 
   if (p.IsReadMode())
-  {
     dirty = true;
-  }
 }

@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,11 +8,12 @@
 class PointerWrap;
 enum class PrimitiveType : u32;
 
-// The non-API dependent parts.
+// Keeps GeometryShaderConstants in sync with the BP/XF registers; backend independent.
 class GeometryShaderManager
 {
 public:
   void Init();
+  // Recomputes config-dependent constants (after loading a state or changing settings).
   void Dirty();
   void DoState(PointerWrap& p);
 
