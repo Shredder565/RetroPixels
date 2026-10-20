@@ -436,13 +436,6 @@ if (WIN32)
   )
 endif()
 
-if (NOT WIN32)
-  target_sources(dolphin-emu PRIVATE
-    QtUtils/SignalDaemon.cpp
-    QtUtils/SignalDaemon.h
-  )
-endif()
-
 target_compile_definitions(dolphin-emu
 PRIVATE
   -DQT_USE_QSTRINGBUILDER

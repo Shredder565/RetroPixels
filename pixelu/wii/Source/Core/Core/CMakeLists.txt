@@ -748,31 +748,6 @@ if(WIN32)
     iphlpapi.lib
   )
   target_compile_definitions(core PRIVATE "-D_WINSOCK_DEPRECATED_NO_WARNINGS")
-elseif(UNIX)
-  target_sources(core PRIVATE
-    HW/EXI/BBA/TAP_Unix.cpp
-  )
-endif()
-
-# Bluez doesn't support all the communication modes on FreeBSD, so only using it on Linux
-if(LINUX)
-  option(ENABLE_BLUEZ "Enables bluetooth support" ON)
-  if(ENABLE_BLUEZ)
-    find_package(BlueZ)
-    if(BlueZ_FOUND)
-      message(STATUS "BlueZ found, enabling bluetooth support")
-      target_sources(core PRIVATE
-        HW/WiimoteReal/IOLinux.cpp
-        HW/WiimoteReal/IOLinux.h
-      )
-      target_link_libraries(core PUBLIC BlueZ::BlueZ)
-      target_compile_definitions(core PRIVATE -DHAVE_BLUEZ=1)
-    else()
-      message(STATUS "BlueZ NOT found, disabling bluetooth support")
-    endif()
-  else()
-    message(STATUS "BlueZ explicitly disabled, disabling bluetooth support")
-  endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
@@ -788,13 +763,6 @@ if(TARGET Hidapi::Hidapi)
   )
   target_link_libraries(core PUBLIC Hidapi::Hidapi)
   target_compile_definitions(core PRIVATE -DHAVE_HIDAPI=1)
-endif()
-
-if(UNIX)
-  target_sources(core PRIVATE
-    MemoryWatcher.cpp
-    MemoryWatcher.h
-  )
 endif()
 
 if(TARGET cpp-ipc::ipc)

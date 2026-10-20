@@ -100,7 +100,6 @@ add_library(common
   JsonUtil.cpp
   Lazy.h
   LinearDiskCache.h
-  UnixUtil.h
   Logging/ConsoleListener.h
   Logging/Log.h
   Logging/LogManager.cpp
@@ -228,11 +227,6 @@ if(WIN32)
     Logging/ConsoleListenerWin.cpp
     MemArenaWin.cpp
   )
-else()
-  target_sources(common PRIVATE
-    Logging/ConsoleListenerNix.cpp
-    MemArenaUnix.cpp
-  )
 endif()
 
 if(_M_X86_64) #X86
@@ -257,21 +251,6 @@ target_sources(common PRIVATE
   GL/GLExtensions/GLExtensions.h
 )
 
-if(ENABLE_EGL AND EGL_FOUND)
-  target_sources(common PRIVATE
-    GL/GLInterface/EGL.cpp
-    GL/GLInterface/EGL.h
-  )
-  if(ENABLE_X11 AND X11_FOUND)
-    target_sources(common PRIVATE
-      GL/GLInterface/EGLX11.cpp
-      GL/GLInterface/EGLX11.h
-    )
-  endif()
-  target_include_directories(common PRIVATE ${EGL_INCLUDE_DIRS})
-  target_link_libraries(common PUBLIC ${EGL_LIBRARIES})
-endif()
-
 if(WIN32)
   target_sources(common PRIVATE
     CompatPatches.cpp
@@ -280,16 +259,6 @@ if(WIN32)
     WindowsDevice.cpp
     WindowsDevice.h
     WindowsRegistry.cpp
-  )
-elseif(HAIKU)
-  target_sources(common PRIVATE
-    GL/GLInterface/BGL.h
-    GL/GLInterface/BGL.cpp
-  )
-elseif(ENABLE_X11 AND X11_FOUND)
-  target_sources(common PRIVATE
-    GL/GLX11Window.cpp
-    GL/GLX11Window.h
   )
 endif()
 
@@ -329,14 +298,7 @@ if(ENABLE_LLVM)
   endif()
 endif()
 
-if(UNIX)
-  # Posix networking code needs to be fixed for Windows
-  add_executable(traversal_server TraversalServer.cpp)
-  target_link_libraries(traversal_server PRIVATE common fmt::fmt)
-  if(SYSTEMD_FOUND)
-    target_link_libraries(traversal_server PRIVATE ${SYSTEMD_LIBRARIES})
-  endif()
-elseif(WIN32)
+if(WIN32)
   find_package(PowerShell REQUIRED)
   execute_process(
     COMMAND ${POWERSHELL_EXE} -Command "[System.Diagnostics.FileVersionInfo]::GetVersionInfo('$ENV{VCToolsRedistDir}vc_redist.x64.exe').ProductVersion"

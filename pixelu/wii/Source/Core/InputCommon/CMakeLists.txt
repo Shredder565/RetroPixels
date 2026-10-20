@@ -108,42 +108,10 @@ if(WIN32)
     ControllerInterface/ForceFeedback/ForceFeedbackDevice.cpp
     ControllerInterface/ForceFeedback/ForceFeedbackDevice.h
   )
-elseif(X11_FOUND)
-  target_include_directories(inputcommon PUBLIC ${X11_INPUT_INCLUDE_DIRS})
-  target_sources(inputcommon PRIVATE
-    ControllerInterface/Xlib/XInput2.cpp
-    ControllerInterface/Xlib/XInput2.h
-  )
-  target_link_libraries(inputcommon PRIVATE PkgConfig::X11_INPUT)
 endif()
 
 if(NOT ANDROID)
   target_link_libraries(inputcommon PUBLIC LibUSB::LibUSB)
-endif()
-
-if(LIBEVDEV_FOUND AND LIBUDEV_FOUND)
-  target_sources(inputcommon
-  PRIVATE
-    ControllerInterface/evdev/evdev.cpp
-    ControllerInterface/evdev/evdev.h
-  )
-  target_include_directories(inputcommon
-  PRIVATE
-    ${LIBEVDEV_INCLUDE_DIR}
-    ${LIBUDEV_INCLUDE_DIR}
-  )
-  target_link_libraries(inputcommon
-  PRIVATE
-    ${LIBEVDEV_LIBRARY}
-    ${LIBUDEV_LIBRARY}
-  )
-endif()
-
-if(UNIX)
-  target_sources(inputcommon PRIVATE
-    ControllerInterface/Pipes/Pipes.cpp
-    ControllerInterface/Pipes/Pipes.h
-  )
 endif()
 
 if(ENABLE_SDL)
