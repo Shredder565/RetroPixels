@@ -551,6 +551,7 @@ int LibusbDevice::ForEachInterface(const u8 config_num, const std::function<int(
 int LibusbDevice::ClaimAllInterfaces(const u8 config_num) const
 {
   const int result = ForEachInterface(config_num, [this](u8 number) {
+#ifndef __APPLE__
     // Host drivers (HID, audio...) have to let go of the interface before it can be claimed.
     // NOT_FOUND means no driver was bound; NOT_SUPPORTED is what platforms without kernel
     // drivers (Windows) return.
@@ -562,6 +563,9 @@ int LibusbDevice::ClaimAllInterfaces(const u8 config_num) const
                     LibusbUtils::ErrorWrap(detach_result));
       return detach_result;
     }
+#endif
+    // On macOS nothing is detached: that needs root or a special entitlement, and adapters
+    // there are expected to run without a kernel driver (GCAdapterDriver) anyway.
     return libusb_claim_interface(m_handle, number);
   });
 
