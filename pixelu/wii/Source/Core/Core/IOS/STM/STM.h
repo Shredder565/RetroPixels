@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,12 +10,13 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
+// IOCtl numbers of the state transition manager (WiiBrew, "/dev/stm").
 enum
 {
-  // /dev/stm/eventhook
+  // Served by /dev/stm/eventhook.
   IOCTL_STM_EVENTHOOK = 0x1000,
 
-  // /dev/stm/immediate
+  // Served by /dev/stm/immediate.
   IOCTL_STM_HOTRESET = 0x2001,
   IOCTL_STM_HOTRESET_FOR_PD = 0x2002,
   IOCTL_STM_SHUTDOWN = 0x2003,
@@ -33,13 +33,14 @@ enum
   IOCTL_STM_WRITEDMCU = 0x8001,
 };
 
+// Event words delivered to a waiting event hook.
 enum
 {
   STM_EVENT_RESET = 0x00020000,
   STM_EVENT_POWER = 0x00000800
 };
 
-// The /dev/stm/immediate
+// /dev/stm/immediate: power state requests that are answered at once.
 class STMImmediateDevice final : public EmulationDevice
 {
 public:
@@ -47,7 +48,7 @@ public:
   std::optional<IPCReply> IOCtl(const IOCtlRequest& request) override;
 };
 
-// The /dev/stm/eventhook
+// /dev/stm/eventhook: holds one request open until the Reset or Power button is pressed.
 class STMEventHookDevice final : public EmulationDevice
 {
 public:

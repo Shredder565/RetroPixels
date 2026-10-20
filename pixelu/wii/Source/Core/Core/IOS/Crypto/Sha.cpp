@@ -1,11 +1,9 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/Crypto/Sha.h"
 
 #include <algorithm>
 #include <array>
-#include <iterator>
 #include <optional>
 #include <vector>
 
@@ -18,6 +16,40 @@
 
 namespace IOS::HLE
 {
+namespace
+{
+// Owns an mbedtls SHA-1 context loaded from (and saved back to) the caller's state block.
+class Sha1Engine
+{
+public:
+  explicit Sha1Engine(const ShaDevice::ShaContext& saved)
+  {
+    // Only the chaining words and the counter travel between requests, so everything else
+    // (including mbedtls' partial-block buffer) starts out zeroed.
+    mbedtls_sha1_init(&m_ctx);
+    std::copy(saved.states.begin(), saved.states.end(), m_ctx.state);
+    std::copy(saved.length.begin(), saved.length.end(), m_ctx.total);
+  }
+  ~Sha1Engine() { mbedtls_sha1_free(&m_ctx); }
+
+  Sha1Engine(const Sha1Engine&) = delete;
+  Sha1Engine& operator=(const Sha1Engine&) = delete;
+
+  ShaDevice::ShaContext Save() const
+  {
+    ShaDevice::ShaContext out{};
+    std::copy(std::begin(m_ctx.state), std::end(m_ctx.state), out.states.begin());
+    std::copy(std::begin(m_ctx.total), std::end(m_ctx.total), out.length.begin());
+    return out;
+  }
+
+  mbedtls_sha1_context* get() { return &m_ctx; }
+
+private:
+  mbedtls_sha1_context m_ctx;
+};
+}  // namespace
+
 ShaDevice::ShaDevice(EmulationKernel& ios, const std::string& device_name)
     : EmulationDevice(ios, device_name)
 {
@@ -28,75 +60,50 @@ std::optional<IPCReply> ShaDevice::Open(const OpenRequest& request)
   return Device::Open(request);
 }
 
-static void ConvertContext(const ShaDevice::ShaContext& src, mbedtls_sha1_context* dest)
-{
-  std::ranges::copy(src.length, std::begin(dest->total));
-  std::ranges::copy(src.states, std::begin(dest->state));
-}
-
-static void ConvertContext(const mbedtls_sha1_context& src, ShaDevice::ShaContext* dest)
-{
-  std::ranges::copy(src.total, std::begin(dest->length));
-  std::ranges::copy(src.state, std::begin(dest->states));
-}
-
+// in[0] = data to hash (ignored by InitState), io[0] = state block, io[1] = digest output.
 HLE::ReturnCode ShaDevice::ProcessShaCommand(ShaIoctlv command, const IOCtlVRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  auto ret = 0;
-  std::array<u8, 20> output_hash{};
-  mbedtls_sha1_context context;
-  ShaDevice::ShaContext engine_context;
-  memory.CopyFromEmu(&engine_context, request.io_vectors[0].address, sizeof(ShaDevice::ShaContext));
-  ConvertContext(engine_context, &context);
+  auto& memory = GetSystem().GetMemory();
+  const u32 state_address = request.io_vectors[0].address;
 
-  // reset the context
+  ShaContext saved;
+  memory.CopyFromEmu(&saved, state_address, sizeof(saved));
+  Sha1Engine engine(saved);
+
+  std::array<u8, 20> digest{};
+  int status;
   if (command == ShaIoctlv::InitState)
   {
-    ret = mbedtls_sha1_starts_ret(&context);
+    status = mbedtls_sha1_starts_ret(engine.get());
   }
   else
   {
-    std::vector<u8> input_data(request.in_vectors[0].size);
-    memory.CopyFromEmu(input_data.data(), request.in_vectors[0].address, input_data.size());
-    ret = mbedtls_sha1_update_ret(&context, input_data.data(), input_data.size());
-    if (!ret && command == ShaIoctlv::FinalizeState)
-    {
-      ret = mbedtls_sha1_finish_ret(&context, output_hash.data());
-    }
+    const auto& data_in = request.in_vectors[0];
+    std::vector<u8> data(data_in.size);
+    memory.CopyFromEmu(data.data(), data_in.address, data.size());
+    status = mbedtls_sha1_update_ret(engine.get(), data.data(), data.size());
+    if (status == 0 && command == ShaIoctlv::FinalizeState)
+      status = mbedtls_sha1_finish_ret(engine.get(), digest.data());
   }
 
-  ConvertContext(context, &engine_context);
-  memory.CopyToEmu(request.io_vectors[0].address, &engine_context, sizeof(ShaDevice::ShaContext));
-  if (!ret && command == ShaIoctlv::FinalizeState)
-    memory.CopyToEmu(request.io_vectors[1].address, output_hash.data(), output_hash.size());
+  const ShaContext updated = engine.Save();
+  memory.CopyToEmu(state_address, &updated, sizeof(updated));
 
-  mbedtls_sha1_free(&context);
-  return ret ? HLE::ReturnCode::IPC_EACCES : HLE::ReturnCode::IPC_SUCCESS;
+  const bool failed = status != 0;
+  if (!failed && command == ShaIoctlv::FinalizeState)
+    memory.CopyToEmu(request.io_vectors[1].address, digest.data(), digest.size());
+
+  return failed ? HLE::ReturnCode::IPC_EACCES : HLE::ReturnCode::IPC_SUCCESS;
 }
 
 std::optional<IPCReply> ShaDevice::IOCtlV(const IOCtlVRequest& request)
 {
-  HLE::ReturnCode return_code = IPC_EINVAL;
-  ShaIoctlv command = static_cast<ShaIoctlv>(request.request);
+  const auto command = static_cast<ShaIoctlv>(request.request);
+  const bool known = command == ShaIoctlv::InitState || command == ShaIoctlv::ContributeState ||
+                     command == ShaIoctlv::FinalizeState;
+  if (!known || !request.HasNumberOfValidVectors(1, 2))
+    return IPCReply(IPC_EINVAL);
 
-  switch (command)
-  {
-  case ShaIoctlv::InitState:
-  case ShaIoctlv::ContributeState:
-  case ShaIoctlv::FinalizeState:
-    if (!request.HasNumberOfValidVectors(1, 2))
-      break;
-
-    return_code = ProcessShaCommand(command, request);
-    break;
-
-  case ShaIoctlv::ShaCommandUnknown:
-    break;
-  }
-
-  return IPCReply(return_code);
+  return IPCReply(ProcessShaCommand(command, request));
 }
-
 }  // namespace IOS::HLE

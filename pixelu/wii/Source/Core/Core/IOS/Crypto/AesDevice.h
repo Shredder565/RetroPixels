@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 namespace IOS::HLE
 {
+// /dev/aes: the Starlet AES-128-CBC engine as offered to the PPC.
 class AesDevice final : public EmulationDevice
 {
 public:

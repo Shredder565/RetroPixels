@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/STM/STM.h"
 
@@ -14,49 +13,49 @@
 
 namespace IOS::HLE
 {
-static std::unique_ptr<IOCtlRequest> s_event_hook_request;
+namespace
+{
+// The single outstanding event hook request. It is shared by both STM nodes because the
+// immediate node can release it.
+std::unique_ptr<IOCtlRequest> s_pending_hook;
+
+// Answers the pending hook with `event` in its output word.
+void CompleteHook(EmulationKernel& kernel, Memory::MemoryManager& memory, u32 event)
+{
+  memory.Write_U32(event, s_pending_hook->buffer_out);
+  kernel.EnqueueIPCReply(*s_pending_hook, IPC_SUCCESS);
+  s_pending_hook.reset();
+}
+}  // namespace
 
 std::optional<IPCReply> STMImmediateDevice::IOCtl(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
+  const u32 command = request.request;
 
-  s32 return_value = IPC_SUCCESS;
-  switch (request.request)
+  if (command == IOCTL_STM_IDLE || command == IOCTL_STM_SHUTDOWN)
   {
-  case IOCTL_STM_IDLE:
-  case IOCTL_STM_SHUTDOWN:
-    NOTICE_LOG_FMT(IOS_STM, "IOCTL_STM_IDLE or IOCTL_STM_SHUTDOWN received, shutting down");
+    NOTICE_LOG_FMT(IOS_STM, "Shutdown/idle requested ({:#x}); stopping emulation", command);
     Core::QueueHostJob(&Core::Stop, false);
-    break;
+    return IPCReply(IPC_SUCCESS);
+  }
 
-  case IOCTL_STM_RELEASE_EH:
-    if (!s_event_hook_request)
-    {
-      return_value = IPC_ENOENT;
-      break;
-    }
-    memory.Write_U32(0, s_event_hook_request->buffer_out);
-    GetEmulationKernel().EnqueueIPCReply(*s_event_hook_request, IPC_SUCCESS);
-    s_event_hook_request.reset();
-    break;
+  if (command == IOCTL_STM_RELEASE_EH)
+  {
+    // Cancels the event hook: it is answered with event word 0.
+    if (!s_pending_hook)
+      return IPCReply(IPC_ENOENT);
+    CompleteHook(GetEmulationKernel(), GetSystem().GetMemory(), 0);
+    return IPCReply(IPC_SUCCESS);
+  }
 
+  switch (command)
+  {
   case IOCTL_STM_HOTRESET:
-    INFO_LOG_FMT(IOS_STM, "{} - IOCtl:", GetDeviceName());
-    INFO_LOG_FMT(IOS_STM, "    IOCTL_STM_HOTRESET");
-    break;
-
-  case IOCTL_STM_VIDIMMING:  // (Input: 20 bytes, Output: 20 bytes)
-    INFO_LOG_FMT(IOS_STM, "{} - IOCtl:", GetDeviceName());
-    INFO_LOG_FMT(IOS_STM, "    IOCTL_STM_VIDIMMING");
-    // memory.Write_U32(1, buffer_out);
-    // return_value = 1;
-    break;
-
-  case IOCTL_STM_LEDMODE:  // (Input: 20 bytes, Output: 20 bytes)
-    INFO_LOG_FMT(IOS_STM, "{} - IOCtl:", GetDeviceName());
-    INFO_LOG_FMT(IOS_STM, "    IOCTL_STM_LEDMODE");
-    break;
+  case IOCTL_STM_VIDIMMING:
+  case IOCTL_STM_LEDMODE:
+    // Accepted without doing anything.
+    INFO_LOG_FMT(IOS_STM, "{}: ignoring ioctl {:#x}", GetDeviceName(), command);
+    return IPCReply(IPC_SUCCESS);
 
   case IOCTL_STM_HOTRESET_FOR_PD:
   case IOCTL_STM_WAKEUP:
@@ -66,21 +65,18 @@ std::optional<IPCReply> STMImmediateDevice::IOCtl(const IOCtlRequest& request)
   case IOCTL_STM_LEDFLASH:
   case IOCTL_STM_READVER:
   case IOCTL_STM_WRITEDMCU:
-    ERROR_LOG_FMT(IOS_STM, "{} - Unimplemented IOCtl: {}", GetDeviceName(), request.request);
-    break;
+    ERROR_LOG_FMT(IOS_STM, "{}: ioctl {:#x} is not implemented", GetDeviceName(), command);
+    return IPCReply(IPC_SUCCESS);
 
   default:
     request.DumpUnknown(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_STM);
-    return_value = IPC_UNKNOWN;
-    break;
+    return IPCReply(IPC_UNKNOWN);
   }
-
-  return IPCReply(return_value);
 }
 
 STMEventHookDevice::~STMEventHookDevice()
 {
-  s_event_hook_request.reset();
+  s_pending_hook.reset();
 }
 
 std::optional<IPCReply> STMEventHookDevice::IOCtl(const IOCtlRequest& request)
@@ -88,50 +84,43 @@ std::optional<IPCReply> STMEventHookDevice::IOCtl(const IOCtlRequest& request)
   if (request.request != IOCTL_STM_EVENTHOOK)
     return IPCReply(IPC_UNKNOWN);
 
-  if (s_event_hook_request)
+  // Only one hook can wait at a time.
+  if (s_pending_hook)
     return IPCReply(IPC_EEXIST);
 
-  // IOCTL_STM_EVENTHOOK waits until the reset button or power button is pressed.
-  s_event_hook_request = std::make_unique<IOCtlRequest>(GetSystem(), request.address);
+  // No reply now; it is sent when a button is pressed or the hook is released.
+  s_pending_hook = std::make_unique<IOCtlRequest>(GetSystem(), request.address);
   return std::nullopt;
 }
 
 void STMEventHookDevice::DoState(PointerWrap& p)
 {
   Device::DoState(p);
-  u32 address = s_event_hook_request ? s_event_hook_request->address : 0;
-  p.Do(address);
-  if (address != 0)
-  {
-    s_event_hook_request = std::make_unique<IOCtlRequest>(GetSystem(), address);
-  }
+
+  // Only the request's address is saved (0 when no hook is waiting). The request is always
+  // rebuilt from emulated memory afterwards, on load and on save alike.
+  u32 hook_address = s_pending_hook ? s_pending_hook->address : 0;
+  p.Do(hook_address);
+  if (hook_address == 0)
+    s_pending_hook.reset();
   else
-  {
-    s_event_hook_request.reset();
-  }
+    s_pending_hook = std::make_unique<IOCtlRequest>(GetSystem(), hook_address);
 }
 
 bool STMEventHookDevice::HasHookInstalled() const
 {
-  return s_event_hook_request != nullptr;
+  return s_pending_hook != nullptr;
 }
 
 void STMEventHookDevice::TriggerEvent(const u32 event) const
 {
-  // If the device isn't open, ignore the button press.
-  if (!m_is_active || !s_event_hook_request)
-    return;
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  memory.Write_U32(event, s_event_hook_request->buffer_out);
-  GetEmulationKernel().EnqueueIPCReply(*s_event_hook_request, IPC_SUCCESS);
-  s_event_hook_request.reset();
+  // A press is lost when nobody has the node open or no hook is waiting.
+  if (m_is_active && s_pending_hook)
+    CompleteHook(GetEmulationKernel(), GetSystem().GetMemory(), event);
 }
 
 void STMEventHookDevice::ResetButton() const
 {
-  // The reset button triggers STM_EVENT_RESET.
   TriggerEvent(STM_EVENT_RESET);
 }
 
