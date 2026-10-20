@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/HW.h"
 
@@ -29,55 +28,91 @@
 
 namespace HW
 {
-void Init(Core::System& system, const Sram* override_sram)
+namespace
+{
+// Saves or loads one device, followed by a marker carrying its name.
+template <typename Device>
+void DeviceState(PointerWrap& p, Device& device, const char* marker)
+{
+  device.DoState(p);
+  p.DoMarker(marker);
+}
+
+// The scheduler and savestate service come first; devices schedule events
+// and register savestate users while they initialise.
+void BringUpServices(Core::System& system)
 {
   system.GetCoreTiming().Init();
   system.GetSystemTimers().PreInit();
-
   State::Init(system);
+}
 
-  // Init the whole Hardware
+// Device start-up. The order carries dependencies: EXI (SRAM) before memory,
+// memory before the address spaces, and the PowerPC core after the devices
+// whose timing it reads.
+void BringUpDevices(Core::System& system, const Sram* override_sram)
+{
   system.GetAudioInterface().Init();
   system.GetVideoInterface().Init();
   system.GetSerialInterface().Init();
   system.GetProcessorInterface().Init();
-  system.GetExpansionInterface().Init(override_sram);  // Needs to be initialized before Memory
+  system.GetExpansionInterface().Init(override_sram);
   system.GetHSP().Init();
-  system.GetMemory().Init();  // Needs to be initialized before AddressSpace
+
+  system.GetMemory().Init();
   AddressSpace::Init();
   system.GetMemoryInterface().Init();
+
   system.GetDSP().Init(Config::Get(Config::MAIN_DSP_HLE));
   system.GetDVDInterface().Init();
   system.GetGPFifo().Init();
   system.GetCPU().Init(Config::Get(Config::MAIN_CPU_CORE));
   system.GetSystemTimers().Init();
+}
+
+// Teardown runs roughly in reverse.
+void TearDownDevices(Core::System& system)
+{
+  system.GetSystemTimers().Shutdown();
+  system.GetCPU().Shutdown();
+  system.GetDVDInterface().Shutdown();
+  system.GetDSP().Shutdown();
+
+  system.GetMemoryInterface().Shutdown();
+  AddressSpace::Shutdown();
+  system.GetMemory().Shutdown();
+
+  system.GetHSP().Shutdown();
+  system.GetExpansionInterface().Shutdown();
+  system.GetSerialInterface().Shutdown();
+  system.GetAudioInterface().Shutdown();
+}
+}  // namespace
+
+void Init(Core::System& system, const Sram* override_sram)
+{
+  BringUpServices(system);
+  BringUpDevices(system, override_sram);
 
   if (system.IsWii())
   {
     system.GetWiiIPC().Init();
-    IOS::HLE::Init(system);  // Depends on Memory
+    // Needs main memory.
+    IOS::HLE::Init(system);
   }
 
+  // Last, once every device that owns registers exists.
   system.GetMemory().InitMMIO(system);
 }
 
 void Shutdown(Core::System& system)
 {
-  // IOS should always be shut down regardless of IsWii because it can be running in GC mode (MIOS).
-  IOS::HLE::Shutdown(system);  // Depends on Memory
+  // IOS also runs on GameCube titles (as MIOS), so it is always shut down,
+  // before the memory it uses goes away.
+  IOS::HLE::Shutdown(system);
   system.GetWiiIPC().Shutdown();
 
-  system.GetSystemTimers().Shutdown();
-  system.GetCPU().Shutdown();
-  system.GetDVDInterface().Shutdown();
-  system.GetDSP().Shutdown();
-  system.GetMemoryInterface().Shutdown();
-  AddressSpace::Shutdown();
-  system.GetMemory().Shutdown();
-  system.GetHSP().Shutdown();
-  system.GetExpansionInterface().Shutdown();
-  system.GetSerialInterface().Shutdown();
-  system.GetAudioInterface().Shutdown();
+  TearDownDevices(system);
 
   State::Shutdown();
   system.GetCoreTiming().Shutdown();
@@ -85,35 +120,23 @@ void Shutdown(Core::System& system)
 
 void DoState(Core::System& system, PointerWrap& p)
 {
-  system.GetMemory().DoState(p);
-  p.DoMarker("Memory");
-  system.GetMemoryInterface().DoState(p);
-  p.DoMarker("MemoryInterface");
-  system.GetVideoInterface().DoState(p);
-  p.DoMarker("VideoInterface");
-  system.GetSerialInterface().DoState(p);
-  p.DoMarker("SerialInterface");
-  system.GetProcessorInterface().DoState(p);
-  p.DoMarker("ProcessorInterface");
-  system.GetDSP().DoState(p);
-  p.DoMarker("DSP");
-  system.GetDVDInterface().DoState(p);
-  p.DoMarker("DVDInterface");
-  system.GetGPFifo().DoState(p);
-  p.DoMarker("GPFifo");
-  system.GetExpansionInterface().DoState(p);
-  p.DoMarker("ExpansionInterface");
-  system.GetAudioInterface().DoState(p);
-  p.DoMarker("AudioInterface");
-  system.GetHSP().DoState(p);
-  p.DoMarker("HSP");
+  // The section order and marker names are part of the savestate format.
+  DeviceState(p, system.GetMemory(), "Memory");
+  DeviceState(p, system.GetMemoryInterface(), "MemoryInterface");
+  DeviceState(p, system.GetVideoInterface(), "VideoInterface");
+  DeviceState(p, system.GetSerialInterface(), "SerialInterface");
+  DeviceState(p, system.GetProcessorInterface(), "ProcessorInterface");
+  DeviceState(p, system.GetDSP(), "DSP");
+  DeviceState(p, system.GetDVDInterface(), "DVDInterface");
+  DeviceState(p, system.GetGPFifo(), "GPFifo");
+  DeviceState(p, system.GetExpansionInterface(), "ExpansionInterface");
+  DeviceState(p, system.GetAudioInterface(), "AudioInterface");
+  DeviceState(p, system.GetHSP(), "HSP");
 
   if (system.IsWii())
   {
-    system.GetWiiIPC().DoState(p);
-    p.DoMarker("IOS");
-    system.GetIOS()->DoState(p);
-    p.DoMarker("IOS::HLE");
+    DeviceState(p, system.GetWiiIPC(), "IOS");
+    DeviceState(p, *system.GetIOS(), "IOS::HLE");
   }
 
   p.DoMarker("WIIHW");
