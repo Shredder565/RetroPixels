@@ -1,0 +1,114 @@
+- W14 log: rewrote all 56 W14 files (the Wii Remote: `Core/HW/Wiimote`,
+  `WiimoteCommon`, `WiimoteEmu` with its extensions, and `WiimoteReal`
+  with its I/O backends) as original code. They now have 11244 lines
+  (from 12108). Each starts with the RetroPixels original-code line and
+  has no Dolphin copyright or SPDX header. The files are Wiimote,
+  WiimoteCommon (DataReport, WiimoteConstants.h, WiimoteHid.h,
+  WiimoteReport.h), WiimoteEmu (Camera, DesiredWiimoteState, Dynamics,
+  EmuSubroutines, Encryption, ExtensionPort, I2CBus, MotionPlus,
+  Speaker, WiimoteEmu), the extensions (Classic, DesiredExtensionState.h,
+  DrawsomeTablet, Drums, Extension, Guitar, Nunchuk, Shinkansen,
+  TaTaCon, Turntable, UDrawTablet) and WiimoteReal (WiimoteReal,
+  IOWin, IOhidapi, IODummy.h, IOAndroid.h, IOLinux.h).
+  - Kept unchanged: file names, and every public declaration that other
+    files use (names, signatures, namespaces, enum values, constants,
+    packed report structs and their static_asserts, the calibration and
+    data-format structs that ControllerInterface's WiimoteController
+    reads). Everything that affects emulation also stays the same:
+    - every HID report byte: report IDs, data-report layouts and their
+      core/accel/IR/extension offsets, status, ack and read-reply
+      contents, error codes, and the order and timing in which replies
+      are queued (reads are answered in 16-byte chunks, one per update);
+    - the I2C bus (slave order, first answer wins), the extension port,
+      the extension encryption (key from 0x40, the known-answer tables
+      and the fallback boxes with their 0x17/0xE0 XOR), the IR camera
+      (basic, extended and full modes, sensor-bar geometry, FOV and
+      clipping) and the speaker's Yamaha/Nintendo ADPCM decoder, volume
+      and sample output;
+    - MotionPlus: activation and deactivation timing, the passthrough
+      modes (nunchuk and classic bit moves), the challenge/response
+      registers, calibration data and the gyro encoding;
+    - the input mapping and dynamics math (swing, shake, tilt, point,
+      IMU cursor, gravity and accel encoding), kept bit-identical: the
+      same operations in the same order, so float results match;
+    - every extension's controls, settings, config names and their
+      translatable strings, default calibration, report encoding and
+      savestate;
+    - DesiredWiimoteState serialization (the netplay/movie format) and
+      the input-override hooks the TAS window uses;
+    - the savestate layout and order of the remote, its extensions,
+      MotionPlus, camera, speaker and dynamics;
+    - WiimoteReal: report rewriting (SET_REPORT header, LEDs never all
+      off, speaker data turned into rumble when the speaker cannot play,
+      repeated rumble dropped), send times (emulated time on the CPU
+      thread, now elsewhere; Prepare's 200 ms status request), the
+      200 Hz report repeat, the balance-board probe, the idle write
+      every second, connect retry, the scanner and pool threads, slot
+      assignment and the config keys;
+    - IOWin: the radio and device scans, pairing (3 rounds, inquiry
+      length 3), authentication, the 0xa1 read header and the cached
+      balance-board flag; IOhidapi: the same report framing and return
+      codes.
+  - Kept quirks: the balance-board probe still switches on a stale
+    buffer after a failed read (with a real device a failed read ends
+    the connection anyway). TaTaCon and Shinkansen still clear their
+    registers in Reset.
+  - Deliberate differences (genuine bugs, harmless fixes, cleanups):
+    - An unknown data-report mode uses the core-only layout. The old
+      code dereferenced a null manipulator.
+    - Guitar: a slider position past the last table entry gives the last
+      code. The old code read past the table.
+    - The SerializedWiimoteState buffer and the balance-board read buffer
+      are zero-initialised. Only their used bytes are ever read or sent.
+    - IOWin's ReadDeviceIds closes the device handle it opens (the old
+      code leaked it). The 4995 warning pragmas are only used under MSVC.
+    - IOhidapi copes with a null manufacturer string (the old code
+      converted a null pointer).
+    - IOAndroid.h and IOLinux.h are aliases of the dummy scanner. Nothing
+      in the build uses them.
+    - Removed an unused counter in Wiimote.cpp and a dead branch in the
+      pointing code. The internal encryption helper API is new; nothing
+      outside W14 uses it.
+    - Some log and panic messages are worded differently. None of them
+      are translatable strings.
+  - Checked: three harnesses linked the old and the new code against the
+    same untouched code outside W14 (InputCommon ControllerEmu and
+    expressions, Common config and math), with a fake steady clock and
+    mocks that record every outside call. They compared a hash of every
+    output report byte, I2C memory and register read, speaker sample,
+    callback, savestate byte and recorded call. No Nintendo keys, BIOS,
+    firmware or games were used. Outputs are identical for:
+    - the emulated remote (3500 seeds, 3000 to 30000 steps each): random
+      output reports (register reads and writes on every slave, modes,
+      speaker data, garbage), each extension attached and switched,
+      MotionPlus passthrough set up the way games do it, encryption with
+      matching and non-matching keys, random mapping expressions and
+      inputs, savestate save/load/compare, config toggles, link/unlink
+      and reset;
+    - Wiimote.cpp (5000 seeds): source changes, savestate load after a
+      source change, initialize/shutdown, movie hook, group accessors;
+    - WiimoteReal (5200 seeds, up to 2000 steps): output rewriting, the
+      write queue with send times, reads, Update and the report repeat,
+      buttons, link/unlink, Prepare, the balance-board probe and the
+      device-name and ID helpers.
+    - Mutation checks: single changes (speaker step table, fallback XOR,
+      one answer byte, a MotionPlus bit move, the swing/tilt savestate
+      order, a dynamics threshold, camera geometry, a float
+      reassociation, uDraw bounds, a serializer bit, three Wiimote.cpp
+      conditions, five WiimoteReal rules) each changed the output of at
+      least 16 of the 40-60 seeds tried. One change that was not caught
+      was a single byte of a known-answer encryption table, which random
+      keys almost never reach.
+    - Not covered by a harness, checked by review and compile only: the
+      WiimoteReal threads (writer, reader, scanner and pool), IOWin and
+      IOhidapi, which need real Bluetooth devices.
+    - Compile check: the 25 W14 .cpp files build with clang on Linux and
+      with `-target x86_64-w64-windows-gnu` (IOWin with a shim for
+      Bluetooth declarations this machine's mingw headers lack), and the
+      18 non-Qt files outside W14 that include W14 headers build as
+      before. Under `-Wall -Wextra -Wconversion -Wsign-compare` the W14
+      files give no warnings beyond the untouched tree's.
+    - Verbatim audit (`tools/verbatim-audit.py wii 8`): no function body
+      in W14 .cpp files shares 8 or more lines with the old code. The
+      remaining runs are report structs, enums and class declarations in
+      the headers.
