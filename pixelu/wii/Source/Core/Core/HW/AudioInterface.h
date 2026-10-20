@@ -1,7 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// See CPP file for comments.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,6 +18,10 @@ namespace MMIO
 class Mapping;
 }
 
+// The audio interface (AI, 0x0C006C00). It owns the sample rate settings of
+// the two audio paths: DMA audio from RAM (AID, played by the DSP code) and
+// disc streaming audio (AIS), whose stereo sample counter can raise an
+// interrupt when it reaches a programmed value.
 namespace AudioInterface
 {
 enum class SampleRate
@@ -42,17 +43,18 @@ public:
   void Init();
   void Shutdown();
   void DoState(PointerWrap& p);
+  // Whether disc streaming is running (and the sample counter counting).
   bool IsPlaying() const;
 
   void RegisterMMIO(MMIO::Mapping* mmio, u32 base);
 
-  // Get the audio rate divisors (divisors for 48KHz or 32KHz only)
-  // Mixer::FIXED_SAMPLE_RATE_DIVIDEND will be the dividend used for these divisors
+  // Sample rate divisors: the rate is Mixer::FIXED_SAMPLE_RATE_DIVIDEND
+  // divided by these.
   u32 GetAIDSampleRateDivisor() const;
   u32 GetAISSampleRateDivisor() const;
 
-  // The configured sample rate based on the control registers. Note that on GameCube, the named
-  // rates are slightly higher than the names would suggest due to a hardware bug.
+  // The rates selected in the control register. On the GameCube the real
+  // rates are a little above their names.
   SampleRate GetAIDSampleRate() const;
   SampleRate GetAISSampleRate() const;
 
@@ -62,56 +64,28 @@ public:
   void GenerateAISInterrupt();
 
 private:
-  // AI Control Register
-  union AICR
-  {
-    AICR() = default;
-    explicit AICR(u32 hex_) : hex{hex_} {}
-    struct
-    {
-      u32 PSTAT : 1;     // sample counter/playback enable
-      u32 AISFR : 1;     // AIS Frequency (0=32khz 1=48khz)
-      u32 AIINTMSK : 1;  // 0=interrupt masked 1=interrupt enabled
-      u32 AIINT : 1;     // audio interrupt status
-      u32 AIINTVLD : 1;  // This bit controls whether AIINT is affected by the Interrupt Timing
-                         // register
-                         // matching the sample counter. Once set, AIINT will hold its last value
-      u32 SCRESET : 1;   // write to reset counter
-      u32 AIDFR : 1;     // AID Frequency (0=48khz 1=32khz)
-      u32 : 25;
-    };
-    u32 hex = 0;
-  };
-
-  // AI Volume Register
-  union AIVR
-  {
-    struct
-    {
-      u32 left : 8;
-      u32 right : 8;
-      u32 : 16;
-    };
-    u32 hex = 0;
-  };
-
   void UpdateInterrupts();
   void GenerateAudioInterrupt();
   void IncreaseSampleCount(const u32 amount);
   int GetAIPeriod() const;
   void SetAIDSampleRate(SampleRate sample_rate);
   void SetAISSampleRate(SampleRate sample_rate);
+  void RestartCounterEvent();
+  void WriteControl(u32 value);
 
   void Update(u64 userdata, s64 cycles_late);
   static void GlobalUpdate(Core::System& system, u64 userdata, s64 cycles_late);
 
-  // Registers
-  AICR m_control;
-  AIVR m_volume;
+  bool ControlBit(u32 bit) const { return (m_control & bit) != 0; }
+  void SetControlBit(u32 bit, bool on) { m_control = on ? (m_control | bit) : (m_control & ~bit); }
 
+  // Registers.
+  u32 m_control = 0;  // AICR
+  u32 m_volume = 0;   // AIVR: left volume in bits 0-7, right in bits 8-15
   u32 m_sample_counter = 0;
   u32 m_interrupt_timing = 0;
 
+  // CPU time up to which streamed samples have been counted.
   u64 m_last_cpu_time = 0;
   u64 m_cpu_cycles_per_sample = 0;
 
