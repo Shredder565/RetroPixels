@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.21.1)
 # ---------------------------------------------------------------------------
 option(ENABLE_VCPKG "Enable the vcpkg package manager" ON)
 option(MACOS_BUNDLE "The executable when built on macOS will be created as an application bundle" OFF)
-option(ALLOW_PORTABLE "Allow Cemu to be run in portable mode" ON)
+option(ALLOW_PORTABLE "Allow PixelU to be run in portable mode" ON)
 
 # release scripts may pass a version, local builds show the commit hash instead
 set(EMULATOR_VERSION_MAJOR "0" CACHE STRING "")
