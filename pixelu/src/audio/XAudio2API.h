@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #define DIRECTSOUND_VERSION 0x0800
@@ -13,6 +14,8 @@ struct IXAudio2Voice;
 struct IXAudio2MasteringVoice;
 struct IXAudio2SourceVoice;
 
+// Output through XAudio 2.8+ (the copy that ships with Windows 8 and later). Blocks
+// are copied into a ring of kBlockCount buffers and submitted to one source voice.
 class XAudio2API : public IAudioAPI
 {
 public:
@@ -20,18 +23,17 @@ public:
 	{
 	public:
 		XAudio2DeviceDescription(const std::wstring& name, std::wstring device_id)
-			: DeviceDescription(name), m_device_id(std::move(device_id)) { }
+			: DeviceDescription(name), m_device_id(std::move(device_id)) {}
 
 		std::wstring GetIdentifier() const override { return m_device_id.empty() ? L"default" : m_device_id; }
-		const std::wstring& GetDeviceId() const { return m_device_id; }
+		const std::wstring& GetDeviceId() const { return m_device_id; } // empty: the default device
 
 	private:
 		std::wstring m_device_id;
 	};
-
 	using XAudio2DeviceDescriptionPtr = std::shared_ptr<XAudio2DeviceDescription>;
 
-	AudioAPI GetType() const override { return XAudio27; }
+	AudioAPI GetType() const override { return XAudio2; }
 
 	XAudio2API(std::wstring device_id, uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample);
 	~XAudio2API();
@@ -44,11 +46,12 @@ public:
 
 	static bool InitializeStatic();
 	static void Destroy();
-	static const std::vector<DeviceDescriptionPtr>& GetDevices() { return s_devices;	}
+	static const std::vector<DeviceDescriptionPtr>& GetDevices() { return s_devices; }
 
 private:
 	uint32 GetQueuedBuffers() const;
 
+	// lists the audio endpoints (via WMI) under the ids XAudio2 wants
 	static const std::vector<DeviceDescriptionPtr>& RefreshDevices();
 
 	struct VoiceDeleter
@@ -59,13 +62,13 @@ private:
 	static HMODULE s_xaudio_dll;
 	static std::vector<DeviceDescriptionPtr> s_devices;
 
+	// destroyed bottom up: the voices go before the engine
 	Microsoft::WRL::ComPtr<IXAudio2> m_xaudio;
 	std::wstring m_device_id;
 	std::unique_ptr<IXAudio2MasteringVoice, VoiceDeleter> m_mastering_voice;
 	std::unique_ptr<IXAudio2SourceVoice, VoiceDeleter> m_source_voice;
 
 	std::unique_ptr<uint8[]> m_audio_buffer[kBlockCount];
-	DWORD m_sound_buffer_size = 0;
-	uint32_t m_offset = 0;
-	uint32_t m_blocks_queued = 0;
+	uint32 m_next_buffer = 0;   // ring slot the next block goes to
+	uint32 m_blocks_queued = 0; // our count, refreshed from the voice when it looks full
 };

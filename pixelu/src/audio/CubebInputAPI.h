@@ -1,9 +1,12 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "IAudioInputAPI.h"
 
 #include <cubeb/cubeb.h>
 
+// Microphone input through cubeb: its callback appends what it records to a byte
+// queue, ConsumeBlock() takes it out again.
 class CubebInputAPI : public IAudioInputAPI
 {
 public:
@@ -11,16 +14,15 @@ public:
 	{
 	public:
 		CubebDeviceDescription(cubeb_devid devid, std::string device_id, const std::wstring& name)
-			: DeviceDescription(name), m_devid(devid), m_device_id(std::move(device_id)) { }
+			: DeviceDescription(name), m_devid(devid), m_device_id(std::move(device_id)) {}
 
-		std::wstring GetIdentifier() const override { return  boost::nowide::widen(m_device_id); }
+		std::wstring GetIdentifier() const override { return boost::nowide::widen(m_device_id); }
 		cubeb_devid GetDeviceId() const { return m_devid; }
 
 	private:
 		cubeb_devid m_devid;
 		std::string m_device_id;
 	};
-
 	using CubebDeviceDescriptionPtr = std::shared_ptr<CubebDeviceDescription>;
 
 	CubebInputAPI(cubeb_devid devid, uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample);
@@ -31,7 +33,7 @@ public:
 	bool ConsumeBlock(sint16* data) override;
 	bool Play() override;
 	bool Stop() override;
-	bool IsPlaying() const override { return m_is_playing;  };
+	bool IsPlaying() const override { return m_is_playing; }
 	void SetVolume(sint32 volume) override;
 
 	static std::vector<DeviceDescriptionPtr> GetDevices();
@@ -46,6 +48,8 @@ private:
 	bool m_is_playing = false;
 
 	mutable std::shared_mutex m_mutex;
-	std::vector<uint8> m_buffer;
-	static long data_cb(cubeb_stream* stream, void* user, const void* inputbuffer, void* outputbuffer, long nframes);
+	std::vector<uint8> m_buffer; // recorded PCM bytes, oldest first
+	size_t m_bufferLimit = 0;    // recordings that would reach it are thrown away
+
+	static long TakeInput(cubeb_stream* stream, void* user, const void* input, void* output, long frames);
 };

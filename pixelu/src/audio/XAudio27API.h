@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #define DIRECTSOUND_VERSION 0x0800
@@ -12,6 +13,8 @@ struct IXAudio2Voice;
 struct IXAudio2MasteringVoice;
 struct IXAudio2SourceVoice;
 
+// Output through XAudio 2.7 from the DirectX June 2010 runtime, for systems without
+// XAudio 2.8. That version is a COM object and numbers its devices.
 class XAudio27API : public IAudioAPI
 {
 public:
@@ -19,16 +22,15 @@ public:
 	{
 	public:
 		XAudio27DeviceDescription(const std::wstring& name, std::wstring device_id, uint32 id)
-			: DeviceDescription(name), m_device_id(std::move(device_id)), m_id(id) { }
+			: DeviceDescription(name), m_device_id(std::move(device_id)), m_id(id) {}
 
 		std::wstring GetIdentifier() const override { return m_device_id.empty() ? L"default" : m_device_id; }
-		uint32 GetDeviceId() const { return m_id; }
+		uint32 GetDeviceId() const { return m_id; } // -1: the primary device
 
 	private:
 		std::wstring m_device_id;
 		const uint32 m_id;
 	};
-
 	using XAudio2DeviceDescriptionPtr = std::shared_ptr<XAudio27DeviceDescription>;
 
 	AudioAPI GetType() const override { return XAudio27; }
@@ -53,22 +55,19 @@ private:
 	{
 		void operator()(IXAudio2* ptr) const;
 	};
-
 	struct VoiceDeleter
 	{
 		void operator()(IXAudio2Voice* ptr) const;
 	};
 
 	static HMODULE s_xaudio_dll;
-	static std::unique_ptr<IXAudio2, XAudioDeleter> s_xaudio;
+	static std::unique_ptr<IXAudio2, XAudioDeleter> s_xaudio; // only for listing devices
 
 	std::unique_ptr<IXAudio2, XAudioDeleter> m_xaudio;
-	std::wstring m_device_id;
 	std::unique_ptr<IXAudio2MasteringVoice, VoiceDeleter> m_mastering_voice;
 	std::unique_ptr<IXAudio2SourceVoice, VoiceDeleter> m_source_voice;
-	
+
 	std::unique_ptr<uint8[]> m_audio_buffer[kBlockCount];
-	DWORD m_sound_buffer_size = 0;
-	uint32_t m_offset = 0;
-	uint32_t m_blocks_queued = 0;
+	uint32 m_next_buffer = 0;
+	uint32 m_blocks_queued = 0;
 };

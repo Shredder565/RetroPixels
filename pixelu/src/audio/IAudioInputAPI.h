@@ -1,5 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// Sound input (the GamePad microphone). A backend records into a queue and the
+// emulated mic library takes it out one block at a time.
 class IAudioInputAPI
 {
 	friend class GeneralSettings2;
@@ -9,21 +12,17 @@ public:
 	{
 	public:
 		explicit DeviceDescription(std::wstring name)
-			: m_name(std::move(name)) { }
-
+			: m_name(std::move(name)) {}
 		virtual ~DeviceDescription() = default;
+
 		virtual std::wstring GetIdentifier() const = 0;
 		const std::wstring& GetName() const { return m_name; }
 
-		bool operator==(const DeviceDescription& o) const
-		{
-			return GetIdentifier() == o.GetIdentifier();
-		}
+		bool operator==(const DeviceDescription& o) const { return GetIdentifier() == o.GetIdentifier(); }
 
 	private:
 		std::wstring m_name;
 	};
-
 	using DeviceDescriptionPtr = std::shared_ptr<DeviceDescription>;
 
 	enum AudioInputAPI
@@ -32,6 +31,7 @@ public:
 
 		AudioInputAPIEnd,
 	};
+
 	static constexpr uint32 kBlockCount = 24;
 
 	IAudioInputAPI(uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample);
@@ -43,6 +43,7 @@ public:
 	virtual sint32 GetVolume() const { return m_volume; }
 	virtual void SetVolume(sint32 volume) { m_volume = volume; }
 
+	// fills one block of m_bytesPerBlock bytes, silence where nothing was recorded
 	virtual bool ConsumeBlock(sint16* data) = 0;
 	virtual bool Play() = 0;
 	virtual bool Stop() = 0;
@@ -62,8 +63,6 @@ protected:
 	sint32 m_volume = 0;
 
 	static std::array<bool, AudioInputAPIEnd> s_availableApis;
-
-private:
 };
 
 using AudioInputAPIPtr = std::unique_ptr<IAudioInputAPI>;
