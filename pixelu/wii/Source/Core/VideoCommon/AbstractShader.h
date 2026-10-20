@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,9 +8,8 @@
 
 #include "Common/CommonTypes.h"
 
-// Note: not directly used in this file
-// but done here to avoid specifying in
-// every derived class that needs it
+// Declared here so that every backend shader class sees the includer type without its own
+// forward declaration.
 namespace VideoCommon
 {
 class ShaderIncluder;
@@ -25,6 +23,7 @@ enum class ShaderStage
   Compute
 };
 
+// A compiled shader object owned by a backend.
 class AbstractShader
 {
 public:
@@ -33,8 +32,8 @@ public:
 
   ShaderStage GetStage() const { return m_stage; }
 
-  // Shader binaries represent the input source code in a lower-level form. e.g. SPIR-V or DXBC.
-  // The shader source code is not required to create a shader object from the binary.
+  // Backend-specific compiled form (SPIR-V, DXBC, ...), from which the shader can be recreated
+  // without its source. Empty when the backend has no such form.
   using BinaryData = std::vector<u8>;
   virtual BinaryData GetBinary() const { return {}; }
 

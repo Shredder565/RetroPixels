@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,13 +11,15 @@
 
 struct ImTextureRef;
 
+// A texture owned by a backend. The config is fixed at creation.
 class AbstractTexture
 {
 public:
   explicit AbstractTexture(const TextureConfig& c);
   virtual ~AbstractTexture() = default;
 
-  // Support implicit conversion between AbstractTexture and ImTextureId and ImTextureRef.
+  // Lets a texture be passed straight to Dear ImGui as an ImTextureID / ImTextureRef; the ID is
+  // the object's address.
   using imgui_texture_id = unsigned long long;
   operator imgui_texture_id() const { return reinterpret_cast<imgui_texture_id>(this); }
   operator ImTextureRef() const;
@@ -32,8 +33,8 @@ public:
   virtual void Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                     size_t buffer_size, u32 layer = 0) = 0;
 
-  // Hints to the backend that we have finished rendering to this texture, and it will be used
-  // as a shader resource and sampled. For Vulkan, this transitions the image layout.
+  // Tells the backend that rendering into this texture is done and it will be sampled next
+  // (Vulkan uses this for its layout transition). Does nothing by default.
   virtual void FinishedRendering();
 
   u32 GetWidth() const { return m_config.width; }
@@ -45,6 +46,8 @@ public:
   MathUtil::Rectangle<int> GetRect() const { return m_config.GetRect(); }
   MathUtil::Rectangle<int> GetMipRect(u32 level) const { return m_config.GetMipRect(level); }
   bool IsMultisampled() const { return m_config.IsMultisampled(); }
+
+  // Reads one mip level back and writes it as a PNG.
   bool Save(const std::string& filename, unsigned int level, int compression = 6) const;
 
   static bool IsCompressedFormat(AbstractTextureFormat format);
@@ -52,8 +55,11 @@ public:
   static bool IsStencilFormat(AbstractTextureFormat format);
   static bool IsCompatibleDepthAndColorFormats(AbstractTextureFormat depth_format,
                                                AbstractTextureFormat color_format);
+  // Bytes per row of row_length texels (rows of 4x4 blocks for block-compressed formats).
   static u32 CalculateStrideForFormat(AbstractTextureFormat format, u32 row_length);
+  // Bytes per texel, or per 4x4 block for block-compressed formats.
   static u32 GetTexelSizeForFormat(AbstractTextureFormat format);
+  // Block edge in texels: 4 for block-compressed formats, else 1.
   static u32 GetBlockSizeForFormat(AbstractTextureFormat format);
 
   const TextureConfig& GetConfig() const;

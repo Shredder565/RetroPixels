@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -26,6 +25,7 @@ enum class AbstractTextureFormat : u32;
 enum class ShaderStage;
 enum class StagingTextureType;
 
+// Size, DPI scale and format of the window surface.
 struct SurfaceInfo
 {
   u32 width = 0;
@@ -42,11 +42,9 @@ class ShaderIncluder;
 
 using ClearColor = std::array<float, 4>;
 
-// AbstractGfx is the root of Dolphin's Graphics API abstraction layer.
-//
-// Abstract knows nothing about the internals of the GameCube/Wii, that is all handled elsewhere in
-// VideoCommon.
-
+// The host graphics device as seen by VideoCommon. Each video backend implements one. It only
+// deals in host objects (textures, framebuffers, shaders, pipelines) and draw calls; everything
+// about the emulated GPU lives elsewhere.
 class AbstractGfx
 {
 public:
@@ -55,23 +53,32 @@ public:
 
   virtual bool IsHeadless() const = 0;
 
-  // Does the backend support drawing a UI or doing post-processing
+  // False when the backend cannot draw the UI or run post-processing passes.
   virtual bool SupportsUtilityDrawing() const { return true; }
 
-  virtual void SetPipeline(const AbstractPipeline* pipeline) {}
-  virtual void SetScissorRect(const MathUtil::Rectangle<int>& rc) {}
-  virtual void SetTexture(u32 index, const AbstractTexture* texture) {}
-  virtual void SetSamplerState(u32 index, const SamplerState& state) {}
-  virtual void SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write) {}
-  virtual void UnbindTexture(const AbstractTexture* texture) {}
-  virtual void SetViewport(float x, float y, float width, float height, float near_depth,
-                           float far_depth)
+  // Pipeline and resource binding.
+  virtual void SetPipeline(const AbstractPipeline* /*pipeline*/) {}
+  virtual void SetScissorRect(const MathUtil::Rectangle<int>& /*rc*/) {}
+  virtual void SetTexture(u32 /*index*/, const AbstractTexture* /*texture*/) {}
+  virtual void SetSamplerState(u32 /*index*/, const SamplerState& /*state*/) {}
+  virtual void SetComputeImageTexture(u32 /*index*/, AbstractTexture* /*texture*/, bool /*read*/,
+                                      bool /*write*/)
   {
   }
-  virtual void SetFullscreen(bool enable_fullscreen) {}
+  virtual void UnbindTexture(const AbstractTexture* /*texture*/) {}
+  virtual void SetViewport(float /*x*/, float /*y*/, float /*width*/, float /*height*/,
+                           float /*near_depth*/, float /*far_depth*/)
+  {
+  }
+  virtual void SetFullscreen(bool /*enable_fullscreen*/) {}
   virtual bool IsFullscreen() const { return false; }
+
+  // Bracket draws that are not part of the emulated GPU's command stream (UI, copies,
+  // post-processing). The end call puts the EFB framebuffer, viewport and scissor back.
   virtual void BeginUtilityDrawing();
   virtual void EndUtilityDrawing();
+
+  // Object creation.
   virtual std::unique_ptr<AbstractTexture> CreateTexture(const TextureConfig& config,
                                                          std::string_view name = "") = 0;
   virtual std::unique_ptr<AbstractStagingTexture>
@@ -80,37 +87,37 @@ public:
   CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
                     std::vector<AbstractTexture*> additional_color_attachments = {}) = 0;
 
-  // Framebuffer operations.
+  // Render target binding. The base versions only record the current framebuffer.
   virtual void SetFramebuffer(AbstractFramebuffer* framebuffer);
   virtual void SetAndDiscardFramebuffer(AbstractFramebuffer* framebuffer);
   virtual void SetAndClearFramebuffer(AbstractFramebuffer* framebuffer,
                                       const ClearColor& color_value = {}, float depth_value = 0.0f);
 
+  // Clears part of the current target. The base version draws a full-screen triangle with one
+  // of the framebuffer manager's clear pipelines.
   virtual void ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEnable,
                            bool alphaEnable, bool zEnable, u32 color, u32 z);
 
-  // Drawing with currently-bound pipeline state.
-  virtual void Draw(u32 base_vertex, u32 num_vertices) {}
-  virtual void DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex) {}
+  // Draw with whatever is bound.
+  virtual void Draw(u32 /*base_vertex*/, u32 /*num_vertices*/) {}
+  virtual void DrawIndexed(u32 /*base_index*/, u32 /*num_indices*/, u32 /*base_vertex*/) {}
 
-  // Dispatching compute shaders with currently-bound state.
-  virtual void DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-                                     u32 groupsize_z, u32 groups_x, u32 groups_y, u32 groups_z)
+  // Run a compute shader with whatever is bound.
+  virtual void DispatchComputeShader(const AbstractShader* /*shader*/, u32 /*groupsize_x*/,
+                                     u32 /*groupsize_y*/, u32 /*groupsize_z*/, u32 /*groups_x*/,
+                                     u32 /*groups_y*/, u32 /*groups_z*/)
   {
   }
 
-  // Binds the backbuffer for rendering. The buffer will be cleared immediately after binding.
-  // This is where any window size changes are detected, therefore m_backbuffer_width and/or
-  // m_backbuffer_height may change after this function returns.
-  // If this returns false, a problem occurred binding the backbuffer.
-  // Don't render anything to it, but still call `PresentBackbuffer`, which will reset any
-  // per-frame resources and prepare for the next frame.
-  virtual bool BindBackbuffer(const ClearColor& clear_color = {}) { return true; }
+  // Binds the window's back buffer and clears it. Window size changes are picked up here. When
+  // this fails nothing should be drawn, but PresentBackbuffer must still be called so per-frame
+  // state is reset.
+  virtual bool BindBackbuffer(const ClearColor& /*clear_color*/ = {}) { return true; }
 
-  // Presents the backbuffer to the window system, or "swaps buffers".
+  // Shows the back buffer (swap).
   virtual void PresentBackbuffer() {}
 
-  // Shader modules/objects.
+  // Shader and pipeline objects.
   virtual std::unique_ptr<AbstractShader>
   CreateShaderFromSource(ShaderStage stage, std::string_view source,
                          VideoCommon::ShaderIncluder* shader_includer = nullptr,
@@ -137,22 +144,21 @@ public:
     float viewport_far_depth = 0;
   };
 
-  // Stores the last viewport and scissor, the stored data is restored in 'EndUtilityDrawing'
+  // Remembers the emulated viewport and scissor; EndUtilityDrawing restores them.
   void StoreViewportAndScissor(const ViewportAndScissor& viewport_and_scissor);
 
-  // Sets viewport and scissor to the specified rectangle. rect is assumed to be in framebuffer
-  // coordinates, i.e. lower-left origin in OpenGL.
+  // Sets both viewport and scissor to rect (framebuffer coordinates, so lower-left origin on
+  // backends that use it).
   void SetViewportAndScissor(const MathUtil::Rectangle<int>& rect, float min_depth = 0.0f,
                              float max_depth = 1.0f);
 
-  // Scales a GPU texture using a copy shader.
+  // Copies src_rect of src_texture into dst_rect of an RGBA8 framebuffer with linear filtering.
   virtual void ScaleTexture(AbstractFramebuffer* dst_framebuffer,
                             const MathUtil::Rectangle<int>& dst_rect,
                             const AbstractTexture* src_texture,
                             const MathUtil::Rectangle<int>& src_rect);
 
-  // Converts an upper-left to lower-left if required by the backend, optionally
-  // clamping to the framebuffer size.
+  // Flips an upper-left-origin rectangle vertically for lower-left-origin backends.
   MathUtil::Rectangle<int> ConvertFramebufferRectangle(const MathUtil::Rectangle<int>& rect,
                                                        u32 fb_width, u32 fb_height) const;
   MathUtil::Rectangle<int>
@@ -162,27 +168,27 @@ public:
   virtual void Flush() {}
   virtual void WaitForGPUIdle() {}
 
-  // For opengl's glDrawBuffer
+  // Eye selection for quad-buffered stereo on OpenGL.
   virtual void SelectLeftBuffer() {}
   virtual void SelectRightBuffer() {}
   virtual void SelectMainBuffer() {}
 
-  // A simple presentation fallback, only used by video software
-  virtual void ShowImage(const AbstractTexture* source_texture,
-                         const MathUtil::Rectangle<int>& source_rc)
+  // Minimal presentation path used by the software renderer.
+  virtual void ShowImage(const AbstractTexture* /*source_texture*/,
+                         const MathUtil::Rectangle<int>& /*source_rc*/)
   {
   }
 
   virtual std::unique_ptr<VideoCommon::AsyncShaderCompiler> CreateAsyncShaderCompiler();
 
-  // Called when the configuration changes, and backend structures need to be updated.
+  // Called from the config-changed event with CONFIG_CHANGE_BIT_* flags.
   virtual void OnConfigChanged(u32 changed_bits);
 
-  // Returns true if a layer-expanding geometry shader should be used when rendering
-  // the user interface on the output buffer.
+  // True when UI drawn to the output should go through a layer-expanding geometry shader
+  // (quad-buffered stereo on backends with a two-layer back buffer).
   bool UseGeometryShaderForUI() const;
 
-  // Returns info about the main surface (aka backbuffer)
+  // The window surface (back buffer).
   virtual SurfaceInfo GetSurfaceInfo() const = 0;
 
 protected:
@@ -190,8 +196,8 @@ protected:
   const AbstractPipeline* m_current_pipeline = nullptr;
 
 private:
-  Common::EventHook m_config_changed;
-  ViewportAndScissor m_viewport_and_scissor;
+  Common::EventHook m_on_config_changed;
+  ViewportAndScissor m_saved_viewport;
 };
 
 extern std::unique_ptr<AbstractGfx> g_gfx;

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,9 @@
 
 namespace VideoCommon
 {
+// Runs shader/pipeline compiles on a pool of worker threads. Compile() runs on a worker (or
+// immediately when there are no workers); Retrieve() runs on the thread that calls
+// RetrieveWorkItems, normally the video thread.
 class AsyncShaderCompiler
 {
 public:
@@ -42,50 +44,54 @@ public:
     return std::make_unique<T>(std::forward<Params>(params)...);
   }
 
-  // Queues a new work item to the compiler threads. The lower the priority, the sooner
-  // this work item will be compiled, relative to the other work items.
+  // Adds an item to the queue. Lower priority values are compiled first; items with the same
+  // priority are compiled in the order they were queued.
   void QueueWorkItem(WorkItemPtr item, u32 priority);
+  // Calls Retrieve on every finished item and drops it.
   void RetrieveWorkItems();
+  // True while items are queued or being compiled.
   bool HasPendingWork();
   bool HasCompletedWork();
 
-  // Clears both pending and completed work
+  // Drops every queued and every finished item.
   void ClearAllWork();
 
-  // Calls progress_callback periodically, with completed_items, and total_items.
-  // Returns false if interrupted.
+  // Blocks until the queue is empty. After a short grace period, progress_callback(done, total)
+  // is called periodically. Returns false if emulation is stopping before the queue drains.
   bool WaitUntilCompletion(const std::function<void(size_t, size_t)>& progress_callback);
 
-  // Needed because of calling virtual methods in shutdown procedure.
+  // Thread control. These are separate from construction and destruction because the
+  // per-thread hooks below are virtual.
   bool StartWorkerThreads(u32 num_worker_threads);
   bool ResizeWorkerThreads(u32 num_worker_threads);
   bool HasWorkerThreads() const;
   void StopWorkerThreads();
 
 protected:
+  // Backend hooks: prepare a thread on the starting thread, set it up on the worker itself,
+  // and tear it down when the worker exits.
   virtual bool WorkerThreadInitMainThread(void** param);
   virtual bool WorkerThreadInitWorkerThread(void* param);
   virtual void WorkerThreadExit(void* param);
 
 private:
-  void WorkerThreadEntryPoint(void* param);
-  void WorkerThreadRun();
+  void WorkerMain(void* param);
+  void ServeQueue();
 
-  Common::Flag m_exit_flag;
-  Common::Event m_init_event;
+  Common::Flag m_stop_requested;
+  Common::Event m_worker_ready;
 
-  std::vector<std::thread> m_worker_threads;
-  std::atomic_bool m_worker_thread_start_result{false};
+  std::vector<std::thread> m_workers;
+  std::atomic_bool m_last_worker_ok{false};
 
-  // A multimap is used to store the work items. We can't use a priority_queue here, because
-  // there's no way to obtain a non-const reference, which we need for the unique_ptr.
-  std::multimap<u32, WorkItemPtr> m_pending_work;
-  std::mutex m_pending_work_lock;
-  std::condition_variable m_worker_thread_wake;
-  std::atomic_size_t m_busy_workers{0};
+  // Keyed by priority. A multimap rather than a priority_queue so items can be moved out.
+  std::multimap<u32, WorkItemPtr> m_queue;
+  std::mutex m_queue_mutex;
+  std::condition_variable m_queue_cv;
+  std::atomic_size_t m_compiling{0};
 
-  std::deque<WorkItemPtr> m_completed_work;
-  std::mutex m_completed_work_lock;
+  std::deque<WorkItemPtr> m_finished;
+  std::mutex m_finished_mutex;
 };
 
 }  // namespace VideoCommon

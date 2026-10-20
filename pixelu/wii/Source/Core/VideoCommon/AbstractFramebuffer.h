@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,11 +10,8 @@
 
 class AbstractTexture;
 
-// An abstract framebuffer wraps a backend framebuffer/view object, which can be used to
-// draw onto a texture. Currently, only single-level textures are supported. Multi-layer
-// textures will render by default only to the first layer, however, multiple layers
-// be rendered in parallel using geometry shaders and layer variable.
-
+// A render target made of up to one colour texture (plus optional extra colour textures) and one
+// depth texture, all single-mip. Backends derive from this to hold their own target object.
 class AbstractFramebuffer
 {
 public:
@@ -25,6 +21,7 @@ public:
                       u32 width, u32 height, u32 layers, u32 samples);
   virtual ~AbstractFramebuffer();
 
+  // True when the given textures can be combined into one framebuffer.
   static bool ValidateConfig(const AbstractTexture* color_attachment,
                              const AbstractTexture* depth_attachment,
                              const std::vector<AbstractTexture*>& additional_color_attachments);
