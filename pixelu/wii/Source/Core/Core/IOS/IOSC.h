@@ -1,7 +1,7 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Implementation of an IOSC-like API, but much simpler since we only support actual keys.
+// A model of the IOS crypto engine (IOSC): a small table of key objects, addressed by handle,
+// plus the operations that use them. Only keys that are actually known are supported.
 
 #pragma once
 
@@ -23,6 +23,8 @@ namespace ES
 class CertReader;
 }  // namespace ES
 
+// Signature and key type words used in tickets, TMDs and certificates (WiiBrew,
+// "Certificate chain"). All of these structures are stored big endian.
 enum class SignatureType : u32
 {
   RSA4096 = 0x00010000,
@@ -65,7 +67,7 @@ struct SignatureECC
 };
 static_assert(sizeof(SignatureECC) == 0xc0, "Wrong size for SignatureECC");
 
-// Source: https://wiibrew.org/wiki/Certificate_chain
+// Follows the signature in every certificate.
 struct CertHeader
 {
   PublicKeyType public_key_type;
@@ -95,7 +97,7 @@ struct CertRSA2048RSA2048
 };
 static_assert(sizeof(CertRSA2048RSA2048) == 0x300, "Wrong size for CertRSA2048RSA2048");
 
-/// Used for device certificates
+// A console (NG) certificate: RSA-signed, ECC key.
 struct CertRSA2048ECC
 {
   SignatureRSA2048 signature;
@@ -105,7 +107,7 @@ struct CertRSA2048ECC
 };
 static_assert(sizeof(CertRSA2048ECC) == 0x240, "Wrong size for CertRSA2048ECC");
 
-/// Used for device signed certificates
+// A certificate signed by a console key (for example an AP certificate).
 struct CertECC
 {
   SignatureECC signature;
@@ -131,34 +133,31 @@ public:
     RVT,
   };
 
-  // We use the same default key handle IDs as the actual IOSC because there are ioctlvs
-  // that accept arbitrary key handles from the PPC, so the IDs must match.
-  // More information on default handles: https://wiibrew.org/wiki/IOS/Syscalls
+  // Built-in objects and their fixed handles. Titles pass these numbers in ioctlvs, so they
+  // have to match the real IOSC (WiiBrew, "IOS/Syscalls").
   enum DefaultHandle : u32
   {
-    // NG private key. ECC-233 private signing key (per-console)
+    // The console's ECC-233 private key (NG key)
     HANDLE_CONSOLE_KEY = 0,
     // Console ID
     HANDLE_CONSOLE_ID = 1,
-    // NAND FS AES-128 key
+    // NAND encryption key (AES-128)
     HANDLE_FS_KEY = 2,
-    // NAND FS HMAC
+    // NAND HMAC key
     HANDLE_FS_MAC = 3,
     // Common key
     HANDLE_COMMON_KEY = 4,
     // PRNG seed
     HANDLE_PRNG_KEY = 5,
-    // SD AES-128 key
+    // SD card key (AES-128)
     HANDLE_SD_KEY = 6,
     // boot2 version (writable)
     HANDLE_BOOT2_VERSION = 7,
-    // Unknown
     HANDLE_UNKNOWN_8 = 8,
-    // Unknown
     HANDLE_UNKNOWN_9 = 9,
-    // Filesystem version (writable)
+    // File system version (writable)
     HANDLE_FS_VERSION = 10,
-    // New common key (aka Korean common key)
+    // Second common key, used for Korean titles
     HANDLE_NEW_COMMON_KEY = 11,
 
     HANDLE_ROOT_KEY = 0xfffffff,
@@ -188,23 +187,23 @@ public:
   IOSC(ConsoleType console_type = ConsoleType::Retail);
   ~IOSC();
 
-  // Create an object for use with the other functions that operate on objects.
+  // Allocates an empty object owned by `pid`.
   ReturnCode CreateObject(Handle* handle, ObjectType type, ObjectSubType subtype, u32 pid);
-  // Delete an object. Built-in objects cannot be deleted.
+  // Frees an object. Built-in objects cannot be freed.
   ReturnCode DeleteObject(Handle handle, u32 pid);
-  // Import a secret, encrypted key into dest_handle, which will be decrypted using decrypt_handle.
+  // Decrypts `encrypted_key` with the key in decrypt_handle and stores it in dest_handle.
   ReturnCode ImportSecretKey(Handle dest_handle, Handle decrypt_handle, u8* iv,
                              const u8* encrypted_key, u32 pid);
-  // Import a secret key that is already decrypted.
+  // Stores a plain AES key in dest_handle.
   ReturnCode ImportSecretKey(Handle dest_handle, const u8* decrypted_key, u32 pid);
-  // Import a public key. public_key_exponent must be passed for RSA keys.
+  // Stores a public key; RSA keys also need their exponent.
   ReturnCode ImportPublicKey(Handle dest_handle, const u8* public_key,
                              const u8* public_key_exponent, u32 pid);
-  // Compute an AES key from an ECDH shared secret.
+  // Derives an AES key from an ECDH exchange between a private and a public ECC key.
   ReturnCode ComputeSharedKey(Handle dest_handle, Handle private_handle, Handle public_handle,
                               u32 pid);
 
-  // AES encrypt/decrypt.
+  // AES-128-CBC. `iv` is updated for chaining.
   ReturnCode Encrypt(Handle key_handle, u8* iv, const u8* input, size_t size, u8* output,
                      u32 pid) const;
   ReturnCode Decrypt(Handle key_handle, u8* iv, const u8* input, size_t size, u8* output,
@@ -212,11 +211,11 @@ public:
 
   ReturnCode VerifyPublicKeySign(const std::array<u8, 20>& sha1, Handle signer_handle,
                                  const std::vector<u8>& signature, u32 pid) const;
-  // Import a certificate (signed by the certificate in signer_handle) into dest_handle.
+  // Checks `cert` against the key in signer_handle, then stores its public key in dest_handle.
   ReturnCode ImportCertificate(const ES::CertReader& cert, Handle signer_handle, Handle dest_handle,
                                u32 pid);
 
-  // Ownership
+  // Owner masks (one bit per process ID).
   ReturnCode GetOwnership(Handle handle, u32* owner) const;
   ReturnCode SetOwnership(Handle handle, u32 owner, u32 pid);
 
@@ -243,7 +242,7 @@ private:
     u32 misc_data = 0;
     u32 owner_mask = 0;
   };
-  // The Wii's IOSC is limited to 32 entries, including 12 built-in entries.
+  // 32 slots, the first 12 of which hold the built-in objects.
   using KeyEntries = std::array<KeyEntry, 32>;
 
   enum class SearchMode
@@ -267,6 +266,7 @@ private:
 
   ConsoleType m_console_type{ConsoleType::Retail};
   KeyEntries m_key_entries;
+  // The root CA key lives outside the table and is never saved.
   KeyEntry m_root_key_entry;
   Common::ec::Signature m_console_signature{};
   u32 m_ms_id = 0;
