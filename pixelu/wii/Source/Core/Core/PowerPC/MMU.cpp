@@ -1248,11 +1248,14 @@ MMU::Translated MMU::TranslateThroughPageTable(const u32 address)
   const UReg_SR segment{m_ppc_state.sr[address >> 28]};
   const u32 vsid = segment.VSID;
 
-  bool wi = false;
+  // Page translations always report wi = false: the uncached/write-through
+  // handling (and the data cache bypass) is applied to BAT mappings only,
+  // which is the long-standing behaviour games are tested against.
+  bool tlb_wi = false;
   u32 physical = 0;
-  const TLBHit tlb = LookUpTLB(m_ppc_state, flag, address, vsid, &physical, &wi);
+  const TLBHit tlb = LookUpTLB(m_ppc_state, flag, address, vsid, &physical, &tlb_wi);
   if (tlb == TLBHit::Hit)
-    return Translated{Translation::Page, physical, wi};
+    return Translated{Translation::Page, physical, false};
 
   if (segment.T != 0)
     return Translated{Translation::DirectStore, 0, false};
@@ -1311,8 +1314,7 @@ MMU::Translated MMU::TranslateThroughPageTable(const u32 address)
       if (tlb != TLBHit::NeedsChangedBit)
         FillTLB(m_ppc_state, flag, pte, address, vsid);
 
-      return Translated{Translation::Page, (pte.RPN << 12) | (address & 0xFFF),
-                        IsWriteThroughOrInhibited(pte.WIMG)};
+      return Translated{Translation::Page, (pte.RPN << 12) | (address & 0xFFF), false};
     }
   }
   return Translated{Translation::Fault, 0, false};
