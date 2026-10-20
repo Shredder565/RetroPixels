@@ -280,7 +280,15 @@ and the CMake glue in `Externals/`. Those need their own steps (an original
 top-level build in `pixelu/wii`, original or dropped data files, fetching
 the third-party Externals directly) before the submodule can go.
 
-Next, once both engines and the app are 100% original: a Linux version of
+Queued after the rewrite and before Linux (project owner, 2026-10-20):
+analyse and improve Supermodel (Sega Model 3; the owner's upload of
+supermodel-0.3a-20260726-git-24d2ffc-windows.zip) and add it to RetroPixels
+under its own tab with the same launch rules as the other emulators, so that
+clicking the Supermodel icon starts Star Wars Trilogy Arcade playable. The
+game ROM is the owner's own (/mnt/project-files/swtrilgya.zip) and is never
+bundled: RetroPixels finds the owner's copy once and launches it from then on.
+
+Then, once both engines and the app are 100% original: a Linux version of
 RetroPixels (asked for by the project owner on 2026-10-20). That needs
 Linux back ends for the Go app's window, sound, controllers and menus, and
 for PixelU and PixelU-Wii, whose non-Windows code was pruned for the rewrite
