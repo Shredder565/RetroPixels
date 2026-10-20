@@ -114,6 +114,12 @@ void StoreU64(u8* p, u64 v)
 {
   std::memcpy(p, &v, sizeof(v));
 }
+// Saves or loads each field in turn.
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
 }  // namespace
 
 DSPManager::DSPManager(Core::System& system) : m_system(system)
@@ -127,13 +133,8 @@ void DSPManager::DoState(PointerWrap& p)
   // Wii MEM2 is saved by the memory manager.
   if (!m_aram.wii_mode)
     p.DoArray(m_aram.ptr, m_aram.size);
-  p.Do(m_dsp_control);
-  p.Do(m_audio_dma);
-  p.Do(m_aram_dma);
-  p.Do(m_aram_info);
-  p.Do(m_aram_mode);
-  p.Do(m_aram_refresh);
-  p.Do(m_dsp_slice);
+  DoFields(p, m_dsp_control, m_audio_dma, m_aram_dma);
+  DoFields(p, m_aram_info, m_aram_mode, m_aram_refresh, m_dsp_slice);
 
   m_dsp_emulator->DoState(p);
 }

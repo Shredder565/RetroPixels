@@ -138,46 +138,31 @@ constexpr u32 PAGE_MASK = ~(PAGE_SIZE - 1);
 class EffectiveSpace final : public Accessors
 {
 public:
+  // Every access goes through the MMU's host accessors.
+  template <typename T>
+  static T Get(const Core::CPUThreadGuard& guard, u32 address)
+  {
+    return PowerPC::MMU::HostRead<T>(guard, address);
+  }
+  template <typename T>
+  static void Put(const Core::CPUThreadGuard& guard, u32 address, T value)
+  {
+    PowerPC::MMU::HostWrite<T>(guard, value, address);
+  }
+
   bool IsValidAddress(const Core::CPUThreadGuard& guard, u32 address) const override
   {
     return PowerPC::MMU::HostIsRAMAddress(guard, address);
   }
-  u8 ReadU8(const Core::CPUThreadGuard& guard, u32 address) const override
-  {
-    return PowerPC::MMU::HostRead<u8>(guard, address);
-  }
-  void WriteU8(const Core::CPUThreadGuard& guard, u32 address, u8 value) override
-  {
-    PowerPC::MMU::HostWrite<u8>(guard, value, address);
-  }
-  u16 ReadU16(const Core::CPUThreadGuard& guard, u32 address) const override
-  {
-    return PowerPC::MMU::HostRead<u16>(guard, address);
-  }
-  void WriteU16(const Core::CPUThreadGuard& guard, u32 address, u16 value) override
-  {
-    PowerPC::MMU::HostWrite<u16>(guard, value, address);
-  }
-  u32 ReadU32(const Core::CPUThreadGuard& guard, u32 address) const override
-  {
-    return PowerPC::MMU::HostRead<u32>(guard, address);
-  }
-  void WriteU32(const Core::CPUThreadGuard& guard, u32 address, u32 value) override
-  {
-    PowerPC::MMU::HostWrite<u32>(guard, value, address);
-  }
-  u64 ReadU64(const Core::CPUThreadGuard& guard, u32 address) const override
-  {
-    return PowerPC::MMU::HostRead<u64>(guard, address);
-  }
-  void WriteU64(const Core::CPUThreadGuard& guard, u32 address, u64 value) override
-  {
-    PowerPC::MMU::HostWrite<u64>(guard, value, address);
-  }
-  float ReadF32(const Core::CPUThreadGuard& guard, u32 address) const override
-  {
-    return PowerPC::MMU::HostRead<float>(guard, address);
-  }
+  u8 ReadU8(const Core::CPUThreadGuard& g, u32 a) const override { return Get<u8>(g, a); }
+  u16 ReadU16(const Core::CPUThreadGuard& g, u32 a) const override { return Get<u16>(g, a); }
+  u32 ReadU32(const Core::CPUThreadGuard& g, u32 a) const override { return Get<u32>(g, a); }
+  u64 ReadU64(const Core::CPUThreadGuard& g, u32 a) const override { return Get<u64>(g, a); }
+  float ReadF32(const Core::CPUThreadGuard& g, u32 a) const override { return Get<float>(g, a); }
+  void WriteU8(const Core::CPUThreadGuard& g, u32 a, u8 v) override { Put(g, a, v); }
+  void WriteU16(const Core::CPUThreadGuard& g, u32 a, u16 v) override { Put(g, a, v); }
+  void WriteU32(const Core::CPUThreadGuard& g, u32 a, u32 v) override { Put(g, a, v); }
+  void WriteU64(const Core::CPUThreadGuard& g, u32 a, u64 v) override { Put(g, a, v); }
 
   // Scans address by address. Inside a mapped page every start address is
   // tried; an unmapped page is skipped as a whole, landing on the first byte

@@ -70,13 +70,12 @@ std::optional<Overlap> FindOverlap(const PhysicalMemoryRegion& region, u32 start
 }  // namespace
 
 MemoryManager::MemoryManager(Core::System& system)
-    : m_page_size(static_cast<u32>(m_arena.GetPageSize())),
-      m_guest_pages_per_host_page(m_page_size / PowerPC::HW_PAGE_SIZE),
-      m_host_page_type(GetHostPageTypeForPageSize(m_page_size)), m_system(system)
+    : m_page_size{static_cast<u32>(m_arena.GetPageSize())},
+      m_guest_pages_per_host_page{static_cast<u32>(m_page_size / PowerPC::HW_PAGE_SIZE)},
+      m_host_page_type{GetHostPageTypeForPageSize(m_page_size)},
+      m_system{system}
 {
 }
-
-MemoryManager::~MemoryManager() = default;
 
 MemoryManager::HostPageType MemoryManager::GetHostPageTypeForPageSize(u32 page_size)
 {
@@ -85,6 +84,8 @@ MemoryManager::HostPageType MemoryManager::GetHostPageTypeForPageSize(u32 page_s
   return page_size <= PowerPC::HW_PAGE_SIZE ? HostPageType::SmallPages :
                                               HostPageType::LargePages;
 }
+
+MemoryManager::~MemoryManager() = default;
 
 void MemoryManager::InitMMIO(Core::System& system)
 {
@@ -529,12 +530,11 @@ void MemoryManager::ShutdownFastmemArena()
   m_large_readable_pages.clear();
   m_large_writeable_pages.clear();
 
-  m_fastmem_arena = nullptr;
-  m_fastmem_arena_size = 0;
-  m_physical_base = nullptr;
-  m_logical_base = nullptr;
-
   m_is_fastmem_arena_initialized = false;
+  m_logical_base = nullptr;
+  m_physical_base = nullptr;
+  m_fastmem_arena_size = 0;
+  m_fastmem_arena = nullptr;
 }
 
 void MemoryManager::Clear()
@@ -648,72 +648,45 @@ std::span<u8> MemoryManager::GetSpanForAddress(u32 address) const
   return {};
 }
 
-u8 MemoryManager::Read_U8(u32 address) const
+// Guest memory is big-endian; the *_Swap accessors move the bytes as they are.
+namespace
 {
-  u8 value = 0;
-  CopyFromEmu(&value, address, sizeof(value));
+template <typename T, bool BigEndian>
+T Load(const MemoryManager& memory, u32 address)
+{
+  T value{};
+  memory.CopyFromEmu(&value, address, sizeof(T));
+  if constexpr (BigEndian)
+    value = Common::FromBigEndian(value);
   return value;
 }
 
-u16 MemoryManager::Read_U16(u32 address) const
+template <typename T, bool BigEndian>
+void Store(MemoryManager& memory, u32 address, T value)
 {
-  u16 value = 0;
-  CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap16(value);
+  if constexpr (BigEndian)
+    value = Common::FromBigEndian(value);
+  memory.CopyToEmu(address, &value, sizeof(T));
 }
+}  // namespace
 
-u32 MemoryManager::Read_U32(u32 address) const
-{
-  u32 value = 0;
-  CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap32(value);
-}
+u8 MemoryManager::Read_U8(u32 address) const { return Load<u8, false>(*this, address); }
+u16 MemoryManager::Read_U16(u32 address) const { return Load<u16, true>(*this, address); }
+u32 MemoryManager::Read_U32(u32 address) const { return Load<u32, true>(*this, address); }
+u64 MemoryManager::Read_U64(u32 address) const { return Load<u64, true>(*this, address); }
+u32 MemoryManager::Read_U32_Swap(u32 address) const { return Load<u32, false>(*this, address); }
 
-u64 MemoryManager::Read_U64(u32 address) const
-{
-  u64 value = 0;
-  CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap64(value);
-}
-
-u32 MemoryManager::Read_U32_Swap(u32 address) const
-{
-  u32 value = 0;
-  CopyFromEmu(&value, address, sizeof(value));
-  return value;
-}
-
-void MemoryManager::Write_U8(u8 value, u32 address)
-{
-  CopyToEmu(address, &value, sizeof(value));
-}
-
-void MemoryManager::Write_U16(u16 value, u32 address)
-{
-  const u16 big_endian = Common::swap16(value);
-  CopyToEmu(address, &big_endian, sizeof(big_endian));
-}
-
-void MemoryManager::Write_U32(u32 value, u32 address)
-{
-  const u32 big_endian = Common::swap32(value);
-  CopyToEmu(address, &big_endian, sizeof(big_endian));
-}
-
-void MemoryManager::Write_U64(u64 value, u32 address)
-{
-  const u64 big_endian = Common::swap64(value);
-  CopyToEmu(address, &big_endian, sizeof(big_endian));
-}
-
+void MemoryManager::Write_U8(u8 value, u32 address) { Store<u8, false>(*this, address, value); }
+void MemoryManager::Write_U16(u16 value, u32 address) { Store<u16, true>(*this, address, value); }
+void MemoryManager::Write_U32(u32 value, u32 address) { Store<u32, true>(*this, address, value); }
+void MemoryManager::Write_U64(u64 value, u32 address) { Store<u64, true>(*this, address, value); }
 void MemoryManager::Write_U32_Swap(u32 value, u32 address)
 {
-  CopyToEmu(address, &value, sizeof(value));
+  Store<u32, false>(*this, address, value);
 }
-
 void MemoryManager::Write_U64_Swap(u64 value, u32 address)
 {
-  CopyToEmu(address, &value, sizeof(value));
+  Store<u64, false>(*this, address, value);
 }
 
 }  // namespace Memory

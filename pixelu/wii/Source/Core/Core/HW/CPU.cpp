@@ -31,6 +31,13 @@ CPUManager::CPUManager(Core::System& system) : m_system(system)
 
 CPUManager::~CPUManager() = default;
 
+State CPUManager::GetState() const { return m_state; }
+const State* CPUManager::GetStatePtr() const { return &m_state; }
+bool CPUManager::IsStepping() const { return GetState() == State::Stepping; }
+
+// Nothing to reset: the state follows Init/Stop.
+void CPUManager::Reset() {}
+
 void CPUManager::Init(PowerPC::CPUCore cpu_core)
 {
   m_system.GetPowerPC().Init(cpu_core);
@@ -270,25 +277,6 @@ void CPUManager::Stop()
   FlushStepSyncEventLocked();
 }
 
-bool CPUManager::IsStepping() const
-{
-  return m_state == State::Stepping;
-}
-
-State CPUManager::GetState() const
-{
-  return m_state;
-}
-
-const State* CPUManager::GetStatePtr() const
-{
-  return &m_state;
-}
-
-void CPUManager::Reset()
-{
-}
-
 void CPUManager::StepOpcode(Common::Event* event)
 {
   std::lock_guard state_lock(m_state_change_lock);
@@ -334,18 +322,16 @@ void CPUManager::SetStepping(bool stepping)
 void CPUManager::Break()
 {
   std::lock_guard state_lock(m_state_change_lock);
-
-  // While another thread holds PauseAndLock, only remember the request so
-  // that its unlock does not resume.
-  if (m_state_paused_and_locked)
+  if (!m_state_paused_and_locked)
   {
-    m_state_system_request_stepping = true;
+    // No waiting here: the CPU thread may be blocked on our caller.
+    SetStateLocked(State::Stepping);
+    RunAdjacentSystems(false);
     return;
   }
-
-  // No waiting here: the CPU thread may be blocked on our caller.
-  SetStateLocked(State::Stepping);
-  RunAdjacentSystems(false);
+  // Another thread holds PauseAndLock: remember the request, so that its
+  // unlock leaves the CPU stepping instead of resuming it.
+  m_state_system_request_stepping = true;
 }
 
 void CPUManager::Continue()
@@ -356,22 +342,24 @@ void CPUManager::Continue()
 
 bool CPUManager::PauseAndLock()
 {
+  // Held until RestoreStateAndUnlock().
   m_stepping_lock.lock();
 
-  std::unique_lock state_lock(m_state_change_lock);
-  m_state_paused_and_locked = true;
-  const bool was_running = m_state == State::Running;
-  SetStateLocked(State::Stepping);
-  WaitForCPUThreadIdle(state_lock);
-  state_lock.unlock();
-
-  // Let the caller act as the CPU thread meanwhile.
-  if (!Core::IsCPUThread())
+  bool was_running;
   {
-    m_have_fake_cpu_thread = true;
-    Core::DeclareAsCPUThread();
+    std::unique_lock state_lock(m_state_change_lock);
+    m_state_paused_and_locked = true;
+    was_running = GetState() == State::Running;
+    SetStateLocked(State::Stepping);
+    WaitForCPUThreadIdle(state_lock);
   }
 
+  // The caller acts as the CPU thread until it unlocks.
+  if (!Core::IsCPUThread())
+  {
+    Core::DeclareAsCPUThread();
+    m_have_fake_cpu_thread = true;
+  }
   return was_running;
 }
 

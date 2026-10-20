@@ -35,7 +35,7 @@ GPFifoManager::GPFifoManager(Core::System& system) : m_system(system)
 
 size_t GPFifoManager::GetGatherPipeCount()
 {
-  return m_system.GetPPCState().gather_pipe_ptr - m_gather_pipe;
+  return static_cast<size_t>(m_system.GetPPCState().gather_pipe_ptr - m_gather_pipe);
 }
 
 void GPFifoManager::SetGatherPipeCount(size_t size)
@@ -114,49 +114,16 @@ void GPFifoManager::CheckGatherPipe()
   m_system.GetJitInterface().CompileExceptionCheck(JitInterface::ExceptionType::FIFOWrite);
 }
 
-void GPFifoManager::Write8(const u8 value)
-{
-  FastWrite8(value);
-  CheckGatherPipe();
-}
+// The checked stores: append, then send a completed burst.
+void GPFifoManager::Write8(const u8 value) { FastWrite8(value); CheckGatherPipe(); }
+void GPFifoManager::Write16(const u16 value) { FastWrite16(value); CheckGatherPipe(); }
+void GPFifoManager::Write32(const u32 value) { FastWrite32(value); CheckGatherPipe(); }
+void GPFifoManager::Write64(const u64 value) { FastWrite64(value); CheckGatherPipe(); }
 
-void GPFifoManager::Write16(const u16 value)
-{
-  FastWrite16(value);
-  CheckGatherPipe();
-}
-
-void GPFifoManager::Write32(const u32 value)
-{
-  FastWrite32(value);
-  CheckGatherPipe();
-}
-
-void GPFifoManager::Write64(const u64 value)
-{
-  FastWrite64(value);
-  CheckGatherPipe();
-}
-
-void GPFifoManager::FastWrite8(const u8 value)
-{
-  Append(m_system.GetPPCState(), value);
-}
-
-void GPFifoManager::FastWrite16(u16 value)
-{
-  Append(m_system.GetPPCState(), value);
-}
-
-void GPFifoManager::FastWrite32(u32 value)
-{
-  Append(m_system.GetPPCState(), value);
-}
-
-void GPFifoManager::FastWrite64(u64 value)
-{
-  Append(m_system.GetPPCState(), value);
-}
+void GPFifoManager::FastWrite8(const u8 value) { Append(m_system.GetPPCState(), value); }
+void GPFifoManager::FastWrite16(u16 value) { Append(m_system.GetPPCState(), value); }
+void GPFifoManager::FastWrite32(u32 value) { Append(m_system.GetPPCState(), value); }
+void GPFifoManager::FastWrite64(u64 value) { Append(m_system.GetPPCState(), value); }
 
 void UpdateGatherPipe(GPFifoManager& gpfifo)
 {

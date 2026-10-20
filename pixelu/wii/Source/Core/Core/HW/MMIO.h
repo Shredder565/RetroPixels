@@ -65,47 +65,38 @@ inline u32 UniqueID(u32 address)
 // separate 16-bit registers (host is little-endian).
 namespace Utils
 {
-inline u16* LowPart(u32* ptr)
-{
-  return reinterpret_cast<u16*>(ptr);
-}
-inline u16* LowPart(std::atomic<u32>* ptr)
+// Lock-free std::atomic<u32> has the layout of a plain u32.
+inline u32* PlainValue(std::atomic<u32>* ptr)
 {
   static_assert(std::atomic<u32>::is_always_lock_free && sizeof(std::atomic<u32>) == sizeof(u32));
-  return LowPart(std::bit_cast<u32*>(ptr));
+  return std::bit_cast<u32*>(ptr);
 }
-inline u16* HighPart(u32* ptr)
-{
-  return LowPart(ptr) + 1;
-}
-inline u16* HighPart(std::atomic<u32>* ptr)
-{
-  static_assert(std::atomic<u32>::is_always_lock_free && sizeof(std::atomic<u32>) == sizeof(u32));
-  return HighPart(std::bit_cast<u32*>(ptr));
-}
+inline u16* LowPart(u32* ptr) { return reinterpret_cast<u16*>(ptr); }
+inline u16* HighPart(u32* ptr) { return reinterpret_cast<u16*>(ptr) + 1; }
+inline u16* LowPart(std::atomic<u32>* ptr) { return LowPart(PlainValue(ptr)); }
+inline u16* HighPart(std::atomic<u32>* ptr) { return HighPart(PlainValue(ptr)); }
 }  // namespace Utils
 
 // The register map: one read and one write handler per address and size.
 class Mapping
 {
 public:
+  // Installs handling methods; the slot takes ownership of them.
   template <typename Unit>
   void RegisterRead(u32 addr, ReadHandlingMethod<Unit>* read)
   {
     GetHandlerForRead<Unit>(addr).ResetMethod(read);
   }
-
   template <typename Unit>
   void RegisterWrite(u32 addr, WriteHandlingMethod<Unit>* write)
   {
     GetHandlerForWrite<Unit>(addr).ResetMethod(write);
   }
-
   template <typename Unit>
   void Register(u32 addr, ReadHandlingMethod<Unit>* read, WriteHandlingMethod<Unit>* write)
   {
-    RegisterRead(addr, read);
-    RegisterWrite(addr, write);
+    GetHandlerForRead<Unit>(addr).ResetMethod(read);
+    GetHandlerForWrite<Unit>(addr).ResetMethod(write);
   }
 
   // Performs an access (used by the MMU slow paths and by emulator code).
@@ -169,14 +160,13 @@ private:
 
 // 64-bit register accesses do not exist; these only let generic callers compile.
 template <>
-inline u64 Mapping::Read<u64>(Core::System& system, u32 addr)
+inline u64 Mapping::Read<u64>(Core::System&, u32)
 {
   DEBUG_ASSERT(false);
   return 0;
 }
-
 template <>
-inline void Mapping::Write(Core::System& system, u32 addr, u64 val)
+inline void Mapping::Write<u64>(Core::System&, u32, u64)
 {
   DEBUG_ASSERT(false);
 }

@@ -223,7 +223,7 @@ void ProcessorInterfaceManager::UpdateException()
   if (m_interrupt_cause & m_interrupt_mask)
     ppc_state.Exceptions |= EXCEPTION_EXTERNAL_INT;
   else
-    ppc_state.Exceptions &= ~EXCEPTION_EXTERNAL_INT;
+    ppc_state.Exceptions &= ~static_cast<u32>(EXCEPTION_EXTERNAL_INT);
 }
 
 void ProcessorInterfaceManager::SetInterrupt(u32 cause_mask, bool set)

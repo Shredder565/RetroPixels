@@ -47,11 +47,19 @@ u32 RightVolume(u32 volume)
 {
   return (volume >> 8) & 0xFF;
 }
+// Saves or loads each field in turn.
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
 }  // namespace
 
+// Streaming (AIS) starts at 48 kHz, DMA (AID) at 32 kHz.
 AudioInterfaceManager::AudioInterfaceManager(Core::System& system)
-    : m_ais_sample_rate_divisor(Mixer::FIXED_SAMPLE_RATE_DIVIDEND / 48000),
-      m_aid_sample_rate_divisor(Mixer::FIXED_SAMPLE_RATE_DIVIDEND / 32000), m_system(system)
+    : m_ais_sample_rate_divisor{Mixer::FIXED_SAMPLE_RATE_DIVIDEND / 48000},
+      m_aid_sample_rate_divisor{Mixer::FIXED_SAMPLE_RATE_DIVIDEND / 32000},
+      m_system{system}
 {
 }
 
@@ -59,14 +67,8 @@ AudioInterfaceManager::~AudioInterfaceManager() = default;
 
 void AudioInterfaceManager::DoState(PointerWrap& p)
 {
-  p.Do(m_control);
-  p.Do(m_volume);
-  p.Do(m_sample_counter);
-  p.Do(m_interrupt_timing);
-  p.Do(m_last_cpu_time);
-  p.Do(m_ais_sample_rate_divisor);
-  p.Do(m_aid_sample_rate_divisor);
-  p.Do(m_cpu_cycles_per_sample);
+  DoFields(p, m_control, m_volume, m_sample_counter, m_interrupt_timing, m_last_cpu_time);
+  DoFields(p, m_ais_sample_rate_divisor, m_aid_sample_rate_divisor, m_cpu_cycles_per_sample);
 
   m_system.GetSoundStream()->GetMixer()->DoState(p);
 }

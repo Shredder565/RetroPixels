@@ -47,6 +47,13 @@ constexpr std::ranges::greater HEAP_ORDER{};
 void DiscardLostEvent(Core::System&, u64, s64)
 {
 }
+
+// Saves or loads each field in turn.
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
 }  // namespace
 
 CoreTimingManager::CoreTimingManager(Core::System& system) : m_system(system)
@@ -58,12 +65,12 @@ CoreTimingManager::CoreTimingManager(Core::System& system) : m_system(system)
 // fixed number of cycles still behaves.
 int CoreTimingManager::DowncountToCycles(int downcount) const
 {
-  return static_cast<int>(downcount * m_globals.last_OC_factor_inverted);
+  return static_cast<int>(static_cast<float>(downcount) * m_globals.last_OC_factor_inverted);
 }
 
 int CoreTimingManager::CyclesToDowncount(int cycles) const
 {
-  return static_cast<int>(cycles * m_last_oc_factor);
+  return static_cast<int>(static_cast<float>(cycles) * m_last_oc_factor);
 }
 
 void CoreTimingManager::PushEvent(const Event& event)
@@ -121,7 +128,7 @@ void CoreTimingManager::Init()
   // Time spent paused must not be "caught up" by running flat out afterwards.
   m_core_state_changed_hook = Core::AddOnStateChangedCallback([this](Core::State state) {
     if (state == Core::State::Running)
-      ResetThrottle(GetTicks());
+      ResetThrottle(static_cast<s64>(GetTicks()));
   });
 
   m_throttled_after_presentation = false;
@@ -172,7 +179,7 @@ void CoreTimingManager::RefreshConfig()
     }
   }
 
-  UpdateSpeedLimit(GetTicks(), Config::Get(Config::MAIN_EMULATION_SPEED));
+  UpdateSpeedLimit(static_cast<s64>(GetTicks()), Config::Get(Config::MAIN_EMULATION_SPEED));
 
   m_use_precision_timer = Config::Get(Config::MAIN_PRECISION_FRAME_TIMING);
 }
@@ -181,14 +188,9 @@ void CoreTimingManager::DoState(PointerWrap& p)
 {
   std::lock_guard guard(m_ts_write_lock);
 
-  p.Do(m_globals.slice_length);
-  p.Do(m_globals.global_timer);
-  p.Do(m_idled_cycles);
-  p.Do(m_fake_dec_start_value);
-  p.Do(m_fake_dec_start_ticks);
-  p.Do(m_globals.fake_TB_start_value);
-  p.Do(m_globals.fake_TB_start_ticks);
-  p.Do(m_last_oc_factor);
+  DoFields(p, m_globals.slice_length, m_globals.global_timer, m_idled_cycles,
+           m_fake_dec_start_value, m_fake_dec_start_ticks, m_globals.fake_TB_start_value,
+           m_globals.fake_TB_start_ticks, m_last_oc_factor);
   m_globals.last_OC_factor_inverted = 1.0f / m_last_oc_factor;
   p.Do(m_event_fifo_id);
   p.DoMarker("CoreTimingData");
@@ -237,7 +239,7 @@ u64 CoreTimingManager::GetTicks() const
 
   // Inside a slice: add what the CPU has already used of the slice budget.
   const int remaining = DowncountToCycles(m_system.GetPPCState().downcount);
-  return slice_start + (m_globals.slice_length - remaining);
+  return slice_start + static_cast<u64>(m_globals.slice_length - remaining);
 }
 
 u64 CoreTimingManager::GetIdleTicks() const
@@ -283,7 +285,7 @@ void CoreTimingManager::ScheduleEvent(s64 cycles_into_future, EventType* event_t
     return;
   }
 
-  const s64 due_time = static_cast<s64>(GetTicks() + cycles_into_future);
+  const s64 due_time = static_cast<s64>(GetTicks() + static_cast<u64>(cycles_into_future));
 
   // Outside Advance(): make sure the current slice ends in time for this event.
   if (!m_is_global_timer_sane)
@@ -469,7 +471,7 @@ void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
   m_emulation_speed = new_speed;
 
   const u32 new_rate =
-      std::lround(m_system.GetSystemTimers().GetTicksPerSecond() * new_speed);
+      static_cast<u32>(std::lround(m_system.GetSystemTimers().GetTicksPerSecond() * new_speed));
 
   // Keep host time continuous across the change by re-deriving the reference cycle.
   if (m_throttle_adj_clock_per_sec != 0)
@@ -540,7 +542,7 @@ void CoreTimingManager::Idle()
     m_system.GetFifo().FlushGpu();
 
   auto& ppc_state = m_system.GetPPCState();
-  PowerPC::UpdatePerformanceMonitor(ppc_state.downcount, 0, 0, ppc_state);
+  PowerPC::UpdatePerformanceMonitor(static_cast<u32>(ppc_state.downcount), 0, 0, ppc_state);
   m_idled_cycles += DowncountToCycles(ppc_state.downcount);
   ppc_state.downcount = 0;
 }
@@ -557,54 +559,17 @@ std::string CoreTimingManager::GetScheduledEventsSummary() const
   return summary;
 }
 
-u32 CoreTimingManager::GetFakeDecStartValue() const
-{
-  return m_fake_dec_start_value;
-}
+// Decrementer and time base bookkeeping, kept here for SystemTimers.
+u32 CoreTimingManager::GetFakeDecStartValue() const { return m_fake_dec_start_value; }
+u64 CoreTimingManager::GetFakeDecStartTicks() const { return m_fake_dec_start_ticks; }
+u64 CoreTimingManager::GetFakeTBStartValue() const { return m_globals.fake_TB_start_value; }
+u64 CoreTimingManager::GetFakeTBStartTicks() const { return m_globals.fake_TB_start_ticks; }
+void CoreTimingManager::SetFakeDecStartValue(u32 val) { m_fake_dec_start_value = val; }
+void CoreTimingManager::SetFakeDecStartTicks(u64 val) { m_fake_dec_start_ticks = val; }
+void CoreTimingManager::SetFakeTBStartValue(u64 val) { m_globals.fake_TB_start_value = val; }
+void CoreTimingManager::SetFakeTBStartTicks(u64 val) { m_globals.fake_TB_start_ticks = val; }
 
-void CoreTimingManager::SetFakeDecStartValue(u32 val)
-{
-  m_fake_dec_start_value = val;
-}
-
-u64 CoreTimingManager::GetFakeDecStartTicks() const
-{
-  return m_fake_dec_start_ticks;
-}
-
-void CoreTimingManager::SetFakeDecStartTicks(u64 val)
-{
-  m_fake_dec_start_ticks = val;
-}
-
-u64 CoreTimingManager::GetFakeTBStartValue() const
-{
-  return m_globals.fake_TB_start_value;
-}
-
-void CoreTimingManager::SetFakeTBStartValue(u64 val)
-{
-  m_globals.fake_TB_start_value = val;
-}
-
-u64 CoreTimingManager::GetFakeTBStartTicks() const
-{
-  return m_globals.fake_TB_start_ticks;
-}
-
-void CoreTimingManager::SetFakeTBStartTicks(u64 val)
-{
-  m_globals.fake_TB_start_ticks = val;
-}
-
-void GlobalAdvance()
-{
-  Core::System::GetInstance().GetCoreTiming().Advance();
-}
-
-void GlobalIdle()
-{
-  Core::System::GetInstance().GetCoreTiming().Idle();
-}
-
+// Entry points for JIT-generated code.
+void GlobalAdvance() { Core::System::GetInstance().GetCoreTiming().Advance(); }
+void GlobalIdle() { Core::System::GetInstance().GetCoreTiming().Idle(); }
 }  // namespace CoreTiming

@@ -98,6 +98,12 @@ void EjectIfRequested(Core::System& system, Common::Flags<GPIO> out)
   INFO_LOG_FMT(WII_IPC, "Disc eject requested through GPIO");
   system.GetDVDInterface().EjectDisc(Core::CPUThreadGuard{system}, DVD::EjectCause::Software);
 }
+// Saves or loads each field in turn.
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
 }  // namespace
 
 WiiIPC::WiiIPC(Core::System& system) : m_system(system)
@@ -108,16 +114,9 @@ WiiIPC::~WiiIPC() = default;
 
 void WiiIPC::DoState(PointerWrap& p)
 {
-  p.Do(m_ppc_msg);
-  p.Do(m_arm_msg);
-  p.Do(m_ctrl);
-  p.Do(m_ppc_irq_flags);
-  p.Do(m_ppc_irq_masks);
-  p.Do(m_arm_irq_flags);
-  p.Do(m_arm_irq_masks);
-  p.Do(m_gpio_dir);
-  p.Do(m_gpio_out);
-  p.Do(m_resets);
+  DoFields(p, m_ppc_msg, m_arm_msg, m_ctrl);
+  DoFields(p, m_ppc_irq_flags, m_ppc_irq_masks, m_arm_irq_flags, m_arm_irq_masks);
+  DoFields(p, m_gpio_dir, m_gpio_out, m_resets);
 }
 
 void WiiIPC::InitState()

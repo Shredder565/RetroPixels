@@ -112,6 +112,12 @@ u16* Low(u32& reg)
 {
   return MMIO::Utils::LowPart(&reg);
 }
+// Saves or loads each field in turn.
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
 }  // namespace
 
 VideoInterfaceManager::VideoInterfaceManager(Core::System& system) : m_system(system)
@@ -139,21 +145,12 @@ void VideoInterfaceManager::DoState(PointerWrap& p)
   p.Do(m_horizontal_scaling);
   p.DoArray(m_filter_taps_10bit);
   p.DoArray(m_filter_taps_8bit);
-  p.Do(m_unknown_aa_register);
-  p.Do(m_clock);
-  p.Do(m_dtv_status);
-  p.Do(m_fb_width);
-  p.Do(m_border_hblank);
-  p.Do(m_target_refresh_rate);
-  p.Do(m_target_refresh_rate_numerator);
-  p.Do(m_target_refresh_rate_denominator);
-  p.Do(m_ticks_last_line_start);
-  p.Do(m_half_line_count);
-  p.Do(m_half_line_of_next_si_poll);
-  p.Do(m_even_field_first_hl);
-  p.Do(m_odd_field_first_hl);
-  p.Do(m_even_field_last_hl);
-  p.Do(m_odd_field_last_hl);
+  DoFields(p, m_unknown_aa_register, m_clock, m_dtv_status, m_fb_width, m_border_hblank);
+  // Derived timing state.
+  DoFields(p, m_target_refresh_rate, m_target_refresh_rate_numerator,
+           m_target_refresh_rate_denominator, m_ticks_last_line_start, m_half_line_count,
+           m_half_line_of_next_si_poll, m_even_field_first_hl, m_odd_field_first_hl,
+           m_even_field_last_hl, m_odd_field_last_hl);
 }
 
 // The boot ROM's video setup (480i NTSC or 576i PAL timings). Fields not
@@ -193,7 +190,7 @@ void VideoInterfaceManager::Preset(bool _bNTSC)
 
   // Pre-retrace at line 263, post-retrace at line 1; both enabled.
   const u32 interrupt_positions[2][2] = {{430, 263}, {1, 1}};
-  for (int i = 0; i < 2; i++)
+  for (size_t i = 0; i < 2; i++)
   {
     u32& reg = m_interrupt_register[i];
     HCT::Set(reg, interrupt_positions[i][0]);
@@ -222,9 +219,9 @@ void VideoInterfaceManager::Preset(bool _bNTSC)
   m_fb_width = 0;
   m_border_hblank = 0;
 
-  m_ticks_last_line_start = 0;
   m_half_line_count = 0;
   m_half_line_of_next_si_poll = NUM_HALF_LINES_FOR_SI_POLL;
+  m_ticks_last_line_start = 0;
 
   UpdateParameters();
 }
@@ -232,15 +229,17 @@ void VideoInterfaceManager::Preset(bool _bNTSC)
 void VideoInterfaceManager::Init()
 {
   Preset(true);
-
+  // Registered first: RefreshConfig() may itself change the configuration.
   m_config_changed_callback_id = Config::AddConfigChangedCallback([this] { RefreshConfig(); });
   RefreshConfig();
 }
 
 void VideoInterfaceManager::RefreshConfig()
 {
-  m_config_vi_oc_factor =
-      Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE) ? Config::Get(Config::MAIN_VI_OVERCLOCK) : 1.0f;
+  float factor = 1.0f;
+  if (Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE))
+    factor = Config::Get(Config::MAIN_VI_OVERCLOCK);
+  m_config_vi_oc_factor = factor;
   // Hardcore achievements do not allow slowing the VBI down.
   const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
   if (hardcore && m_config_vi_oc_factor < 1.0f)
@@ -476,17 +475,19 @@ u32 VideoInterfaceManager::GetTicksPerOddField() const
 // match the line count.
 float VideoInterfaceManager::GetAspectRatio() const
 {
-  const int active_lines = ACV::Get(m_vertical_timing);
+  const int active_lines = static_cast<int>(ACV::Get(m_vertical_timing));
   const int active_samples = static_cast<int>(HLW::Get(m_h_timing_0) + HBS640::Get(m_h_timing_1) -
                                               HBE640::Get(m_h_timing_1));
 
   // Everything in seconds.
   const u32 ticks_per_half_line = GetNominalTicksPerHalfLine();
-  const float tick = 1.0f / m_system.GetSystemTimers().GetTicksPerSecond();
-  const float field_time = tick * ticks_per_half_line * GetHalfLinesPerEvenField();
-  const float line_time = tick * ticks_per_half_line * 2;
-  const float active_height_time = active_lines * line_time;
-  const float active_width_time = tick * GetTicksPerSample() * active_samples;
+  const float tick = 1.0f / static_cast<float>(m_system.GetSystemTimers().GetTicksPerSecond());
+  const float field_time = tick * static_cast<float>(ticks_per_half_line) *
+                           static_cast<float>(GetHalfLinesPerEvenField());
+  const float line_time = tick * static_cast<float>(ticks_per_half_line) * 2.0f;
+  const float active_height_time = static_cast<float>(active_lines) * line_time;
+  const float active_width_time =
+      tick * static_cast<float>(GetTicksPerSample()) * static_cast<float>(active_samples);
 
   float vertical_ratio = active_height_time / field_time;
   float horizontal_ratio = active_width_time / line_time;
@@ -547,10 +548,7 @@ void VideoInterfaceManager::UpdateRefreshRate()
                           m_target_refresh_rate_denominator;
 }
 
-double VideoInterfaceManager::GetTargetRefreshRate() const
-{
-  return m_target_refresh_rate;
-}
+double VideoInterfaceManager::GetTargetRefreshRate() const { return m_target_refresh_rate; }
 
 u32 VideoInterfaceManager::GetTargetRefreshRateNumerator() const
 {
@@ -575,13 +573,10 @@ u32 VideoInterfaceManager::GetNominalTicksPerHalfLine() const
 u32 VideoInterfaceManager::GetTicksPerHalfLine() const
 {
   // Float division, truncated.
-  return static_cast<u32>(GetNominalTicksPerHalfLine() / m_config_vi_oc_factor);
+  return static_cast<u32>(static_cast<float>(GetNominalTicksPerHalfLine()) / m_config_vi_oc_factor);
 }
 
-u32 VideoInterfaceManager::GetTicksPerField() const
-{
-  return GetTicksPerEvenField();
-}
+u32 VideoInterfaceManager::GetTicksPerField() const { return GetTicksPerEvenField(); }
 
 // --- Scan-out -------------------------------------------------------------------------
 
@@ -652,7 +647,7 @@ void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
 
   // Pace on vblank unless immediate XFB is on (it trades pacing for latency).
   if (!g_ActiveConfig.bImmediateXFB)
-    m_system.GetCoreTiming().Throttle(ticks);
+    m_system.GetCoreTiming().Throttle(static_cast<s64>(ticks));
 
   m_system.GetPerfMetrics().CountVBlank();
   m_system.GetVideoEvents().vi_end_field_event.Trigger();
@@ -686,7 +681,7 @@ void VideoInterfaceManager::Update(u64 ticks)
   if (m_half_line_count == m_half_line_of_next_si_poll)
   {
     // Throttle first, so input is read as late as possible.
-    timing.Throttle(ticks);
+    timing.Throttle(static_cast<s64>(ticks));
     Core::UpdateInputGate(!Config::Get(Config::MAIN_INPUT_BACKGROUND_INPUT),
                           Config::Get(Config::MAIN_LOCK_CURSOR));
     auto& si = m_system.GetSerialInterface();

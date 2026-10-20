@@ -96,7 +96,7 @@ void SystemTimersManager::VICallback(Core::System& system, u64, s64 cycles_late)
 {
   auto& timing = system.GetCoreTiming();
   auto& vi = system.GetVideoInterface();
-  vi.Update(timing.GetTicks() - cycles_late);
+  vi.Update(timing.GetTicks() - static_cast<u64>(cycles_late));
   timing.ScheduleEvent(s64{vi.GetTicksPerHalfLine()} - cycles_late,
                        system.GetSystemTimers().m_event_type_vi);
 }
@@ -211,7 +211,8 @@ void SystemTimersManager::Init()
   if (Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE))
   {
     m_localtime_rtc_offset =
-        Common::Timer::GetLocalTimeSinceJan1970() - Config::Get(Config::MAIN_CUSTOM_RTC_VALUE);
+        static_cast<s64>(Common::Timer::GetLocalTimeSinceJan1970() -
+                         Config::Get(Config::MAIN_CUSTOM_RTC_VALUE));
   }
 
   auto& timing = m_system.GetCoreTiming();
