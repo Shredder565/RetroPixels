@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -31,6 +30,7 @@ enum class TaTaConGroup;
 enum class ShinkansenGroup;
 }  // namespace WiimoteEmu
 
+// Wii Remote slots. The fifth slot is reserved for the Balance Board.
 enum
 {
   WIIMOTE_CHAN_0 = 0,
@@ -44,6 +44,7 @@ enum
 
 #define WIIMOTE_INI_NAME "WiimoteNew"
 
+// What feeds a slot (the Wii Remote source setting).
 enum class WiimoteSource
 {
   None = 0,
@@ -55,10 +56,11 @@ namespace WiimoteCommon
 {
 class HIDWiimote;
 
-// Used to reconnect WiimoteDevice instance to HID source.
-// Must be run from CPU thread.
+// Re-attaches the emulated Bluetooth device of a slot to the slot's current source.
+// Call on the CPU thread.
 void UpdateSource(unsigned int index);
 
+// The HID device feeding a slot, or nullptr when the slot is empty.
 HIDWiimote* GetHIDWiimoteSource(unsigned int index);
 
 }  // namespace WiimoteCommon
@@ -71,11 +73,11 @@ enum class InitializeMode
   DO_NOT_WAIT_FOR_WIIMOTES,
 };
 
-// The Real Wii Remote sends report every ~5ms (200 Hz).
+// Real remotes report at about 200 Hz (every 5 ms).
 constexpr int UPDATE_FREQ = 200;
 
-void Shutdown();
 void Initialize(InitializeMode init_mode);
+void Shutdown();
 void ResetAllWiimotes();
 void LoadConfig();
 void GenerateDynamicInputTextures();
@@ -83,7 +85,9 @@ void Resume();
 void Pause();
 
 void DoState(PointerWrap& p);
+
 InputConfig* GetConfig();
+
 ControllerEmu::ControlGroup* GetWiimoteGroup(int number, WiimoteEmu::WiimoteGroup group);
 ControllerEmu::ControlGroup* GetNunchukGroup(int number, WiimoteEmu::NunchukGroup group);
 ControllerEmu::ControlGroup* GetClassicGroup(int number, WiimoteEmu::ClassicGroup group);

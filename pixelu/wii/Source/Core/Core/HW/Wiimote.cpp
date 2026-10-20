@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/Wiimote.h"
 
@@ -24,41 +23,44 @@
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/InputConfig.h"
 
-// Limit the amount of wiimote connect requests, when a button is pressed in disconnected state
-static std::array<u8, MAX_BBMOTES> s_last_connect_request_counter;
-
 namespace
 {
-static std::array<std::atomic<WiimoteSource>, MAX_BBMOTES> s_wiimote_sources;
-static std::optional<Config::ConfigChangedCallbackID> s_config_callback_id = std::nullopt;
+// Current source of every slot, as last read from the config.
+std::array<std::atomic<WiimoteSource>, MAX_BBMOTES> s_slot_sources;
 
-WiimoteSource GetSource(unsigned int index)
+std::optional<Config::ConfigChangedCallbackID> s_source_watch;
+
+InputConfig s_emulated_config(WIIMOTE_INI_NAME, _trans("Wii Remote"), "Wiimote", "Wiimote");
+
+WiimoteEmu::Wiimote* EmulatedRemote(int slot)
 {
-  return s_wiimote_sources[index];
+  return static_cast<WiimoteEmu::Wiimote*>(s_emulated_config.GetController(slot));
 }
 
-void OnSourceChanged(unsigned int index, WiimoteSource source)
+WiimoteSource CurrentSource(unsigned int slot)
 {
-  const WiimoteSource previous_source = s_wiimote_sources[index].exchange(source);
+  return s_slot_sources[slot];
+}
 
-  if (previous_source == source)
-  {
-    // No change. Do nothing.
+void ApplySource(unsigned int slot, WiimoteSource wanted)
+{
+  if (s_slot_sources[slot].exchange(wanted) == wanted)
     return;
-  }
 
-  WiimoteReal::HandleWiimoteSourceChange(index);
+  WiimoteReal::HandleWiimoteSourceChange(slot);
 
   const Core::CPUThreadGuard guard(Core::System::GetInstance());
-  WiimoteCommon::UpdateSource(index);
+  WiimoteCommon::UpdateSource(slot);
 }
 
-void RefreshConfig()
+void ReadSourcesFromConfig()
 {
-  for (int i = 0; i < MAX_BBMOTES; ++i)
-    OnSourceChanged(i, Config::Get(Config::GetInfoForWiimoteSource(i)));
+  for (int slot = 0; slot < MAX_BBMOTES; ++slot)
+  {
+    ApplySource(static_cast<unsigned int>(slot),
+                Config::Get(Config::GetInfoForWiimoteSource(slot)));
+  }
 }
-
 }  // namespace
 
 namespace WiimoteCommon
@@ -66,7 +68,7 @@ namespace WiimoteCommon
 void UpdateSource(unsigned int index)
 {
   const auto bluetooth = WiiUtils::GetBluetoothEmuDevice();
-  if (bluetooth == nullptr)
+  if (!bluetooth)
     return;
 
   bluetooth->AccessWiimoteByIndex(index)->SetSource(GetHIDWiimoteSource(index));
@@ -74,145 +76,128 @@ void UpdateSource(unsigned int index)
 
 HIDWiimote* GetHIDWiimoteSource(unsigned int index)
 {
-  HIDWiimote* hid_source = nullptr;
-
-  switch (GetSource(index))
+  switch (CurrentSource(index))
   {
   case WiimoteSource::Emulated:
-    hid_source = static_cast<WiimoteEmu::Wiimote*>(::Wiimote::GetConfig()->GetController(index));
-    break;
-
+    return EmulatedRemote(static_cast<int>(index));
   case WiimoteSource::Real:
-    hid_source = WiimoteReal::g_wiimotes[index].get();
-    break;
-
+    return WiimoteReal::g_wiimotes[index].get();
   default:
-    break;
+    return nullptr;
   }
-
-  return hid_source;
 }
-
 }  // namespace WiimoteCommon
 
 namespace Wiimote
 {
-static InputConfig s_config(WIIMOTE_INI_NAME, _trans("Wii Remote"), "Wiimote", "Wiimote");
-
 InputConfig* GetConfig()
 {
-  return &s_config;
+  return &s_emulated_config;
 }
 
 ControllerEmu::ControlGroup* GetWiimoteGroup(int number, WiimoteEmu::WiimoteGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetWiimoteGroup(group);
+  return EmulatedRemote(number)->GetWiimoteGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetNunchukGroup(int number, WiimoteEmu::NunchukGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetNunchukGroup(group);
+  return EmulatedRemote(number)->GetNunchukGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetClassicGroup(int number, WiimoteEmu::ClassicGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetClassicGroup(group);
+  return EmulatedRemote(number)->GetClassicGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetGuitarGroup(int number, WiimoteEmu::GuitarGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetGuitarGroup(group);
+  return EmulatedRemote(number)->GetGuitarGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetDrumsGroup(int number, WiimoteEmu::DrumsGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetDrumsGroup(group);
+  return EmulatedRemote(number)->GetDrumsGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetTurntableGroup(int number, WiimoteEmu::TurntableGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))
-      ->GetTurntableGroup(group);
+  return EmulatedRemote(number)->GetTurntableGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetUDrawTabletGroup(int number, WiimoteEmu::UDrawTabletGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))
-      ->GetUDrawTabletGroup(group);
+  return EmulatedRemote(number)->GetUDrawTabletGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetDrawsomeTabletGroup(int number,
                                                     WiimoteEmu::DrawsomeTabletGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))
-      ->GetDrawsomeTabletGroup(group);
+  return EmulatedRemote(number)->GetDrawsomeTabletGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetTaTaConGroup(int number, WiimoteEmu::TaTaConGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))->GetTaTaConGroup(group);
+  return EmulatedRemote(number)->GetTaTaConGroup(group);
 }
 
 ControllerEmu::ControlGroup* GetShinkansenGroup(int number, WiimoteEmu::ShinkansenGroup group)
 {
-  return static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(number))
-      ->GetShinkansenGroup(group);
-}
-
-void Shutdown()
-{
-  s_config.UnregisterHotplugCallback();
-
-  s_config.ClearControllers();
-
-  WiimoteReal::Stop();
-
-  if (s_config_callback_id)
-  {
-    Config::RemoveConfigChangedCallback(*s_config_callback_id);
-    s_config_callback_id = std::nullopt;
-  }
+  return EmulatedRemote(number)->GetShinkansenGroup(group);
 }
 
 void Initialize(InitializeMode init_mode)
 {
-  if (s_config.ControllersNeedToBeCreated())
+  if (s_emulated_config.ControllersNeedToBeCreated())
   {
-    for (unsigned int i = WIIMOTE_CHAN_0; i < MAX_BBMOTES; ++i)
-      s_config.CreateController<WiimoteEmu::Wiimote>(i);
+    for (unsigned int slot = WIIMOTE_CHAN_0; slot < MAX_BBMOTES; ++slot)
+      s_emulated_config.CreateController<WiimoteEmu::Wiimote>(slot);
   }
 
-  s_config.RegisterHotplugCallback();
+  s_emulated_config.RegisterHotplugCallback();
 
   LoadConfig();
 
-  if (!s_config_callback_id)
-    s_config_callback_id = Config::AddConfigChangedCallback(RefreshConfig);
-  RefreshConfig();
+  if (!s_source_watch.has_value())
+    s_source_watch = Config::AddConfigChangedCallback(ReadSourcesFromConfig);
+  ReadSourcesFromConfig();
 
   WiimoteReal::Initialize(init_mode);
 
-  // Reload Wiimotes with our settings
+  // A running movie needs the remotes set up the way it recorded them.
   auto& movie = Core::System::GetInstance().GetMovie();
   if (movie.IsMovieActive())
     movie.ChangeWiiPads();
 }
 
+void Shutdown()
+{
+  s_emulated_config.UnregisterHotplugCallback();
+  s_emulated_config.ClearControllers();
+
+  WiimoteReal::Stop();
+
+  if (s_source_watch.has_value())
+  {
+    Config::RemoveConfigChangedCallback(*s_source_watch);
+    s_source_watch.reset();
+  }
+}
+
 void ResetAllWiimotes()
 {
-  for (int i = WIIMOTE_CHAN_0; i < MAX_BBMOTES; ++i)
-    static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(i))->Reset();
+  for (int slot = WIIMOTE_CHAN_0; slot < MAX_BBMOTES; ++slot)
+    EmulatedRemote(slot)->Reset();
 }
 
 void LoadConfig()
 {
-  s_config.LoadConfig();
-  s_last_connect_request_counter.fill(0);
+  s_emulated_config.LoadConfig();
 }
 
 void GenerateDynamicInputTextures()
 {
-  s_config.GenerateControllerTextures();
+  s_emulated_config.GenerateControllerTextures();
 }
 
 void Resume()
@@ -227,25 +212,22 @@ void Pause()
 
 void DoState(PointerWrap& p)
 {
-  for (int i = 0; i < MAX_BBMOTES; ++i)
+  for (int slot = 0; slot < MAX_BBMOTES; ++slot)
   {
-    const WiimoteSource source = GetSource(i);
-    auto state_wiimote_source = u8(source);
-    p.Do(state_wiimote_source);
+    const auto index = static_cast<unsigned int>(slot);
+    const WiimoteSource current = CurrentSource(index);
 
-    if (WiimoteSource(state_wiimote_source) == WiimoteSource::Emulated)
-    {
-      // Sync complete state of emulated wiimotes.
-      static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(i))->DoState(p);
-    }
+    // One byte with the slot's source, then the full state if the slot is emulated.
+    u8 saved = static_cast<u8>(current);
+    p.Do(saved);
+    const auto saved_source = static_cast<WiimoteSource>(saved);
 
-    if (p.IsReadMode())
-    {
-      // If using a real wiimote or the save-state source does not match the current source,
-      // then force a reconnection on load.
-      if (source == WiimoteSource::Real || source != WiimoteSource(state_wiimote_source))
-        WiimoteCommon::UpdateSource(i);
-    }
+    if (saved_source == WiimoteSource::Emulated)
+      EmulatedRemote(slot)->DoState(p);
+
+    // After loading, reconnect real remotes and every slot whose source differs from the state.
+    if (p.IsReadMode() && (current == WiimoteSource::Real || current != saved_source))
+      WiimoteCommon::UpdateSource(index);
   }
 }
 }  // namespace Wiimote
