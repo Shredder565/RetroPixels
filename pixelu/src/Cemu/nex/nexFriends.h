@@ -14,17 +14,8 @@ public:
 	nexGameKey(uint64 titleId, uint16 ukn) : titleId(titleId), ukn(ukn) {}
 	nexGameKey(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		pb->writeU64(titleId);
-		pb->writeU16(ukn);
-	}
-
-	void readData(nexPacketBuffer* pb) override
-	{
-		titleId = pb->readU64();
-		ukn = pb->readU16();
-	}
+	void writeData(nexPacketBuffer* pb) const override { pb->writeFields(titleId, ukn); }
+	void readData(nexPacketBuffer* pb) override { pb->readFields(titleId, ukn); }
 
 public:
 	uint64 titleId{};
@@ -45,23 +36,24 @@ public:
 
 	nexMiiV2(nexPacketBuffer* pb) { readData(pb); }
 
+	// name, two zero bytes, the FFL data blob and a zero u64
 	void writeData(nexPacketBuffer* pb) const override
 	{
 		pb->writeString(miiNickname);
-		pb->writeU8(0);
-		pb->writeU8(0);
+		pb->writeFields(uint8(0), uint8(0));
 		pb->writeBuffer(miiData, FFL_SIZE);
-		pb->writeU64(0);
+		pb->writeFields(uint64(0));
 	}
 
 	void readData(nexPacketBuffer* pb) override
 	{
+		uint8 unknownBytes[2];
+		uint64 unknownTail;
 		pb->readString(miiNickname, sizeof(miiNickname));
-		pb->readU8();
-		pb->readU8();
+		pb->readFields(unknownBytes[0], unknownBytes[1]);
 		memset(miiData, 0, sizeof(miiData));
 		pb->readBuffer(miiData, FFL_SIZE);
-		pb->readU64();
+		pb->readFields(unknownTail);
 	}
 
 public:
@@ -76,47 +68,25 @@ public:
 	nexPresenceV2(int) {} // empty presence
 	nexPresenceV2(nexPacketBuffer* pb) { readData(pb); }
 
-	const char* getMetaName() override
-	{
-		return "NintendoPresenceV2";
-	}
+	const char* getMetaName() override { return "NintendoPresenceV2"; }
 
+	// our own presence: kind 1, an empty message and fixed trailer bytes 3, 1, 3
 	void writeData(nexPacketBuffer* pb) const override
 	{
-		pb->writeU32(1);
-		pb->writeU8(isOnline ? 1 : 0);
-		gameKey.writeData(pb);
-		pb->writeU8(1);
+		pb->writeFields(uint32(1), uint8(isOnline ? 1 : 0), gameKey, uint8(1));
 		pb->writeString("");
-		pb->writeU32(joinFlagMask);
-		pb->writeU8(joinAvailability);
-		pb->writeU32(gameId);
-		pb->writeU32(gameMode);
-		pb->writeU32(hostPid);
-		pb->writeU32(groupId);
+		pb->writeFields(joinFlagMask, joinAvailability, gameId, gameMode, hostPid, groupId);
 		pb->writeBuffer(appSpecificData, sizeof(appSpecificData));
-		pb->writeU8(3);
-		pb->writeU8(1);
-		pb->writeU8(3);
+		pb->writeFields(uint8(3), uint8(1), uint8(3));
 	}
 
 	void readData(nexPacketBuffer* pb) override
 	{
-		ukn0 = pb->readU32();
-		isOnline = pb->readU8();
-		gameKey.readData(pb);
-		ukn3 = pb->readU8();
+		pb->readFields(ukn0, isOnline, gameKey, ukn3);
 		msg = nexReadBoundedString(pb, 1024);
-		joinFlagMask = pb->readU32();
-		joinAvailability = pb->readU8();
-		gameId = pb->readU32();
-		gameMode = pb->readU32();
-		hostPid = pb->readU32();
-		groupId = pb->readU32();
+		pb->readFields(joinFlagMask, joinAvailability, gameId, gameMode, hostPid, groupId);
 		pb->readBuffer(appSpecificData, sizeof(appSpecificData));
-		ukn11 = pb->readU8();
-		ukn12 = pb->readU8();
-		ukn13 = pb->readU8();
+		pb->readFields(ukn11, ukn12, ukn13);
 	}
 
 public:
@@ -153,18 +123,16 @@ public:
 
 	void writeData(nexPacketBuffer* pb) const override
 	{
-		pb->writeU32(principalId);
+		pb->writeFields(principalId);
 		pb->writeString(nnid);
-		mii.writeData(pb);
-		pb->writeU8(2);
+		pb->writeFields(mii, uint8(2)); // region byte, always 2 when we send it
 	}
 
 	void readData(nexPacketBuffer* pb) override
 	{
-		principalId = pb->readU32();
+		pb->readFields(principalId);
 		pb->readString(nnid, sizeof(nnid));
-		mii.readData(pb);
-		regionGuessed = pb->readU8();
+		pb->readFields(mii, regionGuessed);
 	}
 
 public:
@@ -184,19 +152,8 @@ public:
 
 	nexNNAInfo(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		principalInfo.writeData(pb);
-		pb->writeU8(countryCode);
-		pb->writeU8(countrySubCode);
-	}
-
-	void readData(nexPacketBuffer* pb) override
-	{
-		principalInfo.readData(pb);
-		countryCode = pb->readU8();
-		countrySubCode = pb->readU8();
-	}
+	void writeData(nexPacketBuffer* pb) const override { pb->writeFields(principalInfo, countryCode, countrySubCode); }
+	void readData(nexPacketBuffer* pb) override { pb->readFields(principalInfo, countryCode, countrySubCode); }
 
 public:
 	uint8 countryCode{};
@@ -214,19 +171,8 @@ public:
 
 	nexPrincipalPreference(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		pb->writeU8(showOnline);
-		pb->writeU8(showGame);
-		pb->writeU8(blockFriendRequests);
-	}
-
-	void readData(nexPacketBuffer* pb) override
-	{
-		showOnline = pb->readU8();
-		showGame = pb->readU8();
-		blockFriendRequests = pb->readU8();
-	}
+	void writeData(nexPacketBuffer* pb) const override { pb->writeFields(showOnline, showGame, blockFriendRequests); }
+	void readData(nexPacketBuffer* pb) override { pb->readFields(showOnline, showGame, blockFriendRequests); }
 
 public:
 	uint8 showOnline{};
@@ -243,16 +189,16 @@ public:
 
 	void writeData(nexPacketBuffer* pb) const override
 	{
-		pb->writeU8(ukn0);
+		pb->writeFields(ukn0);
 		pb->writeString(commentString.c_str());
-		pb->writeU64(ukn1);
+		pb->writeFields(ukn1);
 	}
 
 	void readData(nexPacketBuffer* pb) override
 	{
-		ukn0 = pb->readU8();
+		pb->readFields(ukn0);
 		commentString = nexReadBoundedString(pb, 1024);
-		ukn1 = pb->readU64();
+		pb->readFields(ukn1);
 	}
 
 public:
@@ -268,22 +214,15 @@ public:
 	nexFriendRequestMessage(uint8) { cemu_assert_unimplemented(); }
 	nexFriendRequestMessage(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
 
 	void readData(nexPacketBuffer* pb) override
 	{
-		messageId = pb->readU64();
-		isMarkedAsReceived = pb->readU8();
-		ukn2 = pb->readU8();
+		pb->readFields(messageId, isMarkedAsReceived, ukn2);
 		commentStr = nexReadBoundedString(pb, 1024);
-		ukn4 = pb->readU8();
+		pb->readFields(ukn4);
 		ukn5Str = nexReadBoundedString(pb, 1024);
-		gameKey.readData(pb);
-		ukn7 = pb->readU64();
-		expireTimestamp = pb->readU64();
+		pb->readFields(gameKey, ukn7, expireTimestamp);
 	}
 
 public:
@@ -305,22 +244,9 @@ public:
 	nexFriendRequest(uint64, uint16) { cemu_assert_unimplemented(); }
 	nexFriendRequest(nexPacketBuffer* pb) { readData(pb); }
 
-	const char* getMetaName() override
-	{
-		return "FriendRequest";
-	}
-
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
-
-	void readData(nexPacketBuffer* pb) override
-	{
-		principalInfo.readData(pb);
-		message.readData(pb);
-		ukn = pb->readU64();
-	}
+	const char* getMetaName() override { return "FriendRequest"; }
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
+	void readData(nexPacketBuffer* pb) override { pb->readFields(principalInfo, message, ukn); }
 
 public:
 	nexPrincipalBasicInfo principalInfo;
@@ -334,24 +260,11 @@ public:
 	nexFriend() = default;
 	nexFriend(nexPacketBuffer* pb) { readData(pb); }
 
-	const char* getMetaName() override
-	{
-		return "FriendInfo";
-	}
-
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
-
+	const char* getMetaName() override { return "FriendInfo"; }
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
 	void readData(nexPacketBuffer* pb) override
 	{
-		nnaInfo.readData(pb);
-		presence.readData(pb);
-		comment.readData(pb);
-		friendsSinceTimestamp = pb->readU64();
-		lastOnlineTimestamp = pb->readU64();
-		ukn6 = pb->readU64();
+		pb->readFields(nnaInfo, presence, comment, friendsSinceTimestamp, lastOnlineTimestamp, ukn6);
 	}
 
 public:
@@ -369,17 +282,8 @@ public:
 	nexBlacklisted() = default;
 	nexBlacklisted(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
-
-	void readData(nexPacketBuffer* pb) override
-	{
-		basicInfo.readData(pb);
-		gameKey.readData(pb);
-		ukn = pb->readU64();
-	}
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
+	void readData(nexPacketBuffer* pb) override { pb->readFields(basicInfo, gameKey, ukn); }
 
 public:
 	nexPrincipalBasicInfo basicInfo;
@@ -393,17 +297,10 @@ public:
 	nexPersistentNotification() = default;
 	nexPersistentNotification(nexPacketBuffer* pb) { readData(pb); }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
-
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
 	void readData(nexPacketBuffer* pb) override
 	{
-		messageId = pb->readU64();
-		pid1 = pb->readU32();
-		pid2 = pb->readU32();
-		type = pb->readU32();
+		pb->readFields(messageId, pid1, pid2, type);
 		pb->readStdString(msg);
 	}
 

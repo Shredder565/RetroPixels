@@ -2,6 +2,7 @@
 #pragma once
 #include <string>
 #include <cstring>
+#include <type_traits>
 
 // Serialisation primitives of the NEX RPC protocol. Everything on the wire is
 // little endian; strings carry a u16 length that counts the terminating NUL
@@ -176,6 +177,20 @@ public:
 		return !m_readFailed;
 	}
 
+	// Field by field, in argument order: integers at their own width (bool as
+	// one byte), nex structures through their readData/writeData.
+	template<typename... TFields>
+	void readFields(TFields&... fields)
+	{
+		(ReadField(fields), ...);
+	}
+
+	template<typename... TFields>
+	void writeFields(const TFields&... fields)
+	{
+		(WriteField(fields), ...);
+	}
+
 	bool hasReadOutOfBounds() { return m_readFailed; }
 	uint8* getDataPtr() { return m_data; }
 	sint32 getWriteIndex() { return m_pos; }
@@ -209,6 +224,28 @@ private:
 		memcpy(&v, m_data + m_pos, sizeof(T));
 		m_pos += (sint32)sizeof(T);
 		return v;
+	}
+
+	template<typename T>
+	void ReadField(T& field)
+	{
+		if constexpr (std::is_base_of_v<nexType, T>)
+			field.readData(this);
+		else if constexpr (std::is_same_v<T, bool>)
+			field = Get<uint8>() != 0;
+		else
+			field = Get<T>();
+	}
+
+	template<typename T>
+	void WriteField(const T& field)
+	{
+		if constexpr (std::is_base_of_v<nexType, T>)
+			field.writeData(this);
+		else if constexpr (std::is_same_v<T, bool>)
+			Put<uint8>(field ? 1 : 0);
+		else
+			Put<T>(field);
 	}
 
 	// a length field that did not fit is still filled as far as the buffer goes
@@ -259,26 +296,15 @@ class nexNotificationEventGeneral : public nexType
 public:
 	nexNotificationEventGeneral() = default;
 
-	nexNotificationEventGeneral(nexPacketBuffer* pb)
-	{
-		readData(pb);
-	}
+	nexNotificationEventGeneral(nexPacketBuffer* pb) { readData(pb); }
 
-	const char* getMetaName() override
-	{
-		return "NintendoNotificationEventGeneral";
-	}
+	const char* getMetaName() override { return "NintendoNotificationEventGeneral"; }
 
-	void writeData(nexPacketBuffer* pb) const override
-	{
-		cemu_assert_unimplemented();
-	}
+	void writeData(nexPacketBuffer* pb) const override { cemu_assert_unimplemented(); } // only ever received
 
 	void readData(nexPacketBuffer* pb) override
 	{
-		param1 = pb->readU32();
-		param2 = pb->readU64();
-		param3 = pb->readU64();
+		pb->readFields(param1, param2, param3);
 		pb->readStdString(paramStr);
 	}
 
