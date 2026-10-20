@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "input/api/InputAPI.h"
@@ -9,12 +10,15 @@
 #include "wxgui/helpers/wxCustomData.h"
 #include "input/api/Controller.h"
 
+class wxButton;
 class wxComboBox;
 class wxChoice;
 class wxTextCtrl;
 
 using wxAPIType = wxCustomData<InputAPI::Type>;
 
+// Picks an input API and one of its controllers to add to a profile.
+// Controller lists are fetched on a worker thread when the list is opened.
 class InputAPIAddWindow : public wxDialog
 {
 public:
@@ -25,38 +29,37 @@ public:
 	InputAPI::Type get_type() const { return m_type.value(); }
 	std::shared_ptr<ControllerBase> get_controller() const { return m_controller; }
 
+	// DSU client needs a host and port
 	bool has_custom_settings() const;
 	std::unique_ptr<ControllerProviderSettings> get_settings() const;
 
 private:
-	void on_add_button(wxCommandEvent& event);
-	void on_close_button(wxCommandEvent& event);
-	
+	struct SearchTicket
+	{
+		std::mutex mutex;
+		bool cancelled = false;
+	};
 
-	void on_api_selected(wxCommandEvent& event);
+	std::optional<InputAPI::Type> SelectedApi() const;
+	void OnAdd();
+	void OnApiChosen();
+	void StartSearch();
+	void OnControllerChosen();
+	void FillControllers(const std::vector<ControllerPtr>& found);
+	void CancelSearch();
 
-	void on_controller_dropdown(wxCommandEvent& event);
-	void on_controller_selected(wxCommandEvent& event);
-	void on_controllers_refreshed(wxCommandEvent& event);
+	wxChoice* m_apiChoice;
+	wxComboBox* m_controllerChoice;
+	wxButton* m_addButton;
 
-	void discard_thread_result();
-
-	wxChoice* m_input_api;
-	wxComboBox* m_controller_list;
-	wxButton* m_ok_button;
-
-	wxPanel* m_settings_panel;
-	wxTextCtrl* m_ip, * m_port;
+	wxPanel* m_dsuPanel;
+	wxTextCtrl* m_ip;
+	wxTextCtrl* m_port;
 
 	std::optional<InputAPI::Type> m_type;
 	std::shared_ptr<ControllerBase> m_controller;
 
-	std::vector<ControllerPtr> m_controllers;
-	std::atomic_bool m_search_running = false;
-	struct AsyncThreadData
-	{
-		std::atomic_bool discardResult = false;
-		std::mutex mutex;
-	};
-	std::shared_ptr<AsyncThreadData> m_search_thread_data;
+	std::vector<ControllerPtr> m_controllers; // already in the profile
+	std::atomic_bool m_searching = false;
+	std::shared_ptr<SearchTicket> m_search;
 };

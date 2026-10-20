@@ -1,326 +1,262 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/input/InputAPIAddWindow.h"
 
 #include "input/InputManager.h"
+#include "input/ControllerFactory.h"
+#include "input/api/Controller.h"
 #include "wxgui/helpers/wxCustomData.h"
 #include "wxgui/helpers/wxHelpers.h"
-#include "input/api/Controller.h"
 
-#include <wx/sizer.h>
-#include <wx/stattext.h>
-#include <wx/choice.h>
-#include <wx/statline.h>
 #include <wx/button.h>
+#include <wx/choice.h>
 #include <wx/combobox.h>
 #include <wx/msgdlg.h>
+#include <wx/sizer.h>
+#include <wx/statline.h>
+#include <wx/stattext.h>
+#include <wx/textctrl.h>
 #include <wx/wupdlock.h>
 
-#include "input/ControllerFactory.h"
+namespace
+{
+	using ControllerItem = wxCustomData<ControllerPtr>;
 
-wxDEFINE_EVENT(wxControllersRefreshed, wxCommandEvent);
+	bool IsApiNamed(const wxString& shown, InputAPI::Type api)
+	{
+		return shown == wxString::FromUTF8(to_string(api));
+	}
+}
 
-using wxTypeData = wxCustomData<InputAPI::Type>;
-using wxControllerData = wxCustomData<ControllerPtr>;
-
-InputAPIAddWindow::InputAPIAddWindow(wxWindow* parent, const wxPoint& position,
-                                     const std::vector<ControllerPtr>& controllers)
+InputAPIAddWindow::InputAPIAddWindow(wxWindow* parent, const wxPoint& position, const std::vector<ControllerPtr>& controllers)
 	: wxDialog(parent, wxID_ANY, "Add input API", position, wxDefaultSize, wxCAPTION), m_controllers(controllers)
 {
-	this->SetSizeHints(wxDefaultSize, wxDefaultSize);
+	SetSizeHints(wxDefaultSize, wxDefaultSize);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
 
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
-
+	// API / controller pickers
 	{
-		auto* api_row = new wxFlexGridSizer(2);
+		auto* grid = new wxFlexGridSizer(2);
 
-		// API
-		api_row->Add(new wxStaticText(this, wxID_ANY, _("API")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		m_input_api = new wxChoice(this, wxID_ANY);
-		auto& providers = InputManager::instance().get_api_providers();
-		for (const auto& p : providers)
+		grid->Add(new wxStaticText(this, wxID_ANY, _("API")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+		m_apiChoice = new wxChoice(this, wxID_ANY);
+		// one entry per API that has a provider
+		for (const auto& providers : InputManager::instance().get_api_providers())
 		{
-			if (p.empty())
+			if (providers.empty())
 				continue;
-
-			const auto provider = *p.begin();
-			m_input_api->Append(wxString::FromUTF8(provider->api_name()), new wxTypeData(provider->api()));
+			const auto& provider = *providers.begin();
+			m_apiChoice->Append(wxString::FromUTF8(provider->api_name()), new wxAPIType(provider->api()));
 		}
+		m_apiChoice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { OnApiChosen(); });
+		grid->Add(m_apiChoice, 1, wxALL | wxEXPAND, 5);
 
-		m_input_api->Bind(wxEVT_CHOICE, &InputAPIAddWindow::on_api_selected, this);
-		api_row->Add(m_input_api, 1, wxALL | wxEXPAND, 5);
+		grid->Add(new wxStaticText(this, wxID_ANY, _("Controller")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+		m_controllerChoice = new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
+		m_controllerChoice->Bind(wxEVT_COMBOBOX_DROPDOWN, [this](wxCommandEvent&) { StartSearch(); });
+		m_controllerChoice->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { OnControllerChosen(); });
+		m_controllerChoice->SetMinSize(wxSize(240, -1));
+		m_controllerChoice->Disable();
+		grid->Add(m_controllerChoice, 1, wxALL | wxEXPAND, 5);
 
-		// Controller
-		api_row->Add(new wxStaticText(this, wxID_ANY, _("Controller")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		m_controller_list = new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr,
-		                                   wxCB_READONLY);
-		m_controller_list->Bind(wxEVT_COMBOBOX_DROPDOWN, &InputAPIAddWindow::on_controller_dropdown, this);
-		m_controller_list->Bind(wxEVT_COMBOBOX, &InputAPIAddWindow::on_controller_selected, this);
-		m_controller_list->SetMinSize(wxSize(240, -1));
-		m_controller_list->Disable();
-		api_row->Add(m_controller_list, 1, wxALL | wxEXPAND, 5);
-
-		sizer->Add(api_row, 0, wxEXPAND, 5);
+		layout->Add(grid, 0, wxEXPAND, 5);
 	}
 
-	sizer->Add(new wxStaticLine(this), 0, wxEXPAND);
+	layout->Add(new wxStaticLine(this), 0, wxEXPAND);
 
 	{
-		auto* end_row = new wxBoxSizer(wxHORIZONTAL);
+		auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+		m_addButton = new wxButton(this, wxID_ANY, _("Add"));
+		m_addButton->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnAdd(); });
+		m_addButton->Disable();
+		buttons->Add(m_addButton, 0, wxALL, 5);
 
-		m_ok_button = new wxButton(this, wxID_ANY, _("Add"));
-		m_ok_button->Bind(wxEVT_BUTTON, &InputAPIAddWindow::on_add_button, this);
-		m_ok_button->Disable();
-		end_row->Add(m_ok_button, 0, wxALL, 5);
-
-		auto* cancel_button = new wxButton(this, wxID_ANY, _("Cancel"));
-		cancel_button->Bind(wxEVT_BUTTON, &InputAPIAddWindow::on_close_button, this);
-		end_row->Add(cancel_button, 0, wxALL, 5);
-
-		sizer->Add(end_row, 0, wxEXPAND, 5);
+		auto* cancel = new wxButton(this, wxID_ANY, _("Cancel"));
+		cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CANCEL); });
+		buttons->Add(cancel, 0, wxALL, 5);
+		layout->Add(buttons, 0, wxEXPAND, 5);
 	}
 
+	// DSU host/port, only shown while DSU client is picked
 	{
-		// optional settings
-		m_settings_panel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-		auto* panel_sizer = new wxBoxSizer(wxVERTICAL);
-		panel_sizer->Add(new wxStaticLine(m_settings_panel), 0, wxEXPAND, 0);
+		m_dsuPanel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+		auto* panelLayout = new wxBoxSizer(wxVERTICAL);
+		panelLayout->Add(new wxStaticLine(m_dsuPanel), 0, wxEXPAND, 0);
 
-		{
-			auto* row = new wxBoxSizer(wxHORIZONTAL);
-			// we only have dsu settings atm, so add elements now
-			row->Add(new wxStaticText(m_settings_panel, wxID_ANY, _("IP")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-			m_ip = new wxTextCtrl(m_settings_panel, wxID_ANY, "127.0.0.1");
-			row->Add(m_ip, 0, wxALL, 5);
+		auto* fields = new wxBoxSizer(wxHORIZONTAL);
+		fields->Add(new wxStaticText(m_dsuPanel, wxID_ANY, _("IP")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+		m_ip = new wxTextCtrl(m_dsuPanel, wxID_ANY, "127.0.0.1");
+		fields->Add(m_ip, 0, wxALL, 5);
+		fields->Add(new wxStaticText(m_dsuPanel, wxID_ANY, _("Port")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+		m_port = new wxTextCtrl(m_dsuPanel, wxID_ANY, "26760");
+		fields->Add(m_port, 0, wxALL, 5);
+		panelLayout->Add(fields, 0, wxEXPAND);
 
-			row->Add(new wxStaticText(m_settings_panel, wxID_ANY, _("Port")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-			m_port = new wxTextCtrl(m_settings_panel, wxID_ANY, "26760");
-			row->Add(m_port, 0, wxALL, 5);
-
-			panel_sizer->Add(row, 0, wxEXPAND);
-		}
-
-		m_settings_panel->SetSizer(panel_sizer);
-		m_settings_panel->Layout();
-		m_settings_panel->Hide();
-
-		sizer->Add(m_settings_panel, 1, wxEXPAND);
+		m_dsuPanel->SetSizer(panelLayout);
+		m_dsuPanel->Layout();
+		m_dsuPanel->Hide();
+		layout->Add(m_dsuPanel, 1, wxEXPAND);
 	}
 
-	this->SetSizer(sizer);
-	this->Layout();
-	sizer->Fit(this);
-
-	this->Bind(wxControllersRefreshed, &InputAPIAddWindow::on_controllers_refreshed, this);
+	SetSizer(layout);
+	Layout();
+	layout->Fit(this);
 }
 
 InputAPIAddWindow::~InputAPIAddWindow()
 {
-	discard_thread_result();
+	CancelSearch();
 }
 
-void InputAPIAddWindow::on_add_button(wxCommandEvent& event)
+std::optional<InputAPI::Type> InputAPIAddWindow::SelectedApi() const
 {
-	const auto selection = m_input_api->GetSelection();
-	if (selection == wxNOT_FOUND)
-	{
-		cemu_assert_debug(false);
-		EndModal(wxID_CANCEL);
-		return;
-	}
-
-	for (const auto& c : m_controllers)
-	{
-		if (*c == *m_controller)
-		{
-			wxMessageBox(_("The controller is already added!"), _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-			return;
-		}
-	}
-
-	m_type = static_cast<wxTypeData*>(m_input_api->GetClientObject(selection))->get();
-	EndModal(wxID_OK);
-}
-
-void InputAPIAddWindow::on_close_button(wxCommandEvent& event)
-{
-	EndModal(wxID_CANCEL);
+	const int index = m_apiChoice->GetSelection();
+	if (index == wxNOT_FOUND)
+		return std::nullopt;
+	return static_cast<wxAPIType*>(m_apiChoice->GetClientObject(index))->get();
 }
 
 bool InputAPIAddWindow::has_custom_settings() const
 {
-	const auto selection = m_input_api->GetStringSelection();
-	return selection == wxString::FromUTF8(to_string(InputAPI::DSUClient));
+	return IsApiNamed(m_apiChoice->GetStringSelection(), InputAPI::DSUClient);
 }
 
 std::unique_ptr<ControllerProviderSettings> InputAPIAddWindow::get_settings() const
 {
 	if (!has_custom_settings())
 		return {};
-
-	return std::make_unique<DSUProviderSettings>(m_ip->GetValue().ToStdString(),
-	                                             ConvertString<uint16>(m_port->GetValue().ToStdString()));
+	return std::make_unique<DSUProviderSettings>(m_ip->GetValue().ToStdString(), ConvertString<uint16>(m_port->GetValue().ToStdString()));
 }
 
-void InputAPIAddWindow::on_api_selected(wxCommandEvent& event)
+void InputAPIAddWindow::OnAdd()
 {
-	discard_thread_result();
+	const auto api = SelectedApi();
+	if (!api)
+	{
+		cemu_assert_debug(false);
+		EndModal(wxID_CANCEL);
+		return;
+	}
+	const bool duplicate = std::any_of(m_controllers.begin(), m_controllers.end(),
+									   [this](const ControllerPtr& c) { return *c == *m_controller; });
+	if (duplicate)
+	{
+		wxMessageBox(_("The controller is already added!"), _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
+		return;
+	}
+	m_type = *api;
+	EndModal(wxID_OK);
+}
 
-	if (m_input_api->GetSelection() == wxNOT_FOUND)
+void InputAPIAddWindow::OnApiChosen()
+{
+	CancelSearch();
+	if (m_apiChoice->GetSelection() == wxNOT_FOUND)
 		return;
 
-	m_controller_list->Enable();
-	m_controller_list->SetSelection(wxNOT_FOUND);
+	// a controller picked for the previous API does not carry over
+	m_controller.reset();
+	m_addButton->Disable();
+	m_controllerChoice->Enable();
+	m_controllerChoice->SetSelection(wxNOT_FOUND);
 
-    const auto selection = m_input_api->GetStringSelection();
-	// keyboard is a special case, as theres only one device supported atm
-	if (selection == wxString::FromUTF8(to_string(InputAPI::Keyboard)))
+	if (IsApiNamed(m_apiChoice->GetStringSelection(), InputAPI::Keyboard))
 	{
-		const auto controllers = InputManager::instance().get_api_provider(InputAPI::Keyboard)->get_controllers();
-		if (!controllers.empty())
+		// there is only ever the one keyboard, pick it right away
+		const auto keyboards = InputManager::instance().get_api_provider(InputAPI::Keyboard)->get_controllers();
+		if (!keyboards.empty())
 		{
-			m_controller = controllers[0];
-			m_ok_button->Enable();
-
-			m_controller_list->Clear();
-			const auto display_name = controllers[0]->display_name();
-			const auto index = m_controller_list->Append(display_name, new wxCustomData(controllers[0]));
-			m_controller_list->SetSelection(index);
+			m_controller = keyboards.front();
+			m_addButton->Enable();
+			m_controllerChoice->Clear();
+			const int index = m_controllerChoice->Append(keyboards.front()->display_name(), new ControllerItem(keyboards.front()));
+			m_controllerChoice->SetSelection(index);
 		}
 	}
-    else
-    {
-#if BOOST_OS_LINUX || BOOST_OS_BSD
-        // We rely on the wxEVT_COMBOBOX_DROPDOWN event to trigger filling the controller list,
-        // but on wxGTK the dropdown button cannot be clicked if the list is empty
-        // so as a quick and dirty workaround we fill the list here
-        wxCommandEvent tmpCmdEvt;
-        on_controller_dropdown(tmpCmdEvt);
-#endif
-    }
-
-	const auto show_settings = has_custom_settings();
-	// dsu has special settings for ip/port
-	if (show_settings != m_settings_panel->IsShown())
+	else
 	{
-		wxWindowUpdateLocker locker(this);
-		m_settings_panel->Show(show_settings);
+#if BOOST_OS_LINUX || BOOST_OS_BSD
+		// wxGTK will not open the dropdown of an empty combo box, so the
+		// dropdown event would never fire; search immediately instead
+		StartSearch();
+#endif
+	}
+
+	const bool wantDsu = has_custom_settings();
+	if (wantDsu != m_dsuPanel->IsShown())
+	{
+		wxWindowUpdateLocker freeze(this);
+		m_dsuPanel->Show(wantDsu);
 		Layout();
 		Fit();
 	}
 }
 
-void InputAPIAddWindow::on_controller_dropdown(wxCommandEvent& event)
+void InputAPIAddWindow::StartSearch()
 {
-	if (m_search_running)
+	if (m_searching)
 		return;
-
-	int selection = m_input_api->GetSelection();
-	if (selection == wxNOT_FOUND)
+	const auto api = SelectedApi();
+	if (!api)
 		return;
-
-	const auto type = static_cast<wxAPIType*>(m_input_api->GetClientObject(selection))->get();
-	auto settings = get_settings();
 
 	ControllerProviderPtr provider;
-	if (settings)
-		provider = InputManager::instance().get_api_provider(type, *settings);
+	if (const auto settings = get_settings())
+		provider = InputManager::instance().get_api_provider(*api, *settings);
 	else
-		provider = InputManager::instance().get_api_provider(type);
-
+		provider = InputManager::instance().get_api_provider(*api);
 	if (!provider)
 		return;
 
-	std::string selected_uuid;
-	selection = m_controller_list->GetSelection();
-	if (selection != wxNOT_FOUND)
+	m_searching = true;
 	{
-		// TODO selected_uuid
+		wxWindowUpdateLocker freeze(m_controllerChoice);
+		m_controllerChoice->Clear();
+		m_controllerChoice->Append(_("Searching for controllers..."), (wxClientData*)nullptr);
+		m_controllerChoice->SetSelection(wxNOT_FOUND);
 	}
 
-	m_search_running = true;
-
-	wxWindowUpdateLocker lock(m_controller_list);
-	m_controller_list->Clear();
-
-	m_controller_list->Append(_("Searching for controllers..."), (wxClientData*)nullptr);
-	m_controller_list->SetSelection(wxNOT_FOUND);
-
-	m_search_thread_data = std::make_unique<AsyncThreadData>();
-	std::thread([this, provider, selected_uuid](std::shared_ptr<AsyncThreadData> data)
-	{
-		auto available_controllers = provider->get_controllers();
-
-		{
-			std::lock_guard lock{data->mutex};
-			if(!data->discardResult)
-			{
-				wxCommandEvent event(wxControllersRefreshed);
-				event.SetEventObject(m_controller_list);
-				event.SetClientObject(new wxCustomData(std::move(available_controllers)));
-				event.SetInt(provider->api());
-				event.SetString(selected_uuid);
-				wxPostEvent(this, event);
-				m_search_running = false;
-			}
-		}
-	}, m_search_thread_data).detach();
+	auto ticket = std::make_shared<SearchTicket>();
+	m_search = ticket;
+	std::thread([this, provider, ticket]() {
+		auto found = provider->get_controllers();
+		std::lock_guard lock(ticket->mutex);
+		// a cancelled search may outlive the dialog, so it must not touch it
+		if (ticket->cancelled)
+			return;
+		CallAfter([this, found = std::move(found)]() { FillControllers(found); });
+		m_searching = false;
+	}).detach();
 }
 
-void InputAPIAddWindow::on_controller_selected(wxCommandEvent& event)
+void InputAPIAddWindow::FillControllers(const std::vector<ControllerPtr>& found)
 {
-	if (m_search_running)
-	{
+	wxWindowUpdateLocker freeze(m_controllerChoice);
+	m_controllerChoice->Clear();
+	for (const auto& controller : found)
+		m_controllerChoice->Append(controller->display_name(), new ControllerItem(controller));
+}
+
+void InputAPIAddWindow::OnControllerChosen()
+{
+	if (m_searching)
 		return;
-	}
-
-	const auto selection = m_controller_list->GetSelection();
-	if (selection == wxNOT_FOUND)
-	{
+	const int index = m_controllerChoice->GetSelection();
+	if (index == wxNOT_FOUND)
 		return;
-	}
-
-	if (auto* controller = (wxControllerData*)m_controller_list->GetClientObject(selection))
+	// the "searching" placeholder has no data
+	if (auto* item = static_cast<ControllerItem*>(m_controllerChoice->GetClientObject(index)))
 	{
-		m_controller = controller->ref();
-		m_ok_button->Enable();
-	}
-}
-
-void InputAPIAddWindow::on_controllers_refreshed(wxCommandEvent& event)
-{
-	const auto type = event.GetInt();
-	wxASSERT(0 <= type && type < InputAPI::MAX);
-
-	auto* controllers = dynamic_cast<wxComboBox*>(event.GetEventObject());
-	wxASSERT(controllers);
-
-	const auto available_controllers = static_cast<wxCustomData<std::vector<std::shared_ptr<ControllerBase>>>*>(event.
-		GetClientObject())->get();
-	const auto selected_uuid = event.GetString().ToStdString();
-	bool item_selected = false;
-
-	wxWindowUpdateLocker lock(controllers);
-	controllers->Clear();
-	for (const auto& c : available_controllers)
-	{
-		const auto display_name = c->display_name();
-		const auto uuid = c->uuid();
-		const auto index = controllers->Append(display_name, new wxCustomData(c));
-		if (!item_selected && selected_uuid == uuid)
-		{
-			controllers->SetSelection(index);
-			item_selected = true;
-		}
+		m_controller = item->ref();
+		m_addButton->Enable();
 	}
 }
 
-void InputAPIAddWindow::discard_thread_result()
+void InputAPIAddWindow::CancelSearch()
 {
-	m_search_running = false;
-	if(m_search_thread_data)
+	m_searching = false;
+	if (m_search)
 	{
-		std::lock_guard lock{m_search_thread_data->mutex};
-		m_search_thread_data->discardResult = true;
+		std::lock_guard lock(m_search->mutex);
+		m_search->cancelled = true;
 	}
 }
