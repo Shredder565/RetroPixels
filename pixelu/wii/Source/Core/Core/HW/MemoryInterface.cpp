@@ -1,11 +1,6 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/MemoryInterface.h"
-
-#include <array>
-#include <cstring>
-#include <type_traits>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -13,45 +8,36 @@
 
 namespace MemoryInterface
 {
-// internal hardware addresses
-enum
+namespace
 {
-  MI_REGION0_FIRST = 0x000,
-  MI_REGION0_LAST = 0x002,
-  MI_REGION1_FIRST = 0x004,
-  MI_REGION1_LAST = 0x006,
-  MI_REGION2_FIRST = 0x008,
-  MI_REGION2_LAST = 0x00A,
-  MI_REGION3_FIRST = 0x00C,
-  MI_REGION3_LAST = 0x00E,
-  MI_PROT_TYPE = 0x010,
-  MI_IRQMASK = 0x01C,
-  MI_IRQFLAG = 0x01E,
-  MI_UNKNOWN1 = 0x020,
-  MI_PROT_ADDR_LO = 0x022,
-  MI_PROT_ADDR_HI = 0x024,
-  MI_TIMER0_HI = 0x032,
-  MI_TIMER0_LO = 0x034,
-  MI_TIMER1_HI = 0x036,
-  MI_TIMER1_LO = 0x038,
-  MI_TIMER2_HI = 0x03A,
-  MI_TIMER2_LO = 0x03C,
-  MI_TIMER3_HI = 0x03E,
-  MI_TIMER3_LO = 0x040,
-  MI_TIMER4_HI = 0x042,
-  MI_TIMER4_LO = 0x044,
-  MI_TIMER5_HI = 0x046,
-  MI_TIMER5_LO = 0x048,
-  MI_TIMER6_HI = 0x04A,
-  MI_TIMER6_LO = 0x04C,
-  MI_TIMER7_HI = 0x04E,
-  MI_TIMER7_LO = 0x050,
-  MI_TIMER8_HI = 0x052,
-  MI_TIMER8_LO = 0x054,
-  MI_TIMER9_HI = 0x056,
-  MI_TIMER9_LO = 0x058,
-  MI_UNKNOWN2 = 0x05A,
+// Savestate slot of each halfword register. The savestate holds:
+//   slots 0-7    protection regions 0-3 (first page, last page)
+//   slot  8      protection type
+//   slots 9, 10  interrupt mask, interrupt flags
+//   slot  11     unknown register at 0x20
+//   slots 12, 13 protection address, low then high halfword
+//   slots 14-33  access counters 0-9, each low then high halfword
+//   slot  34     unknown register at 0x5A
+//   slot  35     padding
+// The register at 0x22 holds the high halfword of the protection address and
+// the one at 0x24 the low halfword; each counter likewise has its high
+// halfword at the lower address.
+struct RegisterSlot
+{
+  u32 offset;
+  u32 slot;
 };
+
+constexpr RegisterSlot FIXED_REGISTERS[] = {
+    {0x00, 0},  {0x02, 1},  {0x04, 2},  {0x06, 3},  {0x08, 4},  {0x0A, 5},
+    {0x0C, 6},  {0x0E, 7},  {0x10, 8},  {0x1C, 9},  {0x1E, 10}, {0x20, 11},
+    {0x22, 13}, {0x24, 12}, {0x5A, 34},
+};
+
+constexpr u32 COUNTER_BASE = 0x32;
+constexpr u32 COUNTER_FIRST_SLOT = 14;
+constexpr u32 NUM_COUNTERS = 10;
+}  // namespace
 
 MemoryInterfaceManager::MemoryInterfaceManager() = default;
 
@@ -59,8 +45,7 @@ MemoryInterfaceManager::~MemoryInterfaceManager() = default;
 
 void MemoryInterfaceManager::Init()
 {
-  static_assert(std::is_trivially_copyable_v<MIMemStruct>);
-  std::memset(static_cast<void*>(&m_mi_mem), 0, sizeof(MIMemStruct));
+  m_slots.fill(0);
 }
 
 void MemoryInterfaceManager::Shutdown()
@@ -70,56 +55,33 @@ void MemoryInterfaceManager::Shutdown()
 
 void MemoryInterfaceManager::DoState(PointerWrap& p)
 {
-  p.Do(m_mi_mem);
+  p.DoArray(m_slots);
 }
 
 void MemoryInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 {
-  for (u32 i = MI_REGION0_FIRST; i <= MI_REGION3_LAST; i += 4)
+  const auto map_halfword = [&](u32 offset, u32 slot) {
+    mmio->Register(base | offset, MMIO::DirectRead<u16>(&m_slots[slot]),
+                   MMIO::DirectWrite<u16>(&m_slots[slot]));
+  };
+
+  for (const RegisterSlot& reg : FIXED_REGISTERS)
+    map_halfword(reg.offset, reg.slot);
+
+  for (u32 counter = 0; counter < NUM_COUNTERS; ++counter)
   {
-    auto& region = m_mi_mem.regions[i / 4];
-    mmio->Register(base | i, MMIO::DirectRead<u16>(&region.first_page),
-                   MMIO::DirectWrite<u16>(&region.first_page));
-    mmio->Register(base | (i + 2), MMIO::DirectRead<u16>(&region.last_page),
-                   MMIO::DirectWrite<u16>(&region.last_page));
+    const u32 offset = COUNTER_BASE + 4 * counter;
+    const u32 low_slot = COUNTER_FIRST_SLOT + 2 * counter;
+    map_halfword(offset, low_slot + 1);
+    map_halfword(offset + 2, low_slot);
   }
 
-  mmio->Register(base | MI_PROT_TYPE, MMIO::DirectRead<u16>(&m_mi_mem.prot_type.hex),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.prot_type.hex));
-
-  mmio->Register(base | MI_IRQMASK, MMIO::DirectRead<u16>(&m_mi_mem.irq_mask.hex),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.irq_mask.hex));
-
-  mmio->Register(base | MI_IRQFLAG, MMIO::DirectRead<u16>(&m_mi_mem.irq_flag.hex),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.irq_flag.hex));
-
-  mmio->Register(base | MI_UNKNOWN1, MMIO::DirectRead<u16>(&m_mi_mem.unknown1),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.unknown1));
-
-  // The naming is confusing here: the register contains the lower part of
-  // the address (hence MI_..._LO but this is still the high part of the
-  // overall register.
-  mmio->Register(base | MI_PROT_ADDR_LO, MMIO::DirectRead<u16>(&m_mi_mem.prot_addr.hi),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.prot_addr.hi));
-  mmio->Register(base | MI_PROT_ADDR_HI, MMIO::DirectRead<u16>(&m_mi_mem.prot_addr.lo),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.prot_addr.lo));
-
-  for (u32 i = 0; i < m_mi_mem.timers.size(); ++i)
+  // Word accesses are split into two halfword accesses.
+  for (u32 offset = 0; offset < 0x1000; offset += 4)
   {
-    auto& timer = m_mi_mem.timers[i];
-    mmio->Register(base | (MI_TIMER0_HI + 4 * i), MMIO::DirectRead<u16>(&timer.hi),
-                   MMIO::DirectWrite<u16>(&timer.hi));
-    mmio->Register(base | (MI_TIMER0_LO + 4 * i), MMIO::DirectRead<u16>(&timer.lo),
-                   MMIO::DirectWrite<u16>(&timer.lo));
-  }
-
-  mmio->Register(base | MI_UNKNOWN2, MMIO::DirectRead<u16>(&m_mi_mem.unknown2),
-                 MMIO::DirectWrite<u16>(&m_mi_mem.unknown2));
-
-  for (u32 i = 0; i < 0x1000; i += 4)
-  {
-    mmio->Register(base | i, MMIO::ReadToSmaller<u32>(mmio, base | i, base | (i + 2)),
-                   MMIO::WriteToSmaller<u32>(mmio, base | i, base | (i + 2)));
+    mmio->Register(base | offset,
+                   MMIO::ReadToSmaller<u32>(mmio, base | offset, base | (offset + 2)),
+                   MMIO::WriteToSmaller<u32>(mmio, base | offset, base | (offset + 2)));
   }
 }
 

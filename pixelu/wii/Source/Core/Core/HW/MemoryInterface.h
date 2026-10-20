@@ -1,12 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
 #include <memory>
 
-#include "Common/BitField.h"
 #include "Common/CommonTypes.h"
 
 namespace Core
@@ -19,6 +17,9 @@ class Mapping;
 }
 class PointerWrap;
 
+// The memory interface (MI, 0x0C004000): MEM1 protection regions, the
+// protection interrupt registers and the access counters. Nothing here
+// affects emulation; software reads back what it wrote.
 namespace MemoryInterface
 {
 class MemoryInterfaceManager
@@ -38,86 +39,9 @@ public:
   void RegisterMMIO(MMIO::Mapping* mmio, u32 base);
 
 private:
-  union MIRegion
-  {
-    u32 hex = 0;
-    struct
-    {
-      u16 first_page;
-      u16 last_page;
-    };
-  };
-
-  union MIProtType
-  {
-    u16 hex = 0;
-
-    BitField<0, 2, u16> reg0;
-    BitField<2, 2, u16> reg1;
-    BitField<4, 2, u16> reg2;
-    BitField<6, 2, u16> reg3;
-    BitField<8, 8, u16> reserved;
-  };
-
-  union MIIRQMask
-  {
-    u16 hex = 0;
-
-    BitField<0, 1, u16> reg0;
-    BitField<1, 1, u16> reg1;
-    BitField<2, 1, u16> reg2;
-    BitField<3, 1, u16> reg3;
-    BitField<4, 1, u16> all_regs;
-    BitField<5, 11, u16> reserved;
-  };
-
-  union MIIRQFlag
-  {
-    u16 hex = 0;
-
-    BitField<0, 1, u16> reg0;
-    BitField<1, 1, u16> reg1;
-    BitField<2, 1, u16> reg2;
-    BitField<3, 1, u16> reg3;
-    BitField<4, 1, u16> all_regs;
-    BitField<5, 11, u16> reserved;
-  };
-
-  union MIProtAddr
-  {
-    u32 hex = 0;
-    struct
-    {
-      u16 lo;
-      u16 hi;
-    };
-    BitField<0, 5, u32> reserved_1;
-    BitField<5, 25, u32> addr;
-    BitField<30, 2, u32> reserved_2;
-  };
-
-  union MITimer
-  {
-    u32 hex = 0;
-    struct
-    {
-      u16 lo;
-      u16 hi;
-    };
-  };
-
-  struct MIMemStruct
-  {
-    std::array<MIRegion, 4> regions;
-    MIProtType prot_type;
-    MIIRQMask irq_mask;
-    MIIRQFlag irq_flag;
-    u16 unknown1 = 0;
-    MIProtAddr prot_addr;
-    std::array<MITimer, 10> timers;
-    u16 unknown2 = 0;
-  };
-
-  MIMemStruct m_mi_mem;
+  // The halfword registers in savestate order (the .cpp lists the slot of
+  // each register). The last slot is unused.
+  static constexpr size_t NUM_SLOTS = 36;
+  std::array<u16, NUM_SLOTS> m_slots{};
 };
 }  // namespace MemoryInterface
