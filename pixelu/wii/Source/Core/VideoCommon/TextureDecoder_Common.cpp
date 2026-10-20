@@ -273,36 +273,31 @@ int TexDecoder_GetPaletteSize(TextureFormat format)
 
 TextureFormat TexDecoder_GetEFBCopyBaseFormat(EFBCopyFormat format)
 {
-  // The texture format a game would use to sample the copy back (the paletted formats
-  // aside, which share these layouts).
-  switch (format)
-  {
-  case EFBCopyFormat::R4:
-    return TextureFormat::I4;
-  case EFBCopyFormat::R8_0x1:
-  case EFBCopyFormat::A8:
-  case EFBCopyFormat::R8:
-  case EFBCopyFormat::G8:
-  case EFBCopyFormat::B8:
-    return TextureFormat::I8;
-  case EFBCopyFormat::RA4:
-    return TextureFormat::IA4;
-  case EFBCopyFormat::RA8:
-  case EFBCopyFormat::RG8:
-  case EFBCopyFormat::GB8:
-    return TextureFormat::IA8;
-  case EFBCopyFormat::RGB565:
-    return TextureFormat::RGB565;
-  case EFBCopyFormat::RGB5A3:
-    return TextureFormat::RGB5A3;
-  case EFBCopyFormat::RGBA8:
-    return TextureFormat::RGBA8;
-  case EFBCopyFormat::XFB:
+  // The texture format whose memory layout an EFB copy produces, i.e. the format a game reads
+  // the copy back with (paletted formats share these layouts). Indexed by the copy format's
+  // GX value 0x0-0xC; XFB copies are handled separately.
+  static constexpr std::array<TextureFormat, 13> layout_of = {
+      TextureFormat::I4,      // R4
+      TextureFormat::I8,      // R8_0x1
+      TextureFormat::IA4,     // RA4
+      TextureFormat::IA8,     // RA8
+      TextureFormat::RGB565,  // RGB565
+      TextureFormat::RGB5A3,  // RGB5A3
+      TextureFormat::RGBA8,   // RGBA8
+      TextureFormat::I8,      // A8
+      TextureFormat::I8,      // R8
+      TextureFormat::I8,      // G8
+      TextureFormat::I8,      // B8
+      TextureFormat::IA8,     // RG8
+      TextureFormat::IA8,     // GB8
+  };
+  const auto value = static_cast<u32>(format);
+  if (value < layout_of.size())
+    return layout_of[value];
+  if (format == EFBCopyFormat::XFB)
     return TextureFormat::XFB;
-  default:
-    PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBaseFormat)", format);
-    return static_cast<TextureFormat>(format);
-  }
+  PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBaseFormat)", format);
+  return static_cast<TextureFormat>(format);
 }
 
 void TexDecoder_SetTexFmtOverlayOptions(bool enable, bool center)
