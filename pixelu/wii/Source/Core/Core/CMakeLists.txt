@@ -657,28 +657,6 @@ if(_M_X86_64)
     PowerPC/Jit64Common/TrampolineCache.h
     PowerPC/Jit64Common/TrampolineInfo.h
   )
-elseif(_M_ARM_64)
-  target_sources(core PRIVATE
-    PowerPC/JitArm64/Jit.cpp
-    PowerPC/JitArm64/Jit.h
-    PowerPC/JitArm64/JitAsm.cpp
-    PowerPC/JitArm64/JitArm64Cache.cpp
-    PowerPC/JitArm64/JitArm64_BackPatch.cpp
-    PowerPC/JitArm64/JitArm64_Branch.cpp
-    PowerPC/JitArm64/JitArm64_FloatingPoint.cpp
-    PowerPC/JitArm64/JitArm64_Integer.cpp
-    PowerPC/JitArm64/JitArm64_LoadStore.cpp
-    PowerPC/JitArm64/JitArm64_LoadStoreFloating.cpp
-    PowerPC/JitArm64/JitArm64_LoadStorePaired.cpp
-    PowerPC/JitArm64/JitArm64_Paired.cpp
-    PowerPC/JitArm64/JitArm64_RegCache.cpp
-    PowerPC/JitArm64/JitArm64_RegCache.h
-    PowerPC/JitArm64/JitArm64_SystemRegisters.cpp
-    PowerPC/JitArm64/Jit_Util.cpp
-    PowerPC/JitArm64/Jit_Util.h
-    PowerPC/JitArm64/JitArm64_Tables.cpp
-    PowerPC/JitArmCommon/BackPatch.h
-  )
 endif()
 
 target_link_libraries(core

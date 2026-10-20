@@ -251,31 +251,16 @@ else()
   )
 endif()
 
-if(_M_ARM_64)
+if(_M_X86_64) #X86
   target_sources(common PRIVATE
-    Arm64Emitter.cpp
-    Arm64Emitter.h
-    ArmCommon.h
-    ArmCPUDetect.cpp
-    ArmFPURoundMode.cpp
+    x64ABI.cpp
+    x64ABI.h
+    x64Emitter.cpp
+    x64Emitter.h
+    x64FPURoundMode.cpp
+    x64CPUDetect.cpp
+    x64Reg.h
   )
-else()
-  if(_M_X86_64) #X86
-    target_sources(common PRIVATE
-      x64ABI.cpp
-      x64ABI.h
-      x64Emitter.cpp
-      x64Emitter.h
-      x64FPURoundMode.cpp
-      x64CPUDetect.cpp
-      x64Reg.h
-    )
-  else() # Generic
-    target_sources(common PRIVATE
-      GenericFPURoundMode.cpp
-      GenericCPUDetect.cpp
-    )
-  endif()
 endif()
 
 # OpenGL Interface
