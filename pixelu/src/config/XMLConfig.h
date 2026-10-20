@@ -1,18 +1,39 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "util/tinyxml2/tinyxml2.h"
 #include "Common/FileStream.h"
 #include "config/ConfigValue.h"
 
-#include <string>
+#include <array>
+#include <cassert>
+#include <atomic>
+#include <concepts>
+#include <functional>
 #include <mutex>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
 
-template <typename T>
-concept HasConstCharConstructor = requires { T(std::declval<const char*>()); };
-
+// Reading and writing of the XML settings files (settings.xml,
+// network_services.xml, the debugger files).
+//
+// XMLConfigParser is a cursor on one element of a tinyxml2 document; the root
+// cursor stands for the document itself. Values are stored as element text or
+// as attributes. The C++ type of the default value picks the conversion:
+//   bool, float, sint32, uint32, sint64   tinyxml2's text/attribute parsers
+//   uint64                                stored and parsed as sint64
+//   enums                                 their underlying integer type
+//   const char*, std::string              the text as is (element text also
+//                                         fills any type built from a const char*)
+//   std::array<T, N>                      lowercase hex, two digits per entry
+// A value of any other type cannot be read: the default comes back.
+// These rules are part of the file format, existing files depend on them.
 class XMLConfigParser
 {
 public:
+	// cursor on the document itself
 	XMLConfigParser(tinyxml2::XMLDocument* document)
 		: m_document(document), m_current_element(nullptr), m_is_root(true) {}
 
@@ -20,298 +41,287 @@ private:
 	XMLConfigParser(tinyxml2::XMLDocument* document, tinyxml2::XMLElement* element)
 		: m_document(document), m_current_element(element), m_is_root(false) {}
 
-public:
-	template <typename T>
-	auto get(const char* name, T default_value = {})
+	template<typename T>
+	static constexpr bool kTextLike = std::is_same_v<T, const char*> || std::is_same_v<T, std::string>;
+
+	// note: a cursor without an element (root, or a child that does not exist)
+	// looks among the top level elements of the document
+	tinyxml2::XMLElement* Child(const char* name) const
 	{
-		if constexpr(std::is_enum_v<T>)
-			return static_cast<T>(get(name, static_cast<std::underlying_type_t<T>>(default_value)));
-
-		const auto* element = m_current_element
-			? m_current_element->FirstChildElement(name)
-			: m_document->FirstChildElement(name);
-		
-		if (element == nullptr)
-			return default_value;
-
-		if constexpr (std::is_same_v<T, bool>)
-			return element->BoolText(default_value);
-		else if constexpr (std::is_same_v<T, float>)
-			return element->FloatText(default_value);
-		else if constexpr (std::is_same_v<T, sint32>)
-			return element->IntText(default_value);
-		else if constexpr (std::is_same_v<T, uint32>)
-			return element->UnsignedText(default_value);
-		else if constexpr (std::is_same_v<T, sint64>)
-			return element->Int64Text(default_value);
-		else if constexpr (std::is_same_v<T, uint64>) // doesnt support real uint64...
-			return (uint64)element->Int64Text((sint64)default_value);
-		else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, std::string> || HasConstCharConstructor<T>)
-		{
-			const char* text = element->GetText();
-			return text ? text : default_value;
-		}
-		
-		return default_value;
+		return m_current_element ? m_current_element->FirstChildElement(name) : m_document->FirstChildElement(name);
 	}
-	
-	template <typename T>
+
+	void Append(tinyxml2::XMLElement* element) const
+	{
+		if (m_current_element)
+			m_current_element->InsertEndChild(element);
+		else
+			m_document->InsertEndChild(element);
+	}
+
+	static int HexDigit(char c)
+	{
+		if (c >= '0' && c <= '9')
+			return c - '0';
+		if (c >= 'a' && c <= 'f')
+			return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F')
+			return c - 'A' + 10;
+		throw std::invalid_argument("Invalid input string");
+	}
+
+public:
+	// ---- element values ----
+
+	template<typename T>
+	T get(const char* name, T default_value = {})
+	{
+		if constexpr (std::is_enum_v<T>)
+		{
+			using Raw = std::underlying_type_t<T>;
+			return static_cast<T>(get(name, static_cast<Raw>(default_value)));
+		}
+		else
+		{
+			const tinyxml2::XMLElement* element = Child(name);
+			if (!element)
+				return default_value;
+			if constexpr (std::is_same_v<T, bool>)
+				return element->BoolText(default_value);
+			else if constexpr (std::is_same_v<T, float>)
+				return element->FloatText(default_value);
+			else if constexpr (std::is_same_v<T, sint32>)
+				return element->IntText(default_value);
+			else if constexpr (std::is_same_v<T, uint32>)
+				return element->UnsignedText(default_value);
+			else if constexpr (std::is_same_v<T, sint64>)
+				return element->Int64Text(default_value);
+			else if constexpr (std::is_same_v<T, uint64>)
+				return (uint64)element->Int64Text((sint64)default_value);
+			else if constexpr (kTextLike<T> || std::constructible_from<T, const char*>)
+			{
+				if (const char* text = element->GetText())
+					return T(text);
+				return default_value;
+			}
+			else
+				return default_value;
+		}
+	}
+
+	// a setting's declared value is the default, not its current one
+	template<typename T>
 	T get(const char* name, const ConfigValue<T>& default_value)
 	{
 		return get(name, default_value.GetInitValue());
 	}
-	
-	template <typename T>
+
+	template<typename T>
 	T get(const char* name, const ConfigValueBounds<T>& default_value)
 	{
 		return get(name, default_value.GetInitValue());
 	}
 
-	template <typename T>
-	auto get_attribute(const char* name, T default_value = {})
+	// hex text into a byte array; the array is zeroed first and stays zero when
+	// the element is missing. Text that is too short or not hex throws
+	// std::invalid_argument, the entries before the bad digit are filled.
+	template<typename TType, size_t TSize>
+	std::array<TType, TSize>& get(const char* name, std::array<TType, TSize>& arr)
 	{
-		if constexpr (std::is_enum_v<T>)
-			return static_cast<T>(get_attribute(name, static_cast<std::underlying_type_t<T>>(default_value)));
-
-		if (m_current_element == nullptr)
-			return default_value;
-
-		if constexpr (std::is_same_v<T, bool>)
-			return m_current_element->BoolAttribute(name, default_value);
-		else if constexpr (std::is_same_v<T, float>)
-			return m_current_element->FloatAttribute(name, default_value);
-		else if constexpr (std::is_same_v<T, sint32>)
-			return m_current_element->IntAttribute(name, default_value);
-		else if constexpr (std::is_same_v<T, uint32>)
-			return m_current_element->UnsignedAttribute(name, default_value);
-		else if constexpr (std::is_same_v<T, sint64>)
-			return m_current_element->Int64Attribute(name, default_value);
-		else if constexpr (std::is_same_v<T, uint64>) // doesnt support real uint64...
-			return (uint64)m_current_element->Int64Attribute(name, (sint64)default_value);
-		else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, std::string>)
+		arr = {};
+		const tinyxml2::XMLElement* element = Child(name);
+		if (!element)
+			return arr;
+		const char* text = element->GetText();
+		if (!text)
+			return arr;
+		assert(strlen(text) == TSize * 2);
+		size_t pos = 0;
+		for (size_t i = 0; i < TSize; i++)
 		{
-			const char* text = m_current_element->Attribute(name);
-			return text ? text : default_value;
+			// stop at the terminator: it is not a hex digit
+			const int high = HexDigit(text[pos]);
+			pos++;
+			const int low = HexDigit(text[pos]);
+			pos++;
+			arr[i] = (TType)((high << 4) + low);
 		}
-
-		return default_value;
+		return arr;
 	}
 
-	template <typename T>
+	// ---- attributes of this element ----
+
+	template<typename T>
+	T get_attribute(const char* name, T default_value = {})
+	{
+		if constexpr (std::is_enum_v<T>)
+		{
+			using Raw = std::underlying_type_t<T>;
+			return static_cast<T>(get_attribute(name, static_cast<Raw>(default_value)));
+		}
+		else
+		{
+			const tinyxml2::XMLElement* element = m_current_element;
+			if (!element)
+				return default_value;
+			if constexpr (std::is_same_v<T, bool>)
+				return element->BoolAttribute(name, default_value);
+			else if constexpr (std::is_same_v<T, float>)
+				return element->FloatAttribute(name, default_value);
+			else if constexpr (std::is_same_v<T, sint32>)
+				return element->IntAttribute(name, default_value);
+			else if constexpr (std::is_same_v<T, uint32>)
+				return element->UnsignedAttribute(name, default_value);
+			else if constexpr (std::is_same_v<T, sint64>)
+				return element->Int64Attribute(name, default_value);
+			else if constexpr (std::is_same_v<T, uint64>)
+				return (uint64)element->Int64Attribute(name, (sint64)default_value);
+			else if constexpr (kTextLike<T>)
+			{
+				if (const char* text = element->Attribute(name))
+					return T(text);
+				return default_value;
+			}
+			else
+				return default_value;
+		}
+	}
+
+	template<typename T>
 	T get_attribute(const char* name, const ConfigValue<T>& default_value)
 	{
 		return get_attribute(name, default_value.GetInitValue());
 	}
 
-	template <typename T>
+	template<typename T>
 	T get_attribute(const char* name, const ConfigValueBounds<T>& default_value)
 	{
 		return get_attribute(name, default_value.GetInitValue());
 	}
 
-	int char2int(char input)
-	{
-	  if(input >= '0' && input <= '9')
-	    return input - '0';
-	  if(input >= 'A' && input <= 'F')
-	    return input - 'A' + 10;
-	  if(input >= 'a' && input <= 'f')
-	    return input - 'a' + 10;
-	  throw std::invalid_argument("Invalid input string");
-	}
+	// ---- the text of this element itself ----
 
-	template <typename TType, size_t TSize>
-	std::array<TType, TSize>& get(const char* name, std::array<TType, TSize>& arr)
-	{
-		arr = {};
-		const auto element = m_current_element
-			                     ? m_current_element->FirstChildElement(name)
-			                     : m_document->FirstChildElement(name);
-		if (element == nullptr)
-			return arr;
-
-		const char* text = element->GetText();
-		if(text)
-		{
-			assert(strlen(text) == (arr.size() * 2));
-			std::istringstream iss(text);
-			for(int i = 0; i < arr.size(); ++i)
-			{
-				arr[i] = (char2int(text[i*2]) << 4) + char2int(text[i * 2 + 1]);
-			}
-		}
-
-		return arr;
-	}
-	
-	template <typename T>
+	// unsupported types: the default
+	template<typename T>
 	T value(T default_value = T())
 	{
-		//peterBreak();
 		return default_value;
 	}
 
-	bool value(bool default_value)
-	{
-		return m_current_element ? m_current_element->BoolText(default_value) : default_value;
-	}
-
-	float value(float default_value)
-	{
-		return m_current_element ? m_current_element->FloatText(default_value) : default_value;
-	}
-
-	double value(double default_value)
-	{
-		return m_current_element ? m_current_element->DoubleText(default_value) : default_value;
-	}
-
-	uint32 value(uint32 default_value)
-	{
-		return m_current_element ? m_current_element->UnsignedText(default_value) : default_value;
-	}
-
-	sint32 value(sint32 default_value)
-	{
-		return m_current_element ? m_current_element->IntText(default_value) : default_value;
-	}
-
-	uint64 value(uint64 default_value)
-	{
-		return m_current_element ? (uint64)m_current_element->Int64Text(default_value) : default_value;
-	}
-
-	sint64 value(sint64 default_value)
-	{
-		return m_current_element ? m_current_element->Int64Text(default_value) : default_value;
-	}
+	bool value(bool default_value) { return m_current_element ? m_current_element->BoolText(default_value) : default_value; }
+	float value(float default_value) { return m_current_element ? m_current_element->FloatText(default_value) : default_value; }
+	double value(double default_value) { return m_current_element ? m_current_element->DoubleText(default_value) : default_value; }
+	uint32 value(uint32 default_value) { return m_current_element ? m_current_element->UnsignedText(default_value) : default_value; }
+	sint32 value(sint32 default_value) { return m_current_element ? m_current_element->IntText(default_value) : default_value; }
+	uint64 value(uint64 default_value) { return m_current_element ? (uint64)m_current_element->Int64Text(default_value) : default_value; }
+	sint64 value(sint64 default_value) { return m_current_element ? m_current_element->Int64Text(default_value) : default_value; }
 
 	const char* value(const char* default_value)
 	{
-		if (m_current_element)
-		{
-			if (m_current_element->GetText())
-				return m_current_element->GetText();
-		}
-
-		return default_value;
+		const char* text = m_current_element ? m_current_element->GetText() : nullptr;
+		return text ? text : default_value;
 	}
 
-	template <typename TType, size_t TSize>
+	// ---- writing: each call appends a new child element ----
+
+	template<typename TType, size_t TSize>
 	void set(const char* name, const std::array<TType, TSize>& value)
 	{
-		auto element = m_document->NewElement(name);
-
-		std::stringstream str;
-		for(const auto& v : value)
-		{
-			str << fmt::format("{:02x}", v);
-		}
-
-		element->SetText(str.str().c_str());
-
-		if (m_current_element)
-			m_current_element->InsertEndChild(element);
-		else
-			m_document->InsertEndChild(element);
+		std::string hex;
+		hex.reserve(TSize * 2);
+		for (const TType& v : value)
+			hex += fmt::format("{:02x}", v);
+		tinyxml2::XMLElement* element = m_document->NewElement(name);
+		element->SetText(hex.c_str());
+		Append(element);
 	}
 
-	template <typename T>
+	template<typename T>
 	void set(const char* name, T value)
 	{
-		auto* element = m_document->NewElement(name);
-
+		tinyxml2::XMLElement* element = m_document->NewElement(name);
 		if constexpr (std::is_enum_v<T>)
-			element->SetText(fmt::format("{}", static_cast<typename std::underlying_type<T>::type>(value)).c_str());
+			element->SetText(fmt::format("{}", static_cast<std::underlying_type_t<T>>(value)).c_str());
 		else
 			element->SetText(fmt::format("{}", value).c_str());
-
-		if (m_current_element)
-			m_current_element->InsertEndChild(element);
-		else
-			m_document->InsertEndChild(element);
+		Append(element);
 	}
 
-	template <typename T>
+	template<typename T>
 	void set(const char* name, const std::atomic<T>& value)
 	{
 		set(name, value.load());
 	}
 
-	template <typename T>
+	template<typename T>
 	void set(const char* name, const ConfigValue<T>& value)
 	{
 		set(name, value.GetValue());
 	}
 
+	// uint64 is written signed, matching how it is read back
 	void set(const char* name, uint64 value)
 	{
 		set(name, (sint64)value);
 	}
 
+	// ---- navigation ----
+
 	tinyxml2::XMLElement* GetCurrentElement() const { return m_current_element; }
 
+	// first child with this name (the cursor is invalid when there is none)
 	XMLConfigParser get(const char* name) const
 	{
-		const auto element = m_current_element
-			                     ? m_current_element->FirstChildElement(name)
-			                     : m_document->FirstChildElement(name);
-		return {m_document, element};
+		return {m_document, Child(name)};
 	}
 
-	XMLConfigParser get(const char* name, const XMLConfigParser& parser)
+	// next sibling of previous with this name
+	XMLConfigParser get(const char* name, const XMLConfigParser& previous)
 	{
-		const auto element = parser.m_current_element
-			? parser.m_current_element->NextSiblingElement(name)
-			: parser.m_document->NextSiblingElement(name);
-		return { m_document, element };
+		tinyxml2::XMLElement* next = previous.m_current_element ? previous.m_current_element->NextSiblingElement(name)
+															   : previous.m_document->NextSiblingElement(name);
+		return {m_document, next};
 	}
 
+	// new child element
 	XMLConfigParser set(const char* name) const
 	{
-		const auto element = m_document->NewElement(name);
-		if (m_current_element)
-			m_current_element->InsertEndChild(element);
-		else
-			m_document->InsertEndChild(element);
-
+		tinyxml2::XMLElement* element = m_document->NewElement(name);
+		Append(element);
 		return {m_document, element};
 	}
 
-	template <typename T>
+	template<typename T>
 	XMLConfigParser& set_attribute(const char* name, const T& value)
 	{
 		cemu_assert_debug(m_current_element != nullptr);
 		if (m_current_element)
 			m_current_element->SetAttribute(name, value);
-		
 		return *this;
 	}
 
-	template <typename T>
+	template<typename T>
 	XMLConfigParser& set_attribute(const char* name, const ConfigValue<T>& value)
 	{
 		return set_attribute(name, value.GetValue());
 	}
 
-	template <typename T>
+	template<typename T>
 	XMLConfigParser& set_attribute(const char* name, const ConfigValueBounds<T>& value)
 	{
 		return set_attribute(name, value.GetValue());
 	}
-	
+
 	XMLConfigParser& set_attribute(const char* name, const std::string& value)
 	{
 		return set_attribute(name, value.c_str());
 	}
 
-
 	bool valid() const
 	{
-		if (m_is_root)
-			return m_document != nullptr;
-
-		return m_document != nullptr && m_current_element != nullptr;
+		if (!m_document)
+			return false;
+		return m_is_root || m_current_element != nullptr;
 	}
 
 private:
@@ -320,131 +330,110 @@ private:
 	bool m_is_root;
 };
 
+// save and load callbacks of a section that lives inside another file's root element
 using ChildXMLConfigParser = std::pair<std::function<void(XMLConfigParser&)>, std::function<void(XMLConfigParser&)>>;
 
+// T::Load/Save receive the document cursor and return the cursor child sections are attached to
 template<typename T>
 concept XMLConfigurable = requires(T t, XMLConfigParser& configParser) {
 	{ t.Save(configParser) } -> std::same_as<XMLConfigParser>;
 	{ t.Load(configParser) } -> std::same_as<XMLConfigParser>;
 };
 
-template <XMLConfigurable T>
+// An XML file bound to an object
+template<XMLConfigurable T>
 class XMLConfig
 {
 public:
 	XMLConfig() = delete;
-
-	XMLConfig(T& instance)
-		: m_instance(instance)
-	{}
-
-	XMLConfig(T& instance, std::wstring_view filename)
-		: m_instance(instance), m_filename(filename) {}
-
+	XMLConfig(T& instance) : m_instance(instance) {}
+	XMLConfig(T& instance, std::wstring_view filename) : m_instance(instance), m_filename(filename) {}
 	XMLConfig(const XMLConfig&) = delete;
-
 	virtual ~XMLConfig() = default;
 
 	bool Load()
 	{
-		if (m_filename.empty())
-			return false;
-
-		return Load(m_filename);
+		return !m_filename.empty() && Load(m_filename);
 	}
 
 	bool Load(const std::wstring& filename)
 	{
-		FileStream* fs = FileStream::openFile(filename.c_str());
-		if (!fs)
+		std::vector<uint8> content;
 		{
-			cemuLog_logDebug(LogType::Force, "XMLConfig::Load > failed \"{}\" with error {}", boost::nowide::narrow(filename), errno);
-			return false;
-		}
-		std::vector<uint8> xmlData;
-		xmlData.resize(fs->GetSize());
-		fs->readData(xmlData.data(), xmlData.size());
-		delete fs;
-
-		tinyxml2::XMLDocument doc;		
-		const tinyxml2::XMLError error = doc.Parse((const char*)xmlData.data(), xmlData.size());
-		const bool success = error == tinyxml2::XML_SUCCESS;
-		if (error != 0)
-		{
-			cemuLog_logDebug(LogType::Force, "XMLConfig::Load > LoadFile {}", error);
+			std::unique_ptr<FileStream> file(FileStream::openFile(filename.c_str()));
+			if (!file)
+			{
+				cemuLog_logDebug(LogType::Force, "XMLConfig: cannot open \"{}\" (errno {})", boost::nowide::narrow(filename), errno);
+				return false;
+			}
+			content.resize(file->GetSize());
+			file->readData(content.data(), content.size());
 		}
 
-		if (!success)
+		tinyxml2::XMLDocument doc;
+		const tinyxml2::XMLError result = doc.Parse((const char*)content.data(), content.size());
+		if (result != tinyxml2::XML_SUCCESS)
 		{
+			cemuLog_logDebug(LogType::Force, "XMLConfig: parse error {} in \"{}\"", (int)result, boost::nowide::narrow(filename));
 			return false;
 		}
 
-		auto parser = XMLConfigParser(&doc);
-		auto parentParser = m_instance.Load(parser);
-
-		for (auto [save, load] : m_childConfigParsers)
-			load(parentParser);
-
+		XMLConfigParser root(&doc);
+		XMLConfigParser sectionParent = m_instance.Load(root);
+		for (const ChildXMLConfigParser& child : m_childConfigParsers)
+			child.second(sectionParent);
 		return true;
 	}
 
 	bool Save()
 	{
-		if (m_filename.empty())
-			return false;
-
-		return Save(m_filename);
+		return !m_filename.empty() && Save(m_filename);
 	}
 
+	// writes to a temporary file next to the target, then renames it over the target
 	bool Save(const std::wstring& filename)
 	{
-		std::wstring tmp_name = fmt::format(L"{}_{}.tmp", filename,rand() % 1000);
-		std::error_code err;
-		fs::create_directories(fs::path(filename).parent_path(), err);
-		if (err)
+		const std::wstring tempName = fmt::format(L"{}_{}.tmp", filename, rand() % 1000);
+		std::error_code ec;
+		fs::create_directories(fs::path(filename).parent_path(), ec);
+		if (ec)
 		{
-			cemuLog_log(LogType::Force, "can't create parent path for save file: {}", err.message());
+			cemuLog_log(LogType::Force, "XMLConfig: cannot create the folder for the settings file: {}", ec.message());
 			return false;
 		}
 
-		FILE* file = nullptr;
 #if BOOST_OS_WINDOWS
-        file = _wfopen(tmp_name.c_str(), L"wb");
+		FILE* out = _wfopen(tempName.c_str(), L"wb");
 #else
-		file = fopen(boost::nowide::narrow(tmp_name).c_str(), "wb");
+		FILE* out = fopen(boost::nowide::narrow(tempName).c_str(), "wb");
 #endif
-        if (!file)
-        {
-			cemuLog_logDebug(LogType::Force, "XMLConfig::Save > failed \"{}\" with error {}", boost::nowide::narrow(filename), errno);
-            return false;
-        }
-
-		tinyxml2::XMLDocument doc;
-		const auto declaration = doc.NewDeclaration();
-		doc.InsertFirstChild(declaration);
-
-		auto parser = XMLConfigParser(&doc);
-		auto parentParser = m_instance.Save(parser);
-
-		for (auto [save, load] : m_childConfigParsers)
-			save(parentParser);
-
-		const tinyxml2::XMLError error = doc.SaveFile(file);
-		const bool success = error == tinyxml2::XML_SUCCESS;
-		if(error != 0)
-			cemuLog_logDebug(LogType::Force, "XMLConfig::Save > SaveFile {}", error);
-
-		fflush(file);
-		fclose(file);
-
-		fs::rename(tmp_name, filename, err);
-		if(err)
+		if (!out)
 		{
-			cemuLog_log(LogType::Force, "Unable to save settings to file: {}", err.message().c_str());
-			fs::remove(tmp_name, err);
+			cemuLog_logDebug(LogType::Force, "XMLConfig: cannot write \"{}\" (errno {})", boost::nowide::narrow(filename), errno);
+			return false;
 		}
 
-		return success;
+		tinyxml2::XMLDocument doc;
+		doc.InsertFirstChild(doc.NewDeclaration());
+		XMLConfigParser root(&doc);
+		XMLConfigParser sectionParent = m_instance.Save(root);
+		for (const ChildXMLConfigParser& child : m_childConfigParsers)
+			child.first(sectionParent);
+
+		const tinyxml2::XMLError result = doc.SaveFile(out);
+		if (result != tinyxml2::XML_SUCCESS)
+			cemuLog_logDebug(LogType::Force, "XMLConfig: write error {} for \"{}\"", (int)result, boost::nowide::narrow(filename));
+		fflush(out);
+		fclose(out);
+
+		fs::rename(tempName, filename, ec);
+		if (ec)
+		{
+			cemuLog_log(LogType::Force, "XMLConfig: cannot replace the settings file: {}", ec.message());
+			fs::remove(tempName, ec);
+		}
+		// note: success means the document was written, a failed rename only gets logged
+		return result == tinyxml2::XML_SUCCESS;
 	}
 
 	[[nodiscard]] const std::wstring& GetFilename() const { return m_filename; }
@@ -452,18 +441,20 @@ public:
 
 	std::unique_lock<std::mutex> Lock() { return std::unique_lock(m_mutex); }
 
+	// sections stored by other objects inside this file, saved and loaded after the main object
 	void AddChildConfig(ChildXMLConfigParser childConfigParser)
 	{
-		m_childConfigParsers.push_back(childConfigParser);
+		m_childConfigParsers.emplace_back(std::move(childConfigParser));
 	}
 
-  private:
+private:
 	std::vector<ChildXMLConfigParser> m_childConfigParsers;
 	T& m_instance;
 	std::wstring m_filename;
 	std::mutex m_mutex;
 };
 
+// a callable that returns the XMLConfig a child section belongs to
 template<typename T>
 concept XMLConfigProvider = requires(T t, ChildXMLConfigParser& configParser) {
 	{ t().Save() } -> std::same_as<bool>;
@@ -472,78 +463,54 @@ concept XMLConfigProvider = requires(T t, ChildXMLConfigParser& configParser) {
 	{ t().AddChildConfig(configParser) } -> std::same_as<void>;
 };
 
+// Settings object stored as a section of another config file. L and S read and
+// write the section from the cursor the parent's object returns.
 template<typename T, void (T::*L)(XMLConfigParser&), void (T::*S)(XMLConfigParser&)>
 class XMLChildConfig
 {
-  public:
+public:
 	XMLChildConfig(XMLConfigProvider auto getParentConfig)
 	{
-		m_parentConfig = {
-			.lock = [getParentConfig]() { return getParentConfig().Lock(); },
-			.save = [getParentConfig]() { return getParentConfig().Save(); },
-			.load = [getParentConfig]() { return getParentConfig().Load(); },
-		};
-
-		auto configParser = std::make_pair(
-			[this](XMLConfigParser& parser) {
-				(m_data.*S)(parser);
-			},
-			[this](XMLConfigParser& parser) {
-				(m_data.*L)(parser);
-			});
-
-		getParentConfig().AddChildConfig(configParser);
-	}
-
-	bool Save()
-	{
-		return m_parentConfig.save();
-	}
-
-	bool Load()
-	{
-		return m_parentConfig.load();
-	}
-
-	T& Data()
-	{
-		return m_data;
-	}
-
-	std::unique_lock<std::mutex> Lock()
-	{
-		return m_parentConfig.lock();
+		m_parent.lock = [getParentConfig]() { return getParentConfig().Lock(); };
+		m_parent.save = [getParentConfig]() { return getParentConfig().Save(); };
+		m_parent.load = [getParentConfig]() { return getParentConfig().Load(); };
+		getParentConfig().AddChildConfig(ChildXMLConfigParser(
+			[this](XMLConfigParser& parser) { (m_data.*S)(parser); },
+			[this](XMLConfigParser& parser) { (m_data.*L)(parser); }));
 	}
 
 	virtual ~XMLChildConfig() = default;
 
-  private:
+	// saving or loading always covers the whole parent file
+	bool Save() { return m_parent.save(); }
+	bool Load() { return m_parent.load(); }
+	std::unique_lock<std::mutex> Lock() { return m_parent.lock(); }
+
+	T& Data() { return m_data; }
+
+private:
 	T m_data;
 	struct
 	{
 		std::function<std::unique_lock<std::mutex>()> lock;
 		std::function<bool()> save;
 		std::function<bool()> load;
-	} m_parentConfig;
+	} m_parent;
 };
 
+// An XML file that owns its object. T either has XMLConfigurable Load/Save or
+// void Load/Save (XMLStandaloneConfigurable), see the specialisations below.
 template<typename T>
 struct XMLDataConfig {};
 
-template <XMLConfigurable T>
+template<XMLConfigurable T>
 class XMLDataConfig<T> : public XMLConfig<T>
 {
 public:
-	XMLDataConfig()
-		: XMLConfig<T>::XMLConfig(m_data), m_data() {}
-
-	XMLDataConfig(std::wstring_view filename)
-		: XMLConfig<T>::XMLConfig(m_data, filename), m_data() {}
-
-	XMLDataConfig(std::wstring_view filename, T init_data)
-		: XMLConfig<T>::XMLConfig(m_data, filename), m_data(std::move(init_data)) {}
-
-	XMLDataConfig(const XMLDataConfig& o) = delete;
+	XMLDataConfig() : XMLConfig<T>(m_data), m_data() {}
+	XMLDataConfig(std::wstring_view filename) : XMLConfig<T>(m_data, filename), m_data() {}
+	XMLDataConfig(std::wstring_view filename, T init_data) : XMLConfig<T>(m_data, filename), m_data(std::move(init_data)) {}
+	XMLDataConfig(const XMLDataConfig&) = delete;
 
 	T& data() { return m_data; }
 
@@ -557,6 +524,7 @@ concept XMLStandaloneConfigurable = requires(T t, XMLConfigParser& configParser)
 	{ t.Load(configParser) } -> std::same_as<void>;
 };
 
+// adapts void Load/Save to the XMLConfigurable form (no child sections)
 template<XMLStandaloneConfigurable T>
 struct XMLConfigWrapper
 {
@@ -578,23 +546,16 @@ struct XMLConfigWrapper
 template<XMLStandaloneConfigurable T>
 class XMLDataConfig<T> : public XMLConfig<XMLConfigWrapper<T>>
 {
-  public:
-	XMLDataConfig()
-		: XMLConfig<XMLConfigWrapper<T>>::XMLConfig(m_configWrapper), m_configWrapper() {}
+	using Base = XMLConfig<XMLConfigWrapper<T>>;
 
-	XMLDataConfig(std::wstring_view filename)
-		: XMLConfig<XMLConfigWrapper<T>>::XMLConfig(m_configWrapper, filename), m_configWrapper() {}
+public:
+	XMLDataConfig() : Base(m_wrapper), m_wrapper() {}
+	XMLDataConfig(std::wstring_view filename) : Base(m_wrapper, filename), m_wrapper() {}
+	XMLDataConfig(std::wstring_view filename, T init_data) : Base(m_wrapper, filename), m_wrapper{.data = std::move(init_data)} {}
+	XMLDataConfig(const XMLDataConfig&) = delete;
 
-	XMLDataConfig(std::wstring_view filename, T init_data)
-		: XMLConfig<XMLConfigWrapper<T>>::XMLConfig(m_configWrapper, filename), m_configWrapper{.data = std::move(init_data)} {}
+	T& data() { return m_wrapper.data; }
 
-	XMLDataConfig(const XMLDataConfig& o) = delete;
-
-	T& data()
-	{
-		return m_configWrapper.data;
-	}
-
-  private:
-	XMLConfigWrapper<T> m_configWrapper;
+private:
+	XMLConfigWrapper<T> m_wrapper;
 };
