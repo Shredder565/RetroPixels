@@ -1,9 +1,9 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <span>
 
 #include "Common/CommonTypes.h"
@@ -16,45 +16,202 @@
 #include "VideoCommon/TextureDecoder_Util.h"
 #include "VideoCommon/sfont.inc"
 
-static bool TexFmt_Overlay_Enable = false;
-static bool TexFmt_Overlay_Center = false;
+using namespace TextureDecoderUtil;
 
-// TRAM
-// STATE_TO_SAVE
+// TMEM contents (saved in savestates by the BP/pixel engine code).
 alignas(16) std::array<u8, TMEM_SIZE> s_tex_mem;
 
-int TexDecoder_GetTexelSizeInNibbles(TextureFormat format)
+namespace
+{
+bool s_overlay_enabled = false;
+bool s_overlay_centered = false;
+
+// Texel size and tile shape of every format the decoders understand.
+struct FormatShape
+{
+  bool known;
+  int nibbles_per_texel;
+  int tile_width;
+  int tile_height;
+};
+
+constexpr FormatShape ShapeOf(TextureFormat format)
 {
   switch (format)
   {
-  // 4-bit formats
   case TextureFormat::I4:
   case TextureFormat::C4:
-    return 1;
-  // 8-bit formats
+    return {true, 1, 8, 8};
   case TextureFormat::I8:
   case TextureFormat::IA4:
   case TextureFormat::C8:
-    return 2;
-  // 16-bit formats
+    return {true, 2, 8, 4};
   case TextureFormat::IA8:
   case TextureFormat::RGB565:
   case TextureFormat::RGB5A3:
   case TextureFormat::C14X2:
-    return 4;
-  // 32-bit formats
+    return {true, 4, 4, 4};
   case TextureFormat::RGBA8:
-    return 8;
-  // Compressed format
+    return {true, 8, 4, 4};
   case TextureFormat::CMPR:
-    return 1;
-  // Special formats
+    return {true, 1, 8, 8};
   case TextureFormat::XFB:
-    return 4;
+    return {true, 4, 16, 1};
   default:
-    PanicAlertFmt("Invalid Texture Format {}! (GetTexelSizeInNibbles)", format);
-    return 1;
+    return {false, 0, 0, 0};
   }
+}
+
+// Tile shape of every copy encoder (RGBA8 copies write two 32-byte lines per 4x4 tile, but
+// the tile is still 4x4 texels).
+constexpr FormatShape ShapeOf(EFBCopyFormat format)
+{
+  switch (format)
+  {
+  case EFBCopyFormat::R4:
+    return {true, 1, 8, 8};
+  case EFBCopyFormat::RA4:
+  case EFBCopyFormat::A8:
+  case EFBCopyFormat::R8_0x1:
+  case EFBCopyFormat::R8:
+  case EFBCopyFormat::G8:
+  case EFBCopyFormat::B8:
+    return {true, 2, 8, 4};
+  case EFBCopyFormat::RA8:
+  case EFBCopyFormat::RGB565:
+  case EFBCopyFormat::RGB5A3:
+  case EFBCopyFormat::RG8:
+  case EFBCopyFormat::GB8:
+    return {true, 4, 4, 4};
+  case EFBCopyFormat::RGBA8:
+    return {true, 8, 4, 4};
+  case EFBCopyFormat::XFB:
+    return {true, 4, 16, 1};
+  default:
+    return {false, 0, 0, 0};
+  }
+}
+
+u32 PaletteLookup(std::span<const u8> tlut, u32 index, TLUTFormat tlutfmt)
+{
+  const u16 raw = Common::SafeSpanRead<u16>(tlut, sizeof(u16) * index);
+  switch (tlutfmt)
+  {
+  case TLUTFormat::IA8:
+    return IA8FromRaw(raw);
+  case TLUTFormat::RGB565:
+    return RGB565FromValue(Common::swap16(raw));
+  case TLUTFormat::RGB5A3:
+    return RGB5A3FromValue(Common::swap16(raw));
+  default:
+    return 0;
+  }
+}
+
+void StoreTexel(u8* dst, u32 rgba)
+{
+  std::memcpy(dst, &rgba, sizeof(rgba));
+}
+
+// Position of texel (s, t) in a tiled image. The tile counts per row follow what the software
+// sampler passes in `image_width` (the width minus one): one more tile than width >> shift.
+// The 16-bit truncations match the GX coordinate width.
+struct TilePosition
+{
+  u32 tile;    // tile number, row-major
+  u32 within;  // texel number inside the tile, row-major
+};
+
+TilePosition LocateTexel(int s, int t, int width_shift, int height_shift, int image_width)
+{
+  const u16 tile_x = static_cast<u16>(s >> width_shift);
+  const u16 tile_y = static_cast<u16>(t >> height_shift);
+  const u16 tiles_per_row = static_cast<u16>((image_width >> width_shift) + 1);
+  const u32 in_x = static_cast<u32>(s) & ((1u << width_shift) - 1);
+  const u32 in_y = static_cast<u32>(t) & ((1u << height_shift) - 1);
+  return {static_cast<u32>(tile_y) * tiles_per_row + tile_x, (in_y << width_shift) + in_x};
+}
+
+// Offset (in texels of the format) of texel (s, t) for formats whose tile is one contiguous
+// run of texels.
+u32 TiledTexelIndex(int s, int t, int width_shift, int height_shift, int image_width)
+{
+  const TilePosition pos = LocateTexel(s, t, width_shift, height_shift, image_width);
+  return (pos.tile << (width_shift + height_shift)) + pos.within;
+}
+
+u8 ClampToByte(float value)
+{
+  return static_cast<u8>(std::clamp(static_cast<int>(value), 0, 255));
+}
+
+// Inverse BT.601 (studio swing) YCbCr to RGB, as used for XFB textures. y, u and v have
+// their offsets (16, 128, 128) already removed.
+u32 YUVToRGBA(int y_int, int u_int, int v_int)
+{
+  // The inputs are at most 9 bits, so these conversions are exact.
+  const float y = static_cast<float>(y_int);
+  const float u = static_cast<float>(u_int);
+  const float v = static_cast<float>(v_int);
+  const u8 r = ClampToByte(1.164f * y + 1.596f * v);
+  const u8 g = ClampToByte(1.164f * y - 0.392f * u - 0.813f * v);
+  const u8 b = ClampToByte(1.164f * y + 2.017f * u);
+  return 0xFF000000u | static_cast<u32>(b) << 16 | static_cast<u32>(g) << 8 | r;
+}
+
+u32 DecodeCMPRTexel(std::span<const u8> src, int s, int t, int image_width)
+{
+  // Each 8x8 tile holds four 4x4 sub-blocks of 8 bytes, in row-major order.
+  const u16 sub_x = static_cast<u16>(s >> 2);
+  const u16 sub_y = static_cast<u16>(t >> 2);
+  const u16 tiles_per_row = static_cast<u16>((image_width >> 3) + 1);
+  const u32 tile = static_cast<u32>(sub_y >> 1) * tiles_per_row + (sub_x >> 1);
+  const u32 sub_block = (tile << 2) + ((sub_y & 1u) << 1) + (sub_x & 1u);
+
+  const DXTBlock block = Common::SafeSpanRead<DXTBlock>(src, sub_block << 3);
+  const std::array<u32, 4> colors = CMPRPalette(block.color1, block.color2);
+  const u32 selector_shift = 6 - ((static_cast<u32>(s) & 3) << 1);
+  return colors[(block.lines[t & 3] >> selector_shift) & 3];
+}
+
+void DrawFormatName(u8* dst, int width, int height, TextureFormat texformat)
+{
+  int x_pos = 0;
+  int y_pos = 0;
+  if (s_overlay_centered)
+  {
+    x_pos = (width - std::min(width, 40)) >> 1;
+    y_pos = (height - std::min(height, 10)) >> 1;
+  }
+
+  u32* const texels = reinterpret_cast<u32*>(dst);
+  for (const char ch : fmt::to_string(texformat))
+  {
+    // Glyphs are 10 rows of 9 cells; unused cells on the right hold 0x78.
+    const unsigned char* glyph = sfont_raw[sfont_map[static_cast<u8>(ch)]];
+    int glyph_width = 0;
+    while (glyph_width < 9 && glyph[glyph_width] != 0x78)
+      ++glyph_width;
+
+    for (int row = 0; row < 10; ++row)
+    {
+      const unsigned char* cells = glyph + row * 9;
+      u32* line = texels + (row + y_pos) * width + x_pos;
+      for (int col = 0; col < glyph_width; ++col)
+        line[col] = cells[col] ? 0xFFFFFFFFu : 0xFF000000u;
+    }
+    x_pos += glyph_width;
+  }
+}
+}  // namespace
+
+int TexDecoder_GetTexelSizeInNibbles(TextureFormat format)
+{
+  const FormatShape shape = ShapeOf(format);
+  if (shape.known)
+    return shape.nibbles_per_texel;
+  PanicAlertFmt("Invalid Texture Format {}! (GetTexelSizeInNibbles)", format);
+  return 1;
 }
 
 int TexDecoder_GetTextureSizeInBytes(int width, int height, TextureFormat format)
@@ -64,167 +221,66 @@ int TexDecoder_GetTextureSizeInBytes(int width, int height, TextureFormat format
 
 int TexDecoder_GetBlockWidthInTexels(TextureFormat format)
 {
-  switch (format)
-  {
-  // 4-bit formats
-  case TextureFormat::I4:
-  case TextureFormat::C4:
-    return 8;
-  // 8-bit formats
-  case TextureFormat::I8:
-  case TextureFormat::IA4:
-  case TextureFormat::C8:
-    return 8;
-  // 16-bit formats
-  case TextureFormat::IA8:
-  case TextureFormat::RGB565:
-  case TextureFormat::RGB5A3:
-  case TextureFormat::C14X2:
-    return 4;
-  // 32-bit formats
-  case TextureFormat::RGBA8:
-    return 4;
-  // Compressed format
-  case TextureFormat::CMPR:
-    return 8;
-  // Special formats
-  case TextureFormat::XFB:
-    return 16;
-  default:
-    PanicAlertFmt("Invalid Texture Format {}! (GetBlockWidthInTexels)", format);
-    return 8;
-  }
+  const FormatShape shape = ShapeOf(format);
+  if (shape.known)
+    return shape.tile_width;
+  PanicAlertFmt("Invalid Texture Format {}! (GetBlockWidthInTexels)", format);
+  return 8;
 }
 
 int TexDecoder_GetBlockHeightInTexels(TextureFormat format)
 {
-  switch (format)
-  {
-  // 4-bit formats
-  case TextureFormat::I4:
-  case TextureFormat::C4:
-    return 8;
-  // 8-bit formats
-  case TextureFormat::I8:
-  case TextureFormat::IA4:
-  case TextureFormat::C8:
-    return 4;
-  // 16-bit formats
-  case TextureFormat::IA8:
-  case TextureFormat::RGB565:
-  case TextureFormat::RGB5A3:
-  case TextureFormat::C14X2:
-    return 4;
-  // 32-bit formats
-  case TextureFormat::RGBA8:
-    return 4;
-  // Compressed format
-  case TextureFormat::CMPR:
-    return 8;
-  // Special formats
-  case TextureFormat::XFB:
-    return 1;
-  default:
-    PanicAlertFmt("Invalid Texture Format {}! (GetBlockHeightInTexels)", format);
-    return 4;
-  }
+  const FormatShape shape = ShapeOf(format);
+  if (shape.known)
+    return shape.tile_height;
+  PanicAlertFmt("Invalid Texture Format {}! (GetBlockHeightInTexels)", format);
+  return 4;
 }
 
 int TexDecoder_GetEFBCopyBlockWidthInTexels(EFBCopyFormat format)
 {
-  switch (format)
-  {
-  // 4-bit formats
-  case EFBCopyFormat::R4:
-    return 8;
-  // 8-bit formats
-  case EFBCopyFormat::RA4:
-  case EFBCopyFormat::A8:
-  case EFBCopyFormat::R8_0x1:
-  case EFBCopyFormat::R8:
-  case EFBCopyFormat::G8:
-  case EFBCopyFormat::B8:
-    return 8;
-  // 16-bit formats
-  case EFBCopyFormat::RA8:
-  case EFBCopyFormat::RGB565:
-  case EFBCopyFormat::RGB5A3:
-  case EFBCopyFormat::RG8:
-  case EFBCopyFormat::GB8:
-    return 4;
-  // 32-bit formats
-  case EFBCopyFormat::RGBA8:
-    return 4;
-  // Special formats
-  case EFBCopyFormat::XFB:
-    return 16;
-  default:
-    PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBlockWidthInTexels)", format);
-    return 8;
-  }
+  const FormatShape shape = ShapeOf(format);
+  if (shape.known)
+    return shape.tile_width;
+  PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBlockWidthInTexels)", format);
+  return 8;
 }
 
 int TexDecoder_GetEFBCopyBlockHeightInTexels(EFBCopyFormat format)
 {
-  switch (format)
-  {
-  // 4-bit formats
-  case EFBCopyFormat::R4:
-    return 8;
-  // 8-bit formats
-  case EFBCopyFormat::RA4:
-  case EFBCopyFormat::A8:
-  case EFBCopyFormat::R8_0x1:
-  case EFBCopyFormat::R8:
-  case EFBCopyFormat::G8:
-  case EFBCopyFormat::B8:
-    return 4;
-  // 16-bit formats
-  case EFBCopyFormat::RA8:
-  case EFBCopyFormat::RGB565:
-  case EFBCopyFormat::RGB5A3:
-  case EFBCopyFormat::RG8:
-  case EFBCopyFormat::GB8:
-    return 4;
-  // 32-bit formats
-  case EFBCopyFormat::RGBA8:
-    return 4;
-  // Special formats
-  case EFBCopyFormat::XFB:
-    return 1;
-  default:
-    PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBlockHeightInTexels)", format);
-    return 4;
-  }
+  const FormatShape shape = ShapeOf(format);
+  if (shape.known)
+    return shape.tile_height;
+  PanicAlertFmt("Invalid EFB Copy Format {}! (GetEFBCopyBlockHeightInTexels)", format);
+  return 4;
 }
 
-// returns bytes
 int TexDecoder_GetPaletteSize(TextureFormat format)
 {
+  // Bytes of TLUT a paletted format can address: 2 bytes per entry.
   switch (format)
   {
   case TextureFormat::C4:
-    return 16 * 2;
+    return 2 << 4;
   case TextureFormat::C8:
-    return 256 * 2;
+    return 2 << 8;
   case TextureFormat::C14X2:
-    return 16384 * 2;
+    return 2 << 14;
   default:
     return 0;
   }
 }
 
-// Get the "in memory" texture format of an EFB copy's format.
-// With the exception of c4/c8/c14 paletted texture formats (which are handled elsewhere)
-// this is the format the game should be using when it is drawing an EFB copy back.
 TextureFormat TexDecoder_GetEFBCopyBaseFormat(EFBCopyFormat format)
 {
+  // The texture format a game would use to sample the copy back (the paletted formats
+  // aside, which share these layouts).
   switch (format)
   {
   case EFBCopyFormat::R4:
     return TextureFormat::I4;
-  case EFBCopyFormat::A8:
   case EFBCopyFormat::R8_0x1:
+  case EFBCopyFormat::A8:
   case EFBCopyFormat::R8:
   case EFBCopyFormat::G8:
   case EFBCopyFormat::B8:
@@ -251,490 +307,178 @@ TextureFormat TexDecoder_GetEFBCopyBaseFormat(EFBCopyFormat format)
 
 void TexDecoder_SetTexFmtOverlayOptions(bool enable, bool center)
 {
-  TexFmt_Overlay_Enable = enable;
-  TexFmt_Overlay_Center = center;
-}
-
-static void TexDecoder_DrawOverlay(u8* dst, int width, int height, TextureFormat texformat)
-{
-  int w = std::min(width, 40);
-  int h = std::min(height, 10);
-
-  int xoff = (width - w) >> 1;
-  int yoff = (height - h) >> 1;
-
-  if (!TexFmt_Overlay_Center)
-  {
-    xoff = 0;
-    yoff = 0;
-  }
-
-  const auto fmt_str = fmt::to_string(texformat);
-  for (char ch : fmt_str)
-  {
-    int xcnt = 0;
-    int nchar = sfont_map[static_cast<u8>(ch)];
-
-    const unsigned char* ptr = sfont_raw[nchar];  // each char is up to 9x10
-
-    for (int x = 0; x < 9; x++)
-    {
-      if (ptr[x] == 0x78)
-        break;
-      xcnt++;
-    }
-
-    for (int y = 0; y < 10; y++)
-    {
-      for (int x = 0; x < xcnt; x++)
-      {
-        int* dtp = (int*)dst;
-        dtp[(y + yoff) * width + x + xoff] = ptr[x] ? 0xFFFFFFFF : 0xFF000000;
-      }
-      ptr += 9;
-    }
-    xoff += xcnt;
-  }
+  s_overlay_enabled = enable;
+  s_overlay_centered = center;
 }
 
 void TexDecoder_Decode(u8* dst, const u8* src, int width, int height, TextureFormat texformat,
                        const u8* tlut, TLUTFormat tlutfmt)
 {
-  _TexDecoder_DecodeImpl((u32*)dst, src, width, height, texformat, tlut, tlutfmt);
-
-  if (TexFmt_Overlay_Enable)
-    TexDecoder_DrawOverlay(dst, width, height, texformat);
-}
-
-static inline u32 DecodePixel_IA8(u16 val)
-{
-  int a = val & 0xFF;
-  int i = val >> 8;
-  return i | (i << 8) | (i << 16) | (a << 24);
-}
-
-static inline u32 DecodePixel_RGB565(u16 val)
-{
-  int r, g, b, a;
-  r = Convert5To8((val >> 11) & 0x1f);
-  g = Convert6To8((val >> 5) & 0x3f);
-  b = Convert5To8((val) & 0x1f);
-  a = 0xFF;
-  return r | (g << 8) | (b << 16) | (a << 24);
-}
-
-static inline u32 DecodePixel_RGB5A3(u16 val)
-{
-  int r, g, b, a;
-  if ((val & 0x8000))
-  {
-    r = Convert5To8((val >> 10) & 0x1f);
-    g = Convert5To8((val >> 5) & 0x1f);
-    b = Convert5To8((val) & 0x1f);
-    a = 0xFF;
-  }
-  else
-  {
-    a = Convert3To8((val >> 12) & 0x7);
-    r = Convert4To8((val >> 8) & 0xf);
-    g = Convert4To8((val >> 4) & 0xf);
-    b = Convert4To8((val) & 0xf);
-  }
-  return r | (g << 8) | (b << 16) | (a << 24);
-}
-
-static inline u32 DecodePixel_Paletted(u16 pixel, TLUTFormat tlutfmt)
-{
-  switch (tlutfmt)
-  {
-  case TLUTFormat::IA8:
-    return DecodePixel_IA8(pixel);
-  case TLUTFormat::RGB565:
-    return DecodePixel_RGB565(Common::swap16(pixel));
-  case TLUTFormat::RGB5A3:
-    return DecodePixel_RGB5A3(Common::swap16(pixel));
-  default:
-    return 0;
-  }
+  _TexDecoder_DecodeImpl(reinterpret_cast<u32*>(dst), src, width, height, texformat, tlut,
+                         tlutfmt);
+  if (s_overlay_enabled)
+    DrawFormatName(dst, width, height, texformat);
 }
 
 void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int imageWidth,
-                            TextureFormat texformat, std::span<const u8> tlut_, TLUTFormat tlutfmt)
+                            TextureFormat texformat, std::span<const u8> tlut, TLUTFormat tlutfmt)
 {
-  /* General formula for computing texture offset
-  //
-  u16 sBlk = s / blockWidth;
-  u16 tBlk = t / blockHeight;
-  u16 widthBlks = (width / blockWidth) + 1;
-  u32 base = (tBlk * widthBlks + sBlk) * blockWidth * blockHeight;
-  u16 blkS = s & (blockWidth - 1);
-  u16 blkT =  t & (blockHeight - 1);
-  u32 blkOff = blkT * blockWidth + blkS;
-  */
-
   switch (texformat)
   {
+  case TextureFormat::I4:
   case TextureFormat::C4:
   {
-    u16 sBlk = s >> 3;
-    u16 tBlk = t >> 3;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;
-    u16 blkS = s & 7;
-    u16 blkT = t & 7;
-    u32 blkOff = (blkT << 3) + blkS;
-
-    int rs = (blkOff & 1) ? 0 : 4;
-    u32 offset = base + (blkOff >> 1);
-
-    u8 val = (Common::SafeSpanRead<u8>(src, offset) >> rs) & 0xF;
-    u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
-
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
+    // Two texels per byte, the left one in the high nibble.
+    const u32 index = TiledTexelIndex(s, t, 3, 3, imageWidth);
+    const u8 packed = Common::SafeSpanRead<u8>(src, index >> 1);
+    const u8 nibble = (index & 1) ? (packed & 0xF) : (packed >> 4);
+    if (texformat == TextureFormat::C4)
+    {
+      StoreTexel(dst, PaletteLookup(tlut, nibble, tlutfmt));
+    }
+    else
+    {
+      const u8 intensity = Convert4To8(nibble);
+      std::memset(dst, intensity, 4);
+    }
+    break;
   }
-  break;
-  case TextureFormat::I4:
-  {
-    u16 sBlk = s >> 3;
-    u16 tBlk = t >> 3;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;
-    u16 blkS = s & 7;
-    u16 blkT = t & 7;
-    u32 blkOff = (blkT << 3) + blkS;
-
-    int rs = (blkOff & 1) ? 0 : 4;
-    u32 offset = base + (blkOff >> 1);
-
-    u8 val = (Common::SafeSpanRead<u8>(src, offset) >> rs) & 0xF;
-    val = Convert4To8(val);
-    dst[0] = val;
-    dst[1] = val;
-    dst[2] = val;
-    dst[3] = val;
-  }
-  break;
   case TextureFormat::I8:
-  {
-    u16 sBlk = s >> 3;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;
-    u16 blkS = s & 7;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 3) + blkS;
-
-    u8 val = Common::SafeSpanRead<u8>(src, base + blkOff);
-    dst[0] = val;
-    dst[1] = val;
-    dst[2] = val;
-    dst[3] = val;
-  }
-  break;
   case TextureFormat::C8:
-  {
-    u16 sBlk = s >> 3;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;
-    u16 blkS = s & 7;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 3) + blkS;
-
-    u8 val = Common::SafeSpanRead<u8>(src, base + blkOff);
-    u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
-
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
-  }
-  break;
   case TextureFormat::IA4:
   {
-    u16 sBlk = s >> 3;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;
-    u16 blkS = s & 7;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 3) + blkS;
-
-    u8 val = Common::SafeSpanRead<u8>(src, base + blkOff);
-    const u8 a = Convert4To8(val >> 4);
-    const u8 l = Convert4To8(val & 0xF);
-    dst[0] = l;
-    dst[1] = l;
-    dst[2] = l;
-    dst[3] = a;
+    const u8 value = Common::SafeSpanRead<u8>(src, TiledTexelIndex(s, t, 3, 2, imageWidth));
+    if (texformat == TextureFormat::I8)
+    {
+      std::memset(dst, value, 4);
+    }
+    else if (texformat == TextureFormat::C8)
+    {
+      StoreTexel(dst, PaletteLookup(tlut, value, tlutfmt));
+    }
+    else
+    {
+      // IA4: alpha in the high nibble, intensity in the low one.
+      const u8 intensity = Convert4To8(value & 0xF);
+      dst[0] = intensity;
+      dst[1] = intensity;
+      dst[2] = intensity;
+      dst[3] = Convert4To8(value >> 4);
+    }
+    break;
   }
-  break;
   case TextureFormat::IA8:
-  {
-    u16 sBlk = s >> 2;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 2) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 4;
-    u16 blkS = s & 3;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 2) + blkS;
-
-    u32 offset = (base + blkOff) << 1;
-    u16 val = Common::SafeSpanRead<u16>(src, offset);
-
-    *((u32*)dst) = DecodePixel_IA8(val);
-  }
-  break;
   case TextureFormat::C14X2:
-  {
-    u16 sBlk = s >> 2;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 2) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 4;
-    u16 blkS = s & 3;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 2) + blkS;
-
-    u32 offset = (base + blkOff) << 1;
-    u16 val = Common::swap16(Common::SafeSpanRead<u16>(src, offset)) & 0x3FFF;
-    u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
-
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
-  }
-  break;
   case TextureFormat::RGB565:
-  {
-    u16 sBlk = s >> 2;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 2) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 4;
-    u16 blkS = s & 3;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 2) + blkS;
-
-    u32 offset = (base + blkOff) << 1;
-    u16 val = Common::SafeSpanRead<u16>(src, offset);
-
-    *((u32*)dst) = DecodePixel_RGB565(Common::swap16(val));
-  }
-  break;
   case TextureFormat::RGB5A3:
   {
-    u16 sBlk = s >> 2;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 2) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 4;
-    u16 blkS = s & 3;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 2) + blkS;
-
-    u32 offset = (base + blkOff) << 1;
-    u16 val = Common::SafeSpanRead<u16>(src, offset);
-
-    *((u32*)dst) = DecodePixel_RGB5A3(Common::swap16(val));
+    const u32 byte_offset = TiledTexelIndex(s, t, 2, 2, imageWidth) << 1;
+    const u16 raw = Common::SafeSpanRead<u16>(src, byte_offset);
+    u32 rgba;
+    if (texformat == TextureFormat::IA8)
+      rgba = IA8FromRaw(raw);
+    else if (texformat == TextureFormat::C14X2)
+      rgba = PaletteLookup(tlut, Common::swap16(raw) & 0x3FFFu, tlutfmt);
+    else if (texformat == TextureFormat::RGB565)
+      rgba = RGB565FromValue(Common::swap16(raw));
+    else
+      rgba = RGB5A3FromValue(Common::swap16(raw));
+    StoreTexel(dst, rgba);
+    break;
   }
-  break;
   case TextureFormat::RGBA8:
   {
-    u16 sBlk = s >> 2;
-    u16 tBlk = t >> 2;
-    u16 widthBlks = (imageWidth >> 2) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 5;  // shift by 5 is correct
-    u16 blkS = s & 3;
-    u16 blkT = t & 3;
-    u32 blkOff = (blkT << 2) + blkS;
-
-    u32 offset = (base + blkOff) << 1;
-
-    dst[3] = Common::SafeSpanRead<u8>(src, offset);
-    dst[0] = Common::SafeSpanRead<u8>(src, offset + 1);
-    dst[1] = Common::SafeSpanRead<u8>(src, offset + 32);
-    dst[2] = Common::SafeSpanRead<u8>(src, offset + 33);
+    // A 4x4 tile is 32 bytes of AR pairs followed by 32 bytes of GB pairs.
+    const TilePosition pos = LocateTexel(s, t, 2, 2, imageWidth);
+    const u32 ar_offset = ((pos.tile << 5) + pos.within) << 1;
+    dst[3] = Common::SafeSpanRead<u8>(src, ar_offset);
+    dst[0] = Common::SafeSpanRead<u8>(src, ar_offset + 1);
+    dst[1] = Common::SafeSpanRead<u8>(src, ar_offset + 32);
+    dst[2] = Common::SafeSpanRead<u8>(src, ar_offset + 33);
+    break;
   }
-  break;
   case TextureFormat::CMPR:
-  {
-    u16 sDxt = s >> 2;
-    u16 tDxt = t >> 2;
-
-    u16 sBlk = sDxt >> 1;
-    u16 tBlk = tDxt >> 1;
-    u16 widthBlks = (imageWidth >> 3) + 1;
-    u32 base = (tBlk * widthBlks + sBlk) << 2;
-    u16 blkS = sDxt & 1;
-    u16 blkT = tDxt & 1;
-    u32 blkOff = (blkT << 1) + blkS;
-
-    u32 offset = (base + blkOff) << 3;
-
-    DXTBlock dxtBlock = Common::SafeSpanRead<DXTBlock>(src, offset);
-
-    u16 c1 = Common::swap16(dxtBlock.color1);
-    u16 c2 = Common::swap16(dxtBlock.color2);
-    int blue1 = Convert5To8(c1 & 0x1F);
-    int blue2 = Convert5To8(c2 & 0x1F);
-    int green1 = Convert6To8((c1 >> 5) & 0x3F);
-    int green2 = Convert6To8((c2 >> 5) & 0x3F);
-    int red1 = Convert5To8((c1 >> 11) & 0x1F);
-    int red2 = Convert5To8((c2 >> 11) & 0x1F);
-
-    u16 ss = s & 3;
-    u16 tt = t & 3;
-
-    int colorSel = dxtBlock.lines[tt];
-    int rs = 6 - (ss << 1);
-    colorSel = (colorSel >> rs) & 3;
-    colorSel |= c1 > c2 ? 0 : 4;
-
-    u32 color = 0;
-
-    switch (colorSel)
-    {
-    case 0:
-    case 4:
-      color = MakeRGBA(red1, green1, blue1, 255);
-      break;
-    case 1:
-    case 5:
-      color = MakeRGBA(red2, green2, blue2, 255);
-      break;
-    case 2:
-      color = MakeRGBA(DXTBlend(red2, red1), DXTBlend(green2, green1), DXTBlend(blue2, blue1), 255);
-      break;
-    case 3:
-      color = MakeRGBA(DXTBlend(red1, red2), DXTBlend(green1, green2), DXTBlend(blue1, blue2), 255);
-      break;
-    case 6:
-      color = MakeRGBA((red1 + red2) / 2, (green1 + green2) / 2, (blue1 + blue2) / 2, 255);
-      break;
-    case 7:
-      // color[3] is the same as color[2] (average of both colors), but transparent.
-      // This differs from DXT1 where color[3] is transparent black.
-      color = MakeRGBA((red1 + red2) / 2, (green1 + green2) / 2, (blue1 + blue2) / 2, 0);
-      break;
-    default:
-      color = 0;
-      break;
-    }
-
-    *((u32*)dst) = color;
-  }
-  break;
+    StoreTexel(dst, DecodeCMPRTexel(src, s, t, imageWidth));
+    break;
   case TextureFormat::XFB:
   {
-    size_t offset = (t * imageWidth + (s & (~1))) * 2;
-
-    // We do this one color sample (aka 2 RGB pixles) at a time
-    int Y = int((s & 1) == 0 ? src[offset] : src[offset + 2]) - 16;
-    int U = int(src[offset + 1]) - 128;
-    int V = int(src[offset + 3]) - 128;
-
-    // We do the inverse BT.601 conversion for YCbCr to RGB
-    // http://www.equasys.de/colorconversion.html#YCbCr-RGBColorFormatConversion
-    // TODO: Use more precise numbers for this conversion (although on real hardware, the XFB isn't
-    // in a real texture format, so does this conversion actually ever happen?)
-    u8 R = std::clamp(int(1.164f * Y + 1.596f * V), 0, 255);
-    u8 G = std::clamp(int(1.164f * Y - 0.392f * U - 0.813f * V), 0, 255);
-    u8 B = std::clamp(int(1.164f * Y + 2.017f * U), 0, 255);
-    dst[t * imageWidth + s] = 0xff000000 | B << 16 | G << 8 | R;
+    // Linear YUYV: each 4-byte group holds two texels sharing U and V. Only the low byte of
+    // the result (red) is stored, at a byte index of t * width + s.
+    const size_t pair = static_cast<size_t>((t * imageWidth + (s & ~1)) * 2);
+    const int y = int(src[(s & 1) ? pair + 2 : pair]) - 16;
+    const int u = int(src[pair + 1]) - 128;
+    const int v = int(src[pair + 3]) - 128;
+    dst[t * imageWidth + s] = static_cast<u8>(YUVToRGBA(y, u, v));
+    break;
   }
-  break;
+  default:
+    break;
   }
 }
 
 void TexDecoder_DecodeTexelRGBA8FromTmem(u8* dst, std::span<const u8> src_ar,
                                          std::span<const u8> src_gb, int s, int t, int imageWidth)
 {
-  u16 sBlk = s >> 2;
-  u16 tBlk = t >> 2;
-  u16 widthBlks =
-      (imageWidth >> 2) + 1;  // TODO: Looks wrong. Shouldn't this be ((imageWidth-1)>>2)+1 ?
-  u32 base_ar = (tBlk * widthBlks + sBlk) << 4;
-  u32 base_gb = (tBlk * widthBlks + sBlk) << 4;
-  u16 blkS = s & 3;
-  u16 blkT = t & 3;
-  u32 blk_off = (blkT << 2) + blkS;
-
-  u32 offset_ar = (base_ar + blk_off) << 1;
-  u32 offset_gb = (base_gb + blk_off) << 1;
-
-  dst[3] = Common::SafeSpanRead<u8>(src_ar, offset_ar);      // A
-  dst[0] = Common::SafeSpanRead<u8>(src_ar, offset_ar + 1);  // R
-  dst[1] = Common::SafeSpanRead<u8>(src_gb, offset_gb);      // G
-  dst[2] = Common::SafeSpanRead<u8>(src_gb, offset_gb + 1);  // B
+  // Both banks use the 16-bit 4x4 tiling; one holds AR pairs, the other GB pairs.
+  const u32 offset = TiledTexelIndex(s, t, 2, 2, imageWidth) << 1;
+  dst[3] = Common::SafeSpanRead<u8>(src_ar, offset);
+  dst[0] = Common::SafeSpanRead<u8>(src_ar, offset + 1);
+  dst[1] = Common::SafeSpanRead<u8>(src_gb, offset);
+  dst[2] = Common::SafeSpanRead<u8>(src_gb, offset + 1);
 }
 
 void TexDecoder_DecodeTexelRGBA8FromTmem(u8* dst, const u8* src_ar, const u8* src_gb, int s, int t,
                                          int imageWidth)
 {
-  u16 sBlk = s >> 2;
-  u16 tBlk = t >> 2;
-  u16 widthBlks =
-      (imageWidth >> 2) + 1;  // TODO: Looks wrong. Shouldn't this be ((imageWidth-1)>>2)+1 ?
-  u32 base_ar = (tBlk * widthBlks + sBlk) << 4;
-  u32 base_gb = (tBlk * widthBlks + sBlk) << 4;
-  u16 blkS = s & 3;
-  u16 blkT = t & 3;
-  u32 blk_off = (blkT << 2) + blkS;
-
-  u32 offset_ar = (base_ar + blk_off) << 1;
-  u32 offset_gb = (base_gb + blk_off) << 1;
-  const u8* val_addr_ar = src_ar + offset_ar;
-  const u8* val_addr_gb = src_gb + offset_gb;
-
-  dst[3] = val_addr_ar[0];  // A
-  dst[0] = val_addr_ar[1];  // R
-  dst[1] = val_addr_gb[0];  // G
-  dst[2] = val_addr_gb[1];  // B
+  const u32 offset = TiledTexelIndex(s, t, 2, 2, imageWidth) << 1;
+  dst[3] = src_ar[offset];
+  dst[0] = src_ar[offset + 1];
+  dst[1] = src_gb[offset];
+  dst[2] = src_gb[offset + 1];
 }
 
 void TexDecoder_DecodeRGBA8FromTmem(u8* dst, const u8* src_ar, const u8* src_gb, int width,
                                     int height)
 {
-  // TODO for someone who cares: Make this less slow!
+  if (width <= 0 || height <= 0)
+    return;
+
+  // Same layout as the per-texel decoder with an image width of width - 1, walked tile by
+  // tile instead of recomputing every offset.
+  const u32 tiles_per_row = static_cast<u32>(((width - 1) >> 2) + 1);
+  const u32 row_pitch = static_cast<u32>(width) * 4;
   for (int y = 0; y < height; ++y)
   {
-    for (int x = 0; x < width; ++x)
+    const u32 tile_row_base = (static_cast<u32>(y) >> 2) * tiles_per_row * 32 + (y & 3) * 8;
+    u8* out = dst + static_cast<u32>(y) * row_pitch;
+    for (int x = 0; x < width; ++x, out += 4)
     {
-      TexDecoder_DecodeTexelRGBA8FromTmem(dst, src_ar, src_gb, x, y, width - 1);
-      dst += 4;
+      const u32 offset = tile_row_base + (static_cast<u32>(x) >> 2) * 32 + (x & 3) * 2;
+      out[0] = src_ar[offset + 1];
+      out[1] = src_gb[offset];
+      out[2] = src_gb[offset + 1];
+      out[3] = src_ar[offset];
     }
   }
 }
 
 void TexDecoder_DecodeXFB(u8* dst, const u8* src, u32 width, u32 height, u32 stride)
 {
-  const u8* src_ptr = src;
-  u8* dst_ptr = dst;
-
-  for (u32 y = 0; y < height; y++)
+  // Each row is width / 2 (rounded up) YUYV groups; the output is packed without padding.
+  const u32 groups_per_row = (width + 1) / 2;
+  u8* out = dst;
+  for (u32 row = 0; row < height; ++row)
   {
-    const u8* row_ptr = src_ptr;
-    for (u32 x = 0; x < width; x += 2)
+    const u8* in = src + static_cast<size_t>(row) * stride;
+    for (u32 group = 0; group < groups_per_row; ++group, in += 4)
     {
-      // We do this one color sample (aka 2 RGB pixels) at a time
-      int Y1 = int(*(row_ptr++)) - 16;
-      int U = int(*(row_ptr++)) - 128;
-      int Y2 = int(*(row_ptr++)) - 16;
-      int V = int(*(row_ptr++)) - 128;
-
-      // We do the inverse BT.601 conversion for YCbCr to RGB
-      // http://www.equasys.de/colorconversion.html#YCbCr-RGBColorFormatConversion
-      // TODO: Use more precise numbers for this conversion (although on real hardware, the XFB
-      // isn't in a real texture format, so does this conversion actually ever happen?)
-      u8 R1 = static_cast<u8>(std::clamp(int(1.164f * Y1 + 1.596f * V), 0, 255));
-      u8 G1 = static_cast<u8>(std::clamp(int(1.164f * Y1 - 0.392f * U - 0.813f * V), 0, 255));
-      u8 B1 = static_cast<u8>(std::clamp(int(1.164f * Y1 + 2.017f * U), 0, 255));
-
-      u8 R2 = static_cast<u8>(std::clamp(int(1.164f * Y2 + 1.596f * V), 0, 255));
-      u8 G2 = static_cast<u8>(std::clamp(int(1.164f * Y2 - 0.392f * U - 0.813f * V), 0, 255));
-      u8 B2 = static_cast<u8>(std::clamp(int(1.164f * Y2 + 2.017f * U), 0, 255));
-
-      u32 rgba = 0xff000000 | B1 << 16 | G1 << 8 | R1;
-      std::memcpy(dst_ptr, &rgba, sizeof(rgba));
-      dst_ptr += sizeof(rgba);
-      rgba = 0xff000000 | B2 << 16 | G2 << 8 | R2;
-      std::memcpy(dst_ptr, &rgba, sizeof(rgba));
-      dst_ptr += sizeof(rgba);
+      const int y0 = int(in[0]) - 16;
+      const int u = int(in[1]) - 128;
+      const int y1 = int(in[2]) - 16;
+      const int v = int(in[3]) - 128;
+      StoreTexel(out, YUVToRGBA(y0, u, v));
+      StoreTexel(out + 4, YUVToRGBA(y1, u, v));
+      out += 8;
     }
-
-    src_ptr += stride;
   }
 }
