@@ -23,6 +23,7 @@
 #include "Common/IOFile.h"
 #include "Common/Lazy.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/NandPaths.h"
 #include "Common/Swap.h"
 #include "Core/CommonTitles.h"
@@ -44,10 +45,41 @@ namespace
 using Md5 = std::array<u8, 0x10>;
 using Iv = std::array<u8, 0x10>;
 
+// The header of a data.bin is encrypted with the SD card key and a fixed IV. Both are Nintendo's
+// and RetroPixels has neither: they come from the owner's wii_keys.txt (sd_key, sd_iv).
+std::optional<Iv> LoadSdIv()
+{
+  const std::optional<std::vector<u8>> bytes = IOSC::LoadOwnerKey("sd_iv", Iv{}.size());
+  if (!bytes)
+    return std::nullopt;
+  Iv iv;
+  std::ranges::copy(*bytes, iv.begin());
+  return iv;
+}
+
+bool HasSdKey(const IOSC& iosc)
+{
+  Iv iv{};
+  std::array<u8, 16> block{};
+  return iosc.Encrypt(IOSC::HANDLE_SD_KEY, iv.data(), block.data(), block.size(), block.data(),
+                      IOS::PID_ES) == IOS::HLE::IPC_SUCCESS;
+}
+
+// Import and export need both; without them they fail with this message.
+bool CheckSdKeys(const IOSC& iosc)
+{
+  if (HasSdKey(iosc) && LoadSdIv())
+    return true;
+  PanicAlertFmtT("Wii save files (data.bin) are encrypted with the Wii's SD card key and IV, which "
+                 "RetroPixels doesn't include.\n\nTo import or export them, add sd_key and sd_iv "
+                 "from your own console to wii_keys.txt in:\n{0}",
+                 File::GetUserPath(D_WIIROOT_IDX));
+  return false;
+}
+
 // Fixed values of the data.bin format, as the System Menu writes it.
-constexpr Iv SD_INITIAL_IV{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-// Stands in for the header's own MD5 while the header is hashed.
+// Stands in for the header's own MD5 while the header is hashed. This is a published format
+// constant (the value the MD5 field holds while it is computed), not key material.
 constexpr Md5 MD5_BLANKER{0x0E, 0x65, 0x37, 0x81, 0x99, 0xBE, 0x45, 0x17,
                           0xAB, 0x06, 0xEC, 0x22, 0x45, 0x1A, 0x57, 0x93};
 constexpr u32 NG_ID = 0x0403AC68;
@@ -290,8 +322,17 @@ private:
 class DataBinStorage final : public Storage
 {
 public:
-  DataBinStorage(IOSC* iosc, const std::string& path, const char* mode) : m_iosc{*iosc}
+  DataBinStorage(IOSC* iosc, const std::string& path, const char* mode)
+      : m_iosc{*iosc}, m_header_iv{LoadSdIv()}
   {
+    // Without the SD key and IV nothing can be read or written, so the file is left alone
+    // (opening it for writing would empty it).
+    if (!m_header_iv || !HasSdKey(m_iosc))
+    {
+      ERROR_LOG_FMT(CORE, "WiiSave: no SD key and IV (wii_keys.txt); {} is not used", path);
+      m_header_iv.reset();
+      return;
+    }
     File::CreateFullPath(path);
     m_file = File::IOFile{path, mode};
   }
@@ -303,10 +344,10 @@ public:
   std::optional<Header> ReadHeader() override
   {
     Header header;
-    if (!m_file.Seek(0, File::SeekOrigin::Begin) || !m_file.ReadArray(&header, 1))
+    if (!m_header_iv || !m_file.Seek(0, File::SeekOrigin::Begin) || !m_file.ReadArray(&header, 1))
       return std::nullopt;
 
-    Iv iv = SD_INITIAL_IV;
+    Iv iv = *m_header_iv;
     u8* const raw = reinterpret_cast<u8*>(&header);
     m_iosc.Decrypt(IOSC::HANDLE_SD_KEY, iv.data(), raw, sizeof(Header), raw, IOS::PID_ES);
 
@@ -388,8 +429,10 @@ public:
 
   bool WriteHeader(const Header& header) override
   {
+    if (!m_header_iv)
+      return false;
     Header encrypted;
-    Iv iv = SD_INITIAL_IV;
+    Iv iv = *m_header_iv;
     m_iosc.Encrypt(IOSC::HANDLE_SD_KEY, iv.data(), reinterpret_cast<const u8*>(&header),
                    sizeof(Header), reinterpret_cast<u8*>(&encrypted), IOS::PID_ES);
     return m_file.Seek(0, File::SeekOrigin::Begin) && m_file.WriteArray(&encrypted, 1);
@@ -503,6 +546,7 @@ private:
   }
 
   IOSC& m_iosc;
+  std::optional<Iv> m_header_iv;  // empty without the owner's SD key and IV
   File::IOFile m_file;
 };
 
@@ -567,6 +611,10 @@ CopyResult Copy(Storage* source, Storage* destination)
 CopyResult Import(const std::string& data_bin_path, const std::function<bool()>& can_overwrite)
 {
   IOS::HLE::Kernel ios;
+  // The player has been told why; Cancelled keeps the caller from adding a second, misleading
+  // message about a damaged NAND.
+  if (!CheckSdKeys(ios.GetIOSC()))
+    return CopyResult::Cancelled;
   const StoragePointer data_bin = MakeDataBinStorage(&ios.GetIOSC(), data_bin_path, "rb");
   const std::optional<Header> header = data_bin->ReadHeader();
   if (!header)
@@ -592,12 +640,16 @@ CopyResult Import(const std::string& data_bin_path, const std::function<bool()>&
 CopyResult Export(u64 tid, std::string_view export_path)
 {
   IOS::HLE::Kernel ios;
+  if (!CheckSdKeys(ios.GetIOSC()))
+    return CopyResult::Error;
   return ExportWith(ios, tid, export_path);
 }
 
 size_t ExportAll(std::string_view export_path)
 {
   IOS::HLE::Kernel ios;
+  if (!CheckSdKeys(ios.GetIOSC()))
+    return 0;
   size_t exported = 0;
   for (const u64 tid : ios.GetESCore().GetInstalledTitles())
   {

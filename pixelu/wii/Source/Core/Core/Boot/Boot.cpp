@@ -168,6 +168,22 @@ void FinishTitleBoot(const Core::CPUThreadGuard& guard, const DiscIO::Volume* vo
   AchievementManager::GetInstance().LoadGame(volume);
   SConfig::OnTitleDirectlyBooted(guard);
 }
+
+// Wii discs, WADs and NAND titles are encrypted with keys that only the owner's own console has
+// (RetroPixels has none). Without its keys file such a title is refused with one clear message
+// before anything is set up. GameCube games and Wii homebrew executables need no keys.
+bool HaveWiiKeys(IOS::HLE::IOSC::ConsoleType console_type)
+{
+  if (IOS::HLE::IOSC::HasConsoleKeys(console_type))
+    return true;
+  IOS::HLE::IOSC::ReportMissingKeys(console_type);
+  return false;
+}
+
+bool HaveWiiKeys(const DiscIO::Volume& volume)
+{
+  return HaveWiiKeys(volume.GetTicket(volume.GetGamePartition()).GetConsoleType());
+}
 }  // namespace
 
 // BootSessionData -----------------------------------------------------------------------------
@@ -530,6 +546,8 @@ public:
   bool operator()(BootParameters::Disc& disc) const
   {
     NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
+    if (m_system.IsWii() && disc.volume && !HaveWiiKeys(*disc.volume))
+      return false;
     const DiscIO::VolumeDisc* const volume =
         SetDisc(m_system.GetDVDInterface(), std::move(disc.volume), disc.auto_disc_change_paths);
     AchievementManager::GetInstance().LoadGame(volume);
@@ -585,6 +603,8 @@ public:
 
   bool operator()(const DiscIO::VolumeWAD& wad) const
   {
+    if (!HaveWiiKeys(wad))
+      return false;
     SetDefaultDisc(m_system.GetDVDInterface());
     if (!Boot_WiiWAD(m_system, wad))
       return false;
@@ -594,6 +614,13 @@ public:
 
   bool operator()(const BootParameters::NANDTitle& nand_title) const
   {
+    // The title's ticket is only readable once IOS runs; any keys file will do here, and a
+    // ticket for the other kind of console then fails in ES like on hardware.
+    if (!IOS::HLE::IOSC::HasConsoleKeys())
+    {
+      IOS::HLE::IOSC::ReportMissingKeys(IOS::HLE::IOSC::ConsoleType::Retail);
+      return false;
+    }
     SetDefaultDisc(m_system.GetDVDInterface());
     if (!BootNANDTitle(m_system, nand_title.id))
       return false;

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -13,11 +14,14 @@
 #include "Common/Align.h"
 #include "Common/BitUtils.h"
 #include "Common/Crypto/AES.h"
+#include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/Swap.h"
 #include "Core/Boot/AncastTypes.h"
 #include "Core/HW/Memmap.h"
+#include "Core/IOS/IOSC.h"
 #include "Core/System.h"
 
 namespace
@@ -40,13 +44,15 @@ bool ContainsHID4Access(std::span<const u8> code)
   return false;
 }
 
-// Keys and IV used by the Espresso boot ROM to decrypt vWii PPC ancast bodies.
-constexpr u8 ANCAST_KEY_RETAIL[0x10] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-constexpr u8 ANCAST_KEY_DEV[0x10] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-constexpr u8 ANCAST_IV[0x10] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+// The Espresso boot ROM decrypts vWii PPC ancast bodies with keys from the Espresso's own OTP.
+// That OTP is not part of a Wii U otp.bin dump (which is the Latte's; WiiUBrew lists no Espresso
+// key in it), and RetroPixels has no keys of its own, so they can only come from wii_keys.txt.
+std::optional<std::vector<u8>> LoadAncastKey(u32 console_type)
+{
+  const char* const name = console_type == ANCAST_CONSOLE_TYPE_DEV ? "espresso_ancast_key_dev" :
+                                                                     "espresso_ancast_key";
+  return IOS::HLE::IOSC::LoadOwnerKey(name, Common::AES::Context::KEY_SIZE);
+}
 }  // namespace
 
 DolReader::~DolReader() = default;
@@ -198,23 +204,30 @@ bool DolReader::LoadAncastIntoMemory(Core::System& system) const
   }
 
   const u32 console_type = Common::swap32(header.info_block.console_type);
-  const u8* key;
-  switch (console_type)
+  if (console_type != ANCAST_CONSOLE_TYPE_DEV && console_type != ANCAST_CONSOLE_TYPE_RETAIL)
   {
-  case ANCAST_CONSOLE_TYPE_DEV:
-    key = ANCAST_KEY_DEV;
-    break;
-  case ANCAST_CONSOLE_TYPE_RETAIL:
-    key = ANCAST_KEY_RETAIL;
-    break;
-  default:
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid console type: 0x{:x}", console_type);
     return false;
   }
 
+  const std::optional<std::vector<u8>> key = LoadAncastKey(console_type);
+  const std::optional<std::vector<u8>> iv =
+      IOS::HLE::IOSC::LoadOwnerKey("espresso_ancast_iv", Common::AES::Context::BLOCK_SIZE);
+  if (!key || !iv)
+  {
+    ERROR_LOG_FMT(BOOT, "Ancast: no Espresso ancast key and IV in wii_keys.txt");
+    PanicAlertFmtT("This is a vWii ancast image. It is encrypted with keys from the Wii U's "
+                   "Espresso processor, which RetroPixels doesn't include and a Wii U otp.bin "
+                   "doesn't contain, so it can't be started.\n\nIf you have them from your own "
+                   "console, add espresso_ancast_key and espresso_ancast_iv to wii_keys.txt in "
+                   "{0}",
+                   File::GetUserPath(D_WIIROOT_IDX));
+    return false;
+  }
+
   std::vector<u8> plain(body_size);
-  const std::unique_ptr<Common::AES::Context> aes = Common::AES::CreateContextDecrypt(key);
-  if (!aes->Crypt(ANCAST_IV, body, plain.data(), body_size))
+  const std::unique_ptr<Common::AES::Context> aes = Common::AES::CreateContextDecrypt(key->data());
+  if (!aes->Crypt(iv->data(), body, plain.data(), body_size))
     return false;
 
   auto& memory = system.GetMemory();
