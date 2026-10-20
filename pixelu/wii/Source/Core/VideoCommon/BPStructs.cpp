@@ -1,11 +1,16 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// BP register writes: masking, change detection and the side effects of each register (state
+// invalidation, EFB copies, TMEM loads, PE tokens), plus their text descriptions.
 
 #include "VideoCommon/BPStructs.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <optional>
 #include <string>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -41,1333 +46,995 @@
 #include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/XFStateManager.h"
 
-using namespace BPFunctions;
-
-static constexpr Common::EnumMap<float, GammaCorrection::Invalid2_2> s_gammaLUT = {1.0f, 1.7f, 2.2f,
-                                                                                   2.2f};
-
 void BPInit()
 {
-  memset(reinterpret_cast<u8*>(&bpmem), 0, sizeof(bpmem));
+  std::memset(reinterpret_cast<u8*>(&bpmem), 0, sizeof(bpmem));
   bpmem.bpMask = 0xFFFFFF;
 }
 
-static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& xf_state_manager,
-                      GeometryShaderManager& geometry_shader_manager, const BPCmd& bp,
-                      int cycles_into_future)
+namespace
 {
-  /*
-  ----------------------------------------------------------------------------------------------------------------
-  Purpose: Writes to the BP registers
-  Called: At the end of every: OpcodeDecoding.cpp ExecuteDisplayList > Decode() > LoadBPReg
-  How It Works: First the pipeline is flushed then update the bpmem with the new value.
-          Some of the BP cases have to call certain functions while others just update the bpmem.
-          some bp cases check the changes variable, because they might not have to be updated all
-  the time
-  NOTE: it seems not all bp cases like checking changes, so calling if (bp.changes == 0 ? false :
-  true)
-      had to be ditched and the games seem to work fine with out it.
-  NOTE2: Yet Another GameCube Documentation calls them Bypass Raster State Registers but possibly
-  completely wrong
-  NOTE3: This controls the register groups: RAS1/2, SU, TF, TEV, C/Z, PEC
-  TODO: Turn into function table. The (future) DisplayList (DL) jit can then call the functions
-  directly,
-      getting rid of dynamic dispatch. Unfortunately, few games use DLs properly - most\
-      just stuff geometry in them and don't put state changes there
-  ----------------------------------------------------------------------------------------------------------------
-  */
+// Exponent used for each EFB copy gamma setting (the reserved value acts like 2.2).
+constexpr Common::EnumMap<float, GammaCorrection::Invalid2_2> COPY_GAMMA = {1.0f, 1.7f, 2.2f,
+                                                                            2.2f};
 
-  if (((s32*)&bpmem)[bp.address] == bp.newvalue)
+// The BP register file as words.
+u32* BPWords()
+{
+  return reinterpret_cast<u32*>(&bpmem);
+}
+
+// Registers that act on every write ("commands"), even when the value does not change.
+bool IsCommandRegister(int address)
+{
+  switch (address)
   {
-    if (!(bp.address == BPMEM_TRIGGER_EFB_COPY || bp.address == BPMEM_CLEARBBOX1 ||
-          bp.address == BPMEM_CLEARBBOX2 || bp.address == BPMEM_SETDRAWDONE ||
-          bp.address == BPMEM_PE_TOKEN_ID || bp.address == BPMEM_PE_TOKEN_INT_ID ||
-          bp.address == BPMEM_LOADTLUT0 || bp.address == BPMEM_LOADTLUT1 ||
-          bp.address == BPMEM_TEXINVALIDATE || bp.address == BPMEM_PRELOAD_MODE ||
-          bp.address == BPMEM_CLEAR_PIXEL_PERF))
+  case BPMEM_TRIGGER_EFB_COPY:
+  case BPMEM_CLEARBBOX1:
+  case BPMEM_CLEARBBOX2:
+  case BPMEM_SETDRAWDONE:
+  case BPMEM_PE_TOKEN_ID:
+  case BPMEM_PE_TOKEN_INT_ID:
+  case BPMEM_LOADTLUT0:
+  case BPMEM_LOADTLUT1:
+  case BPMEM_TEXINVALIDATE:
+  case BPMEM_PRELOAD_MODE:
+  case BPMEM_CLEAR_PIXEL_PERF:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Registers whose value is only read later (when copying, clearing, drawing...), so writing
+// them needs nothing beyond the store.
+bool IsPassiveRegister(int address)
+{
+  switch (address)
+  {
+  case BPMEM_DISPLAYCOPYFILTER:
+  case BPMEM_DISPLAYCOPYFILTER + 1:
+  case BPMEM_DISPLAYCOPYFILTER + 2:
+  case BPMEM_DISPLAYCOPYFILTER + 3:
+  case BPMEM_COPYFILTER0:
+  case BPMEM_COPYFILTER1:
+  case BPMEM_IND_IMASK:
+  case BPMEM_PERF0_TRI:
+  case BPMEM_PERF0_QUAD:
+  case BPMEM_PERF1:
+  case BPMEM_BUSCLOCK0:
+  case BPMEM_BUSCLOCK1:
+  case BPMEM_FIELDMASK:  // field rendering is not emulated
+  case BPMEM_FIELDMODE:
+  case BPMEM_EFB_TL:
+  case BPMEM_EFB_WH:
+  case BPMEM_EFB_ADDR:
+  case BPMEM_EFB_STRIDE:
+  case BPMEM_COPYYSCALE:
+  case BPMEM_CLEAR_AR:
+  case BPMEM_CLEAR_GB:
+  case BPMEM_CLEAR_Z:
+  case BPMEM_REVBITS:
+  case BPMEM_PRELOAD_ADDR:
+  case BPMEM_PRELOAD_TMEMEVEN:
+  case BPMEM_PRELOAD_TMEMODD:
+  case BPMEM_LOADTLUT0:  // source address for the next BPMEM_LOADTLUT1
+  case BPMEM_BP_MASK:    // applied by LoadBPReg
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Draw done and tokens report that everything before them has been drawn, so pending EFB copies
+// must land and EFB peeks must see fresh data.
+void FinishPendingEFBWork()
+{
+  g_texture_cache->FlushEFBCopies();
+  g_texture_cache->FlushStaleBinds();
+  g_framebuffer_manager->InvalidatePeekCache(false);
+  g_framebuffer_manager->RefreshPeekCache();
+}
+
+// In deterministic mode the PE events were already raised while preprocessing on the CPU.
+bool PixelEngineEventsFromGPU(Core::System& system)
+{
+  return !system.GetFifo().UseDeterministicGPUThread();
+}
+
+void OnDrawDone(u32 value, int cycles_into_future)
+{
+  if ((value & 0xFF) != 0x02)
+  {
+    WARN_LOG_FMT(VIDEO, "GXSetDrawDone ??? (value {:#04X})", value & 0xFFFF);
+    return;
+  }
+
+  INCSTAT(g_stats.this_frame.num_draw_done);
+  FinishPendingEFBWork();
+  auto& system = Core::System::GetInstance();
+  if (PixelEngineEventsFromGPU(system))
+    system.GetPixelEngine().SetFinish(cycles_into_future);
+  DEBUG_LOG_FMT(VIDEO, "GXSetDrawDone SetPEFinish (value: {:#04X})", value & 0xFFFF);
+}
+
+void OnToken(u32 value, bool interrupt, int cycles_into_future)
+{
+  if (interrupt)
+    INCSTAT(g_stats.this_frame.num_token_int);
+  else
+    INCSTAT(g_stats.this_frame.num_token);
+  FinishPendingEFBWork();
+
+  auto& system = Core::System::GetInstance();
+  const u16 token = static_cast<u16>(value & 0xFFFF);
+  if (PixelEngineEventsFromGPU(system))
+    system.GetPixelEngine().SetToken(token, interrupt, cycles_into_future);
+  if (interrupt)
+    DEBUG_LOG_FMT(VIDEO, "SetPEToken + INT {:#06X}", value & 0xFFFF);
+  else
+    DEBUG_LOG_FMT(VIDEO, "SetPEToken {:#06X}", value & 0xFFFF);
+}
+
+// Display copy (EFB to XFB): the end of a frame for most games.
+void CopyToXFB(PixelShaderManager& pixel_shader_manager, const UPE_Copy& copy, u32 dest_addr,
+               u32 dest_stride, u32 copy_width, const MathUtil::Rectangle<s32>& src)
+{
+  // Bounding box tracking stops at a display copy.
+  g_bounding_box->Disable(pixel_shader_manager);
+
+  // The vertical scale register is 8.8 fixed point; the invert bit uses its reciprocal.
+  const float scale_reg = static_cast<float>(bpmem.dispcopyyscale);
+  const float y_scale = copy.scale_invert ? 256.0f / scale_reg : scale_reg / 256.0f;
+  const float xfb_lines = 1.0f + static_cast<float>(bpmem.copyTexSrcWH.y.Value()) * y_scale;
+  const u32 xfb_height = static_cast<u32>(xfb_lines);
+
+  DEBUG_LOG_FMT(VIDEO,
+                "RenderToXFB: destAddr: {:08x} | srcRect [{} {} {} {}] | fbWidth: {} | "
+                "fbStride: {} | fbHeight: {} | yScale: {}",
+                dest_addr, src.left, src.top, src.right, src.bottom, bpmem.copyTexSrcWH.x + 1,
+                dest_stride, xfb_height, y_scale);
+
+  const bool from_depth = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
+  g_texture_cache->CopyRenderTargetToTexture(
+      dest_addr, EFBCopyFormat::XFB, copy_width, xfb_height, dest_stride, from_depth, src, false,
+      false, y_scale, COPY_GAMMA[copy.gamma], bpmem.triggerEFBCopy.clamp_top,
+      bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
+
+  // Treat every display copy as a frame boundary. Games that assemble one XFB from several
+  // smaller copies (e.g. to exceed the EFB size) produce several "frames" per real frame; telling
+  // those apart would need tracking the VI configuration.
+  auto& system = Core::System::GetInstance();
+  system.GetVideoEvents().after_frame_event.Trigger(system);
+
+  if (g_ActiveConfig.bImmediateXFB)
+  {
+    // The stride is in bytes; two bytes per YUYV pixel gives the width.
+    g_presenter->ImmediateSwap(dest_addr, dest_stride / 2, dest_stride, xfb_height);
+  }
+  else if (system.GetFifoPlayer().IsRunningWithFakeVideoInterfaceUpdates())
+  {
+    system.GetVideoInterface().FakeVIUpdate(dest_addr, static_cast<u32>(src.GetWidth()),
+                                            dest_stride, xfb_height);
+  }
+}
+
+// BPMEM_TRIGGER_EFB_COPY: copy the source rectangle to a texture in RAM or to the XFB, then
+// optionally clear it.
+void ExecuteEFBCopy(PixelShaderManager& pixel_shader_manager)
+{
+  const u32 dest_addr = bpmem.copyTexDest << 5;
+  const u32 dest_stride = bpmem.copyDestStride << 5;
+  const UPE_Copy copy = bpmem.triggerEFBCopy;
+
+  // Source rectangle; the size registers hold size - 1.
+  MathUtil::Rectangle<s32> src;
+  src.left = static_cast<s32>(bpmem.copyTexSrcXY.x.Value());
+  src.top = static_cast<s32>(bpmem.copyTexSrcXY.y.Value());
+  src.right = static_cast<s32>(bpmem.copyTexSrcXY.x + bpmem.copyTexSrcWH.x + 1);
+  src.bottom = static_cast<s32>(bpmem.copyTexSrcXY.y + bpmem.copyTexSrcWH.y + 1);
+
+  // The 10-bit registers allow regions up to 1024x1024. On hardware an oversized copy still
+  // writes as many bytes as the size says, filling the excess with format-dependent junk read
+  // past the EFB. That junk is not reproduced: a copy starting outside the EFB writes nothing,
+  // and one extending past it is clamped to the EFB edges. (Some arcade Virtual Console titles
+  // do this.)
+  if (static_cast<u32>(src.right) > EFB_WIDTH || static_cast<u32>(src.bottom) > EFB_HEIGHT)
+  {
+    WARN_LOG_FMT(VIDEO, "Oversized EFB copy: {}x{} (offset {},{} stride {})", src.GetWidth(),
+                 src.GetHeight(), src.left, src.top, dest_stride);
+
+    if (static_cast<u32>(src.left) >= EFB_WIDTH || static_cast<u32>(src.top) >= EFB_HEIGHT)
     {
+      // Nothing of the EFB is covered (seen from at least one online mode). A display copy
+      // still ends bounding box tracking, as the normal path would.
+      if (copy.copy_to_xfb)
+        g_bounding_box->Disable(pixel_shader_manager);
       return;
+    }
+
+    src.right = std::clamp<int>(src.right, 0, EFB_WIDTH);
+    src.bottom = std::clamp<int>(src.bottom, 0, EFB_HEIGHT);
+  }
+
+  const u32 copy_width = static_cast<u32>(src.GetWidth());
+  const u32 copy_height = static_cast<u32>(src.GetHeight());
+
+  // A zero stride copies nothing (but a requested clear still happens).
+  if (dest_stride != 0)
+  {
+    if (copy.copy_to_xfb)
+    {
+      CopyToXFB(pixel_shader_manager, copy, dest_addr, dest_stride, copy_width, src);
+    }
+    else
+    {
+      // With a Z24 EFB the depth buffer is the copy source.
+      const bool from_depth = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
+      g_texture_cache->CopyRenderTargetToTexture(
+          dest_addr, copy.tp_realFormat(), copy_width, copy_height, dest_stride, from_depth, src,
+          copy.intensity_fmt && copy.auto_conv, copy.half_scale, 1.0f, COPY_GAMMA[copy.gamma],
+          bpmem.triggerEFBCopy.clamp_top, bpmem.triggerEFBCopy.clamp_bottom,
+          bpmem.copyfilter.GetCoefficients());
     }
   }
 
-  FlushPipeline();
+  if (!copy.clear)
+    return;
 
-  ((u32*)&bpmem)[bp.address] = bp.newvalue;
+  // The clear happens after the copy has read the region.
+  BPFunctions::ClearScreen(g_framebuffer_manager.get(), src, bpmem.blendmode.color_update != 0,
+                           bpmem.blendmode.alpha_update != 0, bpmem.zmode.update_enable != 0,
+                           bpmem.zcontrol.pixel_format, bpmem.clearcolorAR, bpmem.clearcolorGB,
+                           bpmem.clearZValue);
+  // Clearing changes the scissor, so put the game's back.
+  BPFunctions::SetScissorAndViewport(g_framebuffer_manager.get(), bpmem.scissorTL,
+                                     bpmem.scissorBR, bpmem.scissorOffset, xfmem.viewport);
+}
 
-  switch (bp.address)
+void NoteTMEMSource(Core::System& system, u32 address, u32 size)
+{
+  if (OpcodeDecoder::g_record_fifo_data)
+    system.GetFifoRecorder().UseMemory(address, size, MemoryUpdate::Type::TMEM);
+}
+
+// BPMEM_LOADTLUT1: copy a palette from RAM into TMEM.
+void LoadTLUT()
+{
+  const auto& tlut = bpmem.tmem_config.tlut_dest;
+  const u32 tmem_offset = tlut.tmem_addr << 9;
+  const u32 byte_count = tlut.tmem_line_count * TMEM_LINE_SIZE;
+  u32 source = bpmem.tmem_config.tlut_src << 5;
+
+  // The GameCube decodes fewer address bits; some games leave junk in the high ones.
+  auto& system = Core::System::GetInstance();
+  if (!system.IsWii())
+    source &= 0x01FFFFFF;
+
+  // The largest offset plus the largest size still fits in TMEM, so no bounds check is needed.
+  constexpr u32 LARGEST_OFFSET = (1u << decltype(tlut.tmem_addr)::NumBits()) << 9;
+  constexpr u32 LARGEST_SIZE = (1u << decltype(tlut.tmem_line_count)::NumBits()) * TMEM_LINE_SIZE;
+  static_assert(LARGEST_OFFSET + LARGEST_SIZE < TMEM_SIZE);
+
+  system.GetMemory().CopyFromEmu(s_tex_mem.data() + tmem_offset, source, byte_count);
+  NoteTMEMSource(system, source, byte_count);
+  TMEM::InvalidateAll();
+}
+
+// BPMEM_PRELOAD_MODE with a non-zero value: load texture data straight into TMEM (manual TMEM
+// management). How exactly the hardware does this is not well understood.
+void PreloadTMEM()
+{
+  const BPS_TmemConfig& config = bpmem.tmem_config;
+  const u32 source = config.preload_addr << 5;
+  const u32 lines = config.preload_tile_info.count;
+  u32 even = config.preload_tmem_even * TMEM_LINE_SIZE;
+  u32 consumed = 0;
+
+  auto& system = Core::System::GetInstance();
+  auto& memory = system.GetMemory();
+
+  if (config.preload_tile_info.type == 3)
   {
-  case BPMEM_GENMODE:  // Set the Generation Mode
-    PRIM_LOG(
-        "genmode: texgen={}, col={}, multisampling={}, tev={}, cull_mode={}, ind={}, zfeeze={}",
-        bpmem.genMode.numtexgens, bpmem.genMode.numcolchans, bpmem.genMode.multisampling,
-        bpmem.genMode.numtevstages + 1, bpmem.genMode.cull_mode, bpmem.genMode.numindstages,
-        bpmem.genMode.zfreeze);
+    // RGBA8 (and apparently CI14): the AR and GB halves of each tile go to different TMEM
+    // banks, a line at a time.
+    u32 odd = config.preload_tmem_odd * TMEM_LINE_SIZE;
+    for (u32 line = 0; line < lines; ++line)
+    {
+      if (even + TMEM_LINE_SIZE > TMEM_SIZE || odd + TMEM_LINE_SIZE > TMEM_SIZE)
+        break;
+      memory.CopyFromEmu(s_tex_mem.data() + even, source + consumed, TMEM_LINE_SIZE);
+      memory.CopyFromEmu(s_tex_mem.data() + odd, source + consumed + TMEM_LINE_SIZE,
+                         TMEM_LINE_SIZE);
+      even += TMEM_LINE_SIZE;
+      odd += TMEM_LINE_SIZE;
+      consumed += 2 * TMEM_LINE_SIZE;
+    }
+  }
+  else if (even < TMEM_SIZE)
+  {
+    // Everything else is one contiguous block, cut off at the end of TMEM.
+    consumed = std::min(lines * TMEM_LINE_SIZE, TMEM_SIZE - even);
+    memory.CopyFromEmu(s_tex_mem.data() + even, source, consumed);
+  }
 
-    if (bp.changes)
-      pixel_shader_manager.SetGenModeChanged();
+  NoteTMEMSource(Core::System::GetInstance(), source, consumed);
+  TMEM::InvalidateAll();
+}
 
-    // Only call SetGenerationMode when cull mode changes.
-    if (bp.changes & 0xC000)
-      SetGenerationMode();
-    return;
-  case BPMEM_IND_MTXA:  // Index Matrix Changed
-  case BPMEM_IND_MTXB:
-  case BPMEM_IND_MTXC:
-  case BPMEM_IND_MTXA + 3:
-  case BPMEM_IND_MTXB + 3:
-  case BPMEM_IND_MTXC + 3:
-  case BPMEM_IND_MTXA + 6:
-  case BPMEM_IND_MTXB + 6:
-  case BPMEM_IND_MTXC + 6:
-    if (bp.changes)
-      pixel_shader_manager.SetIndMatrixChanged((bp.address - BPMEM_IND_MTXA) / 3);
-    return;
-  case BPMEM_RAS1_SS0:  // Index Texture Coordinate Scale 0
-    if (bp.changes)
-      pixel_shader_manager.SetIndTexScaleChanged(false);
-    return;
-  case BPMEM_RAS1_SS1:  // Index Texture Coordinate Scale 1
-    if (bp.changes)
-      pixel_shader_manager.SetIndTexScaleChanged(true);
-    return;
-  // ----------------
-  // Scissor Control
-  // ----------------
-  case BPMEM_SCISSORTL:      // Scissor Rectable Top, Left
-  case BPMEM_SCISSORBR:      // Scissor Rectable Bottom, Right
-  case BPMEM_SCISSOROFFSET:  // Scissor Offset
-    xf_state_manager.SetViewportChanged();
-    geometry_shader_manager.SetViewportChanged();
-    return;
-  case BPMEM_LINEPTWIDTH:  // Line Width
-    geometry_shader_manager.SetLinePtWidthChanged();
-    return;
-  case BPMEM_ZMODE:  // Depth Control
+// BPMEM_TEV_COLOR_RA/BG: each writes two components of one TEV colour register, either the
+// colour or the konstant set depending on the type bit.
+void UpdateTevColor(PixelShaderManager& pixel_shader_manager, int address)
+{
+  const int reg = (address >> 1) & 0x3;
+  const TevReg& tev = bpmem.tevregs[reg];
+  const bool is_red_alpha = ((address - BPMEM_TEV_COLOR_RA) & 1) == 0;
+
+  // Components: 0 red, 1 green, 2 blue, 3 alpha.
+  const std::array<std::pair<int, s32>, 2> parts =
+      is_red_alpha ? std::array<std::pair<int, s32>, 2>{{{0, tev.ra.red}, {3, tev.ra.alpha}}} :
+                     std::array<std::pair<int, s32>, 2>{{{1, tev.bg.green}, {2, tev.bg.blue}}};
+  const bool konst =
+      (is_red_alpha ? tev.ra.type.Value() : tev.bg.type.Value()) == TevRegType::Constant;
+  for (const auto& [component, value] : parts)
+  {
+    if (konst)
+      pixel_shader_manager.SetTevKonstColor(reg, component, value);
+    else
+      pixel_shader_manager.SetTevColor(reg, component, value);
+  }
+}
+
+struct Managers
+{
+  PixelShaderManager& pixel;
+  XFStateManager& xf;
+  GeometryShaderManager& geometry;
+};
+
+// Registers with a fixed address (or a short contiguous run). Returns false for addresses it
+// does not know.
+bool WriteFixedRegister(const Managers& m, const BPCmd& bp, int cycles_into_future)
+{
+  const int address = bp.address;
+  const int changes = bp.changes;
+  PixelShaderManager& psm = m.pixel;
+
+  if (IsPassiveRegister(address))
+    return true;
+
+  if (address >= BPMEM_IND_MTXA && address < BPMEM_IND_MTXA + 9)
+  {
+    if (changes)
+      psm.SetIndMatrixChanged((address - BPMEM_IND_MTXA) / 3);
+    return true;
+  }
+  if (address >= BPMEM_FOGRANGE && address < BPMEM_FOGRANGE + 6)
+  {
+    if (changes)
+      psm.SetFogRangeAdjustChanged();
+    return true;
+  }
+  if (address >= BPMEM_TEV_KSEL && address < BPMEM_TEV_KSEL + 8)
+  {
+    psm.SetTevKSel(address - BPMEM_TEV_KSEL, static_cast<u32>(bp.newvalue));
+    return true;
+  }
+  if (address >= BPMEM_TEV_COLOR_RA && address < BPMEM_TEV_COLOR_RA + 8)
+  {
+    UpdateTevColor(psm, address);
+    return true;
+  }
+
+  switch (address)
+  {
+  // Rasterizer setup.
+  case BPMEM_GENMODE:
+    PRIM_LOG("genmode: texgen={}, col={}, multisampling={}, tev={}, cull_mode={}, ind={}, "
+             "zfeeze={}",
+             bpmem.genMode.numtexgens, bpmem.genMode.numcolchans, bpmem.genMode.multisampling,
+             bpmem.genMode.numtevstages + 1, bpmem.genMode.cull_mode, bpmem.genMode.numindstages,
+             bpmem.genMode.zfreeze);
+    if (changes)
+      psm.SetGenModeChanged();
+    // Only the cull mode bits affect rasterization state.
+    if (changes & 0xC000)
+      BPFunctions::SetGenerationMode();
+    return true;
+
+  case BPMEM_SCISSORTL:
+  case BPMEM_SCISSORBR:
+  case BPMEM_SCISSOROFFSET:
+    m.xf.SetViewportChanged();
+    m.geometry.SetViewportChanged();
+    return true;
+
+  case BPMEM_LINEPTWIDTH:
+    m.geometry.SetLinePtWidthChanged();
+    return true;
+
+  // Indirect texturing.
+  case BPMEM_RAS1_SS0:
+  case BPMEM_RAS1_SS1:
+    if (changes)
+      psm.SetIndTexScaleChanged(address == BPMEM_RAS1_SS1);
+    return true;
+
+  case BPMEM_IREF:
+    if (changes)
+      psm.SetTevIndirectChanged();
+    return true;
+
+  // Pixel engine state.
+  case BPMEM_ZMODE:
     PRIM_LOG("zmode: test={}, func={}, upd={}", bpmem.zmode.test_enable, bpmem.zmode.func,
              bpmem.zmode.update_enable);
-    SetDepthMode();
-    pixel_shader_manager.SetZModeControl();
-    return;
-  case BPMEM_BLENDMODE:  // Blending Control
-    if (bp.changes & 0xFFFF)
+    BPFunctions::SetDepthMode();
+    psm.SetZModeControl();
+    return true;
+
+  case BPMEM_BLENDMODE:
+    if (changes & 0xFFFF)
     {
-      PRIM_LOG("blendmode: en={}, open={}, colupd={}, alphaupd={}, dst={}, src={}, sub={}, mode={}",
+      PRIM_LOG("blendmode: en={}, open={}, colupd={}, alphaupd={}, dst={}, src={}, sub={}, "
+               "mode={}",
                bpmem.blendmode.blend_enable, bpmem.blendmode.logic_op_enable,
                bpmem.blendmode.color_update, bpmem.blendmode.alpha_update,
                bpmem.blendmode.dst_factor, bpmem.blendmode.src_factor, bpmem.blendmode.subtract,
                bpmem.blendmode.logic_mode);
-
-      SetBlendMode();
-
-      pixel_shader_manager.SetBlendModeChanged();
+      BPFunctions::SetBlendMode();
+      psm.SetBlendModeChanged();
     }
-    return;
-  case BPMEM_CONSTANTALPHA:  // Set Destination Alpha
+    return true;
+
+  case BPMEM_CONSTANTALPHA:
     PRIM_LOG("constalpha: alp={}, en={}", bpmem.dstalpha.alpha, bpmem.dstalpha.enable);
-    if (bp.changes)
+    if (changes)
     {
-      pixel_shader_manager.SetAlpha();
-      pixel_shader_manager.SetDestAlphaChanged();
+      psm.SetAlpha();
+      psm.SetDestAlphaChanged();
     }
-    if (bp.changes & 0x100)
-      SetBlendMode();
-    return;
+    // The enable bit affects blending.
+    if (changes & 0x100)
+      BPFunctions::SetBlendMode();
+    return true;
 
-  // This is called when the game is done drawing the new frame (eg: like in DX: Begin(); Draw();
-  // End();)
-  // Triggers an interrupt on the PPC side so that the game knows when the GPU has finished drawing.
-  // Tokens are similar.
-  case BPMEM_SETDRAWDONE:
-    switch (bp.newvalue & 0xFF)
+  case BPMEM_ZCOMPARE:
+    BPFunctions::OnPixelFormatChange(g_framebuffer_manager.get(), bpmem.zcontrol.pixel_format,
+                                     bpmem.zcontrol.zformat);
+    // The pixel format decides whether dual-source blending is possible.
+    if (changes & 7)
+      BPFunctions::SetBlendMode();
+    psm.SetZModeControl();
+    return true;
+
+  case BPMEM_ALPHACOMPARE:
+    PRIM_LOG("alphacmp: ref0={}, ref1={}, comp0={}, comp1={}, logic={}", bpmem.alpha_test.ref0,
+             bpmem.alpha_test.ref1, bpmem.alpha_test.comp0, bpmem.alpha_test.comp1,
+             bpmem.alpha_test.logic);
+    if (changes & 0xFFFF)
+      psm.SetAlpha();
+    if (changes)
     {
-    case 0x02:
-    {
-      INCSTAT(g_stats.this_frame.num_draw_done);
-      g_texture_cache->FlushEFBCopies();
-      g_texture_cache->FlushStaleBinds();
-      g_framebuffer_manager->InvalidatePeekCache(false);
-      g_framebuffer_manager->RefreshPeekCache();
-      auto& system = Core::System::GetInstance();
-      if (!system.GetFifo().UseDeterministicGPUThread())
-        system.GetPixelEngine().SetFinish(cycles_into_future);  // may generate interrupt
-      DEBUG_LOG_FMT(VIDEO, "GXSetDrawDone SetPEFinish (value: {:#04X})", bp.newvalue & 0xFFFF);
-      return;
+      psm.SetAlphaTestChanged();
+      BPFunctions::SetBlendMode();
     }
+    return true;
 
-    default:
-      WARN_LOG_FMT(VIDEO, "GXSetDrawDone ??? (value {:#04X})", bp.newvalue & 0xFFFF);
-      return;
-    }
-    return;
-  case BPMEM_PE_TOKEN_ID:  // Pixel Engine Token ID
-  {
-    INCSTAT(g_stats.this_frame.num_token);
-    g_texture_cache->FlushEFBCopies();
-    g_texture_cache->FlushStaleBinds();
-    g_framebuffer_manager->InvalidatePeekCache(false);
-    g_framebuffer_manager->RefreshPeekCache();
-    auto& system = Core::System::GetInstance();
-    if (!system.GetFifo().UseDeterministicGPUThread())
-    {
-      system.GetPixelEngine().SetToken(static_cast<u16>(bp.newvalue & 0xFFFF), false,
-                                       cycles_into_future);
-    }
-    DEBUG_LOG_FMT(VIDEO, "SetPEToken {:#06X}", bp.newvalue & 0xFFFF);
-    return;
-  }
-  case BPMEM_PE_TOKEN_INT_ID:  // Pixel Engine Interrupt Token ID
-  {
-    INCSTAT(g_stats.this_frame.num_token_int);
-    g_texture_cache->FlushEFBCopies();
-    g_texture_cache->FlushStaleBinds();
-    g_framebuffer_manager->InvalidatePeekCache(false);
-    g_framebuffer_manager->RefreshPeekCache();
-    auto& system = Core::System::GetInstance();
-    if (!system.GetFifo().UseDeterministicGPUThread())
-    {
-      system.GetPixelEngine().SetToken(static_cast<u16>(bp.newvalue & 0xFFFF), true,
-                                       cycles_into_future);
-    }
-    DEBUG_LOG_FMT(VIDEO, "SetPEToken + INT {:#06X}", bp.newvalue & 0xFFFF);
-    return;
-  }
+  case BPMEM_BIAS:
+    PRIM_LOG("ztex bias={:#x}", bpmem.ztex1.bias);
+    if (changes)
+      psm.SetZTextureBias();
+    return true;
 
-  // ------------------------
-  // EFB copy command. This copies a rectangle from the EFB to either RAM in a texture format or to
-  // XFB as YUYV.
-  // It can also optionally clear the EFB while copying from it. To emulate this, we of course copy
-  // first and clear afterwards.
-  case BPMEM_TRIGGER_EFB_COPY:  // Copy EFB Region or Render to the XFB or Clear the screen.
-  {
-    // The bottom right is within the rectangle
-    // The values in bpmem.copyTexSrcXY and bpmem.copyTexSrcWH are updated in case 0x49 and 0x4a in
-    // this function
+  case BPMEM_ZTEX2:
+    if (changes & 3)
+      psm.SetZTextureTypeChanged();
+    if (changes & 12)
+      psm.SetZTextureOpChanged();
+    PRIM_LOG("ztex op={}, type={}", bpmem.ztex2.op, bpmem.ztex2.type);
+    return true;
 
-    u32 destAddr = bpmem.copyTexDest << 5;
-    u32 destStride = bpmem.copyDestStride << 5;
-
-    MathUtil::Rectangle<s32> srcRect;
-    srcRect.left = bpmem.copyTexSrcXY.x;
-    srcRect.top = bpmem.copyTexSrcXY.y;
-
-    // Here Width+1 like Height, otherwise some textures are corrupted already since the native
-    // resolution.
-    srcRect.right = bpmem.copyTexSrcXY.x + bpmem.copyTexSrcWH.x + 1;
-    srcRect.bottom = bpmem.copyTexSrcXY.y + bpmem.copyTexSrcWH.y + 1;
-
-    const UPE_Copy PE_copy = bpmem.triggerEFBCopy;
-
-    // Since the copy X and Y coordinates/sizes are 10-bit, the game can configure a copy region up
-    // to 1024x1024. Hardware tests have found that the number of bytes written does not depend on
-    // the configured stride, instead it is based on the size registers, writing beyond the length
-    // of a single row. The data written for the pixels which lie outside the EFB bounds does not
-    // wrap around instead returning different colors based on the pixel format of the EFB. This
-    // suggests it's not based on coordinates, but instead on memory addresses. The effect of a
-    // within-bounds size but out-of-bounds offset (e.g. offset 320,0, size 640,480) are the same.
-
-    // As it would be difficult to emulate the exact behavior of out-of-bounds reads, instead of
-    // writing the junk data, we don't write anything to RAM at all for over-sized copies, and clamp
-    // to the EFB borders for over-offset copies. The arcade virtual console games (e.g. 1942) are
-    // known for configuring these out-of-range copies.
-
-    if (u32(srcRect.right) > EFB_WIDTH || u32(srcRect.bottom) > EFB_HEIGHT)
-    {
-      WARN_LOG_FMT(VIDEO, "Oversized EFB copy: {}x{} (offset {},{} stride {})", srcRect.GetWidth(),
-                   srcRect.GetHeight(), srcRect.left, srcRect.top, destStride);
-
-      if (u32(srcRect.left) >= EFB_WIDTH || u32(srcRect.top) >= EFB_HEIGHT)
-      {
-        // This is not a sane src rectangle, it doesn't touch any valid image data at all
-        // Just ignore it
-        // Apparently Mario Kart Wii in wifi mode can generate a deformed EFB copy of size 4x4
-        // at offset (328,1020)
-        if (PE_copy.copy_to_xfb == 1)
-        {
-          // Make sure we disable Bounding box to match the side effects of the non-failure path
-          g_bounding_box->Disable(pixel_shader_manager);
-        }
-
-        return;
-      }
-
-      // Clamp the copy region to fit within EFB. So that we don't end up with a stretched image.
-      srcRect.right = std::clamp<int>(srcRect.right, 0, EFB_WIDTH);
-      srcRect.bottom = std::clamp<int>(srcRect.bottom, 0, EFB_HEIGHT);
-    }
-
-    const u32 copy_width = srcRect.GetWidth();
-    const u32 copy_height = srcRect.GetHeight();
-
-    if (destStride != 0)
-    {
-      // Check if we are to copy from the EFB or draw to the XFB
-      if (PE_copy.copy_to_xfb == 0)
-      {
-        // bpmem.zcontrol.pixel_format to PixelFormat::Z24 is when the game wants to copy from
-        // ZBuffer (Zbuffer uses 24-bit Format)
-        bool is_depth_copy = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
-        g_texture_cache->CopyRenderTargetToTexture(
-            destAddr, PE_copy.tp_realFormat(), copy_width, copy_height, destStride, is_depth_copy,
-            srcRect, PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.half_scale, 1.0f,
-            s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
-            bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
-      }
-      else
-      {
-        // We should be able to get away with deactivating the current bbox tracking
-        // here. Not sure if there's a better spot to put this.
-        // the number of lines copied is determined by the y scale * source efb height
-        g_bounding_box->Disable(pixel_shader_manager);
-
-        float yScale;
-        if (PE_copy.scale_invert)
-          yScale = 256.0f / static_cast<float>(bpmem.dispcopyyscale);
-        else
-          yScale = static_cast<float>(bpmem.dispcopyyscale) / 256.0f;
-
-        float num_xfb_lines = 1.0f + bpmem.copyTexSrcWH.y * yScale;
-
-        u32 height = static_cast<u32>(num_xfb_lines);
-
-        DEBUG_LOG_FMT(VIDEO,
-                      "RenderToXFB: destAddr: {:08x} | srcRect [{} {} {} {}] | fbWidth: {} | "
-                      "fbStride: {} | fbHeight: {} | yScale: {}",
-                      destAddr, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom,
-                      bpmem.copyTexSrcWH.x + 1, destStride, height, yScale);
-
-        bool is_depth_copy = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
-        g_texture_cache->CopyRenderTargetToTexture(
-            destAddr, EFBCopyFormat::XFB, copy_width, height, destStride, is_depth_copy, srcRect,
-            false, false, yScale, s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
-            bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
-
-        auto& system = Core::System::GetInstance();
-
-        // This is as closest as we have to an "end of the frame"
-        // It works 99% of the time.
-        // But sometimes games want to render an XFB larger than the EFB's 640x528 pixel resolution
-        // (especially when using the 3xMSAA mode, which cuts EFB resolution to 640x264). So they
-        // render multiple sub-frames and arrange the XFB copies in next to each-other in main
-        // memory so they form a single completed XFB. See
-        // https://dolphin-emu.org/blog/2017/11/19/hybridxfb/ for examples and more detail.
-        system.GetVideoEvents().after_frame_event.Trigger(system);
-
-        // Note: Theoretically, in the future we could track the VI configuration and try to detect
-        //       when an XFB is the last XFB copy of a frame. Not only would we get a clean "end of
-        //       the frame", but we would also be able to use ImmediateXFB even for these games.
-        //       Might also clean up some issues with games doing XFB copies they don't intend to
-        //       display.
-
-        if (g_ActiveConfig.bImmediateXFB)
-        {
-          // below div two to convert from bytes to pixels - it expects width, not stride
-          g_presenter->ImmediateSwap(destAddr, destStride / 2, destStride, height);
-        }
-        else
-        {
-          if (system.GetFifoPlayer().IsRunningWithFakeVideoInterfaceUpdates())
-          {
-            auto& vi = system.GetVideoInterface();
-            vi.FakeVIUpdate(destAddr, srcRect.GetWidth(), destStride, height);
-          }
-        }
-      }
-    }
-
-    // Clear the rectangular region after copying it.
-    if (PE_copy.clear)
-    {
-      const bool color_enable = bpmem.blendmode.color_update != 0;
-      const bool alpha_enable = bpmem.blendmode.alpha_update != 0;
-      const bool z_enable = bpmem.zmode.update_enable != 0;
-      const auto pixel_format = bpmem.zcontrol.pixel_format;
-      const auto color_ar = bpmem.clearcolorAR;
-      const auto color_gb = bpmem.clearcolorGB;
-      const auto z_value = bpmem.clearZValue;
-      ClearScreen(g_framebuffer_manager.get(), srcRect, color_enable, alpha_enable, z_enable,
-                  pixel_format, color_ar, color_gb, z_value);
-
-      // Scissor rect must be restored.
-      BPFunctions::SetScissorAndViewport(g_framebuffer_manager.get(), bpmem.scissorTL,
-                                         bpmem.scissorBR, bpmem.scissorOffset, xfmem.viewport);
-    }
-
-    return;
-  }
-  case BPMEM_LOADTLUT0:  // This updates bpmem.tmem_config.tlut_src, no need to do anything here.
-    return;
-  case BPMEM_LOADTLUT1:  // Load a Texture Look Up Table
-  {
-    u32 tmem_addr = bpmem.tmem_config.tlut_dest.tmem_addr << 9;
-    u32 tmem_transfer_count = bpmem.tmem_config.tlut_dest.tmem_line_count * TMEM_LINE_SIZE;
-    u32 addr = bpmem.tmem_config.tlut_src << 5;
-
-    // The GameCube ignores the upper bits of this address. Some games (WW, MKDD) set them.
-    auto& system = Core::System::GetInstance();
-    if (!system.IsWii())
-      addr = addr & 0x01FFFFFF;
-
-    // The copy below will always be in bounds as tmem is bigger than the maximum address a TLUT can
-    // be loaded to.
-    static constexpr u32 MAX_LOADABLE_TMEM_ADDR =
-        (1 << bpmem.tmem_config.tlut_dest.tmem_addr.NumBits()) << 9;
-    static constexpr u32 MAX_TMEM_LINE_COUNT =
-        (1 << bpmem.tmem_config.tlut_dest.tmem_line_count.NumBits()) * TMEM_LINE_SIZE;
-    static_assert(MAX_LOADABLE_TMEM_ADDR + MAX_TMEM_LINE_COUNT < TMEM_SIZE);
-
-    auto& memory = system.GetMemory();
-    memory.CopyFromEmu(s_tex_mem.data() + tmem_addr, addr, tmem_transfer_count);
-
-    if (OpcodeDecoder::g_record_fifo_data)
-      system.GetFifoRecorder().UseMemory(addr, tmem_transfer_count, MemoryUpdate::Type::TMEM);
-
-    TMEM::InvalidateAll();
-
-    return;
-  }
-  case BPMEM_FOGRANGE:  // Fog Settings Control
-  case BPMEM_FOGRANGE + 1:
-  case BPMEM_FOGRANGE + 2:
-  case BPMEM_FOGRANGE + 3:
-  case BPMEM_FOGRANGE + 4:
-  case BPMEM_FOGRANGE + 5:
-    if (bp.changes)
-      pixel_shader_manager.SetFogRangeAdjustChanged();
-    return;
+  // Fog.
   case BPMEM_FOGPARAM0:
   case BPMEM_FOGBMAGNITUDE:
   case BPMEM_FOGBEXPONENT:
   case BPMEM_FOGPARAM3:
-    if (bp.changes)
-      pixel_shader_manager.SetFogParamChanged();
-    return;
-  case BPMEM_FOGCOLOR:  // Fog Color
-    if (bp.changes)
-      pixel_shader_manager.SetFogColorChanged();
-    return;
-  case BPMEM_ALPHACOMPARE:  // Compare Alpha Values
-    PRIM_LOG("alphacmp: ref0={}, ref1={}, comp0={}, comp1={}, logic={}", bpmem.alpha_test.ref0,
-             bpmem.alpha_test.ref1, bpmem.alpha_test.comp0, bpmem.alpha_test.comp1,
-             bpmem.alpha_test.logic);
-    if (bp.changes & 0xFFFF)
-      pixel_shader_manager.SetAlpha();
-    if (bp.changes)
-    {
-      pixel_shader_manager.SetAlphaTestChanged();
-      SetBlendMode();
-    }
-    return;
-  case BPMEM_BIAS:  // BIAS
-    PRIM_LOG("ztex bias={:#x}", bpmem.ztex1.bias);
-    if (bp.changes)
-      pixel_shader_manager.SetZTextureBias();
-    return;
-  case BPMEM_ZTEX2:  // Z Texture type
-  {
-    if (bp.changes & 3)
-      pixel_shader_manager.SetZTextureTypeChanged();
-    if (bp.changes & 12)
-      pixel_shader_manager.SetZTextureOpChanged();
-    PRIM_LOG("ztex op={}, type={}", bpmem.ztex2.op, bpmem.ztex2.type);
-  }
-    return;
-  // ----------------------------------
-  // Display Copy Filtering Control - GX_SetCopyFilter(u8 aa,u8 sample_pattern[12][2],u8 vf,u8
-  // vfilter[7])
-  // Fields: Destination, Frame2Field, Gamma, Source
-  // ----------------------------------
-  case BPMEM_DISPLAYCOPYFILTER:      // if (aa) { use sample_pattern } else { use 666666 }
-  case BPMEM_DISPLAYCOPYFILTER + 1:  // if (aa) { use sample_pattern } else { use 666666 }
-  case BPMEM_DISPLAYCOPYFILTER + 2:  // if (aa) { use sample_pattern } else { use 666666 }
-  case BPMEM_DISPLAYCOPYFILTER + 3:  // if (aa) { use sample_pattern } else { use 666666 }
-  case BPMEM_COPYFILTER0:            // if (vf) { use vfilter } else { use 595000 }
-  case BPMEM_COPYFILTER1:            // if (vf) { use vfilter } else { use 000015 }
-    return;
-  // -----------------------------------
-  // Interlacing Control
-  // -----------------------------------
-  case BPMEM_FIELDMASK:  // GX_SetFieldMask(u8 even_mask,u8 odd_mask)
-  case BPMEM_FIELDMODE:  // GX_SetFieldMode(u8 field_mode,u8 half_aspect_ratio)
-    // TODO
-    return;
-  // ----------------------------------------
-  // Unimportant regs (Clock, Perf, ...)
-  // ----------------------------------------
-  case BPMEM_BUSCLOCK0:   // TB Bus Clock ?
-  case BPMEM_BUSCLOCK1:   // TB Bus Clock ?
-  case BPMEM_PERF0_TRI:   // Perf: Triangles
-  case BPMEM_PERF0_QUAD:  // Perf: Quads
-  case BPMEM_PERF1:       // Perf: Some Clock, Texels, TX, TC
-    return;
-  // ----------------
-  // EFB Copy config
-  // ----------------
-  case BPMEM_EFB_TL:    // EFB Source Rect. Top, Left
-  case BPMEM_EFB_WH:    // EFB Source Rect. Width, Height - 1
-  case BPMEM_EFB_ADDR:  // EFB Target Address
-    return;
-  // --------------
-  // Clear Config
-  // --------------
-  case BPMEM_CLEAR_AR:  // Alpha and Red Components
-  case BPMEM_CLEAR_GB:  // Green and Blue Components
-  case BPMEM_CLEAR_Z:   // Z Components (24-bit Zbuffer)
-    return;
-  // -------------------------
-  // Bounding Box Control
-  // -------------------------
+    if (changes)
+      psm.SetFogParamChanged();
+    return true;
+
+  case BPMEM_FOGCOLOR:
+    if (changes)
+      psm.SetFogColorChanged();
+    return true;
+
+  // Commands.
+  case BPMEM_SETDRAWDONE:
+    OnDrawDone(static_cast<u32>(bp.newvalue), cycles_into_future);
+    return true;
+
+  case BPMEM_PE_TOKEN_ID:
+  case BPMEM_PE_TOKEN_INT_ID:
+    OnToken(static_cast<u32>(bp.newvalue), address == BPMEM_PE_TOKEN_INT_ID, cycles_into_future);
+    return true;
+
+  case BPMEM_TRIGGER_EFB_COPY:
+    ExecuteEFBCopy(psm);
+    return true;
+
+  case BPMEM_LOADTLUT1:
+    LoadTLUT();
+    return true;
+
+  case BPMEM_PRELOAD_MODE:
+    // Zero (written by GXTexModeSync) returns to automatic TMEM management.
+    if (bp.newvalue != 0)
+      PreloadTMEM();
+    return true;
+
+  case BPMEM_TEXINVALIDATE:
+    TMEM::Invalidate(static_cast<u32>(bp.newvalue));
+    return true;
+
   case BPMEM_CLEARBBOX1:
   case BPMEM_CLEARBBOX2:
   {
-    const u8 offset = bp.address & 2;
-    g_bounding_box->Enable(pixel_shader_manager);
-
-    g_bounding_box->Set(offset, bp.newvalue & 0x3ff);
-    g_bounding_box->Set(offset + 1, bp.newvalue >> 10);
+    // Each register sets two of the four bounds: left/right or top/bottom.
+    const u32 first = static_cast<u32>(address & 2);
+    g_bounding_box->Enable(psm);
+    g_bounding_box->Set(first, static_cast<u16>(bp.newvalue & 0x3ff));
+    g_bounding_box->Set(first + 1, static_cast<u16>(bp.newvalue >> 10));
+    return true;
   }
-    return;
-  case BPMEM_TEXINVALIDATE:
-    TMEM::Invalidate(bp.newvalue);
-    return;
-
-  case BPMEM_ZCOMPARE:  // Set the Z-Compare and EFB pixel format
-    OnPixelFormatChange(g_framebuffer_manager.get(), bpmem.zcontrol.pixel_format,
-                        bpmem.zcontrol.zformat);
-    if (bp.changes & 7)
-      SetBlendMode();  // dual source could be activated by changing to PIXELFMT_RGBA6_Z24
-    pixel_shader_manager.SetZModeControl();
-    return;
-
-  case BPMEM_EFB_STRIDE:  // Display Copy Stride
-  case BPMEM_COPYYSCALE:  // Display Copy Y Scale
-    return;
-
-  /* 24 RID
-   * 21 BC3 - Ind. Tex Stage 3 NTexCoord
-   * 18 BI3 - Ind. Tex Stage 3 NTexMap
-   * 15 BC2 - Ind. Tex Stage 2 NTexCoord
-   * 12 BI2 - Ind. Tex Stage 2 NTexMap
-   * 9 BC1 - Ind. Tex Stage 1 NTexCoord
-   * 6 BI1 - Ind. Tex Stage 1 NTexMap
-   * 3 BC0 - Ind. Tex Stage 0 NTexCoord
-   * 0 BI0 - Ind. Tex Stage 0 NTexMap */
-  case BPMEM_IREF:
-  {
-    if (bp.changes)
-      pixel_shader_manager.SetTevIndirectChanged();
-    return;
-  }
-
-  case BPMEM_TEV_KSEL:      // Texture Environment Swap Mode Table 0
-  case BPMEM_TEV_KSEL + 1:  // Texture Environment Swap Mode Table 1
-  case BPMEM_TEV_KSEL + 2:  // Texture Environment Swap Mode Table 2
-  case BPMEM_TEV_KSEL + 3:  // Texture Environment Swap Mode Table 3
-  case BPMEM_TEV_KSEL + 4:  // Texture Environment Swap Mode Table 4
-  case BPMEM_TEV_KSEL + 5:  // Texture Environment Swap Mode Table 5
-  case BPMEM_TEV_KSEL + 6:  // Texture Environment Swap Mode Table 6
-  case BPMEM_TEV_KSEL + 7:  // Texture Environment Swap Mode Table 7
-    pixel_shader_manager.SetTevKSel(bp.address - BPMEM_TEV_KSEL, bp.newvalue);
-    return;
-
-  /* This Register can be used to limit to which bits of BP registers is
-   * actually written to. The mask is only valid for the next BP write,
-   * and will reset itself afterwards. It's handled as a special case in
-   * LoadBPReg. */
-  case BPMEM_BP_MASK:
-
-  case BPMEM_IND_IMASK:  // Index Mask ?
-  case BPMEM_REVBITS:    // Always set to 0x0F when GX_InitRevBits() is called.
-    return;
 
   case BPMEM_CLEAR_PIXEL_PERF:
-    // GXClearPixMetric writes 0xAAA here, Sunshine alternates this register between values 0x000
-    // and 0xAAA
+    // GXClearPixMetric writes 0xAAA; at least one game toggles between 0 and 0xAAA.
     if (PerfQueryBase::ShouldEmulate())
       g_perf_query->ResetQuery();
-    return;
-
-  case BPMEM_PRELOAD_ADDR:
-  case BPMEM_PRELOAD_TMEMEVEN:
-  case BPMEM_PRELOAD_TMEMODD:  // Used when PRELOAD_MODE is set
-    return;
-
-  case BPMEM_PRELOAD_MODE:  // Set to 0 when GX_TexModeSync() is called.
-    // if this is different from 0, manual TMEM management is used (GX_PreloadEntireTexture).
-    if (bp.newvalue != 0)
-    {
-      // TODO: Not quite sure if this is completely correct (likely not)
-      // NOTE: libogc's implementation of GX_PreloadEntireTexture seems flawed, so it's not
-      // necessarily a good reference for RE'ing this feature.
-
-      BPS_TmemConfig& tmem_cfg = bpmem.tmem_config;
-      u32 src_addr = tmem_cfg.preload_addr << 5;  // TODO: Should we add mask here on GC?
-      u32 bytes_read = 0;
-      u32 tmem_addr_even = tmem_cfg.preload_tmem_even * TMEM_LINE_SIZE;
-
-      if (tmem_cfg.preload_tile_info.type != 3)
-      {
-        if (tmem_addr_even < TMEM_SIZE)
-        {
-          bytes_read = tmem_cfg.preload_tile_info.count * TMEM_LINE_SIZE;
-          if (tmem_addr_even + bytes_read > TMEM_SIZE)
-            bytes_read = TMEM_SIZE - tmem_addr_even;
-
-          auto& system = Core::System::GetInstance();
-          auto& memory = system.GetMemory();
-          memory.CopyFromEmu(s_tex_mem.data() + tmem_addr_even, src_addr, bytes_read);
-        }
-      }
-      else  // RGBA8 tiles (and CI14, but that might just be stupid libogc!)
-      {
-        auto& system = Core::System::GetInstance();
-        auto& memory = system.GetMemory();
-
-        // AR and GB tiles are stored in separate TMEM banks => can't use a single memcpy for
-        // everything
-        u32 tmem_addr_odd = tmem_cfg.preload_tmem_odd * TMEM_LINE_SIZE;
-
-        for (u32 i = 0; i < tmem_cfg.preload_tile_info.count; ++i)
-        {
-          if (tmem_addr_even + TMEM_LINE_SIZE > TMEM_SIZE ||
-              tmem_addr_odd + TMEM_LINE_SIZE > TMEM_SIZE)
-          {
-            break;
-          }
-
-          memory.CopyFromEmu(s_tex_mem.data() + tmem_addr_even, src_addr + bytes_read,
-                             TMEM_LINE_SIZE);
-          memory.CopyFromEmu(s_tex_mem.data() + tmem_addr_odd,
-                             src_addr + bytes_read + TMEM_LINE_SIZE, TMEM_LINE_SIZE);
-          tmem_addr_even += TMEM_LINE_SIZE;
-          tmem_addr_odd += TMEM_LINE_SIZE;
-          bytes_read += TMEM_LINE_SIZE * 2;
-        }
-      }
-
-      if (OpcodeDecoder::g_record_fifo_data)
-      {
-        Core::System::GetInstance().GetFifoRecorder().UseMemory(src_addr, bytes_read,
-                                                                MemoryUpdate::Type::TMEM);
-      }
-
-      TMEM::InvalidateAll();
-    }
-    return;
-
-  // ---------------------------------------------------
-  // Set the TEV Color
-  // ---------------------------------------------------
-  //
-  // NOTE: Each of these registers actually maps to two variables internally.
-  //       There's a bit that specifies which one is currently written to.
-  //
-  // NOTE: Some games write only to the RA register (or only to the BG register).
-  //       We may not assume that the unwritten register holds a valid value, hence
-  //       both component pairs need to be loaded individually.
-  case BPMEM_TEV_COLOR_RA:
-  case BPMEM_TEV_COLOR_RA + 2:
-  case BPMEM_TEV_COLOR_RA + 4:
-  case BPMEM_TEV_COLOR_RA + 6:
-  {
-    int num = (bp.address >> 1) & 0x3;
-    if (bpmem.tevregs[num].ra.type == TevRegType::Constant)
-    {
-      pixel_shader_manager.SetTevKonstColor(num, 0, bpmem.tevregs[num].ra.red);
-      pixel_shader_manager.SetTevKonstColor(num, 3, bpmem.tevregs[num].ra.alpha);
-    }
-    else
-    {
-      pixel_shader_manager.SetTevColor(num, 0, bpmem.tevregs[num].ra.red);
-      pixel_shader_manager.SetTevColor(num, 3, bpmem.tevregs[num].ra.alpha);
-    }
-    return;
-  }
-
-  case BPMEM_TEV_COLOR_BG:
-  case BPMEM_TEV_COLOR_BG + 2:
-  case BPMEM_TEV_COLOR_BG + 4:
-  case BPMEM_TEV_COLOR_BG + 6:
-  {
-    int num = (bp.address >> 1) & 0x3;
-    if (bpmem.tevregs[num].bg.type == TevRegType::Constant)
-    {
-      pixel_shader_manager.SetTevKonstColor(num, 1, bpmem.tevregs[num].bg.green);
-      pixel_shader_manager.SetTevKonstColor(num, 2, bpmem.tevregs[num].bg.blue);
-    }
-    else
-    {
-      pixel_shader_manager.SetTevColor(num, 1, bpmem.tevregs[num].bg.green);
-      pixel_shader_manager.SetTevColor(num, 2, bpmem.tevregs[num].bg.blue);
-    }
-    return;
-  }
+    return true;
 
   default:
-    break;
+    return false;
   }
+}
 
-  switch (bp.address & 0xFC)  // Texture sampler filter
+// Registers addressed in blocks: TEV order and texture coordinate sizes (by groups of four),
+// texture units, indirect stages and TEV combiners.
+bool WriteBlockRegister(const Managers& m, const BPCmd& bp)
+{
+  const int address = bp.address;
+  const u32 value = static_cast<u32>(bp.newvalue);
+
+  if (address >= BPMEM_TREF && address < BPMEM_TREF + 8)
   {
-  // -------------------------
-  // Texture Environment Order
-  // -------------------------
-  case BPMEM_TREF:
-  case BPMEM_TREF + 4:
-    pixel_shader_manager.SetTevOrder(bp.address - BPMEM_TREF, bp.newvalue);
-    return;
-  // ----------------------
-  // Set wrap size
-  // ----------------------
-  case BPMEM_SU_SSIZE:  // Matches BPMEM_SU_TSIZE too
-  case BPMEM_SU_SSIZE + 4:
-  case BPMEM_SU_SSIZE + 8:
-  case BPMEM_SU_SSIZE + 12:
+    m.pixel.SetTevOrder(address - BPMEM_TREF, value);
+    return true;
+  }
+  if (address >= BPMEM_SU_SSIZE && address < BPMEM_SU_SSIZE + 16)
+  {
+    // S and T size registers alternate; both map to the same texture coordinate.
     if (bp.changes)
     {
-      pixel_shader_manager.SetTexCoordChanged((bp.address - BPMEM_SU_SSIZE) >> 1);
-      geometry_shader_manager.SetTexCoordChanged((bp.address - BPMEM_SU_SSIZE) >> 1);
+      const auto texcoord = static_cast<u8>((address - BPMEM_SU_SSIZE) >> 1);
+      m.pixel.SetTexCoordChanged(texcoord);
+      m.geometry.SetTexCoordChanged(texcoord);
     }
-    return;
+    return true;
   }
-
-  if ((bp.address & 0xc0) == 0x80)
+  if ((address & 0xc0) == 0x80)
   {
-    auto tex_address = TexUnitAddress::FromBPAddress(bp.address);
-
-    switch (tex_address.Reg)
+    const auto unit_address = TexUnitAddress::FromBPAddress(static_cast<u32>(address));
+    // Every texture unit register except the unused slot reconfigures TMEM.
+    if (unit_address.Reg != TexUnitAddress::Register::UNKNOWN)
     {
-    // ------------------------
-    // BPMEM_TX_SETMODE0 - (Texture lookup and filtering mode) LOD/BIAS Clamp, MaxAnsio, LODBIAS,
-    // DiagLoad, Min Filter, Mag Filter, Wrap T, S
-    // BPMEM_TX_SETMODE1 - (LOD Stuff) - Max LOD, Min LOD
-    // ------------------------
-    case TexUnitAddress::Register::SETMODE0:
-    case TexUnitAddress::Register::SETMODE1:
-      TMEM::ConfigurationChanged(tex_address, bp.newvalue);
-      return;
-
-    // --------------------------------------------
-    // BPMEM_TX_SETIMAGE0 - Texture width, height, format
-    // BPMEM_TX_SETIMAGE1 - even LOD address in TMEM - Image Type, Cache Height, Cache Width,
-    //                      TMEM Offset
-    // BPMEM_TX_SETIMAGE2 - odd LOD address in TMEM - Cache Height, Cache Width, TMEM Offset
-    // BPMEM_TX_SETIMAGE3 - Address of Texture in main memory
-    // --------------------------------------------
-    case TexUnitAddress::Register::SETIMAGE0:
-    case TexUnitAddress::Register::SETIMAGE1:
-    case TexUnitAddress::Register::SETIMAGE2:
-    case TexUnitAddress::Register::SETIMAGE3:
-      TMEM::ConfigurationChanged(tex_address, bp.newvalue);
-      return;
-
-    // -------------------------------
-    // Set a TLUT
-    // BPMEM_TX_SETTLUT - Format, TMEM Offset (offset of TLUT from start of TMEM high bank > > 5)
-    // -------------------------------
-    case TexUnitAddress::Register::SETTLUT:
-      TMEM::ConfigurationChanged(tex_address, bp.newvalue);
-      return;
-    case TexUnitAddress::Register::UNKNOWN:
-      break;  // Not handled
+      TMEM::ConfigurationChanged(unit_address, value);
+      return true;
     }
   }
-
-  switch (bp.address & 0xF0)
+  if (address >= BPMEM_IND_CMD && address < BPMEM_IND_CMD + 16)
   {
-  // --------------
-  // Indirect Tev
-  // --------------
-  case BPMEM_IND_CMD:
-    pixel_shader_manager.SetTevIndirectChanged();
-    return;
-  // --------------------------------------------------
-  // Set Color/Alpha of a Tev
-  // BPMEM_TEV_COLOR_ENV - Dest, Shift, Clamp, Sub, Bias, Sel A, Sel B, Sel C, Sel D
-  // BPMEM_TEV_ALPHA_ENV - Dest, Shift, Clamp, Sub, Bias, Sel A, Sel B, Sel C, Sel D, T Swap, R Swap
-  // --------------------------------------------------
-  case BPMEM_TEV_COLOR_ENV:  // Texture Environment 1
-  case BPMEM_TEV_COLOR_ENV + 16:
-    pixel_shader_manager.SetTevCombiner((bp.address - BPMEM_TEV_COLOR_ENV) >> 1,
-                                        (bp.address - BPMEM_TEV_COLOR_ENV) & 1, bp.newvalue);
-    return;
-  default:
-    break;
+    m.pixel.SetTevIndirectChanged();
+    return true;
   }
+  if (address >= BPMEM_TEV_COLOR_ENV && address < BPMEM_TEV_COLOR_ENV + 32)
+  {
+    // Colour and alpha combiners alternate.
+    const int offset = address - BPMEM_TEV_COLOR_ENV;
+    m.pixel.SetTevCombiner(offset >> 1, offset & 1, value);
+    return true;
+  }
+  return false;
+}
+
+void BPWritten(const Managers& managers, const BPCmd& bp, int cycles_into_future)
+{
+  // Rewriting the same value is free unless the register is a command.
+  if (BPWords()[bp.address] == static_cast<u32>(bp.newvalue) && !IsCommandRegister(bp.address))
+    return;
+
+  // Anything queued was drawn with the old state.
+  BPFunctions::FlushPipeline();
+  BPWords()[bp.address] = static_cast<u32>(bp.newvalue);
+
+  if (WriteFixedRegister(managers, bp, cycles_into_future) || WriteBlockRegister(managers, bp))
+    return;
 
   DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUnknownBPCommand);
   WARN_LOG_FMT(VIDEO, "Unknown BP opcode: address = {:#010x} value = {:#010x}", bp.address,
                bp.newvalue);
 }
+}  // namespace
 
-// Call browser: OpcodeDecoding.cpp RunCallback::OnBP()
 void LoadBPReg(u8 reg, u32 value, int cycles_into_future)
 {
   auto& system = Core::System::GetInstance();
 
-  int oldval = ((u32*)&bpmem)[reg];
-  int newval = (oldval & ~bpmem.bpMask) | (value & bpmem.bpMask);
-  int changes = (oldval ^ newval) & 0xFFFFFF;
-
-  BPCmd bp = {reg, changes, newval};
-
-  // Reset the mask register if we're not trying to set it ourselves.
+  // BPMEM_BP_MASK limits which bits the next write may change; it then reverts to all bits.
+  const u32 previous = BPWords()[reg];
+  const u32 mask = bpmem.bpMask;
+  const u32 merged = (previous & ~mask) | (value & mask);
+  const BPCmd bp = {reg, static_cast<int>((previous ^ merged) & 0xFFFFFF),
+                    static_cast<int>(merged)};
   if (reg != BPMEM_BP_MASK)
     bpmem.bpMask = 0xFFFFFF;
 
-  BPWritten(system.GetPixelShaderManager(), system.GetXFStateManager(),
-            system.GetGeometryShaderManager(), bp, cycles_into_future);
+  BPWritten({system.GetPixelShaderManager(), system.GetXFStateManager(),
+             system.GetGeometryShaderManager()},
+            bp, cycles_into_future);
 }
 
+// Deterministic dual core: the CPU-side pass raises the PE events itself, at the right time.
+// (A pending BPMEM_BP_MASK is not applied here.)
 void LoadBPRegPreprocess(u8 reg, u32 value, int cycles_into_future)
 {
-  auto& system = Core::System::GetInstance();
+  auto& pixel_engine = Core::System::GetInstance().GetPixelEngine();
+  const u32 data = value & 0xffffff;
+  const u16 token = static_cast<u16>(data & 0xffff);
 
-  // masking via BPMEM_BP_MASK could hypothetically be a problem
-  u32 newval = value & 0xffffff;
-  switch (reg)
+  if (reg == BPMEM_SETDRAWDONE)
   {
-  case BPMEM_SETDRAWDONE:
-    if ((newval & 0xff) == 0x02)
-      system.GetPixelEngine().SetFinish(cycles_into_future);
-    break;
-  case BPMEM_PE_TOKEN_ID:
-    system.GetPixelEngine().SetToken(newval & 0xffff, false, cycles_into_future);
-    break;
-  case BPMEM_PE_TOKEN_INT_ID:  // Pixel Engine Interrupt Token ID
-    system.GetPixelEngine().SetToken(newval & 0xffff, true, cycles_into_future);
-    break;
+    if ((data & 0xff) == 0x02)
+      pixel_engine.SetFinish(cycles_into_future);
+  }
+  else if (reg == BPMEM_PE_TOKEN_ID || reg == BPMEM_PE_TOKEN_INT_ID)
+  {
+    pixel_engine.SetToken(token, reg == BPMEM_PE_TOKEN_INT_ID, cycles_into_future);
   }
 }
 
-std::pair<std::string, std::string> GetBPRegInfo(u8 cmd, u32 cmddata)
+// ---------------------------------------------------------------------------------------------
+// Descriptions
+
+namespace
 {
-// Macro to set the register name and make sure it was written correctly via compile time assertion
-#define RegName(reg) ((void)(reg), #reg)
-#define DescriptionlessReg(reg) std::make_pair(RegName(reg), "");
+// Names of the registers that are listed under a fixed name; nullptr elsewhere.
+constexpr std::array<const char*, 256> MakeFixedNames()
+{
+  std::array<const char*, 256> names{};
+  const auto name = [&names](int reg, const char* text) { names[static_cast<size_t>(reg)] = text; };
+  name(BPMEM_GENMODE, "BPMEM_GENMODE");
+  for (int i = 0; i < 4; ++i)
+    name(BPMEM_DISPLAYCOPYFILTER + i, "BPMEM_DISPLAYCOPYFILTER");
+  name(BPMEM_IND_IMASK, "BPMEM_IND_IMASK");
+  name(BPMEM_SCISSORTL, "BPMEM_SCISSORTL");
+  name(BPMEM_SCISSORBR, "BPMEM_SCISSORBR");
+  name(BPMEM_LINEPTWIDTH, "BPMEM_LINEPTWIDTH");
+  name(BPMEM_PERF0_TRI, "BPMEM_PERF0_TRI");
+  name(BPMEM_PERF0_QUAD, "BPMEM_PERF0_QUAD");
+  name(BPMEM_RAS1_SS0, "BPMEM_RAS1_SS0");
+  name(BPMEM_RAS1_SS1, "BPMEM_RAS1_SS1");
+  name(BPMEM_IREF, "BPMEM_IREF");
+  name(BPMEM_ZMODE, "BPMEM_ZMODE");
+  name(BPMEM_BLENDMODE, "BPMEM_BLENDMODE");
+  name(BPMEM_CONSTANTALPHA, "BPMEM_CONSTANTALPHA");
+  name(BPMEM_ZCOMPARE, "BPMEM_ZCOMPARE");
+  name(BPMEM_FIELDMASK, "BPMEM_FIELDMASK");
+  name(BPMEM_SETDRAWDONE, "BPMEM_SETDRAWDONE");
+  name(BPMEM_BUSCLOCK0, "BPMEM_BUSCLOCK0");
+  name(BPMEM_PE_TOKEN_ID, "BPMEM_PE_TOKEN_ID");
+  name(BPMEM_PE_TOKEN_INT_ID, "BPMEM_PE_TOKEN_INT_ID");
+  name(BPMEM_EFB_TL, "BPMEM_EFB_TL");
+  name(BPMEM_EFB_WH, "BPMEM_EFB_WH");
+  name(BPMEM_EFB_ADDR, "BPMEM_EFB_ADDR");
+  name(BPMEM_EFB_STRIDE, "BPMEM_EFB_STRIDE");
+  name(BPMEM_COPYYSCALE, "BPMEM_COPYYSCALE");
+  name(BPMEM_CLEAR_AR, "BPMEM_CLEAR_AR");
+  name(BPMEM_CLEAR_GB, "BPMEM_CLEAR_GB");
+  name(BPMEM_CLEAR_Z, "BPMEM_CLEAR_Z");
+  name(BPMEM_TRIGGER_EFB_COPY, "BPMEM_TRIGGER_EFB_COPY");
+  name(BPMEM_COPYFILTER0, "BPMEM_COPYFILTER0");
+  name(BPMEM_COPYFILTER1, "BPMEM_COPYFILTER1");
+  name(BPMEM_CLEARBBOX1, "BPMEM_CLEARBBOX1");
+  name(BPMEM_CLEARBBOX2, "BPMEM_CLEARBBOX2");
+  name(BPMEM_CLEAR_PIXEL_PERF, "BPMEM_CLEAR_PIXEL_PERF");
+  name(BPMEM_REVBITS, "BPMEM_REVBITS");
+  name(BPMEM_SCISSOROFFSET, "BPMEM_SCISSOROFFSET");
+  name(BPMEM_PRELOAD_ADDR, "BPMEM_PRELOAD_ADDR");
+  name(BPMEM_PRELOAD_TMEMEVEN, "BPMEM_PRELOAD_TMEMEVEN");
+  name(BPMEM_PRELOAD_TMEMODD, "BPMEM_PRELOAD_TMEMODD");
+  name(BPMEM_PRELOAD_MODE, "BPMEM_PRELOAD_MODE");
+  name(BPMEM_LOADTLUT0, "BPMEM_LOADTLUT0");
+  name(BPMEM_LOADTLUT1, "BPMEM_LOADTLUT1");
+  name(BPMEM_TEXINVALIDATE, "BPMEM_TEXINVALIDATE");
+  name(BPMEM_PERF1, "BPMEM_PERF1");
+  name(BPMEM_FIELDMODE, "BPMEM_FIELDMODE");
+  name(BPMEM_BUSCLOCK1, "BPMEM_BUSCLOCK1");
+  name(BPMEM_FOGPARAM0, "BPMEM_FOGPARAM0");
+  name(BPMEM_FOGBMAGNITUDE, "BPMEM_FOGBMAGNITUDE");
+  name(BPMEM_FOGBEXPONENT, "BPMEM_FOGBEXPONENT");
+  name(BPMEM_FOGPARAM3, "BPMEM_FOGPARAM3");
+  name(BPMEM_FOGCOLOR, "BPMEM_FOGCOLOR");
+  name(BPMEM_ALPHACOMPARE, "BPMEM_ALPHACOMPARE");
+  name(BPMEM_BIAS, "BPMEM_BIAS");
+  name(BPMEM_ZTEX2, "BPMEM_ZTEX2");
+  name(BPMEM_BP_MASK, "BPMEM_BP_MASK");
+  return names;
+}
+constexpr auto FIXED_NAMES = MakeFixedNames();
+
+// Description of a fixed-name register; empty for those without one.
+std::string DescribeFixed(u8 cmd, u32 data)
+{
+  const auto high_low = [data](const char* high, const char* low) {
+    return fmt::format("Clear color {}: 0x{:02X}\nClear color {}: 0x{:02X}", high,
+                       (data & 0xFF00) >> 8, low, data & 0xFF);
+  };
+  const auto bbox_pair = [data](int first) {
+    return fmt::format("Bounding Box index {}: {}\nBounding Box index {}: {}", first,
+                       data & 0x3ff, first + 1, (data >> 10) & 0x3ff);
+  };
+  const auto six_bit = [data](int field) { return (data >> (6 * field)) & 0x3f; };
 
   switch (cmd)
   {
-  case BPMEM_GENMODE:  // 0x00
-    return std::make_pair(RegName(BPMEM_GENMODE), fmt::to_string(GenMode{.hex = cmddata}));
-
-  case BPMEM_DISPLAYCOPYFILTER:  // 0x01
-  case BPMEM_DISPLAYCOPYFILTER + 1:
-  case BPMEM_DISPLAYCOPYFILTER + 2:
-  case BPMEM_DISPLAYCOPYFILTER + 3:
-    // TODO: This is actually the sample pattern used for copies from an antialiased EFB
-    return DescriptionlessReg(BPMEM_DISPLAYCOPYFILTER);
-    // TODO: Description
-
-  case BPMEM_IND_MTXA:  // 0x06
-  case BPMEM_IND_MTXA + 3:
-  case BPMEM_IND_MTXA + 6:
-    return std::make_pair(fmt::format("BPMEM_IND_MTXA Matrix {}", (cmd - BPMEM_IND_MTXA) / 3),
-                          fmt::format("Matrix {} column A\n{}", (cmd - BPMEM_IND_MTXA) / 3,
-                                      IND_MTXA{.hex = cmddata}));
-
-  case BPMEM_IND_MTXB:  // 0x07
-  case BPMEM_IND_MTXB + 3:
-  case BPMEM_IND_MTXB + 6:
-    return std::make_pair(fmt::format("BPMEM_IND_MTXB Matrix {}", (cmd - BPMEM_IND_MTXB) / 3),
-                          fmt::format("Matrix {} column B\n{}", (cmd - BPMEM_IND_MTXB) / 3,
-                                      IND_MTXB{.hex = cmddata}));
-
-  case BPMEM_IND_MTXC:  // 0x08
-  case BPMEM_IND_MTXC + 3:
-  case BPMEM_IND_MTXC + 6:
-    return std::make_pair(fmt::format("BPMEM_IND_MTXC Matrix {}", (cmd - BPMEM_IND_MTXC) / 3),
-                          fmt::format("Matrix {} column C\n{}", (cmd - BPMEM_IND_MTXC) / 3,
-                                      IND_MTXC{.hex = cmddata}));
-
-  case BPMEM_IND_IMASK:  // 0x0F
-    return DescriptionlessReg(BPMEM_IND_IMASK);
-    // TODO: Description
-
-  case BPMEM_IND_CMD:  // 0x10
-  case BPMEM_IND_CMD + 1:
-  case BPMEM_IND_CMD + 2:
-  case BPMEM_IND_CMD + 3:
-  case BPMEM_IND_CMD + 4:
-  case BPMEM_IND_CMD + 5:
-  case BPMEM_IND_CMD + 6:
-  case BPMEM_IND_CMD + 7:
-  case BPMEM_IND_CMD + 8:
-  case BPMEM_IND_CMD + 9:
-  case BPMEM_IND_CMD + 10:
-  case BPMEM_IND_CMD + 11:
-  case BPMEM_IND_CMD + 12:
-  case BPMEM_IND_CMD + 13:
-  case BPMEM_IND_CMD + 14:
-  case BPMEM_IND_CMD + 15:
-    return std::make_pair(fmt::format("BPMEM_IND_CMD number {}", cmd - BPMEM_IND_CMD),
-                          fmt::to_string(TevStageIndirect{.fullhex = cmddata}));
-
-  case BPMEM_SCISSORTL:  // 0x20
-    return std::make_pair(RegName(BPMEM_SCISSORTL), fmt::to_string(ScissorPos{.hex = cmddata}));
-
-  case BPMEM_SCISSORBR:  // 0x21
-    return std::make_pair(RegName(BPMEM_SCISSORBR), fmt::to_string(ScissorPos{.hex = cmddata}));
-
-  case BPMEM_LINEPTWIDTH:  // 0x22
-    return std::make_pair(RegName(BPMEM_LINEPTWIDTH), fmt::to_string(LPSize{.hex = cmddata}));
-
-  case BPMEM_PERF0_TRI:  // 0x23
-    return DescriptionlessReg(BPMEM_PERF0_TRI);
-    // TODO: Description
-
-  case BPMEM_PERF0_QUAD:  // 0x24
-    return DescriptionlessReg(BPMEM_PERF0_QUAD);
-    // TODO: Description
-
-  case BPMEM_RAS1_SS0:  // 0x25
-    return std::make_pair(RegName(BPMEM_RAS1_SS0),
-                          fmt::to_string(std::make_pair(cmd, TEXSCALE{.hex = cmddata})));
-
-  case BPMEM_RAS1_SS1:  // 0x26
-    return std::make_pair(RegName(BPMEM_RAS1_SS1),
-                          fmt::to_string(std::make_pair(cmd, TEXSCALE{.hex = cmddata})));
-
-  case BPMEM_IREF:  // 0x27
-    return std::make_pair(RegName(BPMEM_IREF), fmt::to_string(RAS1_IREF{.hex = cmddata}));
-
-  case BPMEM_TREF:  // 0x28
-  case BPMEM_TREF + 1:
-  case BPMEM_TREF + 2:
-  case BPMEM_TREF + 3:
-  case BPMEM_TREF + 4:
-  case BPMEM_TREF + 5:
-  case BPMEM_TREF + 6:
-  case BPMEM_TREF + 7:
-    return std::make_pair(fmt::format("BPMEM_TREF number {}", cmd - BPMEM_TREF),
-                          fmt::to_string(std::make_pair(cmd, TwoTevStageOrders{.hex = cmddata})));
-
-  case BPMEM_SU_SSIZE:  // 0x30
-  case BPMEM_SU_SSIZE + 2:
-  case BPMEM_SU_SSIZE + 4:
-  case BPMEM_SU_SSIZE + 6:
-  case BPMEM_SU_SSIZE + 8:
-  case BPMEM_SU_SSIZE + 10:
-  case BPMEM_SU_SSIZE + 12:
-  case BPMEM_SU_SSIZE + 14:
-    return std::make_pair(fmt::format("BPMEM_SU_SSIZE number {}", (cmd - BPMEM_SU_SSIZE) / 2),
-                          fmt::to_string(std::make_pair(true, TCInfo{.hex = cmddata})));
-
-  case BPMEM_SU_TSIZE:  // 0x31
-  case BPMEM_SU_TSIZE + 2:
-  case BPMEM_SU_TSIZE + 4:
-  case BPMEM_SU_TSIZE + 6:
-  case BPMEM_SU_TSIZE + 8:
-  case BPMEM_SU_TSIZE + 10:
-  case BPMEM_SU_TSIZE + 12:
-  case BPMEM_SU_TSIZE + 14:
-    return std::make_pair(fmt::format("BPMEM_SU_TSIZE number {}", (cmd - BPMEM_SU_TSIZE) / 2),
-                          fmt::to_string(std::make_pair(false, TCInfo{.hex = cmddata})));
-
-  case BPMEM_ZMODE:  // 0x40
-    return std::make_pair(RegName(BPMEM_ZMODE), fmt::format("Z mode: {}", ZMode{.hex = cmddata}));
-
-  case BPMEM_BLENDMODE:  // 0x41
-    return std::make_pair(RegName(BPMEM_BLENDMODE), fmt::to_string(BlendMode{.hex = cmddata}));
-
-  case BPMEM_CONSTANTALPHA:  // 0x42
-    return std::make_pair(RegName(BPMEM_CONSTANTALPHA),
-                          fmt::to_string(ConstantAlpha{.hex = cmddata}));
-
-  case BPMEM_ZCOMPARE:  // 0x43
-    return std::make_pair(RegName(BPMEM_ZCOMPARE), fmt::to_string(PEControl{.hex = cmddata}));
-
-  case BPMEM_FIELDMASK:  // 0x44
-    return std::make_pair(RegName(BPMEM_FIELDMASK), fmt::to_string(FieldMask{.hex = cmddata}));
-
-  case BPMEM_SETDRAWDONE:  // 0x45
-    return DescriptionlessReg(BPMEM_SETDRAWDONE);
-    // TODO: Description
-
-  case BPMEM_BUSCLOCK0:  // 0x46
-    return DescriptionlessReg(BPMEM_BUSCLOCK0);
-    // TODO: Description
-
-  case BPMEM_PE_TOKEN_ID:  // 0x47
-    return DescriptionlessReg(BPMEM_PE_TOKEN_ID);
-    // TODO: Description
-
-  case BPMEM_PE_TOKEN_INT_ID:  // 0x48
-    return DescriptionlessReg(BPMEM_PE_TOKEN_INT_ID);
-    // TODO: Description
-
-  case BPMEM_EFB_TL:  // 0x49
+  case BPMEM_GENMODE:
+    return fmt::to_string(GenMode{.hex = data});
+  case BPMEM_SCISSORTL:
+  case BPMEM_SCISSORBR:
+    return fmt::to_string(ScissorPos{.hex = data});
+  case BPMEM_LINEPTWIDTH:
+    return fmt::to_string(LPSize{.hex = data});
+  case BPMEM_RAS1_SS0:
+  case BPMEM_RAS1_SS1:
+    return fmt::to_string(std::make_pair(cmd, TEXSCALE{.hex = data}));
+  case BPMEM_IREF:
+    return fmt::to_string(RAS1_IREF{.hex = data});
+  case BPMEM_ZMODE:
+    return fmt::format("Z mode: {}", ZMode{.hex = data});
+  case BPMEM_BLENDMODE:
+    return fmt::to_string(BlendMode{.hex = data});
+  case BPMEM_CONSTANTALPHA:
+    return fmt::to_string(ConstantAlpha{.hex = data});
+  case BPMEM_ZCOMPARE:
+    return fmt::to_string(PEControl{.hex = data});
+  case BPMEM_FIELDMASK:
+    return fmt::to_string(FieldMask{.hex = data});
+  case BPMEM_EFB_TL:
   {
-    const X10Y10 left_top{.hex = cmddata};
-    return std::make_pair(RegName(BPMEM_EFB_TL),
-                          fmt::format("EFB Left: {}\nEFB Top: {}", left_top.x, left_top.y));
+    const X10Y10 corner{.hex = data};
+    return fmt::format("EFB Left: {}\nEFB Top: {}", corner.x, corner.y);
   }
-
-  case BPMEM_EFB_WH:  // 0x4A
+  case BPMEM_EFB_WH:
   {
-    const X10Y10 width_height{.hex = cmddata};
-    return std::make_pair(
-        RegName(BPMEM_EFB_WH),
-        fmt::format("EFB Width: {}\nEFB Height: {}", width_height.x + 1, width_height.y + 1));
+    const X10Y10 size{.hex = data};
+    return fmt::format("EFB Width: {}\nEFB Height: {}", size.x + 1, size.y + 1);
   }
-
-  case BPMEM_EFB_ADDR:  // 0x4B
-    return std::make_pair(
-        RegName(BPMEM_EFB_ADDR),
-        fmt::format("EFB Target address (32 byte aligned): 0x{:06X}", cmddata << 5));
-
-  case BPMEM_EFB_STRIDE:  // 0x4D
-    return std::make_pair(
-        RegName(BPMEM_EFB_STRIDE),
-        fmt::format("EFB destination stride (32 byte aligned): 0x{:06X}", cmddata << 5));
-
-  case BPMEM_COPYYSCALE:  // 0x4E
-    return std::make_pair(
-        RegName(BPMEM_COPYYSCALE),
-        fmt::format("Y scaling factor (XFB copy only): 0x{:X} ({}, reciprocal {})", cmddata,
-                    static_cast<float>(cmddata) / 256.f, 256.f / static_cast<float>(cmddata)));
-
-  case BPMEM_CLEAR_AR:  // 0x4F
-    return std::make_pair(RegName(BPMEM_CLEAR_AR),
-                          fmt::format("Clear color alpha: 0x{:02X}\nClear color red: 0x{:02X}",
-                                      (cmddata & 0xFF00) >> 8, cmddata & 0xFF));
-
-  case BPMEM_CLEAR_GB:  // 0x50
-    return std::make_pair(RegName(BPMEM_CLEAR_GB),
-                          fmt::format("Clear color green: 0x{:02X}\nClear color blue: 0x{:02X}",
-                                      (cmddata & 0xFF00) >> 8, cmddata & 0xFF));
-
-  case BPMEM_CLEAR_Z:  // 0x51
-    return std::make_pair(RegName(BPMEM_CLEAR_Z), fmt::format("Clear Z value: 0x{:06X}", cmddata));
-
-  case BPMEM_TRIGGER_EFB_COPY:  // 0x52
-    return std::make_pair(RegName(BPMEM_TRIGGER_EFB_COPY),
-                          fmt::to_string(UPE_Copy{.Hex = cmddata}));
-
-  case BPMEM_COPYFILTER0:  // 0x53
+  case BPMEM_EFB_ADDR:
+    return fmt::format("EFB Target address (32 byte aligned): 0x{:06X}", data << 5);
+  case BPMEM_EFB_STRIDE:
+    return fmt::format("EFB destination stride (32 byte aligned): 0x{:06X}", data << 5);
+  case BPMEM_COPYYSCALE:
   {
-    const u32 w0 = (cmddata & 0x00003f);
-    const u32 w1 = (cmddata & 0x000fc0) >> 6;
-    const u32 w2 = (cmddata & 0x03f000) >> 12;
-    const u32 w3 = (cmddata & 0xfc0000) >> 18;
-    return std::make_pair(RegName(BPMEM_COPYFILTER0),
-                          fmt::format("w0: {}\nw1: {}\nw2: {}\nw3: {}", w0, w1, w2, w3));
+    const float scale = static_cast<float>(data);
+    return fmt::format("Y scaling factor (XFB copy only): 0x{:X} ({}, reciprocal {})", data,
+                       scale / 256.f, 256.f / scale);
   }
-
-  case BPMEM_COPYFILTER1:  // 0x54
-  {
-    const u32 w4 = (cmddata & 0x00003f);
-    const u32 w5 = (cmddata & 0x000fc0) >> 6;
-    const u32 w6 = (cmddata & 0x03f000) >> 12;
-    // There is no w7
-    return std::make_pair(RegName(BPMEM_COPYFILTER1),
-                          fmt::format("w4: {}\nw5: {}\nw6: {}", w4, w5, w6));
-  }
-
-  case BPMEM_CLEARBBOX1:  // 0x55
-    return std::make_pair(RegName(BPMEM_CLEARBBOX1),
-                          fmt::format("Bounding Box index 0: {}\nBounding Box index 1: {}",
-                                      cmddata & 0x3ff, (cmddata >> 10) & 0x3ff));
-
-  case BPMEM_CLEARBBOX2:  // 0x56
-    return std::make_pair(RegName(BPMEM_CLEARBBOX2),
-                          fmt::format("Bounding Box index 2: {}\nBounding Box index 3: {}",
-                                      cmddata & 0x3ff, (cmddata >> 10) & 0x3ff));
-
-  case BPMEM_CLEAR_PIXEL_PERF:  // 0x57
-    return DescriptionlessReg(BPMEM_CLEAR_PIXEL_PERF);
-    // TODO: Description
-
-  case BPMEM_REVBITS:  // 0x58
-    return DescriptionlessReg(BPMEM_REVBITS);
-    // TODO: Description
-
-  case BPMEM_SCISSOROFFSET:  // 0x59
-    return std::make_pair(RegName(BPMEM_SCISSOROFFSET),
-                          fmt::to_string(ScissorOffset{.hex = cmddata}));
-
-  case BPMEM_PRELOAD_ADDR:  // 0x60
-    return std::make_pair(
-        RegName(BPMEM_PRELOAD_ADDR),
-        fmt::format("Tmem preload address (32 byte aligned, in main memory): 0x{:06x}",
-                    cmddata << 5));
-
-  case BPMEM_PRELOAD_TMEMEVEN:  // 0x61
-    return std::make_pair(RegName(BPMEM_PRELOAD_TMEMEVEN),
-                          fmt::format("Tmem preload even line: 0x{:04x} (byte 0x{:05x})", cmddata,
-                                      cmddata * TMEM_LINE_SIZE));
-
-  case BPMEM_PRELOAD_TMEMODD:  // 0x62
-    return std::make_pair(RegName(BPMEM_PRELOAD_TMEMODD),
-                          fmt::format("Tmem preload odd line: 0x{:04x} (byte 0x{:05x})", cmddata,
-                                      cmddata * TMEM_LINE_SIZE));
-
-  case BPMEM_PRELOAD_MODE:  // 0x63
-    return std::make_pair(RegName(BPMEM_PRELOAD_MODE),
-                          fmt::to_string(BPU_PreloadTileInfo{.hex = cmddata}));
-
-  case BPMEM_LOADTLUT0:  // 0x64
-    return std::make_pair(
-        RegName(BPMEM_LOADTLUT0),
-        fmt::format("TLUT load address (32 byte aligned, in main memory): 0x{:06x}", cmddata << 5));
-
-  case BPMEM_LOADTLUT1:  // 0x65
-    return std::make_pair(RegName(BPMEM_LOADTLUT1),
-                          fmt::to_string(BPU_LoadTlutInfo{.hex = cmddata}));
-
-  case BPMEM_TEXINVALIDATE:  // 0x66
-    return DescriptionlessReg(BPMEM_TEXINVALIDATE);
-    // TODO: Description
-
-  case BPMEM_PERF1:  // 0x67
-    return DescriptionlessReg(BPMEM_PERF1);
-    // TODO: Description
-
-  case BPMEM_FIELDMODE:  // 0x68
-    return std::make_pair(RegName(BPMEM_FIELDMODE), fmt::to_string(FieldMode{.hex = cmddata}));
-
-  case BPMEM_BUSCLOCK1:  // 0x69
-    return DescriptionlessReg(BPMEM_BUSCLOCK1);
-    // TODO: Description
-
-  case BPMEM_TX_SETMODE0:  // 0x80
-  case BPMEM_TX_SETMODE0 + 1:
-  case BPMEM_TX_SETMODE0 + 2:
-  case BPMEM_TX_SETMODE0 + 3:
-    return std::make_pair(fmt::format("BPMEM_TX_SETMODE0 Texture Unit {}", cmd - BPMEM_TX_SETMODE0),
-                          fmt::to_string(TexMode0{.hex = cmddata}));
-
-  case BPMEM_TX_SETMODE1:  // 0x84
-  case BPMEM_TX_SETMODE1 + 1:
-  case BPMEM_TX_SETMODE1 + 2:
-  case BPMEM_TX_SETMODE1 + 3:
-    return std::make_pair(fmt::format("BPMEM_TX_SETMODE1 Texture Unit {}", cmd - BPMEM_TX_SETMODE1),
-                          fmt::to_string(TexMode1{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE0:  // 0x88
-  case BPMEM_TX_SETIMAGE0 + 1:
-  case BPMEM_TX_SETIMAGE0 + 2:
-  case BPMEM_TX_SETIMAGE0 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE0 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE0),
-        fmt::to_string(TexImage0{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE1:  // 0x8C
-  case BPMEM_TX_SETIMAGE1 + 1:
-  case BPMEM_TX_SETIMAGE1 + 2:
-  case BPMEM_TX_SETIMAGE1 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE1 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE1),
-        fmt::to_string(TexImage1{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE2:  // 0x90
-  case BPMEM_TX_SETIMAGE2 + 1:
-  case BPMEM_TX_SETIMAGE2 + 2:
-  case BPMEM_TX_SETIMAGE2 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE2 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE2),
-        fmt::to_string(TexImage2{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE3:  // 0x94
-  case BPMEM_TX_SETIMAGE3 + 1:
-  case BPMEM_TX_SETIMAGE3 + 2:
-  case BPMEM_TX_SETIMAGE3 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE3 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE3),
-        fmt::to_string(TexImage3{.hex = cmddata}));
-
-  case BPMEM_TX_SETTLUT:  // 0x98
-  case BPMEM_TX_SETTLUT + 1:
-  case BPMEM_TX_SETTLUT + 2:
-  case BPMEM_TX_SETTLUT + 3:
-    return std::make_pair(fmt::format("BPMEM_TX_SETTLUT Texture Unit {}", cmd - BPMEM_TX_SETTLUT),
-                          fmt::to_string(TexTLUT{.hex = cmddata}));
-
-  case BPMEM_TX_SETMODE0_4:  // 0xA0
-  case BPMEM_TX_SETMODE0_4 + 1:
-  case BPMEM_TX_SETMODE0_4 + 2:
-  case BPMEM_TX_SETMODE0_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETMODE0_4 Texture Unit {}", cmd - BPMEM_TX_SETMODE0_4 + 4),
-        fmt::to_string(TexMode0{.hex = cmddata}));
-
-  case BPMEM_TX_SETMODE1_4:  // 0xA4
-  case BPMEM_TX_SETMODE1_4 + 1:
-  case BPMEM_TX_SETMODE1_4 + 2:
-  case BPMEM_TX_SETMODE1_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETMODE1_4 Texture Unit {}", cmd - BPMEM_TX_SETMODE1_4 + 4),
-        fmt::to_string(TexMode1{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE0_4:  // 0xA8
-  case BPMEM_TX_SETIMAGE0_4 + 1:
-  case BPMEM_TX_SETIMAGE0_4 + 2:
-  case BPMEM_TX_SETIMAGE0_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE0_4 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE0_4 + 4),
-        fmt::to_string(TexImage0{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE1_4:  // 0xAC
-  case BPMEM_TX_SETIMAGE1_4 + 1:
-  case BPMEM_TX_SETIMAGE1_4 + 2:
-  case BPMEM_TX_SETIMAGE1_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE1_4 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE1_4 + 4),
-        fmt::to_string(TexImage1{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE2_4:  // 0xB0
-  case BPMEM_TX_SETIMAGE2_4 + 1:
-  case BPMEM_TX_SETIMAGE2_4 + 2:
-  case BPMEM_TX_SETIMAGE2_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE2_4 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE2_4 + 4),
-        fmt::to_string(TexImage2{.hex = cmddata}));
-
-  case BPMEM_TX_SETIMAGE3_4:  // 0xB4
-  case BPMEM_TX_SETIMAGE3_4 + 1:
-  case BPMEM_TX_SETIMAGE3_4 + 2:
-  case BPMEM_TX_SETIMAGE3_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETIMAGE3_4 Texture Unit {}", cmd - BPMEM_TX_SETIMAGE3_4 + 4),
-        fmt::to_string(TexImage3{.hex = cmddata}));
-
-  case BPMEM_TX_SETTLUT_4:  // 0xB8
-  case BPMEM_TX_SETTLUT_4 + 1:
-  case BPMEM_TX_SETTLUT_4 + 2:
-  case BPMEM_TX_SETTLUT_4 + 3:
-    return std::make_pair(
-        fmt::format("BPMEM_TX_SETTLUT_4 Texture Unit {}", cmd - BPMEM_TX_SETTLUT_4 + 4),
-        fmt::to_string(TexTLUT{.hex = cmddata}));
-
-  case BPMEM_TEV_COLOR_ENV:  // 0xC0
-  case BPMEM_TEV_COLOR_ENV + 2:
-  case BPMEM_TEV_COLOR_ENV + 4:
-  case BPMEM_TEV_COLOR_ENV + 6:
-  case BPMEM_TEV_COLOR_ENV + 8:
-  case BPMEM_TEV_COLOR_ENV + 10:
-  case BPMEM_TEV_COLOR_ENV + 12:
-  case BPMEM_TEV_COLOR_ENV + 14:
-  case BPMEM_TEV_COLOR_ENV + 16:
-  case BPMEM_TEV_COLOR_ENV + 18:
-  case BPMEM_TEV_COLOR_ENV + 20:
-  case BPMEM_TEV_COLOR_ENV + 22:
-  case BPMEM_TEV_COLOR_ENV + 24:
-  case BPMEM_TEV_COLOR_ENV + 26:
-  case BPMEM_TEV_COLOR_ENV + 28:
-  case BPMEM_TEV_COLOR_ENV + 30:
-    return std::make_pair(
-        fmt::format("BPMEM_TEV_COLOR_ENV Tev stage {}", (cmd - BPMEM_TEV_COLOR_ENV) / 2),
-        fmt::to_string(TevStageCombiner::ColorCombiner{.hex = cmddata}));
-
-  case BPMEM_TEV_ALPHA_ENV:  // 0xC1
-  case BPMEM_TEV_ALPHA_ENV + 2:
-  case BPMEM_TEV_ALPHA_ENV + 4:
-  case BPMEM_TEV_ALPHA_ENV + 6:
-  case BPMEM_TEV_ALPHA_ENV + 8:
-  case BPMEM_TEV_ALPHA_ENV + 10:
-  case BPMEM_TEV_ALPHA_ENV + 12:
-  case BPMEM_TEV_ALPHA_ENV + 14:
-  case BPMEM_TEV_ALPHA_ENV + 16:
-  case BPMEM_TEV_ALPHA_ENV + 18:
-  case BPMEM_TEV_ALPHA_ENV + 20:
-  case BPMEM_TEV_ALPHA_ENV + 22:
-  case BPMEM_TEV_ALPHA_ENV + 24:
-  case BPMEM_TEV_ALPHA_ENV + 26:
-  case BPMEM_TEV_ALPHA_ENV + 28:
-  case BPMEM_TEV_ALPHA_ENV + 30:
-    return std::make_pair(
-        fmt::format("BPMEM_TEV_ALPHA_ENV Tev stage {}", (cmd - BPMEM_TEV_ALPHA_ENV) / 2),
-        fmt::to_string(TevStageCombiner::AlphaCombiner{.hex = cmddata}));
-
-  case BPMEM_TEV_COLOR_RA:      // 0xE0
-  case BPMEM_TEV_COLOR_RA + 2:  // 0xE2
-  case BPMEM_TEV_COLOR_RA + 4:  // 0xE4
-  case BPMEM_TEV_COLOR_RA + 6:  // 0xE6
-    return std::make_pair(
-        fmt::format("BPMEM_TEV_COLOR_RA Tev register {}", (cmd - BPMEM_TEV_COLOR_RA) / 2),
-        fmt::to_string(TevReg::RA{.hex = cmddata}));
-
-  case BPMEM_TEV_COLOR_BG:      // 0xE1
-  case BPMEM_TEV_COLOR_BG + 2:  // 0xE3
-  case BPMEM_TEV_COLOR_BG + 4:  // 0xE5
-  case BPMEM_TEV_COLOR_BG + 6:  // 0xE7
-    return std::make_pair(
-        fmt::format("BPMEM_TEV_COLOR_BG Tev register {}", (cmd - BPMEM_TEV_COLOR_BG) / 2),
-        fmt::to_string(TevReg::BG{.hex = cmddata}));
-
-  case BPMEM_FOGRANGE:  // 0xE8
-    return std::make_pair("BPMEM_FOGRANGE Base",
-                          fmt::to_string(FogRangeParams::RangeBase{.hex = cmddata}));
-
-  case BPMEM_FOGRANGE + 1:
-  case BPMEM_FOGRANGE + 2:
-  case BPMEM_FOGRANGE + 3:
-  case BPMEM_FOGRANGE + 4:
-  case BPMEM_FOGRANGE + 5:
-    return std::make_pair(fmt::format("BPMEM_FOGRANGE K element {}", cmd - BPMEM_FOGRANGE),
-                          fmt::to_string(FogRangeKElement{.HEX = cmddata}));
-
-  case BPMEM_FOGPARAM0:  // 0xEE
-    return std::make_pair(RegName(BPMEM_FOGPARAM0), fmt::to_string(FogParam0{.hex = cmddata}));
-
-  case BPMEM_FOGBMAGNITUDE:  // 0xEF
-    return std::make_pair(RegName(BPMEM_FOGBMAGNITUDE), fmt::format("B magnitude: {}", cmddata));
-
-  case BPMEM_FOGBEXPONENT:  // 0xF0
-    return std::make_pair(RegName(BPMEM_FOGBEXPONENT),
-                          fmt::format("B shift: 1>>{} (1/{})", cmddata, 1 << cmddata));
-
-  case BPMEM_FOGPARAM3:  // 0xF1
-    return std::make_pair(RegName(BPMEM_FOGPARAM3), fmt::to_string(FogParam3{.hex = cmddata}));
-
-  case BPMEM_FOGCOLOR:  // 0xF2
-    return std::make_pair(RegName(BPMEM_FOGCOLOR),
-                          fmt::to_string(FogParams::FogColor{.hex = cmddata}));
-
-  case BPMEM_ALPHACOMPARE:  // 0xF3
-    return std::make_pair(RegName(BPMEM_ALPHACOMPARE), fmt::to_string(AlphaTest{.hex = cmddata}));
-
-  case BPMEM_BIAS:  // 0xF4
-    return std::make_pair(RegName(BPMEM_BIAS), fmt::to_string(ZTex1{.hex = cmddata}));
-
-  case BPMEM_ZTEX2:  // 0xF5
-    return std::make_pair(RegName(BPMEM_ZTEX2), fmt::to_string(ZTex2{.hex = cmddata}));
-
-  case BPMEM_TEV_KSEL:  // 0xF6
-  case BPMEM_TEV_KSEL + 1:
-  case BPMEM_TEV_KSEL + 2:
-  case BPMEM_TEV_KSEL + 3:
-  case BPMEM_TEV_KSEL + 4:
-  case BPMEM_TEV_KSEL + 5:
-  case BPMEM_TEV_KSEL + 6:
-  case BPMEM_TEV_KSEL + 7:
-    return std::make_pair(fmt::format("BPMEM_TEV_KSEL number {}", cmd - BPMEM_TEV_KSEL),
-                          fmt::to_string(std::make_pair(cmd, TevKSel{.hex = cmddata})));
-
-  case BPMEM_BP_MASK:  // 0xFE
-    return std::make_pair(RegName(BPMEM_BP_MASK),
-                          fmt::format("The next BP command will only update these bits; others "
-                                      "will retain their prior values: {:06x}",
-                                      cmddata));
-
+  case BPMEM_CLEAR_AR:
+    return high_low("alpha", "red");
+  case BPMEM_CLEAR_GB:
+    return high_low("green", "blue");
+  case BPMEM_CLEAR_Z:
+    return fmt::format("Clear Z value: 0x{:06X}", data);
+  case BPMEM_TRIGGER_EFB_COPY:
+    return fmt::to_string(UPE_Copy{.Hex = data});
+  case BPMEM_COPYFILTER0:
+    return fmt::format("w0: {}\nw1: {}\nw2: {}\nw3: {}", six_bit(0), six_bit(1), six_bit(2),
+                       six_bit(3));
+  case BPMEM_COPYFILTER1:
+    // Seven coefficients in total; this register holds the last three.
+    return fmt::format("w4: {}\nw5: {}\nw6: {}", six_bit(0), six_bit(1), six_bit(2));
+  case BPMEM_CLEARBBOX1:
+    return bbox_pair(0);
+  case BPMEM_CLEARBBOX2:
+    return bbox_pair(2);
+  case BPMEM_SCISSOROFFSET:
+    return fmt::to_string(ScissorOffset{.hex = data});
+  case BPMEM_PRELOAD_ADDR:
+    return fmt::format("Tmem preload address (32 byte aligned, in main memory): 0x{:06x}",
+                       data << 5);
+  case BPMEM_PRELOAD_TMEMEVEN:
+    return fmt::format("Tmem preload even line: 0x{:04x} (byte 0x{:05x})", data,
+                       data * TMEM_LINE_SIZE);
+  case BPMEM_PRELOAD_TMEMODD:
+    return fmt::format("Tmem preload odd line: 0x{:04x} (byte 0x{:05x})", data,
+                       data * TMEM_LINE_SIZE);
+  case BPMEM_PRELOAD_MODE:
+    return fmt::to_string(BPU_PreloadTileInfo{.hex = data});
+  case BPMEM_LOADTLUT0:
+    return fmt::format("TLUT load address (32 byte aligned, in main memory): 0x{:06x}",
+                       data << 5);
+  case BPMEM_LOADTLUT1:
+    return fmt::to_string(BPU_LoadTlutInfo{.hex = data});
+  case BPMEM_FIELDMODE:
+    return fmt::to_string(FieldMode{.hex = data});
+  case BPMEM_FOGPARAM0:
+    return fmt::to_string(FogParam0{.hex = data});
+  case BPMEM_FOGBMAGNITUDE:
+    return fmt::format("B magnitude: {}", data);
+  case BPMEM_FOGBEXPONENT:
+    return fmt::format("B shift: 1>>{} (1/{})", data, 1 << data);
+  case BPMEM_FOGPARAM3:
+    return fmt::to_string(FogParam3{.hex = data});
+  case BPMEM_FOGCOLOR:
+    return fmt::to_string(FogParams::FogColor{.hex = data});
+  case BPMEM_ALPHACOMPARE:
+    return fmt::to_string(AlphaTest{.hex = data});
+  case BPMEM_BIAS:
+    return fmt::to_string(ZTex1{.hex = data});
+  case BPMEM_ZTEX2:
+    return fmt::to_string(ZTex2{.hex = data});
+  case BPMEM_BP_MASK:
+    return fmt::format("The next BP command will only update these bits; others will retain "
+                       "their prior values: {:06x}",
+                       data);
   default:
-    return std::make_pair(fmt::format("Unknown BP Reg: {:02x}={:06x}", cmd, cmddata), "");
-
-#undef DescriptionlessReg
-#undef RegName
+    // Performance, clock, draw done, token and other command registers.
+    return "";
   }
 }
 
-// Called when loading a saved state.
+// Texture unit registers: seven kinds, four units in each of two banks.
+std::optional<std::pair<std::string, std::string>> DescribeTextureUnit(u8 cmd, u32 data)
+{
+  if (cmd < BPMEM_TX_SETMODE0 || cmd >= BPMEM_TEV_COLOR_ENV)
+    return std::nullopt;
+  const bool upper_bank = cmd >= BPMEM_TX_SETMODE0_4;
+  const int kind = ((cmd & 0x1f) >> 2);
+  if (kind == 7)
+    return std::nullopt;
+  static constexpr std::array<const char*, 7> kinds = {
+      "SETMODE0", "SETMODE1", "SETIMAGE0", "SETIMAGE1", "SETIMAGE2", "SETIMAGE3", "SETTLUT"};
+  const int unit = (cmd & 3) + (upper_bank ? 4 : 0);
+  std::string name = fmt::format("BPMEM_TX_{}{} Texture Unit {}", kinds[static_cast<size_t>(kind)],
+                                 upper_bank ? "_4" : "", unit);
+  std::string desc;
+  switch (kind)
+  {
+  case 0:
+    desc = fmt::to_string(TexMode0{.hex = data});
+    break;
+  case 1:
+    desc = fmt::to_string(TexMode1{.hex = data});
+    break;
+  case 2:
+    desc = fmt::to_string(TexImage0{.hex = data});
+    break;
+  case 3:
+    desc = fmt::to_string(TexImage1{.hex = data});
+    break;
+  case 4:
+    desc = fmt::to_string(TexImage2{.hex = data});
+    break;
+  case 5:
+    desc = fmt::to_string(TexImage3{.hex = data});
+    break;
+  default:
+    desc = fmt::to_string(TexTLUT{.hex = data});
+    break;
+  }
+  return std::make_pair(std::move(name), std::move(desc));
+}
+
+// Everything addressed by block other than the texture units.
+std::optional<std::pair<std::string, std::string>> DescribeBlock(u8 cmd, u32 data)
+{
+  const auto in = [cmd](int first, int count) { return cmd >= first && cmd < first + count; };
+
+  if (in(BPMEM_IND_MTXA, 9))
+  {
+    const int matrix = (cmd - BPMEM_IND_MTXA) / 3;
+    switch ((cmd - BPMEM_IND_MTXA) % 3)
+    {
+    case 0:
+      return std::make_pair(fmt::format("BPMEM_IND_MTXA Matrix {}", matrix),
+                            fmt::format("Matrix {} column A\n{}", matrix, IND_MTXA{.hex = data}));
+    case 1:
+      return std::make_pair(fmt::format("BPMEM_IND_MTXB Matrix {}", matrix),
+                            fmt::format("Matrix {} column B\n{}", matrix, IND_MTXB{.hex = data}));
+    default:
+      return std::make_pair(fmt::format("BPMEM_IND_MTXC Matrix {}", matrix),
+                            fmt::format("Matrix {} column C\n{}", matrix, IND_MTXC{.hex = data}));
+    }
+  }
+  if (in(BPMEM_IND_CMD, 16))
+  {
+    return std::make_pair(fmt::format("BPMEM_IND_CMD number {}", cmd - BPMEM_IND_CMD),
+                          fmt::to_string(TevStageIndirect{.fullhex = data}));
+  }
+  if (in(BPMEM_TREF, 8))
+  {
+    return std::make_pair(fmt::format("BPMEM_TREF number {}", cmd - BPMEM_TREF),
+                          fmt::to_string(std::make_pair(cmd, TwoTevStageOrders{.hex = data})));
+  }
+  if (in(BPMEM_SU_SSIZE, 16))
+  {
+    // S and T sizes alternate.
+    const bool is_s = ((cmd - BPMEM_SU_SSIZE) & 1) == 0;
+    const int texcoord = (cmd - BPMEM_SU_SSIZE) / 2;
+    return std::make_pair(
+        fmt::format("BPMEM_SU_{}SIZE number {}", is_s ? 'S' : 'T', texcoord),
+        fmt::to_string(std::make_pair(is_s, TCInfo{.hex = data})));
+  }
+  if (in(BPMEM_TEV_COLOR_ENV, 32))
+  {
+    const int stage = (cmd - BPMEM_TEV_COLOR_ENV) / 2;
+    if (((cmd - BPMEM_TEV_COLOR_ENV) & 1) == 0)
+    {
+      return std::make_pair(fmt::format("BPMEM_TEV_COLOR_ENV Tev stage {}", stage),
+                            fmt::to_string(TevStageCombiner::ColorCombiner{.hex = data}));
+    }
+    return std::make_pair(fmt::format("BPMEM_TEV_ALPHA_ENV Tev stage {}", stage),
+                          fmt::to_string(TevStageCombiner::AlphaCombiner{.hex = data}));
+  }
+  if (in(BPMEM_TEV_COLOR_RA, 8))
+  {
+    const int reg = (cmd - BPMEM_TEV_COLOR_RA) / 2;
+    if (((cmd - BPMEM_TEV_COLOR_RA) & 1) == 0)
+    {
+      return std::make_pair(fmt::format("BPMEM_TEV_COLOR_RA Tev register {}", reg),
+                            fmt::to_string(TevReg::RA{.hex = data}));
+    }
+    return std::make_pair(fmt::format("BPMEM_TEV_COLOR_BG Tev register {}", reg),
+                          fmt::to_string(TevReg::BG{.hex = data}));
+  }
+  if (cmd == BPMEM_FOGRANGE)
+  {
+    return std::make_pair(std::string("BPMEM_FOGRANGE Base"),
+                          fmt::to_string(FogRangeParams::RangeBase{.hex = data}));
+  }
+  if (in(BPMEM_FOGRANGE + 1, 5))
+  {
+    return std::make_pair(fmt::format("BPMEM_FOGRANGE K element {}", cmd - BPMEM_FOGRANGE),
+                          fmt::to_string(FogRangeKElement{.HEX = data}));
+  }
+  if (in(BPMEM_TEV_KSEL, 8))
+  {
+    return std::make_pair(fmt::format("BPMEM_TEV_KSEL number {}", cmd - BPMEM_TEV_KSEL),
+                          fmt::to_string(std::make_pair(cmd, TevKSel{.hex = data})));
+  }
+  return DescribeTextureUnit(cmd, data);
+}
+}  // namespace
+
+std::pair<std::string, std::string> GetBPRegInfo(u8 cmd, u32 cmddata)
+{
+  if (const char* const name = FIXED_NAMES[cmd])
+    return {name, DescribeFixed(cmd, cmddata)};
+  if (auto block = DescribeBlock(cmd, cmddata))
+    return std::move(*block);
+  return {fmt::format("Unknown BP Reg: {:02x}={:06x}", cmd, cmddata), ""};
+}
+
+// After a savestate load: push the BP state that lives in the backend (rather than in shader
+// constants, which have their own savestate) back out. Nothing is replayed through BPWritten.
 void BPReload()
 {
-  // restore anything that goes straight to the renderer.
-  // let's not risk actually replaying any writes.
-  // note that PixelShaderManager is already covered since it has its own DoState.
-  SetGenerationMode();
-  BPFunctions::SetScissorAndViewport(g_framebuffer_manager.get(), bpmem.scissorTL, bpmem.scissorBR,
-                                     bpmem.scissorOffset, xfmem.viewport);
-  SetDepthMode();
-  SetBlendMode();
-  OnPixelFormatChange(g_framebuffer_manager.get(), bpmem.zcontrol.pixel_format,
-                      bpmem.zcontrol.zformat);
+  BPFunctions::SetGenerationMode();
+  BPFunctions::SetScissorAndViewport(g_framebuffer_manager.get(), bpmem.scissorTL,
+                                     bpmem.scissorBR, bpmem.scissorOffset, xfmem.viewport);
+  BPFunctions::SetDepthMode();
+  BPFunctions::SetBlendMode();
+  BPFunctions::OnPixelFormatChange(g_framebuffer_manager.get(), bpmem.zcontrol.pixel_format,
+                                   bpmem.zcontrol.zformat);
 }

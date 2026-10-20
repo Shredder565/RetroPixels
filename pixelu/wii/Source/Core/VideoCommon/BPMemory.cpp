@@ -1,80 +1,59 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/BPMemory.h"
 
 #include <bit>
+#include <limits>
 
-// BP state
-// STATE_TO_SAVE
+// The emulated BP register file (saved in savestates).
 BPMemory bpmem;
+
+namespace
+{
+// Builds a float from the fog registers' reduced format: sign, 8-bit exponent and an 11-bit
+// mantissa that occupies the top of the 23-bit IEEE mantissa.
+float FogFloat(u32 sign, u32 exponent, u32 mantissa)
+{
+  return std::bit_cast<float>((sign << 31) | (exponent << 23) | (mantissa << 12));
+}
+}  // namespace
 
 bool BlendMode::UseLogicOp() const
 {
-  // Blending overrides the logicop bit.
-  if (blend_enable || !logic_op_enable)
-    return false;
-
-  // Fast path for Kirby's Return to Dreamland, they use it with dstAlpha.
-  if (logic_mode == LogicOp::NoOp)
-    return false;
-
-  return true;
+  // Logic ops only apply with blending off. NoOp is treated as "no logic op" (a game draws with
+  // it to update destination alpha only).
+  return !blend_enable && logic_op_enable && logic_mode != LogicOp::NoOp;
 }
 
+// Both A and C having the maximum exponent (infinite or NaN). Hardware output in that case
+// depends only on the signs: fogged when both are positive, unfogged otherwise. GetA/GetC replace
+// the values with finite/infinite ones that reproduce this without handing NaNs to the host GPU.
 bool FogParams::IsNaNCase() const
 {
-  // Check for the case where both a and c are infinity or NaN.
-  // On hardware, this results in the following colors:
-  //
-  // -------------------------------------------------------
-  // |   A   |   C   |  Result  |   A   |   C   |  Result  |
-  // -------------------------------------------------------
-  // |  inf  |  inf  |  Fogged  |  inf  |  nan  |  Fogged  |
-  // |  inf  | -inf  | Unfogged |  inf  | -nan  | Unfogged |
-  // | -inf  |  inf  | Unfogged | -inf  |  nan  | Unfogged |
-  // | -inf  | -inf  | Unfogged | -inf  | -nan  | Unfogged |
-  // -------------------------------------------------------
-  // |  nan  |  inf  |  Fogged  |  nan  |  nan  |  Fogged  |
-  // |  nan  | -inf  | Unfogged |  nan  | -nan  | Unfogged |
-  // | -nan  |  inf  | Unfogged | -nan  |  nan  | Unfogged |
-  // | -nan  | -inf  | Unfogged | -nan  | -nan  | Unfogged |
-  // -------------------------------------------------------
-  //
-  // We replicate this by returning A=0, and C=inf for the inf/inf case, otherwise -inf.
-  // This ensures we do not pass a NaN to the GPU, and -inf/inf clamp to 0/1 respectively.
   return a.exp == 255 && c_proj_fsel.c_exp == 255;
 }
 
 float FogParam0::FloatValue() const
 {
-  // scale mantissa from 11 to 23 bits
-  const u32 integral = (sign << 31) | (exp << 23) | (mant << 12);
-  return std::bit_cast<float>(integral);
+  return FogFloat(sign, exp, mant);
 }
 
 float FogParam3::FloatValue() const
 {
-  // scale mantissa from 11 to 23 bits
-  const u32 integral = (c_sign << 31) | (c_exp << 23) | (c_mant << 12);
-  return std::bit_cast<float>(integral);
+  return FogFloat(c_sign, c_exp, c_mant);
 }
 
 float FogParams::GetA() const
 {
-  if (IsNaNCase())
-    return 0.0f;
-
-  return a.FloatValue();
+  return IsNaNCase() ? 0.0f : a.FloatValue();
 }
 
 float FogParams::GetC() const
 {
-  if (IsNaNCase())
-  {
-    constexpr float inf = std::numeric_limits<float>::infinity();
-    return !a.sign && !c_proj_fsel.c_sign ? -inf : inf;
-  }
+  if (!IsNaNCase())
+    return c_proj_fsel.FloatValue();
 
-  return c_proj_fsel.FloatValue();
+  constexpr float infinity = std::numeric_limits<float>::infinity();
+  const bool both_positive = !a.sign && !c_proj_fsel.c_sign;
+  return both_positive ? -infinity : infinity;
 }
