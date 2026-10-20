@@ -18,10 +18,6 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h"
 #endif
-#ifdef ENABLE_METAL
-#include "Cafe/HW/Latte/Renderer/Metal/RendererShaderMtl.h"
-#include "Cafe/HW/Latte/Renderer/Metal/MetalPipelineCache.h"
-#endif
 
 #include <imgui.h>
 #include "imgui/imgui_extension.h"
@@ -429,11 +425,6 @@ namespace
 			RendererShaderGL::ShaderCacheLoading_end();
 			break;
 #endif
-#ifdef ENABLE_METAL
-		case RendererAPI::Metal:
-			RendererShaderMtl::ShaderCacheLoading_end();
-			break;
-#endif
 		default:
 			break;
 		}
@@ -568,10 +559,6 @@ namespace
 		case RendererAPI::Vulkan:
 			return VulkanPipelineStableCache::GetInstance().UpdateLoading(s_loading.pipelinesLoaded, missingShaders);
 #endif
-#ifdef ENABLE_METAL
-		case RendererAPI::Metal:
-			return MetalPipelineCache::GetInstance().UpdateLoading(s_loading.pipelinesLoaded, missingShaders);
-#endif
 		default:
 			return false;
 		}
@@ -586,11 +573,6 @@ namespace
 			s_loading.pipelineCount = VulkanPipelineStableCache::GetInstance().BeginLoading(titleId);
 			break;
 #endif
-#ifdef ENABLE_METAL
-		case RendererAPI::Metal:
-			s_loading.pipelineCount = MetalPipelineCache::GetInstance().BeginLoading(titleId);
-			break;
-#endif
 		default:
 			break;
 		}
@@ -601,11 +583,6 @@ namespace
 #ifdef ENABLE_VULKAN
 		case RendererAPI::Vulkan:
 			VulkanPipelineStableCache::GetInstance().EndLoading();
-			break;
-#endif
-#ifdef ENABLE_METAL
-		case RendererAPI::Metal:
-			MetalPipelineCache::GetInstance().EndLoading();
 			break;
 #endif
 		default:
@@ -661,18 +638,11 @@ void LatteShaderCache_Load()
 		RendererShaderGL::ShaderCacheLoading_begin(titleId);
 		break;
 #endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		RendererShaderMtl::ShaderCacheLoading_begin(titleId);
-		break;
-#endif
 	default:
 		break;
 	}
 
-	// Metal shaders are generated differently and get a file of their own
-	const fs::path cachePath = api == RendererAPI::Metal ? ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_mtlshaders.bin", titleId)
-		: ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_shaders.bin", titleId);
+	const fs::path cachePath = ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_shaders.bin", titleId);
 	s_cacheFile = FileCache::Open(cachePath, false, kLegacyExtraVersion);
 	if (!s_cacheFile)
 		s_cacheFile = FileCache::Open(cachePath, true, LatteShaderCache_getShaderCacheExtraVersion(titleId));
@@ -724,8 +694,8 @@ void LatteShaderCache_Load()
 	(void)loadStart;
 #endif
 	NotifyBackendLoadingDone();
-#if defined(ENABLE_VULKAN) || defined(ENABLE_METAL)
-	if (api == RendererAPI::Vulkan || api == RendererAPI::Metal)
+#ifdef ENABLE_VULKAN
+	if (api == RendererAPI::Vulkan)
 		LoadPipelines(titleId);
 #endif
 
@@ -808,12 +778,6 @@ void LatteShaderCache_Close()
 #ifdef ENABLE_OPENGL
 	case RendererAPI::OpenGL:
 		RendererShaderGL::ShaderCacheLoading_Close();
-		break;
-#endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		RendererShaderMtl::ShaderCacheLoading_Close();
-		MetalPipelineCache::GetInstance().Close();
 		break;
 #endif
 	default:

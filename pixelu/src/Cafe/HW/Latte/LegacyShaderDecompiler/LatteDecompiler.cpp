@@ -560,12 +560,6 @@ namespace
 				LatteDecompiler_emitGLSLShader(ctx, shader);
 #endif
 			}
-			else if (api == RendererAPI::Metal)
-			{
-#ifdef ENABLE_METAL
-				LatteDecompiler_emitMSLShader(ctx, shader);
-#endif
-			}
 		}
 		LatteDecompiler_cleanup(ctx);
 		buildFastAccessTables(shader);

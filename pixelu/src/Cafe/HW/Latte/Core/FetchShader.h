@@ -53,17 +53,11 @@ struct LatteFetchShader
 	// Vulkan: hash of the parts of the layout that are baked into a graphics pipeline
 	uint64 vkPipelineHashFragment{};
 
-	// Metal: attributes that can't use the native vertex fetch path
-	bool mtlFetchVertexManually{};
-
 	CacheHash m_cacheHash{}; // hash of the program code
 	bool m_isRegistered{}; // true once this object owns its m_cacheHash entry
 
 	void CalculateFetchShaderVkHash();
 
-#ifdef ENABLE_METAL
-	void CheckIfVerticesNeedManualFetchMtl(uint32* contextRegister);
-#endif
 
 	uint64 getVkPipelineHashFragment() const { return vkPipelineHashFragment; };
 

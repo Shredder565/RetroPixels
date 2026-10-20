@@ -15,9 +15,6 @@
 #ifdef ENABLE_VULKAN
 #include "wxgui/canvas/VulkanCanvas.h"
 #endif
-#ifdef ENABLE_METAL
-#include "wxgui/canvas/MetalCanvas.h"
-#endif
 #include "wxgui/MainWindow.h"
 #include "wxgui/helpers/wxHelpers.h"
 #include "wxHelper.h"
@@ -87,10 +84,6 @@ void PadViewFrame::InitializeRenderCanvas()
 #ifdef ENABLE_OPENGL
 	if (api == kOpenGL)
 		m_render_canvas = GLCanvas_Create(this, kDefaultSize, false);
-#endif
-#ifdef ENABLE_METAL
-	if (api == kMetal)
-		m_render_canvas = new MetalCanvas(this, kDefaultSize, false);
 #endif
 	auto* layout = new wxBoxSizer(wxVERTICAL);
 	layout->Add(m_render_canvas, 1, wxEXPAND);

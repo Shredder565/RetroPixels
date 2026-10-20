@@ -40,11 +40,6 @@ private:
 	// Graphic page
 	wxChoice* m_graphic_api;
 	wxChoice* m_shader_mul_accuracy;
-#ifdef ENABLE_METAL
-	wxChoice* m_shader_fast_math;
-	wxChoice* m_metal_buffer_cache_mode;
-	wxChoice* m_position_invariance;
-#endif
 
 	// Controller page
 	wxComboBox* m_controller_profile[8];

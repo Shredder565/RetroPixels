@@ -50,10 +50,6 @@
 #ifdef ENABLE_VULKAN
 #include "canvas/VulkanCanvas.h"
 #endif
-#ifdef ENABLE_METAL
-#include "canvas/MetalCanvas.h"
-#include "Cafe/HW/Latte/Renderer/Metal/MetalRenderer.h"
-#endif
 
 #include "Cafe/OS/libs/nfc/nfc.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
@@ -766,10 +762,6 @@ void MainWindow::CreateCanvas()
 #ifdef ENABLE_VULKAN
 	if (api == kVulkan)
 		m_render_canvas = new VulkanCanvas(m_game_panel, canvasSize, true);
-#endif
-#ifdef ENABLE_METAL
-	if (api == kMetal)
-		m_render_canvas = new MetalCanvas(m_game_panel, canvasSize, true);
 #endif
 	if (!m_render_canvas)
 		cemu_assert(false && "no canvas for the selected graphics API");
@@ -1678,13 +1670,6 @@ void MainWindow::OnDebugSetting(wxCommandEvent& event)
 		if (!config.vk_accurate_barriers)
 			wxMessageBox(_("Warning: Disabling the accurate barriers option will lead to flickering graphics but may improve performance. It is highly recommended to leave it turned on."), _("Accurate barriers are off"), wxOK);
 	}
-#ifdef ENABLE_METAL
-	else if (id == Cmd::GpuCapture)
-	{
-		cemu_assert_debug(g_renderer->GetType() == RendererAPI::Metal);
-		static_cast<MetalRenderer*>(g_renderer.get())->CaptureFrame();
-	}
-#endif
 	else if (id == Cmd::AudioAuxOnly)
 		ActiveSettings::EnableAudioOnlyAux(event.IsChecked());
 	else if (id == Cmd::DumpRam)
@@ -2149,9 +2134,6 @@ void MainWindow::RecreateMenu()
 	if (LaunchSettings::RenderUpsideDownEnabled().has_value())
 		upsideDown->Enable(false);
 	m_debugMenu->AppendCheckItem(Cmd::AccurateBarriers, _("&Accurate barriers (Vulkan)"))->Check(config.vk_accurate_barriers);
-#ifdef ENABLE_METAL
-	m_debugMenu->Append(Cmd::GpuCapture, _("&GPU capture (Metal)"))->Enable(m_game_launched && g_renderer->GetType() == RendererAPI::Metal);
-#endif
 	m_debugMenu->AppendSeparator();
 #ifdef CEMU_DEBUG_ASSERT
 	m_debugMenu->AppendCheckItem(Cmd::AudioAuxOnly, _("&Audio AUX only"))->Check(ActiveSettings::AudioOutputOnlyAux());

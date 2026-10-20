@@ -64,7 +64,7 @@ struct LatteDecompilerShaderResourceMapping
 	}
 	// textures
 	sint8 textureUnitToBindingPoint[LATTE_NUM_MAX_TEX_UNITS]; // absolute binding per texture unit (OpenGL keeps units sparse)
-	sint8 relBindingPointToRelTextureUnit[LATTE_NUM_MAX_TEX_UNITS]; // Vulkan/Metal: (binding - base) -> texture unit
+	sint8 relBindingPointToRelTextureUnit[LATTE_NUM_MAX_TEX_UNITS]; // Vulkan: (binding - base) -> texture unit
 	sint8 textureUnitBaseBindingPoint{UNUSED_BINDING};
 	sint8 textureUnitCount{0};
 	// uniforms
@@ -76,10 +76,6 @@ struct LatteDecompilerShaderResourceMapping
 	sint8 attributeMapping[LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS];
 	// Vulkan descriptor set
 	sint8 setIndex{};
-	// Metal only
-	sint8 verticesPerInstanceBinding{UNUSED_BINDING};
-	sint8 indexBufferBinding{UNUSED_BINDING};
-	sint8 indexTypeBinding{UNUSED_BINDING};
 
 	sint32 getTextureCount()
 	{
@@ -296,7 +292,6 @@ struct LatteDecompilerOutput_t
 	// binding layout per API
 	LatteDecompilerShaderResourceMapping resourceMappingGL;
 	LatteDecompilerShaderResourceMapping resourceMappingVK;
-	LatteDecompilerShaderResourceMapping resourceMappingMTL;
 };
 
 struct LatteDecompilerSubroutineInfo;

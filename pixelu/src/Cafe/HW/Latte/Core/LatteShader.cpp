@@ -19,9 +19,6 @@
 #include "util/containers/robin_hood.h"
 #include "util/helpers/StateHasher.h"
 #include "util/helpers/StringBuf.h"
-#ifdef ENABLE_METAL
-#include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
-#endif
 
 // Shader management. Each stage's program is identified by a base hash (program words
 // plus the bits of GPU state the generated code depends on) and an aux hash (state that
@@ -203,28 +200,6 @@ namespace
 			h += 21;
 		if (LatteGPUState.contextNew.PA_CL_CLIP_CNTL.get_DX_CLIP_SPACE_DEF())
 			h += 0x1537; // depth range 0..1
-#ifdef ENABLE_METAL
-		if (g_renderer->GetType() == RendererAPI::Metal)
-		{
-			const bool rectShader = primitive == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::RECTS;
-			const bool fetchInShader = usesGeometryShader || rectShader;
-			if (fetchInShader || fetchShader->mtlFetchVertexManually)
-			{
-				for (const LatteParsedFetchShaderBufferGroup& group : fetchShader->bufferGroups)
-				{
-					const uint32 strideReg = mmSQ_VTX_ATTRIBUTE_BLOCK_START + group.attributeBufferIndex * 7 + 2;
-					h = std::rotl<uint64>(h + ((Reg(strideReg) >> 11) & 0xFFFF), 7);
-				}
-			}
-			if (!fetchInShader)
-			{
-				if (LatteGPUState.contextNew.IsRasterizationEnabled())
-					h += 51;
-				if (fetchShader->mtlFetchVertexManually)
-					h += 349;
-			}
-		}
-#endif
 		return h;
 	}
 
@@ -288,20 +263,6 @@ namespace
 			const uint32 word0 = regs[Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS + unit * 7];
 			h = std::rotl<uint64>(h, 3) + (word0 & 7);
 		}
-#ifdef ENABLE_METAL
-		if (g_renderer->GetType() == RendererAPI::Metal)
-		{
-			for (uint32 i = 0; i < shader->textureUnitListCount; i++)
-				h = std::rotl<uint64>(h, 11) + (uint64)shader->textureRenderTargetIndex[shader->textureUnitList[i]];
-			for (uint8 i = 0; i < LATTE_NUM_COLOR_TARGET; i++)
-			{
-				const auto format = LatteMRT::GetColorBufferFormat(i, LatteGPUState.contextNew);
-				h = std::rotl<uint64>(h, 7) + (uint64)(uint8)GetMtlPixelFormatInfo(format, false).dataType;
-			}
-			if (LatteMRT::GetActiveDepthBufferMask(LatteGPUState.contextNew))
-				h = std::rotl<uint64>(h, 5) + 13;
-		}
-#endif
 		return h;
 	}
 
@@ -522,16 +483,6 @@ namespace
 	{
 		const uint32* regs = LatteGPUState.contextRegister;
 		uint64 h = (vs ? VertexShaderAuxHash(vs, regs) : 0) + Avalanche64(ps ? PixelShaderAuxHash(ps, regs) : 0);
-#ifdef ENABLE_METAL
-		if (g_renderer->GetType() == RendererAPI::Metal && fetchShader)
-		{
-			for (const auto& group : fetchShader->bufferGroups)
-			{
-				const uint32 strideReg = mmSQ_VTX_ATTRIBUTE_BLOCK_START + group.attributeBufferIndex * 7 + 2;
-				h = std::rotl<uint64>(h, 7) + ((regs[strideReg] >> 11) & 0xFFFF);
-			}
-		}
-#endif
 		return h;
 	}
 
@@ -848,9 +799,6 @@ LatteDecompilerShader* LatteShader_CreateShaderFromDecompilerOutput(LatteDecompi
 	case RendererAPI::Vulkan:
 		shader->resourceMapping = decompilerOutput.resourceMappingVK;
 		break;
-	case RendererAPI::Metal:
-		shader->resourceMapping = decompilerOutput.resourceMappingMTL;
-		break;
 	default:
 		break;
 	}
@@ -1011,10 +959,6 @@ void LatteSHRC_UpdateActiveShaders()
 	hasher.MixIn(copyProgram.packed(), s_psInputs.key);
 	hasher.MixIn(Reg(mmSPI_PS_IN_CONTROL_0) & kPsInControl0Mask, Reg(mmSPI_PS_IN_CONTROL_1) & kPsInControl1Mask);
 	hasher.MixIn(Reg(mmSPI_INTERP_CONTROL_0) & kInterpControl0Mask, 0);
-#ifdef ENABLE_METAL
-	if (g_renderer->GetType() == RendererAPI::Metal)
-		hasher.MixInSingle(ctx.IsRasterizationEnabled() ? 1 : 0);
-#endif
 	const uint64 stateKey = hasher.Finish();
 
 	LatteGPUState.activeShaderHasError = false;

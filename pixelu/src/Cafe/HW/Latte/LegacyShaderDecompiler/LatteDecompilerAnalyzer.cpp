@@ -11,10 +11,6 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Common/MemPtr.h"
 #include "HW/Latte/ISA/LatteReg.h"
-#ifdef ENABLE_METAL
-#include "HW/Latte/Renderer/Metal/MetalCommon.h"
-#include "HW/Latte/Renderer/Metal/MetalRenderer.h"
-#endif
 
 // Analysis pass of the legacy decompiler. It walks the decoded program once
 // and collects everything the code generator has to know up front: which
@@ -280,9 +276,7 @@ namespace
 			}
 			else if (cf->exportArrayBase == 61)
 			{
-				// depth export; Metal additionally requires a bound depth buffer (part of its pipeline key)
-				if (g_renderer->GetType() != RendererAPI::Metal || LatteMRT::GetActiveDepthBufferMask(*ctx->contextRegistersNew))
-					shader->depthMask = true;
+				shader->depthMask = true; // depth export
 			}
 		}
 		else if (shader->shaderType == LatteConst::ShaderType::Vertex)
@@ -650,22 +644,6 @@ namespace
 		}
 		if (packed == 0)
 			vk.textureUnitBaseBindingPoint = -1;
-#ifdef ENABLE_METAL
-		// Metal: packed as well, textures read through framebuffer fetch get no binding
-		auto& mtl = out->resourceMappingMTL;
-		mtl.textureUnitBaseBindingPoint = (sint8)ctx->currentTextureBindingPointMTL;
-		sint32 packedMtl = 0;
-		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
-		{
-			if (!out->textureUnitMask[i] || ctx->shader->textureRenderTargetIndex[i] != 255)
-				continue;
-			mtl.textureUnitToBindingPoint[i] = (sint8)ctx->currentTextureBindingPointMTL++;
-			mtl.relBindingPointToRelTextureUnit[packedMtl++] = (sint8)i;
-			mtl.textureUnitCount++;
-		}
-		if (packedMtl == 0)
-			mtl.textureUnitBaseBindingPoint = -1;
-#endif
 	}
 
 	bool anyViewportScaleDisabled(LatteDecompilerShaderContext* ctx)
@@ -696,21 +674,6 @@ namespace
 		// historical binding layout that existing pipelines/caches rely on
 		if ((a.useSSBOForStreamout && isVS && !ctx->options->usesGeometryShader) || isGS)
 			needed = true; // uf_verticesPerInstance, uf_streamoutBufferBase*
-#ifdef ENABLE_METAL
-		if (g_renderer->GetType() == RendererAPI::Metal)
-		{
-			if (static_cast<MetalRenderer*>(g_renderer.get())->SupportsFramebufferFetch())
-			{
-				for (sint32 t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
-				{
-					if (ctx->shader->textureRenderTargetIndex[t] != 255)
-						needed = true; // framebufferFetchSize
-				}
-			}
-			if (isVS && UseGeometryShader(*ctx->contextRegistersNew, ctx->options->usesGeometryShader))
-				needed = true; // uf_verticesPerInstance
-		}
-#endif
 		if (isPS && a.texUnitUsesTexelCoordinates.any())
 			needed = true; // uf_tex*Scale
 		return needed;
@@ -723,14 +686,12 @@ namespace
 		if (ctx->hasUniformVarBlock)
 		{
 			out->resourceMappingVK.uniformVarsBufferBindingPoint = (sint8)ctx->currentBindingPointVK++;
-			out->resourceMappingMTL.uniformVarsBufferBindingPoint = (sint8)ctx->currentBufferBindingPointMTL++;
 		}
 		else if (ctx->shaderType == LatteConst::ShaderType::Pixel)
 		{
 			// pixel shaders always reserve the slot so bindings stay stable for
 			// graphic pack replacement shaders written before the block became optional
 			ctx->currentBindingPointVK++;
-			ctx->currentBufferBindingPointMTL++;
 		}
 		if (ctx->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
 		{
@@ -744,14 +705,12 @@ namespace
 				if (!ctx->analyzer.uniformBufferAccessTracker[i].HasAccess())
 					continue;
 				out->resourceMappingVK.uniformBuffersBindingPoint[i] = (sint8)ctx->currentBindingPointVK++;
-				out->resourceMappingMTL.uniformBuffersBindingPoint[i] = (sint8)ctx->currentBufferBindingPointMTL++;
 				out->resourceMappingGL.uniformBuffersBindingPoint[i] = (sint8)(glStageBase + (sint32)i);
 			}
 		}
 		if (ctx->analyzer.useSSBOForStreamout)
 		{
 			out->resourceMappingVK.tfStorageBindingPoint = (sint8)ctx->currentBindingPointVK++;
-			out->resourceMappingMTL.tfStorageBindingPoint = (sint8)ctx->currentBufferBindingPointMTL++;
 		}
 	}
 
@@ -766,7 +725,6 @@ namespace
 				continue;
 			ctx->output->resourceMappingGL.attributeMapping[sem] = location;
 			ctx->output->resourceMappingVK.attributeMapping[sem] = location;
-			ctx->output->resourceMappingMTL.attributeMapping[sem] = location;
 			location++;
 		}
 	}
@@ -819,8 +777,4 @@ void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteD
 	assignTextureBindings(ctx);
 	assignUniformBindings(ctx);
 	assignAttributeBindings(ctx);
-	auto& mtl = ctx->output->resourceMappingMTL;
-	mtl.verticesPerInstanceBinding = (sint8)ctx->currentBufferBindingPointMTL++;
-	mtl.indexBufferBinding = (sint8)ctx->currentBufferBindingPointMTL++;
-	mtl.indexTypeBinding = (sint8)ctx->currentBufferBindingPointMTL++;
 }

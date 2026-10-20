@@ -153,11 +153,6 @@ bool GameProfile::Load(uint64_t title_id)
 					LogOutOfRange(*api, "graphics_api");
 			}
 			ReadEnum(ini, "accurateShaderMul", m_accurateShaderMul);
-#ifdef ENABLE_METAL
-			ReadBool(ini, "shaderFastMath", m_shaderFastMath);
-			ReadEnum(ini, "metalBufferCacheMode2", m_metalBufferCacheMode);
-			ReadEnum(ini, "positionInvariance2", m_positionInvariance);
-#endif
 			// boolean in older profiles; anything else (or no entry) means Auto
 			m_precompiledShaders = PrecompiledShaderOption::Auto;
 			if (std::optional<std::string_view> precompiled = ini.FindOption("precompiledShaders"))
@@ -234,11 +229,6 @@ void GameProfile::Save(uint64_t title_id)
 
 	file->writeLine("[Graphics]");
 	WriteSetting(file.get(), "accurateShaderMul", m_accurateShaderMul);
-#ifdef ENABLE_METAL
-	WriteSetting(file.get(), "shaderFastMath", m_shaderFastMath);
-	WriteSetting(file.get(), "metalBufferCacheMode2", m_metalBufferCacheMode);
-	WriteSetting(file.get(), "positionInvariance2", m_positionInvariance);
-#endif
 	WriteSetting(file.get(), "precompiledShaders", m_precompiledShaders);
 	WriteSetting(file.get(), "graphics_api", m_graphics_api);
 	file->writeLine("");
@@ -255,11 +245,6 @@ void GameProfile::ResetOptional()
 	m_loadSharedLibraries.reset();
 	m_startWithPadView = false;
 	m_accurateShaderMul = AccurateShaderMulOption::True;
-#ifdef ENABLE_METAL
-	m_shaderFastMath = true;
-	m_metalBufferCacheMode = MetalBufferCacheMode::Auto;
-	m_positionInvariance = PositionInvariance::Auto;
-#endif
 	// graphics API and precompiled shader choice are left as they are
 	m_threadQuantum = kThreadQuantumDefault;
 	m_cpuMode.reset();
@@ -274,11 +259,6 @@ void GameProfile::Reset()
 	m_loadSharedLibraries = true;
 	m_startWithPadView = false;
 	m_accurateShaderMul = AccurateShaderMulOption::True;
-#ifdef ENABLE_METAL
-	m_shaderFastMath = true;
-	m_metalBufferCacheMode = MetalBufferCacheMode::Auto;
-	m_positionInvariance = PositionInvariance::Auto;
-#endif
 	m_precompiledShaders = PrecompiledShaderOption::Auto;
 	// graphics API is left as it is
 	m_threadQuantum = kThreadQuantumDefault;

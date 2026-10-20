@@ -9,9 +9,6 @@
 #include "HW/Latte/Renderer/Renderer.h"
 #include "util/containers/LookupTableL3.h"
 #include "util/helpers/fspinlock.h"
-#ifdef ENABLE_METAL
-#include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
-#endif
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 
@@ -209,7 +206,6 @@ namespace
 	{
 		uint64 key = 0;
 		auto mix = [&key](uint64 v, int rot) { key = std::rotl<uint64>(key + v, rot); };
-		const bool metal = g_renderer->GetType() == RendererAPI::Metal;
 		for (auto& group : fs->bufferGroups)
 		{
 			for (sint32 i = 0; i < group.attribCount; i++)
@@ -227,22 +223,9 @@ namespace
 				mix((uint64)(a.aluDivisor + 1), 2);
 				mix(a.attributeBufferIndex, 8);
 				mix(a.semanticId, 8);
-#ifdef ENABLE_METAL
-				if (metal)
-					mix(a.offset, 7);
-				else
-#endif
-					mix(a.offset & 3, 2);
+				mix(a.offset & 3, 2);
 			}
 		}
-#ifdef ENABLE_METAL
-		if (metal)
-		{
-			for (auto& group : fs->bufferGroups)
-				mix(group.attributeBufferIndex, 5);
-		}
-#endif
-		(void)metal;
 		fs->key = key;
 	}
 
@@ -250,9 +233,6 @@ namespace
 	{
 		ComputeLayoutKey(fs);
 		fs->CalculateFetchShaderVkHash();
-#ifdef ENABLE_METAL
-		fs->CheckIfVerticesNeedManualFetchMtl(contextRegister);
-#endif
 	}
 
 	uint32 CurrentProgramAddr24()
@@ -315,24 +295,6 @@ void LatteFetchShader::CalculateFetchShaderVkHash()
 	vkPipelineHashFragment = a + b + (uint64)c;
 }
 
-#ifdef ENABLE_METAL
-void LatteFetchShader::CheckIfVerticesNeedManualFetchMtl(uint32* contextRegister)
-{
-	// Metal needs 4 byte aligned strides and attributes that end inside the stride
-	for (auto& group : bufferGroups)
-	{
-		const uint32 stride = group.getCurrentBufferStride(contextRegister);
-		if ((stride & 3) != 0)
-			mtlFetchVertexManually = true;
-		for (sint32 i = 0; i < group.attribCount; i++)
-		{
-			const auto& a = group.attrib[i];
-			if (a.offset + GetMtlVertexFormatSize(a.format) > stride)
-				mtlFetchVertexManually = true;
-		}
-	}
-}
-#endif
 
 // Decodes a fetch shader program into a LatteFetchShader and registers it under fsHash.
 // Safe to call from several threads for the same program: only one object gets

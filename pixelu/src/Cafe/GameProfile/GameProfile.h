@@ -34,11 +34,6 @@ class GameProfile
 
 	[[nodiscard]] const std::optional<GraphicAPI>& GetGraphicsAPI() const { return m_graphics_api; }
 	[[nodiscard]] const AccurateShaderMulOption& GetAccurateShaderMul() const { return m_accurateShaderMul; }
-#ifdef ENABLE_METAL
-	[[nodiscard]] bool GetShaderFastMath() const { return m_shaderFastMath; }
-	[[nodiscard]] MetalBufferCacheMode GetBufferCacheMode() const { return m_metalBufferCacheMode; }
-	[[nodiscard]] PositionInvariance GetPositionInvariance() const { return m_positionInvariance; }
-#endif
 	[[nodiscard]] const std::optional<PrecompiledShaderOption>& GetPrecompiledShadersState() const { return m_precompiledShaders; }
 
 	[[nodiscard]] uint32 GetThreadQuantum() const { return m_threadQuantum; }
@@ -62,11 +57,6 @@ class GameProfile
 	// [Graphics]
 	std::optional<GraphicAPI> m_graphics_api{};
 	AccurateShaderMulOption m_accurateShaderMul = AccurateShaderMulOption::True;
-#ifdef ENABLE_METAL
-	bool m_shaderFastMath = true;
-	MetalBufferCacheMode m_metalBufferCacheMode = MetalBufferCacheMode::Auto;
-	PositionInvariance m_positionInvariance = PositionInvariance::Auto;
-#endif
 	std::optional<PrecompiledShaderOption> m_precompiledShaders{};
 
 	// [CPU]

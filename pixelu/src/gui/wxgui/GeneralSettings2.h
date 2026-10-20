@@ -84,9 +84,6 @@ private:
 	wxSpinCtrlDouble* m_userDisplayGamma;
 	wxCheckBox* m_userDisplayisSRGB;
 	wxCheckBox *m_async_compile, *m_gx2drawdone_sync;
-#ifdef ENABLE_METAL
-	wxCheckBox* m_force_mesh_shaders;
-#endif
 	wxRadioBox *m_upscale_filter, *m_downscale_filter, *m_fullscreen_scaling;
 
 	void OnGraphicAPISelected(wxCommandEvent& event);
@@ -145,8 +142,4 @@ private:
 	// --- Debug
 	wxChoice* m_crash_dump;
 	wxSpinCtrl* m_gdb_port;
-#ifdef ENABLE_METAL
-	wxTextCtrl* m_gpu_capture_dir;
-	wxCheckBox* m_framebuffer_fetch;
-#endif
 };

@@ -239,8 +239,6 @@ struct LatteDecompilerShaderContext
 	// emitter state
 	bool hasUniformVarBlock;
 	sint32 currentBindingPointVK{};
-	sint32 currentBufferBindingPointMTL{};
-	sint32 currentTextureBindingPointMTL{};
 	struct ALUClauseTemporariesState* aluPVPSState{nullptr}; // used by the MSL emitter
 
 	std::vector<LatteDecompilerSubroutineInfo> list_subroutines;
@@ -250,9 +248,6 @@ struct LatteDecompilerShaderContext
 void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
 void LatteDecompiler_analyzeDataTypes(LatteDecompilerShaderContext* shaderContext);
 void LatteDecompiler_emitGLSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
-#ifdef ENABLE_METAL
-void LatteDecompiler_emitMSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
-#endif
 
 void LatteDecompiler_cleanup(LatteDecompilerShaderContext* shaderContext);
 

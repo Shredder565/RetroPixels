@@ -138,11 +138,7 @@ GameProfileWindow::GameProfileWindow(wxWindow* parent, uint64_t title_id)
 
 		grid->Add(new wxStaticText(page, wxID_ANY, _("Graphics API")), 0, kLabelFlags, 5);
 		// first entry: no override
-		const wxString apis[] = {"", "OpenGL", "Vulkan",
-#ifdef ENABLE_METAL
-								 "Metal"
-#endif
-		};
+		const wxString apis[] = {"", "OpenGL", "Vulkan"};
 		m_graphic_api = MakeChoice(page, apis);
 		grid->Add(m_graphic_api, 0, wxALL, 5);
 
@@ -151,21 +147,6 @@ GameProfileWindow::GameProfileWindow(wxWindow* parent, uint64_t title_id)
 		m_shader_mul_accuracy = MakeChoice(page, falseTrue, _("EXPERT OPTION\nControls the accuracy of floating point multiplication in shaders.\n\nRecommended: true"));
 		grid->Add(m_shader_mul_accuracy, 0, wxALL, 5);
 
-#ifdef ENABLE_METAL
-		grid->Add(new wxStaticText(page, wxID_ANY, _("Shader fast math")), 0, kLabelFlags, 5);
-		m_shader_fast_math = MakeChoice(page, falseTrue, _("EXPERT OPTION\nEnables fast math for all shaders. May (rarely) cause graphical bugs.\n\nMetal only\n\nRecommended: true"));
-		grid->Add(m_shader_fast_math, 0, wxALL, 5);
-
-		grid->Add(new wxStaticText(page, wxID_ANY, _("Metal buffer cache mode")), 0, kLabelFlags, 5);
-		const wxString cacheModes[] = {_("auto"), _("device private"), _("device shared"), _("host")};
-		m_metal_buffer_cache_mode = MakeChoice(page, cacheModes, _("EXPERT OPTION\nDecides how the buffer cache memory will be managed.\n\nMetal only\n\nRecommended: auto"));
-		grid->Add(m_metal_buffer_cache_mode, 0, wxALL, 5);
-
-		grid->Add(new wxStaticText(page, wxID_ANY, _("Position invariance")), 0, kLabelFlags, 5);
-		const wxString invariance[] = {_("auto"), _("false"), _("true")};
-		m_position_invariance = MakeChoice(page, invariance, _("EXPERT OPTION\nDisables most optimizations for vertex positions. May fix polygon cutouts or flickering in some games.\n\nMetal only\n\nRecommended: auto"));
-		grid->Add(m_position_invariance, 0, wxALL, 5);
-#endif
 		column->Add(grid, 0, wxEXPAND, 5);
 		AddPage(book, column, page, _("Graphic"), false);
 	}
@@ -252,11 +233,6 @@ void GameProfileWindow::ApplyProfile()
 	// entry 0 is "no override", then one per GraphicAPI value
 	m_graphic_api->SetSelection(profile.m_graphics_api.has_value() ? 1 + (int)profile.m_graphics_api.value() : 0);
 	m_shader_mul_accuracy->SetSelection((int)profile.m_accurateShaderMul);
-#ifdef ENABLE_METAL
-	m_shader_fast_math->SetSelection((int)profile.m_shaderFastMath);
-	m_metal_buffer_cache_mode->SetSelection((int)profile.m_metalBufferCacheMode);
-	m_position_invariance->SetSelection((int)profile.m_positionInvariance);
-#endif
 
 	const auto profiles = InputManager::get_profiles();
 	for (wxComboBox* box : m_controller_profile)
@@ -292,11 +268,6 @@ void GameProfileWindow::SaveProfile()
 	if (mul != AccurateShaderMulOption::False && mul != AccurateShaderMulOption::True)
 		mul = AccurateShaderMulOption::True; // nothing selected
 	profile.m_accurateShaderMul = mul;
-#ifdef ENABLE_METAL
-	profile.m_shaderFastMath = (bool)m_shader_fast_math->GetSelection();
-	profile.m_metalBufferCacheMode = (MetalBufferCacheMode)m_metal_buffer_cache_mode->GetSelection();
-	profile.m_positionInvariance = (PositionInvariance)m_position_invariance->GetSelection();
-#endif
 
 	const int api = m_graphic_api->GetSelection();
 	if (api == 0)

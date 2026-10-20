@@ -2,7 +2,7 @@
 #pragma once
 
 // Abstract graphics backend. Latte (the GPU emulation) talks to the host GPU only through this
-// interface; OpenGLRenderer, VulkanRenderer and MetalRenderer implement it.
+// interface; OpenGLRenderer and VulkanRenderer implement it.
 
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"

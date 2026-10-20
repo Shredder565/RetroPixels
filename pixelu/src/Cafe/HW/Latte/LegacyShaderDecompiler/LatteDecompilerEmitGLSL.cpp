@@ -35,7 +35,7 @@
 
 void LatteDecompiler_emitAttributeDecodeGLSL(LatteDecompilerShader* shaderContext, StringBuf* src, LatteParsedFetchShaderAttribute* attrib);
 
-// ---- helpers shared with the Metal back end (LatteDecompilerEmitMSL.cpp) ----
+// ---- helpers (external linkage) ----
 
 // semantic id a vertex shader output parameter is routed to, 0xFF if the pixel shader does not consume it
 sint32 _getVertexShaderOutParamSemanticId(uint32* contextRegisters, sint32 index)

@@ -141,10 +141,6 @@ GraphicAPI ActiveSettings::GetGraphicsAPI()
 	if (g_vulkan_available && offer(kVulkan))
 		return kVulkan;
 #endif
-#ifdef ENABLE_METAL
-	if (offer(kMetal))
-		return kMetal;
-#endif
 #ifdef ENABLE_OPENGL
 	if (offer(kOpenGL))
 		return kOpenGL;

@@ -210,18 +210,6 @@ namespace
 			if (!config.vk_accurate_barriers.GetValue())
 				cemuLog_log(LogType::Force, "Accurate barriers: off");
 		}
-#ifdef ENABLE_METAL
-		else if (api == GraphicAPI::kMetal)
-		{
-			cemuLog_log(LogType::Force, "Async shader compile: {}", config.async_compile.GetValue());
-			cemuLog_log(LogType::Force, "Force mesh shaders: {}", config.force_mesh_shaders.GetValue());
-			cemuLog_log(LogType::Force, "Fast math: {}", g_current_game_profile->GetShaderFastMath());
-			cemuLog_log(LogType::Force, "Buffer cache type: {}", g_current_game_profile->GetBufferCacheMode());
-			cemuLog_log(LogType::Force, "Position invariance: {}", g_current_game_profile->GetPositionInvariance());
-			if (!config.vk_accurate_barriers.GetValue())
-				cemuLog_log(LogType::Force, "Accurate barriers: off");
-		}
-#endif
 		cemuLog_log(LogType::Force, "Console language: {}", stdx::to_underlying(config.console_language.GetValue()));
 	}
 

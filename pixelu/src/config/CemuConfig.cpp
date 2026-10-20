@@ -155,9 +155,6 @@ namespace
 		cfg.async_compile = gfx.get("AsyncCompile", cfg.async_compile);
 		// named "VulkanAccurateBarriers" before the default became true
 		cfg.vk_accurate_barriers = gfx.get("vkAccurateBarriers", true);
-#ifdef ENABLE_METAL
-		cfg.force_mesh_shaders = gfx.get("ForceMeshShaders", false);
-#endif
 
 		auto& ov = cfg.overlay;
 		auto& nt = cfg.notification;
@@ -252,10 +249,6 @@ namespace
 		cfg.crash_dump = debug.get("CrashDumpUnix", cfg.crash_dump);
 #endif
 		cfg.gdb_port = debug.get("GDBPort", 1337);
-#ifdef ENABLE_METAL
-		cfg.gpu_capture_dir = debug.get("GPUCaptureDir", "");
-		cfg.framebuffer_fetch = debug.get("FramebufferFetch", true);
-#endif
 
 		XMLConfigParser dsu = root.get("Input").get("DSUC");
 		cfg.dsu_client.host = dsu.get_attribute("host", cfg.dsu_client.host);
@@ -326,9 +319,6 @@ namespace
 		gfx.set("OverrideGammaValue", cfg.overrideGammaValue);
 		gfx.set("UserDisplayGamma", cfg.userDisplayGamma);
 		gfx.set("GX2DrawdoneSync", cfg.gx2drawdone_sync);
-#ifdef ENABLE_METAL
-		gfx.set("ForceMeshShaders", cfg.force_mesh_shaders);
-#endif
 		gfx.set("UpscaleFilter", cfg.upscale_filter);
 		gfx.set("DownscaleFilter", cfg.downscale_filter);
 		gfx.set("FullscreenScaling", cfg.fullscreen_scaling);
@@ -399,10 +389,6 @@ namespace
 		debug.set("CrashDumpUnix", cfg.crash_dump.GetValue());
 #endif
 		debug.set("GDBPort", cfg.gdb_port);
-#ifdef ENABLE_METAL
-		debug.set("GPUCaptureDir", cfg.gpu_capture_dir);
-		debug.set("FramebufferFetch", cfg.framebuffer_fetch);
-#endif
 
 		XMLConfigParser dsu = root.set("Input").set("DSUC");
 		dsu.set_attribute("host", cfg.dsu_client.host);

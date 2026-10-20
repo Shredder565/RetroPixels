@@ -80,8 +80,6 @@ enum GraphicAPI
 
 #if defined(ENABLE_VULKAN)
 constexpr GraphicAPI kDefaultGraphicsAPI = kVulkan;
-#elif defined(ENABLE_METAL)
-constexpr GraphicAPI kDefaultGraphicsAPI = kMetal;
 #elif defined(ENABLE_OPENGL)
 constexpr GraphicAPI kDefaultGraphicsAPI = kOpenGL;
 #endif
@@ -132,15 +130,6 @@ enum class AccurateShaderMulOption
 	True = 1   // emulate the GPU's non-IEEE MUL (0 * anything = 0)
 };
 ENABLE_ENUM_ITERATORS(AccurateShaderMulOption, AccurateShaderMulOption::False, AccurateShaderMulOption::True);
-
-enum class MetalBufferCacheMode
-{
-	Auto,
-	DevicePrivate,
-	DeviceShared,
-	Host,
-};
-ENABLE_ENUM_ITERATORS(MetalBufferCacheMode, MetalBufferCacheMode::Auto, MetalBufferCacheMode::Host);
 
 enum class PositionInvariance
 {
@@ -238,18 +227,6 @@ namespace config_names
 		{
 		case AccurateShaderMulOption::False: return "false";
 		case AccurateShaderMulOption::True: return "true";
-		}
-		return "unknown";
-	}
-
-	constexpr const char* name(MetalBufferCacheMode v)
-	{
-		switch (v)
-		{
-		case MetalBufferCacheMode::Auto: return "auto";
-		case MetalBufferCacheMode::DevicePrivate: return "device private";
-		case MetalBufferCacheMode::DeviceShared: return "device shared";
-		case MetalBufferCacheMode::Host: return "host";
 		}
 		return "unknown";
 	}
@@ -357,7 +334,6 @@ namespace config_names
 
 template<> struct fmt::formatter<PrecompiledShaderOption> : config_names::NameFormatter<PrecompiledShaderOption> {};
 template<> struct fmt::formatter<AccurateShaderMulOption> : config_names::NameFormatter<AccurateShaderMulOption> {};
-template<> struct fmt::formatter<MetalBufferCacheMode> : config_names::NameFormatter<MetalBufferCacheMode> {};
 template<> struct fmt::formatter<PositionInvariance> : config_names::NameFormatter<PositionInvariance> {};
 template<> struct fmt::formatter<CPUMode> : config_names::NameFormatter<CPUMode> {};
 template<> struct fmt::formatter<CPUModeLegacy> : config_names::NameFormatter<CPUModeLegacy> {};
@@ -415,9 +391,6 @@ struct CemuConfig
 	ConfigValue<bool> gx2drawdone_sync{true};
 	ConfigValue<bool> render_upside_down{false};
 	ConfigValue<bool> async_compile{true};
-#ifdef ENABLE_METAL
-	ConfigValue<bool> force_mesh_shaders{false};
-#endif
 
 	// gamma
 	ConfigValue<bool> overrideAppGammaPreference{false};
@@ -481,10 +454,6 @@ struct CemuConfig
 	// debug
 	ConfigValueBounds<CrashDump> crash_dump{CrashDump::Disabled};
 	ConfigValue<uint16> gdb_port{1337};
-#ifdef ENABLE_METAL
-	ConfigValue<std::string> gpu_capture_dir{""};
-	ConfigValue<bool> framebuffer_fetch{true};
-#endif
 
 	XMLConfigParser Load(XMLConfigParser& parser);
 	XMLConfigParser Save(XMLConfigParser& parser);

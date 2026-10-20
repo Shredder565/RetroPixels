@@ -105,100 +105,6 @@ void outputShader()
 }
 )";
 
-	// ---- Metal filters (complete fragment functions, the Metal backend binds no parameter block) ----
-
-	const char* const kMslCopy = R"(#include <metal_stdlib>
-using namespace metal;
-
-struct VertexOut {
-	float2 uv;
-};
-
-fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]]) {
-	return float4(textureSrc.sample(samplr, in.uv).rgb, 1.0);
-}
-)";
-
-	// note: works on texel coordinates without the half texel shift of the GLSL variant
-	const char* const kMslBicubic = R"(#include <metal_stdlib>
-using namespace metal;
-
-float4 bsplineWeights(float t) {
-	float t2 = t * t;
-	float t3 = t2 * t;
-	float s = 1.0 - t;
-	return float4(s * s * s, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
-}
-
-struct VertexOut {
-	float2 uv;
-};
-
-fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]]) {
-	float2 texSize = float2(textureSrc.get_width(), textureSrc.get_height());
-	float2 pos = in.uv * texSize;
-	float2 cell = floor(pos);
-	float2 t = pos - cell;
-	float4 wx = bsplineWeights(t.x);
-	float4 wy = bsplineWeights(t.y);
-	float2 gx = float2(wx.x + wx.y, wx.z + wx.w);
-	float2 gy = float2(wy.x + wy.y, wy.z + wy.w);
-	float2 px = cell.x + float2(-0.5 + wx.y / gx.x, 1.5 + wx.w / gx.y);
-	float2 py = cell.y + float2(-0.5 + wy.y / gy.x, 1.5 + wy.w / gy.y);
-	float2 invSize = float2(1.0, 1.0) / texSize;
-	float4 c00 = textureSrc.sample(samplr, float2(px.x, py.x) * invSize);
-	float4 c10 = textureSrc.sample(samplr, float2(px.y, py.x) * invSize);
-	float4 c01 = textureSrc.sample(samplr, float2(px.x, py.y) * invSize);
-	float4 c11 = textureSrc.sample(samplr, float2(px.y, py.y) * invSize);
-	float fx = gx.x / (gx.x + gx.y);
-	float fy = gy.x / (gy.x + gy.y);
-	float4 rowTop = c00 * fx + c10 * (1.0 - fx);
-	float4 rowBottom = c01 * fx + c11 * (1.0 - fx);
-	return float4((rowTop * fy + rowBottom * (1.0 - fy)).rgb, 1.0);
-}
-)";
-
-	// note: the Metal backend passes the output resolution as texel size basis, and the third/fourth taps sit at
-	// texel*texel offsets; kept as the Metal backend has always rendered it
-	const char* const kMslHermite = R"(#include <metal_stdlib>
-using namespace metal;
-
-float4 catmullRomWeights(float t) {
-	float t2 = t * t;
-	float t3 = t2 * t;
-	return float4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2) * 0.5;
-}
-
-float3 hermiteRow(texture2d<float> tex, sampler s, float2 base, float dy, float2 texel, float farX, float4 w) {
-	float3 a = tex.sample(s, base + float2(-texel.x, dy)).rgb;
-	float3 b = tex.sample(s, base + float2(0.0, dy)).rgb;
-	float3 c = tex.sample(s, base + float2(texel.x, dy)).rgb;
-	float3 d = tex.sample(s, base + float2(farX, dy)).rgb;
-	return a * w.x + b * w.y + c * w.z + d * w.w;
-}
-
-struct VertexOut {
-	float4 position [[position]];
-	float2 uv;
-};
-
-fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]], constant float2& outputResolution [[buffer(0)]]) {
-	float2 texSize = outputResolution;
-	float2 texel = float2(1.0, 1.0) / texSize;
-	float2 far = texel * texel;
-	float2 pos = in.uv * texSize + 0.5;
-	float2 t = fract(pos);
-	float2 base = floor(pos) / texSize - texel * 0.5;
-	float4 wx = catmullRomWeights(t.x);
-	float4 wy = catmullRomWeights(t.y);
-	float3 r0 = hermiteRow(textureSrc, samplr, base, -texel.y, texel, far.x, wx);
-	float3 r1 = hermiteRow(textureSrc, samplr, base, 0.0, texel, far.x, wx);
-	float3 r2 = hermiteRow(textureSrc, samplr, base, texel.y, texel, far.x, wx);
-	float3 r3 = hermiteRow(textureSrc, samplr, base, far.y, texel, far.x, wx);
-	return float4(r0 * wy.x + r1 * wy.y + r2 * wy.z + r3 * wy.w, 1.0);
-}
-)";
-
 	// The quad is drawn as two triangles (6 vertices, no vertex buffer). Corner order:
 	// (1,1) (-1,1) (-1,-1) (-1,-1) (1,-1) (1,1); UVs follow the position, flipped vertically when upside down.
 	std::string BuildQuadVertexShader(const char* versionLine, const char* outDecl, const char* vertexIdName, bool upsideDown)
@@ -239,32 +145,6 @@ std::string RendererOutputShader::GetOpenGlVertexSource(bool render_upside_down)
 std::string RendererOutputShader::GetVulkanVertexSource(bool render_upside_down)
 {
 	return BuildQuadVertexShader("#version 450", "layout(location = 0) out vec2 passUV;", "gl_VertexIndex", render_upside_down);
-}
-
-std::string RendererOutputShader::GetMetalVertexSource(bool render_upside_down)
-{
-	// one oversized triangle that covers the viewport
-	std::string src = R"(#include <metal_stdlib>
-using namespace metal;
-
-struct VertexOut {
-	float4 position [[position]];
-	float2 uv;
-};
-
-vertex VertexOut main0(ushort vid [[vertex_id]]) {
-	const float2 corners[3] = { float2(-1.0, -3.0), float2(-1.0, 1.0), float2(3.0, 1.0) };
-	float2 pos = corners[vid];
-	VertexOut out;
-	out.uv = float2(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
-)";
-	if (render_upside_down)
-		src += "\tpos.y = -pos.y;\n";
-	src += R"(	out.position = float4(pos, 0.0, 1.0);
-	return out;
-}
-)";
-	return src;
 }
 
 // Declarations shared by the built-in filters and graphic pack output shaders. The names (passUV, textureSrc,
@@ -320,13 +200,7 @@ void main()
 
 RendererOutputShader::RendererOutputShader(const std::string& vertex_source, const std::string& fragment_source)
 {
-	// Metal shaders are complete programs, the GLSL ones get the shared declarations
-	bool usePreamble = true;
-#ifdef ENABLE_METAL
-	if (g_renderer->GetType() == RendererAPI::Metal)
-		usePreamble = false;
-#endif
-	const std::string fragmentCode = usePreamble ? PrependFragmentPreamble(fragment_source) : fragment_source;
+	const std::string fragmentCode = PrependFragmentPreamble(fragment_source);
 
 	m_vertex_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kVertex, 0, 0, vertex_source, false, false));
 	m_fragment_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kFragment, 0, 0, fragmentCode, false, false));
@@ -366,15 +240,6 @@ void RendererOutputShader::InitializeStatic()
 	std::string vs, vsUpsideDown;
 	switch (g_renderer->GetType())
 	{
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		vs = GetMetalVertexSource(false);
-		vsUpsideDown = GetMetalVertexSource(true);
-		copySrc = kMslCopy;
-		bicubicSrc = kMslBicubic;
-		hermiteSrc = kMslHermite;
-		break;
-#endif
 #ifdef ENABLE_OPENGL
 	case RendererAPI::OpenGL:
 		vs = GetOpenGlVertexSource(false);

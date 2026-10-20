@@ -3,7 +3,7 @@
 
 #include <wx/wxprec.h>
 
-// Shared part of the render canvases (OpenGL, Vulkan, Metal): whether this canvas shows the TV picture
+// Shared part of the render canvases (OpenGL, Vulkan): whether this canvas shows the TV picture
 // in the main window (true) or the GamePad picture in its own window (false).
 class IRenderCanvas
 {

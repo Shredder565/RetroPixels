@@ -23,9 +23,6 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #endif
-#ifdef ENABLE_METAL
-#include "Cafe/HW/Latte/Renderer/Metal/MetalRenderer.h"
-#endif
 
 #include "util/helpers/helpers.h"
 #include "util/helpers/SystemException.h"
@@ -497,10 +494,6 @@ wxPanel* GeneralSettings2::AddGraphicsPage(wxNotebook* notebook)
 			m_api_map.push_back(GraphicAPI::kVulkan);
 		}
 #endif
-#ifdef ENABLE_METAL
-		apiNames.Add("Metal");
-		m_api_map.push_back(GraphicAPI::kMetal);
-#endif
 		wxASSERT(!m_api_map.empty());
 
 		AddLabel(box, grid, _("Graphics API"));
@@ -529,10 +522,6 @@ wxPanel* GeneralSettings2::AddGraphicsPage(wxNotebook* notebook)
 		misc->Add(m_async_compile, 0, wxALL, 5);
 		m_gx2drawdone_sync = NewCheckBox(box, _("Full sync at GX2DrawDone()"), _("If synchronization is requested by the game, the emulated CPU will wait for the GPU to finish all operations.\nThis is more accurate behavior, but may cause lower performance"));
 		misc->Add(m_gx2drawdone_sync, 0, wxALL, 5);
-#ifdef ENABLE_METAL
-		m_force_mesh_shaders = NewCheckBox(box, _("Force mesh shaders"), _("Force mesh shaders on all GPUs that support them. Mesh shaders are disabled by default on Intel GPUs due to potential stability issues.\nMetal only"));
-		misc->Add(m_force_mesh_shaders, 0, wxALL, 5);
-#endif
 		section->Add(misc, 1, wxEXPAND, 5);
 		column->Add(section, 0, wxEXPAND | wxALL, 5);
 	}
@@ -948,17 +937,6 @@ wxPanel* GeneralSettings2::AddDebugPage(wxNotebook* notebook)
 	m_gdb_port->SetToolTip(_("Changes the port that the GDB stub will use, which you can use by either starting PixelU with the --enable-gdbstub option or by enabling it the Debug tab."));
 	addRow(_("GDB Stub port"), m_gdb_port);
 
-#ifdef ENABLE_METAL
-	m_gpu_capture_dir = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_DONTWRAP);
-	m_gpu_capture_dir->SetMinSize(wxSize(150, -1));
-	m_gpu_capture_dir->SetToolTip(_("PixelU will save the GPU captures done by selecting Debug -> GPU capture (Metal) in the menu bar in this directory. If a debugger with support for GPU captures (like Xcode) is attached, the capture will be opened in that debugger instead. If such debugger is not attached, METAL_CAPTURE_ENABLED must be set to 1 as an environment variable."));
-	addRow(_("GPU capture save directory"), m_gpu_capture_dir);
-
-	auto* fetchRow = NewGrid(2);
-	m_framebuffer_fetch = NewCheckBox(page, _("Framebuffer fetch"), _("Enable framebuffer fetch for eligible textures on supported devices.\nMetal only"));
-	fetchRow->Add(m_framebuffer_fetch, 0, wxALL | wxEXPAND, 5);
-	column->Add(fetchRow, 0, wxALL | wxEXPAND, 5);
-#endif
 
 	page->SetSizerAndFit(column);
 	return page;
@@ -1027,9 +1005,6 @@ void GeneralSettings2::ApplyConfig()
 	m_userDisplayGamma->Enable(!srgb);
 	m_async_compile->SetValue(config.async_compile);
 	m_gx2drawdone_sync->SetValue(config.gx2drawdone_sync);
-#ifdef ENABLE_METAL
-	m_force_mesh_shaders->SetValue(config.force_mesh_shaders);
-#endif
 	m_upscale_filter->SetSelection(config.upscale_filter);
 	m_downscale_filter->SetSelection(config.downscale_filter);
 	m_fullscreen_scaling->SetSelection(config.fullscreen_scaling);
@@ -1090,10 +1065,6 @@ void GeneralSettings2::ApplyConfig()
 	// --- Debug
 	m_crash_dump->SetSelection((int)config.crash_dump.GetValue());
 	m_gdb_port->SetValue(config.gdb_port.GetValue());
-#ifdef ENABLE_METAL
-	m_gpu_capture_dir->SetValue(wxString::FromUTF8(config.gpu_capture_dir.GetValue()));
-	m_framebuffer_fetch->SetValue(config.framebuffer_fetch);
-#endif
 }
 
 void GeneralSettings2::StoreConfig()
@@ -1171,18 +1142,8 @@ void GeneralSettings2::StoreConfig()
 			config.vk_graphic_device_uuid = device ? device->Get().uuid : decltype(config.vk_graphic_device_uuid){};
 		}
 #endif
-#ifdef ENABLE_METAL
-		if (config.graphic_api == GraphicAPI::kMetal)
-		{
-			const auto* device = SelectedData<RendererDeviceData<MetalRenderer::DeviceInfo>>(m_graphic_device);
-			config.mtl_graphic_device_uuid = device ? device->Get().uuid : decltype(config.mtl_graphic_device_uuid){};
-		}
-#endif
 	}
 	config.gx2drawdone_sync = m_gx2drawdone_sync->IsChecked();
-#ifdef ENABLE_METAL
-	config.force_mesh_shaders = m_force_mesh_shaders->IsChecked();
-#endif
 	config.async_compile = m_async_compile->IsChecked();
 
 	// --- Overlay
@@ -1211,10 +1172,6 @@ void GeneralSettings2::StoreConfig()
 	// --- Debug
 	config.crash_dump = (CrashDump)m_crash_dump->GetSelection();
 	config.gdb_port = m_gdb_port->GetValue();
-#ifdef ENABLE_METAL
-	config.gpu_capture_dir = m_gpu_capture_dir->GetValue().utf8_string();
-	config.framebuffer_fetch = m_framebuffer_fetch->IsChecked();
-#endif
 
 	GetConfigHandle().Save();
 }
@@ -1374,9 +1331,6 @@ void GeneralSettings2::HandleGraphicsApiSelection()
 		m_graphic_device->Disable();
 		m_gx2drawdone_sync->Enable();
 		m_async_compile->Disable();
-#ifdef ENABLE_METAL
-		m_force_mesh_shaders->Disable();
-#endif
 		break;
 #endif
 #ifdef ENABLE_VULKAN
@@ -1384,9 +1338,6 @@ void GeneralSettings2::HandleGraphicsApiSelection()
 	{
 		m_gx2drawdone_sync->Disable();
 		m_async_compile->Enable();
-#ifdef ENABLE_METAL
-		m_force_mesh_shaders->Disable();
-#endif
 		m_vsync->AppendString(_("Off"));
 		m_vsync->AppendString(_("Double buffering"));
 		m_vsync->AppendString(_("Triple buffering"));
@@ -1396,20 +1347,6 @@ void GeneralSettings2::HandleGraphicsApiSelection()
 		selectVsync(vsync);
 		const auto devices = CafeSystem::IsTitleRunning() ? decltype(VulkanRenderer::GetDevices()){} : VulkanRenderer::GetDevices();
 		fillDevices(devices, GetConfig().vk_graphic_device_uuid);
-		break;
-	}
-#endif
-#ifdef ENABLE_METAL
-	case GraphicAPI::kMetal:
-	{
-		m_gx2drawdone_sync->Disable();
-		m_async_compile->Enable();
-		m_force_mesh_shaders->Enable();
-		m_vsync->AppendString(_("Off"));
-		m_vsync->AppendString(_("On"));
-		selectVsync(vsync);
-		const auto devices = CafeSystem::IsTitleRunning() ? decltype(MetalRenderer::GetDevices()){} : MetalRenderer::GetDevices();
-		fillDevices(devices, GetConfig().mtl_graphic_device_uuid);
 		break;
 	}
 #endif

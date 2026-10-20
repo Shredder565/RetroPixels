@@ -109,21 +109,14 @@ if (UNIX AND NOT APPLE)
 endif()
 
 if (APPLE)
-    set(ENABLE_METAL_DEFAULT ON)
 	set(ENABLE_OPENGL_DEFAULT OFF)
 else()
-    set(ENABLE_METAL_DEFAULT OFF)
 	set(ENABLE_OPENGL_DEFAULT ON)
 endif()
 
 option(ENABLE_OPENGL "Enables the OpenGL backend" ${ENABLE_OPENGL_DEFAULT})
 option(ENABLE_VULKAN "Enables the Vulkan backend" ON)
-option(ENABLE_METAL "Enables the Metal backend" ${ENABLE_METAL_DEFAULT})
 option(ENABLE_DISCORD_RPC "Enables the Discord Rich Presence feature" ON)
-
-if (ENABLE_METAL AND NOT APPLE)
-    message(FATAL_ERROR "Metal backend is only supported on Apple platforms")
-endif()
 
 # input backends
 if (WIN32)
@@ -207,12 +200,6 @@ endif()
 if (ENABLE_OPENGL)
 	find_package(OpenGL REQUIRED)
 	add_compile_definitions(ENABLE_OPENGL)
-endif()
-
-if (ENABLE_METAL)
-    include_directories(${CMAKE_SOURCE_DIR}/dependencies/metal-cpp)
-
-    add_compile_definitions(ENABLE_METAL)
 endif()
 
 if (ENABLE_DISCORD_RPC)
