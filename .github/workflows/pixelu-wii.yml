@@ -1,9 +1,12 @@
 name: PixelU Wii (GameCube / Wii) test build
 
-# Builds PixelU's GameCube and Wii engine: Dolphin (GPL-2.0-or-later, the
-# submodule in pixelu/wii/dolphin) with the small changes in
-# pixelu/wii/patches. It is its own program (PixelU-Wii.exe), separate from
-# PixelU's Wii U part, and is packaged as the PixelU\wii\ folder.
+# Builds PixelU's GameCube and Wii engine. The build tree is Dolphin 2609a
+# (GPL-2.0-or-later, the submodule in pixelu/wii/dolphin: top-level CMake,
+# Externals, Data) with its Source/ replaced by pixelu/wii/Source, the code
+# being rewritten (docs/pixelu-wii-original.md), and the patches in
+# pixelu/wii/patches applied to the files outside Source/. It is its own
+# program (PixelU-Wii.exe), separate from PixelU's Wii U part, and is
+# packaged as the PixelU\wii\ folder.
 # The result is a workflow artifact only: no release is made.
 
 on:
@@ -12,6 +15,7 @@ on:
     branches: [claude/wiiu-emulator-urpcen]
     paths:
       - "pixelu/wii/**"
+      - "pixelu/wii/Source/**"
       - ".gitmodules"
       - ".github/workflows/pixelu-wii.yml"
 
@@ -54,18 +58,38 @@ jobs:
           }
           git -C $env:DOLPHIN_DIR log -1 --format="Dolphin at %H (%s)"
 
+      - name: Use PixelU's Source
+        shell: pwsh
+        run: |
+          # pixelu/wii/Source is Dolphin's Source/ as PixelU has it (the old
+          # Source/ patches already applied, files being replaced one by one
+          # with original code). Directories the Windows build never
+          # configures (Android, UnitTests, DSPSpy, DSPTool, MacUpdater,
+          # WinUpdater, DolphinNoGUI) are not in it.
+          $src = "$env:DOLPHIN_DIR/Source"
+          Remove-Item -Recurse -Force $src
+          if (Test-Path $src) { Write-Error "could not remove $src"; exit 1 }
+          Copy-Item -Recurse pixelu/wii/Source $src
+          "Source: $((Get-ChildItem -Recurse -File $src).Count) files"
+
       - name: Apply PixelU patches
         shell: pwsh
         run: |
+          # These touch only files outside Source/ (Source/ changes live in
+          # pixelu/wii/Source itself).
           $patches = Get-ChildItem pixelu/wii/patches/*.patch | Sort-Object Name
           foreach ($p in $patches) {
             Write-Host "Applying $($p.Name)"
             git -C $env:DOLPHIN_DIR apply --whitespace=nowarn $p.FullName
             if ($LASTEXITCODE) { exit 1 }
           }
-          # Commit and tag them, so Dolphin's version string reads
-          # "2609a-pixelu" instead of "2609a-dirty".
-          git -C $env:DOLPHIN_DIR -c user.name="PixelU CI" -c user.email="ci@invalid" commit -q -a -m "PixelU patches"
+          # Commit and tag PixelU's Source and the patches, so Dolphin's
+          # version string reads "2609a-pixelu" instead of "2609a-dirty".
+          # add -A also records files PixelU added or removed under Source/.
+          git -C $env:DOLPHIN_DIR add -A
+          if ($LASTEXITCODE) { exit 1 }
+          git -C $env:DOLPHIN_DIR -c user.name="PixelU CI" -c user.email="ci@invalid" commit -q -m "PixelU Source and patches"
+          if ($LASTEXITCODE) { exit 1 }
           git -C $env:DOLPHIN_DIR -c user.name="PixelU CI" -c user.email="ci@invalid" tag -a "$env:DOLPHIN_TAG-pixelu" -m "PixelU"
           if ($LASTEXITCODE) { exit 1 }
           git -C $env:DOLPHIN_DIR describe --always --long
