@@ -312,7 +312,7 @@ GCMemcardErrorCode Directory::CheckForErrorsWithBat(const BlockAlloc& bat) const
 BlockAlloc::BlockAlloc(u16 size_mbits)
 {
   std::memset(static_cast<void*>(this), 0, sizeof(*this));
-  m_free_blocks = MbitToFreeBlocks(size_mbits);
+  m_free_blocks = static_cast<u16>(MbitToFreeBlocks(size_mbits));
   m_last_allocated_block = MC_FST_BLOCKS - 1;
   FixChecksums();
 }
@@ -424,7 +424,8 @@ GCMemcardErrorCode BlockAlloc::CheckForErrors(u16 size_mbits) const
   ASSERT(data_blocks <= m_map.size());
 
   const auto is_used = [](const Common::BigEndianValue<u16>& v) { return v != 0; };
-  const auto used = std::count_if(m_map.begin(), m_map.begin() + data_blocks, is_used);
+  const auto used =
+      static_cast<size_t>(std::count_if(m_map.begin(), m_map.begin() + data_blocks, is_used));
   if (static_cast<u16>(data_blocks - used) != m_free_blocks)
     result.Set(GCMemcardValidityIssues::FREE_BLOCK_MISMATCH);
 
@@ -534,7 +535,7 @@ std::pair<GCMemcardErrorCode, std::optional<GCMemcard>> GCMemcard::Open(std::str
   if (damaged == 1)
   {
     bool repaired = false;
-    for (int bad = 0; bad < 2 && !repaired; ++bad)
+    for (size_t bad = 0; bad < 2 && !repaired; ++bad)
     {
       if (!dir_errors[bad].HasCriticalErrors())
         continue;
@@ -545,7 +546,7 @@ std::pair<GCMemcardErrorCode, std::optional<GCMemcard>> GCMemcard::Open(std::str
       dir_errors[bad] = target.CheckForErrors();
       repaired = true;
     }
-    for (int bad = 0; bad < 2 && !repaired; ++bad)
+    for (size_t bad = 0; bad < 2 && !repaired; ++bad)
     {
       if (!bat_errors[bad].HasCriticalErrors())
         continue;
@@ -580,25 +581,25 @@ std::pair<GCMemcardErrorCode, std::optional<GCMemcard>> GCMemcard::Open(std::str
 
 const Directory& GCMemcard::GetActiveDirectory() const
 {
-  return m_directory_blocks[m_active_directory];
+  return m_directory_blocks[static_cast<size_t>(m_active_directory)];
 }
 
 const BlockAlloc& GCMemcard::GetActiveBat() const
 {
-  return m_bat_blocks[m_active_bat];
+  return m_bat_blocks[static_cast<size_t>(m_active_bat)];
 }
 
 // Changes go to the inactive copy, which then becomes the active one.
 void GCMemcard::UpdateDirectory(const Directory& directory)
 {
   m_active_directory ^= 1;
-  m_directory_blocks[m_active_directory] = directory;
+  m_directory_blocks[static_cast<size_t>(m_active_directory)] = directory;
 }
 
 void GCMemcard::UpdateBat(const BlockAlloc& bat)
 {
   m_active_bat ^= 1;
-  m_bat_blocks[m_active_bat] = bat;
+  m_bat_blocks[static_cast<size_t>(m_active_bat)] = bat;
 }
 
 bool GCMemcard::IsShiftJIS() const
@@ -831,7 +832,8 @@ GCMemcardImportFileRetVal GCMemcard::ImportFile(const Savefile& savefile)
   if (TitlePresent(entry))
     return GCMemcardImportFileRetVal::TITLEPRESENT;
 
-  u16 block = GetActiveBat().NextFreeBlock(m_size_blocks, GetActiveBat().m_last_allocated_block);
+  u16 block = GetActiveBat().NextFreeBlock(static_cast<u16>(m_size_blocks),
+                                                  GetActiveBat().m_last_allocated_block);
   if (block == 0xFFFF)
     return GCMemcardImportFileRetVal::OUTOFBLOCKS;
 
@@ -866,7 +868,8 @@ GCMemcardImportFileRetVal GCMemcard::ImportFile(const Savefile& savefile)
     }
     m_data_blocks[block - MC_FST_BLOCKS] = data[i];
     const bool last = i + 1 == block_count;
-    const u16 next = last ? u16{0xFFFF} : bat.NextFreeBlock(m_size_blocks, block + 1);
+    const u16 next = last ? u16{0xFFFF} : bat.NextFreeBlock(static_cast<u16>(m_size_blocks),
+                                                                 static_cast<u16>(block + 1));
     bat.m_map[block - MC_FST_BLOCKS] = next;
     bat.m_last_allocated_block = block;
     block = next;
@@ -1100,7 +1103,7 @@ bool GCMemcard::Format(u8* card_data, const CardFlashId& flash_id, u16 size_mbit
   const BlockAlloc bat(size_mbits);
 
   std::memcpy(card_data, &header, BLOCK_SIZE);
-  for (int copy = 0; copy < 2; ++copy)
+  for (u32 copy = 0; copy < 2; ++copy)
   {
     std::memcpy(card_data + BLOCK_SIZE * (1 + copy), &directory, BLOCK_SIZE);
     std::memcpy(card_data + BLOCK_SIZE * (3 + copy), &bat, BLOCK_SIZE);

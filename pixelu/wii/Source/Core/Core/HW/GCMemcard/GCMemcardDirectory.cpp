@@ -153,10 +153,10 @@ bool GCMemcardDirectory::LoadGCI(Memcard::GCIFile gci)
     Memcard::GCMemcard::FZEROGX_MakeSaveGameValid(m_hdr, gci.m_gci_header, gci.m_save_data);
   }
 
-  const int slot = static_cast<int>(m_saves.size());
+  const size_t slot = m_saves.size();
   m_dir1.Replace(gci.m_gci_header, slot);
   m_saves.push_back(std::move(gci));
-  SetUsedBlocks(slot);
+  SetUsedBlocks(static_cast<int>(slot));
   return true;
 }
 
@@ -335,44 +335,47 @@ bool GCMemcardDirectory::MapBlock(s32 block, bool writing)
 
 s32 GCMemcardDirectory::Read(u32 src_address, s32 length, u8* dest_address)
 {
-  const s32 block = src_address / BLOCK_SIZE;
+  const s32 block = static_cast<s32>(src_address / BLOCK_SIZE);
   const u32 offset = src_address % BLOCK_SIZE;
 
   // Anything past the end of this block is read by a recursive call.
-  s32 overflow = 0;
-  if (offset + length > BLOCK_SIZE)
+  u32 count = static_cast<u32>(length);
+  u32 overflow = 0;
+  if (offset + count > BLOCK_SIZE)
   {
-    overflow = static_cast<s32>(offset + length - BLOCK_SIZE);
-    length -= overflow;
-    DEBUG_ASSERT_MSG(EXPANSIONINTERFACE, (src_address + length) % BLOCK_SIZE == 0,
+    overflow = offset + count - BLOCK_SIZE;
+    count -= overflow;
+    DEBUG_ASSERT_MSG(EXPANSIONINTERFACE, (src_address + count) % BLOCK_SIZE == 0,
                      "Memcard directory Read Logic Error");
   }
 
   if (m_last_block != block && !MapBlock(block, false))
   {
     // Free space reads as erased flash.
-    std::memset(dest_address, 0xFF, length);
+    std::memset(dest_address, 0xFF, count);
     return 0;
   }
 
-  std::memcpy(dest_address, m_last_block_address + offset, length);
+  std::memcpy(dest_address, m_last_block_address + offset, count);
+  s32 rest = 0;
   if (overflow != 0)
-    overflow = Read(src_address + length, overflow, dest_address + length);
-  return length + overflow;
+    rest = Read(src_address + count, static_cast<s32>(overflow), dest_address + count);
+  return static_cast<s32>(count) + rest;
 }
 
 s32 GCMemcardDirectory::Write(u32 dest_address, s32 length, const u8* src_address)
 {
   std::unique_lock lock(m_write_mutex);
-  const s32 block = dest_address / BLOCK_SIZE;
+  const s32 block = static_cast<s32>(dest_address / BLOCK_SIZE);
   const u32 offset = dest_address % BLOCK_SIZE;
 
-  s32 overflow = 0;
-  if (offset + length > BLOCK_SIZE)
+  u32 count = static_cast<u32>(length);
+  u32 overflow = 0;
+  if (offset + count > BLOCK_SIZE)
   {
-    overflow = static_cast<s32>(offset + length - BLOCK_SIZE);
-    length -= overflow;
-    DEBUG_ASSERT_MSG(EXPANSIONINTERFACE, (dest_address + length) % BLOCK_SIZE == 0,
+    overflow = offset + count - BLOCK_SIZE;
+    count -= overflow;
+    DEBUG_ASSERT_MSG(EXPANSIONINTERFACE, (dest_address + count) % BLOCK_SIZE == 0,
                      "Memcard directory Write Logic Error");
   }
 
@@ -383,14 +386,14 @@ s32 GCMemcardDirectory::Write(u32 dest_address, s32 length, const u8* src_addres
       // Directory writes go entry by entry so the save list can be kept in
       // step. Only the part inside this block is written.
       m_last_block = -1;
-      s32 done = 0;
-      for (s32 left = length; left > 0;)
+      u32 done = 0;
+      for (s32 left = static_cast<s32>(count); left > 0;)
       {
-        const s32 piece = std::min<s32>(DENTRY_SIZE, left);
-        done += DirectoryWrite(dest_address + done, piece, src_address + done);
-        left -= piece;
+        const u32 piece = std::min(DENTRY_SIZE, static_cast<u32>(left));
+        done += static_cast<u32>(DirectoryWrite(dest_address + done, piece, src_address + done));
+        left -= static_cast<s32>(piece);
       }
-      return done;
+      return static_cast<s32>(done);
     }
 
     if (!MapBlock(block, true))
@@ -400,15 +403,16 @@ s32 GCMemcardDirectory::Write(u32 dest_address, s32 length, const u8* src_addres
     }
   }
 
-  std::memcpy(m_last_block_address + offset, src_address, length);
+  std::memcpy(m_last_block_address + offset, src_address, count);
   lock.unlock();
 
+  s32 rest = 0;
   if (overflow != 0)
-    overflow = Write(dest_address + length, overflow, src_address + length);
+    rest = Write(dest_address + count, static_cast<s32>(overflow), src_address + count);
   // A block written to its end is likely complete: schedule a flush.
-  if (offset + length == BLOCK_SIZE)
+  if (offset + count == BLOCK_SIZE)
     m_flush_trigger.Set();
-  return length + overflow;
+  return static_cast<s32>(count) + rest;
 }
 
 void GCMemcardDirectory::ClearBlock(u32 address)
@@ -517,7 +521,7 @@ inline s32 GCMemcardDirectory::SaveAreaRW(u32 block, bool writing)
     }
 
     m_last_block = static_cast<s32>(block);
-    m_last_block_address = save.m_save_data[position].m_block.data();
+    m_last_block_address = save.m_save_data[static_cast<size_t>(position)].m_block.data();
     return m_last_block;
   }
   return -1;
@@ -539,7 +543,7 @@ s32 GCMemcardDirectory::DirectoryWrite(u32 dest_address, u32 length, const u8* s
 bool GCMemcardDirectory::SetUsedBlocks(int save_index)
 {
   const Memcard::BlockAlloc& bat = Newest(m_bat2, m_bat1);
-  Memcard::GCIFile& save = m_saves[save_index];
+  Memcard::GCIFile& save = m_saves[static_cast<size_t>(save_index)];
 
   for (u16 block = save.m_gci_header.m_first_block; block != 0xFFFF;)
   {

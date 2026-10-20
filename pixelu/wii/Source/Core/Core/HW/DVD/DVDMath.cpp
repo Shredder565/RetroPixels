@@ -108,7 +108,7 @@ double CalculateRawDiscReadTime(u64 offset, u64 length, bool wii_disc)
                           (curve.outer_rate - curve.inner_rate) +
                       curve.inner_rate;
 
-  const double seconds = length / rate;
+  const double seconds = static_cast<double>(length) / rate;
   DEBUG_LOG_FMT(DVDINTERFACE, "DVD stream {:#x} bytes at {:#x} (r={} mm): {} us at {} MiB/s",
                 length, offset, radius * 1000, seconds * 1e6, rate / MIB);
   return seconds;

@@ -555,7 +555,7 @@ void DVDInterface::Fail(DriveError error, CommandResult& result)
 void DVDInterface::ScheduleCommandCompletion(ReplyType reply_type, DIInterruptType interrupt)
 {
   const u64 ticks_per_us = m_system.GetSystemTimers().GetTicksPerSecond() / 1000000;
-  m_system.GetCoreTiming().ScheduleEvent(COMMAND_LATENCY_US * ticks_per_us,
+  m_system.GetCoreTiming().ScheduleEvent(static_cast<s64>(COMMAND_LATENCY_US * ticks_per_us),
                                          m_finish_executing_command,
                                          EncodeCompletion(reply_type, interrupt));
 }
@@ -895,7 +895,7 @@ void DVDInterface::RunStopMotorCommand()
   if (auto_change)
   {
     const u64 delay = software_eject ? 0 : m_system.GetSystemTimers().GetTicksPerSecond() / 2;
-    m_system.GetCoreTiming().ScheduleEvent(delay, m_auto_change_disc);
+    m_system.GetCoreTiming().ScheduleEvent(static_cast<s64>(delay), m_auto_change_disc);
     OSD::AddMessage("Changing discs automatically...", OSD::Duration::NORMAL);
   }
   else if (software_eject)
@@ -1083,7 +1083,7 @@ void DVDInterface::StreamAudioBlocks(DIInterruptType interrupt_type,
       s16* out = &pcm[b * SAMPLES * 2];
       m_adpcm_decoder.DecodeBlock(out, &audio_data[b * StreamADPCM::ONE_BLOCK_SIZE]);
       for (u32 s = 0; s < SAMPLES * 2; ++s)
-        out[s] = Common::swap16(out[s]);
+        out[s] = static_cast<s16>(Common::swap16(static_cast<u16>(out[s])));
     }
     m_system.GetSoundStream()->GetMixer()->PushStreamingSamples(pcm.data(), blocks * SAMPLES);
 
@@ -1219,8 +1219,12 @@ void DVDInterface::ScheduleReads(u64 offset, u32 length, const DiscIO::Partition
         seeked = true;
         ticks += static_cast<u64>(tps * DVDMath::CalculateSeekTime(head, block));
 
-        const double seconds_after_seek = (core_timing.GetTicks() + ticks) / tps;
-        ticks += tps * DVDMath::CalculateRotationalLatency(block, seconds_after_seek, wii_disc);
+        // Whole seconds only: the tick count is divided as an integer.
+        const double seconds_after_seek =
+            static_cast<double>((core_timing.GetTicks() + static_cast<u64>(ticks)) / tps);
+        ticks = static_cast<s64>(
+            static_cast<double>(ticks) +
+            tps * DVDMath::CalculateRotationalLatency(block, seconds_after_seek, wii_disc));
         DEBUG_LOG_FMT(DVDINTERFACE, "Seek for {:#x} bytes at {:#x}, now {} ticks", chunk, offset,
                       ticks);
       }
@@ -1254,7 +1258,7 @@ void DVDInterface::ScheduleReads(u64 offset, u32 length, const DiscIO::Partition
     if (seeked)
       m_read_ahead.end_offset = std::max(m_read_ahead.end_offset, first_block + READ_AHEAD_SIZE);
 
-    m_read_ahead.start_time = now + ticks;
+    m_read_ahead.start_time = now + static_cast<u64>(ticks);
     const double fill_seconds = DVDMath::CalculateRawDiscReadTime(
         m_read_ahead.start_offset, m_read_ahead.end_offset - m_read_ahead.start_offset, wii_disc);
     m_read_ahead.end_time = m_read_ahead.start_time + static_cast<u64>(tps * fill_seconds);

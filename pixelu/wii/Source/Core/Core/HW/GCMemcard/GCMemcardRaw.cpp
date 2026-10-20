@@ -159,7 +159,7 @@ s32 MemoryCard::Read(u32 src_address, s32 length, u8* dest_address)
     return -1;
   }
 
-  std::memcpy(dest_address, m_memcard_data.get() + src_address, length);
+  std::memcpy(dest_address, m_memcard_data.get() + src_address, static_cast<size_t>(length));
   return length;
 }
 
@@ -174,7 +174,7 @@ s32 MemoryCard::Write(u32 dest_address, s32 length, const u8* src_address)
 
   {
     std::lock_guard guard(m_flush_mutex);
-    std::memcpy(m_memcard_data.get() + dest_address, src_address, length);
+    std::memcpy(m_memcard_data.get() + dest_address, src_address, static_cast<size_t>(length));
   }
   MakeDirty();
   return length;

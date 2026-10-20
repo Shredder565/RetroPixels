@@ -1,5 +1,5 @@
-- W11 log: rewrote 22 of the 24 W11 files, the DVD drive and memory card
-  code (5378 lines now, from 6246): `DVD/DVDInterface`, `DVD/DVDMath`,
+- W11 log: rewrote 19 of the 21 W11 files, the DVD drive and memory card
+  code (5389 lines now, from 6246): `DVD/DVDInterface`, `DVD/DVDMath`,
   `DVD/DVDThread`, `DVD/FileMonitor`, `GCMemcard/GCIFile`,
   `GCMemcard/GCMemcard`, `GCMemcard/GCMemcardBase.h`,
   `GCMemcard/GCMemcardDirectory`, `GCMemcard/GCMemcardRaw` and
@@ -85,7 +85,11 @@
   - Compile check: the 10 W11 .cpp files and the 20 non-Qt files that include
     W11 headers (boot, config, EXI, SI, Triforce, IOS DI/MIOS, Movie,
     NetPlay, System, HW), with g++ and with clang for x86_64-w64-windows-gnu.
-    The rewritten files are `-Wall -Wextra` clean. Other failures match
+    The rewritten files (headers included) are clean under clang with
+    `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow`. Integer
+    narrowing, sign changes and int/float conversions are written as
+    explicit casts, keeping the same values (MSVC /W4 with warnings as
+    errors). Other failures match
     the base tree exactly (missing SFML/glslang/UnixUtil headers here, and
     MinGW's missing `std::expected`). The DolphinQt users (GCMemcardManager,
     GCMemcardCreateNewDialog, GameCubePane, ...) can't be compiled here
