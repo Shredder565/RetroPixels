@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "wxgui/helpers/wxCustomData.h"
@@ -5,10 +6,12 @@
 
 #include <wx/listctrl.h>
 
-#include <boost/optional.hpp> // std::optional doesn't support optional reference inner types yet
+#include <boost/optional.hpp> // optional references
 #include <utility>
 #include <vector>
 
+// Virtual list of installed titles, updates, DLC and saves for the title
+// manager, fed by the title and save list callbacks.
 class wxTitleManagerList : public wxListView
 {
 	friend class TitleManager;
@@ -47,9 +50,11 @@ public:
 		WUHB,
 	};
 
-	// sort by column, if -1 will sort by last column or default (=titleid)
+	// sorts by the given column; -1 re-applies the current sort (title id by default)
 	void SortEntries(int column);
 	void RefreshPage();
+	// plain text matches name, title id or type; "TITLEID:", "NAME:", "TYPE:",
+	// "REGION:", "VERSION:" and "FORMAT:" prefixes match a single column
 	void Filter(const wxString& filter);
 	[[nodiscard]] size_t GetCountByType(EntryType type) const;
 	void ClearItems();
@@ -71,68 +76,50 @@ public:
 		uint32_t version = 0;
 		CafeConsoleRegion region;
 
-		std::vector<uint32> persistent_ids; // only used for save
+		std::vector<uint32> persistent_ids; // saves only
 	};
 	boost::optional<const TitleEntry&> GetSelectedTitleEntry() const;
 
 private:
-	void AddColumns();
-	int Filter(const wxString& filter, const wxString& prefix, ItemColumn column);
-	boost::optional<TitleEntry&> GetSelectedTitleEntry();
-	boost::optional<TitleEntry&> GetTitleEntryByUID(uint64 uid);
-
-	class wxPanel* m_tooltip_window;
-	class wxStaticText* m_tooltip_text;
-	class wxTimer* m_tooltip_timer;
-
-	void OnClose(wxCloseEvent& event);
-	void OnColumnClick(wxListEvent& event);
-	void OnContextMenu(wxContextMenuEvent& event);
-	void OnItemSelected(wxListEvent& event);
-	void OnContextMenuSelected(wxCommandEvent& event);
-	void OnTimer(class wxTimerEvent& event);
-	void OnRemoveItem(wxCommandEvent& event);
-	void OnRemoveEntry(wxCommandEvent& event);
-
-	void OnTitleDiscovered(wxCommandEvent& event);
-	void OnTitleRemoved(wxCommandEvent& event);
-	void HandleTitleListCallback(struct CafeTitleListCallbackEvent* evt);
-	void HandleSaveListCallback(struct CafeSaveListCallbackEvent* evt);
-
 	using TitleEntryData_t = wxCustomData<TitleEntry>;
-	void AddTitle(TitleEntryData_t* obj);
-	int AddImage(const wxImage& image) const;
-	wxString OnGetItemText(long item, long column) const override;
-	wxItemAttr* OnGetItemAttr(long item) const override;
-	[[nodiscard]] boost::optional<const TitleEntry&> GetTitleEntry(long item) const;
-	[[nodiscard]] boost::optional<TitleEntry&> GetTitleEntry(long item);
-	[[nodiscard]] boost::optional<const TitleEntry&> GetTitleEntry(const fs::path& path) const;
-	[[nodiscard]] boost::optional<TitleEntry&> GetTitleEntry(const fs::path& path);
 
-	void OnConvertToCompressedFormat(uint64 titleId, uint64 rightClickedUID);
-	bool DeleteEntry(long index, const TitleEntry& entry);
-
-	void RemoveItem(long item);
-	void RemoveItem(const TitleEntry& entry);
-	
 	struct ItemData
 	{
 		ItemData(bool visible, const TitleEntry& entry)
 			: visible(visible), entry(entry) {}
-		
+
 		bool visible;
 		TitleEntry entry;
 	};
-	using ItemDataPtr = std::unique_ptr<ItemData>;
-	std::vector<ItemDataPtr> m_data;
-	std::vector<std::reference_wrapper<ItemData>> m_sorted_data;
 
-	using Type_t = std::reference_wrapper<const ItemData>;
-	bool SortFunc(int column, const Type_t& v1, const Type_t& v2);
+	boost::optional<TitleEntry&> GetSelectedTitleEntry();
+	void AddTitle(TitleEntryData_t* obj);
 
-	static wxString GetTitleEntryText(const TitleEntry& entry, ItemColumn column);
-	static wxString GetTranslatedTitleEntryType(EntryType entryType);
+	boost::optional<TitleEntry&> EntryAtRow(long row) const;
+	boost::optional<TitleEntry&> EntryByUid(uint64 uid) const;
+	wxString OnGetItemText(long item, long column) const override;
+	wxItemAttr* OnGetItemAttr(long item) const override;
+	static wxString ColumnText(const TitleEntry& entry, ItemColumn column);
+	static wxString TypeName(EntryType type);
+	void ShowRows(size_t count);
+
+	void QueueTitleEvent(struct CafeTitleListCallbackEvent* evt);
+	void QueueSaveEvent(struct CafeSaveListCallbackEvent* evt);
+	void OnTitleFoundEvent(wxCommandEvent& event);
+	void OnTitleRemovedEvent(wxCommandEvent& event);
+
+	void OnContextMenu(wxContextMenuEvent& event);
+	void OnMenuCommand(int id);
+	bool IsBusy();
+	void DeleteWithConfirmation(long row, const TitleEntry& entry);
+	void RemoveRow(long row);
+	void RemoveEntry(const TitleEntry* entry);
+	void ConvertToWua(uint64 titleId, uint64 clickedUid);
+
+	std::vector<std::unique_ptr<ItemData>> m_data;          // owns the entries, in arrival order
+	std::vector<std::reference_wrapper<ItemData>> m_sorted;  // display order; hidden ones are skipped
 	std::future<bool> m_context_worker;
+	mutable wxItemAttr m_rowAttr[2];
 
 	uint64 m_callbackIdTitleList;
 	uint64 m_callbackIdSaveList;
