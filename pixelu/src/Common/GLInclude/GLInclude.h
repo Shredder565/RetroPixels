@@ -1,3 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Single include for the OpenGL renderer: pulls in the Khronos extension
+// headers, declares the runtime-loaded function pointers listed in
+// glFunctions.h (namespace CemuGL, kept for the existing callers) and offers
+// texture helpers that use direct state access when the driver has it and
+// otherwise bind the texture briefly and restore the previous binding.
 #pragma once
 
 #include "glext.h"
@@ -6,25 +13,22 @@
 #include "wglext.h"
 #endif
 
-#if ( BOOST_OS_LINUX || BOOST_OS_BSD ) > 0
-
-// from Xlib
+#if (BOOST_OS_LINUX || BOOST_OS_BSD) > 0
+// glxext.h expects the Xlib / GLX base types, which we do not include.
 #define Bool int
 #define Status int
 #define True 1
 #define False 0
-
-// from system glx.h
 typedef XID GLXContextID;
 typedef XID GLXPixmap;
 typedef XID GLXDrawable;
 typedef XID GLXPbuffer;
 typedef XID GLXWindow;
 typedef XID GLXFBConfigID;
-typedef struct __GLXcontextRec *GLXContext;
-typedef struct __GLXFBConfigRec *GLXFBConfig;
+typedef struct __GLXcontextRec* GLXContext;
+typedef struct __GLXFBConfigRec* GLXFBConfig;
 
-#define EGL_EGL_PROTOTYPES 0
+#define EGL_EGL_PROTOTYPES 0 // only the PFN typedefs; functions are loaded at runtime
 #include "egl.h"
 #undef EGL_EGL_PROTOTYPES
 #include "glxext.h"
@@ -33,190 +37,142 @@ typedef struct __GLXFBConfigRec *GLXFBConfig;
 #undef Status
 #undef True
 #undef False
-
 #endif
 
 namespace CemuGL
 {
-#define GLFUNC(__type, __name)	extern __type __name;
-#define EGLFUNC(__type, __name) extern __type __name;
+#define GLFUNC(type, name) extern type name;
+#define EGLFUNC(type, name) extern type name;
 #include "glFunctions.h"
 #undef GLFUNC
 #undef EGLFUNC
 
-// DSA-style helpers with fallback to legacy API if DSA is not supported
-
-#define DSA_FORCE_DISABLE false // set to true to simulate DSA not being supported
-
-static GLenum GetGLBindingFromTextureTarget(GLenum texTarget)
-{
-	switch(texTarget)
+	// Binding query enum for a texture target.
+	static GLenum GetGLBindingFromTextureTarget(GLenum target)
 	{
-	case GL_TEXTURE_1D: return GL_TEXTURE_BINDING_1D;
-	case GL_TEXTURE_2D: return GL_TEXTURE_BINDING_2D;
-	case GL_TEXTURE_3D: return GL_TEXTURE_BINDING_3D;
-	case GL_TEXTURE_2D_ARRAY: return GL_TEXTURE_BINDING_2D_ARRAY;
-	case GL_TEXTURE_CUBE_MAP: return GL_TEXTURE_BINDING_CUBE_MAP;
-	case GL_TEXTURE_CUBE_MAP_ARRAY: return GL_TEXTURE_BINDING_CUBE_MAP_ARRAY;
-	default:
+		switch (target)
+		{
+		case GL_TEXTURE_1D: return GL_TEXTURE_BINDING_1D;
+		case GL_TEXTURE_2D: return GL_TEXTURE_BINDING_2D;
+		case GL_TEXTURE_3D: return GL_TEXTURE_BINDING_3D;
+		case GL_TEXTURE_2D_ARRAY: return GL_TEXTURE_BINDING_2D_ARRAY;
+		case GL_TEXTURE_CUBE_MAP: return GL_TEXTURE_BINDING_CUBE_MAP;
+		case GL_TEXTURE_CUBE_MAP_ARRAY: return GL_TEXTURE_BINDING_CUBE_MAP_ARRAY;
+		}
 		cemu_assert_unimplemented();
 		return 0;
 	}
-}
 
-static GLuint glCreateTextureWrapper(GLenum target)
-{
-	GLuint tex;
-	if (glCreateTextures && !DSA_FORCE_DISABLE)
+	// Binds a texture for the lifetime of the object and puts back whatever
+	// was bound to the same target before. Used when DSA is unavailable.
+	struct GLScopedTextureBind
 	{
-		glCreateTextures(target, 1, &tex);
-		return tex;
-	}
-	GLint originalTexture;
-	glGetIntegerv(GetGLBindingFromTextureTarget(target), &originalTexture);
-	glGenTextures(1, &tex);
-	glBindTexture(target, tex);
-	glBindTexture(target, originalTexture);
-	return tex;
-}
+		GLScopedTextureBind(GLenum target, GLuint texture) : m_target(target)
+		{
+			glGetIntegerv(GetGLBindingFromTextureTarget(target), &m_previous);
+			glBindTexture(target, texture);
+		}
+		~GLScopedTextureBind()
+		{
+			glBindTexture(m_target, (GLuint)m_previous);
+		}
+		GLScopedTextureBind(const GLScopedTextureBind&) = delete;
+		GLScopedTextureBind& operator=(const GLScopedTextureBind&) = delete;
 
-static void glTextureStorage1DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width)
-{
-	if (glTextureStorage1D && !DSA_FORCE_DISABLE)
+	  private:
+		GLenum m_target;
+		GLint m_previous = 0;
+	};
+
+	static GLuint glCreateTextureWrapper(GLenum target)
 	{
-		glTextureStorage1D(texture, levels, internalformat, width);
-		return;
+		GLuint texture = 0;
+		if (glCreateTextures)
+		{
+			glCreateTextures(target, 1, &texture);
+			return texture;
+		}
+		// a name from glGenTextures only becomes a texture object once bound
+		glGenTextures(1, &texture);
+		GLScopedTextureBind bind(target, texture);
+		return texture;
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexStorage1D(target, levels, internalformat, width);
-	glBindTexture(target, originalTexture);
-}
 
-static void glTextureStorage2DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height)
-{
-	if (glTextureStorage2D && !DSA_FORCE_DISABLE)
+	static void glTextureStorage1DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width)
 	{
-		glTextureStorage2D(texture, levels, internalformat, width, height);
-		return;
+		if (glTextureStorage1D)
+			return glTextureStorage1D(texture, levels, internalformat, width);
+		GLScopedTextureBind bind(target, texture);
+		glTexStorage1D(target, levels, internalformat, width);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexStorage2D(target, levels, internalformat, width, height);
-	glBindTexture(target, originalTexture);
-}
 
-static void glTextureStorage3DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth)
-{
-	if (glTextureStorage3D && !DSA_FORCE_DISABLE)
+	static void glTextureStorage2DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height)
 	{
-		glTextureStorage3D(texture, levels, internalformat, width, height, depth);
-		return;
+		if (glTextureStorage2D)
+			return glTextureStorage2D(texture, levels, internalformat, width, height);
+		GLScopedTextureBind bind(target, texture);
+		glTexStorage2D(target, levels, internalformat, width, height);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexStorage3D(target, levels, internalformat, width, height, depth);
-	glBindTexture(target, originalTexture);
-}
 
-static void glTextureSubImage1DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels)
-{
-	if (glTextureSubImage1D && !DSA_FORCE_DISABLE)
+	static void glTextureStorage3DWrapper(GLenum target, GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth)
 	{
-		glTextureSubImage1D(texture, level, xoffset, width, format, type, pixels);
-		return;
+		if (glTextureStorage3D)
+			return glTextureStorage3D(texture, levels, internalformat, width, height, depth);
+		GLScopedTextureBind bind(target, texture);
+		glTexStorage3D(target, levels, internalformat, width, height, depth);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexSubImage1D(target, level, xoffset, width, format, type, pixels);
-	glBindTexture(target, originalTexture);
-}
 
-static void glCompressedTextureSubImage1DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data)
-{
-	if (glCompressedTextureSubImage1D && !DSA_FORCE_DISABLE)
+	static void glTextureSubImage1DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels)
 	{
-		glCompressedTextureSubImage1D(texture, level, xoffset, width, format, imageSize, data);
-		return;
+		if (glTextureSubImage1D)
+			return glTextureSubImage1D(texture, level, xoffset, width, format, type, pixels);
+		GLScopedTextureBind bind(target, texture);
+		glTexSubImage1D(target, level, xoffset, width, format, type, pixels);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glCompressedTexSubImage1D(target, level, xoffset, width, format, imageSize, data);
-	glBindTexture(target, originalTexture);
-}
 
-static void glTextureSubImage2DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels)
-{
-	if (glTextureSubImage2D && !DSA_FORCE_DISABLE)
+	static void glCompressedTextureSubImage1DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data)
 	{
-		glTextureSubImage2D(texture, level, xoffset, yoffset, width, height, format, type, pixels);
-		return;
+		if (glCompressedTextureSubImage1D)
+			return glCompressedTextureSubImage1D(texture, level, xoffset, width, format, imageSize, data);
+		GLScopedTextureBind bind(target, texture);
+		glCompressedTexSubImage1D(target, level, xoffset, width, format, imageSize, data);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-	glBindTexture(target, originalTexture);
-}
 
-static void glCompressedTextureSubImage2DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data)
-{
-	if (glCompressedTextureSubImage2D && !DSA_FORCE_DISABLE)
+	static void glTextureSubImage2DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels)
 	{
-		glCompressedTextureSubImage2D(texture, level, xoffset, yoffset, width, height, format, imageSize, data);
-		return;
+		if (glTextureSubImage2D)
+			return glTextureSubImage2D(texture, level, xoffset, yoffset, width, height, format, type, pixels);
+		GLScopedTextureBind bind(target, texture);
+		glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
-	glBindTexture(target, originalTexture);
-}
 
-static void glTextureSubImage3DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels)
-{
-	if(glTextureSubImage3D && !DSA_FORCE_DISABLE)
+	static void glCompressedTextureSubImage2DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data)
 	{
-		glTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
-		return;
+		if (glCompressedTextureSubImage2D)
+			return glCompressedTextureSubImage2D(texture, level, xoffset, yoffset, width, height, format, imageSize, data);
+		GLScopedTextureBind bind(target, texture);
+		glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
-	glBindTexture(target, originalTexture);
-}
 
-static void glCompressedTextureSubImage3DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data)
-{
-	if(glCompressedTextureSubImage3D && !DSA_FORCE_DISABLE)
+	static void glTextureSubImage3DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels)
 	{
-		glCompressedTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
-		return;
+		if (glTextureSubImage3D)
+			return glTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+		GLScopedTextureBind bind(target, texture);
+		glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
 	}
-	GLenum binding = GetGLBindingFromTextureTarget(target);
-	GLint originalTexture;
-	glGetIntegerv(binding, &originalTexture);
-	glBindTexture(target, texture);
-	glCompressedTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
-	glBindTexture(target, originalTexture);
-}
 
-}
+	static void glCompressedTextureSubImage3DWrapper(GLenum target, GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data)
+	{
+		if (glCompressedTextureSubImage3D)
+			return glCompressedTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
+		GLScopedTextureBind bind(target, texture);
+		glCompressedTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
+	}
+} // namespace CemuGL
+
 using namespace CemuGL;
-// this prevents Windows GL.h from being included:
+
+// keep the Windows SDK's GL.h out: everything comes from the headers above
 #define __gl_h_
 #define __GL_H__

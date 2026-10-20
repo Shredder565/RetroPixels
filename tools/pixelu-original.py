@@ -33,7 +33,11 @@ THIRD_PARTY = (
     "audio/xaudio2_7/",
     "Common/unix/date.h",
     "Common/unix/fast_float.h",
-    "Common/GLInclude/",
+    "Common/GLInclude/egl.h",
+    "Common/GLInclude/glext.h",
+    "Common/GLInclude/glxext.h",
+    "Common/GLInclude/khrplatform.h",
+    "Common/GLInclude/wglext.h",
     "Cafe/OS/libs/nsyshid/g721/",
     # font data, not code: Lato Medium (SIL OFL 1.1), the 'More Perfect DOS VGA'
     # bitmap font, and the generated Font Awesome 5 icon table (zlib licence)

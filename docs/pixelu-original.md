@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 199714 | 81.5% |
+| Original (RetroPixels) | 200131 | 81.7% |
 | Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
-| Third-party | 45460 | 18.5% |
-| **All** | **245174** | 100% |
+| Third-party | 44933 | 18.3% |
+| **All** | **245064** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -156,7 +156,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/nex | 3410 | 3410 | original |
 | Cemu/PPCAssembler | 1893 | 1893 | original |
 | Cemu/Tools | 1590 | 1590 | original |
-| Common | 31625 | 3311 | mixed (10% original), 28314 lines third-party |
+| Common | 31515 | 3728 | mixed (12% original), 27787 lines third-party |
 | config | 2805 | 2805 | original |
 | gui/interface | 140 | 140 | original |
 | gui/wxgui (top level) | 11953 | 11953 | original |
@@ -1493,3 +1493,55 @@ Done:
   uint64 is written signed; the declared value, not the current one, is the
   default when a key is missing; Save reports success when the document was
   written even if the final rename fails.
+
+- Batch 17: Cemu's non-code material and branding. Rewritten as original
+  files: src/resource/cemu.rc (same file name; same resource names and ids:
+  M_WND_ICON128, M_WND_ICON16, X_INPUT_CONTROLLER, X_BOX, X_SETTINGS,
+  X_GAME_PROFILE, X_HOTKEY_SETTINGS, IDR_FONTAWESOME, VS_VERSION_INFO; the
+  version block now names PixelU / RetroPixels and PixelU.exe, and file
+  names use forward slashes so windres can read it too);
+  dist/windows/pixelu.manifest in place of Cemu.manifest (same settings:
+  common controls 6.0 for amd64, asInvoker, dpiAware True/PM; CMake links
+  the new name); dist/network_services.xml (an example in the format
+  NetworkConfig::Load reads); README.md, BUILD.md, CONTRIBUTING.md and
+  CODING_STYLE.md (short docs on how PixelU is built and changed here); and
+  the new THIRD_PARTY.md, which lists the Icons8 pictures, the fonts, the
+  code the tracker's THIRD_PARTY tuple names, dependencies/ and cmake/, with
+  their licences. The repository .gitignore drops *.md (Mega Drive ROMs), so
+  pixelu/*.md is let through.
+  Cemu's logo is replaced by RetroPixels' icon: pixelu.ico (16 to 256 px),
+  pixelu16.ico, pixelu.icns and the embedded M_WND_ICON128.xpm (128x128,
+  256 colours, 2 characters per pixel, same array name) are generated with
+  Pillow from web/icon-512.png. Removed: logo_1.png, logo_icon.png/.ico,
+  logo_icon16.ico, logo_icon2.ico, orig1024.ico, output.ico, cemu.icns,
+  installer.nsi, MacOSXBundleInfo.plist.in, cemu.macos.entitlements,
+  dist/linux (the info.cemu.Cemu desktop entry, metainfo, icon and
+  appimage.sh, used only by Cemu's release workflow), CMakeSettings.json,
+  boost.natvis, .gdbinit, pixelu/.github (Cemu's issue templates and
+  workflows; GitHub only runs the root workflows), and the metal-cpp
+  submodule (.gitmodules entry and gitlink; nothing includes it since the
+  Metal backend went in batch 16). The optional macOS bundle uses CMake's
+  own Info.plist template with PixelU names and id
+  io.github.shredder565.PixelU; the Wayland app id is the same id.
+  Visible names changed where nothing parses them: the cubeb context and
+  stream names ("PixelU", "PixelU audio output", "PixelU input", "PixelU
+  microphone input"), the keys.txt error and the async shader notification
+  (_tr; Cemu -> PixelU, so these two fall back to English until the
+  catalogs are updated), the cafeLibs log line, the crash log's
+  "PixelU.exe at" line, and the ALLOW_PORTABLE option description.
+  pixelu.yml: only the header comment.
+  Kept on purpose: resource ids, CMake target names (CemuBin, CemuCommon,
+  ...), config and folder names (settings.xml, network_services.xml,
+  usr/packages/title/cemu_*, the "cemu" translation catalog), settings
+  keys, the About window's credit to Cemu, the cemu.info / cemu-project
+  URLs the program downloads from, the Discord application id, and
+  LICENSE.txt (the licence for the rewritten code is the user's choice).
+  Checks: windres (mingw) compiles cemu.rc both by hand and through the
+  rule CMake generates; every icon, the font and the version strings appear
+  in the output. CMake configures on Linux (GTK) and for mingw/Windows with
+  stub packages and placeholder files for the imgui submodule, which this
+  checkout lacks; no missing source files. xmllint: the manifest is
+  well-formed. network_services.xml parses with the bundled tinyxml2 and
+  gives all ten URLs, the name and the SSL flag. The XPM parses back to the
+  128x128 picture and compiles as C++. tools/pixelu-original.py: table
+  unchanged.
