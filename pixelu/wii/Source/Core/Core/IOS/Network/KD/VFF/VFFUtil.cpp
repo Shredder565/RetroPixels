@@ -276,7 +276,10 @@ ErrorCode ReadVolumeFile(const std::string& name, std::vector<u8>& out)
   if (status != FR_OK || got != wanted)
   {
     if (status != FR_OK)
-      ERROR_LOG_FMT(IOS_WC24, "Failed to read file {} in VFF: {}", name, std::to_underlying(status));
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Failed to read file {} in VFF: {}", name,
+                    std::to_underlying(status));
+    }
     else
       ERROR_LOG_FMT(IOS_WC24, "Failed to read bytes of file {} ({} != {})", name, got, wanted);
     f_close(&file);

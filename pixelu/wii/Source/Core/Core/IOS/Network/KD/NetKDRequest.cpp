@@ -165,7 +165,8 @@ s32 MakeWiiNumber(u64* out, u32 console_id, u16 counter, HardwareModel model, u8
   for (u32 index = 0; index < 6; ++index)
   {
     const u8 byte = ByteOf(id, index);
-    id = WithByte(id, index, static_cast<u8>((NIBBLE_MAP[byte >> 4] << 4) | NIBBLE_MAP[byte & 0xF]));
+    const u8 mapped = static_cast<u8>((NIBBLE_MAP[byte >> 4] << 4) | NIBBLE_MAP[byte & 0xF]);
+    id = WithByte(id, index, mapped);
   }
 
   const u64 substituted = id;

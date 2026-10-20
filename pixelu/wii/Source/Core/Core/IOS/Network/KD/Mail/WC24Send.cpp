@@ -180,7 +180,8 @@ ErrorCode WC24SendList::DeleteMessage(u32 index)
   header.next_entry_id = Common::swap32(GetEntryId(index));
   header.next_entry_offset = CalculateFileOffset(index);
   // Stored without converting back to big endian (long-standing behaviour); nothing reads it.
-  header.total_size_of_messages = Common::swap32(header.total_size_of_messages) - GetMailSize(index);
+  header.total_size_of_messages =
+      Common::swap32(header.total_size_of_messages) - GetMailSize(index);
 
   m_data.entries[index] = {};
   return WC24_OK;
