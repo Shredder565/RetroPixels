@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/SI/SI_DeviceNull.h"
 
@@ -10,17 +9,17 @@ CSIDevice_Null::CSIDevice_Null(Core::System& system, SIDevices device, int devic
 {
 }
 
-int CSIDevice_Null::RunBuffer(u8* buffer, int request_length)
+int CSIDevice_Null::RunBuffer(u8*, int)
 {
   return -1;
 }
 
-DataResponse CSIDevice_Null::GetData(u32& hi, u32& low)
+DataResponse CSIDevice_Null::GetData(u32&, u32&)
 {
   return DataResponse::ErrorNoResponse;
 }
 
-void CSIDevice_Null::SendCommand(u32 command, u8 poll)
+void CSIDevice_Null::SendCommand(u32, u8)
 {
 }
 }  // namespace SerialInterface

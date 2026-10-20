@@ -1,12 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/SI/SI_DeviceGCAdapter.h"
 
-#include <cstring>
-
 #include "Common/CommonTypes.h"
-#include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
@@ -19,52 +15,41 @@ namespace SerialInterface
 CSIDevice_GCAdapter::CSIDevice_GCAdapter(Core::System& system, SIDevices device, int device_number)
     : CSIDevice_GCController(system, device, device_number)
 {
-  // Make sure PAD_GET_ORIGIN gets set due to a newly connected device.
+  // Forget the port's last controller type so the adapter code flags the
+  // next poll with PAD_GET_ORIGIN, as for a newly plugged pad.
   GCAdapter::ResetDeviceType(m_device_number);
 
-  // get the correct pad number that should rumble locally when using netplay
-  const int pad_num = NetPlay_InGamePadToLocalPad(m_device_number);
-  if (pad_num < 4)
-    m_simulate_konga = Config::Get(Config::GetInfoForSimulateKonga(pad_num));
+  const int local_pad = NetPlay_InGamePadToLocalPad(m_device_number);
+  if (local_pad < 4)
+    m_simulate_konga = Config::Get(Config::GetInfoForSimulateKonga(local_pad));
 }
 
 GCPadStatus CSIDevice_GCAdapter::GetPadStatus()
 {
-  GCPadStatus pad_status = {};
-
-  // For netplay, the local controllers are polled in GetNetPads(), and
-  // the remote controllers receive their status there as well
+  GCPadStatus pad = {};
   if (!NetPlay::IsNetPlayRunning())
-  {
-    pad_status = GCAdapter::Input(m_device_number);
-  }
+    pad = GCAdapter::Input(m_device_number);
 
-  HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad_status);
+  HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad);
 
-  // Our GCAdapter code sets PAD_GET_ORIGIN when a new device has been connected.
-  // Watch for this to calibrate real controllers on connection.
-  if (pad_status.button & PAD_GET_ORIGIN)
-    SetOrigin(pad_status);
+  if ((pad.button & PAD_GET_ORIGIN) != 0)
+    SetOrigin(pad);
 
-  return pad_status;
+  return pad;
 }
 
 int CSIDevice_GCAdapter::RunBuffer(u8* buffer, int request_length)
 {
-  if (!Core::WantsDeterminism())
+  // An empty adapter port answers "no device" (the SI_NONE word). That is
+  // skipped when determinism is required, because the answer depends on the
+  // local hardware and would desync NetPlay and movies.
+  if (!Core::WantsDeterminism() && !GCAdapter::DeviceConnected(m_device_number))
   {
-    // The previous check is a hack to prevent a desync due to SI devices
-    // being different and returning different values on RunBuffer();
-    // the corresponding code in GCAdapter.cpp has the same check.
-
-    // This returns an error value if there is no controller plugged
-    // into this port on the hardware gc adapter, exposing it to the game.
-    if (!GCAdapter::DeviceConnected(m_device_number))
-    {
-      const u32 device = Common::swap32(SI_NONE);
-      memcpy(buffer, &device, sizeof(device));
-      return 4;
-    }
+    buffer[0] = static_cast<u8>(SI_NONE >> 24);
+    buffer[1] = static_cast<u8>(SI_NONE >> 16);
+    buffer[2] = static_cast<u8>(SI_NONE >> 8);
+    buffer[3] = static_cast<u8>(SI_NONE);
+    return 4;
   }
   return CSIDevice_GCController::RunBuffer(buffer, request_length);
 }
@@ -72,12 +57,8 @@ int CSIDevice_GCAdapter::RunBuffer(u8* buffer, int request_length)
 DataResponse CSIDevice_GCAdapter::GetData(u32& hi, u32& low)
 {
   CSIDevice_GCController::GetData(hi, low);
-
   if (m_simulate_konga)
-  {
     hi &= CSIDevice_TaruKonga::HI_BUTTON_MASK;
-  }
-
   return DataResponse::Success;
 }
 

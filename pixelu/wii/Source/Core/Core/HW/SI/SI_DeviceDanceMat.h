@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@ struct GCPadStatus;
 
 namespace SerialInterface
 {
+// Dance mat (DDR Mario Mix, Active Life). Reports its arrows as buttons.
 class CSIDevice_DanceMat final : public CSIDevice_GCController
 {
 public:

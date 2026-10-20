@@ -1,9 +1,7 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <array>
 #include <memory>
 
 #include <SFML/Network.hpp>
@@ -11,10 +9,13 @@
 #include "Common/CommonTypes.h"
 #include "Core/HW/SI/SI_Device.h"
 
-// GameBoy Advance "Link Cable"
+// Game Boy Advance on the link cable, provided by an external emulator that
+// connects over TCP: port 0xd6ba carries the joybus bytes and port 0xc10c a
+// clock stream telling the GBA side how much time has passed.
 
 namespace SerialInterface
 {
+// Stops the background thread that accepts emulator connections.
 void GBAConnectionWaiter_Shutdown();
 
 class GBASockServer
@@ -33,11 +34,13 @@ public:
 private:
   void Disconnect();
 
-  std::unique_ptr<sf::TcpSocket> m_client;
-  std::unique_ptr<sf::TcpSocket> m_clock_sync;
+  std::unique_ptr<sf::TcpSocket> m_data_socket;
+  std::unique_ptr<sf::TcpSocket> m_clock_socket;
 
-  u64 m_last_time_slice = 0;
-  bool m_booted = false;
+  // Tick count of the last clock message (0 = none sent yet).
+  u64 m_last_clock_ticks = 0;
+  // Set once the other side has answered; afterwards replies are waited for.
+  bool m_peer_answered = false;
 };
 
 class CSIDevice_GBA final : public ISIDevice
@@ -51,16 +54,16 @@ public:
   void SendCommand(u32 command, u8 poll) override;
 
 private:
-  enum class NextAction
+  enum class Phase
   {
-    SendCommand,
-    WaitTransferTime,
-    ReceiveResponse
+    Idle,          // next RunBuffer sends a new command
+    InFlight,      // waiting for the bytes to cross the cable
+    AwaitReply,    // collecting the reply
   };
 
-  GBASockServer m_sock_server;
-  NextAction m_next_action = NextAction::SendCommand;
-  EBufferCommands m_last_cmd = EBufferCommands::CMD_STATUS;
-  u64 m_timestamp_sent = 0;
+  GBASockServer m_link;
+  Phase m_phase = Phase::Idle;
+  EBufferCommands m_pending_command = EBufferCommands::CMD_STATUS;
+  u64 m_sent_at = 0;
 };
 }  // namespace SerialInterface

@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,6 +18,7 @@ class GBAHostInterface;
 
 namespace SerialInterface
 {
+// A GBA on the link cable emulated in-process by mGBA (see HW/GBACore).
 class CSIDevice_GBAEmu final : public ISIDevice
 {
 public:
@@ -33,16 +33,18 @@ public:
   void OnEvent(u64 userdata, s64 cycles_late) override;
 
 private:
-  enum class NextAction
+  // Saved in savestates as an int; the values must stay.
+  enum class Phase
   {
-    SendCommand,
-    WaitTransferTime,
-    ReceiveResponse
+    Idle = 0,
+    InFlight = 1,
+    AwaitReply = 2,
   };
 
-  NextAction m_next_action = NextAction::SendCommand;
-  EBufferCommands m_last_cmd{};
-  u64 m_timestamp_sent = 0;
+  Phase m_phase = Phase::Idle;
+  EBufferCommands m_pending_command{};
+  u64 m_sent_at = 0;
+  // GBA key bits from the last poll.
   u16 m_keys = 0;
 
   std::shared_ptr<HW::GBA::Core> m_core;

@@ -1,17 +1,17 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/SI/SI_DeviceGBA.h"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstddef>
-#include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 
 #include "Common/CommonTypes.h"
-#include "Common/Flag.h"
 #include "Common/Logging/Log.h"
 #include "Common/Thread.h"
 #include "Core/CoreTiming.h"
@@ -23,96 +23,112 @@ namespace SerialInterface
 {
 namespace
 {
-std::thread s_connection_thread;
-std::queue<std::unique_ptr<sf::TcpSocket>> s_waiting_socks;
-std::queue<std::unique_ptr<sf::TcpSocket>> s_waiting_clocks;
-std::mutex s_cs_gba;
-std::mutex s_cs_gba_clk;
-int s_num_connected;
-Common::Flag s_server_running;
-}  // namespace
+constexpr unsigned short DATA_PORT = 0xd6ba;   // "dolphin gba"
+constexpr unsigned short CLOCK_PORT = 0xc10c;  // "clock"
+constexpr std::size_t MAX_PACKET = 5;
 
-constexpr auto SEND_MAX_SIZE = 5, RECV_MAX_SIZE = 5;
+using SocketPtr = std::unique_ptr<sf::TcpSocket>;
 
-// --- GameBoy Advance "Link Cable" ---
-
-static void GBAConnectionWaiter()
+// Accepts incoming emulator connections on a background thread and hands
+// them out, oldest first, to whichever link port asks next.
+class ConnectionWaiter
 {
-  s_server_running.Set();
-
-  Common::SetCurrentThreadName("GBA Connection Waiter");
-
-  sf::TcpListener server;
-  sf::TcpListener clock_server;
-
-  // "dolphin gba"
-  if (server.listen(0xd6ba) != sf::Socket::Status::Done)
-    return;
-
-  // "clock"
-  if (clock_server.listen(0xc10c) != sf::Socket::Status::Done)
-    return;
-
-  server.setBlocking(false);
-  clock_server.setBlocking(false);
-
-  auto new_client = std::make_unique<sf::TcpSocket>();
-  while (s_server_running.IsSet())
+public:
+  void EnsureRunning()
   {
-    if (server.accept(*new_client) == sf::Socket::Status::Done)
+    if (m_thread.joinable())
+      return;
+    m_running = true;
+    m_thread = std::thread([this] { Run(); });
+  }
+
+  void Stop()
+  {
+    m_running = false;
+    if (m_thread.joinable())
+      m_thread.join();
+  }
+
+  SocketPtr TakeDataSocket() { return Take(m_data_sockets); }
+  SocketPtr TakeClockSocket() { return Take(m_clock_sockets); }
+
+private:
+  SocketPtr Take(std::deque<SocketPtr>& queue)
+  {
+    std::lock_guard guard(m_lock);
+    if (queue.empty())
+      return nullptr;
+    SocketPtr socket = std::move(queue.front());
+    queue.pop_front();
+    return socket;
+  }
+
+  void Run()
+  {
+    Common::SetCurrentThreadName("GBA Connection Waiter");
+
+    sf::TcpListener data_listener;
+    sf::TcpListener clock_listener;
+    if (data_listener.listen(DATA_PORT) != sf::Socket::Status::Done)
+      return;
+    if (clock_listener.listen(CLOCK_PORT) != sf::Socket::Status::Done)
+      return;
+    data_listener.setBlocking(false);
+    clock_listener.setBlocking(false);
+
+    auto candidate = std::make_unique<sf::TcpSocket>();
+    while (m_running)
     {
-      std::lock_guard lk(s_cs_gba);
-      s_waiting_socks.push(std::move(new_client));
-
-      new_client = std::make_unique<sf::TcpSocket>();
+      // A socket that got accepted is queued and replaced by a fresh one.
+      if (data_listener.accept(*candidate) == sf::Socket::Status::Done)
+      {
+        std::lock_guard guard(m_lock);
+        m_data_sockets.push_back(std::move(candidate));
+        candidate = std::make_unique<sf::TcpSocket>();
+      }
+      if (clock_listener.accept(*candidate) == sf::Socket::Status::Done)
+      {
+        std::lock_guard guard(m_lock);
+        m_clock_sockets.push_back(std::move(candidate));
+        candidate = std::make_unique<sf::TcpSocket>();
+      }
+      Common::SleepCurrentThread(1);
     }
-    if (clock_server.accept(*new_client) == sf::Socket::Status::Done)
-    {
-      std::lock_guard lk(s_cs_gba_clk);
-      s_waiting_clocks.push(std::move(new_client));
+  }
 
-      new_client = std::make_unique<sf::TcpSocket>();
-    }
+  std::thread m_thread;
+  std::atomic<bool> m_running{false};
+  std::mutex m_lock;
+  std::deque<SocketPtr> m_data_sockets;
+  std::deque<SocketPtr> m_clock_sockets;
+};
 
-    Common::SleepCurrentThread(1);
+ConnectionWaiter s_waiter;
+
+// Reply size the GBA sends for each command.
+u8 ReplyLength(EBufferCommands command)
+{
+  switch (command)
+  {
+  case EBufferCommands::CMD_RESET:
+  case EBufferCommands::CMD_STATUS:
+    return 3;
+  case EBufferCommands::CMD_READ_GBA:
+    return 5;
+  default:
+    return 1;
   }
 }
+}  // namespace
 
 void GBAConnectionWaiter_Shutdown()
 {
-  s_server_running.Clear();
-  if (s_connection_thread.joinable())
-    s_connection_thread.join();
-}
-
-template <typename T>
-static std::unique_ptr<T> MoveFromFront(std::queue<std::unique_ptr<T>>& ptrs)
-{
-  if (ptrs.empty())
-    return nullptr;
-  std::unique_ptr<T> ptr = std::move(ptrs.front());
-  ptrs.pop();
-  return ptr;
-}
-
-static std::unique_ptr<sf::TcpSocket> GetNextSock()
-{
-  std::lock_guard lk(s_cs_gba);
-  return MoveFromFront(s_waiting_socks);
-}
-
-static std::unique_ptr<sf::TcpSocket> GetNextClock()
-{
-  std::lock_guard lk(s_cs_gba_clk);
-  return MoveFromFront(s_waiting_clocks);
+  s_waiter.Stop();
 }
 
 GBASockServer::GBASockServer()
 {
-  if (!s_connection_thread.joinable())
-    s_connection_thread = std::thread(GBAConnectionWaiter);
-
-  s_num_connected = 0;
+  s_waiter.EnsureRunning();
 }
 
 GBASockServer::~GBASockServer()
@@ -122,72 +138,62 @@ GBASockServer::~GBASockServer()
 
 void GBASockServer::Disconnect()
 {
-  if (m_client)
+  if (m_data_socket)
   {
-    s_num_connected--;
-    m_client->disconnect();
-    m_client = nullptr;
+    m_data_socket->disconnect();
+    m_data_socket.reset();
   }
-  if (m_clock_sync)
+  if (m_clock_socket)
   {
-    m_clock_sync->disconnect();
-    m_clock_sync = nullptr;
+    m_clock_socket->disconnect();
+    m_clock_socket.reset();
   }
-  m_last_time_slice = 0;
-  m_booted = false;
+  m_last_clock_ticks = 0;
+  m_peer_answered = false;
 }
 
 void GBASockServer::ClockSync(Core::System& system)
 {
-  if (!m_clock_sync)
-    if (!(m_clock_sync = GetNextClock()))
+  if (!m_clock_socket)
+  {
+    m_clock_socket = s_waiter.TakeClockSocket();
+    if (!m_clock_socket)
       return;
-
-  const auto& core_timing = system.GetCoreTiming();
-
-  u32 time_slice = 0;
-
-  if (m_last_time_slice == 0)
-  {
-    s_num_connected++;
-    m_last_time_slice = core_timing.GetTicks();
-    time_slice = (u32)(system.GetSystemTimers().GetTicksPerSecond() / 60);
-  }
-  else
-  {
-    time_slice = (u32)(core_timing.GetTicks() - m_last_time_slice);
   }
 
-  time_slice = (u32)((u64)time_slice * 16777216 / system.GetSystemTimers().GetTicksPerSecond());
-  m_last_time_slice = core_timing.GetTicks();
-  char bytes[4] = {0, 0, 0, 0};
-  bytes[0] = (time_slice >> 24) & 0xff;
-  bytes[1] = (time_slice >> 16) & 0xff;
-  bytes[2] = (time_slice >> 8) & 0xff;
-  bytes[3] = time_slice & 0xff;
+  const u64 now = system.GetCoreTiming().GetTicks();
+  const u64 tps = system.GetSystemTimers().GetTicksPerSecond();
 
-  const sf::Socket::Status status = m_clock_sync->send(bytes, 4);
-  if (status == sf::Socket::Status::Disconnected)
+  // The first message claims one frame (1/60 s) has passed. Elapsed time is
+  // sent in units of 2^-24 seconds, as a big-endian 32-bit value.
+  const u32 elapsed =
+      m_last_clock_ticks == 0 ? static_cast<u32>(tps / 60) : static_cast<u32>(now - m_last_clock_ticks);
+  const u32 scaled = static_cast<u32>(u64{elapsed} * 16777216 / tps);
+  m_last_clock_ticks = now;
+
+  const std::array<u8, 4> message = {static_cast<u8>(scaled >> 24), static_cast<u8>(scaled >> 16),
+                                     static_cast<u8>(scaled >> 8), static_cast<u8>(scaled)};
+  if (m_clock_socket->send(message.data(), message.size()) == sf::Socket::Status::Disconnected)
   {
-    m_clock_sync->disconnect();
-    m_clock_sync = nullptr;
+    m_clock_socket->disconnect();
+    m_clock_socket.reset();
   }
 }
 
 bool GBASockServer::Connect()
 {
-  if (!IsConnected())
+  if (!m_data_socket)
   {
-    m_client = GetNextSock();
-    if (m_client)
-      m_client->setBlocking(false);
+    m_data_socket = s_waiter.TakeDataSocket();
+    if (m_data_socket)
+      m_data_socket->setBlocking(false);
   }
-  return IsConnected();
+  return m_data_socket != nullptr;
 }
 
 bool GBASockServer::IsConnected()
 {
-  return static_cast<bool>(m_client);
+  return m_data_socket != nullptr;
 }
 
 void GBASockServer::Send(const u8* si_buffer)
@@ -195,68 +201,61 @@ void GBASockServer::Send(const u8* si_buffer)
   if (!Connect())
     return;
 
-  std::array<u8, SEND_MAX_SIZE> send_data;
-  for (size_t i = 0; i < send_data.size(); i++)
-    send_data[i] = si_buffer[i];
+  // Only a write carries data; every other command is a single byte.
+  const bool is_write = static_cast<EBufferCommands>(si_buffer[0]) == EBufferCommands::CMD_WRITE_GBA;
+  std::array<u8, MAX_PACKET> packet;
+  std::copy_n(si_buffer, packet.size(), packet.begin());
+  const std::size_t length = is_write ? packet.size() : 1;
 
-  const auto cmd = static_cast<EBufferCommands>(send_data[0]);
-
-  sf::Socket::Status status;
-  if (cmd == EBufferCommands::CMD_WRITE_GBA)
-    status = m_client->send(send_data.data(), send_data.size());
-  else
-    status = m_client->send(send_data.data(), 1);
-
-  if (status == sf::Socket::Status::Disconnected)
+  if (m_data_socket->send(packet.data(), length) == sf::Socket::Status::Disconnected)
     Disconnect();
 }
 
 int GBASockServer::Receive(u8* si_buffer, u8 bytes)
 {
-  if (!m_client)
+  if (!m_data_socket)
     return 0;
 
-  if (m_booted)
+  // Once the peer is known to answer, give it up to a second.
+  if (m_peer_answered)
   {
     sf::SocketSelector selector;
-    selector.add(*m_client);
+    selector.add(*m_data_socket);
     (void)selector.wait(sf::milliseconds(1000));
   }
 
-  size_t num_received = 0;
-  std::array<u8, RECV_MAX_SIZE> recv_data;
-  const sf::Socket::Status recv_stat = m_client->receive(recv_data.data(), bytes, num_received);
-  if (recv_stat == sf::Socket::Status::Disconnected)
+  std::array<u8, MAX_PACKET> reply{};
+  std::size_t received = 0;
+  const auto status = m_data_socket->receive(reply.data(), bytes, received);
+  if (status == sf::Socket::Status::Disconnected)
   {
     Disconnect();
     return 0;
   }
-
-  if (recv_stat == sf::Socket::Status::NotReady || num_received == 0)
+  if (status == sf::Socket::Status::NotReady || received == 0)
   {
-    m_booted = false;
+    m_peer_answered = false;
     return 0;
   }
-  m_booted = true;
 
-  for (size_t i = 0; i < recv_data.size(); i++)
-    si_buffer[i] = recv_data[i];
-  return static_cast<int>(std::min(num_received, recv_data.size()));
+  m_peer_answered = true;
+  std::copy(reply.begin(), reply.end(), si_buffer);
+  return static_cast<int>(std::min(received, reply.size()));
 }
 
 void GBASockServer::Flush()
 {
-  if (!m_client)
+  if (!m_data_socket)
     return;
 
-  size_t num_received = 1;
-  u8 byte;
-  while (num_received)
+  // Drop any late replies to commands that already timed out.
+  u8 discard;
+  std::size_t received = 0;
+  do
   {
-    const sf::Socket::Status recv_stat = m_client->receive(&byte, 1, num_received);
-    if (recv_stat != sf::Socket::Status::Done)
+    if (m_data_socket->receive(&discard, 1, received) != sf::Socket::Status::Done)
       break;
-  }
+  } while (received != 0);
 }
 
 CSIDevice_GBA::CSIDevice_GBA(Core::System& system, SIDevices device, int device_number)
@@ -264,94 +263,53 @@ CSIDevice_GBA::CSIDevice_GBA(Core::System& system, SIDevices device, int device_
 {
 }
 
-int CSIDevice_GBA::RunBuffer(u8* buffer, int request_length)
+int CSIDevice_GBA::RunBuffer(u8* buffer, int)
 {
-  switch (m_next_action)
-  {
-  case NextAction::SendCommand:
-  {
-    m_sock_server.ClockSync(m_system);
-    if (m_sock_server.Connect())
-    {
-#ifdef _DEBUG
-      NOTICE_LOG_FMT(SERIALINTERFACE, "{} cmd {:02x} [> {:02x}{:02x}{:02x}{:02x}]", m_device_number,
-                     buffer[0], buffer[1], buffer[2], buffer[3], buffer[4]);
-#endif
-      m_sock_server.Flush();  // Clear out any replies we might have timed out waiting for
-      m_sock_server.Send(buffer);
-    }
-    else
-    {
-      return -1;
-    }
+  auto& timing = m_system.GetCoreTiming();
 
-    m_last_cmd = static_cast<EBufferCommands>(buffer[0]);
-    m_timestamp_sent = m_system.GetCoreTiming().GetTicks();
-    m_next_action = NextAction::WaitTransferTime;
+  if (m_phase == Phase::Idle)
+  {
+    m_link.ClockSync(m_system);
+    if (!m_link.Connect())
+      return -1;
+
+    m_link.Flush();
+    m_link.Send(buffer);
+    m_pending_command = static_cast<EBufferCommands>(buffer[0]);
+    m_sent_at = timing.GetTicks();
+    m_phase = Phase::InFlight;
     return 0;
   }
 
-  case NextAction::WaitTransferTime:
+  if (m_phase == Phase::InFlight)
   {
-    const int elapsed_time =
-        static_cast<int>(m_system.GetCoreTiming().GetTicks() - m_timestamp_sent);
-    // Tell SI to ask again after TransferInterval() cycles
-    if (SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_last_cmd) > elapsed_time)
+    const int elapsed = static_cast<int>(timing.GetTicks() - m_sent_at);
+    if (elapsed < SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_pending_command))
       return 0;
-    m_next_action = NextAction::ReceiveResponse;
-    [[fallthrough]];
+    m_phase = Phase::AwaitReply;
   }
 
-  case NextAction::ReceiveResponse:
-  {
-    u8 bytes = 1;
-    switch (m_last_cmd)
-    {
-    case EBufferCommands::CMD_RESET:
-    case EBufferCommands::CMD_STATUS:
-      bytes = 3;
-      break;
-    case EBufferCommands::CMD_READ_GBA:
-      bytes = 5;
-      break;
-    default:
-      break;
-    }
-    const int num_data_received = m_sock_server.Receive(buffer, bytes);
-
-    m_next_action = NextAction::SendCommand;
-    if (num_data_received == 0)
-      return -1;
-#ifdef _DEBUG
-    const Common::Log::LogLevel log_level =
-        (m_last_cmd == EBufferCommands::CMD_STATUS || m_last_cmd == EBufferCommands::CMD_RESET) ?
-            Common::Log::LogLevel::LERROR :
-            Common::Log::LogLevel::LWARNING;
-    GENERIC_LOG_FMT(Common::Log::LogType::SERIALINTERFACE, log_level,
-                    "{}                              [< {:02x}{:02x}{:02x}{:02x}{:02x}] ({})",
-                    m_device_number, buffer[0], buffer[1], buffer[2], buffer[3], buffer[4],
-                    num_data_received);
-#endif
-    return num_data_received;
-  }
-  }
-
-  // This should never happen, but appease MSVC which thinks it might.
-  ERROR_LOG_FMT(SERIALINTERFACE, "Unknown state {}\n", static_cast<int>(m_next_action));
-  return 0;
+  // Phase::AwaitReply
+  m_phase = Phase::Idle;
+  const int received = m_link.Receive(buffer, ReplyLength(m_pending_command));
+  if (received == 0)
+    return -1;
+  DEBUG_LOG_FMT(SERIALINTERFACE, "GBA {}: reply to {:#04x}, {} bytes", m_device_number,
+                static_cast<u8>(m_pending_command), received);
+  return received;
 }
 
 int CSIDevice_GBA::TransferInterval()
 {
-  return SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_last_cmd);
+  return SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_pending_command);
 }
 
-DataResponse CSIDevice_GBA::GetData(u32& hi, u32& low)
+DataResponse CSIDevice_GBA::GetData(u32&, u32&)
 {
   return DataResponse::NoData;
 }
 
-void CSIDevice_GBA::SendCommand(u32 command, u8 poll)
+void CSIDevice_GBA::SendCommand(u32, u8)
 {
 }
 }  // namespace SerialInterface

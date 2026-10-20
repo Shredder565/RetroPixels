@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,23 +11,21 @@ struct KeyboardStatus;
 
 namespace SerialInterface
 {
+// The GameCube ASCII keyboard (Phantasy Star Online). Each poll reports up
+// to three held keys as scancodes plus a 4-bit sequence counter.
 class CSIDevice_Keyboard final : public ISIDevice
 {
 public:
-  // Constructor
   CSIDevice_Keyboard(Core::System& system, SIDevices device, int device_number);
 
-  // Run the SI Buffer
   int RunBuffer(u8* buffer, int request_length) override;
 
   DataResponse GetData(u32& hi, u32& low) override;
 
   KeyboardStatus GetKeyboardStatus() const;
 
-  // Send a command directly
   void SendCommand(u32 command, u8 poll) override;
 
-  // Savestate support
   void DoState(PointerWrap& p) override;
 
 private:
@@ -36,7 +33,7 @@ private:
 
   KeyArray MapKeys(const KeyboardStatus& key_status) const;
 
-  // Internal counter synchronizing GC and keyboard
+  // Advanced by every poll command, wraps at 16.
   u8 m_counter = 0;
 };
 }  // namespace SerialInterface

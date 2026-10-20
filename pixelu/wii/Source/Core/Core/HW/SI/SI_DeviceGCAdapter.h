@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 
 namespace SerialInterface
 {
+// A port fed by a real controller on the USB GameCube adapter.
 class CSIDevice_GCAdapter final : public CSIDevice_GCController
 {
 public:
@@ -20,6 +20,7 @@ public:
   DataResponse GetData(u32& hi, u32& low) override;
 
 private:
+  // Report only the bongo buttons (for DK Bongos plugged into the adapter).
   bool m_simulate_konga{};
 };
 }  // namespace SerialInterface

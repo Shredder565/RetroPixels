@@ -1,10 +1,8 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/SI/SI_DeviceKeyboard.h"
 
 #include <array>
-#include <cstring>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -14,7 +12,37 @@
 
 namespace SerialInterface
 {
-// --- GameCube keyboard ---
+namespace
+{
+constexpr std::size_t MAX_REPORTED_KEYS = 3;
+
+// The keyboard status packs 85 keys into six 16-bit words, one bit per key
+// in scancode order (only the low 5 bits of the last word are used). The
+// scancodes are consecutive except for three unused gaps: 0x0B-0x0F after
+// Scroll Lock, 0x52 after Tab and 0x60 before Enter.
+constexpr u8 ScancodeForKeyIndex(u32 index)
+{
+  if (index < 5)
+    return static_cast<u8>(KEY_HOME + index);
+  if (index < 71)
+    return static_cast<u8>(index + 0x0B);
+  if (index < 84)
+    return static_cast<u8>(index + 0x0C);
+  return static_cast<u8>(index + 0x0D);
+}
+static_assert(ScancodeForKeyIndex(5) == KEY_A);
+static_assert(ScancodeForKeyIndex(70) == KEY_TAB);
+static_assert(ScancodeForKeyIndex(71) == KEY_CAPSLOCK);
+static_assert(ScancodeForKeyIndex(83) == KEY_RIGHTARROW);
+static_assert(ScancodeForKeyIndex(84) == KEY_ENTER);
+
+void StoreWordBE(u8* dst, u32 value)
+{
+  for (int i = 0; i < 4; ++i)
+    dst[i] = static_cast<u8>(value >> (24 - 8 * i));
+}
+}  // namespace
+
 CSIDevice_Keyboard::CSIDevice_Keyboard(Core::System& system, SIDevices device, int device_number)
     : ISIDevice(system, device, device_number)
 {
@@ -22,42 +50,32 @@ CSIDevice_Keyboard::CSIDevice_Keyboard(Core::System& system, SIDevices device, i
 
 int CSIDevice_Keyboard::RunBuffer(u8* buffer, int request_length)
 {
-  // For debug logging only
   ISIDevice::RunBuffer(buffer, request_length);
 
-  // Read the command
-  const auto command = static_cast<EBufferCommands>(buffer[0]);
-
-  // Handle it
-  switch (command)
+  const u8 command = buffer[0];
+  switch (static_cast<EBufferCommands>(command))
   {
   case EBufferCommands::CMD_STATUS:
   case EBufferCommands::CMD_RESET:
-  {
     return CreateStatusResponse(SI_GC_KEYBOARD, buffer);
-  }
 
   case EBufferCommands::CMD_DIRECT_KB:
   {
-    INFO_LOG_FMT(SERIALINTERFACE, "Keyboard - Direct (Request Length: {})", request_length);
-    u32 high, low;
-    GetData(high, low);
-    for (int i = 0; i < 4; i++)
-    {
-      buffer[i + 0] = (high >> (24 - (i * 8))) & 0xff;
-      buffer[i + 4] = (low >> (24 - (i * 8))) & 0xff;
-    }
-    return sizeof(high) + sizeof(low);
+    INFO_LOG_FMT(SERIALINTERFACE, "Keyboard {}: direct poll ({} byte request)", m_device_number,
+                 request_length);
+    u32 hi = 0;
+    u32 lo = 0;
+    GetData(hi, lo);
+    StoreWordBE(buffer, hi);
+    StoreWordBE(buffer + 4, lo);
+    return 8;
   }
 
   default:
-  {
-    ERROR_LOG_FMT(SERIALINTERFACE, "Unknown SI command     ({:#x})", static_cast<u8>(command));
+    ERROR_LOG_FMT(SERIALINTERFACE, "Keyboard {}: unhandled SI command {:#x}", m_device_number,
+                  command);
+    return 0;
   }
-  break;
-  }
-
-  return 0;
 }
 
 KeyboardStatus CSIDevice_Keyboard::GetKeyboardStatus() const
@@ -67,28 +85,26 @@ KeyboardStatus CSIDevice_Keyboard::GetKeyboardStatus() const
 
 DataResponse CSIDevice_Keyboard::GetData(u32& hi, u32& low)
 {
-  const KeyboardStatus key_status = GetKeyboardStatus();
-  const KeyArray key = MapKeys(key_status);
-  const u8 checksum = key[0] ^ key[1] ^ key[2] ^ m_counter;
+  const KeyArray keys = MapKeys(GetKeyboardStatus());
+  const u8 check = static_cast<u8>(keys[0] ^ keys[1] ^ keys[2] ^ m_counter);
 
-  hi = m_counter << 24;
-  low = key[0] << 24 | key[1] << 16 | key[2] << 8 | checksum;
-
+  hi = u32{m_counter} << 24;
+  low = (u32{keys[0]} << 24) | (u32{keys[1]} << 16) | (u32{keys[2]} << 8) | check;
   return DataResponse::Success;
 }
 
-void CSIDevice_Keyboard::SendCommand(u32 command, u8 poll)
+void CSIDevice_Keyboard::SendCommand(u32 command, u8)
 {
-  UCommand keyboard_command(command);
-
-  if (static_cast<EDirectCommands>(keyboard_command.command) == EDirectCommands::CMD_POLL)
+  const UCommand word(command);
+  if (static_cast<EDirectCommands>(word.command) == EDirectCommands::CMD_POLL)
   {
-    m_counter++;
-    m_counter &= 15;
+    m_counter = static_cast<u8>((m_counter + 1) & 0xF);
+    return;
   }
-  else if (keyboard_command.command != 0x00)
+  if (word.command != 0)
   {
-    ERROR_LOG_FMT(SERIALINTERFACE, "Unknown direct command     ({:#x})", command);
+    ERROR_LOG_FMT(SERIALINTERFACE, "Keyboard {}: unhandled direct command {:#x}", m_device_number,
+                  command);
   }
 }
 
@@ -97,115 +113,20 @@ void CSIDevice_Keyboard::DoState(PointerWrap& p)
   p.Do(m_counter);
 }
 
-template <size_t N>
-using MaskArray = std::array<KeyMasks, N>;
-
-template <size_t N>
-using KeyScanCodeArray = std::array<KeyScanCode, N>;
-
 CSIDevice_Keyboard::KeyArray CSIDevice_Keyboard::MapKeys(const KeyboardStatus& key_status) const
 {
-  static constexpr MaskArray<16> key0_masks{
-      KEYMASK_HOME, KEYMASK_END, KEYMASK_PGUP, KEYMASK_PGDN, KEYMASK_SCROLLLOCK, KEYMASK_A,
-      KEYMASK_B,    KEYMASK_C,   KEYMASK_D,    KEYMASK_E,    KEYMASK_F,          KEYMASK_G,
-      KEYMASK_H,    KEYMASK_I,   KEYMASK_J,    KEYMASK_K,
-  };
-  static constexpr KeyScanCodeArray<16> key0_keys{
-      KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_SCROLLLOCK, KEY_A, KEY_B, KEY_C,
-      KEY_D,    KEY_E,   KEY_F,    KEY_G,    KEY_H,          KEY_I, KEY_J, KEY_K,
-  };
+  const std::array<u16, 6> words = {key_status.key0x, key_status.key1x, key_status.key2x,
+                                    key_status.key3x, key_status.key4x, key_status.key5x};
+  constexpr u32 KEY_COUNT = 85;
 
-  static constexpr MaskArray<16> key1_masks{
-      KEYMASK_L, KEYMASK_M, KEYMASK_N, KEYMASK_O, KEYMASK_P, KEYMASK_Q, KEYMASK_R, KEYMASK_S,
-      KEYMASK_T, KEYMASK_U, KEYMASK_V, KEYMASK_W, KEYMASK_X, KEYMASK_Y, KEYMASK_Z, KEYMASK_1,
-  };
-  static constexpr KeyScanCodeArray<16> key1_keys{
-      KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S,
-      KEY_T, KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z, KEY_1,
-  };
-
-  static constexpr MaskArray<16> key2_masks{
-      KEYMASK_2,          KEYMASK_3,           KEYMASK_4,     KEYMASK_5,
-      KEYMASK_6,          KEYMASK_7,           KEYMASK_8,     KEYMASK_9,
-      KEYMASK_0,          KEYMASK_MINUS,       KEYMASK_PLUS,  KEYMASK_PRINTSCR,
-      KEYMASK_BRACE_OPEN, KEYMASK_BRACE_CLOSE, KEYMASK_COLON, KEYMASK_QUOTE,
-  };
-  static constexpr KeyScanCodeArray<16> key2_keys{
-      KEY_2,          KEY_3,           KEY_4,     KEY_5,     KEY_6,    KEY_7,
-      KEY_8,          KEY_9,           KEY_0,     KEY_MINUS, KEY_PLUS, KEY_PRINTSCR,
-      KEY_BRACE_OPEN, KEY_BRACE_CLOSE, KEY_COLON, KEY_QUOTE,
-  };
-
-  static constexpr MaskArray<16> key3_masks{
-      KEYMASK_HASH, KEYMASK_COMMA, KEYMASK_PERIOD, KEYMASK_QUESTIONMARK, KEYMASK_INTERNATIONAL1,
-      KEYMASK_F1,   KEYMASK_F2,    KEYMASK_F3,     KEYMASK_F4,           KEYMASK_F5,
-      KEYMASK_F6,   KEYMASK_F7,    KEYMASK_F8,     KEYMASK_F9,           KEYMASK_F10,
-      KEYMASK_F11,
-  };
-  static constexpr KeyScanCodeArray<16> key3_keys{
-      KEY_HASH, KEY_COMMA, KEY_PERIOD, KEY_QUESTIONMARK, KEY_INTERNATIONAL1,
-      KEY_F1,   KEY_F2,    KEY_F3,     KEY_F4,           KEY_F5,
-      KEY_F6,   KEY_F7,    KEY_F8,     KEY_F9,           KEY_F10,
-      KEY_F11,
-  };
-
-  static constexpr MaskArray<16> key4_masks{
-      KEYMASK_F12,         KEYMASK_ESC,        KEYMASK_INSERT,       KEYMASK_DELETE,
-      KEYMASK_TILDE,       KEYMASK_BACKSPACE,  KEYMASK_TAB,          KEYMASK_CAPSLOCK,
-      KEYMASK_LEFTSHIFT,   KEYMASK_RIGHTSHIFT, KEYMASK_LEFTCONTROL,  KEYMASK_RIGHTALT,
-      KEYMASK_LEFTWINDOWS, KEYMASK_SPACE,      KEYMASK_RIGHTWINDOWS, KEYMASK_MENU,
-  };
-  static constexpr KeyScanCodeArray<16> key4_keys{
-      KEY_F12,         KEY_ESC,        KEY_INSERT,       KEY_DELETE,
-      KEY_TILDE,       KEY_BACKSPACE,  KEY_TAB,          KEY_CAPSLOCK,
-      KEY_LEFTSHIFT,   KEY_RIGHTSHIFT, KEY_LEFTCONTROL,  KEY_RIGHTALT,
-      KEY_LEFTWINDOWS, KEY_SPACE,      KEY_RIGHTWINDOWS, KEY_MENU,
-  };
-
-  static constexpr MaskArray<5> key5_masks{
-      KEYMASK_LEFTARROW, KEYMASK_DOWNARROW, KEYMASK_UPARROW, KEYMASK_RIGHTARROW, KEYMASK_ENTER,
-  };
-  static constexpr KeyScanCodeArray<5> key5_keys{
-      KEY_LEFTARROW, KEY_DOWNARROW, KEY_UPARROW, KEY_RIGHTARROW, KEY_ENTER,
-  };
-
-  u32 keys_held = 0;
-  constexpr u32 MAX_KEYS_HELD = 3;
-
-  KeyArray key{};
-
-  const auto check_masks = [&](const auto& masks, const auto& keys, u32 field) {
-    for (size_t i = 0; i < masks.size(); i++)
-    {
-      if ((field & masks[i]) == 0)
-        continue;
-
-      key[keys_held++] = keys[i];
-      if (keys_held >= MAX_KEYS_HELD)
-        return true;
-    }
-
-    return false;
-  };
-
-  if (check_masks(key0_masks, key0_keys, key_status.key0x))
-    return key;
-
-  if (check_masks(key1_masks, key1_keys, key_status.key1x))
-    return key;
-
-  if (check_masks(key2_masks, key2_keys, key_status.key2x))
-    return key;
-
-  if (check_masks(key3_masks, key3_keys, key_status.key3x))
-    return key;
-
-  if (check_masks(key4_masks, key4_keys, key_status.key4x))
-    return key;
-
-  if (check_masks(key5_masks, key5_keys, key_status.key5x))
-    return key;
-
-  return key;
+  // Report the first three held keys in scancode order.
+  KeyArray reported{};
+  std::size_t found = 0;
+  for (u32 index = 0; index < KEY_COUNT && found < MAX_REPORTED_KEYS; ++index)
+  {
+    if ((words[index / 16] >> (index % 16)) & 1)
+      reported[found++] = ScancodeForKeyIndex(index);
+  }
+  return reported;
 }
 }  // namespace SerialInterface

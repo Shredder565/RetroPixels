@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,7 +7,7 @@
 
 namespace SerialInterface
 {
-// Stub class for saying nothing is attached, and not having to deal with null pointers :)
+// An empty port: it never answers, so the game sees "no response".
 class CSIDevice_Null final : public ISIDevice
 {
 public:

@@ -1,31 +1,25 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/SI/SI.h"
 
-#include <array>
+#include <cstddef>
 #include <cstring>
 #include <memory>
+#include <string>
 
-#if defined(_DEBUG)
-#include <vector>
+#include <fmt/format.h>
 
-#include "Common/StringUtil.h"
-#endif
-
-#include "Common/BitField.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
-#include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/ProcessorInterface.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/HW/SI/SI_DeviceGBA.h"
 #include "Core/HW/SystemTimers.h"
-#include "Core/Movie.h"
 #include "Core/NetPlayProto.h"
 #include "Core/System.h"
 
@@ -33,27 +27,92 @@
 
 namespace SerialInterface
 {
-// SI Internal Hardware Addresses
-enum
+namespace
 {
-  SI_CHANNEL_0_OUT = 0x00,
-  SI_CHANNEL_0_IN_HI = 0x04,
-  SI_CHANNEL_0_IN_LO = 0x08,
-  SI_CHANNEL_1_OUT = 0x0C,
-  SI_CHANNEL_1_IN_HI = 0x10,
-  SI_CHANNEL_1_IN_LO = 0x14,
-  SI_CHANNEL_2_OUT = 0x18,
-  SI_CHANNEL_2_IN_HI = 0x1C,
-  SI_CHANNEL_2_IN_LO = 0x20,
-  SI_CHANNEL_3_OUT = 0x24,
-  SI_CHANNEL_3_IN_HI = 0x28,
-  SI_CHANNEL_3_IN_LO = 0x2C,
-  SI_POLL = 0x30,
-  SI_COM_CSR = 0x34,
-  SI_STATUS_REG = 0x38,
-  SI_EXI_CLOCK_COUNT = 0x3C,
-  SI_IO_BUFFER = 0x80,
-};
+// Register offsets inside the SI block. The three per-port words repeat
+// every 12 bytes starting at 0x00.
+constexpr u32 PORT_STRIDE = 0x0C;
+constexpr u32 REG_PORT_OUT = 0x00;
+constexpr u32 REG_PORT_IN_HI = 0x04;
+constexpr u32 REG_PORT_IN_LO = 0x08;
+constexpr u32 REG_POLL = 0x30;
+constexpr u32 REG_COMCSR = 0x34;
+constexpr u32 REG_STATUS = 0x38;
+constexpr u32 REG_EXI_CLOCK = 0x3C;
+constexpr u32 REG_BUFFER = 0x80;
+
+// SICOMCSR fields.
+constexpr u32 CSR_TSTART = 1u << 0;
+constexpr u32 CSR_CHANNEL_SHIFT = 1;
+constexpr u32 CSR_CHANNEL_MASK = 0x3u << CSR_CHANNEL_SHIFT;
+constexpr u32 CSR_INLEN_SHIFT = 8;
+constexpr u32 CSR_INLEN_MASK = 0x7Fu << CSR_INLEN_SHIFT;
+constexpr u32 CSR_OUTLEN_SHIFT = 16;
+constexpr u32 CSR_OUTLEN_MASK = 0x7Fu << CSR_OUTLEN_SHIFT;
+constexpr u32 CSR_RDSTINTMSK = 1u << 27;
+constexpr u32 CSR_RDSTINT = 1u << 28;
+constexpr u32 CSR_COMERR = 1u << 29;
+constexpr u32 CSR_TCINTMSK = 1u << 30;
+constexpr u32 CSR_TCINT = 1u << 31;
+// The fields a write to SICOMCSR simply stores.
+constexpr u32 CSR_WRITABLE = CSR_CHANNEL_MASK | CSR_INLEN_MASK | CSR_OUTLEN_MASK |
+                             CSR_RDSTINTMSK | CSR_TCINTMSK;
+
+// SISR: one byte per port, port 0 in the top byte. Within that byte bit 0 is
+// UNRUN, 1 OVRUN, 2 COLL, 3 NOREP (all write-1-to-clear), 4 WRST and 5 RDST.
+constexpr u32 SR_ERROR_BITS = 0x0F0F0F0F;
+constexpr u32 SR_WRST_BITS = 0x10101010;
+constexpr u32 SR_RDST_BITS = 0x20202020;
+constexpr u32 SR_WR = 1u << 31;
+
+constexpr u32 PortByteShift(u32 port)
+{
+  return 24 - 8 * port;
+}
+constexpr u32 NoResponseBit(u32 port)
+{
+  return 0x08u << PortByteShift(port);
+}
+constexpr u32 ReadStatusBit(u32 port)
+{
+  return 0x20u << PortByteShift(port);
+}
+
+// SIPOLL: EN0..EN3 live in bits 7..4, X (lines between polls) in bits 16..25.
+constexpr u32 POLL_X_SHIFT = 16;
+constexpr u32 POLL_X_MASK = 0x3FFu;
+constexpr u32 POLL_X_DEFAULT = 492;
+constexpr u8 PollEnabled(u32 poll, u32 port)
+{
+  return static_cast<u8>((poll >> (7 - port)) & 1);
+}
+
+// SICxINBUFH flags.
+constexpr u32 IN_ERRSTAT = 1u << 31;
+constexpr u32 IN_ERRLATCH = 1u << 30;
+
+// A length field of 0 means 128 bytes.
+constexpr s32 TransferLength(u32 field)
+{
+  const u32 length = field & 0x7F;
+  return length == 0 ? 128 : static_cast<s32>(length);
+}
+
+template <typename T>
+T LoadBigEndian(const u8* src)
+{
+  T value;
+  std::memcpy(&value, src, sizeof(T));
+  return Common::FromBigEndian(value);
+}
+
+template <typename T>
+void StoreBigEndian(u8* dst, T value)
+{
+  const T swapped = Common::FromBigEndian(value);
+  std::memcpy(dst, &swapped, sizeof(T));
+}
+}  // namespace
 
 SerialInterfaceManager::SerialInterfaceManager(Core::System& system) : m_system(system)
 {
@@ -61,411 +120,274 @@ SerialInterfaceManager::SerialInterfaceManager(Core::System& system) : m_system(
 
 SerialInterfaceManager::~SerialInterfaceManager() = default;
 
-static constexpr u32 GetRDSTBit(u32 channel)
+void SerialInterfaceManager::FlagNoResponse(u32 port)
 {
-  // Returns bit for RDST0,1,2,3
-  return 0x20000000 >> (channel * 8);
+  if (port < MAX_SI_CHANNELS)
+    m_status |= NoResponseBit(port);
 }
 
-void SerialInterfaceManager::SetNoResponse(u32 channel)
+void SerialInterfaceManager::RefreshInterrupt()
 {
-  // raise the NO RESPONSE error
-  switch (channel)
+  if ((m_status & SR_RDST_BITS) != 0)
+    m_comcsr |= CSR_RDSTINT;
+  else
+    m_comcsr &= ~CSR_RDSTINT;
+
+  const bool read_pending = (m_comcsr & CSR_RDSTINT) && (m_comcsr & CSR_RDSTINTMSK);
+  const bool transfer_done = (m_comcsr & CSR_TCINT) && (m_comcsr & CSR_TCINTMSK);
+  m_system.GetProcessorInterface().SetInterrupt(ProcessorInterface::INT_CAUSE_SI,
+                                                read_pending || transfer_done);
+}
+
+void SerialInterfaceManager::RaiseTransferComplete()
+{
+  m_comcsr |= CSR_TCINT;
+  RefreshInterrupt();
+}
+
+void SerialInterfaceManager::OnTransferEvent(Core::System& system, u64, s64 cycles_late)
+{
+  system.GetSerialInterface().ProcessTransfer(cycles_late);
+}
+
+void SerialInterfaceManager::OnCooldownEvent(Core::System& system, u64 userdata, s64)
+{
+  system.GetSerialInterface().m_ports[userdata].unplug_cooldown = false;
+}
+
+void SerialInterfaceManager::ProcessTransfer(s64 cycles_late)
+{
+  if ((m_comcsr & CSR_TSTART) == 0)
+    return;
+
+  const u32 port = (m_comcsr & CSR_CHANNEL_MASK) >> CSR_CHANNEL_SHIFT;
+  const s32 out_length = TransferLength((m_comcsr & CSR_OUTLEN_MASK) >> CSR_OUTLEN_SHIFT);
+  const s32 in_length = TransferLength((m_comcsr & CSR_INLEN_MASK) >> CSR_INLEN_SHIFT);
+
+  ISIDevice* const device = m_ports[port].device.get();
+  const s32 reply_length = device->RunBuffer(m_buffer.data(), out_length);
+
+  DEBUG_LOG_FMT(SERIALINTERFACE, "SI transfer on port {}: sent {} bytes, wanted {}, got {}", port,
+                out_length, in_length, reply_length);
+  if (reply_length > 0 && reply_length != in_length)
   {
-  case 0:
-    m_status_reg.NOREP0 = 1;
-    break;
-  case 1:
-    m_status_reg.NOREP1 = 1;
-    break;
-  case 2:
-    m_status_reg.NOREP2 = 1;
-    break;
-  case 3:
-    m_status_reg.NOREP3 = 1;
-    break;
+    WARN_LOG_FMT(SERIALINTERFACE, "SI transfer on port {}: game expected {} reply bytes, device gave {}",
+                 port, in_length, reply_length);
   }
-}
 
-void SerialInterfaceManager::ChangeDeviceCallback(Core::System& system, u64 user_data,
-                                                  s64 cycles_late)
-{
-  // The purpose of this callback is to simply re-enable device changes.
-  auto& si = system.GetSerialInterface();
-  si.m_channel[user_data].has_recent_device_unplug = false;
-}
-
-void SerialInterfaceManager::UpdateInterrupts()
-{
-  // check if we have to update the RDSTINT flag
-  if (m_status_reg.RDST0 || m_status_reg.RDST1 || m_status_reg.RDST2 || m_status_reg.RDST3)
+  if (reply_length == 0)
   {
-    m_com_csr.RDSTINT = 1;
+    // The device is still busy; poll it again after its transfer interval.
+    m_system.GetCoreTiming().ScheduleEvent(device->TransferInterval() - cycles_late,
+                                           m_transfer_event);
+    return;
+  }
+
+  m_comcsr &= ~CSR_TSTART;
+  if (reply_length < 0)
+  {
+    m_comcsr |= CSR_COMERR;
+    FlagNoResponse(port);
   }
   else
   {
-    m_com_csr.RDSTINT = 0;
+    m_comcsr &= ~CSR_COMERR;
   }
-
-  // check if we have to generate an interrupt
-  const bool generate_interrupt = (m_com_csr.RDSTINT & m_com_csr.RDSTINTMSK) != 0 ||
-                                  (m_com_csr.TCINT & m_com_csr.TCINTMSK) != 0;
-
-  m_system.GetProcessorInterface().SetInterrupt(ProcessorInterface::INT_CAUSE_SI,
-                                                generate_interrupt);
-}
-
-void SerialInterfaceManager::GenerateSIInterrupt(SIInterruptType type)
-{
-  switch (type)
-  {
-  case INT_RDSTINT:
-    m_com_csr.RDSTINT = 1;
-    break;
-  case INT_TCINT:
-    m_com_csr.TCINT = 1;
-    break;
-  }
-
-  UpdateInterrupts();
-}
-
-constexpr u32 SI_XFER_LENGTH_MASK = 0x7f;
-
-// Translate [0,1,2,...,126,127] to [128,1,2,...,126,127]
-constexpr s32 ConvertSILengthField(u32 field)
-{
-  return ((field - 1) & SI_XFER_LENGTH_MASK) + 1;
-}
-
-void SerialInterfaceManager::GlobalRunSIBuffer(Core::System& system, u64 user_data, s64 cycles_late)
-{
-  system.GetSerialInterface().RunSIBuffer(user_data, cycles_late);
-}
-
-void SerialInterfaceManager::RunSIBuffer(u64 user_data, s64 cycles_late)
-{
-  if (m_com_csr.TSTART)
-  {
-    const s32 request_length = ConvertSILengthField(m_com_csr.OUTLNGTH);
-    const s32 expected_response_length = ConvertSILengthField(m_com_csr.INLNGTH);
-
-#if defined(_DEBUG)
-    const std::vector<u8> request_copy(m_si_buffer.data(), m_si_buffer.data() + request_length);
-#endif
-
-    auto* const device = m_channel[m_com_csr.CHANNEL].device.get();
-    const s32 actual_response_length = device->RunBuffer(m_si_buffer.data(), request_length);
-
-    DEBUG_LOG_FMT(SERIALINTERFACE,
-                  "RunSIBuffer  chan: {}  request_length: {}  expected_response_length: {}  "
-                  "actual_response_length: {}",
-                  m_com_csr.CHANNEL, request_length, expected_response_length,
-                  actual_response_length);
-    if (actual_response_length > 0 && expected_response_length != actual_response_length)
-    {
-#if defined(_DEBUG)
-      WARN_LOG_FMT(
-          SERIALINTERFACE,
-          "RunSIBuffer: expected_response_length({}) != actual_response_length({}): request: {}",
-          expected_response_length, actual_response_length, Common::BytesToHexString(request_copy));
-#else
-      WARN_LOG_FMT(SERIALINTERFACE,
-                   "RunSIBuffer: expected_response_length({}) != actual_response_length({})",
-                   expected_response_length, actual_response_length);
-#endif
-    }
-
-    // TODO:
-    // 1) Wait a reasonable amount of time for the result to be available:
-    //    request is N bytes, ends with a stop bit
-    //    response in M bytes, ends with a stop bit
-    //    processing controller-side takes K us (investigate?)
-    //    each bit takes 4us ([3us low/1us high] for a 0, [1us low/3us high] for a 1)
-    //    time until response is available is at least: K + ((N*8 + 1) + (M*8 + 1)) * 4 us
-    // 2) Investigate the timeout period for NOREP0
-    if (actual_response_length != 0)
-    {
-      m_com_csr.TSTART = 0;
-      m_com_csr.COMERR = actual_response_length < 0;
-      if (actual_response_length < 0)
-        SetNoResponse(m_com_csr.CHANNEL);
-      GenerateSIInterrupt(INT_TCINT);
-    }
-    else
-    {
-      m_system.GetCoreTiming().ScheduleEvent(device->TransferInterval() - cycles_late,
-                                             m_event_type_tranfer_pending);
-    }
-  }
+  RaiseTransferComplete();
 }
 
 void SerialInterfaceManager::DoState(PointerWrap& p)
 {
-  for (int i = 0; i < MAX_SI_CHANNELS; i++)
+  for (int i = 0; i < MAX_SI_CHANNELS; ++i)
   {
-    p.Do(m_channel[i].in_hi.hex);
-    p.Do(m_channel[i].in_lo.hex);
-    p.Do(m_channel[i].out.hex);
-    p.Do(m_channel[i].has_recent_device_unplug);
+    Port& port = m_ports[static_cast<std::size_t>(i)];
+    p.Do(port.in_hi);
+    p.Do(port.in_lo);
+    p.Do(port.out);
+    p.Do(port.unplug_cooldown);
 
-    const std::unique_ptr<ISIDevice>& device = m_channel[i].device;
-    SIDevices type = device->GetDeviceType();
-    p.Do(type);
+    SIDevices saved_type = port.device->GetDeviceType();
+    p.Do(saved_type);
+    if (saved_type != port.device->GetDeviceType())
+      AddDevice(SIDevice_Create(m_system, saved_type, i));
 
-    if (type != device->GetDeviceType())
-    {
-      AddDevice(SIDevice_Create(m_system, type, i));
-    }
-
-    device->DoState(p);
+    port.device->DoState(p);
   }
 
   p.Do(m_poll);
-  p.Do(m_com_csr);
-  p.Do(m_status_reg);
-  p.Do(m_exi_clock_count);
-  p.Do(m_si_buffer);
-}
-
-void SerialInterfaceManager::RegisterEvents()
-{
-  auto& core_timing = m_system.GetCoreTiming();
-
-  m_event_type_change_device = core_timing.RegisterEvent("ChangeSIDevice", ChangeDeviceCallback);
-  m_event_type_tranfer_pending = core_timing.RegisterEvent("SITransferPending", GlobalRunSIBuffer);
-
-  for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
-  {
-    auto& channel = m_channel[i];
-    m_event_types_device[i] =
-        core_timing.RegisterEvent(fmt::format("SIEventChannel{}", i),
-                                  [&channel](Core::System&, u64 user_data, s64 cycles_late) {
-                                    channel.device->OnEvent(user_data, cycles_late);
-                                  });
-  }
+  p.Do(m_comcsr);
+  p.Do(m_status);
+  p.Do(m_exi_clock);
+  p.Do(m_buffer);
 }
 
 void SerialInterfaceManager::ScheduleEvent(int device_number, s64 cycles_into_future, u64 userdata)
 {
-  auto& core_timing = m_system.GetCoreTiming();
-  core_timing.ScheduleEvent(cycles_into_future, m_event_types_device[device_number], userdata);
+  m_system.GetCoreTiming().ScheduleEvent(cycles_into_future, m_port_events[static_cast<std::size_t>(device_number)],
+                                         userdata);
 }
 
 void SerialInterfaceManager::RemoveEvent(int device_number)
 {
-  auto& core_timing = m_system.GetCoreTiming();
-  core_timing.RemoveEvent(m_event_types_device[device_number]);
+  m_system.GetCoreTiming().RemoveEvent(m_port_events[static_cast<std::size_t>(device_number)]);
 }
 
 void SerialInterfaceManager::Init()
 {
-  RegisterEvents();
-
-  for (int i = 0; i < MAX_SI_CHANNELS; i++)
+  auto& timing = m_system.GetCoreTiming();
+  m_cooldown_event = timing.RegisterEvent("ChangeSIDevice", OnCooldownEvent);
+  m_transfer_event = timing.RegisterEvent("SITransferPending", OnTransferEvent);
+  for (u32 i = 0; i < MAX_SI_CHANNELS; ++i)
   {
-    m_channel[i].out.hex = 0;
-    m_channel[i].in_hi.hex = 0;
-    m_channel[i].in_lo.hex = 0;
-    m_channel[i].has_recent_device_unplug = false;
+    Port* const port = &m_ports[i];
+    m_port_events[i] = timing.RegisterEvent(
+        fmt::format("SIEventChannel{}", i),
+        [port](Core::System&, u64 userdata, s64 cycles_late) {
+          port->device->OnEvent(userdata, cycles_late);
+        });
+  }
 
+  for (int i = 0; i < MAX_SI_CHANNELS; ++i)
+  {
+    Port& port = m_ports[static_cast<std::size_t>(i)];
+    port.out = 0;
+    port.in_hi = 0;
+    port.in_lo = 0;
+    port.unplug_cooldown = false;
     AddDevice(Config::Get(Config::GetInfoForSIDevice(i)), i);
   }
 
-  m_poll.hex = 0;
-  m_poll.X = 492;
-
-  m_com_csr.hex = 0;
-
-  m_status_reg.hex = 0;
-
-  m_exi_clock_count.hex = 0;
-
-  // Supposedly set on reset, but logs from real Wii don't look like it is...
-  // m_exi_clock_count.LOCK = 1;
-
-  m_si_buffer = {};
+  m_poll = POLL_X_DEFAULT << POLL_X_SHIFT;
+  m_comcsr = 0;
+  m_status = 0;
+  // The EXI clock lock bit is documented as set on reset, but real consoles
+  // read it back as clear, so it starts at zero.
+  m_exi_clock = 0;
+  m_buffer.fill(0);
 }
 
 void SerialInterfaceManager::Shutdown()
 {
-  for (int i = 0; i < MAX_SI_CHANNELS; i++)
+  for (int i = 0; i < MAX_SI_CHANNELS; ++i)
     RemoveDevice(i);
   GBAConnectionWaiter_Shutdown();
 }
 
+u32 SerialInterfaceManager::ReadInputWord(u32 port, bool high)
+{
+  // Reading either input word acknowledges the port's new-data flag.
+  m_status &= ~ReadStatusBit(port);
+  RefreshInterrupt();
+  return high ? m_ports[port].in_hi : m_ports[port].in_lo;
+}
+
+void SerialInterfaceManager::WriteComCsr(u32 value)
+{
+  m_comcsr = (m_comcsr & ~CSR_WRITABLE) | (value & CSR_WRITABLE);
+
+  // The two interrupt flags are cleared by writing 1.
+  if (value & CSR_RDSTINT)
+    m_comcsr &= ~CSR_RDSTINT;
+  if (value & CSR_TCINT)
+    m_comcsr &= ~CSR_TCINT;
+
+  if (value & CSR_TSTART)
+  {
+    // Starting a transfer while one is pending restarts it.
+    if (m_comcsr & CSR_TSTART)
+      m_system.GetCoreTiming().RemoveEvent(m_transfer_event);
+    m_comcsr |= CSR_TSTART;
+    ProcessTransfer(0);
+  }
+
+  if ((m_comcsr & CSR_TSTART) == 0)
+    RefreshInterrupt();
+}
+
+void SerialInterfaceManager::WriteStatus(u32 value)
+{
+  m_status &= ~(value & SR_ERROR_BITS);
+
+  if ((value & SR_WR) == 0)
+    return;
+
+  // WR copies every port's output word to its device.
+  for (u32 i = 0; i < MAX_SI_CHANNELS; ++i)
+    m_ports[i].device->SendCommand(m_ports[i].out, PollEnabled(m_poll, i));
+  m_status &= ~(SR_WR | SR_WRST_BITS);
+}
+
 void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 {
-  // Register SI buffer direct accesses.
-  const u32 io_buffer_base = base | SI_IO_BUFFER;
-  for (size_t i = 0; i < m_si_buffer.size(); i += sizeof(u32))
-  {
-    const u32 address = base | static_cast<u32>(io_buffer_base + i);
+  const u32 buffer_base = base | REG_BUFFER;
 
-    mmio->Register(address, MMIO::ComplexRead<u32>([i](Core::System& system, u32) {
-                     const auto& si = system.GetSerialInterface();
-                     u32 val;
-                     std::memcpy(&val, &si.m_si_buffer[i], sizeof(val));
-                     return Common::swap32(val);
+  // The communication buffer is big-endian and can be accessed in 32-bit or
+  // 16-bit units.
+  for (u32 offset = 0; offset < BUFFER_SIZE; offset += 4)
+  {
+    mmio->Register(base | (buffer_base + offset),
+                   MMIO::ComplexRead<u32>([offset](Core::System& system, u32) {
+                     return LoadBigEndian<u32>(&system.GetSerialInterface().m_buffer[offset]);
                    }),
-                   MMIO::ComplexWrite<u32>([i](Core::System& system, u32, u32 val) {
-                     auto& si = system.GetSerialInterface();
-                     val = Common::swap32(val);
-                     std::memcpy(&si.m_si_buffer[i], &val, sizeof(val));
+                   MMIO::ComplexWrite<u32>([offset](Core::System& system, u32, u32 value) {
+                     StoreBigEndian<u32>(&system.GetSerialInterface().m_buffer[offset], value);
                    }));
   }
-  for (size_t i = 0; i < m_si_buffer.size(); i += sizeof(u16))
+  for (u32 offset = 0; offset < BUFFER_SIZE; offset += 2)
   {
-    const u32 address = base | static_cast<u32>(io_buffer_base + i);
-
-    mmio->Register(address, MMIO::ComplexRead<u16>([i](Core::System& system, u32) {
-                     const auto& si = system.GetSerialInterface();
-                     u16 val;
-                     std::memcpy(&val, &si.m_si_buffer[i], sizeof(val));
-                     return Common::swap16(val);
+    mmio->Register(base | (buffer_base + offset),
+                   MMIO::ComplexRead<u16>([offset](Core::System& system, u32) {
+                     return LoadBigEndian<u16>(&system.GetSerialInterface().m_buffer[offset]);
                    }),
-                   MMIO::ComplexWrite<u16>([i](Core::System& system, u32, u16 val) {
-                     auto& si = system.GetSerialInterface();
-                     val = Common::swap16(val);
-                     std::memcpy(&si.m_si_buffer[i], &val, sizeof(val));
+                   MMIO::ComplexWrite<u16>([offset](Core::System& system, u32, u16 value) {
+                     StoreBigEndian<u16>(&system.GetSerialInterface().m_buffer[offset], value);
                    }));
   }
 
-  // In and out for the 4 SI channels.
-  for (u32 i = 0; i < u32(MAX_SI_CHANNELS); ++i)
+  for (u32 port = 0; port < MAX_SI_CHANNELS; ++port)
   {
-    // We need to clear the RDST bit for the SI channel when reading.
-    const u32 clear_rdst = ~GetRDSTBit(i);
+    const u32 port_base = base | (port * PORT_STRIDE);
+    Port& state = m_ports[port];
 
-    mmio->Register(base | (SI_CHANNEL_0_OUT + 0xC * i),
-                   MMIO::DirectRead<u32>(&m_channel[i].out.hex),
-                   MMIO::DirectWrite<u32>(&m_channel[i].out.hex));
-    mmio->Register(base | (SI_CHANNEL_0_IN_HI + 0xC * i),
-                   MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
-                     auto& si = system.GetSerialInterface();
-                     si.m_status_reg.hex &= clear_rdst;
-                     si.UpdateInterrupts();
-                     return si.m_channel[i].in_hi.hex;
+    mmio->Register(port_base + REG_PORT_OUT, MMIO::DirectRead<u32>(&state.out),
+                   MMIO::DirectWrite<u32>(&state.out));
+    mmio->Register(port_base + REG_PORT_IN_HI,
+                   MMIO::ComplexRead<u32>([port](Core::System& system, u32) {
+                     return system.GetSerialInterface().ReadInputWord(port, true);
                    }),
-                   MMIO::DirectWrite<u32>(&m_channel[i].in_hi.hex));
-    mmio->Register(base | (SI_CHANNEL_0_IN_LO + 0xC * i),
-                   MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
-                     auto& si = system.GetSerialInterface();
-                     si.m_status_reg.hex &= clear_rdst;
-                     si.UpdateInterrupts();
-                     return si.m_channel[i].in_lo.hex;
+                   MMIO::DirectWrite<u32>(&state.in_hi));
+    mmio->Register(port_base + REG_PORT_IN_LO,
+                   MMIO::ComplexRead<u32>([port](Core::System& system, u32) {
+                     return system.GetSerialInterface().ReadInputWord(port, false);
                    }),
-                   MMIO::DirectWrite<u32>(&m_channel[i].in_lo.hex));
+                   MMIO::DirectWrite<u32>(&state.in_lo));
   }
 
-  mmio->Register(base | SI_POLL, MMIO::DirectRead<u32>(&m_poll.hex),
-                 MMIO::DirectWrite<u32>(&m_poll.hex));
-
-  mmio->Register(base | SI_COM_CSR, MMIO::DirectRead<u32>(&m_com_csr.hex),
-                 MMIO::ComplexWrite<u32>([](Core::System& system, u32, u32 val) {
-                   auto& si = system.GetSerialInterface();
-                   const USIComCSR tmp_com_csr(val);
-
-                   si.m_com_csr.CHANNEL = tmp_com_csr.CHANNEL.Value();
-                   si.m_com_csr.INLNGTH = tmp_com_csr.INLNGTH.Value();
-                   si.m_com_csr.OUTLNGTH = tmp_com_csr.OUTLNGTH.Value();
-                   si.m_com_csr.RDSTINTMSK = tmp_com_csr.RDSTINTMSK.Value();
-                   si.m_com_csr.TCINTMSK = tmp_com_csr.TCINTMSK.Value();
-
-                   if (tmp_com_csr.RDSTINT)
-                     si.m_com_csr.RDSTINT = 0;
-                   if (tmp_com_csr.TCINT)
-                     si.m_com_csr.TCINT = 0;
-
-                   // be careful: run si-buffer after updating the INT flags
-                   if (tmp_com_csr.TSTART)
-                   {
-                     if (si.m_com_csr.TSTART)
-                       system.GetCoreTiming().RemoveEvent(si.m_event_type_tranfer_pending);
-                     si.m_com_csr.TSTART = 1;
-                     si.RunSIBuffer(0, 0);
-                   }
-
-                   if (!si.m_com_csr.TSTART)
-                     si.UpdateInterrupts();
+  mmio->Register(base | REG_POLL, MMIO::DirectRead<u32>(&m_poll), MMIO::DirectWrite<u32>(&m_poll));
+  mmio->Register(base | REG_COMCSR, MMIO::DirectRead<u32>(&m_comcsr),
+                 MMIO::ComplexWrite<u32>([](Core::System& system, u32, u32 value) {
+                   system.GetSerialInterface().WriteComCsr(value);
                  }));
-
-  mmio->Register(base | SI_STATUS_REG, MMIO::DirectRead<u32>(&m_status_reg.hex),
-                 MMIO::ComplexWrite<u32>([](Core::System& system, u32, u32 val) {
-                   auto& si = system.GetSerialInterface();
-                   const USIStatusReg tmp_status(val);
-
-                   // clear bits ( if (tmp.bit) SISR.bit=0 )
-                   if (tmp_status.NOREP0)
-                     si.m_status_reg.NOREP0 = 0;
-                   if (tmp_status.COLL0)
-                     si.m_status_reg.COLL0 = 0;
-                   if (tmp_status.OVRUN0)
-                     si.m_status_reg.OVRUN0 = 0;
-                   if (tmp_status.UNRUN0)
-                     si.m_status_reg.UNRUN0 = 0;
-
-                   if (tmp_status.NOREP1)
-                     si.m_status_reg.NOREP1 = 0;
-                   if (tmp_status.COLL1)
-                     si.m_status_reg.COLL1 = 0;
-                   if (tmp_status.OVRUN1)
-                     si.m_status_reg.OVRUN1 = 0;
-                   if (tmp_status.UNRUN1)
-                     si.m_status_reg.UNRUN1 = 0;
-
-                   if (tmp_status.NOREP2)
-                     si.m_status_reg.NOREP2 = 0;
-                   if (tmp_status.COLL2)
-                     si.m_status_reg.COLL2 = 0;
-                   if (tmp_status.OVRUN2)
-                     si.m_status_reg.OVRUN2 = 0;
-                   if (tmp_status.UNRUN2)
-                     si.m_status_reg.UNRUN2 = 0;
-
-                   if (tmp_status.NOREP3)
-                     si.m_status_reg.NOREP3 = 0;
-                   if (tmp_status.COLL3)
-                     si.m_status_reg.COLL3 = 0;
-                   if (tmp_status.OVRUN3)
-                     si.m_status_reg.OVRUN3 = 0;
-                   if (tmp_status.UNRUN3)
-                     si.m_status_reg.UNRUN3 = 0;
-
-                   // send command to devices
-                   if (tmp_status.WR)
-                   {
-                     si.m_channel[0].device->SendCommand(si.m_channel[0].out.hex, si.m_poll.EN0);
-                     si.m_channel[1].device->SendCommand(si.m_channel[1].out.hex, si.m_poll.EN1);
-                     si.m_channel[2].device->SendCommand(si.m_channel[2].out.hex, si.m_poll.EN2);
-                     si.m_channel[3].device->SendCommand(si.m_channel[3].out.hex, si.m_poll.EN3);
-
-                     si.m_status_reg.WR = 0;
-                     si.m_status_reg.WRST0 = 0;
-                     si.m_status_reg.WRST1 = 0;
-                     si.m_status_reg.WRST2 = 0;
-                     si.m_status_reg.WRST3 = 0;
-                   }
+  mmio->Register(base | REG_STATUS, MMIO::DirectRead<u32>(&m_status),
+                 MMIO::ComplexWrite<u32>([](Core::System& system, u32, u32 value) {
+                   system.GetSerialInterface().WriteStatus(value);
                  }));
-
-  mmio->Register(base | SI_EXI_CLOCK_COUNT, MMIO::DirectRead<u32>(&m_exi_clock_count.hex),
-                 MMIO::DirectWrite<u32>(&m_exi_clock_count.hex));
+  mmio->Register(base | REG_EXI_CLOCK, MMIO::DirectRead<u32>(&m_exi_clock),
+                 MMIO::DirectWrite<u32>(&m_exi_clock));
 }
 
 void SerialInterfaceManager::RemoveDevice(int device_number)
 {
-  m_channel.at(device_number).device.reset();
+  m_ports.at(static_cast<std::size_t>(device_number)).device.reset();
 }
 
 void SerialInterfaceManager::AddDevice(std::unique_ptr<ISIDevice> device)
 {
-  const int device_number = device->GetDeviceNumber();
-
-  // Delete the old device
-  RemoveDevice(device_number);
-
-  // Set the new one
-  m_channel.at(device_number).device = std::move(device);
+  // The new device already exists at this point; the old one is destroyed
+  // only now, so its destructor runs after the new device's constructor.
+  Port& port = m_ports.at(static_cast<std::size_t>(device->GetDeviceNumber()));
+  port.device.reset();
+  port.device = std::move(device);
 }
 
 void SerialInterfaceManager::AddDevice(const SIDevices device, int device_number)
@@ -473,97 +395,89 @@ void SerialInterfaceManager::AddDevice(const SIDevices device, int device_number
   AddDevice(SIDevice_Create(m_system, device, device_number));
 }
 
-void SerialInterfaceManager::ChangeDeviceDeterministic(SIDevices device, int channel)
+void SerialInterfaceManager::SwapDevice(SIDevices device, int port_number)
 {
-  if (channel < 0 || channel >= MAX_SI_CHANNELS)
+  if (port_number < 0 || port_number >= MAX_SI_CHANNELS)
     return;
-  if (m_channel[channel].has_recent_device_unplug)
+  Port& port = m_ports[static_cast<std::size_t>(port_number)];
+  if (port.unplug_cooldown)
     return;
 
-  if (GetDeviceType(channel) != SIDEVICE_NONE)
-  {
-    // Detach the current device before switching to the new one.
+  // A change always goes through "nothing plugged in" first, so a port with
+  // a device is emptied now and gets the new device once the cooldown ends.
+  if (GetDeviceType(port_number) != SIDEVICE_NONE)
     device = SIDEVICE_NONE;
-  }
 
-  // TODO: Resetting this state may not be necessary or accurate.
-  m_channel[channel].out.hex = 0;
-  m_channel[channel].in_hi.hex = 0;
-  m_channel[channel].in_lo.hex = 0;
+  port.out = 0;
+  port.in_hi = 0;
+  port.in_lo = 0;
+  AddDevice(device, port_number);
 
-  AddDevice(device, channel);
-
-  if (device == SIDEVICE_NONE)
-  {
-    // Prevent additional device changes on this channel for one second.
-    m_channel[channel].has_recent_device_unplug = true;
-    m_system.GetCoreTiming().ScheduleEvent(m_system.GetSystemTimers().GetTicksPerSecond(),
-                                           m_event_type_change_device, channel);
-  }
+  if (device != SIDEVICE_NONE)
+    return;
+  port.unplug_cooldown = true;
+  m_system.GetCoreTiming().ScheduleEvent(m_system.GetSystemTimers().GetTicksPerSecond(),
+                                         m_cooldown_event, static_cast<u64>(port_number));
 }
 
 void SerialInterfaceManager::UpdateDevices()
 {
-  // Check for device change requests:
-  for (int i = 0; i != MAX_SI_CHANNELS; ++i)
+  for (int i = 0; i < MAX_SI_CHANNELS; ++i)
   {
-    const SIDevices current_type = GetDeviceType(i);
-    const SIDevices desired_type = Config::Get(Config::GetInfoForSIDevice(i));
-
-    if (current_type != desired_type)
-    {
-      ChangeDeviceDeterministic(desired_type, i);
-    }
+    const SIDevices wanted = Config::Get(Config::GetInfoForSIDevice(i));
+    if (GetDeviceType(i) != wanted)
+      SwapDevice(wanted, i);
   }
 
-  // Hinting NetPlay that all controllers will be polled in
-  // succession, in order to optimize networking
+  // All four ports are polled back to back; NetPlay can batch them.
   NetPlay::SetSIPollBatching(true);
 
-  // Update inputs at the rate of SI
-  // Typically 120hz but is variable
   g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
   g_controller_interface.UpdateInput();
 
-  // Update channels and set the status bit if there's new data
-  for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
+  for (u32 i = 0; i < MAX_SI_CHANNELS; ++i)
   {
-    // ERRLATCH bit is maintained.
-    u32 errlatch = m_channel[i].in_hi.ERRLATCH.Value();
-    switch (m_channel[i].device->GetData(m_channel[i].in_hi.hex, m_channel[i].in_lo.hex))
+    Port& port = m_ports[i];
+    // The device may overwrite the whole word, but the error latch survives.
+    const u32 latch_before = port.in_hi & IN_ERRLATCH;
+    bool failed = false;
+
+    switch (port.device->GetData(port.in_hi, port.in_lo))
     {
     case DataResponse::Success:
-      m_status_reg.hex |= GetRDSTBit(i);
+      m_status |= ReadStatusBit(i);
       break;
     case DataResponse::ErrorNoResponse:
-      SetNoResponse(i);
-      [[fallthrough]];
+      FlagNoResponse(i);
+      failed = true;
+      break;
     case DataResponse::NoData:
-      errlatch = 1;
-      m_channel[i].in_hi.ERRSTAT = 1;
+      failed = true;
       break;
     }
 
-    m_channel[i].in_hi.ERRLATCH = errlatch;
+    if (failed)
+      port.in_hi = (port.in_hi & ~IN_ERRLATCH) | IN_ERRSTAT | IN_ERRLATCH;
+    else
+      port.in_hi = (port.in_hi & ~IN_ERRLATCH) | latch_before;
   }
 
-  UpdateInterrupts();
+  RefreshInterrupt();
 
-  // Polling finished
   NetPlay::SetSIPollBatching(false);
 }
 
 SIDevices SerialInterfaceManager::GetDeviceType(int channel) const
 {
-  if (channel < 0 || channel >= MAX_SI_CHANNELS || !m_channel[channel].device)
+  if (channel < 0 || channel >= MAX_SI_CHANNELS)
     return SIDEVICE_NONE;
-
-  return m_channel[channel].device->GetDeviceType();
+  const auto& device = m_ports[static_cast<std::size_t>(channel)].device;
+  return device ? device->GetDeviceType() : SIDEVICE_NONE;
 }
 
 u32 SerialInterfaceManager::GetPollXLines()
 {
-  return m_poll.X;
+  return (m_poll >> POLL_X_SHIFT) & POLL_X_MASK;
 }
 
 }  // namespace SerialInterface

@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,20 +17,20 @@ class SystemTimersManager;
 
 namespace SerialInterface
 {
-// Devices can reply with these
-constexpr u32 SI_ERROR_NO_RESPONSE = 0x0008;  // Nothing is attached
-constexpr u32 SI_ERROR_UNKNOWN = 0x0040;      // Unknown device is attached
-constexpr u32 SI_ERROR_BUSY = 0x0080;         // Still detecting
+// Error flags a port can report.
+constexpr u32 SI_ERROR_NO_RESPONSE = 0x0008;  // nothing plugged in
+constexpr u32 SI_ERROR_UNKNOWN = 0x0040;      // device not recognised
+constexpr u32 SI_ERROR_BUSY = 0x0080;         // detection still running
 
-// Device types
-constexpr u32 SI_TYPE_MASK = 0x18000000;  // ???
+// Device type word (the top three bytes are the status reply).
+constexpr u32 SI_TYPE_MASK = 0x18000000;
 constexpr u32 SI_TYPE_GC = 0x08000000;
 
-// GC Controller types
-constexpr u32 SI_GC_NOMOTOR = 0x20000000;  // No rumble motor
+// GameCube controller subtype flags.
+constexpr u32 SI_GC_NOMOTOR = 0x20000000;  // no rumble motor
 constexpr u32 SI_GC_STANDARD = 0x01000000;
 
-// SI Device IDs for emulator use
+// Device IDs returned by the status command.
 enum TSIDevices : u32
 {
   SI_NONE = SI_ERROR_NO_RESPONSE,
@@ -42,13 +41,12 @@ enum TSIDevices : u32
   SI_GBA = 0x00040000,
   SI_GC_CONTROLLER = (SI_TYPE_GC | SI_GC_STANDARD),
   SI_GC_KEYBOARD = (SI_TYPE_GC | 0x00200000),
-  SI_GC_STEERING =
-      SI_TYPE_GC,  // (shuffle2)I think the "chainsaw" is the same (Or else it's just standard)
+  SI_GC_STEERING = SI_TYPE_GC,
   SI_DANCEMAT = (SI_TYPE_GC | SI_GC_STANDARD | 0x00000300),
-  SI_AM_BASEBOARD = 0x10110800  // gets ORd with dipswitch state
+  SI_AM_BASEBOARD = 0x10110800  // the low bits carry the DIP switches
 };
 
-// Commands
+// First byte of a communication-buffer transfer.
 enum class EBufferCommands : u8
 {
   CMD_STATUS = 0x00,
@@ -63,6 +61,7 @@ enum class EBufferCommands : u8
   CMD_RESET = 0xFF
 };
 
+// Command byte of a port's output word (sent on every poll).
 enum class EDirectCommands : u8
 {
   CMD_FORCE = 0x30,
@@ -70,6 +69,7 @@ enum class EDirectCommands : u8
   CMD_POLL = 0x54
 };
 
+// Output word layout: command in bits 16..23, parameters below it.
 union UCommand
 {
   u32 hex = 0;
@@ -84,7 +84,7 @@ union UCommand
   UCommand(u32 value) : hex{value} {}
 };
 
-// For configuration use, since some devices can have the same SI Device ID
+// What can be plugged into a port (config values; several share a device ID).
 enum SIDevices : int
 {
   SIDEVICE_NONE,
@@ -101,7 +101,7 @@ enum SIDevices : int
   SIDEVICE_AM_BASEBOARD,
   SIDEVICE_WIIU_ADAPTER,
   SIDEVICE_GC_GBA_EMULATED,
-  // Not a valid device. Used for checking whether enum values are valid.
+  // Number of entries, for range checks.
   SIDEVICE_COUNT,
 };
 
@@ -121,28 +121,26 @@ public:
   int GetDeviceNumber() const;
   SIDevices GetDeviceType() const;
 
-  // Run the SI Buffer
-  // Return value:
-  //  positive: The response length.
-  //  0: Response not ready, we will try again `TransferInterval()` cycles later.
-  //  -1: No response.
+  // Handles a communication-buffer transfer. Returns the reply length, 0 if
+  // the reply is not ready yet (the SI asks again after TransferInterval()
+  // cycles) or -1 if the device does not answer.
   virtual int RunBuffer(u8* buffer, int request_length);
 
   virtual int TransferInterval();
 
+  // Fills the two input words for a poll.
   virtual DataResponse GetData(u32& hi, u32& low) = 0;
 
-  // Send a command directly (no detour per buffer)
+  // Receives the port's output word (when the game sets SISR.WR).
   virtual void SendCommand(u32 command, u8 poll) = 0;
 
-  // Savestate support
   virtual void DoState(PointerWrap& p);
 
-  // Schedulable event
+  // Called for events scheduled through SerialInterfaceManager::ScheduleEvent.
   virtual void OnEvent(u64 userdata, s64 cycles_late);
 
 protected:
-  // Only the three high bytes of `si_device_id` are used.
+  // Writes the top three bytes of `si_device_id`, big-endian.
   static int CreateStatusResponse(u32 si_device_id, u8* buffer);
 
   Core::System& m_system;

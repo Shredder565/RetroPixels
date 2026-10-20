@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 
 namespace SerialInterface
 {
+// The GameCube steering wheel with pedals and force feedback.
 class CSIDevice_GCSteeringWheel final : public CSIDevice_GCController
 {
 public:
@@ -15,12 +15,5 @@ public:
   int RunBuffer(u8* buffer, int request_length) override;
   DataResponse GetData(u32& hi, u32& low) override;
   void SendCommand(u32 command, u8 poll) override;
-
-private:
-  enum class ForceCommandType : u8
-  {
-    MotorOn = 0x03,
-    MotorOff = 0x02,
-  };
 };
 }  // namespace SerialInterface

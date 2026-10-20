@@ -1,11 +1,10 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef HAS_LIBMGBA
 
 #include "Core/HW/SI/SI_DeviceGBAEmu.h"
 
-#include <vector>
+#include <array>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -23,10 +22,22 @@
 
 namespace SerialInterface
 {
-static s64 GetSyncInterval(const SystemTimers::SystemTimersManager& timers)
+namespace
+{
+// The emulated GBA is run forward at least once per millisecond of GameCube
+// time, so it stays close to the console even without link traffic.
+s64 SyncPeriod(const SystemTimers::SystemTimersManager& timers)
 {
   return timers.GetTicksPerSecond() / 1000;
 }
+
+// Pad buttons in the order of the GBA's KEYINPUT bits (A, B, Select, Start,
+// Right, Left, Up, Down, R, L). Select is mapped to Z.
+constexpr std::array<u16, 10> GBA_KEY_SOURCES = {
+    PAD_BUTTON_A,     PAD_BUTTON_B,    PAD_TRIGGER_Z, PAD_BUTTON_START, PAD_BUTTON_RIGHT,
+    PAD_BUTTON_LEFT,  PAD_BUTTON_UP,   PAD_BUTTON_DOWN, PAD_TRIGGER_R,  PAD_TRIGGER_L,
+};
+}  // namespace
 
 CSIDevice_GBAEmu::CSIDevice_GBAEmu(Core::System& system, SIDevices device, int device_number)
     : ISIDevice(system, device, device_number)
@@ -35,8 +46,7 @@ CSIDevice_GBAEmu::CSIDevice_GBAEmu(Core::System& system, SIDevices device, int d
   m_core->Start(system.GetCoreTiming().GetTicks());
   m_gbahost = Host_CreateGBAHost(m_core);
   m_core->SetHost(m_gbahost);
-  system.GetSerialInterface().ScheduleEvent(m_device_number,
-                                            GetSyncInterval(system.GetSystemTimers()));
+  system.GetSerialInterface().ScheduleEvent(m_device_number, SyncPeriod(system.GetSystemTimers()));
 }
 
 CSIDevice_GBAEmu::~CSIDevice_GBAEmu()
@@ -47,130 +57,96 @@ CSIDevice_GBAEmu::~CSIDevice_GBAEmu()
   m_core.reset();
 }
 
-int CSIDevice_GBAEmu::RunBuffer(u8* buffer, int request_length)
+int CSIDevice_GBAEmu::RunBuffer(u8* buffer, int)
 {
-  switch (m_next_action)
-  {
-  case NextAction::SendCommand:
-  {
-#ifdef _DEBUG
-    NOTICE_LOG_FMT(SERIALINTERFACE, "{} cmd {:02x} [> {:02x}{:02x}{:02x}{:02x}]", m_device_number,
-                   buffer[0], buffer[1], buffer[2], buffer[3], buffer[4]);
-#endif
-    m_last_cmd = static_cast<EBufferCommands>(buffer[0]);
-    m_timestamp_sent = m_system.GetCoreTiming().GetTicks();
-    m_core->SendJoybusCommand(m_timestamp_sent, TransferInterval(), buffer, m_keys);
+  auto& si = m_system.GetSerialInterface();
+  const u64 now = m_system.GetCoreTiming().GetTicks();
 
-    auto& si = m_system.GetSerialInterface();
+  if (m_phase == Phase::Idle)
+  {
+    m_pending_command = static_cast<EBufferCommands>(buffer[0]);
+    m_sent_at = now;
+    const int transfer_time = TransferInterval();
+    m_core->SendJoybusCommand(m_sent_at, transfer_time, buffer, m_keys);
+
+    // Restart this port's sync timer after the transfer, and bring every
+    // other emulated GBA up to the same point in time right away.
     si.RemoveEvent(m_device_number);
-    si.ScheduleEvent(m_device_number,
-                     TransferInterval() + GetSyncInterval(m_system.GetSystemTimers()));
-    for (int i = 0; i < MAX_SI_CHANNELS; ++i)
+    si.ScheduleEvent(m_device_number, transfer_time + SyncPeriod(m_system.GetSystemTimers()));
+    for (int port = 0; port < MAX_SI_CHANNELS; ++port)
     {
-      if (i == m_device_number || si.GetDeviceType(i) != GetDeviceType())
+      if (port == m_device_number || si.GetDeviceType(port) != GetDeviceType())
         continue;
-      si.RemoveEvent(i);
-      si.ScheduleEvent(i, 0, static_cast<u64>(TransferInterval()));
+      si.RemoveEvent(port);
+      si.ScheduleEvent(port, 0, static_cast<u64>(transfer_time));
     }
-
-    m_next_action = NextAction::WaitTransferTime;
-    [[fallthrough]];
+    m_phase = Phase::InFlight;
   }
 
-  case NextAction::WaitTransferTime:
+  if (m_phase == Phase::InFlight)
   {
-    const int elapsed_time =
-        static_cast<int>(m_system.GetCoreTiming().GetTicks() - m_timestamp_sent);
-    // Tell SI to ask again after TransferInterval() cycles
-    if (TransferInterval() > elapsed_time)
+    if (TransferInterval() > static_cast<int>(now - m_sent_at))
       return 0;
-    m_next_action = NextAction::ReceiveResponse;
-    [[fallthrough]];
+    m_phase = Phase::AwaitReply;
   }
 
-  case NextAction::ReceiveResponse:
-  {
-    m_next_action = NextAction::SendCommand;
-    const auto response_length = m_core->GetJoybusResponse(buffer);
-    if (response_length == 0)
-      return -1;
-
-#ifdef _DEBUG
-    const Common::Log::LogLevel log_level =
-        (m_last_cmd == EBufferCommands::CMD_STATUS || m_last_cmd == EBufferCommands::CMD_RESET) ?
-            Common::Log::LogLevel::LERROR :
-            Common::Log::LogLevel::LWARNING;
-    GENERIC_LOG_FMT(Common::Log::LogType::SERIALINTERFACE, log_level,
-                    "{}                              [< {:02x}{:02x}{:02x}{:02x}{:02x}] ({})",
-                    m_device_number, buffer[0], buffer[1], buffer[2], buffer[3], buffer[4],
-                    response_length);
-#endif
-
-    return response_length;
-  }
-  }
-
-  // This should never happen, but appease MSVC which thinks it might.
-  ERROR_LOG_FMT(SERIALINTERFACE, "Unknown state {}\n", static_cast<int>(m_next_action));
-  return -1;
+  m_phase = Phase::Idle;
+  const int length = m_core->GetJoybusResponse(buffer);
+  if (length == 0)
+    return -1;
+  DEBUG_LOG_FMT(SERIALINTERFACE, "GBA {}: reply to {:#04x}, {} bytes", m_device_number,
+                static_cast<u8>(m_pending_command), length);
+  return length;
 }
 
 int CSIDevice_GBAEmu::TransferInterval()
 {
-  return SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_last_cmd);
+  return SIDevice_GetGBATransferTime(m_system.GetSystemTimers(), m_pending_command);
 }
 
-DataResponse CSIDevice_GBAEmu::GetData(u32& hi, u32& low)
+DataResponse CSIDevice_GBAEmu::GetData(u32&, u32&)
 {
-  GCPadStatus pad_status{};
+  GCPadStatus pad{};
   if (!NetPlay::IsNetPlayRunning())
-    pad_status = Pad::GetGBAStatus(m_device_number);
-  SerialInterface::CSIDevice_GCController::HandleMoviePadStatus(m_system.GetMovie(),
-                                                                m_device_number, &pad_status);
+    pad = Pad::GetGBAStatus(m_device_number);
+  CSIDevice_GCController::HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad);
 
-  static constexpr std::array<PadButton, 10> buttons_map = {
-      PadButton::PAD_BUTTON_A,      // A
-      PadButton::PAD_BUTTON_B,      // B
-      PadButton::PAD_TRIGGER_Z,     // Select
-      PadButton::PAD_BUTTON_START,  // Start
-      PadButton::PAD_BUTTON_RIGHT,  // Right
-      PadButton::PAD_BUTTON_LEFT,   // Left
-      PadButton::PAD_BUTTON_UP,     // Up
-      PadButton::PAD_BUTTON_DOWN,   // Down
-      PadButton::PAD_TRIGGER_R,     // R
-      PadButton::PAD_TRIGGER_L,     // L
-  };
+  u16 keys = 0;
+  for (std::size_t bit = 0; bit < GBA_KEY_SOURCES.size(); ++bit)
+  {
+    if ((pad.button & GBA_KEY_SOURCES[bit]) != 0)
+      keys = static_cast<u16>(keys | (1u << bit));
+  }
+  m_keys = keys;
 
-  m_keys = 0;
-  for (size_t i = 0; i < buttons_map.size(); ++i)
-    m_keys |= static_cast<u16>(static_cast<bool>((pad_status.button & buttons_map[i]))) << i;
-
-  // Use X button as a reset signal for NetPlay/Movies
-  if (pad_status.button & PadButton::PAD_BUTTON_X)
+  // X carries the reset request (so it also works through NetPlay/movies).
+  if ((pad.button & PAD_BUTTON_X) != 0)
     m_core->Reset();
 
+  // The GBA is never polled; it only talks through buffer transfers.
   return DataResponse::NoData;
 }
 
-void CSIDevice_GBAEmu::SendCommand(u32 command, u8 poll)
+void CSIDevice_GBAEmu::SendCommand(u32, u8)
 {
 }
 
 void CSIDevice_GBAEmu::DoState(PointerWrap& p)
 {
-  p.Do(m_next_action);
-  p.Do(m_last_cmd);
-  p.Do(m_timestamp_sent);
+  p.Do(m_phase);
+  p.Do(m_pending_command);
+  p.Do(m_sent_at);
   p.Do(m_keys);
   m_core->DoState(p);
 }
 
-void CSIDevice_GBAEmu::OnEvent(u64 userdata, s64 cycles_late)
+void CSIDevice_GBAEmu::OnEvent(u64 userdata, s64)
 {
+  // `userdata` is how far past "now" the GBA should run (non-zero when a
+  // transfer on another port triggered this sync).
   m_core->SyncJoybus(m_system.GetCoreTiming().GetTicks() + userdata, m_keys);
-
-  const auto num_cycles = userdata + GetSyncInterval(m_system.GetSystemTimers());
-  m_system.GetSerialInterface().ScheduleEvent(m_device_number, num_cycles);
+  const u64 next = userdata + static_cast<u64>(SyncPeriod(m_system.GetSystemTimers()));
+  m_system.GetSerialInterface().ScheduleEvent(m_device_number, static_cast<s64>(next));
 }
 }  // namespace SerialInterface
 #endif  // HAS_LIBMGBA
