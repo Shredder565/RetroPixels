@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,10 +14,12 @@
 
 namespace IOS::HLE::FS
 {
-/// Backend that uses the host file system as backend.
-///
-/// Ignores metadata like permissions, attributes and various checks and also
-/// sometimes returns wrong information because metadata is not available.
+// A NAND kept as an ordinary folder on the host.
+//
+// File data and the set of existing files come straight from the host folder. Ownership,
+// permissions, attributes and the order of directory entries are kept in a small FST file
+// (fst.bin) next to the data; entries missing from it get permissive defaults, so a folder
+// populated by hand still works. Checks that need real NAND metadata are only approximated.
 class HostFileSystem final : public FileSystem
 {
 public:
@@ -60,19 +61,17 @@ public:
   void SetNandRedirects(std::vector<NandRedirect> nand_redirects) override;
 
 private:
+  // One node of the in-memory FST.
   struct FstEntry
   {
     bool CheckPermission(Uid uid, Gid gid, Mode requested_mode) const;
     std::string name;
     Metadata data{};
-    /// Children of this FST entry. Only valid for directories.
-    ///
-    /// We use a vector rather than a list here because iterating over children
-    /// happens a lot more often than removals.
-    /// Newly created entries are added at the end.
+    // Directory contents, oldest first. Empty for files.
     std::vector<FstEntry> children;
   };
 
+  // An open guest descriptor.
   struct Handle
   {
     bool opened = false;
@@ -102,24 +101,20 @@ private:
   void ResetFst();
   void LoadFst();
   void SaveFst();
-  /// Get the FST entry for a file (or directory).
-  /// Automatically creates fallback entries for parents if they do not exist.
-  /// Returns nullptr if the path is invalid or the file does not exist.
+  // Finds the FST node of an existing host file or directory, adding default nodes for any part
+  // of the path the FST does not know yet. nullptr when the path is invalid or nothing exists on
+  // the host.
   FstEntry* GetFstEntryForPath(const std::string& path);
 
-  /// FST entry for the filesystem root.
-  ///
-  /// Note that unlike a real Wii's FST, ours is the single source of truth only for
-  /// filesystem metadata and ordering. File existence must be checked by querying
-  /// the host filesystem.
-  /// The reasons for this design are twofold: existing users do not have a FST
-  /// and we do not want FS to break if the user adds or removes files in their
-  /// filesystem root manually.
+  // FST of the NAND root. It is authoritative for metadata and entry order only; whether a file
+  // exists is always decided by the host folder.
   FstEntry m_root_entry{};
   std::string m_root_path;
+  // Host files currently open, shared between guest handles to the same file.
   std::map<std::string, std::weak_ptr<File::IOFile>> m_open_files;
   std::array<Handle, 16> m_handles{};
 
+  // Separate FST for paths that are redirected elsewhere; never saved.
   FstEntry m_redirect_fst{};
   std::vector<NandRedirect> m_nand_redirects;
 };

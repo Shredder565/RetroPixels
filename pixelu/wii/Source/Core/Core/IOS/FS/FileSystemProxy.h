@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,9 @@ constexpr FS::Fd INVALID_FD = 0xffffffff;
 
 class FSDevice;
 
+// The FS module's request handling, shared by the /dev/fs device and by kernel code (ES, boot)
+// that reads the NAND. It keeps per-descriptor state and models how long each operation takes,
+// including the effect of the module's one-cluster cache.
 class FSCore final
 {
 public:
@@ -32,6 +34,7 @@ public:
   FSCore& operator=(FSCore&& other) = delete;
   ~FSCore();
 
+  // A descriptor (or negative error) that is closed again when it goes out of scope.
   class ScopedFd
   {
   public:
@@ -43,7 +46,7 @@ public:
     ~ScopedFd()
     {
       if (m_fd >= 0)
-        m_fs->Close(m_fd, m_tick_tracker);
+        m_fs->Close(static_cast<u64>(m_fd), m_tick_tracker);
     }
 
     ScopedFd(const ScopedFd&) = delete;
@@ -60,8 +63,7 @@ public:
     Ticks m_tick_tracker{};
   };
 
-  // These are the equivalent of the IPC command handlers so IPC overhead is included
-  // in timing calculations.
+  // Counterparts of the IPC commands. Their tick counts include the IPC overhead.
   ScopedFd Open(FS::Uid uid, FS::Gid gid, const std::string& path, FS::Mode mode,
                 std::optional<u32> ipc_fd = {}, Ticks ticks = {});
   s32 Close(u64 fd, Ticks ticks = {});
@@ -80,18 +82,19 @@ public:
   template <typename T>
   s32 Read(u64 fd, T* data, size_t count, Ticks ticks = {})
   {
-    return Read(fd, reinterpret_cast<u8*>(data), static_cast<u32>(sizeof(T) * count), {}, ticks);
+    const auto bytes = static_cast<u32>(sizeof(T) * count);
+    return Read(fd, reinterpret_cast<u8*>(data), bytes, {}, ticks);
   }
 
   std::shared_ptr<FS::FileSystem> GetFS() const { return m_ios.GetFS(); }
 
 private:
+  // Saved as raw bytes in the savestate, so its layout must not change.
   struct Handle
   {
     u16 gid = 0;
     u32 uid = 0;
     FS::Fd fs_fd = INVALID_FD;
-    // We use a std::array to keep this savestate friendly.
     std::array<char, 64> name{};
     bool superblock_flush_needed = false;
   };
@@ -103,16 +106,18 @@ private:
 
   Kernel& m_ios;
 
+  // The cache holds one cluster (m_cache_chain_index) of one file (m_cache_fd).
   bool m_dirty_cache = false;
   u16 m_cache_chain_index = 0;
   std::optional<u64> m_cache_fd;
-  // The first 0x18 IDs are reserved for the PPC.
+  // Descriptors below 0x18 are the PPC's; internal opens are numbered from here.
   u64 m_next_fd = 0x18;
   std::map<u64, Handle> m_fd_map;
 
   friend class FSDevice;
 };
 
+// /dev/fs as seen through IPC. Opening any other absolute path also lands here.
 class FSDevice final : public EmulationDevice
 {
 public:

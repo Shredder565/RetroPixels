@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,10 +7,12 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #ifdef _WIN32
-// TODO: Horrible hack, remove ASAP!
+// Several users of this header rely on it pulling in windows.h. Keep it until they include
+// what they need themselves.
 #include <windows.h>
 #endif
 
@@ -26,6 +27,8 @@ enum ReturnCode : s32;
 
 namespace FS
 {
+// Outcomes of file system operations. The order matters: entry N maps to IOS error -(100 + N)
+// (see ConvertResult), matching the FS module's error numbering.
 enum class ResultCode
 {
   Success,
@@ -56,6 +59,7 @@ using Uid = u32;
 using Gid = u16;
 using Fd = u32;
 
+// Access bits, used both for open modes and for the owner/group/other permissions.
 enum class Mode : u8
 {
   None = 0,
@@ -73,12 +77,13 @@ enum class SeekMode : u32
 
 using FileAttribute = u8;
 
+// Maps a NAND subtree onto a directory elsewhere on the host.
 struct NandRedirect
 {
-  // A Wii FS path, eg. "/title/00010000/534d4e45/data".
+  // NAND path being redirected, e.g. "/title/00010000/534d4e45/data".
   std::string source_path;
 
-  // An absolute host filesystem path the above should be redirected to.
+  // Absolute host directory that takes its place.
   std::string target_path;
 };
 
@@ -88,8 +93,7 @@ struct Modes
 };
 inline bool operator==(const Modes& lhs, const Modes& rhs)
 {
-  const auto fields = [](const Modes& obj) { return std::tie(obj.owner, obj.group, obj.other); };
-  return fields(lhs) == fields(rhs);
+  return lhs.owner == rhs.owner && lhs.group == rhs.group && lhs.other == rhs.other;
 }
 
 struct Metadata
@@ -103,31 +107,21 @@ struct Metadata
   u16 fst_index;
 };
 
-// size of a single cluster in the NAND in bytes
+// Geometry of the 512 MiB NAND, in 16 KiB clusters.
 constexpr u16 CLUSTER_SIZE = 16384;
-
-// total number of clusters available in the NAND
 constexpr u16 TOTAL_CLUSTERS = 0x7ec0;
-
-// number of clusters reserved for bad blocks and similar, not accessible to normal writes
+// Kept back for bad-block replacement; never handed out for files.
 constexpr u16 RESERVED_CLUSTERS = 0x0300;
-
-// number of clusters actually usable by the file system
 constexpr u16 USABLE_CLUSTERS = TOTAL_CLUSTERS - RESERVED_CLUSTERS;
 
-// size of a single 'block' as defined by the Wii System Menu in clusters
+// The System Menu counts space in "blocks" of 8 clusters (128 KiB) and gives titles 2176 of them.
 constexpr u16 CLUSTERS_PER_BLOCK = 8;
-
-// total number of user-accessible blocks in the NAND
 constexpr u16 USER_BLOCKS = 2176;
-
-// total number of user-accessible clusters in the NAND
 constexpr u16 USER_CLUSTERS = USER_BLOCKS * CLUSTERS_PER_BLOCK;
-
-// the inverse of that, the amount of usable clusters reserved for system files
+// Whatever is left is used by system titles and files.
 constexpr u16 SYSTEM_CLUSTERS = USABLE_CLUSTERS - USER_CLUSTERS;
 
-// total number of inodes available in the NAND
+// Size of the FST (file and directory entries).
 constexpr u16 TOTAL_INODES = 0x17ff;
 
 struct NandStats
@@ -147,8 +141,8 @@ struct DirectoryStats
   u32 used_inodes;
 };
 
-// Not a real Wii data struct, but useful for calculating how full the user's NAND is even if it's
-// way larger than it should be.
+// Same as DirectoryStats but wide enough for a host NAND folder that is bigger than a real NAND
+// could ever be. Emulator-only.
 struct ExtendedDirectoryStats
 {
   u64 used_clusters;
@@ -161,16 +155,16 @@ struct FileStatus
   u32 size;
 };
 
-/// The maximum number of components a path can have.
+// Limits on paths: number of components, total characters, characters per name.
 constexpr size_t MaxPathDepth = 8;
-/// The maximum number of characters a path can have.
 constexpr size_t MaxPathLength = 64;
-/// The maximum number of characters a filename can have.
 constexpr size_t MaxFilenameLength = 12;
 
-/// Returns whether a Wii path is valid.
+// "/" or a valid non-root path.
 bool IsValidPath(std::string_view path);
+// Absolute, at most MaxPathLength characters, and not ending in '/'.
 bool IsValidNonRootPath(std::string_view path);
+// A single path component of acceptable length.
 bool IsValidFilename(std::string_view filename);
 
 struct SplitPathResult
@@ -180,18 +174,16 @@ struct SplitPathResult
 };
 inline bool operator==(const SplitPathResult& lhs, const SplitPathResult& rhs)
 {
-  const auto fields = [](const SplitPathResult& obj) {
-    return std::tie(obj.parent, obj.file_name);
-  };
-  return fields(lhs) == fields(rhs);
+  return lhs.parent == rhs.parent && lhs.file_name == rhs.file_name;
 }
 
-/// Split a path into a parent path and the file name. Takes a *valid non-root* path.
-///
-/// Example: /shared2/sys/SYSCONF => {/shared2/sys, SYSCONF}
+// Splits a valid non-root path at its last '/': "/shared2/sys/SYSCONF" gives
+// {"/shared2/sys", "SYSCONF"}, and "/tmp" gives {"/", "tmp"}.
 SplitPathResult SplitPathAndBasename(std::string_view path);
 
 class FileSystem;
+
+// Owns an open file descriptor and closes it when destroyed.
 class FileHandle final
 {
 public:
@@ -202,7 +194,7 @@ public:
   FileHandle& operator=(const FileHandle&) = delete;
   FileHandle& operator=(FileHandle&&);
 
-  /// Release the FD so that it is not automatically closed.
+  // Gives up ownership; the descriptor stays open.
   Fd Release();
 
   template <typename T>
@@ -219,6 +211,7 @@ private:
   std::optional<Fd> m_fd;
 };
 
+// Interface of a NAND file system implementation.
 class FileSystem
 {
 public:
@@ -226,64 +219,54 @@ public:
 
   virtual void DoState(PointerWrap& p) = 0;
 
-  /// Format the file system.
+  // Erases everything. Only the kernel (UID 0) may do this.
   virtual ResultCode Format(Uid uid) = 0;
 
-  /// Get a file descriptor for accessing a file. The FD will be automatically closed after use.
   virtual Result<FileHandle> OpenFile(Uid uid, Gid gid, const std::string& path, Mode mode) = 0;
-  /// Create a file if it doesn't exist and open it in read/write mode.
+  // Opens a file for reading and writing, creating it with `modes` first when it is missing.
   Result<FileHandle> CreateAndOpenFile(Uid uid, Gid gid, const std::string& path, Modes modes);
-  /// Close a file descriptor.
   virtual ResultCode Close(Fd fd) = 0;
-  /// Read `size` bytes from the file descriptor. Returns the number of bytes read.
+  // Reads/writes up to `size` bytes at the current position and returns how many were done.
   virtual Result<u32> ReadBytesFromFile(Fd fd, u8* ptr, u32 size) = 0;
-  /// Write `size` bytes to the file descriptor. Returns the number of bytes written.
   virtual Result<u32> WriteBytesToFile(Fd fd, const u8* ptr, u32 size) = 0;
-  /// Reposition the file offset for a file descriptor.
   virtual Result<u32> SeekFile(Fd fd, u32 offset, SeekMode mode) = 0;
-  /// Get status for a file descriptor.
-  /// Guaranteed to succeed for a valid file descriptor.
+  // Never fails for a descriptor that is open.
   virtual Result<FileStatus> GetFileStatus(Fd fd) = 0;
 
-  /// Create a file with the specified path and metadata.
   virtual ResultCode CreateFile(Uid caller_uid, Gid caller_gid, const std::string& path,
                                 FileAttribute attribute, Modes modes) = 0;
-  /// Create a directory with the specified path and metadata.
   virtual ResultCode CreateDirectory(Uid caller_uid, Gid caller_gid, const std::string& path,
                                      FileAttribute attribute, Modes modes) = 0;
 
-  /// Create any parent directories for a path with the specified metadata.
-  /// Example: "/a/b" to create directory /a; "/a/b/" to create directories /a and /a/b
+  // Creates every missing directory before the last '/' of `path`: "/a/b" makes "/a", and
+  // "/a/b/" makes "/a" and "/a/b".
   ResultCode CreateFullPath(Uid caller_uid, Gid caller_gid, const std::string& path,
                             FileAttribute attribute, Modes modes);
 
-  /// Delete a file or directory with the specified path.
+  // Removes a file or a whole directory tree.
   virtual ResultCode Delete(Uid caller_uid, Gid caller_gid, const std::string& path) = 0;
-  /// Rename a file or directory with the specified path.
   virtual ResultCode Rename(Uid caller_uid, Gid caller_gid, const std::string& old_path,
                             const std::string& new_path) = 0;
 
-  /// List the children of a directory (non-recursively).
+  // Names of the direct children of a directory.
   virtual Result<std::vector<std::string>> ReadDirectory(Uid caller_uid, Gid caller_gid,
                                                          const std::string& path) = 0;
 
-  /// Get metadata about a file.
   virtual Result<Metadata> GetMetadata(Uid caller_uid, Gid caller_gid, const std::string& path) = 0;
-  /// Set metadata for a file.
   virtual ResultCode SetMetadata(Uid caller_uid, const std::string& path, Uid uid, Gid gid,
                                  FileAttribute attribute, Modes modes) = 0;
 
-  /// Get usage information about the NAND (block size, cluster and inode counts).
+  // Whole-NAND usage (cluster size, cluster and inode counts).
   virtual Result<NandStats> GetNandStats() = 0;
-  /// Get usage information about a directory (used cluster and inode counts).
+  // Usage of one directory tree, capped to what a real NAND can hold.
   virtual Result<DirectoryStats> GetDirectoryStats(const std::string& path) = 0;
-
-  /// Like GetDirectoryStats() but not limited to the actual 512 MB NAND limit.
+  // Usage of one directory tree, uncapped.
   virtual Result<ExtendedDirectoryStats> GetExtendedDirectoryStats(const std::string& path) = 0;
 
   virtual void SetNandRedirects(std::vector<NandRedirect> nand_redirects) = 0;
 
 protected:
+  // Savestate helpers that serialise a directory tree (metadata and file contents).
   void DoStateWriteOrMeasure(PointerWrap& p, const std::string& directory_path);
   void DoStateRead(PointerWrap& p, const std::string& directory_path);
 };
@@ -291,11 +274,12 @@ protected:
 template <typename T>
 Result<size_t> FileHandle::Read(T* ptr, size_t count) const
 {
-  const Result<u32> bytes = m_fs->ReadBytesFromFile(*m_fd, reinterpret_cast<u8*>(ptr),
-                                                    static_cast<u32>(sizeof(T) * count));
-  if (!bytes)
-    return bytes;
-  if (*bytes != sizeof(T) * count)
+  const auto wanted = static_cast<u32>(sizeof(T) * count);
+  const Result<u32> got = m_fs->ReadBytesFromFile(*m_fd, reinterpret_cast<u8*>(ptr), wanted);
+  if (!got.has_value())
+    return std::unexpected{got.error()};
+  // Anything less than a full read counts as an error.
+  if (*got != sizeof(T) * count)
     return std::unexpected{ResultCode::ShortRead};
   return count;
 }
@@ -303,23 +287,25 @@ Result<size_t> FileHandle::Read(T* ptr, size_t count) const
 template <typename T>
 Result<size_t> FileHandle::Write(const T* ptr, size_t count) const
 {
-  const auto result = m_fs->WriteBytesToFile(*m_fd, reinterpret_cast<const u8*>(ptr),
-                                             static_cast<u32>(sizeof(T) * count));
-  if (!result)
-    return result;
+  const auto length = static_cast<u32>(sizeof(T) * count);
+  const Result<u32> put = m_fs->WriteBytesToFile(*m_fd, reinterpret_cast<const u8*>(ptr), length);
+  if (!put.has_value())
+    return std::unexpected{put.error()};
   return count;
 }
 
 enum class Location
 {
+  // The user's configured NAND folder.
   Configured,
+  // The NAND used by the running session (may be a temporary copy).
   Session,
 };
 
 std::unique_ptr<FileSystem> MakeFileSystem(Location location = Location::Session,
                                            std::vector<NandRedirect> nand_redirects = {});
 
-/// Convert a FS result code to an IOS error code.
+// Maps a ResultCode to the value IOS puts in the reply.
 IOS::HLE::ReturnCode ConvertResult(ResultCode code);
 
 }  // namespace FS

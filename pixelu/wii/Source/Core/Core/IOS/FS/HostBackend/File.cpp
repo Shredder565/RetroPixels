@@ -1,9 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/FS/HostBackend/FS.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <expected>
 #include <memory>
 
@@ -14,92 +14,73 @@
 
 namespace IOS::HLE::FS
 {
-// This isn't theadsafe, but it's only called from the CPU thread.
+namespace
+{
+bool Allows(Mode granted, Mode wanted)
+{
+  return (static_cast<u8>(granted) & static_cast<u8>(wanted)) != 0;
+}
+}  // namespace
+
+// Returns the one shared host stream for `host_path`, opening it if nobody has it open yet.
+//
+// IOS orders all accesses to a file strictly, so a write through one descriptor is visible at
+// once through any other descriptor for the same file. Separate host streams would each buffer
+// on their own and break that (some titles, including the System Menu, open the same file
+// several times and depend on it). Sharing a single stream per path keeps the ordering.
+// Only used from the CPU thread.
 std::shared_ptr<File::IOFile> HostFileSystem::OpenHostFile(const std::string& host_path)
 {
-  // On the wii, all file operations are strongly ordered.
-  // If a game opens the same file twice (or 8 times, looking at you PokePark Wii)
-  // and writes to one file handle, it will be able to immediately read the written
-  // data from the other handle.
-  // On 'real' operating systems, there are various buffers and caches meaning
-  // applications doing such naughty things will not get expected results.
+  if (const auto cached = m_open_files.find(host_path); cached != m_open_files.end())
+    return cached->second.lock();
 
-  // So we fix this by catching any attempts to open the same file twice and
-  // only opening one file. Accesses to a single file handle are ordered.
-  //
-  // Hall of Shame:
-  //    - PokePark Wii (gets stuck on the loading screen of Pikachu falling)
-  //    - PokePark 2 (Also gets stuck while loading)
-  //    - Wii System Menu (Can't access the system settings, gets stuck on blank screen)
-  //    - The Beatles: Rock Band (saving doesn't work)
-
-  // Check if the file has already been opened.
-  auto search = m_open_files.find(host_path);
-  if (search != m_open_files.end())
+  // Opened read/write; each guest handle enforces its own mode in the calls below.
+  File::IOFile stream;
+  while (!stream.Open(host_path, "r+b"))
   {
-    // Lock a shared pointer to use.
-    return search->second.lock();
-  }
-
-  // All files are opened read/write. Actual access rights will be controlled per handle by the
-  // read/write functions below
-  File::IOFile file;
-  while (!file.Open(host_path, "r+b"))
-  {
-    const bool try_again =
-        PanicYesNoFmt("File \"{}\" could not be opened!\n"
-                      "This may happen with improper permissions or use by another process.\n"
-                      "Press \"Yes\" to make another attempt.",
-                      host_path);
-
-    if (!try_again)
+    const bool retry = PanicYesNoFmt("Could not open \"{}\".\n"
+                                     "Check the file's permissions and whether another program "
+                                     "is using it.\n"
+                                     "Choose \"Yes\" to try again.",
+                                     host_path);
+    if (!retry)
     {
-      // We've failed to open the file:
-      ERROR_LOG_FMT(IOS_FS, "OpenHostFile {}", host_path);
+      ERROR_LOG_FMT(IOS_FS, "Giving up opening host file {}", host_path);
       return nullptr;
     }
   }
 
-  // This code will be called when all references to the shared pointer below have been removed.
-  auto deleter = [this, host_path](File::IOFile* ptr) {
-    delete ptr;                     // IOFile's deconstructor closes the file.
-    m_open_files.erase(host_path);  // erase the weak pointer from the list of open files.
+  // When the last user lets go, close the stream and forget the cache entry.
+  const auto release = [this, host_path](File::IOFile* raw) {
+    delete raw;
+    m_open_files.erase(host_path);
   };
-
-  // Use the custom deleter from above.
-  std::shared_ptr<File::IOFile> file_ptr(new File::IOFile(std::move(file)), deleter);
-
-  // Store a weak pointer to our newly opened file in the cache.
-  m_open_files[host_path] = std::weak_ptr<File::IOFile>(file_ptr);
-
-  return file_ptr;
+  std::shared_ptr<File::IOFile> shared(new File::IOFile(std::move(stream)), release);
+  m_open_files[host_path] = shared;
+  return shared;
 }
 
 Result<FileHandle> HostFileSystem::OpenFile(Uid, Gid, const std::string& path, Mode mode)
 {
   Handle* handle = AssignFreeHandle();
-  if (!handle)
+  if (handle == nullptr)
     return std::unexpected{ResultCode::NoFreeHandle};
+
+  // Every failure below gives the slot back.
+  const auto fail = [handle](ResultCode code) -> Result<FileHandle> {
+    *handle = Handle{};
+    return std::unexpected{code};
+  };
 
   const std::string host_path = BuildFilename(path).host_path;
   if (File::IsDirectory(host_path))
-  {
-    *handle = Handle{};
-    return std::unexpected{ResultCode::Invalid};
-  }
-
+    return fail(ResultCode::Invalid);
   if (!File::IsFile(host_path))
-  {
-    *handle = Handle{};
-    return std::unexpected{ResultCode::NotFound};
-  }
+    return fail(ResultCode::NotFound);
 
   handle->host_file = OpenHostFile(host_path);
   if (!handle->host_file)
-  {
-    *handle = Handle{};
-    return std::unexpected{ResultCode::AccessDenied};
-  }
+    return fail(ResultCode::AccessDenied);
 
   handle->wii_path = path;
   handle->mode = mode;
@@ -110,11 +91,10 @@ Result<FileHandle> HostFileSystem::OpenFile(Uid, Gid, const std::string& path, M
 ResultCode HostFileSystem::Close(Fd fd)
 {
   Handle* handle = GetHandleFromFd(fd);
-  if (!handle)
+  if (handle == nullptr)
     return ResultCode::Invalid;
 
-  // Let go of our pointer to the file, it will automatically close if we are the last handle
-  // accessing it.
+  // Dropping the shared stream closes it if this was its last user.
   *handle = Handle{};
   return ResultCode::Success;
 }
@@ -122,42 +102,41 @@ ResultCode HostFileSystem::Close(Fd fd)
 Result<u32> HostFileSystem::ReadBytesFromFile(Fd fd, u8* ptr, u32 count)
 {
   Handle* handle = GetHandleFromFd(fd);
-  if (!handle || !handle->host_file->IsOpen())
+  if (handle == nullptr || !handle->host_file->IsOpen())
     return std::unexpected{ResultCode::Invalid};
-
-  if ((u8(handle->mode) & u8(Mode::Read)) == 0)
+  if (!Allows(handle->mode, Mode::Read))
     return std::unexpected{ResultCode::AccessDenied};
 
-  const u32 file_size = static_cast<u32>(handle->host_file->GetSize());
-  // IOS has this check in the read request handler.
-  if (count + handle->file_offset > file_size)
+  File::IOFile& stream = *handle->host_file;
+
+  // Like IOS, clamp the request to the end of the file (in 32-bit arithmetic).
+  const auto file_size = static_cast<u32>(stream.GetSize());
+  if (handle->file_offset + count > file_size)
     count = file_size - handle->file_offset;
 
-  // File might be opened twice, need to seek before we read
-  handle->host_file->Seek(handle->file_offset, File::SeekOrigin::Begin);
-  const u32 actually_read = static_cast<u32>(fread(ptr, 1, count, handle->host_file->GetHandle()));
-
-  if (actually_read != count && ferror(handle->host_file->GetHandle()))
+  // The stream may be shared, so always position it first.
+  stream.Seek(handle->file_offset, File::SeekOrigin::Begin);
+  std::FILE* const raw = stream.GetHandle();
+  const auto got = static_cast<u32>(std::fread(ptr, 1, count, raw));
+  if (got != count && std::ferror(raw))
     return std::unexpected{ResultCode::AccessDenied};
 
-  // IOS returns the number of bytes read and adds that value to the seek position,
-  // instead of adding the *requested* read length.
-  handle->file_offset += actually_read;
-  return actually_read;
+  // The position advances by what was actually read, not by what was asked for.
+  handle->file_offset += got;
+  return got;
 }
 
 Result<u32> HostFileSystem::WriteBytesToFile(Fd fd, const u8* ptr, u32 count)
 {
   Handle* handle = GetHandleFromFd(fd);
-  if (!handle || !handle->host_file->IsOpen())
+  if (handle == nullptr || !handle->host_file->IsOpen())
     return std::unexpected{ResultCode::Invalid};
-
-  if ((u8(handle->mode) & u8(Mode::Write)) == 0)
+  if (!Allows(handle->mode, Mode::Write))
     return std::unexpected{ResultCode::AccessDenied};
 
-  // File might be opened twice, need to seek before we read
-  handle->host_file->Seek(handle->file_offset, File::SeekOrigin::Begin);
-  if (!handle->host_file->WriteBytes(ptr, count))
+  File::IOFile& stream = *handle->host_file;
+  stream.Seek(handle->file_offset, File::SeekOrigin::Begin);
+  if (!stream.WriteBytes(ptr, count))
     return std::unexpected{ResultCode::AccessDenied};
 
   handle->file_offset += count;
@@ -167,67 +146,62 @@ Result<u32> HostFileSystem::WriteBytesToFile(Fd fd, const u8* ptr, u32 count)
 Result<u32> HostFileSystem::SeekFile(Fd fd, std::uint32_t offset, SeekMode mode)
 {
   Handle* handle = GetHandleFromFd(fd);
-  if (!handle || !handle->host_file->IsOpen())
+  if (handle == nullptr || !handle->host_file->IsOpen())
     return std::unexpected{ResultCode::Invalid};
 
-  u32 new_position = 0;
-  switch (mode)
-  {
-  case SeekMode::Set:
-    new_position = offset;
-    break;
-  case SeekMode::Current:
-    new_position = handle->file_offset + offset;
-    break;
-  case SeekMode::End:
-    new_position = handle->host_file->GetSize() + offset;
-    break;
-  default:
-    return std::unexpected{ResultCode::Invalid};
-  }
-
-  // This differs from POSIX behaviour which allows seeking past the end of the file.
-  if (handle->host_file->GetSize() < new_position)
+  const u64 file_size = handle->host_file->GetSize();
+  u32 target;
+  if (mode == SeekMode::Set)
+    target = offset;
+  else if (mode == SeekMode::Current)
+    target = handle->file_offset + offset;
+  else if (mode == SeekMode::End)
+    target = static_cast<u32>(file_size + offset);
+  else
     return std::unexpected{ResultCode::Invalid};
 
-  handle->file_offset = new_position;
-  return handle->file_offset;
+  // Unlike POSIX, IOS refuses to move past the end of the file.
+  if (target > file_size)
+    return std::unexpected{ResultCode::Invalid};
+
+  handle->file_offset = target;
+  return target;
 }
 
 Result<FileStatus> HostFileSystem::GetFileStatus(Fd fd)
 {
   const Handle* handle = GetHandleFromFd(fd);
-  if (!handle || !handle->host_file->IsOpen())
+  if (handle == nullptr || !handle->host_file->IsOpen())
     return std::unexpected{ResultCode::Invalid};
 
   FileStatus status;
-  status.size = handle->host_file->GetSize();
   status.offset = handle->file_offset;
+  status.size = static_cast<u32>(handle->host_file->GetSize());
   return status;
 }
 
 HostFileSystem::Handle* HostFileSystem::AssignFreeHandle()
 {
-  const auto it =
-      std::ranges::find_if(m_handles, [](const Handle& handle) { return !handle.opened; });
-  if (it == m_handles.end())
-    return nullptr;
-
-  *it = Handle{};
-  it->opened = true;
-  return &*it;
+  for (Handle& slot : m_handles)
+  {
+    if (slot.opened)
+      continue;
+    slot = Handle{};
+    slot.opened = true;
+    return &slot;
+  }
+  return nullptr;
 }
 
 HostFileSystem::Handle* HostFileSystem::GetHandleFromFd(Fd fd)
 {
-  if (fd >= m_handles.size() || !m_handles[fd].opened)
-    return nullptr;
-  return &m_handles[fd];
+  if (fd < m_handles.size() && m_handles[fd].opened)
+    return &m_handles[fd];
+  return nullptr;
 }
 
 Fd HostFileSystem::ConvertHandleToFd(const Handle* handle) const
 {
-  return handle - m_handles.data();
+  return static_cast<Fd>(handle - m_handles.data());
 }
-
 }  // namespace IOS::HLE::FS

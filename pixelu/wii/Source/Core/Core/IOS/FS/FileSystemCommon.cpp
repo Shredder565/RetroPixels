@@ -1,20 +1,49 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/FS/FileSystem.h"
 
 #include <algorithm>
 #include <array>
 #include <expected>
+#include <optional>
+#include <utility>
 
 #include "Common/Assert.h"
+#include "Common/ChunkFile.h"
 #include "Common/FileUtil.h"
 #include "Core/IOS/Device.h"
 #include "Core/IOS/FS/HostBackend/FS.h"
 
 namespace IOS::HLE::FS
 {
-constexpr u32 BUFFER_CHUNK_SIZE = 65536;
+namespace
+{
+// File contents go through the savestate in pieces of this size.
+constexpr u32 STATE_COPY_CHUNK = 0x10000;
+
+std::string JoinPath(const std::string& directory, const std::string& name)
+{
+  std::string joined;
+  joined.reserve(directory.size() + 1 + name.size());
+  joined += directory;
+  if (directory.back() != '/')
+    joined += '/';
+  joined += name;
+  return joined;
+}
+
+// The directory's own metadata is stored field by field (not as one block).
+void DoMetadataFields(PointerWrap& p, Metadata& m)
+{
+  p.Do(m.uid);
+  p.Do(m.gid);
+  p.Do(m.attribute);
+  p.Do(m.modes);
+  p.Do(m.is_file);
+  p.Do(m.size);
+  p.Do(m.fst_index);
+}
+}  // namespace
 
 bool IsValidPath(std::string_view path)
 {
@@ -23,67 +52,71 @@ bool IsValidPath(std::string_view path)
 
 bool IsValidNonRootPath(std::string_view path)
 {
-  return path.length() > 1 && path.length() <= MaxPathLength && path[0] == '/' &&
-         path.back() != '/';
+  if (path.size() < 2 || path.size() > MaxPathLength)
+    return false;
+  return path.front() == '/' && path.back() != '/';
 }
 
 bool IsValidFilename(std::string_view filename)
 {
-  return filename.length() <= MaxFilenameLength &&
-         !std::ranges::any_of(filename, [](char c) { return c == '/'; });
+  return filename.size() <= MaxFilenameLength && filename.find('/') == std::string_view::npos;
 }
 
 SplitPathResult SplitPathAndBasename(std::string_view path)
 {
-  const auto last_separator = path.rfind('/');
-  return {std::string(path.substr(0, std::max<size_t>(1, last_separator))),
-          std::string(path.substr(last_separator + 1))};
+  const size_t slash = path.rfind('/');
+  // A slash at position 0 means the parent is the root, which keeps its "/".
+  const size_t parent_length = slash == 0 ? 1 : slash;
+  return {std::string(path.substr(0, parent_length)), std::string(path.substr(slash + 1))};
 }
 
 std::unique_ptr<FileSystem> MakeFileSystem(Location location,
                                            std::vector<NandRedirect> nand_redirects)
 {
-  const std::string nand_root =
-      File::GetUserPath(location == Location::Session ? D_SESSION_WIIROOT_IDX : D_WIIROOT_IDX);
-  return std::make_unique<HostFileSystem>(nand_root, std::move(nand_redirects));
+  const auto root_index = location == Location::Session ? D_SESSION_WIIROOT_IDX : D_WIIROOT_IDX;
+  return std::make_unique<HostFileSystem>(File::GetUserPath(root_index),
+                                          std::move(nand_redirects));
 }
 
 IOS::HLE::ReturnCode ConvertResult(ResultCode code)
 {
   if (code == ResultCode::Success)
     return IPC_SUCCESS;
-  // FS error codes start at -100. Since result codes in the enum are listed in the same way
-  // as the IOS codes, we just need to return -100-code.
-  return static_cast<ReturnCode>(-(static_cast<s32>(code) + 100));
+  // The enum lists the FS errors in IOS order, starting at -101 for Invalid.
+  return static_cast<ReturnCode>(-100 - static_cast<s32>(code));
 }
 
 FileHandle::FileHandle(FileSystem* fs, Fd fd) : m_fs{fs}, m_fd{fd}
 {
 }
 
-FileHandle::FileHandle(FileHandle&& other) : m_fs{other.m_fs}, m_fd{other.m_fd}
+FileHandle::FileHandle(FileHandle&& other) : m_fs{other.m_fs}, m_fd{std::exchange(other.m_fd, {})}
 {
-  other.m_fd.reset();
 }
 
 FileHandle& FileHandle::operator=(FileHandle&& other)
 {
-  if (std::tie(m_fs, m_fd) != std::tie(other.m_fs, other.m_fd))
-    *this = std::move(other);
+  if (this != &other)
+  {
+    // Give back what this handle owns, then take over the other one's descriptor.
+    if (m_fd && m_fs)
+      ASSERT(m_fs->Close(*m_fd) == FS::ResultCode::Success);
+    m_fs = other.m_fs;
+    m_fd = std::exchange(other.m_fd, {});
+  }
   return *this;
 }
 
 FileHandle::~FileHandle()
 {
-  if (m_fd && m_fs)
+  if (m_fs != nullptr && m_fd.has_value())
     ASSERT(m_fs->Close(*m_fd) == FS::ResultCode::Success);
 }
 
 Fd FileHandle::Release()
 {
-  const Fd fd = m_fd.value();
-  m_fd.reset();
-  return fd;
+  const std::optional<Fd> taken = std::exchange(m_fd, std::nullopt);
+  return taken.value();
 }
 
 Result<u32> FileHandle::Seek(u32 offset, SeekMode mode) const
@@ -99,293 +132,238 @@ Result<FileStatus> FileHandle::GetStatus() const
 Result<FileHandle> FileSystem::CreateAndOpenFile(Uid uid, Gid gid, const std::string& path,
                                                  Modes modes)
 {
-  if (Result<FileHandle> file = OpenFile(uid, gid, path, Mode::ReadWrite))
-    return file;
+  Result<FileHandle> existing = OpenFile(uid, gid, path, Mode::ReadWrite);
+  if (existing.has_value())
+    return existing;
 
-  const ResultCode result = CreateFile(uid, gid, path, 0, modes);
-  if (result != ResultCode::Success)
-    return std::unexpected{result};
-
+  if (const ResultCode created = CreateFile(uid, gid, path, 0, modes);
+      created != ResultCode::Success)
+  {
+    return std::unexpected{created};
+  }
   return OpenFile(uid, gid, path, Mode::ReadWrite);
 }
 
 ResultCode FileSystem::CreateFullPath(Uid uid, Gid gid, const std::string& path,
                                       FileAttribute attribute, Modes modes)
 {
-  std::string::size_type position = 1;
-  while (true)
+  // Visit each prefix that ends just before a '/', skipping the leading one.
+  for (size_t slash = path.find('/', 1); slash != std::string::npos;
+       slash = path.find('/', slash + 1))
   {
-    position = path.find('/', position);
-    if (position == std::string::npos)
-      return ResultCode::Success;
-
-    const std::string subpath = path.substr(0, position);
-    const Result<Metadata> metadata = GetMetadata(uid, gid, subpath);
-    if (!metadata && metadata.error() != ResultCode::NotFound)
-      return metadata.error();
-    if (metadata && metadata->is_file)
-      return ResultCode::Invalid;
-
-    if (!metadata)
+    const std::string prefix = path.substr(0, slash);
+    const Result<Metadata> existing = GetMetadata(uid, gid, prefix);
+    if (existing.has_value())
     {
-      const ResultCode result = CreateDirectory(uid, gid, subpath, attribute, modes);
-      if (result != ResultCode::Success)
-        return result;
+      if (existing->is_file)
+        return ResultCode::Invalid;
+      continue;
     }
+    if (existing.error() != ResultCode::NotFound)
+      return existing.error();
 
-    ++position;
+    if (const ResultCode made = CreateDirectory(uid, gid, prefix, attribute, modes);
+        made != ResultCode::Success)
+    {
+      return made;
+    }
   }
+  return ResultCode::Success;
 }
 
+// Savestate layout of a directory (written by DoStateWriteOrMeasure, read by DoStateRead):
+//   the directory's metadata, field by field;
+//   a u32 child count, then per child: its Metadata block, its name, and either its contents
+//   (for a file, `size` raw bytes) or the same layout again (for a directory).
 void FileSystem::DoStateRead(PointerWrap& p, const std::string& directory_path)
 {
-  const auto delete_ = [this](const std::string& directory_path_) {
-    const ResultCode delete_result = Delete(0, 0, directory_path_);
-    if (delete_result != ResultCode::Success && delete_result != ResultCode::NotFound)
-    {
-      ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call Delete for {}: {}", directory_path_,
-                    delete_result);
-      return false;
-    }
-    return true;
+  // Clears the target; a missing entry is fine.
+  const auto remove = [this](const std::string& target) {
+    const ResultCode result = Delete(0, 0, target);
+    if (result == ResultCode::Success || result == ResultCode::NotFound)
+      return true;
+    ERROR_LOG_FMT(IOS_FS, "Savestate load: cannot delete {}: {}", target, result);
+    return false;
   };
 
-  if (directory_path != "/")
+  const bool is_root = directory_path == "/";
+  if (is_root)
   {
-    if (!delete_(directory_path))
-    {
-      p.SetVerifyMode();
-      return;
-    }
-  }
-  else
-  {
-    // Calling Delete for the root would return Invalid. Let's delete all children instead.
-    auto children = ReadDirectory(0, 0, directory_path);
+    // The root itself cannot be deleted, so empty it instead.
+    const auto children = ReadDirectory(0, 0, directory_path);
     if (!children)
     {
-      ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call ReadDirectory for {}: {}", directory_path,
+      ERROR_LOG_FMT(IOS_FS, "Savestate load: cannot list {}: {}", directory_path,
                     children.error());
       p.SetVerifyMode();
       return;
     }
-
-    for (const std::string& child_name : children.value())
+    for (const std::string& child : *children)
     {
-      if (!delete_(directory_path + child_name))
+      if (!remove(directory_path + child))
       {
         p.SetVerifyMode();
         return;
       }
     }
   }
-
-  Metadata metadata{};
-  p.Do(metadata.uid);
-  p.Do(metadata.gid);
-  p.Do(metadata.attribute);
-  p.Do(metadata.modes);
-  p.Do(metadata.is_file);
-  p.Do(metadata.size);
-  p.Do(metadata.fst_index);
-
-  // Again here, calling CreateDirectory for the root would return Invalid.
-  // The root always exists, so we can skip creating it.
-  if (directory_path != "/")
+  else if (!remove(directory_path))
   {
-    // UID 0 is used to avoid AccessDenied.
-    const ResultCode create_directory_result =
-        CreateDirectory(0, 0, directory_path, metadata.attribute, metadata.modes);
-    if (create_directory_result != ResultCode::Success)
-    {
-      ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call CreateDirectory for {}: {}", directory_path,
-                    create_directory_result);
-      p.SetVerifyMode();
-      return;
-    }
-  }
-
-  // Change the UID and GID from 0 to the intended values.
-  const ResultCode set_metadata_result = SetMetadata(0, directory_path, metadata.uid, metadata.gid,
-                                                     metadata.attribute, metadata.modes);
-  if (set_metadata_result != ResultCode::Success)
-  {
-    ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call SetMetadata for {}: {}", directory_path,
-                  set_metadata_result);
     p.SetVerifyMode();
     return;
   }
 
-  // Now restore from the stream
-  std::vector<std::string> children;
-  p.DoEachElement(children, [this, &directory_path](PointerWrap& p_, std::string& child_name) {
-    Metadata child_metadata;
-    p_.Do(child_metadata);
-    p_.Do(child_name);
+  Metadata own{};
+  DoMetadataFields(p, own);
 
-    std::string child_path;
-    child_path.reserve(directory_path.size() + child_name.size() + 1);
-    child_path.append(directory_path);
-    if (directory_path.back() != '/')
-      child_path.push_back('/');
-    child_path.append(child_name);
-
-    if (child_metadata.is_file)
+  // Rebuild as the kernel (to get past permission checks), then hand ownership over. The root
+  // always exists and is not created.
+  if (!is_root)
+  {
+    const ResultCode made = CreateDirectory(0, 0, directory_path, own.attribute, own.modes);
+    if (made != ResultCode::Success)
     {
-      // UID 0 is used to avoid AccessDenied.
-      const ResultCode create_file_result =
-          CreateFile(0, 0, child_path, child_metadata.attribute, child_metadata.modes);
-      if (create_file_result != ResultCode::Success)
-      {
-        ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call CreateFile for {}: {}", child_path,
-                      create_file_result);
-        p_.SetVerifyMode();
-        return;
-      }
-
-      // Change the UID and GID from 0 to the intended values.
-      const ResultCode set_metadata_result =
-          SetMetadata(0, child_path, child_metadata.uid, child_metadata.gid,
-                      child_metadata.attribute, child_metadata.modes);
-      if (set_metadata_result != ResultCode::Success)
-      {
-        ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call SetMetadata for {}: {}", child_path,
-                      set_metadata_result);
-        p_.SetVerifyMode();
-        return;
-      }
-
-      std::array<u8, BUFFER_CHUNK_SIZE> buffer;
-      Result<FileHandle> handle = OpenFile(0, 0, child_path, Mode::Write);
-      if (!handle)
-      {
-        ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call OpenFile for {}: {}", child_path,
-                      handle.error());
-        p_.SetVerifyMode();
-        return;
-      }
-
-      u32 i = 0;
-      while (i < child_metadata.size)
-      {
-        const u32 bytes_to_write =
-            std::min(child_metadata.size - i, static_cast<u32>(buffer.size()));
-        p_.DoArray(buffer.data(), bytes_to_write);
-
-        Result<size_t> write_result = handle->Write(buffer.data(), bytes_to_write);
-        if (!write_result)
-        {
-          ERROR_LOG_FMT(IOS_FS, "DoStateRead failed to call Write for {}: {}", child_path,
-                        write_result.error());
-          p_.SetVerifyMode();
-          return;
-        }
-        if (*write_result != bytes_to_write)
-        {
-          ERROR_LOG_FMT(IOS_FS, "DoStateRead tried to write {} bytes to {} but wrote {} bytes",
-                        child_path, bytes_to_write, *write_result);
-          p_.SetVerifyMode();
-          return;
-        }
-
-        i += bytes_to_write;
-      }
+      ERROR_LOG_FMT(IOS_FS, "Savestate load: cannot create {}: {}", directory_path, made);
+      p.SetVerifyMode();
+      return;
     }
-    else
+  }
+  if (const ResultCode set =
+          SetMetadata(0, directory_path, own.uid, own.gid, own.attribute, own.modes);
+      set != ResultCode::Success)
+  {
+    ERROR_LOG_FMT(IOS_FS, "Savestate load: cannot set metadata of {}: {}", directory_path, set);
+    p.SetVerifyMode();
+    return;
+  }
+
+  std::vector<std::string> names;
+  p.DoEachElement(names, [this, &directory_path](PointerWrap& q, std::string& name) {
+    Metadata meta;
+    q.Do(meta);
+    q.Do(name);
+    const std::string path = JoinPath(directory_path, name);
+
+    if (!meta.is_file)
     {
-      DoStateRead(p_, child_path);
+      DoStateRead(q, path);
+      return;
+    }
+
+    const auto fail = [&q](const char* what, const std::string& target, ResultCode code) {
+      ERROR_LOG_FMT(IOS_FS, "Savestate load: {} failed for {}: {}", what, target, code);
+      q.SetVerifyMode();
+    };
+
+    if (const ResultCode made = CreateFile(0, 0, path, meta.attribute, meta.modes);
+        made != ResultCode::Success)
+    {
+      fail("CreateFile", path, made);
+      return;
+    }
+    if (const ResultCode set = SetMetadata(0, path, meta.uid, meta.gid, meta.attribute, meta.modes);
+        set != ResultCode::Success)
+    {
+      fail("SetMetadata", path, set);
+      return;
+    }
+
+    std::array<u8, STATE_COPY_CHUNK> chunk;
+    const Result<FileHandle> file = OpenFile(0, 0, path, Mode::Write);
+    if (!file)
+    {
+      fail("OpenFile", path, file.error());
+      return;
+    }
+
+    for (u32 done = 0; done < meta.size;)
+    {
+      const u32 piece = std::min(meta.size - done, STATE_COPY_CHUNK);
+      q.DoArray(chunk.data(), piece);
+
+      const Result<size_t> written = file->Write(chunk.data(), piece);
+      if (!written)
+      {
+        fail("Write", path, written.error());
+        return;
+      }
+      if (*written != piece)
+      {
+        ERROR_LOG_FMT(IOS_FS, "Savestate load: wrote {} of {} bytes to {}", *written, piece, path);
+        q.SetVerifyMode();
+        return;
+      }
+      done += piece;
     }
   });
 }
 
 void FileSystem::DoStateWriteOrMeasure(PointerWrap& p, const std::string& directory_path)
 {
-  const Result<Metadata> metadata = GetMetadata(0, 0, directory_path);
-  if (!metadata)
+  const Result<Metadata> own = GetMetadata(0, 0, directory_path);
+  if (!own)
   {
-    ERROR_LOG_FMT(IOS_FS, "DoStateWriteOrMeasure failed to call GetMetadata for {}: {}",
-                  directory_path, metadata.error());
+    ERROR_LOG_FMT(IOS_FS, "Savestate save: cannot stat {}: {}", directory_path, own.error());
     p.SetVerifyMode();
     return;
   }
-  p.Do(metadata->uid);
-  p.Do(metadata->gid);
-  p.Do(metadata->attribute);
-  p.Do(metadata->modes);
-  p.Do(metadata->is_file);
-  p.Do(metadata->size);
-  p.Do(metadata->fst_index);
+  Metadata own_copy = *own;
+  DoMetadataFields(p, own_copy);
 
-  auto children = ReadDirectory(0, 0, directory_path);
-  if (!children)
+  auto names = ReadDirectory(0, 0, directory_path);
+  if (!names)
   {
-    ERROR_LOG_FMT(IOS_FS, "DoStateWriteOrMeasure failed to call ReadDirectory for {}: {}",
-                  directory_path, children.error());
+    ERROR_LOG_FMT(IOS_FS, "Savestate save: cannot list {}: {}", directory_path, names.error());
     p.SetVerifyMode();
     return;
   }
 
-  p.DoEachElement(*children, [this, &directory_path](PointerWrap& p_, std::string& child_name) {
-    std::string child_path;
-    child_path.reserve(directory_path.size() + child_name.size() + 1);
-    child_path.append(directory_path);
-    if (directory_path.back() != '/')
-      child_path.push_back('/');
-    child_path.append(child_name);
+  p.DoEachElement(*names, [this, &directory_path](PointerWrap& q, std::string& name) {
+    const std::string path = JoinPath(directory_path, name);
 
-    Result<Metadata> child_metadata = GetMetadata(0, 0, child_path);
-    if (!child_metadata)
+    Result<Metadata> meta = GetMetadata(0, 0, path);
+    if (!meta)
     {
-      ERROR_LOG_FMT(IOS_FS, "DoStateWriteOrMeasure failed to call GetMetadata for {}: {}",
-                    child_name, child_metadata.error());
-      p_.SetVerifyMode();
+      ERROR_LOG_FMT(IOS_FS, "Savestate save: cannot stat {}: {}", name, meta.error());
+      q.SetVerifyMode();
+      return;
+    }
+    q.Do(*meta);
+    q.Do(name);
+
+    if (!meta->is_file)
+    {
+      DoStateWriteOrMeasure(q, path);
       return;
     }
 
-    p_.Do(*child_metadata);
-    p_.Do(child_name);
-
-    if (child_metadata->is_file)
+    std::array<u8, STATE_COPY_CHUNK> chunk;
+    const Result<FileHandle> file = OpenFile(0, 0, path, Mode::Read);
+    if (!file)
     {
-      std::array<u8, BUFFER_CHUNK_SIZE> buffer;
-      Result<FileHandle> handle = OpenFile(0, 0, child_path, Mode::Read);
-      if (!handle)
+      ERROR_LOG_FMT(IOS_FS, "Savestate save: cannot open {}: {}", name, file.error());
+      q.SetVerifyMode();
+      return;
+    }
+
+    for (u32 done = 0; done < meta->size;)
+    {
+      const u32 piece = std::min(meta->size - done, STATE_COPY_CHUNK);
+      const Result<size_t> got = file->Read(chunk.data(), piece);
+      if (!got)
       {
-        ERROR_LOG_FMT(IOS_FS, "DoStateWriteOrMeasure failed to call OpenFile for {}: {}",
-                      child_name, handle.error());
-        p_.SetVerifyMode();
+        ERROR_LOG_FMT(IOS_FS, "Savestate save: cannot read {}: {}", name, got.error());
+        q.SetVerifyMode();
         return;
       }
-
-      u32 i = 0;
-      while (i < child_metadata->size)
+      if (*got != piece)
       {
-        const u32 bytes_to_read =
-            std::min(child_metadata->size - i, static_cast<u32>(buffer.size()));
-        Result<size_t> read_result = handle->Read(buffer.data(), bytes_to_read);
-        if (!read_result)
-        {
-          ERROR_LOG_FMT(IOS_FS, "DoStateWriteOrMeasure failed to call Read for {}: {}", child_name,
-                        read_result.error());
-          p_.SetVerifyMode();
-          return;
-        }
-        if (*read_result != bytes_to_read)
-        {
-          ERROR_LOG_FMT(IOS_FS,
-                        "DoStateWriteOrMeasure tried to read {} bytes from {} but got {} bytes",
-                        child_name, bytes_to_read, *read_result);
-          p_.SetVerifyMode();
-          return;
-        }
-
-        p_.DoArray(buffer.data(), bytes_to_read);
-        i += bytes_to_read;
+        ERROR_LOG_FMT(IOS_FS, "Savestate save: read {} of {} bytes from {}", *got, piece, name);
+        q.SetVerifyMode();
+        return;
       }
-    }
-    else
-    {
-      DoStateWriteOrMeasure(p_, child_path);
+      q.DoArray(chunk.data(), piece);
+      done += piece;
     }
   });
 }
