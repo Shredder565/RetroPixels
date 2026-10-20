@@ -1,29 +1,79 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/api/Wiimote/NativeWiimoteController.h"
 
 #include "input/api/Wiimote/WiimoteControllerProvider.h"
 
 #include <pugixml.hpp>
 
+namespace
+{
+	struct NamedButton
+	{
+		uint64 id;
+		std::string_view name;
+	};
+
+	constexpr NamedButton kNames[] = {
+		{ kWiimoteButton_A, "A" },
+		{ kWiimoteButton_B, "B" },
+		{ kWiimoteButton_One, "1" },
+		{ kWiimoteButton_Two, "2" },
+		{ kWiimoteButton_Plus, "+" },
+		{ kWiimoteButton_Minus, "-" },
+		{ kWiimoteButton_Home, "HOME" },
+		{ kWiimoteButton_Up, "UP" },
+		{ kWiimoteButton_Down, "DOWN" },
+		{ kWiimoteButton_Left, "LEFT" },
+		{ kWiimoteButton_Right, "RIGHT" },
+
+		{ kWiimoteButton_C, "C" },
+		{ kWiimoteButton_Z, "Z" },
+
+		{ kHighestWiimote + kClassicButton_A, "A" },
+		{ kHighestWiimote + kClassicButton_B, "B" },
+		{ kHighestWiimote + kClassicButton_Y, "Y" },
+		{ kHighestWiimote + kClassicButton_X, "X" },
+		{ kHighestWiimote + kClassicButton_Plus, "+" },
+		{ kHighestWiimote + kClassicButton_Minus, "-" },
+		{ kHighestWiimote + kClassicButton_Home, "HOME" },
+		{ kHighestWiimote + kClassicButton_Up, "UP" },
+		{ kHighestWiimote + kClassicButton_Down, "DOWN" },
+		{ kHighestWiimote + kClassicButton_Left, "LEFT" },
+		{ kHighestWiimote + kClassicButton_Right, "RIGHT" },
+		{ kHighestWiimote + kClassicButton_L, "L" },
+		{ kHighestWiimote + kClassicButton_R, "R" },
+		{ kHighestWiimote + kClassicButton_ZL, "ZL" },
+		{ kHighestWiimote + kClassicButton_ZR, "ZR" },
+	};
+
+	void SetBits(ControllerState& out, uint64 bits, uint32 first_id)
+	{
+		for (uint32 bit = 0; bit < 64 && (bits >> bit) != 0; ++bit)
+		{
+			if ((bits >> bit) & 1)
+				out.buttons.SetButtonState(first_id + bit, true);
+		}
+	}
+}
+
 NativeWiimoteController::NativeWiimoteController(size_t index)
 	: base_type(fmt::format("{}", index), fmt::format("Controller {}", index + 1)), m_index(index)
 {
-	m_settings.motion = true;
+	m_settings.motion = true; // a remote always has an accelerometer
 }
 
 void NativeWiimoteController::save(pugi::xml_node& node)
 {
 	base_type::save(node);
-
-	node.append_child("packet_delay").append_child(pugi::node_pcdata).set_value(
-		fmt::format("{}", m_packet_delay).c_str());
+	auto delay = node.append_child("packet_delay");
+	delay.append_child(pugi::node_pcdata).set_value(fmt::format("{}", m_packet_delay).c_str());
 }
 
 void NativeWiimoteController::load(const pugi::xml_node& node)
 {
 	base_type::load(node);
-
-	if (const auto value = node.child("packet_delay"))
-		m_packet_delay = ConvertString<uint32>(value.child_value());
+	if (auto delay = node.child("packet_delay"))
+		m_packet_delay = ConvertString<uint32>(delay.child_value());
 }
 
 bool NativeWiimoteController::connect()
@@ -31,48 +81,41 @@ bool NativeWiimoteController::connect()
 	if (is_connected())
 		return true;
 
+	// a remote that was never seen: let the provider pick up new devices first
 	if (!m_provider->is_registered_device(m_index))
-	{
 		m_provider->get_controllers();
-	}
 
-	if (m_provider->is_connected(m_index))
-	{
-		m_provider->set_packet_delay(m_index, m_packet_delay);
-		m_provider->set_led(m_index, m_player_index);
-		return true;
-	}
+	if (!m_provider->is_connected(m_index))
+		return false;
 
-	return false;
+	m_provider->set_packet_delay(m_index, m_packet_delay);
+	m_provider->set_led(m_index, m_player_index);
+	return true;
 }
 
 bool NativeWiimoteController::is_connected()
 {
-	if (m_provider->is_connected(m_index))
-	{
-		m_provider->set_packet_delay(m_index, m_packet_delay);
-		return true;
-	}
-
-	return false;
+	if (!m_provider->is_connected(m_index))
+		return false;
+	m_provider->set_packet_delay(m_index, m_packet_delay);
+	return true;
 }
 
 void NativeWiimoteController::set_player_index(size_t player_index)
 {
 	m_player_index = player_index;
-	m_provider->set_led(m_index, m_player_index);
+	m_provider->set_led(m_index, player_index);
 }
 
 NativeWiimoteController::Extension NativeWiimoteController::get_extension() const
 {
-	Extension result = None;
-	const auto ext = m_provider->get_state(m_index).m_extension;
-	if (std::holds_alternative<NunchuckData>(ext))
-		result = Nunchuck;
-	else if (std::holds_alternative<ClassicData>(ext))
-		result = Classic;
-
-	return result;
+	const auto state = m_provider->get_state(m_index);
+	switch (state.m_extension.index())
+	{
+	case 1: return Nunchuck; // NunchuckData
+	case 2: return Classic;  // ClassicData
+	default: return None;
+	}
 }
 
 bool NativeWiimoteController::is_mpls_attached() const
@@ -83,41 +126,39 @@ bool NativeWiimoteController::is_mpls_attached() const
 bool NativeWiimoteController::has_position()
 {
 	const auto state = m_provider->get_state(m_index);
-	return std::any_of(state.ir_camera.dots.cbegin(), state.ir_camera.dots.cend(),
-	                   [](const IRDot& v) { return v.visible; });
+	for (const IRDot& dot : state.ir_camera.dots)
+	{
+		if (dot.visible)
+			return true;
+	}
+	return false;
 }
 
 glm::vec2 NativeWiimoteController::get_position()
 {
-	const auto state = m_provider->get_state(m_index);
-	return state.ir_camera.position;
+	return m_provider->get_state(m_index).ir_camera.position;
 }
 
 glm::vec2 NativeWiimoteController::get_prev_position()
 {
-	const auto state = m_provider->get_state(m_index);
-	return state.ir_camera.m_prev_position;
+	return m_provider->get_state(m_index).ir_camera.m_prev_position;
 }
+
 PositionVisibility NativeWiimoteController::GetPositionVisibility()
 {
-	const auto state = m_provider->get_state(m_index);
-	return state.ir_camera.m_positionVisibility;
+	return m_provider->get_state(m_index).ir_camera.m_positionVisibility;
 }
 
 bool NativeWiimoteController::has_low_battery()
 {
-	const auto state = m_provider->get_state(m_index);
-	return HAS_FLAG(state.flags, kBatteryEmpty);
+	return (m_provider->get_state(m_index).flags & kBatteryEmpty) != 0;
 }
 
 void NativeWiimoteController::start_rumble()
 {
-	if (m_settings.rumble < 1.0f)
-	{
-		return;
-	}
-
-	m_provider->set_rumble(m_index, true);
+	// the remote's motor is on or off, so only full strength turns it on
+	if (m_settings.rumble >= 1.0f)
+		m_provider->set_rumble(m_index, true);
 }
 
 void NativeWiimoteController::stop_rumble()
@@ -127,68 +168,24 @@ void NativeWiimoteController::stop_rumble()
 
 MotionSample NativeWiimoteController::get_motion_sample()
 {
-	const auto state = m_provider->get_state(m_index);
-	return state.motion_sample;
+	return m_provider->get_state(m_index).motion_sample;
 }
 
 MotionSample NativeWiimoteController::get_nunchuck_motion_sample() const
 {
 	const auto state = m_provider->get_state(m_index);
-	if (std::holds_alternative<NunchuckData>(state.m_extension))
-	{
-		return std::get<NunchuckData>(state.m_extension).motion_sample;
-	}
-
+	if (const auto* nunchuk = std::get_if<NunchuckData>(&state.m_extension))
+		return nunchuk->motion_sample;
 	return {};
 }
 
 std::string NativeWiimoteController::get_button_name(uint64 button) const
 {
-	switch (button)
+	for (const auto& entry : kNames)
 	{
-	case kWiimoteButton_A: return "A";
-	case kWiimoteButton_B: return "B";
-
-	case kWiimoteButton_One: return "1";
-	case kWiimoteButton_Two: return "2";
-
-	case kWiimoteButton_Plus: return "+";
-	case kWiimoteButton_Minus: return "-";
-
-	case kWiimoteButton_Home: return "HOME";
-
-	case kWiimoteButton_Up: return "UP";
-	case kWiimoteButton_Down: return "DOWN";
-	case kWiimoteButton_Left: return "LEFT";
-	case kWiimoteButton_Right: return "RIGHT";
-
-	// nunchuck
-	case kWiimoteButton_C: return "C";
-	case kWiimoteButton_Z: return "Z";
-
-	// classic
-	case kHighestWiimote + kClassicButton_A: return "A";
-	case kHighestWiimote + kClassicButton_B: return "B";
-	case kHighestWiimote + kClassicButton_Y: return "Y";
-	case kHighestWiimote + kClassicButton_X: return "X";
-
-	case kHighestWiimote + kClassicButton_Plus: return "+";
-	case kHighestWiimote + kClassicButton_Minus: return "-";
-
-	case kHighestWiimote + kClassicButton_Home: return "HOME";
-
-	case kHighestWiimote + kClassicButton_Up: return "UP";
-	case kHighestWiimote + kClassicButton_Down: return "DOWN";
-	case kHighestWiimote + kClassicButton_Left: return "LEFT";
-	case kHighestWiimote + kClassicButton_Right: return "RIGHT";
-
-	case kHighestWiimote + kClassicButton_L: return "L";
-	case kHighestWiimote + kClassicButton_R: return "R";
-
-	case kHighestWiimote + kClassicButton_ZL: return "ZL";
-	case kHighestWiimote + kClassicButton_ZR: return "ZR";
+		if (entry.id == button)
+			return std::string{ entry.name };
 	}
-
 	return base_type::get_button_name(button);
 }
 
@@ -211,34 +208,23 @@ ControllerState NativeWiimoteController::raw_state()
 		return result;
 
 	const auto state = m_provider->get_state(m_index);
-	for (int i = 0; i < std::numeric_limits<uint16>::digits; i++)
-		result.buttons.SetButtonState(i, (state.buttons & (1 << i)) != 0);
+	SetBits(result, state.buttons, 0);
 
-	if (std::holds_alternative<NunchuckData>(state.m_extension))
+	if (const auto* nunchuk = std::get_if<NunchuckData>(&state.m_extension))
 	{
-		const auto nunchuck = std::get<NunchuckData>(state.m_extension);
-		if (nunchuck.c)
+		if (nunchuk->c)
 			result.buttons.SetButtonState(kWiimoteButton_C, true);
-
-		if (nunchuck.z)
+		if (nunchuk->z)
 			result.buttons.SetButtonState(kWiimoteButton_Z, true);
-
-		result.axis = nunchuck.axis;
+		result.axis = nunchuk->axis;
 	}
-	else if (std::holds_alternative<ClassicData>(state.m_extension))
+	else if (const auto* classic = std::get_if<ClassicData>(&state.m_extension))
 	{
-		const auto classic = std::get<ClassicData>(state.m_extension);
-		uint64 buttons = (uint64)classic.buttons << kHighestWiimote;
-		for (int i = 0; i < std::numeric_limits<uint64>::digits; i++)
-		{
-			// OR with base buttons
-			if((buttons & (1ULL << i)))
-				result.buttons.SetButtonState(i, true);
-		}
-		result.axis = classic.left_axis;
-		result.rotation = classic.right_axis;
-		result.trigger = classic.trigger;
+		// classic buttons sit above the remote's own ids, added to them
+		SetBits(result, classic->buttons, kHighestWiimote);
+		result.axis = classic->left_axis;
+		result.rotation = classic->right_axis;
+		result.trigger = classic->trigger;
 	}
-
 	return result;
 }

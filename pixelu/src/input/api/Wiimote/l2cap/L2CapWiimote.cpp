@@ -1,28 +1,71 @@
-#include "L2CapWiimote.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "input/api/Wiimote/l2cap/L2CapWiimote.h"
+
 #include <bluetooth/l2cap.h>
 #include <fcntl.h>
 #include <unistd.h>
 
-constexpr auto comparator = [](const bdaddr_t& a, const bdaddr_t& b) {
-	return bacmp(&a, &b);
-};
-
-static auto s_addresses = std::map<bdaddr_t, bool, decltype(comparator)>(comparator);
-static std::mutex s_addressMutex;
-
-static bool AttemptConnect(int sockFd, const sockaddr_l2& addr)
+namespace
 {
-	auto res = connect(sockFd, reinterpret_cast<const sockaddr*>(&addr),
-					   sizeof(sockaddr_l2));
-	if (res == 0)
-		return true;
-	return connect(sockFd, reinterpret_cast<const sockaddr*>(&addr),
-				   sizeof(sockaddr_l2)) == 0;
-}
+	// Bluetooth HID channels
+	constexpr uint16 kControlPsm = 0x11;
+	constexpr uint16 kInterruptPsm = 0x13;
 
-static bool AttemptSetNonBlock(int sockFd)
-{
-	return fcntl(sockFd, F_SETFL, fcntl(sockFd, F_GETFL) | O_NONBLOCK) == 0;
+	// HID transaction headers on the interrupt channel
+	constexpr uint8 kOutputHeader = 0xA2; // DATA | output
+	constexpr uint8 kInputHeader = 0xA1;  // DATA | input
+	constexpr size_t kMaxFrame = 23;      // header + report id + 21 bytes
+
+	struct AddressLess
+	{
+		bool operator()(const bdaddr_t& a, const bdaddr_t& b) const { return bacmp(&a, &b) < 0; }
+	};
+
+	// known addresses -> a socket is open to it
+	std::mutex g_candidatesMutex;
+	std::map<bdaddr_t, bool, AddressLess> g_candidates;
+
+	std::string FormatAddress(const bdaddr_t& addr)
+	{
+		const uint8_t* b = addr.b; // stored little endian
+		return fmt::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", b[5], b[4], b[3], b[2], b[1], b[0]);
+	}
+
+	// opens one L2CAP channel to the remote, non-blocking once connected; -1 on failure
+	int OpenChannel(const bdaddr_t& addr, uint16 psm, const char* what)
+	{
+		const int fd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+		if (fd < 0)
+		{
+			cemuLog_logDebug(LogType::Force, "Failed to open {} socket: {}", what, strerror(errno));
+			return -1;
+		}
+
+		sockaddr_l2 target{};
+		target.l2_family = AF_BLUETOOTH;
+		target.l2_psm = htobs(psm);
+		target.l2_bdaddr = addr;
+
+		// a freshly woken remote often refuses the first attempt
+		const auto* raw = reinterpret_cast<const sockaddr*>(&target);
+		bool connected = connect(fd, raw, sizeof(target)) == 0 || connect(fd, raw, sizeof(target)) == 0;
+		if (connected)
+			connected = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0;
+
+		if (!connected)
+		{
+			cemuLog_logDebug(LogType::Force, "Failed to connect {} socket to '{}': {}", what, FormatAddress(addr), strerror(errno));
+			close(fd);
+			return -1;
+		}
+		return fd;
+	}
+
+	void SetInUse(const bdaddr_t& addr, bool in_use)
+	{
+		std::scoped_lock lock(g_candidatesMutex);
+		g_candidates[addr] = in_use;
+	}
 }
 
 L2CapWiimote::L2CapWiimote(int controlFd, int dataFd, bdaddr_t addr)
@@ -34,117 +77,70 @@ L2CapWiimote::~L2CapWiimote()
 {
 	close(m_dataFd);
 	close(m_controlFd);
-	const auto& b = m_addr.b;
-	cemuLog_logDebug(LogType::Force, "Wiimote at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} disconnected", b[5], b[4], b[3], b[2], b[1], b[0]);
-
-	// Re-add to candidate vec
-	s_addressMutex.lock();
-	s_addresses[m_addr] = false;
-	s_addressMutex.unlock();
+	cemuLog_logDebug(LogType::Force, "Wiimote at {} disconnected", FormatAddress(m_addr));
+	SetInUse(m_addr, false); // may be connected again later
 }
 
 void L2CapWiimote::AddCandidateAddress(bdaddr_t addr)
 {
-	std::scoped_lock lock(s_addressMutex);
-	s_addresses.try_emplace(addr, false);
+	std::scoped_lock lock(g_candidatesMutex);
+	g_candidates.try_emplace(addr, false);
 }
 
 std::vector<WiimoteDevicePtr> L2CapWiimote::get_devices()
 {
-	s_addressMutex.lock();
-	std::vector<bdaddr_t> unconnected;
-	for (const auto& [addr, connected] : s_addresses)
+	std::vector<bdaddr_t> free_addresses;
 	{
-		if (!connected)
-			unconnected.push_back(addr);
+		std::scoped_lock lock(g_candidatesMutex);
+		for (const auto& entry : g_candidates)
+		{
+			if (!entry.second)
+				free_addresses.push_back(entry.first);
+		}
 	}
-	s_addressMutex.unlock();
 
-	std::vector<WiimoteDevicePtr> outDevices;
-	for (const auto& addr : unconnected)
+	std::vector<WiimoteDevicePtr> opened;
+	for (const bdaddr_t& addr : free_addresses)
 	{
-		// Control socket, PSM 0x11, needs to be open for the data socket to be opened
-		auto controlFd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
-		if (controlFd < 0)
+		// the interrupt channel can only be opened while the control channel is
+		const int control = OpenChannel(addr, kControlPsm, "control");
+		if (control < 0)
+			continue;
+		const int data = OpenChannel(addr, kInterruptPsm, "data");
+		if (data < 0)
 		{
-			cemuLog_logDebug(LogType::Force, "Failed to open control socket: {}", strerror(errno));
+			close(control);
 			continue;
 		}
-
-		sockaddr_l2 controlAddr{};
-		controlAddr.l2_family = AF_BLUETOOTH;
-		controlAddr.l2_psm = htobs(0x11);
-		controlAddr.l2_bdaddr = addr;
-
-		if (!AttemptConnect(controlFd, controlAddr) || !AttemptSetNonBlock(controlFd))
-		{
-			const auto& b = addr.b;
-			cemuLog_logDebug(LogType::Force, "Failed to connect control socket to '{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}': {}",
-							 b[5], b[4], b[3], b[2], b[1], b[0], strerror(errno));
-			close(controlFd);
-			continue;
-		}
-
-		// Socket for sending and receiving data from controller, PSM 0x13
-		auto dataFd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
-		if (dataFd < 0)
-		{
-			cemuLog_logDebug(LogType::Force, "Failed to open data socket: {}", strerror(errno));
-			close(controlFd);
-			continue;
-		}
-		sockaddr_l2 dataAddr{};
-		dataAddr.l2_family = AF_BLUETOOTH;
-		dataAddr.l2_psm = htobs(0x13);
-		dataAddr.l2_bdaddr = addr;
-
-		if (!AttemptConnect(dataFd, dataAddr) || !AttemptSetNonBlock(dataFd))
-		{
-			const auto& b = addr.b;
-			cemuLog_logDebug(LogType::Force, "Failed to connect data socket to '{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}': {}",
-							 b[5], b[4], b[3], b[2], b[1], b[0], strerror(errno));
-			close(dataFd);
-			close(controlFd);
-			continue;
-		}
-		outDevices.emplace_back(std::make_shared<L2CapWiimote>(controlFd, dataFd, addr));
-
-		s_addressMutex.lock();
-		s_addresses[addr] = true;
-		s_addressMutex.unlock();
+		opened.emplace_back(std::make_shared<L2CapWiimote>(control, data, addr));
+		SetInUse(addr, true);
 	}
-	return outDevices;
+	return opened;
 }
 
 bool L2CapWiimote::write_data(const std::vector<uint8>& data)
 {
-	const auto size = data.size();
-	cemu_assert_debug(size < 23);
-	uint8 buffer[23];
-	// All outgoing messages must be prefixed with 0xA2
-	buffer[0] = 0xA2;
-	std::memcpy(buffer + 1, data.data(), size);
-	const auto outSize = size + 1;
-	return send(m_dataFd, buffer, outSize, 0) == outSize;
+	cemu_assert_debug(data.size() < kMaxFrame);
+	uint8 frame[kMaxFrame];
+	const size_t length = std::min(data.size(), kMaxFrame - 1);
+	frame[0] = kOutputHeader;
+	std::memcpy(frame + 1, data.data(), length);
+	return send(m_dataFd, frame, length + 1, 0) == (ssize_t)(length + 1);
 }
 
 std::optional<std::vector<uint8>> L2CapWiimote::read_data()
 {
-	uint8 buffer[23];
-	const auto nBytes = recv(m_dataFd, buffer, 23, 0);
-
-	if (nBytes < 0 && errno == EWOULDBLOCK)
-		return std::vector<uint8>{};
-	// All incoming messages must be prefixed with 0xA1
-	if (nBytes < 2 || buffer[0] != 0xA1)
+	uint8 frame[kMaxFrame];
+	const ssize_t received = recv(m_dataFd, frame, sizeof(frame), 0);
+	if (received < 0 && errno == EWOULDBLOCK)
+		return std::vector<uint8>{}; // nothing waiting
+	if (received < 2 || frame[0] != kInputHeader)
 		return std::nullopt;
-	return std::vector(buffer + 1, buffer + 1 + nBytes - 1);
+	return std::vector<uint8>(frame + 1, frame + received);
 }
 
-bool L2CapWiimote::operator==(const WiimoteDevice& rhs) const
+bool L2CapWiimote::operator==(const WiimoteDevice& o) const
 {
-	auto mote = dynamic_cast<const L2CapWiimote*>(&rhs);
-	if (!mote)
-		return false;
-	return bacmp(&m_addr, &mote->m_addr) == 0;
+	const auto* other = dynamic_cast<const L2CapWiimote*>(&o);
+	return other && bacmp(&other->m_addr, &m_addr) == 0;
 }

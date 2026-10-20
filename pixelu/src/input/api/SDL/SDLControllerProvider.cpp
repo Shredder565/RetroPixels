@@ -1,23 +1,62 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/api/SDL/SDLControllerProvider.h"
 
 #include "input/api/SDL/SDLController.h"
-#include "util/helpers/TempState.h"
 
 #include <SDL3/SDL.h>
-#include <boost/functional/hash.hpp>
 
-struct SDL_JoystickGUIDHash
+namespace
 {
-	std::size_t operator()(const SDL_GUID& guid) const
+	// SDL's joystick list must not change while we walk it
+	struct JoystickListLock
 	{
-		return boost::hash_value(guid.data);
-	}
-};
+		JoystickListLock() { SDL_LockJoysticks(); }
+		~JoystickListLock() { SDL_UnlockJoysticks(); }
+		JoystickListLock(const JoystickListLock&) = delete;
+		JoystickListLock& operator=(const JoystickListLock&) = delete;
+	};
+
+	// SDL_GetGamepads() result, freed with SDL_free
+	struct GamepadList
+	{
+		int count = 0;
+		SDL_JoystickID* ids = SDL_GetGamepads(&count);
+		~GamepadList() { SDL_free(ids); }
+		GamepadList() = default;
+		GamepadList(const GamepadList&) = delete;
+		GamepadList& operator=(const GamepadList&) = delete;
+		std::span<const SDL_JoystickID> span() const { return ids ? std::span<const SDL_JoystickID>(ids, (size_t)count) : std::span<const SDL_JoystickID>{}; }
+	};
+
+	struct GuidKey
+	{
+		SDL_GUID guid;
+		bool operator<(const GuidKey& o) const { return memcmp(&guid, &o.guid, sizeof(SDL_GUID)) < 0; }
+	};
+
+	constexpr float kStandardGravity = 9.81f; // SDL reports m/s^2
+	// a gap this long (10 s) means the sensor stream restarted
+	constexpr uint64 kSensorGapNs = 10'000'000'000ull;
+
+	constexpr const char* kHintsOn[] = {
+		SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
+		SDL_HINT_JOYSTICK_ENHANCED_REPORTS,
+		SDL_HINT_JOYSTICK_HIDAPI_PS4,
+		SDL_HINT_JOYSTICK_HIDAPI_PS5,
+		SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE,
+		SDL_HINT_JOYSTICK_HIDAPI_SWITCH,
+		SDL_HINT_JOYSTICK_HIDAPI_SWITCH2,
+		SDL_HINT_JOYSTICK_HIDAPI_JOY_CONS,
+		SDL_HINT_JOYSTICK_HIDAPI_STADIA,
+		SDL_HINT_JOYSTICK_HIDAPI_STEAM,
+		SDL_HINT_JOYSTICK_HIDAPI_LUNA,
+	};
+}
 
 SDLControllerProvider::SDLControllerProvider()
 {
 #if !BOOST_OS_MACOS
-	std::scoped_lock _l(s_mutex);
+	std::scoped_lock lock(s_mutex);
 	if (s_initCount.fetch_add(1) == 0)
 	{
 		s_running = true;
@@ -29,79 +68,60 @@ SDLControllerProvider::SDLControllerProvider()
 SDLControllerProvider::~SDLControllerProvider()
 {
 #if !BOOST_OS_MACOS
-	bool shutdownSDL = false;
+	bool last = false;
 	{
-		std::scoped_lock _l(s_mutex);
+		std::scoped_lock lock(s_mutex);
 		if (s_initCount.fetch_sub(1) == 1)
 		{
 			cemu_assert_debug(s_running);
 			s_running = false;
-			shutdownSDL = true;
+			last = true;
 		}
 	}
+	if (!last)
+		return;
 
-	if (shutdownSDL)
-	{
-		// wake the thread with a quit event if it's currently waiting for events
-		SDL_Event evt;
-		SDL_zero(evt);
-		evt.type = SDL_EVENT_QUIT;
-		SDL_PushEvent(&evt);
-		if (s_thread.joinable())
-		{
-			s_thread.join();
-		}
-	}
+	// the event thread may be blocked in SDL_WaitEvent
+	SDL_Event quit;
+	SDL_zero(quit);
+	quit.type = SDL_EVENT_QUIT;
+	SDL_PushEvent(&quit);
+	if (s_thread.joinable())
+		s_thread.join();
 #endif
 }
 
 std::vector<std::shared_ptr<ControllerBase>> SDLControllerProvider::get_controllers()
 {
 	std::vector<std::shared_ptr<ControllerBase>> result;
+	std::map<GuidKey, size_t> seen; // how many gamepads of each GUID came before
 
-	std::unordered_map<SDL_GUID, size_t, SDL_JoystickGUIDHash> guid_counter;
-
-	TempState lock(SDL_LockJoysticks, SDL_UnlockJoysticks);
-	int gamepad_count = 0;
-	SDL_JoystickID *gamepad_ids = SDL_GetGamepads(&gamepad_count);
-	if (gamepad_ids)
+	JoystickListLock lock;
+	const GamepadList gamepads;
+	for (const SDL_JoystickID id : gamepads.span())
 	{
-		for (size_t i = 0; i < gamepad_count; ++i)
-		{
-			const auto guid = SDL_GetGamepadGUIDForID(gamepad_ids[i]);
-			const auto it = guid_counter.try_emplace(guid, 0);
-			if (const char* name = SDL_GetGamepadNameForID(gamepad_ids[i]))
-				result.emplace_back(std::make_shared<SDLController>(guid, it.first->second, name));
-			else
-				result.emplace_back(std::make_shared<SDLController>(guid, it.first->second));
-			++it.first->second;
-		}
-		SDL_free(gamepad_ids);
+		const SDL_GUID guid = SDL_GetGamepadGUIDForID(id);
+		const size_t guid_index = seen[GuidKey{ guid }]++;
+		if (const char* name = SDL_GetGamepadNameForID(id))
+			result.emplace_back(std::make_shared<SDLController>(guid, guid_index, name));
+		else
+			result.emplace_back(std::make_shared<SDLController>(guid, guid_index));
 	}
 	return result;
 }
 
 int SDLControllerProvider::get_index(size_t guid_index, const SDL_GUID& guid) const
 {
-	size_t index = 0;
-	int gamepad_count = 0;
-	TempState lock(SDL_LockJoysticks, SDL_UnlockJoysticks);
-	SDL_JoystickID *gamepad_ids = SDL_GetGamepads(&gamepad_count);
-	if (gamepad_ids)
+	JoystickListLock lock;
+	const GamepadList gamepads;
+	const auto ids = gamepads.span();
+	size_t matches = 0;
+	for (size_t i = 0; i < ids.size(); ++i)
 	{
-		for (size_t i = 0; i < gamepad_count; ++i)
-		{
-			if (guid == SDL_GetGamepadGUIDForID(gamepad_ids[i]))
-			{
-				if (index == guid_index)
-				{
-					SDL_free(gamepad_ids);
-					return i;
-				}
-				++index;
-			}
-		}
-		SDL_free(gamepad_ids);
+		if (!(SDL_GetGamepadGUIDForID(ids[i]) == guid))
+			continue;
+		if (matches++ == guid_index)
+			return (int)i;
 	}
 	return -1;
 }
@@ -109,34 +129,23 @@ int SDLControllerProvider::get_index(size_t guid_index, const SDL_GUID& guid) co
 MotionSample SDLControllerProvider::motion_sample(SDL_JoystickID diid)
 {
 	std::shared_lock lock(s_mutex);
-	auto it = s_motion_states.find(diid);
-	return (it != s_motion_states.end()) ? it->second.data : MotionSample{};
+	const auto it = s_motion_states.find(diid);
+	if (it == s_motion_states.end())
+		return {};
+	return it->second.data;
 }
 
 void SDLControllerProvider::InitSDL()
 {
-	SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH2, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_JOY_CONS, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STADIA, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
-	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_LUNA, "1");
+	for (const char* hint : kHintsOn)
+		SDL_SetHint(hint, "1");
 
 	if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC))
-	{
 		throw std::runtime_error(fmt::format("couldn't initialize SDL: {}", SDL_GetError()));
-	}
 
 	SDL_SetGamepadEventsEnabled(true);
 	if (!SDL_GamepadEventsEnabled())
-	{
 		cemuLog_log(LogType::Force, "Couldn't enable SDL gamecontroller event polling: {}", SDL_GetError());
-	}
 }
 
 void SDLControllerProvider::ShutdownSDL()
@@ -157,130 +166,83 @@ void SDLControllerProvider::HandleSDLEvent(SDL_Event& event)
 {
 	switch (event.type)
 	{
-		case SDL_EVENT_QUIT:
-		{
-			std::scoped_lock _l(s_mutex);
-			s_running = false;
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_AXIS_MOTION: /**< Game controller axis motion */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_BUTTON_DOWN: /**< Game controller button pressed */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_BUTTON_UP: /**< Game controller button released */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_ADDED: /**< A new Game controller has been inserted into the system */
-		{
-			std::scoped_lock _l(s_mutex);
-			InputManager::instance().on_device_changed();
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_REMOVED: /**< An opened Game controller has been removed */
-		{
-			std::scoped_lock _l(s_mutex);
-			InputManager::instance().on_device_changed();
-			s_motion_states.erase(event.gdevice.which);
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_REMAPPED: 			/**< The controller mapping was updated */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:		/**< Game controller touchpad was touched */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:		/**< Game controller touchpad finger was moved */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:			/**< Game controller touchpad finger was lifted */
-		{
-			break;
-		}
-		case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:		/**< Game controller sensor was updated */
-		{
-			SDL_JoystickID id = event.gsensor.which;
-			uint64_t ts = event.gsensor.timestamp;
-			std::scoped_lock _l(s_mutex);
-			auto& state = s_motion_states[id];
-			auto& tracking = state.tracking;
-
-			if (event.gsensor.sensor == SDL_SENSOR_ACCEL)
-			{
-				const auto dif = ts - tracking.lastTimestampAccel;
-				if (dif <= 0)
-				{
-					break;
-				}
-
-				if (dif >= 10000000000)
-				{
-					tracking.hasAcc = false;
-					tracking.hasGyro = false;
-					tracking.lastTimestampAccel = ts;
-					break;
-				}
-
-				tracking.lastTimestampAccel = ts;
-				tracking.acc[0] = -event.gsensor.data[0] / 9.81f;
-				tracking.acc[1] = -event.gsensor.data[1] / 9.81f;
-				tracking.acc[2] = -event.gsensor.data[2] / 9.81f;
-				tracking.hasAcc = true;
-			}
-			if (event.gsensor.sensor == SDL_SENSOR_GYRO)
-			{
-				const auto dif = ts - tracking.lastTimestampGyro;
-				if (dif <= 0)
-				{
-					break;
-				}
-
-				if (dif >= 10000000000)
-				{
-					tracking.hasAcc = false;
-					tracking.hasGyro = false;
-					tracking.lastTimestampGyro = ts;
-					break;
-				}
-
-				tracking.lastTimestampGyro = ts;
-				tracking.gyro[0] = event.gsensor.data[0];
-				tracking.gyro[1] = -event.gsensor.data[1];
-				tracking.gyro[2] = -event.gsensor.data[2];
-				tracking.hasGyro = true;
-			}
-			if (tracking.hasAcc && tracking.hasGyro)
-			{
-				auto ts = std::max(tracking.lastTimestampGyro, tracking.lastTimestampAccel);
-
-				if (ts > tracking.lastTimestampIntegrate)
-				{
-					const auto tsDif = ts - tracking.lastTimestampIntegrate;
-					tracking.lastTimestampIntegrate = ts;
-					float tsDifD = (float)tsDif / 1000000000.0f;
-
-					if (tsDifD >= 1.0f)
-					{
-						tsDifD = 1.0f;
-					}
-
-					state.handler.processMotionSample(tsDifD, tracking.gyro.x, tracking.gyro.y, tracking.gyro.z, tracking.acc.x, -tracking.acc.y, -tracking.acc.z);
-					state.data = state.handler.getMotionSample();
-				}
-
-				tracking.hasAcc = false;
-				tracking.hasGyro = false;
-			}
-			break;
-		}
+	case SDL_EVENT_QUIT:
+	{
+		std::scoped_lock lock(s_mutex);
+		s_running = false;
+		return;
 	}
+	case SDL_EVENT_GAMEPAD_ADDED:
+	{
+		std::scoped_lock lock(s_mutex);
+		InputManager::instance().on_device_changed();
+		return;
+	}
+	case SDL_EVENT_GAMEPAD_REMOVED:
+	{
+		std::scoped_lock lock(s_mutex);
+		InputManager::instance().on_device_changed();
+		s_motion_states.erase(event.gdevice.which);
+		return;
+	}
+	case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+		break;
+	default:
+		// buttons and axes are polled, not taken from events
+		return;
+	}
+
+	const SDL_GamepadSensorEvent& sensor = event.gsensor;
+	const uint64 time = sensor.timestamp;
+	std::scoped_lock lock(s_mutex);
+	MotionState& state = s_motion_states[sensor.which];
+	SensorPair& pending = state.pending;
+
+	// keeps one reading of each sensor; returns false to drop this event
+	const auto accept = [&pending, time](uint64& last) -> bool
+	{
+		const uint64 elapsed = time - last;
+		if (elapsed == 0)
+			return false;
+		last = time;
+		if (elapsed >= kSensorGapNs)
+		{
+			pending.haveAccel = false;
+			pending.haveGyro = false;
+			return false;
+		}
+		return true;
+	};
+
+	if (sensor.sensor == SDL_SENSOR_ACCEL)
+	{
+		if (!accept(pending.accelTime))
+			return;
+		pending.accel = { -sensor.data[0] / kStandardGravity, -sensor.data[1] / kStandardGravity, -sensor.data[2] / kStandardGravity };
+		pending.haveAccel = true;
+	}
+	if (sensor.sensor == SDL_SENSOR_GYRO)
+	{
+		if (!accept(pending.gyroTime))
+			return;
+		pending.gyro = { sensor.data[0], -sensor.data[1], -sensor.data[2] };
+		pending.haveGyro = true;
+	}
+
+	if (!pending.haveAccel || !pending.haveGyro)
+		return;
+
+	// one fused step per accelerometer + gyro pair
+	const uint64 newest = std::max(pending.gyroTime, pending.accelTime);
+	if (newest > pending.fusedTime)
+	{
+		const float dt = std::min((float)(newest - pending.fusedTime) / 1000000000.0f, 1.0f);
+		pending.fusedTime = newest;
+		state.handler.processMotionSample(dt, pending.gyro.x, pending.gyro.y, pending.gyro.z, pending.accel.x, -pending.accel.y, -pending.accel.z);
+		state.data = state.handler.getMotionSample();
+	}
+	pending.haveAccel = false;
+	pending.haveGyro = false;
 }
 
 void SDLControllerProvider::event_thread()

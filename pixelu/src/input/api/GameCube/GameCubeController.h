@@ -1,4 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// One port of a GameCube controller adapter. Button ids are the bits of the adapter's
+// button word.
 
 #include "input/api/Controller.h"
 #include "input/api/GameCube/GameCubeControllerProvider.h"
@@ -9,7 +13,7 @@ class GameCubeController : public Controller<GameCubeControllerProvider>
 {
 public:
 	GameCubeController(uint32 adapter, uint32 index);
-	
+
 	std::string_view api_name() const override
 	{
 		static_assert(to_string(InputAPI::GameCube) == "GameCube");

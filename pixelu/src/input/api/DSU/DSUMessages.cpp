@@ -1,95 +1,102 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/api/DSU/DSUMessages.h"
 #include "util/crypto/crc32.h"
 
-constexpr uint32_t kMagicClient = 'CUSD';
-constexpr uint32_t kMagicServer = 'SUSD';
-constexpr uint16_t kProtocolVersion = 1001;
-
-MessageHeader::MessageHeader(uint32_t magic, uint32_t uid)
-	: m_magic(magic), m_protocol_version(kProtocolVersion), m_uid(uid) { }
-
-void MessageHeader::Finalize(size_t size)
+namespace
 {
-	m_packet_size = (uint16_t)(size - sizeof(MessageHeader));
-	m_crc32 = CRC32(size);
+	// the magic values read as text in the packet: "DSUC" / "DSUS"
+	constexpr uint32_t kClientMagic = 0x43555344;
+	constexpr uint32_t kServerMagic = 0x53555344;
+	constexpr uint16_t kProtocolVersion = 1001;
+
+	constexpr size_t kCRCOffset = offsetof(MessageHeader, crc32);
+
+	MessageHeader ClientHeader(uint32_t uid, MessageType type)
+	{
+		MessageHeader h{};
+		h.magic = kClientMagic;
+		h.protocol_version = kProtocolVersion;
+		h.uid = uid;
+		h.type = type;
+		return h;
+	}
+
+	// fills in the size and CRC once the packet is complete
+	template<typename T>
+	T Seal(T packet)
+	{
+		packet.header.packet_size = (uint16_t)(sizeof(T) - 16);
+		packet.header.crc32 = DSUMessage::PacketCRC(&packet, sizeof(T));
+		return packet;
+	}
+
+	// server packets are checked over the size of the packet type we expect
+	template<typename T>
+	bool HasValidCRC(const T& packet)
+	{
+		return packet.header.crc32 == DSUMessage::PacketCRC(&packet, sizeof(T));
+	}
+
+	DataRequest MakeDataRequest(uint32_t uid, RegisterFlag flags, uint8_t index, const MACAddress_t& mac)
+	{
+		DataRequest r{};
+		r.header = ClientHeader(uid, MessageType::Data);
+		r.flags = flags;
+		r.index = index;
+		r.mac_address = mac;
+		return Seal(r);
+	}
 }
 
-uint32_t MessageHeader::CRC32(size_t size) const
+bool MessageHeader::IsClientMessage() const { return magic == kClientMagic; }
+bool MessageHeader::IsServerMessage() const { return magic == kServerMagic; }
+
+bool VersionResponse::IsValid() const { return HasValidCRC(*this); }
+bool PortInfo::IsValid() const { return HasValidCRC(*this); }
+bool DataResponse::IsValid() const { return HasValidCRC(*this); }
+
+uint32_t DSUMessage::PacketCRC(const void* packet, size_t size)
 {
-	uint32_t tmp, tmp2;
-
-	tmp = m_crc32;
-	m_crc32 = 0;
-	tmp2 = crc32_calc(this, size);
-	m_crc32 = tmp;
-
-	return tmp2;
+	// computed over a copy with the CRC field cleared
+	uint8_t copy[sizeof(DataResponse)];
+	cemu_assert(size <= sizeof(copy) && size >= kCRCOffset + 4);
+	memcpy(copy, packet, size);
+	memset(copy + kCRCOffset, 0, 4);
+	return crc32_calc(copy, size);
 }
 
-bool MessageHeader::IsClientMessage() const { return m_magic == kMagicClient; }
-bool MessageHeader::IsServerMessage() const { return m_magic == kMagicServer; }
-
-Message::Message(uint32_t magic, uint32_t uid, MessageType type)
-	: MessageHeader(magic, uid), m_message_type(type)
+VersionRequest DSUMessage::Version(uint32_t uid)
 {
-	
+	VersionRequest r{};
+	r.header = ClientHeader(uid, MessageType::Version);
+	return Seal(r);
 }
 
-ClientMessage::ClientMessage(uint32_t uid, MessageType message_type)
-	: Message(kMagicClient, uid, message_type) { }
-
-VersionRequest::VersionRequest(uint32_t uid)
-	: ClientMessage(uid, MessageType::Version)
+ListPorts DSUMessage::PortList(uint32_t uid, uint32_t count, const std::array<uint8_t, 4>& indices)
 {
-	Finalize(sizeof(VersionRequest));
+	ListPorts r{};
+	r.header = ClientHeader(uid, MessageType::Information);
+	r.count = count;
+	r.indices = indices;
+	return Seal(r);
 }
 
-ListPorts::ListPorts(uint32_t uid, uint32_t num_pads_requests, const std::array<uint8_t, 4>& request_indices)
-	: ClientMessage(uid, MessageType::Information), m_count(num_pads_requests), m_indices(request_indices)
+DataRequest DSUMessage::Data(uint32_t uid)
 {
-	Finalize(sizeof(ListPorts));
+	return MakeDataRequest(uid, RegisterFlag::AllPads, 0, {});
 }
 
-DataRequest::DataRequest(uint32_t uid)
-	: ClientMessage(uid, MessageType::Data), m_reg_flags(RegisterFlag::AllPads), m_index(0), m_mac_address({})
+DataRequest DSUMessage::Data(uint32_t uid, uint8_t index)
 {
-	Finalize(sizeof(DataRequest));
+	return MakeDataRequest(uid, RegisterFlag::Index, index, {});
 }
 
-DataRequest::DataRequest(uint32_t uid, uint8_t index)
-	: ClientMessage(uid, MessageType::Data), m_reg_flags(RegisterFlag::Index), m_index(index), m_mac_address({})
+DataRequest DSUMessage::Data(uint32_t uid, const MACAddress_t& mac_address)
 {
-	Finalize(sizeof(DataRequest));
+	return MakeDataRequest(uid, RegisterFlag::MACAddress, 0, mac_address);
 }
 
-DataRequest::DataRequest(uint32_t uid, const MACAddress_t& mac_address)
-	: ClientMessage(uid, MessageType::Data), m_reg_flags(RegisterFlag::MACAddress), m_index(0), m_mac_address(mac_address)
+DataRequest DSUMessage::Data(uint32_t uid, uint8_t index, const MACAddress_t& mac_address)
 {
-	Finalize(sizeof(DataRequest));
-}
-
-DataRequest::DataRequest(uint32_t uid, uint8_t index, const MACAddress_t& mac_address)
-	: ClientMessage(uid, MessageType::Data), m_reg_flags(RegisterFlag::Index | RegisterFlag::MACAddress), m_index(index), m_mac_address(mac_address)
-{
-	Finalize(sizeof(DataRequest));
-}
-
-bool ServerMessage::ValidateCRC32(size_t size) const
-{
-	return GetCRC32() == CRC32(size);
-}
-
-bool VersionResponse::IsValid() const
-{
-	return ValidateCRC32(sizeof(VersionResponse));
-}
-
-bool PortInfo::IsValid() const
-{
-	return ValidateCRC32(sizeof(PortInfo));
-}
-
-bool DataResponse::IsValid() const
-{
-	return ValidateCRC32(sizeof(DataResponse));
+	return MakeDataRequest(uid, RegisterFlag::Index | RegisterFlag::MACAddress, index, mac_address);
 }

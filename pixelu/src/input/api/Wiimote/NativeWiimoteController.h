@@ -1,9 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "input/api/Controller.h"
 #include "input/api/Wiimote/WiimoteControllerProvider.h"
 
-// todo: find better name because of emulated nameclash
+// A real Wii remote (plus whatever is plugged into it) used as a host controller.
+// "Native" sets it apart from the emulated WiimoteController.
 class NativeWiimoteController : public Controller<WiimoteControllerProvider>
 {
 public:
@@ -16,7 +18,7 @@ public:
 		Classic,
 		MotionPlus,
 	};
-	
+
 	std::string_view api_name() const override
 	{
 		static_assert(to_string(InputAPI::Wiimote) == "Wiimote");
@@ -30,6 +32,7 @@ public:
 	bool connect() override;
 	bool is_connected() override;
 
+	// the player number shown on the remote's LEDs
 	void set_player_index(size_t player_index);
 
 	Extension get_extension() const;
@@ -41,13 +44,13 @@ public:
 	glm::vec2 get_position() override;
 	glm::vec2 get_prev_position() override;
 	PositionVisibility GetPositionVisibility() override;
-	
+
 	bool has_motion() override { return true; }
 	bool has_rumble() override { return true; }
 
 	bool has_battery() override { return true; }
 	bool has_low_battery() override;
-	
+
 	void start_rumble() override;
 	void stop_rumble() override;
 
@@ -64,4 +67,3 @@ private:
 	size_t m_player_index = 0;
 	uint32 m_packet_delay = WiimoteControllerProvider::kDefaultPacketDelay;
 };
-

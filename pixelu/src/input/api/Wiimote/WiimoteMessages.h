@@ -1,30 +1,35 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-// https://wiibrew.org/wiki/Wiimote
+// Report ids, registers and decoded state of a real Wii remote, as documented on
+// wiibrew.org (Wiimote, Extension Controllers and Motion Plus pages).
 
+// reports the remote sends
 enum InputReportId : uint8
 {
 	kNone = 0,
 
-	kStatus = 0x20,
-	kRead = 0x21,
-	kAcknowledge = 0x22,
+	kStatus = 0x20,      // battery, LEDs, extension plugged in
+	kRead = 0x21,        // answer to a memory read
+	kAcknowledge = 0x22, // result of an output report
 
-	kDataCore = 0x30,
-	kDataCoreAcc = 0x31,
-	kDataCoreExt8 = 0x32,
-	kDataCoreAccIR = 0x33,
-	kDataCoreExt19 = 0x34,
-	kDataCoreAccExt = 0x35,
-	kDataCoreIRExt = 0x36,
-	kDataCoreAccIRExt = 0x37,
-	kDataExt = 0x3d,
+	// data reports: B = buttons, A = accelerometer, I = IR camera, E = extension bytes
+	kDataCore = 0x30,         // BB
+	kDataCoreAcc = 0x31,      // BB AAA
+	kDataCoreExt8 = 0x32,     // BB E*8
+	kDataCoreAccIR = 0x33,    // BB AAA I*12
+	kDataCoreExt19 = 0x34,    // BB E*19
+	kDataCoreAccExt = 0x35,   // BB AAA E*16
+	kDataCoreIRExt = 0x36,    // BB I*10 E*9
+	kDataCoreAccIRExt = 0x37, // BB AAA I*10 E*6
+	kDataExt = 0x3d,          // E*21
 };
 
+// addresses in the remote's EEPROM / register space (24 bit)
 enum RegisterAddress : uint32
 {
-	kRegisterCalibration = 0x16,
-	kRegisterCalibration2 = 0x20, // backup calibration data
+	kRegisterCalibration = 0x16,  // accelerometer calibration in EEPROM
+	kRegisterCalibration2 = 0x20, // its backup copy
 
 	kRegisterIR = 0x4b00030,
 	kRegisterIRSensitivity1 = 0x4b00000,
@@ -33,16 +38,18 @@ enum RegisterAddress : uint32
 
 	kRegisterExtensionEncrypted = 0x4a40040,
 
+	// writing 0x55 / 0x00 here starts an extension unencrypted
 	kRegisterExtension1 = 0x4a400f0,
 	kRegisterExtension2 = 0x4a400fb,
-	kRegisterExtensionType = 0x4a400fa,
-	kRegisterExtensionCalibration = 0x4a40020,
+	kRegisterExtensionType = 0x4a400fa,        // 6 byte id
+	kRegisterExtensionCalibration = 0x4a40020, // 16 bytes
 
 	kRegisterMotionPlusDetect = 0x4a600fa,
 	kRegisterMotionPlusInit = 0x4a600f0,
 	kRegisterMotionPlusEnable = 0x4a600fe,
 };
 
+// 6 byte extension ids, read big endian
 enum ExtensionType : uint64
 {
 	kExtensionNunchuck = 0x0000A4200000,
@@ -65,6 +72,7 @@ enum MemoryType : uint8
 	kRegisterMemory = 0x4,
 };
 
+// flags byte of a status report
 enum StatusBitmask : uint8
 {
 	kBatteryEmpty = 0x1,
@@ -77,10 +85,11 @@ enum StatusBitmask : uint8
 	kLed4 = 0x80
 };
 
+// reports we send; bit 0 of the first payload byte always carries the rumble state
 enum OutputReportId : uint8
 {
 	kLED = 0x11,
-	kType = 0x12,
+	kType = 0x12, // data reporting mode
 	kIR = 0x13,
 	kSpeakerState = 0x14,
 	kStatusRequest = 0x15,
@@ -94,11 +103,12 @@ enum OutputReportId : uint8
 enum IRMode : uint8
 {
 	kIRDisabled,
-	kBasicIR = 1,
-	kExtendedIR = 3,
+	kBasicIR = 1,    // 10 bytes for 4 dots
+	kExtendedIR = 3, // 12 bytes for 4 dots, with size
 	kFullIR = 5,
 };
 
+// button ids of the remote: bit numbers of its two button bytes (read little endian)
 enum WiimoteButtons
 {
 	kWiimoteButton_Left = 0,
@@ -115,13 +125,15 @@ enum WiimoteButtons
 
 	kWiimoteButton_Home = 15,
 
-	// self defined
+	// the Nunchuk's, our own numbering
 	kWiimoteButton_C = 16,
 	kWiimoteButton_Z = 17,
 
+	// Classic Controller buttons are kHighestWiimote + ClassicButtons
 	kHighestWiimote = 20,
 };
 
+// bit numbers in the Classic Controller's button word
 enum ClassicButtons
 {
 	kClassicButton_R = 1,
@@ -141,62 +153,19 @@ enum ClassicButtons
 	kClassicButton_ZL = 15,
 };
 
+// 10 bit accelerometer values at rest and at 1 g
 struct Calibration
 {
 	glm::vec<3, uint16> zero{ 0x200, 0x200, 0x200 };
 	glm::vec<3, uint16> gravity{ 0x240, 0x240, 0x240 };
 };
 
-struct BasicIR
-{
-	uint8 x1;
-	uint8 y1;
-
-	struct
-	{
-		uint8 x2 : 2;
-		uint8 y2 : 2;
-		uint8 x1 : 2;
-		uint8 y1 : 2;
-	} bits;
-	static_assert(sizeof(bits) == 1);
-
-	uint8 x2;
-	uint8 y2;
-};
-static_assert(sizeof(BasicIR) == 5);
-
-struct ExtendedIR
-{
-	uint8 x;
-	uint8 y;
-	struct
-	{
-		uint8 size : 4;
-		uint8 x : 2;
-		uint8 y : 2;
-	} bits;
-	static_assert(sizeof(bits) == 1);
-};
-static_assert(sizeof(ExtendedIR) == 3);
-
 struct IRDot
 {
 	bool visible = false;
-	glm::vec2 pos;
-	glm::vec<2, uint16> raw;
+	glm::vec2 pos;            // 0..1, x mirrored so it follows the pointer
+	glm::vec<2, uint16> raw;  // 0..1023 / 0..767
 	uint32 size;
-};
-
-struct IRCamera
-{
-	IRMode mode;
-	std::array<IRDot, 4> dots{}, prev_dots{};
-
-	glm::vec2 position, m_prev_position;
-	glm::vec2 middle;
-	float distance;
-	std::pair<sint32, sint32> indices{ 0,1 };
 };
 
 struct NunchuchCalibration : Calibration

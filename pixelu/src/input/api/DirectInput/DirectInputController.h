@@ -1,4 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// One DirectInput device, identified by its instance GUID. Profiles also store the
+// product GUID, so the same model plugged into another port is found again.
 
 #include "input/api/DirectInput/DirectInputControllerProvider.h"
 #include "input/api/Controller.h"
@@ -10,7 +14,7 @@ public:
 	DirectInputController(const GUID& guid);
 	DirectInputController(const GUID& guid, std::string_view display_name);
 	~DirectInputController() override;
-	
+
 	std::string_view api_name() const override
 	{
 		static_assert(to_string(InputAPI::DirectInput) == "DirectInput");
@@ -20,12 +24,13 @@ public:
 
 	void save(pugi::xml_node& node) override;
 	void load(const pugi::xml_node& node) override;
-	
+
 	bool connect() override;
 	bool is_connected() override;
 
+	// a constant force effect exists (only with exclusive access)
 	bool has_rumble() override;
-	
+
 	void start_rumble() override;
 	void stop_rumble() override;
 
@@ -38,6 +43,9 @@ protected:
 	ControllerState raw_state() override;
 
 private:
+	void create_rumble_effect();
+	void read_axis_ranges();
+
 	GUID m_guid;
 	GUID m_product_guid{};
 
@@ -45,6 +53,7 @@ private:
 	Microsoft::WRL::ComPtr<IDirectInputDevice8W> m_device;
 	Microsoft::WRL::ComPtr<IDirectInputEffect> m_effect;
 
+	// range of X, Y, Z, RX, RY, RZ as the device reports them
 	std::array<LONG, 6> m_min_axis{};
 	std::array<LONG, 6> m_max_axis{};
 };

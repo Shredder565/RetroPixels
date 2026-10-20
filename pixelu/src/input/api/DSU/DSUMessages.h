@@ -1,6 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-// https://v1993.github.io/cemuhook-protocol/
+// Wire format of the cemuhook "DSU" UDP protocol (version 1001), which motion servers
+// such as DS4Windows, BetterJoy or SteamDeckGyroDSU speak. Every packet starts with a
+// 16 byte header and a 32 bit message type; everything is little endian. The CRC32 is
+// taken over the whole packet with the CRC field set to zero.
 
 #include "Common/enumFlags.h"
 #include "util/math/vector3.h"
@@ -42,6 +46,7 @@ enum class DsBattery : uint8_t
 	Charged = 0xEF
 };
 
+// which pads a data request subscribes to
 enum class RegisterFlag : uint8_t
 {
 	AllPads = 0x00,
@@ -55,108 +60,68 @@ enum class MessageType : uint32_t
 	Version = 0x100000,
 	Information = 0x100001,
 	Data = 0x100002,
-	Rumble = 0x100003, // TODO
+	Rumble = 0x100003, // not used
 };
 
 using MACAddress_t = std::array<uint8_t, 6>;
 
-#pragma pack(push,1)
+#pragma pack(push, 1)
 
-class MessageHeader
+struct MessageHeader
 {
-public:
-	MessageHeader(uint32_t magic, uint32_t uid);
+	uint32_t magic;            // "DSUC" from clients, "DSUS" from servers
+	uint16_t protocol_version;
+	uint16_t packet_size;      // bytes after this header
+	uint32_t crc32;
+	uint32_t uid;              // sender id
+	MessageType type;          // strictly the first field of the payload
 
-	[[nodiscard]] uint16_t GetSize() const { return sizeof(MessageHeader) + m_packet_size; }
-	[[nodiscard]] bool IsClientMessage() const;
-	[[nodiscard]] bool IsServerMessage() const;
-	[[nodiscard]] uint32_t GetCRC32() const { return m_crc32; }
-	
-protected:
-	void Finalize(size_t size);
-
-	[[nodiscard]] uint32_t CRC32(size_t size) const;
-private:
-	uint32_t m_magic;
-	uint16_t m_protocol_version;
-	uint16_t m_packet_size = 0;
-	mutable uint32_t m_crc32 = 0;
-	uint32_t m_uid;
+	uint16_t GetSize() const { return (uint16_t)(16 + packet_size); }
+	MessageType GetMessageType() const { return type; }
+	bool IsClientMessage() const;
+	bool IsServerMessage() const;
 };
-static_assert(sizeof(MessageHeader) == 0x10);
+static_assert(sizeof(MessageHeader) == 0x14);
 
-class Message : public MessageHeader
+// --- sent by us ---
+
+struct VersionRequest
 {
-public:
-	Message(uint32_t magic, uint32_t uid, MessageType type);
-
-	[[nodiscard]] MessageType GetMessageType() const { return m_message_type; }
-private:
-	MessageType m_message_type;
+	MessageHeader header;
 };
-static_assert(sizeof(Message) == 0x14);
+static_assert(sizeof(VersionRequest) == 0x14);
 
-// client messages
-class ClientMessage : public Message
+struct ListPorts
 {
-public:
-	ClientMessage(uint32_t uid, MessageType message_type);
+	MessageHeader header;
+	uint32_t count;                 // how many entries of `indices` are used
+	std::array<uint8_t, 4> indices;
 };
-static_assert(sizeof(ClientMessage) == sizeof(Message));
+static_assert(sizeof(ListPorts) == 0x1C);
 
-class VersionRequest : public ClientMessage
+struct DataRequest
 {
-public:
-	VersionRequest(uint32_t uid);
+	MessageHeader header;
+	RegisterFlag flags;
+	uint8_t index;
+	MACAddress_t mac_address;
 };
-static_assert(sizeof(VersionRequest) == sizeof(ClientMessage));
+static_assert(sizeof(DataRequest) == 0x1C);
 
-class ListPorts : public ClientMessage
+// --- sent by the server ---
+
+struct VersionResponse
 {
-public:
-	ListPorts(uint32_t uid, uint32_t num_pads_requests, const std::array<uint8_t, 4>& request_indices);
-
-private:
-	uint32_t m_count;
-	std::array<uint8_t, 4> m_indices;
-};
-
-class DataRequest : public ClientMessage
-{
-public:
-	DataRequest(uint32_t uid);
-	DataRequest(uint32_t uid, uint8_t index);
-	DataRequest(uint32_t uid, const MACAddress_t& mac_address);
-	DataRequest(uint32_t uid, uint8_t index, const MACAddress_t& mac_address);
-
-private:
-	RegisterFlag m_reg_flags;
-	uint8_t m_index;
-	MACAddress_t m_mac_address;
-};
-
-// server messages
-class ServerMessage : public Message
-{
-public:
-	ServerMessage() = delete;
-
-protected:
-	[[nodiscard]] bool ValidateCRC32(size_t size) const;
-};
-
-class VersionResponse : public ServerMessage
-{
-public:
-	[[nodiscard]] bool IsValid() const;
-	[[nodiscard]] uint16_t GetVersion() const { return m_version; }
-
-private:
-	uint16_t m_version;
+	MessageHeader header;
+	uint16_t version;
 	uint8_t padding[2];
+
+	bool IsValid() const;
+	uint16_t GetVersion() const { return version; }
 };
 static_assert(sizeof(VersionResponse) == 0x18);
 
+// slot description, at the start of both port info and data packets
 struct PortInfoData
 {
 	uint8_t index;
@@ -167,24 +132,16 @@ struct PortInfoData
 	DsBattery battery;
 	uint8_t is_active;
 };
+static_assert(sizeof(PortInfoData) == 0xC);
 
-class PortInfo : public ServerMessage
+struct PortInfo
 {
-public:
-	[[nodiscard]] bool IsValid() const;
+	MessageHeader header;
+	PortInfoData info;
 
-	[[nodiscard]] const PortInfoData& GetInfo() const { return m_info; }
-
-	[[nodiscard]] uint8_t GetIndex() const { return m_info.index; }
-	[[nodiscard]] DsState GetState() const { return m_info.state; }
-	[[nodiscard]] DsModel GetModel() const { return m_info.model; }
-	[[nodiscard]] DsConnection GetConnection() const { return m_info.connection; }
-	[[nodiscard]] MACAddress_t GetMacAddress() const { return m_info.mac_address; }
-	[[nodiscard]] DsBattery GetBattery() const { return m_info.battery; }
-	[[nodiscard]] bool IsActive() const { return m_info.is_active != 0; }
-
-protected:
-	PortInfoData m_info;
+	bool IsValid() const;
+	const PortInfoData& GetInfo() const { return info; }
+	uint8_t GetIndex() const { return info.index; }
 };
 static_assert(sizeof(PortInfo) == 0x20);
 
@@ -192,7 +149,7 @@ struct TouchPoint
 {
 	uint8_t active;
 	uint8_t index;
-	int16_t x, y;
+	int16_t x, y; // 1920 x 942 on a DS4
 };
 static_assert(sizeof(TouchPoint) == 0x6);
 
@@ -200,15 +157,16 @@ struct DataResponseData
 {
 	uint32_t m_packet_index;
 
-	uint8_t state1;
-	uint8_t state2;
+	uint8_t state1; // share, L3, R3, options, up, right, down, left
+	uint8_t state2; // L2, R2, L1, R1, triangle, circle, cross, square
 	uint8_t ps;
 	uint8_t touch;
 
-	// y values are inverted by convention
+	// sticks, 128 is centred; y grows upwards
 	uint8_t lx, ly;
 	uint8_t rx, ry;
 
+	// analog buttons
 	uint8_t dpad_left;
 	uint8_t dpad_down;
 	uint8_t dpad_right;
@@ -226,50 +184,43 @@ struct DataResponseData
 
 	TouchPoint tpad1, tpad2;
 
-	uint64_t motion_timestamp;
-	Vector3f accel;
-	Vector3f gyro;
+	uint64_t motion_timestamp; // microseconds
+	Vector3f accel;            // g
+	Vector3f gyro;             // degrees per second
 };
+static_assert(sizeof(DataResponseData) == 0x44);
 
-class DataResponse : public PortInfo
+struct DataResponse
 {
-public:
-	[[nodiscard]] bool IsValid() const;
+	MessageHeader header;
+	PortInfoData info;
+	DataResponseData data;
 
-	[[nodiscard]] const DataResponseData& GetData() const { return m_data; }
-	
-	uint32_t GetPacketIndex() const { return m_data.m_packet_index; }
-	uint8_t GetState1() const { return m_data.state1; }
-	uint8_t GetState2() const { return m_data.state2; }
-	uint8_t GetPs() const { return m_data.ps; }
-	uint8_t GetTouch() const { return m_data.touch; }
-	uint8_t GetLx() const { return m_data.lx; }
-	uint8_t GetLy() const { return m_data.ly; }
-	uint8_t GetRx() const { return m_data.rx; }
-	uint8_t GetRy() const { return m_data.ry; }
-	uint8_t GetDpadLeft() const { return m_data.dpad_left; }
-	uint8_t GetDpadDown() const { return m_data.dpad_down; }
-	uint8_t GetDpadRight() const { return m_data.dpad_right; }
-	uint8_t GetDpadUp() const { return m_data.dpad_up; }
-	uint8_t GetSquare() const { return m_data.square; }
-	uint8_t GetCross() const { return m_data.cross; }
-	uint8_t GetCircle() const { return m_data.circle; }
-	uint8_t GetTriangle() const { return m_data.triangle; }
-	uint8_t GetR1() const { return m_data.r1; }
-	uint8_t GetL1() const { return m_data.l1; }
-	uint8_t GetR2() const { return m_data.r2; }
-	uint8_t GetL2() const { return m_data.l2; }
-	const TouchPoint& GetTpad1() const { return m_data.tpad1; }
-	const TouchPoint& GetTpad2() const { return m_data.tpad2; }
-	uint64_t GetMotionTimestamp() const { return m_data.motion_timestamp; }
-	
-	const Vector3f& GetAcceleration() const { return m_data.accel; }
-	const Vector3f& GetGyro() const { return m_data.gyro; }
-
-private:
-	DataResponseData m_data;
+	bool IsValid() const;
+	const PortInfoData& GetInfo() const { return info; }
+	const DataResponseData& GetData() const { return data; }
+	uint8_t GetIndex() const { return info.index; }
+	uint64_t GetMotionTimestamp() const { return data.motion_timestamp; }
+	const Vector3f& GetAcceleration() const { return data.accel; }
+	const Vector3f& GetGyro() const { return data.gyro; }
 };
-
-//static_assert(sizeof(DataResponse) == 0x20);
+static_assert(sizeof(DataResponse) == 0x64);
 
 #pragma pack(pop)
+
+namespace DSUMessage
+{
+	// requests, ready to send
+	VersionRequest Version(uint32_t uid);
+	// asks for the slot info of `count` slots
+	ListPorts PortList(uint32_t uid, uint32_t count, const std::array<uint8_t, 4>& indices);
+	// subscribes to the data of every slot
+	DataRequest Data(uint32_t uid);
+	// subscribes to the data of one slot
+	DataRequest Data(uint32_t uid, uint8_t index);
+	DataRequest Data(uint32_t uid, const MACAddress_t& mac_address);
+	DataRequest Data(uint32_t uid, uint8_t index, const MACAddress_t& mac_address);
+
+	// CRC of a packet of `size` bytes as the protocol defines it
+	uint32_t PacketCRC(const void* packet, size_t size);
+}

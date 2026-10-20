@@ -1,28 +1,31 @@
-#include <boost/container/small_vector.hpp>
-
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/api/Keyboard/KeyboardController.h"
 #include "WindowSystem.h"
 
 KeyboardController::KeyboardController()
-	: base_type("keyboard", "Keyboard")
+	: Controller<KeyboardControllerProvider>("keyboard", "Keyboard")
 {
-	
 }
 
 std::string KeyboardController::get_button_name(uint64 button) const
 {
-	return WindowSystem::GetKeyCodeName(button);
+	return WindowSystem::GetKeyCodeName((uint32)button);
 }
 
 ControllerState KeyboardController::raw_state()
 {
-	ControllerState result{};
+	ControllerState state{};
+	auto& window = WindowSystem::GetWindowInfo();
+	// keys typed into the debugger are not game input
+	if (window.debugger_focused)
+		return state;
 
-	if (WindowSystem::GetWindowInfo().debugger_focused)
-		return result;
-
-	boost::container::small_vector<uint32, 16> pressedKeys;
-	WindowSystem::GetWindowInfo().iter_keystates([&pressedKeys](const std::pair<const uint32, bool>& keyState) { if (keyState.second) pressedKeys.emplace_back(keyState.first); });
-	result.buttons.SetPressedButtons(pressedKeys);
-	return result;
+	std::vector<uint32> held;
+	window.iter_keystates([&held](const std::pair<const uint32, bool>& key)
+	{
+		if (key.second)
+			held.push_back(key.first);
+	});
+	state.buttons.SetPressedButtons(held);
+	return state;
 }

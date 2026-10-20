@@ -1,18 +1,19 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// One slot (0..7) of a DSU server. Button ids are the bits of the two button bytes of a
+// data packet, then kButton16 for the touchpad click. The touchpad also gives the
+// pointer position.
 
 #include "input/api/Controller.h"
 #include "input/api/DSU/DSUControllerProvider.h"
-#include "Cafe/HW/AI/AI.h"
-#include "Cafe/HW/AI/AI.h"
-#include "Cafe/HW/AI/AI.h"
-#include "Cafe/HW/AI/AI.h"
 
 class DSUController : public Controller<DSUControllerProvider>
 {
 public:
 	DSUController(uint32 index);
 	DSUController(uint32 index, const DSUProviderSettings& settings);
-	
+
 	std::string_view api_name() const override
 	{
 		static_assert(to_string(InputAPI::DSUClient) == "DSUController");
@@ -20,12 +21,13 @@ public:
 	}
 	InputAPI::Type api() const override { return InputAPI::DSUClient; }
 
+	// the server address is part of the profile
 	void save(pugi::xml_node& node) override;
 	void load(const pugi::xml_node& node) override;
 
 	bool connect() override;
 	bool is_connected() override;
-	
+
 	bool has_motion() override { return true; }
 	MotionSample get_motion_sample() override;
 
@@ -42,4 +44,3 @@ protected:
 private:
 	uint32 m_index;
 };
-

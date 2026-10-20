@@ -1,4 +1,7 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// The keyboard of the emulator's windows. There is always exactly one.
 
 #include "input/api/ControllerProvider.h"
 
