@@ -115,16 +115,26 @@ private:
 };
 #pragma pack()
 
-template <std::size_t position, std::size_t bits, typename T, typename S>
-struct fmt::formatter<BitField<position, bits, T, S>>
+namespace Common::detail
+{
+// Bit fields (and references to array elements) format exactly like their value type: the
+// format spec goes to T's formatter, which then gets the extracted value.
+template <typename T>
+struct BitFieldValueFormatter
 {
   fmt::formatter<T> m_formatter;
-  constexpr auto parse(format_parse_context& ctx) { return m_formatter.parse(ctx); }
-  template <typename FormatContext>
-  auto format(const BitField<position, bits, T, S>& field, FormatContext& ctx) const
+  constexpr auto parse(fmt::format_parse_context& ctx) { return m_formatter.parse(ctx); }
+  template <typename Field, typename FormatContext>
+  auto format(const Field& field, FormatContext& ctx) const
   {
     return m_formatter.format(field.Value(), ctx);
   }
+};
+}  // namespace Common::detail
+
+template <std::size_t position, std::size_t bits, typename T, typename S>
+struct fmt::formatter<BitField<position, bits, T, S>> : Common::detail::BitFieldValueFormatter<T>
+{
 };
 
 template <std::size_t position, std::size_t bits, std::size_t size, typename T, typename S>
@@ -338,26 +348,13 @@ private:
 };
 
 template <std::size_t position, std::size_t bits, std::size_t size, typename T, typename S>
-struct fmt::formatter<BitFieldArrayRef<position, bits, size, T, S>>
+struct fmt::formatter<BitFieldArrayConstRef<position, bits, size, T, S>>
+    : Common::detail::BitFieldValueFormatter<T>
 {
-  fmt::formatter<T> m_formatter;
-  constexpr auto parse(format_parse_context& ctx) { return m_formatter.parse(ctx); }
-  template <typename FormatContext>
-  auto format(const BitFieldArrayRef<position, bits, size, T, S>& ref, FormatContext& ctx) const
-  {
-    return m_formatter.format(ref.Value(), ctx);
-  }
 };
 
 template <std::size_t position, std::size_t bits, std::size_t size, typename T, typename S>
-struct fmt::formatter<BitFieldArrayConstRef<position, bits, size, T, S>>
+struct fmt::formatter<BitFieldArrayRef<position, bits, size, T, S>>
+    : Common::detail::BitFieldValueFormatter<T>
 {
-  fmt::formatter<T> m_formatter;
-  constexpr auto parse(format_parse_context& ctx) { return m_formatter.parse(ctx); }
-  template <typename FormatContext>
-  auto format(const BitFieldArrayConstRef<position, bits, size, T, S>& ref,
-              FormatContext& ctx) const
-  {
-    return m_formatter.format(ref.Value(), ctx);
-  }
 };

@@ -61,30 +61,32 @@ constexpr T& ValueOf(Tagged<Tag, T>& val)
 template <typename T>
 using FailureOr = std::variant<AssemblerError, T>;
 
+// The error is alternative 0, the result alternative 1. The getters throw
+// std::bad_variant_access when asked for the alternative that is not there.
 template <typename T>
 constexpr bool IsFailure(const FailureOr<T>& var)
 {
-  return std::holds_alternative<AssemblerError>(var);
-}
-template <typename T>
-constexpr AssemblerError& GetFailure(FailureOr<T>& var)
-{
-  return std::get<AssemblerError>(var);
-}
-template <typename T>
-constexpr const AssemblerError& GetFailure(const FailureOr<T>& var)
-{
-  return std::get<AssemblerError>(var);
-}
-template <typename T>
-constexpr const T& GetT(const FailureOr<T>& var)
-{
-  return std::get<T>(var);
+  return var.index() == 0;
 }
 template <typename T>
 constexpr T& GetT(FailureOr<T>& var)
 {
-  return std::get<T>(var);
+  return std::get<1>(var);
+}
+template <typename T>
+constexpr const T& GetT(const FailureOr<T>& var)
+{
+  return std::get<1>(var);
+}
+template <typename T>
+constexpr AssemblerError& GetFailure(FailureOr<T>& var)
+{
+  return std::get<0>(var);
+}
+template <typename T>
+constexpr const AssemblerError& GetFailure(const FailureOr<T>& var)
+{
+  return std::get<0>(var);
 }
 
 // Assembler directives (".byte", ".align", ...).

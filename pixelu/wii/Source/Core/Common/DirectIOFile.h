@@ -74,20 +74,17 @@ public:
   // Transfers at the current position and advances it on success.
   bool Read(u8* out_ptr, u64 size)
   {
-    if (!OffsetRead(m_current_offset, out_ptr, size))
-      return false;
-    m_current_offset += size;
-    return true;
+    const bool done = OffsetRead(m_current_offset, out_ptr, size);
+    m_current_offset += done ? size : 0;
+    return done;
   }
-  bool Read(std::span<u8> out_data) { return Read(out_data.data(), out_data.size()); }
-
   bool Write(const u8* in_ptr, u64 size)
   {
-    if (!OffsetWrite(m_current_offset, in_ptr, size))
-      return false;
-    m_current_offset += size;
-    return true;
+    const bool done = OffsetWrite(m_current_offset, in_ptr, size);
+    m_current_offset += done ? size : 0;
+    return done;
   }
+  bool Read(std::span<u8> out_data) { return Read(out_data.data(), out_data.size()); }
   bool Write(std::span<const u8> in_data) { return Write(in_data.data(), in_data.size()); }
 
   // 0 on error.
@@ -113,8 +110,9 @@ public:
   }
 
 private:
-  void Swap(DirectIOFile& other);
+  // A second handle to the same file, with the same position (used for copies).
   DirectIOFile Duplicate() const;
+  void Swap(DirectIOFile& other);
 
 #if defined(_WIN32)
   // HANDLE without including windows.h; -1 is INVALID_HANDLE_VALUE.
