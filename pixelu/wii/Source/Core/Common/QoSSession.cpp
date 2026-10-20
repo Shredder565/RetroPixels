@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/QoSSession.h"
 
@@ -13,82 +12,83 @@ namespace Common
 #if defined(_WIN32)
 QoSSession::QoSSession(ENetPeer* peer, int tos_val) : m_peer(peer)
 {
-  QOS_VERSION ver = {1, 0};
-
-  if (!QOSCreateHandle(&ver, &m_qos_handle))
-    return;
-
-  sockaddr_in sin = {};
-
-  sin.sin_family = AF_INET;
-  sin.sin_port = ENET_HOST_TO_NET_16(peer->host->address.port);
-  sin.sin_addr.s_addr = peer->host->address.host;
-
-  if (QOSAddSocketToFlow(m_qos_handle, peer->host->socket, reinterpret_cast<PSOCKADDR>(&sin),
-                         QOSTrafficTypeControl, QOS_NON_ADAPTIVE_FLOW, &m_qos_flow_id))
+  QOS_VERSION version{};
+  version.MajorVersion = 1;
+  version.MinorVersion = 0;
+  if (!QOSCreateHandle(&version, &m_qos_handle))
   {
-    // We shift the complete ToS value by 3 to get rid of the 3 bit ECN field
-    DWORD dscp = static_cast<DWORD>(tos_val >> 3);
-
-    // Sets DSCP to the same as Linux
-    // This will fail if we're not admin, but we ignore it
-    QOSSetFlow(m_qos_handle, m_qos_flow_id, QOSSetOutgoingDSCPValue, sizeof(DWORD), &dscp, 0,
-               nullptr);
-
-    m_success = true;
+    m_qos_handle = nullptr;
+    return;
   }
+
+  // The flow is keyed on the host socket's own address.
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = ENET_HOST_TO_NET_16(peer->host->address.port);
+  address.sin_addr.s_addr = peer->host->address.host;
+
+  if (!QOSAddSocketToFlow(m_qos_handle, peer->host->socket, reinterpret_cast<PSOCKADDR>(&address),
+                          QOSTrafficTypeControl, QOS_NON_ADAPTIVE_FLOW, &m_qos_flow_id))
+  {
+    return;
+  }
+
+  // DSCP is the ToS byte without its two ECN bits, so the same marking as IP_TOS elsewhere.
+  // Setting it needs administrator rights; without them the flow still exists, so it is not an
+  // error.
+  DWORD dscp = static_cast<DWORD>(tos_val >> 2);
+  QOSSetFlow(m_qos_handle, m_qos_flow_id, QOSSetOutgoingDSCPValue, sizeof(dscp), &dscp, 0,
+             nullptr);
+  m_success = true;
 }
 
-QoSSession::~QoSSession()
+void QoSSession::Release()
 {
-  if (m_qos_handle == nullptr)
-    return;
-
-  if (m_qos_flow_id != 0)
-    QOSRemoveSocketFromFlow(m_qos_handle, m_peer->host->socket, m_qos_flow_id, 0);
-
-  QOSCloseHandle(m_qos_handle);
+  if (m_qos_handle != nullptr)
+  {
+    if (m_qos_flow_id != 0)
+      QOSRemoveSocketFromFlow(m_qos_handle, m_peer->host->socket, m_qos_flow_id, 0);
+    QOSCloseHandle(m_qos_handle);
+  }
+  m_qos_handle = nullptr;
+  m_qos_flow_id = 0;
+  m_peer = nullptr;
+  m_success = false;
 }
 #else
 QoSSession::QoSSession(ENetPeer* peer, int tos_val)
 {
-// Apple systems don't support SO_PRIORITY on BSD sockets, but they do support a flag for
-// marking sockets as a specific type of traffic. `NET_SERVICE_TYPE_RV` should roughly
-// correspond to "low delay tolerant, low-medium loss tolerant, elastic flow, variable
-// packet interval, rate and size".
-#if defined(__APPLE__)
-  constexpr int srv_type = NET_SERVICE_TYPE_RV;
-  setsockopt(peer->host->socket, SOL_SOCKET, SO_NET_SERVICE_TYPE, &srv_type, sizeof(srv_type));
-#endif
-
+  const ENetSocket socket = peer->host->socket;
 #if defined(__linux__)
-  constexpr int priority = 7;
-  setsockopt(peer->host->socket, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority));
+  constexpr int priority = 7;  // highest priority settable without CAP_NET_ADMIN
+  setsockopt(socket, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority));
 #endif
-
-  m_success = setsockopt(peer->host->socket, IPPROTO_IP, IP_TOS, &tos_val, sizeof(tos_val)) == 0;
+  m_success = setsockopt(socket, IPPROTO_IP, IP_TOS, &tos_val, sizeof(tos_val)) == 0;
 }
 
-QoSSession::~QoSSession() = default;
+void QoSSession::Release()
+{
+  m_success = false;
+}
 #endif
+
+QoSSession::~QoSSession()
+{
+  Release();
+}
 
 QoSSession& QoSSession::operator=(QoSSession&& session)
 {
-  if (this != &session)
-  {
+  if (this == &session)
+    return *this;
+
+  Release();
 #if defined(_WIN32)
-    m_qos_handle = session.m_qos_handle;
-    m_qos_flow_id = session.m_qos_flow_id;
-    m_peer = session.m_peer;
-
-    session.m_qos_handle = nullptr;
-    session.m_qos_flow_id = 0;
-    session.m_peer = nullptr;
+  m_qos_handle = std::exchange(session.m_qos_handle, nullptr);
+  m_qos_flow_id = std::exchange(session.m_qos_flow_id, 0);
+  m_peer = std::exchange(session.m_peer, nullptr);
 #endif
-    m_success = session.m_success;
-    session.m_success = false;
-  }
-
+  m_success = std::exchange(session.m_success, false);
   return *this;
 }
 }  // namespace Common

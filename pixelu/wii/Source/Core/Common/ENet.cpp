@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/ENet.h"
 
@@ -8,58 +7,62 @@
 
 namespace Common::ENet
 {
+namespace
+{
+constexpr enet_uint32 LOOPBACK_ADDRESS = 0x0100007f;  // 127.0.0.1 in network byte order
+}
+
 void WakeupThread(ENetHost* host)
 {
-  // Send ourselves a spurious message.  This is hackier than it should be.
-  // comex reported this as https://github.com/lsalzman/enet/issues/23, so
-  // hopefully there will be a better way to do it in the future.
-  ENetAddress address;
+  // ENet has no way to interrupt enet_host_service(), so poke the socket from outside: a single
+  // zero byte sent to the host's own port on the loopback interface.
+  ENetAddress target{};
   if (host->address.port != 0)
-    address.port = host->address.port;
+    target.port = host->address.port;
   else
-    enet_socket_get_address(host->socket, &address);
-  address.host = 0x0100007f;  // localhost
-  u8 byte = 0;
-  ENetBuffer buf;
-  buf.data = &byte;
-  buf.dataLength = 1;
-  enet_socket_send(host->socket, &address, &buf, 1);
+    enet_socket_get_address(host->socket, &target);
+  target.host = LOOPBACK_ADDRESS;
+
+  u8 payload = 0;
+  ENetBuffer buffer;
+  buffer.data = &payload;
+  buffer.dataLength = sizeof(payload);
+  enet_socket_send(host->socket, &target, &buffer, 1);
 }
 
 int ENET_CALLBACK InterceptCallback(ENetHost* host, ENetEvent* event)
 {
-  // wakeup packet received
-  if (host->receivedDataLength == 1 && host->receivedData[0] == 0)
-  {
-    event->type = static_cast<ENetEventType>(SKIPPABLE_EVENT);
-    return 1;
-  }
-  return 0;
+  const bool is_wakeup = host->receivedDataLength == 1 && host->receivedData[0] == 0;
+  if (!is_wakeup)
+    return 0;
+  event->type = static_cast<ENetEventType>(SKIPPABLE_EVENT);
+  return 1;
 }
 
 bool SendPacket(ENetPeer* socket, const sf::Packet& packet, u8 channel_id)
 {
-  if (!socket)
+  if (socket == nullptr)
   {
-    ERROR_LOG_FMT(NETPLAY, "Target socket is null.");
+    ERROR_LOG_FMT(NETPLAY, "Cannot send a packet: no peer.");
     return false;
   }
 
-  ENetPacket* epac =
+  ENetPacket* const enet_packet =
       enet_packet_create(packet.getData(), packet.getDataSize(), ENET_PACKET_FLAG_RELIABLE);
-  if (!epac)
+  if (enet_packet == nullptr)
   {
-    ERROR_LOG_FMT(NETPLAY, "Failed to create ENetPacket ({} bytes).", packet.getDataSize());
+    ERROR_LOG_FMT(NETPLAY, "Could not allocate a {}-byte ENet packet.", packet.getDataSize());
     return false;
   }
 
-  const int result = enet_peer_send(socket, channel_id, epac);
-  if (result != 0)
+  if (const int error = enet_peer_send(socket, channel_id, enet_packet); error != 0)
   {
-    ERROR_LOG_FMT(NETPLAY, "Failed to send ENetPacket (error code {}).", result);
+    ERROR_LOG_FMT(NETPLAY, "enet_peer_send failed ({}).", error);
+    // A packet ENet did not queue anywhere is still ours to free.
+    if (enet_packet->referenceCount == 0)
+      enet_packet_destroy(enet_packet);
     return false;
   }
-
   return true;
 }
 }  // namespace Common::ENet

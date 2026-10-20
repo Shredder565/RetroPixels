@@ -1,41 +1,41 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/SFMLHelper.h"
 
 #include <SFML/Network/Packet.hpp>
 
+namespace
+{
+template <typename T>
+sf::Packet& ReadInto(sf::Packet& packet, Common::BigEndianValue<T>& data)
+{
+  T value{};
+  packet >> value;
+  data = value;
+  return packet;
+}
+}  // namespace
+
 sf::Packet& operator>>(sf::Packet& packet, Common::BigEndianValue<u16>& data)
 {
-  u16 tmp;
-  packet >> tmp;
-  data = tmp;
-  return packet;
+  return ReadInto(packet, data);
 }
 
 sf::Packet& operator>>(sf::Packet& packet, Common::BigEndianValue<u32>& data)
 {
-  u32 tmp;
-  packet >> tmp;
-  data = tmp;
-  return packet;
+  return ReadInto(packet, data);
 }
 
 sf::Packet& operator>>(sf::Packet& packet, Common::BigEndianValue<u64>& data)
 {
-  u64 tmp;
-  packet >> tmp;
-  data = tmp;
-  return packet;
+  return ReadInto(packet, data);
 }
 
 namespace Common
 {
-// SFML's Uint64 type is different depending on platform,
-// so we have this for cleaner code.
 u64 PacketReadU64(sf::Packet& packet)
 {
-  u64 value;
+  u64 value{};
   packet >> value;
   return value;
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: CC0-1.0
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +16,7 @@
 
 namespace Common
 {
+// Receives the traversal client's events (implemented by the netplay client/server).
 class TraversalClientClient
 {
 public:
@@ -26,6 +27,9 @@ public:
   virtual void OnTtlDetermined(u8 ttl) = 0;
 };
 
+// Client side of the traversal protocol (TraversalProto.h). It shares the netplay ENet host's
+// UDP socket: traversal datagrams are picked out of the host's traffic by an intercept hook.
+// Registering gives this machine a host id that others can connect to through the server.
 class TraversalClient
 {
 public:
@@ -43,6 +47,9 @@ public:
     SocketSendError,
     ResendTimeout,
   };
+
+  // Hooks `netHost` and starts registering with `server`:`port`. `port_alt` is the server's
+  // second port, used for the hole-punching TTL test.
   TraversalClient(ENetHost* netHost, std::string server, const u16 port, const u16 port_alt = 0);
   ~TraversalClient();
 
@@ -55,10 +62,15 @@ public:
   bool IsConnecting() const { return m_State == State::Connecting; }
   bool IsConnected() const { return m_State == State::Connected; }
 
+  // Forgets a pending connection request and detaches m_Client.
   void Reset();
+  // Asks the server to set up a connection to the host with id `host`.
   void ConnectToClient(std::string_view host);
+  // (Re)starts registration with the server.
   void ReconnectToServer();
+  // Services the ENet host briefly when nothing else does, then HandleResends().
   void Update();
+  // Retransmits unacknowledged requests and sends keep-alives.
   void HandleResends();
 
   TraversalClientClient* m_Client = nullptr;
@@ -70,8 +82,9 @@ private:
     int tries;
     u32 sendTime;
   };
+
   void HandleServerPacket(TraversalPacket* packet);
-  // called from NetHost
+  // Handles `data` if it came from the server; returns whether it did.
   bool TestPacket(u8* data, size_t size, ENetAddress* from);
   void ResendPacket(OutgoingTraversalPacketInfo* info);
   TraversalRequestId SendTraversalPacket(const TraversalPacket& packet);
@@ -96,6 +109,7 @@ private:
   u16 m_portAlt;
   u32 m_PingTime = 0;
 
+  // TTL test: the smallest TTL whose datagram opens our NAT for the server's reply.
   ENetSocket m_TestSocket = ENET_SOCKET_NULL;
   TraversalRequestId m_TestRequestId = 0;
   u8 m_ttl = 2;
@@ -103,10 +117,11 @@ private:
 };
 
 extern std::unique_ptr<TraversalClient> g_TraversalClient;
-// the NetHost connected to the TraversalClient.
+// The ENet host g_TraversalClient is attached to.
 extern ENet::ENetHostPtr g_MainNetHost;
 
-// Create g_TraversalClient and g_MainNetHost if necessary.
+// Creates (or recreates, when any setting changed) g_MainNetHost and g_TraversalClient.
+// Returns false if the ENet host could not be created.
 bool EnsureTraversalClient(const std::string& server, u16 server_port, u16 server_port_alt = 0,
                            u16 listen_port = 0);
 void ReleaseTraversalClient();

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef USE_UPNP
 
@@ -10,6 +9,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <miniupnpc.h>
 #include <miniwget.h>
 #include <string>
@@ -17,165 +17,171 @@
 #include <upnpcommands.h>
 #include <upnperrors.h>
 
-static UPNPUrls s_urls;
-static IGDdatas s_data;
-static std::array<char, 20> s_our_ip;
-static u16 s_mapped = 0;
-static std::thread s_thread;
+// All router communication happens on one worker thread at a time; the public functions only
+// start and join it, so the state below is never touched concurrently.
 
-// called from ---UPnP--- thread
-// discovers the IGD
-static bool InitUPnP()
+namespace
 {
-  static bool s_inited = false;
-  static bool s_error = false;
+struct Gateway
+{
+  UPNPUrls urls{};
+  IGDdatas data{};
+  std::array<char, 20> local_ip{};  // our address as seen on the way to the gateway
+};
 
-  // Don't init if already inited
-  if (s_inited)
+Gateway s_gateway;
+u16 s_mapped_port = 0;  // 0 = nothing mapped
+std::thread s_worker;
+
+enum class DiscoveryState
+{
+  NotTried,
+  Done,  // finished, whether or not a usable gateway was found
+  Failed,
+};
+DiscoveryState s_discovery = DiscoveryState::NotTried;
+
+using DeviceList = std::unique_ptr<UPNPDev, decltype(&freeUPNPDevlist)>;
+using MallocedChars = std::unique_ptr<char, decltype(&std::free)>;
+
+DeviceList Discover(int* error)
+{
+  constexpr int TIMEOUT_MS = 2000;
+#if MINIUPNPC_API_VERSION >= 14
+  return {upnpDiscover(TIMEOUT_MS, nullptr, nullptr, 0, 0, 2, error), freeUPNPDevlist};
+#else
+  return {upnpDiscover(TIMEOUT_MS, nullptr, nullptr, 0, 0, error), freeUPNPDevlist};
+#endif
+}
+
+// Downloads a device description, also learning our local address. Null on failure.
+MallocedChars FetchDescription(const char* url, int* size)
+{
+  int status = 200;
+#if MINIUPNPC_API_VERSION >= 16
+  void* const body = miniwget_getaddr(url, size, s_gateway.local_ip.data(),
+                                      static_cast<int>(s_gateway.local_ip.size()), 0, &status);
+#else
+  void* const body = miniwget_getaddr(url, size, s_gateway.local_ip.data(),
+                                      static_cast<int>(s_gateway.local_ip.size()), 0);
+#endif
+  MallocedChars result(static_cast<char*>(body), std::free);
+  if (status != 200)
+    result.reset();
+  return result;
+}
+
+// Finds the internet gateway device once per run (a failed discovery is not retried).
+bool EnsureGateway()
+{
+  if (s_discovery == DiscoveryState::Done)
     return true;
-
-  // Don't init if it failed before
-  if (s_error)
+  if (s_discovery == DiscoveryState::Failed)
     return false;
 
-  s_urls = {};
-  s_data = {};
+  s_gateway.urls = {};
+  s_gateway.data = {};
 
-  // Find all UPnP devices
-  int upnperror = 0;
-  std::unique_ptr<UPNPDev, decltype(&freeUPNPDevlist)> devlist(nullptr, freeUPNPDevlist);
-#if MINIUPNPC_API_VERSION >= 14
-  devlist.reset(upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &upnperror));
-#else
-  devlist.reset(upnpDiscover(2000, nullptr, nullptr, 0, 0, &upnperror));
-#endif
-  if (!devlist)
+  int error = 0;
+  const DeviceList devices = Discover(&error);
+  if (!devices)
   {
-    if (upnperror == UPNPDISCOVER_SUCCESS)
-    {
-      WARN_LOG_FMT(NETPLAY, "No UPnP devices could be found.");
-    }
+    if (error == UPNPDISCOVER_SUCCESS)
+      WARN_LOG_FMT(NETPLAY, "UPnP: no devices found.");
     else
-    {
-      WARN_LOG_FMT(NETPLAY, "An error occurred trying to discover UPnP devices: {}",
-                   strupnperror(upnperror));
-    }
-
-    s_error = true;
-
+      WARN_LOG_FMT(NETPLAY, "UPnP: device discovery failed: {}", strupnperror(error));
+    s_discovery = DiscoveryState::Failed;
     return false;
   }
 
-  // Look for the IGD
-  bool found_valid_igd = false;
-  for (UPNPDev* dev = devlist.get(); dev; dev = dev->pNext)
+  bool found = false;
+  for (UPNPDev* device = devices.get(); device != nullptr && !found; device = device->pNext)
   {
-    if (!std::strstr(dev->st, "InternetGatewayDevice"))
+    if (std::strstr(device->st, "InternetGatewayDevice") == nullptr)
       continue;
 
-    int desc_xml_size = 0;
-    std::unique_ptr<char, decltype(&std::free)> desc_xml(nullptr, std::free);
-    int statusCode = 200;
-#if MINIUPNPC_API_VERSION >= 16
-    desc_xml.reset(
-        static_cast<char*>(miniwget_getaddr(dev->descURL, &desc_xml_size, s_our_ip.data(),
-                                            static_cast<int>(s_our_ip.size()), 0, &statusCode)));
-#else
-    desc_xml.reset(static_cast<char*>(miniwget_getaddr(
-        dev->descURL, &desc_xml_size, s_our_ip.data(), static_cast<int>(s_our_ip.size()), 0)));
-#endif
-    if (desc_xml && statusCode == 200)
+    int size = 0;
+    const MallocedChars description = FetchDescription(device->descURL, &size);
+    if (!description)
     {
-      parserootdesc(desc_xml.get(), desc_xml_size, &s_data);
-      GetUPNPUrls(&s_urls, &s_data, dev->descURL, 0);
+      WARN_LOG_FMT(NETPLAY, "UPnP: could not read the gateway description at {}.",
+                   device->descURL);
+      continue;
+    }
 
-      found_valid_igd = true;
-      NOTICE_LOG_FMT(NETPLAY, "Got info from IGD at {}.", dev->descURL);
-      break;
-    }
-    else
-    {
-      WARN_LOG_FMT(NETPLAY, "Error getting info from IGD at {}.", dev->descURL);
-    }
+    parserootdesc(description.get(), size, &s_gateway.data);
+    GetUPNPUrls(&s_gateway.urls, &s_gateway.data, device->descURL, 0);
+    NOTICE_LOG_FMT(NETPLAY, "UPnP: using the gateway at {}.", device->descURL);
+    found = true;
   }
 
-  if (!found_valid_igd)
-    WARN_LOG_FMT(NETPLAY, "Could not find a valid IGD in the discovered UPnP devices.");
+  if (!found)
+    WARN_LOG_FMT(NETPLAY, "UPnP: none of the discovered devices is a usable gateway.");
 
-  s_inited = true;
-
+  s_discovery = DiscoveryState::Done;
   return true;
 }
 
-// called from ---UPnP--- thread
-// Attempt to stop portforwarding.
-// --
-// NOTE: It is important that this happens! A few very crappy routers
-// apparently do not delete UPnP mappings on their own, so if you leave them
-// hanging, the NVRAM will fill with portmappings, and eventually all UPnP
-// requests will fail silently, with the only recourse being a factory reset.
-// --
-static bool UnmapPort(const u16 port)
+// Mappings must be removed explicitly: some routers never expire them and eventually stop
+// accepting new ones when their table is full.
+void RemoveMapping(u16 port)
 {
-  std::string port_str = std::to_string(port);
-  UPNP_DeletePortMapping(s_urls.controlURL, s_data.first.servicetype, port_str.c_str(), "UDP",
-                         nullptr);
-
-  return true;
+  const std::string port_text = std::to_string(port);
+  UPNP_DeletePortMapping(s_gateway.urls.controlURL, s_gateway.data.first.servicetype,
+                         port_text.c_str(), "UDP", nullptr);
 }
 
-// called from ---UPnP--- thread
-// Attempt to portforward!
-static bool MapPort(const char* addr, const u16 port)
+bool AddMapping(const char* local_ip, u16 port)
 {
-  if (s_mapped > 0)
-    UnmapPort(s_mapped);
+  if (s_mapped_port != 0)
+    RemoveMapping(s_mapped_port);
 
-  std::string port_str = std::to_string(port);
-  int result = UPNP_AddPortMapping(
-      s_urls.controlURL, s_data.first.servicetype, port_str.c_str(), port_str.c_str(), addr,
-      (std::string("dolphin-emu UDP on ") + addr).c_str(), "UDP", nullptr, nullptr);
-
+  const std::string port_text = std::to_string(port);
+  const std::string description = std::string("dolphin-emu UDP on ") + local_ip;
+  const int result = UPNP_AddPortMapping(s_gateway.urls.controlURL,
+                                         s_gateway.data.first.servicetype, port_text.c_str(),
+                                         port_text.c_str(), local_ip, description.c_str(), "UDP",
+                                         nullptr, nullptr);
   if (result != 0)
     return false;
 
-  s_mapped = port;
-
+  s_mapped_port = port;
   return true;
 }
 
-// UPnP thread: try to map a port
-static void MapPortThread(const u16 port)
+void MapWorker(u16 port)
 {
-  if (InitUPnP() && MapPort(s_our_ip.data(), port))
-  {
-    NOTICE_LOG_FMT(NETPLAY, "Successfully mapped port {} to {}.", port, s_our_ip.data());
-    return;
-  }
-
-  WARN_LOG_FMT(NETPLAY, "Failed to map port {} to {}.", port, s_our_ip.data());
+  const char* const local_ip = s_gateway.local_ip.data();
+  if (EnsureGateway() && AddMapping(local_ip, port))
+    NOTICE_LOG_FMT(NETPLAY, "UPnP: forwarded port {} to {}.", port, local_ip);
+  else
+    WARN_LOG_FMT(NETPLAY, "UPnP: could not forward port {} to {}.", port, local_ip);
 }
 
-// UPnP thread: try to unmap a port
-static void UnmapPortThread()
+void UnmapWorker()
 {
-  if (s_mapped > 0)
-    UnmapPort(s_mapped);
+  if (s_mapped_port != 0)
+    RemoveMapping(s_mapped_port);
 }
+
+void JoinWorker()
+{
+  if (s_worker.joinable())
+    s_worker.join();
+}
+}  // namespace
 
 void Common::UPnP::TryPortmapping(u16 port)
 {
-  if (s_thread.joinable())
-    s_thread.join();
-  s_thread = std::thread(&MapPortThread, port);
+  JoinWorker();
+  s_worker = std::thread(&MapWorker, port);
 }
 
 void Common::UPnP::StopPortmapping()
 {
-  if (s_thread.joinable())
-    s_thread.join();
-  s_thread = std::thread(&UnmapPortThread);
-  s_thread.join();
+  JoinWorker();
+  s_worker = std::thread(&UnmapWorker);
+  JoinWorker();
 }
 
 #endif
