@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 namespace IOS::HLE
 {
+// /dev/usb/ven: access to USB devices of any class (USB interface version 5).
 class USB_VEN final : public USBV5ResourceManager
 {
 public:

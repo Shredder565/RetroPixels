@@ -1,12 +1,12 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 #include "Core/IOS/USB/Common.h"
 
-// Used by an early version of /dev/usb/hid.
+// The USB interface of the early /dev/usb/hid (version 4). Transfers are ioctls whose input
+// buffer is one 32-byte request block (see WiiBrew, /dev/usb/hid).
 
 namespace IOS::HLE
 {
@@ -32,6 +32,8 @@ struct V4CtrlMessage final : CtrlMessage
   V4CtrlMessage(EmulationKernel& ios, const IOCtlRequest& ioctl);
 };
 
+// Reads a string descriptor in US English and replaces anything that is not printable ASCII
+// with '?' before answering, as IOS does.
 struct V4GetUSStringMessage final : CtrlMessage
 {
   V4GetUSStringMessage(EmulationKernel& ios, const IOCtlRequest& ioctl);

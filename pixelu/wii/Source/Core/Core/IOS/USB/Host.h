@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,7 +19,9 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
-// Common base class for USB host devices (such as /dev/usb/oh0 and /dev/usb/ven).
+// Base of the IOS resource managers that hand out USB devices (/dev/usb/oh0, /dev/usb/ven,
+// /dev/usb/hid). It keeps the list of attached devices in sync with the USB scanner and tells
+// subclasses about every insertion and removal.
 class USBHost : public EmulationDevice
 {
 public:
@@ -31,6 +32,7 @@ public:
 
   void DoState(PointerWrap& p) override;
 
+  // Called by the scanner thread whenever the set of host devices changes.
   void OnDevicesChanged(const USBScanner::DeviceMap& new_devices);
 
 protected:
@@ -39,13 +41,15 @@ protected:
     Inserted,
     Removed,
   };
-  using DeviceChangeHooks = std::map<std::shared_ptr<USB::Device>, ChangeEvent>;
 
   std::shared_ptr<USB::Device> GetDeviceById(u64 device_id) const;
   virtual void OnDeviceChange(ChangeEvent event, std::shared_ptr<USB::Device> changed_device);
+  // Called once after a batch of OnDeviceChange calls.
   virtual void OnDeviceChangeEnd();
   virtual bool ShouldAddDevice(const USB::Device& device) const;
 
+  // Runs `submit` for a transfer on `device`. No reply is returned when the transfer was
+  // queued (the backend answers later); otherwise the reply carries the error.
   std::optional<IPCReply> HandleTransfer(const std::shared_ptr<USB::Device>& device, u32 request,
                                          const std::function<s32()>& submit) const;
 
@@ -54,8 +58,8 @@ protected:
 
 private:
   void Update() override;
-  void OnDevicesChangedInternal(const USBScanner::DeviceMap& new_devices);
+  void SyncDeviceList(const USBScanner::DeviceMap& new_devices);
 
-  bool m_has_initialised = false;
+  bool m_scanner_attached = false;
 };
 }  // namespace IOS::HLE

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,7 @@ struct libusb_transfer;
 
 namespace IOS::HLE::USB
 {
+// A real USB device of the host, passed through to the guest with libusb.
 class LibusbDevice final : public Device
 {
 public:
@@ -44,40 +44,51 @@ public:
   int SubmitTransfer(std::unique_ptr<IsoMessage> message) override;
 
 private:
+  // Transfers in flight on one endpoint, keyed by their libusb transfer.
+  class PendingTransfers final
+  {
+  public:
+    void Add(libusb_transfer* transfer, std::unique_ptr<TransferCommand> command);
+    // Answers and forgets the command of a finished transfer. `on_success` copies the data
+    // back and gives the reply value when the transfer completed normally.
+    void Finish(libusb_transfer* transfer,
+                const std::function<s32(const TransferCommand&)>& on_success);
+    void CancelAll();
+
+  private:
+    std::mutex m_lock;
+    std::map<libusb_transfer*, std::unique_ptr<TransferCommand>> m_commands;
+  };
+
+  static void OnControlTransferDone(libusb_transfer* transfer);
+  static void OnTransferDone(libusb_transfer* transfer);
+
+  // Fills in the transfer fields shared by bulk, interrupt and isochronous transfers, queues it
+  // and submits it.
+  int Queue(libusb_transfer* transfer, std::unique_ptr<TransferCommand> command);
+
+  void ApplyPlayStationDisguise();
+  int SendRockBand3InstrumentEnable();
+
+  int ForEachInterface(u8 config_num, const std::function<int(u8)>& action) const;
+  int ClaimAllInterfaces(u8 config_num) const;
+  int ReleaseAllInterfaces(u8 config_num) const;
+  int ReleaseInterfacesOfActiveConfig() const;
+
   std::vector<LibusbUtils::ConfigDescriptor> m_config_descriptors;
   u16 m_vid = 0;
   u16 m_pid = 0;
-  u16 m_spoofed_vid = 0;
-  u16 m_spoofed_pid = 0;
+  // What the guest is told; differs from the real IDs for disguised PlayStation instruments.
+  u16 m_reported_vid = 0;
+  u16 m_reported_pid = 0;
   u8 m_active_interface = 0;
   bool m_device_attached = false;
-  bool m_needs_playstation_rock_band_3_instrument_control_transfer = false;
+  bool m_needs_rb3_instrument_enable = false;
 
   libusb_device* m_device = nullptr;
   libusb_device_handle* m_handle = nullptr;
 
-  class TransferEndpoint final
-  {
-  public:
-    void AddTransfer(std::unique_ptr<TransferCommand> command, libusb_transfer* transfer);
-    void HandleTransfer(libusb_transfer* tr,
-                        const std::function<s32(const TransferCommand&)>& function);
-    void CancelTransfers();
-
-  private:
-    std::mutex m_transfers_mutex;
-    std::map<libusb_transfer*, std::unique_ptr<TransferCommand>> m_transfers;
-  };
-  std::map<u8, TransferEndpoint> m_transfer_endpoints;
-  static void CtrlTransferCallback(libusb_transfer* transfer);
-  static void TransferCallback(libusb_transfer* transfer);
-
-  void DisguisePlayStationDevice();
-  int SubmitPlayStationRockBand3InstrumentControlTransfer();
-
-  int ClaimAllInterfaces(u8 config_num) const;
-  int ReleaseAllInterfaces(u8 config_num) const;
-  int ReleaseAllInterfacesForCurrentConfig() const;
+  std::map<u8, PendingTransfers> m_pending;
 };
 }  // namespace IOS::HLE::USB
 #endif

@@ -1,107 +1,94 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/USB/USBV4.h"
 
 #include <algorithm>
-#include <functional>
 #include <string>
 
 #include "Common/CommonTypes.h"
 #include "Common/StringUtil.h"
-#include "Common/Swap.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/Device.h"
 #include "Core/System.h"
 
 namespace IOS::HLE::USB
 {
-// Source: https://wiibrew.org/w/index.php?title=/dev/usb/hid&oldid=96809
-#pragma pack(push, 1)
-struct HIDRequest
+namespace
 {
-  u8 padding[16];
-  s32 device_no;
-  union
-  {
-    struct
-    {
-      u8 bmRequestType;
-      u8 bmRequest;
-      u16 wValue;
-      u16 wIndex;
-      u16 wLength;
-    } control;
-    struct
-    {
-      u32 endpoint;
-      u32 length;
-    } interrupt;
-    struct
-    {
-      u8 bIndex;
-    } string;
-  };
-  u32 data_addr;
-};
-#pragma pack(pop)
+// Offsets in the 32-byte /dev/usb/hid request block (WiiBrew, /dev/usb/hid). The first 16 bytes
+// are unused and the device number sits at 16.
+constexpr u32 OFFSET_PARAMS = 20;
+constexpr u32 OFFSET_DATA_ADDRESS = 28;
+
+// Control requests: bmRequestType, bRequest, wValue, wIndex, wLength.
+constexpr u32 OFFSET_CTRL_REQUEST_TYPE = OFFSET_PARAMS + 0;
+constexpr u32 OFFSET_CTRL_REQUEST = OFFSET_PARAMS + 1;
+constexpr u32 OFFSET_CTRL_VALUE = OFFSET_PARAMS + 2;
+constexpr u32 OFFSET_CTRL_INDEX = OFFSET_PARAMS + 4;
+constexpr u32 OFFSET_CTRL_LENGTH = OFFSET_PARAMS + 6;
+// Interrupt requests: endpoint (u32), length (u32).
+constexpr u32 OFFSET_INTR_ENDPOINT = OFFSET_PARAMS + 0;
+constexpr u32 OFFSET_INTR_LENGTH = OFFSET_PARAMS + 4;
+// String requests: descriptor index (u8).
+constexpr u32 OFFSET_STRING_INDEX = OFFSET_PARAMS + 0;
+
+constexpr u16 DESCRIPTOR_TYPE_STRING = 0x03;
+constexpr u16 LANGUAGE_ENGLISH_US = 0x0409;
+
+Memory::MemoryManager& GuestMemory(EmulationKernel& ios)
+{
+  return ios.GetSystem().GetMemory();
+}
+}  // namespace
 
 V4CtrlMessage::V4CtrlMessage(EmulationKernel& ios, const IOCtlRequest& ioctl)
     : CtrlMessage(ios, ioctl, 0)
 {
-  auto& system = ios.GetSystem();
-  auto& memory = system.GetMemory();
-
-  HIDRequest hid_request;
-  memory.CopyFromEmu(&hid_request, ioctl.buffer_in, sizeof(hid_request));
-  request_type = hid_request.control.bmRequestType;
-  request = hid_request.control.bmRequest;
-  value = Common::swap16(hid_request.control.wValue);
-  index = Common::swap16(hid_request.control.wIndex);
-  length = Common::swap16(hid_request.control.wLength);
-  data_address = Common::swap32(hid_request.data_addr);
+  const Memory::MemoryManager& memory = GuestMemory(ios);
+  const u32 block = ioctl.buffer_in;
+  request_type = memory.Read_U8(block + OFFSET_CTRL_REQUEST_TYPE);
+  request = memory.Read_U8(block + OFFSET_CTRL_REQUEST);
+  value = memory.Read_U16(block + OFFSET_CTRL_VALUE);
+  index = memory.Read_U16(block + OFFSET_CTRL_INDEX);
+  length = memory.Read_U16(block + OFFSET_CTRL_LENGTH);
+  data_address = memory.Read_U32(block + OFFSET_DATA_ADDRESS);
 }
 
-// Since this is just a standard control request, but with additional requirements
-// (US for the language and replacing non-ASCII characters with '?'),
-// we can simply submit it as a usual control request.
 V4GetUSStringMessage::V4GetUSStringMessage(EmulationKernel& ios, const IOCtlRequest& ioctl)
     : CtrlMessage(ios, ioctl, 0)
 {
-  auto& system = ios.GetSystem();
-  auto& memory = system.GetMemory();
-
-  HIDRequest hid_request;
-  memory.CopyFromEmu(&hid_request, ioctl.buffer_in, sizeof(hid_request));
+  // This is a plain GET_DESCRIPTOR(string) request with a fixed language and maximum length.
+  const Memory::MemoryManager& memory = GuestMemory(ios);
+  const u32 block = ioctl.buffer_in;
   request_type = 0x80;
   request = REQUEST_GET_DESCRIPTOR;
-  value = (0x03 << 8) | hid_request.string.bIndex;
-  index = 0x0409;  // language US
+  value = static_cast<u16>((DESCRIPTOR_TYPE_STRING << 8) |
+                           memory.Read_U8(block + OFFSET_STRING_INDEX));
+  index = LANGUAGE_ENGLISH_US;
   length = 255;
-  data_address = Common::swap32(hid_request.data_addr);
+  data_address = memory.Read_U32(block + OFFSET_DATA_ADDRESS);
 }
 
 void V4GetUSStringMessage::OnTransferComplete(s32 return_value) const
 {
-  auto& system = m_ios.GetSystem();
-  auto& memory = system.GetMemory();
-
-  std::string message = memory.GetString(data_address);
-  std::ranges::replace_if(message, std::not_fn(Common::IsPrintableCharacter), '?');
-  memory.CopyToEmu(data_address, message.c_str(), message.size());
+  Memory::MemoryManager& memory = GuestMemory(m_ios);
+  std::string text = memory.GetString(data_address);
+  for (char& c : text)
+  {
+    if (!Common::IsPrintableCharacter(c))
+      c = '?';
+  }
+  memory.CopyToEmu(data_address, text.data(), text.size());
   TransferCommand::OnTransferComplete(return_value);
 }
 
 V4IntrMessage::V4IntrMessage(EmulationKernel& ios, const IOCtlRequest& ioctl)
     : IntrMessage(ios, ioctl, 0)
 {
-  auto& system = ios.GetSystem();
-  auto& memory = system.GetMemory();
-
-  HIDRequest hid_request;
-  memory.CopyFromEmu(&hid_request, ioctl.buffer_in, sizeof(hid_request));
-  length = Common::swap32(hid_request.interrupt.length);
-  endpoint = static_cast<u8>(Common::swap32(hid_request.interrupt.endpoint));
-  data_address = Common::swap32(hid_request.data_addr);
+  const Memory::MemoryManager& memory = GuestMemory(ios);
+  const u32 block = ioctl.buffer_in;
+  length = memory.Read_U32(block + OFFSET_INTR_LENGTH);
+  endpoint = static_cast<u8>(memory.Read_U32(block + OFFSET_INTR_ENDPOINT));
+  data_address = memory.Read_U32(block + OFFSET_DATA_ADDRESS);
 }
 }  // namespace IOS::HLE::USB

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/USB/USB_HID/HIDv4.h"
 
@@ -22,6 +21,60 @@
 
 namespace IOS::HLE
 {
+namespace
+{
+constexpr u32 HIDV4_VERSION = 0x40001;
+constexpr u8 USB_CLASS_HID = 0x03;
+
+// Size the guest must give for the device-change reply buffer.
+constexpr u32 DEVICE_CHANGE_BUFFER_SIZE = 0x600;
+// Written after the last device section (and alone on shutdown).
+constexpr u32 END_OF_LIST = 0xffffffff;
+
+void AppendBigEndian32(std::vector<u8>* out, u32 value)
+{
+  const u32 big_endian = Common::swap32(value);
+  const auto* bytes = reinterpret_cast<const u8*>(&big_endian);
+  out->insert(out->end(), bytes, bytes + sizeof(big_endian));
+}
+
+// Appends one descriptor in guest byte order, padded with zeros to a multiple of 4 bytes.
+template <typename Descriptor>
+void AppendDescriptor(std::vector<u8>* out, const Descriptor& descriptor)
+{
+  Descriptor swapped = descriptor;
+  swapped.Swap();
+  const auto* bytes = reinterpret_cast<const u8*>(&swapped);
+  out->insert(out->end(), bytes, bytes + sizeof(Descriptor));
+  out->resize(out->size() + (Common::AlignUp(sizeof(Descriptor), 4) - sizeof(Descriptor)), 0);
+}
+
+// The descriptors of a device: device, then for each configuration the configuration followed
+// by its interfaces (last one first), each followed by its endpoints.
+std::vector<u8> SerialiseDescriptors(const USB::Device& device)
+{
+  std::vector<u8> out;
+  AppendDescriptor(&out, device.GetDeviceDescriptor());
+
+  const std::vector<USB::ConfigDescriptor> configurations = device.GetConfigurations();
+  for (size_t index = 0; index < configurations.size(); ++index)
+  {
+    AppendDescriptor(&out, configurations[index]);
+
+    const u8 config = static_cast<u8>(index);
+    const std::vector<USB::InterfaceDescriptor> interfaces = device.GetInterfaces(config);
+    for (auto it = interfaces.rbegin(); it != interfaces.rend(); ++it)
+    {
+      AppendDescriptor(&out, *it);
+      const auto endpoints = device.GetEndpoints(config, it->bInterfaceNumber, it->bAlternateSetting);
+      for (const USB::EndpointDescriptor& endpoint : endpoints)
+        AppendDescriptor(&out, endpoint);
+    }
+  }
+  return out;
+}
+}  // namespace
+
 USB_HIDv4::USB_HIDv4(EmulationKernel& ios, const std::string& device_name)
     : USBHost(ios, device_name)
 {
@@ -31,20 +84,17 @@ USB_HIDv4::~USB_HIDv4() = default;
 
 std::optional<IPCReply> USB_HIDv4::IOCtl(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
   request.Log(GetDeviceName(), Common::Log::LogType::IOS_USB, Common::Log::LogLevel::LDEBUG);
   switch (request.request)
   {
   case USB::IOCTL_USBV4_GETVERSION:
-    return IPCReply(VERSION);
+    return IPCReply(HIDV4_VERSION);
   case USB::IOCTL_USBV4_GETDEVICECHANGE:
     return GetDeviceChange(request);
   case USB::IOCTL_USBV4_SHUTDOWN:
     return Shutdown(request);
   case USB::IOCTL_USBV4_SET_SUSPEND:
-    // Not implemented in IOS
+    // IOS accepts this without doing anything.
     return IPCReply(IPC_SUCCESS);
   case USB::IOCTL_USBV4_CANCELINTERRUPT:
     return CancelInterrupt(request);
@@ -52,47 +102,67 @@ std::optional<IPCReply> USB_HIDv4::IOCtl(const IOCtlRequest& request)
   case USB::IOCTL_USBV4_CTRLMSG:
   case USB::IOCTL_USBV4_INTRMSG_IN:
   case USB::IOCTL_USBV4_INTRMSG_OUT:
-  {
-    if (request.buffer_in == 0 || request.buffer_in_size != 32)
-      return IPCReply(IPC_EINVAL);
-    const auto device = GetDeviceByIOSID(memory.Read_U32(request.buffer_in + 16));
-    if (!device)
-      return IPCReply(IPC_ENOENT);
-    if (!device->Attach())
-      return IPCReply(IPC_EINVAL);
-    return HandleTransfer(device, request.request,
-                          [&, this] { return SubmitTransfer(*device, request); });
-  }
+    return StartTransfer(request);
   default:
     request.DumpUnknown(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_USB);
     return IPCReply(IPC_SUCCESS);
   }
 }
 
+std::optional<IPCReply> USB_HIDv4::StartTransfer(const IOCtlRequest& request)
+{
+  // Every transfer takes a 32-byte request block with the device ID at offset 16.
+  if (request.buffer_in == 0 || request.buffer_in_size != 32)
+    return IPCReply(IPC_EINVAL);
+
+  const s32 guest_id = static_cast<s32>(GetSystem().GetMemory().Read_U32(request.buffer_in + 16));
+  const std::shared_ptr<USB::Device> device = FindByGuestId(guest_id);
+  if (!device)
+    return IPCReply(IPC_ENOENT);
+  if (!device->Attach())
+    return IPCReply(IPC_EINVAL);
+
+  return HandleTransfer(device, request.request, [&]() -> s32 {
+    EmulationKernel& ios = GetEmulationKernel();
+    switch (request.request)
+    {
+    case USB::IOCTL_USBV4_CTRLMSG:
+      return device->SubmitTransfer(std::make_unique<USB::V4CtrlMessage>(ios, request));
+    case USB::IOCTL_USBV4_GET_US_STRING:
+      return device->SubmitTransfer(std::make_unique<USB::V4GetUSStringMessage>(ios, request));
+    case USB::IOCTL_USBV4_INTRMSG_IN:
+    case USB::IOCTL_USBV4_INTRMSG_OUT:
+      return device->SubmitTransfer(std::make_unique<USB::V4IntrMessage>(ios, request));
+    default:
+      return IPC_EINVAL;
+    }
+  });
+}
+
 IPCReply USB_HIDv4::CancelInterrupt(const IOCtlRequest& request)
 {
+  // Input: device ID (u32), endpoint (u8).
   if (request.buffer_in == 0 || request.buffer_in_size != 8)
     return IPCReply(IPC_EINVAL);
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  auto device = GetDeviceByIOSID(memory.Read_U32(request.buffer_in));
+  const Memory::MemoryManager& memory = GetSystem().GetMemory();
+  const std::shared_ptr<USB::Device> device =
+      FindByGuestId(static_cast<s32>(memory.Read_U32(request.buffer_in)));
   if (!device)
     return IPCReply(IPC_ENOENT);
+
   device->CancelTransfer(memory.Read_U8(request.buffer_in + 4));
   return IPCReply(IPC_SUCCESS);
 }
 
 std::optional<IPCReply> USB_HIDv4::GetDeviceChange(const IOCtlRequest& request)
 {
-  std::lock_guard lk{m_devicechange_hook_address_mutex};
-  if (request.buffer_out == 0 || request.buffer_out_size != 0x600)
+  std::lock_guard lock(m_devicechange_hook_address_mutex);
+  if (request.buffer_out == 0 || request.buffer_out_size != DEVICE_CHANGE_BUFFER_SIZE)
     return IPCReply(IPC_EINVAL);
 
   m_devicechange_hook_request = std::make_unique<IOCtlRequest>(GetSystem(), request.address);
-  // If there are pending changes, the reply is sent immediately (instead of on device
-  // insertion/removal).
+  // Answer at once if something changed (or a shutdown happened) since the last request.
   if (m_has_pending_changes || m_is_shut_down)
   {
     TriggerDeviceChangeReply();
@@ -102,14 +172,13 @@ std::optional<IPCReply> USB_HIDv4::GetDeviceChange(const IOCtlRequest& request)
   return std::nullopt;
 }
 
-IPCReply USB_HIDv4::Shutdown(const IOCtlRequest& request)
+IPCReply USB_HIDv4::Shutdown(const IOCtlRequest&)
 {
-  std::lock_guard lk{m_devicechange_hook_address_mutex};
-  if (m_devicechange_hook_request != nullptr)
+  std::lock_guard lock(m_devicechange_hook_address_mutex);
+  if (m_devicechange_hook_request)
   {
-    auto& system = GetSystem();
-    auto& memory = system.GetMemory();
-    memory.Write_U32(0xffffffff, m_devicechange_hook_request->buffer_out);
+    // The waiting request is released with an empty list and -1.
+    GetSystem().GetMemory().Write_U32(END_OF_LIST, m_devicechange_hook_request->buffer_out);
     GetEmulationKernel().EnqueueIPCReply(*m_devicechange_hook_request, -1);
     m_devicechange_hook_request.reset();
     m_is_shut_down = true;
@@ -117,38 +186,16 @@ IPCReply USB_HIDv4::Shutdown(const IOCtlRequest& request)
   return IPCReply(IPC_SUCCESS);
 }
 
-s32 USB_HIDv4::SubmitTransfer(USB::Device& device, const IOCtlRequest& request)
-{
-  switch (request.request)
-  {
-  case USB::IOCTL_USBV4_CTRLMSG:
-    return device.SubmitTransfer(
-        std::make_unique<USB::V4CtrlMessage>(GetEmulationKernel(), request));
-  case USB::IOCTL_USBV4_GET_US_STRING:
-    return device.SubmitTransfer(
-        std::make_unique<USB::V4GetUSStringMessage>(GetEmulationKernel(), request));
-  case USB::IOCTL_USBV4_INTRMSG_IN:
-  case USB::IOCTL_USBV4_INTRMSG_OUT:
-    return device.SubmitTransfer(
-        std::make_unique<USB::V4IntrMessage>(GetEmulationKernel(), request));
-  default:
-    return IPC_EINVAL;
-  }
-}
-
 void USB_HIDv4::DoState(PointerWrap& p)
 {
   p.Do(m_has_pending_changes);
-  u32 hook_address = m_devicechange_hook_request ? m_devicechange_hook_request->address : 0;
+
+  u32 hook_address = 0;
+  if (m_devicechange_hook_request)
+    hook_address = m_devicechange_hook_request->address;
   p.Do(hook_address);
-  if (hook_address != 0)
-  {
-    m_devicechange_hook_request = std::make_unique<IOCtlRequest>(GetSystem(), hook_address);
-  }
-  else
-  {
-    m_devicechange_hook_request.reset();
-  }
+  m_devicechange_hook_request =
+      hook_address == 0 ? nullptr : std::make_unique<IOCtlRequest>(GetSystem(), hook_address);
 
   p.Do(m_ios_ids);
   p.Do(m_device_ids);
@@ -156,47 +203,47 @@ void USB_HIDv4::DoState(PointerWrap& p)
   USBHost::DoState(p);
 }
 
-std::shared_ptr<USB::Device> USB_HIDv4::GetDeviceByIOSID(const s32 ios_id) const
+std::shared_ptr<USB::Device> USB_HIDv4::FindByGuestId(const s32 guest_id) const
 {
-  std::lock_guard lk{m_id_map_mutex};
-  const auto iterator = m_ios_ids.find(ios_id);
-  if (iterator == m_ios_ids.cend())
+  std::lock_guard lock(m_id_map_mutex);
+  const auto found = m_ios_ids.find(guest_id);
+  if (found == m_ios_ids.end())
     return nullptr;
-  return GetDeviceById(iterator->second);
+  return GetDeviceById(found->second);
 }
 
 void USB_HIDv4::OnDeviceChange(ChangeEvent event, std::shared_ptr<USB::Device> device)
 {
   {
-    std::lock_guard id_map_lock{m_id_map_mutex};
+    std::lock_guard lock(m_id_map_mutex);
+    const u64 host_id = device->GetId();
     if (event == ChangeEvent::Inserted)
     {
-      const auto id = device->GetId();
-      s32 new_id = 0;
-      while (!m_ios_ids.emplace(new_id, id).second)
-        ++new_id;
-
-      m_device_ids[id] = new_id;
+      // The smallest ID not in use.
+      s32 guest_id = 0;
+      while (m_ios_ids.contains(guest_id))
+        ++guest_id;
+      m_ios_ids.emplace(guest_id, host_id);
+      m_device_ids[host_id] = guest_id;
     }
     else if (event == ChangeEvent::Removed)
     {
-      if (const auto it = m_device_ids.find(device->GetId()); it != m_device_ids.end())
+      const auto found = m_device_ids.find(host_id);
+      if (found != m_device_ids.end())
       {
-        m_ios_ids.erase(it->second);
-        m_device_ids.erase(it);
+        m_ios_ids.erase(found->second);
+        m_device_ids.erase(found);
       }
     }
   }
 
-  {
-    std::lock_guard lk{m_devicechange_hook_address_mutex};
-    TriggerDeviceChangeReply();
-  }
+  std::lock_guard lock(m_devicechange_hook_address_mutex);
+  TriggerDeviceChangeReply();
 }
 
 bool USB_HIDv4::ShouldAddDevice(const USB::Device& device) const
 {
-  return device.HasClass(HID_CLASS);
+  return device.HasClass(USB_CLASS_HID);
 }
 
 void USB_HIDv4::TriggerDeviceChangeReply()
@@ -207,26 +254,25 @@ void USB_HIDv4::TriggerDeviceChangeReply()
     return;
   }
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
   {
-    std::lock_guard lk(m_devices_mutex);
-    const u32 dest = m_devicechange_hook_request->buffer_out;
-    u32 offset = 0;
-    for (const auto& device : m_devices)
+    std::lock_guard lock(m_devices_mutex);
+    const u32 reply_buffer = m_devicechange_hook_request->buffer_out;
+    // One byte less than the buffer is usable, so that the end marker always fits.
+    const u32 usable = m_devicechange_hook_request->buffer_out_size - 1;
+    u32 used = 0;
+    for (const auto& entry : m_devices)
     {
-      const std::vector<u8> device_section = GetDeviceEntry(*device.second.get());
-      if (offset + device_section.size() > m_devicechange_hook_request->buffer_out_size - 1)
+      const std::vector<u8> section = BuildDeviceSection(*entry.second);
+      if (used + section.size() > usable)
       {
-        WARN_LOG_FMT(IOS_USB, "Too many devices connected, skipping");
+        WARN_LOG_FMT(IOS_USB, "Device list is full; the remaining devices are not reported");
         break;
       }
-      memory.CopyToEmu(dest + offset, device_section.data(), device_section.size());
-      offset += Common::AlignUp(static_cast<u32>(device_section.size()), 4);
+      memory.CopyToEmu(reply_buffer + used, section.data(), section.size());
+      used += Common::AlignUp(static_cast<u32>(section.size()), 4);
     }
-    // IOS writes 0xffffffff to the buffer when there are no more devices
-    memory.Write_U32(0xffffffff, dest + offset);
+    memory.Write_U32(END_OF_LIST, reply_buffer + used);
   }
 
   GetEmulationKernel().EnqueueIPCReply(*m_devicechange_hook_request, IPC_SUCCESS, 0,
@@ -234,56 +280,18 @@ void USB_HIDv4::TriggerDeviceChangeReply()
   m_devicechange_hook_request.reset();
 }
 
-template <typename T>
-static void CopyDescriptorToBuffer(std::vector<u8>* buffer, T descriptor)
+std::vector<u8> USB_HIDv4::BuildDeviceSection(const USB::Device& device) const
 {
-  const size_t size = sizeof(descriptor);
-  descriptor.Swap();
-  buffer->insert(buffer->end(), reinterpret_cast<const u8*>(&descriptor),
-                 reinterpret_cast<const u8*>(&descriptor) + size);
-  constexpr size_t number_of_padding_bytes = Common::AlignUp(size, 4) - size;
-  buffer->insert(buffer->end(), number_of_padding_bytes, 0);
-}
+  std::lock_guard lock(m_id_map_mutex);
 
-static std::vector<u8> GetDescriptors(const USB::Device& device)
-{
-  std::vector<u8> buffer;
-
-  CopyDescriptorToBuffer(&buffer, device.GetDeviceDescriptor());
-  const auto configurations = device.GetConfigurations();
-  for (size_t c = 0; c < configurations.size(); ++c)
-  {
-    CopyDescriptorToBuffer(&buffer, configurations[c]);
-    const auto interfaces = device.GetInterfaces(static_cast<u8>(c));
-    for (size_t i = interfaces.size(); i-- > 0;)
-    {
-      CopyDescriptorToBuffer(&buffer, interfaces[i]);
-      for (const auto& endpoint_descriptor : device.GetEndpoints(
-               static_cast<u8>(c), interfaces[i].bInterfaceNumber, interfaces[i].bAlternateSetting))
-      {
-        CopyDescriptorToBuffer(&buffer, endpoint_descriptor);
-      }
-    }
-  }
-  return buffer;
-}
-
-std::vector<u8> USB_HIDv4::GetDeviceEntry(const USB::Device& device) const
-{
-  std::lock_guard id_map_lock{m_id_map_mutex};
-
-  // The structure for a device section is as follows:
-  //   0-4 bytes: total size of the device data, including the size and the device ID
-  //   4-8 bytes: device ID
-  //   the rest of the buffer is device descriptors data
-  std::vector<u8> entry(8);
-  const std::vector<u8> descriptors = GetDescriptors(device);
-  const u32 entry_size = Common::swap32(static_cast<u32>(entry.size() + descriptors.size()));
-  const u32 ios_device_id = Common::swap32(m_device_ids.at(device.GetId()));
-  std::memcpy(entry.data(), &entry_size, sizeof(entry_size));
-  std::memcpy(entry.data() + 4, &ios_device_id, sizeof(ios_device_id));
-  entry.insert(entry.end(), descriptors.begin(), descriptors.end());
-
-  return entry;
+  // A section is: total size (including these two words), the guest device ID, then the
+  // descriptors.
+  const std::vector<u8> descriptors = SerialiseDescriptors(device);
+  std::vector<u8> section;
+  section.reserve(8 + descriptors.size());
+  AppendBigEndian32(&section, static_cast<u32>(8 + descriptors.size()));
+  AppendBigEndian32(&section, static_cast<u32>(m_device_ids.at(device.GetId())));
+  section.insert(section.end(), descriptors.begin(), descriptors.end());
+  return section;
 }
 }  // namespace IOS::HLE

@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,6 +20,10 @@ namespace IOS::HLE
 {
 class USBHost;
 
+// Keeps the list of USB devices that the emulated USB host interfaces can see: the emulated
+// accessories enabled in the settings plus whitelisted host devices (through libusb). A
+// background thread refreshes the list while at least one USBHost is registered and pushes
+// every change to the registered hosts.
 class USBScanner final
 {
 public:
@@ -28,22 +31,23 @@ public:
 
   ~USBScanner();
 
+  // Both return whether the set of clients changed. The first client starts the scan thread
+  // and the last one to go stops it.
   bool AddClient(USBHost* client);
   bool RemoveClient(USBHost* client);
 
+  // Blocks until the scan thread has produced its first list (if it is running).
   void WaitForFirstScan();
 
   DeviceMap GetDevices() const;
 
 private:
-  void StartScanning();
-  void StopScanning();
+  void StartThread();
+  void StopThread();
+  void ThreadLoop();
 
-  bool UpdateDevices();
-  bool AddNewDevices(DeviceMap* new_devices) const;
-  static void WakeupSantrollerDevice(libusb_device* device);
-  static void AddEmulatedDevices(DeviceMap* new_devices);
-  static void AddDevice(std::unique_ptr<USB::Device> device, DeviceMap* new_devices);
+  bool Rescan();
+  bool CollectDevices(DeviceMap* devices) const;
 
   DeviceMap m_devices;
   mutable std::mutex m_devices_mutex;

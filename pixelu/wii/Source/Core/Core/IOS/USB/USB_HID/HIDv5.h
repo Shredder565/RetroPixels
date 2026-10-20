@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 namespace IOS::HLE
 {
+// /dev/usb/hid from IOS57 on (USB interface version 5).
 class USB_HIDv5 final : public USBV5ResourceManager
 {
 public:
@@ -27,11 +27,14 @@ private:
   bool ShouldAddDevice(const USB::Device& device) const override;
   bool HasInterfaceNumberInIDs() const override { return true; }
 
-  struct AdditionalDeviceData
+  // The interrupt endpoints of each entry, learnt when the guest asks for its parameters.
+  struct InterruptEndpoints
   {
-    u8 interrupt_in_endpoint = 0;
-    u8 interrupt_out_endpoint = 0;
+    u8 in = 0;
+    u8 out = 0;
   };
-  std::array<AdditionalDeviceData, 32> m_additional_device_data{};
+  InterruptEndpoints& EndpointsOf(const USBV5Device& device);
+
+  std::array<InterruptEndpoints, 32> m_interrupt_endpoints{};
 };
 }  // namespace IOS::HLE

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,10 +10,16 @@
 #include "Common/CommonTypes.h"
 #include "Core/IOS/Device.h"
 
+// Shared pieces of the emulated IOS USB stack: the standard USB descriptor layouts (USB 2.0
+// specification, chapter 9), the transfer commands that the host interfaces (OH0, VEN, HID)
+// build from IPC requests, and the abstract device every backend implements.
+
 namespace IOS::HLE::USB
 {
+// IOS (and the guests using it) only ever talks to the first configuration of a device.
 constexpr u8 DEFAULT_CONFIG_NUM = 0;
 
+// bRequest values of the standard requests that need special handling by a backend.
 enum StandardDeviceRequestCodes
 {
   REQUEST_GET_DESCRIPTOR = 6,
@@ -23,6 +28,7 @@ enum StandardDeviceRequestCodes
   REQUEST_SET_INTERFACE = 11,
 };
 
+// Fields of bmRequestType: direction (bit 7), type (bits 5-6) and recipient (bits 0-4).
 enum ControlRequestTypes
 {
   DIR_HOST2DEVICE = 0,
@@ -37,11 +43,16 @@ enum ControlRequestTypes
   REC_OTHER = 3,
 };
 
+// Packs bmRequestType and bRequest into one value (type in the high byte) so that a backend
+// can switch over both at once.
 constexpr u16 USBHDR(u8 dir, u8 type, u8 recipient, u8 request)
 {
-  return static_cast<u16>(((dir << 7 | type << 5 | recipient) << 8) | request);
+  const u32 request_type = (u32{dir} << 7) | (u32{type} << 5) | u32{recipient};
+  return static_cast<u16>((request_type << 8) | u32{request});
 }
 
+// The descriptor structs below are kept in host byte order. Swap() turns the multi-byte fields
+// into the big-endian order the PPC expects (and back).
 struct DeviceDescriptor
 {
   void Swap();
@@ -99,6 +110,8 @@ struct EndpointDescriptor
   u8 bInterval;
 };
 
+// One transfer submitted by the PPC. It remembers the IPC request to answer and where the
+// transfer's data lives in emulated memory.
 struct TransferCommand
 {
   Request ios_request;
@@ -111,11 +124,14 @@ struct TransferCommand
   virtual ~TransferCommand() = default;
 
   EmulationKernel& GetEmulationKernel() const;
-  // Called after a transfer has completed to reply to the IPC request.
-  // This can be overridden for additional processing before replying.
+  // Answers the IPC request once the transfer is done. Subclasses may post-process the data
+  // first.
   virtual void OnTransferComplete(s32 return_value) const;
+  // Answers the IPC request after a delay given in microseconds.
   void ScheduleTransferCompletion(s32 return_value, u32 expected_time_us) const;
+  // Copies `size` bytes of the transfer data out of emulated memory.
   std::unique_ptr<u8[]> MakeBuffer(size_t size) const;
+  // Copies `size` bytes into the transfer data in emulated memory.
   void FillBuffer(const u8* src, size_t size) const;
 
 protected:
@@ -148,6 +164,7 @@ struct IntrMessage : TransferCommand
 
 struct IsoMessage : TransferCommand
 {
+  // Guest array of u16 packet lengths; IOS writes the actual lengths back into it.
   u32 packet_sizes_addr = 0;
   std::vector<u16> packet_sizes;
   u32 length = 0;
@@ -155,13 +172,13 @@ struct IsoMessage : TransferCommand
   u8 endpoint = 0;
   using TransferCommand::TransferCommand;
   void SetPacketReturnValue(size_t packet_num, u16 return_value) const;
+  // Spreads data_size bytes over the packets in order (each packet takes at most its requested
+  // length), writes every packet's length back and returns what did not fit.
   u16 SetPacketsReturnValueFromSize(u16 data_size) const;
-
-private:
-  inline void SetPacketReturnValue(size_t packet_num, u16 return_value,
-                                   Memory::MemoryManager& memory) const;
 };
 
+// A USB device as seen by the emulated host controllers, either passed through from the host
+// (LibusbDevice) or emulated.
 class Device
 {
 public:
@@ -169,6 +186,7 @@ public:
   u64 GetId() const;
   u16 GetVid() const;
   u16 GetPid() const;
+  // True if the device class or the class of any interface of the first configuration matches.
   bool HasClass(u8 device_class) const;
 
   virtual DeviceDescriptor GetDeviceDescriptor() const = 0;
@@ -177,12 +195,11 @@ public:
   virtual std::vector<EndpointDescriptor> GetEndpoints(u8 config, u8 iface, u8 alt) const = 0;
 
   virtual std::string GetErrorName(int error_code) const;
-  /// Ensure the device is ready to use.
+  // Gets the device ready for transfers.
   virtual bool Attach() = 0;
-  /// Ensure the device is ready to use and change the active interface (if needed).
-  ///
-  /// This may reset the active alt setting, so prefer using Attach when interface changes
-  /// are unnecessary (e.g. for control requests).
+  // Like Attach, and also makes `iface` the active interface. Switching interfaces can reset
+  // the alternate setting, so Attach is the better choice when the interface does not matter
+  // (control transfers, for example).
   virtual bool AttachAndChangeInterface(u8 iface) = 0;
   virtual int CancelTransfer(u8 endpoint) = 0;
   virtual int ChangeInterface(u8 iface) = 0;

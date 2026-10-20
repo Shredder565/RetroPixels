@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/USB/Common.h"
 
@@ -15,65 +14,63 @@
 
 namespace IOS::HLE::USB
 {
+namespace
+{
+Memory::MemoryManager& GuestMemory(EmulationKernel& kernel)
+{
+  return kernel.GetSystem().GetMemory();
+}
+}  // namespace
+
 EmulationKernel& TransferCommand::GetEmulationKernel() const
 {
   return m_ios;
 }
 
-std::unique_ptr<u8[]> TransferCommand::MakeBuffer(const size_t size) const
-{
-  ASSERT_MSG(IOS_USB, data_address != 0, "Invalid data_address");
-  auto buffer = std::make_unique<u8[]>(size);
-  auto& system = m_ios.GetSystem();
-  auto& memory = system.GetMemory();
-  memory.CopyFromEmu(buffer.get(), data_address, size);
-  return buffer;
-}
-
-void TransferCommand::FillBuffer(const u8* src, const size_t size) const
-{
-  ASSERT_MSG(IOS_USB, size == 0 || data_address != 0, "Invalid data_address");
-  auto& system = m_ios.GetSystem();
-  auto& memory = system.GetMemory();
-  memory.CopyToEmu(data_address, src, size);
-}
-
 void TransferCommand::OnTransferComplete(s32 return_value) const
 {
+  // Completion callbacks come from backend threads, never from the CPU thread.
   m_ios.EnqueueIPCReply(ios_request, return_value, 0, CoreTiming::FromThread::NON_CPU);
 }
 
 void TransferCommand::ScheduleTransferCompletion(s32 return_value, u32 expected_time_us) const
 {
-  auto ticks = m_ios.GetSystem().GetSystemTimers().GetTicksPerSecond();
-  s64 cycles_in_future = static_cast<s64>((static_cast<u64>(ticks) * expected_time_us) / 1'000'000);
-  m_ios.EnqueueIPCReply(ios_request, return_value, cycles_in_future, CoreTiming::FromThread::ANY);
+  const u64 ticks_per_second = m_ios.GetSystem().GetSystemTimers().GetTicksPerSecond();
+  const u64 delay_ticks = ticks_per_second * expected_time_us / 1'000'000;
+  m_ios.EnqueueIPCReply(ios_request, return_value, static_cast<s64>(delay_ticks),
+                        CoreTiming::FromThread::ANY);
+}
+
+std::unique_ptr<u8[]> TransferCommand::MakeBuffer(const size_t size) const
+{
+  ASSERT_MSG(IOS_USB, data_address != 0, "Invalid data_address");
+  std::unique_ptr<u8[]> copy = std::make_unique<u8[]>(size);
+  GuestMemory(m_ios).CopyFromEmu(copy.get(), data_address, size);
+  return copy;
+}
+
+void TransferCommand::FillBuffer(const u8* src, const size_t size) const
+{
+  ASSERT_MSG(IOS_USB, size == 0 || data_address != 0, "Invalid data_address");
+  GuestMemory(m_ios).CopyToEmu(data_address, src, size);
 }
 
 void IsoMessage::SetPacketReturnValue(const size_t packet_num, const u16 return_value) const
 {
-  auto& system = m_ios.GetSystem();
-  auto& memory = system.GetMemory();
-  SetPacketReturnValue(packet_num, return_value, memory);
-}
-
-inline void IsoMessage::SetPacketReturnValue(const size_t packet_num, const u16 return_value,
-                                             Memory::MemoryManager& memory) const
-{
-  memory.Write_U16(return_value, static_cast<u32>(packet_sizes_addr + packet_num * sizeof(u16)));
+  const u32 slot = static_cast<u32>(packet_sizes_addr + packet_num * sizeof(u16));
+  GuestMemory(m_ios).Write_U16(return_value, slot);
 }
 
 u16 IsoMessage::SetPacketsReturnValueFromSize(u16 data_size) const
 {
-  auto& system = m_ios.GetSystem();
-  auto& memory = system.GetMemory();
-  for (std::size_t i = 0; i < num_packets; i++)
+  u16 remaining = data_size;
+  for (size_t packet = 0; packet < num_packets; ++packet)
   {
-    const u16 packet_size = std::min(data_size, packet_sizes[i]);
-    SetPacketReturnValue(i, packet_size, memory);
-    data_size -= packet_size;
+    const u16 used = std::min(remaining, packet_sizes[packet]);
+    SetPacketReturnValue(packet, used);
+    remaining = static_cast<u16>(remaining - used);
   }
-  return data_size;
+  return remaining;
 }
 
 Device::~Device() = default;
@@ -97,10 +94,18 @@ bool Device::HasClass(const u8 device_class) const
 {
   if (GetDeviceDescriptor().bDeviceClass == device_class)
     return true;
-  const auto interfaces = GetInterfaces(0);
-  return std::ranges::any_of(interfaces, [device_class](const auto& interface) {
-    return interface.bInterfaceClass == device_class;
-  });
+
+  for (const InterfaceDescriptor& interface_descriptor : GetInterfaces(0))
+  {
+    if (interface_descriptor.bInterfaceClass == device_class)
+      return true;
+  }
+  return false;
+}
+
+std::string Device::GetErrorName(const int error_code) const
+{
+  return fmt::format("unknown error {}", error_code);
 }
 
 void DeviceDescriptor::Swap()
@@ -118,15 +123,11 @@ void ConfigDescriptor::Swap()
 
 void InterfaceDescriptor::Swap()
 {
+  // Only single-byte fields.
 }
 
 void EndpointDescriptor::Swap()
 {
   wMaxPacketSize = Common::swap16(wMaxPacketSize);
-}
-
-std::string Device::GetErrorName(const int error_code) const
-{
-  return fmt::format("unknown error {}", error_code);
 }
 }  // namespace IOS::HLE::USB

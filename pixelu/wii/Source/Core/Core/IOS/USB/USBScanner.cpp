@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/USB/USBScanner.h"
 
@@ -33,199 +32,197 @@
 
 namespace IOS::HLE
 {
-USBScanner::~USBScanner()
+namespace
 {
-  StopScanning();
+// Time between two scans of the host's USB devices.
+constexpr int RESCAN_INTERVAL_MS = 50;
+
+void Insert(USBScanner::DeviceMap* devices, std::unique_ptr<USB::Device> device)
+{
+  const u64 id = device->GetId();
+  (*devices)[id] = std::move(device);
 }
 
-void USBScanner::WaitForFirstScan()
+// Emulated accessories are never offered during netplay, since their state is not synced.
+bool WantsEmulated(const Config::Info<bool>& setting)
 {
-  if (m_thread_running.IsSet())
+  return Config::Get(setting) && !NetPlay::IsNetPlayRunning();
+}
+
+void AddEmulatedAccessories(USBScanner::DeviceMap* devices)
+{
+  if (WantsEmulated(Config::MAIN_EMULATE_SKYLANDER_PORTAL))
+    Insert(devices, std::make_unique<USB::SkylanderUSB>());
+  if (WantsEmulated(Config::MAIN_EMULATE_INFINITY_BASE))
+    Insert(devices, std::make_unique<USB::InfinityUSB>());
+  if (WantsEmulated(Config::MAIN_EMULATE_WII_SPEAK))
+    Insert(devices, std::make_unique<USB::WiiSpeak>());
+
+  for (u8 slot = 0; slot < Config::EMULATED_LOGITECH_MIC_COUNT; ++slot)
   {
-    m_first_scan_complete_flag.Wait(true);
+    if (WantsEmulated(Config::MAIN_EMULATE_LOGITECH_MIC[slot]))
+      Insert(devices, std::make_unique<USB::LogitechMic>(slot));
   }
+}
+
+#ifdef __LIBUSB__
+// Santroller firmware (open-source controller firmware used for guitars and drums) works out
+// which console it is plugged into by watching how the host talks to it. A PC host gives no such
+// hint, so the device is told to switch to its Wii mode with a class request on interface 2.
+void SwitchSantrollerToWiiMode(libusb_device* device)
+{
+  libusb_device_handle* handle = nullptr;
+  if (libusb_open(device, &handle) != LIBUSB_SUCCESS)
+    return;
+
+#ifdef __linux__
+  libusb_set_auto_detach_kernel_driver(handle, true);
+  libusb_claim_interface(handle, 2);
+#endif
+  constexpr u8 request_type =
+      u8(+LIBUSB_ENDPOINT_IN | +LIBUSB_REQUEST_TYPE_CLASS | +LIBUSB_RECIPIENT_INTERFACE);
+  libusb_control_transfer(handle, request_type, 0x01, 0x03f2, 2, nullptr, 0x11, 5000);
+  libusb_close(handle);
+}
+
+bool IsSantroller(const libusb_device_descriptor& descriptor)
+{
+  return descriptor.idVendor == 0x1209 && descriptor.idProduct == 0x2882;
+}
+#endif
+}  // namespace
+
+USBScanner::~USBScanner()
+{
+  StopThread();
 }
 
 bool USBScanner::AddClient(USBHost* client)
 {
-  bool should_start_scanning;
-  bool client_is_new;
+  std::lock_guard start_stop_lock(m_thread_start_stop_mutex);
 
-  std::lock_guard thread_lock(m_thread_start_stop_mutex);
-
+  bool was_first;
+  bool inserted;
   {
     std::lock_guard clients_lock(m_clients_mutex);
-    should_start_scanning = m_clients.empty();
-    auto [it, newly_added] = m_clients.insert(client);
-    client_is_new = newly_added;
+    was_first = m_clients.empty();
+    inserted = m_clients.insert(client).second;
   }
 
-  if (should_start_scanning)
-    StartScanning();
-
-  return client_is_new;
+  if (was_first)
+    StartThread();
+  return inserted;
 }
 
 bool USBScanner::RemoveClient(USBHost* client)
 {
-  std::lock_guard thread_lock(m_thread_start_stop_mutex);
+  std::lock_guard start_stop_lock(m_thread_start_stop_mutex);
 
-  bool client_was_removed;
-  bool should_stop_scanning;
-
+  bool erased;
+  bool was_last;
   {
     std::lock_guard clients_lock(m_clients_mutex);
-    const bool was_empty = m_clients.empty();
-    client_was_removed = m_clients.erase(client) != 0;
-    should_stop_scanning = !was_empty && m_clients.empty();
+    const bool had_clients = !m_clients.empty();
+    erased = m_clients.erase(client) != 0;
+    was_last = had_clients && m_clients.empty();
   }
 
-  // The scan thread might be trying to lock m_clients_mutex, so we need to not hold a lock on
-  // m_clients_mutex when trying to join with the scan thread.
-  if (should_stop_scanning)
-    StopScanning();
-
-  return client_was_removed;
+  // The scan thread takes m_clients_mutex itself, so it must not be held while joining.
+  if (was_last)
+    StopThread();
+  return erased;
 }
 
-void USBScanner::StartScanning()
+void USBScanner::WaitForFirstScan()
 {
-  if (m_thread_running.TestAndSet())
-  {
-    m_thread = std::thread([this] {
-      Common::SetCurrentThreadName("USB Scan Thread");
-      while (m_thread_running.IsSet())
-      {
-        if (UpdateDevices())
-          m_first_scan_complete_flag.Set(true);
-        Common::SleepCurrentThread(50);
-      }
-      m_devices.clear();
-      m_first_scan_complete_flag.Set(false);
-    });
-  }
+  if (!m_thread_running.IsSet())
+    return;
+  m_first_scan_complete_flag.Wait(true);
 }
 
-void USBScanner::StopScanning()
+USBScanner::DeviceMap USBScanner::GetDevices() const
+{
+  std::lock_guard lock(m_devices_mutex);
+  return m_devices;
+}
+
+void USBScanner::StartThread()
+{
+  if (!m_thread_running.TestAndSet())
+    return;
+  m_thread = std::thread(&USBScanner::ThreadLoop, this);
+}
+
+void USBScanner::StopThread()
 {
   if (m_thread_running.TestAndClear())
     m_thread.join();
 }
 
-USBScanner::DeviceMap USBScanner::GetDevices() const
+void USBScanner::ThreadLoop()
 {
-  std::lock_guard lk(m_devices_mutex);
-  return m_devices;
+  Common::SetCurrentThreadName("USB Scan Thread");
+  while (m_thread_running.IsSet())
+  {
+    if (Rescan())
+      m_first_scan_complete_flag.Set(true);
+    Common::SleepCurrentThread(RESCAN_INTERVAL_MS);
+  }
+
+  {
+    std::lock_guard lock(m_devices_mutex);
+    m_devices.clear();
+  }
+  m_first_scan_complete_flag.Set(false);
 }
 
-// This is called from the scan thread. Returns false if we failed to update the device list.
-bool USBScanner::UpdateDevices()
+// Runs on the scan thread. Returns false when no device list could be built.
+bool USBScanner::Rescan()
 {
-  DeviceMap new_devices;
-  if (!AddNewDevices(&new_devices))
+  DeviceMap fresh;
+  if (!CollectDevices(&fresh))
     return false;
 
-  std::lock_guard lk(m_devices_mutex);
-  if (!std::ranges::equal(std::views::keys(m_devices), std::views::keys(new_devices)))
-  {
-    m_devices = std::move(new_devices);
+  std::lock_guard lock(m_devices_mutex);
+  // Only the set of IDs matters; the hosts are only told when a device came or went.
+  const bool same_ids = std::ranges::equal(std::views::keys(m_devices), std::views::keys(fresh));
+  if (same_ids)
+    return true;
 
-    std::lock_guard clients_lock(m_clients_mutex);
-    for (USBHost* client : m_clients)
-      client->OnDevicesChanged(m_devices);
-  }
-
+  m_devices = std::move(fresh);
+  std::lock_guard clients_lock(m_clients_mutex);
+  for (USBHost* client : m_clients)
+    client->OnDevicesChanged(m_devices);
   return true;
 }
 
-bool USBScanner::AddNewDevices(DeviceMap* new_devices) const
+bool USBScanner::CollectDevices(DeviceMap* devices) const
 {
-  AddEmulatedDevices(new_devices);
+  AddEmulatedAccessories(devices);
+
 #ifdef __LIBUSB__
-  if (!Core::WantsDeterminism())
-  {
-    const auto whitelist = Config::GetUSBDeviceWhitelist();
-    if (whitelist.empty())
-      return true;
+  if (Core::WantsDeterminism())
+    return true;
 
-    if (m_context.IsValid())
-    {
-      const int ret = m_context.GetDeviceList([&](libusb_device* device) {
-        libusb_device_descriptor descriptor;
-        libusb_get_device_descriptor(device, &descriptor);
-        if (descriptor.idVendor == 0x1209 && descriptor.idProduct == 0x2882)
-        {
-          WakeupSantrollerDevice(device);
-        }
-        const USBUtils::DeviceInfo device_info{descriptor.idVendor, descriptor.idProduct};
-        if (!whitelist.contains(device_info))
-          return true;
+  const auto whitelist = Config::GetUSBDeviceWhitelist();
+  if (whitelist.empty() || !m_context.IsValid())
+    return true;
 
-        auto usb_device = std::make_unique<USB::LibusbDevice>(device, descriptor);
-        AddDevice(std::move(usb_device), new_devices);
-        return true;
-      });
-      if (ret != LIBUSB_SUCCESS)
-        WARN_LOG_FMT(IOS_USB, "GetDeviceList failed: {}", LibusbUtils::ErrorWrap(ret));
-    }
-  }
+  const int result = m_context.GetDeviceList([&](libusb_device* host_device) {
+    libusb_device_descriptor descriptor;
+    libusb_get_device_descriptor(host_device, &descriptor);
+    if (IsSantroller(descriptor))
+      SwitchSantrollerToWiiMode(host_device);
+
+    if (whitelist.contains(USBUtils::DeviceInfo{descriptor.idVendor, descriptor.idProduct}))
+      Insert(devices, std::make_unique<USB::LibusbDevice>(host_device, descriptor));
+    // Keep going through the whole list.
+    return true;
+  });
+  if (result != LIBUSB_SUCCESS)
+    WARN_LOG_FMT(IOS_USB, "Could not list the host USB devices: {}", LibusbUtils::ErrorWrap(result));
 #endif
   return true;
-}
-
-void USBScanner::AddEmulatedDevices(DeviceMap* new_devices)
-{
-  if (Config::Get(Config::MAIN_EMULATE_SKYLANDER_PORTAL) && !NetPlay::IsNetPlayRunning())
-  {
-    auto skylanderportal = std::make_unique<USB::SkylanderUSB>();
-    AddDevice(std::move(skylanderportal), new_devices);
-  }
-  if (Config::Get(Config::MAIN_EMULATE_INFINITY_BASE) && !NetPlay::IsNetPlayRunning())
-  {
-    auto infinity_base = std::make_unique<USB::InfinityUSB>();
-    AddDevice(std::move(infinity_base), new_devices);
-  }
-  if (Config::Get(Config::MAIN_EMULATE_WII_SPEAK) && !NetPlay::IsNetPlayRunning())
-  {
-    auto wii_speak = std::make_unique<USB::WiiSpeak>();
-    AddDevice(std::move(wii_speak), new_devices);
-  }
-  for (u8 index = 0; index != Config::EMULATED_LOGITECH_MIC_COUNT; ++index)
-  {
-    if (Config::Get(Config::MAIN_EMULATE_LOGITECH_MIC[index]) && !NetPlay::IsNetPlayRunning())
-    {
-      auto logitech_mic = std::make_unique<USB::LogitechMic>(index);
-      AddDevice(std::move(logitech_mic), new_devices);
-    }
-  }
-}
-
-void USBScanner::WakeupSantrollerDevice(libusb_device* device)
-{
-#ifdef __LIBUSB__
-  // Santroller devices emulate various instruments for multiple consoles.
-  // On an actual console, santroller detects the console based on how it communicates
-  // with usb devices. Since the underlying operating system is doing that here, the
-  // check doesn't work, so we need to send a special command to make the device
-  // jump to wii emulation mode.
-  libusb_device_handle* lusb_handle;
-  if (libusb_open(device, &lusb_handle) == LIBUSB_SUCCESS)
-  {
-#ifdef __linux__
-    libusb_set_auto_detach_kernel_driver(lusb_handle, true);
-    libusb_claim_interface(lusb_handle, 2);
-#endif
-    libusb_control_transfer(
-        lusb_handle, +LIBUSB_ENDPOINT_IN | +LIBUSB_REQUEST_TYPE_CLASS | +LIBUSB_RECIPIENT_INTERFACE,
-        0x01, 0x03f2, 2, nullptr, 0x11, 5000);
-    libusb_close(lusb_handle);
-  }
-#endif
-}
-
-void USBScanner::AddDevice(std::unique_ptr<USB::Device> device, DeviceMap* new_devices)
-{
-  (*new_devices)[device->GetId()] = std::move(device);
 }
 
 }  // namespace IOS::HLE
