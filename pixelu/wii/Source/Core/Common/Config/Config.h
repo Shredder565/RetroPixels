@@ -100,16 +100,18 @@ T Get(const Layer* game_layer, const Info<T>& setting)
   return game_layer->Get(setting);
 }
 
-template <typename T>
-T GetBase(const Info<T>& info)
-{
-  return Get(LayerType::Base, info);
-}
-
+// The layer the effective value of `info` comes from.
 template <typename T>
 LayerType GetActiveLayerForConfig(const Info<T>& info)
 {
   return GetActiveLayerForConfig(info.GetLocation());
+}
+
+// The value stored in the base layer (or the default when it has none).
+template <typename T>
+T GetBase(const Info<T>& info)
+{
+  return GetLayer(LayerType::Base)->Get(info);
 }
 
 template <typename InfoT, typename ValueT>

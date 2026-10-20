@@ -26,15 +26,14 @@ public:
   public:
     Section();
     explicit Section(std::string name_);
-    bool Exists(std::string_view key) const;
-    bool Delete(std::string_view key);
 
     void Set(const std::string& key, std::string new_value);
-
+    // Anything else is stored in its ValueToString form.
     template <typename T>
     void Set(const std::string& key, T&& new_value)
     {
-      Set(key, ValueToString(std::forward<T>(new_value)));
+      std::string text = ValueToString(std::forward<T>(new_value));
+      Set(key, std::move(text));
     }
 
     // Stores the value, or removes the key if the value equals the default.
@@ -46,6 +45,9 @@ public:
       else
         Delete(key);
     }
+
+    bool Exists(std::string_view key) const;
+    bool Delete(std::string_view key);
 
     // True if the key exists, or if a default_value was passed (which is then returned).
     bool Get(std::string_view key, std::string* value,
@@ -67,12 +69,13 @@ public:
     // and comment-only lines skipped.
     bool GetLines(std::vector<std::string>* lines, const bool remove_comments = true) const;
 
-    bool operator<(const Section& other) const { return name < other.name; }
     using SectionMap = std::map<std::string, std::string, CaseInsensitiveLess>;
-
-    const std::string& GetName() const { return name; }
     const SectionMap& GetValues() const { return values; }
     bool HasLines() const { return !m_lines.empty(); }
+    const std::string& GetName() const { return name; }
+
+    // Sections sort by name.
+    bool operator<(const Section& other) const { return name < other.name; }
 
   protected:
     std::string name;

@@ -85,15 +85,10 @@ struct Rectangle
 
   constexpr Rectangle() = default;
 
-  constexpr Rectangle(T theLeft, T theTop, T theRight, T theBottom)
-      : left(theLeft), top(theTop), right(theRight), bottom(theBottom)
-  {
-  }
+  constexpr Rectangle(T l, T t, T r, T b) : left(l), top(t), right(r), bottom(b) {}
 
-  constexpr bool operator==(const Rectangle& r) const
-  {
-    return left == r.left && top == r.top && right == r.right && bottom == r.bottom;
-  }
+  // Member-wise, in declaration order.
+  constexpr bool operator==(const Rectangle&) const = default;
 
   constexpr T GetWidth() const { return Distance(left, right); }
   constexpr T GetHeight() const { return Distance(top, bottom); }

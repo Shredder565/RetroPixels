@@ -32,14 +32,17 @@ public:
   bool operator<(const Profiler& b) const;
 
 private:
-  static std::list<Profiler*> s_all_profilers;
+  // Registry of live profilers, guarded by s_mutex.
   static std::mutex s_mutex;
-  static u32 s_max_length;
-  static u64 s_frame_time;
-  static u64 s_usecs_frame;
+  static std::list<Profiler*> s_all_profilers;
 
+  // Cached table and the number of calls left before it is rebuilt.
   static std::string s_lazy_result;
   static int s_lazy_delay;
+
+  static u64 s_frame_time;
+  static u64 s_usecs_frame;
+  static u32 s_max_length;
 
   std::mutex m_mutex;
   std::string m_name;
@@ -55,16 +58,16 @@ class ProfilerExecuter
 {
 public:
   ProfilerExecuter(Profiler* profiler, u64* time, int* depth)
-      : m_profiler(profiler), m_time(time), m_depth(depth)
+      : m_time(time), m_depth(depth), m_profiler(profiler)
   {
-    m_profiler->Start(m_time, m_depth);
+    profiler->Start(time, depth);
   }
   ~ProfilerExecuter() { m_profiler->Stop(m_time, m_depth); }
 
 private:
-  Profiler* m_profiler;
   u64* m_time;
   int* m_depth;
+  Profiler* m_profiler;
 };
 }  // namespace Common
 

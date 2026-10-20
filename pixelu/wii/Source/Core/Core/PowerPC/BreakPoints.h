@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Common/BitSet.h"
@@ -164,29 +165,26 @@ class DelayedMemCheckUpdate final
 {
 public:
   DelayedMemCheckUpdate(MemChecks* memchecks, bool update_needed = false)
-      : m_memchecks(memchecks), m_update_needed(update_needed)
+      : m_memchecks{memchecks}, m_update_needed{update_needed}
   {
   }
-
-  DelayedMemCheckUpdate(const DelayedMemCheckUpdate&) = delete;
-  DelayedMemCheckUpdate(DelayedMemCheckUpdate&& other) = delete;
-  DelayedMemCheckUpdate& operator=(const DelayedMemCheckUpdate&) = delete;
-  DelayedMemCheckUpdate& operator=(DelayedMemCheckUpdate&& other) = delete;
-
   ~DelayedMemCheckUpdate()
   {
     if (m_update_needed)
       m_memchecks->Update();
   }
 
+  // Not copyable or movable: exactly one object owns a pending update.
+  DelayedMemCheckUpdate(const DelayedMemCheckUpdate&) = delete;
+  DelayedMemCheckUpdate& operator=(const DelayedMemCheckUpdate&) = delete;
+  DelayedMemCheckUpdate(DelayedMemCheckUpdate&& other) = delete;
+  DelayedMemCheckUpdate& operator=(DelayedMemCheckUpdate&& other) = delete;
+
   // Takes over the other object's pending update (same MemChecks only).
   DelayedMemCheckUpdate& operator|=(DelayedMemCheckUpdate&& other)
   {
-    if (other.m_memchecks != m_memchecks)
-      return *this;
-    if (other.m_update_needed)
-      m_update_needed = true;
-    other.m_update_needed = false;
+    if (other.m_memchecks == m_memchecks)
+      m_update_needed = std::exchange(other.m_update_needed, false) || m_update_needed;
     return *this;
   }
 

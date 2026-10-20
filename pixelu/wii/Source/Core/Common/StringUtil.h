@@ -170,11 +170,12 @@ bool TryParseVector(const std::string& str, std::vector<N>* output, const char d
 std::string ValueToString(u16 value);
 std::string ValueToString(u32 value);
 std::string ValueToString(u64 value);
-std::string ValueToString(float value);
-std::string ValueToString(double value);
 std::string ValueToString(int value);
 std::string ValueToString(s64 value);
+std::string ValueToString(float value);
+std::string ValueToString(double value);
 std::string ValueToString(bool value);
+// Enums are written as their underlying integer (so the overloads above must come first).
 std::string ValueToString(Common::Enum auto value)
 {
   return ValueToString(std::to_underlying(value));
@@ -267,26 +268,13 @@ std::u16string UTF8ToUTF16(std::string_view input);
 
 std::wstring UTF8ToWString(std::string_view str);
 
+// TCHAR strings: wide when _UNICODE is defined, otherwise already UTF-8.
 #ifdef _UNICODE
-inline std::string TStrToUTF8(std::wstring_view str)
-{
-  return WStringToUTF8(str);
-}
-
-inline std::wstring UTF8ToTStr(std::string_view str)
-{
-  return UTF8ToWString(str);
-}
+inline std::wstring UTF8ToTStr(std::string_view str) { return UTF8ToWString(str); }
+inline std::string TStrToUTF8(std::wstring_view str) { return WStringToUTF8(str); }
 #else
-inline std::string TStrToUTF8(std::string_view str)
-{
-  return std::string(str);
-}
-
-inline std::string UTF8ToTStr(std::string_view str)
-{
-  return std::string(str);
-}
+inline std::string UTF8ToTStr(std::string_view str) { return std::string{str}; }
+inline std::string TStrToUTF8(std::string_view str) { return std::string{str}; }
 #endif
 
 #endif

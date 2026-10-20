@@ -149,13 +149,12 @@ public:
   // and 0 (or an empty string) is returned.
   template <std::unsigned_integral T>
   static T HostRead(const Core::CPUThreadGuard& guard, u32 address);
+  // Other types (floats, signed) go through the unsigned type of the same size, bit for bit.
   template <typename T>
   requires(!std::unsigned_integral<T>)
-  static T HostRead(const Core::CPUThreadGuard& guard, const u32 address)
+  static T HostRead(const Core::CPUThreadGuard& guard, u32 address)
   {
-    using U = Common::MakeUnsignedSameSize<T>;
-    U result = HostRead<U>(guard, address);
-    return std::bit_cast<T>(result);
+    return std::bit_cast<T>(HostRead<Common::MakeUnsignedSameSize<T>>(guard, address));
   }
 
   static u32 HostRead_Instruction(const Core::CPUThreadGuard& guard, u32 address);
@@ -170,14 +169,13 @@ public:
   HostTryRead(const Core::CPUThreadGuard& guard, u32 address,
               RequestedAddressSpace space = RequestedAddressSpace::Effective);
   template <typename T>
+  requires(!std::unsigned_integral<T>)
   static std::optional<ReadResult<T>>
   HostTryRead(const Core::CPUThreadGuard& guard, u32 address,
               RequestedAddressSpace space = RequestedAddressSpace::Effective)
-      requires(!std::unsigned_integral<T>)
   {
-    using U = Common::MakeUnsignedSameSize<T>;
-    std::optional<ReadResult<U>> result = HostTryRead<U>(guard, address, space);
-    return std::bit_cast<std::optional<ReadResult<T>>>(result);
+    using Result = std::optional<ReadResult<T>>;
+    return std::bit_cast<Result>(HostTryRead<Common::MakeUnsignedSameSize<T>>(guard, address, space));
   }
   static std::optional<ReadResult<u32>>
   HostTryReadInstruction(const Core::CPUThreadGuard& guard, u32 address,
@@ -191,12 +189,11 @@ public:
   static void HostWrite(const Core::CPUThreadGuard& guard, Common::MakeAtLeastU32<T> var,
                         u32 address);
   template <typename T>
+  requires(!std::unsigned_integral<T>)
   static void HostWrite(const Core::CPUThreadGuard& guard, T var, u32 address)
-      requires(!std::unsigned_integral<T>)
   {
-    using U = Common::MakeUnsignedSameSize<T>;
-    U cast_var = std::bit_cast<U>(var);
-    return HostWrite<U>(guard, cast_var, address);
+    using Bits = Common::MakeUnsignedSameSize<T>;
+    HostWrite<Bits>(guard, std::bit_cast<Bits>(var), address);
   }
 
   // Writes to the requested address space without any alert; returns
@@ -206,14 +203,13 @@ public:
   HostTryWrite(const Core::CPUThreadGuard& guard, Common::MakeAtLeastU32<T> var, u32 address,
                RequestedAddressSpace space = RequestedAddressSpace::Effective);
   template <typename T>
+  requires(!std::unsigned_integral<T>)
   static std::optional<WriteResult>
-  HostTryWrite(const Core::CPUThreadGuard& guard, const T var, const u32 address,
+  HostTryWrite(const Core::CPUThreadGuard& guard, T var, u32 address,
                RequestedAddressSpace space = RequestedAddressSpace::Effective)
-      requires(!std::unsigned_integral<T>)
   {
-    using U = Common::MakeUnsignedSameSize<T>;
-    U cast_var = std::bit_cast<U>(var);
-    return HostTryWrite<U>(guard, cast_var, address, space);
+    using Bits = Common::MakeUnsignedSameSize<T>;
+    return HostTryWrite<Bits>(guard, std::bit_cast<Bits>(var), address, space);
   }
 
   // Whether an access at the address ends up in RAM (MEM1, MEM2, fake VMEM

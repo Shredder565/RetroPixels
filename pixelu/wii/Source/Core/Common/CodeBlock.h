@@ -71,15 +71,14 @@ public:
   {
     ASSERT(!m_is_child);
     Common::FreeMemoryPages(region, total_region_size);
-    region = nullptr;
-    region_size = 0;
-    total_region_size = 0;
+    const auto forget_region = [](CodeBlock& block) {
+      block.region = nullptr;
+      block.region_size = 0;
+      block.total_region_size = 0;
+    };
+    forget_region(*this);
     for (CodeBlock* child : m_children)
-    {
-      child->region = nullptr;
-      child->region_size = 0;
-      child->total_region_size = 0;
-    }
+      forget_region(*child);
   }
 
   bool IsInSpace(const u8* ptr) const { return ptr >= region && ptr < region + region_size; }

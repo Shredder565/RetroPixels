@@ -467,35 +467,24 @@ union UReg_FPSCR
   UReg_FPSCR() = default;
   explicit UReg_FPSCR(u32 hex_) : Hex{hex_ & mask} {}
 
-  UReg_FPSCR& operator=(u32 value)
-  {
-    Hex = value & mask;
-    return *this;
-  }
-
-  UReg_FPSCR& operator|=(u32 value)
-  {
-    Hex |= value & mask;
-    return *this;
-  }
-
-  // Clearing can never set the reserved bit, so no mask is needed.
-  UReg_FPSCR& operator&=(u32 value)
-  {
-    Hex &= value;
-    return *this;
-  }
-
-  UReg_FPSCR& operator^=(u32 value)
-  {
-    Hex ^= value & mask;
-    return *this;
-  }
+  // The reserved bit is dropped from `value` (clearing with &= can never set it, so that one
+  // needs no mask).
+  UReg_FPSCR& operator=(u32 value) { return StoreHex(value & mask); }
+  UReg_FPSCR& operator|=(u32 value) { return StoreHex(Hex | (value & mask)); }
+  UReg_FPSCR& operator&=(u32 value) { return StoreHex(Hex & value); }
+  UReg_FPSCR& operator^=(u32 value) { return StoreHex(Hex ^ (value & mask)); }
 
   void ClearFIFR()
   {
     FI = 0;
     FR = 0;
+  }
+
+private:
+  UReg_FPSCR& StoreHex(u32 value)
+  {
+    Hex = value;
+    return *this;
   }
 };
 

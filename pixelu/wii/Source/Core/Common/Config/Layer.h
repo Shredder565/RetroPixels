@@ -78,22 +78,27 @@ class Section
 {
 public:
   using iterator = LayerMap::iterator;
-  Section(iterator begin_, iterator end_) : m_begin(begin_), m_end(end_) {}
-  iterator begin() const { return m_begin; }
+
+  Section(iterator first, iterator last) : m_begin{first}, m_end{last} {}
+
   iterator end() const { return m_end; }
+  iterator begin() const { return m_begin; }
 
 private:
   iterator m_begin;
   iterator m_end;
 };
 
+// The same over a const layer.
 class ConstSection
 {
 public:
   using iterator = LayerMap::const_iterator;
-  ConstSection(iterator begin_, iterator end_) : m_begin(begin_), m_end(end_) {}
-  iterator begin() const { return m_begin; }
+
+  ConstSection(iterator first, iterator last) : m_begin{first}, m_end{last} {}
+
   iterator end() const { return m_end; }
+  iterator begin() const { return m_begin; }
 
 private:
   iterator m_begin;
@@ -130,20 +135,21 @@ public:
 
   // The Set functions return whether the layer changed.
 
-  template <typename T>
-  bool Set(const Info<T>& config_info, DefaultState)
+  bool Set(const Location& location, std::string new_value)
   {
-    return DeleteKey(config_info.GetLocation());
+    if (const auto entry = m_map.find(location); entry != m_map.end())
+    {
+      if (entry->second == new_value)
+        return false;
+      entry->second = std::move(new_value);
+    }
+    else
+    {
+      m_map.emplace(location, std::move(new_value));
+    }
+    MarkAsDirty();
+    return true;
   }
-
-  // (The value's type is not deduced, so it converts to the setting's type.)
-  template <typename T>
-  bool Set(const Info<T>& config_info, const std::common_type_t<T>& value)
-  {
-    return Set(config_info.GetLocation(), value);
-  }
-
-  bool Set(const Location& location, DefaultState) { return DeleteKey(location); }
 
   template <typename T>
   bool Set(const Location& location, const T& value)
@@ -151,21 +157,19 @@ public:
     return Set(location, ValueToString(value));
   }
 
-  bool Set(const Location& location, std::string new_value)
+  // DefaultState removes the key, so the default applies again.
+  bool Set(const Location& location, DefaultState) { return DeleteKey(location); }
+  template <typename T>
+  bool Set(const Info<T>& config_info, DefaultState)
   {
-    auto entry = m_map.find(location);
-    if (entry == m_map.end())
-    {
-      m_map.emplace(location, std::move(new_value));
-    }
-    else
-    {
-      if (entry->second == new_value)
-        return false;
-      entry->second = std::move(new_value);
-    }
-    m_is_dirty = true;
-    return true;
+    return Set(config_info.GetLocation(), DefaultState{});
+  }
+
+  // (The value's type is not deduced, so it converts to the setting's type.)
+  template <typename T>
+  bool Set(const Info<T>& config_info, const std::common_type_t<T>& value)
+  {
+    return Set(config_info.GetLocation(), value);
   }
 
   void MarkAsDirty() { m_is_dirty = true; }
