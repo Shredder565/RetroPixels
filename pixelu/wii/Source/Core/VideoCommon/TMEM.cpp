@@ -1,6 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/TMEM.h"
 
@@ -9,282 +7,193 @@
 #include "Common/ChunkFile.h"
 #include "VideoCommon/BPMemory.h"
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// How the model works
+// -------------------
+// Each of the eight texture units points two cache regions ("banks") into TMEM: the even bank
+// always holds level 0 (and the other even mip levels), the odd bank is used for odd mip levels
+// and for the second half of 32-bit texels. A game sets a region's offset and its size code
+// through the SETIMAGE1/SETIMAGE2 registers, and regions may overlap freely.
 //
-// TMEM emulation tracks which textures should be cached in TMEM on a real console.
-// There are two good reasons to do this:
+// A unit is "cached" after a bind when the bound texture fits entirely in its region(s) and no
+// other live region overlaps them; then a following draw would sample stale TMEM rather than
+// RAM, which some games rely on after overwriting a texture with an EFB copy. A unit is "valid"
+// while its registers are unchanged, and "invalid" once they change or TMEM is flushed.
 //
-// 1. Some games deliberately avoid invalidating a texture, overwrite it with an EFB copy,
-//    and then expect the original texture to still be found in TMEM for another draw call.
-//    Spyro: A Hero's Tail is known for using such overwritten textures.
-//    However, other games like:
-//      * Sonic Riders
-//      * Metal Arms: Glitch in the System
-//      * Godzilla: Destroy All Monsters Melee
-//      * NHL Slapshot
-//      * Tak and the Power of Juju
-//      * Night at the Museum: Battle of the Smithsonian
-//      * 428: Fūsa Sareta Shibuya de
-//    are known to (accidentally or deliberately) avoid invalidating and then expect the pattern
-//    of the draw and the fact that the whole texture doesn't fit in TMEM to self-invalidate the
-//    texture. These are usually full-screen efb copies.
-//    So we must track the size of the textures as an heuristic to see if they will self-invalidate
-//    or not.
-//
-// 2. It actually improves Dolphin's performance in safer texture hashing modes, by reducing the
-//    amount of times a texture needs to be hashed when reused in subsequent draws.
-//
-// As a side-effect, TMEM emulation also tracks if the texture unit configuration has changed at
-// all, which Dolphin's TextureCache takes advantage of.
-//
-////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// Checking if a texture fits in TMEM or not is complicated by the fact that Flipper's TMEM is quite
-// configurable.
-// Each of the eight texture units has two banks (even and odd) that can be pointed at any offset
-// and set to any size. It is completely valid to have overlapping banks, and performance can be
-// improved by overlapping the caches of texture units that are drawing the same textures.
-//
-// For trilinear textures, the even/odd banks contain the even/odd LODs of the texture. TMEM has two
-// banks of 512KB each, covering the upper and lower halves of TMEM's address space. The two banks
-// be accessed simultaneously, allowing a trilinear texture sample to be completed at the same cost
-// as a bilinear sample, assuming the even and odd banks are mapped onto different banks.
-//
-// 32bit textures are actually stored as two 16bit textures in separate banks, allowing a bilinear
-// sample of a 32bit texture at the same cost as a 16bit bilinear/trilinear sample. A trilinear
-// sample of a 32bit texture costs more.
-//
-// TODO: I'm not sure if it's valid for a texture unit's even and odd banks to overlap. There might
-//       actually be a hard requirement for even and odd banks to live in different banks of TMEM.
-//
-// Note: This is still very much a heuristic.
-//       Actually knowing if a texture is partially or fully cached within TMEM would require
-//       extensive software rasterization, or sampler feedback from a hardware backend.
-//
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// This is an estimate. Real hardware streams texels through these regions as it samples, so
+// whether a texture is fully resident also depends on what was drawn.
 
 namespace TMEM
 {
-struct TextureUnitState
+namespace
 {
-  enum class State
-  {
-    // Cache is invalid. Configuration has changed
-    INVALID,
-
-    // Valid, but not cached due to either being too big, or overlapping with another texture unit
-    VALID,
-
-    // Texture unit has cached all of the previous draw
-    CACHED,
-  };
-
-  struct BankConfig
-  {
-    u32 width = 0;
-    u32 height = 0;
-    u32 base = 0;
-    u32 size = 0;
-    bool Overlaps(const BankConfig& other) const;
-  };
-
-  BankConfig even = {};
-  BankConfig odd = {};
-  State state = State::INVALID;
-
-  bool Overlaps(const TextureUnitState& other) const;
+enum class Residency
+{
+  Invalid,  // registers changed (or TMEM flushed) since the last bind
+  Valid,    // bound, but too large for its regions or sharing them with another unit
+  Cached,   // bound, and the whole texture stays resident
 };
 
-static u32 CalculateUnitSize(TextureUnitState::BankConfig bank_config);
+// A unit's cache region. `size` is in bytes and is only known after a bind; zero means unused.
+struct Region
+{
+  u32 width_code = 0;
+  u32 height_code = 0;
+  u32 offset = 0;
+  u32 size = 0;
+};
 
-static std::array<TextureUnitState, 8> s_unit;
+// Saved verbatim in savestates: two regions, then the residency. Do not reorder.
+struct UnitState
+{
+  Region even;
+  Region odd;
+  Residency residency = Residency::Invalid;
+};
 
-// On TMEM configuration changed:
-// 1. invalidate stage.
+std::array<UnitState, 8> s_units;
+
+// Region size from its two 3-bit codes. The SDK only uses the three square presets; anything
+// else follows the guess that each code doubles one dimension of a 512-byte base.
+u32 RegionBytes(const Region& region)
+{
+  if (region.width_code == region.height_code)
+  {
+    constexpr u32 kib = 1024;
+    if (region.width_code == 3)
+      return 32 * kib;
+    if (region.width_code == 4)
+      return 128 * kib;
+    if (region.width_code == 5)
+      return 512 * kib;
+  }
+  return 512u << (region.width_code + region.height_code);
+}
+
+// Half-open byte ranges [offset, offset + size) intersect. Unused regions never do.
+bool RangesCollide(const Region& a, const Region& b)
+{
+  if (a.size == 0 || b.size == 0)
+    return false;
+  const auto starts_within = [](const Region& outer, const Region& inner) {
+    return outer.offset <= inner.offset && outer.offset + outer.size > inner.offset;
+  };
+  return starts_within(a, b) || starts_within(b, a);
+}
+
+bool UnitsCollide(const UnitState& a, const UnitState& b)
+{
+  if (a.residency == Residency::Invalid || b.residency == Residency::Invalid)
+    return false;
+  for (const Region* ra : {&a.even, &a.odd})
+  {
+    for (const Region* rb : {&b.even, &b.odd})
+    {
+      if (RangesCollide(*ra, *rb))
+        return true;
+    }
+  }
+  return false;
+}
+}  // namespace
 
 void ConfigurationChanged(TexUnitAddress bp_addr, u32 config)
 {
-  TextureUnitState& unit_state = s_unit[bp_addr.GetUnitID()];
+  UnitState& unit = s_units[bp_addr.GetUnitID()];
+  unit.residency = Residency::Invalid;
 
-  // If anything has changed, we can't assume existing state is still valid.
-  unit_state.state = TextureUnitState::State::INVALID;
-
-  // Note: BPStructs has already filtered out NOP changes before calling us
-  switch (bp_addr.Reg)
+  // Only the image registers move a region; TMEM offsets are given in 32-byte lines.
+  if (bp_addr.Reg == TexUnitAddress::Register::SETIMAGE1)
   {
-  case TexUnitAddress::Register::SETIMAGE1:
-  {
-    // Image Type and Even bank's Cache Height, Cache Width, TMEM Offset
-    TexImage1 even = {.hex = config};
-    unit_state.even = {even.cache_width, even.cache_height, even.tmem_even << 5, 0};
-    break;
+    const TexImage1 reg{.hex = config};
+    unit.even = Region{reg.cache_width, reg.cache_height, reg.tmem_even * 32u, 0};
   }
-  case TexUnitAddress::Register::SETIMAGE2:
+  else if (bp_addr.Reg == TexUnitAddress::Register::SETIMAGE2)
   {
-    // Odd bank's Cache Height, Cache Width, TMEM Offset
-    TexImage2 odd = {.hex = config};
-    unit_state.odd = {odd.cache_width, odd.cache_height, odd.tmem_odd << 5, 0};
-    break;
-  }
-  default:
-    // Something else has changed
-    return;
+    const TexImage2 reg{.hex = config};
+    unit.odd = Region{reg.cache_width, reg.cache_height, reg.tmem_odd * 32u, 0};
   }
 }
 
 void InvalidateAll()
 {
-  for (auto& unit : s_unit)
-  {
-    unit.state = TextureUnitState::State::INVALID;
-  }
+  for (UnitState& unit : s_units)
+    unit.residency = Residency::Invalid;
 }
-
-// On invalidate cache:
-// 1. invalidate all texture units.
 
 void Invalidate(u32 /* param */)
 {
-  // The exact arguments of Invalidate commands is currently unknown.
-  // It appears to contain the TMEM address and a size.
-
-  // For simplicity, we will just invalidate everything
+  // The parameter seems to encode an address and a length, but its format is not known well
+  // enough to invalidate selectively.
   InvalidateAll();
 }
 
-// On bind:
-// 1. use mipmapping/32bit status to calculate final sizes
-// 2. if texture size is small enough to fit in region mark as cached.
-//    otherwise, mark as valid
-
-void Bind(u32 unit, int width, int height, bool is_mipmapped, bool is_32_bit)
+void Bind(u32 unit_index, int width, int height, bool is_mipmapped, bool is_32_bit)
 {
-  TextureUnitState& unit_state = s_unit[unit];
+  UnitState& unit = s_units[unit_index];
 
-  // All textures use the even bank.
-  // It holds the level 0 mipmap (and other even mipmap LODs, if mipmapping is enabled)
-  unit_state.even.size = CalculateUnitSize(unit_state.even);
+  // Every block (4x4, 8x4 or 8x8 texels) occupies one 32-byte TMEM line per bank.
+  const u32 needed = static_cast<u32>(width) * static_cast<u32>(height) * 32u;
+  const bool uses_odd = is_mipmapped || is_32_bit;
 
-  bool fits = (width * height * 32U) <= unit_state.even.size;
+  unit.even.size = RegionBytes(unit.even);
+  unit.odd.size = uses_odd ? RegionBytes(unit.odd) : 0;
 
-  if (is_mipmapped || is_32_bit)
-  {
-    // And the odd bank is enabled when either mipmapping is enabled or the texture is 32 bit
-    // It holds the Alpha and Red channels of 32 bit textures or the odd layers of a mipmapped
-    // texture
-    unit_state.odd.size = CalculateUnitSize(unit_state.odd);
+  bool fits = needed <= unit.even.size;
+  if (uses_odd)
+    fits = fits && needed <= unit.odd.size;
 
-    fits = fits && (width * height * 32U) <= unit_state.odd.size;
-  }
-  else
-  {
-    unit_state.odd.size = 0;
-  }
-
+  // Mipmapped textures are treated as also occupying a second region's worth of space after
+  // the even region (and after the odd region for 32-bit textures). This matches what games
+  // appear to expect, though the true footprint has not been measured on hardware.
   if (is_mipmapped)
   {
-    // TODO: This is what games appear to expect from hardware. But seems odd, as it doesn't line up
-    //       with how much extra memory is required for mipmapping, just 33% more.
-    //       Hardware testing is required to see exactly what gets used.
-
-    // When mipmapping is enabled, the even bank is doubled in size
-    // The extended region holds the remaining even mipmap layers
-    unit_state.even.size *= 2;
-
+    unit.even.size *= 2;
     if (is_32_bit)
-    {
-      // When a 32bit texture is mipmapped, the odd bank is also doubled in size
-      unit_state.odd.size *= 2;
-    }
+      unit.odd.size *= 2;
   }
 
-  unit_state.state = fits ? TextureUnitState::State::CACHED : TextureUnitState::State::VALID;
+  unit.residency = fits ? Residency::Cached : Residency::Valid;
 }
 
-static u32 CalculateUnitSize(TextureUnitState::BankConfig bank_config)
-{
-  u32 width = bank_config.width;
-  u32 height = bank_config.height;
-
-  // These are the only cache sizes supported by the sdk
-  if (width == height)
-  {
-    switch (width)
-    {
-    case 3:  // 32KB
-      return 32 * 1024;
-    case 4:  // 128KB
-      return 128 * 1024;
-    case 5:  // 512KB
-      return 512 * 1024;
-    default:
-      break;
-    }
-  }
-
-  // However, the registers allow a much larger amount of configurablity.
-  // Maybe other sizes are broken?
-  // Until hardware tests are done, this is a guess at the size algorithm
-
-  return 512 * (1 << width) * (1 << height);
-}
-
-bool TextureUnitState::BankConfig::Overlaps(const BankConfig& other) const
-{
-  if (size == 0 || other.size == 0)
-    return false;
-  return (base <= other.base && (base + size) > other.base) ||
-         (other.base <= base && (other.base + other.size) > base);
-}
-
-bool TextureUnitState::Overlaps(const TextureUnitState& other) const
-{
-  if (state == TextureUnitState::State::INVALID || other.state == TextureUnitState::State::INVALID)
-    return false;
-  return even.Overlaps(other.even) || even.Overlaps(other.odd) || odd.Overlaps(other.even) ||
-         odd.Overlaps(other.odd);
-}
-
-// Scans though active texture units checks for overlaps.
 void FinalizeBinds(BitSet32 used_textures)
 {
-  for (u32 i : used_textures)
+  // A collision only needs both units to be live, and nothing here makes a unit invalid, so
+  // the result does not depend on the order the pairs are visited in.
+  for (const int bit : used_textures)
   {
-    if (s_unit[i].even.Overlaps(s_unit[i].odd))
-    {  // Self-overlap
-      s_unit[i].state = TextureUnitState::State::VALID;
-    }
-    for (size_t j = 0; j < s_unit.size(); j++)
+    const u32 i = static_cast<u32>(bit);
+    UnitState& unit = s_units[i];
+    if (RangesCollide(unit.even, unit.odd))
+      unit.residency = Residency::Valid;
+
+    for (u32 j = 0; j < s_units.size(); ++j)
     {
-      if (j != i && s_unit[i].Overlaps(s_unit[j]))
-      {
-        // There is an overlap, downgrade both from CACHED
-        // (for there to be an overlap, both must have started as valid or cached)
-        s_unit[i].state = TextureUnitState::State::VALID;
-        s_unit[j].state = TextureUnitState::State::VALID;
-      }
+      if (j == i || !UnitsCollide(unit, s_units[j]))
+        continue;
+      unit.residency = Residency::Valid;
+      s_units[j].residency = Residency::Valid;
     }
   }
 }
 
 bool IsCached(u32 unit)
 {
-  return s_unit[unit].state == TextureUnitState::State::CACHED;
+  return s_units[unit].residency == Residency::Cached;
 }
 
 bool IsValid(u32 unit)
 {
-  return s_unit[unit].state != TextureUnitState::State::INVALID;
+  return s_units[unit].residency != Residency::Invalid;
 }
 
 void Init()
 {
-  s_unit.fill({});
+  s_units.fill(UnitState{});
 }
 
 void DoState(PointerWrap& p)
 {
-  p.DoArray(s_unit);
+  p.DoArray(s_units);
 }
 
 }  // namespace TMEM
