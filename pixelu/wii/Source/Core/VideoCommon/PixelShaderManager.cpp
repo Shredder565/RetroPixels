@@ -248,16 +248,18 @@ void PixelShaderManager::SetViewportChanged()
 
 void PixelShaderManager::SetEfbScaleChanged(float scalex, float scaley)
 {
-  constants.efbscale[0] = 1.0f / scalex;
-  constants.efbscale[1] = 1.0f / scaley;
+  // The shaders multiply by the reciprocal.
+  constants.efbscale = {1.0f / scalex, 1.0f / scaley};
   dirty = true;
 }
 
 void PixelShaderManager::SetZSlope(float dfdx, float dfdy, float f0)
 {
-  constants.zslope[0] = dfdx;
-  constants.zslope[1] = dfdy;
-  constants.zslope[2] = f0;
+  // Depth gradients and base value of the current primitive, for per-pixel depth (.w unused).
+  float4& plane = constants.zslope;
+  plane[0] = dfdx;
+  plane[1] = dfdy;
+  plane[2] = f0;
   dirty = true;
 }
 
