@@ -1,27 +1,29 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
 
 #include "Common/CommonTypes.h"
 #include "Common/Swap.h"
 
-#include <array>
-
 namespace IOS::HLE::NWC24::Mail
 {
-constexpr u32 MAIL_LIST_MAGIC = 0x57635466;  // WcTf
+// "WcTf": first word of the outgoing (wc24send.ctl) and incoming mail list files.
+constexpr u32 MAIL_LIST_MAGIC = 0x57635466;
 
+// Where entry `index` starts in a mail list file (after the 128-byte header), big endian.
 inline u32 CalculateFileOffset(u32 index)
 {
-  return Common::swap32(128 + (index * 128));
+  return Common::swap32((index + 1) * 128);
 }
 
 #pragma pack(push, 1)
+// All fields are stored big endian.
 struct MailListHeader final
 {
-  u32 magic;    // 'WcTf' 0x57635466
-  u32 version;  // 4 in Wii Menu 4.x
+  u32 magic;
+  u32 version;  // 4 on system menu 4.x
   u32 number_of_mail;
   u32 total_entries;
   u32 total_size_of_messages;
@@ -41,6 +43,7 @@ struct MultipartEntry final
   u32 size;
 };
 
+// One message of a mail list (128 bytes).
 struct MailListEntry final
 {
   u32 id;
@@ -50,8 +53,7 @@ struct MailListEntry final
   u32 header_length;
   u32 tag;
   u32 wii_cmd;
-  // Never validated
-  u32 crc32;
+  u32 crc32;  // not checked by anything
   u64 from_friend_code;
   u32 minutes_since_1900;
   u32 padding;
@@ -64,8 +66,7 @@ struct MailListEntry final
   u32 packed_charset;
   u32 packed_transfer_encoding;
   u32 message_offset;
-  // Set to message_length if content transfer encoding is not base64.
-  u32 encoded_length;
+  u32 encoded_length;  // equals message_length unless the body is base64
   std::array<MultipartEntry, 2> multipart_entries;
   std::array<u32, 2> multipart_sizes;
   std::array<u32, 2> multipart_content_types;
@@ -75,6 +76,5 @@ struct MailListEntry final
   u32 padding3;
 };
 static_assert(sizeof(MailListEntry) == 128);
-
 #pragma pack(pop)
 }  // namespace IOS::HLE::NWC24::Mail

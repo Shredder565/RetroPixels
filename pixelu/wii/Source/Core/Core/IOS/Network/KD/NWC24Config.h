@@ -1,10 +1,11 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <memory>
 #include <string>
+#include <string_view>
+
 #include "Common/CommonTypes.h"
 
 namespace IOS::HLE
@@ -15,6 +16,7 @@ class FileSystem;
 }
 namespace NWC24
 {
+// Result codes of the WiiConnect24 calls, as the guest sees them.
 enum ErrorCode : s32
 {
   WC24_OK = 0,
@@ -38,6 +40,7 @@ enum ErrorCode : s32
   WC24_MSG_TOO_BIG = -72
 };
 
+// How far the console's WiiConnect24 account has got.
 enum class NWC24CreationStage : u32
 {
   Initial = 0,
@@ -45,18 +48,24 @@ enum class NWC24CreationStage : u32
   Registered = 2
 };
 
+// The WiiConnect24 account settings (nwc24msg.cfg, with a backup copy in nwc24msg.cbk).
+// Values are kept in file (big endian) order and converted by the accessors.
 class NWC24Config final
 {
 public:
   explicit NWC24Config(std::shared_ptr<FS::FileSystem> fs);
 
+  // Loads the file, or writes and uses the defaults if it cannot be read.
   void ReadConfig();
   void WriteCBK() const;
   void WriteConfig() const;
   void WriteConfigToPath(const std::string& path) const;
+  // Deletes the file and writes fresh defaults (no ID, the stock server URLs).
   void ResetConfig();
 
+  // Sum of the first 255 big-endian words of the file.
   u32 CalculateNwc24ConfigChecksum() const;
+  // 0 if the settings are usable, else -14 (bad magic, checksum or ID counter) or -27 (version).
   s32 CheckNwc24Config() const;
 
   u32 Magic() const;
@@ -67,6 +76,7 @@ public:
 
   u32 IdGen() const;
   void SetIdGen(u32 id_generation);
+  // The counter wraps at 32.
   void IncrementIdGen();
 
   u32 Checksum() const;
@@ -107,11 +117,22 @@ private:
     MAX_MLCHKID_LENGTH = 0x24,
   };
 
+  // Indices into http_urls.
+  enum
+  {
+    URL_ACCOUNT = 0,
+    URL_CHECK = 1,
+    URL_RECEIVE = 2,
+    URL_DELETE = 3,
+    URL_SEND = 4,
+  };
+
 #pragma pack(push, 1)
+  // The file, 1024 bytes.
   struct ConfigData final
   {
-    u32 magic;    // 'WcCf' 0x57634366
-    u32 version;  // must be 8
+    u32 magic;    // "WcCf"
+    u32 version;  // 8
     u64 nwc24_id;
     u32 id_generation;
     NWC24CreationStage creation_stage;
@@ -124,6 +145,7 @@ private:
     u32 checksum;
   };
 #pragma pack(pop)
+  static_assert(sizeof(ConfigData) == 1024);
 
   std::shared_ptr<FS::FileSystem> m_fs;
   ConfigData m_data;

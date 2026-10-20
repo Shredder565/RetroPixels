@@ -1,9 +1,13 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/Network/KD/NWC24Config.h"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstring>
+#include <string>
+#include <string_view>
 
 #include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
@@ -14,8 +18,49 @@
 
 namespace IOS::HLE::NWC24
 {
+namespace
+{
 constexpr const char CONFIG_PATH[] = "/" WII_WC24CONF_DIR "/nwc24msg.cfg";
 constexpr const char CBK_PATH[] = "/" WII_WC24CONF_DIR "/nwc24msg.cbk";
+
+constexpr u32 CONFIG_MAGIC = 0x57634366;  // "WcCf"
+constexpr u32 CONFIG_VERSION = 8;
+constexpr u32 MAX_ID_GENERATION = 0x1f;
+constexpr size_t CHECKSUMMED_WORDS = 0xff;
+
+constexpr s32 CONFIG_BROKEN = -14;
+constexpr s32 CONFIG_BAD_VERSION = -27;
+
+// Server URLs of a fresh config, in http_urls order.
+constexpr std::array<const char*, 5> DEFAULT_URLS{
+    "https://amw.wc24.wii.com/cgi-bin/account.cgi",
+    "http://rcw.wc24.wii.com/cgi-bin/check.cgi",
+    "http://mtw.wc24.wii.com/cgi-bin/receive.cgi",
+    "http://mtw.wc24.wii.com/cgi-bin/delete.cgi",
+    "http://mtw.wc24.wii.com/cgi-bin/send.cgi",
+};
+
+// Copies `text` up to its first NUL into a fixed field, zero-filling the rest.
+void StoreText(char* field, size_t field_size, std::string_view text)
+{
+  const size_t end = std::min(text.find('\0'), text.size());
+  const size_t length = std::min(end, field_size);
+  std::memcpy(field, text.data(), length);
+  std::memset(field + length, 0, field_size - length);
+}
+
+// The text in a fixed field, which need not be NUL-terminated.
+std::string_view LoadText(const char* field, size_t field_size)
+{
+  return {field, strnlen(field, field_size)};
+}
+
+bool LoadFile(FS::FileSystem& fs, void* data, size_t size)
+{
+  const auto file = fs.OpenFile(PID_KD, PID_KD, CONFIG_PATH, FS::Mode::Read);
+  return file && file->Read(static_cast<u8*>(data), size);
+}
+}  // namespace
 
 NWC24Config::NWC24Config(std::shared_ptr<FS::FileSystem> fs) : m_fs{std::move(fs)}
 {
@@ -24,18 +69,15 @@ NWC24Config::NWC24Config(std::shared_ptr<FS::FileSystem> fs) : m_fs{std::move(fs
 
 void NWC24Config::ReadConfig()
 {
-  if (const auto file = m_fs->OpenFile(PID_KD, PID_KD, CONFIG_PATH, FS::Mode::Read))
+  if (!LoadFile(*m_fs, &m_data, sizeof(m_data)))
   {
-    if (file->Read(&m_data, 1))
-    {
-      const s32 config_error = CheckNwc24Config();
-      if (config_error)
-        ERROR_LOG_FMT(IOS_WC24, "There is an error in the config for for WC24: {}", config_error);
-
-      return;
-    }
+    ResetConfig();
+    return;
   }
-  ResetConfig();
+
+  // A damaged file is still used as it is.
+  if (const s32 problem = CheckNwc24Config(); problem != 0)
+    ERROR_LOG_FMT(IOS_WC24, "There is an error in the config for for WC24: {}", problem);
 }
 
 void NWC24Config::WriteCBK() const
@@ -50,10 +92,11 @@ void NWC24Config::WriteConfig() const
 
 void NWC24Config::WriteConfigToPath(const std::string& path) const
 {
-  constexpr FS::Modes public_modes{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite};
-  m_fs->CreateFullPath(PID_KD, PID_KD, path, 0, public_modes);
-  const auto file = m_fs->CreateAndOpenFile(PID_KD, PID_KD, path, public_modes);
-  if (!file || !file->Write(&m_data, 1))
+  constexpr FS::Modes everyone_rw{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite};
+  m_fs->CreateFullPath(PID_KD, PID_KD, path, 0, everyone_rw);
+  const auto file = m_fs->CreateAndOpenFile(PID_KD, PID_KD, path, everyone_rw);
+  const bool written = file && file->Write(reinterpret_cast<const u8*>(&m_data), sizeof(m_data));
+  if (!written)
     ERROR_LOG_FMT(IOS_WC24, "Failed to open or write WC24 config file at {}", path);
 }
 
@@ -61,25 +104,14 @@ void NWC24Config::ResetConfig()
 {
   m_fs->Delete(PID_KD, PID_KD, CONFIG_PATH);
 
-  constexpr const char* urls[5] = {
-      "https://amw.wc24.wii.com/cgi-bin/account.cgi", "http://rcw.wc24.wii.com/cgi-bin/check.cgi",
-      "http://mtw.wc24.wii.com/cgi-bin/receive.cgi",  "http://mtw.wc24.wii.com/cgi-bin/delete.cgi",
-      "http://mtw.wc24.wii.com/cgi-bin/send.cgi",
-  };
-
-  memset(&m_data, 0, sizeof(m_data));
-
-  SetMagic(0x57634366);
-  SetVersion(8);
+  std::memset(&m_data, 0, sizeof(m_data));
+  SetMagic(CONFIG_MAGIC);
+  SetVersion(CONFIG_VERSION);
   SetCreationStage(NWC24CreationStage::Initial);
   SetEnableBooting(0);
   SetEmail("@wii.com");
-
-  for (int i = 0; i < URL_COUNT; ++i)
-  {
-    strncpy(m_data.http_urls[i], urls[i], MAX_URL_LENGTH);
-  }
-
+  for (size_t i = 0; i < DEFAULT_URLS.size(); ++i)
+    StoreText(m_data.http_urls[i], MAX_URL_LENGTH, DEFAULT_URLS[i]);
   SetChecksum(CalculateNwc24ConfigChecksum());
 
   WriteConfig();
@@ -87,44 +119,37 @@ void NWC24Config::ResetConfig()
 
 u32 NWC24Config::CalculateNwc24ConfigChecksum() const
 {
-  const u32* ptr = reinterpret_cast<const u32*>(&m_data);
+  std::array<u32, CHECKSUMMED_WORDS> words;
+  std::memcpy(words.data(), &m_data, sizeof(words));
+
   u32 sum = 0;
-
-  for (int i = 0; i < 0xFF; ++i)
-  {
-    sum += Common::swap32(*ptr++);
-  }
-
+  for (const u32 word : words)
+    sum += Common::swap32(word);
   return sum;
 }
 
 s32 NWC24Config::CheckNwc24Config() const
 {
-  // 'WcCf' magic
-  if (Magic() != 0x57634366)
+  if (Magic() != CONFIG_MAGIC)
   {
     ERROR_LOG_FMT(IOS_WC24, "Magic mismatch");
-    return -14;
+    return CONFIG_BROKEN;
   }
 
-  const u32 checksum = CalculateNwc24ConfigChecksum();
-  DEBUG_LOG_FMT(IOS_WC24, "Checksum: {:X}", checksum);
-  if (Checksum() != checksum)
+  const u32 expected = CalculateNwc24ConfigChecksum();
+  if (Checksum() != expected)
   {
-    ERROR_LOG_FMT(IOS_WC24, "Checksum mismatch expected {:X} and got {:X}", checksum, Checksum());
-    return -14;
+    ERROR_LOG_FMT(IOS_WC24, "Checksum mismatch expected {:X} and got {:X}", expected, Checksum());
+    return CONFIG_BROKEN;
   }
 
-  if (IdGen() > 0x1F)
+  if (IdGen() > MAX_ID_GENERATION)
   {
     ERROR_LOG_FMT(IOS_WC24, "Id gen error");
-    return -14;
+    return CONFIG_BROKEN;
   }
 
-  if (Version() != 8)
-    return -27;
-
-  return 0;
+  return Version() == CONFIG_VERSION ? 0 : CONFIG_BAD_VERSION;
 }
 
 u32 NWC24Config::Magic() const
@@ -159,11 +184,7 @@ void NWC24Config::SetIdGen(u32 id_generation)
 
 void NWC24Config::IncrementIdGen()
 {
-  u32 id_ctr = IdGen();
-  id_ctr++;
-  id_ctr &= 0x1F;
-
-  SetIdGen(id_ctr);
+  SetIdGen((IdGen() + 1) & MAX_ID_GENERATION);
 }
 
 u32 NWC24Config::Checksum() const
@@ -178,12 +199,13 @@ void NWC24Config::SetChecksum(u32 checksum)
 
 NWC24CreationStage NWC24Config::CreationStage() const
 {
-  return NWC24CreationStage(Common::swap32(u32(m_data.creation_stage)));
+  return static_cast<NWC24CreationStage>(Common::swap32(static_cast<u32>(m_data.creation_stage)));
 }
 
 void NWC24Config::SetCreationStage(NWC24CreationStage creation_stage)
 {
-  m_data.creation_stage = NWC24CreationStage(Common::swap32(u32(creation_stage)));
+  m_data.creation_stage =
+      static_cast<NWC24CreationStage>(Common::swap32(static_cast<u32>(creation_stage)));
 }
 
 u32 NWC24Config::EnableBooting() const
@@ -213,49 +235,45 @@ const char* NWC24Config::Email() const
 
 void NWC24Config::SetEmail(const char* email)
 {
-  strncpy(m_data.email, email, MAX_EMAIL_LENGTH);
+  // Always NUL-terminated, so at most 63 characters are kept.
+  StoreText(m_data.email, MAX_EMAIL_LENGTH, email);
   m_data.email[MAX_EMAIL_LENGTH - 1] = '\0';
 }
 
 std::string_view NWC24Config::GetMlchkid() const
 {
-  const size_t size = strnlen(m_data.mlchkid, MAX_MLCHKID_LENGTH);
-  return {m_data.mlchkid, size};
+  return LoadText(m_data.mlchkid, MAX_MLCHKID_LENGTH);
 }
 
-std::string NWC24Config::GetCheckURL() const
+std::string_view NWC24Config::GetPassword() const
 {
-  const size_t size = strnlen(m_data.http_urls[1], MAX_URL_LENGTH);
-  return {m_data.http_urls[1], size};
+  return LoadText(m_data.paswd, MAX_PASSWORD_LENGTH);
 }
 
 std::string NWC24Config::GetAccountURL() const
 {
-  const size_t size = strnlen(m_data.http_urls[0], MAX_URL_LENGTH);
-  return {m_data.http_urls[0], size};
+  return std::string(LoadText(m_data.http_urls[URL_ACCOUNT], MAX_URL_LENGTH));
+}
+
+std::string NWC24Config::GetCheckURL() const
+{
+  return std::string(LoadText(m_data.http_urls[URL_CHECK], MAX_URL_LENGTH));
+}
+
+std::string NWC24Config::GetSendURL() const
+{
+  return std::string(LoadText(m_data.http_urls[URL_SEND], MAX_URL_LENGTH));
 }
 
 void NWC24Config::SetMailCheckID(std::string_view mlchkid)
 {
-  std::strncpy(m_data.mlchkid, mlchkid.data(), std::size(m_data.mlchkid));
+  StoreText(m_data.mlchkid, MAX_MLCHKID_LENGTH, mlchkid);
   m_data.mlchkid[MAX_MLCHKID_LENGTH - 1] = '\0';
 }
 
 void NWC24Config::SetPassword(std::string_view password)
 {
-  std::strncpy(m_data.paswd, password.data(), std::size(m_data.paswd));
+  StoreText(m_data.paswd, MAX_PASSWORD_LENGTH, password);
   m_data.paswd[MAX_PASSWORD_LENGTH - 1] = '\0';
-}
-
-std::string NWC24Config::GetSendURL() const
-{
-  const size_t size = strnlen(m_data.http_urls[4], MAX_URL_LENGTH);
-  return {m_data.http_urls[4], size};
-}
-
-std::string_view NWC24Config::GetPassword() const
-{
-  const size_t size = strnlen(m_data.paswd, MAX_PASSWORD_LENGTH);
-  return {m_data.paswd, size};
 }
 }  // namespace IOS::HLE::NWC24

@@ -1,14 +1,16 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/Network/KD/VFF/VFFUtil.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
+#include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
-// Does not compile if diskio.h is included first.
+// ff.h has to come before diskio.h.
 // clang-format off
 #include "ff.h"
 #include "diskio.h"
@@ -17,442 +19,303 @@
 #include "Common/Align.h"
 #include "Common/FatFsUtil.h"
 #include "Common/Logging/Log.h"
-#include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
-
 #include "Core/IOS/Uids.h"
-
-static DRESULT read_vff_header(IOS::HLE::FS::FileHandle* vff, FATFS* fs)
-{
-  IOS::HLE::NWC24::VFFHeader header;
-  if (!vff->Read(&header, 1))
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to read VFF header.");
-    return RES_ERROR;
-  }
-
-  u16 cluster_size = 0;
-  u16 cluster_count = 0;
-
-  switch (Common::swap16(header.endianness))
-  {
-  case IOS::HLE::NWC24::VF_BIG_ENDIAN:
-    cluster_size = Common::swap16(header.cluster_size) * 16;
-    cluster_count = Common::swap32(header.volume_size) / cluster_size;
-    break;
-  case IOS::HLE::NWC24::VF_LITTLE_ENDIAN:
-    // TODO: Actually implement.
-    // Another option is to just delete these VFFs and let the current channel create a Big Endian
-    // one.
-    return RES_ERROR;
-  }
-
-  if (cluster_count < 4085)
-  {
-    fs->fs_type = FS_FAT12;
-
-    u32 table_size = ((cluster_count + 1) / 2) * 3;
-    table_size = Common::AlignUp(table_size, cluster_size);
-
-    // Fsize is the full table size divided by 512 (Cluster size).
-    fs->fsize = table_size / 512;
-  }
-  else if (cluster_count < 65525)
-  {
-    fs->fs_type = FS_FAT16;
-
-    u32 table_size = cluster_count * 2;
-    table_size = Common::AlignUp(table_size, cluster_size);
-    fs->fsize = table_size / 512;
-  }
-  else
-  {
-    ERROR_LOG_FMT(IOS_WC24, "VFF not FAT12 or 16! Cluster size: {}", cluster_size);
-    return RES_ERROR;
-  }
-
-  fs->n_fats = 2;
-  fs->csize = 1;
-
-  // Root directory entry is 4096 bytes long, with each entry being 32 bytes. 4096 / 32 = 128
-  fs->n_rootdir = 128;
-
-  u32 sysect = 1 + (fs->fsize * 2) + fs->n_rootdir / (512 / 32);
-
-  // cluster_count is the total count whereas this is the actual amount of clusters we can use
-  u32 actual_cluster_count = cluster_count - sysect;
-
-  fs->n_fatent = actual_cluster_count + 2;
-  fs->volbase = 0;
-  fs->fatbase = 1;
-  fs->database = sysect;
-  // Root directory entry
-  fs->dirbase = fs->fatbase + fs->fsize * 2;
-
-  // Initialize cluster allocation information
-  fs->last_clst = fs->free_clst = 0xFFFFFFFF;
-  fs->fsi_flag = 0x80;
-
-  fs->id = 0;
-  fs->cdir = 0;
-
-  // invalidate window
-  fs->wflag = 0;
-  fs->winsect = std::numeric_limits<LBA_t>::max();
-
-  return RES_OK;
-}
-
-static FRESULT vff_mount(IOS::HLE::FS::FileHandle* vff, FATFS* fs)
-{
-  fs->fs_type = 0;  // Clear the filesystem object
-  fs->pdrv = 0;     // Volume hosting physical drive
-
-  DRESULT ret = read_vff_header(vff, fs);
-  if (ret != RES_OK)
-    return FR_DISK_ERR;
-
-  return FR_OK;
-}
-
-static DRESULT vff_read(IOS::HLE::FS::FileHandle* vff, BYTE pdrv, BYTE* buff, LBA_t sector,
-                        UINT count)
-{
-  // We cannot read or write data to the 0th sector in a VFF.
-  if (sector == 0)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Attempted to read the 0th sector in the VFF: Invalid VFF?");
-    return RES_ERROR;
-  }
-
-  const u64 offset = static_cast<u64>(sector) * IOS::HLE::NWC24::SECTOR_SIZE - 480;
-  if (!vff->Seek(offset, IOS::HLE::FS::SeekMode::Set))
-  {
-    ERROR_LOG_FMT(IOS_WC24, "VFF seek failed (offset={})", offset);
-    return RES_ERROR;
-  }
-
-  const size_t size = static_cast<size_t>(count) * IOS::HLE::NWC24::SECTOR_SIZE;
-  if (!vff->Read(buff, size))
-  {
-    ERROR_LOG_FMT(IOS_WC24, "VFF read failed (offset={}, size={})", offset, size);
-    return RES_ERROR;
-  }
-
-  return RES_OK;
-}
-
-static DRESULT vff_write(IOS::HLE::FS::FileHandle* vff, BYTE pdrv, const BYTE* buff, LBA_t sector,
-                         UINT count)
-{
-  if (sector == 0)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Attempted to write to the 0th sector in the VFF: Invalid VFF?");
-    return RES_ERROR;
-  }
-
-  const u64 offset = static_cast<u64>(sector) * IOS::HLE::NWC24::SECTOR_SIZE - 480;
-  if (!vff->Seek(offset, IOS::HLE::FS::SeekMode::Set))
-  {
-    ERROR_LOG_FMT(IOS_WC24, "VFF seek failed (offset={})", offset);
-    return RES_ERROR;
-  }
-
-  const size_t size = static_cast<size_t>(count) * IOS::HLE::NWC24::SECTOR_SIZE;
-  const auto res = vff->Write(buff, size);
-  if (!res)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "VFF write failed (offset={}, size={})", offset, size);
-    return RES_ERROR;
-  }
-
-  return RES_OK;
-}
-
-static DRESULT vff_ioctl(IOS::HLE::FS::FileHandle* vff, BYTE pdrv, BYTE cmd, void* buff)
-{
-  switch (cmd)
-  {
-  case CTRL_SYNC:
-    return RES_OK;
-  case GET_SECTOR_COUNT:
-    *static_cast<LBA_t*>(buff) = vff->GetStatus()->size / IOS::HLE::NWC24::SECTOR_SIZE;
-    return RES_OK;
-  default:
-    WARN_LOG_FMT(IOS_WC24, "Unexpected FAT ioctl {}", cmd);
-    return RES_OK;
-  }
-}
 
 namespace IOS::HLE::NWC24
 {
-static ErrorCode WriteFile(const std::string& filename, std::span<const u8> tmp_buffer)
-{
-  FIL dst{};
-  const auto open_error_code = f_open(&dst, filename.c_str(), FA_CREATE_ALWAYS | FA_WRITE);
-  if (open_error_code != FR_OK)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to open file {} in VFF", filename);
-    return WC24_ERR_FILE_OPEN;
-  }
-
-  size_t size = tmp_buffer.size();
-  size_t offset = 0;
-  while (size > 0)
-  {
-    constexpr size_t MAX_CHUNK_SIZE = 32768;
-    u32 chunk_size = static_cast<u32>(std::min(size, MAX_CHUNK_SIZE));
-
-    u32 written_size;
-    const auto write_error_code =
-        f_write(&dst, tmp_buffer.data() + offset, chunk_size, &written_size);
-    if (write_error_code != FR_OK)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to write file {} to VFF: {}", filename,
-                    std::to_underlying(write_error_code));
-      return WC24_ERR_FILE_WRITE;
-    }
-
-    if (written_size != chunk_size)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to write bytes of file {} to VFF ({} != {})", filename,
-                    written_size, chunk_size);
-      return WC24_ERR_FILE_WRITE;
-    }
-
-    size -= chunk_size;
-    offset += chunk_size;
-  }
-
-  const auto close_error_code = f_close(&dst);
-  if (close_error_code != FR_OK)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to close file {} in VFF", filename);
-    return WC24_ERR_FILE_CLOSE;
-  }
-
-  return WC24_OK;
-}
-
-static ErrorCode ReadFile(const std::string& filename, std::vector<u8>& out)
-{
-  FIL src{};
-  const auto open_error_code = f_open(&src, filename.c_str(), FA_READ);
-  if (open_error_code != FR_OK)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to open file {} in VFF", filename);
-    return WC24_ERR_FILE_OPEN;
-  }
-
-  Common::ScopeGuard vff_close_guard{[&] { f_close(&src); }};
-
-  u32 size = static_cast<u32>(out.size());
-  u32 read_size{};
-  const auto read_error_code = f_read(&src, out.data(), size, &read_size);
-  if (read_error_code != FR_OK)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to read file {} in VFF: {}", filename,
-                  static_cast<u32>(read_error_code));
-    return WC24_ERR_FILE_READ;
-  }
-
-  if (read_size != size)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to read bytes of file {} to VFF ({} != {})", filename,
-                  read_size, size);
-    return WC24_ERR_FILE_READ;
-  }
-
-  // As prior operations did not fail, dismiss the guard and handle a potential error with f_close.
-  vff_close_guard.Dismiss();
-
-  const auto close_error_code = f_close(&src);
-  if (close_error_code != FR_OK)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "Failed to close file {} in VFF", filename);
-    return WC24_ERR_FILE_CLOSE;
-  }
-
-  return WC24_OK;
-}
-
 namespace
 {
-class VffFatFsCallbacks : public Common::FatFsCallbacks
+// Sector n of the volume is at byte n * 512 - 480 of the file: sector 1 starts right after the
+// 32-byte header, and there is no sector 0.
+constexpr u32 FIRST_SECTOR_OFFSET = SECTOR_SIZE - sizeof(VFFHeader);
+
+constexpr u32 FAT12_MAX_CLUSTERS = 4085;
+constexpr u32 FAT16_MAX_CLUSTERS = 65525;
+// The root directory is 4 KiB: 128 entries of 32 bytes.
+constexpr u16 ROOT_ENTRIES = 128;
+constexpr u32 DIR_ENTRY_SIZE = 32;
+
+// Write sizes handed to FatFs at once.
+constexpr size_t WRITE_CHUNK = 32768;
+
+// The VFF file as FatFs's block device.
+class VFFDisk final : public Common::FatFsCallbacks
 {
 public:
-  int DiskRead(u8 pdrv, u8* buff, u32 sector, unsigned int count) override
+  int DiskRead(u8, u8* buff, u32 sector, unsigned int count) override
   {
-    return vff_read(m_vff, pdrv, buff, sector, count);
+    if (!Seek(sector, "read"))
+      return RES_ERROR;
+    const size_t bytes = size_t{count} * SECTOR_SIZE;
+    if (!file->Read(buff, bytes))
+    {
+      ERROR_LOG_FMT(IOS_WC24, "VFF read failed (sector={}, size={})", sector, bytes);
+      return RES_ERROR;
+    }
+    return RES_OK;
   }
 
-  int DiskWrite(u8 pdrv, const u8* buff, u32 sector, unsigned int count) override
+  int DiskWrite(u8, const u8* buff, u32 sector, unsigned int count) override
   {
-    return vff_write(m_vff, pdrv, buff, sector, count);
+    if (!Seek(sector, "write"))
+      return RES_ERROR;
+    const size_t bytes = size_t{count} * SECTOR_SIZE;
+    if (!file->Write(buff, bytes))
+    {
+      ERROR_LOG_FMT(IOS_WC24, "VFF write failed (sector={}, size={})", sector, bytes);
+      return RES_ERROR;
+    }
+    return RES_OK;
   }
 
-  int DiskIOCtl(u8 pdrv, u8 cmd, void* buff) override { return vff_ioctl(m_vff, pdrv, cmd, buff); }
+  int DiskIOCtl(u8, u8 cmd, void* buff) override
+  {
+    if (cmd == GET_SECTOR_COUNT)
+    {
+      *static_cast<LBA_t*>(buff) = static_cast<LBA_t>(file->GetStatus()->size / SECTOR_SIZE);
+      return RES_OK;
+    }
+    if (cmd != CTRL_SYNC)
+      WARN_LOG_FMT(IOS_WC24, "Unexpected FAT ioctl {}", cmd);
+    return RES_OK;
+  }
 
-  IOS::HLE::FS::FileHandle* m_vff = nullptr;
+  FS::FileHandle* file = nullptr;
+
+private:
+  bool Seek(u32 sector, const char* what) const
+  {
+    if (sector == 0)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Attempted to {} sector 0 of the VFF: Invalid VFF?", what);
+      return false;
+    }
+    const u64 offset = u64{sector} * SECTOR_SIZE - FIRST_SECTOR_OFFSET;
+    if (!file->Seek(static_cast<u32>(offset), FS::SeekMode::Set))
+    {
+      ERROR_LOG_FMT(IOS_WC24, "VFF seek failed (offset={})", offset);
+      return false;
+    }
+    return true;
+  }
 };
+
+// Fills in `volume` from the VFF header instead of letting FatFs look for a boot sector, which
+// VFFs do not have. Layout: sector 1 holds the first FAT, then the second FAT, then the root
+// directory, then the data clusters (one sector each).
+bool SetUpVolume(FS::FileHandle& file, FATFS* volume)
+{
+  VFFHeader header;
+  if (!file.Read(reinterpret_cast<u8*>(&header), sizeof(header)))
+  {
+    ERROR_LOG_FMT(IOS_WC24, "Failed to read VFF header.");
+    return false;
+  }
+
+  const u16 endianness = Common::swap16(header.endianness);
+  if (endianness == VF_LITTLE_ENDIAN)
+  {
+    // Not supported yet. (The channel would make a new big-endian one if it were deleted.)
+    return false;
+  }
+
+  // Both values are 16 bits wide, exactly as in IOS.
+  u16 cluster_bytes = 0;
+  u16 clusters = 0;
+  if (endianness == VF_BIG_ENDIAN)
+  {
+    cluster_bytes = static_cast<u16>(Common::swap16(header.cluster_size) * 16);
+    clusters = static_cast<u16>(Common::swap32(header.volume_size) / cluster_bytes);
+  }
+
+  u32 fat_bytes = 0;
+  if (clusters < FAT12_MAX_CLUSTERS)
+  {
+    volume->fs_type = FS_FAT12;
+    fat_bytes = (clusters + 1u) / 2 * 3;
+  }
+  else if (clusters < FAT16_MAX_CLUSTERS)
+  {
+    volume->fs_type = FS_FAT16;
+    fat_bytes = clusters * 2u;
+  }
+  else
+  {
+    ERROR_LOG_FMT(IOS_WC24, "VFF not FAT12 or 16! Cluster size: {}", cluster_bytes);
+    return false;
+  }
+  // Each FAT is padded to a whole cluster.
+  const u32 fat_sectors = Common::AlignUp(fat_bytes, u32{cluster_bytes}) / SECTOR_SIZE;
+
+  const u32 fat_start = 1;
+  const u32 root_start = fat_start + fat_sectors * 2;
+  const u32 data_start = root_start + ROOT_ENTRIES / (SECTOR_SIZE / DIR_ENTRY_SIZE);
+
+  volume->n_fats = 2;
+  volume->csize = 1;
+  volume->n_rootdir = ROOT_ENTRIES;
+  volume->fsize = fat_sectors;
+  // The space before the data area comes out of the volume's clusters.
+  volume->n_fatent = clusters - data_start + 2;
+  volume->volbase = 0;
+  volume->fatbase = fat_start;
+  volume->dirbase = root_start;
+  volume->database = data_start;
+
+  // Free space is unknown, there is no FSINFO, the current directory is the root and the
+  // sector window is empty.
+  volume->last_clst = 0xffffffff;
+  volume->free_clst = 0xffffffff;
+  volume->fsi_flag = 0x80;
+  volume->id = 0;
+  volume->cdir = 0;
+  volume->wflag = 0;
+  volume->winsect = std::numeric_limits<LBA_t>::max();
+  return true;
+}
+
+// Opens the VFF at `path` as the FatFs volume and runs `use` on it. `open_error` and
+// `mount_error` are what to answer when the file is missing or is not a usable VFF.
+template <typename Use>
+ErrorCode WithVFF(const std::string& path, const std::shared_ptr<FS::FileSystem>& fs,
+                  ErrorCode open_error, ErrorCode mount_error, bool delete_on_failure, Use use)
+{
+  VFFDisk disk;
+  ErrorCode result = WC24_OK;
+  Common::RunInFatFsContext(disk, [&] {
+    auto file = fs->OpenFile(PID_KD, PID_KD, path, FS::Mode::ReadWrite);
+    if (!file)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Failed to open VFF at: {}", path);
+      result = open_error;
+      return;
+    }
+    disk.file = &*file;
+
+    FATFS volume{};
+    if (f_mount(&volume, "", 0) != FR_OK)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
+      result = mount_error;
+    }
+    else
+    {
+      volume.fs_type = 0;
+      volume.pdrv = 0;
+      if (!SetUpVolume(*file, &volume))
+      {
+        ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
+        result = mount_error;
+      }
+      else
+      {
+        result = use();
+      }
+      f_unmount("");
+    }
+
+    // A VFF that could not be written to is thrown away (while it is still open, as IOS does).
+    if (delete_on_failure && result != WC24_OK)
+      fs->Delete(PID_KD, PID_KD, path);
+  });
+  return result;
+}
+
+ErrorCode WriteVolumeFile(const std::string& name, std::span<const u8> data)
+{
+  FIL file{};
+  if (f_open(&file, name.c_str(), FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+  {
+    ERROR_LOG_FMT(IOS_WC24, "Failed to open file {} in VFF", name);
+    return WC24_ERR_FILE_OPEN;
+  }
+
+  // On a failed write the file is left open; the volume is unmounted (and the VFF deleted)
+  // straight after anyway.
+  for (size_t done = 0; done < data.size();)
+  {
+    const UINT chunk = static_cast<UINT>(std::min(data.size() - done, WRITE_CHUNK));
+    UINT written = 0;
+    const FRESULT status = f_write(&file, data.data() + done, chunk, &written);
+    if (status != FR_OK)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Failed to write file {} to VFF: {}", name,
+                    std::to_underlying(status));
+      return WC24_ERR_FILE_WRITE;
+    }
+    if (written != chunk)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "Failed to write bytes of file {} to VFF ({} != {})", name,
+                    written, chunk);
+      return WC24_ERR_FILE_WRITE;
+    }
+    done += chunk;
+  }
+
+  if (f_close(&file) != FR_OK)
+  {
+    ERROR_LOG_FMT(IOS_WC24, "Failed to close file {} in VFF", name);
+    return WC24_ERR_FILE_CLOSE;
+  }
+  return WC24_OK;
+}
+
+ErrorCode ReadVolumeFile(const std::string& name, std::vector<u8>& out)
+{
+  FIL file{};
+  if (f_open(&file, name.c_str(), FA_READ) != FR_OK)
+  {
+    ERROR_LOG_FMT(IOS_WC24, "Failed to open file {} in VFF", name);
+    return WC24_ERR_FILE_OPEN;
+  }
+
+  const UINT wanted = static_cast<UINT>(out.size());
+  UINT got = 0;
+  const FRESULT status = f_read(&file, out.data(), wanted, &got);
+  if (status != FR_OK || got != wanted)
+  {
+    if (status != FR_OK)
+      ERROR_LOG_FMT(IOS_WC24, "Failed to read file {} in VFF: {}", name, std::to_underlying(status));
+    else
+      ERROR_LOG_FMT(IOS_WC24, "Failed to read bytes of file {} ({} != {})", name, got, wanted);
+    f_close(&file);
+    return WC24_ERR_FILE_READ;
+  }
+
+  if (f_close(&file) != FR_OK)
+  {
+    ERROR_LOG_FMT(IOS_WC24, "Failed to close file {} in VFF", name);
+    return WC24_ERR_FILE_CLOSE;
+  }
+  return WC24_OK;
+}
 }  // namespace
 
 ErrorCode WriteToVFF(const std::string& path, const std::string& filename,
                      const std::shared_ptr<FS::FileSystem>& fs, std::span<const u8> data)
 {
-  VffFatFsCallbacks callbacks;
-  ErrorCode return_value;
-  Common::RunInFatFsContext(callbacks, [&] {
-    auto temp = fs->OpenFile(PID_KD, PID_KD, path, FS::Mode::ReadWrite);
-    if (!temp)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to open VFF at: {}", path);
-      return_value = WC24_ERR_FILE_OPEN;
-      return;
-    }
-
-    callbacks.m_vff = &*temp;
-
-    Common::ScopeGuard vff_delete_guard{[&] { fs->Delete(PID_KD, PID_KD, path); }};
-
-    FATFS fatfs{};
-    const FRESULT fatfs_mount_error_code = f_mount(&fatfs, "", 0);
-    if (fatfs_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_FILE_READ;
-      return;
-    }
-
-    Common::ScopeGuard unmount_guard{[] { f_unmount(""); }};
-
-    const FRESULT vff_mount_error_code = vff_mount(callbacks.m_vff, &fatfs);
-    if (vff_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_FILE_READ;
-      return;
-    }
-
-    const auto write_error_code = WriteFile(filename, data);
-    if (write_error_code != WC24_OK)
-    {
-      return_value = write_error_code;
-      return;
-    }
-
-    vff_delete_guard.Dismiss();
-
-    return_value = WC24_OK;
-    return;
-  });
-
-  return return_value;
+  return WithVFF(path, fs, WC24_ERR_FILE_OPEN, WC24_ERR_FILE_READ, true,
+                 [&] { return WriteVolumeFile(filename, data); });
 }
 
 ErrorCode ReadFromVFF(const std::string& path, const std::string& filename,
                       const std::shared_ptr<FS::FileSystem>& fs, std::vector<u8>& out)
 {
-  VffFatFsCallbacks callbacks;
-  ErrorCode return_value;
-  Common::RunInFatFsContext(callbacks, [&] {
-    auto temp = fs->OpenFile(PID_KD, PID_KD, path, FS::Mode::ReadWrite);
-    if (!temp)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to open VFF at: {}", path);
-      return_value = WC24_ERR_NOT_FOUND;
-      return;
-    }
-
-    callbacks.m_vff = &*temp;
-
-    FATFS fatfs{};
-    const FRESULT fatfs_mount_error_code = f_mount(&fatfs, "", 0);
-    if (fatfs_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_BROKEN;
-      return;
-    }
-
-    Common::ScopeGuard unmount_guard{[] { f_unmount(""); }};
-
-    const FRESULT vff_mount_error_code = vff_mount(callbacks.m_vff, &fatfs);
-    if (vff_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_BROKEN;
-      return;
-    }
-
-    const ErrorCode read_error_code = ReadFile(filename, out);
-    if (read_error_code != WC24_OK)
-    {
-      return_value = read_error_code;
-      return;
-    }
-
-    return_value = WC24_OK;
-    return;
-  });
-
-  return return_value;
+  return WithVFF(path, fs, WC24_ERR_NOT_FOUND, WC24_ERR_BROKEN, false,
+                 [&] { return ReadVolumeFile(filename, out); });
 }
 
 ErrorCode DeleteFileFromVFF(const std::string& path, const std::string& filename,
                             const std::shared_ptr<FS::FileSystem>& fs)
 {
-  VffFatFsCallbacks callbacks;
-  ErrorCode return_value;
-  Common::RunInFatFsContext(callbacks, [&] {
-    auto temp = fs->OpenFile(PID_KD, PID_KD, path, FS::Mode::ReadWrite);
-    if (!temp)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to open VFF at: {}", path);
-      return_value = WC24_ERR_NOT_FOUND;
-      return;
-    }
-
-    callbacks.m_vff = &*temp;
-
-    FATFS fatfs{};
-    const FRESULT fatfs_mount_error_code = f_mount(&fatfs, "", 0);
-    if (fatfs_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_BROKEN;
-      return;
-    }
-
-    Common::ScopeGuard unmount_guard{[] { f_unmount(""); }};
-
-    const FRESULT vff_mount_error_code = vff_mount(callbacks.m_vff, &fatfs);
-    if (vff_mount_error_code != FR_OK)
-    {
-      // The VFF is most likely broken.
-      ERROR_LOG_FMT(IOS_WC24, "Failed to mount VFF at: {}", path);
-      return_value = WC24_ERR_BROKEN;
-      return;
-    }
-
-    const FRESULT unlink_code = f_unlink(filename.c_str());
-    if (unlink_code != FR_OK)
-    {
-      ERROR_LOG_FMT(IOS_WC24, "Failed to delete file {} in VFF at: {} Code: {}", filename, path,
-                    static_cast<u32>(unlink_code));
-      return_value = WC24_ERR_BROKEN;
-      return;
-    }
-
-    return_value = WC24_OK;
-    return;
+  return WithVFF(path, fs, WC24_ERR_NOT_FOUND, WC24_ERR_BROKEN, false, [&] {
+    const FRESULT status = f_unlink(filename.c_str());
+    if (status == FR_OK)
+      return WC24_OK;
+    ERROR_LOG_FMT(IOS_WC24, "Failed to delete file {} in VFF at: {} Code: {}", filename, path,
+                  std::to_underlying(status));
+    return WC24_ERR_BROKEN;
   });
-
-  return return_value;
 }
 }  // namespace IOS::HLE::NWC24
