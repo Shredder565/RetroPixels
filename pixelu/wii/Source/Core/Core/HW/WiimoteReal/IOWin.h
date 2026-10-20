@@ -1,12 +1,14 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #ifdef _WIN32
+
 #include <windows.h>
 
 #include <atomic>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "Common/SocketContext.h"
@@ -19,6 +21,8 @@ namespace WiimoteReal
 {
 class WiimoteScannerWindows;
 
+// A remote reached through a Windows HID interface (Microsoft Bluetooth stack or DolphinBar),
+// using overlapped I/O.
 class WiimoteWindows final : public Wiimote
 {
   friend WiimoteScannerWindows;
@@ -26,6 +30,7 @@ class WiimoteWindows final : public Wiimote
 public:
   WiimoteWindows(std::wstring hid_iface);
   ~WiimoteWindows() override;
+
   std::string GetId() const override;
 
 protected:
@@ -37,13 +42,14 @@ protected:
   int IOWrite(u8 const* buf, size_t len) override;
 
 private:
-  // These return 0 on error. -1 on no data.
+  // The byte count, 0 on failure or -1 when nothing was transferred (timeout or wakeup).
   int OverlappedRead(u8* data, DWORD size);
   int OverlappedWrite(const u8* data, DWORD size);
 
   const std::wstring m_hid_iface;
 
   HANDLE m_dev_handle{INVALID_HANDLE_VALUE};
+  // Signalled by IOWakeup to end a pending read.
   HANDLE m_wakeup_event{INVALID_HANDLE_VALUE};
 
   OVERLAPPED m_hid_overlap_read{};
@@ -55,6 +61,8 @@ private:
 class WiimoteScannerWindows final : public WiimoteScannerBackend
 {
 public:
+  // A HID interface that looks like a Wii device. Whether it is a balance board is known up
+  // front when its Bluetooth name says so; otherwise it is found out (once) on connection.
   struct EnumeratedWiimoteInterface
   {
     std::wstring hid_iface;
@@ -69,13 +77,15 @@ public:
   void Update() override;
   void RequestStopSearching() override {}
 
+  // Pairs remotes in sync mode (red sync button), for the controller settings dialog.
   static void FindAndAuthenticateWiimotes();
+  // Makes Windows forget every paired remote.
   static void RemoveRememberedWiimotes();
 
 private:
   FindResults FindWiimoteHIDDevices();
 
-  // This vector is updated after we receive a device change notification.
+  // Rebuilt when Windows reports a device change.
   std::vector<EnumeratedWiimoteInterface> m_wiimote_hid_interfaces;
   std::atomic_bool m_devices_changed{true};
 
@@ -84,9 +94,12 @@ private:
 }  // namespace WiimoteReal
 
 #else
+
 #include "Core/HW/WiimoteReal/IODummy.h"
+
 namespace WiimoteReal
 {
 using WiimoteScannerWindows = WiimoteScannerDummy;
 }
+
 #endif

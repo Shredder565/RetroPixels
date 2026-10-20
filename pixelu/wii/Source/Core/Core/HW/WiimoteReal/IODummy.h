@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,11 +6,13 @@
 
 namespace WiimoteReal
 {
+// Stands in for a scanner backend the platform does not have: finds nothing.
 class WiimoteScannerDummy final : public WiimoteScannerBackend
 {
 public:
   WiimoteScannerDummy() = default;
   ~WiimoteScannerDummy() override = default;
+
   void Update() override {}
   void RequestStopSearching() override {}
 };
