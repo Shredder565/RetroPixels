@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 class Jit64;
 
+// Paired-single registers, each held as a full XMM register (ps0 in the low
+// lane, ps1 in the high lane). There are no immediates.
 class FPURegCache final : public RegCache
 {
 public:

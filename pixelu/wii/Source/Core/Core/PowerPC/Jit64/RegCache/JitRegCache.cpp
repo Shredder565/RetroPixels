@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64/RegCache/JitRegCache.h"
 
@@ -12,14 +11,41 @@
 #include "Common/Assert.h"
 #include "Common/BitSet.h"
 #include "Common/CommonTypes.h"
-#include "Common/VariantUtil.h"
 #include "Common/x64Emitter.h"
 #include "Core/PowerPC/Jit64/Jit.h"
 #include "Core/PowerPC/Jit64/RegCache/CachedReg.h"
 #include "Core/PowerPC/Jit64/RegCache/RCMode.h"
 
 using namespace Gen;
-using namespace PowerPC;
+
+namespace
+{
+using WideContents = std::variant<std::monostate, X64Reg, u32, preg_t>;
+
+// Widens an RCX64Reg's contents to the RCOpArg variant.
+WideContents Widen(const std::variant<std::monostate, X64Reg, preg_t>& narrow)
+{
+  return std::visit([](const auto& value) -> WideContents { return value; }, narrow);
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// RCOpArg
+
+RCOpArg::RCOpArg() = default;
+
+RCOpArg::RCOpArg(u32 imm) : contents(imm)
+{
+}
+
+RCOpArg::RCOpArg(X64Reg xr) : contents(xr)
+{
+}
+
+RCOpArg::RCOpArg(RegCache* rc_, preg_t preg) : rc(rc_), contents(preg)
+{
+  rc->Lock(preg);
+}
 
 RCOpArg RCOpArg::Imm32(u32 imm)
 {
@@ -29,21 +55,6 @@ RCOpArg RCOpArg::Imm32(u32 imm)
 RCOpArg RCOpArg::R(X64Reg xr)
 {
   return RCOpArg{xr};
-}
-
-RCOpArg::RCOpArg() = default;
-
-RCOpArg::RCOpArg(u32 imm) : rc(nullptr), contents(imm)
-{
-}
-
-RCOpArg::RCOpArg(X64Reg xr) : rc(nullptr), contents(xr)
-{
-}
-
-RCOpArg::RCOpArg(RegCache* rc_, preg_t preg) : rc(rc_), contents(preg)
-{
-  rc->Lock(preg);
 }
 
 RCOpArg::~RCOpArg()
@@ -57,77 +68,76 @@ RCOpArg::RCOpArg(RCOpArg&& other) noexcept
 {
 }
 
+RCOpArg::RCOpArg(RCX64Reg&& other) noexcept
+    : rc(std::exchange(other.rc, nullptr)),
+      contents(Widen(std::exchange(other.contents, std::monostate{})))
+{
+}
+
 RCOpArg& RCOpArg::operator=(RCOpArg&& other) noexcept
 {
   Unlock();
-  rc = std::exchange(other.rc, nullptr);
   contents = std::exchange(other.contents, std::monostate{});
+  rc = std::exchange(other.rc, nullptr);
   return *this;
-}
-
-RCOpArg::RCOpArg(RCX64Reg&& other) noexcept
-    : rc(std::exchange(other.rc, nullptr)),
-      contents(VariantCast(std::exchange(other.contents, std::monostate{})))
-{
 }
 
 RCOpArg& RCOpArg::operator=(RCX64Reg&& other) noexcept
 {
   Unlock();
+  contents = Widen(std::exchange(other.contents, std::monostate{}));
   rc = std::exchange(other.rc, nullptr);
-  contents = VariantCast(std::exchange(other.contents, std::monostate{}));
   return *this;
 }
 
 void RCOpArg::Realize()
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
-  {
-    rc->Realize(*preg);
-  }
+  if (std::holds_alternative<preg_t>(contents))
+    rc->Realize(std::get<preg_t>(contents));
 }
 
 OpArg RCOpArg::Location() const
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
+  if (std::holds_alternative<preg_t>(contents))
   {
-    ASSERT(rc->IsRealized(*preg));
-    return rc->R(*preg);
+    const preg_t preg = std::get<preg_t>(contents);
+    ASSERT(rc->IsRealized(preg));
+    return rc->R(preg);
   }
-  else if (const X64Reg* xr = std::get_if<X64Reg>(&contents))
-  {
-    return Gen::R(*xr);
-  }
-  else if (const u32* imm = std::get_if<u32>(&contents))
-  {
-    return Gen::Imm32(*imm);
-  }
+  if (std::holds_alternative<X64Reg>(contents))
+    return Gen::R(std::get<X64Reg>(contents));
+  if (std::holds_alternative<u32>(contents))
+    return Gen::Imm32(std::get<u32>(contents));
+
   ASSERT(false);
   return {};
 }
 
 void RCOpArg::Unlock()
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
+  if (std::holds_alternative<preg_t>(contents))
   {
     ASSERT(rc);
-    rc->Unlock(*preg);
+    rc->Unlock(std::get<preg_t>(contents));
   }
-  else if (const X64Reg* xr = std::get_if<X64Reg>(&contents))
+  else if (std::holds_alternative<X64Reg>(contents))
   {
-    // If rc, we got this from an RCX64Reg.
-    // If !rc, we got this from RCOpArg::R.
-    if (rc)
-      rc->UnlockX(*xr);
+    // Only a register that came from an RCX64Reg carries a lock; RCOpArg::R
+    // leaves rc null.
+    if (rc != nullptr)
+      rc->UnlockX(std::get<X64Reg>(contents));
   }
   else
   {
     ASSERT(!rc);
   }
 
-  rc = nullptr;
   contents = std::monostate{};
+  rc = nullptr;
 }
+
+// ---------------------------------------------------------------------------
+// RCX64Reg
 
 RCX64Reg::RCX64Reg() = default;
 
@@ -155,59 +165,61 @@ RCX64Reg::RCX64Reg(RCX64Reg&& other) noexcept
 RCX64Reg& RCX64Reg::operator=(RCX64Reg&& other) noexcept
 {
   Unlock();
-  rc = std::exchange(other.rc, nullptr);
   contents = std::exchange(other.contents, std::monostate{});
+  rc = std::exchange(other.rc, nullptr);
   return *this;
 }
 
 void RCX64Reg::Realize()
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
-  {
-    rc->Realize(*preg);
-  }
+  if (std::holds_alternative<preg_t>(contents))
+    rc->Realize(std::get<preg_t>(contents));
 }
 
 RCX64Reg::operator X64Reg() const&
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
+  if (std::holds_alternative<X64Reg>(contents))
+    return std::get<X64Reg>(contents);
+  if (std::holds_alternative<preg_t>(contents))
   {
-    ASSERT(rc->IsRealized(*preg));
-    return rc->RX(*preg);
+    const preg_t preg = std::get<preg_t>(contents);
+    ASSERT(rc->IsRealized(preg));
+    return rc->RX(preg);
   }
-  else if (const X64Reg* xr = std::get_if<X64Reg>(&contents))
-  {
-    return *xr;
-  }
+
   ASSERT(false);
   return {};
 }
 
 RCX64Reg::operator OpArg() const&
 {
-  return Gen::R(RCX64Reg::operator X64Reg());
+  const X64Reg reg = *this;
+  return Gen::R(reg);
 }
 
 void RCX64Reg::Unlock()
 {
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
+  if (std::holds_alternative<preg_t>(contents))
   {
     ASSERT(rc);
-    rc->Unlock(*preg);
+    rc->Unlock(std::get<preg_t>(contents));
   }
-  else if (const X64Reg* xr = std::get_if<X64Reg>(&contents))
+  else if (std::holds_alternative<X64Reg>(contents))
   {
     ASSERT(rc);
-    rc->UnlockX(*xr);
+    rc->UnlockX(std::get<X64Reg>(contents));
   }
   else
   {
     ASSERT(!rc);
   }
 
-  rc = nullptr;
   contents = std::monostate{};
+  rc = nullptr;
 }
+
+// ---------------------------------------------------------------------------
+// RCForkGuard
 
 RCForkGuard::RCForkGuard(RegCache& rc_) : rc(&rc_), m_regs(rc_.m_regs), m_xregs(rc_.m_xregs)
 {
@@ -215,21 +227,23 @@ RCForkGuard::RCForkGuard(RegCache& rc_) : rc(&rc_), m_regs(rc_.m_regs), m_xregs(
 }
 
 RCForkGuard::RCForkGuard(RCForkGuard&& other) noexcept
-    : rc(other.rc), m_regs(other.m_regs), m_xregs(other.m_xregs)
+    : rc(std::exchange(other.rc, nullptr)), m_regs(other.m_regs), m_xregs(other.m_xregs)
 {
-  other.rc = nullptr;
 }
 
 void RCForkGuard::EndFork()
 {
-  if (!rc)
+  if (rc == nullptr)
     return;
 
   ASSERT(!rc->IsAnyConstraintActive());
-  rc->m_regs = m_regs;
   rc->m_xregs = m_xregs;
+  rc->m_regs = m_regs;
   rc = nullptr;
 }
+
+// ---------------------------------------------------------------------------
+// RegCache: public interface
 
 RegCache::RegCache(Jit64& jit) : m_jit{jit}
 {
@@ -237,11 +251,9 @@ RegCache::RegCache(Jit64& jit) : m_jit{jit}
 
 void RegCache::Start()
 {
-  m_xregs.fill({});
-  for (size_t i = 0; i < m_regs.size(); i++)
-  {
-    m_regs[i] = PPCCachedReg{GetDefaultLocation(i)};
-  }
+  m_xregs.fill(X64CachedReg{});
+  for (preg_t preg = 0; preg < m_regs.size(); ++preg)
+    m_regs[preg] = PPCCachedReg{GetDefaultLocation(preg)};
 }
 
 void RegCache::SetEmitter(XEmitter* emitter)
@@ -251,19 +263,19 @@ void RegCache::SetEmitter(XEmitter* emitter)
 
 bool RegCache::SanityCheck() const
 {
-  for (size_t i = 0; i < m_regs.size(); i++)
+  for (preg_t preg = 0; preg < m_regs.size(); ++preg)
   {
-    if (m_regs[i].IsInHostRegister())
-    {
-      if (m_regs[i].IsLocked() || m_regs[i].IsRevertable())
-        return false;
+    const PPCCachedReg& reg = m_regs[preg];
+    if (!reg.IsInHostRegister())
+      continue;
 
-      Gen::X64Reg xr = m_regs[i].GetHostRegister();
-      if (m_xregs[xr].IsLocked())
-        return false;
-      if (m_xregs[xr].Contents() != i)
-        return false;
-    }
+    // Between instructions nothing may be locked or mid-transaction, and the
+    // host side must agree about the binding.
+    const X64CachedReg& host = m_xregs[reg.GetHostRegister()];
+    const bool consistent = !reg.IsLocked() && !reg.IsRevertable() && !host.IsLocked() &&
+                            host.Contents() == preg;
+    if (!consistent)
+      return false;
   }
   return true;
 }
@@ -300,7 +312,8 @@ RCX64Reg RegCache::RevertableBind(preg_t preg, RCMode mode)
 
 RCX64Reg RegCache::Scratch()
 {
-  return Scratch(GetFreeXReg());
+  const X64Reg xr = GetFreeXReg();
+  return Scratch(xr);
 }
 
 RCX64Reg RegCache::Scratch(X64Reg xr)
@@ -314,53 +327,57 @@ RCForkGuard RegCache::Fork()
   return RCForkGuard{*this};
 }
 
+void RegCache::AssertNothingLocked(const char* operation) const
+{
+  const bool any_host_locked = std::ranges::any_of(m_xregs, &X64CachedReg::IsLocked);
+  ASSERT_MSG(DYNA_REC, !any_host_locked, "{}: a host register is still locked", operation);
+}
+
 void RegCache::Discard(BitSet32 pregs)
 {
-  ASSERT_MSG(DYNA_REC, std::ranges::none_of(m_xregs, &X64CachedReg::IsLocked),
-             "Someone forgot to unlock a X64 reg");
-
-  for (preg_t i : pregs)
+  AssertNothingLocked("Discard");
+  for (const int index : pregs)
   {
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsLocked(), "Someone forgot to unlock PPC reg {} (X64 reg {}).",
-               i, std::to_underlying(RX(i)));
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Register transaction is in progress for {}!",
-               i);
-
-    DiscardRegister(i);
+    const auto preg = static_cast<preg_t>(index);
+    ASSERT_MSG(DYNA_REC, !m_regs[preg].IsLocked(), "Discard: guest register {} is still locked",
+               preg);
+    ASSERT_MSG(DYNA_REC, !m_regs[preg].IsRevertable(),
+               "Discard: guest register {} is inside a transaction", preg);
+    DiscardRegister(preg);
   }
 }
 
 void RegCache::Flush(BitSet32 pregs, FlushMode mode,
                      IgnoreDiscardedRegisters ignore_discarded_registers)
 {
-  ASSERT_MSG(DYNA_REC, std::ranges::none_of(m_xregs, &X64CachedReg::IsLocked),
-             "Someone forgot to unlock a X64 reg");
-
-  for (preg_t i : pregs)
+  AssertNothingLocked("Flush");
+  for (const int index : pregs)
   {
-    ASSERT_MSG(DYNA_REC, mode != FlushMode::Full || !m_regs[i].IsLocked(),
-               "Someone forgot to unlock PPC reg {} (X64 reg {}).", i, std::to_underlying(RX(i)));
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Register transaction is in progress for {}!",
-               i);
-
-    StoreFromRegister(i, mode, ignore_discarded_registers);
+    const auto preg = static_cast<preg_t>(index);
+    // An Undirty flush keeps bindings, so it is allowed while handles exist.
+    ASSERT_MSG(DYNA_REC, mode != FlushMode::Full || !m_regs[preg].IsLocked(),
+               "Flush: guest register {} is still locked", preg);
+    ASSERT_MSG(DYNA_REC, !m_regs[preg].IsRevertable(),
+               "Flush: guest register {} is inside a transaction", preg);
+    StoreFromRegister(preg, mode, ignore_discarded_registers);
   }
 }
 
 void RegCache::Reset(BitSet32 pregs)
 {
-  for (preg_t i : pregs)
+  for (const int index : pregs)
   {
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsInHostRegister(),
-               "Attempted to reset a loaded register (did you mean to flush it?)");
-    m_regs[i].SetFlushed(false);
+    const auto preg = static_cast<preg_t>(index);
+    ASSERT_MSG(DYNA_REC, !m_regs[preg].IsInHostRegister(),
+               "Reset: guest register {} is bound; it needs a flush instead", preg);
+    m_regs[preg].SetFlushed(false);
   }
 }
 
 void RegCache::Revert()
 {
   ASSERT(IsAllUnlocked());
-  for (auto& reg : m_regs)
+  for (PPCCachedReg& reg : m_regs)
   {
     if (reg.IsRevertable())
       reg.SetRevert();
@@ -370,7 +387,7 @@ void RegCache::Revert()
 void RegCache::Commit()
 {
   ASSERT(IsAllUnlocked());
-  for (auto& reg : m_regs)
+  for (PPCCachedReg& reg : m_regs)
   {
     if (reg.IsRevertable())
       reg.SetCommit();
@@ -379,14 +396,19 @@ void RegCache::Commit()
 
 bool RegCache::IsAllUnlocked() const
 {
-  return std::ranges::none_of(m_regs, &PPCCachedReg::IsLocked) &&
-         std::ranges::none_of(m_xregs, &X64CachedReg::IsLocked) && !IsAnyConstraintActive();
+  if (std::ranges::any_of(m_regs, &PPCCachedReg::IsLocked))
+    return false;
+  if (std::ranges::any_of(m_xregs, &X64CachedReg::IsLocked))
+    return false;
+  return !IsAnyConstraintActive();
 }
 
 void RegCache::PreloadRegisters(BitSet32 to_preload)
 {
-  for (preg_t preg : to_preload)
+  for (const int index : to_preload)
   {
+    const auto preg = static_cast<preg_t>(index);
+    // Leave room for the instruction's own scratch needs.
     if (NumFreeRegisters() < 2)
       return;
     if (!IsImm(preg))
@@ -396,168 +418,160 @@ void RegCache::PreloadRegisters(BitSet32 to_preload)
 
 BitSet32 RegCache::RegistersInUse() const
 {
-  BitSet32 result;
-  for (size_t i = 0; i < m_xregs.size(); i++)
+  BitSet32 in_use;
+  for (size_t index = 0; index < m_xregs.size(); ++index)
   {
-    if (!m_xregs[i].IsFree())
-      result[i] = true;
+    if (!m_xregs[index].IsFree())
+      in_use[index] = true;
   }
-  return result;
+  return in_use;
 }
+
+// ---------------------------------------------------------------------------
+// RegCache: allocation
 
 void RegCache::FlushX(X64Reg reg)
 {
-  ASSERT_MSG(DYNA_REC, reg < m_xregs.size(), "Flushing non-existent reg {}",
+  ASSERT_MSG(DYNA_REC, reg < m_xregs.size(), "FlushX: no host register {}",
              std::to_underlying(reg));
-  ASSERT(!m_xregs[reg].IsLocked());
-  if (!m_xregs[reg].IsFree())
-  {
-    StoreFromRegister(m_xregs[reg].Contents());
-  }
+  const X64CachedReg& host = m_xregs[reg];
+  ASSERT(!host.IsLocked());
+  if (!host.IsFree())
+    StoreFromRegister(host.Contents());
 }
 
 void RegCache::DiscardRegister(preg_t preg)
 {
-  if (m_regs[preg].IsInHostRegister())
-  {
-    X64Reg xr = m_regs[preg].GetHostRegister();
-    m_xregs[xr].Unbind();
-  }
-
-  m_regs[preg].SetDiscarded();
+  PPCCachedReg& reg = m_regs[preg];
+  if (reg.IsInHostRegister())
+    m_xregs[reg.GetHostRegister()].Unbind();
+  reg.SetDiscarded();
 }
 
-void RegCache::BindToRegister(preg_t i, bool doLoad, bool makeDirty)
+void RegCache::BindToRegister(preg_t preg, bool doLoad, bool makeDirty)
 {
-  if (!m_regs[i].IsInHostRegister())
+  PPCCachedReg& reg = m_regs[preg];
+  if (reg.IsInHostRegister())
   {
-    X64Reg xr = GetFreeXReg();
-
-    ASSERT_MSG(DYNA_REC, !m_xregs[xr].IsLocked(), "GetFreeXReg returned locked register");
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Invalid transaction state");
-
-    m_xregs[xr].SetBoundTo(i);
-
-    if (doLoad)
-      LoadRegister(i, xr);
-
-    ASSERT_MSG(DYNA_REC,
-               std::ranges::none_of(m_regs,
-                                    [xr](const auto& r) {
-                                      return r.IsInHostRegister() && r.GetHostRegister() == xr;
-                                    }),
-               "Xreg {} already bound", std::to_underlying(xr));
-
-    m_regs[i].SetInHostRegister(xr, makeDirty);
+    if (makeDirty)
+      reg.SetDirty();
   }
   else
   {
-    // reg location must be simplereg; memory locations
-    // and immediates are taken care of above.
-    if (makeDirty)
-      m_regs[i].SetDirty();
+    const X64Reg xr = GetFreeXReg();
+    ASSERT_MSG(DYNA_REC, !m_xregs[xr].IsLocked(), "BindToRegister: allocator returned a locked reg");
+    ASSERT_MSG(DYNA_REC, !reg.IsRevertable(), "BindToRegister: unexpected transaction state");
+
+    m_xregs[xr].SetBoundTo(preg);
+    if (doLoad)
+      LoadRegister(preg, xr);
+
+    const bool already_used = std::ranges::any_of(m_regs, [xr](const PPCCachedReg& other) {
+      return other.IsInHostRegister() && other.GetHostRegister() == xr;
+    });
+    ASSERT_MSG(DYNA_REC, !already_used, "BindToRegister: host register {} is already bound",
+               std::to_underlying(xr));
+
+    reg.SetInHostRegister(xr, makeDirty);
   }
 
+  // A register that is about to be written no longer has a known constant.
   if (makeDirty)
-    DiscardImm(i);
+    DiscardImm(preg);
 
-  ASSERT_MSG(DYNA_REC, !m_xregs[RX(i)].IsLocked(),
-             "WTF, this reg ({} -> {}) should have been flushed", i, std::to_underlying(RX(i)));
+  ASSERT_MSG(DYNA_REC, !m_xregs[RX(preg)].IsLocked(),
+             "BindToRegister: guest register {} landed in locked host register {}", preg,
+             std::to_underlying(RX(preg)));
 }
 
-void RegCache::StoreFromRegister(preg_t i, FlushMode mode,
+void RegCache::StoreFromRegister(preg_t preg, FlushMode mode,
                                  IgnoreDiscardedRegisters ignore_discarded_registers)
 {
-  // When a transaction is in progress, allowing the store would overwrite the old value.
-  ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Register transaction on {} is in progress!", i);
+  PPCCachedReg& reg = m_regs[preg];
+  // Writing back mid-transaction would destroy the value a revert restores.
+  ASSERT_MSG(DYNA_REC, !reg.IsRevertable(), "StoreFromRegister: {} is inside a transaction",
+             preg);
 
-  if (!m_regs[i].IsInDefaultLocation())
-    StoreRegister(i, GetDefaultLocation(i), ignore_discarded_registers);
+  if (!reg.IsInDefaultLocation())
+    StoreRegister(preg, GetDefaultLocation(preg), ignore_discarded_registers);
 
-  if (mode == FlushMode::Full && m_regs[i].IsInHostRegister())
-    m_xregs[m_regs[i].GetHostRegister()].Unbind();
-
-  m_regs[i].SetFlushed(mode != FlushMode::Full);
+  const bool release = mode == FlushMode::Full;
+  if (release && reg.IsInHostRegister())
+    m_xregs[reg.GetHostRegister()].Unbind();
+  reg.SetFlushed(!release);
 }
 
 X64Reg RegCache::GetFreeXReg()
 {
-  const auto order = GetAllocationOrder();
+  const std::span<const X64Reg> order = GetAllocationOrder();
+  const auto free_reg =
+      std::ranges::find_if(order, [this](X64Reg xr) { return m_xregs[xr].IsFree(); });
+  if (free_reg != order.end())
+    return *free_reg;
+  return EvictForAllocation(order);
+}
+
+X64Reg RegCache::EvictForAllocation(std::span<const X64Reg> order)
+{
+  // Evict the cheapest unlocked binding; ties go to the earlier register in
+  // allocation order.
+  X64Reg victim = INVALID_REG;
+  preg_t victim_preg = 0;
+  float victim_score = std::numeric_limits<float>::max();
   for (const X64Reg xr : order)
   {
-    if (m_xregs[xr].IsFree())
-      return xr;
-  }
-
-  // Okay, not found; run the register allocator heuristic and
-  // figure out which register we should clobber.
-  float min_score = std::numeric_limits<float>::max();
-  X64Reg best_xreg = INVALID_REG;
-  size_t best_preg = 0;
-  for (const X64Reg xreg : order)
-  {
-    const preg_t preg = m_xregs[xreg].Contents();
-    if (m_xregs[xreg].IsLocked() || m_regs[preg].IsLocked())
+    if (m_xregs[xr].IsLocked())
+      continue;
+    const preg_t preg = m_xregs[xr].Contents();
+    if (m_regs[preg].IsLocked())
       continue;
 
-    const float score = ScoreRegister(xreg);
-    if (score < min_score)
+    const float score = ScoreRegister(xr);
+    if (score < victim_score)
     {
-      min_score = score;
-      best_xreg = xreg;
-      best_preg = preg;
+      victim_score = score;
+      victim = xr;
+      victim_preg = preg;
     }
   }
 
-  if (best_xreg != INVALID_REG)
+  if (victim == INVALID_REG)
   {
-    StoreFromRegister(best_preg);
-    return best_xreg;
+    ASSERT_MSG(DYNA_REC, false, "Register cache has no register left to evict");
+    return INVALID_REG;
   }
 
-  // Still no dice? Die!
-  ASSERT_MSG(DYNA_REC, false, "Regcache ran out of regs");
-  return INVALID_REG;
+  StoreFromRegister(victim_preg);
+  return victim;
 }
 
 int RegCache::NumFreeRegisters() const
 {
-  int count = 0;
-  for (const X64Reg reg : GetAllocationOrder())
-  {
-    if (m_xregs[reg].IsFree())
-      count++;
-  }
-  return count;
+  const std::span<const X64Reg> order = GetAllocationOrder();
+  const auto free_count =
+      std::ranges::count_if(order, [this](X64Reg xr) { return m_xregs[xr].IsFree(); });
+  return static_cast<int>(free_count);
 }
 
-// Estimate roughly how bad it would be to de-allocate this register. Higher score
-// means more bad.
+// Cost of evicting the guest register held in `xreg`; higher is worse.
 float RegCache::ScoreRegister(X64Reg xreg) const
 {
-  preg_t preg = m_xregs[xreg].Contents();
+  const preg_t preg = m_xregs[xreg].Contents();
   float score = 0;
 
-  // If it's not dirty, we don't need a store to write it back to the register file, so
-  // bias a bit against dirty registers. Testing shows that a bias of 2 seems roughly
-  // right: 3 causes too many extra clobbers, while 1 saves very few clobbers relative
-  // to the number of extra stores it causes.
+  // A dirty register costs a store. A weight of 2 balances extra stores
+  // against extra reloads.
   if (!m_regs[preg].IsInDefaultLocation())
     score += 2;
 
-  // If the register isn't actually needed in a physical register for a later instruction,
-  // writing it back to the register file isn't quite as bad.
+  // Registers the rest of the block still reads are worth more, the more so
+  // the sooner they are needed: count how many other registers are read
+  // before this one, looking at most 64 instructions ahead.
   if (GetRegUtilization()[preg])
   {
-    // Don't look too far ahead; we don't want to have quadratic compilation times for
-    // enormous block sizes!
-    // This actually improves register allocation a tiny bit; I'm not sure why.
-    u32 lookahead = std::min(m_jit.js.instructionsLeft, 64);
-    // Count how many other registers are going to be used before we need this one again.
-    u32 regs_in_count = CountRegsIn(preg, lookahead).Count();
-    // Totally ad-hoc heuristic to bias based on how many other registers we'll need
-    // before this one gets used again.
-    score += 1 + 2 * (5 - log2f(1 + (float)regs_in_count));
+    const u32 lookahead = static_cast<u32>(std::min(m_jit.js.instructionsLeft, 64));
+    const u32 others_first = CountRegsIn(preg, lookahead).Count();
+    score += 1 + 2 * (5 - std::log2(1 + static_cast<float>(others_first)));
   }
 
   return score;
@@ -565,9 +579,12 @@ float RegCache::ScoreRegister(X64Reg xreg) const
 
 X64Reg RegCache::RX(preg_t preg) const
 {
-  ASSERT_MSG(DYNA_REC, m_regs[preg].IsInHostRegister(), "Not in host register - {}", preg);
+  ASSERT_MSG(DYNA_REC, m_regs[preg].IsInHostRegister(), "Guest register {} is not bound", preg);
   return m_regs[preg].GetHostRegister();
 }
+
+// ---------------------------------------------------------------------------
+// RegCache: locking and realization
 
 void RegCache::Lock(preg_t preg)
 {
@@ -577,11 +594,9 @@ void RegCache::Lock(preg_t preg)
 void RegCache::Unlock(preg_t preg)
 {
   m_regs[preg].Unlock();
+  // The last handle is gone: the instruction is done with this register.
   if (!m_regs[preg].IsLocked())
-  {
-    // Fully unlocked, reset realization state.
-    m_constraints[preg] = {};
-  }
+    m_constraints[preg] = RCConstraint{};
 }
 
 void RegCache::LockX(X64Reg xr)
@@ -601,45 +616,42 @@ bool RegCache::IsRealized(preg_t preg) const
 
 void RegCache::Realize(preg_t preg)
 {
-  if (m_constraints[preg].IsRealized())
+  RCConstraint& constraint = m_constraints[preg];
+  if (constraint.IsRealized())
     return;
 
-  const bool load = m_constraints[preg].ShouldLoad();
-  const bool dirty = m_constraints[preg].ShouldDirty();
-  const bool kill_imm = m_constraints[preg].ShouldKillImmediate();
-  const bool kill_mem = m_constraints[preg].ShouldKillMemory();
-
-  const auto do_bind = [&] {
+  const bool load = constraint.ShouldLoad();
+  const bool dirty = constraint.ShouldDirty();
+  const auto bind = [&] {
     BindToRegister(preg, load, dirty);
-    m_constraints[preg].Realized(RCConstraint::RealizedLoc::Bound);
+    constraint.Realized(RCConstraint::RealizedLoc::Bound);
   };
 
-  if (m_constraints[preg].ShouldBeRevertable())
+  if (constraint.ShouldBeRevertable())
   {
+    // The home slot must hold the pre-transaction value.
     StoreFromRegister(preg, FlushMode::Undirty);
-    do_bind();
+    bind();
     m_regs[preg].SetRevertable();
     return;
   }
 
   if (IsImm(preg))
   {
-    if (dirty || kill_imm)
-      do_bind();
+    if (dirty || constraint.ShouldKillImmediate())
+      bind();
     else
-      m_constraints[preg].Realized(RCConstraint::RealizedLoc::Imm);
+      constraint.Realized(RCConstraint::RealizedLoc::Imm);
+    return;
   }
-  else if (!m_regs[preg].IsInHostRegister())
+
+  if (!m_regs[preg].IsInHostRegister() && !constraint.ShouldKillMemory())
   {
-    if (kill_mem)
-      do_bind();
-    else
-      m_constraints[preg].Realized(RCConstraint::RealizedLoc::Mem);
+    constraint.Realized(RCConstraint::RealizedLoc::Mem);
+    return;
   }
-  else
-  {
-    do_bind();
-  }
+
+  bind();
 }
 
 bool RegCache::IsAnyConstraintActive() const

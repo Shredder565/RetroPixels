@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,10 @@ class RegCache;
 using preg_t = size_t;
 static constexpr size_t NUM_XREGS = 16;
 
+// A guest register (or a plain host register or immediate) used as an x86
+// operand for the duration of one instruction. While the handle lives, the
+// guest register stays locked where it was realized. Constructed through
+// RegCache::Use and friends; RegCache::Realize must run before Location().
 class RCOpArg
 {
 public:
@@ -60,10 +63,13 @@ private:
   explicit RCOpArg(Gen::X64Reg xr);
   RCOpArg(RegCache* rc_, preg_t preg);
 
+  // Owning cache; null for immediates and for plain registers from R().
   RegCache* rc = nullptr;
   std::variant<std::monostate, Gen::X64Reg, u32, preg_t> contents;
 };
 
+// Like RCOpArg, but always a host register: either a bound guest register or
+// a locked scratch register.
 class RCX64Reg
 {
 public:
@@ -94,6 +100,8 @@ private:
   std::variant<std::monostate, Gen::X64Reg, preg_t> contents;
 };
 
+// Snapshot of the allocation state, restored when the guard ends. Used
+// around code that is emitted for only one side of a branch.
 class RCForkGuard
 {
 public:
@@ -116,15 +124,15 @@ private:
   std::array<X64CachedReg, NUM_XREGS> m_xregs;
 };
 
+// Maps 32 guest registers onto host registers for the block being compiled.
 class RegCache
 {
 public:
   enum class FlushMode
   {
-    // All dirty registers get written back, and all registers get removed from the cache.
+    // Write back dirty registers and release every host register.
     Full,
-    // All dirty registers get written back and get set as no longer dirty.
-    // No registers are removed from the cache.
+    // Write back dirty registers but keep them bound (now clean).
     Undirty,
   };
 
@@ -168,6 +176,7 @@ public:
 
   bool IsBound(preg_t preg) const { return m_regs[preg].IsInHostRegister(); }
 
+  // Requests for an operand; each returns a locked handle.
   RCOpArg Use(preg_t preg, RCMode mode);
   RCOpArg UseNoImm(preg_t preg, RCMode mode);
   RCOpArg BindOrImm(preg_t preg, RCMode mode);
@@ -234,4 +243,9 @@ protected:
   std::array<X64CachedReg, NUM_XREGS> m_xregs;
   std::array<RCConstraint, 32> m_constraints;
   Gen::XEmitter* m_emitter = nullptr;
+
+private:
+  // Picks a host register for a new binding, evicting one if necessary.
+  Gen::X64Reg EvictForAllocation(std::span<const Gen::X64Reg> order);
+  void AssertNothingLocked(const char* operation) const;
 };

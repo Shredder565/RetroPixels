@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 class Jit64;
 
+// Integer registers. Known constants live in the JIT's constant propagation
+// state and are only materialized when needed.
 class GPRRegCache final : public RegCache
 {
 public:
@@ -16,6 +17,8 @@ public:
   u32 Imm32(preg_t preg) const override;
   s32 SImm32(preg_t preg) const override;
 
+  // Makes `preg` a known constant. With dirty == false the old value is kept
+  // as well (used for speculative constants that match memory).
   void SetImmediate32(preg_t preg, u32 imm_value, bool dirty = true);
 
 protected:

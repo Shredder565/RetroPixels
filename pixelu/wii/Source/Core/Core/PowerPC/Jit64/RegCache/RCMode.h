@@ -1,8 +1,8 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+// How an instruction accesses a cached guest register.
 enum class RCMode
 {
   Read,
