@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/dialog.h>
@@ -14,13 +15,19 @@ class wxPanel;
 class wxButton;
 class wxChoice;
 
+// Options > Graphic packs: the pack tree (checkbox = enabled) on the left, the selected pack's
+// description and presets on the right. Changes apply to a running game where they can; the
+// enabled packs and presets are written to the settings when the window closes.
 class GraphicPacksWindow2 : public wxDialog
 {
 public:
+	// title_id_filter != 0 pre-fills the filter with that title id
 	GraphicPacksWindow2(wxWindow* parent, uint64_t title_id_filter);
 	~GraphicPacksWindow2();
 
+	// reloads every pack from disk
 	static void RefreshGraphicPacks();
+	// the download buttons are off while a game runs
 	void UpdateTitleRunning(bool running);
 
 private:
@@ -34,17 +41,17 @@ private:
 	void FillGraphicPackList() const;
 	void GetChildren(const wxTreeItemId& id, std::vector<wxTreeItemId>& children) const;
 	void ExpandChildren(const std::vector<wxTreeItemId>& ids, size_t& counter) const;
-	
-	wxSplitterWindow * m_splitter_window;
+
+	wxSplitterWindow* m_splitter_window;
 
 	wxPanel* m_right_panel;
 	wxScrolled<wxPanel>* m_gp_options;
-	
-	wxCheckTree * m_graphic_pack_tree;
+
+	wxCheckTree* m_graphic_pack_tree;
 	wxTextCtrl* m_filter_text;
 	wxCheckBox* m_installed_games_only;
 
-	wxStaticText* m_graphic_pack_name, *m_graphic_pack_description;
+	wxStaticText *m_graphic_pack_name, *m_graphic_pack_description;
 	wxBoxSizer* m_preset_sizer;
 	std::vector<wxChoice*> m_active_preset;
 	wxButton* m_reload_shaders;
@@ -54,6 +61,7 @@ private:
 
 	GraphicPackPtr m_shown_graphic_pack;
 
+	// left pane width / window width
 	float m_ratio = 0.55f;
 	wxColour m_default_colour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
 	wxColour m_activated_colour = wxSystemSettings::SelectLightDark(wxColour(0x00, 0xCC, 0x00), wxColour(0x42, 0xB3, 0x42));
@@ -77,5 +85,4 @@ private:
 
 	void ReloadPack(const GraphicPackPtr& graphic_pack) const;
 	void DeleteShadersFromRuntimeCache(const GraphicPackPtr& graphic_pack) const;
-
 };
