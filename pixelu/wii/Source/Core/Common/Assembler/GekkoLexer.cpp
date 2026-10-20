@@ -2,6 +2,7 @@
 
 #include "Common/Assembler/GekkoLexer.h"
 
+#include <array>
 #include <cstdlib>
 #include <string>
 
@@ -200,47 +201,29 @@ std::optional<std::string_view> MatchFloat(Cursor& c)
   return std::nullopt;
 }
 
+// Characters that form a token on their own.
+struct Punctuator
+{
+  char ch;
+  TokenType type;
+};
+constexpr Punctuator kPunctuators[] = {
+    {'.', TokenType::Dot},   {':', TokenType::Colon},     {',', TokenType::Comma},
+    {'(', TokenType::Lparen}, {')', TokenType::Rparen},   {'|', TokenType::Pipe},
+    {'^', TokenType::Caret}, {'&', TokenType::Ampersand}, {'+', TokenType::Plus},
+    {'-', TokenType::Minus}, {'*', TokenType::Star},      {'/', TokenType::Slash},
+    {'~', TokenType::Tilde}, {'`', TokenType::Grave},     {'@', TokenType::At},
+    {'\n', TokenType::Eol},  {'\0', TokenType::Eof},
+};
+
 TokenType PunctuationType(char ch)
 {
-  switch (ch)
+  for (const Punctuator& p : kPunctuators)
   {
-  case ',':
-    return TokenType::Comma;
-  case '(':
-    return TokenType::Lparen;
-  case ')':
-    return TokenType::Rparen;
-  case '|':
-    return TokenType::Pipe;
-  case '^':
-    return TokenType::Caret;
-  case '&':
-    return TokenType::Ampersand;
-  case '+':
-    return TokenType::Plus;
-  case '-':
-    return TokenType::Minus;
-  case '*':
-    return TokenType::Star;
-  case '/':
-    return TokenType::Slash;
-  case '~':
-    return TokenType::Tilde;
-  case '@':
-    return TokenType::At;
-  case ':':
-    return TokenType::Colon;
-  case '`':
-    return TokenType::Grave;
-  case '.':
-    return TokenType::Dot;
-  case '\n':
-    return TokenType::Eol;
-  case '\0':
-    return TokenType::Eof;
-  default:
-    return TokenType::Invalid;
+    if (p.ch == ch)
+      return p.type;
   }
+  return TokenType::Invalid;
 }
 
 // "0".."31" without leading zeros.
@@ -286,46 +269,51 @@ T Accumulate(std::string_view digits, u32 base)
   return value;
 }
 
+// Tokens whose value is "skip a fixed prefix, read the rest as digits in some base".
+struct DigitForm
+{
+  TokenType type;
+  size_t prefix;
+  u32 base;
+};
+constexpr DigitForm kDigitForms[] = {
+    {TokenType::DecimalLit, 0, 10}, {TokenType::HexadecimalLit, 2, 16},
+    {TokenType::OctalLit, 1, 8},    {TokenType::BinaryLit, 2, 2},
+    {TokenType::FPR, 1, 10},        {TokenType::CRField, 2, 10},
+};
+
 template <typename T>
 std::optional<T> IntegerValue(TokenType type, std::string_view text)
 {
-  switch (type)
+  for (const DigitForm& form : kDigitForms)
   {
-  case TokenType::DecimalLit:
-    return Accumulate<T>(text, 10);
-  case TokenType::HexadecimalLit:
-    return Accumulate<T>(text.substr(2), 16);
-  case TokenType::OctalLit:
-    return Accumulate<T>(text.substr(1), 8);
-  case TokenType::BinaryLit:
-    return Accumulate<T>(text.substr(2), 2);
-  case TokenType::GPR:
+    if (form.type == type)
+      return Accumulate<T>(text.substr(form.prefix), form.base);
+  }
+
+  if (type == TokenType::GPR)
+  {
+    // Two GPRs also have ABI names.
     if (SameText(text, "sp"))
       return T{1};
     if (SameText(text, "rtoc"))
       return T{2};
     return Accumulate<T>(text.substr(1), 10);
-  case TokenType::FPR:
-    return Accumulate<T>(text.substr(1), 10);
-  case TokenType::CRField:
-    return Accumulate<T>(text.substr(2), 10);
-  case TokenType::SPR:
-    return static_cast<T>(FindSprName(text).value_or(0));
-  case TokenType::Lt:
-    return T{0};
-  case TokenType::Gt:
-    return T{1};
-  case TokenType::Eq:
-    return T{2};
-  case TokenType::So:
-    return T{3};
-  case TokenType::NumLabFwd:
-  case TokenType::NumLabBwd:
-    // The digits, without the trailing 'f' or 'b'.
-    return Accumulate<T>(text.substr(0, text.size() - 1), 10);
-  default:
-    return std::nullopt;
   }
+  if (type == TokenType::SPR)
+    return static_cast<T>(FindSprName(text).value_or(0));
+
+  // lt, gt, eq, so are declared in bit order, so the bit number is the offset from lt.
+  const int cr_bit = static_cast<int>(type) - static_cast<int>(TokenType::Lt);
+  if (cr_bit >= 0 && cr_bit <= static_cast<int>(TokenType::So) - static_cast<int>(TokenType::Lt))
+    return static_cast<T>(cr_bit);
+
+  if (type == TokenType::NumLabFwd || type == TokenType::NumLabBwd)
+  {
+    // Everything but the trailing 'f' or 'b'.
+    return Accumulate<T>(text.substr(0, text.size() - 1), 10);
+  }
+  return std::nullopt;
 }
 }  // namespace
 
@@ -398,80 +386,45 @@ void ConvertStringLiteral(std::string_view literal, std::vector<u8>* out_vec)
   }
 }
 
+namespace
+{
+// Display names, indexed by TokenType. Numeric labels have no name of their own.
+using TypeNameTable = std::array<std::string_view, static_cast<size_t>(TokenType::LastToken) + 1>;
+constexpr TypeNameTable kTypeNames = [] {
+  TypeNameTable n{};
+  const auto set = [&n](TokenType t, std::string_view s) { n[static_cast<size_t>(t)] = s; };
+  set(TokenType::Invalid, "Invalid");
+  set(TokenType::Identifier, "Identifier");
+  set(TokenType::StringLit, "String Literal");
+  set(TokenType::HexadecimalLit, "Hexadecimal Literal");
+  set(TokenType::DecimalLit, "Decimal Literal");
+  set(TokenType::OctalLit, "Octal Literal");
+  set(TokenType::BinaryLit, "Binary Literal");
+  set(TokenType::FloatLit, "Float Literal");
+  set(TokenType::GPR, "GPR");
+  set(TokenType::FPR, "FPR");
+  set(TokenType::CRField, "CR Field");
+  set(TokenType::SPR, "SPR");
+  for (TokenType bit : {TokenType::Lt, TokenType::Gt, TokenType::Eq, TokenType::So})
+    set(bit, "CR Bit");
+  set(TokenType::Eol, "End of Line");
+  set(TokenType::Eof, "End of File");
+  set(TokenType::Lsh, "<<");
+  set(TokenType::Rsh, ">>");
+  // Every single-character operator is shown as its own character.
+  for (const Punctuator& p : kPunctuators)
+  {
+    if (static_cast<int>(p.type) >= static_cast<int>(TokenType::OperatorBegin))
+      set(p.type, std::string_view(&p.ch, 1));
+  }
+  return n;
+}();
+}  // namespace
+
 std::string_view TokenTypeToStr(TokenType tp)
 {
-  switch (tp)
-  {
-  case TokenType::GPR:
-    return "GPR";
-  case TokenType::FPR:
-    return "FPR";
-  case TokenType::SPR:
-    return "SPR";
-  case TokenType::CRField:
-    return "CR Field";
-  case TokenType::Lt:
-  case TokenType::Gt:
-  case TokenType::Eq:
-  case TokenType::So:
-    return "CR Bit";
-  case TokenType::Identifier:
-    return "Identifier";
-  case TokenType::StringLit:
-    return "String Literal";
-  case TokenType::DecimalLit:
-    return "Decimal Literal";
-  case TokenType::BinaryLit:
-    return "Binary Literal";
-  case TokenType::HexadecimalLit:
-    return "Hexadecimal Literal";
-  case TokenType::OctalLit:
-    return "Octal Literal";
-  case TokenType::FloatLit:
-    return "Float Literal";
-  case TokenType::Invalid:
-    return "Invalid";
-  case TokenType::Lsh:
-    return "<<";
-  case TokenType::Rsh:
-    return ">>";
-  case TokenType::Eof:
-    return "End of File";
-  case TokenType::Eol:
-    return "End of Line";
-  case TokenType::Comma:
-    return ",";
-  case TokenType::Lparen:
-    return "(";
-  case TokenType::Rparen:
-    return ")";
-  case TokenType::Pipe:
-    return "|";
-  case TokenType::Caret:
-    return "^";
-  case TokenType::Ampersand:
-    return "&";
-  case TokenType::Plus:
-    return "+";
-  case TokenType::Minus:
-    return "-";
-  case TokenType::Star:
-    return "*";
-  case TokenType::Slash:
-    return "/";
-  case TokenType::Tilde:
-    return "~";
-  case TokenType::At:
-    return "@";
-  case TokenType::Colon:
-    return ":";
-  case TokenType::Grave:
-    return "`";
-  case TokenType::Dot:
-    return ".";
-  default:
-    return "";
-  }
+  const auto i = static_cast<size_t>(tp);
+  return i < kTypeNames.size() ? kTypeNames[i] : std::string_view{};
 }
 
 std::string_view AssemblerToken::TypeStr() const
