@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/TextureUtils.h"
 
@@ -16,65 +15,75 @@
 
 namespace
 {
-std::string BuildDumpTextureFilename(std::string basename, u32 level, bool is_arbitrary)
+// Per-game dump folder; the game id is read on every call since it changes between games.
+std::string GameDumpFolder()
 {
+  return File::GetUserPath(D_DUMPTEXTURES_IDX) + SConfig::GetInstance().GetGameID();
+}
+
+void EnsureFolderExists(const std::string& folder)
+{
+  if (!File::IsDirectory(folder))
+    File::CreateDir(folder);
+}
+
+// File name without folder or extension.
+std::string DumpName(std::string basename, u32 level, bool is_arbitrary)
+{
+  std::string name = std::move(basename);
   if (is_arbitrary)
-    basename += "_arb";
+    name.append("_arb");
+  if (level != 0)
+    name.append(fmt::format("_mip{}", level));
+  return name;
+}
 
-  if (level > 0)
-    basename += fmt::format("_mip{}", level);
+std::string DumpPath(const std::string& folder, const std::string& name)
+{
+  return fmt::format("{}/{}.png", folder, name);
+}
 
-  return basename;
+void WritePNG(const AbstractTexture& texture, const std::string& path, u32 level)
+{
+  texture.Save(path, level, Config::Get(Config::GFX_TEXTURE_PNG_COMPRESSION_LEVEL));
 }
 }  // namespace
+
 namespace VideoCommon::TextureUtils
 {
 void DumpTexture(const ::AbstractTexture& texture, std::string basename, u32 level,
                  bool is_arbitrary)
 {
-  const std::string dump_dir =
-      File::GetUserPath(D_DUMPTEXTURES_IDX) + SConfig::GetInstance().GetGameID();
+  const std::string folder = GameDumpFolder();
+  EnsureFolderExists(folder);
 
-  if (!File::IsDirectory(dump_dir))
-    File::CreateDir(dump_dir);
-
-  const std::string name = BuildDumpTextureFilename(std::move(basename), level, is_arbitrary);
-  const std::string filename = fmt::format("{}/{}.png", dump_dir, name);
-
-  if (File::Exists(filename))
-    return;
-
-  texture.Save(filename, level, Config::Get(Config::GFX_TEXTURE_PNG_COMPRESSION_LEVEL));
+  const std::string path = DumpPath(folder, DumpName(std::move(basename), level, is_arbitrary));
+  if (!File::Exists(path))
+    WritePNG(texture, path, level);
 }
 
 void TextureDumper::DumpTexture(const ::AbstractTexture& texture, std::string basename, u32 level,
                                 bool is_arbitrary)
 {
-  const std::string dump_dir =
-      File::GetUserPath(D_DUMPTEXTURES_IDX) + SConfig::GetInstance().GetGameID();
+  const std::string folder = GameDumpFolder();
 
+  // Nothing recorded yet: learn what earlier sessions already wrote.
   if (m_dumped_textures.empty())
   {
-    if (!File::IsDirectory(dump_dir))
-      File::CreateDir(dump_dir);
-
-    for (auto& filename : Common::DoFileSearch(dump_dir, ".png", true))
+    EnsureFolderExists(folder);
+    for (const std::string& existing : Common::DoFileSearch(folder, ".png", true))
     {
-      std::string name;
-      SplitPath(filename, nullptr, &name, nullptr);
-      m_dumped_textures.insert(name);
+      std::string stem;
+      SplitPath(existing, nullptr, &stem, nullptr);
+      m_dumped_textures.insert(std::move(stem));
     }
-
     NOTICE_LOG_FMT(VIDEO, "Found {} dumped textures that will not be re-dumped.",
                    m_dumped_textures.size());
   }
 
-  const std::string name = BuildDumpTextureFilename(std::move(basename), level, is_arbitrary);
-  const bool file_existed = !m_dumped_textures.insert(name).second;
-  if (file_existed)
-    return;
-
-  texture.Save(fmt::format("{}/{}.png", dump_dir, name), level,
-               Config::Get(Config::GFX_TEXTURE_PNG_COMPRESSION_LEVEL));
+  std::string name = DumpName(std::move(basename), level, is_arbitrary);
+  const std::string path = DumpPath(folder, name);
+  if (m_dumped_textures.insert(std::move(name)).second)
+    WritePNG(texture, path, level);
 }
 }  // namespace VideoCommon::TextureUtils

@@ -1,15 +1,15 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/HiresTextures.h"
 
+#include <array>
 #include <fmt/format.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
-#include <xxhash.h>
 
 #include "Common/CommonPaths.h"
 #include "Common/FileSearch.h"
@@ -23,57 +23,101 @@
 #include "VideoCommon/Resources/CustomResourceManager.h"
 #include "VideoCommon/VideoConfig.h"
 
-constexpr std::string_view s_format_prefix{"tex1_"};
-
-static std::unordered_map<std::string, std::shared_ptr<HiresTexture>> s_hires_texture_cache;
-static std::unordered_map<std::string, bool> s_hires_texture_id_to_arbmipmap;
-
-static auto s_file_library = std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
-
 namespace
 {
-std::pair<std::string, bool> GetNameArbPair(const TextureInfo& texture_info)
+constexpr std::string_view kTexturePrefix = TextureInfo::format_prefix;
+constexpr std::string_view kArbitraryMipsMarker = "_arb";
+
+// Everything known about the packs of the running game.
+struct PackState
 {
-  if (s_hires_texture_id_to_arbmipmap.empty())
-    return {"", false};
+  // Textures already created (and, when preloading, already loaded), by id. Declared first so
+  // that it is destroyed last, after the asset library.
+  std::unordered_map<std::string, std::shared_ptr<HiresTexture>> textures;
+  // Every texture id the packs provide, and whether it has hand-made mip levels.
+  std::unordered_map<std::string, bool> available;
+  // Maps ids to files, and watches the pack folders for edits.
+  std::shared_ptr<VideoCommon::DirectFilesystemAssetLibrary> library =
+      std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
+};
 
-  const auto texture_name_details = texture_info.CalculateTextureName();
-  // look for an exact match first
-  const std::string full_name = texture_name_details.GetFullName();
-  if (auto iter = s_hires_texture_id_to_arbmipmap.find(full_name);
-      iter != s_hires_texture_id_to_arbmipmap.end())
+PackState s_packs;
+
+struct PackMatch
+{
+  std::string id;
+  bool has_arbitrary_mipmaps;
+};
+
+// Pack file names may replace either hash with '$' to match any texture or any palette. The
+// exact name is preferred, then the any-palette form, then the any-texture form.
+std::optional<PackMatch> FindPackEntry(const TextureInfo& texture_info)
+{
+  if (s_packs.available.empty())
+    return std::nullopt;
+
+  const TextureInfo::NameDetails name = texture_info.CalculateTextureName();
+  const std::array<std::string, 3> candidates = {
+      name.GetFullName(),
+      fmt::format("{}_{}_$_{}", name.base_name, name.texture_name, name.format_name),
+      fmt::format("{}_${}_{}", name.base_name, name.tlut_name, name.format_name),
+  };
+  for (const std::string& candidate : candidates)
   {
-    return {full_name, iter->second};
+    const auto found = s_packs.available.find(candidate);
+    if (found != s_packs.available.end())
+      return PackMatch{candidate, found->second};
   }
+  return std::nullopt;
+}
 
-  // Single wildcard ignoring the tlut hash
-  const std::string texture_name_single_wildcard_tlut =
-      fmt::format("{}_{}_$_{}", texture_name_details.base_name, texture_name_details.texture_name,
-                  texture_name_details.format_name);
-  if (auto iter = s_hires_texture_id_to_arbmipmap.find(texture_name_single_wildcard_tlut);
-      iter != s_hires_texture_id_to_arbmipmap.end())
+// Turns a pack file stem into a texture id, removing (the last) "_arb" marker. Returns whether
+// a marker was found.
+bool StripArbitraryMipsMarker(std::string& stem)
+{
+  const size_t marker = stem.rfind(kArbitraryMipsMarker);
+  if (marker == std::string::npos)
+    return false;
+  stem.erase(marker, kArbitraryMipsMarker.size());
+  return true;
+}
+
+// Registers every texture file in one pack folder. Returns false if any id was already known
+// (from this or an earlier folder); the first file seen for an id wins.
+bool IndexPackFolder(const std::string& folder)
+{
+  s_packs.library->Watch(folder);
+
+  static constexpr std::array<std::string_view, 2> kImageExtensions = {".png", ".dds"};
+  bool all_new = true;
+  for (const std::string& path : Common::DoFileSearch(folder, kImageExtensions, true))
   {
-    return {texture_name_single_wildcard_tlut, iter->second};
-  }
+    std::string id;
+    SplitPath(path, nullptr, &id, nullptr);
+    if (!id.starts_with(kTexturePrefix))
+      continue;
 
-  // Single wildcard ignoring the texture hash
-  const std::string texture_name_single_wildcard_tex =
-      fmt::format("{}_${}_{}", texture_name_details.base_name, texture_name_details.tlut_name,
-                  texture_name_details.format_name);
-  if (auto iter = s_hires_texture_id_to_arbmipmap.find(texture_name_single_wildcard_tex);
-      iter != s_hires_texture_id_to_arbmipmap.end())
-  {
-    return {texture_name_single_wildcard_tex, iter->second};
-  }
+    const bool arbitrary_mips = StripArbitraryMipsMarker(id);
+    if (!s_packs.available.try_emplace(id, arbitrary_mips).second)
+    {
+      all_new = false;
+      continue;
+    }
 
-  return {"", false};
+    // A texture asset is a single file, so the map has just one entry under any name.
+    s_packs.library->SetAssetIDMapData(
+        id, std::map<std::string, std::filesystem::path>{{"texture", StringToPath(path)}});
+
+    if (g_ActiveConfig.bCacheHiresTextures)
+    {
+      auto texture = std::make_shared<HiresTexture>(arbitrary_mips, std::move(id));
+      static_cast<void>(texture->LoadTexture());
+      s_packs.textures.try_emplace(texture->GetId(), std::move(texture));
+    }
+  }
+  return all_new;
 }
 }  // namespace
-
-void HiresTexture::Shutdown()
-{
-  Clear();
-}
 
 void HiresTexture::Update()
 {
@@ -83,107 +127,50 @@ void HiresTexture::Update()
     return;
   }
 
-  const std::set<std::string> texture_directories = GetTextureDirectoriesForFirstMatchingGameId(
-      File::GetUserPath(D_HIRESTEXTURES_IDX), SConfig::GetInstance().GetGameIDsForTextures());
-
-  constexpr auto extensions = std::to_array<std::string_view>({".png", ".dds"});
-
-  for (const auto& texture_directory : texture_directories)
+  const std::string root = File::GetUserPath(D_HIRESTEXTURES_IDX);
+  const std::vector<std::string> ids = SConfig::GetInstance().GetGameIDsForTextures();
+  for (const std::string& folder : GetTextureDirectoriesForFirstMatchingGameId(root, ids))
   {
-    // Watch this directory for any texture reloads
-    s_file_library->Watch(texture_directory);
-
-    const auto texture_paths =
-        Common::DoFileSearch(texture_directory, extensions, /*recursive*/ true);
-
-    bool failed_insert = false;
-    for (auto& path : texture_paths)
-    {
-      std::string filename;
-      SplitPath(path, nullptr, &filename, nullptr);
-
-      if (filename.substr(0, s_format_prefix.length()) == s_format_prefix)
-      {
-        const size_t arb_index = filename.rfind("_arb");
-        const bool has_arbitrary_mipmaps = arb_index != std::string::npos;
-        if (has_arbitrary_mipmaps)
-          filename.erase(arb_index, 4);
-
-        const auto [it, inserted] =
-            s_hires_texture_id_to_arbmipmap.try_emplace(filename, has_arbitrary_mipmaps);
-        if (!inserted)
-        {
-          failed_insert = true;
-        }
-        else
-        {
-          // Since this is just a texture (single file) the mapper doesn't really matter
-          // just provide a string
-          s_file_library->SetAssetIDMapData(filename, std::map<std::string, std::filesystem::path>{
-                                                          {"texture", StringToPath(path)}});
-
-          if (g_ActiveConfig.bCacheHiresTextures)
-          {
-            auto hires_texture =
-                std::make_shared<HiresTexture>(has_arbitrary_mipmaps, std::move(filename));
-            static_cast<void>(hires_texture->LoadTexture());
-            s_hires_texture_cache.try_emplace(hires_texture->GetId(), hires_texture);
-          }
-        }
-      }
-    }
-
-    if (failed_insert)
-    {
-      ERROR_LOG_FMT(VIDEO, "One or more textures at path '{}' were already inserted",
-                    texture_directory);
-    }
+    if (!IndexPackFolder(folder))
+      ERROR_LOG_FMT(VIDEO, "One or more textures at path '{}' were already inserted", folder);
   }
 
-  const std::vector<std::string> game_ids_for_textures =
-      SConfig::GetInstance().GetGameIDsForTextures();
-  const std::string game_id_display = fmt::format("{}", fmt::join(game_ids_for_textures, "' or '"));
-
-  std::string message;
-  if (g_ActiveConfig.bCacheHiresTextures)
-  {
-    message = fmt::format("Preloading '{}' custom textures for '{}'", s_hires_texture_cache.size(),
-                          game_id_display);
-  }
-  else
-  {
-    message = fmt::format("Found '{}' custom textures for '{}'",
-                          s_hires_texture_id_to_arbmipmap.size(), game_id_display);
-  }
-  OSD::AddMessage(message, 10000);
+  const std::vector<std::string> shown_ids = SConfig::GetInstance().GetGameIDsForTextures();
+  const std::string game = fmt::format("{}", fmt::join(shown_ids, "' or '"));
+  const bool preloaded = g_ActiveConfig.bCacheHiresTextures;
+  std::string message =
+      preloaded ?
+          fmt::format("Preloading '{}' custom textures for '{}'", s_packs.textures.size(), game) :
+          fmt::format("Found '{}' custom textures for '{}'", s_packs.available.size(), game);
+  OSD::AddMessage(std::move(message), 10000);
 }
 
 void HiresTexture::Clear()
 {
-  s_hires_texture_cache.clear();
-  s_hires_texture_id_to_arbmipmap.clear();
-  s_file_library = std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
+  s_packs.textures.clear();
+  s_packs.available.clear();
+  // A fresh library drops all id mappings and folder watches.
+  s_packs.library = std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
+}
+
+void HiresTexture::Shutdown()
+{
+  Clear();
 }
 
 std::shared_ptr<HiresTexture> HiresTexture::Search(const TextureInfo& texture_info)
 {
-  auto [base_filename, has_arb_mipmaps] = GetNameArbPair(texture_info);
-  if (base_filename == "")
+  std::optional<PackMatch> match = FindPackEntry(texture_info);
+  if (!match || match->id.empty())
     return nullptr;
 
-  if (auto iter = s_hires_texture_cache.find(base_filename); iter != s_hires_texture_cache.end())
-  {
-    return iter->second;
-  }
-  else
-  {
-    auto hires_texture = std::make_shared<HiresTexture>(has_arb_mipmaps, std::move(base_filename));
-    if (g_ActiveConfig.bCacheHiresTextures)
-    {
-      s_hires_texture_cache.try_emplace(hires_texture->GetId(), hires_texture);
-    }
-    return hires_texture;
-  }
+  if (const auto known = s_packs.textures.find(match->id); known != s_packs.textures.end())
+    return known->second;
+
+  auto texture = std::make_shared<HiresTexture>(match->has_arbitrary_mipmaps, std::move(match->id));
+  if (g_ActiveConfig.bCacheHiresTextures)
+    s_packs.textures.try_emplace(texture->GetId(), texture);
+  return texture;
 }
 
 HiresTexture::HiresTexture(bool has_arbitrary_mipmaps, std::string id)
@@ -193,66 +180,49 @@ HiresTexture::HiresTexture(bool has_arbitrary_mipmaps, std::string id)
 
 VideoCommon::TextureDataResource* HiresTexture::LoadTexture() const
 {
-  auto& system = Core::System::GetInstance();
-  auto& custom_resource_manager = system.GetCustomResourceManager();
-  return custom_resource_manager.GetTextureDataFromAsset(m_id, s_file_library);
+  auto& resources = Core::System::GetInstance().GetCustomResourceManager();
+  return resources.GetTextureDataFromAsset(m_id, s_packs.library);
 }
 
 std::set<std::string> GetTextureDirectoriesWithGameId(const std::string& root_directory,
                                                       const std::string& game_id)
 {
-  std::set<std::string> result;
-  const std::string texture_directory = root_directory + game_id;
+  std::set<std::string> folders;
+  const std::string short_id = game_id.substr(0, 3);
 
-  if (File::Exists(texture_directory))
+  // A folder named after the full id, or failing that the region-free three-character id.
+  if (const std::string full = root_directory + game_id; File::Exists(full))
   {
-    result.insert(texture_directory);
+    folders.insert(full);
   }
-  else
+  else if (const std::string region_free = root_directory + short_id; File::Exists(region_free))
   {
-    // If there's no directory with the region-specific ID, look for a 3-character region-free one
-    const std::string region_free_directory = root_directory + game_id.substr(0, 3);
-
-    if (File::Exists(region_free_directory))
-    {
-      result.insert(region_free_directory);
-    }
+    folders.insert(region_free);
   }
 
-  const auto match_gameid_or_all = [game_id](const std::string& filename) {
-    std::string basename;
-    SplitPath(filename, nullptr, &basename, nullptr);
-    return basename == game_id || basename == game_id.substr(0, 3) || basename == "all";
-  };
-
-  // Look for any other directories that might be specific to the given gameid
-  const auto files = Common::DoFileSearch(root_directory, ".txt", true);
-  for (const auto& file : files)
+  // Marker files: "<root>/<top folder>/.../<id>.txt" selects "<root>/<top folder>".
+  for (const std::string& marker : Common::DoFileSearch(root_directory, ".txt", true))
   {
-    if (match_gameid_or_all(file))
-    {
-      // The following code is used to calculate the top directory
-      // of a found gameid.txt file
-      // ex:  <root directory>/My folder/gameids/<gameid>.txt
-      // would insert "<root directory>/My folder"
-      const auto directory_path = file.substr(root_directory.size());
-      const std::size_t first_path_separator_position = directory_path.find_first_of(DIR_SEP_CHR);
-      result.insert(root_directory + directory_path.substr(0, first_path_separator_position));
-    }
-  }
+    std::string stem;
+    SplitPath(marker, nullptr, &stem, nullptr);
+    if (stem != game_id && stem != short_id && stem != "all")
+      continue;
 
-  return result;
+    const std::string relative = marker.substr(root_directory.size());
+    folders.insert(root_directory + relative.substr(0, relative.find(DIR_SEP_CHR)));
+  }
+  return folders;
 }
 
 std::set<std::string>
 GetTextureDirectoriesForFirstMatchingGameId(const std::string& root_directory,
                                             const std::vector<std::string>& game_ids)
 {
-  for (const auto& game_id : game_ids)
+  for (const std::string& id : game_ids)
   {
-    auto directories = GetTextureDirectoriesWithGameId(root_directory, game_id);
-    if (!directories.empty())
-      return directories;
+    std::set<std::string> folders = GetTextureDirectoriesWithGameId(root_directory, id);
+    if (!folders.empty())
+      return folders;
   }
   return {};
 }
