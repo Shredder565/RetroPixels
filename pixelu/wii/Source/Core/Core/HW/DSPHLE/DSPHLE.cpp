@@ -1,10 +1,10 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/DSPHLE.h"
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
@@ -20,53 +20,51 @@ DSPHLE::DSPHLE(Core::System& system) : m_mail_handler(system.GetDSP()), m_system
 
 DSPHLE::~DSPHLE() = default;
 
-bool DSPHLE::Initialize(bool wii, bool dsp_thread)
+bool DSPHLE::Initialize(bool wii, bool /*dsp_thread*/)
 {
   m_wii = wii;
-  m_ucode = nullptr;
-  m_last_ucode = nullptr;
+  m_ucode.reset();
+  m_last_ucode.reset();
 
+  // Power on: the ROM is running, and the DSP is held halted with the init bit set.
   SetUCode(UCODE_ROM);
 
   m_dsp_control.Hex = 0;
   m_dsp_control.DSPHalt = 1;
   m_dsp_control.DSPInit = 1;
-  m_mail_handler.SetHalted(m_dsp_control.DSPHalt);
+  m_mail_handler.SetHalted(true);
 
-  m_dsp_state.Reset();
-
+  m_mailboxes = {};
   return true;
+}
+
+void DSPHLE::Shutdown()
+{
+  m_ucode.reset();
 }
 
 void DSPHLE::DSP_StopSoundStream()
 {
 }
 
-void DSPHLE::Shutdown()
+void DSPHLE::PauseAndLock()
 {
-  m_ucode = nullptr;
 }
 
-void DSPHLE::DSP_Update(int cycles)
+void DSPHLE::UnpauseAndUnlock()
 {
-  if (m_ucode != nullptr)
+}
+
+void DSPHLE::DSP_Update(int /*cycles*/)
+{
+  if (m_ucode)
     m_ucode->Update();
 }
 
 u32 DSPHLE::DSP_UpdateRate()
 {
-  // AX HLE uses 3ms (Wii) or 5ms (GC) timing period
-  // But to be sure, just update the HLE every ms.
+  // AX frames are 5 ms (GameCube) or 3 ms (Wii); updating every millisecond is fine for all.
   return m_system.GetSystemTimers().GetTicksPerSecond() / 1000;
-}
-
-void DSPHLE::SendMailToDSP(u32 mail)
-{
-  if (m_ucode != nullptr)
-  {
-    DEBUG_LOG_FMT(DSP_MAIL, "CPU writes {:#010x}", mail);
-    m_ucode->HandleMail(mail);
-  }
 }
 
 void DSPHLE::SetUCode(u32 crc)
@@ -76,31 +74,30 @@ void DSPHLE::SetUCode(u32 crc)
   m_ucode->Initialize();
 }
 
-// TODO do it better?
-// Assumes that every odd call to this func is by the persistent ucode.
-// Even callers are deleted.
 void DSPHLE::SwapUCode(u32 crc)
 {
   m_mail_handler.ClearPending();
 
-  if (m_last_ucode && UCodeInterface::GetCRC(m_last_ucode.get()) == crc)
+  if (m_last_ucode != nullptr && UCodeInterface::GetCRC(m_last_ucode.get()) == crc)
   {
+    // Back to the ucode we left: it continues where it was.
     m_ucode = std::move(m_last_ucode);
+    return;
   }
-  else
-  {
-    if (!m_last_ucode)
-      m_last_ucode = std::move(m_ucode);
-    m_ucode = UCodeFactory(crc, this, m_wii);
-    m_ucode->Initialize();
-  }
+
+  // Keep the ucode we are leaving only if nothing is parked yet.
+  if (m_last_ucode == nullptr)
+    m_last_ucode = std::move(m_ucode);
+
+  m_ucode = UCodeFactory(crc, this, m_wii);
+  m_ucode->Initialize();
 }
 
 void DSPHLE::DoState(PointerWrap& p)
 {
   bool is_hle = true;
   p.Do(is_hle);
-  if (!is_hle && p.IsReadMode())
+  if (p.IsReadMode() && !is_hle)
   {
     Core::DisplayMessage("State is incompatible with current DSP engine. Aborting load state.",
                          3000);
@@ -110,123 +107,105 @@ void DSPHLE::DoState(PointerWrap& p)
 
   p.Do(m_dsp_control);
   p.Do(m_control_reg_init_code_clear_time);
-  p.Do(m_dsp_state);
+  p.Do(m_mailboxes);
 
-  int ucode_crc = UCodeInterface::GetCRC(m_ucode.get());
-  int ucode_crc_before_load = ucode_crc;
-  int last_ucode_crc = UCodeInterface::GetCRC(m_last_ucode.get());
-  int last_ucode_crc_before_load = last_ucode_crc;
+  const u32 current_crc = UCodeInterface::GetCRC(m_ucode.get());
+  const u32 parked_crc = UCodeInterface::GetCRC(m_last_ucode.get());
+  u32 saved_current_crc = current_crc;
+  u32 saved_parked_crc = parked_crc;
+  p.Do(saved_current_crc);
+  p.Do(saved_parked_crc);
 
-  p.Do(ucode_crc);
-  p.Do(last_ucode_crc);
-
-  // if a different type of ucode was being used when the savestate was created,
-  // we have to reconstruct the old type of ucode so that we have a valid thing to call DoState on.
-  const bool same_ucode = ucode_crc == ucode_crc_before_load;
-  const bool same_last_ucode = last_ucode_crc == last_ucode_crc_before_load;
-  auto ucode = same_ucode ? std::move(m_ucode) : UCodeFactory(ucode_crc, this, m_wii);
-  auto last_ucode =
-      same_last_ucode ? std::move(m_last_ucode) : UCodeFactory(last_ucode_crc, this, m_wii);
-
-  if (ucode)
-    ucode->DoState(p);
-  if (last_ucode)
-    last_ucode->DoState(p);
-
-  m_ucode = std::move(ucode);
-  m_last_ucode = std::move(last_ucode);
+  // A state made with other ucodes needs those ucodes built (without starting them) so they can
+  // read their own state.
+  std::unique_ptr<UCodeInterface> current = saved_current_crc == current_crc ?
+                                                std::move(m_ucode) :
+                                                UCodeFactory(saved_current_crc, this, m_wii);
+  std::unique_ptr<UCodeInterface> parked = saved_parked_crc == parked_crc ?
+                                               std::move(m_last_ucode) :
+                                               UCodeFactory(saved_parked_crc, this, m_wii);
+  if (current)
+    current->DoState(p);
+  if (parked)
+    parked->DoState(p);
+  m_ucode = std::move(current);
+  m_last_ucode = std::move(parked);
 
   m_mail_handler.DoState(p);
 }
 
-// Mailbox functions
 u16 DSPHLE::DSP_ReadMailBoxHigh(bool cpu_mailbox)
 {
-  if (cpu_mailbox)
-  {
-    return (m_dsp_state.cpu_mailbox >> 16) & 0xFFFF;
-  }
-  else
-  {
-    return AccessMailHandler().ReadDSPMailboxHigh();
-  }
+  if (!cpu_mailbox)
+    return m_mail_handler.ReadDSPMailboxHigh();
+  return static_cast<u16>(m_mailboxes.to_dsp >> 16);
 }
 
 u16 DSPHLE::DSP_ReadMailBoxLow(bool cpu_mailbox)
 {
-  if (cpu_mailbox)
-  {
-    return m_dsp_state.cpu_mailbox & 0xFFFF;
-  }
-  else
-  {
-    return AccessMailHandler().ReadDSPMailboxLow();
-  }
+  if (!cpu_mailbox)
+    return m_mail_handler.ReadDSPMailboxLow();
+  return static_cast<u16>(m_mailboxes.to_dsp);
 }
 
 void DSPHLE::DSP_WriteMailBoxHigh(bool cpu_mailbox, u16 value)
 {
-  if (cpu_mailbox)
-  {
-    m_dsp_state.cpu_mailbox = (m_dsp_state.cpu_mailbox & 0xFFFF) | (value << 16);
-  }
-  else
+  if (!cpu_mailbox)
   {
     PanicAlertFmt("CPU can't write {:08x} to DSP mailbox", value);
+    return;
   }
+  m_mailboxes.to_dsp = (u32{value} << 16) | (m_mailboxes.to_dsp & 0xFFFF);
 }
 
 void DSPHLE::DSP_WriteMailBoxLow(bool cpu_mailbox, u16 value)
 {
-  if (cpu_mailbox)
-  {
-    m_dsp_state.cpu_mailbox = (m_dsp_state.cpu_mailbox & 0xFFFF0000) | value;
-    SendMailToDSP(m_dsp_state.cpu_mailbox);
-    // Mail sent so clear MSB to show that it is progressed
-    m_dsp_state.cpu_mailbox &= 0x7FFFFFFF;
-  }
-  else
+  if (!cpu_mailbox)
   {
     PanicAlertFmt("CPU can't write {:08x} to DSP mailbox", value);
+    return;
   }
+
+  // Writing the low half sends the mail. The ucode handles it right away, so the CPU sees the
+  // "mail waiting" bit already cleared afterwards.
+  m_mailboxes.to_dsp = (m_mailboxes.to_dsp & 0xFFFF0000) | value;
+  if (m_ucode)
+  {
+    DEBUG_LOG_FMT(DSP_MAIL, "CPU mail in: {:08x}", m_mailboxes.to_dsp);
+    m_ucode->HandleMail(m_mailboxes.to_dsp);
+  }
+  m_mailboxes.to_dsp &= 0x7FFFFFFF;
 }
 
-// Other DSP functions
 u16 DSPHLE::DSP_WriteControlRegister(u16 value)
 {
-  DSP::UDSPControl temp(value);
+  DSP::UDSPControl requested(value);
 
-  if (m_dsp_control.DSPHalt != temp.DSPHalt)
+  if (requested.DSPHalt != m_dsp_control.DSPHalt)
   {
-    INFO_LOG_FMT(DSPHLE, "DSP_CONTROL halt bit changed: {:04x} -> {:04x}", m_dsp_control.Hex,
-                 value);
-    m_mail_handler.SetHalted(temp.DSPHalt);
+    INFO_LOG_FMT(DSPHLE, "DSP halt bit: {:04x} -> {:04x}", m_dsp_control.Hex, value);
+    m_mail_handler.SetHalted(requested.DSPHalt != 0);
   }
 
-  if (temp.DSPReset)
+  if (requested.DSPReset != 0)
   {
+    // Reset reboots into the ROM; the bit reads back as done at once.
     SetUCode(UCODE_ROM);
-    temp.DSPReset = 0;
+    requested.DSPReset = 0;
   }
 
-  // init - unclear if writing DSPInitCode does something. Clearing DSPInit immediately sets
-  // DSPInitCode, which gets unset a bit later...
-  if ((m_dsp_control.DSPInit != 0) && (temp.DSPInit == 0))
+  if (m_dsp_control.DSPInit != 0 && requested.DSPInit == 0)
   {
-    // Copy 1024(?) bytes of uCode from main memory 0x81000000 (or is it ARAM 00000000?)
-    // to IMEM 0000 and jump to that code
-    // TODO: Determine exactly how this initialization works
-    // We could hash the input data, but this is only used for initialization purposes on licensed
-    // games and by devkitpro, so there's no real point in doing so.
-    // Datel has similar logic to retail games, but they clear bit 0x80 (DSP) instead of bit 0x800
-    // (DSPInit) so they end up not using the init uCode.
+    // Clearing DSPInit makes the DSP run the small program the SDK and libogc boot it with. That
+    // program is not hashed: it is only ever the standard one. DSPInitCode then reads 1 for a
+    // short while (about 130 time base ticks, measured on a Wii). Datel software clears the
+    // wrong bit here and never takes this path.
     SetUCode(UCODE_INIT_AUDIO_SYSTEM);
-    temp.DSPInitCode = 1;
-    // Number obtained from real hardware on a Wii, but it's not perfectly consistent
+    requested.DSPInitCode = 1;
     m_control_reg_init_code_clear_time = m_system.GetSystemTimers().GetFakeTimeBase() + 130;
   }
 
-  m_dsp_control.Hex = temp.Hex;
+  m_dsp_control.Hex = requested.Hex;
   return m_dsp_control.Hex;
 }
 
@@ -237,16 +216,8 @@ u16 DSPHLE::DSP_ReadControlRegister()
     if (m_system.GetSystemTimers().GetFakeTimeBase() >= m_control_reg_init_code_clear_time)
       m_dsp_control.DSPInitCode = 0;
     else
-      m_system.GetCoreTiming().ForceExceptionCheck(50);  // Keep checking
+      m_system.GetCoreTiming().ForceExceptionCheck(50);  // come back soon to clear it
   }
   return m_dsp_control.Hex;
-}
-
-void DSPHLE::PauseAndLock()
-{
-}
-
-void DSPHLE::UnpauseAndUnlock()
-{
 }
 }  // namespace DSP::HLE

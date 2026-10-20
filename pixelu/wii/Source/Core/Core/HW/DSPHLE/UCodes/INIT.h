@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@ namespace DSP::HLE
 {
 class DSPHLE;
 
+// The small program run when the CPU clears the DSP init bit. It only says hello.
 class INITUCode final : public UCodeInterface
 {
 public:

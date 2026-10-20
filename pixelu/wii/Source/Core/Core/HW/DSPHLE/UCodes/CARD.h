@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@ namespace DSP::HLE
 {
 class DSPHLE;
 
+// The memory card unlock task. Its real job (the challenge computation for the card's unlock
+// sequence) is not needed by the emulated cards, so any request just finishes the task.
 class CARDUCode final : public UCodeInterface
 {
 public:
@@ -21,14 +22,14 @@ public:
   void DoState(PointerWrap& p) override;
 
 private:
-  enum class State
+  enum class Stage
   {
-    WaitingForRequest,
-    WaitingForAddress,
-    WaitingForNextTask,
+    AwaitingRequest,
+    AwaitingAddress,
+    AwaitingNextTask,
   };
 
-  // Currently unused, will be used in a later version
-  State m_state = State::WaitingForRequest;
+  // Not advanced at the moment; saved for the savestate layout.
+  Stage m_stage = Stage::AwaitingRequest;
 };
 }  // namespace DSP::HLE

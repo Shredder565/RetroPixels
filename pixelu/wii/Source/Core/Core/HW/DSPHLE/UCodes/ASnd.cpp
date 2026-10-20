@@ -1,12 +1,12 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// High-level emulation for the libasnd ucode, used by older homebrew
-// libasnd is copyright 2008 Hermes <www.entuwii.net> and released under the BSD-3-Clause license
+// HLE of the libasnd mixer ucode. The behaviour follows the ucode's published source
+// (libogc's libasnd/dsp_mixer), including its quirks.
 
 #include "Core/HW/DSPHLE/UCodes/ASnd.h"
 
 #include <algorithm>
+#include <type_traits>
 
 #include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
@@ -20,57 +20,74 @@
 
 namespace DSP::HLE
 {
-// "fill the internal sample buffer and process the voice internally"
-constexpr u32 MAIL_INPUT_SAMPLES = 0x0111;
-// "get samples from the external buffer to the internal buffer and process the voice mixing the
-// samples internally" (not used)
-constexpr u32 MAIL_INPUT_SAMPLES_2 = 0x0112;
-// "get the address of the voice datas buffer (CHANNEL DATAS)" (actually sets it)
-constexpr u32 MAIL_SET_VOICE_DATA_BUFFER = 0x0123;
-// "process the voice mixing the samples internally"
-constexpr u32 MAIL_INPUT_NEXT_SAMPLES = 0x0222;
-// "send the samples for the internal buffer to the external buffer"
-constexpr u32 MAIN_SEND_SAMPLES = 0x0666;
-// "special: to dump the IROM Datas (remember disable others functions from the interrupt vector to
-// use) (CMBH+0x8000) contains the address of IROM" (not used)
-constexpr u32 MAIL_ROM_DUMP_WORD = 0x0777;
-// "Used for test" (not used)
-constexpr u32 MAIL_TEST = 0x0888;
-constexpr u32 MAIL_TERMINATE = 0x0999;
-
-// Note that there are additional flags used on the powerpc side (UPDATEADD, UPDATE, and VOLUPDATE)
-// that are not relevant to the DSP side.
-// The old flags are used in the 2008 and 2009 versions, while the new ones are used in the 2011 and
-// 2020 versions.
-constexpr u32 OLD_FLAGS_VOICE_PAUSE = 1 << 5;
-constexpr u32 OLD_FLAGS_VOICE_LOOP = 1 << 2;
-constexpr u32 OLD_FLAGS_SAMPLE_FORMAT_MASK = 3;
-
-constexpr u32 NEW_FLAGS_VOICE_PAUSE = 1 << 9;
-constexpr u32 NEW_FLAGS_VOICE_LOOP = 1 << 8;
-constexpr u32 NEW_FLAGS_SAMPLE_FORMAT_MASK = 7;
-// Used on the PowerPC side as an enabled flag (if 0, then the voice isn't active).
-// Used on the DSP side as the step in bytes after each read.
-constexpr u32 FLAGS_SAMPLE_FORMAT_BYTES_MASK = 0xffff0000;
-constexpr u32 FLAGS_SAMPLE_FORMAT_BYTES_SHIFT = 16;
-
-constexpr u32 SAMPLE_RATE = 48000;
-
-bool ASndUCode::SwapLeftRight() const
+namespace
 {
-  return m_crc == HASH_2008 || m_crc == HASH_2009 || m_crc == HASH_2011 || m_crc == HASH_2020 ||
-         m_crc == HASH_2020_PAD;
+// Commands; the ucode only looks at the low half of the mail.
+enum : u32
+{
+  CMD_MIX_FRESH = 0x0111,        // load the voice, clear the output, mix
+  CMD_MIX_ON_TOP_OF_RAM = 0x0112,  // load the voice, load the output from RAM, mix (unused)
+  CMD_SET_VOICE_ADDR = 0x0123,     // the next mail is the voice data address
+  CMD_MIX_MORE = 0x0222,           // load the voice, mix into the current output
+  CMD_SEND_OUTPUT = 0x0666,        // copy the output buffer to RAM
+  CMD_DUMP_ROM_WORD = 0x0777,      // debugging aid (unused)
+  CMD_SELF_TEST = 0x0888,          // debugging aid (unused)
+  CMD_TERMINATE = 0x0999,          // not in the 2008 build
+};
+
+// Flag bits of the 2008/2009 builds, and of the 2011 and later builds.
+constexpr u32 OLD_PAUSE_BIT = 1 << 5;
+constexpr u32 OLD_LOOP_BIT = 1 << 2;
+constexpr u32 OLD_FORMAT_MASK = 3;
+constexpr u32 NEW_PAUSE_BIT = 1 << 9;
+constexpr u32 NEW_LOOP_BIT = 1 << 8;
+constexpr u32 NEW_FORMAT_MASK = 7;
+
+constexpr u32 OUTPUT_RATE = 48000;
+
+constexpr s16 Saturate16(s32 value)
+{
+  return static_cast<s16>(std::clamp(value, -32768, 32767));
 }
 
-bool ASndUCode::UseNewFlagMasks() const
+// 8-bit samples: one byte in the top half of a 16-bit sample.
+constexpr s16 ByteToSample(u32 byte)
 {
-  return m_crc == HASH_2011 || m_crc == HASH_2020 || m_crc == HASH_2020_PAD ||
-         m_crc == HASH_DESERT_BUS_2011 || m_crc == HASH_DESERT_BUS_2012 || m_crc == HASH_2024 ||
-         m_crc == HASH_2024_PAD;
+  return static_cast<s16>((byte & 0xFF) << 8);
 }
+}  // namespace
 
 ASndUCode::ASndUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
 {
+}
+
+bool ASndUCode::UsesNewFlagLayout() const
+{
+  switch (m_crc)
+  {
+  case HASH_2008:
+  case HASH_2009:
+    return false;
+  default:
+    return true;
+  }
+}
+
+bool ASndUCode::HasRightBeforeLeftInput() const
+{
+  // Every build before the Desert Bus and 2024 ones reads the second channel of a stereo frame as
+  // the left one.
+  switch (m_crc)
+  {
+  case HASH_2008:
+  case HASH_2009:
+  case HASH_2011:
+  case HASH_2020:
+  case HASH_2020_PAD:
+    return true;
+  default:
+    return false;
+  }
 }
 
 void ASndUCode::Initialize()
@@ -80,11 +97,9 @@ void ASndUCode::Initialize()
 
 void ASndUCode::Update()
 {
-  // This is dubious in general, since we set the interrupt parameter on m_mail_handler.PushMail
+  // Mails already raise their interrupt; this just keeps reminding the CPU.
   if (m_mail_handler.HasPending())
-  {
     m_dsphle->GetSystem().GetDSP().GenerateDSPInterruptFromDSPEmu(INT_DSP);
-  }
 }
 
 void ASndUCode::HandleMail(u32 mail)
@@ -92,466 +107,302 @@ void ASndUCode::HandleMail(u32 mail)
   if (m_upload_setup_in_progress)
   {
     PrepareBootUCode(mail);
+    return;
   }
-  else if (m_next_mail_is_voice_addr)
+
+  if (m_next_mail_is_voice_addr)
   {
-    m_voice_addr = mail;
-    INFO_LOG_FMT(DSPHLE, "ASndUCode - Voice data is at {:08x}", mail);
     m_next_mail_is_voice_addr = false;
-    // No mail is sent in response
+    m_voice_addr = mail;
+    INFO_LOG_FMT(DSPHLE, "ASnd: voice data at {:08x}", mail);
+    return;
   }
-  else if ((mail & TASK_MAIL_MASK) == TASK_MAIL_TO_DSP)
+
+  if ((mail & TASK_MAIL_MASK) == TASK_MAIL_TO_DSP)
   {
-    switch (mail)
-    {
-    case MAIL_NEW_UCODE:
+    // Task mails get no reply.
+    if (mail == MAIL_NEW_UCODE)
       m_upload_setup_in_progress = true;
-      break;
-    case MAIL_RESET:
+    else if (mail == MAIL_RESET)
       m_dsphle->SetUCode(UCODE_ROM);
-      break;
-    default:
-      WARN_LOG_FMT(DSPHLE, "ASndUCode - unknown 0xcdd1 command: {:08x}", mail);
-      break;
-    }
-    // No mail is sent in response to any of these
+    else
+      WARN_LOG_FMT(DSPHLE, "ASnd: unknown task mail {:08x}", mail);
+    return;
   }
-  else
+
+  auto& memory = m_dsphle->GetSystem().GetMemory();
+  switch (mail & 0xFFFF)
   {
-    // The ucode only checks the lower word (as long as the upper word is not 0xCDD1).
-    switch (mail & 0xffff)
+  case CMD_MIX_FRESH:
+    LoadVoice();
+    m_output.fill(0);
+    MixAndReply();
+    break;
+
+  case CMD_MIX_ON_TOP_OF_RAM:
+    WARN_LOG_FMT(DSPHLE, "ASnd: rarely used command {:08x}", mail);
+    LoadVoice();
+    memory.CopyFromEmuSwapped(m_output.data(), m_voice.out_buf, sizeof(m_output));
+    MixAndReply();
+    break;
+
+  case CMD_SET_VOICE_ADDR:
+    m_next_mail_is_voice_addr = true;
+    break;
+
+  case CMD_MIX_MORE:
+    LoadVoice();
+    MixAndReply();
+    break;
+
+  case CMD_SEND_OUTPUT:
+    memory.CopyToEmuSwapped(m_voice.out_buf, m_output.data(), sizeof(m_output));
+    m_mail_handler.PushMail(DSP_SYNC, true);
+    break;
+
+  case CMD_DUMP_ROM_WORD:
+    // The real ucode returns a word of the IROM; HLE has none to give. No interrupt.
+    WARN_LOG_FMT(DSPHLE, "ASnd: ROM dump command {:08x} not supported", mail);
+    m_mail_handler.PushMail(0x00000000);
+    break;
+
+  case CMD_SELF_TEST:
+    // The ucode replies with its status register and a test value; this is a typical reply.
+    WARN_LOG_FMT(DSPHLE, "ASnd: test command {:08x}", mail);
+    m_mail_handler.PushMail(0x22640000);
+    break;
+
+  case CMD_TERMINATE:
+    if (m_crc == HASH_2008)
     {
-    case MAIL_INPUT_SAMPLES:
-      DEBUG_LOG_FMT(DSPHLE, "ASndUCode - MAIL_INPUT_SAMPLES: {:08x}", mail);
-      // input_samples
-      DMAInVoiceData();
-      // loop_get1
-      m_output_buffer.fill(0);
-      DoMixing(DSP_SYNC);
-      // Mail is handled by DoMixing()
-      break;
-    case MAIL_INPUT_SAMPLES_2:
-    {
-      WARN_LOG_FMT(DSPHLE, "ASndUCode - MAIL_INPUT_SAMPLES_2: {:08x} - not normally used", mail);
-      // input_samples2
-      DMAInVoiceData();  // first do_dma call
-      // second do_dma call
-      auto& memory = m_dsphle->GetSystem().GetMemory();
-      memory.CopyFromEmuSwapped(m_output_buffer.data(), m_current_voice.out_buf,
-                                sizeof(m_output_buffer));
-      DoMixing(DSP_SYNC);
-      // Mail is handled by DoMixing()
-      break;
-    }
-    case MAIL_SET_VOICE_DATA_BUFFER:
-      DEBUG_LOG_FMT(DSPHLE, "ASndUCode - MAIL_SET_VOICE_DATA_BUFFER: {:08x}", mail);
-      m_next_mail_is_voice_addr = true;
-      // No mail is sent in response
-      break;
-    case MAIL_INPUT_NEXT_SAMPLES:
-      DEBUG_LOG_FMT(DSPHLE, "ASndUCode - MAIL_INPUT_NEXT_SAMPLES: {:08x}", mail);
-      // input_next_samples
-      DMAInVoiceData();
-      // called via fallthrough
-      DoMixing(DSP_SYNC);
-      // Mail is handled by DoMixing()
-      break;
-    case MAIN_SEND_SAMPLES:
-    {
-      DEBUG_LOG_FMT(DSPHLE, "ASndUCode - MAIN_SEND_SAMPLES: {:08x}", mail);
-      auto& memory = m_dsphle->GetSystem().GetMemory();
-      memory.CopyToEmuSwapped(m_current_voice.out_buf, m_output_buffer.data(),
-                              sizeof(m_output_buffer));
+      // Not a command yet in this build: handled like an unknown one.
+      WARN_LOG_FMT(DSPHLE, "ASnd: terminate command {:08x} not in this build", mail);
       m_mail_handler.PushMail(DSP_SYNC, true);
-      break;
     }
-    case MAIL_ROM_DUMP_WORD:
-      WARN_LOG_FMT(DSPHLE, "ASndUCode - MAIL_ROM_DUMP_WORD: {:08x} - not normally used", mail);
-      // Reads instruction at 0x8000 | (mail >> 16), and sends it back in DMBL. DMBH is 0.
-      m_mail_handler.PushMail(0x0000'0000, false);  // DIRQ is not set
-      break;
-    case MAIL_TEST:
-      WARN_LOG_FMT(DSPHLE, "ASndUCode - MAIL_TEST: {:08x} - not normally used", mail);
-      // Runs `lri $ac0.m, #0x0` and `andf $ac0.m, #0x1`
-      // and then sends $sr in DMBH and $ac0.m in DMBL
-      // The exact value of $sr will vary, but this isn't used by anything in practice.
-      m_mail_handler.PushMail(0x2264'0000, false);  // DIRQ is not set
-      break;
-    case MAIL_TERMINATE:
-      if (m_crc != HASH_2008)
-      {
-        INFO_LOG_FMT(DSPHLE, "ASndUCode - MAIL_TERMINATE: {:08x}", mail);
-        // This doesn't actually change the state of the system.
-        m_mail_handler.PushMail(DSP_DONE, true);
-      }
-      else
-      {
-        WARN_LOG_FMT(DSPHLE, "ASndUCode - MAIL_TERMINATE is not supported in this version: {:08x}",
-                     mail);
-        m_mail_handler.PushMail(DSP_SYNC, true);
-      }
-      break;
-    default:
-      WARN_LOG_FMT(DSPHLE, "ASndUCode - unknown command: {:08x}", mail);
-      m_mail_handler.PushMail(DSP_SYNC, true);
-      break;
+    else
+    {
+      // Only reports DSP_DONE; the ucode keeps running.
+      INFO_LOG_FMT(DSPHLE, "ASnd: terminate {:08x}", mail);
+      m_mail_handler.PushMail(DSP_DONE, true);
     }
+    break;
+
+  default:
+    WARN_LOG_FMT(DSPHLE, "ASnd: unknown command {:08x}", mail);
+    m_mail_handler.PushMail(DSP_SYNC, true);
+    break;
   }
 }
 
-void ASndUCode::DMAInVoiceData()
+// Visits the voice fields in their RAM order, with their byte offsets.
+template <typename Voice, typename Visitor>
+static void VisitVoiceFields(Voice& v, Visitor&& visit)
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  m_current_voice.out_buf = memory.Read_U32(m_voice_addr);
-  m_current_voice.delay_samples = memory.Read_U32(m_voice_addr + 4);
-  u32 new_flags = memory.Read_U32(m_voice_addr + 8);
-  if (m_current_voice.flags != new_flags)
-    DEBUG_LOG_FMT(DSPHLE, "ASndUCode - flags: {:08x}", new_flags);
-  m_current_voice.flags = new_flags;
-  m_current_voice.start_addr = memory.Read_U32(m_voice_addr + 12);
-  m_current_voice.end_addr = memory.Read_U32(m_voice_addr + 16);
-  m_current_voice.freq = memory.Read_U32(m_voice_addr + 20);
-  m_current_voice.left = memory.Read_U16(m_voice_addr + 24);
-  m_current_voice.right = memory.Read_U16(m_voice_addr + 26);
-  m_current_voice.counter = memory.Read_U32(m_voice_addr + 28);
-  m_current_voice.volume_l = memory.Read_U16(m_voice_addr + 32);
-  m_current_voice.volume_r = memory.Read_U16(m_voice_addr + 34);
-  m_current_voice.start_addr2 = memory.Read_U32(m_voice_addr + 36);
-  m_current_voice.end_addr2 = memory.Read_U32(m_voice_addr + 40);
-  m_current_voice.volume2_l = memory.Read_U16(m_voice_addr + 44);
-  m_current_voice.volume2_r = memory.Read_U16(m_voice_addr + 46);
-  m_current_voice.backup_addr = memory.Read_U32(m_voice_addr + 48);
-  m_current_voice.tick_counter = memory.Read_U32(m_voice_addr + 52);
-  m_current_voice.cb = memory.Read_U32(m_voice_addr + 56);
-  m_current_voice._pad = memory.Read_U32(m_voice_addr + 60);
+  visit(0x00, v.out_buf);
+  visit(0x04, v.delay_samples);
+  visit(0x08, v.flags);
+  visit(0x0C, v.start_addr);
+  visit(0x10, v.end_addr);
+  visit(0x14, v.freq);
+  visit(0x18, v.left);
+  visit(0x1A, v.right);
+  visit(0x1C, v.counter);
+  visit(0x20, v.volume_l);
+  visit(0x22, v.volume_r);
+  visit(0x24, v.start_addr2);
+  visit(0x28, v.end_addr2);
+  visit(0x2C, v.volume2_l);
+  visit(0x2E, v.volume2_r);
+  visit(0x30, v.backup_addr);
+  visit(0x34, v.tick_counter);
+  visit(0x38, v.cb);
+  visit(0x3C, v._pad);
 }
 
-void ASndUCode::DMAOutVoiceData()
+void ASndUCode::LoadVoice()
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.Write_U32(m_current_voice.out_buf, m_voice_addr);
-  memory.Write_U32(m_current_voice.delay_samples, m_voice_addr + 4);
-  memory.Write_U32(m_current_voice.flags, m_voice_addr + 8);
-  memory.Write_U32(m_current_voice.start_addr, m_voice_addr + 12);
-  memory.Write_U32(m_current_voice.end_addr, m_voice_addr + 16);
-  memory.Write_U32(m_current_voice.freq, m_voice_addr + 20);
-  memory.Write_U16(m_current_voice.left, m_voice_addr + 24);
-  memory.Write_U16(m_current_voice.right, m_voice_addr + 26);
-  memory.Write_U32(m_current_voice.counter, m_voice_addr + 28);
-  memory.Write_U16(m_current_voice.volume_l, m_voice_addr + 32);
-  memory.Write_U16(m_current_voice.volume_r, m_voice_addr + 34);
-  memory.Write_U32(m_current_voice.start_addr2, m_voice_addr + 36);
-  memory.Write_U32(m_current_voice.end_addr2, m_voice_addr + 40);
-  memory.Write_U16(m_current_voice.volume2_l, m_voice_addr + 44);
-  memory.Write_U16(m_current_voice.volume2_r, m_voice_addr + 46);
-  memory.Write_U32(m_current_voice.backup_addr, m_voice_addr + 48);
-  memory.Write_U32(m_current_voice.tick_counter, m_voice_addr + 52);
-  memory.Write_U32(m_current_voice.cb, m_voice_addr + 56);
-  memory.Write_U32(m_current_voice._pad, m_voice_addr + 60);
+  const auto& memory = m_dsphle->GetSystem().GetMemory();
+  VisitVoiceFields(m_voice, [&](u32 offset, auto& field) {
+    using Field = std::remove_reference_t<decltype(field)>;
+    if constexpr (sizeof(Field) == 4)
+      field = memory.Read_U32(m_voice_addr + offset);
+    else
+      field = static_cast<Field>(memory.Read_U16(m_voice_addr + offset));
+  });
 }
 
-void ASndUCode::DoMixing(u32 return_mail)
+void ASndUCode::SaveVoice()
 {
-  // Note: return_mail is set to DSP_SYNC by all callers, but then changed here... to DSP_SYNC.
-  // This doesn't really make sense, but I'm keeping that behavior in case it helps with porting
-  // older versions.
+  auto& memory = m_dsphle->GetSystem().GetMemory();
+  VisitVoiceFields(m_voice, [&](u32 offset, auto& field) {
+    if constexpr (sizeof(field) == 4)
+      memory.Write_U32(field, m_voice_addr + offset);
+    else
+      memory.Write_U16(static_cast<u16>(field), m_voice_addr + offset);
+  });
+}
 
-  // start_main
+void ASndUCode::FetchInputBlock(u32 address)
+{
+  const auto& memory = m_dsphle->GetSystem().GetMemory();
+  memory.CopyFromEmuSwapped(m_input_block.data(), address, INPUT_BLOCK_BYTES);
+}
 
-  const u32 sample_format_mask =
-      UseNewFlagMasks() ? NEW_FLAGS_SAMPLE_FORMAT_MASK : OLD_FLAGS_SAMPLE_FORMAT_MASK;
-  const u32 sample_format = m_current_voice.flags & sample_format_mask;
-  const u32 sample_format_step =
-      (m_current_voice.flags & FLAGS_SAMPLE_FORMAT_BYTES_MASK) >> FLAGS_SAMPLE_FORMAT_BYTES_SHIFT;
+void ASndUCode::SwitchToNextBuffer()
+{
+  m_voice.volume_l = m_voice.volume2_l;
+  m_voice.volume_r = m_voice.volume2_r;
+  m_voice.end_addr = m_voice.end_addr2;
+  m_voice.start_addr = m_voice.start_addr2;
+  m_voice.backup_addr = m_voice.start_addr2;
 
-  // sample_selector jump table
-  static constexpr std::array<std::pair<s16, s16> (ASndUCode::*)() const, 8> sample_selector{
-      &ASndUCode::ReadSampleMono8Bits,           &ASndUCode::ReadSampleMono16Bits,
-      &ASndUCode::ReadSampleStereo8Bits,         &ASndUCode::ReadSampleStereo16Bits,
-      &ASndUCode::ReadSampleMono8BitsUnsigned,   &ASndUCode::ReadSampleMono16BitsLittleEndian,
-      &ASndUCode::ReadSampleStereo8BitsUnsigned, &ASndUCode::ReadSampleStereo16BitsLittleEndian,
-  };
-  const auto sample_function = sample_selector[sample_format];
-
-  const u32 pause_mask = UseNewFlagMasks() ? NEW_FLAGS_VOICE_PAUSE : OLD_FLAGS_VOICE_PAUSE;
-
-  if ((m_current_voice.flags & pause_mask) == 0)
+  // Without looping the second buffer is used up now.
+  const u32 loop_bit = UsesNewFlagLayout() ? NEW_LOOP_BIT : OLD_LOOP_BIT;
+  if ((m_voice.flags & loop_bit) == 0)
   {
-    if (m_current_voice.start_addr == 0)
-    {
-      // "set return as "change of buffer""
-      // (which doesn't make sense, since we're changing the return value to what it already was)
-      return_mail = DSP_SYNC;
-      ChangeBuffer();
-      if (m_current_voice.start_addr == 0)
-      {
-        // Jump to save_datas_end, but since we write to start_addr directly in ChangeBuffer and
-        // can't have changed prev_r or prev_l here, there's nothing that needs to be saved.
-        // Thus, we can jump to end_main instead. This is still pretty ugly, but I don't think
-        // there's any way to tidy it further without making the structure much more convoluted.
-        goto end_main;
-      }
-    }
-    // do_not_change1
-
-    u32 buffer_offset = 0;
-    // "delay time section"
-    u16 remaining_samples = NUM_OUTPUT_SAMPLES;
-
-    // Note: We don't handle masking/sign extension from use of $ac0.h and $ac1.h, as this isn't
-    // something that should happen if the PowerPC code is using the library normally.
-    // This applies throughout.
-    if (m_current_voice.delay_samples != 0)
-    {
-      m_current_voice.right = 0;
-      m_current_voice.left = 0;
-      u16 remaining_samples_delay = remaining_samples;
-      // l_delay
-      while (true)
-      {
-        buffer_offset += 2;
-        remaining_samples_delay--;
-        if (remaining_samples_delay == 0)
-        {
-          // exit_delay1
-          remaining_samples = 0;
-          break;
-        }
-        m_current_voice.delay_samples--;
-        if (m_current_voice.delay_samples == 0)
-        {
-          // exit_delay2
-          // commented with "load remanent samples to be processed in AXL0",
-          // but they use "MRR $AX0.L, $AC1.L" when the remaining samples are in $AC1.M.
-          remaining_samples = 0;
-          break;
-        }
-      }
-    }
-    // no_delay
-    // "bucle de generacion de samples", i.e. sample generation loop
-    DMAInSampleData();
-    // "loops for samples to be processed", corresponding to BLOOP $ax0.l, loop_end
-    while (remaining_samples > 0)
-    {
-      remaining_samples--;
-      // "Mix right sample section"
-      s32 sample_r = static_cast<s16>(m_output_buffer[buffer_offset]);
-      sample_r += m_current_voice.right;
-      sample_r = std::clamp(sample_r, -32768, 32767);
-      m_output_buffer[buffer_offset++] = sample_r;
-      // "Mix left sample section"
-      s32 sample_l = static_cast<s16>(m_output_buffer[buffer_offset]);
-      sample_l += m_current_voice.left;
-      sample_l = std::clamp(sample_l, -32768, 32767);
-      m_output_buffer[buffer_offset++] = sample_l;
-      // "adds the counter with the voice frequency and test if it >=48000 to get the next sample"
-      m_current_voice.counter += m_current_voice.freq;
-      if (m_current_voice.counter >= SAMPLE_RATE)
-      {
-        if (m_current_voice.freq <= SAMPLE_RATE)
-        {
-          // get_sample: "fast method"
-          m_current_voice.counter -= SAMPLE_RATE;
-          m_current_voice.start_addr += sample_format_step;
-        }
-        else
-        {
-          // get_sample2: "slow method"
-          while (m_current_voice.counter >= SAMPLE_RATE)
-          {
-            m_current_voice.counter -= SAMPLE_RATE;
-            m_current_voice.start_addr += sample_format_step;
-            if ((m_current_voice.start_addr & INPUT_SAMPLE_BUFFER_BYTE_MASK) == 0)
-            {
-              DMAInSampleData();
-            }
-          }
-        }
-
-        if (m_current_voice.start_addr >= m_current_voice.end_addr)
-        {
-          // get_new_buffer (the comparison/jump is performed separately in get_sample and
-          // get_sample2, but the same comparison is done for both)
-          return_mail = DSP_SYNC;
-          ChangeBuffer();
-          if (m_current_voice.start_addr == 0)
-          {
-            // zero_samples
-            // This directly jumps to out_samp as well, bypassing the code below.
-            // Fortunately we can replicate this behavior with `continue`, and don't need to handle
-            // the multiplication logic in out_samp since the samples are zero.
-            m_current_voice.right = 0;
-            m_current_voice.left = 0;
-            continue;
-          }
-          DMAInSampleData();
-        }
-        // jump_load_smp_addr
-        const u16 input_sample_offset =
-            (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-        if (input_sample_offset == 0)
-        {
-          // jump_load_smp_dma
-          DMAInSampleDataAssumeAligned();
-        }
-        // Both paths jmpr $AR3, which is an index into sample_selector
-
-        auto [new_l, new_r] = (this->*sample_function)();
-        if (SwapLeftRight())
-        {
-          // Most versions of the ASnd ucode have the right channel come before the left channel.
-          // The Desert Bus and 2024 versions swapped the left and right input channels so that left
-          // comes first, and then right, matching mp3/ogg files.
-          std::swap(new_r, new_l);
-        }
-        // out_samp: "multiply sample x volume" - left is put in $ax0.h, right is put in $ax1.h
-
-        // All functions jumped to from sample_selector jump or fall through here (zero_samples also
-        // jumps here, but is handled separately above for structural reasons)
-        const s32 temp_l = static_cast<s32>(new_l) * m_current_voice.volume_l;
-        m_current_voice.left = static_cast<s16>(temp_l >> 8);
-        const s32 temp_r = static_cast<s32>(new_r) * m_current_voice.volume_r;
-        m_current_voice.right = static_cast<s16>(temp_r >> 8);
-      }
-      // loop_end, remember that the labeled instruction is the last instruction in the loop
-      // so jumping to the NOP here causes the loop to repeat (and decrement its counter)
-    }
-    // end_process (not actually jumped to)
-    if (m_current_voice.start_addr == 0)
-    {
-      return_mail = DSP_SYNC;
-      ChangeBuffer();
-    }
-    // save_datas_end (we mutate m_current_voice.start_addr, left, and right in place,
-    // so nothing needs to happen here here)
+    m_voice.start_addr2 = 0;
+    m_voice.end_addr2 = 0;
   }
-end_main:  // end_main
-  DMAOutVoiceData();
-
-  m_mail_handler.PushMail(return_mail, true);
 }
 
-void ASndUCode::ChangeBuffer()
+std::pair<s16, s16> ASndUCode::ReadInputFrame(u32 format) const
 {
-  // change_buffer
-  m_current_voice.volume_l = m_current_voice.volume2_l;
-  m_current_voice.volume_r = m_current_voice.volume2_r;
-  m_current_voice.end_addr = m_current_voice.end_addr2;
-  m_current_voice.start_addr = m_current_voice.start_addr2;
-  m_current_voice.backup_addr = m_current_voice.start_addr2;
+  const u32 addr = m_voice.start_addr;
+  const u32 word_index = (addr >> 1) & (INPUT_BLOCK_WORDS - 1);
+  const u16 word = m_input_block[word_index];
+  // Stereo 16-bit reads take the following word too, without wrapping inside the block.
+  const u16 next_word = m_input_block[word_index + 1];
+  // Even addresses hold the byte in the top half of the word.
+  const u32 selected_byte = (addr & 1) == 0 ? u32{word} >> 8 : u32{word};
 
-  const u32 loop_mask = UseNewFlagMasks() ? NEW_FLAGS_VOICE_LOOP : OLD_FLAGS_VOICE_LOOP;
-
-  if ((m_current_voice.flags & loop_mask) == 0)
+  switch (format)
   {
-    m_current_voice.start_addr2 = 0;
-    m_current_voice.end_addr2 = 0;
+  case 0:  // mono, signed 8 bit
+  {
+    const s16 s = ByteToSample(selected_byte);
+    return {s, s};
+  }
+  case 1:  // mono, 16 bit big-endian
+    return {static_cast<s16>(word), static_cast<s16>(word)};
+  case 2:  // stereo, signed 8 bit
+    return {static_cast<s16>(word & 0xFF00), ByteToSample(word)};
+  case 3:  // stereo, 16 bit big-endian
+    return {static_cast<s16>(word), static_cast<s16>(next_word)};
+  case 4:  // mono, unsigned 8 bit
+  {
+    const s16 s = static_cast<s16>(ByteToSample(selected_byte) ^ 0x8000);
+    return {s, s};
+  }
+  case 5:  // mono, 16 bit little-endian
+  {
+    const s16 s = static_cast<s16>(Common::swap16(word));
+    return {s, s};
+  }
+  case 6:  // stereo, unsigned 8 bit
+  {
+    const u16 flipped = word ^ 0x8080;
+    return {static_cast<s16>(flipped & 0xFF00), ByteToSample(flipped)};
+  }
+  default:  // 7: stereo, 16 bit little-endian
+    return {static_cast<s16>(Common::swap16(word)), static_cast<s16>(Common::swap16(next_word))};
   }
 }
 
-void ASndUCode::DMAInSampleData()
+void ASndUCode::MixVoice()
 {
-  // load_smp_addr_align
-  // This is its own function, and it contains its own copy of the DMA logic.
-  // The only difference is that this one forces the address to be aligned, while when
-  // jump_load_smp_dma is used, the address is expected to already be aligned.
-  const u32 addr = m_current_voice.start_addr & ~INPUT_SAMPLE_BUFFER_BYTE_MASK;
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyFromEmuSwapped(m_input_sample_buffer.data(), addr, INPUT_SAMPLE_BUFFER_SIZE_BYTES);
+  const bool new_layout = UsesNewFlagLayout();
+  const u32 format = m_voice.flags & (new_layout ? NEW_FORMAT_MASK : OLD_FORMAT_MASK);
+  const u32 step = m_voice.flags >> 16;
+
+  u32 frames = NUM_OUTPUT_SAMPLES;
+  if (m_voice.delay_samples != 0)
+  {
+    // The delay loop counts the delay down by at most 1023 per call, and whichever way it ends
+    // it leaves nothing to mix in this call (the ucode reloads the wrong register on exit).
+    m_voice.left = 0;
+    m_voice.right = 0;
+    m_voice.delay_samples = m_voice.delay_samples > NUM_OUTPUT_SAMPLES - 1 ?
+                                m_voice.delay_samples - (NUM_OUTPUT_SAMPLES - 1) :
+                                0;
+    frames = 0;
+  }
+
+  FetchInputBlock(m_voice.start_addr & ~(INPUT_BLOCK_BYTES - 1));
+
+  for (u32 frame = 0; frame < frames; ++frame)
+  {
+    // Output the current sample (right first), saturating.
+    u16& out_right = m_output[2 * frame];
+    u16& out_left = m_output[2 * frame + 1];
+    out_right = static_cast<u16>(Saturate16(static_cast<s16>(out_right) + m_voice.right));
+    out_left = static_cast<u16>(Saturate16(static_cast<s16>(out_left) + m_voice.left));
+
+    m_voice.counter += m_voice.freq;
+    if (m_voice.counter < OUTPUT_RATE)
+      continue;
+
+    // Time for the next input frame.
+    if (m_voice.freq <= OUTPUT_RATE)
+    {
+      m_voice.counter -= OUTPUT_RATE;
+      m_voice.start_addr += step;
+    }
+    else
+    {
+      // Faster than the output: skip input frames, refetching each time a block is crossed.
+      do
+      {
+        m_voice.counter -= OUTPUT_RATE;
+        m_voice.start_addr += step;
+        if ((m_voice.start_addr & (INPUT_BLOCK_BYTES - 1)) == 0)
+          FetchInputBlock(m_voice.start_addr & ~(INPUT_BLOCK_BYTES - 1));
+      } while (m_voice.counter >= OUTPUT_RATE);
+    }
+
+    if (m_voice.start_addr >= m_voice.end_addr)
+    {
+      SwitchToNextBuffer();
+      if (m_voice.start_addr == 0)
+      {
+        // Nothing left to play: output silence.
+        m_voice.left = 0;
+        m_voice.right = 0;
+        continue;
+      }
+      FetchInputBlock(m_voice.start_addr & ~(INPUT_BLOCK_BYTES - 1));
+    }
+
+    // At the start of a block the ucode fetches again, from the unmasked address.
+    if (((m_voice.start_addr >> 1) & (INPUT_BLOCK_WORDS - 1)) == 0)
+      FetchInputBlock(m_voice.start_addr);
+
+    auto [first, second] = ReadInputFrame(format);
+    if (HasRightBeforeLeftInput())
+      std::swap(first, second);
+
+    // first goes left, second goes right; volumes are 8.8 fixed point.
+    m_voice.left = static_cast<s16>((s32{first} * m_voice.volume_l) >> 8);
+    m_voice.right = static_cast<s16>((s32{second} * m_voice.volume_r) >> 8);
+  }
+
+  if (m_voice.start_addr == 0)
+    SwitchToNextBuffer();
 }
 
-void ASndUCode::DMAInSampleDataAssumeAligned()
+void ASndUCode::MixAndReply()
 {
-  // jump_load_smp_dma
-  // This is technically not a function, but instead is directly jumped to and then jumps to $ar3
-  // (which is set to an address from sample_selector). We can just treat it as a function though.
-  const u32 addr = m_current_voice.start_addr;
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyFromEmuSwapped(m_input_sample_buffer.data(), addr, INPUT_SAMPLE_BUFFER_SIZE_BYTES);
-}
+  const u32 pause_bit = UsesNewFlagLayout() ? NEW_PAUSE_BIT : OLD_PAUSE_BIT;
+  if ((m_voice.flags & pause_bit) == 0)
+  {
+    // A voice without a current buffer starts on its second one, if it has one.
+    if (m_voice.start_addr == 0)
+      SwitchToNextBuffer();
+    if (m_voice.start_addr != 0)
+      MixVoice();
+  }
 
-std::pair<s16, s16> ASndUCode::ReadSampleMono8Bits() const
-{
-  // mono_8bits
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  s16 result = m_input_sample_buffer[index];
-  if ((m_current_voice.start_addr & 1) == 0)
-    result >>= 8;
-  result <<= 8;
-  return {result, result};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleStereo8Bits() const
-{
-  // stereo_8bits
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  const u16 sample = m_input_sample_buffer[index];
-  const s16 right = sample & 0xff00;
-  const s16 left = sample << 8;
-  return {right, left};
-}
-std::pair<s16, s16> ASndUCode::ReadSampleMono16Bits() const
-{
-  // mono_16bits
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  const s16 result = m_input_sample_buffer[index];
-  return {result, result};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleStereo16Bits() const
-{
-  // stereo_16bits
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  const s16 right = m_input_sample_buffer[index];
-  // Note that 1 is added to index after the masking - meaning that theoretically an out-of-bounds
-  // index 0x10 can be read (but the buffer is oversized both here and in the actual uCode, so the
-  // data at the out-of-bounds index will instead be 0).
-  const s16 left = m_input_sample_buffer[index + 1];
-  return {right, left};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleMono8BitsUnsigned() const
-{
-  // mono_8bits_unsigned
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  s16 result = m_input_sample_buffer[index];
-  if ((m_current_voice.start_addr & 1) == 0)
-    result >>= 8;
-  result <<= 8;
-  result ^= 0x8000;  // Flip the sign bit - effectively adding 0x8000
-  return {result, result};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleMono16BitsLittleEndian() const
-{
-  // mono_16bits_le
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  // Actual implementation is u32 result_l = result | result << 16; result = result_l >> 8;
-  const s16 result = Common::swap16(m_input_sample_buffer[index]);
-  return {result, result};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleStereo8BitsUnsigned() const
-{
-  // stereo_8bits_unsigned
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  u16 sample = m_input_sample_buffer[index] ^ 0x8080;
-  const s16 right = sample & 0xff00;
-  const s16 left = sample << 8;
-  return {right, left};
-}
-
-std::pair<s16, s16> ASndUCode::ReadSampleStereo16BitsLittleEndian() const
-{
-  // stereo_16bits_le
-  const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  const s16 right = Common::swap16(m_input_sample_buffer[index]);
-  // Note that 1 is added to index after the masking - meaning that theoretically an out-of-bounds
-  // index 0x10 can be read (but the buffer is oversized both here and in the actual uCode, so the
-  // data at the out-of-bounds index will instead be 0).
-  const s16 left = Common::swap16(m_input_sample_buffer[index + 1]);
-  return {right, left};
+  SaveVoice();
+  m_mail_handler.PushMail(DSP_SYNC, true);
 }
 
 void ASndUCode::DoState(PointerWrap& p)
@@ -559,8 +410,8 @@ void ASndUCode::DoState(PointerWrap& p)
   DoStateShared(p);
   p.Do(m_next_mail_is_voice_addr);
   p.Do(m_voice_addr);
-  p.Do(m_current_voice);
-  p.Do(m_input_sample_buffer);
-  p.Do(m_output_buffer);
+  p.Do(m_voice);
+  p.Do(m_input_block);
+  p.Do(m_output);
 }
 }  // namespace DSP::HLE

@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,11 +14,17 @@ namespace DSP::HLE
 {
 class DSPHLE;
 
-// Computes two 32 bit integers to be returned to the game, based on the
-// provided crypto parameters at the provided MRAM address. The integers are
-// written back to RAM at the dest address provided in the crypto parameters.
+// The JoyBoot key exchange used to send a program to a GBA. `address` points to the request
+// block in RAM:
+//   +0  challenge read from the GBA (little-endian)
+//   +4  palette of the logo animation the GBA BIOS shows (0-6)
+//   +8  speed/direction of that animation (-4..4, low byte significant)
+//   +12 length of the program to send
+//   +16 where to write the two result words
+// The results are the session key and the encoded transfer parameters.
 void ProcessGBACrypto(Memory::MemoryManager& memory, u32 address);
 
+// The GBA link task: one crypto request, then back to the task manager.
 class GBAUCode final : public UCodeInterface
 {
 public:
@@ -33,13 +38,13 @@ public:
 private:
   static constexpr u32 REQUEST_MAIL = 0xabba0000;
 
-  enum class MailState
+  enum class Stage
   {
-    WaitingForRequest,
-    WaitingForAddress,
-    WaitingForNextTask,
+    AwaitingRequest,
+    AwaitingAddress,
+    AwaitingNextTask,
   };
 
-  MailState m_mail_state = MailState::WaitingForRequest;
+  Stage m_stage = Stage::AwaitingRequest;
 };
 }  // namespace DSP::HLE

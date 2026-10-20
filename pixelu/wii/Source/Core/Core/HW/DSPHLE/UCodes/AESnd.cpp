@@ -1,15 +1,18 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// High-level emulation for the libaesnd ucode, used by homebrew
-// libaesnd is part of devkitPro's libogc, released under the Zlib license
+// HLE of the libaesnd mixer ucode. The behaviour follows the ucode's published source
+// (libogc's libaesnd/dspcode/dspmixer.s), including its quirks.
 
 #include "Core/HW/DSPHLE/UCodes/AESnd.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <utility>
 
 #include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Core/DSP/DSPAccelerator.h"
 #include "Core/HW/DSP.h"
 #include "Core/HW/DSPHLE/DSPHLE.h"
@@ -20,222 +23,47 @@
 
 namespace DSP::HLE
 {
-constexpr u32 MAIL_PREFIX = 0xface'0000;
-constexpr u32 MAIL_PROCESS_FIRST_VOICE = MAIL_PREFIX | 0x0010;
-constexpr u32 MAIL_PROCESS_NEXT_VOICE = MAIL_PREFIX | 0x0020;
-constexpr u32 MAIL_GET_PB_ADDRESS = MAIL_PREFIX | 0x0080;
-constexpr u32 MAIL_SEND_SAMPLES = MAIL_PREFIX | 0x0100;
-constexpr u32 MAIL_TERMINATE = MAIL_PREFIX | 0xdead;
-
-constexpr u32 VOICE_MONO8 = 0x00000000;
-constexpr u32 VOICE_STEREO8 = 0x00000001;
-constexpr u32 VOICE_MONO16 = 0x00000002;
-constexpr u32 VOICE_STEREO16 = 0x00000003;
-// These are only present in the 2020 release
-constexpr u32 VOICE_MONO8_UNSIGNED = 0x00000004;
-constexpr u32 VOICE_STEREO8_UNSIGNED = 0x00000005;
-constexpr u32 VOICE_MONO16_UNSIGNED = 0x00000006;
-constexpr u32 VOICE_STEREO16_UNSIGNED = 0x00000007;
-
-constexpr u32 VOICE_FORMAT_MASK_OLD = 3;
-constexpr u32 VOICE_FORMAT_MASK_NEW = 7;
-// Note that the above formats have the 2-bit set for 16-bit formats and not set for 8-bit formats
-constexpr u32 VOICE_16_BIT_FLAG = 2;
-
-// These are used in the pre-2020 versions version
-constexpr u32 VOICE_PAUSE_OLD = 0x00000004;
-constexpr u32 VOICE_LOOP_OLD [[maybe_unused]] = 0x00000008;    // not used by the DSP
-constexpr u32 VOICE_ONCE_OLD [[maybe_unused]] = 0x00000010;    // not used by the DSP
-constexpr u32 VOICE_STREAM_OLD [[maybe_unused]] = 0x00000020;  // not used by the DSP
-
-// These were changed in the 2020 version to account for the different flags
-constexpr u32 VOICE_PAUSE_NEW = 0x00000008;
-constexpr u32 VOICE_LOOP_NEW [[maybe_unused]] = 0x00000010;    // not used by the DSP
-constexpr u32 VOICE_ONCE_NEW [[maybe_unused]] = 0x00000020;    // not used by the DSP
-constexpr u32 VOICE_STREAM_NEW [[maybe_unused]] = 0x00000040;  // not used by the DSP
-
-// These did not change between versions
-constexpr u32 VOICE_FINISHED = 0x00100000;
-constexpr u32 VOICE_STOPPED [[maybe_unused]] = 0x00200000;  // not used by the DSP
-constexpr u32 VOICE_RUNNING = 0x40000000;
-constexpr u32 VOICE_USED [[maybe_unused]] = 0x80000000;  // not used by the DSP
-
-// 1<<4 = scale gain by 1/1,    2<<2 = PCM decoding from ARAM, 1<<0 = 8-bit reads
-constexpr u32 ACCELERATOR_FORMAT_8_BIT = 0x0019;
-// 0<<4 = scale gain by 1/2048, 2<<2 = PCM decoding from ARAM, 2<<0 = 16-bit reads
-constexpr u32 ACCELERATOR_FORMAT_16_BIT = 0x000a;
-// Multiply samples by 0x100/1 = 0x100 (for ACCELERATOR_FORMAT_8_BIT)
-constexpr u32 ACCELERATOR_GAIN_8_BIT = 0x0100;
-// Multiply samples by 0x800/2048 = 1 (for ACCELERATOR_FORMAT_16_BIT)
-constexpr u32 ACCELERATOR_GAIN_16_BIT = 0x0800;
-
-bool AESndUCode::SwapLeftRight() const
+namespace
 {
-  return m_crc == HASH_2012 || m_crc == HASH_EDUKE32 || m_crc == HASH_2020 ||
-         m_crc == HASH_2020_PAD || m_crc == HASH_2022_PAD || m_crc == HASH_2023;
-}
+// Commands, prefix included.
+constexpr u32 CMD_FIRST_VOICE = 0xface0010;  // clear the output, then mix the voice
+constexpr u32 CMD_NEXT_VOICE = 0xface0020;   // mix the voice into the output
+constexpr u32 CMD_SET_PB_ADDR = 0xface0080;  // the next mail is the parameter block address
+constexpr u32 CMD_SEND_OUTPUT = 0xface0100;  // copy the output to RAM
+constexpr u32 CMD_TERMINATE = 0xfacedead;
 
-bool AESndUCode::UseNewFlagMasks() const
-{
-  return m_crc == HASH_EDUKE32 || m_crc == HASH_2020 || m_crc == HASH_2020_PAD ||
-         m_crc == HASH_2022_PAD || m_crc == HASH_2023;
-}
+// Voice formats: bit 0 = stereo, bit 1 = 16-bit, bit 2 = unsigned (2020 and later layouts).
+constexpr u32 FORMAT_STEREO_BIT = 1;
+constexpr u32 FORMAT_16BIT_BIT = 2;
+constexpr u32 FORMAT_UNSIGNED_BIT = 4;
+constexpr u32 FORMAT_STEREO8 = 1;
+constexpr u32 FORMAT_STEREO16 = 3;
+constexpr u32 FORMAT_STEREO8_UNSIGNED = 5;
 
-AESndUCode::AESndUCode(DSPHLE* dsphle, u32 crc)
-    : UCodeInterface(dsphle, crc), m_accelerator(dsphle->GetSystem().GetDSP())
-{
-}
+// Flag bits the DSP looks at. Older layouts have a 2-bit format and the pause bit at 2; newer
+// ones a 3-bit format and the pause bit at 3.
+constexpr u32 OLD_FORMAT_MASK = 3;
+constexpr u32 OLD_PAUSE_BIT = 0x00000004;
+constexpr u32 NEW_FORMAT_MASK = 7;
+constexpr u32 NEW_PAUSE_BIT = 0x00000008;
+constexpr u32 FLAG_FINISHED = 0x00100000;
+constexpr u32 FLAG_RUNNING = 0x40000000;
 
-void AESndUCode::Initialize()
-{
-  m_mail_handler.PushMail(DSP_INIT);
-}
+// Accelerator setups: PCM from ARAM with 8-bit reads and a gain of 0x100 (scale 1), or 16-bit
+// reads and a gain of 0x800 (scale 1/2048), so both give full-range 16-bit samples.
+constexpr u16 ACCEL_FORMAT_PCM8 = 0x0019;
+constexpr u16 ACCEL_GAIN_PCM8 = 0x0100;
+constexpr u16 ACCEL_FORMAT_PCM16 = 0x000a;
+constexpr u16 ACCEL_GAIN_PCM16 = 0x0800;
 
-void AESndUCode::Update()
-{
-  // This is dubious in general, since we set the interrupt parameter on m_mail_handler.PushMail
-  if (m_mail_handler.HasPending())
-  {
-    m_dsphle->GetSystem().GetDSP().GenerateDSPInterruptFromDSPEmu(INT_DSP);
-  }
-}
+// The ucode zeroes all ADPCM coefficients.
+constexpr std::array<s16, 16> NO_COEFFICIENTS{};
 
-void AESndUCode::HandleMail(u32 mail)
+constexpr s16 Saturate16(s32 value)
 {
-  if (m_upload_setup_in_progress)
-  {
-    PrepareBootUCode(mail);
-  }
-  else if (m_next_mail_is_parameter_block_addr)
-  {
-    // get_pb_address
-    m_parameter_block_addr = mail;
-    INFO_LOG_FMT(DSPHLE, "AESndUCode - Parameter block is at {:08x}", mail);
-    m_next_mail_is_parameter_block_addr = false;
-    // No mail is sent in response
-  }
-  else if ((mail & TASK_MAIL_MASK) == TASK_MAIL_TO_DSP)
-  {
-    switch (mail)
-    {
-    case MAIL_NEW_UCODE:
-      m_upload_setup_in_progress = true;
-      break;
-    case MAIL_RESET:
-      m_dsphle->SetUCode(UCODE_ROM);
-      break;
-    default:
-      WARN_LOG_FMT(DSPHLE, "AESndUCode - unknown 0xcdd1 command: {:08x}", mail);
-      break;
-    }
-    // No mail is sent in response to any of these.
-    // The actual uCode halts on unknown cdd1 commands, which I have not implemented.
-  }
-  else
-  {
-    // The uCode checks for a 0xface prefix, which we include in the constants above.
-    switch (mail)
-    {
-    case MAIL_PROCESS_FIRST_VOICE:
-      DEBUG_LOG_FMT(DSPHLE, "AESndUCode - MAIL_PROCESS_FIRST_VOICE");
-      DMAInParameterBlock();  // dma_pb_block
-      m_output_buffer.fill(0);
-      DoMixing();  // fall through to dsp_mixer
-      // Mail is handled by DoMixing()
-      break;
-    case MAIL_PROCESS_NEXT_VOICE:
-      DEBUG_LOG_FMT(DSPHLE, "AESndUCode - MAIL_PROCESS_NEXT_VOICE");
-      DMAInParameterBlock();  // dma_pb_block
-      DoMixing();             // jump to dsp_mixer
-      // Mail is handled by DoMixing()
-      break;
-    case MAIL_GET_PB_ADDRESS:
-      DEBUG_LOG_FMT(DSPHLE, "AESndUCode - MAIL_GET_PB_ADDRESS");
-      m_next_mail_is_parameter_block_addr = true;
-      // No mail is sent in response
-      break;
-    case MAIL_SEND_SAMPLES:
-    {
-      DEBUG_LOG_FMT(DSPHLE, "AESndUCode - MAIL_SEND_SAMPLES");
-      // send_samples
-      auto& memory = m_dsphle->GetSystem().GetMemory();
-      memory.CopyToEmuSwapped(m_parameter_block.out_buf, m_output_buffer.data(),
-                              sizeof(m_output_buffer));
-      m_mail_handler.PushMail(DSP_SYNC, true);
-      break;
-    }
-    case MAIL_TERMINATE:
-      INFO_LOG_FMT(DSPHLE, "AESndUCode - MAIL_TERMINATE: {:08x}", mail);
-      if (m_crc != HASH_2022_PAD && m_crc != HASH_2023)
-      {
-        // The relevant code looks like this:
-        //
-        // lrs $acc1.m,@CMBL
-        // ...
-        // cmpi $acc1.m,#0xdead
-        // jeq task_terminate
-        //
-        // The cmpi instruction always sign-extends, so it will compare $acc1 with 0xff'dead'0000.
-        // However, recv_cmd runs in set16 mode, so the load to $acc1 will produce 0x00'dead'0000.
-        // This means that the comparison never succeeds, and no mail is sent in response to
-        // MAIL_TERMINATE. This means that __dsp_donecallback is never called (since that's
-        // normally called in response to DSP_DONE), so __aesnddspinit is never cleared, so
-        // AESND_Reset never returns, resulting in a hang. We always send the mail to avoid this
-        // hang. (It's possible to exit without calling AESND_Reset, so most homebrew probably
-        // isn't affected by this bug in the first place.)
-        WARN_LOG_FMT(DSPHLE, "AESndUCode - MAIL_TERMINATE is broken in this version of the "
-                             "uCode; this will hang on real hardware or with DSP LLE");
-      }
-      // This doesn't actually change the state of the DSP code.
-      m_mail_handler.PushMail(DSP_DONE, true);
-      break;
-    default:
-      WARN_LOG_FMT(DSPHLE, "AESndUCode - unknown command: {:08x}", mail);
-      // No mail is sent in this case
-      break;
-    }
-  }
+  return static_cast<s16>(std::clamp(value, -32768, 32767));
 }
-
-void AESndUCode::DMAInParameterBlock()
-{
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  m_parameter_block.out_buf = memory.Read_U32(m_parameter_block_addr + 0);
-  m_parameter_block.buf_start = memory.Read_U32(m_parameter_block_addr + 4);
-  m_parameter_block.buf_end = memory.Read_U32(m_parameter_block_addr + 8);
-  m_parameter_block.buf_curr = memory.Read_U32(m_parameter_block_addr + 12);
-  m_parameter_block.yn1 = memory.Read_U16(m_parameter_block_addr + 16);
-  m_parameter_block.yn2 = memory.Read_U16(m_parameter_block_addr + 18);
-  m_parameter_block.pds = memory.Read_U16(m_parameter_block_addr + 20);
-  m_parameter_block.freq = memory.Read_U32(m_parameter_block_addr + 22);
-  m_parameter_block.counter = memory.Read_U16(m_parameter_block_addr + 26);
-  m_parameter_block.left = memory.Read_U16(m_parameter_block_addr + 28);
-  m_parameter_block.right = memory.Read_U16(m_parameter_block_addr + 30);
-  m_parameter_block.volume_l = memory.Read_U16(m_parameter_block_addr + 32);
-  m_parameter_block.volume_r = memory.Read_U16(m_parameter_block_addr + 34);
-  m_parameter_block.delay = memory.Read_U32(m_parameter_block_addr + 36);
-  m_parameter_block.flags = memory.Read_U32(m_parameter_block_addr + 40);
-}
-
-void AESndUCode::DMAOutParameterBlock()
-{
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.Write_U32(m_parameter_block.out_buf, m_parameter_block_addr + 0);
-  memory.Write_U32(m_parameter_block.buf_start, m_parameter_block_addr + 4);
-  memory.Write_U32(m_parameter_block.buf_end, m_parameter_block_addr + 8);
-  memory.Write_U32(m_parameter_block.buf_curr, m_parameter_block_addr + 12);
-  memory.Write_U16(m_parameter_block.yn1, m_parameter_block_addr + 16);
-  memory.Write_U16(m_parameter_block.yn2, m_parameter_block_addr + 18);
-  memory.Write_U16(m_parameter_block.pds, m_parameter_block_addr + 20);
-  memory.Write_U32(m_parameter_block.freq, m_parameter_block_addr + 22);
-  memory.Write_U16(m_parameter_block.counter, m_parameter_block_addr + 26);
-  memory.Write_U16(m_parameter_block.left, m_parameter_block_addr + 28);
-  memory.Write_U16(m_parameter_block.right, m_parameter_block_addr + 30);
-  memory.Write_U16(m_parameter_block.volume_l, m_parameter_block_addr + 32);
-  memory.Write_U16(m_parameter_block.volume_r, m_parameter_block_addr + 34);
-  memory.Write_U32(m_parameter_block.delay, m_parameter_block_addr + 36);
-  memory.Write_U32(m_parameter_block.flags, m_parameter_block_addr + 40);
-}
+}  // namespace
 
 AESndAccelerator::AESndAccelerator(DSPManager& dsp) : m_dsp(dsp)
 {
@@ -245,7 +73,8 @@ AESndAccelerator::~AESndAccelerator() = default;
 
 void AESndAccelerator::OnSampleReadEndException()
 {
-  // exception5 - this updates internal state
+  // The ucode's handler writes the history and predictor registers back, which lets the
+  // accelerator carry on reading.
   SetYn1(GetYn1());
   SetYn2(GetYn2());
   SetPredScale(GetPredScale());
@@ -261,180 +90,269 @@ void AESndAccelerator::WriteMemory(u32 address, u8 value)
   m_dsp.WriteARAM(value, address);
 }
 
-static constexpr std::array<s16, 16> ACCELERATOR_COEFS = {};  // all zeros
-
-void AESndUCode::SetUpAccelerator(u16 format, u16 gain)
+AESndUCode::AESndUCode(DSPHLE* dsphle, u32 crc)
+    : UCodeInterface(dsphle, crc), m_accelerator(dsphle->GetSystem().GetDSP())
 {
-  // setup_accl
-  m_accelerator.SetSampleFormat(format);
-  m_accelerator.SetGain(gain);
-  m_accelerator.SetStartAddress(m_parameter_block.buf_start);
-  m_accelerator.SetEndAddress(m_parameter_block.buf_end);
-  m_accelerator.SetCurrentAddress(m_parameter_block.buf_curr);
-  m_accelerator.SetYn1(m_parameter_block.yn1);
-  m_accelerator.SetYn2(m_parameter_block.yn2);
-  m_accelerator.SetPredScale(m_parameter_block.pds);
-  // All of the coefficients (COEF_A1_0 at ffa0 - COEF_A2_7 at ffaf) are set to 0
 }
 
-void AESndUCode::DoMixing()
+bool AESndUCode::UsesNewFlagLayout() const
 {
-  const u32 pause_flag = UseNewFlagMasks() ? VOICE_PAUSE_NEW : VOICE_PAUSE_OLD;
-  const u32 format_mask = UseNewFlagMasks() ? VOICE_FORMAT_MASK_NEW : VOICE_FORMAT_MASK_OLD;
-  // dsp_mixer
-  const bool paused = (m_parameter_block.flags & pause_flag) != 0;
-  const bool running = (m_parameter_block.flags & VOICE_RUNNING) != 0;
-  const bool has_buf = m_parameter_block.buf_start != 0;
-  if (!paused && running && has_buf)
+  return m_crc != HASH_2010 && m_crc != HASH_2012;
+}
+
+bool AESndUCode::HasLeftFirstInput() const
+{
+  return m_crc != HASH_2010;
+}
+
+void AESndUCode::Initialize()
+{
+  m_mail_handler.PushMail(DSP_INIT);
+}
+
+void AESndUCode::Update()
+{
+  // Mails already raise their interrupt; this just keeps reminding the CPU.
+  if (m_mail_handler.HasPending())
+    m_dsphle->GetSystem().GetDSP().GenerateDSPInterruptFromDSPEmu(INT_DSP);
+}
+
+void AESndUCode::HandleMail(u32 mail)
+{
+  if (m_upload_setup_in_progress)
   {
-    // no_change_buffer
-    const u32 voice_format = m_parameter_block.flags & format_mask;
-    const bool is_16_bit = (voice_format & VOICE_16_BIT_FLAG) != 0;
-    if (m_crc == HASH_EDUKE32)
-    {
-      if (voice_format != VOICE_STEREO8 && voice_format != VOICE_STEREO16 &&
-          voice_format != VOICE_STEREO8_UNSIGNED)
-      {
-        // The EDuke32 Wii version does not support 16-but unsigned stereo, and also has broken
-        // handling of all mono formats.
-        if (!m_has_shown_unsupported_sample_format_warning)
-        {
-          m_has_shown_unsupported_sample_format_warning = true;
-          PanicAlertFmt("EDuke32 Wii aesndlib uCode does not correctly handle this sample format: "
-                        "{} (flags: {:08x})",
-                        voice_format, m_parameter_block.flags);
-        }
-      }
-    }
-    // select_format table
-    const u16 accelerator_format = is_16_bit ? ACCELERATOR_FORMAT_16_BIT : ACCELERATOR_FORMAT_8_BIT;
-    const u16 accelerator_gain = is_16_bit ? ACCELERATOR_GAIN_16_BIT : ACCELERATOR_GAIN_8_BIT;
-    SetUpAccelerator(accelerator_format, accelerator_gain);
-    // read from select_mixer skipped
-
-    // Note: We don't handle masking/sign extension from use of $ac0.h and $ac1.h, as this isn't
-    // something that should happen if the PowerPC code is using the library normally.
-    // This applies throughout.
-    u32 delay = m_parameter_block.delay;
-    u32 sample_index = 0;
-    u32 remaining_samples = NUM_OUTPUT_SAMPLES;
-
-    if (delay != 0)
-    {
-      // delay_loop
-      // This is implemented with a BLOOP and then a read from the loop counter stack register in
-      // the actual uCode. I'm not 100% sure how it works/if it works correctly there.
-      while (remaining_samples != 0)
-      {
-        remaining_samples--;
-        delay--;
-        if (delay == 0)
-          break;
-        sample_index++;
-      }
-      // exit_delay
-      m_parameter_block.delay = delay;
-    }
-    // no_delay - operates in set40 mode
-    while (remaining_samples != 0)  // BLOOP dspmixer_loop_end
-    {
-      remaining_samples--;
-      s32 right = m_output_buffer[sample_index * 2 + 0];
-      s32 left = m_output_buffer[sample_index * 2 + 1];
-      right += m_parameter_block.right;
-      left += m_parameter_block.left;
-      // Clamping from set40 mode
-      right = std::clamp(right, -32768, 32767);
-      left = std::clamp(left, -32768, 32767);
-      m_output_buffer[sample_index * 2 + 0] = right;
-      m_output_buffer[sample_index * 2 + 1] = left;
-      sample_index++;
-
-      const u32 counter = static_cast<u32>(m_parameter_block.counter) + m_parameter_block.freq;
-      m_parameter_block.counter = static_cast<u16>(counter);
-      u16 counter_h = counter >> 16;
-      if (counter_h >= 1)
-      {
-        s16 new_l = 0, new_r = 0;
-
-        // jrge $ar3 (using select_mixer table)
-        // We already masked voice_format with the right mask for the version, so nothing special
-        // needs to be done for this switch statement to exclude unsupported formats
-        switch (voice_format)
-        {
-        case VOICE_MONO8:
-        case VOICE_MONO16:
-          // mono_mix
-          while (counter_h >= 1)
-          {
-            counter_h--;
-            new_r = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-            new_l = new_r;
-          }
-          break;
-
-        case VOICE_STEREO8:
-        case VOICE_STEREO16:
-          // stereo_mix
-          while (counter_h >= 1)
-          {
-            counter_h--;
-            new_r = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-            new_l = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-          }
-          break;  // falls through to mix_samples normally
-
-        case VOICE_MONO8_UNSIGNED:
-        case VOICE_MONO16_UNSIGNED:
-          // mono_unsigned_mix
-          while (counter_h >= 1)
-          {
-            counter_h--;
-            new_r = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-            new_l = new_r;
-          }
-          new_r ^= 0x8000;
-          new_l ^= 0x8000;
-          break;
-
-        case VOICE_STEREO8_UNSIGNED:
-        case VOICE_STEREO16_UNSIGNED:
-          // stereo_unsigned_mix
-          while (counter_h >= 1)
-          {
-            counter_h--;
-            new_r = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-            new_l = m_accelerator.ReadSample(ACCELERATOR_COEFS.data());
-          }
-          new_r ^= 0x8000;
-          new_l ^= 0x8000;
-          break;
-        }
-        if (SwapLeftRight())
-        {
-          // The 2012 version swapped the left and right input channels so that left comes first,
-          // and then right. Before, right came before left. The 2012 version didn't update comments
-          // for it, though.
-          std::swap(new_r, new_l);
-        }
-        // mix_samples
-        const s32 mixed_l = (static_cast<s32>(new_l) * m_parameter_block.volume_l) >> 8;
-        const s32 mixed_r = (static_cast<s32>(new_r) * m_parameter_block.volume_r) >> 8;
-        // Clamping from set40 mode
-        m_parameter_block.left = std::clamp(mixed_l, -32768, 32767);
-        m_parameter_block.right = std::clamp(mixed_r, -32768, 32767);
-      }
-      // no_mix - we don't need to do anything as we modify m_parameter_block.left/right in place
-    }
-    // mixer_end - back to set16 mode
-    m_parameter_block.pds = m_accelerator.GetPredScale();
-    m_parameter_block.yn2 = m_accelerator.GetYn2();
-    m_parameter_block.yn1 = m_accelerator.GetYn1();
-    m_parameter_block.buf_curr = m_accelerator.GetCurrentAddress();
+    PrepareBootUCode(mail);
+    return;
   }
-  // finish_voice
-  m_parameter_block.flags |= VOICE_FINISHED;
-  DMAOutParameterBlock();  // dma_pb_block
+
+  if (m_next_mail_is_parameter_block_addr)
+  {
+    m_next_mail_is_parameter_block_addr = false;
+    m_parameter_block_addr = mail;
+    INFO_LOG_FMT(DSPHLE, "AESnd: parameter block at {:08x}", mail);
+    return;
+  }
+
+  if ((mail & TASK_MAIL_MASK) == TASK_MAIL_TO_DSP)
+  {
+    // No reply. (The real ucode halts on unknown task mails.)
+    if (mail == MAIL_NEW_UCODE)
+      m_upload_setup_in_progress = true;
+    else if (mail == MAIL_RESET)
+      m_dsphle->SetUCode(UCODE_ROM);
+    else
+      WARN_LOG_FMT(DSPHLE, "AESnd: unknown task mail {:08x}", mail);
+    return;
+  }
+
+  switch (mail)
+  {
+  case CMD_FIRST_VOICE:
+    LoadParameterBlock();
+    m_output.fill(0);
+    MixAndReply();
+    break;
+
+  case CMD_NEXT_VOICE:
+    LoadParameterBlock();
+    MixAndReply();
+    break;
+
+  case CMD_SET_PB_ADDR:
+    m_next_mail_is_parameter_block_addr = true;
+    break;
+
+  case CMD_SEND_OUTPUT:
+    m_dsphle->GetSystem().GetMemory().CopyToEmuSwapped(m_pb.out_buf, m_output.data(),
+                                                       sizeof(m_output));
+    m_mail_handler.PushMail(DSP_SYNC, true);
+    break;
+
+  case CMD_TERMINATE:
+    INFO_LOG_FMT(DSPHLE, "AESnd: terminate {:08x}", mail);
+    if (m_crc != HASH_2022_PAD && m_crc != HASH_2023)
+    {
+      // In these builds the comparison against 0xdead sign-extends the constant but not the
+      // received mail, so it never matches and the CPU waits forever for DSP_DONE. The reply is
+      // sent anyway so that homebrew calling AESND_Reset does not hang.
+      WARN_LOG_FMT(DSPHLE, "AESnd: this ucode build cannot terminate; real hardware and LLE "
+                           "hang here");
+    }
+    m_mail_handler.PushMail(DSP_DONE, true);
+    break;
+
+  default:
+    WARN_LOG_FMT(DSPHLE, "AESnd: unknown command {:08x}", mail);
+    break;
+  }
+}
+
+// The fields the DSP transfers, as (byte offset, size). The packed struct mirrors the RAM
+// layout, so the offsets are the same in both.
+namespace
+{
+struct PBField
+{
+  u8 offset;
+  u8 size;
+};
+constexpr PBField PB_FIELDS[] = {
+    {0, 4},  {4, 4},  {8, 4},  {12, 4}, {16, 2}, {18, 2}, {20, 2}, {22, 4},
+    {26, 2}, {28, 2}, {30, 2}, {32, 2}, {34, 2}, {36, 4}, {40, 4},
+};
+}  // namespace
+
+void AESndUCode::LoadParameterBlock()
+{
+  const auto& memory = m_dsphle->GetSystem().GetMemory();
+  u8* const bytes = reinterpret_cast<u8*>(&m_pb);
+  for (const PBField& field : PB_FIELDS)
+  {
+    const u32 address = m_parameter_block_addr + field.offset;
+    if (field.size == 4)
+    {
+      const u32 value = memory.Read_U32(address);
+      std::memcpy(bytes + field.offset, &value, sizeof(value));
+    }
+    else
+    {
+      const u16 value = memory.Read_U16(address);
+      std::memcpy(bytes + field.offset, &value, sizeof(value));
+    }
+  }
+}
+
+void AESndUCode::SaveParameterBlock()
+{
+  auto& memory = m_dsphle->GetSystem().GetMemory();
+  const u8* const bytes = reinterpret_cast<const u8*>(&m_pb);
+  for (const PBField& field : PB_FIELDS)
+  {
+    const u32 address = m_parameter_block_addr + field.offset;
+    if (field.size == 4)
+    {
+      u32 value;
+      std::memcpy(&value, bytes + field.offset, sizeof(value));
+      memory.Write_U32(value, address);
+    }
+    else
+    {
+      u16 value;
+      std::memcpy(&value, bytes + field.offset, sizeof(value));
+      memory.Write_U16(value, address);
+    }
+  }
+}
+
+void AESndUCode::ArmAccelerator(u16 format, u16 gain)
+{
+  m_accelerator.SetSampleFormat(format);
+  m_accelerator.SetGain(static_cast<s16>(gain));
+  m_accelerator.SetStartAddress(m_pb.buf_start);
+  m_accelerator.SetEndAddress(m_pb.buf_end);
+  m_accelerator.SetCurrentAddress(m_pb.buf_curr);
+  m_accelerator.SetYn1(static_cast<s16>(m_pb.yn1));
+  m_accelerator.SetYn2(static_cast<s16>(m_pb.yn2));
+  m_accelerator.SetPredScale(m_pb.pds);
+}
+
+void AESndUCode::MixVoice()
+{
+  const bool new_layout = UsesNewFlagLayout();
+  const u32 format = m_pb.flags & (new_layout ? NEW_FORMAT_MASK : OLD_FORMAT_MASK);
+  const bool stereo = (format & FORMAT_STEREO_BIT) != 0;
+  const bool is_unsigned = (format & FORMAT_UNSIGNED_BIT) != 0;
+  const bool is_16bit = (format & FORMAT_16BIT_BIT) != 0;
+
+  if (m_crc == HASH_EDUKE32 && format != FORMAT_STEREO8 && format != FORMAT_STEREO16 &&
+      format != FORMAT_STEREO8_UNSIGNED && !m_warned_about_format)
+  {
+    // EDuke32's build mixes the mono formats wrongly and lacks unsigned 16-bit stereo.
+    m_warned_about_format = true;
+    PanicAlertFmt("EDuke32 Wii aesndlib uCode does not correctly handle this sample format: "
+                  "{} (flags: {:08x})",
+                  format, m_pb.flags);
+  }
+
+  if (is_16bit)
+    ArmAccelerator(ACCEL_FORMAT_PCM16, ACCEL_GAIN_PCM16);
+  else
+    ArmAccelerator(ACCEL_FORMAT_PCM8, ACCEL_GAIN_PCM8);
+
+  // The delay counts down one per output sample. When it runs out inside this buffer, mixing
+  // starts at the sample where it hit zero (that slot is written by both).
+  u32 first = 0;
+  u32 count = NUM_OUTPUT_SAMPLES;
+  if (m_pb.delay != 0)
+  {
+    if (m_pb.delay <= NUM_OUTPUT_SAMPLES)
+    {
+      first = m_pb.delay - 1;
+      count = NUM_OUTPUT_SAMPLES - m_pb.delay;
+      m_pb.delay = 0;
+    }
+    else
+    {
+      count = 0;
+      m_pb.delay -= NUM_OUTPUT_SAMPLES;
+    }
+  }
+
+  for (u32 i = first; i < first + count; ++i)
+  {
+    // Output the current sample (right first), saturating.
+    s16& out_right = m_output[2 * i];
+    s16& out_left = m_output[2 * i + 1];
+    out_right = Saturate16(out_right + m_pb.right);
+    out_left = Saturate16(out_left + m_pb.left);
+
+    // 16.16 rate conversion: the integer part says how many input frames to step over.
+    const u32 position = u32{m_pb.counter} + m_pb.freq;
+    m_pb.counter = static_cast<u16>(position);
+    u32 frames_to_read = (position >> 16) & 0xFFFF;
+    if (frames_to_read == 0)
+      continue;
+
+    s16 a = 0;
+    s16 b = 0;
+    while (frames_to_read-- != 0)
+    {
+      a = static_cast<s16>(m_accelerator.ReadSample(NO_COEFFICIENTS.data()));
+      b = stereo ? static_cast<s16>(m_accelerator.ReadSample(NO_COEFFICIENTS.data())) : a;
+    }
+    if (is_unsigned)
+    {
+      a = static_cast<s16>(a ^ 0x8000);
+      b = static_cast<s16>(b ^ 0x8000);
+    }
+
+    // The original layout reads right then left; later builds read left then right.
+    s16 new_left = b;
+    s16 new_right = a;
+    if (HasLeftFirstInput())
+      std::swap(new_left, new_right);
+
+    // Volumes are 8.8 fixed point.
+    m_pb.left = Saturate16((s32{new_left} * m_pb.volume_l) >> 8);
+    m_pb.right = Saturate16((s32{new_right} * m_pb.volume_r) >> 8);
+  }
+
+  m_pb.pds = m_accelerator.GetPredScale();
+  m_pb.yn2 = static_cast<u16>(m_accelerator.GetYn2());
+  m_pb.yn1 = static_cast<u16>(m_accelerator.GetYn1());
+  m_pb.buf_curr = m_accelerator.GetCurrentAddress();
+}
+
+void AESndUCode::MixAndReply()
+{
+  const u32 pause_bit = UsesNewFlagLayout() ? NEW_PAUSE_BIT : OLD_PAUSE_BIT;
+  const bool playing = (m_pb.flags & pause_bit) == 0 && (m_pb.flags & FLAG_RUNNING) != 0 &&
+                       m_pb.buf_start != 0;
+  if (playing)
+    MixVoice();
+
+  m_pb.flags |= FLAG_FINISHED;
+  SaveParameterBlock();
   m_mail_handler.PushMail(DSP_SYNC, true);
 }
 
@@ -443,8 +361,8 @@ void AESndUCode::DoState(PointerWrap& p)
   DoStateShared(p);
   p.Do(m_next_mail_is_parameter_block_addr);
   p.Do(m_parameter_block_addr);
-  p.Do(m_parameter_block);
-  p.Do(m_output_buffer);
+  p.Do(m_pb);
+  p.Do(m_output);
   m_accelerator.DoState(p);
 }
 }  // namespace DSP::HLE

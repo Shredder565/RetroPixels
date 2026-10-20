@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,49 +7,57 @@
 
 #include "Common/CommonTypes.h"
 
+class PointerWrap;
+
 namespace DSP
 {
 class DSPManager;
 }
-class PointerWrap;
 
 namespace DSP::HLE
 {
+// The DSP-to-CPU mailbox as seen by the HLE ucodes.
+//
+// The hardware only has one mailbox register pair. An HLE ucode answers a CPU request all at
+// once, though, often with several mails, so the replies wait in a queue here and the CPU gets
+// them one by one as it reads the mailbox (high half first, then low half).
 class CMailHandler
 {
 public:
   explicit CMailHandler(DSP::DSPManager& dsp);
-  CMailHandler(const CMailHandler& other) = delete;
-  CMailHandler(CMailHandler&& other) = delete;
-  CMailHandler& operator=(const CMailHandler& other) = delete;
-  CMailHandler& operator=(CMailHandler&& other) = delete;
+  CMailHandler(const CMailHandler&) = delete;
+  CMailHandler(CMailHandler&&) = delete;
+  CMailHandler& operator=(const CMailHandler&) = delete;
+  CMailHandler& operator=(CMailHandler&&) = delete;
   ~CMailHandler();
 
-  // TODO: figure out correct timing for interrupts rather than defaulting to "immediately."
+  // Queues a mail for the CPU. With `interrupt`, the CPU also gets a DSP interrupt: after
+  // `cycles_into_future` cycles when the queue was empty, otherwise when the mail currently at the
+  // head of the queue has been read.
   void PushMail(u32 mail, bool interrupt = false, int cycles_into_future = 0);
+
+  // A halted DSP delivers nothing new; the CPU keeps reading the last mail.
   void SetHalted(bool halt);
+
   void DoState(PointerWrap& p);
   bool HasPending() const;
 
-  // Clear any pending mail from the current uCode.  This is called by DSPHLE::SetUCode and
-  // DSPHLE::SwapUCode. Since pending mail is an abstraction for DSPHLE and not something that
-  // actually exists on real hardware, HLE implementations do not need to call this directly.
-  // Note that this function does not reset m_last_mail, which will continue to read the same value
-  // until the new uCode sends mail.
+  // Drops every queued mail (used when the ucode changes). The last delivered mail stays readable.
   void ClearPending();
 
   u16 ReadDSPMailboxHigh();
   u16 ReadDSPMailboxLow();
 
 private:
-  // The actual DSP only has a single pair of mail registers, and doesn't keep track of pending
-  // mails. But for HLE, it's a lot easier to write all the mails that will be read ahead of time,
-  // and then give them to the CPU in the requested order.
-  std::deque<std::pair<u32, bool>> m_pending_mails;
-  // If no pending mail exists, the last mail that was read is returned,
-  // but with the top bit (0x80000000) cleared.
-  u32 m_last_mail = 0;
-  // When halted, the DSP itself is not running, but the last mail can be read.
+  bool CanDeliver() const { return !m_halted && !m_queue.empty(); }
+
+  // Queued mails, oldest first, each with "raise an interrupt once this one has been read".
+  std::deque<std::pair<u32, bool>> m_queue;
+
+  // What the mailbox registers currently hold. Once the low half has been read, bit 31 (the
+  // "mail waiting" flag) reads back as clear until another mail is delivered.
+  u32 m_mailbox = 0;
+
   bool m_halted = false;
 
   DSP::DSPManager& m_dsp;

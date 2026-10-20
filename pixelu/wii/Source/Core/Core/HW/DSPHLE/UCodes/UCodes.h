@@ -1,17 +1,11 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <cstring>
 #include <memory>
 
 #include "Common/CommonTypes.h"
 
-namespace Memory
-{
-class MemoryManager;
-}
 class PointerWrap;
 
 namespace DSP::HLE
@@ -19,10 +13,14 @@ namespace DSP::HLE
 class CMailHandler;
 class DSPHLE;
 
-#define UCODE_ROM 0x00000000
-#define UCODE_INIT_AUDIO_SYSTEM 0x00000001
-#define UCODE_NULL 0xFFFFFFFF
+// Pseudo-CRCs for the ucodes that are not loaded by the game: the boot ROM and the small init
+// program run when the CPU clears the DSP init bit. UCODE_NULL stands for "no ucode".
+constexpr u32 UCODE_ROM = 0x00000000;
+constexpr u32 UCODE_INIT_AUDIO_SYSTEM = 0x00000001;
+constexpr u32 UCODE_NULL = 0xFFFFFFFF;
 
+// Base class of every high-level emulated DSP program. The CRC identifying a ucode is the
+// "ector" hash of its IRAM image.
 class UCodeInterface
 {
 public:
@@ -32,80 +30,69 @@ public:
   virtual void Initialize() = 0;
   virtual void HandleMail(u32 mail) = 0;
   virtual void Update() = 0;
-
   virtual void DoState(PointerWrap& p) = 0;
-  static u32 GetCRC(UCodeInterface* ucode) { return ucode ? ucode->m_crc : UCODE_NULL; }
+
+  static u32 GetCRC(UCodeInterface* ucode) { return ucode != nullptr ? ucode->m_crc : UCODE_NULL; }
 
 protected:
+  // Task switching (the SDK's DSP task manager, also used by libogc).
+  //
+  // Mails from the DSP to the CPU carry 0xDCD1 in the high half:
+  //   DSP_INIT       task started (callback, no reply)
+  //   DSP_RESUME     task resumed after a switch (callback, no reply)
+  //   DSP_YIELD      task wants to give up the DSP; AX expects MAIL_NEW_UCODE when the CPU has
+  //                  another task, MAIL_CONTINUE otherwise
+  //   DSP_DONE       task finished (callback); the CPU answers MAIL_NEW_UCODE or MAIL_RESET
+  //   DSP_SYNC       generic acknowledgement (callback, no reply)
+  //   DSP_FRAME_END  Zelda-family ucodes: a frame of audio is ready; the CPU answers
+  //                  MAIL_NEW_UCODE when it has a task to run, MAIL_CONTINUE otherwise
+  // The CPU answers with 0xCDD1 in the high half:
+  //   MAIL_RESUME    AX replies DSP_RESUME and continues; Zelda halts (not seen in practice)
+  //   MAIL_NEW_UCODE the next ten mails describe the ucode to boot (see PrepareBootUCode)
+  //   MAIL_RESET     reboot into the ROM
+  //   MAIL_CONTINUE  go back to the main loop
+  static constexpr u32 TASK_MAIL_MASK = 0xFFFF0000;
+  static constexpr u32 TASK_MAIL_TO_CPU = 0xDCD10000;
+  static constexpr u32 DSP_INIT = TASK_MAIL_TO_CPU | 0x0000;
+  static constexpr u32 DSP_RESUME = TASK_MAIL_TO_CPU | 0x0001;
+  static constexpr u32 DSP_YIELD = TASK_MAIL_TO_CPU | 0x0002;
+  static constexpr u32 DSP_DONE = TASK_MAIL_TO_CPU | 0x0003;
+  static constexpr u32 DSP_SYNC = TASK_MAIL_TO_CPU | 0x0004;
+  static constexpr u32 DSP_FRAME_END = TASK_MAIL_TO_CPU | 0x0005;
+
+  static constexpr u32 TASK_MAIL_TO_DSP = 0xCDD10000;
+  static constexpr u32 MAIL_RESUME = TASK_MAIL_TO_DSP | 0x0000;
+  static constexpr u32 MAIL_NEW_UCODE = TASK_MAIL_TO_DSP | 0x0001;
+  static constexpr u32 MAIL_RESET = TASK_MAIL_TO_DSP | 0x0002;
+  static constexpr u32 MAIL_CONTINUE = TASK_MAIL_TO_DSP | 0x0003;
+
+  // Feeds one of the ten mails that follow MAIL_NEW_UCODE. After the tenth, the new ucode is
+  // identified and swapped in (which may destroy this object), and the next Update() of the
+  // resumed ucode is told to send its resume mail (see NeedsResumeMail).
   void PrepareBootUCode(u32 mail);
 
-  // Some ucodes (notably zelda) require a resume mail to be
-  // sent if they are be started via PrepareBootUCode.
-  // The HLE can use this to
+  // True once after a ucode switch requested through PrepareBootUCode completed. Ucodes that
+  // can be resumed (AX, Zelda) send DSP_RESUME when they see it.
   bool NeedsResumeMail();
 
+  // Saves the task-switch state shared by all ucodes.
   void DoStateShared(PointerWrap& p);
 
   CMailHandler& m_mail_handler;
 
-  static constexpr u32 TASK_MAIL_MASK = 0xFFFF'0000;
-  // Task-management mails, used for uCode switching. The DSP sends mail with 0xDCD1 in the high
-  // word to the CPU to report its status. The CPU reacts in different ways for different mails.
-  // Also, Zelda uCode titles use a slightly different handler compared to AX uCode titles. Libogc's
-  // mail handler is based on the AX one.
-  static constexpr u32 TASK_MAIL_TO_CPU = 0xDCD1'0000;
-  // Triggers a callback. No response is sent.
-  static constexpr u32 DSP_INIT = TASK_MAIL_TO_CPU | 0x0000;
-  // Triggers a callback. No response is sent.
-  static constexpr u32 DSP_RESUME = TASK_MAIL_TO_CPU | 0x0001;
-  // If the current task is canceled by the CPU, the CPU processes this mail as if it were DSP_DONE
-  // instead. Otherwise, it is handled differently for Zelda uCode games and AX games.
-  // On Zelda uCode, the CPU will always respond with MAIL_NEW_UCODE.
-  // On AX uCode, the CPU will respond with MAIL_NEW_UCODE if it has a new task, and otherwise
-  // will use MAIL_CONTINUE.
-  static constexpr u32 DSP_YIELD = TASK_MAIL_TO_CPU | 0x0002;
-  // Triggers a callback. The response is handled differently for Zelda uCode games and AX games.
-  // On Zelda uCode, the CPU will always respond with MAIL_NEW_UCODE.
-  // On AX uCode, the CPU will respond with MAIL_NEW_UCODE if there is a new task, and otherwise
-  // will use MAIL_RESET if the finished task was the only task.
-  static constexpr u32 DSP_DONE = TASK_MAIL_TO_CPU | 0x0003;
-  // Triggers a callback. No response is sent.
-  static constexpr u32 DSP_SYNC = TASK_MAIL_TO_CPU | 0x0004;
-  // Used by Zelda uCode only. Zelda uCode titles (or at least Super Mario Sunshine and Super Mario
-  // Galaxy) will log "Audio Yield Start", send MAIL_NEW_UCODE, and then log "Audio Yield Finish" if
-  // they have a task to execute (e.g. the card uCode), and otherwise will send MAIL_CONTINUE.
-  static constexpr u32 DSP_FRAME_END = TASK_MAIL_TO_CPU | 0x0005;
-
-  // The CPU will send a mail prefixed with 0xCDD1 in the high word in response.
-  static constexpr u32 TASK_MAIL_TO_DSP = 0xCDD1'0000;
-  // On AX, this sends DSP_RESUME and then returns to normal execution. On Zelda, this immediately
-  // HALTs. Other uCodes (e.g. Card, GBA) do not implement (and instead ignore) this mail.
-  // This mail does not seem to be sent in practice.
-  static constexpr u32 MAIL_RESUME = TASK_MAIL_TO_DSP | 0x0000;
-  // Starts populating info for a new uCode (see PrepareBootUCode and m_upload_setup_in_progress).
-  // The current uCode's state can optionally be saved, although the Card and GBA uCode do not
-  // support this (as there is no reason to reload their old state).
-  static constexpr u32 MAIL_NEW_UCODE = TASK_MAIL_TO_DSP | 0x0001;
-  // Immediately switches to ROM uCode. Implemented by the Zelda uCode, but the Zelda uCode task
-  // handler doesn't seem to send it.
-  static constexpr u32 MAIL_RESET = TASK_MAIL_TO_DSP | 0x0002;
-  // Jumps back to the main loop. Not implemented by all uCode (in particular Card and GBA which do
-  // not have a main loop).
-  static constexpr u32 MAIL_CONTINUE = TASK_MAIL_TO_DSP | 0x0003;
-
-  // UCode is forwarding mails to PrepareBootUCode
-  // UCode only needs to set this to true, UCodeInterface will set to false when done!
+  // Set by a ucode when it receives MAIL_NEW_UCODE; mails then go to PrepareBootUCode until the
+  // description is complete (which clears it again).
   bool m_upload_setup_in_progress = false;
 
-  // Need a pointer back to DSPHLE to switch ucodes.
   DSPHLE* m_dsphle;
 
-  // used for reconstruction when loading saves,
-  // and for variations within certain ucodes.
+  // The ucode's CRC, used to rebuild the ucode when loading a state and to tell versions apart.
   u32 m_crc;
 
 private:
-  struct NextUCodeInfo
+  // The ten-mail description of the next task. Saved as raw bytes; `reserved` makes the
+  // alignment padding explicit so the saved bytes are always defined.
+  struct BootRequest
   {
     u32 mram_dest_addr;
     u16 mram_size;
@@ -114,15 +101,23 @@ private:
     u16 iram_size;
     u16 iram_dest;
     u16 iram_startpc;
+    u16 reserved;
     u32 dram_mram_addr;
     u16 dram_size;
     u16 dram_dest;
   };
-  NextUCodeInfo m_next_ucode{};
-  int m_next_ucode_steps = 0;
+  static_assert(sizeof(BootRequest) == 28);
 
+  BootRequest m_boot_request{};
+  int m_boot_mails_received = 0;
   bool m_needs_resume_mail = false;
 };
 
+// Hashes the ucode image at `address` in main memory (dumping it when the user asked for ucode
+// dumps) and returns its CRC.
+u32 IdentifyUCodeImage(DSPHLE* dsphle, u32 address, u32 size);
+
+// Creates the HLE implementation for a CRC. Unknown CRCs fall back to AX (GameCube) or AXWii
+// (Wii) after warning the user; UCODE_NULL gives nullptr.
 std::unique_ptr<UCodeInterface> UCodeFactory(u32 crc, DSPHLE* dsphle, bool wii);
 }  // namespace DSP::HLE

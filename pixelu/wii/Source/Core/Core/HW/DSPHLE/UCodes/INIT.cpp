@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/UCodes/INIT.h"
 
@@ -7,30 +6,30 @@
 #include "Common/Logging/Log.h"
 #include "Core/HW/DSPHLE/DSPHLE.h"
 #include "Core/HW/DSPHLE/MailHandler.h"
-#include "Core/HW/DSPHLE/UCodes/UCodes.h"
 
 namespace DSP::HLE
 {
 INITUCode::INITUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
 {
-  INFO_LOG_FMT(DSPHLE, "INITUCode - initialized");
+  INFO_LOG_FMT(DSPHLE, "DSP init program started");
 }
 
 void INITUCode::Initialize()
 {
+  // "\x80TCH"
   m_mail_handler.PushMail(0x80544348);
+}
+
+void INITUCode::HandleMail(u32 /*mail*/)
+{
 }
 
 void INITUCode::Update()
 {
 }
 
-void INITUCode::HandleMail(u32 mail)
+void INITUCode::DoState(PointerWrap& /*p*/)
 {
-}
-
-void INITUCode::DoState(PointerWrap& p)
-{
-  // We don't need to call DoStateShared() as the init uCode doesn't support launching new uCode
+  // Nothing to save: this program cannot start a task, so it has no task-switch state either.
 }
 }  // namespace DSP::HLE

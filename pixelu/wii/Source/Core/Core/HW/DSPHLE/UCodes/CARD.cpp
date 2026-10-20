@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/UCodes/CARD.h"
 
@@ -8,14 +7,20 @@
 #include "Common/Logging/Log.h"
 #include "Core/HW/DSP.h"
 #include "Core/HW/DSPHLE/DSPHLE.h"
+#include "Core/HW/DSPHLE/MailHandler.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
 #include "Core/System.h"
 
 namespace DSP::HLE
 {
+namespace
+{
+constexpr u32 MAIL_UNLOCK_CARD = 0xFF000000;
+}
+
 CARDUCode::CARDUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
 {
-  INFO_LOG_FMT(DSPHLE, "CARDUCode - initialized");
+  INFO_LOG_FMT(DSPHLE, "Memory card unlock task started");
 }
 
 void CARDUCode::Initialize()
@@ -25,24 +30,18 @@ void CARDUCode::Initialize()
 
 void CARDUCode::Update()
 {
-  // check if we have something to send
+  // Keep poking the CPU while it has mail to read.
   if (m_mail_handler.HasPending())
-  {
     m_dsphle->GetSystem().GetDSP().GenerateDSPInterruptFromDSPEmu(INT_DSP);
-  }
 }
 
 void CARDUCode::HandleMail(u32 mail)
 {
-  if (mail == 0xFF000000)  // unlock card
-  {
-    //	m_Mails.push(0x00000001); // ACK (actually anything != 0)
-  }
-  else
-  {
-    WARN_LOG_FMT(DSPHLE, "CARDUCode - unknown command: {:x}", mail);
-  }
+  if (mail != MAIL_UNLOCK_CARD)
+    WARN_LOG_FMT(DSPHLE, "Memory card task: unexpected mail {:08x}", mail);
 
+  // Report the task as done and go back to the ROM. Rebooting the ROM clears the queue, so the
+  // CPU actually sees the ROM's greeting.
   m_mail_handler.PushMail(DSP_DONE);
   m_dsphle->SetUCode(UCODE_ROM);
 }
@@ -50,6 +49,6 @@ void CARDUCode::HandleMail(u32 mail)
 void CARDUCode::DoState(PointerWrap& p)
 {
   DoStateShared(p);
-  p.Do(m_state);
+  p.Do(m_stage);
 }
 }  // namespace DSP::HLE

@@ -1,31 +1,29 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/UCodes/ROM.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Common/Hash.h"
 #include "Common/Logging/Log.h"
-#include "Core/Config/MainSettings.h"
-#include "Core/ConfigManager.h"
-#include "Core/DSP/DSPCodeUtil.h"
 #include "Core/HW/DSPHLE/DSPHLE.h"
 #include "Core/HW/DSPHLE/MailHandler.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
-#include "Core/HW/Memmap.h"
-#include "Core/System.h"
 
 namespace DSP::HLE
 {
-ROMUCode::ROMUCode(DSPHLE* dsphle, u32 crc)
-    : UCodeInterface(dsphle, crc), m_current_ucode(), m_boot_task_num_steps(0), m_next_parameter(0)
+namespace
 {
-  INFO_LOG_FMT(DSPHLE, "UCode_Rom - initialized");
+// Parameter selectors sent by the CPU, each followed by the value mail.
+constexpr u32 PARAM_RAM_ADDRESS = 0x80F3A001;
+constexpr u32 PARAM_IRAM_LENGTH = 0x80F3A002;
+constexpr u32 PARAM_DRAM_LENGTH = 0x80F3B002;
+constexpr u32 PARAM_IRAM_ADDRESS = 0x80F3C002;
+constexpr u32 PARAM_START_PC = 0x80F3D001;
+}  // namespace
+
+ROMUCode::ROMUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
+{
+  INFO_LOG_FMT(DSPHLE, "DSP boot ROM ready");
 }
 
 void ROMUCode::Initialize()
@@ -39,86 +37,63 @@ void ROMUCode::Update()
 
 void ROMUCode::HandleMail(u32 mail)
 {
-  if (m_next_parameter == 0)
+  if (m_pending_parameter == 0)
   {
-    // wait for beginning of UCode
-    if ((mail & 0xFFFF0000) != 0x80F30000)
-    {
-      u32 Message = 0xFEEE0000 | (mail & 0xFFFF);
-      m_mail_handler.PushMail(Message);
-    }
+    // Anything that is not a parameter selector is echoed back as 0xFEEExxxx.
+    if ((mail & 0xFFFF0000) == 0x80F30000)
+      m_pending_parameter = mail;
     else
-    {
-      m_next_parameter = mail;
-    }
+      m_mail_handler.PushMail(0xFEEE0000 | (mail & 0xFFFF));
+    return;
   }
-  else
+
+  const u32 selector = m_pending_parameter;
+  const u32 low = mail & 0xFFFF;
+  switch (selector)
   {
-    switch (m_next_parameter)
-    {
-    case 0x80F3A001:
-      m_current_ucode.m_ram_address = mail;
-      break;
-
-    case 0x80F3A002:
-      m_current_ucode.m_length = mail & 0xffff;
-      break;
-
-    case 0x80F3B002:
-      m_current_ucode.m_dmem_length = mail & 0xffff;
-      if (m_current_ucode.m_dmem_length)
-      {
-        NOTICE_LOG_FMT(DSPHLE, "m_current_ucode.m_dmem_length = {:#06x}.",
-                       m_current_ucode.m_dmem_length);
-      }
-      break;
-
-    case 0x80F3C002:
-      m_current_ucode.m_imem_address = mail & 0xffff;
-      break;
-
-    case 0x80F3D001:
-      m_current_ucode.m_start_pc = mail & 0xffff;
-      BootUCode();
-      return;  // Important! BootUCode indirectly does "delete this;". Must exit immediately.
-
-    default:
-      break;
-    }
-
-    // THE GODDAMN OVERWRITE WAS HERE. Without the return above, since BootUCode may delete "this",
-    // well ...
-    m_next_parameter = 0;
+  case PARAM_RAM_ADDRESS:
+    m_params.ram_address = mail;
+    break;
+  case PARAM_IRAM_LENGTH:
+    m_params.length = low;
+    break;
+  case PARAM_DRAM_LENGTH:
+    m_params.dmem_length = low;
+    if (low != 0)
+      NOTICE_LOG_FMT(DSPHLE, "ROM boot with a DRAM image of {:#06x} bytes", low);
+    break;
+  case PARAM_IRAM_ADDRESS:
+    m_params.imem_address = low;
+    break;
+  case PARAM_START_PC:
+    m_params.start_pc = low;
+    // Replaces this ucode: return without touching any member.
+    StartLoadedUCode();
+    return;
+  default:
+    break;
   }
+  m_pending_parameter = 0;
 }
 
-void ROMUCode::BootUCode()
+void ROMUCode::StartLoadedUCode()
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  const u8* pointer =
-      memory.GetPointerForRange(m_current_ucode.m_ram_address, m_current_ucode.m_length);
-  const u32 ector_crc = Common::HashEctor(pointer, m_current_ucode.m_length);
+  const u32 crc = IdentifyUCodeImage(m_dsphle, m_params.ram_address, m_params.length);
 
-  if (Config::Get(Config::MAIN_DUMP_UCODE))
-    DumpDSPCode(pointer, m_current_ucode.m_length, ector_crc);
+  INFO_LOG_FMT(DSPHLE,
+               "ROM boot: RAM {:08x}, {:#x} bytes to IRAM {:04x}, DRAM {:#x} bytes, entry {:04x}, "
+               "crc {:08x}",
+               m_params.ram_address, m_params.length, m_params.imem_address, m_params.dmem_length,
+               m_params.start_pc, crc);
 
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode SOURCE Addr: {:#010x}", m_current_ucode.m_ram_address);
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode Length:      {:#010x}", m_current_ucode.m_length);
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode DEST Addr:   {:#010x}", m_current_ucode.m_imem_address);
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode DMEM Length: {:#010x}", m_current_ucode.m_dmem_length);
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode init_vector: {:#010x}", m_current_ucode.m_start_pc);
-  INFO_LOG_FMT(DSPHLE, "CurrentUCode CRC:         {:#010x}", ector_crc);
-  INFO_LOG_FMT(DSPHLE, "BootTask - done");
-
-  m_dsphle->SetUCode(ector_crc);
+  m_dsphle->SetUCode(crc);
 }
 
 void ROMUCode::DoState(PointerWrap& p)
 {
-  p.Do(m_current_ucode);
-  p.Do(m_boot_task_num_steps);
-  p.Do(m_next_parameter);
-
+  p.Do(m_params);
+  p.Do(m_unused_step_count);
+  p.Do(m_pending_parameter);
   DoStateShared(p);
 }
 }  // namespace DSP::HLE

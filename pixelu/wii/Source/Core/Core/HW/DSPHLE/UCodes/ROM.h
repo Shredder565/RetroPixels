@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@ namespace DSP::HLE
 {
 class DSPHLE;
 
+// The DSP boot ROM. It greets the CPU with 0x8071FEED and then waits for the 0x80F3xxxx
+// parameter mails describing the ucode to load; the last one starts that ucode.
 class ROMUCode final : public UCodeInterface
 {
 public:
@@ -18,23 +19,26 @@ public:
   void Initialize() override;
   void HandleMail(u32 mail) override;
   void Update() override;
-
   void DoState(PointerWrap& p) override;
 
 private:
-  struct UCodeBootInfo
+  // Boot parameters, saved as raw bytes in this order.
+  struct BootParams
   {
-    u32 m_ram_address;
-    u32 m_length;
-    u32 m_imem_address;
-    u32 m_dmem_length;
-    u32 m_start_pc;
+    u32 ram_address;
+    u32 length;
+    u32 imem_address;
+    u32 dmem_length;
+    u32 start_pc;
   };
-  UCodeBootInfo m_current_ucode;
-  int m_boot_task_num_steps;
+  static_assert(sizeof(BootParams) == 20);
 
-  u32 m_next_parameter;
+  void StartLoadedUCode();
 
-  void BootUCode();
+  BootParams m_params{};
+  // Not used by the ROM; kept for the savestate layout.
+  int m_unused_step_count = 0;
+  // The 0x80F3xxxx mail naming the parameter that the next mail carries, or 0.
+  u32 m_pending_parameter = 0;
 };
 }  // namespace DSP::HLE
