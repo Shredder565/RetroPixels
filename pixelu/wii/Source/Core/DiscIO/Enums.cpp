@@ -135,21 +135,34 @@ Language FromGameCubeLanguage(int language)
 // The game list cache stores the results of the functions below; bump its revision
 // (GameFileCache.cpp) when they change.
 
+namespace
+{
+// Each region's "home" country, used when a disc only says which region it is for, and the
+// letter Wii Menu version strings end in.
+struct RegionInfo
+{
+  Region region;
+  Country country;
+  char menu_letter;
+};
+constexpr RegionInfo s_region_info[] = {
+    {Region::NTSC_J, Country::Japan, 'J'},
+    {Region::NTSC_U, Country::USA, 'U'},
+    {Region::PAL, Country::Europe, 'E'},
+    {Region::NTSC_K, Country::Korea, 'K'},
+};
+
+const RegionInfo* FindRegionInfo(Region region)
+{
+  const auto it = std::ranges::find(s_region_info, region, &RegionInfo::region);
+  return it != std::end(s_region_info) ? &*it : nullptr;
+}
+}  // namespace
+
 Country TypicalCountryForRegion(Region region)
 {
-  switch (region)
-  {
-  case Region::NTSC_J:
-    return Country::Japan;
-  case Region::NTSC_U:
-    return Country::USA;
-  case Region::PAL:
-    return Country::Europe;
-  case Region::NTSC_K:
-    return Country::Korea;
-  default:
-    return Country::Unknown;
-  }
+  const RegionInfo* info = FindRegionInfo(region);
+  return info ? info->country : Country::Unknown;
 }
 
 // The Wii's SYSCONF country codes are grouped by area: Japan, the Americas, Europe and its
@@ -282,19 +295,12 @@ Country CountryCodeToCountry(u8 country_code, Platform platform, Region region,
 // The low nibble of a Wii Menu title version says which region it is for.
 Region GetSysMenuRegion(u16 title_version)
 {
-  switch (title_version & 0xf)
-  {
-  case 0:
-    return Region::NTSC_J;
-  case 1:
-    return Region::NTSC_U;
-  case 2:
-    return Region::PAL;
-  case 6:
-    return Region::NTSC_K;
-  default:
-    return Region::Unknown;
-  }
+  // Nibble values 3-5 and 7-15 are not used.
+  constexpr std::array<Region, 7> by_nibble{Region::NTSC_J,  Region::NTSC_U,  Region::PAL,
+                                            Region::Unknown, Region::Unknown, Region::Unknown,
+                                            Region::NTSC_K};
+  const u32 nibble = title_version & 0xf;
+  return nibble < by_nibble.size() ? by_nibble[nibble] : Region::Unknown;
 }
 
 std::string GetSysMenuVersionString(u16 title_version, bool is_vwii)
@@ -328,25 +334,10 @@ std::string GetSysMenuVersionString(u16 title_version, bool is_vwii)
       {512, "4.3"},
   }};
 
-  char region_letter = 0;
-  switch (GetSysMenuRegion(title_version))
-  {
-  case Region::NTSC_J:
-    region_letter = 'J';
-    break;
-  case Region::NTSC_U:
-    region_letter = 'U';
-    break;
-  case Region::PAL:
-    region_letter = 'E';
-    break;
-  case Region::NTSC_K:
-    region_letter = 'K';
-    break;
-  default:
+  const RegionInfo* region = FindRegionInfo(GetSysMenuRegion(title_version));
+  if (region == nullptr)
     WARN_LOG_FMT(DISCIO, "Unknown region for Wii Menu version {}", title_version);
-    break;
-  }
+  const char region_letter = region ? region->menu_letter : 0;
 
   const u16 base = title_version & 0xff0;
   const std::span<const Release> releases =
