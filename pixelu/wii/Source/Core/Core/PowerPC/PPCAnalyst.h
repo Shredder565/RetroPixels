@@ -1,5 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Static analysis of guest code.
+//
+// PPCAnalyzer decodes a run of instructions into a CodeBuffer for the JITs:
+// per-instruction register/CR/flag usage, liveness information computed
+// backwards over the block, float-format facts computed forwards, optional
+// branch following and instruction reordering.
+//
+// The free functions discover and size functions for the symbol database.
 
 #pragma once
 
@@ -26,16 +34,16 @@ class CPUThreadGuard;
 
 namespace PPCAnalyst
 {
-struct CodeOp  // 16B
+struct CodeOp
 {
   UGeckoInstruction inst;
   const GekkoOPInfo* opinfo = nullptr;
   u32 address = 0;
-  u32 branchTo = 0;  // if UINT32_MAX, not a branch
+  u32 branchTo = 0;  // UINT32_MAX when the target is not known statically
   BitSet32 regsIn;
   BitSet32 regsOut;
   BitSet32 fregsIn;
-  s8 fregOut = 0;
+  s8 fregOut = 0;  // -1 when no FPR is written
   BitSet8 crIn;
   BitSet8 crOut;
   bool branchUsesCtr = false;
@@ -43,48 +51,47 @@ struct CodeOp  // 16B
   BitSet8 wantsCR;
   bool wantsFPRF = false;
   bool wantsCA = false;
-  bool wantsCAInFlags = false;
+  bool wantsCAInFlags = false;  // CA may stay in the host carry flag
   BitSet8 outputCR;
   bool outputFPRF = false;
   bool outputCA = false;
   bool canEndBlock = false;
   bool canCauseException = false;
-  bool skipLRStack = false;
-  bool skip = false;  // followed BL-s for example
+  bool skipLRStack = false;  // call whose return was inlined by branch following
+  bool skip = false;         // instruction elided by branch following (an inlined blr)
+
+  // Backwards liveness: what later instructions of the block will read or
+  // write, and what is dead (overwritten before being read) from here on.
   BitSet8 crWillBeRead;
   BitSet8 crWillBeWritten;
   BitSet8 crDiscardable;
-  // which registers are still needed after this instruction in this block
   BitSet32 gprWillBeRead;
   BitSet32 gprWillBeWritten;
   BitSet32 fprWillBeRead;
   BitSet32 fprWillBeWritten;
-  // which registers have values which are known to be unused after this instruction
   BitSet32 gprDiscardable;
   BitSet32 fprDiscardable;
-  // we do double stores from GPRs, so we don't want to load a PowerPC floating point register into
-  // an XMM only to move it again to a GPR afterwards.
+  // FPRs that later instructions consume through the vector unit (all FPR
+  // inputs except those of double stores, which move the raw bits via a GPR).
   BitSet32 fprInXmm;
-  // whether an fpr is known to be an actual single-precision value at this point in the block.
+
+  // Forward facts about FPR contents at this instruction:
+  // the value is representable as a single...
   BitSet32 fprIsSingle;
-  // whether an fpr is known to have identical top and bottom halves (e.g. due to a single
-  // instruction)
+  // ...ps0 and ps1 hold the same value...
   BitSet32 fprIsDuplicated;
-  // whether an fpr is the output of a single-precision arithmetic instruction, i.e. whether we can
-  // convert between single and double formats by just using the host machine's instruction for it.
-  // (The reason why we can't always do this is because some games rely on the exact bits of
-  // denormals and SNaNs being preserved as long as no arithmetic operation is performed on them.)
+  // ...and the value came from single-precision arithmetic, so converting it
+  // with host instructions cannot disturb denormal or SNaN bit patterns that
+  // some games rely on being preserved through moves.
   BitSet32 fprIsStoreSafeBeforeInst;
   BitSet32 fprIsStoreSafeAfterInst;
 
   BitSet32 GetFregsOut() const
   {
-    BitSet32 result;
-
+    BitSet32 out;
     if (fregOut >= 0)
-      result[fregOut] = true;
-
-    return result;
+      out[fregOut] = true;
+    return out;
   }
 };
 
@@ -102,37 +109,20 @@ using CodeBuffer = std::vector<CodeOp>;
 
 struct CodeBlock
 {
-  // Beginning PPC address.
-  u32 m_address = 0;
+  u32 m_address = 0;           // guest address of the first instruction
+  u32 m_num_instructions = 0;  // instructions decoded into the buffer
 
-  // Number of instructions
-  // Gives us the size of the block.
-  u32 m_num_instructions = 0;
-
-  // Some basic statistics about the block.
   BlockStats* m_stats = nullptr;
-
-  // Register statistics about the block.
   BlockRegStats* m_gpa = nullptr;
-  BlockRegStats* m_fpa = nullptr;
+  BlockRegStats* m_fpa = nullptr;  // m_fpa->any: the block uses the FPU
 
-  // Are we a broken block?
-  bool m_broken = false;
+  bool m_broken = false;            // no instruction that ends the block was found
+  bool m_memory_exception = false;  // the very first fetch failed
 
-  // Did we have a memory_exception?
-  bool m_memory_exception = false;
-
-  // Which GQRs this block uses, if any.
-  BitSet8 m_gqr_used;
-
-  // Which GQRs this block modifies, if any.
-  BitSet8 m_gqr_modified;
-
-  // Which GPRs this block reads from before defining, if any.
-  BitSet32 m_gpr_inputs;
-
-  // Which memory locations are occupied by this block.
-  Common::RangeSet<u32> m_physical_addresses;
+  BitSet8 m_gqr_used;         // GQRs read by quantized loads/stores
+  BitSet8 m_gqr_modified;     // GQRs written by mtspr
+  BitSet32 m_gpr_inputs;      // GPRs read before being written in the block
+  Common::RangeSet<u32> m_physical_addresses;  // memory the block's code occupies
 };
 
 class PPCAnalyzer
@@ -140,43 +130,26 @@ class PPCAnalyzer
 public:
   enum AnalystOption
   {
-    // Conditional branch continuing
-    // If the JIT core supports conditional branches within the blocks
-    // Block will end on unconditional branch or other ENDBLOCK flagged instruction.
-    // Requires JIT support to be enabled.
+    // Conditional branches (and traps) do not end the block; execution
+    // continues with the fall-through path. Needs JIT support.
     OPTION_CONDITIONAL_CONTINUE = (1 << 0),
-
-    // Try to inline unconditional branches/calls/returns.
-    // Also track the LR value to follow unconditional return instructions.
-    // Might require JIT intervention to support it correctly.
-    // Especially if the BLR optimization is used.
+    // Inline unconditional branches and calls, and a blr that returns from
+    // an inlined call.
     OPTION_BRANCH_FOLLOW = (1 << 1),
-
-    // Complex blocks support jumping backwards on to themselves.
-    // Happens commonly in loops, pretty complex to support.
-    // May require register caches to use register usage metrics.
-    // XXX: NOT COMPLETE
+    // Reserved; not implemented.
     OPTION_COMPLEX_BLOCK = (1 << 2),
-
-    // Similar to complex blocks.
-    // Instead of jumping backwards, this jumps forwards within the block.
-    // Requires JIT support to work.
-    // XXX: NOT COMPLETE
+    // Reserved; not implemented.
     OPTION_FORWARD_JUMP = (1 << 3),
-
-    // Reorder compare/Rc instructions next to their associated branches and
-    // merge in the JIT (for common cases, anyway).
+    // Move CR-writing instructions (compares, Rc=1) next to the branches
+    // that consume them.
     OPTION_BRANCH_MERGE = (1 << 4),
-
-    // Reorder carry instructions next to their associated branches and pass
-    // carry flags in the x86 flags between them, instead of in XER.
+    // Move carry producers and consumers together so CA can stay in the
+    // host flags.
     OPTION_CARRY_MERGE = (1 << 5),
-
-    // Reorder cror instructions next to their associated fcmp.
+    // Move cror next to the fcmp that feeds it.
     OPTION_CROR_MERGE = (1 << 6),
   };
 
-  // Option setting/getting
   void SetOption(AnalystOption option) { m_options |= option; }
   void ClearOption(AnalystOption option) { m_options &= ~(option); }
   bool HasOption(AnalystOption option) const { return !!(m_options & option); }
@@ -184,34 +157,40 @@ public:
   void SetBranchFollowingEnabled(bool enabled) { m_enable_branch_following = enabled; }
   void SetFloatExceptionsEnabled(bool enabled) { m_enable_float_exceptions = enabled; }
   void SetDivByZeroExceptionsEnabled(bool enabled) { m_enable_div_by_zero_exceptions = enabled; }
+
+  // Decodes up to block_size instructions from address into buffer and fills
+  // in block. Returns the address after the last decoded instruction (or the
+  // last followed branch target).
   u32 Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer, std::size_t block_size) const;
 
 private:
-  enum class ReorderType
+  enum class BubbleKind
   {
     Carry,
-    CMP,
-    CROR
+    Compare,
+    Cror,
   };
 
   bool CanSwapAdjacentOps(const CodeOp& a, const CodeOp& b) const;
-  void ReorderInstructionsCore(u32 instructions, CodeOp* code, bool reverse,
-                               ReorderType type) const;
+  bool WantsToBubble(const CodeOp& op, BubbleKind kind) const;
+  void BubblePass(CodeOp* code, u32 count, bool backwards, BubbleKind kind) const;
   void ReorderInstructions(u32 instructions, CodeOp* code) const;
   void SetInstructionStats(CodeBlock* block, CodeOp* code, const GekkoOPInfo* opinfo) const;
   bool IsBusyWaitLoop(CodeBlock* block, CodeOp* code, size_t instructions) const;
 
-  // Options
   u32 m_options = 0;
-
   bool m_is_debugging_enabled = false;
   bool m_enable_branch_following = false;
   bool m_enable_float_exceptions = false;
   bool m_enable_div_by_zero_exceptions = false;
 };
 
+// Scans [startAddr, endAddr) for call targets and adds the functions found
+// (plus exception handlers and functions that directly follow known ones).
 void FindFunctions(const Core::CPUThreadGuard& guard, u32 startAddr, u32 endAddr,
                    PPCSymbolDB* func_db);
+// Determines the size, calls and flags of the function at startAddr.
+// Returns false if no valid end was found. max_size = 0 means unbounded.
 bool AnalyzeFunction(const Core::CPUThreadGuard& guard, u32 startAddr, Common::Symbol& func,
                      u32 max_size = 0);
 bool ReanalyzeFunction(const Core::CPUThreadGuard& guard, u32 start_addr, Common::Symbol& func,
