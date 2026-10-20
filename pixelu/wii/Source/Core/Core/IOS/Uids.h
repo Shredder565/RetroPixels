@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,7 +6,8 @@
 
 namespace IOS
 {
-// IOS processes have their UID and GID set to their (hardcoded) PID.
+// Every IOS resource manager runs as its own process. Its UID and GID are both equal to its
+// process ID, which is fixed for each module (see WiiBrew, "IOS/Kernel").
 enum IOSUid : u32
 {
   PID_KERNEL = 0,
@@ -32,8 +32,10 @@ enum IOSUid : u32
   PID_UNKNOWN = 19,
 };
 
+// UIDs handed out to PowerPC titles (through /sys/uid.sys) start here.
 constexpr u32 FIRST_PPC_UID = 0x1000;
 
+// The System Menu always gets the first PPC UID and group 1.
 constexpr u32 SYSMENU_UID = FIRST_PPC_UID;
 constexpr u16 SYSMENU_GID = 1;
 

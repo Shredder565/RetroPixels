@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,8 @@
 
 namespace IOS::HLE
 {
+// The low memory constants an IOS kernel publishes at 0x3100-0x3160 when it boots, together
+// with its version and build date. One entry per IOS version that we know about.
 struct MemoryValues
 {
   u16 ios_number;
@@ -35,30 +36,31 @@ struct MemoryValues
 
 const std::array<MemoryValues, 41>& GetMemoryValues();
 
+// Modules (resource managers) that a given IOS version ships with.
 enum class Feature
 {
   // Kernel, ES, FS, STM, DI, OH0, OH1
   Core = 1 << 0,
-  // SDIO
+  // SD slot driver
   SDIO = 1 << 1,
-  // Network (base support: SO, Ethernet; KD, SSL, NCD, Wi-Fi)
+  // Networking: sockets and Ethernet, then KD, SSL, NCD and Wi-Fi
   SO = 1 << 2,
   Ethernet = 1 << 3,
   KD = 1 << 4,
   SSL = 1 << 5,
   NCD = 1 << 6,
   WiFi = 1 << 7,
-  // KBD
+  // USB keyboard
   USB_KBD = 1 << 8,
-  // USB_HID v4
+  // Version 4 of the USB HID interface
   USB_HIDv4 = 1 << 9,
-  // SDv2 support
+  // SDHC (SD version 2) support
   SDv2 = 1 << 10,
-  // New USB modules (USB, USB_VEN, USB_HUB, USB_MSC, OHCI0, USB_HIDv5)
+  // The rewritten USB stack (USB, USB_VEN, USB_HUB, USB_MSC, OHCI0, USB_HIDv5)
   NewUSB = 1 << 11,
-  // EHCI
+  // USB 2.0 host controller
   EHCI = 1 << 12,
-  // WFS (WFSSRV, WFSI, USB_SHARED)
+  // Wii Fit U / WFS storage (WFSSRV, WFSI, USB_SHARED)
   WFS = 1 << 13,
 };
 
