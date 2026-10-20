@@ -135,15 +135,10 @@ void NetWDCommandDevice::StepTowardsTargetStatus()
 void NetWDCommandDevice::DoState(PointerWrap& p)
 {
   Device::DoState(p);
-  p.Do(m_ipc_owner_fd);
-  p.Do(m_mode);
-  p.Do(m_buffer_flags);
-  p.Do(m_status);
-  p.Do(m_target_status);
-  p.Do(m_nitro_enabled_channels);
-  p.Do(m_info);
-  p.Do(m_recv_frame_requests);
-  p.Do(m_recv_notification_requests);
+  // The order is the savestate layout.
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_ipc_owner_fd, m_mode, m_buffer_flags, m_status, m_target_status,
+       m_nitro_enabled_channels, m_info, m_recv_frame_requests, m_recv_notification_requests);
 }
 
 std::optional<IPCReply> NetWDCommandDevice::Open(const OpenRequest& request)

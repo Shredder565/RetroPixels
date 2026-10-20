@@ -20,6 +20,20 @@ namespace IOS::HLE::NWC24
 {
 namespace
 {
+// Every multi-byte field of these files is stored big endian.
+u32 ByteSwapped(u32 value)
+{
+  return Common::swap32(value);
+}
+
+u64 ByteSwapped(u64 value)
+{
+  return Common::swap64(value);
+}
+}  // namespace
+
+namespace
+{
 constexpr const char CONFIG_PATH[] = "/" WII_WC24CONF_DIR "/nwc24msg.cfg";
 constexpr const char CBK_PATH[] = "/" WII_WC24CONF_DIR "/nwc24msg.cbk";
 
@@ -124,7 +138,7 @@ u32 NWC24Config::CalculateNwc24ConfigChecksum() const
 
   u32 sum = 0;
   for (const u32 word : words)
-    sum += Common::swap32(word);
+    sum += ByteSwapped(word);
   return sum;
 }
 
@@ -154,32 +168,32 @@ s32 NWC24Config::CheckNwc24Config() const
 
 u32 NWC24Config::Magic() const
 {
-  return Common::swap32(m_data.magic);
+  return ByteSwapped(m_data.magic);
 }
 
 void NWC24Config::SetMagic(u32 magic)
 {
-  m_data.magic = Common::swap32(magic);
+  m_data.magic = ByteSwapped(magic);
 }
 
 u32 NWC24Config::Version() const
 {
-  return Common::swap32(m_data.version);
+  return ByteSwapped(m_data.version);
 }
 
 void NWC24Config::SetVersion(u32 version)
 {
-  m_data.version = Common::swap32(version);
+  m_data.version = ByteSwapped(version);
 }
 
 u32 NWC24Config::IdGen() const
 {
-  return Common::swap32(m_data.id_generation);
+  return ByteSwapped(m_data.id_generation);
 }
 
 void NWC24Config::SetIdGen(u32 id_generation)
 {
-  m_data.id_generation = Common::swap32(id_generation);
+  m_data.id_generation = ByteSwapped(id_generation);
 }
 
 void NWC24Config::IncrementIdGen()
@@ -189,43 +203,43 @@ void NWC24Config::IncrementIdGen()
 
 u32 NWC24Config::Checksum() const
 {
-  return Common::swap32(m_data.checksum);
+  return ByteSwapped(m_data.checksum);
 }
 
 void NWC24Config::SetChecksum(u32 checksum)
 {
-  m_data.checksum = Common::swap32(checksum);
+  m_data.checksum = ByteSwapped(checksum);
 }
 
 NWC24CreationStage NWC24Config::CreationStage() const
 {
-  return static_cast<NWC24CreationStage>(Common::swap32(static_cast<u32>(m_data.creation_stage)));
+  return static_cast<NWC24CreationStage>(ByteSwapped(static_cast<u32>(m_data.creation_stage)));
 }
 
 void NWC24Config::SetCreationStage(NWC24CreationStage creation_stage)
 {
   m_data.creation_stage =
-      static_cast<NWC24CreationStage>(Common::swap32(static_cast<u32>(creation_stage)));
+      static_cast<NWC24CreationStage>(ByteSwapped(static_cast<u32>(creation_stage)));
 }
 
 u32 NWC24Config::EnableBooting() const
 {
-  return Common::swap32(m_data.enable_booting);
+  return ByteSwapped(m_data.enable_booting);
 }
 
 void NWC24Config::SetEnableBooting(u32 enable_booting)
 {
-  m_data.enable_booting = Common::swap32(enable_booting);
+  m_data.enable_booting = ByteSwapped(enable_booting);
 }
 
 u64 NWC24Config::Id() const
 {
-  return Common::swap64(m_data.nwc24_id);
+  return ByteSwapped(m_data.nwc24_id);
 }
 
 void NWC24Config::SetId(u64 nwc24_id)
 {
-  m_data.nwc24_id = Common::swap64(nwc24_id);
+  m_data.nwc24_id = ByteSwapped(nwc24_id);
 }
 
 const char* NWC24Config::Email() const

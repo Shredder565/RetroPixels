@@ -53,22 +53,24 @@ std::optional<IPCReply> USB_VEN::IOCtl(const IOCtlRequest& request)
 
   switch (request.request)
   {
-  case USB::IOCTL_USBV5_GETVERSION:
-    return GetUSBVersion(request);
-  case USB::IOCTL_USBV5_GETDEVICECHANGE:
-    return GetDeviceChange(request);
-  case USB::IOCTL_USBV5_SHUTDOWN:
-    return Shutdown(request);
+  // Commands for one device.
   case USB::IOCTL_USBV5_GETDEVPARAMS:
     return on_device(&USB_VEN::GetDeviceInfo);
-  case USB::IOCTL_USBV5_ATTACHFINISH:
-    return IPCReply(IPC_SUCCESS);
   case USB::IOCTL_USBV5_SETALTERNATE:
     return on_device(&USB_VEN::SetAlternateSetting);
   case USB::IOCTL_USBV5_SUSPEND_RESUME:
     return on_device(&USB_VEN::SuspendResume);
   case USB::IOCTL_USBV5_CANCELENDPOINT:
     return on_device(&USB_VEN::CancelEndpoint);
+  // Commands for the module.
+  case USB::IOCTL_USBV5_GETVERSION:
+    return GetUSBVersion(request);
+  case USB::IOCTL_USBV5_GETDEVICECHANGE:
+    return GetDeviceChange(request);
+  case USB::IOCTL_USBV5_SHUTDOWN:
+    return Shutdown(request);
+  case USB::IOCTL_USBV5_ATTACHFINISH:
+    return IPCReply(IPC_SUCCESS);
   default:
     request.DumpUnknown(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_USB,
                         Common::Log::LogLevel::LERROR);

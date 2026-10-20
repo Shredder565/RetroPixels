@@ -3,6 +3,7 @@
 #include "Core/IOS/USB/Common.h"
 
 #include <algorithm>
+#include <initializer_list>
 
 #include <fmt/format.h>
 
@@ -82,25 +83,23 @@ u64 Device::GetId() const
 
 u16 Device::GetVid() const
 {
-  return GetDeviceDescriptor().idVendor;
+  const DeviceDescriptor descriptor = GetDeviceDescriptor();
+  return descriptor.idVendor;
 }
 
 u16 Device::GetPid() const
 {
-  return GetDeviceDescriptor().idProduct;
+  const DeviceDescriptor descriptor = GetDeviceDescriptor();
+  return descriptor.idProduct;
 }
 
 bool Device::HasClass(const u8 device_class) const
 {
-  if (GetDeviceDescriptor().bDeviceClass == device_class)
-    return true;
-
-  for (const InterfaceDescriptor& interface_descriptor : GetInterfaces(0))
-  {
-    if (interface_descriptor.bInterfaceClass == device_class)
-      return true;
-  }
-  return false;
+  // The device's own class, or that of any interface of the first configuration.
+  return GetDeviceDescriptor().bDeviceClass == device_class ||
+         std::ranges::any_of(GetInterfaces(0), [device_class](const InterfaceDescriptor& desc) {
+           return desc.bInterfaceClass == device_class;
+         });
 }
 
 std::string Device::GetErrorName(const int error_code) const
@@ -110,10 +109,8 @@ std::string Device::GetErrorName(const int error_code) const
 
 void DeviceDescriptor::Swap()
 {
-  bcdUSB = Common::swap16(bcdUSB);
-  idVendor = Common::swap16(idVendor);
-  idProduct = Common::swap16(idProduct);
-  bcdDevice = Common::swap16(bcdDevice);
+  for (u16* field : {&bcdUSB, &idVendor, &idProduct, &bcdDevice})
+    *field = Common::swap16(*field);
 }
 
 void ConfigDescriptor::Swap()

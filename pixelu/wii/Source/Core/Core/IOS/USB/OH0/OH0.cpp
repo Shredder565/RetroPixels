@@ -3,6 +3,7 @@
 #include "Core/IOS/USB/OH0/OH0.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <utility>
 
@@ -328,21 +329,20 @@ std::optional<IPCReply> OH0::DeviceIOCtlV(const u64 device_id, const IOCtlVReque
   if (!device)
     return IPCReply(IPC_ENOENT);
 
-  switch (request.request)
+  constexpr std::array TRANSFERS = {USB::IOCTLV_USBV0_CTRLMSG, USB::IOCTLV_USBV0_BLKMSG,
+                                     USB::IOCTLV_USBV0_LBLKMSG, USB::IOCTLV_USBV0_INTRMSG,
+                                     USB::IOCTLV_USBV0_ISOMSG};
+  if (std::ranges::find(TRANSFERS, request.request) != TRANSFERS.end())
   {
-  case USB::IOCTLV_USBV0_CTRLMSG:
-  case USB::IOCTLV_USBV0_BLKMSG:
-  case USB::IOCTLV_USBV0_LBLKMSG:
-  case USB::IOCTLV_USBV0_INTRMSG:
-  case USB::IOCTLV_USBV0_ISOMSG:
     return HandleTransfer(device, request.request,
                           [&] { return StartTransfer(*device, request); });
-  case USB::IOCTLV_USBV0_UNKNOWN_32:
-    request.DumpUnknown(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_USB);
-    return IPCReply(IPC_SUCCESS);
-  default:
-    return IPCReply(IPC_EINVAL);
   }
+
+  // Command 32 is unknown; it is logged and accepted.
+  if (request.request != USB::IOCTLV_USBV0_UNKNOWN_32)
+    return IPCReply(IPC_EINVAL);
+  request.DumpUnknown(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_USB);
+  return IPCReply(IPC_SUCCESS);
 }
 
 s32 OH0::StartTransfer(USB::Device& device, const IOCtlVRequest& ioctlv)

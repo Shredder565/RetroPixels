@@ -26,6 +26,15 @@ namespace IOS::HLE::NWC24::Mail
 {
 namespace
 {
+// Every multi-byte field of these files is stored big endian.
+u32 ByteSwapped(u32 value)
+{
+  return Common::swap32(value);
+}
+}  // namespace
+
+namespace
+{
 constexpr const char SEND_LIST_PATH[] = "/" WII_WC24CONF_DIR "/mbox"
                                         "/wc24send.ctl";
 
@@ -135,13 +144,13 @@ void WC24SendList::WriteSendList() const
 
 bool WC24SendList::CheckSendList() const
 {
-  const u32 magic = Common::swap32(m_data.header.magic);
+  const u32 magic = ByteSwapped(m_data.header.magic);
   if (magic != MAIL_LIST_MAGIC)
   {
     ERROR_LOG_FMT(IOS_WC24, "Send List magic mismatch ({} != {})", magic, MAIL_LIST_MAGIC);
     return false;
   }
-  if (Common::swap32(m_data.header.version) != SEND_LIST_VERSION)
+  if (ByteSwapped(m_data.header.version) != SEND_LIST_VERSION)
   {
     ERROR_LOG_FMT(IOS_WC24, "Send List version mismatch");
     return false;
@@ -152,19 +161,19 @@ bool WC24SendList::CheckSendList() const
 u32 WC24SendList::GetNumberOfMail() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.number_of_mail);
+  return ByteSwapped(m_data.header.number_of_mail);
 }
 
 u32 WC24SendList::GetEntryId(u32 entry_index) const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.entries[entry_index].id);
+  return ByteSwapped(m_data.entries[entry_index].id);
 }
 
 u32 WC24SendList::GetMailSize(u32 index) const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.entries[index].msg_size);
+  return ByteSwapped(m_data.entries[index].msg_size);
 }
 
 ErrorCode WC24SendList::DeleteMessage(u32 index)
@@ -176,12 +185,12 @@ ErrorCode WC24SendList::DeleteMessage(u32 index)
 
   // The freed entry is reused next, with the same ID.
   MailListHeader& header = m_data.header;
-  header.number_of_mail = Common::swap32(GetNumberOfMail() - 1);
-  header.next_entry_id = Common::swap32(GetEntryId(index));
+  header.number_of_mail = ByteSwapped(GetNumberOfMail() - 1);
+  header.next_entry_id = ByteSwapped(GetEntryId(index));
   header.next_entry_offset = CalculateFileOffset(index);
   // Stored without converting back to big endian (long-standing behaviour); nothing reads it.
   header.total_size_of_messages =
-      Common::swap32(header.total_size_of_messages) - GetMailSize(index);
+      ByteSwapped(header.total_size_of_messages) - GetMailSize(index);
 
   m_data.entries[index] = {};
   return WC24_OK;
@@ -195,14 +204,14 @@ std::string WC24SendList::GetMailPath(u32 index) const
 u32 WC24SendList::GetNextEntryId() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.next_entry_id);
+  return ByteSwapped(m_data.header.next_entry_id);
 }
 
 u32 WC24SendList::GetNextEntryIndex() const
 {
   ASSERT(!IsDisabled());
   // Offsets below the first entry wrap around (u32), as in IOS.
-  return (Common::swap32(m_data.header.next_entry_offset) - ENTRY_SIZE) / ENTRY_SIZE;
+  return (ByteSwapped(m_data.header.next_entry_offset) - ENTRY_SIZE) / ENTRY_SIZE;
 }
 
 std::vector<u32> WC24SendList::GetMailToSend() const
@@ -240,7 +249,7 @@ ErrorCode WC24SendList::AddRegistrationMessages(const WC24FriendList& friend_lis
     const u32 index = GetNextEntryIndex();
     const u32 id = GetNextEntryId();
     MailListEntry& entry = m_data.entries[index];
-    entry.id = Common::swap32(id);
+    entry.id = ByteSwapped(id);
 
     const std::string mail =
         fmt::format(REGISTRATION_MAIL, sender, friend_code, fmt::gmtime(std::time(nullptr)));
@@ -256,12 +265,12 @@ ErrorCode WC24SendList::AddRegistrationMessages(const WC24FriendList& friend_lis
     }
     NOTICE_LOG_FMT(IOS_WC24, "Issued registration message for Wii Friend: {}", friend_code);
 
-    entry.msg_size = Common::swap32(mail_size);
+    entry.msg_size = ByteSwapped(mail_size);
     MailListHeader& header = m_data.header;
-    header.number_of_mail = Common::swap32(GetNumberOfMail() + 1);
-    header.next_entry_id = Common::swap32(id + 1);
+    header.number_of_mail = ByteSwapped(GetNumberOfMail() + 1);
+    header.next_entry_id = ByteSwapped(id + 1);
     // Host order, like in DeleteMessage.
-    header.total_size_of_messages = Common::swap32(header.total_size_of_messages) + mail_size;
+    header.total_size_of_messages = ByteSwapped(header.total_size_of_messages) + mail_size;
     PointAtFreeEntry();
   }
 

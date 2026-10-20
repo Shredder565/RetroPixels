@@ -44,31 +44,35 @@ namespace IOS::HLE
 {
 namespace
 {
+// /dev/net/kd/request commands.
+namespace KDCommand
+{
 enum : u32
 {
-  IOCTL_NWC24_SUSPEND_SCHEDULER = 0x01,
-  IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER = 0x02,
-  IOCTL_NWC24_EXEC_RESUME_SCHEDULER = 0x03,
-  IOCTL_NWC24_KD_GET_TIME_TRIGGERS = 0x04,
-  IOCTL_NWC24_SET_SCHEDULE_SPAN = 0x05,
-  IOCTL_NWC24_STARTUP_SOCKET = 0x06,
-  IOCTL_NWC24_CLEANUP_SOCKET = 0x07,
-  IOCTL_NWC24_LOCK_SOCKET = 0x08,
-  IOCTL_NWC24_UNLOCK_SOCKET = 0x09,
-  IOCTL_NWC24_CHECK_MAIL_NOW = 0x0A,
-  IOCTL_NWC24_SEND_MAIL_NOW = 0x0B,
-  IOCTL_NWC24_RECEIVE_MAIL_NOW = 0x0C,
-  IOCTL_NWC24_SAVE_MAIL_NOW = 0x0D,
-  IOCTL_NWC24_DOWNLOAD_NOW_EX = 0x0E,
-  IOCTL_NWC24_REQUEST_GENERATED_USER_ID = 0x0F,
-  IOCTL_NWC24_REQUEST_REGISTER_USER_ID = 0x10,
-  IOCTL_NWC24_GET_SCHEDULER_STAT = 0x1E,
-  IOCTL_NWC24_SET_FILTER_MODE = 0x1F,
-  IOCTL_NWC24_SET_DEBUG_MODE = 0x20,
-  IOCTL_NWC24_KD_SET_NEXT_WAKEUP = 0x21,
-  IOCTL_NWC24_SET_SCRIPT_MODE = 0x22,
-  IOCTL_NWC24_REQUEST_SHUTDOWN = 0x28,
+  SuspendScheduler = 0x1,
+  ExecTrySuspendScheduler = 0x2,
+  ExecResumeScheduler = 0x3,
+  KdGetTimeTriggers = 0x4,
+  SetScheduleSpan = 0x5,
+  StartupSocket = 0x6,
+  CleanupSocket = 0x7,
+  LockSocket = 0x8,
+  UnlockSocket = 0x9,
+  CheckMailNow = 0xa,
+  SendMailNow = 0xb,
+  ReceiveMailNow = 0xc,
+  SaveMailNow = 0xd,
+  DownloadNowEx = 0xe,
+  RequestGeneratedUserId = 0xf,
+  RequestRegisterUserId = 0x10,
+  GetSchedulerStat = 0x1e,
+  SetFilterMode = 0x1f,
+  SetDebugMode = 0x20,
+  KdSetNextWakeup = 0x21,
+  SetScriptMode = 0x22,
+  RequestShutdown = 0x28,
 };
+}  // namespace KDCommand
 
 // Indices into the scheduler status buffer.
 constexpr size_t STAT_PERMISSIONS = 1;
@@ -957,42 +961,42 @@ std::optional<IPCReply> NetKDRequestDevice::IOCtl(const IOCtlRequest& request)
   switch (request.request)
   {
   // Slow requests are answered from the worker thread.
-  case IOCTL_NWC24_REQUEST_REGISTER_USER_ID:
+  case KDCommand::RequestRegisterUserId:
     return RunLater(request, &NetKDRequestDevice::HandleRequestRegisterUserId);
-  case IOCTL_NWC24_CHECK_MAIL_NOW:
+  case KDCommand::CheckMailNow:
     return RunLater(request, &NetKDRequestDevice::HandleNWC24CheckMailNow);
-  case IOCTL_NWC24_DOWNLOAD_NOW_EX:
+  case KDCommand::DownloadNowEx:
     return RunLater(request, &NetKDRequestDevice::HandleNWC24DownloadNowEx);
-  case IOCTL_NWC24_SEND_MAIL_NOW:
+  case KDCommand::SendMailNow:
     return RunLater(request, &NetKDRequestDevice::HandleNWC24SendMailNow);
 
-  case IOCTL_NWC24_SUSPEND_SCHEDULER:
-  case IOCTL_NWC24_EXEC_RESUME_SCHEDULER:
+  case KDCommand::SuspendScheduler:
+  case KDCommand::ExecResumeScheduler:
     // The scheduler keeps running; report success.
     WriteReturnValue(memory, 0, request.buffer_out);
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_STARTUP_SOCKET:
+  case KDCommand::StartupSocket:
     WriteReturnValue(memory, 0, request.buffer_out);
     memory.Write_U32(0, request.buffer_out + 4);
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_CLEANUP_SOCKET:
+  case KDCommand::CleanupSocket:
     GetEmulationKernel().GetSocketManager()->Clean();
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER:
-  case IOCTL_NWC24_LOCK_SOCKET:
-  case IOCTL_NWC24_UNLOCK_SOCKET:
-  case IOCTL_NWC24_SAVE_MAIL_NOW:
+  case KDCommand::ExecTrySuspendScheduler:
+  case KDCommand::LockSocket:
+  case KDCommand::UnlockSocket:
+  case KDCommand::SaveMailNow:
     INFO_LOG_FMT(IOS_WC24, "KD: ioctl {:#x} accepted without effect", request.request);
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_REQUEST_GENERATED_USER_ID:
+  case KDCommand::RequestGeneratedUserId:
     HandleRequestGeneratedUserId(request);
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_GET_SCHEDULER_STAT:
+  case KDCommand::GetSchedulerStat:
   {
     if (bad_out(16))
       return IPCReply(IPC_EINVAL);
@@ -1002,7 +1006,7 @@ std::optional<IPCReply> NetKDRequestDevice::IOCtl(const IOCtlRequest& request)
     return IPCReply(IPC_SUCCESS);
   }
 
-  case IOCTL_NWC24_REQUEST_SHUTDOWN:
+  case KDCommand::RequestShutdown:
   {
     const bool bad_in =
         request.buffer_in == 0 || request.buffer_in % 4 != 0 || request.buffer_in_size < 8;
@@ -1014,7 +1018,7 @@ std::optional<IPCReply> NetKDRequestDevice::IOCtl(const IOCtlRequest& request)
     return IPCReply(IPC_SUCCESS);
   }
 
-  case IOCTL_NWC24_KD_GET_TIME_TRIGGERS:
+  case KDCommand::KdGetTimeTriggers:
   {
     if (bad_out(12))
       return IPCReply(IPC_EINVAL);

@@ -16,6 +16,15 @@ namespace IOS::HLE::NWC24
 {
 namespace
 {
+// Every multi-byte field of these files is stored big endian.
+u32 ByteSwapped(u32 value)
+{
+  return Common::swap32(value);
+}
+}  // namespace
+
+namespace
+{
 constexpr const char DL_LIST_PATH[] = "/" WII_WC24CONF_DIR "/nwc24dl.bin";
 
 constexpr bool Bit(u32 value, u32 bit)
@@ -105,29 +114,29 @@ bool NWC24Dl::DoesEntryExist(u16 entry_index) const
 std::string NWC24Dl::GetDownloadURL(u16 entry_index, std::optional<u8> subtask_id) const
 {
   const DLListEntry& entry = Entry(entry_index);
-  return WithSubtask(entry.dl_url, subtask_id, Bit(Common::swap32(entry.subtask_bitmask), 1));
+  return WithSubtask(entry.dl_url, subtask_id, Bit(ByteSwapped(entry.subtask_bitmask), 1));
 }
 
 std::string NWC24Dl::GetVFFContentName(u16 entry_index, std::optional<u8> subtask_id) const
 {
   const DLListEntry& entry = Entry(entry_index);
-  return WithSubtask(entry.filename, subtask_id, Bit(Common::swap32(entry.subtask_bitmask), 0));
+  return WithSubtask(entry.filename, subtask_id, Bit(ByteSwapped(entry.subtask_bitmask), 0));
 }
 
 std::string NWC24Dl::GetVFFPath(u16 entry_index) const
 {
   const DLListEntry& entry = Entry(entry_index);
   // Note the order: the low half of the title ID comes first in this path.
-  return fmt::format("/title/{:08x}/{:08x}/data/wc24dl.vff", Common::swap32(entry.low_title_id),
-                     Common::swap32(entry.high_title_id));
+  return fmt::format("/title/{:08x}/{:08x}/data/wc24dl.vff", ByteSwapped(entry.low_title_id),
+                     ByteSwapped(entry.high_title_id));
 }
 
 std::optional<WC24PubkMod> NWC24Dl::GetWC24PubkMod(u16 entry_index) const
 {
   const DLListEntry& entry = Entry(entry_index);
   const std::string path =
-      fmt::format("/title/{:08x}/{:08x}/data/wc24pubk.mod", Common::swap32(entry.low_title_id),
-                  Common::swap32(entry.high_title_id));
+      fmt::format("/title/{:08x}/{:08x}/data/wc24pubk.mod", ByteSwapped(entry.low_title_id),
+                  ByteSwapped(entry.high_title_id));
 
   const auto file = m_fs->OpenFile(PID_KD, PID_KD, path, FS::Mode::Read);
   WC24PubkMod contents;
@@ -138,17 +147,17 @@ std::optional<WC24PubkMod> NWC24Dl::GetWC24PubkMod(u16 entry_index) const
 
 bool NWC24Dl::IsEncrypted(u16 entry_index) const
 {
-  return Bit(Common::swap32(Entry(entry_index).flags), 3);
+  return Bit(ByteSwapped(Entry(entry_index).flags), 3);
 }
 
 bool NWC24Dl::IsRSASigned(u16 entry_index) const
 {
-  return !Bit(Common::swap32(Entry(entry_index).flags), 2);
+  return !Bit(ByteSwapped(Entry(entry_index).flags), 2);
 }
 
 bool NWC24Dl::SkipSchedulerDownload(u16 entry_index) const
 {
-  return Bit(Common::swap32(Entry(entry_index).flags), 5);
+  return Bit(ByteSwapped(Entry(entry_index).flags), 5);
 }
 
 bool NWC24Dl::HasSubtask(u16 entry_index) const
@@ -172,7 +181,7 @@ bool NWC24Dl::IsValidSubtask(u16 entry_index, u8 subtask_id) const
 u64 NWC24Dl::GetNextDownloadTime(u16 record_index) const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.records[record_index].next_dl_timestamp) * SECONDS_PER_MINUTE;
+  return ByteSwapped(m_data.records[record_index].next_dl_timestamp) * SECONDS_PER_MINUTE;
 }
 
 u64 NWC24Dl::GetRetryTime(u16 entry_index) const
@@ -189,7 +198,7 @@ u64 NWC24Dl::GetDownloadMargin(u16 entry_index) const
 void NWC24Dl::SetNextDownloadTime(u16 record_index, u64 value, std::optional<u8> subtask_id)
 {
   ASSERT(!IsDisabled());
-  const u32 minutes_be = Common::swap32(static_cast<u32>(value / SECONDS_PER_MINUTE));
+  const u32 minutes_be = ByteSwapped(static_cast<u32>(value / SECONDS_PER_MINUTE));
   if (subtask_id)
     m_data.entries[record_index].subtask_timestamps[*subtask_id] = minutes_be;
   m_data.records[record_index].next_dl_timestamp = minutes_be;
@@ -198,32 +207,32 @@ void NWC24Dl::SetNextDownloadTime(u16 record_index, u64 value, std::optional<u8>
 u64 NWC24Dl::GetLastSubtaskDownloadTime(u16 entry_index, u8 subtask_id) const
 {
   const DLListEntry& entry = Entry(entry_index);
-  const u64 last = Common::swap32(entry.subtask_timestamps[subtask_id]);
-  const u64 interval = Common::swap32(entry.server_dl_interval);
+  const u64 last = ByteSwapped(entry.subtask_timestamps[subtask_id]);
+  const u64 interval = ByteSwapped(entry.server_dl_interval);
   return (last + interval) * SECONDS_PER_MINUTE;
 }
 
 u32 NWC24Dl::Magic() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.magic);
+  return ByteSwapped(m_data.header.magic);
 }
 
 void NWC24Dl::SetMagic(u32 magic)
 {
   ASSERT(!IsDisabled());
-  m_data.header.magic = Common::swap32(magic);
+  m_data.header.magic = ByteSwapped(magic);
 }
 
 u32 NWC24Dl::Version() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.version);
+  return ByteSwapped(m_data.header.version);
 }
 
 void NWC24Dl::SetVersion(u32 version)
 {
   ASSERT(!IsDisabled());
-  m_data.header.version = Common::swap32(version);
+  m_data.header.version = ByteSwapped(version);
 }
 }  // namespace IOS::HLE::NWC24
