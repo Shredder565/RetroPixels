@@ -35,6 +35,11 @@ THIRD_PARTY = (
     "Common/unix/fast_float.h",
     "Common/GLInclude/",
     "Cafe/OS/libs/nsyshid/g721/",
+    # font data, not code: Lato Medium (SIL OFL 1.1), the 'More Perfect DOS VGA'
+    # bitmap font, and the generated Font Awesome 5 icon table (zlib licence)
+    "resource/CafeDefaultFont.cpp",
+    "Cafe/OS/libs/coreinit/coreinit_OSScreen_font.h",
+    "resource/IconsFontAwesome5.h",
 )
 
 

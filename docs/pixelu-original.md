@@ -55,10 +55,10 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Kind | Lines | Share |
 |---|---:|---:|
 | Original (RetroPixels) | 199714 | 81.5% |
-| Cemu, untouched | 6056 | 2.5% |
+| Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
-| Third-party | 39404 | 16.1% |
+| Third-party | 45460 | 18.5% |
 | **All** | **245174** | 100% |
 
 | Module | Lines | Original lines | Status |
@@ -102,7 +102,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs (shared headers) | 352 | 352 | original |
 | Cafe/OS/libs/avm | 60 | 60 | original |
 | Cafe/OS/libs/camera | 266 | 266 | original |
-| Cafe/OS/libs/coreinit | 16729 | 14187 | mixed (85% original) |
+| Cafe/OS/libs/coreinit | 16729 | 14187 | mixed (85% original), 2542 lines third-party |
 | Cafe/OS/libs/dmae | 174 | 174 | original |
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
 | Cafe/OS/libs/erreula | 514 | 514 | original |
@@ -174,7 +174,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | input/api | 5342 | 5342 | original |
 | input/emulated | 2426 | 2426 | original |
 | input/motion | 354 | 354 | original |
-| resource | 3617 | 103 | mixed (3% original) |
+| resource | 3617 | 103 | mixed (3% original), 3514 lines third-party |
 | tools | 100 | 100 | original |
 | util (top level) | 54 | 54 | original |
 | util/boost | 65 | 65 | original |
