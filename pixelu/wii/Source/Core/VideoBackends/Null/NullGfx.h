@@ -1,13 +1,17 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <memory>
+#include <string_view>
+#include <vector>
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/EFBInterface.h"
 
 namespace Null
 {
+// A graphics device that creates placeholder objects and has no surface to present to.
 class NullGfx final : public AbstractGfx
 {
 public:
@@ -40,6 +44,7 @@ public:
   SurfaceInfo GetSurfaceInfo() const override { return {}; }
 };
 
+// An EFB that holds nothing: peeks read zero and pokes and reinterprets are ignored.
 class NullEFBInterface final : public EFBInterfaceBase
 {
   void ReinterpretPixelData(EFBReinterpretType convtype) override;

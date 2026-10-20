@@ -1,12 +1,14 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include "Common/CommonTypes.h"
 
 #include "VideoCommon/VertexManagerBase.h"
 
 namespace Null
 {
+// Batches are built by VideoCommon as usual and then thrown away.
 class VertexManager final : public VertexManagerBase
 {
 public:

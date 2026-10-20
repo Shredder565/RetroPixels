@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,7 @@
 
 namespace Null
 {
+// A texture with no storage; uploads and copies do nothing.
 class NullTexture final : public AbstractTexture
 {
 public:
@@ -29,6 +29,7 @@ public:
             u32 layer) override;
 };
 
+// Staging memory exists so callers can map and read it, but copies never fill it.
 class NullStagingTexture final : public AbstractStagingTexture
 {
 public:

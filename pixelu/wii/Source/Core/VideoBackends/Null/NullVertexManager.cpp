@@ -1,16 +1,15 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Null/NullVertexManager.h"
 
 namespace Null
 {
 VertexManager::VertexManager() = default;
-
 VertexManager::~VertexManager() = default;
 
-void VertexManager::DrawCurrentBatch(u32 base_index, u32 num_indices, u32 base_vertex)
+void VertexManager::DrawCurrentBatch(u32, u32, u32)
 {
+  // There is no device to draw with.
 }
 
 }  // namespace Null

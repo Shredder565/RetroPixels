@@ -1,28 +1,26 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
 
 #include "VideoCommon/TextureCacheBase.h"
 
 namespace Null
 {
+// EFB copies have no pixels to copy, so both kinds are ignored.
 class TextureCache final : public TextureCacheBase
 {
 protected:
-  void CopyEFB(AbstractStagingTexture* dst, const EFBCopyParams& params, u32 native_width,
-               u32 bytes_per_row, u32 num_blocks_y, u32 memory_stride,
-               const MathUtil::Rectangle<int>& src_rect, bool scale_by_half, bool linear_filter,
-               float y_scale, float gamma, bool clamp_top, bool clamp_bottom,
-               const std::array<u32, 3>& filter_coefficients) override
+  void CopyEFB(AbstractStagingTexture*, const EFBCopyParams&, u32, u32, u32, u32,
+               const MathUtil::Rectangle<int>&, bool, bool, float, float, bool, bool,
+               const std::array<u32, 3>&) override
   {
   }
 
-  void CopyEFBToCacheEntry(RcTcacheEntry& entry, bool is_depth_copy,
-                           const MathUtil::Rectangle<int>& src_rect, bool scale_by_half,
-                           bool linear_filter, EFBCopyFormat dst_format, bool is_intensity,
-                           float gamma, bool clamp_top, bool clamp_bottom,
-                           const std::array<u32, 3>& filter_coefficients) override
+  void CopyEFBToCacheEntry(RcTcacheEntry&, bool, const MathUtil::Rectangle<int>&, bool, bool,
+                           EFBCopyFormat, bool, float, bool, bool,
+                           const std::array<u32, 3>&) override
   {
   }
 };

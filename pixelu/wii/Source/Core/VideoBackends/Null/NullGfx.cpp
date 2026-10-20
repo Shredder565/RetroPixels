@@ -1,7 +1,8 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Null/NullGfx.h"
+
+#include <utility>
 
 #include "VideoBackends/Null/NullTexture.h"
 
@@ -12,7 +13,20 @@
 
 namespace Null
 {
-// Init functions
+namespace
+{
+class PlaceholderShader final : public AbstractShader
+{
+public:
+  explicit PlaceholderShader(ShaderStage stage) : AbstractShader(stage) {}
+};
+
+class PlaceholderPipeline final : public AbstractPipeline
+{
+};
+}  // namespace
+
+// The active config is refreshed when the device comes and goes, as the other backends do.
 NullGfx::NullGfx()
 {
   UpdateActiveConfig();
@@ -34,7 +48,7 @@ bool NullGfx::SupportsUtilityDrawing() const
 }
 
 std::unique_ptr<AbstractTexture> NullGfx::CreateTexture(const TextureConfig& config,
-                                                        std::string_view /* name */)
+                                                        std::string_view)
 {
   return std::make_unique<NullTexture>(config);
 }
@@ -43,39 +57,6 @@ std::unique_ptr<AbstractStagingTexture> NullGfx::CreateStagingTexture(StagingTex
                                                                       const TextureConfig& config)
 {
   return std::make_unique<NullStagingTexture>(type, config);
-}
-
-class NullShader final : public AbstractShader
-{
-public:
-  explicit NullShader(ShaderStage stage) : AbstractShader(stage) {}
-};
-
-std::unique_ptr<AbstractShader>
-NullGfx::CreateShaderFromSource(ShaderStage stage, std::string_view /* source */,
-                                VideoCommon::ShaderIncluder* /* shader_includer */,
-                                std::string_view /* name */)
-{
-  return std::make_unique<NullShader>(stage);
-}
-
-std::unique_ptr<AbstractShader> NullGfx::CreateShaderFromBinary(ShaderStage stage,
-                                                                const void* /* data */,
-                                                                size_t /* length */,
-                                                                std::string_view /* name */)
-{
-  return std::make_unique<NullShader>(stage);
-}
-
-class NullPipeline final : public AbstractPipeline
-{
-};
-
-std::unique_ptr<AbstractPipeline> NullGfx::CreatePipeline(const AbstractPipelineConfig& config,
-                                                          const void* cache_data,
-                                                          size_t cache_data_length)
-{
-  return std::make_unique<NullPipeline>();
 }
 
 std::unique_ptr<AbstractFramebuffer>
@@ -87,30 +68,49 @@ NullGfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* d
                                  std::move(additional_color_attachments));
 }
 
+std::unique_ptr<AbstractShader> NullGfx::CreateShaderFromSource(ShaderStage stage, std::string_view,
+                                                                VideoCommon::ShaderIncluder*,
+                                                                std::string_view)
+{
+  return std::make_unique<PlaceholderShader>(stage);
+}
+
+std::unique_ptr<AbstractShader> NullGfx::CreateShaderFromBinary(ShaderStage stage, const void*,
+                                                                size_t, std::string_view)
+{
+  return std::make_unique<PlaceholderShader>(stage);
+}
+
 std::unique_ptr<NativeVertexFormat>
 NullGfx::CreateNativeVertexFormat(const PortableVertexDeclaration& vtx_decl)
 {
   return std::make_unique<NativeVertexFormat>(vtx_decl);
 }
 
-void NullEFBInterface::ReinterpretPixelData(EFBReinterpretType convtype)
+std::unique_ptr<AbstractPipeline> NullGfx::CreatePipeline(const AbstractPipelineConfig&,
+                                                          const void*, size_t)
+{
+  return std::make_unique<PlaceholderPipeline>();
+}
+
+void NullEFBInterface::ReinterpretPixelData(EFBReinterpretType)
 {
 }
 
-void NullEFBInterface::PokeColor(u16 x, u16 y, u32 color)
+void NullEFBInterface::PokeColor(u16, u16, u32)
 {
 }
 
-void NullEFBInterface::PokeDepth(u16 x, u16 y, u32 depth)
+void NullEFBInterface::PokeDepth(u16, u16, u32)
 {
 }
 
-u32 NullEFBInterface::PeekColorInternal(u16 x, u16 y)
+u32 NullEFBInterface::PeekColorInternal(u16, u16)
 {
   return 0;
 }
 
-u32 NullEFBInterface::PeekDepthInternal(u16 x, u16 y)
+u32 NullEFBInterface::PeekDepthInternal(u16, u16)
 {
   return 0;
 }
