@@ -1,9 +1,12 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+#include <functional>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/WorkQueueThread.h"
@@ -14,6 +17,9 @@ struct cubeb_stream;
 
 namespace ExpansionInterface
 {
+// The GameCube microphone (DOL-022) in a memory card slot. Software writes a 16-bit status word
+// to start sampling; the mic then raises an EXI interrupt each time its ring buffer has filled,
+// and software reads the buffer out. Audio comes from the host's default input via cubeb.
 class CEXIMic : public IEXIDevice
 {
 public:
@@ -24,82 +30,55 @@ public:
   bool IsPresent() const override;
 
 private:
-  static u8 const exi_id[];
-  static int const sample_size = sizeof(s16);
-  static int const rate_base = 11025;
-  static int const ring_base = 32;
-
-  enum
-  {
-    cmdID = 0x00,
-    cmdGetStatus = 0x40,
-    cmdSetStatus = 0x80,
-    cmdGetBuffer = 0x20,
-    cmdReset = 0xFF,
-  };
-
-  int slot;
-
-  u32 m_position;
-  int command;
-  union UStatus
-  {
-    u16 U16;
-    u8 U8[2];
-    struct
-    {
-      u16 out : 4;          // MICSet/GetOut...???
-      u16 id : 1;           // Used for MICGetDeviceID (always 0)
-      u16 button_unk : 3;   // Button bits which appear unused
-      u16 button : 1;       // The actual button on the mic
-      u16 buff_ovrflw : 1;  // Ring buffer wrote over bytes which weren't read by console
-      u16 gain : 1;         // Gain: 0dB or 15dB
-      u16 sample_rate : 2;  // Sample rate, 00-11025, 01-22050, 10-44100, 11-??
-      u16 buff_size : 2;    // Ring buffer size in bytes, 00-32, 01-64, 10-128, 11-???
-      u16 is_active : 1;    // If we are sampling or not
-    };
-  };
-
-  static long DataCallback(cubeb_stream* stream, void* user_data, const void* input_buffer,
-                           void* output_buffer, long nframes);
-
   void TransferByte(u8& byte) override;
 
-  void StreamInit();
-  void StreamTerminate();
-  void StreamStart();
-  void StreamStop();
-  void StreamReadOne();
+  void ReadStatusByte(u32 index, u8& byte);
+  void WriteStatusByte(u32 index, u8 byte);
+  u8 NextBufferByte();
 
-  // 64 is the max size, can be 16 or 32 as well
-  int ring_pos;
-  u8 ring_buffer[64 * sample_size];
+  void ScheduleNextInterrupt();
 
-  // 0 to disable interrupts, else it will be checked against current CPU ticks
-  // to determine if interrupt should be raised
-  u64 next_int_ticks;
-  void UpdateNextInterruptTicks();
+  // Capture side (cubeb).
+  void OpenContext();
+  void CloseContext();
+  void StartCapture();
+  void StopCapture();
+  void CopyCapturedBlock();
+  static long OnCapturedFrames(cubeb_stream* stream, void* user_data, const void* input_buffer,
+                               void* output_buffer, long nframes);
+  // Runs cubeb calls where they have to run (a COM-initialised thread on Windows). Returns
+  // false if they cannot run there.
+  bool RunAudioTask(const std::function<void()>& task, bool needs_com);
 
-  // Streaming input interface
+  int m_slot;
+
+  u32 m_position = 0;
+  int m_command = 0;
+  // Status word: bits 0-3 output, 4 ID, 5-7 unused buttons, 8 button, 9 overflow, 10 gain,
+  // 11-12 sample rate, 13-14 ring size, 15 active. Transferred high byte first.
+  u16 m_status = 0;
+
+  // Derived from the status word when sampling starts.
+  int m_sample_rate = 0;
+  u32 m_ring_bytes = 0;
+  u32 m_ring_samples = 0;
+
+  // The block software reads (up to 32 << 3 bytes) and the read position in it.
+  std::array<u8, 256> m_ring{};
+  u32 m_ring_pos = 0;
+
+  // When the next "buffer full" interrupt is due, or 0 while none is.
+  u64 m_next_irq_tick = 0;
+
+  // Captured samples waiting to be handed to the console, written by the cubeb thread.
+  std::mutex m_capture_lock;
+  std::vector<s16> m_capture;
+  std::size_t m_capture_write = 0;
+  std::size_t m_capture_read = 0;
+  std::size_t m_capture_available = 0;
+
   std::shared_ptr<cubeb> m_cubeb_ctx = nullptr;
   cubeb_stream* m_cubeb_stream = nullptr;
-
-  UStatus status;
-
-  std::mutex ring_lock;
-
-  // status bits converted to nice numbers
-  int sample_rate;
-  int buff_size;
-  int buff_size_samples;
-
-  // Arbitrarily small ringbuffer used by audio input backend in order to
-  // keep delay tolerable
-  s16* stream_buffer;
-  int stream_size;
-  int stream_wpos;
-  int stream_rpos;
-  int samples_avail;
 
 #ifdef _WIN32
   Common::AsyncWorkThread m_work_queue;

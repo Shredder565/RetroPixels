@@ -1,70 +1,55 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <SFML/Network.hpp>
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 
 #include "Common/CommonTypes.h"
-#include "Common/Flag.h"
 #include "Core/HW/EXI/EXI_Device.h"
+
+namespace sf
+{
+class TcpSocket;
+}
 
 namespace ExpansionInterface
 {
-class GeckoSockServer
-{
-public:
-  GeckoSockServer();
-  ~GeckoSockServer();
-  bool GetAvailableSock();
+class GeckoListener;
 
-  // Client for this server object
-  std::unique_ptr<sf::TcpSocket> client;
-  void ClientThread();
-  std::thread clientThread;
-  std::mutex transfer_lock;
-
-  std::deque<u8> send_fifo;
-  std::deque<u8> recv_fifo;
-
-private:
-  static int client_count;
-  Common::Flag client_running;
-
-  // Only ever one server thread
-  static void GeckoConnectionWaiter();
-
-  static u16 server_port;
-  static Common::Flag server_running;
-  static std::thread connectionThread;
-  static std::mutex connection_lock;
-  static std::queue<std::unique_ptr<sf::TcpSocket>> waiting_socks;
-};
-
-class CEXIGecko : public IEXIDevice, private GeckoSockServer
+// The USB Gecko debugging adapter. The PC side is a TCP connection: Dolphin listens on port
+// 55020 (or one of the next ten if it is taken) and bridges the first connected client to the
+// adapter's FIFOs. Every access is a bidirectional immediate transfer whose top nibble is the
+// command.
+class CEXIGecko : public IEXIDevice
 {
 public:
   explicit CEXIGecko(Core::System& system);
+  ~CEXIGecko() override;
+
+  CEXIGecko(const CEXIGecko&) = delete;
+  CEXIGecko& operator=(const CEXIGecko&) = delete;
+
   bool IsPresent() const override { return true; }
-  void ImmReadWrite(u32& _uData, u32 _uSize) override;
+  void ImmReadWrite(u32& data, u32 size) override;
 
 private:
-  enum
-  {
-    CMD_LED_OFF = 0x7,
-    CMD_LED_ON = 0x8,
-    CMD_INIT = 0x9,
-    CMD_RECV = 0xa,
-    CMD_SEND = 0xb,
-    CMD_CHK_TX = 0xc,
-    CMD_CHK_RX = 0xd,
-  };
+  void AdoptWaitingClient();
+  void StopPump();
+  void Pump();
 
-  static const u32 ident = 0x04700000;
+  std::shared_ptr<GeckoListener> m_listener;
+
+  std::unique_ptr<sf::TcpSocket> m_client;
+  std::thread m_pump_thread;
+  std::atomic<bool> m_pump_running{false};
+
+  // Both FIFOs are shared with the pump thread.
+  std::mutex m_fifo_lock;
+  std::deque<u8> m_to_pc;
+  std::deque<u8> m_from_pc;
 };
 }  // namespace ExpansionInterface

@@ -1,22 +1,35 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceAD16.h"
+
+#include <array>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Common/Swap.h"
+#include "Common/Logging/Log.h"
 
 namespace ExpansionInterface
 {
+namespace
+{
+constexpr u32 CMD_READ_ID = 0x00;
+constexpr u32 CMD_WRITE = 0xa0;
+constexpr u32 CMD_READ = 0xa2;
+
+// The ID command loads the board's ID into the register and then shifts it out after one dummy
+// byte. The register keeps the bytes in the order of a little-endian host word, so reading the
+// four bytes gives 0x04120000.
+constexpr std::array<u8, 4> AD16_ID = {0x04, 0x12, 0x00, 0x00};
+}  // namespace
+
 CEXIAD16::CEXIAD16(Core::System& system) : IEXIDevice(system)
 {
 }
 
 void CEXIAD16::SetCS(int cs)
 {
-  if (cs)
+  if (cs != 0)
     m_position = 0;
 }
 
@@ -27,88 +40,47 @@ bool CEXIAD16::IsPresent() const
 
 void CEXIAD16::TransferByte(u8& byte)
 {
-  if (m_position == 0)
+  const u32 position = m_position++;
+  if (position == 0)
   {
     m_command = byte;
+    return;
   }
-  else
+
+  switch (m_command)
   {
-    switch (m_command)
+  case CMD_READ_ID:
+    m_register = AD16_ID;
+    if (position == 1)
+      DEBUG_ASSERT(byte == 0x00);
+    else if (position <= 5)
+      byte = m_register[position - 2];
+    break;
+
+  case CMD_WRITE:
+    if (position <= 4)
+      m_register[position - 1] = byte;
+    if (position == 4)
     {
-    case init:
-    {
-      m_ad16_register.U32 = Common::swap32(0x04120000);
-      switch (m_position)
-      {
-      case 1:
-        DEBUG_ASSERT(byte == 0x00);
-        break;  // just skip
-      case 2:
-        byte = m_ad16_register.U8[0];
-        break;
-      case 3:
-        byte = m_ad16_register.U8[1];
-        break;
-      case 4:
-        byte = m_ad16_register.U8[2];
-        break;
-      case 5:
-        byte = m_ad16_register.U8[3];
-        break;
-      }
+      INFO_LOG_FMT(EXPANSIONINTERFACE, "AD16 register now {:02x} {:02x} {:02x} {:02x}",
+                   m_register[0], m_register[1], m_register[2], m_register[3]);
     }
     break;
 
-    case write:
-    {
-      switch (m_position)
-      {
-      case 1:
-        m_ad16_register.U8[0] = byte;
-        break;
-      case 2:
-        m_ad16_register.U8[1] = byte;
-        break;
-      case 3:
-        m_ad16_register.U8[2] = byte;
-        break;
-      case 4:
-        m_ad16_register.U8[3] = byte;
-        INFO_LOG_FMT(EXPANSIONINTERFACE, "AD16 received: 0x{:08X}", m_ad16_register.U32);
-        break;
-      }
-    }
+  case CMD_READ:
+    if (position <= 4)
+      byte = m_register[position - 1];
     break;
 
-    case read:
-    {
-      switch (m_position)
-      {
-      case 1:
-        byte = m_ad16_register.U8[0];
-        break;
-      case 2:
-        byte = m_ad16_register.U8[1];
-        break;
-      case 3:
-        byte = m_ad16_register.U8[2];
-        break;
-      case 4:
-        byte = m_ad16_register.U8[3];
-        break;
-      }
-    }
+  default:
     break;
-    }
   }
-
-  m_position++;
 }
 
 void CEXIAD16::DoState(PointerWrap& p)
 {
   p.Do(m_position);
   p.Do(m_command);
-  p.Do(m_ad16_register);
+  p.Do(m_register);
 }
 }  // namespace ExpansionInterface

@@ -1,15 +1,16 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceGecko.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <vector>
 
+#include <SFML/Network.hpp>
 #include <fmt/format.h>
 
 #include "Common/CommonTypes.h"
@@ -19,211 +20,235 @@
 
 namespace ExpansionInterface
 {
-u16 GeckoSockServer::server_port;
-int GeckoSockServer::client_count;
-std::thread GeckoSockServer::connectionThread;
-Common::Flag GeckoSockServer::server_running;
-std::mutex GeckoSockServer::connection_lock;
-std::queue<std::unique_ptr<sf::TcpSocket>> GeckoSockServer::waiting_socks;
-
-GeckoSockServer::GeckoSockServer() : client_running(false)
+// Accepts PC connections for every Gecko device. One listener thread serves all adapters; it
+// lives as long as some adapter holds a reference to it.
+class GeckoListener
 {
-  if (!connectionThread.joinable())
-    connectionThread = std::thread(GeckoConnectionWaiter);
+public:
+  GeckoListener() : m_thread(&GeckoListener::Run, this) {}
+  ~GeckoListener()
+  {
+    m_running = false;
+    m_thread.join();
+  }
+
+  GeckoListener(const GeckoListener&) = delete;
+  GeckoListener& operator=(const GeckoListener&) = delete;
+
+  static std::shared_ptr<GeckoListener> Acquire()
+  {
+    static std::mutex s_lock;
+    static std::weak_ptr<GeckoListener> s_instance;
+    std::lock_guard guard(s_lock);
+    std::shared_ptr<GeckoListener> listener = s_instance.lock();
+    if (!listener)
+    {
+      listener = std::make_shared<GeckoListener>();
+      s_instance = listener;
+    }
+    return listener;
+  }
+
+  // Hands out the oldest connection nobody has taken yet.
+  std::unique_ptr<sf::TcpSocket> TakeConnection()
+  {
+    std::lock_guard guard(m_lock);
+    if (m_pending.empty())
+      return nullptr;
+    std::unique_ptr<sf::TcpSocket> socket = std::move(m_pending.front());
+    m_pending.pop();
+    return socket;
+  }
+
+private:
+  static constexpr u16 FIRST_PORT = 0xd6ec;  // 55020
+  static constexpr int EXTRA_PORTS = 10;
+
+  void Run()
+  {
+    Common::SetCurrentThreadName("Gecko Connection Waiter");
+
+    sf::TcpListener listener;
+    u16 port = FIRST_PORT;
+    bool bound = false;
+    for (int attempt = 0; attempt <= EXTRA_PORTS; ++attempt, ++port)
+    {
+      if (listener.listen(port) == sf::Socket::Status::Done)
+      {
+        bound = true;
+        break;
+      }
+    }
+    if (!bound)
+      return;
+
+    Core::DisplayMessage(fmt::format("USBGecko: Listening on TCP port {}", port), 5000);
+    listener.setBlocking(false);
+
+    auto candidate = std::make_unique<sf::TcpSocket>();
+    while (m_running)
+    {
+      if (listener.accept(*candidate) == sf::Socket::Status::Done)
+      {
+        std::lock_guard guard(m_lock);
+        m_pending.push(std::move(candidate));
+        candidate = std::make_unique<sf::TcpSocket>();
+      }
+      Common::SleepCurrentThread(1);
+    }
+  }
+
+  std::atomic<bool> m_running{true};
+  std::mutex m_lock;
+  std::queue<std::unique_ptr<sf::TcpSocket>> m_pending;
+  std::thread m_thread;
+};
+
+namespace
+{
+// Commands, in the top nibble of the transfer word.
+constexpr u32 GECKO_LED_OFF = 0x7;
+constexpr u32 GECKO_LED_ON = 0x8;
+constexpr u32 GECKO_IDENTIFY = 0x9;
+constexpr u32 GECKO_RECEIVE = 0xa;
+constexpr u32 GECKO_SEND = 0xb;
+constexpr u32 GECKO_CAN_SEND = 0xc;
+constexpr u32 GECKO_CAN_RECEIVE = 0xd;
+
+constexpr u32 GECKO_ID = 0x04700000;
+constexpr u32 RECEIVED_BYTE = 0x08000000;
+constexpr u32 ACCEPTED = 0x04000000;
+}  // namespace
+
+CEXIGecko::CEXIGecko(Core::System& system)
+    : IEXIDevice(system), m_listener(GeckoListener::Acquire())
+{
 }
 
-GeckoSockServer::~GeckoSockServer()
+CEXIGecko::~CEXIGecko()
 {
-  if (clientThread.joinable())
-  {
-    --client_count;
-
-    client_running.Clear();
-    clientThread.join();
-  }
-
-  if (client_count <= 0 && connectionThread.joinable())
-  {
-    server_running.Clear();
-    connectionThread.join();
-  }
+  StopPump();
 }
 
-void GeckoSockServer::GeckoConnectionWaiter()
+void CEXIGecko::StopPump()
 {
-  Common::SetCurrentThreadName("Gecko Connection Waiter");
+  m_pump_running = false;
+  if (m_pump_thread.joinable())
+    m_pump_thread.join();
+}
 
-  sf::TcpListener server;
-  server_port = 0xd6ec;  // "dolphin gecko"
-  for (int bind_tries = 0; bind_tries <= 10 && !server_running.IsSet(); bind_tries++)
-  {
-    server_running.Set(server.listen(server_port) == sf::Socket::Status::Done);
-    if (!server_running.IsSet())
-      server_port++;
-  }
-
-  if (!server_running.IsSet())
+void CEXIGecko::AdoptWaitingClient()
+{
+  std::unique_ptr<sf::TcpSocket> socket = m_listener->TakeConnection();
+  if (!socket)
     return;
 
-  Core::DisplayMessage(fmt::format("USBGecko: Listening on TCP port {}", server_port), 5000);
-
-  server.setBlocking(false);
-
-  auto new_client = std::make_unique<sf::TcpSocket>();
-  while (server_running.IsSet())
-  {
-    if (server.accept(*new_client) == sf::Socket::Status::Done)
-    {
-      std::lock_guard lk(connection_lock);
-      waiting_socks.push(std::move(new_client));
-
-      new_client = std::make_unique<sf::TcpSocket>();
-    }
-
-    Common::SleepCurrentThread(1);
-  }
+  // A new PC connection replaces the old one and starts with empty FIFOs.
+  StopPump();
+  m_client = std::move(socket);
+  m_to_pc.clear();
+  m_from_pc.clear();
+  m_pump_running = true;
+  m_pump_thread = std::thread(&CEXIGecko::Pump, this);
 }
 
-bool GeckoSockServer::GetAvailableSock()
+void CEXIGecko::Pump()
 {
-  bool sock_filled = false;
-
-  std::lock_guard lk(connection_lock);
-
-  if (!waiting_socks.empty())
-  {
-    client = std::move(waiting_socks.front());
-    if (clientThread.joinable())
-    {
-      client_running.Clear();
-      clientThread.join();
-
-      recv_fifo = std::deque<u8>();
-      send_fifo = std::deque<u8>();
-    }
-    clientThread = std::thread(&GeckoSockServer::ClientThread, this);
-    client_count++;
-    waiting_socks.pop();
-    sock_filled = true;
-  }
-
-  return sock_filled;
-}
-
-void GeckoSockServer::ClientThread()
-{
-  client_running.Set();
-
   Common::SetCurrentThreadName("Gecko Client");
+  m_client->setBlocking(false);
 
-  client->setBlocking(false);
-
-  while (client_running.IsSet())
+  std::array<char, 128> chunk;
+  std::vector<char> outgoing;
+  while (m_pump_running)
   {
-    bool did_nothing = true;
-
+    bool busy = false;
     {
-      std::lock_guard lk(transfer_lock);
+      std::lock_guard guard(m_fifo_lock);
 
-      // what's an ideal buffer size?
-      std::array<char, 128> buffer;
-      std::size_t got = 0;
-
-      if (client->receive(buffer.data(), buffer.size(), got) == sf::Socket::Status::Disconnected)
-        client_running.Clear();
-
-      if (got != 0)
+      std::size_t received = 0;
+      if (m_client->receive(chunk.data(), chunk.size(), received) ==
+          sf::Socket::Status::Disconnected)
       {
-        did_nothing = false;
-
-        recv_fifo.insert(recv_fifo.end(), buffer.data(), buffer.data() + got);
+        m_pump_running = false;
+      }
+      if (received != 0)
+      {
+        m_from_pc.insert(m_from_pc.end(), chunk.begin(), chunk.begin() + received);
+        busy = true;
       }
 
-      if (!send_fifo.empty())
+      if (!m_to_pc.empty())
       {
-        did_nothing = false;
-
-        std::vector<char> packet(send_fifo.begin(), send_fifo.end());
-        send_fifo.clear();
-
-        if (client->send(&packet[0], packet.size()) == sf::Socket::Status::Disconnected)
-          client_running.Clear();
+        outgoing.assign(m_to_pc.begin(), m_to_pc.end());
+        m_to_pc.clear();
+        if (m_client->send(outgoing.data(), outgoing.size()) == sf::Socket::Status::Disconnected)
+          m_pump_running = false;
+        busy = true;
       }
-    }  // unlock transfer
+    }
 
-    if (did_nothing)
+    if (!busy)
       Common::YieldCPU();
   }
 
-  client->disconnect();
+  m_client->disconnect();
 }
 
-CEXIGecko::CEXIGecko(Core::System& system) : IEXIDevice(system)
+void CEXIGecko::ImmReadWrite(u32& data, u32)
 {
-}
+  // Pick up a PC connection while there is none (or the last one was closed).
+  if (!m_client || m_client->getLocalPort() == 0)
+    AdoptWaitingClient();
 
-void CEXIGecko::ImmReadWrite(u32& _uData, u32 _uSize)
-{
-  // We don't really care about _uSize
-  (void)_uSize;
-
-  if (!client || client->getLocalPort() == 0)
-    GetAvailableSock();
-
-  switch (_uData >> 28)
+  switch (data >> 28)
   {
-  case CMD_LED_OFF:
+  case GECKO_LED_OFF:
     Core::DisplayMessage("USBGecko: No LEDs for you!", 3000);
     break;
-  case CMD_LED_ON:
+
+  case GECKO_LED_ON:
     Core::DisplayMessage("USBGecko: A piercing blue light is now shining in your general direction",
                          3000);
     break;
 
-  case CMD_INIT:
-    _uData = ident;
+  case GECKO_IDENTIFY:
+    data = GECKO_ID;
     break;
 
-  // PC -> Gecko
-  // |= 0x08000000 if successful
-  case CMD_RECV:
+  case GECKO_RECEIVE:
   {
-    std::lock_guard lk(transfer_lock);
-    if (!recv_fifo.empty())
+    // PC to console: the byte comes back in bits 16-23 when one was waiting.
+    std::lock_guard guard(m_fifo_lock);
+    if (!m_from_pc.empty())
     {
-      _uData = 0x08000000 | (recv_fifo.front() << 16);
-      recv_fifo.pop_front();
+      data = RECEIVED_BYTE | (u32{m_from_pc.front()} << 16);
+      m_from_pc.pop_front();
     }
     break;
   }
 
-  // Gecko -> PC
-  // |= 0x04000000 if successful
-  case CMD_SEND:
+  case GECKO_SEND:
   {
-    std::lock_guard lk(transfer_lock);
-    send_fifo.push_back(_uData >> 20);
-    _uData = 0x04000000;
+    // Console to PC: the byte is in bits 20-27. The FIFO never fills.
+    std::lock_guard guard(m_fifo_lock);
+    m_to_pc.push_back(static_cast<u8>(data >> 20));
+    data = ACCEPTED;
     break;
   }
 
-  // Check if ok for Gecko -> PC, or FIFO full
-  // |= 0x04000000 if FIFO is not full
-  case CMD_CHK_TX:
-    _uData = 0x04000000;
+  case GECKO_CAN_SEND:
+    data = ACCEPTED;
     break;
 
-  // Check if data in FIFO for PC -> Gecko, or FIFO empty
-  // |= 0x04000000 if data in recv FIFO
-  case CMD_CHK_RX:
+  case GECKO_CAN_RECEIVE:
   {
-    std::lock_guard lk(transfer_lock);
-    _uData = recv_fifo.empty() ? 0 : 0x04000000;
+    std::lock_guard guard(m_fifo_lock);
+    data = m_from_pc.empty() ? 0 : ACCEPTED;
     break;
   }
 
   default:
-    ERROR_LOG_FMT(EXPANSIONINTERFACE, "Unknown USBGecko command {:x}", _uData);
+    ERROR_LOG_FMT(EXPANSIONINTERFACE, "Unknown USBGecko command {:x}", data);
     break;
   }
 }

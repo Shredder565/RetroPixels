@@ -1,7 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
 
 #include "Core/HW/EXI/EXI_Device.h"
 
@@ -9,6 +10,8 @@ class PointerWrap;
 
 namespace ExpansionInterface
 {
+// The AD16, a development diagnostics board with one 32-bit register. A command byte (0x00 read
+// ID, 0xa0 write, 0xa2 read) is followed by the register's four bytes.
 class CEXIAD16 : public IEXIDevice
 {
 public:
@@ -18,24 +21,11 @@ public:
   void DoState(PointerWrap& p) override;
 
 private:
-  enum
-  {
-    init = 0x00,
-    write = 0xa0,
-    read = 0xa2
-  };
+  void TransferByte(u8& byte) override;
 
-  union AD16Reg
-  {
-    u32 U32 = 0;
-    u8 U8[4];
-  };
-
-  // STATE_TO_SAVE
+  // Saved in this order.
   u32 m_position = 0;
   u32 m_command = 0;
-  AD16Reg m_ad16_register;
-
-  void TransferByte(u8& byte) override;
+  std::array<u8, 4> m_register{};
 };
 }  // namespace ExpansionInterface
