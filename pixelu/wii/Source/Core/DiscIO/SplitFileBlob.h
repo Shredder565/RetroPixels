@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,9 +14,12 @@
 
 namespace DiscIO
 {
+// A plain disc image cut into pieces named name.part0.iso, name.part1.iso, ... (as written by
+// tools that work around FAT32's 4 GiB limit). The pieces are read back as one image.
 class SplitPlainFileReader final : public BlobReader
 {
 public:
+  // Takes the path of the .part0.iso piece. Needs at least two non-empty pieces.
   static std::unique_ptr<SplitPlainFileReader> Create(std::string_view first_file_path);
 
   BlobType GetBlobType() const override { return BlobType::SPLIT_PLAIN; }
@@ -35,17 +37,17 @@ public:
   bool Read(u64 offset, u64 nbytes, u8* out_ptr) override;
 
 private:
-  struct SingleFile
+  struct Piece
   {
     File::DirectIOFile file;
-    u64 offset;
+    u64 start;  // offset of the piece's first byte in the whole image
     u64 size;
   };
 
-  SplitPlainFileReader(std::vector<SingleFile> m_files);
+  explicit SplitPlainFileReader(std::vector<Piece> pieces);
 
-  std::vector<SingleFile> m_files;
-  u64 m_size;
+  std::vector<Piece> m_pieces;
+  u64 m_size = 0;
 };
 
 }  // namespace DiscIO

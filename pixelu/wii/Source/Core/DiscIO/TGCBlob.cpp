@@ -1,96 +1,83 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/TGCBlob.h"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "Common/BitUtils.h"
 #include "Common/Swap.h"
 
-namespace
-{
-u32 SubtractBE32(u32 minuend_be, u32 subtrahend_le)
-{
-  return Common::swap32(Common::swap32(minuend_be) - subtrahend_le);
-}
-
-void Replace(u64 offset, u64 size, u8* out_ptr, u64 replace_offset, u64 replace_size,
-             const u8* replace_ptr)
-{
-  const u64 replace_start = std::max(offset, replace_offset);
-  const u64 replace_end = std::min(offset + size, replace_offset + replace_size);
-
-  if (replace_end > replace_start)
-  {
-    std::copy_n(replace_ptr + (replace_start - replace_offset), replace_end - replace_start,
-                out_ptr + (replace_start - offset));
-  }
-}
-
-template <typename T>
-void Replace(u64 offset, u64 size, u8* out_ptr, u64 replace_offset, const T& replace_value)
-{
-  static_assert(std::is_trivially_copyable_v<T>);
-
-  const u8* replace_ptr = reinterpret_cast<const u8*>(&replace_value);
-  Replace(offset, size, out_ptr, replace_offset, sizeof(T), replace_ptr);
-}
-}  // namespace
-
 namespace DiscIO
 {
+namespace
+{
+// Copies the part of [src_offset, src_offset + src_size) that overlaps the read window
+// [offset, offset + size) into the output buffer.
+void Overlay(u64 offset, u64 size, u8* out, u64 src_offset, u64 src_size, const u8* src)
+{
+  const u64 begin = std::max(offset, src_offset);
+  const u64 end = std::min(offset + size, src_offset + src_size);
+  if (begin < end)
+    std::memcpy(out + (begin - offset), src + (begin - src_offset), end - begin);
+}
+
+void OverlayU32BE(u64 offset, u64 size, u8* out, u64 at, u32 value)
+{
+  const u8 bytes[4] = {static_cast<u8>(value >> 24), static_cast<u8>(value >> 16),
+                       static_cast<u8>(value >> 8), static_cast<u8>(value)};
+  Overlay(offset, size, out, at, sizeof(bytes), bytes);
+}
+
+constexpr size_t FST_ENTRY_SIZE = 12;
+}  // namespace
+
 std::unique_ptr<TGCFileReader> TGCFileReader::Create(File::DirectIOFile file)
 {
   TGCHeader header;
-  if (file.OffsetRead(0, Common::AsWritableU8Span(header)) && header.magic == TGC_MAGIC)
-  {
-    return std::unique_ptr<TGCFileReader>(new TGCFileReader(std::move(file)));
-  }
-
-  return nullptr;
+  if (!file.OffsetRead(0, Common::AsWritableU8Span(header)) || header.magic != TGC_MAGIC)
+    return nullptr;
+  return std::unique_ptr<TGCFileReader>(new TGCFileReader(std::move(file)));
 }
 
 TGCFileReader::TGCFileReader(File::DirectIOFile file) : m_file(std::move(file))
 {
-  m_file.OffsetRead(0, Common::AsWritableU8Span(m_header));
+  TGCHeader header{};
+  m_file.OffsetRead(0, Common::AsWritableU8Span(header));
+  m_file_size = m_file.GetSize();
 
-  m_size = m_file.GetSize();
+  m_header_size = Common::swap32(header.tgc_header_size);
+  // 32-bit arithmetic on purpose: the format's offsets are 32-bit and may wrap.
+  m_disc_dol_offset = Common::swap32(header.dol_real_offset) - m_header_size;
+  m_disc_fst_offset = Common::swap32(header.fst_real_offset) - m_header_size;
 
-  const u32 fst_offset = Common::swap32(m_header.fst_real_offset);
-  const u32 fst_size = Common::swap32(m_header.fst_size);
-  m_fst.resize(fst_size);
-  if (!m_file.OffsetRead(fst_offset, m_fst))
-  {
+  m_fst.resize(Common::swap32(header.fst_size));
+  if (!m_file.OffsetRead(Common::swap32(header.fst_real_offset), m_fst))
     m_fst.clear();
-  }
 
-  constexpr size_t FST_ENTRY_SIZE = 12;
   if (m_fst.size() < FST_ENTRY_SIZE)
     return;
 
-  // This calculation can overflow, but this is not a problem, because in that case
-  // the old_offset + file_area_shift calculation later also overflows, cancelling it out
-  const u32 file_area_shift = Common::swap32(m_header.file_area_real_offset) -
-                              Common::swap32(m_header.file_area_virtual_offset) -
-                              Common::swap32(m_header.tgc_header_size);
+  // File entries point into the "virtual" file area; move them to where the data is in the
+  // presented disc. Overflow is harmless here since the same wrap happens in reverse.
+  const u32 shift = Common::swap32(header.file_area_real_offset) -
+                    Common::swap32(header.file_area_virtual_offset) - m_header_size;
 
-  const size_t claimed_fst_entries = Common::swap32(m_fst.data() + 8);
-  const size_t fst_entries = std::min(claimed_fst_entries, m_fst.size() / FST_ENTRY_SIZE);
-  for (size_t i = 0; i < fst_entries; ++i)
+  const size_t count = std::min<size_t>(Common::swap32(m_fst.data() + 8),
+                                        m_fst.size() / FST_ENTRY_SIZE);
+  for (size_t i = 0; i < count; ++i)
   {
-    // If this is a file (as opposed to a directory)...
-    if (m_fst[i * FST_ENTRY_SIZE] == 0)
-    {
-      // ...change its offset
-      const u32 old_offset = Common::swap32(m_fst.data() + i * FST_ENTRY_SIZE + 4);
-      const u32 new_offset = Common::swap32(old_offset + file_area_shift);
-      Replace<u32>(0, m_fst.size(), m_fst.data(), i * FST_ENTRY_SIZE + 4, new_offset);
-    }
+    u8* entry = m_fst.data() + i * FST_ENTRY_SIZE;
+    if (entry[0] != 0)
+      continue;  // directory
+    const u32 moved = Common::swap32(entry + 4) + shift;
+    entry[4] = static_cast<u8>(moved >> 24);
+    entry[5] = static_cast<u8>(moved >> 16);
+    entry[6] = static_cast<u8>(moved >> 8);
+    entry[7] = static_cast<u8>(moved);
   }
 }
 
@@ -101,27 +88,19 @@ std::unique_ptr<BlobReader> TGCFileReader::CopyReader() const
 
 u64 TGCFileReader::GetDataSize() const
 {
-  return m_size - Common::swap32(m_header.tgc_header_size);
+  return m_file_size - m_header_size;
 }
 
 bool TGCFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 {
-  const u32 tgc_header_size = Common::swap32(m_header.tgc_header_size);
+  if (!m_file.OffsetRead(offset + m_header_size, out_ptr, nbytes))
+    return false;
 
-  if (m_file.OffsetRead(offset + tgc_header_size, out_ptr, nbytes))
-  {
-    const u32 replacement_dol_offset = SubtractBE32(m_header.dol_real_offset, tgc_header_size);
-    const u32 replacement_fst_offset = SubtractBE32(m_header.fst_real_offset, tgc_header_size);
-
-    Replace<u32>(offset, nbytes, out_ptr, 0x0420, replacement_dol_offset);
-    Replace<u32>(offset, nbytes, out_ptr, 0x0424, replacement_fst_offset);
-    Replace(offset, nbytes, out_ptr, Common::swap32(replacement_fst_offset), m_fst.size(),
-            m_fst.data());
-
-    return true;
-  }
-
-  return false;
+  // Patch the disc header's DOL and FST offsets and the FST itself.
+  OverlayU32BE(offset, nbytes, out_ptr, 0x420, m_disc_dol_offset);
+  OverlayU32BE(offset, nbytes, out_ptr, 0x424, m_disc_fst_offset);
+  Overlay(offset, nbytes, out_ptr, m_disc_fst_offset, m_fst.size(), m_fst.data());
+  return true;
 }
 
 }  // namespace DiscIO

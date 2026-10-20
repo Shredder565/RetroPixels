@@ -1,58 +1,58 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/SplitFileBlob.h"
 
+#include <algorithm>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <fmt/format.h>
 
 namespace DiscIO
 {
-SplitPlainFileReader::SplitPlainFileReader(std::vector<SingleFile> files)
-    : m_files(std::move(files))
+SplitPlainFileReader::SplitPlainFileReader(std::vector<Piece> pieces) : m_pieces(std::move(pieces))
 {
-  m_size = 0;
-  for (const auto& f : m_files)
-    m_size += f.size;
+  if (!m_pieces.empty())
+    m_size = m_pieces.back().start + m_pieces.back().size;
 }
 
 std::unique_ptr<SplitPlainFileReader> SplitPlainFileReader::Create(std::string_view first_file_path)
 {
-  constexpr std::string_view part0_iso = ".part0.iso";
-  if (!first_file_path.ends_with(part0_iso))
+  constexpr std::string_view FIRST_SUFFIX = ".part0.iso";
+  if (!first_file_path.ends_with(FIRST_SUFFIX))
     return nullptr;
+  const std::string_view stem =
+      first_file_path.substr(0, first_file_path.size() - FIRST_SUFFIX.size());
 
-  const std::string_view base_path =
-      first_file_path.substr(0, first_file_path.size() - part0_iso.size());
-  std::vector<SingleFile> files;
-  size_t index = 0;
-  u64 offset = 0;
-  while (true)
+  std::vector<Piece> pieces;
+  u64 start = 0;
+  for (size_t n = 0;; ++n)
   {
-    File::DirectIOFile f(fmt::format("{}.part{}.iso", base_path, index), File::AccessMode::Read);
-    if (!f.IsOpen())
-      break;
-    const u64 size = f.GetSize();
+    File::DirectIOFile file(fmt::format("{}.part{}.iso", stem, n), File::AccessMode::Read);
+    if (!file.IsOpen())
+      break;  // the first missing number ends the set
+    const u64 size = file.GetSize();
     if (size == 0)
       return nullptr;
-    files.emplace_back(SingleFile{std::move(f), offset, size});
-    offset += size;
-    ++index;
+    pieces.push_back(Piece{std::move(file), start, size});
+    start += size;
   }
 
-  if (files.size() < 2)
+  if (pieces.size() < 2)
     return nullptr;
-
-  files.shrink_to_fit();
-  return std::unique_ptr<SplitPlainFileReader>(new SplitPlainFileReader(std::move(files)));
+  return std::unique_ptr<SplitPlainFileReader>(new SplitPlainFileReader(std::move(pieces)));
 }
 
 std::unique_ptr<BlobReader> SplitPlainFileReader::CopyReader() const
 {
-  return std::unique_ptr<SplitPlainFileReader>{new SplitPlainFileReader(m_files)};
+  std::vector<Piece> copy;
+  copy.reserve(m_pieces.size());
+  for (const Piece& piece : m_pieces)
+    copy.push_back(Piece{piece.file, piece.start, piece.size});
+  return std::unique_ptr<SplitPlainFileReader>(new SplitPlainFileReader(std::move(copy)));
 }
 
 bool SplitPlainFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
@@ -60,27 +60,25 @@ bool SplitPlainFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
   if (offset >= m_size)
     return false;
 
-  u64 current_offset = offset;
-  u64 rest = nbytes;
-  u8* out = out_ptr;
-  for (auto& file : m_files)
+  // Pieces are sorted by start; find the one holding `offset`, then walk forward.
+  auto it = std::upper_bound(m_pieces.begin(), m_pieces.end(), offset,
+                             [](u64 value, const Piece& piece) { return value < piece.start; });
+  --it;
+
+  while (true)
   {
-    if (current_offset >= file.offset && current_offset < file.offset + file.size)
-    {
-      auto& f = file.file;
-      const u64 offset_in_file = current_offset - file.offset;
-      const u64 current_read = std::min(file.size - offset_in_file, rest);
-      if (!f.OffsetRead(offset_in_file, out, current_read))
-        return false;
-
-      rest -= current_read;
-      if (rest == 0)
-        return true;
-      current_offset += current_read;
-      out += current_read;
-    }
+    const u64 in_piece = offset - it->start;
+    const u64 n = std::min(it->size - in_piece, nbytes);
+    if (!it->file.OffsetRead(in_piece, out_ptr, n))
+      return false;
+    nbytes -= n;
+    if (nbytes == 0)
+      return true;
+    offset += n;
+    out_ptr += n;
+    if (++it == m_pieces.end())
+      return false;  // ran off the end of the image
   }
-
-  return rest == 0;
 }
+
 }  // namespace DiscIO

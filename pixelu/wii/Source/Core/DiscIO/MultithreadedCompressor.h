@@ -1,17 +1,22 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <atomic>
+#include <algorithm>
+#include <condition_variable>
+#include <cstddef>
+#include <deque>
 #include <expected>
 #include <functional>
-#include <memory>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "Common/Assert.h"
-#include "Common/Event.h"
+#include "Common/CommonTypes.h"
 
 namespace DiscIO
 {
@@ -27,196 +32,189 @@ enum class ConversionResultCode
 template <typename T>
 using ConversionResult = std::expected<T, ConversionResultCode>;
 
-// This class starts a number of compression threads and one output thread.
-// The set_up_compress_thread_state function is called at the start of each compression thread.
-// When CompressAndWrite is called, the compress function will be called on one of the
-// compression threads, and then the output function will be called on the output thread.
-// The output thread handles data in the order that data was submitted using CompressAndWrite,
-// but the compression threads are not guaranteed to handle data in a predictable order.
-// Remember to check GetStatus regularly and cancel if it doesn't return Success,
-// and call Shutdown when you want to ensure that everything finishes.
-template <typename CompressThreadState, typename CompressParameters, typename OutputParameters>
+// Runs the expensive half of a conversion (compression) on a pool of worker threads and the
+// cheap half (writing) on a single output thread, which receives the results in exactly the
+// order the work was submitted, so the output file doesn't depend on thread timing.
+//
+// Each worker owns one ThreadState, constructed on that thread and passed to `set_up` once.
+// After any step fails (or `output` returns an error such as Canceled), further submissions
+// are ignored and results that haven't been written yet are dropped. Callers should check
+// GetStatus() between submissions and must call Shutdown() (or let the destructor do it) to
+// wait for everything to finish.
+template <typename ThreadState, typename Input, typename Output>
 class MultithreadedCompressor
 {
 public:
-  MultithreadedCompressor(
-      std::function<ConversionResultCode(CompressThreadState*)> set_up_compress_thread_state,
-      std::function<ConversionResult<OutputParameters>(CompressThreadState*, CompressParameters)>
-          compress,
-      std::function<ConversionResultCode(OutputParameters)> output)
-      : m_set_up_compress_thread_state(std::move(set_up_compress_thread_state)),
-        m_compress(std::move(compress)), m_output(std::move(output)),
-        m_threads(std::max<unsigned int>(1, std::thread::hardware_concurrency()))
+  using SetUpFn = std::function<ConversionResultCode(ThreadState*)>;
+  using CompressFn = std::function<ConversionResult<Output>(ThreadState*, Input)>;
+  using OutputFn = std::function<ConversionResultCode(Output)>;
+
+  MultithreadedCompressor(SetUpFn set_up, CompressFn compress, OutputFn output)
+      : m_set_up(std::move(set_up)), m_compress(std::move(compress)), m_output(std::move(output))
   {
-    m_compress_threads = std::make_unique<CompressThread[]>(m_threads);
+    const size_t worker_count = std::max(1u, std::thread::hardware_concurrency());
+    // Allow a little queueing on top of the work in progress so workers rarely sit idle.
+    m_max_in_flight = worker_count * 2;
 
-    for (size_t i = 0; i < m_threads; ++i)
-    {
-      m_compress_threads[i].thread =
-          std::thread(std::mem_fn(&MultithreadedCompressor::CompressThreadFunction), this,
-                      &m_compress_threads[i]);
-    }
-
-    m_output_thread =
-        std::thread(std::mem_fn(&MultithreadedCompressor::OutputThreadFunction), this);
+    m_workers.reserve(worker_count);
+    for (size_t i = 0; i < worker_count; ++i)
+      m_workers.emplace_back([this] { WorkerMain(); });
+    m_writer = std::thread([this] { WriterMain(); });
   }
 
-  ~MultithreadedCompressor()
-  {
-    if (!m_shutting_down.load())
-      Shutdown();
-  }
+  MultithreadedCompressor(const MultithreadedCompressor&) = delete;
+  MultithreadedCompressor& operator=(const MultithreadedCompressor&) = delete;
 
-  void CompressAndWrite(CompressParameters parameters)
+  ~MultithreadedCompressor() { Shutdown(); }
+
+  // Queues one piece of work. Blocks while too much work is outstanding.
+  void CompressAndWrite(Input input)
   {
-    if (GetStatus() != ConversionResultCode::Success)
+    std::unique_lock lock(m_mutex);
+    if (m_status != ConversionResultCode::Success || m_stopping)
       return;
 
-    CompressThread& compress_thread = m_compress_threads[m_current_index];
+    m_space_cv.wait(lock, [this] { return m_next_seq - m_next_to_write < m_max_in_flight; });
 
-    compress_thread.compress_ready_event.Wait();
-    compress_thread.compress_parameters = std::move(parameters);
-    compress_thread.compress_event.Set();
-
-    ++m_current_index;
-    if (m_current_index >= m_threads)
-      m_current_index -= m_threads;
+    m_queue.push_back(Job{m_next_seq++, std::move(input)});
+    m_work_cv.notify_one();
   }
 
-  void SetError(ConversionResultCode result)
+  // Records a failure. Only the first failure is kept.
+  void SetError(ConversionResultCode code)
   {
-    ASSERT(result != ConversionResultCode::Success);
-
-    // If we already have an error, don't overwrite it
-    ConversionResultCode expected = ConversionResultCode::Success;
-    m_result.compare_exchange_strong(expected, result);
+    ASSERT(code != ConversionResultCode::Success);
+    std::lock_guard lock(m_mutex);
+    SetErrorLocked(code);
   }
 
-  ConversionResultCode GetStatus() const { return m_result.load(); }
+  ConversionResultCode GetStatus() const
+  {
+    std::lock_guard lock(m_mutex);
+    return m_status;
+  }
 
+  // Waits until all submitted work has been compressed and written (or dropped), then stops
+  // the threads. Safe to call more than once.
   void Shutdown()
   {
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].compress_ready_event.Wait();
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].compress_done_event.Wait();
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].output_ready_event.Wait();
+    {
+      std::lock_guard lock(m_mutex);
+      if (m_stopping)
+        return;
+      m_stopping = true;
+    }
+    m_work_cv.notify_all();
+    m_result_cv.notify_all();
 
-    m_shutting_down.store(true);
-
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].compress_event.Set();
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].output_event.Set();
-
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].thread.join();
-
-    m_output_thread.join();
+    for (std::thread& worker : m_workers)
+      worker.join();
+    m_writer.join();
   }
 
 private:
-  struct CompressThread
+  struct Job
   {
-    std::thread thread;
-
-    Common::Event compress_ready_event;
-    Common::Event compress_event;
-    Common::Event compress_done_event;
-    Common::Event output_ready_event;
-    Common::Event output_event;
-
-    CompressParameters compress_parameters;
-    OutputParameters output_parameters;
+    u64 seq;
+    Input input;
   };
 
-  void CompressThreadFunction(CompressThread* state)
+  void SetErrorLocked(ConversionResultCode code)
   {
-    CompressThreadState compress_thread_state;
+    if (m_status == ConversionResultCode::Success)
+      m_status = code;
+  }
 
-    ConversionResultCode setup_result = m_set_up_compress_thread_state(&compress_thread_state);
-    if (setup_result != ConversionResultCode::Success)
-      SetError(setup_result);
+  void WorkerMain()
+  {
+    ThreadState state;
+    const ConversionResultCode set_up_result = m_set_up(&state);
+    const bool usable = set_up_result == ConversionResultCode::Success;
+    if (!usable)
+      SetError(set_up_result);
 
-    state->compress_ready_event.Set();
-    state->compress_done_event.Set();
-
+    std::unique_lock lock(m_mutex);
     while (true)
     {
-      state->compress_event.Wait();
+      m_work_cv.wait(lock, [this] { return !m_queue.empty() || m_stopping; });
+      if (m_queue.empty())
+        return;  // stopping, and nothing left to do
 
-      if (m_shutting_down.load())
-        return;
+      Job job = std::move(m_queue.front());
+      m_queue.pop_front();
+      lock.unlock();
 
-      CompressParameters parameters = std::move(state->compress_parameters);
-
-      state->compress_done_event.Reset();
-      state->compress_ready_event.Set();
-
-      ConversionResult<OutputParameters> result =
-          m_compress(&compress_thread_state, std::move(parameters));
-
-      if (result)
+      std::optional<Output> result;
+      std::optional<ConversionResultCode> failure;
+      if (usable)
       {
-        state->output_ready_event.Wait();
-        state->output_parameters = std::move(*result);
-        state->output_event.Set();
-      }
-      else
-      {
-        SetError(result.error());
+        ConversionResult<Output> compressed = m_compress(&state, std::move(job.input));
+        if (compressed)
+          result.emplace(std::move(*compressed));
+        else
+          failure = compressed.error();
       }
 
-      state->compress_done_event.Set();
+      lock.lock();
+      if (failure)
+        SetErrorLocked(*failure);
+      m_results.emplace(job.seq, std::move(result));
+      m_result_cv.notify_all();
     }
   }
 
-  void OutputThreadFunction()
+  void WriterMain()
   {
-    for (size_t i = 0; i < m_threads; ++i)
-      m_compress_threads[i].output_ready_event.Set();
-
-    size_t index = 0;
-
+    std::unique_lock lock(m_mutex);
     while (true)
     {
-      CompressThread& compress_thread = m_compress_threads[index];
+      m_result_cv.wait(lock, [this] {
+        return m_results.contains(m_next_to_write) ||
+               (m_stopping && m_next_to_write == m_next_seq);
+      });
 
-      compress_thread.output_event.Wait();
+      auto it = m_results.find(m_next_to_write);
+      if (it == m_results.end())
+        return;  // stopping, and everything submitted has been handled
 
-      if (m_shutting_down.load())
-        return;
+      std::optional<Output> result = std::move(it->second);
+      m_results.erase(it);
+      const bool write = result.has_value() && m_status == ConversionResultCode::Success;
+      lock.unlock();
 
-      OutputParameters parameters = std::move(compress_thread.output_parameters);
+      if (write)
+      {
+        const ConversionResultCode code = m_output(std::move(*result));
+        if (code != ConversionResultCode::Success)
+          SetError(code);
+      }
 
-      compress_thread.output_ready_event.Set();
-
-      const ConversionResultCode result = m_output(std::move(parameters));
-
-      if (result != ConversionResultCode::Success)
-        SetError(result);
-
-      ++index;
-      if (index >= m_threads)
-        index -= m_threads;
+      lock.lock();
+      ++m_next_to_write;
+      m_space_cv.notify_all();
     }
   }
 
-  std::function<ConversionResultCode(CompressThreadState*)> m_set_up_compress_thread_state;
-  std::function<ConversionResult<OutputParameters>(CompressThreadState*, CompressParameters)>
-      m_compress;
-  std::function<ConversionResultCode(OutputParameters)> m_output;
+  SetUpFn m_set_up;
+  CompressFn m_compress;
+  OutputFn m_output;
 
-  // We can't use std::vector for this, because Common::Event is not movable
-  std::unique_ptr<CompressThread[]> m_compress_threads;
-  std::thread m_output_thread;
+  mutable std::mutex m_mutex;
+  std::condition_variable m_work_cv;    // a job was queued, or stopping
+  std::condition_variable m_result_cv;  // a job finished, or stopping
+  std::condition_variable m_space_cv;   // a result was written
 
-  const size_t m_threads;
-  size_t m_current_index = 0;
+  std::deque<Job> m_queue;
+  std::map<u64, std::optional<Output>> m_results;  // nullopt: the job failed
+  u64 m_next_seq = 0;
+  u64 m_next_to_write = 0;
+  size_t m_max_in_flight = 1;
 
-  std::atomic<ConversionResultCode> m_result = ConversionResultCode::Success;
-  std::atomic<bool> m_shutting_down = false;
+  ConversionResultCode m_status = ConversionResultCode::Success;
+  bool m_stopping = false;
+
+  std::vector<std::thread> m_workers;
+  std::thread m_writer;
 };
 
 }  // namespace DiscIO

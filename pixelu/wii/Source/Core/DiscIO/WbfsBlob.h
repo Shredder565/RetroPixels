@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,7 +12,11 @@
 
 namespace DiscIO
 {
-static constexpr u32 WBFS_MAGIC = 0x53464257;  // "WBFS" (byteswapped to little endian)
+// WBFS: the file system USB loaders put on hard drives, here as an image holding one Wii disc.
+// The drive is divided into "WBFS sectors" (clusters); a table maps each cluster of the disc
+// to the drive cluster that holds it, and unused disc clusters aren't stored at all. Images
+// over 4 GiB may continue in name.wbf1, name.wbf2, ... (up to ten files in total).
+static constexpr u32 WBFS_MAGIC = 0x53464257;  // "WBFS" read as a little endian u32
 
 class WbfsFileReader final : public BlobReader
 {
@@ -25,11 +28,11 @@ public:
   BlobType GetBlobType() const override { return BlobType::WBFS; }
   std::unique_ptr<BlobReader> CopyReader() const override;
 
-  u64 GetRawSize() const override { return m_size; }
+  u64 GetRawSize() const override { return m_raw_size; }
   u64 GetDataSize() const override;
   DataSizeType GetDataSizeType() const override { return DataSizeType::UpperBound; }
 
-  u64 GetBlockSize() const override { return m_wbfs_sector_size; }
+  u64 GetBlockSize() const override { return m_cluster_size; }
   bool HasFastRandomAccessInBlock() const override { return true; }
   std::string GetCompressionMethod() const override { return {}; }
   std::optional<int> GetCompressionLevel() const override { return std::nullopt; }
@@ -37,51 +40,22 @@ public:
   bool Read(u64 offset, u64 nbytes, u8* out_ptr) override;
 
 private:
-  WbfsFileReader(File::DirectIOFile file, const std::string& path = "");
-
-  void OpenAdditionalFiles(const std::string& path);
-  bool AddFileToList(File::DirectIOFile file);
-  bool ReadHeader();
-
-  File::DirectIOFile& SeekToCluster(u64 offset, u64* available);
-  bool IsGood() const { return m_good; }
-  struct FileEntry
+  struct Part
   {
-    FileEntry(File::DirectIOFile file_, u64 base_address_, u64 size_)
-        : file(std::move(file_)), base_address(base_address_), size(size_)
-    {
-    }
-
     File::DirectIOFile file;
-    u64 base_address;
+    u64 start;  // where the file begins on the (virtual) drive
     u64 size;
   };
 
-  std::vector<FileEntry> m_files;
+  explicit WbfsFileReader(std::vector<Part> parts);
+  bool Parse();
 
-  u64 m_size;
+  std::vector<Part> m_parts;
+  u64 m_raw_size = 0;  // all parts together
 
-  u64 m_hd_sector_size;
-  u64 m_wbfs_sector_size;
-  u64 m_wbfs_sector_count;
-  u64 m_disc_info_size;
-
-#pragma pack(1)
-  struct WbfsHeader
-  {
-    u32 magic;
-    u32 hd_sector_count;
-    u8 hd_sector_shift;
-    u8 wbfs_sector_shift;
-    u8 padding[2];
-    u8 disc_table[500];
-  } m_header;
-#pragma pack()
-
-  std::vector<u16> m_wlba_table;
-  u64 m_blocks_per_disc;
-
-  bool m_good;
+  u32 m_cluster_shift = 0;
+  u64 m_cluster_size = 0;
+  std::vector<u16> m_cluster_map;  // disc cluster -> drive cluster (unused ones are 0)
 };
 
 }  // namespace DiscIO

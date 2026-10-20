@@ -1,18 +1,15 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/WbfsBlob.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "Common/Align.h"
-#include "Common/Assert.h"
 #include "Common/BitUtils.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -20,103 +17,124 @@
 
 namespace DiscIO
 {
-static constexpr u64 WII_SECTOR_SIZE = 0x8000;
-static constexpr u64 WII_SECTOR_COUNT = 143432 * 2;
-static constexpr u64 WII_DISC_HEADER_SIZE = 256;
-
-WbfsFileReader::WbfsFileReader(File::DirectIOFile file, const std::string& path)
-    : m_size(0), m_good(false)
+namespace
 {
-  if (!AddFileToList(std::move(file)))
-    return;
-  if (!path.empty())
-    OpenAdditionalFiles(path);
-  if (!ReadHeader())
-    return;
-  m_good = true;
+// The disc as presented: a dual-layer Wii disc's worth of 32 KiB sectors.
+constexpr u64 DISC_SIZE = u64(143432) * 2 * 0x8000;
+constexpr u64 MIN_CLUSTER_SIZE = 0x8000;
 
-  // Grab disc info (assume slot 0, checked in ReadHeader())
-  m_wlba_table.resize(m_blocks_per_disc);
-  m_files[0].file.Seek(m_hd_sector_size + WII_DISC_HEADER_SIZE /*+ i * m_disc_info_size*/,
-                       File::SeekOrigin::Begin);
-  m_files[0].file.Read(Common::AsWritableU8Span(m_wlba_table));
-  for (size_t i = 0; i < m_blocks_per_disc; i++)
-    m_wlba_table[i] = Common::swap16(m_wlba_table[i]);
+constexpr size_t MAX_FILES = 10;
+
+// Drive header (first drive sector of the first file)
+constexpr size_t HEADER_SIZE = 0x200;
+constexpr size_t HDR_MAGIC = 0x0;          // u32, "WBFS"
+constexpr size_t HDR_SECTOR_COUNT = 0x4;   // u32 BE, number of drive sectors
+constexpr size_t HDR_SECTOR_SHIFT = 0x8;   // u8, log2 of the drive sector size
+constexpr size_t HDR_CLUSTER_SHIFT = 0x9;  // u8, log2 of the WBFS sector size
+constexpr size_t HDR_DISC_SLOTS = 0xC;     // u8 per disc slot, non-zero = used
+
+// Each disc slot starts with a copy of the disc header, then its cluster map.
+constexpr u64 SLOT_DISC_HEADER_SIZE = 0x100;
+}  // namespace
+
+std::unique_ptr<WbfsFileReader> WbfsFileReader::Create(File::DirectIOFile file,
+                                                       const std::string& path)
+{
+  if (!file.IsOpen())
+    return nullptr;
+
+  std::vector<Part> parts;
+  u64 start = 0;
+  const auto add = [&](File::DirectIOFile f) {
+    const u64 size = f.GetSize();
+    parts.push_back(Part{std::move(f), start, size});
+    start += size;
+  };
+  add(std::move(file));
+
+  // name.wbfs continues in name.wbf1, name.wbf2, ...
+  if (path.size() >= 4)
+  {
+    while (parts.size() < MAX_FILES)
+    {
+      std::string next = path;
+      next.back() = static_cast<char>('0' + parts.size());
+      File::DirectIOFile f(next, File::AccessMode::Read);
+      if (!f.IsOpen())
+        break;
+      add(std::move(f));
+    }
+  }
+
+  std::unique_ptr<WbfsFileReader> reader(new WbfsFileReader(std::move(parts)));
+  if (!reader->Parse())
+    return nullptr;
+  return reader;
+}
+
+WbfsFileReader::WbfsFileReader(std::vector<Part> parts) : m_parts(std::move(parts))
+{
+  for (const Part& part : m_parts)
+    m_raw_size += part.size;
 }
 
 WbfsFileReader::~WbfsFileReader() = default;
 
+bool WbfsFileReader::Parse()
+{
+  std::array<u8, HEADER_SIZE> header;
+  File::DirectIOFile& first = m_parts[0].file;
+  if (!first.OffsetRead(0, header))
+    return false;
+
+  u32 magic;
+  std::memcpy(&magic, header.data() + HDR_MAGIC, sizeof(magic));
+  if (magic != WBFS_MAGIC)
+    return false;
+
+  const u32 sector_shift = header[HDR_SECTOR_SHIFT];
+  m_cluster_shift = header[HDR_CLUSTER_SHIFT];
+  if (sector_shift >= 64 || m_cluster_shift >= 64)
+    return false;
+
+  // The files together must be exactly the size the header claims for the drive.
+  const u64 sector_size = u64(1) << sector_shift;
+  if (m_raw_size != Common::swap32(header.data() + HDR_SECTOR_COUNT) * sector_size)
+    return false;
+
+  m_cluster_size = u64(1) << m_cluster_shift;
+  if (m_cluster_size < MIN_CLUSTER_SIZE)
+    return false;
+
+  // Only the first disc slot is supported.
+  if (header[HDR_DISC_SLOTS] == 0)
+    return false;
+
+  // The first slot's data sits in the second drive sector.
+  const u64 clusters = (DISC_SIZE + m_cluster_size - 1) / m_cluster_size;
+  m_cluster_map.assign(clusters, 0);
+  first.OffsetRead(sector_size + SLOT_DISC_HEADER_SIZE, Common::AsWritableU8Span(m_cluster_map));
+  for (u16& entry : m_cluster_map)
+    entry = Common::swap16(entry);
+  return true;
+}
+
 std::unique_ptr<BlobReader> WbfsFileReader::CopyReader() const
 {
-  auto retval = std::unique_ptr<WbfsFileReader>(new WbfsFileReader(m_files[0].file));
-  for (size_t ix = 1; ix < m_files.size(); ix++)
-    retval->AddFileToList(m_files[ix].file);
-  return retval;
+  std::vector<Part> parts;
+  parts.reserve(m_parts.size());
+  for (const Part& part : m_parts)
+    parts.push_back(Part{part.file, part.start, part.size});
+
+  std::unique_ptr<WbfsFileReader> copy(new WbfsFileReader(std::move(parts)));
+  if (!copy->Parse())
+    return nullptr;
+  return copy;
 }
 
 u64 WbfsFileReader::GetDataSize() const
 {
-  return WII_SECTOR_COUNT * WII_SECTOR_SIZE;
-}
-
-void WbfsFileReader::OpenAdditionalFiles(const std::string& path)
-{
-  if (path.length() < 4)
-    return;
-
-  ASSERT(!m_files.empty());  // The code below gives .wbf0 for index 0, but it should be .wbfs
-
-  while (true)
-  {
-    // Replace last character with index (e.g. wbfs = wbf1)
-    if (m_files.size() >= 10)
-      return;
-    std::string current_path = path;
-    current_path.back() = static_cast<char>('0' + m_files.size());
-    if (!AddFileToList(File::DirectIOFile(current_path, File::AccessMode::Read)))
-      return;
-  }
-}
-
-bool WbfsFileReader::AddFileToList(File::DirectIOFile file)
-{
-  if (!file.IsOpen())
-    return false;
-
-  const u64 file_size = file.GetSize();
-  m_files.emplace_back(std::move(file), m_size, file_size);
-  m_size += file_size;
-
-  return true;
-}
-
-bool WbfsFileReader::ReadHeader()
-{
-  // Read hd size info
-  m_files[0].file.Seek(0, File::SeekOrigin::Begin);
-  m_files[0].file.Read(Common::AsWritableU8Span(m_header));
-  if (m_header.magic != WBFS_MAGIC)
-    return false;
-
-  m_header.hd_sector_count = Common::swap32(m_header.hd_sector_count);
-  m_hd_sector_size = 1ull << m_header.hd_sector_shift;
-
-  if (m_size != (m_header.hd_sector_count * m_hd_sector_size))
-    return false;
-
-  // Read wbfs cluster info
-  m_wbfs_sector_size = 1ull << m_header.wbfs_sector_shift;
-  m_wbfs_sector_count = m_size / m_wbfs_sector_size;
-
-  if (m_wbfs_sector_size < WII_SECTOR_SIZE)
-    return false;
-
-  m_blocks_per_disc =
-      (WII_SECTOR_COUNT * WII_SECTOR_SIZE + m_wbfs_sector_size - 1) / m_wbfs_sector_size;
-  m_disc_info_size =
-      Common::AlignUp(WII_DISC_HEADER_SIZE + m_blocks_per_disc * sizeof(u16), m_hd_sector_size);
-
-  return m_header.disc_table[0] != 0;
+  return DISC_SIZE;
 }
 
 bool WbfsFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
@@ -124,69 +142,37 @@ bool WbfsFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
   if (offset + nbytes > GetDataSize())
     return false;
 
-  while (nbytes)
+  while (nbytes > 0)
   {
-    u64 read_size;
-    auto& data_file = SeekToCluster(offset, &read_size);
-    if (read_size == 0)
-      return false;
-    read_size = std::min(read_size, nbytes);
-
-    if (!data_file.Read(out_ptr, read_size))
+    // Disc offset -> drive offset. Clusters the disc doesn't use map to drive cluster 0.
+    const u64 cluster = offset >> m_cluster_shift;
+    if (cluster >= m_cluster_map.size())
     {
+      ERROR_LOG_FMT(DISCIO, "WBFS: read past the end of the disc");
+      return false;
+    }
+    const u64 in_cluster = offset & (m_cluster_size - 1);
+    const u64 drive_offset = u64(m_cluster_map[cluster]) * m_cluster_size + in_cluster;
+
+    auto part = std::find_if(m_parts.begin(), m_parts.end(), [drive_offset](const Part& p) {
+      return drive_offset < p.start + p.size;
+    });
+    if (part == m_parts.end())
+    {
+      ERROR_LOG_FMT(DISCIO, "WBFS: cluster {} points past the end of the image", cluster);
       return false;
     }
 
-    out_ptr += read_size;
-    nbytes -= read_size;
-    offset += read_size;
-  }
+    const u64 in_part = drive_offset - part->start;
+    const u64 n = std::min({part->size - in_part, m_cluster_size - in_cluster, nbytes});
+    if (!part->file.OffsetRead(in_part, out_ptr, n))
+      return false;
 
+    offset += n;
+    out_ptr += n;
+    nbytes -= n;
+  }
   return true;
-}
-
-File::DirectIOFile& WbfsFileReader::SeekToCluster(u64 offset, u64* available)
-{
-  u64 base_cluster = (offset >> m_header.wbfs_sector_shift);
-  if (base_cluster < m_blocks_per_disc)
-  {
-    u64 cluster_address = m_wbfs_sector_size * m_wlba_table[base_cluster];
-    u64 cluster_offset = offset & (m_wbfs_sector_size - 1);
-    u64 final_address = cluster_address + cluster_offset;
-
-    for (FileEntry& file_entry : m_files)
-    {
-      if (final_address < (file_entry.base_address + file_entry.size))
-      {
-        file_entry.file.Seek(final_address - file_entry.base_address, File::SeekOrigin::Begin);
-        if (available)
-        {
-          u64 till_end_of_file = file_entry.size - (final_address - file_entry.base_address);
-          u64 till_end_of_sector = m_wbfs_sector_size - cluster_offset;
-          *available = std::min(till_end_of_file, till_end_of_sector);
-        }
-
-        return file_entry.file;
-      }
-    }
-  }
-
-  ERROR_LOG_FMT(DISCIO, "Read beyond end of disc");
-  if (available)
-    *available = 0;
-  m_files[0].file.Seek(0, File::SeekOrigin::Begin);
-  return m_files[0].file;
-}
-
-std::unique_ptr<WbfsFileReader> WbfsFileReader::Create(File::DirectIOFile file,
-                                                       const std::string& path)
-{
-  auto reader = std::unique_ptr<WbfsFileReader>(new WbfsFileReader(std::move(file), path));
-
-  if (!reader->IsGood())
-    reader.reset();
-
-  return reader;
 }
 
 }  // namespace DiscIO

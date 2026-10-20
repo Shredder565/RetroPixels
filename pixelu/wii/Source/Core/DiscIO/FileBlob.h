@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,7 @@
 
 namespace DiscIO
 {
+// An uncompressed disc image: the file is the disc, byte for byte.
 class PlainFileReader final : public BlobReader
 {
 public:
@@ -32,10 +32,10 @@ public:
   bool Read(u64 offset, u64 nbytes, u8* out_ptr) override;
 
 private:
-  PlainFileReader(File::DirectIOFile file);
+  explicit PlainFileReader(File::DirectIOFile file);
 
   File::DirectIOFile m_file;
-  u64 m_size;
+  u64 m_size = 0;
 };
 
 }  // namespace DiscIO

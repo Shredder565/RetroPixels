@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/FileBlob.h"
 
@@ -15,17 +14,16 @@
 
 namespace DiscIO
 {
-PlainFileReader::PlainFileReader(File::DirectIOFile file) : m_file(std::move(file))
+PlainFileReader::PlainFileReader(File::DirectIOFile file)
+    : m_file(std::move(file)), m_size(m_file.GetSize())
 {
-  m_size = m_file.GetSize();
 }
 
 std::unique_ptr<PlainFileReader> PlainFileReader::Create(File::DirectIOFile file)
 {
-  if (file.IsOpen())
-    return std::unique_ptr<PlainFileReader>(new PlainFileReader(std::move(file)));
-
-  return nullptr;
+  if (!file.IsOpen())
+    return nullptr;
+  return std::unique_ptr<PlainFileReader>(new PlainFileReader(std::move(file)));
 }
 
 std::unique_ptr<BlobReader> PlainFileReader::CopyReader() const
@@ -54,61 +52,54 @@ bool ConvertToPlain(BlobReader* infile, const std::string& infile_path,
     return false;
   }
 
-  constexpr size_t DESIRED_BUFFER_SIZE = 0x80000;
-  u64 buffer_size = infile->GetBlockSize();
-  if (buffer_size == 0)
-  {
-    buffer_size = DESIRED_BUFFER_SIZE;
-  }
-  else
-  {
-    while (buffer_size < DESIRED_BUFFER_SIZE)
-      buffer_size *= 2;
-  }
+  // Copy in pieces of at least 512 KiB, rounded to whole blocks of the source format.
+  constexpr u64 MIN_PIECE = 0x80000;
+  u64 piece = infile->GetBlockSize();
+  if (piece == 0)
+    piece = MIN_PIECE;
+  while (piece < MIN_PIECE)
+    piece <<= 1;
 
-  std::vector<u8> buffer(buffer_size);
-  const u64 num_buffers = (infile->GetDataSize() + buffer_size - 1) / buffer_size;
-  int progress_monitor = std::max<int>(1, num_buffers / 100);
-  bool success = true;
+  const u64 total = infile->GetDataSize();
+  const u64 pieces = (total + piece - 1) / piece;
+  const u64 report_every = std::max<int>(1, static_cast<int>(pieces / 100));
 
-  for (u64 i = 0; i < num_buffers; i++)
+  std::vector<u8> buffer(piece);
+  bool ok = true;
+  for (u64 i = 0; i < pieces; ++i)
   {
-    if (i % progress_monitor == 0)
+    if (i % report_every == 0 &&
+        !callback(Common::GetStringT("Unpacking"), static_cast<float>(i) / pieces))
     {
-      const bool was_cancelled =
-          !callback(Common::GetStringT("Unpacking"), (float)i / (float)num_buffers);
-      if (was_cancelled)
-      {
-        success = false;
-        break;
-      }
-    }
-    const u64 inpos = i * buffer_size;
-    const u64 sz = std::min(buffer_size, infile->GetDataSize() - inpos);
-    if (!infile->Read(inpos, sz, buffer.data()))
-    {
-      PanicAlertFmtT("Failed to read from the input file \"{0}\".", infile_path);
-      success = false;
+      ok = false;
       break;
     }
-    if (!outfile.Write(buffer.data(), sz))
+
+    const u64 position = i * piece;
+    const u64 length = std::min(piece, total - position);
+    if (!infile->Read(position, length, buffer.data()))
+    {
+      PanicAlertFmtT("Failed to read from the input file \"{0}\".", infile_path);
+      ok = false;
+      break;
+    }
+    if (!outfile.Write(buffer.data(), length))
     {
       PanicAlertFmtT("Failed to write the output file \"{0}\".\n"
                      "Check that you have enough space available on the target drive.",
                      outfile_path);
-      success = false;
+      ok = false;
       break;
     }
   }
 
-  if (!success)
+  if (!ok)
   {
-    // Remove the incomplete output file.
+    // Don't leave a partial image behind.
     outfile.Close();
     File::Delete(outfile_path);
   }
-
-  return success;
+  return ok;
 }
 
 }  // namespace DiscIO
