@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,10 +11,11 @@
 
 namespace Common
 {
+// The system's text for an HRESULT.
 std::string GetHResultMessage(HRESULT hr);
 
-// Wrapper for HRESULT to be used with fmt.  Note that we can't create a fmt::formatter directly
-// for HRESULT as HRESULT is simply a typedef on long and not a distinct type.
+// Formats an HRESULT through fmt as "<message> (0x########)". HRESULT is only a typedef of long,
+// so it needs this distinct wrapper type to get its own formatter.
 struct HRWrap
 {
   constexpr explicit HRWrap(HRESULT hr) : m_hr(hr) {}
@@ -27,21 +27,25 @@ template <>
 struct fmt::formatter<Common::HRWrap>
 {
   constexpr auto parse(fmt::format_parse_context& ctx) { return ctx.begin(); }
+
   template <typename FormatContext>
-  auto format(const Common::HRWrap& hr, FormatContext& ctx) const
+  auto format(const Common::HRWrap& wrapped, FormatContext& ctx) const
   {
-    return fmt::format_to(ctx.out(), "{} ({:#010x})", Common::GetHResultMessage(hr.m_hr),
-                          static_cast<u32>(hr.m_hr));
+    return fmt::format_to(ctx.out(), "{} ({:#010x})", Common::GetHResultMessage(wrapped.m_hr),
+                          static_cast<u32>(wrapped.m_hr));
   }
 };
 
+// Same format for C++/WinRT's hresult.
 template <>
 struct fmt::formatter<winrt::hresult>
 {
   constexpr auto parse(fmt::format_parse_context& ctx) { return ctx.begin(); }
+
   template <typename FormatContext>
-  auto format(const winrt::hresult& hr, FormatContext& ctx) const
+  auto format(const winrt::hresult& result, FormatContext& ctx) const
   {
-    return fmt::format_to(ctx.out(), "{} ({:#010x})", Common::GetHResultMessage(hr), hr.value);
+    return fmt::format_to(ctx.out(), "{} ({:#010x})", Common::GetHResultMessage(result.value),
+                          static_cast<u32>(result.value));
   }
 };

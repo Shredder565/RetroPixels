@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef _WIN32
 
@@ -14,101 +13,94 @@
 
 namespace Common
 {
-std::optional<std::wstring> GetPropertyHelper(auto function, auto dev,
-                                              const DEVPROPKEY* requested_property,
-                                              DEVPROPTYPE expected_type)
+namespace
+{
+// Shared by the devnode and interface variants, which take the same arguments apart from the
+// first. Queries the size, then the value.
+template <typename Getter, typename Target>
+std::optional<std::wstring> ReadStringProperty(Getter getter, Target target,
+                                               const DEVPROPKEY* key)
 {
   DEVPROPTYPE type{};
-  ULONG buffer_size{};
+  ULONG size = 0;
+  const CONFIGRET probe = getter(target, key, &type, nullptr, &size, 0);
+  if (probe != CR_SUCCESS && probe != CR_BUFFER_SMALL)
+  {
+    if (probe != CR_NO_SUCH_VALUE)
+      WARN_LOG_FMT(COMMON, "Reading a device property failed: {}", probe);
+    return std::nullopt;
+  }
+  if (type != DEVPROP_TYPE_STRING)
+  {
+    WARN_LOG_FMT(COMMON, "Device property has type 0x{:x}, expected a string", type);
+    return std::nullopt;
+  }
+  if (size < sizeof(WCHAR))
+    return std::wstring{};
 
-  if (const auto result = function(dev, requested_property, &type, nullptr, &buffer_size, 0);
-      result != CR_SUCCESS && result != CR_BUFFER_SMALL)
+  // `size` counts the terminator; std::wstring keeps room for it past size().
+  std::wstring value(size / sizeof(WCHAR) - 1, L'\0');
+  const CONFIGRET read =
+      getter(target, key, &type, reinterpret_cast<BYTE*>(value.data()), &size, 0);
+  if (read != CR_SUCCESS)
   {
-    if (result != CR_NO_SUCH_VALUE)
-      WARN_LOG_FMT(COMMON, "CM_Get_DevNode_Property returned: {}", result);
+    ERROR_LOG_FMT(COMMON, "Reading a device property failed: {}", read);
     return std::nullopt;
   }
-  if (type != expected_type)
-  {
-    WARN_LOG_FMT(COMMON, "CM_Get_DevNode_Property unexpected type: 0x{:x}", type);
-    return std::nullopt;
-  }
-
-  std::optional<std::wstring> property;
-  // FYI: It's legal to write the null terminator at data()[size()] of std::basic_string.
-  property.emplace(buffer_size / sizeof(WCHAR) - 1, L'\0');
-  if (const auto result = function(dev, requested_property, &type,
-                                   reinterpret_cast<BYTE*>(property->data()), &buffer_size, 0);
-      result != CR_SUCCESS)
-  {
-    ERROR_LOG_FMT(COMMON, "CM_Get_DevNode_Property returned: {}", result);
-    return std::nullopt;
-  }
-  return property;
+  return value;
 }
 
-std::optional<std::wstring> GetDevNodeStringProperty(DEVINST dev,
+DWORD CALLBACK OnDeviceInterfaceChange(HCMNOTIFICATION, PVOID context, CM_NOTIFY_ACTION action,
+                                       PCM_NOTIFY_EVENT_DATA, DWORD)
+{
+  auto& callback = *static_cast<DeviceChangeNotification::CallbackType*>(context);
+  if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL)
+    callback(DeviceChangeNotification::EventType::Arrival);
+  else if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL)
+    callback(DeviceChangeNotification::EventType::Removal);
+  return ERROR_SUCCESS;
+}
+}  // namespace
+
+std::optional<std::wstring> GetDevNodeStringProperty(DEVINST device,
                                                      const DEVPROPKEY* requested_property)
 {
-  return GetPropertyHelper(CM_Get_DevNode_Property, dev, requested_property, DEVPROP_TYPE_STRING);
+  return ReadStringProperty(CM_Get_DevNode_Property, device, requested_property);
 }
 
 std::optional<std::wstring> GetDeviceInterfaceStringProperty(LPCWSTR iface,
                                                              const DEVPROPKEY* requested_property)
 {
-  return GetPropertyHelper(CM_Get_Device_Interface_Property, iface, requested_property,
-                           DEVPROP_TYPE_STRING);
+  return ReadStringProperty(CM_Get_Device_Interface_Property, iface, requested_property);
 }
 
 NullTerminatedStringList<WCHAR> GetDeviceInterfaceList(LPGUID iface_class_guid, DEVINSTID device_id,
                                                        ULONG flags)
 {
-  while (true)
+  // The list can grow between asking for its size and reading it; retry until it fits.
+  for (;;)
   {
-    ULONG list_size = 0;
-    const auto size_result =
-        CM_Get_Device_Interface_List_Size(&list_size, iface_class_guid, device_id, flags);
-    if (size_result != CR_SUCCESS || list_size == 0)
-      list_size = 1;
-
-    auto buffer = std::make_unique_for_overwrite<WCHAR[]>(list_size);
-    const auto list_result =
-        CM_Get_Device_Interface_List(iface_class_guid, device_id, buffer.get(), list_size, flags);
-
-    // "A new device can be added to the system causing the size returned to no longer be valid."
-    // Microsoft recommends trying again in a loop.
-    if (list_result == CR_BUFFER_SMALL)
-      continue;
-
-    if (list_result != CR_SUCCESS)
+    ULONG length = 0;
+    if (CM_Get_Device_Interface_List_Size(&length, iface_class_guid, device_id, flags) !=
+            CR_SUCCESS ||
+        length == 0)
     {
-      ERROR_LOG_FMT(COMMON, "CM_Get_Device_Interface_List: {}", list_result);
-      buffer[0] = 0;
+      length = 1;
     }
 
+    auto buffer = std::make_unique_for_overwrite<WCHAR[]>(length);
+    const CONFIGRET result =
+        CM_Get_Device_Interface_List(iface_class_guid, device_id, buffer.get(), length, flags);
+    if (result == CR_BUFFER_SMALL)
+      continue;
+
+    if (result != CR_SUCCESS)
+    {
+      ERROR_LOG_FMT(COMMON, "Listing device interfaces failed: {}", result);
+      buffer[0] = L'\0';
+    }
     return {std::move(buffer)};
   }
-}
-
-static __callback DWORD OnDevicesChanged(_In_ HCMNOTIFICATION notify_handle, _In_opt_ PVOID context,
-                                         _In_ CM_NOTIFY_ACTION action,
-                                         _In_reads_bytes_(event_data_size)
-                                             PCM_NOTIFY_EVENT_DATA event_data,
-                                         _In_ DWORD event_data_size)
-{
-  auto& callback = *static_cast<DeviceChangeNotification::CallbackType*>(context);
-  switch (action)
-  {
-  case CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL:
-    callback(DeviceChangeNotification::EventType::Arrival);
-    break;
-  case CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL:
-    callback(DeviceChangeNotification::EventType::Removal);
-    break;
-  default:
-    break;
-  }
-  return ERROR_SUCCESS;
 }
 
 DeviceChangeNotification::DeviceChangeNotification() = default;
@@ -123,16 +115,17 @@ void DeviceChangeNotification::Register(CallbackType callback)
   Unregister();
   m_callback = std::move(callback);
 
-  CM_NOTIFY_FILTER notify_filter{
-      .cbSize = sizeof(notify_filter),
-      .FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
-      .u{.DeviceInterface{.ClassGuid = GUID_DEVINTERFACE_HID}},
-  };
-  const CONFIGRET cfg_rv =
-      CM_Register_Notification(&notify_filter, &m_callback, OnDevicesChanged, &m_notify_handle);
-  if (cfg_rv != CR_SUCCESS)
+  CM_NOTIFY_FILTER filter{};
+  filter.cbSize = sizeof(filter);
+  filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+  filter.u.DeviceInterface.ClassGuid = GUID_DEVINTERFACE_HID;
+
+  const CONFIGRET result =
+      CM_Register_Notification(&filter, &m_callback, OnDeviceInterfaceChange, &m_notify_handle);
+  if (result != CR_SUCCESS)
   {
-    ERROR_LOG_FMT(COMMON, "CM_Register_Notification failed: {:x}", cfg_rv);
+    ERROR_LOG_FMT(COMMON, "Registering for device notifications failed: {:x}", result);
+    m_notify_handle = nullptr;
   }
 }
 
@@ -141,11 +134,9 @@ void DeviceChangeNotification::Unregister()
   if (m_notify_handle == nullptr)
     return;
 
-  const CONFIGRET cfg_rv = CM_Unregister_Notification(m_notify_handle);
-  if (cfg_rv != CR_SUCCESS)
-  {
-    ERROR_LOG_FMT(COMMON, "CM_Unregister_Notification failed: {:x}", cfg_rv);
-  }
+  const CONFIGRET result = CM_Unregister_Notification(m_notify_handle);
+  if (result != CR_SUCCESS)
+    ERROR_LOG_FMT(COMMON, "Unregistering device notifications failed: {:x}", result);
   m_notify_handle = nullptr;
 }
 

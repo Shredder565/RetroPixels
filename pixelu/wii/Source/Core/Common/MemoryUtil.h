@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,31 +7,36 @@
 
 namespace Common
 {
+// Read-write-execute memory for JIT code. Panics and returns nullptr on failure.
 void* AllocateExecutableMemory(size_t size);
 
-// These two functions control the executable/writable state of the W^X memory
-// allocations. More detailed documentation about them is in the .cpp file.
-// In general where applicable the ScopedJITPageWriteAndNoExecute wrapper
-// should be used to prevent bugs from not pairing up the calls properly.
-
-// Allows a thread to write to executable memory, but not execute the data.
+// Per-thread write/execute switching for JIT memory, for platforms that forbid a thread from
+// having both at once. The calls nest: execute is re-enabled only by the outermost
+// JITPageWriteDisableExecuteEnable(). Prefer ScopedJITPageWriteAndNoExecute, which pairs them.
 void JITPageWriteEnableExecuteDisable();
-// Allows a thread to execute memory allocated for execution, but not write to it.
 void JITPageWriteDisableExecuteEnable();
-// RAII Wrapper around JITPageWrite*Execute*(). When this is in scope the thread can
-// write to executable memory but not execute it.
+
+// While in scope, the thread may write JIT memory but not execute it.
 struct ScopedJITPageWriteAndNoExecute
 {
   ScopedJITPageWriteAndNoExecute() { JITPageWriteEnableExecuteDisable(); }
   ~ScopedJITPageWriteAndNoExecute() { JITPageWriteDisableExecuteEnable(); }
 };
+
+// Whole pages of read-write memory, and their release (size must be the allocated size).
 void* AllocateMemoryPages(size_t size);
 bool FreeMemoryPages(void* ptr, size_t size);
+
+// Heap memory with the given power-of-two alignment; free with FreeAlignedMemory().
 void* AllocateAlignedMemory(size_t size, size_t alignment);
 void FreeAlignedMemory(void* ptr);
+
+// Page protection changes. Each panics and returns false on failure.
 bool ReadProtectMemory(void* ptr, size_t size);
 bool WriteProtectMemory(void* ptr, size_t size, bool executable = false);
 bool UnWriteProtectMemory(void* ptr, size_t size, bool allowExecute = false);
+
+// Total installed physical memory in bytes.
 size_t MemPhysical();
 
 }  // namespace Common

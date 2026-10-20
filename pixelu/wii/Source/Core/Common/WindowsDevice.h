@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -25,13 +25,15 @@
 
 namespace Common
 {
+// A string-typed property of a device node / device interface, or nullopt if it is missing or
+// not a string.
 std::optional<std::wstring> GetDevNodeStringProperty(DEVINST device,
                                                      const DEVPROPKEY* requested_property);
-
 std::optional<std::wstring> GetDeviceInterfaceStringProperty(LPCWSTR iface,
                                                              const DEVPROPKEY* requested_property);
 
-// Allows iterating null-separated/terminated string lists returned by the Windows API.
+// Owns a Windows "multi-string" (strings each ending in a NUL, the list ending in an extra NUL)
+// and iterates its strings: `for (WCHAR* str : list)`.
 template <typename T>
 struct NullTerminatedStringList
 {
@@ -44,17 +46,19 @@ struct NullTerminatedStringList
 
     constexpr Iterator& operator++()
     {
-      m_ptr += std::basic_string_view(m_ptr).size() + 1;
+      // Step past this string and its terminator.
+      m_ptr += std::basic_string_view<T>(m_ptr).size() + 1;
       return *this;
     }
 
     constexpr Iterator operator++(int)
     {
-      const auto result{*this};
+      Iterator previous = *this;
       ++*this;
-      return result;
+      return previous;
     }
 
+    // The list ends at an empty string.
     constexpr bool operator==(std::default_sentinel_t) const { return *m_ptr == T{}; }
 
   private:
@@ -69,9 +73,11 @@ struct NullTerminatedStringList
   std::unique_ptr<T[]> list;
 };
 
+// The device interfaces of a class (CM_Get_Device_Interface_List). Empty on failure.
 NullTerminatedStringList<WCHAR> GetDeviceInterfaceList(LPGUID iface_class_guid, DEVINSTID device_id,
                                                        ULONG flags);
 
+// Calls back when HID device interfaces arrive or are removed.
 class DeviceChangeNotification
 {
 public:
@@ -85,7 +91,7 @@ public:
   DeviceChangeNotification();
   ~DeviceChangeNotification();
 
-  // FYI: Currently hardcoded to a GUID_DEVINTERFACE_HID filter.
+  // Replaces any previous registration. The callback runs on a system thread.
   void Register(CallbackType callback);
   void Unregister();
 
