@@ -54,22 +54,22 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 200131 | 81.7% |
+| Original (RetroPixels) | 199640 | 81.6% |
 | Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
-| Third-party | 44933 | 18.3% |
-| **All** | **245064** | 100% |
+| Third-party | 44933 | 18.4% |
+| **All** | **244573** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | (top level: main.cpp, mainLLE.cpp) | 335 | 335 | original |
 | audio | 2861 | 1803 | mixed (63% original), 1058 lines third-party |
-| Cafe (CafeSystem, GamePatch) | 1547 | 1547 | original |
-| Cafe/Account | 696 | 696 | original |
-| Cafe/Filesystem | 3355 | 3355 | original |
+| Cafe (CafeSystem, GamePatch) | 1544 | 1544 | original |
+| Cafe/Account | 694 | 694 | original |
+| Cafe/Filesystem | 3301 | 3301 | original |
 | Cafe/GameProfile | 345 | 345 | original |
-| Cafe/GraphicPack | 2835 | 2835 | original |
+| Cafe/GraphicPack | 2841 | 2841 | original |
 | Cafe/HW/ACR | 42 | 42 | original |
 | Cafe/HW/AI | 8 | 8 | original |
 | Cafe/HW/Common | 129 | 129 | original |
@@ -78,13 +78,13 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
 | Cafe/HW/Espresso/Recompiler | 7818 | 7818 | original |
 | Cafe/HW/Latte/Common | 3130 | 3130 | original |
-| Cafe/HW/Latte/Core | 13964 | 13964 | original |
+| Cafe/HW/Latte/Core | 13961 | 13961 | original |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
-| Cafe/HW/Latte/LatteAddrLib | 1249 | 1249 | original |
-| Cafe/HW/Latte/LegacyShaderDecompiler | 5914 | 5914 | original |
+| Cafe/HW/Latte/LatteAddrLib | 1251 | 1251 | original |
+| Cafe/HW/Latte/LegacyShaderDecompiler | 5896 | 5896 | original |
 | Cafe/HW/Latte/Renderer | 899 | 899 | original |
-| Cafe/HW/Latte/Renderer/OpenGL | 4531 | 4531 | original |
-| Cafe/HW/Latte/Renderer/Vulkan | 11861 | 11861 | original |
+| Cafe/HW/Latte/Renderer/OpenGL | 4541 | 4541 | original |
+| Cafe/HW/Latte/Renderer/Vulkan | 11842 | 11842 | original |
 | Cafe/HW/Latte/ShaderInfo | 70 | 70 | original |
 | Cafe/HW/Latte/Transcompiler | 731 | 731 | original |
 | Cafe/HW/MMU | 681 | 681 | original |
@@ -92,9 +92,9 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/VI | 5 | 5 | original |
 | Cafe/IOSU (shared headers) | 91 | 91 | original |
 | Cafe/IOSU/ccr_nfc | 335 | 335 | original |
-| Cafe/IOSU/fsa | 1043 | 1043 | original |
+| Cafe/IOSU/fsa | 1031 | 1031 | original |
 | Cafe/IOSU/kernel | 678 | 678 | original |
-| Cafe/IOSU/legacy | 4410 | 4410 | original |
+| Cafe/IOSU/legacy | 4407 | 4407 | original |
 | Cafe/IOSU/nn | 2200 | 2200 | original |
 | Cafe/IOSU/ODM | 139 | 139 | original |
 | Cafe/IOSU/PDM | 517 | 517 | original |
@@ -102,14 +102,14 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs (shared headers) | 352 | 352 | original |
 | Cafe/OS/libs/avm | 60 | 60 | original |
 | Cafe/OS/libs/camera | 266 | 266 | original |
-| Cafe/OS/libs/coreinit | 16729 | 14187 | mixed (85% original), 2542 lines third-party |
+| Cafe/OS/libs/coreinit | 16592 | 14050 | mixed (85% original), 2542 lines third-party |
 | Cafe/OS/libs/dmae | 174 | 174 | original |
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
 | Cafe/OS/libs/erreula | 514 | 514 | original |
-| Cafe/OS/libs/gx2 | 6269 | 6269 | original |
-| Cafe/OS/libs/h264_avc | 2291 | 2291 | original |
+| Cafe/OS/libs/gx2 | 6202 | 6202 | original |
+| Cafe/OS/libs/h264_avc | 2287 | 2287 | original |
 | Cafe/OS/libs/mic | 397 | 397 | original |
-| Cafe/OS/libs/nfc | 1081 | 1081 | original |
+| Cafe/OS/libs/nfc | 1076 | 1076 | original |
 | Cafe/OS/libs/nlibcurl | 1243 | 1243 | original |
 | Cafe/OS/libs/nlibnss | 65 | 65 | original |
 | Cafe/OS/libs/nn_ac | 313 | 313 | original |
@@ -127,7 +127,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nn_nim | 241 | 241 | original |
 | Cafe/OS/libs/nn_olv | 2887 | 2887 | original |
 | Cafe/OS/libs/nn_pdm | 66 | 66 | original |
-| Cafe/OS/libs/nn_save | 566 | 566 | original |
+| Cafe/OS/libs/nn_save | 545 | 545 | original |
 | Cafe/OS/libs/nn_sl | 121 | 121 | original |
 | Cafe/OS/libs/nn_spm | 126 | 126 | original |
 | Cafe/OS/libs/nn_temp | 65 | 65 | original |
@@ -138,41 +138,41 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/ntag | 623 | 623 | original |
 | Cafe/OS/libs/padscore | 737 | 737 | original |
 | Cafe/OS/libs/proc_ui | 868 | 868 | original |
-| Cafe/OS/libs/snd_core | 3818 | 3818 | original |
+| Cafe/OS/libs/snd_core | 3811 | 3811 | original |
 | Cafe/OS/libs/snd_user | 1030 | 1030 | original |
 | Cafe/OS/libs/swkbd | 613 | 613 | original |
 | Cafe/OS/libs/sysapp | 435 | 435 | original |
 | Cafe/OS/libs/TCL | 216 | 216 | original |
 | Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
-| Cafe/OS/RPL | 2525 | 2525 | original |
-| Cafe/TitleList | 2313 | 2313 | original |
+| Cafe/OS/RPL | 2501 | 2501 | original |
+| Cafe/TitleList | 2310 | 2310 | original |
 | Cemu/DiscordPresence | 850 | 850 | original |
 | Cemu/ExpressionParser | 600 | 600 | original |
 | Cemu/FileCache | 535 | 535 | original |
 | Cemu/Logging | 430 | 430 | original |
 | Cemu/napi | 1986 | 1986 | original |
 | Cemu/ncrypto | 921 | 921 | original |
-| Cemu/nex | 3410 | 3410 | original |
+| Cemu/nex | 3333 | 3333 | original |
 | Cemu/PPCAssembler | 1893 | 1893 | original |
-| Cemu/Tools | 1590 | 1590 | original |
-| Common | 31515 | 3728 | mixed (12% original), 27787 lines third-party |
-| config | 2805 | 2805 | original |
+| Cemu/Tools | 1584 | 1584 | original |
+| Common | 31509 | 3722 | mixed (12% original), 27787 lines third-party |
+| config | 2800 | 2800 | original |
 | gui/interface | 140 | 140 | original |
-| gui/wxgui (top level) | 11953 | 11953 | original |
+| gui/wxgui (top level) | 11963 | 11963 | original |
 | gui/wxgui/canvas | 294 | 294 | original |
-| gui/wxgui/components | 4015 | 4015 | original |
-| gui/wxgui/debugger | 3207 | 3207 | original |
+| gui/wxgui/components | 4014 | 4014 | original |
+| gui/wxgui/debugger | 3204 | 3204 | original |
 | gui/wxgui/dialogs | 656 | 656 | original |
 | gui/wxgui/EmulatedUSBDevices | 771 | 771 | original |
 | gui/wxgui/helpers | 529 | 529 | original |
 | gui/wxgui/input | 3351 | 3351 | original |
 | gui/wxgui/windows | 675 | 675 | original |
-| gui/wxgui/wxcomponents | 581 | 581 | original |
+| gui/wxgui/wxcomponents | 576 | 576 | original |
 | imgui | 1471 | 1471 | original |
-| input (top level) | 1266 | 1266 | original |
-| input/api | 5342 | 5342 | original |
-| input/emulated | 2426 | 2426 | original |
+| input (top level) | 1272 | 1272 | original |
+| input/api | 5322 | 5322 | original |
+| input/emulated | 2421 | 2421 | original |
 | input/motion | 354 | 354 | original |
 | resource | 3617 | 103 | mixed (3% original), 3514 lines third-party |
 | tools | 100 | 100 | original |
@@ -184,7 +184,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | util/crypto | 896 | 478 | mixed (53% original), 418 lines third-party |
 | util/DXGIWrapper | 77 | 77 | original |
 | util/Fiber | 148 | 148 | original |
-| util/helpers | 2333 | 2333 | original |
+| util/helpers | 2318 | 2318 | original |
 | util/highresolutiontimer | 171 | 171 | original |
 | util/ImageWriter | 123 | 123 | original |
 | util/IniParser | 225 | 225 | original |
@@ -1545,3 +1545,58 @@ Done:
   gives all ten URLs, the name and the SSL flag. The XPM parses back to the
   128x128 picture and compiles as C++. tools/pixelu-original.py: table
   unchanged.
+
+PixelU (Wii U) verbatim clean-up, pass on top of 075c213
+=========================================================
+
+Audit: python3 tools/verbatim-audit.py wiiu 8 (runs of 8+ non-trivial lines
+identical to Cemu a798c44).
+
+  before: 435 runs (122 in .cpp files)
+  after:  298 runs ( 12 in .cpp files)
+
+Reworked (behaviour preserved; order-sensitive sequences kept in order)
+- HLE export registration in 29 coreinit/gx2/snd_core/nfc/nn_save/h264 files:
+  per-library EXPORT_FN lists, several per line. The (lib, name, log type)
+  sequence was compared before/after for every file and is identical, so the
+  HLE indices do not move.
+- Cafe core, decompiler, renderers: CafeSystem legacy service start table,
+  GraphicPack2 reset/wait, GLSL helper emission via a line-list helper (output
+  text byte-identical), GL texture view defaults table, Vulkan render-pass and
+  viewport code, surface-copy shaders built by BuildCopyVertexShader /
+  BuildCopyFragmentShader (byte-identical output, checked by harness), COS
+  module list regrouped (lookup is by name, verified same order).
+- coreinit/gx2/ax/IOSU/title code: FSA case lists, alarm/event init (plain
+  variant calls the Ex variant), thread suspend/sleep, MCP, GX2 shutdown, AX
+  init table, H264 setters, TitleInfo paths and UID, napi.
+- GUI/input/audio/config: wxCemuConfig root flags driven by one table for Load
+  and Save (same elements, same defaults), NetworkSettings URL table, MainWindow
+  file filter and menu enables, controller setters, controller factory, SDL,
+  Wiimote, GameCube and VPAD code.
+- nex: nexPacketBuffer gained readFields/writeFields; the friends and
+  notification structures use them (harness: 260000 cases, 0 mismatches).
+- Headers: inline bodies rewritten as one-liners or helpers (fsc stubs via
+  fscUnsupported, MEMPTR assignment via Store, StringParser state copy,
+  uniform-offset init, XMLConfigWrapper, OSContext magic, clock getters,
+  PipelineHash, api_name, menu-navigation overrides, small accessors and
+  comparisons). Private host-only members reordered where layout is unused.
+
+Left as is, and why
+- .cpp (12 runs), all data or fixed layouts:
+  Dimensions.cpp figure tables (6 runs), iosu_crypto certificate tables (2),
+  GraphicPack2 permission table, H264DECFrameOutput and GX2ComputeShader guest
+  structs, the ih264d Apache license text in MainWindow (must stay verbatim).
+- Headers (286 runs): public declarations, guest-mapped betype structs
+  (layout is ABI with the guest), enums and register definitions (RegDefines,
+  LatteReg, LatteInstructions, EspressoISA, PM4), wire formats (DSU and Wiimote
+  messages, boss/act/fpd IPC structs) and config/class declarations. Only one
+  run with an inline body remained in the classifier and it was handled.
+
+Checks
+- Every .cpp in pixelu/src syntax-checked (g++ -std=c++20 -Wall -Wextra) in
+  this tree and in the 075c213 tree: 409 clean, 0 with new diagnostics (two
+  runs that the OOM killer interrupted were re-run and are clean). 29 files
+  stop on headers that are missing here (Windows.h, wrl, mmsystem, imgui, zstd,
+  gtk, mach) in both trees, XAudio among them; the MSVC CI is the final check.
+- Harnesses: surface-copy shader text, GLSL helpers, nex read/write, export
+  order, case label sets: all identical to the old code.
