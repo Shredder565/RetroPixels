@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64/Jit.h"
 
@@ -14,18 +13,43 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
-// The branches are known good, or at least reasonably good.
-// No need for a disable-mechanism.
-
-// If defined, clears CR0 at blr and bl-s. If the assumption that
-// flags never carry over between functions holds, then the task for
-// an optimizer becomes much easier.
-
-// #define ACID_TEST
-
-// Zelda and many more games seem to pass the Acid Test.
-
 using namespace Gen;
+
+namespace
+{
+// rfi copies these MSR bits from SRR1 and keeps the rest.
+constexpr u32 RFI_SRR1_BITS = 0x87C0FFFF;
+// MSR[13] (POW) is always cleared by rfi.
+constexpr u32 RFI_CLEARED_BITS = 0x00040000;
+
+bool DecrementsCTR(UGeckoInstruction inst)
+{
+  return (inst.BO & BO_DONT_DECREMENT_FLAG) == 0;
+}
+
+bool TestsCondition(UGeckoInstruction inst)
+{
+  return (inst.BO & BO_DONT_CHECK_CONDITION) == 0;
+}
+
+// The CR bit a conditional branch tests, as (field, bit-within-field) in the
+// emulated CR helpers' numbering, where bit 3 is LT and bit 0 is SO.
+int ConditionField(UGeckoInstruction inst)
+{
+  return static_cast<int>(inst.BI >> 2);
+}
+
+int ConditionBit(UGeckoInstruction inst)
+{
+  return 3 - static_cast<int>(inst.BI & 3);
+}
+
+// The skip jumps when the condition does not hold.
+bool SkipIfSet(UGeckoInstruction inst)
+{
+  return (inst.BO_2 & BO_BRANCH_IF_TRUE) == 0;
+}
+}  // namespace
 
 void Jit64::sc(UGeckoInstruction inst)
 {
@@ -34,6 +58,7 @@ void Jit64::sc(UGeckoInstruction inst)
 
   gpr.Flush();
   fpr.Flush();
+  // The syscall exception returns to the next instruction.
   MOV(32, PPCSTATE(pc), Imm32(js.compilerPC + 4));
   LOCK();
   OR(32, PPCSTATE(Exceptions), Imm32(EXCEPTION_SYSCALL));
@@ -48,20 +73,17 @@ void Jit64::rfi(UGeckoInstruction inst)
   gpr.Flush();
   fpr.Flush();
 
-  // See Interpreter rfi for details
-  const u32 mask = 0x87C0FFFF;
-  const u32 clearMSR13 = 0xFFFBFFFF;  // Mask used to clear the bit MSR[13]
-  // MSR = ((MSR & ~mask) | (SRR1 & mask)) & clearMSR13;
-  AND(32, PPCSTATE(msr), Imm32((~mask) & clearMSR13));
+  constexpr u32 from_srr1 = RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
+  constexpr u32 kept = ~RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
+  AND(32, PPCSTATE(msr), Imm32(kept));
   MOV(32, R(RSCRATCH), PPCSTATE_SRR1);
-  AND(32, R(RSCRATCH), Imm32(mask & clearMSR13));
+  AND(32, R(RSCRATCH), Imm32(from_srr1));
   OR(32, PPCSTATE(msr), R(RSCRATCH));
 
-  // Call MSRUpdated to update feature_flags. Only the bits that come from SRR1
-  // are relevant for this, so it's fine to pass in RSCRATCH in place of msr.
+  // The bits that matter for feature_flags all come from SRR1, so the
+  // masked SRR1 value can stand in for the new MSR.
   MSRUpdated(R(RSCRATCH), RSCRATCH2);
 
-  // NPC = SRR0;
   MOV(32, R(RSCRATCH), PPCSTATE_SRR0);
   WriteRfiExitDestInRSCRATCH();
 }
@@ -70,18 +92,23 @@ template <bool condition>
 void Jit64::WriteBranchWatch(u32 origin, u32 destination, UGeckoInstruction inst,
                              BitSet32 caller_save)
 {
-  if (IsBranchWatchEnabled())
-  {
-    ABI_PushRegistersAndAdjustStack(caller_save, 0);
-    MOV(64, R(ABI_PARAM1), ImmPtr(&m_branch_watch));
-    MOV(64, R(ABI_PARAM2), Imm64(Core::FakeBranchWatchCollectionKey{origin, destination}));
-    MOV(32, R(ABI_PARAM3), Imm32(inst.hex));
-    ABI_CallFunction(m_ppc_state.msr.IR ? (condition ? &Core::BranchWatch::HitVirtualTrue_fk :
-                                                       &Core::BranchWatch::HitVirtualFalse_fk) :
-                                          (condition ? &Core::BranchWatch::HitPhysicalTrue_fk :
-                                                       &Core::BranchWatch::HitPhysicalFalse_fk));
-    ABI_PopRegistersAndAdjustStack(caller_save, 0);
-  }
+  if (!IsBranchWatchEnabled())
+    return;
+
+  using HitFn = void (*)(Core::BranchWatch*, u64, u32);
+  HitFn hit;
+  if (m_ppc_state.msr.IR)
+    hit = condition ? &Core::BranchWatch::HitVirtualTrue_fk : &Core::BranchWatch::HitVirtualFalse_fk;
+  else
+    hit = condition ? &Core::BranchWatch::HitPhysicalTrue_fk :
+                      &Core::BranchWatch::HitPhysicalFalse_fk;
+
+  ABI_PushRegistersAndAdjustStack(caller_save, 0);
+  MOV(64, R(ABI_PARAM1), ImmPtr(&m_branch_watch));
+  MOV(64, R(ABI_PARAM2), Imm64(Core::FakeBranchWatchCollectionKey{origin, destination}));
+  MOV(32, R(ABI_PARAM3), Imm32(inst.hex));
+  ABI_CallFunction(hit);
+  ABI_PopRegistersAndAdjustStack(caller_save, 0);
 }
 
 template void Jit64::WriteBranchWatch<true>(u32, u32, UGeckoInstruction, BitSet32);
@@ -89,20 +116,81 @@ template void Jit64::WriteBranchWatch<false>(u32, u32, UGeckoInstruction, BitSet
 
 void Jit64::WriteBranchWatchDestInRSCRATCH(u32 origin, UGeckoInstruction inst, BitSet32 caller_save)
 {
-  if (IsBranchWatchEnabled())
-  {
-    // Assert RSCRATCH won't be clobbered before it is moved from.
-    static_assert(ABI_PARAM1 != RSCRATCH);
+  if (!IsBranchWatchEnabled())
+    return;
 
-    ABI_PushRegistersAndAdjustStack(caller_save, 0);
-    MOV(64, R(ABI_PARAM1), ImmPtr(&m_branch_watch));
-    MOV(32, R(ABI_PARAM3), R(RSCRATCH));
-    MOV(32, R(ABI_PARAM2), Imm32(origin));
-    MOV(32, R(ABI_PARAM4), Imm32(inst.hex));
-    ABI_CallFunction(m_ppc_state.msr.IR ? &Core::BranchWatch::HitVirtualTrue :
-                                          &Core::BranchWatch::HitPhysicalTrue);
-    ABI_PopRegistersAndAdjustStack(caller_save, 0);
+  // The destination is read from RSCRATCH after the first parameter is set.
+  static_assert(ABI_PARAM1 != RSCRATCH);
+
+  ABI_PushRegistersAndAdjustStack(caller_save, 0);
+  MOV(64, R(ABI_PARAM1), ImmPtr(&m_branch_watch));
+  MOV(32, R(ABI_PARAM3), R(RSCRATCH));
+  MOV(32, R(ABI_PARAM2), Imm32(origin));
+  MOV(32, R(ABI_PARAM4), Imm32(inst.hex));
+  if (m_ppc_state.msr.IR)
+    ABI_CallFunction(&Core::BranchWatch::HitVirtualTrue);
+  else
+    ABI_CallFunction(&Core::BranchWatch::HitPhysicalTrue);
+  ABI_PopRegistersAndAdjustStack(caller_save, 0);
+}
+
+Jit64::BranchSkips Jit64::EmitBranchConditionTests(UGeckoInstruction inst)
+{
+  BranchSkips skips;
+  if (DecrementsCTR(inst))
+  {
+    SUB(32, PPCSTATE_CTR, Imm8(1));
+    // BO_BRANCH_IF_CTR_0 set: branch only when CTR reached zero.
+    const CCFlags skip_cc = (inst.BO & BO_BRANCH_IF_CTR_0) ? CC_NZ : CC_Z;
+    skips.ctr = J_CC(skip_cc, Jump::Near);
   }
+  if (TestsCondition(inst))
+    skips.condition = JumpIfCRFieldBit(ConditionField(inst), ConditionBit(inst), SkipIfSet(inst));
+  return skips;
+}
+
+void Jit64::BindBranchSkips(const BranchSkips& skips)
+{
+  if (skips.condition)
+    SetJumpTarget(*skips.condition);
+  if (skips.ctr)
+    SetJumpTarget(*skips.ctr);
+}
+
+void Jit64::EmitFlattenedBranch(UGeckoInstruction inst)
+{
+  // The analyzer merged the target into this block, so nothing is emitted
+  // for the jump itself. A bl whose return is not in the block still needs
+  // its return prediction.
+  WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, CallerSavedRegistersInUse());
+  if (inst.LK && !js.op->skipLRStack)
+    FakeBLCall(js.compilerPC + 4);
+}
+
+void Jit64::ExitToBranchTarget(UGeckoInstruction inst)
+{
+  // Registers must already be flushed.
+  WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, {});
+  if (js.op->branchIsIdleLoop)
+    WriteIdleExit(js.op->branchTo);
+  else
+    WriteExit(js.op->branchTo, inst.LK, js.compilerPC + 4);
+}
+
+void Jit64::EmitBranchNotTaken(UGeckoInstruction inst, bool watch_after_exit)
+{
+  const u32 next = js.compilerPC + 4;
+  const bool continues = analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
+  if (!continues)
+  {
+    gpr.Flush();
+    fpr.Flush();
+    WriteBranchWatch<false>(js.compilerPC, next, inst, {});
+    WriteExit(next);
+    if (!watch_after_exit)
+      return;
+  }
+  WriteBranchWatch<false>(js.compilerPC, next, inst, CallerSavedRegistersInUse());
 }
 
 void Jit64::bx(UGeckoInstruction inst)
@@ -110,89 +198,36 @@ void Jit64::bx(UGeckoInstruction inst)
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
-  // We must always process the following sentence
-  // even if the blocks are merged by PPCAnalyst::Flatten().
+  // LR is written even when the block continues at the target.
   if (inst.LK)
     MOV(32, PPCSTATE_LR, Imm32(js.compilerPC + 4));
 
-  // If this is not the last instruction of a block,
-  // we will skip the rest process.
-  // Because PPCAnalyst::Flatten() merged the blocks.
   if (!js.isLastInstruction)
   {
-    WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, CallerSavedRegistersInUse());
-    if (inst.LK && !js.op->skipLRStack)
-    {
-      // We have to fake the stack as the RET instruction was not
-      // found in the same block. This is a big overhead, but still
-      // better than calling the dispatcher.
-      FakeBLCall(js.compilerPC + 4);
-    }
+    EmitFlattenedBranch(inst);
     return;
   }
 
   gpr.Flush();
   fpr.Flush();
-
-  WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, {});
-#ifdef ACID_TEST
-  if (inst.LK)
-    AND(32, PPCSTATE(cr), Imm32(~(0xFF000000)));
-#endif
-  if (js.op->branchIsIdleLoop)
-  {
-    WriteIdleExit(js.op->branchTo);
-  }
-  else
-  {
-    WriteExit(js.op->branchTo, inst.LK, js.compilerPC + 4);
-  }
+  ExitToBranchTarget(inst);
 }
 
-// TODO - optimize to hell and beyond
-// TODO - make nice easy to optimize special cases for the most common
-// variants of this instruction.
 void Jit64::bcx(UGeckoInstruction inst)
 {
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
-  // USES_CR
-
-  FixupBranch pCTRDontBranch;
-  if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)  // Decrement and test CTR
-  {
-    SUB(32, PPCSTATE_CTR, Imm8(1));
-    if (inst.BO & BO_BRANCH_IF_CTR_0)
-      pCTRDontBranch = J_CC(CC_NZ, Jump::Near);
-    else
-      pCTRDontBranch = J_CC(CC_Z, Jump::Near);
-  }
-
-  FixupBranch pConditionDontBranch;
-  if ((inst.BO & BO_DONT_CHECK_CONDITION) == 0)  // Test a CR bit
-  {
-    pConditionDontBranch =
-        JumpIfCRFieldBit(inst.BI >> 2, 3 - (inst.BI & 3), !(inst.BO_2 & BO_BRANCH_IF_TRUE));
-  }
+  const BranchSkips skips = EmitBranchConditionTests(inst);
 
   if (inst.LK)
     MOV(32, PPCSTATE_LR, Imm32(js.compilerPC + 4));
 
-  // If this is not the last instruction of a block
-  // and an unconditional branch, we will skip the rest process.
-  // Because PPCAnalyst::Flatten() merged the blocks.
-  if (!js.isLastInstruction && (inst.BO & BO_DONT_DECREMENT_FLAG) &&
-      (inst.BO & BO_DONT_CHECK_CONDITION))
+  // An unconditional bc in the middle of a block was followed by the
+  // analyzer, just like b.
+  if (!js.isLastInstruction && !DecrementsCTR(inst) && !TestsCondition(inst))
   {
-    WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, CallerSavedRegistersInUse());
-    if (inst.LK && !js.op->skipLRStack)
-    {
-      // We have to fake the stack as the RET instruction was not
-      // found in the same block. This is a big overhead, but still
-      // better than calling the dispatcher.
-      FakeBLCall(js.compilerPC + 4);
-    }
+    EmitFlattenedBranch(inst);
     return;
   }
 
@@ -201,31 +236,11 @@ void Jit64::bcx(UGeckoInstruction inst)
     RCForkGuard fpr_guard = fpr.Fork();
     gpr.Flush();
     fpr.Flush();
-
-    WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, {});
-    if (js.op->branchIsIdleLoop)
-    {
-      WriteIdleExit(js.op->branchTo);
-    }
-    else
-    {
-      WriteExit(js.op->branchTo, inst.LK, js.compilerPC + 4);
-    }
+    ExitToBranchTarget(inst);
   }
 
-  if ((inst.BO & BO_DONT_CHECK_CONDITION) == 0)
-    SetJumpTarget(pConditionDontBranch);
-  if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
-    SetJumpTarget(pCTRDontBranch);
-
-  if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
-  {
-    gpr.Flush();
-    fpr.Flush();
-    WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, {});
-    WriteExit(js.compilerPC + 4);
-  }
-  WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, CallerSavedRegistersInUse());
+  BindBranchSkips(skips);
+  EmitBranchNotTaken(inst, true);
 }
 
 void Jit64::bcctrx(UGeckoInstruction inst)
@@ -233,60 +248,46 @@ void Jit64::bcctrx(UGeckoInstruction inst)
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
-  // bcctrx doesn't decrement and/or test CTR
+  // Decrementing CTR while branching to it is an invalid form.
   DEBUG_ASSERT_MSG(POWERPC, inst.BO_2 & BO_DONT_DECREMENT_FLAG,
                    "bcctrx with decrement and test CTR option is invalid!");
 
+  const u32 next = js.compilerPC + 4;
+
   if (inst.BO_2 & BO_DONT_CHECK_CONDITION)
   {
-    // BO_2 == 1z1zz -> b always
-
-    // NPC = CTR & 0xfffffffc;
     gpr.Flush();
     fpr.Flush();
 
     MOV(32, R(RSCRATCH), PPCSTATE_CTR);
     if (inst.LK_3)
-      MOV(32, PPCSTATE_LR, Imm32(js.compilerPC + 4));  // LR = PC + 4;
+      MOV(32, PPCSTATE_LR, Imm32(next));
     AND(32, R(RSCRATCH), Imm32(0xFFFFFFFC));
     WriteBranchWatchDestInRSCRATCH(js.compilerPC, inst, BitSet32{RSCRATCH});
-    WriteExitDestInRSCRATCH(inst.LK_3, js.compilerPC + 4);
+    WriteExitDestInRSCRATCH(inst.LK_3, next);
+    return;
   }
-  else
+
+  // The conditional form is rare (some builds of the NES emulator use it).
+  const FixupBranch skip =
+      JumpIfCRFieldBit(ConditionField(inst), ConditionBit(inst), SkipIfSet(inst));
+  MOV(32, R(RSCRATCH), PPCSTATE_CTR);
+  AND(32, R(RSCRATCH), Imm32(0xFFFFFFFC));
+  if (inst.LK_3)
+    MOV(32, PPCSTATE_LR, Imm32(next));
+
   {
-    // Rare condition seen in (just some versions of?) Nintendo's NES Emulator
-
-    // BO_2 == 001zy -> b if false
-    // BO_2 == 011zy -> b if true
-
-    FixupBranch b =
-        JumpIfCRFieldBit(inst.BI >> 2, 3 - (inst.BI & 3), !(inst.BO_2 & BO_BRANCH_IF_TRUE));
-    MOV(32, R(RSCRATCH), PPCSTATE_CTR);
-    AND(32, R(RSCRATCH), Imm32(0xFFFFFFFC));
-    // MOV(32, PPCSTATE(pc), R(RSCRATCH)); => Already done in WriteExitDestInRSCRATCH()
-    if (inst.LK_3)
-      MOV(32, PPCSTATE_LR, Imm32(js.compilerPC + 4));  // LR = PC + 4;
-
-    {
-      RCForkGuard gpr_guard = gpr.Fork();
-      RCForkGuard fpr_guard = fpr.Fork();
-      gpr.Flush();
-      fpr.Flush();
-      WriteBranchWatchDestInRSCRATCH(js.compilerPC, inst, BitSet32{RSCRATCH});
-      WriteExitDestInRSCRATCH(inst.LK_3, js.compilerPC + 4);
-      // Would really like to continue the block here, but it ends. TODO.
-    }
-    SetJumpTarget(b);
-
-    if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
-    {
-      gpr.Flush();
-      fpr.Flush();
-      WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, {});
-      WriteExit(js.compilerPC + 4);
-    }
-    WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, CallerSavedRegistersInUse());
+    RCForkGuard gpr_guard = gpr.Fork();
+    RCForkGuard fpr_guard = fpr.Fork();
+    gpr.Flush();
+    fpr.Flush();
+    // WriteExitDestInRSCRATCH stores pc itself.
+    WriteBranchWatchDestInRSCRATCH(js.compilerPC, inst, BitSet32{RSCRATCH});
+    WriteExitDestInRSCRATCH(inst.LK_3, next);
   }
+  SetJumpTarget(skip);
+
+  EmitBranchNotTaken(inst, true);
 }
 
 void Jit64::bclrx(UGeckoInstruction inst)
@@ -294,33 +295,12 @@ void Jit64::bclrx(UGeckoInstruction inst)
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
-  FixupBranch pCTRDontBranch;
-  if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)  // Decrement and test CTR
-  {
-    SUB(32, PPCSTATE_CTR, Imm8(1));
-    if (inst.BO & BO_BRANCH_IF_CTR_0)
-      pCTRDontBranch = J_CC(CC_NZ, Jump::Near);
-    else
-      pCTRDontBranch = J_CC(CC_Z, Jump::Near);
-  }
-
-  FixupBranch pConditionDontBranch;
-  if ((inst.BO & BO_DONT_CHECK_CONDITION) == 0)  // Test a CR bit
-  {
-    pConditionDontBranch =
-        JumpIfCRFieldBit(inst.BI >> 2, 3 - (inst.BI & 3), !(inst.BO_2 & BO_BRANCH_IF_TRUE));
-  }
-
-// This below line can be used to prove that blr "eats flags" in practice.
-// This observation could let us do some useful optimizations.
-#ifdef ACID_TEST
-  AND(32, PPCSTATE(cr), Imm32(~(0xFF000000)));
-#endif
+  const BranchSkips skips = EmitBranchConditionTests(inst);
 
   MOV(32, R(RSCRATCH), PPCSTATE_LR);
-  // We don't have to do this because WriteBLRExit handles it for us. Specifically, since we only
-  // ever push divisible-by-four instruction addresses onto the stack, if the return address
-  // matches, we're already good. If it doesn't match, the mispredicted-BLR code handles the fixup.
+  // With the BLR optimization the low bits need no masking here: only
+  // aligned return addresses are ever predicted, so a matching prediction
+  // implies an aligned LR, and the mispredict path masks pc itself.
   if (!m_enable_blr_optimization)
     AND(32, R(RSCRATCH), Imm32(0xFFFFFFFC));
   if (inst.LK)
@@ -344,20 +324,6 @@ void Jit64::bclrx(UGeckoInstruction inst)
     }
   }
 
-  if ((inst.BO & BO_DONT_CHECK_CONDITION) == 0)
-    SetJumpTarget(pConditionDontBranch);
-  if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
-    SetJumpTarget(pCTRDontBranch);
-
-  if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
-  {
-    gpr.Flush();
-    fpr.Flush();
-    WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, {});
-    WriteExit(js.compilerPC + 4);
-  }
-  else
-  {
-    WriteBranchWatch<false>(js.compilerPC, js.compilerPC + 4, inst, CallerSavedRegistersInUse());
-  }
+  BindBranchSkips(skips);
+  EmitBranchNotTaken(inst, false);
 }

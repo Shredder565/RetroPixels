@@ -1,9 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64/JitAsm.h"
 
 #include <climits>
+#include <cstddef>
 #include <utility>
 
 #include "Common/CommonTypes.h"
@@ -20,13 +20,18 @@
 
 using namespace Gen;
 
+namespace
+{
+constexpr size_t ROUTINE_CONST_POOL_SIZE = 4096;
+}  // namespace
+
 Jit64AsmRoutineManager::Jit64AsmRoutineManager(Jit64& jit) : CommonAsmRoutines(jit)
 {
 }
 
 void Jit64AsmRoutineManager::Init()
 {
-  m_const_pool.Init(AllocChildCodeSpace(4096), 4096);
+  m_const_pool.Init(AllocChildCodeSpace(ROUTINE_CONST_POOL_SIZE), ROUTINE_CONST_POOL_SIZE);
   Generate();
   WriteProtect(true);
 }
@@ -39,219 +44,169 @@ void Jit64AsmRoutineManager::Regenerate()
   WriteProtect(true);
 }
 
-// PLAN: no more block numbers - crazy opcodes just contain offset within
-// dynarec buffer
-// At this offset - 4, there is an int specifying the block number.
+void Jit64AsmRoutineManager::ResetStack(X64CodeBlock& emitter)
+{
+  emitter.MOV(64, R(RSP), PPCSTATE(stored_stack_pointer));
+}
 
+void Jit64AsmRoutineManager::EmitBlockLookup()
+{
+  JitBaseBlockCache& block_cache = *m_jit.GetBlockCache();
+  u8** const entry_points = block_cache.GetEntryPoints();
+
+  if (entry_points != nullptr)
+  {
+    // Flat table of entry pointers indexed by (feature_flags << 30 | pc >> 2).
+    // With 8-byte entries the byte offset is (feature_flags << 32 | pc) * 2.
+    MOV(32, R(RSCRATCH2), PPCSTATE(feature_flags));
+    SHL(64, R(RSCRATCH2), Imm8(32));
+    MOV(32, R(RSCRATCH_EXTRA), PPCSTATE(pc));
+    OR(64, R(RSCRATCH_EXTRA), R(RSCRATCH2));
+    MOV(64, R(RSCRATCH2), Imm64(reinterpret_cast<u64>(entry_points)));
+    MOV(64, R(RSCRATCH), MComplex(RSCRATCH2, RSCRATCH_EXTRA, SCALE_2, 0));
+
+    TEST(64, R(RSCRATCH), R(RSCRATCH));
+    const FixupBranch missing = J_CC(CC_Z);
+    JMPptr(R(RSCRATCH));
+    SetJumpTarget(missing);
+    return;
+  }
+
+  // Hashed table of JitBlockData pointers indexed by (pc >> 2) & mask. With
+  // 8-byte entries the byte offset is (pc & (mask << 2)) * 2. A hit still has
+  // to be checked against the block's address and feature flags.
+  const u64 table = reinterpret_cast<u64>(block_cache.GetFastBlockMapFallback());
+  MOV(32, R(RSCRATCH), PPCSTATE(pc));
+  MOV(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
+  AND(32, R(RSCRATCH), Imm32(JitBaseBlockCache::FAST_BLOCK_MAP_FALLBACK_MASK << 2));
+  if (table <= static_cast<u64>(INT_MAX))
+  {
+    MOV(64, R(RSCRATCH), MScaled(RSCRATCH, SCALE_2, static_cast<s32>(table)));
+  }
+  else
+  {
+    MOV(64, R(RSCRATCH2), Imm64(table));
+    MOV(64, R(RSCRATCH), MComplex(RSCRATCH2, RSCRATCH, SCALE_2, 0));
+  }
+
+  TEST(64, R(RSCRATCH), R(RSCRATCH));
+  const FixupBranch missing = J_CC(CC_Z);
+
+  // effectiveAddress directly follows feature_flags, so one 64-bit compare
+  // checks both.
+  static_assert(offsetof(JitBlockData, feature_flags) + 4 ==
+                offsetof(JitBlockData, effectiveAddress));
+  MOV(32, R(RSCRATCH2), PPCSTATE(feature_flags));
+  SHL(64, R(RSCRATCH_EXTRA), Imm8(32));
+  OR(64, R(RSCRATCH2), R(RSCRATCH_EXTRA));
+  CMP(64, R(RSCRATCH2), MDisp(RSCRATCH, static_cast<s32>(offsetof(JitBlockData, feature_flags))));
+  const FixupBranch wrong_block = J_CC(CC_NE);
+  JMPptr(MDisp(RSCRATCH, static_cast<s32>(offsetof(JitBlockData, normalEntry))));
+
+  SetJumpTarget(missing);
+  SetJumpTarget(wrong_block);
+
+  // The C++ dispatcher also looks at blocks the hashed table does not hold.
+  ABI_PushRegistersAndAdjustStack({}, 0);
+  MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(&m_jit)));
+  ABI_CallFunction(JitBase::Dispatch);
+  ABI_PopRegistersAndAdjustStack({}, 0);
+  TEST(64, R(ABI_RETURN), R(ABI_RETURN));
+  const FixupBranch still_missing = J_CC(CC_Z);
+  JMPptr(R(ABI_RETURN));
+  SetJumpTarget(still_missing);
+}
+
+// The run loop:
+//
+//   enter_code:   save callee-saved registers and RSP, set up RPPCSTATE.
+//   outer loop:   CoreTiming::GlobalAdvance, reload RMEM, then dispatch.
+//   dispatcher*:  entry points used by block exits (see below); look up the
+//                 block for pc and jump to it, compiling it first if needed.
+//   do_timing:    the slice is used up; go round the outer loop unless the
+//                 CPU is no longer running.
+//   dispatcher_exit: restore and return to Run().
 void Jit64AsmRoutineManager::Generate()
 {
-  const bool enable_debugging = Config::IsDebuggingEnabled();
+  const bool debugging = Config::IsDebuggingEnabled();
+  auto& ppc_state = m_jit.m_ppc_state;
+  auto& cpu = m_jit.m_system.GetCPU();
 
   enter_code = AlignCode16();
-  // We need to own the beginning of RSP, so we do an extra stack adjustment
-  // for the shadow region before calls in this function.  This call will
-  // waste a bit of space for a second shadow, but whatever.
+  // The extra 8 bytes give this frame a shadow area of its own for calls.
   ABI_PushRegistersAndAdjustStack(ABI_ALL_CALLEE_SAVED, 8, /*frame*/ 16);
-
-  auto& ppc_state = m_jit.m_ppc_state;
-
-  // Two statically allocated registers.
-  // MOV(64, R(RMEM), Imm64((u64)Memory::physical_base));
-  MOV(64, R(RPPCSTATE), Imm64((u64)&ppc_state + 0x80));
-
+  MOV(64, R(RPPCSTATE), Imm64(reinterpret_cast<u64>(&ppc_state) + PPCSTATE_BIAS));
   MOV(64, PPCSTATE(stored_stack_pointer), R(RSP));
+  // A return prediction that never matches, below every real one.
+  MOV(64, MDisp(RSP, 8), Imm32(0xFFFFFFFF));
 
-  // something that can't pass the BLR test
-  MOV(64, MDisp(RSP, 8), Imm32((u32)-1));
-
-  const u8* outerLoop = GetCodePtr();
+  const u8* const outer_loop = GetCodePtr();
   ABI_PushRegistersAndAdjustStack({}, 0);
   ABI_CallFunction(CoreTiming::GlobalAdvance);
   ABI_PopRegistersAndAdjustStack({}, 0);
-
-  // When we've just entered the jit we need to update the membase
-  // GlobalAdvance also checks exceptions after which we need to
-  // update the membase so it makes sense to do this here.
+  // GlobalAdvance may have taken an exception, which can change MSR[DR].
   MOV(64, R(RMEM), PPCSTATE(mem_ptr));
+  const FixupBranch to_lookup = J(debugging ? Jump::Near : Jump::Short);
 
-  // skip the sync and compare first time
-  FixupBranch skipToRealDispatch = J(enable_debugging ? Jump::Near : Jump::Short);
-
+  // WriteBLRExit lands here when the host stack's prediction was wrong,
+  // with the block's cycle count in RSCRATCH2. The predictions on the stack
+  // are worthless now, so drop them all.
   dispatcher_mispredicted_blr = GetCodePtr();
   AND(32, PPCSTATE(pc), Imm32(0xFFFFFFFC));
-
   ResetStack(*this);
-
   SUB(32, PPCSTATE(downcount), R(RSCRATCH2));
 
+  // Entered with the flags of the downcount subtraction.
   dispatcher = GetCodePtr();
+  const FixupBranch out_of_cycles = J_CC(CC_LE, Jump::Near);
 
-  // Expected result of SUB(32, PPCSTATE(downcount), Imm32(block_cycles)) is in RFLAGS.
-  // Branch if downcount is <= 0 (signed).
-  FixupBranch bail = J_CC(CC_LE, Jump::Near);
-
+  // Entered once the downcount is known to be positive.
   dispatcher_no_timing_check = GetCodePtr();
-
-  auto& system = m_jit.m_system;
-
-  FixupBranch dbg_exit;
-  if (enable_debugging)
+  FixupBranch stopped{};
+  if (debugging)
   {
-    MOV(64, R(RSCRATCH), ImmPtr(system.GetCPU().GetStatePtr()));
+    MOV(64, R(RSCRATCH), ImmPtr(cpu.GetStatePtr()));
     CMP(32, MatR(RSCRATCH), Imm32(std::to_underlying(CPU::State::Running)));
-    dbg_exit = J_CC(CC_NE, Jump::Near);
+    stopped = J_CC(CC_NE, Jump::Near);
   }
 
-  SetJumpTarget(skipToRealDispatch);
-
+  SetJumpTarget(to_lookup);
   dispatcher_no_check = GetCodePtr();
+  EmitBlockLookup();
 
-  // The following is a translation of JitBaseBlockCache::Dispatch into assembly.
-  const bool assembly_dispatcher = true;
-  if (assembly_dispatcher)
-  {
-    if (m_jit.GetBlockCache()->GetEntryPoints())
-    {
-      MOV(32, R(RSCRATCH2), PPCSTATE(feature_flags));
-      SHL(64, R(RSCRATCH2), Imm8(32));
-
-      MOV(32, R(RSCRATCH_EXTRA), PPCSTATE(pc));
-      OR(64, R(RSCRATCH_EXTRA), R(RSCRATCH2));
-
-      u64 icache = reinterpret_cast<u64>(m_jit.GetBlockCache()->GetEntryPoints());
-      MOV(64, R(RSCRATCH2), Imm64(icache));
-      // The entry points map is indexed by ((feature_flags << 30) | (pc >> 2)).
-      // The map contains 8-byte pointers and that means we need to shift feature_flags
-      // left by 33 bits and pc left by 1 bit to get the correct offset in the map.
-      MOV(64, R(RSCRATCH), MComplex(RSCRATCH2, RSCRATCH_EXTRA, SCALE_2, 0));
-    }
-    else
-    {
-      // Fast block number lookup.
-      // ((PC >> 2) & mask) * sizeof(JitBlock*) = (PC & (mask << 2)) * 2
-      MOV(32, R(RSCRATCH), PPCSTATE(pc));
-      // Keep a copy for later.
-      MOV(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
-      u64 icache = reinterpret_cast<u64>(m_jit.GetBlockCache()->GetFastBlockMapFallback());
-      AND(32, R(RSCRATCH), Imm32(JitBaseBlockCache::FAST_BLOCK_MAP_FALLBACK_MASK << 2));
-      if (icache <= INT_MAX)
-      {
-        MOV(64, R(RSCRATCH), MScaled(RSCRATCH, SCALE_2, static_cast<s32>(icache)));
-      }
-      else
-      {
-        MOV(64, R(RSCRATCH2), Imm64(icache));
-        MOV(64, R(RSCRATCH), MComplex(RSCRATCH2, RSCRATCH, SCALE_2, 0));
-      }
-    }
-
-    // Check if we found a block.
-    TEST(64, R(RSCRATCH), R(RSCRATCH));
-    FixupBranch not_found = J_CC(CC_Z);
-    FixupBranch state_mismatch;
-
-    if (!m_jit.GetBlockCache()->GetEntryPoints())
-    {
-      // Check block.feature_flags.
-      MOV(32, R(RSCRATCH2), PPCSTATE(feature_flags));
-      // Also check the block.effectiveAddress. RSCRATCH_EXTRA still has the PC.
-      SHL(64, R(RSCRATCH_EXTRA), Imm8(32));
-      OR(64, R(RSCRATCH2), R(RSCRATCH_EXTRA));
-
-      static_assert(offsetof(JitBlockData, feature_flags) + 4 ==
-                    offsetof(JitBlockData, effectiveAddress));
-
-      CMP(64, R(RSCRATCH2),
-          MDisp(RSCRATCH, static_cast<s32>(offsetof(JitBlockData, feature_flags))));
-
-      state_mismatch = J_CC(CC_NE);
-      // Success; branch to the block we found.
-      JMPptr(MDisp(RSCRATCH, static_cast<s32>(offsetof(JitBlockData, normalEntry))));
-    }
-    else
-    {
-      // Success; branch to the block we found.
-      JMPptr(R(RSCRATCH));
-    }
-
-    SetJumpTarget(not_found);
-    if (!m_jit.GetBlockCache()->GetEntryPoints())
-    {
-      SetJumpTarget(state_mismatch);
-    }
-
-    // Failure, fallback to the C++ dispatcher for calling the JIT.
-  }
-
-  // There is no point in calling the dispatcher in the fast lookup table
-  // case, since the assembly dispatcher would already have found a block.
-  if (!assembly_dispatcher || !m_jit.GetBlockCache()->GetEntryPoints())
-  {
-    // Ok, no block, let's call the slow dispatcher
-    ABI_PushRegistersAndAdjustStack({}, 0);
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(&m_jit)));
-    ABI_CallFunction(JitBase::Dispatch);
-    ABI_PopRegistersAndAdjustStack({}, 0);
-
-    TEST(64, R(ABI_RETURN), R(ABI_RETURN));
-    FixupBranch no_block_available = J_CC(CC_Z);
-
-    // Jump to the block
-    JMPptr(R(ABI_RETURN));
-
-    SetJumpTarget(no_block_available);
-  }
-
-  // We reset the stack because Jit might clear the code cache.
-  // Also if we are in the middle of disabling BLR optimization on windows
-  // we need to reset the stack before _resetstkoflw() is called in Jit
-  // otherwise we will generate a second stack overflow exception during DoJit()
+  // No block yet: compile one. The stack is reset first because compiling
+  // may clear the cache, and because a stack-overflow recovery on Windows
+  // must not fault again while the JIT runs.
   ResetStack(*this);
-
   ABI_PushRegistersAndAdjustStack({}, 0);
   MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(&m_jit)));
   MOV(32, R(ABI_PARAM2), PPCSTATE(pc));
   ABI_CallFunction(JitTrampoline);
   ABI_PopRegistersAndAdjustStack({}, 0);
-
-  // If jitting triggered an ISI exception, MSR.DR may have changed
+  // Compiling may have raised an ISI, which can change MSR[DR].
   MOV(64, R(RMEM), PPCSTATE(mem_ptr));
-
   JMP(dispatcher_no_check);
 
-  SetJumpTarget(bail);
+  SetJumpTarget(out_of_cycles);
   do_timing = GetCodePtr();
-
-  // make sure npc contains the next pc (needed for exception checking in CoreTiming::Advance)
+  // CoreTiming's exception check expects npc to be the next instruction.
   MOV(32, R(RSCRATCH), PPCSTATE(pc));
   MOV(32, PPCSTATE(npc), R(RSCRATCH));
-
-  // Check the state pointer to see if we are exiting
-  // Gets checked on at the end of every slice
-  MOV(64, R(RSCRATCH), ImmPtr(system.GetCPU().GetStatePtr()));
+  MOV(64, R(RSCRATCH), ImmPtr(cpu.GetStatePtr()));
   CMP(32, MatR(RSCRATCH), Imm32(std::to_underlying(CPU::State::Running)));
-  J_CC(CC_E, outerLoop);
+  J_CC(CC_E, outer_loop);
 
-  // Landing pad for drec space
   dispatcher_exit = GetCodePtr();
-  if (enable_debugging)
-    SetJumpTarget(dbg_exit);
-
-  // Reset the stack pointer, since the BLR optimization may have pushed things onto the stack
-  // without popping them.
+  if (debugging)
+    SetJumpTarget(stopped);
+  // Unwind whatever the BLR optimization left on the stack.
   ResetStack(*this);
-
   ABI_PopRegistersAndAdjustStack(ABI_ALL_CALLEE_SAVED, 8, 16);
   RET();
 
   Common::JitRegister::Register(enter_code, GetCodePtr(), "JIT_Loop");
 
   GenerateCommon();
-}
-
-void Jit64AsmRoutineManager::ResetStack(X64CodeBlock& emitter)
-{
-  emitter.MOV(64, R(RSP), PPCSTATE(stored_stack_pointer));
 }
 
 void Jit64AsmRoutineManager::GenerateCommon()
