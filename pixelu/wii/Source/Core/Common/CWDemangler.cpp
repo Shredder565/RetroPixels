@@ -1,260 +1,276 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-// Based on: https://github.com/encounter/cwdemangle
-// Copyright 2024 Luke Street <luke@street.dev>
-// SPDX-License-Identifier: CC0-1.0
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/CWDemangler.h"
 
 #include <algorithm>
 #include <cctype>
-#include <map>
-
-#include <fmt/format.h>
+#include <charconv>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 #include "Common/StringUtil.h"
 
 namespace CWDemangler
 {
-
-struct ParseQualifiersResult
+namespace
 {
-  std::string pre;
-  std::string post;
-  std::string_view rest;
-};
-
-struct ParseDigitsResult
+// Mangled operator names (the Itanium-style two/three letter codes CodeWarrior also uses).
+std::optional<std::string_view> OperatorName(std::string_view code)
 {
-  std::size_t digits;
-  std::string_view rest;
-};
-
-inline static bool IsAscii(std::string_view s)
-{
-  return std::ranges::none_of(s, [](u8 c) { return c > 127; });
-}
-
-static const std::map<std::string_view, std::string_view> operators = {
-    {"nw", "operator new"},    {"nwa", "operator new[]"},
-    {"dl", "operator delete"}, {"dla", "operator delete[]"},
-    {"pl", "operator+"},       {"mi", "operator-"},
-    {"ml", "operator*"},       {"dv", "operator/"},
-    {"md", "operator%"},       {"er", "operator^"},
-    {"ad", "operator&"},       {"or", "operator|"},
-    {"co", "operator~"},       {"nt", "operator!"},
-    {"as", "operator="},       {"lt", "operator<"},
-    {"gt", "operator>"},       {"apl", "operator+="},
-    {"ami", "operator-="},     {"amu", "operator*="},
-    {"adv", "operator/="},     {"amd", "operator%="},
-    {"aer", "operator^="},     {"aad", "operator&="},
-    {"aor", "operator|="},     {"ls", "operator<<"},
-    {"rs", "operator>>"},      {"ars", "operator>>="},
-    {"als", "operator<<="},    {"eq", "operator=="},
-    {"ne", "operator!="},      {"le", "operator<="},
-    {"ge", "operator>="},      {"aa", "operator&&"},
-    {"oo", "operator||"},      {"pp", "operator++"},
-    {"mm", "operator--"},      {"cm", "operator,"},
-    {"rm", "operator->*"},     {"rf", "operator->"},
-    {"cl", "operator()"},      {"vc", "operator[]"},
-    {"vt", "__vtable"}};
-
-static const std::map<char, std::string_view> types = {
-    {'i', "int"},          {'b', "bool"},      {'c', "char"},  {'s', "short"},
-    {'l', "long"},         {'x', "long long"}, {'f', "float"}, {'d', "double"},
-    {'w', "wchar_t"},      {'v', "void"},      {'e', "..."},   {'r', "long double"},
-    {'D', "short double"},
-};
-
-// Finds the first double underscore in the string, excluding any that are part of a
-// template argument list or operator name.
-static std::optional<std::size_t> find_split(std::string_view s, bool special,
-                                             DemangleOptions options)
-{
-  std::size_t start = 0;
-
-  if (special && s.starts_with("op"))
+  struct Entry
   {
-    const auto result = demangle_arg(s.substr(2), options);
-    if (!result)
-      return std::nullopt;
-
-    const std::string_view rest = result->rest;
-
-    start = s.length() - rest.length();
-  }
-
-  int depth = 0;
-  const std::size_t length = s.length();
-
-  for (std::size_t i = start; i < length; i++)
+    std::string_view code;
+    std::string_view name;
+  };
+  static constexpr Entry table[] = {
+      {"nw", "operator new"},  {"nwa", "operator new[]"}, {"dl", "operator delete"},
+      {"dla", "operator delete[]"}, {"pl", "operator+"},   {"mi", "operator-"},
+      {"ml", "operator*"},     {"dv", "operator/"},       {"md", "operator%"},
+      {"er", "operator^"},     {"ad", "operator&"},       {"or", "operator|"},
+      {"co", "operator~"},     {"nt", "operator!"},       {"as", "operator="},
+      {"lt", "operator<"},     {"gt", "operator>"},       {"apl", "operator+="},
+      {"ami", "operator-="},   {"amu", "operator*="},     {"adv", "operator/="},
+      {"amd", "operator%="},   {"aer", "operator^="},     {"aad", "operator&="},
+      {"aor", "operator|="},   {"ls", "operator<<"},      {"rs", "operator>>"},
+      {"ars", "operator>>="},  {"als", "operator<<="},    {"eq", "operator=="},
+      {"ne", "operator!="},    {"le", "operator<="},      {"ge", "operator>="},
+      {"aa", "operator&&"},    {"oo", "operator||"},      {"pp", "operator++"},
+      {"mm", "operator--"},    {"cm", "operator,"},       {"rm", "operator->*"},
+      {"rf", "operator->"},    {"cl", "operator()"},      {"vc", "operator[]"},
+      {"vt", "__vtable"},
+  };
+  for (const Entry& e : table)
   {
-    switch (s[i])
-    {
-    case '<':
-      depth++;
-      break;
-    case '>':
-      depth--;
-      break;
-    case '_':
-      if (i < length - 1 && s[i + 1] == '_' && depth == 0)
-      {
-        return i;
-      }
-      break;
-    default:
-      break;
-    }
+    if (e.code == code)
+      return e.name;
   }
-
   return std::nullopt;
 }
 
-static ParseQualifiersResult parse_qualifiers(std::string_view str)
+// Single-letter builtin type codes.
+std::optional<std::string_view> BuiltinType(char code)
 {
-  std::string pre;
-  std::string post;
-  std::size_t index = 0;
-
-  for (char c : str)
+  switch (code)
   {
-    bool found_non_qualifier = false;
-
-    switch (c)
-    {
-    case 'P':
-      if (pre.empty())
-      {
-        post.insert(0, "*");
-      }
-      else
-      {
-        post.insert(0, fmt::format("* {0}", StripTrailingWhitespace(pre)));
-        pre.clear();
-      }
-      break;
-    case 'R':
-      if (pre.empty())
-      {
-        post.insert(0, "&");
-      }
-      else
-      {
-        post.insert(0, fmt::format("& {0}", StripTrailingWhitespace(pre)));
-        pre.clear();
-      }
-      break;
-    case 'C':
-      pre += "const ";
-      break;
-    case 'V':
-      pre += "volatile ";
-      break;
-    case 'U':
-      pre += "unsigned ";
-      break;
-    case 'S':
-      pre += "signed ";
-      break;
-    default:
-      found_non_qualifier = true;
-      break;
-    }
-
-    if (found_non_qualifier)
-      break;
-    index++;
+  case 'i':
+    return "int";
+  case 'b':
+    return "bool";
+  case 'c':
+    return "char";
+  case 's':
+    return "short";
+  case 'l':
+    return "long";
+  case 'x':
+    return "long long";
+  case 'f':
+    return "float";
+  case 'd':
+    return "double";
+  case 'w':
+    return "wchar_t";
+  case 'v':
+    return "void";
+  case 'e':
+    return "...";
+  case 'r':
+    return "long double";
+  case 'D':
+    return "short double";
+  default:
+    return std::nullopt;
   }
-  str.remove_prefix(index);
-  post = StripTrailingWhitespace(post);
-  return {pre, post, str};
 }
 
-static std::optional<ParseDigitsResult> parse_digits(std::string_view str)
+struct Number
+{
+  std::size_t value;
+  std::string_view rest;
+};
+
+// Leading decimal number.
+std::optional<Number> ReadNumber(std::string_view str)
 {
   if (str.empty())
     return std::nullopt;
+  std::size_t value = 0;
+  const char* const end = str.data() + str.size();
+  const auto [ptr, ec] = std::from_chars(str.data(), end, value);
+  if (ec != std::errc{})
+    return std::nullopt;
+  return Number{value, std::string_view(ptr, static_cast<std::size_t>(end - ptr))};
+}
 
-  const char* str_start = str.data();
-  const char* str_end = str_start + str.size();
-  std::size_t val = 0;
-  std::string_view remainder;
+struct Qualifiers
+{
+  std::string pre;   // cv/sign words printed before the type
+  std::string post;  // pointer/reference declarators printed after it
+  std::string_view rest;
+};
 
-  const auto result = std::from_chars(str_start, str_end, val);
+// Reads the run of P, R, C, V, U, S codes in front of a type. A pointer or reference that
+// follows cv words binds them: "PC" reads as "* const" (a const pointer).
+Qualifiers ReadQualifiers(std::string_view str)
+{
+  Qualifiers q;
+  std::size_t used = 0;
+  for (; used < str.size(); ++used)
+  {
+    const char c = str[used];
+    if (c == 'P' || c == 'R')
+    {
+      const char* symbol = c == 'P' ? "*" : "&";
+      if (q.pre.empty())
+        q.post.insert(0, symbol);
+      else
+        q.post.insert(0, std::string(symbol) + " " + std::string(StripTrailingWhitespace(q.pre)));
+      q.pre.clear();
+    }
+    else if (c == 'C')
+      q.pre += "const ";
+    else if (c == 'V')
+      q.pre += "volatile ";
+    else if (c == 'U')
+      q.pre += "unsigned ";
+    else if (c == 'S')
+      q.pre += "signed ";
+    else
+      break;
+  }
+  q.post = std::string(StripTrailingWhitespace(q.post));
+  q.rest = str.substr(used);
+  return q;
+}
 
-  if (result.ec != std::errc{})
+// Position of the "__" that separates a symbol's name from its signature: the first one that
+// is not inside a template argument list (and, for "__op" conversion operators, not inside the
+// target type).
+std::optional<std::size_t> FindSplit(std::string_view str, bool special, DemangleOptions options)
+{
+  std::size_t from = 0;
+  if (special && str.starts_with("op"))
+  {
+    const auto type = demangle_arg(str.substr(2), options);
+    if (!type)
+      return std::nullopt;
+    from = str.size() - type->rest.size();
+  }
+
+  int depth = 0;
+  for (std::size_t i = from; i < str.size(); ++i)
+  {
+    const char c = str[i];
+    if (c == '<')
+      ++depth;
+    else if (c == '>')
+      --depth;
+    else if (c == '_' && depth == 0 && i + 1 < str.size() && str[i + 1] == '_')
+      return i;
+  }
+  return std::nullopt;
+}
+
+DemangleArgResult Done(std::string pre, std::string post, std::string_view rest)
+{
+  return DemangleArgResult{std::move(pre), std::move(post), rest};
+}
+
+// Function type after 'F' (or member function type after "M<class>F"). `cv` and `declarator`
+// are what was read in front of it; `member_of` is the printed class for members.
+std::optional<DemangleArgResult> ReadFunctionType(std::string_view str, std::string cv,
+                                                  std::string declarator, bool is_member,
+                                                  DemangleOptions options)
+{
+  bool const_member = false;
+  if (is_member)
+  {
+    // The hidden 'this' and the second implicit parameter of member function pointers.
+    if (str.starts_with("PCvPCv"))
+    {
+      const_member = true;
+      str.remove_prefix(6);
+    }
+    else if (str.starts_with("PCvPv"))
+    {
+      str.remove_prefix(5);
+    }
+    else
+    {
+      return std::nullopt;
+    }
+  }
+  else if (declarator.starts_with('*'))
+  {
+    // Pointer to function: the '*' moves inside the parentheses.
+    declarator = std::string(StripLeadingWhitespace(std::string_view(declarator).substr(1)));
+    cv = "*" + cv;
+  }
+  else
+  {
+    return std::nullopt;
+  }
+
+  const auto params = demangle_function_args(str, options);
+  if (!params || !params->rest.starts_with('_'))
     return std::nullopt;
 
-  const char* rest_start = result.ptr;
-  if (rest_start != str_end)
-    remainder = std::string_view(rest_start, str_end - rest_start);
+  const auto ret = demangle_arg(params->rest.substr(1), options);
+  if (!ret)
+    return std::nullopt;
 
-  return {{val, remainder}};
+  std::string pre = ret->arg_pre + " (" + cv + declarator;
+  std::string post = ")(" + params->args + ")" + (const_member ? " const" : "") + ret->arg_post;
+  return Done(std::move(pre), std::move(post), ret->rest);
 }
+}  // namespace
 
 std::optional<DemangleTemplateArgsResult> demangle_template_args(std::string_view str,
                                                                  DemangleOptions options)
 {
-  const std::size_t start_idx = str.find('<');
+  const std::size_t open = str.find('<');
+  if (open == std::string_view::npos)
+    return DemangleTemplateArgsResult{str, ""};
 
-  if (start_idx == std::string::npos)
-    return {{str, ""}};
-
-  const std::size_t end_idx = str.rfind('>');
-  if (end_idx == std::string::npos || end_idx < start_idx)
-  {
+  const std::size_t close = str.rfind('>');
+  if (close == std::string_view::npos || close < open)
     return std::nullopt;
-  }
 
-  std::string_view args(&str[start_idx + 1], &str[end_idx]);
-  const std::string_view template_name = str.substr(0, start_idx);
-  std::string tmpl_args = "<";
-
-  while (!args.empty())
+  std::string printed = "<";
+  std::string_view inner = str.substr(open + 1, close - open - 1);
+  while (!inner.empty())
   {
-    const auto result = demangle_arg(args, options);
-    if (!result)
+    const auto arg = demangle_arg(inner, options);
+    if (!arg)
       return std::nullopt;
-
-    const auto demangled_arg = result.value();
-    const std::string_view rest = demangled_arg.rest;
-    tmpl_args += demangled_arg.arg_pre;
-    tmpl_args += demangled_arg.arg_post;
-
-    if (rest.empty())
+    printed += arg->arg_pre;
+    printed += arg->arg_post;
+    if (arg->rest.empty())
       break;
-
-    tmpl_args += ", ";
-
-    args = rest.substr(1);
+    // Skip the separator.
+    printed += ", ";
+    inner = arg->rest.substr(1);
   }
-
-  tmpl_args += ">";
-
-  return {{template_name, tmpl_args}};
+  printed += ">";
+  return DemangleTemplateArgsResult{str.substr(0, open), std::move(printed)};
 }
 
 std::optional<DemangleNameResult> demangle_name(std::string_view str, DemangleOptions options)
 {
-  const auto result = parse_digits(str);
-  if (!result)
+  const auto length = ReadNumber(str);
+  if (!length || length->rest.size() < length->value)
     return std::nullopt;
 
-  auto [size, rest] = result.value();
-
-  if (rest.length() < size)
-  {
-    return std::nullopt;
-  }
-
-  auto result1 = demangle_template_args(rest.substr(0, size), options);
-  if (!result1)
+  const std::string_view mangled = length->rest.substr(0, length->value);
+  const auto templ = demangle_template_args(mangled, options);
+  if (!templ)
     return std::nullopt;
 
-  auto [name, args] = result1.value();
-  const std::string result_name{name};
-  return {{result_name, fmt::format("{0}{1}", name, args), rest.substr(size)}};
+  std::string base(templ->name);
+  std::string full = base + templ->args;
+  return DemangleNameResult{std::move(base), std::move(full),
+                            length->rest.substr(length->value)};
 }
 
 std::optional<DemangleNameResult> demangle_qualified_name(std::string_view str,
@@ -263,510 +279,302 @@ std::optional<DemangleNameResult> demangle_qualified_name(std::string_view str,
   if (!str.starts_with('Q'))
     return demangle_name(str, options);
 
-  if (str.length() < 3)
-  {
+  // The nesting depth is one digit (the compiler keeps at most nine levels).
+  if (str.size() < 3 || str[1] < '0' || str[1] > '9')
     return std::nullopt;
-  }
+  const int levels = str[1] - '0';
+  str.remove_prefix(2);
 
-  // MWCC only preserves up to 9 layers of namespace/class depth in symbol names, so we
-  // can just check one digit
-  const int digit = static_cast<int>(str[1] - '0');
-  if (digit < 0 || digit > 9)
-    return std::nullopt;
-
-  const int count = digit;
-
-  str = str.substr(2);
-
-  std::string last_class;
-  std::string qualified;
-
-  for (int i = 0; i < count; i++)
+  DemangleNameResult result;
+  for (int level = 0; level < levels; ++level)
   {
-    const auto result = demangle_name(str, options);
-    if (!result)
+    auto part = demangle_name(str, options);
+    if (!part)
       return std::nullopt;
-
-    auto [class_name, full, rest] = *result;
-    qualified += full;
-    last_class = class_name;
-    str = rest;
-    if (i < count - 1)
-    {
-      qualified += "::";
-    }
+    if (level != 0)
+      result.full += "::";
+    result.full += part->full;
+    result.class_name = std::move(part->class_name);
+    str = part->rest;
   }
-  return {{last_class, qualified, str}};
+  result.rest = str;
+  return result;
 }
 
 std::optional<DemangleArgResult> demangle_arg(std::string_view str, DemangleOptions options)
 {
-  // Negative constant
+  // Negative integer template argument.
   if (str.starts_with('-'))
   {
-    const auto parse_result = parse_digits(str.substr(1));
-    if (!parse_result)
+    const auto number = ReadNumber(str.substr(1));
+    if (!number)
       return std::nullopt;
-
-    const std::size_t size = parse_result->digits;
-    const std::string out_val = fmt::format("-{}", size);
-    return {{out_val, "", parse_result->rest}};
+    return Done("-" + std::to_string(number->value), "", number->rest);
   }
 
-  std::string result;
+  Qualifiers q = ReadQualifiers(str);
+  std::string_view body = q.rest;
 
-  const auto parse_qual_result = parse_qualifiers(str);
-  std::string pre = parse_qual_result.pre;
-  std::string post = parse_qual_result.post;
-  std::string_view rest = parse_qual_result.rest;
-  result += pre;
-  str = rest;
-
-  // Disambiguate arguments starting with a number
-  if (str.length() > 0 && std::isdigit(static_cast<u8>(str[0])))
+  if (!body.empty() && std::isdigit(static_cast<unsigned char>(body[0])))
   {
-    const auto parse_result = parse_digits(str);
-    if (!parse_result)
+    const auto number = ReadNumber(body);
+    if (!number)
       return std::nullopt;
 
-    auto& [num, rest_value] = parse_result.value();
-    rest = rest_value;
-
-    // If the number is followed by a comma or the end of the string, it's a template argument
-    if (rest.empty() || rest.starts_with(','))
+    // A number alone (up to ',' or the end) is an integer template argument, or with the
+    // Metrowerks extensions one of the extension types.
+    if (number->rest.empty() || number->rest.starts_with(','))
     {
-      // ...or a Metrowerks extension type
-      if (options.mw_extensions)
+      if (options.mw_extensions && (number->value == 1 || number->value == 2))
       {
-        const std::string t = num == 1 ? "__int128" : num == 2 ? "__vec2x32float__" : "";
-
-        if (!t.empty())
-        {
-          result += t;
-          return {{result, post, rest}};
-        }
+        const char* ext = number->value == 1 ? "__int128" : "__vec2x32float__";
+        return Done(q.pre + ext, q.post, number->rest);
       }
-      result += fmt::format("{}{}", num, post);
-      return {{result, "", rest}};
+      return Done(q.pre + std::to_string(number->value) + q.post, "", number->rest);
     }
-    // Otherwise, it's (probably) the size of a type
-    const auto demangle_name_result = demangle_name(str, options);
-    if (!demangle_name_result)
-      return std::nullopt;
 
-    result += demangle_name_result->full;
-    result += post;
-    return {{result, "", demangle_name_result->rest}};
+    // Otherwise it is the length prefix of a class name.
+    const auto name = demangle_name(body, options);
+    if (!name)
+      return std::nullopt;
+    return Done(q.pre + name->full + q.post, "", name->rest);
   }
 
-  // Handle qualified names
-  if (str.starts_with('Q'))
+  if (body.starts_with('Q'))
   {
-    const auto demangle_qual_result = demangle_qualified_name(str, options);
-    if (!demangle_qual_result)
+    const auto name = demangle_qualified_name(body, options);
+    if (!name)
       return std::nullopt;
-
-    result += demangle_qual_result->full;
-    result += post;
-    return {{result, "", demangle_qual_result->rest}};
+    return Done(q.pre + name->full + q.post, "", name->rest);
   }
 
-  bool is_member = false;
-  bool const_member = false;
-  if (str.starts_with('M'))
+  if (body.starts_with('M'))
   {
-    is_member = true;
-    const auto demangle_qual_result = demangle_qualified_name(str.substr(1), options);
-    if (!demangle_qual_result)
+    // Pointer to member function: M<class>F...
+    const auto owner = demangle_qualified_name(body.substr(1), options);
+    if (!owner || !owner->rest.starts_with('F'))
       return std::nullopt;
-
-    rest = demangle_qual_result->rest;
-    pre = fmt::format("{}::*{}", demangle_qual_result->full, pre);
-    if (!rest.starts_with('F'))
-    {
-      return std::nullopt;
-    }
-    str = rest;
+    return ReadFunctionType(owner->rest.substr(1), owner->full + "::*" + q.pre, q.post, true,
+                            options);
   }
-  if (is_member || str.starts_with('F'))
+
+  if (body.starts_with('F'))
+    return ReadFunctionType(body.substr(1), q.pre, q.post, false, options);
+
+  if (body.starts_with('A'))
   {
-    str.remove_prefix(1);
-    if (is_member)
-    {
-      // "const void*, const void*" or "const void*, void*"
-      if (str.starts_with("PCvPCv"))
-      {
-        const_member = true;
-        str.remove_prefix(6);
-      }
-      else if (str.starts_with("PCvPv"))
-      {
-        str.remove_prefix(5);
-      }
-      else
-      {
-        return std::nullopt;
-      }
-    }
-    else if (post.starts_with('*'))
-    {
-      post = StripLeadingWhitespace(post.substr(1));
-      pre = fmt::format("*{}", pre);
-    }
-    else
-    {
+    // Array: A<count>_<element type>
+    const auto count = ReadNumber(body.substr(1));
+    if (!count || !count->rest.starts_with('_'))
       return std::nullopt;
-    }
-
-    const auto demangle_func_args_result = demangle_function_args(str, options);
-    if (!demangle_func_args_result)
+    const auto element = demangle_arg(count->rest.substr(1), options);
+    if (!element)
       return std::nullopt;
-
-    const auto demangled_func_args = demangle_func_args_result.value();
-
-    if (!demangled_func_args.rest.starts_with('_'))
-    {
-      return std::nullopt;
-    }
-
-    const auto demangle_arg_result = demangle_arg(demangled_func_args.rest.substr(1), options);
-    if (!demangle_arg_result)
-      return std::nullopt;
-
-    const std::string_view const_str = const_member ? " const" : "";
-    const std::string res_pre = fmt::format("{} ({}{}", demangle_arg_result->arg_pre, pre, post);
-    const std::string res_post = fmt::format(")({}){}{}", demangled_func_args.args, const_str,
-                                             demangle_arg_result->arg_post);
-    return {{res_pre, res_post, demangle_arg_result->rest}};
+    const std::string declarator = q.post.empty() ? std::string() : "(" + q.post + ")";
+    return Done(q.pre + element->arg_pre + declarator,
+                "[" + std::to_string(count->value) + "]" + element->arg_post, element->rest);
   }
 
-  if (str.starts_with('A'))
-  {
-    const auto parse_result = parse_digits(str.substr(1));
-    if (!parse_result)
-      return std::nullopt;
-
-    auto& [count, rest_value] = parse_result.value();
-    rest = rest_value;
-
-    if (!rest.starts_with('_'))
-    {
-      return std::nullopt;
-    }
-
-    const auto demangle_arg_result = demangle_arg(rest.substr(1), options);
-    if (!demangle_arg_result)
-      return std::nullopt;
-
-    if (!post.empty())
-    {
-      post = fmt::format("({})", post);
-    }
-    result = fmt::format("{}{}{}", pre, demangle_arg_result->arg_pre, post);
-    const std::string ret_post = fmt::format("[{}]{}", count, demangle_arg_result->arg_post);
-    return {{result, ret_post, demangle_arg_result->rest}};
-  }
-
-  if (str.length() == 0)
+  if (body.empty())
     return std::nullopt;
 
-  std::string_view type;
+  if (body[0] == '_')
+    return Done(q.pre, "", body);
 
-  const char c = str[0];
-
-  if (types.contains(c))
-  {
-    type = types.at(c);
-  }
-  else
-  {
-    // Handle special cases
-    switch (c)
-    {
-    case '1':
-      if (options.mw_extensions)
-        type = "__int128";
-      break;
-    case '2':
-      if (options.mw_extensions)
-        type = "__vec2x32float__";
-      break;
-    case '_':
-      return {{result, "", rest}};
-    default:
-      return std::nullopt;
-    }
-  }
-
-  return {{fmt::format("{}{}{}", result, type, post), "", str.substr(1)}};
+  const auto builtin = BuiltinType(body[0]);
+  if (!builtin)
+    return std::nullopt;
+  return Done(q.pre + std::string(*builtin) + q.post, "", body.substr(1));
 }
 
 std::optional<DemangleFunctionArgsResult> demangle_function_args(std::string_view str,
                                                                  DemangleOptions options)
 {
-  std::string result;
-
+  std::string printed;
   while (!str.empty())
   {
-    if (!result.empty())
-    {
-      result += ", ";
-    }
+    // Separators only go between non-empty pieces.
+    if (!printed.empty())
+      printed += ", ";
 
-    const auto demangle_arg_result = demangle_arg(str, options);
-    if (!demangle_arg_result)
+    const auto arg = demangle_arg(str, options);
+    if (!arg)
       return std::nullopt;
-
-    result += demangle_arg_result->arg_pre;
-    result += demangle_arg_result->arg_post;
-    str = demangle_arg_result->rest;
+    printed += arg->arg_pre;
+    printed += arg->arg_post;
+    str = arg->rest;
 
     if (str.starts_with('_') || str.starts_with(','))
-    {
       break;
-    }
   }
-
-  return {{result, str}};
+  return DemangleFunctionArgsResult{std::move(printed), str};
 }
 
 std::optional<std::string> demangle_special_function(std::string_view str,
                                                      std::string_view class_name,
                                                      DemangleOptions options)
 {
+  // Conversion operator: "op" followed by the target type.
   if (str.starts_with("op"))
   {
-    const std::string_view rest = str.substr(2);
-    const auto demangle_arg_result = demangle_arg(rest, options);
-    if (!demangle_arg_result)
+    const auto type = demangle_arg(str.substr(2), options);
+    if (!type)
       return std::nullopt;
-
-    return fmt::format("operator {}{}", demangle_arg_result->arg_pre,
-                       demangle_arg_result->arg_post);
+    return "operator " + type->arg_pre + type->arg_post;
   }
 
-  const auto result = demangle_template_args(str, options);
-  if (!result)
+  const auto templ = demangle_template_args(str, options);
+  if (!templ)
     return std::nullopt;
 
-  auto& [op, args] = result.value();
+  if (templ->name == "dt")
+    return "~" + std::string(class_name) + templ->args;
+  if (templ->name == "ct")
+    return std::string(class_name) + templ->args;
 
-  std::string_view func_name;
+  // Operator codes are only recognised on their own: the lookup uses the whole input (up to
+  // a NUL), so a templated operator falls through to the generic form below.
+  const std::string_view whole = str.substr(0, str.find('\0'));
+  if (const auto op = OperatorName(whole))
+    return std::string(*op) + templ->args;
 
-  if (op == "dt")
-  {
-    return fmt::format("~{}{}", class_name, args);
-  }
-  else if (op == "ct")
-  {
-    func_name = class_name;
-  }
-  else if (operators.contains(op.data()))
-  {
-    func_name = operators.at(op.data());
-  }
-  else
-  {
-    return fmt::format("__{}{}", op, args);
-  }
-
-  return fmt::format("{0}{1}", func_name, args);
+  return "__" + std::string(templ->name) + templ->args;
 }
 
-// Demangle a symbol name.
-//
-// Returns `std::nullopt` if the input is not a valid mangled name.
 std::optional<std::string> demangle(std::string_view str, DemangleOptions options)
 {
-  if (!IsAscii(str))
-  {
+  if (std::ranges::any_of(str, [](char c) { return static_cast<unsigned char>(c) > 127; }))
     return std::nullopt;
-  }
 
-  bool special = false;
-  bool cnst = false;
-  std::string fn_name;
   std::string static_var;
 
-  // Handle new static function variables (Wii CW)
-  const bool guard = str.starts_with("@GUARD@");
-  if (guard || str.starts_with("@LOCAL@"))
+  // Wii compilers: "@GUARD@<symbol>@<var>" / "@LOCAL@<symbol>@<var>" for function statics.
+  const bool is_guard = str.starts_with("@GUARD@");
+  if (is_guard || str.starts_with("@LOCAL@"))
   {
-    str = str.substr(7);
-    std::size_t idx = str.rfind('@');
-    if (idx == std::string::npos)
+    str.remove_prefix(7);
+    const std::size_t at = str.rfind('@');
+    if (at == std::string_view::npos)
       return std::nullopt;
-
-    const std::string_view rest = str.substr(0, idx);
-    const std::string_view var = str.substr(idx);
-
-    if (guard)
-    {
-      static_var = fmt::format("{0} guard", var.substr(1));
-    }
-    else
-    {
-      static_var = var.substr(1);
-    }
-    str = rest;
+    static_var = std::string(str.substr(at + 1));
+    if (is_guard)
+      static_var += " guard";
+    str = str.substr(0, at);
   }
 
-  if (str.starts_with("__"))
-  {
-    special = true;
-    str = str.substr(2);
-  }
-
-  const auto idx_temp = find_split(str, special, options);
-  if (!idx_temp)
-    return std::nullopt;
-  std::size_t idx = idx_temp.value();
-  // Handle any trailing underscores in the function name
-  while (str[idx + 2] == '_')
-  {
-    idx++;
-  }
-
-  const std::string_view fn_name_out = str.substr(0, idx);
-  std::string_view rest = str.substr(idx);
-
+  const bool special = str.starts_with("__");
   if (special)
+    str.remove_prefix(2);
+
+  const auto split_at = FindSplit(str, special, options);
+  if (!split_at)
+    return std::nullopt;
+  std::size_t split = *split_at;
+  // A name may itself end in underscores: the separator is the last "__" of the run.
+  while (split + 2 < str.size() && str[split + 2] == '_')
+    ++split;
+
+  const std::string_view base = str.substr(0, split);
+  std::string_view signature = str.substr(split);
+
+  std::string fn_name;
+  if (!special)
   {
-    if (fn_name_out == "init")
-    {
-      // Special case for double __
-      const std::size_t rest_idx = rest.substr(2).find("__");
-      if (rest_idx == std::string::npos)
-        return std::nullopt;
-      fn_name = str.substr(0, rest_idx + 6);
-      rest.remove_prefix(rest_idx + 2);
-    }
-    else
-    {
-      fn_name = fn_name_out;
-    }
+    const auto templ = demangle_template_args(base, options);
+    if (!templ)
+      return std::nullopt;
+    fn_name = std::string(templ->name) + templ->args;
+  }
+  else if (base == "init")
+  {
+    // "__init__<name>__<signature>": the static initialiser keeps "init__<name>".
+    const std::size_t next = signature.substr(2).find("__");
+    if (next == std::string_view::npos)
+      return std::nullopt;
+    fn_name = std::string(str.substr(0, next + 6));
+    signature.remove_prefix(next + 2);
   }
   else
   {
-    const auto result = demangle_template_args(fn_name_out, options);
-    if (!result)
-      return std::nullopt;
-
-    const auto template_args = result.value();
-    fn_name = fmt::format("{}{}", template_args.name, template_args.args);
+    fn_name = std::string(base);
   }
 
-  // Handle old static function variables (GC CW)
-  const std::size_t first_idx = fn_name.find('$');
-  if (first_idx != std::string::npos)
+  // GameCube compilers: "<var>$localstatic<n>$<function>" for function statics.
+  if (const std::size_t dollar = fn_name.find('$'); dollar != std::string::npos)
   {
-    const std::size_t second_idx = fn_name.substr(first_idx + 1).find('$');
-    if (second_idx == std::string::npos)
+    const std::size_t second = fn_name.find('$', dollar + 1);
+    if (second == std::string::npos)
       return std::nullopt;
-
-    const std::string var = fn_name.substr(0, first_idx);
-    std::string rest_temp = fn_name.substr(first_idx + 1);
-
-    const std::string var_type = rest_temp.substr(0, second_idx);
-    rest_temp = rest_temp.substr(second_idx);
-
-    if (!var_type.starts_with("localstatic"))
-    {
+    const std::string var = fn_name.substr(0, dollar);
+    const std::string kind = fn_name.substr(dollar + 1, second - dollar - 1);
+    if (!kind.starts_with("localstatic"))
       return std::nullopt;
-    }
-
-    if (var == "init")
-    {
-      // Sadly, $localstatic doesn't provide the variable name in guard/init
-      static_var = fmt::format("{} guard", var_type);
-    }
-    else
-    {
-      static_var = var;
-    }
-
-    fn_name = rest_temp.substr(1);
+    // The guard of an initialised static carries no variable name.
+    static_var = var == "init" ? kind + " guard" : var;
+    fn_name = fn_name.substr(second + 1);
   }
 
-  str = rest.substr(2);
+  std::string_view rest = signature.substr(2);
 
+  std::string scope;
   std::string class_name;
-  std::string return_type_pre;
-  std::string return_type_post;
-  std::string qualified;
-
-  if (!str.starts_with('F'))
+  if (!rest.starts_with('F'))
   {
-    const auto result = demangle_qualified_name(str, options);
-    if (!result)
+    auto owner = demangle_qualified_name(rest, options);
+    if (!owner)
       return std::nullopt;
-
-    class_name = result->class_name;
-    qualified = result->full;
-    str = result->rest;
+    class_name = std::move(owner->class_name);
+    scope = std::move(owner->full);
+    rest = owner->rest;
   }
+
   if (special)
   {
-    const auto result = demangle_special_function(fn_name, class_name, options);
-    if (!result)
+    auto name = demangle_special_function(fn_name, class_name, options);
+    if (!name)
       return std::nullopt;
-    fn_name = result.value();
+    fn_name = std::move(*name);
   }
-  if (str.starts_with('C'))
-  {
-    str.remove_prefix(1);
-    cnst = true;
-  }
-  if (str.starts_with('F'))
-  {
-    str.remove_prefix(1);
-    const auto result = demangle_function_args(str, options);
-    if (!result)
-      return std::nullopt;
 
-    if (options.omit_empty_parameters && result->args == "void")
-    {
-      fn_name = fmt::format("{}()", fn_name);
-    }
+  const bool const_method = rest.starts_with('C');
+  if (const_method)
+    rest.remove_prefix(1);
+
+  if (rest.starts_with('F'))
+  {
+    const auto params = demangle_function_args(rest.substr(1), options);
+    if (!params)
+      return std::nullopt;
+    if (options.omit_empty_parameters && params->args == "void")
+      fn_name += "()";
     else
-    {
-      fn_name = fmt::format("{}({})", fn_name, result->args);
-    }
-    str = result->rest;
+      fn_name += "(" + params->args + ")";
+    rest = params->rest;
   }
-  if (str.starts_with('_'))
+
+  std::string ret_pre;
+  std::string ret_post;
+  if (rest.starts_with('_'))
   {
-    str.remove_prefix(1);
-    const auto result = demangle_arg(str, options);
-    if (!result)
+    const auto ret = demangle_arg(rest.substr(1), options);
+    if (!ret)
       return std::nullopt;
-
-    return_type_pre = result->arg_pre;
-    return_type_post = result->arg_post;
-    str = result->rest;
+    ret_pre = ret->arg_pre;
+    ret_post = ret->arg_post;
+    rest = ret->rest;
   }
-  if (!str.empty())
-  {
+
+  if (!rest.empty())
     return std::nullopt;
-  }
-  if (cnst)
-  {
-    fn_name = fmt::format("{} const", fn_name);
-  }
-  if (!qualified.empty())
-  {
-    fn_name = fmt::format("{}::{}", qualified, fn_name);
-  }
-  if (!return_type_pre.empty())
-  {
-    fn_name = fmt::format("{} {}{}", return_type_pre, fn_name, return_type_post);
-  }
-  if (!static_var.empty())
-  {
-    fn_name = fmt::format("{}::{}", fn_name, static_var);
-  }
 
+  if (const_method)
+    fn_name += " const";
+  if (!scope.empty())
+    fn_name = scope + "::" + fn_name;
+  if (!ret_pre.empty())
+    fn_name = ret_pre + " " + fn_name + ret_post;
+  if (!static_var.empty())
+    fn_name += "::" + static_var;
   return fn_name;
 }
-
 }  // namespace CWDemangler

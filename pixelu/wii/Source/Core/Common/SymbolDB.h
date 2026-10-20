@@ -1,8 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// This file contains a generic symbol map implementation. For CPU-specific
-// magic, derive and extend.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,8 +18,12 @@ namespace Core
 class CPUThreadGuard;
 }
 
+// A table of guest code/data symbols keyed by address. The PowerPC symbol database derives
+// from it and adds analysis.
+
 namespace Common
 {
+// A call edge: `function` is the callee or caller, `call_address` the branch instruction.
 struct SCall
 {
   SCall(u32 a, u32 b) : function(a), call_address(b) {}
@@ -31,6 +31,7 @@ struct SCall
   u32 call_address;
 };
 
+// A user note covering an address range.
 struct Note
 {
   std::string name;
@@ -52,35 +53,29 @@ struct Symbol
   Symbol() = default;
   explicit Symbol(const std::string& symbol_name) { Rename(symbol_name); }
 
+  // Sets name, function_name (the name without parameters) and demangled_name.
   void Rename(const std::string& symbol_name);
 
   bool IsDemangled() const { return !demangled_name.empty(); }
 
   const std::string& GetDisplayName(bool use_demangled_name) const
   {
-    if (use_demangled_name && IsDemangled())
-    {
-      return demangled_name;
-    }
-    else
-    {
-      return name;
-    }
+    return use_demangled_name && IsDemangled() ? demangled_name : name;
   }
 
   std::string name;
-  std::string demangled_name;  // Demangled symbol name
-  std::string function_name;   // stripped function name
-  std::string object_name;     // name of object/source file symbol belongs to
-  std::vector<SCall> callers;  // addresses of functions that call this function
-  std::vector<SCall> calls;    // addresses of functions that are called by this function
-  u32 hash = 0;                // use for HLE function finding
+  std::string demangled_name;  // empty when the name is not a CodeWarrior mangled name
+  std::string function_name;   // name up to the first '(' or ' '
+  std::string object_name;     // object/source file the symbol came from
+  std::vector<SCall> callers;  // functions calling this one
+  std::vector<SCall> calls;    // functions this one calls
+  u32 hash = 0;                // code hash, used to recognise known (HLE) functions
   u32 address = 0;
   u32 flags = 0;
   u32 size = 0;
   int num_calls = 0;
   Type type = Type::Function;
-  int index = 0;  // only used for coloring the disasm view
+  int index = 0;  // position in the table, for the disassembly view's colours
   bool analyzed = false;
 };
 
@@ -114,6 +109,7 @@ public:
   bool RenameSymbol(const Symbol& symbol, const std::string& symbol_name,
                     const std::string& object_name);
 
+  // Lookups by function_name (first match in address order) and by hash.
   const Symbol* GetSymbolFromName(std::string_view name) const;
   std::vector<const Symbol*> GetSymbolsFromName(std::string_view name) const;
   const Symbol* GetSymbolFromHash(u32 hash) const;
@@ -123,18 +119,19 @@ public:
   void ForEachSymbol(F f) const
   {
     std::lock_guard lock(m_mutex);
-    for (const auto& [addr, symbol] : m_functions)
-      f(symbol);
+    for (const auto& entry : m_functions)
+      f(entry.second);
   }
 
+  // f may change a symbol but not its address.
   template <typename F>
   void ForEachSymbolWithMutation(F f)
   {
     std::lock_guard lock(m_mutex);
-    for (auto& [addr, symbol] : m_functions)
+    for (auto& [address, symbol] : m_functions)
     {
       f(symbol);
-      ASSERT_MSG(COMMON, addr == symbol.address, "Symbol address was unexpectedly changed");
+      ASSERT_MSG(COMMON, address == symbol.address, "Symbol address was unexpectedly changed");
     }
   }
 
@@ -142,24 +139,29 @@ public:
   void ForEachNote(F f) const
   {
     std::lock_guard lock(m_mutex);
-    for (const auto& [addr, note] : m_notes)
-      f(note);
+    for (const auto& entry : m_notes)
+      f(entry.second);
   }
 
+  // f may change a note but not its address.
   template <typename F>
   void ForEachNoteWithMutation(F f)
   {
     std::lock_guard lock(m_mutex);
-    for (auto& [addr, note] : m_notes)
+    for (auto& [address, note] : m_notes)
     {
       f(note);
-      ASSERT_MSG(COMMON, addr == note.address, "Note address was unexpectedly changed");
+      ASSERT_MSG(COMMON, address == note.address, "Note address was unexpectedly changed");
     }
   }
 
   bool IsEmpty() const;
+  // Drops every symbol and note. Returns false when there was nothing to drop. The prefix is
+  // currently ignored.
   bool Clear(const char* prefix = "");
+  // Logs the symbol table.
   void List();
+  // Renumbers Symbol::index in address order.
   void Index();
 
 protected:

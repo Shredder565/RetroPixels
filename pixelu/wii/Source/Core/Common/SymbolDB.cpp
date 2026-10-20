@@ -1,13 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/SymbolDB.h"
 
-#include <cstring>
-#include <map>
 #include <mutex>
 #include <string>
-#include <utility>
 
 #include "Common/CWDemangler.h"
 #include "Common/CommonTypes.h"
@@ -15,36 +11,33 @@
 
 namespace Common
 {
-static std::string GetStrippedFunctionName(const std::string& symbol_name)
+namespace
 {
-  std::string name = symbol_name.substr(0, symbol_name.find('('));
-  size_t position = name.find(' ');
-  if (position != std::string::npos)
-    name.erase(position);
-  return name;
+// "foo(int) const" -> "foo"; "foo bar" -> "foo".
+std::string BareName(const std::string& symbol_name)
+{
+  const std::size_t end = symbol_name.find_first_of("( ");
+  return symbol_name.substr(0, end);
 }
-
-SymbolDB::SymbolDB() = default;
-
-SymbolDB::~SymbolDB() = default;
+}  // namespace
 
 void Symbol::Rename(const std::string& symbol_name)
 {
-  this->name = symbol_name;
-  this->function_name = GetStrippedFunctionName(symbol_name);
-
-  // Try demangling the symbol name, saving it in the symbol if valid.
-  auto demangle_result = CWDemangler::demangle(symbol_name, CWDemangler::DemangleOptions());
-  this->demangled_name = demangle_result.value_or("");
+  name = symbol_name;
+  function_name = BareName(symbol_name);
+  demangled_name = CWDemangler::demangle(symbol_name, CWDemangler::DemangleOptions()).value_or("");
 }
+
+SymbolDB::SymbolDB() = default;
+SymbolDB::~SymbolDB() = default;
 
 void SymbolDB::List()
 {
   std::lock_guard lock(m_mutex);
-  for (const auto& func : m_functions)
+  for (const auto& [address, symbol] : m_functions)
   {
-    DEBUG_LOG_FMT(OSHLE, "{} @ {:08x}: {} bytes (hash {:08x}) : {} calls", func.second.name,
-                  func.second.address, func.second.size, func.second.hash, func.second.num_calls);
+    DEBUG_LOG_FMT(OSHLE, "{} @ {:08x}: {} bytes (hash {:08x}) : {} calls", symbol.name,
+                  symbol.address, symbol.size, symbol.hash, symbol.num_calls);
   }
   INFO_LOG_FMT(OSHLE, "{} functions known in this program above.", m_functions.size());
 }
@@ -58,10 +51,8 @@ bool SymbolDB::IsEmpty() const
 bool SymbolDB::Clear(const char* prefix)
 {
   std::lock_guard lock(m_mutex);
-
-  // TODO: honor prefix
   m_map_name.clear();
-  if (IsEmpty())
+  if (m_functions.empty() && m_notes.empty())
     return false;
 
   m_functions.clear();
@@ -78,61 +69,50 @@ void SymbolDB::Index()
 
 void SymbolDB::Index(XFuncMap* functions)
 {
-  int i = 0;
-  for (auto& func : *functions)
-  {
-    func.second.index = i++;
-  }
+  int next = 0;
+  for (auto& entry : *functions)
+    entry.second.index = next++;
 }
 
 const Symbol* SymbolDB::GetSymbolFromName(std::string_view name) const
 {
   std::lock_guard lock(m_mutex);
-
-  for (auto& func : m_functions)
+  for (const auto& entry : m_functions)
   {
-    if (func.second.function_name == name)
-      return &func.second;
+    if (entry.second.function_name == name)
+      return &entry.second;
   }
-
   return nullptr;
 }
 
 std::vector<const Symbol*> SymbolDB::GetSymbolsFromName(std::string_view name) const
 {
   std::lock_guard lock(m_mutex);
-  std::vector<const Symbol*> symbols;
-
-  for (auto& func : m_functions)
+  std::vector<const Symbol*> found;
+  for (const auto& entry : m_functions)
   {
-    if (func.second.function_name == name)
-      symbols.push_back(&func.second);
+    if (entry.second.function_name == name)
+      found.push_back(&entry.second);
   }
-
-  return symbols;
+  return found;
 }
 
 const Symbol* SymbolDB::GetSymbolFromHash(u32 hash) const
 {
   std::lock_guard lock(m_mutex);
-
-  auto iter = m_checksum_to_function.find(hash);
-  if (iter == m_checksum_to_function.end())
+  const auto it = m_checksum_to_function.find(hash);
+  if (it == m_checksum_to_function.end() || it->second.empty())
     return nullptr;
-
-  return *iter->second.begin();
+  return *it->second.begin();
 }
 
 std::vector<const Symbol*> SymbolDB::GetSymbolsFromHash(u32 hash) const
 {
   std::lock_guard lock(m_mutex);
-
-  const auto iter = m_checksum_to_function.find(hash);
-
-  if (iter == m_checksum_to_function.cend())
+  const auto it = m_checksum_to_function.find(hash);
+  if (it == m_checksum_to_function.end())
     return {};
-
-  return {iter->second.cbegin(), iter->second.cend()};
+  return std::vector<const Symbol*>(it->second.begin(), it->second.end());
 }
 
 void SymbolDB::AddCompleteSymbol(const Symbol& symbol)
@@ -144,11 +124,9 @@ void SymbolDB::AddCompleteSymbol(const Symbol& symbol)
 bool SymbolDB::RenameSymbol(const Symbol& symbol, const std::string& symbol_name)
 {
   std::lock_guard lock(m_mutex);
-
-  auto it = m_functions.find(symbol.address);
+  const auto it = m_functions.find(symbol.address);
   if (it == m_functions.end())
     return false;
-
   it->second.Rename(symbol_name);
   return true;
 }
@@ -157,14 +135,11 @@ bool SymbolDB::RenameSymbol(const Symbol& symbol, const std::string& symbol_name
                             const std::string& object_name)
 {
   std::lock_guard lock(m_mutex);
-
-  auto it = m_functions.find(symbol.address);
+  const auto it = m_functions.find(symbol.address);
   if (it == m_functions.end())
     return false;
-
   it->second.Rename(symbol_name);
   it->second.object_name = object_name;
   return true;
 }
-
 }  // namespace Common
