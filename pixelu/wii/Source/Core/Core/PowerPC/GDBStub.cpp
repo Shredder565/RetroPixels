@@ -1,19 +1,22 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Originally written by Sven Peter <sven@fail0verflow.com> for anergistic.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/GDBStub.h"
 
-#include <fmt/format.h>
+#include <array>
+#include <cstddef>
+#include <cstring>
 #include <optional>
-#include <string.h>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <fmt/format.h>
+
 #ifdef _WIN32
 #include <iphlpapi.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-typedef SSIZE_T ssize_t;
-#define SHUT_RDWR SD_BOTH
 #else
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -38,1131 +41,918 @@ typedef SSIZE_T ssize_t;
 
 namespace GDBStub
 {
-static std::optional<Common::SocketContext> s_socket_context;
-
-#define GDB_BFR_MAX 10000
-
-#define GDB_STUB_START '$'
-#define GDB_STUB_END '#'
-#define GDB_STUB_ACK '+'
-#define GDB_STUB_NAK '-'
-
-// We are treating software breakpoints and hardware breakpoints the same way
-enum class BreakpointType
+namespace
 {
-  ExecuteSoft = 0,
-  ExecuteHard,
-  Write,
-  Read,
-  Access,
+#ifdef _WIN32
+using NativeSocket = SOCKET;
+constexpr NativeSocket NO_SOCKET = INVALID_SOCKET;
+constexpr int SHUTDOWN_BOTH = SD_BOTH;
+void CloseNativeSocket(NativeSocket s)
+{
+  closesocket(s);
+}
+#else
+using NativeSocket = int;
+constexpr NativeSocket NO_SOCKET = -1;
+constexpr int SHUTDOWN_BOTH = SHUT_RDWR;
+void CloseNativeSocket(NativeSocket s)
+{
+  close(s);
+}
+#endif
+
+// Largest packet (framing included) the stub buffers in either direction.
+constexpr std::size_t PACKET_LIMIT = 10000;
+// Largest payload that still fits once wrapped as $payload#xx.
+constexpr std::size_t REPLY_PAYLOAD_LIMIT = PACKET_LIMIT - 4;
+
+constexpr char PACKET_BEGIN = '$';
+constexpr char PACKET_CHECKSUM = '#';
+constexpr char ACKNOWLEDGE = '+';
+constexpr char REJECT = '-';
+constexpr u8 INTERRUPT = 0x03;
+
+// How often the stub polls the connection while the CPU is running freely.
+constexpr s64 POLL_PERIOD_CYCLES = 100000;
+
+// Mach-O CPU identifiers reported by qHostInfo (PowerPC, 750 subtype).
+constexpr int HOST_CPU_TYPE = 18;
+constexpr int HOST_CPU_SUBTYPE = 9;
+
+// Breakpoint kinds named by the first field of Z/z packets. Software and hardware execution
+// breakpoints are treated alike.
+enum class StopPointKind : u32
+{
+  SoftwareExecute = 0,
+  HardwareExecute = 1,
+  WriteWatch = 2,
+  ReadWatch = 3,
+  AccessWatch = 4,
 };
+constexpr u32 LAST_STOP_POINT_KIND = static_cast<u32>(StopPointKind::AccessWatch);
 
-constexpr u32 NUM_BREAKPOINT_TYPES = 4;
-
-constexpr int MACH_O_POWERPC = 18;
-constexpr int MACH_O_POWERPC_750 = 9;
-
-const s64 GDB_UPDATE_CYCLES = 100000;
-
-static bool s_has_control = false;
-static bool s_just_connected = false;
-
-static int s_tmpsock = -1;
-static int s_sock = -1;
-
-static u8 s_cmd_bfr[GDB_BFR_MAX];
-static u32 s_cmd_len;
-
-static CoreTiming::EventType* s_update_event;
-
-static const char* CommandBufferAsString()
+bool IsExecuteKind(StopPointKind kind)
 {
-  return reinterpret_cast<const char*>(s_cmd_bfr);
+  return kind == StopPointKind::SoftwareExecute || kind == StopPointKind::HardwareExecute;
 }
 
-// private helpers
-static u8 Hex2char(u8 hex)
+struct Connection
 {
-  if (hex >= '0' && hex <= '9')
-    return hex - '0';
-  else if (hex >= 'a' && hex <= 'f')
-    return hex - 'a' + 0xa;
-  else if (hex >= 'A' && hex <= 'F')
-    return hex - 'A' + 0xa;
+  std::optional<Common::SocketContext> socket_library;
+  NativeSocket listener = NO_SOCKET;
+  NativeSocket peer = NO_SOCKET;
+  bool debugger_has_control = false;
+  bool fresh_connection = false;
+  CoreTiming::EventType* poll_event = nullptr;
+};
 
-  ERROR_LOG_FMT(GDB_STUB, "Invalid nibble: {} ({:02x})", static_cast<char>(hex), hex);
+Connection s_conn;
+
+// The payload of the packet being served, always followed by at least one zero byte so it can
+// be treated as a C string.
+std::array<char, PACKET_LIMIT> s_payload_storage;
+std::size_t s_payload_size = 0;
+
+// The payload up to its first zero byte, as text commands are matched.
+std::string_view PayloadText()
+{
+  return s_payload_storage.data();
+}
+
+// Returns the payload byte at `index`, or zero past its end.
+u8 PayloadByte(std::size_t index)
+{
+  return index < s_payload_size ? static_cast<u8>(s_payload_storage[index]) : 0;
+}
+
+// --- hex helpers ----------------------------------------------------------------------------
+
+u8 HexValue(u8 digit)
+{
+  if (digit >= '0' && digit <= '9')
+    return digit - '0';
+  if (digit >= 'A' && digit <= 'F')
+    return digit - 'A' + 10;
+  if (digit >= 'a' && digit <= 'f')
+    return digit - 'a' + 10;
+  ERROR_LOG_FMT(GDB_STUB, "gdb: '{}' ({:02x}) is not a hex digit", static_cast<char>(digit), digit);
   return 0;
 }
 
-static u8 Nibble2hex(u8 n)
+char HexDigit(u32 value)
 {
-  n &= 0xf;
-  if (n < 0xa)
-    return '0' + n;
-  else
-    return 'A' + n - 0xa;
+  static constexpr char DIGITS[] = "0123456789ABCDEF";
+  return DIGITS[value & 0xF];
 }
 
-static void Mem2hex(u8* dst, u8* src, u32 len)
+// Appends `digits` hex digits of `value`, most significant first.
+void AppendHex(std::string& out, u64 value, int digits)
 {
-  while (len-- > 0)
-  {
-    const u8 tmp = *src++;
-    *dst++ = Nibble2hex(tmp >> 4);
-    *dst++ = Nibble2hex(tmp);
-  }
+  for (int shift = (digits - 1) * 4; shift >= 0; shift -= 4)
+    out.push_back(HexDigit(static_cast<u32>(value >> shift)));
 }
 
-static void Hex2mem(u8* dst, u8* src, u32 len)
+// Reads `digits` hex digits from the payload starting at `pos`.
+u64 PayloadHex(std::size_t pos, int digits)
 {
-  while (len-- > 0)
-  {
-    *dst++ = (Hex2char(*src) << 4) | Hex2char(*(src + 1));
-    src += 2;
-  }
+  u64 value = 0;
+  for (int i = 0; i < digits; ++i)
+    value = (value << 4) | HexValue(PayloadByte(pos + i));
+  return value;
 }
 
-static void UpdateCallback(Core::System& system, u64 userdata, s64 cycles_late)
+// Accumulates hex digits from `pos` until `terminator` or the end of the payload; leaves `pos`
+// just past the terminator.
+u32 PayloadHexField(std::size_t& pos, char terminator)
 {
-  ProcessCommands(false);
-  if (IsActive())
-    Core::System::GetInstance().GetCoreTiming().ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
+  u32 value = 0;
+  while (pos < s_payload_size && s_payload_storage[pos] != terminator)
+    value = (value << 4) | HexValue(PayloadByte(pos++));
+  ++pos;
+  return value;
 }
 
-static u8 ReadByte()
+// Accumulates hex digits from `pos` to the end of the payload.
+u32 PayloadHexRest(std::size_t pos)
 {
-  u8 c = '+';
-
-  const ssize_t res = recv(s_sock, (char*)&c, 1, MSG_WAITALL);
-  if (res != 1)
-  {
-    ERROR_LOG_FMT(GDB_STUB, "recv failed : {}", res);
-    Deinit();
-  }
-
-  return c;
+  u32 value = 0;
+  while (pos < s_payload_size)
+    value = (value << 4) | HexValue(PayloadByte(pos++));
+  return value;
 }
 
-static u8 CalculateChecksum()
+// --- transport -------------------------------------------------------------------------------
+
+void SendRaw(char byte)
 {
-  u32 len = s_cmd_len;
-  u8* ptr = s_cmd_bfr;
-  u8 c = 0;
-
-  while (len-- > 0)
-    c += *ptr++;
-
-  return c;
+  if (send(s_conn.peer, &byte, 1, 0) != 1)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: could not send '{}'", byte);
 }
 
-static void RemoveBreakpoint(BreakpointType type, u32 addr, u32 len)
+std::optional<u8> ReceiveByte()
 {
-  if (type == BreakpointType::ExecuteHard || type == BreakpointType::ExecuteSoft)
-  {
-    auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
-    if (breakpoints.Remove(addr))
-    {
-      INFO_LOG_FMT(GDB_STUB, "gdb: removed a breakpoint: {:08x} bytes at {:08x}", len, addr);
-    }
-  }
-  else
-  {
-    auto& memchecks = Core::System::GetInstance().GetPowerPC().GetMemChecks();
-    DelayedMemCheckUpdate delayed_update(&memchecks);
-    while (memchecks.GetMemCheck(addr, len) != nullptr)
-    {
-      delayed_update |= memchecks.Remove(addr);
-      INFO_LOG_FMT(GDB_STUB, "gdb: removed a memcheck: {:08x} bytes at {:08x}", len, addr);
-    }
-  }
-  Host_PPCBreakpointsChanged();
+  char byte = 0;
+  const auto received = recv(s_conn.peer, &byte, 1, MSG_WAITALL);
+  if (received == 1)
+    return static_cast<u8>(byte);
+
+  ERROR_LOG_FMT(GDB_STUB, "gdb: connection read failed ({})", static_cast<long long>(received));
+  Deinit();
+  return std::nullopt;
 }
 
-static void Nack()
+bool InputPending()
 {
-  const char nak = GDB_STUB_NAK;
-  const ssize_t res = send(s_sock, &nak, 1, 0);
-
-  if (res != 1)
-    ERROR_LOG_FMT(GDB_STUB, "send failed");
-}
-
-static void Ack()
-{
-  const char ack = GDB_STUB_ACK;
-  const ssize_t res = send(s_sock, &ack, 1, 0);
-
-  if (res != 1)
-    ERROR_LOG_FMT(GDB_STUB, "send failed");
-}
-
-static void ReadCommand()
-{
-  s_cmd_len = 0;
-  memset(s_cmd_bfr, 0, sizeof s_cmd_bfr);
-
-  u8 c = ReadByte();
-  if (c == '+')
+  fd_set readable;
+  FD_ZERO(&readable);
+  FD_SET(s_conn.peer, &readable);
+  timeval wait{};
+  wait.tv_usec = 20;
+  if (select(static_cast<int>(s_conn.peer + 1), &readable, nullptr, nullptr, &wait) < 0)
   {
-    // ignore ack
-    return;
-  }
-  else if (c == 0x03)
-  {
-    auto& system = Core::System::GetInstance();
-    system.GetCPU().Break();
-    SendSignal(Signal::Sigtrap);
-    s_has_control = true;
-    INFO_LOG_FMT(GDB_STUB, "gdb: CPU::Break due to break command");
-    return;
-  }
-  else if (c != GDB_STUB_START)
-  {
-    WARN_LOG_FMT(GDB_STUB, "gdb: read invalid byte {:02x}", c);
-    return;
-  }
-
-  while ((c = ReadByte()) != GDB_STUB_END)
-  {
-    s_cmd_bfr[s_cmd_len++] = c;
-    if (s_cmd_len == sizeof s_cmd_bfr)
-    {
-      ERROR_LOG_FMT(GDB_STUB, "gdb: cmd_bfr overflow");
-      Nack();
-      return;
-    }
-  }
-
-  u8 chk_read = Hex2char(ReadByte()) << 4;
-  chk_read |= Hex2char(ReadByte());
-
-  const u8 chk_calc = CalculateChecksum();
-
-  if (chk_calc != chk_read)
-  {
-    ERROR_LOG_FMT(GDB_STUB,
-                  "gdb: invalid checksum: calculated {:02x} and read {:02x} for ${}# (length: {})",
-                  chk_calc, chk_read, CommandBufferAsString(), s_cmd_len);
-    s_cmd_len = 0;
-
-    Nack();
-    return;
-  }
-
-  DEBUG_LOG_FMT(GDB_STUB, "gdb: read command {} with a length of {}: {}",
-                static_cast<char>(s_cmd_bfr[0]), s_cmd_len, CommandBufferAsString());
-  Ack();
-}
-
-static bool IsDataAvailable()
-{
-  timeval t;
-  fd_set _fds, *fds = &_fds;
-
-  FD_ZERO(fds);
-  FD_SET(s_sock, fds);
-
-  t.tv_sec = 0;
-  t.tv_usec = 20;
-
-  if (select(s_sock + 1, fds, nullptr, nullptr, &t) < 0)
-  {
-    ERROR_LOG_FMT(GDB_STUB, "select failed");
+    ERROR_LOG_FMT(GDB_STUB, "gdb: select on the connection failed");
     return false;
   }
-
-  if (FD_ISSET(s_sock, fds))
-    return true;
-  return false;
+  return FD_ISSET(s_conn.peer, &readable) != 0;
 }
 
-static void SendReply(const char* reply)
+u8 Checksum(std::string_view bytes)
+{
+  u8 sum = 0;
+  for (const char c : bytes)
+    sum += static_cast<u8>(c);
+  return sum;
+}
+
+void Reply(std::string_view payload)
 {
   if (!IsActive())
     return;
 
-  memset(s_cmd_bfr, 0, sizeof s_cmd_bfr);
-
-  s_cmd_len = (u32)strlen(reply);
-  if (s_cmd_len + 4 > sizeof s_cmd_bfr)
-    ERROR_LOG_FMT(GDB_STUB, "cmd_bfr overflow in gdb_reply");
-
-  memcpy(s_cmd_bfr + 1, reply, s_cmd_len);
-
-  s_cmd_len++;
-  const u8 chk = CalculateChecksum();
-  s_cmd_len--;
-  s_cmd_bfr[0] = GDB_STUB_START;
-  s_cmd_bfr[s_cmd_len + 1] = GDB_STUB_END;
-  s_cmd_bfr[s_cmd_len + 2] = Nibble2hex(chk >> 4);
-  s_cmd_bfr[s_cmd_len + 3] = Nibble2hex(chk);
-
-  DEBUG_LOG_FMT(GDB_STUB, "gdb: reply (len: {}): {}", s_cmd_len, CommandBufferAsString());
-
-  const char* ptr = (const char*)s_cmd_bfr;
-  u32 left = s_cmd_len + 4;
-  while (left > 0)
+  if (payload.size() > REPLY_PAYLOAD_LIMIT)
   {
-    const int n = send(s_sock, ptr, left, 0);
-    if (n < 0)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: reply of {} bytes truncated", payload.size());
+    payload = payload.substr(0, REPLY_PAYLOAD_LIMIT);
+  }
+
+  std::string framed;
+  framed.reserve(payload.size() + 4);
+  framed.push_back(PACKET_BEGIN);
+  framed.append(payload);
+  framed.push_back(PACKET_CHECKSUM);
+  AppendHex(framed, Checksum(payload), 2);
+  DEBUG_LOG_FMT(GDB_STUB, "gdb: sending {}", framed);
+
+  std::size_t sent = 0;
+  while (sent < framed.size())
+  {
+    const auto chunk =
+        send(s_conn.peer, framed.data() + sent, static_cast<int>(framed.size() - sent), 0);
+    if (chunk <= 0)
     {
-      ERROR_LOG_FMT(GDB_STUB, "gdb: send failed");
-      return Deinit();
+      ERROR_LOG_FMT(GDB_STUB, "gdb: sending a reply failed");
+      Deinit();
+      return;
     }
-    left -= n;
-    ptr += n;
+    sent += static_cast<std::size_t>(chunk);
   }
 }
 
-static void WriteHostInfo()
+void ReplyOk()
 {
-  return SendReply(
-      fmt::format("cputype:{};cpusubtype:{};ostype:unknown;vendor:unknown;endian:big;ptrsize:4",
-                  MACH_O_POWERPC, MACH_O_POWERPC_750)
-          .c_str());
+  Reply("OK");
 }
 
-static void HandleQuery()
+void ReplyError(u32 code)
 {
-  DEBUG_LOG_FMT(GDB_STUB, "gdb: query '{}'", CommandBufferAsString());
-
-  if (!strncmp((const char*)(s_cmd_bfr), "qAttached", strlen("qAttached")))
-    return SendReply("1");
-  if (!strcmp((const char*)(s_cmd_bfr), "qC"))
-    return SendReply("QC1");
-  if (!strcmp((const char*)(s_cmd_bfr), "qfThreadInfo"))
-    return SendReply("m1");
-  else if (!strcmp((const char*)(s_cmd_bfr), "qsThreadInfo"))
-    return SendReply("l");
-  else if (!strncmp((const char*)(s_cmd_bfr), "qThreadExtraInfo", strlen("qThreadExtraInfo")))
-    return SendReply("00");
-  else if (!strncmp((const char*)(s_cmd_bfr), "qHostInfo", strlen("qHostInfo")))
-    return WriteHostInfo();
-  else if (!strncmp((const char*)(s_cmd_bfr), "qSupported", strlen("qSupported")))
-    return SendReply("swbreak+;hwbreak+");
-
-  SendReply("");
+  Reply(fmt::format("E{:02X}", code));
 }
 
-static void HandleSetThread()
+// Reads one unit of input. Afterwards s_payload_size is non-zero only if a complete packet with
+// a valid checksum arrived (and was acknowledged).
+void ReceivePacket()
 {
-  if (memcmp(s_cmd_bfr, "Hg-1", 4) == 0 || memcmp(s_cmd_bfr, "Hc-1", 4) == 0 ||
-      memcmp(s_cmd_bfr, "Hg0", 3) == 0 || memcmp(s_cmd_bfr, "Hc0", 3) == 0 ||
-      memcmp(s_cmd_bfr, "Hg1", 3) == 0 || memcmp(s_cmd_bfr, "Hc1", 3) == 0)
-    return SendReply("OK");
-  SendReply("E01");
-}
+  s_payload_storage.fill(0);
+  s_payload_size = 0;
 
-static void HandleIsThreadAlive()
-{
-  if (memcmp(s_cmd_bfr, "T1", 2) == 0 || memcmp(s_cmd_bfr, "T-1", 3) == 0)
-    return SendReply("OK");
-  SendReply("E01");
-}
+  const std::optional<u8> lead = ReceiveByte();
+  if (!lead || *lead == ACKNOWLEDGE)
+    return;
 
-static void wbe32hex(u8* p, u32 v)
-{
-  u32 i;
-  for (i = 0; i < 8; i++)
-    p[i] = Nibble2hex(v >> (28 - 4 * i));
-}
-
-static void wbe64hex(u8* p, u64 v)
-{
-  u32 i;
-  for (i = 0; i < 16; i++)
-    p[i] = Nibble2hex(v >> (60 - 4 * i));
-}
-
-static u32 re32hex(u8* p)
-{
-  u32 i;
-  u32 res = 0;
-
-  for (i = 0; i < 8; i++)
-    res = (res << 4) | Hex2char(p[i]);
-
-  return res;
-}
-
-static u64 re64hex(u8* p)
-{
-  u32 i;
-  u64 res = 0;
-
-  for (i = 0; i < 16; i++)
-    res = (res << 4) | Hex2char(p[i]);
-
-  return res;
-}
-
-static void ReadRegister()
-{
-  auto& system = Core::System::GetInstance();
-  auto& ppc_state = system.GetPPCState();
-
-  static u8 reply[64];
-  u32 id;
-
-  memset(reply, 0, sizeof reply);
-  id = Hex2char(s_cmd_bfr[1]);
-  if (s_cmd_bfr[2] != '\0')
+  if (*lead == INTERRUPT)
   {
-    id <<= 4;
-    id |= Hex2char(s_cmd_bfr[2]);
+    Core::System::GetInstance().GetCPU().Break();
+    SendSignal(Signal::Sigtrap);
+    s_conn.debugger_has_control = true;
+    INFO_LOG_FMT(GDB_STUB, "gdb: interrupt requested, CPU halted");
+    return;
   }
 
-  if (id < 32)
+  if (*lead != PACKET_BEGIN)
   {
-    wbe32hex(reply, ppc_state.gpr[id]);
+    WARN_LOG_FMT(GDB_STUB, "gdb: ignoring stray byte {:02x}", *lead);
+    return;
   }
-  else if (id >= 32 && id < 64)
+
+  std::size_t size = 0;
+  while (true)
   {
-    wbe64hex(reply, ppc_state.ps[id - 32].PS0AsU64());
-  }
-  else if (id >= 71 && id < 87)
-  {
-    wbe32hex(reply, ppc_state.sr[id - 71]);
-  }
-  else if (id >= 88 && id < 104)
-  {
-    wbe32hex(reply, ppc_state.spr[SPR_IBAT0U + id - 88]);
-  }
-  else
-  {
-    switch (id)
+    const std::optional<u8> next = ReceiveByte();
+    if (!next)
+      return;
+    if (*next == PACKET_CHECKSUM)
+      break;
+    s_payload_storage[size++] = static_cast<char>(*next);
+    if (size == s_payload_storage.size())
     {
-    case 64:
-      wbe32hex(reply, ppc_state.pc);
-      break;
-    case 65:
-      wbe32hex(reply, ppc_state.msr.Hex);
-      break;
-    case 66:
-      wbe32hex(reply, ppc_state.cr.Get());
-      break;
-    case 67:
-      wbe32hex(reply, LR(ppc_state));
-      break;
-    case 68:
-      wbe32hex(reply, CTR(ppc_state));
-      break;
-    case 69:
-      wbe32hex(reply, ppc_state.spr[SPR_XER]);
-      break;
-    case 70:
-      wbe32hex(reply, ppc_state.fpscr.Hex);
-      break;
-    case 87:
-      wbe32hex(reply, ppc_state.spr[SPR_PVR]);
-      break;
-    case 104:
-      wbe32hex(reply, ppc_state.spr[SPR_SDR]);
-      break;
-    case 105:
-      wbe64hex(reply, ppc_state.spr[SPR_ASR]);
-      break;
-    case 106:
-      wbe32hex(reply, ppc_state.spr[SPR_DAR]);
-      break;
-    case 107:
-      wbe32hex(reply, ppc_state.spr[SPR_DSISR]);
-      break;
-    case 108:
-      wbe32hex(reply, ppc_state.spr[SPR_SPRG0]);
-      break;
-    case 109:
-      wbe32hex(reply, ppc_state.spr[SPR_SPRG1]);
-      break;
-    case 110:
-      wbe32hex(reply, ppc_state.spr[SPR_SPRG2]);
-      break;
-    case 111:
-      wbe32hex(reply, ppc_state.spr[SPR_SPRG3]);
-      break;
-    case 112:
-      wbe32hex(reply, ppc_state.spr[SPR_SRR0]);
-      break;
-    case 113:
-      wbe32hex(reply, ppc_state.spr[SPR_SRR1]);
-      break;
-    case 114:
-      wbe32hex(reply, ppc_state.spr[SPR_TL]);
-      break;
-    case 115:
-      wbe32hex(reply, ppc_state.spr[SPR_TU]);
-      break;
-    case 116:
-      wbe32hex(reply, ppc_state.spr[SPR_DEC]);
-      break;
-    case 117:
-      wbe32hex(reply, ppc_state.spr[SPR_DABR]);
-      break;
-    case 118:
-      wbe32hex(reply, ppc_state.spr[SPR_EAR]);
-      break;
-    case 119:
-      wbe32hex(reply, ppc_state.spr[SPR_HID0]);
-      break;
-    case 120:
-      wbe32hex(reply, ppc_state.spr[SPR_HID1]);
-      break;
-    case 121:
-      wbe32hex(reply, ppc_state.spr[SPR_IABR]);
-      break;
-    case 122:
-      wbe32hex(reply, ppc_state.spr[SPR_DABR]);
-      break;
-    case 124:
-      wbe32hex(reply, ppc_state.spr[SPR_UMMCR0]);
-      break;
-    case 125:
-      wbe32hex(reply, ppc_state.spr[SPR_UPMC1]);
-      break;
-    case 126:
-      wbe32hex(reply, ppc_state.spr[SPR_UPMC2]);
-      break;
-    case 127:
-      wbe32hex(reply, ppc_state.spr[SPR_USIA]);
-      break;
-    case 128:
-      wbe32hex(reply, ppc_state.spr[SPR_UMMCR1]);
-      break;
-    case 129:
-      wbe32hex(reply, ppc_state.spr[SPR_UPMC3]);
-      break;
-    case 130:
-      wbe32hex(reply, ppc_state.spr[SPR_UPMC4]);
-      break;
-    case 131:
-      wbe32hex(reply, ppc_state.spr[SPR_MMCR0]);
-      break;
-    case 132:
-      wbe32hex(reply, ppc_state.spr[SPR_PMC1]);
-      break;
-    case 133:
-      wbe32hex(reply, ppc_state.spr[SPR_PMC2]);
-      break;
-    case 134:
-      wbe32hex(reply, ppc_state.spr[SPR_SIA]);
-      break;
-    case 135:
-      wbe32hex(reply, ppc_state.spr[SPR_MMCR1]);
-      break;
-    case 136:
-      wbe32hex(reply, ppc_state.spr[SPR_PMC3]);
-      break;
-    case 137:
-      wbe32hex(reply, ppc_state.spr[SPR_PMC4]);
-      break;
-    case 138:
-      wbe32hex(reply, ppc_state.spr[SPR_L2CR]);
-      break;
-    case 139:
-      wbe32hex(reply, ppc_state.spr[SPR_ICTC]);
-      break;
-    case 140:
-      wbe32hex(reply, ppc_state.spr[SPR_THRM1]);
-      break;
-    case 141:
-      wbe32hex(reply, ppc_state.spr[SPR_THRM2]);
-      break;
-    case 142:
-      wbe32hex(reply, ppc_state.spr[SPR_THRM3]);
-      break;
-    default:
-      return SendReply("E01");
-      break;
+      ERROR_LOG_FMT(GDB_STUB, "gdb: packet too large");
+      s_payload_storage.fill(0);
+      SendRaw(REJECT);
+      return;
     }
   }
 
-  SendReply((char*)reply);
+  u8 expected = 0;
+  for (int i = 0; i < 2; ++i)
+  {
+    const std::optional<u8> digit = ReceiveByte();
+    if (!digit)
+    {
+      s_payload_storage.fill(0);
+      return;
+    }
+    expected = static_cast<u8>((expected << 4) | HexValue(*digit));
+  }
+
+  const std::string_view body(s_payload_storage.data(), size);
+  const u8 actual = Checksum(body);
+  if (actual != expected)
+  {
+    ERROR_LOG_FMT(GDB_STUB, "gdb: checksum mismatch (got {:02x}, computed {:02x}) on {}", expected,
+                  actual, body);
+    SendRaw(REJECT);
+    return;
+  }
+
+  DEBUG_LOG_FMT(GDB_STUB, "gdb: received {}", body);
+  s_payload_size = size;
+  SendRaw(ACKNOWLEDGE);
 }
 
-static void ReadRegisters()
+// --- queries and thread packets ------------------------------------------------------------
+
+void ServeQuery()
 {
-  auto& system = Core::System::GetInstance();
-  auto& ppc_state = system.GetPPCState();
+  const std::string_view query = PayloadText();
+  DEBUG_LOG_FMT(GDB_STUB, "gdb: query {}", query);
 
-  static u8 bfr[GDB_BFR_MAX - 4];
-  u8* bufptr = bfr;
-  u32 i;
-
-  memset(bfr, 0, sizeof bfr);
-
-  for (i = 0; i < 32; i++)
+  if (query.starts_with("qAttached"))
+    return Reply("1");
+  if (query == "qC")
+    return Reply("QC1");
+  if (query == "qfThreadInfo")
+    return Reply("m1");
+  if (query == "qsThreadInfo")
+    return Reply("l");
+  if (query.starts_with("qThreadExtraInfo"))
+    return Reply("00");
+  if (query.starts_with("qHostInfo"))
   {
-    wbe32hex(bufptr + i * 8, ppc_state.gpr[i]);
+    return Reply(fmt::format(
+        "cputype:{};cpusubtype:{};ostype:unknown;vendor:unknown;endian:big;ptrsize:4",
+        HOST_CPU_TYPE, HOST_CPU_SUBTYPE));
   }
-  bufptr += 32 * 8;
-
-  SendReply((char*)bfr);
+  if (query.starts_with("qSupported"))
+    return Reply("swbreak+;hwbreak+");
+  Reply("");
 }
 
-static void WriteRegisters()
+// The emulated machine is presented as a single thread whose id is 1 (0 and -1 mean "any" and
+// "all").
+void ServeSelectThread()
 {
-  auto& system = Core::System::GetInstance();
-  auto& ppc_state = system.GetPPCState();
-
-  u32 i;
-  u8* bufptr = s_cmd_bfr;
-
-  for (i = 0; i < 32; i++)
+  const std::string_view packet = PayloadText();
+  for (const std::string_view accepted : {"Hg-1", "Hc-1", "Hg0", "Hc0", "Hg1", "Hc1"})
   {
-    ppc_state.gpr[i] = re32hex(bufptr + i * 8);
+    if (packet.starts_with(accepted))
+      return ReplyOk();
   }
-  bufptr += 32 * 8;
-
-  SendReply("OK");
+  ReplyError(1);
 }
 
-static void WriteRegister()
+void ServeThreadAlive()
 {
-  auto& system = Core::System::GetInstance();
-  auto& ppc_state = system.GetPPCState();
+  const std::string_view packet = PayloadText();
+  if (packet.starts_with("T1") || packet.starts_with("T-1"))
+    return ReplyOk();
+  ReplyError(1);
+}
 
-  u32 id;
+// --- registers -------------------------------------------------------------------------------
 
-  u8* bufptr = s_cmd_bfr + 3;
+// GDB register numbers for Broadway:
+//   0-31 r0-r31, 32-63 f0-f31 (paired-single slot 0), 64 pc, 65 msr, 66 cr, 67 lr, 68 ctr,
+//   69 xer, 70 fpscr, 71-86 sr0-sr15, 87 pvr, 88-103 the eight IBAT/DBAT pairs, then the SPRs
+//   listed in TAIL_REGISTERS starting at 104.
+constexpr u32 FIRST_GPR = 0;
+constexpr u32 FIRST_FPR = 32;
+constexpr u32 REG_PC = 64;
+constexpr u32 REG_MSR = 65;
+constexpr u32 REG_CR = 66;
+constexpr u32 REG_FPSCR = 70;
+constexpr u32 FIRST_SR = 71;
+constexpr u32 FIRST_BAT = 88;
+constexpr u32 FIRST_TAIL = 104;
 
-  id = Hex2char(s_cmd_bfr[1]);
-  if (s_cmd_bfr[2] != '=')
+constexpr u32 NOT_AN_SPR = 0xFFFFFFFF;
+
+constexpr std::array<u32, 39> TAIL_REGISTERS = {
+    SPR_SDR,    SPR_ASR,   SPR_DAR,   SPR_DSISR, SPR_SPRG0,  SPR_SPRG1, SPR_SPRG2, SPR_SPRG3,
+    SPR_SRR0,   SPR_SRR1,  SPR_TL,    SPR_TU,    SPR_DEC,    SPR_DABR,  SPR_EAR,   SPR_HID0,
+    SPR_HID1,   SPR_IABR,  SPR_DABR,  NOT_AN_SPR, SPR_UMMCR0, SPR_UPMC1, SPR_UPMC2, SPR_USIA,
+    SPR_UMMCR1, SPR_UPMC3, SPR_UPMC4, SPR_MMCR0, SPR_PMC1,   SPR_PMC2,  SPR_SIA,   SPR_MMCR1,
+    SPR_PMC3,   SPR_PMC4,  SPR_L2CR,  SPR_ICTC,  SPR_THRM1,  SPR_THRM2, SPR_THRM3,
+};
+
+enum class RegisterBank
+{
+  None,
+  Gpr,
+  Fpr,
+  Pc,
+  Msr,
+  Cr,
+  Fpscr,
+  Segment,
+  Special,
+};
+
+struct RegisterSlot
+{
+  RegisterBank bank = RegisterBank::None;
+  u32 index = 0;
+  // Number of hex digits the register occupies on the wire.
+  int digits = 8;
+};
+
+RegisterSlot LocateRegister(u32 number)
+{
+  if (number < FIRST_FPR)
+    return {RegisterBank::Gpr, number - FIRST_GPR};
+  if (number < REG_PC)
+    return {RegisterBank::Fpr, number - FIRST_FPR, 16};
+  if (number >= FIRST_SR && number < FIRST_SR + 16)
+    return {RegisterBank::Segment, number - FIRST_SR};
+  if (number >= FIRST_BAT && number < FIRST_TAIL)
+    return {RegisterBank::Special, SPR_IBAT0U + (number - FIRST_BAT)};
+  if (number >= FIRST_TAIL && number < FIRST_TAIL + TAIL_REGISTERS.size())
   {
-    ++bufptr;
-    id <<= 4;
-    id |= Hex2char(s_cmd_bfr[2]);
+    const u32 spr = TAIL_REGISTERS[number - FIRST_TAIL];
+    if (spr == NOT_AN_SPR)
+      return {};
+    return {RegisterBank::Special, spr, spr == SPR_ASR ? 16 : 8};
   }
 
-  if (id < 32)
+  switch (number)
   {
-    ppc_state.gpr[id] = re32hex(bufptr);
+  case REG_PC:
+    return {RegisterBank::Pc};
+  case REG_MSR:
+    return {RegisterBank::Msr};
+  case REG_CR:
+    return {RegisterBank::Cr};
+  case 67:
+    return {RegisterBank::Special, SPR_LR};
+  case 68:
+    return {RegisterBank::Special, SPR_CTR};
+  case 69:
+    return {RegisterBank::Special, SPR_XER};
+  case REG_FPSCR:
+    return {RegisterBank::Fpscr};
+  case 87:
+    return {RegisterBank::Special, SPR_PVR};
+  default:
+    return {};
   }
-  else if (id >= 32 && id < 64)
+}
+
+u64 FetchRegister(const PowerPC::PowerPCState& ppc, const RegisterSlot& slot)
+{
+  switch (slot.bank)
   {
-    ppc_state.ps[id - 32].SetPS0(re64hex(bufptr));
+  case RegisterBank::Gpr:
+    return ppc.gpr[slot.index];
+  case RegisterBank::Fpr:
+    return ppc.ps[slot.index].PS0AsU64();
+  case RegisterBank::Pc:
+    return ppc.pc;
+  case RegisterBank::Msr:
+    return ppc.msr.Hex;
+  case RegisterBank::Cr:
+    return ppc.cr.Get();
+  case RegisterBank::Fpscr:
+    return ppc.fpscr.Hex;
+  case RegisterBank::Segment:
+    return ppc.sr[slot.index];
+  case RegisterBank::Special:
+    return ppc.spr[slot.index];
+  case RegisterBank::None:
+    break;
   }
-  else if (id >= 71 && id < 87)
+  return 0;
+}
+
+void StoreRegister(Core::System& system, const RegisterSlot& slot, u64 value)
+{
+  auto& ppc = system.GetPPCState();
+  const u32 value32 = static_cast<u32>(value);
+  switch (slot.bank)
   {
-    ppc_state.sr[id - 71] = re32hex(bufptr);
+  case RegisterBank::Gpr:
+    ppc.gpr[slot.index] = value32;
+    break;
+  case RegisterBank::Fpr:
+    ppc.ps[slot.index].SetPS0(value);
+    break;
+  case RegisterBank::Pc:
+    ppc.pc = value32;
+    break;
+  case RegisterBank::Msr:
+    ppc.msr.Hex = value32;
+    system.GetPowerPC().MSRUpdated();
+    break;
+  case RegisterBank::Cr:
+    ppc.cr.Set(value32);
+    break;
+  case RegisterBank::Fpscr:
+    ppc.fpscr.Hex = value32;
+    break;
+  case RegisterBank::Segment:
+    ppc.sr[slot.index] = value32;
     system.GetMMU().SRUpdated();
-  }
-  else if (id >= 88 && id < 104)
-  {
-    ppc_state.spr[SPR_IBAT0U + id - 88] = re32hex(bufptr);
-  }
-  else
-  {
-    switch (id)
-    {
-    case 64:
-      ppc_state.pc = re32hex(bufptr);
-      break;
-    case 65:
-      ppc_state.msr.Hex = re32hex(bufptr);
-      system.GetPowerPC().MSRUpdated();
-      break;
-    case 66:
-      ppc_state.cr.Set(re32hex(bufptr));
-      break;
-    case 67:
-      LR(ppc_state) = re32hex(bufptr);
-      break;
-    case 68:
-      CTR(ppc_state) = re32hex(bufptr);
-      break;
-    case 69:
-      ppc_state.spr[SPR_XER] = re32hex(bufptr);
-      break;
-    case 70:
-      ppc_state.fpscr.Hex = re32hex(bufptr);
-      break;
-    case 87:
-      ppc_state.spr[SPR_PVR] = re32hex(bufptr);
-      break;
-    case 104:
-      ppc_state.spr[SPR_SDR] = re32hex(bufptr);
+    break;
+  case RegisterBank::Special:
+    ppc.spr[slot.index] = value32;
+    if (slot.index == SPR_SDR)
       system.GetMMU().SDRUpdated();
-      break;
-    case 105:
-      ppc_state.spr[SPR_ASR] = re64hex(bufptr);
-      break;
-    case 106:
-      ppc_state.spr[SPR_DAR] = re32hex(bufptr);
-      break;
-    case 107:
-      ppc_state.spr[SPR_DSISR] = re32hex(bufptr);
-      break;
-    case 108:
-      ppc_state.spr[SPR_SPRG0] = re32hex(bufptr);
-      break;
-    case 109:
-      ppc_state.spr[SPR_SPRG1] = re32hex(bufptr);
-      break;
-    case 110:
-      ppc_state.spr[SPR_SPRG2] = re32hex(bufptr);
-      break;
-    case 111:
-      ppc_state.spr[SPR_SPRG3] = re32hex(bufptr);
-      break;
-    case 112:
-      ppc_state.spr[SPR_SRR0] = re32hex(bufptr);
-      break;
-    case 113:
-      ppc_state.spr[SPR_SRR1] = re32hex(bufptr);
-      break;
-    case 114:
-      ppc_state.spr[SPR_TL] = re32hex(bufptr);
-      break;
-    case 115:
-      ppc_state.spr[SPR_TU] = re32hex(bufptr);
-      break;
-    case 116:
-      ppc_state.spr[SPR_DEC] = re32hex(bufptr);
-      break;
-    case 117:
-      ppc_state.spr[SPR_DABR] = re32hex(bufptr);
-      break;
-    case 118:
-      ppc_state.spr[SPR_EAR] = re32hex(bufptr);
-      break;
-    case 119:
-      ppc_state.spr[SPR_HID0] = re32hex(bufptr);
-      break;
-    case 120:
-      ppc_state.spr[SPR_HID1] = re32hex(bufptr);
-      break;
-    case 121:
-      ppc_state.spr[SPR_IABR] = re32hex(bufptr);
-      break;
-    case 122:
-      ppc_state.spr[SPR_DABR] = re32hex(bufptr);
-      break;
-    case 124:
-      ppc_state.spr[SPR_UMMCR0] = re32hex(bufptr);
-      break;
-    case 125:
-      ppc_state.spr[SPR_UPMC1] = re32hex(bufptr);
-      break;
-    case 126:
-      ppc_state.spr[SPR_UPMC2] = re32hex(bufptr);
-      break;
-    case 127:
-      ppc_state.spr[SPR_USIA] = re32hex(bufptr);
-      break;
-    case 128:
-      ppc_state.spr[SPR_UMMCR1] = re32hex(bufptr);
-      break;
-    case 129:
-      ppc_state.spr[SPR_UPMC3] = re32hex(bufptr);
-      break;
-    case 130:
-      ppc_state.spr[SPR_UPMC4] = re32hex(bufptr);
-      break;
-    case 131:
-      ppc_state.spr[SPR_MMCR0] = re32hex(bufptr);
-      PowerPC::MMCRUpdated(ppc_state);
-      break;
-    case 132:
-      ppc_state.spr[SPR_PMC1] = re32hex(bufptr);
-      break;
-    case 133:
-      ppc_state.spr[SPR_PMC2] = re32hex(bufptr);
-      break;
-    case 134:
-      ppc_state.spr[SPR_SIA] = re32hex(bufptr);
-      break;
-    case 135:
-      ppc_state.spr[SPR_MMCR1] = re32hex(bufptr);
-      PowerPC::MMCRUpdated(ppc_state);
-      break;
-    case 136:
-      ppc_state.spr[SPR_PMC3] = re32hex(bufptr);
-      break;
-    case 137:
-      ppc_state.spr[SPR_PMC4] = re32hex(bufptr);
-      break;
-    case 138:
-      ppc_state.spr[SPR_L2CR] = re32hex(bufptr);
-      break;
-    case 139:
-      ppc_state.spr[SPR_ICTC] = re32hex(bufptr);
-      break;
-    case 140:
-      ppc_state.spr[SPR_THRM1] = re32hex(bufptr);
-      break;
-    case 141:
-      ppc_state.spr[SPR_THRM2] = re32hex(bufptr);
-      break;
-    case 142:
-      ppc_state.spr[SPR_THRM3] = re32hex(bufptr);
-      break;
-    default:
-      return SendReply("E01");
-      break;
-    }
+    else if (slot.index == SPR_MMCR0 || slot.index == SPR_MMCR1)
+      PowerPC::MMCRUpdated(ppc);
+    break;
+  case RegisterBank::None:
+    break;
+  }
+}
+
+// "p" followed by one or two hex digits of register number.
+void ServeReadRegister()
+{
+  u32 number = HexValue(PayloadByte(1));
+  if (PayloadByte(2) != 0)
+    number = (number << 4) | HexValue(PayloadByte(2));
+
+  const RegisterSlot slot = LocateRegister(number);
+  if (slot.bank == RegisterBank::None)
+    return ReplyError(1);
+
+  std::string text;
+  AppendHex(text, FetchRegister(Core::System::GetInstance().GetPPCState(), slot), slot.digits);
+  Reply(text);
+}
+
+// "P" followed by one or two hex digits of register number, '=', and the value.
+void ServeWriteRegister()
+{
+  u32 number = HexValue(PayloadByte(1));
+  std::size_t value_pos = 3;
+  if (PayloadByte(2) != '=')
+  {
+    number = (number << 4) | HexValue(PayloadByte(2));
+    value_pos = 4;
   }
 
-  SendReply("OK");
+  const RegisterSlot slot = LocateRegister(number);
+  if (slot.bank == RegisterBank::None)
+    return ReplyError(1);
+
+  StoreRegister(Core::System::GetInstance(), slot, PayloadHex(value_pos, slot.digits));
+  ReplyOk();
 }
 
-static void ReadMemory(const Core::CPUThreadGuard& guard)
+// "g" reports, and "G" replaces, the general-purpose registers only.
+void ServeReadAllRegisters()
 {
-  static u8 reply[GDB_BFR_MAX - 4];
-  u32 addr, len;
-  u32 i;
-
-  i = 1;
-  addr = 0;
-  while (s_cmd_bfr[i] != ',')
-    addr = (addr << 4) | Hex2char(s_cmd_bfr[i++]);
-  i++;
-
-  len = 0;
-  while (i < s_cmd_len)
-    len = (len << 4) | Hex2char(s_cmd_bfr[i++]);
-  INFO_LOG_FMT(GDB_STUB, "gdb: read memory: {:08x} bytes from {:08x}", len, addr);
-
-  if (len * 2 > sizeof reply)
-    SendReply("E01");
-
-  if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
-    return SendReply("E00");
-
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  u8* data = memory.GetPointerForRange(addr, len);
-  Mem2hex(reply, data, len);
-  reply[len * 2] = '\0';
-  SendReply((char*)reply);
+  const auto& ppc = Core::System::GetInstance().GetPPCState();
+  std::string text;
+  text.reserve(32 * 8);
+  for (const u32 value : ppc.gpr)
+    AppendHex(text, value, 8);
+  Reply(text);
 }
 
-static void WriteMemory(const Core::CPUThreadGuard& guard)
+void ServeWriteAllRegisters()
 {
-  u32 addr, len;
-  u32 i;
-
-  i = 1;
-  addr = 0;
-  while (s_cmd_bfr[i] != ',')
-    addr = (addr << 4) | Hex2char(s_cmd_bfr[i++]);
-  i++;
-
-  len = 0;
-  while (s_cmd_bfr[i] != ':')
-    len = (len << 4) | Hex2char(s_cmd_bfr[i++]);
-  INFO_LOG_FMT(GDB_STUB, "gdb: write memory: {:08x} bytes to {:08x}", len, addr);
-
-  if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
-    return SendReply("E00");
-
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  u8* dst = memory.GetPointerForRange(addr, len);
-  Hex2mem(dst, s_cmd_bfr + i + 1, len);
-  SendReply("OK");
+  auto& ppc = Core::System::GetInstance().GetPPCState();
+  for (std::size_t r = 0; r < 32; ++r)
+    ppc.gpr[r] = static_cast<u32>(PayloadHex(1 + r * 8, 8));
+  ReplyOk();
 }
 
-static void Step()
+// --- memory ----------------------------------------------------------------------------------
+
+// "m addr,length"
+void ServeReadMemory(const Core::CPUThreadGuard& guard)
 {
-  auto& system = Core::System::GetInstance();
-  system.GetCPU().SetStepping(true);
-  Core::NotifyStateChanged(Core::State::Paused);
+  std::size_t pos = 1;
+  const u32 address = PayloadHexField(pos, ',');
+  const u32 length = PayloadHexRest(pos);
+  INFO_LOG_FMT(GDB_STUB, "gdb: memory read of {:08x} bytes at {:08x}", length, address);
+
+  if (u64{length} * 2 > REPLY_PAYLOAD_LIMIT)
+    return ReplyError(1);
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, address))
+    return ReplyError(0);
+
+  const u8* bytes = Core::System::GetInstance().GetMemory().GetPointerForRange(address, length);
+  if (bytes == nullptr)
+    return ReplyError(0);
+
+  std::string text;
+  text.reserve(std::size_t{length} * 2);
+  for (const u8 byte : std::span(bytes, length))
+    AppendHex(text, byte, 2);
+  Reply(text);
 }
 
-static bool AddBreakpoint(BreakpointType type, u32 addr, u32 len)
+// "M addr,length:data"
+void ServeWriteMemory(const Core::CPUThreadGuard& guard)
 {
-  if (type == BreakpointType::ExecuteHard || type == BreakpointType::ExecuteSoft)
+  std::size_t pos = 1;
+  const u32 address = PayloadHexField(pos, ',');
+  const u32 length = PayloadHexField(pos, ':');
+  INFO_LOG_FMT(GDB_STUB, "gdb: memory write of {:08x} bytes at {:08x}", length, address);
+
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, address))
+    return ReplyError(0);
+
+  u8* bytes = Core::System::GetInstance().GetMemory().GetPointerForRange(address, length);
+  if (bytes == nullptr)
+    return ReplyError(0);
+
+  for (u32 i = 0; i < length; ++i)
+    bytes[i] = static_cast<u8>(PayloadHex(pos + std::size_t{i} * 2, 2));
+  ReplyOk();
+}
+
+// --- breakpoints -----------------------------------------------------------------------------
+
+void InsertStopPoint(StopPointKind kind, u32 address, u32 length)
+{
+  auto& power_pc = Core::System::GetInstance().GetPowerPC();
+  if (IsExecuteKind(kind))
   {
-    auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
-    breakpoints.Add(addr);
-    INFO_LOG_FMT(GDB_STUB, "gdb: added {} breakpoint: {:08x} bytes at {:08x}",
-                 static_cast<int>(type), len, addr);
+    power_pc.GetBreakPoints().Add(address);
+    INFO_LOG_FMT(GDB_STUB, "gdb: breakpoint (kind {}) at {:08x}, length {:08x}",
+                 static_cast<u32>(kind), address, length);
   }
   else
   {
-    TMemCheck new_memcheck;
-    new_memcheck.start_address = addr;
-    new_memcheck.end_address = addr + len - 1;
-    new_memcheck.is_ranged = (len > 1);
-    new_memcheck.is_break_on_read =
-        (type == BreakpointType::Read || type == BreakpointType::Access);
-    new_memcheck.is_break_on_write =
-        (type == BreakpointType::Write || type == BreakpointType::Access);
-    new_memcheck.break_on_hit = true;
-    new_memcheck.log_on_hit = false;
-    new_memcheck.is_enabled = true;
-    auto& memchecks = Core::System::GetInstance().GetPowerPC().GetMemChecks();
-    memchecks.Add(std::move(new_memcheck));
-    INFO_LOG_FMT(GDB_STUB, "gdb: added {} memcheck: {:08x} bytes at {:08x}", static_cast<int>(type),
-                 len, addr);
+    TMemCheck watch;
+    watch.start_address = address;
+    watch.end_address = address + length - 1;
+    watch.is_ranged = length > 1;
+    watch.is_break_on_read = kind == StopPointKind::ReadWatch || kind == StopPointKind::AccessWatch;
+    watch.is_break_on_write =
+        kind == StopPointKind::WriteWatch || kind == StopPointKind::AccessWatch;
+    watch.break_on_hit = true;
+    watch.log_on_hit = false;
+    watch.is_enabled = true;
+    power_pc.GetMemChecks().Add(std::move(watch));
+    INFO_LOG_FMT(GDB_STUB, "gdb: watchpoint (kind {}) at {:08x}, length {:08x}",
+                 static_cast<u32>(kind), address, length);
   }
   Host_PPCBreakpointsChanged();
-  return true;
 }
 
-static void HandleAddBreakpoint()
+void ErasePoint(StopPointKind kind, u32 address, u32 length)
 {
-  u32 type;
-  u32 i, addr = 0, len = 0;
-
-  type = Hex2char(s_cmd_bfr[1]);
-  if (type > NUM_BREAKPOINT_TYPES)
-    return SendReply("E01");
-
-  i = 3;
-  while (s_cmd_bfr[i] != ',')
-    addr = addr << 4 | Hex2char(s_cmd_bfr[i++]);
-  i++;
-
-  while (i < s_cmd_len)
-    len = len << 4 | Hex2char(s_cmd_bfr[i++]);
-
-  if (!AddBreakpoint(static_cast<BreakpointType>(type), addr, len))
-    return SendReply("E02");
-  SendReply("OK");
+  auto& power_pc = Core::System::GetInstance().GetPowerPC();
+  if (IsExecuteKind(kind))
+  {
+    if (power_pc.GetBreakPoints().Remove(address))
+      INFO_LOG_FMT(GDB_STUB, "gdb: breakpoint at {:08x} removed", address);
+  }
+  else
+  {
+    auto& watches = power_pc.GetMemChecks();
+    DelayedMemCheckUpdate pending_update(&watches);
+    // Removal is by start address, so stop once nothing starting there is left even if some
+    // other watch still overlaps the range.
+    while (watches.GetMemCheck(address, length) != nullptr)
+    {
+      DelayedMemCheckUpdate removed = watches.Remove(address);
+      const bool made_progress = removed;
+      pending_update |= std::move(removed);
+      if (!made_progress)
+        break;
+      INFO_LOG_FMT(GDB_STUB, "gdb: watchpoint at {:08x}, length {:08x} removed", address, length);
+    }
+  }
+  Host_PPCBreakpointsChanged();
 }
 
-static void HandleRemoveBreakpoint()
+struct StopPointRequest
 {
-  u32 type, addr, len, i;
+  StopPointKind kind;
+  u32 address;
+  u32 length;
+};
 
-  type = Hex2char(s_cmd_bfr[1]);
-  if (type > NUM_BREAKPOINT_TYPES)
-    return SendReply("E01");
+// "Z kind,addr,length" / "z kind,addr,length". Only a single kind digit is understood.
+std::optional<StopPointRequest> ParseStopPoint()
+{
+  const u32 kind = HexValue(PayloadByte(1));
+  if (kind > LAST_STOP_POINT_KIND)
+    return std::nullopt;
 
-  addr = 0;
-  len = 0;
-
-  i = 3;
-  while (s_cmd_bfr[i] != ',')
-    addr = (addr << 4) | Hex2char(s_cmd_bfr[i++]);
-  i++;
-
-  while (i < s_cmd_len)
-    len = (len << 4) | Hex2char(s_cmd_bfr[i++]);
-
-  RemoveBreakpoint(static_cast<BreakpointType>(type), addr, len);
-  SendReply("OK");
+  std::size_t pos = 3;
+  const u32 address = PayloadHexField(pos, ',');
+  const u32 length = PayloadHexRest(pos);
+  return StopPointRequest{static_cast<StopPointKind>(kind), address, length};
 }
+
+void ServeInsertStopPoint()
+{
+  const auto request = ParseStopPoint();
+  if (!request)
+    return ReplyError(1);
+  InsertStopPoint(request->kind, request->address, request->length);
+  ReplyOk();
+}
+
+void ServeRemoveStopPoint()
+{
+  const auto request = ParseStopPoint();
+  if (!request)
+    return ReplyError(1);
+  ErasePoint(request->kind, request->address, request->length);
+  ReplyOk();
+}
+
+// --- setup -----------------------------------------------------------------------------------
+
+void PollCallback(Core::System& system, u64, s64)
+{
+  ProcessCommands(false);
+  if (IsActive())
+    system.GetCoreTiming().ScheduleEvent(POLL_PERIOD_CYCLES, s_conn.poll_event);
+}
+
+// Listens on the given address, blocks until one debugger connects, then starts polling.
+void ListenAndAccept(int family, const sockaddr* address, socklen_t address_size)
+{
+  s_conn.socket_library.emplace();
+
+  s_conn.listener = socket(family, SOCK_STREAM, 0);
+  if (s_conn.listener == NO_SOCKET)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: could not create the listening socket");
+
+  const int reuse = 1;
+  if (setsockopt(s_conn.listener, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
+                 static_cast<socklen_t>(sizeof(reuse))) < 0)
+  {
+    ERROR_LOG_FMT(GDB_STUB, "gdb: could not set SO_REUSEADDR");
+  }
+  if (bind(s_conn.listener, address, address_size) < 0)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: could not bind the listening socket");
+  if (listen(s_conn.listener, 1) < 0)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: could not listen for a debugger");
+
+  INFO_LOG_FMT(GDB_STUB, "gdb: waiting for a debugger to connect");
+  s_conn.peer = accept(s_conn.listener, nullptr, nullptr);
+  if (s_conn.peer == NO_SOCKET)
+    ERROR_LOG_FMT(GDB_STUB, "gdb: accepting the debugger failed");
+  else
+    INFO_LOG_FMT(GDB_STUB, "gdb: debugger connected");
+  s_conn.fresh_connection = true;
+
+  if (s_conn.listener != NO_SOCKET)
+    CloseNativeSocket(s_conn.listener);
+  s_conn.listener = NO_SOCKET;
+
+  auto& core_timing = Core::System::GetInstance().GetCoreTiming();
+  s_conn.poll_event = core_timing.RegisterEvent("GDBStubUpdate", PollCallback);
+  core_timing.ScheduleEvent(POLL_PERIOD_CYCLES, s_conn.poll_event);
+  s_conn.debugger_has_control = true;
+}
+
+void Disconnect(NativeSocket& s)
+{
+  if (s == NO_SOCKET)
+    return;
+  shutdown(s, SHUTDOWN_BOTH);
+  CloseNativeSocket(s);
+  s = NO_SOCKET;
+}
+}  // namespace
 
 void ProcessCommands(bool loop_until_continue)
 {
-  s_just_connected = false;
+  s_conn.fresh_connection = false;
   auto& system = Core::System::GetInstance();
   auto& cpu = system.GetCPU();
+
   while (IsActive())
   {
     if (cpu.GetState() == CPU::State::PowerDown)
     {
       Deinit();
-      INFO_LOG_FMT(GDB_STUB, "killed by power down");
+      INFO_LOG_FMT(GDB_STUB, "gdb: emulated machine powered down, debugger detached");
       return;
     }
 
-    if (!IsDataAvailable())
+    if (!InputPending())
     {
-      if (loop_until_continue)
-        continue;
-      else
+      if (!loop_until_continue)
         return;
+      continue;
     }
-    ReadCommand();
-    // No more commands
-    if (s_cmd_len == 0)
+
+    ReceivePacket();
+    if (s_payload_size == 0)
       continue;
 
-    switch (s_cmd_bfr[0])
+    switch (s_payload_storage[0])
     {
     case 'q':
-      HandleQuery();
+      ServeQuery();
       break;
     case 'H':
-      HandleSetThread();
+      ServeSelectThread();
       break;
     case 'T':
-      HandleIsThreadAlive();
+      ServeThreadAlive();
       break;
     case '?':
       SendSignal(Signal::Sigterm);
       break;
-    case 'k':
-      Deinit();
-      INFO_LOG_FMT(GDB_STUB, "killed by gdb");
-      return;
     case 'g':
-      ReadRegisters();
+      ServeReadAllRegisters();
       break;
     case 'G':
-      WriteRegisters();
+      ServeWriteAllRegisters();
       break;
     case 'p':
-      ReadRegister();
+      ServeReadRegister();
       break;
     case 'P':
-      WriteRegister();
+      ServeWriteRegister();
       break;
     case 'm':
     {
       ASSERT(Core::IsCPUThread());
-      Core::CPUThreadGuard guard(system);
-
-      ReadMemory(guard);
+      const Core::CPUThreadGuard guard(system);
+      ServeReadMemory(guard);
       break;
     }
     case 'M':
     {
       ASSERT(Core::IsCPUThread());
-      Core::CPUThreadGuard guard(system);
-
-      WriteMemory(guard);
-      auto& ppc_state = system.GetPPCState();
-      auto& jit_interface = system.GetJitInterface();
-      ppc_state.iCache.Reset(jit_interface);
+      const Core::CPUThreadGuard guard(system);
+      ServeWriteMemory(guard);
+      // The debugger may have patched code.
+      system.GetPPCState().iCache.Reset(system.GetJitInterface());
       Host_UpdateDisasmDialog();
       break;
     }
-    case 's':
-      Step();
-      return;
-    case 'C':
-    case 'c':
-      cpu.Continue();
-      s_has_control = false;
-      return;
-    case 'z':
-      HandleRemoveBreakpoint();
-      break;
     case 'Z':
-      HandleAddBreakpoint();
+      ServeInsertStopPoint();
       break;
+    case 'z':
+      ServeRemoveStopPoint();
+      break;
+    case 's':
+      cpu.SetStepping(true);
+      Core::NotifyStateChanged(Core::State::Paused);
+      return;
+    case 'c':
+    case 'C':
+      cpu.Continue();
+      s_conn.debugger_has_control = false;
+      return;
+    case 'k':
+      Deinit();
+      INFO_LOG_FMT(GDB_STUB, "gdb: debugger sent kill, detached");
+      return;
     default:
-      SendReply("");
+      // An empty reply tells the debugger the packet is not supported.
+      Reply("");
       break;
     }
   }
 }
 
-// exported functions
-
-static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t server_addrlen,
-                        sockaddr* client_addr, socklen_t* client_addrlen);
-
 #ifndef _WIN32
 void InitLocal(const char* socket)
 {
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  const std::size_t path_length = std::strlen(socket);
+  if (path_length >= sizeof(address.sun_path))
+  {
+    ERROR_LOG_FMT(GDB_STUB, "gdb: socket path {} is too long", socket);
+    return;
+  }
+  std::memcpy(address.sun_path, socket, path_length + 1);
+
   unlink(socket);
-
-  sockaddr_un addr = {};
-  addr.sun_family = AF_UNIX;
-  strcpy(addr.sun_path, socket);
-
-  InitGeneric(PF_LOCAL, (const sockaddr*)&addr, sizeof(addr), nullptr, nullptr);
+  ListenAndAccept(AF_UNIX, reinterpret_cast<const sockaddr*>(&address),
+                  static_cast<socklen_t>(sizeof(address)));
 }
 #endif
 
 void Init(u32 port)
 {
-  sockaddr_in saddr_server = {};
-  sockaddr_in saddr_client;
-
-  saddr_server.sin_family = AF_INET;
-  saddr_server.sin_port = htons(port);
-  saddr_server.sin_addr.s_addr = INADDR_ANY;
-
-  socklen_t client_addrlen = sizeof(saddr_client);
-
-  InitGeneric(PF_INET, (const sockaddr*)&saddr_server, sizeof(saddr_server),
-              (sockaddr*)&saddr_client, &client_addrlen);
-
-  saddr_client.sin_addr.s_addr = ntohl(saddr_client.sin_addr.s_addr);
-}
-
-static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t server_addrlen,
-                        sockaddr* client_addr, socklen_t* client_addrlen)
-{
-  s_socket_context.emplace();
-
-  s_tmpsock = socket(domain, SOCK_STREAM, 0);
-  if (s_tmpsock == -1)
-    ERROR_LOG_FMT(GDB_STUB, "Failed to create gdb socket");
-
-  int on = 1;
-  if (setsockopt(s_tmpsock, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on) < 0)
-    ERROR_LOG_FMT(GDB_STUB, "Failed to setsockopt");
-
-  if (bind(s_tmpsock, server_addr, server_addrlen) < 0)
-    ERROR_LOG_FMT(GDB_STUB, "Failed to bind gdb socket");
-
-  if (listen(s_tmpsock, 1) < 0)
-    ERROR_LOG_FMT(GDB_STUB, "Failed to listen to gdb socket");
-
-  INFO_LOG_FMT(GDB_STUB, "Waiting for gdb to connect...");
-
-  s_sock = accept(s_tmpsock, client_addr, client_addrlen);
-  if (s_sock < 0)
-    ERROR_LOG_FMT(GDB_STUB, "Failed to accept gdb client");
-  INFO_LOG_FMT(GDB_STUB, "Client connected.");
-  s_just_connected = true;
-
-#ifdef _WIN32
-  closesocket(s_tmpsock);
-#else
-  close(s_tmpsock);
-#endif
-  s_tmpsock = -1;
-
-  auto& system = Core::System::GetInstance();
-  auto& core_timing = system.GetCoreTiming();
-  s_update_event = core_timing.RegisterEvent("GDBStubUpdate", UpdateCallback);
-  core_timing.ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
-  s_has_control = true;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<u16>(port));
+  address.sin_addr.s_addr = htonl(INADDR_ANY);
+  ListenAndAccept(AF_INET, reinterpret_cast<const sockaddr*>(&address),
+                  static_cast<socklen_t>(sizeof(address)));
 }
 
 void Deinit()
 {
-  if (s_tmpsock != -1)
-  {
-    shutdown(s_tmpsock, SHUT_RDWR);
-    s_tmpsock = -1;
-  }
-  if (s_sock != -1)
-  {
-    shutdown(s_sock, SHUT_RDWR);
-    s_sock = -1;
-  }
-
-  s_socket_context.reset();
-  s_has_control = false;
+  Disconnect(s_conn.listener);
+  Disconnect(s_conn.peer);
+  s_conn.socket_library.reset();
+  s_conn.debugger_has_control = false;
 }
 
 bool IsActive()
 {
-  return s_tmpsock != -1 || s_sock != -1;
+  return s_conn.listener != NO_SOCKET || s_conn.peer != NO_SOCKET;
 }
 
 bool HasControl()
 {
-  return s_has_control;
+  return s_conn.debugger_has_control;
 }
 
 void TakeControl()
 {
-  s_has_control = true;
+  s_conn.debugger_has_control = true;
 }
 
 bool JustConnected()
 {
-  return s_just_connected;
+  return s_conn.fresh_connection;
 }
 
 void SendSignal(Signal signal)
 {
-  auto& system = Core::System::GetInstance();
-  auto& ppc_state = system.GetPPCState();
-
-  char bfr[128] = {};
-  fmt::format_to(bfr, "T{:02x}{:02x}:{:08x};{:02x}:{:08x};", static_cast<u8>(signal), 64,
-                 ppc_state.pc, 1, ppc_state.gpr[1]);
-  SendReply(bfr);
+  // Stop reply carrying pc (register 0x40) and r1 (the stack pointer).
+  const auto& ppc = Core::System::GetInstance().GetPPCState();
+  Reply(fmt::format("T{:02x}{:02x}:{:08x};{:02x}:{:08x};", static_cast<u8>(signal), REG_PC, ppc.pc,
+                    1, ppc.gpr[1]));
 }
 }  // namespace GDBStub
