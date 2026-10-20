@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/FilesystemWatcher.h"
 
@@ -15,49 +14,48 @@ FilesystemWatcher::~FilesystemWatcher() = default;
 
 void FilesystemWatcher::Watch(const std::string& path)
 {
-  const auto [iter, inserted] = m_watched_paths.try_emplace(path, nullptr);
-  if (inserted)
-  {
-    iter->second = std::make_unique<wtr::watch>(path, [this](wtr::event e) {
-      const auto watched_path = PathToString(e.path_name);
-      if (e.path_type == wtr::event::path_type::watcher)
-      {
-        if (watched_path.starts_with('e'))
-          ERROR_LOG_FMT(COMMON, "Filesystem watcher: '{}'", watched_path);
-        else if (watched_path.starts_with('w'))
-          WARN_LOG_FMT(COMMON, "Filesystem watcher: '{}'", watched_path);
-        return;
-      }
+  auto [entry, is_new] = m_watched_paths.try_emplace(path);
+  if (!is_new)
+    return;
 
-      if (e.effect_type == wtr::event::effect_type::create)
-      {
-        const auto unified_path = WithUnifiedPathSeparators(watched_path);
-        PathAdded(unified_path);
-      }
-      else if (e.effect_type == wtr::event::effect_type::modify)
-      {
-        const auto unified_path = WithUnifiedPathSeparators(watched_path);
-        PathModified(unified_path);
-      }
-      else if (e.effect_type == wtr::event::effect_type::rename)
-      {
-        if (!e.associated)
-        {
-          WARN_LOG_FMT(COMMON, "Rename on path '{}' seen without association!", watched_path);
-          return;
-        }
+  entry->second = std::make_unique<wtr::watch>(path, [this](wtr::event event) {
+    const std::string name = PathToString(event.path_name);
 
-        const auto old_path = WithUnifiedPathSeparators(watched_path);
-        const auto new_path = WithUnifiedPathSeparators(PathToString(e.associated->path_name));
-        PathRenamed(old_path, new_path);
-      }
-      else if (e.effect_type == wtr::event::effect_type::destroy)
+    // Messages about the watcher itself: the text starts with "e" for errors, "w" for warnings.
+    if (event.path_type == wtr::event::path_type::watcher)
+    {
+      if (name.starts_with('e'))
+        ERROR_LOG_FMT(COMMON, "Filesystem watcher: '{}'", name);
+      else if (name.starts_with('w'))
+        WARN_LOG_FMT(COMMON, "Filesystem watcher: '{}'", name);
+      return;
+    }
+
+    switch (event.effect_type)
+    {
+    case wtr::event::effect_type::create:
+      PathAdded(WithUnifiedPathSeparators(name));
+      break;
+    case wtr::event::effect_type::modify:
+      PathModified(WithUnifiedPathSeparators(name));
+      break;
+    case wtr::event::effect_type::destroy:
+      PathDeleted(WithUnifiedPathSeparators(name));
+      break;
+    case wtr::event::effect_type::rename:
+      // The new name arrives as the associated event.
+      if (!event.associated)
       {
-        const auto unified_path = WithUnifiedPathSeparators(watched_path);
-        PathDeleted(unified_path);
+        WARN_LOG_FMT(COMMON, "Rename of '{}' reported without its new name", name);
+        break;
       }
-    });
-  }
+      PathRenamed(WithUnifiedPathSeparators(name),
+                  WithUnifiedPathSeparators(PathToString(event.associated->path_name)));
+      break;
+    default:
+      break;
+    }
+  });
 }
 
 void FilesystemWatcher::Unwatch(const std::string& path)

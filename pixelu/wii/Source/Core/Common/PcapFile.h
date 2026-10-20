@@ -1,14 +1,11 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// PCAP is a standard file format for network capture files. This also extends
-// to any capture of packetized intercommunication data. This file provides a
-// class called PCAP which is a very light wrapper around the file format,
-// allowing only creating a new PCAP capture file and appending packets to it.
+// Writer for libpcap capture files (the classic format: one global header, then a record header
+// and the captured bytes per packet). Only creating a file and appending to it is supported.
 //
-// Example use:
-//   PCAP pcap(new IOFile("test.pcap", "wb"));
-//   pcap.AddPacket(pkt);  // pkt is automatically casted to u8*
+//   PCAP pcap(new File::IOFile("capture.pcap", "wb"));
+//   pcap.AddPacket(some_struct);           // the struct's bytes
+//   pcap.AddPacket(buffer.data(), size);
 
 #pragma once
 
@@ -23,24 +20,26 @@ namespace Common
 class PCAP final
 {
 public:
+  // Values of the header's link-layer type field.
   enum class LinkType : u32
   {
-    Ethernet = 1,  // IEEE 802.3 Ethernet
-    User = 147,    // Reserved for internal use
+    Ethernet = 1,  // IEEE 802.3 Ethernet frames
+    User = 147,    // LINKTYPE_USER0, private use
   };
 
-  // Takes ownership of the file object. Assumes the file object is already
-  // opened in write mode.
+  // Takes ownership of `fp`, which must already be open for writing, and writes the file header.
   explicit PCAP(File::IOFile* fp, LinkType link_type = LinkType::User) : m_fp(fp)
   {
     AddHeader(static_cast<u32>(link_type));
   }
+
   template <typename T>
   void AddPacket(const T& obj)
   {
     AddPacket(reinterpret_cast<const u8*>(&obj), sizeof(obj));
   }
 
+  // Appends one packet, timestamped now. Not safe to call from several threads at once.
   void AddPacket(const u8* bytes, size_t size);
 
 private:

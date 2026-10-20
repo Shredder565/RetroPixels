@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,34 +13,29 @@
 
 namespace Common
 {
-// Reads all of the current file. destination must be big enough to fit the whole file.
+// Reads exactly `len` bytes of the zip reader's current entry into `destination`.
 inline bool ReadFileFromZip(void* zip_reader, u8* destination, u64 len)
 {
-  const u64 MAX_BUFFER_SIZE = 65535;
-
   if (mz_zip_reader_entry_open(zip_reader) != MZ_OK)
     return false;
+  Common::ScopeGuard close_entry{[&] { mz_zip_reader_entry_close(zip_reader); }};
 
-  Common::ScopeGuard guard{[&] { mz_zip_reader_entry_close(zip_reader); }};
-
-  u64 bytes_to_go = len;
-  while (bytes_to_go > 0)
+  constexpr u64 CHUNK_SIZE = 65535;  // fits the reader's int length parameter
+  u64 remaining = len;
+  while (remaining != 0)
   {
-    // NOTE: multiples of 4G can't cause read_len == 0 && bytes_to_go > 0, as MAX_BUFFER_SIZE is
-    // small.
-    const u32 read_len = static_cast<u32>(std::min(bytes_to_go, MAX_BUFFER_SIZE));
-    const int rv = mz_zip_reader_entry_read(zip_reader, destination, read_len);
-    if (rv < 0)
+    const int chunk = static_cast<int>(std::min(remaining, CHUNK_SIZE));
+    const int got = mz_zip_reader_entry_read(zip_reader, destination, chunk);
+    // An error, or the entry ended before `len` bytes.
+    if (got <= 0)
       return false;
-
-    const u32 bytes_read = static_cast<u32>(rv);
-    bytes_to_go -= bytes_read;
-    destination += bytes_read;
+    remaining -= static_cast<u64>(got);
+    destination += got;
   }
-
-  return bytes_to_go == 0;
+  return true;
 }
 
+// Fills a contiguous container (sized by the caller) from the current entry.
 template <typename ContiguousContainer>
 bool ReadFileFromZip(void* file, ContiguousContainer* destination)
 {

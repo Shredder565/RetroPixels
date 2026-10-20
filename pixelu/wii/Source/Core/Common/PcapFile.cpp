@@ -1,64 +1,73 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/PcapFile.h"
 
+#include <array>
 #include <chrono>
+#include <cstring>
 
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
+
+// Fields are written in host byte order; readers detect the order from the magic number.
 
 namespace Common
 {
 namespace
 {
-const u32 PCAP_MAGIC = 0xa1b2c3d4;
-const u16 PCAP_VERSION_MAJOR = 2;
-const u16 PCAP_VERSION_MINOR = 4;
-const u32 PCAP_CAPTURE_LENGTH = 65535;
+constexpr u32 MAGIC = 0xa1b2c3d4;  // microsecond timestamps
+constexpr u16 VERSION_MAJOR = 2;
+constexpr u16 VERSION_MINOR = 4;
+constexpr u32 SNAPSHOT_LENGTH = 65535;
 
-// Designed to be directly written into the PCAP file. The PCAP format is
-// endian independent, so this works just fine.
-#pragma pack(push, 1)
-struct PCAPHeader
+constexpr size_t FILE_HEADER_SIZE = 24;
+constexpr size_t RECORD_HEADER_SIZE = 16;
+
+template <size_t N>
+class HeaderWriter
 {
-  u32 magic_number;
-  u16 version_major;
-  u16 version_minor;
-  s32 tz_offset;       // Offset in seconds from the GMT timezone.
-  u32 ts_accuracy;     // In practice, 0.
-  u32 capture_length;  // Size at which we truncate packets.
-  u32 data_link_type;
-};
+public:
+  template <typename T>
+  HeaderWriter& Put(T value)
+  {
+    std::memcpy(m_bytes.data() + m_pos, &value, sizeof(T));
+    m_pos += sizeof(T);
+    return *this;
+  }
+  const std::array<u8, N>& Bytes() const { return m_bytes; }
 
-struct PCAPRecordHeader
-{
-  u32 ts_sec;
-  u32 ts_usec;
-  u32 size_in_file;  // Size after eventual truncation.
-  u32 real_size;     // Size before eventual truncation.
+private:
+  std::array<u8, N> m_bytes{};
+  size_t m_pos = 0;
 };
-#pragma pack(pop)
-
 }  // namespace
 
 void PCAP::AddHeader(u32 link_type)
 {
-  PCAPHeader hdr = {PCAP_MAGIC, PCAP_VERSION_MAJOR,  PCAP_VERSION_MINOR, 0,
-                    0,          PCAP_CAPTURE_LENGTH, link_type};
-  m_fp->WriteBytes(&hdr, sizeof(hdr));
+  HeaderWriter<FILE_HEADER_SIZE> header;
+  header.Put(MAGIC)
+      .Put(VERSION_MAJOR)
+      .Put(VERSION_MINOR)
+      .Put(s32{0})  // GMT to local time correction
+      .Put(u32{0})  // timestamp accuracy
+      .Put(SNAPSHOT_LENGTH)
+      .Put(link_type);
+  m_fp->WriteBytes(header.Bytes().data(), header.Bytes().size());
 }
 
-// Not thread-safe, concurrency between multiple calls to IOFile::WriteBytes.
 void PCAP::AddPacket(const u8* bytes, size_t size)
 {
-  std::chrono::system_clock::time_point now(std::chrono::system_clock::now());
-  auto ts = now.time_since_epoch();
-  PCAPRecordHeader rec_hdr = {
-      (u32)std::chrono::duration_cast<std::chrono::seconds>(ts).count(),
-      (u32)(std::chrono::duration_cast<std::chrono::microseconds>(ts).count() % 1000000), (u32)size,
-      (u32)size};
-  m_fp->WriteBytes(&rec_hdr, sizeof(rec_hdr));
+  using namespace std::chrono;
+  const auto since_epoch = duration_cast<microseconds>(system_clock::now().time_since_epoch());
+  const auto seconds = duration_cast<std::chrono::seconds>(since_epoch);
+  const auto micros = since_epoch.count() % 1000000;
+
+  HeaderWriter<RECORD_HEADER_SIZE> record;
+  record.Put(static_cast<u32>(seconds.count()))
+      .Put(static_cast<u32>(micros))
+      .Put(static_cast<u32>(size))   // bytes stored
+      .Put(static_cast<u32>(size));  // original length (nothing is truncated)
+  m_fp->WriteBytes(record.Bytes().data(), record.Bytes().size());
   m_fp->WriteBytes(bytes, size);
 }
 }  // namespace Common
