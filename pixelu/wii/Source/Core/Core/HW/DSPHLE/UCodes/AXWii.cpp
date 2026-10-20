@@ -72,25 +72,28 @@ constexpr size_t FILTER_GAP_END = offsetof(AXPBWii, biquad) + sizeof(PBBiquadFil
 
 struct Segment
 {
-  size_t begin;
+  size_t begin;  // byte range in the struct
   size_t end;
+  size_t ram;  // byte offset of that range in the PB in RAM
 };
 
-// The parts of the struct that exist in RAM for a layout, in order.
+// The parts of the struct that exist in RAM for a layout, in order. In the layout without an
+// updates field the filters still sit at their full-struct offset in RAM, so the part before them
+// is followed by an unused hole there.
 size_t PresentSegments(PBLayout layout, std::array<Segment, 3>& out)
 {
   switch (layout)
   {
   case PBLayout::UpdatesAndHighPass:
-    out = {{{0, FILTER_GAP_BEGIN}, {FILTER_GAP_END, sizeof(AXPBWii)}}};
+    out = {{{0, FILTER_GAP_BEGIN, 0}, {FILTER_GAP_END, sizeof(AXPBWii), FILTER_GAP_BEGIN}}};
     return 2;
   case PBLayout::HighPassOnly:
-    out = {{{0, UPDATES_BEGIN},
-            {UPDATES_END, FILTER_GAP_BEGIN},
-            {FILTER_GAP_END, sizeof(AXPBWii)}}};
+    out = {{{0, UPDATES_BEGIN, 0},
+            {UPDATES_END, FILTER_GAP_BEGIN, UPDATES_BEGIN},
+            {FILTER_GAP_END, sizeof(AXPBWii), FILTER_GAP_BEGIN}}};
     return 3;
   case PBLayout::BiquadOnly:
-    out = {{{0, UPDATES_BEGIN}, {UPDATES_END, sizeof(AXPBWii)}}};
+    out = {{{0, UPDATES_BEGIN, 0}, {UPDATES_END, sizeof(AXPBWii), UPDATES_BEGIN}}};
     return 2;
   case PBLayout::Unknown:
     break;
@@ -366,16 +369,13 @@ void AXWiiUCode::ReadPB(Memory::MemoryManager& memory, u32 addr, AXPBWii& pb) co
 
   // Fields missing from this layout read as zero.
   u8* const bytes = reinterpret_cast<u8*>(&pb);
-  size_t ram_offset = 0;
   size_t struct_offset = 0;
   for (size_t i = 0; i < count; ++i)
   {
     const Segment& segment = segments[i];
     std::memset(bytes + struct_offset, 0, segment.begin - struct_offset);
-    const size_t length = segment.end - segment.begin;
     memory.CopyFromEmuSwapped(reinterpret_cast<u16*>(bytes + segment.begin),
-                              addr + static_cast<u32>(ram_offset), length);
-    ram_offset += length;
+                              addr + static_cast<u32>(segment.ram), segment.end - segment.begin);
     struct_offset = segment.end;
   }
 }
@@ -386,13 +386,12 @@ void AXWiiUCode::WritePB(Memory::MemoryManager& memory, u32 addr, const AXPBWii&
   const size_t count = PresentSegments(LayoutFor(m_crc), segments);
 
   const u8* const bytes = reinterpret_cast<const u8*>(&pb);
-  size_t ram_offset = 0;
   for (size_t i = 0; i < count; ++i)
   {
-    const size_t length = segments[i].end - segments[i].begin;
-    memory.CopyToEmuSwapped(addr + static_cast<u32>(ram_offset),
-                            reinterpret_cast<const u16*>(bytes + segments[i].begin), length);
-    ram_offset += length;
+    const Segment& segment = segments[i];
+    memory.CopyToEmuSwapped(addr + static_cast<u32>(segment.ram),
+                            reinterpret_cast<const u16*>(bytes + segment.begin),
+                            segment.end - segment.begin);
   }
 }
 
@@ -450,8 +449,9 @@ void AXWiiUCode::ProcessPBList(u32 pb_addr)
 void AXWiiUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr, u16 volume)
 {
   std::array<u16, FRAME_SAMPLES> ramp;
-  GenerateVolumeRamp(ramp.data(), m_last_aux_volumes[static_cast<size_t>(aux_id)], volume, ramp.size());
-  m_last_aux_volumes[static_cast<size_t>(aux_id)] = volume;
+  u16& last_volume = m_last_aux_volumes[static_cast<size_t>(aux_id)];
+  GenerateVolumeRamp(ramp.data(), last_volume, volume, ramp.size());
+  last_volume = volume;
 
   auto& memory = m_dsphle->GetSystem().GetMemory();
   constexpr u32 BUS_BYTES = FRAME_SAMPLES * sizeof(int);
@@ -494,8 +494,9 @@ void AXWiiUCode::UploadAUXMixLRSC(int aux_id, const u32* addresses, u16 volume)
   memory.CopyToEmuSwapped(addresses[1], m_auxc[aux_id != 0 ? AUXC_S : AUXC_R].data(), BUS_BYTES);
 
   std::array<u16, FRAME_SAMPLES> ramp;
-  GenerateVolumeRamp(ramp.data(), m_last_aux_volumes[static_cast<size_t>(aux_id)], volume, ramp.size());
-  m_last_aux_volumes[static_cast<size_t>(aux_id)] = volume;
+  u16& last_volume = m_last_aux_volumes[static_cast<size_t>(aux_id)];
+  GenerateVolumeRamp(ramp.data(), last_volume, volume, ramp.size());
+  last_volume = volume;
 
   // Four returned buffers mix into main L, R, S and aux C L. Each is downloaded into the aux L
   // bus first, which therefore ends up holding the last one.
