@@ -1,8 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 
@@ -15,7 +17,7 @@
 #include <ws2tcpip.h>
 #endif
 
-// WSAPoll doesn't support POLLPRI and POLLWRBAND flags
+// Poll events WSAPoll rejects; they are never passed to it.
 #ifdef _WIN32
 constexpr int UNSUPPORTED_WSAPOLL = POLLPRI | POLLWRBAND;
 #else
@@ -24,6 +26,7 @@ constexpr int UNSUPPORTED_WSAPOLL = 0;
 
 namespace IOS::HLE
 {
+// Commands of /dev/net/ip/top (the IOCTLV_ ones come as ioctlv).
 enum NET_IOCTL
 {
   IOCTL_SO_ACCEPT = 1,
@@ -63,6 +66,8 @@ enum NET_IOCTL
   IOCTL_SO_ICMPCLOSE
 };
 
+// /dev/net/ip/top: the socket API. Calls that can block are queued on the socket manager;
+// name lookups run on a worker thread.
 class NetIPTopDevice : public EmulationDevice
 {
 public:
@@ -87,37 +92,40 @@ private:
     s32 return_value;
   };
 
-  template <typename Method, typename Request>
-  std::optional<IPCReply> LaunchAsyncTask(Method method, const Request& request)
+  // Runs `handler` on the worker thread; its result is sent from Update().
+  template <typename RequestType>
+  std::optional<IPCReply> RunOnWorker(IPCReply (NetIPTopDevice::*handler)(const RequestType&),
+                                      const RequestType& request)
   {
-    m_work_queue.EmplaceItem(AsyncTask{request, std::bind(method, this, request)});
+    m_work_queue.EmplaceItem(
+        AsyncTask{request, [this, handler, request] { return (this->*handler)(request); }});
     return std::nullopt;
   }
 
-  IPCReply HandleInitInterfaceRequest(const IOCtlRequest& request);
-  IPCReply HandleSocketRequest(const IOCtlRequest& request);
-  IPCReply HandleICMPSocketRequest(const IOCtlRequest& request);
-  IPCReply HandleCloseRequest(const IOCtlRequest& request);
-  std::optional<IPCReply> HandleDoSockRequest(const IOCtlRequest& request);
-  IPCReply HandleShutdownRequest(const IOCtlRequest& request);
-  IPCReply HandleListenRequest(const IOCtlRequest& request);
-  IPCReply HandleGetSockOptRequest(const IOCtlRequest& request);
-  IPCReply HandleSetSockOptRequest(const IOCtlRequest& request);
-  IPCReply HandleGetSockNameRequest(const IOCtlRequest& request);
-  IPCReply HandleGetPeerNameRequest(const IOCtlRequest& request);
-  IPCReply HandleGetHostIDRequest(const IOCtlRequest& request);
-  IPCReply HandleInetAToNRequest(const IOCtlRequest& request);
-  IPCReply HandleInetPToNRequest(const IOCtlRequest& request);
-  IPCReply HandleInetNToPRequest(const IOCtlRequest& request);
-  std::optional<IPCReply> HandlePollRequest(const IOCtlRequest& request);
-  IPCReply HandleGetHostByNameRequest(const IOCtlRequest& request);
-  IPCReply HandleICMPCancelRequest(const IOCtlRequest& request);
+  IPCReply InitInterface(const IOCtlRequest& request);
+  IPCReply OpenSocket(const IOCtlRequest& request);
+  IPCReply OpenICMPSocket(const IOCtlRequest& request);
+  IPCReply CloseSocket(const IOCtlRequest& request);
+  std::optional<IPCReply> QueueOnSocket(const IOCtlRequest& request);
+  IPCReply Shutdown(const IOCtlRequest& request);
+  IPCReply Listen(const IOCtlRequest& request);
+  IPCReply GetSockOpt(const IOCtlRequest& request);
+  IPCReply SetSockOpt(const IOCtlRequest& request);
+  IPCReply GetSockName(const IOCtlRequest& request);
+  IPCReply GetPeerName(const IOCtlRequest& request);
+  IPCReply GetHostID(const IOCtlRequest& request);
+  IPCReply InetAToN(const IOCtlRequest& request);
+  IPCReply InetPToN(const IOCtlRequest& request);
+  IPCReply InetNToP(const IOCtlRequest& request);
+  std::optional<IPCReply> Poll(const IOCtlRequest& request);
+  IPCReply GetHostByName(const IOCtlRequest& request);
+  IPCReply ICMPCancel(const IOCtlRequest& request);
 
-  IPCReply HandleGetInterfaceOptRequest(const IOCtlVRequest& request);
-  std::optional<IPCReply> HandleSendToRequest(const IOCtlVRequest& request);
-  std::optional<IPCReply> HandleRecvFromRequest(const IOCtlVRequest& request);
-  IPCReply HandleGetAddressInfoRequest(const IOCtlVRequest& request);
-  IPCReply HandleICMPPingRequest(const IOCtlVRequest& request);
+  IPCReply GetInterfaceOpt(const IOCtlVRequest& request);
+  std::optional<IPCReply> SendTo(const IOCtlVRequest& request);
+  std::optional<IPCReply> RecvFrom(const IOCtlVRequest& request);
+  IPCReply GetAddrInfo(const IOCtlVRequest& request);
+  IPCReply ICMPPing(const IOCtlVRequest& request);
 
   Common::SocketContext m_socket_context;
   Common::WorkQueueThreadSP<AsyncTask> m_work_queue;

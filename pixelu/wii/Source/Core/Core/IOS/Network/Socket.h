@@ -1,21 +1,22 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+// Host socket headers. Other files (the IP device, the Triforce media board) rely on this header
+// for them, for pollfd_t and for poll() being available on Windows.
 #ifdef _WIN32
 #include <iphlpapi.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-typedef pollfd pollfd_t;
+using pollfd_t = pollfd;
 
 #define poll WSAPoll
 #define MALLOC(x) HeapAlloc(GetProcessHeap(), 0, (x))
 #define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
 
-#elif defined(__linux__) or defined(__APPLE__) or defined(__FreeBSD__) or defined(__NetBSD__) or   \
-    defined(__OpenBSD__) or defined(__HAIKU__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) ||                          \
+    defined(__NetBSD__) || defined(__OpenBSD__) || defined(__HAIKU__)
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <net/if.h>
@@ -26,7 +27,7 @@ typedef pollfd pollfd_t;
 #include <sys/socket.h>
 #include <sys/types.h>
 
-typedef struct pollfd pollfd_t;
+using pollfd_t = struct pollfd;
 #else
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -40,6 +41,7 @@ typedef struct pollfd pollfd_t;
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -50,8 +52,10 @@ typedef struct pollfd pollfd_t;
 
 namespace IOS::HLE
 {
+// Number of sockets a title can have open at once.
 constexpr int WII_SOCKET_FD_MAX = 24;
 
+// Flags of send/recv as the Wii passes them.
 enum
 {
   SO_MSG_OOB = 0x01,
@@ -59,6 +63,7 @@ enum
   SO_MSG_NONBLOCK = 0x04,
 };
 
+// The Wii's socket error numbers. Calls report them negated.
 enum
 {
   SO_SUCCESS,
@@ -142,6 +147,7 @@ enum
   SO_EXDEV
 };
 
+// Socket addresses in guest memory (BSD layout with a length byte, network byte order).
 #pragma pack(push, 1)
 struct WiiInAddr
 {
@@ -166,28 +172,30 @@ struct WiiSockAddrIn
 
 class WiiSockMan;
 
+// One guest socket, backed by a non-blocking host socket. Requests that can block are queued
+// here and retried on every update until they finish (or straight away for non-blocking use).
 class WiiSocket
 {
 public:
-  explicit WiiSocket(WiiSockMan& socket_manager) : m_socket_manager(socket_manager) {}
+  explicit WiiSocket(WiiSockMan& manager) : m_manager(manager) {}
   WiiSocket(const WiiSocket&) = delete;
   WiiSocket(WiiSocket&&) = delete;
-  ~WiiSocket();
   WiiSocket& operator=(const WiiSocket&) = delete;
   WiiSocket& operator=(WiiSocket&&) = delete;
+  ~WiiSocket();
 
 private:
-  using Timeout = std::chrono::time_point<std::chrono::steady_clock>;
-  struct sockop
+  friend class WiiSockMan;
+
+  using Deadline = std::chrono::steady_clock::time_point;
+
+  struct QueuedRequest
   {
     Request request;
-    bool is_ssl;
-    bool is_aborted = false;
-    union
-    {
-      NET_IOCTL net_type;
-      SSL_IOCTL ssl_type;
-    };
+    bool is_ssl = false;
+    bool aborted = false;
+    // A NET_IOCTL, or an SSL_IOCTL if is_ssl is set.
+    u32 command = 0;
   };
 
   enum class ConnectingState
@@ -198,36 +206,40 @@ private:
     Error
   };
 
-  friend class WiiSockMan;
-  void SetFd(s32 s);
-  void SetWiiFd(s32 s);
+  void AdoptHostSocket(s32 host_fd, s32 guest_fd);
   s32 Shutdown(u32 how);
-  s32 CloseFd();
+  s32 Close();
   s32 FCntl(u32 cmd, u32 arg);
-  void Abort(sockop* op, s32 value) const;
+  void Abort(QueuedRequest& queued, s32 result) const;
 
-  const Timeout& GetTimeout();
-  void ResetTimeout();
+  void Queue(const Request& request, NET_IOCTL type);
+  void Queue(const Request& request, SSL_IOCTL type);
 
-  void DoSock(const Request& request, NET_IOCTL type);
-  void DoSock(const Request& request, SSL_IOCTL type);
-  void Update(bool read, bool write, bool except);
-  void UpdateConnectingState(s32 connect_rv);
-  ConnectingState GetConnectingState() const;
-  bool IsValid() const { return fd >= 0; }
+  // Retries every queued request once.
+  void Update();
+  s32 RunIOCtl(const Request& request, u32 command);
+  s32 RunSSL(const Request& request, u32 command);
+  s32 RunSendTo(const Request& request, bool* force_non_blocking);
+  s32 RunRecvFrom(const Request& request, bool* force_non_blocking);
+  s32 AdjustBlockingConnect(s32 result);
+
+  void SetConnectingState(s32 connect_result);
+  ConnectingState PollConnectingState() const;
+  bool IsValid() const { return m_host_fd >= 0; }
   bool IsTCP() const;
+  const Deadline& ConnectDeadline();
 
-  WiiSockMan& m_socket_manager;
+  WiiSockMan& m_manager;
 
-  s32 fd = -1;
-  s32 wii_fd = -1;
-  bool nonBlock = false;
-  ConnectingState connecting_state = ConnectingState::None;
-  std::list<sockop> pending_sockops;
-
-  std::optional<Timeout> timeout;
+  s32 m_host_fd = -1;
+  s32 m_guest_fd = -1;
+  bool m_non_blocking = false;
+  ConnectingState m_connecting = ConnectingState::None;
+  std::list<QueuedRequest> m_queue;
+  std::optional<Deadline> m_connect_deadline;
 };
 
+// The socket table shared by /dev/net/ip/top, /dev/net/ssl and KD.
 class WiiSockMan
 {
 public:
@@ -237,6 +249,7 @@ public:
     NativeToWii
   };
 
+  // A poll that waits (without blocking emulation) until something is ready or it times out.
   struct PollCommand
   {
     u32 request_addr = 0;
@@ -252,6 +265,7 @@ public:
   WiiSockMan& operator=(WiiSockMan&&) = delete;
   ~WiiSockMan();
 
+  // Turns a host call result into a Wii result, reading the host error when it failed.
   s32 GetNetErrorCode(s32 ret, std::string_view caller, bool is_rw);
 
   void Update();
@@ -262,45 +276,46 @@ public:
 
   void DoState(PointerWrap& p);
   void AddPollCommand(const PollCommand& cmd);
-  // NON-BLOCKING FUNCTIONS
+
+  // These never block.
   s32 NewSocket(s32 af, s32 type, s32 protocol);
   s32 AddSocket(s32 fd, bool is_rw);
   bool IsSocketBlocking(s32 wii_fd) const;
   s32 GetHostSocket(s32 wii_fd) const;
   s32 ShutdownSocket(s32 wii_fd, u32 how);
   s32 DeleteSocket(s32 wii_fd);
-  s32 GetLastNetError() const { return errno_last; }
-  void SetLastNetError(s32 error) { errno_last = error; }
-  void Clean() { WiiSockets.clear(); }
+  s32 GetLastNetError() const { return m_last_error; }
+  void SetLastNetError(s32 error) { m_last_error = error; }
+  void Clean() { m_sockets.clear(); }
   void EnqueueIPCReply(const Request& request, s32 return_value) const;
+
+  // Queues a request on a socket; it is answered from Update().
   template <typename T>
   void DoSock(s32 sock, const Request& request, T type)
   {
-    auto socket_entry = WiiSockets.find(sock);
-    if (socket_entry == WiiSockets.end())
+    const auto found = m_sockets.find(sock);
+    if (found != m_sockets.end())
     {
-      ERROR_LOG_FMT(IOS_NET, "DoSock: Error, fd not found ({:08x}, {:08X}, {:08X})", sock,
-                    request.address, std::to_underlying(type));
-      EnqueueIPCReply(request, -SO_EBADF);
+      found->second.Queue(request, type);
+      return;
     }
-    else
-    {
-      socket_entry->second.DoSock(request, type);
-    }
+    ERROR_LOG_FMT(IOS_NET, "DoSock: no socket {:08x} (request {:08X}, command {:08X})", sock,
+                  request.address, std::to_underlying(type));
+    EnqueueIPCReply(request, -SO_EBADF);
   }
 
   void UpdateWantDeterminism(bool want);
 
 private:
-  void UpdatePollCommands();
-
   friend class WiiSocket;
 
+  void UpdatePollCommands();
+
   EmulationKernel& m_ios;
-  std::unordered_map<s32, WiiSocket> WiiSockets;
-  s32 errno_last = 0;
-  std::vector<PollCommand> pending_polls;
-  std::chrono::time_point<std::chrono::high_resolution_clock> last_time =
+  std::unordered_map<s32, WiiSocket> m_sockets;
+  s32 m_last_error = 0;
+  std::vector<PollCommand> m_polls;
+  std::chrono::time_point<std::chrono::high_resolution_clock> m_last_poll_update =
       std::chrono::high_resolution_clock::now();
 };
 }  // namespace IOS::HLE
