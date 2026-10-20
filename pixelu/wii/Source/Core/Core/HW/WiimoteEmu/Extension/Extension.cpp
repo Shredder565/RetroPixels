@@ -16,11 +16,13 @@ Extension::Extension(const char* name) : Extension(name, name)
 {
 }
 
+// For extensions whose UI name differs from their config section name.
 Extension::Extension(const char* config_name, const char* display_name)
     : m_config_name(config_name), m_display_name(display_name)
 {
 }
 
+// The config section name; the display name is what the UI shows.
 std::string Extension::GetName() const
 {
   return m_config_name;

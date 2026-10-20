@@ -267,7 +267,8 @@ int MotionPlus::BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in)
   if (status != ActivationStatus::Active || slave_addr != ACTIVE_DEVICE_ADDR)
     return 0;
 
-  DEBUG_LOG_FMT(WIIMOTE, "M+ (active) write at {:#x}: {}", addr, ArrayToString(data_in, static_cast<u32>(count)));
+  DEBUG_LOG_FMT(WIIMOTE, "M+ (active) write at {:#x}: {}", addr,
+                ArrayToString(data_in, static_cast<u32>(count)));
 
   const int written = RawWrite(&m_reg_data, addr, count, data_in);
 
@@ -307,8 +308,8 @@ void MotionPlus::OnPassthroughModeWrite()
   const ActivationStatus status = GetActivationStatus();
 
   const PassthroughMode mode = GetPassthroughMode();
-  const bool valid_mode = mode == PassthroughMode::Disabled ||
-                          mode == PassthroughMode::Nunchuk || mode == PassthroughMode::Classic;
+  const bool valid_mode = mode == PassthroughMode::Disabled || mode == PassthroughMode::Nunchuk ||
+                          mode == PassthroughMode::Classic;
 
   if (valid_mode && status != ActivationStatus::Active)
     Activate();
@@ -415,8 +416,7 @@ void MotionPlus::Update(const DesiredExtensionState&)
     BigInt y = BigInt::FromSecret();
     if (m_reg_data.challenge_type != 0)
     {
-      y.MultiplyMod(BigInt::FromDecimal(CHALLENGE_SQRT_V),
-                    BigInt::FromDecimal(CHALLENGE_MODULUS));
+      y.MultiplyMod(BigInt::FromDecimal(CHALLENGE_SQRT_V), BigInt::FromDecimal(CHALLENGE_MODULUS));
     }
     y.StoreLittleEndian(&m_reg_data.challenge_data);
 
@@ -492,8 +492,7 @@ void MotionPlus::PrepareInput(const MotionPlus::DataFormat::Data& gyroscope_data
       // Passthrough off. Any other mode would have deactivated the MotionPlus already.
       if (mode != PassthroughMode::Disabled)
       {
-        ERROR_LOG_FMT(WIIMOTE, "M+ in unexpected passthrough mode {}",
-                      static_cast<int>(mode));
+        ERROR_LOG_FMT(WIIMOTE, "M+ in unexpected passthrough mode {}", static_cast<int>(mode));
       }
       format.is_mp_data = true;
     }

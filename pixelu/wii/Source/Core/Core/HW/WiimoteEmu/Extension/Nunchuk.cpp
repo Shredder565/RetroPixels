@@ -40,8 +40,8 @@ Nunchuk::Nunchuk() : Extension1stParty(_trans("Nunchuk"))
   m_buttons->AddInput(Translatability::DoNotTranslate, C_BUTTON);
   m_buttons->AddInput(Translatability::DoNotTranslate, Z_BUTTON);
 
-  m_stick = new ControllerEmu::OctagonAnalogStick(
-      STICK_GROUP, ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
+  m_stick = new ControllerEmu::OctagonAnalogStick(STICK_GROUP,
+                                                  ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
   groups.emplace_back(m_stick);
 
   // Shaking defaults to the opposite direction of the remote's, which Donkey Kong Country
@@ -80,8 +80,8 @@ void Nunchuk::BuildDesiredExtensionState(DesiredExtensionState* target_state)
   // tilt and swing rotations, plus shaking.
   const Common::Matrix33 orientation =
       GetRotationalMatrix(-m_tilt_state.angle) * GetRotationalMatrix(-m_swing_state.angle);
-  const Common::Vec3 resting = m_imu_accelerometer->GetState().value_or(
-      Common::Vec3(0, 0, float(GRAVITY_ACCELERATION)));
+  const Common::Vec3 resting =
+      m_imu_accelerometer->GetState().value_or(Common::Vec3(0, 0, float(GRAVITY_ACCELERATION)));
 
   Common::Vec3 accel = orientation * (m_swing_state.acceleration + resting);
   accel += m_shake_state.acceleration;
@@ -125,23 +125,7 @@ void Nunchuk::Reset()
 
 ControllerEmu::ControlGroup* Nunchuk::GetGroup(NunchukGroup group)
 {
-  switch (group)
-  {
-  case NunchukGroup::Buttons:
-    return m_buttons;
-  case NunchukGroup::Stick:
-    return m_stick;
-  case NunchukGroup::Tilt:
-    return m_tilt;
-  case NunchukGroup::Swing:
-    return m_swing;
-  case NunchukGroup::Shake:
-    return m_shake;
-  case NunchukGroup::IMUAccelerometer:
-    return m_imu_accelerometer;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_stick, m_tilt, m_swing, m_shake, m_imu_accelerometer);
 }
 
 void Nunchuk::DoState(PointerWrap& p)

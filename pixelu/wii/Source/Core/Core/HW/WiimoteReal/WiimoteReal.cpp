@@ -72,7 +72,8 @@ constexpr int POOL_INDEX = 99;
 
 bool WantsRealWiimote(unsigned int slot)
 {
-  return Config::Get(Config::GetInfoForWiimoteSource(static_cast<int>(slot))) == WiimoteSource::Real;
+  return Config::Get(Config::GetInfoForWiimoteSource(static_cast<int>(slot))) ==
+         WiimoteSource::Real;
 }
 
 void HandleWiimoteDisconnect(unsigned int slot)
@@ -324,6 +325,7 @@ void Wiimote::EventLinked()
 {
   m_is_linked = true;
 
+  // Drop whatever arrived while unlinked and start from plain core reports.
   ClearReadQueue();
   ResetDataReporting();
   EnablePowerAssertionInternal();
@@ -331,10 +333,18 @@ void Wiimote::EventLinked()
 
 void Wiimote::EventUnlinked()
 {
-  if (m_really_disconnect)
-    DisconnectInternal();
-  else
-    EmuStop();
+  m_really_disconnect ? DisconnectInternal() : EmuStop();
+}
+
+// The power assertion keeps the host from sleeping while a remote is in use.
+void Wiimote::EmuResume()
+{
+  EnablePowerAssertionInternal();
+}
+
+void Wiimote::EmuPause()
+{
+  DisablePowerAssertionInternal();
 }
 
 void Wiimote::InterruptDataOutput(const u8* data, const u32 size)
@@ -422,8 +432,8 @@ bool Wiimote::IsBalanceBoard()
 
   // Ask for the status; once it shows an extension, read two identifier bytes at 0xa400fe.
   static const u8 request_status[] = {HEADER, u8(OutputReportID::RequestStatus), 0};
-  static const u8 read_identifier[] = {HEADER, u8(OutputReportID::ReadData), 0x04, 0xa4,
-                                       0x00,   0xfe,                         0x02, 0x00};
+  static const u8 read_identifier[] = {
+      HEADER, u8(OutputReportID::ReadData), 0x04, 0xa4, 0x00, 0xfe, 0x02, 0x00};
 
   int result = IOWrite(request_status, sizeof(request_status));
   u8 buf[MAX_PAYLOAD] = {};
@@ -548,8 +558,8 @@ void Wiimote::Prepare()
   const TimePoint now = Clock::now();
 
   // Non-continuous core reports, with rumble on...
-  m_write_reports.Emplace(now, Report{WR_SET_REPORT | BT_OUTPUT, u8(OutputReportID::ReportMode),
-                                      1, u8(InputReportID::ReportCore)});
+  m_write_reports.Emplace(now, Report{WR_SET_REPORT | BT_OUTPUT, u8(OutputReportID::ReportMode), 1,
+                                      u8(InputReportID::ReportCore)});
 
   // ...and 200 ms later a status request, which turns rumble off again.
   m_write_reports.Emplace(now + std::chrono::milliseconds{200},
@@ -560,19 +570,10 @@ void Wiimote::Prepare()
 
 void Wiimote::EmuStop()
 {
+  // Incoming reports are dropped from here on.
   m_is_linked = false;
 
   ResetDataReporting();
-  DisablePowerAssertionInternal();
-}
-
-void Wiimote::EmuResume()
-{
-  EnablePowerAssertionInternal();
-}
-
-void Wiimote::EmuPause()
-{
   DisablePowerAssertionInternal();
 }
 

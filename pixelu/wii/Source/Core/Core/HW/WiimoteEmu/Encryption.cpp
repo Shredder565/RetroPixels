@@ -15,6 +15,8 @@ namespace
 // two boxes used when none of the known key derivations matches, the box applied to the random
 // bytes, and the eight boxes the tables are built from (key index i uses boxes i and i + 1).
 
+// The tables keep 16 bytes per row.
+// clang-format off
 constexpr SBox FIRST_PARTY_FALLBACK_A = {{
     0x00, 0x3B, 0x4C, 0x89, 0x7B, 0xA5, 0x77, 0x17, 0xFF, 0x9E, 0x9B, 0x9C, 0x4D, 0xA3, 0xE1, 0x0C,
     0xF2, 0x47, 0x6A, 0xEE, 0x3C, 0x8D, 0x46, 0xF1, 0x36, 0x4B, 0x6C, 0xFA, 0xF5, 0xE7, 0x93, 0x12,
@@ -477,6 +479,7 @@ constexpr KeyTerms THIRD_PARTY_TERMS = {{
     {5, 4, 8, 1},
     {9, 3, 8, 5},
 }};
+// clang-format on
 
 struct Scheme
 {

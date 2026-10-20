@@ -148,8 +148,7 @@ void Wiimote::HandleReportMode(const OutputReportMode& dr)
   // A real remote ignores the whole report when the mode is unknown.
   if (!DataReportBuilder::IsValidMode(dr.mode))
   {
-    WARN_LOG_FMT(WIIMOTE, "Ignoring unknown data reporting mode {:#04x}",
-                 static_cast<u8>(dr.mode));
+    WARN_LOG_FMT(WIIMOTE, "Ignoring unknown data reporting mode {:#04x}", static_cast<u8>(dr.mode));
     return;
   }
 
@@ -182,6 +181,7 @@ void Wiimote::HandleIRLogicEnable2(const WiimoteCommon::OutputReportEnableFeatur
 
 void Wiimote::HandleSpeakerMute(const WiimoteCommon::OutputReportEnableFeature& rpt)
 {
+  // Muting keeps sample data from reaching the speaker (see HandleSpeakerData).
   m_speaker_mute = rpt.enable;
 
   if (rpt.ack)
@@ -190,6 +190,7 @@ void Wiimote::HandleSpeakerMute(const WiimoteCommon::OutputReportEnableFeature& 
 
 void Wiimote::HandleSpeakerEnable(const WiimoteCommon::OutputReportEnableFeature& rpt)
 {
+  // Only the status bit; whether sound plays is up to the speaker's own registers.
   m_status.speaker = rpt.enable;
 
   if (rpt.ack)
@@ -239,8 +240,8 @@ void Wiimote::HandleWriteData(const OutputReportWriteData& wd)
 
   const u16 address = Common::swap16(wd.address);
 
-  DEBUG_LOG_FMT(WIIMOTE, "Write {:#04x} @ {:#04x} @ {:#04x} ({} bytes)", wd.space,
-                wd.slave_address, address, wd.size);
+  DEBUG_LOG_FMT(WIIMOTE, "Write {:#04x} @ {:#04x} @ {:#04x} ({} bytes)", wd.space, wd.slave_address,
+                address, wd.size);
 
   // Silently ignored by a real remote.
   if (wd.size == 0 || wd.size > 16)
@@ -411,8 +412,7 @@ void Wiimote::HandleExtensionSwap(ExtensionNumber desired_extension_number,
   // Removing the MotionPlus takes the whole update, and also unplugs what was plugged into it.
   if (m_is_motion_plus_attached && !desired_motion_plus)
   {
-    INFO_LOG_FMT(WIIMOTE, "Remote {} (slot {}): unplugging MotionPlus", m_index,
-                 m_bt_device_index);
+    INFO_LOG_FMT(WIIMOTE, "Remote {} (slot {}): unplugging MotionPlus", m_index, m_bt_device_index);
 
     m_extension_port.AttachExtension(GetNoneExtension());
     m_is_motion_plus_attached = false;
@@ -453,13 +453,11 @@ void Wiimote::HandleExtensionSwap(ExtensionNumber desired_extension_number,
   }
   else
   {
-    INFO_LOG_FMT(WIIMOTE, "Remote {} (slot {}): unplugging extension", m_index,
-                 m_bt_device_index);
+    INFO_LOG_FMT(WIIMOTE, "Remote {} (slot {}): unplugging extension", m_index, m_bt_device_index);
     m_active_extension = ExtensionNumber::NONE;
   }
 
-  ExtensionPort& port =
-      m_is_motion_plus_attached ? m_motion_plus.GetExtPort() : m_extension_port;
+  ExtensionPort& port = m_is_motion_plus_attached ? m_motion_plus.GetExtPort() : m_extension_port;
   port.AttachExtension(GetActiveExtension());
 
   GetActiveExtension()->Reset();

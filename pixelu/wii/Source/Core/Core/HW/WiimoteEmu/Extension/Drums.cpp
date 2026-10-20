@@ -145,7 +145,8 @@ void Drums::Update(const DesiredExtensionState& target_state)
   report.unk5 = 0b11;
 
   const bool has_velocity = reported_hit != nullptr;
-  report.velocity_id = static_cast<u8>(has_velocity ? reported_hit->velocity_id : VelocityID::None) & 0x7f;
+  report.velocity_id =
+      static_cast<u8>(has_velocity ? reported_hit->velocity_id : VelocityID::None) & 0x7f;
   report.no_velocity_data_1 = has_velocity ? 0 : 1;
   report.no_velocity_data_2 = has_velocity ? 0 : 1;
 
@@ -182,6 +183,7 @@ void Drums::DoState(PointerWrap& p)
 {
   EncryptedExtension::DoState(p);
 
+  // Pad hit tracking, after the registers (savestate order).
   p.Do(m_prev_pad_input);
   p.Do(m_new_pad_hits);
   p.Do(m_pad_remaining_frames);
@@ -189,16 +191,6 @@ void Drums::DoState(PointerWrap& p)
 
 ControllerEmu::ControlGroup* Drums::GetGroup(DrumsGroup group)
 {
-  switch (group)
-  {
-  case DrumsGroup::Buttons:
-    return m_buttons;
-  case DrumsGroup::Pads:
-    return m_pads;
-  case DrumsGroup::Stick:
-    return m_stick;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_pads, m_stick);
 }
 }  // namespace WiimoteEmu

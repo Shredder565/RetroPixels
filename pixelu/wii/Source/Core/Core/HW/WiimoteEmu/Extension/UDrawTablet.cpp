@@ -117,17 +117,7 @@ void UDrawTablet::Reset()
 
 ControllerEmu::ControlGroup* UDrawTablet::GetGroup(UDrawTabletGroup group)
 {
-  switch (group)
-  {
-  case UDrawTabletGroup::Buttons:
-    return m_buttons;
-  case UDrawTabletGroup::Stylus:
-    return m_stylus;
-  case UDrawTabletGroup::Touch:
-    return m_touch;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_stylus, m_touch);
 }
 
 }  // namespace WiimoteEmu

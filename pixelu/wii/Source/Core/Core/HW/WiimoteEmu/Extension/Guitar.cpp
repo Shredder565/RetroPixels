@@ -44,20 +44,19 @@ constexpr u8 SLIDER_UNTOUCHED = 0x0F;
 
 u8 SliderCodeAt(ControlState position)
 {
-  const auto it = std::find_if(SLIDER_CODES.begin(), SLIDER_CODES.end(),
-                               [position](const SliderCode& c) { return !(c.position < position); });
+  const auto it =
+      std::find_if(SLIDER_CODES.begin(), SLIDER_CODES.end(),
+                   [position](const SliderCode& c) { return !(c.position < position); });
   // Positions beyond the last entry cannot occur (the slider is clamped to -1..1); treat them as
   // the bottom fret.
   return it != SLIDER_CODES.end() ? it->code : SLIDER_CODES.back().code;
 }
 
 // Frets in group order, with their report bits.
-constexpr std::array<const char*, 5> FRET_NAMES = {_trans("Green"), _trans("Red"),
-                                                   _trans("Yellow"), _trans("Blue"),
-                                                   _trans("Orange")};
-constexpr std::array<u16, 5> FRET_BITS = {Guitar::FRET_GREEN, Guitar::FRET_RED,
-                                          Guitar::FRET_YELLOW, Guitar::FRET_BLUE,
-                                          Guitar::FRET_ORANGE};
+constexpr std::array<const char*, 5> FRET_NAMES = {_trans("Green"), _trans("Red"), _trans("Yellow"),
+                                                   _trans("Blue"), _trans("Orange")};
+constexpr std::array<u16, 5> FRET_BITS = {Guitar::FRET_GREEN, Guitar::FRET_RED, Guitar::FRET_YELLOW,
+                                          Guitar::FRET_BLUE, Guitar::FRET_ORANGE};
 
 // "-" then "+".
 constexpr std::array<u16, 2> BUTTON_BITS = {Guitar::BUTTON_MINUS, Guitar::BUTTON_PLUS};
@@ -85,8 +84,8 @@ Guitar::Guitar() : Extension1stParty(_trans("Guitar"))
   m_buttons->AddInput(Translatability::DoNotTranslate, "-");
   m_buttons->AddInput(Translatability::DoNotTranslate, "+");
 
-  m_stick = new ControllerEmu::OctagonAnalogStick(
-      _trans("Stick"), ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
+  m_stick = new ControllerEmu::OctagonAnalogStick(_trans("Stick"),
+                                                  ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
   groups.emplace_back(m_stick);
 
   m_whammy = new ControllerEmu::Triggers(_trans("Whammy"));
@@ -143,22 +142,6 @@ void Guitar::Reset()
 
 ControllerEmu::ControlGroup* Guitar::GetGroup(GuitarGroup group)
 {
-  switch (group)
-  {
-  case GuitarGroup::Buttons:
-    return m_buttons;
-  case GuitarGroup::Frets:
-    return m_frets;
-  case GuitarGroup::Strum:
-    return m_strum;
-  case GuitarGroup::Whammy:
-    return m_whammy;
-  case GuitarGroup::Stick:
-    return m_stick;
-  case GuitarGroup::SliderBar:
-    return m_slider_bar;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_frets, m_strum, m_whammy, m_stick, m_slider_bar);
 }
 }  // namespace WiimoteEmu

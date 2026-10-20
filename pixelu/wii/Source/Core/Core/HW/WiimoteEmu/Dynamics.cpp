@@ -28,8 +28,7 @@ double BrakingDistance(double v, double a, double jerk)
   const double accel = a * mirror;
 
   const double ramp_time = accel / jerk;
-  const double ramp_distance =
-      std::pow(accel, 3) / (3 * jerk * jerk) + (accel * speed) / jerk;
+  const double ramp_distance = std::pow(accel, 3) / (3 * jerk * jerk) + (accel * speed) / jerk;
 
   const double speed_after_ramp = speed + accel * std::abs(ramp_time) -
                                   std::copysign(jerk * ramp_time * ramp_time / 2, ramp_time);
@@ -112,8 +111,7 @@ void EmulateShake(PositionalState* state, ControllerEmu::Shake* const shake_grou
   Common::Vec3 jerk_limit;
   for (std::size_t axis = 0; axis != goal.data.size(); ++axis)
   {
-    const float reach =
-        std::max(std::abs(goal.data[axis]), std::abs(state->position.data[axis]));
+    const float reach = std::max(std::abs(goal.data[axis]), std::abs(state->position.data[axis]));
     jerk_limit.data[axis] = float(reach / quarter_period_cubed);
   }
 
@@ -160,9 +158,8 @@ void EmulateSwing(MotionState* state, ControllerEmu::Force* swing_group, float t
 
   const float return_speed = float(swing_group->GetReturnSpeed());
   const float swing_speed = float(swing_group->GetSpeed());
-  const Common::Vec3 speed =
-      MathUtil::Lerp(Common::Vec3{1, 1, 1} * return_speed, Common::Vec3{1, 1, 1} * swing_speed,
-                     progress);
+  const Common::Vec3 speed = MathUtil::Lerp(Common::Vec3{1, 1, 1} * return_speed,
+                                            Common::Vec3{1, 1, 1} * swing_speed, progress);
 
   // The jerk that reaches `speed` over a one meter move.
   const Common::Vec3 jerk_limit = speed * speed * speed * 4;
@@ -286,8 +283,7 @@ void ApproachAngleWithAccel(RotationalState* state, const Common::Vec3& angle_ta
     }
 
     // Land exactly on the target with the speed that gets there in this step.
-    state->angular_velocity.data[axis] =
-        (angle_target.data[axis] - state->angle.data[axis]) / dt;
+    state->angular_velocity.data[axis] = (angle_target.data[axis] - state->angle.data[axis]) / dt;
     state->angle.data[axis] = angle_target.data[axis];
   }
 }
@@ -335,8 +331,7 @@ void EmulateIMUCursor(IMUCursorState* state, ControllerEmu::IMUCursor* imu_ir_gr
 void ApproachPositionWithJerk(PositionalState* state, const Common::Vec3& position_target,
                               const Common::Vec3& max_jerk, float time_elapsed)
 {
-  const Common::Vec3 braking =
-      BrakingDistances(state->velocity, state->acceleration, max_jerk);
+  const Common::Vec3 braking = BrakingDistances(state->velocity, state->acceleration, max_jerk);
 
   const Common::Vec3 remaining = position_target - state->position;
   const Common::Vec3 jerk = MathUtil::Sign(remaining - braking) * max_jerk;
@@ -373,8 +368,8 @@ Common::Quaternion GetRotationFromAcceleration(const Common::Vec3& accel)
   const float angle = std::acos(down.Dot(UP));
 
   // Straight up or down has no cross product; any horizontal axis will do.
-  const Common::Vec3 safe_axis = axis.LengthSquared() != 0 ? axis.Normalized() :
-                                                             Common::Vec3{0, 1, 0};
+  const Common::Vec3 safe_axis =
+      axis.LengthSquared() != 0 ? axis.Normalized() : Common::Vec3{0, 1, 0};
   return Common::Quaternion::Rotate(angle, safe_axis);
 }
 

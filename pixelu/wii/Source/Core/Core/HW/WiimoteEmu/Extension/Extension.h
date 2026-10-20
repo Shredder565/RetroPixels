@@ -3,9 +3,11 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <optional>
 #include <string>
 
+#include "Common/Assert.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Core/HW/WiimoteEmu/Encryption.h"
@@ -15,6 +17,20 @@
 namespace WiimoteEmu
 {
 struct DesiredExtensionState;
+
+// For the GetGroup functions: `groups` lists a controller's groups in the order of its group
+// enum, and the one `group` names is returned (nullptr, after an assertion, if it names none).
+template <typename GroupEnum, typename... Groups>
+ControllerEmu::ControlGroup* GroupByEnum(GroupEnum group, Groups*... groups)
+{
+  const std::array<ControllerEmu::ControlGroup*, sizeof...(Groups)> in_order{groups...};
+  const auto index = static_cast<std::size_t>(group);
+  if (index < in_order.size())
+    return in_order[index];
+
+  ASSERT(false);
+  return nullptr;
+}
 
 // Something that can be plugged into an extension port: a set of input controls and an i2c
 // device.
@@ -96,8 +112,7 @@ public:
   static_assert(0x100 == sizeof(Register));
 
 protected:
-  EncryptedExtension(ExtensionKeyScheme scheme, const char* config_name,
-                     const char* display_name);
+  EncryptedExtension(ExtensionKeyScheme scheme, const char* config_name, const char* display_name);
 
   void Reset() override;
   void DoState(PointerWrap& p) override;

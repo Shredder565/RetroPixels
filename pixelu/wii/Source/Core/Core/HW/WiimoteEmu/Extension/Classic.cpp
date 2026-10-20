@@ -48,8 +48,8 @@ Classic::Classic() : Extension1stParty("Classic", _trans("Classic Controller"))
 
   m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP);
   groups.emplace_back(m_buttons);
-  for (const char* name : {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, ZL_BUTTON, ZR_BUTTON,
-                           MINUS_BUTTON, PLUS_BUTTON})
+  for (const char* name :
+       {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, ZL_BUTTON, ZR_BUTTON, MINUS_BUTTON, PLUS_BUTTON})
   {
     m_buttons->AddInput(Translatability::DoNotTranslate, name);
   }
@@ -115,28 +115,13 @@ void Classic::Reset()
   constexpr u8 HIGH = CAL_STICK_CENTER + STICK_GATE_RADIUS;
   constexpr u8 LOW = CAL_STICK_CENTER - STICK_GATE_RADIUS;
   constexpr u8 MID = CAL_STICK_CENTER;
-  m_reg.calibration = {HIGH, LOW, MID, HIGH, LOW, MID, HIGH, LOW,
-                       MID,  HIGH, LOW, MID, 0,   0,   0,   0};
+  m_reg.calibration = {HIGH, LOW, MID, HIGH, LOW, MID, HIGH, LOW, MID, HIGH, LOW, MID, 0, 0, 0, 0};
 
   UpdateCalibrationDataChecksum(m_reg.calibration, CALIBRATION_CHECKSUM_BYTES);
 }
 
 ControllerEmu::ControlGroup* Classic::GetGroup(ClassicGroup group)
 {
-  switch (group)
-  {
-  case ClassicGroup::Buttons:
-    return m_buttons;
-  case ClassicGroup::Triggers:
-    return m_triggers;
-  case ClassicGroup::DPad:
-    return m_dpad;
-  case ClassicGroup::LeftStick:
-    return m_left_stick;
-  case ClassicGroup::RightStick:
-    return m_right_stick;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_triggers, m_dpad, m_left_stick, m_right_stick);
 }
 }  // namespace WiimoteEmu

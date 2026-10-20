@@ -122,8 +122,8 @@ SerializedWiimoteState SerializeDesiredState(const DesiredWiimoteState& state)
   {
     // Y and Z lose their lowest bit.
     const auto& a = state.acceleration.value;
-    const u8 low_bits = static_cast<u8>((a.x & 0b11) | Bit(BitAt(u8(a.y), 1), 2) |
-                                        Bit(BitAt(u8(a.z), 1), 3));
+    const u8 low_bits =
+        static_cast<u8>((a.x & 0b11) | Bit(BitAt(u8(a.y), 1), 2) | Bit(BitAt(u8(a.z), 1), 3));
     const auto low_nibble = static_cast<u8>(low_bits << 4);
 
     // The d-pad byte has a free upper half.
@@ -244,10 +244,10 @@ bool DeserializeDesiredState(DesiredWiimoteState* state, const SerializedWiimote
     auto& a = state->acceleration.value;
     a.x = static_cast<u16>((d[high_pos] << 2) | (low_bits & 0b11));
     // Y and Z get their dropped bit back by repeating the bit above it.
-    a.y = Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 1] << 1) | BitAt(low_bits, 2)),
-                                   1);
-    a.z = Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 2] << 1) | BitAt(low_bits, 3)),
-                                   1);
+    a.y =
+        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 1] << 1) | BitAt(low_bits, 2)), 1);
+    a.z =
+        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 2] << 1) | BitAt(low_bits, 3)), 1);
     pos = high_pos + 3;
   }
 
@@ -269,10 +269,10 @@ bool DeserializeDesiredState(DesiredWiimoteState* state, const SerializedWiimote
     const auto axis_slow = [&d](std::size_t at) { return (d[at + 1] & 0x80) != 0; };
 
     using Format = MotionPlus::DataFormat;
-    state->motion_plus = Format::Data{
-        Format::GyroRawValue{
-            Format::GyroType(axis_value(pos), axis_value(pos + 2), axis_value(pos + 4))},
-        Format::SlowType(axis_slow(pos), axis_slow(pos + 2), axis_slow(pos + 4))};
+    state->motion_plus =
+        Format::Data{Format::GyroRawValue{Format::GyroType(axis_value(pos), axis_value(pos + 2),
+                                                           axis_value(pos + 4))},
+                     Format::SlowType(axis_slow(pos), axis_slow(pos + 2), axis_slow(pos + 4))};
     pos += MOTION_PLUS_BYTES;
   }
 

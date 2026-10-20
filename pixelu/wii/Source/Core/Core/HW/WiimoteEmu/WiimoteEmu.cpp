@@ -3,6 +3,8 @@
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -30,6 +32,7 @@
 #include "Core/HW/WiimoteEmu/Extension/DesiredExtensionState.h"
 #include "Core/HW/WiimoteEmu/Extension/DrawsomeTablet.h"
 #include "Core/HW/WiimoteEmu/Extension/Drums.h"
+#include "Core/HW/WiimoteEmu/Extension/Extension.h"
 #include "Core/HW/WiimoteEmu/Extension/Guitar.h"
 #include "Core/HW/WiimoteEmu/Extension/Nunchuk.h"
 #include "Core/HW/WiimoteEmu/Extension/Shinkansen.h"
@@ -55,11 +58,18 @@ using namespace WiimoteCommon;
 
 namespace
 {
+// Adds one default-constructed attachment per type, left to right; the index of each must
+// match its ExtensionNumber.
+template <typename... Attachment>
+void AddAttachmentsInOrder(ControllerEmu::Attachments& attachments)
+{
+  (attachments.AddAttachment(std::make_unique<Attachment>()), ...);
+}
+
 // Report bits of the Buttons group entries, in group order.
-constexpr u16 CORE_BUTTON_BITS[] = {Wiimote::BUTTON_A,     Wiimote::BUTTON_B,
-                                    Wiimote::BUTTON_ONE,   Wiimote::BUTTON_TWO,
-                                    Wiimote::BUTTON_MINUS, Wiimote::BUTTON_PLUS,
-                                    Wiimote::BUTTON_HOME};
+constexpr u16 CORE_BUTTON_BITS[] = {
+    Wiimote::BUTTON_A,     Wiimote::BUTTON_B,    Wiimote::BUTTON_ONE, Wiimote::BUTTON_TWO,
+    Wiimote::BUTTON_MINUS, Wiimote::BUTTON_PLUS, Wiimote::BUTTON_HOME};
 
 // D-pad bits for up, down, left and right; held sideways the pad is turned a quarter.
 constexpr u16 DPAD_BITS[] = {Wiimote::PAD_UP, Wiimote::PAD_DOWN, Wiimote::PAD_LEFT,
@@ -89,9 +99,8 @@ std::array<u8, 11> MakeIRCalibration()
     return static_cast<u8>((top(a.y) << 6) | (top(a.x) << 4) | (top(b.y) << 2) | top(b.x));
   };
 
-  std::array<u8, 11> block = {low(P1.x), low(P1.y), mix(P1, P2), low(P2.x),
-                              low(P2.y), low(P3.x), low(P3.y),   mix(P3, P4),
-                              low(P4.x), low(P4.y), 0};
+  std::array<u8, 11> block = {low(P1.x), low(P1.y),   mix(P1, P2), low(P2.x), low(P2.y), low(P3.x),
+                              low(P3.y), mix(P3, P4), low(P4.x),   low(P4.y), 0};
   UpdateCalibrationDataChecksum(block, 1);
   return block;
 }
@@ -306,16 +315,8 @@ Wiimote::Wiimote(const unsigned int index) : m_index(index), m_bt_device_index(i
   // The attachment list must follow ExtensionNumber.
   m_attachments = new ControllerEmu::Attachments(_trans("Extension"));
   groups.emplace_back(m_attachments);
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::None>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Nunchuk>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Classic>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Guitar>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Drums>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Turntable>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::UDrawTablet>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::DrawsomeTablet>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::TaTaCon>());
-  m_attachments->AddAttachment(std::make_unique<WiimoteEmu::Shinkansen>());
+  AddAttachmentsInOrder<None, Nunchuk, Classic, Guitar, Drums, Turntable, UDrawTablet,
+                        DrawsomeTablet, TaTaCon, Shinkansen>(*m_attachments);
   m_attachments->AddSetting(&m_motion_plus_setting, {_trans("Attach MotionPlus")}, true);
 
   m_rumble = new ControllerEmu::ControlGroup(_trans("Rumble"));
@@ -340,6 +341,7 @@ Wiimote::Wiimote(const unsigned int index) : m_index(index), m_bt_device_index(i
   m_options->AddSetting(&m_sideways_setting,
                         {SIDEWAYS_OPTION, nullptr, nullptr, _trans("Sideways Wii Remote")}, false);
 
+  // Power-on state, then the current settings (and again whenever they change).
   Reset();
 
   m_config_changed_callback_id = Config::AddConfigChangedCallback([this] { RefreshConfig(); });
@@ -353,9 +355,9 @@ Wiimote::~Wiimote()
 
 std::string Wiimote::GetName() const
 {
-  if (m_index == WIIMOTE_BALANCE_BOARD)
-    return "BalanceBoard";
-  return fmt::format("Wiimote{}", m_index + 1);
+  // Profile and config section names: "Wiimote1".."Wiimote4", "BalanceBoard".
+  return m_index == WIIMOTE_BALANCE_BOARD ? std::string("BalanceBoard") :
+                                            fmt::format("Wiimote{}", m_index + 1);
 }
 
 InputConfig* Wiimote::GetConfig() const
@@ -365,39 +367,9 @@ InputConfig* Wiimote::GetConfig() const
 
 ControllerEmu::ControlGroup* Wiimote::GetWiimoteGroup(WiimoteGroup group) const
 {
-  switch (group)
-  {
-  case WiimoteGroup::Buttons:
-    return m_buttons;
-  case WiimoteGroup::DPad:
-    return m_dpad;
-  case WiimoteGroup::Shake:
-    return m_shake;
-  case WiimoteGroup::Point:
-    return m_ir;
-  case WiimoteGroup::Tilt:
-    return m_tilt;
-  case WiimoteGroup::Swing:
-    return m_swing;
-  case WiimoteGroup::Rumble:
-    return m_rumble;
-  case WiimoteGroup::Attachments:
-    return m_attachments;
-  case WiimoteGroup::Options:
-    return m_options;
-  case WiimoteGroup::Hotkeys:
-    return m_hotkeys;
-  case WiimoteGroup::IMUAccelerometer:
-    return m_imu_accelerometer;
-  case WiimoteGroup::IMUGyroscope:
-    return m_imu_gyroscope;
-  case WiimoteGroup::IMUPoint:
-    return m_imu_ir;
-  case WiimoteGroup::IRPassthrough:
-    return m_ir_passthrough;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_dpad, m_shake, m_ir, m_tilt, m_swing, m_rumble,
+                     m_attachments, m_options, m_hotkeys, m_imu_accelerometer, m_imu_gyroscope,
+                     m_imu_ir, m_ir_passthrough);
 }
 
 namespace
@@ -607,8 +579,8 @@ void Wiimote::SendDataReport(const DesiredWiimoteState& target_state)
     const u8 ext_size = report.GetExtDataSize();
 
     // An unanswered read fills the field with 0xff, as on hardware.
-    if (m_i2c_bus.BusRead(ExtensionPort::REPORT_I2C_SLAVE, ExtensionPort::REPORT_I2C_ADDR,
-                          ext_size, ext_out) != ext_size)
+    if (m_i2c_bus.BusRead(ExtensionPort::REPORT_I2C_SLAVE, ExtensionPort::REPORT_I2C_ADDR, ext_size,
+                          ext_out) != ext_size)
     {
       std::fill_n(ext_out, ext_size, u8(0xff));
     }
@@ -648,18 +620,16 @@ void Wiimote::LoadDefaults(const ControllerInterface& ciface)
 #ifdef ANDROID
   m_rumble->SetControlExpression(0, "`Android/0/Device Sensors:Motor 0`");
 
-  set_all(m_imu_accelerometer, {"`Android/0/Device Sensors:Accel Up`",
-                                "`Android/0/Device Sensors:Accel Down`",
-                                "`Android/0/Device Sensors:Accel Left`",
-                                "`Android/0/Device Sensors:Accel Right`",
-                                "`Android/0/Device Sensors:Accel Forward`",
-                                "`Android/0/Device Sensors:Accel Backward`"});
-  set_all(m_imu_gyroscope, {"`Android/0/Device Sensors:Gyro Pitch Up`",
-                            "`Android/0/Device Sensors:Gyro Pitch Down`",
-                            "`Android/0/Device Sensors:Gyro Roll Left`",
-                            "`Android/0/Device Sensors:Gyro Roll Right`",
-                            "`Android/0/Device Sensors:Gyro Yaw Left`",
-                            "`Android/0/Device Sensors:Gyro Yaw Right`"});
+  set_all(m_imu_accelerometer,
+          {"`Android/0/Device Sensors:Accel Up`", "`Android/0/Device Sensors:Accel Down`",
+           "`Android/0/Device Sensors:Accel Left`", "`Android/0/Device Sensors:Accel Right`",
+           "`Android/0/Device Sensors:Accel Forward`",
+           "`Android/0/Device Sensors:Accel Backward`"});
+  set_all(m_imu_gyroscope,
+          {"`Android/0/Device Sensors:Gyro Pitch Up`", "`Android/0/Device Sensors:Gyro Pitch Down`",
+           "`Android/0/Device Sensors:Gyro Roll Left`",
+           "`Android/0/Device Sensors:Gyro Roll Right`", "`Android/0/Device Sensors:Gyro Yaw Left`",
+           "`Android/0/Device Sensors:Gyro Yaw Right`"});
 #else
   // A and B on mouse buttons, then 1, 2, -, + and Home on the keyboard.
 #if defined HAVE_X11 && HAVE_X11
@@ -707,8 +677,7 @@ void Wiimote::LoadDefaults(const ControllerInterface& ciface)
     const int first = (object - 1) * 3;
     m_ir_passthrough->SetControlExpression(first, fmt::format("`IR Object {} X`", object));
     m_ir_passthrough->SetControlExpression(first + 1, fmt::format("`IR Object {} Y`", object));
-    m_ir_passthrough->SetControlExpression(first + 2,
-                                           fmt::format("`IR Object {} Size`", object));
+    m_ir_passthrough->SetControlExpression(first + 2, fmt::format("`IR Object {} Size`", object));
   }
 #endif
 
@@ -858,8 +827,8 @@ Wiimote::OverrideVec3(const ControllerEmu::ControlGroup* control_group, Common::
 Common::Vec3 Wiimote::GetTotalAcceleration() const
 {
   // Without a motion source, gravity alone.
-  const Common::Vec3 measured = m_imu_accelerometer->GetState().value_or(
-      Common::Vec3(0, 0, float(GRAVITY_ACCELERATION)));
+  const Common::Vec3 measured =
+      m_imu_accelerometer->GetState().value_or(Common::Vec3(0, 0, float(GRAVITY_ACCELERATION)));
   return OverrideVec3(m_imu_accelerometer, GetAcceleration(measured));
 }
 

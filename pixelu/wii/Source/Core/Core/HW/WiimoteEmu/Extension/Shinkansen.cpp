@@ -29,19 +29,10 @@ constexpr std::array<u8, 9> BRAKE_NOTCHES = {0, 53, 79, 105, 132, 159, 187, 217,
 constexpr std::array<u8, 14> POWER_NOTCHES = {255, 229, 208, 189, 170, 153, 135,
                                               118, 101, 85,  68,  51,  35,  17};
 
-// Report bits of the Buttons group entries (as a little endian u16), in group order.
-constexpr std::array<u16, 10> BUTTON_BITS = {
-    0x0100,  // Up
-    0x0040,  // Down
-    0x0200,  // Left
-    0x0080,  // Right
-    0x2000,  // A
-    0x4000,  // B
-    0x1000,  // C
-    0x0800,  // D
-    0x0010,  // Select
-    0x0004,  // Start
-};
+// Report bits of the Buttons group entries (as a little endian u16), in group order:
+// Up, Down, Left, Right, A, B, C, D, Select, Start.
+constexpr std::array<u16, 10> BUTTON_BITS = {0x0100, 0x0040, 0x0200, 0x0080, 0x2000,
+                                             0x4000, 0x1000, 0x0800, 0x0010, 0x0004};
 
 // Picks one of `notches` for a 0..1 lever position.
 template <std::size_t N>
@@ -123,16 +114,6 @@ void Shinkansen::Reset()
 
 ControllerEmu::ControlGroup* Shinkansen::GetGroup(ShinkansenGroup group)
 {
-  switch (group)
-  {
-  case ShinkansenGroup::Levers:
-    return m_levers;
-  case ShinkansenGroup::Buttons:
-    return m_buttons;
-  case ShinkansenGroup::Light:
-    return m_led;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_levers, m_led);
 }
 }  // namespace WiimoteEmu

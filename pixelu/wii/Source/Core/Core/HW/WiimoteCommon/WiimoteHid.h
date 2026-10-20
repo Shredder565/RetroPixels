@@ -73,7 +73,10 @@ protected:
     InterruptCallback(data_input_header, data, size);
   }
 
-  void InterruptCallback(u8 hid_type, const u8* data, u32 size) { m_callback(hid_type, data, size); }
+  void InterruptCallback(u8 hid_type, const u8* data, u32 size)
+  {
+    m_callback(hid_type, data, size);
+  }
 
 private:
   InterruptCallbackType m_callback;

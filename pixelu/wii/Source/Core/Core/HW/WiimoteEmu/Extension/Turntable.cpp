@@ -69,8 +69,8 @@ Turntable::Turntable() : Extension1stParty("Turntable", _trans("DJ Turntable"))
   m_right_table = new ControllerEmu::Slider("Table Right", _trans("Right Table"));
   groups.emplace_back(m_right_table);
 
-  m_stick = new ControllerEmu::OctagonAnalogStick(
-      _trans("Stick"), ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
+  m_stick = new ControllerEmu::OctagonAnalogStick(_trans("Stick"),
+                                                  ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
   groups.emplace_back(m_stick);
 
   m_effect_dial = new ControllerEmu::Slider(_trans("Effect"));
@@ -138,22 +138,7 @@ void Turntable::Reset()
 
 ControllerEmu::ControlGroup* Turntable::GetGroup(TurntableGroup group)
 {
-  switch (group)
-  {
-  case TurntableGroup::Buttons:
-    return m_buttons;
-  case TurntableGroup::Stick:
-    return m_stick;
-  case TurntableGroup::EffectDial:
-    return m_effect_dial;
-  case TurntableGroup::LeftTable:
-    return m_left_table;
-  case TurntableGroup::RightTable:
-    return m_right_table;
-  case TurntableGroup::Crossfade:
-    return m_crossfade;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_buttons, m_stick, m_effect_dial, m_left_table, m_right_table,
+                     m_crossfade);
 }
 }  // namespace WiimoteEmu

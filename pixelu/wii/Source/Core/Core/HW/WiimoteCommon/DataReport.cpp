@@ -278,6 +278,7 @@ bool DataReportBuilder::HasAccel() const
   return m_manip->HasAccel();
 }
 
+// IR and extension bytes are optional too.
 bool DataReportBuilder::HasIR() const
 {
   return m_manip->HasIR();
@@ -288,6 +289,7 @@ bool DataReportBuilder::HasExt() const
   return m_manip->HasExt();
 }
 
+// Core buttons, through the mode's manipulator.
 void DataReportBuilder::GetCoreData(CoreData* core) const
 {
   m_manip->GetCoreData(core);
@@ -298,6 +300,7 @@ void DataReportBuilder::SetCoreData(const CoreData& core)
   m_manip->SetCoreData(core);
 }
 
+// Accelerometer, through the mode's manipulator.
 void DataReportBuilder::GetAccelData(AccelData* accel) const
 {
   m_manip->GetAccelData(accel);

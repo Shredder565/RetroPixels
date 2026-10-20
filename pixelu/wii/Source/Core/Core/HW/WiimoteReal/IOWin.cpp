@@ -202,19 +202,19 @@ template <typename Predicate>
 u32 RemoveWiimotes(Predicate&& should_remove)
 {
   u32 removed = 0;
-  ForEachBluetoothWiimote(0, [&](HANDLE, const BLUETOOTH_RADIO_INFO&,
-                                 BLUETOOTH_DEVICE_INFO& device) {
-    if (!should_remove(std::as_const(device)))
-      return Walk::Continue;
+  ForEachBluetoothWiimote(
+      0, [&](HANDLE, const BLUETOOTH_RADIO_INFO&, BLUETOOTH_DEVICE_INFO& device) {
+        if (!should_remove(std::as_const(device)))
+          return Walk::Continue;
 
-    NOTICE_LOG_FMT(WIIMOTE, "Removing a paired Wii Remote");
-    const DWORD result = BluetoothRemoveDevice(&device.Address);
-    if (result != ERROR_SUCCESS)
-      ERROR_LOG_FMT(WIIMOTE, "Removing the Bluetooth device failed: {}", result);
-    else
-      ++removed;
-    return Walk::Continue;
-  });
+        NOTICE_LOG_FMT(WIIMOTE, "Removing a paired Wii Remote");
+        const DWORD result = BluetoothRemoveDevice(&device.Address);
+        if (result != ERROR_SUCCESS)
+          ERROR_LOG_FMT(WIIMOTE, "Removing the Bluetooth device failed: {}", result);
+        else
+          ++removed;
+        return Walk::Continue;
+      });
   return removed;
 }
 
@@ -551,23 +551,19 @@ bool WiimoteWindows::ConnectInternal()
   // always opens (writes fail with ERROR_GEN_FAILURE). So try a status request; its answer is
   // not needed.
   const u8 probe[] = {u8(OutputReportID::RequestStatus), 0};
-  if (OverlappedWrite(probe, sizeof(probe)) <= 0)
-  {
+  const bool answered = OverlappedWrite(probe, sizeof(probe)) > 0;
+  if (answered)
+    m_is_connected.store(true, std::memory_order_relaxed);
+  else
     CloseHandle(std::exchange(m_dev_handle, nullptr));
-    return false;
-  }
-
-  m_is_connected.store(true, std::memory_order_relaxed);
-  return true;
+  return answered;
 }
 
 void WiimoteWindows::DisconnectInternal()
 {
-  if (!IsConnected())
-    return;
-
-  m_is_connected.store(false, std::memory_order_relaxed);
-  CloseHandle(std::exchange(m_dev_handle, nullptr));
+  // Only the call that sees the connected state closes the handle.
+  if (m_is_connected.exchange(false, std::memory_order_relaxed))
+    CloseHandle(std::exchange(m_dev_handle, nullptr));
 }
 
 std::string WiimoteWindows::GetId() const
@@ -596,8 +592,8 @@ int WiimoteWindows::OverlappedRead(u8* data, DWORD size)
 
   // Wait for the read, a wakeup or the timeout; anything but a finished read cancels it.
   const std::array<HANDLE, 2> events{m_wakeup_event, m_hid_overlap_read.hEvent};
-  const DWORD signalled = WaitForMultipleObjects(DWORD(events.size()), events.data(), FALSE,
-                                                 WIIMOTE_DEFAULT_TIMEOUT);
+  const DWORD signalled =
+      WaitForMultipleObjects(DWORD(events.size()), events.data(), FALSE, WIIMOTE_DEFAULT_TIMEOUT);
   const bool finished = signalled == WAIT_OBJECT_0 + 1;
   if (signalled == WAIT_OBJECT_0)
   {

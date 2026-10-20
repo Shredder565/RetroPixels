@@ -77,14 +77,6 @@ void TaTaCon::Reset()
 
 ControllerEmu::ControlGroup* TaTaCon::GetGroup(TaTaConGroup group)
 {
-  switch (group)
-  {
-  case TaTaConGroup::Center:
-    return m_center;
-  case TaTaConGroup::Rim:
-    return m_rim;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_center, m_rim);
 }
 }  // namespace WiimoteEmu

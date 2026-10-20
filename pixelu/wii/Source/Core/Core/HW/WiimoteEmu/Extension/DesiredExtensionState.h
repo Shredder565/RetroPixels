@@ -28,8 +28,8 @@ struct DesiredExtensionState
   using ExtensionData =
       std::variant<std::monostate, Nunchuk::DesiredState, Classic::DesiredState,
                    Guitar::DesiredState, Drums::DesiredState, Turntable::DesiredState,
-                   UDrawTablet::DesiredState, DrawsomeTablet::DesiredState,
-                   TaTaCon::DesiredState, Shinkansen::DesiredState>;
+                   UDrawTablet::DesiredState, DrawsomeTablet::DesiredState, TaTaCon::DesiredState,
+                   Shinkansen::DesiredState>;
 
   ExtensionData data = std::monostate{};
 

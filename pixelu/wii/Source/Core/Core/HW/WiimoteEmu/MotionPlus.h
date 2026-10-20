@@ -96,9 +96,9 @@ public:
     auto GetData() const
     {
       const auto join = [](u8 low, u8 high) { return static_cast<u16>(low | (high << 8)); };
-      return Data{GyroRawValue{GyroType(join(pitch1, pitch2), join(roll1, roll2),
-                                        join(yaw1, yaw2))},
-                  SlowType(pitch_slow, roll_slow, yaw_slow)};
+      return Data{
+          GyroRawValue{GyroType(join(pitch1, pitch2), join(roll1, roll2), join(yaw1, yaw2))},
+          SlowType(pitch_slow, roll_slow, yaw_slow)};
     }
 
     // Each rate is 14 bits: the low 8 in *1, the high 6 in *2.

@@ -96,14 +96,6 @@ void DrawsomeTablet::Reset()
 
 ControllerEmu::ControlGroup* DrawsomeTablet::GetGroup(DrawsomeTabletGroup group)
 {
-  switch (group)
-  {
-  case DrawsomeTabletGroup::Stylus:
-    return m_stylus;
-  case DrawsomeTabletGroup::Touch:
-    return m_touch;
-  }
-  ASSERT(false);
-  return nullptr;
+  return GroupByEnum(group, m_stylus, m_touch);
 }
 }  // namespace WiimoteEmu
