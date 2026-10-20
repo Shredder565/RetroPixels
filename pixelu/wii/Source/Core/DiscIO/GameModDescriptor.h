@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,12 @@
 
 namespace DiscIO
 {
+// A game mod descriptor is a small JSON file ("type": "dolphin-game-mod-descriptor",
+// "version": 1) that makes a modded game show up in the game list: it names the base image and
+// the Riivolution patches to apply, plus an optional title, maker and banner. Relative paths in
+// the file are relative to the file's own folder.
+
+// A preselected choice for one Riivolution option, matched by section name and option ID or name.
 struct GameModDescriptorRiivolutionPatchOption
 {
   std::string section_name;

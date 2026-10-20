@@ -1,11 +1,11 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/GameModDescriptor.h"
 
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <picojson.h>
@@ -16,209 +16,212 @@
 
 namespace DiscIO
 {
-static std::string MakeAbsolute(const std::string& directory, const std::string& path)
+namespace
 {
-  return PathToString(StringToPath(directory) / StringToPath(path));
+constexpr std::string_view DESCRIPTOR_TYPE = "dolphin-game-mod-descriptor";
+constexpr double DESCRIPTOR_VERSION = 1.0;
+
+// Paths in a descriptor are relative to the descriptor's folder (absolute ones stay as they are).
+std::string ResolvePath(const std::string& base_directory, const std::string& path)
+{
+  return PathToString(StringToPath(base_directory) / StringToPath(path));
 }
 
-std::optional<GameModDescriptor> ParseGameModDescriptorFile(const std::string& filename)
+// Returns the string value, or nullptr if the value is not a string.
+const std::string* AsString(const picojson::value& value)
 {
-  File::IOFile f(filename, "rb");
-  if (!f)
-    return std::nullopt;
-
-  std::vector<char> data;
-  data.resize(f.GetSize());
-  if (!f.ReadBytes(data.data(), data.size()))
-    return std::nullopt;
-
-#ifdef _WIN32
-  std::string path = ReplaceAll(filename, "\\", "/");
-#else
-  const std::string& path = filename;
-#endif
-  return ParseGameModDescriptorString(std::string_view(data.data(), data.size()), path);
+  return value.is<std::string>() ? &value.get<std::string>() : nullptr;
 }
 
-static std::vector<GameModDescriptorRiivolutionPatchOption>
-ParseRiivolutionOptions(const picojson::array& array)
+std::vector<GameModDescriptorRiivolutionPatchOption> ReadOptions(const picojson::array& json)
 {
   std::vector<GameModDescriptorRiivolutionPatchOption> options;
-  for (const auto& option_object : array)
+  for (const picojson::value& item : json)
   {
-    if (!option_object.is<picojson::object>())
+    if (!item.is<picojson::object>())
       continue;
 
-    auto& option = options.emplace_back();
-    for (const auto& [key, value] : option_object.get<picojson::object>())
+    GameModDescriptorRiivolutionPatchOption& option = options.emplace_back();
+    for (const auto& [key, value] : item.get<picojson::object>())
     {
-      if (key == "section-name" && value.is<std::string>())
-        option.section_name = value.get<std::string>();
-      else if (key == "option-id" && value.is<std::string>())
-        option.option_id = value.get<std::string>();
-      else if (key == "option-name" && value.is<std::string>())
-        option.option_name = value.get<std::string>();
+      if (const std::string* text = AsString(value))
+      {
+        if (key == "section-name")
+          option.section_name = *text;
+        else if (key == "option-id")
+          option.option_id = *text;
+        else if (key == "option-name")
+          option.option_name = *text;
+      }
       else if (key == "choice" && value.is<double>())
+      {
         option.choice = MathUtil::SaturatingCast<u32>(value.get<double>());
+      }
     }
   }
   return options;
 }
 
-static GameModDescriptorRiivolution ParseRiivolutionObject(const std::string& json_directory,
-                                                           const picojson::object& object)
+GameModDescriptorRiivolution ReadRiivolution(const std::string& base_directory,
+                                             const picojson::object& json)
 {
-  GameModDescriptorRiivolution r;
-  for (const auto& [element_key, element_value] : object)
-  {
-    if (element_key == "patches" && element_value.is<picojson::array>())
-    {
-      for (const auto& patch_object : element_value.get<picojson::array>())
-      {
-        if (!patch_object.is<picojson::object>())
-          continue;
+  GameModDescriptorRiivolution riivolution;
+  const auto patches = json.find("patches");
+  if (patches == json.end() || !patches->second.is<picojson::array>())
+    return riivolution;
 
-        auto& patch = r.patches.emplace_back();
-        for (const auto& [key, value] : patch_object.get<picojson::object>())
-        {
-          if (key == "xml" && value.is<std::string>())
-            patch.xml = MakeAbsolute(json_directory, value.get<std::string>());
-          else if (key == "root" && value.is<std::string>())
-            patch.root = MakeAbsolute(json_directory, value.get<std::string>());
-          else if (key == "options" && value.is<picojson::array>())
-            patch.options = ParseRiivolutionOptions(value.get<picojson::array>());
-        }
+  for (const picojson::value& item : patches->second.get<picojson::array>())
+  {
+    if (!item.is<picojson::object>())
+      continue;
+
+    GameModDescriptorRiivolutionPatch& patch = riivolution.patches.emplace_back();
+    for (const auto& [key, value] : item.get<picojson::object>())
+    {
+      if (const std::string* text = AsString(value))
+      {
+        if (key == "xml")
+          patch.xml = ResolvePath(base_directory, *text);
+        else if (key == "root")
+          patch.root = ResolvePath(base_directory, *text);
+      }
+      else if (key == "options" && value.is<picojson::array>())
+      {
+        patch.options = ReadOptions(value.get<picojson::array>());
       }
     }
   }
-  return r;
+  return riivolution;
+}
+
+picojson::object WriteRiivolution(const GameModDescriptorRiivolution& riivolution)
+{
+  picojson::array patches;
+  for (const GameModDescriptorRiivolutionPatch& patch : riivolution.patches)
+  {
+    picojson::object json_patch;
+    if (!patch.xml.empty())
+      json_patch.emplace("xml", picojson::value(patch.xml));
+    if (!patch.root.empty())
+      json_patch.emplace("root", picojson::value(patch.root));
+    if (!patch.options.empty())
+    {
+      picojson::array options;
+      for (const GameModDescriptorRiivolutionPatchOption& option : patch.options)
+      {
+        picojson::object json_option;
+        if (!option.section_name.empty())
+          json_option.emplace("section-name", picojson::value(option.section_name));
+        if (!option.option_id.empty())
+          json_option.emplace("option-id", picojson::value(option.option_id));
+        if (!option.option_name.empty())
+          json_option.emplace("option-name", picojson::value(option.option_name));
+        json_option.emplace("choice", picojson::value(static_cast<double>(option.choice)));
+        options.emplace_back(std::move(json_option));
+      }
+      json_patch.emplace("options", picojson::value(std::move(options)));
+    }
+    patches.emplace_back(std::move(json_patch));
+  }
+
+  picojson::object json;
+  json.emplace("patches", picojson::value(std::move(patches)));
+  return json;
+}
+}  // namespace
+
+std::optional<GameModDescriptor> ParseGameModDescriptorFile(const std::string& filename)
+{
+  File::IOFile file(filename, "rb");
+  if (!file)
+    return std::nullopt;
+
+  std::string contents(file.GetSize(), '\0');
+  if (!file.ReadBytes(contents.data(), contents.size()))
+    return std::nullopt;
+
+#ifdef _WIN32
+  // The folder of the file is taken with forward slashes only.
+  const std::string path = ReplaceAll(filename, "\\", "/");
+#else
+  const std::string& path = filename;
+#endif
+  return ParseGameModDescriptorString(contents, path);
 }
 
 std::optional<GameModDescriptor> ParseGameModDescriptorString(std::string_view json,
                                                               std::string_view json_path)
 {
-  std::string json_directory;
-  SplitPath(json_path, &json_directory, nullptr, nullptr);
+  std::string base_directory;
+  SplitPath(json_path, &base_directory, nullptr, nullptr);
 
-  picojson::value json_root;
-  std::string err;
-  picojson::parse(json_root, json.begin(), json.end(), &err);
-  if (!err.empty())
-    return std::nullopt;
-  if (!json_root.is<picojson::object>())
+  picojson::value root;
+  std::string error;
+  picojson::parse(root, json.begin(), json.end(), &error);
+  if (!error.empty() || !root.is<picojson::object>())
     return std::nullopt;
 
   GameModDescriptor descriptor;
-  bool is_game_mod_descriptor = false;
-  bool is_valid_version = false;
-  for (const auto& [key, value] : json_root.get<picojson::object>())
+  bool right_type = false;
+  bool right_version = false;
+  for (const auto& [key, value] : root.get<picojson::object>())
   {
-    if (key == "type" && value.is<std::string>())
+    if (key == "version")
     {
-      is_game_mod_descriptor = value.get<std::string>() == "dolphin-game-mod-descriptor";
+      if (value.is<double>())
+        right_version = value.get<double>() == DESCRIPTOR_VERSION;
     }
-    else if (key == "version" && value.is<double>())
+    else if (key == "riivolution")
     {
-      is_valid_version = value.get<double>() == 1.0;
+      if (value.is<picojson::object>())
+        descriptor.riivolution = ReadRiivolution(base_directory, value.get<picojson::object>());
     }
-    else if (key == "base-file" && value.is<std::string>())
+    else if (const std::string* text = AsString(value))
     {
-      descriptor.base_file = MakeAbsolute(json_directory, value.get<std::string>());
-    }
-    else if (key == "display-name" && value.is<std::string>())
-    {
-      descriptor.display_name = value.get<std::string>();
-    }
-    else if (key == "maker" && value.is<std::string>())
-    {
-      descriptor.maker = value.get<std::string>();
-    }
-    else if (key == "banner" && value.is<std::string>())
-    {
-      descriptor.banner = MakeAbsolute(json_directory, value.get<std::string>());
-    }
-    else if (key == "riivolution" && value.is<picojson::object>())
-    {
-      descriptor.riivolution =
-          ParseRiivolutionObject(json_directory, value.get<picojson::object>());
+      if (key == "type")
+        right_type = *text == DESCRIPTOR_TYPE;
+      else if (key == "base-file")
+        descriptor.base_file = ResolvePath(base_directory, *text);
+      else if (key == "display-name")
+        descriptor.display_name = *text;
+      else if (key == "maker")
+        descriptor.maker = *text;
+      else if (key == "banner")
+        descriptor.banner = ResolvePath(base_directory, *text);
     }
   }
-  if (!is_game_mod_descriptor || !is_valid_version)
+
+  if (!right_type || !right_version)
     return std::nullopt;
   return descriptor;
 }
 
-static picojson::object
-WriteGameModDescriptorRiivolution(const GameModDescriptorRiivolution& riivolution)
-{
-  picojson::array json_patches;
-  for (const auto& patch : riivolution.patches)
-  {
-    picojson::object json_patch;
-    if (!patch.xml.empty())
-      json_patch["xml"] = picojson::value(patch.xml);
-    if (!patch.root.empty())
-      json_patch["root"] = picojson::value(patch.root);
-    if (!patch.options.empty())
-    {
-      picojson::array json_options;
-      for (const auto& option : patch.options)
-      {
-        picojson::object json_option;
-        if (!option.section_name.empty())
-          json_option["section-name"] = picojson::value(option.section_name);
-        if (!option.option_id.empty())
-          json_option["option-id"] = picojson::value(option.option_id);
-        if (!option.option_name.empty())
-          json_option["option-name"] = picojson::value(option.option_name);
-        json_option["choice"] = picojson::value(static_cast<double>(option.choice));
-        json_options.emplace_back(std::move(json_option));
-      }
-      json_patch["options"] = picojson::value(std::move(json_options));
-    }
-    json_patches.emplace_back(std::move(json_patch));
-  }
-
-  picojson::object json_riivolution;
-  json_riivolution["patches"] = picojson::value(std::move(json_patches));
-  return json_riivolution;
-}
-
 std::string WriteGameModDescriptorString(const GameModDescriptor& descriptor, bool pretty)
 {
-  picojson::object json_root;
-  json_root["type"] = picojson::value("dolphin-game-mod-descriptor");
-  json_root["version"] = picojson::value(1.0);
+  picojson::object json;
+  json.emplace("type", picojson::value(std::string(DESCRIPTOR_TYPE)));
+  json.emplace("version", picojson::value(DESCRIPTOR_VERSION));
   if (!descriptor.base_file.empty())
-    json_root["base-file"] = picojson::value(descriptor.base_file);
+    json.emplace("base-file", picojson::value(descriptor.base_file));
   if (!descriptor.display_name.empty())
-    json_root["display-name"] = picojson::value(descriptor.display_name);
+    json.emplace("display-name", picojson::value(descriptor.display_name));
   if (!descriptor.maker.empty())
-    json_root["maker"] = picojson::value(descriptor.maker);
+    json.emplace("maker", picojson::value(descriptor.maker));
   if (!descriptor.banner.empty())
-    json_root["banner"] = picojson::value(descriptor.banner);
+    json.emplace("banner", picojson::value(descriptor.banner));
   if (descriptor.riivolution)
-  {
-    json_root["riivolution"] =
-        picojson::value(WriteGameModDescriptorRiivolution(*descriptor.riivolution));
-  }
-  return picojson::value(json_root).serialize(pretty);
+    json.emplace("riivolution", picojson::value(WriteRiivolution(*descriptor.riivolution)));
+  return picojson::value(json).serialize(pretty);
 }
 
 bool WriteGameModDescriptorFile(const std::string& filename, const GameModDescriptor& descriptor,
                                 bool pretty)
 {
-  auto json = WriteGameModDescriptorString(descriptor, pretty);
+  const std::string json = WriteGameModDescriptorString(descriptor, pretty);
   if (json.empty())
     return false;
 
-  File::IOFile f(filename, "wb");
-  if (!f)
-    return false;
-
-  if (!f.WriteString(json))
-    return false;
-
-  return true;
+  File::IOFile file(filename, "wb");
+  return file && file.WriteString(json);
 }
 }  // namespace DiscIO
