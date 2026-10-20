@@ -1,9 +1,7 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// ------------------------------------------
-// Video backend must define these functions
-// ------------------------------------------
+// Translation of BP (pixel pipeline) register state into renderer calls, and the scissor maths
+// shared with the statistics overlay.
 
 #pragma once
 
@@ -18,6 +16,8 @@ struct Viewport;
 
 namespace BPFunctions
 {
+// One axis of a scissor rectangle after applying a scissor offset: EFB coordinates
+// [start, end) reached with the given total offset.
 struct ScissorRange
 {
   constexpr ScissorRange() = default;
@@ -30,11 +30,12 @@ struct ScissorRange
   int end = 0;
 };
 
+// A rectangle of the EFB the scissor lets through, plus the offset that maps it back to
+// scissor coordinates.
 struct ScissorRect
 {
   constexpr ScissorRect(ScissorRange x_range, ScissorRange y_range)
-      :  // Rectangle ctor takes x0, y0, x1, y1.
-        rect(x_range.start, y_range.start, x_range.end, y_range.end), x_off(x_range.offset),
+      : rect(x_range.start, y_range.start, x_range.end, y_range.end), x_off(x_range.offset),
         y_off(y_range.offset)
   {
   }
@@ -46,76 +47,47 @@ struct ScissorRect
   int GetArea() const;
 };
 
-// Although the GameCube/Wii have only one scissor configuration and only one viewport
-// configuration, some values can result in multiple parts of the screen being updated.
-// This can happen if the scissor offset combined with the bottom or right coordinate ends up
-// exceeding 1024; then, both sides of the screen will be drawn to, while the middle is not.
-// Major Minor's Majestic March causes this to happen during loading screens and other scrolling
-// effects, though it draws on top of one of them.
-// This can also happen if the scissor rectangle is particularly large, but this will usually
-// involve drawing content outside of the viewport, which Dolphin does not currently handle.
+// The hardware has a single scissor rectangle, but its coordinates wrap: with a large enough
+// offset (or a large enough rectangle) several separate parts of the EFB are drawn to. At least
+// one commercial game relies on this during scrolling effects.
 //
-// The hardware backends can currently only use one viewport and scissor rectangle, so we need to
-// pick the "best" rectangle based on how much of the viewport would be rendered to the screen.
-// If we choose the wrong one, then content might not actually show up when the game is expecting it
-// to.  This does happen on Major Minor's Majestic March for the final few frames of the horizontal
-// scrolling animation, but it isn't that important.  Note that the assumption that a "best"
-// rectangle exists is based on games only wanting to draw one rectangle, and accidentally
-// configuring the scissor offset and size of the scissor rectangle such that multiple show up;
-// there are no known games where this is not the case.
+// Hardware backends can only take one rectangle, so all candidates are computed and sorted so
+// that the best (the one covering most of the viewport) comes last; games are only known to
+// intend a single visible rectangle.
 //
-// An ImGui overlay that displays the scissor rectangle configuration as well as the generated
-// rectangles is available by setting OverlayScissorStats (GFX_OVERLAY_SCISSOR_STATS)
-// under [Settings] to True in GFX.ini.
+// The scissor statistics overlay (OverlayScissorStats in GFX.ini) shows the inputs and the
+// candidates.
 struct ScissorResult
 {
   ScissorResult(ScissorPos scissor_top_left, ScissorPos scissor_bottom_right,
                 ScissorOffset scissor_offset, const Viewport& viewport);
   ~ScissorResult() = default;
-  ScissorResult(const ScissorResult& other)
-      : scissor_tl{.hex = other.scissor_tl.hex}, scissor_br{.hex = other.scissor_br.hex},
-        scissor_off{.hex = other.scissor_off.hex}, viewport_left{other.viewport_left},
-        viewport_right{other.viewport_right}, viewport_top{other.viewport_top},
-        viewport_bottom{other.viewport_bottom}, rectangles{other.rectangles}
+  // The register unions cannot be assigned directly, hence the hand-written copies.
+  ScissorResult(const ScissorResult& other) : rectangles{other.rectangles} { CopyInputs(other); }
+  ScissorResult(ScissorResult&& other) : rectangles{std::move(other.rectangles)}
   {
+    CopyInputs(other);
   }
   ScissorResult& operator=(const ScissorResult& other)
   {
-    if (this == &other)
-      return *this;
-    scissor_tl.hex = other.scissor_tl.hex;
-    scissor_br.hex = other.scissor_br.hex;
-    scissor_off.hex = other.scissor_off.hex;
-    viewport_left = other.viewport_left;
-    viewport_right = other.viewport_right;
-    viewport_top = other.viewport_top;
-    viewport_bottom = other.viewport_bottom;
-    rectangles = other.rectangles;
+    if (this != &other)
+    {
+      CopyInputs(other);
+      rectangles = other.rectangles;
+    }
     return *this;
-  }
-  ScissorResult(ScissorResult&& other)
-      : scissor_tl{.hex = other.scissor_tl.hex}, scissor_br{.hex = other.scissor_br.hex},
-        scissor_off{.hex = other.scissor_off.hex}, viewport_left{other.viewport_left},
-        viewport_right{other.viewport_right}, viewport_top{other.viewport_top},
-        viewport_bottom{other.viewport_bottom}, rectangles{std::move(other.rectangles)}
-  {
   }
   ScissorResult& operator=(ScissorResult&& other)
   {
-    if (this == &other)
-      return *this;
-    scissor_tl.hex = other.scissor_tl.hex;
-    scissor_br.hex = other.scissor_br.hex;
-    scissor_off.hex = other.scissor_off.hex;
-    viewport_left = other.viewport_left;
-    viewport_right = other.viewport_right;
-    viewport_top = other.viewport_top;
-    viewport_bottom = other.viewport_bottom;
-    rectangles = std::move(other.rectangles);
+    if (this != &other)
+    {
+      CopyInputs(other);
+      rectangles = std::move(other.rectangles);
+    }
     return *this;
   }
 
-  // Input values, for use in statistics
+  // The inputs, kept for the statistics overlay.
   ScissorPos scissor_tl;
   ScissorPos scissor_br;
   ScissorOffset scissor_off;
@@ -124,6 +96,7 @@ struct ScissorResult
   float viewport_top;
   float viewport_bottom;
 
+  // Candidates, best last.
   std::vector<ScissorRect> rectangles;
 
   ScissorRect Best() const;
@@ -140,17 +113,25 @@ struct ScissorResult
   }
   bool Matches(const ScissorResult& other, bool compare_scissor, bool compare_viewport) const
   {
-    if (compare_scissor && !ScissorMatches(other))
-      return false;
-    if (compare_viewport && !ViewportMatches(other))
-      return false;
-    return true;
+    return (!compare_scissor || ScissorMatches(other)) &&
+           (!compare_viewport || ViewportMatches(other));
   }
 
 private:
   ScissorResult(ScissorPos scissor_top_left, ScissorPos scissor_bottom_right,
                 ScissorOffset scissor_offset, std::pair<float, float> viewport_x,
                 std::pair<float, float> viewport_y);
+
+  void CopyInputs(const ScissorResult& other)
+  {
+    scissor_tl.hex = other.scissor_tl.hex;
+    scissor_br.hex = other.scissor_br.hex;
+    scissor_off.hex = other.scissor_off.hex;
+    viewport_left = other.viewport_left;
+    viewport_right = other.viewport_right;
+    viewport_top = other.viewport_top;
+    viewport_bottom = other.viewport_bottom;
+  }
 
   int GetViewportArea(const ScissorRect& rect) const;
   bool IsWorse(const ScissorRect& lhs, const ScissorRect& rhs) const;
@@ -167,7 +148,7 @@ void SetScissorAndViewport(FramebufferManager* frame_buffer_manager, ScissorPos 
 void SetDepthMode();
 void SetBlendMode();
 
-// Returns true if the EFB was triggered to clear
+// Clears the EFB if any channel is enabled; returns whether it did.
 bool ClearScreen(FramebufferManager* frame_buffer_manager, const MathUtil::Rectangle<int>& rc,
                  bool color_enable, bool alpha_enable, bool z_enable, PixelFormat pixel_format,
                  u32 clear_color_ar, u32 clear_color_gb, u32 clear_z_value);
