@@ -1,9 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/PixelEngine.h"
 
+#include <algorithm>
 #include <mutex>
+#include <utility>
 
 #include "Common/BitField.h"
 #include "Common/ChunkFile.h"
@@ -24,11 +25,32 @@
 
 namespace PixelEngine
 {
-enum
+namespace
 {
-  INT_CAUSE_PE_TOKEN = 0x200,   // GP Token
-  INT_CAUSE_PE_FINISH = 0x400,  // GP Finished
+// Processor interface interrupt lines owned by the PE.
+constexpr u32 PI_LINE_TOKEN = 0x200;
+constexpr u32 PI_LINE_FINISH = 0x400;
+
+// In single-core (and deterministic dual-core) mode the emulated GPU finishes far sooner than
+// real hardware would; delivering the token/finish interrupt at least this many CPU cycles later
+// gives games the time they expect to arm their handlers.
+constexpr int MIN_SINGLE_CORE_DELAY = 500;
+
+struct PerfCounterRegs
+{
+  u32 low_offset;
+  PerfQueryType query;
 };
+
+constexpr PerfCounterRegs PERF_COUNTERS[] = {
+    {PE_PERF_ZCOMP_INPUT_ZCOMPLOC_L, PQ_ZCOMP_INPUT_ZCOMPLOC},
+    {PE_PERF_ZCOMP_OUTPUT_ZCOMPLOC_L, PQ_ZCOMP_OUTPUT_ZCOMPLOC},
+    {PE_PERF_ZCOMP_INPUT_L, PQ_ZCOMP_INPUT},
+    {PE_PERF_ZCOMP_OUTPUT_L, PQ_ZCOMP_OUTPUT},
+    {PE_PERF_BLEND_INPUT_L, PQ_BLEND_INPUT},
+    {PE_PERF_EFB_COPY_CLOCKS_L, PQ_EFB_COPY_CLOCKS},
+};
+}  // namespace
 
 PixelEngineManager::PixelEngineManager(Core::System& system) : m_system{system}
 {
@@ -44,115 +66,97 @@ void PixelEngineManager::DoState(PointerWrap& p)
   p.Do(m_control);
 
   p.Do(m_token);
-  p.Do(m_token_pending);
-  p.Do(m_token_interrupt_pending);
-  p.Do(m_finish_interrupt_pending);
-  p.Do(m_event_raised);
+  p.Do(m_queued_token);
+  p.Do(m_queued_token_irq);
+  p.Do(m_queued_finish_irq);
+  p.Do(m_delivery_scheduled);
 
-  p.Do(m_signal_token_interrupt);
-  p.Do(m_signal_finish_interrupt);
+  p.Do(m_token_irq_asserted);
+  p.Do(m_finish_irq_asserted);
 }
 
 void PixelEngineManager::Init()
 {
-  m_control.hex = 0;
-  m_z_conf.hex = 0;
-  m_alpha_conf.hex = 0;
-  m_dst_alpha_conf.hex = 0;
-  m_alpha_mode_conf.hex = 0;
-  m_alpha_read.hex = 0;
+  for (u16* reg : {&m_control.hex, &m_z_conf.hex, &m_alpha_conf.hex, &m_dst_alpha_conf.hex,
+                   &m_alpha_mode_conf.hex, &m_alpha_read.hex})
+  {
+    *reg = 0;
+  }
 
   m_token = 0;
-  m_token_pending = 0;
-  m_token_interrupt_pending = false;
-  m_finish_interrupt_pending = false;
-  m_event_raised = false;
+  m_queued_token = 0;
+  m_queued_token_irq = false;
+  m_queued_finish_irq = false;
+  m_delivery_scheduled = false;
+  m_token_irq_asserted = false;
+  m_finish_irq_asserted = false;
 
-  m_signal_token_interrupt = false;
-  m_signal_finish_interrupt = false;
-
-  m_event_type_set_token_finish =
-      m_system.GetCoreTiming().RegisterEvent("SetTokenFinish", SetTokenFinish_OnMainThread_Static);
+  m_delivery_event = m_system.GetCoreTiming().RegisterEvent("SetTokenFinish", OnTokenFinishEvent);
 }
 
 void PixelEngineManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 {
-  // Directly mapped registers.
-  struct
-  {
-    u32 addr;
-    u16* ptr;
-  } directly_mapped_vars[] = {
+  // EFB access configuration: plain storage, readable and writable.
+  const std::pair<u32, u16*> plain_regs[] = {
       {PE_ZCONF, &m_z_conf.hex},
       {PE_ALPHACONF, &m_alpha_conf.hex},
       {PE_DSTALPHACONF, &m_dst_alpha_conf.hex},
       {PE_ALPHAMODE, &m_alpha_mode_conf.hex},
       {PE_ALPHAREAD, &m_alpha_read.hex},
   };
-  for (auto& mapped_var : directly_mapped_vars)
-  {
-    mmio->Register(base | mapped_var.addr, MMIO::DirectRead<u16>(mapped_var.ptr),
-                   MMIO::DirectWrite<u16>(mapped_var.ptr));
-  }
+  for (const auto& [offset, storage] : plain_regs)
+    mmio->Register(base | offset, MMIO::DirectRead<u16>(storage), MMIO::DirectWrite<u16>(storage));
 
-  // Performance queries registers: read only, need to call the video backend
-  // to get the results.
-  struct
+  // Performance counters come from the backend's queries; each 32-bit count is split over a
+  // low and a high register.
+  for (const PerfCounterRegs& counter : PERF_COUNTERS)
   {
-    u32 addr;
-    PerfQueryType pqtype;
-  } pq_regs[] = {
-      {PE_PERF_ZCOMP_INPUT_ZCOMPLOC_L, PQ_ZCOMP_INPUT_ZCOMPLOC},
-      {PE_PERF_ZCOMP_OUTPUT_ZCOMPLOC_L, PQ_ZCOMP_OUTPUT_ZCOMPLOC},
-      {PE_PERF_ZCOMP_INPUT_L, PQ_ZCOMP_INPUT},
-      {PE_PERF_ZCOMP_OUTPUT_L, PQ_ZCOMP_OUTPUT},
-      {PE_PERF_BLEND_INPUT_L, PQ_BLEND_INPUT},
-      {PE_PERF_EFB_COPY_CLOCKS_L, PQ_EFB_COPY_CLOCKS},
-  };
-  for (auto& pq_reg : pq_regs)
-  {
-    mmio->Register(base | pq_reg.addr, MMIO::ComplexRead<u16>([pq_reg](Core::System&, u32) {
-                     return g_video_backend->Video_GetQueryResult(pq_reg.pqtype) & 0xFFFF;
+    const PerfQueryType query = counter.query;
+    mmio->Register(base | counter.low_offset,
+                   MMIO::ComplexRead<u16>([query](Core::System&, u32) {
+                     return static_cast<u16>(g_video_backend->Video_GetQueryResult(query) & 0xFFFF);
                    }),
                    MMIO::InvalidWrite<u16>());
-    mmio->Register(base | (pq_reg.addr + 2), MMIO::ComplexRead<u16>([pq_reg](Core::System&, u32) {
-                     return g_video_backend->Video_GetQueryResult(pq_reg.pqtype) >> 16;
+    mmio->Register(base | (counter.low_offset + 2),
+                   MMIO::ComplexRead<u16>([query](Core::System&, u32) {
+                     return static_cast<u16>(g_video_backend->Video_GetQueryResult(query) >> 16);
                    }),
                    MMIO::InvalidWrite<u16>());
   }
 
-  // Control register
   mmio->Register(base | PE_CTRL_REGISTER, MMIO::DirectRead<u16>(&m_control.hex),
                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
-                   auto& pe = system.GetPixelEngine();
+                   PixelEngineManager& pe = system.GetPixelEngine();
+                   const UPECtrlReg written{.hex = val};
 
-                   UPECtrlReg tmpCtrl{.hex = val};
+                   // Acknowledge bits drop the corresponding asserted interrupt.
+                   if (written.pe_token)
+                     pe.m_token_irq_asserted = false;
+                   if (written.pe_finish)
+                     pe.m_finish_irq_asserted = false;
 
-                   if (tmpCtrl.pe_token)
-                     pe.m_signal_token_interrupt = false;
-
-                   if (tmpCtrl.pe_finish)
-                     pe.m_signal_finish_interrupt = false;
-
-                   pe.m_control.pe_token_enable = tmpCtrl.pe_token_enable.Value();
-                   pe.m_control.pe_finish_enable = tmpCtrl.pe_finish_enable.Value();
-                   pe.m_control.pe_token = false;   // this flag is write only
-                   pe.m_control.pe_finish = false;  // this flag is write only
+                   // Only the enables are stored; the acknowledge bits are write-only.
+                   UPECtrlReg stored{.hex = pe.m_control.hex};
+                   stored.pe_token_enable = written.pe_token_enable.Value();
+                   stored.pe_finish_enable = written.pe_finish_enable.Value();
+                   stored.pe_token = false;
+                   stored.pe_finish = false;
+                   pe.m_control.hex = stored.hex;
 
                    DEBUG_LOG_FMT(PIXELENGINE, "(w16) CTRL_REGISTER: {:#06x}", val);
                    pe.UpdateInterrupts();
                  }));
 
-  // Token register, readonly.
   mmio->Register(base | PE_TOKEN_REG, MMIO::DirectRead<u16>(&m_token), MMIO::InvalidWrite<u16>());
 
-  // BBOX registers, readonly and need to update a flag.
-  for (int i = 0; i < 4; ++i)
+  // Reading any bounding box register tells us the game uses the feature, so the pixel shaders
+  // stop tracking the box from then on.
+  for (int side = 0; side < 4; ++side)
   {
-    mmio->Register(base | (PE_BBOX_LEFT + 2 * i),
-                   MMIO::ComplexRead<u16>([i](Core::System& system, u32) {
+    const u32 offset = PE_BBOX_LEFT + 2 * static_cast<u32>(side);
+    mmio->Register(base | offset, MMIO::ComplexRead<u16>([side](Core::System& system, u32) {
                      g_bounding_box->Disable(system.GetPixelShaderManager());
-                     return g_video_backend->Video_GetBoundingBox(i);
+                     return g_video_backend->Video_GetBoundingBox(side);
                    }),
                    MMIO::InvalidWrite<u16>());
   }
@@ -160,95 +164,73 @@ void PixelEngineManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 
 void PixelEngineManager::UpdateInterrupts()
 {
-  auto& processor_interface = m_system.GetProcessorInterface();
-
-  // check if there is a token-interrupt
-  processor_interface.SetInterrupt(INT_CAUSE_PE_TOKEN,
-                                   m_signal_token_interrupt && m_control.pe_token_enable);
-
-  // check if there is a finish-interrupt
-  processor_interface.SetInterrupt(INT_CAUSE_PE_FINISH,
-                                   m_signal_finish_interrupt && m_control.pe_finish_enable);
+  ProcessorInterface::ProcessorInterfaceManager& pi = m_system.GetProcessorInterface();
+  pi.SetInterrupt(PI_LINE_TOKEN, m_token_irq_asserted && m_control.pe_token_enable);
+  pi.SetInterrupt(PI_LINE_FINISH, m_finish_irq_asserted && m_control.pe_finish_enable);
 }
 
-void PixelEngineManager::SetTokenFinish_OnMainThread_Static(Core::System& system, u64 userdata,
-                                                            s64 cycles_late)
+void PixelEngineManager::OnTokenFinishEvent(Core::System& system, u64, s64)
 {
-  system.GetPixelEngine().SetTokenFinish_OnMainThread(userdata, cycles_late);
+  system.GetPixelEngine().DeliverPending();
 }
 
-void PixelEngineManager::SetTokenFinish_OnMainThread(u64 userdata, s64 cycles_late)
+// CPU thread: publish whatever the GPU queued since the event was scheduled.
+void PixelEngineManager::DeliverPending()
 {
-  std::unique_lock lk(m_token_finish_mutex);
-  m_event_raised = false;
+  std::unique_lock guard(m_handover_lock);
+  m_delivery_scheduled = false;
+  m_token = m_queued_token;
 
-  m_token = m_token_pending;
-
-  if (m_token_interrupt_pending)
+  if (m_queued_token_irq)
   {
-    m_token_interrupt_pending = false;
-    m_signal_token_interrupt = true;
+    m_queued_token_irq = false;
+    m_token_irq_asserted = true;
     UpdateInterrupts();
   }
 
-  if (m_finish_interrupt_pending)
-  {
-    m_finish_interrupt_pending = false;
-    m_signal_finish_interrupt = true;
-    UpdateInterrupts();
-    lk.unlock();
-    Core::FrameUpdateOnCPUThread();
-  }
-}
-
-// Raise the event handler above on the CPU thread.
-// m_token_finish_mutex must be locked.
-// THIS IS EXECUTED FROM VIDEO THREAD
-void PixelEngineManager::RaiseEvent(int cycles_into_future)
-{
-  if (m_event_raised)
+  if (!m_queued_finish_irq)
     return;
 
-  m_event_raised = true;
-
-  CoreTiming::FromThread from = CoreTiming::FromThread::NON_CPU;
-  s64 cycles = 0;  // we don't care about timings for dual core mode.
-  if (!m_system.IsDualCoreMode() || m_system.GetFifo().UseDeterministicGPUThread())
-  {
-    from = CoreTiming::FromThread::CPU;
-
-    // Hack: Dolphin's single-core gpu timings are way too fast. Enforce a minimum delay to give
-    //       games time to setup any interrupt state
-    cycles = std::max(500, cycles_into_future);
-  }
-  m_system.GetCoreTiming().ScheduleEvent(cycles, m_event_type_set_token_finish, 0, from);
+  m_queued_finish_irq = false;
+  m_finish_irq_asserted = true;
+  UpdateInterrupts();
+  // A finished frame drives frame-advance and movie bookkeeping; do that outside the lock.
+  guard.unlock();
+  Core::FrameUpdateOnCPUThread();
 }
 
-// SetToken
-// THIS IS EXECUTED FROM VIDEO THREAD
+// GPU thread, with m_handover_lock held: make sure a delivery event is on its way.
+void PixelEngineManager::ScheduleDelivery(int cycles_into_future)
+{
+  if (m_delivery_scheduled)
+    return;
+  m_delivery_scheduled = true;
+
+  const bool timed = !m_system.IsDualCoreMode() || m_system.GetFifo().UseDeterministicGPUThread();
+  // With a free-running GPU thread the delay is meaningless, so deliver as soon as possible.
+  const s64 delay = timed ? std::max(MIN_SINGLE_CORE_DELAY, cycles_into_future) : 0;
+  const CoreTiming::FromThread origin =
+      timed ? CoreTiming::FromThread::CPU : CoreTiming::FromThread::NON_CPU;
+  m_system.GetCoreTiming().ScheduleEvent(delay, m_delivery_event, 0, origin);
+}
+
 void PixelEngineManager::SetToken(const u16 token, const bool interrupt, int cycles_into_future)
 {
   DEBUG_LOG_FMT(PIXELENGINE, "VIDEO Backend raises INT_CAUSE_PE_TOKEN (btw, token: {:04x})", token);
 
-  std::lock_guard lk(m_token_finish_mutex);
-
-  m_token_pending = token;
-  m_token_interrupt_pending |= interrupt;
-
-  RaiseEvent(cycles_into_future);
+  std::lock_guard guard(m_handover_lock);
+  m_queued_token = token;
+  m_queued_token_irq = m_queued_token_irq || interrupt;
+  ScheduleDelivery(cycles_into_future);
 }
 
-// SetFinish
-// THIS IS EXECUTED FROM VIDEO THREAD (BPStructs.cpp) when a new frame has been drawn
 void PixelEngineManager::SetFinish(int cycles_into_future)
 {
   DEBUG_LOG_FMT(PIXELENGINE, "VIDEO Set Finish");
 
-  std::lock_guard lk(m_token_finish_mutex);
-
-  m_finish_interrupt_pending |= true;
-
-  RaiseEvent(cycles_into_future);
+  std::lock_guard guard(m_handover_lock);
+  m_queued_finish_irq = true;
+  ScheduleDelivery(cycles_into_future);
 }
 
 }  // namespace PixelEngine

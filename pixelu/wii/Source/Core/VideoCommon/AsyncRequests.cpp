@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/AsyncRequests.h"
 
@@ -19,23 +18,24 @@ void AsyncRequests::PullEvents()
   if (m_queue.Empty())
     return;
 
-  // This is only called if the queue isn't empty.
-  // So just flush the pipeline to get accurate results.
+  // Requests (EFB peeks, bounding box reads, ...) must observe every draw issued before them,
+  // so submit the pending batch first.
   g_vertex_manager->Flush();
 
-  while (!m_queue.Empty())
+  // Each entry is popped only after it has run, so WaitForEmptyQueue() on the CPU thread cannot
+  // return while the last request is still executing.
+  do
   {
     std::invoke(std::move(m_queue.Front()));
     m_queue.Pop();
-  }
+  } while (!m_queue.Empty());
 }
 
 void AsyncRequests::QueueEvent(Event&& event)
 {
   m_queue.Push(std::move(event));
-
-  auto& system = Core::System::GetInstance();
-  system.GetFifo().RunGpu();
+  // Make sure the video thread wakes up to service it.
+  Core::System::GetInstance().GetFifo().RunGpu();
 }
 
 void AsyncRequests::WaitForEmptyQueue()

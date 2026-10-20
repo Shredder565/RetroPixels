@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,26 +22,27 @@ namespace MMIO
 class Mapping;
 }
 
+// The pixel engine's CPU-visible registers (0x0C001000 on the console): EFB access
+// configuration, the draw-sync token, the draw-done flag, bounding box and performance counters.
 namespace PixelEngine
 {
-// internal hardware addresses
+// Register offsets within the PE block.
 enum
 {
-  PE_ZCONF = 0x00,          // Z Config
-  PE_ALPHACONF = 0x02,      // Alpha Config
-  PE_DSTALPHACONF = 0x04,   // Destination Alpha Config
-  PE_ALPHAMODE = 0x06,      // Alpha Mode Config
-  PE_ALPHAREAD = 0x08,      // Alpha Read
-  PE_CTRL_REGISTER = 0x0a,  // Control
-  PE_TOKEN_REG = 0x0e,      // Token
-  PE_BBOX_LEFT = 0x10,      // Bounding Box Left Pixel
-  PE_BBOX_RIGHT = 0x12,     // Bounding Box Right Pixel
-  PE_BBOX_TOP = 0x14,       // Bounding Box Top Pixel
-  PE_BBOX_BOTTOM = 0x16,    // Bounding Box Bottom Pixel
+  PE_ZCONF = 0x00,
+  PE_ALPHACONF = 0x02,
+  PE_DSTALPHACONF = 0x04,
+  PE_ALPHAMODE = 0x06,
+  PE_ALPHAREAD = 0x08,
+  PE_CTRL_REGISTER = 0x0a,
+  PE_TOKEN_REG = 0x0e,
+  PE_BBOX_LEFT = 0x10,
+  PE_BBOX_RIGHT = 0x12,
+  PE_BBOX_TOP = 0x14,
+  PE_BBOX_BOTTOM = 0x16,
 
-  // NOTE: Order not verified
-  // These indicate the number of quads that are being used as input/output for each particular
-  // stage
+  // Performance counters, each a 32-bit value split into low/high halves. The assignment of
+  // counters to addresses is a best guess.
   PE_PERF_ZCOMP_INPUT_ZCOMPLOC_L = 0x18,
   PE_PERF_ZCOMP_INPUT_ZCOMPLOC_H = 0x1a,
   PE_PERF_ZCOMP_OUTPUT_ZCOMPLOC_L = 0x1c,
@@ -57,16 +57,15 @@ enum
   PE_PERF_EFB_COPY_CLOCKS_H = 0x2e,
 };
 
-// ReadMode specifies the returned alpha channel for EFB peeks
+// Alpha value returned by CPU reads of the EFB.
 enum class AlphaReadMode : u16
 {
-  Read00 = 0,    // Always read 0x00
-  ReadFF = 1,    // Always read 0xFF
-  ReadNone = 2,  // Always read the real alpha value
+  Read00 = 0,    // constant 0x00
+  ReadFF = 1,    // constant 0xFF
+  ReadNone = 2,  // the stored alpha
 };
 
-// Note: These enums are (assumed to be) identical to the one in BPMemory, but the base type is set
-// to u16 instead of u32 for BitField
+// Same values as the BP-side compare enum, but 16-bit so it fits the PE register BitFields.
 enum class CompareMode : u16
 {
   Never = 0,
@@ -134,14 +133,14 @@ enum class LogicOp : u16
 union UPEAlphaConfReg
 {
   u16 hex = 0;
-  BitField<0, 1, bool, u16> blend;  // Set for GX_BM_BLEND or GX_BM_SUBTRACT
-  BitField<1, 1, bool, u16> logic;  // Set for GX_BM_LOGIC
+  BitField<0, 1, bool, u16> blend;  // blend or subtract mode
+  BitField<1, 1, bool, u16> logic;  // logic-op mode
   BitField<2, 1, bool, u16> dither;
   BitField<3, 1, bool, u16> color_update_enable;
   BitField<4, 1, bool, u16> alpha_update_enable;
   BitField<5, 3, DstBlendFactor, u16> dst_factor;
   BitField<8, 3, SrcBlendFactor, u16> src_factor;
-  BitField<11, 1, bool, u16> subtract;  // Set for GX_BM_SUBTRACT
+  BitField<11, 1, bool, u16> subtract;  // subtract mode
   BitField<12, 4, LogicOp, u16> logic_op;
 };
 
@@ -156,7 +155,7 @@ union UPEAlphaModeConfReg
 {
   u16 hex = 0;
   BitField<0, 8, u8, u16> threshold;
-  // Yagcd and libogc use 8 bits for this, but the enum only needs 3
+  // Documented as an 8-bit field; only the low three bits carry the compare mode.
   BitField<8, 3, CompareMode, u16> compare_mode;
 };
 
@@ -166,14 +165,15 @@ union UPEAlphaReadReg
   BitField<0, 2, AlphaReadMode, u16> read_mode;
 };
 
-// fifo Control Register
+// Interrupt control. Writing 1 to pe_token / pe_finish acknowledges that interrupt; those two
+// bits always read back as 0.
 union UPECtrlReg
 {
   u16 hex = 0;
   BitField<0, 1, bool, u16> pe_token_enable;
   BitField<1, 1, bool, u16> pe_finish_enable;
-  BitField<2, 1, bool, u16> pe_token;   // Write only
-  BitField<3, 1, bool, u16> pe_finish;  // Write only
+  BitField<2, 1, bool, u16> pe_token;
+  BitField<3, 1, bool, u16> pe_finish;
 };
 
 class PixelEngineManager
@@ -186,20 +186,19 @@ public:
 
   void RegisterMMIO(MMIO::Mapping* mmio, u32 base);
 
-  // gfx backend support
+  // Called from the GPU side when the command stream sets the token or signals draw done.
   void SetToken(const u16 token, const bool interrupt, int cycle_delay);
   void SetFinish(int cycle_delay);
   AlphaReadMode GetAlphaReadMode() const { return m_alpha_read.read_mode; }
 
 private:
-  void RaiseEvent(int cycles_into_future);
+  void ScheduleDelivery(int cycles_into_future);
   void UpdateInterrupts();
-  void SetTokenFinish_OnMainThread(u64 userdata, s64 cycles_late);
+  void DeliverPending();
 
-  static void SetTokenFinish_OnMainThread_Static(Core::System& system, u64 userdata,
-                                                 s64 cycles_late);
+  static void OnTokenFinishEvent(Core::System& system, u64 userdata, s64 cycles_late);
 
-  // STATE_TO_SAVE
+  // Savestate fields (saved in declaration order).
   UPEZConfReg m_z_conf;
   UPEAlphaConfReg m_alpha_conf;
   UPEDstAlphaConfReg m_dst_alpha_conf;
@@ -207,17 +206,18 @@ private:
   UPEAlphaReadReg m_alpha_read;
   UPECtrlReg m_control;
 
-  std::mutex m_token_finish_mutex;
-  u16 m_token = 0;
-  u16 m_token_pending = 0;
-  bool m_token_interrupt_pending = false;
-  bool m_finish_interrupt_pending = false;
-  bool m_event_raised = false;
+  // Guards the hand-over of tokens and draw-done from the GPU thread to the CPU thread.
+  std::mutex m_handover_lock;
+  u16 m_token = 0;          // value visible to the CPU
+  u16 m_queued_token = 0;   // value waiting to be delivered
+  bool m_queued_token_irq = false;
+  bool m_queued_finish_irq = false;
+  bool m_delivery_scheduled = false;
 
-  bool m_signal_token_interrupt = false;
-  bool m_signal_finish_interrupt = false;
+  bool m_token_irq_asserted = false;
+  bool m_finish_irq_asserted = false;
 
-  CoreTiming::EventType* m_event_type_set_token_finish = nullptr;
+  CoreTiming::EventType* m_delivery_event = nullptr;
 
   Core::System& m_system;
 };

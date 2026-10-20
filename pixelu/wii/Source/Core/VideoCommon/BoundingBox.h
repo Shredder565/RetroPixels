@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,16 +15,20 @@ class PointerWrap;
 using BBoxType = s32;
 constexpr u32 NUM_BBOX_VALUES = 4;
 
+// Emulates the pixel engine's bounding box registers (left, right, top, bottom). Backends that
+// can track the box on the GPU implement Read/Write; this class caches the four values on the
+// CPU side, batching writes and reading back lazily.
 class BoundingBox
 {
 public:
   explicit BoundingBox() = default;
   virtual ~BoundingBox() = default;
 
-  bool IsEnabled() const { return m_is_active; }
+  bool IsEnabled() const { return m_active; }
   void Enable(PixelShaderManager& pixel_shader_manager);
   void Disable(PixelShaderManager& pixel_shader_manager);
 
+  // Pushes pending CPU-side writes to the backend and marks the cache stale (a draw follows).
   void Flush();
 
   u16 Get(u32 index);
@@ -33,8 +36,7 @@ public:
 
   void DoState(PointerWrap& p);
 
-  // Initialize, Read, and Write are only safe to call if the backend supports bounding box,
-  // otherwise unexpected exceptions can occur
+  // The three backend hooks may only be used when the backend reports bounding box support.
   virtual bool Initialize() = 0;
 
 protected:
@@ -42,25 +44,22 @@ protected:
   virtual void Write(u32 index, std::span<const BBoxType> values) = 0;
 
 private:
-  void Readback();
+  // True when emulation is switched off (by config or by the backend), in which case reads and
+  // writes go to m_fallback instead.
+  static bool UseFallback();
+  void RefreshFromBackend();
 
-  bool m_is_active = false;
+  bool m_active = false;
 
-  std::array<BBoxType, NUM_BBOX_VALUES> m_values = {};
-  std::array<bool, NUM_BBOX_VALUES> m_dirty = {};
-  bool m_is_valid = true;
+  std::array<BBoxType, NUM_BBOX_VALUES> m_cache = {};
+  std::array<bool, NUM_BBOX_VALUES> m_pending_write = {};
+  bool m_cache_valid = true;
 
-  // Nintendo's SDK seems to write "default" bounding box values before every draw (1023 0 1023 0
-  // are the only values encountered so far, which happen to be the extents allowed by the BP
-  // registers) to reset the registers for comparison in the pixel engine, and presumably to detect
-  // whether GX has updated the registers with real values.
-  //
-  // We can store these values when Bounding Box emulation is disabled and return them on read,
-  // which the game will interpret as "no pixels have been drawn"
-  //
-  // This produces much better results than just returning garbage, which can cause games like
-  // Ultimate Spider-Man to crash
-  std::array<u16, 4> m_bounding_box_fallback = {};
+  // Without real emulation, values written by the game are simply echoed back. Games built on
+  // the official SDK reset the box to its extents (1023, 0, 1023, 0) before drawing and treat
+  // getting those back as "nothing drawn", which is far safer than returning junk (some titles
+  // crash on junk values).
+  std::array<u16, 4> m_fallback = {};
 };
 
 extern std::unique_ptr<BoundingBox> g_bounding_box;

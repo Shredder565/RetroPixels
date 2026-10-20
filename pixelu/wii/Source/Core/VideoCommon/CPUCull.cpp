@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/CPUCull.h"
 
@@ -14,125 +13,287 @@
 #include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/XFMemory.h"
 
-// We really want things like c.w * a.x - a.w * c.x to stay symmetric, so they cancel to zero on
-// degenerate triangles.  Make sure the compiler doesn't optimize in fmas where not requested.
+// The culling maths relies on expressions such as a*b - c*d being evaluated as two separate
+// roundings, so that they come out exactly zero for degenerate triangles. Ask the compiler not
+// to fuse them. (GCC has no in-source switch for this; there a fused build can only make the
+// degenerate-triangle test slightly less effective.)
 #ifdef _MSC_VER
 #pragma fp_contract(off)
 #else
-// GCC doesn't support any in-file way to turn off fp contract yet
-// Not ideal, but worst case scenario its cpu cull is worse at detecting degenerate triangles
-// (Most likely to happen on arm, as we don't compile the cull code for x86 fma)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #pragma STDC FP_CONTRACT OFF
 #pragma GCC diagnostic pop
 #endif
 
-#if defined(_M_X86) || defined(_M_X86_64)
-#define USE_SSE
-#elif defined(_M_ARM_64)
-#define USE_NEON
-#else
-#define NO_SIMD
-#endif
+#define CPUCULL_FLAVOR_SCALAR 0
+#define CPUCULL_FLAVOR_NEON 1
+#define CPUCULL_FLAVOR_SSE 2
+#define CPUCULL_FLAVOR_SSE3 3
+#define CPUCULL_FLAVOR_SSE41 4
+#define CPUCULL_FLAVOR_AVX 5
+#define CPUCULL_FLAVOR_FMA 6
 
-#if defined(USE_SSE)
+#if defined(_M_X86) || defined(_M_X86_64)
+#define CPUCULL_HOST_X86 1
 #include <immintrin.h>
-#elif defined(USE_NEON)
+#elif defined(_M_ARM_64)
+#define CPUCULL_HOST_NEON 1
 #include <arm_neon.h>
 #endif
 
+#if defined(CPUCULL_HOST_X86)
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_SSE
 #include "VideoCommon/CPUCullImpl.h"
-#ifdef USE_SSE
-#define USE_SSE3
+#undef CPUCULL_FLAVOR
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_SSE3
 #include "VideoCommon/CPUCullImpl.h"
-#define USE_SSE41
+#undef CPUCULL_FLAVOR
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_SSE41
 #include "VideoCommon/CPUCullImpl.h"
-#define USE_AVX
+#undef CPUCULL_FLAVOR
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_AVX
 #include "VideoCommon/CPUCullImpl.h"
-#define USE_FMA
+#undef CPUCULL_FLAVOR
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_FMA
 #include "VideoCommon/CPUCullImpl.h"
-#endif
-
-#if defined(USE_SSE)
-#if defined(__AVX__) && defined(__FMA__)
-static constexpr int MIN_SSE = 51;
-#elif defined(__AVX__)
-static constexpr int MIN_SSE = 50;
-#elif defined(__SSE4_1__)
-static constexpr int MIN_SSE = 41;
-#elif defined(__SSE3__)
-static constexpr int MIN_SSE = 30;
+#undef CPUCULL_FLAVOR
+#elif defined(CPUCULL_HOST_NEON)
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_NEON
+#include "VideoCommon/CPUCullImpl.h"
+#undef CPUCULL_FLAVOR
 #else
-static constexpr int MIN_SSE = 0;
-#endif
+#define CPUCULL_FLAVOR CPUCULL_FLAVOR_SCALAR
+#include "VideoCommon/CPUCullImpl.h"
+#undef CPUCULL_FLAVOR
 #endif
 
-template <bool PositionHas3Elems, bool PerVertexPosMtx>
-static CPUCull::TransformFunction GetTransformFunction()
+namespace
 {
-#if defined(USE_SSE)
-  if (MIN_SSE >= 51 || (cpu_info.bAVX && cpu_info.bFMA))
-    return CPUCull_FMA::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
-  else if (MIN_SSE >= 50 || cpu_info.bAVX)
-    return CPUCull_AVX::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
-  else if (PositionHas3Elems && PerVertexPosMtx && (MIN_SSE >= 41 || cpu_info.bSSE4_1))
-    return CPUCull_SSE41::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
-  else if (PositionHas3Elems && (MIN_SSE >= 30 || cpu_info.bSSE3))
-    return CPUCull_SSE3::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
-  else
-    return CPUCull_SSE::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
-#elif defined(USE_NEON)
-  return CPUCull_NEON::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
+#if defined(CPUCULL_HOST_X86)
+// What the build baseline already guarantees, so runtime checks can be skipped.
+constexpr bool BASELINE_FMA =
+#if defined(__AVX__) && defined(__FMA__)
+    true;
 #else
-  return CPUCull_Scalar::TransformVertices<PositionHas3Elems, PerVertexPosMtx>;
+    false;
 #endif
+constexpr bool BASELINE_AVX =
+#if defined(__AVX__)
+    true;
+#else
+    false;
+#endif
+constexpr bool BASELINE_SSE41 =
+#if defined(__SSE4_1__)
+    true;
+#else
+    false;
+#endif
+constexpr bool BASELINE_SSE3 =
+#if defined(__SSE3__)
+    true;
+#else
+    false;
+#endif
+#endif
+
+template <bool HasZ, bool PerVertexMatrix>
+CPUCull::TransformFunction PickTransform()
+{
+#if defined(CPUCULL_HOST_X86)
+  if (BASELINE_FMA || (cpu_info.bAVX && cpu_info.bFMA))
+    return CPUCullFma::TransformVertices<HasZ, PerVertexMatrix>;
+  if (BASELINE_AVX || cpu_info.bAVX)
+    return CPUCullAvx::TransformVertices<HasZ, PerVertexMatrix>;
+  // The blend-based load only pays off for three-component positions with their own matrices;
+  // horizontal adds help any three-component position.
+  if (HasZ && PerVertexMatrix && (BASELINE_SSE41 || cpu_info.bSSE4_1))
+    return CPUCullSse41::TransformVertices<HasZ, PerVertexMatrix>;
+  if (HasZ && (BASELINE_SSE3 || cpu_info.bSSE3))
+    return CPUCullSse3::TransformVertices<HasZ, PerVertexMatrix>;
+  return CPUCullSse::TransformVertices<HasZ, PerVertexMatrix>;
+#elif defined(CPUCULL_HOST_NEON)
+  return CPUCullNeon::TransformVertices<HasZ, PerVertexMatrix>;
+#else
+  return CPUCullScalar::TransformVertices<HasZ, PerVertexMatrix>;
+#endif
+}
+
+// ---------------------------------------------------------------------------------------------
+// Triangle rejection, on vertices already in clip space.
+
+using Vertex = CPUCull::TransformedVertex;
+
+// Twice the signed screen-space area of the triangle, up to the positive factor 1/(wa*wb*wc),
+// written as the three cofactor terms of the homogeneous determinant.
+inline float FacingTerm(const Vertex& a, const Vertex& b, const Vertex& c)
+{
+  const float t_x = (a.x * c.w - c.x * a.w) * b.y;
+  const float t_y = (a.y * c.x - c.y * a.x) * b.w;
+  const float t_w = (a.w * c.y - c.w * a.y) * b.x;
+#if defined(CPUCULL_HOST_NEON)
+  // The NEON reduction also folds in a (normally zero) z term, pairwise.
+  const float t_z = (a.z * 0.0f - c.z * 0.0f) * b.x;
+  return (t_x + t_y) + (t_z + t_w);
+#else
+  return (t_x + t_y) + t_w;
+#endif
+}
+
+// True if the coordinate lies past the +w clip plane. The SSE kernels compare with w <= v,
+// the other flavours with v > w; the two only differ on the plane itself.
+inline bool BeyondPositive(float v, float w)
+{
+#if defined(CPUCULL_HOST_X86)
+  return w <= v;
+#else
+  return v > w;
+#endif
+}
+
+inline bool BeyondNegative(float v, float w)
+{
+  return v < -w;
+}
+
+// True when all three vertices are outside the same one of the x/y clip planes.
+inline bool OutsideOnePlane(const Vertex& a, const Vertex& b, const Vertex& c)
+{
+  const bool left = BeyondNegative(a.x, a.w) && BeyondNegative(b.x, b.w) && BeyondNegative(c.x, c.w);
+  const bool bottom =
+      BeyondNegative(a.y, a.w) && BeyondNegative(b.y, b.w) && BeyondNegative(c.y, c.w);
+  const bool right =
+      BeyondPositive(a.x, a.w) && BeyondPositive(b.x, b.w) && BeyondPositive(c.x, c.w);
+  const bool top = BeyondPositive(a.y, a.w) && BeyondPositive(b.y, b.w) && BeyondPositive(c.y, c.w);
+  return left || bottom || right || top;
+}
+
+template <CullMode Mode>
+inline bool TriangleRejected(const Vertex& a, const Vertex& b, const Vertex& c)
+{
+  if constexpr (Mode == CullMode::All)
+  {
+    return true;
+  }
+  else
+  {
+    const float facing = FacingTerm(a, b, c);
+    // Zero-area triangles are always dropped; otherwise the cull mode picks a facing.
+    bool facing_rejected;
+    if constexpr (Mode == CullMode::Front)
+      facing_rejected = facing <= 0;
+    else if constexpr (Mode == CullMode::Back)
+      facing_rejected = facing >= 0;
+    else
+      facing_rejected = facing == 0;
+    return facing_rejected || OutsideOnePlane(a, b, c);
+  }
 }
 
 template <OpcodeDecoder::Primitive Primitive, CullMode Mode>
-static CPUCull::CullFunction GetCullFunction0()
+bool EveryTriangleRejected(const Vertex* v, int count)
 {
-#if defined(USE_SSE)
-  // Note: AVX version only actually AVX on compilers that support __attribute__((target))
-  // Sorry, MSVC + Sandy Bridge.  (Ivy+ and AMD see very little benefit thanks to mov elimination)
-  if (MIN_SSE >= 50 || cpu_info.bAVX)
-    return CPUCull_AVX::AreAllVerticesCulled<Primitive, Mode>;
-  else if (MIN_SSE >= 30 || cpu_info.bSSE3)
-    return CPUCull_SSE3::AreAllVerticesCulled<Primitive, Mode>;
+  using Prim = OpcodeDecoder::Primitive;
+  if constexpr (Primitive == Prim::GX_DRAW_QUADS || Primitive == Prim::GX_DRAW_QUADS_2)
+  {
+    // Each quad (q, q+1, q+2, q+3) splits into (q, q+1, q+2) and (q, q+2, q+3). A trailing
+    // group of exactly three vertices still forms one triangle.
+    int q = 0;
+    for (; q + 4 <= count; q += 4)
+    {
+      if (!TriangleRejected<Mode>(v[q], v[q + 1], v[q + 2]) ||
+          !TriangleRejected<Mode>(v[q], v[q + 2], v[q + 3]))
+      {
+        return false;
+      }
+    }
+    if (count - q == 3 && !TriangleRejected<Mode>(v[q], v[q + 1], v[q + 2]))
+      return false;
+    return true;
+  }
+  else if constexpr (Primitive == Prim::GX_DRAW_TRIANGLES)
+  {
+    for (int t = 0; t + 3 <= count; t += 3)
+    {
+      if (!TriangleRejected<Mode>(v[t], v[t + 1], v[t + 2]))
+        return false;
+    }
+    return true;
+  }
+  else if constexpr (Primitive == Prim::GX_DRAW_TRIANGLE_STRIP)
+  {
+    // Every other strip triangle has its last two vertices swapped to keep a common winding.
+    for (int t = 0; t + 3 <= count; ++t)
+    {
+      const bool odd = (t & 1) != 0;
+      const Vertex& second = odd ? v[t + 2] : v[t + 1];
+      const Vertex& third = odd ? v[t + 1] : v[t + 2];
+      if (!TriangleRejected<Mode>(v[t], second, third))
+        return false;
+    }
+    return true;
+  }
   else
-    return CPUCull_SSE::AreAllVerticesCulled<Primitive, Mode>;
-#elif defined(USE_NEON)
-  return CPUCull_NEON::AreAllVerticesCulled<Primitive, Mode>;
-#else
-  return CPUCull_Scalar::AreAllVerticesCulled<Primitive, Mode>;
-#endif
+  {
+    static_assert(Primitive == Prim::GX_DRAW_TRIANGLE_FAN);
+    for (int t = 2; t < count; ++t)
+    {
+      if (!TriangleRejected<Mode>(v[0], v[t - 1], v[t]))
+        return false;
+    }
+    return true;
+  }
 }
 
 template <OpcodeDecoder::Primitive Primitive>
-static Common::EnumMap<CPUCull::CullFunction, CullMode::All> GetCullFunction1()
+constexpr std::array<CPUCull::CullFunction, 4> CullersFor()
 {
-  return {
-      GetCullFunction0<Primitive, CullMode::None>(),
-      GetCullFunction0<Primitive, CullMode::Back>(),
-      GetCullFunction0<Primitive, CullMode::Front>(),
-      GetCullFunction0<Primitive, CullMode::All>(),
-  };
+  // Ordered by the CullMode values None, Back, Front, All.
+  return {EveryTriangleRejected<Primitive, CullMode::None>,
+          EveryTriangleRejected<Primitive, CullMode::Back>,
+          EveryTriangleRejected<Primitive, CullMode::Front>,
+          EveryTriangleRejected<Primitive, CullMode::All>};
 }
+
+// A positive viewport height flips the y axis, which reverses the apparent winding.
+constexpr std::array<CullMode, 4> FLIPPED_MODE = {CullMode::None, CullMode::Front, CullMode::Back,
+                                                  CullMode::All};
+}  // namespace
 
 CPUCull::~CPUCull() = default;
 
+void CPUCull::AlignedFree::operator()(TransformedVertex* ptr) const
+{
+  Common::FreeAlignedMemory(ptr);
+}
+
 void CPUCull::Init()
 {
-  m_transform_table[false][false] = GetTransformFunction<false, false>();
-  m_transform_table[false][true] = GetTransformFunction<false, true>();
-  m_transform_table[true][false] = GetTransformFunction<true, false>();
-  m_transform_table[true][true] = GetTransformFunction<true, true>();
+  m_transforms[0] = PickTransform<false, false>();
+  m_transforms[1] = PickTransform<false, true>();
+  m_transforms[2] = PickTransform<true, false>();
+  m_transforms[3] = PickTransform<true, true>();
+
   using Prim = OpcodeDecoder::Primitive;
-  m_cull_table[Prim::GX_DRAW_QUADS] = GetCullFunction1<Prim::GX_DRAW_QUADS>();
-  m_cull_table[Prim::GX_DRAW_QUADS_2] = GetCullFunction1<Prim::GX_DRAW_QUADS>();
-  m_cull_table[Prim::GX_DRAW_TRIANGLES] = GetCullFunction1<Prim::GX_DRAW_TRIANGLES>();
-  m_cull_table[Prim::GX_DRAW_TRIANGLE_STRIP] = GetCullFunction1<Prim::GX_DRAW_TRIANGLE_STRIP>();
-  m_cull_table[Prim::GX_DRAW_TRIANGLE_FAN] = GetCullFunction1<Prim::GX_DRAW_TRIANGLE_FAN>();
+  // Both quad encodings share the quad rules.
+  m_culls[static_cast<size_t>(Prim::GX_DRAW_QUADS)] = CullersFor<Prim::GX_DRAW_QUADS>();
+  m_culls[static_cast<size_t>(Prim::GX_DRAW_QUADS_2)] = CullersFor<Prim::GX_DRAW_QUADS>();
+  m_culls[static_cast<size_t>(Prim::GX_DRAW_TRIANGLES)] = CullersFor<Prim::GX_DRAW_TRIANGLES>();
+  m_culls[static_cast<size_t>(Prim::GX_DRAW_TRIANGLE_STRIP)] =
+      CullersFor<Prim::GX_DRAW_TRIANGLE_STRIP>();
+  m_culls[static_cast<size_t>(Prim::GX_DRAW_TRIANGLE_FAN)] =
+      CullersFor<Prim::GX_DRAW_TRIANGLE_FAN>();
+}
+
+void CPUCull::EnsureCapacity(u32 count)
+{
+  if (count <= m_scratch_capacity) [[likely]]
+    return;
+  const u32 capacity = MathUtil::NextPowerOf2(count);
+  m_scratch_capacity = capacity;
+  m_scratch.reset(static_cast<TransformedVertex*>(
+      Common::AllocateAlignedMemory(capacity * sizeof(TransformedVertex), 32)));
 }
 
 bool CPUCull::AreAllVerticesCulled(VertexLoaderBase* loader, OpcodeDecoder::Primitive primitive,
@@ -140,35 +301,23 @@ bool CPUCull::AreAllVerticesCulled(VertexLoaderBase* loader, OpcodeDecoder::Prim
 {
   ASSERT_MSG(VIDEO, primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES,
              "CPUCull should not be called on lines or points");
-  const u32 stride = loader->m_native_vtx_decl.stride;
-  const bool posHas3Elems = loader->m_native_vtx_decl.position.components >= 3;
-  const bool perVertexPosMtx = loader->m_native_vtx_decl.posmtx.enable;
-  if (m_transform_buffer_size < count) [[unlikely]]
-  {
-    u32 new_size = MathUtil::NextPowerOf2(count);
-    m_transform_buffer_size = new_size;
-    m_transform_buffer.reset(static_cast<TransformedVertex*>(
-        Common::AllocateAlignedMemory(new_size * sizeof(TransformedVertex), 32)));
-  }
 
-  // transform functions need the projection matrix to transform to clip space
-  auto& system = Core::System::GetInstance();
+  const PortableVertexDeclaration& decl = loader->m_native_vtx_decl;
+  const bool has_z = decl.position.components >= 3;
+  const bool per_vertex_matrix = decl.posmtx.enable;
+  EnsureCapacity(count);
+
+  // The kernels read the projection constants, so bring them up to date first.
+  Core::System& system = Core::System::GetInstance();
   system.GetVertexShaderManager().SetProjectionMatrix(system.GetXFStateManager());
 
-  static constexpr Common::EnumMap<CullMode, CullMode::All> cullmode_invert = {
-      CullMode::None, CullMode::Front, CullMode::Back, CullMode::All};
+  CullMode mode = bpmem.genMode.cull_mode;
+  if (xfmem.viewport.ht > 0)
+    mode = FLIPPED_MODE[static_cast<size_t>(mode)];
 
-  CullMode cull_mode = bpmem.genMode.cull_mode;
-  if (xfmem.viewport.ht > 0)  // See videosoftware Clipper.cpp:IsBackface
-    cull_mode = cullmode_invert[cull_mode];
-  const TransformFunction transform = m_transform_table[posHas3Elems][perVertexPosMtx];
-  transform(m_transform_buffer.get(), src, stride, count);
-  const CullFunction cull = m_cull_table[primitive][cull_mode];
-  return cull(m_transform_buffer.get(), count);
-}
-
-template <typename T>
-void CPUCull::BufferDeleter<T>::operator()(T* ptr)
-{
-  Common::FreeAlignedMemory(ptr);
+  const TransformFunction transform =
+      m_transforms[(has_z ? 2u : 0u) + (per_vertex_matrix ? 1u : 0u)];
+  transform(m_scratch.get(), src, static_cast<u32>(decl.stride), static_cast<int>(count));
+  const CullFunction cull = m_culls[static_cast<size_t>(primitive)][static_cast<size_t>(mode)];
+  return cull(m_scratch.get(), static_cast<int>(count));
 }

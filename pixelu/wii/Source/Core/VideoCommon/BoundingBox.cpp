@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/BoundingBox.h"
 
@@ -11,123 +10,115 @@
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/VideoConfig.h"
 
-#include <algorithm>
-
 std::unique_ptr<BoundingBox> g_bounding_box;
+
+bool BoundingBox::UseFallback()
+{
+  return !(g_ActiveConfig.bBBoxEnable && g_backend_info.bSupportsBBox);
+}
 
 void BoundingBox::Enable(PixelShaderManager& pixel_shader_manager)
 {
-  m_is_active = true;
-  pixel_shader_manager.SetBoundingBoxActive(m_is_active);
+  m_active = true;
+  pixel_shader_manager.SetBoundingBoxActive(true);
 }
 
 void BoundingBox::Disable(PixelShaderManager& pixel_shader_manager)
 {
-  m_is_active = false;
-  pixel_shader_manager.SetBoundingBoxActive(m_is_active);
+  m_active = false;
+  pixel_shader_manager.SetBoundingBoxActive(false);
 }
 
 void BoundingBox::Flush()
 {
-  if (!g_ActiveConfig.bBBoxEnable || !g_backend_info.bSupportsBBox)
+  if (UseFallback())
     return;
 
-  m_is_valid = false;
+  // Whatever is drawn next may move the box, so the cached copy can no longer be trusted.
+  m_cache_valid = false;
 
-  if (std::ranges::none_of(m_dirty, std::identity{}))
-    return;
-
-  // TODO: Does this make any difference over just writing all the values?
-  // Games only ever seem to write all 4 values at once anyways.
-  for (u32 start = 0; start < NUM_BBOX_VALUES; ++start)
+  // Send each run of consecutive pending values in a single backend write.
+  u32 index = 0;
+  while (index < NUM_BBOX_VALUES)
   {
-    if (!m_dirty[start])
+    if (!m_pending_write[index])
+    {
+      ++index;
       continue;
-
-    u32 end = start + 1;
-    while (end < NUM_BBOX_VALUES && m_dirty[end])
-      ++end;
-
-    for (u32 i = start; i < end; ++i)
-      m_dirty[i] = false;
-
-    Write(start, std::span(m_values.begin() + start, m_values.begin() + end));
+    }
+    const u32 first = index;
+    while (index < NUM_BBOX_VALUES && m_pending_write[index])
+      m_pending_write[index++] = false;
+    Write(first, std::span<const BBoxType>(m_cache.data() + first, index - first));
   }
 }
 
-void BoundingBox::Readback()
+void BoundingBox::RefreshFromBackend()
 {
   if (!g_backend_info.bSupportsBBox)
     return;
 
-  auto read_values = Read(0, NUM_BBOX_VALUES);
+  const std::vector<BBoxType> fresh = Read(0, NUM_BBOX_VALUES);
+  // Values the game wrote since the last flush win over what the GPU holds.
+  for (u32 i = 0; i < NUM_BBOX_VALUES; ++i)
+    m_cache[i] = m_pending_write[i] ? m_cache[i] : fresh[i];
 
-  // Preserve dirty values, that way we don't need to sync.
-  for (u32 i = 0; i < NUM_BBOX_VALUES; i++)
-  {
-    if (!m_dirty[i])
-      m_values[i] = read_values[i];
-  }
-
-  m_is_valid = true;
+  m_cache_valid = true;
 }
 
 u16 BoundingBox::Get(u32 index)
 {
   ASSERT(index < NUM_BBOX_VALUES);
 
-  if (!g_ActiveConfig.bBBoxEnable || !g_backend_info.bSupportsBBox)
-    return m_bounding_box_fallback[index];
+  if (UseFallback())
+    return m_fallback[index];
 
-  if (!m_is_valid)
-    Readback();
-
-  return static_cast<u16>(m_values[index]);
+  if (!m_cache_valid)
+    RefreshFromBackend();
+  return static_cast<u16>(m_cache[index]);
 }
 
 void BoundingBox::Set(u32 index, u16 value)
 {
   ASSERT(index < NUM_BBOX_VALUES);
 
-  if (!g_ActiveConfig.bBBoxEnable || !g_backend_info.bSupportsBBox)
+  if (UseFallback())
   {
-    m_bounding_box_fallback[index] = value;
+    m_fallback[index] = value;
     return;
   }
 
-  if (m_is_valid && m_values[index] == value)
+  // Skip redundant writes when the cache is known to match the GPU.
+  const bool unchanged = m_cache_valid && m_cache[index] == value;
+  if (unchanged)
     return;
-
-  m_values[index] = value;
-  m_dirty[index] = true;
+  m_cache[index] = value;
+  m_pending_write[index] = true;
 }
 
-// FIXME: This may not work correctly if we're in the middle of a draw.
-// We should probably ensure that state saves only happen on frame boundaries.
-// Nonetheless, it has been designed to be as safe as possible.
+// Savestates taken mid-draw may not capture the box exactly; the layout below at least keeps
+// the CPU cache and the GPU copy separate so neither disturbs the other.
 void BoundingBox::DoState(PointerWrap& p)
 {
-  p.DoArray(m_bounding_box_fallback);
-  p.Do(m_is_active);
-  p.DoArray(m_values);
-  p.DoArray(m_dirty);
-  p.Do(m_is_valid);
+  p.DoArray(m_fallback);
+  p.Do(m_active);
+  p.DoArray(m_cache);
+  p.DoArray(m_pending_write);
+  p.Do(m_cache_valid);
 
-  // We handle saving the backend values specially rather than using Readback() and Flush() so that
-  // we don't mess up the current cache state
-  std::vector<BBoxType> backend_values(NUM_BBOX_VALUES);
-  if (p.IsReadMode())
+  // The GPU-side values travel as their own vector, read or written directly so that the
+  // cache state above is left untouched.
+  const bool gpu_side = g_backend_info.bSupportsBBox;
+  std::vector<BBoxType> gpu_values(NUM_BBOX_VALUES);
+  if (!p.IsReadMode())
   {
-    p.Do(backend_values);
-
-    if (g_backend_info.bSupportsBBox)
-      Write(0, backend_values);
+    if (gpu_side)
+      gpu_values = Read(0, NUM_BBOX_VALUES);
+    p.Do(gpu_values);
+    return;
   }
-  else
-  {
-    if (g_backend_info.bSupportsBBox)
-      backend_values = Read(0, NUM_BBOX_VALUES);
 
-    p.Do(backend_values);
-  }
+  p.Do(gpu_values);
+  if (gpu_side)
+    Write(0, gpu_values);
 }

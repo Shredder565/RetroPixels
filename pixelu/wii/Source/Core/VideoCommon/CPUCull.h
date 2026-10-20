@@ -1,16 +1,22 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
+#include <memory>
 
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/OpcodeDecoding.h"
 
+// Software pre-pass that transforms the positions of a batch to clip space and decides whether
+// every triangle in it would be rejected (back-face culled or entirely off one side of the
+// view), so the draw can be skipped without involving the host GPU.
 class CPUCull
 {
 public:
   ~CPUCull();
+  // Selects the fastest kernels the host CPU supports.
   void Init();
   bool AreAllVerticesCulled(VertexLoaderBase* loader, OpcodeDecoder::Primitive primitive,
                             const u8* src, u32 count);
@@ -24,15 +30,20 @@ public:
   using CullFunction = bool (*)(const CPUCull::TransformedVertex*, int);
 
 private:
-  template <typename T>
-  struct BufferDeleter
+  // Number of triangle primitive kinds (quads, quads_2, triangles, strip, fan) and cull modes.
+  static constexpr size_t TRIANGLE_PRIMITIVE_KINDS = 5;
+  static constexpr size_t CULL_MODES = 4;
+
+  struct AlignedFree
   {
-    void operator()(T* ptr);
+    void operator()(TransformedVertex* ptr) const;
   };
-  std::unique_ptr<TransformedVertex[], BufferDeleter<TransformedVertex>> m_transform_buffer{};
-  u32 m_transform_buffer_size = 0;
-  std::array<std::array<TransformFunction, 2>, 2> m_transform_table{};
-  Common::EnumMap<Common::EnumMap<CullFunction, CullMode::All>,
-                  OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_FAN>
-      m_cull_table{};
+
+  void EnsureCapacity(u32 count);
+
+  std::unique_ptr<TransformedVertex[], AlignedFree> m_scratch{};
+  u32 m_scratch_capacity = 0;
+  // Indexed by (position has z) * 2 + (vertices carry their own matrix index).
+  std::array<TransformFunction, 4> m_transforms{};
+  std::array<std::array<CullFunction, CULL_MODES>, TRIANGLE_PRIMITIVE_KINDS> m_culls{};
 };

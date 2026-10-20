@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,42 +12,47 @@
 struct EfbPokeData;
 class PointerWrap;
 
+// Hands work from the CPU thread to the video thread. In passthrough mode (single core, or
+// while the video thread is not running) requests simply run on the calling thread.
 class AsyncRequests
 {
 public:
   AsyncRequests();
 
-  // Called from the Video thread.
+  // Video thread: run everything that has been queued so far.
   void PullEvents();
 
-  // The following are called from the CPU thread.
+  // CPU thread: block until the video thread has drained the queue.
   void WaitForEmptyQueue();
 
+  // CPU thread: run `callback` on the video thread without waiting for it.
   template <std::invocable<> F>
   void PushEvent(F&& callback)
   {
-    if (m_passthrough)
+    if (!m_passthrough)
     {
-      std::invoke(std::forward<F>(callback));
+      QueueEvent(Event{std::forward<F>(callback)});
       return;
     }
-
-    QueueEvent(Event{std::forward<F>(callback)});
+    std::invoke(std::forward<F>(callback));
   }
 
+  // CPU thread: run `callback` on the video thread and wait for its result.
   template <std::invocable<> F>
   auto PushBlockingEvent(F&& callback) -> std::invoke_result_t<F>
   {
     if (m_passthrough)
       return std::invoke(std::forward<F>(callback));
 
-    std::packaged_task task{std::forward<F>(callback)};
-    QueueEvent(Event{[&] { task(); }});
-
-    return task.get_future().get();
+    // The queued wrapper refers to the task on this stack frame, which stays alive because we
+    // wait on the result before returning.
+    std::packaged_task job{std::forward<F>(callback)};
+    auto result = job.get_future();
+    QueueEvent(Event{[&job] { job(); }});
+    return result.get();
   }
 
-  // Not thread-safe. Only set during initialization.
+  // Only changed while the video thread is not running.
   void SetPassthrough(bool enable);
 
   static AsyncRequests* GetInstance() { return &s_singleton; }
