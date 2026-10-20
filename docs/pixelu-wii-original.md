@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 182999 | 43.9% |
-| Dolphin, untouched | 224035 | 53.7% |
-| Dolphin, with PixelU changes | 4224 | 1.0% |
+| Original (RetroPixels) | 183395 | 43.9% |
+| Dolphin, untouched | 222699 | 53.4% |
+| Dolphin, with PixelU changes | 5572 | 1.3% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **417021** | 100% |
+| **All** | **417429** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -117,7 +117,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
 | Core/Common/Logging | 581 | 581 | original |
 | Core/Core (top level) | 25031 | 892 | mixed (4% original) |
-| Core/Core/Boot | 2798 | 2798 | original |
+| Core/Core/Boot | 2838 | 2838 | original |
 | Core/Core/Config | 2398 | 2398 | original |
 | Core/Core/ConfigLoaders | 1245 | 1245 | original |
 | Core/Core/Debugger | 3384 | 3384 | original |
@@ -126,7 +126,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/DSP/Jit | 3625 | 3625 | original |
 | Core/Core/FifoPlayer | 1943 | 1943 | original |
 | Core/Core/HLE | 1429 | 1429 | original |
-| Core/Core/HW (top level) | 9909 | 9909 | original |
+| Core/Core/HW (top level) | 9961 | 9961 | original |
 | Core/Core/HW/DSPHLE | 6575 | 6575 | original |
 | Core/Core/HW/DSPLLE | 571 | 571 | original |
 | Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
@@ -137,14 +137,14 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW/SI | 3159 | 2504 | mixed (79% original) |
 | Core/Core/HW/Triforce | 3604 | 124 | mixed (3% original) |
 | Core/Core/HW/WiimoteCommon | 1006 | 1006 | original |
-| Core/Core/HW/WiimoteEmu | 7530 | 7530 | original |
+| Core/Core/HW/WiimoteEmu | 7553 | 7553 | original |
 | Core/Core/HW/WiimoteReal | 2362 | 2362 | original |
-| Core/Core/IOS (top level) | 3447 | 3447 | original |
+| Core/Core/IOS (top level) | 3655 | 3655 | original |
 | Core/Core/IOS/Crypto | 275 | 275 | original |
 | Core/Core/IOS/DI | 915 | 915 | original |
-| Core/Core/IOS/ES | 5107 | 5107 | original |
+| Core/Core/IOS/ES | 5115 | 5115 | original |
 | Core/Core/IOS/FS | 2744 | 2744 | original |
-| Core/Core/IOS/Network | 8383 | 0 | Dolphin |
+| Core/Core/IOS/Network | 8395 | 0 | Dolphin + PixelU change |
 | Core/Core/IOS/SDIO | 698 | 698 | original |
 | Core/Core/IOS/STM | 199 | 199 | original |
 | Core/Core/IOS/USB (top level) | 2597 | 0 | Dolphin |
@@ -153,7 +153,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/USB/OH0 | 576 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_HID | 584 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
-| Core/Core/IOS/WFS | 1229 | 1229 | original |
+| Core/Core/IOS/WFS | 1237 | 1237 | original |
 | Core/Core/PowerPC (top level) | 9982 | 9982 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
 | Core/Core/PowerPC/Interpreter | 4391 | 4391 | original |
@@ -161,7 +161,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/Jit64Common | 2509 | 2509 | original |
 | Core/Core/PowerPC/JitCommon | 2164 | 2164 | original |
 | Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
-| Core/DiscIO | 15909 | 15909 | original |
+| Core/DiscIO | 15966 | 15966 | original |
 | Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
@@ -232,23 +232,23 @@ batch rewrites them.
 | W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13455 | 13455 | original |
 | W3 | Common: platform, memory, network, crypto, file formats | 9026 | 9026 | original |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9417 | 9417 | original |
-| W5 | DiscIO: blob formats and compression | 7618 | 7618 | original |
-| W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8291 | 8291 | original |
+| W5 | DiscIO: blob formats and compression | 7637 | 7637 | original |
+| W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8329 | 8329 | original |
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10769 | 10769 | original |
 | W8 | PowerPC: interpreter and cached interpreter | 5474 | 5474 | original |
 | W9 | PowerPC: JIT common and Jit64 | 14792 | 14792 | original |
-| W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8491 | 8491 | original |
+| W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8543 | 8543 | original |
 | W11 | HW: DVD and GameCube memory cards | 8087 | 5389 | mixed (67% original) |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 7874 | 6494 | mixed (82% original) |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 10990 | 5487 | mixed (50% original) |
-| W14 | HW: Wii Remote (common, emulated, real) | 11244 | 11244 | original |
+| W14 | HW: Wii Remote (common, emulated, real) | 11267 | 11267 | original |
 | W15 | DSP: core, interpreter, LLE glue | 8461 | 8461 | original |
 | W16 | DSP: x64 JIT | 3625 | 3625 | original |
 | W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 6575 | 6575 | original |
-| W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 14614 | 14614 | original |
-| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12334 | 0 | Dolphin |
+| W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 14838 | 14838 | original |
+| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12346 | 0 | Dolphin + PixelU change |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 13973 | 0 | Dolphin |
-| W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13197 | 13197 | original |
+| W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13237 | 13237 | original |
 | W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10095 | 0 | Dolphin + PixelU change |
 | W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 14044 | 0 | Dolphin |
 | W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 11051 | 11051 | original |
@@ -2614,3 +2614,114 @@ Checks
       remaining runs are class declarations in the headers (SWGfx.h,
       NullGfx.h, NullTexture.h, SWTexture.h, SWEfbInterface.h and the
       VideoBackend.h files).
+
+- Wii keys log: removed every Nintendo key from PixelU-Wii. The engine now
+  reads the owner's own keys file, and RetroPixels Native asks for it
+  before a Wii game.
+  - Removed (now loaded from the owner's files):
+    - `IOSC.cpp`:
+      - retail and development common keys, Korean common key, SD key;
+      - the default console private key, its signature, key ID and device
+        ID;
+      - the root public keys (retail and development).
+    - `DolReader.cpp`: the Espresso ancast keys (retail and development)
+      and their IV.
+    - `WiiSave.cpp`: `SD_INITIAL_IV`.
+    - `NetKDRequest.h`: the WC24 mail-check HMAC key.
+    - `MotionPlus.cpp`: the secret square root used to answer the
+      MotionPlus challenge (`CHALLENGE_SQRT_V`). The public modulus `n` is
+      kept.
+  - Kept (not Nintendo secrets):
+    - `WiiSave.cpp` `MD5_BLANKER`: the fixed filler that replaces the MD5
+      while a save header is hashed. It is a format constant, not a key.
+    - `WiiSave.cpp` `NG_ID`: a placeholder console ID written into
+      exported backups.
+    - Wiimote extension encryption tables: the algorithm's tables; the key
+      comes from the game.
+    - Not Nintendo's:
+      - ARDecrypt tables (Datel's);
+      - Infinity and Skylanders constants (the toy makers');
+      - the updater's ed25519 public key (Dolphin's);
+      - the sect233r1 curve parameters (public);
+      - SSL.cpp's SHA-256 hashes of the user's own certificate dumps.
+    - `Data/Sys/Wii/shared2/wc24/nwc24msg.cfg`: Dolphin's default WC24
+      account values (password, mlchkid). They are service credentials,
+      not keys, so they are left as they were; flagged for review.
+  - Owner's files, in the Wii NAND root (`User/Wii`, or Dolphin.ini
+    `[General] NANDRootPath`):
+    - `keys.bin` (BootMii, 1 KiB) is read first, then `otp.bin`:
+      - a Wii's 128-byte OTP: retail MS/CA IDs, no NG signature, no Korean
+        key;
+      - a Wii U's 1 KiB OTP: bank 0, plus bank 6 at 0x300 for the MS/CA
+        IDs, NG key ID and signature, and the Korean key at 0x348
+        (WiiUBrew "Hardware/eFuse").
+    - `wii_keys.txt` (optional, `name = hex` lines) holds the keys a
+      console dump doesn't have:
+      - `sd_key`, `sd_iv`;
+      - `root_key`, `root_key_dev`;
+      - `espresso_ancast_key`, `espresso_ancast_key_dev`,
+        `espresso_ancast_iv`;
+      - `wc24_mail_check_key`;
+      - `motionplus_sqrt_v`.
+    - The Espresso ancast key is not in the Wii U's Latte OTP (it is in the
+      Espresso's own fuses), so vWii ancast images only load when it is
+      given in `wii_keys.txt`. Otherwise there is a clear message.
+    - Common keys load only when the dump's console type (CA ID 2 means
+      development) matches the IOSC console type.
+  - Without a keys file:
+    - GameCube is unchanged. Homebrew DOL/ELF still boots.
+    - Wii discs, WADs and NAND titles stop before boot with one message
+      ("RetroPixels needs a keys file from your own Wii...").
+    - Title keys can't be decrypted:
+      - VolumeWii reads fail;
+      - WAD content checks fail;
+      - WIA/RVZ conversion fails;
+      - DirectoryBlob won't encrypt;
+      - WFSI returns ENOTICKET.
+    - The game list still shows Wii discs: ID, maker, revision, country and
+      name fall back to the disc's own header. There is no banner.
+    - The verifier adds a "results may not be real" problem.
+    - SD save import/export says the SD keys are missing. It never opens
+      (or truncates) data.bin.
+  - Without the extra keys, even with a keys file:
+    - Root-to-CA certificate signatures are not checked (the rest of the
+      chain is).
+    - WC24 mail HMACs are not checked.
+    - MotionPlus "y1" challenge answers are wrong; games retry. This is a
+      possible gameplay regression for MotionPlus titles and is not
+      confirmed on hardware.
+  - RetroPixels Native: before a Wii/WiiWare game, if the Wii root has no
+    usable keys, a "Wii keys file" window offers:
+    - Find keys on this PC: a background search with a Stop button.
+      - It looks in Downloads, Desktop and Documents, then fixed drives and
+        memory cards (C: to Z:).
+      - It skips system, program, cache and VCS folders and symlinks; the
+        limits are 12 folders deep and 90 s.
+      - Names searched: `*keys*.bin`, `*otp*.bin`, `*nand*.bin`, by exact
+        size.
+      - Matches are checked by layout, copies are listed once, and the
+        list shows each console's ID.
+    - Choose file...
+    - How to get yours: opens wiibrew.org/wiki/BootMii, plus two lines
+      saying the file comes from the owner's own Wii.
+    - Cancel.
+    - The chosen file is converted to keys.bin (an old one is kept as
+      keys.bin.old) and the game starts. Nothing is downloaded.
+  - Checked:
+    - IOSC harness: an old build with the tables replaced by synthetic keys
+      vs the new build with the same synthetic keys.bin/otp.bin/
+      wii_keys.txt, with hash streams compared. Retail, development, Wii
+      otp.bin and Wii U otp.bin are identical. The no-keys, mismatch and
+      parser checks pass. A mutated sd_key gives DIFF (negative control).
+    - Go tests (synthetic dumps only) for:
+      - root lookup with NANDRootPath;
+      - HaveWiiKeys, matching the engine's checks;
+      - layout checks and conversions;
+      - nand.bin tail;
+      - install;
+      - scan (skips, depth, dedupe, cancel, timeout).
+    - `go vet`, `go test`, the `GOOS=windows` vet and the Windows build.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: diagnostics
+      are identical to the base tree for every changed file and every
+      includer of `IOSC.h` and `ES/Formats.h`. MSVC was not run.
