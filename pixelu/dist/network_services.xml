@@ -1,6 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example network_services.xml for PixelU (RetroPixels).
+
+  Copy it into PixelU's settings folder (next to settings.xml) and pick
+  "Custom" as the network service in General settings > Account. PixelU then
+  sends the console's online requests to the servers listed here. Every
+  entry is optional: a missing name falls back to "Custom", a missing URL to
+  the official server. The URLs below are the official ones; replace the
+  ones your own server handles.
+-->
 <content>
-    <networkname>CustomExample</networkname>
+    <!-- name shown for this service in the settings -->
+    <networkname>MyServer</networkname>
+    <!-- 1 accepts any TLS certificate (only for a test server of your own) -->
     <disablesslverification>0</disablesslverification>
     <urls>
         <act>https://account.nintendo.net</act>

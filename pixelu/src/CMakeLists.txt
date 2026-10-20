@@ -83,7 +83,7 @@ pixelu_library(CemuBin)
 
 if(WIN32)
 	# icons, version block and the font, plus the application manifest
-	target_sources(CemuBin PRIVATE resource/cemu.rc ../dist/windows/Cemu.manifest)
+	target_sources(CemuBin PRIVATE resource/cemu.rc ../dist/windows/pixelu.manifest)
 endif()
 
 if(MSVC AND MSVC_VERSION EQUAL 1940)
