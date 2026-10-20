@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 148119 | 54.3% |
-| Cemu, untouched | 77945 | 28.6% |
-| Cemu, with PixelU changes | 6757 | 2.5% |
+| Original (RetroPixels) | 158750 | 59.1% |
+| Cemu, untouched | 64200 | 23.9% |
+| Cemu, with PixelU changes | 5775 | 2.1% |
 | PixelU-added files (MPL-2.0 header) | 519 | 0.2% |
-| Third-party | 39404 | 14.4% |
-| **All** | **272744** | 100% |
+| Third-party | 39404 | 14.7% |
+| **All** | **268648** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -148,14 +148,14 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
 | Cafe/OS/RPL | 2525 | 2525 | original |
 | Cafe/TitleList | 2313 | 2313 | original |
-| Cemu/DiscordPresence | 846 | 0 | Cemu |
-| Cemu/ExpressionParser | 725 | 0 | Cemu |
-| Cemu/FileCache | 762 | 0 | Cemu |
-| Cemu/Logging | 415 | 0 | Cemu |
-| Cemu/napi | 2450 | 0 | Cemu |
-| Cemu/ncrypto | 1203 | 0 | Cemu + PixelU change |
-| Cemu/nex | 4220 | 0 | Cemu |
-| Cemu/PPCAssembler | 4106 | 0 | Cemu |
+| Cemu/DiscordPresence | 850 | 850 | original |
+| Cemu/ExpressionParser | 600 | 600 | original |
+| Cemu/FileCache | 535 | 535 | original |
+| Cemu/Logging | 430 | 430 | original |
+| Cemu/napi | 1986 | 1986 | original |
+| Cemu/ncrypto | 921 | 921 | original |
+| Cemu/nex | 3410 | 3410 | original |
+| Cemu/PPCAssembler | 1893 | 1893 | original |
 | Cemu/Tools | 2017 | 0 | Cemu |
 | Common | 31625 | 3311 | mixed (10% original), 28314 lines third-party |
 | config | 2969 | 2132 | mixed (72% original) |
@@ -185,7 +185,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | util/crypto | 896 | 478 | mixed (53% original), 418 lines third-party |
 | util/DXGIWrapper | 77 | 77 | original |
 | util/Fiber | 148 | 148 | original |
-| util/helpers | 2327 | 2327 | original |
+| util/helpers | 2333 | 2333 | original |
 | util/highresolutiontimer | 171 | 171 | original |
 | util/ImageWriter | 123 | 123 | original |
 | util/IniParser | 225 | 225 | original |
@@ -1146,3 +1146,78 @@ Done:
   a 64-bit value; the DSU port (uint16) is never loaded from settings.xml;
   legacy graphic packs insert the normalized path but store the preset
   under the original one.
+- Batch 13a: pixelu/src/Cemu rewritten as original code: the logging
+  front end and its asynchronous file writer, the ExpressionParser, the
+  FileCache container, the Discord rich presence client, the crypto helpers
+  (ncrypto), the online service client (napi: account, ECS/IAS/NUS/CCS SOAP,
+  IDBE, version lists), the single line PowerPC assembler and table driven
+  disassembler (PPCAssembler, including the ppcAsmTest self tests), and the
+  NEX/PRUDP friend service client (nex). Not rewritten: Tools/DownloadManager
+  (see below).
+  File names, public interfaces and every symbol used outside these folders
+  are unchanged. ExpressionParser results, the FileCache file format (read
+  and written byte for byte the same), napi request XML, URLs, headers and
+  TLS setup, the PPCAssembler output words, error texts and relocations for
+  every instruction and syntax variant, and the NEX/PRUDP wire bytes are
+  unchanged. PixelU's iosuCrypto_hasSeeprom addition in ncrypto is kept.
+  Old-vs-new harnesses (ASan/UBSan) give identical results: the
+  ExpressionParser 2.1M expressions on g++ and 13.1M on the clang
+  fast_float path; FileCache 300 seeds of 200-1700 random operations with
+  reopen, compression and damaged files (final file bytes identical, cross
+  reads both ways); the Discord client against a fake IPC server; ncrypto
+  200 seeds; napi against a fake libcurl 200 seeds x 250 calls covering
+  every log path (ECDSA signatures verified, then masked); PPCAssembler
+  200 seeds (every mnemonic in 63 operand shapes with branch hints, 20000
+  random and structured words disassembled and reassembled, every
+  assembled word disassembled again with bit flips, 20000 random source
+  lines, 5000 data directive lines); nex against a scripted NEX server
+  behind a fake UDP layer and fake clock (60 seeds x 300 steps: 40
+  identical, in the other 20 the old code deadlocks, crashes or traps and
+  the new output is identical up to that point; 30 more seeds with error
+  answers and truncated lists run on the new code only and finish
+  cleanly), plus 40 seeds x 4000 serialisation fuzz cases. All callers
+  compile with the same diagnostics on g++ and clang++.
+  Fixes and defined behaviour: an empty or whitespace-only expression throws
+  instead of reading an empty stack; the FileCache writer thread starts
+  lazily, drains on stop and can no longer hang at exit, and a zero sized
+  table in the header no longer overflows the heap; the Discord client
+  writes valid JSON for party fields, parses READY strings containing braces
+  and tries discord-ipc-0..9 on Windows; Logging's waitForFlush waits for
+  the batch to be written and returns when no log file is open; napi frees
+  its curl header lists, locks the service URL override map and reports a
+  TIV without '.' as an XML error instead of reading past the string; the
+  PPCAssembler register number parser wraps without signed overflow.
+  NEX: login, ticket and account registration calls that get an error
+  answer now fail the login instead of waiting forever; a call whose error
+  handler queues another call (adding or removing a friend while the
+  connection drops) no longer deadlocks the nex thread on the request
+  queue lock; a friend list refresh during teardown no longer dereferences
+  a null session; updatePreferencesAsync and updateCommentAsync without a
+  session report ERR_NOT_CONNECTED to the callback;
+  requestGetAllInformation with a callback sends zeroed presence data
+  instead of uninitialised memory; malformed or truncated packets, unknown
+  PRUDP packet types and call parameters of 7 KB or more are logged and
+  dropped or failed instead of hitting assert_dbg or reading out of
+  bounds; list and string readers stop at the end of the buffer, so a
+  truncated friend list keeps only the entries it holds instead of padding
+  the list to the announced count with pid 0 entries or stale entries of
+  the previous list; a length placeholder near the end of a buffer is
+  patched only inside it; sockets whose bind fails are closed; picking
+  port 50000 no longer throws out_of_range; fragment sequence ids wrap as
+  u16.
+  Kept on purpose: PPCAssembler quirks (no operand swaps, highest priority
+  then last row wins when disassembling, '#' starts a comment even inside
+  strings, a \x escape ends a string literal, unknown escapes keep the
+  backslash, rotate aliases OR their fields without masking, x86 style
+  double to integer conversion of data directives); NEX quirks
+  (updateMyPresence keeps the caller's game key but sends the foreground
+  title, a second incoming request hides an added friend notification, one
+  service message is handled per update, empty reliable data packets are
+  not queued, the PRUDP random number sequence).
+  Log texts differ in places.
+  Tools/DownloadManager is still the original Cemu code: it drives account
+  login, ticket sync, TMD/content download, verification and installation
+  through napi, ncrypto, FST, FileStream, FileCache, the title list and the
+  thread pool, and a trustworthy old-vs-new comparison needs a fake title
+  server with valid tickets, TMDs and encrypted FST content. It needs its
+  own batch.
