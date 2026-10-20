@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -28,8 +27,12 @@ enum class PrimitiveType : u32
   TriangleStrip,
 };
 
+// The fixed-function states of a host pipeline, each packed into one 32-bit word so they can be
+// compared, hashed and stored cheaply. Copies only transfer `hex`.
+
 union RasterizationState
 {
+  // From the GX generation mode; culling is off for points and lines.
   void Generate(const BPMemory& bp, PrimitiveType primitive_type);
 
   RasterizationState() = default;
@@ -78,10 +81,7 @@ union FramebufferState
   BitField<16, 8, u32> samples;
   BitField<24, 1, u32> per_sample_shading;
 
-  // Note: all additional color attachments
-  // have the same format as `color_texture_format`
-  // TODO: in the future improve this so every attachment
-  // can specify its own format
+  // Extra colour targets, all in color_texture_format.
   BitField<25, 3, u32> additional_color_attachment_count;
 
   u32 hex = 0;
@@ -89,6 +89,7 @@ union FramebufferState
 
 union DepthState
 {
+  // From the GX Z mode register.
   void Generate(const BPMemory& bp);
 
   DepthState() = default;
@@ -117,10 +118,11 @@ union DepthState
 
 union BlendingState
 {
+  // From the GX blend mode, alpha test, destination alpha and EFB format.
   void Generate(const BPMemory& bp);
 
-  // HACK: Replaces logical operations with blend operations.
-  // Will not be bit-correct, and in some cases not even remotely in the same ballpark.
+  // Replaces the logic op with a blend equation that comes close for most operations. The
+  // result is not exact, and for some operations not close at all.
   void ApproximateLogicOpWithBlending();
   bool LogicOpApproximationIsExact();
   bool LogicOpApproximationWantsShaderHelp();
@@ -155,6 +157,7 @@ union BlendingState
   BitField<17, 3, SrcBlendFactor> src_factor_alpha;
   BitField<20, 4, LogicOp> logic_mode;
 
+  // True when blending is on with dual-source output and a factor reads the second source.
   bool RequiresDualSrc() const;
 
   u32 hex = 0;
@@ -162,6 +165,7 @@ union BlendingState
 
 struct SamplerState
 {
+  // From texture unit `index`'s TexMode0/TexMode1 registers.
   void Generate(const BPMemory& bp, u32 index);
 
   SamplerState() = default;
@@ -185,29 +189,27 @@ struct SamplerState
 
   constexpr u64 Hex() const { return tm0.hex | (static_cast<u64>(tm1.hex) << 32); }
 
-  // Based on BPMemory TexMode0/TexMode1, but with slightly higher precision and some
-  // simplifications
+  // Host form of TexMode0/TexMode1, with finer LOD units.
   union TM0
   {
-    // BP's mipmap_filter can be None, but that is represented here by setting min_lod and max_lod
-    // to 0
+    // A GX mip filter of "none" is expressed by min_lod = max_lod = 0 instead.
     BitField<0, 1, FilterMode> min_filter;
     BitField<1, 1, FilterMode> mag_filter;
     BitField<2, 1, FilterMode> mipmap_filter;
-    // Guaranteed to be valid values (i.e. not 3)
+    // Always a valid mode (the reserved value 3 is mapped to clamp).
     BitField<3, 2, WrapMode> wrap_u;
     BitField<5, 2, WrapMode> wrap_v;
     BitField<7, 1, LODType> diag_lod;
-    BitField<8, 16, s32> lod_bias;         // multiplied by 256, higher precision than normal
-    BitField<24, 1, bool, u32> lod_clamp;  // TODO: This isn't currently implemented
+    BitField<8, 16, s32> lod_bias;         // in 1/256 units
+    BitField<24, 1, bool, u32> lod_clamp;  // stored, not used by the backends
     BitField<25, 4, u32> anisotropic_filtering;
     u32 hex = 0;
   };
   union TM1
   {
-    // Min is guaranteed to be less than or equal to max
-    BitField<0, 8, u32> min_lod;  // multiplied by 16
-    BitField<8, 8, u32> max_lod;  // multiplied by 16
+    // min_lod <= max_lod always holds.
+    BitField<0, 8, u32> min_lod;  // in 1/16 units
+    BitField<8, 8, u32> max_lod;  // in 1/16 units
     u32 hex = 0;
   };
 
@@ -224,6 +226,8 @@ struct std::hash<SamplerState>
   }
 };
 
+// Ready-made states for utility drawing. The "invalid" ones have every bit set, so they never
+// match a real state.
 namespace RenderState
 {
 RasterizationState GetInvalidRasterizationState();

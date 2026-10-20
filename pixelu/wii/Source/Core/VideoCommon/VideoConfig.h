@@ -1,11 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// IMPORTANT: UI etc should modify g_Config. Graphics code should read g_ActiveConfig.
-// The reason for this is to get rid of race conditions etc when the configuration
-// changes in the middle of a frame. This is done by copying g_Config to g_ActiveConfig
-// at the start of every frame. No one should ever change members of g_ActiveConfig
-// directly.
+// Two copies of the video settings exist. The UI and config system write g_Config; the video
+// code reads g_ActiveConfig, which is refreshed from g_Config once per frame so settings never
+// change half-way through a frame. Nothing should write g_ActiveConfig directly.
 
 #pragma once
 
@@ -21,13 +18,13 @@ constexpr int EFB_SCALE_AUTO_INTEGRAL = 0;
 
 enum class AspectMode : int
 {
-  Auto,           // ~4:3 or ~16:9 (auto detected)
-  ForceWide,      // ~16:9
-  ForceStandard,  // ~4:3
-  Stretch,
-  Custom,         // Forced relative custom AR
-  CustomStretch,  // Forced absolute custom AR
-  Raw,            // Forced squared pixels
+  Auto,           // detected 4:3 or 16:9
+  ForceWide,      // 16:9
+  ForceStandard,  // 4:3
+  Stretch,        // fill the window
+  Custom,         // custom ratio, scaled like the game's own
+  CustomStretch,  // custom ratio, absolute
+  Raw,            // square pixels
 };
 
 enum class StereoMode : int
@@ -92,11 +89,11 @@ enum class TriState : int
 
 enum class FrameDumpResolutionType : int
 {
-  // Window resolution (not including potential back buffer black borders)
+  // The window's drawn area (black borders excluded).
   WindowResolution,
-  // The aspect ratio corrected XFB resolution (XFB pixels might not have been square)
+  // The XFB at internal resolution, stretched to the game's aspect ratio.
   XFBAspectRatioCorrectedResolution,
-  // The raw unscaled XFB resolution (based on "internal resolution" scale)
+  // The XFB at internal resolution, as stored.
   XFBRawResolution,
 };
 
@@ -107,7 +104,7 @@ enum class VertexLoaderType : int
   Compare
 };
 
-// Bitmask containing information about which configuration has changed for the backend.
+// Flags passed with the config-changed event, one per kind of change the backends care about.
 enum ConfigChangeBits : u32
 {
   CONFIG_CHANGE_BIT_HOST_CONFIG = (1 << 0),
@@ -123,48 +120,46 @@ enum ConfigChangeBits : u32
   CONFIG_CHANGE_BIT_HDR = (1 << 10),
 };
 
-// Static config per API
+// What the active backend and device can do. Filled by the backend's InitBackendInfo.
 struct BackendInfo
 {
   APIType api_type = APIType::Nothing;
   std::string DisplayName;
 
-  std::vector<std::string> Adapters;  // for D3D
+  std::vector<std::string> Adapters;  // D3D/Vulkan adapter names
   std::vector<u32> AAModes;
 
-  // TODO: merge AdapterName and Adapters array
-  std::string AdapterName;  // for OpenGL
+  std::string AdapterName;  // OpenGL renderer name
 
   u32 MaxTextureSize = 16384;
   bool bUsesLowerLeftOrigin = false;
   bool bUsesExplictQuadBuffering = false;
-  bool bSupportsExclusiveFullscreen = false;  // Note: Vulkan can change this at runtime.
+  bool bSupportsExclusiveFullscreen = false;  // may change at run time on Vulkan
   bool bSupportsDualSourceBlend = false;
   bool bSupportsPrimitiveRestart = false;
   bool bSupportsGeometryShaders = false;
   bool bSupportsComputeShaders = false;
   bool bSupports3DVision = false;
-  bool bSupportsEarlyZ = false;         // needed by PixelShaderGen, so must stay in VideoCommon
-  bool bSupportsBindingLayout = false;  // Needed by ShaderGen, so must stay in VideoCommon
+  bool bSupportsEarlyZ = false;
+  bool bSupportsBindingLayout = false;
   bool bSupportsBBox = false;
-  bool bSupportsGSInstancing = false;  // Needed by GeometryShaderGen, so must stay in VideoCommon
+  bool bSupportsGSInstancing = false;
   bool bSupportsPostProcessing = false;
   bool bSupportsPaletteConversion = false;
-  bool bSupportsClipControl = false;  // Needed by VertexShaderGen, so must stay in VideoCommon
+  bool bSupportsClipControl = false;
   bool bSupportsSSAA = false;
-  bool bSupportsFragmentStoresAndAtomics = false;  // a.k.a. OpenGL SSBOs a.k.a. Direct3D UAVs
-  bool bSupportsDepthClamp = false;  // Needed by VertexShaderGen, so must stay in VideoCommon
+  bool bSupportsFragmentStoresAndAtomics = false;  // SSBOs / UAVs in fragment shaders
+  bool bSupportsDepthClamp = false;
   bool bSupportsReversedDepthRange = false;
   bool bSupportsLogicOp = false;
   bool bSupportsMultithreading = false;
   bool bSupportsGPUTextureDecoding = false;
   bool bSupportsST3CTextures = false;
   bool bSupportsCopyToVram = false;
-  bool bSupportsBitfield = false;  // Needed by UberShaders, so must stay in VideoCommon
-  // Needed by UberShaders, so must stay in VideoCommon
+  bool bSupportsBitfield = false;
   bool bSupportsDynamicSamplerIndexing = false;
   bool bSupportsBPTCTextures = false;
-  bool bSupportsFramebufferFetch = false;  // Used as an alternative to dual-source blend on GLES
+  bool bSupportsFramebufferFetch = false;  // stands in for dual-source blending where missing
   bool bSupportsBackgroundCompiling = false;
   bool bSupportsLargePoints = false;
   bool bSupportsPartialDepthCopies = false;
@@ -185,11 +180,13 @@ struct BackendInfo
 
 extern BackendInfo g_backend_info;
 
-// NEVER inherit from this class.
+// The video settings. Final on purpose: it is copied by value every frame.
 struct VideoConfig final
 {
   VideoConfig() = default;
+  // Reads every setting from the config system.
   void Refresh();
+  // Fixes settings the current backend cannot honour.
   void VerifyValidity();
   static void Init();
   static void Shutdown();
@@ -228,23 +225,19 @@ struct VideoConfig final
   float fArbitraryMipmapDetectionThreshold = 0;
   bool bHDR = false;
 
-  // Color Correction
+  // Colour correction
   struct
   {
-    // Color Space Correction:
     bool bCorrectColorSpace = false;
     ColorCorrectionRegion game_color_space = ColorCorrectionRegion::SMPTE_NTSCM;
 
-    // Gamma Correction:
     bool bCorrectGamma = false;
     float fGameGamma = 2.35f;
     bool bSDRDisplayGammaSRGB = true;
-    // Custom gamma when the display is not sRGB
+    // Display gamma used when the display is not treated as sRGB.
     float fSDRDisplayCustomGamma = 2.2f;
 
-    // HDR:
-    // 203 is a good default value that matches the brightness of many SDR screens.
-    // It's also the value recommended by the ITU.
+    // Brightness of SDR white on an HDR display; 203 nits is the ITU's reference value.
     float fHDRPaperWhiteNits = 203.f;
   } color_correction;
 
@@ -299,18 +292,18 @@ struct VideoConfig final
   bool bSkipPresentingDuplicateXFBs = false;
   bool bCopyEFBScaled = false;
   int iSafeTextureCache_ColorSamples = 0;
-  float fAspectRatioHackW = 1;  // Initial value needed for the first frame
+  float fAspectRatioHackW = 1;  // 1 until the first frame sets it
   float fAspectRatioHackH = 1;
   bool bEnablePixelLighting = false;
   bool bFastDepthCalc = false;
   bool bVertexRounding = false;
   bool bVISkip = false;
   int iEFBAccessTileSize = 0;
-  int iSaveTargetId = 0;  // TODO: Should be dropped
+  int iSaveTargetId = 0;
   u32 iMissingColorValue = 0;
   bool bFastTextureSampling = false;
 #ifdef __APPLE__
-  bool bNoMipmapping = false;  // Used by macOS fifoci to work around an M1 bug
+  bool bNoMipmapping = false;
 #endif
 
   // Stereoscopy
@@ -321,47 +314,40 @@ struct VideoConfig final
   bool bStereoSwapEyes = false;
   bool bStereoEFBMonoDepth = false;
 
-  // D3D only config, mostly to be merged into the above
+  // Adapter index (D3D, Vulkan)
   int iAdapter = 0;
 
-  // Metal only config
+  // Metal settings (kept for config compatibility)
   TriState iManuallyUploadBuffers = TriState::Auto;
   TriState iUsePresentDrawable = TriState::Auto;
 
-  // Enable API validation layers, currently only supported with Vulkan.
+  // Vulkan: validation layers, threaded submission, and how many draws pass before a command
+  // buffer is submitted early.
   bool bEnableValidationLayer = false;
-
-  // Multithreaded submission, currently only supported with Vulkan.
   bool bBackendMultithreading = true;
-
-  // Early command buffer execution interval in number of draws.
-  // Currently only supported with Vulkan.
   int iCommandBufferExecuteInterval = 0;
 
-  // Shader compilation settings.
+  // Shader compilation
   bool bWaitForShadersBeforeStarting = false;
   ShaderCompilationMode iShaderCompilationMode{};
 
-  // Number of shader compiler threads.
-  // 0 disables background compilation.
-  // -1 uses an automatic number based on the CPU threads.
+  // Compiler thread counts: 0 = compile on the video thread, -1 = pick from the CPU count.
   int iShaderCompilerThreads = 0;
   int iShaderPrecompilerThreads = 0;
 
-  // Loading custom drivers on Android
+  // Custom driver library (Android)
   std::string customDriverLibraryName;
 
-  // Vertex loader
   VertexLoaderType vertex_loader_type;
 
-  // Utility
+  // Derived settings
   bool UseVSForLinePointExpand() const
   {
+    // Vertex-shader expansion when supported, required without geometry shaders, otherwise
+    // the user's choice.
     if (!g_backend_info.bSupportsVSLinePointExpand)
       return false;
-    if (!g_backend_info.bSupportsGeometryShaders)
-      return true;
-    return bPreferVSForLinePointExpansion;
+    return !g_backend_info.bSupportsGeometryShaders || bPreferVSForLinePointExpansion;
   }
   bool MultisamplingEnabled() const { return iMultisamples > 1; }
   bool ExclusiveFullscreenEnabled() const
@@ -374,36 +360,29 @@ struct VideoConfig final
            !bArbitraryMipmapDetection;
   }
   bool UseVertexRounding() const { return bVertexRounding && iEFBScale != 1; }
+  // True when manual texture sampling has to cope with textures whose size or layer count
+  // differs from what the game set: hi-res texture packs, scaled EFB copies at a raised
+  // internal resolution, or stereoscopic copies with two layers.
   bool ManualTextureSamplingWithCustomTextureSizes() const
   {
-    // If manual texture sampling is disabled, we don't need to do anything.
     if (bFastTextureSampling)
       return false;
-    // Hi-res textures break the wrapping logic used by manual texture sampling, as a texture's
-    // size won't match the size the game sets.
-    if (bHiresTextures)
-      return true;
-    // Hi-res EFB copies (but not native-resolution EFB copies at higher internal resolutions)
-    // also result in different texture sizes that need special handling.
-    if (iEFBScale != 1 && bCopyEFBScaled)
-      return true;
-    // Stereoscopic 3D changes the number of layers some textures have (EFB copies have 2 layers,
-    // while game textures still have 1), meaning bounds checks need to be added.
-    if (stereo_mode != StereoMode::Off)
-      return true;
-    // Otherwise, manual texture sampling can use the sizes games specify directly.
-    return false;
+    return bHiresTextures || (iEFBScale != 1 && bCopyEFBScaled) || stereo_mode != StereoMode::Off;
   }
   bool UsingUberShaders() const;
   u32 GetShaderCompilerThreads() const;
   u32 GetShaderPrecompilerThreads() const;
 
-  float GetCustomAspectRatio() const { return (float)custom_aspect_width / custom_aspect_height; }
+  float GetCustomAspectRatio() const
+  {
+    return static_cast<float>(custom_aspect_width) / static_cast<float>(custom_aspect_height);
+  }
 };
 
 extern VideoConfig g_Config;
 extern VideoConfig g_ActiveConfig;
 
-// Called every frame.
+// Copies g_Config into g_ActiveConfig (once per frame).
 void UpdateActiveConfig();
+// Applies a changed config to the video objects and fires the config-changed event.
 void CheckForConfigChanges();

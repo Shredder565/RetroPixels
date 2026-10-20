@@ -1,47 +1,49 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <memory>
+#include <optional>
 
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
 
 class PointerWrap;
 
-// This class is responsible for tracking the game's aspect ratio.
-// This exclusively supports 4:3 or 16:9 detection by default.
+// Decides whether the game is showing 4:3 or 16:9 (anamorphic) pictures. Settings can force
+// either; otherwise Wii games follow the system setting and GameCube games are watched by a
+// heuristic on their projection matrices.
 class WidescreenManager
 {
 public:
   WidescreenManager();
 
-  // Just a helper to tell whether the game seems to be running in widescreen,
-  // or if it's being forced to.
+  // True when the game is (or is being treated as) widescreen.
   bool IsGameWidescreen() const { return m_is_game_widescreen; }
 
   void DoState(PointerWrap& p);
 
 private:
-  enum class HeuristicState
+  enum class Detection
   {
-    Inactive,
-    Active_NotFound,
-    Active_Found_Normal,
-    Active_Found_Anamorphic,
+    Off,
+    Undecided,
+    SawStandard,
+    SawAnamorphic,
   };
 
-  // Returns whether the widescreen state wants to change, and its target value
+  // The widescreen value settings impose, if any.
   std::optional<bool> GetWidescreenOverride() const;
+  // Runs after each frame on GameCube.
   void UpdateWidescreenHeuristic();
+  void OnConfigChanged(u32 changed_bits);
 
   bool m_is_game_widescreen = false;
-  bool m_was_orthographically_anamorphic = false;
-  HeuristicState m_heuristic_state = HeuristicState::Inactive;
+  bool m_last_ortho_anamorphic = false;
+  Detection m_detection = Detection::Off;
 
-  Common::EventHook m_update_widescreen;
-  Common::EventHook m_config_changed;
+  Common::EventHook m_after_frame_hook;
+  Common::EventHook m_config_hook;
 };
 
 extern std::unique_ptr<WidescreenManager> g_widescreen;
