@@ -1,9 +1,7 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Debug/MemoryPatches.h"
 
-#include <algorithm>
 #include <utility>
 
 namespace Common::Debug
@@ -14,45 +12,45 @@ MemoryPatch::MemoryPatch(u32 address_, std::vector<u8> value_)
 }
 
 MemoryPatch::MemoryPatch(u32 address_, u32 value_)
-    : MemoryPatch(address_, {static_cast<u8>(value_ >> 24), static_cast<u8>(value_ >> 16),
-                             static_cast<u8>(value_ >> 8), static_cast<u8>(value_)})
+    : address(address_), value{static_cast<u8>(value_ >> 24), static_cast<u8>(value_ >> 16),
+                               static_cast<u8>(value_ >> 8), static_cast<u8>(value_)}
 {
 }
 
 MemoryPatches::MemoryPatches() = default;
 MemoryPatches::~MemoryPatches() = default;
 
+void MemoryPatches::Append(const Core::CPUThreadGuard& guard, MemoryPatch patch,
+                           MemoryPatch::ApplyType type)
+{
+  patch.type = type;
+  m_patches.push_back(std::move(patch));
+  Patch(guard, m_patches.size() - 1);
+}
+
+// The 32-bit forms add a patch even when one already exists at the address (the debugger's
+// "patch instruction" commands stack); the byte-vector forms replace an existing one.
 void MemoryPatches::SetPatch(const Core::CPUThreadGuard& guard, u32 address, u32 value)
 {
-  const std::size_t index = m_patches.size();
-  m_patches.emplace_back(address, value);
-  Patch(guard, index);
+  Append(guard, MemoryPatch(address, value), MemoryPatch::ApplyType::Once);
 }
 
 void MemoryPatches::SetPatch(const Core::CPUThreadGuard& guard, u32 address, std::vector<u8> value)
 {
   UnsetPatch(guard, address);
-  const std::size_t index = m_patches.size();
-  m_patches.emplace_back(address, std::move(value));
-  Patch(guard, index);
+  Append(guard, MemoryPatch(address, std::move(value)), MemoryPatch::ApplyType::Once);
 }
 
 void MemoryPatches::SetFramePatch(const Core::CPUThreadGuard& guard, u32 address, u32 value)
 {
-  const std::size_t index = m_patches.size();
-  m_patches.emplace_back(address, value);
-  m_patches.back().type = MemoryPatch::ApplyType::EachFrame;
-  Patch(guard, index);
+  Append(guard, MemoryPatch(address, value), MemoryPatch::ApplyType::EachFrame);
 }
 
 void MemoryPatches::SetFramePatch(const Core::CPUThreadGuard& guard, u32 address,
                                   std::vector<u8> value)
 {
   UnsetPatch(guard, address);
-  const std::size_t index = m_patches.size();
-  m_patches.emplace_back(address, std::move(value));
-  m_patches.back().type = MemoryPatch::ApplyType::EachFrame;
-  Patch(guard, index);
+  Append(guard, MemoryPatch(address, std::move(value)), MemoryPatch::ApplyType::EachFrame);
 }
 
 const std::vector<MemoryPatch>& MemoryPatches::GetPatches() const
@@ -62,52 +60,60 @@ const std::vector<MemoryPatch>& MemoryPatches::GetPatches() const
 
 void MemoryPatches::UnsetPatch(const Core::CPUThreadGuard& guard, u32 address)
 {
-  const auto it = std::ranges::find(m_patches, address, &MemoryPatch::address);
-
-  if (it == m_patches.end())
-    return;
-
-  const std::size_t index = std::distance(m_patches.begin(), it);
-  RemovePatch(guard, index);
+  // Only the first patch at this address goes.
+  for (std::size_t i = 0; i < m_patches.size(); ++i)
+  {
+    if (m_patches[i].address == address)
+    {
+      RemovePatch(guard, i);
+      return;
+    }
+  }
 }
 
 void MemoryPatches::EnablePatch(const Core::CPUThreadGuard& guard, std::size_t index)
 {
-  if (m_patches[index].is_enabled == MemoryPatch::State::Enabled)
-    return;
-  m_patches[index].is_enabled = MemoryPatch::State::Enabled;
-  Patch(guard, index);
+  MemoryPatch& patch = m_patches[index];
+  if (patch.is_enabled != MemoryPatch::State::Enabled)
+  {
+    patch.is_enabled = MemoryPatch::State::Enabled;
+    Patch(guard, index);
+  }
 }
 
 void MemoryPatches::DisablePatch(const Core::CPUThreadGuard& guard, std::size_t index)
 {
-  if (m_patches[index].is_enabled == MemoryPatch::State::Disabled)
-    return;
-  m_patches[index].is_enabled = MemoryPatch::State::Disabled;
-  Patch(guard, index);
+  MemoryPatch& patch = m_patches[index];
+  if (patch.is_enabled != MemoryPatch::State::Disabled)
+  {
+    patch.is_enabled = MemoryPatch::State::Disabled;
+    Patch(guard, index);
+  }
 }
 
 bool MemoryPatches::HasEnabledPatch(u32 address) const
 {
-  return std::ranges::any_of(m_patches, [address](const MemoryPatch& patch) {
-    return patch.address == address && patch.is_enabled == MemoryPatch::State::Enabled;
-  });
+  for (const MemoryPatch& patch : m_patches)
+  {
+    if (patch.address == address && patch.is_enabled == MemoryPatch::State::Enabled)
+      return true;
+  }
+  return false;
 }
 
 void MemoryPatches::RemovePatch(const Core::CPUThreadGuard& guard, std::size_t index)
 {
   DisablePatch(guard, index);
   UnPatch(index);
-  m_patches.erase(m_patches.begin() + index);
+  m_patches.erase(m_patches.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
 void MemoryPatches::ClearPatches(const Core::CPUThreadGuard& guard)
 {
-  const std::size_t size = m_patches.size();
-  for (std::size_t index = 0; index < size; ++index)
+  for (std::size_t i = 0; i < m_patches.size(); ++i)
   {
-    DisablePatch(guard, index);
-    UnPatch(index);
+    DisablePatch(guard, i);
+    UnPatch(i);
   }
   m_patches.clear();
 }

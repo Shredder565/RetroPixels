@@ -1,11 +1,11 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Debug/Watches.h"
 
 #include <algorithm>
 #include <locale>
 #include <sstream>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -18,17 +18,16 @@ Watch::Watch(u32 address_, std::string name_, State is_enabled_)
 
 std::size_t Watches::SetWatch(u32 address, std::string name)
 {
-  const std::size_t size = m_watches.size();
-  for (std::size_t index = 0; index < size; index++)
+  const auto existing = std::ranges::find(m_watches, address, &Watch::address);
+  if (existing != m_watches.end())
   {
-    if (m_watches.at(index).address == address)
-    {
-      UpdateWatch(index, address, name);
-      return index;
-    }
+    const auto index = static_cast<std::size_t>(existing - m_watches.begin());
+    UpdateWatch(index, address, std::move(name));
+    return index;
   }
+
   m_watches.emplace_back(address, std::move(name), Watch::State::Enabled);
-  return size;
+  return m_watches.size() - 1;
 }
 
 const Watch& Watches::GetWatch(std::size_t index) const
@@ -43,13 +42,14 @@ const std::vector<Watch>& Watches::GetWatches() const
 
 void Watches::UnsetWatch(u32 address)
 {
-  std::erase_if(m_watches, [address](const auto& watch) { return watch.address == address; });
+  std::erase_if(m_watches, [address](const Watch& w) { return w.address == address; });
 }
 
 void Watches::UpdateWatch(std::size_t index, u32 address, std::string name)
 {
-  m_watches[index].address = address;
-  m_watches[index].name = std::move(name);
+  Watch& watch = m_watches[index];
+  watch.address = address;
+  watch.name = std::move(name);
 }
 
 void Watches::UpdateWatchAddress(std::size_t index, u32 address)
@@ -79,38 +79,39 @@ void Watches::DisableWatch(std::size_t index)
 
 bool Watches::HasEnabledWatch(u32 address) const
 {
-  return std::ranges::any_of(m_watches, [address](const auto& watch) {
-    return watch.address == address && watch.is_enabled == Watch::State::Enabled;
+  return std::ranges::any_of(m_watches, [address](const Watch& w) {
+    return w.address == address && w.is_enabled == Watch::State::Enabled;
   });
 }
 
 void Watches::RemoveWatch(std::size_t index)
 {
-  m_watches.erase(m_watches.begin() + index);
+  m_watches.erase(m_watches.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
 void Watches::LoadFromStrings(std::span<const std::string> watches)
 {
-  for (const std::string& watch : watches)
+  for (const std::string& line : watches)
   {
-    std::istringstream ss(watch);
-    ss.imbue(std::locale::classic());
-    u32 address;
+    // Locale-independent "<hex address> <name to end of line>". A line that does not start
+    // with a number becomes a watch at address 0 with an empty name.
+    std::istringstream stream(line);
+    stream.imbue(std::locale::classic());
+    u32 address = 0;
     std::string name;
-    ss >> std::hex >> address;
-    ss >> std::ws;
-    std::getline(ss, name);
-    SetWatch(address, name);
+    stream >> std::hex >> address >> std::ws;
+    std::getline(stream, name);
+    SetWatch(address, std::move(name));
   }
 }
 
 std::vector<std::string> Watches::SaveToStrings() const
 {
-  std::vector<std::string> watches;
-  watches.reserve(m_watches.size());
-  for (const auto& watch : m_watches)
-    watches.emplace_back(fmt::format("{:x} {}", watch.address, watch.name));
-  return watches;
+  std::vector<std::string> lines;
+  lines.reserve(m_watches.size());
+  for (const Watch& watch : m_watches)
+    lines.push_back(fmt::format("{:x} {}", watch.address, watch.name));
+  return lines;
 }
 
 void Watches::Clear()

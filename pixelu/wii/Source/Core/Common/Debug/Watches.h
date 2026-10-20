@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,7 @@
 
 namespace Common::Debug
 {
+// A memory watch shown by the debugger.
 struct Watch
 {
   enum class State : bool
@@ -31,6 +31,7 @@ struct Watch
 class Watches
 {
 public:
+  // Adds a watch, or renames the existing one at that address. Returns its index.
   std::size_t SetWatch(u32 address, std::string name);
   const Watch& GetWatch(std::size_t index) const;
   const std::vector<Watch>& GetWatches() const;
@@ -43,6 +44,7 @@ public:
   void DisableWatch(std::size_t index);
   bool HasEnabledWatch(u32 address) const;
   void RemoveWatch(std::size_t index);
+  // Each string is "<hex address> <name>".
   void LoadFromStrings(std::span<const std::string> watches);
   std::vector<std::string> SaveToStrings() const;
   void Clear();

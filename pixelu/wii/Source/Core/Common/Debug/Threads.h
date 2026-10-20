@@ -1,9 +1,9 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,6 +18,8 @@ class CPUThreadGuard;
 
 namespace Common::Debug
 {
+// Saved CPU registers of a guest thread. A field is empty when the thread structure does not
+// record that register.
 struct PartialContext
 {
   std::optional<std::array<u32, 32>> gpr;
@@ -35,6 +37,7 @@ struct PartialContext
   std::optional<std::array<double, 32>> psf;
 };
 
+// The debugger's view of one guest thread (an OS or libogc thread control block in memory).
 class ThreadView
 {
 public:
@@ -57,11 +60,10 @@ public:
   virtual u32 GetStackEnd() const = 0;
   virtual std::size_t GetStackSize() const = 0;
   virtual s32 GetErrno() const = 0;
-  // Implementation specific, used to store arbitrary data
+  // Extra, implementation-defined text about the thread.
   virtual std::string GetSpecific(const Core::CPUThreadGuard& guard) const = 0;
   virtual bool IsValid(const Core::CPUThreadGuard& guard) const = 0;
 };
 
 using Threads = std::vector<std::unique_ptr<ThreadView>>;
-
 }  // namespace Common::Debug
