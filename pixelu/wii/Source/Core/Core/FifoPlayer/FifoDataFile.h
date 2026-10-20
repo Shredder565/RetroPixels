@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -41,7 +40,7 @@ struct FifoFrameInfo
   u32 fifoStart = 0;
   u32 fifoEnd = 0;
 
-  // Must be sorted by fifoPosition
+  // In fifoPosition order.
   std::vector<MemoryUpdate> memoryUpdates;
 };
 

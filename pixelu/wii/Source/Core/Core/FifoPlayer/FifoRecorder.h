@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -35,26 +34,24 @@ public:
   bool IsRecordingDone() const;
 
   FifoDataFile* GetRecordedFile() const;
-  // Called from video thread
 
-  // Must write one full GP command at a time
+  // The functions below run on the video thread.
+
+  // `data` holds exactly one complete GP command.
   void WriteGPCommand(const u8* data, u32 size);
 
-  // Track memory that has been used and write it to the fifolog if it has changed.
-  // If memory is updated by the video backend (dynamicUpdate == true) take special care to make
-  // sure the data
-  // isn't baked into the fifolog.
+  // Records the memory a command reads if it changed since it was last recorded. Memory the
+  // video backend writes itself (dynamicUpdate) is only shadowed, so it never ends up in the log.
   void UseMemory(u32 address, u32 size, MemoryUpdate::Type type, bool dynamicUpdate = false);
 
   void EndFrame(u32 fifoStart, u32 fifoEnd);
 
-  // This function must be called before writing GP commands
-  // bpMem must point to the actual bp mem array used by the plugin because it will be read as fifo
-  // data is recorded
+  // Snapshot of the GPU state the recording starts from; must come before the first
+  // WriteGPCommand. The CP state also seeds the command analyzer.
   void SetVideoMemory(const u32* bpMem, const u32* cpMem, const u32* xfMem, const u32* xfRegs,
                       u32 xfRegsSize, const u8* texMem);
 
-  // Checked once per frame prior to callng EndFrame()
+  // Polled once per frame, before EndFrame().
   bool IsRecording() const;
 
 private:
@@ -62,19 +59,19 @@ private:
 
   void RecordInitialVideoMemory();
 
-  // Accessed from both GUI and video threads
+  // Shared between the UI and video threads (guarded by m_mutex).
 
   std::recursive_mutex m_mutex;
-  // True if video thread should send data
+  // The video thread should keep feeding data.
   bool m_IsRecording = false;
-  // True if m_IsRecording was true during last frame
+  // At least one frame end has been seen while recording.
   bool m_WasRecording = false;
   bool m_RequestedRecordingEnd = false;
   s32 m_RecordFramesRemaining = 0;
   CallbackFunc m_FinishedCb;
   std::unique_ptr<FifoDataFile> m_File;
 
-  // Accessed only from video thread
+  // Video thread only.
 
   bool m_SkipNextData = true;
   bool m_SkipFutureData = true;

@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -28,34 +27,12 @@ namespace CPU
 enum class State;
 }
 
-// Story time:
-// When FifoRecorder was created, efb copies weren't really used or they used efb2tex which ignored
-// the underlying memory, so FifoRecorder didn't do anything special about the memory backing efb
-// copies. This means the memory underlying efb copies go treated like regular textures and was
-// baked into the fifo log. If you recorded with efb2ram on, the result of efb2ram would be baked
-// into the fifo. If you recorded with efb2tex or efb off, random data would be included in the fifo
-// log.
-// Later the behaviour of efb2tex was changed to zero the underlying memory and check the hash of
-// that.
-// But this broke a whole lot of fifologs due to the following sequence of events:
-//    1. fifoplayer would trigger the efb copy
-//    2. Texture cache would zero the memory backing the texture and hash it.
-//    3. Time passes.
-//    4. fifoplayer would encounter the drawcall using the efb copy
-//    5. fifoplayer would overwrite the memory backing the efb copy back to it's state when
-//    recording.
-//    6. Texture cache would hash the memory and see that the hash no-longer matches
-//    7. Texture cache would load whatever data was now in memory as a texture either a baked in
-//       efb2ram copy from recording time or just random data.
-//    8. The output of fifoplayer would be wrong.
-
-// To keep compatibility with old fifologs, we have this flag which signals texture cache to not
-// bother hashing the memory and just assume the hash matched.
-// At a later point proper efb copy support should be added to fiforecorder and this flag will
-// change based on the version of the .dff file, but until then it will always be true when a
-// fifolog is playing.
-
-// Shitty global to fix a shitty problem
+// Old recordings captured the RAM behind EFB copies like any other texture data, so whatever was
+// there at recording time (an EFB-to-RAM result or garbage) is part of the log and is written
+// back during playback. Since EFB-to-texture copies now hash memory they zeroed themselves, that
+// write-back would make the hash mismatch and the texture cache would load the stale bytes.
+// While such a log plays, this flag tells the texture cache to trust the hash instead. Until the
+// recorder handles EFB copies properly it is set for every log of an affected version.
 extern bool IsPlayingBackFifologWithBrokenEFBCopies;
 
 enum class FramePartType
@@ -105,11 +82,9 @@ public:
   bool Open(const std::string& filename);
   void Close();
 
-  // Returns a CPUCoreBase instance that can be injected into PowerPC as a
-  // pseudo-CPU. The instance is only valid while the FifoPlayer is Open().
-  // Returns nullptr if the FifoPlayer is not initialized correctly.
-  // Play/Pause/Stop of the FifoLog can be controlled normally via the
-  // PowerPC state.
+  // A stand-in CPU core that plays the log; the PowerPC code runs it like any other core, so
+  // the usual run/pause/stop controls apply. Valid only while a file is open; null when no
+  // file (or an empty one) is loaded.
   std::unique_ptr<CPUCoreBase> GetCPUCore();
 
   bool IsPlaying() const;
@@ -120,20 +95,19 @@ public:
   u32 GetCurrentFrameObjectCount() const;
   u32 GetCurrentFrameNum() const { return m_CurrentFrame; }
   const AnalyzedFrameInfo& GetAnalyzedFrameInfo(u32 frame) const { return m_FrameInfo[frame]; }
-  // Frame range
+  // Frames to play (inclusive).
   u32 GetFrameRangeStart() const { return m_FrameRangeStart; }
   void SetFrameRangeStart(u32 start);
 
   u32 GetFrameRangeEnd() const { return m_FrameRangeEnd; }
   void SetFrameRangeEnd(u32 end);
 
-  // Object range
+  // Objects to draw within each frame (inclusive).
   u32 GetObjectRangeStart() const { return m_ObjectRangeStart; }
   void SetObjectRangeStart(u32 start) { m_ObjectRangeStart = start; }
   u32 GetObjectRangeEnd() const { return m_ObjectRangeEnd; }
   void SetObjectRangeEnd(u32 end) { m_ObjectRangeEnd = end; }
 
-  // Callbacks
   void SetFileLoadedCallback(CallbackFunc callback);
   void SetFrameWrittenCallback(CallbackFunc callback) { m_FrameWrittenCb = std::move(callback); }
 
@@ -151,8 +125,8 @@ private:
   void WriteAllMemoryUpdates();
   void WriteMemory(const MemoryUpdate& memUpdate);
 
-  // writes a range of data to the fifo
-  // start and end must be relative to frame's fifo data so elapsed cycles are figured correctly
+  // Feeds [start, end) of the current frame's FIFO data to the GPU (offsets into the frame,
+  // which is what the cycle accounting is based on).
   void WriteFifo(const u8* data, u32 start, u32 end);
 
   void SetupFifo();
@@ -184,7 +158,7 @@ private:
   Core::System& m_system;
 
   bool m_Loop = true;
-  // If enabled then all memory updates happen at once before the first frame
+  // Apply every frame's memory updates up front instead of at their FIFO positions.
   bool m_EarlyMemoryUpdates = false;
 
   u32 m_CurrentFrame = 0;
