@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/GameProfileWindow.h"
 
 #include <wx/statbox.h>
@@ -15,208 +16,184 @@
 #include "resource/embedded/resources.h"
 #endif
 
+namespace
+{
+	const int kLabelFlags = wxALIGN_CENTER_VERTICAL | wxALL;
+
+	wxFlexGridSizer* MakeGrid(int columns, bool flexibleBoth = true)
+	{
+		auto* grid = new wxFlexGridSizer(0, columns, 0, 0);
+		if (flexibleBoth)
+			grid->SetFlexibleDirection(wxBOTH);
+		grid->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
+		return grid;
+	}
+
+	template<size_t N>
+	wxChoice* MakeChoice(wxWindow* parent, const wxString (&items)[N], const wxString& tip = {})
+	{
+		auto* choice = new wxChoice(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)N, items);
+		if (!tip.empty())
+			choice->SetToolTip(tip);
+		return choice;
+	}
+
+	// a notebook page holding one vertical sizer
+	wxPanel* AddPage(wxNotebook* book, wxSizer* content, wxPanel* page, const wxString& title, bool select)
+	{
+		page->SetSizer(content);
+		page->Layout();
+		content->Fit(page);
+		book->AddPage(page, title, select);
+		return page;
+	}
+
+	// list position of each CPU mode in the "Mode" choice
+	int CpuModeToChoice(CPUMode mode)
+	{
+		switch (mode)
+		{
+		case CPUMode::SinglecoreInterpreter: return 0;
+		case CPUMode::SinglecoreRecompiler: return 1;
+		case CPUMode::DualcoreRecompiler:
+		case CPUMode::MulticoreRecompiler: return 2;
+		default: return 3;
+		}
+	}
+
+	CPUMode ChoiceToCpuMode(int index)
+	{
+		switch (index)
+		{
+		case 0: return CPUMode::SinglecoreInterpreter;
+		case 1: return CPUMode::SinglecoreRecompiler;
+		case 2: return CPUMode::MulticoreRecompiler;
+		default: return CPUMode::Auto;
+		}
+	}
+}
+
 GameProfileWindow::GameProfileWindow(wxWindow* parent, uint64_t title_id)
-	: wxFrame(parent, wxID_ANY, _("Edit game profile"), wxDefaultPosition, wxSize{ 390, 350 }, wxCLOSE_BOX | wxCLIP_CHILDREN | wxCAPTION | wxRESIZE_BORDER | wxTAB_TRAVERSAL | wxSYSTEM_MENU), m_title_id(title_id)
+	: wxFrame(parent, wxID_ANY, _("Edit game profile"), wxDefaultPosition, wxSize{390, 350},
+			  wxCLOSE_BOX | wxCLIP_CHILDREN | wxCAPTION | wxRESIZE_BORDER | wxTAB_TRAVERSAL | wxSYSTEM_MENU),
+	  m_title_id(title_id)
 {
 	SetIcon(wxICON(X_GAME_PROFILE));
 
 	m_game_profile.Reset();
 	m_game_profile.Load(title_id);
 
-	this->SetSizeHints(wxDefaultSize, wxDefaultSize);
+	SetSizeHints(wxDefaultSize, wxDefaultSize);
+	auto* book = new wxNotebook(this, wxID_ANY);
 
-	auto* main_sizer = new wxBoxSizer(wxVERTICAL);
-
-	auto* m_notebook = new wxNotebook(this, wxID_ANY);
-	// general
+	// General: libraries, GamePad view, CPU
 	{
-		auto* panel = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-		auto* sizer = new wxBoxSizer(wxVERTICAL);
-		{
-			auto* box_sizer = new wxStaticBoxSizer(new wxStaticBox(panel, wxID_ANY, _("General")), wxVERTICAL);
-			auto* box = box_sizer->GetStaticBox();
+		auto* page = new wxPanel(book, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+		auto* column = new wxBoxSizer(wxVERTICAL);
 
+		auto* general = new wxStaticBoxSizer(new wxStaticBox(page, wxID_ANY, _("General")), wxVERTICAL);
+		{
+			wxWindow* box = general->GetStaticBox();
 			m_load_libs = new wxCheckBox(box, wxID_ANY, _("Load shared libraries"));
 			m_load_libs->SetToolTip(_("EXPERT OPTION\nThis option will load libraries from the cafeLibs directory"));
-			box_sizer->Add(m_load_libs, 0, wxALL, 5);
+			general->Add(m_load_libs, 0, wxALL, 5);
 
 			m_start_with_padview = new wxCheckBox(box, wxID_ANY, _("Launch with gamepad view"));
 			m_start_with_padview->SetToolTip(_("Games will be launched with gamepad view toggled as default. The view can be toggled with CTRL + TAB"));
-			box_sizer->Add(m_start_with_padview, 0, wxALL, 5);
-
-			sizer->Add(box_sizer, 0, wxEXPAND, 5);
+			general->Add(m_start_with_padview, 0, wxALL, 5);
 		}
-		// cpu
+		column->Add(general, 0, wxEXPAND, 5);
+
+		auto* cpu = new wxStaticBoxSizer(new wxStaticBox(page, wxID_ANY, _("CPU")), wxVERTICAL);
 		{
-			auto* box_sizer = new wxStaticBoxSizer(new wxStaticBox(panel, wxID_ANY, _("CPU")), wxVERTICAL);
-			auto* box = box_sizer->GetStaticBox();
+			wxWindow* box = cpu->GetStaticBox();
+			auto* grid = MakeGrid(2);
 
-			auto* first_row = new wxFlexGridSizer(0, 2, 0, 0);
-			first_row->SetFlexibleDirection(wxBOTH);
-			first_row->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
+			grid->Add(new wxStaticText(box, wxID_ANY, _("Mode")), 0, kLabelFlags, 5);
+			const wxString modes[] = {_("Single-core interpreter"), _("Single-core recompiler"), _("Multi-core recompiler"), _("Auto (recommended)")};
+			m_cpu_mode = MakeChoice(box, modes, _("Set the CPU emulation mode"));
+			grid->Add(m_cpu_mode, 0, wxALL, 5);
 
-			first_row->Add(new wxStaticText(box, wxID_ANY, _("Mode")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			wxString cpu_modes[] = { _("Single-core interpreter"), _("Single-core recompiler"), _("Multi-core recompiler"), _("Auto (recommended)") };
-			const sint32 m_cpu_modeNChoices = std::size(cpu_modes);
-			m_cpu_mode = new wxChoice(box, wxID_ANY, wxDefaultPosition, wxDefaultSize, m_cpu_modeNChoices, cpu_modes, 0);
-			m_cpu_mode->SetToolTip(_("Set the CPU emulation mode"));
-			first_row->Add(m_cpu_mode, 0, wxALL, 5);
-
-			first_row->Add(new wxStaticText(box, wxID_ANY, _("Thread quantum")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			auto* quantum_sizer = new wxFlexGridSizer(0, 2, 0, 0);
-			quantum_sizer->SetFlexibleDirection(wxBOTH);
-			quantum_sizer->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
-
-			wxString quantum_values[] = { "20000", "45000", "60000", "80000" ,"100000" };
-			m_thread_quantum = new wxChoice(box, wxID_ANY, wxDefaultPosition, wxDefaultSize, std::size(quantum_values), quantum_values);
+			grid->Add(new wxStaticText(box, wxID_ANY, _("Thread quantum")), 0, kLabelFlags, 5);
+			auto* quantumRow = MakeGrid(2);
+			const wxString quanta[] = {"20000", "45000", "60000", "80000", "100000"};
+			m_thread_quantum = MakeChoice(box, quanta, _("EXPERT OPTION\nSet the maximum thread slice runtime (in virtual cycles)"));
 			m_thread_quantum->SetMinSize(wxSize(85, -1));
-			m_thread_quantum->SetToolTip(_("EXPERT OPTION\nSet the maximum thread slice runtime (in virtual cycles)"));
-			quantum_sizer->Add(m_thread_quantum, 0, wxALL, 5);
+			quantumRow->Add(m_thread_quantum, 0, wxALL, 5);
+			quantumRow->Add(new wxStaticText(box, wxID_ANY, _("cycles")), 0, kLabelFlags, 5);
+			grid->Add(quantumRow, 0, wxEXPAND, 5);
 
-			quantum_sizer->Add(new wxStaticText(box, wxID_ANY, _("cycles")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			first_row->Add(quantum_sizer, 0, wxEXPAND, 5);
-
-			box_sizer->Add(first_row, 0, wxEXPAND, 5);
-
-
-			sizer->Add(box_sizer, 0, wxEXPAND, 5);
+			cpu->Add(grid, 0, wxEXPAND, 5);
 		}
+		column->Add(cpu, 0, wxEXPAND, 5);
 
-		panel->SetSizer(sizer);
-		panel->Layout();
-		sizer->Fit(panel);
-		m_notebook->AddPage(panel, _("General"), true);
+		AddPage(book, column, page, _("General"), true);
 	}
 
-	// graphic
+	// Graphic: API and shader options
 	{
-		auto* panel = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-		auto* sizer = new wxBoxSizer(wxVERTICAL);
+		auto* page = new wxPanel(book, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+		auto* column = new wxBoxSizer(wxVERTICAL);
+		auto* grid = MakeGrid(2, false);
 
-		//m_extended_texture_readback = new wxCheckBox(panel, wxID_ANY, _("Extended texture readback"));
-		//m_extended_texture_readback->SetToolTip(_("Improves emulation accuracy of CPU to GPU memory access at the cost of performance. Required for some games."));
-		//sizer->Add(m_extended_texture_readback, 0, wxALL, 5);
-
-		auto* first_row = new wxFlexGridSizer(0, 2, 0, 0);
-		first_row->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
-
-		/*first_row->Add(new wxStaticText(panel, wxID_ANY, _("Precompiled shaders")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-		wxString precompiled_modes[] = { _("auto"), _("enable"), _("disable") };
-		const sint32 precompiled_count = std::size(precompiled_modes);
-		m_precompiled = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, precompiled_count, precompiled_modes, 0);
-		m_precompiled->SetToolTip(_("Precompiled shaders can speed up the load time on the shader loading screen.\nAuto will enable it for AMD/Intel but disable it for NVIDIA GPUs as a workaround for a driver bug.\n\nRecommended: Auto"));
-		first_row->Add(m_precompiled, 0, wxALL, 5);*/
-
-		first_row->Add(new wxStaticText(panel, wxID_ANY, _("Graphics API")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		wxString gapi_values[] = { "", "OpenGL", "Vulkan",
+		grid->Add(new wxStaticText(page, wxID_ANY, _("Graphics API")), 0, kLabelFlags, 5);
+		// first entry: no override
+		const wxString apis[] = {"", "OpenGL", "Vulkan",
 #ifdef ENABLE_METAL
-            "Metal"
+								 "Metal"
 #endif
 		};
-		m_graphic_api = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(gapi_values), gapi_values);
-		first_row->Add(m_graphic_api, 0, wxALL, 5);
+		m_graphic_api = MakeChoice(page, apis);
+		grid->Add(m_graphic_api, 0, wxALL, 5);
 
-		first_row->Add(new wxStaticText(panel, wxID_ANY, _("Shader multiplication accuracy")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		wxString mul_values[] = { _("false"), _("true")};
-		m_shader_mul_accuracy = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(mul_values), mul_values);
-		m_shader_mul_accuracy->SetToolTip(_("EXPERT OPTION\nControls the accuracy of floating point multiplication in shaders.\n\nRecommended: true"));
-		first_row->Add(m_shader_mul_accuracy, 0, wxALL, 5);
+		const wxString falseTrue[] = {_("false"), _("true")};
+		grid->Add(new wxStaticText(page, wxID_ANY, _("Shader multiplication accuracy")), 0, kLabelFlags, 5);
+		m_shader_mul_accuracy = MakeChoice(page, falseTrue, _("EXPERT OPTION\nControls the accuracy of floating point multiplication in shaders.\n\nRecommended: true"));
+		grid->Add(m_shader_mul_accuracy, 0, wxALL, 5);
 
 #ifdef ENABLE_METAL
-		first_row->Add(new wxStaticText(panel, wxID_ANY, _("Shader fast math")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+		grid->Add(new wxStaticText(page, wxID_ANY, _("Shader fast math")), 0, kLabelFlags, 5);
+		m_shader_fast_math = MakeChoice(page, falseTrue, _("EXPERT OPTION\nEnables fast math for all shaders. May (rarely) cause graphical bugs.\n\nMetal only\n\nRecommended: true"));
+		grid->Add(m_shader_fast_math, 0, wxALL, 5);
 
-		wxString math_values[] = { _("false"), _("true") };
-		m_shader_fast_math = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(math_values), math_values);
-		m_shader_fast_math->SetToolTip(_("EXPERT OPTION\nEnables fast math for all shaders. May (rarely) cause graphical bugs.\n\nMetal only\n\nRecommended: true"));
-		first_row->Add(m_shader_fast_math, 0, wxALL, 5);
+		grid->Add(new wxStaticText(page, wxID_ANY, _("Metal buffer cache mode")), 0, kLabelFlags, 5);
+		const wxString cacheModes[] = {_("auto"), _("device private"), _("device shared"), _("host")};
+		m_metal_buffer_cache_mode = MakeChoice(page, cacheModes, _("EXPERT OPTION\nDecides how the buffer cache memory will be managed.\n\nMetal only\n\nRecommended: auto"));
+		grid->Add(m_metal_buffer_cache_mode, 0, wxALL, 5);
 
-		first_row->Add(new wxStaticText(panel, wxID_ANY, _("Metal buffer cache mode")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		wxString cache_values[] = { _("auto"), _("device private"), _("device shared"), _("host") };
-		m_metal_buffer_cache_mode = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(cache_values), cache_values);
-		m_metal_buffer_cache_mode->SetToolTip(_("EXPERT OPTION\nDecides how the buffer cache memory will be managed.\n\nMetal only\n\nRecommended: auto"));
-		first_row->Add(m_metal_buffer_cache_mode, 0, wxALL, 5);
-
-		first_row->Add(new wxStaticText(panel, wxID_ANY, _("Position invariance")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		wxString pos_values[] = { _("auto"), _("false"), _("true") };
-		m_position_invariance = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(pos_values), pos_values);
-		m_position_invariance->SetToolTip(_("EXPERT OPTION\nDisables most optimizations for vertex positions. May fix polygon cutouts or flickering in some games.\n\nMetal only\n\nRecommended: auto"));
-		first_row->Add(m_position_invariance, 0, wxALL, 5);
+		grid->Add(new wxStaticText(page, wxID_ANY, _("Position invariance")), 0, kLabelFlags, 5);
+		const wxString invariance[] = {_("auto"), _("false"), _("true")};
+		m_position_invariance = MakeChoice(page, invariance, _("EXPERT OPTION\nDisables most optimizations for vertex positions. May fix polygon cutouts or flickering in some games.\n\nMetal only\n\nRecommended: auto"));
+		grid->Add(m_position_invariance, 0, wxALL, 5);
 #endif
-
-		/*first_row->Add(new wxStaticText(panel, wxID_ANY, _("GPU buffer cache accuracy")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-		wxString accuarcy_values[] = { _("high"), _("medium"), _("low") };
-		m_cache_accuracy = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, (int)std::size(accuarcy_values), accuarcy_values);
-		m_cache_accuracy->SetToolTip(_("Lower value results in higher performance, but may cause graphical issues"));
-		first_row->Add(m_cache_accuracy, 0, wxALL, 5);*/
-
-		sizer->Add(first_row, 0, wxEXPAND, 5);
-
-
-		panel->SetSizer(sizer);
-		panel->Layout();
-		sizer->Fit(panel);
-		m_notebook->AddPage(panel, _("Graphic"), false);
+		column->Add(grid, 0, wxEXPAND, 5);
+		AddPage(book, column, page, _("Graphic"), false);
 	}
 
-	//// audio
-	//{
-	//	auto panel = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-	//	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-
-	//	m_disable_audio = new wxCheckBox(panel, wxID_ANY, _("Disable Audio"), wxDefaultPosition, wxDefaultSize, wxCHK_3STATE | wxCHK_ALLOW_3RD_STATE_FOR_USER);
-	//	sizer->Add(m_disable_audio, 0, wxALL, 5);
-
-
-	//	panel->SetSizer(sizer);
-	//	panel->Layout();
-	//	sizer->Fit(panel);
-	//	m_notebook->AddPage(panel, _("Audio"), false);
-	//}
-
-	// controller
+	// Controller: a forced input profile per controller
 	{
-		auto panel = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-		wxBoxSizer* sizer;
-		sizer = new wxBoxSizer(wxVERTICAL);
-
-		wxFlexGridSizer* profile_sizer;
-		profile_sizer = new wxFlexGridSizer(0, 2, 0, 0);
-		profile_sizer->SetFlexibleDirection(wxBOTH);
-		profile_sizer->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
-
+		auto* page = new wxPanel(book, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+		auto* column = new wxBoxSizer(wxVERTICAL);
+		auto* grid = MakeGrid(2);
 		for (int i = 0; i < 8; ++i)
 		{
-			profile_sizer->Add(new wxStaticText(panel, wxID_ANY, formatWxString(_("Controller {}"), i + 1)), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			m_controller_profile[i] = new wxComboBox(panel, wxID_ANY,"", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_DROPDOWN| wxCB_READONLY);
-			m_controller_profile[i]->SetMinSize(wxSize(250, -1));
-			m_controller_profile[i]->Bind(wxEVT_COMBOBOX_DROPDOWN, &GameProfileWindow::OnControllerProfileDropdown, this);
-			m_controller_profile[i]->SetToolTip(_("Forces a given controller profile"));
-			profile_sizer->Add(m_controller_profile[i], 0, wxALL, 5);
+			grid->Add(new wxStaticText(page, wxID_ANY, formatWxString(_("Controller {}"), i + 1)), 0, kLabelFlags, 5);
+			auto* profile = new wxComboBox(page, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_DROPDOWN | wxCB_READONLY);
+			profile->SetMinSize(wxSize(250, -1));
+			profile->Bind(wxEVT_COMBOBOX_DROPDOWN, &GameProfileWindow::OnControllerProfileDropdown, this);
+			profile->SetToolTip(_("Forces a given controller profile"));
+			grid->Add(profile, 0, wxALL, 5);
+			m_controller_profile[i] = profile;
 		}
-
-		sizer->Add(profile_sizer, 0, wxEXPAND, 5);
-
-		panel->SetSizer(sizer);
-		panel->Layout();
-		sizer->Fit(panel);
-		m_notebook->AddPage(panel, _("Controller"), false);
+		column->Add(grid, 0, wxEXPAND, 5);
+		AddPage(book, column, page, _("Controller"), false);
 	}
 
-	main_sizer->Add(m_notebook, 1, wxEXPAND | wxALL, 5);
-
-
-	this->SetSizer(main_sizer);
-	this->Layout();
-
-	this->Centre(wxBOTH);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	layout->Add(book, 1, wxEXPAND | wxALL, 5);
+	SetSizer(layout);
+	Layout();
+	Centre(wxBOTH);
 
 	ApplyProfile();
 }
@@ -228,104 +205,71 @@ GameProfileWindow::~GameProfileWindow()
 
 void GameProfileWindow::OnStreamoutSizeChange(wxCommandEvent& event)
 {
-	wxSlider* slider = wxDynamicCast(event.GetEventObject(), wxSlider);
+	// a slider's client data is the label that shows its value
+	auto* slider = wxDynamicCast(event.GetEventObject(), wxSlider);
 	wxASSERT(slider);
-	wxStaticText* text = wxDynamicCast(slider->GetClientData(), wxStaticText);
-	wxASSERT(text);
-	text->SetLabelText(fmt::format("{} MB", slider->GetValue()));
+	auto* label = wxDynamicCast(slider->GetClientData(), wxStaticText);
+	wxASSERT(label);
+	label->SetLabelText(fmt::format("{} MB", slider->GetValue()));
 	event.Skip();
 }
 
 void GameProfileWindow::OnControllerProfileDropdown(wxCommandEvent& event)
 {
-	wxComboBox* cb = wxDynamicCast(event.GetEventObject(), wxComboBox);
-	wxASSERT(cb);
+	// refill with the current profiles (plus "none") right before the list opens
+	auto* box = wxDynamicCast(event.GetEventObject(), wxComboBox);
+	wxASSERT(box);
+	wxWindowUpdateLocker freeze(box);
 
-	wxWindowUpdateLocker lock(cb);
-
-	const auto selected_value = cb->GetStringSelection();
-	cb->Clear();
-	cb->Append(wxEmptyString);
-
-	auto profiles = InputManager::get_profiles();
-	for (const auto& profile : profiles)
-	{
-		cb->Append(wxString::FromUTF8(profile));
-	}
-
-	cb->SetStringSelection(selected_value);
+	const wxString current = box->GetStringSelection();
+	box->Clear();
+	box->Append(wxEmptyString);
+	for (const auto& name : InputManager::get_profiles())
+		box->Append(wxString::FromUTF8(name));
+	box->SetStringSelection(current);
 }
 
 void GameProfileWindow::SetProfileInt(gameProfileIntegerOption_t& option, wxCheckBox* checkbox, sint32 value) const
 {
-	const auto state = checkbox->GetValue();
-	if (state)
-	{
-		option.isPresent = true;
+	option.isPresent = checkbox->GetValue();
+	if (option.isPresent)
 		option.value = value;
-	}
-	else
-		option.isPresent = false;
 }
 
 void GameProfileWindow::ApplyProfile()
 {
-	if(m_game_profile.m_gameName)
-		this->SetTitle(_("Edit game profile") + " - " + m_game_profile.m_gameName.value());
+	const GameProfile& profile = m_game_profile;
+	if (profile.m_gameName)
+		SetTitle(_("Edit game profile") + " - " + wxString::FromUTF8(profile.m_gameName.value()));
 
-	// general
-	m_load_libs->SetValue(m_game_profile.m_loadSharedLibraries.value());
-	m_start_with_padview->SetValue(m_game_profile.m_startWithPadView);
+	m_load_libs->SetValue(profile.m_loadSharedLibraries.value());
+	m_start_with_padview->SetValue(profile.m_startWithPadView);
 
-	// cpu
-	// wxString cpu_modes[] = { _("Singlecore-Interpreter"), _("Singlecore-Recompiler"), _("Triplecore-Recompiler"), _("Auto (recommended)") };
-	switch(m_game_profile.m_cpuMode.value())
-	{
-	case CPUMode::SinglecoreInterpreter: m_cpu_mode->SetSelection(0); break;
-	case CPUMode::SinglecoreRecompiler: m_cpu_mode->SetSelection(1); break;
-	case CPUMode::DualcoreRecompiler: m_cpu_mode->SetSelection(2); break;
-	case CPUMode::MulticoreRecompiler: m_cpu_mode->SetSelection(2); break;
-	default: m_cpu_mode->SetSelection(3);
-	}
+	m_cpu_mode->SetSelection(CpuModeToChoice(profile.m_cpuMode.value()));
+	// a quantum that isn't in the list leaves the choice empty
+	m_thread_quantum->SetStringSelection(fmt::format("{}", profile.m_threadQuantum));
 
-	m_thread_quantum->SetStringSelection(fmt::format("{}", m_game_profile.m_threadQuantum));
-
-	// gpu
-	if (!m_game_profile.m_graphics_api.has_value())
-		m_graphic_api->SetSelection(0); // selecting ""
-	else
-		m_graphic_api->SetSelection(1 + m_game_profile.m_graphics_api.value()); // "", OpenGL, Vulkan, Metal
-	m_shader_mul_accuracy->SetSelection((int)m_game_profile.m_accurateShaderMul);
+	// entry 0 is "no override", then one per GraphicAPI value
+	m_graphic_api->SetSelection(profile.m_graphics_api.has_value() ? 1 + (int)profile.m_graphics_api.value() : 0);
+	m_shader_mul_accuracy->SetSelection((int)profile.m_accurateShaderMul);
 #ifdef ENABLE_METAL
-	m_shader_fast_math->SetSelection((int)m_game_profile.m_shaderFastMath);
-	m_metal_buffer_cache_mode->SetSelection((int)m_game_profile.m_metalBufferCacheMode);
-	m_position_invariance->SetSelection((int)m_game_profile.m_positionInvariance);
+	m_shader_fast_math->SetSelection((int)profile.m_shaderFastMath);
+	m_metal_buffer_cache_mode->SetSelection((int)profile.m_metalBufferCacheMode);
+	m_position_invariance->SetSelection((int)profile.m_positionInvariance);
 #endif
 
-	//// audio
-	//m_disable_audio->Set3StateValue(GetCheckboxState(m_game_profile.disableAudio));
-
-	// controller
-	auto profiles = InputManager::get_profiles();
-
-	for (const auto& cb : m_controller_profile)
+	const auto profiles = InputManager::get_profiles();
+	for (wxComboBox* box : m_controller_profile)
 	{
-		cb->Clear();
-		for (const auto& profile : profiles)
-		{
-			cb->Append(wxString::FromUTF8(profile));
-		}
+		box->Clear();
+		for (const auto& name : profiles)
+			box->Append(wxString::FromUTF8(name));
 	}
-
 	for (int i = 0; i < InputManager::kMaxController; ++i)
 	{
-		const bool has_value = m_game_profile.m_controllerProfile[i].has_value();
-		if (has_value)
-		{
-			const auto& v = m_game_profile.m_controllerProfile[i].value();
-			m_controller_profile[i]->SetStringSelection(wxString::FromUTF8(v));
-		}
-
+		const auto& forced = profile.m_controllerProfile[i];
+		if (forced.has_value())
+			m_controller_profile[i]->SetStringSelection(wxString::FromUTF8(forced.value()));
 		else
 			m_controller_profile[i]->SetSelection(wxNOT_FOUND);
 	}
@@ -333,73 +277,55 @@ void GameProfileWindow::ApplyProfile()
 
 void GameProfileWindow::SaveProfile()
 {
-	// update game profile struct
-	m_game_profile.Reset();
-	// general
-	m_game_profile.m_loadSharedLibraries = m_load_libs->GetValue();
-	m_game_profile.m_startWithPadView = m_start_with_padview->GetValue();
+	GameProfile& profile = m_game_profile;
+	profile.Reset();
 
-	// cpu
-	switch(m_cpu_mode->GetSelection())
-	{
-	case 0: m_game_profile.m_cpuMode = CPUMode::SinglecoreInterpreter; break;
-	case 1: m_game_profile.m_cpuMode = CPUMode::SinglecoreRecompiler; break;
-	case 2: m_game_profile.m_cpuMode = CPUMode::MulticoreRecompiler; break;
-	default:
-		m_game_profile.m_cpuMode = CPUMode::Auto;
-	}
+	profile.m_loadSharedLibraries = m_load_libs->GetValue();
+	profile.m_startWithPadView = m_start_with_padview->GetValue();
+	profile.m_cpuMode = ChoiceToCpuMode(m_cpu_mode->GetSelection());
 
+	const wxString quantum = m_thread_quantum->GetStringSelection();
+	if (!quantum.empty())
+		profile.m_threadQuantum = std::clamp<uint32>(ConvertString<uint32>(quantum.ToStdString()), 5000, 536870912);
 
-	const wxString thread_quantum = m_thread_quantum->GetStringSelection();
-	if (!thread_quantum.empty())
-	{
-		m_game_profile.m_threadQuantum = ConvertString<uint32>(thread_quantum.ToStdString());
-		m_game_profile.m_threadQuantum = std::min<uint32>(m_game_profile.m_threadQuantum, 536870912);
-		m_game_profile.m_threadQuantum = std::max<uint32>(m_game_profile.m_threadQuantum, 5000);
-	}
-
-	// gpu
-	m_game_profile.m_accurateShaderMul = (AccurateShaderMulOption)m_shader_mul_accuracy->GetSelection();
-	if (m_game_profile.m_accurateShaderMul != AccurateShaderMulOption::False && m_game_profile.m_accurateShaderMul != AccurateShaderMulOption::True)
-		m_game_profile.m_accurateShaderMul = AccurateShaderMulOption::True; // force a legal value
+	auto mul = (AccurateShaderMulOption)m_shader_mul_accuracy->GetSelection();
+	if (mul != AccurateShaderMulOption::False && mul != AccurateShaderMulOption::True)
+		mul = AccurateShaderMulOption::True; // nothing selected
+	profile.m_accurateShaderMul = mul;
 #ifdef ENABLE_METAL
-	m_game_profile.m_shaderFastMath = (bool)m_shader_fast_math->GetSelection();
-	m_game_profile.m_metalBufferCacheMode = (MetalBufferCacheMode)m_metal_buffer_cache_mode->GetSelection();
-	m_game_profile.m_positionInvariance = (PositionInvariance)m_position_invariance->GetSelection();
+	profile.m_shaderFastMath = (bool)m_shader_fast_math->GetSelection();
+	profile.m_metalBufferCacheMode = (MetalBufferCacheMode)m_metal_buffer_cache_mode->GetSelection();
+	profile.m_positionInvariance = (PositionInvariance)m_position_invariance->GetSelection();
 #endif
 
-	if (m_graphic_api->GetSelection() == 0)
-		m_game_profile.m_graphics_api = {};
+	const int api = m_graphic_api->GetSelection();
+	if (api == 0)
+		profile.m_graphics_api = {};
 	else
-		m_game_profile.m_graphics_api = (GraphicAPI)(m_graphic_api->GetSelection() - 1);  // "", OpenGL, Vulkan, Metal
+		profile.m_graphics_api = (GraphicAPI)(api - 1);
 
-	// controller
 	for (int i = 0; i < 8; ++i)
 	{
-		if(m_controller_profile[i]->GetSelection() == wxNOT_FOUND)
-		{
-			m_game_profile.m_controllerProfile[i].reset();
-			continue;
-		}
-
-		const wxString profile_name = m_controller_profile[i]->GetStringSelection();
-		if (profile_name.empty())
-			m_game_profile.m_controllerProfile[i].reset();
+		auto& forced = profile.m_controllerProfile[i];
+		const wxComboBox* box = m_controller_profile[i];
+		const wxString name = box->GetSelection() == wxNOT_FOUND ? wxString() : box->GetStringSelection();
+		if (name.empty())
+			forced.reset();
 		else
-			m_game_profile.m_controllerProfile[i] = profile_name.ToUTF8();
+			forced = name.utf8_string();
 	}
 
-	// update game profile file
-	m_game_profile.Save(m_title_id);
+	profile.Save(m_title_id);
 }
 
 void GameProfileWindow::SetSliderValue(wxSlider* slider, sint32 new_value) const
 {
+	// moves the slider and lets its handler update the label
 	wxASSERT(slider);
 	slider->SetValue(new_value);
 
-	wxCommandEvent slider_event(wxEVT_SLIDER, slider->GetId());
-	slider_event.SetEventObject(slider);
-	slider_event.SetClientData((void*)IsFrozen());
-	wxPostEvent(slider->GetEventHandler(), slider_event);
+	wxCommandEvent changed(wxEVT_SLIDER, slider->GetId());
+	changed.SetEventObject(slider);
+	changed.SetClientData((void*)IsFrozen());
+	wxPostEvent(slider->GetEventHandler(), changed);
 }

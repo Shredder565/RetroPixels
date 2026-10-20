@@ -40,7 +40,7 @@ namespace
 		return row;
 	}
 
-	constexpr int kCornerFlags = wxALIGN_BOTTOM | wxALIGN_RIGHT | wxALL;
+	const int kCornerFlags = wxALIGN_BOTTOM | wxALIGN_RIGHT | wxALL;
 }
 
 GettingStartedDialog::GettingStartedDialog(wxWindow* parent)

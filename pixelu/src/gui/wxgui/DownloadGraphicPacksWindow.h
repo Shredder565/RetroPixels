@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <atomic>
@@ -10,7 +11,9 @@
 #include <wx/timer.h>
 #include <wx/gauge.h>
 
-
+// Fetches the latest community graphic pack release and unpacks it into
+// graphicPacks/downloadedGraphicPacks (version.txt records which release is there).
+// The work runs on a thread while the dialog shows the stage and progress.
 class DownloadGraphicPacksWindow : public wxDialog
 {
 public:
@@ -19,6 +22,7 @@ public:
 
 	const std::string& GetException() const;
 
+	// refuses (wxID_CANCEL) while a game runs; otherwise wxID_CANCEL only when the user cancelled
 	int ShowModal() override;
 	void OnClose(wxCloseEvent& event);
 
@@ -49,7 +53,7 @@ private:
 	std::string m_threadException;
 	std::thread m_thread;
 
-	DownloadStage_t m_currentStage;
+	DownloadStage_t m_currentStage; // the stage the title shows
 	wxGauge* m_processBar;
 	wxTimer* m_timer;
 
