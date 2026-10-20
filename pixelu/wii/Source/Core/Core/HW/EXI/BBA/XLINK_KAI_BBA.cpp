@@ -45,10 +45,10 @@ bool CEXIETHERNET::XLinkNetworkInterface::SendDatagram(const void* data, std::si
 void CEXIETHERNET::XLinkNetworkInterface::SendCommand(std::string_view command)
 {
   std::array<u8, COMMAND_BUFFER_SIZE> buffer{};
-  const std::size_t size = std::min(command.size(), buffer.size());
+  const u32 size = static_cast<u32>(std::min(command.size(), buffer.size()));
   std::copy_n(command.begin(), size, buffer.begin());
   DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size, ArrayToString(buffer.data(), size, 0x10));
-  if (!SendDatagram(buffer.data(), static_cast<u32>(size)))
+  if (!SendDatagram(buffer.data(), size))
     ERROR_LOG_FMT(SP1, "Failed to send '{}' to the XLink Kai client", command.substr(0, 16));
 }
 
