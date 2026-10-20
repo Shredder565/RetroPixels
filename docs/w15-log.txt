@@ -25,8 +25,8 @@
     write-back order.
   - Assembler/disassembler: the same text and bytes. The assembler keeps
     the two-pass design, strtok-style tokenizing, the `INCLUDE`, `INCDIR`,
-    `ORG`, `SEGMENT` (with the same segment PCs), `ALIGN`, `EQU`,
-    `WARNPC`/`ERRORPC` directives, expression syntax and its error codes
+    `ORG`, `SEGMENT` (`CODE`/`DATA`, with the same segment PCs), `EQU`
+    and `WARNPC` directives, expression syntax and its error codes
     and messages. `LabelMap` keeps label lookup order and the
     duplicate/predefined rules. `DSPCodeUtil` keeps dump file formats and
     names, `Compare` output and the CRC.
