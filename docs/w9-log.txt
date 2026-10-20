@@ -1,0 +1,110 @@
+- W9 log: rewrote all 46 W9 files (JitCommon, Jit64Common, Jit64 and
+  its RegCache) as original code. They now have 14792 lines (from
+  15169). Each starts with the RetroPixels original-code line and has no
+  Dolphin copyright or SPDX header. The files are:
+  - JitCommon: JitBase, JitCache, JitAsmCommon, DivUtils and
+    ConstantPropagation;
+  - Jit64Common: BlockCache, ConstantPool, EmuCodeBlock, FarCodeCache,
+    Jit64AsmCommon, Jit64Constants, Jit64PowerPCState, TrampolineCache
+    and TrampolineInfo;
+  - Jit64: Jit, JitAsm, Jit64_Tables and the Branch, FloatingPoint,
+    Integer, LoadStore, LoadStoreFloating, LoadStorePaired, Paired and
+    SystemRegisters instruction files;
+  - RegCache: CachedReg, RCMode, JitRegCache, GPRRegCache and
+    FPURegCache.
+  - Kept unchanged: file names, and every public declaration that other
+    files use (class and member names, signatures, the JitBase and
+    JitInterface contract, JitState/JitOptions, the JitBlock and
+    JitBlockData layout the debugger views read, SafeLoadStoreFlags
+    values, the TrampolineInfo layout, the code-size constants, the
+    register-cache handle API with RCOpArg, RCX64Reg, forks and
+    transactions). The x86 the JIT emits is also the same for every
+    input:
+    - the same register allocation (allocation orders, eviction score
+      and tie-breaking), and the same order of Use/Bind/Scratch/Realize
+      calls in every instruction, so the same host registers are chosen;
+    - the same constant-pool contents and order (MConst is called at the
+      same points);
+    - the same sequences for every instruction, every exit and the
+      dispatcher, including fastmem backpatching and trampolines, the
+      memcheck paths, idle skipping and branch following, block linking,
+      the BLR optimization and stack guard, cycle counts and downcount,
+      FPSCR/MXCSR handling, accurate NaNs, FPRF, the fmadds
+      error-free-transformation paths and the CPU feature paths (no
+      BMI1/BMI2, AVX, SSE4.1, FMA, LZCNT and MOVBE paths);
+    - the JIT_SETTINGS table, the profiling and branch-watch hooks and
+      every debug/JIT-off option;
+    - DivUtils gives the same magic constants for every divisor, checked
+      over all 2^32 values.
+  - Kept quirks: reserved GQR types (1-3) still assemble to UD2.
+  - Deliberate differences (bug fixes, nothing a correct program sees
+    except the first):
+    - ConstantPropagation: divwuo with both operands known at compile
+      time and a quotient of 2^31 or more set XER[OV]. It now sets OV
+      only for a zero divisor, as the interpreter and the JIT's own
+      non-constant path do.
+    - JitCache walks address ranges with 64-bit arithmetic, so a range
+      that ends at the top of the address space no longer wraps.
+    - Jit64 no longer inserts a nullptr key into its exception-handler
+      map.
+    - EmuCodeBlock's 8/16-bit MMIO constant reads sign-extend with casts
+      instead of signed shifts. The value is the same.
+    - fmadd family: when ps1 of frC is needed after the software-FMA
+      call, the register that holds it is now saved. The old code saved
+      the wrong register (RCX) instead.
+    - dcbx and the float compares read the next instruction only after
+      checking that it can be merged; they used to read js.op[1] first.
+    - subfx with a known operand computes the LEA displacement as an
+      unsigned negation, so a value of 0x80000000 is no longer signed
+      overflow. The emitted code is the same.
+  - Fixed for MSVC /W4: the W9 files have no implicit narrowing, no ~ on
+    a narrower type that is then widened, no unary minus on unsigned
+    values, no unused locals and no signed/unsigned compares. They build
+    with no warnings under clang and g++ `-Wall -Wextra -Wconversion
+    -Wsign-compare` (and clang -Wshadow).
+  - Checked: a harness linked the old JIT and the new one (each with its
+    own JIT files) against the same interpreter, MMU, memory and MMIO,
+    with mocks of the rest of the emulator. It ran random guest programs
+    (integer, load/store with self-modifying code, FP, paired singles,
+    system registers, branches and all of them mixed) and compared, per
+    case, hashes of all guest state (GPRs, FPRs, CR fields, XER, FPSCR,
+    MSR, every SPR, segment registers, reservation, pending exceptions,
+    downcount, the global timer, the gather pipe and all of guest
+    memory), of the scheduled events, idle skips and breakpoint hits,
+    and of the block cache (every block's addresses, size, feature
+    flags, exits and link state, profiling run counts) and the
+    branch-watch records.
+    No Nintendo keys, BIOS, firmware or games were used. Results:
+    - 60 configurations: the default; MMU on and off; fastmem off;
+      memchecks; no fastmem arena; real mode; the data cache; the low
+      dcbz hack; page-table fastmem off; the large entry-points map off;
+      FPRF, accurate NaNs, accurate fmadds, FMA on and off, FP and
+      divide-by-zero exceptions; CPU feature masks from none up to all
+      (with BMI1, BMI2, AVX, SSE4.1, FMA, LZCNT and MOVBE each turned
+      off); branch following; branch watch; debugging and profiling;
+      no linking; no block cache; external and FIFO interrupts;
+      interpreter-safe programs; each of the 13 JIT-off options; very
+      long and very short programs.
+    - Every configuration for 2 seeds: 60 programs in each of the
+      integer, FP, paired, system-register, branch and mixed families
+      (43200 cases), plus 30 load/store programs with self-modifying
+      code (3600 cases, capped at 20000 cycles). Earlier runs during the
+      rewrite added several thousand more. No case differs.
+    - DivUtils: all 2^32 divisors match. ConstantPropagation: 50 million
+      random cases match, apart from the divwuo fix above.
+    - Windows ABI: compiled only. This machine has no wine, so code
+      emitted for the Windows ABI was not run.
+    - Compile check: every W9 .cpp builds with g++ and clang (Linux) and
+      clang `-target x86_64-w64-windows-gnu`. The files that include W9
+      headers (Memmap, CachedInterpreter, CachedInterpreterBlockCache,
+      JitInterface and PPCAnalyst) build against the new headers. The
+      DolphinQt JIT widgets need Qt, which this machine lacks; a stub
+      that uses every JitBlock field and JitInterface call they use
+      builds.
+    - Verbatim audit (`tools/verbatim-audit.py wii 8`): no function body
+      in W9 .cpp files shares 8 or more lines with the old code. The
+      remaining runs are all in headers: class declarations and member
+      lists that other code depends on (JitRegCache.h, JitBase.h, Jit.h,
+      JitAsmCommon.h, Jit64AsmCommon.h, FPURegCache.h, GPRRegCache.h,
+      EmuCodeBlock.h, JitCache.h, BlockCache.h, ConstantPool.h and
+      CachedReg.h).
