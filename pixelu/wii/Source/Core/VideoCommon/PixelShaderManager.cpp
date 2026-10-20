@@ -22,6 +22,12 @@ constexpr std::array<s32, 8> FIXED_KONST = {255, 223, 191, 159, 128, 96, 64, 32}
 // The fog range-adjust centre register is offset by this from the real screen centre.
 constexpr s32 FOG_RANGE_CENTER_BIAS = 342;
 
+// The public setters take int register indices.
+constexpr std::size_t Slot(int index)
+{
+  return static_cast<std::size_t>(index);
+}
+
 // Assigns `value` to `field`, reporting whether it changed.
 template <typename Field, typename Value>
 bool Store(Field& field, const Value& value)
@@ -141,8 +147,8 @@ void PixelShaderManager::SetConstants()
 
 void PixelShaderManager::SetTevColor(int index, int component, s32 value)
 {
-  auto& color = constants.colors[index];
-  color[component] = value;
+  auto& color = constants.colors[Slot(index)];
+  color[Slot(component)] = value;
   dirty = true;
 
   PRIM_LOG("tev color{}: {} {} {} {}", index, color[0], color[1], color[2], color[3]);
@@ -150,34 +156,34 @@ void PixelShaderManager::SetTevColor(int index, int component, s32 value)
 
 void PixelShaderManager::SetTevKonstColor(int index, int component, s32 value)
 {
-  auto& color = constants.kcolors[index];
-  color[component] = value;
+  auto& color = constants.kcolors[Slot(index)];
+  color[Slot(component)] = value;
   dirty = true;
 
   // Ubershader konst table: rows 12-15 are the .rgb selections (alpha stays zero), rows 16-31
   // the splatted .rrrr/.gggg/.bbbb/.aaaa selections.
   if (component != 3)
-    constants.konst[12 + index][component] = value;
-  constants.konst[16 + index + 4 * component].fill(value);
+    constants.konst[Slot(12 + index)][Slot(component)] = value;
+  constants.konst[Slot(16 + index + 4 * component)].fill(value);
 
   PRIM_LOG("tev konst color{}: {} {} {} {}", index, color[0], color[1], color[2], color[3]);
 }
 
 void PixelShaderManager::SetTevOrder(int index, u32 order)
 {
-  if (Store(constants.pack2[index][0], order))
+  if (Store(constants.pack2[Slot(index)][0], order))
     dirty = true;
 }
 
 void PixelShaderManager::SetTevKSel(int index, u32 ksel)
 {
-  if (Store(constants.pack2[index][1], ksel))
+  if (Store(constants.pack2[Slot(index)][1], ksel))
     dirty = true;
 }
 
 void PixelShaderManager::SetTevCombiner(int index, int alpha, u32 combiner)
 {
-  if (Store(constants.pack1[index][alpha], combiner))
+  if (Store(constants.pack1[Slot(index)][Slot(alpha)], combiner))
     dirty = true;
 }
 
@@ -188,8 +194,8 @@ void PixelShaderManager::SetTevIndirectChanged()
 
 void PixelShaderManager::SetAlpha()
 {
-  constants.alpha[0] = bpmem.alpha_test.ref0;
-  constants.alpha[1] = bpmem.alpha_test.ref1;
+  constants.alpha[0] = static_cast<s32>(bpmem.alpha_test.ref0.Value());
+  constants.alpha[1] = static_cast<s32>(bpmem.alpha_test.ref1.Value());
   constants.alpha[3] = static_cast<s32>(bpmem.dstalpha.alpha);
   dirty = true;
 }
@@ -211,23 +217,25 @@ void PixelShaderManager::SetDestAlphaChanged()
 
 void PixelShaderManager::SetTexDims(int texmapid, u32 width, u32 height)
 {
-  auto& dims = constants.texdims[texmapid];
-  const bool changed = Store(dims[0], width) | Store(dims[1], height);
-  if (changed)
+  auto& dims = constants.texdims[Slot(texmapid)];
+  const bool width_changed = Store(dims[0], width);
+  const bool height_changed = Store(dims[1], height);
+  if (width_changed || height_changed)
     dirty = true;
 }
 
 void PixelShaderManager::SetSamplerState(int texmapid, u32 tm0, u32 tm1)
 {
-  auto& words = constants.pack2[texmapid];
-  const bool changed = Store(words[2], tm0) | Store(words[3], tm1);
-  if (changed)
+  auto& words = constants.pack2[Slot(texmapid)];
+  const bool tm0_changed = Store(words[2], tm0);
+  const bool tm1_changed = Store(words[3], tm1);
+  if (tm0_changed || tm1_changed)
     dirty = true;
 }
 
 void PixelShaderManager::SetZTextureBias()
 {
-  constants.zbias[1][3] = bpmem.ztex1.bias;
+  constants.zbias[1][3] = static_cast<s32>(bpmem.ztex1.bias.Value());
   dirty = true;
 }
 
@@ -270,8 +278,9 @@ void PixelShaderManager::SetIndMatrixChanged(int matrixidx)
   // Two rows per matrix: the static 2x3 matrix row in .xyz and the shift for the dynamic
   // matrices (17 - scale exponent) in .w.
   const s32 shift = 17 - scale;
-  constants.indtexmtx[2 * matrixidx] = {matrix.col0.ma, matrix.col1.mc, matrix.col2.me, shift};
-  constants.indtexmtx[2 * matrixidx + 1] = {matrix.col0.mb, matrix.col1.md, matrix.col2.mf, shift};
+  const std::size_t row = Slot(2 * matrixidx);
+  constants.indtexmtx[row] = {matrix.col0.ma, matrix.col1.mc, matrix.col2.me, shift};
+  constants.indtexmtx[row + 1] = {matrix.col0.mb, matrix.col1.md, matrix.col2.mf, shift};
   dirty = true;
 
   PRIM_LOG("indmtx{}: scale={}, mat=({} {} {}; {} {} {})", matrixidx, scale, matrix.col0.ma,
@@ -314,9 +323,9 @@ void PixelShaderManager::SetFogColorChanged()
     return;
 
   const auto& color = bpmem.fog.color;
-  constants.fogcolor[0] = color.r;
-  constants.fogcolor[1] = color.g;
-  constants.fogcolor[2] = color.b;
+  constants.fogcolor[0] = static_cast<s32>(color.r.Value());
+  constants.fogcolor[1] = static_cast<s32>(color.g.Value());
+  constants.fogcolor[2] = static_cast<s32>(color.b.Value());
   dirty = true;
 }
 

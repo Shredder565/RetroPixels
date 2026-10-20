@@ -56,9 +56,10 @@ public:
   {
     if (!attribute.enable)
       return;
-    const u32 word_offset = attribute.offset / 4;
-    const u32 packed =
-        include_components ? (word_offset | (attribute.components << 16)) : word_offset;
+    const u32 word_offset = static_cast<u32>(attribute.offset / 4);
+    const u32 packed = include_components ?
+                           (word_offset | (static_cast<u32>(attribute.components) << 16)) :
+                           word_offset;
     UpdateValue(dirty, old_value, packed);
   }
 
@@ -75,7 +76,7 @@ public:
   DOLPHIN_FORCE_INLINE void SetVertexFormat(u32 components, const PortableVertexDeclaration& format)
   {
     UpdateValue(&dirty, &constants.components, components);
-    UpdateValue(&dirty, &constants.vertex_stride, format.stride / 4);
+    UpdateValue(&dirty, &constants.vertex_stride, static_cast<u32>(format.stride / 4));
     UpdateOffset(&dirty, true, &constants.vertex_offset_position, format.position);
     UpdateOffset(&dirty, false, &constants.vertex_offset_posmtx, format.posmtx);
     UpdateOffsets(&dirty, true, &constants.vertex_offset_texcoords, format.texcoords);

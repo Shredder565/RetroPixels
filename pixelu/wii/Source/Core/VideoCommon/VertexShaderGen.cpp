@@ -61,10 +61,10 @@ void FillTexGenKey(vertex_shader_uid_data& key, u32 index)
     gen.other.texgentype = type;
     if (type != TexGenType::EmbossMap)
       return;
-    gen.other.emboss_sourceshift = info.embosssourceshift;
+    gen.other.emboss_sourceshift = static_cast<u8>(info.embosssourceshift.Value());
     // Without tangent/binormal data the light shift cannot change the result.
     if ((key.components & (VB_HAS_TANGENT | VB_HAS_BINORMAL)) != 0)
-      gen.other.emboss_lightshift = info.embosslightshift;
+      gen.other.emboss_lightshift = static_cast<u8>(info.embosslightshift.Value());
     return;
   }
 
@@ -75,7 +75,7 @@ void FillTexGenKey(vertex_shader_uid_data& key, u32 index)
   key.dualTexTrans_enabled = xfmem.dualTexTrans.enabled;
   if (key.dualTexTrans_enabled)
   {
-    gen.regular.postmtx_index = xfmem.postMtxInfo[index].index;
+    gen.regular.postmtx_index = static_cast<u8>(xfmem.postMtxInfo[index].index.Value());
     gen.regular.postmtx_normalize = xfmem.postMtxInfo[index].normalize;
   }
 }

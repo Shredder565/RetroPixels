@@ -36,7 +36,7 @@ constexpr float MAX_DEPTH = 16777215.0f;
 template <std::size_t N>
 void CopyRows(std::array<float4, N>& dest, const float* xf_block, int first_row, int end_row)
 {
-  std::memcpy(dest[first_row].data(), xf_block + first_row * 4,
+  std::memcpy(dest[static_cast<std::size_t>(first_row)].data(), xf_block + first_row * 4,
               static_cast<std::size_t>(end_row - first_row) * sizeof(float4));
 }
 
@@ -59,10 +59,10 @@ float SanitizeDirection(float component)
 void ConvertLight(const Light& src, VertexShaderConstants::Light& dst)
 {
   // XF stores the colour as a, b, g, r bytes.
-  for (int c = 0; c < 4; ++c)
+  for (std::size_t c = 0; c < 4; ++c)
     dst.color[c] = src.color[3 - c];
 
-  for (int c = 0; c < 3; ++c)
+  for (std::size_t c = 0; c < 3; ++c)
   {
     dst.cosatt[c] = src.cosatt[c];
     dst.distatt[c] = src.distatt[c];
@@ -81,14 +81,14 @@ void ConvertLight(const Light& src, VertexShaderConstants::Light& dst)
   for (int c = 0; c < 3; ++c)
     length_sq += double(src.ddir[c]) * double(src.ddir[c]);
   const double inv_length = 1.0 / std::sqrt(length_sq);
-  for (int c = 0; c < 3; ++c)
+  for (std::size_t c = 0; c < 3; ++c)
     dst.dir[c] = SanitizeDirection(static_cast<float>(src.ddir[c] * inv_length));
 }
 
 // Material/ambient colours are RGBA8 words, unpacked to one channel per int.
 void UnpackColor(int4& dest, u32 rgba)
 {
-  for (int c = 0; c < 4; ++c)
+  for (std::size_t c = 0; c < 4; ++c)
     dest[c] = static_cast<s32>((rgba >> (24 - 8 * c)) & 0xFF);
 }
 
@@ -195,7 +195,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   if (constants.missing_color_hex != missing)
   {
     constants.missing_color_hex = missing;
-    for (int c = 0; c < 4; ++c)
+    for (std::size_t c = 0; c < 4; ++c)
     {
       const float channel = static_cast<float>((missing >> (24 - 8 * c)) & 0xFF);
       constants.missing_color_value[c] = channel / 255;
@@ -215,7 +215,8 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   if (const auto span = xf_state_manager.GetPerVertexNormalMatrixChanges(); span[0] >= 0)
   {
     for (int row = span[0] / 3; row < (span[1] + 2) / 3; ++row)
-      std::memcpy(constants.normalmatrices[row].data(), &xfmem.normalMatrices[3 * row], 12);
+      std::memcpy(constants.normalmatrices[static_cast<std::size_t>(row)].data(),
+                  &xfmem.normalMatrices[3 * row], 12);
     xf_state_manager.ResetPerVertexNormalMatrixChanges();
     dirty = true;
   }
@@ -232,7 +233,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   if (const auto span = xf_state_manager.GetLightsChanged(); span[0] >= 0)
   {
     for (int light = span[0] / 0x10; light < (span[1] + 15) / 0x10; ++light)
-      ConvertLight(xfmem.lights[light], constants.lights[light]);
+      ConvertLight(xfmem.lights[light], constants.lights[static_cast<std::size_t>(light)]);
     xf_state_manager.ResetLightsChanged();
     dirty = true;
   }
@@ -240,7 +241,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   // Indices 0 and 1 are the ambient colours, 2 and 3 the material colours.
   for (const int index : xf_state_manager.GetMaterialChanges())
   {
-    UnpackColor(constants.materials[index],
+    UnpackColor(constants.materials[static_cast<std::size_t>(index)],
                 index >= 2 ? xfmem.matColor[index - 2] : xfmem.ambColor[index]);
     dirty = true;
   }
@@ -256,7 +257,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
     const u32 pos_index = index_a.PosNormalMtxIdx;
     CopyMatrix3x4(constants.posnormalmatrix.data(), &xfmem.posMatrices[pos_index * 4]);
     const float* normal = &xfmem.normalMatrices[3 * (pos_index & 31)];
-    for (int row = 0; row < 3; ++row)
+    for (std::size_t row = 0; row < 3; ++row)
       std::memcpy(constants.posnormalmatrix[3 + row].data(), normal + 3 * row, 3 * sizeof(float));
     dirty = true;
   }

@@ -1405,10 +1405,11 @@ void ClearUnusedPixelShaderUidBits(APIType api_type, const ShaderHostConfig& hos
     key.uint_output = 0;
 
   // Keys cached while bounding box was on must not emit it once it is off.
-  key.bounding_box &= host_config.bounding_box && host_config.backend_bbox;
+  if (!host_config.bounding_box || !host_config.backend_bbox)
+    key.bounding_box = 0;
 }
 
-void WritePixelShaderCommonHeader(ShaderCode& out, APIType api_type,
+void WritePixelShaderCommonHeader(ShaderCode& out, [[maybe_unused]] APIType api_type,
                                   const ShaderHostConfig& host_config, bool bounding_box)
 {
   // Integer dot products.
@@ -1472,7 +1473,7 @@ void WritePixelShaderCommonHeader(ShaderCode& out, APIType api_type,
   Put(out, "}\n");
 }
 
-void WriteFragmentBody(APIType api_type, const ShaderHostConfig& host_config,
+void WriteFragmentBody([[maybe_unused]] APIType api_type, const ShaderHostConfig& host_config,
                        const pixel_shader_uid_data* uid_data, ShaderCode& out)
 {
   const pixel_shader_uid_data& uid = *uid_data;

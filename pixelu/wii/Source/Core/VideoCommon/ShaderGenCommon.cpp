@@ -185,7 +185,7 @@ void WriteIsNanHeader(ShaderCode& out, APIType api_type)
 )");
 }
 
-void WriteBitfieldExtractHeader(ShaderCode& out, APIType api_type,
+void WriteBitfieldExtractHeader(ShaderCode& out, [[maybe_unused]] APIType api_type,
                                 const ShaderHostConfig& host_config)
 {
   if (host_config.backend_bitfield)
