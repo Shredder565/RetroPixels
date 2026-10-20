@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 47754 | 10.9% |
-| Dolphin, untouched | 378502 | 86.8% |
+| Original (RetroPixels) | 58494 | 13.4% |
+| Dolphin, untouched | 366597 | 84.3% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **436243** | 100% |
+| **All** | **435078** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -154,13 +154,13 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/USB/USB_HID | 584 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
 | Core/Core/IOS/WFS | 1346 | 0 | Dolphin |
-| Core/Core/PowerPC (top level) | 11150 | 0 | Dolphin |
+| Core/Core/PowerPC (top level) | 9959 | 9959 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1020 | 0 | Dolphin |
 | Core/Core/PowerPC/Interpreter | 6120 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64 | 10326 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
-| Core/Core/PowerPC/SignatureDB | 755 | 0 | Dolphin |
+| Core/Core/PowerPC/SignatureDB | 781 | 781 | original |
 | Core/DiscIO | 15874 | 15874 | original |
 | Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
@@ -234,7 +234,7 @@ batch rewrites them.
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9479 | 9479 | original |
 | W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8290 | 8290 | original |
-| W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 11905 | 0 | Dolphin |
+| W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10740 | 10740 | original |
 | W8 | PowerPC: interpreter and cached interpreter | 7140 | 0 | Dolphin |
 | W9 | PowerPC: JIT common and Jit64 | 15169 | 0 | Dolphin |
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 9898 | 0 | Dolphin |
@@ -822,3 +822,89 @@ the third-party Externals directly) before the submodule can go.
       untouched tree (Linux: 124 ok, 125 fail; Windows: 114 ok, 135
       fail). The failures come from missing Qt, SFML, cubeb, libusb and
       similar.
+
+- W7 log: rewrote all 32 files of the PowerPC core outside the CPU
+  backends (10740 lines now, from 11905): `BreakPoints`, `CPUCoreBase.h`,
+  `ConditionRegister`, `Expression`, `GDBStub`, `Gekko.h`, `JitInterface`,
+  `MMU`, `PPCAnalyst`, `PPCCache`, `PPCSymbolDB`, `PPCTables`, `PowerPC`,
+  and `SignatureDB/{CSV,DSY,MEGA,}SignatureDB`. Every file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. File
+  names, public declarations, register/struct layouts (`PowerPCState`
+  offsets the JIT uses, checked on Linux and MSVC-style layout), savestate
+  `DoState` order, symbol map / signature file formats and the GDB wire
+  protocol are unchanged.
+  - CPU state: `Gekko.h` (SPR numbers, register bitfields, exception bits),
+    `ConditionRegister` (the 64-bit-per-field CR form: SO bit 59, LT bit 62,
+    EQ when the low word is zero, GT when the value is positive),
+    `CPUCoreBase.h`, `PowerPC` (state reset, exceptions and their priority,
+    decrementer/timebase, MSR/MMCR updates, single step, breakpoint and
+    memcheck checks), `PPCCache` (instruction cache with the same pseudo-LRU
+    tree, valid bits and DoState).
+  - `MMU`: effective-to-physical translation (BATs, page table with the
+    same PTEG search order and R/C bit updates, TLB with the same
+    replacement), host read/write helpers, DSI/ISI generation, dcbz/dcbi
+    helpers and the fastmem BAT/page mappings.
+  - `PPCTables`: one flat instruction list (form, extended opcode, name,
+    class, cycles, flags) built into the decode tables at compile time; a
+    duplicate encoding stops the build. Every encoding gives the same
+    name/class/cycles/flags as before.
+  - `PPCAnalyst`: block decoding, branch following, instruction reordering
+    (cror/cmp/carry bubbling), register liveness and the per-op
+    flag/format passes. `CodeOp`/`CodeBlock` contents are unchanged.
+  - `PPCSymbolDB` (function detection, map file load/save in every format
+    the old parser accepted), `SignatureDB` and its DSY, CSV and MEGA
+    readers/writers (same checksums and matching rules).
+  - `BreakPoints`/`Expression` (conditions still go through the expr
+    library), `JitInterface` (core selection, block log dump byte for byte,
+    icache invalidation, exception checks), `GDBStub`.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - `MMU`: when an old page-table entry's page address cannot be worked
+      out, the fastmem mapping update now still adds the new entry (the old
+      code skipped it, so stale mappings could stay); the page-table mirror
+      is bounds-checked before it is read.
+    - `PPCSymbolDB`: folding `(entry of ...)` in map files no longer uses
+      an overlapping `strcpy` that could garble names or overflow; empty
+      or wrapping notes no longer walk off the note map; `DeleteFunction`
+      removes the symbol from the hash index too (left a dangling pointer).
+    - `SignatureDB`: the checksum loop counts words, so a function ending
+      at the top of the address space no longer loops forever; DSY loading
+      stops at a truncated record (same resulting table).
+    - `GDBStub`: `m` with a length too big for a reply only answers `E01`
+      (it also overran a buffer and sent a second reply); `m`/`M` ranges
+      that leave RAM answer `E00` (crashed); `G` reads registers from the
+      payload (it started at the command letter, shifting every register);
+      an interrupt byte no longer causes an extra empty `$#00` reply, and
+      an oversized packet is no longer dispatched after its NAK; a dropped
+      connection in the middle of a packet no longer spins forever; field
+      parsing stops at the end of the packet; `z` for a watch that overlaps
+      the range without starting at its address no longer loops forever;
+      `Deinit` closes the sockets (they leaked); a local socket path that
+      does not fit is refused instead of overflowing.
+    - `PPCTables`: the compiled-instruction log lists ops in table order
+      (cosmetic). `PowerPC.h`: the dead non-x64 `ps` placement and an
+      unused member are gone (layout unchanged on x64).
+  - Kept on purpose because other code or users see them: the CoreTiming
+    event names (`GDBStubUpdate` etc.), JIT block log columns and the
+    signature/map file text formats.
+  - Checked: old and new code run side by side under ASan/UBSan on the
+    same inputs, with identical results (old copies patched only for the
+    fixes above):
+    - Gekko bitfields, `PowerPCState` offsets (Linux and MSVC-style
+      layout), ConditionRegister, PPCCache, BreakPoints/Expression.
+    - MMU + PowerPC system test with random BATs, page tables, TLB use and
+      exceptions (20 seeds).
+    - PPCTables over every OPCD x XO x Rc word plus 2M random words.
+    - PPCAnalyst on random code (13 seeds, 424 reorders seen).
+    - PPCSymbolDB map load/save/detection (20 seeds), SignatureDB family
+      (9 seeds), JitInterface against a logging fake JIT (5 seeds).
+    - GDBStub: scripted debugger sessions over a real local socket (bad
+      checksums, interrupts, oversized packets, every packet type, register
+      and memory reads/writes, breakpoints and watches; 40 seeds), comparing
+      the reply bytes and every side effect.
+  - Compile check: the 15 W7 .cpp files and 80 files that include W7
+    headers (JIT, interpreter, HW, HLE, boot, debugger, IOS) with g++ and
+    with clang for x86_64-w64-windows-gnu, `-Wall` clean for the W7 files.
+    The only failures are the same as on the base tree (missing SFML/lz4/
+    glslang headers here, and the MinGW library's missing `std::expected`).
+  - Not rewritten: nothing in W7. The CPU backends (Jit64, interpreter,
+    cached interpreter) belong to later batches.
