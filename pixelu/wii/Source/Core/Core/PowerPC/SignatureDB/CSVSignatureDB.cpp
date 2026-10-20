@@ -1,11 +1,11 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/SignatureDB/CSVSignatureDB.h"
 
-#include <cstdio>
 #include <fstream>
+#include <ios>
 #include <sstream>
+#include <string>
 
 #include <fmt/format.h>
 
@@ -13,67 +13,75 @@
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 
-// CSV separated with tabs
-// Checksum | Size | Symbol | [Object Location |] Object Name
+namespace
+{
+// Line layout: "<checksum hex> <size hex><anything>\t<name>\t<field>\t<field>".
+// With two trailing fields they are the object location and object name;
+// with one it is the object name.
+bool ParseLine(const std::string& line, u32* checksum, HashSignatureDB::DBFunc* func)
+{
+  std::istringstream in(line);
+  u32 size = 0;
+  in >> std::hex >> *checksum >> size;
+  if (!in)
+    return false;
+
+  std::string ignored;
+  if (!std::getline(in, ignored, '\t'))
+    return false;
+
+  std::string name, second, third;
+  if (std::getline(in, name, '\t') && std::getline(in, second, '\t'))
+    std::getline(in, third);
+
+  func->name = std::move(name);
+  func->size = size;
+  if (third.empty())
+  {
+    func->object_name = std::move(second);
+  }
+  else
+  {
+    func->object_location = std::move(second);
+    func->object_name = std::move(third);
+  }
+  return true;
+}
+}  // namespace
+
 bool CSVSignatureDB::Load(const std::string& file_path)
 {
-  std::string line;
-  std::ifstream ifs;
-  File::OpenFStream(ifs, file_path, std::ios_base::in);
-
-  if (!ifs)
+  std::ifstream file;
+  File::OpenFStream(file, file_path, std::ios_base::in);
+  if (!file)
     return false;
-  for (size_t i = 1; std::getline(ifs, line); i += 1)
+
+  std::string line;
+  for (size_t line_number = 1; std::getline(file, line); ++line_number)
   {
-    std::istringstream iss(line);
-    u32 checksum, size;
-    std::string tab, symbol, object_location, object_name;
-
-    iss >> std::hex >> checksum >> std::hex >> size;
-    if (iss && std::getline(iss, tab, '\t'))
-    {
-      if (std::getline(iss, symbol, '\t') && std::getline(iss, object_location, '\t'))
-        std::getline(iss, object_name);
-      HashSignatureDB::DBFunc func;
-      func.name = symbol;
-      func.size = size;
-      // Doesn't have an object location
-      if (object_name.empty())
-      {
-        func.object_name = object_location;
-      }
-      else
-      {
-        func.object_location = object_location;
-        func.object_name = object_name;
-      }
-      m_database[checksum] = func;
-    }
+    u32 checksum = 0;
+    DBFunc func;
+    if (ParseLine(line, &checksum, &func))
+      m_database[checksum] = std::move(func);
     else
-    {
-      WARN_LOG_FMT(SYMBOLS, "CSV database failed to parse line {}", i);
-    }
+      WARN_LOG_FMT(SYMBOLS, "CSV database failed to parse line {}", line_number);
   }
-
   return true;
 }
 
 bool CSVSignatureDB::Save(const std::string& file_path) const
 {
-  File::IOFile f(file_path, "w");
-
-  if (!f)
+  File::IOFile file(file_path, "w");
+  if (!file)
   {
     ERROR_LOG_FMT(SYMBOLS, "CSV database save failed");
     return false;
   }
-  for (const auto& func : m_database)
+
+  for (const auto& [checksum, func] : m_database)
   {
-    // The object name/location are unused for the time being.
-    // To be implemented.
-    f.WriteString(fmt::format("{0:08x}\t{1:08x}\t{2}\t{3}\t{4}\n", func.first, func.second.size,
-                              func.second.name, func.second.object_location,
-                              func.second.object_name));
+    file.WriteString(fmt::format("{:08x}\t{:08x}\t{}\t{}\t{}\n", checksum, func.size, func.name,
+                                 func.object_location, func.object_name));
   }
 
   INFO_LOG_FMT(SYMBOLS, "CSV database save successful");

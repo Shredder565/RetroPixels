@@ -1,10 +1,11 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Core/PowerPC/SignatureDB/SignatureDB.h"
 
+// Binary: u32 count, then count records of {u32 checksum, u32 size,
+// char name[128]} in host byte order.
 class DSYSignatureDB final : public HashSignatureDB
 {
 public:

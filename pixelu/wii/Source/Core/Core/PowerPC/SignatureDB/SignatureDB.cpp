@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/SignatureDB/SignatureDB.h"
 
+#include <bit>
 #include <memory>
 #include <string>
 
@@ -10,43 +10,86 @@
 #include "Common/Logging/Log.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
-
-// Format Handlers
 #include "Core/PowerPC/SignatureDB/CSVSignatureDB.h"
 #include "Core/PowerPC/SignatureDB/DSYSignatureDB.h"
 #include "Core/PowerPC/SignatureDB/MEGASignatureDB.h"
 
 namespace
 {
-SignatureDB::HandlerType GetHandlerType(const std::string& file_path)
+std::unique_ptr<SignatureDBFormatHandler> MakeHandler(SignatureDB::HandlerType type)
 {
-  if (file_path.ends_with(".csv"))
-    return SignatureDB::HandlerType::CSV;
-  if (file_path.ends_with(".mega"))
-    return SignatureDB::HandlerType::MEGA;
-  return SignatureDB::HandlerType::DSY;
-}
-
-std::unique_ptr<SignatureDBFormatHandler> CreateFormatHandler(SignatureDB::HandlerType handler)
-{
-  switch (handler)
+  switch (type)
   {
-  default:
-  case SignatureDB::HandlerType::DSY:
-    return std::make_unique<DSYSignatureDB>();
   case SignatureDB::HandlerType::CSV:
     return std::make_unique<CSVSignatureDB>();
   case SignatureDB::HandlerType::MEGA:
     return std::make_unique<MEGASignatureDB>();
+  case SignatureDB::HandlerType::DSY:
+  default:
+    return std::make_unique<DSYSignatureDB>();
   }
 }
-}  // Anonymous namespace
 
-SignatureDB::SignatureDB(HandlerType handler) : m_handler(CreateFormatHandler(handler))
+SignatureDB::HandlerType HandlerForPath(const std::string& path)
+{
+  if (path.ends_with(".csv"))
+    return SignatureDB::HandlerType::CSV;
+  if (path.ends_with(".mega"))
+    return SignatureDB::HandlerType::MEGA;
+  return SignatureDB::HandlerType::DSY;
+}
+
+// The part of an instruction that the checksum keeps: the primary opcode
+// plus, depending on the form, the extended opcode or the register fields
+// whose values tend to be fixed by the compiler's calling convention.
+u32 ChecksumBits(u32 inst)
+{
+  const u32 primary = inst >> 26;
+  u32 kept = inst & 0xFC000000;
+  switch (primary)
+  {
+  case 4:  // paired singles: XO in the low six bits; some forms also keep frC
+  {
+    const u32 xo = inst & 0x3F;
+    kept |= xo;
+    if (xo == 0 || xo == 8 || xo == 16 || xo == 21 || xo == 22)
+      kept |= inst & 0x7C0;
+    break;
+  }
+  case 7:
+  case 8:
+  case 10:
+  case 11:
+  case 12:
+  case 13:
+  case 14:
+  case 15:  // integer immediates: rD/rA
+    kept |= inst & 0x03FF0000;
+    break;
+  case 19:
+  case 31:
+  case 63:  // extended opcode and Rc
+    kept |= inst & 0x7FF;
+    break;
+  case 59:  // single-precision FP: XO, and frC for the low XOs
+    kept |= inst & 0x3F;
+    if ((inst & 0x3F) < 16)
+      kept |= inst & 0x7C0;
+    break;
+  default:
+    if (primary >= 32 && primary < 56)  // loads and stores: rD/rA
+      kept |= inst & 0x03FF0000;
+    break;
+  }
+  return kept;
+}
+}  // namespace
+
+SignatureDB::SignatureDB(HandlerType handler) : m_handler(MakeHandler(handler))
 {
 }
 
-SignatureDB::SignatureDB(const std::string& file_path) : SignatureDB(GetHandlerType(file_path))
+SignatureDB::SignatureDB(const std::string& file_path) : SignatureDB(HandlerForPath(file_path))
 {
 }
 
@@ -86,32 +129,42 @@ bool SignatureDB::Add(const Core::CPUThreadGuard& guard, u32 start_addr, u32 siz
   return m_handler->Add(guard, start_addr, size, name);
 }
 
-// Adds a known function to the hash database
+SignatureDBFormatHandler::~SignatureDBFormatHandler() = default;
+
+u32 HashSignatureDB::ComputeCodeChecksum(const Core::CPUThreadGuard& guard, u32 offsetStart,
+                                         u32 offsetEnd)
+{
+  if (offsetEnd < offsetStart)
+    return 0;
+
+  // Rotate-and-xor over the words; counted so an end near 4 GiB cannot wrap.
+  const u32 words = (offsetEnd - offsetStart) / 4 + 1;
+  u32 sum = 0;
+  for (u32 i = 0; i < words; ++i)
+  {
+    const u32 inst = PowerPC::MMU::HostRead_Instruction(guard, offsetStart + i * 4);
+    sum = std::rotl(sum, 17) ^ ChecksumBits(inst);
+  }
+  return sum;
+}
+
 bool HashSignatureDB::Add(const Core::CPUThreadGuard& guard, u32 startAddr, u32 size,
                           const std::string& name)
 {
-  u32 hash = ComputeCodeChecksum(guard, startAddr, startAddr + size - 4);
+  const u32 hash = ComputeCodeChecksum(guard, startAddr, startAddr + size - 4);
+  if (m_database.contains(hash))
+    return false;
 
-  DBFunc temp_dbfunc;
-  temp_dbfunc.size = size;
-  temp_dbfunc.name = name;
-
-  FuncDB::iterator iter = m_database.find(hash);
-  if (iter == m_database.end())
-  {
-    m_database[hash] = temp_dbfunc;
-    return true;
-  }
-  return false;
+  DBFunc& func = m_database[hash];
+  func.size = size;
+  func.name = name;
+  return true;
 }
 
 void HashSignatureDB::List() const
 {
-  for (const auto& entry : m_database)
-  {
-    DEBUG_LOG_FMT(SYMBOLS, "{} : {} bytes, hash = {:08x}", entry.second.name, entry.second.size,
-                  entry.first);
-  }
+  for (const auto& [hash, func] : m_database)
+    DEBUG_LOG_FMT(SYMBOLS, "{} : {} bytes, hash = {:08x}", func.name, func.size, hash);
   INFO_LOG_FMT(SYMBOLS, "{} functions known in current database.", m_database.size());
 }
 
@@ -122,21 +175,20 @@ void HashSignatureDB::Clear()
 
 void HashSignatureDB::Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* symbol_db) const
 {
-  for (const auto& entry : m_database)
+  for (const auto& [hash, known] : m_database)
   {
-    for (const auto& function : symbol_db->GetSymbolsFromHash(entry.first))
+    for (const Common::Symbol* symbol : symbol_db->GetSymbolsFromHash(hash))
     {
-      // Found the function. Let's rename it according to the symbol file.
-      symbol_db->RenameSymbol(*function, entry.second.name);
-      if (entry.second.size == static_cast<unsigned int>(function->size))
+      symbol_db->RenameSymbol(*symbol, known.name);
+      if (known.size == symbol->size)
       {
-        INFO_LOG_FMT(SYMBOLS, "Found {} at {:08x} (size: {:08x})!", entry.second.name,
-                     function->address, function->size);
+        INFO_LOG_FMT(SYMBOLS, "Found {} at {:08x} (size: {:08x})!", known.name, symbol->address,
+                     symbol->size);
       }
       else
       {
         ERROR_LOG_FMT(SYMBOLS, "Wrong size! Found {} at {:08x} (size: {:08x} instead of {:08x})!",
-                      entry.second.name, function->address, function->size, entry.second.size);
+                      known.name, symbol->address, symbol->size, known.size);
       }
     }
   }
@@ -145,77 +197,20 @@ void HashSignatureDB::Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* symb
 
 void HashSignatureDB::Populate(const PPCSymbolDB* symbol_db, const std::string& filter)
 {
+  // Without a filter, take every symbol that has a real name (not an
+  // auto-generated "zz_" one and not a section name).
+  const auto wanted = [&filter](const std::string& name) {
+    if (!filter.empty())
+      return name.starts_with(filter);
+    return !name.empty() && !name.starts_with("zz_") && !name.starts_with(".");
+  };
+
   symbol_db->ForEachSymbol([&](const Common::Symbol& symbol) {
-    if ((filter.empty() && (!symbol.name.empty()) && symbol.name.substr(0, 3) != "zz_" &&
-         symbol.name.substr(0, 1) != ".") ||
-        ((!filter.empty()) && symbol.name.substr(0, filter.size()) == filter))
-    {
-      DBFunc temp_dbfunc;
-      temp_dbfunc.name = symbol.name;
-      temp_dbfunc.size = symbol.size;
-      m_database[symbol.hash] = temp_dbfunc;
-    }
+    if (!wanted(symbol.name))
+      return;
+    DBFunc func;
+    func.name = symbol.name;
+    func.size = symbol.size;
+    m_database[symbol.hash] = std::move(func);
   });
 }
-
-u32 HashSignatureDB::ComputeCodeChecksum(const Core::CPUThreadGuard& guard, u32 offsetStart,
-                                         u32 offsetEnd)
-{
-  u32 sum = 0;
-  for (u32 offset = offsetStart; offset <= offsetEnd; offset += 4)
-  {
-    u32 opcode = PowerPC::MMU::HostRead_Instruction(guard, offset);
-    u32 op = opcode & 0xFC000000;
-    u32 op2 = 0;
-    u32 op3 = 0;
-    u32 auxop = op >> 26;
-    switch (auxop)
-    {
-    case 4:  // PS instructions
-      op2 = opcode & 0x0000003F;
-      switch (op2)
-      {
-      case 0:
-      case 8:
-      case 16:
-      case 21:
-      case 22:
-        op3 = opcode & 0x000007C0;
-      }
-      break;
-
-    case 7:  // addi muli etc
-    case 8:
-    case 10:
-    case 11:
-    case 12:
-    case 13:
-    case 14:
-    case 15:
-      op2 = opcode & 0x03FF0000;
-      break;
-
-    case 19:  // MCRF??
-    case 31:  // integer
-    case 63:  // fpu
-      op2 = opcode & 0x000007FF;
-      break;
-    case 59:  // fpu
-      op2 = opcode & 0x0000003F;
-      if (op2 < 16)
-        op3 = opcode & 0x000007C0;
-      break;
-    default:
-      if (auxop >= 32 && auxop < 56)
-        op2 = opcode & 0x03FF0000;
-      break;
-    }
-    // Checksum only uses opcode, not opcode data, because opcode data changes
-    // in all compilations, but opcodes don't!
-    sum = (((sum << 17) & 0xFFFE0000) | ((sum >> 15) & 0x0001FFFF));
-    sum = sum ^ (op | op2 | op3);
-  }
-  return sum;
-}
-
-SignatureDBFormatHandler::~SignatureDBFormatHandler() = default;

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,7 @@ class CPUThreadGuard;
 
 class PPCSymbolDB;
 
+// A symbol referenced from inside a signature, at a byte offset.
 struct MEGASignatureReference
 {
   MEGASignatureReference(u32 ref_offset, std::string ref_name)
@@ -28,18 +28,15 @@ struct MEGASignatureReference
 
 struct MEGASignature
 {
-  std::vector<u32> code;
+  std::vector<u32> code;  // instruction words; 0 matches anything
   std::string name;
   std::vector<MEGASignatureReference> refs;
 };
 
-// MEGA files from Megazig's WiiTools IDA plugin
-//  -> https://github.com/Megazig/WiiTools
-//
-// Each line contains a function signature composed of:
-//  - Hexstring representation with "." acting as a wildcard
-//  - Name, represented as follow: ":0000 function_name"
-//  - References located in the hexstring at offset: "^offset reference_name"
+// Pattern files as produced by the WiiTools IDA plugin
+// (https://github.com/Megazig/WiiTools). One signature per line:
+//   <hex words, "........" = wildcard word> <:offset> <name> [^offset refname]...
+// Matching compares a symbol's code word by word. Read-only format.
 class MEGASignatureDB : public SignatureDBFormatHandler
 {
 public:

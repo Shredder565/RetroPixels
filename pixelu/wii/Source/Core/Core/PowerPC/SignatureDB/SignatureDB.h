@@ -1,5 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Function signature databases: recognise library functions in guest code
+// and name them. SignatureDB picks a file format handler (DSY binary, CSV,
+// or MEGA pattern files) and forwards to it. These objects are meant to be
+// short-lived: create, load/apply or populate/save, discard.
 
 #pragma once
 
@@ -8,8 +12,6 @@
 #include <string>
 
 #include "Common/CommonTypes.h"
-
-// You're not meant to keep around SignatureDB objects persistently. Use 'em, throw them away.
 
 namespace Core
 {
@@ -29,15 +31,19 @@ public:
     MEGA
   };
   explicit SignatureDB(HandlerType handler);
+  // Chooses the handler from the extension: .csv, .mega, otherwise DSY.
   explicit SignatureDB(const std::string& file_path);
 
   void Clear();
-  // Does not clear. Remember to clear first if that's what you want.
+  // Adds to the current contents; call Clear() first to replace them.
   bool Load(const std::string& file_path);
   bool Save(const std::string& file_path) const;
   void List() const;
 
+  // Takes signatures from the symbols in func_db (named ones, or those whose
+  // name starts with filter).
   void Populate(const PPCSymbolDB* func_db, const std::string& filter = "");
+  // Renames the symbols in func_db that match a signature.
   void Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* func_db) const;
 
   bool Add(const Core::CPUThreadGuard& guard, u32 start_addr, u32 size, const std::string& name);
@@ -63,6 +69,7 @@ public:
                    const std::string& name) = 0;
 };
 
+// Formats that identify a function by a checksum of its instruction opcodes.
 class HashSignatureDB : public SignatureDBFormatHandler
 {
 public:
@@ -75,6 +82,9 @@ public:
   };
   using FuncDB = std::map<u32, DBFunc>;
 
+  // Checksum of the words in [offsetStart, offsetEnd] (inclusive) that only
+  // looks at opcode bits, so that it survives relinking and register
+  // allocation differences between builds of the same code.
   static u32 ComputeCodeChecksum(const Core::CPUThreadGuard& guard, u32 offsetStart, u32 offsetEnd);
 
   void Clear() override;
@@ -87,7 +97,6 @@ public:
            const std::string& name) override;
 
 protected:
-  // Map from signature to function. We store the DB in this map because it optimizes the
-  // most common operation - lookup. We don't care about ordering anyway.
+  // Keyed by checksum.
   FuncDB m_database;
 };
