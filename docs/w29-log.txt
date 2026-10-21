@@ -1,0 +1,179 @@
+- W29 log: rewrote all 95 W29 files in `VideoCommon` as original code (12278
+  lines now, from 13335): the on-screen display and ImGui UI
+  (`OnScreenDisplay`, `OnScreenUI`, `NetPlayChatUI`, `NetPlayGolfUI`, the
+  overlay font `sfont.inc`), `PerformanceMetrics` and `PerformanceTracker`,
+  `FrameDumper` and `FrameDumpFFMpeg`, the custom asset layer (`Assets/`:
+  asset cache, loader, `CustomTextureData` with DDS and PNG loading,
+  texture, shader, material and mesh assets, `TextureSamplerValue`,
+  `DirectFilesystemAssetLibrary`), the graphics mod system
+  (`GraphicsModSystem/`: the mod, group, target, feature and asset config
+  parsers, `GraphicsModManager`, the action factory and actions, `FBInfo`,
+  `CustomPipeline`, `CustomShaderCache`) and the custom resources
+  (`Resources/`: `Resource`, `TexturePool`, `InvalidTextures`, the texture,
+  shader and material resources, `CustomResourceManager`). Every file starts
+  with the original-code header and has no Dolphin copyright or SPDX line.
+  The public names, signatures, enums and layouts are kept: the OSD message
+  types, colours, durations and the `OSD::Message` API, the
+  `PerformanceMetrics` and `FrameDumper` public methods, every asset and
+  material data struct (`MaterialData`, `RasterSurfaceShaderData`,
+  `TextureAndSamplerData`, `MeshData`, `CustomTextureData`), the shader
+  property and sampler variants, the `GraphicsTargetConfig` variant and
+  every target struct, the `GraphicsModActionData` payloads, `FBInfo`, the
+  resource `TaskComplete`/`State` enums and the resource manager's Get*
+  methods. Changed in the headers, with no user outside W29: private
+  members of `FrameDumper` (the worker and capture helpers are `WorkerLoop`,
+  `BeginDump`, `WriteFrame`, `SubmitFrame`, `EnsureScaleTarget`,
+  `EnsureReadback`; the unused screenshot-completed event is gone),
+  `GraphicsModManager` (the decorated action is a file-local
+  `ModGatedAction`), `GraphicsModGroupConfig`, `CustomAssetCache`,
+  `CustomResourceManager` and the resources (declaration order kept where it
+  decides destruction order).
+  - Design:
+    - `OnScreenDisplay`: messages live on one `Board` (per-type queues and
+      the obscured margins); each message is drawn by `EmitNotice`, its
+      expiry decided by `IsFinished`, icons uploaded by `UploadIcon`.
+    - `OnScreenUI`: setup split into `CreateUiContexts`, `FindOsdFont`,
+      `UiTextureConfig` and `LoadRgba`; the movie window and debug text are
+      built by small writers (`WriteMovieStatus`, `DrawWhen`); the texture
+      updates (atlas and dynamic textures) go through
+      `UpdateImguiTexture`/`CreateAtlasTexture`.
+    - `PerformanceTracker`/`PerformanceMetrics`: the sample window is kept
+      by `AddNewest`/`DropOldest`/`TakeInterval`; the overlay layout is one
+      `OverlayLayout` struct; the graph grid rates are a table.
+    - `FrameDumpFFMpeg`: one `FrameDumpContext`; codec and pixel-format
+      choice, segment naming and libav log forwarding are file-local helpers;
+      a segment is opened by `OpenSegment`/`CreateSegmentFile` and closed by
+      `CloseSegment`, packets drained by `DrainEncoder`.
+    - `CustomTextureData`: DDS header parsing returns a `DdsLayout`; level
+      reads, the four-byte fixups (`FixFourByteTexels`) and the BGR widening
+      (`ExpandBGRTexels`) are separate steps; PNG and DDS share one level
+      builder.
+    - `MeshAsset`: glTF reading is split into node, primitive, index and
+      attribute readers; the dolmesh format is read through a bounds-checked
+      `ByteReader`.
+    - `GraphicsModManager`: two passes (collect targets per group and
+      register assets with `ResolveAssetFiles`; then one action per feature
+      attached to its group's targets); the lookups share `ActionsFor`.
+    - `CustomShaderCache`: the four caches are one `Cache` template with
+      pending/ready holders; the pipeline and pixel shader jobs are small
+      work-item classes (a pipeline job queues a fresh copy of itself while
+      its pixel shader is still compiling).
+    - Resources: one `Resource` state machine drives every resource
+      (primary data, dependencies, processing); the material resource builds
+      its texture references and shader key in separate steps.
+    - `sfont.inc`: a newly drawn 9x10 font with the same character map,
+      glyph indices and per-glyph widths.
+  - Kept as before (outputs, quirks):
+    - Every backend call, in order and with the same arguments, for the UI
+      (textures, pipelines, draws, scissors, uniform uploads), the OSD
+      icons (released newest first on `ClearMessages`), frame dumping
+      (staging readbacks, scale targets), the resources and the custom
+      shader cache.
+    - Every FFmpeg call in order with the same arguments (codec and format
+      selection, options, `avcodec_*`/`avformat_*`/`sws_*` calls, packet
+      timing, segment restarts on resolution change), the dump and
+      screenshot file names, the savestate layout, the OSD and log texts.
+    - OSD text, colours, timing, fade and layout; the performance numbers
+      (FPS, VPS, speed, frame times, the same sample windows and float
+      operations) and the overlay layout.
+    - Asset load and reload behaviour: the cache's priority queues, memory
+      accounting and unload order, the loader's two threads and its
+      scheduling, last-loaded times, dirty marks, load sizes and every log
+      message. Graphics mod parse results: the same JSON accepted and
+      rejected with the same messages, profile round trips, weight sort
+      (not stable), the directory scan stopping at the first mod the
+      profile lists, `GetXFBActions` answering from the EFB table.
+    - Resource manager: one cache entry per asset id whatever the asset
+      type, material chains followed without a cycle check (a cycle recurses
+      without end in both versions), the generated GLSL text.
+  - Deliberate differences:
+    - `CustomTextureData` (DDS): the four-byte fixups stop at the end of the
+      level's data, and the BGR widening reads missing source bytes as zero.
+      The old code read and wrote past the buffer for files whose pitch flag
+      or row length promises more data than the file holds (valgrind errors
+      on 37 of 1500 generated DDS files; new: none). Six of those files
+      decode differently (the old output was undefined) and four crashed
+      the old code.
+    - `PurgeInvalidMipsFromTextureData` skips a slice with no levels (the
+      old code read `m_levels[0]` of an empty slice).
+    - `MeshData::FromDolphinMesh` checks every read against the input size
+      and fails on truncated data (the old code read past the end).
+    - `DirectFilesystemAssetLibrary::LoadMesh` reads the file into a sized
+      buffer. The old code reserved capacity, read into it and parsed the
+      still-empty vector, so every dolmesh load read past the vector (a
+      garbage chunk count, usually ending in a `length_error` abort).
+    - `FrameDumper`: the screenshot-completed event, which was set but never
+      waited on, is gone.
+    - `sfont.inc`: redrawn; every glyph now has all ten rows.
+  - Checked:
+    - Old vs new, each built from its own W29 files with the untouched
+      non-W29 base files on both sides, against a recording fake backend
+      (every call and object id), a recording fake libav and a fake clock;
+      random sequences with fixed seeds and synthetic files. One hash per
+      step streamed through `cmp`; verbose logs only for locating
+      differences:
+      - Assets: 3000 mutated JSON documents through every parser and the
+        mod config parsers, 600 PNG and 1500 DDS files, 400 glTF files,
+        dolmesh round trips, `PurgeInvalidMips`/validation, and 800
+        generated asset libraries loaded through
+        `DirectFilesystemAssetLibrary`. Identical, except the DDS and mesh
+        cases above: DDS 1490 identical, 6 different and 4 old-only
+        crashes (all on the over-read files); libraries 650 identical, 150
+        abort only in the old code (all in the old `LoadMesh`).
+      - OSD with the NetPlay chat and golf UIs and the performance
+        overlay: 300 seeds x 600 frames of random message and timing
+        sequences (each frame's ImGui draw data, backend calls and log
+        hashed). Identical, including the render-time log files.
+      - `OnScreenUI` with `PerformanceMetrics`/`PerformanceTracker`: 300
+        seeds x 200 frames (initialisation with injected backend failures,
+        input, config changes, the movie, achievement and NetPlay overlays,
+        scale and pipeline changes). Identical.
+      - Frame dumping: 400 seeds x 400 steps of capture, flush, screenshot
+        and config sequences with libav failures and delays injected (4616
+        output files hashed); without FFmpeg, 200 x 300. Identical.
+      - Custom resources with the real asset cache, loader and filesystem
+        library: 300 generated asset worlds x 200 steps (texture, shader
+        and material requests by kind, file edits, dirty marks, host
+        config changes, frame ends, resets, reinitialisation), workers run
+        under a deterministic pthread-level scheduler. Identical.
+      - Graphics mods: 300 generated mod trees (user and system folders,
+        game-id folders and marker files, profiles) x 150 steps
+        (`Initialize`, group `Load`/`Save`/copy/`GetMod`, the manager's
+        `Load`, every `Get*Actions` query with each action called on live
+        and null payloads, frame ends, mod and profile edits). Identical.
+      - `CustomShaderCache`: 300 seeds x 150 steps with GX and uber UIDs
+        built from random BP/XF state (specialised and uber requests,
+        retrieval, frame ends, host config changes, reloads, rebuilds,
+        failing shaders and pipelines), compilers inline; 150 x 150 with
+        worker threads under the scheduler (no reloads there: `Reload`
+        spins until the workers drain, which the scheduler does not allow).
+        Identical.
+      - Cases left out of the generated inputs because both versions fail
+        on them: a staging-texture failure while a frame capture is pending
+        (both crash), a UI texture failure after initialisation and
+        destroying a UI whose `Initialize` failed (both assert), one asset
+        id requested as two asset types (both confuse the types), cyclic
+        material chains (both recurse without end), truncated framebuffer
+        target names (both throw from the target parser; the assets harness
+        covers it), and generator asserts from random BP state (shared
+        code; answered "continue").
+    - Speed: callgrind instruction counts over the harness runs, old vs new:
+      `OnScreenUI::Finalize`, `DrawImGui`, `DrawDebugText`,
+      `BeginImGuiFrame`, `OSD::DrawMessages` and
+      `PerformanceMetrics::DrawImGuiStats` within 0.1% (new slightly lower);
+      `FrameDumper::DumpCurrentFrame` +0.03%, the dump thread -0.05%,
+      `FFMpegFrameDump::AddFrame` -0.1%; `CustomShaderCache::GetPipelineAsync`
+      -0.02%. The seven `GraphicsModManager` lookups per draw: 195-216
+      cycles old, 160-187 new over 3 interleaved runs. No slowdown.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: the 43 W29
+      .cpp files are clean. The 32 files outside W29 that include a W29
+      header, same flags: no warning from a W29 header on either target; 20
+      compile clean on Linux and 19 on Windows, the rest stop on headers
+      this machine does not have (Qt, SFML, lz4, wil, the achievement hash
+      header) or on unrelated errors, exactly as with the base tree.
+      Element and value types match in every find/contains/== written
+      (MSVC C4389). MSVC was not run.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W29 .cpp
+      file. Remaining runs are in W29 headers only (declarations, data
+      struct layouts, the target variant and action payloads).
