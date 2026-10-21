@@ -210,7 +210,7 @@ void Device::AddControls()
   {
     const char* negative_name;
     const char* positive_name;
-    u8 Proto::PadDataResponse::*field;
+    AnalogField field;
   };
   static constexpr StickAxis stick_axes[] = {
       {"Left X-", "Left X+", &Proto::PadDataResponse::left_stick_x},
