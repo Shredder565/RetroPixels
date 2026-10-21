@@ -1,0 +1,99 @@
+- W39 log: rewrote all 108 W39 files in `Core/DolphinQt/Config` (50 in
+  the folder itself, ConfigControls 17, ControllerInterface 10, Graphics
+  14, SDLHints 2, ToolTipControls 15; 11734 lines now, from 12387). Every
+  rewritten file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. File names, class names, public declarations,
+  signals and slots, objectNames, widgets and their layout order, labels,
+  tooltips, menus and actions, enabled/visible rules, every config key and
+  when it is read or written, the Core/UICommon calls (order and
+  arguments) and every tr() text (byte for byte) are unchanged, as is the
+  Windows behaviour. No files outside W39 were touched; CMake lists and
+  project files were not touched.
+  - Config: the properties dialog and its pages (Info, Filesystem,
+    Verify, Game Config with its INI editor and highlighter, Graphics
+    Mods, Patches, AR and Gecko codes with the code editor, new-patch
+    dialog and the cheat/hardcore/graphics-mod warnings), the settings
+    window, the controllers pane (GameCube ports, Wii Remotes with
+    Bluetooth passthrough and real Wii Remotes, common controllers),
+    the free-look window, the controller interface window, the log
+    widgets, the DSU (DualShock UDP) settings and the mapping-related
+    helpers.
+  - ConfigControls / ToolTipControls: the config-bound bool, choice,
+    radio, integer, slider, float slider and combo controls (same
+    layer-aware reads and writes, same bold-on-override rule) and the
+    tooltip wrappers with the balloon tip.
+  - Graphics: the graphics pane (General, Enhancements, Hacks, Advanced),
+    the color correction and post-processing windows.
+  - SDLHints: the SDL hints window.
+  - Keys and credentials: none found in W39; nothing was added.
+  - Deliberate differences (crashes, undefined behaviour or unbuilt
+    platforms; nothing a user sees in a working run):
+    - ToolTipWidget::timerEvent no longer dereferences an empty optional.
+    - BalloonTip ends its painters before setMask.
+    - PostProcessingConfigWindow: ownership of its configuration is
+      decided at construction; an option whose parent is unknown becomes
+      top-level (the old code dereferenced null); grandchild options
+      without widgets are null-checked; connections use the dialog as
+      context.
+    - HacksWidget connections have `this` as context.
+    - ConfigSliderU32 drops a redundant setValue; ConfigInteger uses
+      setRange.
+    - CheatCodeEditor copies the creator capture before reassigning the
+      name (the old code read a dangling sub_match).
+    - LogWidget's Clear takes the queue mutex.
+    - VerifyWidget reads GetBytesProcessed once per loop iteration.
+    - The u16 casts in GraphicsModListWidget and WiimoteControllersWidget
+      are explicit; SettingsWindow uses static_cast<int> instead of
+      std::to_underlying.
+    - The DSU dialog sets each field's text before its validator.
+    - PropertiesDialog creates its pages in separate statements.
+    - The unused m_*_groups arrays were dropped.
+    - The Apple-only branches are not kept (no such build in this tree).
+  - Checked: old and new code side by side, offscreen against Qt 6.4,
+    with the base versions of every non-W39 file on both sides (pristine
+    Common/Config) and logging fakes for Core, UICommon, DiscIO-free
+    services, VideoBackend, input and Bluetooth. Each run pokes visible,
+    enabled widgets in a seeded random order (clicks, toggles, combo and
+    slider changes, typed text, context menus, table edits, modal dialogs
+    answered both ways) mixed with outside events (emulation state,
+    config changes, running game), and dumps the widget tree (texts,
+    tooltips, enabled/visible, checked, values, objectNames), every tr()
+    lookup, every config write and every fake call after each step.
+    Old and new outputs were compared in memory; all equal:
+    - ctl (config and tooltip controls, balloon tip): 30 seeds x 100 steps.
+    - dsu (DSU settings, widget, dialog, validator; SDL hints): 40 x 80.
+    - cht (AR, Gecko, patches, code editor, new-patch dialog, warnings):
+      40 x 100.
+    - pad (GameCube ports, common controllers, free look, graphics-mod and
+      hardcore warnings, controller interface window): 40 x 80.
+    - wii (Wii Remotes widget with passthrough, scanning thread): 40 x 60.
+    - gfx (graphics pane, four tabs, color correction and post-processing
+      windows): 30 x 60.
+    - gcw (game config widget with its graphics tabs and INI editor):
+      30 x 50.
+    - gml (graphics mods list): 40 x 80.
+    - gcf (game config editor and highlighter, log widget and log config):
+      30 x 60.
+    The harness found and this batch fixed two order differences: the
+    cheat warning's tr()/GetCheatsEnabled order and the Graphics tooltip
+    tr() order (AdvancedWidget backend name, HacksWidget help text).
+  - Compile check: the W39 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu (with UNICODE); C4267, C4389 and C4458
+    map to the clang flags (none); no bitwise `~` on narrow types (C4319)
+    and no bool mixed with integers (C4805), checked by search; no locals
+    named after inherited Qt members. Non-W39 files including W39 headers
+    compile as on the base tree. MSVC itself was not run.
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W39 .cpp file. The runs left in W39 headers are class
+    declarations and member lists (BalloonTip, EnhancementsWidget,
+    ConfigChoice, ConfigSlider, ConfigInteger, GraphicsModListWidget,
+    ColorCorrectionConfigWindow, PostProcessingConfigWindow,
+    PropertiesDialog, SettingsWindow, GeckoCodeWidget, ARCodeWidget,
+    PatchesWidget, DualShockUDPSettings, FilesystemWidget, CheatCodeEditor,
+    GraphicsPane, GeneralWidget).
+  - Not driven, compared line by line only: InfoWidget, FilesystemWidget
+    and VerifyWidget (they need a full DiscIO volume and file system),
+    PropertiesDialog, SettingsWindow and ControllersPane (containers of
+    the driven pages), the _WIN32-only paths (Wii Remote pair/forget via
+    RunWithSpinner, borderless fullscreen) and the removed Apple branches.
