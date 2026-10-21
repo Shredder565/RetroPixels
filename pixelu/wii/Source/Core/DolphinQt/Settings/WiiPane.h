@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,12 +12,13 @@ class ConfigChoiceMap;
 class ConfigChoiceU32;
 class ConfigSliderU32;
 class ConfigUserPath;
-class QLabel;
+class QGroupBox;
 class QListWidget;
 class QPushButton;
-class QString;
 class QVBoxLayout;
 
+// "Wii" settings page: SYSCONF options, the emulated SD card, the USB passthrough whitelist and
+// Wii Remote settings.
 class WiiPane : public QWidget
 {
   Q_OBJECT
@@ -26,60 +26,46 @@ public:
   explicit WiiPane(QWidget* parent = nullptr);
 
 private:
-  void PopulateUSBPassthroughListWidget();
-  void CreateLayout();
-  void ConnectLayout();
-  void CreateMisc();
-  void CreateSDCard();
-  void CreateWhitelistedUSBPassthroughDevices();
-  void CreateWiiRemoteSettings();
+  QGroupBox* BuildSystemGroup();
+  QGroupBox* BuildSDCardGroup();
+  QGroupBox* BuildPassthroughGroup();
+  QGroupBox* BuildRemoteGroup();
+  void WireUp();
 
-  void OnEmulationStateChanged(bool running);
+  void LockForEmulation(bool running);
+  void RefreshRemoveButton();
+  void RefreshPassthroughList();
+  void AddPassthroughDevice();
+  void RemovePassthroughDevice();
 
-  void ValidateSelectionState();
+  void PickSDImage();
+  void PickSDSyncFolder();
+  // Packs the sync folder into the image (pack == true) or the other way round.
+  void ConvertSDCard(bool pack);
 
-  void OnUSBWhitelistAddButton();
-  void OnUSBWhitelistRemoveButton();
+  // System
+  ConfigBool* m_pal60;
+  ConfigBool* m_screen_saver;
+  ConfigBool* m_wiilink;
+  ConfigBool* m_usb_keyboard;
+  ConfigChoiceMap<bool>* m_widescreen;
+  ConfigChoiceU32* m_language;
+  ConfigChoiceU32* m_sound;
 
-  void BrowseSDRaw();
-  void BrowseSDSyncFolder();
+  // SD card
+  ConfigUserPath* m_sd_image_path;
+  ConfigUserPath* m_sd_folder_path;
+  QPushButton* m_sd_pack;
+  QPushButton* m_sd_unpack;
 
-  // Widgets
-  QVBoxLayout* m_main_layout;
+  // USB passthrough
+  QListWidget* m_passthrough_list;
+  QPushButton* m_passthrough_add;
+  QPushButton* m_passthrough_remove;
 
-  // Misc Settings
-  ConfigBool* m_screensaver_checkbox;
-  ConfigBool* m_pal60_mode_checkbox;
-  ConfigBool* m_connect_keyboard_checkbox;
-  ConfigBool* m_wiilink_checkbox;
-  ConfigChoiceU32* m_system_language_choice;
-  QLabel* m_system_language_choice_label;
-  ConfigChoiceMap<bool>* m_aspect_ratio_choice;
-  QLabel* m_aspect_ratio_choice_label;
-  ConfigChoiceU32* m_sound_mode_choice;
-  QLabel* m_sound_mode_choice_label;
-
-  // SD Card Settings
-  ConfigBool* m_sd_card_checkbox;
-  ConfigBool* m_allow_sd_writes_checkbox;
-  ConfigBool* m_sync_sd_folder_checkbox;
-  ConfigChoiceMap<u64>* m_sd_card_size_combo;
-  ConfigUserPath* m_sd_raw_edit;
-  ConfigUserPath* m_sd_sync_folder_edit;
-  QPushButton* m_sd_pack_button;
-  QPushButton* m_sd_unpack_button;
-
-  // Whitelisted USB Passthrough Devices
-  QListWidget* m_whitelist_usb_list;
-  QPushButton* m_whitelist_usb_add_button;
-  QPushButton* m_whitelist_usb_remove_button;
-
-  // Wii Remote Settings
-  QLabel* m_wiimote_sensor_position_label;
-  ConfigChoiceMap<u32>* m_wiimote_ir_sensor_position;
-  ConfigSliderU32* m_wiimote_ir_sensitivity;
-  QLabel* m_wiimote_ir_sensitivity_label;
-  ConfigSliderU32* m_wiimote_speaker_volume;
-  QLabel* m_wiimote_speaker_volume_label;
-  ConfigBool* m_wiimote_motor;
+  // Wii Remote
+  ConfigChoiceMap<u32>* m_sensor_bar_position;
+  ConfigSliderU32* m_ir_sensitivity;
+  ConfigSliderU32* m_speaker_volume;
+  ConfigBool* m_rumble;
 };
