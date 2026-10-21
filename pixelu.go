@@ -2,7 +2,7 @@ package main
 
 // Wii U games through PixelU, RetroPixels' Wii U emulator (based on Cemu,
 // built from pixelu/). It works like the Dolphin launcher in dolphin.go:
-// PixelU.exe is found next to RetroPixels or in Downloads (or chosen), games
+// PixelU.exe (PixelU on Linux) is found next to RetroPixels or in Downloads (or chosen), games
 // are listed from the player's folders, and a game starts with PixelU's own
 // command line through startEmulator. The finding, listing and command line
 // are in internal/pixelu (RetroPixels Native uses them too).
@@ -16,11 +16,49 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"retropixels/internal/pixelu"
 )
+
+// exeFile names a program as it is on this system, for messages:
+// "RetroPixels.exe" on Windows, "RetroPixels" on Linux.
+func exeFile(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+// programFilter is the "choose a program" dialog's filter for one program
+// file. On Linux the dialog adds "All files" itself (pickArgs).
+func programFilter(label, file string) string {
+	if runtime.GOOS == "windows" {
+		return label + " (" + file + ")|" + file + "|Programs (*.exe)|*.exe"
+	}
+	return label + " (" + file + ")|" + file
+}
+
+// checkProgram tells whether a chosen file can be a program: a .exe on
+// Windows, a file marked as executable elsewhere.
+func checkProgram(p string) error {
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(filepath.Ext(p), ".exe") {
+			return errors.New("that isn't a program (.exe)")
+		}
+		return nil
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+		return errors.New("that isn't a program (it isn't marked as executable)")
+	}
+	return nil
+}
 
 func pixeluExe() string {
 	cfgMu.Lock()
@@ -95,7 +133,7 @@ func pixeluRecording(name string) (*recSession, pixelu.LaunchOptions, error) {
 func launchPixelUGame(path string) error {
 	exe := pixeluExe()
 	if exe == "" {
-		return errors.New("PixelU isn't set up yet — choose PixelU.exe in the Wii U tab")
+		return errors.New("PixelU isn't set up yet — choose " + pixelu.ExeName + " in the Wii U tab")
 	}
 	var g *pixelu.Game
 	for _, x := range pixeluLibrary() {
@@ -227,11 +265,9 @@ func registerPixelURoutes(mux *http.ServeMux) {
 		switch b.Action {
 		case "choose-exe":
 			var p string
-			p, err = pickFile("Choose PixelU.exe", "PixelU (PixelU.exe)|PixelU.exe|Programs (*.exe)|*.exe", filepath.Dir(pixeluExe()))
+			p, err = pickFile("Choose "+pixelu.ExeName, programFilter("PixelU", pixelu.ExeName), filepath.Dir(pixeluExe()))
 			if err == nil && p != "" {
-				if !strings.EqualFold(filepath.Ext(p), ".exe") {
-					err = errors.New("that isn't a program (.exe)")
-				} else {
+				if err = checkProgram(p); err == nil {
 					set(func() { cfg.PixelUExe = p })
 				}
 			}

@@ -9,7 +9,8 @@ package main
 // (or fullscreen in Supermodel's own), recorded like the others, and
 // with no console window. Supermodel's settings, NVRAM (the game's own
 // settings and high scores) and save states are kept in
-// %APPDATA%\RetroPixels\Supermodel. The finding, checking, settings and
+// %APPDATA%\RetroPixels\Supermodel (~/.config/RetroPixels/Supermodel on
+// Linux). The finding, checking, settings and
 // command line are in internal/supermodel.
 
 import (
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"retropixels/internal/dolphin"
 	"retropixels/internal/mame"
 	"retropixels/internal/supermodel"
 )
@@ -82,7 +84,10 @@ func supermodelFolders() []string {
 	add(cfg.DolphinFolders...)
 	cfgMu.Unlock()
 	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, "Downloads"), filepath.Join(home, "Desktop"), filepath.Join(home, "Documents"),
+		// The desktop's own Downloads, Desktop and Documents (on Linux they
+		// can have other names; see dolphin.UserFolder).
+		add(dolphin.DownloadDirs(home)...)
+		add(dolphin.UserFolder(home, "Desktop"), dolphin.UserFolder(home, "Documents"),
 			filepath.Join(home, "ROMs"), filepath.Join(home, "roms"))
 	}
 	return out
@@ -203,8 +208,8 @@ func supermodelRecording() (*recSession, string, string, error) {
 func launchSupermodel() error {
 	exe := supermodelExe()
 	if exe == "" {
-		return errors.New("Supermodel isn't here: it comes in the RetroPixels download (the Supermodel folder next to RetroPixels.exe). " +
-			"Unpack the whole download, or choose a supermodel.exe")
+		return errors.New("Supermodel isn't here: it comes in the RetroPixels download (the Supermodel folder next to " + exeFile("RetroPixels") + "). " +
+			"Unpack the whole download, or choose a " + supermodel.ExeName)
 	}
 	rom, c := supermodelROM()
 	if rom == "" {
@@ -382,11 +387,9 @@ func registerSupermodelRoutes(mux *http.ServeMux) {
 			supermodelFind(true)
 		case "choose-exe":
 			var p string
-			p, err = pickFile("Choose Supermodel (supermodel.exe)", "Supermodel (supermodel.exe)|supermodel.exe|Programs (*.exe)|*.exe", filepath.Dir(supermodelExe()))
+			p, err = pickFile("Choose Supermodel ("+supermodel.ExeName+")", programFilter("Supermodel", supermodel.ExeName), filepath.Dir(supermodelExe()))
 			if err == nil && p != "" {
-				if !strings.EqualFold(filepath.Ext(p), ".exe") {
-					err = errors.New("that isn't a program (.exe)")
-				} else {
+				if err = checkProgram(p); err == nil {
 					set(func() { cfg.SupermodelExe = p })
 				}
 			}

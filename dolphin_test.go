@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"retropixels/internal/pixelu"
 )
 
 // Real header bytes from the user's files (first bytes at the offsets that matter).
@@ -167,18 +169,18 @@ func TestDolphinIniAndPads(t *testing.T) {
 }
 
 // fakeEngine makes a PixelU folder holding the Wii / GameCube engine (a
-// shell script standing in for wii\PixelU-Wii.exe, with portable.txt next
+// shell script standing in for wii\PixelU-Wii.exe, PixelU-Wii on Linux, with portable.txt next
 // to it, as shipped) and chooses that folder's PixelU.exe.
 func fakeEngine(t *testing.T, script string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "PixelU")
 	os.MkdirAll(filepath.Join(dir, "wii"), 0o755)
-	os.WriteFile(filepath.Join(dir, "PixelU.exe"), []byte("x"), 0o755)
-	exe := filepath.Join(dir, "wii", "PixelU-Wii.exe")
+	os.WriteFile(filepath.Join(dir, pixelu.ExeName), []byte("x"), 0o755)
+	exe := filepath.Join(dir, "wii", pixelu.WiiExeName)
 	os.WriteFile(exe, []byte(script), 0o755)
 	os.WriteFile(filepath.Join(dir, "wii", "portable.txt"), nil, 0o644)
 	cfgMu.Lock()
-	cfg.PixelUExe = filepath.Join(dir, "PixelU.exe")
+	cfg.PixelUExe = filepath.Join(dir, pixelu.ExeName)
 	cfgMu.Unlock()
 	return exe
 }
@@ -207,7 +209,7 @@ func TestWiiEngineLaunchAndImport(t *testing.T) {
 	if got := dolphinExe(); got != exe {
 		t.Fatalf("dolphinExe = %q want %q", got, exe)
 	}
-	if dolphinExeName() != "PixelU-Wii.exe" {
+	if dolphinExeName() != pixelu.WiiExeName {
 		t.Fatalf("exe name %q", dolphinExeName())
 	}
 	user := filepath.Join(filepath.Dir(exe), "User")

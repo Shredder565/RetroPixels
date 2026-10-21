@@ -176,8 +176,8 @@ var discExts = map[string]bool{".iso": true, ".gcm": true, ".ciso": true, ".wbfs
 const wiiEngineLabel = "PixelU (Wii/GameCube)"
 
 // errNoWiiEngine: what to do when the engine isn't there.
-var errNoWiiEngine = errors.New("PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels.exe " +
-	`(it must have wii\PixelU-Wii.exe in it), then try again`)
+var errNoWiiEngine = errors.New("PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to " + exeFile("RetroPixels") +
+	" (it must have " + filepath.Join(pixelu.WiiDir, pixelu.WiiExeName) + " in it), then try again")
 
 // dolphinExe is PixelU's Wii / GameCube engine, or "".
 func dolphinExe() string {
@@ -467,29 +467,11 @@ func dolphinLibrary() []dolGame {
 // ---------------- Dolphin settings files ----------------
 
 // dolphinUserDir: the engine's portable "User" folder (PixelU\wii\User, as
-// portable.txt is next to PixelU-Wii.exe), else the usual Windows locations.
-func dolphinUserDir() string {
-	if t := os.Getenv("RETRO_DOLPHIN_USER"); t != "" {
-		return t
-	}
-	if exe := dolphinExe(); exe != "" {
-		dir := filepath.Dir(exe)
-		if _, err := os.Stat(filepath.Join(dir, "portable.txt")); err == nil {
-			return filepath.Join(dir, "User")
-		}
-	}
-	home, _ := os.UserHomeDir()
-	docs := filepath.Join(home, "Documents", "Dolphin Emulator")
-	if _, err := os.Stat(docs); err == nil {
-		return docs
-	}
-	if ad := os.Getenv("APPDATA"); ad != "" {
-		return filepath.Join(ad, "Dolphin Emulator")
-	}
-	return docs
-}
+// portable.txt is next to PixelU-Wii.exe), else the usual places of an
+// installed Dolphin on this system (dolphin.UserDir).
+func dolphinUserDir() string { return dolphin.UserDir(dolphinExe()) }
 
-func dolphinIni(name string) string { return filepath.Join(dolphinUserDir(), "Config", name) }
+func dolphinIni(name string) string { return dolphin.ConfigFile(dolphinUserDir(), name) }
 
 // importOldDolphin brings the player's settings, memory cards and Wii saves
 // over from the Dolphin they used before (Documents\Dolphin Emulator, or the
@@ -1046,7 +1028,7 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 				err = errNoWiiEngine
 				break
 			}
-			p := filepath.Join(dolphinUserDir(), "Config")
+			p := dolphin.ConfigDir(dolphinUserDir())
 			os.MkdirAll(p, 0o755)
 			err = openFolder(p)
 		default:
