@@ -668,25 +668,11 @@ bool WantsDeterminism()
   return s_wants_determinism;
 }
 
-void DeclareAsCPUThread()
-{
-  tls_is_cpu_thread = true;
-}
-
-void UndeclareAsCPUThread()
-{
-  tls_is_cpu_thread = false;
-}
-
-void DeclareAsGPUThread()
-{
-  tls_is_gpu_thread = true;
-}
-
-void UndeclareAsGPUThread()
-{
-  tls_is_gpu_thread = false;
-}
+// Thread-role markers, set by each thread for itself.
+void DeclareAsCPUThread() { tls_is_cpu_thread = true; }
+void UndeclareAsCPUThread() { tls_is_cpu_thread = false; }
+void DeclareAsGPUThread() { tls_is_gpu_thread = true; }
+void UndeclareAsGPUThread() { tls_is_gpu_thread = false; }
 
 // Host thread. BootManager::BootCore prepares the session and ends up here.
 bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)

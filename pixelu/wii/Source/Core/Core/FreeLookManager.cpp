@@ -2,6 +2,7 @@
 
 #include "Core/FreeLookManager.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -181,20 +182,11 @@ void FreeLookController::LoadDefaults(const ControllerInterface& ciface)
 
 ControllerEmu::ControlGroup* FreeLookController::GetGroup(FreeLookGroup group) const
 {
-  switch (group)
-  {
-  case FreeLookGroup::Move:
-    return m_move_buttons;
-  case FreeLookGroup::Speed:
-    return m_speed_buttons;
-  case FreeLookGroup::FieldOfView:
-    return m_fov_buttons;
-  case FreeLookGroup::Other:
-    return m_other_buttons;
-  case FreeLookGroup::Rotation:
-    return m_rotation_gyro;
-  }
-  return nullptr;
+  // Indexed by FreeLookGroup's enum order.
+  const std::array<ControllerEmu::ControlGroup*, 5> by_group{
+      m_move_buttons, m_speed_buttons, m_fov_buttons, m_other_buttons, m_rotation_gyro};
+  const auto index = static_cast<size_t>(group);
+  return index < by_group.size() ? by_group[index] : nullptr;
 }
 
 void FreeLookController::Update()

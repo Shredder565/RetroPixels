@@ -228,47 +228,47 @@ static_assert(NamesCoverEveryHotkeyInOrder(), "HOTKEY_NAMES must list every hotk
 
 struct GroupRange
 {
-  const char* title;
   Hotkey first;
   Hotkey last;
+  const char* title;
   // GBA window hotkeys are sampled separately, without the render-window focus rule.
   bool sampled_without_focus = false;
 };
 
 constexpr std::array<GroupRange, NUM_HOTKEY_GROUPS> GROUP_RANGES{{
 #ifdef USE_RETRO_ACHIEVEMENTS
-    {_trans("General"), HK_OPEN, HK_OPEN_ACHIEVEMENTS},
+    {HK_OPEN, HK_OPEN_ACHIEVEMENTS, _trans("General")},
 #else
-    {_trans("General"), HK_OPEN, HK_REQUEST_GOLF_CONTROL},
+    {HK_OPEN, HK_REQUEST_GOLF_CONTROL, _trans("General")},
 #endif
-    {_trans("Volume"), HK_VOLUME_DOWN, HK_VOLUME_TOGGLE_MUTE},
-    {_trans("Emulation Speed"), HK_DECREASE_EMULATION_SPEED, HK_TOGGLE_THROTTLE},
-    {_trans("Frame Advance"), HK_FRAME_ADVANCE, HK_FRAME_ADVANCE_RESET_SPEED},
-    {_trans("Movie"), HK_START_RECORDING, HK_READ_ONLY_MODE},
-    {_trans("Stepping"), HK_STEP, HK_SKIP},
-    {_trans("Program Counter"), HK_SHOW_PC, HK_SET_PC},
-    {_trans("Breakpoint"), HK_BP_TOGGLE, HK_MBP_ADD},
-    {_trans("Wii"), HK_TRIGGER_SYNC_BUTTON, HK_TOGGLE_WII_SPEAK_MUTE},
-    {_trans("Controller Profile 1"), HK_NEXT_WIIMOTE_PROFILE_1, HK_PREV_GAME_WIIMOTE_PROFILE_1},
-    {_trans("Controller Profile 2"), HK_NEXT_WIIMOTE_PROFILE_2, HK_PREV_GAME_WIIMOTE_PROFILE_2},
-    {_trans("Controller Profile 3"), HK_NEXT_WIIMOTE_PROFILE_3, HK_PREV_GAME_WIIMOTE_PROFILE_3},
-    {_trans("Controller Profile 4"), HK_NEXT_WIIMOTE_PROFILE_4, HK_PREV_GAME_WIIMOTE_PROFILE_4},
-    {_trans("Graphics Toggles"), HK_TOGGLE_CROP_TO_ASPECT_RATIO, HK_TOGGLE_TEXTURES},
-    {_trans("Internal Resolution"), HK_INCREASE_IR, HK_DECREASE_IR},
-    {_trans("Freelook"), HK_FREELOOK_TOGGLE, HK_FREELOOK_TOGGLE},
+    {HK_VOLUME_DOWN, HK_VOLUME_TOGGLE_MUTE, _trans("Volume")},
+    {HK_DECREASE_EMULATION_SPEED, HK_TOGGLE_THROTTLE, _trans("Emulation Speed")},
+    {HK_FRAME_ADVANCE, HK_FRAME_ADVANCE_RESET_SPEED, _trans("Frame Advance")},
+    {HK_START_RECORDING, HK_READ_ONLY_MODE, _trans("Movie")},
+    {HK_STEP, HK_SKIP, _trans("Stepping")},
+    {HK_SHOW_PC, HK_SET_PC, _trans("Program Counter")},
+    {HK_BP_TOGGLE, HK_MBP_ADD, _trans("Breakpoint")},
+    {HK_TRIGGER_SYNC_BUTTON, HK_TOGGLE_WII_SPEAK_MUTE, _trans("Wii")},
+    {HK_NEXT_WIIMOTE_PROFILE_1, HK_PREV_GAME_WIIMOTE_PROFILE_1, _trans("Controller Profile 1")},
+    {HK_NEXT_WIIMOTE_PROFILE_2, HK_PREV_GAME_WIIMOTE_PROFILE_2, _trans("Controller Profile 2")},
+    {HK_NEXT_WIIMOTE_PROFILE_3, HK_PREV_GAME_WIIMOTE_PROFILE_3, _trans("Controller Profile 3")},
+    {HK_NEXT_WIIMOTE_PROFILE_4, HK_PREV_GAME_WIIMOTE_PROFILE_4, _trans("Controller Profile 4")},
+    {HK_TOGGLE_CROP_TO_ASPECT_RATIO, HK_TOGGLE_TEXTURES, _trans("Graphics Toggles")},
+    {HK_INCREASE_IR, HK_DECREASE_IR, _trans("Internal Resolution")},
+    {HK_FREELOOK_TOGGLE, HK_FREELOOK_TOGGLE, _trans("Freelook")},
     // i18n: Stereoscopic 3D
-    {_trans("3D"), HK_TOGGLE_STEREO_SIDE_BY_SIDE, HK_TOGGLE_STEREO_ANAGLYPH},
+    {HK_TOGGLE_STEREO_SIDE_BY_SIDE, HK_TOGGLE_STEREO_ANAGLYPH, _trans("3D")},
     // i18n: Stereoscopic 3D
-    {_trans("3D Depth"), HK_DECREASE_DEPTH, HK_INCREASE_CONVERGENCE},
-    {_trans("Load State"), HK_LOAD_STATE_SLOT_1, HK_LOAD_STATE_SLOT_SELECTED},
-    {_trans("Save State"), HK_SAVE_STATE_SLOT_1, HK_SAVE_STATE_SLOT_SELECTED},
-    {_trans("Select State"), HK_SELECT_STATE_SLOT_1, HK_SELECT_STATE_SLOT_10},
-    {_trans("Load Last State"), HK_LOAD_LAST_STATE_1, HK_LOAD_LAST_STATE_10},
-    {_trans("Other State Hotkeys"), HK_SAVE_FIRST_STATE, HK_DECREMENT_SELECTED_STATE_SLOT},
-    {_trans("GBA Core"), HK_GBA_LOAD, HK_GBA_RESET, true},
-    {_trans("GBA Volume"), HK_GBA_VOLUME_DOWN, HK_GBA_TOGGLE_MUTE, true},
-    {_trans("GBA Window Size"), HK_GBA_1X, HK_GBA_4X, true},
-    {_trans("USB Emulation Devices"), HK_SKYLANDERS_PORTAL, HK_INFINITY_BASE},
+    {HK_DECREASE_DEPTH, HK_INCREASE_CONVERGENCE, _trans("3D Depth")},
+    {HK_LOAD_STATE_SLOT_1, HK_LOAD_STATE_SLOT_SELECTED, _trans("Load State")},
+    {HK_SAVE_STATE_SLOT_1, HK_SAVE_STATE_SLOT_SELECTED, _trans("Save State")},
+    {HK_SELECT_STATE_SLOT_1, HK_SELECT_STATE_SLOT_10, _trans("Select State")},
+    {HK_LOAD_LAST_STATE_1, HK_LOAD_LAST_STATE_10, _trans("Load Last State")},
+    {HK_SAVE_FIRST_STATE, HK_DECREMENT_SELECTED_STATE_SLOT, _trans("Other State Hotkeys")},
+    {HK_GBA_LOAD, HK_GBA_RESET, _trans("GBA Core"), true},
+    {HK_GBA_VOLUME_DOWN, HK_GBA_TOGGLE_MUTE, _trans("GBA Volume"), true},
+    {HK_GBA_1X, HK_GBA_4X, _trans("GBA Window Size"), true},
+    {HK_SKYLANDERS_PORTAL, HK_INFINITY_BASE, _trans("USB Emulation Devices")},
 }};
 
 // A group's hotkeys are one bit each in a u32.
