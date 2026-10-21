@@ -229,11 +229,22 @@ namespace
 		return GTK_WINDOW(static_cast<GtkWidget*>(frame->GetHandle()));
 	}
 
-	// "PixelU.Screen" client messages; RetroPixels sends them to the game window
+	void ShowDocked(wxFrame* frame, XWindow host);
+
+	// "PixelU.Screen" client messages (RetroPixels sends them to the game window), and RetroPixels
+	// mapping the hidden window
 	GdkFilterReturn OnXEvent(GdkXEvent* gdkXEvent, GdkEvent*, gpointer)
 	{
 		const XEvent* event = static_cast<const XEvent*>(gdkXEvent);
+		constexpr int kMapNotify = 19;
 		constexpr int kClientMessage = 33; // X11's ClientMessage, whose macro platform.h undefines
+		if (event->type == kMapNotify && event->xmap.window == s_window && s_window != 0 && s_mainFrame && !s_docked && !s_standalone)
+		{
+			// Mapped by RetroPixels while GTK still thinks the window is hidden: GTK would unmap it again
+			// on this event, so the frame is shown first, before GDK handles it.
+			ShowDocked(s_mainFrame, RPEmbedX11::FindHost(s_window, true));
+			return GDK_FILTER_CONTINUE;
+		}
 		if (event->type != kClientMessage)
 			return GDK_FILTER_CONTINUE;
 		const XClientMessageEvent& message = event->xclient;

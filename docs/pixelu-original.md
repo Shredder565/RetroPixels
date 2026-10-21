@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 200330 | 81.7% |
+| Original (RetroPixels) | 200341 | 81.7% |
 | Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
 | Third-party | 44933 | 18.3% |
-| **All** | **245263** | 100% |
+| **All** | **245274** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -159,7 +159,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Common | 31535 | 3748 | mixed (12% original), 27787 lines third-party |
 | config | 2800 | 2800 | original |
 | gui/interface | 140 | 140 | original |
-| gui/wxgui (top level) | 12608 | 12608 | original |
+| gui/wxgui (top level) | 12619 | 12619 | original |
 | gui/wxgui/canvas | 294 | 294 | original |
 | gui/wxgui/components | 4014 | 4014 | original |
 | gui/wxgui/debugger | 3204 | 3204 | original |

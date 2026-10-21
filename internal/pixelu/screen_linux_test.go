@@ -340,9 +340,11 @@ func TestPixelUDockingBox(t *testing.T) {
 	if err := c.ReparentWindow(w, box, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond) // PixelU may look before RetroPixels sizes it
-	c.MoveResizeWindow(w, 0, 0, 960, 540)
+	// mapped at once, before PixelU looks (GTK must not unmap it again), and sized later
 	c.MapWindow(w)
+	c.Sync()
+	time.Sleep(300 * time.Millisecond)
+	c.MoveResizeWindow(w, 0, 0, 960, 540)
 	c.Sync()
 	waitUntil(t, "the docked window to fill the box", 10*time.Second, func() bool {
 		g, err := c.GetGeometry(w)
