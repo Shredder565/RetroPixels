@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -19,9 +19,13 @@ namespace UICommon
 {
 class GameFile;
 
+// Every file under the given folders whose extension the game list can show.
 std::vector<std::string> FindAllGamePaths(std::span<const std::string_view> directories_to_scan,
                                           bool recursive_scan);
 
+// The game list's set of GameFiles, persisted to <cache dir>/gamelist.cache. Entries are shared
+// with other threads as const objects, so an entry is never changed in place: an updated copy
+// replaces it.
 class GameFileCache
 {
 public:
@@ -43,10 +47,10 @@ public:
   size_t GetSize() const;
   void Clear(DeleteOnDisk delete_on_disk);
 
-  // Returns nullptr if the file is invalid.
+  // The entry for `path`, created if needed; nullptr if the file cannot be listed.
   std::shared_ptr<const GameFile> AddOrGet(const std::string& path, bool* cache_changed);
 
-  // These functions return true if the call modified the cache.
+  // Both return whether the cache contents changed.
   bool Update(std::span<const std::string> all_game_paths,
               const GameAddedToCacheFn& game_added_to_cache = {},
               const GameRemovedFromCacheFn& game_removed_from_cache = {},
@@ -58,10 +62,12 @@ public:
   bool Save();
 
 private:
-  bool UpdateAdditionalMetadata(std::shared_ptr<GameFile>* game_file);
+  // Refreshes one entry's optional metadata; replaces it with an updated copy if anything changed.
+  static bool RefreshEntry(std::shared_ptr<GameFile>* entry);
 
-  bool SyncCacheFile(bool save);
-  void DoState(PointerWrap* p, u64 size = 0);
+  bool WriteFile();
+  bool ReadFile();
+  void Serialize(PointerWrap* p, u64 total_size);
 
   std::string m_path;
   std::vector<std::shared_ptr<GameFile>> m_cached_files;

@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,7 @@ class TitleDatabase;
 
 namespace UICommon
 {
+// A banner as 32-bit ARGB pixels, row by row.
 struct GameBanner
 {
   std::vector<u32> buffer;
@@ -34,6 +34,7 @@ struct GameBanner
   void DoState(PointerWrap& p);
 };
 
+// A cover image, kept as the PNG file's bytes.
 struct GameCover
 {
   std::vector<u8> buffer;
@@ -41,7 +42,8 @@ struct GameCover
   void DoState(PointerWrap& p);
 };
 
-// This class caches the metadata of a DiscIO::Volume (or a DOL/ELF file).
+// What the game list knows about one file: a disc image, WAD, DOL/ELF or game mod descriptor.
+// Instances are cached on disk by GameFileCache through DoState.
 class GameFile final
 {
 public:
@@ -62,15 +64,21 @@ public:
   const std::string& GetName(const Core::TitleDatabase& title_database) const;
   const std::string& GetName(Variant variant) const;
   const std::string& GetMaker(Variant variant) const;
-  const std::string& GetShortName(DiscIO::Language l) const { return Lookup(l, m_short_names); }
-  const std::string& GetShortName() const { return LookupUsingConfigLanguage(m_short_names); }
-  const std::string& GetLongName(DiscIO::Language l) const { return Lookup(l, m_long_names); }
-  const std::string& GetLongName() const { return LookupUsingConfigLanguage(m_long_names); }
-  const std::string& GetShortMaker(DiscIO::Language l) const { return Lookup(l, m_short_makers); }
-  const std::string& GetShortMaker() const { return LookupUsingConfigLanguage(m_short_makers); }
-  const std::string& GetLongMaker(DiscIO::Language l) const { return Lookup(l, m_long_makers); }
-  const std::string& GetLongMaker() const { return LookupUsingConfigLanguage(m_long_makers); }
-  const std::string& GetDescription(DiscIO::Language l) const { return Lookup(l, m_descriptions); }
+  const std::string& GetShortName(DiscIO::Language l) const { return PickString(l, m_short_names); }
+  const std::string& GetShortName() const { return PickForConfig(m_short_names); }
+  const std::string& GetLongName(DiscIO::Language l) const { return PickString(l, m_long_names); }
+  const std::string& GetLongName() const { return PickForConfig(m_long_names); }
+  const std::string& GetShortMaker(DiscIO::Language l) const
+  {
+    return PickString(l, m_short_makers);
+  }
+  const std::string& GetShortMaker() const { return PickForConfig(m_short_makers); }
+  const std::string& GetLongMaker(DiscIO::Language l) const { return PickString(l, m_long_makers); }
+  const std::string& GetLongMaker() const { return PickForConfig(m_long_makers); }
+  const std::string& GetDescription(DiscIO::Language l) const
+  {
+    return PickString(l, m_descriptions);
+  }
   const std::string& GetDescription(Variant variant) const;
   std::vector<DiscIO::Language> GetLanguages() const;
   const std::string& GetInternalName() const { return m_internal_name; }
@@ -79,16 +87,15 @@ public:
   u64 GetTitleID() const { return m_title_id; }
   const std::string& GetMakerID() const { return m_maker_id; }
   u16 GetRevision() const { return m_revision; }
-  // 0 is the first disc, 1 is the second disc
+  // Zero-based: 0 is disc 1.
   u8 GetDiscNumber() const { return m_disc_number; }
   bool IsTwoDiscGame() const { return m_is_two_disc_game; }
   std::string GetNetPlayName(const Core::TitleDatabase& title_database) const;
 
-  // This function is slow
+  // The next three read the whole file, so they are slow.
   std::array<u8, 20> GetSyncHash() const;
-  // This function is slow
   NetPlay::SyncIdentifier GetSyncIdentifier() const;
-  // This function is slow if all of game_id, revision, disc_number, is_datel are identical
+  // Only reads the file when everything cheaper to compare matches.
   NetPlay::SyncIdentifierComparison
   CompareSyncIdentifier(const NetPlay::SyncIdentifier& sync_identifier) const;
 
@@ -112,6 +119,9 @@ public:
   const GameBanner& GetBannerImage() const;
   const GameCover& GetCoverImage() const;
   void DoState(PointerWrap& p);
+
+  // GameFileCache refreshes optional metadata in two steps: a *Changed call loads the current
+  // data into a staging area and says whether it differs, and the *Commit call adopts it.
   bool XMLMetadataChanged();
   void XMLMetadataCommit();
   bool WiiBannerChanged();
@@ -125,21 +135,18 @@ public:
   void CustomCoverCommit();
 
 private:
-  DiscIO::Language GetConfigLanguage() const;
-  static const std::string& Lookup(DiscIO::Language language,
-                                   const std::map<DiscIO::Language, std::string>& strings);
-  const std::string&
-  LookupUsingConfigLanguage(const std::map<DiscIO::Language, std::string>& strings) const;
-  std::string GetExtension() const;
-  bool IsElfOrDol() const;
-  bool ReadXMLMetadata(const std::string& path);
-  bool ReadPNGBanner(const std::string& path);
-  bool TryLoadGameModDescriptorBanner();
-  bool CheckIfTwoDiscGame(const std::string& game_id) const;
+  DiscIO::Language ConfigLanguage() const;
+  static const std::string& PickString(DiscIO::Language language,
+                                       const std::map<DiscIO::Language, std::string>& strings);
+  const std::string& PickForConfig(const std::map<DiscIO::Language, std::string>& strings) const;
+  std::string LowerExtension() const;
+  bool IsExecutable() const;
+  bool LoadXMLMetadata(const std::string& path);
+  bool LoadPNGBanner(const std::string& path);
+  bool LoadModDescriptorBanner();
 
-  // IMPORTANT: Nearly all data members must be save/restored in DoState.
-  // If anything is changed, make sure DoState handles it properly and
-  // CACHE_REVISION in GameFileCache.cpp is incremented.
+  // Everything below up to m_pending is written by DoState. Changing what is stored needs a
+  // matching DoState change and a new CACHE_REVISION in GameFileCache.cpp.
 
   bool m_valid{};
   std::string m_file_path;
@@ -181,8 +188,8 @@ private:
   GameCover m_default_cover{};
   GameCover m_custom_cover{};
 
-  // The following data members allow GameFileCache to construct updated versions
-  // of GameFiles in a threadsafe way. They should not be handled in DoState.
+  // Staging area for the *Changed/*Commit pairs, so GameFileCache can build an updated copy
+  // without touching one that other threads may be reading. Never cached.
   struct
   {
     std::string custom_name;

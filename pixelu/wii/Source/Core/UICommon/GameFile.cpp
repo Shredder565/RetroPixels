@@ -1,14 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/GameFile.h"
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -18,6 +17,7 @@
 #include <fmt/ranges.h>
 #include <pugixml.hpp>
 
+#include "Common/Assert.h"
 #include "Common/BitUtils.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonPaths.h"
@@ -48,233 +48,225 @@ namespace UICommon
 {
 namespace
 {
-const std::string EMPTY_STRING;
+using Digest = Common::SHA1::Digest;
 
-bool UseGameCovers()
+const std::string NO_STRING;
+
+// Three-letter game ID prefixes of GameCube and Wii games released on two discs (kept sorted for
+// the binary search below).
+constexpr std::array<std::string_view, 30> TWO_DISC_PREFIXES = {
+    "DBJ", "G3A", "G3Q", "G4B", "G5T", "GBI", "GBZ", "GC9", "GCD", "GCJ",
+    "GFF", "GGI", "GGS", "GK4", "GK7", "GKB", "GL3", "GMX", "GNI", "GOY",
+    "GQS", "GR8", "GRZ", "GTO", "GW4", "GWY", "S4M", "S4S", "S6T", "SDQ",
+};
+static_assert(std::ranges::is_sorted(TWO_DISC_PREFIXES));
+
+bool IsTwoDiscGameID(std::string_view game_id)
 {
-#ifdef ANDROID
-  // Android has its own code for handling covers, written completely in Java.
-  // It's best if we disable the C++ cover code on Android to avoid duplicated data and such.
-  return false;
-#else
-  return Config::Get(Config::MAIN_USE_GAME_COVERS);
-#endif
+  if (game_id.size() < 3)
+    return false;
+  return std::ranges::binary_search(TWO_DISC_PREFIXES, game_id.substr(0, 3));
 }
-}  // Anonymous namespace
 
-DiscIO::Language GameFile::GetConfigLanguage() const
+bool CoversEnabled()
+{
+  return Config::Get(Config::MAIN_USE_GAME_COVERS);
+}
+
+// Splits the file path into its folder (with trailing separator) and its name without extension.
+std::pair<std::string, std::string> FolderAndStem(const std::string& file_path)
+{
+  std::string folder;
+  std::string stem;
+  SplitPath(file_path, &folder, &stem, nullptr);
+  return {std::move(folder), std::move(stem)};
+}
+
+// Reads a whole file that exists into `out`.
+bool ReadIfExists(const std::string& path, std::string* out)
+{
+  return File::Exists(path) && File::ReadFileToString(path, *out);
+}
+
+Digest DigestOf(std::string_view text)
+{
+  return Common::SHA1::CalculateDigest(text);
+}
+
+Digest DigestOf(u32 number)
+{
+  // The value's bytes in host order.
+  return Common::SHA1::CalculateDigest(Common::BitCastToArray<u8>(number));
+}
+
+std::optional<Digest> DigestOfFile(const std::string& path)
+{
+  std::string contents;
+  if (!File::ReadFileToString(path, contents))
+    return std::nullopt;
+  return DigestOf(contents);
+}
+
+// Folds two optional digests together. A missing side leaves the other unchanged; otherwise each
+// byte of `a` is XORed with the next byte (wrapping) of `b`.
+std::optional<Digest> Combine(const std::optional<Digest>& a, const std::optional<Digest>& b)
+{
+  if (!a.has_value())
+    return b;
+  if (!b.has_value())
+    return a;
+
+  Digest mixed{};
+  const std::size_t n = mixed.size();
+  for (std::size_t i = 0; i < n; ++i)
+    mixed[i] = static_cast<u8>((*a)[i] ^ (*b)[(i + 1) % n]);
+  return mixed;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Language lookup
+
+DiscIO::Language GameFile::ConfigLanguage() const
 {
   return SConfig::GetInstance().GetLanguageAdjustedForRegion(DiscIO::IsWii(m_platform), m_region);
 }
 
-const std::string& GameFile::Lookup(DiscIO::Language language,
-                                    const std::map<DiscIO::Language, std::string>& strings)
+const std::string& GameFile::PickString(DiscIO::Language language,
+                                        const std::map<DiscIO::Language, std::string>& strings)
 {
-  auto end = strings.end();
-  auto it = strings.find(language);
-  if (it != end)
-    return it->second;
+  // The requested language, else English, else whichever language sorts first.
+  if (const auto wanted = strings.find(language); wanted != strings.end())
+    return wanted->second;
 
-  // English tends to be a good fallback when the requested language isn't available
   if (language != DiscIO::Language::English)
   {
-    it = strings.find(DiscIO::Language::English);
-    if (it != end)
-      return it->second;
+    if (const auto english = strings.find(DiscIO::Language::English); english != strings.end())
+      return english->second;
   }
 
-  // If English isn't available either, just pick something
-  if (!strings.empty())
-    return strings.cbegin()->second;
-
-  return EMPTY_STRING;
+  return strings.empty() ? NO_STRING : strings.begin()->second;
 }
 
 const std::string&
-GameFile::LookupUsingConfigLanguage(const std::map<DiscIO::Language, std::string>& strings) const
+GameFile::PickForConfig(const std::map<DiscIO::Language, std::string>& strings) const
 {
-  return Lookup(GetConfigLanguage(), strings);
+  return PickString(ConfigLanguage(), strings);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Construction
+
 GameFile::GameFile() = default;
+GameFile::~GameFile() = default;
 
 GameFile::GameFile(std::string path) : m_file_path(std::move(path))
 {
   m_file_name = PathToFileName(m_file_path);
 
+  // 1. Anything DiscIO can open as a volume: discs, compressed images and WADs.
+  if (const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(m_file_path))
   {
-    std::unique_ptr<DiscIO::Volume> volume(DiscIO::CreateVolume(m_file_path));
-    if (volume != nullptr)
-    {
-      m_platform = volume->GetVolumeType();
+    const DiscIO::BlobReader& blob = volume->GetBlobReader();
 
-      m_short_names = volume->GetShortNames();
-      m_long_names = volume->GetLongNames();
-      m_short_makers = volume->GetShortMakers();
-      m_long_makers = volume->GetLongMakers();
-      m_descriptions = volume->GetDescriptions();
-
-      m_region = volume->GetRegion();
-      m_country = volume->GetCountry();
-      m_blob_type = volume->GetBlobType();
-      m_block_size = volume->GetBlobReader().GetBlockSize();
-      m_compression_method = volume->GetBlobReader().GetCompressionMethod();
-      m_file_size = volume->GetRawSize();
-      m_volume_size = volume->GetDataSize();
-      m_volume_size_type = volume->GetDataSizeType();
-      m_is_datel_disc = volume->IsDatelDisc();
-      m_is_nkit = volume->IsNKit();
-
-      m_internal_name = volume->GetInternalName();
-      m_game_id = volume->GetGameID();
-      m_gametdb_id = volume->GetGameTDBID();
-      m_title_id = volume->GetTitleID().value_or(0);
-      m_maker_id = volume->GetMakerID();
-      m_revision = volume->GetRevision().value_or(0);
-      m_disc_number = volume->GetDiscNumber().value_or(0);
-      m_is_two_disc_game = CheckIfTwoDiscGame(m_game_id);
-      m_apploader_date = volume->GetApploaderDate();
-
-      m_volume_banner.buffer = volume->GetBanner(&m_volume_banner.width, &m_volume_banner.height);
-
-      m_valid = true;
-    }
+    m_platform = volume->GetVolumeType();
+    m_short_names = volume->GetShortNames();
+    m_long_names = volume->GetLongNames();
+    m_short_makers = volume->GetShortMakers();
+    m_long_makers = volume->GetLongMakers();
+    m_descriptions = volume->GetDescriptions();
+    m_region = volume->GetRegion();
+    m_country = volume->GetCountry();
+    m_blob_type = volume->GetBlobType();
+    m_block_size = blob.GetBlockSize();
+    m_compression_method = blob.GetCompressionMethod();
+    m_file_size = volume->GetRawSize();
+    m_volume_size = volume->GetDataSize();
+    m_volume_size_type = volume->GetDataSizeType();
+    m_is_datel_disc = volume->IsDatelDisc();
+    m_is_nkit = volume->IsNKit();
+    m_internal_name = volume->GetInternalName();
+    m_game_id = volume->GetGameID();
+    m_gametdb_id = volume->GetGameTDBID();
+    m_title_id = volume->GetTitleID().value_or(0);
+    m_maker_id = volume->GetMakerID();
+    m_revision = volume->GetRevision().value_or(0);
+    m_disc_number = volume->GetDiscNumber().value_or(0);
+    m_is_two_disc_game = IsTwoDiscGameID(m_game_id);
+    m_apploader_date = volume->GetApploaderDate();
+    m_volume_banner.buffer = volume->GetBanner(&m_volume_banner.width, &m_volume_banner.height);
+    m_valid = true;
   }
 
-  if (!IsValid() && IsElfOrDol())
+  // 2. A bare DOL or ELF executable, recognised by its extension.
+  if (!IsValid() && IsExecutable())
   {
     m_valid = true;
-    m_file_size = m_volume_size = File::GetSize(m_file_path);
-    m_game_id = SConfig::MakeGameID(m_file_name);
+    m_platform = DiscIO::Platform::ELFOrDOL;
+    m_blob_type = DiscIO::BlobType::DIRECTORY;
+    m_file_size = File::GetSize(m_file_path);
+    m_volume_size = m_file_size;
     m_volume_size_type = DiscIO::DataSizeType::Accurate;
     m_is_datel_disc = false;
     m_is_nkit = false;
-    m_platform = DiscIO::Platform::ELFOrDOL;
-    m_blob_type = DiscIO::BlobType::DIRECTORY;
+    m_game_id = SConfig::MakeGameID(m_file_name);
   }
 
-  if (!IsValid() && GetExtension() == ".json")
+  // 3. A game mod descriptor (.json) whose base game is itself listable.
+  if (!IsValid() && LowerExtension() == ".json")
   {
-    auto descriptor = DiscIO::ParseGameModDescriptorFile(m_file_path);
-    if (descriptor)
-    {
-      GameFile proxy(descriptor->base_file);
-      if (proxy.IsValid())
-      {
-        m_valid = true;
-        m_file_size = File::GetSize(m_file_path);
-        m_long_names.emplace(DiscIO::Language::English, std::move(descriptor->display_name));
-        if (!descriptor->maker.empty())
-          m_long_makers.emplace(DiscIO::Language::English, std::move(descriptor->maker));
-        m_internal_name = proxy.GetInternalName();
-        m_game_id = proxy.GetGameID();
-        m_gametdb_id = proxy.GetGameTDBID();
-        m_title_id = proxy.GetTitleID();
-        m_maker_id = proxy.GetMakerID();
-        m_region = proxy.GetRegion();
-        m_country = proxy.GetCountry();
-        m_platform = proxy.GetPlatform();
-        m_revision = proxy.GetRevision();
-        m_disc_number = proxy.GetDiscNumber();
-        m_blob_type = DiscIO::BlobType::MOD_DESCRIPTOR;
-      }
-    }
+    std::optional<DiscIO::GameModDescriptor> mod = DiscIO::ParseGameModDescriptorFile(m_file_path);
+    if (!mod)
+      return;
+
+    const GameFile base(mod->base_file);
+    if (!base.IsValid())
+      return;
+
+    m_valid = true;
+    m_blob_type = DiscIO::BlobType::MOD_DESCRIPTOR;
+    m_file_size = File::GetSize(m_file_path);
+    m_long_names.emplace(DiscIO::Language::English, std::move(mod->display_name));
+    if (!mod->maker.empty())
+      m_long_makers.emplace(DiscIO::Language::English, std::move(mod->maker));
+
+    m_internal_name = base.GetInternalName();
+    m_game_id = base.GetGameID();
+    m_gametdb_id = base.GetGameTDBID();
+    m_title_id = base.GetTitleID();
+    m_maker_id = base.GetMakerID();
+    m_region = base.GetRegion();
+    m_country = base.GetCountry();
+    m_platform = base.GetPlatform();
+    m_revision = base.GetRevision();
+    m_disc_number = base.GetDiscNumber();
   }
 }
-
-GameFile::~GameFile() = default;
 
 bool GameFile::IsValid() const
 {
-  if (!m_valid)
-    return false;
-
-  if (m_platform == DiscIO::Platform::WiiWAD && !IOS::ES::IsChannel(m_title_id))
-    return false;
-
-  return true;
+  // WADs are only listed when they hold a channel.
+  if (m_platform == DiscIO::Platform::WiiWAD)
+    return m_valid && IOS::ES::IsChannel(m_title_id);
+  return m_valid;
 }
 
-bool GameFile::CustomCoverChanged()
+std::string GameFile::LowerExtension() const
 {
-  if (!m_custom_cover.buffer.empty() || !UseGameCovers())
-    return false;
-
-  std::string path, name;
-  SplitPath(m_file_path, &path, &name, nullptr);
-
-  std::string contents;
-
-  // This icon naming format is intended as an alternative to Homebrew Channel icons
-  // for those who don't want to have a Homebrew Channel style folder structure.
-  const std::string cover_path = path + name + ".cover.png";
-  bool success = File::Exists(cover_path) && File::ReadFileToString(cover_path, contents);
-
-  if (!success)
-  {
-    const std::string alt_cover_path = path + "cover.png";
-    success = File::Exists(alt_cover_path) && File::ReadFileToString(alt_cover_path, contents);
-  }
-
-  if (success)
-    m_pending.custom_cover.buffer = {contents.begin(), contents.end()};
-
-  return success;
+  std::string extension;
+  SplitPath(m_file_path, nullptr, nullptr, &extension);
+  Common::ToLower(&extension);
+  return extension;
 }
 
-void GameFile::DownloadDefaultCover()
+bool GameFile::IsExecutable() const
 {
-  if (!m_default_cover.buffer.empty() || !UseGameCovers() || m_gametdb_id.empty())
-    return;
-
-  const auto cover_path = File::GetUserPath(D_COVERCACHE_IDX) + DIR_SEP;
-  const auto png_path = cover_path + m_gametdb_id + ".png";
-
-  // If the cover has already been downloaded, abort
-  if (File::Exists(png_path))
-    return;
-
-  const std::string region_code =
-      SConfig::GetInstance().GetGameTDBImageRegionCode(DiscIO::IsWii(GetPlatform()), m_region);
-
-  Common::HttpRequest request;
-  static constexpr char cover_url[] = "https://art.gametdb.com/wii/cover/{}/{}.png";
-  const auto response = request.Get(fmt::format(cover_url, region_code, m_gametdb_id));
-
-  if (!response)
-    return;
-
-  File::WriteStringToFile(png_path, std::string(response->begin(), response->end()));
+  const std::string extension = LowerExtension();
+  return extension == ".dol" || extension == ".elf";
 }
 
-bool GameFile::DefaultCoverChanged()
-{
-  if (!m_default_cover.buffer.empty() || !UseGameCovers())
-    return false;
-
-  const auto cover_path = File::GetUserPath(D_COVERCACHE_IDX) + DIR_SEP;
-
-  std::string contents;
-
-  File::ReadFileToString(cover_path + m_gametdb_id + ".png", contents);
-
-  if (contents.empty())
-    return false;
-
-  m_pending.default_cover.buffer = {contents.begin(), contents.end()};
-
-  return true;
-}
-
-void GameFile::CustomCoverCommit()
-{
-  m_custom_cover = std::move(m_pending.custom_cover);
-}
-
-void GameFile::DefaultCoverCommit()
-{
-  m_default_cover = std::move(m_pending.default_cover);
-}
+// ---------------------------------------------------------------------------------------------
+// Cache serialisation
 
 void GameBanner::DoState(PointerWrap& p)
 {
@@ -290,6 +282,7 @@ void GameCover::DoState(PointerWrap& p)
 
 void GameFile::DoState(PointerWrap& p)
 {
+  // The field order is the cache file layout.
   p.Do(m_valid);
   p.Do(m_file_path);
   p.Do(m_file_name);
@@ -300,11 +293,11 @@ void GameFile::DoState(PointerWrap& p)
   p.Do(m_is_datel_disc);
   p.Do(m_is_nkit);
 
-  p.Do(m_short_names);
-  p.Do(m_long_names);
-  p.Do(m_short_makers);
-  p.Do(m_long_makers);
-  p.Do(m_descriptions);
+  for (auto* strings : {&m_short_names, &m_long_names, &m_short_makers, &m_long_makers,
+                        &m_descriptions})
+  {
+    p.Do(*strings);
+  }
   p.Do(m_internal_name);
   p.Do(m_game_id);
   p.Do(m_gametdb_id);
@@ -325,69 +318,115 @@ void GameFile::DoState(PointerWrap& p)
   p.Do(m_custom_name);
   p.Do(m_custom_description);
   p.Do(m_custom_maker);
-  m_volume_banner.DoState(p);
-  m_custom_banner.DoState(p);
-  m_default_cover.DoState(p);
-  m_custom_cover.DoState(p);
+  for (GameBanner* banner : {&m_volume_banner, &m_custom_banner})
+    banner->DoState(p);
+  for (GameCover* cover : {&m_default_cover, &m_custom_cover})
+    cover->DoState(p);
 }
 
-std::string GameFile::GetExtension() const
-{
-  std::string extension;
-  SplitPath(m_file_path, nullptr, nullptr, &extension);
-  Common::ToLower(&extension);
-  return extension;
-}
+// ---------------------------------------------------------------------------------------------
+// Covers
 
-bool GameFile::IsElfOrDol() const
+bool GameFile::CustomCoverChanged()
 {
-  const std::string extension = GetExtension();
-  return extension == ".elf" || extension == ".dol";
-}
-
-bool GameFile::ReadXMLMetadata(const std::string& path)
-{
-  std::string data;
-  if (!File::ReadFileToString(path, data))
+  if (!m_custom_cover.buffer.empty() || !CoversEnabled())
     return false;
 
-  pugi::xml_document doc;
-  // We use load_buffer instead of load_file to avoid path encoding problems on Windows
-  if (!doc.load_buffer(data.data(), data.size()))
+  // "<name>.cover.png" next to the game, or a shared "cover.png" in its folder.
+  const auto [folder, stem] = FolderAndStem(m_file_path);
+  std::string png;
+  const bool found =
+      ReadIfExists(folder + stem + ".cover.png", &png) || ReadIfExists(folder + "cover.png", &png);
+  if (found)
+    m_pending.custom_cover.buffer.assign(png.begin(), png.end());
+  return found;
+}
+
+void GameFile::CustomCoverCommit()
+{
+  m_custom_cover = std::move(m_pending.custom_cover);
+}
+
+void GameFile::DownloadDefaultCover()
+{
+  if (!m_default_cover.buffer.empty() || !CoversEnabled() || m_gametdb_id.empty())
+    return;
+
+  const std::string target = File::GetUserPath(D_COVERCACHE_IDX) + DIR_SEP + m_gametdb_id + ".png";
+  if (File::Exists(target))
+    return;
+
+  const std::string region =
+      SConfig::GetInstance().GetGameTDBImageRegionCode(DiscIO::IsWii(GetPlatform()), m_region);
+  const std::string url =
+      fmt::format("https://art.gametdb.com/wii/cover/{}/{}.png", region, m_gametdb_id);
+
+  Common::HttpRequest http;
+  const Common::HttpRequest::Response reply = http.Get(url);
+  if (reply)
+    File::WriteStringToFile(target, std::string(reply->begin(), reply->end()));
+}
+
+bool GameFile::DefaultCoverChanged()
+{
+  if (!m_default_cover.buffer.empty() || !CoversEnabled())
     return false;
 
-  const pugi::xml_node app_node = doc.child("app");
-  m_pending.custom_name = app_node.child("name").text().as_string();
-  m_pending.custom_maker = app_node.child("coder").text().as_string();
-  m_pending.custom_description = app_node.child("short_description").text().as_string();
+  // Whatever DownloadDefaultCover left in the cover cache; the read's result is not checked,
+  // only whether any bytes came back.
+  std::string png;
+  File::ReadFileToString(File::GetUserPath(D_COVERCACHE_IDX) + DIR_SEP + m_gametdb_id + ".png",
+                         png);
+  if (png.empty())
+    return false;
 
-  // Elements that we aren't using:
-  // version (can be written in any format)
-  // release_date (YYYYmmddHHMMSS format)
-  // long_description (can be several screens long!)
+  m_pending.default_cover.buffer.assign(png.begin(), png.end());
+  return true;
+}
 
+void GameFile::DefaultCoverCommit()
+{
+  m_default_cover = std::move(m_pending.default_cover);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Homebrew-style metadata and banners
+
+bool GameFile::LoadXMLMetadata(const std::string& path)
+{
+  std::string xml;
+  if (!File::ReadFileToString(path, xml))
+    return false;
+
+  // Parsing from memory sidesteps path encoding issues on Windows.
+  pugi::xml_document document;
+  if (!document.load_buffer(xml.data(), xml.size()))
+    return false;
+
+  // Only these three fields of the Homebrew Channel meta.xml are shown.
+  const pugi::xml_node app = document.child("app");
+  m_pending.custom_name = app.child("name").text().as_string();
+  m_pending.custom_maker = app.child("coder").text().as_string();
+  m_pending.custom_description = app.child("short_description").text().as_string();
   return true;
 }
 
 bool GameFile::XMLMetadataChanged()
 {
-  std::string path, name;
-  SplitPath(m_file_path, &path, &name, nullptr);
-
-  // This XML file naming format is intended as an alternative to the Homebrew Channel naming
-  // for those who don't want to have a Homebrew Channel style folder structure.
-  if (!ReadXMLMetadata(path + name + ".xml"))
+  // "<name>.xml" next to the game, or the Homebrew Channel's "meta.xml" in its folder.
+  const auto [folder, stem] = FolderAndStem(m_file_path);
+  if (!LoadXMLMetadata(folder + stem + ".xml") && !LoadXMLMetadata(folder + "meta.xml"))
   {
-    // Homebrew Channel naming. Typical for DOLs and ELFs, but we also support it for volumes.
-    if (!ReadXMLMetadata(path + "meta.xml"))
-    {
-      // If no XML metadata is found, remove any old XML metadata from memory.
-      m_pending.custom_banner = {};
-    }
+    // Long-standing behaviour kept as is: with no XML, the staged custom banner is cleared
+    // (not the staged name, maker or description).
+    m_pending.custom_banner = {};
   }
 
-  return m_pending.custom_name != m_custom_name && m_pending.custom_maker != m_custom_maker &&
-         m_pending.custom_description != m_custom_description;
+  // Also kept as is: this only reports a change when all three fields differ.
+  const bool name_differs = m_pending.custom_name != m_custom_name;
+  const bool maker_differs = m_pending.custom_maker != m_custom_maker;
+  const bool description_differs = m_pending.custom_description != m_custom_description;
+  return name_differs && maker_differs && description_differs;
 }
 
 void GameFile::XMLMetadataCommit()
@@ -399,22 +438,14 @@ void GameFile::XMLMetadataCommit()
 
 bool GameFile::WiiBannerChanged()
 {
-  // Wii banners can only be read if there is a save file.
-  // In case the cache was created without a save file existing,
-  // let's try reading the save file again, because it might exist now.
-
-  if (!m_volume_banner.empty())
-    return false;
-  if (!DiscIO::IsWii(m_platform))
+  // A Wii banner comes from the game's save data, which may have appeared since the cache entry
+  // was made. Only an empty banner is ever retried.
+  if (!m_volume_banner.empty() || !DiscIO::IsWii(m_platform))
     return false;
 
-  m_pending.volume_banner.buffer =
-      DiscIO::WiiSaveBanner(m_title_id)
-          .GetBanner(&m_pending.volume_banner.width, &m_pending.volume_banner.height);
-
-  // We only reach here if the old banner was empty, so if the new banner isn't empty,
-  // the new banner is guaranteed to be different from the old banner
-  return !m_pending.volume_banner.buffer.empty();
+  GameBanner& staged = m_pending.volume_banner;
+  staged.buffer = DiscIO::WiiSaveBanner(m_title_id).GetBanner(&staged.width, &staged.height);
+  return !staged.buffer.empty();
 }
 
 void GameFile::WiiBannerCommit()
@@ -422,64 +453,52 @@ void GameFile::WiiBannerCommit()
   m_volume_banner = std::move(m_pending.volume_banner);
 }
 
-bool GameFile::ReadPNGBanner(const std::string& path)
+bool GameFile::LoadPNGBanner(const std::string& path)
 {
   File::IOFile file(path, "rb");
   if (!file)
     return false;
 
-  std::vector<u8> png_data(file.GetSize());
-  if (!file.ReadBytes(png_data.data(), png_data.size()))
+  std::vector<u8> png(file.GetSize());
+  if (!file.ReadBytes(png.data(), png.size()))
     return false;
 
-  GameBanner& banner = m_pending.custom_banner;
-  Common::UniqueBuffer<u8> data_out;
-  if (!Common::LoadPNG(png_data, &data_out, &banner.width, &banner.height))
+  GameBanner& staged = m_pending.custom_banner;
+  Common::UniqueBuffer<u8> rgba;
+  if (!Common::LoadPNG(png, &rgba, &staged.width, &staged.height))
     return false;
 
-  // Make an ARGB copy of the RGBA data
-  banner.buffer.resize(data_out.size() / sizeof(u32));
-  for (size_t i = 0; i < banner.buffer.size(); i++)
+  // RGBA bytes to 0xAARRGGBB words. Kept bit for bit from the long-standing conversion: the top
+  // byte is filled from the pixel's red byte, not its alpha byte.
+  const std::size_t pixels = rgba.size() / 4;
+  staged.buffer.resize(pixels);
+  for (std::size_t i = 0; i < pixels; ++i)
   {
-    const size_t j = i * sizeof(u32);
-    banner.buffer[i] = (Common::swap32(data_out.data() + j) >> 8) + (data_out[j] << 24);
+    const u8* px = rgba.data() + i * 4;
+    staged.buffer[i] = (u32{px[0]} << 24) | (u32{px[0]} << 16) | (u32{px[1]} << 8) | px[2];
   }
-
   return true;
 }
 
-bool GameFile::TryLoadGameModDescriptorBanner()
+bool GameFile::LoadModDescriptorBanner()
 {
-  if (m_blob_type != DiscIO::BlobType::MOD_DESCRIPTOR)
+  if (!IsModDescriptor())
     return false;
 
-  auto descriptor = DiscIO::ParseGameModDescriptorFile(m_file_path);
-  if (!descriptor)
-    return false;
-
-  return ReadPNGBanner(descriptor->banner);
+  const std::optional<DiscIO::GameModDescriptor> mod =
+      DiscIO::ParseGameModDescriptorFile(m_file_path);
+  return mod && LoadPNGBanner(mod->banner);
 }
 
 bool GameFile::CustomBannerChanged()
 {
-  std::string path, name;
-  SplitPath(m_file_path, &path, &name, nullptr);
-
-  // This icon naming format is intended as an alternative to the Homebrew Channel naming
-  // for those who don't want to have a Homebrew Channel style folder structure.
-  if (!ReadPNGBanner(path + name + ".png"))
-  {
-    // Homebrew Channel icon naming. Typical for DOLs and ELFs, but we also support it for volumes.
-    if (!ReadPNGBanner(path + "icon.png"))
-    {
-      // If it's a game mod descriptor file, it may specify its own custom banner.
-      if (!TryLoadGameModDescriptorBanner())
-      {
-        // If no custom icon is found, go back to the non-custom one.
-        m_pending.custom_banner = {};
-      }
-    }
-  }
+  // "<name>.png" next to the game, the Homebrew Channel's "icon.png", or a mod descriptor's own
+  // banner; with none of them the plain volume banner is used again.
+  const auto [folder, stem] = FolderAndStem(m_file_path);
+  const bool found = LoadPNGBanner(folder + stem + ".png") || LoadPNGBanner(folder + "icon.png") ||
+                     LoadModDescriptorBanner();
+  if (!found)
+    m_pending.custom_banner = {};
 
   return m_pending.custom_banner != m_custom_banner;
 }
@@ -489,15 +508,22 @@ void GameFile::CustomBannerCommit()
   m_custom_banner = std::move(m_pending.custom_banner);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Display strings
+
 const std::string& GameFile::GetName(const Core::TitleDatabase& title_database) const
 {
   if (!m_custom_name.empty())
     return m_custom_name;
-  if (IsModDescriptor())
-    return GetName(Variant::LongAndPossiblyCustom);
 
-  const std::string& database_name = title_database.GetTitleName(m_gametdb_id, GetConfigLanguage());
-  return database_name.empty() ? GetName(Variant::LongAndPossiblyCustom) : database_name;
+  if (!IsModDescriptor())
+  {
+    const std::string& listed = title_database.GetTitleName(m_gametdb_id, ConfigLanguage());
+    if (!listed.empty())
+      return listed;
+  }
+
+  return GetName(Variant::LongAndPossiblyCustom);
 }
 
 const std::string& GameFile::GetName(Variant variant) const
@@ -505,12 +531,10 @@ const std::string& GameFile::GetName(Variant variant) const
   if (variant == Variant::LongAndPossiblyCustom && !m_custom_name.empty())
     return m_custom_name;
 
-  const std::string& name = variant == Variant::ShortAndNotCustom ? GetShortName() : GetLongName();
-  if (!name.empty())
-    return name;
-
-  // No usable name, return filename (better than nothing)
-  return m_file_name;
+  const std::string& from_volume =
+      variant == Variant::ShortAndNotCustom ? GetShortName() : GetLongName();
+  // The file name is the last resort.
+  return from_volume.empty() ? m_file_name : from_volume;
 }
 
 const std::string& GameFile::GetMaker(Variant variant) const
@@ -518,271 +542,164 @@ const std::string& GameFile::GetMaker(Variant variant) const
   if (variant == Variant::LongAndPossiblyCustom && !m_custom_maker.empty())
     return m_custom_maker;
 
-  const std::string& maker =
+  const std::string& from_volume =
       variant == Variant::ShortAndNotCustom ? GetShortMaker() : GetLongMaker();
-  if (!maker.empty())
-    return maker;
+  if (!from_volume.empty())
+    return from_volume;
 
-  if (m_game_id.size() >= 6)
-    return DiscIO::GetCompanyFromID(m_maker_id);
-
-  return EMPTY_STRING;
+  // Fall back to the company table, but only for six-character game IDs.
+  return m_game_id.size() < 6 ? NO_STRING : DiscIO::GetCompanyFromID(m_maker_id);
 }
 
 const std::string& GameFile::GetDescription(Variant variant) const
 {
-  if (variant == Variant::LongAndPossiblyCustom && !m_custom_description.empty())
-    return m_custom_description;
-
-  return LookupUsingConfigLanguage(m_descriptions);
+  const bool use_custom = variant == Variant::LongAndPossiblyCustom && !m_custom_description.empty();
+  return use_custom ? m_custom_description : PickForConfig(m_descriptions);
 }
 
 std::vector<DiscIO::Language> GameFile::GetLanguages() const
 {
-  std::vector<DiscIO::Language> languages;
-  // TODO: What if some languages don't have long names but have other strings?
-  for (const auto& name : m_long_names)
-    languages.push_back(name.first);
-  return languages;
-}
-
-bool GameFile::CheckIfTwoDiscGame(const std::string& game_id) const
-{
-  constexpr size_t GAME_ID_PREFIX_SIZE = 3;
-  if (game_id.size() < GAME_ID_PREFIX_SIZE)
-    return false;
-
-  static constexpr std::array<std::string_view, 30> two_disc_game_id_prefixes = {
-      // Resident Evil
-      "DBJ",
-      // The Lord of the Rings: The Third Age
-      "G3A",
-      // Teenage Mutant Ninja Turtles 3: Mutant Nightmare
-      "G3Q",
-      // Resident Evil 4
-      "G4B",
-      // Tiger Woods PGA Tour 2005
-      "G5T",
-      // Resident Evil
-      "GBI",
-      // Resident Evil Zero
-      "GBZ",
-      // Conan
-      "GC9",
-      // Resident Evil Code: Veronica X
-      "GCD",
-      // Tom Clancy's Splinter Cell: Chaos Theory
-      "GCJ",
-      // Freaky Flyers
-      "GFF",
-      // GoldenEye: Rogue Agent
-      "GGI",
-      // Metal Gear Solid: The Twin Snakes
-      "GGS",
-      // Baten Kaitos Origins
-      "GK4",
-      // Killer7
-      "GK7",
-      // Baten Kaitos: Eternal Wings and the Lost Ocean
-      "GKB",
-      // Lupin the 3rd: Lost Treasure by the Sea
-      "GL3",
-      // Enter the Matrix
-      "GMX",
-      // Teenage Mutant Ninja Turtles 2: Battle Nexus
-      "GNI",
-      // GoldenEye: Rogue Agent
-      "GOY",
-      // Tales of Symphonia
-      "GQS",
-      // Medal of Honor: Rising Sun
-      "GR8",
-      "GRZ",
-      // Tales of Symphonia
-      "GTO",
-      // Tiger Woods PGA Tour 2004
-      "GW4",
-      // Tom Clancy's Splinter Cell: Double Agent (GC)
-      "GWY",
-      // Dragon Quest X: Mezameshi Itsutsu no Shuzoku Online
-      "S4M",
-      "S4S",
-      "S6T",
-      "SDQ",
-  };
-  static_assert(std::ranges::is_sorted(two_disc_game_id_prefixes));
-
-  std::string_view game_id_prefix(game_id.data(), GAME_ID_PREFIX_SIZE);
-  return std::ranges::binary_search(two_disc_game_id_prefixes, game_id_prefix);
+  // The languages that have a long name.
+  std::vector<DiscIO::Language> result;
+  result.reserve(m_long_names.size());
+  for (const auto& entry : m_long_names)
+    result.push_back(entry.first);
+  return result;
 }
 
 std::string GameFile::GetNetPlayName(const Core::TitleDatabase& title_database) const
 {
-  std::vector<std::string> info;
-  if (!GetGameID().empty())
-    info.push_back(GetGameID());
-  if (GetRevision() != 0)
-    info.push_back(fmt::format("Revision {}", GetRevision()));
+  const std::string& name = GetName(title_database);
 
-  const std::string name = GetName(title_database);
+  std::vector<std::string> details;
+  if (!m_game_id.empty())
+    details.push_back(m_game_id);
+  if (m_revision != 0)
+    details.push_back(fmt::format("Revision {}", m_revision));
 
-  int disc_number = GetDiscNumber() + 1;
-
-  std::string lower_name = name;
-  Common::ToLower(&lower_name);
-  auto is_numbered_disc = lower_name.contains(fmt::format("disc {}", disc_number)) ||
-                          lower_name.contains(fmt::format("disc{}", disc_number));
-
-  if (disc_number > 1 && !is_numbered_disc)
+  // Add the disc number from disc 2 on, unless the title already says which disc it is.
+  const int disc = m_disc_number + 1;
+  if (disc > 1)
   {
-    info.push_back(fmt::format("Disc {}", disc_number));
+    std::string lowered = name;
+    Common::ToLower(&lowered);
+    const bool title_has_disc = lowered.contains(fmt::format("disc {}", disc)) ||
+                                lowered.contains(fmt::format("disc{}", disc));
+    if (!title_has_disc)
+      details.push_back(fmt::format("Disc {}", disc));
   }
-  if (info.empty())
+
+  if (details.empty())
     return name;
-  return fmt::format("{} ({})", name, fmt::join(info, ", "));
+  return fmt::format("{} ({})", name, fmt::join(details, ", "));
 }
 
-static Common::SHA1::Digest GetHash(u32 value)
-{
-  auto data = Common::BitCastToArray<u8>(value);
-  return Common::SHA1::CalculateDigest(data);
-}
+// ---------------------------------------------------------------------------------------------
+// NetPlay identity
 
-static Common::SHA1::Digest GetHash(std::string_view str)
+std::array<u8, 20> GameFile::GetSyncHash() const
 {
-  return Common::SHA1::CalculateDigest(str);
-}
-
-static std::optional<Common::SHA1::Digest> GetFileHash(const std::string& path)
-{
-  std::string buffer;
-  if (!File::ReadFileToString(path, buffer))
-    return std::nullopt;
-  return GetHash(buffer);
-}
-
-static std::optional<Common::SHA1::Digest> MixHash(const std::optional<Common::SHA1::Digest>& lhs,
-                                                   const std::optional<Common::SHA1::Digest>& rhs)
-{
-  if (!lhs && !rhs)
-    return std::nullopt;
-  if (!lhs || !rhs)
-    return !rhs ? lhs : rhs;
-  Common::SHA1::Digest result;
-  for (size_t i = 0; i < result.size(); ++i)
-    result[i] = (*lhs)[i] ^ (*rhs)[(i + 1) % result.size()];
-  return result;
-}
-
-Common::SHA1::Digest GameFile::GetSyncHash() const
-{
-  std::optional<Common::SHA1::Digest> hash;
+  std::optional<Digest> digest;
 
   if (m_platform == DiscIO::Platform::ELFOrDOL)
   {
-    hash = GetFileHash(m_file_path);
+    digest = DigestOfFile(m_file_path);
   }
-  else if (m_blob_type == DiscIO::BlobType::MOD_DESCRIPTOR)
+  else if (IsModDescriptor())
   {
-    auto descriptor = DiscIO::ParseGameModDescriptorFile(m_file_path);
-    if (descriptor)
+    const std::optional<DiscIO::GameModDescriptor> mod =
+        DiscIO::ParseGameModDescriptorFile(m_file_path);
+    if (mod)
     {
-      GameFile proxy(descriptor->base_file);
-      if (proxy.IsValid())
-        hash = proxy.GetSyncHash();
+      const GameFile base(mod->base_file);
+      if (base.IsValid())
+        digest = base.GetSyncHash();
 
-      // add patches to hash if they're enabled
-      if (descriptor->riivolution)
+      // Fold in each Riivolution patch file and its selected options.
+      if (mod->riivolution)
       {
-        for (const auto& patch : descriptor->riivolution->patches)
+        for (const DiscIO::GameModDescriptorRiivolutionPatch& patch : mod->riivolution->patches)
         {
-          hash = MixHash(hash, GetFileHash(patch.xml));
-          for (const auto& option : patch.options)
+          digest = Combine(digest, DigestOfFile(patch.xml));
+          for (const DiscIO::GameModDescriptorRiivolutionPatchOption& option : patch.options)
           {
-            hash = MixHash(hash, GetHash(option.section_name));
-            hash = MixHash(hash, GetHash(option.option_id));
-            hash = MixHash(hash, GetHash(option.option_name));
-            hash = MixHash(hash, GetHash(option.choice));
+            digest = Combine(digest, DigestOf(option.section_name));
+            digest = Combine(digest, DigestOf(option.option_id));
+            digest = Combine(digest, DigestOf(option.option_name));
+            digest = Combine(digest, DigestOf(option.choice));
           }
         }
       }
     }
   }
-  else
+  else if (const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(m_file_path))
   {
-    if (std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(m_file_path))
-      hash = volume->GetSyncHash();
+    digest = volume->GetSyncHash();
   }
 
-  return hash.value_or(Common::SHA1::Digest{});
+  return digest.value_or(Digest{});
 }
 
 NetPlay::SyncIdentifier GameFile::GetSyncIdentifier() const
 {
-  const u64 dol_elf_size = m_platform == DiscIO::Platform::ELFOrDOL ? m_file_size : 0;
-  return NetPlay::SyncIdentifier{dol_elf_size,  m_game_id,       m_revision,
-                                 m_disc_number, m_is_datel_disc, GetSyncHash()};
+  NetPlay::SyncIdentifier id{};
+  id.dol_elf_size = m_platform == DiscIO::Platform::ELFOrDOL ? m_file_size : 0;
+  id.game_id = m_game_id;
+  id.revision = m_revision;
+  id.disc_number = m_disc_number;
+  id.is_datel = m_is_datel_disc;
+  id.sync_hash = GetSyncHash();
+  return id;
 }
 
 NetPlay::SyncIdentifierComparison
 GameFile::CompareSyncIdentifier(const NetPlay::SyncIdentifier& sync_identifier) const
 {
-  const bool is_elf_or_dol = m_platform == DiscIO::Platform::ELFOrDOL;
-  if ((is_elf_or_dol ? m_file_size : 0) != sync_identifier.dol_elf_size)
-    return NetPlay::SyncIdentifierComparison::DifferentGame;
+  using Result = NetPlay::SyncIdentifierComparison;
 
-  if (m_is_datel_disc != sync_identifier.is_datel)
-    return NetPlay::SyncIdentifierComparison::DifferentGame;
+  const bool executable = m_platform == DiscIO::Platform::ELFOrDOL;
+  const u64 own_executable_size = executable ? m_file_size : 0;
+  const std::string& other_id = sync_identifier.game_id;
 
-  if (m_game_id.size() != sync_identifier.game_id.size())
-    return NetPlay::SyncIdentifierComparison::DifferentGame;
-
-  if (!is_elf_or_dol && !m_is_datel_disc && m_game_id.size() >= 4 && m_game_id.size() <= 6)
+  if (own_executable_size != sync_identifier.dol_elf_size ||
+      m_is_datel_disc != sync_identifier.is_datel || m_game_id.size() != other_id.size())
   {
-    // This is a game ID, following specific rules which we can use to give clearer information to
-    // the user.
-
-    // If the first 3 characters don't match, then these are probably different games.
-    // (There are exceptions; in particular Japanese-region games sometimes use a different ID;
-    // for instance, GOYE69, GOYP69, and GGIJ13 are used by GoldenEye: Rogue Agent.)
-    if (std::string_view(&m_game_id[0], 3) != std::string_view(&sync_identifier.game_id[0], 3))
-      return NetPlay::SyncIdentifierComparison::DifferentGame;
-
-    // If the first 3 characters match but the region doesn't match, reject it as such.
-    if (m_game_id[3] != sync_identifier.game_id[3])
-      return NetPlay::SyncIdentifierComparison::DifferentRegion;
-
-    // If the maker code is present, and doesn't match between the two but the main ID does,
-    // these might be different revisions of the same game (e.g. a rerelease with a different
-    // publisher), which we should treat as a different revision.
-    if (std::string_view(&m_game_id[4]) != std::string_view(&sync_identifier.game_id[4]))
-      return NetPlay::SyncIdentifierComparison::DifferentRevision;
+    return Result::DifferentGame;
   }
-  else
+
+  const bool structured_id =
+      !executable && !m_is_datel_disc && m_game_id.size() >= 4 && m_game_id.size() <= 6;
+  if (structured_id)
   {
-    // Numeric title ID or another generated ID that does not follow the rules above
-    if (m_game_id != sync_identifier.game_id)
-      return NetPlay::SyncIdentifierComparison::DifferentGame;
+    // Characters 0-2 name the game, 3 the region, 4-5 (if present) the maker. A different maker
+    // usually means a re-release, so it counts as another revision.
+    if (m_game_id.compare(0, 3, other_id, 0, 3) != 0)
+      return Result::DifferentGame;
+    if (m_game_id[3] != other_id[3])
+      return Result::DifferentRegion;
+    if (std::string_view(m_game_id.c_str() + 4) != std::string_view(other_id.c_str() + 4))
+      return Result::DifferentRevision;
+  }
+  else if (m_game_id != other_id)
+  {
+    // Title IDs and generated IDs are compared whole.
+    return Result::DifferentGame;
   }
 
   if (m_revision != sync_identifier.revision)
-    return NetPlay::SyncIdentifierComparison::DifferentRevision;
-
+    return Result::DifferentRevision;
   if (m_disc_number != sync_identifier.disc_number)
-    return NetPlay::SyncIdentifierComparison::DifferentDiscNumber;
+    return Result::DifferentDiscNumber;
 
-  if (GetSyncHash() != sync_identifier.sync_hash)
-  {
-    // Most Datel titles re-use the same game ID (GNHE5d, with that lowercase D, or DTLX01).
-    // So if the hash differs, then it's probably a different game even if the game ID matches.
-    if (m_is_datel_disc)
-      return NetPlay::SyncIdentifierComparison::DifferentGame;
-    else
-      return NetPlay::SyncIdentifierComparison::DifferentHash;
-  }
+  if (GetSyncHash() == sync_identifier.sync_hash)
+    return Result::SameGame;
 
-  return NetPlay::SyncIdentifierComparison::SameGame;
+  // Many Datel discs share one game ID, so for them a different hash means a different disc.
+  return m_is_datel_disc ? Result::DifferentGame : Result::DifferentHash;
 }
+
+// ---------------------------------------------------------------------------------------------
+// File details
 
 std::string GameFile::GetWiiFSPath() const
 {
@@ -792,52 +709,33 @@ std::string GameFile::GetWiiFSPath() const
 
 bool GameFile::ShouldShowFileFormatDetails() const
 {
-  switch (m_blob_type)
-  {
-  case DiscIO::BlobType::PLAIN:
-    break;
-  case DiscIO::BlobType::DRIVE:
-  case DiscIO::BlobType::MOD_DESCRIPTOR:
+  if (m_blob_type == DiscIO::BlobType::DRIVE || m_blob_type == DiscIO::BlobType::MOD_DESCRIPTOR)
     return false;
-  default:
-    return true;
-  }
 
-  switch (m_platform)
-  {
-  case DiscIO::Platform::WiiWAD:
-    return false;
-  case DiscIO::Platform::ELFOrDOL:
-    return false;
-  default:
+  // Any container other than a plain file is worth describing; a plain file only when it is a
+  // disc image.
+  if (m_blob_type != DiscIO::BlobType::PLAIN)
     return true;
-  }
+  return m_platform != DiscIO::Platform::WiiWAD && m_platform != DiscIO::Platform::ELFOrDOL;
 }
 
 std::string GameFile::GetFileFormatName() const
 {
-  switch (m_platform)
-  {
-  case DiscIO::Platform::WiiWAD:
+  if (m_platform == DiscIO::Platform::WiiWAD)
     return "WAD";
 
-  case DiscIO::Platform::ELFOrDOL:
+  if (m_platform == DiscIO::Platform::ELFOrDOL)
   {
-    std::string extension = GetExtension();
+    // "DOL" or "ELF": the extension in capitals, without its dot.
+    std::string extension = LowerExtension();
     Common::ToUpper(&extension);
-
-    // substr removes the dot
-    return extension.substr(std::min<size_t>(1, extension.size()));
+    return extension.empty() ? extension : extension.substr(1);
   }
 
-  default:
-  {
-    std::string name = DiscIO::GetName(m_blob_type, true);
-    if (m_is_nkit)
-      return Common::FmtFormatT("{0} (NKit)", name);
-    return name;
-  }
-  }
+  std::string container = DiscIO::GetName(m_blob_type, true);
+  if (!m_is_nkit)
+    return container;
+  return Common::FmtFormatT("{0} (NKit)", container);
 }
 
 bool GameFile::ShouldAllowConversion() const
