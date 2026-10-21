@@ -393,5 +393,6 @@ void WiiPane::ConvertSDCard(bool pack)
   raw->exec();
 
   if (!worker.get())
-    ModalMessageBox::warning(this, title, tr("Conversion failed."));
+    ModalMessageBox::warning(this, pack ? tr(Common::SD_PACK_TEXT) : tr(Common::SD_UNPACK_TEXT),
+                             tr("Conversion failed."));
 }

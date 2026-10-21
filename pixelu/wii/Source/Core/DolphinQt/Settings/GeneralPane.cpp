@@ -227,9 +227,8 @@ void GeneralPane::BuildStatisticsGroup(QVBoxLayout* page)
 
 void GeneralPane::ResetStatisticsIdentity()
 {
-  DolphinAnalytics& analytics = DolphinAnalytics::Instance();
-  analytics.GenerateNewIdentity();
-  analytics.ReloadConfig();
+  DolphinAnalytics::Instance().GenerateNewIdentity();
+  DolphinAnalytics::Instance().ReloadConfig();
 
   ModalMessageBox notice(this);
   notice.setIcon(QMessageBox::Information);
