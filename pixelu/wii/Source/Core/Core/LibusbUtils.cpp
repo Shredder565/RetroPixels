@@ -1,16 +1,17 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/LibusbUtils.h"
 
+#include <algorithm>
+#include <atomic>
 #include <mutex>
+#include <string_view>
 #include <thread>
 
 #if defined(__LIBUSB__)
 #include <libusb.h>
 #endif
 
-#include "Common/Flag.h"
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
 #include "Common/Thread.h"
@@ -23,69 +24,73 @@ class Context::Impl
 public:
   Impl()
   {
-    const int ret = libusb_init(&m_context);
-    if (ret != LIBUSB_SUCCESS)
+    if (const int result = libusb_init(&m_context); result != LIBUSB_SUCCESS)
     {
-      ERROR_LOG_FMT(IOS_USB, "Failed to init libusb: {}", ErrorWrap(ret));
+      ERROR_LOG_FMT(IOS_USB, "Failed to init libusb: {}", ErrorWrap(result));
       return;
     }
 
 #ifdef _WIN32
-    const int usbdk_ret = libusb_set_option(m_context, LIBUSB_OPTION_USE_USBDK);
-    if (usbdk_ret != LIBUSB_SUCCESS && usbdk_ret != LIBUSB_ERROR_NOT_FOUND)
-      WARN_LOG_FMT(IOS_USB, "Failed to set LIBUSB_OPTION_USE_USBDK: {}", ErrorWrap(usbdk_ret));
+    // UsbDk lets devices be used without replacing their driver; it's optional.
+    const int usbdk = libusb_set_option(m_context, LIBUSB_OPTION_USE_USBDK);
+    if (usbdk != LIBUSB_SUCCESS && usbdk != LIBUSB_ERROR_NOT_FOUND)
+      WARN_LOG_FMT(IOS_USB, "Failed to set LIBUSB_OPTION_USE_USBDK: {}", ErrorWrap(usbdk));
 #endif
-    m_event_thread_running.Set();
-    m_event_thread = std::thread(&Impl::EventThread, this);
+
+    m_handling_events = true;
+    m_event_thread = std::thread([this] { HandleEvents(); });
   }
 
   ~Impl()
   {
-    if (!m_context || !m_event_thread_running.TestAndClear())
+    if (m_context == nullptr || !m_handling_events.exchange(false))
       return;
 #if defined(LIBUSB_API_VERSION) && LIBUSB_API_VERSION >= 0x01000105
+    // Wakes the event thread so it sees the stop request now instead of after its timeout.
     libusb_interrupt_event_handler(m_context);
 #endif
     m_event_thread.join();
     libusb_exit(m_context);
   }
 
+  Impl(const Impl&) = delete;
+  Impl& operator=(const Impl&) = delete;
+
   libusb_context* GetContext() const { return m_context; }
 
   int GetDeviceList(const GetDeviceListCallback& callback) const
   {
-    std::lock_guard lock{m_device_list_mutex};
+    // libusb's device list isn't safe to build from several threads at once.
+    std::lock_guard lock{m_list_mutex};
 
-    libusb_device** list;
-    ssize_t count = libusb_get_device_list(m_context, &list);
+    libusb_device** devices = nullptr;
+    const ssize_t count = libusb_get_device_list(m_context, &devices);
     if (count < 0)
       return static_cast<int>(count);
 
-    for (ssize_t i = 0; i < count; ++i)
+    for (ssize_t i = 0; i < count && callback(devices[i]); ++i)
     {
-      if (!callback(list[i]))
-        break;
     }
-    libusb_free_device_list(list, 1);
+    libusb_free_device_list(devices, 1);
     return LIBUSB_SUCCESS;
   }
 
 private:
-  void EventThread()
+  void HandleEvents()
   {
     Common::SetCurrentThreadName("libusb thread");
-    timeval tv{5, 0};
-    while (m_event_thread_running.IsSet())
+    timeval timeout{5, 0};
+    while (m_handling_events)
     {
-      const int ret = libusb_handle_events_timeout_completed(m_context, &tv, nullptr);
-      if (ret != LIBUSB_SUCCESS)
-        WARN_LOG_FMT(IOS_USB, "libusb_handle_events_timeout_completed failed: {}", ErrorWrap(ret));
+      const int result = libusb_handle_events_timeout_completed(m_context, &timeout, nullptr);
+      if (result != LIBUSB_SUCCESS)
+        WARN_LOG_FMT(IOS_USB, "libusb_handle_events_timeout_completed failed: {}", ErrorWrap(result));
     }
   }
 
   libusb_context* m_context = nullptr;
-  mutable std::mutex m_device_list_mutex;
-  Common::Flag m_event_thread_running;
+  mutable std::mutex m_list_mutex;
+  std::atomic<bool> m_handling_events{false};
   std::thread m_event_thread;
 };
 #else
@@ -93,7 +98,7 @@ class Context::Impl
 {
 public:
   libusb_context* GetContext() const { return nullptr; }
-  int GetDeviceList(GetDeviceListCallback callback) const { return -1; }
+  int GetDeviceList(const GetDeviceListCallback&) const { return -1; }
 };
 #endif
 
@@ -122,13 +127,13 @@ std::pair<int, ConfigDescriptor> MakeConfigDescriptor(libusb_device* device, u8 
 {
 #if defined(__LIBUSB__)
   libusb_config_descriptor* descriptor = nullptr;
-  const int ret = libusb_get_config_descriptor(device, config_num, &descriptor);
-  if (ret == LIBUSB_SUCCESS)
-    return {ret, ConfigDescriptor{descriptor, libusb_free_config_descriptor}};
+  const int result = libusb_get_config_descriptor(device, config_num, &descriptor);
+  if (result == LIBUSB_SUCCESS)
+    return {result, ConfigDescriptor{descriptor, libusb_free_config_descriptor}};
 #else
-  const int ret = -1;
+  const int result = -1;
 #endif
-  return {ret, ConfigDescriptor{nullptr, [](auto) {}}};
+  return {result, ConfigDescriptor{nullptr, [](libusb_config_descriptor*) {}}};
 }
 
 const char* ErrorWrap::GetName() const
@@ -152,47 +157,42 @@ const char* ErrorWrap::GetStrError() const
 std::optional<std::string> GetStringDescriptor(libusb_device_handle* dev_handle, uint8_t desc_index)
 {
 #if defined(__LIBUSB__)
-  struct StringDescriptor
+  // USB string descriptor: bLength, bDescriptorType, then UTF-16LE text (at most 255 bytes).
+  struct
   {
     u8 length;
-    u8 descriptor_type;
-    char16_t data[127];
-  };
+    u8 type;
+    char16_t text[127];
+  } descriptor{};
+  auto* const raw = reinterpret_cast<unsigned char*>(&descriptor);
 
-  StringDescriptor buffer{};
-
-  // Reading lang ID 0 returns a list of lang IDs.
-  const auto lang_id_result = libusb_get_string_descriptor(
-      dev_handle, desc_index, 0, reinterpret_cast<unsigned char*>(&buffer), 4);
-
-  if (lang_id_result != 4 || buffer.length < 4 || buffer.descriptor_type != LIBUSB_DT_STRING)
+  // String index 0 (language 0) holds the supported language IDs; the first one is used.
+  const int languages = libusb_get_string_descriptor(dev_handle, desc_index, 0, raw, 4);
+  if (languages != 4 || descriptor.length < 4 || descriptor.type != LIBUSB_DT_STRING)
   {
     ERROR_LOG_FMT(IOS_USB, "libusb_get_string_descriptor(desc_index={}, lang_id=0) result:{}",
-                  static_cast<int>(desc_index), lang_id_result);
+                  static_cast<int>(desc_index), languages);
     return std::nullopt;
   }
+  const u16 language = descriptor.text[0];
 
-  const u16 lang_id = buffer.data[0];
-
-  const auto str_result = libusb_get_string_descriptor(
-      dev_handle, desc_index, lang_id, reinterpret_cast<unsigned char*>(&buffer), 255);
-
-  if (str_result < 2 || buffer.length > str_result || buffer.descriptor_type != LIBUSB_DT_STRING)
+  const int read = libusb_get_string_descriptor(dev_handle, desc_index, language, raw, 255);
+  if (read < 2 || descriptor.length > read || descriptor.type != LIBUSB_DT_STRING)
   {
     ERROR_LOG_FMT(IOS_USB, "libusb_get_string_descriptor(desc_index={}, lang_id={}) result:{}",
-                  static_cast<int>(desc_index), lang_id, str_result);
+                  static_cast<int>(desc_index), language, read);
     return std::nullopt;
   }
 
-  // The UTF-16 data size should be even and equal to the return value.
-  if ((buffer.length & 1u) != 0 || buffer.length != str_result)
+  // Only reported: the declared length should be even and match what was read.
+  if (descriptor.length % 2 != 0 || descriptor.length != read)
   {
-    WARN_LOG_FMT(IOS_USB, "GetStringDescriptor: buffer.length:{} result:{}", buffer.length,
-                 str_result);
+    WARN_LOG_FMT(IOS_USB, "GetStringDescriptor: buffer.length:{} result:{}", descriptor.length,
+                 read);
   }
 
-  const std::size_t str_length = std::max(0, buffer.length - 2) / 2;
-  return UTF16ToUTF8(std::u16string_view{buffer.data, str_length});
+  const auto characters = static_cast<std::size_t>(std::max(0, descriptor.length - 2) / 2);
+  return UTF16ToUTF8(std::u16string_view{descriptor.text, characters});
 #else
   return "__LIBUSB__ not defined";
 #endif

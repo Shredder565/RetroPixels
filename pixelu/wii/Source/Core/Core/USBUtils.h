@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,7 +13,7 @@ struct libusb_device_descriptor;
 
 namespace USBUtils
 {
-
+// A USB vendor/product ID pair.
 struct DeviceInfo
 {
   u16 vid;
@@ -22,15 +21,20 @@ struct DeviceInfo
 
   constexpr auto operator<=>(const DeviceInfo& other) const = default;
 
-  // Extracts DeviceInfo from a string in the format "VID:PID"
+  // Parses "VID:PID" (hexadecimal).
   static std::optional<DeviceInfo> FromString(const std::string& str);
+  // "vvvv:pppp"
   std::string ToString() const;
+  // "Name (vvvv:pppp)", with the name looked up.
   std::string ToDisplayString() const;
   std::string ToDisplayString(const std::string& name) const;
 };
 
+// Finds a human-readable name for a device, from a built-in list of Wii peripherals or the
+// operating system.
 std::optional<std::string> GetDeviceNameFromVIDPID(u16 vid, u16 pid);
 
+// The connected USB devices accepted by `filter`.
 std::vector<DeviceInfo>
 ListDevices(const std::function<bool(const struct libusb_device_descriptor&)>& filter =
                 [](const struct libusb_device_descriptor&) { return true; });

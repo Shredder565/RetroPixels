@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,14 +16,16 @@ struct libusb_context;
 struct libusb_device;
 struct libusb_device_handle;
 
+// Small RAII helpers around libusb. Without libusb (no __LIBUSB__) everything reports failure.
 namespace LibusbUtils
 {
 template <typename T>
 using UniquePtr = std::unique_ptr<T, void (*)(T*)>;
 
-// Return false to stop iterating the device list.
+// Called for each device; returning false stops the enumeration.
 using GetDeviceListCallback = std::function<bool(libusb_device* device)>;
 
+// A libusb context with its own event handling thread.
 class Context
 {
 public:
@@ -34,7 +35,7 @@ public:
   operator libusb_context*() const;
   bool IsValid() const;
 
-  // Only valid if the context is valid.
+  // Requires a valid context. Returns a libusb error code.
   int GetDeviceList(const GetDeviceListCallback& callback) const;
 
 private:
@@ -43,11 +44,10 @@ private:
 };
 
 using ConfigDescriptor = UniquePtr<libusb_config_descriptor>;
+// Returns the libusb result and, on success, the descriptor.
 std::pair<int, ConfigDescriptor> MakeConfigDescriptor(libusb_device* device, u8 config_num = 0);
 
-// Wrapper for libusb_error to be used with fmt.  Note that we can't create a fmt::formatter
-// directly for libusb_error as it is a plain enum and most libusb functions actually return an
-// int instead of a libusb_error.
+// Formats a libusb error code (libusb functions return plain ints) with fmt.
 struct ErrorWrap
 {
   constexpr explicit ErrorWrap(int error) : m_error(error) {}
@@ -57,7 +57,7 @@ struct ErrorWrap
   const char* GetName() const;
 };
 
-// Returns the UTF-16 descriptor converted to UTF-8 or returns nullopt on error.
+// Reads a string descriptor (in the device's first language) as UTF-8.
 std::optional<std::string> GetStringDescriptor(libusb_device_handle* dev_handle,
                                                uint8_t desc_index);
 
@@ -68,9 +68,10 @@ struct fmt::formatter<LibusbUtils::ErrorWrap>
 {
   constexpr auto parse(fmt::format_parse_context& ctx) { return ctx.begin(); }
   template <typename FormatContext>
-  auto format(const LibusbUtils::ErrorWrap& wrap, FormatContext& ctx) const
+  auto format(const LibusbUtils::ErrorWrap& error, FormatContext& ctx) const
   {
-    return fmt::format_to(ctx.out(), "{} ({}: {})", wrap.GetStrError(), wrap.m_error,
-                          wrap.GetName());
+    // "<description> (<code>: <name>)"
+    return fmt::format_to(ctx.out(), "{} ({}: {})", error.GetStrError(), error.m_error,
+                          error.GetName());
   }
 };

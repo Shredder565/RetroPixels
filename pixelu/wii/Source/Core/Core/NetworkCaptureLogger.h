@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -24,6 +23,8 @@ namespace Common
 class PCAP;
 }
 
+// Dumps the emulated console's network traffic (the plain text of SSL connections, socket data
+// and broadband adapter frames) for debugging.
 namespace Core
 {
 enum class NetworkCaptureType
@@ -48,6 +49,7 @@ public:
   virtual void LogSSLRead(const void* data, std::size_t length, s32 socket) = 0;
   virtual void LogSSLWrite(const void* data, std::size_t length, s32 socket) = 0;
 
+  // `from` / `to` is the peer for unconnected sockets, or null to ask the socket.
   virtual void LogRead(const void* data, std::size_t length, s32 socket, sockaddr* from) = 0;
   virtual void LogWrite(const void* data, std::size_t length, s32 socket, sockaddr* to) = 0;
 
@@ -56,6 +58,7 @@ public:
   virtual NetworkCaptureType GetCaptureType() const = 0;
 };
 
+// Logs nothing.
 class DummyNetworkCaptureLogger : public NetworkCaptureLogger
 {
 public:
@@ -72,6 +75,7 @@ public:
   NetworkCaptureType GetCaptureType() const override;
 };
 
+// Appends SSL plain text to "<game id>_read.bin" / "<game id>_write.bin".
 class BinarySSLCaptureLogger final : public DummyNetworkCaptureLogger
 {
 public:
@@ -81,6 +85,8 @@ public:
   NetworkCaptureType GetCaptureType() const override;
 };
 
+// Writes everything to a .pcap file, wrapping socket data in made-up Ethernet/IPv4/TCP or UDP
+// headers so packet analysers can read it.
 class PCAPSSLCaptureLogger final : public NetworkCaptureLogger
 {
 public:
@@ -100,19 +106,21 @@ public:
   NetworkCaptureType GetCaptureType() const override;
 
 private:
-  enum class LogType
+  enum class Direction
   {
-    Read,
-    Write,
+    Incoming,
+    Outgoing,
   };
 
-  void Log(LogType log_type, const void* data, std::size_t length, s32 socket, sockaddr* other);
-  void LogIPv4(LogType log_type, const u8* data, u16 length, s32 socket, const sockaddr_in& from,
-               const sockaddr_in& to);
+  void LogSocketData(Direction direction, const void* data, std::size_t length, s32 socket,
+                     sockaddr* peer);
+  void WritePacket(Direction direction, const u8* data, u16 length, s32 socket,
+                   const sockaddr_in& source, const sockaddr_in& destination);
 
-  std::unique_ptr<Common::PCAP> m_file;
-  std::mutex m_io_mutex;
-  std::map<s32, u32> m_read_sequence_number;
-  std::map<s32, u32> m_write_sequence_number;
+  std::unique_ptr<Common::PCAP> m_pcap;
+  std::mutex m_bba_mutex;
+  // Made-up TCP sequence numbers, per socket and direction.
+  std::map<s32, u32> m_incoming_sequence;
+  std::map<s32, u32> m_outgoing_sequence;
 };
 }  // namespace Core

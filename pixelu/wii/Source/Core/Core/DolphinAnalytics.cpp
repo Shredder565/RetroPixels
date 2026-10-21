@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DolphinAnalytics.h"
 
@@ -47,114 +46,10 @@
 
 namespace
 {
-constexpr char ANALYTICS_ENDPOINT[] = "https://analytics.dolphin-emu.org/report";
-}  // namespace
+constexpr char kReportEndpoint[] = "https://analytics.dolphin-emu.org/report";
 
-#if defined(ANDROID)
-static std::function<std::string(std::string)> s_get_val_func;
-void DolphinAnalytics::AndroidSetGetValFunc(std::function<std::string(std::string)> func)
-{
-  s_get_val_func = std::move(func);
-}
-#endif
-
-DolphinAnalytics::DolphinAnalytics()
-{
-  m_last_analytics_enabled = Config::Get(Config::MAIN_ANALYTICS_ENABLED);
-
-  ReloadConfig();
-  MakeBaseBuilder();
-
-  m_config_changed_callback_id = Config::AddConfigChangedCallback([this] {
-    bool current_analytics_enabled = Config::Get(Config::MAIN_ANALYTICS_ENABLED);
-    if (m_last_analytics_enabled != current_analytics_enabled)
-    {
-      m_last_analytics_enabled = current_analytics_enabled;
-      ReloadConfig();
-    }
-  });
-}
-
-DolphinAnalytics::~DolphinAnalytics()
-{
-  Config::RemoveConfigChangedCallback(m_config_changed_callback_id);
-}
-
-DolphinAnalytics& DolphinAnalytics::Instance()
-{
-  static DolphinAnalytics instance;
-  return instance;
-}
-
-void DolphinAnalytics::ReloadConfig()
-{
-  std::lock_guard lk{m_reporter_mutex};
-
-  // Install the HTTP backend if analytics support is enabled.
-  std::unique_ptr<Common::AnalyticsReportingBackend> new_backend;
-  if (m_last_analytics_enabled)
-  {
-    new_backend = std::make_unique<Common::HttpAnalyticsBackend>(ANALYTICS_ENDPOINT);
-  }
-  m_reporter.SetBackend(std::move(new_backend));
-
-  // Load the unique ID or generate it if needed.
-  m_unique_id = Config::Get(Config::MAIN_ANALYTICS_ID);
-  if (m_unique_id.empty())
-  {
-    GenerateNewIdentity();
-  }
-}
-
-void DolphinAnalytics::GenerateNewIdentity()
-{
-  const u64 id_high = Common::Random::GenerateValue<u64>();
-  const u64 id_low = Common::Random::GenerateValue<u64>();
-  m_unique_id = fmt::format("{:016x}{:016x}", id_high, id_low);
-
-  // Save the new id in the configuration.
-  Config::SetBase(Config::MAIN_ANALYTICS_ID, m_unique_id);
-  Config::Save();
-}
-
-std::string DolphinAnalytics::MakeUniqueId(std::string_view data) const
-{
-  const auto input = std::string{m_unique_id}.append(data);
-  const auto digest = Common::SHA1::CalculateDigest(input);
-
-  // Convert to hex string and truncate to 64 bits.
-  std::string out;
-  for (int i = 0; i < 8; ++i)
-  {
-    out += fmt::format("{:02x}", digest[i]);
-  }
-  return out;
-}
-
-void DolphinAnalytics::ReportDolphinStart(std::string_view ui_type)
-{
-  Common::AnalyticsReportBuilder builder(m_base_builder);
-  builder.AddData("type", "dolphin-start");
-  builder.AddData("ui-type", ui_type);
-  builder.AddData("id", MakeUniqueId("dolphin-start"));
-  Send(builder);
-}
-
-void DolphinAnalytics::ReportGameStart()
-{
-  MakePerGameBuilder();
-
-  Common::AnalyticsReportBuilder builder(m_per_game_builder);
-  builder.AddData("type", "game-start");
-  Send(builder);
-
-  // Reset per-game state.
-  m_reported_quirks.fill(false);
-  InitializePerformanceSampling();
-}
-
-// Keep in sync with enum class GameQuirk definition.
-constexpr std::array GAME_QUIRKS_NAMES{
+// Report names of the GameQuirk values, in enum order.
+constexpr std::array<const char*, static_cast<size_t>(GameQuirk::Count)> kQuirkNames{
     "uses-DVDLowStopLaser",
     "uses-DVDLowOffset",
     "uses-DVDLowReadDiskBca",
@@ -189,141 +84,24 @@ constexpr std::array GAME_QUIRKS_NAMES{
     "invalid-texture-coordinate-component-format",
     "invalid-color-component-format",
 };
-static_assert(GAME_QUIRKS_NAMES.size() == static_cast<u32>(GameQuirk::Count),
-              "Game quirks names and enum definition are out of sync.");
+static_assert(kQuirkNames.back() != nullptr, "every GameQuirk needs a name");
 
-void DolphinAnalytics::ReportGameQuirk(GameQuirk quirk)
-{
-  u32 quirk_idx = static_cast<u32>(quirk);
+constexpr u64 kMicrosecondsPerSecond = 1000000;
 
-  // Only report once per run.
-  if (m_reported_quirks[quirk_idx])
-    return;
-  m_reported_quirks[quirk_idx] = true;
-
-  Common::AnalyticsReportBuilder builder(m_per_game_builder);
-  builder.AddData("type", "quirk");
-  builder.AddData("quirk", GAME_QUIRKS_NAMES[quirk_idx]);
-  Send(builder);
-}
-
-void DolphinAnalytics::ReportPerformanceInfo(PerformanceSample sample)
-{
-  if (ShouldStartPerformanceSampling())
-  {
-    m_sampling_performance_info = true;
-  }
-
-  if (m_sampling_performance_info)
-  {
-    m_performance_samples.emplace_back(sample);
-  }
-
-  if (m_performance_samples.size() >= NUM_PERFORMANCE_SAMPLES_PER_REPORT)
-  {
-    std::vector<u32> speed_times_1000(m_performance_samples.size());
-    std::vector<u32> num_prims(m_performance_samples.size());
-    std::vector<u32> num_draw_calls(m_performance_samples.size());
-    for (size_t i = 0; i < m_performance_samples.size(); ++i)
-    {
-      speed_times_1000[i] = static_cast<u32>(m_performance_samples[i].speed_ratio * 1000);
-      num_prims[i] = m_performance_samples[i].num_prims;
-      num_draw_calls[i] = m_performance_samples[i].num_draw_calls;
-    }
-
-    // The per game builder should already exist -- there is no way we can be reporting performance
-    // info without a game start event having been generated.
-    Common::AnalyticsReportBuilder builder(m_per_game_builder);
-    builder.AddData("type", "performance");
-    builder.AddData("speed", speed_times_1000);
-    builder.AddData("prims", num_prims);
-    builder.AddData("draw-calls", num_draw_calls);
-
-    Send(builder);
-
-    // Clear up and stop sampling until next time ShouldStartPerformanceSampling() says so.
-    m_performance_samples.clear();
-    m_sampling_performance_info = false;
-  }
-}
-
-void DolphinAnalytics::InitializePerformanceSampling()
-{
-  m_performance_samples.clear();
-  m_sampling_performance_info = false;
-
-  u64 wait_us =
-      PERFORMANCE_SAMPLING_INITIAL_WAIT_TIME_SECS * 1000000 +
-      Common::Random::GenerateValue<u64>() % (PERFORMANCE_SAMPLING_WAIT_TIME_JITTER_SECS * 1000000);
-  m_sampling_next_start_us = Common::Timer::NowUs() + wait_us;
-}
-
-bool DolphinAnalytics::ShouldStartPerformanceSampling()
-{
-  if (Common::Timer::NowUs() < m_sampling_next_start_us)
-    return false;
-
-  u64 wait_us =
-      PERFORMANCE_SAMPLING_INTERVAL_SECS * 1000000 +
-      Common::Random::GenerateValue<u64>() % (PERFORMANCE_SAMPLING_WAIT_TIME_JITTER_SECS * 1000000);
-  m_sampling_next_start_us = Common::Timer::NowUs() + wait_us;
-  return true;
-}
-
-void DolphinAnalytics::MakeBaseBuilder()
-{
-  Common::AnalyticsReportBuilder builder;
-
-  // Version information.
-  builder.AddData("version-desc", Common::GetScmDescStr());
-  builder.AddData("version-hash", Common::GetScmRevGitStr());
-  builder.AddData("version-branch", Common::GetScmBranchStr());
-  builder.AddData("version-dist", Common::GetScmDistributorStr());
-
-  // Auto-Update information.
-  builder.AddData("update-track", Config::Get(Config::MAIN_AUTOUPDATE_UPDATE_TRACK));
-
-  // CPU information.
-  builder.AddData("cpu-summary", cpu_info.Summarize());
-
-// OS information.
-#if defined(_WIN32)
-  builder.AddData("os-type", "windows");
-
-  const auto winver = WindowsRegistry::GetOSVersion();
-  builder.AddData("win-ver-major", static_cast<u32>(winver.dwMajorVersion));
-  builder.AddData("win-ver-minor", static_cast<u32>(winver.dwMinorVersion));
-  builder.AddData("win-ver-build", static_cast<u32>(winver.dwBuildNumber));
-#elif defined(ANDROID)
-  builder.AddData("os-type", "android");
-  builder.AddData("android-manufacturer", s_get_val_func("DEVICE_MANUFACTURER"));
-  builder.AddData("android-model", s_get_val_func("DEVICE_MODEL"));
-  builder.AddData("android-version", s_get_val_func("DEVICE_OS"));
-#elif defined(__APPLE__)
-  builder.AddData("os-type", "osx");
-
-  Common::MacOSVersion version = Common::GetMacOSVersion();
-  builder.AddData("osx-ver-major", version.major);
-  builder.AddData("osx-ver-minor", version.minor);
-  builder.AddData("osx-ver-bugfix", version.patch);
-#elif defined(__linux__)
-  builder.AddData("os-type", "linux");
-#elif defined(__FreeBSD__)
-  builder.AddData("os-type", "freebsd");
-#elif defined(__OpenBSD__)
-  builder.AddData("os-type", "openbsd");
-#elif defined(__NetBSD__)
-  builder.AddData("os-type", "netbsd");
-#elif defined(__HAIKU__)
-  builder.AddData("os-type", "haiku");
-#else
-  builder.AddData("os-type", "unknown");
+#if defined(ANDROID)
+std::function<std::string(std::string)> s_android_get_value;
 #endif
 
-  m_base_builder = builder;
+// The next sampling start: `wait_secs` from now plus up to the jitter.
+u64 NextSamplingTime(int wait_secs, int jitter_secs)
+{
+  const u64 delay = static_cast<u64>(wait_secs) * kMicrosecondsPerSecond +
+                    Common::Random::GenerateValue<u64>() %
+                        (static_cast<u64>(jitter_secs) * kMicrosecondsPerSecond);
+  return Common::Timer::NowUs() + delay;
 }
 
-static const char* GetShaderCompilationMode()
+const char* ShaderCompilationModeName()
 {
   switch (Config::Get(Config::GFX_SHADER_COMPILATION_MODE))
   {
@@ -333,114 +111,342 @@ static const char* GetShaderCompilationMode()
     return "async-skip-rendering";
   case ShaderCompilationMode::SynchronousUberShaders:
     return "sync-ubershaders";
-  case ShaderCompilationMode::Synchronous:
   default:
     return "sync";
   }
 }
 
-static bool UseVertexRounding()
+// Builder fields that are a setting's value as is.
+class SettingFields
 {
-  return Config::Get(Config::GFX_HACK_VERTEX_ROUNDING) && Config::Get(Config::GFX_EFB_SCALE) != 1;
+public:
+  explicit SettingFields(Common::AnalyticsReportBuilder* builder) : m_builder(builder) {}
+
+  template <typename T>
+  SettingFields& Add(std::string_view key, const Config::Info<T>& setting)
+  {
+    m_builder->AddData(key, Config::Get(setting));
+    return *this;
+  }
+
+private:
+  Common::AnalyticsReportBuilder* m_builder;
+};
+
+void AddOSFields(Common::AnalyticsReportBuilder* builder)
+{
+#if defined(_WIN32)
+  builder->AddData("os-type", "windows");
+  const auto version = WindowsRegistry::GetOSVersion();
+  builder->AddData("win-ver-major", static_cast<u32>(version.dwMajorVersion));
+  builder->AddData("win-ver-minor", static_cast<u32>(version.dwMinorVersion));
+  builder->AddData("win-ver-build", static_cast<u32>(version.dwBuildNumber));
+#elif defined(ANDROID)
+  builder->AddData("os-type", "android");
+  builder->AddData("android-manufacturer", s_android_get_value("DEVICE_MANUFACTURER"));
+  builder->AddData("android-model", s_android_get_value("DEVICE_MODEL"));
+  builder->AddData("android-version", s_android_get_value("DEVICE_OS"));
+#elif defined(__APPLE__)
+  builder->AddData("os-type", "osx");
+  const Common::MacOSVersion version = Common::GetMacOSVersion();
+  builder->AddData("osx-ver-major", version.major);
+  builder->AddData("osx-ver-minor", version.minor);
+  builder->AddData("osx-ver-bugfix", version.patch);
+#elif defined(__linux__)
+  builder->AddData("os-type", "linux");
+#elif defined(__FreeBSD__)
+  builder->AddData("os-type", "freebsd");
+#elif defined(__OpenBSD__)
+  builder->AddData("os-type", "openbsd");
+#elif defined(__NetBSD__)
+  builder->AddData("os-type", "netbsd");
+#elif defined(__HAIKU__)
+  builder->AddData("os-type", "haiku");
+#else
+  builder->AddData("os-type", "unknown");
+#endif
+}
+
+void AddEmulationSettings(Common::AnalyticsReportBuilder* builder)
+{
+  SettingFields(builder)
+      .Add("cfg-dsp-hle", Config::MAIN_DSP_HLE)
+      .Add("cfg-dsp-jit", Config::MAIN_DSP_JIT)
+      .Add("cfg-dsp-thread", Config::MAIN_DSP_THREAD)
+      .Add("cfg-cpu-thread", Config::MAIN_CPU_THREAD)
+      .Add("cfg-fastmem", Config::MAIN_FASTMEM)
+      .Add("cfg-syncgpu", Config::MAIN_SYNC_GPU)
+      .Add("cfg-audio-backend", Config::MAIN_AUDIO_BACKEND)
+      .Add("cfg-oc-enable", Config::MAIN_OVERCLOCK_ENABLE)
+      .Add("cfg-oc-factor", Config::MAIN_OVERCLOCK)
+      .Add("cfg-vi-oc-enable", Config::MAIN_VI_OVERCLOCK_ENABLE)
+      .Add("cfg-vi-oc-factor", Config::MAIN_VI_OVERCLOCK)
+      .Add("cfg-render-to-main", Config::MAIN_RENDER_TO_MAIN);
+  if (g_video_backend != nullptr)
+    builder->AddData("cfg-video-backend", g_video_backend->GetConfigName());
+}
+
+void AddGraphicsSettings(Common::AnalyticsReportBuilder* builder)
+{
+  SettingFields settings(builder);
+  settings.Add("cfg-gfx-multisamples", Config::GFX_MSAA).Add("cfg-gfx-ssaa", Config::GFX_SSAA);
+  builder->AddData("cfg-gfx-anisotropy",
+                   std::to_underlying(Config::Get(Config::GFX_ENHANCE_MAX_ANISOTROPY)));
+  settings.Add("cfg-gfx-vsync", Config::GFX_VSYNC);
+  builder->AddData("cfg-gfx-aspect-ratio", static_cast<int>(Config::Get(Config::GFX_ASPECT_RATIO)));
+  settings.Add("cfg-gfx-efb-access", Config::GFX_HACK_EFB_ACCESS_ENABLE)
+      .Add("cfg-gfx-efb-copy-format-changes", Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES);
+  // The next two (and "immediate-xfb", whose meaning is inverted by mistake) are sent negated;
+  // the report history depends on that.
+  builder->AddData("cfg-gfx-efb-copy-ram", !Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM));
+  builder->AddData("cfg-gfx-xfb-copy-ram", !Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM));
+  settings.Add("cfg-gfx-defer-efb-copies", Config::GFX_HACK_DEFER_EFB_COPIES);
+  builder->AddData("cfg-gfx-immediate-xfb", !Config::Get(Config::GFX_HACK_IMMEDIATE_XFB));
+  settings.Add("cfg-gfx-efb-copy-scaled", Config::GFX_HACK_COPY_EFB_SCALED)
+      .Add("cfg-gfx-internal-resolution", Config::GFX_EFB_SCALE)
+      .Add("cfg-gfx-tc-samples", Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  builder->AddData("cfg-gfx-stereo-mode", static_cast<int>(Config::Get(Config::GFX_STEREO_MODE)));
+  settings.Add("cfg-gfx-stereo-per-eye-resolution-full",
+               Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL);
+  // Sent as a number, as it always was.
+  builder->AddData("cfg-gfx-hdr", static_cast<int>(Config::Get(Config::GFX_ENHANCE_HDR_OUTPUT)));
+  settings.Add("cfg-gfx-per-pixel-lighting", Config::GFX_ENABLE_PIXEL_LIGHTING);
+  builder->AddData("cfg-gfx-shader-compilation-mode", ShaderCompilationModeName());
+  settings.Add("cfg-gfx-wait-for-shaders", Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING)
+      .Add("cfg-gfx-fast-depth", Config::GFX_FAST_DEPTH_CALC);
+  // Vertex rounding only does anything above native resolution.
+  const bool vertex_rounding =
+      Config::Get(Config::GFX_HACK_VERTEX_ROUNDING) && Config::Get(Config::GFX_EFB_SCALE) != 1;
+  builder->AddData("cfg-gfx-vertex-rounding", vertex_rounding);
+}
+
+void AddGPUFeatures(Common::AnalyticsReportBuilder* builder)
+{
+  const BackendInfo& gpu = g_backend_info;
+
+  const int adapter = Config::Get(Config::GFX_ADAPTER);
+  if (adapter < static_cast<int>(gpu.Adapters.size()))
+    builder->AddData("gpu-adapter", gpu.Adapters[static_cast<std::size_t>(adapter)]);
+  else if (!gpu.AdapterName.empty())
+    builder->AddData("gpu-adapter", gpu.AdapterName);
+
+  const std::pair<const char*, bool> features[] = {
+      {"gpu-has-exclusive-fullscreen", gpu.bSupportsExclusiveFullscreen},
+      {"gpu-has-dual-source-blend", gpu.bSupportsDualSourceBlend},
+      {"gpu-has-primitive-restart", gpu.bSupportsPrimitiveRestart},
+      {"gpu-has-geometry-shaders", gpu.bSupportsGeometryShaders},
+      {"gpu-has-3d-vision", gpu.bSupports3DVision},
+      {"gpu-has-early-z", gpu.bSupportsEarlyZ},
+      {"gpu-has-binding-layout", gpu.bSupportsBindingLayout},
+      {"gpu-has-bbox", gpu.bSupportsBBox},
+      {"gpu-has-fragment-stores-and-atomics", gpu.bSupportsFragmentStoresAndAtomics},
+      {"gpu-has-gs-instancing", gpu.bSupportsGSInstancing},
+      {"gpu-has-post-processing", gpu.bSupportsPostProcessing},
+      {"gpu-has-palette-conversion", gpu.bSupportsPaletteConversion},
+      {"gpu-has-clip-control", gpu.bSupportsClipControl},
+      {"gpu-has-ssaa", gpu.bSupportsSSAA},
+      {"gpu-has-logic-ops", gpu.bSupportsLogicOp},
+      {"gpu-has-framebuffer-fetch", gpu.bSupportsFramebufferFetch},
+  };
+  for (const auto& [key, supported] : features)
+    builder->AddData(key, supported);
+}
+}  // namespace
+
+#if defined(ANDROID)
+void DolphinAnalytics::AndroidSetGetValFunc(std::function<std::string(std::string)> func)
+{
+  s_android_get_value = std::move(func);
+}
+#endif
+
+DolphinAnalytics::DolphinAnalytics()
+{
+  m_enabled = Config::Get(Config::MAIN_ANALYTICS_ENABLED);
+
+  ReloadConfig();
+  MakeBaseBuilder();
+
+  // Only an opt-in change needs the backend swapped.
+  m_config_callback = Config::AddConfigChangedCallback([this] {
+    const bool enabled = Config::Get(Config::MAIN_ANALYTICS_ENABLED);
+    if (enabled == m_enabled)
+      return;
+    m_enabled = enabled;
+    ReloadConfig();
+  });
+}
+
+DolphinAnalytics::~DolphinAnalytics()
+{
+  Config::RemoveConfigChangedCallback(m_config_callback);
+}
+
+DolphinAnalytics& DolphinAnalytics::Instance()
+{
+  static DolphinAnalytics analytics;
+  return analytics;
+}
+
+void DolphinAnalytics::ReloadConfig()
+{
+  std::lock_guard lock{m_send_mutex};
+
+  // Without consent there is no backend, and reports go nowhere.
+  std::unique_ptr<Common::AnalyticsReportingBackend> backend;
+  if (m_enabled)
+    backend = std::make_unique<Common::HttpAnalyticsBackend>(kReportEndpoint);
+  m_reporter.SetBackend(std::move(backend));
+
+  m_unique_id = Config::Get(Config::MAIN_ANALYTICS_ID);
+  if (m_unique_id.empty())
+    GenerateNewIdentity();
+}
+
+void DolphinAnalytics::GenerateNewIdentity()
+{
+  // 128 random bits as 32 hex digits.
+  const u64 high = Common::Random::GenerateValue<u64>();
+  const u64 low = Common::Random::GenerateValue<u64>();
+  m_unique_id = fmt::format("{:016x}{:016x}", high, low);
+
+  Config::SetBase(Config::MAIN_ANALYTICS_ID, m_unique_id);
+  Config::Save();
+}
+
+std::string DolphinAnalytics::MakeUniqueId(std::string_view data) const
+{
+  // The first 64 bits of SHA-1(ID + data), in hex.
+  std::string input = m_unique_id;
+  input += data;
+  const auto digest = Common::SHA1::CalculateDigest(input);
+
+  std::string id;
+  for (std::size_t i = 0; i < 8; ++i)
+    id += fmt::format("{:02x}", digest[i]);
+  return id;
+}
+
+void DolphinAnalytics::ReportDolphinStart(std::string_view ui_type)
+{
+  Common::AnalyticsReportBuilder report(m_base_builder);
+  report.AddData("type", "dolphin-start");
+  report.AddData("ui-type", ui_type);
+  report.AddData("id", MakeUniqueId("dolphin-start"));
+  Send(report);
+}
+
+void DolphinAnalytics::ReportGameStart()
+{
+  MakePerGameBuilder();
+
+  Common::AnalyticsReportBuilder report(m_per_game_builder);
+  report.AddData("type", "game-start");
+  Send(report);
+
+  m_quirk_reported.fill(false);
+  InitializePerformanceSampling();
+}
+
+void DolphinAnalytics::ReportGameQuirk(GameQuirk quirk)
+{
+  const auto index = static_cast<std::size_t>(quirk);
+  if (m_quirk_reported[index])
+    return;
+  m_quirk_reported[index] = true;
+
+  Common::AnalyticsReportBuilder report(m_per_game_builder);
+  report.AddData("type", "quirk");
+  report.AddData("quirk", kQuirkNames[index]);
+  Send(report);
+}
+
+void DolphinAnalytics::ReportPerformanceInfo(PerformanceSample sample)
+{
+  if (ShouldStartPerformanceSampling())
+    m_sampling = true;
+  if (m_sampling)
+    m_samples.push_back(sample);
+  if (m_samples.size() < NUM_PERFORMANCE_SAMPLES_PER_REPORT)
+    return;
+
+  std::vector<u32> speeds, prims, draw_calls;
+  speeds.reserve(m_samples.size());
+  prims.reserve(m_samples.size());
+  draw_calls.reserve(m_samples.size());
+  for (const PerformanceSample& collected : m_samples)
+  {
+    // Speed in thousandths of full speed.
+    speeds.push_back(static_cast<u32>(collected.speed_ratio * 1000));
+    prims.push_back(static_cast<u32>(collected.num_prims));
+    draw_calls.push_back(static_cast<u32>(collected.num_draw_calls));
+  }
+
+  // Samples are only taken while a game runs, so the per-game data exists.
+  Common::AnalyticsReportBuilder report(m_per_game_builder);
+  report.AddData("type", "performance");
+  report.AddData("speed", speeds);
+  report.AddData("prims", prims);
+  report.AddData("draw-calls", draw_calls);
+  Send(report);
+
+  m_samples.clear();
+  m_sampling = false;
+}
+
+void DolphinAnalytics::InitializePerformanceSampling()
+{
+  m_samples.clear();
+  m_sampling = false;
+  m_next_sampling_us = NextSamplingTime(PERFORMANCE_SAMPLING_INITIAL_WAIT_TIME_SECS,
+                                        PERFORMANCE_SAMPLING_WAIT_TIME_JITTER_SECS);
+}
+
+bool DolphinAnalytics::ShouldStartPerformanceSampling()
+{
+  if (Common::Timer::NowUs() < m_next_sampling_us)
+    return false;
+
+  m_next_sampling_us = NextSamplingTime(PERFORMANCE_SAMPLING_INTERVAL_SECS,
+                                        PERFORMANCE_SAMPLING_WAIT_TIME_JITTER_SECS);
+  return true;
+}
+
+void DolphinAnalytics::MakeBaseBuilder()
+{
+  Common::AnalyticsReportBuilder builder;
+
+  builder.AddData("version-desc", Common::GetScmDescStr());
+  builder.AddData("version-hash", Common::GetScmRevGitStr());
+  builder.AddData("version-branch", Common::GetScmBranchStr());
+  builder.AddData("version-dist", Common::GetScmDistributorStr());
+  SettingFields(&builder).Add("update-track", Config::MAIN_AUTOUPDATE_UPDATE_TRACK);
+  builder.AddData("cpu-summary", cpu_info.Summarize());
+  AddOSFields(&builder);
+
+  m_base_builder = builder;
 }
 
 void DolphinAnalytics::MakePerGameBuilder()
 {
   Common::AnalyticsReportBuilder builder(m_base_builder);
 
-  // Gameid.
-  builder.AddData("gameid", SConfig::GetInstance().GetGameID());
+  const SConfig& config = SConfig::GetInstance();
+  builder.AddData("gameid", config.GetGameID());
+  // The ID is derived from the game ID so it differs between games.
+  builder.AddData("id", MakeUniqueId(config.GetGameID()));
+  builder.AddData("simulated-memory-size", config.GetSimulatedMemorySize());
 
-  // Unique id bound to the gameid.
-  builder.AddData("id", MakeUniqueId(SConfig::GetInstance().GetGameID()));
+  AddEmulationSettings(&builder);
+  AddGraphicsSettings(&builder);
+  AddGPUFeatures(&builder);
 
-  // Other game-specific fields.
-  builder.AddData("simulated-memory-size", SConfig::GetInstance().GetSimulatedMemorySize());
-
-  // Configuration.
-  builder.AddData("cfg-dsp-hle", Config::Get(Config::MAIN_DSP_HLE));
-  builder.AddData("cfg-dsp-jit", Config::Get(Config::MAIN_DSP_JIT));
-  builder.AddData("cfg-dsp-thread", Config::Get(Config::MAIN_DSP_THREAD));
-  builder.AddData("cfg-cpu-thread", Config::Get(Config::MAIN_CPU_THREAD));
-  builder.AddData("cfg-fastmem", Config::Get(Config::MAIN_FASTMEM));
-  builder.AddData("cfg-syncgpu", Config::Get(Config::MAIN_SYNC_GPU));
-  builder.AddData("cfg-audio-backend", Config::Get(Config::MAIN_AUDIO_BACKEND));
-  builder.AddData("cfg-oc-enable", Config::Get(Config::MAIN_OVERCLOCK_ENABLE));
-  builder.AddData("cfg-oc-factor", Config::Get(Config::MAIN_OVERCLOCK));
-  builder.AddData("cfg-vi-oc-enable", Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE));
-  builder.AddData("cfg-vi-oc-factor", Config::Get(Config::MAIN_VI_OVERCLOCK));
-  builder.AddData("cfg-render-to-main", Config::Get(Config::MAIN_RENDER_TO_MAIN));
-  if (g_video_backend)
-  {
-    builder.AddData("cfg-video-backend", g_video_backend->GetConfigName());
-  }
-
-  // Video configuration.
-  builder.AddData("cfg-gfx-multisamples", Config::Get(Config::GFX_MSAA));
-  builder.AddData("cfg-gfx-ssaa", Config::Get(Config::GFX_SSAA));
-  builder.AddData("cfg-gfx-anisotropy",
-                  std::to_underlying(Config::Get(Config::GFX_ENHANCE_MAX_ANISOTROPY)));
-  builder.AddData("cfg-gfx-vsync", Config::Get(Config::GFX_VSYNC));
-  builder.AddData("cfg-gfx-aspect-ratio", static_cast<int>(Config::Get(Config::GFX_ASPECT_RATIO)));
-  builder.AddData("cfg-gfx-efb-access", Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE));
-  builder.AddData("cfg-gfx-efb-copy-format-changes",
-                  Config::Get(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES));
-  builder.AddData("cfg-gfx-efb-copy-ram", !Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM));
-  builder.AddData("cfg-gfx-xfb-copy-ram", !Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM));
-  builder.AddData("cfg-gfx-defer-efb-copies", Config::Get(Config::GFX_HACK_DEFER_EFB_COPIES));
-  // Note: Incorrectly inverted. Keeping as-is to not break analytics history.
-  builder.AddData("cfg-gfx-immediate-xfb", !Config::Get(Config::GFX_HACK_IMMEDIATE_XFB));
-  builder.AddData("cfg-gfx-efb-copy-scaled", Config::Get(Config::GFX_HACK_COPY_EFB_SCALED));
-  builder.AddData("cfg-gfx-internal-resolution", Config::Get(Config::GFX_EFB_SCALE));
-  builder.AddData("cfg-gfx-tc-samples", Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES));
-  builder.AddData("cfg-gfx-stereo-mode", static_cast<int>(Config::Get(Config::GFX_STEREO_MODE)));
-  builder.AddData("cfg-gfx-stereo-per-eye-resolution-full",
-                  Config::Get(Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL));
-  // Note: An int for some reason. Keeping as-is to not break analytics history.
-  builder.AddData("cfg-gfx-hdr", static_cast<int>(Config::Get(Config::GFX_ENHANCE_HDR_OUTPUT)));
-  builder.AddData("cfg-gfx-per-pixel-lighting", Config::Get(Config::GFX_ENABLE_PIXEL_LIGHTING));
-  builder.AddData("cfg-gfx-shader-compilation-mode", GetShaderCompilationMode());
-  builder.AddData("cfg-gfx-wait-for-shaders",
-                  Config::Get(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING));
-  builder.AddData("cfg-gfx-fast-depth", Config::Get(Config::GFX_FAST_DEPTH_CALC));
-  builder.AddData("cfg-gfx-vertex-rounding", UseVertexRounding());
-
-  // GPU features.
-  const int adapter_index = Config::Get(Config::GFX_ADAPTER);
-  if (adapter_index < static_cast<int>(g_backend_info.Adapters.size()))
-  {
-    builder.AddData("gpu-adapter", g_backend_info.Adapters[adapter_index]);
-  }
-  else if (!g_backend_info.AdapterName.empty())
-  {
-    builder.AddData("gpu-adapter", g_backend_info.AdapterName);
-  }
-  builder.AddData("gpu-has-exclusive-fullscreen", g_backend_info.bSupportsExclusiveFullscreen);
-  builder.AddData("gpu-has-dual-source-blend", g_backend_info.bSupportsDualSourceBlend);
-  builder.AddData("gpu-has-primitive-restart", g_backend_info.bSupportsPrimitiveRestart);
-  builder.AddData("gpu-has-geometry-shaders", g_backend_info.bSupportsGeometryShaders);
-  builder.AddData("gpu-has-3d-vision", g_backend_info.bSupports3DVision);
-  builder.AddData("gpu-has-early-z", g_backend_info.bSupportsEarlyZ);
-  builder.AddData("gpu-has-binding-layout", g_backend_info.bSupportsBindingLayout);
-  builder.AddData("gpu-has-bbox", g_backend_info.bSupportsBBox);
-  builder.AddData("gpu-has-fragment-stores-and-atomics",
-                  g_backend_info.bSupportsFragmentStoresAndAtomics);
-  builder.AddData("gpu-has-gs-instancing", g_backend_info.bSupportsGSInstancing);
-  builder.AddData("gpu-has-post-processing", g_backend_info.bSupportsPostProcessing);
-  builder.AddData("gpu-has-palette-conversion", g_backend_info.bSupportsPaletteConversion);
-  builder.AddData("gpu-has-clip-control", g_backend_info.bSupportsClipControl);
-  builder.AddData("gpu-has-ssaa", g_backend_info.bSupportsSSAA);
-  builder.AddData("gpu-has-logic-ops", g_backend_info.bSupportsLogicOp);
-  builder.AddData("gpu-has-framebuffer-fetch", g_backend_info.bSupportsFramebufferFetch);
-
-  // NetPlay / recording.
   builder.AddData("netplay", NetPlay::IsNetPlayRunning());
   builder.AddData("movie", Core::System::GetInstance().GetMovie().IsMovieActive());
 
-  // Controller information
-  // We grab enough to tell what percentage of our users are playing with keyboard/mouse, some kind
-  // of gamepad, or the official GameCube adapter.
-  builder.AddData("gcadapter-detected", GCAdapter::IsDetected(nullptr));
+  // Enough to tell keyboard/mouse players from gamepad and GameCube adapter users.
+  const bool adapter_detected = GCAdapter::IsDetected(nullptr);
+  builder.AddData("gcadapter-detected", adapter_detected);
   builder.AddData("has-controller", Pad::GetConfig()->IsControllerControlledByGamepadDevice(0) ||
                                         GCAdapter::IsDetected(nullptr));
 
