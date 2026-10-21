@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,20 +10,20 @@
 
 namespace Vulkan
 {
-// Number of command buffers.
+// Size of the ring of command buffers the GPU can be working through at once.
 constexpr size_t NUM_COMMAND_BUFFERS = 8;
 
-// Number of frames in flight, will be used to decide how many descriptor pools are used
+// Frames that may be in flight; each has its own set of descriptor pools.
 constexpr size_t NUM_FRAMES_IN_FLIGHT = 2;
 
-// Staging buffer usage - optimize for uploads or readbacks
+// Whether a staging buffer is written by the CPU (upload) or read by it (readback).
 enum STAGING_BUFFER_TYPE
 {
   STAGING_BUFFER_TYPE_UPLOAD,
   STAGING_BUFFER_TYPE_READBACK
 };
 
-// Descriptor set layouts
+// The descriptor set layouts created by the object cache, in creation order.
 enum DESCRIPTOR_SET_LAYOUT
 {
   DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS,
@@ -36,26 +35,15 @@ enum DESCRIPTOR_SET_LAYOUT
   NUM_DESCRIPTOR_SET_LAYOUTS
 };
 
-// We use four pipeline layouts:
-//   - Standard
-//       - Per-stage UBO (VS/GS/PS, VS constants accessible from PS) [set=0, binding=0-3]
-//       - 8 combined image samplers (accessible from PS) [set=1, binding=0-7]
-//       - 1 SSBO accessible from PS if supported [set=2, binding=0]
-//   - Uber
-//       - Like standard, plus 1 SSBO accessible from VS if supported [set=2, binding=1]
-//   - Utility
-//       - 1 combined UBO, accessible from VS/GS/PS [set=0, binding=0]
-//       - 8 combined image samplers (accessible from PS) [set=1, binding=0-7]
-//       - 1 texel buffer (accessible from PS) [set=1, binding=8]
-//   - Compute
-//       - 1 uniform buffer [set=0, binding=0]
-//       - 8 combined image samplers [set=0, binding=1-8]
-//       - 2 texel buffers [set=0, binding=9-10]
-//       - 8 storage image [set=0, binding=11-18]
+// Pipeline layouts and the descriptor sets bound with them:
 //
-// All four pipeline layout share the first two descriptor sets (uniform buffers, PS samplers).
-// The third descriptor set (see bind points above) is used for storage or texel buffers.
-//
+//   STANDARD  set 0: dynamic UBOs (binding 0 PS, 1 VS, 2 custom PS, 3 GS)
+//             set 1: pixel samplers (an array of 8 at binding 0, then bindings 8..15)
+//             set 2: bounding-box SSBO (binding 0), only when something needs it
+//   UBER      as STANDARD, plus the dynamic vertex loader's SSBO at set 2 binding 1
+//   UTILITY   set 0: one dynamic UBO for every stage
+//             set 1: 8 samplers (bindings 0..7) and a texel buffer (binding 8)
+//   COMPUTE   set 0: UBO (0), 8 samplers (1..8), 2 texel buffers (9..10), 8 images (11..18)
 enum PIPELINE_LAYOUT
 {
   PIPELINE_LAYOUT_STANDARD,
@@ -65,7 +53,7 @@ enum PIPELINE_LAYOUT
   NUM_PIPELINE_LAYOUTS
 };
 
-// Uniform buffer bindings within the first descriptor set
+// Binding numbers of the GX uniform buffers inside the first descriptor set.
 enum UNIFORM_BUFFER_DESCRIPTOR_SET_BINDING
 {
   UBO_DESCRIPTOR_SET_BINDING_PS,
@@ -75,22 +63,20 @@ enum UNIFORM_BUFFER_DESCRIPTOR_SET_BINDING
   NUM_UBO_DESCRIPTOR_SET_BINDINGS
 };
 
-// Maximum number of attributes per vertex (we don't have any more than this?)
+// Upper bound on vertex attributes in one native vertex format.
 constexpr u32 MAX_VERTEX_ATTRIBUTES = 16;
 
-// Number of pixel shader texture slots
+// Samplers visible to utility (non-GX) pixel shaders.
 constexpr u32 NUM_UTILITY_PIXEL_SAMPLERS = 8;
 
-// Number of texel buffer binding points.
+// Texel buffers visible to compute shaders.
 constexpr u32 NUM_COMPUTE_TEXEL_BUFFERS = 2;
 
-// Textures that don't fit into this buffer will be uploaded with a separate buffer (see below).
+// Size of the shared stream buffer used for texture uploads.
 constexpr u32 TEXTURE_UPLOAD_BUFFER_SIZE = 32 * 1024 * 1024;
 
-// Textures greater than 1024*1024 will be put in staging textures that are released after
-// execution instead. A 2048x2048 texture is 16MB, and we'd only fit four of these in our
-// streaming buffer and be blocking frequently. Games are unlikely to have textures this
-// large anyway, so it's only really an issue for HD texture packs, and memory is not
-// a limiting factor in these scenarios anyway.
+// Uploads larger than this (4 MiB, a 1024x1024 RGBA8 level) get their own temporary staging
+// buffer instead of a slice of the stream buffer, so a few large HD textures cannot keep the
+// shared buffer full and force waits.
 constexpr u32 STAGING_TEXTURE_UPLOAD_THRESHOLD = 1024 * 1024 * 4;
 }  // namespace Vulkan

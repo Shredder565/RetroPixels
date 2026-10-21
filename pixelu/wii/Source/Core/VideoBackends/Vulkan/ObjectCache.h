@@ -1,113 +1,97 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <compare>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <string>
-#include <tuple>
-#include <unordered_map>
 
 #include "Common/CommonTypes.h"
-#include "Common/LinearDiskCache.h"
 
 #include "VideoBackends/Vulkan/Constants.h"
 
-#include "VideoCommon/GeometryShaderGen.h"
-#include "VideoCommon/PixelShaderGen.h"
 #include "VideoCommon/RenderState.h"
-#include "VideoCommon/VertexShaderGen.h"
 
 namespace Vulkan
 {
-class CommandBufferManager;
-class VertexFormat;
-class VKTexture;
 class StreamBuffer;
 
+// Long-lived objects shared by the whole backend: descriptor set and pipeline layouts, the
+// fixed and per-state samplers, render passes, the texture upload stream buffer and the
+// VkPipelineCache (kept on disk between runs).
 class ObjectCache
 {
 public:
   ObjectCache();
   ~ObjectCache();
 
-  // Perform at startup, create descriptor layouts, compiles all static shaders.
   bool Initialize();
+  // Writes the pipeline cache to disk (when shader caching is on).
   void Shutdown();
 
-  // Descriptor set layout accessor. Used for allocating descriptor sets.
   VkDescriptorSetLayout GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT layout) const
   {
-    return m_descriptor_set_layouts[layout];
+    return m_set_layouts[layout];
   }
-
-  // Pipeline layout accessor. Used to fill in required field in PipelineInfo.
   VkPipelineLayout GetPipelineLayout(PIPELINE_LAYOUT layout) const
   {
     return m_pipeline_layouts[layout];
   }
 
-  // Staging buffer for textures.
-  StreamBuffer* GetTextureUploadBuffer() const { return m_texture_upload_buffer.get(); }
+  StreamBuffer* GetTextureUploadBuffer() const { return m_upload_buffer.get(); }
 
-  // Static samplers
   VkSampler GetPointSampler() const { return m_point_sampler; }
   VkSampler GetLinearSampler() const { return m_linear_sampler; }
+  // The sampler for a GX sampler state, created on first use (a failed creation is cached too).
   VkSampler GetSampler(const SamplerState& info);
 
-  // Render pass cache.
+  // A single-subpass render pass for these attachments, created on first use.
   VkRenderPass GetRenderPass(VkFormat color_format, VkFormat depth_format, u32 multisamples,
                              VkAttachmentLoadOp load_op, u8 additional_attachment_count = 0);
 
-  // Pipeline cache. Used when creating pipelines for drivers to store compiled programs.
   VkPipelineCache GetPipelineCache() const { return m_pipeline_cache; }
 
-  // Clear sampler cache, use when anisotropy mode changes
-  // WARNING: Ensure none of the objects from here are in use when calling
+  // Destroys every per-state sampler (for anisotropy or filtering changes). None may be in use.
   void ClearSamplerCache();
 
-  // Saves the pipeline cache to disk. Call when shutting down.
   void SavePipelineCache();
-
-  // Reload pipeline cache. Call when host config changes.
+  // Saves, then reopens the cache for the current host configuration.
   void ReloadPipelineCache();
 
 private:
-  bool CreateDescriptorSetLayouts();
-  void DestroyDescriptorSetLayouts();
+  struct RenderPassKey
+  {
+    VkFormat color;
+    VkFormat depth;
+    u32 samples;
+    VkAttachmentLoadOp load_op;
+    std::size_t extra_colors;
+    auto operator<=>(const RenderPassKey&) const = default;
+  };
+
+  bool CreateSetLayouts();
   bool CreatePipelineLayouts();
-  void DestroyPipelineLayouts();
-  bool CreateStaticSamplers();
-  void DestroySamplers();
-  void DestroyRenderPassCache();
-  bool CreatePipelineCache();
-  bool LoadPipelineCache();
-  bool ValidatePipelineCache(const u8* data, size_t data_length);
-  void DestroyPipelineCache();
+  bool CreateFixedSamplers();
+  bool CreateEmptyPipelineCache();
+  bool OpenPipelineCacheFromDisk();
+  bool HeaderMatchesDevice(const u8* data, size_t size) const;
 
-  std::array<VkDescriptorSetLayout, NUM_DESCRIPTOR_SET_LAYOUTS> m_descriptor_set_layouts = {};
+  std::array<VkDescriptorSetLayout, NUM_DESCRIPTOR_SET_LAYOUTS> m_set_layouts = {};
   std::array<VkPipelineLayout, NUM_PIPELINE_LAYOUTS> m_pipeline_layouts = {};
-
-  std::unique_ptr<StreamBuffer> m_texture_upload_buffer;
+  std::unique_ptr<StreamBuffer> m_upload_buffer;
 
   VkSampler m_point_sampler = VK_NULL_HANDLE;
   VkSampler m_linear_sampler = VK_NULL_HANDLE;
+  // Ordered maps: objects are destroyed in key order.
+  std::map<SamplerState, VkSampler> m_samplers;
+  std::map<RenderPassKey, VkRenderPass> m_render_passes;
 
-  std::map<SamplerState, VkSampler> m_sampler_cache;
-
-  // Dummy image for samplers that are unbound
-  std::unique_ptr<VKTexture> m_dummy_texture;
-
-  // Render pass cache
-  using RenderPassCacheKey = std::tuple<VkFormat, VkFormat, u32, VkAttachmentLoadOp, std::size_t>;
-  std::map<RenderPassCacheKey, VkRenderPass> m_render_pass_cache;
-
-  // pipeline cache
   VkPipelineCache m_pipeline_cache = VK_NULL_HANDLE;
-  std::string m_pipeline_cache_filename;
+  // Remembered at load time: by shutdown the game ID it was named after may be gone.
+  std::string m_pipeline_cache_path;
 };
 
 extern std::unique_ptr<ObjectCache> g_object_cache;

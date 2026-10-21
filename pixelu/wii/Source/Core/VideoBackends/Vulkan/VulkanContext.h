@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,13 +14,18 @@
 
 namespace Vulkan
 {
+// Owns the VkInstance, the chosen physical device, the logical device with its queues and the
+// memory allocator. Also answers "what can this GPU do" for the backend info.
 class VulkanContext
 {
 public:
+  // The properties and features of a physical device the backend cares about.
   struct PhysicalDeviceInfo
   {
     PhysicalDeviceInfo(const PhysicalDeviceInfo&) = default;
     explicit PhysicalDeviceInfo(VkPhysicalDevice device);
+
+    // The feature set to enable on the logical device.
     VkPhysicalDeviceFeatures features() const;
 
     char deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
@@ -56,22 +60,24 @@ public:
     bool shaderSubgroupOperations = false;
   };
 
+  using GPUList = std::vector<VkPhysicalDevice>;
+
   VulkanContext(VkInstance instance, VkPhysicalDevice physical_device);
   ~VulkanContext();
 
-  // Determines if the Vulkan validation layer is available on the system.
+  // True when both VK_LAYER_KHRONOS_validation and VK_EXT_debug_utils can be enabled.
   static bool CheckValidationLayerAvailablility();
 
-  // Helper method to create a Vulkan instance.
+  // Creates an instance with the surface and debug extensions this window system needs.
+  // Returns VK_NULL_HANDLE on failure; the API version asked for goes to out_vk_api_version.
   static VkInstance CreateVulkanInstance(WindowSystemType wstype, bool enable_debug_utils,
                                          bool enable_validation_layer, u32* out_vk_api_version);
 
-  // Returns a list of Vulkan-compatible GPUs.
-  using GPUList = std::vector<VkPhysicalDevice>;
+  // The physical devices of an instance, in driver order (empty on failure).
   static GPUList EnumerateGPUs(VkInstance instance);
 
-  // Populates backend/video config.
-  // These are public so that the backend info can be populated without creating a context.
+  // Backend info, in four steps so it can be filled without creating a device: the fixed
+  // capabilities, the adapter names, the per-device features and the MSAA modes.
   static void PopulateBackendInfo(BackendInfo* backend_info);
   static void PopulateBackendInfoAdapters(BackendInfo* backend_info, const GPUList& gpu_list);
   static void PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhysicalDevice gpu,
@@ -79,54 +85,47 @@ public:
   static void PopulateBackendInfoMultisampleModes(BackendInfo* backend_info, VkPhysicalDevice gpu,
                                                   const PhysicalDeviceInfo& info);
 
-  // Creates a Vulkan device context.
-  // This assumes that PopulateBackendInfo and PopulateBackendInfoAdapters has already
-  // been called for the specified VideoConfig.
+  // Creates the device on `gpu`. Takes over the instance (and the surface on failure).
   static std::unique_ptr<VulkanContext> Create(VkInstance instance, VkPhysicalDevice gpu,
                                                VkSurfaceKHR surface, bool enable_debug_utils,
                                                bool enable_validation_layer, u32 api_version);
 
-  // Enable/disable debug message runtime.
+  // Installs or removes the debug messenger that forwards driver messages to the log.
   bool EnableDebugUtils();
   void DisableDebugUtils();
 
-  // Global state accessors
   VkInstance GetVulkanInstance() const { return m_instance; }
   VkPhysicalDevice GetPhysicalDevice() const { return m_physical_device; }
   VkDevice GetDevice() const { return m_device; }
   VkQueue GetGraphicsQueue() const { return m_graphics_queue; }
-  u32 GetGraphicsQueueFamilyIndex() const { return m_graphics_queue_family_index; }
+  u32 GetGraphicsQueueFamilyIndex() const { return m_graphics_family; }
   VkQueue GetPresentQueue() const { return m_present_queue; }
-  u32 GetPresentQueueFamilyIndex() const { return m_present_queue_family_index; }
+  u32 GetPresentQueueFamilyIndex() const { return m_present_family; }
   const VkQueueFamilyProperties& GetGraphicsQueueProperties() const
   {
-    return m_graphics_queue_properties;
+    return m_graphics_family_properties;
   }
-  const PhysicalDeviceInfo& GetDeviceInfo() const { return m_device_info; }
-  // Support bits
-  bool SupportsAnisotropicFiltering() const { return m_device_info.samplerAnisotropy; }
-  bool SupportsPreciseOcclusionQueries() const { return m_device_info.occlusionQueryPrecise; }
-  u32 GetShaderSubgroupSize() const { return m_device_info.subgroupSize; }
-  bool SupportsShaderSubgroupOperations() const { return m_device_info.shaderSubgroupOperations; }
+  const PhysicalDeviceInfo& GetDeviceInfo() const { return m_info; }
 
-  // Helpers for getting constants
-  VkDeviceSize GetUniformBufferAlignment() const
-  {
-    return m_device_info.minUniformBufferOffsetAlignment;
-  }
-  VkDeviceSize GetBufferImageGranularity() const { return m_device_info.bufferImageGranularity; }
-  float GetMaxSamplerAnisotropy() const { return m_device_info.maxSamplerAnisotropy; }
+  bool SupportsAnisotropicFiltering() const { return m_info.samplerAnisotropy; }
+  bool SupportsPreciseOcclusionQueries() const { return m_info.occlusionQueryPrecise; }
+  u32 GetShaderSubgroupSize() const { return m_info.subgroupSize; }
+  bool SupportsShaderSubgroupOperations() const { return m_info.shaderSubgroupOperations; }
 
-  // Returns true if the specified extension is supported and enabled.
+  VkDeviceSize GetUniformBufferAlignment() const { return m_info.minUniformBufferOffsetAlignment; }
+  VkDeviceSize GetBufferImageGranularity() const { return m_info.bufferImageGranularity; }
+  float GetMaxSamplerAnisotropy() const { return m_info.maxSamplerAnisotropy; }
+
+  // Whether `name` was enabled on the device.
   bool SupportsDeviceExtension(const char* name) const;
 
-  // Returns true if exclusive fullscreen is supported for the given surface.
+  // Whether exclusive fullscreen can be used with this surface.
   bool SupportsExclusiveFullscreen(const WindowSystemInfo& wsi, VkSurfaceKHR surface);
 
   VmaAllocator GetMemoryAllocator() const { return m_allocator; }
 
 #ifdef WIN32
-  // Returns the platform-specific exclusive fullscreen structure.
+  // The monitor description chained into exclusive-fullscreen queries and swap chains.
   VkSurfaceFullScreenExclusiveWin32InfoEXT
   GetPlatformExclusiveFullscreenInfo(const WindowSystemInfo& wsi);
 #endif
@@ -136,6 +135,7 @@ private:
                                        WindowSystemType wstype, bool enable_debug_utils,
                                        bool validation_layer_enabled);
   bool SelectDeviceExtensions(bool enable_surface);
+  bool FindQueueFamilies(VkSurfaceKHR surface);
   void WarnMissingDeviceFeatures();
   bool CreateDevice(VkSurfaceKHR surface, bool enable_validation_layer);
   void InitDriverDetails();
@@ -145,18 +145,16 @@ private:
   VkPhysicalDevice m_physical_device = VK_NULL_HANDLE;
   VkDevice m_device = VK_NULL_HANDLE;
   VmaAllocator m_allocator = VK_NULL_HANDLE;
+  VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
 
+  u32 m_graphics_family = 0;
+  u32 m_present_family = 0;
   VkQueue m_graphics_queue = VK_NULL_HANDLE;
-  u32 m_graphics_queue_family_index = 0;
   VkQueue m_present_queue = VK_NULL_HANDLE;
-  u32 m_present_queue_family_index = 0;
-  VkQueueFamilyProperties m_graphics_queue_properties = {};
+  VkQueueFamilyProperties m_graphics_family_properties = {};
 
-  VkDebugUtilsMessengerEXT m_debug_utils_messenger = VK_NULL_HANDLE;
-
-  PhysicalDeviceInfo m_device_info;
-
-  std::vector<std::string> m_device_extensions;
+  PhysicalDeviceInfo m_info;
+  std::vector<std::string> m_enabled_device_extensions;
 };
 
 extern std::unique_ptr<VulkanContext> g_vulkan_context;

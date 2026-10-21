@@ -1,11 +1,12 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/ObjectCache.h"
 
 #include <algorithm>
-#include <array>
+#include <cstring>
+#include <limits>
 #include <type_traits>
+#include <vector>
 
 #include "Common/FileUtil.h"
 #include "Common/LinearDiskCache.h"
@@ -15,397 +16,347 @@
 #include "VideoBackends/Vulkan/VKTexture.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 #include "VideoCommon/Constants.h"
+#include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/VideoCommon.h"
 
 namespace Vulkan
 {
 std::unique_ptr<ObjectCache> g_object_cache;
 
+namespace
+{
+VkDevice Device()
+{
+  return g_vulkan_context->GetDevice();
+}
+
+// Appends `count` single-descriptor bindings numbered first..first+count-1.
+void AddBindings(std::vector<VkDescriptorSetLayoutBinding>* out, u32 first, u32 count,
+                 VkDescriptorType type, VkShaderStageFlags stages)
+{
+  for (u32 n = 0; n < count; ++n)
+    out->push_back({first + n, type, 1, stages, nullptr});
+}
+
+// The header the Vulkan spec puts at the start of VK_PIPELINE_CACHE_HEADER_VERSION_ONE data
+// (stored little-endian, which every host we build for is).
+#pragma pack(push, 4)
+struct PipelineCacheHeader
+{
+  u32 length;
+  u32 version;
+  u32 vendor;
+  u32 device;
+  u8 uuid[VK_UUID_SIZE];
+};
+#pragma pack(pop)
+static_assert(std::is_trivially_copyable_v<PipelineCacheHeader>);
+
+// Keeps the payload of the (single) entry in a pipeline cache file.
+class BlobReader final : public Common::LinearDiskCacheReader<u32, u8>
+{
+public:
+  explicit BlobReader(std::vector<u8>* blob) : m_blob(blob) {}
+  void Read(const u32&, const u8* value, u32 value_size) override
+  {
+    m_blob->assign(value, value + value_size);
+  }
+
+private:
+  std::vector<u8>* m_blob;
+};
+
+// Reads and throws away every entry; used to open a cache file for appending.
+class DiscardReader final : public Common::LinearDiskCacheReader<u32, u8>
+{
+public:
+  void Read(const u32&, const u8*, u32) override {}
+};
+}  // namespace
+
 ObjectCache::ObjectCache() = default;
 
 ObjectCache::~ObjectCache()
 {
-  DestroyPipelineCache();
-  DestroySamplers();
-  DestroyPipelineLayouts();
-  DestroyDescriptorSetLayouts();
-  DestroyRenderPassCache();
-  m_dummy_texture.reset();
+  const VkDevice device = Device();
+
+  vkDestroyPipelineCache(device, m_pipeline_cache, nullptr);
+  m_pipeline_cache = VK_NULL_HANDLE;
+
+  ClearSamplerCache();
+  for (VkSampler* fixed : {&m_point_sampler, &m_linear_sampler})
+  {
+    if (*fixed == VK_NULL_HANDLE)
+      continue;
+    vkDestroySampler(device, *fixed, nullptr);
+    *fixed = VK_NULL_HANDLE;
+  }
+
+  for (VkPipelineLayout layout : m_pipeline_layouts)
+  {
+    if (layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(device, layout, nullptr);
+  }
+  for (VkDescriptorSetLayout layout : m_set_layouts)
+  {
+    if (layout != VK_NULL_HANDLE)
+      vkDestroyDescriptorSetLayout(device, layout, nullptr);
+  }
+
+  for (const auto& [key, pass] : m_render_passes)
+    vkDestroyRenderPass(device, pass, nullptr);
+  m_render_passes.clear();
 }
 
 bool ObjectCache::Initialize()
 {
-  if (!CreateDescriptorSetLayouts())
+  if (!CreateSetLayouts() || !CreatePipelineLayouts() || !CreateFixedSamplers())
     return false;
 
-  if (!CreatePipelineLayouts())
-    return false;
-
-  if (!CreateStaticSamplers())
-    return false;
-
-  m_texture_upload_buffer =
+  m_upload_buffer =
       StreamBuffer::Create(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, TEXTURE_UPLOAD_BUFFER_SIZE);
-  if (!m_texture_upload_buffer)
+  if (m_upload_buffer == nullptr)
   {
     PanicAlertFmt("Failed to create texture upload buffer");
     return false;
   }
 
-  if (g_ActiveConfig.bShaderCache)
-  {
-    if (!LoadPipelineCache())
-      return false;
-  }
-  else
-  {
-    if (!CreatePipelineCache())
-      return false;
-  }
-
-  return true;
+  return g_ActiveConfig.bShaderCache ? OpenPipelineCacheFromDisk() : CreateEmptyPipelineCache();
 }
 
 void ObjectCache::Shutdown()
 {
-  if (g_ActiveConfig.bShaderCache && m_pipeline_cache != VK_NULL_HANDLE)
+  if (m_pipeline_cache != VK_NULL_HANDLE && g_ActiveConfig.bShaderCache)
     SavePipelineCache();
 }
 
 void ObjectCache::ClearSamplerCache()
 {
-  for (const auto& it : m_sampler_cache)
+  const VkDevice device = Device();
+  for (const auto& [state, sampler] : m_samplers)
   {
-    if (it.second != VK_NULL_HANDLE)
-      vkDestroySampler(g_vulkan_context->GetDevice(), it.second, nullptr);
+    if (sampler != VK_NULL_HANDLE)
+      vkDestroySampler(device, sampler, nullptr);
   }
-  m_sampler_cache.clear();
+  m_samplers.clear();
 }
 
-void ObjectCache::DestroySamplers()
+bool ObjectCache::CreateSetLayouts()
 {
-  ClearSamplerCache();
+  static_assert(VideoCommon::MAX_PIXEL_SHADER_SAMPLERS == 16,
+                "The sampler set below assumes 16 pixel shader samplers");
+  constexpr u32 ARRAYED_SAMPLERS = 8;
+  constexpr VkShaderStageFlags FRAG = VK_SHADER_STAGE_FRAGMENT_BIT;
+  constexpr VkShaderStageFlags COMP = VK_SHADER_STAGE_COMPUTE_BIT;
+  constexpr VkDescriptorType CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  constexpr VkDescriptorType DYN_UBO = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  constexpr VkDescriptorType TEXEL = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
 
-  if (m_point_sampler != VK_NULL_HANDLE)
-  {
-    vkDestroySampler(g_vulkan_context->GetDevice(), m_point_sampler, nullptr);
-    m_point_sampler = VK_NULL_HANDLE;
-  }
+  std::array<std::vector<VkDescriptorSetLayoutBinding>, NUM_DESCRIPTOR_SET_LAYOUTS> sets;
 
-  if (m_linear_sampler != VK_NULL_HANDLE)
-  {
-    vkDestroySampler(g_vulkan_context->GetDevice(), m_linear_sampler, nullptr);
-    m_linear_sampler = VK_NULL_HANDLE;
-  }
-}
+  // GX uniforms: PS, VS, custom, GS. The GS buffer is last so it can be cut off below.
+  auto& gx_ubos = sets[DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS];
+  AddBindings(&gx_ubos, UBO_DESCRIPTOR_SET_BINDING_PS, 1, DYN_UBO, FRAG);
+  AddBindings(&gx_ubos, UBO_DESCRIPTOR_SET_BINDING_VS, 1, DYN_UBO,
+              VK_SHADER_STAGE_VERTEX_BIT | FRAG);
+  AddBindings(&gx_ubos, UBO_DESCRIPTOR_SET_BINDING_CUST, 1, DYN_UBO,
+              VK_SHADER_STAGE_VERTEX_BIT | FRAG);
+  AddBindings(&gx_ubos, UBO_DESCRIPTOR_SET_BINDING_GS, 1, DYN_UBO, VK_SHADER_STAGE_GEOMETRY_BIT);
 
-bool ObjectCache::CreateDescriptorSetLayouts()
-{
-  // The geometry shader buffer must be last in this binding set, as we don't include it
-  // if geometry shaders are not supported by the device. See the decrement below.
-  static const std::array<VkDescriptorSetLayoutBinding, 4> standard_ubo_bindings{{
-      {UBO_DESCRIPTOR_SET_BINDING_PS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-       VK_SHADER_STAGE_FRAGMENT_BIT},
-      {UBO_DESCRIPTOR_SET_BINDING_VS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
-      {UBO_DESCRIPTOR_SET_BINDING_CUST, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
-      {UBO_DESCRIPTOR_SET_BINDING_GS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-       VK_SHADER_STAGE_GEOMETRY_BIT},
-  }};
+  // GX samplers: one 8-element array, then the remaining samplers one binding each.
+  auto& gx_samplers = sets[DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS];
+  gx_samplers.push_back({0, CIS, ARRAYED_SAMPLERS, FRAG, nullptr});
+  AddBindings(&gx_samplers, ARRAYED_SAMPLERS,
+              VideoCommon::MAX_PIXEL_SHADER_SAMPLERS - ARRAYED_SAMPLERS, CIS, FRAG);
 
-  constexpr u32 MAX_PIXEL_SAMPLER_ARRAY_SIZE = 8;
-  constexpr u32 TOTAL_PIXEL_SAMPLER_BINDINGS =
-      1 + (VideoCommon::MAX_PIXEL_SHADER_SAMPLERS - MAX_PIXEL_SAMPLER_ARRAY_SIZE);
-  static_assert(VideoCommon::MAX_PIXEL_SHADER_SAMPLERS == 16, "Update descriptor sampler bindings");
+  // Storage buffers: bounding box, then the dynamic vertex loader's vertices (last, so it can
+  // be cut off).
+  auto& gx_ssbos = sets[DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS];
+  AddBindings(&gx_ssbos, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, FRAG);
+  AddBindings(&gx_ssbos, 1, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 
-  static const std::array<VkDescriptorSetLayoutBinding, TOTAL_PIXEL_SAMPLER_BINDINGS>
-      standard_sampler_bindings{{
-          {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_PIXEL_SAMPLER_ARRAY_SIZE,
-           VK_SHADER_STAGE_FRAGMENT_BIT},
-          {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-          {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      }};
+  AddBindings(&sets[DESCRIPTOR_SET_LAYOUT_UTILITY_UNIFORM_BUFFER], 0, 1, DYN_UBO,
+              VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | FRAG);
 
-  // The dynamic veretex loader's vertex buffer must be last here, for similar reasons
-  static const std::array<VkDescriptorSetLayoutBinding, 2> standard_ssbo_bindings{{
-      {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT},
-  }};
+  auto& util_samplers = sets[DESCRIPTOR_SET_LAYOUT_UTILITY_SAMPLERS];
+  AddBindings(&util_samplers, 0, 8, CIS, FRAG);
+  AddBindings(&util_samplers, 8, 1, TEXEL, FRAG);
 
-  static const std::array<VkDescriptorSetLayoutBinding, 1> utility_ubo_bindings{{
-      {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
-  }};
+  auto& compute = sets[DESCRIPTOR_SET_LAYOUT_COMPUTE];
+  AddBindings(&compute, 0, 1, DYN_UBO, COMP);
+  AddBindings(&compute, 1, 8, CIS, COMP);
+  AddBindings(&compute, 9, 2, TEXEL, COMP);
+  AddBindings(&compute, 11, 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, COMP);
 
-  // Utility samplers aren't dynamically indexed.
-  static const std::array<VkDescriptorSetLayoutBinding, 9> utility_sampler_bindings{{
-      {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-      {8, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-  }};
-
-  static const std::array<VkDescriptorSetLayoutBinding, 19> compute_set_bindings{{
-      {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {9, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {10, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-      {18, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT},
-  }};
-
-  std::array<VkDescriptorSetLayoutBinding, 4> ubo_bindings = standard_ubo_bindings;
-
-  std::array<VkDescriptorSetLayoutCreateInfo, NUM_DESCRIPTOR_SET_LAYOUTS> create_infos{{
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(ubo_bindings.size()), ubo_bindings.data()},
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(standard_sampler_bindings.size()), standard_sampler_bindings.data()},
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(standard_ssbo_bindings.size()), standard_ssbo_bindings.data()},
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(utility_ubo_bindings.size()), utility_ubo_bindings.data()},
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(utility_sampler_bindings.size()), utility_sampler_bindings.data()},
-      {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(compute_set_bindings.size()), compute_set_bindings.data()},
-  }};
-
-  // Don't set the GS bit if geometry shaders aren't available.
+  // Line/point expansion in the vertex shader reads the GS uniforms from the VS; without a
+  // geometry stage at all the GS buffer is not needed.
+  VkDescriptorSetLayoutBinding& gs_ubo = gx_ubos[UBO_DESCRIPTOR_SET_BINDING_GS];
   if (g_ActiveConfig.UseVSForLinePointExpand())
   {
-    if (g_backend_info.bSupportsGeometryShaders)
-      ubo_bindings[UBO_DESCRIPTOR_SET_BINDING_GS].stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-    else
-      ubo_bindings[UBO_DESCRIPTOR_SET_BINDING_GS].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    gs_ubo.stageFlags = g_backend_info.bSupportsGeometryShaders ?
+                            (gs_ubo.stageFlags | VK_SHADER_STAGE_VERTEX_BIT) :
+                            VkShaderStageFlags{VK_SHADER_STAGE_VERTEX_BIT};
   }
   else if (!g_backend_info.bSupportsGeometryShaders)
   {
-    create_infos[DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS].bindingCount--;
+    gx_ubos.pop_back();
   }
-
-  // Remove the dynamic vertex loader's buffer if it'll never be needed
   if (!g_backend_info.bSupportsDynamicVertexLoader)
-    create_infos[DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS].bindingCount--;
+    gx_ssbos.pop_back();
 
-  for (size_t i = 0; i < create_infos.size(); i++)
+  for (size_t index = 0; index < sets.size(); ++index)
   {
-    VkResult res = vkCreateDescriptorSetLayout(g_vulkan_context->GetDevice(), &create_infos[i],
-                                               nullptr, &m_descriptor_set_layouts[i]);
+    const VkDescriptorSetLayoutCreateInfo info = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
+        static_cast<u32>(sets[index].size()), sets[index].data()};
+    const VkResult res = vkCreateDescriptorSetLayout(Device(), &info, nullptr, &m_set_layouts[index]);
     if (res != VK_SUCCESS)
     {
       LOG_VULKAN_ERROR(res, "vkCreateDescriptorSetLayout failed: ");
       return false;
     }
   }
-
   return true;
-}
-
-void ObjectCache::DestroyDescriptorSetLayouts()
-{
-  for (VkDescriptorSetLayout layout : m_descriptor_set_layouts)
-  {
-    if (layout != VK_NULL_HANDLE)
-      vkDestroyDescriptorSetLayout(g_vulkan_context->GetDevice(), layout, nullptr);
-  }
 }
 
 bool ObjectCache::CreatePipelineLayouts()
 {
-  // Descriptor sets for each pipeline layout.
-  // In the standard set, the SSBO must be the last descriptor, as we do not include it
-  // when fragment stores and atomics are not supported by the device.
-  const std::array<VkDescriptorSetLayout, 3> standard_sets{
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS],
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS],
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS],
+  const VkDescriptorSetLayout gx_sets[] = {
+      m_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS],
+      m_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS],
+      m_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS],
   };
-  const std::array<VkDescriptorSetLayout, 3> uber_sets{
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS],
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS],
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS],
+  const VkDescriptorSetLayout utility_sets[] = {
+      m_set_layouts[DESCRIPTOR_SET_LAYOUT_UTILITY_UNIFORM_BUFFER],
+      m_set_layouts[DESCRIPTOR_SET_LAYOUT_UTILITY_SAMPLERS],
   };
-  const std::array<VkDescriptorSetLayout, 2> utility_sets{
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_UTILITY_UNIFORM_BUFFER],
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_UTILITY_SAMPLERS],
-  };
-  const std::array<VkDescriptorSetLayout, 1> compute_sets{
-      m_descriptor_set_layouts[DESCRIPTOR_SET_LAYOUT_COMPUTE],
-  };
+  const VkDescriptorSetLayout compute_sets[] = {m_set_layouts[DESCRIPTOR_SET_LAYOUT_COMPUTE]};
 
-  // Info for each pipeline layout
-  std::array<VkPipelineLayoutCreateInfo, NUM_PIPELINE_LAYOUTS> pipeline_layout_info{{
-      // Standard
-      {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(standard_sets.size()), standard_sets.data(), 0, nullptr},
-
-      // Uber
-      {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(uber_sets.size()), uber_sets.data(), 0, nullptr},
-
-      // Utility
-      {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(utility_sets.size()), utility_sets.data(), 0, nullptr},
-
-      // Compute
-      {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0,
-       static_cast<u32>(compute_sets.size()), compute_sets.data(), 0, nullptr},
-  }};
-
-  const bool ssbos_in_standard =
+  // The storage buffer set is the last one, and is left out when nothing uses it.
+  const bool standard_needs_ssbo =
       g_backend_info.bSupportsBBox || g_ActiveConfig.UseVSForLinePointExpand();
+  const bool uber_needs_ssbo = standard_needs_ssbo || g_backend_info.bSupportsDynamicVertexLoader;
 
-  // If bounding box is unsupported, don't bother with the SSBO descriptor set.
-  if (!ssbos_in_standard)
-    pipeline_layout_info[PIPELINE_LAYOUT_STANDARD].setLayoutCount--;
-  // If neither SSBO-using feature is supported, skip in ubershaders too
-  if (!ssbos_in_standard && !g_backend_info.bSupportsDynamicVertexLoader)
-    pipeline_layout_info[PIPELINE_LAYOUT_UBER].setLayoutCount--;
-
-  for (size_t i = 0; i < pipeline_layout_info.size(); i++)
+  struct LayoutSpec
   {
-    VkResult res;
-    if ((res = vkCreatePipelineLayout(g_vulkan_context->GetDevice(), &pipeline_layout_info[i],
-                                      nullptr, &m_pipeline_layouts[i])) != VK_SUCCESS)
+    const VkDescriptorSetLayout* sets;
+    u32 count;
+  };
+  std::array<LayoutSpec, NUM_PIPELINE_LAYOUTS> specs = {};
+  specs[PIPELINE_LAYOUT_STANDARD] = {gx_sets, standard_needs_ssbo ? 3u : 2u};
+  specs[PIPELINE_LAYOUT_UBER] = {gx_sets, uber_needs_ssbo ? 3u : 2u};
+  specs[PIPELINE_LAYOUT_UTILITY] = {utility_sets, 2};
+  specs[PIPELINE_LAYOUT_COMPUTE] = {compute_sets, 1};
+
+  for (size_t index = 0; index < specs.size(); ++index)
+  {
+    const VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                             nullptr,
+                                             0,
+                                             specs[index].count,
+                                             specs[index].sets,
+                                             0,
+                                             nullptr};
+    const VkResult res = vkCreatePipelineLayout(Device(), &info, nullptr, &m_pipeline_layouts[index]);
+    if (res != VK_SUCCESS)
     {
       LOG_VULKAN_ERROR(res, "vkCreatePipelineLayout failed: ");
       return false;
     }
   }
-
   return true;
 }
 
-void ObjectCache::DestroyPipelineLayouts()
+bool ObjectCache::CreateFixedSamplers()
 {
-  for (VkPipelineLayout layout : m_pipeline_layouts)
-  {
-    if (layout != VK_NULL_HANDLE)
-      vkDestroyPipelineLayout(g_vulkan_context->GetDevice(), layout, nullptr);
-  }
-}
+  VkSamplerCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+  info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+  info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  info.maxAnisotropy = 1.0f;
+  info.compareOp = VK_COMPARE_OP_ALWAYS;
+  info.minLod = std::numeric_limits<float>::min();
+  info.maxLod = std::numeric_limits<float>::max();
+  info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 
-bool ObjectCache::CreateStaticSamplers()
-{
-  VkSamplerCreateInfo create_info = {
-      VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,    // VkStructureType         sType
-      nullptr,                                  // const void*             pNext
-      0,                                        // VkSamplerCreateFlags    flags
-      VK_FILTER_NEAREST,                        // VkFilter                magFilter
-      VK_FILTER_NEAREST,                        // VkFilter                minFilter
-      VK_SAMPLER_MIPMAP_MODE_NEAREST,           // VkSamplerMipmapMode     mipmapMode
-      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,  // VkSamplerAddressMode    addressModeU
-      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,  // VkSamplerAddressMode    addressModeV
-      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,    // VkSamplerAddressMode    addressModeW
-      0.0f,                                     // float                   mipLodBias
-      VK_FALSE,                                 // VkBool32                anisotropyEnable
-      1.0f,                                     // float                   maxAnisotropy
-      VK_FALSE,                                 // VkBool32                compareEnable
-      VK_COMPARE_OP_ALWAYS,                     // VkCompareOp             compareOp
-      std::numeric_limits<float>::min(),        // float                   minLod
-      std::numeric_limits<float>::max(),        // float                   maxLod
-      VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,  // VkBorderColor           borderColor
-      VK_FALSE                                  // VkBool32                unnormalizedCoordinates
+  struct Variant
+  {
+    VkSampler* out;
+    VkFilter filter;
+    VkSamplerMipmapMode mip;
   };
-
-  VkResult res =
-      vkCreateSampler(g_vulkan_context->GetDevice(), &create_info, nullptr, &m_point_sampler);
-  if (res != VK_SUCCESS)
+  const Variant variants[] = {
+      {&m_point_sampler, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST},
+      {&m_linear_sampler, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR},
+  };
+  for (const Variant& v : variants)
   {
-    LOG_VULKAN_ERROR(res, "vkCreateSampler failed: ");
-    return false;
+    info.magFilter = v.filter;
+    info.minFilter = v.filter;
+    info.mipmapMode = v.mip;
+    const VkResult res = vkCreateSampler(Device(), &info, nullptr, v.out);
+    if (res != VK_SUCCESS)
+    {
+      LOG_VULKAN_ERROR(res, "vkCreateSampler failed: ");
+      return false;
+    }
   }
-
-  // Most fields are shared across point<->linear samplers, so only change those necessary.
-  create_info.minFilter = VK_FILTER_LINEAR;
-  create_info.magFilter = VK_FILTER_LINEAR;
-  create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-  res = vkCreateSampler(g_vulkan_context->GetDevice(), &create_info, nullptr, &m_linear_sampler);
-  if (res != VK_SUCCESS)
-  {
-    LOG_VULKAN_ERROR(res, "vkCreateSampler failed: ");
-    return false;
-  }
-
   return true;
 }
 
 VkSampler ObjectCache::GetSampler(const SamplerState& info)
 {
-  auto iter = m_sampler_cache.find(info);
-  if (iter != m_sampler_cache.end())
-    return iter->second;
+  if (const auto found = m_samplers.find(info); found != m_samplers.end())
+    return found->second;
 
-  static constexpr std::array<VkFilter, 4> filters = {{VK_FILTER_NEAREST, VK_FILTER_LINEAR}};
-  static constexpr std::array<VkSamplerMipmapMode, 2> mipmap_modes = {
-      {VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_MIPMAP_MODE_LINEAR}};
-  static constexpr std::array<VkSamplerAddressMode, 4> address_modes = {
-      {VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_REPEAT,
-       VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT}};
-
-  VkSamplerCreateInfo create_info = {
-      VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,              // VkStructureType         sType
-      nullptr,                                            // const void*             pNext
-      0,                                                  // VkSamplerCreateFlags    flags
-      filters[u32(info.tm0.mag_filter.Value())],          // VkFilter                magFilter
-      filters[u32(info.tm0.min_filter.Value())],          // VkFilter                minFilter
-      mipmap_modes[u32(info.tm0.mipmap_filter.Value())],  // VkSamplerMipmapMode mipmapMode
-      address_modes[u32(info.tm0.wrap_u.Value())],        // VkSamplerAddressMode    addressModeU
-      address_modes[u32(info.tm0.wrap_v.Value())],        // VkSamplerAddressMode    addressModeV
-      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,              // VkSamplerAddressMode    addressModeW
-      info.tm0.lod_bias / 256.0f,                         // float                   mipLodBias
-      VK_FALSE,                                 // VkBool32                anisotropyEnable
-      0.0f,                                     // float                   maxAnisotropy
-      VK_FALSE,                                 // VkBool32                compareEnable
-      VK_COMPARE_OP_ALWAYS,                     // VkCompareOp             compareOp
-      info.tm1.min_lod / 16.0f,                 // float                   minLod
-      info.tm1.max_lod / 16.0f,                 // float                   maxLod
-      VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,  // VkBorderColor           borderColor
-      VK_FALSE                                  // VkBool32                unnormalizedCoordinates
+  const auto filter = [](auto mode) {
+    return u32(mode) == 0 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+  };
+  // GX wrap modes: clamp, repeat, mirror; the reserved value 3 behaves as repeat.
+  const auto address = [](auto mode) {
+    switch (u32(mode))
+    {
+    case 0:
+      return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case 2:
+      return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    default:
+      return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    }
   };
 
-  // Can we use anisotropic filtering with this sampler?
-  if (info.tm0.anisotropic_filtering != 0 && g_vulkan_context->SupportsAnisotropicFiltering())
+  VkSamplerCreateInfo create = {};
+  create.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  create.magFilter = filter(info.tm0.mag_filter.Value());
+  create.minFilter = filter(info.tm0.min_filter.Value());
+  create.mipmapMode = u32(info.tm0.mipmap_filter.Value()) == 0 ? VK_SAMPLER_MIPMAP_MODE_NEAREST :
+                                                                  VK_SAMPLER_MIPMAP_MODE_LINEAR;
+  create.addressModeU = address(info.tm0.wrap_u.Value());
+  create.addressModeV = address(info.tm0.wrap_v.Value());
+  create.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  create.mipLodBias = static_cast<float>(info.tm0.lod_bias) / 256.0f;
+  create.maxAnisotropy = 0.0f;
+  create.compareOp = VK_COMPARE_OP_ALWAYS;
+  create.minLod = static_cast<float>(info.tm1.min_lod) / 16.0f;
+  create.maxLod = static_cast<float>(info.tm1.max_lod) / 16.0f;
+  create.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+
+  const u32 aniso_log2 = info.tm0.anisotropic_filtering;
+  if (aniso_log2 != 0 && g_vulkan_context->SupportsAnisotropicFiltering())
   {
-    // Cap anisotropy to device limits.
-    create_info.anisotropyEnable = VK_TRUE;
-    create_info.maxAnisotropy = std::min(static_cast<float>(1 << info.tm0.anisotropic_filtering),
-                                         g_vulkan_context->GetMaxSamplerAnisotropy());
+    create.anisotropyEnable = VK_TRUE;
+    create.maxAnisotropy = std::min(static_cast<float>(1 << aniso_log2),
+                                    g_vulkan_context->GetMaxSamplerAnisotropy());
   }
 
   VkSampler sampler = VK_NULL_HANDLE;
-  VkResult res = vkCreateSampler(g_vulkan_context->GetDevice(), &create_info, nullptr, &sampler);
+  const VkResult res = vkCreateSampler(Device(), &create, nullptr, &sampler);
   if (res != VK_SUCCESS)
     LOG_VULKAN_ERROR(res, "vkCreateSampler failed: ");
 
-  // Store it even if it failed
-  m_sampler_cache.emplace(info, sampler);
+  // A null handle is remembered as well, so a failing state is not retried every draw.
+  m_samplers.emplace(info, sampler);
   return sampler;
 }
 
@@ -413,285 +364,188 @@ VkRenderPass ObjectCache::GetRenderPass(VkFormat color_format, VkFormat depth_fo
                                         u32 multisamples, VkAttachmentLoadOp load_op,
                                         u8 additional_attachment_count)
 {
-  auto key =
-      std::tie(color_format, depth_format, multisamples, load_op, additional_attachment_count);
-  auto it = m_render_pass_cache.find(key);
-  if (it != m_render_pass_cache.end())
-    return it->second;
+  const RenderPassKey key{color_format, depth_format, multisamples, load_op,
+                          additional_attachment_count};
+  if (const auto found = m_render_passes.find(key); found != m_render_passes.end())
+    return found->second;
 
-  VkAttachmentReference depth_reference;
-  VkAttachmentReference* depth_reference_ptr = nullptr;
+  const auto samples = static_cast<VkSampleCountFlagBits>(multisamples);
   std::vector<VkAttachmentDescription> attachments;
-  std::vector<VkAttachmentReference> color_attachment_references;
+  std::vector<VkAttachmentReference> color_refs;
+  VkAttachmentReference depth_ref = {};
+  bool has_depth = false;
+
+  const auto add_attachment = [&](VkFormat format, VkImageLayout layout) {
+    const u32 slot = static_cast<u32>(attachments.size());
+    attachments.push_back({0, format, samples, load_op, VK_ATTACHMENT_STORE_OP_STORE,
+                           VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                           layout, layout});
+    return VkAttachmentReference{slot, layout};
+  };
+
   if (color_format != VK_FORMAT_UNDEFINED)
-  {
-    VkAttachmentReference color_reference;
-    color_reference.attachment = static_cast<uint32_t>(attachments.size());
-    color_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_attachment_references.push_back(std::move(color_reference));
-    attachments.push_back({0, color_format, static_cast<VkSampleCountFlagBits>(multisamples),
-                           load_op, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                           VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-  }
+    color_refs.push_back(add_attachment(color_format, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
   if (depth_format != VK_FORMAT_UNDEFINED)
   {
-    depth_reference.attachment = static_cast<uint32_t>(attachments.size());
-    depth_reference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depth_reference_ptr = &depth_reference;
-    attachments.push_back({0, depth_format, static_cast<VkSampleCountFlagBits>(multisamples),
-                           load_op, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                           VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL});
+    depth_ref = add_attachment(depth_format, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    has_depth = true;
   }
+  // Extra color outputs share the main color format.
+  for (u32 extra = 0; extra < additional_attachment_count; ++extra)
+    color_refs.push_back(add_attachment(color_format, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 
-  for (u8 i = 0; i < additional_attachment_count; i++)
-  {
-    VkAttachmentReference color_reference;
-    color_reference.attachment = static_cast<uint32_t>(attachments.size());
-    color_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_attachment_references.push_back(std::move(color_reference));
-    attachments.push_back({0, color_format, static_cast<VkSampleCountFlagBits>(multisamples),
-                           load_op, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                           VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-  }
+  VkSubpassDescription subpass = {};
+  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  subpass.colorAttachmentCount = static_cast<u32>(color_refs.size());
+  subpass.pColorAttachments = color_refs.empty() ? nullptr : color_refs.data();
+  subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
 
-  VkSubpassDescription subpass = {
-      0,
-      VK_PIPELINE_BIND_POINT_GRAPHICS,
-      0,
-      nullptr,
-      static_cast<uint32_t>(color_attachment_references.size()),
-      color_attachment_references.empty() ? nullptr : color_attachment_references.data(),
-      nullptr,
-      depth_reference_ptr,
-      0,
-      nullptr};
-  VkRenderPassCreateInfo pass_info = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                                      nullptr,
-                                      0,
-                                      static_cast<uint32_t>(attachments.size()),
-                                      attachments.data(),
-                                      1,
-                                      &subpass,
-                                      0,
-                                      nullptr};
+  VkRenderPassCreateInfo pass_info = {};
+  pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+  pass_info.attachmentCount = static_cast<u32>(attachments.size());
+  pass_info.pAttachments = attachments.data();
+  pass_info.subpassCount = 1;
+  pass_info.pSubpasses = &subpass;
 
-  VkRenderPass pass;
-  VkResult res = vkCreateRenderPass(g_vulkan_context->GetDevice(), &pass_info, nullptr, &pass);
+  VkRenderPass pass = VK_NULL_HANDLE;
+  const VkResult res = vkCreateRenderPass(Device(), &pass_info, nullptr, &pass);
   if (res != VK_SUCCESS)
   {
+    // Not remembered: the next request tries again.
     LOG_VULKAN_ERROR(res, "vkCreateRenderPass failed: ");
     return VK_NULL_HANDLE;
   }
 
-  m_render_pass_cache.emplace(key, pass);
+  m_render_passes.emplace(key, pass);
   return pass;
 }
 
-void ObjectCache::DestroyRenderPassCache()
+bool ObjectCache::CreateEmptyPipelineCache()
 {
-  for (auto& it : m_render_pass_cache)
-    vkDestroyRenderPass(g_vulkan_context->GetDevice(), it.second, nullptr);
-  m_render_pass_cache.clear();
-}
+  // One cache file is shared by all games; drivers only build pipelines from it on lookup.
+  m_pipeline_cache_path = GetDiskShaderCacheFileName(APIType::Vulkan, "Pipeline", false, true);
 
-class PipelineCacheReadCallback : public Common::LinearDiskCacheReader<u32, u8>
-{
-public:
-  PipelineCacheReadCallback(std::vector<u8>* data) : m_data(data) {}
-  void Read(const u32& key, const u8* value, u32 value_size) override
+  VkPipelineCacheCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  const VkResult res = vkCreatePipelineCache(Device(), &info, nullptr, &m_pipeline_cache);
+  if (res != VK_SUCCESS)
   {
-    m_data->resize(value_size);
-    if (value_size > 0)
-      memcpy(m_data->data(), value, value_size);
-  }
-
-private:
-  std::vector<u8>* m_data;
-};
-
-class PipelineCacheReadIgnoreCallback : public Common::LinearDiskCacheReader<u32, u8>
-{
-public:
-  void Read(const u32& key, const u8* value, u32 value_size) override {}
-};
-
-bool ObjectCache::CreatePipelineCache()
-{
-  // Vulkan pipeline caches can be shared between games for shader compile time reduction.
-  // This assumes that drivers don't create all pipelines in the cache on load time, only
-  // when a lookup occurs that matches a pipeline (or pipeline data) in the cache.
-  m_pipeline_cache_filename = GetDiskShaderCacheFileName(APIType::Vulkan, "Pipeline", false, true);
-
-  VkPipelineCacheCreateInfo info = {
-      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,  // VkStructureType            sType
-      nullptr,                                       // const void*                pNext
-      0,                                             // VkPipelineCacheCreateFlags flags
-      0,                                             // size_t                     initialDataSize
-      nullptr                                        // const void*                pInitialData
-  };
-
-  VkResult res =
-      vkCreatePipelineCache(g_vulkan_context->GetDevice(), &info, nullptr, &m_pipeline_cache);
-  if (res == VK_SUCCESS)
-    return true;
-
-  LOG_VULKAN_ERROR(res, "vkCreatePipelineCache failed: ");
-  return false;
-}
-
-bool ObjectCache::LoadPipelineCache()
-{
-  // We have to keep the pipeline cache file name around since when we save it
-  // we delete the old one, by which time the game's unique ID is already cleared.
-  m_pipeline_cache_filename = GetDiskShaderCacheFileName(APIType::Vulkan, "Pipeline", false, true);
-
-  std::vector<u8> disk_data;
-  Common::LinearDiskCache<u32, u8> disk_cache;
-  PipelineCacheReadCallback read_callback(&disk_data);
-  if (disk_cache.OpenAndRead(m_pipeline_cache_filename, read_callback) != 1)
-    disk_data.clear();
-
-  if (!disk_data.empty() && !ValidatePipelineCache(disk_data.data(), disk_data.size()))
-  {
-    // Don't use this data. In fact, we should delete it to prevent it from being used next time.
-    File::Delete(m_pipeline_cache_filename);
-    return CreatePipelineCache();
-  }
-
-  VkPipelineCacheCreateInfo info = {
-      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,  // VkStructureType            sType
-      nullptr,                                       // const void*                pNext
-      0,                                             // VkPipelineCacheCreateFlags flags
-      disk_data.size(),                              // size_t                     initialDataSize
-      disk_data.data()                               // const void*                pInitialData
-  };
-
-  VkResult res =
-      vkCreatePipelineCache(g_vulkan_context->GetDevice(), &info, nullptr, &m_pipeline_cache);
-  if (res == VK_SUCCESS)
-    return true;
-
-  // Failed to create pipeline cache, try with it empty.
-  LOG_VULKAN_ERROR(res, "vkCreatePipelineCache failed, trying empty cache: ");
-  return CreatePipelineCache();
-}
-
-// Based on Vulkan 1.0 specification,
-// Table 9.1. Layout for pipeline cache header version VK_PIPELINE_CACHE_HEADER_VERSION_ONE
-// NOTE: This data is assumed to be in little-endian format.
-#pragma pack(push, 4)
-struct VK_PIPELINE_CACHE_HEADER
-{
-  u32 header_length;
-  u32 header_version;
-  u32 vendor_id;
-  u32 device_id;
-  u8 uuid[VK_UUID_SIZE];
-};
-#pragma pack(pop)
-static_assert(std::is_trivially_copyable<VK_PIPELINE_CACHE_HEADER>::value,
-              "VK_PIPELINE_CACHE_HEADER must be trivially copyable");
-
-bool ObjectCache::ValidatePipelineCache(const u8* data, size_t data_length)
-{
-  if (data_length < sizeof(VK_PIPELINE_CACHE_HEADER))
-  {
-    ERROR_LOG_FMT(VIDEO, "Pipeline cache failed validation: Invalid header");
+    LOG_VULKAN_ERROR(res, "vkCreatePipelineCache failed: ");
     return false;
   }
-
-  VK_PIPELINE_CACHE_HEADER header;
-  std::memcpy(&header, data, sizeof(header));
-  if (header.header_length < sizeof(VK_PIPELINE_CACHE_HEADER))
-  {
-    ERROR_LOG_FMT(VIDEO, "Pipeline cache failed validation: Invalid header length");
-    return false;
-  }
-
-  if (header.header_version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE)
-  {
-    ERROR_LOG_FMT(VIDEO, "Pipeline cache failed validation: Invalid header version");
-    return false;
-  }
-
-  if (header.vendor_id != g_vulkan_context->GetDeviceInfo().vendorID)
-  {
-    ERROR_LOG_FMT(
-        VIDEO, "Pipeline cache failed validation: Incorrect vendor ID (file: {:#X}, device: {:#X})",
-        header.vendor_id, g_vulkan_context->GetDeviceInfo().vendorID);
-    return false;
-  }
-
-  if (header.device_id != g_vulkan_context->GetDeviceInfo().deviceID)
-  {
-    ERROR_LOG_FMT(
-        VIDEO, "Pipeline cache failed validation: Incorrect device ID (file: {:#X}, device: {:#X})",
-        header.device_id, g_vulkan_context->GetDeviceInfo().deviceID);
-    return false;
-  }
-
-  if (std::memcmp(header.uuid, g_vulkan_context->GetDeviceInfo().pipelineCacheUUID, VK_UUID_SIZE) !=
-      0)
-  {
-    ERROR_LOG_FMT(VIDEO, "Pipeline cache failed validation: Incorrect UUID");
-    return false;
-  }
-
   return true;
 }
 
-void ObjectCache::DestroyPipelineCache()
+bool ObjectCache::OpenPipelineCacheFromDisk()
 {
-  vkDestroyPipelineCache(g_vulkan_context->GetDevice(), m_pipeline_cache, nullptr);
-  m_pipeline_cache = VK_NULL_HANDLE;
+  // Remember the name now: when saving at shutdown the game ID it depends on is gone.
+  m_pipeline_cache_path = GetDiskShaderCacheFileName(APIType::Vulkan, "Pipeline", false, true);
+
+  std::vector<u8> blob;
+  {
+    Common::LinearDiskCache<u32, u8> file;
+    BlobReader reader(&blob);
+    if (file.OpenAndRead(m_pipeline_cache_path, reader) != 1)
+      blob.clear();
+  }
+
+  if (!blob.empty() && !HeaderMatchesDevice(blob.data(), blob.size()))
+  {
+    // Stale data from another driver or GPU: remove it so it is not tried again.
+    File::Delete(m_pipeline_cache_path);
+    return CreateEmptyPipelineCache();
+  }
+
+  VkPipelineCacheCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  info.initialDataSize = blob.size();
+  info.pInitialData = blob.data();
+  const VkResult res = vkCreatePipelineCache(Device(), &info, nullptr, &m_pipeline_cache);
+  if (res == VK_SUCCESS)
+    return true;
+
+  LOG_VULKAN_ERROR(res, "vkCreatePipelineCache failed, trying empty cache: ");
+  return CreateEmptyPipelineCache();
+}
+
+bool ObjectCache::HeaderMatchesDevice(const u8* data, size_t size) const
+{
+  constexpr const char* PREFIX = "Pipeline cache failed validation: ";
+  if (size < sizeof(PipelineCacheHeader))
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Invalid header", PREFIX);
+    return false;
+  }
+
+  PipelineCacheHeader header;
+  std::memcpy(&header, data, sizeof(header));
+  const VulkanContext::PhysicalDeviceInfo& device = g_vulkan_context->GetDeviceInfo();
+
+  if (header.length < sizeof(PipelineCacheHeader))
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Invalid header length", PREFIX);
+    return false;
+  }
+  if (header.version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE)
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Invalid header version", PREFIX);
+    return false;
+  }
+  if (header.vendor != device.vendorID)
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Incorrect vendor ID (file: {:#X}, device: {:#X})", PREFIX,
+                  header.vendor, device.vendorID);
+    return false;
+  }
+  if (header.device != device.deviceID)
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Incorrect device ID (file: {:#X}, device: {:#X})", PREFIX,
+                  header.device, device.deviceID);
+    return false;
+  }
+  if (std::memcmp(header.uuid, device.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+  {
+    ERROR_LOG_FMT(VIDEO, "{}Incorrect UUID", PREFIX);
+    return false;
+  }
+  return true;
 }
 
 void ObjectCache::SavePipelineCache()
 {
-  size_t data_size;
-  VkResult res =
-      vkGetPipelineCacheData(g_vulkan_context->GetDevice(), m_pipeline_cache, &data_size, nullptr);
+  // Ask for the size first, then the data.
+  size_t size = 0;
+  VkResult res = vkGetPipelineCacheData(Device(), m_pipeline_cache, &size, nullptr);
+  if (res != VK_SUCCESS)
+  {
+    LOG_VULKAN_ERROR(res, "vkGetPipelineCacheData failed: ");
+    return;
+  }
+  std::vector<u8> blob(size);
+  res = vkGetPipelineCacheData(Device(), m_pipeline_cache, &size, blob.data());
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkGetPipelineCacheData failed: ");
     return;
   }
 
-  std::vector<u8> data(data_size);
-  res = vkGetPipelineCacheData(g_vulkan_context->GetDevice(), m_pipeline_cache, &data_size,
-                               data.data());
-  if (res != VK_SUCCESS)
-  {
-    LOG_VULKAN_ERROR(res, "vkGetPipelineCacheData failed: ");
-    return;
-  }
-
-  // Delete the old cache and re-create.
-  File::Delete(m_pipeline_cache_filename);
-
-  // We write a single key of 1, with the entire pipeline cache data.
-  // Not ideal, but our disk cache class does not support just writing a single blob
-  // of data without specifying a key.
-  Common::LinearDiskCache<u32, u8> disk_cache;
-  PipelineCacheReadIgnoreCallback callback;
-  disk_cache.OpenAndRead(m_pipeline_cache_filename, callback);
-  disk_cache.Append(1, data.data(), static_cast<u32>(data.size()));
-  disk_cache.Close();
+  // The file holds one entry (key 1) with the whole blob; start from an empty file.
+  File::Delete(m_pipeline_cache_path);
+  Common::LinearDiskCache<u32, u8> file;
+  DiscardReader discard;
+  file.OpenAndRead(m_pipeline_cache_path, discard);
+  file.Append(1, blob.data(), static_cast<u32>(blob.size()));
+  file.Close();
 }
 
 void ObjectCache::ReloadPipelineCache()
 {
   SavePipelineCache();
-
+  // The previous VkPipelineCache handle is simply replaced.
   if (g_ActiveConfig.bShaderCache)
-    LoadPipelineCache();
+    OpenPipelineCacheFromDisk();
   else
-    CreatePipelineCache();
+    CreateEmptyPipelineCache();
 }
+
 }  // namespace Vulkan
