@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,5 +46,22 @@ func TestEngineNamesLinux(t *testing.T) {
 	}
 	if !strings.Contains(errNoWiiEngine.Error(), "next to RetroPixels (it must have wii/PixelU-Wii in it)") {
 		t.Errorf("message: %v", errNoWiiEngine)
+	}
+}
+
+// The page is told which system the app runs on, and words itself for it.
+func TestPageKnowsTheSystem(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = fmt.Sprintf("127.0.0.1:%d", port)
+	newMux().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 200 || !strings.Contains(body, `os: "linux" };`) {
+		t.Fatalf("page %d: no os in %q", rec.Code, body[:min(len(body), 200)])
+	}
+	for _, s := range []string{`const OS = (DESKTOP && DESKTOP.os) || "windows";`, `data-exe="RetroPixels"`, `data-path="code/*.rpx"`, "data-nonwin="} {
+		if !strings.Contains(body, s) {
+			t.Errorf("page has no %s", s)
+		}
 	}
 }

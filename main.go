@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -219,7 +220,7 @@ func newMux() *http.ServeMux {
 	indexHTML, _ := fs.ReadFile(sub, "index.html")
 	page := bytes.Replace(indexHTML,
 		[]byte("/*__RETRO_DESKTOP__*/"),
-		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: %q };`, token, appVersion)), 1)
+		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: %q, os: %q };`, token, appVersion, runtime.GOOS)), 1)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if !hostOK[r.Host] {

@@ -512,7 +512,7 @@
   <!-- ===================== GameCube & Wii tab ===================== -->
   <section id="gcTab" hidden>
     <div id="gcBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">GameCube and Wii games play in <strong>PixelU</strong> (Wii/GameCube engine based on Dolphin, GPL) through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">GameCube and Wii games play in <strong>PixelU</strong> (Wii/GameCube engine based on Dolphin, GPL) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="gcDesktop" hidden>
       <div class="sw-locked" id="gcLocked" hidden><b>PixelU (Wii/GameCube) is open.</b> Settings changes are paused until you close it.</div>
@@ -578,7 +578,7 @@
   <!-- ===================== Wii U (PixelU) tab ===================== -->
   <section id="wiiuTab" hidden>
     <div id="wiiuBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Wii U games play in <strong>PixelU</strong> (RetroPixels' Wii U emulator, based on Cemu) through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">Wii U games play in <strong>PixelU</strong> (RetroPixels' Wii U emulator, based on Cemu) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="wiiuDesktop" hidden>
       <div class="gc-layout">
@@ -605,7 +605,7 @@
           <p class="muted" id="wiiuMsg" style="font-size:14px;margin:6px 0"></p>
           <div class="sw-grid" id="wiiuGrid"></div>
           <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
-            Lists .wua, .wud and .wux files, Wii U .iso discs and unpacked games (a folder with code\*.rpx). Games are played from where they are; nothing is copied.</p>
+            Lists .wua, .wud and .wux files, Wii U .iso discs and unpacked games (a folder with <span data-path="code/*.rpx">code\*.rpx</span>). Games are played from where they are; nothing is copied.</p>
         </section>
         <aside class="gc-side">
           <section class="sw-sec">
@@ -626,7 +626,7 @@
   <!-- ===================== Arcade (MAME) tab ===================== -->
   <section id="mameTab" hidden>
     <div id="mameBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Arcade games play in <strong>MAME</strong>, any version of it, through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">Arcade games play in <strong>MAME</strong>, any version of it, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="mameDesktop" hidden>
       <div class="gc-layout">
@@ -661,7 +661,7 @@
           </section>
           <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">Download a MAME version</h2>
-            <p class="muted" style="font-size:12px;margin:0 0 8px">Any official Windows release from the MAME team (github.com/mamedev/mame). Each version gets its own folder next to RetroPixels, so they don't replace each other.</p>
+            <p class="muted" style="font-size:12px;margin:0 0 8px" data-nonwin="The MAME team publishes ready-made builds for Windows only. On Linux, play with the MAME that comes with RetroPixels (built from the MAME team's official source) or your system's mame package (Add MAME… or Find MAME on this PC).">Any official Windows release from the MAME team (github.com/mamedev/mame). Each version gets its own folder next to RetroPixels, so they don't replace each other.</p>
             <div class="sw-row"><select id="mameRelSel" class="sw-select" style="flex:1"><option value="">Loading the list…</option></select>
               <button class="btn sm mame-btn" id="mameDl">Download</button></div>
             <div id="mameDlNote" style="margin-top:8px"></div>
@@ -681,7 +681,7 @@
   <!-- ===================== Supermodel (Sega Model 3) tab ===================== -->
   <section id="smTab" hidden>
     <div id="smBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Star Wars Trilogy Arcade plays in <strong>Supermodel</strong>, the Sega Model 3 arcade emulator, through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">Star Wars Trilogy Arcade plays in <strong>Supermodel</strong>, the Sega Model 3 arcade emulator, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="smDesktop" hidden>
       <div class="gc-layout">
@@ -856,6 +856,15 @@
 
   // ---------- Desktop app ----------
   const DESKTOP = window.RETRO_DESKTOP || null;
+  // The system the desktop app runs on ("windows" or "linux"): program names
+  // and paths in the page are worded for it (PixelU.exe and code\*.rpx on
+  // Windows, PixelU and code/*.rpx on Linux).
+  const OS = (DESKTOP && DESKTOP.os) || "windows";
+  const exeFile = n => OS === "windows" ? n + ".exe" : n;
+  const sysPath = p => OS === "windows" ? p.replace(/\//g, "\\") : p;
+  document.querySelectorAll("[data-exe]").forEach(e => { e.textContent = exeFile(e.dataset.exe); });
+  document.querySelectorAll("[data-path]").forEach(e => { e.textContent = sysPath(e.dataset.path); });
+  if (OS !== "windows") document.querySelectorAll("[data-nonwin]").forEach(e => { e.textContent = e.dataset.nonwin; });
   if (DESKTOP && DESKTOP.version) document.getElementById("appVersion").textContent = "v" + DESKTOP.version;
 
   const api = async (path, body) => {
@@ -1252,7 +1261,7 @@
           <button class="linkbtn" data-open="${i}">Open folder</button>
           <button class="linkbtn danger" data-rmv="${i}">Remove</button></div></div>`).join("")
       : `<p class="muted" style="font-size:13px;margin:0">${st.finding ? "Looking for MAME on this PC…"
-          : 'No MAME yet. Download a version below, or click "Add MAME…" to choose a mame.exe you already have. You can add as many versions as you like.'}</p>`;
+          : `No MAME yet. Download a version below, or click "Add MAME…" to choose a ${exeFile("mame")} you already have. You can add as many versions as you like.`}</p>`;
     el.querySelectorAll("[data-def]").forEach(b => b.addEventListener("click", () => mameAction({ action: "set-default", exe: list[+b.dataset.def].exe }, "Default MAME changed")));
     el.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => mameAction({ action: "open-folder", exe: list[+b.dataset.open].exe })));
     el.querySelectorAll("[data-rmv]").forEach(b => b.addEventListener("click", () => {
@@ -1423,9 +1432,9 @@
     const st = gcStatus;
     document.getElementById("gcEmu").innerHTML = st.exe
       ? `<span class="muted">Emulator</span><br><b>PixelU</b> <small class="muted">Wii/GameCube engine, based on Dolphin${st.version ? " · " + esc(st.version) : ""}</small><br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU\'s Wii/GameCube engine wasn\'t found</b><br><small class="muted">Put the PixelU folder next to RetroPixels.exe (it has wii\\PixelU-Wii.exe inside), then come back to this tab</small>';
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU's Wii/GameCube engine wasn't found</b><br><small class="muted">Put the PixelU folder next to ${exeFile("RetroPixels")} (it has ${sysPath("wii/" + exeFile("PixelU-Wii"))} inside), then come back to this tab</small>`;
     document.getElementById("gcDolNote").innerHTML = st.exe ? "" :
-      `<div class="rec-note err">PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels.exe.</div>`;
+      `<div class="rec-note err">PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to ${exeFile("RetroPixels")}.</div>`;
     document.getElementById("gcOpenDolphin").disabled = !st.exe;
     document.getElementById("gcOpenConfig").disabled = !st.exe;
     const f = st.folders || [];
@@ -1663,7 +1672,7 @@
     const emuEl = document.getElementById("smEmu");
     emuEl.innerHTML = st.exe
       ? `<span class="muted">Emulator</span><br><b>Supermodel</b> <small class="muted">${esc(st.version || "")}</small>${st.patched ? "" : '<br><small style="color:var(--warn)">Not RetroPixels\' build: it plays in its own window, without recording</small>'}<br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Supermodel not found</b><br><small class="muted">It comes in the RetroPixels download (the Supermodel folder next to RetroPixels.exe). Unpack the whole download, or click "Change Supermodel…"</small>';
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">Supermodel not found</b><br><small class="muted">It comes in the RetroPixels download (the Supermodel folder next to ${exeFile("RetroPixels")}). Unpack the whole download, or click "Change Supermodel…"</small>`;
     document.getElementById("smEmbed").checked = !!st.embed;
     document.getElementById("smEmbed").disabled = st.exe && !st.patched;
     document.getElementById("smFull").checked = !!st.fullscreen;
@@ -1758,7 +1767,7 @@
     const st = wiiuStatus;
     document.getElementById("wiiuEmu").innerHTML = st.exe
       ? `<span class="muted">Emulator</span><br><b>PixelU</b> <small class="muted">based on Cemu</small><br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU not found</b><br><small class="muted">Put the PixelU folder next to RetroPixels.exe (or keep it in Downloads), or click "Change PixelU…" to pick PixelU.exe</small>';
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU not found</b><br><small class="muted">Put the PixelU folder next to ${exeFile("RetroPixels")} (or keep it in Downloads), or click "Change PixelU…" to pick ${exeFile("PixelU")}</small>`;
     const f = st.folders || [];
     const el = document.getElementById("wiiuFolders");
     el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
