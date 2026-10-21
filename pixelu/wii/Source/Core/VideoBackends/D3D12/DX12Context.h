@@ -1,10 +1,11 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/HRWrap.h"
@@ -18,7 +19,7 @@ struct IDXGIFactory;
 
 namespace DX12
 {
-// Vertex/Pixel shader root parameters
+// Root parameter slots of the GX and utility root signatures.
 enum ROOT_PARAMETER
 {
   ROOT_PARAMETER_PS_CBV,
@@ -32,10 +33,10 @@ enum ROOT_PARAMETER
   ROOT_PARAMETER_BASE_VERTEX_CONSTANT,
   ROOT_PARAMETER_PS_CUS_CBV,
   ROOT_PARAMETER_PS_UAV_OR_CBV2,
-  ROOT_PARAMETER_PS_CBV2,  // ROOT_PARAMETER_PS_UAV_OR_CBV2 if bbox is not enabled
+  ROOT_PARAMETER_PS_CBV2,  // takes ROOT_PARAMETER_PS_UAV_OR_CBV2's slot without bounding box
   NUM_ROOT_PARAMETERS
 };
-// Compute shader root parameters
+// Root parameter slots of the compute root signature.
 enum CS_ROOT_PARAMETERS
 {
   CS_ROOT_PARAMETER_CBV,
@@ -45,25 +46,29 @@ enum CS_ROOT_PARAMETERS
   NUM_CS_ROOT_PARAMETERS,
 };
 
+// The D3D12 device and everything shared by the backend: the queue and its
+// fence, a ring of command lists with their per-list descriptor heaps and
+// deferred releases, the descriptor heaps, the root signatures and the
+// texture upload buffer.
 class DXContext
 {
 public:
   ~DXContext();
 
-  // Returns a list of AA modes.
+  // Sample counts the EFB colour format supports (with a throwaway device
+  // when the backend is not running).
   static std::vector<u32> GetAAModes(u32 adapter_index);
 
-  // Creates new device and context.
+  // Loads the runtime and creates the factory, device, queue and fence.
   static bool Create(u32 adapter_index, bool enable_debug_layer);
 
-  // Destroys active context.
   static void Destroy();
 
   IDXGIFactory* GetDXGIFactory() const { return m_dxgi_factory.Get(); }
   ID3D12Device* GetDevice() const { return m_device.Get(); }
   ID3D12CommandQueue* GetCommandQueue() const { return m_command_queue.Get(); }
 
-  // Returns the current command list, commands can be recorded directly.
+  // The command list being recorded.
   ID3D12GraphicsCommandList* GetCommandList() const
   {
     return m_command_lists[m_current_command_list].command_list.Get();
@@ -77,11 +82,11 @@ public:
     return &m_command_lists[m_current_command_list].sampler_allocator;
   }
 
-  // Descriptor manager access.
   DescriptorHeapManager& GetDescriptorHeapManager() { return m_descriptor_heap_manager; }
   DescriptorHeapManager& GetRTVHeapManager() { return m_rtv_heap_manager; }
   DescriptorHeapManager& GetDSVHeapManager() { return m_dsv_heap_manager; }
   SamplerHeapManager& GetSamplerHeapManager() { return m_sampler_heap_manager; }
+  // The shader-visible heaps of the current list: views, then samplers.
   ID3D12DescriptorHeap* const* GetGPUDescriptorHeaps() const
   {
     return m_gpu_descriptor_heaps.data();
@@ -89,52 +94,48 @@ public:
   u32 GetGPUDescriptorHeapCount() const { return static_cast<u32>(m_gpu_descriptor_heaps.size()); }
   const DescriptorHandle& GetNullSRVDescriptor() const { return m_null_srv_descriptor; }
 
-  // Root signature access.
   ID3D12RootSignature* GetGXRootSignature() const { return m_gx_root_signature.Get(); }
   ID3D12RootSignature* GetUtilityRootSignature() const { return m_utility_root_signature.Get(); }
   ID3D12RootSignature* GetComputeRootSignature() const { return m_compute_root_signature.Get(); }
 
-  // Fence value for current command list.
+  // Fence value the current command list will signal.
   u64 GetCurrentFenceValue() const { return m_current_fence_value; }
 
-  // Last "completed" fence.
+  // Highest fence value known to have completed.
   u64 GetCompletedFenceValue() const { return m_completed_fence_value; }
 
-  // Texture streaming buffer for uploads.
   StreamBuffer& GetTextureUploadBuffer() { return m_texture_upload_buffer; }
 
-  // Feature level to use when compiling shaders.
   D3D_FEATURE_LEVEL GetFeatureLevel() const { return m_feature_level; }
 
-  // Test for support for the specified texture format.
+  // Whether the format can be a sampled 2D and cube texture.
   bool SupportsTextureFormat(DXGI_FORMAT format);
 
-  // Creates command lists, global buffers and descriptor heaps.
+  // Descriptor heaps, root signatures, upload buffer and command lists.
   bool CreateGlobalResources();
 
-  // Executes the current command list.
+  // Submits the current command list and starts the next one.
   void ExecuteCommandList(bool wait_for_completion);
 
-  // Waits for a specific fence.
   void WaitForFence(u64 fence);
 
-  // Defers destruction of a D3D resource (associates it with the current list).
+  // Keeps a reference until the current command list has completed.
   void DeferResourceDestruction(ID3D12Resource* resource);
 
-  // Defers destruction of a descriptor handle (associates it with the current list).
+  // Frees the descriptor once the current command list has completed.
   void DeferDescriptorDestruction(DescriptorHeapManager& manager, u32 index);
 
-  // Clears all samplers from the per-frame allocators.
   void ResetSamplerAllocators();
 
-  // Re-creates the root signature. Call when the host config changes (e.g. bbox/per-pixel shading).
+  // Rebuilds the GX root signature after a host-config change (bounding box,
+  // per-pixel lighting, line/point expansion).
   void RecreateGXRootSignature();
 
 private:
-  // Number of command lists. One is being built while the other(s) are executed.
+  // Lists in flight: one recording while the others execute.
   static const u32 NUM_COMMAND_LISTS = 3;
 
-  // Textures that don't fit into this buffer will be uploaded with a staging buffer.
+  // Larger texture uploads go through their own staging buffer.
   static const u32 TEXTURE_UPLOAD_BUFFER_SIZE = 32 * 1024 * 1024;
 
   struct CommandListResources
@@ -164,6 +165,7 @@ private:
   void MoveToNextCommandList();
   void DestroyPendingResources(CommandListResources& cmdlist);
 
+  // Member order is relied on for the release order at shutdown.
   ComPtr<IDXGIFactory> m_dxgi_factory;
   ComPtr<ID3D12Debug> m_debug_interface;
   ComPtr<ID3D12Device> m_device;
@@ -194,9 +196,8 @@ private:
 
 extern std::unique_ptr<DXContext> g_dx_context;
 
-// Wrapper for HRESULT to be used with fmt.  Note that we can't create a fmt::formatter directly
-// for HRESULT as HRESULT is simply a typedef on long and not a distinct type.
-// Unlike the version in Common, this variant also knows to call GetDeviceRemovedReason if needed.
+// fmt wrapper for an HRESULT from D3D12 (HRESULT is a plain typedef and cannot
+// have its own formatter). A removed device's removal reason is appended.
 struct DX12HRWrap
 {
   constexpr explicit DX12HRWrap(HRESULT hr) : m_hr(hr) {}
@@ -209,19 +210,17 @@ template <>
 struct fmt::formatter<DX12::DX12HRWrap>
 {
   constexpr auto parse(fmt::format_parse_context& ctx) { return ctx.begin(); }
+
   template <typename FormatContext>
-  auto format(const DX12::DX12HRWrap& hr, FormatContext& ctx) const
+  auto format(const DX12::DX12HRWrap& wrapped, FormatContext& ctx) const
   {
-    if (hr.m_hr == DXGI_ERROR_DEVICE_REMOVED && DX12::g_dx_context != nullptr &&
-        DX12::g_dx_context->GetDevice() != nullptr)
-    {
-      return fmt::format_to(
-          ctx.out(), "{}\nDevice removal reason: {}", Common::HRWrap(hr.m_hr),
-          Common::HRWrap(DX12::g_dx_context->GetDevice()->GetDeviceRemovedReason()));
-    }
-    else
-    {
-      return fmt::format_to(ctx.out(), "{}", Common::HRWrap(hr.m_hr));
-    }
+    ID3D12Device* const device =
+        DX12::g_dx_context != nullptr ? DX12::g_dx_context->GetDevice() : nullptr;
+    if (wrapped.m_hr != DXGI_ERROR_DEVICE_REMOVED || device == nullptr)
+      return fmt::format_to(ctx.out(), "{}", Common::HRWrap(wrapped.m_hr));
+
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    return fmt::format_to(ctx.out(), "{}\nDevice removal reason: {}", Common::HRWrap(wrapped.m_hr),
+                          Common::HRWrap(reason));
   }
 };

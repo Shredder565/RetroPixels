@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 #pragma once
 
 #include <d3d12.h>
@@ -12,13 +11,17 @@ namespace DX12
 {
 using Microsoft::WRL::ComPtr;
 
+// Records a whole-resource state transition.
 static void ResourceBarrier(ID3D12GraphicsCommandList* cmdlist, ID3D12Resource* resource,
                             D3D12_RESOURCE_STATES from_state, D3D12_RESOURCE_STATES to_state)
 {
-  const D3D12_RESOURCE_BARRIER barrier = {
-      D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-      D3D12_RESOURCE_BARRIER_FLAG_NONE,
-      {{resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, from_state, to_state}}};
-  cmdlist->ResourceBarrier(1, &barrier);
+  D3D12_RESOURCE_BARRIER transition;
+  transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  transition.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  transition.Transition.pResource = resource;
+  transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  transition.Transition.StateBefore = from_state;
+  transition.Transition.StateAfter = to_state;
+  cmdlist->ResourceBarrier(1, &transition);
 }
 }  // namespace DX12

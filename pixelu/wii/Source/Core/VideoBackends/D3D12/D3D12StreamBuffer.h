@@ -1,9 +1,9 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <deque>
+#include <optional>
 #include <utility>
 
 #include "Common/CommonTypes.h"
@@ -11,6 +11,9 @@
 
 namespace DX12
 {
+// A persistently mapped upload-heap buffer used as a ring. The CPU writes at
+// the current offset; each submitted command list's fence records how far the
+// GPU will have read once it completes.
 class StreamBuffer
 {
 public:
@@ -29,15 +32,27 @@ public:
   }
   u32 GetSize() const { return m_size; }
   u32 GetCurrentOffset() const { return m_current_offset; }
+
+  // Makes room for num_bytes at the given alignment at the current offset.
+  // False means the space is held by the command list still being recorded:
+  // the caller has to submit it and try again.
   bool ReserveMemory(u32 num_bytes, u32 alignment);
+  // Moves past the bytes actually written (at most the reserved amount).
   void CommitMemory(u32 final_num_bytes);
 
 private:
+  // Records the current offset against the current command list's fence.
   void UpdateCurrentFencePosition();
+  // Drops fences the GPU has passed, moving the GPU position forward.
   void UpdateGPUPosition();
 
-  // Waits for as many fences as needed to allocate num_bytes bytes from the buffer.
+  // Waits on the oldest fence whose completion frees num_bytes; false when no
+  // submitted fence would.
   bool WaitForClearSpace(u32 num_bytes);
+
+  // Where to continue writing, and the GPU position to assume, if the GPU
+  // were at gpu_position.
+  std::optional<std::pair<u32, u32>> SpaceIfGPUAt(u32 gpu_position, u32 num_bytes) const;
 
   u32 m_size = 0;
   u32 m_current_offset = 0;
@@ -48,7 +63,7 @@ private:
   D3D12_GPU_VIRTUAL_ADDRESS m_gpu_pointer = {};
   u8* m_host_pointer = nullptr;
 
-  // List of fences and the corresponding positions in the buffer
+  // (fence value, buffer offset reached by the commands before that fence)
   std::deque<std::pair<u64, u32>> m_tracked_fences;
 };
 

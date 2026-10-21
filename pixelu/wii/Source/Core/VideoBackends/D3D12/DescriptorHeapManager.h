@@ -1,17 +1,18 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <bitset>
 #include <unordered_map>
+#include <vector>
 
 #include "VideoBackends/D3D12/Common.h"
 #include "VideoCommon/RenderState.h"
 
 namespace DX12
 {
-// This class provides an abstraction for D3D12 descriptor heaps.
+// One descriptor: its CPU handle, its GPU handle (shader-visible heaps only)
+// and its slot in the heap. A zero CPU handle means "none".
 struct DescriptorHandle final
 {
   D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
@@ -21,6 +22,8 @@ struct DescriptorHandle final
   operator bool() const { return cpu_handle.ptr != 0; }
 };
 
+// A CPU-only descriptor heap with individually allocated and freed slots
+// (views of long-lived resources).
 class DescriptorHeapManager final
 {
 public:
@@ -32,6 +35,7 @@ public:
 
   bool Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 num_descriptors);
 
+  // Takes the lowest free slot.
   bool Allocate(DescriptorHandle* handle);
   void Free(const DescriptorHandle& handle);
   void Free(u32 index);
@@ -43,11 +47,14 @@ private:
 
   D3D12_CPU_DESCRIPTOR_HANDLE m_heap_base_cpu = {};
 
+  // Free-slot bits, set when free, in blocks of 1024 slots.
   static constexpr u32 BITSET_SIZE = 1024;
   using BitSetType = std::bitset<BITSET_SIZE>;
   std::vector<BitSetType> m_free_slots = {};
 };
 
+// CPU-only sampler descriptors, one per distinct sampler state, filled up
+// linearly and cleared when full.
 class SamplerHeapManager final
 {
 public:

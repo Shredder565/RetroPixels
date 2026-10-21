@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@
 
 namespace DX12
 {
+// A shader-visible descriptor heap handed out front to back and emptied as a
+// whole once the command list that used it has finished.
 class DescriptorAllocator
 {
 public:
@@ -21,6 +22,7 @@ public:
 
   bool Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 num_descriptors);
 
+  // Contiguous run of num_handles descriptors; false when the heap is full.
   bool Allocate(u32 num_handles, DescriptorHandle* out_base_handle);
   void Reset();
 
@@ -34,6 +36,7 @@ protected:
   D3D12_GPU_DESCRIPTOR_HANDLE m_heap_base_gpu = {};
 };
 
+// The sampler states of all pixel-stage slots, compared as raw bytes.
 struct SamplerStateSet final
 {
   SamplerState states[VideoCommon::MAX_PIXEL_SHADER_SAMPLERS];
@@ -43,6 +46,8 @@ bool operator==(const SamplerStateSet& lhs, const SamplerStateSet& rhs);
 bool operator!=(const SamplerStateSet& lhs, const SamplerStateSet& rhs);
 bool operator<(const SamplerStateSet& lhs, const SamplerStateSet& rhs);
 
+// Shader-visible sampler heap holding whole sets of pixel-stage samplers;
+// a set already copied in is reused.
 class SamplerAllocator final : public DescriptorAllocator
 {
 public:

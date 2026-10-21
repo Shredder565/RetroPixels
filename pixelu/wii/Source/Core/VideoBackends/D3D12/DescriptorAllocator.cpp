@@ -1,7 +1,9 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D12/DescriptorAllocator.h"
+
+#include <array>
+#include <cstring>
 
 #include "Common/Assert.h"
 
@@ -15,12 +17,15 @@ DescriptorAllocator::~DescriptorAllocator() = default;
 bool DescriptorAllocator::Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type,
                                  u32 num_descriptors)
 {
-  const D3D12_DESCRIPTOR_HEAP_DESC desc = {type, static_cast<UINT>(num_descriptors),
-                                           D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
-  HRESULT hr = device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_descriptor_heap));
-  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Creating descriptor heap for linear allocator failed: {}",
-             DX12HRWrap(hr));
-  if (FAILED(hr))
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  desc.Type = type;
+  desc.NumDescriptors = num_descriptors;
+  desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+  const HRESULT result = device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_descriptor_heap));
+  ASSERT_MSG(VIDEO, SUCCEEDED(result), "Creating descriptor heap for linear allocator failed: {}",
+             DX12HRWrap(result));
+  if (FAILED(result))
     return false;
 
   m_num_descriptors = num_descriptors;
@@ -32,14 +37,13 @@ bool DescriptorAllocator::Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYP
 
 bool DescriptorAllocator::Allocate(u32 num_handles, DescriptorHandle* out_base_handle)
 {
-  if ((m_current_offset + num_handles) > m_num_descriptors)
+  if (m_current_offset + num_handles > m_num_descriptors)
     return false;
 
+  const u32 byte_offset = m_current_offset * m_descriptor_increment_size;
   out_base_handle->index = m_current_offset;
-  out_base_handle->cpu_handle.ptr =
-      m_heap_base_cpu.ptr + m_current_offset * m_descriptor_increment_size;
-  out_base_handle->gpu_handle.ptr =
-      m_heap_base_gpu.ptr + m_current_offset * m_descriptor_increment_size;
+  out_base_handle->cpu_handle.ptr = m_heap_base_cpu.ptr + byte_offset;
+  out_base_handle->gpu_handle.ptr = m_heap_base_gpu.ptr + byte_offset;
   m_current_offset += num_handles;
   return true;
 }
@@ -49,20 +53,28 @@ void DescriptorAllocator::Reset()
   m_current_offset = 0;
 }
 
+namespace
+{
+// SamplerState has no padding, so the sets order and compare as raw bytes.
+int CompareSets(const SamplerStateSet& lhs, const SamplerStateSet& rhs)
+{
+  return std::memcmp(lhs.states, rhs.states, sizeof(lhs.states));
+}
+}  // namespace
+
 bool operator==(const SamplerStateSet& lhs, const SamplerStateSet& rhs)
 {
-  // There shouldn't be any padding here, so this will be safe.
-  return std::memcmp(lhs.states, rhs.states, sizeof(lhs.states)) == 0;
+  return CompareSets(lhs, rhs) == 0;
 }
 
 bool operator!=(const SamplerStateSet& lhs, const SamplerStateSet& rhs)
 {
-  return std::memcmp(lhs.states, rhs.states, sizeof(lhs.states)) != 0;
+  return CompareSets(lhs, rhs) != 0;
 }
 
 bool operator<(const SamplerStateSet& lhs, const SamplerStateSet& rhs)
 {
-  return std::memcmp(lhs.states, rhs.states, sizeof(lhs.states)) < 0;
+  return CompareSets(lhs, rhs) < 0;
 }
 
 SamplerAllocator::SamplerAllocator() = default;
@@ -77,42 +89,41 @@ bool SamplerAllocator::Create(ID3D12Device* device)
 bool SamplerAllocator::GetGroupHandle(const SamplerStateSet& sss,
                                       D3D12_GPU_DESCRIPTOR_HANDLE* handle)
 {
-  auto it = m_sampler_map.find(sss);
-  if (it != m_sampler_map.end())
+  if (const auto found = m_sampler_map.find(sss); found != m_sampler_map.end())
   {
-    *handle = it->second;
+    *handle = found->second;
     return true;
   }
 
-  // Allocate a group of descriptors.
-  DescriptorHandle allocation;
-  if (!Allocate(VideoCommon::MAX_PIXEL_SHADER_SAMPLERS, &allocation))
+  constexpr u32 SLOTS = VideoCommon::MAX_PIXEL_SHADER_SAMPLERS;
+  DescriptorHandle group;
+  if (!Allocate(SLOTS, &group))
     return false;
 
-  // Lookup sampler handles from global cache.
-  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> source_handles;
-  for (u32 i = 0; i < VideoCommon::MAX_PIXEL_SHADER_SAMPLERS; i++)
+  // Each state's CPU descriptor comes from the shared sampler heap.
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, SLOTS> sources;
+  SamplerHeapManager& cache = g_dx_context->GetSamplerHeapManager();
+  for (u32 slot = 0; slot < SLOTS; ++slot)
   {
-    if (!g_dx_context->GetSamplerHeapManager().Lookup(sss.states[i], &source_handles[i]))
+    if (!cache.Lookup(sss.states[slot], &sources[slot]))
       return false;
   }
 
-  // Copy samplers from the sampler heap.
-  static constexpr std::array<UINT, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> source_sizes = {
-      {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}};
+  // One destination range of all slots, gathered from single-descriptor sources.
+  static constexpr std::array<UINT, SLOTS> ONE_EACH = {1, 1, 1, 1, 1, 1, 1, 1,
+                                                       1, 1, 1, 1, 1, 1, 1, 1};
   g_dx_context->GetDevice()->CopyDescriptors(
-      1, &allocation.cpu_handle, &VideoCommon::MAX_PIXEL_SHADER_SAMPLERS,
-      VideoCommon::MAX_PIXEL_SHADER_SAMPLERS, source_handles.data(), source_sizes.data(),
-      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-  *handle = allocation.gpu_handle;
-  m_sampler_map.emplace(sss, allocation.gpu_handle);
+      1, &group.cpu_handle, &VideoCommon::MAX_PIXEL_SHADER_SAMPLERS, SLOTS, sources.data(),
+      ONE_EACH.data(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  *handle = group.gpu_handle;
+  m_sampler_map.emplace(sss, group.gpu_handle);
   return true;
 }
 
 bool SamplerAllocator::ShouldReset() const
 {
-  // We only reset the sampler heap if more than half of the descriptors are used.
-  // This saves descriptor copying when there isn't a large number of sampler configs per frame.
+  // Starting over costs copying every set again, so the heap is only reset
+  // once half of it would be in use.
   return m_sampler_map.size() >= (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE / 2);
 }
 
