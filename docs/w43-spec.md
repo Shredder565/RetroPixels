@@ -736,4 +736,1294 @@ mode, after loading it: close all open sockets (as in Shutdown) and, for
 each set bit `i` in 1..63, slot `i` = `socket(AF_INET, SOCK_STREAM, 0)` (no
 platform options). Files, dimm_disc and the event are not saved.
 
+## 3. SI baseboard (`SI/SI_DeviceAMBaseboard.cpp/.h`)
+
+### 3.1 Role and interface
+
+`SerialInterface::CSIDevice_AMBaseboard final : public ISIDevice` is the
+Triforce baseboard on an SI port (device type `SIDEVICE_AM_BASEBOARD`). It
+owns the cabinet I/O: an `IOPorts` hub with game-specific adapters, a JVS-IO
+board, and up to two serial devices (ports A and B). Public interface (may be
+kept):
+
+```
+CSIDevice_AMBaseboard(Core::System& system, SIDevices device, int device_number);
+~CSIDevice_AMBaseboard() override;
+int RunBuffer(u8* buffer, int request_length) override;
+DataResponse GetData(u32& hi, u32& low) override;   // always DataResponse::NoData, no side effects
+void SendCommand(u32 command, u8 poll) override;     // only logs (section 14)
+void DoState(PointerWrap&) override;
+```
+
+Members other files rely on: none. The header forward-declares
+`Triforce::JVSIOBoard` and `Triforce::SerialDevice` and includes
+`MagCard/MagneticCardReader.h`, `SI/SI.h`, `SI/SI_Device.h` and
+`Triforce/IOPorts.h`. State:
+
+| State | Type | Initial |
+|---|---|---|
+| response buffers | 2 x 128 bytes (`SerialInterfaceManager::BUFFER_SIZE`) | zero |
+| current response buffer index | u8 | 0 |
+| I/O ports | `Triforce::IOPorts` | see 4 |
+| JVS board | owned `Triforce::JVSIOBoard` | per game |
+| magnetic card settings | `MagCard::MagneticCardReader::Settings` | see below |
+| serial device A, B | owned `Triforce::SerialDevice`, may be null | per game |
+
+### 3.2 Construction
+
+1. Card settings: `card_path` = Triforce user folder, `card_name` =
+   `tricard_<GameID>.bin`; the two flags keep their defaults
+   (`insert_card_when_possible = true`, `report_dispenser_empty = false`).
+2. Add a `Common_IOAdapter(system)` to the I/O ports (always first).
+3. By `AMMediaboard::GetGameType()`:
+
+| Game type | JVS board | Serial A | Serial B | Adapters added after Common, in order |
+|---|---|---|---|---|
+| FZeroAX | `Sega_837_13844_JVSIOBoard` | `FZeroAXSteeringWheel` | `MagCard::C1231BR(&settings)` | `FZeroAXCommon(wheel A)`, `FZeroAXDeluxe` |
+| FZeroAXMonster | (fallback) | `FZeroAXSteeringWheel` | none | `FZeroAXCommon(wheel A)`, `FZeroAXMonster` |
+| MarioKartGP, MarioKartGP2 | `Namco_FCA_JVSIOBoard` | `MarioKartGPSteeringWheel` | `MagCard::C1231LR(&settings)` | `MarioKartGPCommon(wheel A)` |
+| VirtuaStriker3 | (fallback) | none | none | `VirtuaStriker3` |
+| VirtuaStriker4 | (fallback) | `ICCardReader(0)` | `ICCardReader(1)` | `VirtuaStriker4Common(A, B)` |
+| VirtuaStriker4_2006 | (fallback) | `ICCardReader(0)` | `ICCardReader(1)` | `VirtuaStriker4Common(A, B)`, `VirtuaStriker4_2006(A, B)` |
+| GekitouProYakyuu | (fallback) | `ICCardReader(0)` | `ICCardReader(1)` | `GekitouProYakyuu(A, B)` |
+| KeyOfAvalon | (fallback) | `DeckReader` | `Touchscreen` | `KeyOfAvalon(deck reader's internal IC card reader)` |
+| anything else | (fallback) | none | none | none |
+
+"Fallback" is `Sega_837_13551_JVSIOBoard`. Every JVS board is constructed
+with a pointer to the I/O ports.
+
+### 3.3 RunBuffer(buffer, request_length)
+
+`buffer` always points at 128 bytes. Steps:
+
+1. Call the base `ISIDevice::RunBuffer` (debug only; no effect) and then
+   `IOPorts::Update()` (section 4), whatever the command.
+2. Dispatch on `buffer[0]`:
+
+**`0x00` (CMD_STATUS):** write the status response for
+`SI_AM_BASEBOARD | 0x100` = `0x10110900` with `ISIDevice::CreateStatusResponse`
+(bytes `10 11 09` into `buffer[0..2]`) and return 3.
+
+**`0x70` (CMD_AM_BASEBOARD):** `len = buffer[1]`. If `2 + len >
+request_length`, log the "Bad command_length" error and return -1 (no other
+change). Otherwise parse sub-commands from `buffer[2 .. 2+len)` into the
+response buffer selected by the current index (the "out" buffer). Output
+starts at offset 2; the usable size is 127 (byte 127 holds the checksum).
+
+A helper validates each step as `(n_in, n_out, name)`: it fails if fewer
+than `n_in` input bytes remain, else if `offset + n_out > 127`. On failure
+it logs "data_in overflow in {name}" or "data_out overflow in {name}",
+then the "Overflow details" error (it holds host pointers; see section 14),
+and sets the input position to the end, which ends the loop. The handler
+then writes nothing.
+
+Sub-commands (the command byte has already been consumed; "in" counts the
+bytes after it):
+
+| Cmd | Validate (in, out) | Consumes | Output appended |
+|---|---|---|---|
+| `10` status switches | (1, 4) | 1 | `10 02` + the 2 status-switch bytes from the I/O ports |
+| `11` serial number | (1, 18) | 1 | `11 10` + ASCII `AADE-01B98394904` (16 bytes) |
+| `12`, `14` | (2, 2) | 2 | `<cmd> 00` |
+| `15` firmware version | (1, 4) | 1 | `15 02 00 26` |
+| `16` FPGA version | (1, 4) | 1 | `16 02 07 06` |
+| `1F` region | (5, 22) | 5 | `1F 14` + the 20-byte region table (below) |
+| `21` | (4, 0) | 4 | nothing |
+| `22` | (7, 0), then (`in[0]+1`, 0) | `in[0]+1` | nothing |
+| `23`, `24` | (2, 2) | 2 | `<cmd> 00` |
+| `31` serial A | (1, 0), then (`n`, 0) with `n = in[0]` | `1 + n` | nothing; the `n` bytes go to serial A's rx if A exists |
+| `32` serial B | same as `31` for B | `1 + n` | nothing |
+| `40`, `41` JVS | (1, 0), then (`n`, 0) | `1 + n` | see below |
+| `60` | (3, 0), then (`in[0]+1`, 0) | `in[0]+1` | nothing |
+| other | (5, 0) | 0 | nothing (logs the unknown command and the next 5 bytes) |
+
+Notes:
+
+- `22` and `60` validate the larger count first, then consume only
+  `in[0]+1` bytes (so the count byte is included in what is skipped).
+- Unknown commands consume only the command byte when 5 or more bytes
+  follow, so parsing resumes at the next byte. With fewer than 5 bytes the
+  helper fails ("data_in overflow in Unknown_<decimal cmd>") and the loop
+  ends.
+- JVS (`40`/`41`, both go to the same board): append the `n` bytes to the
+  JVS board's rx, then call its `Update()`. If its tx count `t` is 0,
+  output nothing. Otherwise validate (0, `t + 2`) with name `SerialDevice`;
+  on success append `<cmd> <u8 t>` and take all `t` tx bytes. On failure the
+  bytes stay queued for a later request. JVS output is not capped at 0x1F.
+
+Region table (20 bytes): `00 00 30 00 02 FD 00 00` then twelve `FF`.
+
+After the loop, for serial A and then serial B (each only if it exists):
+call its `Update()`; `t = min(tx count, 0x1F)`; if `t > 0`, validate (0,
+`t + 2`, `SerialDevice`) and on success append `31` (A) or `32` (B), `u8 t`
+and the first `t` tx bytes. This runs even if the loop ended on a validation
+failure. (A validation failure here also logs the overflow errors.)
+
+Finish the out buffer: `[0] = 01`, `[1] = offset - 2`, bytes `offset..126`
+= 0, `[127] = ~(sum of bytes 0 .. offset-1, mod 256)`.
+
+Then advance the index (0 -> 1 -> 0). If byte 0 of the buffer at the new
+index is nonzero, copy all 128 bytes of it into `buffer` and return 128;
+otherwise return 0. **Quirk:** so each reply is returned one request late
+(the very first 0x70 request returns 0, the second returns the first
+request's reply, and so on). The old comment says games' parsers need this.
+
+**Any other command:** log `Unknown SI command (0x{:08x})` (the command byte
+as a number), `PanicAlertFmt("SI: Unknown command")`, return -1.
+
+### 3.4 DoState
+
+Both response buffers (256 raw bytes, buffer 0 first), the index (1), the
+I/O ports (section 4), the JVS board (5.6), serial A's `DoState` if A
+exists, then serial B's if B exists.
+
+## 4. I/O ports and adapters (`Triforce/IOPorts.cpp/.h`)
+
+### 4.1 Interface (may be kept)
+
+Namespace `Triforce`. `IOPorts` holds the cabinet's input and output lines:
+
+| Member | Type | Initial | Notes |
+|---|---|---|---|
+| status switches | `std::array<u8, 2>` | `FF FF` | baseboard DIP/status bits, active low |
+| system inputs | u8 | 0 | first byte of JVS switch data |
+| switch inputs | 2 players x 2 bytes | 0 | |
+| analog inputs | 8 x u16 | 0 | |
+| generic outputs | 4 bytes | 0 | lamps, locks; written by JVS |
+| coin inputs | 2 x bool | false | |
+| adapters | vector of owned `IOAdapter` | empty | updated in insertion order |
+
+Public: `Update()`; `GetStatusSwitches()` (span of 2, const and non-const);
+`GetSystemInputs()` (pointer to the byte); `GetSwitchInputs(player)` (span of
+2 bytes for player 0 or 1; `ASSERT(player < 2)`); `GetAnalogInputs()` (span
+of 8); `GetGenericOutputs()` (const span of 4); `SetGenericOutputs(span)`;
+`ResetGenericOutputs()`; `GetCoinInputs()` (span of 2 bool);
+`AddIOAdapter(unique_ptr)`; `DoState`. Constants: `PLAYER_COUNT = 2`,
+`COIN_SLOT_COUNT = 2`, `NEUTRAL_ANALOG_VALUE = 0x8000`.
+
+`IOAdapter` (non-copyable, non-movable) has public virtual `Update()` and
+`DoState(PointerWrap&)`, a protected `GetIOPorts()`, a protected virtual
+`HandleGenericOutputsChanged(span bits_set, span bits_cleared)`, and a
+private `SetIOPorts` that `IOPorts` (a friend) calls from `AddIOAdapter`. The
+base versions do nothing. Adapter class names and constructors (may be
+kept): `Common_IOAdapter(Core::System&)`, `VirtuaStriker3_IOAdapter()`,
+`VirtuaStriker4Common_IOAdapter(ICCardReader* a, ICCardReader* b)`,
+`VirtuaStriker4_2006_IOAdapter(a, b)`, `GekitouProYakyuu_IOAdapter(a, b)`,
+`KeyOfAvalon_IOAdapter(ICCardReader*)`; the F-Zero and Mario Kart ones are in
+section 6.
+
+### 4.2 Behaviour
+
+`Update()`: system inputs = 0, switch inputs = 0, all 8 analog inputs =
+`0x8000`, coin inputs = false; then each adapter's `Update()` in order. The
+status switches and generic outputs are not reset.
+
+`SetGenericOutputs(bytes)`:
+
+1. If `bytes.size() > 4`, warn "SetGenericOutputs: Unexpected byte count".
+2. `n = min(size, 4)`. If the first `n` new bytes equal the first `n`
+   stored bytes, return (no handlers called).
+3. For `i < n`: `set[i] = ~old[i] & new[i]`, `cleared[i] = old[i] & ~new[i]`,
+   store `new[i]`. `set`/`cleared` are 4-byte arrays; entries `>= n` are 0.
+   Bytes `>= n` of the stored outputs keep their value.
+4. Call every adapter's `HandleGenericOutputsChanged(set, cleared)` in order.
+
+`ResetGenericOutputs()` = `SetGenericOutputs` with 4 zero bytes.
+
+`DoState`: status switches (2), generic outputs (4), then every adapter's
+`DoState` in order. Inputs are not saved (they are rebuilt by `Update`).
+
+### 4.3 Adapters
+
+All pad reads are `Pad::GetStatus(i)` (`GCPadStatus`; button bits from
+`InputCommon/GCPadStatus.h`). "p0[0] |= 0x80" means switch byte 0 of player
+0 gets bit 0x80.
+
+**Common** (every game): for `i` in 0, 1, only if
+`system.GetSerialInterface().GetDeviceType(i) == SIDEVICE_AM_BASEBOARD`:
+read pad `i`;
+- `switches & SWITCH_TEST`: if `AMMediaboard::GetTestMenu()`, system inputs
+  `|= 0x80`; else
+  `OSD::AddMessage("Test menu is disabled due to missing SegaBoot.",
+  OSD::Duration::NORMAL, OSD::Color::RED)` (every update while held);
+- `switches & SWITCH_SERVICE`: p`i`[0] `|= 0x40`;
+- `switches & SWITCH_COIN`: coin `i` = true.
+
+**VirtuaStriker3**, for players 0 and 1 from pads 0 and 1: Start -> [0]
+0x80, Up 0x20, Down 0x10, Left 0x08, Right 0x04, X 0x02, B 0x01; A -> [1]
+0x80.
+
+**VirtuaStriker4Common** (lock bits in generic output byte 0: A = 0x40,
+B = 0x10):
+1. If A is locked: if reader B is ready to insert, insert into B. Else: if
+   B has a card and B is not locked, eject B.
+2. If reader A is ready to insert, insert into A.
+3. For players `i` = 0, 1 (reader `i`, pad `i`): set or clear p`i`[0] bit
+   0x10 to "reader `i` has a card", and p`i`[1] bit 0x20 to "reader `i` is
+   ejecting"; then Start -> [0] 0x80, Left 0x20, Up 0x08, Right 0x04,
+   A 0x02, X 0x01; B -> [1] 0x80, Y 0x40; analog `2i` =
+   `ExpandValue<u16>(0xFF - stickY, 8)`, analog `2i+1` =
+   `ExpandValue<u16>(stickX, 8)`.
+
+Its output handler: with `changed = set[0] | cleared[0]`, if `changed & 0x40`
+log info "JVS-IO: Slot 1: Locked" when `set[0] & 0x40` else "...Unlocked";
+same for 0x10 and "Slot 2".
+
+**VirtuaStriker4_2006** (no `Update`): output handler ejects reader A if
+`set[0] & 0x80`, reader B if `set[0] & 0x20`.
+
+**GekitouProYakyuu**, for `i` = 0, 1: insert into reader `i` if it is ready;
+set or clear p`i`[1] bit 0x40 to "reader `i` has a card"; Start -> [0]
+0x80, Up 0x20, Down 0x10, Left 0x08, Right 0x04, A 0x02, B 0x01; trigger-L
+button bit (`PAD_TRIGGER_L`) -> [1] 0x80. Output handler: eject A if
+`cleared[0] & 0x40`, eject B if `cleared[0] & 0x10`.
+
+**KeyOfAvalon** (one reader): if the reader's insert-check count is `>= 10`,
+eject; then if ready, insert. Pad 0: Start -> p0[0] 0x80, B 0x08, A 0x04.
+
+"Ready to insert", "has a card", "ejecting" and the insert-check count are
+defined in section 7.
+
+## 5. JVS-IO boards (`Triforce/JVSIO.cpp/.h`)
+
+### 5.1 Interface (may be kept)
+
+`class JVSIOBoard : public SerialDevice` with `explicit
+JVSIOBoard(IOPorts*)`, `Update() override`, `DoState() override`, a protected
+`using HandlerResponse = std::expected<JVSIOReportCode, JVSIOStatusCode>`,
+a protected `struct FrameContext { JVSIORequestReader& request;
+JVSIOResponseWriter& response; }` and a protected virtual
+`HandlerResponse HandleCommand(JVSIOCommand, FrameContext)`. The enums
+`JVSIOStatusCode`, `JVSIOReportCode`, `JVSIOCommand` (all `u8`) and the
+classes `JVSIORequestReader`, `JVSIOResponseWriter` are forward-declared in
+the header and defined in the `.cpp`. Final subclasses that override only
+`HandleCommand` and inherit the constructor: `Namco_FCA_JVSIOBoard`,
+`Sega_837_13551_JVSIOBoard`, `Sega_837_13844_JVSIOBoard`.
+
+State: client address (u8, 0 = unassigned), last response (byte vector,
+without the sync byte), coin counts (2 x u16), previous coin input states
+(2 x bool), I/O ports pointer.
+
+Codes: status Okay 1, UnknownCommand 2, ChecksumError 3, ResponseOverflow 4.
+Report Okay 1, ParameterSizeError 2, ParameterDataError 3, Busy 4.
+
+Commands (values; only those with a handler below do anything): 10
+IOIdentify, 11 CommandRevision, 12 JVSRevision, 13 CommVersion, 14
+FeatureCheck, 15 MainID, 20 SwitchInput, 21 CoinInput, 22 AnalogInput, 23
+RotaryInput, 24 KeycodeInput, 25 ScreenPositionInput, 26 MiscSwitchInput, 2E
+RemainingPayout, 2F DataRetransmit, 30 CoinCounterDec, 31 PayoutCounterInc,
+32 GenericOutput, 33 AnalogOutput, 34 CharacterOutput, 35 CoinCounterInc, 36
+PayoutCounterDec, 37 GenericOutputByte, 38 GenericOutputBit, 70
+NamcoCommand, F0 Reset, F1 SetAddress, F2 CommMethodChange.
+
+### 5.2 Framing
+
+Sync `E0`, escape mark `D0`, broadcast address `FF`, host address `00`. On
+the wire every frame body byte equal to `E0` or `D0` is sent as `D0`
+followed by the byte minus 1; on receive, `D0 x` decodes to `x + 1` (any
+`x`).
+
+A request frame decodes to: destination, `N`, then `N` bytes whose last is
+the checksum. The checksum is the 8-bit sum of destination, `N` and the
+first `N - 1` payload bytes.
+
+### 5.3 Update()
+
+1. Coins: for each slot, if the I/O ports' coin input is true and the stored
+   previous state was false, increment that coin count (u16, wraps). Store
+   the input as the new previous state.
+2. Loop while rx is not empty:
+   - First byte not `E0`: log error "Expected JVSIO_SYNC", drop 1 byte,
+     continue.
+   - Decode 2 header bytes after the sync, then `N` more bytes. If the rx
+     ends before either is complete, stop and wait (nothing consumed).
+   - The whole frame (sync + escaped header + escaped payload) is consumed
+     at the end of this step whatever happens below.
+   - `N == 0`: log error "Empty payload"; next frame.
+   - Bad checksum: log error "Bad checksum"; set the last response to the
+     frame `[00, 02, 03]` + checksum (`05`) and send it (`E0 00 02 03 05`);
+     next frame.
+   - The request is the `N - 1` payload bytes. Destination `FF`: broadcast
+     (5.4). Else if it equals the client address: unicast (5.5). Else warn
+     "Unexpected destination node".
+   - If request bytes are left over after processing, warn "Excess request
+     bytes: {count}".
+
+Sending a response = append `E0`, then each body byte escaped as in 5.2.
+
+### 5.4 Broadcast requests
+
+Empty request: nothing. Otherwise only the first command is processed:
+
+- `F0` Reset: no parameter byte -> log error "Reset: ParameterSizeError",
+  done. Else read it; if it is `D9`: notice "Reset", client address = 0,
+  status switch byte 1 `|= 0x01`. In both cases (`D9` or not): reset the
+  generic outputs (4.2, which may call adapter handlers) and clear the last
+  response. No reply.
+- `F1` SetAddress: no parameter -> log error "SetAddress: ParameterSizeError".
+  Else read address `a`: info "SetAddress: {a}", client address = `a`,
+  status switch byte 1 `&= ~0x01`, last response = `[00, 03, 01, 01]` +
+  checksum `05`, send it (`E0 00 03 01 01 05`).
+- Other: error "ProcessBroadcastFrame: UnknownCommand: {:02x}".
+
+### 5.5 Unicast requests
+
+If the request is not empty and its first byte is `2F` (DataRetransmit):
+consume it, info "DataRetransmit", send the stored last response again
+(just `E0` if it is empty), done.
+
+Otherwise build a new last response: start with `[00, cnt, status]`
+(placeholders). Then loop:
+- No request bytes left: end the frame with status Okay; stop.
+- Append a 1-byte report placeholder, read the command byte, call
+  `HandleCommand`.
+- Handler returned an error status: log error "HandleCommand: cmd:{:02x}
+  StatusCode:{}", end the frame with that status (the placeholder report
+  byte stays 0 and is part of the frame); stop.
+- Else write the report into the placeholder. If it is not Okay: log error
+  "HandleCommand: cmd:{:02x} ReportCode:{}", end the frame with status Okay;
+  stop.
+
+Ending a frame: `count = size - 1` (bytes after the destination, plus the
+checksum to come). If `count > 255`, cut the response back to its first 3
+bytes (`00 00 00`), with no checksum and no further change (**Quirk**: the
+overflow status is not written). Else byte 1 = count, byte 2 = status, append
+the 8-bit sum of all bytes so far. Then send the last response.
+
+### 5.6 Command handlers
+
+Base board (`JVSIOBoard::HandleCommand`):
+
+| Cmd | Request params | Data appended | Report |
+|---|---|---|---|
+| `11` | - | `11` | Okay (info "CommandRevision") |
+| `12` | - | `20` | Okay (info "JVSRevision") |
+| `13` | - | `10` | Okay (info "CommVersion") |
+| `15` | NUL-terminated string | - | Okay, consuming string + NUL (info "MainID: {string}"); no NUL in the rest of the request: ParameterDataError, nothing consumed |
+| `20` | `P`, `B` | system inputs byte, then for each player `0..P-1`: the first `min(B, 2)` switch bytes, then zero bytes up to `B` | fewer than 2 params: ParameterSizeError |
+| `21` | `S` | for each slot `i < S`: BE16 of `(cond << 14) \| (count_i & 0x3FFF)`, where `cond` = 0 and `count_i` = coin count for `i < 2`, else `cond` = 2 and count 0 | no param: ParameterSizeError |
+| `22` | `C` | for each channel `< min(C, 8)`: BE16 of the analog input; then BE `80 00` for the rest up to `C` | no param: ParameterSizeError |
+| `30`, `35` | slot, msb, lsb | - | fewer than 3: ParameterSizeError. `adj = (msb << 8 \| lsb)`, negative for `30`. Notice "CoinCounter: slot:{} adjustment:{}". If slot < 2: count = clamp(count + adj, 0, 0x3FFF). Okay. |
+| `32` | `K`, then `K` bytes | - | no `K` or fewer than `K` bytes: ParameterSizeError. Else `SetGenericOutputs` with the `K` bytes, consume them, Okay. |
+| other | - | - | error status UnknownCommand |
+
+`P > 2` in `20` hits the assertion in `GetSwitchInputs` (section 13).
+
+Board-specific (each falls back to the base for other commands):
+
+| Board | `10` IOIdentify reply (bytes, including the final NUL) | `14` FeatureCheck reply |
+|---|---|---|
+| Namco_FCA | `namco ltd.;FCA-1;Ver1.01;JPN,Multipurpose + Rotary Encoder` + `00` | `01 01 10 00`, `02 02 00 00`, `03 07 00 00`, `12 06 00 00`, `13 04 00 00`, `00` |
+| Sega_837_13551 | `SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551 ;Ver1.00;98/10` + `00` | `01 02 0D 00`, `02 02 00 00`, `03 08 00 00`, `12 06 00 00`, `00` |
+| Sega_837_13844 | `SEGA ENTERPRISES,LTD.;837-13844-01 I/O CNTL BD2 ;Ver1.00;99/07` + `00` | `01 02 0C 00`, `02 02 00 00`, `03 08 00 00`, `12 16 00 00`, `00` |
+
+Both report Okay and log info "IOIdentify" / "FeatureCheck". Namco also has
+`70`: no sub-command byte -> ParameterSizeError. Sub-command `18`: needs 4
+more bytes (else ParameterSizeError); info "NAMCO_COMMAND(18): {4 bytes}",
+consume them, append `FF`, Okay. Other sub-commands: error "Unknown
+NAMCO_COMMAND: {:02x}", ParameterDataError.
+
+### 5.7 DoState
+
+`SerialDevice::DoState`, client address (1), last response (vector), coin
+counts (4), previous coin states (2).
+
+## 6. Wheels and touchscreen (`FZeroAX`, `MarioKartGP`, `Touchscreen`)
+
+### 6.1 F-Zero AX (`Triforce/FZeroAX.cpp/.h`)
+
+Interface (may be kept): `FZeroAXSteeringWheel final : SerialDevice` with
+`Update()`, `bool IsInitializing() const`, `s8 GetServoPosition() const`,
+`DoState()`; state init state (u8, 0) and servo position (s8, 0).
+`FZeroAXCommon_IOAdapter(FZeroAXSteeringWheel*)` with `Update` and the
+output handler; `FZeroAXDeluxe_IOAdapter` with `Update`, `DoState` and
+state `m_delay` (u32, 0) and `m_rx_reply` (u8, `F0`);
+`FZeroAXMonster_IOAdapter` with `Update`.
+
+Wheel `Update()`: walk the rx bytes with a position starting at 0; while at
+least 4 bytes remain from the position: if the XOR of the 4 bytes and `80`
+is not 0, warn "SteeringWheel: Bad checksum!" and advance the position by 1;
+else process the 4-byte request and advance by 4. Then consume everything up
+to the position (fewer than 4 trailing bytes stay).
+
+Processing a request `r`: `cmd = r[0] ^ 0x80`.
+- `4`: servo = `s8(0x80 - (u8(r[1] << 7) | r[2]))` (8-bit arithmetic).
+- `7`: init state = 2.
+- `0x7F`: init state = 1.
+- anything else: no change.
+Every valid request then sends 4 zero bytes.
+
+`IsInitializing()` is `init state == 1`. Wheel `DoState`: init state (1),
+servo (1) only; its SerialDevice buffers are not saved (**Quirk**).
+
+Common adapter `Update()` (pad 0 only):
+- status switch byte 0 `&= ~0x20`;
+- p0[0]: Start 0x80, Right 0x20, Left 0x10, Up 0x08, Down 0x04, A 0x02;
+- p1[0]: X 0x20, Y 0x10;
+- analog 0 = if the wheel is initializing, `u16(servo * 512 + 0x8000)`
+  (servo as a signed int), else `ExpandValue<u16>(stickX, 8)`;
+- analog 1 = `ExpandValue(stickY, 8)`, analog 4 =
+  `ExpandValue(triggerRight, 8)`, analog 5 = `ExpandValue(triggerLeft, 8)`,
+  analog 6 = `0x8000`.
+
+Common output handler: `changed = set[0] | cleared[0]`; for each of the
+lamps in this order: `80` "START BUTTON", `20` "VIEW CHANGE 1", `10` "VIEW
+CHANGE 2", `08` "VIEW CHANGE 3", `04` "VIEW CHANGE 4", `40` "BOOST": if
+changed, info "JVS-IO: {name}: ON" if `set[0]` has the bit, else
+"...: OFF".
+
+Deluxe adapter `Update()`: `seat = BE16(generic outputs bytes 1 and 2) >> 2`.
+If `seat == 0x70`: `++m_delay`; if `m_delay % 10 == 0`, reply = `FB`. If
+`seat == 0xF0`: reply = `F0`. Other values: no change. Then p0[0] `|= 0x01`,
+p0[1] = `reply & 0xF0` (assigned), p1[1] = `u8(reply << 4)` (assigned).
+`DoState`: `m_delay` (4), reply (1).
+
+Monster adapter `Update()`: p1[0] `|= 0x02`.
+
+### 6.2 Mario Kart Arcade GP (`Triforce/MarioKartGP.cpp/.h`)
+
+Interface (may be kept): `MarioKartGPSteeringWheel final : SerialDevice`
+with `Update()`, `Reset()`, `DoState()`, state init state (u8, 0);
+`MarioKartGPCommon_IOAdapter(MarioKartGPSteeringWheel*)` with `Update` and
+the output handler.
+
+Wheel `Update()`: while 10 or more rx bytes remain, process 10 bytes, then
+consume all processed bytes. Processing: if BE32 of bytes 0-3 is not
+`FFFFFF01`, warn "SteeringWheel: Unknown command: {:08x}" and send nothing.
+Else (bytes 4-9 are force values, debug only) by init state: 0 -> send
+ASCII `E00`, state 1; 1 -> send `C06`, state 2; 2 or more -> send `C01`,
+state 1.
+
+`Reset()`: info "SteeringWheel: Reset", init state = 0. `DoState`: init
+state only (1 byte; buffers not saved).
+
+Adapter `Update()` (pad 0): status switch byte 0 `&= 0xFF` (no change);
+p0[0] Start 0x80; p0[1]: A 0x20, B 0x02; analog 0 = `ExpandValue(stickX,
+8)`, analog 1 = `ExpandValue(triggerRight, 8)`, analog 2 =
+`ExpandValue(triggerLeft, 8)`.
+
+Output handler: first, if `set[0] & 0x80`, reset the wheel. Then with
+`changed = set[0] | cleared[0]`: `04` "ITEM BUTTON", `08` "CANCEL BUTTON",
+logged as in 6.1.
+
+### 6.3 Touchscreen (`Triforce/Touchscreen.cpp/.h`)
+
+`Touchscreen final : SerialDevice` with `Update()` only; no own state
+(`DoState` is SerialDevice's).
+
+`Update()`: if rx is not empty, warn "Unexpected write of {n} bytes to
+touchscreen." and consume it all. Then always send one 10-byte packet from
+pad 0:
+
+| Offset | Value |
+|---|---|
+| 0 | `55` |
+| 1 | `54` |
+| 2 | `FF` |
+| 3-4 | LE16 `ExpandValue(u16(substickX), 4)` |
+| 5-6 | LE16 `ExpandValue(u16(substickY), 4)` |
+| 7 | `triggerRight` |
+| 8 | `00` |
+| 9 | `AA` + sum of bytes 0-8 (mod 256) |
+
+## 7. IC card reader (`Triforce/ICCardReader.cpp/.h`)
+
+### 7.1 Interface (may be kept)
+
+`ICCardReader final : SerialDevice`: `explicit ICCardReader(u8 slot_index)`,
+`Update()`, `bool IsCardPresent() const`, `bool IsEjecting() const`,
+`bool IsReadyToInsertCard() const`, `InsertCard()`, `EjectCard()`,
+`u8 GetCardPresentInsertCheckCount() const`, `DoState()`.
+
+State: a list of cards ("tags"; several can sit on one physical card),
+field on (bool, false), slot index (u8, const), eject timer (u8, 0),
+insert-check count (u8, 0). Each card: 2048 data bytes (256 pages of 8), a
+file name, an 8-byte UID and a state (Idle 0 / Halted 1, initially Idle).
+
+- `IsCardPresent()` = the card list is not empty.
+- `IsEjecting()` = eject timer > 60.
+- `IsReadyToInsertCard()` = no card and eject timer == 0.
+- `InsertCard()`: if a card is present, nothing. Else notice "InsertCard",
+  create 1 card (7.4) and initialise it (7.4).
+- `EjectCard()`: if no card, nothing. Else notice "EjectCard", clear the
+  list, eject timer = 120, insert-check count = 0.
+
+### 7.2 Request and reply
+
+Request: `00`, command, BE16 payload length `L`, `L` payload bytes, then a
+checksum byte making the XOR of all `L + 5` bytes 0.
+
+`Update()`:
+1. If the eject timer is nonzero, decrement it.
+2. If fewer than 4 rx bytes, or fewer than `L + 5`, wait.
+3. If the XOR of the `L + 5` bytes is nonzero: log error "Bad checksum!",
+   consume 1 byte, return (only one step per `Update`).
+4. Otherwise handle one request; the `L + 5` bytes are consumed afterwards.
+   At most one request is handled per `Update`.
+
+Before dispatch: unless the command is `20` (InsertCheck), set the
+insert-check count to 0. `status` starts at 0 and the reply payload is
+empty.
+
+Size check `need(n)`: if `L < n`, log error "Undersized payload size {L}
+for command: {:02x}", status = `0x0080`, skip the handler. If `L > n`, warn
+"Oversized payload size ..." and continue.
+
+Session check: a session value `s` selects card `s & 0xFF` if
+`(s & 0xFF00) == 0x2300` and that index exists; otherwise log error
+"Unexpected card session: {:04x}", status = `0x0080`, and the handler stops.
+Sessions are not checked against earlier Selects.
+
+Reply: `10`, command, BE16 (2 + payload length), BE16 status, payload, then
+the XOR of all previous reply bytes.
+
+### 7.3 Commands
+
+Payload offsets are within the request payload; numbers are BE16 unless
+stated. "Page" values are masked with `0xFF`.
+
+| Cmd | need | Behaviour | Reply payload |
+|---|---|---|---|
+| `10` GetStatus | 0 | info "GetStatus"; status = `0x30` if the field is on else `0x20` | - |
+| `11` SetBaudrate | 8 | info with the payload bytes | - |
+| `14` FieldOn | 0 | info "FieldOn"; field on | - |
+| `15` FieldOff | 0 | info "FieldOff"; field off; every card Idle | - |
+| `16` EjectCard | 0 | `EjectCard()` | - |
+| `20` InsertCheck | 8 | info "InsertCheck: {u16 at 0}"; present = some card is not Halted; if present and count < 255, ++count; status 0 if present else `0x0080` | - |
+| `21` AntiCollision | 16 | info; if some card is not Halted: status = 1 if more than one is not Halted, else 0 | UID of the first non-Halted card (8) |
+| | | if none: status `0x0080` | - |
+| `22` SelectCard | 8 | info with the 8 UID bytes; find the card whose UID equals payload 0-7 | BE16 `0x2300 \| index` + 6 zero bytes; status 0 |
+| | | not found: warn "SelectCard: Unexpected Card ID.", status `0x0080` | - |
+| `24` ReadPage, `33` ReadUseCount | 8 | session @0, page @2; read 1 page | the 8 page bytes |
+| `25` WritePage | 16 | session @0, unknown @2, page @4; write the 8 bytes at payload 6-13 | - (status `0x0080` if the write fails) |
+| `26` DecreaseUseCount | 8 | session @0, page @2, amount @4; see 7.5 | BE16 new count + 6 zero bytes |
+| `27` HaltCard | 8 | session @0; card Halted | - |
+| `34` ReadPages | 8 | session @0, page @2, count @4 (not masked); read `count` pages | the bytes |
+| `35` WritePages | see text | | - |
+| other | - | log error "Unknown command: {:02x}"; status stays 0 | - |
+
+Read failures (7.5) set status `0x0080` and the payload stays empty.
+
+`35` WritePages: if `L < 8`, log error "WritePages: Undersized payload size:
+{L}" and stop, **with status 0** (**Quirk**). Else session @0, page @2,
+count @4; info log; session check; then `need(8 + count * 8)`; then write
+`count * 8` bytes starting at payload offset 6 (**Quirk**: the data start at
+offset 6 even though 8 bytes were reserved). A failed write sets `0x0080`.
+
+All the info lines are in section 14.
+
+### 7.4 Cards and files
+
+Creating `n` cards (used by `InsertCard` with 1 and by `DoState`): clear the
+list; for card `i`: name `slot<slot_index + 1>`, plus the letter `'a' + i`
+if `i > 0` (so the second tag of slot 1 is `slot1b`); file
+`tricard_<GameID>_<name>.bin` in the Triforce folder; UID
+`00 00 54 4D 50 00 <slot_index> <i>`.
+
+Initialising a card: try to load the file: open it for reading; if
+`File::Exists` is false, the load fails. If the file is larger than 2048
+bytes, warn "Unexpected size of {size} for file: {name}". Read
+`min(size, 2048)` bytes into the start of the data (the rest stays zero); a
+read failure logs error "Failed to read from file: {name}" and the load
+fails. Success logs info "Loaded {n} bytes from file: {name}".
+
+If the load fails: notice "Creating new IC Card data.", then:
+- bytes 32-39 (page 4, the serial number): byte 32 = `95`, 33 = `71`, then
+  by game type: KeyOfAvalon: 34 = `26`, 35 = `40 | (s % 10)` where `s` is the
+  sum of both nibbles of each of bytes 36-39; VirtuaStriker4 and
+  VirtuaStriker4_2006: 34 = `44`, 35 = `00`; GekitouProYakyuu: 34 = `76`,
+  35 = `50`; other games leave 34-35 as they are;
+- BE16 `FFFF` at byte `0x28` (the use count);
+- flush bytes 32-47 to the file (7.5).
+
+### 7.5 Card data operations
+
+- Read(page, count): offset `page * 8`, size `count * 8`. If offset + size >
+  2048, warn "ReadData: Attempt to read beyond end of card." and fail. A
+  size of 0 gives an empty result, which callers treat as a failure.
+- Write(page, data): offset `page * 8`. If the range overlaps bytes 32-39
+  (`offset < 40 && offset + size > 32`), warn "WriteData: Read-only page."
+  and fail. If offset + size > 2048, warn "WriteData: Attempt to write
+  beyond end of card." and fail. Else copy and flush that range.
+- DecreaseUseCount(page, amount): at offset `page * 8`, read BE16 `old`;
+  `new = max(old - amount, 0)`; notice "DecreaseUseCount: {old} -> {new}";
+  store BE16; flush those 2 bytes. No read-only check.
+- Flush(offset, size): open the card file with `DirectIOFile`,
+  `AccessMode::Write`, `OpenMode::Always`, and `OffsetWrite(offset, bytes)`;
+  on failure log error "FlushData: Failed to write to: {file}".
+
+### 7.6 DoState
+
+`SerialDevice::DoState`; card count (u8); if it differs from the current
+list size, recreate that many cards (7.4, no file access); for each card:
+data (2048), UID (8), state (1); field on (1); eject timer (1); insert-check
+count (1).
+
+## 8. Deck reader (`Triforce/DeckReader.cpp/.h`)
+
+### 8.1 Interface (may be kept)
+
+`DeckReader final : SerialDevice` with `Update()`, `DoState()` and
+`auto* GetICCardReader()` returning a pointer to its internal
+`ICCardReader` (slot 0). Private state: the IC card reader, a firmware
+update timeout (u8, 0) and a `File::DirectIOFile` for the firmware dump
+(the header includes `Common/DirectIOFile.h`).
+
+### 8.2 Update()
+
+Whatever path `Update()` takes (including early returns), it ends by
+calling the internal IC reader's `Update()` and passing its tx bytes
+through to our tx (`PassThroughTxBytes`).
+
+1. If the firmware timeout is nonzero: firmware mode (8.3); done.
+2. If rx is empty: done.
+3. If the first byte is `00` (an IC card command): if fewer than 4 bytes,
+   or fewer than `BE16(bytes 2-3) + 5`, wait; else move exactly that many
+   bytes to the IC reader's rx. Done.
+4. Otherwise it is a one-byte deck command `c`: send `AA c`, then the body
+   below, then `00`, then consume 1 byte. Only one command per `Update`.
+
+| `c` | Name | Info log | Body |
+|---|---|---|---|
+| `74` | SelfTest | "SelfTest" | `00` |
+| `63` | SensLock | "SensLock" | `01` |
+| `76` | ProgramVersion | "ProgramVersion" | ASCII `Version 1.22,2003/09/19,171-8213B` padded with zeros to 48 bytes |
+| `62` | BootVersion | "BootVersion" | ASCII `Version 1.04,2003/06/17,171-8213B` padded to 48 |
+| `6B` | ProgramChecksum | "ProgramChecksum" | `89 AB CD EF` |
+| `6D` | BootChecksum | "BootChecksum" | `01 23 45 67` |
+| `68` | CameraCheck | "CameraCheck" | 10 zero bytes |
+| `67` | ShutterGet | "ShutterGet" | BE32 1234567890 = `49 96 02 D2` |
+| `61` | ShutterAuto | "ShutterAuto" | `49 96 02 D2` |
+| `69`, `6C` | Shutter | "Shutter" | - |
+| `6F` | ShutterLoad | "ShutterLoad" | - |
+| `73` | ShutterSave | "ShutterSave" | - |
+| `65` | SensCard | "SensCard" | `01` |
+| `72` | ReadCard | "ReadCard" | `AA 72`, a length byte, the cards (below) |
+| `66` | FirmwareUpdate | "FirmwareUpdate" | - (below) |
+| other | | error "Unknown command: {:02x}" | - |
+
+So a ReadCard reply is `AA 72 AA 72 <len> <cards> 00` (**Quirk**: the
+header appears twice).
+
+ReadCard cards: read the whole file `tricard_<GameID>_deck.json` (a missing
+file reads as an empty string) and parse it with picojson. On a parse
+error, log error "LoadCardDeckFromFile: {picojson error}"; if the root is
+not an object, "LoadCardDeckFromFile: Invalid JSON root object."; if
+`"cards"` is not an array, "LoadCardDeckFromFile: Invalid \"cards\"
+array."; in these cases the length byte is `00` and no cards follow. Else
+for each element of `"cards"`: non-objects are skipped; `"index"` must be a
+number (else error "LoadCardDeckFromFile: Invalid \"index\" field." and the
+element is skipped), converted to u16; `"table"` is a number converted to u8,
+default 0; `"quantity"` is a number converted to u8, default 1 (0 adds
+nothing). Each element adds `quantity` copies of the 3-byte entry
+`[table, BE16 index]`. The length byte is `u8(entries * 3)` (it wraps above
+85 entries; all entries are still sent). Numbers are converted with a plain
+C++ cast from double, so they must be in range (section 13).
+
+FirmwareUpdate: timeout = 240; open `card_deck_reader_firmware.bin` with
+`AccessMode::Write` (truncating); notice "Writing firmware to: {file}" on
+success, else error "Failed to open: {file}".
+
+### 8.3 Firmware mode
+
+If rx is empty: decrement the timeout; when it reaches 0, send `AA 66 00`,
+info "Fake FirmwareUpdate done.", close the file. Else: if the file is open,
+write all rx bytes to it (on failure error "Failed to write {n} bytes to
+firmware."); consume all rx; timeout = 240.
+
+### 8.4 DoState
+
+`SerialDevice::DoState`, the IC reader's `DoState`, the timeout (1). In read
+mode, then close the firmware file.
+
+## 9. Magnetic card readers (`MagCard/*`)
+
+### 9.1 Interface (may be kept)
+
+Namespace `MagCard`. `MagneticCardReader : Triforce::SerialDevice`
+(abstract, non-copyable, non-movable) with:
+
+- `static constexpr std::size_t TRACK_SIZE = 69, NUM_TRACKS = 3;`
+- `struct Settings { std::string card_name; std::string card_path; bool
+  insert_card_when_possible = true; bool report_dispenser_empty = false; };`
+  (not part of the savestate; owned by the SI baseboard)
+- `explicit MagneticCardReader(Settings*)`, virtual destructor, `Update()`,
+  `DoState()`.
+- Protected enums: `R` (card position, u8) `NO_CARD, READ_WRITE_HEAD,
+  THERMAL_HEAD, DISPENSER_THERMAL, ENTRY_SLOT, MAX_POSITIONS` (values 0-5;
+  the wire values come from the model); `P` (error, u8) `NO_ERR 30,
+  READ_ERR 31, WRITE_ERR 32, CARD_JAM 33, MOTOR_ERR 34, PRINT_ERR 35,
+  ILLEGAL_ERR 38, BATTERY_ERR 40, SYSTEM_ERR 41, TRACK_1_READ_ERR 51 ...
+  TRACK_2_AND_3_READ_ERR 56` (51 T1, 52 T2, 53 T3, 54 T1&2, 55 T1&3, 56
+  T2&3); `S` (job status, u8) `NO_JOB 30, ILLEGAL_COMMAND 32,
+  RUNNING_COMMAND 33, WAITING_FOR_CARD 34, DISPENSER_EMPTY 35, NO_DISPENSER
+  36, CARD_FULL 37`; `InitMode` (u8) `Standard 30, EjectAfter 31,
+  ResetSpecifications 32`.
+- Protected `struct Status { R r = NO_CARD; P p = NO_ERR; S s = NO_JOB; void
+  SoftReset(); }` where `SoftReset` sets `p = NO_ERR, s = NO_JOB`.
+- Protected members used by the models: `virtual u8 GetPositionValue() = 0`,
+  `virtual bool IsReadyForCard()`, `virtual void Command_10_Initialize()`,
+  `virtual void Command_D0_ControlShutter()`, `SetPError`, `SetSError`,
+  `FinishCommand`, `MoveCard(R)`, `IsCardPresent()`, the settings pointer
+  and the `Status`, the current packet (byte vector).
+
+The protected helper names in the old header (`ReceivePacket`,
+`BuildPacket`, `StepStateMachine(DT)`, `StepStatePerson(DT)`,
+`ClearCardInMemory`, `ReadCardFile`, `WriteCardFile`, `IsRunningCommand`,
+`GetCurrentCommand`, `IsCardLoaded`, `EjectCard`, `DispenseCard`, and the
+`Command_XX_*` functions) may be kept or replaced; only C1231BR and
+C1231LR use the ones listed above.
+
+State, in savestate order: status (`r`, `p`, `s`, 3 bytes), current command
+(u8, 0), reply payload (byte vector), current packet (byte vector), current
+step (s32, 0 = no command running), three tracks (`std::optional<std::array<u8,
+69>>` each), time since the machine moved the card (`DT`), time since the
+"person" moved the card (`DT`).
+
+Helpers:
+- present = `r != NO_CARD`; loaded = present and `r != ENTRY_SLOT`;
+- running = step > 0;
+- `FinishCommand()`: step = 0; if `s != ILLEGAL_COMMAND`, `s = NO_JOB`;
+- `SetPError(e)`: warn "SetPError: {:02x}", `p = e`, finish;
+  `SetSError(e)`: warn "SetSError: {:02x}", `s = e`, finish;
+- `MoveCard(pos)`: if already there, nothing; else info "MoveCard: {name}"
+  (names `NO_CARD`, `READ_WRITE_HEAD`, `THERMAL_HEAD`, `DISPENSER_THERMAL`,
+  `ENTRY_SLOT`), set `r`, machine time = 0;
+- `EjectCard()`: if loaded: notice "Ejecting card.", clear all tracks, move
+  to `ENTRY_SLOT`, `Core::DisplayMessage("Ejected Magnetic Card", 4000)`;
+- `DispenseCard()`: if loaded, `SetSError(ILLEGAL_COMMAND)`; else if the
+  dispenser is reported empty, `s = DISPENSER_EMPTY`; else notice
+  "Dispensing a new card.", `Core::DisplayMessage("Created Magnetic Card",
+  4000)`, move to `DISPENSER_THERMAL`;
+- base `IsReadyForCard()` = not present.
+
+The destructor warns "Shutdown before ejecting card!" if a card is loaded.
+
+### 9.2 Wire protocol
+
+`Update()` loops while rx is not empty:
+- `05` (ENQ): step the command machine by 50 ms (9.3), step the person by
+  50 ms (9.5), send the status packet (below), consume 1.
+- `02` (STX): needs at least 2 bytes and then `size = rx[1]` more; else
+  wait. Check the `size` bytes as a packet (below); send `06` (ACK) if
+  accepted, else warn "Writing NACK" and send `15` (NACK). Consume
+  `size + 2`.
+- any other byte: log error "Process: Unexpected {:02x}", consume 1.
+
+Packet check (`p` = the `size` bytes after the size byte):
+1. `size < 6`: warn "ReceivePacket: Bad packet size!", reject.
+2. `p[size-2] != 03`: warn "ReceivePacket: Missing END_OF_TEXT!", reject.
+3. XOR of `size` and all bytes of `p` must be 0 (the last byte is the
+   checksum); else warn "ReceivePacket: Bad checksum!", reject.
+4. If a command is running: info "ReceivePacket: Cancelling command: {old}"
+   if `p[0] == 40`, else warn "ReceivePacket: Running command: {old}
+   interrupted by command: {new}".
+5. Current command = `p[0]`; current packet = `p[4 .. size-2)` (skipping
+   the command and 3 host status bytes, dropping ETX and the checksum);
+   `SoftReset`; `s = RUNNING_COMMAND`; step = 1; clear the reply payload.
+   Accept.
+
+Status packet: `02`, then `L = u8(payload size + 6)`, current command,
+`GetPositionValue()`, `p`, `s`, the reply payload, `03`, and a checksum
+that is the XOR of everything after the `02` (lead-in, payload, `03`).
+
+### 9.3 Command machine
+
+Each ENQ: machine time += 50 ms; if a command is running, run its handler
+for the current step; if it is still running afterwards, step += 1. So
+step 1 runs at the first ENQ after the command arrived, step 2 at the
+second, and so on.
+
+Handlers ("finish" = `FinishCommand`; P/S errors finish too):
+
+| Cmd | Handler |
+|---|---|
+| `10` Initialize | (base) `EjectCard`, `SoftReset`, finish. C1231BR overrides it (9.6). |
+| `20` ReadStatus, `40` Cancel, `78` PrintSettings, `7A` RegisterFont, `C0` ControlLED, `C1` SetPrintRetry | `SoftReset`, finish |
+| `33` ReadData | see below |
+| `35` GetData | step 2: if not loaded, P `ILLEGAL_ERR`; else for each of the 3 tracks: if empty, P `READ_ERR` and stop; else append its 69 bytes. Finish at step >= 2 if still running. |
+| `53` WriteData | see below |
+| `7B` PrintImage | if not present, P `PRINT_ERR`; else `SoftReset`, finish |
+| `7C` PrintLine | packet < 3 bytes: P `SYSTEM_ERR`. Step 1: if not present, P `PRINT_ERR`, else move to `THERMAL_HEAD`. Step 2: move to `READ_WRITE_HEAD`. Finish at step >= 2. |
+| `7D` Erase | as `7C` without the packet-size check |
+| `7E` PrintBarcode | step 2: if not present, P `ILLEGAL_ERR`. Finish at step >= 2. |
+| `80` EjectCard | at step >= 3: `EjectCard`, finish |
+| `A0` Clean | step 2: if not loaded: notice "Inserting cleaning card.", `Core::DisplayMessage("Inserting cleaning card", 4000)`, move to `THERMAL_HEAD`. Step 3: `EjectCard`. Finish at step >= 3. |
+| `B0` DispenseCard | mode = packet[0] if the packet is not empty, else `31`. Step 2: mode `32` (check only): `s = DISPENSER_EMPTY` if the dispenser is reported empty, else `s = CARD_FULL`; other modes: `DispenseCard()`. Step 3: if `r == DISPENSER_THERMAL`, move to `READ_WRITE_HEAD`. Finish at step >= 3 if still running. |
+| `D0` ControlShutter | (base) S `ILLEGAL_COMMAND`. C1231BR overrides it. |
+| `F0` GetVersion | append ASCII `AP:S1234-5678,OS:S9012-3456,0000` (32 bytes), `SoftReset`, finish |
+| other | warn "HandlePacket: Unhandled command {:02x}", S `ILLEGAL_COMMAND` |
+
+Note that `s` values set during a step (for example `DISPENSER_EMPTY` or
+`CARD_FULL`) are visible in status packets until the finish turns them back
+into `NO_JOB`.
+
+`33` ReadData (packet: mode, bit mode, track):
+- packet < 3 bytes: P `SYSTEM_ERR` (at every step).
+- step 1: if mode is `32` (card capture), info "Command_33_ReadData:
+  CardCapture".
+- step 2, mode `32`: if not present: `s = WAITING_FOR_CARD`, step -= 1 (so
+  step 2 runs again at the next ENQ). Else if `r != READ_WRITE_HEAD`: notice
+  "Capturing Card.", move to `READ_WRITE_HEAD`, read the card file (9.4),
+  `Core::DisplayMessage("Inserted Magnetic Card", 4000)`.
+- step 2, other modes: tracks = the track list (below) for the track byte.
+  If not loaded or the list is empty: P `ILLEGAL_ERR`. Else for each listed
+  track: if empty, P `READ_ERR`, warn "Command_33_ReadData: Empty track
+  {:02x}" (the track index), stop; else append its 69 bytes.
+- finish at step >= 2 if still running.
+
+`53` WriteData (packet: mode, bit mode, track, data):
+- packet < 3 bytes: P `SYSTEM_ERR`.
+- step < 2: nothing.
+- tracks = the list for the track byte; data = packet from offset 3. If
+  mode is not `30`, or not loaded, or the list is empty, or the data length
+  is not `69 * tracks`: warn "Command_53_WriteData: Failed.", P
+  `ILLEGAL_ERR`.
+- else info "Command_53_WriteData: Writing {n} track(s) to memory."; for
+  the `k`-th listed track, store data bytes `69k .. 69k+68` (section 13 on
+  why this is positional); `Core::DisplayMessage("Writing Magnetic Card",
+  4000)`; write the card file (9.4); finish.
+
+Track lists: `30` -> [0], `31` -> [1], `32` -> [2], `33` -> [0, 1], `34` ->
+[0, 2], `35` -> [1, 2], `36` -> [0, 1, 2], other -> empty.
+
+### 9.4 Card file
+
+The card file is `card_path + card_name` (for the SI baseboard:
+`<Triforce>/tricard_<GameID>.bin`). It holds up to 3 tracks of 69 bytes back
+to back.
+
+Reading: notice "Reading card data from: {card_name}"; clear all tracks;
+open with `DirectIOFile` read; if the size is 0, not a multiple of 69, or
+more than 3 tracks, log error "ReadCardFile: Incorrect card file size:
+{size}" (and continue); for `k < min(size / 69, 3)`: read 69 bytes into
+track `k`; on a read failure log error "File read failed.", empty track `k`
+and stop. A missing file has size 0.
+
+Writing: notice "Writing card data to: {card_name}"; open with
+`DirectIOFile` write (truncating); for each present track `k`,
+`OffsetWrite(69k, track)`; on failure log error "File write failed.".
+
+### 9.5 The person
+
+Each ENQ, after the machine step: person time += 50 ms. If a card is
+loaded, nothing else. The "file exists" test (`File::Exists(card file)`)
+is evaluated at most once per step, only when needed.
+
+- No card present: if `insert_card_when_possible`, `IsReadyForCard()`,
+  person time > 500 ms and the file exists: notice "Inserting card.",
+  `r = ENTRY_SLOT`, person time = 0. (This does not reset the machine time.)
+- Card at the entry slot: let "machine moved last" = machine time < person
+  time. If (machine moved last and machine time > 100 ms) or the file does
+  not exist: notice "Removing card.", `r = NO_CARD`, person time = 0.
+
+All time comparisons are strict.
+
+### 9.6 Models
+
+**C1231BR** (F-Zero AX, `MagCard/C1231BR.h`): `final`, inherits the
+constructor; adds shutter open (bool, initially true).
+- Position value = `(shutter open ? 0x80 : 0x40) | (report_dispenser_empty ?
+  0 : 0x20) | pos`, with `pos` for `NO_CARD 00, READ_WRITE_HEAD 18,
+  THERMAL_HEAD 07, DISPENSER_THERMAL 1C, ENTRY_SLOT 01`.
+- `IsReadyForCard()` = not present and shutter open.
+- Initialize (`10`): if the packet is not empty and packet[0] is `31`
+  (EjectAfter): shutter open, move to `ENTRY_SLOT` (the tracks are not
+  cleared). Then finish. No `SoftReset`.
+- ControlShutter (`D0`): empty packet: P `SYSTEM_ERR`. Else shutter open =
+  (packet[0] == `31`), info "Shutter: Open" / "Shutter: Close", finish.
+- `DoState`: base `DoState`, then shutter open (1).
+
+**C1231LR** (Mario Kart GP, `MagCard/C1231LR.h`): `final`, inherits the
+constructor; position value `NO_CARD 30, READ_WRITE_HEAD 31, THERMAL_HEAD
+32, DISPENSER_THERMAL 33, ENTRY_SLOT 34`. Nothing else is overridden.
+
+### 9.7 DoState
+
+`SerialDevice::DoState`, status (3), current command (1), reply payload
+(vector), current packet (vector), step (4), track 0, 1, 2 (optional, 1 +
+69 when present), machine time (8), person time (8).
+
+## 10. EXI baseboard (`EXI/EXI_DeviceBaseboard.cpp/.h`)
+
+### 10.1 Interface (may be kept)
+
+```
+namespace ExpansionInterface {
+void GenerateInterrupt(int flag);
+class CEXIBaseboard final : public IEXIDevice {
+public:
+  explicit CEXIBaseboard(Core::System& system);
+  ~CEXIBaseboard() override;
+  void SetCS(int cs) override;
+  bool IsInterruptSet() override;
+  bool IsPresent() const override;      // true
+  void DoState(PointerWrap& p) override;
+  void DMAWrite(u32 addr, u32 size) override;
+  void DMARead(u32 addr, u32 size) override;
+protected:
+  void TransferByte(u8& byte) override;
+};
+}
+```
+
+`ImmWrite`/`ImmRead` are the base class's (byte by byte through
+`TransferByte`, most significant byte first; reads feed `00` into
+`TransferByte`). `GenerateInterrupt` is called by the media board (section
+2).
+
+State: three file-scope statics shared by all instances: interrupt set
+(bool, false), IRQ timer (u32, 0), IRQ status (u32, 0). Per instance:
+position (u32, 0), the 4 command bytes (0), backup offset (u16, 0), DMA
+offset (u32) and length (u32) (stored, otherwise unused), and the backup
+file (`File::IOFile`).
+
+### 10.2 Construction
+
+1. File `tribackup_<GameID>.bin` in the Triforce folder: open with mode
+   `rb+`; if that fails, `wb+`.
+2. If the file is not good: `PanicAlertFmt("Failed to open {}\nFile might be
+   in use.", file name)`; seed `std::srand` with the current time; open
+   `tribackup_tmp_<std::rand()><GameID>.bin` with `wb+` instead.
+3. If the game type is VirtuaStriker4 or GekitouProYakyuu (not
+   VirtuaStriker4_2006) and the file is at least `0x400` bytes: read it all;
+   store u16 `0x1703` in host order (bytes `03 17`) at offsets `0x12` and
+   `0x212`; store at `0x0A` the BE16 of the low 16 bits of the byte sum of
+   `0x1F4` bytes from `0x0C`, and at `0x20A` the same for `0x1F4` bytes from
+   `0x20C`; seek to 0, write it all back, flush. (The file position is then
+   at the end.)
+
+### 10.3 Interrupts and chip select
+
+- `GenerateInterrupt(flag)`: interrupt set = true, timer = 0, status =
+  `flag`; then `System::GetInstance().GetExpansionInterface().UpdateInterrupts()`.
+- `IsInterruptSet()`: if set: `++timer`; if timer > 12, clear the flag;
+  return true (so it reports true 13 times after each trigger). Else false.
+- `SetCS(cs)`: if `cs` is nonzero, position = 0.
+
+### 10.4 TransferByte(byte)
+
+`pos` = position; `cmd` = the 4 command bytes. In order:
+
+1. If `pos < 4`: `cmd[pos] = byte`, `byte = FF`.
+2. Then exactly one of:
+   - `pos >= 2` and `cmd[0] == 0` and `cmd[1] == 0` (serial ID read):
+     `byte = {06, 04, 10, 00}[(pos - 2) & 3]`.
+   - `pos == 3`: a check value is computed over cmd 0-2 (debug only; no
+     effect); `byte` stays `FF`.
+   - `pos == 4`: by `cmd[0]`:
+
+| cmd[0] | Effect | byte |
+|---|---|---|
+| `01` backup offset set | offset = `cmd[1] << 8 \| cmd[2]`; seek the file there | `01` |
+| `02` backup write | write the 1 byte `cmd[1]` at the file position; flush | `01` |
+| `03` backup read | - | `01` |
+| `05` DMA offset/length set | DMA offset = `cmd[1] << 8 \| cmd[2]`, length = `cmd[3]`; notice log | `01` |
+| `82` read ISR | notice log | `04` |
+| `83` write ISR | IRQ status `&= ~cmd[2]`; notice log | `04` |
+| `86` read IMR, `87` write IMR | notice log | `04` |
+| `FF` write LANCNT | notice log; if `cmd[1] == 0 && cmd[2] == 0`: set = true, timer = 0, status = 2; if `cmd[1] == 2 && cmd[2] == 1`: status = 0. No interrupt update call. | `08` |
+| other | error "AM-BB: COMMAND: ..." | `04` |
+
+   - `pos > 4`: by `cmd[0]`:
+
+| cmd[0] | byte |
+|---|---|
+| `03` | the next byte read from the file (unchanged if the read fails, e.g. at end of file) |
+| `05` | `01` |
+| `82` | at `pos == 6`: the IRQ status (low byte), and the interrupt flag is cleared; other positions: `04` |
+| `86` | `pos == 5`: `FF`; `pos == 6`: `81`; else unchanged |
+| other | unchanged; error "Unknown AM-BB command: {:02x}" |
+
+   - otherwise (`pos` 0, 1, or 2 without the serial case): `byte = FF`.
+3. `++position`.
+
+The file position is shared by reads and writes and advances with each.
+
+### 10.5 DMA
+
+`DMAWrite(addr, size)`: `span = memory.GetSpanForAddress(addr)`; if
+`span.size() < size`, log error "AM-BB: Backup DMA Write overflow: ..." and
+return. Else notice "AM-BB: COMMAND: Backup DMA Write: {:08x} {:x}", seek
+the file to the backup offset (not the DMA offset), write `size` bytes from
+memory, flush. `DMARead` is the same with "Read", reading `size` bytes from
+the file into memory (a short read leaves the rest of memory unchanged; no
+flush).
+
+### 10.6 DoState
+
+Position (4), the static interrupt flag (1), the 4 command bytes. The timer,
+status, offsets and file are not saved.
+
+## 11. AGP cartridge reader (`EXI/EXI_DeviceAGP.cpp/.h`)
+
+### 11.1 Interface (may be kept)
+
+```
+class CEXIAgp : public IEXIDevice {
+public:
+  CEXIAgp(Core::System& system, const Slot slot);   // slot must be a memory card slot (ASSERT)
+  ~CEXIAgp() override;
+  bool IsPresent() const override { return true; }
+  void ImmWrite(u32 _uData, u32 _uSize) override;
+  u32 ImmRead(u32 _uSize) override;
+  void DoState(PointerWrap& p) override;
+};
+```
+
+`SetCS`, DMA and `IsInterruptSet` are the base class's. State (savestate
+order in 11.6): slot (`Slot`, an `int` enum), address (u32, 0, never
+changed), current command (u32, 0), EEPROM bytes (vector), EEPROM command
+(u32, 0), EEPROM data (u64, 0), EEPROM mask (u32, 0), EEPROM position (u16,
+0), EEPROM size (u32, 0), address end (u16, 0), address mask (u16, 0), read
+mask (u16, 0), status mask (u32, 0), write status (bool, false), hash (u8,
+0), position (u32, 0, never changed), return position (u32, 0), ROM bytes
+(vector), ROM mask (u32, 0), ROM size (u32, 0), ROM offset (u32, 0).
+
+Constants: ignore bits 4, data bits 64 (0x40), read false `0A`, read true
+`0B`.
+
+### 11.2 Files
+
+`Config::Get(Config::GetInfoForAGPCartPath(slot))` (`MAIN_AGP_CART_A_PATH`
+or `_B_PATH`) is split with `SplitPath` into folder (with trailing
+separator), name (no extension) and extension (with the dot). `base` =
+folder + name.
+
+Construction: load the ROM from `base + extension`, info "Loaded GBA rom:
+{base} card: {slot}", load the save from `base + ".sav"`, info "Loaded GBA
+sav: {base} card: {slot}".
+
+- ROM: open with `rb`. If it opens: ROM size = file size (low 32 bits),
+  ROM mask = size - 1, read the whole file. Else the ROM is 0x2000 zero
+  bytes with size and mask left at 0.
+- Save: open with `rb`. If it opens: EEPROM size = file size, EEPROM mask =
+  size - 1, read the whole file. If the size is 512 or 8192: reinterpret it
+  as 64-bit words: for each 8-byte group, the host `u64` at that position
+  becomes the big-endian value of the 8 file bytes (so on a LE host each
+  group is byte-reversed in memory); address end = 8 (512) or 16 (8192);
+  address mask = `3F` or `3FF`; read mask = `80` or `8000`; status mask =
+  `1FFFF00` if the ROM size is exactly 32 MiB, else `1000000`. Any other
+  size: status mask = 0, the others stay 0. If the save does not open:
+  EEPROM size 0, no bytes. **Quirk:** with an empty configured path the
+  save file name is `.sav` relative to the current directory.
+
+Destruction: if `base` is not empty, write `base + ".sav"` with `wb`: for
+sizes 512 and 8192 the words are converted back to file order (each host
+`u64` written as its 8 bytes most significant first); otherwise the bytes
+as they are (possibly 0 bytes, which creates an empty file).
+
+### 11.3 Hash
+
+`CRC8(bytes)`: for each byte `b`: `h ^= b`; then `h` = XOR of the table
+entries for each set bit of `h`: bit 0 `5E`, 1 `BC`, 2 `61`, 3 `C2`, 4 `9D`,
+5 `23`, 6 `46`, 7 `8C`. (This is the Dallas/Maxim 1-Wire CRC-8, reflected
+polynomial `8C`.) "Hash `x`" below means apply this to the single byte `x`.
+
+### 11.4 ImmWrite(data, size)
+
+If `size == 1` and the top byte of `data` is 0: ignore. Else by the current
+command:
+
+| Current command | Effect |
+|---|---|
+| `AE020000`, `AE030000` | ROM offset = `(data & FFFFFF00) >> 7`; return position = 0; hash bytes 3, 2, 1 of `data` (top first) |
+| `AE040000` | EEPROM position = `u16((data >> 16) & EEPROM mask)`; hash bytes 3, 2 |
+| `AE070000` | EEPROM position as above; if EEPROM size != 0, EEPROM byte at that position = byte 1 of `data`; hash bytes 3, 2, 1 |
+| `AE0C0000` | one EEPROM bit (below); then position += 1, return position = 0, hash bytes 3, 2 |
+| `AE0B0000` | write status = false (the command stays) |
+| `AE000000`, `AE010000`, `AE090000` | write status = false, then as `AE0A0000` |
+| `AE0A0000` | EEPROM position = 0, then as default |
+| anything else (default) | current command = `data`; return position = 0; hash = `FF`; hash byte 2 of `data` |
+
+So only the default rows (and `AE0x` rows that fall into them) change the
+current command; while a command such as `AE0C0000` is current, every write
+is data for it.
+
+EEPROM bit write, with `pos` = EEPROM position, `end` = address end, `bit`
+= `(data >> 16) & 1`, `special = (EEPROM command & read mask) ? end : end +
+64`:
+- If `pos < end` or `pos == special`: mask = `1 << (end - min(pos, end))`;
+  set or clear that bit of the EEPROM command. Then if `pos == end + 64`:
+  if EEPROM size != 0, store the EEPROM data as the 64-bit word at index
+  `(EEPROM command >> 1) & address mask`; write status = true.
+- Else: mask = `1 << (end + 63 - pos)`; set or clear that bit of the EEPROM
+  data.
+
+### 11.5 ImmRead(size)
+
+By the current command (then "reset" = current command = 0):
+
+| Current command | Result |
+|---|---|
+| `AE000000` | `5AAA5517`; reset |
+| `AE010000` | `01020304` if the return position is 0, else `F0020304`. If the return position is 1, reset; else set it to 1 (the command stays). |
+| `AE020000` | if write status and status mask != 0 and `(ROM offset & status mask) == status mask`: `v1 = 01, v2 = 00`; else `v1 = ROM[offset++ & ROM mask]`, `v2 = ROM[offset++ & ROM mask]`. Hash `v2`, then `v1`. Result `v2 << 24 \| v1 << 16 \| hash << 8`. Reset. |
+| `AE030000` | if `size == 1`: `FF000000`, reset. Else read 4 ROM bytes `v1..v4` as above; hash `v2, v1, v4, v3`; result `v2 << 24 \| v1 << 16 \| v4 << 8 \| v3`; the command stays. |
+| `AE040000` | `v` = `FF` if EEPROM size is 0, else the EEPROM byte at the EEPROM position; hash `v`; result `v << 24 \| hash << 16`; reset |
+| `AE0B0000` | `v` = `0B` if EEPROM size != 0 and position >= 4 and bit `(63 - (position - 4))` of the 64-bit word at index `(EEPROM command >> 1) & address mask` is 1; else `0A`. Hash `00`, then `v`. Result `v << 16 \| hash << 8`. Position += 1. Reset. |
+| `AE070000`, `AE0C0000` | `hash << 24`; reset |
+| other | 0; reset |
+
+The ROM offset is a u32 and wraps.
+
+### 11.6 DoState
+
+slot (4), address (4), current command (4), EEPROM bytes (vector), EEPROM
+command (4), EEPROM data (8), EEPROM mask (4), EEPROM position (2), EEPROM
+size (4), address end (2), address mask (2), read mask (2), status mask
+(4), write status (1), hash (1), position (4), return position (4), ROM
+bytes (vector), ROM mask (4), ROM size (4), ROM offset (4).
+
+## 12. Modem adapter (`EXI/EXI_DeviceModem.cpp/.h`)
+
+### 12.1 Interface (must be kept)
+
+The header is used by the original `EXI/Modem/TAPServerModem.cpp`, so keep
+it as is, including the private parts that file uses:
+
+- `static constexpr std::size_t MODEM_RECV_SIZE = 0x800;`
+- `enum { EXI_DEVTYPE_MODEM = 0x02020000 };`
+- `enum class ModemDeviceType { TAPSERVER };`
+- `class CEXIModem : public IEXIDevice` with public `CEXIModem(Core::System&,
+  ModemDeviceType)`, destructor, `SetCS`, `IsPresent` (true),
+  `IsInterruptSet`, `ImmWrite`, `ImmRead`, `DMAWrite`, `DMARead`, `DoState`;
+- private `void SendComplete();` and `void AddToReceiveBuffer(std::string&&
+  data);`
+- the private nested `class NetworkInterface` (protected `CEXIModem*
+  m_modem_ref`, protected explicit constructor taking it, public virtual
+  `Activate()` false, `Deactivate()`, `IsActivated()` false,
+  `SendAndRemoveAllHDLCFrames(std::string*)` false, `RecvInit()` false,
+  `RecvStart()`, `RecvStop()`, virtual destructor) and `class
+  TAPServerNetworkInterface : public NetworkInterface` (public constructor
+  `(CEXIModem*, const std::string& destination)`, the seven overrides,
+  private `TAPServerConnection m_tapserver_if;` and `void
+  HandleReceivedFrame(std::string&&)`).
+
+The header includes `Core/HW/EXI/BBA/TAPServerConnection.h` and
+`Core/HW/EXI/EXI_Device.h`. Other private members may change.
+
+State: the network interface (owned), transfer descriptor (u32, invalid =
+`FFFFFFFF`), AT command bytes, AT reply bytes, send buffer, receive buffer
+(strings; the receive buffer is guarded by a mutex because frames arrive on
+the tapserver thread), 32 registers (all 0 except below).
+
+### 12.2 Registers, interrupts, descriptors
+
+Registers used: `00` device type, `01` interrupt mask, `02` pending
+interrupts, `04` AT command size, `05` AT reply size, `0B`/`0C` bytes
+available (high/low), `10`/`11` RX threshold (high/low). The others
+(`03`, `06`-`0A`, `0D`-`0F` TX threshold, `12`, `13`) are plain storage.
+Interrupt bits: `02` AT reply available, `10` send buffer below threshold,
+`20` receive buffer above threshold (`40` exists but is never set).
+
+Construction: create the `TAPServerNetworkInterface` with
+`Config::Get(Config::MAIN_MODEM_TAPSERVER_DESTINATION)`, info "Created
+tapserver physical network interface.", then register `00` = 2 and `01` = 2.
+Destruction: `RecvStop()`, `Deactivate()`.
+
+Setting interrupt flag `f` to `on`: set or clear `f` in register `02`, then
+always call `ScheduleUpdateInterrupts(CPU or NON_CPU, 0)` on the system's
+EXI manager (`CPU` from CPU-side calls, `NON_CPU` from received frames).
+
+`IsInterruptSet()` = `(reg 01 & reg 02) != 0`. `SetCS(any)` = descriptor
+invalid. `DoState` saves nothing.
+
+A descriptor `d`: write if bit 30 is set; modem transfer if bit 29 is set;
+for modem transfers the kind is `d & 0F000000` (`03000000` AT buffer,
+`08000000` packet buffer) and the remaining size is bits 8-23; for register
+transfers the first register is `(d >> 24) & 1F`. Updating the remaining
+size to `n` keeps the top byte of `d`, puts `n` in bits 8-23 and clears the
+low 8 bits.
+
+### 12.3 Immediate transfers
+
+`ImmWrite(data, size)`:
+- No descriptor: descriptor = `data`. If it is `00008000` (reset):
+  `RecvStop()`, `Deactivate()`, descriptor invalid.
+- Read descriptor: log error "Received EXI IMM write ... after read
+  command ...", descriptor invalid.
+- Modem write descriptor: the top `size` bytes of `data`, most significant
+  first, are written (12.5).
+- Register write descriptor: starting at its first register, while `size`
+  is left and the register number is < 32: store the top byte of `data`,
+  shift `data` left by 8, next register. If register 1 or 2 was written,
+  `ScheduleUpdateInterrupts(CPU, 0)`. Descriptor invalid.
+
+`ImmRead(size)`:
+- No descriptor: log error "Received EXI IMM read ({size} bytes) with no
+  pending transfer", return 0.
+- Write descriptor: log error "Received EXI IMM read ... after write command
+  ...", descriptor invalid, return 0.
+- Modem read descriptor: read `size` bytes (12.5) into a zeroed 4-byte
+  buffer; return it as a BE u32 (first byte in the top position).
+- Register read descriptor: if the first register is 0, return
+  `02020000` (**Quirk**: the descriptor is not cleared). Else for `z <
+  size` while the register number + `z` < 32, OR register `first + z` into
+  bits `(3 - z) * 8`; descriptor invalid; return.
+
+### 12.4 DMA
+
+`DMAWrite(addr, size)`: no descriptor: log error "Received EXI DMA write
+{addr} ({size} bytes) after read command {descriptor}" (**Quirk**: the same
+text as the next case) and keep the descriptor. Read descriptor: that error,
+descriptor invalid. Register descriptor: error "Received EXI DMA write ...
+to registers ...", descriptor invalid. Modem write: write `size` bytes from
+`memory.GetPointerForRange(addr, size)` (12.5).
+
+`DMARead(addr, size)`: no descriptor: error "Received EXI DMA read ... with
+no pending transfer". Write descriptor: error "... after write command ...",
+invalid. Register descriptor: error "... to registers ...", invalid. Modem
+read: read `size` bytes into `GetPointerForRange(addr, size)`.
+
+### 12.5 Modem buffers
+
+Reading `size` bytes (`req` = remaining size in the descriptor):
+1. If `size > req`: log error "More bytes requested ({size}) than
+   originally requested for transfer {:x}", `size = req`.
+2. AT kind: copy `n = min(size, AT reply length)` bytes from the AT reply
+   and remove them; register `05` = `u8(remaining reply length)`; interrupt
+   `02` = (reply not empty). Packet kind: under the lock, copy and remove
+   `n = min(size, receive length)` bytes from the receive buffer, then the
+   receive-buffer update (12.6) from the CPU. Other kinds: error "Invalid
+   modem read transfer type {:x}". Destination bytes past `n` are left as
+   they are.
+3. Remaining = `req - size`; if 0 the descriptor becomes invalid, else
+   update its size.
+
+Writing `size` bytes (`exp` = remaining size):
+1. If `size > exp`: log error "More bytes received ({size}) than expected for
+   transfer {:x}" and return (nothing stored, descriptor unchanged).
+2. AT kind: append to the AT command bytes, run the AT commands (12.7),
+   register `04` = `u8(AT command length)` (what is left after running).
+   Packet kind: append to the send buffer; interrupt `10` on; call the
+   network interface's `SendAndRemoveAllHDLCFrames(&send buffer)`. Other:
+   error "Invalid modem write transfer type {:x}".
+3. Remaining = `exp - size`; descriptor update as above.
+
+`SendComplete()` (called by the tapserver glue when at least one frame went
+out): interrupt `10` on, from the CPU.
+
+### 12.6 Receive buffer
+
+`AddToReceiveBuffer(data)` (from the tapserver thread): under the lock,
+append `data`, then the update from a non-CPU thread.
+
+Update: `n = min(receive length, 0x200)`; register `0B` = `n >> 8`, `0C` =
+`n & FF`; interrupt `20` = (receive length >= BE16 of registers `10`/`11`).
+
+### 12.7 AT commands
+
+While the AT command bytes contain `\r` or `\n`: take the text before the
+first one as the command and remove it together with that one terminator;
+info "Received AT command: {command}"; then:
+- starts with `ATZ`, or equals `ATH0`: `RecvStop()`, `Deactivate()`, reply
+  `OK\r`;
+- starts with `ATD`: if `Activate()` succeeds, `RecvStart()` and reply
+  `OK\rCONNECT 115200\r`; else reply `OK\rNO ANSWER\r`;
+- anything else (including empty): reply `OK\r`.
+
+Replying appends to the AT reply, sets register `05` = `u8(reply length)`
+and interrupt `02` = (reply not empty), from the CPU.
+
 <!-- next -->
