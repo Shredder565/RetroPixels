@@ -80,9 +80,8 @@ option(ENABLE_QT "Build the Qt program (PixelU-Wii.exe)" ON)
 option(ENABLE_NOGUI "Build dolphin-emu-nogui, the program without a user interface" ${on_linux})
 option(ENABLE_CLI_TOOL "Also configure the dolphin-tool command-line program" ON)
 option(ENABLE_VULKAN "Vulkan video backend" ON)
-# On Linux cubeb needs its PulseAudio/ALSA build (Externals/cubeb); until then
-# the Null sound backend is the only one there.
-option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ${on_windows})
+# cubeb: WASAPI/WinMM on Windows, PulseAudio/ALSA on Linux (Externals/cubeb).
+option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ON)
 option(ENABLE_SDL "SDL controller input" ON)
 option(ENABLE_LLVM "Use LLVM, when its CMake package is found, for the debugger's host disassembly" ON)
 option(ENABLE_LTO "Link-time optimisation" OFF)
