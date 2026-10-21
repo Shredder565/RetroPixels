@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -38,38 +37,41 @@ class TMDReader;
 
 struct BootParameters;
 
+// Game ID used while nothing is running.
 static constexpr std::string_view DEFAULT_GAME_ID = "00000000";
 
+// Session-wide state that is not a Config setting: what is running (IDs,
+// title, revision, region) and the paths and flags chosen at boot.
 struct SConfig
 {
-  // Settings
+  // Boot and JIT switches set by the front end.
   bool bBootToPause = false;
-
   bool bJITNoBlockCache = false;
   bool bJITNoBlockLinking = false;
 
+  // NetPlay: copy the host's Wii saves into the session.
   bool bCopyWiiSaveNetplay = true;
 
+  // Region of the running game, after fallbacks.
   DiscIO::Region m_region;
 
-  // files
   std::string m_strBootROM;
   std::string m_strSRAM;
+  // Name used for the debugger's per-game files (map files and so on).
   std::string m_debugger_game_id;
 
-  // TODO: remove this as soon as the ticket view hack in IOS/ES/Views is dropped.
+  // Set while a disc launched from the game list runs; only the ES ticket
+  // view workaround reads it.
   bool m_disc_booted_from_game_list = false;
 
   const std::string GetGameID() const;
   const std::string GetGameTDBID() const;
   const std::string GetGameIDElfDol() const;
 
-  // Returns a preference ordered list of ids to try for texture loading.
-  // If launched via elf/dol, returns {elfdolid-gameid, gameid}. Otherwise returns {gameid}.
+  // IDs to look for custom textures under, best first: "<elf/dol id>-<game id>"
+  // and the game ID for an ELF/DOL, otherwise just the game ID.
   const std::vector<std::string> GetGameIDsForTextures() const;
-
-  // Returns the single most-preferred id from GetGameIDsForTextures(); see that function for
-  // the full priority order.
+  // The first of GetGameIDsForTextures().
   const std::string GetGameIDForTextures() const;
 
   const std::string GetTitleName() const;
@@ -84,13 +86,11 @@ struct SConfig
 
   void SetElfDolID(const std::string& game_id);
 
-  // Triggered when Dolphin loads a title directly
-  // Reloads title-specific map files, patches, etc.
+  // A title was started directly (not through ES): reload map files, HLE
+  // hooks, patches and, for GameCube, textures.
   static void OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard);
 
-  // Direct title change from ES (Wii system)
-  // Wii titles will still hit OnTitleDirectlyBooted
-  // but GC titles will never see this call
+  // ES switched titles (Wii only): reload controller settings and textures.
   static void OnESTitleChanged();
 
   void LoadDefaults();
@@ -113,16 +113,15 @@ struct SConfig
   SConfig(SConfig&&) = delete;
   SConfig& operator=(SConfig&&) = delete;
 
-  // Save settings
+  // Write or read Dolphin.ini and the other config files.
   void SaveSettings();
-
-  // Load settings
   void LoadSettings();
 
+  // Deletes the config files and clears every config layer.
   static void ResetAllSettings();
 
-  // Return the permanent and somewhat globally used instance of this struct
-  static SConfig& GetInstance() { return (*m_Instance); }
+  // The single instance, valid between Init() and Shutdown().
+  static SConfig& GetInstance() { return *s_instance; }
   static void Init();
   static void Shutdown();
 
@@ -136,16 +135,17 @@ private:
                               u64 title_id, u16 revision, DiscIO::Region region,
                               u32 simulated_memory_size);
 
-  static SConfig* m_Instance;
-  mutable std::recursive_mutex m_metadata_lock;
+  static SConfig* s_instance;
 
+  // Guards the running-game fields below; recursive because the setters call each other.
+  mutable std::recursive_mutex m_metadata_mutex;
   std::string m_game_id;
-  std::string m_game_id_elf_dol;
+  std::string m_elf_dol_id;
   std::string m_gametdb_id;
   std::string m_title_name;
   std::string m_title_description;
-  u64 m_title_id;
-  u16 m_revision;
-  // Memory size requested by game's header.
-  u32 m_simulated_memory_size;
+  u64 m_title_id = 0;
+  u16 m_revision = 0;
+  // MEM1 size the game asked for in its header (0 for the default).
+  u32 m_simulated_memory_size = 0;
 };
