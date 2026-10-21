@@ -278,6 +278,7 @@ void HacksWidget::RefreshGpuTextureDecoding(const QString& backend_name)
   const bool blocked_by_mipmaps = Get(m_game_layer, Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION);
   m_gpu_texture_decoding->setEnabled(supported && !blocked_by_mipmaps);
 
+  const QString help = tr(base_help);
   QString note;
   if (!supported)
   {
@@ -294,7 +295,7 @@ void HacksWidget::RefreshGpuTextureDecoding(const QString& backend_name)
   {
     note = tr("<dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>");
   }
-  m_gpu_texture_decoding->SetDescription(tr(base_help) + note);
+  m_gpu_texture_decoding->SetDescription(help + note);
 }
 
 void HacksWidget::RefreshBoundingBox(const QString& backend_name)
@@ -306,13 +307,14 @@ void HacksWidget::RefreshBoundingBox(const QString& backend_name)
   const bool supported = g_backend_info.bSupportsBBox;
   m_disable_bounding_box->setEnabled(supported);
 
+  const QString help = tr(base_help);
   const QString note =
       supported ?
           tr("<dolphin_emphasis>If unsure, leave this checked.</dolphin_emphasis>") :
           tr("<dolphin_emphasis>The %1 backend doesn't support Bounding Box "
              "emulation.</dolphin_emphasis>")
               .arg(backend_name);
-  m_disable_bounding_box->SetDescription(tr(base_help) + note);
+  m_disable_bounding_box->SetDescription(help + note);
 }
 
 // Deferring is pointless once both EFB and XFB copies stay on the GPU.

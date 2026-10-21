@@ -474,12 +474,12 @@ void AdvancedWidget::SetDescriptions()
   m_backend_multithreading->SetDescription(tr(multithreading_help));
 
   // Explains why the option may be locked for the current backend.
-  const QString backend = tr(g_backend_info.DisplayName.c_str());
+  const auto backend = [] { return tr(g_backend_info.DisplayName.c_str()); };
   QString vs_note;
   if (!g_backend_info.bSupportsGeometryShaders)
-    vs_note = tr("Forced on because %1 doesn't support geometry shaders.").arg(backend);
+    vs_note = tr("Forced on because %1 doesn't support geometry shaders.").arg(backend());
   else if (!g_backend_info.bSupportsVSLinePointExpand)
-    vs_note = tr("Forced off because %1 doesn't support VS expansion.").arg(backend);
+    vs_note = tr("Forced off because %1 doesn't support VS expansion.").arg(backend());
   else
     vs_note = tr(unsure_unchecked);
   m_prefer_vs_for_point_line_expansion->SetDescription(tr(vs_expansion_help).arg(vs_note));
