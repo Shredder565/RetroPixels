@@ -1,37 +1,147 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// The register layout follows public community documentation of the Wii Speak (wiibrew).
 
 #include "Core/IOS/USB/Emulated/WiiSpeak.h"
 
 #include <algorithm>
+#include <array>
+#include <string>
 
+#include "Common/Logging/Log.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 
 namespace IOS::HLE::USB
 {
-bool WiiSpeakState::IsSampleOn() const
-{
-  return sample_on;
-}
-
-bool WiiSpeakState::IsMuted() const
-{
-  return mute;
-}
-
-u32 WiiSpeakState::GetDefaultSamplingRate() const
-{
-  return DEFAULT_SAMPLING_RATE;
-}
-
 namespace
 {
-class MicrophoneWiiSpeak final : public Microphone
+constexpr u16 VENDOR_ID = 0x057E;
+constexpr u16 PRODUCT_ID = 0x0308;
+
+constexpr u8 EP_AUDIO_IN = 0x81;
+constexpr u8 EP_AUDIO_OUT = 0x03;
+constexpr u8 EP_DATA_OUT = 0x02;
+
+// Vendor requests (interface recipient).
+constexpr u8 VENDOR_RESET = 0;
+constexpr u8 VENDOR_WRITE_REGISTER = 1;
+constexpr u8 VENDOR_READ_REGISTER = 2;
+
+// Registers. Their low bit is ignored.
+constexpr u8 REG_SAMPLER = 0x00;
+constexpr u8 REG_FREQUENCY = 0x02;
+constexpr u8 REG_GAIN = 0x04;
+constexpr u8 REG_MUTE = 0x0c;
+constexpr u8 REG_ECHO_CANCEL = 0x14;
+constexpr u8 REG_SPEECH = 0x38;
+
+// Sub-commands of REG_SPEECH, given in the register's value.
+constexpr u16 SPEECH_ENABLE = 0x1010;
+constexpr u16 SPEECH_SIN = 0x2001;
+constexpr u16 SPEECH_SOUT = 0x2004;  // reads back the loudness level
+constexpr u16 SPEECH_RIN = 0x200d;
+
+// Register codes for the sampling rates and gains; anything unknown means the last entry
+// (16 kHz, 36 dB), which is also the device default.
+struct CodedValue
+{
+  u16 code;
+  int value;
+};
+constexpr std::array<CodedValue, 3> FREQUENCIES{{{0, 8000}, {1, 11025}, {3, 16000}}};
+constexpr std::array<CodedValue, 4> GAINS{{{0, 0}, {1, 15}, {2, 30}, {3, 36}}};
+// Gain readings carry these bits on top of the code.
+constexpr u16 GAIN_READ_BITS = 0x300;
+
+template <size_t N>
+int ValueForCode(const std::array<CodedValue, N>& table, u16 code, const char* what)
+{
+  for (const CodedValue& entry : table)
+  {
+    if (entry.code == code)
+      return entry.value;
+  }
+  WARN_LOG_FMT(IOS_USB, "Wii Speak: unknown {} code {:04x}, using the default", what, code);
+  return table.back().value;
+}
+
+template <size_t N>
+u16 CodeForValue(const std::array<CodedValue, N>& table, int value, const char* what)
+{
+  for (const CodedValue& entry : table)
+  {
+    if (entry.value == value)
+      return entry.code;
+  }
+  WARN_LOG_FMT(IOS_USB, "Wii Speak: {} {} has no register code, reporting the default", what,
+               value);
+  return table.back().code;
+}
+
+const DeviceDescriptor DEVICE_DESCRIPTOR{
+    .bLength = 0x12,
+    .bDescriptorType = 0x01,
+    .bcdUSB = 0x0200,
+    .bDeviceClass = 0,
+    .bDeviceSubClass = 0,
+    .bDeviceProtocol = 0,
+    .bMaxPacketSize0 = 0x10,
+    .idVendor = VENDOR_ID,
+    .idProduct = PRODUCT_ID,
+    .bcdDevice = 0x0214,
+    .iManufacturer = 1,
+    .iProduct = 2,
+    .iSerialNumber = 0,
+    .bNumConfigurations = 1,
+};
+
+const ConfigDescriptor CONFIG_DESCRIPTOR{
+    .bLength = 0x09,
+    .bDescriptorType = 0x02,
+    .wTotalLength = 0x0030,
+    .bNumInterfaces = 1,
+    .bConfigurationValue = 1,
+    .iConfiguration = 0,
+    .bmAttributes = 0x80,
+    .MaxPower = 0x32,
+};
+
+constexpr InterfaceDescriptor VendorInterface(u8 alt, u8 endpoints)
+{
+  return {.bLength = 0x09,
+          .bDescriptorType = 0x04,
+          .bInterfaceNumber = 0,
+          .bAlternateSetting = alt,
+          .bNumEndpoints = endpoints,
+          .bInterfaceClass = 0xFF,
+          .bInterfaceSubClass = 0xFF,
+          .bInterfaceProtocol = 0xFF,
+          .iInterface = 0};
+}
+
+constexpr EndpointDescriptor Endpoint(u8 address, u8 attributes, u16 max_packet, u8 interval)
+{
+  return {.bLength = 0x07,
+          .bDescriptorType = 0x05,
+          .bEndpointAddress = address,
+          .bmAttributes = attributes,
+          .wMaxPacketSize = max_packet,
+          .bInterval = interval};
+}
+
+constexpr u8 ISOCHRONOUS = 1;
+constexpr u8 BULK = 2;
+
+// Completion delay of an isochronous transfer. Games show the "talking" cue only if audio
+// arrives fast enough, and sending faster makes it choppier.
+constexpr u32 ISO_TRANSFER_US = 2000;
+
+class WiiSpeakMicrophone final : public Microphone
 {
 public:
-  explicit MicrophoneWiiSpeak(const WiiSpeakState& sampler)
+  explicit WiiSpeakMicrophone(const WiiSpeakState& sampler)
       : Microphone(sampler, "Wii Speak Worker")
   {
   }
@@ -47,424 +157,300 @@ private:
   {
     return Config::Get(Config::MAIN_WII_SPEAK_VOLUME_MODIFIER);
   }
+  // The Wii expects big-endian samples.
   bool AreSamplesByteSwapped() const override { return true; }
 #endif
-
   bool IsMicrophoneMuted() const override { return Config::Get(Config::MAIN_WII_SPEAK_MUTED); }
   u32 GetStreamSize() const override { return BUFF_SIZE_SAMPLES * 500; }
 };
 }  // namespace
 
+bool WiiSpeakState::IsSampleOn() const
+{
+  return sample_on;
+}
+
+bool WiiSpeakState::IsMuted() const
+{
+  return mute;
+}
+
+u32 WiiSpeakState::GetDefaultSamplingRate() const
+{
+  return DEFAULT_SAMPLING_RATE;
+}
+
 WiiSpeak::WiiSpeak()
 {
-  m_id = u64(m_vid) << 32 | u64(m_pid) << 16 | u64(9) << 8 | u64(1);
+  m_id = u64{VENDOR_ID} << 32 | u64{PRODUCT_ID} << 16 | u64{9} << 8 | u64{1};
 }
 
 WiiSpeak::~WiiSpeak() = default;
 
 DeviceDescriptor WiiSpeak::GetDeviceDescriptor() const
 {
-  return m_device_descriptor;
+  return DEVICE_DESCRIPTOR;
 }
 
 std::vector<ConfigDescriptor> WiiSpeak::GetConfigurations() const
 {
-  return m_config_descriptor;
+  return {CONFIG_DESCRIPTOR};
 }
 
-std::vector<InterfaceDescriptor> WiiSpeak::GetInterfaces(u8 config) const
+std::vector<InterfaceDescriptor> WiiSpeak::GetInterfaces(u8) const
 {
-  return m_interface_descriptor;
+  return {VendorInterface(0, 0), VendorInterface(1, 3)};
 }
 
-std::vector<EndpointDescriptor> WiiSpeak::GetEndpoints(u8 config, u8 iface, u8 alt) const
+std::vector<EndpointDescriptor> WiiSpeak::GetEndpoints(u8, u8, u8) const
 {
-  return m_endpoint_descriptor;
+  return {Endpoint(EP_AUDIO_IN, ISOCHRONOUS, 0x0020, 1), Endpoint(EP_DATA_OUT, BULK, 0x0020, 0),
+          Endpoint(EP_AUDIO_OUT, ISOCHRONOUS, 0x0040, 1)};
 }
 
 bool WiiSpeak::Attach()
 {
-  if (m_device_attached)
-    return true;
-
-  DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x}] Opening device", m_vid, m_pid);
-  if (!m_microphone)
+  if (!m_device_attached)
   {
-    m_microphone = std::make_unique<MicrophoneWiiSpeak>(m_sampler);
-    m_microphone->Initialize();
+    DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x}] Opening device", VENDOR_ID, PRODUCT_ID);
+    if (m_microphone == nullptr)
+    {
+      m_microphone = std::make_unique<WiiSpeakMicrophone>(m_sampler);
+      m_microphone->Initialize();
+    }
+    m_device_attached = true;
   }
-  m_device_attached = true;
   return true;
 }
 
-bool WiiSpeak::AttachAndChangeInterface(const u8 iface)
+bool WiiSpeak::AttachAndChangeInterface(const u8 f)
 {
   if (!Attach())
     return false;
-
-  if (iface != m_active_interface)
-    return ChangeInterface(iface) == 0;
-
-  return true;
+  return f == m_active_interface || ChangeInterface(f) == 0;
 }
 
 int WiiSpeak::CancelTransfer(const u8 endpoint)
 {
-  INFO_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Cancelling transfers (endpoint {:#x})", m_vid, m_pid,
-               m_active_interface, endpoint);
-
+  INFO_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Cancelling transfers (endpoint {:#x})", VENDOR_ID,
+               PRODUCT_ID, m_active_interface, endpoint);
   return IPC_SUCCESS;
 }
 
 int WiiSpeak::ChangeInterface(const u8 iface)
 {
-  DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Changing interface to {}", m_vid, m_pid,
+  DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Changing interface to {}", VENDOR_ID, PRODUCT_ID,
                 m_active_interface, iface);
   m_active_interface = iface;
   return 0;
 }
 
-int WiiSpeak::GetNumberOfAltSettings(u8 iface)
+int WiiSpeak::GetNumberOfAltSettings(u8)
 {
   return 0;
 }
 
-int WiiSpeak::SetAltSetting(u8 alt_setting)
+int WiiSpeak::SetAltSetting(u8)
 {
   return 0;
 }
 
-int WiiSpeak::SubmitTransfer(std::unique_ptr<CtrlMessage> cmd)
+int WiiSpeak::SubmitTransfer(std::unique_ptr<CtrlMessage> message)
 {
+  CtrlMessage& cmd = *message;
+  EmulationKernel& ios = cmd.GetEmulationKernel();
   DEBUG_LOG_FMT(IOS_USB,
                 "[{:04x}:{:04x} {}] Control: bRequestType={:02x} bRequest={:02x} wValue={:04x}"
                 " wIndex={:04x} wLength={:04x}",
-                m_vid, m_pid, m_active_interface, cmd->request_type, cmd->request, cmd->value,
-                cmd->index, cmd->length);
+                VENDOR_ID, PRODUCT_ID, m_active_interface, cmd.request_type, cmd.request,
+                cmd.value, cmd.index, cmd.length);
 
-  switch (cmd->request_type << 8 | cmd->request)
+  const u16 setup = static_cast<u16>(cmd.request_type << 8 | cmd.request);
+  if (setup == USBHDR(DIR_DEVICE2HOST, TYPE_STANDARD, REC_INTERFACE, REQUEST_GET_INTERFACE))
   {
-  case USBHDR(DIR_DEVICE2HOST, TYPE_STANDARD, REC_INTERFACE, REQUEST_GET_INTERFACE):
-  {
-    constexpr u8 data{1};
-    cmd->FillBuffer(&data, sizeof(data));
-    cmd->ScheduleTransferCompletion(1, 100);
-    break;
+    const u8 current_alt = 1;
+    cmd.FillBuffer(&current_alt, 1);
+    cmd.ScheduleTransferCompletion(1, 100);
+    return IPC_SUCCESS;
   }
-  case USBHDR(DIR_HOST2DEVICE, TYPE_STANDARD, REC_INTERFACE, REQUEST_SET_INTERFACE):
+  if (setup == USBHDR(DIR_HOST2DEVICE, TYPE_STANDARD, REC_INTERFACE, REQUEST_SET_INTERFACE))
   {
     INFO_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] REQUEST_SET_INTERFACE index={:04x} value={:04x}",
-                 m_vid, m_pid, m_active_interface, cmd->index, cmd->value);
-    if (static_cast<u8>(cmd->index) != m_active_interface)
+                 VENDOR_ID, PRODUCT_ID, m_active_interface, cmd.index, cmd.value);
+    const u8 iface = static_cast<u8>(cmd.index);
+    if (iface != m_active_interface)
     {
-      const int ret = ChangeInterface(static_cast<u8>(cmd->index));
-      if (ret < 0)
-      {
-        ERROR_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Failed to change interface to {}", m_vid, m_pid,
-                      m_active_interface, cmd->index);
-        return ret;
-      }
+      if (const int error = ChangeInterface(iface); error < 0)
+        return error;
     }
-    const int ret = SetAltSetting(static_cast<u8>(cmd->value));
-    if (ret == 0)
-      cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, cmd->length);
-    return ret;
+    const int result = SetAltSetting(static_cast<u8>(cmd.value));
+    if (result == 0)
+      ios.EnqueueIPCReply(cmd.ios_request, cmd.length);
+    return result;
   }
-  case USBHDR(DIR_HOST2DEVICE, TYPE_VENDOR, REC_INTERFACE, 0):
+
+  if (setup == USBHDR(DIR_HOST2DEVICE, TYPE_VENDOR, REC_INTERFACE, VENDOR_RESET))
   {
-    init = false;
-    cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
-    break;
+    m_ready = false;
   }
-  case USBHDR(DIR_DEVICE2HOST, TYPE_VENDOR, REC_INTERFACE, REQUEST_GET_DESCRIPTOR):
+  else if (setup == USBHDR(DIR_DEVICE2HOST, TYPE_VENDOR, REC_INTERFACE, REQUEST_GET_DESCRIPTOR))
   {
-    if (!init)
-    {
-      constexpr u8 data{0};
-      cmd->FillBuffer(&data, sizeof(data));
-      cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
-      init = true;
-    }
-    else
-    {
-      constexpr u8 data{1};
-      cmd->FillBuffer(&data, sizeof(data));
-      cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
-    }
-    break;
+    // Answers 0 the first time after a reset, 1 afterwards.
+    const u8 ready = m_ready ? 1 : 0;
+    cmd.FillBuffer(&ready, 1);
+    m_ready = true;
   }
-  case USBHDR(DIR_HOST2DEVICE, TYPE_VENDOR, REC_INTERFACE, 1):
-    SetRegister(cmd);
-    cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
-    break;
-  case USBHDR(DIR_DEVICE2HOST, TYPE_VENDOR, REC_INTERFACE, 2):
-    GetRegister(cmd);
-    cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
-    break;
-  default:
+  else if (setup == USBHDR(DIR_HOST2DEVICE, TYPE_VENDOR, REC_INTERFACE, VENDOR_WRITE_REGISTER))
+  {
+    WriteRegister(cmd);
+  }
+  else if (setup == USBHDR(DIR_DEVICE2HOST, TYPE_VENDOR, REC_INTERFACE, VENDOR_READ_REGISTER))
+  {
+    ReadRegister(cmd);
+  }
+  else
+  {
     NOTICE_LOG_FMT(IOS_USB, "Unknown command");
-    cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
   }
-
+  ios.EnqueueIPCReply(cmd.ios_request, IPC_SUCCESS);
   return IPC_SUCCESS;
 }
 
-int WiiSpeak::SubmitTransfer(std::unique_ptr<BulkMessage> cmd)
+int WiiSpeak::SubmitTransfer(std::unique_ptr<BulkMessage> message)
 {
-  cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
+  message->GetEmulationKernel().EnqueueIPCReply(message->ios_request, IPC_SUCCESS);
   return IPC_SUCCESS;
 }
 
-int WiiSpeak::SubmitTransfer(std::unique_ptr<IntrMessage> cmd)
+int WiiSpeak::SubmitTransfer(std::unique_ptr<IntrMessage> message)
 {
-  cmd->GetEmulationKernel().EnqueueIPCReply(cmd->ios_request, IPC_SUCCESS);
+  message->GetEmulationKernel().EnqueueIPCReply(message->ios_request, IPC_SUCCESS);
   return IPC_SUCCESS;
 }
 
-int WiiSpeak::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
+int WiiSpeak::SubmitTransfer(std::unique_ptr<IsoMessage> message)
 {
-  auto& system = cmd->GetEmulationKernel().GetSystem();
-  auto& memory = system.GetMemory();
-
-  u8* packets = memory.GetPointerForRange(cmd->data_address, cmd->length);
-  if (packets == nullptr)
+  IsoMessage& cmd = *message;
+  auto& memory = cmd.GetEmulationKernel().GetSystem().GetMemory();
+  u8* const buffer = memory.GetPointerForRange(cmd.data_address, cmd.length);
+  if (buffer == nullptr)
   {
     ERROR_LOG_FMT(IOS_USB, "Wii Speak command invalid");
     return IPC_EINVAL;
   }
 
-  switch (cmd->endpoint)
+  if (cmd.endpoint == EP_AUDIO_IN)
   {
-  case ENDPOINT_AUDIO_IN:
-  {
-    // Transfer: Wii Speak -> Wii
-    u16 size = 0;
-    if (m_microphone && m_microphone->HasData(cmd->length / sizeof(s16)))
-      size = m_microphone->ReadIntoBuffer(packets, cmd->length);
-    if (const u16 remainder = cmd->SetPacketsReturnValueFromSize(size); remainder != 0)
-    {
-      WARN_LOG_FMT(IOS_USB, "Wii Speak data truncated, {} byte(s) lost in isochronous message",
-                   remainder);
-    }
-    break;
+    // Hand over captured audio only when a whole transfer's worth is ready.
+    u16 filled = 0;
+    const u32 wanted_samples = static_cast<u32>(cmd.length / sizeof(s16));
+    if (m_microphone != nullptr && m_microphone->HasData(wanted_samples))
+      filled = m_microphone->ReadIntoBuffer(buffer, cmd.length);
+    const u16 lost = cmd.SetPacketsReturnValueFromSize(filled);
+    if (lost != 0)
+      WARN_LOG_FMT(IOS_USB, "Wii Speak: {} byte(s) did not fit the isochronous packets", lost);
   }
-  case ENDPOINT_AUDIO_OUT:
-    // Transfer: Wii -> Wii Speak
-    break;
-  default:
-    WARN_LOG_FMT(IOS_USB, "Wii Speak unsupported isochronous transfer (endpoint={:02x})",
-                 cmd->endpoint);
-    break;
+  else if (cmd.endpoint != EP_AUDIO_OUT)
+  {
+    // Audio sent to the device's speaker is ignored; anything else is unexpected.
+    WARN_LOG_FMT(IOS_USB, "Wii Speak: isochronous transfer on unsupported endpoint {:02x}",
+                 cmd.endpoint);
   }
 
-  // Transferring too slow causes the visual cue to not appear,
-  // while transferring too fast results in more choppy audio.
-  DEBUG_LOG_FMT(IOS_USB,
-                "Wii Speak isochronous transfer: length={:04x} endpoint={:02x} num_packets={:02x}",
-                cmd->length, cmd->endpoint, cmd->num_packets);
-
-  // According to the Wii Speak specs on wiibrew, it's "USB 2.0 Full-speed Device Module",
-  // so the length of a single frame should be 1 ms.
-  //
-  // Monster Hunter 3 and the Wii Speak Channel use cmd->length=0x100, allowing 256/2 samples
-  // (i.e. 128 samples in 16-bit mono) per frame transfer. The Microphone class is using cubeb
-  // configured with a sample rate of 8000.
-  //
-  // Based on USB sniffing using Wireshark + Dolphin USB passthrough:
-  //  - 125 frames are received per second (i.e. timing 8 ms per frame)
-  //  - however, the cmd->length=0x80 which doesn't match the HLE emulation
-  //  - each frame having 8 packets of 0x10 bytes
-  //
-  // Let's sample at a reasonable speed.
-  const u32 transfer_timing = 2000;
-  cmd->ScheduleTransferCompletion(IPC_SUCCESS, transfer_timing);
+  DEBUG_LOG_FMT(IOS_USB, "Wii Speak isochronous transfer: length={:04x} endpoint={:02x} packets={}",
+                cmd.length, cmd.endpoint, cmd.num_packets);
+  cmd.ScheduleTransferCompletion(IPC_SUCCESS, ISO_TRANSFER_US);
   return IPC_SUCCESS;
 }
 
-void WiiSpeak::SetRegister(const std::unique_ptr<CtrlMessage>& cmd)
+void WiiSpeak::WriteRegister(const CtrlMessage& cmd)
 {
-  auto& system = cmd->GetEmulationKernel().GetSystem();
-  auto& memory = system.GetMemory();
-  const u8 reg = memory.Read_U8(cmd->data_address + 1) & ~1;
-  const u16 arg1 = memory.Read_U16(cmd->data_address + 2);
-  const u16 arg2 = memory.Read_U16(cmd->data_address + 4);
-
-  DEBUG_LOG_FMT(IOS_USB, "Wii Speak register set (reg={:02x}, arg1={:04x}, arg2={:04x})", reg, arg1,
-                arg2);
+  auto& memory = cmd.GetEmulationKernel().GetSystem().GetMemory();
+  const u8 reg = memory.Read_U8(cmd.data_address + 1) & 0xFE;
+  const u16 value = memory.Read_U16(cmd.data_address + 2);
+  const u16 extra = memory.Read_U16(cmd.data_address + 4);
+  DEBUG_LOG_FMT(IOS_USB, "Wii Speak register write: reg={:02x} value={:04x} extra={:04x}", reg,
+                value, extra);
 
   switch (reg)
   {
-  case SAMPLER_STATE:
-    m_sampler.sample_on = !!arg1;
+  case REG_SAMPLER:
+    m_sampler.sample_on = value != 0;
     break;
-  case SAMPLER_FREQ:
-    switch (arg1)
-    {
-    case FREQ_8KHZ:
-      m_sampler.freq = 8000;
-      break;
-    case FREQ_11KHZ:
-      m_sampler.freq = 11025;
-      break;
-    case FREQ_RESERVED:
-    default:
-      WARN_LOG_FMT(IOS_USB,
-                   "Wii Speak unsupported SAMPLER_FREQ set (arg1={:04x}, arg2={:04x}) defaulting "
-                   "to FREQ_16KHZ",
-                   arg1, arg2);
-      [[fallthrough]];
-    case FREQ_16KHZ:
-      m_sampler.freq = 16000;
-      break;
-    }
-    if (m_microphone)
-      m_microphone->SetSamplingRate(m_sampler.freq);
+  case REG_MUTE:
+    m_sampler.mute = value != 0;
     break;
-  case SAMPLER_GAIN:
-    WARN_LOG_FMT(IOS_USB, "Wii Speak SAMPLER_GAIN set (arg1={:04x}, arg2={:04x}) not implemented",
-                 arg1, arg2);
-    switch (arg1 & ~0x300)
-    {
-    case GAIN_00dB:
-      m_sampler.gain = 0;
-      break;
-    case GAIN_15dB:
-      m_sampler.gain = 15;
-      break;
-    case GAIN_30dB:
-      m_sampler.gain = 30;
-      break;
-    default:
-      WARN_LOG_FMT(IOS_USB,
-                   "Wii Speak unsupported SAMPLER_GAIN set (arg1={:04x}, arg2={:04x}) defaulting "
-                   "to GAIN_36dB",
-                   arg1, arg2);
-      [[fallthrough]];
-    case GAIN_36dB:
-      m_sampler.gain = 36;
-      break;
-    }
+  case REG_ECHO_CANCEL:
+    m_sampler.ec_reset = value != 0;
     break;
-  case EC_STATE:
-    m_sampler.ec_reset = !!arg1;
+  case REG_FREQUENCY:
+    m_sampler.freq = ValueForCode(FREQUENCIES, value, "sampling rate");
+    if (m_microphone != nullptr)
+      m_microphone->SetSamplingRate(static_cast<u32>(m_sampler.freq));
     break;
-  case SP_STATE:
-    switch (arg1)
-    {
-    case SP_ENABLE:
-      m_sampler.sp_on = arg2 == 0;
-      break;
-    case SP_SIN:
-    case SP_SOUT:
-    case SP_RIN:
-      break;
-    default:
-      WARN_LOG_FMT(IOS_USB, "Wii Speak unsupported SP_STATE set (arg1={:04x}, arg2={:04x})", arg1,
-                   arg2);
-      break;
-    }
+  case REG_GAIN:
+    // Stored and reported back, but not applied to the audio.
+    m_sampler.gain = ValueForCode(GAINS, static_cast<u16>(value & ~GAIN_READ_BITS), "gain");
     break;
-  case SAMPLER_MUTE:
-    m_sampler.mute = !!arg1;
+  case REG_SPEECH:
+    if (value == SPEECH_ENABLE)
+      m_sampler.sp_on = extra == 0;
+    else if (value != SPEECH_SIN && value != SPEECH_SOUT && value != SPEECH_RIN)
+      WARN_LOG_FMT(IOS_USB, "Wii Speak: unknown speech write {:04x} {:04x}", value, extra);
     break;
   default:
-    WARN_LOG_FMT(IOS_USB,
-                 "Wii Speak unsupported register set (reg={:02x}, arg1={:04x}, arg2={:04x})", reg,
-                 arg1, arg2);
+    WARN_LOG_FMT(IOS_USB, "Wii Speak: write to unknown register {:02x} ({:04x} {:04x})", reg,
+                 value, extra);
     break;
   }
 }
 
-void WiiSpeak::GetRegister(const std::unique_ptr<CtrlMessage>& cmd) const
+void WiiSpeak::ReadRegister(const CtrlMessage& cmd) const
 {
-  auto& system = cmd->GetEmulationKernel().GetSystem();
-  auto& memory = system.GetMemory();
-  const u8 reg = memory.Read_U8(cmd->data_address + 1) & ~1;
-  const u32 arg1 = cmd->data_address + 2;
-  const u32 arg2 = cmd->data_address + 4;
-
-  DEBUG_LOG_FMT(IOS_USB, "Wii Speak register get (reg={:02x}, arg1={:08x}, arg2={:08x})", reg, arg1,
-                arg2);
+  auto& memory = cmd.GetEmulationKernel().GetSystem().GetMemory();
+  const u8 reg = memory.Read_U8(cmd.data_address + 1) & 0xFE;
+  const u32 value_address = cmd.data_address + 2;
+  const u32 extra_address = cmd.data_address + 4;
+  DEBUG_LOG_FMT(IOS_USB, "Wii Speak register read: reg={:02x}", reg);
 
   switch (reg)
   {
-  case SAMPLER_STATE:
-    memory.Write_U16(m_sampler.sample_on ? 1 : 0, arg1);
+  case REG_SAMPLER:
+    memory.Write_U16(m_sampler.sample_on ? 1 : 0, value_address);
     break;
-  case SAMPLER_FREQ:
-    switch (m_sampler.freq)
+  case REG_MUTE:
+    memory.Write_U16(m_sampler.mute ? 1 : 0, value_address);
+    break;
+  case REG_ECHO_CANCEL:
+    memory.Write_U16(m_sampler.ec_reset ? 1 : 0, value_address);
+    break;
+  case REG_FREQUENCY:
+    memory.Write_U16(CodeForValue(FREQUENCIES, m_sampler.freq, "sampling rate"), value_address);
+    break;
+  case REG_GAIN:
+    memory.Write_U16(static_cast<u16>(GAIN_READ_BITS | CodeForValue(GAINS, m_sampler.gain, "gain")),
+                     value_address);
+    break;
+  case REG_SPEECH:
+  {
+    const u16 query = memory.Read_U16(value_address);
+    if (query == SPEECH_ENABLE)
     {
-    case 8000:
-      memory.Write_U16(FREQ_8KHZ, arg1);
-      break;
-    case 11025:
-      memory.Write_U16(FREQ_11KHZ, arg1);
-      break;
-    default:
-      WARN_LOG_FMT(IOS_USB,
-                   "Wii Speak unsupported SAMPLER_FREQ get (arg1={:04x}, arg2={:04x}) defaulting "
-                   "to FREQ_16KHZ",
-                   arg1, arg2);
-      [[fallthrough]];
-    case 16000:
-      memory.Write_U16(FREQ_16KHZ, arg1);
-      break;
+      memory.Write_U16(1, extra_address);
+    }
+    else if (query == SPEECH_SOUT)
+    {
+      const u16 level = m_microphone != nullptr ? m_microphone->GetLoudnessLevel() : 0;
+      memory.Write_U16(level, extra_address);
+    }
+    else if (query != SPEECH_SIN && query != SPEECH_RIN)
+    {
+      WARN_LOG_FMT(IOS_USB, "Wii Speak: unknown speech read {:04x}", query);
     }
     break;
-  case SAMPLER_GAIN:
-    switch (m_sampler.gain)
-    {
-    case 0:
-      memory.Write_U16(0x300 | GAIN_00dB, arg1);
-      break;
-    case 15:
-      memory.Write_U16(0x300 | GAIN_15dB, arg1);
-      break;
-    case 30:
-      memory.Write_U16(0x300 | GAIN_30dB, arg1);
-      break;
-    default:
-      WARN_LOG_FMT(IOS_USB,
-                   "Wii Speak unsupported SAMPLER_GAIN get (arg1={:04x}, arg2={:04x}) defaulting "
-                   "to GAIN_36dB",
-                   arg1, arg2);
-      [[fallthrough]];
-    case 36:
-      memory.Write_U16(0x300 | GAIN_36dB, arg1);
-      break;
-    }
-    break;
-  case EC_STATE:
-    memory.Write_U16(m_sampler.ec_reset ? 1 : 0, arg1);
-    break;
-  case SP_STATE:
-    switch (memory.Read_U16(arg1))
-    {
-    case SP_ENABLE:
-      memory.Write_U16(1, arg2);
-      break;
-    case SP_SIN:
-      break;
-    case SP_SOUT:
-      // TODO: Find how it was measured and how accurate it was
-      // memory.Write_U16(0x39B0, arg2);  // 6dB
-      memory.Write_U16(m_microphone->GetLoudnessLevel(), arg2);
-      break;
-    case SP_RIN:
-      break;
-    default:
-      WARN_LOG_FMT(IOS_USB, "Wii Speak unsupported SP_STATE get (arg1={:04x}, arg2={:04x})", arg1,
-                   arg2);
-      break;
-    }
-    break;
-  case SAMPLER_MUTE:
-    memory.Write_U16(m_sampler.mute ? 1 : 0, arg1);
-    break;
+  }
   default:
-    WARN_LOG_FMT(IOS_USB,
-                 "Wii Speak unsupported register get (reg={:02x}, arg1={:08x}, arg2={:08x})", reg,
-                 arg1, arg2);
+    WARN_LOG_FMT(IOS_USB, "Wii Speak: read of unknown register {:02x}", reg);
     break;
   }
 }

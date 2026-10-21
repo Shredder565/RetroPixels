@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -21,6 +21,7 @@ struct cubeb_stream;
 
 namespace IOS::HLE::USB
 {
+// What an emulated USB microphone tells the capture code: whether the game wants samples.
 class MicrophoneState
 {
 public:
@@ -31,6 +32,9 @@ public:
   virtual u32 GetDefaultSamplingRate() const = 0;
 };
 
+// Captures mono 16-bit audio from a host input device (through cubeb) into a ring buffer that an
+// emulated device drains in blocks of BUFF_SIZE_SAMPLES samples. It also keeps a rough loudness
+// level of the captured audio for devices that report one.
 class Microphone
 {
 public:
@@ -52,69 +56,43 @@ protected:
   static constexpr u32 BUFF_SIZE_SAMPLES = 32;
 
 private:
+  // Per-device settings, provided by the emulated device.
 #ifdef HAVE_CUBEB
-  static long CubebDataCallback(cubeb_stream* stream, void* user_data, const void* input_buffer,
-                                void* output_buffer, long nframes);
   virtual std::string GetInputDeviceId() const = 0;
   virtual std::string GetCubebStreamName() const = 0;
   virtual s16 GetVolumeModifier() const = 0;
   virtual bool AreSamplesByteSwapped() const = 0;
 #endif
-
-  long DataCallback(const SampleType* input_buffer, long nframes);
   virtual bool IsMicrophoneMuted() const = 0;
-  void UpdateLoudness(SampleType sample);
-
-  void StreamInit();
-  void StreamTerminate();
-  void StreamStart(u32 sampling_rate);
-  void StreamStop();
-
   virtual u32 GetStreamSize() const = 0;
-  std::vector<SampleType> m_stream_buffer{};
-  u32 m_stream_wpos = 0;
-  u32 m_stream_rpos = 0;
-  u32 m_samples_avail = 0;
 
-  // TODO: Find how this level is calculated on real hardware
-  std::atomic<u16> m_loudness_level = 0;
-  struct Loudness
-  {
-    void Update(SampleType sample);
+#ifdef HAVE_CUBEB
+  static long OnCubebData(cubeb_stream* stream, void* user_data, const void* input_buffer,
+                          void* output_buffer, long nframes);
+#endif
+  long StoreCapturedSamples(const SampleType* samples, long count);
+  void FeedLevelMeter(SampleType sample);
 
-    SampleType GetPeak() const;
-    static FloatType GetDecibel(FloatType value);
-    FloatType GetAmplitude() const;
-    FloatType GetAmplitudeDb() const;
-    FloatType GetAbsoluteMean() const;
-    FloatType GetAbsoluteMeanDb() const;
-    FloatType GetRootMeanSquare() const;
-    FloatType GetRootMeanSquareDb() const;
-    FloatType GetCrestFactor() const;
-    FloatType GetCrestFactorDb() const;
-    static FloatType ComputeGain(FloatType db);
+  void OpenContext();
+  void CloseContext();
+  void OpenStream(u32 sampling_rate);
+  void CloseStream();
 
-    void Reset();
-    void LogStats();
-
-    // Samples used to compute the loudness level (arbitrarily chosen)
-    static constexpr u16 SAMPLES_NEEDED = 128;
-    static_assert((SAMPLES_NEEDED % BUFF_SIZE_SAMPLES) == 0);
-
-    static constexpr FloatType MAX_AMPLITUDE =
-        UnsignedSampleType{std::numeric_limits<UnsignedSampleType>::max() / 2};
-    static const FloatType DB_MIN;
-    static const FloatType DB_MAX;
-
-    u16 samples_count = 0;
-    u32 absolute_sum = 0;
-    FloatType square_sum = FloatType(0);
-    SampleType peak_min = 0;
-    SampleType peak_max = 0;
-  };
-  Loudness m_loudness;
-
+  // Ring buffer of captured samples (already in the device's byte order).
+  std::vector<SampleType> m_ring;
+  u32 m_write_index = 0;
+  u32 m_read_index = 0;
+  u32 m_buffered = 0;
   mutable std::mutex m_ring_lock;
+
+  // Loudness: the peak of each window of LEVEL_WINDOW_SAMPLES samples, mapped onto
+  // 0..LEVEL_RANGE on a decibel scale. How real hardware measures it is unknown.
+  static constexpr u16 LEVEL_WINDOW_SAMPLES = 128;
+  static_assert(LEVEL_WINDOW_SAMPLES % BUFF_SIZE_SAMPLES == 0);
+  u16 m_window_samples = 0;
+  SampleType m_window_low = 0;
+  SampleType m_window_high = 0;
+  std::atomic<u16> m_loudness_level = 0;
 
   const MicrophoneState& m_sampler;
 

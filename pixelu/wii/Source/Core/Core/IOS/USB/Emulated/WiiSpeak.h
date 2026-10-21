@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,16 +12,17 @@
 
 namespace IOS::HLE::USB
 {
+// The sampler settings a game programs into the Wii Speak through its vendor registers.
 class WiiSpeakState final : public MicrophoneState
 {
 public:
-  // Use atomic for members concurrently used by the data callback
-  std::atomic<bool> sample_on;
-  std::atomic<bool> mute;
-  int freq;
-  int gain;
-  bool ec_reset;
-  bool sp_on;
+  // Read by the capture callback on another thread.
+  std::atomic<bool> sample_on = false;
+  std::atomic<bool> mute = false;
+  int freq = 0;
+  int gain = 0;
+  bool ec_reset = false;
+  bool sp_on = false;
 
   static constexpr u32 DEFAULT_SAMPLING_RATE = 16000;
 
@@ -31,6 +31,8 @@ public:
   u32 GetDefaultSamplingRate() const override;
 };
 
+// The Wii Speak (057e:0308), a USB microphone for the Wii. Audio goes to the console on an
+// isochronous IN endpoint; the sampler is configured with vendor control requests.
 class WiiSpeak final : public Device
 {
 public:
@@ -53,56 +55,15 @@ public:
   int SubmitTransfer(std::unique_ptr<IsoMessage> message) override;
 
 private:
+  // Vendor register access: the 6-byte payload is {?, register, value (BE), extra (BE)}.
+  void WriteRegister(const CtrlMessage& cmd);
+  void ReadRegister(const CtrlMessage& cmd) const;
+
   WiiSpeakState m_sampler{};
-
-  enum Registers
-  {
-    SAMPLER_STATE = 0,
-    SAMPLER_MUTE = 0x0c,
-
-    SAMPLER_FREQ = 2,
-    FREQ_8KHZ = 0,
-    FREQ_11KHZ = 1,
-    FREQ_RESERVED = 2,
-    FREQ_16KHZ = 3,  // default
-
-    SAMPLER_GAIN = 4,
-    GAIN_00dB = 0,
-    GAIN_15dB = 1,
-    GAIN_30dB = 2,
-    GAIN_36dB = 3,  // default
-
-    EC_STATE = 0x14,
-
-    SP_STATE = 0x38,
-    SP_ENABLE = 0x1010,
-    SP_SIN = 0x2001,
-    SP_SOUT = 0x2004,
-    SP_RIN = 0x200d
-  };
-
-  void GetRegister(const std::unique_ptr<CtrlMessage>& cmd) const;
-  void SetRegister(const std::unique_ptr<CtrlMessage>& cmd);
-
-  const u16 m_vid = 0x057E;
-  const u16 m_pid = 0x0308;
+  std::unique_ptr<Microphone> m_microphone;
   u8 m_active_interface = 0;
   bool m_device_attached = false;
-  bool init = false;
-  std::unique_ptr<Microphone> m_microphone{};
-  const DeviceDescriptor m_device_descriptor{0x12,  0x1,    0x200,  0,   0,   0,   0x10,
-                                             0x57E, 0x0308, 0x0214, 0x1, 0x2, 0x0, 0x1};
-  const std::vector<ConfigDescriptor> m_config_descriptor{
-      {0x9, 0x2, 0x0030, 0x1, 0x1, 0x0, 0x80, 0x32}};
-  const std::vector<InterfaceDescriptor> m_interface_descriptor{
-      {0x9, 0x4, 0x0, 0x0, 0x0, 0xFF, 0xFF, 0xFF, 0x0},
-      {0x9, 0x4, 0x0, 0x01, 0x03, 0xFF, 0xFF, 0xFF, 0x0}};
-  static constexpr u8 ENDPOINT_AUDIO_IN = 0x81;
-  static constexpr u8 ENDPOINT_AUDIO_OUT = 0x3;
-  static constexpr u8 ENDPOINT_DATA_OUT = 0x2;
-  const std::vector<EndpointDescriptor> m_endpoint_descriptor{
-      {0x7, 0x5, ENDPOINT_AUDIO_IN, 0x1, 0x0020, 0x1},
-      {0x7, 0x5, ENDPOINT_DATA_OUT, 0x2, 0x0020, 0},
-      {0x7, 0x5, ENDPOINT_AUDIO_OUT, 0x1, 0x0040, 0x1}};
+  // Flips to true after the first vendor GET_DESCRIPTOR following a vendor reset.
+  bool m_ready = false;
 };
 }  // namespace IOS::HLE::USB

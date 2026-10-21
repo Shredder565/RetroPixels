@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,13 +12,13 @@
 
 namespace IOS::HLE::USB
 {
-
+// Settings the game controls through USB Audio Class requests.
 class LogitechMicState final : public MicrophoneState
 {
 public:
-  // Use atomic for members concurrently used by the data callback
-  std::atomic<bool> mute;
-  std::atomic<u8> volume;
+  // Read by the capture callback on another thread.
+  std::atomic<bool> mute = false;
+  std::atomic<u8> volume = 0;
   std::atomic<u32> sample_rate = DEFAULT_SAMPLING_RATE;
 
   static constexpr u32 DEFAULT_SAMPLING_RATE = 48000;
@@ -29,6 +28,8 @@ public:
   u32 GetDefaultSamplingRate() const override;
 };
 
+// The Logitech USB microphone (046d:0a03) used by Rock Band and other games: a standard USB
+// Audio Class 1.0 device with one mono 16-bit input. Up to four can be emulated (index 0-3).
 class LogitechMic final : public Device
 {
 public:
@@ -50,17 +51,16 @@ public:
   int SubmitTransfer(std::unique_ptr<IsoMessage> cmd) override;
 
 private:
+  // Audio Class requests. Each returns the number of bytes answered, 0 for an accepted
+  // request without data, or IPC_STALL.
+  int FeatureUnitGet(const CtrlMessage& cmd) const;
+  int FeatureUnitSet(const CtrlMessage& cmd);
+  int EndpointRequest(const CtrlMessage& cmd);
+
   LogitechMicState m_sampler{};
-
-  int GetAudioControl(std::unique_ptr<CtrlMessage>& cmd);
-  int SetAudioControl(std::unique_ptr<CtrlMessage>& cmd);
-  int EndpointAudioControl(std::unique_ptr<CtrlMessage>& cmd);
-
-  const u16 m_vid = 0x046d;
-  const u16 m_pid = 0x0a03;
+  std::unique_ptr<Microphone> m_microphone;
   u8 m_index = 0;
   u8 m_active_interface = 0;
   bool m_device_attached = false;
-  std::unique_ptr<Microphone> m_microphone{};
 };
 }  // namespace IOS::HLE::USB
