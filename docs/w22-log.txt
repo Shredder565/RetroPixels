@@ -1,0 +1,103 @@
+- W22 log: rewrote all 34 W22 files in `Core/Core`, the core session and its
+  helpers (9463 lines now, from 10095): BootManager, CPUThreadConfigCallback,
+  CommonTitles.h, ConfigManager, Core, FreeLookManager, Host.h,
+  HotkeyManager, MachineContext.h, MemTools, Movie, State, SyncIdentifier.h,
+  SysConf, System, TimePlayed, TitleDatabase, WiiRoot and WiiUtils. Every
+  rewritten file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. File names, public declarations and layouts,
+  config keys (section, system, name and default), paths, the SYSCONF, DTM,
+  savestate and WAD/NAND bytes, the order of every callback and host call
+  in Core start, stop, pause and frame stepping, and all translatable
+  strings are unchanged. The window title stays
+  "PixelU Wii (Dolphin {GetScmDescStr()}) | settings".
+  - `Core`/`System`: session start and stop sequencing (EmuThread and
+    CPU/GPU thread start-up and teardown order, dual and single core, FIFO
+    player, GDB stub, fastmem/EMM, SD card sync), pause, frame step, host
+    jobs, CPU-thread guards and the title string; System keeps its parts in
+    the same construction and destruction order.
+  - `BootManager`/`ConfigManager`: BootCore (config layers, NetPlay and
+    movie settings, Wii root, SYSCONF hand-over) and RestoreConfig;
+    running game metadata, title hooks, boot-parameter metadata, language
+    and region rules, GameTDB region codes and the game INI merges.
+  - `Movie`: DTM header and input layout, recording, playback, the input
+    and Wii Remote readers, desync checks and their messages, and the
+    savestate hooks.
+  - `State`: savestate file layout (header, LZ4/LZO blocks, version
+    strings), the save worker, the undo slots and the last-saved list.
+  - `SysConf`: SYSCONF parsing and writing, entry types and defaults.
+  - `WiiRoot`/`WiiUtils`: temporary and NetPlay Wii roots (setup,
+    save seeding and redirects, teardown and copy-back), WAD install and
+    uninstall, the online and disc system updaters (same SOAP request bytes),
+    NAND check and repair, and the backup TMD lookup. Both still use the
+    owner's keys file exactly as before.
+  - `HotkeyManager`/`FreeLookManager`: hotkey groups and default mappings,
+    pressed/held tracking, the config sections, and the free look camera
+    controls and background input handling.
+  - `MemTools`/`MachineContext`: the SIGSEGV handler (with its own signal
+    stack, falling back to the previous handler) and the Windows vectored
+    exception handler.
+  - `TimePlayed`, `TitleDatabase`, `CPUThreadConfigCallback`,
+    `CommonTitles.h`, `Host.h`, `SyncIdentifier.h`.
+  - Deliberate differences (no change for a game, a DTM or a save):
+    - MachineContext and MemTools drop the macOS (Mach exception port),
+      BSD and ARM branches, and FreeLookManager drops the Apple/Android
+      branches; PixelU-Wii builds only for x86-64 Linux and Windows.
+    - Core: the GPU thread owns the start-up promise it fulfils.
+    - SConfig's title ID, revision and memory-size fields start at 0
+      (they were uninitialised until the first metadata reset).
+    - State: an LZO block whose output would overrun the buffer is
+      rejected; `LoadLastSaved` refuses an index equal to the list size
+      (the old code read past the end), and keeps the old index rule
+      otherwise. The 16-bit LZO paths are gone.
+    - WiiUtils: the SOAP request is built differently (same bytes);
+      `GetDeviceRegion` returns "EUR" for a System Menu region with no
+      code, where the old map lookup threw.
+    - Movie: each DSP ROM is checked for in the user directory and opened
+      before the next one (the old code checked both first); same hashes.
+    - Assert expression texts differ.
+  - Bugs found by the old-vs-new harnesses and fixed before the end:
+    Movie showed the controller hint in the opposite case, WiiRoot dropped
+    the temporary SYSCONF before its saves were seeded, and the NAND check
+    skipped the ticket lookup for disc titles.
+  - Checked: old and new code side by side on synthetic inputs only (no
+    game data), using the base versions of all non-W22 files on both
+    sides, comparing per-case hashes of the traced output:
+    - SysConf: 2000 seeds of random, truncated and damaged SYSCONF images
+      through load, edits and save.
+    - TitleDatabase and TimePlayed: 300 seeds of name files and INIs.
+    - HotkeyManager and FreeLookManager: 500 seeds of mappings, input
+      sequences and config round trips.
+    - Movie: 1000 seeds of DTM recording, playback, header and input
+      checks.
+    - State: 1000 seeds of saves, loads, undo slots and damaged files.
+    - WiiRoot: 1000 seeds of root setup and teardown on fake NANDs.
+    - WiiUtils: 1000 seeds of WAD installs, updates (fake HTTP and disc),
+      NAND checks and repairs.
+    - Core: 1000 seeds of session start/stop/pause, frame step and host
+      jobs with about 120 fakes.
+    - BootManager: 1000 seeds of BootCore and RestoreConfig.
+    - ConfigManager: 1000 seeds of metadata, languages, region codes,
+      game INIs and boot metadata.
+    - MemTools: 300 forked cases of claimed and unclaimed faults, with and
+      without an earlier handler, and install/uninstall cycles.
+    - The harnesses skip inputs that are undefined behaviour in the old
+      and new code alike: a DTM shorter than its 256-byte header, corrupt
+      LZO data, an LZO block bigger than its buffer, a huge uncompressed
+      state size, and the undo buffer after a failed capture.
+  - Compile check: the W22 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu. The 223 other non-Qt files that include
+    W22 headers (Core, IOS, HW, PowerPC, NetPlay, VideoCommon, the video
+    backends, AudioCommon, InputCommon, UICommon, DiscIO and DolphinTool)
+    compile or fail file for file exactly as on the base tree, on both
+    targets (51 failures over 27 files, from headers that are missing here,
+    such as DirectX, FFmpeg, mGBA and some Windows networking headers), with
+    no warning located in a W22 file. DolphinQt was not built (no Qt
+    headers here).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W22 .cpp file. The runs left in W22 headers are public
+    declarations (the hotkey enum, System and Movie member lists, Host and
+    Core function lists, SysConf and WiiUtils enums).
+  - Not rewritten: nothing. No key, IV, token or credential bytes were
+    found in the W22 files; no keys, certificates, firmware or game data
+    were added.
