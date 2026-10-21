@@ -1,15 +1,24 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// The base's packet format and the figure format follow public community documentation of the
+// Disney Infinity base. Figures carry a 7-byte tag ID in block 0 and the character number in
+// block 1, which is AES-128 encrypted with a key derived (SHA-1) from a fixed string and the tag
+// ID.
 
 #include "Core/IOS/USB/Emulated/Infinity.h"
 
 #include <array>
 #include <bit>
+#include <cstddef>
+#include <cstring>
 #include <mutex>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
-#include "Common/BitUtils.h"
+#include "Common/Assert.h"
+#include "Common/Crypto/AES.h"
 #include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
 #include "Common/Random.h"
@@ -20,131 +29,289 @@
 
 namespace IOS::HLE::USB
 {
-// Information taken from https://disneyinfinity.fandom.com/wiki/Model_Numbers
-const std::array<std::pair<const char*, const u32>, 104> list_infinity_figures = {
-    {{"The Incredibles - Mr. Incredible", 0x0F4241},
-     {"Monsters University - Sulley", 0x0F4242},
-     {"Pirates of the Caribbean - Jack Sparrow", 0x0F4243},
-     {"The Lone Ranger - The Lone Ranger", 0x0F4244},
-     {"The Lone Ranger - Tonto", 0x0F4245},
-     {"Cars - Lightning McQueen", 0x0F4246},
-     {"Cars - Holley Shiftwell", 0x0F4247},
-     {"Toy Story - Buzz Lightyear", 0x0F4248},
-     {"Toy Story - Jessie", 0x0F4249},
-     {"Monsters University - Mike Wazowski", 0x0F424A},
-     {"The Incredibles - Mrs. Incredible", 0x0F424B},
-     {"Pirates of the Caribbean - Barbossa", 0x0F424C},
-     {"Pirates of the Caribbean - Davy Jones", 0x0F424D},
-     {"Monsters University - Randy", 0x0F424E},
-     {"The Incredibles - Syndrome", 0x0F424F},
-     {"Toy Story - Woody", 0x0F4250},
-     {"Cars - Mater", 0x0F4251},
-     {"The Incredibles - Dash", 0x0F4252},
-     {"The Incredibles - Violet", 0x0F4253},
-     {"Cars - Francesco Bernoulli", 0x0F4254},
-     {"Fantasia - Sorcerer's Apprentice Mickey", 0x0F4255},
-     {"The Nightmare Before Christmas - Jack Skellington", 0x0F4256},
-     {"Tangled - Rapunzel", 0x0F4257},
-     {"Frozen - Anna", 0x0F4258},
-     {"Frozen - Elsa", 0x0F4259},
-     {"Phineas and Ferb - Phineas Flynn", 0x0F425A},
-     {"Phineas and Ferb - Agent P", 0x0F425B},
-     {"Wreck-It Ralph - Wreck-It Ralph", 0x0F425C},
-     {"Wreck-It Ralph - Vanellope von Schweetz", 0x0F425D},
-     {"The Incredibles - Mr. Incredible (Crystal)", 0x0F425E},
-     {"Pirates of the Caribbean - Jack Sparrow (Crystal)", 0x0F425F},
-     {"Monsters University - Sulley (Crystal)", 0x0F4260},
-     {"Cars - Lightning McQueen (Crystal)", 0x0F4261},
-     {"The Lone Ranger - The Lone Ranger (Crystal)", 0x0F4262},
-     {"Toy Story - Buzz Lightyear (Crystal)", 0x0F4263},
-     {"Phineas and Ferb - Agent P (Crystal)", 0x0F4264},
-     {"Fantasia - Sorcerer's Apprentice Mickey (Crystal)", 0x0F4265},
-     {"Toy Story - Buzz Lightyear (Glowing)", 0x0F4266},
-     {"The Incredibles - Pirates of the Caribbean - Monsters University Play Set", 0x1E8481},
-     {"The Lone Ranger Play Set", 0x1E8482},
-     {"Cars Play Set", 0x1E8483},
-     {"Toy Story in Space Play Set", 0x1E8484},
-     {"Bolt - Bolt's Super Strength - Ability", 0x2DC6C3},
-     {"Wreck-it Ralph - Ralph's Power of Destruction - Ability", 0x2DC6C4},
-     {"Fantasia - Chernabog's Power - Ability", 0x2DC6C5},
-     {"Cars - C.H.R.O.M.E. Damage Increaser - Ability", 0x2DC6C6},
-     {"Phineas and Ferb - Dr. Doofenshmirtz's Damage-Inator! - Ability", 0x2DC6C7},
-     {"Frankenweenie - Electro-Charge - Ability", 0x2DC6C8},
-     {"Wreck-It Ralph - Fix-It Felix's Repair Power - Ability", 0x2DC6C9},
-     {"Tangled - Rapunzel's Healing - Ability", 0x2DC6CA},
-     {"Cars - C.H.R.O.M.E. Armor Shield - Ability", 0x2DC6CB},
-     {"Toy Story - Star Command Shield - Ability", 0x2DC6CC},
-     {"The Incredibles - Violet's Force Field - Ability", 0x2DC6CD},
-     {"Pirates of the Caribbean - Pieces of Eight - Ability", 0x2DC6CE},
-     {"DuckTales - Scrooge McDuck's Lucky Dime - Ability", 0x2DC6CF},
-     {"TRON - User Control Disc - Ability", 0x2DC6D0},
-     {"Fantasia - Mickey's Sorcerer Hat - Ability", 0x2DC6D1},
-     {"Toy Story - Emperor Zurg's Wrath - Ability", 0x2DC6FE},
-     {"The Sword in the Stone - Merlin's Summon - Ability", 0x2DC6FF},
-     {"Mickey Mouse Universe - Mickey's Car - Toy (Vehicle)", 0x3D0912},
-     {"Cinderella - Cinderella's Coach - Toy (Vehicle)", 0x3D0913},
-     {"The Muppets - Electric Mayhem Bus - Toy (Vehicle)", 0x3D0914},
-     {"101 Dalmatians - Cruella De Vil's Car - Toy (Vehicle)", 0x3D0915},
-     {"Toy Story - Pizza Planet Delivery Truck - Toy (Vehicle)", 0x3D0916},
-     {"Monsters, Inc. - Mike's New Car - Toy (Vehicle)", 0x3D0917},
-     {"Disney Parks - Disney Parks Parking Lot Tram - Toy (Vehicle)", 0x3D0919},
-     {"Peter Pan, Disney Parks - Jolly Roger - Toy (Aircraft)", 0x3D091A},
-     {"Dumbo, Disney Parks - Dumbo the Flying Elephant - Toy (Aircraft)", 0x3D091B},
-     {"Bolt - Calico Helicopter - Toy (Aircraft)", 0x3D091C},
-     {"Tangled - Maximus - Toy (Mount)", 0x3D091D},
-     {"Brave - Angus - Toy (Mount)", 0x3D091E},
-     {"Aladdin - Abu the Elephant - Toy (Mount)", 0x3D091F},
-     {"The Adventures of Ichabod and Mr. Toad - Headless Horseman's Horse - Toy (Mount)", 0x3D0920},
-     {"Beauty and the Beast - Phillipe - Toy (Mount)", 0x3D0921},
-     {"Mulan - Khan - Toy (Mount)", 0x3D0922},
-     {"Tarzan - Tantor - Toy (Mount)", 0x3D0923},
-     {"Mulan - Dragon Firework Cannon - Toy (Weapon)", 0x3D0924},
-     {"Lilo & Stitch - Stitch's Blaster - Toy (Weapon)", 0x3D0925},
-     {"Toy Story, Disney Parks - Toy Story Mania Blaster - Toy (Weapon)", 0x3D0926},
-     {"Alice in Wonderland - Flamingo Croquet Mallet - Toy (Weapon)", 0x3D0927},
-     {"Up - Carl Fredricksen's Cane - Toy (Weapon)", 0x3D0928},
-     {"Lilo & Stitch - Hangin' Ten Stitch With Surfboard - Toy (Hoverboard)", 0x3D0929},
-     {"Condorman - Condorman Glider - Toy (Glider)", 0x3D092A},
-     {"WALL-E - WALL-E's Fire Extinguisher - Toy (Jetpack)", 0x3D092B},
-     {"TRON - On the Grid - Customization (Terrain)", 0x3D092C},
-     {"WALL-E - WALL-E's Collection - Customization (Terrain)", 0x3D092D},
-     {"Wreck-It Ralph - King Candy's Dessert Toppings - Customization (Terrain)", 0x3D092E},
-     {"Frankenweenie - Victor's Experiments - Customization (Terrain)", 0x3D0930},
-     {"The Nightmare Before Christmas - Jack's Scary Decorations - Customization (Terrain)",
-      0x3D0931},
-     {"Frozen - Frozen Flourish - Customization (Terrain)", 0x3D0933},
-     {"Tangled - Rapunzel's Kingdom - Customization (Terrain)", 0x3D0934},
-     {"TRON - TRON Interface - Customization (Skydome)", 0x3D0935},
-     {"WALL-E - Buy N Large Atmosphere - Customization (Skydome)", 0x3D0936},
-     {"Wreck-It Ralph - Sugar Rush Sky - Customization (Skydome)", 0x3D0937},
-     {"The Nightmare Before Christmas - Halloween Town Sky - Customization (Skydome)", 0x3D093A},
-     {"Frozen - Chill in the Air - Customization (Skydome)", 0x3D093C},
-     {"Tangled - Rapunzel's Birthday Sky - Customization (Skydome)", 0x3D093D},
-     {"Toy Story, Disney Parks - Astro Blasters Space Cruiser - Toy (Vehicle)", 0x3D0940},
-     {"Finding Nemo - Marlin's Reef - Customization (Terrain)", 0x3D0941},
-     {"Finding Nemo - Nemo's Seascape - Customization (Skydome)", 0x3D0942},
-     {"Alice in Wonderland - Alice's Wonderland - Customization (Terrain)", 0x3D0943},
-     {"Alice in Wonderland - Tulgey Wood - Customization (Skydome)", 0x3D0944},
-     {"Phineas and Ferb - Tri-State Area Terrain - Customization (Terrain)", 0x3D0945},
-     {"Phineas and Ferb - Danville Sky - Customization (Skydome)", 0x3D0946}}};
-
 static constexpr std::array<u8, 32> SHA1_CONSTANT = {
     0xAF, 0x62, 0xD2, 0xEC, 0x04, 0x91, 0x96, 0x8C, 0xC5, 0x2A, 0x1A, 0x71, 0x65, 0xF8, 0x65, 0xFE,
     0x28, 0x63, 0x29, 0x20, 0x44, 0x69, 0x73, 0x6e, 0x65, 0x79, 0x20, 0x32, 0x30, 0x31, 0x33};
 
-static constexpr std::array<u8, 16> BLANK_BLOCK = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+namespace
+{
+// Character numbers (https://disneyinfinity.fandom.com/wiki/Model_Numbers).
+struct InfinityToy
+{
+  u32 number;
+  const char* name;
+};
+
+// clang-format off
+constexpr InfinityToy TOYS[] = {
+    {0x0F4241, "The Incredibles - Mr. Incredible"},
+    {0x0F4242, "Monsters University - Sulley"},
+    {0x0F4243, "Pirates of the Caribbean - Jack Sparrow"},
+    {0x0F4244, "The Lone Ranger - The Lone Ranger"},
+    {0x0F4245, "The Lone Ranger - Tonto"},
+    {0x0F4246, "Cars - Lightning McQueen"},
+    {0x0F4247, "Cars - Holley Shiftwell"},
+    {0x0F4248, "Toy Story - Buzz Lightyear"},
+    {0x0F4249, "Toy Story - Jessie"},
+    {0x0F424A, "Monsters University - Mike Wazowski"},
+    {0x0F424B, "The Incredibles - Mrs. Incredible"},
+    {0x0F424C, "Pirates of the Caribbean - Barbossa"},
+    {0x0F424D, "Pirates of the Caribbean - Davy Jones"},
+    {0x0F424E, "Monsters University - Randy"},
+    {0x0F424F, "The Incredibles - Syndrome"},
+    {0x0F4250, "Toy Story - Woody"},
+    {0x0F4251, "Cars - Mater"},
+    {0x0F4252, "The Incredibles - Dash"},
+    {0x0F4253, "The Incredibles - Violet"},
+    {0x0F4254, "Cars - Francesco Bernoulli"},
+    {0x0F4255, "Fantasia - Sorcerer's Apprentice Mickey"},
+    {0x0F4256, "The Nightmare Before Christmas - Jack Skellington"},
+    {0x0F4257, "Tangled - Rapunzel"},
+    {0x0F4258, "Frozen - Anna"},
+    {0x0F4259, "Frozen - Elsa"},
+    {0x0F425A, "Phineas and Ferb - Phineas Flynn"},
+    {0x0F425B, "Phineas and Ferb - Agent P"},
+    {0x0F425C, "Wreck-It Ralph - Wreck-It Ralph"},
+    {0x0F425D, "Wreck-It Ralph - Vanellope von Schweetz"},
+    {0x0F425E, "The Incredibles - Mr. Incredible (Crystal)"},
+    {0x0F425F, "Pirates of the Caribbean - Jack Sparrow (Crystal)"},
+    {0x0F4260, "Monsters University - Sulley (Crystal)"},
+    {0x0F4261, "Cars - Lightning McQueen (Crystal)"},
+    {0x0F4262, "The Lone Ranger - The Lone Ranger (Crystal)"},
+    {0x0F4263, "Toy Story - Buzz Lightyear (Crystal)"},
+    {0x0F4264, "Phineas and Ferb - Agent P (Crystal)"},
+    {0x0F4265, "Fantasia - Sorcerer's Apprentice Mickey (Crystal)"},
+    {0x0F4266, "Toy Story - Buzz Lightyear (Glowing)"},
+    {0x1E8481, "The Incredibles - Pirates of the Caribbean - Monsters University Play Set"},
+    {0x1E8482, "The Lone Ranger Play Set"},
+    {0x1E8483, "Cars Play Set"},
+    {0x1E8484, "Toy Story in Space Play Set"},
+    {0x2DC6C3, "Bolt - Bolt's Super Strength - Ability"},
+    {0x2DC6C4, "Wreck-it Ralph - Ralph's Power of Destruction - Ability"},
+    {0x2DC6C5, "Fantasia - Chernabog's Power - Ability"},
+    {0x2DC6C6, "Cars - C.H.R.O.M.E. Damage Increaser - Ability"},
+    {0x2DC6C7, "Phineas and Ferb - Dr. Doofenshmirtz's Damage-Inator! - Ability"},
+    {0x2DC6C8, "Frankenweenie - Electro-Charge - Ability"},
+    {0x2DC6C9, "Wreck-It Ralph - Fix-It Felix's Repair Power - Ability"},
+    {0x2DC6CA, "Tangled - Rapunzel's Healing - Ability"},
+    {0x2DC6CB, "Cars - C.H.R.O.M.E. Armor Shield - Ability"},
+    {0x2DC6CC, "Toy Story - Star Command Shield - Ability"},
+    {0x2DC6CD, "The Incredibles - Violet's Force Field - Ability"},
+    {0x2DC6CE, "Pirates of the Caribbean - Pieces of Eight - Ability"},
+    {0x2DC6CF, "DuckTales - Scrooge McDuck's Lucky Dime - Ability"},
+    {0x2DC6D0, "TRON - User Control Disc - Ability"},
+    {0x2DC6D1, "Fantasia - Mickey's Sorcerer Hat - Ability"},
+    {0x2DC6FE, "Toy Story - Emperor Zurg's Wrath - Ability"},
+    {0x2DC6FF, "The Sword in the Stone - Merlin's Summon - Ability"},
+    {0x3D0912, "Mickey Mouse Universe - Mickey's Car - Toy (Vehicle)"},
+    {0x3D0913, "Cinderella - Cinderella's Coach - Toy (Vehicle)"},
+    {0x3D0914, "The Muppets - Electric Mayhem Bus - Toy (Vehicle)"},
+    {0x3D0915, "101 Dalmatians - Cruella De Vil's Car - Toy (Vehicle)"},
+    {0x3D0916, "Toy Story - Pizza Planet Delivery Truck - Toy (Vehicle)"},
+    {0x3D0917, "Monsters, Inc. - Mike's New Car - Toy (Vehicle)"},
+    {0x3D0919, "Disney Parks - Disney Parks Parking Lot Tram - Toy (Vehicle)"},
+    {0x3D091A, "Peter Pan, Disney Parks - Jolly Roger - Toy (Aircraft)"},
+    {0x3D091B, "Dumbo, Disney Parks - Dumbo the Flying Elephant - Toy (Aircraft)"},
+    {0x3D091C, "Bolt - Calico Helicopter - Toy (Aircraft)"},
+    {0x3D091D, "Tangled - Maximus - Toy (Mount)"},
+    {0x3D091E, "Brave - Angus - Toy (Mount)"},
+    {0x3D091F, "Aladdin - Abu the Elephant - Toy (Mount)"},
+    {0x3D0920, "The Adventures of Ichabod and Mr. Toad - Headless Horseman's Horse - Toy (Mount)"},
+    {0x3D0921, "Beauty and the Beast - Phillipe - Toy (Mount)"},
+    {0x3D0922, "Mulan - Khan - Toy (Mount)"},
+    {0x3D0923, "Tarzan - Tantor - Toy (Mount)"},
+    {0x3D0924, "Mulan - Dragon Firework Cannon - Toy (Weapon)"},
+    {0x3D0925, "Lilo & Stitch - Stitch's Blaster - Toy (Weapon)"},
+    {0x3D0926, "Toy Story, Disney Parks - Toy Story Mania Blaster - Toy (Weapon)"},
+    {0x3D0927, "Alice in Wonderland - Flamingo Croquet Mallet - Toy (Weapon)"},
+    {0x3D0928, "Up - Carl Fredricksen's Cane - Toy (Weapon)"},
+    {0x3D0929, "Lilo & Stitch - Hangin' Ten Stitch With Surfboard - Toy (Hoverboard)"},
+    {0x3D092A, "Condorman - Condorman Glider - Toy (Glider)"},
+    {0x3D092B, "WALL-E - WALL-E's Fire Extinguisher - Toy (Jetpack)"},
+    {0x3D092C, "TRON - On the Grid - Customization (Terrain)"},
+    {0x3D092D, "WALL-E - WALL-E's Collection - Customization (Terrain)"},
+    {0x3D092E, "Wreck-It Ralph - King Candy's Dessert Toppings - Customization (Terrain)"},
+    {0x3D0930, "Frankenweenie - Victor's Experiments - Customization (Terrain)"},
+    {0x3D0931,
+     "The Nightmare Before Christmas - Jack's Scary Decorations - Customization (Terrain)"},
+    {0x3D0933, "Frozen - Frozen Flourish - Customization (Terrain)"},
+    {0x3D0934, "Tangled - Rapunzel's Kingdom - Customization (Terrain)"},
+    {0x3D0935, "TRON - TRON Interface - Customization (Skydome)"},
+    {0x3D0936, "WALL-E - Buy N Large Atmosphere - Customization (Skydome)"},
+    {0x3D0937, "Wreck-It Ralph - Sugar Rush Sky - Customization (Skydome)"},
+    {0x3D093A, "The Nightmare Before Christmas - Halloween Town Sky - Customization (Skydome)"},
+    {0x3D093C, "Frozen - Chill in the Air - Customization (Skydome)"},
+    {0x3D093D, "Tangled - Rapunzel's Birthday Sky - Customization (Skydome)"},
+    {0x3D0940, "Toy Story, Disney Parks - Astro Blasters Space Cruiser - Toy (Vehicle)"},
+    {0x3D0941, "Finding Nemo - Marlin's Reef - Customization (Terrain)"},
+    {0x3D0942, "Finding Nemo - Nemo's Seascape - Customization (Skydome)"},
+    {0x3D0943, "Alice in Wonderland - Alice's Wonderland - Customization (Terrain)"},
+    {0x3D0944, "Alice in Wonderland - Tulgey Wood - Customization (Skydome)"},
+    {0x3D0945, "Phineas and Ferb - Tri-State Area Terrain - Customization (Terrain)"},
+    {0x3D0946, "Phineas and Ferb - Danville Sky - Customization (Skydome)"},
+};
+// clang-format on
+
+template <std::size_t... I>
+constexpr auto MakeFigureList(std::index_sequence<I...>)
+{
+  return std::array<std::pair<const char*, const u32>, sizeof...(I)>{
+      {{TOYS[I].name, TOYS[I].number}...}};
+}
+
+constexpr auto FIGURE_LIST = MakeFigureList(std::make_index_sequence<std::size(TOYS)>{});
+
+using Packet = std::array<u8, 32>;
+using FigureBytes = std::array<u8, INFINITY_NUM_BLOCKS * INFINITY_BLOCK_SIZE>;
+
+constexpr u8 REPLY = 0xAA;
+constexpr u8 FIGURE_CHANGE = 0xAB;
+constexpr u8 COMMAND = 0xFF;
+
+// Reply delays in microseconds.
+constexpr u64 ECHO_DELAY_US = 500;
+constexpr u64 REPLY_DELAY_US = 1000;
+
+// The game's mask for spreading a 32-bit number over 64 bits.
+constexpr u64 SCRAMBLE_MASK = 0x8E55AA1B3999E8AA;
+
+// The low byte of the sum of the first `count` bytes.
+u8 Checksum(const Packet& packet, std::size_t count)
+{
+  u32 sum = 0;
+  for (std::size_t i = 0; i < count; ++i)
+    sum += packet[i];
+  return static_cast<u8>(sum);
+}
+
+// The figure block that the game's block number refers to: 0 is block 1, n is block 4n.
+// (Computed in eight bits, as the base does.)
+u8 FigureBlock(u8 block)
+{
+  return block == 0 ? u8{1} : static_cast<u8>(block * 4);
+}
+
+// CRC-32 (reflected polynomial 0xEDB88320) without the usual initial value and final XOR, over
+// the first 12 bytes of a block.
+constexpr std::array<u32, 256> MakeCRCTable()
+{
+  std::array<u32, 256> table{};
+  for (u32 n = 0; n < 256; ++n)
+  {
+    u32 value = n;
+    for (int bit = 0; bit < 8; ++bit)
+      value = (value & 1) != 0 ? (value >> 1) ^ 0xEDB88320 : value >> 1;
+    table[n] = value;
+  }
+  return table;
+}
+
+u32 BlockCRC(const std::array<u8, 16>& block)
+{
+  static constexpr auto TABLE = MakeCRCTable();
+  u32 crc = 0;
+  for (std::size_t i = 0; i < 12; ++i)
+    crc = (crc >> 8) ^ TABLE[(crc ^ block[i]) & 0xFF];
+  return crc;
+}
+
+// The AES key of a figure: SHA-1 over the fixed string (without its last byte) and the tag ID;
+// the first 16 bytes of the digest with each 32-bit word byte-swapped.
+std::array<u8, 16> FigureKey(std::span<const u8> tag_id)
+{
+  std::vector<u8> message(SHA1_CONSTANT.begin(), SHA1_CONSTANT.end() - 1);
+  message.insert(message.end(), tag_id.begin(), tag_id.end());
+  const Common::SHA1::Digest digest = Common::SHA1::CalculateDigest(message);
+
+  std::array<u8, 16> key{};
+  for (std::size_t word = 0; word < 4; ++word)
+  {
+    for (std::size_t b = 0; b < 4; ++b)
+      key[4 * word + b] = digest[4 * word + 3 - b];
+  }
+  return key;
+}
+
+// Block 1 of a new figure: the character number, a manufacturing date (13/08/18, the release of
+// Infinity 1.0), fixed bytes and the CRC.
+std::array<u8, 16> CharacterBlock(u32 number)
+{
+  std::array<u8, 16> block{};
+  block[1] = static_cast<u8>(number >> 16);
+  block[2] = static_cast<u8>(number >> 8);
+  block[3] = static_cast<u8>(number);
+  block[4] = 0x0D;
+  block[5] = 0x08;
+  block[6] = 0x12;
+  block[9] = 0x01;
+  block[10] = 0xD1;
+  block[11] = 0x1F;
+  const u32 crc = BlockCRC(block);
+  for (std::size_t b = 0; b < 4; ++b)
+    block[12 + b] = static_cast<u8>(crc >> (24 - 8 * b));
+  return block;
+}
+
+// Puts the bits of `value` (lowest first) where the mask has ones, read from its lowest bit and
+// written from the result's highest bit.
+u64 Scramble(u32 value)
+{
+  u64 result = 0;
+  for (int i = 0; i < 64; ++i)
+  {
+    if (((SCRAMBLE_MASK >> i) & 1) != 0)
+    {
+      result |= u64{value & 1} << (63 - i);
+      value >>= 1;
+    }
+  }
+  return result;
+}
+
+// Collects the bits of `value` (lowest first) where the mask, read from its highest bit, has
+// ones.
+u32 Descramble(u64 value)
+{
+  u32 result = 0;
+  for (int i = 0; i < 64; ++i)
+  {
+    if (((SCRAMBLE_MASK >> (63 - i)) & 1) != 0)
+      result = (result << 1) | static_cast<u32>((value >> i) & 1);
+  }
+  return result;
+}
+
+FigureBasePosition PadOf(FigureUIPosition position)
+{
+  const auto index = static_cast<u8>(position);
+  if (index < 3)
+    return FigureBasePosition::HexagonSlot;
+  if (index < 6)
+    return FigureBasePosition::PlayerOneSlot;
+  if (index < 9)
+    return FigureBasePosition::PlayerTwoSlot;
+  return FigureBasePosition::Unknown;
+}
+
+void ReplyHeader(Packet& packet, u8 length, u8 sequence)
+{
+  packet[0] = REPLY;
+  packet[1] = length;
+  packet[2] = sequence;
+}
+}  // namespace
 
 InfinityUSB::InfinityUSB()
 {
   m_vid = 0x0E6F;
   m_pid = 0x0129;
-  m_id = (u64(m_vid) << 32 | u64(m_pid) << 16 | u64(9) << 8 | u64(1));
+  m_id = (u64{m_vid} << 32) | (u64{m_pid} << 16) | (u64{9} << 8) | u64{1};
   m_device_descriptor = DeviceDescriptor{0x12,   0x1,    0x200, 0x0, 0x0, 0x0, 0x20,
                                          0x0E6F, 0x0129, 0x200, 0x1, 0x2, 0x3, 0x1};
   m_config_descriptor.emplace_back(ConfigDescriptor{0x9, 0x2, 0x29, 0x1, 0x1, 0x0, 0x80, 0xFA});
   m_interface_descriptor.emplace_back(
       InterfaceDescriptor{0x9, 0x4, 0x0, 0x0, 0x2, 0x3, 0x0, 0x0, 0x0});
+  // Interrupt IN 0x81 and OUT 0x01, 32 bytes, every frame.
   m_endpoint_descriptor.emplace_back(EndpointDescriptor{0x7, 0x5, 0x81, 0x3, 0x20, 0x1});
   m_endpoint_descriptor.emplace_back(EndpointDescriptor{0x7, 0x5, 0x1, 0x3, 0x20, 0x1});
 }
@@ -161,24 +328,24 @@ std::vector<ConfigDescriptor> InfinityUSB::GetConfigurations() const
   return m_config_descriptor;
 }
 
-std::vector<InterfaceDescriptor> InfinityUSB::GetInterfaces(u8 config) const
+std::vector<InterfaceDescriptor> InfinityUSB::GetInterfaces(u8 /*config*/) const
 {
   return m_interface_descriptor;
 }
 
-std::vector<EndpointDescriptor> InfinityUSB::GetEndpoints(u8 config, u8 iface, u8 alt) const
+std::vector<EndpointDescriptor> InfinityUSB::GetEndpoints(u8 /*config*/, u8 /*iface*/,
+                                                          u8 /*alt*/) const
 {
   return m_endpoint_descriptor;
 }
 
 bool InfinityUSB::Attach()
 {
-  if (m_device_attached)
+  if (!m_device_attached)
   {
-    return true;
+    DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x}] Opening device", m_vid, m_pid);
+    m_device_attached = true;
   }
-  DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x}] Opening device", m_vid, m_pid);
-  m_device_attached = true;
   return true;
 }
 
@@ -186,18 +353,13 @@ bool InfinityUSB::AttachAndChangeInterface(const u8 iface)
 {
   if (!Attach())
     return false;
-
-  if (iface != m_active_interface)
-    return ChangeInterface(iface) == 0;
-
-  return true;
+  return iface == m_active_interface || ChangeInterface(iface) == 0;
 }
 
 int InfinityUSB::CancelTransfer(const u8 endpoint)
 {
   INFO_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Cancelling transfers (endpoint {:#x})", m_vid, m_pid,
                m_active_interface, endpoint);
-
   return IPC_SUCCESS;
 }
 
@@ -209,12 +371,12 @@ int InfinityUSB::ChangeInterface(const u8 iface)
   return 0;
 }
 
-int InfinityUSB::GetNumberOfAltSettings(u8 iface)
+int InfinityUSB::GetNumberOfAltSettings(u8 /*iface*/)
 {
   return 0;
 }
 
-int InfinityUSB::SetAltSetting(u8 alt_setting)
+int InfinityUSB::SetAltSetting(u8 /*alt_setting*/)
 {
   return 0;
 }
@@ -228,178 +390,135 @@ int InfinityUSB::SubmitTransfer(std::unique_ptr<CtrlMessage> cmd)
                 cmd->index, cmd->length);
   return 0;
 }
+
 int InfinityUSB::SubmitTransfer(std::unique_ptr<BulkMessage> cmd)
 {
   DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Bulk: length={:04x} endpoint={:02x}", m_vid, m_pid,
                 m_active_interface, cmd->length, cmd->endpoint);
   return 0;
 }
+
+// Packets in: FF <length> <command> <sequence> <data...> <checksum> runs a command; 00 (the
+// first read) and AA/AB wait for a reply. Other packets are ignored.
 int InfinityUSB::SubmitTransfer(std::unique_ptr<IntrMessage> cmd)
 {
   DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Interrupt: length={:04x} endpoint={:02x}", m_vid,
                 m_pid, m_active_interface, cmd->length, cmd->endpoint);
 
   auto& system = cmd->GetEmulationKernel().GetSystem();
-  auto& memory = system.GetMemory();
-  auto& infinity_base = system.GetInfinityBase();
-  u8* buf = memory.GetPointerForRange(cmd->data_address, cmd->length);
-  if (cmd->length != 32 || buf == nullptr)
+  u8* const packet = system.GetMemory().GetPointerForRange(cmd->data_address, cmd->length);
+  if (cmd->length != 32 || packet == nullptr)
   {
     ERROR_LOG_FMT(IOS_USB, "Infinity Base command invalid");
     return IPC_EINVAL;
   }
 
-  std::array<u8, 32> data = {};
-  std::array<u8, 32> response_data = {};
-  // First call - constant device response
-  if (buf[0] == 0x00)
+  switch (packet[0])
   {
+  case 0x00:
     m_response_list.push(std::move(cmd));
-  }
-  // Respond with data requested from FF command
-  else if (buf[0] == 0xAA || buf[0] == 0xAB)
+    break;
+
+  case REPLY:
+  case FIGURE_CHANGE:
   {
-    // If a new figure has been added or removed, get the updated figure response
-    if (infinity_base.HasFigureBeenAddedRemoved())
+    // Figure placement notices go first, then replies to earlier commands.
+    InfinityBase& base = system.GetInfinityBase();
+    if (base.HasFigureBeenAddedRemoved())
     {
-      ScheduleTransfer(std::move(cmd), infinity_base.PopAddedRemovedResponse(), 1000);
+      ScheduleTransfer(std::move(cmd), base.PopAddedRemovedResponse(), REPLY_DELAY_US);
     }
-    else if (m_queries.empty())
+    else if (!m_queries.empty())
+    {
+      ScheduleTransfer(std::move(cmd), m_queries.front(), REPLY_DELAY_US);
+      m_queries.pop();
+    }
+    else
     {
       m_response_list.push(std::move(cmd));
     }
-    else
-    {
-      ScheduleTransfer(std::move(cmd), m_queries.front(), 1000);
-      m_queries.pop();
-    }
+    break;
   }
-  else if (buf[0] == 0xFF)
+
+  case COMMAND:
   {
-    // FF <length of packet data> <packet data> <checksum>
-    // <checksum> is the sum of all the bytes preceding it (including the FF and <packet length>).
-    //
-    // <packet data> consists of:
-    // <command> <sequence> <optional attached data>
-    //
-    // <sequence> is an auto-incrementing sequence, so that the game can match up the command
-    // packet with the response it goes with.
-    // <length of packet data> includes <command>, <sequence> and <optional attached data>, but
-    // not FF or <checksum>
-
-    u8 command = buf[2];
-    u8 sequence = buf[3];
-
-    switch (command)
-    {
-    case 0x80:
-    {
-      // Activate Base, constant response (might be specific based on device type)
-      response_data = {0xaa, 0x15, 0x00, 0x00, 0x0f, 0x01, 0x00, 0x03, 0x02, 0x09, 0x09, 0x43,
-                       0x20, 0x32, 0x62, 0x36, 0x36, 0x4b, 0x34, 0x99, 0x67, 0x31, 0x93, 0x8c};
-      break;
-    }
-    case 0x81:
-    {
-      // Initiate random number generation, combine the 8 big endian aligned bytes sent in the
-      // command in to a u64, and descramble this number, which is then used to generate
-      // the seed for the random number generator to align with the game. Finally, respond with a
-      // blank packet as this command doesn't need a response.
-      infinity_base.DescrambleAndSeed(buf, sequence, response_data);
-      break;
-    }
-    case 0x83:
-    {
-      // Respond with random generated numbers based on the seed from the 0x81 command. The next
-      // random number is 4 bytes, which then needs to be scrambled in to an 8 byte unsigned
-      // integer, and then passed back as 8 big endian aligned bytes.
-      infinity_base.GetNextAndScramble(sequence, response_data);
-      break;
-    }
-    case 0x90:
-    case 0x92:
-    case 0x93:
-    case 0x95:
-    case 0x96:
-    {
-      // Set Colors. Needs further input to actually emulate the 'colors', but none of these
-      // commands expect a response. Potential commands could include turning the lights on
-      // individual sections of the base, flashing lights, setting colors, initiating a color
-      // sequence etc.
-      infinity_base.GetBlankResponse(sequence, response_data);
-      break;
-    }
-    case 0xA1:
-    {
-      // A1 - Get Presence Status:
-      // Returns what figures, if any, are present and the order they were added.
-      // For each figure on the infinity base, 2 blocks are sent in the response:
-      // <index> <unknown>
-      // <index> is 20 for player 1, 30 for player 2, and 10 for the hexagonal position.
-      // This is also added with the order the figure was added, so 22 would indicate player one,
-      // which was added 3rd to the base.
-      // <unknown> is (for me) always 09. If nothing is on the
-      // infinity base, no data is sent in the response.
-      infinity_base.GetPresentFigures(sequence, response_data);
-      break;
-    }
-    case 0xA2:
-    {
-      // A2 - Read Figure Data:
-      // This reads a block of 16 bytes from a figure on the infinity base.
-      // Attached data: II BB UU
-      // II is the order the figure was added (00 for first, 01 for second and 02 for third etc).
-      // BB is the block number. 00 is block 1, 01 is block 4, 02 is block 8, and 03 is block 12).
-      // UU is either 00 or 01 -- not exactly sure what it indicates.
-      infinity_base.QueryBlock(buf[4], buf[5], response_data, sequence);
-      break;
-    }
-    case 0xA3:
-    {
-      // A3 - Write Figure Data:
-      // This writes a block of 16 bytes to a figure on the infinity base.
-      // Attached data: II BB UU <16 bytes>
-      // II is the order the figure was added (00 for first, 01 for second and 02 for third etc).
-      // BB is the block number. 00 is block 1, 01 is block 4, 02 is block 8, and 03 is block 12).
-      // UU is either 00 or 01 -- not exactly sure what it indicates.
-      // <16 bytes> is the raw (encrypted) 16 bytes to be sent to the figure.
-      infinity_base.WriteBlock(buf[4], buf[5], &buf[7], response_data, sequence);
-      break;
-    }
-    case 0xB4:
-    {
-      // B4 - Get Tag ID:
-      // This gets the tag's unique ID for a figure on the infinity base.
-      // The first byte is the order the figure was added (00 for first, 01 for second and 02 for
-      // third etc). The infinity base will respond with 7 bytes (the tag ID).
-      infinity_base.GetFigureIdentifier(buf[4], sequence, response_data);
-      break;
-    }
-    case 0xB5:
-    {
-      // Get status?
-      infinity_base.GetBlankResponse(sequence, response_data);
-      break;
-    }
-    default:
-      ERROR_LOG_FMT(IOS_USB, "Unhandled Infinity Base Command: {}", command);
-      break;
-    }
-
-    memcpy(data.data(), buf, 32);
-    ScheduleTransfer(std::move(cmd), data, 500);
-    if (m_response_list.empty())
-    {
-      m_queries.push(response_data);
-    }
-    else
-    {
-      ScheduleTransfer(std::move(m_response_list.front()), response_data, 1000);
-      m_response_list.pop();
-    }
+    // The packet itself is echoed back, and the reply goes to the next read.
+    const Packet reply = RunCommand(system.GetInfinityBase(), packet);
+    Packet echo;
+    std::copy_n(packet, echo.size(), echo.begin());
+    ScheduleTransfer(std::move(cmd), echo, ECHO_DELAY_US);
+    DeliverReply(reply);
+    break;
   }
 
+  default:
+    break;
+  }
   return 0;
+}
+
+auto InfinityUSB::RunCommand(InfinityBase& base, u8* packet) -> Packet
+{
+  const u8 command = packet[2];
+  const u8 sequence = packet[3];
+  Packet reply{};
+
+  switch (command)
+  {
+  case 0x80:
+    // Activate: a fixed description of the base.
+    reply = {0xaa, 0x15, 0x00, 0x00, 0x0f, 0x01, 0x00, 0x03, 0x02, 0x09, 0x09, 0x43,
+             0x20, 0x32, 0x62, 0x36, 0x36, 0x4b, 0x34, 0x99, 0x67, 0x31, 0x93, 0x8c};
+    break;
+  case 0x81:
+    // Seed the random number generator with the scrambled number the game sends.
+    base.DescrambleAndSeed(packet, sequence, reply);
+    break;
+  case 0x83:
+    // The next random number, scrambled.
+    base.GetNextAndScramble(sequence, reply);
+    break;
+  case 0x90:
+  case 0x92:
+  case 0x93:
+  case 0x95:
+  case 0x96:
+    // Lights (not emulated) and a status query only need an acknowledgement.
+  case 0xB5:
+    base.GetBlankResponse(sequence, reply);
+    break;
+  case 0xA1:
+    // Which figures are present.
+    base.GetPresentFigures(sequence, reply);
+    break;
+  case 0xA2:
+    // Read a block: figure (order placed), block, unknown.
+    base.QueryBlock(packet[4], packet[5], reply, sequence);
+    break;
+  case 0xA3:
+    // Write a block: figure, block, unknown, 16 bytes.
+    base.WriteBlock(packet[4], packet[5], packet + 7, reply, sequence);
+    break;
+  case 0xB4:
+    // The tag ID of a figure.
+    base.GetFigureIdentifier(packet[4], sequence, reply);
+    break;
+  default:
+    ERROR_LOG_FMT(IOS_USB, "Unhandled Infinity Base Command: {}", command);
+    break;
+  }
+  return reply;
+}
+
+void InfinityUSB::DeliverReply(const Packet& reply)
+{
+  if (m_response_list.empty())
+  {
+    m_queries.push(reply);
+    return;
+  }
+  ScheduleTransfer(std::move(m_response_list.front()), reply, REPLY_DELAY_US);
+  m_response_list.pop();
 }
 
 int InfinityUSB::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
@@ -413,9 +532,11 @@ int InfinityUSB::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
 void InfinityUSB::ScheduleTransfer(std::unique_ptr<TransferCommand> command,
                                    const std::array<u8, 32>& data, u64 expected_time_us)
 {
-  command->FillBuffer(data.data(), 32);
-  command->ScheduleTransferCompletion(32, expected_time_us);
+  command->FillBuffer(data.data(), data.size());
+  command->ScheduleTransferCompletion(32, static_cast<u32>(expected_time_us));
 }
+
+// ---- the base ----
 
 bool InfinityBase::HasFigureBeenAddedRemoved() const
 {
@@ -424,219 +545,118 @@ bool InfinityBase::HasFigureBeenAddedRemoved() const
 
 std::array<u8, 32> InfinityBase::PopAddedRemovedResponse()
 {
-  std::array<u8, 32> response = m_figure_added_removed_response.front();
+  const Packet notice = m_figure_added_removed_response.front();
   m_figure_added_removed_response.pop();
-  return response;
-}
-
-u8 InfinityBase::GenerateChecksum(const std::array<u8, 32>& data, int num_of_bytes) const
-{
-  int checksum = 0;
-  for (int i = 0; i < num_of_bytes; i++)
-  {
-    checksum += data[i];
-  }
-  return (checksum & 0xFF);
+  return notice;
 }
 
 void InfinityBase::GetBlankResponse(u8 sequence, std::array<u8, 32>& reply_buf)
 {
-  reply_buf[0] = 0xaa;
-  reply_buf[1] = 0x01;
-  reply_buf[2] = sequence;
-  reply_buf[3] = GenerateChecksum(reply_buf, 3);
+  ReplyHeader(reply_buf, 0x01, sequence);
+  reply_buf[3] = Checksum(reply_buf, 3);
 }
 
+// Two bytes per present figure, in slot order: pad (10 hexagon, 20 player one, 30 player two)
+// plus the order it was placed in, then 09.
 void InfinityBase::GetPresentFigures(u8 sequence, std::array<u8, 32>& reply_buf)
 {
-  int x = 3;
-  for (u8 i = 0; i < m_figures.size(); i++)
+  std::size_t end = 3;
+  for (std::size_t i = 0; i < m_figures.size(); ++i)
   {
-    u8 slot = i == 0 ? 0x10 : (i > 0 && i < 4) ? 0x20 : 0x30;
-    if (m_figures[i].present)
-    {
-      reply_buf[x] = slot + m_figures[i].order_added;
-      reply_buf[x + 1] = 0x09;
-      x = x + 2;
-    }
+    const InfinityFigure& figure = m_figures[i];
+    if (!figure.present)
+      continue;
+    const u8 pad = i == 0 ? 0x10 : i < 4 ? 0x20 : 0x30;
+    reply_buf[end] = static_cast<u8>(pad + figure.order_added);
+    reply_buf[end + 1] = 0x09;
+    end += 2;
   }
-  reply_buf[0] = 0xaa;
-  reply_buf[1] = x - 2;
-  reply_buf[2] = sequence;
-  reply_buf[x] = GenerateChecksum(reply_buf, x);
+  ReplyHeader(reply_buf, static_cast<u8>(end - 2), sequence);
+  reply_buf[end] = Checksum(reply_buf, end);
 }
 
 void InfinityBase::GetFigureIdentifier(u8 fig_num, u8 sequence, std::array<u8, 32>& reply_buf)
 {
   std::lock_guard lock(m_infinity_mutex);
+  const InfinityFigure& figure = FigureInOrder(fig_num);
 
-  InfinityFigure& figure = GetFigureByOrder(fig_num);
-
-  reply_buf[0] = 0xaa;
-  reply_buf[1] = 0x09;
-  reply_buf[2] = sequence;
+  ReplyHeader(reply_buf, 0x09, sequence);
   reply_buf[3] = 0x00;
-
   if (figure.present)
-  {
-    memcpy(&reply_buf[4], figure.data.data(), 7);
-  }
-  reply_buf[11] = GenerateChecksum(reply_buf, 11);
+    std::copy_n(figure.data.begin(), 7, reply_buf.begin() + 4);
+  reply_buf[11] = Checksum(reply_buf, 11);
 }
 
 void InfinityBase::QueryBlock(u8 fig_num, u8 block, std::array<u8, 32>& reply_buf, u8 sequence)
 {
   std::lock_guard lock(m_infinity_mutex);
+  const InfinityFigure& figure = FigureInOrder(fig_num);
 
-  InfinityFigure& figure = GetFigureByOrder(fig_num);
-
-  reply_buf[0] = 0xaa;
-  reply_buf[1] = 0x12;
-  reply_buf[2] = sequence;
+  ReplyHeader(reply_buf, 0x12, sequence);
   reply_buf[3] = 0x00;
-  u8 file_block = 0;
-  if (block == 0)
+  const u8 file_block = FigureBlock(block);
+  if (figure.present && file_block < INFINITY_NUM_BLOCKS)
   {
-    file_block = 1;
+    std::copy_n(figure.data.begin() + INFINITY_BLOCK_SIZE * file_block, INFINITY_BLOCK_SIZE,
+                reply_buf.begin() + 4);
   }
-  else
-  {
-    file_block = block * 4;
-  }
-  if (figure.present && file_block < 20)
-  {
-    memcpy(&reply_buf[4], figure.data.data() + (16 * file_block), 16);
-  }
-  reply_buf[20] = GenerateChecksum(reply_buf, 20);
+  reply_buf[20] = Checksum(reply_buf, 20);
 }
 
 void InfinityBase::WriteBlock(u8 fig_num, u8 block, const u8* to_write_buf,
                               std::array<u8, 32>& reply_buf, u8 sequence)
 {
   std::lock_guard lock(m_infinity_mutex);
+  InfinityFigure& figure = FigureInOrder(fig_num);
 
-  InfinityFigure& figure = GetFigureByOrder(fig_num);
-
-  reply_buf[0] = 0xaa;
-  reply_buf[1] = 0x02;
-  reply_buf[2] = sequence;
+  ReplyHeader(reply_buf, 0x02, sequence);
   reply_buf[3] = 0x00;
-  u8 file_block = 0;
-  if (block == 0)
+  const u8 file_block = FigureBlock(block);
+  if (figure.present && file_block < INFINITY_NUM_BLOCKS)
   {
-    file_block = 1;
-  }
-  else
-  {
-    file_block = block * 4;
-  }
-  if (figure.present && file_block < 20)
-  {
-    memcpy(figure.data.data() + (file_block * 16), to_write_buf, 16);
+    std::copy_n(to_write_buf, INFINITY_BLOCK_SIZE,
+                figure.data.begin() + INFINITY_BLOCK_SIZE * file_block);
     figure.Save();
   }
-  reply_buf[4] = GenerateChecksum(reply_buf, 4);
+  reply_buf[4] = Checksum(reply_buf, 4);
 }
 
-static u32 InfinityCRC32(const std::array<u8, 16>& buffer)
+// AB 04 <pad> 09 <order> <00 placed / 01 removed> <checksum>
+void InfinityBase::QueueFigureChange(FigureUIPosition position, u8 order_added, bool removed)
 {
-  static constexpr std::array<u32, 256> CRC32_TABLE{
-      0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535,
-      0x9e6495a3, 0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988, 0x09b64c2b, 0x7eb17cbd,
-      0xe7b82d07, 0x90bf1d91, 0x1db71064, 0x6ab020f2, 0xf3b97148, 0x84be41de, 0x1adad47d,
-      0x6ddde4eb, 0xf4d4b551, 0x83d385c7, 0x136c9856, 0x646ba8c0, 0xfd62f97a, 0x8a65c9ec,
-      0x14015c4f, 0x63066cd9, 0xfa0f3d63, 0x8d080df5, 0x3b6e20c8, 0x4c69105e, 0xd56041e4,
-      0xa2677172, 0x3c03e4d1, 0x4b04d447, 0xd20d85fd, 0xa50ab56b, 0x35b5a8fa, 0x42b2986c,
-      0xdbbbc9d6, 0xacbcf940, 0x32d86ce3, 0x45df5c75, 0xdcd60dcf, 0xabd13d59, 0x26d930ac,
-      0x51de003a, 0xc8d75180, 0xbfd06116, 0x21b4f4b5, 0x56b3c423, 0xcfba9599, 0xb8bda50f,
-      0x2802b89e, 0x5f058808, 0xc60cd9b2, 0xb10be924, 0x2f6f7c87, 0x58684c11, 0xc1611dab,
-      0xb6662d3d, 0x76dc4190, 0x01db7106, 0x98d220bc, 0xefd5102a, 0x71b18589, 0x06b6b51f,
-      0x9fbfe4a5, 0xe8b8d433, 0x7807c9a2, 0x0f00f934, 0x9609a88e, 0xe10e9818, 0x7f6a0dbb,
-      0x086d3d2d, 0x91646c97, 0xe6635c01, 0x6b6b51f4, 0x1c6c6162, 0x856530d8, 0xf262004e,
-      0x6c0695ed, 0x1b01a57b, 0x8208f4c1, 0xf50fc457, 0x65b0d9c6, 0x12b7e950, 0x8bbeb8ea,
-      0xfcb9887c, 0x62dd1ddf, 0x15da2d49, 0x8cd37cf3, 0xfbd44c65, 0x4db26158, 0x3ab551ce,
-      0xa3bc0074, 0xd4bb30e2, 0x4adfa541, 0x3dd895d7, 0xa4d1c46d, 0xd3d6f4fb, 0x4369e96a,
-      0x346ed9fc, 0xad678846, 0xda60b8d0, 0x44042d73, 0x33031de5, 0xaa0a4c5f, 0xdd0d7cc9,
-      0x5005713c, 0x270241aa, 0xbe0b1010, 0xc90c2086, 0x5768b525, 0x206f85b3, 0xb966d409,
-      0xce61e49f, 0x5edef90e, 0x29d9c998, 0xb0d09822, 0xc7d7a8b4, 0x59b33d17, 0x2eb40d81,
-      0xb7bd5c3b, 0xc0ba6cad, 0xedb88320, 0x9abfb3b6, 0x03b6e20c, 0x74b1d29a, 0xead54739,
-      0x9dd277af, 0x04db2615, 0x73dc1683, 0xe3630b12, 0x94643b84, 0x0d6d6a3e, 0x7a6a5aa8,
-      0xe40ecf0b, 0x9309ff9d, 0x0a00ae27, 0x7d079eb1, 0xf00f9344, 0x8708a3d2, 0x1e01f268,
-      0x6906c2fe, 0xf762575d, 0x806567cb, 0x196c3671, 0x6e6b06e7, 0xfed41b76, 0x89d32be0,
-      0x10da7a5a, 0x67dd4acc, 0xf9b9df6f, 0x8ebeeff9, 0x17b7be43, 0x60b08ed5, 0xd6d6a3e8,
-      0xa1d1937e, 0x38d8c2c4, 0x4fdff252, 0xd1bb67f1, 0xa6bc5767, 0x3fb506dd, 0x48b2364b,
-      0xd80d2bda, 0xaf0a1b4c, 0x36034af6, 0x41047a60, 0xdf60efc3, 0xa867df55, 0x316e8eef,
-      0x4669be79, 0xcb61b38c, 0xbc66831a, 0x256fd2a0, 0x5268e236, 0xcc0c7795, 0xbb0b4703,
-      0x220216b9, 0x5505262f, 0xc5ba3bbe, 0xb2bd0b28, 0x2bb45a92, 0x5cb36a04, 0xc2d7ffa7,
-      0xb5d0cf31, 0x2cd99e8b, 0x5bdeae1d, 0x9b64c2b0, 0xec63f226, 0x756aa39c, 0x026d930a,
-      0x9c0906a9, 0xeb0e363f, 0x72076785, 0x05005713, 0x95bf4a82, 0xe2b87a14, 0x7bb12bae,
-      0x0cb61b38, 0x92d28e9b, 0xe5d5be0d, 0x7cdcefb7, 0x0bdbdf21, 0x86d3d2d4, 0xf1d4e242,
-      0x68ddb3f8, 0x1fda836e, 0x81be16cd, 0xf6b9265b, 0x6fb077e1, 0x18b74777, 0x88085ae6,
-      0xff0f6a70, 0x66063bca, 0x11010b5c, 0x8f659eff, 0xf862ae69, 0x616bffd3, 0x166ccf45,
-      0xa00ae278, 0xd70dd2ee, 0x4e048354, 0x3903b3c2, 0xa7672661, 0xd06016f7, 0x4969474d,
-      0x3e6e77db, 0xaed16a4a, 0xd9d65adc, 0x40df0b66, 0x37d83bf0, 0xa9bcae53, 0xdebb9ec5,
-      0x47b2cf7f, 0x30b5ffe9, 0xbdbdf21c, 0xcabac28a, 0x53b39330, 0x24b4a3a6, 0xbad03605,
-      0xcdd70693, 0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94,
-      0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d};
-
-  // Infinity figures calculate their CRC32 based on 12 bytes in the block of 16
-  u32 ret = 0;
-  for (u32 i = 0; i < 12; ++i)
-  {
-    u8 index = u8(ret & 0xFF) ^ buffer[i];
-    ret = ((ret >> 8) ^ CRC32_TABLE[index]);
-  }
-
-  return ret;
+  Packet notice{FIGURE_CHANGE, 0x04, static_cast<u8>(PadOf(position)), 0x09, order_added,
+                static_cast<u8>(removed ? 0x01 : 0x00)};
+  notice[6] = Checksum(notice, 6);
+  m_figure_added_removed_response.push(notice);
 }
 
-std::string
-InfinityBase::LoadFigure(const std::array<u8, INFINITY_NUM_BLOCKS * INFINITY_BLOCK_SIZE>& buf,
-                         File::IOFile in_file, FigureUIPosition position)
+std::string InfinityBase::LoadFigure(const FigureBytes& buf, File::IOFile in_file,
+                                     FigureUIPosition position)
 {
   std::lock_guard lock(m_infinity_mutex);
-  u8 order_added;
 
-  std::vector<u8> sha1_calc = {SHA1_CONSTANT.begin(), SHA1_CONSTANT.end() - 1};
-  for (int i = 0; i < 7; i++)
-  {
-    sha1_calc.push_back(buf[i]);
-  }
-
-  std::array<u8, 16> key = GenerateInfinityFigureKey(sha1_calc);
-
-  std::unique_ptr<Common::AES::Context> ctx = Common::AES::CreateContextDecrypt(key.data());
-  std::array<u8, 16> infinity_decrypted_block = {};
-  ctx->CryptIvZero(&buf[16], infinity_decrypted_block.data(), 16);
-
-  u32 number = u32(infinity_decrypted_block[1]) << 16 | u32(infinity_decrypted_block[2]) << 8 |
-               u32(infinity_decrypted_block[3]);
+  // The character number is in the encrypted block 1.
+  const auto key = FigureKey(std::span{buf}.first(7));
+  std::array<u8, 16> character{};
+  Common::AES::CreateContextDecrypt(key.data())
+      ->CryptIvZero(buf.data() + INFINITY_BLOCK_SIZE, character.data(), character.size());
+  const u32 number = (u32{character[1]} << 16) | (u32{character[2]} << 8) | u32{character[3]};
   DEBUG_LOG_FMT(IOS_USB, "Toy Number: {}", number);
 
   InfinityFigure& figure = m_figures[static_cast<u8>(position)];
-
   figure.inf_file = std::move(in_file);
-  memcpy(figure.data.data(), buf.data(), figure.data.size());
+  figure.data = buf;
   figure.present = true;
+  // A figure keeps the order number of its slot.
   if (figure.order_added == 255)
-  {
-    figure.order_added = m_figure_order;
-    m_figure_order++;
-  }
-  order_added = figure.order_added;
+    figure.order_added = m_figure_order++;
 
-  FigureBasePosition derived_position = DeriveFigurePosition(position);
-  if (derived_position == FigureBasePosition::Unknown)
+  if (PadOf(position) == FigureBasePosition::Unknown)
   {
     ERROR_LOG_FMT(IOS_USB, "Invalid Position for Infinity Figure");
     return "Unknown Figure";
   }
-
-  std::array<u8, 32> figure_change_response = {0xab, 0x04,        static_cast<u8>(derived_position),
-                                               0x09, order_added, 0x00};
-  figure_change_response[6] = GenerateChecksum(figure_change_response, 6);
-  m_figure_added_removed_response.push(figure_change_response);
-
+  QueueFigureChange(position, figure.order_added, false);
   return FindFigure(number);
 }
 
@@ -651,302 +671,140 @@ void InfinityBase::RemoveFigure(FigureUIPosition position)
     figure.inf_file.Close();
   }
 
-  if (figure.present)
+  if (!figure.present)
+    return;
+  if (PadOf(position) == FigureBasePosition::Unknown)
   {
-    FigureBasePosition derived_position = DeriveFigurePosition(position);
-    if (derived_position == FigureBasePosition::Unknown)
-    {
-      ERROR_LOG_FMT(IOS_USB, "Invalid Position for Infinity Figure");
-      return;
-    }
-
-    figure.present = false;
-
-    std::array<u8, 32> figure_change_response = {
-        0xab, 0x04, static_cast<u8>(derived_position), 0x09, figure.order_added, 0x01};
-    figure_change_response[6] = GenerateChecksum(figure_change_response, 6);
-    m_figure_added_removed_response.push(figure_change_response);
+    ERROR_LOG_FMT(IOS_USB, "Invalid Position for Infinity Figure");
+    return;
   }
+  figure.present = false;
+  QueueFigureChange(position, figure.order_added, true);
 }
 
+// A new figure: a random tag ID, the character block and four blank data blocks (encrypted),
+// and the NFC access bits in the sector trailers.
 bool InfinityBase::CreateFigure(const std::string& file_path, u32 figure_num)
 {
-  File::IOFile inf_file(file_path, "w+b");
-  if (!inf_file)
-  {
-    return false;
-  }
-
-  // Create a 320 byte file with standard NFC read/write permissions
-  std::array<u8, INFINITY_NUM_BLOCKS * INFINITY_BLOCK_SIZE> file_data{};
-  u32 first_block = 0x17878E;
-  u32 other_blocks = 0x778788;
-  for (s8 i = 2; i >= 0; i--)
-  {
-    file_data[0x38 - i] = u8((first_block >> i * 8) & 0xFF);
-  }
-  for (u32 index = 1; index < 0x05; index++)
-  {
-    for (s8 i = 2; i >= 0; i--)
-    {
-      file_data[((index * 0x40) + 0x38) - i] = u8((other_blocks >> i * 8) & 0xFF);
-    }
-  }
-  // Create the vector to calculate the SHA1 hash with
-  std::vector<u8> sha1_calc = {SHA1_CONSTANT.begin(), SHA1_CONSTANT.end() - 1};
-
-  // Generate random UID, used for AES encrypt/decrypt
-  std::array<u8, 16> uid_data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89, 0x44, 0x00, 0xC2};
-  Common::Random::Generate(&uid_data[0], 7);
-  for (s8 i = 0; i < 7; i++)
-  {
-    sha1_calc.push_back(uid_data[i]);
-  }
-  std::array<u8, 16> figure_data = GenerateBlankFigureData(figure_num);
-
-  if (figure_data[1] == 0x00)
+  File::IOFile file(file_path, "w+b");
+  if (!file)
     return false;
 
-  std::array<u8, 16> key = GenerateInfinityFigureKey(sha1_calc);
+  FigureBytes bytes{};
+  constexpr std::array<u8, 3> FIRST_SECTOR_ACCESS{0x17, 0x87, 0x8E};
+  constexpr std::array<u8, 3> OTHER_SECTOR_ACCESS{0x77, 0x87, 0x88};
+  for (std::size_t sector = 0; sector < 5; ++sector)
+  {
+    const auto& access = sector == 0 ? FIRST_SECTOR_ACCESS : OTHER_SECTOR_ACCESS;
+    std::ranges::copy(access, bytes.begin() + static_cast<std::ptrdiff_t>(sector * 0x40 + 0x36));
+  }
 
-  // Create AES Encrypt context based on AES key, use this to encrypt the character data and 4 blank
-  // blocks
-  std::unique_ptr<Common::AES::Context> ctx = Common::AES::CreateContextEncrypt(key.data());
-  std::array<u8, 16> encrypted_block = {};
-  std::array<u8, 16> encrypted_blank = {};
+  // Block 0: the tag ID, then fixed bytes.
+  std::array<u8, 16> tag{};
+  Common::Random::Generate(tag.data(), 7);
+  tag[7] = 0x89;
+  tag[8] = 0x44;
+  tag[9] = 0x00;
+  tag[10] = 0xC2;
 
-  ctx->CryptIvZero(figure_data.data(), encrypted_block.data(), figure_data.size());
-  ctx->CryptIvZero(BLANK_BLOCK.data(), encrypted_blank.data(), BLANK_BLOCK.size());
+  const std::array<u8, 16> character = CharacterBlock(figure_num);
+  // Character numbers start at 0x0F4241, so the top byte is never zero.
+  if (character[1] == 0x00)
+    return false;
 
-  // Copy encrypted data and UID data to the Figure File
-  memcpy(&file_data[0], uid_data.data(), uid_data.size());
-  memcpy(&file_data[16], encrypted_block.data(), encrypted_block.size());
-  memcpy(&file_data[16 * 0x04], encrypted_blank.data(), encrypted_blank.size());
-  memcpy(&file_data[16 * 0x08], encrypted_blank.data(), encrypted_blank.size());
-  memcpy(&file_data[16 * 0x0C], encrypted_blank.data(), encrypted_blank.size());
-  memcpy(&file_data[16 * 0x0D], encrypted_blank.data(), encrypted_blank.size());
+  const auto aes = Common::AES::CreateContextEncrypt(FigureKey(std::span{tag}.first(7)).data());
+  std::array<u8, 16> encrypted_character{};
+  std::array<u8, 16> encrypted_blank{};
+  const std::array<u8, 16> blank{};
+  aes->CryptIvZero(character.data(), encrypted_character.data(), character.size());
+  aes->CryptIvZero(blank.data(), encrypted_blank.data(), blank.size());
 
-  DEBUG_LOG_FMT(IOS_USB, "File Data: \n{}", HexDump(file_data.data(), file_data.size()));
+  std::ranges::copy(tag, bytes.begin());
+  std::ranges::copy(encrypted_character, bytes.begin() + 1 * INFINITY_BLOCK_SIZE);
+  constexpr std::array<std::size_t, 4> BLANK_BLOCKS{4, 8, 12, 13};
+  for (const std::size_t block : BLANK_BLOCKS)
+  {
+    std::ranges::copy(encrypted_blank,
+                      bytes.begin() + static_cast<std::ptrdiff_t>(block * INFINITY_BLOCK_SIZE));
+  }
 
-  inf_file.WriteBytes(file_data.data(), file_data.size());
-
+  DEBUG_LOG_FMT(IOS_USB, "File Data: \n{}", HexDump(bytes.data(), bytes.size()));
+  file.WriteBytes(bytes.data(), bytes.size());
   return true;
 }
 
 std::span<const std::pair<const char*, const u32>> InfinityBase::GetFigureList()
 {
-  return list_infinity_figures;
+  return FIGURE_LIST;
 }
 
 std::string InfinityBase::FindFigure(u32 number) const
 {
-  for (auto it = list_infinity_figures.begin(); it != list_infinity_figures.end(); it++)
+  for (const auto& [name, toy_number] : FIGURE_LIST)
   {
-    if (it->second == number)
-    {
-      return it->first;
-    }
+    if (toy_number == number)
+      return name;
   }
   return "Unknown Figure";
 }
 
-FigureBasePosition InfinityBase::DeriveFigurePosition(FigureUIPosition position)
+InfinityFigure& InfinityBase::FigureInOrder(u8 order_added)
 {
-  // In the added/removed response, position needs to be 1 for the hexagon, 2 for Player 1 and
-  // Player 1's abilities, and 3 for Player 2 and Player 2's abilities. In the UI, positions 0, 1
-  // and 2 represent the hexagon slot, 3, 4 and 5 represent Player 1's slot and 6, 7 and 8 represent
-  // Player 2's slot.
-
-  switch (position)
+  for (InfinityFigure& figure : m_figures)
   {
-  case FigureUIPosition::HexagonDiscOne:
-  case FigureUIPosition::HexagonDiscTwo:
-  case FigureUIPosition::HexagonDiscThree:
-  {
-    return FigureBasePosition::HexagonSlot;
+    if (figure.order_added == order_added)
+      return figure;
   }
-  case FigureUIPosition::PlayerOne:
-  case FigureUIPosition::P1AbilityOne:
-  case FigureUIPosition::P1AbilityTwo:
-  {
-    return FigureBasePosition::PlayerOneSlot;
-  }
-  case FigureUIPosition::PlayerTwo:
-  case FigureUIPosition::P2AbilityOne:
-  case FigureUIPosition::P2AbilityTwo:
-  {
-    return FigureBasePosition::PlayerTwoSlot;
-  }
-  default:
-    return FigureBasePosition::Unknown;
-  }
-}
-
-InfinityFigure& InfinityBase::GetFigureByOrder(u8 order_added)
-{
-  for (u8 i = 0; i < m_figures.size(); i++)
-  {
-    if (m_figures[i].order_added == order_added)
-    {
-      return m_figures[i];
-    }
-  }
-  // This should never reach this statement, but return 0 reference to supress warnings
   ASSERT_MSG(IOS_USB, false, "Unable to find Disney Figure requested by game");
   return m_figures[0];
 }
 
-std::array<u8, 16> InfinityBase::GenerateInfinityFigureKey(const std::vector<u8>& sha1_data)
-{
-  Common::SHA1::Digest digest = Common::SHA1::CalculateDigest(sha1_data);
-  // Infinity AES keys are the first 16 bytes of the SHA1 Digest, every set of 4 bytes need to be
-  // reversed due to endianness
-  std::array<u8, 16> key = {};
-  for (int i = 0; i < 4; i++)
-  {
-    for (int x = 3; x >= 0; x--)
-    {
-      key[(3 - x) + (i * 4)] = digest[x + (i * 4)];
-    }
-  }
-  return key;
-}
-
-std::array<u8, 16> InfinityBase::GenerateBlankFigureData(u32 figure_num)
-{
-  std::array<u8, 16> figure_data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                    0x00, 0x00, 0x00, 0x01, 0xD1, 0x1F};
-
-  // Figure Number, input by end user
-  figure_data[1] = u8((figure_num >> 16) & 0xFF);
-  figure_data[2] = u8((figure_num >> 8) & 0xFF);
-  figure_data[3] = u8(figure_num & 0xFF);
-
-  // Manufacture date, formatted as YY/MM/DD. Set to Infinity 1.0 release date
-  figure_data[4] = 0x0D;
-  figure_data[5] = 0x08;
-  figure_data[6] = 0x12;
-
-  u32 checksum = InfinityCRC32(figure_data);
-  for (s8 i = 3; i >= 0; i--)
-  {
-    figure_data[15 - i] = u8((checksum >> i * 8) & 0xFF);
-  }
-  DEBUG_LOG_FMT(IOS_USB, "Block 1: \n{}", HexDump(figure_data.data(), 16));
-  return figure_data;
-}
-
+// 81 <8 bytes, big endian>: the scrambled seed.
 void InfinityBase::DescrambleAndSeed(u8* buf, u8 sequence, std::array<u8, 32>& reply_buf)
 {
-  u64 value = u64(buf[4]) << 56 | u64(buf[5]) << 48 | u64(buf[6]) << 40 | u64(buf[7]) << 32 |
-              u64(buf[8]) << 24 | u64(buf[9]) << 16 | u64(buf[10]) << 8 | u64(buf[11]);
-  u32 seed = Descramble(value);
-  GenerateSeed(seed);
+  u64 scrambled = 0;
+  for (std::size_t i = 0; i < 8; ++i)
+    scrambled = (scrambled << 8) | buf[4 + i];
+  SeedGenerator(Descramble(scrambled));
   GetBlankResponse(sequence, reply_buf);
 }
 
 void InfinityBase::GetNextAndScramble(u8 sequence, std::array<u8, 32>& reply_buf)
 {
-  u32 next_random = GetNext();
-  u64 scrambled_next_random = Scramble(next_random, 0);
-  reply_buf = {0xAA, 0x09, sequence};
-  reply_buf[3] = u8((scrambled_next_random >> 56) & 0xFF);
-  reply_buf[4] = u8((scrambled_next_random >> 48) & 0xFF);
-  reply_buf[5] = u8((scrambled_next_random >> 40) & 0xFF);
-  reply_buf[6] = u8((scrambled_next_random >> 32) & 0xFF);
-  reply_buf[7] = u8((scrambled_next_random >> 24) & 0xFF);
-  reply_buf[8] = u8((scrambled_next_random >> 16) & 0xFF);
-  reply_buf[9] = u8((scrambled_next_random >> 8) & 0xFF);
-  reply_buf[10] = u8(scrambled_next_random & 0xFF);
-  reply_buf[11] = GenerateChecksum(reply_buf, 11);
+  const u64 scrambled = Scramble(NextRandom());
+  reply_buf = {};
+  ReplyHeader(reply_buf, 0x09, sequence);
+  for (std::size_t i = 0; i < 8; ++i)
+    reply_buf[3 + i] = static_cast<u8>(scrambled >> (56 - 8 * i));
+  reply_buf[11] = Checksum(reply_buf, 11);
 }
 
-void InfinityBase::GenerateSeed(u32 seed)
+// Bob Jenkins' small fast generator (JSF32), seeded the usual way.
+void InfinityBase::SeedGenerator(u32 seed)
 {
-  m_random_a = 0xF1EA5EED;
-  m_random_b = seed;
-  m_random_c = seed;
-  m_random_d = seed;
-
-  for (int i = 0; i < 23; i++)
-  {
-    GetNext();
-  }
+  m_rng_a = 0xF1EA5EED;
+  m_rng_b = seed;
+  m_rng_c = seed;
+  m_rng_d = seed;
+  for (int i = 0; i < 23; ++i)
+    NextRandom();
 }
 
-u32 InfinityBase::GetNext()
+u32 InfinityBase::NextRandom()
 {
-  u32 a = m_random_a;
-  u32 b = m_random_b;
-  u32 c = m_random_c;
-  u32 ret = std::rotl(m_random_b, 27);
-
-  u32 temp = (a + ((ret ^ 0xFFFFFFFF) + 1));
-  b ^= std::rotl(c, 17);
-  a = m_random_d;
-  c += a;
-  ret = b + temp;
-  a += temp;
-
-  m_random_c = a;
-  m_random_a = b;
-  m_random_b = c;
-  m_random_d = ret;
-
-  return ret;
-}
-
-u64 InfinityBase::Scramble(u32 num_to_scramble, u32 garbage)
-{
-  u64 mask = 0x8E55AA1B3999E8AA;
-  u64 ret = 0;
-
-  for (int i = 0; i < 64; i++)
-  {
-    ret <<= 1;
-
-    if ((mask & 1) != 0)
-    {
-      ret |= (num_to_scramble & 1);
-      num_to_scramble >>= 1;
-    }
-    else
-    {
-      ret |= (garbage & 1);
-      garbage >>= 1;
-    }
-
-    mask >>= 1;
-  }
-
-  return ret;
-}
-
-u32 InfinityBase::Descramble(u64 num_to_descramble)
-{
-  u64 mask = 0x8E55AA1B3999E8AA;
-  u32 ret = 0;
-
-  for (int i = 0; i < 64; i++)
-  {
-    if (Common::ExtractBit(mask, 63))
-    {
-      ret = (ret << 1) | (num_to_descramble & 0x01);
-    }
-
-    num_to_descramble >>= 1;
-    mask <<= 1;
-  }
-
-  return ret;
+  const u32 e = m_rng_a - std::rotl(m_rng_b, 27);
+  m_rng_a = m_rng_b ^ std::rotl(m_rng_c, 17);
+  m_rng_b = m_rng_c + m_rng_d;
+  m_rng_c = m_rng_d + e;
+  m_rng_d = e + m_rng_a;
+  return m_rng_d;
 }
 
 void InfinityFigure::Save()
 {
   if (!inf_file)
     return;
-
   inf_file.Seek(0, File::SeekOrigin::Begin);
-  inf_file.WriteBytes(data.data(), 0x40 * 0x05);
+  inf_file.WriteBytes(data.data(), data.size());
 }
 }  // namespace IOS::HLE::USB

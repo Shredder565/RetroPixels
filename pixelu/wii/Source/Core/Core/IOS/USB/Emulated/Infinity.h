@@ -1,12 +1,14 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -15,19 +17,27 @@
 
 namespace IOS::HLE::USB
 {
+// A figure is an NFC tag of 20 blocks of 16 bytes.
 constexpr u8 INFINITY_NUM_BLOCKS = 0x14;
 constexpr u8 INFINITY_BLOCK_SIZE = 0x10;
 
 struct InfinityFigure final
 {
+  // Writes the data back to the figure file, if one is open.
   void Save();
 
   File::IOFile inf_file;
   std::array<u8, INFINITY_NUM_BLOCKS * INFINITY_BLOCK_SIZE> data{};
   bool present = false;
+  // The order the figure was first placed in (255: never placed).
   u8 order_added = 255;
 };
 
+class InfinityBase;
+
+// The USB side of a Disney Infinity base (0e6f:0129). The game sends 32-byte "FF" command
+// packets on the interrupt OUT endpoint and reads 32-byte "AA" replies (and "AB" figure
+// placement notices) from the IN endpoint.
 class InfinityUSB final : public Device
 {
 public:
@@ -49,8 +59,14 @@ public:
   int SubmitTransfer(std::unique_ptr<IsoMessage> message) override;
 
 private:
+  using Packet = std::array<u8, 32>;
+
   void ScheduleTransfer(std::unique_ptr<TransferCommand> command, const std::array<u8, 32>& data,
                         u64 expected_time_us);
+  // Runs one FF command packet and returns its reply.
+  Packet RunCommand(InfinityBase& base, u8* packet);
+  // Hands a reply to a waiting read, or keeps it for the next one.
+  void DeliverReply(const Packet& reply);
 
   u16 m_vid = 0;
   u16 m_pid = 0;
@@ -60,10 +76,12 @@ private:
   std::vector<ConfigDescriptor> m_config_descriptor;
   std::vector<InterfaceDescriptor> m_interface_descriptor;
   std::vector<EndpointDescriptor> m_endpoint_descriptor;
-  std::queue<std::array<u8, 32>> m_queries;
+  // Replies nobody has read yet, and reads waiting for a reply.
+  std::queue<Packet> m_queries;
   std::queue<std::unique_ptr<IntrMessage>> m_response_list;
 };
 
+// Slots in the UI: three on the hexagon, then each player's figure and two ability discs.
 enum class FigureUIPosition : u8
 {
   HexagonDiscOne = 0,
@@ -77,6 +95,7 @@ enum class FigureUIPosition : u8
   P2AbilityTwo = 8
 };
 
+// The three pads of the base as the game numbers them.
 enum class FigureBasePosition : u8
 {
   Unknown = 0,
@@ -111,24 +130,22 @@ protected:
   std::array<InfinityFigure, 9> m_figures;
 
 private:
-  InfinityFigure& GetFigureByOrder(u8 order_added);
-  std::array<u8, 16> GenerateInfinityFigureKey(const std::vector<u8>& sha1_data);
-  std::array<u8, 16> GenerateBlankFigureData(u32 figure_num);
-  FigureBasePosition DeriveFigurePosition(FigureUIPosition position);
-  void GenerateSeed(u32 seed);
-  u32 GetNext();
-  u64 Scramble(u32 num_to_scramble, u32 garbage);
-  u32 Descramble(u64 num_to_descramble);
-  u8 GenerateChecksum(const std::array<u8, 32>& data, int num_of_bytes) const;
+  using Packet = std::array<u8, 32>;
 
-  // These 4 variables are state variables used during the seeding and use of the random number
-  // generator.
-  u32 m_random_a;
-  u32 m_random_b;
-  u32 m_random_c;
-  u32 m_random_d;
+  InfinityFigure& FigureInOrder(u8 order_added);
+  void QueueFigureChange(FigureUIPosition position, u8 order_added, bool removed);
+
+  // The base's random number generator, which the game seeds and then checks.
+  void SeedGenerator(u32 seed);
+  u32 NextRandom();
+
+  // State of the random number generator.
+  u32 m_rng_a = 0;
+  u32 m_rng_b = 0;
+  u32 m_rng_c = 0;
+  u32 m_rng_d = 0;
 
   u8 m_figure_order = 0;
-  std::queue<std::array<u8, 32>> m_figure_added_removed_response;
+  std::queue<Packet> m_figure_added_removed_response;
 };
 }  // namespace IOS::HLE::USB
