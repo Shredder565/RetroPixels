@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <string_view>
@@ -357,7 +358,12 @@ private:
 class HapticOutput : public Core::Device::Output
 {
 public:
-  explicit HapticOutput(SDL_Haptic* haptic) : m_haptic(haptic) { m_effect.type = NO_EFFECT; }
+  explicit HapticOutput(SDL_Haptic* haptic) : m_haptic(haptic)
+  {
+    // The whole union is cleared (SDL copies all of it, not only the member in use).
+    std::memset(&m_effect, 0, sizeof(m_effect));
+    m_effect.type = NO_EFFECT;
+  }
 
   ~HapticOutput() override
   {
