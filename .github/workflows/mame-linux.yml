@@ -1,0 +1,183 @@
+name: MAME for Linux
+
+# The MAME in the Linux download. The MAME team publishes ready-made builds
+# for Windows only, so this builds the same official release the Windows
+# download has (bundlemame -resolve: the newest, or the version asked for)
+# from the MAME team's own source code, unchanged, on ubuntu-22.04 (glibc
+# 2.35 floor), with tools/bundlemame/build-linux.sh, and lays it out with
+# bundlemame -os linux. All of MAME's machines, as in the Windows release
+# (MAME no longer has an arcade-only subtarget; see linux-pins.sh).
+#
+# A full MAME build takes hours, so the finished build is cached by release
+# tag (and by the build script and pins), and the compiler's objects by
+# ccache: a run for a release that's built already takes minutes, and a new
+# release mostly comes from ccache. If a first build runs out of time, the
+# objects made so far are saved; run it again and it carries on.
+#
+# Artifact MAME-linux-x64: MAME-linux.tar.gz, whose contents go into the
+# package's MAME/ folder as they are ("MAME 0.xxx/mame" with the built-in
+# marker, and roms/). bundle-linux.yml takes it from the newest successful
+# run; this starts bundle-linux.yml when it's done. When the MAME team makes a
+# new release, run this by hand (or push a change to tools/bundlemame) so the
+# Linux download follows the Windows one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "MAME version (e.g. 0.289); empty = the newest, as the Windows download"
+        required: false
+        default: ""
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - tools/bundlemame/**
+      - internal/mame/install.go
+      - .github/workflows/mame-linux.yml
+
+permissions:
+  contents: read
+  actions: write # to start the RetroPixels Linux download once this is done
+
+concurrency:
+  group: mame-linux
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 5G
+      CCACHE_COMPRESS: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Which MAME
+        id: rel
+        run: |
+          go run ./tools/bundlemame -resolve -version "${{ inputs.version }}"
+          cat "$GITHUB_OUTPUT"
+
+      - name: Finished build (cache)
+        id: pkg
+        uses: actions/cache/restore@v4
+        with:
+          path: stage
+          key: mame-linux-${{ steps.rel.outputs.tag }}-${{ hashFiles('tools/bundlemame/build-linux.sh', 'tools/bundlemame/linux-pins.sh') }}
+
+      - name: Room on the disk
+        if: steps.pkg.outputs.cache-hit != 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build tools
+        if: steps.pkg.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -q
+          # MAME: compiler, python3, fontconfig/FreeType, PulseAudio, ALSA,
+          # X11 with Xinerama and XInput2, OpenGL. SDL2's back ends
+          # (loaded at run time): X11 extensions, Wayland, libdecor, KMS.
+          sudo apt-get install -y -q --no-install-recommends \
+            build-essential python3 ccache cmake ninja-build patchelf pkg-config \
+            libfontconfig1-dev libfreetype-dev libpulse-dev libasound2-dev \
+            libx11-dev libxext-dev libxinerama-dev libxi-dev libgl-dev libegl-dev \
+            libxrandr-dev libxcursor-dev libxfixes-dev libxss-dev libxxf86vm-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev libgbm-dev \
+            libudev-dev libdbus-1-dev libpipewire-0.3-dev
+          gcc --version | head -n 1
+          ccache --version | head -n 1
+
+      - name: Compiler cache
+        if: steps.pkg.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: mame-ccache-${{ steps.rel.outputs.tag }}-${{ github.run_id }}
+          restore-keys: |
+            mame-ccache-${{ steps.rel.outputs.tag }}-
+            mame-ccache-
+
+      - name: MAME's source code
+        id: src
+        if: steps.pkg.outputs.cache-hit != 'true'
+        run: go run ./tools/bundlemame -resolve -version "${{ steps.rel.outputs.version }}" -source "$RUNNER_TEMP/mame-source.tar.gz"
+
+      - name: Build MAME ${{ steps.rel.outputs.version }}
+        if: steps.pkg.outputs.cache-hit != 'true'
+        run: |
+          export PATH=/usr/lib/ccache:$PATH
+          ccache -z
+          # Stops in time to save the compiler cache (see the next step).
+          timeout 285m sh tools/bundlemame/build-linux.sh \
+            -s "$RUNNER_TEMP/mame-source.tar.gz" -S "${{ steps.src.outputs.source_sha256 }}" \
+            -t "${{ steps.rel.outputs.tag }}" -w build-mame stage
+          ccache -s
+
+      - name: Save the compiler cache
+        if: always() && steps.pkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: mame-ccache-${{ steps.rel.outputs.tag }}-${{ github.run_id }}
+
+      - name: Save the finished build
+        if: steps.pkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: stage
+          key: ${{ steps.pkg.outputs.cache-primary-key }}
+
+      - name: Check it
+        run: |
+          sudo apt-get install -y -q --no-install-recommends xvfb xauth
+          cat stage/RETROPIXELS-BUILD.txt
+          grep -qx "tag=${{ steps.rel.outputs.tag }}" stage/RETROPIXELS-BUILD.txt
+          ldd stage/mame
+          if ldd stage/mame | grep -q 'not found'; then exit 1; fi
+          ldd stage/mame | grep -q "$PWD/stage/lib/libSDL2-2.0.so.0"
+          v=$(stage/mame -version)
+          echo "$v"
+          case "$v" in "${{ steps.rel.outputs.version }} (${{ steps.rel.outputs.tag }})"*) ;; *) echo "unexpected version"; exit 1 ;; esac
+          stage/mame -listxml pacman | grep -q '<machine name="pacman"'
+          cd stage
+          # Every machine's description checks out.
+          ./mame -validate
+          # Pong needs no ROMs: it runs for a few seconds in a window under
+          # Xvfb with software video and no sound, then saves a screenshot.
+          rm -rf "$RUNNER_TEMP/snap"
+          xvfb-run -a -s '-screen 0 1280x1024x24' ./mame pong -rompath "$RUNNER_TEMP/none" \
+            -window -video soft -sound none -skip_gameinfo -nothrottle -seconds_to_run 5 \
+            -snapshot_directory "$RUNNER_TEMP/snap" -cfg_directory "$RUNNER_TEMP/cfg" -nvram_directory "$RUNNER_TEMP/nvram"
+          find "$RUNNER_TEMP/snap" -name '*.png' | grep -q . || echo "::warning::pong saved no screenshot"
+
+      - name: Lay it out for the download
+        run: |
+          go run ./tools/bundlemame -os linux -dir out/MAME -build stage -version "${{ steps.rel.outputs.version }}"
+          test -x "out/MAME/MAME ${{ steps.rel.outputs.version }}/mame"
+          test -f "out/MAME/MAME ${{ steps.rel.outputs.version }}/RETROPIXELS-BUILT-IN.txt"
+          cat "out/MAME/MAME ${{ steps.rel.outputs.version }}/RETROPIXELS-BUILT-IN.txt"
+          mkdir -p dist
+          tar -czf dist/MAME-linux.tar.gz -C out/MAME .
+          tar -tzvf dist/MAME-linux.tar.gz | head -n 20
+          du -sh "out/MAME" dist/MAME-linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MAME-linux-x64
+          path: dist/MAME-linux.tar.gz
+          compression-level: 0
+          retention-days: 30
+
+      - name: Make the RetroPixels Linux download with this build
+        run: gh workflow run bundle-linux.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"
