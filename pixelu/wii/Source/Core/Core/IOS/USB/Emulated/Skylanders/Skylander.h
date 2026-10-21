@@ -1,11 +1,14 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <queue>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -13,9 +16,7 @@
 #include "Core/IOS/USB/Common.h"
 #include "Core/IOS/USB/Emulated/Skylanders/SkylanderFigure.h"
 
-// The maximum possible characters the portal can handle.
-// The status array is 32 bits and every character takes 2 bits.
-// 32/2 = 16
+// The portal reports the state of every figure in a 32-bit word, two bits each.
 constexpr u8 MAX_SKYLANDERS = 16;
 constexpr u8 NUM_SKYLANDER_GAMES = 5;
 constexpr u8 NUM_SKYLANDER_TYPES = 10;
@@ -44,6 +45,7 @@ enum class Type : u8
   Trap,
   Unknown
 };
+// The kinds whose saved data is understood: Skylander (all characters), Trophy, or Unknown.
 Type NormalizeSkylanderType(Type type);
 enum class Element
 {
@@ -68,7 +70,13 @@ struct SkyData
   Type type = Type::Unknown;
 };
 
+// Known figures by (figure ID, variant ID).
 extern const std::map<const std::pair<const u16, const u16>, SkyData> list_skylanders;
+
+class SkylanderPortal;
+
+// The USB side of a Skylanders portal of power (1430:0150): HID reports over control transfers
+// for commands and an interrupt endpoint for replies, status and speaker audio.
 class SkylanderUSB final : public Device
 {
 public:
@@ -92,6 +100,18 @@ public:
                         s32 expected_count, u64 expected_time_us);
 
 private:
+  using Report = std::array<u8, 64>;
+
+  // How a portal command is answered on its control transfer: the bytes echoed back and the
+  // transfer length (0: the command is not accepted). Replies that come back through the
+  // interrupt endpoint are queued in m_queries.
+  struct CommandReply
+  {
+    Report control{};
+    s32 length = 0;
+  };
+  CommandReply HandlePortalCommand(SkylanderPortal& portal, std::span<const u8> command);
+
   u16 m_vid = 0;
   u16 m_pid = 0;
   u8 m_active_interface = 0;
@@ -100,13 +120,16 @@ private:
   std::vector<ConfigDescriptor> m_config_descriptor;
   std::vector<InterfaceDescriptor> m_interface_descriptor;
   std::vector<EndpointDescriptor> m_endpoint_descriptor;
-  std::queue<std::array<u8, 64>> m_queries;
+  // Replies waiting for an interrupt transfer, oldest first.
+  std::queue<Report> m_queries;
 };
 
+// One portal slot.
 struct Skylander final
 {
   std::unique_ptr<SkylanderFigure> figure;
   u8 status = 0;
+  // States still to be reported, one per status report.
   std::queue<u8> queued_status;
   u32 last_id = 0;
 
@@ -126,6 +149,7 @@ struct SkylanderLEDColor final
   u8 blue = 0;
 };
 
+// The figures on the portal, shared by the emulated USB device and the UI.
 class SkylanderPortal final
 {
 public:
@@ -140,15 +164,13 @@ public:
   void WriteBlock(u8 sky_num, u8 block, const u8* to_write_buf, u8* reply_buf);
 
   bool RemoveSkylander(u8 sky_num);
+  // Returns the slot used, or 0xFF when the portal is full.
   u8 LoadSkylander(std::unique_ptr<SkylanderFigure> figure);
   Skylander* GetSkylander(u8 slot);
   std::pair<u16, u16> CalculateIDs(const std::array<u8, 0x40 * 0x10>& file_data);
 
 private:
-  static bool IsSkylanderNumberValid(u8 sky_num);
-  static bool IsBlockNumberValid(u8 block);
-
-  std::mutex sky_mutex;
+  std::mutex m_mutex;
 
   bool m_activated = true;
   bool m_status_updated = false;
@@ -157,7 +179,7 @@ private:
   SkylanderLEDColor m_color_left = {};
   SkylanderLEDColor m_color_trap = {};
 
-  std::array<Skylander, MAX_SKYLANDERS> skylanders;
+  std::array<Skylander, MAX_SKYLANDERS> m_slots;
 };
 
 }  // namespace IOS::HLE::USB
