@@ -1,7 +1,11 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 
 #include "Common/CommonTypes.h"
 #include "Common/Event.h"
@@ -16,16 +20,21 @@ class AbstractStagingTexture;
 class AbstractTexture;
 class AbstractFramebuffer;
 
+// Captures presented frames for screenshots and frame dumping.
+//
+// The video thread copies each frame into a readback staging texture. At the end of the frame
+// the readback texture is swapped with the output texture, mapped, and handed to a worker
+// thread, which writes a screenshot and/or appends the frame to the dump (video or PNG files).
 class FrameDumper
 {
 public:
   FrameDumper();
   ~FrameDumper();
 
-  // Ensures all rendered frames are queued for encoding.
+  // Hands the most recently captured frame (if any) to the worker thread.
   void FlushFrameDump();
 
-  // Fills the frame dump staging texture with the current XFB texture.
+  // Captures src_rect of src_texture, scaled to the size of target_rect.
   void DumpCurrentFrame(const AbstractTexture* src_texture,
                         const MathUtil::Rectangle<int>& src_rect,
                         const MathUtil::Rectangle<int>& target_rect, u64 ticks, int frame_number);
@@ -38,68 +47,48 @@ public:
   void DoState(PointerWrap& p);
 
 private:
-  // NOTE: The methods below are called on the framedumping thread.
-  void FrameDumpThreadFunc();
-  bool StartFrameDumpToFFMPEG(const FrameData&);
-  void DumpFrameToFFMPEG(const FrameData&);
-  void StopFrameDumpToFFMPEG();
-  std::string GetFrameDumpNextImageFileName() const;
-  bool StartFrameDumpToImage(const FrameData&);
-  void DumpFrameToImage(const FrameData&);
+  // Video thread side.
+  bool EnsureScaleTarget(u32 width, u32 height);
+  bool EnsureReadback(u32 width, u32 height);
+  void SubmitFrame(const u8* pixels, int width, int height, int stride);
+  void WaitForWorker();
+  void Shutdown();
 
-  void ShutdownFrameDumping();
+  // Worker thread side.
+  void WorkerLoop();
+  bool BeginDump(bool use_ffmpeg, const FrameData& frame);
+  void WriteFrame(bool use_ffmpeg, const FrameData& frame);
+  std::string ImagePath() const;
 
-  // Checks that the frame dump render texture exists and is the correct size.
-  bool CheckFrameDumpRenderTexture(u32 target_width, u32 target_height);
+  std::thread m_worker;
+  Common::Flag m_worker_alive;
+  Common::Event m_work_ready;
+  Common::Event m_work_done;
 
-  // Checks that the frame dump readback texture exists and is the correct size.
-  bool CheckFrameDumpReadbackTexture(u32 target_width, u32 target_height);
+  // The frame being handed to the worker, and the state captured with the pending readback.
+  FrameData m_handoff;
+  FrameState m_pending_state;
 
-  // Asynchronously encodes the specified pointer of frame data to the frame dump.
-  void DumpFrameData(const u8* data, int w, int h, int stride);
+  // Intermediate target used when the frame has to be resized before readback.
+  std::unique_ptr<AbstractTexture> m_scale_texture;
+  std::unique_ptr<AbstractFramebuffer> m_scale_framebuffer;
 
-  // Ensures all encoded frames have been written to the output file.
-  void FinishFrameData();
+  // m_readback receives new captures; m_mapped is the one currently read by the worker.
+  std::unique_ptr<AbstractStagingTexture> m_readback;
+  std::unique_ptr<AbstractStagingTexture> m_mapped;
+  bool m_have_capture = false;
+  bool m_worker_busy = false;
 
-  std::thread m_frame_dump_thread;
-  Common::Flag m_frame_dump_thread_running;
-
-  // Used to kick frame dump thread.
-  Common::Event m_frame_dump_start;
-
-  // Set by frame dump thread on frame completion.
-  Common::Event m_frame_dump_done;
-
-  // Holds emulation state during the last swap when dumping.
-  FrameState m_last_frame_state;
-
-  // Communication of frame between video and dump threads.
-  FrameData m_frame_dump_data;
-
-  // Texture used for screenshot/frame dumping
-  std::unique_ptr<AbstractTexture> m_frame_dump_render_texture;
-  std::unique_ptr<AbstractFramebuffer> m_frame_dump_render_framebuffer;
-
-  // Double buffer:
-  std::unique_ptr<AbstractStagingTexture> m_frame_dump_readback_texture;
-  std::unique_ptr<AbstractStagingTexture> m_frame_dump_output_texture;
-  // Set when readback texture holds a frame that needs to be dumped.
-  bool m_frame_dump_needs_flush = false;
-  // Set when thread is processing output texture.
-  bool m_frame_dump_frame_running = false;
-
-  // Used to generate screenshot names.
-  u32 m_frame_dump_image_counter = 0;
+  // Number of the next PNG written when dumping frames as images.
+  u32 m_image_number = 0;
 
   FFMpegFrameDump m_ffmpeg_dump;
 
-  // Screenshots
-  Common::Flag m_screenshot_request;
-  Common::Event m_screenshot_completed;
-  std::mutex m_screenshot_lock;
-  std::string m_screenshot_name;
+  Common::Flag m_want_screenshot;
+  std::mutex m_screenshot_mutex;
+  std::string m_screenshot_path;
 
-  Common::EventHook m_frame_end_handle;
+  Common::EventHook m_after_frame_hook;
 };
 
 extern std::unique_ptr<FrameDumper> g_frame_dumper;

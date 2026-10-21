@@ -1,7 +1,8 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/FrameDumper.h"
+
+#include <utility>
 
 #include "Common/Assert.h"
 #include "Common/FileUtil.h"
@@ -17,356 +18,315 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/Present.h"
 
-// The video encoder needs the image to be a multiple of x samples.
-static constexpr int VIDEO_ENCODER_LCM = 4;
+std::unique_ptr<FrameDumper> g_frame_dumper;
 
-static bool DumpFrameToPNG(const FrameData& frame, const std::string& file_name)
+namespace
 {
-  return Common::ConvertRGBAToRGBAndSavePNG(file_name, frame.data, frame.width, frame.height,
-                                            frame.stride,
-                                            Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL));
+// Video encoders work on blocks, so dumped frame sizes are rounded to a multiple of this.
+constexpr int ENCODER_SIZE_MULTIPLE = 4;
+
+TextureConfig CaptureConfig(u32 width, u32 height, u32 flags)
+{
+  return TextureConfig(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, flags,
+                       AbstractTextureType::Texture_2DArray);
 }
+
+bool WritePNG(const std::string& path, const FrameData& frame)
+{
+  const int level = Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL);
+  return Common::ConvertRGBAToRGBAndSavePNG(path, frame.data, static_cast<u32>(frame.width),
+                                            static_cast<u32>(frame.height),
+                                            static_cast<u32>(frame.stride), level);
+}
+}  // namespace
 
 FrameDumper::FrameDumper()
 {
-  m_frame_end_handle =
+  m_after_frame_hook =
       GetVideoEvents().after_frame_event.Register([this](Core::System&) { FlushFrameDump(); });
 }
 
 FrameDumper::~FrameDumper()
 {
-  ShutdownFrameDumping();
+  Shutdown();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Video thread
+// ---------------------------------------------------------------------------------------------
 
 void FrameDumper::DumpCurrentFrame(const AbstractTexture* src_texture,
                                    const MathUtil::Rectangle<int>& src_rect,
                                    const MathUtil::Rectangle<int>& target_rect, u64 ticks,
                                    int frame_number)
 {
-  int source_width = src_rect.GetWidth();
-  int source_height = src_rect.GetHeight();
-  int target_width = target_rect.GetWidth();
-  int target_height = target_rect.GetHeight();
+  const int out_w = target_rect.GetWidth();
+  const int out_h = target_rect.GetHeight();
 
-  // We only need to render a copy if we need to stretch/scale the XFB copy.
-  MathUtil::Rectangle<int> copy_rect = src_rect;
-  if (source_width != target_width || source_height != target_height)
+  const AbstractTexture* source = src_texture;
+  MathUtil::Rectangle<int> region = src_rect;
+
+  // A staging copy cannot resize, so draw into an intermediate target first when needed.
+  const bool resize = src_rect.GetWidth() != out_w || src_rect.GetHeight() != out_h;
+  if (resize)
   {
-    if (!CheckFrameDumpRenderTexture(target_width, target_height))
+    if (!EnsureScaleTarget(static_cast<u32>(out_w), static_cast<u32>(out_h)))
       return;
-
-    g_gfx->ScaleTexture(m_frame_dump_render_framebuffer.get(),
-                        m_frame_dump_render_framebuffer->GetRect(), src_texture, src_rect);
-    src_texture = m_frame_dump_render_texture.get();
-    copy_rect = src_texture->GetRect();
+    g_gfx->ScaleTexture(m_scale_framebuffer.get(), m_scale_framebuffer->GetRect(), src_texture,
+                        src_rect);
+    source = m_scale_texture.get();
+    region = source->GetRect();
   }
 
-  if (!CheckFrameDumpReadbackTexture(target_width, target_height))
+  if (!EnsureReadback(static_cast<u32>(out_w), static_cast<u32>(out_h)))
     return;
 
-  m_frame_dump_readback_texture->CopyFromTexture(src_texture, copy_rect, 0, 0,
-                                                 m_frame_dump_readback_texture->GetRect());
-  m_last_frame_state = m_ffmpeg_dump.FetchState(ticks, frame_number);
-  m_frame_dump_needs_flush = true;
+  m_readback->CopyFromTexture(source, region, 0, 0, m_readback->GetRect());
+  m_pending_state = m_ffmpeg_dump.FetchState(ticks, frame_number);
+  m_have_capture = true;
 }
 
-bool FrameDumper::CheckFrameDumpRenderTexture(u32 target_width, u32 target_height)
+bool FrameDumper::EnsureScaleTarget(u32 width, u32 height)
 {
-  // Ensure framebuffer exists (we lazily allocate it in case frame dumping isn't used).
-  // Or, resize texture if it isn't large enough to accommodate the current frame.
-  if (m_frame_dump_render_texture && m_frame_dump_render_texture->GetWidth() == target_width &&
-      m_frame_dump_render_texture->GetHeight() == target_height)
+  if (m_scale_texture && m_scale_texture->GetWidth() == width &&
+      m_scale_texture->GetHeight() == height)
   {
     return true;
   }
 
-  // Recreate texture, but release before creating so we don't temporarily use twice the RAM.
-  m_frame_dump_render_framebuffer.reset();
-  m_frame_dump_render_texture.reset();
-  m_frame_dump_render_texture = g_gfx->CreateTexture(
-      TextureConfig(target_width, target_height, 1, 1, 1, AbstractTextureFormat::RGBA8,
-                    AbstractTextureFlag_RenderTarget, AbstractTextureType::Texture_2DArray),
-      "Frame dump render texture");
-  if (!m_frame_dump_render_texture)
+  // Free the old target first so two of them never exist at once.
+  m_scale_framebuffer.reset();
+  m_scale_texture.reset();
+
+  m_scale_texture = g_gfx->CreateTexture(
+      CaptureConfig(width, height, AbstractTextureFlag_RenderTarget), "Frame dump render texture");
+  if (m_scale_texture == nullptr)
   {
     PanicAlertFmt("Failed to allocate frame dump render texture");
     return false;
   }
-  m_frame_dump_render_framebuffer =
-      g_gfx->CreateFramebuffer(m_frame_dump_render_texture.get(), nullptr);
-  ASSERT(m_frame_dump_render_framebuffer);
+
+  m_scale_framebuffer = g_gfx->CreateFramebuffer(m_scale_texture.get(), nullptr);
+  ASSERT(m_scale_framebuffer);
   return true;
 }
 
-bool FrameDumper::CheckFrameDumpReadbackTexture(u32 target_width, u32 target_height)
+bool FrameDumper::EnsureReadback(u32 width, u32 height)
 {
-  std::unique_ptr<AbstractStagingTexture>& rbtex = m_frame_dump_readback_texture;
-  if (rbtex && rbtex->GetWidth() == target_width && rbtex->GetHeight() == target_height)
+  if (m_readback && m_readback->GetWidth() == width && m_readback->GetHeight() == height)
     return true;
 
-  rbtex.reset();
-  rbtex = g_gfx->CreateStagingTexture(StagingTextureType::Readback,
-                                      TextureConfig(target_width, target_height, 1, 1, 1,
-                                                    AbstractTextureFormat::RGBA8, 0,
-                                                    AbstractTextureType::Texture_2DArray));
-  if (!rbtex)
-    return false;
-
-  return true;
+  m_readback.reset();
+  m_readback =
+      g_gfx->CreateStagingTexture(StagingTextureType::Readback, CaptureConfig(width, height, 0));
+  return m_readback != nullptr;
 }
 
 void FrameDumper::FlushFrameDump()
 {
-  if (!m_frame_dump_needs_flush)
+  if (!m_have_capture)
     return;
 
-  // Ensure dumping thread is done with output texture before swapping.
-  FinishFrameData();
+  // The worker may still be reading the output texture; it must finish before the swap.
+  WaitForWorker();
+  std::swap(m_readback, m_mapped);
 
-  std::swap(m_frame_dump_output_texture, m_frame_dump_readback_texture);
-
-  // Queue encoding of the last frame dumped.
-  auto& output = m_frame_dump_output_texture;
-  output->Flush();
-  if (output->Map())
+  m_mapped->Flush();
+  if (m_mapped->Map())
   {
-    DumpFrameData(reinterpret_cast<u8*>(output->GetMappedPointer()), output->GetConfig().width,
-                  output->GetConfig().height, static_cast<int>(output->GetMappedStride()));
+    const TextureConfig& cfg = m_mapped->GetConfig();
+    SubmitFrame(reinterpret_cast<u8*>(m_mapped->GetMappedPointer()), static_cast<int>(cfg.width),
+                static_cast<int>(cfg.height), static_cast<int>(m_mapped->GetMappedStride()));
   }
   else
   {
     ERROR_LOG_FMT(VIDEO, "Failed to map texture for dumping.");
   }
+  m_have_capture = false;
 
-  m_frame_dump_needs_flush = false;
-
-  // Shutdown frame dumping if it is no longer active.
   if (!IsFrameDumping())
-    ShutdownFrameDumping();
+    Shutdown();
 }
 
-void FrameDumper::ShutdownFrameDumping()
+void FrameDumper::SubmitFrame(const u8* pixels, int width, int height, int stride)
 {
-  // Ensure the last queued readback has been sent to the encoder.
-  FlushFrameDump();
+  m_handoff = FrameData{pixels, width, height, stride, m_pending_state};
 
-  if (!m_frame_dump_thread_running.IsSet())
-    return;
-
-  // Ensure previous frame has been encoded.
-  FinishFrameData();
-
-  // Wake thread up, and wait for it to exit.
-  m_frame_dump_thread_running.Clear();
-  m_frame_dump_start.Set();
-  if (m_frame_dump_thread.joinable())
-    m_frame_dump_thread.join();
-  m_frame_dump_render_framebuffer.reset();
-  m_frame_dump_render_texture.reset();
-
-  m_frame_dump_readback_texture.reset();
-  m_frame_dump_output_texture.reset();
-}
-
-void FrameDumper::DumpFrameData(const u8* data, int w, int h, int stride)
-{
-  m_frame_dump_data = FrameData{data, w, h, stride, m_last_frame_state};
-
-  if (!m_frame_dump_thread_running.IsSet())
+  if (!m_worker_alive.IsSet())
   {
-    if (m_frame_dump_thread.joinable())
-      m_frame_dump_thread.join();
-    m_frame_dump_thread_running.Set();
-    m_frame_dump_thread = std::thread(&FrameDumper::FrameDumpThreadFunc, this);
+    // A worker that exited earlier still has to be joined before a new one starts.
+    if (m_worker.joinable())
+      m_worker.join();
+    m_worker_alive.Set();
+    m_worker = std::thread(&FrameDumper::WorkerLoop, this);
   }
 
-  // Wake worker thread up.
-  m_frame_dump_start.Set();
-  m_frame_dump_frame_running = true;
+  m_work_ready.Set();
+  m_worker_busy = true;
 }
 
-void FrameDumper::FinishFrameData()
+void FrameDumper::WaitForWorker()
 {
-  if (!m_frame_dump_frame_running)
+  if (!m_worker_busy)
     return;
 
-  m_frame_dump_done.Wait();
-  m_frame_dump_frame_running = false;
-
-  m_frame_dump_output_texture->Unmap();
+  m_work_done.Wait();
+  m_worker_busy = false;
+  m_mapped->Unmap();
 }
 
-void FrameDumper::FrameDumpThreadFunc()
+void FrameDumper::Shutdown()
+{
+  // Anything already captured still goes to the worker first.
+  FlushFrameDump();
+
+  if (!m_worker_alive.IsSet())
+    return;
+
+  WaitForWorker();
+
+  // Clearing the flag before the wake-up makes the worker leave its loop.
+  m_worker_alive.Clear();
+  m_work_ready.Set();
+  if (m_worker.joinable())
+    m_worker.join();
+
+  m_scale_framebuffer.reset();
+  m_scale_texture.reset();
+  m_readback.reset();
+  m_mapped.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Worker thread
+// ---------------------------------------------------------------------------------------------
+
+void FrameDumper::WorkerLoop()
 {
   Common::SetCurrentThreadName("FrameDumping");
 
-  bool dump_to_ffmpeg = !Config::Get(Config::GFX_DUMP_FRAMES_AS_IMAGES);
-  bool frame_dump_started = false;
-
-// If Dolphin was compiled without ffmpeg, we only support dumping to images.
+  bool use_ffmpeg = !Config::Get(Config::GFX_DUMP_FRAMES_AS_IMAGES);
 #if !defined(HAVE_FFMPEG)
-  if (dump_to_ffmpeg)
+  if (use_ffmpeg)
   {
     WARN_LOG_FMT(VIDEO, "FrameDump: Dolphin was not compiled with FFmpeg, using fallback option. "
                         "Frames will be saved as PNG images instead.");
-    dump_to_ffmpeg = false;
+    use_ffmpeg = false;
   }
 #endif
 
-  while (true)
+  bool dumping = false;
+  for (;;)
   {
-    m_frame_dump_start.Wait();
-    if (!m_frame_dump_thread_running.IsSet())
+    m_work_ready.Wait();
+    if (!m_worker_alive.IsSet())
       break;
 
-    auto frame = m_frame_dump_data;
+    const FrameData frame = m_handoff;
 
-    // Save screenshot
-    if (m_screenshot_request.TestAndClear())
+    if (m_want_screenshot.TestAndClear())
     {
-      std::lock_guard<std::mutex> lk(m_screenshot_lock);
-
-      if (DumpFrameToPNG(frame, m_screenshot_name))
-        OSD::AddMessage("Screenshot saved to " + m_screenshot_name);
-
-      // Reset settings
-      m_screenshot_name.clear();
-      m_screenshot_completed.Set();
+      std::lock_guard guard(m_screenshot_mutex);
+      if (WritePNG(m_screenshot_path, frame))
+        OSD::AddMessage("Screenshot saved to " + m_screenshot_path);
+      m_screenshot_path.clear();
     }
 
     if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES))
     {
-      if (!frame_dump_started)
+      if (!dumping)
       {
-        if (dump_to_ffmpeg)
-          frame_dump_started = StartFrameDumpToFFMPEG(frame);
-        else
-          frame_dump_started = StartFrameDumpToImage(frame);
-
-        // Stop frame dumping if we fail to start.
-        if (!frame_dump_started)
+        dumping = BeginDump(use_ffmpeg, frame);
+        // Turn the option back off when the dump could not be started.
+        if (!dumping)
           Config::SetCurrent(Config::MAIN_MOVIE_DUMP_FRAMES, false);
       }
-
-      // If we failed to start frame dumping, don't write a frame.
-      if (frame_dump_started)
-      {
-        if (dump_to_ffmpeg)
-          DumpFrameToFFMPEG(frame);
-        else
-          DumpFrameToImage(frame);
-      }
+      if (dumping)
+        WriteFrame(use_ffmpeg, frame);
     }
 
-    m_frame_dump_done.Set();
+    m_work_done.Set();
   }
 
-  if (frame_dump_started)
+  // Image dumps need no finishing step; a video file has to be closed.
+  if (dumping && use_ffmpeg)
   {
-    // No additional cleanup is needed when dumping to images.
-    if (dump_to_ffmpeg)
-      StopFrameDumpToFFMPEG();
-  }
-}
-
 #if defined(HAVE_FFMPEG)
-
-bool FrameDumper::StartFrameDumpToFFMPEG(const FrameData& frame)
-{
-  // If dumping started at boot, the start time must be set to the boot time to maintain audio sync.
-  // TODO: Perhaps we should care about this when starting dumping in the middle of emulation too,
-  // but it's less important there since the first frame to dump usually gets delivered quickly.
-  const u64 start_ticks = frame.state.frame_number == 0 ? 0 : frame.state.ticks;
-  return m_ffmpeg_dump.Start(frame.width, frame.height, start_ticks);
+    m_ffmpeg_dump.Stop();
+#endif
+  }
 }
 
-void FrameDumper::DumpFrameToFFMPEG(const FrameData& frame)
+bool FrameDumper::BeginDump(bool use_ffmpeg, const FrameData& frame)
 {
-  m_ffmpeg_dump.AddFrame(frame);
-}
-
-void FrameDumper::StopFrameDumpToFFMPEG()
-{
-  m_ffmpeg_dump.Stop();
-}
-
-#else
-
-bool FrameDumper::StartFrameDumpToFFMPEG(const FrameData&)
-{
-  return false;
-}
-
-void FrameDumper::DumpFrameToFFMPEG(const FrameData&)
-{
-}
-
-void FrameDumper::StopFrameDumpToFFMPEG()
-{
-}
-
-#endif  // defined(HAVE_FFMPEG)
-
-std::string FrameDumper::GetFrameDumpNextImageFileName() const
-{
-  return fmt::format("{}framedump_{}.png", File::GetUserPath(D_DUMPFRAMES_IDX),
-                     m_frame_dump_image_counter);
-}
-
-bool FrameDumper::StartFrameDumpToImage(const FrameData&)
-{
-  m_frame_dump_image_counter = 1;
-  if (!Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES_SILENT))
+  if (use_ffmpeg)
   {
-    // Only check for the presence of the first image to confirm overwriting.
-    // A previous run will always have at least one image, and it's safe to assume that if the user
-    // has allowed the first image to be overwritten, this will apply any remaining images as well.
-    std::string filename = GetFrameDumpNextImageFileName();
-    if (File::Exists(filename))
-    {
-      if (!AskYesNoFmtT("Frame dump image(s) '{0}' already exists. Overwrite?", filename))
-        return false;
-    }
+#if defined(HAVE_FFMPEG)
+    // A dump that begins with the first frame is timed from boot, keeping audio in sync.
+    const u64 first_ticks = frame.state.frame_number != 0 ? frame.state.ticks : 0;
+    return m_ffmpeg_dump.Start(frame.width, frame.height, first_ticks);
+#else
+    (void)frame;
+    return false;
+#endif
   }
 
-  return true;
+  m_image_number = 1;
+  if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES_SILENT))
+    return true;
+
+  // Asking about the first file is enough: a previous dump always wrote at least that one.
+  const std::string first = ImagePath();
+  if (!File::Exists(first))
+    return true;
+  return AskYesNoFmtT("Frame dump image(s) '{0}' already exists. Overwrite?", first);
 }
 
-void FrameDumper::DumpFrameToImage(const FrameData& frame)
+void FrameDumper::WriteFrame(bool use_ffmpeg, const FrameData& frame)
 {
-  DumpFrameToPNG(frame, GetFrameDumpNextImageFileName());
-  m_frame_dump_image_counter++;
+  if (use_ffmpeg)
+  {
+#if defined(HAVE_FFMPEG)
+    m_ffmpeg_dump.AddFrame(frame);
+#endif
+    return;
+  }
+
+  WritePNG(ImagePath(), frame);
+  ++m_image_number;
 }
+
+std::string FrameDumper::ImagePath() const
+{
+  return fmt::format("{}framedump_{}.png", File::GetUserPath(D_DUMPFRAMES_IDX), m_image_number);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------------------------
 
 void FrameDumper::SaveScreenshot(std::string filename)
 {
-  std::lock_guard<std::mutex> lk(m_screenshot_lock);
-  m_screenshot_name = std::move(filename);
-  m_screenshot_request.Set();
+  std::lock_guard guard(m_screenshot_mutex);
+  m_screenshot_path = std::move(filename);
+  m_want_screenshot.Set();
 }
 
 bool FrameDumper::IsFrameDumping() const
 {
-  if (m_screenshot_request.IsSet())
-    return true;
-
-  if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES))
-    return true;
-
-  return false;
+  return m_want_screenshot.IsSet() || Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES);
 }
 
 int FrameDumper::GetRequiredResolutionLeastCommonMultiple() const
 {
-  if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES))
-    return VIDEO_ENCODER_LCM;
-  return 1;
+  return Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES) ? ENCODER_SIZE_MULTIPLE : 1;
 }
 
 void FrameDumper::DoState(PointerWrap& p)
 {
-#ifdef HAVE_FFMPEG
+#if defined(HAVE_FFMPEG)
   m_ffmpeg_dump.DoState(p);
+#else
+  (void)p;
 #endif
 }
-std::unique_ptr<FrameDumper> g_frame_dumper;

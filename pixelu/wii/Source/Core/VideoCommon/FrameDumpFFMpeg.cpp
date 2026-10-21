@@ -1,14 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/FrameDumpFFMpeg.h"
 #include "Common/TimeUtil.h"
 
-#if defined(__FreeBSD__)
-#define __STDC_CONSTANT_MACROS 1
-#endif
-
 #include <array>
+#include <cstdarg>
+#include <functional>
+#include <memory>
 #include <string>
 
 #include <fmt/chrono.h>
@@ -41,128 +39,172 @@ extern "C" {
 
 #include "VideoCommon/OnScreenDisplay.h"
 
+// Everything libav needs for the file being written.
 struct FrameDumpContext
 {
-  AVFormatContext* format = nullptr;
+  AVFormatContext* muxer = nullptr;
   AVStream* stream = nullptr;
-  AVCodecContext* codec = nullptr;
-  AVFrame* src_frame = nullptr;
-  AVFrame* scaled_frame = nullptr;
-  SwsContext* sws = nullptr;
+  AVCodecContext* encoder = nullptr;
+  // Wraps the caller's RGBA pixels (no buffer of its own).
+  AVFrame* rgba = nullptr;
+  // The frame in the encoder's pixel format.
+  AVFrame* converted = nullptr;
+  SwsContext* scaler = nullptr;
 
-  s64 last_pts = AV_NOPTS_VALUE;
+  s64 previous_pts = AV_NOPTS_VALUE;
 
   int width = 0;
   int height = 0;
 
-  u64 start_ticks = 0;
+  // Emulated time of the file's first frame, and the savestate generation it belongs to.
+  u64 first_tick = 0;
   u32 savestate_index = 0;
 
-  bool gave_vfr_warning = false;
+  bool warned_variable_rate = false;
 };
 
 namespace
 {
-AVRational GetTimeBaseForCurrentRefreshRate(s64 max_denominator)
+// The video's time base: one tick per emulated refresh (denominator/numerator of the rate),
+// reduced to fit `max_denominator`.
+// TODO: reading the target refresh rate is not thread safe from the dump path.
+AVRational RefreshTimeBase(s64 max_denominator)
 {
-  // TODO: GetTargetRefreshRate* are not safe from GPU thread.
   auto& vi = Core::System::GetInstance().GetVideoInterface();
   int num;
   int den;
-  av_reduce(&num, &den, int(vi.GetTargetRefreshRateDenominator()),
-            int(vi.GetTargetRefreshRateNumerator()), max_denominator);
+  av_reduce(&num, &den, static_cast<int>(vi.GetTargetRefreshRateDenominator()),
+            static_cast<int>(vi.GetTargetRefreshRateNumerator()), max_denominator);
   return AVRational{num, den};
 }
 
-void InitAVCodec()
+Common::Log::LogLevel LibavToLogLevel(int level)
 {
-  static bool first_run = true;
-  if (first_run)
-  {
-    av_log_set_level(AV_LOG_DEBUG);
-    av_log_set_callback([](void* ptr, int level, const char* fmt, va_list vl) {
-      if (level < 0)
-        level = AV_LOG_DEBUG;
-      if (level >= 0)
-        level &= 0xff;
-
-      if (level > av_log_get_level())
-        return;
-
-      auto log_level = Common::Log::LogLevel::LNOTICE;
-      if (level >= AV_LOG_ERROR && level < AV_LOG_WARNING)
-        log_level = Common::Log::LogLevel::LERROR;
-      else if (level >= AV_LOG_WARNING && level < AV_LOG_INFO)
-        log_level = Common::Log::LogLevel::LWARNING;
-      else if (level >= AV_LOG_INFO && level < AV_LOG_DEBUG)
-        log_level = Common::Log::LogLevel::LINFO;
-      else if (level >= AV_LOG_DEBUG)
-        // keep libav debug messages visible in release build of dolphin
-        log_level = Common::Log::LogLevel::LINFO;
-
-      // Don't perform this formatting if the log level is disabled
-      auto* log_manager = Common::Log::LogManager::GetInstance();
-      if (log_manager != nullptr &&
-          log_manager->IsEnabled(Common::Log::LogType::FRAMEDUMP, log_level))
-      {
-        constexpr size_t MAX_MSGLEN = 1024;
-        char message[MAX_MSGLEN];
-        CharArrayFromFormatV(message, MAX_MSGLEN, fmt, vl);
-
-        GENERIC_LOG_FMT(Common::Log::LogType::FRAMEDUMP, log_level, "{}", message);
-      }
-    });
-
-    // TODO: We never call avformat_network_deinit.
-    avformat_network_init();
-
-    first_run = false;
-  }
+  if (level >= AV_LOG_DEBUG)
+    return Common::Log::LogLevel::LINFO;  // libav's debug output stays visible in release builds
+  if (level >= AV_LOG_INFO)
+    return Common::Log::LogLevel::LINFO;
+  if (level >= AV_LOG_WARNING)
+    return Common::Log::LogLevel::LWARNING;
+  if (level >= AV_LOG_ERROR)
+    return Common::Log::LogLevel::LERROR;
+  return Common::Log::LogLevel::LNOTICE;  // panic and fatal
 }
 
-std::string GetDumpPath(const std::string& extension, std::time_t time, u32 index)
+void ForwardLibavLog(void*, int level, const char* format, va_list args)
 {
-  const std::string dump_path = Config::Get(Config::GFX_DUMP_PATH);
-  if (!dump_path.empty())
-    return dump_path;
+  // Negative levels (quiet) count as debug; the high bits carry flags.
+  level = level < 0 ? AV_LOG_DEBUG : (level & 0xff);
+  if (level > av_log_get_level())
+    return;
 
-  const auto local_time = Common::LocalTime(time);
-  if (!local_time)
+  const Common::Log::LogLevel ours = LibavToLogLevel(level);
+  auto* const log = Common::Log::LogManager::GetInstance();
+  if (log == nullptr || !log->IsEnabled(Common::Log::LogType::FRAMEDUMP, ours))
+    return;
+
+  std::array<char, 1024> text;
+  CharArrayFromFormatV(text.data(), static_cast<int>(text.size()), format, args);
+  GENERIC_LOG_FMT(Common::Log::LogType::FRAMEDUMP, ours, "{}", text.data());
+}
+
+void SetUpLibavOnce()
+{
+  static bool done = false;
+  if (done)
+    return;
+
+  av_log_set_level(AV_LOG_DEBUG);
+  av_log_set_callback(ForwardLibavLog);
+  // TODO: avformat_network_deinit is never called.
+  avformat_network_init();
+  done = true;
+}
+
+// "<dump folder><game id>_<local start time>_<index>.<extension>", or the configured path.
+// Returns "" when dumping should not go ahead.
+std::string SegmentPath(const std::string& extension, std::time_t start, u32 index)
+{
+  if (std::string fixed = Config::Get(Config::GFX_DUMP_PATH); !fixed.empty())
+    return fixed;
+
+  const auto local = Common::LocalTime(start);
+  if (!local)
     return "";
 
-  const std::string path_prefix =
-      File::GetUserPath(D_DUMPFRAMES_IDX) + SConfig::GetInstance().GetGameID();
+  const std::string stem = fmt::format(
+      "{}_{:%Y-%m-%d_%H-%M-%S}_{}",
+      File::GetUserPath(D_DUMPFRAMES_IDX) + SConfig::GetInstance().GetGameID(), *local, index);
+  std::string path = fmt::format("{}.{}", stem, extension);
 
-  const std::string base_name =
-      fmt::format("{}_{:%Y-%m-%d_%H-%M-%S}_{}", path_prefix, *local_time, index);
-
-  const std::string path = fmt::format("{}.{}", base_name, extension);
-
-  // Ask to delete file.
   if (File::Exists(path))
   {
-    if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES_SILENT) ||
-        AskYesNoFmtT("Delete the existing file '{0}'?", path))
-    {
-      File::Delete(path);
-    }
-    else
-    {
-      // Stop and cancel dumping the video
-      return "";
-    }
+    const bool replace = Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES_SILENT) ||
+                         AskYesNoFmtT("Delete the existing file '{0}'?", path);
+    if (!replace)
+      return "";  // the user cancelled the dump
+    File::Delete(path);
   }
-
   return path;
 }
 
-std::string AVErrorString(int error)
+std::string DescribeAVError(int error)
 {
-  std::array<char, AV_ERROR_MAX_STRING_SIZE> msg;
-  av_make_error_string(&msg[0], msg.size(), error);
-  return fmt::format("{:8x} {}", (u32)error, &msg[0]);
+  std::array<char, AV_ERROR_MAX_STRING_SIZE> text;
+  av_make_error_string(text.data(), text.size(), error);
+  return fmt::format("{:8x} {}", static_cast<u32>(error), text.data());
 }
 
+// The encoder's pixel format: the configured one if valid, else a format suited to the codec.
+AVPixelFormat ChoosePixelFormat(AVCodecID codec)
+{
+  AVPixelFormat chosen = AV_PIX_FMT_NONE;
+  if (const std::string name = Config::Get(Config::GFX_DUMP_PIXEL_FORMAT); !name.empty())
+  {
+    chosen = av_get_pix_fmt(name.c_str());
+    if (chosen == AV_PIX_FMT_NONE)
+      WARN_LOG_FMT(FRAMEDUMP, "Invalid pixel format {}", name);
+  }
+  if (chosen != AV_PIX_FMT_NONE)
+    return chosen;
+
+  switch (codec)
+  {
+  case AV_CODEC_ID_FFV1:
+    return AV_PIX_FMT_BGR0;
+  case AV_CODEC_ID_UTVIDEO:
+    return AV_PIX_FMT_GBRP;
+  default:
+    return AV_PIX_FMT_YUV420P;
+  }
+}
+
+// The encoder: the configured one if it exists, else the default encoder of the configured
+// codec (lossless means Ut Video), else the container's default codec.
+const AVCodec* ChooseEncoder(const AVOutputFormat& container)
+{
+  AVCodecID codec_id = container.video_codec;
+  const std::string codec_name =
+      Config::Get(Config::GFX_USE_LOSSLESS) ? "utvideo" : Config::Get(Config::GFX_DUMP_CODEC);
+  if (!codec_name.empty())
+  {
+    if (const AVCodecDescriptor* descriptor = avcodec_descriptor_get_by_name(codec_name.c_str()))
+      codec_id = descriptor->id;
+    else
+      WARN_LOG_FMT(FRAMEDUMP, "Invalid codec {}", codec_name);
+  }
+
+  const AVCodec* encoder = nullptr;
+  if (const std::string encoder_name = Config::Get(Config::GFX_DUMP_ENCODER); !encoder_name.empty())
+  {
+    encoder = avcodec_find_encoder_by_name(encoder_name.c_str());
+    if (encoder == nullptr)
+      WARN_LOG_FMT(FRAMEDUMP, "Invalid encoder {}", encoder_name);
+  }
+  return encoder != nullptr ? encoder : avcodec_find_encoder(codec_id);
+}
+
+using PacketPtr = std::unique_ptr<AVPacket, std::function<void(AVPacket*)>>;
 }  // namespace
 
 bool FFMpegFrameDump::Start(int w, int h, u64 start_ticks)
@@ -173,285 +215,222 @@ bool FFMpegFrameDump::Start(int w, int h, u64 start_ticks)
   m_savestate_index = 0;
   m_start_time = std::time(nullptr);
   m_file_index = 0;
-
-  return PrepareEncoding(w, h, start_ticks, m_savestate_index);
+  return OpenSegment(w, h, start_ticks, m_savestate_index);
 }
 
-bool FFMpegFrameDump::PrepareEncoding(int w, int h, u64 start_ticks, u32 savestate_index)
+bool FFMpegFrameDump::OpenSegment(int w, int h, u64 start_ticks, u32 savestate_index)
 {
   m_context = std::make_unique<FrameDumpContext>();
-
   m_context->width = w;
   m_context->height = h;
-
-  m_context->start_ticks = start_ticks;
+  m_context->first_tick = start_ticks;
   m_context->savestate_index = savestate_index;
 
-  InitAVCodec();
-  const bool success = CreateVideoFile();
-  if (!success)
-  {
-    CloseVideoFile();
-    OSD::AddMessage("FrameDump Start failed");
-  }
-  return success;
+  SetUpLibavOnce();
+  if (CreateSegmentFile())
+    return true;
+
+  CloseSegment();
+  OSD::AddMessage("FrameDump Start failed");
+  return false;
 }
 
-bool FFMpegFrameDump::CreateVideoFile()
+bool FFMpegFrameDump::CreateSegmentFile()
 {
-  const std::string format = Config::Get(Config::GFX_DUMP_FORMAT);
+  FrameDumpContext& ctx = *m_context;
+  const std::string container_name = Config::Get(Config::GFX_DUMP_FORMAT);
 
-  const std::string dump_path = GetDumpPath(format, m_start_time, m_file_index);
-
-  if (dump_path.empty())
+  const std::string path = SegmentPath(container_name, m_start_time, m_file_index);
+  if (path.empty())
     return false;
+  File::CreateFullPath(path);
 
-  File::CreateFullPath(dump_path);
-
-  auto* const output_format = av_guess_format(format.c_str(), dump_path.c_str(), nullptr);
-  if (!output_format)
+  // Container.
+  const AVOutputFormat* const container =
+      av_guess_format(container_name.c_str(), path.c_str(), nullptr);
+  if (container == nullptr)
   {
-    ERROR_LOG_FMT(FRAMEDUMP, "Invalid format {}", format);
+    ERROR_LOG_FMT(FRAMEDUMP, "Invalid format {}", container_name);
     return false;
   }
-
-  if (avformat_alloc_output_context2(&m_context->format, output_format, nullptr,
-                                     dump_path.c_str()) < 0)
+  if (avformat_alloc_output_context2(&ctx.muxer, container, nullptr, path.c_str()) < 0)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Could not allocate output context");
     return false;
   }
 
-  const std::string codec_name =
-      Config::Get(Config::GFX_USE_LOSSLESS) ? "utvideo" : Config::Get(Config::GFX_DUMP_CODEC);
-
-  AVCodecID codec_id = output_format->video_codec;
-
-  if (!codec_name.empty())
-  {
-    const AVCodecDescriptor* const codec_desc = avcodec_descriptor_get_by_name(codec_name.c_str());
-    if (codec_desc)
-      codec_id = codec_desc->id;
-    else
-      WARN_LOG_FMT(FRAMEDUMP, "Invalid codec {}", codec_name);
-  }
-
-  const AVCodec* codec = nullptr;
-  const std::string dump_encoder = Config::Get(Config::GFX_DUMP_ENCODER);
-  if (!dump_encoder.empty())
-  {
-    codec = avcodec_find_encoder_by_name(dump_encoder.c_str());
-    if (!codec)
-      WARN_LOG_FMT(FRAMEDUMP, "Invalid encoder {}", dump_encoder);
-  }
-  if (!codec)
-    codec = avcodec_find_encoder(codec_id);
-
-  m_context->codec = avcodec_alloc_context3(codec);
-  if (!codec || !m_context->codec)
+  // Encoder.
+  const AVCodec* const encoder = ChooseEncoder(*container);
+  ctx.encoder = avcodec_alloc_context3(encoder);
+  if (encoder == nullptr || ctx.encoder == nullptr)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Could not find encoder or allocate codec context");
     return false;
   }
 
   m_max_denominator = std::numeric_limits<s64>::max();
-
-  // Force XVID FourCC for better compatibility when using H.263
-  if (codec->id == AV_CODEC_ID_MPEG4)
+  if (encoder->id == AV_CODEC_ID_MPEG4)
   {
-    m_context->codec->codec_tag = MKTAG('X', 'V', 'I', 'D');
+    // Tag MPEG-4 part 2 as XviD, which players recognise more widely.
+    ctx.encoder->codec_tag = MKTAG('X', 'V', 'I', 'D');
     m_max_denominator = std::numeric_limits<unsigned short>::max();
   }
 
-  const auto time_base = GetTimeBaseForCurrentRefreshRate(m_max_denominator);
+  const AVRational time_base = RefreshTimeBase(m_max_denominator);
+  INFO_LOG_FMT(FRAMEDUMP, "Creating video file: {} x {} @ {}/{} fps", ctx.width, ctx.height,
+               time_base.den, time_base.num);
 
-  INFO_LOG_FMT(FRAMEDUMP, "Creating video file: {} x {} @ {}/{} fps", m_context->width,
-               m_context->height, time_base.den, time_base.num);
+  AVCodecContext& enc = *ctx.encoder;
+  enc.codec_type = AVMEDIA_TYPE_VIDEO;
+  enc.bit_rate = static_cast<int64_t>(Config::Get(Config::GFX_BITRATE_KBPS)) * 1000;
+  enc.width = ctx.width;
+  enc.height = ctx.height;
+  enc.time_base = time_base;
+  // Every frame is a key frame.
+  enc.gop_size = 1;
+  enc.level = 1;
+  enc.pix_fmt = ChoosePixelFormat(enc.codec_id);
 
-  m_context->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-  m_context->codec->bit_rate = static_cast<int64_t>(Config::Get(Config::GFX_BITRATE_KBPS)) * 1000;
-  m_context->codec->width = m_context->width;
-  m_context->codec->height = m_context->height;
-  m_context->codec->time_base = time_base;
-  m_context->codec->gop_size = 1;
-  m_context->codec->level = 1;
+  if (enc.codec_id == AV_CODEC_ID_UTVIDEO)
+    av_opt_set_int(enc.priv_data, "pred", 3, 0);  // median prediction
 
-  AVPixelFormat pix_fmt = AV_PIX_FMT_NONE;
+  if ((container->flags & AVFMT_GLOBALHEADER) != 0)
+    enc.flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-  const std::string pixel_format_string = Config::Get(Config::GFX_DUMP_PIXEL_FORMAT);
-  if (!pixel_format_string.empty())
-  {
-    pix_fmt = av_get_pix_fmt(pixel_format_string.c_str());
-    if (pix_fmt == AV_PIX_FMT_NONE)
-      WARN_LOG_FMT(FRAMEDUMP, "Invalid pixel format {}", pixel_format_string);
-  }
-
-  if (pix_fmt == AV_PIX_FMT_NONE)
-  {
-    if (m_context->codec->codec_id == AV_CODEC_ID_FFV1)
-      pix_fmt = AV_PIX_FMT_BGR0;
-    else if (m_context->codec->codec_id == AV_CODEC_ID_UTVIDEO)
-      pix_fmt = AV_PIX_FMT_GBRP;
-    else
-      pix_fmt = AV_PIX_FMT_YUV420P;
-  }
-
-  m_context->codec->pix_fmt = pix_fmt;
-
-  if (m_context->codec->codec_id == AV_CODEC_ID_UTVIDEO)
-    av_opt_set_int(m_context->codec->priv_data, "pred", 3, 0);  // median
-
-  if (output_format->flags & AVFMT_GLOBALHEADER)
-    m_context->codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-  if (avcodec_open2(m_context->codec, codec, nullptr) < 0)
+  if (avcodec_open2(&enc, encoder, nullptr) < 0)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Could not open codec");
     return false;
   }
 
-  m_context->src_frame = av_frame_alloc();
-  m_context->scaled_frame = av_frame_alloc();
-
-  m_context->scaled_frame->format = m_context->codec->pix_fmt;
-  m_context->scaled_frame->width = m_context->width;
-  m_context->scaled_frame->height = m_context->height;
-
-  if (av_frame_get_buffer(m_context->scaled_frame, 1))
+  // Frames.
+  ctx.rgba = av_frame_alloc();
+  ctx.converted = av_frame_alloc();
+  ctx.converted->format = enc.pix_fmt;
+  ctx.converted->width = ctx.width;
+  ctx.converted->height = ctx.height;
+  if (av_frame_get_buffer(ctx.converted, 1) != 0)
     return false;
 
-  m_context->stream = avformat_new_stream(m_context->format, codec);
-  if (!m_context->stream ||
-      avcodec_parameters_from_context(m_context->stream->codecpar, m_context->codec) < 0)
+  // Stream and file.
+  ctx.stream = avformat_new_stream(ctx.muxer, encoder);
+  if (ctx.stream == nullptr || avcodec_parameters_from_context(ctx.stream->codecpar, &enc) < 0)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Could not create stream");
     return false;
   }
+  ctx.stream->time_base = enc.time_base;
 
-  m_context->stream->time_base = m_context->codec->time_base;
-
-  NOTICE_LOG_FMT(FRAMEDUMP, "Opening file {} for dumping", dump_path);
-  if (avio_open(&m_context->format->pb, dump_path.c_str(), AVIO_FLAG_WRITE) < 0 ||
-      avformat_write_header(m_context->format, nullptr))
+  NOTICE_LOG_FMT(FRAMEDUMP, "Opening file {} for dumping", path);
+  if (avio_open(&ctx.muxer->pb, path.c_str(), AVIO_FLAG_WRITE) < 0 ||
+      avformat_write_header(ctx.muxer, nullptr) != 0)
   {
-    ERROR_LOG_FMT(FRAMEDUMP, "Could not open {}", dump_path);
+    ERROR_LOG_FMT(FRAMEDUMP, "Could not open {}", path);
     return false;
   }
 
-  if (av_cmp_q(m_context->stream->time_base, time_base) != 0)
+  // The muxer may pick its own stream time base; packets are rescaled to it.
+  if (av_cmp_q(ctx.stream->time_base, time_base) != 0)
   {
-    WARN_LOG_FMT(FRAMEDUMP, "Stream time base differs at {}/{}", m_context->stream->time_base.den,
-                 m_context->stream->time_base.num);
+    WARN_LOG_FMT(FRAMEDUMP, "Stream time base differs at {}/{}", ctx.stream->time_base.den,
+                 ctx.stream->time_base.num);
   }
 
-  OSD::AddMessage(fmt::format("Dumping Frames to \"{}\" ({}x{})", dump_path, m_context->width,
-                              m_context->height));
+  OSD::AddMessage(fmt::format("Dumping Frames to \"{}\" ({}x{})", path, ctx.width, ctx.height));
   return true;
-}
-
-bool FFMpegFrameDump::IsFirstFrameInCurrentFile() const
-{
-  return m_context->last_pts == AV_NOPTS_VALUE;
 }
 
 void FFMpegFrameDump::AddFrame(const FrameData& frame)
 {
-  // Are we even dumping?
   if (!IsStarted())
     return;
 
-  CheckForConfigChange(frame);
-
-  // Handle failure after a config change.
+  RestartIfNeeded(frame);
+  // The restart may have failed.
   if (!IsStarted())
     return;
 
-  // Calculate presentation timestamp from ticks since start.
-  const s64 pts = av_rescale_q(
-      frame.state.ticks - m_context->start_ticks,
-      // TODO: GetTicksPerSecond is not safe from GPU thread.
-      AVRational{1, int(Core::System::GetInstance().GetSystemTimers().GetTicksPerSecond())},
-      m_context->codec->time_base);
+  FrameDumpContext& ctx = *m_context;
 
-  if (!IsFirstFrameInCurrentFile())
+  // Presentation time from the emulated time since the file's first frame.
+  // TODO: GetTicksPerSecond is not thread safe from the dump path.
+  const int ticks_per_second =
+      static_cast<int>(Core::System::GetInstance().GetSystemTimers().GetTicksPerSecond());
+  const s64 pts = av_rescale_q(static_cast<int64_t>(frame.state.ticks - ctx.first_tick),
+                               AVRational{1, ticks_per_second}, ctx.encoder->time_base);
+
+  if (ctx.previous_pts != AV_NOPTS_VALUE)
   {
-    if (pts <= m_context->last_pts)
+    if (pts <= ctx.previous_pts)
     {
       WARN_LOG_FMT(FRAMEDUMP, "PTS delta < 1. Current frame will not be dumped.");
       return;
     }
-    else if (pts > m_context->last_pts + 1 && !m_context->gave_vfr_warning)
+    if (pts > ctx.previous_pts + 1 && !ctx.warned_variable_rate)
     {
       WARN_LOG_FMT(FRAMEDUMP, "PTS delta > 1. Resulting file will have variable frame rate. "
                               "Subsequent occurrences will not be reported.");
-      m_context->gave_vfr_warning = true;
+      ctx.warned_variable_rate = true;
     }
   }
 
-  constexpr AVPixelFormat pix_fmt = AV_PIX_FMT_RGBA;
+  constexpr AVPixelFormat source_format = AV_PIX_FMT_RGBA;
+  ctx.rgba->data[0] = const_cast<u8*>(frame.data);
+  ctx.rgba->linesize[0] = frame.stride;
+  ctx.rgba->format = source_format;
+  ctx.rgba->width = ctx.width;
+  ctx.rgba->height = ctx.height;
 
-  m_context->src_frame->data[0] = const_cast<u8*>(frame.data);
-  m_context->src_frame->linesize[0] = frame.stride;
-  m_context->src_frame->format = pix_fmt;
-  m_context->src_frame->width = m_context->width;
-  m_context->src_frame->height = m_context->height;
-
-  // Convert image from RGBA to desired pixel format.
-  m_context->sws = sws_getCachedContext(
-      m_context->sws, frame.width, frame.height, pix_fmt, m_context->width, m_context->height,
-      m_context->codec->pix_fmt, SWS_BICUBIC, nullptr, nullptr, nullptr);
-  if (m_context->sws)
+  // Convert (and scale, if a zero-sized frame kept the old size) to the encoder's format.
+  ctx.scaler = sws_getCachedContext(ctx.scaler, frame.width, frame.height, source_format, ctx.width,
+                                    ctx.height, ctx.encoder->pix_fmt, SWS_BICUBIC, nullptr, nullptr,
+                                    nullptr);
+  if (ctx.scaler != nullptr)
   {
-    sws_scale(m_context->sws, m_context->src_frame->data, m_context->src_frame->linesize, 0,
-              frame.height, m_context->scaled_frame->data, m_context->scaled_frame->linesize);
+    sws_scale(ctx.scaler, ctx.rgba->data, ctx.rgba->linesize, 0, frame.height, ctx.converted->data,
+              ctx.converted->linesize);
   }
 
-  m_context->last_pts = pts;
-  m_context->scaled_frame->pts = pts;
+  ctx.previous_pts = pts;
+  ctx.converted->pts = pts;
 
-  if (const int error = avcodec_send_frame(m_context->codec, m_context->scaled_frame))
+  if (const int error = avcodec_send_frame(ctx.encoder, ctx.converted); error != 0)
   {
-    ERROR_LOG_FMT(FRAMEDUMP, "Error while encoding video: {}", AVErrorString(error));
+    ERROR_LOG_FMT(FRAMEDUMP, "Error while encoding video: {}", DescribeAVError(error));
     return;
   }
 
-  ProcessPackets();
+  DrainEncoder();
 }
 
-void FFMpegFrameDump::ProcessPackets()
+void FFMpegFrameDump::DrainEncoder()
 {
-  auto pkt = std::unique_ptr<AVPacket, std::function<void(AVPacket*)>>(
-      av_packet_alloc(), [](AVPacket* packet) { av_packet_free(&packet); });
-
-  if (!pkt)
+  FrameDumpContext& ctx = *m_context;
+  const PacketPtr packet(av_packet_alloc(), [](AVPacket* p) { av_packet_free(&p); });
+  if (!packet)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Could not allocate packet");
     return;
   }
 
-  while (true)
+  for (;;)
   {
-    const int receive_error = avcodec_receive_packet(m_context->codec, pkt.get());
-
-    if (receive_error == AVERROR(EAGAIN) || receive_error == AVERROR_EOF)
+    const int status = avcodec_receive_packet(ctx.encoder, packet.get());
+    // Nothing more for now (EAGAIN), or the encoder is flushed (EOF).
+    if (status == AVERROR(EAGAIN) || status == AVERROR_EOF)
+      return;
+    if (status != 0)
     {
-      // We have processed all available packets.
-      break;
+      ERROR_LOG_FMT(FRAMEDUMP, "Error receiving packet: {}", DescribeAVError(status));
+      return;
     }
 
-    if (receive_error)
+    av_packet_rescale_ts(packet.get(), ctx.encoder->time_base, ctx.stream->time_base);
+    packet->stream_index = ctx.stream->index;
+    if (const int error = av_interleaved_write_frame(ctx.muxer, packet.get()); error != 0)
     {
-      ERROR_LOG_FMT(FRAMEDUMP, "Error receiving packet: {}", AVErrorString(receive_error));
-      break;
-    }
-
-    av_packet_rescale_ts(pkt.get(), m_context->codec->time_base, m_context->stream->time_base);
-    pkt->stream_index = m_context->stream->index;
-
-    if (const int write_error = av_interleaved_write_frame(m_context->format, pkt.get()))
-    {
-      ERROR_LOG_FMT(FRAMEDUMP, "Error writing packet: {}", AVErrorString(write_error));
-      break;
+      ERROR_LOG_FMT(FRAMEDUMP, "Error writing packet: {}", DescribeAVError(error));
+      return;
     }
   }
 }
@@ -461,13 +440,13 @@ void FFMpegFrameDump::Stop()
   if (!IsStarted())
     return;
 
-  // Signal end of stream to encoder.
-  if (const int flush_error = avcodec_send_frame(m_context->codec, nullptr))
-    WARN_LOG_FMT(FRAMEDUMP, "Error sending flush packet: {}", AVErrorString(flush_error));
+  // A null frame asks the encoder to flush what it still holds.
+  if (const int error = avcodec_send_frame(m_context->encoder, nullptr); error != 0)
+    WARN_LOG_FMT(FRAMEDUMP, "Error sending flush packet: {}", DescribeAVError(error));
 
-  ProcessPackets();
-  av_write_trailer(m_context->format);
-  CloseVideoFile();
+  DrainEncoder();
+  av_write_trailer(m_context->muxer);
+  CloseSegment();
 
   NOTICE_LOG_FMT(FRAMEDUMP, "Stopping frame dump");
   OSD::AddMessage("Stopped dumping frames");
@@ -478,76 +457,69 @@ bool FFMpegFrameDump::IsStarted() const
   return m_context != nullptr;
 }
 
-void FFMpegFrameDump::CloseVideoFile()
+void FFMpegFrameDump::CloseSegment()
 {
-  av_frame_free(&m_context->src_frame);
-  av_frame_free(&m_context->scaled_frame);
-
-  avcodec_free_context(&m_context->codec);
-
-  if (m_context->format)
-    avio_closep(&m_context->format->pb);
-
-  avformat_free_context(m_context->format);
-
-  if (m_context->sws)
-    sws_freeContext(m_context->sws);
-
+  FrameDumpContext& ctx = *m_context;
+  av_frame_free(&ctx.rgba);
+  av_frame_free(&ctx.converted);
+  avcodec_free_context(&ctx.encoder);
+  if (ctx.muxer != nullptr)
+    avio_closep(&ctx.muxer->pb);
+  avformat_free_context(ctx.muxer);
+  if (ctx.scaler != nullptr)
+    sws_freeContext(ctx.scaler);
   m_context.reset();
 }
 
 void FFMpegFrameDump::DoState(PointerWrap& p)
 {
+  // Nothing is saved; a load just starts a new generation.
   if (p.IsReadMode())
     ++m_savestate_index;
 }
 
-void FFMpegFrameDump::CheckForConfigChange(const FrameData& frame)
+void FFMpegFrameDump::RestartIfNeeded(const FrameData& frame)
 {
-  bool restart_dump = false;
+  const FrameDumpContext& ctx = *m_context;
+  const AVRational& time_base = ctx.encoder->time_base;
 
-  // We check here to see if the requested width and height have changed since the last frame which
-  // was dumped, then create a new file accordingly. However, is it possible for the height
-  // (possibly width as well, but no examples known) to have a value of zero. This can occur as the
-  // VI is able to be set to a zero value for height/width to disable output. If this is the case,
-  // simply keep the last known resolution of the video for the added frame.
-  if ((frame.width != m_context->width || frame.height != m_context->height) &&
-      (frame.width > 0 && frame.height > 0))
+  // A zero width or height (the VI can switch output off) keeps the current size.
+  const bool size_changed = (frame.width != ctx.width || frame.height != ctx.height) &&
+                            frame.width > 0 && frame.height > 0;
+
+  if (size_changed)
   {
     INFO_LOG_FMT(FRAMEDUMP, "Starting new dump on resolution change.");
-    restart_dump = true;
   }
-  else if (!IsFirstFrameInCurrentFile() &&
-           frame.state.savestate_index != m_context->savestate_index)
+  else if (ctx.previous_pts != AV_NOPTS_VALUE && frame.state.savestate_index != ctx.savestate_index)
   {
     INFO_LOG_FMT(FRAMEDUMP, "Starting new dump on savestate load.");
-    restart_dump = true;
   }
-  else if (frame.state.refresh_rate_den != m_context->codec->time_base.num ||
-           frame.state.refresh_rate_num != m_context->codec->time_base.den)
+  else if (frame.state.refresh_rate_den != time_base.num ||
+           frame.state.refresh_rate_num != time_base.den)
   {
     INFO_LOG_FMT(FRAMEDUMP, "Starting new dump on refresh rate change {}/{} vs {}/{}.",
-                 m_context->codec->time_base.den, m_context->codec->time_base.num,
-                 frame.state.refresh_rate_num, frame.state.refresh_rate_den);
-    restart_dump = true;
+                 time_base.den, time_base.num, frame.state.refresh_rate_num,
+                 frame.state.refresh_rate_den);
+  }
+  else
+  {
+    return;
   }
 
-  if (restart_dump)
-  {
-    Stop();
-    ++m_file_index;
-    PrepareEncoding(frame.width, frame.height, frame.state.ticks, frame.state.savestate_index);
-  }
+  Stop();
+  ++m_file_index;
+  OpenSegment(frame.width, frame.height, frame.state.ticks, frame.state.savestate_index);
 }
 
 FrameState FFMpegFrameDump::FetchState(u64 ticks, int frame_number) const
 {
+  const AVRational time_base = RefreshTimeBase(m_max_denominator);
+
   FrameState state;
   state.ticks = ticks;
   state.frame_number = frame_number;
   state.savestate_index = m_savestate_index;
-
-  const auto time_base = GetTimeBaseForCurrentRefreshRate(m_max_denominator);
   state.refresh_rate_num = time_base.den;
   state.refresh_rate_den = time_base.num;
   return state;

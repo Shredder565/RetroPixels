@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,8 +11,8 @@
 struct FrameDumpContext;
 class PointerWrap;
 
-// Holds relevant emulation state during a rendered frame for
-// when it is later asynchronously written.
+// Emulation state captured when a frame is rendered, travelling with the frame to the dump
+// thread that writes it later.
 struct FrameState
 {
   u64 ticks = 0;
@@ -23,6 +22,7 @@ struct FrameState
   int refresh_rate_den = 0;
 };
 
+// One RGBA8 frame to encode (rows `stride` bytes apart).
 struct FrameData
 {
   const u8* data = nullptr;
@@ -32,6 +32,9 @@ struct FrameData
   FrameState state;
 };
 
+// Encodes frames into a video file with FFmpeg (libavformat / libavcodec / libswscale).
+// A new file is started whenever the resolution or the refresh rate changes, or after a
+// savestate is loaded.
 class FFMpegFrameDump
 {
 public:
@@ -46,25 +49,24 @@ public:
   FrameState FetchState(u64 ticks, int frame_number) const;
 
 private:
-  bool IsFirstFrameInCurrentFile() const;
-  bool PrepareEncoding(int w, int h, u64 start_ticks, u32 savestate_index);
-  bool CreateVideoFile();
-  void CloseVideoFile();
-  void CheckForConfigChange(const FrameData&);
-  void ProcessPackets();
+  bool OpenSegment(int w, int h, u64 start_ticks, u32 savestate_index);
+  bool CreateSegmentFile();
+  void CloseSegment();
+  void RestartIfNeeded(const FrameData&);
+  void DrainEncoder();
 
 #if defined(HAVE_FFMPEG)
   std::unique_ptr<FrameDumpContext> m_context;
 #endif
 
-  // Used for FetchState:
+  // Bumped by every savestate load; frames carry it so a load starts a new file.
   u32 m_savestate_index = 0;
 
-  // Used for filename generation.
+  // File naming: the time dumping started and the number of the current file.
   std::time_t m_start_time = {};
   u32 m_file_index = 0;
 
-  // Some codecs (like MPEG4) have a limit to this
+  // Largest time base denominator the current codec accepts (MPEG-4 is limited to 16 bits).
   int64_t m_max_denominator = std::numeric_limits<s64>::max();
 };
 
@@ -72,7 +74,7 @@ private:
 inline FFMpegFrameDump::FFMpegFrameDump() = default;
 inline FFMpegFrameDump::~FFMpegFrameDump() = default;
 
-inline FrameState FFMpegFrameDump::FetchState(u64 ticks, int frame_number) const
+inline FrameState FFMpegFrameDump::FetchState(u64, int) const
 {
   return {};
 }
