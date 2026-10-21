@@ -15,8 +15,15 @@ Every source file that starts with the line
     Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 was written for RetroPixels from scratch and is RetroPixels' work. So are
-the program icon, the pictures in Sys\Resources (except the font files) and
-the Windows dark style, all drawn by pixelu/wii/art/make_art.py.
+the program icon, the pictures in Sys\Resources (except the font files), the
+icon theme Sys\Themes\PixelU and the Windows dark style, all drawn by
+pixelu/wii/art/make_art.py, and the rest of PixelU-Wii's own Sys data in
+pixelu/wii/Data/Sys: the shaders in Sys\Shaders, the controller profiles in
+Sys\Profiles and the WiiConnect24 defaults in Sys\Wii (made by
+pixelu/wii/Data/make_wc24.py). The GameCube fonts Sys\GC\font_western.bin
+and font_japanese.bin are drawn by pixelu/wii/Data/make_ipl_fonts.py from
+Noto Sans and Noto Sans JP and are under the SIL Open Font License 1.1, as
+those fonts are (Sys\GC\font-licenses.txt).
 
 No licence has been chosen for RetroPixels' original code yet. This notice
 does not grant one and does not choose one.
@@ -42,25 +49,33 @@ The build system and Externals glue still come from Dolphin's tree at 2609a
 (GPL-2.0-or-later).
 
 
-3. Dolphin community data, shipped unchanged
---------------------------------------------
+3. Sys data that is not RetroPixels' own
+----------------------------------------
 
-These are Dolphin community data (GPL-2.0-or-later), shipped unchanged:
+These are Dolphin community data (GPL-2.0-or-later, Copyright Dolphin
+Emulator Project), shipped unchanged:
 
   Sys\GameSettings\          per-game settings and patches
   Sys\ApprovedInis.json      hashes of those settings for RetroAchievements
                              hardcore mode
   Languages\                 translations of the program's texts (compiled
                              from Dolphin's Languages/po)
+  Sys\GC\dsp_rom.bin,        Dolphin's free replacement GameCube DSP ROMs
+   Sys\GC\dsp_coef.bin       (written by the Dolphin project, not
+                             Nintendo's), used when no DSP ROM dump is given
 
-The rest of Sys, apart from Sys\Resources, also still comes from Dolphin
-2609a unchanged and is under the same terms (GPL-2.0-or-later, Copyright
-Dolphin Emulator Project): Sys\Themes, Sys\Shaders, Sys\Load, Sys\Profiles,
-Sys\Wii, Sys\GC (including the free replacement DSP ROM and the IPL fonts
-Dolphin generated from Droid Sans, Apache-2.0), Sys\totaldb.dsy and
-Sys\codehandler.bin (Gecko code handler, based on Gecko OS / kenobi's
-handler). The game title lists Sys\wiitdb-*.txt and Sys\triforcetdb-en.txt
-are GameTDB data (https://www.gametdb.com/) as distributed with Dolphin.
+These come from other projects, shipped as Dolphin 2609a distributes them:
+
+  Sys\wiitdb-*.txt,          game title lists from GameTDB
+   Sys\triforcetdb-*.txt     (https://www.gametdb.com/), credit to GameTDB
+                             and its contributors
+  Sys\codehandler.bin        Gecko code handler, Copyright (c) 2010-2017
+                             Nuke, brkirch, Y.S, Kenobi, gamemasterplc,
+                             based on Gecko OS's code handler; MIT licence
+                             (Licenses\MIT.txt)
+  Sys\Resources\OSD_Font.ttf Bitstream Vera Sans Mono (section 4)
+
+Everything else in Sys is RetroPixels' own (section 1).
 
 
 4. Third-party components
