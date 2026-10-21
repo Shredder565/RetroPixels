@@ -80,7 +80,7 @@ QPolygonF TraceOutline(RadiusAt&& radius_at)
   QPolygonF outline{GATE_POINTS};
   for (int index = 0; index < GATE_POINTS; ++index)
   {
-    const double angle = MathUtil::TAU * index / outline.size();
+    const double angle = MathUtil::TAU * index / static_cast<double>(outline.size());
     outline[index] = Polar(angle, radius_at(angle));
   }
   return outline;
@@ -140,14 +140,15 @@ template <typename Visit>
 void ForEachSpherePoint(int count, Visit&& visit)
 {
   const auto turn = static_cast<float>(MathUtil::PI * (3.f - std::sqrt(5.f)));
-  const float z_first = 1.f / count - 1.f;
-  const float z_step = 2.f / count;
+  const float z_first = 1.f / static_cast<float>(count) - 1.f;
+  const float z_step = 2.f / static_cast<float>(count);
 
   for (int index = 0; index != count; ++index)
   {
-    const float z = z_first + z_step * index;
+    const float along = static_cast<float>(index);
+    const float z = z_first + z_step * along;
     const float ring = std::sqrt(1.f - z * z);
-    visit(Common::Vec3{std::cos(turn * index) * ring, std::sin(turn * index) * ring, z});
+    visit(Common::Vec3{std::cos(turn * along) * ring, std::sin(turn * along) * ring, z});
   }
 }
 
@@ -414,7 +415,7 @@ void ReshapableInputIndicator::DrawReshapableInput(
   p.drawPolygon(
       TraceOutline([&stick](double angle) { return stick.GetInputRadiusAtAngle(angle); }));
 
-  if (center.x || center.y)
+  if (center.x != 0 || center.y != 0)
   {
     p.setPen(DotPen(GetCenterColor()));
     p.drawPoint(QPointF{});
@@ -442,7 +443,7 @@ QColor AnalogStickIndicator::GetGateBrushColor() const
 void AnalogStickIndicator::Draw()
 {
   const auto adjusted = m_stick.GetReshapableState(true);
-  const bool moved = adjusted.x || adjusted.y;
+  const bool moved = adjusted.x != 0 || adjusted.y != 0;
   DrawReshapableInput(m_stick, moved ? std::make_optional(adjusted) : std::nullopt);
 }
 
@@ -468,7 +469,7 @@ void TiltIndicator::Draw()
   tilt.x = wrap(tilt.x);
   tilt.y = wrap(tilt.y);
 
-  const bool tilted = tilt.x || tilt.y;
+  const bool tilted = tilt.x != 0 || tilt.y != 0;
   DrawReshapableInput(m_tilt, tilted ? std::make_optional(tilt) : std::nullopt);
 }
 
@@ -521,7 +522,7 @@ void SwingIndicator::DrawUnderGate(QPainter& p)
   const auto& position = m_motion.position;
   const auto bend =
       std::max(std::abs(m_motion.angle.x), std::abs(m_motion.angle.z)) / MathUtil::TAU;
-  if (!position.y && !bend)
+  if (position.y == 0 && bend == 0)
     return;
 
   const double ends = -(position.y + bend);
@@ -646,7 +647,7 @@ void ShakeMappingIndicator::Update(float elapsed_seconds)
       m_history, [](const HistoryPoint& point) { return point.state.LengthSquared() != 0.0; });
 
   // The sweep line rests at zero until something moves, then loops once a second.
-  if (!m_sweep && !moving)
+  if (m_sweep == 0 && !moving)
     return;
 
   m_sweep += elapsed_seconds;
@@ -675,7 +676,7 @@ void ShakeMappingIndicator::Draw()
   const std::size_t axes = raw.data.size();
   p.setPen(DotPen(GetRawInputColor()));
   for (std::size_t axis = 0; axis != axes; ++axis)
-    p.drawPoint(QPointF{-0.5 + axis * 0.5, raw.data[axis]});
+    p.drawPoint(QPointF{-0.5 + static_cast<double>(axis) * 0.5, raw.data[axis]});
 
   const double sweep_x = 1.0 - m_sweep * 2.0;
   p.setPen(QPen(GetRawInputColor(), 0));
@@ -755,7 +756,7 @@ void GyroMappingIndicator::Update(float elapsed_seconds)
 
   // After a second without (dead-zoned) motion the picture snaps back upright.
   constexpr float settle_time = 1.f;
-  if (velocity.LengthSquared())
+  if (velocity.LengthSquared() != 0)
     m_still_seconds = 0;
   else if (m_still_seconds < settle_time)
     m_still_seconds += elapsed_seconds;
@@ -772,7 +773,7 @@ void GyroMappingIndicator::Draw()
   const Common::Vec3 noise = raw_velocity - m_last_raw_velocity;
   m_last_raw_velocity = raw_velocity;
 
-  const bool still = !velocity.LengthSquared();
+  const bool still = velocity.LengthSquared() == 0;
   const Common::Matrix33 rotation =
       reading ? Common::Matrix33::FromQuaternion(m_orientation) : Common::Matrix33{};
 
@@ -780,7 +781,7 @@ void GyroMappingIndicator::Draw()
   DrawBoundingBox(p);
   TransformPainter(p);
 
-  if (const auto deadzone = m_gyroscope.GetDeadzone(); deadzone)
+  if (const auto deadzone = m_gyroscope.GetDeadzone(); deadzone != 0)
   {
     // The strip below the ball shows the dead zone; a line in it shows the current noise.
     constexpr auto strip_height = 1 - BALL_RADIUS;
@@ -1100,7 +1101,7 @@ void CalibrationWidget::PaintCalibrationProgress(QPainter& p, Common::DVec2 poin
   p.drawPolygon(TraceOutline(
       [this](double angle) { return m_calibrator->GetCalibrationRadiusAtAngle(angle); }));
 
-  if (center.x || center.y)
+  if (center.x != 0 || center.y != 0)
   {
     p.setPen(DotPen(m_indicator.GetCenterColor()));
     p.drawPoint(QPointF{});
