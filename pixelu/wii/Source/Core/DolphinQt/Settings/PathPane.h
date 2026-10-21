@@ -1,9 +1,12 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <string>
+
 #include <QWidget>
+
+#include "Common/Config/Config.h"
 
 class ConfigText;
 class QGridLayout;
@@ -11,6 +14,7 @@ class QGroupBox;
 class QListWidget;
 class QPushButton;
 
+// "Paths" settings page: the game folder list plus the default ISO and the user folders.
 class PathPane final : public QWidget
 {
   Q_OBJECT
@@ -18,24 +22,30 @@ public:
   explicit PathPane(QWidget* parent = nullptr);
 
 private:
-  void Browse();
-  void BrowseDefaultGame();
-  void BrowseWiiNAND();
-  void BrowseDump();
-  void BrowseLoad();
-  void BrowseResourcePack();
-  void BrowseWFS();
-  QGroupBox* MakeGameFolderBox();
-  QGridLayout* MakePathsLayout();
-  void RemovePath();
+  QGroupBox* BuildGameFolders();
+  QGridLayout* BuildPathGrid();
+  void AddPathRow(QGridLayout* grid, int row, const QString& label, ConfigText* edit,
+                  void (PathPane::*browse)());
 
-  QListWidget* m_path_list;
-  ConfigText* m_game_edit;
-  ConfigText* m_nand_edit;
-  ConfigText* m_dump_edit;
-  ConfigText* m_load_edit;
-  ConfigText* m_resource_pack_edit;
-  ConfigText* m_wfs_edit;
+  QString AskForFolder(const QString& caption, unsigned int user_path_index);
+  void SetFolder(ConfigText* edit, const Config::Info<std::string>& setting, const QString& folder);
 
-  QPushButton* m_remove_path;
+  void PickGameFolder();
+  void RemoveSelectedFolder();
+  void PickDefaultGame();
+  void PickNandRoot();
+  void PickDumpFolder();
+  void PickLoadFolder();
+  void PickResourcePackFolder();
+  void PickWfsFolder();
+
+  QListWidget* m_folder_list;
+  QPushButton* m_remove_button;
+
+  ConfigText* m_default_game;
+  ConfigText* m_nand_root;
+  ConfigText* m_dump_folder;
+  ConfigText* m_load_folder;
+  ConfigText* m_resource_pack_folder;
+  ConfigText* m_wfs_folder;
 };

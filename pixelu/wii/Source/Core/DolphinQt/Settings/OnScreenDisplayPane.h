@@ -1,52 +1,34 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+
 #include <QWidget>
 
-class QLabel;
-class ConfigBool;
-class ConfigInteger;
+#include "Common/Config/Config.h"
 
+class ConfigBool;
+class QGridLayout;
+class QGroupBox;
+
+// On-screen display settings page. (No Q_OBJECT: its translations use the QWidget context.)
 class OnScreenDisplayPane final : public QWidget
 {
 public:
   explicit OnScreenDisplayPane(QWidget* parent = nullptr);
 
 private:
-  void CreateLayout();
-  void ConnectLayout();
-  void AddDescriptions();
+  ConfigBool* AddToggle(QGridLayout* grid, int row, int column, const QString& label,
+                        const Config::Info<bool>& setting, const QString& description);
 
-  // General
-  ConfigBool* m_enable_osd;
-  ConfigInteger* m_font_size;
+  QGroupBox* BuildGeneral();
+  QGroupBox* BuildPerformance();
+  QGroupBox* BuildMovie();
+  QGroupBox* BuildNetPlay();
+  QGroupBox* BuildDebug();
 
-  // Performance
-  ConfigBool* m_show_fps;
-  ConfigBool* m_show_ftimes;
-  ConfigBool* m_show_vps;
-  ConfigBool* m_show_vtimes;
-  ConfigBool* m_show_graph;
-  ConfigBool* m_show_speed;
-  ConfigBool* m_speed_colors;
-  ConfigInteger* m_perf_sample_window;
-
-  // Movie window
-  ConfigBool* m_movie_window;
-  ConfigBool* m_rerecord_counter;
-  ConfigBool* m_lag_counter;
-  ConfigBool* m_frame_counter;
-  ConfigBool* m_input_display;
-  ConfigBool* m_system_clock;
-
-  // Netplay
-  ConfigBool* m_show_ping;
-  ConfigBool* m_show_chat;
-
-  // Debug
-  ConfigBool* m_show_statistics;
-  ConfigBool* m_show_proj_statistics;
-  ConfigBool* m_show_internal_resolution;
+  // Options that only matter while the movie window is shown.
+  ConfigBool* m_movie_window = nullptr;
+  std::array<ConfigBool*, 5> m_movie_details{};
 };

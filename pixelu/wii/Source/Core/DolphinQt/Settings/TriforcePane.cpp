@@ -1,7 +1,11 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Settings/TriforcePane.h"
+
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <QDialogButtonBox>
 #include <QGroupBox>
@@ -14,6 +18,7 @@
 #include <fmt/ranges.h>
 
 #include "Common/Logging/Log.h"
+#include "Common/StringUtil.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/DVD/AMMediaboard.h"
@@ -24,198 +29,180 @@
 
 namespace
 {
+// Table columns.
+enum Column : int
+{
+  EMULATED_IP = 0,
+  REAL_IP = 1,
+  NOTE = 2,
+};
 
-constexpr int COLUMN_EMULATED = 0;
-constexpr int COLUMN_REAL = 1;
-constexpr int COLUMN_DESCRIPTION = 2;
-
+// Editable list of "emulated=real description" redirections. The table always ends with a
+// blank row; typing into it appends a new blank row, and clearing an address cell of any
+// other row deletes that row. (No Q_OBJECT: translations use the QDialog context.)
 class IPRedirectionsDialog final : public QDialog
 {
 public:
   explicit IPRedirectionsDialog(QWidget* parent);
 
 private:
-  void LoadConfig();
-  void SaveConfig() const;
+  void ResetToBlankRow();
+  void ShowConfig();
+  void StoreConfig() const;
+  void RestoreDefaults();
+  void OnCellEdited(QTableWidgetItem* item);
 
-  void LoadDefault();
-  void OnClear();
-
-  QTableWidget* m_ip_redirections_table;
+  QTableWidget* m_table;
 };
-
-}  // namespace
-
-TriforcePane::TriforcePane()
-{
-  auto* const main_layout = new QVBoxLayout{this};
-
-  auto* const controllers_group = new QGroupBox{tr("Controllers")};
-  main_layout->addWidget(controllers_group);
-
-  auto* const controllers_layout = new QVBoxLayout{controllers_group};
-
-  auto* const configure_controllers_button = new NonDefaultQPushButton{tr("Configure")};
-  controllers_layout->addWidget(configure_controllers_button);
-
-  connect(configure_controllers_button, &QPushButton::clicked, this, [this] {
-    auto* const window = new MappingWindow(this, MappingWindow::Type::MAPPING_AM_BASEBOARD, 0);
-    window->setAttribute(Qt::WA_DeleteOnClose, true);
-    window->setWindowModality(Qt::WindowModality::WindowModal);
-    window->show();
-  });
-
-  auto* const ip_redirection_group = new QGroupBox{tr("IP Address Redirections")};
-  main_layout->addWidget(ip_redirection_group);
-
-  auto* const ip_redirection_layout = new QVBoxLayout{ip_redirection_group};
-
-  auto* const configure_ip_redirections_button = new NonDefaultQPushButton{tr("Configure")};
-  ip_redirection_layout->addWidget(configure_ip_redirections_button);
-
-  connect(configure_ip_redirections_button, &QPushButton::clicked, this, [this] {
-    auto* const ip_redirections = new IPRedirectionsDialog{this};
-    ip_redirections->setAttribute(Qt::WA_DeleteOnClose);
-    ip_redirections->open();
-  });
-
-  main_layout->addStretch(1);
-}
 
 IPRedirectionsDialog::IPRedirectionsDialog(QWidget* parent) : QDialog{parent}
 {
   setWindowTitle(tr("IP Address Redirections"));
+  auto* const column = new QVBoxLayout{this};
 
-  auto* const main_layout = new QVBoxLayout{this};
-
-  auto* const load_default_button = new QPushButton(tr("Default"));
-  connect(load_default_button, &QPushButton::clicked, this, &IPRedirectionsDialog::LoadDefault);
-
+  auto* const defaults_button = new QPushButton(tr("Default"));
+  connect(defaults_button, &QPushButton::clicked, this, &IPRedirectionsDialog::RestoreDefaults);
   auto* const clear_button = new QPushButton(tr("Clear"));
-  connect(clear_button, &QPushButton::clicked, this, &IPRedirectionsDialog::OnClear);
+  connect(clear_button, &QPushButton::clicked, this, &IPRedirectionsDialog::ResetToBlankRow);
 
-  m_ip_redirections_table = new QTableWidget;
-  main_layout->addWidget(m_ip_redirections_table);
+  m_table = new QTableWidget;
+  column->addWidget(m_table);
+  m_table->setColumnCount(3);
+  m_table->setHorizontalHeaderLabels({tr("Emulated"), tr("Real"), tr("Description")});
+  m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+  m_table->setSizeAdjustPolicy(QTableWidget::AdjustToContents);
+  m_table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
 
-  m_ip_redirections_table->setColumnCount(3);
-  m_ip_redirections_table->setHorizontalHeaderLabels(
-      {tr("Emulated"), tr("Real"), tr("Description")});
-  m_ip_redirections_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-  m_ip_redirections_table->setSizeAdjustPolicy(QTableWidget::AdjustToContents);
+  auto* const buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  column->addWidget(buttons);
+  buttons->addButton(defaults_button, QDialogButtonBox::ActionRole);
+  buttons->addButton(clear_button, QDialogButtonBox::ActionRole);
 
-  m_ip_redirections_table->setEditTriggers(QAbstractItemView::DoubleClicked |
-                                           QAbstractItemView::EditKeyPressed);
+  connect(buttons, &QDialogButtonBox::accepted, this, &IPRedirectionsDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, this, &IPRedirectionsDialog::reject);
+  connect(this, &IPRedirectionsDialog::accepted, this, &IPRedirectionsDialog::StoreConfig);
+  connect(m_table, &QTableWidget::itemChanged, this, &IPRedirectionsDialog::OnCellEdited);
 
-  auto* const button_box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-  main_layout->addWidget(button_box);
-
-  button_box->addButton(load_default_button, QDialogButtonBox::ActionRole);
-  button_box->addButton(clear_button, QDialogButtonBox::ActionRole);
-
-  connect(button_box, &QDialogButtonBox::accepted, this, &IPRedirectionsDialog::accept);
-  connect(button_box, &QDialogButtonBox::rejected, this, &IPRedirectionsDialog::reject);
-
-  connect(this, &IPRedirectionsDialog::accepted, this, &IPRedirectionsDialog::SaveConfig);
-
-  connect(m_ip_redirections_table, &QTableWidget::itemChanged, this,
-          [this](QTableWidgetItem* item) {
-            const int row_count = m_ip_redirections_table->rowCount();
-            const bool is_last_row = item->row() == row_count - 1;
-            if (is_last_row)
-            {
-              if (!item->text().isEmpty())
-                m_ip_redirections_table->insertRow(row_count);
-            }
-            else if (item->column() != COLUMN_DESCRIPTION && item->text().isEmpty())
-            {
-              // Just remove inner rows that have text erased.
-              // This UX could be less weird, but it's good enough for now.
-              m_ip_redirections_table->removeRow(item->row());
-            }
-          });
-
-  LoadConfig();
+  ShowConfig();
 
   QtUtils::AdjustSizeWithinScreen(this);
 }
 
-void IPRedirectionsDialog::LoadConfig()
+void IPRedirectionsDialog::OnCellEdited(QTableWidgetItem* item)
 {
-  m_ip_redirections_table->setRowCount(0);
+  const int rows = m_table->rowCount();
+  const int row = item->row();
 
-  // Add the final empty row.
-  m_ip_redirections_table->insertRow(0);
-
-  int row = 0;
-
-  const auto ip_redirections_str = Config::Get(Config::MAIN_TRIFORCE_IP_REDIRECTIONS);
-  for (auto&& ip_pair : ip_redirections_str | std::views::split(','))
+  if (row == rows - 1)
   {
-    const auto ip_pair_str = std::string_view{ip_pair};
-    const auto parsed = AMMediaboard::ParseIPRedirection(ip_pair_str);
-    if (!parsed.has_value())
+    // Typing into the trailing blank row opens a new blank row below it.
+    if (!item->text().isEmpty())
+      m_table->insertRow(rows);
+    return;
+  }
+
+  // An inner row whose address was erased is dropped (the note alone doesn't count).
+  if (item->column() != NOTE && item->text().isEmpty())
+    m_table->removeRow(row);
+}
+
+void IPRedirectionsDialog::ResetToBlankRow()
+{
+  m_table->setRowCount(0);
+  m_table->insertRow(0);
+}
+
+void IPRedirectionsDialog::ShowConfig()
+{
+  ResetToBlankRow();
+
+  // Entries are inserted in front of the blank row, which therefore stays last.
+  int next_row = 0;
+  const std::string stored = Config::Get(Config::MAIN_TRIFORCE_IP_REDIRECTIONS);
+  for (auto&& piece : stored | std::views::split(','))
+  {
+    const std::string_view entry{piece};
+    const auto parsed = AMMediaboard::ParseIPRedirection(entry);
+    if (!parsed)
     {
-      ERROR_LOG_FMT(COMMON, "Bad IP redirection string: {}", ip_pair_str);
+      ERROR_LOG_FMT(COMMON, "Bad IP redirection string: {}", entry);
       continue;
     }
 
-    m_ip_redirections_table->insertRow(row);
-
-    m_ip_redirections_table->setItem(row, COLUMN_EMULATED,
-                                     new QTableWidgetItem(QString::fromUtf8(parsed->original)));
-    m_ip_redirections_table->setItem(row, COLUMN_REAL,
-                                     new QTableWidgetItem(QString::fromUtf8(parsed->replacement)));
-    m_ip_redirections_table->setItem(row, COLUMN_DESCRIPTION,
-                                     new QTableWidgetItem(QString::fromUtf8(parsed->description)));
-
-    ++row;
+    m_table->insertRow(next_row);
+    const std::string_view cells[] = {parsed->original, parsed->replacement, parsed->description};
+    for (int cell = EMULATED_IP; cell <= NOTE; ++cell)
+      m_table->setItem(next_row, cell, new QTableWidgetItem(QString::fromUtf8(cells[cell])));
+    ++next_row;
   }
 }
 
-void IPRedirectionsDialog::SaveConfig() const
+void IPRedirectionsDialog::StoreConfig() const
 {
-  // Ignore our empty row.
-  const int row_count = m_ip_redirections_table->rowCount() - 1;
+  // The trailing blank row is not saved.
+  const int entry_count = m_table->rowCount() - 1;
 
-  std::vector<std::string> replacements(row_count);
-  for (int row = 0; row < row_count; ++row)
+  // Rows missing an address still occupy a (blank) slot in the list.
+  std::vector<std::string> entries(static_cast<std::size_t>(entry_count));
+  for (int row = 0; row < entry_count; ++row)
   {
-    auto* const original_item = m_ip_redirections_table->item(row, COLUMN_EMULATED);
-    auto* const replacement_item = m_ip_redirections_table->item(row, COLUMN_REAL);
-
-    // Skip incomplete rows.
-    if (original_item == nullptr || replacement_item == nullptr)
+    const QTableWidgetItem* const emulated = m_table->item(row, EMULATED_IP);
+    const QTableWidgetItem* const real = m_table->item(row, REAL_IP);
+    if (!emulated || !real)
       continue;
 
-    replacements[row] = fmt::format("{}={}", StripWhitespace(original_item->text().toStdString()),
-                                    replacement_item->text().toStdString());
+    std::string& entry = entries[static_cast<std::size_t>(row)];
+    entry = fmt::format("{}={}", StripWhitespace(emulated->text().toStdString()),
+                        real->text().toStdString());
 
-    auto* const description_item = m_ip_redirections_table->item(row, COLUMN_DESCRIPTION);
-    if (description_item == nullptr)
-      continue;
-
-    const auto description = description_item->text().toStdString();
-
-    if (!description.empty())
-      (replacements[row] += ' ') += description;
+    if (const QTableWidgetItem* const note = m_table->item(row, NOTE))
+    {
+      const std::string note_text = note->text().toStdString();
+      if (!note_text.empty())
+        entry.append(1, ' ').append(note_text);
+    }
   }
 
   Config::SetBaseOrCurrent(Config::MAIN_TRIFORCE_IP_REDIRECTIONS,
-                           fmt::format("{}", fmt::join(replacements, ",")));
+                           fmt::format("{}", fmt::join(entries, ",")));
 }
 
-void IPRedirectionsDialog::LoadDefault()
+void IPRedirectionsDialog::RestoreDefaults()
 {
-  // This alters the config before "OK" is pressed. Bad UX..
-
+  // Note: this writes the config immediately, without waiting for OK.
   Config::SetBaseOrCurrent(Config::MAIN_TRIFORCE_IP_REDIRECTIONS, Config::DefaultState{});
-
-  LoadConfig();
+  ShowConfig();
 }
+}  // namespace
 
-void IPRedirectionsDialog::OnClear()
+TriforcePane::TriforcePane()
 {
-  m_ip_redirections_table->setRowCount(0);
-  // Add the final empty row.
-  m_ip_redirections_table->insertRow(0);
+  auto* const page = new QVBoxLayout{this};
+
+  // Each section is a group box holding a single "Configure" button.
+  const auto add_section = [page](const QString& title) {
+    auto* const group = new QGroupBox{title};
+    page->addWidget(group);
+    auto* const group_layout = new QVBoxLayout{group};
+    auto* const button = new NonDefaultQPushButton{tr("Configure")};
+    group_layout->addWidget(button);
+    return button;
+  };
+
+  auto* const controllers = add_section(tr("Controllers"));
+  connect(controllers, &QPushButton::clicked, this, [this] {
+    auto* const mapping = new MappingWindow(this, MappingWindow::Type::MAPPING_AM_BASEBOARD, 0);
+    mapping->setAttribute(Qt::WA_DeleteOnClose, true);
+    mapping->setWindowModality(Qt::WindowModality::WindowModal);
+    mapping->show();
+  });
+
+  auto* const redirections = add_section(tr("IP Address Redirections"));
+  connect(redirections, &QPushButton::clicked, this, [this] {
+    auto* const dialog = new IPRedirectionsDialog{this};
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->open();
+  });
+
+  page->addStretch(1);
 }

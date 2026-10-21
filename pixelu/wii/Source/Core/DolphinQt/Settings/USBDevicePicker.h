@@ -1,8 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -10,21 +10,15 @@
 
 #include "Core/USBUtils.h"
 
-class QTimer;
-class QDialog;
-class QHeaderView;
-class QLabel;
-class QLineEdit;
 class QDialogButtonBox;
-class QVBoxLayout;
-class QHBoxLayout;
-class QListView;
-class QPushButton;
+class QLineEdit;
 class QListWidget;
 class QPushButton;
-class QErrorMessage;
-class QMessageBox;
+class QTimer;
+class QVBoxLayout;
 
+// Lets the user type a USB VID/PID pair or pick one from the devices currently plugged in
+// (optionally filtered). The list refreshes itself once a second.
 class USBDevicePicker final : public QDialog
 {
   Q_OBJECT
@@ -32,30 +26,22 @@ public:
   using FilterFunctionType = std::function<bool(const USBUtils::DeviceInfo&)>;
   explicit USBDevicePicker(QWidget* parent, FilterFunctionType filter);
 
+  // Shows the picker modally; returns the entered/selected device if accepted.
   static std::optional<USBUtils::DeviceInfo> Run(
       QWidget* parent, const QString& title,
       const FilterFunctionType filter = [](const USBUtils::DeviceInfo&) { return true; });
 
 private:
-  static constexpr int DEVICE_REFRESH_INTERVAL_MS = 100;
-  QTimer* m_refresh_devices_timer;
-  QDialogButtonBox* m_picker_buttonbox;
-  QVBoxLayout* main_layout;
-  QLabel* enter_device_id_label;
-  QHBoxLayout* entry_hbox_layout;
-  QLineEdit* device_vid_textbox;
-  QLineEdit* device_pid_textbox;
-  QLabel* select_label;
-  QListWidget* usb_inserted_devices_list;
+  QVBoxLayout* BuildContents();
+  void PollDevices();
+  void CopySelectionToFields();
+  std::optional<USBUtils::DeviceInfo> EnteredDevice() const;
 
   FilterFunctionType m_filter;
+  std::vector<USBUtils::DeviceInfo> m_listed;
 
-  std::optional<USBUtils::DeviceInfo> GetSelectedDevice() const;
-
-  void InitControls();
-  void RefreshDeviceList();
-
-  void OnDeviceSelection();
-
-  std::vector<USBUtils::DeviceInfo> m_shown_devices;
+  QLineEdit* m_vid_field = nullptr;
+  QLineEdit* m_pid_field = nullptr;
+  QListWidget* m_device_list = nullptr;
+  QTimer* m_poll_timer = nullptr;
 };
