@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 320301 | 79.8% |
-| Dolphin, untouched | 75455 | 18.8% |
+| Original (RetroPixels) | 328799 | 82.0% |
+| Dolphin, untouched | 66203 | 16.5% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **401519** | 100% |
+| **All** | **400765** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -178,16 +178,16 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinTool | 1245 | 1245 | original |
 | Core/InputCommon (top level) | 1981 | 1981 | original |
 | Core/InputCommon/ControllerEmu | 3621 | 3621 | original |
-| Core/InputCommon/ControllerInterface (top level) | 1863 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/DInput | 1112 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/DualShockUDPClient | 978 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/ForceFeedback | 337 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/SDL | 1311 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/SteamDeck | 335 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/WGInput | 807 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Wiimote | 2020 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Win32 | 139 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/XInput | 350 | 0 | Dolphin |
+| Core/InputCommon/ControllerInterface (top level) | 1739 | 1739 | original |
+| Core/InputCommon/ControllerInterface/DInput | 1080 | 1080 | original |
+| Core/InputCommon/ControllerInterface/DualShockUDPClient | 947 | 947 | original |
+| Core/InputCommon/ControllerInterface/ForceFeedback | 288 | 288 | original |
+| Core/InputCommon/ControllerInterface/SDL | 1229 | 1229 | original |
+| Core/InputCommon/ControllerInterface/SteamDeck | 352 | 352 | original |
+| Core/InputCommon/ControllerInterface/WGInput | 688 | 688 | original |
+| Core/InputCommon/ControllerInterface/Wiimote | 1700 | 1700 | original |
+| Core/InputCommon/ControllerInterface/Win32 | 139 | 139 | original |
+| Core/InputCommon/ControllerInterface/XInput | 336 | 336 | original |
 | Core/InputCommon/ControlReference | 2015 | 2015 | original |
 | Core/InputCommon/DynamicInputTextures | 502 | 502 | original |
 | Core/UICommon | 3858 | 3858 | original |
@@ -262,7 +262,7 @@ batch rewrites them.
 | W32 | Video backends: Vulkan | 8872 | 8872 | original |
 | W33 | Video backends: D3D11, D3D12, D3DCommon | 10186 | 10186 | original |
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8119 | 8119 | original |
-| W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 9252 | 0 | Dolphin |
+| W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 8498 | 8498 | original |
 | W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8837 | 8837 | original |
 | W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10528 | 10528 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8126 | 0 | Dolphin |
@@ -4781,3 +4781,115 @@ step did for the old file. No key bytes are in the tree.
     .cpp file. The runs left are public declarations in the headers
     (signals, slots, member lists, enums).
   - No keys, IVs, tokens or credentials are in these files.
+
+- W35 log: rewrote all 37 W35 files, `InputCommon/ControllerInterface`
+  (8498 lines now, from 9252): `ControllerInterface`, `CoreDevice`,
+  `InputBackend`, `MappingCommon`, `DInput/DInput`, `DInput/DInput8.h`,
+  `DInput/DInputJoystick`, `DInput/DInputKeyboardMouse`, `DInput/NamedKeys.h`,
+  `DInput/XInputFilter`, `ForceFeedback/ForceFeedbackDevice`, `XInput/XInput`,
+  `WGInput/WGInput`, `Win32/Win32`, `SDL/SDL`, `SDL/SDLGamepad`,
+  `DualShockUDPClient/DualShockUDPClient`, `DualShockUDPClient/DualShockUDPProto.h`,
+  `SteamDeck/SteamDeck` and `Wiimote/WiimoteController`. Every rewritten file
+  starts with the original-code header and has no Dolphin copyright or SPDX
+  line. File names, public declarations, the DSU wire structs, enum values,
+  device names, source names, ids and their order, input and output names,
+  hotplug handling, host API calls and their order, config keys, defaults
+  and translatable strings are unchanged. No file outside ControllerInterface
+  was touched.
+  - Core: the device container and registry (add/remove/refresh, ids per
+    source and name, default device, the devices-changed callbacks and
+    their platform-thread handling), `Device` (input/output lookup, the
+    combined "|"-style inputs, full-analog surface), `InputDetector`,
+    `RelativeInputState`, `MappingCommon` (expression building from
+    detections) and `InputBackend`.
+  - DSU (cemuhook) client: server list config, the per-server socket and
+    request timing, version/port list/pad data requests, CRC checks, the
+    slot → device mapping, the motion and touch inputs and their scaling,
+    and the battery input. The protocol header keeps its packed layouts.
+  - Steam Deck: the hidapi device scan and hotplug, the input report
+    decoding (buttons, sticks, pads, triggers, IMU) and the periodic
+    IMU enable request.
+  - SDL: the SDL3 backend thread, gamepad/joystick hotplug with the same
+    device order, `SDLGamepad` inputs, motion sensors, rumble, trigger
+    rumble, LED and haptic effects.
+  - Bluetooth Wii Remote: discovery hand-off, the connection set-up task
+    chain (status, extensions, M+ activation and passthrough, IR camera
+    set-up and sensitivity), report handling, calibration, extension
+    inputs, IR, the battery and rumble timing.
+  - Windows: Win32 (window and hotplug notification thread), DirectInput
+    (enumeration, joystick axes/buttons/hats, keyboard and mouse with
+    cursor and relative axes, the XInput filter), force feedback
+    (effect creation, the worker that sends effect updates), XInput and
+    Windows.Gaming.Input (gamepads, raw controllers, switches, haptics,
+    battery, vibration and trigger rumble).
+  - Deliberate differences (robustness only, nothing a configuration or game
+    sees):
+    - Macros for backends that no longer exist in this tree are dropped.
+    - DSU: a PortInfo reply with pad_id 4 or more is ignored (the old code
+      indexed past the slot array). `Decode` writes into the destination
+      only when the packet is valid (same result as before).
+    - Steam Deck: the report read buffer is a member cleared once, so a
+      short read leaves no undefined bytes.
+    - SDL: event ids start at 0, dead code is gone, and the haptic effect
+      union is cleared in full before use.
+    - Wii Remote: reports under 2 bytes are rejected, short reports are
+      zero-filled without reading or writing out of bounds, the M+
+      passthrough copy is capped at 6 bytes, and the rumble report's
+      padding is zero.
+    - DInput: a joystick ignores byte offsets outside its state. The
+      keyboard/mouse device reads the render window once per update (atomic)
+      and value-initialises its temporary mouse state.
+    - WGInput: an empty button vector passes `data()` rather than the address
+      of element 0.
+    - `RelativeInputState` arrays are zero-initialised.
+  - Checked: old and new code built side by side with the untouched non-W35
+    base files on both sides, against recording fakes for every host API,
+    driven by random devices, capabilities, input streams and hotplug.
+    Device lists, every input value (bit for bit), output calls and the host
+    call logs are compared by a hash per case (no full outputs kept). All
+    runs are identical:
+    - Core (fake backends, containers, expressions, detector, relative
+      inputs): 300×200 seed 1, 2000×400 seed 7, 1000×600 seed 8 (cases ×
+      steps).
+    - DSU with a fake socket layer and random server packets (good, bad CRC,
+      wrong magic/version/type/size): 1500×1000 seed 9, 1000×1000 seed 41.
+    - Steam Deck with fake hidapi: 5000×800 seed 3, 1000×600 seed 4.
+    - SDL with a fake SDL3: 1500×400 seed 2.
+    - Bluetooth Wii Remote with random report streams: 1000×3000 seed 21,
+      1000×1500 seed 31.
+    - Win32 + DInput + XInputFilter + force feedback + XInput, built for
+      x86_64-w64-windows-gnu and run under wine with fake DirectInput COM
+      objects, XInput, user32, SetupDi/CM notification and tick count, the
+      FF worker kept in lockstep: 100×150 seed 1, 1500×300 seed 2, 1000×400
+      seed 7.
+    - WGInput, against stand-in WinRT projection headers (the real ones are
+      missing here), run under wine with a fake object model whose calls can
+      throw: 200×150 seed 1, 1500×300 seed 3; also deterministic across
+      repeated runs.
+    Not tested: a mouse reporting more than 3 axes (both old and new read
+    past the state, unchanged).
+  - Speed (callgrind instructions inside UpdateInput, GetState and
+    ControlReference::State, -O2, old → new): core 10,705,657 →
+    10,501,184 (−1.9%); Steam Deck 15,990,283 → 15,997,069 (+0.04%, about
+    one instruction per update, equal at -O1); SDL 272,645,257 →
+    272,670,200 (+0.009%); DSU 26,687,563 → 26,713,947 (+0.10%, clang
+    does not inline `Decode`); Wii Remote 51,085,926 → 51,177,580
+    (+0.18%, all in the one-off connection set-up chain; report handling
+    is 82k lower and GetState is equal). The Windows backends can't be
+    timed under wine; they were compared line by line for per-update work
+    and do no more of it.
+  - Compile check: all 17 W35 .cpp files for x86_64-w64-windows-gnu and
+    the 9 portable ones on Linux with clang `-Wall -Wextra -Wconversion
+    -Wsign-compare -Wshadow-all -Wshorten-64-to-32`: no warnings in W35
+    files (the remaining ones are in Common/MsgHandler.h,
+    WorkQueueThread.h, MathUtil.h and ControllerEmu.h, as in the base).
+    Narrowing and sign changes are explicit casts (MSVC /W4 /WX). The 10
+    non-Qt dependents (Core, HotkeyManager, SI, BTEmu, WiimoteReal,
+    InputConfig, InputProfile, ControllerEmu, UICommon, Present) on both
+    targets and the 12 DolphinQt dependents (Linux, system Qt 6 headers)
+    give exactly the base tree's diagnostics.
+  - Verbatim audit (`verbatim-audit.py wii 8`): the runs left in W35 files
+    are public declarations in headers (the DSU packed structs and enums,
+    `CoreDevice.h` class declarations). No run is left inside a function
+    body.
+  - Not rewritten: nothing; every W35 file is original code.
