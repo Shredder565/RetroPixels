@@ -132,7 +132,11 @@ func GameArgs(rom string, o LaunchOptions) []string {
 func Command(exe, home string, args ...string) (*exec.Cmd, *Output) {
 	cmd := exec.Command(exe, shortArgs(args)...)
 	cmd.Dir = filepath.Dir(exe)
-	cmd.Env = append(os.Environ(), "SUPERMODEL_HOME="+home)
+	// SDL_WINDOWS_DPI_AWARENESS (an SDL hint, read from the environment):
+	// Supermodel sees the screen's real pixels. Without it, on a scaled
+	// Windows desktop (a 4K screen at 150% or 200%) fullscreen draws the
+	// game in a small square in the top-left corner.
+	cmd.Env = append(os.Environ(), "SUPERMODEL_HOME="+home, "SDL_WINDOWS_DPI_AWARENESS=permonitorv2")
 	hideConsole(cmd)
 	out := &Output{}
 	cmd.Stdout = out

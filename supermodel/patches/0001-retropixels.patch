@@ -9,13 +9,13 @@ Subject: [PATCH] RetroPixels: player folder (SUPERMODEL_HOME), window size
  Makefiles/Rules.inc                |    1 +
  Src/OSD/FileSystemPath.h           |   87 +-
  Src/OSD/OSX/FileSystemPath.cpp     |  104 +-
- Src/OSD/RetroPixels.cpp            |  668 ++++
+ Src/OSD/RetroPixels.cpp            |  668 +++++
  Src/OSD/RetroPixels.h              |   79 +
- Src/OSD/SDL/Audio.cpp              | 1388 ++++----
- Src/OSD/SDL/Main.cpp               | 5115 ++++++++++++++--------------
- Src/OSD/Unix/FileSystemPath.cpp    |  324 +-
+ Src/OSD/SDL/Audio.cpp              | 1388 +++++-----
+ Src/OSD/SDL/Main.cpp               | 5137 ++++++++++++++++++------------------
+ Src/OSD/Unix/FileSystemPath.cpp    |  324 +--
  Src/OSD/Windows/FileSystemPath.cpp |  108 +-
- 10 files changed, 4407 insertions(+), 3496 deletions(-)
+ 10 files changed, 4429 insertions(+), 3496 deletions(-)
  create mode 100644 Docs/RetroPixels.txt
  create mode 100644 Src/OSD/RetroPixels.cpp
  create mode 100644 Src/OSD/RetroPixels.h
@@ -2421,10 +2421,10 @@ index 4738fe0..57243c8 100755
 +    audioBuffer = nullptr;
 +}
 diff --git a/Src/OSD/SDL/Main.cpp b/Src/OSD/SDL/Main.cpp
-index 77072d0..891a738 100644
+index 77072d0..43081c2 100644
 --- a/Src/OSD/SDL/Main.cpp
 +++ b/Src/OSD/SDL/Main.cpp
-@@ -1,2506 +1,2609 @@
+@@ -1,2506 +1,2631 @@
 -/**
 - ** Supermodel
 - ** A Sega Model 3 Arcade Emulator.
@@ -5084,6 +5084,24 @@ index 77072d0..891a738 100644
 +  int actualWidth;
 +  int actualHeight;
 +  SDL_GetWindowSize(s_window, &actualWidth, &actualHeight);
++  // RetroPixels: full screen at the desktop's resolution draws over every
++  // pixel the window really has. The drawable is measured, not assumed: on
++  // a scaled Windows desktop (a 4K screen at 150% or 200%) the size asked
++  // for and the size got can differ, which drew the game in a small square
++  // in a corner.
++  if (s_runtime_config["FullScreen"].ValueAs<bool>() && s_runtime_config["DesktopResolution"].ValueAsDefault<bool>(false))
++  {
++    int drawableWidth = 0;
++    int drawableHeight = 0;
++    SDL_GL_GetDrawableSize(s_window, &drawableWidth, &drawableHeight);
++    if (drawableWidth > 0 && drawableHeight > 0)
++    {
++      actualWidth = drawableWidth;
++      actualHeight = drawableHeight;
++    }
++    *xResPtr = actualWidth;
++    *yResPtr = actualHeight;
++  }
 +  *totalXResPtr = actualWidth;
 +  *totalYResPtr = actualHeight;
 +
@@ -5245,7 +5263,10 @@ index 77072d0..891a738 100644
 +  }
 +
 +  // Set video mode
-+  s_window = SDL_CreateWindow(caption.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, *xResPtr, *yResPtr, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullScreen ? SDL_WINDOW_FULLSCREEN : 0));
++  // RetroPixels: with DesktopResolution, full screen covers the desktop as it
++  // is (no display mode change).
++  const Uint32 fullScreenFlag = s_runtime_config["DesktopResolution"].ValueAsDefault<bool>(false) ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_FULLSCREEN;
++  s_window = SDL_CreateWindow(caption.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, *xResPtr, *yResPtr, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullScreen ? fullScreenFlag : 0));
 +  if (nullptr == s_window)
 +  {
 +    ErrorLog("Unable to create an OpenGL display: %s\n", SDL_GetError());
@@ -5314,7 +5335,8 @@ index 77072d0..891a738 100644
 +static Result ResizeGLScreen(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 +{
 +  // Set full screen mode
-+  if (SDL_SetWindowFullscreen(s_window, fullScreen ? SDL_WINDOW_FULLSCREEN : 0) < 0)
++  const Uint32 fullScreenFlag = s_runtime_config["DesktopResolution"].ValueAsDefault<bool>(false) ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_FULLSCREEN;
++  if (SDL_SetWindowFullscreen(s_window, fullScreen ? fullScreenFlag : 0) < 0)
 +  {
 +    ErrorLog("Unable to enter %s mode: %s\n", fullScreen ? "fullscreen" : "windowed", SDL_GetError());
 +    return Result::FAIL;
