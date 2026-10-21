@@ -99,24 +99,24 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 350250 | 87.7% |
+| Original (RetroPixels) | 350260 | 87.7% |
 | Dolphin, untouched | 43394 | 10.9% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **399407** | 100% |
+| **All** | **399417** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | Core/AudioCommon | 2803 | 2803 | original |
-| Core/Common (top level) | 25007 | 25007 | original |
+| Core/Common (top level) | 25017 | 25017 | original |
 | Core/Common/Assembler | 3757 | 3757 | original |
 | Core/Common/Config | 915 | 915 | original |
 | Core/Common/Crypto | 1202 | 1202 | original |
 | Core/Common/Debug | 436 | 436 | original |
 | Core/Common/GL | 8808 | 3136 | mixed (36% original), 5672 lines third-party |
 | Core/Common/Logging | 581 | 581 | original |
-| Core/Core (top level) | 23205 | 23205 | original |
+| Core/Core (top level) | 23204 | 23204 | original |
 | Core/Core/Boot | 2838 | 2838 | original |
 | Core/Core/Config | 2398 | 2398 | original |
 | Core/Core/ConfigLoaders | 1245 | 1245 | original |
@@ -162,7 +162,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/JitCommon | 2164 | 2164 | original |
 | Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
 | Core/DiscIO | 15966 | 15966 | original |
-| Core/DolphinQt (top level) | 14618 | 14618 | original |
+| Core/DolphinQt (top level) | 14619 | 14619 | original |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
 | Core/DolphinQt/Debugger | 13379 | 13379 | original |
@@ -229,7 +229,7 @@ batch rewrites them.
 | Batch | Scope | Lines | Original lines | Status |
 |---|---|---:|---:|---|
 | W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 0 | 0 | done (no files left) |
-| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13455 | 13455 | original |
+| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13465 | 13465 | original |
 | W3 | Common: platform, memory, network, crypto, file formats | 9026 | 9026 | original |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9417 | 9417 | original |
 | W5 | DiscIO: blob formats and compression | 7637 | 7637 | original |
@@ -249,7 +249,7 @@ batch rewrites them.
 | W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 11630 | 11630 | original |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 9104 | 9104 | original |
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13237 | 13237 | original |
-| W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 9463 | 9463 | original |
+| W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 9462 | 9462 | original |
 | W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 12850 | 12850 | original |
 | W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 11051 | 11051 | original |
 | W25 | VideoCommon: vertex loaders and vertex manager | 4192 | 4192 | original |
@@ -264,7 +264,7 @@ batch rewrites them.
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8119 | 8119 | original |
 | W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 8499 | 8499 | original |
 | W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8837 | 8837 | original |
-| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10528 | 10528 | original |
+| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10529 | 10529 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8071 | 8071 | original |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 12387 | 0 | Dolphin |
 | W40 | DolphinQt: controller mapping and settings panes | 11333 | 0 | Dolphin |
@@ -5146,3 +5146,151 @@ step did for the old file. No key bytes are in the tree.
       `GCMemcardManager.h`, `DiscordHandler.h`, `CheatsManager.h`,
       `CheatSearchWidget.h`, `RiivolutionBootWidget.h`, `GameTracker.h`).
     - No key, IV, token or credential bytes in W38 files.
+
+- B1 log (branding, art, licensing, version): PixelU-Wii's icon, pictures,
+  dark style, licence notice and version are its own now; none of them is
+  taken from Dolphin any more. Done from HEAD f2330ef on
+  `claude/wiiu-emulator-urpcen`; only the files below were touched.
+  - Art (`pixelu/wii/art/make_art.py`, new): draws everything from shapes
+    with Pillow, reads no image. `--check` redraws in memory and compares
+    with the tree (pixels for PNG/ICO, bytes for SVG).
+    - Program icon `Source/Core/DolphinQt/PixelU-Wii.ico` (new): a pixel-art
+      disc with a pink spark on a stepped navy tile; frames 16, 20, 24, 32,
+      40, 48, 64, 96, 128, 256 (16-24 drawn on a 16 grid, the rest on a 32
+      grid), PNG-compressed entries, 18 KB (Dolphin.ico was 230 KB).
+    - `pixelu/wii/Data/Sys/Resources/` (new, 69 PNG): every picture of
+      Dolphin's Sys/Resources with the same name and pixel size:
+      `dolphin_logo` (the app icon art at 200/400; name kept because
+      `Resources.cpp` and the Discord asset key use it), 14 flags at
+      1x/2x/4x, the five platform icons (a plain violet cube for GameCube,
+      an arcade cabinet for Triforce, a motion remote for Wii, a channel
+      tile for WAD, a page for files; no Nintendo logos), `nobanner`, the
+      four achievement placeholders and the three file-system icons.
+      `OSD_Font.ttf` and its copyright file are Bitstream's and still come
+      from Dolphin's Sys.
+    - Dark style (`Source/Core/DolphinQt/Styles/Dark/`): `dark.qss`,
+      `dark.qrc` and the 25 SVGs rewritten. Same file names and resource
+      prefix (`:/dolphin_dark_win`, which `Settings.cpp` loads); own palette
+      (window #1b1e24, accent #3fa9f5), rounded check boxes and buttons,
+      accent bar on the selected tab. Still no `QToolTip` rule, so
+      `Settings.cpp` keeps adding its own; `QGroupBox` is styled, as before.
+  - Resource scripts and manifests: `DolphinQt.rc` and `DolphinTool.rc`
+    have one icon each (`IDI_ICON1`, id 101 from the existing
+    `resource.h`) pointing at `PixelU-Wii.ico` (the tool uses
+    `../DolphinQt/PixelU-Wii.ico`). The unused second icon named "dolphin"
+    is gone: no code loads it. `DolphinQt.manifest` keeps Windows 10+ and
+    `longPathAware`; `DolphinTool.exe.manifest` keeps common controls 6 and
+    Windows 10+ with identity `RetroPixels.PixelUWii.Tool`.
+  - Version: `Source/Core/Common/PixelUWiiVersion.cmake` (new) replaces
+    Dolphin's `ScmRevGen.cmake`/`dolphin_scmrev` for `common`. At configure
+    it finds RetroPixels' `main.go` by walking up from the build tree and
+    reads `appVersion` (2.21.0); cache `PIXELU_WII_VERSION` and
+    `PIXELU_WII_ROOT` override. The target `pixelu_wii_version` runs the
+    same file with `-P` on every build and writes `Common/scmrev.h` from the
+    new `scmrev.h.in` (copy_if_different, so nothing recompiles when
+    nothing changed):
+    - `SCM_DESC_STR` = 2.21.0, `SCM_REV_STR` = RetroPixels' commit hash
+      (the version when git is missing), `SCM_BRANCH_STR` = RetroPixels'
+      branch (`GITHUB_REF_NAME` when detached, else "unknown"),
+      `SCM_COMMITS_AHEAD_MASTER` 0, distributor "RetroPixels", update track
+      empty.
+    - New `SCM_COMPAT_DESC_STR` = "2609a-pixelu" and
+      `Common::GetCompatDescStr()`: the HTTP user agent ("Dolphin/2609a-
+      pixelu", as before) and the RetroAchievements integration DLL keep
+      the string they had, because those servers compare client versions
+      with Dolphin release numbers (2.21.0 would read as an ancient
+      Dolphin). This is a compatibility constant, not read from Dolphin.
+    - `GetScmRevStr()` (shown by `--version`, savestate "made by", shader
+      dumps) says "PixelU-Wii 2.21.0" instead of "Dolphin 2609a-pixelu".
+      `GetEmulatorName()` is still "Dolphin" (netplay handshake, user
+      agent).
+    - Titles: `Core.cpp` "PixelU Wii 2.21.0 | ..." (was "PixelU Wii
+      (Dolphin 2609a-pixelu) | ..."), `MainWindow.cpp` idle title "PixelU
+      Wii 2.21.0", `AboutDialog.cpp` "Version 2.21.0 (based on Dolphin)".
+    - Netplay peers, the lobby browser filter and `/dev/dolphin` now see
+      2.21.0; peers must run the same PixelU-Wii build, as before.
+    - Other templates rewritten with the same keys and placeholders:
+      `build_info.txt.in` (unused while the updater is off),
+      `AchievementApprovedHash.h.in` (still filled by Dolphin's
+      `GenerateAchievementHash.cmake`, B3), `target_qt.conf.in` (the same
+      23 keys), `qtpaths.bat.in`, `qt.conf.win` (a `;` comment line added;
+      Qt reads the same `Paths/Plugins`).
+  - Licensing: `pixelu/wii/COPYING` rewritten: RetroPixels' original code
+    and art (files with the original-code line, make_art.py output), with
+    no licence chosen and none granted by the notice; the executable as a
+    whole is distributed under GPL-2.0-or-later while Dolphin code and GPL
+    components are in it; what is still Dolphin's code; "Dolphin community
+    data (GPL-2.0-or-later), shipped unchanged": `Sys\GameSettings\`,
+    `Sys\ApprovedInis.json`, `Languages\` (owner decision 2026-10-21); the
+    rest of Dolphin's Sys and GameTDB's title lists; a table of the
+    third-party components with their licences. `pixelu/wii/LICENSES`
+    gains the SPDX texts (from spdx/license-list-data) of LGPL-2.1-or-later,
+    LGPL-3.0-only, GPL-3.0-only, Apache-2.0, Zlib, ISC, BSD-2-Clause,
+    BSD-1-Clause, MPL-2.0, curl, bzip2-1.0.6, 0BSD and Bitstream-Vera; the
+    four existing texts are unchanged.
+  - Workflow (`.github/workflows/pixelu-wii.yml`):
+    - "Use PixelU's Source" also copies `pixelu/wii/Data/Sys` over the
+      submodule's `Data/Sys` and replaces its `COPYING` and `LICENSES`, so
+      the build folder's links match the package.
+    - "Apply PixelU patches" no longer commits and tags the submodule (only
+      needed for "2609a-pixelu"); `VERSION.txt` uses the submodule's HEAD
+      and names the PixelU-Wii version from `main.go`.
+    - "Package" copies Sys from the submodule and then `pixelu/wii/Data/Sys`
+      over it, `COPYING`, `license.txt` and `Licenses` from `pixelu/wii`,
+      and each Externals project's own licence files (LICENSE*, COPYING*,
+      NOTICE*, *copyright*, up to two folders deep; not gtest, MoltenVK,
+      libadrenotools, gettext) to `Licenses\Externals\<project>\`.
+    - "List package contents" fails unless `COPYING`,
+      `Licenses/LGPL-3.0-only.txt`, `Sys/Resources/dolphin_logo.png` and
+      `nobanner.png` are byte-identical to `pixelu/wii` and
+      `Sys/GameSettings` is there. The smoke test warns when `--version`
+      does not name PixelU-Wii.
+    - Unchanged: `PixelU-Wii.exe`, the `PixelU/wii` layout, the DLLs,
+      `qt.conf`, `QtPlugins`, `Languages`, `portable.txt`.
+  - Checked:
+    - `make_art.py --check`: 95 files, all match. The 69 Resources have
+      the same names and pixel sizes as Dolphin's and none is
+      byte-identical to one of Dolphin's.
+    - `llvm-rc` compiles both .rc files (the tool's path uses `/`, which
+      rc.exe accepts too); `xmllint` accepts both manifests; Pillow reads
+      the 10 ICO frames back.
+    - Qt 6.4 offscreen (libqt6svg6 installed for the check): a gallery of
+      every styled widget (menus, check boxes and radio buttons in all
+      states, combo, spin box, buttons, tool button menu, progress, slider,
+      tab scroll arrows, sortable table with header and corner, checkable
+      list) built against the old and the new `dark.qrc`: all pictures
+      load, the roles match. QSettings reads `qt.conf.win`
+      (`Paths/Plugins=./QtPlugins`) and the 23 keys of `target_qt.conf.in`.
+    - Version: a stub tree (top level with the `Source/Core` include path,
+      a `Common` dir with the real `Version.cpp` and the new cmake file)
+      configured with Ninja: from a scratch tree with a test `main.go`
+      (9.8.7, no git) and with `PIXELU_WII_ROOT` = the worktree (2.21.0,
+      real hash and branch); every `Common::Get*` value printed as above;
+      a second build only reruns the header target.
+    - Shared lines with Dolphin's old files (whitespace-normalised): COPYING
+      none; manifests and conf templates only the schema lines (keys,
+      GUIDs, element names); `dark.qss` 12 lines in a row, the check box
+      state-to-picture rules (Qt selector syntax plus the kept file names).
+    - No key, firmware, BIOS, DSP ROM or game added.
+  - Left as Dolphin's, and why:
+    - `Sys/Themes` (the five Clean icon themes) and the rest of Sys apart
+      from Resources: outside B1 (Sys data decision pending, B2).
+    - `Languages` and `Externals/gettext`: kept by the owner's decision.
+    - `DolphinTool/DolphinTool.filters` (an unused Visual Studio filters
+      file) and the `.natvis` files: not in B1's file list.
+    - `CMake/GenerateAchievementHash.cmake`, `DolphinSymlinkOrCopy.cmake`
+      and the top-level `dolphin_scmrev` target (still defined, never
+      built): Dolphin's build system, B3.
+    - Qt and FFmpeg binaries from `dolphin-emu/ext-win-qt` /
+      `ext-win-ffmpeg`: B4.
+    - The About box text ("lightly modified build of Dolphin", links to
+      Dolphin's COPYING and forums) and `bundle-test.yml`'s Dolphin 2609a
+      line are wording outside B1.
+    - `docs/pixelu-wii-original.md` still says `pixelu/wii/COPYING` is
+      Dolphin's; this log is the update.
+  - CI must confirm: rc.exe takes the PNG-framed ICO and the exe shows the
+    new icon; the VS generator builds `pixelu_wii_version` before `common`
+    and `GITHUB_REF_NAME` reaches it; `--version` prints "PixelU-Wii
+    2.21.0"; the PowerShell overlay and licence-copy loops (not run here:
+    no PowerShell in this sandbox) and the new package checks pass; the
+    dark style looks right on real Windows dark mode.
