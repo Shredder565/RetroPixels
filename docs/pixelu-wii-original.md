@@ -280,6 +280,11 @@ and the CMake glue in `Externals/`. Those need their own steps (an original
 top-level build in `pixelu/wii`, original or dropped data files, fetching
 the third-party Externals directly) before the submodule can go.
 
+Decided 2026-10-21 (project owner, decision card): keep Dolphin's per-game
+settings (Sys/GameSettings, ApprovedInis.json) and its translations
+(Languages) as clearly labelled Dolphin community data, shipped unchanged and
+credited in the package notice. The rewrite covers code; this data stays.
+
 Decided 2026-10-20 (project owner, decision card): remove Nintendo's keys
 from PixelU-Wii (Wii common, Korean, SD and vWii ancast keys, and the
 built-in console key and signature). Wii discs, WADs and SD saves then use a
