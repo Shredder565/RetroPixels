@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"retropixels/internal/dolphin"
+	"retropixels/internal/pixelu"
 )
 
 func TestDolphinSettingsDefaults(t *testing.T) {
@@ -128,7 +129,7 @@ func TestDolphinEngine(t *testing.T) {
 		t.Fatalf("a Dolphin.exe was used: %q", got)
 	}
 	px := filepath.Join(t.TempDir(), "PixelU")
-	engine := filepath.Join(px, "wii", "PixelU-Wii.exe")
+	engine := filepath.Join(px, "wii", pixelu.WiiExeName)
 	os.MkdirAll(filepath.Dir(engine), 0o755)
 	os.WriteFile(filepath.Join(px, "PixelU.exe"), []byte("x"), 0o644)
 	os.WriteFile(engine, []byte("x"), 0o644)
