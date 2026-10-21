@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,11 +6,9 @@
 
 #include <QObject>
 
-// Singleton that talks to the Core via the interface defined in Core/Host.h.
-// Because Host_* calls might come from different threads than the MainWindow,
-// the Host class communicates with it via signals/slots only.
-
-// Many of the Host_* functions are ignored, and some shouldn't exist.
+// The Qt side of the core's Host_* interface (Core/Host.h). The core calls those functions from
+// its own threads, so everything the GUI has to react to is passed on as a signal; the state the
+// core polls (focus, fullscreen) is kept in atomics.
 class Host final : public QObject
 {
   Q_OBJECT
@@ -48,11 +45,15 @@ signals:
 private:
   Host();
 
-  std::atomic<void*> m_render_handle{nullptr};
-  std::atomic<void*> m_main_window_handle{nullptr};
-  std::atomic<bool> m_render_to_main{false};
-  std::atomic<bool> m_render_focus{false};
-  std::atomic<bool> m_render_full_focus{false};
-  std::atomic<bool> m_render_fullscreen{false};
-  std::atomic<bool> m_tas_input_focus{false};
+  // Native window handles (HWND on Windows) of the render surface and the main window.
+  std::atomic<void*> m_surface{nullptr};
+  std::atomic<void*> m_main_window{nullptr};
+
+  // Whether the render surface lives inside the main window, as of the last SetRenderHandle.
+  std::atomic<bool> m_surface_in_main{false};
+
+  std::atomic<bool> m_has_focus{false};
+  std::atomic<bool> m_has_full_focus{false};
+  std::atomic<bool> m_is_fullscreen{false};
+  std::atomic<bool> m_tas_has_focus{false};
 };

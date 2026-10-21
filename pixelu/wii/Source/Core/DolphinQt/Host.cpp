@@ -1,9 +1,9 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Host.h"
 
-#include <functional>
+#include <string>
+#include <vector>
 
 #include <QAbstractEventDispatcher>
 #include <QApplication>
@@ -40,8 +40,52 @@
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VideoConfig.h"
 
+namespace
+{
+// Runs `action` (which touches the graphics backend) while the GPU thread is not running.
+//
+// This can be reached from a panic alert raised on the CPU or GPU thread, while that thread waits
+// for the alert, so the way of stopping the GPU depends on who is asking: pausing the whole core
+// from the CPU or GPU thread would wait for that very thread and never return.
+template <typename Action>
+void WhileGpuIdle(const Action& action)
+{
+  if (Core::IsGPUThread())
+  {
+    // The caller is the GPU thread, so the GPU is not doing anything else right now.
+    action();
+    return;
+  }
+
+  auto& system = Core::System::GetInstance();
+
+  if (Core::IsCPUThread())
+  {
+    // Dual core, called on the CPU thread: hold only the FIFO (the GPU thread). In single core
+    // the CPU thread is also the GPU thread and was handled above.
+    const bool core_was_running = Core::GetState(system) == Core::State::Running;
+    auto& fifo = system.GetFifo();
+    fifo.PauseAndLock();
+    action();
+    fifo.RestoreState(core_was_running);
+    return;
+  }
+
+  // Any other thread can pause the core as a whole.
+  const Core::CPUThreadGuard pause_core(system);
+  action();
+}
+
+// Emits one of Host's argument-less signals from the GUI thread.
+void EmitOnGuiThread(void (Host::*signal)())
+{
+  QueueOnObject(QApplication::instance(), [signal] { emit(Host::GetInstance()->*signal)(); });
+}
+}  // namespace
+
 Host::Host()
 {
+  // Loading a state changes memory under the debugger's feet.
   State::SetOnAfterLoadCallback([] { Host_UpdateDisasmDialog(); });
 }
 
@@ -52,103 +96,87 @@ Host::~Host()
 
 Host* Host::GetInstance()
 {
-  static Host* s_instance = new Host();
-  return s_instance;
-}
-
-void Host::SetRenderHandle(void* handle)
-{
-  m_render_to_main = Config::Get(Config::MAIN_RENDER_TO_MAIN);
-
-  if (m_render_handle == handle)
-    return;
-
-  m_render_handle = handle;
-  if (g_presenter)
-  {
-    g_presenter->ChangeSurface(handle);
-    g_controller_interface.ChangeWindow(handle);
-  }
+  // Deliberately never destroyed: core threads may still call in during shutdown.
+  static Host* const instance = new Host();
+  return instance;
 }
 
 void Host::SetMainWindowHandle(void* handle)
 {
-  m_main_window_handle = handle;
+  m_main_window = handle;
 }
 
-static void RunWithGPUThreadInactive(const std::function<void()>& f)
+void Host::SetRenderHandle(void* handle)
 {
-  // Potentially any thread which shows panic alerts can be blocked on this returning.
-  // This means that, in order to avoid deadlocks, we need to be careful with how we
-  // synchronize with other threads. Note that the panic alert handler temporarily declares
-  // us as the CPU and/or GPU thread if the panic alert was requested by that thread.
+  m_surface_in_main = Config::Get(Config::MAIN_RENDER_TO_MAIN);
 
-  // TODO: What about the unlikely case where the GPU thread calls the panic alert handler
-  // while the panic alert handler is processing a panic alert from the CPU thread?
+  if (handle == m_surface)
+    return;
+  m_surface = handle;
 
-  if (Core::IsGPUThread())
-  {
-    // If we are the GPU thread, we can't call Core::PauseAndLock without getting a deadlock,
-    // since it would try to pause the GPU thread while that thread is waiting for us.
-    // However, since we know that the GPU thread is inactive, we can just run f directly.
-
-    f();
-  }
-  else if (Core::IsCPUThread())
-  {
-    // If we are the CPU thread in dual core mode, we can't call Core::PauseAndLock, for the
-    // same reason as above. Instead, we use Fifo::PauseAndLock to pause the GPU thread only.
-    // (Note that this case cannot be reached in single core mode, because in single core mode,
-    // the CPU and GPU threads are the same thread, and we already checked for the GPU thread.)
-
-    auto& system = Core::System::GetInstance();
-    const bool was_running = Core::GetState(system) == Core::State::Running;
-    auto& fifo = system.GetFifo();
-    fifo.PauseAndLock();
-    f();
-    fifo.RestoreState(was_running);
-  }
-  else
-  {
-    // If we reach here, we can call Core::PauseAndLock (which we do using a CPUThreadGuard).
-    const Core::CPUThreadGuard guard(Core::System::GetInstance());
-    f();
-  }
+  // While a game runs the presenter and the input backends have to follow the new window.
+  if (!g_presenter)
+    return;
+  g_presenter->ChangeSurface(handle);
+  g_controller_interface.ChangeWindow(handle);
 }
 
 bool Host::GetRenderFocus()
 {
 #ifdef _WIN32
-  // Unfortunately Qt calls SetRenderFocus() with a slight delay compared to what we actually need
-  // to avoid inputs that cause a focus loss to be processed by the emulation
-  if (m_render_to_main && !m_render_fullscreen)
-    return GetForegroundWindow() == (HWND)m_main_window_handle.load();
-  return GetForegroundWindow() == (HWND)m_render_handle.load();
+  // Qt reports focus changes a little late; asking Windows directly keeps the key press that
+  // switched away from the game from reaching it. When the game is drawn inside the main window
+  // (and not fullscreen), the main window is the one that has to be in front.
+  const bool main_window_is_surface = m_surface_in_main && !m_is_fullscreen;
+  const HWND expected = static_cast<HWND>(main_window_is_surface ? m_main_window.load() :
+                                                                   m_surface.load());
+  return GetForegroundWindow() == expected;
 #else
-  return m_render_focus;
+  return m_has_focus;
 #endif
-}
-
-bool Host::GetRenderFullFocus()
-{
-  return m_render_full_focus;
 }
 
 void Host::SetRenderFocus(bool focus)
 {
-  m_render_focus = focus;
-  if (g_gfx && m_render_fullscreen && g_ActiveConfig.ExclusiveFullscreenEnabled())
-  {
-    RunWithGPUThreadInactive([focus] {
-      if (!Config::Get(Config::MAIN_RENDER_TO_MAIN))
-        g_gfx->SetFullscreen(focus);
-    });
-  }
+  m_has_focus = focus;
+
+  // Exclusive fullscreen is dropped while the game window is in the background and taken again
+  // when it comes back (only for a separate render window).
+  if (!g_gfx || !m_is_fullscreen || !g_ActiveConfig.ExclusiveFullscreenEnabled())
+    return;
+
+  WhileGpuIdle([focus] {
+    if (Config::Get(Config::MAIN_RENDER_TO_MAIN))
+      return;
+    g_gfx->SetFullscreen(focus);
+  });
+}
+
+bool Host::GetRenderFullFocus()
+{
+  return m_has_full_focus;
 }
 
 void Host::SetRenderFullFocus(bool focus)
 {
-  m_render_full_focus = focus;
+  m_has_full_focus = focus;
+}
+
+bool Host::GetRenderFullscreen()
+{
+  return m_is_fullscreen;
+}
+
+void Host::SetRenderFullscreen(bool fullscreen)
+{
+  m_is_fullscreen = fullscreen;
+
+  if (!g_gfx || !g_ActiveConfig.ExclusiveFullscreenEnabled())
+    return;
+  if (g_gfx->IsFullscreen() == fullscreen)
+    return;
+
+  WhileGpuIdle([fullscreen] { g_gfx->SetFullscreen(fullscreen); });
 }
 
 bool Host::GetGBAFocus()
@@ -162,57 +190,44 @@ bool Host::GetGBAFocus()
 
 bool Host::GetTASInputFocus() const
 {
-  return m_tas_input_focus;
-}
-
-bool Host::GetRenderFullscreen()
-{
-  return m_render_fullscreen;
-}
-
-void Host::SetRenderFullscreen(bool fullscreen)
-{
-  m_render_fullscreen = fullscreen;
-
-  if (g_gfx && g_gfx->IsFullscreen() != fullscreen && g_ActiveConfig.ExclusiveFullscreenEnabled())
-  {
-    RunWithGPUThreadInactive([fullscreen] { g_gfx->SetFullscreen(fullscreen); });
-  }
+  return m_tas_has_focus;
 }
 
 void Host::SetTASInputFocus(const bool focus)
 {
-  m_tas_input_focus = focus;
+  m_tas_has_focus = focus;
 }
 
-void Host::ResizeSurface(int new_width, int new_height)
+void Host::ResizeSurface(int, int)
 {
+  // The presenter asks the window for its size itself.
   if (g_presenter)
     g_presenter->ResizeSurface();
 }
 
+// The functions below are the core's side of the interface (declared in Core/Host.h).
+
 std::vector<std::string> Host_GetPreferredLocales()
 {
-  const QStringList ui_languages = QLocale::system().uiLanguages();
-  std::vector<std::string> converted_languages(ui_languages.size());
-
-  for (int i = 0; i < ui_languages.size(); ++i)
-    converted_languages[i] = ui_languages[i].toStdString();
-
-  return converted_languages;
+  std::vector<std::string> locales;
+  for (const QString& language : QLocale::system().uiLanguages())
+    locales.push_back(language.toStdString());
+  return locales;
 }
 
 void Host_Message(HostMessageID id)
 {
-  if (id == HostMessageID::WMUserStop)
+  switch (id)
   {
+  case HostMessageID::WMUserStop:
     emit Host::GetInstance()->RequestStop();
-  }
-  else if (id == HostMessageID::WMUserJobDispatch)
-  {
-    // Just poke the main thread to get it to wake up, job dispatch
-    // will happen automatically before it goes back to sleep again.
+    break;
+  case HostMessageID::WMUserJobDispatch:
+    // Waking the GUI thread's event loop is enough: queued jobs run before it sleeps again.
     QAbstractEventDispatcher::instance(qApp->thread())->wakeUp();
+    break;
+  default:
+    break;
   }
 }
 
@@ -223,7 +238,8 @@ void Host_UpdateTitle(const std::string& title)
 
 bool Host_RendererHasFocus()
 {
-  return Host::GetInstance()->GetRenderFocus() || Host::GetInstance()->GetGBAFocus();
+  Host* const host = Host::GetInstance();
+  return host->GetRenderFocus() || host->GetGBAFocus();
 }
 
 bool Host_RendererHasFullFocus()
@@ -243,37 +259,38 @@ bool Host_TASInputHasFocus()
 
 void Host_YieldToUI()
 {
-  if (qApp->thread() == QThread::currentThread())
-    qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+  // Only meaningful on the GUI thread; user input stays queued so it cannot re-enter the caller.
+  if (QThread::currentThread() != qApp->thread())
+    return;
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
 }
 
 void Host_UpdateDisasmDialog()
 {
+  // Refreshing the debugger after every single frame step would only slow stepping down.
   if (Settings::Instance().GetIsContinuouslyFrameStepping())
     return;
-
-  QueueOnObject(QApplication::instance(), [] { emit Host::GetInstance()->UpdateDisasmDialog(); });
+  EmitOnGuiThread(&Host::UpdateDisasmDialog);
 }
 
 void Host_JitCacheInvalidation()
 {
-  QueueOnObject(QApplication::instance(), [] { emit Host::GetInstance()->JitCacheInvalidation(); });
+  EmitOnGuiThread(&Host::JitCacheInvalidation);
 }
 
 void Host_JitProfileDataWiped()
 {
-  QueueOnObject(QApplication::instance(), [] { emit Host::GetInstance()->JitProfileDataWiped(); });
+  EmitOnGuiThread(&Host::JitProfileDataWiped);
 }
 
 void Host_PPCSymbolsChanged()
 {
-  QueueOnObject(QApplication::instance(), [] { emit Host::GetInstance()->PPCSymbolsChanged(); });
+  EmitOnGuiThread(&Host::PPCSymbolsChanged);
 }
 
 void Host_PPCBreakpointsChanged()
 {
-  QueueOnObject(QApplication::instance(),
-                [] { emit Host::GetInstance()->PPCBreakpointsChanged(); });
+  EmitOnGuiThread(&Host::PPCBreakpointsChanged);
 }
 
 void Host_RequestRenderWindowSize(int w, int h)
@@ -283,17 +300,20 @@ void Host_RequestRenderWindowSize(int w, int h)
 
 bool Host_UIBlocksControllerState()
 {
-  // TODO: Remove the Paused check once async presentation is implemented.
-  return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard &&
-         Core::GetState(Core::System::GetInstance()) != Core::State::Paused;
+  // An on-screen ImGui widget that is taking keyboard input keeps the game from seeing it, except
+  // while paused (where the overlay is not redrawn).
+  if (ImGui::GetCurrentContext() == nullptr || !ImGui::GetIO().WantCaptureKeyboard)
+    return false;
+  return Core::GetState(Core::System::GetInstance()) != Core::State::Paused;
 }
 
 void Host_TitleChanged()
 {
 #ifdef USE_DISCORD_PRESENCE
-  // TODO: Not sure if the NetPlay check is needed.
-  if (!NetPlay::IsNetPlayRunning())
-    Discord::UpdateDiscordPresence();
+  // During NetPlay the presence shows the session instead of the game.
+  if (NetPlay::IsNetPlayRunning())
+    return;
+  Discord::UpdateDiscordPresence();
 #endif
 }
 
@@ -322,7 +342,8 @@ bool Host_UpdateDiscordPresenceRaw(const std::string& details, const std::string
 }
 
 #ifndef HAS_LIBMGBA
-std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core> core)
+// Without mGBA there is no GBA emulation to host.
+std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>)
 {
   return nullptr;
 }

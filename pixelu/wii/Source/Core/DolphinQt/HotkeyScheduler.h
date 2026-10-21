@@ -1,16 +1,23 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <atomic>
 #include <thread>
 
 #include <QObject>
 
 #include "Common/CommonTypes.h"
-#include "Common/Flag.h"
 #include "InputCommon/InputProfile.h"
 
+namespace Core
+{
+class System;
+}
+
+// Polls the hotkey controller on a thread of its own (every 5 ms) and turns presses into signals
+// for the GUI, or acts on them directly when no GUI is involved (graphics toggles, volume, ...).
+// Signals are emitted from the polling thread, so receivers get them queued.
 class HotkeyScheduler : public QObject
 {
   Q_OBJECT
@@ -72,12 +79,32 @@ signals:
   void InfinityBaseHotkey();
 
 private:
-  void Run();
-  void CheckDebuggingHotkeys();
-  void CheckGBAHotkeys();
+  using Signal = void (HotkeyScheduler::*)();
+  struct SignalHotkey
+  {
+    int hotkey;
+    Signal signal;
+  };
 
-  Common::Flag m_stop_requested;
-  std::thread m_thread;
+  void PollLoop();
 
-  InputProfile::ProfileCycler m_profile_cycler;
+  // Emits the signal of every entry whose hotkey was just pressed, in table order.
+  template <std::size_t N>
+  void EmitPressed(const SignalHotkey (&table)[N]);
+
+  // Hotkeys that only make sense with the core up. Returns false when no game is running, in
+  // which case the rest of this poll is skipped.
+  bool HandleCoreHotkeys(Core::System& system);
+  void HandleSessionHotkeys(Core::System& system);
+  void HandleWiiHotkeys();
+  void HandleProfileHotkeys();
+  void HandleDebuggerHotkeys();
+  void HandleGBAHotkeys();
+  // Hotkeys that are honoured even while the core is stopping.
+  void HandleLateHotkeys();
+
+  std::atomic<bool> m_quit{false};
+  std::thread m_poller;
+
+  InputProfile::ProfileCycler m_profiles;
 };
