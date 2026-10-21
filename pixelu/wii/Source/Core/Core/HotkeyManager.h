@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,9 @@ namespace ControllerEmu
 class Buttons;
 }  // namespace ControllerEmu
 
+// Every hotkey, and the groups they are shown and saved in. Each group is a
+// contiguous range of this enum (see the group table in HotkeyManager.cpp).
+// The numeric values are not stored anywhere, but the UI indexes by them.
 enum Hotkey
 {
   HK_OPEN,
@@ -223,29 +225,33 @@ enum HotkeyGroup : int
   NUM_HOTKEY_GROUPS,
 };
 
+
+// One bit per hotkey, by its index inside its group.
 struct HotkeyStatus
 {
   std::array<u32, NUM_HOTKEY_GROUPS> button;
   s8 err;
 };
 
+// The emulated "controller" whose buttons are the hotkeys (Hotkeys.ini).
 class HotkeyManager : public ControllerEmu::EmulatedController
 {
 public:
   HotkeyManager();
   ~HotkeyManager() override;
 
+  // Samples the groups whose focus rule matches ignore_focus into `hk`.
   void GetInput(HotkeyStatus* hk, bool ignore_focus);
   std::string GetName() const override;
   InputConfig* GetConfig() const override;
   ControllerEmu::ControlGroup* GetHotkeyGroup(HotkeyGroup group) const;
+  // The group a hotkey belongs to, and its index inside that group.
   int FindGroupByID(int id) const;
   int GetIndexForGroup(int group, int id) const;
   void LoadDefaults(const ControllerInterface& ciface) override;
 
 private:
-  std::array<ControllerEmu::Buttons*, NUM_HOTKEY_GROUPS> m_keys{};
-  std::array<ControllerEmu::ControlGroup*, NUM_HOTKEY_GROUPS> m_hotkey_groups{};
+  std::array<ControllerEmu::Buttons*, NUM_HOTKEY_GROUPS> m_group_buttons{};
 };
 
 namespace HotkeyManagerEmu
@@ -256,8 +262,11 @@ void LoadConfig();
 
 InputConfig* GetConfig();
 ControllerEmu::ControlGroup* GetHotkeyGroup(HotkeyGroup group);
+// Samples the hotkeys (see HotkeyManager::GetInput).
 void GetStatus(bool ignore_focus);
 bool IsEnabled();
 void Enable(bool enable_toggle);
+// Whether hotkey `Id` is down in the last sample. Without `held`, only the
+// first sample after it went down counts.
 bool IsPressed(int Id, bool held);
 }  // namespace HotkeyManagerEmu
