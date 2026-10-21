@@ -225,12 +225,14 @@ endif()
 
 set(bin_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
-# Sys is the third-party checkout's Data/Sys with PixelU-Wii's own Data/Sys laid
-# over it, so it is assembled as a copy, fresh on every build.
+# Sys is PixelU-Wii's own Data/Sys plus a short list of files from the third-party
+# checkout's Data/Sys (CMake/PixelUAssembleSys.cmake), assembled fresh on every build.
 add_custom_command(TARGET dolphin-emu POST_BUILD
-  COMMAND "${CMAKE_COMMAND}" -E rm -rf "${bin_dir}/Sys"
-  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PIXELU_WII_DOLPHIN_DATA}/Data/Sys" "${bin_dir}/Sys"
-  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/Data/Sys" "${bin_dir}/Sys"
+  COMMAND "${CMAKE_COMMAND}"
+          "-DTHIRD_PARTY_SYS=${PIXELU_WII_DOLPHIN_DATA}/Data/Sys"
+          "-DOWN_SYS=${PROJECT_SOURCE_DIR}/Data/Sys"
+          "-DOUT=${bin_dir}/Sys"
+          -P "${PIXELU_WII_CMAKE_DIR}/PixelUAssembleSys.cmake"
   COMMENT "Assembling Binaries/Sys"
   VERBATIM)
 pixelu_after_build_link(dolphin-emu "${PROJECT_SOURCE_DIR}/COPYING" "${bin_dir}/COPYING")
