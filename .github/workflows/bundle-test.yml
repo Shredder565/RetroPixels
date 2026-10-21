@@ -8,18 +8,27 @@ name: RetroPixels with PixelU (test build)
 # It runs on each push, and again when a PixelU engine build finishes (those
 # workflows start it, since workflow_run only works from the default branch).
 
+# release.yml calls it with release: true: then the version has no -testN,
+# VERSION.txt says it's a release, and the release files (the zip, the two
+# programs and the MAME source) go in the RetroPixels-release artifact.
+
 on:
   workflow_dispatch:
   push:
     branches: [claude/wiiu-emulator-urpcen]
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: bundle-test
-  cancel-in-progress: true
+  group: bundle-test-${{ inputs.release && 'release' || 'test' }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 jobs:
   # supermodel.exe from supermodel/ at this commit (upstream + RetroPixels' patches).
@@ -46,7 +55,8 @@ jobs:
 
       - name: Build RetroPixels
         run: |
-          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-test${{ github.run_number }}
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          if [ "${{ inputs.release }}" != true ]; then v=$v-test${{ github.run_number }}; fi
           echo "VER=$v" >> "$GITHUB_ENV"
           echo "DIR=dist/RetroPixels-$v" >> "$GITHUB_ENV"
           sh tools/make-winres.sh && sh tools/make-winres-native.sh
@@ -74,6 +84,7 @@ jobs:
           test -f "$DIR/PixelU/PixelU.exe" && test -f "$DIR/PixelU/wii/PixelU-Wii.exe"
 
       - name: Built-in MAME
+        id: mame
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
@@ -99,7 +110,13 @@ jobs:
           cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
           cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
           {
-            echo "RetroPixels $VER (test build, not a release)"
+            if [ "${{ inputs.release }}" = true ]; then
+              echo "RetroPixels $VER"
+              src="https://github.com/$GITHUB_REPOSITORY/tree/v$VER"
+            else
+              echo "RetroPixels $VER (test build, not a release)"
+              src="https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH"
+            fi
             echo "Built $(date -u +%F) from branch $BRANCH ($(git rev-parse --short HEAD))"
             echo
             echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
@@ -112,7 +129,7 @@ jobs:
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo
-            echo "Source: https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH"
+            echo "Source: $src"
             echo "PixelU-Wii source is in pixelu/wii; docs/pixelu-wii-original.md explains the rewrite and lists the third-party parts and kept Dolphin data."
             echo "No games, keys, BIOS or firmware are included."
           } > "$DIR/VERSION.txt"
@@ -130,3 +147,22 @@ jobs:
             !dist/*.tar.gz
           compression-level: 6
           retention-days: 14
+
+      # Release only: the files release.yml publishes.
+      - name: Release files
+        if: inputs.release
+        run: |
+          mkdir -p release
+          (cd dist && zip -qr "../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
+          cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" release/
+          cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
+          cp "$DIR/VERSION.txt" release/VERSION.txt
+          ls -la release
+
+      - if: inputs.release
+        uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-release
+          path: release/
+          compression-level: 0
+          retention-days: 30
