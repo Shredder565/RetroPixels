@@ -32,6 +32,8 @@ type Settings struct {
 	Dolphin DolphinSettings `json:"dolphin"`
 	// Wii U through PixelU (pixelu_settings.go)
 	PixelU PixelUSettings `json:"pixelu"`
+	// Star Wars Trilogy Arcade through Supermodel (supermodel_settings.go)
+	Supermodel SupermodelSettings `json:"supermodel"`
 }
 
 const maxRecent = 10

@@ -23,11 +23,16 @@ import (
 )
 
 // pixeluRecDir makes a folder of its own for one game's raw files, under base.
-func pixeluRecDir(base string) (string, error) {
+func pixeluRecDir(base string) (string, error) { return engineRecDir(base, "PixelU-") }
+
+// engineRecDir makes a folder of its own (named prefix…) for one game's raw
+// files, under base, with the Frames and Audio folders that PixelU and
+// RetroPixels' Supermodel save the picture and sound into.
+func engineRecDir(base, prefix string) (string, error) {
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", errors.New("couldn't make the recordings folder: " + err.Error())
 	}
-	dir, err := os.MkdirTemp(base, "PixelU-")
+	dir, err := os.MkdirTemp(base, prefix)
 	if err != nil {
 		return "", errors.New("couldn't make the recordings folder: " + err.Error())
 	}

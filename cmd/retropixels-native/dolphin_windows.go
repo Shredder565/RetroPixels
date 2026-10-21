@@ -327,7 +327,7 @@ func (a *app) dolOpenPath(path string) bool {
 
 // dolPlay starts a game (stopping the one playing first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
-	if a.mameBusy() || a.pixeluBusy() {
+	if a.mameBusy() || a.pixeluBusy() || a.supermodelBusy() {
 		return
 	}
 	if r := a.dol.run; r != nil {
@@ -577,7 +577,7 @@ func (a *app) dolHoldWindow() bool {
 }
 
 func (a *app) dolMaybeClose() {
-	if !a.dol.closeAfter || a.dol.run != nil || a.pu.run != nil || a.mame.run != nil {
+	if !a.dol.closeAfter || a.dol.run != nil || a.pu.run != nil || a.mame.run != nil || a.sm.run != nil {
 		return
 	}
 	if pending, _, _ := a.dolBusySaving(); pending == 0 {
@@ -618,6 +618,8 @@ func (a *app) dolEvent(name, detail string) {
 				a.pixeluStop()
 			case a.mame.run != nil:
 				a.mameStop()
+			case a.sm.run != nil:
+				a.supermodelStop()
 			}
 		case "close":
 			call(pPostMessageW, a.hwnd, wmClose, 0, 0)

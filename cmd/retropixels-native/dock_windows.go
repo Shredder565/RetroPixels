@@ -107,7 +107,7 @@ func (a *app) dockPlace(child uintptr, force bool) {
 // dockResize follows the window's size (WM_SIZE): whichever emulator's
 // window is docked is fitted to it.
 func (a *app) dockResize() {
-	for _, r := range []*extRun{a.dolExt(), a.mameExt(), a.pixeluExt()} {
+	for _, r := range []*extRun{a.dolExt(), a.mameExt(), a.pixeluExt(), a.supermodelExt()} {
 		if r != nil {
 			if c := r.child.Load(); c != 0 {
 				a.dockPlace(c, false)
