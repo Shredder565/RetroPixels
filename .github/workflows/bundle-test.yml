@@ -3,7 +3,8 @@ name: RetroPixels with PixelU (test build)
 # One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
 # built from this commit, with PixelU inside (the Wii U engine and the
 # GameCube / Wii engine, from their latest successful builds on this branch)
-# and the built-in MAME. A workflow artifact only: no release is made.
+# the built-in MAME and Supermodel (Sega Model 3, built from this commit by
+# supermodel.yml). A workflow artifact only: no release is made.
 # It runs on each push, and again when a PixelU engine build finishes (those
 # workflows start it, since workflow_run only works from the default branch).
 
@@ -21,7 +22,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # supermodel.exe from supermodel/ at this commit (upstream + RetroPixels' patches).
+  supermodel:
+    uses: ./.github/workflows/supermodel.yml
+
   bundle:
+    needs: supermodel
     runs-on: ubuntu-latest
     env:
       BRANCH: claude/wiiu-emulator-urpcen
@@ -72,6 +78,21 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: Supermodel-windows-x64
+          path: eng/Supermodel-windows-x64
+
+      - name: Supermodel (Sega Model 3)
+        run: |
+          mkdir -p "$DIR/Supermodel"
+          cp -r eng/Supermodel-windows-x64/Supermodel/. "$DIR/Supermodel/"
+          test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/RetroPixels.txt"
+          test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/Supermodel-source.tar.gz"
+          . supermodel/pins.sh
+          echo "SM_COMMIT=${SUPERMODEL_COMMIT}" >> "$GITHUB_ENV"
+          echo "SM_REPO=${SUPERMODEL_REPO%.git}" >> "$GITHUB_ENV"
+
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt "$DIR/"
@@ -85,6 +106,9 @@ jobs:
             echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
+            echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel\\LICENSE.txt"
+            echo "  Source: Supermodel\\Supermodel-source.tar.gz (the exact source built), upstream $SM_REPO/tree/$SM_COMMIT"
+            echo "  RetroPixels' changes: Supermodel\\RetroPixels.txt, and https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH/supermodel"
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo
