@@ -145,7 +145,9 @@ fi
 # ---- MAME ----
 subtarget=$MAME_SUBTARGET
 [ -z "$sources" ] || subtarget=rpcheck
-if [ "$subtarget" = mame ]; then binary=mame; else binary=mame$subtarget; fi
+# The program is named after the subtarget: mame for all of MAME; a SOURCES=
+# build names it after its subtarget alone (rpcheck).
+if [ "$subtarget" = mame ] || [ -n "$sources" ]; then binary=$subtarget; else binary=mame$subtarget; fi
 # - the same machines and options as the MAME team's release (OPTIMIZE=3,
 #   no debug symbols); no Qt debugger (MAME's own debugger window needs Qt)
 # - SDL_INI_PATH: mame.ini is looked for in MAME's own folder only, as on
@@ -196,14 +198,16 @@ cp COPYING "$stage/COPYING"
 [ -f uismall.bdf ] && cp uismall.bdf "$stage/"
 
 # Each program and library may need glibc $GLIBC_MAX at most.
-need=$(objdump -T "$stage/mame" "$stage/lib/"*.so.0 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -Vu | tail -n 1)
+bins=$(find "$stage/mame" "$stage/lib" -maxdepth 1 -type f \( -name mame -o -name "*.so.0" \))
+# shellcheck disable=SC2086 # (no spaces in these names)
+need=$(objdump -T $bins | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -Vu | tail -n 1)
 log "needs glibc $need (at most $GLIBC_MAX)"
 [ "$(printf '%s\n%s\n' "$need" "$GLIBC_MAX" | sort -V | tail -n 1)" = "$GLIBC_MAX" ] || {
 	echo "the build needs glibc $need, newer than $GLIBC_MAX" >&2
 	exit 1
 }
 log "libraries it needs:"
-objdump -p "$stage/mame" "$stage/lib/"*.so.0 | grep NEEDED | sort -u
+objdump -p $bins | grep NEEDED | sort -u
 
 cat >"$stage/RETROPIXELS-BUILD.txt" <<EOF
 version=$version

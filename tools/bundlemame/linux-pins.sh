@@ -9,7 +9,7 @@
 
 # Build machine: GitHub's ubuntu-22.04 runner (glibc 2.35, GCC 11.4), so the
 # result runs on glibc 2.35 and later. MAME needs GCC 11 or later.
-GLIBC_MAX=2.35
+GLIBC_MAX=${GLIBC_MAX:-2.35} # (a local check on a newer system can raise it)
 
 # Which machines: all of MAME, as in the MAME team's Windows release. (MAME
 # no longer has an "arcade" subtarget: it went with the source tree's
