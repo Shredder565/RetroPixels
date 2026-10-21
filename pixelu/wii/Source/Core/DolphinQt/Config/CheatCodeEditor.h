@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,8 @@ namespace Gecko
 class GeckoCode;
 }
 
+// Edits one Action Replay or Gecko code in place. The dialog has no
+// Q_OBJECT of its own, so its texts translate in the QDialog context.
 class CheatCodeEditor : public QDialog
 {
 public:
@@ -29,23 +30,21 @@ public:
   void SetGeckoCode(Gecko::GeckoCode* code);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-
-  bool AcceptAR();
-  bool AcceptGecko();
+  void SetGeckoFieldsVisible(bool visible);
+  bool StoreARCode();
+  bool StoreGeckoCode();
 
   void accept() override;
 
-  QLabel* m_creator_label;
-  QLabel* m_notes_label;
+  QLabel* m_creator_caption;
+  QLabel* m_notes_caption;
 
-  QLineEdit* m_name_edit;
-  QLineEdit* m_creator_edit;
-  QTextEdit* m_notes_edit;
-  QTextEdit* m_code_edit;
-  QDialogButtonBox* m_button_box;
+  QLineEdit* m_name;
+  QLineEdit* m_creator;
+  QTextEdit* m_notes;
+  QTextEdit* m_lines;
+  QDialogButtonBox* m_buttons;
 
-  ActionReplay::ARCode* m_ar_code = nullptr;
-  Gecko::GeckoCode* m_gecko_code = nullptr;
+  ActionReplay::ARCode* m_ar_target = nullptr;
+  Gecko::GeckoCode* m_gecko_target = nullptr;
 };

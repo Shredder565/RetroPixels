@@ -1,12 +1,11 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <QWidget>
-
 #include <string>
 #include <vector>
+
+#include <QWidget>
 
 #include "Common/CommonTypes.h"
 
@@ -20,11 +19,12 @@ class CheatWarningWidget;
 #ifdef USE_RETRO_ACHIEVEMENTS
 class HardcoreWarningWidget;
 #endif  // USE_RETRO_ACHIEVEMENTS
-class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
 
+// The Action Replay tab: lists a game's AR codes, lets them be switched on
+// and off, edited and reordered, and keeps the user's game INI up to date.
 class ARCodeWidget : public QWidget
 {
   Q_OBJECT
@@ -42,44 +42,44 @@ signals:
 #endif  // USE_RETRO_ACHIEVEMENTS
 
 private:
+  void BuildLayout();
+  void WireUp();
+
+  void ReadCodes();
+  void WriteCodes();
+  void RebuildList();
+  void ApplyIfRunning();
+  bool AllEnabled() const;
+  void RefreshToggleAllButton();
+
+  void OnCheckToggled(QListWidgetItem* item);
   void OnSelectionChanged();
-  void OnItemChanged(QListWidgetItem* item);
-  void OnContextMenuRequested();
+  void OnRowsMoved();
+  void ShowSortMenu();
+  void SortByName();
+  void PutEnabledFirst();
+  void PutDisabledFirst();
 
-  void CreateWidgets();
-  void ConnectWidgets();
-  void UpdateList();
-  void LoadCodes();
-  void SaveCodes();
-  void SortAlphabetically();
-  void SortEnabledCodesFirst();
-  void SortDisabledCodesFirst();
-  void UpdateToggleButton();
-
-  void OnCodeAddClicked();
-  void OnCodeEditClicked();
-  void OnCodeRemoveClicked();
-  void OnCodeToggleAllClicked();
-
-  void OnListReordered();
-
-  bool IsEveryCodeEnabled();
+  void NewCode();
+  void EditSelected();
+  void RemoveSelected();
+  void ToggleAll();
 
   std::string m_game_id;
   u16 m_game_revision;
 
-  CheatWarningWidget* m_warning;
+  CheatWarningWidget* m_cheat_warning;
 #ifdef USE_RETRO_ACHIEVEMENTS
-  HardcoreWarningWidget* m_hc_warning;
+  HardcoreWarningWidget* m_hardcore_warning;
 #endif  // USE_RETRO_ACHIEVEMENTS
-  QListWidget* m_code_list;
-  QPushButton* m_code_add;
-  QPushButton* m_code_edit;
-  QPushButton* m_code_remove;
-  QPushButton* m_code_toggle_all;
+  QListWidget* m_list;
+  QPushButton* m_add_button;
+  QPushButton* m_edit_button;
+  QPushButton* m_remove_button;
+  QPushButton* m_toggle_all_button;
 
-  CheatCodeEditor* m_cheat_code_editor;
+  CheatCodeEditor* m_editor;
 
-  std::vector<ActionReplay::ARCode> m_ar_codes;
+  std::vector<ActionReplay::ARCode> m_codes;
   bool m_restart_required;
 };

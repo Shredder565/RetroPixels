@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/CheatCodeEditor.h"
 
@@ -14,262 +13,236 @@
 #include <QTextEdit>
 
 #include "Common/StringUtil.h"
-
 #include "Core/ARDecrypt.h"
 #include "Core/ActionReplay.h"
 #include "Core/GeckoCodeConfig.h"
-
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
+
+namespace
+{
+// A "$Name" line is only recognised as the very first line of the text.
+bool IsTitleLine(qsizetype index, const QString& line)
+{
+  return index == 0 && line[0] == u'$';
+}
+
+QStringList SplitLines(const QTextEdit* edit)
+{
+  return edit->toPlainText().split(QLatin1Char{'\n'});
+}
+}  // namespace
 
 CheatCodeEditor::CheatCodeEditor(QWidget* parent) : QDialog(parent)
 {
   setWindowTitle(tr("Cheat Code Editor"));
 
-  CreateWidgets();
-  ConnectWidgets();
+  m_name = new QLineEdit;
+  m_creator = new QLineEdit;
+  m_notes = new QTextEdit;
+  m_lines = new QTextEdit;
+  m_buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Save);
+  m_creator_caption = new QLabel(tr("Creator:"));
+  m_notes_caption = new QLabel(tr("Notes:"));
+
+  auto* const grid = new QGridLayout;
+  grid->addWidget(new QLabel(tr("Name:")), 0, 0);
+  grid->addWidget(m_name, 0, 1);
+  grid->addWidget(m_creator_caption, 1, 0);
+  grid->addWidget(m_creator, 1, 1);
+  grid->addWidget(m_notes_caption, 2, 0);
+  grid->addWidget(m_notes, 2, 1);
+  grid->addWidget(new QLabel(tr("Code:")), 3, 0);
+  grid->addWidget(m_lines, 3, 1);
+  grid->addWidget(m_buttons, 4, 1);
+
+  m_lines->setFont(QFont(QFontDatabase::systemFont(QFontDatabase::FixedFont).family()));
+  m_lines->setAcceptRichText(false);
+  m_notes->setAcceptRichText(false);
+
+  setLayout(grid);
+
+  connect(m_buttons, &QDialogButtonBox::accepted, this, &CheatCodeEditor::accept);
+  connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+}
+
+void CheatCodeEditor::SetGeckoFieldsVisible(bool visible)
+{
+  m_creator_caption->setHidden(!visible);
+  m_creator->setHidden(!visible);
+  m_notes_caption->setHidden(!visible);
+  m_notes->setHidden(!visible);
 }
 
 void CheatCodeEditor::SetARCode(ActionReplay::ARCode* code)
 {
-  m_name_edit->setText(QString::fromStdString(code->name));
+  m_name->setText(QString::fromStdString(code->name));
+  m_lines->clear();
+  for (ActionReplay::AREntry& entry : code->ops)
+    m_lines->append(QString::fromStdString(ActionReplay::SerializeLine(entry)));
 
-  m_code_edit->clear();
+  SetGeckoFieldsVisible(false);
 
-  for (ActionReplay::AREntry& e : code->ops)
-    m_code_edit->append(QString::fromStdString(ActionReplay::SerializeLine(e)));
-
-  m_creator_label->setHidden(true);
-  m_creator_edit->setHidden(true);
-  m_notes_label->setHidden(true);
-  m_notes_edit->setHidden(true);
-
-  m_ar_code = code;
-  m_gecko_code = nullptr;
+  m_ar_target = code;
+  m_gecko_target = nullptr;
 }
 
 void CheatCodeEditor::SetGeckoCode(Gecko::GeckoCode* code)
 {
-  m_name_edit->setText(QString::fromStdString(code->name));
-  m_creator_edit->setText(QString::fromStdString(code->creator));
+  m_name->setText(QString::fromStdString(code->name));
+  m_creator->setText(QString::fromStdString(code->creator));
+  m_lines->clear();
+  for (const Gecko::GeckoCode::Code& entry : code->codes)
+    m_lines->append(QString::fromStdString(entry.original_line));
 
-  m_code_edit->clear();
+  // Every note line keeps a trailing newline.
+  QString notes;
+  for (const std::string& note : code->notes)
+    notes += QStringLiteral("%1\n").arg(QString::fromStdString(note));
+  m_notes->setText(notes);
 
-  for (const auto& c : code->codes)
-    m_code_edit->append(QString::fromStdString(c.original_line));
+  SetGeckoFieldsVisible(true);
 
-  QString notes_string;
-  for (const auto& line : code->notes)
-    notes_string += QStringLiteral("%1\n").arg(QString::fromStdString(line));
-
-  m_notes_edit->setText(notes_string);
-
-  m_creator_label->setHidden(false);
-  m_creator_edit->setHidden(false);
-  m_notes_label->setHidden(false);
-  m_notes_edit->setHidden(false);
-
-  m_gecko_code = code;
-  m_ar_code = nullptr;
+  m_gecko_target = code;
+  m_ar_target = nullptr;
 }
 
-void CheatCodeEditor::CreateWidgets()
+bool CheatCodeEditor::StoreARCode()
 {
-  m_name_edit = new QLineEdit;
-  m_creator_edit = new QLineEdit;
-  m_notes_edit = new QTextEdit;
-  m_code_edit = new QTextEdit;
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Save);
+  QString name = m_name->text();
+  std::vector<ActionReplay::AREntry> plain;
+  std::vector<std::string> encrypted;
 
-  m_creator_label = new QLabel(tr("Creator:"));
-  m_notes_label = new QLabel(tr("Notes:"));
-
-  QGridLayout* grid_layout = new QGridLayout;
-
-  grid_layout->addWidget(new QLabel(tr("Name:")), 0, 0);
-  grid_layout->addWidget(m_name_edit, 0, 1);
-  grid_layout->addWidget(m_creator_label, 1, 0);
-  grid_layout->addWidget(m_creator_edit, 1, 1);
-  grid_layout->addWidget(m_notes_label, 2, 0);
-  grid_layout->addWidget(m_notes_edit, 2, 1);
-  grid_layout->addWidget(new QLabel(tr("Code:")), 3, 0);
-  grid_layout->addWidget(m_code_edit, 3, 1);
-  grid_layout->addWidget(m_button_box, 4, 1);
-
-  QFont monospace(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
-
-  m_code_edit->setFont(monospace);
-
-  m_code_edit->setAcceptRichText(false);
-  m_notes_edit->setAcceptRichText(false);
-
-  setLayout(grid_layout);
-}
-
-void CheatCodeEditor::ConnectWidgets()
-{
-  connect(m_button_box, &QDialogButtonBox::accepted, this, &CheatCodeEditor::accept);
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-}
-
-bool CheatCodeEditor::AcceptAR()
-{
-  QString name = m_name_edit->text();
-
-  std::vector<ActionReplay::AREntry> entries;
-  std::vector<std::string> encrypted_lines;
-
-  QStringList lines = m_code_edit->toPlainText().split(QLatin1Char{'\n'});
-
-  for (int i = 0; i < lines.size(); i++)
+  const QStringList lines = SplitLines(m_lines);
+  for (qsizetype index = 0; index < lines.size(); ++index)
   {
-    QString line = lines[i];
-
+    const QString& line = lines[index];
     if (line.isEmpty())
       continue;
-    if (i == 0 && line[0] == u'$')
+    if (IsTitleLine(index, line))
     {
+      // The title only fills an empty name.
       if (name.isEmpty())
         name = line.right(line.size() - 1);
-
       continue;
     }
 
-    const auto parse_result = ActionReplay::DeserializeLine(line.toStdString());
+    const auto parsed = ActionReplay::DeserializeLine(line.toStdString());
+    if (const auto* const entry = std::get_if<ActionReplay::AREntry>(&parsed))
+    {
+      plain.push_back(*entry);
+      continue;
+    }
+    if (const auto* const line_text = std::get_if<ActionReplay::EncryptedLine>(&parsed))
+    {
+      encrypted.emplace_back(*line_text);
+      continue;
+    }
 
-    if (std::holds_alternative<ActionReplay::AREntry>(parse_result))
-    {
-      entries.push_back(std::get<ActionReplay::AREntry>(parse_result));
-    }
-    else if (std::holds_alternative<ActionReplay::EncryptedLine>(parse_result))
-    {
-      encrypted_lines.emplace_back(std::get<ActionReplay::EncryptedLine>(parse_result));
-    }
-    else
-    {
-      auto result = ModalMessageBox::warning(
-          this, tr("Parsing Error"),
-          tr("Unable to parse line %1 of the entered AR code as a valid "
-             "encrypted or decrypted code. Make sure you typed it correctly.\n\n"
-             "Would you like to ignore this line and continue parsing?")
-              .arg(i + 1),
-          QMessageBox::Ok | QMessageBox::Abort);
-
-      if (result == QMessageBox::Abort)
-        return false;
-    }
+    const auto answer = ModalMessageBox::warning(
+        this, tr("Parsing Error"),
+        tr("Unable to parse line %1 of the entered AR code as a valid encrypted or "
+           "decrypted code. Make sure you typed it correctly.\n\nWould you like to "
+           "ignore this line and continue parsing?")
+            .arg(index + 1),
+        QMessageBox::Ok | QMessageBox::Abort);
+    if (answer == QMessageBox::Abort)
+      return false;
   }
 
-  if (!encrypted_lines.empty())
+  if (!encrypted.empty())
   {
-    if (!entries.empty())
+    if (!plain.empty())
     {
-      auto result = ModalMessageBox::warning(
+      // Yes keeps only the encrypted lines, No only the plain ones, and
+      // Cancel goes back to editing.
+      const auto answer = ModalMessageBox::warning(
           this, tr("Invalid Mixed Code"),
-          tr("This Action Replay code contains both encrypted and unencrypted lines; "
-             "you should check that you have entered it correctly.\n\n"
-             "Do you want to discard all unencrypted lines?"),
+          tr("This Action Replay code contains both encrypted and unencrypted lines; you "
+             "should check that you have entered it correctly.\n\nDo you want to discard all "
+             "unencrypted lines?"),
           QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-
-      // YES = Discard the unencrypted lines then decrypt the encrypted ones instead.
-      // NO = Discard the encrypted lines, keep the unencrypted ones
-      // CANCEL = Stop and let the user go back to editing
-      switch (result)
-      {
-      case QMessageBox::Yes:
-        entries.clear();
-        break;
-      case QMessageBox::No:
-        encrypted_lines.clear();
-        break;
-      case QMessageBox::Cancel:
+      if (answer == QMessageBox::Cancel)
         return false;
-      default:
-        break;
-      }
+      if (answer == QMessageBox::Yes)
+        plain.clear();
+      else if (answer == QMessageBox::No)
+        encrypted.clear();
     }
-    ActionReplay::DecryptARCode(encrypted_lines, &entries);
+    ActionReplay::DecryptARCode(encrypted, &plain);
   }
 
-  if (entries.empty())
+  if (plain.empty())
   {
     ModalMessageBox::critical(this, tr("Error"),
                               tr("The resulting decrypted AR code doesn't contain any lines."));
     return false;
   }
 
-  m_ar_code->name = name.toStdString();
-  m_ar_code->ops = std::move(entries);
-  m_ar_code->user_defined = true;
-
+  m_ar_target->name = name.toStdString();
+  m_ar_target->ops = std::move(plain);
+  m_ar_target->user_defined = true;
   return true;
 }
 
-bool CheatCodeEditor::AcceptGecko()
+bool CheatCodeEditor::StoreGeckoCode()
 {
-  QString name = m_name_edit->text();
+  QString name = m_name->text();
+  std::vector<Gecko::GeckoCode::Code> parsed_lines;
 
-  std::vector<Gecko::GeckoCode::Code> entries;
-
-  QStringList lines = m_code_edit->toPlainText().split(QLatin1Char{'\n'});
-
-  for (int i = 0; i < lines.size(); i++)
+  const QStringList lines = SplitLines(m_lines);
+  for (qsizetype index = 0; index < lines.size(); ++index)
   {
-    QString line = lines[i];
-
+    const QString& line = lines[index];
     if (line.isEmpty())
       continue;
-
-    if (i == 0 && line[0] == u'$')
+    if (IsTitleLine(index, line))
     {
       if (name.isEmpty())
         name = line.right(line.size() - 1);
-
       continue;
     }
 
-    if (std::optional<Gecko::GeckoCode::Code> c = Gecko::DeserializeLine(line.toStdString()))
+    if (const std::optional<Gecko::GeckoCode::Code> entry =
+            Gecko::DeserializeLine(line.toStdString()))
     {
-      entries.push_back(*c);
+      parsed_lines.push_back(*entry);
+      continue;
     }
-    else
-    {
-      auto result = ModalMessageBox::warning(
-          this, tr("Parsing Error"),
-          tr("Unable to parse line %1 of the entered Gecko code as a valid "
-             "code. Make sure you typed it correctly.\n\n"
-             "Would you like to ignore this line and continue parsing?")
-              .arg(i + 1),
-          QMessageBox::Ok | QMessageBox::Abort);
 
-      if (result == QMessageBox::Abort)
-        return false;
-    }
+    const auto answer = ModalMessageBox::warning(
+        this, tr("Parsing Error"),
+        tr("Unable to parse line %1 of the entered Gecko code as a valid code. Make sure "
+           "you typed it correctly.\n\nWould you like to ignore this line and continue "
+           "parsing?")
+            .arg(index + 1),
+        QMessageBox::Ok | QMessageBox::Abort);
+    if (answer == QMessageBox::Abort)
+      return false;
   }
 
-  if (entries.empty())
+  if (parsed_lines.empty())
   {
     ModalMessageBox::critical(this, tr("Error"), tr("This Gecko code doesn't contain any lines."));
     return false;
   }
 
-  m_gecko_code->name = name.trimmed().toStdString();
-  m_gecko_code->creator = m_creator_edit->text().trimmed().toStdString();
-  m_gecko_code->codes = std::move(entries);
-  m_gecko_code->notes = SplitString(m_notes_edit->toPlainText().toStdString(), '\n');
-  m_gecko_code->user_defined = true;
+  Gecko::GeckoCode& target = *m_gecko_target;
+  target.name = name.trimmed().toStdString();
+  target.creator = m_creator->text().trimmed().toStdString();
+  target.codes = std::move(parsed_lines);
+  target.notes = SplitString(m_notes->toPlainText().toStdString(), '\n');
+  target.user_defined = true;
 
+  // A trailing "[Creator]" in the name moves to the creator field, unless
+  // a creator was typed in.
+  static const std::regex name_with_creator{R"(^(.*)\[(.*)\]$)"};
+  std::smatch parts;
+  if (std::regex_match(target.name, parts, name_with_creator))
   {
-    // The creator name is not expected to be present in the cheat code name. It will be extracted
-    // and moved into its dedicated "creator" field.
-    std::smatch matches;
-    if (std::regex_match(m_gecko_code->name, matches, std::regex{R"(^(.*)\[(.*)\]$)"}))
-    {
-      m_gecko_code->name = StripWhitespace(matches[1].str());
-      if (m_gecko_code->creator.empty())
-      {
-        m_gecko_code->creator = StripWhitespace(matches[2].str());
-      }
-    }
+    std::string creator = parts[2].str();
+    target.name = StripWhitespace(parts[1].str());
+    if (target.creator.empty())
+      target.creator = StripWhitespace(creator);
   }
 
   return true;
@@ -277,8 +250,7 @@ bool CheatCodeEditor::AcceptGecko()
 
 void CheatCodeEditor::accept()
 {
-  bool success = m_gecko_code != nullptr ? AcceptGecko() : AcceptAR();
-
-  if (success)
+  const bool stored = m_gecko_target != nullptr ? StoreGeckoCode() : StoreARCode();
+  if (stored)
     QDialog::accept();
 }
