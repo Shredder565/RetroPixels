@@ -35,3 +35,6 @@
 .DS_Store
 Thumbs.db
 .claude/worktrees/
+
+# Supermodel build folder (supermodel/build.sh)
+/supermodel/build/
