@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,19 +10,20 @@
 #include "Common/Hash.h"
 #include "Common/Logging/Log.h"
 
+// Wire format of the "DSU" (cemuhook) protocol, in which a server (DS4Windows, BetterJoy and
+// others) streams controller state, including motion data, to clients over UDP. Every packet
+// starts with a 16-byte header followed by a 32-bit message type; all fields are little endian
+// and packed, which these structs assume of the host.
 namespace ciface::DualShockUDPClient::Proto
 {
-// CemuHook DualShockUDP protocol implementation using UdpServer.cs from
-// https://github.com/Ryochan7/DS4Windows as documentation.
-//
-// WARNING: Little endian host assumed
-
 constexpr u16 CEMUHOOK_PROTOCOL_VERSION = 1001;
 
+// A server reports up to four controller slots.
 constexpr int PORT_COUNT = 4;
 
-constexpr std::array<u8, 4> CLIENT{'D', 'S', 'U', 'C'};
-constexpr std::array<u8, 4> SERVER{'D', 'S', 'U', 'S'};
+using Magic = std::array<u8, 4>;
+constexpr Magic CLIENT{'D', 'S', 'U', 'C'};
+constexpr Magic SERVER{'D', 'S', 'U', 'S'};
 
 #pragma pack(push, 1)
 
@@ -61,6 +61,7 @@ enum class DsBattery : u8
   Charged = 0xEF
 };
 
+// How a pad data request selects the slots to stream.
 enum RegisterFlags : u8
 {
   AllPads = 0x00,
@@ -68,14 +69,18 @@ enum RegisterFlags : u8
   PadMACAdddress = 0x02
 };
 
-struct MessageHeader
+struct Header
 {
-  std::array<u8, 4> source;
+  Magic magic;
   u16 protocol_version;
-  u16 message_length;  // actually message size minus header size
+  // Packet size minus the header.
+  u16 payload_size;
+  // CRC-32 of the whole packet, computed with this field zero.
   u32 crc32;
-  u32 source_uid;
+  // Random id identifying the sender for the session.
+  u32 sender_id;
 };
+static_assert(sizeof(Header) == 16);
 
 struct Touch
 {
@@ -85,31 +90,42 @@ struct Touch
   s16 y;
 };
 
-namespace MessageType
+// Slot description shared by the port info and pad data replies.
+struct SlotInfo
 {
+  u8 pad_id;
+  DsState pad_state;
+  DsModel model;
+  DsConnection connection_type;
+  std::array<u8, 6> pad_mac_address;
+  DsBattery battery_status;
+};
+
+// Client: which protocol version does the server speak?
 struct VersionRequest
 {
-  static constexpr auto FROM = CLIENT;
-  static constexpr auto TYPE = 0x100000U;
-  MessageHeader header;
+  static constexpr Magic FROM = CLIENT;
+  static constexpr u32 TYPE = 0x100000;
+  Header header;
   u32 message_type;
 };
 
 struct VersionResponse
 {
-  static constexpr auto FROM = SERVER;
-  static constexpr auto TYPE = 0x100000U;
-  MessageHeader header;
+  static constexpr Magic FROM = SERVER;
+  static constexpr u32 TYPE = 0x100000;
+  Header header;
   u32 message_type;
   u16 max_protocol_version;
   std::array<u8, 2> padding;
 };
 
+// Client: describe these slots. The server answers with one PortInfo per connected slot.
 struct ListPorts
 {
-  static constexpr auto FROM = CLIENT;
-  static constexpr auto TYPE = 0x100001U;
-  MessageHeader header;
+  static constexpr Magic FROM = CLIENT;
+  static constexpr u32 TYPE = 0x100001;
+  Header header;
   u32 message_type;
   u32 pad_request_count;
   std::array<u8, 4> pad_ids;
@@ -117,24 +133,20 @@ struct ListPorts
 
 struct PortInfo
 {
-  static constexpr auto FROM = SERVER;
-  static constexpr auto TYPE = 0x100001U;
-  MessageHeader header;
+  static constexpr Magic FROM = SERVER;
+  static constexpr u32 TYPE = 0x100001;
+  Header header;
   u32 message_type;
-  u8 pad_id;
-  DsState pad_state;
-  DsModel model;
-  DsConnection connection_type;
-  std::array<u8, 6> pad_mac_address;
-  DsBattery battery_status;
+  SlotInfo slot;
   u8 padding;
 };
 
+// Client: stream this slot's state to me (for a few seconds; the request is repeated).
 struct PadDataRequest
 {
-  static constexpr auto FROM = CLIENT;
-  static constexpr auto TYPE = 0x100002U;
-  MessageHeader header;
+  static constexpr Magic FROM = CLIENT;
+  static constexpr u32 TYPE = 0x100002;
+  Header header;
   u32 message_type;
   RegisterFlags register_flags;
   u8 pad_id_to_register;
@@ -143,19 +155,16 @@ struct PadDataRequest
 
 struct PadDataResponse
 {
-  static constexpr auto FROM = SERVER;
-  static constexpr auto TYPE = 0x100002U;
-  MessageHeader header;
+  static constexpr Magic FROM = SERVER;
+  static constexpr u32 TYPE = 0x100002;
+  Header header;
   u32 message_type;
-  u8 pad_id;
-  DsState pad_state;
-  DsModel model;
-  DsConnection connection_type;
-  std::array<u8, 6> pad_mac_address;
-  DsBattery battery_status;
+  SlotInfo slot;
   u8 active;
   u32 hid_packet_counter;
+  // Share, L3, R3, Options in bits 0-3; the d-pad in bits 4-7.
   u8 button_states1;
+  // L2, R2, L1, R1, Triangle, Circle, Cross, Square.
   u8 button_states2;
   u8 button_ps;
   u8 button_touch;
@@ -185,90 +194,72 @@ struct PadDataResponse
   float gyro_yaw_deg_s;
   float gyro_roll_deg_s;
 };
+static_assert(sizeof(PadDataResponse) == 100);
 
-struct FromServer
+#pragma pack(pop)
+
+// A packet to send: header and type filled in for `sender_id`; call Seal() once the payload is
+// written.
+template <typename Msg>
+Msg NewMessage(u32 sender_id)
 {
-  union
-  {
-    struct
-    {
-      MessageHeader header;
-      u32 message_type;
-    };
-    MessageType::VersionResponse version_response;
-    MessageType::PortInfo port_info;
-    MessageType::PadDataResponse pad_data_response;
-  };
-};
+  Msg msg{};
+  msg.header.magic = Msg::FROM;
+  msg.header.protocol_version = CEMUHOOK_PROTOCOL_VERSION;
+  msg.header.payload_size = static_cast<u16>(sizeof(Msg) - sizeof(Header));
+  msg.header.sender_id = sender_id;
+  msg.message_type = Msg::TYPE;
+  return msg;
+}
 
-struct FromClient
+template <typename Msg>
+void Seal(Msg* msg)
 {
-  union
-  {
-    struct
-    {
-      MessageHeader header;
-      u32 message_type;
-    };
-    MessageType::VersionRequest version_request;
-    MessageType::ListPorts list_ports;
-    MessageType::PadDataRequest pad_data_request;
-  };
-};
-}  // namespace MessageType
+  msg->header.crc32 = 0;
+  msg->header.crc32 = Common::ComputeCRC32(reinterpret_cast<const u8*>(msg), sizeof(Msg));
+}
 
-template <typename MsgType>
-struct Message
+// Room for the largest packet a server sends. Received packets are decoded straight from it.
+struct ReceiveBuffer
 {
-  Message() = default;
-
-  explicit Message(u32 source_uid)
+  // Checks that the buffer holds a valid `Msg` and returns a copy of it. The checksum is taken
+  // over sizeof(Msg) bytes whatever the datagram's length was, and the header's checksum field
+  // is left zeroed afterwards.
+  template <typename Msg>
+  std::optional<Msg> Decode()
   {
-    m_message.header.source = MsgType::FROM;
-    m_message.header.protocol_version = CEMUHOOK_PROTOCOL_VERSION;
-    m_message.header.message_length = sizeof(*this) - sizeof(m_message.header);
-    m_message.header.source_uid = source_uid;
-    m_message.message_type = MsgType::TYPE;
-  }
+    Header header;
+    std::memcpy(&header, bytes.data(), sizeof(header));
 
-  void Finish()
-  {
-    m_message.header.crc32 =
-        Common::ComputeCRC32(reinterpret_cast<const u8*>(&m_message), sizeof(m_message));
-  }
+    const u32 claimed_crc = header.crc32;
+    header.crc32 = 0;
+    std::memcpy(bytes.data(), &header, sizeof(header));
 
-  template <class ToMsgType>
-  std::optional<ToMsgType> CheckAndCastTo()
-  {
-    const u32 crc32_in_header = m_message.header.crc32;
-    // zero out the crc32 in the packet once we got it since that's what's needed for calculation
-    m_message.header.crc32 = 0;
-    const u32 crc32_calculated =
-        Common::ComputeCRC32(reinterpret_cast<const u8*>(&m_message), sizeof(ToMsgType));
-    if (crc32_in_header != crc32_calculated)
+    const u32 actual_crc = Common::ComputeCRC32(bytes.data(), sizeof(Msg));
+    if (actual_crc != claimed_crc)
     {
       NOTICE_LOG_FMT(
           CONTROLLERINTERFACE,
           "DualShockUDPClient Received message with bad CRC in header: got {:08x}, expected {:08x}",
-          crc32_in_header, crc32_calculated);
+          claimed_crc, actual_crc);
       return std::nullopt;
     }
-    if (m_message.header.protocol_version > CEMUHOOK_PROTOCOL_VERSION)
-      return std::nullopt;
-    if (m_message.header.source != ToMsgType::FROM)
-      return std::nullopt;
-    if (m_message.message_type != ToMsgType::TYPE)
-      return std::nullopt;
-    if (m_message.header.message_length + sizeof(m_message.header) > sizeof(ToMsgType))
+
+    u32 message_type;
+    std::memcpy(&message_type, bytes.data() + sizeof(Header), sizeof(message_type));
+
+    const bool acceptable = header.protocol_version <= CEMUHOOK_PROTOCOL_VERSION &&
+                            header.magic == Msg::FROM && message_type == Msg::TYPE &&
+                            header.payload_size + sizeof(Header) <= sizeof(Msg);
+    if (!acceptable)
       return std::nullopt;
 
-    ToMsgType tomsg;
-    memcpy(&tomsg, &m_message, sizeof(tomsg));
-    return tomsg;
+    Msg msg;
+    std::memcpy(&msg, bytes.data(), sizeof(msg));
+    return msg;
   }
 
-  MsgType m_message{};
+  std::array<u8, sizeof(PadDataResponse)> bytes{};
 };
 
-#pragma pack(pop)
 }  // namespace ciface::DualShockUDPClient::Proto
