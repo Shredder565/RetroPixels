@@ -1,5 +1,4 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/SamplerCache.h"
 
@@ -13,108 +12,127 @@ namespace OGL
 {
 std::unique_ptr<SamplerCache> g_sampler_cache;
 
+namespace
+{
+// A sampler for the utility draws: the given filter both ways, clamped at the edges.
+void MakeFixedSampler(GLuint* sampler, GLint filter)
+{
+  glSamplerParameteri(*sampler, GL_TEXTURE_MIN_FILTER, filter);
+  glSamplerParameteri(*sampler, GL_TEXTURE_MAG_FILTER, filter);
+  glSamplerParameteri(*sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glSamplerParameteri(*sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+GLint WrapToGL(WrapMode mode)
+{
+  switch (mode)
+  {
+  case WrapMode::Repeat:
+    return GL_REPEAT;
+  case WrapMode::Mirror:
+    return GL_MIRRORED_REPEAT;
+  default:
+    return GL_CLAMP_TO_EDGE;
+  }
+}
+
+GLint MinFilterToGL(FilterMode min, FilterMode mip)
+{
+  const bool nearest = min == FilterMode::Near;
+  if (mip == FilterMode::Linear)
+    return nearest ? GL_NEAREST_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_LINEAR;
+  return nearest ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_NEAREST;
+}
+}  // namespace
+
 SamplerCache::SamplerCache()
 {
-  glGenSamplers(1, &m_point_sampler);
-  glGenSamplers(1, &m_linear_sampler);
-  glSamplerParameteri(m_point_sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glSamplerParameteri(m_point_sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glSamplerParameteri(m_point_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glSamplerParameteri(m_point_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glSamplerParameteri(m_linear_sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glSamplerParameteri(m_linear_sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glSamplerParameteri(m_linear_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glSamplerParameteri(m_linear_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  // Both names are generated before either is configured.
+  glGenSamplers(1, &m_nearest);
+  glGenSamplers(1, &m_linear);
+  MakeFixedSampler(&m_nearest, GL_NEAREST);
+  MakeFixedSampler(&m_linear, GL_LINEAR);
 }
 
 SamplerCache::~SamplerCache()
 {
   Clear();
-  glDeleteSamplers(1, &m_point_sampler);
-  glDeleteSamplers(1, &m_linear_sampler);
+  glDeleteSamplers(1, &m_nearest);
+  glDeleteSamplers(1, &m_linear);
 }
 
 void SamplerCache::BindNearestSampler(int stage)
 {
-  glBindSampler(stage, m_point_sampler);
+  glBindSampler(static_cast<GLuint>(stage), m_nearest);
 }
 
 void SamplerCache::BindLinearSampler(int stage)
 {
-  glBindSampler(stage, m_linear_sampler);
+  glBindSampler(static_cast<GLuint>(stage), m_linear);
 }
 
 void SamplerCache::SetSamplerState(u32 stage, const SamplerState& state)
 {
-  if (m_active_samplers[stage].first == state && m_active_samplers[stage].second != 0)
+  auto& bound = m_bound[stage];
+  if (bound.second != 0 && bound.first == state)
     return;
 
-  auto it = m_cache.find(state);
-  if (it == m_cache.end())
+  GLuint sampler = 0;
+  if (const auto found = m_samplers.find(state); found != m_samplers.end())
   {
-    GLuint sampler;
+    sampler = found->second;
+  }
+  else
+  {
     glGenSamplers(1, &sampler);
     SetParameters(sampler, state);
-    it = m_cache.emplace(state, sampler).first;
+    m_samplers.emplace(state, sampler);
   }
 
-  m_active_samplers[stage].first = state;
-  m_active_samplers[stage].second = it->second;
-  glBindSampler(stage, it->second);
+  bound = {state, sampler};
+  glBindSampler(stage, sampler);
 }
 
 void SamplerCache::InvalidateBinding(u32 stage)
 {
-  m_active_samplers[stage].second = 0;
+  m_bound[stage].second = 0;
 }
 
 void SamplerCache::SetParameters(GLuint sampler_id, const SamplerState& params)
 {
-  GLenum min_filter;
-  GLenum mag_filter = (params.tm0.mag_filter == FilterMode::Near) ? GL_NEAREST : GL_LINEAR;
-  if (params.tm0.mipmap_filter == FilterMode::Linear)
-  {
-    min_filter = (params.tm0.min_filter == FilterMode::Near) ? GL_NEAREST_MIPMAP_LINEAR :
-                                                               GL_LINEAR_MIPMAP_LINEAR;
-  }
-  else
-  {
-    min_filter = (params.tm0.min_filter == FilterMode::Near) ? GL_NEAREST_MIPMAP_NEAREST :
-                                                               GL_LINEAR_MIPMAP_NEAREST;
-  }
+  const auto& tm0 = params.tm0;
+  const auto& tm1 = params.tm1;
 
-  glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER, min_filter);
-  glSamplerParameteri(sampler_id, GL_TEXTURE_MAG_FILTER, mag_filter);
+  glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER,
+                      MinFilterToGL(tm0.min_filter, tm0.mipmap_filter));
+  glSamplerParameteri(sampler_id, GL_TEXTURE_MAG_FILTER,
+                      tm0.mag_filter == FilterMode::Near ? GL_NEAREST : GL_LINEAR);
+  glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_S, WrapToGL(tm0.wrap_u));
+  glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T, WrapToGL(tm0.wrap_v));
 
-  static constexpr std::array<GLenum, 3> address_modes = {
-      {GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT}};
-
-  glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_S,
-                      address_modes[static_cast<u32>(params.tm0.wrap_u.Value())]);
-  glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T,
-                      address_modes[static_cast<u32>(params.tm0.wrap_v.Value())]);
-
-  glSamplerParameterf(sampler_id, GL_TEXTURE_MIN_LOD, params.tm1.min_lod / 16.f);
-  glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_LOD, params.tm1.max_lod / 16.f);
-
+  // LODs are stored in 1/16 steps and the bias in 1/256 steps.
+  glSamplerParameterf(sampler_id, GL_TEXTURE_MIN_LOD, static_cast<float>(tm1.min_lod) / 16.0f);
+  glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_LOD, static_cast<float>(tm1.max_lod) / 16.0f);
   if (g_backend_info.bSupportsLodBiasInSampler)
   {
-    glSamplerParameterf(sampler_id, GL_TEXTURE_LOD_BIAS, params.tm0.lod_bias / 256.f);
+    glSamplerParameterf(sampler_id, GL_TEXTURE_LOD_BIAS, static_cast<float>(tm0.lod_bias) / 256.0f);
   }
 
-  if (params.tm0.anisotropic_filtering != 0 && g_ogl_config.bSupportsAniso)
+  // The anisotropy field holds log2 of the level.
+  const u32 aniso_log2 = tm0.anisotropic_filtering;
+  if (aniso_log2 != 0 && g_ogl_config.bSupportsAniso)
   {
     glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_ANISOTROPY_EXT,
-                        static_cast<float>(1 << params.tm0.anisotropic_filtering));
+                        static_cast<float>(1u << aniso_log2));
   }
 }
 
 void SamplerCache::Clear()
 {
-  for (auto& p : m_cache)
-    glDeleteSamplers(1, &p.second);
-  for (auto& p : m_active_samplers)
-    p.second = 0;
-  m_cache.clear();
+  for (auto& [state, sampler] : m_samplers)
+    glDeleteSamplers(1, &sampler);
+  for (auto& bound : m_bound)
+    bound.second = 0;
+  m_samplers.clear();
 }
 }  // namespace OGL

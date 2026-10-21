@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@
 
 namespace OGL
 {
+// The bounding box lives in a small shader storage buffer at binding 0 that pixel shaders
+// update with atomics.
 class OGLBoundingBox final : public BoundingBox
 {
 public:
@@ -22,7 +23,7 @@ protected:
   void Write(u32 index, std::span<const BBoxType> values) override;
 
 private:
-  GLuint m_buffer_id = 0;
+  GLuint m_ssbo = 0;
 };
 
 }  // namespace OGL

@@ -1,5 +1,4 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,13 +11,18 @@
 
 namespace OGL
 {
+// Picks the occlusion query flavour the context supports.
 std::unique_ptr<PerfQueryBase> GetPerfQuery(bool is_gles);
 
+// Counts the pixels that pass the depth test with occlusion queries. Queries go into a ring
+// and are read back in order; results are scaled to the native EFB size. The subclasses supply
+// the GL calls for one kind of query object.
 class PerfQuery : public PerfQueryBase
 {
 public:
   PerfQuery();
-  ~PerfQuery() override {}
+  ~PerfQuery() override = default;
+
   void EnableQuery(PerfQueryGroup group) override;
   void DisableQuery(PerfQueryGroup group) override;
   void ResetQuery() override;
@@ -27,57 +31,63 @@ public:
   bool IsFlushed() const override;
 
 protected:
-  struct ActiveQuery
+  struct PendingQuery
   {
-    GLuint query_id;
-    PerfQueryGroup query_group;
+    GLuint id = 0;
+    PerfQueryGroup group{};
   };
 
-  // when testing in SMS: 64 was too small, 128 was ok
-  static const u32 PERF_QUERY_BUFFER_SIZE = 512;
+  // 64 was measured as too few in Super Mario Sunshine, 128 as enough.
+  static constexpr u32 PERF_QUERY_BUFFER_SIZE = 512;
 
-  // This contains gl query objects with unretrieved results.
-  std::array<ActiveQuery, PERF_QUERY_BUFFER_SIZE> m_query_buffer;
-  u32 m_query_read_pos;
+  virtual void BeginGLQuery(GLuint id) = 0;
+  virtual void EndGLQuery() = 0;
+  virtual bool IsGLResultReady(GLuint id) = 0;
+  // The sample count, already referenced to the native EFB resolution.
+  virtual u32 ReadGLResult(GLuint id) = 0;
+
+  // Query objects whose results have not been collected yet, starting at m_read_pos.
+  std::array<PendingQuery, PERF_QUERY_BUFFER_SIZE> m_ring{};
+  u32 m_read_pos = 0;
 
 private:
-  // Implementation
-  std::unique_ptr<PerfQuery> m_query;
+  static bool CountsPixels(PerfQueryGroup group);
+
+  // Collects results that are already available, stopping at the first that is not.
+  void CollectReady();
+  // Waits for and collects the oldest result. The ring must not be empty.
+  void CollectOldest();
 };
 
-// Implementations
+// Core GL / GLES occlusion queries of the given target.
 class PerfQueryGL : public PerfQuery
 {
 public:
-  PerfQueryGL(GLenum query_type);
+  explicit PerfQueryGL(GLenum query_type);
   ~PerfQueryGL() override;
 
-  void EnableQuery(PerfQueryGroup group) override;
-  void DisableQuery(PerfQueryGroup group) override;
-  void FlushResults() override;
+protected:
+  void BeginGLQuery(GLuint id) override;
+  void EndGLQuery() override;
+  bool IsGLResultReady(GLuint id) override;
+  u32 ReadGLResult(GLuint id) override;
 
 private:
-  void WeakFlush();
-  // Only use when non-empty
-  void FlushOne();
-
-  GLenum m_query_type;
+  GLenum m_target;
 };
 
+// GLES with NV_occlusion_query_samples, which reports sample counts unlike ANY_SAMPLES_PASSED.
 class PerfQueryGLESNV : public PerfQuery
 {
 public:
   PerfQueryGLESNV();
   ~PerfQueryGLESNV() override;
 
-  void EnableQuery(PerfQueryGroup group) override;
-  void DisableQuery(PerfQueryGroup group) override;
-  void FlushResults() override;
-
-private:
-  void WeakFlush();
-  // Only use when non-empty
-  void FlushOne();
+protected:
+  void BeginGLQuery(GLuint id) override;
+  void EndGLQuery() override;
+  bool IsGLResultReady(GLuint id) override;
+  u32 ReadGLResult(GLuint id) override;
 };
 
 }  // namespace OGL
