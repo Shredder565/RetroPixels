@@ -15,4 +15,4 @@ freed with delete instead of delete[]).
 
 So this is the one place where PixelU-Wii still carries a third-party library
 as it was modified inside the Dolphin project; the licence (GPL-2.0-or-later)
-is the authors' own, and PixelU-Wii as a whole is GPL-2.0-or-later.
+is the authors' own, and PixelU-Wii's source is GPL-2.0-or-later.

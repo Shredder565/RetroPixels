@@ -1,0 +1,150 @@
+- B4 log (third-party code from its own projects): the build no longer
+  fetches anything from Dolphin's repository except the data PixelU-Wii
+  keeps (Data/Sys/GameSettings, ApprovedInis.json and the other files in
+  B2's third-party Sys list, Languages/po). Work started from HEAD 1148c9a
+  on `claude/wiiu-emulator-urpcen` and was rebased onto 2b1f3d9 (B2
+  merged), keeping B2's check_sys_package.py step and PixelUAssembleSys
+  wiring. No C++ source, Sys data, icon or rc file was touched.
+  - One fetch method for everything (new, original code):
+    - `pixelu/wii/Externals/sources.json` lists 42 sources. A git source is
+      pinned by its full 40-character commit, an archive by its SHA-256
+      (with mirrors). Optional fields: `paths` (sparse checkout), `patches`,
+      `group` (fetched only on request), `write` (small files to add).
+    - `pixelu/wii/Externals/fetch.py` fetches them into
+      `pixelu/wii/third_party` (gitignored). Git: init, fetch --depth 1 of
+      the pinned commit (blobless and sparse when `paths` is set), checkout,
+      HEAD checked against the pin, .git removed. Archives: downloaded,
+      SHA-256 checked, extracted with path checks. Then the patches are
+      applied (own diff applier, exact context, the file's line endings
+      kept), and a `.pixelu-source` stamp is written. `--check` tells
+      whether third_party matches the manifest; CMake runs it at configure
+      and warns when something is missing or out of date. `--list`,
+      `--only`, `--group`, `--jobs`, `--keep-git` are there for CI and
+      local use.
+    - third_party keeps the sub-layout of Dolphin's Externals
+      (`<Name>/<checkout>`), so most of B3's glue paths are unchanged.
+      `PIXELU_WII_THIRD_PARTY` now defaults to `pixelu/wii/third_party`.
+  - Libraries at the same commit as Dolphin 2609a's submodules, unchanged:
+    bzip2, cpp-ipc, cpp-optparse, cubeb, curl, enet, fmt, glslang, hidapi,
+    imgui, implot, libspng, libusb, lz4, mGBA, miniupnpc, minizip-ng,
+    pugixml, rcheevos, SDL, SFML, SPIRV-Cross, tinygltf, Vulkan-Headers,
+    VulkanMemoryAllocator, watcher, WIL, xxHash, zlib-ng, zstd. Nested
+    submodules (picojson's gtest, cubeb's sanitizers) are not needed and
+    not fetched.
+  - Libraries Dolphin had copied into its tree, now from their upstream at
+    the version Dolphin's copy was taken from (each compared file by file
+    with Dolphin's copy):
+    - LZO 2.10 (oberhumer.com tarball, Ubuntu orig tarball as mirror,
+      SHA-256 c0f89294...a072): miniLZO, identical. Dolphin had renamed
+      the header path; `Externals/LZO/include/lzo/lzo1x.h` (own shim)
+      includes minilzo.h.
+    - ed25519 (orlp/ed25519@7fa6712e): identical.
+    - discord-rpc (discord/discord-rpc@963aa9f3) and RapidJSON
+      (Tencent/rapidjson@dfbe1db9, include only): identical.
+    - OpenAL Soft 1.16.0 headers (kcat/openal-soft@b907c21f, include
+      only): identical.
+    - mbedTLS 2.28.0 (Mbed-TLS/mbedtls@8b3f26a5): identical apart from the
+      CMake files, which B3's glue does not use.
+    - picojson (kazuho/picojson@a944d59e): Dolphin changed two throws to
+      abort; with exceptions off both end the program, so no patch.
+    - XZ Utils 5.2.4 (tukaani-project/xz@b5be61cc, src/liblzma and
+      src/common): identical apart from a windows.h include Dolphin put in
+      tuklib_integer.h. `Externals/liblzma/config.h` now includes
+      windows.h and intrin.h under MSVC instead. The glue leaves out the
+      upstream files Dolphin had deleted (crc*_small.c, the BCJ filters).
+    - Bochs disassembler (bochs-emu/Bochs@94864fb9, bochs/disasm only):
+      identical apart from `$Id$` lines and one fix, re-applied as
+      `patches/bochs-disasm-adc-imm32.patch` (ADC r/m64, imm32 is decoded
+      with a sign-extended 32-bit immediate). `Externals/Bochs_disasm/
+      include/config.h` (own) gives the types Bochs' configure would write;
+      Dolphin's stdafx.cc is not built.
+    - FatFs R0.14b (elm-chan.org ff14b.zip): two patches,
+      `patches/fatfs-utf8-putc.patch` (ChaN's published fix to the UTF-8
+      check in f_putc) and `patches/fatfs-ffconf.patch` (the four options
+      the build needs: mkfs, long file names on the heap, UTF-8 names,
+      relative paths). Dolphin had renamed TCHAR to FATFS_TCHAR inside
+      ff.h; `Externals/FatFs/include/ff.h` (own wrapper) does the same from
+      outside so it does not clash with Windows' TCHAR.
+    - `patches/README.txt` explains each patch.
+  - Kept as third-party copies in `pixelu/wii/Externals` (no upstream can
+    give the code the build uses; each has a README.txt):
+    - expr (`expr/include/expr.h`, MIT, LICENSE): the extended dialect the
+      breakpoint conditions use was written inside the Dolphin project;
+      upstream zserge/expr has none of it.
+    - FreeSurround (`FreeSurround/include`, `source`, GPL-2.0-or-later):
+      Kothe's decoder only shipped inside a foobar2000 plugin; the build
+      uses the cut-down port made for Dolphin in 2017 (with a 2023
+      delete[] fix). Copied unchanged.
+  - Qt: the Qt Company's official 6.8.3 MSVC 2022 x64 build (qtbase and
+    qtsvg), installed by aqtinstall 3.3.0 into
+    `third_party/Qt/6.8.3/msvc2022_64` (`PIXELU_WII_QT_DIR`, also the
+    default `QT_HOST_PATH`). windeployqt gets
+    `--exclude-plugins qgif,qico,qjpeg,qtuiotouchplugin` so the deployed
+    plugins are the four Dolphin's Qt had: qwindows, qmodernwindowsstyle,
+    qsvg, qsvgicon.
+  - FFmpeg: Dolphin's ext-win-ffmpeg was static .lib files (no DLLs) of
+    FFmpeg N-106414-g28d011516b. They are now built here from FFmpeg's own
+    repository at that commit (group "ffmpeg" in sources.json) by
+    `Externals/FFmpeg/build-ffmpeg.sh`, with MSVC and the same configure
+    choices (GPL v3, static, no programs, only the AVI muxer, FFV1/MPEG-4/
+    Ut Video encoders and the file protocol; w32threads), into
+    `third_party/FFmpeg/x64` (`PIXELU_WII_FFMPEG_DIR`). sources.json
+    writes FFmpeg's VERSION file so the version string stays
+    N-106414-g28d011516b. CI caches the result.
+  - msgfmt: GNU gettext from MSYS2 (mingw-w64-x86_64-gettext-tools),
+    passed as GETTEXT_MSGFMT_EXECUTABLE. The Externals/gettext fallback in
+    DolphinQt's CMake is gone.
+  - Dolphin's repository: CI makes a sparse, blobless, depth-1 checkout at
+    the commit the pixelu/wii/dolphin submodule pins. The paths are read
+    from the `from_third_party` list in PixelUAssembleSys.cmake, plus
+    /Languages/po/. The step fails if a path brought nothing, or if Source,
+    Externals, Data/Sys/Themes or Data/Sys/Shaders were checked out.
+  - Package: same artifact names, layout and PixelU-Wii.exe. The licence
+    files in Licenses/Externals/<project>/ now come from third_party (FFmpeg's
+    from its install folder) and from Externals/expr and FreeSurround.
+    COPYING says where each library comes from; FFmpeg is listed as
+    GPL-3.0-or-later as configured.
+  - Files: new `Externals/fetch.py`, `sources.json`, `patches/*`,
+    `FFmpeg/build-ffmpeg.sh`, `FatFs/include/ff.h`, `LZO/include/lzo/
+    lzo1x.h`, `Bochs_disasm/include/config.h`, `expr/*` and
+    `FreeSurround/*` copies with README.txt, `Externals/.gitignore`.
+    Changed: the glue of Bochs_disasm, FatFs, LZO, liblzma, ed25519,
+    discord-rpc, expr, FreeSurround; `CMakeLists.txt`,
+    `CMake/PixelUWindowsToolchain.cmake`, `Source/Core/DolphinQt/
+    CMakeLists.txt` (build file only), `.gitignore`, `COPYING`, the
+    workflow. Nothing removed.
+  - Checked here (Linux):
+    - All git sources fetched by fetch.py at their pins; each copied
+      library compared with Dolphin's copy as above.
+    - FatFs wrapper compiled with g++ -Werror, with a Windows-style
+      TCHAR/_T defined before and after; miniLZO round trip through the
+      shim; Bochs decodes `48 81 D0 imm32` as 7 bytes with the patch.
+    - Windows configure (clang-cl, Ninja, the toolchain, stub Qt/FFmpeg)
+      generates. Compared with the old tree's compile_commands, the only
+      differences are the expected ones (stdafx.cc gone, FatFs define and
+      include, Bochs config.h, LZO includes).
+    - FFmpeg built on the host from the pinned commit with the script:
+      all 124 installed headers are byte-identical to ext-win-ffmpeg's.
+  - Only CI can confirm (Qt's server, elm-chan.org, MSYS2 and GitHub are
+    blocked here):
+    - FatFs ff14b.zip's SHA-256: sources.json has a placeholder of zeros;
+      the first run fails and prints the real hash to put in.
+    - FatFs zip layout (source/ at the top, no strip).
+    - aqtinstall with `--archives qtbase qtsvg` gives windeployqt, qtpaths,
+      Qt6Svg and the four plugins (the Check Qt step), and windeployqt
+      accepts --exclude-plugins and deploys the same DLLs and plugins as
+      before.
+    - MSYS2 package names (make, diffutils, nasm, gettext-tools) and the
+      msgfmt path.
+    - FFmpeg's MSVC build under VS 2026 through ilammy/msvc-dev-cmd (cl and
+      link ahead of MSYS2's link in PATH), and that it detects the same
+      Windows parts as Dolphin's (bcrypt, d3d11va, dxva2); the link of
+      PixelU-Wii.exe against it.
+    - ff.h wrapper and liblzma's config.h with windows.h under MSVC and the
+      PCH.
+    - The sparse Dolphin checkout (patterns, sizes) and the licence loop
+      over third_party.
+  - Left from Dolphin: the kept data above (sparse checkout); the expr and
+    FreeSurround copies (third-party code with Dolphin-project changes, no
+    upstream); FFmpeg's configure choices mirror Dolphin's build so the
+    libraries match.
