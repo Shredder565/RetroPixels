@@ -1,5 +1,4 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 #include "Common/CommonTypes.h"
 
+// The GL API: tokens, function pointer types and the gl* names (each a macro for a dol*
+// function pointer, filled in by GLExtensions::Init).
 #include "Common/GL/GLExtensions/AMD_pinned_memory.h"
 #include "Common/GL/GLExtensions/ARB_ES2_compatibility.h"
 #include "Common/GL/GLExtensions/ARB_ES3_compatibility.h"
@@ -60,13 +61,14 @@ class GLContext;
 
 namespace GLExtensions
 {
-// Initializes the interface
+// Loads every entry point the context offers for its version and extensions. False when a
+// required function is missing.
 bool Init(GLContext* context);
 
-// Function for checking if the hardware supports an extension
-// example: if (GLExtensions::Supports("GL_ARB_multi_map"))
+// Whether a feature is available: an extension name such as "GL_ARB_buffer_storage", or one
+// of the pseudo names "VERSION_GL", "VERSION_4_3", "VERSION_GLES_3" and so on.
 bool Supports(const std::string& name);
 
-// Returns OpenGL version in format 430
+// The context version as major * 100 + minor * 10 (4.3 is 430).
 u32 Version();
 }  // namespace GLExtensions

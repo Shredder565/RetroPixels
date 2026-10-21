@@ -1,12 +1,17 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <windows.h>
+
+#include <memory>
 #include <string>
+
 #include "Common/GL/GLContext.h"
 
+// OpenGL through WGL (opengl32.dll). The main context draws to the render window's device
+// context; shared contexts for worker threads draw to a 1x1 pbuffer, since WGL has no
+// surfaceless contexts.
 class GLContextWGL final : public GLContext
 {
 public:
@@ -29,12 +34,15 @@ public:
 protected:
   bool Initialize(const WindowSystemInfo& wsi, bool stereo, bool core) override;
 
-  static HGLRC CreateCoreContext(HDC dc, HGLRC share_context);
-  static bool CreatePBuffer(HDC onscreen_dc, int width, int height, HANDLE* pbuffer_handle,
-                            HDC* pbuffer_dc);
+private:
+  // Tries the core-profile versions newest first; nullptr when none could be made.
+  static HGLRC TryCoreProfiles(HDC dc, HGLRC share_with);
 
-  HWND m_window_handle = nullptr;
-  HANDLE m_pbuffer_handle = nullptr;
-  HDC m_dc = nullptr;
-  HGLRC m_rc = nullptr;
+  bool ReadClientSize();
+  void ReleaseDrawable();
+
+  HWND m_hwnd = nullptr;
+  HANDLE m_pbuffer = nullptr;
+  HDC m_hdc = nullptr;
+  HGLRC m_hglrc = nullptr;
 };

@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/GL/GLUtil.h"
 
@@ -8,110 +7,108 @@
 
 namespace GLUtil
 {
+namespace
+{
+#if defined(_DEBUG) || defined(DEBUGFAST)
+#define GLUTIL_CHECK_BUILD_LOGS 1
+constexpr GLsizei BUILD_LOG_CAPACITY = 1024;
+#endif
+
+// Feeds one source string to a shader object and compiles it. In debug builds the compile log
+// is reported; the return value is false only when the debug check saw a failed compile.
+bool CompileStage(GLuint shader, const std::string& text, const char* stage_name)
+{
+  const GLchar* text_ptr = text.c_str();
+  glShaderSource(shader, 1, &text_ptr, nullptr);
+  glCompileShader(shader);
+
+#ifndef GLUTIL_CHECK_BUILD_LOGS
+  (void)stage_name;
+  return true;
+#else
+  GLint compiled = GL_FALSE;
+  GLsizei log_length = 0;
+  char log[BUILD_LOG_CAPACITY];
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+  glGetShaderInfoLog(shader, BUILD_LOG_CAPACITY, &log_length, log);
+
+  if (!compiled)
+    ERROR_LOG_FMT(VIDEO, "GLSL {} shader error:\n{}{}", stage_name, log, text);
+  else if (log_length != 0)
+    ERROR_LOG_FMT(VIDEO, "GLSL {} shader warnings:\n{}{}", stage_name, log, text);
+  else
+    INFO_LOG_FMT(VIDEO, "GLSL {} shader compiled:\n{}", stage_name, text);
+
+  return compiled != GL_FALSE;
+#endif
+}
+
+// Debug-build report of the link log. A link error is only reported when both stages compiled,
+// since a stage error already explains it.
+void ReportLink(GLuint program, bool stages_ok, const std::string& vertex_text,
+                const std::string& fragment_text)
+{
+#ifndef GLUTIL_CHECK_BUILD_LOGS
+  (void)program;
+  (void)stages_ok;
+  (void)vertex_text;
+  (void)fragment_text;
+#else
+  GLint linked = GL_FALSE;
+  GLsizei log_length = 0;
+  char log[BUILD_LOG_CAPACITY];
+  glGetProgramiv(program, GL_LINK_STATUS, &linked);
+  glGetProgramInfoLog(program, BUILD_LOG_CAPACITY, &log_length, log);
+
+  if (linked && log_length != 0)
+    ERROR_LOG_FMT(VIDEO, "GLSL linker warnings:\n{}{}{}", log, vertex_text, fragment_text);
+  else if (!linked && stages_ok)
+    ERROR_LOG_FMT(VIDEO, "GLSL linker error:\n{}{}{}", log, vertex_text, fragment_text);
+#endif
+}
+}  // namespace
+
 GLuint CompileProgram(const std::string& vertexShader, const std::string& fragmentShader)
 {
-  // generate objects
-  GLuint vertexShaderID = glCreateShader(GL_VERTEX_SHADER);
-  GLuint fragmentShaderID = glCreateShader(GL_FRAGMENT_SHADER);
-  GLuint programID = glCreateProgram();
+  // All three objects are created before anything is compiled.
+  const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+  const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+  const GLuint program = glCreateProgram();
 
-  // compile vertex shader
-  const char* shader = vertexShader.c_str();
-  glShaderSource(vertexShaderID, 1, &shader, nullptr);
-  glCompileShader(vertexShaderID);
-#if defined(_DEBUG) || defined(DEBUGFAST)
-  GLint Result = GL_FALSE;
-  char stringBuffer[1024];
-  GLsizei stringBufferUsage = 0;
-  glGetShaderiv(vertexShaderID, GL_COMPILE_STATUS, &Result);
-  glGetShaderInfoLog(vertexShaderID, 1024, &stringBufferUsage, stringBuffer);
+  const bool vs_ok = CompileStage(vs, vertexShader, "vertex");
+  const bool fs_ok = CompileStage(fs, fragmentShader, "fragment");
 
-  if (Result && stringBufferUsage)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL vertex shader warnings:\n{}{}", stringBuffer, vertexShader);
-  }
-  else if (!Result)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL vertex shader error:\n{}{}", stringBuffer, vertexShader);
-  }
-  else
-  {
-    INFO_LOG_FMT(VIDEO, "GLSL vertex shader compiled:\n{}", vertexShader);
-  }
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  ReportLink(program, vs_ok && fs_ok, vertexShader, fragmentShader);
 
-  bool shader_errors = !Result;
-#endif
-
-  // compile fragment shader
-  shader = fragmentShader.c_str();
-  glShaderSource(fragmentShaderID, 1, &shader, nullptr);
-  glCompileShader(fragmentShaderID);
-#if defined(_DEBUG) || defined(DEBUGFAST)
-  glGetShaderiv(fragmentShaderID, GL_COMPILE_STATUS, &Result);
-  glGetShaderInfoLog(fragmentShaderID, 1024, &stringBufferUsage, stringBuffer);
-
-  if (Result && stringBufferUsage)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL fragment shader warnings:\n{}{}", stringBuffer, fragmentShader);
-  }
-  else if (!Result)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL fragment shader error:\n{}{}", stringBuffer, fragmentShader);
-  }
-  else
-  {
-    INFO_LOG_FMT(VIDEO, "GLSL fragment shader compiled:\n{}", fragmentShader);
-  }
-
-  shader_errors |= !Result;
-#endif
-
-  // link them
-  glAttachShader(programID, vertexShaderID);
-  glAttachShader(programID, fragmentShaderID);
-  glLinkProgram(programID);
-#if defined(_DEBUG) || defined(DEBUGFAST)
-  glGetProgramiv(programID, GL_LINK_STATUS, &Result);
-  glGetProgramInfoLog(programID, 1024, &stringBufferUsage, stringBuffer);
-
-  if (Result && stringBufferUsage)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL linker warnings:\n{}{}{}", stringBuffer, vertexShader,
-                  fragmentShader);
-  }
-  else if (!Result && !shader_errors)
-  {
-    ERROR_LOG_FMT(VIDEO, "GLSL linker error:\n{}{}{}", stringBuffer, vertexShader, fragmentShader);
-  }
-#endif
-
-  // cleanup
-  glDeleteShader(vertexShaderID);
-  glDeleteShader(fragmentShaderID);
-
-  return programID;
+  // The linked program keeps what it needs; the shader objects can go.
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
 }
 
 void EnablePrimitiveRestart(const GLContext* context)
 {
-  constexpr GLuint PRIMITIVE_RESTART_INDEX = 65535;
+  constexpr GLuint RESTART_INDEX = 0xFFFF;
 
   if (context->IsGLES())
   {
+    // ES 3.0 only has the fixed-index form, which for 16-bit indices is 0xFFFF.
     glEnable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+    return;
   }
-  else
+
+  if (GLExtensions::Version() < 310)
   {
-    if (GLExtensions::Version() >= 310)
-    {
-      glEnable(GL_PRIMITIVE_RESTART);
-      glPrimitiveRestartIndex(PRIMITIVE_RESTART_INDEX);
-    }
-    else
-    {
-      glEnableClientState(GL_PRIMITIVE_RESTART_NV);
-      glPrimitiveRestartIndexNV(PRIMITIVE_RESTART_INDEX);
-    }
+    // Before GL 3.1 the feature comes from NV_primitive_restart, as client state.
+    glEnableClientState(GL_PRIMITIVE_RESTART_NV);
+    glPrimitiveRestartIndexNV(RESTART_INDEX);
+    return;
   }
+
+  glEnable(GL_PRIMITIVE_RESTART);
+  glPrimitiveRestartIndex(RESTART_INDEX);
 }
 }  // namespace GLUtil
