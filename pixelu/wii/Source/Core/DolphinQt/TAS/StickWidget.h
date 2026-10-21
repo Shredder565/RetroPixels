@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 #include "Common/CommonTypes.h"
 
+// A round pad showing an analog stick position. Left click/drag places the stick; right click
+// puts it back in the middle.
 class StickWidget : public QWidget
 {
   Q_OBJECT
@@ -30,9 +31,10 @@ protected:
   void handleMouseEvent(QMouseEvent* event);
 
 private:
-  u16 m_max_x;
-  u16 m_max_y;
-  u16 m_x = 0;
-  u16 m_y = 0;
-  bool m_ignore_movement = false;
+  const u16 m_range_x;
+  const u16 m_range_y;
+  u16 m_pos_x = 0;
+  u16 m_pos_y = 0;
+  // Set by a right click so that dragging afterwards does not move the re-centred stick.
+  bool m_drag_locked = false;
 };

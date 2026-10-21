@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/TAS/TASCheckBox.h"
 
@@ -10,56 +9,64 @@
 #include "DolphinQt/QtUtils/QueueOnObject.h"
 #include "DolphinQt/TAS/TASInputWindow.h"
 
+namespace
+{
+u64 MovieFrame()
+{
+  return Core::System::GetInstance().GetMovie().GetCurrentFrame();
+}
+}  // namespace
+
 TASCheckBox::TASCheckBox(const QString& text, TASInputWindow* parent)
-    : QCheckBox(text, parent), m_parent(parent)
+    : QCheckBox(text, parent), m_window(parent)
 {
   setTristate(true);
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-  connect(this, &TASCheckBox::checkStateChanged, this, &TASCheckBox::OnUIValueChanged);
+  connect(this, &QCheckBox::checkStateChanged, this, &TASCheckBox::OnUIValueChanged);
 #else
-  connect(this, &TASCheckBox::stateChanged, this, &TASCheckBox::OnUIValueChanged);
+  connect(this, &QCheckBox::stateChanged, this, &TASCheckBox::OnUIValueChanged);
 #endif
 }
 
 bool TASCheckBox::GetValue() const
 {
-  Qt::CheckState check_state = static_cast<Qt::CheckState>(m_state.GetValue());
+  const auto shown = static_cast<Qt::CheckState>(m_state.GetValue());
+  if (shown != Qt::PartiallyChecked)
+    return shown != Qt::Unchecked;
 
-  if (check_state == Qt::PartiallyChecked)
-  {
-    const u64 frames_elapsed =
-        Core::System::GetInstance().GetMovie().GetCurrentFrame() - m_frame_turbo_started;
-    return static_cast<int>(frames_elapsed % m_turbo_total_frames) < m_turbo_press_frames;
-  }
-
-  return check_state != Qt::Unchecked;
+  // Turbo: held for the first m_turbo_down_frames of every cycle.
+  const u64 since_origin = MovieFrame() - static_cast<u64>(m_turbo_origin_frame);
+  const u64 cycle_position = since_origin % static_cast<u64>(m_turbo_cycle_frames);
+  return static_cast<int>(cycle_position) < m_turbo_down_frames;
 }
 
 void TASCheckBox::OnControllerValueChanged(bool new_value)
 {
-  if (m_state.OnControllerValueChanged(new_value ? Qt::Checked : Qt::Unchecked))
-    QueueOnObject(this, &TASCheckBox::ApplyControllerValueChange);
+  const int as_state = new_value ? Qt::Checked : Qt::Unchecked;
+  if (!m_state.OnControllerValueChanged(as_state))
+    return;
+  QueueOnObject(this, &TASCheckBox::ApplyControllerValueChange);
 }
 
 void TASCheckBox::mousePressEvent(QMouseEvent* event)
 {
-  if (event->button() != Qt::RightButton)
+  if (event->button() == Qt::RightButton)
   {
-    setChecked(!isChecked());
+    if (checkState() == Qt::PartiallyChecked)
+    {
+      setCheckState(Qt::Unchecked);
+      return;
+    }
+
+    m_turbo_origin_frame = static_cast<int>(MovieFrame());
+    m_turbo_down_frames = m_window->GetTurboPressFrames();
+    m_turbo_cycle_frames = m_turbo_down_frames + m_window->GetTurboReleaseFrames();
+    setCheckState(Qt::PartiallyChecked);
     return;
   }
 
-  if (checkState() == Qt::PartiallyChecked)
-  {
-    setCheckState(Qt::Unchecked);
-    return;
-  }
-
-  m_frame_turbo_started = Core::System::GetInstance().GetMovie().GetCurrentFrame();
-  m_turbo_press_frames = m_parent->GetTurboPressFrames();
-  m_turbo_total_frames = m_turbo_press_frames + m_parent->GetTurboReleaseFrames();
-  setCheckState(Qt::PartiallyChecked);
+  setChecked(!isChecked());
 }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
@@ -73,6 +80,7 @@ void TASCheckBox::OnUIValueChanged(int new_value)
 
 void TASCheckBox::ApplyControllerValueChange()
 {
-  const QSignalBlocker blocker(this);
+  // The new state came from the controller, so don't echo it back as a user change.
+  const QSignalBlocker quiet(this);
   setCheckState(static_cast<Qt::CheckState>(m_state.ApplyControllerValueChange()));
 }

@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 #include "Common/CommonTypes.h"
 
+// A rectangle standing for the Wii Remote's IR camera view. Left click/drag aims the pointer;
+// right click aims it at the centre.
 class IRWidget : public QWidget
 {
   Q_OBJECT
@@ -35,7 +36,8 @@ protected:
   void handleMouseEvent(QMouseEvent* event);
 
 private:
-  u16 m_x = 0;
-  u16 m_y = 0;
-  bool m_ignore_movement = false;
+  u16 m_aim_x = 0;
+  u16 m_aim_y = 0;
+  // Set by a right click so that dragging afterwards does not move the re-centred pointer.
+  bool m_drag_locked = false;
 };

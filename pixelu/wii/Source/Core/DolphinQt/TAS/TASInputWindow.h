@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -27,6 +26,8 @@ class QWidget;
 class TASCheckBox;
 class TASSpinBox;
 
+// Collects one override per (control group, control) pair and hands them to an emulated
+// controller as a single input override function.
 class InputOverrider final
 {
 public:
@@ -38,9 +39,12 @@ public:
   ControllerEmu::InputOverrideFunction GetInputOverrideFunction() const;
 
 private:
-  std::map<std::pair<std::string_view, std::string_view>, OverrideFunction> m_functions;
+  using ControlKey = std::pair<std::string_view, std::string_view>;
+  std::map<ControlKey, OverrideFunction> m_by_control;
 };
 
+// Shared base of the GameCube, Wii and GBA TAS input windows: the settings box (controller
+// pass-through and turbo timing) and builders for buttons, sliders and sticks.
 class TASInputWindow : public QDialog
 {
   Q_OBJECT
@@ -82,9 +86,10 @@ protected:
   QSpinBox* m_turbo_release_frames;
 
 private:
-  std::optional<ControlState> GetButton(TASCheckBox* checkbox, ControlState controller_state);
-  std::optional<ControlState> GetSpinBox(TASSpinBox* spin, int zero, int min, int max,
-                                         ControlState controller_state);
-  std::optional<ControlState> GetSpinBox(TASSpinBox* spin, int zero, ControlState controller_state,
+  // Called from the CPU thread with the real controller's value; returns the TAS value.
+  std::optional<ControlState> PollButton(TASCheckBox* button, ControlState real_value);
+  std::optional<ControlState> PollRanged(TASSpinBox* value, int zero, int min, int max,
+                                         ControlState real_value);
+  std::optional<ControlState> PollScaled(TASSpinBox* value, int zero, ControlState real_value,
                                          ControlState scale);
 };

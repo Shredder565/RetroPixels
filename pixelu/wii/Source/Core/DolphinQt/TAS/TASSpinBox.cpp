@@ -1,13 +1,26 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/TAS/TASSpinBox.h"
 
+#include <optional>
+
 #include "DolphinQt/QtUtils/QueueOnObject.h"
+
+namespace
+{
+std::optional<int> ParseWholeNumber(const QString& text)
+{
+  bool parsed = false;
+  const int number = text.toInt(&parsed);
+  if (!parsed)
+    return std::nullopt;
+  return number;
+}
+}  // namespace
 
 TASSpinBox::TASSpinBox(QWidget* parent) : QSpinBox(parent)
 {
-  connect(this, &TASSpinBox::valueChanged, this, &TASSpinBox::OnUIValueChanged);
+  connect(this, &QSpinBox::valueChanged, this, &TASSpinBox::OnUIValueChanged);
 }
 
 int TASSpinBox::GetValue() const
@@ -17,8 +30,9 @@ int TASSpinBox::GetValue() const
 
 void TASSpinBox::OnControllerValueChanged(int new_value)
 {
-  if (m_state.OnControllerValueChanged(new_value))
-    QueueOnObject(this, &TASSpinBox::ApplyControllerValueChange);
+  if (!m_state.OnControllerValueChanged(new_value))
+    return;
+  QueueOnObject(this, &TASSpinBox::ApplyControllerValueChange);
 }
 
 void TASSpinBox::OnUIValueChanged(int new_value)
@@ -33,28 +47,24 @@ void TASSpinBox::ApplyControllerValueChange()
 
 QValidator::State TASSpinBox::validate(QString& input, int& pos) const
 {
-  auto state = QSpinBox::validate(input, pos);
-  if (state == QValidator::Invalid)
-  {
-    bool ok;
-    input.toInt(&ok);
-    if (ok)
-      return QValidator::Intermediate;
-  }
-  return state;
+  const QValidator::State verdict = QSpinBox::validate(input, pos);
+  // An out-of-range number is still worth keeping while the user types; fixup() clamps it.
+  if (verdict == QValidator::Invalid && ParseWholeNumber(input))
+    return QValidator::Intermediate;
+  return verdict;
 }
 
 void TASSpinBox::fixup(QString& input) const
 {
-  bool ok;
-  int val = input.toInt(&ok);
-  if (ok)
+  const std::optional<int> typed = ParseWholeNumber(input);
+  if (!typed)
   {
-    if (val > maximum())
-      input = QString::number(maximum());
-    else if (val < minimum())
-      input = QString::number(minimum());
+    QSpinBox::fixup(input);
     return;
   }
-  QSpinBox::fixup(input);
+
+  if (*typed > maximum())
+    input = QString::number(maximum());
+  else if (*typed < minimum())
+    input = QString::number(minimum());
 }

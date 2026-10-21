@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@ class QShowEvent;
 class QSpinBox;
 class TASCheckBox;
 
+// TAS input for one GameCube controller port: both sticks, the analog triggers and every button.
 class GCTASInputWindow : public TASInputWindow
 {
   Q_OBJECT
@@ -21,22 +21,12 @@ public:
   void showEvent(QShowEvent* event) override;
 
 private:
-  int m_controller_id;
+  QGroupBox* BuildTriggersBox();
+  QGroupBox* BuildButtonsBox();
 
+  int m_port;
   InputOverrider m_overrider;
 
-  TASCheckBox* m_a_button;
-  TASCheckBox* m_b_button;
-  TASCheckBox* m_x_button;
-  TASCheckBox* m_y_button;
-  TASCheckBox* m_z_button;
-  TASCheckBox* m_l_button;
-  TASCheckBox* m_r_button;
-  TASCheckBox* m_start_button;
-  TASCheckBox* m_left_button;
-  TASCheckBox* m_up_button;
-  TASCheckBox* m_down_button;
-  TASCheckBox* m_right_button;
   QGroupBox* m_main_stick_box;
   QGroupBox* m_c_stick_box;
   QGroupBox* m_triggers_box;

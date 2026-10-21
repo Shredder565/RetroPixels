@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,15 +8,17 @@
 
 class TASInputWindow;
 
+// The numeric half of a TAS slider/value pair. The value can be read from the CPU thread, and the
+// real controller can push values into it from there.
 class TASSpinBox : public QSpinBox
 {
   Q_OBJECT
 public:
   explicit TASSpinBox(QWidget* parent = nullptr);
 
-  // Can be called from the CPU thread
+  // Any thread.
   int GetValue() const;
-  // Must be called from the CPU thread
+  // CPU thread only.
   void OnControllerValueChanged(int new_value);
   QValidator::State validate(QString& input, int& pos) const override;
   void fixup(QString& input) const override;

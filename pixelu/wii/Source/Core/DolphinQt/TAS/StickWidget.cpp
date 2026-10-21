@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/TAS/StickWidget.h"
 
@@ -8,19 +7,36 @@
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPoint>
 
 #include "Common/CommonTypes.h"
 
-constexpr int PADDING = 1;
+namespace
+{
+// Gap between the widget's edge and the drawn pad.
+constexpr int MARGIN = 1;
+
+u16 Middle(u16 range)
+{
+  return static_cast<u16>(std::round(range / 2.));
+}
+
+// Maps a widget coordinate (0 .. extent) onto 0 .. range, clamped.
+u16 ToStickValue(int widget_coord, int extent, u16 range)
+{
+  const int scaled = (widget_coord * range) / extent;
+  return static_cast<u16>(std::clamp(scaled, 0, static_cast<int>(range)));
+}
+}  // namespace
 
 StickWidget::StickWidget(QWidget* parent, u16 max_x, u16 max_y)
-    : QWidget(parent), m_max_x(max_x), m_max_y(max_y)
+    : QWidget(parent), m_range_x(max_x), m_range_y(max_y)
 {
   setMouseTracking(false);
   setToolTip(tr("Left click to set the stick value.\n"
                 "Right click to re-center it."));
 
-  // If the widget gets too small, it will get deformed.
+  // Any smaller and the circle would no longer look round.
   setMinimumSize(QSize(64, 64));
 }
 
@@ -31,92 +47,83 @@ QSize StickWidget::sizeHint() const
 
 void StickWidget::SetX(u16 x)
 {
-  m_x = std::min(m_max_x, x);
-
+  m_pos_x = std::min(x, m_range_x);
   update();
 }
 
 void StickWidget::SetY(u16 y)
 {
-  m_y = std::min(m_max_y, y);
-
+  m_pos_y = std::min(y, m_range_y);
   update();
 }
 
-void StickWidget::paintEvent(QPaintEvent* event)
+void StickWidget::paintEvent(QPaintEvent*)
 {
-  QPainter painter(this);
+  const int side = std::min(width(), height()) - 2 * MARGIN;
+  const int half = side / 2;
+  const QPoint centre(MARGIN + half, MARGIN + half);
 
+  // Stick position in widget pixels; y grows downwards on screen but upwards on the stick.
+  const int dot_x = MARGIN + (m_pos_x * side) / m_range_x;
+  const int dot_y = MARGIN + side - (m_pos_y * side) / m_range_y;
+  const int dot_radius = side / 30;
+
+  QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-  const int diameter = std::min(width(), height()) - PADDING * 2;
-
-  // inscribe the StickWidget inside a square
-  painter.fillRect(PADDING, PADDING, diameter, diameter, Qt::lightGray);
-
+  // Grey square backdrop with the white stick gate inscribed in it.
+  painter.fillRect(MARGIN, MARGIN, side, side, Qt::lightGray);
   painter.setBrush(Qt::white);
-  painter.drawEllipse(PADDING, PADDING, diameter, diameter);
+  painter.drawEllipse(MARGIN, MARGIN, side, side);
 
-  painter.drawLine(PADDING, PADDING + diameter / 2, PADDING + diameter, PADDING + diameter / 2);
-  painter.drawLine(PADDING + diameter / 2, PADDING, PADDING + diameter / 2, PADDING + diameter);
+  // Cross hairs through the middle.
+  painter.drawLine(MARGIN, centre.y(), MARGIN + side, centre.y());
+  painter.drawLine(centre.x(), MARGIN, centre.x(), MARGIN + side);
 
-  // convert from value space to widget space
-  u16 x = PADDING + ((m_x * diameter) / m_max_x);
-  u16 y = PADDING + (diameter - (m_y * diameter) / m_max_y);
-
-  painter.drawLine(PADDING + diameter / 2, PADDING + diameter / 2, x, y);
-
+  // A line from the middle to the stick, ending in a blue dot.
+  painter.drawLine(centre.x(), centre.y(), dot_x, dot_y);
   painter.setBrush(Qt::blue);
-  int neutral_radius = diameter / 30;
-  painter.drawEllipse(x - neutral_radius, y - neutral_radius, neutral_radius * 2,
-                      neutral_radius * 2);
+  painter.drawEllipse(dot_x - dot_radius, dot_y - dot_radius, 2 * dot_radius, 2 * dot_radius);
 }
 
 void StickWidget::mousePressEvent(QMouseEvent* event)
 {
   handleMouseEvent(event);
-  m_ignore_movement = event->button() == Qt::RightButton;
+  m_drag_locked = (event->button() == Qt::RightButton);
 }
 
 void StickWidget::mouseMoveEvent(QMouseEvent* event)
 {
-  if (!m_ignore_movement)
-    handleMouseEvent(event);
+  if (m_drag_locked)
+    return;
+  handleMouseEvent(event);
 }
 
 void StickWidget::handleMouseEvent(QMouseEvent* event)
 {
-  u16 prev_x = m_x;
-  u16 prev_y = m_y;
+  const u16 old_x = m_pos_x;
+  const u16 old_y = m_pos_y;
 
   if (event->button() == Qt::RightButton)
   {
-    m_x = std::round(m_max_x / 2.);
-    m_y = std::round(m_max_y / 2.);
+    m_pos_x = Middle(m_range_x);
+    m_pos_y = Middle(m_range_y);
   }
   else
   {
-    // convert from widget space to value space
-    int new_x = (event->pos().x() * m_max_x) / width();
-    int new_y = m_max_y - (event->pos().y() * m_max_y) / height();
-
-    m_x = std::max(0, std::min(static_cast<int>(m_max_x), new_x));
-    m_y = std::max(0, std::min(static_cast<int>(m_max_y), new_y));
+    const QPoint at = event->pos();
+    m_pos_x = ToStickValue(at.x(), width(), m_range_x);
+    m_pos_y = static_cast<u16>(
+        std::clamp(m_range_y - (at.y() * m_range_y) / height(), 0, static_cast<int>(m_range_y)));
   }
 
-  bool changed = false;
-  if (prev_x != m_x)
-  {
-    emit ChangedX(m_x);
-    changed = true;
-  }
-  if (prev_y != m_y)
-  {
-    emit ChangedY(m_y);
-    changed = true;
-  }
-
-  if (changed)
+  const bool moved_x = (m_pos_x != old_x);
+  const bool moved_y = (m_pos_y != old_y);
+  if (moved_x)
+    emit ChangedX(m_pos_x);
+  if (moved_y)
+    emit ChangedY(m_pos_y);
+  if (moved_x || moved_y)
     update();
 }

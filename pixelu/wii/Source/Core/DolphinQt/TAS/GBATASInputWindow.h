@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@ class QShowEvent;
 class QSpinBox;
 class TASCheckBox;
 
+// TAS input for one emulated Game Boy Advance: the D-pad and the six buttons.
 class GBATASInputWindow final : public TASInputWindow
 {
   Q_OBJECT
@@ -21,19 +21,6 @@ public:
   void showEvent(QShowEvent* event) override;
 
 private:
-  int m_controller_id;
-
+  int m_port;
   InputOverrider m_overrider;
-
-  TASCheckBox* m_b_button;
-  TASCheckBox* m_a_button;
-  TASCheckBox* m_l_button;
-  TASCheckBox* m_r_button;
-  TASCheckBox* m_select_button;
-  TASCheckBox* m_start_button;
-
-  TASCheckBox* m_left_button;
-  TASCheckBox* m_up_button;
-  TASCheckBox* m_down_button;
-  TASCheckBox* m_right_button;
 };

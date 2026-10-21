@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,15 +9,18 @@
 class QMouseEvent;
 class TASInputWindow;
 
+// A TAS button. Left click toggles it; right click starts (or stops) turbo, shown as the
+// partially-checked state, which presses and releases the button on a frame cycle taken from the
+// owning window's turbo settings.
 class TASCheckBox : public QCheckBox
 {
   Q_OBJECT
 public:
   explicit TASCheckBox(const QString& text, TASInputWindow* parent);
 
-  // Can be called from the CPU thread
+  // Any thread.
   bool GetValue() const;
-  // Must be called from the CPU thread
+  // CPU thread only.
   void OnControllerValueChanged(bool new_value);
 
 protected:
@@ -33,9 +35,10 @@ private slots:
   void ApplyControllerValueChange();
 
 private:
-  const TASInputWindow* m_parent;
+  const TASInputWindow* m_window;
   TASControlState m_state;
-  int m_frame_turbo_started = 0;
-  int m_turbo_press_frames = 0;
-  int m_turbo_total_frames = 0;
+  // Turbo cycle: the frame it started on, frames held down, and the whole cycle length.
+  int m_turbo_origin_frame = 0;
+  int m_turbo_down_frames = 0;
+  int m_turbo_cycle_frames = 0;
 };

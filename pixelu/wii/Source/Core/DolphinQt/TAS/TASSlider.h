@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 
 class QMouseEvent;
 
+// A slider that snaps back to its resting value on a right click.
 class TASSlider : public QSlider
 {
 public:
@@ -17,5 +17,5 @@ protected:
   void mouseReleaseEvent(QMouseEvent* event) override;
 
 private:
-  int m_default;
+  const int m_rest_value;
 };
