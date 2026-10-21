@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -25,6 +24,8 @@ namespace IOS::HLE::USB
 enum class FigureUIPosition : u8;
 }
 
+// The Disney Infinity base: whether it is plugged in, and the figure file on each of its nine
+// positions (three discs, two players and their abilities).
 class InfinityBaseWindow : public QWidget
 {
   Q_OBJECT
@@ -36,9 +37,11 @@ protected:
   std::array<QLineEdit*, 9> m_edit_figures;
 
 private:
-  void CreateMainWindow();
-  void AddFigureSlot(QVBoxLayout* vbox_group, const QString& name,
-                     IOS::HLE::USB::FigureUIPosition slot);
+  void BuildLayout();
+  void AddPositionRow(QVBoxLayout* rows, const QString& caption,
+                      IOS::HLE::USB::FigureUIPosition position);
+  QLineEdit* FigureField(IOS::HLE::USB::FigureUIPosition position) const;
+
   void OnEmulationStateChanged(Core::State state);
   void EmulateBase(bool emulate);
   void ClearFigure(IOS::HLE::USB::FigureUIPosition slot);
@@ -46,10 +49,11 @@ private:
   void CreateFigure(IOS::HLE::USB::FigureUIPosition slot);
   void LoadFigurePath(IOS::HLE::USB::FigureUIPosition slot, const QString& path);
 
-  QCheckBox* m_checkbox;
-  QGroupBox* m_group_figures;
+  QCheckBox* m_plugged_in;
+  QGroupBox* m_positions_box;
 };
 
+// Picks a character for one base position and writes a blank figure file for it.
 class CreateFigureDialog : public QDialog
 {
   Q_OBJECT
@@ -60,4 +64,7 @@ public:
 
 protected:
   QString m_file_path;
+
+private:
+  void OnCreate(const QString& number_text);
 };
