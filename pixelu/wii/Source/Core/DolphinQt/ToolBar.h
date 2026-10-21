@@ -1,7 +1,8 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
 
 #include <QToolBar>
 
@@ -12,6 +13,8 @@ namespace Core
 enum class State;
 }
 
+// The main window's tool bar: game list, emulation, settings and (in debug mode) stepping
+// buttons. Buttons only emit signals; MainWindow does the work.
 class ToolBar final : public QToolBar
 {
   Q_OBJECT
@@ -41,27 +44,25 @@ signals:
   void SetPCPressed();
 
 private:
-  void OnEmulationStateChanged(Core::State state);
-  void OnDebugModeToggled(bool enabled);
+  void AddButtons();
+  void EqualizeButtonWidths();
+  void ApplyIcons();
 
-  void MakeActions();
-  void UpdateIcons();
-  void UpdatePausePlayButtonState(bool playing_state);
+  void ShowEmulationState(Core::State state);
+  void ShowDebugButtons(bool visible);
+  void EnableSteppingButtons();
+  void ShowPlayOrPause(bool show_pause);
 
-  QAction* m_open_action;
-  QAction* m_refresh_action;
-  QAction* m_pause_play_action;
-  QAction* m_stop_action;
-  QAction* m_fullscreen_action;
-  QAction* m_screenshot_action;
-  QAction* m_config_action;
-  QAction* m_controllers_action;
-  QAction* m_graphics_action;
+  // Debugger buttons, in tool bar order: Step, Step Over, Step Out, Skip, Show PC, Set PC.
+  std::array<QAction*, 6> m_debug{};
 
-  QAction* m_step_action;
-  QAction* m_step_over_action;
-  QAction* m_step_out_action;
-  QAction* m_skip_action;
-  QAction* m_show_pc_action;
-  QAction* m_set_pc_action;
+  QAction* m_open = nullptr;
+  QAction* m_refresh = nullptr;
+  QAction* m_play_pause = nullptr;
+  QAction* m_stop = nullptr;
+  QAction* m_fullscreen = nullptr;
+  QAction* m_screenshot = nullptr;
+  QAction* m_settings = nullptr;
+  QAction* m_graphics = nullptr;
+  QAction* m_controllers = nullptr;
 };

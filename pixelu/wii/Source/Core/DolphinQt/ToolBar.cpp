@@ -1,9 +1,10 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/ToolBar.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <initializer_list>
 #include <vector>
 
 #include <QAction>
@@ -15,182 +16,185 @@
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 
-static QSize ICON_SIZE(32, 32);
+namespace
+{
+enum DebugButton
+{
+  STEP,
+  STEP_OVER,
+  STEP_OUT,
+  SKIP,
+  SHOW_PC,
+  SET_PC,
+};
+
+Core::State CurrentState()
+{
+  return Core::GetState(Core::System::GetInstance());
+}
+}  // namespace
 
 ToolBar::ToolBar(QWidget* parent) : QToolBar(parent)
 {
+  auto& settings = Settings::Instance();
+
   setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-  setMovable(!Settings::Instance().AreWidgetsLocked());
+  setMovable(!settings.AreWidgetsLocked());
   setFloatable(false);
-  setIconSize(ICON_SIZE);
-  setVisible(Settings::Instance().IsToolBarVisible());
+  setIconSize(QSize(32, 32));
+  setVisible(settings.IsToolBarVisible());
 
   setWindowTitle(tr("Toolbar"));
   setObjectName(QStringLiteral("toolbar"));
 
-  MakeActions();
-  connect(&Settings::Instance(), &Settings::ThemeChanged, this, &ToolBar::UpdateIcons);
-  UpdateIcons();
+  AddButtons();
 
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
-          [this](Core::State state) { OnEmulationStateChanged(state); });
+  connect(&settings, &Settings::ThemeChanged, this, &ToolBar::ApplyIcons);
+  ApplyIcons();
 
+  connect(&settings, &Settings::EmulationStateChanged, this,
+          [this](Core::State state) { ShowEmulationState(state); });
+  // The debugger refreshes after a step or a break, which is also when stepping becomes possible.
   connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this,
-          [this] { OnEmulationStateChanged(Core::GetState(Core::System::GetInstance())); });
+          [this] { ShowEmulationState(CurrentState()); });
+  connect(&settings, &Settings::DebugModeToggled, this, &ToolBar::ShowDebugButtons);
 
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this, &ToolBar::OnDebugModeToggled);
+  // Visibility is shared with the View menu's "Show Toolbar".
+  connect(&settings, &Settings::ToolBarVisibilityChanged, this, &ToolBar::setVisible);
+  connect(this, &ToolBar::visibilityChanged, &settings, &Settings::SetToolBarVisible);
 
-  connect(&Settings::Instance(), &Settings::ToolBarVisibilityChanged, this, &ToolBar::setVisible);
-  connect(this, &ToolBar::visibilityChanged, &Settings::Instance(), &Settings::SetToolBarVisible);
-
-  connect(&Settings::Instance(), &Settings::WidgetLockChanged, this,
+  connect(&settings, &Settings::WidgetLockChanged, this,
           [this](bool locked) { setMovable(!locked); });
 
-  connect(&Settings::Instance(), &Settings::GameListRefreshRequested, this,
-          [this] { m_refresh_action->setEnabled(false); });
-  connect(&Settings::Instance(), &Settings::GameListRefreshStarted, this,
-          [this] { m_refresh_action->setEnabled(true); });
+  // Refreshing is not offered again until the requested refresh has actually begun.
+  connect(&settings, &Settings::GameListRefreshRequested, this,
+          [this] { m_refresh->setEnabled(false); });
+  connect(&settings, &Settings::GameListRefreshStarted, this,
+          [this] { m_refresh->setEnabled(true); });
 
-  OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
-  OnDebugModeToggled(Settings::Instance().IsDebugModeEnabled());
+  ShowEmulationState(CurrentState());
+  ShowDebugButtons(settings.IsDebugModeEnabled());
 }
 
-void ToolBar::OnEmulationStateChanged(Core::State state)
+void ToolBar::AddButtons()
 {
-  bool running = state != Core::State::Uninitialized;
-  m_stop_action->setEnabled(running);
-  m_fullscreen_action->setEnabled(running);
-  m_screenshot_action->setEnabled(running);
+  // i18n: "Step" is a verb: run the emulated code one instruction at a time.
+  m_debug[STEP] = addAction(tr("Step"), this, &ToolBar::StepPressed);
+  // i18n: "Step" is a verb: run one instruction, but run a called function to its end.
+  m_debug[STEP_OVER] = addAction(tr("Step Over"), this, &ToolBar::StepOverPressed);
+  // i18n: "Step" is a verb: run until the current function returns.
+  m_debug[STEP_OUT] = addAction(tr("Step Out"), this, &ToolBar::StepOutPressed);
+  m_debug[SKIP] = addAction(tr("Skip"), this, &ToolBar::SkipPressed);
+  // i18n: PC means program counter (the address of the next instruction).
+  m_debug[SHOW_PC] = addAction(tr("Show PC"), this, &ToolBar::ShowPCPressed);
+  // i18n: PC means program counter (the address of the next instruction).
+  m_debug[SET_PC] = addAction(tr("Set PC"), this, &ToolBar::SetPCPressed);
 
-  bool playing = running && state != Core::State::Paused;
-  UpdatePausePlayButtonState(playing);
+  m_open = addAction(tr("Open"), this, &ToolBar::OpenPressed);
+  m_refresh = addAction(tr("Refresh"), this, &ToolBar::RefreshPressed);
+  // Enabled once the game list starts its first scan.
+  m_refresh->setEnabled(false);
 
-  const bool paused = Core::GetState(Core::System::GetInstance()) == Core::State::Paused;
-  m_step_action->setEnabled(paused);
-  m_step_over_action->setEnabled(paused);
-  m_step_out_action->setEnabled(paused);
-  m_skip_action->setEnabled(paused);
-  m_set_pc_action->setEnabled(paused);
+  addSeparator();
+
+  // Play and Pause share one button; ShowPlayOrPause swaps text, icon and signal.
+  m_play_pause = addAction(tr("Play"), this, &ToolBar::PlayPressed);
+  m_stop = addAction(tr("Stop"), this, &ToolBar::StopPressed);
+  m_fullscreen = addAction(tr("FullScr"), this, &ToolBar::FullScreenPressed);
+  m_screenshot = addAction(tr("ScrShot"), this, &ToolBar::ScreenShotPressed);
+
+  addSeparator();
+
+  m_settings = addAction(tr("Config"), this, &ToolBar::SettingsPressed);
+  m_graphics = addAction(tr("Graphics"), this, &ToolBar::GraphicsPressed);
+  m_controllers = addAction(tr("Controllers"), this, &ToolBar::ControllersPressed);
+
+  EqualizeButtonWidths();
+}
+
+void ToolBar::EqualizeButtonWidths()
+{
+  // Give the buttons (all but Refresh) a common minimum width of 85% of the widest one, measured
+  // from their text alone, so the bar looks even without being too wide.
+  std::vector<QWidget*> buttons;
+  for (QAction* action : {m_open, m_play_pause, m_stop, m_fullscreen, m_screenshot, m_settings,
+                          m_graphics, m_controllers})
+  {
+    buttons.push_back(widgetForAction(action));
+  }
+  for (QAction* action : m_debug)
+    buttons.push_back(widgetForAction(action));
+
+  int widest = 0;
+  for (const QWidget* button : buttons)
+    widest = std::max(widest, button->sizeHint().width());
+
+  const int minimum = static_cast<int>(widest * 0.85);
+  for (QWidget* button : buttons)
+    button->setMinimumWidth(minimum);
+}
+
+void ToolBar::ApplyIcons()
+{
+  static constexpr const char* DEBUG_ICONS[] = {"debugger_step_in",  "debugger_step_over",
+                                                "debugger_step_out", "debugger_skip",
+                                                "debugger_show_pc",  "debugger_set_pc"};
+  for (std::size_t i = 0; i < m_debug.size(); ++i)
+    m_debug[i]->setIcon(Resources::GetThemeIcon(DEBUG_ICONS[i]));
+
+  m_open->setIcon(Resources::GetThemeIcon("open"));
+  m_refresh->setIcon(Resources::GetThemeIcon("refresh"));
+
+  const Core::State state = CurrentState();
+  const bool running_unpaused = state != Core::State::Uninitialized && state != Core::State::Paused;
+  m_play_pause->setIcon(Resources::GetThemeIcon(running_unpaused ? "pause" : "play"));
+
+  m_stop->setIcon(Resources::GetThemeIcon("stop"));
+  m_fullscreen->setIcon(Resources::GetThemeIcon("fullscreen"));
+  m_screenshot->setIcon(Resources::GetThemeIcon("screenshot"));
+  m_settings->setIcon(Resources::GetThemeIcon("config"));
+  m_controllers->setIcon(Resources::GetThemeIcon("classic"));
+  m_graphics->setIcon(Resources::GetThemeIcon("graphics"));
+}
+
+void ToolBar::ShowEmulationState(Core::State state)
+{
+  const bool has_game = state != Core::State::Uninitialized;
+  for (QAction* action : {m_stop, m_fullscreen, m_screenshot})
+    action->setEnabled(has_game);
+
+  ShowPlayOrPause(has_game && state != Core::State::Paused);
+  EnableSteppingButtons();
+}
+
+void ToolBar::ShowDebugButtons(bool visible)
+{
+  for (QAction* action : m_debug)
+    action->setVisible(visible);
+  EnableSteppingButtons();
+}
+
+void ToolBar::EnableSteppingButtons()
+{
+  // Stepping needs a paused core. Show PC works at any time.
+  const bool paused = CurrentState() == Core::State::Paused;
+  for (const int button : {STEP, STEP_OVER, STEP_OUT, SKIP, SET_PC})
+    m_debug[static_cast<std::size_t>(button)]->setEnabled(paused);
+}
+
+void ToolBar::ShowPlayOrPause(bool show_pause)
+{
+  // Drop whatever the button was wired to before rewiring it.
+  disconnect(m_play_pause, nullptr, nullptr, nullptr);
+
+  m_play_pause->setText(show_pause ? tr("Pause") : tr("Play"));
+  m_play_pause->setIcon(Resources::GetThemeIcon(show_pause ? "pause" : "play"));
+  connect(m_play_pause, &QAction::triggered, this,
+          show_pause ? &ToolBar::PausePressed : &ToolBar::PlayPressed);
 }
 
 void ToolBar::closeEvent(QCloseEvent*)
 {
+  // Closing the floating bar hides it, like unchecking "Show Toolbar".
   Settings::Instance().SetToolBarVisible(false);
-}
-
-void ToolBar::OnDebugModeToggled(bool enabled)
-{
-  m_step_action->setVisible(enabled);
-  m_step_over_action->setVisible(enabled);
-  m_step_out_action->setVisible(enabled);
-  m_skip_action->setVisible(enabled);
-  m_show_pc_action->setVisible(enabled);
-  m_set_pc_action->setVisible(enabled);
-
-  const bool paused = Core::GetState(Core::System::GetInstance()) == Core::State::Paused;
-  m_step_action->setEnabled(paused);
-  m_step_over_action->setEnabled(paused);
-  m_step_out_action->setEnabled(paused);
-  m_skip_action->setEnabled(paused);
-  m_set_pc_action->setEnabled(paused);
-}
-
-void ToolBar::MakeActions()
-{
-  // i18n: Here, "Step" is a verb. This feature is used for
-  // going through code step by step.
-  m_step_action = addAction(tr("Step"), this, &ToolBar::StepPressed);
-  // i18n: Here, "Step" is a verb. This feature is used for
-  // going through code step by step.
-  m_step_over_action = addAction(tr("Step Over"), this, &ToolBar::StepOverPressed);
-  // i18n: Here, "Step" is a verb. This feature is used for
-  // going through code step by step.
-  m_step_out_action = addAction(tr("Step Out"), this, &ToolBar::StepOutPressed);
-  m_skip_action = addAction(tr("Skip"), this, &ToolBar::SkipPressed);
-  // i18n: Here, PC is an acronym for program counter, not personal computer.
-  m_show_pc_action = addAction(tr("Show PC"), this, &ToolBar::ShowPCPressed);
-  // i18n: Here, PC is an acronym for program counter, not personal computer.
-  m_set_pc_action = addAction(tr("Set PC"), this, &ToolBar::SetPCPressed);
-
-  m_open_action = addAction(tr("Open"), this, &ToolBar::OpenPressed);
-  m_refresh_action = addAction(tr("Refresh"), [this] { emit RefreshPressed(); });
-  m_refresh_action->setEnabled(false);
-
-  addSeparator();
-
-  m_pause_play_action = addAction(tr("Play"), this, &ToolBar::PlayPressed);
-
-  m_stop_action = addAction(tr("Stop"), this, &ToolBar::StopPressed);
-  m_fullscreen_action = addAction(tr("FullScr"), this, &ToolBar::FullScreenPressed);
-  m_screenshot_action = addAction(tr("ScrShot"), this, &ToolBar::ScreenShotPressed);
-
-  addSeparator();
-
-  m_config_action = addAction(tr("Config"), this, &ToolBar::SettingsPressed);
-  m_graphics_action = addAction(tr("Graphics"), this, &ToolBar::GraphicsPressed);
-  m_controllers_action = addAction(tr("Controllers"), this, &ToolBar::ControllersPressed);
-
-  // Ensure every button has about the same width
-  std::vector<QWidget*> items;
-  for (const auto& action :
-       {m_open_action, m_pause_play_action, m_stop_action, m_stop_action, m_fullscreen_action,
-        m_screenshot_action, m_config_action, m_graphics_action, m_controllers_action,
-        m_step_action, m_step_over_action, m_step_out_action, m_skip_action, m_show_pc_action,
-        m_set_pc_action})
-  {
-    items.emplace_back(widgetForAction(action));
-  }
-
-  std::vector<int> widths;
-  std::ranges::transform(items, std::back_inserter(widths),
-                         [](QWidget* item) { return item->sizeHint().width(); });
-
-  const int min_width = *std::ranges::max_element(widths) * 0.85;
-  for (QWidget* widget : items)
-    widget->setMinimumWidth(min_width);
-}
-
-void ToolBar::UpdatePausePlayButtonState(const bool playing_state)
-{
-  if (playing_state)
-  {
-    disconnect(m_pause_play_action, nullptr, nullptr, nullptr);
-    m_pause_play_action->setText(tr("Pause"));
-    m_pause_play_action->setIcon(Resources::GetThemeIcon("pause"));
-    connect(m_pause_play_action, &QAction::triggered, this, &ToolBar::PausePressed);
-  }
-  else
-  {
-    disconnect(m_pause_play_action, nullptr, nullptr, nullptr);
-    m_pause_play_action->setText(tr("Play"));
-    m_pause_play_action->setIcon(Resources::GetThemeIcon("play"));
-    connect(m_pause_play_action, &QAction::triggered, this, &ToolBar::PlayPressed);
-  }
-}
-
-void ToolBar::UpdateIcons()
-{
-  m_step_action->setIcon(Resources::GetThemeIcon("debugger_step_in"));
-  m_step_over_action->setIcon(Resources::GetThemeIcon("debugger_step_over"));
-  m_step_out_action->setIcon(Resources::GetThemeIcon("debugger_step_out"));
-  m_skip_action->setIcon(Resources::GetThemeIcon("debugger_skip"));
-  m_show_pc_action->setIcon(Resources::GetThemeIcon("debugger_show_pc"));
-  m_set_pc_action->setIcon(Resources::GetThemeIcon("debugger_set_pc"));
-
-  m_open_action->setIcon(Resources::GetThemeIcon("open"));
-  m_refresh_action->setIcon(Resources::GetThemeIcon("refresh"));
-
-  const Core::State state = Core::GetState(Core::System::GetInstance());
-  const bool playing = state != Core::State::Uninitialized && state != Core::State::Paused;
-  if (!playing)
-    m_pause_play_action->setIcon(Resources::GetThemeIcon("play"));
-  else
-    m_pause_play_action->setIcon(Resources::GetThemeIcon("pause"));
-
-  m_stop_action->setIcon(Resources::GetThemeIcon("stop"));
-  m_fullscreen_action->setIcon(Resources::GetThemeIcon("fullscreen"));
-  m_screenshot_action->setIcon(Resources::GetThemeIcon("screenshot"));
-  m_config_action->setIcon(Resources::GetThemeIcon("config"));
-  m_controllers_action->setIcon(Resources::GetThemeIcon("classic"));
-  m_graphics_action->setIcon(Resources::GetThemeIcon("graphics"));
 }
