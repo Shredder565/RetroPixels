@@ -1,0 +1,160 @@
+- W38 log: rewrote all 42 W38 files as original code: the game list
+  (`GameList/GameList`, `GameListModel`, `GameTracker`, `GridProxyModel`,
+  `ListProxyModel`), the cheats manager and cheat search tabs
+  (`CheatsManager`, `CheatSearchWidget`, `CheatSearchFactoryWidget`),
+  `ConvertDialog`, `DiscordHandler`, `DiscordJoinRequestDialog`, the GBA
+  windows (`GBAWidget`, `GBAHost`), the memory card dialogs
+  (`GCMemcardManager`, `GCMemcardCreateNewDialog`), `NANDRepairDialog`,
+  `NKitWarningDialog`, `ResourcePackManager`, `RiivolutionBootWidget`,
+  `Updater` and `WiiUpdate`. They have 8071 lines now (from 8126). Every file
+  starts with the original-code header and has no Dolphin copyright or SPDX
+  line. None of them carries a PixelU change (the DolphinQt PixelU change is
+  in W37 files). The public names, signatures, signals, slots, enums
+  (`GameListModel::Column`, the model roles) and the
+  `GuiRiivolutionPatchIndex` metatype are kept; private members and helpers
+  have new names, with no user outside W38.
+  - Design:
+    - `GameList`: the table and grid are built by `BuildTable`, `BuildGrid`
+      and `BuildPlaceholder` around one `SetUpProxy`; column names, settings
+      keys and resize modes come from `ColumnIndex`/`ColumnSetting`/
+      `ColumnResizeMode` lookups; the context menu is `ShowGameMenu` with
+      `AddMultiSelectionEntries`, `AddSingleGameEntries` and `AddTagEntries`;
+      result boxes go through `ShowResultBox`; `FitColumnsToWidth`,
+      `ApplyColumnVisibility`, `InvalidateProxies` and `ShowFittingPage`
+      replace the inline sequences; the column-visibility labels are built
+      once by a static lambda.
+    - `GameListModel`: `TitleData`, `TimePlayedData`, `BannerPixmap`,
+      `PadNumbersForSorting`, `PlatformFilter`/`RegionFilter`; header texts
+      are a `QT_TR_NOOP` table translated with `tr(text)` (same context and
+      source text); tag storage is `SetTagsOf` and `StoreTagNames`.
+    - `GameTracker`: one `Post` for the queued commands and `RunTask`
+      dispatching to `ReadCache`, `FirstScan`, `AddFolder`, `DropFolder`,
+      `RescanFolder`, `RescanFile`; folder scans are `ScanFolder` with
+      `AnyCaseExtension` and `GameFileNameFilters`; `Watch`/`Unwatch`,
+      `GamesGoneFrom`, `LoadGame`.
+    - `GridProxyModel`/`ListProxyModel`: the tile is drawn in one `data`
+      branch with named cover and banner sizes; filtering and sorting are the
+      same comparisons.
+    - `CheatsManager`: `BuildTabs` with an `add_permanent_tab` lambda,
+      `Connect`, `FollowGame`, `RefreshAllSearches`, `AddSearchTab`,
+      `CloseTab`. `CheatSearchWidget`: `BuildLayout`, `ConnectSignals`,
+      `DescribeSession`, `RunScan`/`ReportScanCounts`, `RefreshRows`,
+      `ShowCurrentValue(s)`, `RebuildTable` with an `add_cell` lambda,
+      `ValueSize` as an if-chain. `CheatSearchFactoryWidget`:
+      `BuildAddressSpaceGroup`, `BuildDataTypeGroup`,
+      `UpdateCustomRangeControls`, `CreateSession`.
+    - `ConvertDialog`: `FillBlockSizes`/`AddBlockSize`,
+      `FillCompressionMethods`, `OnFormatChanged`, `OnCompressionChanged`,
+      `ConfirmSettings`, `Convert` with `OutputPathNextTo` and `FileOf`.
+    - `GCMemcardManager`: `BuildWidgets`, `ConnectWidgets`, `SetUpSaveTable`,
+      `SetUpSaveColumns`, `FillTable`, `SelectSlot`, `OpenConfiguredCards`,
+      `BrowseForCard`, `ImportInto` shared by import and copy, `BannerOf`/
+      `IconOf`, `FormatName` and `GetErrorMessageForErrorCode` as if-chains.
+    - `GBAWidget`: `SwapRom`, `InsertCard`, `WithCore`, `PickFile`,
+      `NetPlayPadOf`, `SettingKey`, `ApplyVolume`, `ScreenRect`,
+      `RestoreSettings`/`StoreSettings`; the volume step is a named constant.
+      `GBAHost` queues through one `QueueOnObject` per callback.
+    - `DiscordHandler`: `ShowNewJoinRequest`, `CloseExpiredRequests`,
+      `PollLoop`. `DiscordJoinRequestDialog`: `FetchAvatar`, `BuildLayout`,
+      `Answer`.
+    - `NANDRepairDialog` (`WrappedLabel`, `DescribeTitles`),
+      `NKitWarningDialog`, `ResourcePackManager` (`BuildLayout`, `WireUp`,
+      `FillTable`, `UpdateButtons`, `SelectedPack`, `PackIndexOfRow`,
+      `ToggleInstalled`, install/uninstall/delete/move helpers, `Rescan`,
+      `ShowPackFolder`, `FollowLink`), `RiivolutionBootWidget` (a `PatchFile`
+      struct, `AddXMLsFromUserFolder`, `AskForXMLs`, `AddPatchFile`,
+      `GuessSDRoot`, `ReadSavedChoices`/`WriteSavedChoices`, `ExportPreset`,
+      `Start`), `Updater` (`AskUser`, `CloseParent`), `WiiUpdate` (a
+      file-local `UpdateProgressDialog` whose `reject` does nothing,
+      `RunWithProgress`, `ShowResult`, `ReportFailure`/`ReportSuccess`).
+  - Kept as before (outputs, quirks):
+    - Every widget, label, tooltip, objectName, layout order, enabled and
+      visible rule, context menu entry, shortcut and dialog flow; the model
+      columns, roles, sort and filter rules; Config and QSettings keys and
+      when they are read and written; Core, UICommon, DiscIO, IOS and
+      Discord calls in order and with their arguments; the Windows-only
+      paths (desktop shortcuts, `QApplication::alert`); every tr() text byte
+      for byte in its old context (`QObject` for the `WiiUpdate` and memory
+      card format names, `QDialog` for `ResourcePackManager`, which has no
+      `Q_OBJECT`). Long literals were rewrapped as adjacent strings with the
+      same bytes.
+    - Quirks: `ResourcePackManager` still calls `setLayout` twice and keeps
+      the old up/down row handling; `GCMemcardCreateNewDialog`, the NKit
+      dialog's OK enabling and the Riivolution choice files are unchanged.
+  - Deliberate differences:
+    - `GameTracker` members are destroyed in a different order (no
+      observable effect: the worker is stopped first in both).
+    - `OpenGCSaveFolder` iterates the GCI folder with `std::error_code`
+      (no exception on an unreadable folder).
+    - `GCMemcardManager::AnimateIcons` returns early on an empty animation
+      schedule (the old code indexed it).
+    - Pure queries are called a different number of times (Config reads in
+      the grid proxy, `CanControlCore`, the Wii-disc check); same results.
+    - `NANDRepairDialog` destroys its `TitleDatabase` when the title texts
+      are built instead of at the end of the constructor.
+    - `WiiUpdate` result boxes translate the text before the title (same
+      strings).
+    - `FormatName` asserts `format == Format::GCI` before the GCI fallback.
+    - Redundant repeated `setEnabled` calls in `ConvertDialog` are gone
+      (same final state).
+    - Conversions are explicit (`size_t` and float casts in `GBAWidget`,
+      `u8` file indices in `GCMemcardManager`, `u64` sizes in
+      `ConvertDialog`, `uint` logo size in `ResourcePackManager`); a lambda
+      capture and parameters were renamed so nothing shadows a member. No
+      local or parameter is named after an inherited Qt member (`data`,
+      `d_ptr`, `staticMetaObject`).
+  - Checked:
+    - Old vs new harnesses, Qt 6.4 offscreen, each built from its own W38
+      files against recording fakes (Config, Settings on a temporary
+      QSettings file, FileUtil, ModalMessageBox, DolphinFileDialog,
+      HttpRequest, Discord, Core state, the update, NAND and card
+      back-ends) that log every call; dumps of the widget tree (class,
+      objectName, text, tooltip, enabled, visible, checked), tr() calls with
+      their context, config and QSettings writes, opened URLs and model
+      contents after seeded random interaction; one hash per case, streamed.
+      - `NKitWarningDialog` (40 seeds, toggles, OK/Cancel/Esc, the skip
+        setting): identical.
+      - `NANDRepairDialog`: identical except the `TitleDatabase` destructor
+        position in the log (above).
+      - `ResourcePackManager` (synthetic packs, install, uninstall, move,
+        delete, links): identical.
+      - `GCMemcardCreateNewDialog` (60 seeds, sizes, encodings, file dialog
+        answered or cancelled, failing creation): identical.
+      - `WiiUpdate` (online and disc updates, every result, progress and
+        cancel): identical except the tr order in the result boxes (above).
+      - `Updater` (update or not, both restart modes, the environment
+        override): identical.
+      - `GameListModel` with `ListProxyModel` and `GridProxyModel`
+        (synthetic game files of every platform and region, tags, search,
+        scale, every column and role, sort and filter): identical, with
+        Config read counting off (counts differ by design, above).
+      - `RiivolutionBootWidget` (user folder XMLs, file dialog picks, saved
+        choices, start and preset export): identical once Qt's own
+        file-dialog tr() noise is filtered; the harness found that the
+        start folder was computed after the file dialog call, fixed.
+      - `CheatSearchFactoryWidget` (address spaces, data types, custom
+        ranges): identical.
+      - `DiscordJoinRequestDialog` (with and without avatar, download ok,
+        failing or garbage; each answer, Esc, close): identical.
+    - Not driven, compared line by line against the old files:
+      `GameList` (view, context menus, column menu, tags, shortcuts),
+      `GameTracker`, `CheatsManager`, `CheatSearchWidget`, `ConvertDialog`,
+      `GCMemcardManager`, `GBAWidget`, `GBAHost` and `DiscordHandler`. Their
+      Core, DiscIO, mGBA and Discord calls, menu entries, tr() texts and
+      settings keys were matched one by one.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, on Linux and `-target x86_64-w64-windows-gnu`,
+      against the untouched tree (mGBA 0.10 headers, a minimal `wil` stub):
+      the 21 W38 .cpp files show no warning from W38 code on either target
+      (the old files had conversion and sign warnings), and the files
+      including W38 headers (Host, HotkeyScheduler, Main, MainWindow, MenuBar, GameCubePane, the NetPlay
+      dialogs) show the same totals on both trees. The remaining errors are
+      outside W38 and the same on the base tree (`ntohs` in `NetPlayDialog`
+      on Linux; `DEVMODE`/`CDS_*`/`ES_CONTINUOUS` in `MainWindow` and
+      `SendMessageW` in `NetPlayDialog` with mingw). MSVC was not run.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W38 .cpp
+      file (longest left: 7). Remaining runs are in headers only
+      (declarations: `GameList.h`, `GameListModel.h`, `GBAWidget.h`,
+      `GCMemcardManager.h`, `DiscordHandler.h`, `CheatsManager.h`,
+      `CheatSearchWidget.h`, `RiivolutionBootWidget.h`, `GameTracker.h`).
+    - No key, IV, token or credential bytes in W38 files.
