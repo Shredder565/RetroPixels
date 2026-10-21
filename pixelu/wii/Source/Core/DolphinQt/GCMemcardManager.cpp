@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/GCMemcardManager.h"
 
@@ -41,354 +40,41 @@
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 
-using namespace ExpansionInterface;
-
-constexpr int ROW_HEIGHT = 36;
-constexpr int COLUMN_WIDTH_FILENAME = 100;
-constexpr int COLUMN_WIDTH_BANNER = Memcard::MEMORY_CARD_BANNER_WIDTH + 6;
-constexpr int COLUMN_WIDTH_TEXT = 160;
-constexpr int COLUMN_WIDTH_ICON = Memcard::MEMORY_CARD_ICON_WIDTH + 6;
-constexpr int COLUMN_WIDTH_BLOCKS = 40;
-constexpr int COLUMN_INDEX_FILENAME = 0;
-constexpr int COLUMN_INDEX_BANNER = 1;
-constexpr int COLUMN_INDEX_TEXT = 2;
-constexpr int COLUMN_INDEX_ICON = 3;
-constexpr int COLUMN_INDEX_BLOCKS = 4;
-constexpr int COLUMN_COUNT = 5;
+using ExpansionInterface::Slot;
 
 namespace
 {
+enum SaveColumn : int
+{
+  COLUMN_FILENAME,
+  COLUMN_BANNER,
+  COLUMN_TITLE,
+  COLUMN_ICON,
+  COLUMN_BLOCKS,
+  COLUMN_COUNT,
+};
+
+// Room for a 32 pixel icon or banner plus padding.
+constexpr int ROW_HEIGHT = 36;
+constexpr int ICON_PADDING = 6;
+
+// Save icons change frames after 4, 8 or 12 frames at 60 Hz, so ticking at 15 Hz is enough.
+constexpr int ANIMATION_TICKS_PER_SECOND = 15;
+
+// Every cell of a save's row holds the save's directory index under this role.
+constexpr int ROLE_DIRECTORY_INDEX = Qt::UserRole;
+
 Slot OtherSlot(Slot slot)
 {
   return slot == Slot::A ? Slot::B : Slot::A;
 }
-}  // namespace
 
-struct GCMemcardManager::IconAnimationData
+QString UserCardFolder()
 {
-  // the individual frames
-  std::vector<QPixmap> m_frames;
-
-  // vector containing a list of frame indices that indicate, for each time unit,
-  // the frame that should be displayed when at that time unit
-  std::vector<u8> m_frame_timing;
-};
-
-GCMemcardManager::GCMemcardManager(QWidget* parent) : QDialog(parent)
-{
-  CreateWidgets();
-  ConnectWidgets();
-
-  SetActiveSlot(Slot::A);
-  UpdateActions();
-
-  m_timer = new QTimer(this);
-  connect(m_timer, &QTimer::timeout, this, &GCMemcardManager::DrawIcons);
-
-  // individual frames of icon animations can stay on screen for 4, 8, or 12 frames at 60 FPS,
-  // which means the fastest animation and common denominator is 15 FPS or 66 milliseconds per frame
-  m_timer->start(1000 / 15);
-
-  LoadDefaultMemcards();
-
-  // Make the dimensions more reasonable on startup
-  resize(650, 500);
-
-  setWindowTitle(tr("GameCube Memory Card Manager"));
+  return QString::fromStdString(File::GetUserPath(D_GCUSER_IDX));
 }
 
-GCMemcardManager::~GCMemcardManager() = default;
-
-void GCMemcardManager::CreateWidgets()
-{
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
-
-  // Actions
-  m_select_button = new NonDefaultQPushButton;
-  m_copy_button = new NonDefaultQPushButton;
-  m_delete_button = new NonDefaultQPushButton(tr("&Delete"));
-
-  m_export_button = new QToolButton(this);
-  m_export_menu = new QMenu(m_export_button);
-  m_export_gci_action = new QAction(tr("&Export as .gci..."), m_export_menu);
-  m_export_gcs_action = new QAction(tr("Export as .&gcs..."), m_export_menu);
-  m_export_sav_action = new QAction(tr("Export as .&sav..."), m_export_menu);
-  m_export_menu->addAction(m_export_gci_action);
-  m_export_menu->addAction(m_export_gcs_action);
-  m_export_menu->addAction(m_export_sav_action);
-  m_export_button->setDefaultAction(m_export_gci_action);
-  m_export_button->setPopupMode(QToolButton::MenuButtonPopup);
-  m_export_button->setMenu(m_export_menu);
-
-  m_import_button = new NonDefaultQPushButton(tr("&Import..."));
-  m_fix_checksums_button = new NonDefaultQPushButton(tr("Fix Checksums"));
-
-  auto* layout = new QGridLayout;
-
-  for (Slot slot : MEMCARD_SLOTS)
-  {
-    m_slot_group[slot] = new QGroupBox(slot == Slot::A ? tr("Slot A") : tr("Slot B"));
-    m_slot_file_edit[slot] = new QLineEdit;
-    m_slot_open_button[slot] = new NonDefaultQPushButton(tr("&Open..."));
-    m_slot_create_button[slot] = new NonDefaultQPushButton(tr("&Create..."));
-    m_slot_table[slot] = new QTableWidget;
-    m_slot_table[slot]->setTabKeyNavigation(false);
-    m_slot_table[slot]->setHorizontalScrollMode(QAbstractItemView::ScrollMode::ScrollPerPixel);
-    m_slot_table[slot]->setVerticalScrollMode(QAbstractItemView::ScrollMode::ScrollPerPixel);
-    m_slot_stat_label[slot] = new QLabel;
-
-    m_slot_table[slot]->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_slot_table[slot]->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_slot_table[slot]->setSortingEnabled(true);
-    m_slot_table[slot]->horizontalHeader()->setHighlightSections(false);
-    m_slot_table[slot]->horizontalHeader()->setMinimumSectionSize(0);
-    m_slot_table[slot]->horizontalHeader()->setSortIndicatorShown(true);
-    m_slot_table[slot]->setColumnCount(COLUMN_COUNT);
-    m_slot_table[slot]->setHorizontalHeaderItem(COLUMN_INDEX_FILENAME,
-                                                new QTableWidgetItem(tr("Filename")));
-    m_slot_table[slot]->setHorizontalHeaderItem(COLUMN_INDEX_BANNER,
-                                                new QTableWidgetItem(tr("Banner")));
-    m_slot_table[slot]->setHorizontalHeaderItem(COLUMN_INDEX_TEXT,
-                                                new QTableWidgetItem(tr("Title")));
-    m_slot_table[slot]->setHorizontalHeaderItem(COLUMN_INDEX_ICON,
-                                                new QTableWidgetItem(tr("Icon")));
-    m_slot_table[slot]->setHorizontalHeaderItem(COLUMN_INDEX_BLOCKS,
-                                                new QTableWidgetItem(tr("Blocks")));
-    m_slot_table[slot]->setColumnWidth(COLUMN_INDEX_FILENAME, COLUMN_WIDTH_FILENAME);
-    m_slot_table[slot]->setColumnWidth(COLUMN_INDEX_BANNER, COLUMN_WIDTH_BANNER);
-    m_slot_table[slot]->setColumnWidth(COLUMN_INDEX_TEXT, COLUMN_WIDTH_TEXT);
-    m_slot_table[slot]->setColumnWidth(COLUMN_INDEX_ICON, COLUMN_WIDTH_ICON);
-    m_slot_table[slot]->setColumnWidth(COLUMN_INDEX_BLOCKS, COLUMN_WIDTH_BLOCKS);
-    m_slot_table[slot]->verticalHeader()->setDefaultSectionSize(ROW_HEIGHT);
-    m_slot_table[slot]->verticalHeader()->hide();
-    m_slot_table[slot]->setShowGrid(false);
-
-    auto* slot_layout = new QGridLayout;
-    m_slot_group[slot]->setLayout(slot_layout);
-
-    slot_layout->addWidget(m_slot_file_edit[slot], 0, 0);
-    slot_layout->addWidget(m_slot_open_button[slot], 0, 1);
-    slot_layout->addWidget(m_slot_create_button[slot], 0, 2);
-    slot_layout->addWidget(m_slot_table[slot], 1, 0, 1, 3);
-    slot_layout->addWidget(m_slot_stat_label[slot], 2, 0);
-
-    layout->addWidget(m_slot_group[slot], 0, slot == Slot::A ? 0 : 2, 8, 1);
-
-    UpdateSlotTable(slot);
-  }
-
-  layout->addWidget(m_select_button, 1, 1);
-  layout->addWidget(m_copy_button, 2, 1);
-  layout->addWidget(m_delete_button, 3, 1);
-  layout->addWidget(m_export_button, 4, 1);
-  layout->addWidget(m_import_button, 5, 1);
-  layout->addWidget(m_fix_checksums_button, 6, 1);
-  layout->addWidget(m_button_box, 8, 2);
-
-  setLayout(layout);
-}
-
-void GCMemcardManager::ConnectWidgets()
-{
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-  connect(m_select_button, &QPushButton::clicked,
-          [this] { SetActiveSlot(OtherSlot(m_active_slot)); });
-  connect(m_export_gci_action, &QAction::triggered,
-          [this] { ExportFiles(Memcard::SavefileFormat::GCI); });
-  connect(m_export_gcs_action, &QAction::triggered,
-          [this] { ExportFiles(Memcard::SavefileFormat::GCS); });
-  connect(m_export_sav_action, &QAction::triggered,
-          [this] { ExportFiles(Memcard::SavefileFormat::SAV); });
-  connect(m_delete_button, &QPushButton::clicked, this, &GCMemcardManager::DeleteFiles);
-  connect(m_import_button, &QPushButton::clicked, this, &GCMemcardManager::ImportFile);
-  connect(m_copy_button, &QPushButton::clicked, this, &GCMemcardManager::CopyFiles);
-  connect(m_fix_checksums_button, &QPushButton::clicked, this, &GCMemcardManager::FixChecksums);
-
-  for (Slot slot : MEMCARD_SLOTS)
-  {
-    connect(m_slot_file_edit[slot], &QLineEdit::textChanged,
-            [this, slot](const QString& path) { SetSlotFile(slot, path); });
-    connect(m_slot_open_button[slot], &QPushButton::clicked,
-            [this, slot] { SetSlotFileInteractive(slot); });
-    connect(m_slot_create_button[slot], &QPushButton::clicked,
-            [this, slot] { CreateNewCard(slot); });
-    connect(m_slot_table[slot], &QTableWidget::itemSelectionChanged, this,
-            &GCMemcardManager::UpdateActions);
-  }
-}
-
-void GCMemcardManager::LoadDefaultMemcards()
-{
-  for (ExpansionInterface::Slot slot : ExpansionInterface::MEMCARD_SLOTS)
-  {
-    if (Config::Get(Config::GetInfoForEXIDevice(slot)) !=
-        ExpansionInterface::EXIDeviceType::MemoryCard)
-    {
-      continue;
-    }
-
-    const QString path = QString::fromStdString(
-        Config::GetMemcardPath(slot, Config::Get(Config::MAIN_FALLBACK_REGION)));
-    SetSlotFile(slot, path);
-  }
-}
-
-void GCMemcardManager::SetActiveSlot(Slot slot)
-{
-  for (Slot slot2 : MEMCARD_SLOTS)
-    m_slot_table[slot2]->setEnabled(slot2 == slot);
-
-  m_select_button->setText(slot == Slot::A ? tr("Switch to B") : tr("Switch to A"));
-  m_copy_button->setText(slot == Slot::A ? tr("Copy to B") : tr("Copy to A"));
-
-  m_active_slot = slot;
-
-  UpdateActions();
-}
-
-void GCMemcardManager::UpdateSlotTable(Slot slot)
-{
-  m_slot_active_icons[slot].clear();
-
-  if (m_slot_memcard[slot] == nullptr)
-  {
-    m_slot_table[slot]->setRowCount(0);
-    m_slot_stat_label[slot]->clear();
-    return;
-  }
-
-  auto& memcard = m_slot_memcard[slot];
-  auto* table = m_slot_table[slot];
-  table->setSortingEnabled(false);
-
-  const u8 num_files = memcard->GetNumFiles();
-  const u8 free_files = Memcard::DIRLEN - num_files;
-  const u16 free_blocks = memcard->GetFreeBlocks();
-  table->setRowCount(num_files);
-  for (int i = 0; i < num_files; i++)
-  {
-    const u8 file_index = memcard->GetFileIndex(i);
-
-    const auto file_comments = memcard->GetSaveComments(file_index);
-    const u16 block_count = memcard->DEntry_BlockCount(file_index);
-    const auto entry = memcard->GetDEntry(file_index);
-    const std::string filename = entry ? Memcard::GenerateFilename(*entry) : "";
-
-    const QString title =
-        file_comments ? QString::fromStdString(file_comments->first).trimmed() : QString();
-    const QString comment =
-        file_comments ? QString::fromStdString(file_comments->second).trimmed() : QString();
-    auto banner = GetBannerFromSaveFile(file_index, slot);
-    auto icon_data = GetIconFromSaveFile(file_index, slot);
-
-    auto* item_filename = new QTableWidgetItem(QString::fromStdString(filename));
-    auto* item_banner = new QTableWidgetItem();
-    auto* item_text = new QTableWidgetItem(QStringLiteral("%1\n%2").arg(title, comment));
-    auto* item_icon = new QTableWidgetItem();
-    auto* item_blocks = new QTableWidgetItem();
-
-    item_banner->setData(Qt::DecorationRole, banner);
-    item_icon->setData(Qt::DecorationRole, icon_data.m_frames[0]);
-    item_blocks->setData(Qt::DisplayRole, block_count);
-
-    for (auto* item : {item_filename, item_banner, item_text, item_icon, item_blocks})
-    {
-      item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-      item->setData(Qt::UserRole, static_cast<int>(file_index));
-    }
-
-    m_slot_active_icons[slot].emplace(file_index, std::move(icon_data));
-
-    table->setItem(i, COLUMN_INDEX_FILENAME, item_filename);
-    table->setItem(i, COLUMN_INDEX_BANNER, item_banner);
-    table->setItem(i, COLUMN_INDEX_TEXT, item_text);
-    table->setItem(i, COLUMN_INDEX_ICON, item_icon);
-    table->setItem(i, COLUMN_INDEX_BLOCKS, item_blocks);
-  }
-
-  const QString free_blocks_string = tr("Free Blocks: %1").arg(free_blocks);
-  const QString free_files_string = tr("Free Files: %1").arg(free_files);
-  m_slot_stat_label[slot]->setText(
-      QStringLiteral("%1      %2").arg(free_blocks_string, free_files_string));
-
-  table->setSortingEnabled(true);
-}
-
-void GCMemcardManager::UpdateActions()
-{
-  auto selection = m_slot_table[m_active_slot]->selectedItems();
-  bool have_selection = selection.count();
-  bool have_memcard = m_slot_memcard[m_active_slot] != nullptr;
-  bool have_memcard_other = m_slot_memcard[OtherSlot(m_active_slot)] != nullptr;
-
-  m_copy_button->setEnabled(have_selection && have_memcard_other);
-  m_export_button->setEnabled(have_selection);
-  m_import_button->setEnabled(have_memcard);
-  m_delete_button->setEnabled(have_selection);
-  m_fix_checksums_button->setEnabled(have_memcard);
-}
-
-void GCMemcardManager::SetSlotFile(Slot slot, const QString& path)
-{
-  auto [error_code, memcard] = Memcard::GCMemcard::Open(path.toStdString());
-
-  if (!error_code.HasCriticalErrors() && memcard && memcard->IsValid())
-  {
-    m_slot_file_edit[slot]->setText(path);
-    m_slot_memcard[slot] = std::make_unique<Memcard::GCMemcard>(std::move(*memcard));
-  }
-  else
-  {
-    m_slot_memcard[slot] = nullptr;
-    ModalMessageBox::warning(
-        this, tr("Error"),
-        tr("Failed opening memory card:\n%1").arg(GetErrorMessagesForErrorCode(error_code)));
-  }
-
-  UpdateSlotTable(slot);
-  UpdateActions();
-}
-
-void GCMemcardManager::SetSlotFileInteractive(Slot slot)
-{
-  QString path = QDir::toNativeSeparators(
-      DolphinFileDialog::getOpenFileName(this,
-                                         slot == Slot::A ? tr("Set Memory Card File for Slot A") :
-                                                           tr("Set Memory Card File for Slot B"),
-                                         QString::fromStdString(File::GetUserPath(D_GCUSER_IDX)),
-                                         QStringLiteral("%1 (*.raw *.gcp);;%2 (*)")
-                                             .arg(tr("GameCube Memory Cards"), tr("All Files"))));
-  if (!path.isEmpty())
-    m_slot_file_edit[slot]->setText(path);
-}
-
-std::vector<u8> GCMemcardManager::GetSelectedFileIndices()
-{
-  const auto selection = m_slot_table[m_active_slot]->selectedItems();
-  std::vector<bool> lookup(Memcard::DIRLEN);
-  for (const auto* item : selection)
-  {
-    const int index = item->data(Qt::UserRole).toInt();
-    if (index < 0 || index >= static_cast<int>(Memcard::DIRLEN))
-    {
-      ModalMessageBox::warning(this, tr("Error"),
-                               tr("Data inconsistency in GCMemcardManager, aborting action."));
-      return {};
-    }
-    lookup[index] = true;
-  }
-
-  std::vector<u8> selected_indices;
-  for (u8 i = 0; i < Memcard::DIRLEN; ++i)
-  {
-    if (lookup[i])
-      selected_indices.push_back(i);
-  }
-
-  return selected_indices;
-}
-
-static QString GetFormatDescription(Memcard::SavefileFormat format)
+QString FormatName(Memcard::SavefileFormat format)
 {
   switch (format)
   {
@@ -404,165 +90,478 @@ static QString GetFormatDescription(Memcard::SavefileFormat format)
   }
 }
 
-void GCMemcardManager::ExportFiles(Memcard::SavefileFormat format)
+void SetUpSaveTable(QTableWidget* table)
 {
-  const auto& memcard = m_slot_memcard[m_active_slot];
-  if (!memcard)
+  table->setTabKeyNavigation(false);
+  table->setHorizontalScrollMode(QAbstractItemView::ScrollMode::ScrollPerPixel);
+  table->setVerticalScrollMode(QAbstractItemView::ScrollMode::ScrollPerPixel);
+}
+
+void SetUpSaveColumns(QTableWidget* table)
+{
+  table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  table->setSelectionBehavior(QAbstractItemView::SelectRows);
+  table->setSortingEnabled(true);
+
+  QHeaderView* const header = table->horizontalHeader();
+  header->setHighlightSections(false);
+  header->setMinimumSectionSize(0);
+  header->setSortIndicatorShown(true);
+
+  table->setColumnCount(COLUMN_COUNT);
+  const QString titles[COLUMN_COUNT] = {GCMemcardManager::tr("Filename"),
+                                        GCMemcardManager::tr("Banner"),
+                                        GCMemcardManager::tr("Title"), GCMemcardManager::tr("Icon"),
+                                        GCMemcardManager::tr("Blocks")};
+  for (int column = 0; column < COLUMN_COUNT; ++column)
+    table->setHorizontalHeaderItem(column, new QTableWidgetItem(titles[column]));
+
+  const int widths[COLUMN_COUNT] = {100, Memcard::MEMORY_CARD_BANNER_WIDTH + ICON_PADDING, 160,
+                                    Memcard::MEMORY_CARD_ICON_WIDTH + ICON_PADDING, 40};
+  for (int column = 0; column < COLUMN_COUNT; ++column)
+    table->setColumnWidth(column, widths[column]);
+
+  table->verticalHeader()->setDefaultSectionSize(ROW_HEIGHT);
+  table->verticalHeader()->hide();
+  table->setShowGrid(false);
+}
+}  // namespace
+
+struct GCMemcardManager::AnimatedIcon
+{
+  std::vector<QPixmap> frames;
+  // One entry per animation tick: the index of the frame shown during that tick.
+  std::vector<u8> schedule;
+};
+
+GCMemcardManager::GCMemcardManager(QWidget* parent) : QDialog(parent)
+{
+  BuildWidgets();
+  ConnectWidgets();
+
+  SelectSlot(Slot::A);
+  UpdateButtons();
+
+  m_animation_timer = new QTimer(this);
+  connect(m_animation_timer, &QTimer::timeout, this, &GCMemcardManager::AnimateIcons);
+  m_animation_timer->start(1000 / ANIMATION_TICKS_PER_SECOND);
+
+  OpenConfiguredCards();
+
+  resize(650, 500);
+  setWindowTitle(tr("GameCube Memory Card Manager"));
+}
+
+GCMemcardManager::~GCMemcardManager() = default;
+
+void GCMemcardManager::BuildWidgets()
+{
+  m_close_box = new QDialogButtonBox(QDialogButtonBox::Close);
+
+  // The texts of the first two depend on the active slot (see SelectSlot).
+  m_switch_button = new NonDefaultQPushButton;
+  m_copy_button = new NonDefaultQPushButton;
+  m_delete_button = new NonDefaultQPushButton(tr("&Delete"));
+
+  // Export is a split button: the main part exports as .gci, the arrow offers the other formats.
+  m_export_button = new QToolButton(this);
+  m_export_menu = new QMenu(m_export_button);
+  m_export_gci = new QAction(tr("&Export as .gci..."), m_export_menu);
+  m_export_gcs = new QAction(tr("Export as .&gcs..."), m_export_menu);
+  m_export_sav = new QAction(tr("Export as .&sav..."), m_export_menu);
+  for (QAction* const action : {m_export_gci, m_export_gcs, m_export_sav})
+    m_export_menu->addAction(action);
+  m_export_button->setDefaultAction(m_export_gci);
+  m_export_button->setPopupMode(QToolButton::MenuButtonPopup);
+  m_export_button->setMenu(m_export_menu);
+
+  m_import_button = new NonDefaultQPushButton(tr("&Import..."));
+  m_fix_button = new NonDefaultQPushButton(tr("Fix Checksums"));
+
+  auto* const grid = new QGridLayout;
+
+  for (const Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+  {
+    auto* const group = new QGroupBox(slot == Slot::A ? tr("Slot A") : tr("Slot B"));
+    m_groups[slot] = group;
+    m_paths[slot] = new QLineEdit;
+    m_open_buttons[slot] = new NonDefaultQPushButton(tr("&Open..."));
+    m_create_buttons[slot] = new NonDefaultQPushButton(tr("&Create..."));
+    m_tables[slot] = new QTableWidget;
+    SetUpSaveTable(m_tables[slot]);
+    m_free_space[slot] = new QLabel;
+    SetUpSaveColumns(m_tables[slot]);
+
+    // Path, Open and Create on top, the saves below, the free space at the bottom.
+    auto* const slot_grid = new QGridLayout;
+    group->setLayout(slot_grid);
+    slot_grid->addWidget(m_paths[slot], 0, 0);
+    slot_grid->addWidget(m_open_buttons[slot], 0, 1);
+    slot_grid->addWidget(m_create_buttons[slot], 0, 2);
+    slot_grid->addWidget(m_tables[slot], 1, 0, 1, 3);
+    slot_grid->addWidget(m_free_space[slot], 2, 0);
+
+    // Slot A on the left, slot B on the right, the buttons in the middle column.
+    grid->addWidget(group, 0, slot == Slot::A ? 0 : 2, 8, 1);
+
+    FillTable(slot);
+  }
+
+  int row = 1;
+  for (QWidget* const button :
+       std::initializer_list<QWidget*>{m_switch_button, m_copy_button, m_delete_button,
+                                       m_export_button, m_import_button, m_fix_button})
+  {
+    grid->addWidget(button, row++, 1);
+  }
+  grid->addWidget(m_close_box, 8, 2);
+
+  setLayout(grid);
+}
+
+void GCMemcardManager::ConnectWidgets()
+{
+  connect(m_close_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(m_switch_button, &QPushButton::clicked,
+          [this] { SelectSlot(OtherSlot(m_active_slot)); });
+  connect(m_export_gci, &QAction::triggered,
+          [this] { ExportSaves(Memcard::SavefileFormat::GCI); });
+  connect(m_export_gcs, &QAction::triggered,
+          [this] { ExportSaves(Memcard::SavefileFormat::GCS); });
+  connect(m_export_sav, &QAction::triggered,
+          [this] { ExportSaves(Memcard::SavefileFormat::SAV); });
+  connect(m_delete_button, &QPushButton::clicked, this, &GCMemcardManager::DeleteSaves);
+  connect(m_import_button, &QPushButton::clicked, this, &GCMemcardManager::ImportFromFiles);
+  connect(m_copy_button, &QPushButton::clicked, this, &GCMemcardManager::CopyToOtherSlot);
+  connect(m_fix_button, &QPushButton::clicked, this, &GCMemcardManager::FixChecksums);
+
+  for (const Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+  {
+    // Typing or picking a path opens the card right away.
+    connect(m_paths[slot], &QLineEdit::textChanged,
+            [this, slot](const QString& path) { OpenCard(slot, path); });
+    connect(m_open_buttons[slot], &QPushButton::clicked, [this, slot] { BrowseForCard(slot); });
+    connect(m_create_buttons[slot], &QPushButton::clicked, [this, slot] { CreateCard(slot); });
+    connect(m_tables[slot], &QTableWidget::itemSelectionChanged, this,
+            &GCMemcardManager::UpdateButtons);
+  }
+}
+
+void GCMemcardManager::OpenConfiguredCards()
+{
+  // Start with the cards the emulated slots use, where they hold a memory card image.
+  for (const Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+  {
+    if (Config::Get(Config::GetInfoForEXIDevice(slot)) !=
+        ExpansionInterface::EXIDeviceType::MemoryCard)
+    {
+      continue;
+    }
+
+    const std::string path =
+        Config::GetMemcardPath(slot, Config::Get(Config::MAIN_FALLBACK_REGION));
+    OpenCard(slot, QString::fromStdString(path));
+  }
+}
+
+void GCMemcardManager::SelectSlot(Slot slot)
+{
+  // Only the active slot's table can be used; the buttons act on it.
+  for (const Slot other : ExpansionInterface::MEMCARD_SLOTS)
+    m_tables[other]->setEnabled(other == slot);
+
+  const bool a = slot == Slot::A;
+  m_switch_button->setText(a ? tr("Switch to B") : tr("Switch to A"));
+  m_copy_button->setText(a ? tr("Copy to B") : tr("Copy to A"));
+
+  m_active_slot = slot;
+  UpdateButtons();
+}
+
+void GCMemcardManager::FillTable(Slot slot)
+{
+  m_icons[slot].clear();
+
+  QTableWidget* const table = m_tables[slot];
+  if (!m_cards[slot])
+  {
+    table->setRowCount(0);
+    m_free_space[slot]->clear();
+    return;
+  }
+
+  Memcard::GCMemcard& card = *m_cards[slot];
+
+  // Rows are added in directory order; sorting is off meanwhile so they stay where put.
+  table->setSortingEnabled(false);
+
+  const u8 save_count = card.GetNumFiles();
+  const u8 free_entries = Memcard::DIRLEN - save_count;
+  const u16 free_blocks = card.GetFreeBlocks();
+  table->setRowCount(save_count);
+
+  for (int row = 0; row < save_count; ++row)
+  {
+    const u8 index = card.GetFileIndex(row);
+
+    const auto comments = card.GetSaveComments(index);
+    const u16 blocks = card.DEntry_BlockCount(index);
+    const auto entry = card.GetDEntry(index);
+    const std::string file_name = entry ? Memcard::GenerateFilename(*entry) : "";
+
+    QString title;
+    QString comment;
+    if (comments)
+    {
+      title = QString::fromStdString(comments->first).trimmed();
+      comment = QString::fromStdString(comments->second).trimmed();
+    }
+
+    QPixmap banner = BannerOf(index, slot);
+    AnimatedIcon icon = IconOf(index, slot);
+
+    QTableWidgetItem* const cells[COLUMN_COUNT] = {
+        new QTableWidgetItem(QString::fromStdString(file_name)),
+        new QTableWidgetItem(),
+        new QTableWidgetItem(QStringLiteral("%1\n%2").arg(title, comment)),
+        new QTableWidgetItem(),
+        new QTableWidgetItem(),
+    };
+    cells[COLUMN_BANNER]->setData(Qt::DecorationRole, banner);
+    cells[COLUMN_ICON]->setData(Qt::DecorationRole, icon.frames[0]);
+    cells[COLUMN_BLOCKS]->setData(Qt::DisplayRole, blocks);
+
+    for (QTableWidgetItem* const cell : cells)
+    {
+      cell->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+      cell->setData(ROLE_DIRECTORY_INDEX, static_cast<int>(index));
+    }
+
+    m_icons[slot].emplace(index, std::move(icon));
+
+    for (int column = 0; column < COLUMN_COUNT; ++column)
+      table->setItem(row, column, cells[column]);
+  }
+
+  const QString blocks_text = tr("Free Blocks: %1").arg(free_blocks);
+  const QString entries_text = tr("Free Files: %1").arg(free_entries);
+  m_free_space[slot]->setText(QStringLiteral("%1      %2").arg(blocks_text, entries_text));
+
+  table->setSortingEnabled(true);
+}
+
+void GCMemcardManager::UpdateButtons()
+{
+  const bool has_selection = !m_tables[m_active_slot]->selectedItems().isEmpty();
+  const bool has_card = m_cards[m_active_slot] != nullptr;
+  const bool other_has_card = m_cards[OtherSlot(m_active_slot)] != nullptr;
+
+  m_copy_button->setEnabled(has_selection && other_has_card);
+  m_export_button->setEnabled(has_selection);
+  m_import_button->setEnabled(has_card);
+  m_delete_button->setEnabled(has_selection);
+  m_fix_button->setEnabled(has_card);
+}
+
+void GCMemcardManager::OpenCard(Slot slot, const QString& path)
+{
+  auto [error, card] = Memcard::GCMemcard::Open(path.toStdString());
+
+  const bool usable = !error.HasCriticalErrors() && card && card->IsValid();
+  if (usable)
+  {
+    // Note: this re-enters OpenCard through textChanged when the path text actually changes.
+    m_paths[slot]->setText(path);
+    m_cards[slot] = std::make_unique<Memcard::GCMemcard>(std::move(*card));
+  }
+  else
+  {
+    m_cards[slot] = nullptr;
+    ModalMessageBox::warning(
+        this, tr("Error"),
+        tr("Failed opening memory card:\n%1").arg(GetErrorMessagesForErrorCode(error)));
+  }
+
+  FillTable(slot);
+  UpdateButtons();
+}
+
+void GCMemcardManager::BrowseForCard(Slot slot)
+{
+  const QString caption =
+      slot == Slot::A ? tr("Set Memory Card File for Slot A") : tr("Set Memory Card File for Slot B");
+  const QString filter =
+      QStringLiteral("%1 (*.raw *.gcp);;%2 (*)").arg(tr("GameCube Memory Cards"), tr("All Files"));
+  const QString path = QDir::toNativeSeparators(
+      DolphinFileDialog::getOpenFileName(this, caption, UserCardFolder(), filter));
+  if (!path.isEmpty())
+    m_paths[slot]->setText(path);
+}
+
+std::vector<u8> GCMemcardManager::SelectedSaves()
+{
+  // Selected cells, folded into a set of directory indices (ascending).
+  std::vector<bool> picked(Memcard::DIRLEN);
+  for (const QTableWidgetItem* const cell : m_tables[m_active_slot]->selectedItems())
+  {
+    const int index = cell->data(ROLE_DIRECTORY_INDEX).toInt();
+    if (index < 0 || index >= static_cast<int>(Memcard::DIRLEN))
+    {
+      ModalMessageBox::warning(this, tr("Error"),
+                               tr("Data inconsistency in GCMemcardManager, aborting action."));
+      return {};
+    }
+    picked[static_cast<size_t>(index)] = true;
+  }
+
+  std::vector<u8> indices;
+  for (size_t index = 0; index < picked.size(); ++index)
+  {
+    if (picked[index])
+      indices.push_back(static_cast<u8>(index));
+  }
+  return indices;
+}
+
+void GCMemcardManager::ExportSaves(Memcard::SavefileFormat format)
+{
+  const auto& card = m_cards[m_active_slot];
+  if (!card)
     return;
 
-  const auto selected_indices = GetSelectedFileIndices();
-  if (selected_indices.empty())
+  const std::vector<u8> selected = SelectedSaves();
+  if (selected.empty())
     return;
 
-  const auto savefiles = Memcard::GetSavefiles(*memcard, selected_indices);
-  if (savefiles.empty())
+  const auto saves = Memcard::GetSavefiles(*card, selected);
+  if (saves.empty())
   {
     ModalMessageBox::warning(this, tr("Export Failed"),
                              tr("Failed to read selected savefile(s) from memory card."));
     return;
   }
 
-  std::string extension = Memcard::GetDefaultExtension(format);
+  const std::string extension = Memcard::GetDefaultExtension(format);
 
-  if (savefiles.size() == 1)
+  // A single save goes exactly where the user says.
+  if (saves.size() == 1)
   {
-    // when exporting a single save file, let user specify exact path
-    const std::string basename = Memcard::GenerateFilename(savefiles[0].dir_entry);
-    const QString qformatdesc = GetFormatDescription(format);
-    const std::string default_path =
-        fmt::format("{}/{}{}", File::GetUserPath(D_GCUSER_IDX), basename, extension);
-    const QString qfilename = DolphinFileDialog::getSaveFileName(
-        this, tr("Export Save File"), QString::fromStdString(default_path),
-        QStringLiteral("%1 (*%2);;%3 (*)")
-            .arg(qformatdesc, QString::fromStdString(extension), tr("All Files")));
-    if (qfilename.isEmpty())
+    const std::string suggestion =
+        fmt::format("{}/{}{}", File::GetUserPath(D_GCUSER_IDX),
+                    Memcard::GenerateFilename(saves[0].dir_entry), extension);
+    const QString filter = QStringLiteral("%1 (*%2);;%3 (*)")
+                               .arg(FormatName(format), QString::fromStdString(extension),
+                                    tr("All Files"));
+    const QString chosen = DolphinFileDialog::getSaveFileName(
+        this, tr("Export Save File"), QString::fromStdString(suggestion), filter);
+    if (chosen.isEmpty())
       return;
 
-    const std::string filename = qfilename.toStdString();
-    if (!Memcard::WriteSavefile(filename, savefiles[0], format))
+    const std::string path = chosen.toStdString();
+    if (!Memcard::WriteSavefile(path, saves[0], format))
     {
-      File::Delete(filename);
+      File::Delete(path);
       ModalMessageBox::warning(this, tr("Export Failed"), tr("Failed to write savefile to disk."));
     }
-
     return;
   }
 
-  const QString qdirpath = DolphinFileDialog::getExistingDirectory(
-      this, QObject::tr("Export Save Files"),
-      QString::fromStdString(File::GetUserPath(D_GCUSER_IDX)));
-  if (qdirpath.isEmpty())
+  // Several saves go into a folder, each under its own name, never overwriting a file.
+  const QString chosen_dir = DolphinFileDialog::getExistingDirectory(
+      this, QObject::tr("Export Save Files"), UserCardFolder());
+  if (chosen_dir.isEmpty())
     return;
 
-  const std::string dirpath = qdirpath.toStdString();
-  size_t failures = 0;
-  for (const auto& savefile : savefiles)
+  const std::string dir = chosen_dir.toStdString();
+  size_t failed = 0;
+  for (const auto& save : saves)
   {
-    // find a free filename so we don't overwrite anything
-    const std::string basepath = dirpath + DIR_SEP + Memcard::GenerateFilename(savefile.dir_entry);
-    std::string filename = basepath + extension;
-    if (File::Exists(filename))
-    {
-      size_t tmp = 0;
-      std::string free_name;
-      do
-      {
-        free_name = fmt::format("{}_{}{}", basepath, tmp, extension);
-        ++tmp;
-      } while (File::Exists(free_name));
-      filename = free_name;
-    }
+    const std::string stem = dir + DIR_SEP + Memcard::GenerateFilename(save.dir_entry);
+    std::string path = stem + extension;
+    for (size_t n = 0; File::Exists(path); ++n)
+      path = fmt::format("{}_{}{}", stem, n, extension);
 
-    if (!Memcard::WriteSavefile(filename, savefile, format))
+    if (!Memcard::WriteSavefile(path, save, format))
     {
-      File::Delete(filename);
-      ++failures;
+      File::Delete(path);
+      ++failed;
     }
   }
 
-  if (failures > 0)
+  if (failed == 0)
+    return;
+
+  const QString failed_text =
+      tr("Failed to export %n out of %1 save file(s).", "", static_cast<int>(failed))
+          .arg(saves.size());
+  if (failed == saves.size())
   {
-    QString failure_string =
-        tr("Failed to export %n out of %1 save file(s).", "", static_cast<int>(failures))
-            .arg(savefiles.size());
-    if (failures == savefiles.size())
-    {
-      ModalMessageBox::warning(this, tr("Export Failed"), failure_string);
-    }
-    else
-    {
-      QString success_string = tr("Successfully exported %n out of %1 save file(s).", "",
-                                  static_cast<int>(savefiles.size() - failures))
-                                   .arg(savefiles.size());
-      ModalMessageBox::warning(this, tr("Export Failed"),
-                               QStringLiteral("%1\n%2").arg(failure_string, success_string));
-    }
+    ModalMessageBox::warning(this, tr("Export Failed"), failed_text);
+    return;
   }
+
+  const QString done_text = tr("Successfully exported %n out of %1 save file(s).", "",
+                               static_cast<int>(saves.size() - failed))
+                                .arg(saves.size());
+  ModalMessageBox::warning(this, tr("Export Failed"),
+                           QStringLiteral("%1\n%2").arg(failed_text, done_text));
 }
 
-void GCMemcardManager::ImportFiles(Slot slot, std::span<const Memcard::Savefile> savefiles)
+void GCMemcardManager::ImportInto(Slot slot, std::span<const Memcard::Savefile> saves)
 {
-  auto& card = m_slot_memcard[slot];
+  auto& card = m_cards[slot];
   if (!card)
     return;
 
-  const size_t number_of_files = savefiles.size();
-  const size_t number_of_blocks = Memcard::GetBlockCount(savefiles);
-  const size_t free_files = Memcard::DIRLEN - card->GetNumFiles();
+  // Check everything that can be checked up front, and report all problems at once.
+  const size_t needed_entries = saves.size();
+  const size_t needed_blocks = Memcard::GetBlockCount(saves);
+  const size_t free_entries = Memcard::DIRLEN - card->GetNumFiles();
   const size_t free_blocks = card->GetFreeBlocks();
 
-  QStringList error_messages;
-
-  if (number_of_files > free_files)
+  QStringList problems;
+  if (needed_entries > free_entries)
   {
-    error_messages.push_back(
+    problems.push_back(
         tr("Not enough free files on the target memory card. At least %n free file(s) required.",
-           "", static_cast<int>(number_of_files)));
+           "", static_cast<int>(needed_entries)));
   }
-
-  if (number_of_blocks > free_blocks)
+  if (needed_blocks > free_blocks)
   {
-    error_messages.push_back(
+    problems.push_back(
         tr("Not enough free blocks on the target memory card. At least %n free block(s) required.",
-           "", static_cast<int>(number_of_blocks)));
+           "", static_cast<int>(needed_blocks)));
   }
-
-  if (Memcard::HasDuplicateIdentity(savefiles))
+  if (Memcard::HasDuplicateIdentity(saves))
   {
-    error_messages.push_back(
+    problems.push_back(
         tr("At least two of the selected save files have the same internal filename."));
   }
-
-  for (const Memcard::Savefile& savefile : savefiles)
+  for (const Memcard::Savefile& save : saves)
   {
-    if (card->TitlePresent(savefile.dir_entry))
-    {
-      const std::string filename = Memcard::GenerateFilename(savefile.dir_entry);
-      error_messages.push_back(tr("The target memory card already contains a file \"%1\".")
-                                   .arg(QString::fromStdString(filename)));
-    }
+    if (!card->TitlePresent(save.dir_entry))
+      continue;
+    problems.push_back(tr("The target memory card already contains a file \"%1\".")
+                           .arg(QString::fromStdString(Memcard::GenerateFilename(save.dir_entry))));
   }
 
-  if (!error_messages.empty())
+  if (!problems.empty())
   {
-    ModalMessageBox::warning(this, tr("Import Failed"), error_messages.join(QLatin1Char('\n')));
+    ModalMessageBox::warning(this, tr("Import Failed"), problems.join(QLatin1Char('\n')));
     return;
   }
 
-  for (const Memcard::Savefile& savefile : savefiles)
+  for (const Memcard::Savefile& save : saves)
   {
-    const auto result = card->ImportFile(savefile);
+    // After the checks above, this only fails on a damaged card.
+    if (card->ImportFile(save) == Memcard::GCMemcardImportFileRetVal::SUCCESS)
+      continue;
 
-    // we've already checked everything that could realistically fail here, so this should only
-    // happen if the memory card data is corrupted in some way
-    if (result != Memcard::GCMemcardImportFileRetVal::SUCCESS)
-    {
-      const std::string filename = Memcard::GenerateFilename(savefile.dir_entry);
-      ModalMessageBox::warning(
-          this, tr("Import Failed"),
-          tr("Failed to import \"%1\".").arg(QString::fromStdString(filename)));
-      break;
-    }
+    ModalMessageBox::warning(this, tr("Import Failed"),
+                             tr("Failed to import \"%1\".")
+                                 .arg(QString::fromStdString(
+                                     Memcard::GenerateFilename(save.dir_entry))));
+    break;
   }
 
   if (!card->Save())
@@ -571,39 +570,37 @@ void GCMemcardManager::ImportFiles(Slot slot, std::span<const Memcard::Savefile>
                              tr("Failed to write modified memory card to disk."));
   }
 
-  UpdateSlotTable(slot);
+  FillTable(slot);
 }
 
-void GCMemcardManager::ImportFile()
+void GCMemcardManager::ImportFromFiles()
 {
-  auto& card = m_slot_memcard[m_active_slot];
-  if (!card)
+  if (!m_cards[m_active_slot])
     return;
 
-  const QStringList paths = DolphinFileDialog::getOpenFileNames(
-      this, tr("Import Save File(s)"), QString::fromStdString(File::GetUserPath(D_GCUSER_IDX)),
+  const QString filter =
       QStringLiteral("%1 (*.gci *.gcs *.sav);;%2 (*.gci);;%3 (*.gcs);;%4 (*.sav);;%5 (*)")
-          .arg(tr("Supported file formats"), GetFormatDescription(Memcard::SavefileFormat::GCI),
-               GetFormatDescription(Memcard::SavefileFormat::GCS),
-               GetFormatDescription(Memcard::SavefileFormat::SAV), tr("All Files")));
-
+          .arg(tr("Supported file formats"), FormatName(Memcard::SavefileFormat::GCI),
+               FormatName(Memcard::SavefileFormat::GCS),
+               FormatName(Memcard::SavefileFormat::SAV), tr("All Files"));
+  const QStringList paths = DolphinFileDialog::getOpenFileNames(this, tr("Import Save File(s)"),
+                                                                UserCardFolder(), filter);
   if (paths.isEmpty())
     return;
 
-  std::vector<Memcard::Savefile> savefiles;
-  savefiles.reserve(paths.size());
+  // Read every file first; any unreadable one cancels the whole import.
+  std::vector<Memcard::Savefile> saves;
+  saves.reserve(static_cast<size_t>(paths.size()));
   QStringList errors;
   for (const QString& path : paths)
   {
-    auto read_result = Memcard::ReadSavefile(path.toStdString());
     std::visit(overloaded{
-                   [&](Memcard::Savefile savefile) { savefiles.emplace_back(std::move(savefile)); },
-                   [&](Memcard::ReadSavefileErrorCode error_code) {
-                     errors.push_back(
-                         tr("%1: %2").arg(path, GetErrorMessageForErrorCode(error_code)));
+                   [&saves](Memcard::Savefile save) { saves.emplace_back(std::move(save)); },
+                   [&errors, &path](Memcard::ReadSavefileErrorCode error) {
+                     errors.push_back(tr("%1: %2").arg(path, GetErrorMessageForErrorCode(error)));
                    },
                },
-               std::move(read_result));
+               Memcard::ReadSavefile(path.toStdString()));
   }
 
   if (!errors.empty())
@@ -615,57 +612,51 @@ void GCMemcardManager::ImportFile()
     return;
   }
 
-  ImportFiles(m_active_slot, savefiles);
+  ImportInto(m_active_slot, saves);
 }
 
-void GCMemcardManager::CopyFiles()
+void GCMemcardManager::CopyToOtherSlot()
 {
-  const auto& source_card = m_slot_memcard[m_active_slot];
-  if (!source_card)
+  const auto& source = m_cards[m_active_slot];
+  if (!source || !m_cards[OtherSlot(m_active_slot)])
     return;
 
-  auto& target_card = m_slot_memcard[OtherSlot(m_active_slot)];
-  if (!target_card)
+  const std::vector<u8> selected = SelectedSaves();
+  if (selected.empty())
     return;
 
-  const auto selected_indices = GetSelectedFileIndices();
-  if (selected_indices.empty())
-    return;
-
-  const auto savefiles = Memcard::GetSavefiles(*source_card, selected_indices);
-  if (savefiles.empty())
+  const auto saves = Memcard::GetSavefiles(*source, selected);
+  if (saves.empty())
   {
     ModalMessageBox::warning(this, tr("Copy Failed"),
                              tr("Failed to read selected savefile(s) from memory card."));
     return;
   }
 
-  ImportFiles(OtherSlot(m_active_slot), savefiles);
+  ImportInto(OtherSlot(m_active_slot), saves);
 }
 
-void GCMemcardManager::DeleteFiles()
+void GCMemcardManager::DeleteSaves()
 {
-  auto& card = m_slot_memcard[m_active_slot];
+  auto& card = m_cards[m_active_slot];
   if (!card)
     return;
 
-  const auto selected_indices = GetSelectedFileIndices();
-  if (selected_indices.empty())
+  const std::vector<u8> selected = SelectedSaves();
+  if (selected.empty())
     return;
 
-  const QString text = tr("Do you want to delete the %n selected save file(s)?", "",
-                          static_cast<int>(selected_indices.size()));
-  const auto response = ModalMessageBox::question(this, tr("Question"), text);
-  if (response != QMessageBox::Yes)
+  const QString question = tr("Do you want to delete the %n selected save file(s)?", "",
+                              static_cast<int>(selected.size()));
+  if (ModalMessageBox::question(this, tr("Question"), question) != QMessageBox::Yes)
     return;
 
-  for (const u8 index : selected_indices)
+  for (const u8 index : selected)
   {
-    if (card->RemoveFile(index) != Memcard::GCMemcardRemoveFileRetVal::SUCCESS)
-    {
-      ModalMessageBox::warning(this, tr("Remove Failed"), tr("Failed to remove file."));
-      break;
-    }
+    if (card->RemoveFile(index) == Memcard::GCMemcardRemoveFileRetVal::SUCCESS)
+      continue;
+    ModalMessageBox::warning(this, tr("Remove Failed"), tr("Failed to remove file."));
+    break;
   }
 
   if (!card->Save())
@@ -674,181 +665,151 @@ void GCMemcardManager::DeleteFiles()
                              tr("Failed to write modified memory card to disk."));
   }
 
-  UpdateSlotTable(m_active_slot);
-  UpdateActions();
+  FillTable(m_active_slot);
+  UpdateButtons();
 }
 
 void GCMemcardManager::FixChecksums()
 {
-  auto& memcard = m_slot_memcard[m_active_slot];
-  memcard->FixChecksums();
+  // Only reachable with a card open (the button is disabled otherwise).
+  Memcard::GCMemcard& card = *m_cards[m_active_slot];
+  card.FixChecksums();
 
-  if (!memcard->Save())
+  if (!card.Save())
   {
     ModalMessageBox::warning(this, tr("Fix Checksums Failed"),
                              tr("Failed to write modified memory card to disk."));
   }
 }
 
-void GCMemcardManager::CreateNewCard(Slot slot)
+void GCMemcardManager::CreateCard(Slot slot)
 {
   GCMemcardCreateNewDialog dialog(this);
   if (dialog.exec() == QDialog::Accepted)
-    m_slot_file_edit[slot]->setText(QString::fromStdString(dialog.GetMemoryCardPath()));
+    m_paths[slot]->setText(QString::fromStdString(dialog.GetMemoryCardPath()));
 }
 
-void GCMemcardManager::DrawIcons()
+void GCMemcardManager::AnimateIcons()
 {
-  const int column = COLUMN_INDEX_ICON;
-  for (Slot slot : MEMCARD_SLOTS)
+  for (const Slot slot : ExpansionInterface::MEMCARD_SLOTS)
   {
-    QTableWidget* table = m_slot_table[slot];
-    const int row_count = table->rowCount();
-
-    if (row_count <= 0)
+    QTableWidget* const table = m_tables[slot];
+    const int rows = table->rowCount();
+    if (rows <= 0)
       continue;
 
-    const auto viewport = table->viewport();
-    const int viewport_first_row = table->indexAt(viewport->rect().topLeft()).row();
-    if (viewport_first_row >= row_count)
+    // Only the rows inside the viewport are touched.
+    const QRect area = table->viewport()->rect();
+    const int top_row = table->indexAt(area.topLeft()).row();
+    if (top_row >= rows)
       continue;
+    const int bottom_row = table->indexAt(area.bottomLeft()).row();
+    const int first = std::max(top_row, 0);
+    const int last = bottom_row < 0 ? rows - 1 : std::min(bottom_row, rows - 1);
 
-    const int first_row = viewport_first_row < 0 ? 0 : viewport_first_row;
-    const int viewport_last_row = table->indexAt(viewport->rect().bottomLeft()).row();
-    const int last_row =
-        viewport_last_row < 0 ? (row_count - 1) : std::min(viewport_last_row, row_count - 1);
-
-    for (int row = first_row; row <= last_row; ++row)
+    for (int row = first; row <= last; ++row)
     {
-      auto* item = table->item(row, column);
-      if (!item)
+      QTableWidgetItem* const cell = table->item(row, COLUMN_ICON);
+      if (!cell)
         continue;
 
-      const u8 index = static_cast<u8>(item->data(Qt::UserRole).toInt());
-      auto it = m_slot_active_icons[slot].find(index);
-      if (it == m_slot_active_icons[slot].end())
+      const auto index = static_cast<u8>(cell->data(ROLE_DIRECTORY_INDEX).toInt());
+      const auto found = m_icons[slot].find(index);
+      if (found == m_icons[slot].end())
         continue;
 
-      const auto& icon = it->second;
-
-      // this icon doesn't have an animation
-      if (icon.m_frames.size() <= 1)
+      const AnimatedIcon& icon = found->second;
+      if (icon.frames.size() <= 1 || icon.schedule.empty())
         continue;
 
-      const u64 prev_time_in_animation = (m_current_frame - 1) % icon.m_frame_timing.size();
-      const u8 prev_frame = icon.m_frame_timing[prev_time_in_animation];
-      const u64 current_time_in_animation = m_current_frame % icon.m_frame_timing.size();
-      const u8 current_frame = icon.m_frame_timing[current_time_in_animation];
-
-      if (prev_frame == current_frame)
-        continue;
-
-      item->setData(Qt::DecorationRole, icon.m_frames[current_frame]);
+      // Only touch the cell when the frame actually changes from the last tick.
+      const u64 length = icon.schedule.size();
+      const u8 before = icon.schedule[(m_tick - 1) % length];
+      const u8 now = icon.schedule[m_tick % length];
+      if (before != now)
+        cell->setData(Qt::DecorationRole, icon.frames[now]);
     }
   }
 
-  ++m_current_frame;
+  ++m_tick;
 }
 
-QPixmap GCMemcardManager::GetBannerFromSaveFile(int file_index, Slot slot)
+QPixmap GCMemcardManager::BannerOf(int file_index, Slot slot)
 {
-  auto& memcard = m_slot_memcard[slot];
+  const auto pixels = m_cards[slot]->ReadBannerRGBA8(file_index);
+  if (!pixels)
+    return QPixmap::fromImage(QImage());
 
-  auto pxdata = memcard->ReadBannerRGBA8(file_index);
-
-  QImage image;
-  if (pxdata)
-  {
-    image = QImage(reinterpret_cast<u8*>(pxdata->data()), Memcard::MEMORY_CARD_BANNER_WIDTH,
-                   Memcard::MEMORY_CARD_BANNER_HEIGHT, QImage::Format_ARGB32);
-  }
-
+  const QImage image(reinterpret_cast<const u8*>(pixels->data()),
+                     Memcard::MEMORY_CARD_BANNER_WIDTH, Memcard::MEMORY_CARD_BANNER_HEIGHT,
+                     QImage::Format_ARGB32);
   return QPixmap::fromImage(image);
 }
 
-GCMemcardManager::IconAnimationData GCMemcardManager::GetIconFromSaveFile(int file_index, Slot slot)
+GCMemcardManager::AnimatedIcon GCMemcardManager::IconOf(int file_index, Slot slot)
 {
-  auto& memcard = m_slot_memcard[slot];
+  Memcard::GCMemcard& card = *m_cards[slot];
+  AnimatedIcon icon;
 
-  IconAnimationData frame_data;
-
-  const auto decoded_data = memcard->ReadAnimRGBA8(file_index);
-
-  // Decode Save File Animation
-  if (decoded_data && !decoded_data->empty())
+  const auto frames = card.ReadAnimRGBA8(file_index);
+  if (!frames || frames->empty())
   {
-    frame_data.m_frames.reserve(decoded_data->size());
-
-    for (size_t f = 0; f < decoded_data->size(); ++f)
-    {
-      QImage img(reinterpret_cast<const u8*>((*decoded_data)[f].image_data.data()),
-                 Memcard::MEMORY_CARD_ICON_WIDTH, Memcard::MEMORY_CARD_ICON_HEIGHT,
-                 QImage::Format_ARGB32);
-      frame_data.m_frames.push_back(QPixmap::fromImage(img));
-      for (int i = 0; i < (*decoded_data)[f].delay; ++i)
-      {
-        frame_data.m_frame_timing.push_back(static_cast<u8>(f));
-      }
-    }
-
-    const bool is_pingpong = memcard->DEntry_IsPingPong(file_index);
-    if (is_pingpong && decoded_data->size() >= 3)
-    {
-      // if the animation 'ping-pongs' between start and end then the animation frame order is
-      // something like 'abcdcbabcdcba' instead of the usual 'abcdabcdabcd'
-      // to display that correctly just append all except the first and last frame in reverse order
-      // at the end of the animation
-      for (size_t f = decoded_data->size() - 2; f > 0; --f)
-      {
-        for (int i = 0; i < (*decoded_data)[f].delay; ++i)
-        {
-          frame_data.m_frame_timing.push_back(static_cast<u8>(f));
-        }
-      }
-    }
-  }
-  else
-  {
-    // No Animation found, use an empty placeholder instead.
-    frame_data.m_frames.emplace_back();
-    frame_data.m_frame_timing.push_back(0);
+    // No icon: a single empty frame.
+    icon.frames.emplace_back();
+    icon.schedule.push_back(0);
+    return icon;
   }
 
-  return frame_data;
+  const auto show_for = [&icon, &frames](size_t frame) {
+    for (int tick = 0; tick < (*frames)[frame].delay; ++tick)
+      icon.schedule.push_back(static_cast<u8>(frame));
+  };
+
+  icon.frames.reserve(frames->size());
+  for (size_t frame = 0; frame < frames->size(); ++frame)
+  {
+    const QImage image(reinterpret_cast<const u8*>((*frames)[frame].image_data.data()),
+                       Memcard::MEMORY_CARD_ICON_WIDTH, Memcard::MEMORY_CARD_ICON_HEIGHT,
+                       QImage::Format_ARGB32);
+    icon.frames.push_back(QPixmap::fromImage(image));
+    show_for(frame);
+  }
+
+  // A "ping-pong" animation plays forwards, then backwards without repeating the end frames:
+  // a b c d c b, a b c d c b, ...
+  if (card.DEntry_IsPingPong(file_index) && frames->size() >= 3)
+  {
+    for (size_t frame = frames->size() - 2; frame > 0; --frame)
+      show_for(frame);
+  }
+
+  return icon;
 }
 
 QString GCMemcardManager::GetErrorMessagesForErrorCode(const Memcard::GCMemcardErrorCode& code)
 {
-  QStringList sl;
+  using Issue = Memcard::GCMemcardValidityIssues;
 
-  if (code.Test(Memcard::GCMemcardValidityIssues::FAILED_TO_OPEN))
-    sl.push_back(tr("Couldn't open file."));
+  QStringList messages;
+  const auto check = [&](Issue issue, const QString& message) {
+    if (code.Test(issue))
+      messages.push_back(message);
+  };
 
-  if (code.Test(Memcard::GCMemcardValidityIssues::IO_ERROR))
-    sl.push_back(tr("Couldn't read file."));
+  check(Issue::FAILED_TO_OPEN, tr("Couldn't open file."));
+  check(Issue::IO_ERROR, tr("Couldn't read file."));
+  check(Issue::INVALID_CARD_SIZE,
+        tr("Filesize does not match any known GameCube Memory Card size."));
+  check(Issue::MISMATCHED_CARD_SIZE, tr("Filesize in header mismatches actual card size."));
+  check(Issue::INVALID_CHECKSUM, tr("Invalid checksums."));
+  check(Issue::FREE_BLOCK_MISMATCH,
+        tr("Mismatch between free block count in header and actually unused blocks."));
+  check(Issue::DIR_BAT_INCONSISTENT, tr("Mismatch between internal data structures."));
+  check(Issue::DATA_IN_UNUSED_AREA, tr("Data in area of file that should be unused."));
 
-  if (code.Test(Memcard::GCMemcardValidityIssues::INVALID_CARD_SIZE))
-    sl.push_back(tr("Filesize does not match any known GameCube Memory Card size."));
-
-  if (code.Test(Memcard::GCMemcardValidityIssues::MISMATCHED_CARD_SIZE))
-    sl.push_back(tr("Filesize in header mismatches actual card size."));
-
-  if (code.Test(Memcard::GCMemcardValidityIssues::INVALID_CHECKSUM))
-    sl.push_back(tr("Invalid checksums."));
-
-  if (code.Test(Memcard::GCMemcardValidityIssues::FREE_BLOCK_MISMATCH))
-    sl.push_back(tr("Mismatch between free block count in header and actually unused blocks."));
-
-  if (code.Test(Memcard::GCMemcardValidityIssues::DIR_BAT_INCONSISTENT))
-    sl.push_back(tr("Mismatch between internal data structures."));
-
-  if (code.Test(Memcard::GCMemcardValidityIssues::DATA_IN_UNUSED_AREA))
-    sl.push_back(tr("Data in area of file that should be unused."));
-
-  if (sl.empty())
+  if (messages.empty())
     return tr("No errors.");
-
-  return sl.join(QLatin1Char{'\n'});
+  return messages.join(QLatin1Char{'\n'});
 }
 
 QString GCMemcardManager::GetErrorMessageForErrorCode(Memcard::ReadSavefileErrorCode code)

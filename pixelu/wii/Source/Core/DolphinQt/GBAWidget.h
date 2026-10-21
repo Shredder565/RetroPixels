@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -31,6 +30,8 @@ namespace NetPlay
 struct PadDetails;
 }  // namespace NetPlay
 
+// The window of one emulated Game Boy Advance: shows its screen and offers the ROM, save,
+// state, volume and window options in a context menu.
 class GBAWidget : public QWidget
 {
   Q_OBJECT
@@ -65,14 +66,15 @@ public:
 
 private:
   void UpdateTitle();
-  void UpdateVolume();
+  void ApplyVolume();
 
   static Qt::WindowFlags LoadWindowFlags(int device_number);
-  void LoadSettings();
-  void SaveSettings();
+  void RestoreSettings();
+  void StoreSettings();
 
   bool CanControlCore();
   bool CanResetCore();
+  QRect ScreenRect() const;
 
   void closeEvent(QCloseEvent* event) override;
   void contextMenuEvent(QContextMenuEvent* event) override;
@@ -86,20 +88,23 @@ private:
   void dropEvent(QDropEvent* event) override;
 
   std::weak_ptr<HW::GBA::Core> m_core;
-  HW::GBA::CoreInfo m_core_info;
-  QImage m_last_frame;
+  HW::GBA::CoreInfo m_info;
+  QImage m_frame;
   QImage m_previous_frame;
-  int m_local_pad;
-  bool m_is_local_pad;
-  std::string m_netplayer_name;
-  int m_volume;
-  bool m_muted;
-  bool m_force_disconnect;
-  bool m_moving;
-  QPoint m_move_pos;
-  bool m_interframe_blending;
+  // The pad this window belongs to; under NetPlay this is the local pad number.
+  int m_pad;
+  bool m_pad_is_local = true;
+  std::string m_player_name;
+  int m_volume = 0;
+  bool m_muted = false;
+  bool m_disconnected = false;
+  // Dragging a borderless window around.
+  bool m_dragging = false;
+  QPoint m_drag_offset;
+  bool m_blend_frames = false;
 };
 
+// Lives on the GUI thread and owns the GBAWidget of one GBAHost.
 class GBAWidgetController : public QObject
 {
   Q_OBJECT

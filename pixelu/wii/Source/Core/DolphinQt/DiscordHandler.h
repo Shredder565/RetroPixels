@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,8 @@
 
 class DiscordJoinRequestDialog;
 
+// Pumps Discord's callbacks on a thread of its own and turns them into Qt signals and
+// join request dialogs.
 class DiscordHandler : public QObject, public Discord::Handler
 {
   Q_OBJECT
@@ -39,12 +40,15 @@ signals:
 
 #ifdef USE_DISCORD_PRESENCE
 private:
-  void Run();
+  void PollLoop();
+  void CloseExpiredRequests();
+
   QWidget* m_parent;
-  Common::Flag m_stop_requested;
-  Common::Event m_wakeup_event;
-  std::thread m_thread;
-  std::list<DiscordJoinRequestDialog> m_request_dialogs;
-  std::mutex m_request_dialogs_mutex;
+  Common::Flag m_quit;
+  Common::Event m_wake;
+  std::thread m_poller;
+  // Open join requests, newest first. Guarded by m_requests_lock.
+  std::list<DiscordJoinRequestDialog> m_requests;
+  std::mutex m_requests_lock;
 #endif
 };

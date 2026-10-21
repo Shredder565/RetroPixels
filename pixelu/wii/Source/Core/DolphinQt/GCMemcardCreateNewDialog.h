@@ -1,13 +1,15 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <string>
 
 #include <QDialog>
 
 class QComboBox;
 class QRadioButton;
 
+// Asks for the size and text encoding of a new memory card image, then for where to save it.
 class GCMemcardCreateNewDialog : public QDialog
 {
   Q_OBJECT
@@ -18,10 +20,10 @@ public:
   std::string GetMemoryCardPath() const;
 
 private:
-  bool CreateCard();
+  bool SaveNewCard();
 
-  QComboBox* m_combobox_size;
-  QRadioButton* m_radio_western;
-  QRadioButton* m_radio_shiftjis;
-  std::string m_card_path;
+  QComboBox* m_size = nullptr;
+  QRadioButton* m_western = nullptr;
+  QRadioButton* m_shift_jis = nullptr;
+  std::string m_path;
 };

@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,8 @@ class Core;
 
 class GBAWidgetController;
 
+// The core's view of one GBA window. It is called on emulation threads and forwards everything
+// to a controller that lives on the GUI thread.
 class GBAHost : public GBAHostInterface
 {
 public:
@@ -25,7 +26,7 @@ public:
   void FrameEnded(std::span<const u32> video_buffer) override;
 
 private:
-  GBAWidgetController* m_widget_controller{};
+  GBAWidgetController* m_controller{};
   std::weak_ptr<HW::GBA::Core> m_core;
 };
 #endif  // HAS_LIBMGBA

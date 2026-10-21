@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -36,6 +35,8 @@ class QTableWidget;
 class QTimer;
 class QToolButton;
 
+// Tools > Memory Card Manager: two memory card images side by side, with copying, importing,
+// exporting and deleting of saves, and checksum repair.
 class GCMemcardManager : public QDialog
 {
   Q_OBJECT
@@ -47,62 +48,62 @@ public:
   static QString GetErrorMessageForErrorCode(Memcard::ReadSavefileErrorCode code);
 
 private:
-  struct IconAnimationData;
+  // A save's icon: its frames, and which frame shows at each tick of the 15 Hz animation timer.
+  struct AnimatedIcon;
 
-  void CreateWidgets();
-  void ConnectWidgets();
-  void LoadDefaultMemcards();
-
-  void UpdateActions();
-  void UpdateSlotTable(ExpansionInterface::Slot slot);
-  void SetSlotFile(ExpansionInterface::Slot slot, const QString& path);
-  void SetSlotFileInteractive(ExpansionInterface::Slot slot);
-  void SetActiveSlot(ExpansionInterface::Slot slot);
-
-  std::vector<u8> GetSelectedFileIndices();
-
-  void ImportFiles(ExpansionInterface::Slot slot, std::span<const Memcard::Savefile> savefiles);
-
-  void CopyFiles();
-  void ImportFile();
-  void DeleteFiles();
-  void ExportFiles(Memcard::SavefileFormat format);
-  void FixChecksums();
-  void CreateNewCard(ExpansionInterface::Slot slot);
-  void DrawIcons();
-
-  QPixmap GetBannerFromSaveFile(int file_index, ExpansionInterface::Slot slot);
-
-  IconAnimationData GetIconFromSaveFile(int file_index, ExpansionInterface::Slot slot);
-
-  // Actions
-  QPushButton* m_select_button;
-  QPushButton* m_copy_button;
-  QToolButton* m_export_button;
-  QMenu* m_export_menu;
-  QAction* m_export_gci_action;
-  QAction* m_export_gcs_action;
-  QAction* m_export_sav_action;
-  QPushButton* m_import_button;
-  QPushButton* m_delete_button;
-  QPushButton* m_fix_checksums_button;
-
-  // Slots
   template <typename T>
-  using SlotEnumMap = Common::EnumMap<T, ExpansionInterface::MAX_MEMCARD_SLOT>;
+  using PerSlot = Common::EnumMap<T, ExpansionInterface::MAX_MEMCARD_SLOT>;
 
-  SlotEnumMap<std::map<u8, IconAnimationData>> m_slot_active_icons;
-  SlotEnumMap<std::unique_ptr<Memcard::GCMemcard>> m_slot_memcard;
-  SlotEnumMap<QGroupBox*> m_slot_group;
-  SlotEnumMap<QLineEdit*> m_slot_file_edit;
-  SlotEnumMap<QPushButton*> m_slot_open_button;
-  SlotEnumMap<QPushButton*> m_slot_create_button;
-  SlotEnumMap<QTableWidget*> m_slot_table;
-  SlotEnumMap<QLabel*> m_slot_stat_label;
+  void BuildWidgets();
+  void ConnectWidgets();
+  void OpenConfiguredCards();
 
-  ExpansionInterface::Slot m_active_slot;
-  u64 m_current_frame = 0;
+  void UpdateButtons();
+  void FillTable(ExpansionInterface::Slot slot);
+  void OpenCard(ExpansionInterface::Slot slot, const QString& path);
+  void BrowseForCard(ExpansionInterface::Slot slot);
+  void SelectSlot(ExpansionInterface::Slot slot);
 
-  QDialogButtonBox* m_button_box;
-  QTimer* m_timer;
+  std::vector<u8> SelectedSaves();
+
+  void ImportInto(ExpansionInterface::Slot slot, std::span<const Memcard::Savefile> saves);
+
+  void CopyToOtherSlot();
+  void ImportFromFiles();
+  void DeleteSaves();
+  void ExportSaves(Memcard::SavefileFormat format);
+  void FixChecksums();
+  void CreateCard(ExpansionInterface::Slot slot);
+  void AnimateIcons();
+
+  QPixmap BannerOf(int file_index, ExpansionInterface::Slot slot);
+  AnimatedIcon IconOf(int file_index, ExpansionInterface::Slot slot);
+
+  // Buttons between the two slots.
+  QPushButton* m_switch_button = nullptr;
+  QPushButton* m_copy_button = nullptr;
+  QToolButton* m_export_button = nullptr;
+  QMenu* m_export_menu = nullptr;
+  QAction* m_export_gci = nullptr;
+  QAction* m_export_gcs = nullptr;
+  QAction* m_export_sav = nullptr;
+  QPushButton* m_import_button = nullptr;
+  QPushButton* m_delete_button = nullptr;
+  QPushButton* m_fix_button = nullptr;
+
+  // Per slot. The icons are keyed by directory index.
+  PerSlot<std::map<u8, AnimatedIcon>> m_icons;
+  PerSlot<std::unique_ptr<Memcard::GCMemcard>> m_cards;
+  PerSlot<QGroupBox*> m_groups;
+  PerSlot<QLineEdit*> m_paths;
+  PerSlot<QPushButton*> m_open_buttons;
+  PerSlot<QPushButton*> m_create_buttons;
+  PerSlot<QTableWidget*> m_tables;
+  PerSlot<QLabel*> m_free_space;
+
+  ExpansionInterface::Slot m_active_slot = ExpansionInterface::Slot::A;
+  u64 m_tick = 0;
+
+  QDialogButtonBox* m_close_box = nullptr;
+  QTimer* m_animation_timer = nullptr;
 };
