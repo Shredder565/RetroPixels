@@ -1,16 +1,10 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/SDLHints/SDLHintsWindow.h"
 
-#include "Common/Config/Config.h"
-
-#include "Core/Config/MainSettings.h"
-
-#include "DolphinQt/Config/ToolTipControls/ToolTipCheckBox.h"
-#include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
-#include "DolphinQt/QtUtils/QtUtils.h"
-#include "DolphinQt/QtUtils/SignalBlocking.h"
+#include <array>
+#include <memory>
+#include <string>
 
 #include <QDialogButtonBox>
 #include <QFrame>
@@ -22,292 +16,274 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "Common/Config/Config.h"
+#include "Core/Config/MainSettings.h"
+#include "DolphinQt/Config/ToolTipControls/ToolTipCheckBox.h"
+#include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
+#include "DolphinQt/QtUtils/QtUtils.h"
+#include "DolphinQt/QtUtils/SignalBlocking.h"
+
+namespace
+{
+constexpr const char* HINTS_SECTION = "SDL_Hints";
+
+// One switch on the main tab and the hint strings it stands for.
+struct HintSwitch
+{
+  ToolTipCheckBox* box;
+  const Config::Info<std::string>* hint;
+  const char* checked_value;
+  const char* unchecked_value;
+};
+}  // namespace
+
 SDLHintsWindow::SDLHintsWindow(QWidget* parent) : QDialog(parent)
 {
-  CreateMainLayout();
+  setMinimumWidth(300);
+  setMinimumHeight(270);
+
+  m_close_box = new QDialogButtonBox(QDialogButtonBox::Close);
+  connect(m_close_box, &QDialogButtonBox::rejected, this, &SDLHintsWindow::Close);
+
+  QWidget* const advanced_tab = BuildAdvancedTab();
+  QWidget* const main_tab = BuildMainTab();
+
+  m_tabs = new QTabWidget();
+  m_tabs->addTab(main_tab, tr("Main"));
+  m_tabs->addTab(advanced_tab, tr("Advanced"));
+  m_shown_tab = TAB_MAIN;
+  m_tabs->setCurrentIndex(m_shown_tab);
+  connect(m_tabs, &QTabWidget::currentChanged, this, &SDLHintsWindow::SwitchTab);
+
+  auto* const restart_note =
+      new QLabel(tr("Dolphin must be restarted for these changes to take effect."));
+  restart_note->setWordWrap(true);
+
+  auto* const column = new QVBoxLayout();
+  column->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, restart_note),
+                    0);
+  column->addWidget(m_tabs, 1);
+  column->addWidget(m_close_box, 0, Qt::AlignBottom | Qt::AlignRight);
+  setLayout(column);
 
   setWindowTitle(tr("SDL Controller Settings"));
 }
 
 QSize SDLHintsWindow::sizeHint() const
 {
-  return {450, 0};
+  return QSize(450, 0);
 }
 
-void SDLHintsWindow::CreateMainLayout()
+QWidget* SDLHintsWindow::BuildAdvancedTab()
 {
-  setMinimumWidth(300);
-  setMinimumHeight(270);
+  m_table = new QTableWidget(0, 2);
+  QHeaderView* const header = m_table->horizontalHeader();
+  m_table->setHorizontalHeaderLabels({tr("Name"), tr("Value")});
+  m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  m_table->setSelectionMode(QTableWidget::SingleSelection);
+  // The name column can be dragged; the value column takes the rest.
+  header->setSectionResizeMode(0, QHeaderView::Interactive);
+  header->setSectionResizeMode(1, QHeaderView::Fixed);
+  header->setMinimumSectionSize(60);
+  m_table->verticalHeader()->setVisible(false);
+  header->installEventFilter(this);
+  connect(header, &QHeaderView::sectionResized, this, &SDLHintsWindow::OnNameColumnResized);
 
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &SDLHintsWindow::OnClose);
+  LoadTable();
 
-  // Create hints table
-  m_hints_table = new QTableWidget(0, 2);
-  QHeaderView* const hints_table_header = m_hints_table->horizontalHeader();
-  m_hints_table->setHorizontalHeaderLabels({tr("Name"), tr("Value")});
-  m_hints_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  m_hints_table->setSelectionMode(QTableWidget::SingleSelection);
-  hints_table_header->setSectionResizeMode(0, QHeaderView::Interactive);
-  hints_table_header->setSectionResizeMode(1, QHeaderView::Fixed);
-  hints_table_header->setMinimumSectionSize(60);
-  m_hints_table->verticalHeader()->setVisible(false);
-  hints_table_header->installEventFilter(this);
-  QObject::connect(hints_table_header, &QHeaderView::sectionResized, this,
-                   &SDLHintsWindow::SectionResized);
+  auto* const add_button = new NonDefaultQPushButton(tr("Add"));
+  connect(add_button, &QPushButton::pressed, this, &SDLHintsWindow::AppendRow);
 
-  PopulateTable();
+  m_remove_button = new NonDefaultQPushButton(tr("Remove"));
+  m_remove_button->setEnabled(false);
+  connect(m_remove_button, &QPushButton::pressed, this, &SDLHintsWindow::DeleteCurrentRow);
+  connect(m_table, &QTableWidget::itemSelectionChanged, this,
+          &SDLHintsWindow::UpdateRemoveButton);
 
-  // Create table buttons
-  auto* const add_row_btn = new NonDefaultQPushButton(tr("Add"));
-  connect(add_row_btn, &QPushButton::pressed, this, &SDLHintsWindow::AddRow);
+  auto* const row_buttons = new QDialogButtonBox;
+  row_buttons->setContentsMargins(0, 0, 5, 5);
+  row_buttons->addButton(add_button, QDialogButtonBox::ActionRole);
+  row_buttons->addButton(m_remove_button, QDialogButtonBox::ActionRole);
 
-  m_rem_row_btn = new NonDefaultQPushButton(tr("Remove"));
-  m_rem_row_btn->setEnabled(false);
-  connect(m_rem_row_btn, &QPushButton::pressed, this, &SDLHintsWindow::RemoveRow);
-  connect(m_hints_table, &QTableWidget::itemSelectionChanged, this,
-          &SDLHintsWindow::SelectionChanged);
+  auto* const column = new QVBoxLayout();
+  column->addWidget(m_table);
+  column->addWidget(row_buttons);
 
-  auto* const btns_layout = new QDialogButtonBox;
-  btns_layout->setContentsMargins(0, 0, 5, 5);
-  btns_layout->addButton(add_row_btn, QDialogButtonBox::ActionRole);
-  btns_layout->addButton(m_rem_row_btn, QDialogButtonBox::ActionRole);
-
-  // Create advanced tab
-  auto* advanced_layout = new QVBoxLayout();
-  advanced_layout->addWidget(m_hints_table);
-  advanced_layout->addWidget(btns_layout);
-
-  auto* advanced_frame = new QFrame();
-  advanced_frame->setLayout(advanced_layout);
-
-  // Create default tab
-  m_directinput_detection = new ToolTipCheckBox(tr("Enable DirectInput Detection"));
-  m_directinput_detection->SetDescription(
-      tr("Controls whether SDL should use DirectInput for detecting controllers. Enabling this "
-         "fixes hotplug detection issues with DualSense controllers but causes Dolphin to hang up "
-         "on shutdown when using certain 8BitDo controllers.<br><br><dolphin_emphasis>If unsure, "
-         "leave this checked.</dolphin_emphasis>"));
-  connect(m_directinput_detection, &ToolTipCheckBox::toggled, [](bool checked) {
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT, checked ? "1" : "0");
-  });
-
-  m_combine_joy_cons = new ToolTipCheckBox(tr("Use Joy-Con Pairs as a Single Controller"));
-  m_combine_joy_cons->SetDescription(
-      tr("Controls whether SDL should treat a pair of Joy-Con as a single controller or as two "
-         "separate controllers.<br><br><dolphin_emphasis>If unsure, leave this "
-         "checked.</dolphin_emphasis>"));
-  connect(m_combine_joy_cons, &ToolTipCheckBox::toggled, [](bool checked) {
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, checked ? "1" : "0");
-  });
-
-  m_horizontal_joy_cons = new ToolTipCheckBox(tr("Sideways Joy-Con"));
-  m_horizontal_joy_cons->SetDescription(
-      tr("Defines the default orientation for individual Joy-Con. This setting has no effect when "
-         "Use Joy-Con Pairs as a Single Controller is "
-         "enabled.<br><br><dolphin_emphasis>If unsure, "
-         "leave this checked.</dolphin_emphasis>"));
-  connect(m_horizontal_joy_cons, &ToolTipCheckBox::toggled, [](bool checked) {
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, checked ? "0" : "1");
-  });
-
-  m_dualsense_player_led = new ToolTipCheckBox(tr("Enable DualSense Player LEDs"));
-  m_dualsense_player_led->SetDescription(
-      tr("Controls whether the player LEDs should be lit to indicate which player is associated "
-         "with a DualSense controller.<br><br><dolphin_emphasis>If unsure, leave this "
-         "unchecked.</dolphin_emphasis>"));
-  connect(m_dualsense_player_led, &ToolTipCheckBox::toggled, [](bool checked) {
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, checked ? "1" : "0");
-  });
-
-  auto* const default_layout = new QVBoxLayout();
-  default_layout->setContentsMargins(10, 10, 10, 10);
-  default_layout->addWidget(m_directinput_detection);
-  default_layout->addWidget(m_combine_joy_cons);
-  default_layout->addWidget(m_horizontal_joy_cons);
-  default_layout->addWidget(m_dualsense_player_led);
-  default_layout->addStretch(1);
-
-  auto* const default_frame = new QFrame();
-  default_frame->setLayout(default_layout);
-
-  PopulateChecklist();
-
-  // Create the tab widget
-  m_tab_widget = new QTabWidget();
-  m_tab_widget->addTab(default_frame, tr("Main"));
-  m_tab_widget->addTab(advanced_frame, tr("Advanced"));
-
-  m_current_tab_index = 0;
-  m_tab_widget->setCurrentIndex(m_current_tab_index);
-
-  connect(m_tab_widget, &QTabWidget::currentChanged, this, &SDLHintsWindow::TabChanged);
-
-  auto* const warning_text =
-      new QLabel(tr("Dolphin must be restarted for these changes to take effect."));
-  warning_text->setWordWrap(true);
-
-  // Create main layout
-  auto* const main_layout = new QVBoxLayout();
-  main_layout->addWidget(
-      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning_text), 0);
-  main_layout->addWidget(m_tab_widget, 1);
-  main_layout->addWidget(m_button_box, 0, Qt::AlignBottom | Qt::AlignRight);
-  setLayout(main_layout);
+  auto* const page = new QFrame();
+  page->setLayout(column);
+  return page;
 }
 
-void SDLHintsWindow::PopulateTable()
+QWidget* SDLHintsWindow::BuildMainTab()
 {
-  m_hints_table->setRowCount(0);
+  m_directinput = new ToolTipCheckBox(tr("Enable DirectInput Detection"));
+  m_directinput->SetDescription(
+      tr("Controls whether SDL should use DirectInput for detecting controllers. "
+         "Enabling this fixes hotplug detection issues with DualSense controllers but causes "
+         "Dolphin to hang up on shutdown when using certain 8BitDo controllers.<br><br>"
+         "<dolphin_emphasis>If unsure, leave this checked.</dolphin_emphasis>"));
 
-  // Loop through all the values in the SDL_Hints settings section and load them into the table
-  std::shared_ptr<Config::Layer> layer = Config::GetLayer(Config::LayerType::Base);
-  const Config::Section& section = layer->GetSection(Config::System::Main, "SDL_Hints");
-  for (auto& row_data : section)
+  m_joycon_pairs = new ToolTipCheckBox(tr("Use Joy-Con Pairs as a Single Controller"));
+  m_joycon_pairs->SetDescription(
+      tr("Controls whether SDL should treat a pair of Joy-Con as a single controller "
+         "or as two separate controllers.<br><br>"
+         "<dolphin_emphasis>If unsure, leave this checked.</dolphin_emphasis>"));
+
+  m_joycon_sideways = new ToolTipCheckBox(tr("Sideways Joy-Con"));
+  m_joycon_sideways->SetDescription(
+      tr("Defines the default orientation for individual Joy-Con. This setting has no effect "
+         "when Use Joy-Con Pairs as a Single Controller is enabled.<br><br>"
+         "<dolphin_emphasis>If unsure, leave this checked.</dolphin_emphasis>"));
+
+  m_ps5_leds = new ToolTipCheckBox(tr("Enable DualSense Player LEDs"));
+  m_ps5_leds->SetDescription(
+      tr("Controls whether the player LEDs should be lit to indicate which player is "
+         "associated with a DualSense controller.<br><br>"
+         "<dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
+
+  // Each switch writes its hint to the base layer as soon as it is toggled.
+  // The sideways switch is stored inverted, as the "vertical" hint.
+  const std::array<HintSwitch, 4> switches{{
+      {m_directinput, &Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT, "1", "0"},
+      {m_joycon_pairs, &Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "1", "0"},
+      {m_joycon_sideways, &Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "0", "1"},
+      {m_ps5_leds, &Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1", "0"},
+  }};
+  for (const HintSwitch& entry : switches)
   {
-    const Config::Location& location = row_data.first;
-    const std::optional<std::string>& value = row_data.second;
+    connect(entry.box, &ToolTipCheckBox::toggled, [entry](bool checked) {
+      Config::SetBase(*entry.hint, checked ? entry.checked_value : entry.unchecked_value);
+    });
+  }
 
-    if (value)
-    {
-      m_hints_table->insertRow(m_hints_table->rowCount());
-      m_hints_table->setItem(m_hints_table->rowCount() - 1, 0,
-                             new QTableWidgetItem(QString::fromStdString(location.key)));
-      m_hints_table->setItem(m_hints_table->rowCount() - 1, 1,
-                             new QTableWidgetItem(QString::fromStdString(*value)));
-    }
+  auto* const column = new QVBoxLayout();
+  column->setContentsMargins(10, 10, 10, 10);
+  for (const HintSwitch& entry : switches)
+    column->addWidget(entry.box);
+  column->addStretch(1);
+
+  auto* const page = new QFrame();
+  page->setLayout(column);
+
+  LoadSwitches();
+  return page;
+}
+
+void SDLHintsWindow::LoadTable()
+{
+  m_table->setRowCount(0);
+
+  const std::shared_ptr<Config::Layer> base = Config::GetLayer(Config::LayerType::Base);
+  const Config::Section& hints = base->GetSection(Config::System::Main, HINTS_SECTION);
+  for (const auto& [location, value] : hints)
+  {
+    // Deleted entries keep their slot with no value.
+    if (!value)
+      continue;
+    const int row = m_table->rowCount();
+    m_table->insertRow(row);
+    m_table->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(location.key)));
+    m_table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(*value)));
   }
 }
 
-void SDLHintsWindow::SaveTable()
+void SDLHintsWindow::StoreTable()
 {
-  // Clear all the old values from the SDL_Hints section
-  std::shared_ptr<Config::Layer> layer = Config::GetLayer(Config::LayerType::Base);
-  Config::Section section = layer->GetSection(Config::System::Main, "SDL_Hints");
+  // Drop every stored hint, then write back the rows that have both a name
+  // and a value.
+  const std::shared_ptr<Config::Layer> base = Config::GetLayer(Config::LayerType::Base);
+  Config::Section hints = base->GetSection(Config::System::Main, HINTS_SECTION);
+  for (auto& entry : hints)
+    entry.second.reset();
 
-  for (auto& row_data : section)
-    row_data.second.reset();
-
-  // Add each item still in the table to the config file
-  for (int row = 0; row < m_hints_table->rowCount(); ++row)
+  for (int row = 0; row < m_table->rowCount(); ++row)
   {
-    QTableWidgetItem* hint_name_item = m_hints_table->item(row, 0);
-    QTableWidgetItem* hint_value_item = m_hints_table->item(row, 1);
+    const QTableWidgetItem* const name_cell = m_table->item(row, 0);
+    const QTableWidgetItem* const value_cell = m_table->item(row, 1);
+    if (name_cell == nullptr || value_cell == nullptr)
+      continue;
 
-    if (hint_name_item != nullptr && hint_value_item != nullptr)
-    {
-      const QString& hint_name = hint_name_item->text().trimmed();
-      const QString& hint_value = hint_value_item->text().trimmed();
+    const QString name = name_cell->text().trimmed();
+    const QString value = value_cell->text().trimmed();
+    if (name.isEmpty() || value.isEmpty())
+      continue;
 
-      if (!hint_name.isEmpty() && !hint_value.isEmpty())
-      {
-        const Config::Info<std::string> setting{
-            {Config::System::Main, "SDL_Hints", hint_name.toStdString()}, ""};
-        Config::SetBase(setting, hint_value.toStdString());
-      }
-    }
+    const Config::Info<std::string> hint{{Config::System::Main, HINTS_SECTION, name.toStdString()},
+                                         ""};
+    Config::SetBase(hint, value.toStdString());
   }
 }
 
-void SDLHintsWindow::PopulateChecklist()
+void SDLHintsWindow::LoadSwitches()
 {
-  // Populate the checklist and default to the SDL default for an invalid value
-
-  // Default to checked if incorrectly set
-  SignalBlocking(m_directinput_detection)
+  // A missing or unexpected value shows the switch in its SDL default state.
+  SignalBlocking(m_directinput)
       ->setChecked(Config::GetBase(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT) != "0");
-
-  // Default to checked if incorrectly set
-  SignalBlocking(m_combine_joy_cons)
+  SignalBlocking(m_joycon_pairs)
       ->setChecked(Config::GetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) != "0");
-
-  // Default to checked if incorrectly set
-  SignalBlocking(m_horizontal_joy_cons)
+  SignalBlocking(m_joycon_sideways)
       ->setChecked(Config::GetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS) != "1");
-
-  // Default to checked if incorrectly set
-  SignalBlocking(m_dualsense_player_led)
+  SignalBlocking(m_ps5_leds)
       ->setChecked(Config::GetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED) != "0");
 }
 
-void SDLHintsWindow::AddRow()
+void SDLHintsWindow::AppendRow()
 {
-  m_hints_table->insertRow(m_hints_table->rowCount());
-  m_hints_table->scrollToBottom();
+  m_table->insertRow(m_table->rowCount());
+  m_table->scrollToBottom();
 }
 
-void SDLHintsWindow::RemoveRow()
+void SDLHintsWindow::DeleteCurrentRow()
 {
-  QModelIndex index = m_hints_table->selectionModel()->currentIndex();
-  m_hints_table->removeRow(index.row());
+  m_table->removeRow(m_table->selectionModel()->currentIndex().row());
 }
 
-void SDLHintsWindow::SelectionChanged()
+void SDLHintsWindow::UpdateRemoveButton()
 {
-  m_rem_row_btn->setEnabled(m_hints_table->selectionModel()->hasSelection());
+  m_remove_button->setEnabled(m_table->selectionModel()->hasSelection());
 }
 
-void SDLHintsWindow::OnClose()
+void SDLHintsWindow::Close()
 {
-  TabChanged(-1);  // Pass -1 to indicate exit
-
+  SwitchTab(TAB_LEAVING);
   reject();
 }
 
-void SDLHintsWindow::TabChanged(int new_index)
+// The table is saved when the advanced tab is left, and each tab reloads
+// from the config when it is shown.
+void SDLHintsWindow::SwitchTab(int next)
 {
-  // Check which tab we're coming from, cur_tab_idx has not been updated yet
-  switch (m_current_tab_index)
-  {
-  case 1:  // Coming from the advanced tab
-    SaveTable();
-    break;
+  if (m_shown_tab == TAB_ADVANCED)
+    StoreTable();
 
-  default:
-    break;
-  }
+  if (next == TAB_MAIN)
+    LoadSwitches();
+  else if (next == TAB_ADVANCED)
+    LoadTable();
 
-  // Check which tab we're going to
-  switch (new_index)
-  {
-  case 0:  // Going to the main tab
-    PopulateChecklist();
-    break;
-
-  case 1:  // Going to the advanced tab
-    PopulateTable();
-    break;
-
-  default:
-    break;
-  }
-
-  m_current_tab_index = new_index;
+  m_shown_tab = next;
 }
 
-void SDLHintsWindow::SectionResized(int logical_index, int old_size, int new_size)
+void SDLHintsWindow::OnNameColumnResized(int column, int before, int after)
 {
-  if (logical_index == 0 && old_size != new_size)
-  {
-    QHeaderView* const header = m_hints_table->horizontalHeader();
-    header->setMaximumSectionSize(header->size().width() - header->minimumSectionSize());
-    header->resizeSection(1, header->size().width() - new_size);
-  }
+  if (column != 0 || before == after)
+    return;
+
+  QHeaderView* const header = m_table->horizontalHeader();
+  const int total = header->size().width();
+  header->setMaximumSectionSize(total - header->minimumSectionSize());
+  header->resizeSection(1, total - after);
 }
 
-bool SDLHintsWindow::eventFilter(QObject* obj, QEvent* event)
+bool SDLHintsWindow::eventFilter(QObject* watched, QEvent* event)
 {
-  auto* const table_widget = qobject_cast<QHeaderView*>(obj);
-  if (table_widget)
+  // Keep both columns filling the header when it changes width.
+  if (qobject_cast<QHeaderView*>(watched) != nullptr && event->type() == QEvent::Resize)
   {
-    if (event->type() == QEvent::Resize)
-    {
-      auto* const resize_event = static_cast<QResizeEvent*>(event);
-      QHeaderView* header = m_hints_table->horizontalHeader();
-      header->setMaximumSectionSize(resize_event->size().width() - header->minimumSectionSize());
-      header->resizeSection(0, resize_event->size().width() - header->sectionSize(1));
-    }
+    const int total = static_cast<QResizeEvent*>(event)->size().width();
+    QHeaderView* const header = m_table->horizontalHeader();
+    header->setMaximumSectionSize(total - header->minimumSectionSize());
+    header->resizeSection(0, total - header->sectionSize(1));
   }
-
-  return QDialog::eventFilter(obj, event);
+  return QDialog::eventFilter(watched, event);
 }

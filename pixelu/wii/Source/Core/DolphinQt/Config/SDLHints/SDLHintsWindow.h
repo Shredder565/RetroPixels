@@ -1,16 +1,17 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QDialog>
 
-class QTabWidget;
 class QDialogButtonBox;
-class QTableWidget;
 class QPushButton;
+class QTabWidget;
+class QTableWidget;
 class ToolTipCheckBox;
 
+// Edits the SDL hints kept in the base layer's [SDL_Hints] section: a tab of
+// common switches and a free-form name/value table.
 class SDLHintsWindow final : public QDialog
 {
   Q_OBJECT
@@ -20,29 +21,37 @@ public:
   QSize sizeHint() const override;
 
 private:
-  void CreateMainLayout();
+  enum Tab : int
+  {
+    TAB_LEAVING = -1,
+    TAB_MAIN = 0,
+    TAB_ADVANCED = 1,
+  };
 
-  void PopulateTable();
-  void SaveTable();
-  void PopulateChecklist();
-  void AddRow();
-  void RemoveRow();
-  void SelectionChanged();
-  void OnClose();
-  void TabChanged(int new_index);
-  void SectionResized(int logical_index, int old_size, int new_size);
+  QWidget* BuildAdvancedTab();
+  QWidget* BuildMainTab();
 
-  bool eventFilter(QObject* obj, QEvent* event) override;
+  void LoadTable();
+  void StoreTable();
+  void LoadSwitches();
+  void AppendRow();
+  void DeleteCurrentRow();
+  void UpdateRemoveButton();
+  void Close();
+  void SwitchTab(int next);
+  void OnNameColumnResized(int column, int before, int after);
 
-  QTabWidget* m_tab_widget;
-  QDialogButtonBox* m_button_box;
-  QTableWidget* m_hints_table;
-  QPushButton* m_rem_row_btn;
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
-  ToolTipCheckBox* m_directinput_detection;
-  ToolTipCheckBox* m_combine_joy_cons;
-  ToolTipCheckBox* m_horizontal_joy_cons;
-  ToolTipCheckBox* m_dualsense_player_led;
+  QTabWidget* m_tabs;
+  QDialogButtonBox* m_close_box;
+  QTableWidget* m_table;
+  QPushButton* m_remove_button;
 
-  int m_current_tab_index;
+  ToolTipCheckBox* m_directinput;
+  ToolTipCheckBox* m_joycon_pairs;
+  ToolTipCheckBox* m_joycon_sideways;
+  ToolTipCheckBox* m_ps5_leds;
+
+  int m_shown_tab;
 };
