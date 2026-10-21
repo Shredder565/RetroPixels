@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,7 @@
 
 #include "Common/Event.h"
 
+// One entry of the public NetPlay session list.
 struct NetPlaySession
 {
   std::string name;
@@ -29,10 +29,14 @@ struct NetPlaySession
   bool has_password = false;
   bool in_game = false;
 
+  // Password-protected sessions publish their server ID scrambled with the password, so only
+  // players who know it can connect. This is obfuscation, not real encryption.
   bool EncryptID(std::string_view password);
   std::optional<std::string> DecryptID(std::string_view password) const;
 };
 
+// Client for the NetPlay session index server (Config::NETPLAY_INDEX_URL). A host adds its
+// session, and a background thread then reports its state every few seconds until it is removed.
 class NetPlayIndex
 {
 public:
@@ -42,6 +46,7 @@ public:
   std::optional<std::vector<NetPlaySession>>
   List(const std::map<std::string, std::string>& filters = {});
 
+  // Region codes with their (translatable) names.
   static std::vector<std::pair<std::string, std::string>> GetRegions();
 
   bool Add(const NetPlaySession& session);
@@ -53,12 +58,15 @@ public:
   void SetInGame(bool in_game);
   void SetGame(std::string game);
 
+  // The server's status text for the last failure, or NO_RESPONSE / BAD_JSON.
   const std::string& GetLastError() const;
 
+  // Called from the background thread when the server drops the session.
   void SetErrorCallback(std::function<void()> callback);
 
 private:
-  void NotificationLoop();
+  void KeepAlive();
+  void StopKeepAlive();
 
   std::string m_secret;
   std::string m_game;
@@ -66,9 +74,8 @@ private:
   bool m_in_game = false;
 
   std::string m_last_error;
-  std::thread m_session_thread;
-
-  Common::Event m_session_thread_exit_event;
+  std::thread m_keep_alive;
+  Common::Event m_stop_keep_alive;
 
   std::function<void()> m_error_callback = nullptr;
 };
