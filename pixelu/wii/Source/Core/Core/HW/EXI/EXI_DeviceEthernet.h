@@ -88,7 +88,7 @@ private:
     CEXIETHERNET* m_eth_ref = nullptr;
   };
 
-  // A TAP-Windows virtual adapter (OpenVPN's driver).
+  // A TAP-Windows virtual adapter (OpenVPN's driver), or a TUN/TAP interface on Linux.
   class TAPNetworkInterface : public NetworkInterface
   {
   public:
@@ -111,6 +111,15 @@ private:
     OVERLAPPED m_write_io = {};
     std::vector<u8> m_write_buffer;
     bool m_write_in_flight = false;
+    std::array<u8, BBA_RECV_SIZE> m_read_buffer{};
+    std::thread m_read_thread;
+    Common::Flag m_receiving;
+    Common::Flag m_stop_reading;
+#else
+    // A /dev/net/tun descriptor attached to a TAP interface (TAP_Unix.cpp).
+    void ReadLoop();
+
+    int m_fd = -1;
     std::array<u8, BBA_RECV_SIZE> m_read_buffer{};
     std::thread m_read_thread;
     Common::Flag m_receiving;
