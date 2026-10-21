@@ -358,6 +358,15 @@ func isDocked(child, host uintptr, overlay bool) bool {
 // game screen over the page as an owned window (see dockOverlay).
 func embedPixelU(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
 
+// embedSupermodel follows one Supermodel run like embedPixelU: its OpenGL
+// game window stays over the page as an owned window (a child of the
+// browser window wouldn't show), and Supermodel draws at the size it's given.
+func embedSupermodel(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
+
+// hostWindowPresent: the RetroPixels app window is open, so a game started
+// now gets docked into it.
+func hostWindowPresent() bool { return findHostWindow() != 0 }
+
 // embedDolphin follows one Dolphin run: docks its game screen into the
 // RetroPixels window, keeps it there, and makes sure Dolphin closes
 // completely once the game is stopped so the next game can start.

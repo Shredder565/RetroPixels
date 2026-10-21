@@ -11,7 +11,7 @@ import (
 
 // writeZip makes a .zip whose directory lists files with the given CRC-32s
 // (the contents are a stand-in: only the directory is ever read).
-func writeZip(t *testing.T, path string, files []romFile) {
+func writeZip(t *testing.T, path string, files []ROMFile) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -36,8 +36,8 @@ func writeZip(t *testing.T, path string, files []romFile) {
 	f.Close()
 }
 
-func filesOf(regions []romRegion, withOptional bool) []romFile {
-	var out []romFile
+func filesOf(regions []romRegion, withOptional bool) []ROMFile {
+	var out []ROMFile
 	for _, r := range regions {
 		if r.Required || withOptional {
 			out = append(out, r.Files...)
@@ -48,7 +48,7 @@ func filesOf(regions []romRegion, withOptional bool) []romFile {
 
 // mergedA is a merged (or non-merged) swtrilgya.zip as MAME makes it: the
 // clone's own program ROMs plus everything else from the parent.
-func mergedA(withDrive bool) []romFile { return filesOf(swtrilgya.merged(), withDrive) }
+func mergedA(withDrive bool) []ROMFile { return filesOf(swtrilgya.merged(), withDrive) }
 
 func TestCheckROMMergedClone(t *testing.T) {
 	dir := t.TempDir()
@@ -89,7 +89,7 @@ func TestCheckROMParentAndBroken(t *testing.T) {
 	}
 	// Two sound ROMs missing.
 	files := filesOf(swtrilgy.Regions, false)
-	var short []romFile
+	var short []ROMFile
 	for _, f := range files {
 		if f.Name != "mpr-21355.22" && f.Name != "mpr-21357.24" {
 			short = append(short, f)
@@ -102,7 +102,7 @@ func TestCheckROMParentAndBroken(t *testing.T) {
 	}
 	// Some other game.
 	other := filepath.Join(dir, "tmnt.zip")
-	writeZip(t, other, []romFile{{"a.bin", 1}, {"b.bin", 2}})
+	writeZip(t, other, []ROMFile{{"a.bin", 1}, {"b.bin", 2}})
 	if c := CheckROM(other); c.OK || c.Set != "" || !strings.Contains(c.Problem, "isn't Star Wars") {
 		t.Fatalf("another game: %+v", c)
 	}
@@ -123,7 +123,7 @@ func TestFindROM(t *testing.T) {
 	writeZip(t, broken, swtrilgya.Regions[0].Files)
 	good := filepath.Join(root, "b", "MAME", "roms", "SWTRILGYA.ZIP")
 	writeZip(t, good, mergedA(true))
-	writeZip(t, filepath.Join(root, "b", "MAME", "roms", "tmnt.zip"), []romFile{{"x", 3}})
+	writeZip(t, filepath.Join(root, "b", "MAME", "roms", "tmnt.zip"), []ROMFile{{"x", 3}})
 	p, c := FindROM([]string{filepath.Join(root, "a"), filepath.Join(root, "b")})
 	if p != good || !c.OK {
 		t.Fatalf("FindROM = %q %+v, want %q", p, c, good)

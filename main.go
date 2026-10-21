@@ -3,7 +3,8 @@
 // It serves the embedded page (and RetroPixels' own emulators) on a fixed local
 // port, so save states stored by the page stay put between runs, opens it in a
 // chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii,
-// PixelU for Wii U and MAME (any version of it) for arcade games.
+// PixelU for Wii U, MAME (any version of it) for arcade games and Supermodel
+// for Star Wars Trilogy Arcade (Sega Model 3).
 package main
 
 import (
@@ -79,6 +80,15 @@ type config struct {
 	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = on
 	PixelUOpenGL     bool         `json:"pixeluOpenGL,omitempty"`     // Vulkan doesn't work here: draw with OpenGL
 	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // old Wii U-only switch, no longer used (AutoRecord covers every game)
+
+	// Star Wars Trilogy Arcade in Supermodel (supermodel.go)
+	SupermodelExe        string    `json:"supermodelExe,omitempty"`        // chosen by the player; unset = the one next to RetroPixels
+	SupermodelROM        string    `json:"supermodelRom,omitempty"`        // the game's .zip, once found or chosen
+	SupermodelFullscreen *bool     `json:"supermodelFullscreen,omitempty"` // unset = on
+	SupermodelEmbed      *bool     `json:"supermodelEmbed,omitempty"`      // unset = on
+	SupermodelWide       bool      `json:"supermodelWide,omitempty"`       // 3D view fills a wide screen
+	SupermodelInvertY    bool      `json:"supermodelInvertY,omitempty"`    // stick up dives, like the arcade's flight yoke
+	SupermodelPlayed     time.Time `json:"supermodelPlayed,omitempty"`
 }
 
 var (
@@ -250,6 +260,7 @@ func newMux() *http.ServeMux {
 	registerDolphinRoutes(mux)
 	registerPixelURoutes(mux)
 	registerMameRoutes(mux)
+	registerSupermodelRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
 	registerWiiURoutes(mux)

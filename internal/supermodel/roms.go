@@ -20,7 +20,8 @@ import (
 // Title is the game's name as people know it.
 const Title = "Star Wars Trilogy Arcade"
 
-type romFile struct {
+// ROMFile is one file of a ROM set: Supermodel finds it by its CRC-32.
+type ROMFile struct {
 	Name  string
 	CRC32 uint32
 }
@@ -28,7 +29,7 @@ type romFile struct {
 type romRegion struct {
 	Name     string
 	Required bool // the driveboard_program (force feedback CPU) isn't
-	Files    []romFile
+	Files    []ROMFile
 }
 
 // RomSet is one version of the game, as Supermodel's Games.xml (commit
@@ -45,21 +46,21 @@ type RomSet struct {
 // without it the game asks for the feedback stick to be set up (see
 // analysis in docs/supermodel.md), so RetroPixels turns force feedback on,
 // which runs this program, only when the ROM set has it.
-var DriveBoardROM = romFile{"epr-21119.ic8", 0x65082B14}
+var DriveBoardROM = ROMFile{"epr-21119.ic8", 0x65082B14}
 
 var swtrilgy = RomSet{Name: "swtrilgy", Version: "Export, Revision A", Regions: []romRegion{
-	{Name: "crom", Required: true, Files: []romFile{{"epr-21382a.20", 0x69BAF117}, {"epr-21381a.19", 0x2DD34E28}, {"epr-21380a.18", 0x780FB4E7}, {"epr-21379a.17", 0x24DC1555}}},
-	{Name: "banked_crom", Required: true, Files: []romFile{{"mpr-21342.04", 0x339525CE}, {"mpr-21341.03", 0xB2A269E4}, {"mpr-21340.02", 0xAD36040E}, {"mpr-21339.01", 0xC0CE5037}, {"mpr-21346.08", 0xC8733594}, {"mpr-21345.07", 0x6C183A21}, {"mpr-21344.06", 0x87453D76}, {"mpr-21343.05", 0x12552D07}, {"mpr-21350.12", 0x486195E7}, {"mpr-21349.11", 0x3D39454B}, {"mpr-21348.10", 0x1F7CC5F5}, {"mpr-21347.09", 0xECB6B934}}},
-	{Name: "vrom", Required: true, Files: []romFile{{"mpr-21359.26", 0x34EF4122}, {"mpr-21360.27", 0x2882B95E}, {"mpr-21361.28", 0x9B61C3C1}, {"mpr-21362.29", 0x01A92169}, {"mpr-21363.30", 0xE7D18FED}, {"mpr-21364.31", 0xCB6A5468}, {"mpr-21365.32", 0xAD5449D8}, {"mpr-21366.33", 0xDEFB6B95}, {"mpr-21367.34", 0xDFD51029}, {"mpr-21368.35", 0xAE90FD21}, {"mpr-21369.36", 0xBF17EEB4}, {"mpr-21370.37", 0x2321592A}, {"mpr-21371.38", 0xA68782FD}, {"mpr-21372.39", 0xFC3F4E8B}, {"mpr-21373.40", 0xB76AD261}, {"mpr-21374.41", 0xAE6C4D28}}},
-	{Name: "sound_program", Required: true, Files: []romFile{{"epr-21383.21", 0x544D1E28}}},
-	{Name: "sound_samples", Required: true, Files: []romFile{{"mpr-21355.22", 0xC1B2D326}, {"mpr-21357.24", 0x02703FAB}}},
-	{Name: "mpeg_program", Required: true, Files: []romFile{{"epr-21384.2", 0x12FA4780}}},
-	{Name: "mpeg_music", Required: true, Files: []romFile{{"mpr-21375.18", 0x735157A9}, {"mpr-21376.20", 0xE635F81E}, {"mpr-21377.22", 0x720621F8}, {"mpr-21378.24", 0x1FCF715E}}},
-	{Name: "driveboard_program", Required: false, Files: []romFile{DriveBoardROM}},
+	{Name: "crom", Required: true, Files: []ROMFile{{"epr-21382a.20", 0x69BAF117}, {"epr-21381a.19", 0x2DD34E28}, {"epr-21380a.18", 0x780FB4E7}, {"epr-21379a.17", 0x24DC1555}}},
+	{Name: "banked_crom", Required: true, Files: []ROMFile{{"mpr-21342.04", 0x339525CE}, {"mpr-21341.03", 0xB2A269E4}, {"mpr-21340.02", 0xAD36040E}, {"mpr-21339.01", 0xC0CE5037}, {"mpr-21346.08", 0xC8733594}, {"mpr-21345.07", 0x6C183A21}, {"mpr-21344.06", 0x87453D76}, {"mpr-21343.05", 0x12552D07}, {"mpr-21350.12", 0x486195E7}, {"mpr-21349.11", 0x3D39454B}, {"mpr-21348.10", 0x1F7CC5F5}, {"mpr-21347.09", 0xECB6B934}}},
+	{Name: "vrom", Required: true, Files: []ROMFile{{"mpr-21359.26", 0x34EF4122}, {"mpr-21360.27", 0x2882B95E}, {"mpr-21361.28", 0x9B61C3C1}, {"mpr-21362.29", 0x01A92169}, {"mpr-21363.30", 0xE7D18FED}, {"mpr-21364.31", 0xCB6A5468}, {"mpr-21365.32", 0xAD5449D8}, {"mpr-21366.33", 0xDEFB6B95}, {"mpr-21367.34", 0xDFD51029}, {"mpr-21368.35", 0xAE90FD21}, {"mpr-21369.36", 0xBF17EEB4}, {"mpr-21370.37", 0x2321592A}, {"mpr-21371.38", 0xA68782FD}, {"mpr-21372.39", 0xFC3F4E8B}, {"mpr-21373.40", 0xB76AD261}, {"mpr-21374.41", 0xAE6C4D28}}},
+	{Name: "sound_program", Required: true, Files: []ROMFile{{"epr-21383.21", 0x544D1E28}}},
+	{Name: "sound_samples", Required: true, Files: []ROMFile{{"mpr-21355.22", 0xC1B2D326}, {"mpr-21357.24", 0x02703FAB}}},
+	{Name: "mpeg_program", Required: true, Files: []ROMFile{{"epr-21384.2", 0x12FA4780}}},
+	{Name: "mpeg_music", Required: true, Files: []ROMFile{{"mpr-21375.18", 0x735157A9}, {"mpr-21376.20", 0xE635F81E}, {"mpr-21377.22", 0x720621F8}, {"mpr-21378.24", 0x1FCF715E}}},
+	{Name: "driveboard_program", Required: false, Files: []ROMFile{DriveBoardROM}},
 }}
 
 var swtrilgya = RomSet{Name: "swtrilgya", Parent: "swtrilgy", Version: "Export", Regions: []romRegion{
-	{Name: "crom", Required: true, Files: []romFile{{"epr-21382.20", 0x0B9C44A0}, {"epr-21381.19", 0xBB5757BF}, {"epr-21380.18", 0x49B182F2}, {"epr-21379.17", 0x61AD51D9}}},
+	{Name: "crom", Required: true, Files: []ROMFile{{"epr-21382.20", 0x0B9C44A0}, {"epr-21381.19", 0xBB5757BF}, {"epr-21380.18", 0x49B182F2}, {"epr-21379.17", 0x61AD51D9}}},
 }}
 
 // RomSets lists the versions RetroPixels plays, the owner's own (swtrilgya)
@@ -99,6 +100,22 @@ func (s RomSet) merged() []romRegion {
 	for _, r := range s.Regions {
 		if _, ok := own[r.Name]; ok {
 			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// SetFiles lists every file a version of the game needs (with the optional
+// force feedback program too, if asked), its parent's included for a clone.
+func SetFiles(name string, withOptional bool) []ROMFile {
+	s, ok := SetByName(name)
+	if !ok {
+		return nil
+	}
+	var out []ROMFile
+	for _, r := range s.merged() {
+		if r.Required || withOptional {
+			out = append(out, r.Files...)
 		}
 	}
 	return out
@@ -146,7 +163,7 @@ func CheckROM(path string) Check {
 		c.Problem = "it can't be read as a .zip file (" + err.Error() + ")"
 		return c
 	}
-	has := func(m map[uint32]bool, files []romFile) int {
+	has := func(m map[uint32]bool, files []ROMFile) int {
 		n := 0
 		for _, f := range files {
 			if m[f.CRC32] {
