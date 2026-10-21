@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,11 +14,11 @@
 namespace Vulkan
 {
 class SwapChain;
-class StagingTexture2D;
 class VKFramebuffer;
 class VKPipeline;
 class VKTexture;
 
+// The renderer interface on top of the state tracker, command buffer manager and swap chain.
 class VKGfx final : public ::AbstractGfx
 {
 public:
@@ -83,23 +82,25 @@ public:
 
   SurfaceInfo GetSurfaceInfo() const override;
 
-  // Completes the current render pass, executes the command buffer, and restores state ready for
-  // next render. Use when you want to kick the current buffer to make room for new data.
+  // Ends the render pass, submits the command buffer (optionally on the worker thread and/or
+  // waiting for it) and forgets the recorded state. Used to free ring buffer space too.
   void ExecuteCommandBuffer(bool execute_off_thread, bool wait_for_completion = false);
 
 private:
-  void CheckForSurfaceChange();
-  void CheckForSurfaceResize();
+  // Handle window changes signalled by the presenter.
+  void HandleSurfaceChange();
+  void HandleSurfaceResize();
+  // Recovers from a failed acquire or present; returns the new acquire result.
+  VkResult RecoverSwapChain(VkResult failure);
 
   void ResetSamplerStates();
-
-  void OnSwapChainResized();
+  void PublishBackbufferSize();
   void BindFramebuffer(VKFramebuffer* fb);
 
   std::unique_ptr<SwapChain> m_swap_chain;
   float m_backbuffer_scale;
 
-  // Keep a copy of sampler states to avoid cache lookups every draw
+  // The GX sampler state per slot, so unchanged states skip the sampler lookup.
   std::array<SamplerState, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_sampler_states = {};
 };
 }  // namespace Vulkan
