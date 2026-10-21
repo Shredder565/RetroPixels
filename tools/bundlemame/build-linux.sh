@@ -89,21 +89,21 @@ grep -q "BARE_BUILD_VERSION \"$version\"" "$src/makefile" || {
 # fetch URL SHA256 "OWNER/REPO TAG" FILE: download and check (an empty pin is
 # checked against the SHA-256 GitHub lists for the release file).
 fetch() {
-	if [ -f "$5" ] && [ -n "$2" ] && echo "$2  $5" | sha256sum -c - >/dev/null 2>&1; then
+	if [ -f "$4" ] && [ -n "$2" ] && echo "$2  $4" | sha256sum -c - >/dev/null 2>&1; then
 		return
 	fi
 	log "downloading $1"
-	curl -fsSL --retry 3 -o "$5.part" "$1"
-	sum=$(sha256sum "$5.part" | cut -d' ' -f1)
+	curl -fsSL --retry 3 -o "$4.part" "$1"
+	sum=$(sha256sum "$4.part" | cut -d' ' -f1)
 	want=$2
 	if [ -z "$want" ]; then
 		repo=${3% *} rel=${3#* }
 		want=$(gh api "repos/$repo/releases/tags/$rel" --jq ".assets[] | select(.name == \"$(basename "$1")\") | .digest" 2>/dev/null | sed 's/^sha256://' || true)
-		[ -n "$want" ] || { echo "no SHA-256 pinned for $1 and GitHub lists none: pin $sum in linux-pins.sh after checking it" >&2; rm -f "$5.part"; exit 1; }
+		[ -n "$want" ] || { echo "no SHA-256 pinned for $1 and GitHub lists none: pin $sum in linux-pins.sh after checking it" >&2; rm -f "$4.part"; exit 1; }
 		echo "::warning::$(basename "$1") isn't pinned; it matches GitHub's SHA-256 $sum (pin it in tools/bundlemame/linux-pins.sh)"
 	fi
-	[ "$sum" = "$want" ] || { echo "SHA-256 mismatch for $1: $sum, expected $want" >&2; rm -f "$5.part"; exit 1; }
-	mv "$5.part" "$5"
+	[ "$sum" = "$want" ] || { echo "SHA-256 mismatch for $1: $sum, expected $want" >&2; rm -f "$4.part"; exit 1; }
+	mv "$4.part" "$4"
 }
 
 prefix=$work/sdl-prefix
