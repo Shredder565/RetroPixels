@@ -958,8 +958,8 @@ void VKFramebuffer::SetAndClear(const VkRect2D& rect, const VkClearValue& color_
                                 const VkClearValue& depth_value)
 {
   // One clear value per attachment, in attachment order.
+  // No reserve(): with no attachments data() stays null, which is what the pass is given.
   std::vector<VkClearValue> values;
-  values.reserve(2 + m_additional_color_attachments.size());
   if (GetColorFormat() != AbstractTextureFormat::Undefined)
     values.push_back(color_value);
   if (GetDepthFormat() != AbstractTextureFormat::Undefined)
