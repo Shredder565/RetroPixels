@@ -497,7 +497,7 @@ jobs:
           set -euo pipefail
           bin="$BUILD/Binaries"
           ls -la "$bin"
-          for p in PixelU-Wii dolphin-emu-nogui dolphin-tool; do
+          for p in PixelU-Wii dolphin-emu-nogui DolphinTool; do
             echo "== $p"
             readelf -d "$bin/$p" | grep -E 'NEEDED|RUNPATH|RPATH'
             floor=$(objdump -T "$bin/$p" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
