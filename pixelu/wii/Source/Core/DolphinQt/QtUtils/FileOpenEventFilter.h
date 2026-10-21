@@ -1,10 +1,11 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QObject>
 
+// Turns QFileOpenEvents (sent by the OS when a file is opened with the application) into the
+// fileOpened() signal. It watches the object it is created for, which also becomes its parent.
 class FileOpenEventFilter : public QObject
 {
   Q_OBJECT

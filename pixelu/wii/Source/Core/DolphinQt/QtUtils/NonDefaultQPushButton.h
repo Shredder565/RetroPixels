@@ -1,13 +1,11 @@
-// Copyright 2022 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QPushButton>
 
-// A custom QPushButton that sets the autoDefault option to false
-// This makes sure random buttons are not highlighted anymore by default
+// A push button that never becomes a dialog's default button on its own (autoDefault is off), so
+// buttons are not highlighted for no reason.
 class NonDefaultQPushButton : public QPushButton
 {
 public:

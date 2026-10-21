@@ -1,28 +1,28 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QSignalBlocker>
 
-// Helper class for populating a GUI element without triggering its data change signals.
-
+// SignalBlocking(widget)->setValue(x) changes a widget without emitting its change signals: the
+// returned proxy blocks the object's signals until the end of the full expression.
 template <typename T>
 class SignalBlockerProxy
 {
 public:
-  explicit SignalBlockerProxy(T* object) : m_object(object), m_blocker(object) {}
-  SignalBlockerProxy(const SignalBlockerProxy& other) = delete;
-  SignalBlockerProxy(SignalBlockerProxy&& other) = default;
-  SignalBlockerProxy& operator=(const SignalBlockerProxy& other) = delete;
-  SignalBlockerProxy& operator=(SignalBlockerProxy&& other) = default;
+  explicit SignalBlockerProxy(T* object) : m_target(object), m_block(object) {}
+
+  SignalBlockerProxy(SignalBlockerProxy&&) = default;
+  SignalBlockerProxy& operator=(SignalBlockerProxy&&) = default;
+  SignalBlockerProxy(const SignalBlockerProxy&) = delete;
+  SignalBlockerProxy& operator=(const SignalBlockerProxy&) = delete;
   ~SignalBlockerProxy() = default;
 
-  T* operator->() const { return m_object; }
+  T* operator->() const { return m_target; }
 
 private:
-  T* m_object;
-  QSignalBlocker m_blocker;
+  T* m_target;
+  QSignalBlocker m_block;
 };
 
 template <typename T>

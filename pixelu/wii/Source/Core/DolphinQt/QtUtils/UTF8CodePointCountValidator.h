@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include <QString>
 #include <QValidator>
 
+// Rejects input longer than a number of Unicode code points (counted in the UTF-8 encoding).
 class UTF8CodePointCountValidator : public QValidator
 {
   Q_OBJECT
@@ -17,5 +17,5 @@ public:
   QValidator::State validate(QString& input, int& pos) const override;
 
 private:
-  std::size_t m_max_count;
+  std::size_t m_limit;
 };

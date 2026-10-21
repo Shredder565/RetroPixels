@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,7 +8,8 @@ class QApplication;
 
 namespace QtUtils
 {
-// Changes the window decorations (title bar) for Windows "Dark" mode or "Dark" Dolphin Style.
+// Gives every top-level window a dark title bar whenever the active theme is dark (Windows does
+// not do this by itself for Qt windows).
 void InstallWindowDecorationFilter(QApplication*);
 }  // namespace QtUtils
 

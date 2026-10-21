@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/QtUtils.h"
 
@@ -21,134 +20,115 @@
 
 namespace
 {
-
-void ShowFolderOfFile(std::string_view file_path)
+// Opens the folder containing the file in the system's file manager.
+void OpenContainingFolder(std::string_view file_path)
 {
-  // Remove everything after the last separator in the game's path, resulting in the parent
-  // directory path with a trailing separator. Keeping the trailing separator prevents Windows from
-  // mistakenly opening a .bat or .exe file in the grandparent folder when that file has the same
-  // base name as the folder (See https://bugs.dolphin-emu.org/issues/12411).
-  std::string parent_directory_path;
-  SplitPath(file_path, &parent_directory_path, nullptr, nullptr);
-  if (parent_directory_path.empty())
-  {
+  // SplitPath leaves the separator at the end of the folder path. That matters on Windows: given
+  // a folder path without it, Explorer may instead run a .bat or .exe that sits next to the folder
+  // and has the folder's name.
+  std::string folder;
+  SplitPath(file_path, &folder, nullptr, nullptr);
+  if (folder.empty())
     return;
-  }
 
-  const QUrl url = QUrl::fromLocalFile(QString::fromStdString(parent_directory_path));
-  QDesktopServices::openUrl(url);
+  QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(folder)));
 }
 
+#if defined(QT_DBUS_LIB)
+// Asks the freedesktop file manager service to show the file. Returns whether that worked.
+bool ShowWithFileManager1(std::string_view file_path)
+{
+  const QString dbus_name = QString::fromLatin1("org.freedesktop.DBus");
+  QDBusInterface bus{dbus_name, QString::fromLatin1("/org/freedesktop/DBus"), dbus_name};
+  bus.call(QString::fromLatin1("StartServiceByName"),
+           QString::fromLatin1("org.freedesktop.FileManager1"), 0u);
+
+  const QString fm_name = QString::fromLatin1("org.freedesktop.FileManager1");
+  QDBusInterface file_manager{fm_name, QString::fromLatin1("/org/freedesktop/FileManager1"),
+                              fm_name};
+  if (!file_manager.isValid())
+  {
+    WARN_LOG_FMT(COMMON, "Invalid DBus interface: {}",
+                 file_manager.lastError().message().toStdString());
+    return false;
+  }
+
+  const QStringList uris{QUrl::fromLocalFile(QString::fromUtf8(file_path)).toString()};
+  const QDBusReply<void> reply =
+      file_manager.call(QString::fromLatin1("ShowItems"), uris, QString{});
+  if (reply.isValid())
+    return true;
+
+  WARN_LOG_FMT(COMMON, "DBus call failed: {} - {}", reply.error().name().toStdString(),
+               reply.error().message().toStdString());
+  return false;
+}
+#endif
 }  // namespace
 
 namespace QtUtils
 {
-
 void ShowFourDigitYear(QDateTimeEdit* widget)
 {
-  if (!widget->displayFormat().contains(QStringLiteral("yyyy")))
-  {
-    // Always show the full year, no matter what the locale specifies. Otherwise, two-digit years
-    // will always be interpreted as in the 21st century.
-    widget->setDisplayFormat(
-        widget->displayFormat().replace(QStringLiteral("yy"), QStringLiteral("yyyy")));
-  }
+  // A two-digit year would always be read as 20xx, so widen "yy" to "yyyy" unless it already is.
+  QString format = widget->displayFormat();
+  if (format.contains(QStringLiteral("yyyy")))
+    return;
+  widget->setDisplayFormat(format.replace(QStringLiteral("yy"), QStringLiteral("yyyy")));
 }
 
 QWidget* CreateIconWarning(QWidget* parent, QStyle::StandardPixmap standard_pixmap, QLabel* label)
 {
-  const auto size = QFontMetrics(parent->font()).height() * 5 / 4;
+  const int icon_px = QFontMetrics(parent->font()).height() * 5 / 4;
 
-  auto* const icon = new QLabel{};
-  icon->setPixmap(parent->style()->standardIcon(standard_pixmap).pixmap(size, size));
+  auto* const icon_label = new QLabel{};
+  icon_label->setPixmap(parent->style()->standardIcon(standard_pixmap).pixmap(icon_px, icon_px));
 
-  auto* const widget = new QWidget;
-  auto* const layout = new QHBoxLayout{widget};
-  layout->addWidget(icon);
-  layout->addWidget(label, 1);
-  return widget;
+  auto* const container = new QWidget;
+  auto* const row = new QHBoxLayout{container};
+  row->addWidget(icon_label);
+  row->addWidget(label, 1);
+  return container;
 }
 
 void AdjustSizeWithinScreen(QWidget* widget)
 {
-  const auto screen_size = widget->screen()->availableSize();
-
-  const auto adj_screen_size = screen_size * 9 / 10;
-
-  widget->resize(widget->sizeHint().boundedTo(adj_screen_size));
-
+  const QSize limit = widget->screen()->availableSize() * 9 / 10;
+  widget->resize(widget->sizeHint().boundedTo(limit));
   CenterOnParentWindow(widget);
 }
 
 void CenterOnParentWindow(QWidget* const widget)
 {
-  // Find the top-level window.
-  const QWidget* const parent_widget{widget->parentWidget()};
-  if (!parent_widget)
+  const QWidget* const parent = widget->parentWidget();
+  if (parent == nullptr)
     return;
-  const QWidget* const window{parent_widget->window()};
 
-  // Calculate position based on the widgets' size and position.
-  const QRect window_geometry{window->geometry()};
-  const QSize window_size{window_geometry.size()};
-  const QPoint window_pos{window_geometry.topLeft()};
-  const QRect geometry{widget->geometry()};
-  const QSize size{geometry.size()};
-  const QPoint offset{(window_size.width() - size.width()) / 2,
-                      (window_size.height() - size.height()) / 2};
-  const QPoint pos{window_pos + offset};
-
-  widget->setGeometry(QRect(pos, size));
+  const QRect outer = parent->window()->geometry();
+  const QSize own_size = widget->geometry().size();
+  const QPoint top_left = outer.topLeft() + QPoint{(outer.width() - own_size.width()) / 2,
+                                                   (outer.height() - own_size.height()) / 2};
+  widget->setGeometry(QRect(top_left, own_size));
 }
 
 void ShowFileInFolder(std::string_view file_path)
 {
+  bool shown = false;
 #if defined(QT_DBUS_LIB)
-  QDBusInterface dbus{QString::fromLatin1("org.freedesktop.DBus"),
-                      QString::fromLatin1("/org/freedesktop/DBus"),
-                      QString::fromLatin1("org.freedesktop.DBus")};
-
-  dbus.call(QString::fromLatin1("StartServiceByName"),
-            QString::fromLatin1("org.freedesktop.FileManager1"), 0u);
-
-  QDBusInterface iface{QString::fromLatin1("org.freedesktop.FileManager1"),
-                       QString::fromLatin1("/org/freedesktop/FileManager1"),
-                       QString::fromLatin1("org.freedesktop.FileManager1")};
-  if (iface.isValid())
-  {
-    QStringList urls;
-    urls << QUrl::fromLocalFile(QString::fromUtf8(file_path)).toString();
-
-    const QDBusReply<void> reply = iface.call(QString::fromLatin1("ShowItems"), urls, QString{});
-    if (reply.isValid())
-      return;
-
-    const auto& err = reply.error();
-    WARN_LOG_FMT(COMMON, "DBus call failed: {} - {}", err.name().toStdString(),
-                 err.message().toStdString());
-  }
-  else
-  {
-    WARN_LOG_FMT(COMMON, "Invalid DBus interface: {}", iface.lastError().message().toStdString());
-  }
-
+  shown = ShowWithFileManager1(file_path);
 #elif defined(_WIN32)
-  if (QProcess{}.startDetached(QString::fromLatin1("explorer.exe"),
-                               {QString::fromLatin1("/select"), QString::fromLatin1(","),
-                                QDir::toNativeSeparators(QString::fromUtf8(file_path))}))
-  {
-    return;
-  }
+  // explorer.exe /select , <path> opens the folder with the file selected.
+  const QStringList explorer_args{QString::fromLatin1("/select"), QString::fromLatin1(","),
+                                  QDir::toNativeSeparators(QString::fromUtf8(file_path))};
+  shown = QProcess{}.startDetached(QString::fromLatin1("explorer.exe"), explorer_args);
 #elif defined(__APPLE__)
-  if (QProcess{}.startDetached(QString::fromLatin1("open"),
-                               {QString::fromLatin1("-R"), QString::fromUtf8(file_path)}))
-  {
-    return;
-  }
+  shown = QProcess{}.startDetached(QString::fromLatin1("open"),
+                                   {QString::fromLatin1("-R"), QString::fromUtf8(file_path)});
 #endif
 
-  // Fall back on failure or unsupported platforms.
-  ShowFolderOfFile(file_path);
+  // Fallback: no way to select the file here, or that failed.
+  if (!shown)
+    OpenContainingFolder(file_path);
 }
 
 }  // namespace QtUtils

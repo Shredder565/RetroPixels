@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/PartiallyClosableTabWidget.h"
 
@@ -13,7 +12,7 @@ PartiallyClosableTabWidget::PartiallyClosableTabWidget(QWidget* parent) : QTabWi
 
 void PartiallyClosableTabWidget::setTabUnclosable(int index)
 {
-  QTabBar::ButtonPosition closeSide = (QTabBar::ButtonPosition)style()->styleHint(
-      QStyle::SH_TabBar_CloseButtonPosition, nullptr, this);
-  tabBar()->setTabButton(index, closeSide, nullptr);
+  // The close button sits on whichever side the style puts it; remove the button on that side.
+  const int side = style()->styleHint(QStyle::SH_TabBar_CloseButtonPosition, nullptr, this);
+  tabBar()->setTabButton(index, static_cast<QTabBar::ButtonPosition>(side), nullptr);
 }

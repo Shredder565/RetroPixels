@@ -1,10 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QObject>
 
+// Reports when a watched window is activated or deactivated. Never consumes events.
 class WindowActivationEventFilter : public QObject
 {
   Q_OBJECT

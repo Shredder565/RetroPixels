@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/WrapInScrollArea.h"
 
@@ -13,57 +12,47 @@
 
 namespace
 {
-
-// This scroll area prefers the size of its underlying widget.
-class HintingScrollArea final : public QScrollArea
+class ContentSizedScrollArea final : public QScrollArea
 {
 public:
-  HintingScrollArea()
+  ContentSizedScrollArea()
   {
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     setWidgetResizable(true);
-
-    // Make things not look horrendous on Windows.
+    // No frame: a framed scroll area looks out of place inside dialogs on Windows.
     setFrameStyle(QFrame::NoFrame);
   }
 
   QSize sizeHint() const override
   {
-    // Including the scrollbars in our hint can prevent
-    //  a window undersized in one direction gaining unnecessary scrolling in both directions.
-    const auto scrollbar_padding =
-        QSize{verticalScrollBar()->sizeHint().width(), horizontalScrollBar()->sizeHint().height()};
-
-    const auto size_hint = widget()->sizeHint();
-
-    return size_hint + scrollbar_padding;
+    // Leave room for both scroll bars. Otherwise a window that is too small in one direction
+    // grows a scroll bar that eats into the other direction, which then needs one too.
+    const QSize bars{verticalScrollBar()->sizeHint().width(),
+                     horizontalScrollBar()->sizeHint().height()};
+    return widget()->sizeHint() + bars;
   }
 };
-
 }  // namespace
 
 QWidget* GetWrappedWidget(QWidget* wrapped_widget)
 {
-  auto* const scroll = new HintingScrollArea;
-  scroll->setWidget(wrapped_widget);
+  auto* const area = new ContentSizedScrollArea;
+  area->setWidget(wrapped_widget);
 
-  // Workaround for transparency issues on macOS. Not sure if this is still needed.
-  scroll->viewport()->setAutoFillBackground(false);
+  // Keep the contents transparent so the dialog's background shows through (matters on macOS).
+  area->viewport()->setAutoFillBackground(false);
   wrapped_widget->setAutoFillBackground(false);
 
-  return scroll;
+  return area;
 }
 
 void WrapInScrollArea(QWidget* parent, QLayout* wrapped_layout)
 {
-  auto* widget = new QWidget;
-  widget->setLayout(wrapped_layout);
+  auto* const contents = new QWidget;
+  contents->setLayout(wrapped_layout);
 
-  auto* scroll_area = GetWrappedWidget(widget);
-
-  auto* scroll_layout = new QVBoxLayout;
-  scroll_layout->addWidget(scroll_area);
-  scroll_layout->setContentsMargins(0, 0, 0, 0);
-
-  parent->setLayout(scroll_layout);
+  auto* const fill = new QVBoxLayout;
+  fill->addWidget(GetWrappedWidget(contents));
+  fill->setContentsMargins(0, 0, 0, 0);
+  parent->setLayout(fill);
 }

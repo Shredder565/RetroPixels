@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/BlockUserInputFilter.h"
 
@@ -10,9 +9,12 @@
 
 namespace QtUtils
 {
-
-// Leave filter active for a bit to prevent Return/Space detection from reactivating the button.
-constexpr auto REMOVAL_DELAY = std::chrono::milliseconds{100};
+namespace
+{
+// The filter stays for a short while after removal is requested, so that the key that ended the
+// blocking (for example Return or Space on a button) cannot immediately trigger it again.
+constexpr std::chrono::milliseconds LINGER_TIME{100};
+}  // namespace
 
 BlockKeyboardInputFilter::BlockKeyboardInputFilter(QObject* parent) : QObject{parent}
 {
@@ -21,16 +23,22 @@ BlockKeyboardInputFilter::BlockKeyboardInputFilter(QObject* parent) : QObject{pa
 
 void BlockKeyboardInputFilter::ScheduleRemoval()
 {
-  auto* const timer = new QTimer(this);
-  timer->setSingleShot(true);
-  connect(timer, &QTimer::timeout, [this] { delete this; });
-  timer->start(REMOVAL_DELAY);
+  auto* const countdown = new QTimer(this);
+  countdown->setSingleShot(true);
+  connect(countdown, &QTimer::timeout, [this] { delete this; });
+  countdown->start(LINGER_TIME);
 }
 
-bool BlockKeyboardInputFilter::eventFilter(QObject* object, QEvent* event)
+bool BlockKeyboardInputFilter::eventFilter(QObject*, QEvent* event)
 {
-  const auto event_type = event->type();
-  return event_type == QEvent::KeyPress || event_type == QEvent::KeyRelease;
+  switch (event->type())
+  {
+  case QEvent::KeyPress:
+  case QEvent::KeyRelease:
+    return true;
+  default:
+    return false;
+  }
 }
 
 }  // namespace QtUtils

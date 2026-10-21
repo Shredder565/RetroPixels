@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/ImageConverter.h"
 
@@ -9,7 +8,9 @@
 
 QPixmap ToQPixmap(const UICommon::GameBanner& banner)
 {
-  const auto* ptr = reinterpret_cast<const uchar*>(banner.buffer.data());
-  QImage image(ptr, banner.width, banner.height, QImage::Format_RGBX8888);
-  return QPixmap::fromImage(std::move(image).rgbSwapped());
+  // Wrap the pixels without copying, then swap red and blue (which makes the copy we keep).
+  const QImage view(reinterpret_cast<const uchar*>(banner.buffer.data()),
+                    static_cast<int>(banner.width), static_cast<int>(banner.height),
+                    QImage::Format_RGBX8888);
+  return QPixmap::fromImage(view.rgbSwapped());
 }

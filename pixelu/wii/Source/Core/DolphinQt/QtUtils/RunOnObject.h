@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,26 +10,30 @@
 
 #include "Common/OneShotEvent.h"
 
-// QWidget and subclasses are not thread-safe! This helper takes arbitrary code from any thread,
-// safely runs it on the appropriate GUI thread, waits for it to finish, and returns the result.
-//
-// If the target object is destructed before the code gets to run the function will return nullopt.
-
+// Runs `functor` on the thread `object` lives on (directly, if that is the calling thread),
+// waits for it, and returns its result. Returns nullopt if `object` was destroyed before the
+// call could be made.
 auto RunOnObject(QObject* object, std::invocable<> auto&& functor)
 {
-  Common::OneShotEvent task_complete;
-  std::optional<decltype(functor())> result;
+  using Result = decltype(functor());
+  std::optional<Result> outcome;
+  Common::OneShotEvent finished;
 
-  QMetaObject::invokeMethod(
-      object, [&, guard = Common::ScopedSetter{&task_complete}] { result = functor(); });
+  // The task carries a ScopedSetter, so `finished` is set when the task is destroyed: after it
+  // ran, or when Qt throws it away undelivered. Only then may we stop waiting, because the task
+  // refers to `outcome` and `functor` on this stack frame.
+  auto task = [&outcome, &functor, done = Common::ScopedSetter{&finished}] {
+    outcome.emplace(functor());
+  };
+  QMetaObject::invokeMethod(object, std::move(task));
 
-  // Wait for the lambda to go out of scope. The result may or may not have been assigned.
-  task_complete.Wait();
-  return result;
+  finished.Wait();
+  return outcome;
 }
 
+// Same, calling a member function of `obj` (for example RunOnObject(action, &QAction::isChecked)).
 template <std::derived_from<QObject> Receiver>
 auto RunOnObject(Receiver* obj, auto Receiver::* func)
 {
-  return RunOnObject(obj, std::bind(func, obj));
+  return RunOnObject(obj, [obj, func] { return std::invoke(func, obj); });
 }

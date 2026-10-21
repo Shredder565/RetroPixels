@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/AnalyticsPrompt.h"
 
@@ -14,14 +13,10 @@
 
 void ShowAnalyticsPrompt(QWidget* parent)
 {
-  ModalMessageBox analytics_prompt(parent);
-
-  analytics_prompt.setIcon(QMessageBox::Question);
-  analytics_prompt.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-  analytics_prompt.setWindowTitle(QObject::tr("Allow Usage Statistics Reporting"));
-  analytics_prompt.setText(
-      QObject::tr("Do you authorize Dolphin to report information to Dolphin's developers?"));
-  analytics_prompt.setInformativeText(
+  const QString title = QObject::tr("Allow Usage Statistics Reporting");
+  const QString question =
+      QObject::tr("Do you authorize Dolphin to report information to Dolphin's developers?");
+  const QString details =
       QObject::tr("If authorized, Dolphin can collect data on its performance, "
                   "feature usage, and configuration, as well as data on your system's "
                   "hardware and operating system.\n\n"
@@ -30,12 +25,19 @@ void ShowAnalyticsPrompt(QWidget* parent)
                   "efforts. It also helps us identify rare configurations that are "
                   "causing bugs, performance and stability issues.\n"
                   "This authorization can be revoked at any time through Dolphin's "
-                  "settings."));
+                  "settings.");
 
-  const int answer = analytics_prompt.exec();
+  ModalMessageBox box(parent);
+  box.setIcon(QMessageBox::Question);
+  box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+  box.setWindowTitle(title);
+  box.setText(question);
+  box.setInformativeText(details);
 
+  const bool allowed = box.exec() == QMessageBox::Yes;
+
+  // Whatever the answer was, the question counts as asked.
   Config::SetBase(Config::MAIN_ANALYTICS_PERMISSION_ASKED, true);
-  Settings::Instance().SetAnalyticsEnabled(answer == QMessageBox::Yes);
-
+  Settings::Instance().SetAnalyticsEnabled(allowed);
   DolphinAnalytics::Instance().ReloadConfig();
 }

@@ -1,10 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QPushButton>
 
+// A push button that shortens its text with an ellipsis when it does not fit.
 class ElidedButton : public QPushButton
 {
   Q_OBJECT
@@ -18,5 +18,5 @@ public:
 
 private:
   void paintEvent(QPaintEvent* event) final;
-  Qt::TextElideMode m_elide_mode;
+  Qt::TextElideMode m_mode;
 };

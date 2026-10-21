@@ -1,11 +1,9 @@
-// Copyright 2022 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 
 NonDefaultQPushButton::NonDefaultQPushButton(const QString& text, QWidget* parent)
     : QPushButton(text, parent)
 {
-  this->setAutoDefault(false);
+  setAutoDefault(false);
 }

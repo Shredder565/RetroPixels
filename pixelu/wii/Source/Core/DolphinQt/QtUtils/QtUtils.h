@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,33 +12,32 @@ class QWidget;
 
 namespace QtUtils
 {
-
+// Makes a date/time edit show four-digit years whatever the locale's format says.
 void ShowFourDigitYear(QDateTimeEdit* widget);
 
+// A widget with a standard style icon on the left of `label`.
 QWidget* CreateIconWarning(QWidget* parent, QStyle::StandardPixmap standard_pixmap, QLabel* label);
 
-// Similar to QWidget::adjustSize except maximum size is 9/10 of screen rather than 2/3.
+// Resizes the widget to its size hint, but at most 90% of the available screen area, and centres
+// it on its parent's window.
 void AdjustSizeWithinScreen(QWidget* widget);
 
-// Centers the widget on its parent. It should be called after any adjustments to the widget's size
-// has been applied.
+// Centres the widget over its parent's top-level window. Call it once the size is final.
 void CenterOnParentWindow(QWidget* widget);
 
-// A QWidget that returns the minimumSizeHint as the primary sizeHint.
-// Useful for QListWidget which hints a fairly large height even when entirely empty.
-// Usage: QtUtils::MinimumSizeHintWidget<QListWidget>
+// A widget whose preferred size is its minimum size hint, for widgets (such as QListWidget) that
+// otherwise ask for a lot of room even when empty. Don't use it with widgets whose
+// minimumSizeHint itself calls sizeHint (QPushButton, for one): that would recurse forever.
 template <typename Widget>
 class MinimumSizeHintWidget : public Widget
 {
 public:
   using Widget::Widget;
 
-  // Note: Some widget (e.g. QPushButton) minimumSizeHint implementations themselves use sizeHint,
-  //  which would cause this to stack overflow.
   QSize sizeHint() const override { return Widget::minimumSizeHint(); }
 };
 
-// Opens the folder of the given file (and also selects the file on supported platforms).
+// Opens the folder that contains the file, selecting the file where the platform allows it.
 void ShowFileInFolder(std::string_view file_path);
 
 }  // namespace QtUtils

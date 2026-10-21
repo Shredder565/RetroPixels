@@ -1,27 +1,25 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <QMetaObject>
 #include <QObject>
 #include <utility>
 
-// QWidget and subclasses are not thread-safe! However, Qt's signal-slot connection mechanism will
-// invoke slots/functions on the correct thread for any object. We can (ab)use this to queue up
-// arbitrary code from non-GUI threads. For more information, see:
-// https://stackoverflow.com/questions/21646467/
+// Qt widgets may only be used from the thread they live on. These helpers hand `func` to the
+// event loop of the thread that `obj` lives on, so code on any thread can safely act on it. If
+// `obj` is destroyed before the call is delivered, `func` never runs.
 
+// Returns straight away; `func` runs later on `obj`'s thread.
 template <typename T, typename F>
-static void QueueOnObject(T* obj, F&& func)
+void QueueOnObject(T* obj, F&& func)
 {
-  QObject src;
-  QObject::connect(&src, &QObject::destroyed, obj, std::forward<F>(func), Qt::QueuedConnection);
+  QMetaObject::invokeMethod(obj, std::forward<F>(func), Qt::QueuedConnection);
 }
 
+// Waits until `func` has run on `obj`'s thread. Never call it from that thread itself.
 template <typename T, typename F>
-static void QueueOnObjectBlocking(T* obj, F&& func)
+void QueueOnObjectBlocking(T* obj, F&& func)
 {
-  QObject src;
-  QObject::connect(&src, &QObject::destroyed, obj, std::forward<F>(func),
-                   Qt::BlockingQueuedConnection);
+  QMetaObject::invokeMethod(obj, std::forward<F>(func), Qt::BlockingQueuedConnection);
 }

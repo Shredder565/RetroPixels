@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,9 +6,8 @@
 
 namespace QtUtils
 {
-
-// A menu widget based on QMenu that will not be automatically dismissed when one of its checkable
-// actions are triggered.
+// A QMenu that stays open when one of its checkable actions is clicked, so several options can be
+// toggled in one go. Other actions close it as usual.
 class NonAutodismissibleMenu : public QMenu
 {
 public:
@@ -18,5 +16,4 @@ public:
 protected:
   void mouseReleaseEvent(QMouseEvent* event) override;
 };
-
 }  // namespace QtUtils

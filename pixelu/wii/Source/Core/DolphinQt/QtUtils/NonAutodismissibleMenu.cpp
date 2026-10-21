@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/NonAutodismissibleMenu.h"
 
@@ -8,21 +7,22 @@
 
 namespace QtUtils
 {
-
 void NonAutodismissibleMenu::mouseReleaseEvent(QMouseEvent* const event)
 {
-  if (!event)
+  if (event == nullptr)
     return;
 
-  QAction* const action{activeAction()};
-  if (action && action->isEnabled() && action->isCheckable())
+  QAction* const under_mouse = activeAction();
+  const bool toggle_in_place =
+      under_mouse != nullptr && under_mouse->isEnabled() && under_mouse->isCheckable();
+  if (!toggle_in_place)
   {
-    action->trigger();
-    event->accept();
+    QMenu::mouseReleaseEvent(event);
     return;
   }
 
-  QMenu::mouseReleaseEvent(event);
+  // Trigger the action ourselves instead of letting QMenu do it (which would close the menu).
+  under_mouse->trigger();
+  event->accept();
 }
-
 }  // namespace QtUtils

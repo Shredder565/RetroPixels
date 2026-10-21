@@ -1,8 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Based on:
-// https://stackoverflow.com/questions/30005540/keeping-the-aspect-ratio-of-a-sub-classed-qwidget-during-resize
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/AspectRatioWidget.h"
 
@@ -10,36 +6,40 @@
 #include <QResizeEvent>
 
 AspectRatioWidget::AspectRatioWidget(QWidget* widget, float width, float height, QWidget* parent)
-    : QWidget(parent), m_ar_width(width), m_ar_height(height)
+    : QWidget(parent), m_ratio_w(width), m_ratio_h(height)
 {
-  m_layout = new QBoxLayout(QBoxLayout::LeftToRight, this);
-  m_layout->setContentsMargins(0, 0, 0, 0);
-
-  // add spacer, then your widget, then spacer
-  m_layout->addItem(new QSpacerItem(0, 0));
-  m_layout->addWidget(widget);
-  m_layout->addItem(new QSpacerItem(0, 0));
+  // Three slots: gap, child, gap. Their stretch factors are recomputed on every resize.
+  m_box = new QBoxLayout(QBoxLayout::LeftToRight, this);
+  m_box->setContentsMargins(0, 0, 0, 0);
+  m_box->addItem(new QSpacerItem(0, 0));
+  m_box->addWidget(widget);
+  m_box->addItem(new QSpacerItem(0, 0));
 }
 
 void AspectRatioWidget::resizeEvent(QResizeEvent* event)
 {
-  float aspect_ratio = static_cast<float>(event->size().width()) / event->size().height();
-  int widget_stretch, outer_stretch;
+  const QSize area = event->size();
+  const float wanted = m_ratio_w / m_ratio_h;
+  const bool too_wide = static_cast<float>(area.width()) / static_cast<float>(area.height()) > wanted;
 
-  if (aspect_ratio > (m_ar_width / m_ar_height))  // too wide
+  // The child's share is the length that keeps the ratio along the constrained axis; the two
+  // gaps share what is left.
+  int child_share;
+  int gap_share;
+  if (too_wide)
   {
-    m_layout->setDirection(QBoxLayout::LeftToRight);
-    widget_stretch = height() * (m_ar_width / m_ar_height);  // i.e., my width
-    outer_stretch = (width() - widget_stretch) / 2 + 0.5;
+    m_box->setDirection(QBoxLayout::LeftToRight);
+    child_share = static_cast<int>(static_cast<float>(height()) * wanted);
+    gap_share = static_cast<int>((width() - child_share) / 2 + 0.5);
   }
-  else  // too tall
+  else
   {
-    m_layout->setDirection(QBoxLayout::TopToBottom);
-    widget_stretch = width() * (m_ar_height / m_ar_width);  // i.e., my height
-    outer_stretch = (height() - widget_stretch) / 2 + 0.5;
+    m_box->setDirection(QBoxLayout::TopToBottom);
+    child_share = static_cast<int>(static_cast<float>(width()) * (m_ratio_h / m_ratio_w));
+    gap_share = static_cast<int>((height() - child_share) / 2 + 0.5);
   }
 
-  m_layout->setStretch(0, outer_stretch);
-  m_layout->setStretch(1, widget_stretch);
-  m_layout->setStretch(2, outer_stretch);
+  m_box->setStretch(0, gap_share);
+  m_box->setStretch(1, child_share);
+  m_box->setStretch(2, gap_share);
 }

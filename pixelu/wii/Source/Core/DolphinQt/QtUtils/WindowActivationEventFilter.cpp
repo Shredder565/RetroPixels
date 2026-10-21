@@ -1,18 +1,22 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/WindowActivationEventFilter.h"
 
 #include <QEvent>
 #include <QObject>
 
-bool WindowActivationEventFilter::eventFilter(QObject* object, QEvent* event)
+bool WindowActivationEventFilter::eventFilter(QObject*, QEvent* event)
 {
-  if (event->type() == QEvent::WindowDeactivate)
-    emit windowDeactivated();
-
-  if (event->type() == QEvent::WindowActivate)
+  switch (event->type())
+  {
+  case QEvent::WindowActivate:
     emit windowActivated();
-
+    break;
+  case QEvent::WindowDeactivate:
+    emit windowDeactivated();
+    break;
+  default:
+    break;
+  }
   return false;
 }

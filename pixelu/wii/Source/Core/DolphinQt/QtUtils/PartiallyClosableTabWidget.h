@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 
 class QEvent;
 
+// A tab widget whose tabs have close buttons, except the ones marked with setTabUnclosable().
 class PartiallyClosableTabWidget : public QTabWidget
 {
   Q_OBJECT

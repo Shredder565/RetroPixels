@@ -1,13 +1,13 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 class QLayout;
 class QWidget;
 
-// Puts the given widget in a QScrollArea and returns that.
+// Returns a frameless scroll area holding `wrapped_widget`. The scroll area asks for the size of
+// the widget it holds (plus room for scroll bars).
 QWidget* GetWrappedWidget(QWidget* wrapped_widget);
 
-// Wrap wrapped_layout in a QScrollArea and fill the parent widget with it.
+// Puts `wrapped_layout` into such a scroll area and makes that fill `parent`.
 void WrapInScrollArea(QWidget* parent, QLayout* wrapped_layout);

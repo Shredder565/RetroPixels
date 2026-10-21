@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/ClearLayoutRecursively.h"
 
@@ -9,25 +8,19 @@
 
 void ClearLayoutRecursively(QLayout* layout)
 {
-  while (QLayoutItem* child = layout->takeAt(0))
+  for (QLayoutItem* item = layout->takeAt(0); item != nullptr; item = layout->takeAt(0))
   {
-    if (child == nullptr)
-      continue;
-
-    if (child->widget())
+    if (QWidget* const widget = item->widget())
     {
-      layout->removeWidget(child->widget());
-      child->widget()->deleteLater();
-    }
-    else if (child->layout())
-    {
-      ClearLayoutRecursively(child->layout());
-      layout->removeItem(child);
+      layout->removeWidget(widget);
+      widget->deleteLater();
     }
     else
     {
-      layout->removeItem(child);
+      if (QLayout* const nested = item->layout())
+        ClearLayoutRecursively(nested);
+      layout->removeItem(item);
     }
-    delete child;
+    delete item;
   }
 }

@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/FileOpenEventFilter.h"
 
@@ -10,14 +9,11 @@ FileOpenEventFilter::FileOpenEventFilter(QObject* event_source) : QObject(event_
   event_source->installEventFilter(this);
 }
 
-bool FileOpenEventFilter::eventFilter(QObject* object, QEvent* event)
+bool FileOpenEventFilter::eventFilter(QObject*, QEvent* event)
 {
-  if (event->type() == QEvent::FileOpen)
-  {
-    auto* openEvent = static_cast<QFileOpenEvent*>(event);
-    emit fileOpened(openEvent->file());
-    return true;
-  }
+  if (event->type() != QEvent::FileOpen)
+    return false;
 
-  return false;
+  emit fileOpened(static_cast<QFileOpenEvent*>(event)->file());
+  return true;
 }

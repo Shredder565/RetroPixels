@@ -1,16 +1,17 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QMessageBox>
 
-// Helper for making message boxes modal by default
+// A QMessageBox that is window-modal by default and attaches to the top-level window of the
+// widget it is opened for (or to nothing, if that window is hidden).
 class ModalMessageBox : public QMessageBox
 {
 public:
   explicit ModalMessageBox(QWidget* parent, Qt::WindowModality modality = Qt::WindowModal);
 
+  // Like QMessageBox's static helpers. Note that question() shows the warning icon.
   static int critical(QWidget* parent, const QString& title, const QString& text,
                       StandardButtons buttons = Ok, StandardButton default_button = NoButton,
                       Qt::WindowModality modality = Qt::WindowModal,

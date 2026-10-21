@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@
 
 #include "Common/Flag.h"
 
+// A QProgressDialog that worker threads can update. The dialog itself lives on the GUI thread;
+// the setters below only emit signals, which Qt delivers to the dialog on its own thread.
 class ParallelProgressDialog final : public QObject
 {
   Q_OBJECT
@@ -21,18 +22,18 @@ public:
   ParallelProgressDialog(ParallelProgressDialog&&) = delete;
   ParallelProgressDialog& operator=(ParallelProgressDialog&&) = delete;
 
-  // Only use this from the main thread
+  // GUI thread only. The arguments are passed on to QProgressDialog's constructor.
   template <typename... Args>
   ParallelProgressDialog(Args&&... args) : m_dialog{std::forward<Args>(args)...}
   {
     setParent(m_dialog.parent());
-    ConnectSignalsAndSlots();
+    WireUp();
   }
 
-  // Only use this from the main thread
+  // GUI thread only.
   QProgressDialog* GetRaw() { return &m_dialog; }
 
-  // All of the following can be called from any thread
+  // Any thread.
   void Cancel() { emit CancelSignal(); }
   void Reset() { emit ResetSignal(); }
   void SetCancelButtonText(const QString& text) { emit SetCancelButtonTextSignal(text); }
@@ -42,9 +43,7 @@ public:
   void SetMinimumDuration(int ms) { emit SetMinimumDurationSignal(ms); }
   void SetRange(int minimum, int maximum) { emit SetRangeSignal(minimum, maximum); }
   void SetValue(int progress) { emit SetValueSignal(progress); }
-
-  // Can be called from any thread
-  bool WasCanceled() const { return m_was_cancelled.IsSet(); }
+  bool WasCanceled() const { return m_cancelled.IsSet(); }
 
 signals:
   void CancelSignal();
@@ -60,71 +59,56 @@ signals:
   void Canceled();
   void Finished(int result);
 
-private slots:
-  void OnCancelled() { m_was_cancelled.Set(); }
-
-  void SetValueSlot(int progress)
+private:
+  void WireUp()
   {
-    // Normally we would've been able to just call setValue instead of having this wrapper
-    // around it, but due to the https://bugreports.qt.io/browse/QTBUG-10561 stack overflow,
-    // we can't. Short summary of the stack overflow: setValue calls processEvents,
-    // which calls SetValueSlot if there is another SetValueSlot event in the queue,
-    // which would call setValue if it wasn't for the check below, and so on.
+    QProgressDialog* const dialog = &m_dialog;
 
-    m_last_received_progress = progress;
+    // Requests from any thread, forwarded to the dialog.
+    connect(this, &ParallelProgressDialog::CancelSignal, dialog, &QProgressDialog::cancel);
+    connect(this, &ParallelProgressDialog::ResetSignal, dialog, &QProgressDialog::reset);
+    connect(this, &ParallelProgressDialog::SetCancelButtonTextSignal, dialog,
+            &QProgressDialog::setCancelButtonText);
+    connect(this, &ParallelProgressDialog::SetLabelTextSignal, dialog,
+            &QProgressDialog::setLabelText);
+    connect(this, &ParallelProgressDialog::SetMaximumSignal, dialog,
+            &QProgressDialog::setMaximum);
+    connect(this, &ParallelProgressDialog::SetMinimumSignal, dialog,
+            &QProgressDialog::setMinimum);
+    connect(this, &ParallelProgressDialog::SetMinimumDurationSignal, dialog,
+            &QProgressDialog::setMinimumDuration);
+    connect(this, &ParallelProgressDialog::SetRangeSignal, dialog, &QProgressDialog::setRange);
+    connect(this, &ParallelProgressDialog::SetValueSignal, this,
+            &ParallelProgressDialog::ApplyValue);
 
-    if (m_is_setting_value)
+    // Notifications from the dialog.
+    connect(dialog, &QProgressDialog::canceled, this, [this] { m_cancelled.Set(); });
+    connect(dialog, &QProgressDialog::canceled, this, &ParallelProgressDialog::Canceled);
+    connect(dialog, &QProgressDialog::finished, this, &ParallelProgressDialog::Finished);
+  }
+
+  // QProgressDialog::setValue can process events, which may deliver further queued SetValue
+  // requests and re-enter here (see QTBUG-10561); unbounded, that overflows the stack. A
+  // re-entrant call only records the newest value, and the outermost call keeps applying values
+  // until no newer one has arrived.
+  void ApplyValue(int progress)
+  {
+    m_latest_value = progress;
+    if (m_applying_value)
       return;
 
-    m_is_setting_value = true;
-
-    int last_set_progress;
+    m_applying_value = true;
+    int applied;
     do
     {
-      last_set_progress = m_last_received_progress;
-      m_dialog.setValue(m_last_received_progress);
-    } while (m_last_received_progress != last_set_progress);
-
-    m_is_setting_value = false;
-  }
-
-private:
-  template <typename Func1, typename Func2>
-  void ConnectSignal(Func1 signal, Func2 slot)
-  {
-    QObject::connect(this, signal, &m_dialog, slot);
-  }
-
-  template <typename Func1, typename Func2>
-  void ConnectSlot(Func1 signal, Func2 slot)
-  {
-    QObject::connect(&m_dialog, signal, this, slot);
-  }
-
-  void ConnectSignalsAndSlots()
-  {
-    ConnectSignal(&ParallelProgressDialog::CancelSignal, &QProgressDialog::cancel);
-    ConnectSignal(&ParallelProgressDialog::ResetSignal, &QProgressDialog::reset);
-    ConnectSignal(&ParallelProgressDialog::SetCancelButtonTextSignal,
-                  &QProgressDialog::setCancelButtonText);
-    ConnectSignal(&ParallelProgressDialog::SetLabelTextSignal, &QProgressDialog::setLabelText);
-    ConnectSignal(&ParallelProgressDialog::SetMaximumSignal, &QProgressDialog::setMaximum);
-    ConnectSignal(&ParallelProgressDialog::SetMinimumSignal, &QProgressDialog::setMinimum);
-    ConnectSignal(&ParallelProgressDialog::SetMinimumDurationSignal,
-                  &QProgressDialog::setMinimumDuration);
-    ConnectSignal(&ParallelProgressDialog::SetRangeSignal, &QProgressDialog::setRange);
-
-    QObject::connect(this, &ParallelProgressDialog::SetValueSignal, this,
-                     &ParallelProgressDialog::SetValueSlot);
-
-    ConnectSlot(&QProgressDialog::canceled, &ParallelProgressDialog::OnCancelled);
-
-    ConnectSlot(&QProgressDialog::canceled, &ParallelProgressDialog::Canceled);
-    ConnectSlot(&QProgressDialog::finished, &ParallelProgressDialog::Finished);
+      applied = m_latest_value;
+      m_dialog.setValue(applied);
+    } while (applied != m_latest_value);
+    m_applying_value = false;
   }
 
   QProgressDialog m_dialog;
-  Common::Flag m_was_cancelled;
-  int m_last_received_progress = 0;
-  bool m_is_setting_value = false;
+  Common::Flag m_cancelled;
+  int m_latest_value = 0;
+  bool m_applying_value = false;
 };

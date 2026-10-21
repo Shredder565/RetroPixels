@@ -1,14 +1,13 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/QtUtils/DoubleClickEventFilter.h"
 
 #include <QEvent>
 
-bool DoubleClickEventFilter::eventFilter(QObject* object, QEvent* event)
+bool DoubleClickEventFilter::eventFilter(QObject*, QEvent* event)
 {
-  if (event->type() == QEvent::MouseButtonDblClick)
+  const bool is_double_click = event->type() == QEvent::MouseButtonDblClick;
+  if (is_double_click)
     emit doubleClicked();
-
   return false;
 }

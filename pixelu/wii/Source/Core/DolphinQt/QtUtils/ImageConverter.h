@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,4 +9,6 @@ namespace UICommon
 struct GameBanner;
 }
 
+// A game banner as a pixmap (the banner's pixels have red and blue the other way round from
+// Qt's RGBX format).
 QPixmap ToQPixmap(const UICommon::GameBanner& banner);
