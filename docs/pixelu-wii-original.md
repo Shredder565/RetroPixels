@@ -5494,3 +5494,201 @@ step did for the old file. No key bytes are in the tree.
     PropertiesDialog, SettingsWindow and ControllersPane (containers of
     the driven pages), the _WIN32-only paths (Wii Remote pair/forget via
     RunWithSpinner, borderless fullscreen) and the removed Apple branches.
+
+- B3 log (build system and Externals glue): PixelU-Wii now builds from
+  `pixelu/wii` with its own CMake. No Dolphin-written build file is used;
+  only third-party sources, the prebuilt Qt and FFmpeg, the Sys data and the
+  translations still come from the Dolphin 2609a submodule. Work started
+  from HEAD b94f740 (B1 merged) on `claude/wiiu-emulator-urpcen`. Only the
+  files below were touched.
+  - Top level (new): `pixelu/wii/CMakeLists.txt`, `CMakePresets.json`,
+    `.gitignore` (`/build/`).
+    - Windows x64 with MSVC only: configure stops for any other system or
+      CPU, for MSVC older than 19.32 and for toolsets older than v143.
+    - Third-party code is read from the cache path `PIXELU_WII_THIRD_PARTY`
+      (default `dolphin/Externals`). Sys data and `Languages/po` are read
+      from `PIXELU_WII_DOLPHIN_DATA` (default `dolphin`). Configure checks
+      that both paths exist.
+    - Options: the Windows ones Dolphin had (Qt, CLI tool, Vulkan, cubeb,
+      SDL, LLVM, LTO, frame dumps, UPnP, Discord, mGBA, RetroAchievements,
+      RAIntegration, FASTLOG). `ENABLE_AUTOUPDATE` and `ENABLE_ANALYTICS`
+      default OFF. This is what `patches/0002` did, so `pixelu/wii/patches/`
+      is deleted.
+    - MSVC settings are the same as before:
+      - compiler options: C++23, /EHsc, /GR- /W4 /WX, the same /wd and /w1
+        list, /utf-8, /external, /experimental:deterministic,
+        /Gy /Oi /GS, the /Zc set, /volatile:iso and /fp:precise;
+      - linker options: /NXCOMPAT /DEBUG /OPT:REF /OPT:ICF;
+      - optimised builds use "/O2 /DNDEBUG /Z7" (`CMake/PixelUFlagsOverride.cmake`);
+      - _ARCH_64/_M_X86_64, the analytics/autoupdate/FASTLOG defines and
+        HAVE_FFMPEG;
+      - the program goes to `Binaries`, PDBs to `pdb`, and `dolphin-emu`
+        is the VS startup project.
+    - The third-party libraries are added in Dolphin's order, each followed
+      by the same directory-wide define or include (HAS_VULKAN, HAS_OPENGL,
+      HAVE_CUBEB, __LIBUSB__, HAVE_SDL3, USE_UPNP, HAVE_CPPIPC, the ed25519,
+      discord-rpc, wil, OpenAL and picojson include folders). Their binary
+      folders are in the same places (`build/Externals/<name>/...`).
+    - Version: `Source/Core` is added after `${PROJECT_BINARY_DIR}/Source/Core`
+      goes on the include path. B1's `PixelUWiiVersion.cmake` (included by
+      Common) builds `pixelu_wii_version` before `common`. There is no
+      `dolphin_scmrev` target any more.
+    - The preset `windows-x64-release` is the only one, and it is the one CI
+      uses: "Visual Studio 18 2026", x64, toolset v145, Release, binary
+      folder `build/windows-x64-release`, with the toolchain file below.
+  - CMake modules (new, `pixelu/wii/CMake/`):
+    - `PixelUHelpers.cmake`:
+      - `pixelu_add_sources` ("IN <folder>" source groups);
+      - `pixelu_library`;
+      - `pixelu_use_pch`;
+      - `pixelu_drop_option` (replaces remove_cxx_flag_from_target);
+      - `pixelu_third_party_target` (drops the project's -W and /W options
+        and adds /W0; replaces dolphin_disable_warnings);
+      - `pixelu_after_build_link`.
+    - `PixelUWindowsToolchain.cmake`: system Windows, x86_64, find-root
+      modes. It sets `QT_HOST_PATH` to the bundled Qt (ARM64 when the host
+      is ARM64).
+    - `FindFFmpeg.cmake`: own finder with the same results (FFmpeg::<lib>
+      targets with their links to each other, FFmpeg_FOUND and the
+      per-library variables). `FFMPEG_DIR` limits the search to that folder.
+    - `PixelULinkOrCopy.cmake`: makes a symlink, or copies when it can't.
+    - `PixelUAchievementHash.cmake`: puts the SHA-1 of the json into the
+      header template.
+  - Externals (new, `pixelu/wii/Externals/<name>/CMakeLists.txt`, 36 folders):
+    - Through the library's own upstream CMake, with the same options
+      Dolphin set: fmt, glslang, pugixml, enet, zstd, zlib-ng, minizip-ng
+      (bzip2/lzma/zlib/zstd taken from here, no pkg-config), lz4, libspng,
+      SDL, miniupnpc, curl (Schannel, HTTP only), mGBA (library only),
+      cpp-ipc.
+    - From source lists: bdisasm, cpp-optparse, imgui, implot,
+      spirv_cross, tinygltf, xxhash, bzip2, liblzma, LZO, FreeSurround,
+      ed25519, hidapi, SFML (system and network), rcheevos (no
+      libretro/ROM/zip/encrypted hashing, RAIntegration bridge), and
+      discord-rpc.
+    - Windows-only builds, replacing what Dolphin had changed in the
+      upstream CMake:
+      - cubeb: WASAPI and WinMM backends with the bundled speex resampler,
+        and the same generated `exports/cubeb_export.h` (byte-identical).
+      - libusb: the Windows backends with libusb's msvc config;
+        `LibUSB::LibUSB` is a global interface target.
+      - mbedtls: mbedcrypto, mbedx509 and mbedtls as three static libraries
+        linked to ws2_32, with `MbedTLS::` aliases.
+    - Header-only or interface targets: expr, watcher, FatFs.
+    - Own config headers:
+      - `imgui/imgui_user_config.h`: IM_ASSERT goes to ASSERT, no demo
+        windows. Its folder comes before Dolphin's in the include path.
+      - `implot/implot_force_include.h`: `std::isnan` for implot, forced
+        in with /FI.
+      - `liblzma/config.h`: a config for MSVC x64, written fresh.
+  - Source CMakeLists: all 19 that were Dolphin's are rewritten:
+    - Source, PCH, Core, Common, Core/Core, DiscIO, InputCommon, UICommon,
+      VideoCommon, AudioCommon, UpdaterCommon, DolphinTool, DolphinQt;
+    - VideoBackends and its D3D, D3D12, D3DCommon, OGL and Vulkan.
+    Null and Software were already original and are unchanged.
+    - They have the same targets, sources, definitions and link libraries.
+      The WIN32 and _M_X86_64 source blocks are merged into the main lists.
+      Non-Windows branches are dropped (Apple, Android, OpenBSD, Haiku,
+      Linux, libudev, X11, Iconv, the -W flag checks). The optional parts
+      stay behind their options or targets.
+    - PCH: an own version of the shared-PCH scheme. `build_pch` makes
+      dolphin.pch with /Yc. `use_pch` gives /Yu /FI and
+      `force_build_pch`. Debug information is embedded (/Z7) through the
+      CMP0141 property.
+    - Core: `AchievementApprovedHash.h` is made from the shipped
+      `Sys/ApprovedInis.json`: PixelU-Wii's `Data/Sys` copy if there is
+      one, else the submodule's.
+    - DolphinQt:
+      - Qt comes from the third-party folder; windeployqt runs through
+        qtpaths.bat and target_qt.conf, with the same options.
+      - Translations are built with msgfmt from the submodule's
+        `Languages/po`.
+      - /GR- is dropped and /GR added.
+      - After the build, `Binaries/Sys` is assembled as a copy: the
+        submodule's `Data/Sys` with `pixelu/wii/Data/Sys` laid over it.
+      - `Binaries/COPYING`, `Binaries/Licenses` and `Binaries/qt.conf` link
+        to pixelu/wii's own files.
+      This replaces the workflow's overlay into the submodule.
+  - Workflow (`.github/workflows/pixelu-wii.yml`):
+    - Configures with `cmake --preset windows-x64-release` and builds with
+      `--target dolphin-emu`, both in `pixelu/wii`. The binaries are in
+      `pixelu/wii/build/windows-x64-release/Binaries`.
+    - The steps that swapped Source/ in, overlaid Sys/COPYING/LICENSES onto
+      the submodule and applied the patches are gone. The package copies
+      `Sys` from the build.
+    - The VERSION.txt line now says the build uses PixelU-Wii's own CMake
+      and takes the third-party libraries, Sys and translations from
+      Dolphin 2609a.
+    - Unchanged: the submodule fetch, the artifact name
+      `PixelU-Wii-windows-x64`, the package layout, `PixelU-Wii.exe`, the
+      VC++ runtime copy, and all of B1's steps (COPYING, license.txt,
+      Licenses, Licenses/Externals, the hash checks, the Sys/GameSettings
+      check, the --version warning).
+  - Checked (Linux, configure only): the old tree (B1's Source in Dolphin's
+    build, patch 0002 applied) and the new tree were both configured with
+    clang-cl as an MSVC-style compiler, Ninja, the same Externals and stub
+    Qt/FFmpeg. CMake's file API and compile_commands.json were compared.
+    - Same targets. Only two are gone: `dolphin_scmrev` (as asked) and
+      mbedtls's helper target `lib`.
+    - Every library and program has the same source list. cubeb also
+      builds cubeb_wasapi.cpp and cubeb_winmm.c: upstream turns them on by
+      looking for audioclient.h and mmsystem.h, which MSVC has and the test
+      headers don't. avrt.lib and ksuser.lib come in through cubeb for the
+      same reason.
+    - Link lines: the same libraries, apart from the output paths of
+      mbedtls/discord-rpc.
+    - Compile commands of PixelU-Wii's own sources: identical, include
+      order included, except for these differences:
+      - DATA_DIR is now ".../share/pixelu-wii/";
+      - `Externals/imgui` (the config header) is added;
+      - -msse2 and -fdiagnostics-color are no longer added. Dolphin added
+        each one only if the compiler accepted it: -msse2 only with
+        clang-cl, since cl.exe rejects it (and SSE2 is the x64 baseline
+        anyway), and -fdiagnostics-color only under Ninja.
+    - Third-party differences change only warnings or are MSVC no-ops:
+      - discord-rpc no longer gets /Wall and its /wd list, or its empty
+        RAPIDJSON include;
+      - cpp-optparse no longer gets -fexceptions (cl ignores it; /EHsc is
+        on);
+      - mbedtls no longer gets upstream's GCC/Clang -W set (with MSVC it
+        gets /O2 /DNDEBUG as before);
+      - liblzma no longer gets _LARGEFILE64_SOURCE.
+    - liblzma, all 72 files preprocessed with the old and the new config.h:
+      - 70 give identical output.
+      - `tuklib_exit.c` and `tuklib_mbstr_width.c` differ only because
+        Dolphin's config.h, a Linux one, defines _GNU_SOURCE,
+        HAVE_MBRTOWC and HAVE_WCWIDTH. Under MSVC those make no
+        difference, and liblzma calls neither file.
+    - Verbatim check against every Dolphin build file (top level, CMake/,
+      the Externals wrappers and config headers, the old Source lists): no
+      comment and no multi-line block is shared. The lines that match are
+      single statements that any build of these libraries must contain:
+      upstream option names (`set(SDL_TEST_LIBRARY OFF)`), alias names
+      (`add_library(zstd::zstd ALIAS libzstd_static)`), target link
+      lines, find_package calls, and #define lines of the liblzma config
+      that name xz's own features.
+  - CI must confirm (none of this can be run off Windows):
+    - MSVC v145 compile and link with the VS 2026 generator, including the
+      shared PCH;
+    - that upstream cubeb's WASAPI and WinMM detection matched what is now
+      always on;
+    - windeployqt through qtpaths.bat;
+    - the msgfmt translations;
+    - that the Sys copy, COPYING and Licenses in Binaries end up in the
+      package with B1's hashes.
+    LLVM is not expected on the runner, so HAVE_LLVM stays off as before.
+  - Still from Dolphin's submodule, and why:
+    - Prebuilt binaries, kept as they are per the brief: Qt 6.8.3
+      (`Externals/Qt`, from dolphin-emu/ext-win-qt), FFmpeg
+      (`Externals/FFmpeg-bin`, static .lib files from
+      dolphin-emu/ext-win-ffmpeg) and gettext's `msgfmt.exe` (a build tool,
+      not shipped).
+    - Third-party sources that Dolphin vendors with its own changes, used
+      unchanged as third-party code: Bochs_disasm (with its config.h),
+      FatFs (with ffconf.h), FreeSurround, SFML, discord-rpc, ed25519, LZO,
+      xxhash, bzip2, liblzma and the others in Externals/.
+    - `Data/Sys` (game INIs, shaders, fonts, ApprovedInis.json; B1's own
+      pictures are laid over it) and `Languages/po`. These are data, not
+      build files, and stay until their own batch.
+    - `.github/workflows/bundle-test.yml` still says PixelU-Wii is Dolphin
+      "with the changes in pixelu/wii/patches". That file is not part of
+      this batch, so the line is left for whoever owns it.
