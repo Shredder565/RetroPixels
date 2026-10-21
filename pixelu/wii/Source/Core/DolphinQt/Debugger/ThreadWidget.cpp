@@ -1,11 +1,16 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/ThreadWidget.h"
 
+#include <array>
 #include <bit>
+#include <optional>
+#include <utility>
 
+#include <QCursor>
+#include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -21,42 +26,112 @@
 #include "DolphinQt/QtUtils/FromStdString.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+// Dolphin OS globals in low memory (see YAGCD, "Dolphin OS Globals").
+constexpr u32 OS_CURRENT_CONTEXT = 0x800000D4;
+constexpr u32 OS_DEFAULT_THREAD = 0x800000D8;
+constexpr u32 OS_ACTIVE_QUEUE_HEAD = 0x800000DC;
+constexpr u32 OS_ACTIVE_QUEUE_TAIL = 0x800000E0;
+constexpr u32 OS_CURRENT_THREAD = 0x800000E4;
+
+// How many stack frames the stack walk follows at most.
+constexpr int MAX_FRAMES = 16;
+
+QString Hex8(u32 value)
+{
+  return QStringLiteral("%1").arg(value, 8, 16, QLatin1Char('0'));
+}
+
+QString HexOptional(const std::optional<u32>& value)
+{
+  return value ? Hex8(*value) : QString{};
+}
+
+// The context view shows every scalar register as one 32-bit word (FPSCR keeps its low half).
+template <typename T>
+std::optional<u32> Narrow(const std::optional<T>& value)
+{
+  if (!value)
+    return std::nullopt;
+  return static_cast<u32>(*value);
+}
+
+template <typename Table>
+QString HexAt(const Table& table, size_t index)
+{
+  if (!table || index >= table->size())
+    return QString{};
+  return Hex8(table->at(index));
+}
+
+template <typename Table>
+QString DoubleBitsAt(const Table& table, size_t index)
+{
+  if (!table || index >= table->size())
+    return QString{};
+  return QStringLiteral("%1").arg(std::bit_cast<u64>(table->at(index)), 16, 16, QLatin1Char('0'));
+}
+
+QString ReadWordAsHex(const Core::CPUThreadGuard& guard, u32 address)
+{
+  const u32 word =
+      PowerPC::MMU::HostIsRAMAddress(guard, address) ? PowerPC::MMU::HostRead<u32>(guard, address) : 0;
+  return Hex8(word);
+}
+
+QLineEdit* ReadOnlyHexField()
+{
+  auto* field = new QLineEdit(QStringLiteral("00000000"));
+  field->setReadOnly(true);
+  field->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
+  return field;
+}
+
+void SetCell(QTableWidget* table, int row, int col, const QString& text)
+{
+  table->setItem(row, col, new QTableWidgetItem(text));
+}
+}  // namespace
+
 ThreadWidget::ThreadWidget(QWidget* parent) : QDockWidget(parent)
 {
   setWindowTitle(tr("Threads"));
   setObjectName(QStringLiteral("threads"));
 
-  setHidden(!Settings::Instance().IsThreadsVisible() || !Settings::Instance().IsDebugModeEnabled());
-
+  auto& settings = Settings::Instance();
+  setHidden(!settings.IsThreadsVisible() || !settings.IsDebugModeEnabled());
   setAllowedAreas(Qt::AllDockWidgetAreas);
 
-  CreateWidgets();
+  BuildLayout();
 
-  auto& settings = Settings::GetQSettings();
+  QSettings& stored = Settings::GetQSettings();
+  restoreGeometry(stored.value(QStringLiteral("threadwidget/geometry")).toByteArray());
+  setFloating(stored.value(QStringLiteral("threadwidget/floating")).toBool());
 
-  restoreGeometry(settings.value(QStringLiteral("threadwidget/geometry")).toByteArray());
-  // macOS: setHidden() needs to be evaluated before setFloating() for proper window presentation
-  // according to Settings
-  setFloating(settings.value(QStringLiteral("threadwidget/floating")).toBool());
+  connect(m_thread_list->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+          [this](const QItemSelection& selected, const QItemSelection&) {
+            const QModelIndexList picked = selected.indexes();
+            ThreadPicked(picked.empty() ? -1 : picked.first().row());
+          });
+  connect(m_context_grid, &QTableWidget::customContextMenuRequested, this,
+          [this] { ShowAddressMenu(m_context_grid); });
+  connect(m_stack_list, &QTableWidget::customContextMenuRequested, this,
+          [this] { ShowAddressMenu(m_stack_list); });
 
-  ConnectWidgets();
-
-  connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this, &ThreadWidget::Update);
-
-  connect(&Settings::Instance(), &Settings::ThreadsVisibilityChanged, this,
+  connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this, &ThreadWidget::Refresh);
+  connect(&settings, &Settings::ThreadsVisibilityChanged, this,
           [this](bool visible) { setHidden(!visible); });
-
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this, [this](bool enabled) {
+  connect(&settings, &Settings::DebugModeToggled, this, [this](bool enabled) {
     setHidden(!enabled || !Settings::Instance().IsThreadsVisible());
   });
 }
 
 ThreadWidget::~ThreadWidget()
 {
-  auto& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("threadwidget/geometry"), saveGeometry());
-  settings.setValue(QStringLiteral("threadwidget/floating"), isFloating());
+  QSettings& stored = Settings::GetQSettings();
+  stored.setValue(QStringLiteral("threadwidget/geometry"), saveGeometry());
+  stored.setValue(QStringLiteral("threadwidget/floating"), isFloating());
 }
 
 void ThreadWidget::closeEvent(QCloseEvent*)
@@ -64,429 +139,352 @@ void ThreadWidget::closeEvent(QCloseEvent*)
   Settings::Instance().SetThreadsVisible(false);
 }
 
-void ThreadWidget::showEvent(QShowEvent* event)
+void ThreadWidget::showEvent(QShowEvent*)
 {
-  Update();
+  Refresh();
 }
 
-void ThreadWidget::CreateWidgets()
+void ThreadWidget::BuildLayout()
 {
-  m_state = new QGroupBox(tr("State"));
+  m_globals_box = new QGroupBox(tr("State"));
+  auto* globals_row = new QHBoxLayout;
+  m_globals_box->setLayout(globals_row);
+  globals_row->addWidget(BuildGlobalsBox());
+  globals_row->addWidget(BuildQueueBox());
+  globals_row->setContentsMargins(2, 2, 2, 2);
+  globals_row->setSpacing(1);
 
-  auto* state_layout = new QHBoxLayout;
-  m_state->setLayout(state_layout);
-  state_layout->addWidget(CreateContextGroup());
-  state_layout->addWidget(CreateActiveThreadQueueGroup());
-  state_layout->setContentsMargins(2, 2, 2, 2);
-  state_layout->setSpacing(1);
+  auto* body = new QWidget;
+  auto* column = new QVBoxLayout;
+  body->setLayout(column);
+  column->addWidget(m_globals_box);
+  column->addWidget(BuildThreadListBox());
+  column->addWidget(BuildContextBox());
+  column->addWidget(BuildStackBox());
+  column->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Expanding));
+  setWidget(body);
 
-  auto* widget = new QWidget;
-  auto* layout = new QVBoxLayout;
-  widget->setLayout(layout);
-  layout->addWidget(m_state);
-  layout->addWidget(CreateThreadGroup());
-  layout->addWidget(CreateThreadContextGroup());
-  layout->addWidget(CreateThreadCallstackGroup());
-  layout->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Expanding));
-  setWidget(widget);
-
-  Update();
-  UpdateThreadContext({});
+  Refresh();
+  ShowContext({});
 }
 
-void ThreadWidget::ConnectWidgets()
+QGroupBox* ThreadWidget::BuildGlobalsBox()
 {
-  connect(m_thread_table->selectionModel(), &QItemSelectionModel::selectionChanged,
-          [this](const QItemSelection& selected, const QItemSelection& deselected) {
-            const auto indexes = selected.indexes();
-            const int row = indexes.empty() ? -1 : indexes.first().row();
-            OnSelectionChanged(row);
-          });
-  connect(m_context_table, &QTableWidget::customContextMenuRequested,
-          [this] { ShowContextMenu(m_context_table); });
-  connect(m_callstack_table, &QTableWidget::customContextMenuRequested,
-          [this] { ShowContextMenu(m_callstack_table); });
+  auto* box = new QGroupBox(tr("Thread context"));
+  auto* grid = new QGridLayout;
+  grid->setColumnStretch(0, 1);
+  grid->setColumnStretch(1, 1);
+  box->setLayout(grid);
+
+  const std::array<std::pair<QString, QLineEdit**>, 3> rows{{
+      {tr("Current context"), &m_context_field},
+      {tr("Current thread"), &m_thread_field},
+      {tr("Default thread"), &m_default_field},
+  }};
+  for (int r = 0; r < static_cast<int>(rows.size()); ++r)
+  {
+    const auto& [caption, field] = rows[static_cast<size_t>(r)];
+    grid->addWidget(new QLabel(caption), r, 0);
+    *field = ReadOnlyHexField();
+    grid->addWidget(*field, r, 1);
+  }
+  grid->setSpacing(1);
+  return box;
 }
 
-void ThreadWidget::ShowContextMenu(QTableWidget* table)
+QGroupBox* ThreadWidget::BuildQueueBox()
 {
-  const auto* item = static_cast<QTableWidgetItem*>(table->currentItem());
-  if (item == nullptr)
+  auto* box = new QGroupBox(tr("Active thread queue"));
+  auto* grid = new QGridLayout;
+  grid->setColumnStretch(0, 1);
+  grid->setColumnStretch(1, 1);
+  box->setLayout(grid);
+
+  grid->addWidget(new QLabel(tr("Head")), 0, 0);
+  m_head_field = ReadOnlyHexField();
+  grid->addWidget(m_head_field, 0, 1);
+  grid->addWidget(new QLabel(tr("Tail")), 1, 0);
+  m_tail_field = ReadOnlyHexField();
+  grid->addWidget(m_tail_field, 1, 1);
+  grid->setSpacing(1);
+  return box;
+}
+
+QGroupBox* ThreadWidget::BuildThreadListBox()
+{
+  auto* box = new QGroupBox(tr("Active threads"));
+  auto* grid = new QGridLayout;
+  box->setLayout(grid);
+
+  m_thread_list = new QTableWidget();
+  const QStringList headings{
+      tr("Address"),
+      tr("State"),
+      tr("Detached"),
+      tr("Suspended"),
+      QStringLiteral("%1\n(%2)").arg(tr("Base priority"), tr("Effective priority")),
+      QStringLiteral("%1\n%2").arg(tr("Stack end"), tr("Stack start")),
+      tr("errno"),
+      tr("Specific")};
+  m_thread_list->setColumnCount(static_cast<int>(headings.size()));
+  m_thread_list->setHorizontalHeaderLabels(headings);
+  m_thread_list->setTabKeyNavigation(false);
+  m_thread_list->verticalHeader()->setVisible(false);
+  m_thread_list->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_thread_list->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_thread_list->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_thread_list->setWordWrap(false);
+
+  grid->addWidget(m_thread_list, 0, 0);
+  grid->setSpacing(1);
+  return box;
+}
+
+QGroupBox* ThreadWidget::BuildContextBox()
+{
+  auto* box = new QGroupBox(tr("Selected thread context"));
+  auto* grid = new QGridLayout;
+  box->setLayout(grid);
+
+  // Name/value pairs: GPRs, FPRs, paired-single slots, then GQRs and the other registers.
+  m_context_grid = new QTableWidget();
+  m_context_grid->setColumnCount(8);
+  m_context_grid->setRowCount(32);
+  m_context_grid->setTabKeyNavigation(false);
+  m_context_grid->horizontalHeader()->setVisible(false);
+  m_context_grid->verticalHeader()->setVisible(false);
+  m_context_grid->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_context_grid->setSelectionBehavior(QAbstractItemView::SelectItems);
+  m_context_grid->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_context_grid->setContextMenuPolicy(Qt::CustomContextMenu);
+
+  grid->addWidget(m_context_grid, 0, 0);
+  grid->setSpacing(1);
+  return box;
+}
+
+QGroupBox* ThreadWidget::BuildStackBox()
+{
+  auto* box = new QGroupBox(tr("Selected thread callstack"));
+  auto* grid = new QGridLayout;
+  box->setLayout(grid);
+
+  m_stack_list = new QTableWidget();
+  const QStringList headings{tr("Address"), tr("Back Chain"), tr("LR Save"), tr("Description")};
+  m_stack_list->setColumnCount(static_cast<int>(headings.size()));
+  m_stack_list->setHorizontalHeaderLabels(headings);
+  m_stack_list->setRowCount(0);
+  m_stack_list->setTabKeyNavigation(false);
+  m_stack_list->verticalHeader()->setVisible(false);
+  m_stack_list->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_stack_list->setSelectionBehavior(QAbstractItemView::SelectItems);
+  m_stack_list->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_stack_list->setContextMenuPolicy(Qt::CustomContextMenu);
+
+  grid->addWidget(m_stack_list, 0, 0);
+  grid->setSpacing(1);
+  return box;
+}
+
+void ThreadWidget::ShowAddressMenu(QTableWidget* table)
+{
+  const QTableWidgetItem* cell = table->currentItem();
+  if (!cell)
     return;
 
-  bool ok;
-  const u32 addr = item->text().toUInt(&ok, 16);
+  bool ok = false;
+  const u32 address = cell->text().toUInt(&ok, 16);
   if (!ok)
     return;
 
-  QMenu* menu = new QMenu(this);
+  auto* menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
-  const QString watch_name = QStringLiteral("thread_context_%1").arg(addr, 8, 16, QLatin1Char('0'));
-  menu->addAction(tr("Add &breakpoint"), this, [this, addr] { emit RequestBreakpoint(addr); });
+  const QString watch_name = QStringLiteral("thread_context_%1").arg(Hex8(address));
+  menu->addAction(tr("Add &breakpoint"), this, [this, address] { emit RequestBreakpoint(address); });
   menu->addAction(tr("Add memory breakpoint"), this,
-                  [this, addr] { emit RequestMemoryBreakpoint(addr); });
+                  [this, address] { emit RequestMemoryBreakpoint(address); });
   menu->addAction(tr("Add to &watch"), this,
-                  [this, addr, watch_name] { emit RequestWatch(watch_name, addr); });
-  menu->addAction(tr("View &memory"), this, [this, addr] { emit RequestViewInMemory(addr); });
-  menu->addAction(tr("View &code"), this, [this, addr] { emit RequestViewInCode(addr); });
+                  [this, address, watch_name] { emit RequestWatch(watch_name, address); });
+  menu->addAction(tr("View &memory"), this, [this, address] { emit RequestViewInMemory(address); });
+  menu->addAction(tr("View &code"), this, [this, address] { emit RequestViewInCode(address); });
   menu->exec(QCursor::pos());
 }
 
-QLineEdit* ThreadWidget::CreateLineEdit() const
-{
-  QLineEdit* line_edit = new QLineEdit(QStringLiteral("00000000"));
-  line_edit->setReadOnly(true);
-  line_edit->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
-  return line_edit;
-}
-
-QGroupBox* ThreadWidget::CreateContextGroup()
-{
-  QGroupBox* context_group = new QGroupBox(tr("Thread context"));
-  QGridLayout* context_layout = new QGridLayout;
-  context_layout->setColumnStretch(0, 1);
-  context_layout->setColumnStretch(1, 1);
-  context_group->setLayout(context_layout);
-  context_layout->addWidget(new QLabel(tr("Current context")), 0, 0);
-  m_current_context = CreateLineEdit();
-  context_layout->addWidget(m_current_context, 0, 1);
-  context_layout->addWidget(new QLabel(tr("Current thread")), 1, 0);
-  m_current_thread = CreateLineEdit();
-  context_layout->addWidget(m_current_thread, 1, 1);
-  context_layout->addWidget(new QLabel(tr("Default thread")), 2, 0);
-  m_default_thread = CreateLineEdit();
-  context_layout->addWidget(m_default_thread, 2, 1);
-  context_layout->setSpacing(1);
-  return context_group;
-}
-
-QGroupBox* ThreadWidget::CreateActiveThreadQueueGroup()
-{
-  QGroupBox* thread_queue_group = new QGroupBox(tr("Active thread queue"));
-  auto* thread_queue_layout = new QGridLayout;
-  thread_queue_layout->setColumnStretch(0, 1);
-  thread_queue_layout->setColumnStretch(1, 1);
-  thread_queue_group->setLayout(thread_queue_layout);
-  thread_queue_layout->addWidget(new QLabel(tr("Head")), 0, 0);
-  m_queue_head = CreateLineEdit();
-  thread_queue_layout->addWidget(m_queue_head, 0, 1);
-  thread_queue_layout->addWidget(new QLabel(tr("Tail")), 1, 0);
-  m_queue_tail = CreateLineEdit();
-  thread_queue_layout->addWidget(m_queue_tail, 1, 1);
-  thread_queue_layout->setSpacing(1);
-  return thread_queue_group;
-}
-
-QGroupBox* ThreadWidget::CreateThreadGroup()
-{
-  QGroupBox* thread_group = new QGroupBox(tr("Active threads"));
-  QGridLayout* thread_layout = new QGridLayout;
-  thread_group->setLayout(thread_layout);
-
-  m_thread_table = new QTableWidget();
-  QStringList header{tr("Address"),
-                     tr("State"),
-                     tr("Detached"),
-                     tr("Suspended"),
-                     QStringLiteral("%1\n(%2)").arg(tr("Base priority"), tr("Effective priority")),
-                     QStringLiteral("%1\n%2").arg(tr("Stack end"), tr("Stack start")),
-                     tr("errno"),
-                     tr("Specific")};
-  m_thread_table->setColumnCount(header.size());
-
-  m_thread_table->setHorizontalHeaderLabels(header);
-  m_thread_table->setTabKeyNavigation(false);
-  m_thread_table->verticalHeader()->setVisible(false);
-  m_thread_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_thread_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_thread_table->setSelectionMode(QAbstractItemView::SingleSelection);
-  m_thread_table->setWordWrap(false);
-
-  thread_layout->addWidget(m_thread_table, 0, 0);
-  thread_layout->setSpacing(1);
-  return thread_group;
-}
-
-QGroupBox* ThreadWidget::CreateThreadContextGroup()
-{
-  QGroupBox* thread_context_group = new QGroupBox(tr("Selected thread context"));
-  QGridLayout* thread_context_layout = new QGridLayout;
-  thread_context_group->setLayout(thread_context_layout);
-
-  m_context_table = new QTableWidget();
-  m_context_table->setColumnCount(8);  // GPR, FPR, PSF, (GQR+others)
-  m_context_table->setRowCount(32);
-  m_context_table->setTabKeyNavigation(false);
-  m_context_table->horizontalHeader()->setVisible(false);
-  m_context_table->verticalHeader()->setVisible(false);
-  m_context_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_context_table->setSelectionBehavior(QAbstractItemView::SelectItems);
-  m_context_table->setSelectionMode(QAbstractItemView::SingleSelection);
-  m_context_table->setContextMenuPolicy(Qt::CustomContextMenu);
-
-  thread_context_layout->addWidget(m_context_table, 0, 0);
-  thread_context_layout->setSpacing(1);
-  return thread_context_group;
-}
-
-QGroupBox* ThreadWidget::CreateThreadCallstackGroup()
-{
-  QGroupBox* thread_callstack_group = new QGroupBox(tr("Selected thread callstack"));
-  QGridLayout* thread_callstack_layout = new QGridLayout;
-  thread_callstack_group->setLayout(thread_callstack_layout);
-
-  m_callstack_table = new QTableWidget();
-  QStringList header{tr("Address"), tr("Back Chain"), tr("LR Save"), tr("Description")};
-  m_callstack_table->setColumnCount(header.size());
-
-  m_callstack_table->setHorizontalHeaderLabels(header);
-  m_callstack_table->setRowCount(0);
-  m_callstack_table->setTabKeyNavigation(false);
-  m_callstack_table->verticalHeader()->setVisible(false);
-  m_callstack_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_callstack_table->setSelectionBehavior(QAbstractItemView::SelectItems);
-  m_callstack_table->setSelectionMode(QAbstractItemView::SingleSelection);
-  m_callstack_table->setContextMenuPolicy(Qt::CustomContextMenu);
-
-  thread_callstack_layout->addWidget(m_callstack_table, 0, 0);
-  thread_callstack_layout->setSpacing(1);
-  return thread_callstack_group;
-}
-
-void ThreadWidget::Update()
+void ThreadWidget::Refresh()
 {
   if (!isVisible())
     return;
 
   auto& system = Core::System::GetInstance();
-  const auto emu_state = Core::GetState(system);
-  if (emu_state == Core::State::Stopping || emu_state == Core::State::Uninitialized)
+  const Core::State state = Core::GetState(system);
+  if (state == Core::State::Stopping || state == Core::State::Uninitialized)
   {
-    m_thread_table->setRowCount(0);
-    UpdateThreadContext({});
-
+    // Nothing to show once the game is gone.
+    m_thread_list->setRowCount(0);
+    ShowContext({});
     const Core::CPUThreadGuard guard(system);
-    UpdateThreadCallstack(guard, {});
+    ShowStack(guard, {});
   }
-  if (emu_state != Core::State::Paused)
+  if (state != Core::State::Paused)
     return;
 
-  const auto format_hex = [](u32 value) {
-    return QStringLiteral("%1").arg(value, 8, 16, QLatin1Char('0'));
-  };
-  const auto format_hex_from = [&format_hex](const Core::CPUThreadGuard& guard, u32 addr) {
-    addr =
-        PowerPC::MMU::HostIsRAMAddress(guard, addr) ? PowerPC::MMU::HostRead<u32>(guard, addr) : 0;
-    return format_hex(addr);
-  };
-  const auto get_state = [](u16 thread_state) {
-    QString state_name;
-    switch (thread_state)
+  const auto state_text = [](u16 code) {
+    QString name;
+    switch (code)
     {
     case 1:
-      state_name = tr("READY");
+      name = tr("READY");
       break;
     case 2:
-      state_name = tr("RUNNING");
+      name = tr("RUNNING");
       break;
     case 4:
-      state_name = tr("WAITING");
+      name = tr("WAITING");
       break;
     case 8:
-      state_name = tr("MORIBUND");
+      name = tr("MORIBUND");
       break;
     default:
-      state_name = tr("UNKNOWN");
+      name = tr("UNKNOWN");
+      break;
     }
-    return QStringLiteral("%1 (%2)").arg(QString::number(thread_state), state_name);
-  };
-  const auto get_priority = [](u16 base, u16 effective) {
-    return QStringLiteral("%1 (%2)").arg(QString::number(base), QString::number(effective));
-  };
-  const auto get_stack = [](u32 end, u32 start) {
-    return QStringLiteral("%1\n%2")
-        .arg(end, 8, 16, QLatin1Char('0'))
-        .arg(start, 8, 16, QLatin1Char('0'));
+    return QStringLiteral("%1 (%2)").arg(QString::number(code), name);
   };
 
   {
     const Core::CPUThreadGuard guard(system);
 
-    // YAGCD - Section 4.2.1.4 Dolphin OS Globals
-    m_current_context->setText(format_hex_from(guard, 0x800000D4));
-    m_current_thread->setText(format_hex_from(guard, 0x800000E4));
-    m_default_thread->setText(format_hex_from(guard, 0x800000D8));
+    m_context_field->setText(ReadWordAsHex(guard, OS_CURRENT_CONTEXT));
+    m_thread_field->setText(ReadWordAsHex(guard, OS_CURRENT_THREAD));
+    m_default_field->setText(ReadWordAsHex(guard, OS_DEFAULT_THREAD));
+    m_head_field->setText(ReadWordAsHex(guard, OS_ACTIVE_QUEUE_HEAD));
+    m_tail_field->setText(ReadWordAsHex(guard, OS_ACTIVE_QUEUE_TAIL));
 
-    m_queue_head->setText(format_hex_from(guard, 0x800000DC));
-    m_queue_tail->setText(format_hex_from(guard, 0x800000E0));
+    m_snapshot = guard.GetSystem().GetPowerPC().GetDebugInterface().GetThreads(guard);
 
-    // Thread group
-    m_threads = guard.GetSystem().GetPowerPC().GetDebugInterface().GetThreads(guard);
-
-    int i = 0;
-    m_thread_table->setRowCount(i);
-    for (const auto& thread : m_threads)
+    m_thread_list->setRowCount(0);
+    int row = 0;
+    for (const auto& thread : m_snapshot)
     {
-      m_thread_table->insertRow(i);
-      m_thread_table->setItem(i, 0, new QTableWidgetItem(format_hex(thread->GetAddress())));
-      m_thread_table->setItem(i, 1, new QTableWidgetItem(get_state(thread->GetState())));
-      m_thread_table->setItem(i, 2, new QTableWidgetItem(QString::number(thread->IsDetached())));
-      m_thread_table->setItem(i, 3, new QTableWidgetItem(QString::number(thread->IsSuspended())));
-      m_thread_table->setItem(i, 4,
-                              new QTableWidgetItem(get_priority(thread->GetBasePriority(),
-                                                                thread->GetEffectivePriority())));
-      m_thread_table->setItem(
-          i, 5, new QTableWidgetItem(get_stack(thread->GetStackEnd(), thread->GetStackStart())));
-      m_thread_table->setItem(i, 6, new QTableWidgetItem(QString::number(thread->GetErrno())));
-      m_thread_table->setItem(
-          i, 7, new QTableWidgetItem(QString::fromStdString(thread->GetSpecific(guard))));
-      i += 1;
+      m_thread_list->insertRow(row);
+      SetCell(m_thread_list, row, 0, Hex8(thread->GetAddress()));
+      SetCell(m_thread_list, row, 1, state_text(thread->GetState()));
+      SetCell(m_thread_list, row, 2, QString::number(thread->IsDetached()));
+      SetCell(m_thread_list, row, 3, QString::number(thread->IsSuspended()));
+      SetCell(m_thread_list, row, 4,
+              QStringLiteral("%1 (%2)").arg(QString::number(thread->GetBasePriority()),
+                                            QString::number(thread->GetEffectivePriority())));
+      SetCell(m_thread_list, row, 5,
+              QStringLiteral("%1\n%2").arg(Hex8(thread->GetStackEnd()),
+                                           Hex8(thread->GetStackStart())));
+      SetCell(m_thread_list, row, 6, QString::number(thread->GetErrno()));
+      SetCell(m_thread_list, row, 7, QString::fromStdString(thread->GetSpecific(guard)));
+      ++row;
     }
   }
 
-  m_thread_table->resizeColumnsToContents();
-  m_thread_table->resizeRowsToContents();
-
-  // Thread's context group
-  UpdateThreadContext({});
+  m_thread_list->resizeColumnsToContents();
+  m_thread_list->resizeRowsToContents();
+  ShowContext({});
 }
 
-void ThreadWidget::UpdateThreadContext(const Common::Debug::PartialContext& context)
+void ThreadWidget::ShowContext(const Common::Debug::PartialContext& context)
 {
-  const auto format_hex = [](const std::optional<u32>& value) {
-    if (!value)
-      return QString{};
-    return QStringLiteral("%1").arg(*value, 8, 16, QLatin1Char('0'));
-  };
-  const auto format_hex_idx = [](const auto& table, std::size_t index) {
-    if (!table || index >= table->size())
-      return QString{};
-    return QStringLiteral("%1").arg(table->at(index), 8, 16, QLatin1Char('0'));
-  };
-  const auto format_f64_as_u64_idx = [](const auto& table, std::size_t index) {
-    if (!table || index >= table->size())
-      return QString{};
-    return QStringLiteral("%1").arg(std::bit_cast<u64>(table->at(index)), 16, 16, QLatin1Char('0'));
-  };
+  // Registers in the right-hand pair of columns, by row; rows past these are greyed out.
+  const std::array<std::pair<const char*, std::optional<u32>>, 9> others{{
+      {"CR", context.cr},
+      {"LR", context.lr},
+      {"CTR", context.ctr},
+      {"XER", context.xer},
+      {"FPSCR", Narrow(context.fpscr)},
+      {"SRR0", context.srr0},
+      {"SRR1", context.srr1},
+      {"DUMMY", Narrow(context.dummy)},
+      {"STATE", Narrow(context.state)},
+  }};
 
-  m_context_table->setRowCount(0);
-  for (int i = 0; i < 32; i++)
+  m_context_grid->setRowCount(0);
+  for (int row = 0; row < 32; ++row)
   {
-    m_context_table->insertRow(i);
-    m_context_table->setItem(i, 0, new QTableWidgetItem(QStringLiteral("GPR%1").arg(i)));
-    m_context_table->setItem(i, 1, new QTableWidgetItem(format_hex_idx(context.gpr, i)));
-    m_context_table->setItem(i, 2, new QTableWidgetItem(QStringLiteral("FPR%1").arg(i)));
-    m_context_table->setItem(i, 3, new QTableWidgetItem(format_f64_as_u64_idx(context.fpr, i)));
-    m_context_table->setItem(i, 4, new QTableWidgetItem(QStringLiteral("PSF%1").arg(i)));
-    m_context_table->setItem(i, 5, new QTableWidgetItem(format_f64_as_u64_idx(context.psf, i)));
+    const size_t n = static_cast<size_t>(row);
+    m_context_grid->insertRow(row);
+    SetCell(m_context_grid, row, 0, QStringLiteral("GPR%1").arg(row));
+    SetCell(m_context_grid, row, 1, HexAt(context.gpr, n));
+    SetCell(m_context_grid, row, 2, QStringLiteral("FPR%1").arg(row));
+    SetCell(m_context_grid, row, 3, DoubleBitsAt(context.fpr, n));
+    SetCell(m_context_grid, row, 4, QStringLiteral("PSF%1").arg(row));
+    SetCell(m_context_grid, row, 5, DoubleBitsAt(context.psf, n));
 
-    if (i < 8)
+    if (row < 8)
     {
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("GQR%1").arg(i)));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex_idx(context.gqr, i)));
-      continue;
+      SetCell(m_context_grid, row, 6, QStringLiteral("GQR%1").arg(row));
+      SetCell(m_context_grid, row, 7, HexAt(context.gqr, n));
     }
-    switch (i)
+    else if (n - 8 < others.size())
     {
-    case 8:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("CR")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.cr)));
-      break;
-    case 9:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("LR")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.lr)));
-      break;
-    case 10:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("CTR")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.ctr)));
-      break;
-    case 11:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("XER")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.xer)));
-      break;
-    case 12:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("FPSCR")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.fpscr)));
-      break;
-    case 13:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("SRR0")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.srr0)));
-      break;
-    case 14:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("SRR1")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.srr1)));
-      break;
-    case 15:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("DUMMY")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.dummy)));
-      break;
-    case 16:
-      m_context_table->setItem(i, 6, new QTableWidgetItem(QStringLiteral("STATE")));
-      m_context_table->setItem(i, 7, new QTableWidgetItem(format_hex(context.state)));
-      break;
-    default:
-      for (int j = 6; j <= 7; j++)
-      {
-        auto* disabled_item = new QTableWidgetItem();
-        auto flags = disabled_item->flags();
-        flags &= ~Qt::ItemIsSelectable;
-        flags &= ~Qt::ItemIsEditable;
-        flags &= ~Qt::ItemIsEnabled;
-        disabled_item->setFlags(flags);
-        disabled_item->setBackground(Qt::gray);
-        m_context_table->setItem(i, j, disabled_item);
-      }
-    }
-  }
-  m_context_table->resizeColumnsToContents();
-}
-
-void ThreadWidget::UpdateThreadCallstack(const Core::CPUThreadGuard& guard,
-                                         const Common::Debug::PartialContext& context)
-{
-  m_callstack_table->setRowCount(0);
-
-  if (!context.gpr)
-    return;
-
-  const auto format_hex = [](u32 value) {
-    return QStringLiteral("%1").arg(value, 8, 16, QLatin1Char('0'));
-  };
-
-  u32 sp = context.gpr->at(1);
-  for (int i = 0; i < 16; i++)
-  {
-    if (sp == 0 || sp == 0xffffffff || !PowerPC::MMU::HostIsRAMAddress(guard, sp))
-      break;
-    m_callstack_table->insertRow(i);
-    m_callstack_table->setItem(i, 0, new QTableWidgetItem(format_hex(sp)));
-    if (PowerPC::MMU::HostIsRAMAddress(guard, sp + 4))
-    {
-      const u32 lr_save = PowerPC::MMU::HostRead<u32>(guard, sp + 4);
-      m_callstack_table->setItem(i, 2, new QTableWidgetItem(format_hex(lr_save)));
-      m_callstack_table->setItem(
-          i, 3,
-          new QTableWidgetItem(QtUtils::FromStdString(
-              guard.GetSystem().GetPowerPC().GetDebugInterface().GetDescription(lr_save))));
+      const auto& [name, value] = others[n - 8];
+      SetCell(m_context_grid, row, 6, QString::fromLatin1(name));
+      SetCell(m_context_grid, row, 7, HexOptional(value));
     }
     else
     {
-      m_callstack_table->setItem(i, 2, new QTableWidgetItem(QStringLiteral("--------")));
+      for (const int col : {6, 7})
+      {
+        auto* filler = new QTableWidgetItem();
+        filler->setFlags(filler->flags() &
+                         ~(Qt::ItemIsSelectable | Qt::ItemIsEditable | Qt::ItemIsEnabled));
+        filler->setBackground(Qt::gray);
+        m_context_grid->setItem(row, col, filler);
+      }
     }
-    sp = PowerPC::MMU::HostRead<u32>(guard, sp);
-    m_callstack_table->setItem(i, 1, new QTableWidgetItem(format_hex(sp)));
+  }
+  m_context_grid->resizeColumnsToContents();
+}
+
+void ThreadWidget::ShowStack(const Core::CPUThreadGuard& guard,
+                             const Common::Debug::PartialContext& context)
+{
+  m_stack_list->setRowCount(0);
+  if (!context.gpr)
+    return;
+
+  // Follow the back chain from r1: each frame holds the caller's stack pointer at +0 and the
+  // saved LR at +4.
+  u32 frame = context.gpr->at(1);
+  for (int row = 0; row < MAX_FRAMES; ++row)
+  {
+    if (frame == 0 || frame == 0xffffffff || !PowerPC::MMU::HostIsRAMAddress(guard, frame))
+      break;
+
+    m_stack_list->insertRow(row);
+    SetCell(m_stack_list, row, 0, Hex8(frame));
+
+    if (PowerPC::MMU::HostIsRAMAddress(guard, frame + 4))
+    {
+      const u32 saved_lr = PowerPC::MMU::HostRead<u32>(guard, frame + 4);
+      SetCell(m_stack_list, row, 2, Hex8(saved_lr));
+      SetCell(m_stack_list, row, 3,
+              QtUtils::FromStdString(
+                  guard.GetSystem().GetPowerPC().GetDebugInterface().GetDescription(saved_lr)));
+    }
+    else
+    {
+      SetCell(m_stack_list, row, 2, QStringLiteral("--------"));
+    }
+
+    frame = PowerPC::MMU::HostRead<u32>(guard, frame);
+    SetCell(m_stack_list, row, 1, Hex8(frame));
   }
 }
 
-void ThreadWidget::OnSelectionChanged(int row)
+void ThreadWidget::ThreadPicked(int row)
 {
-  Core::CPUThreadGuard guard(Core::System::GetInstance());
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
   Common::Debug::PartialContext context;
+  if (row >= 0 && static_cast<size_t>(row) < m_snapshot.size())
+    context = m_snapshot[static_cast<size_t>(row)]->GetContext(guard);
 
-  if (row >= 0 && size_t(row) < m_threads.size())
-    context = m_threads[row]->GetContext(guard);
-
-  UpdateThreadContext(context);
-  UpdateThreadCallstack(guard, context);
+  ShowContext(context);
+  ShowStack(guard, context);
 }
