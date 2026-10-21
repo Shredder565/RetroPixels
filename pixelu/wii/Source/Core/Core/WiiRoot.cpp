@@ -327,8 +327,10 @@ void InitializeWiiFileSystemContents(
   const bool temporary = WiiRootIsTemporary();
   if (temporary)
   {
-    // A fresh temporary NAND gets a default SYSCONF.
-    SysConf{fs}.Save();
+    // A fresh temporary NAND gets a default SYSCONF. The object lives until
+    // the saves are seeded; its destructor saves it once more.
+    SysConf default_sysconf{fs};
+    default_sysconf.Save();
     SeedTemporarySaves(fs.get(), boot_session_data);
   }
 
