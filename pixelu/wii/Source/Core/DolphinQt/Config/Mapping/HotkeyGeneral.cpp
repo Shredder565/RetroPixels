@@ -1,36 +1,50 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyGeneral.h"
 
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyGeneral::HotkeyGeneral(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyGeneral::CreateMainLayout()
+void HotkeyGeneral::BuildGroups()
 {
-  m_main_layout = new QGridLayout;
+  // Title, hotkey group and grid cell of each box. A row span of -1 fills the column.
+  struct Cell
+  {
+    QString title;
+    HotkeyGroup group;
+    int row;
+    int column;
+    int row_span;
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("General"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_GENERAL)), 0, 0, -1, 1);
+  const Cell cells[] = {
+      {tr("General"), HKGP_GENERAL, 0, 0, -1},
+      {tr("Volume"), HKGP_VOLUME, 0, 1, 1},
+      {tr("Emulation Speed"), HKGP_SPEED, 1, 1, 1},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Volume"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_VOLUME)), 0, 1);
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Emulation Speed"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_SPEED)), 1, 1);
-
-  setLayout(m_main_layout);
+  auto* const grid = new QGridLayout;
+  for (const Cell& cell : cells)
+  {
+    auto* const group = HotkeyManagerEmu::GetHotkeyGroup(cell.group);
+    grid->addWidget(CreateGroupBox(cell.title, group), cell.row, cell.column, cell.row_span, 1);
+  }
+  setLayout(grid);
 }
 
-InputConfig* HotkeyGeneral::GetConfig()
+void HotkeyGeneral::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyGeneral::LoadSettings()
@@ -38,7 +52,7 @@ void HotkeyGeneral::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyGeneral::SaveSettings()
+InputConfig* HotkeyGeneral::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

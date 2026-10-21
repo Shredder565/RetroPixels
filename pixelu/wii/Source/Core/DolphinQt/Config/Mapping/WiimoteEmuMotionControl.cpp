@@ -1,50 +1,45 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/WiimoteEmuMotionControl.h"
 
-#include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QVBoxLayout>
 
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-
 #include "InputCommon/InputConfig.h"
 
 WiimoteEmuMotionControl::WiimoteEmuMotionControl(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void WiimoteEmuMotionControl::CreateMainLayout()
+void WiimoteEmuMotionControl::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  using WiimoteEmu::WiimoteGroup;
 
-  m_main_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::Shake)));
-  m_main_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::Point)));
-  m_main_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::Tilt)));
-  m_main_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::Swing)));
+  // The boxes take their titles from the groups themselves.
+  static constexpr WiimoteGroup simulated[] = {WiimoteGroup::Shake, WiimoteGroup::Point,
+                                               WiimoteGroup::Tilt, WiimoteGroup::Swing};
 
-  setLayout(m_main_layout);
-}
-
-void WiimoteEmuMotionControl::LoadSettings()
-{
-  Wiimote::LoadConfig();
-}
-
-void WiimoteEmuMotionControl::SaveSettings()
-{
-  Wiimote::GetConfig()->SaveConfig();
+  auto* const row = new QHBoxLayout();
+  for (const WiimoteGroup group : simulated)
+    row->addWidget(CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), group)));
+  setLayout(row);
 }
 
 InputConfig* WiimoteEmuMotionControl::GetConfig()
 {
   return Wiimote::GetConfig();
+}
+
+void WiimoteEmuMotionControl::SaveSettings()
+{
+  InputConfig* const config = Wiimote::GetConfig();
+  config->SaveConfig();
+}
+
+void WiimoteEmuMotionControl::LoadSettings()
+{
+  Wiimote::LoadConfig();
 }

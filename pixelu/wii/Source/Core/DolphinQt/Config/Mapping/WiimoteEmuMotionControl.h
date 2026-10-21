@@ -1,17 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
 
-class QCheckBox;
-class QFormLayout;
-class QGroupBox;
-class QHBoxLayout;
-class QLabel;
-class QVBoxLayout;
-
+// "Motion Simulation" tab of an emulated Wii Remote: shake, point, tilt and swing.
 class WiimoteEmuMotionControl final : public MappingWidget
 {
   Q_OBJECT
@@ -23,8 +16,6 @@ public:
 private:
   void LoadSettings() override;
   void SaveSettings() override;
-  void CreateMainLayout();
 
-  // Main
-  QHBoxLayout* m_main_layout;
+  void BuildGroups();
 };

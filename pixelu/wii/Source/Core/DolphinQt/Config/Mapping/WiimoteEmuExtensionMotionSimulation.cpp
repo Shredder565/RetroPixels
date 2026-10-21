@@ -1,64 +1,63 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/WiimoteEmuExtensionMotionSimulation.h"
+
+#include <utility>
 
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QLabel>
+#include <QString>
 
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/Extension/Nunchuk.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-
 #include "InputCommon/InputConfig.h"
 
 WiimoteEmuExtensionMotionSimulation::WiimoteEmuExtensionMotionSimulation(MappingWindow* window)
     : MappingWidget(window)
 {
-  CreateNunchukLayout();
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void WiimoteEmuExtensionMotionSimulation::CreateNunchukLayout()
+void WiimoteEmuExtensionMotionSimulation::BuildGroups()
 {
-  auto* layout = new QGridLayout();
-  m_nunchuk_box = new QGroupBox(tr("Nunchuk"), this);
+  using WiimoteEmu::NunchukGroup;
 
-  layout->addWidget(CreateGroupBox(tr("Shake"), Wiimote::GetNunchukGroup(
-                                                    GetPort(), WiimoteEmu::NunchukGroup::Shake)),
-                    0, 0);
-  layout->addWidget(CreateGroupBox(tr("Tilt"), Wiimote::GetNunchukGroup(
-                                                   GetPort(), WiimoteEmu::NunchukGroup::Tilt)),
-                    0, 1);
-  layout->addWidget(CreateGroupBox(tr("Swing"), Wiimote::GetNunchukGroup(
-                                                    GetPort(), WiimoteEmu::NunchukGroup::Swing)),
-                    0, 2);
+  auto* const frame_grid = new QGridLayout();
+  auto* const nunchuk_frame = new QGroupBox(tr("Nunchuk"), this);
 
-  m_nunchuk_box->setLayout(layout);
-}
+  // Three boxes in one row inside the Nunchuk frame.
+  const std::pair<QString, NunchukGroup> motions[] = {
+      {tr("Shake"), NunchukGroup::Shake},
+      {tr("Tilt"), NunchukGroup::Tilt},
+      {tr("Swing"), NunchukGroup::Swing},
+  };
+  int column = 0;
+  for (const auto& [title, group] : motions)
+  {
+    auto* const box = CreateGroupBox(title, Wiimote::GetNunchukGroup(GetPort(), group));
+    frame_grid->addWidget(box, 0, column++);
+  }
+  nunchuk_frame->setLayout(frame_grid);
 
-void WiimoteEmuExtensionMotionSimulation::CreateMainLayout()
-{
-  m_main_layout = new QHBoxLayout();
-
-  m_main_layout->addWidget(m_nunchuk_box);
-
-  setLayout(m_main_layout);
-}
-
-void WiimoteEmuExtensionMotionSimulation::LoadSettings()
-{
-  Wiimote::LoadConfig();
+  auto* const page = new QHBoxLayout();
+  page->addWidget(nunchuk_frame);
+  setLayout(page);
 }
 
 void WiimoteEmuExtensionMotionSimulation::SaveSettings()
 {
-  Wiimote::GetConfig()->SaveConfig();
+  InputConfig* const config = Wiimote::GetConfig();
+  config->SaveConfig();
 }
 
 InputConfig* WiimoteEmuExtensionMotionSimulation::GetConfig()
 {
   return Wiimote::GetConfig();
+}
+
+void WiimoteEmuExtensionMotionSimulation::LoadSettings()
+{
+  Wiimote::LoadConfig();
 }

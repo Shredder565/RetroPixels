@@ -1,12 +1,10 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
 
-class QHBoxLayout;
-
+// Hotkey settings tab: Game Boy Advance core, volume and window size hotkeys.
 class HotkeyGBA final : public MappingWidget
 {
   Q_OBJECT
@@ -18,8 +16,6 @@ public:
 private:
   void LoadSettings() override;
   void SaveSettings() override;
-  void CreateMainLayout();
 
-  // Main
-  QHBoxLayout* m_main_layout;
+  void BuildGroups();
 };

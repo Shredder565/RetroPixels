@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/WiimoteEmuExtensionMotionInput.h"
 
@@ -8,59 +7,57 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QStyle>
 
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/Extension/Nunchuk.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-
 #include "DolphinQt/Config/ControllerInterface/ControllerInterfaceWindow.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
-
 #include "InputCommon/InputConfig.h"
 
 WiimoteEmuExtensionMotionInput::WiimoteEmuExtensionMotionInput(MappingWindow* window)
     : MappingWidget(window)
 {
-  CreateNunchukLayout();
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void WiimoteEmuExtensionMotionInput::CreateNunchukLayout()
+void WiimoteEmuExtensionMotionInput::BuildGroups()
 {
-  auto* layout = new QGridLayout();
-  m_nunchuk_box = new QGroupBox(tr("Nunchuk"), this);
+  // Everything sits in one "Nunchuk" frame.
+  auto* const nunchuk_frame = new QGroupBox(tr("Nunchuk"), this);
+  auto* const frame_grid = new QGridLayout();
 
-  auto* warning_layout = new QHBoxLayout();
-  auto* warning_label = new QLabel(
-      tr("These controls are designed to interface directly with motion "
-         "sensor hardware. They are not intended for mapping traditional buttons, triggers or "
-         "axes. You might need to configure alternate input sources before using these controls."));
-  warning_label->setWordWrap(true);
-  auto* warning_input_sources_button = new QPushButton(tr("Alternate Input Sources"));
-  warning_layout->addWidget(
-      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning_label), 1);
-  warning_layout->addWidget(warning_input_sources_button);
-  connect(warning_input_sources_button, &QPushButton::clicked, this, [this] {
-    ControllerInterfaceWindow window{this};
-    window.exec();
+  auto* const warning = new QLabel(
+      tr("These controls are designed to interface directly with motion sensor hardware. They "
+         "are not intended for mapping traditional buttons, triggers or axes. You might need to "
+         "configure alternate input sources before using these controls."));
+  warning->setWordWrap(true);
+  auto* const sources_button = new QPushButton(tr("Alternate Input Sources"));
+
+  auto* const warning_row = new QHBoxLayout();
+  warning_row->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning),
+                         1);
+  warning_row->addWidget(sources_button);
+  connect(sources_button, &QPushButton::clicked, this, [this] {
+    ControllerInterfaceWindow sources_window{this};
+    sources_window.exec();
   });
-  layout->addLayout(warning_layout, 0, 0, 1, -1);
+  frame_grid->addLayout(warning_row, 0, 0, 1, -1);
 
-  layout->addWidget(CreateGroupBox(tr("Accelerometer"),
-                                   Wiimote::GetNunchukGroup(
-                                       GetPort(), WiimoteEmu::NunchukGroup::IMUAccelerometer)),
-                    1, 0);
+  auto* const accelerometer =
+      Wiimote::GetNunchukGroup(GetPort(), WiimoteEmu::NunchukGroup::IMUAccelerometer);
+  frame_grid->addWidget(CreateGroupBox(tr("Accelerometer"), accelerometer), 1, 0);
+  nunchuk_frame->setLayout(frame_grid);
 
-  m_nunchuk_box->setLayout(layout);
+  auto* const page = new QHBoxLayout();
+  page->addWidget(nunchuk_frame);
+  setLayout(page);
 }
 
-void WiimoteEmuExtensionMotionInput::CreateMainLayout()
+InputConfig* WiimoteEmuExtensionMotionInput::GetConfig()
 {
-  m_main_layout = new QHBoxLayout();
-
-  m_main_layout->addWidget(m_nunchuk_box);
-
-  setLayout(m_main_layout);
+  return Wiimote::GetConfig();
 }
 
 void WiimoteEmuExtensionMotionInput::LoadSettings()
@@ -70,10 +67,6 @@ void WiimoteEmuExtensionMotionInput::LoadSettings()
 
 void WiimoteEmuExtensionMotionInput::SaveSettings()
 {
-  Wiimote::GetConfig()->SaveConfig();
-}
-
-InputConfig* WiimoteEmuExtensionMotionInput::GetConfig()
-{
-  return Wiimote::GetConfig();
+  InputConfig* const config = Wiimote::GetConfig();
+  config->SaveConfig();
 }

@@ -1,30 +1,38 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyWii.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyWii::HotkeyWii(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyWii::CreateMainLayout()
+void HotkeyWii::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("Wii"), HKGP_WII},
+  };
 
-  m_main_layout->addWidget(CreateGroupBox(tr("Wii"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_WII)));
-
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyWii::GetConfig()
+void HotkeyWii::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyWii::LoadSettings()
@@ -32,7 +40,7 @@ void HotkeyWii::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyWii::SaveSettings()
+InputConfig* HotkeyWii::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

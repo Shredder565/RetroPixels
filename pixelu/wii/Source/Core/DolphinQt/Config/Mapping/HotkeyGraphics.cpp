@@ -1,37 +1,50 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyGraphics.h"
 
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyGraphics::HotkeyGraphics(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyGraphics::CreateMainLayout()
+void HotkeyGraphics::BuildGroups()
 {
-  m_main_layout = new QGridLayout();
+  // Title, hotkey group and grid cell of each box. A row span of -1 fills the column.
+  struct Cell
+  {
+    QString title;
+    HotkeyGroup group;
+    int row;
+    int column;
+    int row_span;
+  };
 
-  m_main_layout->addWidget(CreateGroupBox(tr("Graphics Toggles"),
-                                          HotkeyManagerEmu::GetHotkeyGroup(HKGP_GRAPHICS_TOGGLES)),
-                           0, 0, -1, 1);
+  const Cell cells[] = {
+      {tr("Graphics Toggles"), HKGP_GRAPHICS_TOGGLES, 0, 0, -1},
+      {tr("FreeLook"), HKGP_FREELOOK, 0, 1, 1},
+      {tr("Internal Resolution"), HKGP_IR, 1, 1, 1},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("FreeLook"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_FREELOOK)), 0, 1);
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Internal Resolution"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_IR)), 1, 1);
-
-  setLayout(m_main_layout);
+  auto* const grid = new QGridLayout;
+  for (const Cell& cell : cells)
+  {
+    auto* const group = HotkeyManagerEmu::GetHotkeyGroup(cell.group);
+    grid->addWidget(CreateGroupBox(cell.title, group), cell.row, cell.column, cell.row_span, 1);
+  }
+  setLayout(grid);
 }
 
-InputConfig* HotkeyGraphics::GetConfig()
+void HotkeyGraphics::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyGraphics::LoadSettings()
@@ -39,7 +52,7 @@ void HotkeyGraphics::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyGraphics::SaveSettings()
+InputConfig* HotkeyGraphics::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

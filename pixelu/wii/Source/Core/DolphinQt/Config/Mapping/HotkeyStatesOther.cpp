@@ -1,35 +1,40 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyStatesOther.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyStatesOther::HotkeyStatesOther(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyStatesOther::CreateMainLayout()
+void HotkeyStatesOther::BuildGroups()
 {
-  auto* layout = new QHBoxLayout;
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("Select Last State"), HKGP_SELECT_STATE},
+      {tr("Load Last State"), HKGP_LOAD_LAST_STATE},
+      {tr("Other State Hotkeys"), HKGP_STATE_MISC},
+  };
 
-  layout->addWidget(
-      CreateGroupBox(tr("Select Last State"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_SELECT_STATE)));
-  layout->addWidget(CreateGroupBox(tr("Load Last State"),
-                                   HotkeyManagerEmu::GetHotkeyGroup(HKGP_LOAD_LAST_STATE)));
-  layout->addWidget(
-      CreateGroupBox(tr("Other State Hotkeys"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_STATE_MISC)));
-
-  setLayout(layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyStatesOther::GetConfig()
+void HotkeyStatesOther::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyStatesOther::LoadSettings()
@@ -37,7 +42,7 @@ void HotkeyStatesOther::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyStatesOther::SaveSettings()
+InputConfig* HotkeyStatesOther::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

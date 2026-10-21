@@ -1,33 +1,39 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyStates.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyStates::HotkeyStates(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyStates::CreateMainLayout()
+void HotkeyStates::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("Save"), HKGP_SAVE_STATE},
+      {tr("Load"), HKGP_LOAD_STATE},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Save"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_SAVE_STATE)));
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Load"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_LOAD_STATE)));
-
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyStates::GetConfig()
+void HotkeyStates::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyStates::LoadSettings()
@@ -35,7 +41,7 @@ void HotkeyStates::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyStates::SaveSettings()
+InputConfig* HotkeyStates::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

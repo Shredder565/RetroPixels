@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/FreeLookRotation.h"
 
@@ -15,39 +14,39 @@
 
 FreeLookRotation::FreeLookRotation(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void FreeLookRotation::CreateMainLayout()
+void FreeLookRotation::OpenAlternateInputSources()
 {
-  m_main_layout = new QGridLayout;
+  // Window-modal and deleted on close, so the tab stays usable afterwards.
+  auto* const sources = new ControllerInterfaceWindow(this);
+  sources->setAttribute(Qt::WA_DeleteOnClose, true);
+  sources->setWindowModality(Qt::WindowModality::WindowModal);
+  sources->show();
+}
 
-  auto* alternate_input_layout = new QHBoxLayout();
-  auto* note_label = new QLabel(
+void FreeLookRotation::BuildGroups()
+{
+  auto* const grid = new QGridLayout;
+
+  // Top row: a note about motion input with a shortcut to the input source settings.
+  auto* const note = new QLabel(
       tr("Note: motion input may require configuring alternate input sources before use."));
-  note_label->setWordWrap(true);
-  auto* alternate_input_sources_button = new QPushButton(tr("Alternate Input Sources"));
-  alternate_input_layout->addWidget(note_label, 1);
-  alternate_input_layout->addWidget(alternate_input_sources_button, 0, Qt::AlignRight);
-  connect(alternate_input_sources_button, &QPushButton::clicked, this, [this] {
-    ControllerInterfaceWindow* window = new ControllerInterfaceWindow(this);
-    window->setAttribute(Qt::WA_DeleteOnClose, true);
-    window->setWindowModality(Qt::WindowModality::WindowModal);
-    window->show();
-  });
-  m_main_layout->addLayout(alternate_input_layout, 0, 0, 1, -1);
+  note->setWordWrap(true);
+  auto* const sources_button = new QPushButton(tr("Alternate Input Sources"));
+  connect(sources_button, &QPushButton::clicked, this, [this] { OpenAlternateInputSources(); });
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Incremental Rotation (rad/sec)"),
-                     FreeLook::GetInputGroup(GetPort(), FreeLookGroup::Rotation)),
-      1, 0);
+  auto* const note_row = new QHBoxLayout();
+  note_row->addWidget(note, 1);
+  note_row->addWidget(sources_button, 0, Qt::AlignRight);
+  grid->addLayout(note_row, 0, 0, 1, -1);
 
-  setLayout(m_main_layout);
-}
+  // Below it, the rotation group itself.
+  auto* const rotation = FreeLook::GetInputGroup(GetPort(), FreeLookGroup::Rotation);
+  grid->addWidget(CreateGroupBox(tr("Incremental Rotation (rad/sec)"), rotation), 1, 0);
 
-InputConfig* FreeLookRotation::GetConfig()
-{
-  return FreeLook::GetInputConfig();
+  setLayout(grid);
 }
 
 void FreeLookRotation::LoadSettings()
@@ -55,7 +54,13 @@ void FreeLookRotation::LoadSettings()
   FreeLook::LoadInputConfig();
 }
 
+InputConfig* FreeLookRotation::GetConfig()
+{
+  return FreeLook::GetInputConfig();
+}
+
 void FreeLookRotation::SaveSettings()
 {
-  FreeLook::GetInputConfig()->SaveConfig();
+  InputConfig* const config = FreeLook::GetInputConfig();
+  config->SaveConfig();
 }

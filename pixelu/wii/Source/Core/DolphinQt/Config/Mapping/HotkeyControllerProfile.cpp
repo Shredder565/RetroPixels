@@ -1,48 +1,42 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyControllerProfile.h"
+
+#include <array>
 
 #include <QGridLayout>
 #include <QGroupBox>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyControllerProfile::HotkeyControllerProfile(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyControllerProfile::CreateMainLayout()
+void HotkeyControllerProfile::BuildGroups()
 {
-  const auto main_layout = new QGridLayout;
+  static constexpr std::array<HotkeyGroup, 4> profile_groups = {
+      HKGP_CONTROLLER_PROFILE_1, HKGP_CONTROLLER_PROFILE_2, HKGP_CONTROLLER_PROFILE_3,
+      HKGP_CONTROLLER_PROFILE_4};
 
-  main_layout->addWidget(
-      CreateGroupBox(tr("Wii Remote %1").arg(1),
-                     HotkeyManagerEmu::GetHotkeyGroup(HKGP_CONTROLLER_PROFILE_1)),
-      0, 0);
-
-  main_layout->addWidget(
-      CreateGroupBox(tr("Wii Remote %1").arg(2),
-                     HotkeyManagerEmu::GetHotkeyGroup(HKGP_CONTROLLER_PROFILE_2)),
-      0, 1);
-
-  main_layout->addWidget(
-      CreateGroupBox(tr("Wii Remote %1").arg(3),
-                     HotkeyManagerEmu::GetHotkeyGroup(HKGP_CONTROLLER_PROFILE_3)),
-      1, 0);
-
-  main_layout->addWidget(
-      CreateGroupBox(tr("Wii Remote %1").arg(4),
-                     HotkeyManagerEmu::GetHotkeyGroup(HKGP_CONTROLLER_PROFILE_4)),
-      1, 1);
-
-  setLayout(main_layout);
+  // A two by two grid, filled row by row: remotes 1 and 2 on top, 3 and 4 below.
+  auto* const grid = new QGridLayout;
+  for (int remote = 0; remote < static_cast<int>(profile_groups.size()); ++remote)
+  {
+    const auto group = profile_groups[static_cast<std::size_t>(remote)];
+    QGroupBox* const box = CreateGroupBox(tr("Wii Remote %1").arg(remote + 1),
+                                          HotkeyManagerEmu::GetHotkeyGroup(group));
+    grid->addWidget(box, remote / 2, remote % 2);
+  }
+  setLayout(grid);
 }
 
-InputConfig* HotkeyControllerProfile::GetConfig()
+void HotkeyControllerProfile::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyControllerProfile::LoadSettings()
@@ -50,7 +44,7 @@ void HotkeyControllerProfile::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyControllerProfile::SaveSettings()
+InputConfig* HotkeyControllerProfile::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

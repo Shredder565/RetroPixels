@@ -1,33 +1,39 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyTAS.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyTAS::HotkeyTAS(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyTAS::CreateMainLayout()
+void HotkeyTAS::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("Frame Advance"), HKGP_FRAME_ADVANCE},
+      {tr("Movie"), HKGP_MOVIE},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Frame Advance"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_FRAME_ADVANCE)));
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Movie"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_MOVIE)));
-
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyTAS::GetConfig()
+void HotkeyTAS::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyTAS::LoadSettings()
@@ -35,7 +41,7 @@ void HotkeyTAS::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyTAS::SaveSettings()
+InputConfig* HotkeyTAS::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

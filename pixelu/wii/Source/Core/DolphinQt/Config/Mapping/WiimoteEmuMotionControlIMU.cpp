@@ -1,63 +1,60 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/WiimoteEmuMotionControlIMU.h"
 
-#include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
-#include <QString>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-
 #include "DolphinQt/Config/ControllerInterface/ControllerInterfaceWindow.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
-
 #include "InputCommon/InputConfig.h"
 
 WiimoteEmuMotionControlIMU::WiimoteEmuMotionControlIMU(MappingWindow* window)
     : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void WiimoteEmuMotionControlIMU::CreateMainLayout()
+void WiimoteEmuMotionControlIMU::BuildGroups()
 {
-  auto* warning_layout = new QHBoxLayout();
-  auto* warning_label =
-      new QLabel(tr("The controls under Accelerometer and Gyroscope are designed to "
-                    "interface directly with motion sensor hardware. They are not intended for "
-                    "mapping traditional buttons, triggers or axes. You might need to configure "
-                    "alternate input sources before using these controls."));
-  warning_label->setWordWrap(true);
-  auto* warning_input_sources_button = new QPushButton(tr("Alternate Input Sources"));
-  warning_layout->addWidget(
-      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning_label), 1);
-  warning_layout->addWidget(warning_input_sources_button);
-  connect(warning_input_sources_button, &QPushButton::clicked, this, [this] {
-    ControllerInterfaceWindow window{this};
-    window.exec();
+  using WiimoteEmu::WiimoteGroup;
+
+  // A warning that these are for real motion sensors, with a button to set up input sources.
+  auto* const warning = new QLabel(
+      tr("The controls under Accelerometer and Gyroscope are designed to interface directly "
+         "with motion sensor hardware. They are not intended for mapping traditional buttons, "
+         "triggers or axes. You might need to configure alternate input sources before using "
+         "these controls."));
+  warning->setWordWrap(true);
+  auto* const sources_button = new QPushButton(tr("Alternate Input Sources"));
+
+  auto* const warning_row = new QHBoxLayout();
+  warning_row->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning),
+                         1);
+  warning_row->addWidget(sources_button);
+
+  connect(sources_button, &QPushButton::clicked, this, [this] {
+    ControllerInterfaceWindow sources_window{this};
+    sources_window.exec();
   });
 
-  auto* groups_layout = new QHBoxLayout();
-  groups_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::IMUPoint)));
-  groups_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::IRPassthrough)));
-  groups_layout->addWidget(CreateGroupBox(
-      Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::IMUAccelerometer)));
-  groups_layout->addWidget(
-      CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), WiimoteEmu::WiimoteGroup::IMUGyroscope)));
+  static constexpr WiimoteGroup sensor_groups[] = {
+      WiimoteGroup::IMUPoint, WiimoteGroup::IRPassthrough, WiimoteGroup::IMUAccelerometer,
+      WiimoteGroup::IMUGyroscope};
+  auto* const groups_row = new QHBoxLayout();
+  for (const WiimoteGroup group : sensor_groups)
+    groups_row->addWidget(CreateGroupBox(Wiimote::GetWiimoteGroup(GetPort(), group)));
 
-  m_main_layout = new QVBoxLayout();
-  m_main_layout->addLayout(warning_layout);
-  m_main_layout->addLayout(groups_layout);
-
-  setLayout(m_main_layout);
+  auto* const page = new QVBoxLayout();
+  page->addLayout(warning_row);
+  page->addLayout(groups_row);
+  setLayout(page);
 }
 
 void WiimoteEmuMotionControlIMU::LoadSettings()
@@ -67,7 +64,8 @@ void WiimoteEmuMotionControlIMU::LoadSettings()
 
 void WiimoteEmuMotionControlIMU::SaveSettings()
 {
-  Wiimote::GetConfig()->SaveConfig();
+  InputConfig* const config = Wiimote::GetConfig();
+  config->SaveConfig();
 }
 
 InputConfig* WiimoteEmuMotionControlIMU::GetConfig()

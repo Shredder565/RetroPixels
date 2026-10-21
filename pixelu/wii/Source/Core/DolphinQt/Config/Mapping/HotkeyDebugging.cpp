@@ -1,36 +1,50 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyDebugging.h"
 
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyDebugging::HotkeyDebugging(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyDebugging::CreateMainLayout()
+void HotkeyDebugging::BuildGroups()
 {
-  m_main_layout = new QGridLayout();
+  // Title, hotkey group and grid cell of each box. A row span of -1 fills the column.
+  struct Cell
+  {
+    QString title;
+    HotkeyGroup group;
+    int row;
+    int column;
+    int row_span;
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Stepping"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_STEPPING)), 0, 0, -1, 1);
+  const Cell cells[] = {
+      {tr("Stepping"), HKGP_STEPPING, 0, 0, -1},
+      {tr("Program Counter"), HKGP_PC, 0, 1, 1},
+      {tr("Breakpoint"), HKGP_BREAKPOINT, 1, 1, 1},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Program Counter"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_PC)), 0, 1);
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Breakpoint"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_BREAKPOINT)), 1, 1);
-
-  setLayout(m_main_layout);
+  auto* const grid = new QGridLayout;
+  for (const Cell& cell : cells)
+  {
+    auto* const group = HotkeyManagerEmu::GetHotkeyGroup(cell.group);
+    grid->addWidget(CreateGroupBox(cell.title, group), cell.row, cell.column, cell.row_span, 1);
+  }
+  setLayout(grid);
 }
 
-InputConfig* HotkeyDebugging::GetConfig()
+void HotkeyDebugging::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyDebugging::LoadSettings()
@@ -38,7 +52,7 @@ void HotkeyDebugging::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyDebugging::SaveSettings()
+InputConfig* HotkeyDebugging::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

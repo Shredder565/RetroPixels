@@ -1,13 +1,11 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
 
-class QGroupBox;
-class QHBoxLayout;
-
+// "Extension Motion Input" tab: the Nunchuk's accelerometer fed from real motion sensors.
+// MappingWindow only shows it while a Nunchuk is attached.
 class WiimoteEmuExtensionMotionInput final : public MappingWidget
 {
   Q_OBJECT
@@ -20,10 +18,5 @@ private:
   void LoadSettings() override;
   void SaveSettings() override;
 
-  void CreateNunchukLayout();
-  void CreateMainLayout();
-
-  // Main
-  QHBoxLayout* m_main_layout;
-  QGroupBox* m_nunchuk_box;
+  void BuildGroups();
 };

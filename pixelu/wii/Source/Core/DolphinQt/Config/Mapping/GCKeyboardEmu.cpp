@@ -1,60 +1,58 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/GCKeyboardEmu.h"
 
-#include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QString>
 #include <QStyle>
 #include <QVBoxLayout>
 
-#include "InputCommon/InputConfig.h"
-
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCKeyboardEmu.h"
-
 #include "DolphinQt/QtUtils/QtUtils.h"
+#include "InputCommon/InputConfig.h"
 
 GCKeyboardEmu::GCKeyboardEmu(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void GCKeyboardEmu::CreateMainLayout()
+void GCKeyboardEmu::BuildGroups()
 {
-  auto* const vbox_layout = new QVBoxLayout{this};
+  auto* const page = new QVBoxLayout{this};
 
-  auto* const warning_text =
-      new QLabel(tr("You are configuring a \"Keyboard Controller\". "
-                    "This device is exclusively for \"Phantasy Star Online Episode I & II\". "
-                    "If you are unsure, turn back now and configure a \"Standard Controller\"."));
-  warning_text->setWordWrap(true);
+  // Most people opening this page wanted the standard controller, so warn first.
+  auto* const warning =
+      new QLabel(tr("You are configuring a \"Keyboard Controller\". This device is exclusively for "
+                    "\"Phantasy Star Online Episode I & II\". If you are unsure, turn back now and "
+                    "configure a \"Standard Controller\"."));
+  warning->setWordWrap(true);
+  page->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning));
 
-  vbox_layout->addWidget(
-      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, warning_text));
-
-  auto* const layout = new QHBoxLayout;
-
-  using KG = KeyboardGroup;
-  for (auto kbg : {KG::Kb0x, KG::Kb1x, KG::Kb2x, KG::Kb3x, KG::Kb4x, KG::Kb5x})
-    layout->addWidget(CreateGroupBox(QString{}, Keyboard::GetGroup(GetPort(), kbg)));
-
-  vbox_layout->addLayout(layout);
-}
-
-void GCKeyboardEmu::LoadSettings()
-{
-  Keyboard::LoadConfig();
-}
-
-void GCKeyboardEmu::SaveSettings()
-{
-  Keyboard::GetConfig()->SaveConfig();
+  // The keys are split into six untitled groups, shown side by side.
+  static constexpr KeyboardGroup key_rows[] = {KeyboardGroup::Kb0x, KeyboardGroup::Kb1x,
+                                               KeyboardGroup::Kb2x, KeyboardGroup::Kb3x,
+                                               KeyboardGroup::Kb4x, KeyboardGroup::Kb5x};
+  auto* const keys = new QHBoxLayout;
+  for (const KeyboardGroup key_row : key_rows)
+    keys->addWidget(CreateGroupBox(QString{}, Keyboard::GetGroup(GetPort(), key_row)));
+  page->addLayout(keys);
 }
 
 InputConfig* GCKeyboardEmu::GetConfig()
 {
   return Keyboard::GetConfig();
+}
+
+void GCKeyboardEmu::SaveSettings()
+{
+  InputConfig* const config = Keyboard::GetConfig();
+  config->SaveConfig();
+}
+
+void GCKeyboardEmu::LoadSettings()
+{
+  Keyboard::LoadConfig();
 }

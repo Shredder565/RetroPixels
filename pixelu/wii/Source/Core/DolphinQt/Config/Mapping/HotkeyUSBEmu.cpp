@@ -1,31 +1,38 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyUSBEmu.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyUSBEmu::HotkeyUSBEmu(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyUSBEmu::CreateMainLayout()
+void HotkeyUSBEmu::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("USB Device Emulation"), HKGP_USB_EMU},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("USB Device Emulation"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_USB_EMU)));
-
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyUSBEmu::GetConfig()
+void HotkeyUSBEmu::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyUSBEmu::LoadSettings()
@@ -33,7 +40,7 @@ void HotkeyUSBEmu::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyUSBEmu::SaveSettings()
+InputConfig* HotkeyUSBEmu::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

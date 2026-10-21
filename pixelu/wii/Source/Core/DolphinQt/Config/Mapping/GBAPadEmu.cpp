@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/GBAPadEmu.h"
 
@@ -12,21 +11,27 @@
 
 GBAPadEmu::GBAPadEmu(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void GBAPadEmu::CreateMainLayout()
+void GBAPadEmu::BuildGroups()
 {
-  auto* layout = new QGridLayout;
+  // Two full-height columns, each laying its controls out in two sub-columns.
+  constexpr int control_columns = 2;
+  auto* const grid = new QGridLayout;
 
-  layout->addWidget(
-      CreateControlsBox(tr("D-Pad"), Pad::GetGBAGroup(GetPort(), GBAPadGroup::DPad), 2), 0, 0, -1,
-      1);
-  layout->addWidget(
-      CreateControlsBox(tr("Buttons"), Pad::GetGBAGroup(GetPort(), GBAPadGroup::Buttons), 2), 0, 1,
-      -1, 1);
+  auto* const dpad = Pad::GetGBAGroup(GetPort(), GBAPadGroup::DPad);
+  grid->addWidget(CreateControlsBox(tr("D-Pad"), dpad, control_columns), 0, 0, -1, 1);
 
-  setLayout(layout);
+  auto* const buttons = Pad::GetGBAGroup(GetPort(), GBAPadGroup::Buttons);
+  grid->addWidget(CreateControlsBox(tr("Buttons"), buttons, control_columns), 0, 1, -1, 1);
+
+  setLayout(grid);
+}
+
+InputConfig* GBAPadEmu::GetConfig()
+{
+  return Pad::GetGBAConfig();
 }
 
 void GBAPadEmu::LoadSettings()
@@ -36,10 +41,6 @@ void GBAPadEmu::LoadSettings()
 
 void GBAPadEmu::SaveSettings()
 {
-  Pad::GetGBAConfig()->SaveConfig();
-}
-
-InputConfig* GBAPadEmu::GetConfig()
-{
-  return Pad::GetGBAConfig();
+  InputConfig* const config = Pad::GetGBAConfig();
+  config->SaveConfig();
 }

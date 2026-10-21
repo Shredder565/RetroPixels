@@ -1,12 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
 
-class QGridLayout;
-
+// Hotkey settings tab: general emulator hotkeys, volume and emulation speed.
 class HotkeyGeneral final : public MappingWidget
 {
   Q_OBJECT
@@ -18,8 +16,6 @@ public:
 private:
   void LoadSettings() override;
   void SaveSettings() override;
-  void CreateMainLayout();
 
-  // Main
-  QGridLayout* m_main_layout;
+  void BuildGroups();
 };

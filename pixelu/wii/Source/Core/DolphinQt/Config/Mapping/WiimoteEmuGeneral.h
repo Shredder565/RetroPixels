@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,8 +6,16 @@
 
 class QComboBox;
 class QLabel;
+class QPushButton;
 class WiimoteEmuExtension;
 
+namespace ControllerEmu
+{
+class Attachments;
+}
+
+// "General and Options" tab of an emulated Wii Remote: buttons, D-Pad, hotkeys, the
+// extension selector, rumble and options.
 class WiimoteEmuGeneral final : public MappingWidget
 {
   Q_OBJECT
@@ -20,21 +27,21 @@ public:
 private:
   void LoadSettings() override;
   void SaveSettings() override;
-  void CreateMainLayout();
-  void Connect();
 
-  // Index changed by code/expression.
+  void BuildGroups();
+  ControllerEmu::Attachments* GetAttachments() const;
+
+  // The combo box index changed, either by the user or by the config/expression.
   void OnAttachmentChanged(int index);
-  // Selection chosen by user.
+  // The user picked an entry in the combo box.
   void OnAttachmentSelected(int index);
 
-  void ConfigChanged();
-  void Update();
+  // Follows the attachment setting after a config change, and after each indicator tick.
+  void SyncWithConfig();
+  void SyncWithState();
 
-  // Extensions
-  QComboBox* m_extension_combo;
-  QLabel* m_extension_combo_dynamic_indicator;
-  QPushButton* m_configure_ext_button;
-
-  WiimoteEmuExtension* m_extension_widget;
+  QComboBox* m_extension_combo = nullptr;
+  QLabel* m_extension_dynamic_marker = nullptr;
+  QPushButton* m_configure_extension = nullptr;
+  WiimoteEmuExtension* const m_extension_page;
 };

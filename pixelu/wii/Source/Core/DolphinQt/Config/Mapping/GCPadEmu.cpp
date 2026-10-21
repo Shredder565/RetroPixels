@@ -1,58 +1,57 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/GCPadEmu.h"
 
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QString>
 
 #include "Core/HW/GCPad.h"
 #include "Core/HW/GCPadEmu.h"
-
 #include "InputCommon/InputConfig.h"
 
 GCPadEmu::GCPadEmu(MappingWindow* window, SubType sub_type) : MappingWidget(window)
 {
-  CreateMainLayout(sub_type);
+  BuildGroups(sub_type);
 }
 
-void GCPadEmu::CreateMainLayout(SubType sub_type)
+void GCPadEmu::BuildGroups(SubType sub_type)
 {
-  auto* layout = new QGridLayout;
+  auto* const grid = new QGridLayout;
 
-  layout->addWidget(CreateGroupBox(tr("Buttons"), Pad::GetGroup(GetPort(), PadGroup::Buttons)), 0,
-                    0);
-  layout->addWidget(CreateGroupBox(tr("D-Pad"), Pad::GetGroup(GetPort(), PadGroup::DPad)), 1, 0);
+  const auto place = [this, grid](const QString& title, PadGroup group, int row, int column,
+                                  int row_span) {
+    grid->addWidget(CreateGroupBox(title, Pad::GetGroup(GetPort(), group)), row, column, row_span,
+                    1);
+  };
 
+  // Left column: buttons over the D-Pad (and the Triforce buttons for the baseboard).
+  place(tr("Buttons"), PadGroup::Buttons, 0, 0, 1);
+  place(tr("D-Pad"), PadGroup::DPad, 1, 0, 1);
   if (sub_type == SubType::AMBaseboard)
-  {
-    layout->addWidget(CreateGroupBox(tr("Triforce"), Pad::GetGroup(GetPort(), PadGroup::Triforce)),
-                      2, 0);
-  }
+    place(tr("Triforce"), PadGroup::Triforce, 2, 0, 1);
 
-  layout->addWidget(
-      CreateGroupBox(tr("Control Stick"), Pad::GetGroup(GetPort(), PadGroup::MainStick)), 0, 1, -1,
-      1);
-  layout->addWidget(CreateGroupBox(tr("C Stick"), Pad::GetGroup(GetPort(), PadGroup::CStick)), 0, 2,
-                    -1, 1);
-  layout->addWidget(CreateGroupBox(tr("Triggers"), Pad::GetGroup(GetPort(), PadGroup::Triggers)), 0,
-                    4);
-  layout->addWidget(CreateGroupBox(tr("Rumble"), Pad::GetGroup(GetPort(), PadGroup::Rumble)), 1, 4);
+  // Both sticks take a full-height column each.
+  place(tr("Control Stick"), PadGroup::MainStick, 0, 1, -1);
+  place(tr("C Stick"), PadGroup::CStick, 0, 2, -1);
 
-  layout->addWidget(CreateGroupBox(tr("Options"), Pad::GetGroup(GetPort(), PadGroup::Options)), 2,
-                    4);
+  // Right column (grid column 4; column 3 is left empty): triggers, rumble, options.
+  place(tr("Triggers"), PadGroup::Triggers, 0, 4, 1);
+  place(tr("Rumble"), PadGroup::Rumble, 1, 4, 1);
+  place(tr("Options"), PadGroup::Options, 2, 4, 1);
 
-  setLayout(layout);
+  setLayout(grid);
+}
+
+void GCPadEmu::SaveSettings()
+{
+  InputConfig* const config = Pad::GetConfig();
+  config->SaveConfig();
 }
 
 void GCPadEmu::LoadSettings()
 {
   Pad::LoadConfig();
-}
-
-void GCPadEmu::SaveSettings()
-{
-  Pad::GetConfig()->SaveConfig();
 }
 
 InputConfig* GCPadEmu::GetConfig()

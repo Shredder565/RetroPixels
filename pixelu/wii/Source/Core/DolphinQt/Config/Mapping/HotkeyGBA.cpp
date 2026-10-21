@@ -1,35 +1,40 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/HotkeyGBA.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 HotkeyGBA::HotkeyGBA(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void HotkeyGBA::CreateMainLayout()
+void HotkeyGBA::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  const std::pair<QString, HotkeyGroup> boxes[] = {
+      {tr("Core"), HKGP_GBA_CORE},
+      {tr("Volume"), HKGP_GBA_VOLUME},
+      {tr("Window Size"), HKGP_GBA_SIZE},
+  };
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Core"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_GBA_CORE)));
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Volume"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_GBA_VOLUME)));
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Window Size"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_GBA_SIZE)));
-
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* HotkeyGBA::GetConfig()
+void HotkeyGBA::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void HotkeyGBA::LoadSettings()
@@ -37,7 +42,7 @@ void HotkeyGBA::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void HotkeyGBA::SaveSettings()
+InputConfig* HotkeyGBA::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

@@ -1,35 +1,41 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/Hotkey3D.h"
 
+#include <utility>
+
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QString>
 
 #include "Core/HotkeyManager.h"
+#include "InputCommon/InputConfig.h"
 
 Hotkey3D::Hotkey3D(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void Hotkey3D::CreateMainLayout()
+void Hotkey3D::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
-
-  m_main_layout->addWidget(
+  const std::pair<QString, HotkeyGroup> boxes[] = {
       // i18n: Stereoscopic 3D
-      CreateGroupBox(tr("3D"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_3D_TOGGLE)));
-  m_main_layout->addWidget(
+      {tr("3D"), HKGP_3D_TOGGLE},
       // i18n: Stereoscopic 3D
-      CreateGroupBox(tr("3D Depth"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_3D_DEPTH)));
+      {tr("3D Depth"), HKGP_3D_DEPTH},
+  };
 
-  setLayout(m_main_layout);
+  // The groups sit side by side, left to right.
+  auto* const row = new QHBoxLayout;
+  for (const auto& [title, group] : boxes)
+    row->addWidget(CreateGroupBox(title, HotkeyManagerEmu::GetHotkeyGroup(group)));
+  setLayout(row);
 }
 
-InputConfig* Hotkey3D::GetConfig()
+void Hotkey3D::SaveSettings()
 {
-  return HotkeyManagerEmu::GetConfig();
+  InputConfig* const config = HotkeyManagerEmu::GetConfig();
+  config->SaveConfig();
 }
 
 void Hotkey3D::LoadSettings()
@@ -37,7 +43,7 @@ void Hotkey3D::LoadSettings()
   HotkeyManagerEmu::LoadConfig();
 }
 
-void Hotkey3D::SaveSettings()
+InputConfig* Hotkey3D::GetConfig()
 {
-  HotkeyManagerEmu::GetConfig()->SaveConfig();
+  return HotkeyManagerEmu::GetConfig();
 }

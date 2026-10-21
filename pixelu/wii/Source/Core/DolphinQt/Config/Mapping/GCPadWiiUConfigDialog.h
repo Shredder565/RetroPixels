@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,9 +6,9 @@
 
 class QCheckBox;
 class QLabel;
-class QDialogButtonBox;
-class QVBoxLayout;
 
+// Settings for one port of the GameCube controller adapter (the Wii U / Switch USB adapter):
+// rumble and DK Bongos simulation, plus a live adapter status and poll rate.
 class GCPadWiiUConfigDialog final : public QDialog
 {
   Q_OBJECT
@@ -17,23 +16,15 @@ public:
   explicit GCPadWiiUConfigDialog(int port, QWidget* parent = nullptr);
 
 private:
-  void LoadSettings();
-  void SaveSettings();
+  void BuildLayout();
+  void ReadConfig();
+  void WriteConfig();
+  void RefreshStatus();
 
-  void CreateLayout();
-  void ConnectWidgets();
+  const int m_port;
 
-private:
-  void UpdateAdapterStatus();
-
-  int m_port;
-
-  QVBoxLayout* m_layout;
-  QLabel* m_status_label;
-  QLabel* m_poll_rate_label;
-  QDialogButtonBox* m_button_box;
-
-  // Checkboxes
-  QCheckBox* m_rumble;
-  QCheckBox* m_simulate_bongos;
+  QLabel* m_status = nullptr;
+  QLabel* m_poll_rate = nullptr;
+  QCheckBox* m_rumble = nullptr;
+  QCheckBox* m_bongos = nullptr;
 };

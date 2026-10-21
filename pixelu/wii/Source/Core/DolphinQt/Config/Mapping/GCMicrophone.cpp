@@ -1,44 +1,41 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/GCMicrophone.h"
 
-#include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QVBoxLayout>
-
-#include "InputCommon/InputConfig.h"
 
 #include "Core/HW/GCPad.h"
 #include "Core/HW/GCPadEmu.h"
+#include "InputCommon/InputConfig.h"
 
 GCMicrophone::GCMicrophone(MappingWindow* window) : MappingWidget(window)
 {
-  CreateMainLayout();
+  BuildGroups();
 }
 
-void GCMicrophone::CreateMainLayout()
+void GCMicrophone::BuildGroups()
 {
-  m_main_layout = new QHBoxLayout();
+  // The microphone button lives in the GameCube pad configuration of the same port.
+  auto* const mic_group = Pad::GetGroup(GetPort(), PadGroup::Mic);
 
-  m_main_layout->addWidget(
-      CreateGroupBox(tr("Microphone"), Pad::GetGroup(GetPort(), PadGroup::Mic)));
-
-  setLayout(m_main_layout);
-}
-
-void GCMicrophone::LoadSettings()
-{
-  Pad::LoadConfig();
+  auto* const row = new QHBoxLayout();
+  row->addWidget(CreateGroupBox(tr("Microphone"), mic_group));
+  setLayout(row);
 }
 
 void GCMicrophone::SaveSettings()
 {
-  Pad::GetConfig()->SaveConfig();
+  InputConfig* const config = Pad::GetConfig();
+  config->SaveConfig();
 }
 
 InputConfig* GCMicrophone::GetConfig()
 {
   return Pad::GetConfig();
+}
+
+void GCMicrophone::LoadSettings()
+{
+  Pad::LoadConfig();
 }
