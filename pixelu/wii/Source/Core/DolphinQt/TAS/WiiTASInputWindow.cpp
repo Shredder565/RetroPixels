@@ -487,17 +487,21 @@ void WiiTASInputWindow::showEvent(QShowEvent* const event)
 
 void WiiTASInputWindow::UpdateInputOverrideFunction()
 {
+  WiimoteEmu::Wiimote* const remote = GetWiimote();
+
+  // With a Classic Controller the remote's own inputs are not offered, so it keeps whatever
+  // override it had.
   switch (m_active_extension)
   {
   case WiimoteEmu::ExtensionNumber::CLASSIC:
     GetExtension()->SetInputOverrideFunction(m_classic_overrider.GetInputOverrideFunction());
     break;
   case WiimoteEmu::ExtensionNumber::NUNCHUK:
-    GetWiimote()->SetInputOverrideFunction(m_wiimote_overrider.GetInputOverrideFunction());
+    remote->SetInputOverrideFunction(m_wiimote_overrider.GetInputOverrideFunction());
     GetExtension()->SetInputOverrideFunction(m_nunchuk_overrider.GetInputOverrideFunction());
     break;
   default:
-    GetWiimote()->SetInputOverrideFunction(m_wiimote_overrider.GetInputOverrideFunction());
+    remote->SetInputOverrideFunction(m_wiimote_overrider.GetInputOverrideFunction());
     break;
   }
 }
