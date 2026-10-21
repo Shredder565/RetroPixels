@@ -13,4 +13,8 @@ if(ENABLE_QT)
   add_subdirectory(DolphinQt)
 endif()
 
+if(ENABLE_NOGUI)
+  add_subdirectory(DolphinNoGUI)
+endif()
+
 add_subdirectory(UpdaterCommon)

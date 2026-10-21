@@ -80,8 +80,7 @@ pixelu_library(core
     EXI_DeviceIPL.h EXI_DeviceMemoryCard.cpp EXI_DeviceMemoryCard.h EXI_DeviceModem.cpp
     EXI_DeviceModem.h
   IN HW/EXI/BBA
-    BuiltIn.cpp BuiltIn.h TAP_Win32.cpp TAP_Win32.h TAPServerBBA.cpp TAPServerConnection.cpp
-    XLINK_KAI_BBA.cpp
+    BuiltIn.cpp BuiltIn.h TAPServerBBA.cpp TAPServerConnection.cpp XLINK_KAI_BBA.cpp
   IN HW/EXI/Modem
     TAPServerModem.cpp
   IN HW/GCMemcard
@@ -114,7 +113,7 @@ pixelu_library(core
     Drums.h Extension.cpp Extension.h Guitar.cpp Guitar.h Nunchuk.cpp Nunchuk.h Shinkansen.cpp
     Shinkansen.h TaTaCon.cpp TaTaCon.h Turntable.cpp Turntable.h UDrawTablet.cpp UDrawTablet.h
   IN HW/WiimoteReal
-    IOWin.cpp IOWin.h WiimoteReal.cpp WiimoteReal.h
+    WiimoteReal.cpp WiimoteReal.h
   IN IOS
     Device.cpp Device.h DeviceStub.cpp DeviceStub.h DolphinDevice.cpp DolphinDevice.h IOS.cpp
     IOS.h IOSC.cpp IOSC.h MIOS.cpp MIOS.h VersionInfo.cpp VersionInfo.h
@@ -283,12 +282,27 @@ if(USE_MGBA)
   target_compile_definitions(core PUBLIC HAS_LIBMGBA)
 endif()
 
-target_link_libraries(core PUBLIC
-  videod3d
-  videod3d12
-  setupapi.lib
-  iphlpapi.lib
-)
+if(WIN32)
+  pixelu_add_sources(core
+    IN HW/EXI/BBA
+      TAP_Win32.cpp TAP_Win32.h
+    IN HW/WiimoteReal
+      IOWin.cpp IOWin.h
+  )
+  target_link_libraries(core PUBLIC
+    videod3d
+    videod3d12
+    setupapi.lib
+    iphlpapi.lib
+  )
+else()
+  # Linux: the BBA's TAP mode through /dev/net/tun. Real Wii Remotes are found through
+  # hidapi (below); there is no BlueZ backend.
+  pixelu_add_sources(core
+    IN HW/EXI/BBA
+      TAP_Unix.cpp
+  )
+endif()
 
 if(TARGET Hidapi::Hidapi)
   # Real Wii Remotes through hidapi.

@@ -12,7 +12,8 @@
 # translations (Languages/po) still come from a checkout of Dolphin 2609a's
 # repository, by default a sparse one in dolphin/.
 #
-# Supported: Windows x64 with MSVC (Visual Studio 2026), see CMakePresets.json.
+# Supported: Windows x64 with MSVC (Visual Studio 2026), and Linux x86-64 with
+# GCC 12+ or Clang 16+ (glibc 2.35 and newer); see CMakePresets.json.
 
 cmake_minimum_required(VERSION 3.25...4.2.1)
 
@@ -32,8 +33,13 @@ include(PixelUHelpers)
 
 set(PIXELU_WII_THIRD_PARTY "${PROJECT_SOURCE_DIR}/third_party" CACHE PATH
   "Folder with the third-party library sources (what Externals/fetch.py fetches)")
-set(PIXELU_WII_QT_DIR "${PIXELU_WII_THIRD_PARTY}/Qt/6.8.3/msvc2022_64" CACHE PATH
-  "Qt 6.8.3 for MSVC x64 (the official build, as aqtinstall installs it)")
+if(WIN32)
+  set(qt_default "${PIXELU_WII_THIRD_PARTY}/Qt/6.8.3/msvc2022_64")
+else()
+  set(qt_default "${PIXELU_WII_THIRD_PARTY}/Qt/6.8.3/gcc_64")
+endif()
+set(PIXELU_WII_QT_DIR "${qt_default}" CACHE PATH
+  "Qt 6.8.3 (the official MSVC x64 or Linux gcc_64 build, as aqtinstall installs it)")
 set(PIXELU_WII_FFMPEG_DIR "${PIXELU_WII_THIRD_PARTY}/FFmpeg/x64" CACHE PATH
   "FFmpeg static libraries and headers (what Externals/FFmpeg/build-ffmpeg.sh installs)")
 set(PIXELU_WII_DOLPHIN_DATA "${PROJECT_SOURCE_DIR}/dolphin" CACHE PATH
@@ -62,10 +68,21 @@ set(THIRD "${PIXELU_WII_THIRD_PARTY}")
 ########################################
 # Options
 
+if(WIN32)
+  set(on_windows ON)
+  set(on_linux OFF)
+else()
+  set(on_windows OFF)
+  set(on_linux ON)
+endif()
+
 option(ENABLE_QT "Build the Qt program (PixelU-Wii.exe)" ON)
+option(ENABLE_NOGUI "Build dolphin-emu-nogui, the program without a user interface" ${on_linux})
 option(ENABLE_CLI_TOOL "Also configure the dolphin-tool command-line program" ON)
 option(ENABLE_VULKAN "Vulkan video backend" ON)
-option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ON)
+# On Linux cubeb needs its PulseAudio/ALSA build (Externals/cubeb); until then
+# the Null sound backend is the only one there.
+option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ${on_windows})
 option(ENABLE_SDL "SDL controller input" ON)
 option(ENABLE_LLVM "Use LLVM, when its CMake package is found, for the debugger's host disassembly" ON)
 option(ENABLE_LTO "Link-time optimisation" OFF)
@@ -74,7 +91,7 @@ option(USE_UPNP "UPnP port forwarding for netplay" ON)
 option(USE_DISCORD_PRESENCE "Discord Rich Presence" ON)
 option(USE_MGBA "Game Boy Advance link emulation with mGBA" ON)
 option(USE_RETRO_ACHIEVEMENTS "RetroAchievements" ON)
-option(RC_CLIENT_SUPPORTS_RAINTEGRATION "RetroAchievements developer tools (RAIntegration)" ON)
+option(RC_CLIENT_SUPPORTS_RAINTEGRATION "RetroAchievements developer tools (RAIntegration, Windows only)" ${on_windows})
 option(FASTLOG "Keep every log level in the build" OFF)
 # PixelU-Wii never updates itself or sends usage statistics; both stay off.
 option(ENABLE_AUTOUPDATE "Automatic updates (needs an update server; keep OFF)" OFF)
@@ -83,8 +100,15 @@ option(ENABLE_ANALYTICS "Opt-in usage statistics (keep OFF)" OFF)
 ########################################
 # Compiler and target checks
 
-if(NOT WIN32)
-  message(FATAL_ERROR "PixelU-Wii builds for Windows only (CMAKE_SYSTEM_NAME is ${CMAKE_SYSTEM_NAME}).")
+if(NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+  message(FATAL_ERROR "PixelU-Wii builds for Windows and Linux only (CMAKE_SYSTEM_NAME is ${CMAKE_SYSTEM_NAME}).")
+endif()
+if(WIN32 AND NOT MSVC)
+  message(FATAL_ERROR "On Windows PixelU-Wii builds with MSVC only.")
+endif()
+if(RC_CLIENT_SUPPORTS_RAINTEGRATION AND NOT WIN32)
+  message(STATUS "RAIntegration is Windows only; turned off")
+  set(RC_CLIENT_SUPPORTS_RAINTEGRATION OFF CACHE BOOL "" FORCE)
 endif()
 if(NOT (CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$"))
   message(FATAL_ERROR "PixelU-Wii builds for x86-64 only, not for '${CMAKE_SYSTEM_PROCESSOR}' "
@@ -98,6 +122,16 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   if(DEFINED MSVC_TOOLSET_VERSION AND MSVC_TOOLSET_VERSION LESS 143)
     message(FATAL_ERROR "PixelU-Wii needs the v143 platform toolset or newer.")
   endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+    message(FATAL_ERROR "PixelU-Wii needs GCC 12 or newer (C++23).")
+  endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+    message(FATAL_ERROR "PixelU-Wii needs Clang 16 or newer (C++23).")
+  endif()
+elseif(NOT MSVC)
+  message(FATAL_ERROR "PixelU-Wii builds with MSVC, GCC or Clang, not ${CMAKE_CXX_COMPILER_ID}.")
 endif()
 
 set(_ARCH_64 1)
@@ -165,6 +199,38 @@ if(MSVC)
   )
   add_link_options(/experimental:deterministic)
   string(APPEND CMAKE_EXE_LINKER_FLAGS " /NXCOMPAT /DEBUG /OPT:REF /OPT:ICF")
+else()
+  # GCC and Clang (Linux). The code base was written for MSVC: no type-based
+  # aliasing assumptions, signed overflow never relied on, and warnings are not
+  # errors here (the Windows build keeps /WX).
+  set(CMAKE_C_STANDARD 99)
+  set(CMAKE_CXX_STANDARD 23)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_CXX_EXTENSIONS OFF)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
+  add_compile_options(
+    -fno-strict-aliasing
+    -fwrapv
+    -fvisibility-inlines-hidden
+    # SSE4.1 and the others are chosen at run time (CPUDetect); this is the
+    # x86-64 baseline the Windows build also assumes.
+    -msse2
+    -Wall
+    -Wno-unused-parameter
+    -Wno-missing-field-initializers
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-class-memaccess>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-invalid-offsetof>
+  )
+  if(CMAKE_GENERATOR MATCHES "Ninja")
+    add_compile_options(-fdiagnostics-color=always)
+  endif()
+  # Programs find their bundled libraries (lib/ next to them) without
+  # LD_LIBRARY_PATH, and keep working when the folder is moved.
+  set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+  set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+  add_link_options(-Wl,--as-needed -Wl,-z,noexecstack)
 endif()
 
 if(ENABLE_LTO)
@@ -200,8 +266,10 @@ if(ENCODE_FRAMEDUMPS)
   if(FFmpeg_FOUND)
     message(STATUS "FFmpeg found: frame dumps are encoded")
     add_definitions(-DHAVE_FFMPEG)
-    # FFmpeg's static libraries call into bcrypt (random numbers in libavutil).
-    set_property(TARGET FFmpeg::avutil APPEND PROPERTY INTERFACE_LINK_LIBRARIES "Bcrypt.lib")
+    if(WIN32)
+      # FFmpeg's static libraries call into bcrypt (random numbers in libavutil).
+      set_property(TARGET FFmpeg::avutil APPEND PROPERTY INTERFACE_LINK_LIBRARIES "Bcrypt.lib")
+    endif()
   else()
     message(STATUS "FFmpeg not found: no frame dump encoding")
   endif()
