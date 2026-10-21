@@ -1,0 +1,119 @@
+- L5b log (PixelU-Wii video on Linux, own): the Vulkan backend makes Xlib, XCB and Wayland
+  surfaces, and Common/GL has GLX and EGL contexts, so the OpenGL, Vulkan and software
+  backends draw on Linux. Work started from HEAD 70b1a3e on `claude/wiiu-emulator-urpcen`.
+  Every new file is written from scratch from the Khronos specifications (Vulkan WSI, GLX 1.4,
+  GLX_ARB_create_context(_profile), GLX_EXT/MESA_swap_control, EGL 1.5, EGL_KHR_create_context,
+  EGL_KHR_platform_x11/wayland, EGL_MESA_platform_surfaceless, EGL_KHR_surfaceless_context),
+  the Xlib manual and wayland-egl's three-function API. Dolphin's EGL*/GLX11* files were not
+  read; only the names our own headers already had (GLContext, WindowSystemInfo) are used.
+  - New files (original-code header):
+    - `Common/GL/GLInterface/X11Window.{h,cpp}`: X11 support shared by GLX and EGL. libX11.so.6
+      is opened at run time. The context gets its own connection to the frontend's X server
+      (XDisplayString of the frontend's Display*), so the frontend's display need not be
+      thread-safe (no XInitThreads needed): every Xlib/GLX call on it is made under one mutex
+      shared by the main context and its worker contexts. It draws into a child window of the
+      frontend's render window with the visual the GL config wants (24-bit preferred, so a
+      compositor does not blend with alpha), selects no input (events still reach the
+      frontend's window) and follows the parent's size on Update(). An X error handler,
+      chained to the previous one, logs and ignores errors on our connections only (a
+      frontend that destroys its window first would otherwise end the program through Xlib's
+      default handler); errors expected while probing context versions are logged at info.
+    - `Common/GL/GLInterface/GLX.{h,cpp}`: desktop GL through GLX 1.3+ (libGL.so.1, or
+      libGLX.so.0), no <GL/glx.h> (it would clash with GLExtensions' pointers; the tokens are
+      declared with the registry's values). Core profiles 4.6 down to 3.2 newest first via
+      glXCreateContextAttribsARB, legacy context as the fallback (as WGL does). Worker contexts
+      on a 1x1 pbuffer (or no drawable for 3.0+ where no pbuffer config exists), the same
+      profile and version as the main one. Swap interval through GLX_EXT_swap_control or
+      GLX_MESA_swap_control.
+    - `Common/GL/GLInterface/EGL.{h,cpp}`: OpenGL or OpenGL ES 3.x through EGL (libEGL.so.1)
+      on three window systems: X11 (private connection and child window as above,
+      EGL_KHR/EXT_platform_x11), Wayland (wl_egl_window from libwayland-egl.so.1 on the
+      frontend's wl_surface) and headless (EGL_MESA_platform_surfaceless, else the default
+      display; surfaceless contexts, else 1x1 pbuffers). Desktop GL first, ES 3.2/3.1/3.0 when
+      that fails or when PreferGLES is set. Core function pointers fall back to
+      libOpenGL.so.0/libGL.so.1 or libGLESv2.so.2 where eglGetProcAddress does not give them.
+    - `docs/l5b-test-dol.py`: writes the test DOL used below (also for L5d's CI job).
+  - Changed:
+    - `Common/GL/GLContext.{h,cpp}`: on Linux (PIXELU_GL_GLX_EGL, set by the Common CMake
+      change below) X11 uses GLX, then EGL (EGL first when PreferGLES); Wayland and headless
+      use EGL. New virtual `SetSurfaceSize` (no-op except EGL on Wayland, where a surface has
+      no size of its own). Windows code paths unchanged.
+    - `VideoBackends/OGL/OGLGfx.cpp`: a surface resize passes the presenter's backbuffer size
+      to SetSurfaceSize before Update() (ignored by WGL, GLX and EGL on X11).
+    - Vulkan: `VulkanLoader.h` includes vulkan_xlib/xcb/wayland.h itself on Linux, with the
+      window-system types declared as the opaque handles they are (Display/Window/VisualID
+      renamed by macros while the headers are read), so no X11 or Wayland headers are needed
+      and no Xlib macros reach the backend; `VulkanEntryPoints.inl` has the six surface entry
+      points; `VulkanContext` enables VK_KHR_xlib_surface and/or VK_KHR_xcb_surface for X11
+      (one of them required) and VK_KHR_wayland_surface for Wayland, and remembers the enabled
+      instance extensions (`IsInstanceExtensionEnabled`); `VKSwapChain` makes an Xlib surface,
+      else an XCB one (XGetXCBConnection from libX11-xcb.so.1, looked up at run time), and
+      Wayland surfaces. Nothing new is linked: libcommon and libvideovulkan have no undefined
+      X11/GL/EGL/Wayland symbols.
+  - Needed from another batch's file (not committed; `docs/l5b-handoff.patch`, applies with
+    `git apply` on top of these commits): `Common/CMakeLists.txt` (L5a's) builds
+    GLInterface/EGL, GLX and X11Window on Linux, finds the X11 and EGL headers
+    (libx11-dev, libegl-dev; a clear error otherwise) and defines PIXELU_GL_GLX_EGL. Without
+    it the tree still builds and links on Linux, but GL has no context there (as before).
+  - Checked here (Ubuntu 24.04 container, Xvfb, Mesa 25.2 llvmpipe and lavapipe):
+    - gcc-12 build of dolphin-emu-nogui (L5a's configure, -DENABLE_QT=OFF -DENABLE_LLVM=OFF),
+      handoff patch applied: no warnings in the changed files. The changed files also compile
+      with clang++-19 -Wall -Wextra without warnings, and EGL.cpp also with an
+      eglplatform.h that uses Xlib types (-DUSE_X11, as older headers do by default).
+    - Test DOL (docs/l5b-test-dol.py, 288 + 768 bytes, no Nintendo code): VI 640x480p with the
+      XFB at 0x00400000, CP/PI FIFO linked, write-gather pipe; each frame BP writes set the
+      clear colour (red = frame counter * 4, green 0xC0, blue 0x40) and trigger an EFB->XFB
+      copy with clear. `--triangle` adds a vertex-coloured triangle (CP/XF/TEV setup).
+    - In an X11 window under Xvfb: a local test platform for dolphin-emu-nogui (not
+      committed; L5d owns the real X11 platform) opened a 640x480 window and passed
+      {X11, Display*, window} like a frontend would. Screenshots (`import -window root`) of
+      the window, mean R/G/B over 640x480: OpenGL/GLX 4.5 core 0.71/0.69/0.23, Vulkan Xlib
+      surface 0.20/0.69/0.23, Vulkan XCB surface (Xlib path disabled for the run)
+      0.67/0.69/0.23, OpenGL ES 3.2 through EGL on X11 0.68/0.68/0.23, software renderer
+      (its GL window through GLX) 0.22/0.74/0.25: the clear colour (green 0.75, blue 0.25,
+      red changing), never black. Worker contexts were made (GLX pbuffers). After resizing
+      the window to 800x600 and calling Presenter::ResizeSurface(), the area outside the old
+      640x480 is filled with the picture for GLX, EGL and Vulkan.
+    - Headless (dolphin-emu-nogui -p headless): OpenGL through EGL_MESA_platform_surfaceless
+      (GL 4.5 core) and Vulkan without a surface both render; frame dumps
+      (DumpFramesAsImages) of the same frame are pixel-identical between the two (also with
+      --triangle; the triangle looks the same in the software renderer, so its odd placement
+      is the DOL's, not a backend's).
+    - Every run exits 0 within a second of SIGINT.
+    - Windows unchanged: the base tree (70b1a3e) and this tree (with the handoff patch) were
+      configured as Windows with clang-cl 18 (Ninja, the Windows toolchain file, mingw headers,
+      ENABLE_QT=OFF, ENCODE_FRAMEDUMPS=OFF): compile_commands.json is identical for all 1742
+      sources and all 59 libraries/programs have the same objects and link lines. The Windows
+      code of the changed files differs only by the new no-op virtual and its call in OGLGfx
+      (not compiled here: no MSVC STL in the container).
+  - CI must confirm (L5d's build-linux job):
+    - ubuntu-22.04 packages for the build: `libx11-dev libegl-dev` (headers only; nothing
+      linked). For the run: `xvfb mesa-vulkan-drivers libgl1-mesa-dri libegl1 libvulkan1`,
+      and `libx11-xcb1` for the XCB path.
+    - GLVND's older EGL headers on 22.04 (libegl-dev 1.4.0) compile EGL.cpp (checked here
+      only by simulating Xlib-typed native handles).
+    - With the X11 platform (L5d) under `xvfb-run -s '-screen 0 1280x1024x24'`:
+      `python3 docs/l5b-test-dol.py t.dol`, then for `-v OGL` and `-v Vulkan`:
+      `dolphin-emu-nogui -u $PWD/u -p x11 -v <backend> -e t.dol &`, after 8 s
+      `import -window root s.png`, the window area's mean green must be > 0.5
+      (`convert s.png -crop 640x480+0+0 -format '%[fx:mean.g]' info:`), then `kill -INT` and
+      exit 0. Without the X11 platform the headless check works today:
+      `-p headless -v OGL` and `-v Vulkan` with
+      `-C Dolphin.Movie.DumpFrames=True` and `[Settings] DumpFramesAsImages = True` in
+      `u/Config/GFX.ini` give PNGs in u/Dump/Frames whose mean green is about 0.75.
+      (`-C GFX.Settings...=` did not take effect here; GFX.ini did. UICommon's option
+      handling, L5d.)
+    - Windows: the MSVC build of PixelU-Wii.exe still compiles the changed files.
+  - Notes for other batches:
+    - L5d (DolphinQt and nogui X11 platform): pass WindowSystemInfo{X11, Display*
+      (QNativeInterface::QX11Application::display() or XOpenDisplay), the render window's
+      XID as render_window and render_surface}. No XInitThreads is needed for video. Under a
+      Wayland session Qt should be forced to xcb (the owner's XWayland decision); for a native
+      Wayland frontend, display_connection is the wl_display*, render_surface the wl_surface*,
+      and the frontend must call g_presenter->SetBackbuffer(w, h) before
+      Presenter::ResizeSurface() since Wayland surfaces have no size (Vulkan and EGL read it).
+    - Sys must sit next to dolphin-emu-nogui for the post-processing default shader
+      (otherwise a harmless "Post-processing shader not found" error at start).
+  - Not done: native Wayland was only built, not run (no compositor in the container).
+    Quad-buffered stereo is not offered through EGL (EGL has no stereo config attribute);
+    GLX has it.
