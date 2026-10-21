@@ -1,13 +1,16 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/DInput/DInputJoystick.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <set>
-#include <type_traits>
+#include <span>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -19,191 +22,230 @@
 
 namespace ciface::DInput
 {
-constexpr DWORD DATA_BUFFER_SIZE = 32;
-
-struct GUIDComparator
+namespace
 {
-  bool operator()(const GUID& left, const GUID& right) const
-  {
-    static_assert(std::is_trivially_copyable_v<GUID>);
+// Buffered events kept by DirectInput between updates.
+constexpr DWORD EVENT_BUFFER_SIZE = 32;
 
-    return memcmp(&left, &right, sizeof(left)) < 0;
-  }
+// The data format's limits.
+constexpr DWORD MAX_BUTTONS = 32;
+constexpr DWORD MAX_HATS = 4;
+// The LONG values (axes, sliders, then the hats) come before the button bytes.
+constexpr DWORD LONG_VALUE_COUNT = DIJOFS_BUTTON(0) / sizeof(LONG);
+
+struct GuidLess
+{
+  bool operator()(const GUID& a, const GUID& b) const { return std::memcmp(&a, &b, sizeof(a)) < 0; }
 };
 
-static std::set<GUID, GUIDComparator> s_guids_in_use;
-static std::mutex s_guids_mutex;
+// Instances that have a Joystick, so they are not added twice.
+std::set<GUID, GuidLess> s_instances_in_use;
+std::mutex s_instances_mutex;
+
+bool IsInUse(const GUID& instance)
+{
+  std::lock_guard lock(s_instances_mutex);
+  return s_instances_in_use.contains(instance);
+}
+
+class ButtonInput final : public Core::Device::Input
+{
+public:
+  ButtonInput(u8 index, const BYTE* state) : m_state(state), m_index(index) {}
+
+  std::string GetName() const override { return fmt::format("Button {}", m_index); }
+  ControlState GetState() const override { return ControlState(*m_state > 0); }
+
+private:
+  const BYTE* const m_state;
+  const u8 m_index;
+};
+
+// One half of an axis or slider, from its centre to one end of its range.
+class AxisInput final : public Core::Device::Input
+{
+public:
+  AxisInput(u8 index, const LONG* value, LONG center, LONG extent)
+      : m_value(value), m_center(center), m_extent(extent), m_index(index)
+  {
+  }
+
+  std::string GetName() const override
+  {
+    const char sign = m_extent < 0 ? '-' : '+';
+    // Six axes (X, Y, Z, then the rotations Xr, Yr, Zr), then sliders.
+    if (m_index >= 6)
+      return fmt::format("Slider {}{:c}", m_index - 6, sign);
+    return fmt::format("Axis {:c}{}{:c}", 'X' + m_index % 3, m_index >= 3 ? "r" : "", sign);
+  }
+
+  ControlState GetState() const override { return ControlState(*m_value - m_center) / m_extent; }
+
+private:
+  const LONG* const m_value;
+  const LONG m_center;
+  const LONG m_extent;
+  const u8 m_index;
+};
+
+// One direction (N, E, S, W) of a point-of-view hat. The hat value is an angle in hundredths
+// of a degree, clockwise from north; diagonals count for both neighbouring directions.
+class HatInput final : public Core::Device::Input
+{
+public:
+  HatInput(u8 index, const DWORD* value, u8 direction)
+      : m_value(value), m_index(index), m_direction(direction)
+  {
+  }
+
+  std::string GetName() const override
+  {
+    return fmt::format("Hat {} {:c}", m_index, "NESW"[m_direction]);
+  }
+
+  ControlState GetState() const override
+  {
+    const DWORD value = *m_value;
+    // Centred is -1, or 0xffff in the low word for some drivers.
+    if (LOWORD(value) == 0xffff)
+      return 0;
+
+    // Which of the eight 45 degree sectors the hat is in, counted from this direction.
+    const int sector = (int(value / 4500) + 8 - 2 * m_direction) % 8;
+    return sector == 7 || sector <= 1;
+  }
+
+private:
+  const DWORD* const m_value;
+  const u8 m_index;
+  const u8 m_direction;
+};
+
+// Sets up a created device; on failure the device is released and nullptr returned.
+LPDIRECTINPUTDEVICE8 PrepareDevice(LPDIRECTINPUTDEVICE8 device, HWND hwnd)
+{
+  if (FAILED(device->SetDataFormat(&c_dfDIJoystick)))
+  {
+    device->Release();
+    return nullptr;
+  }
+
+  // Force feedback needs exclusive access, which needs the top-level window.
+  const HRESULT exclusive =
+      device->SetCooperativeLevel(GetAncestor(hwnd, GA_ROOT), DISCL_BACKGROUND | DISCL_EXCLUSIVE);
+  if (SUCCEEDED(exclusive))
+    return device;
+
+  WARN_LOG_FMT(CONTROLLERINTERFACE,
+               "DInput: Failed to acquire device exclusively. Force feedback will be "
+               "unavailable.  {}",
+               Common::HRWrap(exclusive));
+  if (FAILED(device->SetCooperativeLevel(nullptr, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)))
+  {
+    device->Release();
+    return nullptr;
+  }
+  return device;
+}
+}  // namespace
 
 void InitJoystick(IDirectInput8* const idi8, HWND hwnd)
 {
-  std::list<DIDEVICEINSTANCE> joysticks;
-  idi8->EnumDevices(DI8DEVCLASS_GAMECTRL, DIEnumDevicesCallback, (LPVOID)&joysticks,
-                    DIEDFL_ATTACHEDONLY);
+  std::list<DIDEVICEINSTANCE> attached;
+  idi8->EnumDevices(DI8DEVCLASS_GAMECTRL, DIEnumDevicesCallback, &attached, DIEDFL_ATTACHEDONLY);
 
-  std::unordered_set<DWORD> xinput_guids = GetXInputGUIDS();
-  for (DIDEVICEINSTANCE& joystick : joysticks)
+  const std::unordered_set<DWORD> xinput_products = GetXInputGUIDS();
+  for (const DIDEVICEINSTANCE& instance : attached)
   {
-    // Skip XInput Devices
-    if (xinput_guids.contains(joystick.guidProduct.Data1))
-    {
+    if (xinput_products.contains(instance.guidProduct.Data1))
       continue;
-    }
+    if (IsInUse(instance.guidInstance))
+      continue;
 
-    // Skip devices we are already using.
-    {
-      std::lock_guard lk(s_guids_mutex);
-      if (s_guids_in_use.contains(joystick.guidInstance))
-      {
-        continue;
-      }
-    }
+    // Failures here are not reported.
+    LPDIRECTINPUTDEVICE8 created;
+    if (FAILED(idi8->CreateDevice(instance.guidInstance, &created, nullptr)))
+      continue;
+    LPDIRECTINPUTDEVICE8 const device = PrepareDevice(created, hwnd);
+    if (device == nullptr)
+      continue;
 
-    LPDIRECTINPUTDEVICE8 js_device;
-    // Don't print any warnings on failure
-    if (SUCCEEDED(idi8->CreateDevice(joystick.guidInstance, &js_device, nullptr)))
-    {
-      if (SUCCEEDED(js_device->SetDataFormat(&c_dfDIJoystick)))
-      {
-        HRESULT hr = js_device->SetCooperativeLevel(GetAncestor(hwnd, GA_ROOT),
-                                                    DISCL_BACKGROUND | DISCL_EXCLUSIVE);
-        if (FAILED(hr))
-        {
-          WARN_LOG_FMT(CONTROLLERINTERFACE,
-                       "DInput: Failed to acquire device exclusively. Force feedback will be "
-                       "unavailable.  {}",
-                       Common::HRWrap(hr));
-          // Fall back to non-exclusive mode, with no rumble
-          if (FAILED(
-                  js_device->SetCooperativeLevel(nullptr, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)))
-          {
-            js_device->Release();
-            continue;
-          }
-        }
+    auto joystick = std::make_shared<Joystick>(device);
+    // A joystick without inputs or outputs is dropped, and not remembered as in use: it may
+    // get outputs once exclusive access works (e.g. once there is a window).
+    if (joystick->Inputs().empty() && joystick->Outputs().empty())
+      continue;
+    if (!g_controller_interface.AddDevice(std::move(joystick)))
+      continue;
 
-        auto js = std::make_shared<Joystick>(js_device);
-        // only add if it has some inputs/outputs.
-        // Don't even add it to our static list in case we first created it without a window handle,
-        // failing to get exclusive mode, and then later managed to obtain it, which mean it
-        // could now have some outputs if it didn't before.
-        if (js->Inputs().size() || js->Outputs().size())
-        {
-          if (g_controller_interface.AddDevice(std::move(js)))
-          {
-            std::lock_guard lk(s_guids_mutex);
-            s_guids_in_use.insert(joystick.guidInstance);
-          }
-        }
-      }
-      else
-      {
-        js_device->Release();
-      }
-    }
+    std::lock_guard lock(s_instances_mutex);
+    s_instances_in_use.insert(instance.guidInstance);
   }
 }
 
 Joystick::Joystick(const LPDIRECTINPUTDEVICE8 device) : m_device(device)
 {
-  // seems this needs to be done before GetCapabilities
-  // polled or buffered data
-  DIPROPDWORD dipdw;
-  dipdw.diph.dwSize = sizeof(DIPROPDWORD);
-  dipdw.diph.dwHeaderSize = sizeof(DIPROPHEADER);
-  dipdw.diph.dwObj = 0;
-  dipdw.diph.dwHow = DIPH_DEVICE;
-  dipdw.dwData = DATA_BUFFER_SIZE;
-  // set the buffer size,
-  // if we can't set the property, we can't use buffered data
-  m_buffered = SUCCEEDED(m_device->SetProperty(DIPROP_BUFFERSIZE, &dipdw.diph));
+  // The event buffer must be set up before reading the capabilities and acquiring. Without
+  // it, whole states are read instead.
+  DIPROPDWORD buffer_size;
+  buffer_size.diph.dwSize = sizeof(DIPROPDWORD);
+  buffer_size.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+  buffer_size.diph.dwObj = 0;
+  buffer_size.diph.dwHow = DIPH_DEVICE;
+  buffer_size.dwData = EVENT_BUFFER_SIZE;
+  m_buffered = SUCCEEDED(m_device->SetProperty(DIPROP_BUFFERSIZE, &buffer_size.diph));
 
-  // seems this needs to be done after SetProperty of buffer size
   m_device->Acquire();
 
-  // get joystick caps
-  DIDEVCAPS js_caps;
-  js_caps.dwSize = sizeof(js_caps);
-  if (FAILED(m_device->GetCapabilities(&js_caps)))
+  DIDEVCAPS caps;
+  caps.dwSize = sizeof(caps);
+  if (FAILED(m_device->GetCapabilities(&caps)))
     return;
 
-  // max of 32 buttons and 4 hats / the limit of the data format I am using
-  js_caps.dwButtons = std::min((DWORD)32, js_caps.dwButtons);
-  js_caps.dwPOVs = std::min((DWORD)4, js_caps.dwPOVs);
+  const DWORD button_count = std::min(MAX_BUTTONS, caps.dwButtons);
+  for (u8 i = 0; i != button_count; ++i)
+    AddInput(new ButtonInput(i, &m_state_in.rgbButtons[i]));
 
-  // m_must_poll = (js_caps.dwFlags & DIDC_POLLEDDATAFORMAT) != 0;
-
-  // buttons
-  for (u8 i = 0; i != js_caps.dwButtons; ++i)
-    AddInput(new Button(i, m_state_in.rgbButtons[i]));
-
-  // hats
-  for (u8 i = 0; i != js_caps.dwPOVs; ++i)
+  const DWORD hat_count = std::min(MAX_HATS, caps.dwPOVs);
+  for (u8 i = 0; i != hat_count; ++i)
   {
-    // each hat gets 4 input instances associated with it, (up down left right)
-    for (u8 d = 0; d != 4; ++d)
-      AddInput(new Hat(i, m_state_in.rgdwPOV[i], d));
+    for (u8 direction = 0; direction != 4; ++direction)
+      AddInput(new HatInput(i, &m_state_in.rgdwPOV[i], direction));
   }
 
-  // get up to 6 axes and 2 sliders
+  // Each LONG slot of the state is tried as an axis: one that has a range is present. A
+  // 16 bit range is asked for first; some devices need that, others keep their own, so the
+  // range is read back either way.
   DIPROPRANGE range;
   range.diph.dwSize = sizeof(range);
   range.diph.dwHeaderSize = sizeof(range.diph);
   range.diph.dwHow = DIPH_BYOFFSET;
-  // screw EnumObjects, just go through all the axis offsets and try to GetProperty
-  // this should be more foolproof, less code, and probably faster
-  for (unsigned int offset = 0; offset < DIJOFS_BUTTON(0) / sizeof(LONG); ++offset)
+  for (unsigned int slot = 0; slot < LONG_VALUE_COUNT; ++slot)
   {
-    range.diph.dwObj = offset * sizeof(LONG);
-    // Try to set a range with 16 bits of precision:
+    range.diph.dwObj = static_cast<DWORD>(slot * sizeof(LONG));
     range.lMin = std::numeric_limits<s16>::min();
     range.lMax = std::numeric_limits<s16>::max();
     m_device->SetProperty(DIPROP_RANGE, &range.diph);
-    // Not all devices support setting DIPROP_RANGE so we must GetProperty right back.
-    // This also checks that the axis is present.
-    // Note: Even though not all devices support setting DIPROP_RANGE, some require it.
-    if (SUCCEEDED(m_device->GetProperty(DIPROP_RANGE, &range.diph)))
-    {
-      const LONG base = (range.lMin + range.lMax) / 2;
-      const LONG& ax = (&m_state_in.lX)[offset];
+    if (FAILED(m_device->GetProperty(DIPROP_RANGE, &range.diph)))
+      continue;
 
-      // each axis gets a negative and a positive input instance associated with it
-      AddFullAnalogSurfaceInputs(new Axis(offset, ax, base, range.lMin - base),
-                                 new Axis(offset, ax, base, range.lMax - base));
-    }
+    const LONG center = (range.lMin + range.lMax) / 2;
+    const LONG* const value = &m_state_in.lX + slot;
+    AddFullAnalogSurfaceInputs(new AxisInput(u8(slot), value, center, range.lMin - center),
+                               new AxisInput(u8(slot), value, center, range.lMax - center));
   }
 
-  // Force feedback:
-  std::list<DIDEVICEOBJECTINSTANCE> objects;
-  if (SUCCEEDED(m_device->EnumObjects(DIEnumDeviceObjectsCallback, (LPVOID)&objects, DIDFT_AXIS)))
+  std::list<DIDEVICEOBJECTINSTANCE> axes;
+  if (SUCCEEDED(m_device->EnumObjects(DIEnumDeviceObjectsCallback, &axes, DIDFT_AXIS)))
   {
-    const int num_ff_axes = std::ranges::count_if(
-        objects, [](const auto& pdidoi) { return (pdidoi.dwFlags & DIDOI_FFACTUATOR) != 0; });
-    InitForceFeedback(m_device, num_ff_axes);
+    const auto actuators = std::ranges::count_if(axes, [](const DIDEVICEOBJECTINSTANCE& axis) {
+      return (axis.dwFlags & DIDOI_FFACTUATOR) != 0;
+    });
+    InitForceFeedback(m_device, int(actuators));
   }
 
-  // Set hats to center:
-  // "The center position is normally reported as -1" -MSDN
-  std::ranges::fill(m_state_in.rgdwPOV, -1);
-}
-
-Joystick::~Joystick()
-{
-  DIDEVICEINSTANCE info = {};
-  info.dwSize = sizeof(info);
-  if (SUCCEEDED(m_device->GetDeviceInfo(&info)))
-  {
-    std::lock_guard lk(s_guids_mutex);
-    s_guids_in_use.erase(info.guidInstance);
-  }
-  else
-  {
-    ERROR_LOG_FMT(CONTROLLERINTERFACE, "DInputJoystick: GetDeviceInfo failed.");
-  }
-
-  DeInitForceFeedback();
-
-  m_device->Unacquire();
-  m_device->Release();
+  // Hats start centred (-1).
+  std::ranges::fill(m_state_in.rgdwPOV, DWORD(-1));
 }
 
 std::string Joystick::GetName() const
@@ -221,91 +263,66 @@ bool Joystick::IsValid() const
   return SUCCEEDED(m_device->Acquire());
 }
 
+Joystick::~Joystick()
+{
+  DIDEVICEINSTANCE info{};
+  info.dwSize = sizeof(info);
+  if (FAILED(m_device->GetDeviceInfo(&info)))
+  {
+    ERROR_LOG_FMT(CONTROLLERINTERFACE, "DInputJoystick: GetDeviceInfo failed.");
+  }
+  else
+  {
+    std::lock_guard lock(s_instances_mutex);
+    s_instances_in_use.erase(info.guidInstance);
+  }
+
+  DeInitForceFeedback();
+
+  m_device->Unacquire();
+  m_device->Release();
+}
+
+void Joystick::ApplyBufferedEvents(const DIDEVICEOBJECTDATA* events, DWORD count)
+{
+  BYTE* const state = reinterpret_cast<BYTE*>(&m_state_in);
+  for (const DIDEVICEOBJECTDATA& event : std::span(events, count))
+  {
+    // Offsets are those of the data format: LONG values first, then a byte per button.
+    if (event.dwOfs < DIJOFS_BUTTON(0))
+      std::memcpy(state + event.dwOfs, &event.dwData, sizeof(DWORD));
+    else if (event.dwOfs < sizeof(m_state_in))
+      state[event.dwOfs] = static_cast<BYTE>(event.dwData);
+  }
+}
+
 Core::DeviceRemoval Joystick::UpdateInput()
 {
-  HRESULT hr = 0;
-
-  // just always poll,
-  // MSDN says if this isn't needed it doesn't do anything
+  // Harmless for devices that don't need polling.
   m_device->Poll();
 
+  HRESULT result;
   if (m_buffered)
   {
-    DIDEVICEOBJECTDATA evtbuf[DATA_BUFFER_SIZE];
-    DWORD numevents = DATA_BUFFER_SIZE;
-    hr = m_device->GetDeviceData(sizeof(*evtbuf), evtbuf, &numevents, 0);
-
-    if (SUCCEEDED(hr))
+    DIDEVICEOBJECTDATA events[EVENT_BUFFER_SIZE];
+    DWORD count = EVENT_BUFFER_SIZE;
+    result = m_device->GetDeviceData(sizeof(*events), events, &count, 0);
+    if (SUCCEEDED(result))
     {
-      for (LPDIDEVICEOBJECTDATA evt = evtbuf; evt != (evtbuf + numevents); ++evt)
-      {
-        // all the buttons are at the end of the data format
-        // they are bytes rather than longs
-        if (evt->dwOfs < DIJOFS_BUTTON(0))
-          *(DWORD*)(((BYTE*)&m_state_in) + evt->dwOfs) = evt->dwData;
-        else
-          ((BYTE*)&m_state_in)[evt->dwOfs] = (BYTE)evt->dwData;
-      }
-
-      // seems like this needs to be done maybe...
-      if (DI_BUFFEROVERFLOW == hr)
-        hr = m_device->GetDeviceState(sizeof(m_state_in), &m_state_in);
+      ApplyBufferedEvents(events, count);
+      // Events were lost: read the whole state instead.
+      if (result == DI_BUFFEROVERFLOW)
+        result = m_device->GetDeviceState(sizeof(m_state_in), &m_state_in);
     }
   }
   else
   {
-    hr = m_device->GetDeviceState(sizeof(m_state_in), &m_state_in);
+    result = m_device->GetDeviceState(sizeof(m_state_in), &m_state_in);
   }
 
-  // try reacquire if input lost
-  if (DIERR_INPUTLOST == hr || DIERR_NOTACQUIRED == hr)
+  if (result == DIERR_INPUTLOST || result == DIERR_NOTACQUIRED)
     m_device->Acquire();
 
   return Core::DeviceRemoval::Keep;
-}
-
-// get name
-
-std::string Joystick::Button::GetName() const
-{
-  return fmt::format("Button {}", m_index);
-}
-
-std::string Joystick::Axis::GetName() const
-{
-  const char sign = m_range < 0 ? '-' : '+';
-  if (m_index < 6)  // axis
-    return fmt::format("Axis {:c}{}{:c}", 'X' + m_index % 3, m_index > 2 ? "r" : "", sign);
-  else  // slider
-    return fmt::format("Slider {}{:c}", m_index - 6, sign);
-}
-
-std::string Joystick::Hat::GetName() const
-{
-  return fmt::format("Hat {} {:c}", m_index, "NESW"[m_direction]);
-}
-
-// get / set state
-
-ControlState Joystick::Axis::GetState() const
-{
-  return ControlState(m_axis - m_base) / m_range;
-}
-
-ControlState Joystick::Button::GetState() const
-{
-  return ControlState(m_button > 0);
-}
-
-ControlState Joystick::Hat::GetState() const
-{
-  // "Some drivers report the centered position of the POV indicator as 65,535.
-  // Determine whether the indicator is centered as follows" -MSDN
-  const bool is_centered = (0xffff == LOWORD(m_hat));
-
-  if (is_centered)
-    return 0;
-
-  return (std::abs(int(m_hat / 4500 - m_direction * 2 + 8) % 8 - 4) > 2);
 }
 }  // namespace ciface::DInput

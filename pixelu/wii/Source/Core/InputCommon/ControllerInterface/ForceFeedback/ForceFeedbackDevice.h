@@ -1,10 +1,7 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <atomic>
-#include <string>
 #include <thread>
 
 #include <windows.h>
@@ -17,64 +14,29 @@
 
 namespace ciface::ForceFeedback
 {
+// A device with DirectInput force feedback: one output per supported effect type (constant,
+// ramp and the periodic waveforms), each played at the requested strength. Effects are
+// updated on a thread of their own, as DirectInput calls can be slow.
 class ForceFeedbackDevice : public Core::Device
 {
 public:
+  // Creates the effects the device supports and adds them as outputs. Returns false when
+  // the device has no force feedback axes.
   bool InitForceFeedback(const LPDIRECTINPUTDEVICE8, int axis_count);
+  // Stops the effect thread, which releases the effects. Must come before the DirectInput
+  // device is released.
   void DeInitForceFeedback();
 
 private:
-  void ThreadFunc();
+  class Effect;
+  template <typename Params>
+  class TypedEffect;
 
-  class Force : public Output
-  {
-  public:
-    Force(ForceFeedbackDevice* parent, const char* name, LPDIRECTINPUTEFFECT effect);
+  void EffectThread();
 
-    void UpdateOutput();
-    void Release();
-
-    void SetState(ControlState state) override;
-    std::string GetName() const override;
-
-  protected:
-    const LPDIRECTINPUTEFFECT m_effect;
-
-  private:
-    virtual void UpdateEffect(int magnitude) = 0;
-
-    ForceFeedbackDevice& m_parent;
-    const char* const m_name;
-    std::atomic<int> m_desired_magnitude;
-  };
-
-  template <typename P>
-  class TypedForce : public Force
-  {
-  public:
-    TypedForce(ForceFeedbackDevice* parent, const char* name, LPDIRECTINPUTEFFECT effect,
-               const P& params);
-
-  private:
-    void UpdateEffect(int magnitude) override;
-
-    // Returns true if parameters changed.
-    bool UpdateParameters(int magnitude);
-
-    void PlayEffect();
-    void StopEffect();
-
-    P m_params = {};
-  };
-
-  void SignalUpdateThread();
-
-  typedef TypedForce<DICONSTANTFORCE> ForceConstant;
-  typedef TypedForce<DIRAMPFORCE> ForceRamp;
-  typedef TypedForce<DIPERIODIC> ForcePeriodic;
-
-  std::thread m_update_thread;
-  Common::Event m_update_event;
-  Common::Flag m_run_thread;
+  std::thread m_effect_thread;
+  // Set when an output's strength changes (or to stop the thread).
+  Common::Event m_effects_changed;
+  Common::Flag m_thread_running;
 };
 }  // namespace ciface::ForceFeedback

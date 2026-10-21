@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/DInput/DInput.h"
 
@@ -16,91 +15,94 @@
 
 namespace ciface::DInput
 {
-static IDirectInput8* s_idi8 = nullptr;
+namespace
+{
+// Created by the first PopulateDevices(), released by DeInit().
+IDirectInput8* s_dinput = nullptr;
+
+bool IsDInputDevice(const Core::Device* device)
+{
+  return device->GetSource() == DINPUT_SOURCE_NAME;
+}
+}  // namespace
 
 BOOL CALLBACK DIEnumDeviceObjectsCallback(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
 {
-  ((std::list<DIDEVICEOBJECTINSTANCE>*)pvRef)->push_back(*lpddoi);
+  static_cast<std::list<DIDEVICEOBJECTINSTANCE>*>(pvRef)->push_back(*lpddoi);
   return DIENUM_CONTINUE;
 }
 
 BOOL CALLBACK DIEnumDevicesCallback(LPCDIDEVICEINSTANCE lpddi, LPVOID pvRef)
 {
-  ((std::list<DIDEVICEINSTANCE>*)pvRef)->push_back(*lpddi);
+  static_cast<std::list<DIDEVICEINSTANCE>*>(pvRef)->push_back(*lpddi);
   return DIENUM_CONTINUE;
 }
 
 std::string GetDeviceName(const LPDIRECTINPUTDEVICE8 device)
 {
-  DIPROPSTRING str = {};
-  str.diph.dwSize = sizeof(str);
-  str.diph.dwHeaderSize = sizeof(str.diph);
-  str.diph.dwHow = DIPH_DEVICE;
+  DIPROPSTRING product{};
+  product.diph.dwSize = sizeof(product);
+  product.diph.dwHeaderSize = sizeof(product.diph);
+  product.diph.dwHow = DIPH_DEVICE;
 
-  std::string result;
-  HRESULT hr = device->GetProperty(DIPROP_PRODUCTNAME, &str.diph);
-  if (SUCCEEDED(hr))
-  {
-    result = StripWhitespace(WStringToUTF8(str.wsz));
-  }
-  else
+  const HRESULT result = device->GetProperty(DIPROP_PRODUCTNAME, &product.diph);
+  if (FAILED(result))
   {
     ERROR_LOG_FMT(CONTROLLERINTERFACE, "GetProperty(DIPROP_PRODUCTNAME) failed: {}",
-                  Common::HRWrap(hr));
+                  Common::HRWrap(result));
+    return {};
   }
-
-  return result;
+  return std::string(StripWhitespace(WStringToUTF8(product.wsz)));
 }
 
-// Assumes hwnd had not changed from the previous call
 void PopulateDevices(HWND hwnd)
 {
-  if (!s_idi8)
+  if (s_dinput == nullptr)
   {
-    HRESULT hr = DirectInput8Create(GetModuleHandle(nullptr), DIRECTINPUT_VERSION,
-                                    IID_IDirectInput8, (LPVOID*)&s_idi8, nullptr);
-    if (FAILED(hr))
+    const HRESULT result =
+        DirectInput8Create(GetModuleHandle(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8,
+                           reinterpret_cast<LPVOID*>(&s_dinput), nullptr);
+    if (FAILED(result))
     {
-      ERROR_LOG_FMT(CONTROLLERINTERFACE, "DirectInput8Create failed: {}", Common::HRWrap(hr));
+      ERROR_LOG_FMT(CONTROLLERINTERFACE, "DirectInput8Create failed: {}", Common::HRWrap(result));
       return;
     }
   }
 
-  // Remove old (invalid) devices. No need to ever remove the KeyboardMouse device.
-  // Note that if we have 2+ DInput controllers, not fully repopulating devices
-  // will mean that a device with index "2" could persist while there is no device with index "0".
-  // This is slightly inconsistent as when we refresh all devices, they will instead reset, and
-  // that happens a lot (for uncontrolled reasons, like starting/stopping the emulation).
+  // Joysticks that can no longer be acquired are gone. The others stay, so a joystick may
+  // keep a higher id than a full repopulation would give it. The keyboard and mouse always
+  // stay.
   g_controller_interface.RemoveDevice(
-      [](const auto* dev) { return dev->GetSource() == DINPUT_SOURCE_NAME && !dev->IsValid(); });
+      [](const Core::Device* device) { return IsDInputDevice(device) && !device->IsValid(); });
 
-  InitKeyboardMouse(s_idi8, hwnd);
-  InitJoystick(s_idi8, hwnd);
+  InitKeyboardMouse(s_dinput, hwnd);
+  InitJoystick(s_dinput, hwnd);
 }
 
 void ChangeWindow(HWND hwnd)
 {
-  if (s_idi8)  // Has init? Ignore if called before the first PopulateDevices()
-  {
-    // The KeyboardMouse device is marked as virtual device, so we avoid removing it.
-    // We need to force all the DInput joysticks to be destroyed now, or recreation would fail.
-    g_controller_interface.RemoveDevice(
-        [](const auto* dev) {
-          return dev->GetSource() == DINPUT_SOURCE_NAME && !dev->IsVirtualDevice();
-        },
-        true);
+  // Nothing to do before the first PopulateDevices().
+  if (s_dinput == nullptr)
+    return;
 
-    SetKeyboardMouseWindow(hwnd);
-    InitJoystick(s_idi8, hwnd);
-  }
+  // The joysticks are bound to the old window and must be gone right away to be created again;
+  // the keyboard and mouse (a virtual device) just follow the new window.
+  g_controller_interface.RemoveDevice(
+      [](const Core::Device* device) {
+        return IsDInputDevice(device) && !device->IsVirtualDevice();
+      },
+      true);
+
+  SetKeyboardMouseWindow(hwnd);
+  InitJoystick(s_dinput, hwnd);
 }
 
 void DeInit()
 {
-  if (s_idi8)
-  {
-    s_idi8->Release();
-    s_idi8 = nullptr;
-  }
+  if (s_dinput == nullptr)
+    return;
+
+  s_dinput->Release();
+  s_dinput = nullptr;
 }
 }  // namespace ciface::DInput

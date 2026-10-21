@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,92 +11,23 @@
 
 namespace ciface::DInput
 {
+// Adds the keyboard and mouse device unless it exists already. `hwnd` is the window the
+// cursor position is measured in.
 void InitKeyboardMouse(IDirectInput8* const idi8, HWND hwnd);
-
-using RelativeMouseState = RelativeInputState<Common::TVec3<LONG>>;
+// Changes the window the cursor position is measured in.
 void SetKeyboardMouseWindow(HWND hwnd);
 
+using RelativeMouseState = RelativeInputState<Common::TVec3<LONG>>;
+
+// The system keyboard and mouse as a single device, so that combinations such as shift+click
+// can be mapped. Both are DirectInput "system" devices, present even with nothing plugged in.
 class KeyboardMouse : public Core::Device
 {
-private:
-  struct State
-  {
-    BYTE keyboard[256]{};
-
-    // Old smoothed relative mouse movement.
-    DIMOUSESTATE2 mouse{};
-
-    // Normalized mouse cursor position.
-    Common::TVec2<ControlState> cursor;
-
-    // Raw relative mouse movement.
-    RelativeMouseState relative_mouse;
-  };
-
-  // Keyboard key
-  class Key : public Input
-  {
-  public:
-    Key(u8 index, const BYTE& key) : m_key(key), m_index(index) {}
-    std::string GetName() const override;
-    ControlState GetState() const override;
-
-  private:
-    const BYTE& m_key;
-    const u8 m_index;
-  };
-
-  // Mouse button
-  class Button : public Input
-  {
-  public:
-    Button(u8 index, const BYTE& button) : m_button(button), m_index(index) {}
-    std::string GetName() const override;
-    ControlState GetState() const override;
-
-  private:
-    const BYTE& m_button;
-    const u8 m_index;
-  };
-
-  // Mouse movement offset axis. Includes mouse wheel
-  class Axis : public Input
-  {
-  public:
-    Axis(u8 index, const LONG& axis, LONG range) : m_axis(axis), m_range(range), m_index(index) {}
-    std::string GetName() const override;
-    bool IsDetectable() const override { return false; }
-    ControlState GetState() const override;
-
-  private:
-    const LONG& m_axis;
-    const LONG m_range;
-    const u8 m_index;
-  };
-
-  // Mouse from window center
-  class Cursor : public Input
-  {
-  public:
-    Cursor(u8 index, const ControlState& axis, const bool positive)
-        : m_axis(axis), m_index(index), m_positive(positive)
-    {
-    }
-    std::string GetName() const override;
-    bool IsDetectable() const override { return false; }
-    ControlState GetState() const override;
-
-  private:
-    const ControlState& m_axis;
-    const u8 m_index;
-    const bool m_positive;
-  };
-
 public:
-  Core::DeviceRemoval UpdateInput() override;
-
   KeyboardMouse(const LPDIRECTINPUTDEVICE8 kb_device, const LPDIRECTINPUTDEVICE8 mo_device);
   ~KeyboardMouse() override;
+
+  Core::DeviceRemoval UpdateInput() override;
 
   std::string GetName() const override;
   std::string GetSource() const override;
@@ -105,11 +35,27 @@ public:
   bool IsVirtualDevice() const override;
 
 private:
-  void UpdateCursorInput();
+  // The layout matters: mouse axes past the third read on into the following bytes (see the
+  // constructor), as they always have.
+  struct State
+  {
+    BYTE keyboard[256]{};
+    // Mouse buttons and movement; the movement is smoothed over updates.
+    DIMOUSESTATE2 mouse{};
+    // Cursor position in the window, -1 to 1 (scaled by the window input scale).
+    Common::TVec2<ControlState> cursor;
+    // Unsmoothed movement since the previous update, per input channel.
+    RelativeMouseState relative_mouse;
+  };
+
+  void ReadCursor();
+  void ReadMouse();
+  void ReadKeyboard();
 
   const LPDIRECTINPUTDEVICE8 m_kb_device;
   const LPDIRECTINPUTDEVICE8 m_mo_device;
 
+  // GetTickCount() at the previous update.
   DWORD m_last_update;
   State m_state_in;
 };

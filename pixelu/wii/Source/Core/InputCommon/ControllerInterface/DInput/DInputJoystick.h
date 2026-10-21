@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,71 +7,32 @@
 
 namespace ciface::DInput
 {
+// Adds the attached game controllers that are neither XInput devices nor in use already.
 void InitJoystick(IDirectInput8* const idi8, HWND hwnd);
 
+// A DirectInput game controller, read through the standard DIJOYSTATE format: up to 32
+// buttons, 4 hats, 6 axes and 2 sliders.
 class Joystick : public ForceFeedback::ForceFeedbackDevice
 {
-private:
-  class Button : public Input
-  {
-  public:
-    Button(u8 index, const BYTE& button) : m_button(button), m_index(index) {}
-    std::string GetName() const override;
-    ControlState GetState() const override;
-
-  private:
-    const BYTE& m_button;
-    const u8 m_index;
-  };
-
-  class Axis : public Input
-  {
-  public:
-    Axis(u8 index, const LONG& axis, LONG base, LONG range)
-        : m_axis(axis), m_base(base), m_range(range), m_index(index)
-    {
-    }
-    std::string GetName() const override;
-    ControlState GetState() const override;
-
-  private:
-    const LONG& m_axis;
-    const LONG m_base, m_range;
-    const u8 m_index;
-  };
-
-  class Hat : public Input
-  {
-  public:
-    Hat(u8 index, const DWORD& hat, u8 direction)
-        : m_hat(hat), m_direction(direction), m_index(index)
-    {
-    }
-    std::string GetName() const override;
-    ControlState GetState() const override;
-
-  private:
-    const DWORD& m_hat;
-    const u8 m_index, m_direction;
-  };
-
 public:
-  Core::DeviceRemoval UpdateInput() override;
-
-  Joystick(const LPDIRECTINPUTDEVICE8 device);
+  explicit Joystick(const LPDIRECTINPUTDEVICE8 device);
   ~Joystick() override;
+
+  Core::DeviceRemoval UpdateInput() override;
 
   std::string GetName() const override;
   std::string GetSource() const override;
   int GetSortPriority() const override { return -3; }
 
+  // A joystick that can no longer be acquired has been unplugged.
   bool IsValid() const final;
 
 private:
+  void ApplyBufferedEvents(const DIDEVICEOBJECTDATA* events, DWORD count);
+
   const LPDIRECTINPUTDEVICE8 m_device;
-
   DIJOYSTATE m_state_in{};
-
+  // Whether changes are read as buffered events rather than whole states.
   bool m_buffered;
 };
 }  // namespace ciface::DInput

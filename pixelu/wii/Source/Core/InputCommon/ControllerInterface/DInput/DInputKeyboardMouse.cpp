@@ -1,9 +1,13 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/DInput/DInputKeyboardMouse.h"
 
 #include <algorithm>
+#include <atomic>
+#include <iterator>
+#include <string>
+
+#include <fmt/format.h>
 
 #include "Common/Logging/Log.h"
 
@@ -12,261 +16,308 @@
 
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/DInput/DInput.h"
-
-// (lower would be more sensitive) user can lower sensitivity by setting range
-// seems decent here ( at 8 ), I don't think anyone would need more sensitive than this
-// and user can lower it much farther than they would want to with the range
-#define MOUSE_AXIS_SENSITIVITY 8
-
-// if input hasn't been received for this many ms, mouse input will be skipped
-// otherwise it is just some crazy value
-#define DROP_INPUT_TIME 250
+#include "InputCommon/ControllerInterface/DInput/NamedKeys.h"
 
 namespace ciface::DInput
 {
+namespace
+{
+// Mouse movement (in mickeys per update, smoothed) that counts as a full axis; the wheel uses
+// one notch. Lower would be more sensitive; users can scale it down further with the range.
+constexpr LONG MOUSE_FULL_MOVEMENT = 8;
+constexpr LONG WHEEL_FULL_MOVEMENT = 1;
+
+// After this long (ms) without an update, the mouse state is reset and one reading skipped,
+// as it would otherwise hold the whole pile-up of movement.
+constexpr DWORD STALE_MOUSE_TIME = 250;
+
+// There is only ever one keyboard and mouse device. Accessed from several threads.
+std::atomic<bool> s_keyboard_mouse_exists = false;
+std::atomic<HWND> s_window = nullptr;
+
+// A key or a mouse button: pressed when its state byte is nonzero.
+class StateByte final : public Core::Device::Input
+{
+public:
+  StateByte(const BYTE* state, std::string name) : m_state(state), m_name(std::move(name)) {}
+
+  std::string GetName() const override { return m_name; }
+  ControlState GetState() const override { return *m_state != 0; }
+
+private:
+  const BYTE* const m_state;
+  const std::string m_name;
+};
+
+// One direction of (smoothed) mouse movement along an axis, the wheel being the third.
+class MouseAxis final : public Core::Device::Input
+{
+public:
+  MouseAxis(u8 index, const LONG* movement, LONG full_movement)
+      : m_movement(movement), m_full_movement(full_movement), m_index(index)
+  {
+  }
+
+  std::string GetName() const override
+  {
+    return fmt::format("Axis {}{}", char('X' + m_index), m_full_movement < 0 ? '-' : '+');
+  }
+  bool IsDetectable() const override { return false; }
+  ControlState GetState() const override { return ControlState(*m_movement) / m_full_movement; }
+
+private:
+  const LONG* const m_movement;
+  const LONG m_full_movement;
+  const u8 m_index;
+};
+
+// One direction of the cursor position, measured from the window centre.
+class CursorAxis final : public Core::Device::Input
+{
+public:
+  CursorAxis(u8 index, const ControlState* position, bool positive)
+      : m_position(position), m_index(index), m_positive(positive)
+  {
+  }
+
+  std::string GetName() const override
+  {
+    return fmt::format("Cursor {}{}", char('X' + m_index), m_positive ? '+' : '-');
+  }
+  bool IsDetectable() const override { return false; }
+  ControlState GetState() const override { return *m_position / (m_positive ? 1.0 : -1.0); }
+
+private:
+  const ControlState* const m_position;
+  const u8 m_index;
+  const bool m_positive;
+};
+
+// One direction of raw mouse movement since the previous update.
 class RelativeMouseAxis final : public Core::Device::RelativeInput
 {
 public:
+  RelativeMouseAxis(u8 index, bool positive, const RelativeMouseState* state)
+      : m_state(state), m_index(index), m_sign(positive ? 1 : -1)
+  {
+  }
+
   std::string GetName() const override
   {
-    return fmt::format("RelativeMouse {}{}", char('X' + m_index), (m_scale > 0) ? '+' : '-');
+    return fmt::format("RelativeMouse {}{}", char('X' + m_index), m_sign > 0 ? '+' : '-');
   }
-
-  RelativeMouseAxis(u8 index, bool positive, const RelativeMouseState* state)
-      : m_state(*state), m_index(index), m_scale(positive * 2 - 1)
-  {
-  }
-
   ControlState GetState() const override
   {
-    return ControlState(m_state.GetValue().data[m_index] * m_scale);
+    return ControlState(m_state->GetValue().data[m_index] * m_sign);
   }
 
 private:
-  const RelativeMouseState& m_state;
+  const RelativeMouseState* const m_state;
   const u8 m_index;
-  const s8 m_scale;
+  const s8 m_sign;
 };
 
-static const struct
+bool IsLost(HRESULT result)
 {
-  const BYTE code;
-  const char* const name;
-} named_keys[] = {
-#include "InputCommon/ControllerInterface/DInput/NamedKeys.h"  // NOLINT
-};
-
-// Prevent duplicate keyboard/mouse devices. Modified by more threads.
-static bool s_keyboard_mouse_exists;
-static HWND s_hwnd;
+  return result == DIERR_INPUTLOST || result == DIERR_NOTACQUIRED;
+}
+}  // namespace
 
 void InitKeyboardMouse(IDirectInput8* const idi8, HWND hwnd)
 {
   if (s_keyboard_mouse_exists)
     return;
 
-  s_hwnd = hwnd;
+  s_window = hwnd;
 
-  // Mouse and keyboard are a combined device, to allow shift+click and stuff
-  // if that's dumb, I will make a VirtualDevice class that just uses ranges of inputs/outputs from
-  // other devices
-  // so there can be a separated Keyboard and mouse, as well as combined KeyboardMouse
-
-  LPDIRECTINPUTDEVICE8 kb_device = nullptr;
-  LPDIRECTINPUTDEVICE8 mo_device = nullptr;
-
-  // These are "virtual" system devices, so they are always there even if we have no physical
-  // mouse and keyboard plugged into the computer
-  if (SUCCEEDED(idi8->CreateDevice(GUID_SysKeyboard, &kb_device, nullptr)) &&
-      SUCCEEDED(kb_device->SetDataFormat(&c_dfDIKeyboard)) &&
-      SUCCEEDED(kb_device->SetCooperativeLevel(nullptr, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)) &&
-      SUCCEEDED(idi8->CreateDevice(GUID_SysMouse, &mo_device, nullptr)) &&
-      SUCCEEDED(mo_device->SetDataFormat(&c_dfDIMouse2)) &&
-      SUCCEEDED(mo_device->SetCooperativeLevel(nullptr, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)))
+  LPDIRECTINPUTDEVICE8 keyboard = nullptr;
+  LPDIRECTINPUTDEVICE8 mouse = nullptr;
+  constexpr DWORD shared_access = DISCL_BACKGROUND | DISCL_NONEXCLUSIVE;
+  const bool created = SUCCEEDED(idi8->CreateDevice(GUID_SysKeyboard, &keyboard, nullptr)) &&
+                       SUCCEEDED(keyboard->SetDataFormat(&c_dfDIKeyboard)) &&
+                       SUCCEEDED(keyboard->SetCooperativeLevel(nullptr, shared_access)) &&
+                       SUCCEEDED(idi8->CreateDevice(GUID_SysMouse, &mouse, nullptr)) &&
+                       SUCCEEDED(mouse->SetDataFormat(&c_dfDIMouse2)) &&
+                       SUCCEEDED(mouse->SetCooperativeLevel(nullptr, shared_access));
+  if (created)
   {
-    g_controller_interface.AddDevice(std::make_shared<KeyboardMouse>(kb_device, mo_device));
+    g_controller_interface.AddDevice(std::make_shared<KeyboardMouse>(keyboard, mouse));
     return;
   }
 
   ERROR_LOG_FMT(CONTROLLERINTERFACE, "KeyboardMouse device failed to be created");
-
-  if (kb_device)
-    kb_device->Release();
-  if (mo_device)
-    mo_device->Release();
+  if (keyboard != nullptr)
+    keyboard->Release();
+  if (mouse != nullptr)
+    mouse->Release();
 }
 
 void SetKeyboardMouseWindow(HWND hwnd)
 {
-  s_hwnd = hwnd;
+  s_window = hwnd;
+}
+
+KeyboardMouse::KeyboardMouse(const LPDIRECTINPUTDEVICE8 kb_device,
+                             const LPDIRECTINPUTDEVICE8 mo_device)
+    : m_kb_device(kb_device), m_mo_device(mo_device), m_last_update(GetTickCount()), m_state_in{}
+{
+  s_keyboard_mouse_exists = true;
+
+  // Acquiring can fail now (e.g. without focus); it is retried on updates.
+  if (FAILED(m_kb_device->Acquire()))
+    WARN_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to acquire. We'll retry later");
+  if (FAILED(m_mo_device->Acquire()))
+    WARN_LOG_FMT(CONTROLLERINTERFACE, "Mouse device failed to acquire. We'll retry later");
+
+  for (const NamedKey& key : NAMED_KEYS)
+    AddInput(new StateByte(&m_state_in.keyboard[key.code], key.name));
+
+  // Either-side modifiers, named as on the other platforms.
+  AddCombinedInput("Alt", {"LMENU", "RMENU"});
+  AddCombinedInput("Shift", {"LSHIFT", "RSHIFT"});
+  AddCombinedInput("Ctrl", {"LCONTROL", "RCONTROL"});
+
+  DIDEVCAPS mouse_caps{};
+  mouse_caps.dwSize = sizeof(mouse_caps);
+  m_mo_device->GetCapabilities(&mouse_caps);
+
+  // All eight buttons of the data format; the reported button count is not reliable.
+  for (std::size_t i = 0; i != std::size(m_state_in.mouse.rgbButtons); ++i)
+  {
+    AddInput(new StateByte(&m_state_in.mouse.rgbButtons[i], std::string("Click ") + char('0' + i)));
+  }
+
+  // The axes follow each other in the state: X, Y, wheel. (A mouse claiming more axes gets
+  // inputs reading the bytes after them.)
+  for (DWORD i = 0; i < mouse_caps.dwAxes; ++i)
+  {
+    const LONG* const movement = &m_state_in.mouse.lX + i;
+    const LONG full = i == 2 ? WHEEL_FULL_MOVEMENT : MOUSE_FULL_MOVEMENT;
+    AddInput(new MouseAxis(u8(i), movement, -full));
+    AddInput(new MouseAxis(u8(i), movement, full));
+  }
+
+  AddInput(new CursorAxis(0, &m_state_in.cursor.x, false));
+  AddInput(new CursorAxis(0, &m_state_in.cursor.x, true));
+  AddInput(new CursorAxis(1, &m_state_in.cursor.y, false));
+  AddInput(new CursorAxis(1, &m_state_in.cursor.y, true));
+
+  for (DWORD i = 0; i != mouse_caps.dwAxes; ++i)
+  {
+    AddInput(new RelativeMouseAxis(u8(i), false, &m_state_in.relative_mouse));
+    AddInput(new RelativeMouseAxis(u8(i), true, &m_state_in.relative_mouse));
+  }
 }
 
 KeyboardMouse::~KeyboardMouse()
 {
   s_keyboard_mouse_exists = false;
 
-  // Independently of the order in which we do these, if we put a breakpoint on Unacquire() (or in
-  // any place in the call stack before this), when refreshing devices from the UI, on the second
-  // attempt, it will get stuck in an infinite (while) loop inside dinput8.dll. Given that it can't
-  // be otherwise be reproduced (not even with sleeps), we can just ignore the problem.
-
-  // kb
+  // (A debugger break in here can leave dinput8.dll spinning forever on the next device
+  // refresh; this does not happen otherwise.)
   m_kb_device->Unacquire();
   m_kb_device->Release();
-  // mouse
   m_mo_device->Unacquire();
   m_mo_device->Release();
 }
 
-KeyboardMouse::KeyboardMouse(const LPDIRECTINPUTDEVICE8 kb_device,
-                             const LPDIRECTINPUTDEVICE8 mo_device)
-    : m_kb_device(kb_device), m_mo_device(mo_device), m_last_update(GetTickCount()), m_state_in()
+Core::DeviceRemoval KeyboardMouse::UpdateInput()
 {
-  s_keyboard_mouse_exists = true;
-
-  if (FAILED(m_kb_device->Acquire()))
-    WARN_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to acquire. We'll retry later");
-  if (FAILED(m_mo_device->Acquire()))
-    WARN_LOG_FMT(CONTROLLERINTERFACE, "Mouse device failed to acquire. We'll retry later");
-
-  // KEYBOARD
-  // add keys
-  for (u8 i = 0; i < sizeof(named_keys) / sizeof(*named_keys); ++i)
-    AddInput(new Key(i, m_state_in.keyboard[named_keys[i].code]));
-
-  // Add combined left/right modifiers with consistent naming across platforms.
-  AddCombinedInput("Alt", {"LMENU", "RMENU"});
-  AddCombinedInput("Shift", {"LSHIFT", "RSHIFT"});
-  AddCombinedInput("Ctrl", {"LCONTROL", "RCONTROL"});
-
-  // MOUSE
-  DIDEVCAPS mouse_caps = {};
-  mouse_caps.dwSize = sizeof(mouse_caps);
-  m_mo_device->GetCapabilities(&mouse_caps);
-  // mouse buttons
-  // We don't use caps here due to reporting inconsistencies
-  for (u8 i = 0; i < std::size(m_state_in.mouse.rgbButtons); ++i)
-    AddInput(new Button(i, m_state_in.mouse.rgbButtons[i]));
-  // mouse axes
-  for (unsigned int i = 0; i < mouse_caps.dwAxes; ++i)
-  {
-    const LONG& ax = (&m_state_in.mouse.lX)[i];
-
-    // each axis gets a negative and a positive input instance associated with it
-    AddInput(new Axis(i, ax, (2 == i) ? -1 : -MOUSE_AXIS_SENSITIVITY));
-    AddInput(new Axis(i, ax, -(2 == i) ? 1 : MOUSE_AXIS_SENSITIVITY));
-  }
-
-  // cursor, with a hax for-loop
-  for (unsigned int i = 0; i < 4; ++i)
-    AddInput(new Cursor(!!(i & 2), (&m_state_in.cursor.x)[i / 2], !!(i & 1)));
-
-  // Raw relative mouse movement.
-  for (unsigned int i = 0; i != mouse_caps.dwAxes; ++i)
-  {
-    AddInput(new RelativeMouseAxis(i, false, &m_state_in.relative_mouse));
-    AddInput(new RelativeMouseAxis(i, true, &m_state_in.relative_mouse));
-  }
+  ReadCursor();
+  ReadMouse();
+  ReadKeyboard();
+  return Core::DeviceRemoval::Keep;
 }
 
-void KeyboardMouse::UpdateCursorInput()
+void KeyboardMouse::ReadCursor()
 {
-  // Get the size of the current window (in my case Rect.top and Rect.left was zero).
-  RECT rect;
-  GetClientRect(s_hwnd, &rect);
+  const HWND window = s_window;
 
-  // Width and height are the size of the rendering window. They could be 0
-  const auto win_width = std::max(rect.right - rect.left, 1l);
-  const auto win_height = std::max(rect.bottom - rect.top, 1l);
+  // The window can have a zero size.
+  RECT client;
+  GetClientRect(window, &client);
+  const LONG width = std::max(client.right - client.left, LONG{1});
+  const LONG height = std::max(client.bottom - client.top, LONG{1});
 
-  POINT point = {};
+  POINT position{};
   if (g_controller_interface.IsMouseCenteringRequested() &&
       (Host_RendererHasFocus() || Host_TASInputHasFocus()))
   {
-    point.x = win_width / 2;
-    point.y = win_height / 2;
+    position.x = width / 2;
+    position.y = height / 2;
 
-    POINT screen_point = point;
-    ClientToScreen(s_hwnd, &screen_point);
-    SetCursorPos(screen_point.x, screen_point.y);
+    POINT on_screen = position;
+    ClientToScreen(window, &on_screen);
+    SetCursorPos(on_screen.x, on_screen.y);
     g_controller_interface.SetMouseCenteringRequested(false);
   }
   else if (Host_TASInputHasFocus())
   {
-    // When a TAS Input window has focus and "Enable Controller Input" is checked most types of
-    // input should be read normally as if the render window had focus instead. The cursor is an
-    // exception, as otherwise using the mouse to set any control in the TAS Input window will also
-    // update the Wii IR value (or any other input controlled by the cursor).
-
+    // With a TAS input window focused, input is read as if the game window had focus, except
+    // for the cursor: clicking around the TAS window must not move the pointer in the game.
     return;
   }
   else
   {
-    GetCursorPos(&point);
-
-    // Get the cursor position relative to the upper left corner of the current window
-    // (separate or render to main)
-    ScreenToClient(s_hwnd, &point);
+    GetCursorPos(&position);
+    ScreenToClient(window, &position);
   }
 
-  const auto window_scale = g_controller_interface.GetWindowInputScale();
-
-  // Convert the cursor position to a range from -1 to 1.
-  m_state_in.cursor.x = (ControlState(point.x) / win_width * 2 - 1) * window_scale.x;
-  m_state_in.cursor.y = (ControlState(point.y) / win_height * 2 - 1) * window_scale.y;
+  const Common::Vec2 scale = g_controller_interface.GetWindowInputScale();
+  m_state_in.cursor.x = (ControlState(position.x) / width * 2 - 1) * scale.x;
+  m_state_in.cursor.y = (ControlState(position.y) / height * 2 - 1) * scale.y;
 }
 
-Core::DeviceRemoval KeyboardMouse::UpdateInput()
+void KeyboardMouse::ReadMouse()
 {
-  UpdateCursorInput();
+  DIMOUSESTATE2 reading{};
 
-  DIMOUSESTATE2 tmp_mouse;
-
-  // if mouse position hasn't been updated in a short while, skip a dev state
-  DWORD cur_time = GetTickCount();
-  if (cur_time - m_last_update > DROP_INPUT_TIME)
+  const DWORD now = GetTickCount();
+  if (now - m_last_update > STALE_MOUSE_TIME)
   {
-    // set axes to zero
     m_state_in.mouse = {};
     m_state_in.relative_mouse = {};
-
-    // skip this input state
-    m_mo_device->GetDeviceState(sizeof(tmp_mouse), &tmp_mouse);
+    m_mo_device->GetDeviceState(sizeof(reading), &reading);
   }
+  m_last_update = now;
 
-  m_last_update = cur_time;
-
-  HRESULT mo_hr = m_mo_device->GetDeviceState(sizeof(tmp_mouse), &tmp_mouse);
-  if (DIERR_INPUTLOST == mo_hr || DIERR_NOTACQUIRED == mo_hr)
+  const HRESULT result = m_mo_device->GetDeviceState(sizeof(reading), &reading);
+  if (IsLost(result))
   {
     INFO_LOG_FMT(CONTROLLERINTERFACE, "Mouse device failed to get state");
     if (FAILED(m_mo_device->Acquire()))
       INFO_LOG_FMT(CONTROLLERINTERFACE, "Mouse device failed to re-acquire, we'll retry later");
+    return;
   }
-  else if (SUCCEEDED(mo_hr))
-  {
-    m_state_in.relative_mouse.Move({tmp_mouse.lX, tmp_mouse.lY, tmp_mouse.lZ});
-    m_state_in.relative_mouse.Update();
+  if (FAILED(result))
+    return;
 
-    // need to smooth out the axes, otherwise it doesn't work for shit
-    for (unsigned int i = 0; i < 3; ++i)
-      ((&m_state_in.mouse.lX)[i] += (&tmp_mouse.lX)[i]) /= 2;
+  m_state_in.relative_mouse.Move({reading.lX, reading.lY, reading.lZ});
+  m_state_in.relative_mouse.Update();
 
-    // copy over the buttons
-    std::copy_n(tmp_mouse.rgbButtons, std::size(tmp_mouse.rgbButtons), m_state_in.mouse.rgbButtons);
-  }
+  // Movement is averaged with the previous value; it is too jumpy to use otherwise.
+  LONG* const smoothed = &m_state_in.mouse.lX;
+  const LONG* const latest = &reading.lX;
+  for (int axis = 0; axis != 3; ++axis)
+    smoothed[axis] = (smoothed[axis] + latest[axis]) / 2;
 
-  HRESULT kb_hr = m_kb_device->GetDeviceState(sizeof(m_state_in.keyboard), &m_state_in.keyboard);
-  if (kb_hr == DIERR_INPUTLOST || kb_hr == DIERR_NOTACQUIRED)
-  {
-    INFO_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to get state");
-    if (SUCCEEDED(m_kb_device->Acquire()))
+  std::ranges::copy(reading.rgbButtons, m_state_in.mouse.rgbButtons);
+}
+
+void KeyboardMouse::ReadKeyboard()
+{
+  const HRESULT result =
       m_kb_device->GetDeviceState(sizeof(m_state_in.keyboard), &m_state_in.keyboard);
-    else
-      INFO_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to re-acquire, we'll retry later");
-  }
+  if (!IsLost(result))
+    return;
 
-  return Core::DeviceRemoval::Keep;
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to get state");
+  if (FAILED(m_kb_device->Acquire()))
+  {
+    INFO_LOG_FMT(CONTROLLERINTERFACE, "Keyboard device failed to re-acquire, we'll retry later");
+    return;
+  }
+  m_kb_device->GetDeviceState(sizeof(m_state_in.keyboard), &m_state_in.keyboard);
 }
 
 std::string KeyboardMouse::GetName() const
@@ -279,7 +330,7 @@ std::string KeyboardMouse::GetSource() const
   return DINPUT_SOURCE_NAME;
 }
 
-// Give this device a higher priority to make sure it shows first
+// First in the device list.
 int KeyboardMouse::GetSortPriority() const
 {
   return DEFAULT_DEVICE_SORT_PRIORITY;
@@ -288,53 +339,5 @@ int KeyboardMouse::GetSortPriority() const
 bool KeyboardMouse::IsVirtualDevice() const
 {
   return true;
-}
-
-// names
-std::string KeyboardMouse::Key::GetName() const
-{
-  return named_keys[m_index].name;
-}
-
-std::string KeyboardMouse::Button::GetName() const
-{
-  return std::string("Click ") + char('0' + m_index);
-}
-
-std::string KeyboardMouse::Axis::GetName() const
-{
-  char tmpstr[] = "Axis ..";
-  tmpstr[5] = (char)('X' + m_index);
-  tmpstr[6] = (m_range < 0 ? '-' : '+');
-  return tmpstr;
-}
-
-std::string KeyboardMouse::Cursor::GetName() const
-{
-  char tmpstr[] = "Cursor ..";
-  tmpstr[7] = (char)('X' + m_index);
-  tmpstr[8] = (m_positive ? '+' : '-');
-  return tmpstr;
-}
-
-// get/set state
-ControlState KeyboardMouse::Key::GetState() const
-{
-  return (m_key != 0);
-}
-
-ControlState KeyboardMouse::Button::GetState() const
-{
-  return (m_button != 0);
-}
-
-ControlState KeyboardMouse::Axis::GetState() const
-{
-  return ControlState(m_axis) / m_range;
-}
-
-ControlState KeyboardMouse::Cursor::GetState() const
-{
-  return m_axis / (m_positive ? 1.0 : -1.0);
 }
 }  // namespace ciface::DInput
