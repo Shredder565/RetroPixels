@@ -1,10 +1,11 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/BranchWatchTableModel.h"
 
 #include <array>
 #include <cstddef>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include <QBrush>
@@ -14,134 +15,246 @@
 #include "Core/Debugger/BranchWatch.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 
+namespace
+{
+using Inspection = Core::BranchWatchSelectionInspection;
+using Entry = Core::BranchWatch::Selection::value_type;
+using Record = Core::BranchWatch::Collection::value_type;
+
+QVariant SymbolName(const Common::Symbol* symbol)
+{
+  if (symbol == nullptr)
+    return {};
+  return QString::fromStdString(symbol->name);
+}
+
+QVariant SymbolStart(const Common::Symbol* symbol)
+{
+  if (symbol == nullptr)
+    return {};
+  return QVariant::fromValue<u32>(symbol->address);
+}
+
+// The inspection flag that a click on the given column toggles, if that column has one.
+std::optional<Inspection> FlagForColumn(int column)
+{
+  switch (column)
+  {
+  case BranchWatchTableModelColumn::Instruction:
+    return Inspection::InvertBranchOption;
+  case BranchWatchTableModelColumn::Condition:
+    return Inspection::MakeUnconditional;
+  case BranchWatchTableModelColumn::Origin:
+    return Inspection::SetOriginNOP;
+  case BranchWatchTableModelColumn::Destination:
+    return Inspection::SetDestinBLR;
+  case BranchWatchTableModelColumn::OriginSymbol:
+    return Inspection::SetOriginSymbolBLR;
+  case BranchWatchTableModelColumn::DestinSymbol:
+    return Inspection::SetDestinSymbolBLR;
+  default:
+    return std::nullopt;
+  }
+}
+
+// Only the opcode name: the disassembler separates it from the operands with a tab.
+QString OpcodeName(u32 instruction)
+{
+  const std::string text = Common::GekkoDisassembler::Disassemble(instruction, 0);
+  const std::size_t tab = text.find('\t');
+  if (tab == std::string::npos)
+    return QString::fromStdString(text);
+  return QString::fromLatin1(text.c_str(), static_cast<qsizetype>(tab));
+}
+
+// Sort weight of the condition column: not taken < taken < unconditional.
+int ConditionRank(const Entry& entry)
+{
+  if (!entry.condition)
+    return 0;
+  return BranchIsConditional(entry.collection_ptr->first.original_inst) ? 1 : 2;
+}
+
+qulonglong RecentHitCount(const Record& record)
+{
+  return qulonglong{record.second.total_hits - record.second.hits_snapshot};
+}
+}  // namespace
+
+BranchWatchTableModelSymbolListValueType::BranchWatchTableModelSymbolListValueType(
+    const Common::Symbol* const origin_symbol, const Common::Symbol* const destin_symbol)
+    : origin_name(SymbolName(origin_symbol)), origin_addr(SymbolStart(origin_symbol)),
+      destin_name(SymbolName(destin_symbol)), destin_addr(SymbolStart(destin_symbol))
+{
+}
+
+BranchWatchTableModel::BranchWatchTableModel(Core::System& system,
+                                             Core::BranchWatch& branch_watch,
+                                             PPCSymbolDB& ppc_symbol_db, QObject* parent)
+    : QAbstractTableModel(parent), m_system(system), m_watch(branch_watch),
+      m_symbol_db(ppc_symbol_db)
+{
+}
+
+BranchWatchTableModel::~BranchWatchTableModel() = default;
+
+void BranchWatchTableModel::setFont(const QFont& font)
+{
+  m_base_font = font;
+}
+
 QVariant BranchWatchTableModel::data(const QModelIndex& index, int role) const
 {
   if (!index.isValid())
-    return QVariant();
+    return {};
 
-  switch (role)
-  {
-  case Qt::DisplayRole:
-    return DisplayRoleData(index);
-  case Qt::FontRole:
-    return FontRoleData(index);
-  case Qt::TextAlignmentRole:
-    return TextAlignmentRoleData(index);
-  case Qt::ForegroundRole:
-    return ForegroundRoleData(index);
-  case UserRole::ClickRole:
-    return ClickRoleData(index);
-  case UserRole::SortRole:
-    return SortRoleData(index);
-  }
-  return QVariant();
+  if (role == Qt::DisplayRole)
+    return Text(index);
+  if (role == Qt::FontRole)
+    return Styled(index);
+  if (role == Qt::TextAlignmentRole)
+    return Alignment(index);
+  if (role == Qt::ForegroundRole)
+    return Colour(index);
+  if (role == UserRole::ClickRole)
+    return ClickTarget(index);
+  if (role == UserRole::SortRole)
+    return SortKey(index);
+  return {};
 }
 
 QVariant BranchWatchTableModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
-  if (orientation == Qt::Vertical || role != Qt::DisplayRole)
-    return QVariant();
+  if (role != Qt::DisplayRole || orientation != Qt::Horizontal)
+    return {};
 
-  static constexpr std::array<const char*, Column::NumberOfColumns> headers = {
-      QT_TR_NOOP("Instr."),        QT_TR_NOOP("Cond."),
-      QT_TR_NOOP("Origin"),        QT_TR_NOOP("Destination"),
-      QT_TR_NOOP("Recent Hits"),   QT_TR_NOOP("Total Hits"),
-      QT_TR_NOOP("Origin Symbol"), QT_TR_NOOP("Destination Symbol")};
-  return tr(headers[section]);
+  static constexpr std::array<const char*, Column::NumberOfColumns> titles{
+      QT_TR_NOOP("Instr."),
+      QT_TR_NOOP("Cond."),
+      QT_TR_NOOP("Origin"),
+      QT_TR_NOOP("Destination"),
+      QT_TR_NOOP("Recent Hits"),
+      QT_TR_NOOP("Total Hits"),
+      QT_TR_NOOP("Origin Symbol"),
+      QT_TR_NOOP("Destination Symbol"),
+  };
+  return tr(titles[static_cast<std::size_t>(section)]);
 }
 
 int BranchWatchTableModel::rowCount(const QModelIndex& parent) const
 {
-  if (parent.isValid())
-    return 0;
-  return static_cast<int>(m_branch_watch.GetSelection().size());
+  return parent.isValid() ? 0 : static_cast<int>(m_watch.GetSelection().size());
 }
 
 int BranchWatchTableModel::columnCount(const QModelIndex& parent) const
 {
-  if (parent.isValid())
-    return 0;
-  return Column::NumberOfColumns;
+  return parent.isValid() ? 0 : int{Column::NumberOfColumns};
 }
 
 bool BranchWatchTableModel::removeRows(int row, int count, const QModelIndex& parent)
 {
-  if (parent.isValid() || row < 0)
+  if (row < 0 || parent.isValid())
     return false;
-  if (count <= 0)
+  if (count < 1)
     return true;
 
-  auto& selection = m_branch_watch.GetSelection();
-  beginRemoveRows(parent, row, row + count - 1);  // Last is inclusive in Qt!
-  selection.erase(selection.begin() + row, selection.begin() + row + count);
-  m_symbol_list.remove(row, count);
+  // Qt's range is inclusive at both ends.
+  beginRemoveRows(parent, row, row + count - 1);
+  Core::BranchWatch::Selection& selection = m_watch.GetSelection();
+  const auto first = selection.begin() + row;
+  selection.erase(first, first + count);
+  m_symbols.remove(row, count);
   endRemoveRows();
   return true;
+}
+
+// Runs a change that may reorder or drop selection rows, then rebuilds the symbol side list.
+template <typename Change>
+void BranchWatchTableModel::Reshape(Change&& change)
+{
+  emit layoutAboutToBeChanged();
+  std::forward<Change>(change)();
+  RebuildSymbols();
+  emit layoutChanged();
 }
 
 void BranchWatchTableModel::OnClearBranchWatch(const Core::CPUThreadGuard& guard)
 {
   emit layoutAboutToBeChanged();
-  m_branch_watch.Clear(guard);
-  m_symbol_list.clear();
+  m_watch.Clear(guard);
+  m_symbols.clear();
   emit layoutChanged();
 }
 
 void BranchWatchTableModel::OnCodePathWasTaken(const Core::CPUThreadGuard& guard)
 {
-  emit layoutAboutToBeChanged();
-  m_branch_watch.IsolateHasExecuted(guard);
-  PrefetchSymbols();
-  emit layoutChanged();
+  Reshape([&] { m_watch.IsolateHasExecuted(guard); });
 }
 
 void BranchWatchTableModel::OnCodePathNotTaken(const Core::CPUThreadGuard& guard)
 {
-  emit layoutAboutToBeChanged();
-  m_branch_watch.IsolateNotExecuted(guard);
-  PrefetchSymbols();
-  emit layoutChanged();
+  Reshape([&] { m_watch.IsolateNotExecuted(guard); });
 }
 
 void BranchWatchTableModel::OnBranchWasOverwritten(const Core::CPUThreadGuard& guard)
 {
-  emit layoutAboutToBeChanged();
-  m_branch_watch.IsolateWasOverwritten(guard);
-  PrefetchSymbols();
-  emit layoutChanged();
+  Reshape([&] { m_watch.IsolateWasOverwritten(guard); });
 }
 
 void BranchWatchTableModel::OnBranchNotOverwritten(const Core::CPUThreadGuard& guard)
 {
-  emit layoutAboutToBeChanged();
-  m_branch_watch.IsolateNotOverwritten(guard);
-  PrefetchSymbols();
-  emit layoutChanged();
+  Reshape([&] { m_watch.IsolateNotOverwritten(guard); });
 }
+
+void BranchWatchTableModel::Load(const Core::CPUThreadGuard& guard, std::FILE* file)
+{
+  Reshape([&] { m_watch.Load(guard, file); });
+}
+
+void BranchWatchTableModel::Save(const Core::CPUThreadGuard& guard, std::FILE* file) const
+{
+  m_watch.Save(guard, file);
+}
+
+void BranchWatchTableModel::RefreshColumns(Column first, Column last, const QList<int>& roles)
+{
+  const int bottom = rowCount() - 1;
+  emit dataChanged(createIndex(0, first), createIndex(bottom, last), roles);
+}
+
+// The four refreshers below do nothing at all (not even their side effect) on an empty table.
 
 void BranchWatchTableModel::OnWipeRecentHits()
 {
-  const int row_count = rowCount();
-  if (row_count <= 0)
+  if (rowCount() < 1)
     return;
-  static const QList<int> roles = {Qt::DisplayRole};
-  m_branch_watch.UpdateHitsSnapshot();
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::RecentHits), createIndex(last, Column::RecentHits),
-                   roles);
+  m_watch.UpdateHitsSnapshot();
+  RefreshColumns(Column::RecentHits, Column::RecentHits, {Qt::DisplayRole});
 }
 
 void BranchWatchTableModel::OnWipeInspection()
 {
-  const int row_count = rowCount();
-  if (row_count <= 0)
+  if (rowCount() < 1)
     return;
-  static const QList<int> roles = {Qt::FontRole, Qt::ForegroundRole};
-  m_branch_watch.ClearSelectionInspection();
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::Origin), createIndex(last, Column::Destination), roles);
-  emit dataChanged(createIndex(0, Column::OriginSymbol), createIndex(last, Column::DestinSymbol),
-                   roles);
+  m_watch.ClearSelectionInspection();
+  const QList<int> roles{Qt::FontRole, Qt::ForegroundRole};
+  RefreshColumns(Column::Origin, Column::Destination, roles);
+  RefreshColumns(Column::OriginSymbol, Column::DestinSymbol, roles);
+}
+
+void BranchWatchTableModel::UpdateSymbols()
+{
+  if (rowCount() < 1)
+    return;
+  RebuildSymbols();
+  RefreshColumns(Column::OriginSymbol, Column::DestinSymbol, {Qt::DisplayRole});
+}
+
+void BranchWatchTableModel::UpdateHits()
+{
+  if (rowCount() < 1)
+    return;
+  RefreshColumns(Column::RecentHits, Column::TotalHits, {Qt::DisplayRole});
 }
 
 void BranchWatchTableModel::OnDebugFontChanged(const QFont& font)
@@ -154,344 +267,235 @@ void BranchWatchTableModel::OnPPCSymbolsChanged()
   UpdateSymbols();
 }
 
-void BranchWatchTableModel::Save(const Core::CPUThreadGuard& guard, std::FILE* file) const
+void BranchWatchTableModel::Mark(int row, Column column, Inspection flag)
 {
-  m_branch_watch.Save(guard, file);
-}
-
-void BranchWatchTableModel::Load(const Core::CPUThreadGuard& guard, std::FILE* file)
-{
-  emit layoutAboutToBeChanged();
-  m_branch_watch.Load(guard, file);
-  PrefetchSymbols();
-  emit layoutChanged();
-}
-
-void BranchWatchTableModel::UpdateSymbols()
-{
-  const int row_count = rowCount();
-  if (row_count <= 0)
-    return;
-  static const QList<int> roles = {Qt::DisplayRole};
-  PrefetchSymbols();
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::OriginSymbol), createIndex(last, Column::DestinSymbol),
-                   roles);
-}
-
-void BranchWatchTableModel::UpdateHits()
-{
-  const int row_count = rowCount();
-  if (row_count <= 0)
-    return;
-  static const QList<int> roles = {Qt::DisplayRole};
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::RecentHits), createIndex(last, Column::TotalHits), roles);
+  m_watch.SetSelectedInspected(static_cast<std::size_t>(row), flag);
+  const QModelIndex cell = createIndex(row, column);
+  emit dataChanged(cell, cell, {Qt::FontRole, Qt::ForegroundRole});
 }
 
 void BranchWatchTableModel::SetInspected(const QModelIndex& index)
 {
   const int row = index.row();
-  switch (index.column())
+  const Column column = static_cast<Column>(index.column());
+  switch (column)
   {
   case Column::Instruction:
-    SetInspected(index, Core::BranchWatchSelectionInspection::InvertBranchOption);
-    return;
   case Column::Condition:
-    SetInspected(index, Core::BranchWatchSelectionInspection::MakeUnconditional);
-    return;
+    // These two only ever affect the clicked cell.
+    Mark(row, column, *FlagForColumn(column));
+    break;
   case Column::Origin:
-    SetOriginInspected(m_branch_watch.GetSelection()[row].collection_ptr->first.origin_addr);
-    return;
+    MarkOrigins(GetBranchWatchSelection(index).collection_ptr->first.origin_addr);
+    break;
   case Column::Destination:
-    SetDestinInspected(m_branch_watch.GetSelection()[row].collection_ptr->first.destin_addr, false);
-    return;
+    MarkDestinations(GetBranchWatchSelection(index).collection_ptr->first.destin_addr, false);
+    break;
   case Column::OriginSymbol:
-    SetSymbolInspected(m_symbol_list[row].origin_addr.value<u32>(), false);
-    return;
+    MarkSymbols(m_symbols[row].origin_addr.value<u32>(), false);
+    break;
   case Column::DestinSymbol:
-    SetSymbolInspected(m_symbol_list[row].destin_addr.value<u32>(), false);
-    return;
+    MarkSymbols(m_symbols[row].destin_addr.value<u32>(), false);
+    break;
+  default:
+    break;
   }
 }
 
-void BranchWatchTableModel::SetInspected(const QModelIndex& index,
-                                         Core::BranchWatchSelectionInspection inspection)
+// NOP-ing an origin affects every row that branches from that address.
+void BranchWatchTableModel::MarkOrigins(u32 address)
 {
-  static const QList<int> roles = {Qt::FontRole, Qt::ForegroundRole};
-  m_branch_watch.SetSelectedInspected(index.row(), inspection);
-  emit dataChanged(index, index, roles);
-}
-
-void BranchWatchTableModel::SetOriginInspected(u32 origin_addr)
-{
-  const Core::BranchWatch::Selection& selection = m_branch_watch.GetSelection();
-  for (std::size_t i = 0; i < selection.size(); ++i)
+  const Core::BranchWatch::Selection& selection = m_watch.GetSelection();
+  for (std::size_t row = 0; row < selection.size(); ++row)
   {
-    if (selection[i].collection_ptr->first.origin_addr != origin_addr)
-      continue;
-    SetInspected(createIndex(static_cast<int>(i), Column::Origin),
-                 Core::BranchWatchSelectionInspection::SetOriginNOP);
+    if (selection[row].collection_ptr->first.origin_addr == address)
+      Mark(static_cast<int>(row), Column::Origin, Inspection::SetOriginNOP);
   }
 }
 
-void BranchWatchTableModel::SetDestinInspected(u32 destin_addr, bool nested)
+// A BLR written at a destination also lands at the start of any symbol beginning there, and the
+// other way round; the flag stops the two from bouncing back and forth.
+void BranchWatchTableModel::MarkDestinations(u32 address, bool from_symbol)
 {
-  const Core::BranchWatch::Selection& selection = m_branch_watch.GetSelection();
-  for (std::size_t i = 0; i < selection.size(); ++i)
+  const Core::BranchWatch::Selection& selection = m_watch.GetSelection();
+  for (std::size_t row = 0; row < selection.size(); ++row)
   {
-    if (selection[i].collection_ptr->first.destin_addr != destin_addr)
-      continue;
-    SetInspected(createIndex(static_cast<int>(i), Column::Destination),
-                 Core::BranchWatchSelectionInspection::SetDestinBLR);
+    if (selection[row].collection_ptr->first.destin_addr == address)
+      Mark(static_cast<int>(row), Column::Destination, Inspection::SetDestinBLR);
   }
-
-  if (nested)
-    return;
-  SetSymbolInspected(destin_addr, true);
+  if (!from_symbol)
+    MarkSymbols(address, true);
 }
 
-void BranchWatchTableModel::SetSymbolInspected(u32 symbol_addr, bool nested)
+void BranchWatchTableModel::MarkSymbols(u32 address, bool from_destination)
 {
-  for (qsizetype i = 0; i < m_symbol_list.size(); ++i)
+  const auto starts_at = [address](const QVariant& start) {
+    return start.isValid() && start.value<u32>() == address;
+  };
+  for (qsizetype row = 0; row < m_symbols.size(); ++row)
   {
-    const SymbolListValueType& value = m_symbol_list[i];
-    if (value.origin_addr.isValid() && value.origin_addr.value<u32>() == symbol_addr)
-    {
-      SetInspected(createIndex(static_cast<int>(i), Column::OriginSymbol),
-                   Core::BranchWatchSelectionInspection::SetOriginSymbolBLR);
-    }
-    if (value.destin_addr.isValid() && value.destin_addr.value<u32>() == symbol_addr)
-    {
-      SetInspected(createIndex(static_cast<int>(i), Column::DestinSymbol),
-                   Core::BranchWatchSelectionInspection::SetDestinSymbolBLR);
-    }
+    const SymbolListValueType& symbols = m_symbols[row];
+    if (starts_at(symbols.origin_addr))
+      Mark(static_cast<int>(row), Column::OriginSymbol, Inspection::SetOriginSymbolBLR);
+    if (starts_at(symbols.destin_addr))
+      Mark(static_cast<int>(row), Column::DestinSymbol, Inspection::SetDestinSymbolBLR);
   }
-
-  if (nested)
-    return;
-  SetDestinInspected(symbol_addr, true);
+  if (!from_destination)
+    MarkDestinations(address, true);
 }
 
 const Core::BranchWatchSelectionValueType&
 BranchWatchTableModel::GetBranchWatchSelection(const QModelIndex& index) const
 {
   ASSERT(index.isValid());
-  return m_branch_watch.GetSelection()[index.row()];
+  return m_watch.GetSelection()[static_cast<std::size_t>(index.row())];
 }
 
-void BranchWatchTableModel::PrefetchSymbols()
+void BranchWatchTableModel::RebuildSymbols()
 {
-  if (m_branch_watch.GetRecordingPhase() != Core::BranchWatch::Phase::Reduction)
+  // Before the reduction phase the selection is not meaningful, so the list is left alone.
+  if (m_watch.GetRecordingPhase() != Core::BranchWatch::Phase::Reduction)
     return;
 
-  const Core::BranchWatch::Selection& selection = m_branch_watch.GetSelection();
-  m_symbol_list.clear();
-  m_symbol_list.reserve(selection.size());
-  for (const Core::BranchWatch::Selection::value_type& value : selection)
+  const Core::BranchWatch::Selection& selection = m_watch.GetSelection();
+  m_symbols.clear();
+  m_symbols.reserve(static_cast<qsizetype>(selection.size()));
+  for (const Entry& entry : selection)
   {
-    const Core::BranchWatch::Collection::value_type* const kv = value.collection_ptr;
-    m_symbol_list.emplace_back(m_ppc_symbol_db.GetSymbolFromAddr(kv->first.origin_addr),
-                               m_ppc_symbol_db.GetSymbolFromAddr(kv->first.destin_addr));
+    const auto& key = entry.collection_ptr->first;
+    m_symbols.emplace_back(m_symbol_db.GetSymbolFromAddr(key.origin_addr),
+                           m_symbol_db.GetSymbolFromAddr(key.destin_addr));
   }
 }
 
-static QVariant GetValidSymbolStringVariant(const QVariant& symbol_name_v)
+bool BranchWatchTableModel::IsMarked(const QModelIndex& index) const
 {
-  if (symbol_name_v.isValid())
-    return symbol_name_v;
-  return QStringLiteral(" --- ");
+  // Columns without a flag never touch the selection here.
+  const std::optional<Inspection> flag = FlagForColumn(index.column());
+  if (!flag)
+    return false;
+  const Inspection marks = GetBranchWatchSelection(index).inspection;
+  return (marks & *flag) != Inspection{};
 }
 
-static QString GetInstructionMnemonic(u32 hex)
+QVariant BranchWatchTableModel::Text(const QModelIndex& index) const
 {
-  const std::string disas = Common::GekkoDisassembler::Disassemble(hex, 0);
-  const std::string::size_type split = disas.find('\t');
-  // I wish I could disassemble just the mnemonic!
-  if (split == std::string::npos)
-    return QString::fromStdString(disas);
-  return QString::fromLatin1(disas.data(), split);
-}
-
-static QString GetConditionString(const Core::BranchWatch::Selection::value_type& value,
-                                  const Core::BranchWatch::Collection::value_type* kv)
-{
-  if (value.condition == false)
-    return BranchWatchTableModel::tr("false");
-  if (BranchIsConditional(kv->first.original_inst))
-    return BranchWatchTableModel::tr("true");
-  return QStringLiteral("");
-}
-
-QVariant BranchWatchTableModel::DisplayRoleData(const QModelIndex& index) const
-{
-  switch (index.column())
+  const int column = index.column();
+  if (column == Column::OriginSymbol || column == Column::DestinSymbol)
   {
-  case Column::OriginSymbol:
-    return GetValidSymbolStringVariant(m_symbol_list[index.row()].origin_name);
-  case Column::DestinSymbol:
-    return GetValidSymbolStringVariant(m_symbol_list[index.row()].destin_name);
+    const SymbolListValueType& symbols = m_symbols[index.row()];
+    const QVariant& name =
+        column == Column::OriginSymbol ? symbols.origin_name : symbols.destin_name;
+    return name.isValid() ? name : QVariant{QStringLiteral(" --- ")};
   }
-  const Core::BranchWatch::Selection::value_type& value =
-      m_branch_watch.GetSelection()[index.row()];
-  const Core::BranchWatch::Collection::value_type* kv = value.collection_ptr;
-  switch (index.column())
+
+  const Entry& entry = GetBranchWatchSelection(index);
+  const Record& record = *entry.collection_ptr;
+  switch (column)
   {
   case Column::Instruction:
-    return GetInstructionMnemonic(kv->first.original_inst.hex);
+    return OpcodeName(record.first.original_inst.hex);
   case Column::Condition:
-    return GetConditionString(value, kv);
+    if (!entry.condition)
+      return tr("false");
+    if (BranchIsConditional(record.first.original_inst))
+      return tr("true");
+    return QStringLiteral("");
   case Column::Origin:
-    return QString::number(kv->first.origin_addr, 16);
+    return QString::number(record.first.origin_addr, 16);
   case Column::Destination:
-    return QString::number(kv->first.destin_addr, 16);
+    return QString::number(record.first.destin_addr, 16);
   case Column::RecentHits:
-    return QString::number(kv->second.total_hits - kv->second.hits_snapshot);
+    return QString::number(RecentHitCount(record));
   case Column::TotalHits:
-    return QString::number(kv->second.total_hits);
+    return QString::number(qulonglong{record.second.total_hits});
+  default:
+    break;
   }
   static_assert(Column::NumberOfColumns == 8);
   std::unreachable();
 }
 
-QVariant BranchWatchTableModel::FontRoleData(const QModelIndex& index) const
+QVariant BranchWatchTableModel::Styled(const QModelIndex& index) const
 {
-  m_font.setBold([&]() -> bool {
-    using Inspection = Core::BranchWatchSelectionInspection;
-    const auto get_bit_test = [this, &index](Inspection inspection_mask) -> bool {
-      const Inspection inspection = m_branch_watch.GetSelection()[index.row()].inspection;
-      return (inspection & inspection_mask) != Inspection{};
-    };
-    switch (index.column())
-    {
-    case Column::Instruction:
-      return get_bit_test(Inspection::InvertBranchOption);
-    case Column::Condition:
-      return get_bit_test(Inspection::MakeUnconditional);
-    case Column::Origin:
-      return get_bit_test(Inspection::SetOriginNOP);
-    case Column::Destination:
-      return get_bit_test(Inspection::SetDestinBLR);
-    case Column::OriginSymbol:
-      return get_bit_test(Inspection::SetOriginSymbolBLR);
-    case Column::DestinSymbol:
-      return get_bit_test(Inspection::SetDestinSymbolBLR);
-    }
-    // Importantly, this code path avoids subscripting the selection to get an inspection value.
-    return false;
-  }());
-  return m_font;
+  QFont styled = m_base_font;
+  styled.setBold(IsMarked(index));
+  return styled;
 }
 
-QVariant BranchWatchTableModel::TextAlignmentRoleData(const QModelIndex& index) const
+QVariant BranchWatchTableModel::Alignment(const QModelIndex& index) const
 {
-  // Qt enums become QFlags when operators are used. QVariant's constructors don't support QFlags.
-  switch (index.column())
-  {
-  case Column::Condition:
-  case Column::Origin:
-  case Column::Destination:
-    return Qt::AlignCenter;
-  case Column::RecentHits:
-  case Column::TotalHits:
+  const int column = index.column();
+  static_assert(Column::NumberOfColumns == 8);
+  if (column == Column::Condition || column == Column::Origin || column == Column::Destination)
+    return int{Qt::AlignCenter};
+  // A combined alignment is a QFlags value, which has to be wrapped explicitly.
+  if (column == Column::RecentHits || column == Column::TotalHits)
     return QVariant::fromValue(Qt::AlignRight | Qt::AlignVCenter);
-  case Column::Instruction:
-  case Column::OriginSymbol:
-  case Column::DestinSymbol:
+  if (column == Column::Instruction || column == Column::OriginSymbol ||
+      column == Column::DestinSymbol)
+  {
     return QVariant::fromValue(Qt::AlignLeft | Qt::AlignVCenter);
   }
-  static_assert(Column::NumberOfColumns == 8);
   std::unreachable();
 }
 
-QVariant BranchWatchTableModel::ForegroundRoleData(const QModelIndex& index) const
+QVariant BranchWatchTableModel::Colour(const QModelIndex& index) const
 {
-  using Inspection = Core::BranchWatchSelectionInspection;
-  const auto get_brush_v = [this, &index](Inspection inspection_mask) -> QVariant {
-    const Inspection inspection = m_branch_watch.GetSelection()[index.row()].inspection;
-    return (inspection & inspection_mask) != Inspection{} ? QBrush(Qt::red) : QVariant();
-  };
-  switch (index.column())
+  if (!IsMarked(index))
+    return {};
+  return QBrush(Qt::red);
+}
+
+QVariant BranchWatchTableModel::ClickTarget(const QModelIndex& index) const
+{
+  const int column = index.column();
+  if (column == Column::OriginSymbol)
+    return m_symbols[index.row()].origin_addr;
+  if (column == Column::DestinSymbol)
+    return m_symbols[index.row()].destin_addr;
+
+  const auto& key = GetBranchWatchSelection(index).collection_ptr->first;
+  switch (column)
   {
   case Column::Instruction:
-    return get_brush_v(Inspection::InvertBranchOption);
+    return QVariant::fromValue<u32>(key.original_inst.hex);
+  case Column::Origin:
+    return QVariant::fromValue<u32>(key.origin_addr);
+  case Column::Destination:
+    return QVariant::fromValue<u32>(key.destin_addr);
+  default:
+    return {};
+  }
+}
+
+QVariant BranchWatchTableModel::SortKey(const QModelIndex& index) const
+{
+  const int column = index.column();
+  if (column == Column::OriginSymbol)
+    return m_symbols[index.row()].origin_name;
+  if (column == Column::DestinSymbol)
+    return m_symbols[index.row()].destin_name;
+
+  // Counts are widened to qulonglong: QVariant has no constructor for std::size_t as such.
+  const Entry& entry = GetBranchWatchSelection(index);
+  const Record& record = *entry.collection_ptr;
+  switch (column)
+  {
+  case Column::Instruction:
+    return OpcodeName(record.first.original_inst.hex);
   case Column::Condition:
-    return get_brush_v(Inspection::MakeUnconditional);
+    return ConditionRank(entry);
   case Column::Origin:
-    return get_brush_v(Inspection::SetOriginNOP);
+    return QVariant::fromValue<u32>(record.first.origin_addr);
   case Column::Destination:
-    return get_brush_v(Inspection::SetDestinBLR);
-  case Column::OriginSymbol:
-    return get_brush_v(Inspection::SetOriginSymbolBLR);
-  case Column::DestinSymbol:
-    return get_brush_v(Inspection::SetDestinSymbolBLR);
-  }
-  // Importantly, this code path avoids subscripting the selection to get an inspection value.
-  return QVariant();
-}
-
-QVariant BranchWatchTableModel::ClickRoleData(const QModelIndex& index) const
-{
-  switch (index.column())
-  {
-  case Column::OriginSymbol:
-    return m_symbol_list[index.row()].origin_addr;
-  case Column::DestinSymbol:
-    return m_symbol_list[index.row()].destin_addr;
-  }
-  const Core::BranchWatch::Collection::value_type* kv =
-      m_branch_watch.GetSelection()[index.row()].collection_ptr;
-  switch (index.column())
-  {
-  case Column::Instruction:
-    return kv->first.original_inst.hex;
-  case Column::Origin:
-    return kv->first.origin_addr;
-  case Column::Destination:
-    return kv->first.destin_addr;
-  }
-  return QVariant();
-}
-
-// 0 == false, 1 == true, 2 == unconditional
-static int GetConditionInteger(const Core::BranchWatch::Selection::value_type& value,
-                               const Core::BranchWatch::Collection::value_type* kv)
-{
-  if (value.condition == false)
-    return 0;
-  if (BranchIsConditional(kv->first.original_inst))
-    return 1;
-  return 2;
-}
-
-QVariant BranchWatchTableModel::SortRoleData(const QModelIndex& index) const
-{
-  switch (index.column())
-  {
-  case Column::OriginSymbol:
-    return m_symbol_list[index.row()].origin_name;
-  case Column::DestinSymbol:
-    return m_symbol_list[index.row()].destin_name;
-  }
-  const Core::BranchWatch::Selection::value_type& selection_value =
-      m_branch_watch.GetSelection()[index.row()];
-  const Core::BranchWatch::Collection::value_type* kv = selection_value.collection_ptr;
-  switch (index.column())
-  {
-  // QVariant's ctor only supports (unsigned) int and (unsigned) long long for some stupid reason.
-  // std::size_t is unsigned long on some platforms, which results in an ambiguous conversion.
-  case Column::Instruction:
-    return GetInstructionMnemonic(kv->first.original_inst.hex);
-  case Column::Condition:
-    return GetConditionInteger(selection_value, kv);
-  case Column::Origin:
-    return kv->first.origin_addr;
-  case Column::Destination:
-    return kv->first.destin_addr;
+    return QVariant::fromValue<u32>(record.first.destin_addr);
   case Column::RecentHits:
-    return qulonglong{kv->second.total_hits - kv->second.hits_snapshot};
+    return RecentHitCount(record);
   case Column::TotalHits:
-    return qulonglong{kv->second.total_hits};
+    return qulonglong{record.second.total_hits};
+  default:
+    break;
   }
   static_assert(Column::NumberOfColumns == 8);
   std::unreachable();

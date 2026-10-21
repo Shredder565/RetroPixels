@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -47,20 +46,19 @@ enum EnumType : int
 };
 }
 
+// Symbol names and start addresses for both ends of one branch. A field is an invalid QVariant
+// when no symbol covers that end.
 struct BranchWatchTableModelSymbolListValueType
 {
   explicit BranchWatchTableModelSymbolListValueType(const Common::Symbol* const origin_symbol,
-                                                    const Common::Symbol* const destin_symbol)
-      : origin_name(origin_symbol ? QString::fromStdString(origin_symbol->name) : QVariant{}),
-        origin_addr(origin_symbol ? origin_symbol->address : QVariant{}),
-        destin_name(destin_symbol ? QString::fromStdString(destin_symbol->name) : QVariant{}),
-        destin_addr(destin_symbol ? destin_symbol->address : QVariant{})
-  {
-  }
+                                                    const Common::Symbol* const destin_symbol);
+
   QVariant origin_name, origin_addr;
   QVariant destin_name, destin_addr;
 };
 
+// Presents the Branch Watch selection as a table. Row N is selection entry N; the symbol columns
+// come from a side list that is only refreshed once recording has reached the reduction phase.
 class BranchWatchTableModel final : public QAbstractTableModel
 {
   Q_OBJECT
@@ -72,12 +70,8 @@ public:
   using SymbolList = QList<SymbolListValueType>;
 
   explicit BranchWatchTableModel(Core::System& system, Core::BranchWatch& branch_watch,
-                                 PPCSymbolDB& ppc_symbol_db, QObject* parent = nullptr)
-      : QAbstractTableModel(parent), m_system(system), m_branch_watch(branch_watch),
-        m_ppc_symbol_db(ppc_symbol_db)
-  {
-  }
-  ~BranchWatchTableModel() override = default;
+                                 PPCSymbolDB& ppc_symbol_db, QObject* parent = nullptr);
+  ~BranchWatchTableModel() override;
 
   BranchWatchTableModel(const BranchWatchTableModel&) = delete;
   BranchWatchTableModel(BranchWatchTableModel&&) = delete;
@@ -90,7 +84,7 @@ public:
   int rowCount(const QModelIndex& parent = QModelIndex{}) const override;
   int columnCount(const QModelIndex& parent = QModelIndex{}) const override;
   bool removeRows(int row, int count, const QModelIndex& parent = QModelIndex{}) override;
-  void setFont(const QFont& font) { m_font = font; }
+  void setFont(const QFont& font);
 
   void OnClearBranchWatch(const Core::CPUThreadGuard& guard);
   void OnCodePathWasTaken(const Core::CPUThreadGuard& guard);
@@ -110,26 +104,31 @@ public:
 
   const Core::BranchWatchSelectionValueType&
   GetBranchWatchSelection(const QModelIndex& index) const;
-  const SymbolList& GetSymbolList() const { return m_symbol_list; }
+  const SymbolList& GetSymbolList() const { return m_symbols; }
 
 private:
-  void SetInspected(const QModelIndex& index, Core::BranchWatchSelectionInspection inspection);
-  void SetOriginInspected(u32 origin_addr);
-  void SetDestinInspected(u32 destin_addr, bool nested);
-  void SetSymbolInspected(u32 symbol_addr, bool nested);
-  void PrefetchSymbols();
+  template <typename Change>
+  void Reshape(Change&& change);
+  void RefreshColumns(Column first, Column last, const QList<int>& roles);
 
-  [[nodiscard]] QVariant DisplayRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant FontRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant TextAlignmentRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant ForegroundRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant ClickRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant SortRoleData(const QModelIndex& index) const;
+  void Mark(int row, Column column, Core::BranchWatchSelectionInspection flag);
+  void MarkOrigins(u32 address);
+  void MarkDestinations(u32 address, bool from_symbol);
+  void MarkSymbols(u32 address, bool from_destination);
+  void RebuildSymbols();
+
+  [[nodiscard]] bool IsMarked(const QModelIndex& index) const;
+  [[nodiscard]] QVariant Text(const QModelIndex& index) const;
+  [[nodiscard]] QVariant Styled(const QModelIndex& index) const;
+  [[nodiscard]] QVariant Alignment(const QModelIndex& index) const;
+  [[nodiscard]] QVariant Colour(const QModelIndex& index) const;
+  [[nodiscard]] QVariant ClickTarget(const QModelIndex& index) const;
+  [[nodiscard]] QVariant SortKey(const QModelIndex& index) const;
 
   Core::System& m_system;
-  Core::BranchWatch& m_branch_watch;
-  PPCSymbolDB& m_ppc_symbol_db;
+  Core::BranchWatch& m_watch;
+  PPCSymbolDB& m_symbol_db;
 
-  SymbolList m_symbol_list;
-  mutable QFont m_font;
+  SymbolList m_symbols;
+  QFont m_base_font;
 };
