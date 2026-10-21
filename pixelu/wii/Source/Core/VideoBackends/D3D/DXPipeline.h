@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@
 
 namespace DX11
 {
+// D3D11 has no pipeline objects, so a pipeline is the set of shaders, input
+// layout and cached state objects that Gfx::SetPipeline binds together.
 class DXPipeline final : public AbstractPipeline
 {
 public:
@@ -30,6 +31,7 @@ public:
   ID3D11BlendState* GetBlendState() const { return m_blend_state.Get(); }
   D3D11_PRIMITIVE_TOPOLOGY GetPrimitiveTopology() const { return m_primitive_topology; }
   bool HasGeometryShader() const { return m_geometry_shader != nullptr; }
+  // True when the pipeline draws through the integer render-target view.
   bool UseLogicOp() const { return m_use_logic_op; }
 
   static std::unique_ptr<DXPipeline> Create(const AbstractPipelineConfig& config);

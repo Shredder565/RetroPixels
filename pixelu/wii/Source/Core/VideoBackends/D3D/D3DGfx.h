@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,8 @@ class SwapChain;
 class DXTexture;
 class DXFramebuffer;
 
+// The renderer's view of D3D11. Bindings go through the state manager, which
+// pushes them to the immediate context before each draw.
 class Gfx final : public ::AbstractGfx
 {
 public:
@@ -76,8 +77,10 @@ public:
   SurfaceInfo GetSurfaceInfo() const override;
 
 private:
+  // Applies a window change or resize, or a gained/lost exclusive fullscreen.
   void CheckForSwapChainChanges();
 
+  // Declared first so state objects outlive everything else here.
   StateCache m_state_cache;
 
   float m_backbuffer_scale;

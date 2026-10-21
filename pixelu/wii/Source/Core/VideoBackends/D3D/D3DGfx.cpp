@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D/D3DGfx.h"
 
@@ -37,6 +36,14 @@
 
 namespace DX11
 {
+namespace
+{
+D3D::StateManager& State()
+{
+  return *D3D::stateman;
+}
+}  // namespace
+
 Gfx::Gfx(std::unique_ptr<SwapChain> swap_chain, float backbuffer_scale)
     : m_backbuffer_scale(backbuffer_scale), m_swap_chain(std::move(swap_chain))
 {
@@ -46,7 +53,7 @@ Gfx::~Gfx() = default;
 
 bool Gfx::IsHeadless() const
 {
-  return !m_swap_chain;
+  return m_swap_chain == nullptr;
 }
 
 std::unique_ptr<AbstractTexture> Gfx::CreateTexture(const TextureConfig& config,
@@ -74,11 +81,11 @@ std::unique_ptr<AbstractShader>
 Gfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
                             VideoCommon::ShaderIncluder* shader_includer, std::string_view name)
 {
-  auto bytecode = DXShader::CompileShader(D3D::feature_level, stage, source, shader_includer);
-  if (!bytecode)
+  std::optional<AbstractShader::BinaryData> code =
+      DXShader::CompileShader(D3D::feature_level, stage, source, shader_includer);
+  if (!code)
     return nullptr;
-
-  return DXShader::CreateFromBytecode(stage, std::move(*bytecode), name);
+  return DXShader::CreateFromBytecode(stage, std::move(*code), name);
 }
 
 std::unique_ptr<AbstractShader> Gfx::CreateShaderFromBinary(ShaderStage stage, const void* data,
@@ -88,73 +95,86 @@ std::unique_ptr<AbstractShader> Gfx::CreateShaderFromBinary(ShaderStage stage, c
 }
 
 std::unique_ptr<AbstractPipeline> Gfx::CreatePipeline(const AbstractPipelineConfig& config,
-                                                      const void* cache_data,
-                                                      size_t cache_data_length)
+                                                      const void* /*cache_data*/,
+                                                      size_t /*cache_data_length*/)
 {
+  // D3D11 has no pipeline cache blobs.
   return DXPipeline::Create(config);
 }
 
 void Gfx::SetPipeline(const AbstractPipeline* pipeline)
 {
-  const DXPipeline* dx_pipeline = static_cast<const DXPipeline*>(pipeline);
-  if (m_current_pipeline == dx_pipeline)
+  // m_current_pipeline is not tracked by this backend; the state manager
+  // already filters repeated bindings.
+  const auto* const dx = static_cast<const DXPipeline*>(pipeline);
+  if (m_current_pipeline == dx)
     return;
 
-  if (dx_pipeline)
+  D3D::StateManager& state = State();
+  if (!dx)
   {
-    D3D::stateman->SetRasterizerState(dx_pipeline->GetRasterizerState());
-    D3D::stateman->SetDepthState(dx_pipeline->GetDepthState());
-    D3D::stateman->SetBlendState(dx_pipeline->GetBlendState());
-    D3D::stateman->SetPrimitiveTopology(dx_pipeline->GetPrimitiveTopology());
-    D3D::stateman->SetInputLayout(dx_pipeline->GetInputLayout());
-    D3D::stateman->SetVertexShader(dx_pipeline->GetVertexShader());
-    D3D::stateman->SetGeometryShader(dx_pipeline->GetGeometryShader());
-    D3D::stateman->SetPixelShader(dx_pipeline->GetPixelShader());
-    D3D::stateman->SetIntegerRTV(dx_pipeline->UseLogicOp());
+    // Drop references to objects owned by a pipeline that may be going away.
+    state.SetInputLayout(nullptr);
+    state.SetVertexShader(nullptr);
+    state.SetGeometryShader(nullptr);
+    state.SetPixelShader(nullptr);
+    return;
   }
-  else
-  {
-    // These will be destroyed at pipeline destruction.
-    D3D::stateman->SetInputLayout(nullptr);
-    D3D::stateman->SetVertexShader(nullptr);
-    D3D::stateman->SetGeometryShader(nullptr);
-    D3D::stateman->SetPixelShader(nullptr);
-  }
+
+  state.SetRasterizerState(dx->GetRasterizerState());
+  state.SetDepthState(dx->GetDepthState());
+  state.SetBlendState(dx->GetBlendState());
+  state.SetPrimitiveTopology(dx->GetPrimitiveTopology());
+  state.SetInputLayout(dx->GetInputLayout());
+  state.SetVertexShader(dx->GetVertexShader());
+  state.SetGeometryShader(dx->GetGeometryShader());
+  state.SetPixelShader(dx->GetPixelShader());
+  state.SetIntegerRTV(dx->UseLogicOp());
 }
 
 void Gfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
 {
-  // TODO: Move to stateman
-  const CD3D11_RECT rect(rc.left, rc.top, std::max(rc.right, rc.left + 1),
-                         std::max(rc.bottom, rc.top + 1));
-  D3D::context->RSSetScissorRects(1, &rect);
+  // An empty rectangle is widened to one pixel.
+  D3D11_RECT scissor;
+  scissor.left = rc.left;
+  scissor.top = rc.top;
+  scissor.right = std::max(rc.right, rc.left + 1);
+  scissor.bottom = std::max(rc.bottom, rc.top + 1);
+  D3D::context->RSSetScissorRects(1, &scissor);
 }
 
 void Gfx::SetViewport(float x, float y, float width, float height, float near_depth,
                       float far_depth)
 {
-  // TODO: Move to stateman
-  const CD3D11_VIEWPORT vp(x, y, width, height, near_depth, far_depth);
-  D3D::context->RSSetViewports(1, &vp);
+  D3D11_VIEWPORT viewport;
+  viewport.TopLeftX = x;
+  viewport.TopLeftY = y;
+  viewport.Width = width;
+  viewport.Height = height;
+  viewport.MinDepth = near_depth;
+  viewport.MaxDepth = far_depth;
+  D3D::context->RSSetViewports(1, &viewport);
 }
 
 void Gfx::Draw(u32 base_vertex, u32 num_vertices)
 {
-  D3D::stateman->Apply();
+  State().Apply();
   D3D::context->Draw(num_vertices, base_vertex);
 }
 
 void Gfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
 {
-  D3D::stateman->Apply();
-  D3D::context->DrawIndexed(num_indices, base_index, base_vertex);
+  State().Apply();
+  D3D::context->DrawIndexed(num_indices, base_index, static_cast<INT>(base_vertex));
 }
 
-void Gfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-                                u32 groupsize_z, u32 groups_x, u32 groups_y, u32 groups_z)
+void Gfx::DispatchComputeShader(const AbstractShader* shader, u32 /*groupsize_x*/,
+                                u32 /*groupsize_y*/, u32 /*groupsize_z*/, u32 groups_x,
+                                u32 groups_y, u32 groups_z)
 {
-  D3D::stateman->SetComputeShader(static_cast<const DXShader*>(shader)->GetD3DComputeShader());
-  D3D::stateman->SyncComputeBindings();
+  // Group sizes are compiled into the shader.
+  State().SetComputeShader(static_cast<const DXShader*>(shader)->GetD3DComputeShader());
+  State().SyncComputeBindings();
   D3D::context->Dispatch(groups_x, groups_y, groups_z);
 }
 
@@ -173,33 +193,33 @@ void Gfx::PresentBackbuffer()
 void Gfx::OnConfigChanged(u32 bits)
 {
   AbstractGfx::OnConfigChanged(bits);
+  if (!m_swap_chain)
+    return;
 
-  // Quad-buffer changes require swap chain recreation.
-  if (bits & CONFIG_CHANGE_BIT_STEREO_MODE && m_swap_chain)
+  // Quad-buffered stereo and HDR both need a new swap chain.
+  if (bits & CONFIG_CHANGE_BIT_STEREO_MODE)
     m_swap_chain->SetStereo(SwapChain::WantsStereo());
-
-  if (bits & CONFIG_CHANGE_BIT_HDR && m_swap_chain)
+  if (bits & CONFIG_CHANGE_BIT_HDR)
     m_swap_chain->SetHDR(SwapChain::WantsHDR());
 }
 
 void Gfx::CheckForSwapChainChanges()
 {
-  const bool surface_changed = g_presenter->SurfaceChangedTestAndClear();
-  const bool surface_resized =
+  // A fullscreen change counts as a resize; it is only checked when the
+  // presenter reports no resize itself.
+  const bool new_surface = g_presenter->SurfaceChangedTestAndClear();
+  const bool resized =
       g_presenter->SurfaceResizedTestAndClear() || m_swap_chain->CheckForFullscreenChange();
-  if (!surface_changed && !surface_resized)
+  if (!new_surface && !resized)
     return;
 
-  if (surface_changed)
-  {
+  if (new_surface)
     m_swap_chain->ChangeSurface(g_presenter->GetNewSurfaceHandle());
-  }
   else
-  {
     m_swap_chain->ResizeSwapChain();
-  }
 
-  g_presenter->SetBackbuffer(m_swap_chain->GetWidth(), m_swap_chain->GetHeight());
+  g_presenter->SetBackbuffer(static_cast<int>(m_swap_chain->GetWidth()),
+                             static_cast<int>(m_swap_chain->GetHeight()));
 }
 
 void Gfx::SetFramebuffer(AbstractFramebuffer* framebuffer)
@@ -207,16 +227,16 @@ void Gfx::SetFramebuffer(AbstractFramebuffer* framebuffer)
   if (m_current_framebuffer == framebuffer)
     return;
 
-  // We can't leave the framebuffer bound as a texture and a render target.
-  DXFramebuffer* fb = static_cast<DXFramebuffer*>(framebuffer);
+  // A framebuffer's textures cannot stay bound for sampling while it is a target.
+  auto* const fb = static_cast<DXFramebuffer*>(framebuffer);
   fb->Unbind();
-
-  D3D::stateman->SetFramebuffer(fb);
+  State().SetFramebuffer(fb);
   m_current_framebuffer = fb;
 }
 
 void Gfx::SetAndDiscardFramebuffer(AbstractFramebuffer* framebuffer)
 {
+  // Nothing to gain from discarding on D3D11.
   SetFramebuffer(framebuffer);
 }
 
@@ -224,33 +244,34 @@ void Gfx::SetAndClearFramebuffer(AbstractFramebuffer* framebuffer, const ClearCo
                                  float depth_value)
 {
   SetFramebuffer(framebuffer);
-  D3D::stateman->Apply();
-
-  DXFramebuffer* fb = static_cast<DXFramebuffer*>(framebuffer);
-  fb->Clear(color_value, depth_value);
+  // The clear needs the views bound first.
+  State().Apply();
+  static_cast<DXFramebuffer*>(framebuffer)->Clear(color_value, depth_value);
 }
 
 void Gfx::SetTexture(u32 index, const AbstractTexture* texture)
 {
-  D3D::stateman->SetTexture(index, texture ? static_cast<const DXTexture*>(texture)->GetD3DSRV() :
-                                             nullptr);
+  ID3D11ShaderResourceView* const view =
+      texture ? static_cast<const DXTexture*>(texture)->GetD3DSRV() : nullptr;
+  State().SetTexture(index, view);
 }
 
 void Gfx::SetSamplerState(u32 index, const SamplerState& state)
 {
-  D3D::stateman->SetSampler(index, m_state_cache.Get(state));
+  State().SetSampler(index, m_state_cache.Get(state));
 }
 
-void Gfx::SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write)
+void Gfx::SetComputeImageTexture(u32 index, AbstractTexture* texture, bool /*read*/, bool /*write*/)
 {
-  D3D::stateman->SetComputeUAV(index,
-                               texture ? static_cast<DXTexture*>(texture)->GetD3DUAV() : nullptr);
+  ID3D11UnorderedAccessView* const view =
+      texture ? static_cast<DXTexture*>(texture)->GetD3DUAV() : nullptr;
+  State().SetComputeUAV(index, view);
 }
 
 void Gfx::UnbindTexture(const AbstractTexture* texture)
 {
-  if (D3D::stateman->UnsetTexture(static_cast<const DXTexture*>(texture)->GetD3DSRV()) != 0)
-    D3D::stateman->ApplyTextures();
+  if (State().UnsetTexture(static_cast<const DXTexture*>(texture)->GetD3DSRV()) != 0)
+    State().ApplyTextures();
 }
 
 void Gfx::Flush()
@@ -260,7 +281,7 @@ void Gfx::Flush()
 
 void Gfx::WaitForGPUIdle()
 {
-  // There is no glFinish() equivalent in D3D.
+  // D3D11 has no way to block until the GPU is idle; flushing is the closest.
   D3D::context->Flush();
 }
 
@@ -277,9 +298,10 @@ bool Gfx::IsFullscreen() const
 
 SurfaceInfo Gfx::GetSurfaceInfo() const
 {
-  return {m_swap_chain ? static_cast<u32>(m_swap_chain->GetWidth()) : 0,
-          m_swap_chain ? static_cast<u32>(m_swap_chain->GetHeight()) : 0, m_backbuffer_scale,
-          m_swap_chain ? m_swap_chain->GetFormat() : AbstractTextureFormat::Undefined};
+  if (!m_swap_chain)
+    return {0, 0, m_backbuffer_scale, AbstractTextureFormat::Undefined};
+  return {m_swap_chain->GetWidth(), m_swap_chain->GetHeight(), m_backbuffer_scale,
+          m_swap_chain->GetFormat()};
 }
 
 }  // namespace DX11

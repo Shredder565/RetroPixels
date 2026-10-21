@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 namespace DX11
 {
+// The Direct3D 11 video backend ("D3D" in the configuration).
 class VideoBackend : public VideoBackendBase
 {
 public:

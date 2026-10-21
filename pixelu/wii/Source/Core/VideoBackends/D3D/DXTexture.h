@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,12 +18,15 @@
 
 namespace DX11
 {
+// A D3D11 2D texture (array, cube or multisampled) with its shader view and,
+// for compute images, its unordered-access view.
 class DXTexture final : public AbstractTexture
 {
 public:
   ~DXTexture() override;
 
   static std::unique_ptr<DXTexture> Create(const TextureConfig& config, std::string_view name);
+  // Wraps a texture made elsewhere (a swap-chain buffer); the config is read from it.
   static std::unique_ptr<DXTexture> CreateAdopted(ComPtr<ID3D11Texture2D> texture);
 
   void CopyRectangleFromTexture(const AbstractTexture* src,
@@ -52,6 +54,8 @@ private:
   std::string m_name;
 };
 
+// CPU-side copy of a texture: a staging resource for readback and mutable
+// use, a dynamic shader-visible one for uploads.
 class DXStagingTexture final : public AbstractStagingTexture
 {
 public:
@@ -79,6 +83,9 @@ private:
   ComPtr<ID3D11Texture2D> m_tex = nullptr;
 };
 
+// Render-target and depth views over DXTextures. Colour slot 0 always exists
+// (as a null view for depth-only framebuffers); extra colour attachments
+// follow it.
 class DXFramebuffer final : public AbstractFramebuffer
 {
 public:
@@ -91,10 +98,12 @@ public:
   ~DXFramebuffer() override;
 
   ID3D11RenderTargetView* const* GetRTVArray() const { return m_render_targets_raw.data(); }
-  ID3D11RenderTargetView* const* GetIntegerRTVArray() const { return m_integer_rtv.GetAddressOf(); }
+  // Same slots as GetRTVArray, with slot 0 as the unsigned-integer view (logic ops).
+  ID3D11RenderTargetView* const* GetIntegerRTVArray() const { return m_integer_targets_raw.data(); }
   UINT GetNumRTVs() const { return static_cast<UINT>(m_render_targets_raw.size()); }
   ID3D11DepthStencilView* GetDSV() const { return m_dsv.Get(); }
 
+  // Takes the attachments out of any pixel-stage texture slot.
   void Unbind();
   void Clear(const ClearColor& color_value, float depth_value);
 
@@ -107,6 +116,7 @@ protected:
   std::vector<ID3D11RenderTargetView*> m_render_targets_raw;
   ComPtr<ID3D11RenderTargetView> m_integer_rtv;
   ComPtr<ID3D11DepthStencilView> m_dsv;
+  std::vector<ID3D11RenderTargetView*> m_integer_targets_raw;
 };
 
 }  // namespace DX11

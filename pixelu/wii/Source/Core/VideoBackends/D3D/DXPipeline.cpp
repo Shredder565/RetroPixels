@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D/DXPipeline.h"
 
@@ -32,35 +31,36 @@ DXPipeline::~DXPipeline() = default;
 
 std::unique_ptr<DXPipeline> DXPipeline::Create(const AbstractPipelineConfig& config)
 {
-  StateCache& state_cache = static_cast<Gfx*>(g_gfx.get())->GetStateCache();
-  ID3D11RasterizerState* rasterizer_state = state_cache.Get(config.rasterization_state);
-  ID3D11DepthStencilState* depth_state = state_cache.Get(config.depth_state);
-  ID3D11BlendState* blend_state = state_cache.Get(config.blending_state);
-  D3D11_PRIMITIVE_TOPOLOGY primitive_topology =
+  // State objects come from the renderer's cache, in this order.
+  StateCache& cache = static_cast<Gfx*>(g_gfx.get())->GetStateCache();
+  ID3D11RasterizerState* const raster = cache.Get(config.rasterization_state);
+  ID3D11DepthStencilState* const depth = cache.Get(config.depth_state);
+  ID3D11BlendState* const blend = cache.Get(config.blending_state);
+  const D3D11_PRIMITIVE_TOPOLOGY topology =
       StateCache::GetPrimitiveTopology(config.rasterization_state.primitive);
-  if (!rasterizer_state || !depth_state || !blend_state)
+  if (raster == nullptr || depth == nullptr || blend == nullptr)
     return nullptr;
 
-  const DXShader* vertex_shader = static_cast<const DXShader*>(config.vertex_shader);
-  const DXShader* geometry_shader = static_cast<const DXShader*>(config.geometry_shader);
-  const DXShader* pixel_shader = static_cast<const DXShader*>(config.pixel_shader);
-  ASSERT(vertex_shader != nullptr && pixel_shader != nullptr);
+  const auto* const vs = static_cast<const DXShader*>(config.vertex_shader);
+  const auto* const gs = static_cast<const DXShader*>(config.geometry_shader);
+  const auto* const ps = static_cast<const DXShader*>(config.pixel_shader);
+  ASSERT(vs != nullptr && ps != nullptr);
 
-  ID3D11InputLayout* input_layout =
-      config.vertex_format ?
-          const_cast<D3DVertexFormat*>(static_cast<const D3DVertexFormat*>(config.vertex_format))
-              ->GetInputLayout(vertex_shader->GetByteCode().data(),
-                               vertex_shader->GetByteCode().size()) :
-          nullptr;
+  // The input layout is validated against the vertex shader's signature.
+  ID3D11InputLayout* layout = nullptr;
+  if (config.vertex_format)
+  {
+    auto* const format =
+        const_cast<D3DVertexFormat*>(static_cast<const D3DVertexFormat*>(config.vertex_format));
+    const auto& code = vs->GetByteCode();
+    layout = format->GetInputLayout(code.data(), code.size());
+  }
 
-  // Only use the integer RTV if logic op is supported, and enabled.
-  const bool use_logic_op =
-      config.blending_state.logic_op_enable && g_backend_info.bSupportsLogicOp;
+  // Logic ops are drawn through the integer view, when the device has them.
+  const bool logic_op = config.blending_state.logic_op_enable && g_backend_info.bSupportsLogicOp;
 
-  return std::make_unique<DXPipeline>(config, input_layout, vertex_shader->GetD3DVertexShader(),
-                                      geometry_shader ? geometry_shader->GetD3DGeometryShader() :
-                                                        nullptr,
-                                      pixel_shader->GetD3DPixelShader(), rasterizer_state,
-                                      depth_state, blend_state, primitive_topology, use_logic_op);
+  return std::make_unique<DXPipeline>(
+      config, layout, vs->GetD3DVertexShader(), gs ? gs->GetD3DGeometryShader() : nullptr,
+      ps->GetD3DPixelShader(), raster, depth, blend, topology, logic_op);
 }
 }  // namespace DX11

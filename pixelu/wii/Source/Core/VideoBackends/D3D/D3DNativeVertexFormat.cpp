@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include <array>
 
@@ -23,168 +22,108 @@ Gfx::CreateNativeVertexFormat(const PortableVertexDeclaration& vtx_decl)
   return std::make_unique<D3DVertexFormat>(vtx_decl);
 }
 
-static DXGI_FORMAT VarToD3D(ComponentFormat t, int size, bool integer)
+namespace
 {
-  using FormatMap = Common::EnumMap<DXGI_FORMAT, ComponentFormat::InvalidFloat7>;
-  static constexpr auto f = [](FormatMap a) { return a; };  // Deduction helper
+// DXGI formats for one component count. Index 0-3 follows ComponentFormat
+// (UByte, Byte, UShort, Short); every float-like type uses the 32-bit float.
+struct ComponentFormats
+{
+  std::array<DXGI_FORMAT, 4> normalized;
+  std::array<DXGI_FORMAT, 4> integer;
+  DXGI_FORMAT floating;
+};
 
-  static constexpr std::array<FormatMap, 4> d3d_float_format_lookup = {
-      f({
-          DXGI_FORMAT_R8_UNORM,
-          DXGI_FORMAT_R8_SNORM,
-          DXGI_FORMAT_R16_UNORM,
-          DXGI_FORMAT_R16_SNORM,
-          DXGI_FORMAT_R32_FLOAT,
-          DXGI_FORMAT_R32_FLOAT,
-          DXGI_FORMAT_R32_FLOAT,
-          DXGI_FORMAT_R32_FLOAT,
-      }),
-      f({
-          DXGI_FORMAT_R8G8_UNORM,
-          DXGI_FORMAT_R8G8_SNORM,
-          DXGI_FORMAT_R16G16_UNORM,
-          DXGI_FORMAT_R16G16_SNORM,
-          DXGI_FORMAT_R32G32_FLOAT,
-          DXGI_FORMAT_R32G32_FLOAT,
-          DXGI_FORMAT_R32G32_FLOAT,
-          DXGI_FORMAT_R32G32_FLOAT,
-      }),
-      f({
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_R32G32B32_FLOAT,
-          DXGI_FORMAT_R32G32B32_FLOAT,
-          DXGI_FORMAT_R32G32B32_FLOAT,
-          DXGI_FORMAT_R32G32B32_FLOAT,
-      }),
-      f({
-          DXGI_FORMAT_R8G8B8A8_UNORM,
-          DXGI_FORMAT_R8G8B8A8_SNORM,
-          DXGI_FORMAT_R16G16B16A16_UNORM,
-          DXGI_FORMAT_R16G16B16A16_SNORM,
-          DXGI_FORMAT_R32G32B32A32_FLOAT,
-          DXGI_FORMAT_R32G32B32A32_FLOAT,
-          DXGI_FORMAT_R32G32B32A32_FLOAT,
-          DXGI_FORMAT_R32G32B32A32_FLOAT,
-      }),
-  };
+// By component count minus one. Three-component vectors exist only as floats.
+constexpr std::array<ComponentFormats, 4> VERTEX_FORMATS = {{
+    {{DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_SNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_SNORM},
+     {DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_SINT, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_SINT},
+     DXGI_FORMAT_R32_FLOAT},
+    {{DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8_SNORM, DXGI_FORMAT_R16G16_UNORM,
+      DXGI_FORMAT_R16G16_SNORM},
+     {DXGI_FORMAT_R8G8_UINT, DXGI_FORMAT_R8G8_SINT, DXGI_FORMAT_R16G16_UINT,
+      DXGI_FORMAT_R16G16_SINT},
+     DXGI_FORMAT_R32G32_FLOAT},
+    {{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN},
+     {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN},
+     DXGI_FORMAT_R32G32B32_FLOAT},
+    {{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_SNORM, DXGI_FORMAT_R16G16B16A16_UNORM,
+      DXGI_FORMAT_R16G16B16A16_SNORM},
+     {DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R8G8B8A8_SINT, DXGI_FORMAT_R16G16B16A16_UINT,
+      DXGI_FORMAT_R16G16B16A16_SINT},
+     DXGI_FORMAT_R32G32B32A32_FLOAT},
+}};
 
-  static constexpr std::array<FormatMap, 4> d3d_integer_format_lookup = {
-      f({
-          DXGI_FORMAT_R8_UINT,
-          DXGI_FORMAT_R8_SINT,
-          DXGI_FORMAT_R16_UINT,
-          DXGI_FORMAT_R16_SINT,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-      }),
-      f({
-          DXGI_FORMAT_R8G8_UINT,
-          DXGI_FORMAT_R8G8_SINT,
-          DXGI_FORMAT_R16G16_UINT,
-          DXGI_FORMAT_R16G16_SINT,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-      }),
-      f({
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-      }),
-      f({
-          DXGI_FORMAT_R8G8B8A8_UINT,
-          DXGI_FORMAT_R8G8B8A8_SINT,
-          DXGI_FORMAT_R16G16B16A16_UINT,
-          DXGI_FORMAT_R16G16B16A16_SINT,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-          DXGI_FORMAT_UNKNOWN,
-      }),
-  };
+DXGI_FORMAT AttributeFormatFor(ComponentFormat type, int components, bool integer)
+{
+  const ComponentFormats& row = VERTEX_FORMATS[static_cast<size_t>(components - 1)];
+  const auto type_index = static_cast<u32>(type);
 
-  DXGI_FORMAT retval =
-      integer ? d3d_integer_format_lookup[size - 1][t] : d3d_float_format_lookup[size - 1][t];
-  if (retval == DXGI_FORMAT_UNKNOWN)
-  {
-    PanicAlertFmt("VarToD3D: Invalid type/size combo {}, {}, {}", t, size, integer);
-  }
-  return retval;
+  DXGI_FORMAT format;
+  if (type_index < 4)
+    format = integer ? row.integer[type_index] : row.normalized[type_index];
+  else
+    format = integer ? DXGI_FORMAT_UNKNOWN : row.floating;  // no integer floats
+
+  if (format == DXGI_FORMAT_UNKNOWN)
+    PanicAlertFmt("VarToD3D: Invalid type/size combo {}, {}, {}", type, components, integer);
+  return format;
 }
+}  // namespace
 
 D3DVertexFormat::D3DVertexFormat(const PortableVertexDeclaration& vtx_decl)
     : NativeVertexFormat(vtx_decl)
-
 {
+  // Every attribute is a TEXCOORD with the shader attribute as its index.
   AddAttribute(vtx_decl.position, ShaderAttrib::Position);
-
-  for (u32 i = 0; i < 3; i++)
-    AddAttribute(vtx_decl.normals[i], ShaderAttrib::Normal + i);
-
-  for (u32 i = 0; i < 2; i++)
-    AddAttribute(vtx_decl.colors[i], ShaderAttrib::Color0 + i);
-
-  for (u32 i = 0; i < 8; i++)
-    AddAttribute(vtx_decl.texcoords[i], ShaderAttrib::TexCoord0 + i);
-
+  for (u32 n = 0; n < 3; ++n)
+    AddAttribute(vtx_decl.normals[n], ShaderAttrib::Normal + static_cast<int>(n));
+  for (u32 n = 0; n < 2; ++n)
+    AddAttribute(vtx_decl.colors[n], ShaderAttrib::Color0 + static_cast<int>(n));
+  for (u32 n = 0; n < 8; ++n)
+    AddAttribute(vtx_decl.texcoords[n], ShaderAttrib::TexCoord0 + static_cast<int>(n));
   AddAttribute(vtx_decl.posmtx, ShaderAttrib::PositionMatrix);
 }
 
 D3DVertexFormat::~D3DVertexFormat()
 {
-  ID3D11InputLayout* layout = m_layout.load();
-  if (layout)
+  if (ID3D11InputLayout* const layout = m_layout.load())
     layout->Release();
 }
 
 ID3D11InputLayout* D3DVertexFormat::GetInputLayout(const void* vs_bytecode, size_t vs_bytecode_size)
 {
-  // CreateInputLayout requires a shader input, but it only looks at the signature of the shader,
-  // so we don't need to recompute it if the shader changes.
-  ID3D11InputLayout* layout = m_layout.load();
-  if (layout)
-    return layout;
+  // The layout is checked only against the shader's input signature, which is
+  // the same for every vertex shader, so one layout serves all of them.
+  if (ID3D11InputLayout* const cached = m_layout.load())
+    return cached;
 
-  HRESULT hr = D3D::device->CreateInputLayout(m_elems.data(), m_num_elems, vs_bytecode,
-                                              vs_bytecode_size, &layout);
-  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to create input layout: {}", DX11HRWrap(hr));
+  ID3D11InputLayout* created = nullptr;
+  const HRESULT result = D3D::device->CreateInputLayout(m_elems.data(), m_num_elems, vs_bytecode,
+                                                        vs_bytecode_size, &created);
+  ASSERT_MSG(VIDEO, SUCCEEDED(result), "Failed to create input layout: {}", DX11HRWrap(result));
 
-  // This method can be called from multiple threads, so ensure that only one thread sets the
-  // cached input layout pointer. If another thread beats this thread, use the existing layout.
-  ID3D11InputLayout* expected = nullptr;
-  if (!m_layout.compare_exchange_strong(expected, layout))
-  {
-    if (layout)
-      layout->Release();
+  // Pipelines can be compiled on several threads at once. The first layout
+  // stored wins; a loser drops its own and returns the winner's.
+  ID3D11InputLayout* stored = nullptr;
+  if (m_layout.compare_exchange_strong(stored, created))
+    return created;
 
-    layout = expected;
-  }
-
-  return layout;
+  if (created)
+    created->Release();
+  return stored;
 }
 
 void D3DVertexFormat::AddAttribute(const AttributeFormat& format, ShaderAttrib semantic_index)
 {
-  if (format.enable)
-  {
-    m_elems[m_num_elems].SemanticName = "TEXCOORD";
-    m_elems[m_num_elems].SemanticIndex = static_cast<u32>(semantic_index);
-    m_elems[m_num_elems].AlignedByteOffset = format.offset;
-    m_elems[m_num_elems].Format = VarToD3D(format.type, format.components, format.integer);
-    m_elems[m_num_elems].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
-    ++m_num_elems;
-  }
+  if (!format.enable)
+    return;
+
+  D3D11_INPUT_ELEMENT_DESC& element = m_elems[m_num_elems++];
+  element.SemanticName = "TEXCOORD";
+  element.SemanticIndex = static_cast<u32>(semantic_index);
+  element.AlignedByteOffset = static_cast<UINT>(format.offset);
+  element.Format = AttributeFormatFor(format.type, format.components, format.integer);
+  element.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
 }
 
 }  // namespace DX11

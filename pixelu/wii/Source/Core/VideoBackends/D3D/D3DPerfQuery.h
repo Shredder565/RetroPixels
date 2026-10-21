@@ -1,5 +1,4 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,8 @@
 
 namespace DX11
 {
+// PE pixel counters from D3D11 occlusion queries kept in a ring: queries are
+// begun at the write end and their results collected from the read end.
 class PerfQuery : public PerfQueryBase
 {
 public:
@@ -23,22 +24,26 @@ public:
   bool IsFlushed() const override;
 
 private:
-  struct ActiveQuery
+  struct RingEntry
   {
     ComPtr<ID3D11Query> query;
-    PerfQueryGroup query_group{};
+    PerfQueryGroup group{};
   };
 
-  void WeakFlush();
+  // Collects results that are already available, without waiting.
+  void CollectReady();
+  // Waits for the oldest query and adds its result. The ring must not be empty.
+  void CollectOldest();
 
-  // Only use when non-empty
-  void FlushOne();
+  RingEntry& EntryAt(u32 offset_from_read);
+  // Scales a sample count from the EFB's resolution to the native 640x528.
+  static u64 ToNativeResolution(u64 samples);
 
-  // when testing in SMS: 64 was too small, 128 was ok
+  // 64 entries proved too few in Super Mario Sunshine; 128 were enough.
   static const int PERF_QUERY_BUFFER_SIZE = 512;
 
-  std::array<ActiveQuery, PERF_QUERY_BUFFER_SIZE> m_query_buffer;
-  int m_query_read_pos;
+  std::array<RingEntry, PERF_QUERY_BUFFER_SIZE> m_ring;
+  u32 m_read_index = 0;
 };
 
 }  // namespace DX11

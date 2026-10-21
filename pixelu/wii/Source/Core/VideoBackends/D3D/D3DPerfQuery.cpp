@@ -1,5 +1,4 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D/D3DPerfQuery.h"
 
@@ -12,152 +11,160 @@
 
 namespace DX11
 {
-PerfQuery::PerfQuery() : m_query_read_pos()
+namespace
 {
-  for (ActiveQuery& entry : m_query_buffer)
-  {
-    D3D11_QUERY_DESC qdesc = CD3D11_QUERY_DESC(D3D11_QUERY_OCCLUSION, 0);
-    D3D::device->CreateQuery(&qdesc, &entry.query);
-  }
+bool IsCountedGroup(PerfQueryGroup group)
+{
+  // Only the z-compare groups are backed by occlusion queries.
+  return group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP;
+}
+}  // namespace
+
+PerfQuery::PerfQuery()
+{
+  D3D11_QUERY_DESC desc;
+  desc.Query = D3D11_QUERY_OCCLUSION;
+  desc.MiscFlags = 0;
+  for (RingEntry& entry : m_ring)
+    D3D::device->CreateQuery(&desc, &entry.query);
 
   ResetQuery();
 }
 
 PerfQuery::~PerfQuery() = default;
 
+PerfQuery::RingEntry& PerfQuery::EntryAt(u32 offset_from_read)
+{
+  return m_ring[(m_read_index + offset_from_read) % m_ring.size()];
+}
+
+u64 PerfQuery::ToNativeResolution(u64 samples)
+{
+  // Width first, then height, each rounding down, as the counters always have.
+  return samples * EFB_WIDTH / g_framebuffer_manager->GetEFBWidth() * EFB_HEIGHT /
+         g_framebuffer_manager->GetEFBHeight();
+}
+
 void PerfQuery::EnableQuery(PerfQueryGroup group)
 {
-  u32 query_count = m_query_count.load(std::memory_order_relaxed);
+  u32 pending = m_query_count.load(std::memory_order_relaxed);
 
-  // Is this sane?
-  if (query_count > m_query_buffer.size() / 2)
+  // Past half full, pick up whatever has finished.
+  if (pending > m_ring.size() / 2)
   {
-    WeakFlush();
-    query_count = m_query_count.load(std::memory_order_relaxed);
+    CollectReady();
+    pending = m_query_count.load(std::memory_order_relaxed);
   }
 
-  if (m_query_buffer.size() == query_count)
+  // Still full: wait for the oldest one to make room.
+  if (pending == m_ring.size())
   {
-    // TODO
-    FlushOne();
-    query_count = m_query_count.load(std::memory_order_relaxed);
+    CollectOldest();
+    pending = m_query_count.load(std::memory_order_relaxed);
     ERROR_LOG_FMT(VIDEO, "Flushed query buffer early!");
   }
 
-  // start query
-  if (group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP)
-  {
-    auto& entry = m_query_buffer[(m_query_read_pos + query_count) % m_query_buffer.size()];
+  if (!IsCountedGroup(group))
+    return;
 
-    D3D::context->Begin(entry.query.Get());
-    entry.query_group = group;
-
-    m_query_count.fetch_add(1, std::memory_order_relaxed);
-  }
+  RingEntry& entry = EntryAt(pending);
+  D3D::context->Begin(entry.query.Get());
+  entry.group = group;
+  m_query_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void PerfQuery::DisableQuery(PerfQueryGroup group)
 {
-  // stop query
-  if (group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP)
-  {
-    auto& entry = m_query_buffer[(m_query_read_pos + m_query_count.load(std::memory_order_relaxed) +
-                                  m_query_buffer.size() - 1) %
-                                 m_query_buffer.size()];
-    D3D::context->End(entry.query.Get());
-  }
+  if (!IsCountedGroup(group))
+    return;
+
+  // The newest entry is the one EnableQuery began.
+  const u32 newest =
+      static_cast<u32>(m_query_count.load(std::memory_order_relaxed) + m_ring.size() - 1);
+  D3D::context->End(EntryAt(newest).query.Get());
 }
 
 void PerfQuery::ResetQuery()
 {
   m_query_count.store(0, std::memory_order_relaxed);
-  for (auto& result : m_results)
-    result.store(0, std::memory_order_relaxed);
+  for (std::atomic<u32>& total : m_results)
+    total.store(0, std::memory_order_relaxed);
 }
 
 u32 PerfQuery::GetQueryResult(PerfQueryType type)
 {
-  u32 result = 0;
+  const auto total = [this](PerfQueryGroup group) {
+    return m_results[group].load(std::memory_order_relaxed);
+  };
 
-  if (type == PQ_ZCOMP_INPUT_ZCOMPLOC || type == PQ_ZCOMP_OUTPUT_ZCOMPLOC)
+  u32 value = 0;
+  switch (type)
   {
-    result = m_results[PQG_ZCOMP_ZCOMPLOC].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_ZCOMP_INPUT || type == PQ_ZCOMP_OUTPUT)
-  {
-    result = m_results[PQG_ZCOMP].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_BLEND_INPUT)
-  {
-    result = m_results[PQG_ZCOMP].load(std::memory_order_relaxed) +
-             m_results[PQG_ZCOMP_ZCOMPLOC].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_EFB_COPY_CLOCKS)
-  {
-    result = m_results[PQG_EFB_COPY_CLOCKS].load(std::memory_order_relaxed);
+  case PQ_ZCOMP_INPUT_ZCOMPLOC:
+  case PQ_ZCOMP_OUTPUT_ZCOMPLOC:
+    value = total(PQG_ZCOMP_ZCOMPLOC);
+    break;
+  case PQ_ZCOMP_INPUT:
+  case PQ_ZCOMP_OUTPUT:
+    value = total(PQG_ZCOMP);
+    break;
+  case PQ_BLEND_INPUT:
+    value = total(PQG_ZCOMP) + total(PQG_ZCOMP_ZCOMPLOC);
+    break;
+  case PQ_EFB_COPY_CLOCKS:
+    value = total(PQG_EFB_COPY_CLOCKS);
+    break;
+  default:
+    break;
   }
 
-  return result / 4;
+  // The counters count in quads of pixels.
+  return value / 4;
 }
 
-void PerfQuery::FlushOne()
+void PerfQuery::CollectOldest()
 {
-  auto& entry = m_query_buffer[m_query_read_pos];
+  RingEntry& oldest = m_ring[m_read_index];
 
-  UINT64 result = 0;
-  HRESULT hr = S_FALSE;
-  while (hr != S_OK)
-  {
-    // TODO: Might cause us to be stuck in an infinite loop!
-    hr = D3D::context->GetData(entry.query.Get(), &result, sizeof(result), 0);
-  }
+  // Spins until the GPU has the result.
+  UINT64 samples = 0;
+  HRESULT status = S_FALSE;
+  while (status != S_OK)
+    status = D3D::context->GetData(oldest.query.Get(), &samples, sizeof(samples), 0);
 
-  // NOTE: Reported pixel metrics should be referenced to native resolution
-  // TODO: Dropping the lower 2 bits from this count should be closer to actual
-  // hardware behavior when drawing triangles.
-  u64 native_res_result = result * EFB_WIDTH / g_framebuffer_manager->GetEFBWidth() * EFB_HEIGHT /
-                          g_framebuffer_manager->GetEFBHeight();
+  // Counts are kept relative to native resolution and single sampling.
+  u64 native = ToNativeResolution(samples);
   if (g_ActiveConfig.iMultisamples > 1)
-    native_res_result /= g_ActiveConfig.iMultisamples;
-  m_results[entry.query_group].fetch_add(static_cast<u32>(native_res_result),
-                                         std::memory_order_relaxed);
+    native /= g_ActiveConfig.iMultisamples;
+  m_results[oldest.group].fetch_add(static_cast<u32>(native), std::memory_order_relaxed);
 
-  m_query_read_pos = (m_query_read_pos + 1) % m_query_buffer.size();
+  m_read_index = static_cast<u32>((m_read_index + 1) % m_ring.size());
   m_query_count.fetch_sub(1, std::memory_order_relaxed);
 }
 
-// TODO: could selectively flush things, but I don't think that will do much
 void PerfQuery::FlushResults()
 {
   while (!IsFlushed())
-    FlushOne();
+    CollectOldest();
 }
 
-void PerfQuery::WeakFlush()
+void PerfQuery::CollectReady()
 {
   while (!IsFlushed())
   {
-    auto& entry = m_query_buffer[m_query_read_pos];
+    RingEntry& oldest = m_ring[m_read_index];
+    UINT64 samples = 0;
+    const HRESULT status = D3D::context->GetData(oldest.query.Get(), &samples, sizeof(samples),
+                                                 D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    if (status != S_OK)
+      return;
 
-    UINT64 result = 0;
-    HRESULT hr = D3D::context->GetData(entry.query.Get(), &result, sizeof(result),
-                                       D3D11_ASYNC_GETDATA_DONOTFLUSH);
-
-    if (hr == S_OK)
-    {
-      // NOTE: Reported pixel metrics should be referenced to native resolution
-      const u64 native_res_result = result * EFB_WIDTH / g_framebuffer_manager->GetEFBWidth() *
-                                    EFB_HEIGHT / g_framebuffer_manager->GetEFBHeight();
-      m_results[entry.query_group].store(static_cast<u32>(native_res_result),
-                                         std::memory_order_relaxed);
-
-      m_query_read_pos = (m_query_read_pos + 1) % m_query_buffer.size();
-      m_query_count.fetch_sub(1, std::memory_order_relaxed);
-    }
-    else
-    {
-      break;
-    }
+    // This path replaces the group's total rather than adding to it, and
+    // does not divide by the sample count.
+    m_results[oldest.group].store(static_cast<u32>(ToNativeResolution(samples)),
+                                  std::memory_order_relaxed);
+    m_read_index = static_cast<u32>((m_read_index + 1) % m_ring.size());
+    m_query_count.fetch_sub(1, std::memory_order_relaxed);
   }
 }
 

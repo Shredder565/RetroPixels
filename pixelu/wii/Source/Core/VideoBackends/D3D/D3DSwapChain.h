@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,8 @@ namespace DX11
 class DXTexture;
 class DXFramebuffer;
 
+// D3D11 swap chain: only buffer 0 is wrapped, because the D3D11 runtime
+// rotates the back buffers behind it.
 class SwapChain : public D3DCommon::SwapChain
 {
 public:
@@ -34,7 +35,6 @@ protected:
   void DestroySwapChainBuffers() override;
 
 private:
-  // The runtime takes care of renaming the buffers.
   std::unique_ptr<DXTexture> m_texture;
   std::unique_ptr<DXFramebuffer> m_framebuffer;
 };

@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D/D3DSwapChain.h"
 
@@ -19,35 +18,31 @@ SwapChain::~SwapChain() = default;
 
 std::unique_ptr<SwapChain> SwapChain::Create(const WindowSystemInfo& wsi)
 {
-  std::unique_ptr<SwapChain> swap_chain =
-      std::make_unique<SwapChain>(wsi, D3D::dxgi_factory.Get(), D3D::device.Get());
-  if (!swap_chain->CreateSwapChain(WantsStereo(), WantsHDR()))
+  auto chain = std::make_unique<SwapChain>(wsi, D3D::dxgi_factory.Get(), D3D::device.Get());
+  if (!chain->CreateSwapChain(WantsStereo(), WantsHDR()))
     return nullptr;
-
-  return swap_chain;
+  return chain;
 }
 
 bool SwapChain::CreateSwapChainBuffers()
 {
-  ComPtr<ID3D11Texture2D> texture;
-  HRESULT hr = m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&texture));
-  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to get swap chain buffer: {}", DX11HRWrap(hr));
-  if (FAILED(hr))
+  ComPtr<ID3D11Texture2D> buffer;
+  const HRESULT result = m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&buffer));
+  ASSERT_MSG(VIDEO, SUCCEEDED(result), "Failed to get swap chain buffer: {}", DX11HRWrap(result));
+  if (FAILED(result))
     return false;
 
-  m_texture = DXTexture::CreateAdopted(std::move(texture));
+  m_texture = DXTexture::CreateAdopted(std::move(buffer));
   if (!m_texture)
     return false;
 
   m_framebuffer = DXFramebuffer::Create(m_texture.get(), nullptr, {});
-  if (!m_framebuffer)
-    return false;
-
-  return true;
+  return m_framebuffer != nullptr;
 }
 
 void SwapChain::DestroySwapChainBuffers()
 {
+  // The framebuffer's view refers to the texture, so it goes first.
   m_framebuffer.reset();
   m_texture.reset();
 }

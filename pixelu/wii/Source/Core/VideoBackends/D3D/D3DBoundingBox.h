@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,9 @@
 
 namespace DX11
 {
+// The four bounding-box values live in a raw buffer that pixel shaders update
+// through a UAV bound next to the render targets; reads go through a staging
+// copy.
 class D3DBoundingBox final : public BoundingBox
 {
 public:

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@
 
 namespace DX11
 {
+// DXBC bytecode plus the D3D11 shader object made from it. The object is held
+// through its common base and handed out as the stage's interface.
 class DXShader final : public D3DCommon::Shader
 {
 public:
