@@ -22,11 +22,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"retropixels/internal/ffmpeg"
 )
 
 type crop struct{ X, Y, W, H int }
@@ -76,56 +79,17 @@ func recLogPath() string { return filepath.Join(recordingsDir(), "logs", "last-r
 
 // ---------------- ffmpeg ----------------
 
-func findFFmpeg() string {
-	exe, _ := os.Executable()
-	dir := filepath.Dir(exe)
-	cands := []string{
-		filepath.Join(dir, "ffmpeg", "ffmpeg.exe"),
-		filepath.Join(dir, "ffmpeg.exe"),
-		filepath.Join(dir, "ffmpeg", "bin", "ffmpeg.exe"),
-	}
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		cands = append(cands, filepath.Join(la, "RetroPixels", "ffmpeg", "ffmpeg.exe"))
-	}
-	for _, p := range cands {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	if p := os.Getenv("RETRO_FFMPEG"); p != "" {
-		return p
-	}
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return p
-	}
-	return ""
-}
+// findFFmpeg: ffmpeg next to the app (ffmpeg.exe on Windows, ffmpeg
+// elsewhere), in the folder it's downloaded to (%LOCALAPPDATA% or
+// ~/.local/share), RETRO_FFMPEG, then PATH. internal/ffmpeg has the list,
+// shared with RetroPixels Native.
+func findFFmpeg() string { return ffmpeg.Find() }
 
-var encoderOrder = []string{"h264_nvenc", "h264_amf", "h264_qsv", "libx264"}
+// encoderOrder: graphics-card encoders, best first, then the CPU's; on
+// Linux VAAPI (Intel and AMD graphics) right after NVIDIA's.
+var encoderOrder = ffmpeg.Order(runtime.GOOS)
 
-func encoderArgs(enc, quality string) []string {
-	q := map[string][3]string{ // high, balanced, small
-		"h264_nvenc": {"18", "21", "26"},
-		"h264_amf":   {"18", "22", "27"},
-		"h264_qsv":   {"18", "22", "27"},
-		"libx264":    {"18", "21", "26"},
-	}[enc]
-	v := q[1]
-	if quality == "high" {
-		v = q[0]
-	} else if quality == "small" {
-		v = q[2]
-	}
-	switch enc {
-	case "h264_nvenc":
-		return []string{"-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", v, "-b:v", "0", "-profile:v", "high"}
-	case "h264_amf":
-		return []string{"-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", v, "-qp_p", v}
-	case "h264_qsv":
-		return []string{"-c:v", "h264_qsv", "-preset", "medium", "-global_quality", v}
-	}
-	return []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", v}
-}
+func encoderArgs(enc, quality string) []string { return ffmpeg.EncoderArgs(enc, quality) }
 
 var (
 	encMu    sync.Mutex
@@ -142,10 +106,7 @@ func encoderWorks(ff, enc string) bool {
 	if v, ok := encFound[enc]; ok {
 		return v
 	}
-	args := append([]string{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=640x360:r=30:d=0.3"},
-		encoderArgs(enc, "balanced")...)
-	args = append(args, "-pix_fmt", "yuv420p", "-f", "null", "-")
-	cmd := hiddenCommand(ff, args...)
+	cmd := hiddenCommand(ff, ffmpeg.TestArgs(enc)...)
 	err := runWithTimeout(cmd, 15*time.Second)
 	encFound[enc] = err == nil
 	return err == nil
@@ -623,10 +584,7 @@ func finalArgs(j finalJob, enc, quality string) []string {
 	if len(j.Video) > 1 {
 		labels += fmt.Sprintf("concat=n=%d:v=1:a=0,", len(j.Video))
 	}
-	pix := "yuv420p"
-	if enc == "h264_qsv" {
-		pix = "nv12"
-	}
+	pix := ffmpeg.PixFmt(enc) // for VAAPI also the upload to the graphics card
 	dur := j.To - j.From
 	g = append(g, fmt.Sprintf("%sfps=%s,trim=start=%s:end=%s,setpts=PTS-STARTPTS,format=%s[v]",
 		labels, ffNum(j.FPS), ffNum(j.From), ffNum(j.To), pix))
