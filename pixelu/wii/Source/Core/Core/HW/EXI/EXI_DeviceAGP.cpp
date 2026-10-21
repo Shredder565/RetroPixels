@@ -1,15 +1,16 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceAGP.h"
 
 #include <algorithm>
-#include <string>
-#include <vector>
+#include <array>
+#include <bit>
+#include <cstring>
+#include <utility>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
-#include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
@@ -18,344 +19,359 @@
 
 namespace ExpansionInterface
 {
-CEXIAgp::CEXIAgp(Core::System& system, Slot slot) : IEXIDevice(system)
+
+namespace
+{
+// Command words (the first write of a transfer).
+constexpr u32 CMD_ID = 0xAE000000;
+constexpr u32 CMD_STATUS = 0xAE010000;
+constexpr u32 CMD_ROM_READ_2 = 0xAE020000;
+constexpr u32 CMD_ROM_READ_4 = 0xAE030000;
+constexpr u32 CMD_EEPROM_READ = 0xAE040000;
+constexpr u32 CMD_EEPROM_WRITE = 0xAE070000;
+constexpr u32 CMD_RESET_09 = 0xAE090000;
+constexpr u32 CMD_EEPROM_RESET = 0xAE0A0000;
+constexpr u32 CMD_EEPROM_BIT_READ = 0xAE0B0000;
+constexpr u32 CMD_EEPROM_BIT_WRITE = 0xAE0C0000;
+
+constexpr u8 BIT_READ_ZERO = 0x0A;
+constexpr u8 BIT_READ_ONE = 0x0B;
+
+constexpr u32 ROM_32MIB = 0x02000000;
+constexpr std::size_t EMPTY_ROM_SIZE = 0x2000;
+
+// One step of the 1-Wire CRC-8 (reflected polynomial 0x8C), one table entry
+// per bit of the byte.
+constexpr std::array<u8, 8> CRC_BITS{0x5E, 0xBC, 0x61, 0xC2, 0x9D, 0x23, 0x46, 0x8C};
+
+u8 Byte(u32 value, int index)
+{
+  return static_cast<u8>((value >> (index * 8)) & 0xFF);
+}
+
+// The save holds 64-bit EEPROM words most significant byte first; in memory
+// each word is a host-order u64.
+void SwapWords(std::vector<u8>& bytes)
+{
+  for (std::size_t i = 0; i + 8 <= bytes.size(); i += 8)
+  {
+    for (std::size_t j = 0; j != 4; ++j)
+      std::swap(bytes[i + j], bytes[i + 7 - j]);
+  }
+}
+
+bool IsStandardSaveSize(u32 size)
+{
+  return size == 512 || size == 8192;
+}
+
+// Only correct on a little-endian host, which every PixelU-Wii build is.
+static_assert(std::endian::native == std::endian::little);
+}  // namespace
+
+CEXIAgp::CEXIAgp(Core::System& system, const Slot slot) : IEXIDevice(system), m_slot{slot}
 {
   ASSERT(IsMemcardSlot(slot));
-  m_slot = slot;
 
-  // Create the ROM
-  m_rom_size = 0;
+  std::string folder;
+  std::string name;
+  std::string extension;
+  SplitPath(Config::Get(Config::GetInfoForAGPCartPath(m_slot)), &folder, &name, &extension);
+  m_base_path = folder + name;
 
-  LoadRom();
-
-  m_address = 0;
+  LoadRom(m_base_path + extension);
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "Loaded GBA rom: {} card: {}", m_base_path, m_slot);
+  LoadSave(m_base_path + ".sav");
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "Loaded GBA sav: {} card: {}", m_base_path, m_slot);
 }
 
 CEXIAgp::~CEXIAgp()
 {
-  std::string path;
-  std::string filename;
-  std::string ext;
-  std::string gbapath;
-  SplitPath(Config::Get(Config::GetInfoForAGPCartPath(m_slot)), &path, &filename, &ext);
-  gbapath = path + filename;
-
-  if (!gbapath.empty())
-    SaveFileFromEEPROM(gbapath + ".sav");
+  if (!m_base_path.empty())
+    WriteSave(m_base_path + ".sav");
 }
 
-void CEXIAgp::CRC8(const u8* data, u32 size)
+void CEXIAgp::LoadRom(const std::string& path)
 {
-  for (u32 it = 0; it < size; it++)
+  File::IOFile file(path, "rb");
+  if (!file.IsOpen())
   {
-    u8 crc = 0;
-    m_hash = m_hash ^ data[it];
-    if (m_hash & 1)
-      crc ^= 0x5e;
-    if (m_hash & 2)
-      crc ^= 0xbc;
-    if (m_hash & 4)
-      crc ^= 0x61;
-    if (m_hash & 8)
-      crc ^= 0xc2;
-    if (m_hash & 0x10)
-      crc ^= 0x9d;
-    if (m_hash & 0x20)
-      crc ^= 0x23;
-    if (m_hash & 0x40)
-      crc ^= 0x46;
-    if (m_hash & 0x80)
-      crc ^= 0x8c;
-    m_hash = crc;
+    m_rom.assign(EMPTY_ROM_SIZE, 0);
+    return;
   }
+  const u64 size = file.GetSize();
+  m_rom_size = static_cast<u32>(size);
+  m_rom_mask = m_rom_size - 1;
+  m_rom.resize(static_cast<std::size_t>(size));
+  file.ReadBytes(m_rom.data(), m_rom.size());
 }
 
-void CEXIAgp::LoadRom()
+void CEXIAgp::LoadSave(const std::string& path)
 {
-  // Load whole ROM dump
-  std::string path;
-  std::string filename;
-  std::string ext;
-  SplitPath(Config::Get(Config::GetInfoForAGPCartPath(m_slot)), &path, &filename, &ext);
-  const std::string gbapath = path + filename;
-  LoadFileToROM(gbapath + ext);
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "Loaded GBA rom: {} card: {}", gbapath, m_slot);
-  LoadFileToEEPROM(gbapath + ".sav");
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "Loaded GBA sav: {} card: {}", gbapath, m_slot);
-}
+  File::IOFile file(path, "rb");
+  if (!file.IsOpen())
+    return;
 
-void CEXIAgp::LoadFileToROM(const std::string& filename)
-{
-  File::IOFile pStream(filename, "rb");
-  if (pStream)
+  const u64 size = file.GetSize();
+  m_eeprom_size = static_cast<u32>(size);
+  m_eeprom_mask = m_eeprom_size - 1;
+  m_eeprom.resize(static_cast<std::size_t>(size));
+  file.ReadBytes(m_eeprom.data(), m_eeprom.size());
+
+  if (!IsStandardSaveSize(m_eeprom_size))
   {
-    u64 filesize = pStream.GetSize();
-    m_rom_size = filesize & 0xFFFFFFFF;
-    m_rom_mask = (m_rom_size - 1);
-
-    m_rom.resize(m_rom_size);
-
-    pStream.ReadBytes(m_rom.data(), filesize);
+    m_eeprom_status_mask = 0;
+    return;
   }
+
+  SwapWords(m_eeprom);
+  const bool small = m_eeprom_size == 512;
+  m_eeprom_add_end = small ? 8 : 16;
+  m_eeprom_add_mask = small ? 0x3F : 0x3FF;
+  m_eeprom_read_mask = small ? 0x80 : 0x8000;
+  m_eeprom_status_mask = m_rom_size == ROM_32MIB ? 0x1FFFF00 : 0x1000000;
+}
+
+void CEXIAgp::WriteSave(const std::string& path) const
+{
+  File::IOFile file(path, "wb");
+  std::vector<u8> bytes = m_eeprom;
+  if (IsStandardSaveSize(m_eeprom_size))
+    SwapWords(bytes);
+  file.WriteBytes(bytes.data(), bytes.size());
+}
+
+void CEXIAgp::Hash(u8 byte)
+{
+  const u8 mixed = static_cast<u8>(m_hash ^ byte);
+  u8 result = 0;
+  for (std::size_t bit = 0; bit != CRC_BITS.size(); ++bit)
+  {
+    if ((mixed >> bit) & 1)
+      result ^= CRC_BITS[bit];
+  }
+  m_hash = result;
+}
+
+u8 CEXIAgp::RomByte()
+{
+  const u32 index = m_rw_offset++ & m_rom_mask;
+  return index < m_rom.size() ? m_rom[index] : u8{0};
+}
+
+bool CEXIAgp::ReadEEPROMWord(u32 index, u64* word) const
+{
+  const std::size_t at = std::size_t{index} * 8;
+  if (m_eeprom_size == 0 || at + 8 > m_eeprom.size())
+    return false;
+  std::memcpy(word, &m_eeprom[at], sizeof(*word));
+  return true;
+}
+
+void CEXIAgp::WriteEEPROMBit(u32 data)
+{
+  const u32 pos = m_eeprom_pos;
+  const u32 end = m_eeprom_add_end;
+  const bool set = ((data >> 16) & 1) != 0;
+  const u32 special = (m_eeprom_cmd & m_eeprom_read_mask) != 0 ? end : end + 64;
+
+  if (pos < end || pos == special)
+  {
+    // Address (and read/write flag) bits, most significant first.
+    const u32 mask = 1u << (end - std::min(pos, end));
+    if (set)
+      m_eeprom_cmd |= mask;
+    else
+      m_eeprom_cmd &= ~mask;
+
+    if (pos == end + 64)
+    {
+      const std::size_t at = std::size_t{(m_eeprom_cmd >> 1) & m_eeprom_add_mask} * 8;
+      if (m_eeprom_size != 0 && at + 8 <= m_eeprom.size())
+        std::memcpy(&m_eeprom[at], &m_eeprom_data, sizeof(m_eeprom_data));
+      m_eeprom_write_status = true;
+    }
+    return;
+  }
+
+  // Data bits, most significant first; bits past the word are ignored.
+  if (pos > end + 63)
+    return;
+  const u64 mask = u64{1} << (end + 63 - pos);
+  if (set)
+    m_eeprom_data |= mask;
   else
-  {
-    // dummy rom data
-    m_rom.resize(0x2000);
-  }
-}
-
-void CEXIAgp::LoadFileToEEPROM(const std::string& filename)
-{
-  // Technically one of EEPROM, Flash, SRAM, FRAM
-  File::IOFile pStream(filename, "rb");
-  if (pStream)
-  {
-    u64 filesize = pStream.GetSize();
-    m_eeprom_size = filesize & 0xFFFFFFFF;
-    m_eeprom_mask = (m_eeprom_size - 1);
-
-    m_eeprom.resize(m_eeprom_size);
-    pStream.ReadBytes(m_eeprom.data(), filesize);
-    if ((m_eeprom_size == 512) || (m_eeprom_size == 8192))
-    {
-      // Handle endian read - could be done with byte access in 0xAE commands instead
-      for (u32 index = 0; index < (m_eeprom_size / 8); index++)
-      {
-        u64 NewVal = 0;
-        for (u32 indexb = 0; indexb < 8; indexb++)
-          NewVal = (NewVal << 0x8) | m_eeprom[index * 8 + indexb];
-        ((u64*)(m_eeprom.data()))[index] = NewVal;
-      }
-      m_eeprom_add_end = (m_eeprom_size == 512 ? (2 + 6) : (2 + 14));
-      m_eeprom_add_mask = (m_eeprom_size == 512 ? 0x3F : 0x3FF);
-      m_eeprom_read_mask = (m_eeprom_size == 512 ? 0x80 : 0x8000);
-      m_eeprom_status_mask = (m_rom_size == 0x2000000 ? 0x1FFFF00 : 0x1000000);
-    }
-    else
-      m_eeprom_status_mask = 0;
-  }
-  else
-  {
-    m_eeprom_size = 0;
-    m_eeprom.clear();
-  }
-}
-
-void CEXIAgp::SaveFileFromEEPROM(const std::string& filename)
-{
-  File::IOFile pStream(filename, "wb");
-  if (pStream)
-  {
-    if ((m_eeprom_size == 512) || (m_eeprom_size == 8192))
-    {
-      // Handle endian write - could be done with byte access in 0xAE commands instead
-      std::vector<u8> temp_eeprom(m_eeprom_size);
-      for (u32 index = 0; index < (m_eeprom_size / 8); index++)
-      {
-        u64 NewVal = ((u64*)(m_eeprom.data()))[index];
-        for (u32 indexb = 0; indexb < 8; indexb++)
-          temp_eeprom[index * 8 + (7 - indexb)] = (NewVal >> (indexb * 8)) & 0xFF;
-      }
-      pStream.WriteBytes(temp_eeprom.data(), m_eeprom_size);
-    }
-    else
-    {
-      pStream.WriteBytes(m_eeprom.data(), m_eeprom_size);
-    }
-  }
-}
-
-u32 CEXIAgp::ImmRead(u32 _uSize)
-{
-  u32 uData = 0;
-  u8 RomVal1, RomVal2, RomVal3, RomVal4;
-
-  switch (m_current_cmd)
-  {
-  case 0xAE000000:       // Clock handshake?
-    uData = 0x5AAA5517;  // 17 is precalculated hash
-    m_current_cmd = 0;
-    break;
-  case 0xAE010000:  // Init?
-    uData = (m_return_pos == 0) ? 0x01020304 :
-                                  0xF0020304;  // F0 is precalculated hash, 020304 is left over
-    if (m_return_pos == 1)
-      m_current_cmd = 0;
-    else
-      m_return_pos = 1;
-    break;
-  case 0xAE020000:  // Read 2 bytes with 24 bit address
-    if (m_eeprom_write_status && ((m_rw_offset & m_eeprom_status_mask) == m_eeprom_status_mask) &&
-        (m_eeprom_status_mask != 0))
-    {
-      RomVal1 = 0x1;
-      RomVal2 = 0x0;
-    }
-    else
-    {
-      RomVal1 = m_rom[(m_rw_offset++) & m_rom_mask];
-      RomVal2 = m_rom[(m_rw_offset++) & m_rom_mask];
-    }
-    CRC8(&RomVal2, 1);
-    CRC8(&RomVal1, 1);
-    uData = (RomVal2 << 24) | (RomVal1 << 16) | (m_hash << 8);
-    m_current_cmd = 0;
-    break;
-  case 0xAE030000:  // read the next 4 bytes out of 0x10000 group
-    if (_uSize == 1)
-    {
-      uData = 0xFF000000;
-      m_current_cmd = 0;
-    }
-    else
-    {
-      RomVal1 = m_rom[(m_rw_offset++) & m_rom_mask];
-      RomVal2 = m_rom[(m_rw_offset++) & m_rom_mask];
-      RomVal3 = m_rom[(m_rw_offset++) & m_rom_mask];
-      RomVal4 = m_rom[(m_rw_offset++) & m_rom_mask];
-      CRC8(&RomVal2, 1);
-      CRC8(&RomVal1, 1);
-      CRC8(&RomVal4, 1);
-      CRC8(&RomVal3, 1);
-      uData = (RomVal2 << 24) | (RomVal1 << 16) | (RomVal4 << 8) | (RomVal3);
-    }
-    break;
-  case 0xAE040000:  // read 1 byte from 16 bit address
-    // ToDo: Flash special handling
-    if (m_eeprom_size == 0)
-      RomVal1 = 0xFF;
-    else
-      RomVal1 = (m_eeprom.data())[m_eeprom_pos];
-    CRC8(&RomVal1, 1);
-    uData = (RomVal1 << 24) | (m_hash << 16);
-    m_current_cmd = 0;
-    break;
-  case 0xAE0B0000:  // read 1 bit from DMA with 6 or 14 bit address
-    // Change to byte access instead of endian file access?
-    RomVal1 = EE_READ_FALSE;
-    if ((m_eeprom_size != 0) && (m_eeprom_pos >= EE_IGNORE_BITS) &&
-        ((((u64*)m_eeprom.data())[(m_eeprom_cmd >> 1) & m_eeprom_add_mask]) >>
-         ((EE_DATA_BITS - 1) - (m_eeprom_pos - EE_IGNORE_BITS))) &
-            0x1)
-    {
-      RomVal1 = EE_READ_TRUE;
-    }
-    RomVal2 = 0;
-    CRC8(&RomVal2, 1);
-    CRC8(&RomVal1, 1);
-    uData = (RomVal2 << 24) | (RomVal1 << 16) | (m_hash << 8);
-    m_eeprom_pos++;
-    m_current_cmd = 0;
-    break;
-  case 0xAE070000:  // complete write 1 byte from 16 bit address
-  case 0xAE0C0000:  // complete write 1 bit from dma with 6 or 14 bit address
-    uData = m_hash << 24;
-    m_current_cmd = 0;
-    break;
-  default:
-    uData = 0x0;
-    m_current_cmd = 0;
-    break;
-  }
-  DEBUG_LOG_FMT(EXPANSIONINTERFACE, "AGP read {:x}", uData);
-  return uData;
+    m_eeprom_data &= ~mask;
 }
 
 void CEXIAgp::ImmWrite(u32 _uData, u32 _uSize)
 {
-  // 0x00 = Execute current command?
-  if ((_uSize == 1) && ((_uData & 0xFF000000) == 0))
+  const u32 data = _uData;
+  if (_uSize == 1 && Byte(data, 3) == 0)
     return;
 
-  u8 HashCmd;
-  u64 Mask;
-  DEBUG_LOG_FMT(EXPANSIONINTERFACE, "AGP command {:x}", _uData);
   switch (m_current_cmd)
   {
-  case 0xAE020000:  // set up 24 bit address for read 2 bytes
-  case 0xAE030000:  // set up 24 bit address for read (0x10000 byte group)
-    // 25 bit address shifted one bit right = 24 bits
-    m_rw_offset = ((_uData & 0xFFFFFF00) >> (8 - 1));
+  case CMD_ROM_READ_2:
+  case CMD_ROM_READ_4:
+    m_rw_offset = (data & 0xFFFFFF00) >> 7;
     m_return_pos = 0;
-    HashCmd = (_uData & 0xFF000000) >> 24;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x00FF0000) >> 16;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x0000FF00) >> 8;
-    CRC8(&HashCmd, 1);
+    Hash(Byte(data, 3));
+    Hash(Byte(data, 2));
+    Hash(Byte(data, 1));
+    return;
+
+  case CMD_EEPROM_READ:
+    m_eeprom_pos = static_cast<u16>((data >> 16) & m_eeprom_mask);
+    Hash(Byte(data, 3));
+    Hash(Byte(data, 2));
+    return;
+
+  case CMD_EEPROM_WRITE:
+    m_eeprom_pos = static_cast<u16>((data >> 16) & m_eeprom_mask);
+    if (m_eeprom_size != 0 && m_eeprom_pos < m_eeprom.size())
+      m_eeprom[m_eeprom_pos] = Byte(data, 1);
+    Hash(Byte(data, 3));
+    Hash(Byte(data, 2));
+    Hash(Byte(data, 1));
+    return;
+
+  case CMD_EEPROM_BIT_WRITE:
+    WriteEEPROMBit(data);
+    ++m_eeprom_pos;
+    m_return_pos = 0;
+    Hash(Byte(data, 3));
+    Hash(Byte(data, 2));
+    return;
+
+  case CMD_EEPROM_BIT_READ:
+    m_eeprom_write_status = false;
+    return;
+
+  case CMD_ID:
+  case CMD_STATUS:
+  case CMD_RESET_09:
+    m_eeprom_write_status = false;
+    m_eeprom_pos = 0;
     break;
-  case 0xAE040000:  // set up 16 bit address for read 1 byte
-    // ToDo: Flash special handling
-    m_eeprom_pos = ((_uData & 0xFFFF0000) >> 0x10) & m_eeprom_mask;
-    HashCmd = (_uData & 0xFF000000) >> 24;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x00FF0000) >> 16;
-    CRC8(&HashCmd, 1);
+
+  case CMD_EEPROM_RESET:
+    m_eeprom_pos = 0;
     break;
-  case 0xAE070000:  // write 1 byte from 16 bit address
-    // ToDo: Flash special handling
-    m_eeprom_pos = ((_uData & 0xFFFF0000) >> 0x10) & m_eeprom_mask;
-    if (m_eeprom_size != 0)
-      ((m_eeprom.data()))[(m_eeprom_pos)] = (_uData & 0x0000FF00) >> 0x8;
-    HashCmd = (_uData & 0xFF000000) >> 24;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x00FF0000) >> 16;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x0000FF00) >> 8;
-    CRC8(&HashCmd, 1);
+
+  default:
     break;
-  case 0xAE0C0000:  // write 1 bit from dma with 6 or 14 bit address
-    if ((m_eeprom_pos < m_eeprom_add_end) ||
-        (m_eeprom_pos == ((m_eeprom_cmd & m_eeprom_read_mask) ? m_eeprom_add_end :
-                                                                m_eeprom_add_end + EE_DATA_BITS)))
+  }
+
+  // A new command.
+  DEBUG_LOG_FMT(EXPANSIONINTERFACE, "AGP command {:x}", data);
+  m_current_cmd = data;
+  m_return_pos = 0;
+  m_hash = 0xFF;
+  Hash(Byte(data, 2));
+}
+
+u32 CEXIAgp::ImmRead(u32 _uSize)
+{
+  u32 result = 0;
+  bool keep_command = false;
+
+  switch (m_current_cmd)
+  {
+  case CMD_ID:
+    result = 0x5AAA5517;
+    break;
+
+  case CMD_STATUS:
+    result = m_return_pos == 0 ? 0x01020304 : 0xF0020304;
+    if (m_return_pos != 1)
     {
-      Mask = (1ULL << (m_eeprom_add_end - std::min(m_eeprom_pos, m_eeprom_add_end)));
-      if ((_uData >> 16) & 0x1)
-        m_eeprom_cmd |= Mask;
-      else
-        m_eeprom_cmd &= ~Mask;
-      if (m_eeprom_pos == m_eeprom_add_end + EE_DATA_BITS)
-      {
-        // Change to byte access instead of endian file access?
-        if (m_eeprom_size != 0)
-          ((u64*)(m_eeprom.data()))[(m_eeprom_cmd >> 1) & m_eeprom_add_mask] = m_eeprom_data;
-        m_eeprom_write_status = true;
-      }
+      m_return_pos = 1;
+      keep_command = true;
+    }
+    break;
+
+  case CMD_ROM_READ_2:
+  {
+    u8 first;
+    u8 second;
+    if (m_eeprom_write_status && m_eeprom_status_mask != 0 &&
+        (m_rw_offset & m_eeprom_status_mask) == m_eeprom_status_mask)
+    {
+      first = 0x01;
+      second = 0x00;
     }
     else
     {
-      Mask = (1ULL << (m_eeprom_add_end + EE_DATA_BITS - 1 - m_eeprom_pos));
-      if ((_uData >> 16) & 0x1)
-        m_eeprom_data |= Mask;
-      else
-        m_eeprom_data &= ~Mask;
+      first = RomByte();
+      second = RomByte();
     }
-    m_eeprom_pos++;
-    m_return_pos = 0;
-    HashCmd = (_uData & 0xFF000000) >> 24;
-    CRC8(&HashCmd, 1);
-    HashCmd = (_uData & 0x00FF0000) >> 16;
-    CRC8(&HashCmd, 1);
-    break;
-  case 0xAE0B0000:
-    m_eeprom_write_status = false;
-    break;
-  case 0xAE000000:
-  case 0xAE010000:
-  case 0xAE090000:                  // start DMA
-    m_eeprom_write_status = false;  // ToDo: Verify with hardware which commands disable EEPROM CS
-    [[fallthrough]];
-  case 0xAE0A0000:  // end DMA
-    m_eeprom_pos = 0;
-    [[fallthrough]];
-  default:
-    m_current_cmd = _uData;
-    m_return_pos = 0;
-    m_hash = 0xFF;
-    HashCmd = (_uData & 0x00FF0000) >> 16;
-    CRC8(&HashCmd, 1);
+    Hash(second);
+    Hash(first);
+    result = (u32{second} << 24) | (u32{first} << 16) | (u32{m_hash} << 8);
     break;
   }
+
+  case CMD_ROM_READ_4:
+  {
+    if (_uSize == 1)
+    {
+      result = 0xFF000000;
+      break;
+    }
+    const u8 v1 = RomByte();
+    const u8 v2 = RomByte();
+    const u8 v3 = RomByte();
+    const u8 v4 = RomByte();
+    Hash(v2);
+    Hash(v1);
+    Hash(v4);
+    Hash(v3);
+    result = (u32{v2} << 24) | (u32{v1} << 16) | (u32{v4} << 8) | v3;
+    keep_command = true;
+    break;
+  }
+
+  case CMD_EEPROM_READ:
+  {
+    const u8 value =
+        (m_eeprom_size == 0 || m_eeprom_pos >= m_eeprom.size()) ? u8{0xFF} : m_eeprom[m_eeprom_pos];
+    Hash(value);
+    result = (u32{value} << 24) | (u32{m_hash} << 16);
+    break;
+  }
+
+  case CMD_EEPROM_BIT_READ:
+  {
+    u8 value = BIT_READ_ZERO;
+    u64 word = 0;
+    if (m_eeprom_pos >= 4 && m_eeprom_pos <= 67 &&
+        ReadEEPROMWord((m_eeprom_cmd >> 1) & m_eeprom_add_mask, &word))
+    {
+      if ((word >> (63 - (m_eeprom_pos - 4))) & 1)
+        value = BIT_READ_ONE;
+    }
+    Hash(0x00);
+    Hash(value);
+    result = (u32{value} << 16) | (u32{m_hash} << 8);
+    ++m_eeprom_pos;
+    break;
+  }
+
+  case CMD_EEPROM_WRITE:
+  case CMD_EEPROM_BIT_WRITE:
+    result = u32{m_hash} << 24;
+    break;
+
+  default:
+    result = 0;
+    break;
+  }
+
+  DEBUG_LOG_FMT(EXPANSIONINTERFACE, "AGP read {:x}", result);
+  if (!keep_command)
+    m_current_cmd = 0;
+  return result;
 }
 
 void CEXIAgp::DoState(PointerWrap& p)
@@ -382,4 +398,5 @@ void CEXIAgp::DoState(PointerWrap& p)
   p.Do(m_rom_size);
   p.Do(m_rw_offset);
 }
+
 }  // namespace ExpansionInterface

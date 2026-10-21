@@ -1,25 +1,72 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceModem.h"
 
 #include <algorithm>
 #include <cstring>
-#include <memory>
-#include <string>
+#include <string_view>
 
 #include "Common/ChunkFile.h"
-#include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 #include "Common/Logging/Log.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/Memmap.h"
-#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
 namespace ExpansionInterface
 {
+
+namespace
+{
+// Transfer descriptor fields.
+constexpr u32 DESC_WRITE = 0x40000000;
+constexpr u32 DESC_MODEM = 0x20000000;
+constexpr u32 DESC_KIND_MASK = 0x0F000000;
+constexpr u32 KIND_AT = 0x03000000;
+constexpr u32 KIND_PACKET = 0x08000000;
+constexpr u32 RESET_DESCRIPTOR = 0x00008000;
+
+// Registers.
+constexpr std::size_t REG_DEVICE_TYPE = 0x00;
+constexpr std::size_t REG_INTERRUPT_MASK = 0x01;
+constexpr std::size_t REG_PENDING_INTERRUPTS = 0x02;
+constexpr std::size_t REG_AT_COMMAND_SIZE = 0x04;
+constexpr std::size_t REG_AT_REPLY_SIZE = 0x05;
+constexpr std::size_t REG_RX_AVAILABLE_HIGH = 0x0B;
+constexpr std::size_t REG_RX_AVAILABLE_LOW = 0x0C;
+constexpr std::size_t REG_RX_THRESHOLD_HIGH = 0x10;
+constexpr std::size_t REG_RX_THRESHOLD_LOW = 0x11;
+constexpr std::size_t REGISTER_COUNT = 0x20;
+
+// Interrupt bits.
+constexpr u8 INT_AT_REPLY = 0x02;
+constexpr u8 INT_SEND_READY = 0x10;
+constexpr u8 INT_RECEIVE_READY = 0x20;
+
+constexpr std::size_t RX_AVAILABLE_LIMIT = 0x200;
+
+bool IsWrite(u32 descriptor)
+{
+  return (descriptor & DESC_WRITE) != 0;
+}
+
+bool IsModem(u32 descriptor)
+{
+  return (descriptor & DESC_MODEM) != 0;
+}
+
+u32 RemainingSize(u32 descriptor)
+{
+  return (descriptor >> 8) & 0xFFFF;
+}
+
+std::size_t FirstRegister(u32 descriptor)
+{
+  return (descriptor >> 24) & 0x1F;
+}
+}  // namespace
 
 CEXIModem::CEXIModem(Core::System& system, ModemDeviceType type) : IEXIDevice(system)
 {
@@ -32,8 +79,8 @@ CEXIModem::CEXIModem(Core::System& system, ModemDeviceType type) : IEXIDevice(sy
     break;
   }
 
-  m_regs[Register::DEVICE_TYPE] = 0x02;
-  m_regs[Register::INTERRUPT_MASK] = 0x02;
+  m_registers[REG_DEVICE_TYPE] = 0x02;
+  m_registers[REG_INTERRUPT_MASK] = 0x02;
 }
 
 CEXIModem::~CEXIModem()
@@ -47,346 +94,311 @@ bool CEXIModem::IsPresent() const
   return true;
 }
 
-void CEXIModem::SetCS(int cs)
+void CEXIModem::SetCS(int)
 {
-  m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
+  m_descriptor = NO_TRANSFER;
 }
 
 bool CEXIModem::IsInterruptSet()
 {
-  return !!(m_regs[Register::INTERRUPT_MASK] & m_regs[Register::PENDING_INTERRUPT_MASK]);
+  return (m_registers[REG_INTERRUPT_MASK] & m_registers[REG_PENDING_INTERRUPTS]) != 0;
 }
 
-void CEXIModem::ImmWrite(u32 data, u32 size)
+void CEXIModem::DoState(PointerWrap&)
 {
-  if (m_transfer_descriptor == INVALID_TRANSFER_DESCRIPTOR)
-  {
-    m_transfer_descriptor = data;
-    if (m_transfer_descriptor == 0x00008000)
-    {  // Reset
-      m_network_interface->RecvStop();
-      m_network_interface->Deactivate();
-      m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-    }
-  }
-  else if (!IsWriteTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI IMM write {:x} ({} bytes) after read command {:x}", data, size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-  else if (IsModemTransfer(m_transfer_descriptor))
-  {  // Write AT command buffer or packet send buffer
-    const u32 be_data = htonl(data);
-    HandleWriteModemTransfer(&be_data, size);
-  }
+  // The connection cannot be saved; nothing else is either.
+}
+
+void CEXIModem::SetInterrupt(u8 flag, bool on, bool from_cpu)
+{
+  u8& pending = m_registers[REG_PENDING_INTERRUPTS];
+  if (on)
+    pending |= flag;
   else
-  {  // Write device register
-    u8 reg_num = static_cast<uint8_t>((m_transfer_descriptor >> 24) & 0x1F);
-    bool should_update_interrupts = false;
-    for (; size && reg_num < m_regs.size(); size--)
-    {
-      should_update_interrupts |=
-          ((reg_num == Register::INTERRUPT_MASK) || (reg_num == Register::PENDING_INTERRUPT_MASK));
-      m_regs[reg_num++] = (data >> 24);
-      data <<= 8;
-    }
-    if (should_update_interrupts)
-    {
-      m_system.GetExpansionInterface().ScheduleUpdateInterrupts(CoreTiming::FromThread::CPU, 0);
-    }
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-}
-
-void CEXIModem::DMAWrite(u32 addr, u32 size)
-{
-  if (m_transfer_descriptor == INVALID_TRANSFER_DESCRIPTOR)
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) after read command {:x}", addr, size,
-                  m_transfer_descriptor);
-  }
-  else if (!IsWriteTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) after read command {:x}", addr, size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-  else if (!IsModemTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) to registers {:x}", addr, size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-  else
-  {
-    auto& memory = m_system.GetMemory();
-    HandleWriteModemTransfer(memory.GetPointerForRange(addr, size), size);
-  }
-}
-
-u32 CEXIModem::ImmRead(u32 size)
-{
-  if (m_transfer_descriptor == INVALID_TRANSFER_DESCRIPTOR)
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI IMM read ({} bytes) with no pending transfer", size);
-    return 0;
-  }
-  else if (IsWriteTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI IMM read ({} bytes) after write command {:x}", size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-    return 0;
-  }
-  else if (IsModemTransfer(m_transfer_descriptor))
-  {
-    u32 be_data = 0;
-    HandleReadModemTransfer(&be_data, size);
-    return ntohl(be_data);
-  }
-  else
-  {
-    // Read device register
-    const u8 reg_num = static_cast<uint8_t>((m_transfer_descriptor >> 24) & 0x1F);
-    if (reg_num == 0)
-    {
-      return 0x02020000;  // Device ID (modem)
-    }
-    u32 ret = 0;
-    for (u8 z = 0; z < size; z++)
-    {
-      if (reg_num + z >= m_regs.size())
-      {
-        break;
-      }
-      ret |= (m_regs[reg_num + z] << ((3 - z) * 8));
-    }
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-    return ret;
-  }
-}
-
-void CEXIModem::DMARead(u32 addr, u32 size)
-{
-  if (m_transfer_descriptor == INVALID_TRANSFER_DESCRIPTOR)
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) with no pending transfer", addr,
-                  size);
-  }
-  else if (IsWriteTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) after write command {:x}", addr, size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-  else if (!IsModemTransfer(m_transfer_descriptor))
-  {
-    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) to registers {:x}", addr, size,
-                  m_transfer_descriptor);
-    m_transfer_descriptor = INVALID_TRANSFER_DESCRIPTOR;
-  }
-  else
-  {
-    auto& memory = m_system.GetMemory();
-    HandleReadModemTransfer(memory.GetPointerForRange(addr, size), size);
-  }
-}
-
-void CEXIModem::HandleReadModemTransfer(void* data, u32 size)
-{
-  const u16 bytes_requested = GetModemTransferSize(m_transfer_descriptor);
-  if (size > bytes_requested)
-  {
-    ERROR_LOG_FMT(SP1, "More bytes requested ({}) than originally requested for transfer {:x}",
-                  size, m_transfer_descriptor);
-    size = bytes_requested;
-  }
-  const u16 bytes_requested_after_read = bytes_requested - size;
-
-  if ((m_transfer_descriptor & 0x0F000000) == 0x03000000)
-  {
-    // AT command buffer
-    const std::size_t bytes_to_copy = std::min<std::size_t>(size, m_at_reply_data.size());
-    std::memcpy(data, m_at_reply_data.data(), bytes_to_copy);
-    m_at_reply_data = m_at_reply_data.substr(bytes_to_copy);
-    m_regs[Register::AT_REPLY_SIZE] = static_cast<u8>(m_at_reply_data.size());
-    SetInterruptFlag(Interrupt::AT_REPLY_DATA_AVAILABLE, !m_at_reply_data.empty(), true);
-  }
-  else if ((m_transfer_descriptor & 0x0F000000) == 0x08000000)
-  {
-    // Packet receive buffer
-    std::lock_guard<std::mutex> g(m_receive_buffer_lock);
-    const std::size_t bytes_to_copy = std::min<std::size_t>(size, m_receive_buffer.size());
-    std::memcpy(data, m_receive_buffer.data(), bytes_to_copy);
-    m_receive_buffer = m_receive_buffer.substr(bytes_to_copy);
-    OnReceiveBufferSizeChangedLocked(true);
-  }
-  else
-  {
-    ERROR_LOG_FMT(SP1, "Invalid modem read transfer type {:x}", m_transfer_descriptor);
-  }
-
-  m_transfer_descriptor =
-      (bytes_requested_after_read == 0) ?
-          INVALID_TRANSFER_DESCRIPTOR :
-          SetModemTransferSize(m_transfer_descriptor, bytes_requested_after_read);
-}
-
-void CEXIModem::HandleWriteModemTransfer(const void* data, u32 size)
-{
-  const u16 bytes_expected = GetModemTransferSize(m_transfer_descriptor);
-  if (size > bytes_expected)
-  {
-    ERROR_LOG_FMT(SP1, "More bytes received ({}) than expected for transfer {:x}", size,
-                  m_transfer_descriptor);
-    return;
-  }
-  const u16 bytes_expected_after_write = bytes_expected - size;
-
-  if ((m_transfer_descriptor & 0x0F000000) == 0x03000000)
-  {  // AT command buffer
-    m_at_command_data.append(static_cast<const char*>(data), size);
-    RunAllPendingATCommands();
-    m_regs[Register::AT_COMMAND_SIZE] = static_cast<u8>(m_at_command_data.size());
-  }
-  else if ((m_transfer_descriptor & 0x0F000000) == 0x08000000)
-  {  // Packet send buffer
-    m_send_buffer.append(static_cast<const char*>(data), size);
-    // A more accurate implementation would only set this interrupt if the send
-    // FIFO has enough space; however, we can clear the send FIFO "instantly"
-    // from the emulated program's perspective, so we always tell it the send
-    // FIFO is empty.
-    SetInterruptFlag(Interrupt::SEND_BUFFER_BELOW_THRESHOLD, true, true);
-    m_network_interface->SendAndRemoveAllHDLCFrames(&m_send_buffer);
-  }
-  else
-  {
-    ERROR_LOG_FMT(SP1, "Invalid modem write transfer type {:x}", m_transfer_descriptor);
-  }
-
-  m_transfer_descriptor =
-      (bytes_expected_after_write == 0) ?
-          INVALID_TRANSFER_DESCRIPTOR :
-          SetModemTransferSize(m_transfer_descriptor, bytes_expected_after_write);
-}
-
-void CEXIModem::DoState(PointerWrap& p)
-{
-  // There isn't really any state to save. The registers depend on the state of
-  // the external connection, which Dolphin doesn't have control over. What
-  // should happen when the user saves a state during an online session and
-  // loads it later? The remote server presumably doesn't support point-in-time
-  // snapshots and reloading thereof.
-}
-
-u16 CEXIModem::GetTxThreshold() const
-{
-  return (m_regs[Register::TX_THRESHOLD_HIGH] << 8) | m_regs[Register::TX_THRESHOLD_LOW];
-}
-
-u16 CEXIModem::GetRxThreshold() const
-{
-  return (m_regs[Register::RX_THRESHOLD_HIGH] << 8) | m_regs[Register::RX_THRESHOLD_LOW];
-}
-
-void CEXIModem::SetInterruptFlag(u8 what, bool enabled, bool from_cpu)
-{
-  if (enabled)
-  {
-    m_regs[Register::PENDING_INTERRUPT_MASK] |= what;
-  }
-  else
-  {
-    m_regs[Register::PENDING_INTERRUPT_MASK] &= (~what);
-  }
+    pending &= static_cast<u8>(0xFF ^ flag);
   m_system.GetExpansionInterface().ScheduleUpdateInterrupts(
       from_cpu ? CoreTiming::FromThread::CPU : CoreTiming::FromThread::NON_CPU, 0);
 }
 
-void CEXIModem::OnReceiveBufferSizeChangedLocked(bool from_cpu)
+// The receive buffer lock must be held.
+void CEXIModem::UpdateReceiveState(bool from_cpu)
 {
-  // The caller is expected to hold m_receive_buffer_lock when calling this.
-  const u16 bytes_available =
-      static_cast<u16>(std::min<std::size_t>(m_receive_buffer.size(), 0x200));
-  m_regs[Register::BYTES_AVAILABLE_HIGH] = (bytes_available >> 8) & 0xFF;
-  m_regs[Register::BYTES_AVAILABLE_LOW] = bytes_available & 0xFF;
-  SetInterruptFlag(Interrupt::RECEIVE_BUFFER_ABOVE_THRESHOLD,
-                   m_receive_buffer.size() >= GetRxThreshold(), from_cpu);
-  // TODO: There is a second interrupt here, which the GameCube modem library
-  // expects to be used when large frames are received. However, the correct
-  // semantics for this interrupt aren't obvious. Reverse-engineering some games
-  // that use the modem adapter makes it look like this interrupt should trigger
-  // when there's any data at all in the receive buffer, but implementing the
-  // interrupt this way causes them to crash. Further research is needed.
-  // SetInterruptFlag(Interrupt::RECEIVE_BUFFER_NOT_EMPTY, !m_receive_buffer.empty(), from_cpu);
+  const std::size_t available = std::min(m_receive_buffer.size(), RX_AVAILABLE_LIMIT);
+  m_registers[REG_RX_AVAILABLE_HIGH] = static_cast<u8>(available >> 8);
+  m_registers[REG_RX_AVAILABLE_LOW] = static_cast<u8>(available & 0xFF);
+
+  const std::size_t threshold = (std::size_t{m_registers[REG_RX_THRESHOLD_HIGH]} << 8) |
+                                m_registers[REG_RX_THRESHOLD_LOW];
+  SetInterrupt(INT_RECEIVE_READY, m_receive_buffer.size() >= threshold, from_cpu);
+}
+
+void CEXIModem::AdvanceDescriptor(u32 remaining)
+{
+  if (remaining == 0)
+    m_descriptor = NO_TRANSFER;
+  else
+    m_descriptor = (m_descriptor & 0xFF000000) | (remaining << 8);
 }
 
 void CEXIModem::SendComplete()
 {
-  // See comment in HandleWriteModemTransfer about why this is always true.
-  SetInterruptFlag(Interrupt::SEND_BUFFER_BELOW_THRESHOLD, true, true);
+  SetInterrupt(INT_SEND_READY, true, true);
 }
 
 void CEXIModem::AddToReceiveBuffer(std::string&& data)
 {
-  std::lock_guard<std::mutex> g(m_receive_buffer_lock);
-  if (m_receive_buffer.empty())
-  {
-    m_receive_buffer = std::move(data);
-  }
-  else
-  {
-    m_receive_buffer += data;
-  }
-  OnReceiveBufferSizeChangedLocked(false);
+  std::lock_guard lock(m_receive_lock);
+  m_receive_buffer += data;
+  UpdateReceiveState(false);
 }
 
-void CEXIModem::AddATReply(const std::string& data)
+void CEXIModem::ReplyAT(const std::string& text)
 {
-  m_at_reply_data += data;
-  m_regs[Register::AT_REPLY_SIZE] = static_cast<u8>(m_at_reply_data.size());
-  SetInterruptFlag(Interrupt::AT_REPLY_DATA_AVAILABLE, !m_at_reply_data.empty(), true);
+  m_at_reply += text;
+  m_registers[REG_AT_REPLY_SIZE] = static_cast<u8>(m_at_reply.size());
+  SetInterrupt(INT_AT_REPLY, !m_at_reply.empty(), true);
 }
 
-void CEXIModem::RunAllPendingATCommands()
+void CEXIModem::RunATCommands()
 {
-  for (std::size_t newline_pos = m_at_command_data.find_first_of("\r\n");
-       newline_pos != std::string::npos; newline_pos = m_at_command_data.find_first_of("\r\n"))
+  while (true)
   {
-    std::string command = m_at_command_data.substr(0, newline_pos);
-    m_at_command_data = m_at_command_data.substr(newline_pos + 1);
+    const std::size_t end = m_at_command.find_first_of("\r\n");
+    if (end == std::string::npos)
+      return;
+    const std::string command = m_at_command.substr(0, end);
+    m_at_command.erase(0, end + 1);
 
     INFO_LOG_FMT(SP1, "Received AT command: {}", command);
-
-    if (command.substr(0, 3) == "ATZ" || command == "ATH0")
+    if (command.starts_with("ATZ") || command == "ATH0")
     {
-      // Reset (ATZ) or hang up (ATH0)
+      // Hang up.
       m_network_interface->RecvStop();
       m_network_interface->Deactivate();
-      AddATReply("OK\r");
+      ReplyAT("OK\r");
     }
-    else if (command.substr(0, 3) == "ATD")
+    else if (command.starts_with("ATD"))
     {
-      // Dial
       if (m_network_interface->Activate())
       {
         m_network_interface->RecvStart();
-        AddATReply("OK\rCONNECT 115200\r");  // Maximum baud rate
+        ReplyAT("OK\rCONNECT 115200\r");
       }
       else
       {
-        AddATReply("OK\rNO ANSWER\r");
+        ReplyAT("OK\rNO ANSWER\r");
       }
     }
     else
     {
-      // PSO sends several other AT commands during modem setup, but in our
-      // implementation we don't actually have to do anything in response to
-      // them, so we just pretend we did.
-      AddATReply("OK\r");
+      ReplyAT("OK\r");
     }
   }
+}
+
+void CEXIModem::ReadBuffer(u8* destination, u32 size)
+{
+  const u32 requested = RemainingSize(m_descriptor);
+  if (size > requested)
+  {
+    ERROR_LOG_FMT(SP1, "More bytes requested ({}) than originally requested for transfer {:x}",
+                  size, m_descriptor);
+    size = requested;
+  }
+
+  const u32 kind = m_descriptor & DESC_KIND_MASK;
+  if (kind == KIND_AT)
+  {
+    const std::size_t count = std::min<std::size_t>(size, m_at_reply.size());
+    if (destination != nullptr)
+      std::memcpy(destination, m_at_reply.data(), count);
+    m_at_reply.erase(0, count);
+    m_registers[REG_AT_REPLY_SIZE] = static_cast<u8>(m_at_reply.size());
+    SetInterrupt(INT_AT_REPLY, !m_at_reply.empty(), true);
+  }
+  else if (kind == KIND_PACKET)
+  {
+    std::lock_guard lock(m_receive_lock);
+    const std::size_t count = std::min<std::size_t>(size, m_receive_buffer.size());
+    if (destination != nullptr)
+      std::memcpy(destination, m_receive_buffer.data(), count);
+    m_receive_buffer.erase(0, count);
+    UpdateReceiveState(true);
+  }
+  else
+  {
+    ERROR_LOG_FMT(SP1, "Invalid modem read transfer type {:x}", m_descriptor);
+  }
+
+  AdvanceDescriptor(requested - size);
+}
+
+void CEXIModem::WriteBuffer(const u8* source, u32 size)
+{
+  const u32 expected = RemainingSize(m_descriptor);
+  if (size > expected)
+  {
+    ERROR_LOG_FMT(SP1, "More bytes received ({}) than expected for transfer {:x}", size,
+                  m_descriptor);
+    return;
+  }
+
+  const u32 kind = m_descriptor & DESC_KIND_MASK;
+  const std::string_view bytes =
+      source != nullptr ? std::string_view(reinterpret_cast<const char*>(source), size) :
+                          std::string_view{};
+  if (kind == KIND_AT)
+  {
+    m_at_command += bytes;
+    RunATCommands();
+    m_registers[REG_AT_COMMAND_SIZE] = static_cast<u8>(m_at_command.size());
+  }
+  else if (kind == KIND_PACKET)
+  {
+    m_send_buffer += bytes;
+    SetInterrupt(INT_SEND_READY, true, true);
+    m_network_interface->SendAndRemoveAllHDLCFrames(&m_send_buffer);
+  }
+  else
+  {
+    ERROR_LOG_FMT(SP1, "Invalid modem write transfer type {:x}", m_descriptor);
+  }
+
+  AdvanceDescriptor(expected - size);
+}
+
+void CEXIModem::ImmWrite(u32 data, u32 size)
+{
+  if (m_descriptor == NO_TRANSFER)
+  {
+    m_descriptor = data;
+    if (data == RESET_DESCRIPTOR)
+    {
+      m_network_interface->RecvStop();
+      m_network_interface->Deactivate();
+      m_descriptor = NO_TRANSFER;
+    }
+    return;
+  }
+
+  if (!IsWrite(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI IMM write {:x} ({} bytes) after read command {:x}", data,
+                  size, m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return;
+  }
+
+  if (IsModem(m_descriptor))
+  {
+    std::array<u8, 4> bytes{};
+    const u32 count = std::min<u32>(size, 4);
+    for (u32 i = 0; i != count; ++i)
+      bytes[i] = static_cast<u8>(data >> (24 - 8 * i));
+    WriteBuffer(bytes.data(), count);
+    return;
+  }
+
+  bool interrupts_touched = false;
+  std::size_t reg = FirstRegister(m_descriptor);
+  for (u32 left = size; left != 0 && reg < REGISTER_COUNT; --left, ++reg)
+  {
+    m_registers[reg] = static_cast<u8>(data >> 24);
+    data <<= 8;
+    if (reg == REG_INTERRUPT_MASK || reg == REG_PENDING_INTERRUPTS)
+      interrupts_touched = true;
+  }
+  if (interrupts_touched)
+    m_system.GetExpansionInterface().ScheduleUpdateInterrupts(CoreTiming::FromThread::CPU, 0);
+  m_descriptor = NO_TRANSFER;
+}
+
+u32 CEXIModem::ImmRead(u32 size)
+{
+  if (m_descriptor == NO_TRANSFER)
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI IMM read ({} bytes) with no pending transfer", size);
+    return 0;
+  }
+
+  if (IsWrite(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI IMM read ({} bytes) after write command {:x}", size,
+                  m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return 0;
+  }
+
+  if (IsModem(m_descriptor))
+  {
+    std::array<u8, 4> bytes{};
+    ReadBuffer(bytes.data(), std::min<u32>(size, 4));
+    return (u32{bytes[0]} << 24) | (u32{bytes[1]} << 16) | (u32{bytes[2]} << 8) | bytes[3];
+  }
+
+  const std::size_t first = FirstRegister(m_descriptor);
+  if (first == REG_DEVICE_TYPE)
+    return EXI_DEVTYPE_MODEM;
+
+  u32 result = 0;
+  for (u32 z = 0; z < std::min<u32>(size, 4) && first + z < REGISTER_COUNT; ++z)
+    result |= u32{m_registers[first + z]} << ((3 - z) * 8);
+  m_descriptor = NO_TRANSFER;
+  return result;
+}
+
+void CEXIModem::DMAWrite(u32 addr, u32 size)
+{
+  if (m_descriptor == NO_TRANSFER)
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) after read command {:x}", addr,
+                  size, m_descriptor);
+    return;
+  }
+  if (!IsWrite(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) after read command {:x}", addr,
+                  size, m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return;
+  }
+  if (!IsModem(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA write {:x} ({} bytes) to registers {:x}", addr, size,
+                  m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return;
+  }
+
+  auto& memory = m_system.GetMemory();
+  WriteBuffer(memory.GetPointerForRange(addr, size), size);
+}
+
+void CEXIModem::DMARead(u32 addr, u32 size)
+{
+  if (m_descriptor == NO_TRANSFER)
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) with no pending transfer", addr,
+                  size);
+    return;
+  }
+  if (IsWrite(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) after write command {:x}", addr,
+                  size, m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return;
+  }
+  if (!IsModem(m_descriptor))
+  {
+    ERROR_LOG_FMT(SP1, "Received EXI DMA read {:x} ({} bytes) to registers {:x}", addr, size,
+                  m_descriptor);
+    m_descriptor = NO_TRANSFER;
+    return;
+  }
+
+  auto& memory = m_system.GetMemory();
+  ReadBuffer(memory.GetPointerForRange(addr, size), size);
 }
 
 }  // namespace ExpansionInterface
