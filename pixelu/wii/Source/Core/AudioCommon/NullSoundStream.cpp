@@ -1,21 +1,19 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "AudioCommon/NullSoundStream.h"
 
 bool NullSound::Init()
 {
-  // Make Mixer aware that audio output is disabled.
+  // An output rate of 0 tells the mixer to drop incoming samples.
   GetMixer()->SetSampleRate(0);
-
   return true;
 }
 
-bool NullSound::SetRunning(bool running)
+bool NullSound::SetRunning(bool)
 {
   return true;
 }
 
-void NullSound::SetVolume(int volume)
+void NullSound::SetVolume(int)
 {
 }

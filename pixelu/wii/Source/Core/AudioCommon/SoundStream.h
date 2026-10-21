@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,18 +7,23 @@
 #include "AudioCommon/Mixer.h"
 #include "Common/CommonTypes.h"
 
+// Base class of the host sound backends. Every backend owns a mixer, created for 48 kHz output.
 class SoundStream
 {
-protected:
-  std::unique_ptr<Mixer> m_mixer;
-
 public:
-  SoundStream() : m_mixer(new Mixer(48000)) {}
-  virtual ~SoundStream() {}
+  SoundStream() : m_mixer(std::make_unique<Mixer>(48000)) {}
+  virtual ~SoundStream() = default;
+
+  // Backends hide this with their own check; the base class is never usable on its own.
   static bool IsValid() { return false; }
+
   Mixer* GetMixer() const { return m_mixer.get(); }
+
   virtual bool Init() { return false; }
   virtual void SetVolume(int) {}
-  // Returns true if successful.
-  virtual bool SetRunning(bool running) { return false; }
+  // Starts or stops output; returns false on failure.
+  virtual bool SetRunning(bool) { return false; }
+
+protected:
+  std::unique_ptr<Mixer> m_mixer;
 };

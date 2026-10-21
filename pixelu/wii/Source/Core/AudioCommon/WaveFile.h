@@ -1,15 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// ---------------------------------------------------------------------------------
-// Class: WaveFileWriter
-// Description: Simple utility class to make it easy to write long 16-bit stereo
-// audio streams to disk.
-// Use Start() to start recording to a file, and AddStereoSamples to add wave data.
-// The float variant will convert from -1.0-1.0 range and clamp.
-// Alternatively, AddSamplesBE for big endian wave data.
-// If Stop is not called when it destructs, the destructor will call Stop().
-// ---------------------------------------------------------------------------------
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,6 +8,10 @@
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
 
+// Writes 16-bit stereo PCM to a .wav file (used for the DSP and DTK audio dumps). Samples come
+// in as the emulated hardware produces them: big-endian, right channel first. When the sample
+// rate changes mid-dump, the current file is finished and a numbered new one is started.
+// The destructor finishes the file if Stop() was not called.
 class WaveFileWriter
 {
 public:
@@ -34,24 +27,23 @@ public:
   void Stop();
 
   void SetSkipSilence(bool skip) { m_skip_silence = skip; }
-  // big endian
   void AddStereoSamplesBE(const short* sample_data, u32 count, u32 sample_rate_divisor,
                           int l_volume, int r_volume);
   u32 GetAudioSize() const { return m_audio_size; }
 
 private:
-  static constexpr size_t BUFFER_SIZE = 32 * 1024;
-
-  void Write(u32 value);
-  void Write4(const char* ptr);
+  // Most frames accepted by one AddStereoSamplesBE call (two samples each).
+  static constexpr u32 MAX_FRAMES_PER_CALL = 16 * 1024;
 
   File::IOFile m_file;
-  std::string m_basename;
-  u32 m_file_index = 0;
+
+  // Name of the first file, without directory or extension; numbered follow-up files use it.
+  std::string m_stem;
+  u32 m_sequence = 0;
+
   u32 m_audio_size = 0;
-
-  u32 m_current_sample_rate_divisor;
-  std::array<short, BUFFER_SIZE> m_conv_buffer{};
-
+  u32 m_divisor = 0;
   bool m_skip_silence = false;
+
+  std::array<s16, MAX_FRAMES_PER_CALL * 2> m_scratch{};
 };

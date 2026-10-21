@@ -1,18 +1,18 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "AudioCommon/AudioCommon.h"
+
+#include <algorithm>
+#include <ctime>
+#include <memory>
 
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 
-#include "AudioCommon/AlsaSoundStream.h"
 #include "AudioCommon/CubebStream.h"
 #include "AudioCommon/Mixer.h"
 #include "AudioCommon/NullSoundStream.h"
 #include "AudioCommon/OpenALStream.h"
-#include "AudioCommon/OpenSLESStream.h"
-#include "AudioCommon/PulseAudioStream.h"
 #include "AudioCommon/WASAPIStream.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
@@ -23,55 +23,60 @@
 
 namespace AudioCommon
 {
-constexpr int AUDIO_VOLUME_MIN = 0;
-constexpr int AUDIO_VOLUME_MAX = 100;
-
-static std::unique_ptr<SoundStream> CreateSoundStreamForBackend(std::string_view backend)
+namespace
 {
-  if (backend == BACKEND_CUBEB && CubebStream::IsValid())
-    return std::make_unique<CubebStream>();
-  else if (backend == BACKEND_OPENAL && OpenALStream::IsValid())
-    return std::make_unique<OpenALStream>();
-  else if (backend == BACKEND_NULLSOUND)
+constexpr int MIN_VOLUME = 0;
+constexpr int MAX_VOLUME = 100;
+
+// Creates the named backend if it exists in this build and can run here; null otherwise.
+std::unique_ptr<SoundStream> MakeBackend(std::string_view name)
+{
+  if (name == BACKEND_CUBEB)
+    return CubebStream::IsValid() ? std::make_unique<CubebStream>() : nullptr;
+  if (name == BACKEND_OPENAL)
+    return OpenALStream::IsValid() ? std::make_unique<OpenALStream>() : nullptr;
+  if (name == BACKEND_NULLSOUND)
     return std::make_unique<NullSound>();
-  else if (backend == BACKEND_ALSA && AlsaSound::IsValid())
-    return std::make_unique<AlsaSound>();
-  else if (backend == BACKEND_PULSEAUDIO && PulseAudio::IsValid())
-    return std::make_unique<PulseAudio>();
-  else if (backend == BACKEND_OPENSLES && OpenSLESStream::IsValid())
-    return std::make_unique<OpenSLESStream>();
-  else if (backend == BACKEND_WASAPI && WASAPIStream::IsValid())
-    return std::make_unique<WASAPIStream>();
-  return {};
+  if (name == BACKEND_WASAPI)
+    return WASAPIStream::IsValid() ? std::make_unique<WASAPIStream>() : nullptr;
+  return nullptr;
 }
+
+void SetVolumeSetting(Core::System& system, int volume)
+{
+  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, volume);
+  UpdateSoundStream(system);
+}
+}  // namespace
 
 void InitSoundStream(Core::System& system)
 {
   std::string backend = Config::Get(Config::MAIN_AUDIO_BACKEND);
-  std::unique_ptr<SoundStream> sound_stream = CreateSoundStreamForBackend(backend);
+  std::unique_ptr<SoundStream> stream = MakeBackend(backend);
 
-  if (!sound_stream)
+  if (!stream)
   {
-    WARN_LOG_FMT(AUDIO, "Unknown backend {}, using {} instead.", backend, GetDefaultSoundBackend());
-    backend = GetDefaultSoundBackend();
-    sound_stream = CreateSoundStreamForBackend(backend);
+    const std::string fallback = GetDefaultSoundBackend();
+    WARN_LOG_FMT(AUDIO, "Unknown backend {}, using {} instead.", backend, fallback);
+    backend = fallback;
+    stream = MakeBackend(backend);
   }
 
-  if (!sound_stream || !sound_stream->Init())
+  if (!stream || !stream->Init())
   {
     WARN_LOG_FMT(AUDIO, "Could not initialize backend {}, using {} instead.", backend,
                  BACKEND_NULLSOUND);
-    sound_stream = std::make_unique<NullSound>();
-    sound_stream->Init();
+    stream = std::make_unique<NullSound>();
+    stream->Init();
   }
 
-  system.SetSoundStream(std::move(sound_stream));
+  system.SetSoundStream(std::move(stream));
 }
 
 void PostInitSoundStream(Core::System& system)
 {
-  // This needs to be called after AudioInterface::Init and SerialInterface::Init (for GBA devices)
-  // where input sample rates are set
+  // The input sample rates are known only once AudioInterface and SerialInterface (GBAs) are
+  // initialised, which is why this runs separately from InitSoundStream.
   UpdateSoundStream(system);
   SetSoundStreamRunning(system, true);
 
@@ -94,19 +99,7 @@ void ShutdownSoundStream(Core::System& system)
 
 std::string GetDefaultSoundBackend()
 {
-#if defined(ANDROID)
-  return BACKEND_OPENSLES;
-#else
-  if (CubebStream::IsValid())
-    return BACKEND_CUBEB;
-#endif
-
-#if defined(__linux__)
-  if (AlsaSound::IsValid())
-    return BACKEND_ALSA;
-#endif
-
-  return BACKEND_NULLSOUND;
+  return CubebStream::IsValid() ? BACKEND_CUBEB : BACKEND_NULLSOUND;
 }
 
 DPL2Quality GetDefaultDPL2Quality()
@@ -116,36 +109,19 @@ DPL2Quality GetDefaultDPL2Quality()
 
 std::vector<std::string> GetSoundBackends()
 {
-  std::vector<std::string> backends;
-
-  backends.emplace_back(BACKEND_NULLSOUND);
+  std::vector<std::string> names{BACKEND_NULLSOUND};
   if (CubebStream::IsValid())
-    backends.emplace_back(BACKEND_CUBEB);
-  if (AlsaSound::IsValid())
-    backends.emplace_back(BACKEND_ALSA);
-  if (PulseAudio::IsValid())
-    backends.emplace_back(BACKEND_PULSEAUDIO);
+    names.emplace_back(BACKEND_CUBEB);
   if (OpenALStream::IsValid())
-    backends.emplace_back(BACKEND_OPENAL);
-  if (OpenSLESStream::IsValid())
-    backends.emplace_back(BACKEND_OPENSLES);
+    names.emplace_back(BACKEND_OPENAL);
   if (WASAPIStream::IsValid())
-    backends.emplace_back(BACKEND_WASAPI);
-
-  return backends;
+    names.emplace_back(BACKEND_WASAPI);
+  return names;
 }
 
 bool SupportsDPL2Decoder(std::string_view backend)
 {
-#ifndef __APPLE__
-  if (backend == BACKEND_OPENAL)
-    return true;
-#endif
-  if (backend == BACKEND_CUBEB)
-    return true;
-  if (backend == BACKEND_PULSEAUDIO)
-    return true;
-  return false;
+  return backend == BACKEND_OPENAL || backend == BACKEND_CUBEB || backend == BACKEND_PULSEAUDIO;
 }
 
 bool SupportsLatencyControl(std::string_view backend)
@@ -155,123 +131,109 @@ bool SupportsLatencyControl(std::string_view backend)
 
 bool SupportsVolumeChanges(std::string_view backend)
 {
-  // FIXME: this one should ask the backend whether it supports it.
-  //       but getting the backend from string etc. is probably
-  //       too much just to enable/disable a stupid slider...
+  // Only these backends implement SetVolume.
   return backend == BACKEND_CUBEB || backend == BACKEND_OPENAL || backend == BACKEND_WASAPI;
 }
 
 void UpdateSoundStream(Core::System& system)
 {
-  SoundStream* sound_stream = system.GetSoundStream();
+  SoundStream* stream = system.GetSoundStream();
+  if (!stream)
+    return;
 
-  if (sound_stream)
-  {
-    const int volume =
-        Config::Get(Config::MAIN_AUDIO_MUTED) ? 0 : Config::Get(Config::MAIN_AUDIO_VOLUME);
-    sound_stream->SetVolume(volume);
-  }
+  const bool muted = Config::Get(Config::MAIN_AUDIO_MUTED);
+  stream->SetVolume(muted ? 0 : Config::Get(Config::MAIN_AUDIO_VOLUME));
 }
 
 void SetSoundStreamRunning(Core::System& system, bool running)
 {
-  SoundStream* sound_stream = system.GetSoundStream();
-
-  if (!sound_stream)
+  SoundStream* stream = system.GetSoundStream();
+  if (!stream || system.IsSoundStreamRunning() == running)
     return;
 
-  if (system.IsSoundStreamRunning() == running)
-    return;
   system.SetSoundStreamRunning(running);
-
-  if (sound_stream->SetRunning(running))
-    return;
-  if (running)
-    ERROR_LOG_FMT(AUDIO, "Error starting stream.");
-  else
-    ERROR_LOG_FMT(AUDIO, "Error stopping stream.");
+  if (!stream->SetRunning(running))
+  {
+    if (running)
+      ERROR_LOG_FMT(AUDIO, "Error starting stream.");
+    else
+      ERROR_LOG_FMT(AUDIO, "Error stopping stream.");
+  }
 }
 
 void SendAIBuffer(Core::System& system, const short* samples, unsigned int num_samples)
 {
-  const SoundStream* const sound_stream = system.GetSoundStream();
-
-  if (!sound_stream)
+  const SoundStream* stream = system.GetSoundStream();
+  if (!stream)
     return;
 
-  if (Config::Get(Config::MAIN_DUMP_AUDIO) && !system.IsAudioDumpStarted())
-    StartAudioDump(system);
-  else if (!Config::Get(Config::MAIN_DUMP_AUDIO) && system.IsAudioDumpStarted())
-    StopAudioDump(system);
-
-  Mixer* mixer = sound_stream->GetMixer();
-
-  if (mixer && samples)
+  // Follow the "dump audio" setting while the game runs.
+  const bool want_dump = Config::Get(Config::MAIN_DUMP_AUDIO);
+  if (want_dump != system.IsAudioDumpStarted())
   {
-    mixer->PushSamples(samples, num_samples);
+    if (want_dump)
+      StartAudioDump(system);
+    else
+      StopAudioDump(system);
   }
+
+  Mixer* mixer = stream->GetMixer();
+  if (mixer != nullptr && samples != nullptr)
+    mixer->PushSamples(samples, num_samples);
 }
 
 void StartAudioDump(Core::System& system)
 {
-  const SoundStream* const sound_stream = system.GetSoundStream();
+  const SoundStream* stream = system.GetSoundStream();
 
-  const std::time_t start_time = std::time(nullptr);
+  const std::time_t now = std::time(nullptr);
+  const std::string prefix =
+      File::GetUserPath(D_DUMPAUDIO_IDX) + SConfig::GetInstance().GetGameID();
 
-  std::string path_prefix = File::GetUserPath(D_DUMPAUDIO_IDX) + SConfig::GetInstance().GetGameID();
-
-  const auto local_time = Common::LocalTime(start_time);
+  const auto local_time = Common::LocalTime(now);
   if (!local_time)
     return;
 
-  std::string base_name = fmt::format("{}_{:%Y-%m-%d_%H-%M-%S}", path_prefix, *local_time);
+  // <dump folder>/<game id>_<date>_<time>_{dtk,dsp}dump.wav
+  const std::string stem = fmt::format("{}_{:%Y-%m-%d_%H-%M-%S}", prefix, *local_time);
+  const std::string dtk_path = stem + "_dtkdump.wav";
+  const std::string dsp_path = stem + "_dspdump.wav";
+  File::CreateFullPath(dtk_path);
+  File::CreateFullPath(dsp_path);
 
-  const std::string audio_file_name_dtk = fmt::format("{}_dtkdump.wav", base_name);
-  const std::string audio_file_name_dsp = fmt::format("{}_dspdump.wav", base_name);
-  File::CreateFullPath(audio_file_name_dtk);
-  File::CreateFullPath(audio_file_name_dsp);
-  sound_stream->GetMixer()->StartLogDTKAudio(audio_file_name_dtk);
-  sound_stream->GetMixer()->StartLogDSPAudio(audio_file_name_dsp);
+  Mixer* mixer = stream->GetMixer();
+  mixer->StartLogDTKAudio(dtk_path);
+  mixer->StartLogDSPAudio(dsp_path);
   system.SetAudioDumpStarted(true);
 }
 
 void StopAudioDump(Core::System& system)
 {
-  const SoundStream* const sound_stream = system.GetSoundStream();
-
-  if (!sound_stream)
+  const SoundStream* stream = system.GetSoundStream();
+  if (!stream)
     return;
-  sound_stream->GetMixer()->StopLogDTKAudio();
-  sound_stream->GetMixer()->StopLogDSPAudio();
+
+  Mixer* mixer = stream->GetMixer();
+  mixer->StopLogDTKAudio();
+  mixer->StopLogDSPAudio();
   system.SetAudioDumpStarted(false);
 }
 
 void IncreaseVolume(Core::System& system, unsigned short offset)
 {
   Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, false);
-  int currentVolume = Config::Get(Config::MAIN_AUDIO_VOLUME);
-  currentVolume += offset;
-  if (currentVolume > AUDIO_VOLUME_MAX)
-    currentVolume = AUDIO_VOLUME_MAX;
-  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, currentVolume);
-  UpdateSoundStream(system);
+  SetVolumeSetting(system, std::min(Config::Get(Config::MAIN_AUDIO_VOLUME) + offset, MAX_VOLUME));
 }
 
 void DecreaseVolume(Core::System& system, unsigned short offset)
 {
   Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, false);
-  int currentVolume = Config::Get(Config::MAIN_AUDIO_VOLUME);
-  currentVolume -= offset;
-  if (currentVolume < AUDIO_VOLUME_MIN)
-    currentVolume = AUDIO_VOLUME_MIN;
-  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, currentVolume);
-  UpdateSoundStream(system);
+  SetVolumeSetting(system, std::max(Config::Get(Config::MAIN_AUDIO_VOLUME) - offset, MIN_VOLUME));
 }
 
 void ToggleMuteVolume(Core::System& system)
 {
-  const bool isMuted = Config::Get(Config::MAIN_AUDIO_MUTED);
-  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, !isMuted);
+  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, !Config::Get(Config::MAIN_AUDIO_MUTED));
   UpdateSoundStream(system);
 }
 }  // namespace AudioCommon

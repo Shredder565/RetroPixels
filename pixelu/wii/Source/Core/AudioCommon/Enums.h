@@ -1,10 +1,10 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 namespace AudioCommon
 {
+// Quality of the Dolby Pro Logic II decoder; stored as an int in the config.
 enum class DPL2Quality : int
 {
   Lowest = 0,

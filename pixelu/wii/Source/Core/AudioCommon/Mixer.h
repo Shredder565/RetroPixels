@@ -1,11 +1,13 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cstddef>
+#include <string>
+#include <utility>
 
 #include "AudioCommon/SurroundDecoder.h"
 #include "AudioCommon/WaveFile.h"
@@ -15,6 +17,9 @@
 
 class PointerWrap;
 
+// Combines every emulated audio source (DSP DMA, disc streaming, the Wii Remote speakers, the
+// Skylander portal and GBAs) into the host's output stream. Producers push samples from the
+// emulation thread; the sound backend pulls mixed frames from its own thread.
 class Mixer final
 {
 public:
@@ -23,11 +28,11 @@ public:
 
   void DoState(PointerWrap& p);
 
-  // Called from audio threads
+  // Audio thread side.
   std::size_t Mix(s16* samples, std::size_t numSamples);
   std::size_t MixSurround(float* samples, std::size_t num_samples);
 
-  // Called from main thread
+  // Emulation thread side.
   void PushSamples(const s16* samples, std::size_t num_samples);
   void PushStreamingSamples(const s16* samples, std::size_t num_samples);
   void PushWiimoteSpeakerSamples(std::size_t wiimote_index, const s16* samples,
@@ -38,7 +43,7 @@ public:
   u32 GetSampleRate() const { return m_output_sample_rate; }
   void SetSampleRate(u32 output_sample_rate) { m_output_sample_rate = output_sample_rate; }
 
-  // Note: NullSoundStream sets the sample rate to 0.
+  // A rate of zero means "no output" (the null backend sets it).
   bool IsOutputSampleRateValid() const { return m_output_sample_rate != 0; }
 
   void SetDMAInputSampleRateDivisor(u32 rate_divisor);
@@ -56,150 +61,126 @@ public:
   void StartLogDSPAudio(const std::string& filename);
   void StopLogDSPAudio();
 
-  // 54000000 doesn't work here as it doesn't evenly divide with 32000, but 108000000 does
-  static constexpr u64 FIXED_SAMPLE_RATE_DIVIDEND = 54000000 * 2;
+  // Input rates are expressed as this dividend over a per-source divisor. 108 MHz (twice the
+  // 54 MHz bus clock) divides evenly by 32000 and 48000.
+  static constexpr u64 FIXED_SAMPLE_RATE_DIVIDEND = 108000000;
 
 private:
-  const std::size_t SURROUND_CHANNELS = 6;
-
-  class MixerFifo final
+  // One input source. Incoming samples are cut into 256-frame granules that overlap by half and
+  // are windowed when queued; the reader keeps two granules in flight half a granule apart, so
+  // summing them reconstructs the signal, and resamples the sum to the output rate.
+  class Source final
   {
-    static constexpr std::size_t MAX_GRANULE_QUEUE_SIZE = 256;
-    static constexpr std::size_t GRANULE_QUEUE_MASK = MAX_GRANULE_QUEUE_SIZE - 1;
-
-    struct StereoPair final
-    {
-      float l = 0.f;
-      float r = 0.f;
-
-      constexpr StereoPair() = default;
-      constexpr StereoPair(const StereoPair&) = default;
-      constexpr StereoPair& operator=(const StereoPair&) = default;
-      constexpr StereoPair(StereoPair&&) = default;
-      constexpr StereoPair& operator=(StereoPair&&) = default;
-
-      constexpr StereoPair(float mono) : l(mono), r(mono) {}
-      constexpr StereoPair(float left, float right) : l(left), r(right) {}
-      constexpr StereoPair(s16 left, s16 right) : l(left), r(right) {}
-
-      StereoPair operator+(const StereoPair& other) const
-      {
-        return StereoPair(l + other.l, r + other.r);
-      }
-
-      StereoPair operator*(const StereoPair& other) const
-      {
-        return StereoPair(l * other.l, r * other.r);
-      }
-    };
-
-    static constexpr std::size_t GRANULE_SIZE = 256;
-    static constexpr std::size_t GRANULE_OVERLAP = GRANULE_SIZE / 2;
-    static constexpr std::size_t GRANULE_MASK = GRANULE_SIZE - 1;
-    static constexpr std::size_t GRANULE_BITS = std::countr_one(GRANULE_MASK);
-    static constexpr std::size_t GRANULE_FRAC_BITS = 32 - GRANULE_BITS;
-
-    using Granule = std::array<StereoPair, GRANULE_SIZE>;
-
   public:
-    MixerFifo(Mixer* mixer, u32 sample_rate_divisor,
-              u32 sample_rate_dividend = FIXED_SAMPLE_RATE_DIVIDEND)
-        : m_mixer(mixer), m_input_sample_rate_dividend(sample_rate_dividend),
-          m_input_sample_rate_divisor(sample_rate_divisor)
+    static constexpr std::size_t GRANULE_FRAMES = 256;
+    static constexpr std::size_t RING_SLOTS = 256;
+
+    Source(Mixer* owner, u32 divisor, u32 dividend = FIXED_SAMPLE_RATE_DIVIDEND)
+        : m_owner(owner), m_dividend(dividend), m_divisor(divisor)
     {
     }
+
     void DoState(PointerWrap& p);
 
-    DOLPHIN_FORCE_INLINE void PushSample(s16 left, s16 right)
+    DOLPHIN_FORCE_INLINE void Push(s16 left, s16 right)
     {
-      m_next_buffer[m_next_buffer_index] = {left, right};
-      m_next_buffer_index = (m_next_buffer_index + 1) & GRANULE_MASK;
-
-      // The granules overlap by 50%, so we need to enqueue the
-      // next buffer every time we fill half of the samples.
-      if (m_next_buffer_index == 0 || m_next_buffer_index == m_next_buffer.size() / 2)
-        Enqueue();
+      m_pending[m_pending_pos] = {static_cast<float>(left), static_cast<float>(right)};
+      m_pending_pos = (m_pending_pos + 1) % GRANULE_FRAMES;
+      // A new granule starts every half granule.
+      if (m_pending_pos % (GRANULE_FRAMES / 2) == 0)
+        PublishGranule();
     }
 
-    void Mix(s16* samples, std::size_t num_samples);
+    // Adds this source's resampled output to interleaved stereo frames.
+    void AddTo(s16* frames, std::size_t count);
 
-    void SetInputSampleRateDividend(u32 rate_dividend);
-    u32 GetInputSampleRateDividend() const;
+    u32 GetDivisor() const { return m_divisor; }
+    void SetDivisor(u32 divisor) { m_divisor = divisor; }
 
-    void SetInputSampleRateDivisor(u32 rate_divisor);
-    u32 GetInputSampleRateDivisor() const;
-
-    void SetVolume(u32 lvolume, u32 rvolume);
+    void SetVolume(u32 left, u32 right);
     std::pair<s32, s32> GetVolume() const;
 
   private:
-    Mixer* m_mixer;
+    struct Frame
+    {
+      float left = 0.0f;
+      float right = 0.0f;
+    };
+    using Granule = std::array<Frame, GRANULE_FRAMES>;
 
-    // All non-GBA MixerFifo instances use FIXED_SAMPLE_RATE_DIVIDEND.
-    u32 m_input_sample_rate_dividend;
-    u32 m_input_sample_rate_divisor;
+    void PublishGranule();
+    bool TakeGranule(Granule& out);
 
-    Granule m_next_buffer{};
-    std::size_t m_next_buffer_index = 0;
+    Mixer* m_owner;
 
-    u32 m_current_index = 0;
-    Granule m_front, m_back;
+    // Only GBAs use a dividend other than FIXED_SAMPLE_RATE_DIVIDEND.
+    u32 m_dividend;
+    u32 m_divisor;
 
-    std::atomic<std::size_t> m_granule_queue_size{20};
-    std::array<Granule, MAX_GRANULE_QUEUE_SIZE> m_queue;
-    std::atomic<std::size_t> m_queue_head{0};
-    std::atomic<std::size_t> m_queue_tail{0};
-    std::atomic<bool> m_queue_fading{false};
-    std::atomic<bool> m_queue_looping{false};
-    float m_fade_volume = 1.0;
+    // Producer side: the frames of the granule being collected.
+    Granule m_pending{};
+    std::size_t m_pending_pos = 0;
 
-    void Enqueue();
-    bool Dequeue(Granule* granule);
+    // Consumer side: the 8.24 fixed point read position and the two granules being played.
+    u32 m_phase = 0;
+    Granule m_lead{};
+    Granule m_trail{};
 
-    // Volume ranges from 0-256
-    std::atomic<s32> m_LVolume{256};
-    std::atomic<s32> m_RVolume{256};
+    std::array<Granule, RING_SLOTS> m_ring{};
+    std::atomic<std::size_t> m_ring_write{0};
+    std::atomic<std::size_t> m_ring_read{0};
+    std::atomic<std::size_t> m_target_depth{20};
+    std::atomic<bool> m_fading{false};
+    std::atomic<bool> m_repeating{false};
+    float m_fade_gain = 1.0f;
 
-    StereoPair m_quantization_error;
+    // 256 is unity gain.
+    std::atomic<s32> m_volume_left{256};
+    std::atomic<s32> m_volume_right{256};
+
+    // Rounding error carried over to the next output frame.
+    Frame m_carry{};
+  };
+
+  struct Settings
+  {
+    float emulation_speed = 1.0f;
+    bool preserve_pitch = false;
+    bool fill_gaps = false;
+    int buffer_ms = 0;
+    bool wiimote_routing = false;
+    std::array<bool, 4> wiimote_output{};
   };
 
   void RefreshConfig();
 
-  MixerFifo m_dma_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 32000};
-  MixerFifo m_streaming_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000};
-  std::array<MixerFifo, 4> m_wiimote_speaker_mixers{
-      MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
-      MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
-      MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
-      MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
-  };
-  MixerFifo m_skylander_portal_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 8000};
+  // GBAs mostly play at 65536 Hz, which FIXED_SAMPLE_RATE_DIVIDEND does not divide.
+  static constexpr u32 GBA_DIVIDEND = 0x1000000;
 
-  // GBAs generally use a 65536 sample rate which is not a factor of our FIXED_SAMPLE_RATE_DIVIDEND.
-  static constexpr u32 GBA_SAMPLE_RATE_DIVIDEND = 0x1000000;
-
-  std::array<MixerFifo, 4> m_gba_mixers{
-      MixerFifo{this, GBA_SAMPLE_RATE_DIVIDEND / 65536, GBA_SAMPLE_RATE_DIVIDEND},
-      MixerFifo{this, GBA_SAMPLE_RATE_DIVIDEND / 65536, GBA_SAMPLE_RATE_DIVIDEND},
-      MixerFifo{this, GBA_SAMPLE_RATE_DIVIDEND / 65536, GBA_SAMPLE_RATE_DIVIDEND},
-      MixerFifo{this, GBA_SAMPLE_RATE_DIVIDEND / 65536, GBA_SAMPLE_RATE_DIVIDEND},
+  Source m_dma{this, FIXED_SAMPLE_RATE_DIVIDEND / 32000};
+  Source m_streaming{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000};
+  std::array<Source, 4> m_wiimote_speakers{
+      Source{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
+      Source{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
+      Source{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
+      Source{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000},
   };
+  Source m_skylander_portal{this, FIXED_SAMPLE_RATE_DIVIDEND / 8000};
+  std::array<Source, 4> m_gbas{
+      Source{this, GBA_DIVIDEND / 65536, GBA_DIVIDEND},
+      Source{this, GBA_DIVIDEND / 65536, GBA_DIVIDEND},
+      Source{this, GBA_DIVIDEND / 65536, GBA_DIVIDEND},
+      Source{this, GBA_DIVIDEND / 65536, GBA_DIVIDEND},
+  };
+
   u32 m_output_sample_rate;
+  AudioCommon::SurroundDecoder m_surround;
 
-  AudioCommon::SurroundDecoder m_surround_decoder;
+  WaveFileWriter m_dtk_dump;
+  WaveFileWriter m_dsp_dump;
+  bool m_dtk_dumping = false;
+  bool m_dsp_dumping = false;
 
-  WaveFileWriter m_wave_writer_dtk;
-  WaveFileWriter m_wave_writer_dsp;
-
-  bool m_log_dtk_audio = false;
-  bool m_log_dsp_audio = false;
-
-  float m_config_emulation_speed;
-  bool m_config_audio_preserve_pitch;
-  bool m_config_fill_audio_gaps;
-  int m_config_audio_buffer_ms;
-  bool m_config_wiimote_routing_enabled = false;
-  std::array<bool, 4> m_config_wiimote_output_enabled{};
-
-  Config::ConfigChangedCallbackID m_config_changed_callback_id;
+  Settings m_settings;
+  Config::ConfigChangedCallbackID m_config_callback;
 };

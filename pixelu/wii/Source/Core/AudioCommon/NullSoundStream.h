@@ -1,10 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "AudioCommon/SoundStream.h"
 
+// The "No Audio Output" backend: always available, plays nothing.
 class NullSound final : public SoundStream
 {
 public:
