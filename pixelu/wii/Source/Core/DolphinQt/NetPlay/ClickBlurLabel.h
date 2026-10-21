@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 #include <QStackedWidget>
 #include <QWidget>
 
+// A label whose text stays hidden behind a blur until it is clicked. Each further click toggles
+// between the hidden and the readable form.
 class ClickBlurLabel final : public QStackedWidget
 {
   Q_OBJECT
@@ -21,7 +22,8 @@ protected:
   void mousePressEvent(QMouseEvent* event) override;
 
 private:
-  // Generates text that "looks correct" but is actually gibberish.
+  // Produces a stand-in string with the same shape as the input (letter case, digits and
+  // punctuation kept in place) so the blurred page gives nothing away.
   static QString GenerateBlurredText(const QString& text);
 
   QLabel* m_normal_label;

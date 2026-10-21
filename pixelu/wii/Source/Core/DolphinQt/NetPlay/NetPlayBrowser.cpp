@@ -1,7 +1,8 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/NetPlay/NetPlayBrowser.h"
+
+#include <array>
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -27,19 +28,43 @@
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 #include "DolphinQt/Settings.h"
 
-NetPlayBrowser::NetPlayBrowser(QWidget* parent) : QDialog(parent)
+namespace
+{
+// QSettings keys, all under the "netplaybrowser/" group.
+const QString KEY_GEOMETRY = QStringLiteral("netplaybrowser/geometry");
+const QString KEY_REGION = QStringLiteral("netplaybrowser/region");
+const QString KEY_NAME = QStringLiteral("netplaybrowser/name");
+const QString KEY_GAME_ID = QStringLiteral("netplaybrowser/game_id");
+const QString KEY_VISIBILITY = QStringLiteral("netplaybrowser/visibility");
+const QString KEY_HIDE_INCOMPATIBLE = QStringLiteral("netplaybrowser/hide_incompatible");
+const QString KEY_HIDE_INGAME = QStringLiteral("netplaybrowser/hide_ingame");
+
+constexpr int COLUMN_COUNT = 7;
+
+// The browser can only join sessions running exactly the same build.
+bool IsJoinable(const NetPlaySession& session)
+{
+  return Common::GetScmDescStr() == session.version;
+}
+}  // namespace
+
+NetPlayBrowser::NetPlayBrowser(QWidget* owner) : QDialog(owner)
 {
   setWindowTitle(tr("NetPlay Session Browser"));
 
+  // Saved filters are applied before the change signals are connected, so restoring them does
+  // not fire a refresh per field.
   CreateWidgets();
   RestoreSettings();
   ConnectWidgets();
 
   resize(750, 500);
 
+  // Plain rows: no row numbers, alternating background.
   m_table_widget->verticalHeader()->setHidden(true);
   m_table_widget->setAlternatingRowColors(true);
 
+  // Start the worker before the first query is queued.
   m_refresh_run.Set(true);
   m_refresh_thread = std::thread([this] { RefreshLoop(); });
 
@@ -49,6 +74,7 @@ NetPlayBrowser::NetPlayBrowser(QWidget* parent) : QDialog(parent)
 
 NetPlayBrowser::~NetPlayBrowser()
 {
+  // Wake the worker so it notices it should stop, then wait for it.
   m_refresh_run.Set(false);
   m_refresh_event.Set();
   if (m_refresh_thread.joinable())
@@ -57,72 +83,81 @@ NetPlayBrowser::~NetPlayBrowser()
   SaveSettings();
 }
 
-void NetPlayBrowser::CreateWidgets()
+QWidget* NetPlayBrowser::CreateFilterBox()
 {
-  auto* layout = new QVBoxLayout;
-
-  m_table_widget = new QTableWidget;
-  m_table_widget->setTabKeyNavigation(false);
-
-  m_table_widget->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_table_widget->setSelectionMode(QAbstractItemView::SingleSelection);
-  m_table_widget->setWordWrap(false);
-
   m_region_combo = new QComboBox;
-
   m_region_combo->addItem(tr("Any Region"));
-
-  for (const auto& region : NetPlayIndex::GetRegions())
+  for (const auto& [code, region_name] : NetPlayIndex::GetRegions())
   {
-    m_region_combo->addItem(
-        tr("%1 (%2)").arg(tr(region.second.c_str())).arg(QString::fromStdString(region.first)),
-        QString::fromStdString(region.first));
+    const QString code_text = QString::fromStdString(code);
+    m_region_combo->addItem(tr("%1 (%2)").arg(tr(region_name.c_str())).arg(code_text), code_text);
   }
-
   m_region_combo->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
 
-  m_status_label = new QLabel;
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-  m_button_refresh = new NonDefaultQPushButton(tr("Refresh"));
   m_edit_name = new QLineEdit;
   m_edit_game_id = new QLineEdit;
   m_check_hide_incompatible = new QCheckBox(tr("Hide Incompatible Sessions"));
   m_check_hide_ingame = new QCheckBox(tr("Hide In-Game Sessions"));
-
   m_check_hide_incompatible->setChecked(true);
 
   m_radio_all = new QRadioButton(tr("Private and Public"));
   m_radio_private = new QRadioButton(tr("Private"));
   m_radio_public = new QRadioButton(tr("Public"));
-
   m_radio_all->setChecked(true);
 
-  auto* filter_box = new QGroupBox(tr("Filters"));
-  auto* filter_layout = new QGridLayout;
-  filter_box->setLayout(filter_layout);
+  auto* const box = new QGroupBox(tr("Filters"));
+  auto* const grid = new QGridLayout;
+  box->setLayout(grid);
 
-  filter_layout->addWidget(new QLabel(tr("Region:")), 0, 0);
-  filter_layout->addWidget(m_region_combo, 0, 1, 1, -1);
-  filter_layout->addWidget(new QLabel(tr("Name:")), 1, 0);
-  filter_layout->addWidget(m_edit_name, 1, 1, 1, -1);
-  filter_layout->addWidget(new QLabel(tr("Game ID:")), 2, 0);
-  filter_layout->addWidget(m_edit_game_id, 2, 1, 1, -1);
-  filter_layout->addWidget(m_radio_all, 3, 1);
-  filter_layout->addWidget(m_radio_public, 3, 2);
-  filter_layout->addWidget(m_radio_private, 3, 3);
-  filter_layout->addItem(new QSpacerItem(4, 1, QSizePolicy::Expanding), 3, 4);
-  filter_layout->addWidget(m_check_hide_incompatible, 4, 1, 1, -1);
-  filter_layout->addWidget(m_check_hide_ingame, 5, 1, 1, -1);
+  // Labels sit in column 0; each field fills the rest of its row.
+  int row = 0;
+  for (const auto& [caption, field] :
+       std::array<std::pair<QString, QWidget*>, 3>{{{tr("Region:"), m_region_combo},
+                                                    {tr("Name:"), m_edit_name},
+                                                    {tr("Game ID:"), m_edit_game_id}}})
+  {
+    grid->addWidget(new QLabel(caption), row, 0);
+    grid->addWidget(field, row, 1, 1, -1);
+    ++row;
+  }
 
-  layout->addWidget(m_table_widget);
-  layout->addWidget(filter_box);
-  layout->addWidget(m_status_label);
-  layout->addWidget(m_button_box);
+  grid->addWidget(m_radio_all, row, 1);
+  grid->addWidget(m_radio_public, row, 2);
+  grid->addWidget(m_radio_private, row, 3);
+  grid->addItem(new QSpacerItem(4, 1, QSizePolicy::Expanding), row, 4);
+  ++row;
+  grid->addWidget(m_check_hide_incompatible, row++, 1, 1, -1);
+  grid->addWidget(m_check_hide_ingame, row, 1, 1, -1);
+
+  return box;
+}
+
+void NetPlayBrowser::CreateWidgets()
+{
+  auto* const main_layout = new QVBoxLayout;
+
+  m_table_widget = new QTableWidget;
+  m_table_widget->setTabKeyNavigation(false);
+  m_table_widget->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_table_widget->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_table_widget->setWordWrap(false);
+
+  QWidget* const filters = CreateFilterBox();
+
+  m_status_label = new QLabel;
+  m_button_box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  m_button_refresh = new NonDefaultQPushButton(tr("Refresh"));
+
+  main_layout->addWidget(m_table_widget);
+  main_layout->addWidget(filters);
+  main_layout->addWidget(m_status_label);
+  main_layout->addWidget(m_button_box);
 
   m_button_box->addButton(m_button_refresh, QDialogButtonBox::ResetRole);
+  // Enabled once a joinable row is selected.
   m_button_box->button(QDialogButtonBox::Ok)->setEnabled(false);
 
-  setLayout(layout);
+  setLayout(main_layout);
 }
 
 void NetPlayBrowser::ConnectWidgets()
@@ -133,10 +168,15 @@ void NetPlayBrowser::ConnectWidgets()
   connect(m_button_box, &QDialogButtonBox::rejected, this, &NetPlayBrowser::reject);
   connect(m_button_refresh, &QPushButton::clicked, this, &NetPlayBrowser::Refresh);
 
-  connect(m_radio_all, &QRadioButton::toggled, this, &NetPlayBrowser::Refresh);
-  connect(m_radio_private, &QRadioButton::toggled, this, &NetPlayBrowser::Refresh);
-  connect(m_check_hide_incompatible, &QRadioButton::toggled, this, &NetPlayBrowser::Refresh);
-  connect(m_check_hide_ingame, &QRadioButton::toggled, this, &NetPlayBrowser::Refresh);
+  // Toggling "all" or "private" covers every change of the visibility group, since one of the
+  // two always flips when the selection moves.
+  for (QAbstractButton* const toggle :
+       {static_cast<QAbstractButton*>(m_radio_all), static_cast<QAbstractButton*>(m_radio_private),
+        static_cast<QAbstractButton*>(m_check_hide_incompatible),
+        static_cast<QAbstractButton*>(m_check_hide_ingame)})
+  {
+    connect(toggle, &QAbstractButton::toggled, this, &NetPlayBrowser::Refresh);
+  }
 
   connect(m_edit_name, &QLineEdit::textChanged, this, &NetPlayBrowser::Refresh);
   connect(m_edit_game_id, &QLineEdit::textChanged, this, &NetPlayBrowser::Refresh);
@@ -145,27 +185,31 @@ void NetPlayBrowser::ConnectWidgets()
           &NetPlayBrowser::OnSelectionChanged);
   connect(m_table_widget, &QTableWidget::itemDoubleClicked, this, &NetPlayBrowser::accept);
 
+  // The worker emits these; queue them so the handlers run on the GUI thread.
   connect(this, &NetPlayBrowser::UpdateStatusRequested, this,
           &NetPlayBrowser::OnUpdateStatusRequested, Qt::QueuedConnection);
   connect(this, &NetPlayBrowser::UpdateListRequested, this, &NetPlayBrowser::OnUpdateListRequested,
           Qt::QueuedConnection);
 }
 
-void NetPlayBrowser::Refresh()
+NetPlayBrowser::FilterMap NetPlayBrowser::CurrentFilters() const
 {
-  std::map<std::string, std::string> filters;
+  FilterMap filters;
 
   if (m_check_hide_incompatible->isChecked())
     filters["version"] = Common::GetScmDescStr();
 
-  if (!m_edit_name->text().isEmpty())
-    filters["name"] = m_edit_name->text().toStdString();
+  const QString name = m_edit_name->text();
+  if (!name.isEmpty())
+    filters["name"] = name.toStdString();
 
-  if (!m_edit_game_id->text().isEmpty())
-    filters["game"] = m_edit_game_id->text().toStdString();
+  const QString game = m_edit_game_id->text();
+  if (!game.isEmpty())
+    filters["game"] = game.toStdString();
 
+  // "1" asks for password-protected sessions only, "0" for open ones only.
   if (!m_radio_all->isChecked())
-    filters["password"] = std::to_string(m_radio_private->isChecked());
+    filters["password"] = m_radio_private->isChecked() ? "1" : "0";
 
   if (m_region_combo->currentIndex() != 0)
     filters["region"] = m_region_combo->currentData().toString().toStdString();
@@ -173,7 +217,15 @@ void NetPlayBrowser::Refresh()
   if (m_check_hide_ingame->isChecked())
     filters["in_game"] = "0";
 
-  std::unique_lock<std::mutex> lock(m_refresh_filters_mutex);
+  return filters;
+}
+
+void NetPlayBrowser::Refresh()
+{
+  FilterMap filters = CurrentFilters();
+
+  // Only the newest request matters; an unhandled older one is simply replaced.
+  std::unique_lock<std::mutex> guard(m_refresh_filters_mutex);
   m_refresh_filters = std::move(filters);
   m_refresh_event.Set();
 }
@@ -184,29 +236,26 @@ void NetPlayBrowser::RefreshLoop()
   {
     m_refresh_event.Wait();
 
-    std::unique_lock<std::mutex> lock(m_refresh_filters_mutex);
-    if (m_refresh_filters)
+    std::unique_lock<std::mutex> guard(m_refresh_filters_mutex);
+    if (!m_refresh_filters)
+      continue;
+
+    FilterMap request = std::move(*m_refresh_filters);
+    m_refresh_filters.reset();
+    guard.unlock();
+
+    emit UpdateStatusRequested(tr("Refreshing..."));
+
+    NetPlayIndex index;
+    auto found = index.List(request);
+    if (found)
     {
-      auto filters = std::move(*m_refresh_filters);
-      m_refresh_filters.reset();
-
-      lock.unlock();
-
-      emit UpdateStatusRequested(tr("Refreshing..."));
-
-      NetPlayIndex client;
-
-      auto entries = client.List(filters);
-
-      if (entries)
-      {
-        emit UpdateListRequested(std::move(*entries));
-      }
-      else
-      {
-        emit UpdateStatusRequested(tr("Error obtaining session list: %1")
-                                       .arg(QString::fromStdString(client.GetLastError())));
-      }
+      emit UpdateListRequested(std::move(*found));
+    }
+    else
+    {
+      emit UpdateStatusRequested(
+          tr("Error obtaining session list: %1").arg(QString::fromStdString(index.GetLastError())));
     }
   }
 }
@@ -216,56 +265,54 @@ void NetPlayBrowser::UpdateList()
   const int session_count = static_cast<int>(m_sessions.size());
 
   m_table_widget->clear();
-  m_table_widget->setColumnCount(7);
+  m_table_widget->setColumnCount(COLUMN_COUNT);
   m_table_widget->setHorizontalHeaderLabels({tr("Region"), tr("Name"), tr("Password?"),
                                              tr("In-Game?"), tr("Game"), tr("Players"),
                                              tr("Version")});
 
-  auto* hor_header = m_table_widget->horizontalHeader();
-
-  hor_header->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-  hor_header->setSectionResizeMode(1, QHeaderView::Stretch);
-  hor_header->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-  hor_header->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-  hor_header->setSectionResizeMode(4, QHeaderView::Stretch);
-  hor_header->setHighlightSections(false);
+  QHeaderView* const header = m_table_widget->horizontalHeader();
+  // Name and game take the spare width; the short columns hug their contents.
+  static constexpr std::array<QHeaderView::ResizeMode, 5> modes{
+      QHeaderView::ResizeToContents, QHeaderView::Stretch, QHeaderView::ResizeToContents,
+      QHeaderView::ResizeToContents, QHeaderView::Stretch};
+  for (int column = 0; column < static_cast<int>(modes.size()); ++column)
+    header->setSectionResizeMode(column, modes[static_cast<size_t>(column)]);
+  header->setHighlightSections(false);
 
   m_table_widget->setRowCount(session_count);
 
-  for (int i = 0; i < session_count; i++)
+  for (int row = 0; row < session_count; ++row)
   {
-    const auto& entry = m_sessions[i];
+    const NetPlaySession& session = m_sessions[static_cast<size_t>(row)];
 
-    auto* region = new QTableWidgetItem(QString::fromStdString(entry.region));
-    auto* name = new QTableWidgetItem(QString::fromStdString(entry.name));
-    auto* password = new QTableWidgetItem(entry.has_password ? tr("Yes") : tr("No"));
-    auto* in_game = new QTableWidgetItem(entry.in_game ? tr("Yes") : tr("No"));
-    auto* game_id = new QTableWidgetItem(QString::fromStdString(entry.game_id));
-    auto* player_count = new QTableWidgetItem(QStringLiteral("%1").arg(entry.player_count));
-    auto* version = new QTableWidgetItem(QString::fromStdString(entry.version));
+    const std::array<QTableWidgetItem*, COLUMN_COUNT> cells{
+        new QTableWidgetItem(QString::fromStdString(session.region)),
+        new QTableWidgetItem(QString::fromStdString(session.name)),
+        new QTableWidgetItem(session.has_password ? tr("Yes") : tr("No")),
+        new QTableWidgetItem(session.in_game ? tr("Yes") : tr("No")),
+        new QTableWidgetItem(QString::fromStdString(session.game_id)),
+        new QTableWidgetItem(QStringLiteral("%1").arg(session.player_count)),
+        new QTableWidgetItem(QString::fromStdString(session.version)),
+    };
 
-    const bool enabled = Common::GetScmDescStr() == entry.version;
+    // Rows from other builds stay visible but cannot be picked.
+    const Qt::ItemFlags flags =
+        IsJoinable(session) ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags;
+    for (QTableWidgetItem* const cell : cells)
+      cell->setFlags(flags);
 
-    for (const auto& item : {region, name, password, in_game, game_id, player_count, version})
-      item->setFlags(enabled ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags);
-
-    m_table_widget->setItem(i, 0, region);
-    m_table_widget->setItem(i, 1, name);
-    m_table_widget->setItem(i, 2, password);
-    m_table_widget->setItem(i, 3, in_game);
-    m_table_widget->setItem(i, 4, game_id);
-    m_table_widget->setItem(i, 5, player_count);
-    m_table_widget->setItem(i, 6, version);
+    for (int column = 0; column < COLUMN_COUNT; ++column)
+      m_table_widget->setItem(row, column, cells[static_cast<size_t>(column)]);
   }
 
-  m_status_label->setText(
-      (session_count == 1 ? tr("%1 session found") : tr("%1 sessions found")).arg(session_count));
+  const QString found_text = session_count == 1 ? tr("%1 session found") : tr("%1 sessions found");
+  m_status_label->setText(found_text.arg(session_count));
 }
 
 void NetPlayBrowser::OnSelectionChanged()
 {
-  m_button_box->button(QDialogButtonBox::Ok)
-      ->setEnabled(!m_table_widget->selectedItems().isEmpty());
+  const bool has_selection = !m_table_widget->selectedItems().isEmpty();
+  m_button_box->button(QDialogButtonBox::Ok)->setEnabled(has_selection);
 }
 
 void NetPlayBrowser::OnUpdateStatusRequested(const QString& status)
@@ -281,50 +328,44 @@ void NetPlayBrowser::OnUpdateListRequested(std::vector<NetPlaySession> sessions)
 
 void NetPlayBrowser::accept()
 {
-  if (m_table_widget->selectedItems().isEmpty())
+  const auto selection = m_table_widget->selectedItems();
+  if (selection.isEmpty())
     return;
 
-  const int index = m_table_widget->selectedItems()[0]->row();
-
-  const NetPlaySession& session = m_sessions[index];
-
+  const NetPlaySession& session = m_sessions[static_cast<size_t>(selection[0]->row())];
   std::string server_id = session.server_id;
 
-  if (m_sessions[index].has_password)
+  // Protected sessions publish a scrambled id that only the right password restores.
+  if (session.has_password)
   {
-    QInputDialog dialog(this);
+    QInputDialog prompt(this);
+    prompt.setWindowTitle(tr("Enter password"));
+    prompt.setLabelText(tr("This session requires a password:"));
+    prompt.setWindowModality(Qt::WindowModal);
+    prompt.setTextEchoMode(QLineEdit::Password);
 
-    dialog.setWindowTitle(tr("Enter password"));
-    dialog.setLabelText(tr("This session requires a password:"));
-    dialog.setWindowModality(Qt::WindowModal);
-    dialog.setTextEchoMode(QLineEdit::Password);
-
-    if (dialog.exec() != QDialog::Accepted)
+    if (prompt.exec() != QDialog::Accepted)
       return;
 
-    const std::string password = dialog.textValue().toStdString();
-
-    const auto decrypted_id = session.DecryptID(password);
-
-    if (!decrypted_id)
+    const std::string password = prompt.textValue().toStdString();
+    const std::optional<std::string> real_id = session.DecryptID(password);
+    if (!real_id)
     {
       ModalMessageBox::warning(this, tr("Error"), tr("Invalid password provided."));
       return;
     }
-
-    server_id = decrypted_id.value();
+    server_id = *real_id;
   }
 
   QDialog::accept();
 
   Config::SetBaseOrCurrent(Config::NETPLAY_TRAVERSAL_CHOICE, session.method);
-
   Config::SetBaseOrCurrent(Config::NETPLAY_CONNECT_PORT, session.port);
 
-  if (session.method == "traversal")
-    Config::SetBaseOrCurrent(Config::NETPLAY_HOST_CODE, server_id);
-  else
-    Config::SetBaseOrCurrent(Config::NETPLAY_ADDRESS, server_id);
+  // Traversal sessions are reached by host code, direct ones by address.
+  const auto& target_setting =
+      session.method == "traversal" ? Config::NETPLAY_HOST_CODE : Config::NETPLAY_ADDRESS;
+  Config::SetBaseOrCurrent(target_setting, server_id);
 
   emit Join();
 }
@@ -333,48 +374,44 @@ void NetPlayBrowser::SaveSettings() const
 {
   auto& settings = Settings::Instance().GetQSettings();
 
-  settings.setValue(QStringLiteral("netplaybrowser/geometry"), saveGeometry());
-  settings.setValue(QStringLiteral("netplaybrowser/region"), m_region_combo->currentText());
-  settings.setValue(QStringLiteral("netplaybrowser/name"), m_edit_name->text());
-  settings.setValue(QStringLiteral("netplaybrowser/game_id"), m_edit_game_id->text());
+  settings.setValue(KEY_GEOMETRY, saveGeometry());
+  settings.setValue(KEY_REGION, m_region_combo->currentText());
+  settings.setValue(KEY_NAME, m_edit_name->text());
+  settings.setValue(KEY_GAME_ID, m_edit_game_id->text());
 
-  QString visibility(QStringLiteral("all"));
+  QString visibility = QStringLiteral("all");
   if (m_radio_public->isChecked())
     visibility = QStringLiteral("public");
   else if (m_radio_private->isChecked())
     visibility = QStringLiteral("private");
-  settings.setValue(QStringLiteral("netplaybrowser/visibility"), visibility);
+  settings.setValue(KEY_VISIBILITY, visibility);
 
-  settings.setValue(QStringLiteral("netplaybrowser/hide_incompatible"),
-                    m_check_hide_incompatible->isChecked());
-  settings.setValue(QStringLiteral("netplaybrowser/hide_ingame"), m_check_hide_ingame->isChecked());
+  settings.setValue(KEY_HIDE_INCOMPATIBLE, m_check_hide_incompatible->isChecked());
+  settings.setValue(KEY_HIDE_INGAME, m_check_hide_ingame->isChecked());
 }
 
 void NetPlayBrowser::RestoreSettings()
 {
   const auto& settings = Settings::Instance().GetQSettings();
 
-  const QByteArray geometry =
-      settings.value(QStringLiteral("netplaybrowser/geometry")).toByteArray();
+  const QByteArray geometry = settings.value(KEY_GEOMETRY).toByteArray();
   if (!geometry.isEmpty())
     restoreGeometry(geometry);
 
-  const QString region = settings.value(QStringLiteral("netplaybrowser/region")).toString();
-  const bool valid_region = m_region_combo->findText(region) != -1;
-  if (valid_region)
+  // A region saved by another build may no longer exist; keep the default then.
+  const QString region = settings.value(KEY_REGION).toString();
+  if (m_region_combo->findText(region) != -1)
     m_region_combo->setCurrentText(region);
 
-  m_edit_name->setText(settings.value(QStringLiteral("netplaybrowser/name")).toString());
-  m_edit_game_id->setText(settings.value(QStringLiteral("netplaybrowser/game_id")).toString());
+  m_edit_name->setText(settings.value(KEY_NAME).toString());
+  m_edit_game_id->setText(settings.value(KEY_GAME_ID).toString());
 
-  const QString visibility = settings.value(QStringLiteral("netplaybrowser/visibility")).toString();
+  const QString visibility = settings.value(KEY_VISIBILITY).toString();
   if (visibility == QStringLiteral("public"))
     m_radio_public->setChecked(true);
   else if (visibility == QStringLiteral("private"))
     m_radio_private->setChecked(true);
 
-  m_check_hide_incompatible->setChecked(
-      settings.value(QStringLiteral("netplaybrowser/hide_incompatible"), true).toBool());
-  m_check_hide_ingame->setChecked(
-      settings.value(QStringLiteral("netplaybrowser/hide_ingame")).toBool());
+  m_check_hide_incompatible->setChecked(settings.value(KEY_HIDE_INCOMPATIBLE, true).toBool());
+  m_check_hide_ingame->setChecked(settings.value(KEY_HIDE_INGAME).toBool());
 }

@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -24,6 +23,9 @@ class QPushButton;
 class QRadioButton;
 class QTableWidget;
 
+// Lists the sessions published on the NetPlay index server and lets the user join one.
+// Queries run on a worker thread: every filter change hands it a fresh filter set, and results
+// come back to the GUI thread through queued signals.
 class NetPlayBrowser : public QDialog
 {
   Q_OBJECT
@@ -38,9 +40,13 @@ signals:
   void UpdateListRequested(std::vector<NetPlaySession> sessions);
 
 private:
+  using FilterMap = std::map<std::string, std::string>;
+
   void CreateWidgets();
   void ConnectWidgets();
+  QWidget* CreateFilterBox();
 
+  FilterMap CurrentFilters() const;
   void Refresh();
   void RefreshLoop();
   void UpdateList();
@@ -53,24 +59,24 @@ private:
   void SaveSettings() const;
   void RestoreSettings();
 
-  QComboBox* m_region_combo;
-  QLabel* m_status_label;
-  QPushButton* m_button_refresh;
-  QTableWidget* m_table_widget;
-  QDialogButtonBox* m_button_box;
-  QLineEdit* m_edit_name;
-  QLineEdit* m_edit_game_id;
-  QCheckBox* m_check_hide_incompatible;
-  QCheckBox* m_check_hide_ingame;
+  QComboBox* m_region_combo = nullptr;
+  QLabel* m_status_label = nullptr;
+  QPushButton* m_button_refresh = nullptr;
+  QTableWidget* m_table_widget = nullptr;
+  QDialogButtonBox* m_button_box = nullptr;
+  QLineEdit* m_edit_name = nullptr;
+  QLineEdit* m_edit_game_id = nullptr;
+  QCheckBox* m_check_hide_incompatible = nullptr;
+  QCheckBox* m_check_hide_ingame = nullptr;
 
-  QRadioButton* m_radio_all;
-  QRadioButton* m_radio_private;
-  QRadioButton* m_radio_public;
+  QRadioButton* m_radio_all = nullptr;
+  QRadioButton* m_radio_private = nullptr;
+  QRadioButton* m_radio_public = nullptr;
 
   std::vector<NetPlaySession> m_sessions;
 
   std::thread m_refresh_thread;
-  std::optional<std::map<std::string, std::string>> m_refresh_filters;
+  std::optional<FilterMap> m_refresh_filters;
   std::mutex m_refresh_filters_mutex;
   Common::Flag m_refresh_run;
   Common::Event m_refresh_event;

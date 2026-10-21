@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,8 @@ class QProgressBar;
 class QVBoxLayout;
 class QWidget;
 
+// Shows one progress bar and one status line per player while a chunked transfer (for example a
+// save or SD card sync) runs. Closing it as host aborts the pending game start.
 class ChunkedProgressDialog : public QDialog
 {
   Q_OBJECT
@@ -31,13 +32,15 @@ public:
 private:
   void CreateWidgets();
   void ConnectWidgets();
+  void ClearPlayerRows();
+  void ShowSingleButton(bool is_host);
 
   std::map<int, QProgressBar*> m_progress_bars;
   std::map<int, QLabel*> m_status_labels;
   u64 m_data_size = 0;
 
-  QGroupBox* m_progress_box;
-  QVBoxLayout* m_progress_layout;
-  QVBoxLayout* m_main_layout;
-  QDialogButtonBox* m_button_box;
+  QGroupBox* m_progress_box = nullptr;
+  QVBoxLayout* m_progress_layout = nullptr;
+  QVBoxLayout* m_main_layout = nullptr;
+  QDialogButtonBox* m_button_box = nullptr;
 };

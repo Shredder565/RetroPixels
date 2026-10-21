@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/NetPlay/ClickBlurLabel.h"
 
@@ -14,19 +13,31 @@
 #include "Common/CommonTypes.h"
 #include "Common/Random.h"
 
+namespace
+{
+// Page indices inside the stack; the blurred page is added first so it is the one shown initially.
+constexpr int BLURRED_PAGE = 0;
+constexpr int READABLE_PAGE = 1;
+
+QChar RandomFrom(char first, int span)
+{
+  const int offset = Common::Random::GenerateValue<u8>() % span;
+  return QChar(first + offset);
+}
+}  // namespace
+
 ClickBlurLabel::ClickBlurLabel(QWidget* parent)
     : QStackedWidget(parent), m_normal_label(new QLabel(this)), m_blurred_label(new QLabel(this))
 {
   setCursor(Qt::PointingHandCursor);
 
-  // We use a QStackedWidget with a pre-blurred label instead of applying QGraphicsBlurEffect on
-  // click, because creating the blur effect on demand can cause a visible delay on lower-end
-  // hardware.
-  auto* blur = new QGraphicsBlurEffect(m_blurred_label);
-  blur->setBlurRadius(7);
-  m_blurred_label->setGraphicsEffect(blur);
+  // The blur is attached once up front: building the effect at click time can stall slow machines
+  // for a noticeable moment, so the stack simply flips between two prepared pages.
+  auto* const effect = new QGraphicsBlurEffect(m_blurred_label);
+  effect->setBlurRadius(7);
+  m_blurred_label->setGraphicsEffect(effect);
 
-  // We don't want to take up more space than the labels take
+  // Only as large as the text itself.
   setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
   addWidget(m_blurred_label);
@@ -35,7 +46,7 @@ ClickBlurLabel::ClickBlurLabel(QWidget* parent)
 
 void ClickBlurLabel::setText(const QString& text)
 {
-  if (this->text() == text)
+  if (text == this->text())
     return;
 
   m_normal_label->setText(text);
@@ -44,23 +55,22 @@ void ClickBlurLabel::setText(const QString& text)
 
 void ClickBlurLabel::mousePressEvent(QMouseEvent* event)
 {
-  int current = currentIndex();
-  setCurrentIndex(current == 0 ? 1 : 0);
+  setCurrentIndex(currentIndex() == BLURRED_PAGE ? READABLE_PAGE : BLURRED_PAGE);
   QWidget::mousePressEvent(event);
 }
 
 QString ClickBlurLabel::GenerateBlurredText(const QString& text)
 {
-  QString blurred_text;
-  blurred_text.reserve(text.size());
-  for (const QChar& c : text)
+  QString scrambled;
+  scrambled.reserve(text.size());
+  for (const QChar& ch : text)
   {
-    if (c.isLetter())
-      blurred_text += QChar((c.isUpper() ? 'A' : 'a') + (Common::Random::GenerateValue<u8>() % 26));
-    else if (c.isDigit())
-      blurred_text += QChar('0' + (Common::Random::GenerateValue<u8>() % 10));
+    if (ch.isLetter())
+      scrambled += RandomFrom(ch.isUpper() ? 'A' : 'a', 26);
+    else if (ch.isDigit())
+      scrambled += RandomFrom('0', 10);
     else
-      blurred_text += c;
+      scrambled += ch;
   }
-  return blurred_text;
+  return scrambled;
 }

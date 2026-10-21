@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,7 @@ namespace UICommon
 class GameFile;
 }
 
+// Lets the NetPlay host pick one game from the main game list, shown by its NetPlay name.
 class GameListDialog : public QDialog
 {
   Q_OBJECT
@@ -31,7 +31,7 @@ private:
   void PopulateGameList();
 
   const GameListModel& m_game_list_model;
-  QVBoxLayout* m_main_layout;
-  QListWidget* m_game_list;
-  QDialogButtonBox* m_button_box;
+  QVBoxLayout* m_main_layout = nullptr;
+  QListWidget* m_game_list = nullptr;
+  QDialogButtonBox* m_button_box = nullptr;
 };

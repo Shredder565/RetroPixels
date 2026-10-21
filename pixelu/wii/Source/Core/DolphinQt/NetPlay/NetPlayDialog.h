@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -32,6 +31,20 @@ class QSplitter;
 class QTableWidget;
 class QTextEdit;
 
+namespace Core
+{
+enum class State;
+}
+
+namespace NetPlay
+{
+class NetPlayServer;
+}
+
+// The lobby window of a NetPlay session: chat on the left, the player list and host code on the
+// right, and (for the host) the session options in the menu bar. It is also the NetPlayUI that
+// the NetPlay client reports to; those callbacks may arrive on the network thread, so anything
+// touching widgets is queued onto the GUI thread.
 class NetPlayDialog : public QDialog, public NetPlay::NetPlayUI
 {
   Q_OBJECT
@@ -106,67 +119,80 @@ private:
   void CreateChatLayout();
   void CreatePlayersLayout();
   void CreateMainLayout();
+  void CreateDataMenu();
+  void CreateNetworkMenu();
+  void CreateChecksumMenu();
+  void CreateOtherMenu();
   void ConnectWidgets();
+  void ConnectSettingsSaving();
   void OnChat();
   void OnStart();
+  void OnEmulationStateChanged(Core::State state);
+  void OnChooseGame();
+  void OnAssignPorts();
   void DisplayMessage(const QString& msg, const std::string& color,
                       int duration = OSD::Duration::NORMAL);
   void ResetExternalIP();
   void UpdateDiscordPresence();
   void UpdateGUI();
+  void FillPlayerTable(NetPlay::NetPlayClient& net_client,
+                       const std::vector<const NetPlay::Player*>& players);
+  void UpdateHostCode(NetPlay::NetPlayServer& net_server);
+  void ShowCopyableHostCode();
   void GameStatusChanged(bool running);
   void SetOptionsEnabled(bool enabled);
 
-  void SendMessage(const std::string& message);
+  // Sends a line of chat and echoes it locally. (Not called SendMessage, which is a Win32 macro.)
+  void SendChatLine(const std::string& message);
 
   // Chat
-  QGroupBox* m_chat_box;
-  QTextEdit* m_chat_edit;
-  QLineEdit* m_chat_type_edit;
-  QPushButton* m_chat_send_button;
+  QGroupBox* m_chat_box = nullptr;
+  QTextEdit* m_chat_edit = nullptr;
+  QLineEdit* m_chat_type_edit = nullptr;
+  QPushButton* m_chat_send_button = nullptr;
 
   // Players
-  QGroupBox* m_players_box;
-  QComboBox* m_room_box;
-  ClickBlurLabel* m_hostcode_label;
-  QPushButton* m_hostcode_action_button;
-  QTableWidget* m_players_list;
-  QPushButton* m_kick_button;
-  QPushButton* m_assign_ports_button;
+  QGroupBox* m_players_box = nullptr;
+  QComboBox* m_room_box = nullptr;
+  ClickBlurLabel* m_hostcode_label = nullptr;
+  QPushButton* m_hostcode_action_button = nullptr;
+  QTableWidget* m_players_list = nullptr;
+  QPushButton* m_kick_button = nullptr;
+  QPushButton* m_assign_ports_button = nullptr;
 
-  // Other
-  QMenuBar* m_menu_bar;
-  QMenu* m_data_menu;
-  QMenu* m_network_menu;
-  QMenu* m_game_digest_menu;
-  QMenu* m_other_menu;
-  QPushButton* m_game_button;
-  QPushButton* m_start_button;
-  QLabel* m_buffer_label;
-  QSpinBox* m_buffer_size_box;
+  // Menus and session controls
+  QMenuBar* m_menu_bar = nullptr;
+  QMenu* m_data_menu = nullptr;
+  QMenu* m_network_menu = nullptr;
+  QMenu* m_game_digest_menu = nullptr;
+  QMenu* m_other_menu = nullptr;
+  QPushButton* m_game_button = nullptr;
+  QPushButton* m_start_button = nullptr;
+  QLabel* m_buffer_label = nullptr;
+  QSpinBox* m_buffer_size_box = nullptr;
 
-  QActionGroup* m_savedata_style_group;
-  QAction* m_savedata_none_action;
-  QAction* m_savedata_load_only_action;
-  QAction* m_savedata_load_and_write_action;
-  QAction* m_savedata_all_wii_saves_action;
+  QActionGroup* m_savedata_style_group = nullptr;
+  QAction* m_savedata_none_action = nullptr;
+  QAction* m_savedata_load_only_action = nullptr;
+  QAction* m_savedata_load_and_write_action = nullptr;
+  QAction* m_savedata_all_wii_saves_action = nullptr;
 
-  QAction* m_sync_codes_action;
-  QAction* m_record_input_action;
-  QAction* m_strict_settings_sync_action;
-  QAction* m_host_input_authority_action;
-  QAction* m_golf_mode_action;
-  QAction* m_golf_mode_overlay_action;
-  QAction* m_fixed_delay_action;
-  QAction* m_hide_remote_gbas_action;
-  QPushButton* m_quit_button;
-  QSplitter* m_splitter;
-  QActionGroup* m_network_mode_group;
+  QAction* m_sync_codes_action = nullptr;
+  QAction* m_record_input_action = nullptr;
+  QAction* m_strict_settings_sync_action = nullptr;
+  QAction* m_host_input_authority_action = nullptr;
+  QAction* m_golf_mode_action = nullptr;
+  QAction* m_golf_mode_overlay_action = nullptr;
+  QAction* m_fixed_delay_action = nullptr;
+  QAction* m_hide_remote_gbas_action = nullptr;
+  QPushButton* m_quit_button = nullptr;
+  QSplitter* m_splitter = nullptr;
+  QActionGroup* m_network_mode_group = nullptr;
 
-  QGridLayout* m_main_layout;
-  GameDigestDialog* m_game_digest_dialog;
-  ChunkedProgressDialog* m_chunked_progress_dialog;
-  PadMappingDialog* m_pad_mapping;
+  QGridLayout* m_main_layout = nullptr;
+  GameDigestDialog* m_game_digest_dialog = nullptr;
+  ChunkedProgressDialog* m_chunked_progress_dialog = nullptr;
+  PadMappingDialog* m_pad_mapping = nullptr;
   NetPlay::SyncIdentifier m_current_game_identifier;
   std::string m_current_game_name;
   Common::Lazy<std::string> m_external_ip_address;

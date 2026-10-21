@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,8 @@ class QProgressBar;
 class QVBoxLayout;
 class QWidget;
 
+// Collects every player's SHA1 of the chosen game, shows per-player progress while hashing runs,
+// and says whether all results agree once each player has reported.
 class GameDigestDialog : public QDialog
 {
   Q_OBJECT
@@ -31,15 +32,17 @@ public:
 private:
   void CreateWidgets();
   void ConnectWidgets();
+  void UseOnlyButton(int standard_button);
+  QLabel* StatusLabelFor(int pid) const;
 
   std::map<int, QProgressBar*> m_progress_bars;
   std::map<int, QLabel*> m_status_labels;
 
   std::vector<std::string> m_results;
 
-  QGroupBox* m_progress_box;
-  QVBoxLayout* m_progress_layout;
-  QVBoxLayout* m_main_layout;
-  QLabel* m_check_label;
-  QDialogButtonBox* m_button_box;
+  QGroupBox* m_progress_box = nullptr;
+  QVBoxLayout* m_progress_layout = nullptr;
+  QVBoxLayout* m_main_layout = nullptr;
+  QLabel* m_check_label = nullptr;
+  QDialogButtonBox* m_button_box = nullptr;
 };

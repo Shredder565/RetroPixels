@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/NetPlay/PadMappingDialog.h"
 
@@ -15,6 +14,20 @@
 
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+// Grid rows, top to bottom. Each port gets its own column.
+enum GridRow : int
+{
+  ROW_GC_LABEL = 0,
+  ROW_GC_CHOICE = 1,
+  ROW_GBA_TOGGLE = 2,
+  ROW_WII_LABEL = 3,
+  ROW_WII_CHOICE = 4,
+  ROW_BUTTONS = 5,
+};
+}  // namespace
+
 PadMappingDialog::PadMappingDialog(QWidget* parent) : QDialog(parent)
 {
   setWindowTitle(tr("Assign Controllers"));
@@ -28,22 +41,27 @@ void PadMappingDialog::CreateWidgets()
   m_main_layout = new QGridLayout;
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Ok);
 
-  for (unsigned int i = 0; i < m_wii_boxes.size(); i++)
+  for (unsigned int port = 0; port < m_wii_boxes.size(); ++port)
   {
-    m_gc_boxes[i] = new QComboBox;
-    m_gba_boxes[i] = new QCheckBox(tr("GBA Port %1").arg(i + 1));
-    m_wii_boxes[i] = new QComboBox;
+    const int column = static_cast<int>(port);
+    const unsigned int shown_number = port + 1;
 
-    m_main_layout->addWidget(new QLabel(tr("GC Port %1").arg(i + 1)), 0, i);
-    m_main_layout->addWidget(m_gc_boxes[i], 1, i);
+    m_gc_boxes[port] = new QComboBox;
+    m_gba_boxes[port] = new QCheckBox(tr("GBA Port %1").arg(shown_number));
+    m_wii_boxes[port] = new QComboBox;
+
+    m_main_layout->addWidget(new QLabel(tr("GC Port %1").arg(shown_number)), ROW_GC_LABEL, column);
+    m_main_layout->addWidget(m_gc_boxes[port], ROW_GC_CHOICE, column);
 #ifdef HAS_LIBMGBA
-    m_main_layout->addWidget(m_gba_boxes[i], 2, i);
+    m_main_layout->addWidget(m_gba_boxes[port], ROW_GBA_TOGGLE, column);
 #endif
-    m_main_layout->addWidget(new QLabel(tr("Wii Remote %1").arg(i + 1)), 3, i);
-    m_main_layout->addWidget(m_wii_boxes[i], 4, i);
+    m_main_layout->addWidget(new QLabel(tr("Wii Remote %1").arg(shown_number)), ROW_WII_LABEL,
+                             column);
+    m_main_layout->addWidget(m_wii_boxes[port], ROW_WII_CHOICE, column);
   }
 
-  m_main_layout->addWidget(m_button_box, 5, 0, 1, -1);
+  // The button row spans every column.
+  m_main_layout->addWidget(m_button_box, ROW_BUTTONS, 0, 1, -1);
 
   setLayout(m_main_layout);
 }
@@ -51,65 +69,70 @@ void PadMappingDialog::CreateWidgets()
 void PadMappingDialog::ConnectWidgets()
 {
   connect(m_button_box, &QDialogButtonBox::accepted, this, &QDialog::accept);
-  for (const auto& combo_group : {m_gc_boxes, m_wii_boxes})
-  {
-    for (const auto& combo : combo_group)
-    {
-      connect(combo, &QComboBox::currentIndexChanged, this, &PadMappingDialog::OnMappingChanged);
-    }
-  }
-  for (const auto& checkbox : m_gba_boxes)
+
+  for (QComboBox* const combo : m_gc_boxes)
+    connect(combo, &QComboBox::currentIndexChanged, this, &PadMappingDialog::OnMappingChanged);
+  for (QComboBox* const combo : m_wii_boxes)
+    connect(combo, &QComboBox::currentIndexChanged, this, &PadMappingDialog::OnMappingChanged);
+
+  for (QCheckBox* const toggle : m_gba_boxes)
   {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-    connect(checkbox, &QCheckBox::checkStateChanged, this, &PadMappingDialog::OnMappingChanged);
+    connect(toggle, &QCheckBox::checkStateChanged, this, &PadMappingDialog::OnMappingChanged);
 #else
-    connect(checkbox, &QCheckBox::stateChanged, this, &PadMappingDialog::OnMappingChanged);
+    connect(toggle, &QCheckBox::stateChanged, this, &PadMappingDialog::OnMappingChanged);
 #endif
+  }
+}
+
+void PadMappingDialog::FillPlayerChoices(const QStringList& choices)
+{
+  // Signals stay blocked so that refilling a box does not overwrite the loaded mapping.
+  // As before, the stored player id is used directly as the entry to select.
+  for (size_t port = 0; port < m_gc_boxes.size(); ++port)
+  {
+    QComboBox* const combo = m_gc_boxes[port];
+    const QSignalBlocker quiet(combo);
+    combo->clear();
+    combo->addItems(choices);
+    combo->setCurrentIndex(m_pad_mapping[port]);
+  }
+  for (size_t port = 0; port < m_wii_boxes.size(); ++port)
+  {
+    QComboBox* const combo = m_wii_boxes[port];
+    const QSignalBlocker quiet(combo);
+    combo->clear();
+    combo->addItems(choices);
+    combo->setCurrentIndex(m_wii_mapping[port]);
   }
 }
 
 int PadMappingDialog::exec()
 {
-  const auto client = Settings::Instance().GetNetPlayClient();
-  const auto server = Settings::Instance().GetNetPlayServer();
-  // Load Settings
-  m_players = client->GetPlayers();
-  m_pad_mapping = server->GetPadMapping();
-  m_gba_config = server->GetGBAConfig();
-  m_wii_mapping = server->GetWiimoteMapping();
+  const auto net_client = Settings::Instance().GetNetPlayClient();
+  const auto net_server = Settings::Instance().GetNetPlayServer();
 
-  QStringList players;
+  // Start from what the server currently uses.
+  m_players = net_client->GetPlayers();
+  m_pad_mapping = net_server->GetPadMapping();
+  m_gba_config = net_server->GetGBAConfig();
+  m_wii_mapping = net_server->GetWiimoteMapping();
 
-  players.append(tr("None"));
-
-  for (const auto& player : m_players)
+  // Entry 0 means "nobody"; entry n is the n-th player in the list.
+  QStringList choices;
+  choices.append(tr("None"));
+  for (const NetPlay::Player* player : m_players)
   {
-    players.append(
+    choices.append(
         QStringLiteral("%1 (%2)").arg(QString::fromStdString(player->name)).arg(player->pid));
   }
 
-  for (auto& combo_group : {m_gc_boxes, m_wii_boxes})
+  FillPlayerChoices(choices);
+
+  for (size_t port = 0; port < m_gba_boxes.size(); ++port)
   {
-    const bool gc = combo_group == m_gc_boxes;
-    for (size_t i = 0; i < combo_group.size(); i++)
-    {
-      auto& combo = combo_group[i];
-      const QSignalBlocker blocker(combo);
-
-      combo->clear();
-      combo->addItems(players);
-
-      const auto index = gc ? m_pad_mapping[i] : m_wii_mapping[i];
-
-      combo->setCurrentIndex(index);
-    }
-  }
-
-  for (size_t i = 0; i < m_gba_boxes.size(); i++)
-  {
-    const QSignalBlocker blocker(m_gba_boxes[i]);
-
-    m_gba_boxes[i]->setChecked(m_gba_config[i].enabled);
+    const QSignalBlocker quiet(m_gba_boxes[port]);
+    m_gba_boxes[port]->setChecked(m_gba_config[port].enabled);
   }
 
   return QDialog::exec();
@@ -130,15 +153,22 @@ NetPlay::PadMappingArray PadMappingDialog::GetWiimoteArray()
   return m_wii_mapping;
 }
 
+NetPlay::PlayerId PadMappingDialog::PlayerAt(int combo_index) const
+{
+  if (combo_index <= 0)
+    return 0;
+  return m_players[static_cast<size_t>(combo_index - 1)]->pid;
+}
+
 void PadMappingDialog::OnMappingChanged()
 {
-  for (unsigned int i = 0; i < m_wii_boxes.size(); i++)
+  for (size_t port = 0; port < m_wii_boxes.size(); ++port)
   {
-    const int gc_id = m_gc_boxes[i]->currentIndex();
-    const int wii_id = m_wii_boxes[i]->currentIndex();
+    const int gc_choice = m_gc_boxes[port]->currentIndex();
+    const int wii_choice = m_wii_boxes[port]->currentIndex();
 
-    m_pad_mapping[i] = gc_id > 0 ? m_players[gc_id - 1]->pid : 0;
-    m_gba_config[i].enabled = m_gba_boxes[i]->isChecked();
-    m_wii_mapping[i] = wii_id > 0 ? m_players[wii_id - 1]->pid : 0;
+    m_pad_mapping[port] = PlayerAt(gc_choice);
+    m_gba_config[port].enabled = m_gba_boxes[port]->isChecked();
+    m_wii_mapping[port] = PlayerAt(wii_choice);
   }
 }

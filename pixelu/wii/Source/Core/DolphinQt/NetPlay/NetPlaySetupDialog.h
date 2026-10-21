@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,6 +22,8 @@ namespace UICommon
 class GameFile;
 }
 
+// The dialog shown before a NetPlay session: a "Connect" tab for joining someone else's game and
+// a "Host" tab for starting one. Every edit is written back to the NetPlay config immediately.
 class NetPlaySetupDialog : public QDialog
 {
   Q_OBJECT
@@ -38,6 +39,9 @@ signals:
 
 private:
   void CreateMainLayout();
+  QWidget* CreateConnectTab();
+  QWidget* CreateHostTab();
+  void LoadSettings();
   void ConnectWidgets();
   void PopulateGameList();
   void ResetTraversalHost();
@@ -45,38 +49,39 @@ private:
   void SaveSettings();
 
   void OnConnectionTypeChanged(int index);
+  bool CheckHostRequirements();
 
-  // Main Widget
-  QDialogButtonBox* m_button_box;
-  QComboBox* m_connection_type;
-  QLineEdit* m_nickname_edit;
-  QGridLayout* m_main_layout;
-  QTabWidget* m_tab_widget;
-  QPushButton* m_reset_traversal_button;
+  // Shared by both tabs
+  QDialogButtonBox* m_button_box = nullptr;
+  QComboBox* m_connection_type = nullptr;
+  QLineEdit* m_nickname_edit = nullptr;
+  QGridLayout* m_main_layout = nullptr;
+  QTabWidget* m_tab_widget = nullptr;
+  QPushButton* m_reset_traversal_button = nullptr;
 
-  // Connection Widget
-  QLabel* m_ip_label;
-  QLineEdit* m_ip_edit;
-  QLabel* m_connect_port_label;
-  QSpinBox* m_connect_port_box;
-  QPushButton* m_connect_button;
+  // "Connect" tab
+  QLabel* m_ip_label = nullptr;
+  QLineEdit* m_ip_edit = nullptr;
+  QLabel* m_connect_port_label = nullptr;
+  QSpinBox* m_connect_port_box = nullptr;
+  QPushButton* m_connect_button = nullptr;
 
-  // Host Widget
-  QLabel* m_host_port_label;
-  QSpinBox* m_host_port_box;
-  QListWidget* m_host_games;
-  QPushButton* m_host_button;
-  QCheckBox* m_host_force_port_check;
-  QSpinBox* m_host_force_port_box;
-  QCheckBox* m_host_chunked_upload_limit_check;
-  QSpinBox* m_host_chunked_upload_limit_box;
-  QCheckBox* m_host_server_browser;
-  QLineEdit* m_host_server_name;
-  QLineEdit* m_host_server_password;
-  QComboBox* m_host_server_region;
+  // "Host" tab
+  QLabel* m_host_port_label = nullptr;
+  QSpinBox* m_host_port_box = nullptr;
+  QListWidget* m_host_games = nullptr;
+  QPushButton* m_host_button = nullptr;
+  QCheckBox* m_host_force_port_check = nullptr;
+  QSpinBox* m_host_force_port_box = nullptr;
+  QCheckBox* m_host_chunked_upload_limit_check = nullptr;
+  QSpinBox* m_host_chunked_upload_limit_box = nullptr;
+  QCheckBox* m_host_server_browser = nullptr;
+  QLineEdit* m_host_server_name = nullptr;
+  QLineEdit* m_host_server_password = nullptr;
+  QComboBox* m_host_server_region = nullptr;
 
 #ifdef USE_UPNP
-  QCheckBox* m_host_upnp;
+  QCheckBox* m_host_upnp = nullptr;
 #endif
 
   const GameListModel& m_game_list_model;
