@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<svg width="1300" height="1300" viewBox="0 0 1300 1300" xmlns="http://www.w3.org/2000/svg">
-<rect x="50" y="50" width="1200" height="1200" style="stroke:#7e7e7e;stroke-width:100;fill:#505050;" />
-<polyline points="250,700 500,950 1100,350" stroke="#7e7e7e" stroke-width="150" fill="none" />
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<rect x="1" y="1" width="14" height="14" rx="3" fill="#3b4f63"/>
+<path d="M4.2 8.3 L7 11 L11.9 5.2" fill="none" stroke="#9aa2b0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

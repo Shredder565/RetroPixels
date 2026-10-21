@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
-<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-<polyline points="20,60 50,30 80,60" fill="#dcdcdc" />
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<path d="M2.88 10.56 L13.12 10.56 L8 5.44 Z" fill="#e4e7ed"/>
 </svg>
