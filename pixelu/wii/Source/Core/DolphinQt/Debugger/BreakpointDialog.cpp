@@ -135,7 +135,7 @@ void BreakpointDialog::BuildLayout()
   m_single_address = new QRadioButton(tr("Address"));
   m_single_address->setChecked(true);
   extent_group->addButton(m_single_address);
-  // i18n: A range of memory addresses
+  // i18n: watch a span of addresses rather than one
   m_address_range = new QRadioButton(tr("Range"));
   extent_group->addButton(m_address_range);
 
@@ -144,19 +144,19 @@ void BreakpointDialog::BuildLayout()
   m_first_caption = new QLabel;  // text depends on the extent, see SyncRangeFields
   m_last_caption = new QLabel(tr("To:"));
 
-  // i18n: This is a selectable condition when adding a breakpoint
+  // i18n: option for when a memory breakpoint fires
   m_on_read = new QRadioButton(tr("Read"));
-  // i18n: This is a selectable condition when adding a breakpoint
+  // i18n: option for when a memory breakpoint fires
   m_on_write = new QRadioButton(tr("Write"));
-  // i18n: This is a selectable condition when adding a breakpoint
+  // i18n: option for when a memory breakpoint fires
   m_on_access = new QRadioButton(tr("Read or Write"));
   m_on_write->setChecked(true);
 
-  // i18n: This is a selectable action when adding a breakpoint
+  // i18n: option for what a breakpoint does once hit
   m_log_only = new QRadioButton(tr("Write to Log"));
-  // i18n: This is a selectable action when adding a breakpoint
+  // i18n: option for what a breakpoint does once hit
   m_break_only = new QRadioButton(tr("Break"));
-  // i18n: This is a selectable action when adding a breakpoint
+  // i18n: option for what a breakpoint does once hit
   m_log_and_break = new QRadioButton(tr("Write to Log and Break"));
   m_log_and_break->setChecked(true);
 
@@ -169,8 +169,7 @@ void BreakpointDialog::BuildLayout()
   extent_grid->addWidget(m_last_caption, 1, 2);
   extent_grid->addWidget(m_last_address, 1, 3);
 
-  // i18n: If a condition is set for a breakpoint, the condition becoming true is a prerequisite for
-  // triggering the breakpoint.
+  // i18n: an optional expression; the breakpoint only fires while it evaluates true
   auto* access_box = new QGroupBox(tr("Condition"));
   auto* access_row = new QHBoxLayout;
   access_box->setLayout(access_row);
@@ -188,8 +187,7 @@ void BreakpointDialog::BuildLayout()
 
   auto* condition_row = new QHBoxLayout;
   m_condition = new QLineEdit();
-  // i18n: If a condition is set for a breakpoint, the condition becoming true is a prerequisite for
-  // triggering the breakpoint.
+  // i18n: an optional expression; the breakpoint only fires while it evaluates true
   condition_row->addWidget(new QLabel(tr("Condition:")));
   condition_row->addWidget(m_condition);
 
@@ -275,8 +273,7 @@ void BreakpointDialog::accept()
   const QString condition = m_condition->text().trimmed();
   if (!condition.isEmpty() && !Expression::TryParse(condition.toUtf8().constData()))
   {
-    // i18n: If a condition is set for a breakpoint, the condition becoming true is a prerequisite
-    // for triggering the breakpoint.
+    // i18n: an optional expression; the breakpoint only fires while it evaluates true
     ComplainAbout(tr("Condition"));
     return;
   }
@@ -346,7 +343,6 @@ void BreakpointDialog::ExplainConditions()
       "converted to Doubles for calculations. It's possible for them to go out of range or to "
       "become NaN. A warning will be given if NaN is returned, and the var that became NaN "
       "will be logged.");
-  // i18n: The title for a dialog that shows help for how to use conditions. If a condition is set
-  // for a breakpoint, the condition becoming true is a prerequisite for triggering the breakpoint.
+  // i18n: window title of the help text explaining breakpoint condition expressions
   ModalMessageBox::information(this, tr("Conditional help"), help);
 }

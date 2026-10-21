@@ -714,8 +714,7 @@ QString AssemblerWidget::TitleFor(const AsmEditor* editor, bool mark_unsaved) co
 
   if (mark_unsaved && editor->IsDirty())
   {
-    // i18n: This asterisk is added to the title of an editor to indicate that it has unsaved
-    // changes
+    // i18n: the "*" appended to an editor tab title marks a file with unsaved edits
     title = tr("%1 *").arg(title);
   }
   return title;

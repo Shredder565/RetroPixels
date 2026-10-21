@@ -65,8 +65,7 @@ std::string GameIniPath()
 WatchWidget::WatchWidget(QWidget* parent)
     : QDockWidget(parent), m_system(Core::System::GetInstance())
 {
-  // i18n: This kind of "watch" is used for watching emulated memory.
-  // It's not related to timekeeping devices.
+  // i18n: "watch" as in monitoring an emulated memory location (not a clock)
   setWindowTitle(tr("Watch"));
   setObjectName(QStringLiteral("watch"));
 
@@ -123,9 +122,9 @@ void WatchWidget::BuildLayout()
                                      // i18n: The base 10 numeral system. Not related to
                                      // non-integer numbers
                                      tr("Decimal"),
-                                     // i18n: Data type used in computing
+                                     // i18n: a text value read from memory
                                      tr("String"),
-                                     // i18n: Floating-point (non-integer) number
+                                     // i18n: a value shown as a float
                                      tr("Float"), tr("Locked")});
   m_list->setRowCount(1);
   AppendBlankRow(0);
@@ -330,14 +329,11 @@ void WatchWidget::ShowRowMenu()
     const qsizetype rows = m_list->selectionModel()->selectedRows().count();
     if (rows > 1)
     {
-      // i18n: This kind of "watch" is used for watching emulated memory.
-      // It's not related to timekeeping devices.
+      // i18n: "watch" as in monitoring an emulated memory location (not a clock)
       menu->addAction(tr("&Delete Watches"), this, [this] { RemoveSelected(); });
-      // i18n: This kind of "watch" is used for watching emulated memory.
-      // It's not related to timekeeping devices.
+      // i18n: "watch" as in monitoring an emulated memory location (not a clock)
       menu->addAction(tr("&Lock Watches"), this, [this] { SetSelectedLocked(true); });
-      // i18n: This kind of "watch" is used for watching emulated memory.
-      // It's not related to timekeeping devices.
+      // i18n: "watch" as in monitoring an emulated memory location (not a clock)
       menu->addAction(tr("&Unlock Watches"), this, [this] { SetSelectedLocked(false); });
     }
     else if (rows == 1)
@@ -351,8 +347,7 @@ void WatchWidget::ShowRowMenu()
         };
         menu->addAction(tr("Show in Memory"), this,
                         [this, address_of] { emit ShowMemory(address_of()); });
-        // i18n: This kind of "watch" is used for watching emulated memory.
-        // It's not related to timekeeping devices.
+        // i18n: "watch" as in monitoring an emulated memory location (not a clock)
         menu->addAction(tr("&Delete Watch"), this, [this, index] { RemoveWatchAndRefill(index); });
         menu->addAction(tr("&Add Memory Breakpoint"), this,
                         [this, address_of] { emit RequestMemoryBreakpoint(address_of()); });

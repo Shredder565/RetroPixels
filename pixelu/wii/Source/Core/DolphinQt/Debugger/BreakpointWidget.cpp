@@ -256,7 +256,7 @@ void BreakpointWidget::Update()
 
   m_list->clear();
   m_list->setHorizontalHeaderLabels({tr("Active"), tr("Type"), tr("Function"), tr("Address"),
-                                     // i18n: The address where a breakpoint ends
+                                     // i18n: last address covered by the breakpoint
                                      tr("End Addr"), tr("Break"), tr("Log"), tr("Read"),
                                      tr("Write"), tr("Condition")});
   m_list->horizontalHeader()->setStretchLastSection(true);

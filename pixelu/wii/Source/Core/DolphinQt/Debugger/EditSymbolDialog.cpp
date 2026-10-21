@@ -49,7 +49,7 @@ void EditSymbolDialog::BuildLayout()
   m_dialog_buttons->addButton(tr("Reset"), QDialogButtonBox::ResetRole);
   m_dialog_buttons->addButton(tr("Delete"), QDialogButtonBox::DestructiveRole);
 
-  // i18n: %1 is an address. %2 is a warning message.
+  // i18n: %1 = an address, %2 = the warning text
   const QString heading_format =
       is_symbol ? tr("Editing symbol starting at: %1\n%2") : tr("Editing note starting at: %1\n%2");
   auto* heading = new QLabel(heading_format.arg(QString::number(m_start, 16))
@@ -58,13 +58,11 @@ void EditSymbolDialog::BuildLayout()
   m_label_field = new QLineEdit();
   m_label_field->setPlaceholderText(is_symbol ? tr("Symbol name") : tr("Note name"));
 
-  // i18n: The address where a symbol ends
+  // i18n: last address of the symbol
   auto* end_caption = new QLabel(tr("End Address"));
-  // i18n: The number of lines of code
+  // i18n: length of the symbol counted in instructions (lines)
   auto* lines_caption = new QLabel(tr("Lines"));
-  // i18n: There's a text field immediately to the right of this label where 8 hexadecimal digits
-  // can be entered. The "0x" in this string acts as a prefix to the digits to indicate that they
-  // are hexadecimal.
+  // i18n: label in front of an 8-digit hex input box; "0x" marks the digits as hexadecimal
   auto* hex_caption = new QLabel(tr("Size: 0x"));
 
   m_end_hex = new QLineEdit();

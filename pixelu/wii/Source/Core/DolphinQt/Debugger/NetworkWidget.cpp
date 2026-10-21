@@ -412,7 +412,7 @@ QGroupBox* NetworkWidget::BuildSocketBox()
   box->setLayout(grid);
 
   m_sockets = new QTableWidget();
-  // i18n: FD stands for file descriptor (and in this case refers to sockets, not regular files)
+  // i18n: FD = the socket's file descriptor number
   const QStringList headings{tr("FD"),       tr("Domain"), tr("Type"),        tr("State"),
                              tr("Blocking"), tr("Name"),   tr("Redirections")};
   m_sockets->setColumnCount(static_cast<int>(headings.size()));
@@ -458,7 +458,7 @@ QGroupBox* NetworkWidget::BuildDumpBox()
 
   m_dump_format = new QComboBox();
   m_dump_format->insertItem(static_cast<int>(DumpFormat::None), tr("None"));
-  // i18n: PCAP is a file format
+  // i18n: PCAP is the packet capture file format
   m_dump_format->insertItem(static_cast<int>(DumpFormat::PCAP), tr("PCAP"));
   m_dump_format->insertItem(static_cast<int>(DumpFormat::BinarySSL), tr("Binary SSL"));
   m_dump_format->insertItem(static_cast<int>(DumpFormat::BinarySSLRead), tr("Binary SSL (read)"));
@@ -468,7 +468,7 @@ QGroupBox* NetworkWidget::BuildDumpBox()
 
   m_dump_ssl_read = new QCheckBox(tr("Dump decrypted SSL reads"));
   m_dump_ssl_write = new QCheckBox(tr("Dump decrypted SSL writes"));
-  // i18n: CA stands for certificate authority
+  // i18n: CA = certificate authority
   m_dump_root_ca = new QCheckBox(tr("Dump root CA certificates"));
   m_dump_peer_cert = new QCheckBox(tr("Dump peer certificates"));
   m_dump_bba = new QCheckBox(tr("Dump GameCube BBA traffic"));

@@ -147,8 +147,7 @@ void RegisterWidget::ShowCellMenu()
     const auto kind = static_cast<RegisterType>(cell->data(DATA_TYPE).toInt());
     const RegisterDisplay shown_as = cell->GetDisplay();
 
-    // i18n: This kind of "watch" is used for watching emulated memory.
-    // It's not related to timekeeping devices.
+    // i18n: "watch" as in monitoring an emulated memory location (not a clock)
     menu->addAction(tr("Add to &watch"), this, [this, cell] {
       const u32 address = static_cast<u32>(cell->GetValue());
       emit RequestWatch(QStringLiteral("reg_%1").arg(address, 8, 16, QLatin1Char('0')), address);
@@ -169,9 +168,9 @@ void RegisterWidget::ShowCellMenu()
     this_cell[0] = menu->addAction(tr("Hexadecimal"));
     this_cell[1] = menu->addAction(tr("Signed Integer"));
     this_cell[2] = menu->addAction(tr("Unsigned Integer"));
-    // i18n: A floating point number
+    // i18n: display a value as a single precision float
     this_cell[3] = menu->addAction(tr("Float"));
-    // i18n: A double precision floating point number
+    // i18n: display a value as a 64-bit float
     this_cell[4] = menu->addAction(tr("Double"));
     menu->addSeparator();
 
@@ -179,9 +178,9 @@ void RegisterWidget::ShowCellMenu()
     whole_column[0] = menu->addAction(tr("All Hexadecimal"));
     whole_column[1] = menu->addAction(tr("All Signed Integer"));
     whole_column[2] = menu->addAction(tr("All Unsigned Integer"));
-    // i18n: A floating point number
+    // i18n: display a value as a single precision float
     whole_column[3] = menu->addAction(tr("All Float"));
-    // i18n: A double precision floating point number
+    // i18n: display a value as a 64-bit float
     whole_column[4] = menu->addAction(tr("All Double"));
     for (size_t i = 0; i < whole_column.size(); ++i)
       whole_column[i]->setData(static_cast<int>(i));

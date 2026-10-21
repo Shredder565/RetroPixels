@@ -353,28 +353,28 @@ QVariant JitBlockTableModel::headerData(int section, Qt::Orientation orientation
 
   // Short forms; the JIT widget's column menu shows the full names.
   static constexpr std::array<const char*, Column::NumberOfColumns> titles{
-      // i18n: PPC Feature Flags
+      // i18n: short header for the guest feature flags column
       QT_TR_NOOP("PPC Feat. Flags"),
-      // i18n: Effective Address
+      // i18n: short header for the effective address column
       QT_TR_NOOP("Eff. Address"),
-      // i18n: Code Buffer Size
+      // i18n: short header for the code buffer size column
       QT_TR_NOOP("Code Buff. Size"),
-      // i18n: Repeat Instructions
+      // i18n: short header for the repeated instructions column
       QT_TR_NOOP("Repeat Instr."),
-      // i18n: Host Near Code Size
+      // i18n: short header for the near code size column
       QT_TR_NOOP("Host N. Size"),
-      // i18n: Host Far Code Size
+      // i18n: short header for the far code size column
       QT_TR_NOOP("Host F. Size"),
       QT_TR_NOOP("Run Count"),
       QT_TR_NOOP("Cycles Spent"),
-      // i18n: Cycles Average
+      // i18n: short header, average cycles per run
       QT_TR_NOOP("Cycles Avg."),
-      // i18n: Cycles Percent
+      // i18n: short header, share of all cycles
       QT_TR_NOOP("Cycles %"),
       QT_TR_NOOP("Time Spent (ns)"),
-      // i18n: Time Average (ns)
+      // i18n: short header, average time per run in nanoseconds
       QT_TR_NOOP("Time Avg. (ns)"),
-      // i18n: Time Percent
+      // i18n: short header, share of all time
       QT_TR_NOOP("Time %"),
       QT_TR_NOOP("Symbol"),
   };
