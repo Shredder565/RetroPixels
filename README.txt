@@ -270,6 +270,24 @@ Arcade games in MAME (any version)
 - The MAME list is kept in %APPDATA%\RetroPixels\mame.json and shared with
   RetroPixels Native.
 
+Star Wars Trilogy Arcade (Supermodel)
+- The "Supermodel" tab plays Star Wars Trilogy Arcade (Sega Model 3) on
+  Supermodel, which is in the Supermodel folder of the RetroPixels download
+  (Supermodel by The Supermodel Team, GPL-3.0, modified for RetroPixels: its
+  licence, source and the list of changes are in that folder).
+- You need your own ROM set: swtrilgya.zip or swtrilgy.zip. The first time
+  you open the tab, RetroPixels looks for it in your ROM folders, Downloads,
+  Desktop and Documents and remembers it; or click "Choose the game file...".
+  A swtrilgya.zip that isn't merged needs swtrilgy.zip next to it.
+- Click the tile: the game starts playable, inside RetroPixels (or
+  fullscreen). "Stop game" in the bar at the top comes back.
+- Xbox controller: left stick aims, RT or A fires, RB or B is the event
+  button (force), Start starts, Back inserts a coin, Back + Start leaves.
+  Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
+  F2 the game's test menu.
+- Settings, high scores and save states are kept in
+  %APPDATA%\RetroPixels\Supermodel.
+
 Recording games
 - GameCube and Wii games are recorded automatically as .mp4, from the start
   of the game to the end (turn it off in the Recordings tab, or untick
