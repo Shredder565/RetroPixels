@@ -179,7 +179,8 @@ Device::Device(std::string name, int slot, std::string server_address, u16 serve
 void Device::AddControls()
 {
   // Pressure-sensitive buttons.
-  static constexpr std::pair<const char*, u8 Proto::PadDataResponse::*> analog_buttons[] = {
+  using AnalogField = decltype(&Proto::PadDataResponse::trigger_l2);
+  static constexpr std::pair<const char*, AnalogField> analog_buttons[] = {
       {"Pad W", &Proto::PadDataResponse::button_dpad_left_analog},
       {"Pad S", &Proto::PadDataResponse::button_dpad_down_analog},
       {"Pad E", &Proto::PadDataResponse::button_dpad_right_analog},
