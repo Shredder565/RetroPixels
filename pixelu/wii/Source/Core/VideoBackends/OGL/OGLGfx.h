@@ -1,7 +1,11 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
+#include <memory>
+#include <string_view>
+#include <vector>
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/Constants.h"
@@ -13,6 +17,9 @@ namespace OGL
 class OGLFramebuffer;
 class OGLTexture;
 
+// The OpenGL implementation of the renderer interface. GL is a state machine, so this class
+// remembers what it last set (pipeline state, texture units, image units) and skips redundant
+// calls.
 class OGLGfx final : public AbstractGfx
 {
 public:
@@ -75,45 +82,46 @@ public:
 
   std::unique_ptr<VideoCommon::AsyncShaderCompiler> CreateAsyncShaderCompiler() override;
 
-  // Only call methods from this on the GPU thread.
-  GLContext* GetMainGLContext() const { return m_main_gl_context.get(); }
+  // GPU thread only.
+  GLContext* GetMainGLContext() const { return m_context.get(); }
   bool IsGLES() const;
 
-  // Invalidates a cached texture binding. Required for texel buffers when they borrow the units.
-  void InvalidateTextureBinding(u32 index) { m_bound_textures[index] = nullptr; }
+  // Forgets what is bound to a texture unit, for code that binds texel buffers there itself.
+  void InvalidateTextureBinding(u32 index) { m_unit_textures[index] = nullptr; }
 
-  // The shared framebuffer exists for copying textures when extensions are not available. It is
-  // slower, but the only way to do these things otherwise.
-  u32 GetSharedReadFramebuffer() const { return m_shared_read_framebuffer; }
-  u32 GetSharedDrawFramebuffer() const { return m_shared_draw_framebuffer; }
+  // Two scratch framebuffer objects for copies done by attaching textures (blits, readbacks)
+  // when no direct copy function is available.
+  u32 GetSharedReadFramebuffer() const { return m_scratch_read_fbo; }
+  u32 GetSharedDrawFramebuffer() const { return m_scratch_draw_fbo; }
   void BindSharedReadFramebuffer();
   void BindSharedDrawFramebuffer();
 
-  // Restores FBO binding after it's been changed.
+  // Binds the current framebuffer again after a scratch framebuffer was used.
   void RestoreFramebufferBinding();
 
   SurfaceInfo GetSurfaceInfo() const override;
 
 private:
-  void CheckForSurfaceChange();
-  void CheckForSurfaceResize();
+  void PickUpSurfaceChange();
+  void PickUpSurfaceResize();
+  void ResizeWindowFramebuffer();
+  void SyncDebugOutputWithLogLevel();
+  void SetClipDistances(bool enable);
 
-  void ApplyRasterizationState(const RasterizationState state);
-  void ApplyDepthState(const DepthState state);
-  void ApplyBlendingState(const BlendingState state);
+  void SetRasterization(RasterizationState state);
+  void SetDepth(DepthState state);
+  void SetBlending(BlendingState state);
 
-  std::unique_ptr<GLContext> m_main_gl_context;
-  std::unique_ptr<OGLFramebuffer> m_system_framebuffer;
-  std::array<const OGLTexture*, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_bound_textures{};
-  std::array<const AbstractTexture*, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS>
-      m_bound_image_textures{};
-  AbstractTexture* m_bound_image_texture = nullptr;
-  RasterizationState m_current_rasterization_state;
-  DepthState m_current_depth_state;
-  BlendingState m_current_blend_state;
-  u32 m_shared_read_framebuffer = 0;
-  u32 m_shared_draw_framebuffer = 0;
-  float m_backbuffer_scale;
+  std::unique_ptr<GLContext> m_context;
+  std::unique_ptr<OGLFramebuffer> m_window_framebuffer;
+  std::array<const OGLTexture*, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_unit_textures{};
+  std::array<const AbstractTexture*, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS> m_image_units{};
+  RasterizationState m_raster_state;
+  DepthState m_depth_state;
+  BlendingState m_blend_state;
+  u32 m_scratch_read_fbo = 0;
+  u32 m_scratch_draw_fbo = 0;
+  float m_surface_scale;
 };
 
 inline OGLGfx* GetOGLGfx()

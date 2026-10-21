@@ -1,8 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/OGLVertexManager.h"
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 
 #include "Common/Align.h"
@@ -21,31 +22,40 @@
 
 namespace OGL
 {
-static void CheckBufferBinding()
+namespace
 {
-  // The index buffer is part of the VAO state, therefore we need to bind it first.
-  if (!ProgramShaderCache::IsValidVertexFormatBound())
-  {
-    ProgramShaderCache::BindVertexFormat(
-        static_cast<GLVertexFormat*>(VertexLoaderManager::GetCurrentVertexFormat()));
-  }
+// The element buffer binding belongs to the bound VAO. Before touching the index buffer some
+// real vertex format has to be bound, or the binding would land in the attributeless VAO (or
+// in none).
+void EnsureVertexFormatBound()
+{
+  if (ProgramShaderCache::IsValidVertexFormatBound())
+    return;
+  ProgramShaderCache::BindVertexFormat(
+      static_cast<GLVertexFormat*>(VertexLoaderManager::GetCurrentVertexFormat()));
 }
+
+// Internal formats of the buffer textures, by TexelBufferFormat.
+constexpr std::array<GLenum, NUM_TEXEL_BUFFER_FORMATS> TEXEL_VIEW_FORMATS = {
+    GL_R8UI,     // TEXEL_BUFFER_FORMAT_R8_UINT
+    GL_R16UI,    // TEXEL_BUFFER_FORMAT_R16_UINT
+    GL_RGBA8UI,  // TEXEL_BUFFER_FORMAT_RGBA8_UINT
+    GL_RG32UI,   // TEXEL_BUFFER_FORMAT_R32G32_UINT
+};
+}  // namespace
 
 VertexManager::VertexManager() = default;
 
 VertexManager::~VertexManager()
 {
   if (g_backend_info.bSupportsPaletteConversion)
-  {
-    glDeleteTextures(static_cast<GLsizei>(m_texel_buffer_views.size()),
-                     m_texel_buffer_views.data());
-  }
+    glDeleteTextures(static_cast<GLsizei>(m_texel_views.size()), m_texel_views.data());
 
-  // VAO must be found when destroying the index buffer.
-  CheckBufferBinding();
-  m_texel_buffer.reset();
-  m_index_buffer.reset();
-  m_vertex_buffer.reset();
+  // Deleting the index buffer must find a VAO bound.
+  EnsureVertexFormatBound();
+  m_texels.reset();
+  m_indices.reset();
+  m_vertices.reset();
 }
 
 bool VertexManager::Initialize()
@@ -53,40 +63,30 @@ bool VertexManager::Initialize()
   if (!VertexManagerBase::Initialize())
     return false;
 
-  m_vertex_buffer = StreamBuffer::Create(GL_ARRAY_BUFFER, VERTEX_STREAM_BUFFER_SIZE);
-  m_index_buffer = StreamBuffer::Create(GL_ELEMENT_ARRAY_BUFFER, INDEX_STREAM_BUFFER_SIZE);
+  m_vertices = StreamBuffer::Create(GL_ARRAY_BUFFER, VERTEX_STREAM_BUFFER_SIZE);
+  m_indices = StreamBuffer::Create(GL_ELEMENT_ARRAY_BUFFER, INDEX_STREAM_BUFFER_SIZE);
+
+  // Shaders that fetch vertices themselves read the vertex stream as SSBO 1.
   if (g_ActiveConfig.UseVSForLinePointExpand() || g_backend_info.bSupportsDynamicVertexLoader)
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_vertices->GetGLBufferId());
+
+  if (!g_backend_info.bSupportsPaletteConversion)
+    return true;
+
+  // The texel stream holds palettes and, with GPU texture decoding, raw texture data. GL only
+  // promises 64K texels in a buffer texture, so ask for no more than the driver allows.
+  GLint driver_limit = 0;
+  glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &driver_limit);
+  const GLint texel_bytes = std::min(driver_limit, static_cast<GLint>(TEXEL_STREAM_BUFFER_SIZE));
+  m_texels = StreamBuffer::Create(GL_TEXTURE_BUFFER, static_cast<u32>(texel_bytes));
+
+  glGenTextures(static_cast<GLsizei>(m_texel_views.size()), m_texel_views.data());
+  glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
+  for (u32 format = 0; format < NUM_TEXEL_BUFFER_FORMATS; ++format)
   {
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_vertex_buffer->GetGLBufferId());
+    glBindTexture(GL_TEXTURE_BUFFER, m_texel_views[format]);
+    glTexBuffer(GL_TEXTURE_BUFFER, TEXEL_VIEW_FORMATS[format], m_texels->GetGLBufferId());
   }
-
-  if (g_backend_info.bSupportsPaletteConversion)
-  {
-    // The minimum MAX_TEXTURE_BUFFER_SIZE that the spec mandates is 65KB, we are asking for a 1MB
-    // buffer here. This buffer is also used as storage for undecoded textures when compute shader
-    // texture decoding is enabled, in which case the requested size is 32MB.
-    GLint max_buffer_size;
-    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &max_buffer_size);
-    m_texel_buffer = StreamBuffer::Create(
-        GL_TEXTURE_BUFFER, std::min(max_buffer_size, static_cast<GLint>(TEXEL_STREAM_BUFFER_SIZE)));
-
-    // Allocate texture views backed by buffer.
-    static constexpr std::array<std::pair<TexelBufferFormat, GLenum>, NUM_TEXEL_BUFFER_FORMATS>
-        format_mapping = {{
-            {TEXEL_BUFFER_FORMAT_R8_UINT, GL_R8UI},
-            {TEXEL_BUFFER_FORMAT_R16_UINT, GL_R16UI},
-            {TEXEL_BUFFER_FORMAT_RGBA8_UINT, GL_RGBA8UI},
-            {TEXEL_BUFFER_FORMAT_R32G32_UINT, GL_RG32UI},
-        }};
-    glGenTextures(static_cast<GLsizei>(m_texel_buffer_views.size()), m_texel_buffer_views.data());
-    glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
-    for (const auto& it : format_mapping)
-    {
-      glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[it.first]);
-      glTexBuffer(GL_TEXTURE_BUFFER, it.second, m_texel_buffer->GetGLBufferId());
-    }
-  }
-
   return true;
 }
 
@@ -96,23 +96,29 @@ void VertexManager::UploadUtilityUniforms(const void* uniforms, u32 uniforms_siz
   ProgramShaderCache::UploadConstants(uniforms, uniforms_size);
 }
 
+void VertexManager::BindTexelView(u32 unit, TexelBufferFormat format)
+{
+  // The texture decoding shaders read the texel buffers from units 0 and 1; the cached binding
+  // for that unit is no longer valid afterwards.
+  glActiveTexture(GL_TEXTURE0 + unit);
+  glBindTexture(GL_TEXTURE_BUFFER, m_texel_views[static_cast<u32>(format)]);
+  GetOGLGfx()->InvalidateTextureBinding(unit);
+}
+
 bool VertexManager::UploadTexelBuffer(const void* data, u32 data_size, TexelBufferFormat format,
                                       u32* out_offset)
 {
-  if (data_size > m_texel_buffer->GetSize())
+  if (data_size > m_texels->GetSize())
     return false;
 
-  const u32 elem_size = GetTexelBufferElementSize(format);
-  const auto dst = m_texel_buffer->Map(data_size, elem_size);
-  std::memcpy(dst.first, data, data_size);
+  const u32 element = GetTexelBufferElementSize(format);
+  const auto [dst, byte_offset] = m_texels->Map(data_size, element);
+  std::memcpy(dst, data, data_size);
   ADDSTAT(g_stats.this_frame.bytes_uniform_streamed, data_size);
-  *out_offset = dst.second / elem_size;
-  m_texel_buffer->Unmap(data_size);
+  *out_offset = byte_offset / element;
+  m_texels->Unmap(data_size);
 
-  // Bind the correct view to the texel buffer slot.
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(format)]);
-  GetOGLGfx()->InvalidateTextureBinding(0);
+  BindTexelView(0, format);
   return true;
 }
 
@@ -120,69 +126,69 @@ bool VertexManager::UploadTexelBuffer(const void* data, u32 data_size, TexelBuff
                                       u32* out_offset, const void* palette_data, u32 palette_size,
                                       TexelBufferFormat palette_format, u32* out_palette_offset)
 {
-  const u32 elem_size = GetTexelBufferElementSize(format);
-  const u32 palette_elem_size = GetTexelBufferElementSize(palette_format);
-  const u32 reserve_size = data_size + palette_size + palette_elem_size;
-  if (reserve_size > m_texel_buffer->GetSize())
+  const u32 element = GetTexelBufferElementSize(format);
+  const u32 palette_element = GetTexelBufferElementSize(palette_format);
+
+  // The palette follows the data, aligned to its own element size (which may need up to one
+  // element of padding).
+  if (data_size + palette_size + palette_element > m_texels->GetSize())
     return false;
 
-  const auto dst = m_texel_buffer->Map(reserve_size, elem_size);
-  const u32 palette_byte_offset = Common::AlignUp(data_size, palette_elem_size);
-  std::memcpy(dst.first, data, data_size);
-  std::memcpy(dst.first + palette_byte_offset, palette_data, palette_size);
-  ADDSTAT(g_stats.this_frame.bytes_uniform_streamed, palette_byte_offset + palette_size);
-  *out_offset = dst.second / elem_size;
-  *out_palette_offset = (dst.second + palette_byte_offset) / palette_elem_size;
-  m_texel_buffer->Unmap(palette_byte_offset + palette_size);
+  const auto [dst, byte_offset] =
+      m_texels->Map(data_size + palette_size + palette_element, element);
+  const u32 palette_start = Common::AlignUp(data_size, palette_element);
+  const u32 used = palette_start + palette_size;
+  std::memcpy(dst, data, data_size);
+  std::memcpy(dst + palette_start, palette_data, palette_size);
+  ADDSTAT(g_stats.this_frame.bytes_uniform_streamed, used);
+  *out_offset = byte_offset / element;
+  *out_palette_offset = (byte_offset + palette_start) / palette_element;
+  m_texels->Unmap(used);
 
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(format)]);
-  GetOGLGfx()->InvalidateTextureBinding(0);
-
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(palette_format)]);
-  GetOGLGfx()->InvalidateTextureBinding(1);
-
+  BindTexelView(0, format);
+  BindTexelView(1, palette_format);
   return true;
 }
 
 GLuint VertexManager::GetVertexBufferHandle() const
 {
-  return m_vertex_buffer->m_buffer;
+  return m_vertices->GetGLBufferId();
 }
 
 GLuint VertexManager::GetIndexBufferHandle() const
 {
-  return m_index_buffer->m_buffer;
+  return m_indices->GetGLBufferId();
 }
 
 void VertexManager::ResetBuffer(u32 vertex_stride)
 {
-  CheckBufferBinding();
+  EnsureVertexFormatBound();
 
-  auto buffer = m_vertex_buffer->Map(MAXVBUFFERSIZE, vertex_stride);
-  m_cur_buffer_pointer = m_base_buffer_pointer = buffer.first;
-  m_end_buffer_pointer = buffer.first + MAXVBUFFERSIZE;
+  // Vertices start on a whole vertex so the base vertex is an integer.
+  const auto vertices = m_vertices->Map(MAXVBUFFERSIZE, vertex_stride);
+  m_base_buffer_pointer = vertices.first;
+  m_cur_buffer_pointer = vertices.first;
+  m_end_buffer_pointer = vertices.first + MAXVBUFFERSIZE;
 
-  buffer = m_index_buffer->Map(MAXIBUFFERSIZE * sizeof(u16));
-  m_index_generator.Start(reinterpret_cast<u16*>(buffer.first));
+  const auto indices = m_indices->Map(MAXIBUFFERSIZE * sizeof(u16));
+  m_index_generator.Start(reinterpret_cast<u16*>(indices.first));
 }
 
 void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices,
                                  u32* out_base_vertex, u32* out_base_index)
 {
-  u32 vertex_data_size = num_vertices * vertex_stride;
-  u32 index_data_size = num_indices * sizeof(u16);
+  const u32 vertex_bytes = num_vertices * vertex_stride;
+  const u32 index_bytes = num_indices * static_cast<u32>(sizeof(u16));
 
-  *out_base_vertex = vertex_stride > 0 ? (m_vertex_buffer->GetCurrentOffset() / vertex_stride) : 0;
-  *out_base_index = m_index_buffer->GetCurrentOffset() / sizeof(u16);
+  *out_base_vertex = vertex_stride == 0 ? 0 : m_vertices->GetCurrentOffset() / vertex_stride;
+  *out_base_index = m_indices->GetCurrentOffset() / static_cast<u32>(sizeof(u16));
 
-  CheckBufferBinding();
-  m_vertex_buffer->Unmap(vertex_data_size);
-  m_index_buffer->Unmap(index_data_size);
+  EnsureVertexFormatBound();
+  m_vertices->Unmap(vertex_bytes);
+  m_indices->Unmap(index_bytes);
 
-  ADDSTAT(g_stats.this_frame.bytes_vertex_streamed, vertex_data_size);
-  ADDSTAT(g_stats.this_frame.bytes_index_streamed, index_data_size);
+  ADDSTAT(g_stats.this_frame.bytes_vertex_streamed, vertex_bytes);
+  ADDSTAT(g_stats.this_frame.bytes_index_streamed, index_bytes);
 }
 
 void VertexManager::UploadUniforms()

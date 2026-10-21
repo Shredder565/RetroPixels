@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,12 @@
 
 namespace OGL
 {
+// A GL buffer object that the CPU streams data into (vertices, indices, uniforms, texel
+// buffers). Create() picks the upload technique that suits the driver.
+//
+// Use: Map(max_size) gives a CPU pointer and the byte offset in the GL buffer where the data
+// will be; Unmap(used_size) commits how much was actually written. Data from earlier Maps must
+// not be touched again.
 class StreamBuffer
 {
 public:
@@ -20,49 +25,45 @@ public:
 
   u32 GetGLBufferId() const { return m_buffer; }
   u32 GetSize() const { return m_size; }
-  u32 GetCurrentOffset() const { return m_iterator; }
+  u32 GetCurrentOffset() const { return m_write_pos; }
 
-  /* This mapping function will return a pair of:
-   * - the pointer to the mapped buffer
-   * - the offset into the real GPU buffer (always multiple of stride)
-   * On mapping, the maximum of size for allocation has to be set.
-   * The size really pushed into this fifo only has to be known on Unmapping.
-   * Mapping invalidates the current buffer content,
-   * so it isn't allowed to access the old content any more.
-   */
   virtual std::pair<u8*, u32> Map(u32 size) = 0;
   virtual void Unmap(u32 used_size) = 0;
 
+  // Map with the returned offset rounded up to a multiple of stride.
   std::pair<u8*, u32> Map(u32 size, u32 stride)
   {
-    u32 padding = m_iterator % stride;
-    if (padding)
-    {
-      m_iterator += stride - padding;
-    }
+    const u32 misalignment = m_write_pos % stride;
+    if (misalignment != 0)
+      m_write_pos += stride - misalignment;
     return Map(size);
   }
 
-  const u32 m_buffer;
-
 protected:
   StreamBuffer(u32 type, u32 size);
-  void CreateFences();
-  void DeleteFences();
-  void AllocMemory(u32 size);
 
-  const u32 m_buffertype;
-  const u32 m_size;
+  // Ring-buffer synchronisation for the techniques that write into memory the GPU may still be
+  // reading. The buffer is split into CHUNKS equal parts with one fence each.
+  void FenceEveryChunk();
+  void DeleteOutstandingFences();
+  void WaitForSpace(u32 size);
 
-  u32 m_iterator;
-  u32 m_used_iterator;
-  u32 m_free_iterator;
+  const u32 m_target;
+  const u32 m_buffer;
+  const u32 m_size;  // a power of two
+
+  u32 m_write_pos = 0;     // where the next Map writes
+  u32 m_fenced_pos = 0;    // everything before this has a fence covering it
+  u32 m_reserved_end = 0;  // everything before this is known to be free for writing
 
 private:
-  static constexpr int SYNC_POINTS = 16;
-  int Slot(u32 x) const { return x >> m_bit_per_slot; }
-  const int m_bit_per_slot;
+  static constexpr int CHUNKS = 16;
 
-  std::array<GLsync, SYNC_POINTS> m_fences{};
+  int ChunkOf(u32 offset) const { return static_cast<int>(offset >> m_chunk_shift); }
+  void FenceChunks(int first, int end);
+  void WaitChunks(int first, int last);
+
+  const u32 m_chunk_shift;
+  std::array<GLsync, CHUNKS> m_fences{};
 };
 }  // namespace OGL

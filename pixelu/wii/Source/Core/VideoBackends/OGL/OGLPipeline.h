@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@
 
 namespace OGL
 {
+// GL has no pipeline objects: a pipeline is a linked program (shared between pipelines with
+// the same shaders) plus the fixed-function state OGLGfx applies when it is bound.
 class OGLPipeline final : public AbstractPipeline
 {
 public:
@@ -20,23 +21,23 @@ public:
   ~OGLPipeline() override;
 
   const GLVertexFormat* GetVertexFormat() const { return m_vertex_format; }
-  const RasterizationState& GetRasterizationState() const { return m_rasterization_state; }
-  const DepthState& GetDepthState() const { return m_depth_state; }
-  const BlendingState& GetBlendingState() const { return m_blending_state; }
+  const RasterizationState& GetRasterizationState() const { return m_raster; }
+  const DepthState& GetDepthState() const { return m_depth; }
+  const BlendingState& GetBlendingState() const { return m_blend; }
   const PipelineProgram* GetProgram() const { return m_program; }
   bool HasVertexInput() const { return m_vertex_format != nullptr; }
-  GLenum GetGLPrimitive() const { return m_gl_primitive; }
+  GLenum GetGLPrimitive() const { return m_primitive; }
   CacheData GetCacheData() const override;
   static std::unique_ptr<OGLPipeline> Create(const AbstractPipelineConfig& config,
                                              const void* cache_data, size_t cache_data_size);
 
 private:
   const GLVertexFormat* m_vertex_format;
-  RasterizationState m_rasterization_state;
-  DepthState m_depth_state;
-  BlendingState m_blending_state;
+  RasterizationState m_raster;
+  DepthState m_depth;
+  BlendingState m_blend;
   PipelineProgram* m_program;
-  GLenum m_gl_primitive;
+  GLenum m_primitive;
 };
 
 }  // namespace OGL

@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+#include <cstdint>
 
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
 #include "Common/MsgHandler.h"
 
 #include "VideoBackends/OGL/OGLGfx.h"
@@ -12,9 +12,6 @@
 #include "VideoCommon/NativeVertexFormat.h"
 #include "VideoCommon/VertexShaderGen.h"
 
-// Here's some global state. We only use this to keep track of what we've sent to the OpenGL state
-// machine.
-
 namespace OGL
 {
 std::unique_ptr<NativeVertexFormat>
@@ -23,67 +20,82 @@ OGLGfx::CreateNativeVertexFormat(const PortableVertexDeclaration& vtx_decl)
   return std::make_unique<GLVertexFormat>(vtx_decl);
 }
 
-static inline GLuint VarToGL(ComponentFormat t)
+namespace
 {
-  static constexpr Common::EnumMap<GLuint, ComponentFormat::InvalidFloat7> lookup = {
-      GL_UNSIGNED_BYTE, GL_BYTE,  GL_UNSIGNED_SHORT, GL_SHORT,
-      GL_FLOAT,         GL_FLOAT, GL_FLOAT,          GL_FLOAT,
-  };
-  return lookup[t];
+GLenum ComponentType(ComponentFormat format)
+{
+  switch (format)
+  {
+  case ComponentFormat::UByte:
+    return GL_UNSIGNED_BYTE;
+  case ComponentFormat::Byte:
+    return GL_BYTE;
+  case ComponentFormat::UShort:
+    return GL_UNSIGNED_SHORT;
+  case ComponentFormat::Short:
+    return GL_SHORT;
+  default:
+    // Float, and the unnamed values that games use as float.
+    return GL_FLOAT;
+  }
 }
 
-static void SetPointer(ShaderAttrib attrib, u32 stride, const AttributeFormat& format)
+// Points one attribute at its place in the interleaved vertex. Integer attributes stay
+// integers; the rest are normalised to [0, 1] / [-1, 1] (floats are unaffected).
+void DescribeAttribute(GLuint location, GLsizei stride, const AttributeFormat& attr)
 {
-  if (!format.enable)
+  if (!attr.enable)
     return;
 
-  glEnableVertexAttribArray(static_cast<GLuint>(attrib));
-  if (format.integer)
-    glVertexAttribIPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
-                           stride, (u8*)nullptr + format.offset);
+  const auto* offset =
+      reinterpret_cast<const void*>(static_cast<std::uintptr_t>(static_cast<u32>(attr.offset)));
+  glEnableVertexAttribArray(location);
+  if (attr.integer)
+    glVertexAttribIPointer(location, attr.components, ComponentType(attr.type), stride, offset);
   else
-    glVertexAttribPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
-                          true, stride, (u8*)nullptr + format.offset);
+    glVertexAttribPointer(location, attr.components, ComponentType(attr.type), GL_TRUE, stride,
+                          offset);
 }
+
+GLuint Location(ShaderAttrib attrib, u32 index = 0)
+{
+  return static_cast<GLuint>(attrib) + index;
+}
+}  // namespace
 
 GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
     : NativeVertexFormat(vtx_decl)
 {
-  const u32 vertex_stride = vtx_decl.stride;
+  const u32 stride = static_cast<u32>(vtx_decl.stride);
+  if ((stride & 3) != 0)
+    PanicAlertFmt("Uneven vertex stride: {}", stride);
 
-  // We will not allow vertex components causing uneven strides.
-  if (vertex_stride & 3)
-    PanicAlertFmt("Uneven vertex stride: {}", vertex_stride);
+  const auto* vm = static_cast<const VertexManager*>(g_vertex_manager.get());
 
-  VertexManager* const vm = static_cast<VertexManager*>(g_vertex_manager.get());
+  glGenVertexArrays(1, &m_vao);
+  glBindVertexArray(m_vao);
 
-  glGenVertexArrays(1, &VAO);
-  glBindVertexArray(VAO);
-
-  // the element buffer is bound directly to the vao, so we must it set for every vao
+  // The element buffer binding is part of the VAO, so every VAO gets it.
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vm->GetIndexBufferHandle());
   glBindBuffer(GL_ARRAY_BUFFER, vm->GetVertexBufferHandle());
 
-  SetPointer(ShaderAttrib::Position, vertex_stride, vtx_decl.position);
+  const auto gl_stride = static_cast<GLsizei>(stride);
+  DescribeAttribute(Location(ShaderAttrib::Position), gl_stride, vtx_decl.position);
+  for (u32 i = 0; i < 3; ++i)
+    DescribeAttribute(Location(ShaderAttrib::Normal, i), gl_stride, vtx_decl.normals[i]);
+  for (u32 i = 0; i < 2; ++i)
+    DescribeAttribute(Location(ShaderAttrib::Color0, i), gl_stride, vtx_decl.colors[i]);
+  for (u32 i = 0; i < 8; ++i)
+    DescribeAttribute(Location(ShaderAttrib::TexCoord0, i), gl_stride, vtx_decl.texcoords[i]);
+  DescribeAttribute(Location(ShaderAttrib::PositionMatrix), gl_stride, vtx_decl.posmtx);
 
-  for (u32 i = 0; i < 3; i++)
-    SetPointer(ShaderAttrib::Normal + i, vertex_stride, vtx_decl.normals[i]);
-
-  for (u32 i = 0; i < 2; i++)
-    SetPointer(ShaderAttrib::Color0 + i, vertex_stride, vtx_decl.colors[i]);
-
-  for (u32 i = 0; i < 8; i++)
-    SetPointer(ShaderAttrib::TexCoord0 + i, vertex_stride, vtx_decl.texcoords[i]);
-
-  SetPointer(ShaderAttrib::PositionMatrix, vertex_stride, vtx_decl.posmtx);
-
-  // Other code shouldn't have to worry about its vertex formats being randomly unbound
+  // Creating the VAO bound it; put back whatever the rest of the backend thinks is bound.
   ProgramShaderCache::ReBindVertexFormat();
 }
 
 GLVertexFormat::~GLVertexFormat()
 {
-  ProgramShaderCache::InvalidateVertexFormatIfBound(VAO);
-  glDeleteVertexArrays(1, &VAO);
+  ProgramShaderCache::InvalidateVertexFormatIfBound(m_vao);
+  glDeleteVertexArrays(1, &m_vao);
 }
 }  // namespace OGL

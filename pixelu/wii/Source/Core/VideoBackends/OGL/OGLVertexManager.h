@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,17 +13,22 @@
 namespace OGL
 {
 class StreamBuffer;
+
+// A vertex array object describing one host vertex layout over the shared vertex and index
+// stream buffers.
 class GLVertexFormat : public NativeVertexFormat
 {
 public:
   GLVertexFormat(const PortableVertexDeclaration& vtx_decl);
   ~GLVertexFormat() override;
 
-  GLuint VAO;
+  GLuint GetVAO() const { return m_vao; }
+
+private:
+  GLuint m_vao = 0;
 };
 
-// Handles the OpenGL details of drawing lots of vertices quickly.
-// Other functionality is moving out.
+// Streams vertices, indices, uniforms and texel-buffer data into GL buffers.
 class VertexManager final : public VertexManagerBase
 {
 public:
@@ -50,9 +54,12 @@ protected:
   void UploadUniforms() override;
 
 private:
-  std::unique_ptr<StreamBuffer> m_vertex_buffer;
-  std::unique_ptr<StreamBuffer> m_index_buffer;
-  std::unique_ptr<StreamBuffer> m_texel_buffer;
-  std::array<GLuint, NUM_TEXEL_BUFFER_FORMATS> m_texel_buffer_views{};
+  void BindTexelView(u32 unit, TexelBufferFormat format);
+
+  std::unique_ptr<StreamBuffer> m_vertices;
+  std::unique_ptr<StreamBuffer> m_indices;
+  std::unique_ptr<StreamBuffer> m_texels;
+  // One buffer texture per texel format, all viewing m_texels.
+  std::array<GLuint, NUM_TEXEL_BUFFER_FORMATS> m_texel_views{};
 };
 }  // namespace OGL

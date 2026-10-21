@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,16 +17,17 @@ class OGLShader;
 class GLVertexFormat;
 class StreamBuffer;
 
+// The GL objects of one program: the program itself plus any stage shaders it still owns.
 struct SHADER
 {
+  // Deletes the stage shaders and then the program.
   void Destroy()
   {
     DestroyShaders();
-    if (glprogid)
-    {
-      glDeleteProgram(glprogid);
-      glprogid = 0;
-    }
+    if (glprogid == 0)
+      return;
+    glDeleteProgram(glprogid);
+    glprogid = 0;
   }
 
   GLuint vsid = 0;
@@ -35,12 +35,16 @@ struct SHADER
   GLuint psid = 0;
   GLuint glprogid = 0;
 
+  // After linking: uniform block and sampler bindings for drivers without layout(binding).
   void SetProgramVariables();
+  // Before linking: attribute and fragment output locations for drivers without
+  // layout(location).
   void SetProgramBindings(bool is_compute);
   void Bind() const;
   void DestroyShaders();
 };
 
+// Programs are shared between pipelines that use the same three shaders.
 struct PipelineProgramKey
 {
   u64 vertex_shader_id;
@@ -61,12 +65,14 @@ struct PipelineProgram
   PipelineProgramKey key{};
   SHADER shader;
   std::atomic_size_t reference_count{1};
+  // Set once the binary has been handed to the pipeline cache (or came from it).
   bool binary_retrieved = false;
 };
 
 class ProgramShaderCache
 {
 public:
+  // The backend tracks the bound vertex array object here so redundant binds are skipped.
   static void BindVertexFormat(const GLVertexFormat* vertex_format);
   static void ReBindVertexFormat();
   static bool IsValidVertexFormatBound();
@@ -81,19 +87,18 @@ public:
                                      std::string_view gcode);
   static StreamBuffer* GetUniformBuffer();
   static u32 GetUniformBufferAlignment();
+  // Streams the vertex/pixel/geometry constants (when any changed) and binds them.
   static void UploadConstants();
+  // Streams one block and binds it for every stage (utility shaders).
   static void UploadConstants(const void* data, u32 data_size);
 
   static void Init();
   static void Shutdown();
+  // Builds the text placed in front of every shader for the current GL capabilities.
   static void CreateHeader();
 
-  // This counter increments with each shader object allocated, in order to give it a unique ID.
-  // Since the shaders can be destroyed after a pipeline is created, we can't use the shader pointer
-  // as a key for GL programs. For the same reason, we can't use the GL objects either. This ID is
-  // guaranteed to be unique for the emulation session, even if the memory allocator or GL driver
-  // re-uses pointers, therefore we won't have any collisions where the shaders attached to a
-  // pipeline do not match the pipeline configuration.
+  // Shader and GL object pointers can be reused once freed, so programs are keyed by an ID
+  // that is never handed out twice in a session.
   static u64 GenerateShaderID();
 
   static PipelineProgram* GetPipelineProgram(const GLVertexFormat* vertex_format,
@@ -109,18 +114,26 @@ private:
                          PipelineProgramKeyHash>;
 
   static void CreateAttributelessVAO();
+  static PipelineProgram* FindAndReference(const PipelineProgramKey& key);
+  static bool LinkFromSource(PipelineProgram& prog, const GLVertexFormat* vertex_format,
+                             const OGLShader* vertex_shader, const OGLShader* geometry_shader,
+                             const OGLShader* pixel_shader);
+  static bool LoadFromBinary(PipelineProgram& prog, const void* cache_data, size_t cache_data_size);
 
-  static PipelineProgramMap s_pipeline_programs;
-  static std::mutex s_pipeline_program_lock;
+  static PipelineProgramMap s_programs;
+  static std::mutex s_programs_lock;
 
-  static u32 s_ubo_buffer_size;
+  // Bytes of the three standard constant blocks, each padded to the UBO alignment.
+  static u32 s_constants_size;
   static s32 s_ubo_align;
 
-  static GLuint s_attributeless_VBO;
-  static GLuint s_attributeless_VAO;
-  static GLuint s_last_VAO;
+  static GLuint s_empty_vbo;
+  static GLuint s_empty_vao;
+  static GLuint s_bound_vao;
 };
 
+// Compiles and links on worker threads, each with its own GL context sharing objects with the
+// main one.
 class SharedContextAsyncShaderCompiler : public VideoCommon::AsyncShaderCompiler
 {
 protected:

@@ -1,7 +1,11 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/OGLGfx.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <string_view>
 
 #include "Common/GL/GLContext.h"
 #include "Common/GL/GLExtensions/GLExtensions.h"
@@ -20,192 +24,265 @@
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VideoConfig.h"
 
-#include <algorithm>
-#include <string_view>
-
 namespace OGL
 {
 VideoConfig g_ogl_config;
 
-static void APIENTRY ErrorCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
-                                   GLsizei length, const char* message, const void* userParam)
+namespace
 {
-  const char* s_source;
-  const char* s_type;
+// ---------------------------------------------------------------------------------------------
+// GL debug output
 
-  // Performance - DualCore driver performance warning:
-  // DualCore application thread syncing with server thread
-  if (id == 0x200b0)
-    return;
-
+const char* DebugSourceName(GLenum source)
+{
   switch (source)
   {
   case GL_DEBUG_SOURCE_API_ARB:
-    s_source = "API";
-    break;
+    return "API";
   case GL_DEBUG_SOURCE_WINDOW_SYSTEM_ARB:
-    s_source = "Window System";
-    break;
+    return "Window System";
   case GL_DEBUG_SOURCE_SHADER_COMPILER_ARB:
-    s_source = "Shader Compiler";
-    break;
+    return "Shader Compiler";
   case GL_DEBUG_SOURCE_THIRD_PARTY_ARB:
-    s_source = "Third Party";
-    break;
+    return "Third Party";
   case GL_DEBUG_SOURCE_APPLICATION_ARB:
-    s_source = "Application";
-    break;
+    return "Application";
   case GL_DEBUG_SOURCE_OTHER_ARB:
-    s_source = "Other";
-    break;
+    return "Other";
   default:
-    s_source = "Unknown";
-    break;
+    return "Unknown";
   }
+}
+
+const char* DebugTypeName(GLenum type)
+{
   switch (type)
   {
   case GL_DEBUG_TYPE_ERROR_ARB:
-    s_type = "Error";
-    break;
+    return "Error";
   case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR_ARB:
-    s_type = "Deprecated";
-    break;
+    return "Deprecated";
   case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR_ARB:
-    s_type = "Undefined";
-    break;
+    return "Undefined";
   case GL_DEBUG_TYPE_PORTABILITY_ARB:
-    s_type = "Portability";
-    break;
+    return "Portability";
   case GL_DEBUG_TYPE_PERFORMANCE_ARB:
-    s_type = "Performance";
-    break;
+    return "Performance";
   case GL_DEBUG_TYPE_OTHER_ARB:
-    s_type = "Other";
-    break;
+    return "Other";
   default:
-    s_type = "Unknown";
-    break;
+    return "Unknown";
   }
+}
+
+// High severity and anything unrecognised are errors, medium is a warning, the rest is debug
+// output.
+Common::Log::LogLevel DebugSeverityLevel(GLenum severity)
+{
   switch (severity)
   {
-  case GL_DEBUG_SEVERITY_HIGH_ARB:
-    ERROR_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, s_source, s_type, message);
-    break;
   case GL_DEBUG_SEVERITY_MEDIUM_ARB:
-    WARN_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, s_source, s_type, message);
-    break;
+    return Common::Log::LogLevel::LWARNING;
   case GL_DEBUG_SEVERITY_LOW_ARB:
-    DEBUG_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, s_source, s_type, message);
-    break;
   case GL_DEBUG_SEVERITY_NOTIFICATION:
-    DEBUG_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, s_source, s_type, message);
+    return Common::Log::LogLevel::LDEBUG;
+  default:
+    return Common::Log::LogLevel::LERROR;
+  }
+}
+
+void APIENTRY OnDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity,
+                             GLsizei /*length*/, const char* message, const void* /*user*/)
+{
+  // NVIDIA's "application thread syncing with server thread" performance note is pure noise.
+  constexpr GLuint NVIDIA_THREAD_SYNC_NOTE = 0x200b0;
+  if (id == NVIDIA_THREAD_SYNC_NOTE)
+    return;
+
+  const char* source_name = DebugSourceName(source);
+  const char* type_name = DebugTypeName(type);
+  switch (DebugSeverityLevel(severity))
+  {
+  case Common::Log::LogLevel::LWARNING:
+    WARN_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, source_name, type_name,
+                 message);
+    break;
+  case Common::Log::LogLevel::LDEBUG:
+    DEBUG_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, source_name, type_name,
+                  message);
     break;
   default:
-    ERROR_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, s_source, s_type, message);
+    ERROR_LOG_FMT(HOST_GPU, "id: {:x}, source: {}, type: {} - {}", id, source_name, type_name,
+                  message);
     break;
   }
 }
 
-// Two small Fallbacks to avoid GL_ARB_ES2_compatibility
-static void APIENTRY DepthRangef(GLfloat neardepth, GLfloat fardepth)
+// GL 3.x without ARB_ES2_compatibility only has the double-precision depth functions.
+void APIENTRY DepthRangeFloatShim(GLfloat near_depth, GLfloat far_depth)
 {
-  glDepthRange(neardepth, fardepth);
+  glDepthRange(near_depth, far_depth);
 }
-static void APIENTRY ClearDepthf(GLfloat depthval)
+
+void APIENTRY ClearDepthFloatShim(GLfloat depth)
 {
-  glClearDepth(depthval);
+  glClearDepth(depth);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fixed-function state translation (indexed by the emulated enum values)
+
+// CompareMode: never, less, equal, lequal, greater, nequal, gequal, always.
+constexpr GLenum COMPARE_FUNCS[8] = {GL_NEVER,   GL_LESS,     GL_EQUAL,  GL_LEQUAL,
+                                     GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+
+// Source and destination factors share slots 4 and 5 (source alpha), which switch to the
+// second colour output with dual-source blending.
+constexpr GLenum SOURCE_FACTORS[8] = {GL_ZERO,      GL_ONE,
+                                      GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR,
+                                      GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                      GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+constexpr GLenum DEST_FACTORS[8] = {GL_ZERO,      GL_ONE,
+                                    GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
+                                    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                    GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+
+GLenum BlendFactor(const GLenum (&table)[8], u32 index, bool dual_source)
+{
+  if (dual_source && index == 4)
+    return GL_SRC1_ALPHA;
+  if (dual_source && index == 5)
+    return GL_ONE_MINUS_SRC1_ALPHA;
+  return table[index];
+}
+
+// LogicOp 0-15 in GX order, which matches the GL list.
+constexpr GLenum LOGIC_OPS[16] = {GL_CLEAR,         GL_AND,         GL_AND_REVERSE, GL_COPY,
+                                  GL_AND_INVERTED,  GL_NOOP,        GL_XOR,         GL_OR,
+                                  GL_NOR,           GL_EQUIV,       GL_INVERT,      GL_OR_REVERSE,
+                                  GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND,        GL_SET};
+
+GLboolean AsGLBool(bool value)
+{
+  return value ? GL_TRUE : GL_FALSE;
+}
+
+bool HostGpuErrorsLogged()
+{
+  return Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
+                                                           Common::Log::LogLevel::LERROR);
+}
+
+void SetEnabled(GLenum cap, bool enable)
+{
+  if (enable)
+    glEnable(cap);
+  else
+    glDisable(cap);
+}
+
+const OGLPipeline* AsGL(const AbstractPipeline* pipeline)
+{
+  return static_cast<const OGLPipeline*>(pipeline);
+}
+}  // namespace
 
 OGLGfx::OGLGfx(std::unique_ptr<GLContext> main_gl_context, float backbuffer_scale)
-    : m_main_gl_context(std::move(main_gl_context)),
-      m_current_rasterization_state(RenderState::GetInvalidRasterizationState()),
-      m_current_depth_state(RenderState::GetInvalidDepthState()),
-      m_current_blend_state(RenderState::GetInvalidBlendingState()),
-      m_backbuffer_scale(backbuffer_scale)
+    : m_context(std::move(main_gl_context)),
+      m_raster_state(RenderState::GetInvalidRasterizationState()),
+      m_depth_state(RenderState::GetInvalidDepthState()),
+      m_blend_state(RenderState::GetInvalidBlendingState()), m_surface_scale(backbuffer_scale)
 {
-  // Create the window framebuffer.
-  if (!m_main_gl_context->IsHeadless())
+  // Framebuffer object 0 is the window.
+  if (!m_context->IsHeadless())
   {
-    m_system_framebuffer = std::make_unique<OGLFramebuffer>(
+    m_window_framebuffer = std::make_unique<OGLFramebuffer>(
         nullptr, nullptr, std::vector<AbstractTexture*>{}, AbstractTextureFormat::RGBA8,
-        AbstractTextureFormat::Undefined, std::max(m_main_gl_context->GetBackBufferWidth(), 1u),
-        std::max(m_main_gl_context->GetBackBufferHeight(), 1u), 1, 1, 0);
-    m_current_framebuffer = m_system_framebuffer.get();
+        AbstractTextureFormat::Undefined, std::max(m_context->GetBackBufferWidth(), 1u),
+        std::max(m_context->GetBackBufferHeight(), 1u), 1, 1, 0);
+    m_current_framebuffer = m_window_framebuffer.get();
   }
 
-  if (!m_main_gl_context->IsGLES())
+  // The float depth functions are core from 4.1; route them to the double versions otherwise.
+  if (!m_context->IsGLES() && !GLExtensions::Supports("GL_ARB_ES2_compatibility"))
   {
-    // OpenGL 3 doesn't provide GLES like float functions for depth.
-    // They are in core in OpenGL 4.1, so almost every driver should support them.
-    // But for the oldest ones, we provide fallbacks to the old double functions.
-    if (!GLExtensions::Supports("GL_ARB_ES2_compatibility"))
-    {
-      glDepthRangef = DepthRangef;
-      glClearDepthf = ClearDepthf;
-    }
+    glDepthRangef = DepthRangeFloatShim;
+    glClearDepthf = ClearDepthFloatShim;
   }
 
   InitDriverInfo();
 
-  // Setup Debug logging
   if (g_ogl_config.bSupportsDebug)
   {
+    // Ask for every message; the callback sorts them by severity.
     if (GLExtensions::Supports("GL_KHR_debug"))
     {
       glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, true);
-      glDebugMessageCallback(ErrorCallback, nullptr);
+      glDebugMessageCallback(OnDebugMessage, nullptr);
     }
     else
     {
       glDebugMessageControlARB(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, true);
-      glDebugMessageCallbackARB(ErrorCallback, nullptr);
+      glDebugMessageCallbackARB(OnDebugMessage, nullptr);
     }
-    if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-                                                          Common::Log::LogLevel::LERROR))
-    {
-      glEnable(GL_DEBUG_OUTPUT);
-    }
-    else
-    {
-      glDisable(GL_DEBUG_OUTPUT);
-    }
+    SyncDebugOutputWithLogLevel();
   }
 
-  // Handle VSync on/off
   if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_VSYNC))
-    m_main_gl_context->SwapInterval(g_ActiveConfig.bVSyncActive);
+    m_context->SwapInterval(g_ActiveConfig.bVSyncActive);
 
+  // Depth in [0, 1] with a lower-left origin, like the other backends' clip space.
   if (g_backend_info.bSupportsClipControl)
     glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
 
+  // Depth clamping is emulated with two clip distances plus GL depth clamp.
   if (g_backend_info.bSupportsDepthClamp)
   {
-    glEnable(GL_CLIP_DISTANCE0);
-    glEnable(GL_CLIP_DISTANCE1);
+    SetClipDistances(true);
     glEnable(GL_DEPTH_CLAMP);
   }
 
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);  // 4-byte pixel alignment
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
-  glGenFramebuffers(1, &m_shared_read_framebuffer);
-  glGenFramebuffers(1, &m_shared_draw_framebuffer);
+  glGenFramebuffers(1, &m_scratch_read_fbo);
+  glGenFramebuffers(1, &m_scratch_draw_fbo);
 
   if (g_backend_info.bSupportsPrimitiveRestart)
-    GLUtil::EnablePrimitiveRestart(m_main_gl_context.get());
+    GLUtil::EnablePrimitiveRestart(m_context.get());
 
   UpdateActiveConfig();
 }
 
 OGLGfx::~OGLGfx()
 {
-  glDeleteFramebuffers(1, &m_shared_draw_framebuffer);
-  glDeleteFramebuffers(1, &m_shared_read_framebuffer);
+  glDeleteFramebuffers(1, &m_scratch_draw_fbo);
+  glDeleteFramebuffers(1, &m_scratch_read_fbo);
+}
+
+void OGLGfx::SyncDebugOutputWithLogLevel()
+{
+  // Debug output costs driver time; only have it while HOST_GPU errors are being logged.
+  SetEnabled(GL_DEBUG_OUTPUT, HostGpuErrorsLogged());
+}
+
+void OGLGfx::SetClipDistances(bool enable)
+{
+  SetEnabled(GL_CLIP_DISTANCE0, enable);
+  SetEnabled(GL_CLIP_DISTANCE1, enable);
 }
 
 bool OGLGfx::IsHeadless() const
 {
-  return m_main_gl_context->IsHeadless();
+  return m_context->IsHeadless();
 }
+
+bool OGLGfx::IsGLES() const
+{
+  return m_context->IsGLES();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Object creation
 
 std::unique_ptr<AbstractTexture> OGLGfx::CreateTexture(const TextureConfig& config,
                                                        std::string_view name)
@@ -235,11 +312,10 @@ OGLGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
   return OGLShader::CreateFromSource(stage, source, shader_includer, name);
 }
 
-std::unique_ptr<AbstractShader> OGLGfx::CreateShaderFromBinary(ShaderStage /* stage */,
-                                                               const void* /* data */,
-                                                               size_t /* length */,
-                                                               std::string_view /* name */)
+std::unique_ptr<AbstractShader> OGLGfx::CreateShaderFromBinary(ShaderStage, const void*, size_t,
+                                                               std::string_view)
 {
+  // GL has program binaries but no per-stage binaries.
   return nullptr;
 }
 
@@ -249,6 +325,283 @@ std::unique_ptr<AbstractPipeline> OGLGfx::CreatePipeline(const AbstractPipelineC
 {
   return OGLPipeline::Create(config, cache_data, cache_data_length);
 }
+
+std::unique_ptr<VideoCommon::AsyncShaderCompiler> OGLGfx::CreateAsyncShaderCompiler()
+{
+  return std::make_unique<SharedContextAsyncShaderCompiler>();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pipeline state
+
+void OGLGfx::SetRasterization(RasterizationState state)
+{
+  if (state == m_raster_state)
+    return;
+
+  // Culling everything (CullMode::All) is treated like culling back faces with CW front.
+  const CullMode cull = state.cull_mode;
+  if (cull == CullMode::None)
+  {
+    glDisable(GL_CULL_FACE);
+  }
+  else
+  {
+    glEnable(GL_CULL_FACE);
+    glFrontFace(cull == CullMode::Front ? GL_CCW : GL_CW);
+  }
+  m_raster_state = state;
+}
+
+void OGLGfx::SetDepth(DepthState state)
+{
+  if (state == m_depth_state)
+    return;
+
+  if (!state.test_enable)
+  {
+    // No test means no writes either.
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+  }
+  else
+  {
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(AsGLBool(state.update_enable != 0));
+    glDepthFunc(COMPARE_FUNCS[static_cast<u32>(state.func.Value())]);
+  }
+  m_depth_state = state;
+}
+
+void OGLGfx::SetBlending(BlendingState state)
+{
+  if (state == m_blend_state)
+    return;
+
+  SetEnabled(GL_BLEND, state.blend_enable != 0);
+
+  // The equation and factors are set even with blending off: some drivers misbehave otherwise
+  // (seen in Sonic Adventure 2 Battle's first Dark level).
+  const bool dual = state.use_dual_src != 0;
+  glBlendEquationSeparate(state.subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD,
+                          state.subtract_alpha ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD);
+  glBlendFuncSeparate(
+      BlendFactor(SOURCE_FACTORS, static_cast<u32>(state.src_factor.Value()), dual),
+      BlendFactor(DEST_FACTORS, static_cast<u32>(state.dst_factor.Value()), dual),
+      BlendFactor(SOURCE_FACTORS, static_cast<u32>(state.src_factor_alpha.Value()), dual),
+      BlendFactor(DEST_FACTORS, static_cast<u32>(state.dst_factor_alpha.Value()), dual));
+
+  // ES has no logic ops.
+  if (!IsGLES())
+  {
+    SetEnabled(GL_COLOR_LOGIC_OP, state.logic_op_enable != 0);
+    if (state.logic_op_enable)
+      glLogicOp(LOGIC_OPS[static_cast<u32>(state.logic_mode.Value())]);
+  }
+
+  const GLboolean rgb = AsGLBool(state.color_update != 0);
+  glColorMask(rgb, rgb, rgb, AsGLBool(state.alpha_update != 0));
+  m_blend_state = state;
+}
+
+void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
+{
+  if (pipeline == m_current_pipeline)
+    return;
+
+  if (pipeline == nullptr)
+  {
+    ProgramShaderCache::InvalidateLastProgram();
+    glUseProgram(0);
+  }
+  else
+  {
+    const OGLPipeline* gl_pipeline = AsGL(pipeline);
+    SetRasterization(gl_pipeline->GetRasterizationState());
+    SetDepth(gl_pipeline->GetDepthState());
+    SetBlending(gl_pipeline->GetBlendingState());
+    ProgramShaderCache::BindVertexFormat(gl_pipeline->GetVertexFormat());
+    gl_pipeline->GetProgram()->shader.Bind();
+  }
+  m_current_pipeline = pipeline;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Resource binding
+
+void OGLGfx::SetTexture(u32 index, const AbstractTexture* texture)
+{
+  const auto* gl_texture = static_cast<const OGLTexture*>(texture);
+  if (m_unit_textures[index] == gl_texture)
+    return;
+
+  glActiveTexture(GL_TEXTURE0 + index);
+  if (gl_texture == nullptr)
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+  else
+    glBindTexture(gl_texture->GetGLTarget(), gl_texture->GetGLTextureId());
+  m_unit_textures[index] = gl_texture;
+}
+
+void OGLGfx::SetSamplerState(u32 index, const SamplerState& state)
+{
+  g_sampler_cache->SetSamplerState(index, state);
+}
+
+void OGLGfx::SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write)
+{
+  if (m_image_units[index] == texture)
+    return;
+
+  if (texture == nullptr)
+  {
+    glBindImageTexture(index, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+  }
+  else
+  {
+    const auto* gl_texture = static_cast<OGLTexture*>(texture);
+    GLenum access = GL_WRITE_ONLY;
+    if (read)
+      access = write ? GL_READ_WRITE : GL_READ_ONLY;
+    glBindImageTexture(index, gl_texture->GetGLTextureId(), 0, GL_TRUE, 0, access,
+                       gl_texture->GetGLFormatForImageTexture());
+  }
+  m_image_units[index] = texture;
+}
+
+void OGLGfx::UnbindTexture(const AbstractTexture* texture)
+{
+  // Clear every texture unit and then every image unit that still refers to the texture.
+  for (u32 unit = 0; unit < m_unit_textures.size(); ++unit)
+  {
+    if (m_unit_textures[unit] == texture)
+    {
+      glActiveTexture(GL_TEXTURE0 + unit);
+      glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+      m_unit_textures[unit] = nullptr;
+    }
+  }
+  for (u32 unit = 0; unit < m_image_units.size(); ++unit)
+  {
+    if (m_image_units[unit] == texture)
+    {
+      glBindImageTexture(unit, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+      m_image_units[unit] = nullptr;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Framebuffers and clears
+
+void OGLGfx::SetFramebuffer(AbstractFramebuffer* framebuffer)
+{
+  if (framebuffer == m_current_framebuffer)
+    return;
+
+  glBindFramebuffer(GL_FRAMEBUFFER, static_cast<OGLFramebuffer*>(framebuffer)->GetFBO());
+  m_current_framebuffer = framebuffer;
+}
+
+void OGLGfx::SetAndDiscardFramebuffer(AbstractFramebuffer* framebuffer)
+{
+  // Nothing to gain from discarding on desktop GL.
+  SetFramebuffer(framebuffer);
+}
+
+void OGLGfx::SetAndClearFramebuffer(AbstractFramebuffer* framebuffer, const ClearColor& color_value,
+                                    float depth_value)
+{
+  SetFramebuffer(framebuffer);
+
+  const bool has_color = framebuffer->HasColorBuffer();
+  const bool has_depth = framebuffer->HasDepthBuffer();
+
+  // The clear covers the whole framebuffer and every channel; the write masks of the current
+  // pipeline and the scissor test are restored afterwards.
+  glDisable(GL_SCISSOR_TEST);
+  GLbitfield buffers = 0;
+  if (has_color)
+  {
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(color_value[0], color_value[1], color_value[2], color_value[3]);
+    buffers |= GL_COLOR_BUFFER_BIT;
+  }
+  if (has_depth)
+  {
+    glDepthMask(GL_TRUE);
+    glClearDepthf(depth_value);
+    buffers |= GL_DEPTH_BUFFER_BIT;
+  }
+  glClear(buffers);
+  glEnable(GL_SCISSOR_TEST);
+
+  if (has_color)
+  {
+    const GLboolean rgb = AsGLBool(m_blend_state.color_update != 0);
+    glColorMask(rgb, rgb, rgb, AsGLBool(m_blend_state.alpha_update != 0));
+  }
+  if (has_depth)
+    glDepthMask(AsGLBool(m_depth_state.update_enable != 0));
+}
+
+void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEnable,
+                         bool alphaEnable, bool zEnable, u32 color, u32 z)
+{
+  const bool clear_color = colorEnable || alphaEnable;
+  GLbitfield buffers = 0;
+  if (clear_color)
+  {
+    // color is ARGB8888.
+    glColorMask(AsGLBool(colorEnable), AsGLBool(colorEnable), AsGLBool(colorEnable),
+                AsGLBool(alphaEnable));
+    const auto channel = [color](int shift) {
+      return static_cast<float>((color >> shift) & 0xFF) / 255.0f;
+    };
+    glClearColor(channel(16), channel(8), channel(0), channel(24));
+    buffers = GL_COLOR_BUFFER_BIT;
+  }
+  if (zEnable)
+  {
+    // z is a 24-bit depth value.
+    glDepthMask(GL_TRUE);
+    glClearDepthf(static_cast<float>(z & 0xFFFFFF) / 16777216.0f);
+    buffers |= GL_DEPTH_BUFFER_BIT;
+  }
+
+  // glClear honours the write masks and the scissor rectangle (not the viewport).
+  SetScissorRect(target_rc);
+  glClear(buffers);
+
+  if (clear_color)
+  {
+    const GLboolean rgb = AsGLBool(m_blend_state.color_update != 0);
+    glColorMask(rgb, rgb, rgb, AsGLBool(m_blend_state.alpha_update != 0));
+  }
+  if (zEnable)
+    glDepthMask(AsGLBool(m_depth_state.update_enable != 0));
+}
+
+void OGLGfx::BindSharedReadFramebuffer()
+{
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, m_scratch_read_fbo);
+}
+
+void OGLGfx::BindSharedDrawFramebuffer()
+{
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_scratch_draw_fbo);
+}
+
+void OGLGfx::RestoreFramebufferBinding()
+{
+  const GLuint fbo = m_current_framebuffer == nullptr ?
+                         0 :
+                         static_cast<OGLFramebuffer*>(m_current_framebuffer)->GetFBO();
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Viewport, scissor and draws
 
 void OGLGfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
 {
@@ -264,52 +617,71 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
   }
   else
   {
-    auto iceilf = [](float f) { return static_cast<GLint>(std::ceil(f)); };
-    glViewport(iceilf(x), iceilf(y), iceilf(width), iceilf(height));
+    // Integer viewports round each value up.
+    const auto up = [](float value) { return static_cast<GLint>(std::ceil(value)); };
+    glViewport(up(x), up(y), up(width), up(height));
   }
-
   glDepthRangef(near_depth, far_depth);
 }
 
 void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
 {
-  glDrawArrays(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(), base_vertex,
-               num_vertices);
+  glDrawArrays(AsGL(m_current_pipeline)->GetGLPrimitive(), static_cast<GLint>(base_vertex),
+               static_cast<GLsizei>(num_vertices));
 }
 
 void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
 {
+  // Indices are 16-bit, read from the bound element buffer at an offset of base_index.
+  const GLenum primitive = AsGL(m_current_pipeline)->GetGLPrimitive();
+  const auto* offset =
+      reinterpret_cast<const void*>(static_cast<std::uintptr_t>(base_index) * sizeof(u16));
   if (g_ogl_config.bSupportsGLBaseVertex)
   {
-    glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-                             num_indices, GL_UNSIGNED_SHORT,
-                             static_cast<u16*>(nullptr) + base_index, base_vertex);
+    glDrawElementsBaseVertex(primitive, static_cast<GLsizei>(num_indices), GL_UNSIGNED_SHORT,
+                             offset, static_cast<GLint>(base_vertex));
   }
   else
   {
-    glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-                   num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
+    glDrawElements(primitive, static_cast<GLsizei>(num_indices), GL_UNSIGNED_SHORT, offset);
   }
 }
 
-void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-                                   u32 groupsize_z, u32 groups_x, u32 groups_y, u32 groups_z)
+void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32, u32, u32, u32 groups_x,
+                                   u32 groups_y, u32 groups_z)
 {
   glUseProgram(static_cast<const OGLShader*>(shader)->GetGLComputeProgramID());
   glDispatchCompute(groups_x, groups_y, groups_z);
 
-  // We messed up the program binding, so restore it.
+  // Put the graphics program back.
   ProgramShaderCache::InvalidateLastProgram();
-  if (m_current_pipeline)
-    static_cast<const OGLPipeline*>(m_current_pipeline)->GetProgram()->shader.Bind();
+  if (m_current_pipeline != nullptr)
+    AsGL(m_current_pipeline)->GetProgram()->shader.Bind();
 
-  // Barrier to texture can be used for reads.
-  if (std::ranges::any_of(m_bound_image_textures,
-                          [](const auto* image) { return image != nullptr; }))
-  {
+  // Make image writes visible to texture fetches that follow.
+  const bool any_image = std::ranges::any_of(
+      m_image_units, [](const AbstractTexture* image) { return image != nullptr; });
+  if (any_image)
     glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-  }
 }
+
+void OGLGfx::BeginUtilityDrawing()
+{
+  AbstractGfx::BeginUtilityDrawing();
+  // Utility shaders do not write the clip distances.
+  if (g_backend_info.bSupportsDepthClamp)
+    SetClipDistances(false);
+}
+
+void OGLGfx::EndUtilityDrawing()
+{
+  AbstractGfx::EndUtilityDrawing();
+  if (g_backend_info.bSupportsDepthClamp)
+    SetClipDistances(true);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Window and presentation
 
 void OGLGfx::SelectLeftBuffer()
 {
@@ -326,410 +698,81 @@ void OGLGfx::SelectMainBuffer()
   glDrawBuffer(GL_BACK);
 }
 
-void OGLGfx::SetFramebuffer(AbstractFramebuffer* framebuffer)
+void OGLGfx::ResizeWindowFramebuffer()
 {
-  if (m_current_framebuffer == framebuffer)
+  const u32 width = m_context->GetBackBufferWidth();
+  const u32 height = m_context->GetBackBufferHeight();
+  g_presenter->SetBackbuffer(static_cast<int>(width), static_cast<int>(height));
+  m_window_framebuffer->UpdateDimensions(width, height);
+}
+
+void OGLGfx::PickUpSurfaceChange()
+{
+  if (!g_presenter->SurfaceChangedTestAndClear())
     return;
 
-  glBindFramebuffer(GL_FRAMEBUFFER, static_cast<OGLFramebuffer*>(framebuffer)->GetFBO());
-  m_current_framebuffer = framebuffer;
+  // A new surface usually comes with a new size.
+  m_context->UpdateSurface(g_presenter->GetNewSurfaceHandle());
+  ResizeWindowFramebuffer();
 }
 
-void OGLGfx::SetAndDiscardFramebuffer(AbstractFramebuffer* framebuffer)
+void OGLGfx::PickUpSurfaceResize()
 {
-  // EXT_discard_framebuffer could be used here to save bandwidth on tilers.
-  SetFramebuffer(framebuffer);
-}
+  if (!g_presenter->SurfaceResizedTestAndClear())
+    return;
 
-void OGLGfx::SetAndClearFramebuffer(AbstractFramebuffer* framebuffer, const ClearColor& color_value,
-                                    float depth_value)
-{
-  SetFramebuffer(framebuffer);
-
-  glDisable(GL_SCISSOR_TEST);
-  GLbitfield clear_mask = 0;
-  if (framebuffer->HasColorBuffer())
-  {
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glClearColor(color_value[0], color_value[1], color_value[2], color_value[3]);
-    clear_mask |= GL_COLOR_BUFFER_BIT;
-  }
-  if (framebuffer->HasDepthBuffer())
-  {
-    glDepthMask(GL_TRUE);
-    glClearDepthf(depth_value);
-    clear_mask |= GL_DEPTH_BUFFER_BIT;
-  }
-  glClear(clear_mask);
-  glEnable(GL_SCISSOR_TEST);
-
-  // Restore color/depth mask.
-  if (framebuffer->HasColorBuffer())
-  {
-    glColorMask(m_current_blend_state.color_update, m_current_blend_state.color_update,
-                m_current_blend_state.color_update, m_current_blend_state.alpha_update);
-  }
-  if (framebuffer->HasDepthBuffer())
-    glDepthMask(m_current_depth_state.update_enable);
-}
-
-void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEnable,
-                         bool alphaEnable, bool zEnable, u32 color, u32 z)
-{
-  u32 clear_mask = 0;
-  if (colorEnable || alphaEnable)
-  {
-    glColorMask(colorEnable, colorEnable, colorEnable, alphaEnable);
-    glClearColor(float((color >> 16) & 0xFF) / 255.0f, float((color >> 8) & 0xFF) / 255.0f,
-                 float((color >> 0) & 0xFF) / 255.0f, float((color >> 24) & 0xFF) / 255.0f);
-    clear_mask = GL_COLOR_BUFFER_BIT;
-  }
-  if (zEnable)
-  {
-    glDepthMask(zEnable ? GL_TRUE : GL_FALSE);
-    glClearDepthf(float(z & 0xFFFFFF) / 16777216.0f);
-    clear_mask |= GL_DEPTH_BUFFER_BIT;
-  }
-
-  // Update rect for clearing the picture
-  // glColorMask/glDepthMask/glScissor affect glClear (glViewport does not)
-  g_gfx->SetScissorRect(target_rc);
-
-  glClear(clear_mask);
-
-  // Restore color/depth mask.
-  if (colorEnable || alphaEnable)
-  {
-    glColorMask(m_current_blend_state.color_update, m_current_blend_state.color_update,
-                m_current_blend_state.color_update, m_current_blend_state.alpha_update);
-  }
-  if (zEnable)
-    glDepthMask(m_current_depth_state.update_enable);
+  m_context->Update();
+  ResizeWindowFramebuffer();
 }
 
 bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
 {
-  CheckForSurfaceChange();
-  CheckForSurfaceResize();
-  SetAndClearFramebuffer(m_system_framebuffer.get(), clear_color);
+  PickUpSurfaceChange();
+  PickUpSurfaceResize();
+  SetAndClearFramebuffer(m_window_framebuffer.get(), clear_color);
   return true;
 }
 
 void OGLGfx::PresentBackbuffer()
 {
+  // The log level may have changed since the last frame.
   if (g_ogl_config.bSupportsDebug)
-  {
-    if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-                                                          Common::Log::LogLevel::LERROR))
-    {
-      glEnable(GL_DEBUG_OUTPUT);
-    }
-    else
-    {
-      glDisable(GL_DEBUG_OUTPUT);
-    }
-  }
+    SyncDebugOutputWithLogLevel();
 
-  // Swap the back and front buffers, presenting the image.
-  m_main_gl_context->Swap();
+  m_context->Swap();
+}
+
+SurfaceInfo OGLGfx::GetSurfaceInfo() const
+{
+  return {std::max(m_context->GetBackBufferWidth(), 1u),
+          std::max(m_context->GetBackBufferHeight(), 1u), m_surface_scale,
+          AbstractTextureFormat::RGBA8};
 }
 
 void OGLGfx::OnConfigChanged(u32 bits)
 {
   AbstractGfx::OnConfigChanged(bits);
 
-  if (bits & CONFIG_CHANGE_BIT_VSYNC && !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_VSYNC))
-    m_main_gl_context->SwapInterval(g_ActiveConfig.bVSyncActive);
+  if ((bits & CONFIG_CHANGE_BIT_VSYNC) != 0 &&
+      !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_VSYNC))
+  {
+    m_context->SwapInterval(g_ActiveConfig.bVSyncActive);
+  }
 
-  if (bits & CONFIG_CHANGE_BIT_ANISOTROPY)
+  // Samplers carry the anisotropy level, so they are rebuilt on demand.
+  if ((bits & CONFIG_CHANGE_BIT_ANISOTROPY) != 0)
     g_sampler_cache->Clear();
 }
 
 void OGLGfx::Flush()
 {
-  // ensure all commands are sent to the GPU.
-  // Otherwise the driver could batch several frames together.
+  // Hand queued commands to the GPU now rather than letting the driver batch frames.
   glFlush();
 }
 
 void OGLGfx::WaitForGPUIdle()
 {
   glFinish();
-}
-
-void OGLGfx::CheckForSurfaceChange()
-{
-  if (!g_presenter->SurfaceChangedTestAndClear())
-    return;
-
-  m_main_gl_context->UpdateSurface(g_presenter->GetNewSurfaceHandle());
-
-  u32 width = m_main_gl_context->GetBackBufferWidth();
-  u32 height = m_main_gl_context->GetBackBufferHeight();
-
-  // With a surface change, the window likely has new dimensions.
-  g_presenter->SetBackbuffer(width, height);
-  m_system_framebuffer->UpdateDimensions(width, height);
-}
-
-void OGLGfx::CheckForSurfaceResize()
-{
-  if (!g_presenter->SurfaceResizedTestAndClear())
-    return;
-
-  m_main_gl_context->Update();
-  u32 width = m_main_gl_context->GetBackBufferWidth();
-  u32 height = m_main_gl_context->GetBackBufferHeight();
-  g_presenter->SetBackbuffer(width, height);
-  m_system_framebuffer->UpdateDimensions(width, height);
-}
-
-void OGLGfx::BeginUtilityDrawing()
-{
-  AbstractGfx::BeginUtilityDrawing();
-  if (g_backend_info.bSupportsDepthClamp)
-  {
-    glDisable(GL_CLIP_DISTANCE0);
-    glDisable(GL_CLIP_DISTANCE1);
-  }
-}
-
-void OGLGfx::EndUtilityDrawing()
-{
-  AbstractGfx::EndUtilityDrawing();
-  if (g_backend_info.bSupportsDepthClamp)
-  {
-    glEnable(GL_CLIP_DISTANCE0);
-    glEnable(GL_CLIP_DISTANCE1);
-  }
-}
-
-void OGLGfx::ApplyRasterizationState(const RasterizationState state)
-{
-  if (m_current_rasterization_state == state)
-    return;
-
-  // none, ccw, cw, ccw
-  if (state.cull_mode != CullMode::None)
-  {
-    // TODO: GX_CULL_ALL not supported, yet!
-    glEnable(GL_CULL_FACE);
-    glFrontFace(state.cull_mode == CullMode::Front ? GL_CCW : GL_CW);
-  }
-  else
-  {
-    glDisable(GL_CULL_FACE);
-  }
-
-  m_current_rasterization_state = state;
-}
-
-void OGLGfx::ApplyDepthState(const DepthState state)
-{
-  if (m_current_depth_state == state)
-    return;
-
-  const GLenum glCmpFuncs[8] = {GL_NEVER,   GL_LESS,     GL_EQUAL,  GL_LEQUAL,
-                                GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
-
-  if (state.test_enable)
-  {
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(state.update_enable ? GL_TRUE : GL_FALSE);
-    glDepthFunc(glCmpFuncs[u32(state.func.Value())]);
-  }
-  else
-  {
-    // if the test is disabled write is disabled too
-    // TODO: When PE performance metrics are being emulated via occlusion queries, we should
-    // (probably?) enable depth test with depth function ALWAYS here
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-  }
-
-  m_current_depth_state = state;
-}
-
-void OGLGfx::ApplyBlendingState(const BlendingState state)
-{
-  if (m_current_blend_state == state)
-    return;
-
-  bool useDualSource = state.use_dual_src;
-
-  const GLenum src_factors[8] = {GL_ZERO,
-                                 GL_ONE,
-                                 GL_DST_COLOR,
-                                 GL_ONE_MINUS_DST_COLOR,
-                                 useDualSource ? GL_SRC1_ALPHA : (GLenum)GL_SRC_ALPHA,
-                                 useDualSource ? GL_ONE_MINUS_SRC1_ALPHA :
-                                                 (GLenum)GL_ONE_MINUS_SRC_ALPHA,
-                                 GL_DST_ALPHA,
-                                 GL_ONE_MINUS_DST_ALPHA};
-  const GLenum dst_factors[8] = {GL_ZERO,
-                                 GL_ONE,
-                                 GL_SRC_COLOR,
-                                 GL_ONE_MINUS_SRC_COLOR,
-                                 useDualSource ? GL_SRC1_ALPHA : (GLenum)GL_SRC_ALPHA,
-                                 useDualSource ? GL_ONE_MINUS_SRC1_ALPHA :
-                                                 (GLenum)GL_ONE_MINUS_SRC_ALPHA,
-                                 GL_DST_ALPHA,
-                                 GL_ONE_MINUS_DST_ALPHA};
-
-  if (state.blend_enable)
-    glEnable(GL_BLEND);
-  else
-    glDisable(GL_BLEND);
-
-  // Always call glBlendEquationSeparate and glBlendFuncSeparate, even when
-  // GL_BLEND is disabled, as a workaround for some bugs (possibly graphics
-  // driver issues?). See https://bugs.dolphin-emu.org/issues/10120 : "Sonic
-  // Adventure 2 Battle: graphics crash when loading first Dark level"
-  GLenum equation = state.subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD;
-  GLenum equationAlpha = state.subtract_alpha ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD;
-  glBlendEquationSeparate(equation, equationAlpha);
-  glBlendFuncSeparate(src_factors[u32(state.src_factor.Value())],
-                      dst_factors[u32(state.dst_factor.Value())],
-                      src_factors[u32(state.src_factor_alpha.Value())],
-                      dst_factors[u32(state.dst_factor_alpha.Value())]);
-
-  const GLenum logic_op_codes[16] = {
-      GL_CLEAR,         GL_AND,         GL_AND_REVERSE, GL_COPY,  GL_AND_INVERTED, GL_NOOP,
-      GL_XOR,           GL_OR,          GL_NOR,         GL_EQUIV, GL_INVERT,       GL_OR_REVERSE,
-      GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND,        GL_SET};
-
-  // Logic ops aren't available in GLES3
-  if (!IsGLES())
-  {
-    if (state.logic_op_enable)
-    {
-      glEnable(GL_COLOR_LOGIC_OP);
-      glLogicOp(logic_op_codes[u32(state.logic_mode.Value())]);
-    }
-    else
-    {
-      glDisable(GL_COLOR_LOGIC_OP);
-    }
-  }
-
-  glColorMask(state.color_update, state.color_update, state.color_update, state.alpha_update);
-  m_current_blend_state = state;
-}
-
-void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
-{
-  if (m_current_pipeline == pipeline)
-    return;
-
-  if (pipeline)
-  {
-    ApplyRasterizationState(static_cast<const OGLPipeline*>(pipeline)->GetRasterizationState());
-    ApplyDepthState(static_cast<const OGLPipeline*>(pipeline)->GetDepthState());
-    ApplyBlendingState(static_cast<const OGLPipeline*>(pipeline)->GetBlendingState());
-    ProgramShaderCache::BindVertexFormat(
-        static_cast<const OGLPipeline*>(pipeline)->GetVertexFormat());
-    static_cast<const OGLPipeline*>(pipeline)->GetProgram()->shader.Bind();
-  }
-  else
-  {
-    ProgramShaderCache::InvalidateLastProgram();
-    glUseProgram(0);
-  }
-  m_current_pipeline = pipeline;
-}
-
-void OGLGfx::SetTexture(u32 index, const AbstractTexture* texture)
-{
-  const OGLTexture* gl_texture = static_cast<const OGLTexture*>(texture);
-  if (m_bound_textures[index] == gl_texture)
-    return;
-
-  glActiveTexture(GL_TEXTURE0 + index);
-  if (gl_texture)
-    glBindTexture(gl_texture->GetGLTarget(), gl_texture->GetGLTextureId());
-  else
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-  m_bound_textures[index] = gl_texture;
-}
-
-void OGLGfx::SetSamplerState(u32 index, const SamplerState& state)
-{
-  g_sampler_cache->SetSamplerState(index, state);
-}
-
-void OGLGfx::SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write)
-{
-  if (m_bound_image_textures[index] == texture)
-    return;
-
-  if (texture)
-  {
-    const GLenum access = read ? (write ? GL_READ_WRITE : GL_READ_ONLY) : GL_WRITE_ONLY;
-    glBindImageTexture(index, static_cast<OGLTexture*>(texture)->GetGLTextureId(), 0, GL_TRUE, 0,
-                       access, static_cast<OGLTexture*>(texture)->GetGLFormatForImageTexture());
-  }
-  else
-  {
-    glBindImageTexture(index, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
-  }
-
-  m_bound_image_textures[index] = texture;
-}
-
-void OGLGfx::UnbindTexture(const AbstractTexture* texture)
-{
-  for (size_t i = 0; i < m_bound_textures.size(); i++)
-  {
-    if (m_bound_textures[i] != texture)
-      continue;
-
-    glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + i));
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    m_bound_textures[i] = nullptr;
-  }
-
-  for (size_t i = 0; i < m_bound_image_textures.size(); i++)
-  {
-    if (m_bound_image_textures[i] != texture)
-      continue;
-
-    glBindImageTexture(static_cast<GLuint>(i), 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
-    m_bound_image_textures[i] = nullptr;
-  }
-}
-
-std::unique_ptr<VideoCommon::AsyncShaderCompiler> OGLGfx::CreateAsyncShaderCompiler()
-{
-  return std::make_unique<SharedContextAsyncShaderCompiler>();
-}
-
-bool OGLGfx::IsGLES() const
-{
-  return m_main_gl_context->IsGLES();
-}
-
-void OGLGfx::BindSharedReadFramebuffer()
-{
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, m_shared_read_framebuffer);
-}
-
-void OGLGfx::BindSharedDrawFramebuffer()
-{
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_shared_draw_framebuffer);
-}
-
-void OGLGfx::RestoreFramebufferBinding()
-{
-  glBindFramebuffer(
-      GL_FRAMEBUFFER,
-      m_current_framebuffer ? static_cast<OGLFramebuffer*>(m_current_framebuffer)->GetFBO() : 0);
-}
-
-SurfaceInfo OGLGfx::GetSurfaceInfo() const
-{
-  return {std::max(m_main_gl_context->GetBackBufferWidth(), 1u),
-          std::max(m_main_gl_context->GetBackBufferHeight(), 1u), m_backbuffer_scale,
-          AbstractTextureFormat::RGBA8};
 }
 
 }  // namespace OGL
