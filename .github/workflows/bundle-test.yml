@@ -116,13 +116,15 @@ jobs:
             echo "PixelU-Wii source is in pixelu/wii; docs/pixelu-wii-original.md explains the rewrite and lists the third-party parts and kept Dolphin data."
             echo "No games, keys, BIOS or firmware are included."
           } > "$DIR/VERSION.txt"
-          (cd dist && zip -qr "RetroPixels-$VER.zip" "RetroPixels-$VER")
+          # No zip of our own: GitHub zips the artifact on download, so the
+          # folder is uploaded as it is and the download is one zip holding
+          # the RetroPixels-<ver> folder (not a zip inside a zip).
           ls -la dist
           cat "$DIR/VERSION.txt"
 
       - uses: actions/upload-artifact@v4
         with:
           name: RetroPixels-${{ env.VER }}
-          path: dist/RetroPixels-${{ env.VER }}.zip
-          compression-level: 0
+          path: dist/
+          compression-level: 6
           retention-days: 14
