@@ -14,6 +14,8 @@ name: PixelU Wii (GameCube / Wii) test build
 # pixelu/wii/CMake/PixelUAssembleSys.cmake). It is its own program
 # (PixelU-Wii.exe), separate from PixelU's Wii U part, and is packaged as the
 # PixelU\wii\ folder.
+# build-linux makes the same program for Linux x86-64 (PixelU/wii/PixelU-Wii,
+# Qt's official linux_gcc_64 build next to it; docs/linux-plan.md, L5d).
 # The result is a workflow artifact only: no release is made.
 
 on:
@@ -25,6 +27,8 @@ on:
       - "pixelu/wii/Source/**"
       - ".gitmodules"
       - ".github/workflows/pixelu-wii.yml"
+      - "tools/pixelu-wii-linux-deploy.sh"
+      - "tools/pixelu-wii-test-dol.py"
 
 permissions:
   contents: read
@@ -327,3 +331,368 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run bundle-test.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"
+
+  build-linux:
+    # The Linux build of PixelU-Wii (docs/linux-plan.md, batch L5d): built on
+    # ubuntu-22.04 so glibc 2.35 is the oldest it needs, with GCC 12 (C++23;
+    # its libstdc++ is the one Ubuntu 22.04 and Debian 12 ship). Same sources
+    # as the Windows job: the third-party libraries from sources.json, Qt
+    # 6.8.3's official linux_gcc_64 build (aqtinstall), FFmpeg built from its
+    # source, and the sparse Dolphin checkout for translations and the
+    # third-party Sys files. tools/pixelu-wii-linux-deploy.sh puts Qt next to
+    # the program (lib/, QtPlugins/, $ORIGIN rpath). The artifact
+    # PixelU-Wii-linux-x64 holds PixelU-Wii-linux.tar.gz (a tar keeps the exec
+    # bits) with PixelU/wii/PixelU-Wii inside; bundle-linux.yml picks it up.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      DOLPHIN_TAG: "2609a"
+      DOLPHIN_DIR: "pixelu/wii/dolphin"
+      QT_VERSION: "6.8.3"
+      QT_ARCH: "linux_gcc_64"
+      AQT_VERSION: "3.3.0"
+      BUILD: "pixelu/wii/build/linux-x64-release"
+      FFMPEG_OUT: "pixelu/wii/third_party/FFmpeg/linux-x64"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install build and check packages
+        run: |
+          sudo apt-get update -q
+          # Build: compiler, X11/XInput2/xcb, PulseAudio/ALSA and EGL headers (L5a-L5c),
+          # nasm for FFmpeg, gettext's msgfmt for the translations, patchelf for the deploy.
+          # Run: what Qt's xcb plugin needs (some of it is bundled by the deploy script),
+          # Xvfb, openbox, xdotool, PulseAudio, Mesa's llvmpipe and lavapipe.
+          sudo apt-get install -y -q --no-install-recommends \
+            gcc-12 g++-12 ninja-build pkg-config nasm gettext patchelf \
+            libudev-dev libx11-dev libxi-dev libxcb1-dev libpulse-dev libasound2-dev libegl-dev libgl-dev \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-util1 \
+            libxcb-xinput0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-randr0 libxcb-shape0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-shm0 libfontconfig1 libfreetype6 libdbus-1-3 libgtk-3-0 \
+            xvfb xauth x11-utils xdotool openbox imagemagick pulseaudio pulseaudio-utils \
+            mesa-vulkan-drivers libgl1-mesa-dri libegl1 libegl-mesa0 libvulkan1 libx11-xcb1 \
+            vulkan-tools mesa-utils
+          gcc-12 --version | head -n 1
+          ldd --version | head -n 1
+
+      - name: Fetch Dolphin's game settings, Sys files and translations (sparse)
+        run: |
+          # As in the Windows job: only what PixelUAssembleSys.cmake takes from Dolphin's
+          # Data/Sys, plus Languages/po, at the commit the pixelu/wii/dolphin submodule pins.
+          set -euo pipefail
+          sha=$(git ls-tree HEAD "$DOLPHIN_DIR" | awk '{ print $3 }')
+          mapfile -t paths < <(python3 - << 'EOF'
+          import re
+          text = open("pixelu/wii/CMake/PixelUAssembleSys.cmake").read()
+          text = re.sub(r"(?m)#.*$", "", text)
+          block = re.search(r"set\(from_third_party(.*?)\n\)", text, re.S).group(1)
+          for name in re.findall(r'"([^"]+)"', block):
+              print("/Data/Sys/" + name)
+          print("/Languages/po/")
+          EOF
+          )
+          echo "Dolphin $DOLPHIN_TAG at $sha, sparse paths:"; printf '  %s\n' "${paths[@]}"
+          mkdir -p "$DOLPHIN_DIR"
+          git -C "$DOLPHIN_DIR" init -q
+          git -C "$DOLPHIN_DIR" remote add origin https://github.com/dolphin-emu/dolphin.git
+          git -C "$DOLPHIN_DIR" sparse-checkout set --no-cone "${paths[@]}"
+          git -C "$DOLPHIN_DIR" fetch -q --depth 1 --filter=blob:none origin "$sha"
+          git -C "$DOLPHIN_DIR" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          git -C "$DOLPHIN_DIR" log -1 --format="Dolphin at %H (%s)"
+          for p in "${paths[@]}"; do
+            # The patterns may be globs (wiitdb-*.txt).
+            if ! compgen -G "$DOLPHIN_DIR${p%/}" > /dev/null; then echo "::error::nothing fetched for $p"; exit 1; fi
+          done
+          for d in Source Externals Data/Sys/Themes Data/Sys/Shaders; do
+            if [ -e "$DOLPHIN_DIR/$d" ]; then echo "::error::$d was fetched; the checkout must stay sparse"; exit 1; fi
+          done
+          echo "Dolphin checkout: $(find "$DOLPHIN_DIR" -path '*/.git' -prune -o -type f -print | wc -l) files"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the third-party sources from their own projects
+        run: |
+          python pixelu/wii/Externals/fetch.py --list
+          python pixelu/wii/Externals/fetch.py --jobs 8
+
+      # Qt 6.8.3, the Qt Company's own Linux x64 build: base, SVG, the Wayland
+      # client plugins and the ICU that build links. aqtinstall checks every
+      # archive against the SHA-256 the Qt download server lists for it.
+      - uses: actions/cache@v4
+        id: qt-cache
+        with:
+          path: pixelu/wii/third_party/Qt
+          key: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-qtbase-qtsvg-qtwayland-icu-aqt${{ env.AQT_VERSION }}
+
+      - name: Install Qt (official build)
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install "aqtinstall==$AQT_VERSION"
+          python -m aqt install-qt linux desktop "$QT_VERSION" "$QT_ARCH" --archives qtbase qtsvg qtwayland icu -O pixelu/wii/third_party/Qt
+
+      - name: Check Qt
+        run: |
+          qt="pixelu/wii/third_party/Qt/$QT_VERSION/gcc_64"
+          for f in lib/libQt6Core.so.6 lib/libQt6Gui.so.6 lib/libQt6Widgets.so.6 lib/libQt6Svg.so.6 \
+                   lib/libQt6XcbQpa.so.6 lib/libQt6DBus.so.6 lib/cmake/Qt6/Qt6Config.cmake libexec/moc bin/qtpaths \
+                   plugins/platforms/libqxcb.so plugins/imageformats/libqsvg.so plugins/iconengines/libqsvgicon.so; do
+            [ -e "$qt/$f" ] || { echo "::error::Qt: missing $f"; exit 1; }
+          done
+          [ -e "$qt/plugins/platforms/libqwayland-generic.so" ] || echo "::warning::Qt has no Wayland platform plugin (qtwayland archive); the package will run on X11/XWayland only"
+          "$qt/bin/qtpaths" --qt-query QT_VERSION
+          # ICU and everything else Qt Core and the xcb plugin need must resolve.
+          if LD_LIBRARY_PATH="$qt/lib" ldd "$qt/lib/libQt6Core.so.6" "$qt/plugins/platforms/libqxcb.so" | grep 'not found'; then
+            echo "::error::Qt's libraries do not resolve"; exit 1
+          fi
+
+      # FFmpeg for frame dumps (RetroPixels' recording): static libraries built
+      # from the same FFmpeg source and configuration as the Windows job
+      # (Externals/FFmpeg/build-ffmpeg.sh), here with the host's GCC.
+      - uses: actions/cache@v4
+        id: ffmpeg-cache
+        with:
+          path: ${{ env.FFMPEG_OUT }}
+          key: ffmpeg-linux-ubuntu22.04-${{ hashFiles('pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh', 'pixelu/wii/Externals/sources.json') }}
+
+      - name: Build FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          python pixelu/wii/Externals/fetch.py --group ffmpeg
+          PIXELU_FFMPEG_HOST_TEST=1 bash pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh pixelu/wii/third_party/FFmpeg/ffmpeg "$FFMPEG_OUT"
+
+      - name: Check FFmpeg
+        run: |
+          cat "$FFMPEG_OUT/BUILD-INFO.txt"
+          for l in avcodec avformat avutil swresample swscale; do
+            [ -f "$FFMPEG_OUT/lib/lib$l.a" ] || { echo "::error::FFmpeg: missing lib/lib$l.a"; exit 1; }
+            [ -f "$FFMPEG_OUT/include/lib$l/$l.h" ] || { echo "::error::FFmpeg: missing include/lib$l/$l.h"; exit 1; }
+          done
+          grep -q 'N-106414-g28d011516b' "$FFMPEG_OUT/include/libavutil/ffversion.h" || { echo "::error::FFmpeg: not N-106414-g28d011516b"; exit 1; }
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "4.2.x"
+
+      - name: Configure
+        run: |
+          cmake --version
+          # No LLVM: the debugger's host disassembly would link the runner's libLLVM.
+          cmake -S pixelu/wii -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DENABLE_LLVM=OFF \
+            -DPIXELU_WII_FFMPEG_DIR="$PWD/$FFMPEG_OUT" 2>&1 | tee "$RUNNER_TEMP/configure.txt"
+          test "${PIPESTATUS[0]}" = 0
+          grep -q 'FFmpeg found: frame dumps are encoded' "$RUNNER_TEMP/configure.txt" || { echo "::error::FFmpeg was not found"; exit 1; }
+          grep -q "Qt $QT_VERSION" "$RUNNER_TEMP/configure.txt" || { echo "::error::not configured with Qt $QT_VERSION"; exit 1; }
+
+      - name: Build
+        run: |
+          ninja -C "$BUILD" dolphin-emu dolphin-emu-nogui dolphin-tool pixelu-wii-input-check pixelu-wii-dock-check
+
+      - name: Check the programs (libraries, glibc floor)
+        run: |
+          set -euo pipefail
+          bin="$BUILD/Binaries"
+          ls -la "$bin"
+          for p in PixelU-Wii dolphin-emu-nogui dolphin-tool; do
+            echo "== $p"
+            readelf -d "$bin/$p" | grep -E 'NEEDED|RUNPATH|RPATH'
+            floor=$(objdump -T "$bin/$p" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+            echo "newest glibc symbol: $floor"
+            if [ "$(printf '%s\nGLIBC_2.35\n' "$floor" | sort -V | tail -n 1)" != "GLIBC_2.35" ]; then
+              echo "::error::$p needs $floor (more than glibc 2.35)"; exit 1
+            fi
+            if readelf -d "$bin/$p" | grep -q 'libLLVM'; then echo "::error::$p links libLLVM"; exit 1; fi
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          bin="$BUILD/Binaries"
+          out="package/PixelU/wii"
+          mkdir -p "$out"
+          # The program with Qt next to it (lib/, QtPlugins/, qt.conf).
+          bash tools/pixelu-wii-linux-deploy.sh "$bin/PixelU-Wii" "pixelu/wii/third_party/Qt/$QT_VERSION/gcc_64" "$out"
+          if [ -d "$bin/Languages" ]; then cp -R "$bin/Languages" "$out/Languages"; fi
+          # Sys was assembled by the build: PixelU-Wii's own pixelu/wii/Data/Sys plus the
+          # third-party files listed in PixelUAssembleSys.cmake, taken from Dolphin's Data/Sys.
+          cp -RL "$bin/Sys" "$out/Sys"
+          # COPYING is PixelU-Wii's own notice, license.txt the full GPL text, Licenses the
+          # licence texts COPYING refers to.
+          cp pixelu/wii/COPYING "$out/COPYING"
+          cp pixelu/wii/LICENSES/GPL-2.0-or-later.txt "$out/license.txt"
+          cp -R pixelu/wii/LICENSES "$out/Licenses"
+          # Each third-party project's own licence files go to Licenses/Externals/<project>/
+          # (the same rule as the Windows job; Qt's are there too).
+          ext_dirs=0
+          for ext in pixelu/wii/third_party/*/ pixelu/wii/Externals/expr/ pixelu/wii/Externals/FreeSurround/; do
+            ext=${ext%/}
+            name=$(basename "$ext")
+            if [ "$name" = FreeSurround ]; then
+              found="$ext/README.txt"
+            else
+              found=$(find "$ext" -maxdepth 3 -type f -not -path '*/FFmpeg/ffmpeg/*' | grep -iE '/((licen[cs]e|copying|copyright|notice|unlicense)([._-][^/]*)?|[^/]*copyright[^/]*)$' || true)
+            fi
+            if [ -z "$found" ]; then echo "no licence file found in $name"; continue; fi
+            while IFS= read -r f; do
+              dst="$out/Licenses/Externals/$name/${f#"$ext"/}"
+              mkdir -p "$(dirname "$dst")"
+              cp -f "$f" "$dst"
+            done <<< "$found"
+            ext_dirs=$((ext_dirs + 1))
+          done
+          echo "Licenses/Externals: licence files of $ext_dirs projects"
+          # portable.txt: settings, saves and caches stay in the User folder next to the program.
+          echo "PixelU Wii keeps its settings, saves and caches in the User folder next to PixelU-Wii." > "$out/portable.txt"
+          sha=$(git rev-parse --short HEAD)
+          dsha=$(git -C "$DOLPHIN_DIR" rev-parse --short HEAD)
+          ver=$(sed -n 's/.*appVersion *= *"\([^"]*\)".*/\1/p' main.go | head -n 1)
+          {
+            echo "PixelU Wii $ver test build for Linux x86-64 (GameCube and Wii, based on Dolphin; not a release)"
+            echo "Built $(date -u +%Y-%m-%d) from branch claude/wiiu-emulator-urpcen ($sha) on Ubuntu 22.04 (glibc 2.35 or newer needed)"
+            echo "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $QT_VERSION official build; FFmpeg built from source); translations and the third-party Sys files from Dolphin $DOLPHIN_TAG ($dsha)"
+            echo "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
+            echo "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
+            echo "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses/"
+            echo "No Nintendo keys, firmware, BIOS/IPL or games are included."
+          } > "$out/VERSION.txt"
+
+      - name: List and check package contents
+        run: |
+          set -euo pipefail
+          out="package/PixelU/wii"
+          ls -la "$out"
+          find "$out/QtPlugins" -type f
+          echo "Sys: $(find "$out/Sys" -type f | wc -l) files"
+          du -sh "$out"
+          cat "$out/VERSION.txt"
+          for f in PixelU-Wii lib/libQt6Core.so.6 lib/libQt6Gui.so.6 lib/libQt6Widgets.so.6 qt.conf portable.txt COPYING Sys/GC Sys/Wii Sys/GameSettings QtPlugins/platforms/libqxcb.so; do
+            [ -e "$out/$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          [ -x "$out/PixelU-Wii" ] || { echo "::error::PixelU-Wii is not executable"; exit 1; }
+          for pair in COPYING=pixelu/wii/COPYING Licenses/LGPL-3.0-only.txt=pixelu/wii/LICENSES/LGPL-3.0-only.txt \
+                      Sys/Resources/dolphin_logo.png=pixelu/wii/Data/Sys/Resources/dolphin_logo.png \
+                      Sys/Resources/nobanner.png=pixelu/wii/Data/Sys/Resources/nobanner.png; do
+            cmp "$out/${pair%%=*}" "${pair#*=}" || { echo "::error::${pair%%=*} is not PixelU-Wii's own"; exit 1; }
+          done
+          python pixelu/wii/Data/check_sys_package.py "$out/Sys" "$DOLPHIN_DIR/Data/Sys"
+          # The glibc floor of everything shipped.
+          floor=$(find "$out" -type f \( -name PixelU-Wii -o -name '*.so*' \) -exec objdump -T {} + 2> /dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          echo "newest glibc symbol in the package: $floor"
+          if [ "$(printf '%s\nGLIBC_2.35\n' "$floor" | sort -V | tail -n 1)" != "GLIBC_2.35" ]; then
+            echo "::error::the package needs $floor (more than glibc 2.35)"; exit 1
+          fi
+
+      - name: Smoke test (the program starts and prints its version)
+        run: |
+          set -euo pipefail
+          out="$PWD/package/PixelU/wii"
+          # No X server needed for --version.
+          QT_QPA_PLATFORM=offscreen timeout 60 "$out/PixelU-Wii" --version > "$RUNNER_TEMP/ver.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/ver.txt"
+          echo "exit status ${status:-0}"
+          grep -q 'PixelU-Wii' "$RUNNER_TEMP/ver.txt" || { echo "::error::--version did not name PixelU-Wii"; exit 1; }
+          # It wrote its settings only next to itself (portable.txt).
+          if [ -d "$out/User" ]; then echo "portable User folder created: OK"; else echo "::warning::no User folder next to the program"; fi
+          rm -rf "$out/User"
+          if [ -d "$HOME/.local/share/dolphin-emu" ] || [ -d "$HOME/.config/dolphin-emu" ]; then
+            echo "::error::PixelU-Wii wrote to the home folder despite portable.txt"; exit 1
+          fi
+
+      - name: Start Xvfb and PulseAudio
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          for _ in $(seq 50); do xdpyinfo -display :99 > /dev/null 2>&1 && break; sleep 0.2; done
+          xdpyinfo -display :99 | grep -E 'version number|XInputExtension|dimensions'
+          pulseaudio -D --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=null
+          pactl info | grep -E 'Server Name|Default Sink'
+          DISPLAY=:99 glxinfo -B | grep -E 'OpenGL renderer|OpenGL core profile version'
+          vulkaninfo --summary | grep -E 'deviceName|apiVersion' || true
+          python3 tools/pixelu-wii-test-dol.py "$RUNNER_TEMP/test.dol"
+
+      - name: Check keyboard, mouse and controllers (XInput2, SDL virtual pad)
+        run: |
+          timeout 300 "$BUILD/Binaries/pixelu-wii-input-check" "$RUNNER_TEMP/input-user"
+
+      - name: Check nogui start-up (headless, Null video)
+        run: |
+          set -euo pipefail
+          u="$RUNNER_TEMP/nogui-user"
+          "$BUILD/Binaries/dolphin-emu-nogui" --version
+          "$BUILD/Binaries/dolphin-emu-nogui" -u "$u" -v Null -C Logger.Logs.BOOT=True -C Logger.Logs.CONSOLE=True -C Logger.Options.Verbosity=4 \
+            -C Logger.Options.WriteToConsole=True -e "$RUNNER_TEMP/test.dol" > "$RUNNER_TEMP/nogui.txt" 2>&1 &
+          pid=$!
+          sleep 8
+          kill -0 "$pid" || { cat "$RUNNER_TEMP/nogui.txt"; echo "::error::nogui ended early"; exit 1; }
+          kill -INT "$pid"
+          status=0
+          timeout 10 tail --pid="$pid" -f /dev/null || { echo "::error::nogui did not stop"; kill -9 "$pid"; exit 1; }
+          wait "$pid" || status=$?
+          tail -n 30 "$RUNNER_TEMP/nogui.txt"
+          [ "$status" = 0 ] || { echo "::error::nogui exited $status"; exit 1; }
+          grep -q 'Booting from executable' "$RUNNER_TEMP/nogui.txt" || { echo "::error::no 'Booting from executable'"; exit 1; }
+          grep -q 'Shutdown complete' "$RUNNER_TEMP/nogui.txt" || { echo "::error::no 'Shutdown complete'"; exit 1; }
+
+      - name: Check sound (cubeb through PulseAudio)
+        run: |
+          set -euo pipefail
+          "$BUILD/Binaries/dolphin-emu-nogui" -u "$RUNNER_TEMP/sound-user" -v Null -C Dolphin.DSP.Backend=Cubeb \
+            -C Logger.Logs.AUDIO=True -C Logger.Options.Verbosity=4 -C Logger.Options.WriteToConsole=True \
+            -e "$RUNNER_TEMP/test.dol" > "$RUNNER_TEMP/sound.txt" 2>&1 &
+          pid=$!
+          sleep 8
+          pactl list sink-inputs | tee "$RUNNER_TEMP/sinks.txt" | grep -E 'application\.(name|process\.id)' || true
+          kill -INT "$pid"; wait "$pid" || true
+          grep -q 'Cubeb initialized using pulse backend' "$RUNNER_TEMP/sound.txt" || { tail -n 30 "$RUNNER_TEMP/sound.txt"; echo "::error::cubeb did not use PulseAudio"; exit 1; }
+          grep -q "application.process.id = \"$pid\"" "$RUNNER_TEMP/sinks.txt" || { echo "::error::no PulseAudio stream of the nogui process"; exit 1; }
+
+      - name: Check the game on screen (nogui -p x11 and the Qt program, OpenGL and Vulkan)
+        run: |
+          set -euo pipefail
+          check="$BUILD/Binaries/pixelu-wii-dock-check"
+          app="$PWD/package/PixelU/wii/PixelU-Wii"
+          for backend in OGL Vulkan; do
+            echo "== nogui -p x11, $backend"
+            timeout 180 "$check" nogui "$BUILD/Binaries/dolphin-emu-nogui" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/x11-$backend" "$backend"
+            echo "== PixelU-Wii, $backend"
+            timeout 180 "$check" plain "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/qt-$backend" "$backend"
+          done
+
+      - name: Check docking into RetroPixels (stand-in app window)
+        run: |
+          set -euo pipefail
+          check="$BUILD/Binaries/pixelu-wii-dock-check"
+          app="$PWD/package/PixelU/wii/PixelU-Wii"
+          # Nobody docks it: after 20 s it becomes an ordinary window (no window manager).
+          timeout 180 "$check" give-up "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/dock-giveup"
+          # With a window manager, as on a desktop: it must never reach the window manager
+          # while it waits, and stays docked. PIXELU_EMBED=1 (what RetroPixels sets), then --rp-embed.
+          openbox > "$RUNNER_TEMP/openbox.log" 2>&1 &
+          sleep 2
+          timeout 180 "$check" dock "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/dock-env"
+          timeout 180 "$check" rp-embed "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/dock-flag" Vulkan
+          kill %1 || true
+
+      - name: Make the tar.gz
+        run: |
+          rm -rf package/PixelU/wii/User
+          tar -czf PixelU-Wii-linux.tar.gz -C package PixelU
+          tar -tzvf PixelU-Wii-linux.tar.gz | grep -E ' PixelU/wii/PixelU-Wii$'
+          ls -l PixelU-Wii-linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-Wii-linux-x64
+          path: PixelU-Wii-linux.tar.gz
+          compression-level: 0
+          retention-days: 14
+
+      - name: Make the RetroPixels Linux download with this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bundle-linux.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"
