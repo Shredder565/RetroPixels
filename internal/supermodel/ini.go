@@ -20,6 +20,27 @@ type Controls struct {
 	// InvertY: pushing the stick up dives, like an aircraft's yoke (the
 	// arcade cabinet's flight stick works this way).
 	InvertY bool
+	// FlightStick: the thumbstick is shaped like a flight stick by
+	// RetroPixels' build (FlightStickEnv); Supermodel's own dead zone on
+	// the stick is then off, because the shaping has a round one.
+	FlightStick bool
+}
+
+// Flight stick feel (RetroPixels' build of Supermodel, patch 0002): a round
+// dead zone of FlightStickDead %, the round gate stretched to a square,
+// and a cubic response curve of FlightStickCurve % for fine aim near the
+// centre with full deflection at the edge.
+const (
+	FlightStickCurve = 45
+	FlightStickDead  = 8
+)
+
+// FlightStickEnv is the environment variable that turns it on or off.
+func FlightStickEnv(on bool) string {
+	if !on {
+		return "RP_FLIGHTSTICK=off"
+	}
+	return fmt.Sprintf("RP_FLIGHTSTICK=curve=%d,dead=%d", FlightStickCurve, FlightStickDead)
 }
 
 // INI is Supermodel.ini for Star Wars Trilogy Arcade, played from RetroPixels.
@@ -67,6 +88,11 @@ func INI(c Controls) string {
 	w("InputAnalogJoyDown", "KEY_DOWN")
 	w("InputAnalogJoyX", "JOY1_XAXIS")
 	w("InputAnalogJoyY", y)
+	if c.FlightStick {
+		b.WriteString("; The stick's dead zone is RetroPixels' flight stick shaping's own (round).\n")
+		w("InputJoy1XDeadZone", "0")
+		w("InputJoy1YDeadZone", "0")
+	}
 	w("InputAnalogJoyTrigger", "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS")
 	w("InputAnalogJoyEvent", "KEY_LEFTALT,KEY_S,JOY1_BUTTON2,JOY1_BUTTON6")
 	w("InputAnalogJoyTrigger2", "KEY_D,JOY1_BUTTON3")

@@ -703,6 +703,7 @@
             <label class="sw-check" title="The game plays inside this window instead of fullscreen in Supermodel's own window"><input type="checkbox" id="smEmbed"> Play inside RetroPixels</label>
             <label class="sw-check"><input type="checkbox" id="smFull"> Start fullscreen</label>
             <label class="sw-check" title="The 3D view fills a wide screen; the score and other 2D parts stay 4:3"><input type="checkbox" id="smWide"> Wide screen</label>
+            <label class="sw-check" title="The Xbox stick aims like the arcade's flight stick: steady and precise near the centre, full movement at the edge, and the corners reachable"><input type="checkbox" id="smFlight"> Flight stick feel</label>
             <label class="sw-check" title="Push the stick up to dive and pull it back to climb, like the arcade's flight yoke"><input type="checkbox" id="smInvert"> Flight-style up / down</label>
             <label class="sw-check" title="Saves the game's picture and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="smRec"> Record games automatically</label>
           </div>
@@ -1678,6 +1679,8 @@
     document.getElementById("smFull").checked = !!st.fullscreen;
     document.getElementById("smWide").checked = !!st.wide;
     document.getElementById("smInvert").checked = !!st.invertY;
+    document.getElementById("smFlight").checked = !!st.flight;
+    document.getElementById("smFlight").disabled = st.exe && !st.patched;
     document.getElementById("smRec").checked = !!st.record;
     document.getElementById("smOpenFolder").disabled = !st.exe;
     document.getElementById("smFindRom").disabled = !!st.finding;
@@ -1738,6 +1741,8 @@
     document.getElementById("smEmbed").addEventListener("change", e => smAction({ action: "embed", on: e.target.checked }));
     document.getElementById("smFull").addEventListener("change", e => smAction({ action: "fullscreen", on: e.target.checked }));
     document.getElementById("smWide").addEventListener("change", e => smAction({ action: "wide", on: e.target.checked }));
+    document.getElementById("smFlight").addEventListener("change", e => smAction({ action: "flight-stick", on: e.target.checked },
+      e.target.checked ? "The stick aims like a flight stick" : "The stick works as a plain thumbstick"));
     document.getElementById("smInvert").addEventListener("change", e => smAction({ action: "invert-y", on: e.target.checked },
       e.target.checked ? "Stick up dives, back climbs" : "Stick up climbs"));
     document.getElementById("smRec").addEventListener("change", e => smAction({ action: "record", on: e.target.checked },

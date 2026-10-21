@@ -282,7 +282,8 @@ Star Wars Trilogy Arcade (Supermodel)
 - Click the tile: the game starts playable, fullscreen, with the Xbox
   controller (or inside RetroPixels with "Play inside RetroPixels").
   Back + Start or Esc comes back.
-- Xbox controller: left stick aims, RT or A fires, RB or B is the event
+- Xbox controller ("Flight stick feel" on by default: steady near the
+  centre, full movement at the edge, corners reachable): left stick aims, RT or A fires, RB or B is the event
   button (force), Start starts, Back inserts a coin, Back + Start leaves.
   Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
   F2 the game's test menu.

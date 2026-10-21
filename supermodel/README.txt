@@ -49,8 +49,16 @@ includes the complete corresponding source (Supermodel-source.tar.gz).
 No ROMs, BIOS files or other game data are part of this folder, the build or
 the download.
 
-What the patches change (0001-retropixels.patch)
--------------------------------------------------
+What the patches change
+-----------------------
+0002-flight-stick.patch: RP_FLIGHTSTICK ("curve=N,dead=N" in percent, or
+"off"; RetroPixels sets it) makes a gamepad's thumbstick aim like a flight
+stick: the two axes of a stick are read together, with a round dead zone,
+the round gate stretched to a square one (so the corners can be reached),
+and a cubic response curve (fine near the centre, full at the edge). Only
+full-range stick axes are shaped.
+
+0001-retropixels.patch:
 - SUPERMODEL_HOME: when this environment variable names a folder, the
   player's own files go there: Config/Supermodel.ini, NVRAM/, Saves/ (save
   states), Log/Supermodel.log and Screenshots/. RetroPixels sets it to

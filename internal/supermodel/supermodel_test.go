@@ -297,3 +297,21 @@ func TestCommand(t *testing.T) {
 		t.Fatalf("args %q", cmd.Args)
 	}
 }
+
+func TestFlightStick(t *testing.T) {
+	if got := FlightStickEnv(true); got != "RP_FLIGHTSTICK=curve=45,dead=8" {
+		t.Errorf("FlightStickEnv(true) = %q", got)
+	}
+	if got := FlightStickEnv(false); got != "RP_FLIGHTSTICK=off" {
+		t.Errorf("FlightStickEnv(false) = %q", got)
+	}
+	on, off := INI(Controls{FlightStick: true}), INI(Controls{})
+	for _, k := range []string{`InputJoy1XDeadZone = "0"`, `InputJoy1YDeadZone = "0"`} {
+		if !strings.Contains(on, k) {
+			t.Errorf("flight stick INI lacks %s", k)
+		}
+		if strings.Contains(off, k) {
+			t.Errorf("plain INI has %s", k)
+		}
+	}
+}

@@ -167,6 +167,11 @@ func useSupermodelROM(p string) error {
 func supermodelFullscreenOn() bool {
 	return cfg.SupermodelFullscreen == nil || *cfg.SupermodelFullscreen
 }
+
+// supermodelFlightOn: the Xbox thumbstick feels like a flight stick (on
+// unless the player turned it off).
+func supermodelFlightOn() bool { return cfg.SupermodelPadStick == nil || !*cfg.SupermodelPadStick }
+
 func supermodelEmbedOn() bool { return cfg.SupermodelDock != nil && *cfg.SupermodelDock }
 
 func supermodelRunning() bool {
@@ -230,9 +235,10 @@ func launchSupermodel() error {
 		return errors.New("couldn't make Supermodel's folder: " + err.Error())
 	}
 	cfgMu.Lock()
-	fs, embed, wide, invert := supermodelFullscreenOn(), supermodelEmbedOn(), cfg.SupermodelWide, cfg.SupermodelInvertY
+	fs, embed, wide, invert, flight := supermodelFullscreenOn(), supermodelEmbedOn(), cfg.SupermodelWide, cfg.SupermodelInvertY, supermodelFlightOn()
 	cfgMu.Unlock()
-	if _, err := supermodel.WriteINI(supermodel.ConfigFile(home, exe), supermodel.Controls{InvertY: invert}); err != nil {
+	flight = flight && patched
+	if _, err := supermodel.WriteINI(supermodel.ConfigFile(home, exe), supermodel.Controls{InvertY: invert, FlightStick: flight}); err != nil {
 		return errors.New("couldn't write Supermodel's settings: " + err.Error())
 	}
 	// Docked, Supermodel draws at the size of the page (RetroPixels' own
@@ -251,6 +257,7 @@ func launchSupermodel() error {
 		}
 	}
 	cmd, out := supermodel.Command(exe, home, supermodel.GameArgs(rom, o)...)
+	cmd.Env = append(cmd.Env, supermodel.FlightStickEnv(flight))
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
 		onStart = embedSupermodel
@@ -326,7 +333,7 @@ func supermodelStatus() map[string]any {
 	rom, c := supermodelROM()
 	cfgMu.Lock()
 	st := map[string]any{"fullscreen": supermodelFullscreenOn(), "embed": supermodelEmbedOn(), "wide": cfg.SupermodelWide,
-		"invertY": cfg.SupermodelInvertY, "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
+		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
 	cfgMu.Unlock()
 	smMu.Lock()
 	st["finding"], st["searched"], st["problem"] = smFinding, smSearched, smProblem
@@ -401,6 +408,9 @@ func registerSupermodelRoutes(mux *http.ServeMux) {
 			set(func() { cfg.SupermodelDock = &on })
 		case "wide":
 			set(func() { cfg.SupermodelWide = on })
+		case "flight-stick":
+			off := !on
+			set(func() { cfg.SupermodelPadStick = &off })
 		case "invert-y":
 			set(func() { cfg.SupermodelInvertY = on })
 		case "record":
