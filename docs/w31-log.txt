@@ -1,0 +1,162 @@
+- W31 log: rewrote all 33 W31 files as original code: the OpenGL backend
+  (`VideoBackends/OGL`: `OGLBoundingBox`, `OGLConfig`, `OGLGfx`, `OGLMain.cpp`,
+  `OGLNativeVertexFormat.cpp`, `OGLPerfQuery`, `OGLPipeline`, `OGLShader`,
+  `OGLStreamBuffer`, `OGLTexture`, `OGLVertexManager`, `ProgramShaderCache`,
+  `SamplerCache`, `VideoBackend.h`) and `Common/GL` (`GLContext`, `GLUtil`,
+  `GLExtensions`, `GLInterface/WGL`). They have 8686 lines now (from 9166).
+  Every file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. The OGL `CMakeLists.txt` is not a W31 file and is
+  unchanged. The public names, signatures, enums and layouts are kept:
+  `OGL::VideoConfig` and its enums in their order, the `GLContext` interface,
+  the `GLExtensions` entry points and every `dol*` pointer, the
+  `StreamBuffer`, `PerfQuery`, `SamplerCache` and `ProgramShaderCache` public
+  methods, the `GLVertexFormat`, `OGLTexture`, `OGLFramebuffer`,
+  `OGLStagingTexture`, `OGLShader` and `OGLPipeline` interfaces. Changed in
+  the headers, with no user outside W31: private members and helpers have
+  new names (`OGLGfx::m_window_framebuffer`, the `SamplerCache` maps, the
+  `ProgramShaderCache` statics, the `GLContext` surface fields), and the
+  `PerfQuery` base now holds the shared query ring (see below).
+  - Design:
+    - `GLExtensions`: the entry-point table is one `ENTRY_POINTS` array built
+      with `RP_GL`/`RP_GL_AS` and named requirement constants; the version
+      feature lists are per-version tables; `Supports` is a plain lookup.
+    - `OGLConfig`: driver identification is a `DriverId` filled by one
+      reader per vendor (`ReadQualcommVersion`, `ReadMaliVersion`,
+      `ReadIntelDetails`, `ReadNvidiaVersion`, `ReadImgTecVersion`);
+      `PopulateConfig` runs `CheckDesktopRequirements`,
+      `ReadExtensionFeatures`, `ApplyESProfile`/`ApplyDesktopProfile`,
+      `DetectAAModes` (one `QuerySampleCounts` for colour and depth),
+      `DetectSubgroupSupport` and `ReportMissingFeatures` in the old order.
+    - `OGLStreamBuffer`: one class per technique (`OrphaningStream`,
+      `FencedMappingStream`, `PersistentStream`, `PinnedStream`,
+      `SubDataStream`, `RespecifyStream`) over shared fence helpers
+      (`FenceChunks`, `WaitChunks`, `WaitForSpace`); `Create` picks them with
+      the same driver and bug rules in the same order.
+    - `OGLGfx`, `OGLPipeline`, `OGLShader`, `OGLTexture`: GL enum mappings
+      are tables (primitives, shader stages, blend factors, logic ops,
+      compare functions, texture formats); state application is split into
+      `SetRasterization`/`SetDepth`/`SetBlending` with the same caching.
+    - `ProgramShaderCache`: the GLSL header is built from a line table and an
+      alias table; program lookup, linking and binary loading are
+      `FindAndReference`, `LinkFromSource` and `LoadFromBinary`; the worker
+      context copies the main context state through `MirrorMainContextState`.
+    - `OGLPerfQuery`: the ring of pending queries lives in the base class,
+      with four hooks implemented by the GL and NV variants.
+    - `WGL`, `GLContext`, `GLUtil`, `SamplerCache`, `OGLBoundingBox`,
+      `OGLMain`: new structure around the same steps (pixel format,
+      context-attribute and pbuffer helpers; one compile helper for both
+      shader stages; byte offset and size helpers for the SSBO).
+  - Kept as before (outputs, quirks):
+    - Every GL and WGL call, in order and with its arguments, and every
+      entry-point lookup (the same 939 table rows, names, suffixes and
+      requirement strings, in order).
+    - The GLSL header and shader texts, bounding-box and perf-query results
+      (the u64 product divided by the EFB area; the GL variant truncates to
+      u32 and divides by the MSAA sample count above 1), EFB peeks and
+      pokes, the stream-buffer technique per driver and bug, the context
+      creation choices, backend info, config keys, driver-bug workarounds
+      and the translatable and log texts.
+    - Quirks: the static PFD stereo flag; the `BufferSubData` stream size;
+      the depth AA-mode query using the colour format;
+      `ARB_get_texture_sub_image` looked up without the `GL_` prefix; LIMA
+      reported as ARM; staging textures unmapped through the pack target in
+      the destructor; `CopyToTexture` ignoring `dst_level`; the link-failure
+      dump writing vertex, geometry, pixel; "Dolphin Version: " in the
+      bad-shader dumps; info logs keeping their reported length; the 18
+      robust `glGetn*` queries left out of the entry-point table.
+  - Deliberate differences:
+    - Values the old code left uninitialised are zero: `InitVersion` when the
+      integer queries fail, the Intel market name, the IMGTEC branch and
+      change numbers when the version string does not fully match, the
+      `GL_SAMPLES` query, the pbuffer pixel format, the WGL client rectangle
+      (on failure the old size is kept), the shader compile and link status
+      (`GL_FALSE` before the query).
+    - Null extension strings are skipped; `isspace` gets an unsigned char.
+    - `GLExtensions::Supports` no longer inserts unknown names into the map.
+    - The stream-buffer fence wait is clamped to the last chunk, and the
+      sample-count reserve is guarded against a negative count.
+    - The non-Windows context branches and the dlsym fallback are gone
+      (Windows-only tree).
+    - `SamplerCache`: the invalid wrap value 3 maps to clamp-to-edge (the
+      old code read past a three-element array).
+    - `PerfQuery`: the base class is abstract; the old base delegated to a
+      member that was never set.
+    - `ProgramShaderCache::WorkerThreadInitMainThread` sets its out
+      parameter to null on failure (the caller already starts from null).
+    - The texture format name lookup is a table search; it runs when a
+      texture is created, not per draw.
+    - Conversions are explicit casts (stream-buffer chunk indices, the
+      back-buffer size, vertex strides).
+  - Checked:
+    - Old vs new, each built from its own W31 files with the untouched
+      non-W31 base files on both sides (VideoCommon renderer abstraction,
+      vertex manager base, framebuffer manager, presenter, driver details,
+      shader compiler, graphics settings), against a recording fake GL: a
+      table of 901 entry points that logs every call with its arguments and
+      hashes of the data it reads (buffer contents, uploads, indices and
+      vertices of draws, shader sources), returns scripted values (object
+      names, statuses, info logs, program binaries, fences, query results,
+      readbacks as a function of the source) and keeps buffer, VAO, texture
+      buffer and SSBO state. Each case draws a random scenario: 17 vendor
+      and driver flavours, GL or GLES, random versions and shading-language
+      versions, a random subset of 144 extensions, random limits and sample
+      counts, random video settings. It then runs `GLExtensions::Init`
+      (with all 171 `Supports` answers and the loaded-pointer map logged),
+      `FillBackendInfo` (backend info, `OGL::VideoConfig` and video config
+      dumped member by member, the driver-bug table before and after the
+      `OGLGfx` constructor), the backend start-up and 80 random actions of
+      40 kinds (textures, uploads, copies, resolves, staging reads and
+      writes, framebuffers, scissor and viewport, textures and samplers,
+      compute images, shaders through the real shader includer, vertex
+      formats, pipelines with cache blobs, GX batches through the vertex
+      manager with uniform uploads, utility draws, texel buffers, region
+      clears, surface changes and present, flush and stereo buffer
+      selection, compute dispatch, perf queries, bounding box, stream
+      buffers of every technique), then teardown. One hash per case,
+      streamed through `diff`; verbose logs only for locating differences.
+      3000 cases: identical, with returned values and GL call logs equal.
+      26 cases crash at the same call on both builds: GLES 3.1 without
+      `GL_OES_texture_storage_multisample_2d_array` sends a multisampled 2D
+      array texture to the desktop-only `glTexImage3DMultisample` (25), and a
+      desktop 3.0 context with `ARB_texture_buffer_object` binds a texel
+      buffer through the 3.1 `glTexBuffer` (1). Both are base behaviour and
+      are unchanged.
+    - The harness found and fixed two differences in the rewrite before the
+      final runs: the 18 `glGetn*` rows commented out in the base table were
+      active, and two unsupported-texture-type checks raised `ASSERT_MSG`
+      with new texts instead of `ASSERT(false)`.
+    - Not compared: assertion locations and quoted expressions (they name
+      the source file and line); two `ASSERT_MSG` and two log calls are now
+      one parameterised call each with the same output text (seen equal in
+      the harness). `WGL.cpp` and `GLContext::Create` need a real Windows
+      context and were not driven; they were reviewed against the old files
+      for the same calls, attributes and fallback order, and compile clean
+      for the Windows target. `MirrorMainContextState` and the
+      worker-thread compile path were not driven (no shared contexts in the
+      fake).
+    - Speed, interleaved runs on the same machine with the fake GL in a
+      no-logging mode: 16 cases, each 1000 rounds of up to 8 pipelines with a
+      GX batch, uniform upload, pipeline switch, 8 samplers and textures,
+      scissor, viewport and an indexed draw. Minimum of 5 runs per case:
+      1287 ms old, 1276 ms new in total; per-case results differ in both
+      directions within the run-to-run noise. No measurable change in draw
+      submission or state changes.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`, against the
+      untouched tree: the 17 W31 .cpp files and their outside users
+      (`VideoBackendBase.cpp`, `SWOGLWindow.cpp`, `SWGfx.cpp`) show no
+      warning from W31 code. Remaining messages are outside W31 and the same
+      on the base tree: `MsgHandler.h` (unused `format`),
+      `WorkQueueThread.h` (shadow), `FrameDumpFFMpeg.h` (unused parameters),
+      the missing `glslang/Public/ShaderLang.h` for `OGLShader.cpp` and
+      `VideoBackendBase.cpp` on Windows, and `windows.h` for `WGL.cpp` on
+      Linux. No `bool` mixed with an integer under `|` or `&`, no unary minus
+      on unsigned values, no `~` widened, no signed/unsigned compares.
+      Fixes made for these checks (casts only): stream-buffer fence index
+      and chunk shift, `SetBackbuffer` arguments, the vertex stride; a local
+      named `near` renamed (a Windows macro); an initializer list of GL enums
+      made a `std::array<GLenum, 3>`. MSVC was not run.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W31 .cpp
+      file. Remaining runs are in headers only (declarations: `OGLGfx.h`,
+      `OGLConfig.h`, `OGLVertexManager.h`, `OGLTexture.h`,
+      `ProgramShaderCache.h`, `WGL.h`, `SamplerCache.h`).
