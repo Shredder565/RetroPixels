@@ -142,7 +142,7 @@ void InterfacePane::BuildInterfaceGroup(QVBoxLayout* page)
   m_theme->SetTitle(tr("Theme"));
   m_theme->SetDescription(tr("Changes the appearance and color of Dolphin's "
                              "buttons.<br><br><dolphin_emphasis>If unsure, select "
-                             "Clean.</dolphin_emphasis>"));
+                             "PixelU.</dolphin_emphasis>"));
 
   m_style = new ToolTipComboBox;
   m_style_label = new QLabel(tr("Style:"));

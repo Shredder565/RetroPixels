@@ -87,7 +87,9 @@
 // Only looked up so that an old copy can be deleted
 #define SHADERCACHE_LEGACY_DIR "ShaderCache"
 
-#define DEFAULT_THEME_DIR "Clean"
+// The bundled icon theme (Sys/Themes/PixelU, drawn by pixelu/wii/art/make_art.py). Any other
+// theme name, and any icon a user theme lacks, falls back to it.
+#define DEFAULT_THEME_DIR "PixelU"
 
 // Config directory files
 #define DOLPHIN_CONFIG "Dolphin.ini"

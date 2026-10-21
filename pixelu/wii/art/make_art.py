@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
-"""Draws PixelU-Wii's own pictures: the program icon, the Sys/Resources images and the
-pictures of the Windows dark style.
+"""Draws PixelU-Wii's own pictures: the program icon, the Sys/Resources images, the icon
+theme in Sys/Themes and the pictures of the Windows dark style.
 
 Everything is drawn here from shapes (no image is read), so the output is ours and can be
 remade at any time:
@@ -15,6 +15,8 @@ Needs Pillow (python3 -m pip install Pillow). Output files:
   pixelu/wii/Source/Core/DolphinQt/PixelU-Wii.ico        program icon (DolphinQt.rc, DolphinTool.rc)
   pixelu/wii/Data/Sys/Resources/*.png                    same names and sizes as the images the
                                                          program loads from Sys/Resources
+  pixelu/wii/Data/Sys/Themes/PixelU/*.png                the toolbar and debugger icons
+                                                         (32 x 32, with @2x and @4x copies)
   pixelu/wii/Source/Core/DolphinQt/Styles/Dark/*.svg     check boxes, arrows and so on used by
                                                          dark.qss
 """
@@ -31,6 +33,9 @@ WII = os.path.dirname(HERE)
 ICO_PATH = os.path.join(WII, "Source", "Core", "DolphinQt", "PixelU-Wii.ico")
 RES_DIR = os.path.join(WII, "Data", "Sys", "Resources")
 DARK_DIR = os.path.join(WII, "Source", "Core", "DolphinQt", "Styles", "Dark")
+# The one bundled icon theme (DEFAULT_THEME_DIR in Source/Core/Common/CommonPaths.h).
+THEME_NAME = "PixelU"
+THEME_DIR = os.path.join(WII, "Data", "Sys", "Themes", THEME_NAME)
 
 
 def rgb(h, a=255):
@@ -564,6 +569,357 @@ def resources():
     return out
 
 
+# ---------------------------------------------------------------- icon theme (32 x 32)
+
+# One mid-tone ink reads on light and dark toolbars alike; a few icons carry an accent.
+T_INK = rgb("5b8def")
+T_DEEP = rgb("2f5fc4")
+T_SOFT = rgb("a9c4f7")
+T_GO = rgb("2fbf71")
+T_HALT = PINK
+T_WARN = rgb("f2a93b")
+T_W = 2.6  # stroke width
+
+
+def t_head(c, tip, direction, col, size=5.2):
+    """An arrowhead with its point at tip, pointing along direction (dx, dy)."""
+    dx, dy = direction
+    n = math.hypot(dx, dy) or 1.0
+    dx, dy = dx / n, dy / n
+    px, py = -dy, dx
+    back = (tip[0] - dx * size, tip[1] - dy * size)
+    c.poly([tip, (back[0] + px * size * 0.62, back[1] + py * size * 0.62),
+            (back[0] - px * size * 0.62, back[1] - py * size * 0.62)], col)
+
+
+def t_arrow(c, pts, col, w=T_W, size=5.2):
+    """A polyline that ends in an arrowhead (the line stops short so the point stays sharp)."""
+    (x0, y0), (x1, y1) = pts[-2], pts[-1]
+    dx, dy = x1 - x0, y1 - y0
+    n = math.hypot(dx, dy) or 1.0
+    stop = (x1 - dx / n * size * 0.8, y1 - dy / n * size * 0.8)
+    c.line(pts[:-1] + [stop], col, w)
+    t_head(c, (x1, y1), (dx, dy), col, size)
+
+
+def t_arc_arrow(c, cx, cy, r, a0, a1, col, w=T_W, size=5.2):
+    """An arc from a0 to a1 (degrees, clockwise from three o'clock) ending in an arrowhead."""
+    k = c.k
+    trim = math.degrees(size * 0.7 / r)
+    end = a1 - trim if a1 > a0 else a1 + trim
+    lo, hi = (a0, end) if a1 > a0 else (end, a0)
+    c.d.arc(((cx - r - w / 2) * k, (cy - r - w / 2) * k, (cx + r + w / 2) * k, (cy + r + w / 2) * k),
+            lo, hi, fill=col, width=max(1, int(round(w * k))))
+    start = math.radians(a0)
+    c.circle(cx + r * math.cos(start), cy + r * math.sin(start), w / 2, fill=col)
+    a = math.radians(a1)
+    tip = (cx + r * math.cos(a), cy + r * math.sin(a))
+    sign = 1.0 if a1 > a0 else -1.0
+    t_head(c, tip, (-math.sin(a) * sign, math.cos(a) * sign), col, size)
+
+
+def t_outline_rect(c, x0, y0, x1, y1, col, r=2.5, w=T_W):
+    c.rect(x0, y0, x1, y1, None, r=r, outline=col, width=w)
+
+
+def t_folder(c, col, open_=False):
+    c.poly([(4, 8), (12, 8), (14.5, 10.5), (27, 10.5), (27, 25), (4, 25)], col)
+    if open_:
+        c.poly([(8, 14), (30, 14), (26, 25), (4, 25)], T_SOFT)
+    else:
+        c.rect(4, 13, 27, 25, T_SOFT, r=1.2)
+
+
+def t_page(c, col=T_INK, fill=None):
+    pts = [(8, 3.5), (19.5, 3.5), (25, 9), (25, 28.5), (8, 28.5)]
+    c.poly(pts, col)
+    c.poly([(10.4, 5.9), (18.6, 5.9), (22.6, 9.9), (22.6, 26.1), (10.4, 26.1)], fill or rgb("ffffff", 0))
+    c.poly([(19, 3.5), (25, 9.5), (19, 9.5)], T_DEEP)
+
+
+def t_floppy(c, col=T_INK):
+    c.poly([(4.5, 4.5), (23.5, 4.5), (27.5, 8.5), (27.5, 27.5), (4.5, 27.5)], col)
+    c.rect(9, 4.5, 21, 12, T_SOFT, r=0.8)
+    c.rect(17, 6, 19.5, 10.5, T_DEEP, r=0.4)
+    c.rect(8, 16, 24, 27.5, rgb("ffffff"), r=1.0)
+    for y in (19.5, 23):
+        c.line([(11, y), (21, y)], T_SOFT, 1.4)
+
+
+def t_dot(c, cx, cy, r, col):
+    c.circle(cx, cy, r, fill=col)
+
+
+def t_plus_badge(c, cx=24.5, cy=24.5):
+    c.circle(cx, cy, 6.2, fill=T_GO)
+    c.line([(cx - 3.2, cy), (cx + 3.2, cy)], rgb("ffffff"), 2.0)
+    c.line([(cx, cy - 3.2), (cx, cy + 3.2)], rgb("ffffff"), 2.0)
+
+
+def t_code_lines(c, x0=6, x1=26, ys=(8, 14, 20, 26)):
+    for i, y in enumerate(ys):
+        c.line([(x0 + (4 if i % 2 else 0), y), (x1 - (6 if i == len(ys) - 1 else 0), y)], T_SOFT, 2.0)
+
+
+def icon_play(c):
+    c.poly([(9, 5), (27, 16), (9, 27)], T_GO)
+
+
+def icon_pause(c):
+    c.rect(7.5, 5, 13.5, 27, T_INK, r=1.8)
+    c.rect(18.5, 5, 24.5, 27, T_INK, r=1.8)
+
+
+def icon_stop(c):
+    c.rect(6, 6, 26, 26, T_HALT, r=3.5)
+
+
+def icon_open(c):
+    t_folder(c, T_INK, open_=True)
+
+
+def icon_browse(c):
+    t_folder(c, T_INK)
+    c.circle(20, 19, 5.4, fill=rgb("ffffff"), outline=T_DEEP, width=2.4)
+    c.line([(23.8, 22.8), (28.5, 27.5)], T_DEEP, 3.0)
+
+
+def icon_refresh(c):
+    t_arc_arrow(c, 16, 16, 10, 200, 520 - 40, T_INK, w=3.0, size=6.5)
+
+
+def icon_fullscreen(c):
+    w = 3.0
+    for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+        x = 16 - sx * 11
+        y = 16 - sy * 11
+        c.line([(x, y + sy * 7), (x, y), (x + sx * 7, y)], T_INK, w)
+    c.rect(11, 11, 21, 21, T_SOFT, r=1.5)
+
+
+def icon_screenshot(c):
+    c.rect(3.5, 9, 28.5, 26.5, T_INK, r=3)
+    c.rect(11, 5.5, 21, 10, T_INK, r=1.2)
+    c.circle(16, 17.5, 6.2, fill=rgb("ffffff"))
+    c.circle(16, 17.5, 4.0, fill=T_DEEP)
+    c.circle(24.5, 12.5, 1.3, fill=T_SOFT)
+
+
+def icon_config(c):
+    cx, cy = 16, 16
+    teeth = 8
+    pts = []
+    for i in range(teeth * 4):
+        a = math.radians(i * 360.0 / (teeth * 4) + 360.0 / (teeth * 8))
+        r = 13.0 if (i % 4) in (0, 1) else 10.0
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    c.poly(pts, T_INK)
+    c.circle(cx, cy, 4.2, fill=(0, 0, 0, 0))
+
+
+def icon_graphics(c):
+    c.rect(3, 5, 29, 23, T_INK, r=2.5)
+    c.rect(5.5, 7.5, 26.5, 20.5, T_SOFT, r=1.0)
+    c.poly([(7, 19), (13, 12), (17, 16.5), (20, 13.5), (25, 19)], T_DEEP)
+    c.circle(21.5, 10.5, 1.8, fill=rgb("ffffff"))
+    c.rect(13, 23, 19, 26, T_INK)
+    c.rect(9, 26, 23, 28.5, T_INK, r=1.0)
+
+
+def icon_classic(c):
+    # A two-handled pad: d-pad on the left, four buttons on the right.
+    c.rect(2.5, 9, 29.5, 24, T_INK, r=7.5)
+    c.rect(7, 14.8, 13, 18.2, rgb("ffffff"), r=0.6)
+    c.rect(8.3, 13.5, 11.7, 19.5, rgb("ffffff"), r=0.6)
+    for (x, y) in ((22, 13.6), (25, 16.5), (19, 16.5), (22, 19.4)):
+        c.circle(x, y, 1.6, fill=T_SOFT)
+    c.rect(14.5, 12, 17.5, 13.6, T_SOFT, r=0.6)
+
+
+def icon_gcpad(c):
+    # A rounder pad with a big main button and a stick.
+    c.poly([(5, 10), (27, 10), (30, 22), (26, 28), (21, 24), (11, 24), (6, 28), (2, 22)], T_INK)
+    c.circle(9.5, 15.5, 3.4, fill=T_SOFT)
+    c.circle(9.5, 15.5, 1.6, fill=T_DEEP)
+    c.circle(22.5, 16, 3.0, fill=T_GO)
+    c.circle(26.5, 13, 1.4, fill=rgb("ffffff"))
+    c.circle(18.6, 13, 1.4, fill=rgb("ffffff"))
+    c.circle(19.5, 20.5, 2.0, fill=T_WARN)
+
+
+def icon_wiimote(c):
+    c.rect(11, 2.5, 21, 29.5, T_INK, r=4.5)
+    c.rect(14.6, 5.8, 17.4, 11.8, rgb("ffffff"), r=0.4)
+    c.rect(13, 7.4, 19, 10.2, rgb("ffffff"), r=0.4)
+    c.circle(16, 15.8, 2.1, fill=T_SOFT)
+    for y in (21, 24.5):
+        c.circle(16, y, 1.1, fill=rgb("ffffff"))
+
+
+def icon_assembler_new(c):
+    t_page(c)
+    t_plus_badge(c)
+
+
+def icon_assembler_openasm(c):
+    t_folder(c, T_INK, open_=True)
+    c.line([(15, 15.5), (12, 19), (15, 22.5)], T_DEEP, 2.2)
+    c.line([(21, 15.5), (24, 19), (21, 22.5)], T_DEEP, 2.2)
+
+
+def icon_assembler_save(c):
+    t_floppy(c)
+
+
+def icon_assembler_assemble(c):
+    # A spanner (build the code). Drawing with a clear colour cuts the jaw out of the head.
+    clear = (0, 0, 0, 0)
+    c.line([(10, 10), (26.5, 26.5)], T_INK, 5.0)
+    c.circle(10, 10, 7.5, fill=T_INK)
+    c.poly([(2, 7), (7, 2), (12.5, 7.5), (7.5, 12.5)], clear)
+    c.circle(26.5, 26.5, 1.4, fill=T_DEEP)
+
+
+def icon_assembler_inject(c):
+    # Code going into the chip.
+    c.rect(7, 16, 25, 28, T_INK, r=2)
+    for x in (10, 14, 18, 22):
+        c.line([(x, 28), (x, 30.5)], T_INK, 1.6)
+    c.rect(11, 19, 21, 25, T_SOFT, r=1)
+    t_arrow(c, [(16, 2.5), (16, 14.5)], T_GO, w=3.0, size=6.0)
+
+
+def icon_assembler_clipboard(c):
+    c.rect(6, 5, 26, 29.5, T_INK, r=2.5)
+    c.rect(8.8, 8.5, 23.2, 26.8, rgb("ffffff"), r=1)
+    c.rect(11, 2.5, 21, 7.5, T_DEEP, r=1.5)
+    for y in (13, 17.5, 22):
+        c.line([(11.5, y), (20.5, y)], T_SOFT, 1.8)
+
+
+def icon_debugger_breakpoint(c):
+    t_dot(c, 16, 16, 10.5, T_HALT)
+    c.circle(12.5, 12.5, 2.6, fill=mix(T_HALT, WHITE, 0.6))
+
+
+def icon_debugger_add_breakpoint(c):
+    t_dot(c, 13.5, 13.5, 9.5, T_HALT)
+    t_plus_badge(c)
+
+
+def icon_debugger_add_memorycheck(c):
+    c.rect(4, 6, 22, 21, T_INK, r=2)
+    for x in (7.5, 11.5, 15.5, 19):
+        c.line([(x, 21), (x, 24)], T_INK, 1.5)
+        c.line([(x, 6), (x, 3)], T_INK, 1.5)
+    c.rect(7.5, 9.5, 18.5, 17.5, T_SOFT, r=1)
+    t_plus_badge(c)
+
+
+def icon_debugger_clear(c):
+    # An eraser on a stroke.
+    c.poly([(5, 20), (17, 7), (27, 16), (17.5, 26), (10, 26)], T_INK)
+    c.poly([(5, 20), (10.5, 14), (19, 22), (15, 26), (10, 26)], T_SOFT)
+    c.line([(4, 29), (28, 29)], T_DEEP, 2.0)
+
+
+def icon_debugger_delete(c):
+    c.rect(5, 6.5, 27, 9.5, T_INK, r=1.2)
+    c.rect(12.5, 3.5, 19.5, 7, T_INK, r=1.2)
+    c.poly([(7.5, 10.5), (24.5, 10.5), (23, 29), (9, 29)], T_INK)
+    for x in (12.5, 16, 19.5):
+        c.line([(x, 14), (x, 25.5)], T_SOFT, 1.8)
+
+
+def icon_debugger_load(c):
+    # Into the tray.
+    c.line([(5, 19), (5, 27), (27, 27), (27, 19)], T_INK, 3.0)
+    t_arrow(c, [(16, 3.5), (16, 22)], T_DEEP, w=3.2, size=7.0)
+
+
+def icon_debugger_save(c):
+    t_floppy(c)
+    c.circle(25, 25, 5.5, fill=T_GO)
+    t_arrow(c, [(25, 28), (25, 21.5)], rgb("ffffff"), w=1.8, size=3.6)
+
+
+def icon_debugger_set_pc(c):
+    t_code_lines(c, 13, 28)
+    t_arrow(c, [(3, 14), (11.5, 14)], T_WARN, w=3.0, size=6.0)
+
+
+def icon_debugger_show_pc(c):
+    c.circle(16, 16, 10.5, outline=T_INK, width=2.6)
+    for (a, b) in (((16, 1.5), (16, 8)), ((16, 24), (16, 30.5)), ((1.5, 16), (8, 16)), ((24, 16), (30.5, 16))):
+        c.line([a, b], T_INK, 2.6)
+    c.circle(16, 16, 3.4, fill=T_WARN)
+
+
+def icon_debugger_skip(c):
+    t_code_lines(c, 8, 26, ys=(14, 20, 26))
+    t_arc_arrow(c, 16, 15, 8.5, 200, 340, T_WARN, w=2.8, size=5.6)
+
+
+def icon_debugger_step_in(c):
+    t_arrow(c, [(16, 2.5), (16, 21)], T_INK, w=3.0, size=6.5)
+    t_dot(c, 16, 26.5, 3.4, T_WARN)
+
+
+def icon_debugger_step_out(c):
+    t_dot(c, 16, 26.5, 3.4, T_WARN)
+    t_arrow(c, [(16, 21), (16, 2.5)], T_INK, w=3.0, size=6.5)
+
+
+def icon_debugger_step_over(c):
+    t_arc_arrow(c, 16, 18, 10, 190, 350, T_INK, w=3.0, size=6.2)
+    t_dot(c, 16, 26, 3.4, T_WARN)
+
+
+THEME_ICONS = {
+    "assembler_assemble": icon_assembler_assemble,
+    "assembler_clipboard": icon_assembler_clipboard,
+    "assembler_inject": icon_assembler_inject,
+    "assembler_new": icon_assembler_new,
+    "assembler_openasm": icon_assembler_openasm,
+    "assembler_save": icon_assembler_save,
+    "browse": icon_browse,
+    "classic": icon_classic,
+    "config": icon_config,
+    "debugger_add_breakpoint": icon_debugger_add_breakpoint,
+    "debugger_add_memorycheck": icon_debugger_add_memorycheck,
+    "debugger_breakpoint": icon_debugger_breakpoint,
+    "debugger_clear": icon_debugger_clear,
+    "debugger_delete": icon_debugger_delete,
+    "debugger_load": icon_debugger_load,
+    "debugger_save": icon_debugger_save,
+    "debugger_set_pc": icon_debugger_set_pc,
+    "debugger_show_pc": icon_debugger_show_pc,
+    "debugger_skip": icon_debugger_skip,
+    "debugger_step_in": icon_debugger_step_in,
+    "debugger_step_out": icon_debugger_step_out,
+    "debugger_step_over": icon_debugger_step_over,
+    "fullscreen": icon_fullscreen,
+    "gcpad": icon_gcpad,
+    "graphics": icon_graphics,
+    "open": icon_open,
+    "pause": icon_pause,
+    "play": icon_play,
+    "refresh": icon_refresh,
+    "screenshot": icon_screenshot,
+    "stop": icon_stop,
+    "wiimote": icon_wiimote,
+}
+
+
+def theme_icons():
+    """{file name: image} for the icon theme: every name at 32, 64 and 128 pixels."""
+    out = {}
+    for name, fn in sorted(THEME_ICONS.items()):
+        for s, im in scaled_set(fn, 32, 32).items():
+            out[name + (".png" if s == 1 else "@%dx.png" % s)] = im
+    return out
+
+
 # ---------------------------------------------------------------- dark style pictures
 
 # Colours shared with dark.qss.
@@ -672,6 +1028,8 @@ def all_outputs():
     files = {ICO_PATH: make_ico()}
     for name, im in resources().items():
         files[os.path.join(RES_DIR, name)] = png_bytes(im)
+    for name, im in theme_icons().items():
+        files[os.path.join(THEME_DIR, name)] = png_bytes(im)
     for name, text in dark_svgs().items():
         files[os.path.join(DARK_DIR, name)] = text.encode("utf-8")
     return files

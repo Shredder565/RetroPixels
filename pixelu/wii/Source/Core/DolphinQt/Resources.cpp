@@ -9,6 +9,7 @@
 #include <QImageReader>
 #include <QPixmap>
 
+#include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 
@@ -50,6 +51,25 @@ QString CurrentThemeFolder()
 {
   return QString::fromStdString(File::GetThemeDir(Config::Get(Config::MAIN_THEME_NAME)));
 }
+
+QString BundledThemeFolder()
+{
+  return QString::fromStdString(File::GetSysDirectory() + THEMES_DIR "/" DEFAULT_THEME_DIR "/");
+}
+
+// Whether `dir` has any file LoadNamedIcon could use for `name`.
+bool HasIconFile(std::string_view name, const QString& dir)
+{
+  const QString stem = dir + QLatin1Char{'/'} + QString::fromLatin1(name);
+  if (QFileInfo::exists(stem + QStringLiteral(".svg")))
+    return true;
+  for (const int scale : PNG_SCALES)
+  {
+    if (QFileInfo::exists(PngPath(stem, scale)))
+      return true;
+  }
+  return false;
+}
 }  // namespace
 
 QIcon Resources::LoadNamedIcon(std::string_view name, const QString& dir)
@@ -86,7 +106,12 @@ QIcon Resources::GetResourceIcon(std::string_view name)
 
 QIcon Resources::GetThemeIcon(std::string_view name)
 {
-  return LoadNamedIcon(name, CurrentThemeFolder());
+  // A user theme (or an old one such as "Clean") may not have every icon: the missing ones come
+  // from the bundled theme.
+  const QString folder = CurrentThemeFolder();
+  if (HasIconFile(name, folder))
+    return LoadNamedIcon(name, folder);
+  return LoadNamedIcon(name, BundledThemeFolder());
 }
 
 void Resources::Init()
