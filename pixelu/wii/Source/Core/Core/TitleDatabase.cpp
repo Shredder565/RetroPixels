@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/TitleDatabase.h"
 
@@ -8,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -19,120 +19,132 @@
 
 namespace Core
 {
-static const std::string EMPTY_STRING;
-
-using Map = std::unordered_map<std::string, std::string>;
-
-static Map LoadMap(const std::string& file_path)
+namespace
 {
-  Map map;
+const std::string NO_NAME;
 
-  std::ifstream txt;
-  File::OpenFStream(txt, file_path, std::ios::in);
+// GameTDB IDs are at least four characters (channels) and usually six (discs).
+constexpr std::size_t SHORTEST_ID = 4;
 
-  std::string line;
-  while (std::getline(txt, line))
+std::unordered_map<std::string, std::string> ReadNameFile(const std::string& path)
+{
+  std::unordered_map<std::string, std::string> names;
+
+  std::ifstream stream;
+  File::OpenFStream(stream, path, std::ios::in);
+
+  for (std::string line; std::getline(stream, line);)
   {
-    if (line.empty())
+    const std::size_t separator = line.find('=');
+    if (separator == std::string::npos)
       continue;
 
-    const size_t equals_index = line.find('=');
-    if (equals_index != std::string::npos)
-    {
-      const std::string_view line_view(line);
-      const std::string_view game_id = StripWhitespace(line_view.substr(0, equals_index));
-      if (game_id.length() >= 4)
-        map.emplace(game_id, StripWhitespace(line_view.substr(equals_index + 1)));
-    }
+    const std::string_view text{line};
+    const std::string_view id = StripWhitespace(text.substr(0, separator));
+    if (id.size() < SHORTEST_ID)
+      continue;
+
+    // emplace keeps the first entry when an ID is listed twice.
+    names.emplace(id, StripWhitespace(text.substr(separator + 1)));
   }
-  return map;
+  return names;
 }
 
-void TitleDatabase::AddLazyMap(DiscIO::Language language, const std::string& language_code)
+// Finds `id` in `names`, returning nullptr when it is absent.
+const std::string* Find(const std::unordered_map<std::string, std::string>& names,
+                        const std::string& id)
 {
-  m_title_maps[language] = [language_code]() -> Map {
-    return LoadMap(File::GetSysDirectory() + "wiitdb-" + language_code + ".txt");
-  };
-  m_triforce_title_maps[language] = [language_code]() -> Map {
-    return LoadMap(File::GetSysDirectory() + "triforcetdb-" + language_code + ".txt");
-  };
+  const auto it = names.find(id);
+  return it == names.end() ? nullptr : &it->second;
 }
+}  // namespace
 
 TitleDatabase::TitleDatabase()
 {
-  // User database
-  const std::string& load_directory = File::GetUserPath(D_LOAD_IDX);
-  m_user_title_map = LoadMap(load_directory + "wiitdb.txt");
-  if (m_user_title_map.empty())
-    m_user_title_map = LoadMap(load_directory + "titles.txt");
+  const std::string& load_dir = File::GetUserPath(D_LOAD_IDX);
+  m_user_names = ReadNameFile(load_dir + "wiitdb.txt");
+  if (m_user_names.empty())
+    m_user_names = ReadNameFile(load_dir + "titles.txt");
 
-  // Pre-defined databases (one per language)
-  AddLazyMap(DiscIO::Language::Japanese, "ja");
-  AddLazyMap(DiscIO::Language::English, "en");
-  AddLazyMap(DiscIO::Language::German, "de");
-  AddLazyMap(DiscIO::Language::French, "fr");
-  AddLazyMap(DiscIO::Language::Spanish, "es");
-  AddLazyMap(DiscIO::Language::Italian, "it");
-  AddLazyMap(DiscIO::Language::Dutch, "nl");
-  AddLazyMap(DiscIO::Language::SimplifiedChinese, "zh_CN");
-  AddLazyMap(DiscIO::Language::TraditionalChinese, "zh_TW");
-  AddLazyMap(DiscIO::Language::Korean, "ko");
-  m_title_maps[DiscIO::Language::Unknown] = [] { return Map(); };
+  RegisterLanguage(DiscIO::Language::Japanese, "ja");
+  RegisterLanguage(DiscIO::Language::English, "en");
+  RegisterLanguage(DiscIO::Language::German, "de");
+  RegisterLanguage(DiscIO::Language::French, "fr");
+  RegisterLanguage(DiscIO::Language::Spanish, "es");
+  RegisterLanguage(DiscIO::Language::Italian, "it");
+  RegisterLanguage(DiscIO::Language::Dutch, "nl");
+  RegisterLanguage(DiscIO::Language::SimplifiedChinese, "zh_CN");
+  RegisterLanguage(DiscIO::Language::TraditionalChinese, "zh_TW");
+  RegisterLanguage(DiscIO::Language::Korean, "ko");
+  // An unknown language has no bundled names of its own (it still falls back to English).
+  m_bundled[DiscIO::Language::Unknown].wii = [] { return NameMap(); };
 
-  // Titles that aren't part of the Wii TDB, but common enough to justify having entries for them.
-
+  // Software that GameTDB does not list but users will often see.
   // i18n: "Wii Menu" (or System Menu) refers to the Wii's main menu,
   // which is (usually) the first thing users see when a Wii console starts.
-  m_base_map.emplace("0000000100000002", Common::GetStringT("Wii Menu"));
-  for (const auto& id : {"HAXX", "00010001af1bf516"})
-    m_base_map.emplace(id, "The Homebrew Channel");
+  m_fallback_names.emplace("0000000100000002", Common::GetStringT("Wii Menu"));
+  m_fallback_names.emplace("HAXX", "The Homebrew Channel");
+  m_fallback_names.emplace("00010001af1bf516", "The Homebrew Channel");
 }
 
 TitleDatabase::~TitleDatabase() = default;
 
+void TitleDatabase::RegisterLanguage(DiscIO::Language language, const std::string& suffix)
+{
+  LanguageTables& tables = m_bundled[language];
+  tables.wii = [suffix] {
+    return ReadNameFile(File::GetSysDirectory() + "wiitdb-" + suffix + ".txt");
+  };
+  tables.triforce = [suffix] {
+    return ReadNameFile(File::GetSysDirectory() + "triforcetdb-" + suffix + ".txt");
+  };
+}
+
+const TitleDatabase::NameMap& TitleDatabase::BundledNames(DiscIO::Language language) const
+{
+  // at() throws for a language that was never registered, as callers expect.
+  return *m_bundled.at(language).wii;
+}
+
 const std::string& TitleDatabase::GetTitleName(const std::string& gametdb_id,
                                                DiscIO::Language language) const
 {
-  auto it = m_user_title_map.find(gametdb_id);
-  if (it != m_user_title_map.end())
-    return it->second;
+  if (const std::string* user_name = Find(m_user_names, gametdb_id))
+    return *user_name;
 
   if (!Config::Get(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE))
-    return EMPTY_STRING;
+    return NO_NAME;
 
-  const Map& map = *m_title_maps.at(language);
-  it = map.find(gametdb_id);
-  if (it != map.end())
-    return it->second;
+  if (const std::string* name = Find(BundledNames(language), gametdb_id))
+    return *name;
 
   if (language != DiscIO::Language::English)
   {
-    const Map& english_map = *m_title_maps.at(DiscIO::Language::English);
-    it = english_map.find(gametdb_id);
-    if (it != english_map.end())
-      return it->second;
+    if (const std::string* english_name =
+            Find(BundledNames(DiscIO::Language::English), gametdb_id))
+    {
+      return *english_name;
+    }
   }
 
-  it = m_base_map.find(gametdb_id);
-  if (it != m_base_map.end())
-    return it->second;
+  if (const std::string* fallback = Find(m_fallback_names, gametdb_id))
+    return *fallback;
 
-  return EMPTY_STRING;
+  return NO_NAME;
 }
 
 const std::string& TitleDatabase::GetChannelName(u64 title_id, DiscIO::Language language) const
 {
-  const std::string id{
-      {static_cast<char>((title_id >> 24) & 0xff), static_cast<char>((title_id >> 16) & 0xff),
-       static_cast<char>((title_id >> 8) & 0xff), static_cast<char>(title_id & 0xff)}};
-  return GetTitleName(id, language);
+  // The low word of a channel's title ID is its four-character code.
+  std::string code(4, '\0');
+  for (std::size_t i = 0; i < code.size(); ++i)
+    code[i] = static_cast<char>((title_id >> (24 - 8 * i)) & 0xff);
+  return GetTitleName(code, language);
 }
 
 std::string TitleDatabase::Describe(const std::string& gametdb_id, DiscIO::Language language) const
 {
-  const std::string& title_name = GetTitleName(gametdb_id, language);
-  if (title_name.empty())
-    return gametdb_id;
-  return fmt::format("{} ({})", title_name, gametdb_id);
+  const std::string& name = GetTitleName(gametdb_id, language);
+  return name.empty() ? gametdb_id : fmt::format("{} ({})", name, gametdb_id);
 }
 }  // namespace Core

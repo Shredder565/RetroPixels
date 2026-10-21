@@ -1,10 +1,11 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/MemTools.h"
 
+#include <cstdint>
 #include <cstdlib>
 
+#include "Common/Assert.h"
 #include "Common/CommonFuncs.h"
 #include "Common/MsgHandler.h"
 
@@ -12,243 +13,72 @@
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/System.h"
 
-#if defined(__FreeBSD__) || defined(__NetBSD__)
-#include <signal.h>
-#endif
-#ifndef _WIN32
-#include <unistd.h>  // Needed for _POSIX_VERSION
-#endif
-
-#ifdef _WIN32
-#include "Common/Assert.h"
-#endif
-#if defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
-#include "Common/Thread.h"
-#endif
-
-#if defined(__APPLE__)
-#ifdef _M_X86_64
-#define THREAD_STATE64_COUNT x86_THREAD_STATE64_COUNT
-#define THREAD_STATE64 x86_THREAD_STATE64
-#define thread_state64_t x86_thread_state64_t
-#elif defined(_M_ARM_64)
-#define THREAD_STATE64_COUNT ARM_THREAD_STATE64_COUNT
-#define THREAD_STATE64 ARM_THREAD_STATE64
-#define thread_state64_t arm_thread_state64_t
-#else
-#error Unsupported architecture
-#endif
+#if !defined(_WIN32)
+#include <unistd.h>
 #endif
 
 namespace EMM
 {
-#ifdef _WIN32
-
-static PVOID s_veh_handle;
-
-static LONG NTAPI Handler(PEXCEPTION_POINTERS pPtrs)
+namespace
 {
-  switch (pPtrs->ExceptionRecord->ExceptionCode)
-  {
-  case EXCEPTION_ACCESS_VIOLATION:
-  {
-    ULONG_PTR access_type = pPtrs->ExceptionRecord->ExceptionInformation[0];
-    if (access_type == 8)  // Rule out DEP
-    {
-      return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // virtual address of the inaccessible data
-    uintptr_t fault_address = (uintptr_t)pPtrs->ExceptionRecord->ExceptionInformation[1];
-    SContext* ctx = pPtrs->ContextRecord;
-
-    if (Core::System::GetInstance().GetJitInterface().HandleFault(fault_address, ctx))
-    {
-      return EXCEPTION_CONTINUE_EXECUTION;
-    }
-    else
-    {
-      // Let's not prevent debugging.
-      return EXCEPTION_CONTINUE_SEARCH;
-    }
-  }
-
-  case EXCEPTION_STACK_OVERFLOW:
-    if (Core::System::GetInstance().GetJitInterface().HandleStackFault())
-      return EXCEPTION_CONTINUE_EXECUTION;
-    else
-      return EXCEPTION_CONTINUE_SEARCH;
-
-  case EXCEPTION_ILLEGAL_INSTRUCTION:
-    // No SSE support? Or simply bad codegen?
-    return EXCEPTION_CONTINUE_SEARCH;
-
-  case EXCEPTION_PRIV_INSTRUCTION:
-    // okay, dynarec codegen is obviously broken.
-    return EXCEPTION_CONTINUE_SEARCH;
-
-  case EXCEPTION_IN_PAGE_ERROR:
-    // okay, something went seriously wrong, out of memory?
-    return EXCEPTION_CONTINUE_SEARCH;
-
-  case EXCEPTION_BREAKPOINT:
-    // might want to do something fun with this one day?
-    return EXCEPTION_CONTINUE_SEARCH;
-
-  default:
-    return EXCEPTION_CONTINUE_SEARCH;
-  }
+JitInterface& Jit()
+{
+  return Core::System::GetInstance().GetJitInterface();
 }
+}  // namespace
+
+#if defined(_WIN32)
+
+// Windows: a vectored exception handler, called before any frame-based (SEH)
+// handler. Anything the JIT does not claim is passed on unchanged so that
+// debuggers and crash reporting still see it.
+namespace
+{
+PVOID s_handler_cookie = nullptr;
+
+// ExceptionInformation[0] of an access violation: 0 read, 1 write, 8 DEP
+// (execute) violation.
+constexpr ULONG_PTR ACCESS_KIND_EXECUTE = 8;
+
+LONG NTAPI VectoredHandler(PEXCEPTION_POINTERS info)
+{
+  const EXCEPTION_RECORD& record = *info->ExceptionRecord;
+
+  if (record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+  {
+    // Jumps into non-executable memory are never fastmem accesses.
+    if (record.ExceptionInformation[0] == ACCESS_KIND_EXECUTE)
+      return EXCEPTION_CONTINUE_SEARCH;
+
+    const auto faulting_address = static_cast<uintptr_t>(record.ExceptionInformation[1]);
+    return Jit().HandleFault(faulting_address, info->ContextRecord) ?
+               EXCEPTION_CONTINUE_EXECUTION :
+               EXCEPTION_CONTINUE_SEARCH;
+  }
+
+  if (record.ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    return Jit().HandleStackFault() ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+
+  // Illegal or privileged instructions, in-page errors, breakpoints and the rest
+  // are not ours.
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+}  // namespace
 
 void InstallExceptionHandler()
 {
-  ASSERT(!s_veh_handle);
-  s_veh_handle = AddVectoredExceptionHandler(TRUE, Handler);
-  ASSERT(s_veh_handle);
+  ASSERT(!s_handler_cookie);
+  // First = TRUE: run ahead of handlers that are already registered.
+  s_handler_cookie = AddVectoredExceptionHandler(TRUE, VectoredHandler);
+  ASSERT(s_handler_cookie);
 }
 
 void UninstallExceptionHandler()
 {
-  ULONG status = RemoveVectoredExceptionHandler(s_veh_handle);
-  ASSERT(status);
-  if (status)
-    s_veh_handle = nullptr;
-}
-
-bool IsExceptionHandlerSupported()
-{
-  return true;
-}
-
-#elif defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
-
-static void CheckKR(const char* name, kern_return_t kr)
-{
-  if (kr)
-  {
-    PanicAlertFmt("{} failed: kr={:x}", name, kr);
-  }
-}
-
-static void ExceptionThread(mach_port_t port)
-{
-  Common::SetCurrentThreadName("Mach exception thread");
-#pragma pack(4)
-  struct alignas(8)
-  {
-    mach_msg_header_t Head;
-    NDR_record_t NDR;
-    exception_type_t exception;
-    mach_msg_type_number_t codeCnt;
-    int64_t code[2];
-    int flavor;
-    mach_msg_type_number_t old_stateCnt;
-    natural_t old_state[THREAD_STATE64_COUNT];
-    mach_msg_trailer_t trailer;
-  } msg_in;
-
-  struct alignas(8)
-  {
-    mach_msg_header_t Head;
-    NDR_record_t NDR;
-    kern_return_t RetCode;
-    int flavor;
-    mach_msg_type_number_t new_stateCnt;
-    natural_t new_state[THREAD_STATE64_COUNT];
-  } msg_out;
-#pragma pack()
-  memset(&msg_in, 0xee, sizeof(msg_in));
-  memset(&msg_out, 0xee, sizeof(msg_out));
-  mach_msg_size_t send_size = 0;
-  mach_msg_option_t option = MACH_RCV_MSG;
-  while (true)
-  {
-    // If this isn't the first run, send the reply message.  Then, receive
-    // a message: either a mach_exception_raise_state RPC due to
-    // thread_set_exception_ports, or MACH_NOTIFY_NO_SENDERS due to
-    // mach_port_request_notification.
-    CheckKR("mach_msg_overwrite",
-            mach_msg_overwrite(&msg_out.Head, option, send_size, sizeof(msg_in), port,
-                               MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL, &msg_in.Head, 0));
-
-    if (msg_in.Head.msgh_id == MACH_NOTIFY_NO_SENDERS)
-    {
-      // the other thread exited
-      mach_port_destroy(mach_task_self(), port);
-      return;
-    }
-
-    if (msg_in.Head.msgh_id != 2406)
-    {
-      PanicAlertFmt("unknown message received");
-      return;
-    }
-
-    if (msg_in.flavor != THREAD_STATE64)
-    {
-      PanicAlertFmt("unknown flavor {} (expected {})", msg_in.flavor, THREAD_STATE64);
-      return;
-    }
-
-    thread_state64_t* state = (thread_state64_t*)msg_in.old_state;
-
-    bool ok =
-        Core::System::GetInstance().GetJitInterface().HandleFault((uintptr_t)msg_in.code[1], state);
-
-    // Set up the reply.
-    msg_out.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(msg_in.Head.msgh_bits), 0);
-    msg_out.Head.msgh_remote_port = msg_in.Head.msgh_remote_port;
-    msg_out.Head.msgh_local_port = MACH_PORT_NULL;
-    msg_out.Head.msgh_id = msg_in.Head.msgh_id + 100;
-    msg_out.NDR = msg_in.NDR;
-    if (ok)
-    {
-      msg_out.RetCode = KERN_SUCCESS;
-      msg_out.flavor = THREAD_STATE64;
-      msg_out.new_stateCnt = THREAD_STATE64_COUNT;
-      memcpy(msg_out.new_state, msg_in.old_state, THREAD_STATE64_COUNT * sizeof(natural_t));
-    }
-    else
-    {
-      // Pass the exception to the next handler (debugger or crash).
-      msg_out.RetCode = KERN_FAILURE;
-      msg_out.flavor = 0;
-      msg_out.new_stateCnt = 0;
-    }
-    msg_out.Head.msgh_size =
-        offsetof(__typeof__(msg_out), new_state) + msg_out.new_stateCnt * sizeof(natural_t);
-
-    send_size = msg_out.Head.msgh_size;
-    option |= MACH_SEND_MSG;
-  }
-}
-
-void InstallExceptionHandler()
-{
-  mach_port_t port;
-  CheckKR("mach_port_allocate",
-          mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port));
-  std::thread exc_thread(ExceptionThread, port);
-  exc_thread.detach();
-  // Obtain a send right for thread_set_exception_ports to copy...
-  CheckKR("mach_port_insert_right",
-          mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND));
-  // Mach tries the following exception ports in order: thread, task, host.
-  // Debuggers set the task port, so we grab the thread port.
-  CheckKR("thread_set_exception_ports",
-          thread_set_exception_ports(mach_thread_self(), EXC_MASK_BAD_ACCESS, port,
-                                     EXCEPTION_STATE | MACH_EXCEPTION_CODES, THREAD_STATE64));
-  // ...and get rid of our copy so that MACH_NOTIFY_NO_SENDERS works.
-  CheckKR("mach_port_mod_refs",
-          mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, -1));
-  mach_port_t previous;
-  CheckKR("mach_port_request_notification",
-          mach_port_request_notification(mach_task_self(), port, MACH_NOTIFY_NO_SENDERS, 0, port,
-                                         MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous));
-}
-
-void UninstallExceptionHandler()
-{
+  const ULONG removed = RemoveVectoredExceptionHandler(s_handler_cookie);
+  ASSERT(removed);
+  if (removed != 0)
+    s_handler_cookie = nullptr;
 }
 
 bool IsExceptionHandlerSupported()
@@ -258,89 +88,59 @@ bool IsExceptionHandlerSupported()
 
 #elif defined(_POSIX_VERSION) && !defined(_M_GENERIC)
 
-static struct sigaction old_sa_segv;
-#if defined(__APPLE__)
-static struct sigaction old_sa_bus;
-#endif
-
-static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+// POSIX: a SIGSEGV handler running on its own signal stack (so stack
+// overflows can still be reported). Faults the JIT does not claim go to
+// whatever handler was installed before ours.
+namespace
 {
-  if (sig != SIGSEGV
-#if defined(__APPLE__)
-      && sig != SIGBUS
-#endif
-  )
-  {
-    // We are not interested in other signals - handle it as usual.
-    return;
-  }
-  auto* const context = static_cast<ucontext_t*>(raw_context);
-  const int sicode = info->si_code;
-  if (sicode != SEGV_MAPERR && sicode != SEGV_ACCERR)
-  {
-    // Huh? Return.
-    return;
-  }
-  const auto bad_address = reinterpret_cast<uintptr_t>(info->si_addr);
+struct sigaction s_previous_segv_action;
 
-// Get all the information we can out of the context.
-#ifdef __OpenBSD__
-  SContext* const ctx = context;
-#elif defined(__APPLE__)
-  // `uc_mcontext` is already a pointer here.
-  SContext* const ctx = context->uc_mcontext;
-#else
-  SContext* const ctx = &context->uc_mcontext;
-#endif
-  if (Core::System::GetInstance().GetJitInterface().HandleFault(bad_address, ctx))
+void SegvHandler(int signal_number, siginfo_t* info, void* raw_context)
+{
+  if (signal_number != SIGSEGV)
     return;
 
-  // If JIT didn't handle the signal, restore the original handler and invoke it.
-  const auto& old_sa =
-#if defined(__APPLE__)
-      (sig == SIGBUS) ? old_sa_bus :
-#endif
-                        old_sa_segv;
+  const int reason = info->si_code;
+  if (reason != SEGV_MAPERR && reason != SEGV_ACCERR)
+    return;
 
-  sigaction(sig, &old_sa, nullptr);
-  raise(sig);
+  auto* const user_context = static_cast<ucontext_t*>(raw_context);
+  const auto faulting_address = reinterpret_cast<uintptr_t>(info->si_addr);
+  if (Jit().HandleFault(faulting_address, &user_context->uc_mcontext))
+    return;
+
+  // Not a JIT fault: put the old disposition back and let it handle a re-raise.
+  sigaction(signal_number, &s_previous_segv_action, nullptr);
+  raise(signal_number);
 }
+}  // namespace
 
 void InstallExceptionHandler()
 {
-  stack_t signal_stack;
-#ifdef __FreeBSD__
-  signal_stack.ss_sp = (char*)malloc(SIGSTKSZ);
-#else
-  signal_stack.ss_sp = malloc(SIGSTKSZ);
-#endif
-  signal_stack.ss_size = SIGSTKSZ;
-  signal_stack.ss_flags = 0;
-  if (sigaltstack(&signal_stack, nullptr) != 0)
+  stack_t alternate_stack{};
+  alternate_stack.ss_sp = std::malloc(static_cast<size_t>(SIGSTKSZ));
+  alternate_stack.ss_size = static_cast<size_t>(SIGSTKSZ);
+  alternate_stack.ss_flags = 0;
+  if (sigaltstack(&alternate_stack, nullptr) != 0)
     PanicAlertFmt("sigaltstack failed: {}", Common::LastStrerrorString());
-  struct sigaction sa{};
-  sa.sa_sigaction = &sigsegv_handler;
-  sa.sa_flags = SA_SIGINFO;
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGSEGV, &sa, &old_sa_segv);
-#ifdef __APPLE__
-  sigaction(SIGBUS, &sa, &old_sa_bus);
-#endif
+
+  struct sigaction action{};
+  action.sa_sigaction = &SegvHandler;
+  action.sa_flags = SA_SIGINFO;
+  sigemptyset(&action.sa_mask);
+  sigaction(SIGSEGV, &action, &s_previous_segv_action);
 }
 
 void UninstallExceptionHandler()
 {
-  stack_t signal_stack;
-  stack_t old_stack;
-  signal_stack.ss_flags = SS_DISABLE;
-  if (!sigaltstack(&signal_stack, &old_stack) && !(old_stack.ss_flags & SS_DISABLE))
-  {
-    free(old_stack.ss_sp);
-  }
-  sigaction(SIGSEGV, &old_sa_segv, nullptr);
-#ifdef __APPLE__
-  sigaction(SIGBUS, &old_sa_bus, nullptr);
-#endif
+  stack_t disable_request{};
+  disable_request.ss_flags = SS_DISABLE;
+  stack_t previous_stack{};
+  const bool got_previous = sigaltstack(&disable_request, &previous_stack) == 0;
+  if (got_previous && (previous_stack.ss_flags & SS_DISABLE) == 0)
+    std::free(previous_stack.ss_sp);
+
+  sigaction(SIGSEGV, &s_previous_segv_action, nullptr);
 }
 
 bool IsExceptionHandlerSupported()
@@ -348,8 +148,9 @@ bool IsExceptionHandlerSupported()
   return true;
 }
 
-#else  // _M_GENERIC or unsupported platform
+#else
 
+// No way to intercept faults here: the JIT must run without fastmem.
 void InstallExceptionHandler()
 {
 }
@@ -364,5 +165,4 @@ bool IsExceptionHandlerSupported()
 }
 
 #endif
-
 }  // namespace EMM

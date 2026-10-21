@@ -1,76 +1,77 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/CPUThreadConfigCallback.h"
 
+#include <algorithm>
 #include <atomic>
+#include <limits>
+#include <utility>
+#include <vector>
 
 #include "Common/Assert.h"
 #include "Common/Config/Config.h"
 #include "Core/Core.h"
 
-namespace
-{
-std::atomic<bool> s_should_run_callbacks = false;
-
-static std::vector<
-    std::pair<CPUThreadConfigCallback::ConfigChangedCallbackID, Config::ConfigChangedCallback>>
-    s_callbacks;
-
-static size_t s_next_callback_id = 0;
-
-void RunCallbacks()
-{
-  for (const auto& callback : s_callbacks)
-    callback.second();
-}
-
-void OnConfigChanged()
-{
-  if (Core::IsCPUThread())
-  {
-    s_should_run_callbacks.store(false, std::memory_order_relaxed);
-    RunCallbacks();
-  }
-  else
-  {
-    s_should_run_callbacks.store(true, std::memory_order_relaxed);
-  }
-}
-
-}  // namespace
-
 namespace CPUThreadConfigCallback
 {
+namespace
+{
+struct Registration
+{
+  ConfigChangedCallbackID id;
+  Config::ConfigChangedCallback callback;
+};
+
+// Only the CPU thread (or a thread acting as it) touches the list.
+std::vector<Registration> s_registrations;
+size_t s_last_issued_id = std::numeric_limits<size_t>::max();
+
+// Set when a setting changed on some other thread.
+std::atomic<bool> s_change_pending = false;
+
+void InvokeAll()
+{
+  for (const Registration& registration : s_registrations)
+    registration.callback();
+}
+
+void OnAnyConfigChange()
+{
+  const bool on_cpu_thread = Core::IsCPUThread();
+  s_change_pending.store(!on_cpu_thread, std::memory_order_relaxed);
+  if (on_cpu_thread)
+    InvokeAll();
+}
+
+void HookConfigSystemOnce()
+{
+  // The hook stays for the rest of the process.
+  [[maybe_unused]] static const Config::ConfigChangedCallbackID hook =
+      Config::AddConfigChangedCallback(&OnAnyConfigChange);
+}
+}  // namespace
+
 ConfigChangedCallbackID AddConfigChangedCallback(Config::ConfigChangedCallback func)
 {
-  [[maybe_unused]] static auto s_config_changed_callback_id =
-      Config::AddConfigChangedCallback(&OnConfigChanged);
+  HookConfigSystemOnce();
 
-  const ConfigChangedCallbackID callback_id{s_next_callback_id};
-  ++s_next_callback_id;
-  s_callbacks.emplace_back(std::make_pair(callback_id, std::move(func)));
-  return callback_id;
+  const ConfigChangedCallbackID id{++s_last_issued_id};
+  s_registrations.push_back(Registration{id, std::move(func)});
+  return id;
 }
 
 void RemoveConfigChangedCallback(ConfigChangedCallbackID callback_id)
 {
-  for (auto it = s_callbacks.begin(); it != s_callbacks.end(); ++it)
-  {
-    if (it->first == callback_id)
-    {
-      s_callbacks.erase(it);
-      return;
-    }
-  }
+  const auto match = std::ranges::find(s_registrations, callback_id, &Registration::id);
+  if (match != s_registrations.end())
+    s_registrations.erase(match);
 }
 
 void CheckForConfigChanges()
 {
   DEBUG_ASSERT(Core::IsCPUThread());
 
-  if (s_should_run_callbacks.exchange(false, std::memory_order_relaxed))
-    RunCallbacks();
+  if (s_change_pending.exchange(false, std::memory_order_relaxed))
+    InvokeAll();
 }
-
 }  // namespace CPUThreadConfigCallback

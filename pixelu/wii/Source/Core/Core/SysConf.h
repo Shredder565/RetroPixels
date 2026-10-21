@@ -1,7 +1,13 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Utilities to parse and modify a Wii SYSCONF file and its sections.
+// The Wii's system configuration file, /shared2/sys/SYSCONF on the NAND.
+//
+// Layout (WiiBrew "/shared2/sys/SYSCONF"), all big-endian, exactly 0x4000 bytes:
+//   "SCv0", u16 entry count, u16 offset of each entry plus one past the last,
+//   the entries, zero padding, "SCed" in the last four bytes.
+// Each entry starts with one byte (type << 5 | (name length - 1)) and the name;
+// array types then store their data length minus one (u16 for big arrays,
+// u8 for small ones), and every type is followed by its data.
 
 #pragma once
 
@@ -25,6 +31,7 @@ class FileSystem;
 class SysConf final
 {
 public:
+  // Reads the file straight away (or starts from the defaults); the destructor writes it back.
   explicit SysConf(std::shared_ptr<IOS::HLE::FS::FileSystem> fs);
   ~SysConf();
 
@@ -34,6 +41,7 @@ public:
 
   struct Entry
   {
+    // Stored in the top three bits of each entry's first byte.
     enum Type : u8
     {
       BigArray = 1,
@@ -42,31 +50,31 @@ public:
       Short = 4,
       Long = 5,
       LongLong = 6,
-      // Should really be named Bool, but this conflicts with some random macro. :/
+      // A boolean; not called Bool because of a clashing macro.
       ByteBool = 7,
     };
 
     Entry(Type type_, std::string name_);
     Entry(Type type_, std::string name_, std::vector<u8> bytes_);
 
-    // Intended for use with the non array types.
+    // Scalar entries: the big-endian value, or default_value when the entry
+    // does not hold exactly sizeof(T) bytes.
     template <typename T>
     T GetData(T default_value) const
     {
       if (bytes.size() != sizeof(T))
         return default_value;
-
-      T value;
-      std::memcpy(&value, bytes.data(), bytes.size());
-      return Common::FromBigEndian(value);
+      T raw;
+      std::memcpy(&raw, bytes.data(), sizeof(T));
+      return Common::FromBigEndian(raw);
     }
+
     template <typename T>
     void SetData(T value)
     {
       ASSERT(sizeof(value) == bytes.size());
-
-      value = Common::FromBigEndian(value);
-      std::memcpy(bytes.data(), &value, bytes.size());
+      const T raw = Common::FromBigEndian(value);
+      std::memcpy(bytes.data(), &raw, bytes.size());
     }
 
     Type type;
@@ -80,17 +88,20 @@ public:
   Entry* GetOrAddEntry(std::string_view key, Entry::Type type);
   void RemoveEntry(std::string_view key);
 
-  // Intended for use with the non array types.
+  // Scalar shortcuts by entry name.
   template <typename T>
   T GetData(std::string_view key, T default_value) const
   {
-    const Entry* entry = GetEntry(key);
-    return entry ? entry->GetData(default_value) : default_value;
+    if (const Entry* entry = GetEntry(key))
+      return entry->GetData(default_value);
+    return default_value;
   }
+
   template <typename T>
   void SetData(std::string_view key, Entry::Type type, T value)
   {
-    GetOrAddEntry(key, type)->SetData(value);
+    Entry* entry = GetOrAddEntry(key, type);
+    entry->SetData(value);
   }
 
 private:

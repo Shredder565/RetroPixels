@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,10 +6,12 @@
 
 #include "Common/Config/Config.h"
 
-// This file lets you register callbacks like in Common/Config/Config.h, with the difference that
-// callbacks registered here are guaranteed to run on the CPU thread. Callbacks registered here may
-// run with a slight delay compared to regular config callbacks.
-
+// Config-changed callbacks that always run on the CPU thread.
+//
+// Config::AddConfigChangedCallback callbacks run on whichever thread changed
+// the setting. Callbacks registered here instead run right away when the change
+// happens on the CPU thread, and otherwise at the CPU thread's next call to
+// CheckForConfigChanges().
 namespace CPUThreadConfigCallback
 {
 struct ConfigChangedCallbackID
@@ -20,13 +21,11 @@ struct ConfigChangedCallbackID
   bool operator==(const ConfigChangedCallbackID&) const = default;
 };
 
-// Returns an ID that should be passed to RemoveConfigChangedCallback() when the callback is no
-// longer needed.
+// Keep the returned ID to remove the callback again.
 [[nodiscard]] ConfigChangedCallbackID AddConfigChangedCallback(Config::ConfigChangedCallback func);
 
 void RemoveConfigChangedCallback(ConfigChangedCallbackID callback_id);
 
-// Should be called regularly from the CPU thread
+// Called periodically by the CPU thread.
 void CheckForConfigChanges();
-
 }  // namespace CPUThreadConfigCallback

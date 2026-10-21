@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,28 +9,19 @@
 
 #include "Common/CommonTypes.h"
 
-// Host - defines an interface for the emulator core to communicate back to the
-// OS-specific layer
+// Callbacks from the emulation core into the front end.
 //
-// The emulator core is abstracted from the OS using 2 interfaces:
-// Common and Host.
-//
-// Common simply provides OS-neutral implementations of things like threads, mutexes,
-// INI file manipulation, memory mapping, etc.
-//
-// Host is an abstract interface for communicating things back to the host. The emulator
-// core is treated as a library, not as a main program, because it is far easier to
-// write GUI interfaces that control things than to squash GUI into some model that wasn't
-// designed for it.
-//
-// The host can be just a command line app that opens a window, or a full blown debugger
-// interface.
+// The core never talks to a window system or UI toolkit directly. Whatever
+// program embeds it (the Qt front end in PixelU-Wii) defines every Host_*
+// function below, and the core calls them when it needs the UI to do or answer
+// something.
 
 namespace HW::GBA
 {
 class Core;
 }  // namespace HW::GBA
 
+// Implemented by the front end for each emulated Game Boy Advance window.
 class GBAHostInterface
 {
 public:
@@ -40,13 +30,14 @@ public:
   virtual void FrameEnded(std::span<const u32> video_buffer) = 0;
 };
 
+// Messages for Host_Message. The values start at 10 and must not change.
 enum class HostMessageID
 {
-  // Begin at 10 in case there is already messages with wParam = 0, 1, 2 and so on
   WMUserStop = 10,
   WMUserJobDispatch,
 };
 
+// Queries.
 std::vector<std::string> Host_GetPreferredLocales();
 bool Host_UIBlocksControllerState();
 bool Host_RendererHasFocus();
@@ -54,6 +45,7 @@ bool Host_RendererHasFullFocus();
 bool Host_RendererIsFullscreen();
 bool Host_TASInputHasFocus();
 
+// Notifications and requests.
 void Host_Message(HostMessageID id);
 void Host_PPCSymbolsChanged();
 void Host_PPCBreakpointsChanged();
@@ -65,6 +57,7 @@ void Host_UpdateTitle(const std::string& title);
 void Host_YieldToUI();
 void Host_TitleChanged();
 
+// Discord rich presence.
 void Host_UpdateDiscordClientID(const std::string& client_id = {});
 bool Host_UpdateDiscordPresenceRaw(const std::string& details = {}, const std::string& state = {},
                                    const std::string& large_image_key = {},

@@ -1,263 +1,65 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+// The CPU context a fault handler receives, as the JIT's fastmem and stack
+// fault handling sees it: `SContext` is the platform's saved-register
+// structure, `ctx->CTX_PC` is its instruction pointer, and ContextRN(ctx, n)
+// points at general register n in x86-64 encoding order (RAX, RCX, RDX, RBX,
+// RSP, RBP, RSI, RDI, R8..R15).
+//
+// PixelU-Wii is built for Windows x64. The Linux variant only exists so the
+// core still compiles there.
+
 #include "Common/CommonTypes.h"
 
-// meh.
 #if defined(_M_GENERIC)
-// JitBase uses SContext; it should have no concrete implementations in a
-// generic build.
+
+// No JIT backend: nothing ever looks inside the context.
 struct FakeGenericContext;
 typedef FakeGenericContext SContext;
+
 #elif defined(_WIN32)
+
 #include <windows.h>
 typedef CONTEXT SContext;
-#if _M_X86_64
-#define CTX_RAX Rax
-#define CTX_RBX Rbx
-#define CTX_RCX Rcx
-#define CTX_RDX Rdx
-#define CTX_RDI Rdi
-#define CTX_RSI Rsi
-#define CTX_RBP Rbp
-#define CTX_RSP Rsp
-#define CTX_R8 R8
-#define CTX_R9 R9
-#define CTX_R10 R10
-#define CTX_R11 R11
-#define CTX_R12 R12
-#define CTX_R13 R13
-#define CTX_R14 R14
-#define CTX_R15 R15
-#define CTX_RIP Rip
-#elif _M_ARM64
-#define CTX_REG(x) X[x]
-#define CTX_LR X[30]
-#define CTX_SP Sp
-#define CTX_PC Pc
-#else
-#error No context definition for architecture
-#endif
-#elif defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
-// for modules:
-#define _XOPEN_SOURCE
-#include <ucontext.h>
+#define CTX_PC Rip
+#define PIXELU_CTX_GPR(name) offsetof(SContext, name)
+#define PIXELU_CTX_GPR_TABLE                                                                       \
+  PIXELU_CTX_GPR(Rax), PIXELU_CTX_GPR(Rcx), PIXELU_CTX_GPR(Rdx), PIXELU_CTX_GPR(Rbx),             \
+      PIXELU_CTX_GPR(Rsp), PIXELU_CTX_GPR(Rbp), PIXELU_CTX_GPR(Rsi), PIXELU_CTX_GPR(Rdi),         \
+      PIXELU_CTX_GPR(R8), PIXELU_CTX_GPR(R9), PIXELU_CTX_GPR(R10), PIXELU_CTX_GPR(R11),           \
+      PIXELU_CTX_GPR(R12), PIXELU_CTX_GPR(R13), PIXELU_CTX_GPR(R14), PIXELU_CTX_GPR(R15)
 
-#include <mach/mach.h>
-#include <mach/message.h>
-#if _M_X86_64
-typedef x86_thread_state64_t SContext;
-#define CTX_RAX __rax
-#define CTX_RBX __rbx
-#define CTX_RCX __rcx
-#define CTX_RDX __rdx
-#define CTX_RDI __rdi
-#define CTX_RSI __rsi
-#define CTX_RBP __rbp
-#define CTX_RSP __rsp
-#define CTX_R8 __r8
-#define CTX_R9 __r9
-#define CTX_R10 __r10
-#define CTX_R11 __r11
-#define CTX_R12 __r12
-#define CTX_R13 __r13
-#define CTX_R14 __r14
-#define CTX_R15 __r15
-#define CTX_RIP __rip
-#elif _M_ARM_64
-typedef arm_thread_state64_t SContext;
-#define CTX_REG(x) __x[x]
-#define CTX_LR __lr
-#define CTX_SP __sp
-#define CTX_PC __pc
-#else
-#error No context definition for architecture
-#endif
-#elif defined(__APPLE__)
-#include <signal.h>
-typedef _STRUCT_MCONTEXT64 SContext;
-#if _M_X86_64
-#define CTX_RAX __ss.__rax
-#define CTX_RBX __ss.__rbx
-#define CTX_RCX __ss.__rcx
-#define CTX_RDX __ss.__rdx
-#define CTX_RDI __ss.__rdi
-#define CTX_RSI __ss.__rsi
-#define CTX_RBP __ss.__rbp
-#define CTX_RSP __ss.__rsp
-#define CTX_R8 __ss.__r8
-#define CTX_R9 __ss.__r9
-#define CTX_R10 __ss.__r10
-#define CTX_R11 __ss.__r11
-#define CTX_R12 __ss.__r12
-#define CTX_R13 __ss.__r13
-#define CTX_R14 __ss.__r14
-#define CTX_R15 __ss.__r15
-#define CTX_RIP __ss.__rip
-#elif _M_ARM_64
-#define CTX_REG(x) __ss.__x[x]
-#define CTX_LR __ss.__lr
-#define CTX_SP __ss.__sp
-#define CTX_PC __ss.__pc
-#else
-#error No context definition for architecture
-#endif
 #elif defined(__linux__)
-#include <signal.h>
 
+#include <signal.h>
 #include <ucontext.h>
 typedef mcontext_t SContext;
+#define CTX_PC gregs[REG_RIP]
+#define PIXELU_CTX_GPR(name) offsetof(SContext, gregs) + sizeof(greg_t) * (name)
+#define PIXELU_CTX_GPR_TABLE                                                                       \
+  PIXELU_CTX_GPR(REG_RAX), PIXELU_CTX_GPR(REG_RCX), PIXELU_CTX_GPR(REG_RDX),                       \
+      PIXELU_CTX_GPR(REG_RBX), PIXELU_CTX_GPR(REG_RSP), PIXELU_CTX_GPR(REG_RBP),                   \
+      PIXELU_CTX_GPR(REG_RSI), PIXELU_CTX_GPR(REG_RDI), PIXELU_CTX_GPR(REG_R8),                    \
+      PIXELU_CTX_GPR(REG_R9), PIXELU_CTX_GPR(REG_R10), PIXELU_CTX_GPR(REG_R11),                    \
+      PIXELU_CTX_GPR(REG_R12), PIXELU_CTX_GPR(REG_R13), PIXELU_CTX_GPR(REG_R14),                   \
+      PIXELU_CTX_GPR(REG_R15)
 
-#if _M_X86_64
-#define CTX_RAX gregs[REG_RAX]
-#define CTX_RBX gregs[REG_RBX]
-#define CTX_RCX gregs[REG_RCX]
-#define CTX_RDX gregs[REG_RDX]
-#define CTX_RDI gregs[REG_RDI]
-#define CTX_RSI gregs[REG_RSI]
-#define CTX_RBP gregs[REG_RBP]
-#define CTX_RSP gregs[REG_RSP]
-#define CTX_R8 gregs[REG_R8]
-#define CTX_R9 gregs[REG_R9]
-#define CTX_R10 gregs[REG_R10]
-#define CTX_R11 gregs[REG_R11]
-#define CTX_R12 gregs[REG_R12]
-#define CTX_R13 gregs[REG_R13]
-#define CTX_R14 gregs[REG_R14]
-#define CTX_R15 gregs[REG_R15]
-#define CTX_RIP gregs[REG_RIP]
-#elif _M_ARM_64
-#define CTX_REG(x) regs[x]
-#define CTX_LR regs[30]
-#define CTX_SP sp
-#define CTX_PC pc
 #else
-#error No context definition for architecture
-#endif
-#elif defined(__OpenBSD__)
-#include <signal.h>
-typedef ucontext_t SContext;
-#if _M_X86_64
-#define CTX_RAX sc_rax
-#define CTX_RBX sc_rbx
-#define CTX_RCX sc_rcx
-#define CTX_RDX sc_rdx
-#define CTX_RDI sc_rdi
-#define CTX_RSI sc_rsi
-#define CTX_RBP sc_rbp
-#define CTX_RSP sc_rsp
-#define CTX_R8 sc_r8
-#define CTX_R9 sc_r9
-#define CTX_R10 sc_r10
-#define CTX_R11 sc_r11
-#define CTX_R12 sc_r12
-#define CTX_R13 sc_r13
-#define CTX_R14 sc_r14
-#define CTX_R15 sc_r15
-#define CTX_RIP sc_rip
-#elif _M_ARM_64
-#define CTX_REG(x) sc_x[x]
-#define CTX_LR sc_lr
-#define CTX_SP sc_sp
-#define CTX_PC sc_elr
-#else
-#error No context definition for architecture
-#endif
-#elif defined(__NetBSD__)
-#include <ucontext.h>
-typedef mcontext_t SContext;
-#if _M_X86_64
-#define CTX_RAX __gregs[_REG_RAX]
-#define CTX_RBX __gregs[_REG_RBX]
-#define CTX_RCX __gregs[_REG_RCX]
-#define CTX_RDX __gregs[_REG_RDX]
-#define CTX_RDI __gregs[_REG_RDI]
-#define CTX_RSI __gregs[_REG_RSI]
-#define CTX_RBP __gregs[_REG_RBP]
-#define CTX_RSP __gregs[_REG_RSP]
-#define CTX_R8 __gregs[_REG_R8]
-#define CTX_R9 __gregs[_REG_R9]
-#define CTX_R10 __gregs[_REG_R10]
-#define CTX_R11 __gregs[_REG_R11]
-#define CTX_R12 __gregs[_REG_R12]
-#define CTX_R13 __gregs[_REG_R13]
-#define CTX_R14 __gregs[_REG_R14]
-#define CTX_R15 __gregs[_REG_R15]
-#define CTX_RIP __gregs[_REG_RIP]
-#else
-#error No context definition for architecture
-#endif
-#elif defined(__FreeBSD__)
-#include <ucontext.h>
-typedef mcontext_t SContext;
-#if _M_X86_64
-#define CTX_RAX mc_rax
-#define CTX_RBX mc_rbx
-#define CTX_RCX mc_rcx
-#define CTX_RDX mc_rdx
-#define CTX_RDI mc_rdi
-#define CTX_RSI mc_rsi
-#define CTX_RBP mc_rbp
-#define CTX_RSP mc_rsp
-#define CTX_R8 mc_r8
-#define CTX_R9 mc_r9
-#define CTX_R10 mc_r10
-#define CTX_R11 mc_r11
-#define CTX_R12 mc_r12
-#define CTX_R13 mc_r13
-#define CTX_R14 mc_r14
-#define CTX_R15 mc_r15
-#define CTX_RIP mc_rip
-#elif _M_ARM_64
-#define CTX_REG(x) mc_gpregs.gp_x[x]
-#define CTX_LR mc_gpregs.gp_lr
-#define CTX_SP mc_gpregs.gp_sp
-#define CTX_PC mc_gpregs.gp_elr
-#else
-#error No context definition for architecture
-#endif
-#elif defined(__HAIKU__)
-#include <signal.h>
-typedef mcontext_t SContext;
-#if _M_X86_64
-#define CTX_RAX rax
-#define CTX_RBX rbx
-#define CTX_RCX rcx
-#define CTX_RDX rdx
-#define CTX_RDI rdi
-#define CTX_RSI rsi
-#define CTX_RBP rbp
-#define CTX_RSP rsp
-#define CTX_R8 r8
-#define CTX_R9 r9
-#define CTX_R10 r10
-#define CTX_R11 r11
-#define CTX_R12 r12
-#define CTX_R13 r13
-#define CTX_R14 r14
-#define CTX_R15 r15
-#define CTX_RIP rip
-#else
-#error No context definition for machine
-#endif
-#else
-#error No context definition for OS
+#error PixelU-Wii has no machine context definition for this platform
 #endif
 
-#if _M_X86_64
-#include <stddef.h>
-#define CTX_PC CTX_RIP
+#if defined(_M_X86_64) && !defined(_M_GENERIC)
+#include <cstddef>
+
 static inline u64* ContextRN(SContext* ctx, int n)
 {
-  static const u8 offsets[] = {
-      offsetof(SContext, CTX_RAX), offsetof(SContext, CTX_RCX), offsetof(SContext, CTX_RDX),
-      offsetof(SContext, CTX_RBX), offsetof(SContext, CTX_RSP), offsetof(SContext, CTX_RBP),
-      offsetof(SContext, CTX_RSI), offsetof(SContext, CTX_RDI), offsetof(SContext, CTX_R8),
-      offsetof(SContext, CTX_R9),  offsetof(SContext, CTX_R10), offsetof(SContext, CTX_R11),
-      offsetof(SContext, CTX_R12), offsetof(SContext, CTX_R13), offsetof(SContext, CTX_R14),
-      offsetof(SContext, CTX_R15)};
-  return (u64*)((char*)ctx + offsets[n]);
+  // Byte offset of each general register inside SContext, by x86 register number.
+  static constexpr std::size_t gpr_offsets[16] = {PIXELU_CTX_GPR_TABLE};
+  return reinterpret_cast<u64*>(reinterpret_cast<char*>(ctx) + gpr_offsets[n]);
 }
 #endif
+
+#undef PIXELU_CTX_GPR
+#undef PIXELU_CTX_GPR_TABLE

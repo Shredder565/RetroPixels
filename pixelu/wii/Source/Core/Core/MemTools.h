@@ -1,8 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+// Host fault interception for the JIT. While installed, access violations and
+// stack overflows on the CPU thread are first offered to the JIT (fastmem
+// backpatching, stack guard pages) before the platform's normal handling.
 namespace EMM
 {
 void InstallExceptionHandler();
