@@ -1,10 +1,10 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QByteArray>
 #include <QDockWidget>
+#include <QString>
 
 #include "Common/CommonTypes.h"
 #include "VideoCommon/VideoEvents.h"
@@ -15,12 +15,14 @@ class QComboBox;
 class QGroupBox;
 class QHideEvent;
 class QLabel;
+class QLayout;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QRadioButton;
 class QShowEvent;
 class QSplitter;
+class QWidget;
 
 namespace Core
 {
@@ -30,6 +32,8 @@ class CPUThreadGuard;
 
 class PPCSymbolDB;
 
+// The "Memory" dock: a memory view plus a side bar to jump to addresses, type in and write
+// values, search, change how memory is shown, configure memory breakpoints and browse labels.
 class MemoryWidget : public QDockWidget
 {
   Q_OBJECT
@@ -44,96 +48,95 @@ signals:
   void RequestWatch(QString name, u32 address);
 
 private:
-  struct TargetAddress
+  // Address box plus offset box, resolved. address is only meaningful when both are valid.
+  struct Target
   {
     u32 address = 0;
-    bool is_good_address = false;
-    bool is_good_offset = false;
+    bool address_ok = false;
+    bool offset_ok = false;
   };
-
-  void CreateWidgets();
-  void ConnectWidgets();
-
-  void LoadSettings();
-  void SaveSettings();
-
-  void OnAddressSpaceChanged();
-  void OnDisplayChanged();
-  void OnBPLogChanged();
-  void OnBPTypeChanged();
-
-  void OnSearchAddress();
-  void OnFindNextValue();
-  void OnFindPreviousValue();
-
-  void OnSetValue();
-  void OnSetValueFromFile();
-
-  void OnSelectLabel();
-  void RefreshLabelBox();
-  void UpdateSymbols();
-  void UpdateNotes();
-
-  void OnDumpMRAM();
-  void OnDumpExRAM();
-  void OnDumpARAM();
-  void OnDumpFakeVMEM();
-
-  void ValidateAndPreviewInputValue();
-  QByteArray GetInputData() const;
-  TargetAddress GetTargetAddress() const;
-  void FindValue(bool next);
 
   void closeEvent(QCloseEvent*) override;
   void hideEvent(QHideEvent* event) override;
   void showEvent(QShowEvent* event) override;
-  void RegisterAfterFrameEventCallback();
-  void RemoveAfterFrameEventCallback();
-  void AutoUpdateTable();
-  void ActivateSearchAddress();
+
+  // Side bar pieces, built in this order.
+  QWidget* BuildAddressRow();
+  QLayout* BuildValueRow();
+  void BuildValueTypes();
+  QWidget* BuildSearchBox();
+  QWidget* BuildAddressSpaceBox();
+  QWidget* BuildDisplayBox();
+  QWidget* BuildBreakpointBox();
+  void BuildLabelsBox();
+  void BuildMenus(QWidget* sidebar);
+  void Wire();
+
+  void RestoreChoices();
+  void StoreChoices();
+
+  void AddressSpaceChosen();
+  void DisplayChosen();
+  void BreakpointLoggingChosen();
+  void BreakpointKindChosen();
+
+  void JumpToTyped();
+  void FocusAddressBox();
+  void PreviewValue();
+  [[nodiscard]] QByteArray ValueBytes() const;
+  [[nodiscard]] Target ResolveTarget() const;
+  [[nodiscard]] bool ReportBadTarget(const Target& target);
+  void WriteValue();
+  void WriteFile();
+  void Search(bool forward);
+
+  void RefreshLabels();
+  void JumpToLabel();
+  void FillSymbolLists();
+  void FillNoteList();
+
+  void StartFrameUpdates();
+  void StopFrameUpdates();
 
   Core::System& m_system;
-  PPCSymbolDB& m_ppc_symbol_db;
+  PPCSymbolDB& m_symbol_db;
 
-  MemoryViewWidget* m_memory_view;
-  QSplitter* m_splitter;
-  QComboBox* m_search_address;
-  QLineEdit* m_search_offset;
-  QLineEdit* m_data_edit;
-  QCheckBox* m_base_check;
-  QLabel* m_data_preview;
-  QComboBox* m_display_combo;
-  QComboBox* m_align_combo;
-  QComboBox* m_row_length_combo;
-  QCheckBox* m_dual_check;
-  QPushButton* m_set_value;
+  MemoryViewWidget* m_memory_view = nullptr;
+  QSplitter* m_splitter = nullptr;
 
-  // Search
-  QPushButton* m_find_next;
-  QPushButton* m_find_previous;
-  QComboBox* m_input_combo;
-  QLabel* m_result_label;
+  QComboBox* m_address_box = nullptr;
+  QLineEdit* m_offset_box = nullptr;
+  QLineEdit* m_value_edit = nullptr;
+  QCheckBox* m_hex_check = nullptr;
+  QComboBox* m_value_type = nullptr;
+  QLabel* m_value_preview = nullptr;
+  QPushButton* m_write_button = nullptr;
 
-  // Address Spaces
-  QRadioButton* m_address_space_physical;
-  QRadioButton* m_address_space_effective;
-  QRadioButton* m_address_space_auxiliary;
+  QPushButton* m_next_button = nullptr;
+  QPushButton* m_previous_button = nullptr;
+  QLabel* m_search_result = nullptr;
 
-  // Breakpoint options
-  QRadioButton* m_bp_read_write;
-  QRadioButton* m_bp_read_only;
-  QRadioButton* m_bp_write_only;
-  QCheckBox* m_bp_log_check;
+  QRadioButton* m_effective_radio = nullptr;
+  QRadioButton* m_auxiliary_radio = nullptr;
+  QRadioButton* m_physical_radio = nullptr;
 
-  QGroupBox* m_labels_group;
-  QLineEdit* m_search_labels;
-  QListWidget* m_symbols_list;
-  QListWidget* m_data_list;
-  QListWidget* m_note_list;
-  QString m_note_filter;
+  QComboBox* m_display_type = nullptr;
+  QComboBox* m_alignment = nullptr;
+  QComboBox* m_row_length = nullptr;
+  QCheckBox* m_dual_check = nullptr;
+
+  QRadioButton* m_bp_both_radio = nullptr;
+  QRadioButton* m_bp_read_radio = nullptr;
+  QRadioButton* m_bp_write_radio = nullptr;
+  QCheckBox* m_bp_log_check = nullptr;
+
+  QGroupBox* m_labels_box = nullptr;
+  QLineEdit* m_label_filter = nullptr;
+  QListWidget* m_symbol_list = nullptr;
+  QListWidget* m_data_list = nullptr;
+  QListWidget* m_note_list = nullptr;
+
   bool m_labels_visible = true;
-
-  Common::EventHook m_vi_end_field_event;
-
-  bool m_auto_update_enabled = true;
+  bool m_auto_update = true;
+  Common::EventHook m_frame_hook;
 };

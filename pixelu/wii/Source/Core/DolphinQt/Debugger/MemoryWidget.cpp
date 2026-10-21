@@ -1,11 +1,16 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/MemoryWidget.h"
 
+#include <array>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <fmt/format.h>
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -18,10 +23,14 @@
 #include <QListWidget>
 #include <QMenuBar>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSpacerItem>
 #include <QSplitter>
+#include <QStringList>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -37,1036 +46,914 @@
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/Settings.h"
 
-using Type = MemoryViewWidget::Type;
+namespace
+{
+using ViewType = MemoryViewWidget::Type;
+
+struct TypeChoice
+{
+  const char* label;
+  ViewType type;
+};
+
+// Combo contents, in list order.
+constexpr std::array<TypeChoice, 10> INPUT_TYPES{{
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Hex Byte String"), ViewType::HexString},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "ASCII"), ViewType::ASCII},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Float"), ViewType::Float32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Double"), ViewType::Double},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 8"), ViewType::Unsigned8},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 16"), ViewType::Unsigned16},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 32"), ViewType::Unsigned32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 8"), ViewType::Signed8},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 16"), ViewType::Signed16},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 32"), ViewType::Signed32},
+}};
+
+constexpr std::array<TypeChoice, 12> DISPLAY_TYPES{{
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Hex 8"), ViewType::Hex8},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Hex 16"), ViewType::Hex16},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Hex 32"), ViewType::Hex32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 8"), ViewType::Unsigned8},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 16"), ViewType::Unsigned16},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Unsigned 32"), ViewType::Unsigned32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 8"), ViewType::Signed8},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 16"), ViewType::Signed16},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Signed 32"), ViewType::Signed32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "ASCII"), ViewType::ASCII},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Float"), ViewType::Float32},
+    {QT_TRANSLATE_NOOP("MemoryWidget", "Double"), ViewType::Double},
+}};
+
+void FillTypeCombo(QComboBox* combo, const auto& choices)
+{
+  combo->setMaxVisibleItems(20);
+  for (const TypeChoice& choice : choices)
+    combo->addItem(MemoryWidget::tr(choice.label), static_cast<int>(choice.type));
+}
+
+// The integer types are the only ones where the Hex checkbox means anything.
+bool IsIntegerType(ViewType type)
+{
+  switch (type)
+  {
+  case ViewType::Unsigned8:
+  case ViewType::Unsigned16:
+  case ViewType::Unsigned32:
+  case ViewType::Signed8:
+  case ViewType::Signed16:
+  case ViewType::Signed32:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// The look of an input box: bold red when its contents are unusable, default otherwise.
+void MarkInput(QWidget* box, bool bad)
+{
+  QFont face;
+  QPalette look;
+  if (bad)
+  {
+    face.setBold(true);
+    look.setColor(QPalette::Text, Qt::red);
+  }
+  box->setFont(face);
+  box->setPalette(look);
+}
+
+void WriteDump(const std::string& path, const u8* begin, const u8* end)
+{
+  if (begin == nullptr)
+    return;
+
+  File::IOFile file(path, "wb");
+  const QString shown = QString::fromStdString(path);
+  if (!file)
+  {
+    ModalMessageBox::critical(nullptr, QObject::tr("Error"),
+                              QObject::tr("Failed to dump %1: Can't open file").arg(shown));
+    return;
+  }
+  if (!file.WriteBytes(begin, static_cast<std::size_t>(std::distance(begin, end))))
+  {
+    ModalMessageBox::critical(nullptr, QObject::tr("Error"),
+                              QObject::tr("Failed to dump %1: Failed to write to file").arg(shown));
+  }
+}
+
+void DumpSpace(AddressSpace::Type space, unsigned int path_index)
+{
+  AddressSpace::Accessors* const memory = AddressSpace::GetAccessors(space);
+  WriteDump(File::GetUserPath(path_index), memory->begin(), memory->end());
+}
+}  // namespace
 
 MemoryWidget::MemoryWidget(Core::System& system, QWidget* parent)
-    : QDockWidget(parent), m_system(system), m_ppc_symbol_db(system.GetPPCSymbolDB())
+    : QDockWidget(parent), m_system(system), m_symbol_db(system.GetPPCSymbolDB())
 {
   setWindowTitle(tr("Memory"));
   setObjectName(QStringLiteral("memory"));
-
-  setHidden(!Settings::Instance().IsMemoryVisible() || !Settings::Instance().IsDebugModeEnabled());
-
+  Settings& settings = Settings::Instance();
+  setHidden(!settings.IsMemoryVisible() || !settings.IsDebugModeEnabled());
   setAllowedAreas(Qt::AllDockWidgetAreas);
 
-  CreateWidgets();
+  // The construction order below also fixes the order widgets join the focus chain.
+  QWidget* const address_row = BuildAddressRow();
+  QLayout* const value_row = BuildValueRow();
+  BuildValueTypes();
+  QWidget* const search_box = BuildSearchBox();
+  QWidget* const space_box = BuildAddressSpaceBox();
+  QWidget* const display_box = BuildDisplayBox();
+  QWidget* const breakpoint_box = BuildBreakpointBox();
+  BuildLabelsBox();
 
-  QSettings& settings = Settings::GetQSettings();
+  auto* const sidebar = new QWidget;
+  BuildMenus(sidebar);
 
-  restoreGeometry(settings.value(QStringLiteral("memorywidget/geometry")).toByteArray());
-  // macOS: setHidden() needs to be evaluated before setFloating() for proper window presentation
-  // according to Settings
-  setFloating(settings.value(QStringLiteral("memorywidget/floating")).toBool());
-  m_splitter->restoreState(settings.value(QStringLiteral("memorywidget/splitter")).toByteArray());
+  // The first gap leaves room for the menu bar, which sits on top of the side bar.
+  auto* const column = new QVBoxLayout;
+  column->setSpacing(1);
+  sidebar->setLayout(column);
+  const auto gap = [column](int height) { column->addItem(new QSpacerItem(1, height)); };
+  gap(20);
+  column->addWidget(address_row);
+  column->addLayout(value_row);
+  column->addWidget(m_value_type);
+  gap(10);
+  column->addWidget(m_value_preview);
+  column->addWidget(m_write_button);
+  gap(10);
+  column->addWidget(search_box);
+  gap(10);
+  column->addWidget(display_box);
+  gap(10);
+  column->addWidget(space_box);
+  gap(10);
+  column->addWidget(breakpoint_box);
+  column->addWidget(m_labels_box);
+  column->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Expanding));
 
-  connect(&Settings::Instance(), &Settings::MemoryVisibilityChanged, this,
+  m_splitter = new QSplitter(Qt::Horizontal);
+  auto* const scroller = new QScrollArea;
+  scroller->setWidget(sidebar);
+  scroller->setWidgetResizable(true);
+  m_memory_view = new MemoryViewWidget(m_system, this);
+  m_splitter->addWidget(m_memory_view);
+  m_splitter->addWidget(scroller);
+  m_splitter->setStretchFactor(0, 3);
+  m_splitter->setStretchFactor(1, 1);
+
+  auto* const outer = new QHBoxLayout;
+  outer->setContentsMargins(2, 2, 2, 2);
+  outer->setSpacing(0);
+  outer->addWidget(m_splitter);
+  auto* const body = new QWidget;
+  body->setLayout(outer);
+  setWidget(body);
+  FillNoteList();
+
+  const QSettings& stored = Settings::GetQSettings();
+  restoreGeometry(stored.value(QStringLiteral("memorywidget/geometry")).toByteArray());
+  // Floating is applied after the hidden state, which macOS needs to place the window correctly.
+  setFloating(stored.value(QStringLiteral("memorywidget/floating")).toBool());
+  m_splitter->restoreState(stored.value(QStringLiteral("memorywidget/splitter")).toByteArray());
+
+  connect(&settings, &Settings::MemoryVisibilityChanged, this,
           [this](bool visible) { setHidden(!visible); });
-
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this,
+  connect(&settings, &Settings::DebugModeToggled, this,
           [this](bool enabled) { setHidden(!enabled || !Settings::Instance().IsMemoryVisible()); });
-
+  // No per-frame refresh while the dock is tabbed away.
   connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
-    // Stop auto-update if MemoryView is tabbed out.
-    if (visible && m_auto_update_enabled)
-      RegisterAfterFrameEventCallback();
+    if (visible && m_auto_update)
+      StartFrameUpdates();
     else
-      RemoveAfterFrameEventCallback();
+      StopFrameUpdates();
   });
-  LoadSettings();
 
-  ConnectWidgets();
-  OnAddressSpaceChanged();
-  OnDisplayChanged();
+  RestoreChoices();
+  Wire();
+  AddressSpaceChosen();
+  DisplayChosen();
 }
 
 MemoryWidget::~MemoryWidget()
 {
-  QSettings& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("memorywidget/geometry"), saveGeometry());
-  settings.setValue(QStringLiteral("memorywidget/floating"), isFloating());
-  settings.setValue(QStringLiteral("memorywidget/splitter"), m_splitter->saveState());
-
-  SaveSettings();
+  QSettings& stored = Settings::GetQSettings();
+  stored.setValue(QStringLiteral("memorywidget/geometry"), saveGeometry());
+  stored.setValue(QStringLiteral("memorywidget/floating"), isFloating());
+  stored.setValue(QStringLiteral("memorywidget/splitter"), m_splitter->saveState());
+  StoreChoices();
 }
 
-void MemoryWidget::CreateWidgets()
+QWidget* MemoryWidget::BuildAddressRow()
 {
-  auto* layout = new QHBoxLayout;
+  auto* const row = new QSplitter(Qt::Horizontal);
 
-  layout->setContentsMargins(2, 2, 2, 2);
-  layout->setSpacing(0);
+  m_address_box = new QComboBox;
+  m_address_box->setInsertPolicy(QComboBox::InsertAtTop);
+  m_address_box->setDuplicatesEnabled(false);
+  m_address_box->setEditable(true);
+  m_address_box->setMaxVisibleItems(8);
+  m_offset_box = new QLineEdit;
+  m_offset_box->setMaxLength(9);
+  m_address_box->setPlaceholderText(tr("Search Address"));
+  m_offset_box->setPlaceholderText(tr("Offset"));
 
-  //// Sidebar
+  row->addWidget(m_address_box);
+  row->addWidget(m_offset_box);
+  row->setHandleWidth(1);
+  row->setCollapsible(0, false);
+  row->setStretchFactor(1, 2);
+  return row;
+}
 
-  // Search
-  auto* m_address_splitter = new QSplitter(Qt::Horizontal);
+QLayout* MemoryWidget::BuildValueRow()
+{
+  auto* const row = new QHBoxLayout;
+  m_value_edit = new QLineEdit;
+  m_hex_check = new QCheckBox(tr("Hex"));
+  m_write_button = new QPushButton(tr("Set &Value"));
+  m_value_preview = new QLabel;
 
-  m_search_address = new QComboBox;
-  m_search_address->setInsertPolicy(QComboBox::InsertAtTop);
-  m_search_address->setDuplicatesEnabled(false);
-  m_search_address->setEditable(true);
-  m_search_address->setMaxVisibleItems(8);
-  m_search_offset = new QLineEdit;
+  // Checkbox text on the left of its box.
+  m_hex_check->setLayoutDirection(Qt::RightToLeft);
+  m_value_edit->setPlaceholderText(tr("Value"));
+  m_value_preview->setBackgroundRole(QPalette::AlternateBase);
+  m_value_preview->setAutoFillBackground(true);
 
-  m_search_offset->setMaxLength(9);
-  m_search_address->setPlaceholderText(tr("Search Address"));
-  m_search_offset->setPlaceholderText(tr("Offset"));
+  row->addWidget(m_value_edit);
+  row->addWidget(m_hex_check);
+  return row;
+}
 
-  m_address_splitter->addWidget(m_search_address);
-  m_address_splitter->addWidget(m_search_offset);
-  m_address_splitter->setHandleWidth(1);
-  m_address_splitter->setCollapsible(0, false);
-  m_address_splitter->setStretchFactor(1, 2);
+void MemoryWidget::BuildValueTypes()
+{
+  m_value_type = new QComboBox;
+  FillTypeCombo(m_value_type, INPUT_TYPES);
+}
 
-  auto* input_layout = new QHBoxLayout;
-  m_data_edit = new QLineEdit;
-  m_base_check = new QCheckBox(tr("Hex"));
-  m_set_value = new QPushButton(tr("Set &Value"));
-  m_data_preview = new QLabel;
+QWidget* MemoryWidget::BuildSearchBox()
+{
+  auto* const box = new QGroupBox(tr("Search"));
+  auto* const stack = new QVBoxLayout;
+  box->setLayout(stack);
 
-  m_base_check->setLayoutDirection(Qt::RightToLeft);
-  m_data_edit->setPlaceholderText(tr("Value"));
-  m_data_preview->setBackgroundRole(QPalette::AlternateBase);
-  m_data_preview->setAutoFillBackground(true);
+  m_next_button = new QPushButton(tr("Find &Next"));
+  m_previous_button = new QPushButton(tr("Find &Previous"));
+  m_search_result = new QLabel;
+  stack->addWidget(m_next_button);
+  stack->addWidget(m_previous_button);
+  stack->addWidget(m_search_result);
+  stack->setSpacing(1);
+  return box;
+}
 
-  input_layout->addWidget(m_data_edit);
-  input_layout->addWidget(m_base_check);
+QWidget* MemoryWidget::BuildAddressSpaceBox()
+{
+  auto* const box = new QGroupBox(tr("Address Space"));
+  auto* const stack = new QVBoxLayout;
+  box->setLayout(stack);
 
-  // Input types
-  m_input_combo = new QComboBox;
-  m_input_combo->setMaxVisibleItems(20);
-  // Order here determines combo list order.
-  m_input_combo->addItem(tr("Hex Byte String"), int(Type::HexString));
-  m_input_combo->addItem(tr("ASCII"), int(Type::ASCII));
-  m_input_combo->addItem(tr("Float"), int(Type::Float32));
-  m_input_combo->addItem(tr("Double"), int(Type::Double));
-  m_input_combo->addItem(tr("Unsigned 8"), int(Type::Unsigned8));
-  m_input_combo->addItem(tr("Unsigned 16"), int(Type::Unsigned16));
-  m_input_combo->addItem(tr("Unsigned 32"), int(Type::Unsigned32));
-  m_input_combo->addItem(tr("Signed 8"), int(Type::Signed8));
-  m_input_combo->addItem(tr("Signed 16"), int(Type::Signed16));
-  m_input_combo->addItem(tr("Signed 32"), int(Type::Signed32));
+  // i18n: an address space choice: addresses as the CPU uses them, which the MMU may translate.
+  m_effective_radio = new QRadioButton(tr("Effective"));
+  // i18n: an address space choice: the separate auxiliary RAM (ARAM).
+  m_auxiliary_radio = new QRadioButton(tr("Auxiliary"));
+  // i18n: an address space choice: addresses as the hardware (RAM etc.) is actually wired.
+  m_physical_radio = new QRadioButton(tr("Physical"));
 
-  // Search Options
-  auto* search_group = new QGroupBox(tr("Search"));
-  auto* search_layout = new QVBoxLayout;
-  search_group->setLayout(search_layout);
+  stack->addWidget(m_effective_radio);
+  stack->addWidget(m_auxiliary_radio);
+  stack->addWidget(m_physical_radio);
+  stack->setSpacing(1);
+  return box;
+}
 
-  m_find_next = new QPushButton(tr("Find &Next"));
-  m_find_previous = new QPushButton(tr("Find &Previous"));
-  m_result_label = new QLabel;
+QWidget* MemoryWidget::BuildDisplayBox()
+{
+  auto* const box = new QGroupBox(tr("Display Type"));
+  auto* const stack = new QVBoxLayout;
+  box->setLayout(stack);
 
-  search_layout->addWidget(m_find_next);
-  search_layout->addWidget(m_find_previous);
-  search_layout->addWidget(m_result_label);
-  search_layout->setSpacing(1);
+  m_display_type = new QComboBox;
+  FillTypeCombo(m_display_type, DISPLAY_TYPES);
 
-  // Address Space
-  auto* address_space_group = new QGroupBox(tr("Address Space"));
-  auto* address_space_layout = new QVBoxLayout;
-  address_space_group->setLayout(address_space_layout);
+  // Item data: 0 asks the view to align to the value size, 1 disables alignment. The first item
+  // (alignment equal to the row length) is resolved when the display is applied.
+  m_alignment = new QComboBox;
+  // i18n: alignment that stays the same whatever the value type is
+  m_alignment->addItem(tr("Fixed Alignment"));
+  m_alignment->addItem(tr("Type-based Alignment"), 0);
+  m_alignment->addItem(tr("No Alignment"), 1);
 
-  // i18n: One of the options shown below "Address Space". "Effective" addresses are the addresses
-  // used directly by the CPU and may be subject to translation via the MMU to physical addresses.
-  m_address_space_effective = new QRadioButton(tr("Effective"));
-  // i18n: One of the options shown below "Address Space". "Auxiliary" is the address space of ARAM
-  // (Auxiliary RAM).
-  m_address_space_auxiliary = new QRadioButton(tr("Auxiliary"));
-  // i18n: One of the options shown below "Address Space". "Physical" is the address space that
-  // reflects how devices (e.g. RAM) is physically wired up.
-  m_address_space_physical = new QRadioButton(tr("Physical"));
+  m_row_length = new QComboBox;
+  m_row_length->addItem(tr("4 Bytes"), 4);
+  m_row_length->addItem(tr("8 Bytes"), 8);
+  m_row_length->addItem(tr("16 Bytes"), 16);
+  m_row_length->setCurrentIndex(2);
 
-  address_space_layout->addWidget(m_address_space_effective);
-  address_space_layout->addWidget(m_address_space_auxiliary);
-  address_space_layout->addWidget(m_address_space_physical);
-  address_space_layout->setSpacing(1);
-
-  // Data Type
-  auto* displaytype_group = new QGroupBox(tr("Display Type"));
-  auto* displaytype_layout = new QVBoxLayout;
-  displaytype_group->setLayout(displaytype_layout);
-
-  m_display_combo = new QComboBox;
-  m_display_combo->setMaxVisibleItems(20);
-  m_display_combo->addItem(tr("Hex 8"), int(Type::Hex8));
-  m_display_combo->addItem(tr("Hex 16"), int(Type::Hex16));
-  m_display_combo->addItem(tr("Hex 32"), int(Type::Hex32));
-  m_display_combo->addItem(tr("Unsigned 8"), int(Type::Unsigned8));
-  m_display_combo->addItem(tr("Unsigned 16"), int(Type::Unsigned16));
-  m_display_combo->addItem(tr("Unsigned 32"), int(Type::Unsigned32));
-  m_display_combo->addItem(tr("Signed 8"), int(Type::Signed8));
-  m_display_combo->addItem(tr("Signed 16"), int(Type::Signed16));
-  m_display_combo->addItem(tr("Signed 32"), int(Type::Signed32));
-  m_display_combo->addItem(tr("ASCII"), int(Type::ASCII));
-  m_display_combo->addItem(tr("Float"), int(Type::Float32));
-  m_display_combo->addItem(tr("Double"), int(Type::Double));
-
-  m_align_combo = new QComboBox;
-  // i18n: "Fixed" here means that the alignment is always the same
-  m_align_combo->addItem(tr("Fixed Alignment"));
-  m_align_combo->addItem(tr("Type-based Alignment"), 0);
-  m_align_combo->addItem(tr("No Alignment"), 1);
-
-  m_row_length_combo = new QComboBox;
-  m_row_length_combo->addItem(tr("4 Bytes"), 4);
-  m_row_length_combo->addItem(tr("8 Bytes"), 8);
-  m_row_length_combo->addItem(tr("16 Bytes"), 16);
-
-  m_row_length_combo->setCurrentIndex(2);
   m_dual_check = new QCheckBox(tr("Dual View"));
 
-  displaytype_layout->addWidget(m_display_combo);
-  displaytype_layout->addWidget(m_align_combo);
-  displaytype_layout->addWidget(m_row_length_combo);
-  displaytype_layout->addWidget(m_dual_check);
-
-  // MBP options
-  auto* bp_group = new QGroupBox(tr("Memory breakpoint options"));
-  auto* bp_layout = new QVBoxLayout;
-  bp_group->setLayout(bp_layout);
-
-  // i18n: This string is used for a radio button that represents the type of
-  // memory breakpoint that gets triggered when a read operation or write operation occurs.
-  // The string is not a command to read and write something or to allow reading and writing.
-  m_bp_read_write = new QRadioButton(tr("Read and write"));
-  // i18n: This string is used for a radio button that represents the type of
-  // memory breakpoint that gets triggered when a read operation occurs.
-  // The string does not mean "read-only" in the sense that something cannot be written to.
-  m_bp_read_only = new QRadioButton(tr("Read only"));
-  // i18n: This string is used for a radio button that represents the type of
-  // memory breakpoint that gets triggered when a write operation occurs.
-  // The string does not mean "write-only" in the sense that something cannot be read from.
-  m_bp_write_only = new QRadioButton(tr("Write only"));
-  m_bp_log_check = new QCheckBox(tr("Log"));
-
-  bp_layout->addWidget(m_bp_read_write);
-  bp_layout->addWidget(m_bp_read_only);
-  bp_layout->addWidget(m_bp_write_only);
-  bp_layout->addWidget(m_bp_log_check);
-  bp_layout->setSpacing(1);
-
-  // Notes
-  m_labels_group = new QGroupBox(tr("Labels"));
-  auto* symbols_box = new QTabWidget;
-  m_note_list = new QListWidget;
-  m_data_list = new QListWidget;
-  m_symbols_list = new QListWidget;
-  symbols_box->addTab(m_note_list, tr("Notes"));
-  symbols_box->addTab(m_data_list, tr("Data"));
-  symbols_box->addTab(m_symbols_list, tr("Symbols"));
-  m_symbols_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-
-  auto* labels_layout = new QVBoxLayout;
-  m_search_labels = new QLineEdit;
-  // i18n: Filter is a verb. Typing into this text box will filter the label list so that only
-  // labels containing the typed text are shown.
-  m_search_labels->setPlaceholderText(tr("Filter Label List"));
-
-  m_labels_group->setLayout(labels_layout);
-  labels_layout->addWidget(symbols_box);
-  labels_layout->addWidget(m_search_labels);
-
-  // Sidebar
-  auto* sidebar = new QWidget;
-  auto* sidebar_layout = new QVBoxLayout;
-
-  // Sidebar top menu
-  QMenuBar* menubar = new QMenuBar(sidebar);
-  menubar->setNativeMenuBar(false);
-  QMenu* menu_views = new QMenu(tr("&View"), menubar);
-  menubar->addMenu(menu_views);
-
-  QMenu* menu_import = new QMenu(tr("&Import"), menubar);
-  menu_import->addAction(tr("&Load file to current address"), this,
-                         &MemoryWidget::OnSetValueFromFile);
-  menubar->addMenu(menu_import);
-
-  // View Menu
-  auto* auto_update_action =
-      menu_views->addAction(tr("&Auto update memory values"), this, [this](bool checked) {
-        m_auto_update_enabled = checked;
-        if (checked)
-          RegisterAfterFrameEventCallback();
-        else
-          RemoveAfterFrameEventCallback();
-      });
-  auto_update_action->setCheckable(true);
-  auto_update_action->setChecked(true);
-
-  auto* highlight_update_action =
-      // i18n: Highlight is a verb (this is the label of a checkbox)
-      menu_views->addAction(tr("&Highlight recently changed values"), this,
-                            [this](bool checked) { m_memory_view->ToggleHighlights(checked); });
-  highlight_update_action->setCheckable(true);
-  highlight_update_action->setChecked(true);
-
-  // i18n: Highlight is a noun (clicking this lets you select a color)
-  menu_views->addAction(tr("Highlight &color"), this,
-                        [this] { m_memory_view->SetHighlightColor(); });
-
-  auto* show_notes =
-      menu_views->addAction(tr("&Show symbols and notes"), this, [this](bool checked) {
-        m_labels_visible = checked;
-        m_memory_view->ShowSymbols(checked);
-        UpdateNotes();
-      });
-  show_notes->setCheckable(true);
-  show_notes->setChecked(true);
-
-  QMenu* menu_export = new QMenu(tr("&Export"), menubar);
-  menu_export->addAction(tr("Dump &MRAM"), this, &MemoryWidget::OnDumpMRAM);
-  menu_export->addAction(tr("Dump &ExRAM"), this, &MemoryWidget::OnDumpExRAM);
-  menu_export->addAction(tr("Dump &ARAM"), this, &MemoryWidget::OnDumpARAM);
-  menu_export->addAction(tr("Dump &FakeVMEM"), this, &MemoryWidget::OnDumpFakeVMEM);
-  menubar->addMenu(menu_export);
-
-  sidebar_layout->setSpacing(1);
-  sidebar->setLayout(sidebar_layout);
-  sidebar_layout->addItem(new QSpacerItem(1, 20));
-  sidebar_layout->addWidget(m_address_splitter);
-  sidebar_layout->addLayout(input_layout);
-  sidebar_layout->addWidget(m_input_combo);
-  sidebar_layout->addItem(new QSpacerItem(1, 10));
-  sidebar_layout->addWidget(m_data_preview);
-  sidebar_layout->addWidget(m_set_value);
-  sidebar_layout->addItem(new QSpacerItem(1, 10));
-  sidebar_layout->addWidget(search_group);
-  sidebar_layout->addItem(new QSpacerItem(1, 10));
-  sidebar_layout->addWidget(displaytype_group);
-  sidebar_layout->addItem(new QSpacerItem(1, 10));
-  sidebar_layout->addWidget(address_space_group);
-  sidebar_layout->addItem(new QSpacerItem(1, 10));
-  sidebar_layout->addWidget(bp_group);
-  sidebar_layout->addWidget(m_labels_group);
-  sidebar_layout->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Expanding));
-
-  // Splitter
-  m_splitter = new QSplitter(Qt::Horizontal);
-
-  auto* sidebar_scroll = new QScrollArea;
-  sidebar_scroll->setWidget(sidebar);
-  sidebar_scroll->setWidgetResizable(true);
-
-  m_memory_view = new MemoryViewWidget(m_system, this);
-
-  m_splitter->addWidget(m_memory_view);
-  m_splitter->addWidget(sidebar_scroll);
-  m_splitter->setStretchFactor(0, 3);
-  m_splitter->setStretchFactor(1, 1);
-
-  layout->addWidget(m_splitter);
-
-  auto* widget = new QWidget;
-  widget->setLayout(layout);
-  setWidget(widget);
-  UpdateNotes();
+  stack->addWidget(m_display_type);
+  stack->addWidget(m_alignment);
+  stack->addWidget(m_row_length);
+  stack->addWidget(m_dual_check);
+  return box;
 }
 
-void MemoryWidget::ConnectWidgets()
+QWidget* MemoryWidget::BuildBreakpointBox()
 {
-  connect(m_search_address, &QComboBox::currentTextChanged, this, &MemoryWidget::OnSearchAddress);
-  connect(m_search_offset, &QLineEdit::textChanged, this, &MemoryWidget::OnSearchAddress);
-  connect(m_data_edit, &QLineEdit::textChanged, this, &MemoryWidget::ValidateAndPreviewInputValue);
+  auto* const box = new QGroupBox(tr("Memory breakpoint options"));
+  auto* const stack = new QVBoxLayout;
+  box->setLayout(stack);
 
-  connect(m_input_combo, &QComboBox::currentIndexChanged, this,
-          &MemoryWidget::ValidateAndPreviewInputValue);
-  connect(m_set_value, &QPushButton::clicked, this, &MemoryWidget::OnSetValue);
+  // i18n: kind of memory breakpoint: it fires on reads and on writes. It does not mean that
+  // something may be read and written.
+  m_bp_both_radio = new QRadioButton(tr("Read and write"));
+  // i18n: kind of memory breakpoint: it fires on reads only. Not "read-only" as in "cannot be
+  // written".
+  m_bp_read_radio = new QRadioButton(tr("Read only"));
+  // i18n: kind of memory breakpoint: it fires on writes only. Not "write-only" as in "cannot be
+  // read".
+  m_bp_write_radio = new QRadioButton(tr("Write only"));
+  m_bp_log_check = new QCheckBox(tr("Log"));
 
-  connect(m_find_next, &QPushButton::clicked, this, &MemoryWidget::OnFindNextValue);
-  connect(m_find_previous, &QPushButton::clicked, this, &MemoryWidget::OnFindPreviousValue);
+  stack->addWidget(m_bp_both_radio);
+  stack->addWidget(m_bp_read_radio);
+  stack->addWidget(m_bp_write_radio);
+  stack->addWidget(m_bp_log_check);
+  stack->setSpacing(1);
+  return box;
+}
 
-  for (auto* radio :
-       {m_address_space_effective, m_address_space_auxiliary, m_address_space_physical})
-  {
-    connect(radio, &QRadioButton::toggled, this, &MemoryWidget::OnAddressSpaceChanged);
-  }
-  for (auto* combo : {m_display_combo, m_align_combo, m_row_length_combo})
-  {
-    connect(combo, &QComboBox::currentIndexChanged, this, &MemoryWidget::OnDisplayChanged);
-  }
+void MemoryWidget::BuildLabelsBox()
+{
+  m_labels_box = new QGroupBox(tr("Labels"));
+  auto* const tabs = new QTabWidget;
+  m_note_list = new QListWidget;
+  m_data_list = new QListWidget;
+  m_symbol_list = new QListWidget;
+  tabs->addTab(m_note_list, tr("Notes"));
+  tabs->addTab(m_data_list, tr("Data"));
+  tabs->addTab(m_symbol_list, tr("Symbols"));
+  m_symbol_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
-  connect(m_dual_check, &QCheckBox::toggled, this, &MemoryWidget::OnDisplayChanged);
+  auto* const stack = new QVBoxLayout;
+  m_label_filter = new QLineEdit;
+  // i18n: "Filter" is a verb: typing here narrows the label lists to entries containing the text.
+  m_label_filter->setPlaceholderText(tr("Filter Label List"));
 
-  for (auto* radio : {m_bp_read_write, m_bp_read_only, m_bp_write_only})
-    connect(radio, &QRadioButton::toggled, this, &MemoryWidget::OnBPTypeChanged);
+  m_labels_box->setLayout(stack);
+  stack->addWidget(tabs);
+  stack->addWidget(m_label_filter);
+}
 
-  connect(m_base_check, &QCheckBox::toggled, this, &MemoryWidget::ValidateAndPreviewInputValue);
-  connect(m_bp_log_check, &QCheckBox::toggled, this, &MemoryWidget::OnBPLogChanged);
+void MemoryWidget::BuildMenus(QWidget* sidebar)
+{
+  auto* const bar = new QMenuBar(sidebar);
+  bar->setNativeMenuBar(false);
 
-  for (auto* list : {m_symbols_list, m_data_list, m_note_list})
-    connect(list, &QListWidget::itemClicked, this, &MemoryWidget::OnSelectLabel);
+  auto* const view_menu = new QMenu(tr("&View"), bar);
+  bar->addMenu(view_menu);
 
-  connect(Host::GetInstance(), &Host::PPCSymbolsChanged, this, &MemoryWidget::RefreshLabelBox);
-  connect(m_search_labels, &QLineEdit::textChanged, this, &MemoryWidget::RefreshLabelBox);
+  auto* const import_menu = new QMenu(tr("&Import"), bar);
+  import_menu->addAction(tr("&Load file to current address"), this, &MemoryWidget::WriteFile);
+  bar->addMenu(import_menu);
+
+  // A checkable View entry, on by default; the handler receives the new state when clicked.
+  const auto add_toggle = [this, view_menu](const QString& text, auto handler) {
+    QAction* const toggle = view_menu->addAction(text, this, handler);
+    toggle->setCheckable(true);
+    toggle->setChecked(true);
+  };
+  add_toggle(tr("&Auto update memory values"), [this](bool on) {
+    m_auto_update = on;
+    if (on)
+      StartFrameUpdates();
+    else
+      StopFrameUpdates();
+  });
+  // i18n: "Highlight" is a verb here; this entry is a checkbox
+  add_toggle(tr("&Highlight recently changed values"),
+             [this](bool on) { m_memory_view->ToggleHighlights(on); });
+  // i18n: "Highlight" is a noun here; this entry opens a colour picker
+  view_menu->addAction(tr("Highlight &color"), this,
+                       [this] { m_memory_view->SetHighlightColor(); });
+  add_toggle(tr("&Show symbols and notes"), [this](bool on) {
+    m_labels_visible = on;
+    m_memory_view->ShowSymbols(on);
+    FillNoteList();
+  });
+
+  auto* const export_menu = new QMenu(tr("&Export"), bar);
+  export_menu->addAction(tr("Dump &MRAM"), this,
+                         [] { DumpSpace(AddressSpace::Type::Mem1, F_MEM1DUMP_IDX); });
+  export_menu->addAction(tr("Dump &ExRAM"), this,
+                         [] { DumpSpace(AddressSpace::Type::Mem2, F_MEM2DUMP_IDX); });
+  export_menu->addAction(tr("Dump &ARAM"), this,
+                         [] { DumpSpace(AddressSpace::Type::Auxiliary, F_ARAMDUMP_IDX); });
+  export_menu->addAction(tr("Dump &FakeVMEM"), this,
+                         [] { DumpSpace(AddressSpace::Type::Fake, F_FAKEVMEMDUMP_IDX); });
+  bar->addMenu(export_menu);
+}
+
+void MemoryWidget::Wire()
+{
+  connect(m_address_box, &QComboBox::currentTextChanged, this, &MemoryWidget::JumpToTyped);
+  connect(m_offset_box, &QLineEdit::textChanged, this, &MemoryWidget::JumpToTyped);
+  connect(m_value_edit, &QLineEdit::textChanged, this, &MemoryWidget::PreviewValue);
+  connect(m_value_type, &QComboBox::currentIndexChanged, this, &MemoryWidget::PreviewValue);
+  connect(m_write_button, &QPushButton::clicked, this, &MemoryWidget::WriteValue);
+  connect(m_next_button, &QPushButton::clicked, this, [this] { Search(true); });
+  connect(m_previous_button, &QPushButton::clicked, this, [this] { Search(false); });
+
+  for (QRadioButton* const radio : {m_effective_radio, m_auxiliary_radio, m_physical_radio})
+    connect(radio, &QRadioButton::toggled, this, &MemoryWidget::AddressSpaceChosen);
+  for (QComboBox* const combo : {m_display_type, m_alignment, m_row_length})
+    connect(combo, &QComboBox::currentIndexChanged, this, &MemoryWidget::DisplayChosen);
+  connect(m_dual_check, &QCheckBox::toggled, this, &MemoryWidget::DisplayChosen);
+  for (QRadioButton* const radio : {m_bp_both_radio, m_bp_read_radio, m_bp_write_radio})
+    connect(radio, &QRadioButton::toggled, this, &MemoryWidget::BreakpointKindChosen);
+  connect(m_hex_check, &QCheckBox::toggled, this, &MemoryWidget::PreviewValue);
+  connect(m_bp_log_check, &QCheckBox::toggled, this, &MemoryWidget::BreakpointLoggingChosen);
+
+  for (QListWidget* const list : {m_symbol_list, m_data_list, m_note_list})
+    connect(list, &QListWidget::itemClicked, this, &MemoryWidget::JumpToLabel);
+
+  connect(Host::GetInstance(), &Host::PPCSymbolsChanged, this, &MemoryWidget::RefreshLabels);
+  connect(m_label_filter, &QLineEdit::textChanged, this, &MemoryWidget::RefreshLabels);
   connect(m_memory_view, &MemoryViewWidget::ShowCode, this, &MemoryWidget::ShowCode);
   connect(m_memory_view, &MemoryViewWidget::RequestWatch, this, &MemoryWidget::RequestWatch);
-  connect(m_memory_view, &MemoryViewWidget::ActivateSearch, this,
-          &MemoryWidget::ActivateSearchAddress);
+  connect(m_memory_view, &MemoryViewWidget::ActivateSearch, this, &MemoryWidget::FocusAddressBox);
 }
 
 void MemoryWidget::closeEvent(QCloseEvent*)
 {
   Settings::Instance().SetMemoryVisible(false);
-  RemoveAfterFrameEventCallback();
+  StopFrameUpdates();
 }
 
-void MemoryWidget::showEvent(QShowEvent* event)
+void MemoryWidget::showEvent(QShowEvent*)
 {
-  if (m_auto_update_enabled)
-    RegisterAfterFrameEventCallback();
-
+  if (m_auto_update)
+    StartFrameUpdates();
   Update();
 }
 
-void MemoryWidget::hideEvent(QHideEvent* event)
+void MemoryWidget::hideEvent(QHideEvent*)
 {
-  RemoveAfterFrameEventCallback();
+  StopFrameUpdates();
 }
 
-void MemoryWidget::RegisterAfterFrameEventCallback()
+// Values are captured at the end of every emulated field while auto update is on.
+void MemoryWidget::StartFrameUpdates()
 {
-  m_vi_end_field_event =
-      m_system.GetVideoEvents().vi_end_field_event.Register([this] { AutoUpdateTable(); });
+  m_frame_hook = m_system.GetVideoEvents().vi_end_field_event.Register(
+      [this] { m_memory_view->UpdateOnFrameEnd(); });
 }
 
-void MemoryWidget::RemoveAfterFrameEventCallback()
+void MemoryWidget::StopFrameUpdates()
 {
-  m_vi_end_field_event.reset();
-}
-
-void MemoryWidget::AutoUpdateTable()
-{
-  m_memory_view->UpdateOnFrameEnd();
+  m_frame_hook.reset();
 }
 
 void MemoryWidget::Update()
 {
   if (!isVisible())
     return;
-
   m_memory_view->UpdateDispatcher(MemoryViewWidget::UpdateType::Addresses);
   update();
 }
 
-void MemoryWidget::LoadSettings()
+void MemoryWidget::RestoreChoices()
 {
-  QSettings& settings = Settings::GetQSettings();
+  const QSettings& stored = Settings::GetQSettings();
+  m_value_type->setCurrentIndex(stored.value(QStringLiteral("memorywidget/inputcombo"), 1).toInt());
 
-  const int combo_index = settings.value(QStringLiteral("memorywidget/inputcombo"), 1).toInt();
+  // Set in this order; an exclusive radio button cannot be unchecked directly.
+  m_effective_radio->setChecked(
+      stored.value(QStringLiteral("memorywidget/addrspace_effective"), true).toBool());
+  m_auxiliary_radio->setChecked(
+      stored.value(QStringLiteral("memorywidget/addrspace_auxiliary"), false).toBool());
+  m_physical_radio->setChecked(
+      stored.value(QStringLiteral("memorywidget/addrspace_physical"), false).toBool());
 
-  m_input_combo->setCurrentIndex(combo_index);
+  m_display_type->setCurrentIndex(
+      stored.value(QStringLiteral("memorywidget/display_type"), 1).toInt());
 
-  const bool address_space_effective =
-      settings.value(QStringLiteral("memorywidget/addrspace_effective"), true).toBool();
-  const bool address_space_auxiliary =
-      settings.value(QStringLiteral("memorywidget/addrspace_auxiliary"), false).toBool();
-  const bool address_space_physical =
-      settings.value(QStringLiteral("memorywidget/addrspace_physical"), false).toBool();
+  const bool both = stored.value(QStringLiteral("memorywidget/bpreadwrite"), true).toBool();
+  const bool reads = stored.value(QStringLiteral("memorywidget/bpread"), false).toBool();
+  const bool writes = stored.value(QStringLiteral("memorywidget/bpwrite"), false).toBool();
+  const bool log = stored.value(QStringLiteral("memorywidget/bplog"), true).toBool();
 
-  m_address_space_effective->setChecked(address_space_effective);
-  m_address_space_auxiliary->setChecked(address_space_auxiliary);
-  m_address_space_physical->setChecked(address_space_physical);
-
-  const int display_index = settings.value(QStringLiteral("memorywidget/display_type"), 1).toInt();
-
-  m_display_combo->setCurrentIndex(display_index);
-
-  bool bp_rw = settings.value(QStringLiteral("memorywidget/bpreadwrite"), true).toBool();
-  bool bp_r = settings.value(QStringLiteral("memorywidget/bpread"), false).toBool();
-  bool bp_w = settings.value(QStringLiteral("memorywidget/bpwrite"), false).toBool();
-  bool bp_log = settings.value(QStringLiteral("memorywidget/bplog"), true).toBool();
-
-  if (bp_rw)
-    m_memory_view->SetBPType(MemoryViewWidget::BPType::ReadWrite);
-  else if (bp_r)
-    m_memory_view->SetBPType(MemoryViewWidget::BPType::ReadOnly);
-  else
-    m_memory_view->SetBPType(MemoryViewWidget::BPType::WriteOnly);
-
-  m_bp_read_write->setChecked(bp_rw);
-  m_bp_read_only->setChecked(bp_r);
-  m_bp_write_only->setChecked(bp_w);
-  m_bp_log_check->setChecked(bp_log);
+  using BPType = MemoryViewWidget::BPType;
+  m_memory_view->SetBPType(both ? BPType::ReadWrite : reads ? BPType::ReadOnly : BPType::WriteOnly);
+  m_bp_both_radio->setChecked(both);
+  m_bp_read_radio->setChecked(reads);
+  m_bp_write_radio->setChecked(writes);
+  m_bp_log_check->setChecked(log);
 }
 
-void MemoryWidget::SaveSettings()
+void MemoryWidget::StoreChoices()
 {
-  QSettings& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("memorywidget/inputcombo"), m_input_combo->currentIndex());
-
-  settings.setValue(QStringLiteral("memorywidget/addrspace_effective"),
-                    m_address_space_effective->isChecked());
-  settings.setValue(QStringLiteral("memorywidget/addrspace_auxiliary"),
-                    m_address_space_auxiliary->isChecked());
-  settings.setValue(QStringLiteral("memorywidget/addrspace_physical"),
-                    m_address_space_physical->isChecked());
-
-  settings.setValue(QStringLiteral("memorywidget/display_type"), m_display_combo->currentIndex());
-
-  settings.setValue(QStringLiteral("memorywidget/bpreadwrite"), m_bp_read_write->isChecked());
-  settings.setValue(QStringLiteral("memorywidget/bpread"), m_bp_read_only->isChecked());
-  settings.setValue(QStringLiteral("memorywidget/bpwrite"), m_bp_write_only->isChecked());
-  settings.setValue(QStringLiteral("memorywidget/bplog"), m_bp_log_check->isChecked());
+  QSettings& stored = Settings::GetQSettings();
+  const std::array<std::pair<const char*, QVariant>, 9> values{{
+      {"memorywidget/inputcombo", m_value_type->currentIndex()},
+      {"memorywidget/addrspace_effective", m_effective_radio->isChecked()},
+      {"memorywidget/addrspace_auxiliary", m_auxiliary_radio->isChecked()},
+      {"memorywidget/addrspace_physical", m_physical_radio->isChecked()},
+      {"memorywidget/display_type", m_display_type->currentIndex()},
+      {"memorywidget/bpreadwrite", m_bp_both_radio->isChecked()},
+      {"memorywidget/bpread", m_bp_read_radio->isChecked()},
+      {"memorywidget/bpwrite", m_bp_write_radio->isChecked()},
+      {"memorywidget/bplog", m_bp_log_check->isChecked()},
+  }};
+  for (const auto& [key, value] : values)
+    stored.setValue(QString::fromLatin1(key), value);
 }
 
-void MemoryWidget::OnAddressSpaceChanged()
+void MemoryWidget::AddressSpaceChosen()
 {
-  AddressSpace::Type space;
-
-  if (m_address_space_effective->isChecked())
+  AddressSpace::Type space = AddressSpace::Type::Physical;
+  if (m_effective_radio->isChecked())
     space = AddressSpace::Type::Effective;
-  else if (m_address_space_auxiliary->isChecked())
+  else if (m_auxiliary_radio->isChecked())
     space = AddressSpace::Type::Auxiliary;
-  else
-    space = AddressSpace::Type::Physical;
-
   m_memory_view->SetAddressSpace(space);
-
-  SaveSettings();
+  StoreChoices();
 }
 
-void MemoryWidget::OnDisplayChanged()
+void MemoryWidget::DisplayChosen()
 {
-  const auto type = static_cast<Type>(m_display_combo->currentData().toInt());
-  int bytes_per_row = m_row_length_combo->currentData().toInt();
-  int alignment;
-  bool dual_view = m_dual_check->isChecked();
+  const auto type = static_cast<ViewType>(m_display_type->currentData().toInt());
+  int row_bytes = m_row_length->currentData().toInt();
+  // A double does not fit a four-byte row.
+  if (type == ViewType::Double && row_bytes == 4)
+    row_bytes = 8;
 
-  if (type == Type::Double && bytes_per_row == 4)
-    bytes_per_row = 8;
+  // "Fixed" aligns to the row length; the other entries carry their value as item data.
+  const int alignment =
+      m_alignment->currentIndex() == 0 ? row_bytes : m_alignment->currentData().toInt();
 
-  // Alignment: First (fixed) option equals bytes per row. 'currentData' is correct for other
-  // options. Type-based must be calculated in memoryviewwidget and is left at 0. "No alignment" is
-  // equivalent to a value of 1.
-  if (m_align_combo->currentIndex() == 0)
-    alignment = bytes_per_row;
-  else
-    alignment = m_align_combo->currentData().toInt();
-
-  m_memory_view->SetDisplay(type, bytes_per_row, alignment, dual_view);
-
-  SaveSettings();
+  m_memory_view->SetDisplay(type, row_bytes, alignment, m_dual_check->isChecked());
+  StoreChoices();
 }
 
-void MemoryWidget::OnBPLogChanged()
+void MemoryWidget::BreakpointLoggingChosen()
 {
   m_memory_view->SetBPLoggingEnabled(m_bp_log_check->isChecked());
-  SaveSettings();
+  StoreChoices();
 }
 
-void MemoryWidget::OnBPTypeChanged()
+void MemoryWidget::BreakpointKindChosen()
 {
-  bool read_write = m_bp_read_write->isChecked();
-  bool read_only = m_bp_read_only->isChecked();
-
-  MemoryViewWidget::BPType type;
-
-  if (read_write)
-    type = MemoryViewWidget::BPType::ReadWrite;
-  else if (read_only)
-    type = MemoryViewWidget::BPType::ReadOnly;
-  else
-    type = MemoryViewWidget::BPType::WriteOnly;
-
-  m_memory_view->SetBPType(type);
-
-  SaveSettings();
+  using BPType = MemoryViewWidget::BPType;
+  BPType kind = BPType::WriteOnly;
+  if (m_bp_both_radio->isChecked())
+    kind = BPType::ReadWrite;
+  else if (m_bp_read_radio->isChecked())
+    kind = BPType::ReadOnly;
+  m_memory_view->SetBPType(kind);
+  StoreChoices();
 }
 
 void MemoryWidget::SetAddress(u32 address)
 {
-  // Store current and target address in combo box
-  const QSignalBlocker blocker(m_search_address);
-  const QString current_text = m_search_address->currentText();
-  const QString target_addr = QString::number(address, 16);
-  bool good;
-  const u32 current_addr = current_text.toUInt(&good, 16);
+  // Keep the previous address (if it was a valid one) and the new one in the history list,
+  // without reacting to our own edits of the box.
+  const QSignalBlocker quiet(m_address_box);
+  const QString previous = m_address_box->currentText();
+  const QString wanted = QString::number(address, 16);
 
-  if (good)
+  bool keep_previous = false;
+  const u32 previous_address = previous.toUInt(&keep_previous, 16);
+  if (keep_previous)
   {
-    AddressSpace::Accessors* accessors =
+    AddressSpace::Accessors* const memory =
         AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
-
     const Core::CPUThreadGuard guard(m_system);
-    good = accessors->IsValidAddress(guard, current_addr);
+    keep_previous = memory->IsValidAddress(guard, previous_address);
   }
 
-  if (m_search_address->findText(current_text) == -1 && good)
-    m_search_address->insertItem(0, current_text);
-
-  if (m_search_address->findText(target_addr) == -1)
-    m_search_address->insertItem(0, target_addr);
-
-  m_search_address->setCurrentText(target_addr);
+  if (m_address_box->findText(previous) == -1 && keep_previous)
+    m_address_box->insertItem(0, previous);
+  if (m_address_box->findText(wanted) == -1)
+    m_address_box->insertItem(0, wanted);
+  m_address_box->setCurrentText(wanted);
 
   m_memory_view->SetAddress(address);
   Settings::Instance().SetMemoryVisible(true);
   raise();
-
   m_memory_view->setFocus();
 }
 
-void MemoryWidget::ActivateSearchAddress()
+void MemoryWidget::FocusAddressBox()
 {
-  m_search_address->setFocus();
-  m_search_address->lineEdit()->selectAll();
+  m_address_box->setFocus();
+  m_address_box->lineEdit()->selectAll();
 }
 
-void MemoryWidget::OnSearchAddress()
+void MemoryWidget::JumpToTyped()
 {
-  const auto target_addr = GetTargetAddress();
-
-  if (target_addr.is_good_address && target_addr.is_good_offset)
-    m_memory_view->SetAddress(target_addr.address);
-
-  QFont addr_font, offset_font;
-  QPalette addr_palette, offset_palette;
-
-  if (!target_addr.is_good_address)
-  {
-    addr_font.setBold(true);
-    addr_palette.setColor(QPalette::Text, Qt::red);
-  }
-
-  if (!target_addr.is_good_offset)
-  {
-    offset_font.setBold(true);
-    offset_palette.setColor(QPalette::Text, Qt::red);
-  }
-
-  m_search_address->setFont(addr_font);
-  m_search_address->setPalette(addr_palette);
-  m_search_offset->setFont(offset_font);
-  m_search_offset->setPalette(offset_palette);
+  const Target target = ResolveTarget();
+  if (target.address_ok && target.offset_ok)
+    m_memory_view->SetAddress(target.address);
+  MarkInput(m_address_box, !target.address_ok);
+  MarkInput(m_offset_box, !target.offset_ok);
 }
 
-void MemoryWidget::ValidateAndPreviewInputValue()
+// Normalises the typed value, shows the bytes it would write (or marks the box), and keeps the
+// Hex checkbox enabled only for integer types.
+void MemoryWidget::PreviewValue()
 {
-  m_data_preview->clear();
-  QString input_text = m_data_edit->text();
-  const auto input_type = static_cast<Type>(m_input_combo->currentData().toInt());
+  m_value_preview->clear();
+  QString text = m_value_edit->text();
+  const auto type = static_cast<ViewType>(m_value_type->currentData().toInt());
+  m_hex_check->setEnabled(IsIntegerType(type));
 
-  m_base_check->setEnabled(input_type == Type::Unsigned32 || input_type == Type::Signed32 ||
-                           input_type == Type::Unsigned16 || input_type == Type::Signed16 ||
-                           input_type == Type::Unsigned8 || input_type == Type::Signed8);
-
-  if (input_text.isEmpty())
+  if (text.isEmpty())
     return;
 
-  // Remove any spaces
-  if (input_type != Type::ASCII)
-    input_text.remove(QLatin1Char(' '));
+  if (type != ViewType::ASCII)
+    text.remove(QLatin1Char(' '));
 
-  if (input_type == Type::HexString)
+  const QString hex_prefix = QStringLiteral("0x");
+  if (type == ViewType::HexString)
   {
-    // Hex strings are parsed using QByteArray::fromHex which doesn't expect a 0x prefix. If the
-    // user has inserted one, remove it.
-    if (input_text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-      input_text.remove(0, 2);
+    // fromHex() does not accept a prefix.
+    if (text.startsWith(hex_prefix, Qt::CaseInsensitive))
+      text.remove(0, 2);
   }
-  else if (m_base_check->isChecked())
+  else if (m_hex_check->isChecked())
   {
-    // Add 0x to the front of the input (after the '-', if present), but only if the user didn't
-    // already do so.
-    if (input_text.startsWith(QLatin1Char('-')))
-    {
-      if (!input_text.startsWith(QStringLiteral("-0x"), Qt::CaseInsensitive))
-        input_text.insert(1, QStringLiteral("0x"));
-    }
-    else if (!input_text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-    {
-      input_text.prepend(QStringLiteral("0x"));
-    }
+    // Add the prefix (after a minus sign, if any) unless it is already there.
+    const qsizetype digits_at = text.startsWith(QLatin1Char('-')) ? 1 : 0;
+    if (!QStringView(text).sliced(digits_at).startsWith(hex_prefix, Qt::CaseInsensitive))
+      text.insert(digits_at, hex_prefix);
   }
 
-  QFont font;
-  QPalette palette;
-  std::vector<u8> bytes = m_memory_view->ConvertTextToBytes(input_type, input_text);
-
+  const std::vector<u8> bytes = m_memory_view->ConvertTextToBytes(type, text);
   if (!bytes.empty())
   {
-    QString hex_string;
-    std::string s;
-
-    for (const u8 c : bytes)
-      s.append(fmt::format("{:02x}", c));
-
-    hex_string = QString::fromStdString(s);
-    int output_length = hex_string.length();
-
-    if (output_length > 16)
-    {
-      hex_string.truncate(16);
-      output_length = hex_string.length();
-      hex_string.append(QStringLiteral("..."));
-    }
-
-    for (int i = 2; i < output_length; i += 2)
-      hex_string.insert(output_length - i, QLatin1Char{' '});
-
-    m_data_preview->setText(hex_string);
+    // At most eight bytes are shown, space separated, with "..." when there are more.
+    QStringList shown;
+    for (std::size_t i = 0; i < bytes.size() && i < 8; ++i)
+      shown.append(QString::fromStdString(fmt::format("{:02x}", bytes[i])));
+    QString preview = shown.join(QLatin1Char(' '));
+    if (bytes.size() > 8)
+      preview.append(QStringLiteral("..."));
+    m_value_preview->setText(preview);
   }
-  else
-  {
-    font.setBold(true);
-    palette.setColor(QPalette::Text, Qt::red);
-  }
-
-  m_data_edit->setFont(font);
-  m_data_edit->setPalette(palette);
+  MarkInput(m_value_edit, bytes.empty());
 }
 
-QByteArray MemoryWidget::GetInputData() const
+// The bytes to write or search for; empty when the input is missing or invalid.
+QByteArray MemoryWidget::ValueBytes() const
 {
-  // Empty or invalid input data returns an empty array.
-  if (m_data_preview->text().isEmpty())
-    return QByteArray();
+  if (m_value_preview->text().isEmpty())
+    return {};
 
-  const auto input_type = static_cast<Type>(m_input_combo->currentData().toInt());
-
-  // Ascii might be truncated, pull from data edit box.
-  if (input_type == Type::ASCII)
-    return QByteArray(m_data_edit->text().toUtf8());
-
-  // If we are doing a large array of hex bytes
-  if (input_type == Type::HexString)
-    return QByteArray::fromHex(m_data_edit->text().toUtf8());
-
-  // Data preview has exactly what we want to input, so pull it from there.
-  return QByteArray::fromHex(m_data_preview->text().toUtf8());
+  const auto type = static_cast<ViewType>(m_value_type->currentData().toInt());
+  // The preview may be cut short for these, so they are taken from the edit box.
+  if (type == ViewType::ASCII)
+    return m_value_edit->text().toUtf8();
+  if (type == ViewType::HexString)
+    return QByteArray::fromHex(m_value_edit->text().toUtf8());
+  return QByteArray::fromHex(m_value_preview->text().toUtf8());
 }
 
-void MemoryWidget::OnSetValue()
+// Address box (hex; empty means 0) plus offset box (signed hex; empty means 0). The offset is
+// rejected if it would move the address past either end of the 32-bit space.
+MemoryWidget::Target MemoryWidget::ResolveTarget() const
+{
+  Target target;
+  const QString address_text = m_address_box->currentText();
+  const QString offset_text = m_offset_box->text();
+
+  const u32 base = address_text.toUInt(&target.address_ok, 16);
+  target.address_ok = target.address_ok || address_text.isEmpty();
+
+  const s32 offset = offset_text.toInt(&target.offset_ok, 16);
+  target.offset_ok = target.offset_ok || offset_text.isEmpty();
+
+  // Magnitude of a negative offset, computed without overflowing on the most negative value.
+  const u32 back = offset == std::numeric_limits<s32>::min() ?
+                       u32{1} << 31 :
+                       static_cast<u32>(-static_cast<s64>(offset));
+  if (offset < 0 && back > base)
+    target.offset_ok = false;
+  if (offset > 0 && std::numeric_limits<u32>::max() - static_cast<u32>(offset) < base)
+    target.offset_ok = false;
+
+  if (target.address_ok && target.offset_ok)
+    target.address = offset < 0 ? base - back : base + static_cast<u32>(offset);
+  return target;
+}
+
+bool MemoryWidget::ReportBadTarget(const Target& target)
+{
+  if (!target.address_ok)
+  {
+    ModalMessageBox::critical(this, tr("Error"), tr("Bad address provided."));
+    return true;
+  }
+  if (!target.offset_ok)
+  {
+    ModalMessageBox::critical(this, tr("Error"), tr("Bad offset provided."));
+    return true;
+  }
+  return false;
+}
+
+void MemoryWidget::WriteValue()
 {
   if (!Core::IsRunning(m_system))
     return;
 
-  auto target_addr = GetTargetAddress();
-
-  if (!target_addr.is_good_address)
-  {
-    ModalMessageBox::critical(this, tr("Error"), tr("Bad address provided."));
+  const Target target = ResolveTarget();
+  if (ReportBadTarget(target))
     return;
-  }
 
-  if (!target_addr.is_good_offset)
-  {
-    ModalMessageBox::critical(this, tr("Error"), tr("Bad offset provided."));
-    return;
-  }
-
-  const QByteArray bytes = GetInputData();
-
-  // Invalid input will give an empty array.
+  const QByteArray bytes = ValueBytes();
   if (bytes.isEmpty())
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Bad value provided."));
     return;
   }
 
+  // The guard is held through the refresh at the end.
   const Core::CPUThreadGuard guard(m_system);
-
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
-  u32 end_address = target_addr.address + static_cast<u32>(bytes.size()) - 1;
-
-  if (!accessors->IsValidAddress(guard, target_addr.address) ||
-      !accessors->IsValidAddress(guard, end_address))
+  AddressSpace::Accessors* const memory =
+      AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
+  const u32 last = target.address + static_cast<u32>(bytes.size()) - 1;
+  if (!memory->IsValidAddress(guard, target.address) || !memory->IsValidAddress(guard, last))
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Target address range is invalid."));
     return;
   }
 
-  for (const char c : bytes)
-    accessors->WriteU8(guard, target_addr.address++, static_cast<u8>(c));
-
+  u32 address = target.address;
+  for (const char byte : bytes)
+    memory->WriteU8(guard, address++, static_cast<u8>(byte));
   Update();
 }
 
-void MemoryWidget::OnSetValueFromFile()
+void MemoryWidget::WriteFile()
 {
   if (!Core::IsRunning(m_system))
     return;
 
-  auto target_addr = GetTargetAddress();
-
-  if (!target_addr.is_good_address)
-  {
-    ModalMessageBox::critical(this, tr("Error"), tr("Bad address provided."));
+  const Target target = ResolveTarget();
+  if (ReportBadTarget(target))
     return;
-  }
 
-  if (!target_addr.is_good_offset)
-  {
-    ModalMessageBox::critical(this, tr("Error"), tr("Bad offset provided."));
-    return;
-  }
-
-  QString path = QFileDialog::getOpenFileName(this, tr("Select a file"), QDir::currentPath(),
-                                              tr("All files (*)"));
+  const QString path = QFileDialog::getOpenFileName(this, tr("Select a file"), QDir::currentPath(),
+                                                    tr("All files (*)"));
   if (path.isNull())
-  {
     return;
-  }
 
-  File::IOFile f(path.toStdString(), "rb");
-
-  if (!f)
+  File::IOFile file(path.toStdString(), "rb");
+  if (!file)
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Unable to open file."));
     return;
   }
-
-  const u64 file_length = f.GetSize();
-  std::vector<u8> file_contents(file_length);
-  if (!f.ReadBytes(file_contents.data(), file_length))
+  std::vector<u8> contents(file.GetSize());
+  if (!file.ReadBytes(contents.data(), contents.size()))
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Unable to read file."));
     return;
   }
 
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
-
+  // Unlike WriteValue, the range is not checked up front.
+  AddressSpace::Accessors* const memory =
+      AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
   const Core::CPUThreadGuard guard(m_system);
-
-  for (u8 b : file_contents)
-    accessors->WriteU8(guard, target_addr.address++, b);
-
+  u32 address = target.address;
+  for (const u8 byte : contents)
+    memory->WriteU8(guard, address++, byte);
   Update();
 }
 
-void MemoryWidget::RefreshLabelBox()
+void MemoryWidget::RefreshLabels()
 {
-  if (!m_labels_visible || m_ppc_symbol_db.IsEmpty())
+  if (!m_labels_visible || m_symbol_db.IsEmpty())
   {
-    m_labels_group->hide();
+    m_labels_box->hide();
     return;
   }
-
-  m_labels_group->show();
-
-  UpdateSymbols();
-  UpdateNotes();
+  m_labels_box->show();
+  FillSymbolLists();
+  FillNoteList();
 }
 
-void MemoryWidget::OnSelectLabel()
+void MemoryWidget::JumpToLabel()
 {
-  QList<QListWidgetItem*> items;
-  if (m_note_list->isVisible())
-    items = m_note_list->selectedItems();
-  else if (m_symbols_list->isVisible())
-    items = m_symbols_list->selectedItems();
-  else if (m_data_list->isVisible())
-    items = m_data_list->selectedItems();
-
-  if (items.isEmpty())
-    return;
-
-  const u32 address = items[0]->data(Qt::UserRole).toUInt();
-
-  SetAddress(address);
+  // Whichever list's tab is showing.
+  QList<QListWidgetItem*> picked;
+  for (const QListWidget* const list : {m_note_list, m_symbol_list, m_data_list})
+  {
+    if (list->isVisible())
+    {
+      picked = list->selectedItems();
+      break;
+    }
+  }
+  if (!picked.isEmpty())
+    SetAddress(picked.front()->data(Qt::UserRole).toUInt());
 }
 
-void MemoryWidget::UpdateSymbols()
+// Functions go to the Symbols tab, everything else to Data. Only the Symbols tab is sorted.
+void MemoryWidget::FillSymbolLists()
 {
-  const QString selection = m_symbols_list->selectedItems().isEmpty() ?
-                                QString{} :
-                                m_symbols_list->selectedItems()[0]->text();
-  m_symbols_list->clear();
+  const QList<QListWidgetItem*> picked = m_symbol_list->selectedItems();
+  const QString previous = picked.isEmpty() ? QString{} : picked.front()->text();
+  m_symbol_list->clear();
   m_data_list->clear();
 
-  m_ppc_symbol_db.ForEachSymbol([&](const Common::Symbol& symbol) {
+  const QString filter = m_label_filter->text();
+  m_symbol_db.ForEachSymbol([&](const Common::Symbol& symbol) {
     QString name = QString::fromStdString(symbol.name);
-
-    // If the symbol has an object name, add it to the entry name.
     if (!symbol.object_name.empty())
-    {
       name += QString::fromStdString(fmt::format(" ({})", symbol.object_name));
-    }
-
-    auto* item = new QListWidgetItem(name);
-    if (name == selection)
-      item->setSelected(true);
-
-    item->setData(Qt::UserRole, symbol.address);
-
-    if (!name.contains(m_search_labels->text(), Qt::CaseInsensitive))
+    if (!name.contains(filter, Qt::CaseInsensitive))
       return;
 
-    if (symbol.type != Common::Symbol::Type::Function)
-      m_data_list->addItem(item);
-    else
-      m_symbols_list->addItem(item);
+    auto* const entry = new QListWidgetItem(name);
+    if (name == previous)
+      entry->setSelected(true);
+    entry->setData(Qt::UserRole, symbol.address);
+    (symbol.type == Common::Symbol::Type::Function ? m_symbol_list : m_data_list)->addItem(entry);
   });
 
-  m_symbols_list->sortItems();
+  m_symbol_list->sortItems();
 }
 
-void MemoryWidget::UpdateNotes()
+void MemoryWidget::FillNoteList()
 {
-  // Save selection to re-apply.
-  const QString selection = m_note_list->selectedItems().isEmpty() ?
-                                QStringLiteral("") :
-                                m_note_list->selectedItems()[0]->text();
+  const QList<QListWidgetItem*> picked = m_note_list->selectedItems();
+  const QString previous = picked.isEmpty() ? QStringLiteral("") : picked.front()->text();
   m_note_list->clear();
 
-  m_ppc_symbol_db.ForEachNote([&](const Common::Note& note) {
+  const QString filter = m_label_filter->text();
+  m_symbol_db.ForEachNote([&](const Common::Note& note) {
     const QString name = QString::fromStdString(note.name);
+    if (!name.contains(filter, Qt::CaseInsensitive))
+      return;
 
-    auto* item = new QListWidgetItem(name);
-    if (name == selection)
-      item->setSelected(true);
-
-    item->setData(Qt::UserRole, note.address);
-
-    // Filter notes based on the search text.
-    if (name.contains(m_search_labels->text(), Qt::CaseInsensitive))
-      m_note_list->addItem(item);
+    auto* const entry = new QListWidgetItem(name);
+    if (name == previous)
+      entry->setSelected(true);
+    entry->setData(Qt::UserRole, note.address);
+    m_note_list->addItem(entry);
   });
 
   m_note_list->sortItems();
 }
 
-static void DumpArray(const std::string& filename, const u8* data, size_t length)
+void MemoryWidget::Search(bool forward)
 {
-  if (!data)
-    return;
-
-  File::IOFile f(filename, "wb");
-
-  if (!f)
+  Target target = ResolveTarget();
+  if (!target.address_ok)
   {
-    ModalMessageBox::critical(
-        nullptr, QObject::tr("Error"),
-        QObject::tr("Failed to dump %1: Can't open file").arg(QString::fromStdString(filename)));
+    m_search_result->setText(tr("Bad address provided."));
     return;
   }
-
-  if (!f.WriteBytes(data, length))
+  if (!target.offset_ok)
   {
-    ModalMessageBox::critical(nullptr, QObject::tr("Error"),
-                              QObject::tr("Failed to dump %1: Failed to write to file")
-                                  .arg(QString::fromStdString(filename)));
-  }
-}
-
-void MemoryWidget::OnDumpMRAM()
-{
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Mem1);
-  DumpArray(File::GetUserPath(F_MEM1DUMP_IDX), accessors->begin(),
-            std::distance(accessors->begin(), accessors->end()));
-}
-
-void MemoryWidget::OnDumpExRAM()
-{
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Mem2);
-  DumpArray(File::GetUserPath(F_MEM2DUMP_IDX), accessors->begin(),
-            std::distance(accessors->begin(), accessors->end()));
-}
-
-void MemoryWidget::OnDumpARAM()
-{
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Auxiliary);
-  DumpArray(File::GetUserPath(F_ARAMDUMP_IDX), accessors->begin(),
-            std::distance(accessors->begin(), accessors->end()));
-}
-
-void MemoryWidget::OnDumpFakeVMEM()
-{
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Fake);
-  DumpArray(File::GetUserPath(F_FAKEVMEMDUMP_IDX), accessors->begin(),
-            std::distance(accessors->begin(), accessors->end()));
-}
-
-MemoryWidget::TargetAddress MemoryWidget::GetTargetAddress() const
-{
-  TargetAddress target;
-
-  // Returns 0 if conversion fails
-  const u32 addr = m_search_address->currentText().toUInt(&target.is_good_address, 16);
-  target.is_good_address |= m_search_address->currentText().isEmpty();
-  const s32 offset = m_search_offset->text().toInt(&target.is_good_offset, 16);
-  const u32 neg_offset = offset != std::numeric_limits<s32>::min() ?
-                             -offset :
-                             u32(std::numeric_limits<s32>::max()) + 1;
-  target.is_good_offset |= m_search_offset->text().isEmpty();
-  target.is_good_offset &= offset >= 0 || neg_offset <= addr;
-  target.is_good_offset &= offset <= 0 || (std::numeric_limits<u32>::max() - u32(offset)) >= addr;
-
-  if (!target.is_good_address || !target.is_good_offset)
-    return target;
-
-  if (offset < 0)
-    target.address = addr - neg_offset;
-  else
-    target.address = addr + u32(offset);
-  return target;
-}
-
-void MemoryWidget::FindValue(bool next)
-{
-  auto target_addr = GetTargetAddress();
-
-  if (!target_addr.is_good_address)
-  {
-    m_result_label->setText(tr("Bad address provided."));
+    m_search_result->setText(tr("Bad offset provided."));
     return;
   }
 
-  if (!target_addr.is_good_offset)
+  const QByteArray needle = ValueBytes();
+  if (needle.isEmpty())
   {
-    m_result_label->setText(tr("Bad offset provided."));
+    m_search_result->setText(tr("Bad Value Given"));
     return;
   }
 
-  const QByteArray search_for = GetInputData();
+  // Step off the address in the box so the previous match is not found again.
+  if (!m_address_box->currentText().isEmpty())
+    target.address = forward ? target.address + 1 : target.address - 1;
 
-  if (search_for.isEmpty())
+  std::optional<u32> found;
   {
-    m_result_label->setText(tr("Bad Value Given"));
-    return;
-  }
-
-  if (!m_search_address->currentText().isEmpty())
-  {
-    // skip the quoted address so we don't potentially refind the last result
-    target_addr.address += next ? 1 : -1;
-  }
-
-  const std::optional<u32> found_addr = [&] {
-    AddressSpace::Accessors* accessors =
+    AddressSpace::Accessors* const memory =
         AddressSpace::GetAccessors(m_memory_view->GetAddressSpace());
-
     const Core::CPUThreadGuard guard(m_system);
-    return accessors->Search(guard, target_addr.address,
-                             reinterpret_cast<const u8*>(search_for.data()),
-                             static_cast<u32>(search_for.size()), next);
-  }();
+    found = memory->Search(guard, target.address, reinterpret_cast<const u8*>(needle.data()),
+                           static_cast<u32>(needle.size()), forward);
+  }
 
-  if (found_addr.has_value())
+  if (!found)
   {
-    m_result_label->setText(tr("Match Found"));
-
-    u32 offset = *found_addr;
-
-    m_search_address->setCurrentText(QStringLiteral("%1").arg(offset, 8, 16, QLatin1Char('0')));
-    m_search_offset->clear();
-
-    m_memory_view->SetAddress(offset);
-
+    m_search_result->setText(tr("No Match"));
     return;
   }
 
-  m_result_label->setText(tr("No Match"));
-}
-
-void MemoryWidget::OnFindNextValue()
-{
-  FindValue(true);
-}
-
-void MemoryWidget::OnFindPreviousValue()
-{
-  FindValue(false);
+  m_search_result->setText(tr("Match Found"));
+  m_address_box->setCurrentText(QStringLiteral("%1").arg(*found, 8, 16, QLatin1Char('0')));
+  m_offset_box->clear();
+  m_memory_view->SetAddress(*found);
 }
