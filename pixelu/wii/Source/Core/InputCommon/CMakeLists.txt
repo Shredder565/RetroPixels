@@ -100,3 +100,21 @@ if(TARGET Hidapi::Hidapi)
   target_link_libraries(inputcommon PUBLIC Hidapi::Hidapi)
   target_compile_definitions(inputcommon PRIVATE HAVE_HIDAPI=1)
 endif()
+
+if(NOT WIN32 AND ENABLE_X11 AND ENABLE_SDL)
+  # pixelu-wii-input-check: the Linux input check (XInput2 keyboard and mouse driven by
+  # xdotool, an SDL virtual gamepad through RetroPixels' XInput/0/Gamepad mapping). Run
+  # under an X server; not built unless asked for (ninja pixelu-wii-input-check).
+  add_executable(pixelu-wii-input-check EXCLUDE_FROM_ALL)
+  pixelu_add_sources(pixelu-wii-input-check
+    IN LinuxCheck
+      InputCheck.cpp
+  )
+  target_link_libraries(pixelu-wii-input-check PRIVATE
+    core
+    uicommon
+    fmt::fmt
+    SDL3::SDL3
+    X11::X11
+  )
+endif()
