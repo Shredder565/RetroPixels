@@ -51,8 +51,9 @@ struct ProbeDevice
   Common::DynamicLibrary library;
   ComPtr<ID3D11Device> device;
 
-  // pass a null level pointer when the level is not wanted
-  bool Open(u32 adapter_index, D3D_FEATURE_LEVEL* level)
+  // Pass a null level pointer when the level is not wanted. With as_11_1 the
+  // 11.1 interface is queried while the factory and adapter are still held.
+  bool Open(u32 adapter_index, D3D_FEATURE_LEVEL* level, ComPtr<ID3D11Device1>* as_11_1 = nullptr)
   {
     ComPtr<IDXGIFactory> factory = D3DCommon::CreateDXGIFactory(false);
     if (!factory)
@@ -66,8 +67,12 @@ struct ProbeDevice
     if (!LookUpCreateDevice(library, &create_device))
       return false;
 
-    return SUCCEEDED(MakeDevice(create_device, adapter.Get(), 0, device.ReleaseAndGetAddressOf(),
-                                level, nullptr));
+    if (FAILED(MakeDevice(create_device, adapter.Get(), 0, device.ReleaseAndGetAddressOf(), level,
+                          nullptr)))
+    {
+      return false;
+    }
+    return !as_11_1 || SUCCEEDED(device.As(as_11_1));
   }
 };
 }  // namespace
@@ -262,9 +267,7 @@ bool SupportsLogicOp(u32 adapter_index)
   ComPtr<ID3D11Device1> device_11_1 = device1;
   if (!device)
   {
-    if (!probe.Open(adapter_index, nullptr))
-      return false;
-    if (FAILED(probe.device.As(&device_11_1)))
+    if (!probe.Open(adapter_index, nullptr, &device_11_1))
       return false;
   }
 
