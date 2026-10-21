@@ -150,7 +150,7 @@ namespace
 // PixelU: the main window's title whenever no game is drawing into it.
 QString IdleWindowTitle()
 {
-  return QStringLiteral("PixelU Wii (based on Dolphin %1)")
+  return QStringLiteral("PixelU Wii %1")
       .arg(QString::fromStdString(Common::GetScmDescStr()));
 }
 

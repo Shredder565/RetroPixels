@@ -61,7 +61,8 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
   // left open, as it always has been.
   QStringList page;
   page << QStringLiteral("<p style='font-size:38pt; font-weight:400;'>PixelU Wii</p>");
-  page << QStringLiteral("<p style='font-size:18pt;'>Based on Dolphin %1</p>").arg(version);
+  page << QStringLiteral("<p style='font-size:18pt;'>Version %1 (based on Dolphin)</p>")
+              .arg(version);
   // PixelU: what this build is and where its source lives.
   page << Paragraph({QStringLiteral("PixelU's GameCube and Wii engine is a lightly modified build "
                                     "of Dolphin,<br>"),

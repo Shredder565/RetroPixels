@@ -15,6 +15,8 @@ namespace
 // The emulator name is part of the user agent, the window title and the netplay handshake, so it
 // stays what existing servers and peers expect.
 constexpr std::string_view EMULATOR_NAME = "Dolphin";
+// The program named by --version, savestates and shader reports.
+constexpr std::string_view PRODUCT_NAME = "PixelU-Wii";
 
 #if defined(_DEBUG)
 constexpr std::string_view BUILD_TYPE_PREFIX = "Debug ";
@@ -54,7 +56,7 @@ std::string BuildRevisionString()
   std::string branch_part;
   if (!on_master)
     branch_part = Concat({"[", SCM_BRANCH_STR, "] "});
-  return Concat({EMULATOR_NAME, " ", branch_part, BUILD_TYPE_PREFIX, SCM_DESC_STR});
+  return Concat({PRODUCT_NAME, " ", branch_part, BUILD_TYPE_PREFIX, SCM_DESC_STR});
 }
 }  // namespace
 
@@ -90,7 +92,14 @@ const std::string& GetScmBranchStr()
 
 const std::string& GetUserAgentStr()
 {
-  static const std::string value = Concat({EMULATOR_NAME, "/", SCM_DESC_STR});
+  // Servers that check the client's version (RetroAchievements) know only Dolphin's numbers.
+  static const std::string value = Concat({EMULATOR_NAME, "/", SCM_COMPAT_DESC_STR});
+  return value;
+}
+
+const std::string& GetCompatDescStr()
+{
+  static const std::string value = SCM_COMPAT_DESC_STR;
   return value;
 }
 

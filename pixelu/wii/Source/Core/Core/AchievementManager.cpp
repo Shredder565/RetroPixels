@@ -120,7 +120,7 @@ void AchievementManager::Init([[maybe_unused]] void* hwnd)
   // on x64, RA_Integration.dll elsewhere). Logging in happens once its loading has finished.
   rc_client_begin_load_raintegration(m_client, UTF8ToWString(File::GetExeDirectory()).c_str(),
                                      reinterpret_cast<HWND>(hwnd), "Dolphin",
-                                     Common::GetScmDescStr().c_str(), LoadIntegrationCallback,
+                                     Common::GetCompatDescStr().c_str(), LoadIntegrationCallback,
                                      nullptr);
 #else
   if (HasAPIToken())

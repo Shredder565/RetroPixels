@@ -849,9 +849,8 @@ void UpdateTitle(Core::System& system)
       fmt::format("{} {} | {} | {}", system.GetPowerPC().GetCPUName(), threading,
                   g_video_backend->GetDisplayName(), dsp_kind);
 
-  // PixelU branding: the window title names PixelU Wii and the Dolphin release it is based on.
-  std::string title =
-      fmt::format("PixelU Wii (Dolphin {}) | {}", Common::GetScmDescStr(), settings);
+  // PixelU branding: the window title names PixelU Wii and its version.
+  std::string title = fmt::format("PixelU Wii {} | {}", Common::GetScmDescStr(), settings);
   if (Config::Get(Config::MAIN_SHOW_ACTIVE_TITLE))
   {
     const std::string game = SConfig::GetInstance().GetTitleDescription();

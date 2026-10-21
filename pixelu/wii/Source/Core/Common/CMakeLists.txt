@@ -167,7 +167,9 @@ add_library(common
   WorkQueueThread.h
 )
 
-add_dependencies(common dolphin_scmrev)
+# PixelU-Wii's own version header (Common/scmrev.h), not Dolphin's ScmRevGen.
+include(${CMAKE_CURRENT_SOURCE_DIR}/PixelUWiiVersion.cmake)
+add_dependencies(common pixelu_wii_version)
 
 if(NOT MSVC AND _M_ARM_64)
   set_source_files_properties(

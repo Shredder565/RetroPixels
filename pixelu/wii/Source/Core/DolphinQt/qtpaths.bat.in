@@ -1,2 +1,6 @@
 @echo off
+rem Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+rem Runs qtpaths with the target_qt.conf next to this file, so windeployqt
+rem finds the bundled Qt by relative paths instead of the absolute ones of
+rem the machine Qt was built on.
 "@QTPATHS_EXE@" -qtconf "%~dp0target_qt.conf" %*

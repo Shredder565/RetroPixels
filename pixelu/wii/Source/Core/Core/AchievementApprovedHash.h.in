@@ -1,7 +1,12 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// Generated at build time from AchievementApprovedHash.h.in: the SHA-1 of the
+// Sys/ApprovedInis.json this build ships. RetroAchievements hardcore mode
+// trusts the per-game settings list only when its hash is this one.
 
 #pragma once
+
+#include <string_view>
 
 #include "Common/Crypto/SHA1.h"
 
