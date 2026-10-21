@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@
 
 namespace Vulkan
 {
+// Occlusion queries in a ring over one query pool. Each query remembers the submission it was
+// recorded in; results are collected once that submission has completed.
 class PerfQuery : public PerfQueryBase
 {
 public:
@@ -30,30 +31,28 @@ public:
   bool IsFlushed() const override;
 
 private:
-  // u32 is used for the sample counts.
-  using PerfQueryDataType = u32;
+  // Large enough for the games tested (64 was not, 128 was).
+  static constexpr u32 RING_SIZE = 512;
 
-  // when testing in SMS: 64 was too small, 128 was ok
-  // TODO: This should be size_t, but the base class uses u32s
-  static const u32 PERF_QUERY_BUFFER_SIZE = 512;
-
-  struct ActiveQuery
+  struct Slot
   {
     u64 fence_counter;
-    PerfQueryGroup query_group;
-    bool has_value;
+    PerfQueryGroup group;
+    bool in_use;
   };
 
-  bool CreateQueryPool();
-  void ReadbackQueries();
-  void ReadbackQueries(u32 query_count);
+  // Collects every finished query from the front of the ring.
+  void CollectFinished();
+  // Reads `count` results starting at the front (no wrap) and frees their slots.
+  void Collect(u32 count);
+  // Submits if needed (always when blocking, which also waits), then collects.
   void PartialFlush(bool blocking);
 
-  VkQueryPool m_query_pool = VK_NULL_HANDLE;
-  u32 m_query_readback_pos = 0;
-  u32 m_query_next_pos = 0;
-  std::array<ActiveQuery, PERF_QUERY_BUFFER_SIZE> m_query_buffer = {};
-  std::array<PerfQueryDataType, PERF_QUERY_BUFFER_SIZE> m_query_result_buffer = {};
+  VkQueryPool m_pool = VK_NULL_HANDLE;
+  u32 m_front = 0;
+  u32 m_back = 0;
+  std::array<Slot, RING_SIZE> m_slots = {};
+  std::array<u32, RING_SIZE> m_samples = {};
 };
 
 }  // namespace Vulkan

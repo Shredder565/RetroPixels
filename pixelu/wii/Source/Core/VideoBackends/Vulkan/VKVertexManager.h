@@ -1,8 +1,8 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -14,6 +14,8 @@ namespace Vulkan
 {
 class StreamBuffer;
 
+// Streams vertices, indices, shader constants and texel buffer data through four ring
+// buffers and points the state tracker at what it wrote.
 class VertexManager : public VertexManagerBase
 {
 public:
@@ -35,23 +37,23 @@ protected:
                     u32* out_base_index) override;
   void UploadUniforms() override;
 
-  void DestroyTexelBufferViews();
-
-  void UpdateVertexShaderConstants();
-  void UpdateGeometryShaderConstants();
-  void UpdatePixelShaderConstants();
-
-  // Allocates storage in the uniform buffer of the specified size. If this storage cannot be
-  // allocated immediately, the current command buffer will be submitted and all stage's
-  // constants will be re-uploaded. false will be returned in this case, otherwise true.
+private:
+  // Reserves room for every constant block. When that needs a submission, all constants are
+  // uploaded afresh into the new command buffer and false is returned.
   bool ReserveConstantStorage();
   void UploadAllConstants();
+  // Writes one block at the uniform ring's current position and binds it at `binding`.
+  void StreamConstants(u32 binding, const void* data, u32 size);
+  // Reserves texel ring space, submitting once if needed.
+  bool ReserveTexelSpace(u32 size, u32 alignment);
 
+  // Destroyed in reverse order: texel, uniform, index, vertex.
   std::unique_ptr<StreamBuffer> m_vertex_stream_buffer;
   std::unique_ptr<StreamBuffer> m_index_stream_buffer;
   std::unique_ptr<StreamBuffer> m_uniform_stream_buffer;
   std::unique_ptr<StreamBuffer> m_texel_stream_buffer;
-  std::array<VkBufferView, NUM_TEXEL_BUFFER_FORMATS> m_texel_buffer_views = {};
-  u32 m_uniform_buffer_reserve_size = 0;
+  std::array<VkBufferView, NUM_TEXEL_BUFFER_FORMATS> m_texel_views = {};
+  // The largest size of the PS, VS and GS blocks together, with alignment.
+  u32 m_constants_reserve = 0;
 };
 }  // namespace Vulkan

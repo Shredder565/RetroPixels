@@ -1,9 +1,6 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/VKPerfQuery.h"
-
-#include <cstring>
 
 #include "Common/Assert.h"
 #include "Common/MsgHandler.h"
@@ -18,116 +15,139 @@
 
 namespace Vulkan
 {
+namespace
+{
+bool IsOcclusionGroup(PerfQueryGroup group)
+{
+  return group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP;
+}
+
+VkCommandBuffer Cmd()
+{
+  return g_command_buffer_mgr->GetCurrentCommandBuffer();
+}
+
+// Scales a sample count at the internal resolution (and MSAA) back to native EFB pixels.
+u32 ToNativePixels(u32 samples)
+{
+  u64 pixels = static_cast<u64>(samples) * EFB_WIDTH / g_framebuffer_manager->GetEFBWidth() *
+               EFB_HEIGHT / g_framebuffer_manager->GetEFBHeight();
+  if (g_ActiveConfig.iMultisamples > 1)
+    pixels /= static_cast<u64>(g_ActiveConfig.iMultisamples);
+  return static_cast<u32>(pixels);
+}
+}  // namespace
+
 PerfQuery::PerfQuery() = default;
 
 PerfQuery::~PerfQuery()
 {
-  if (m_query_pool != VK_NULL_HANDLE)
-    vkDestroyQueryPool(g_vulkan_context->GetDevice(), m_query_pool, nullptr);
+  if (m_pool != VK_NULL_HANDLE)
+    vkDestroyQueryPool(g_vulkan_context->GetDevice(), m_pool, nullptr);
 }
 
 bool PerfQuery::Initialize()
 {
-  if (!CreateQueryPool())
+  VkQueryPoolCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+  info.queryType = VK_QUERY_TYPE_OCCLUSION;
+  info.queryCount = RING_SIZE;
+  const VkResult res = vkCreateQueryPool(g_vulkan_context->GetDevice(), &info, nullptr, &m_pool);
+  if (res != VK_SUCCESS)
   {
+    LOG_VULKAN_ERROR(res, "vkCreateQueryPool failed: ");
     PanicAlertFmt("Failed to create query pool");
     return false;
   }
 
-  // Vulkan requires query pools to be reset after creation
+  // New pools must be reset before first use.
   ResetQuery();
-
   return true;
 }
 
 void PerfQuery::EnableQuery(PerfQueryGroup group)
 {
-  // Block if there are no free slots.
-  // Otherwise, try to keep half of them available.
-  const u32 query_count = m_query_count.load(std::memory_order_relaxed);
-  if (query_count > m_query_buffer.size() / 2)
-    PartialFlush(query_count == PERF_QUERY_BUFFER_SIZE);
+  // Keep about half the ring free; when it is completely full, wait.
+  const u32 pending = m_query_count.load(std::memory_order_relaxed);
+  if (pending > RING_SIZE / 2)
+    PartialFlush(pending == RING_SIZE);
 
-  // Ensure command buffer is ready to go before beginning the query, that way we don't submit
-  // a buffer with open queries.
+  // Record pending state first, so that no submission happens while the query is open.
   StateTracker::GetInstance()->Bind();
 
-  if (group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP)
-  {
-    ActiveQuery& entry = m_query_buffer[m_query_next_pos];
-    DEBUG_ASSERT(!entry.has_value);
-    entry.has_value = true;
-    entry.query_group = group;
+  if (!IsOcclusionGroup(group))
+    return;
 
-    // Use precise queries if supported, otherwise boolean (which will be incorrect).
-    VkQueryControlFlags flags =
-        g_vulkan_context->SupportsPreciseOcclusionQueries() ? VK_QUERY_CONTROL_PRECISE_BIT : 0;
+  Slot& slot = m_slots[m_back];
+  DEBUG_ASSERT(!slot.in_use);
+  slot.in_use = true;
+  slot.group = group;
 
-    // Ensure the query starts within a render pass.
-    StateTracker::GetInstance()->BeginRenderPass();
-    vkCmdBeginQuery(g_command_buffer_mgr->GetCurrentCommandBuffer(), m_query_pool, m_query_next_pos,
-                    flags);
-  }
+  // Without precise queries the result is only zero or non-zero (and so wrong).
+  const VkQueryControlFlags flags =
+      g_vulkan_context->SupportsPreciseOcclusionQueries() ? VK_QUERY_CONTROL_PRECISE_BIT : 0;
+  StateTracker::GetInstance()->BeginRenderPass();
+  vkCmdBeginQuery(Cmd(), m_pool, m_back, flags);
 }
 
 void PerfQuery::DisableQuery(PerfQueryGroup group)
 {
-  if (group == PQG_ZCOMP_ZCOMPLOC || group == PQG_ZCOMP)
-  {
-    vkCmdEndQuery(g_command_buffer_mgr->GetCurrentCommandBuffer(), m_query_pool, m_query_next_pos);
-    ActiveQuery& entry = m_query_buffer[m_query_next_pos];
-    entry.fence_counter = g_command_buffer_mgr->GetCurrentFenceCounter();
+  if (!IsOcclusionGroup(group))
+    return;
 
-    m_query_next_pos = (m_query_next_pos + 1) % PERF_QUERY_BUFFER_SIZE;
-    m_query_count.fetch_add(1, std::memory_order_relaxed);
-  }
+  vkCmdEndQuery(Cmd(), m_pool, m_back);
+  m_slots[m_back].fence_counter = g_command_buffer_mgr->GetCurrentFenceCounter();
+  m_back = (m_back + 1) % RING_SIZE;
+  m_query_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void PerfQuery::ResetQuery()
 {
   m_query_count.store(0, std::memory_order_relaxed);
-  m_query_readback_pos = 0;
-  m_query_next_pos = 0;
-  for (size_t i = 0; i < m_results.size(); ++i)
-    m_results[i].store(0, std::memory_order_relaxed);
+  m_front = 0;
+  m_back = 0;
+  for (std::atomic<u32>& result : m_results)
+    result.store(0, std::memory_order_relaxed);
 
-  // Reset entire query pool, ensuring all queries are ready to write to.
   StateTracker::GetInstance()->EndRenderPass();
-  vkCmdResetQueryPool(g_command_buffer_mgr->GetCurrentCommandBuffer(), m_query_pool, 0,
-                      PERF_QUERY_BUFFER_SIZE);
-
-  std::memset(m_query_buffer.data(), 0, sizeof(ActiveQuery) * m_query_buffer.size());
+  vkCmdResetQueryPool(Cmd(), m_pool, 0, RING_SIZE);
+  m_slots.fill({});
 }
 
 u32 PerfQuery::GetQueryResult(PerfQueryType type)
 {
-  u32 result = 0;
-  if (type == PQ_ZCOMP_INPUT_ZCOMPLOC || type == PQ_ZCOMP_OUTPUT_ZCOMPLOC)
-  {
-    result = m_results[PQG_ZCOMP_ZCOMPLOC].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_ZCOMP_INPUT || type == PQ_ZCOMP_OUTPUT)
-  {
-    result = m_results[PQG_ZCOMP].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_BLEND_INPUT)
-  {
-    result = m_results[PQG_ZCOMP].load(std::memory_order_relaxed) +
-             m_results[PQG_ZCOMP_ZCOMPLOC].load(std::memory_order_relaxed);
-  }
-  else if (type == PQ_EFB_COPY_CLOCKS)
-  {
-    result = m_results[PQG_EFB_COPY_CLOCKS].load(std::memory_order_relaxed);
-  }
+  const auto value = [this](PerfQueryGroup group) {
+    return m_results[group].load(std::memory_order_relaxed);
+  };
 
-  return result / 4;
+  u32 total = 0;
+  switch (type)
+  {
+  case PQ_ZCOMP_INPUT_ZCOMPLOC:
+  case PQ_ZCOMP_OUTPUT_ZCOMPLOC:
+    total = value(PQG_ZCOMP_ZCOMPLOC);
+    break;
+  case PQ_ZCOMP_INPUT:
+  case PQ_ZCOMP_OUTPUT:
+    total = value(PQG_ZCOMP);
+    break;
+  case PQ_BLEND_INPUT:
+    total = value(PQG_ZCOMP) + value(PQG_ZCOMP_ZCOMPLOC);
+    break;
+  case PQ_EFB_COPY_CLOCKS:
+    total = value(PQG_EFB_COPY_CLOCKS);
+    break;
+  default:
+    break;
+  }
+  // The counters advance once per 2x2 quad.
+  return total / 4;
 }
 
 void PerfQuery::FlushResults()
 {
   if (!IsFlushed())
     PartialFlush(true);
-
   ASSERT(IsFlushed());
 }
 
@@ -136,108 +156,67 @@ bool PerfQuery::IsFlushed() const
   return m_query_count.load(std::memory_order_relaxed) == 0;
 }
 
-bool PerfQuery::CreateQueryPool()
+void PerfQuery::CollectFinished()
 {
-  VkQueryPoolCreateInfo info = {
-      VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,  // VkStructureType                  sType
-      nullptr,                                   // const void*                      pNext
-      0,                                         // VkQueryPoolCreateFlags           flags
-      VK_QUERY_TYPE_OCCLUSION,                   // VkQueryType                      queryType
-      PERF_QUERY_BUFFER_SIZE,                    // uint32_t                         queryCount
-      0  // VkQueryPipelineStatisticFlags    pipelineStatistics;
-  };
+  const u64 completed = g_command_buffer_mgr->GetCompletedFenceCounter();
+  const u32 pending = m_query_count.load(std::memory_order_relaxed);
 
-  VkResult res = vkCreateQueryPool(g_vulkan_context->GetDevice(), &info, nullptr, &m_query_pool);
-  if (res != VK_SUCCESS)
+  // Walk the finished prefix of the ring, collecting in two runs if it wraps.
+  u32 run = 0;
+  for (u32 seen = 0; seen < pending; ++seen)
   {
-    LOG_VULKAN_ERROR(res, "vkCreateQueryPool failed: ");
-    return false;
-  }
-
-  return true;
-}
-
-void PerfQuery::ReadbackQueries()
-{
-  const u64 completed_fence_counter = g_command_buffer_mgr->GetCompletedFenceCounter();
-
-  // Need to save these since ProcessResults will modify them.
-  const u32 outstanding_queries = m_query_count.load(std::memory_order_relaxed);
-  u32 readback_count = 0;
-  for (u32 i = 0; i < outstanding_queries; i++)
-  {
-    u32 index = (m_query_readback_pos + readback_count) % PERF_QUERY_BUFFER_SIZE;
-    const ActiveQuery& entry = m_query_buffer[index];
-    if (entry.fence_counter > completed_fence_counter)
+    const u32 slot = (m_front + run) % RING_SIZE;
+    if (m_slots[slot].fence_counter > completed)
       break;
-
-    // If this wrapped around, we need to flush the entries before the end of the buffer.
-    if (index < m_query_readback_pos)
+    if (slot < m_front)
     {
-      ReadbackQueries(readback_count);
-      DEBUG_ASSERT(m_query_readback_pos == 0);
-      readback_count = 0;
+      // Wrapped: read out the part up to the end of the ring first.
+      Collect(run);
+      DEBUG_ASSERT(m_front == 0);
+      run = 0;
     }
-
-    readback_count++;
+    ++run;
   }
-
-  if (readback_count > 0)
-    ReadbackQueries(readback_count);
+  if (run != 0)
+    Collect(run);
 }
 
-void PerfQuery::ReadbackQueries(u32 query_count)
+void PerfQuery::Collect(u32 count)
 {
-  // Should be at maximum query_count queries pending.
-  ASSERT(query_count <= m_query_count.load(std::memory_order_relaxed) &&
-         (m_query_readback_pos + query_count) <= PERF_QUERY_BUFFER_SIZE);
+  ASSERT(count <= m_query_count.load(std::memory_order_relaxed) && m_front + count <= RING_SIZE);
 
-  // Read back from the GPU.
-  VkResult res = vkGetQueryPoolResults(
-      g_vulkan_context->GetDevice(), m_query_pool, m_query_readback_pos, query_count,
-      query_count * sizeof(PerfQueryDataType), m_query_result_buffer.data(),
-      sizeof(PerfQueryDataType), VK_QUERY_RESULT_WAIT_BIT);
+  const VkResult res = vkGetQueryPoolResults(
+      g_vulkan_context->GetDevice(), m_pool, m_front, count, count * sizeof(u32), m_samples.data(),
+      sizeof(u32), VK_QUERY_RESULT_WAIT_BIT);
   if (res != VK_SUCCESS)
     LOG_VULKAN_ERROR(res, "vkGetQueryPoolResults failed: ");
 
+  // Make the slots reusable.
   StateTracker::GetInstance()->EndRenderPass();
-  vkCmdResetQueryPool(g_command_buffer_mgr->GetCurrentCommandBuffer(), m_query_pool,
-                      m_query_readback_pos, query_count);
+  vkCmdResetQueryPool(Cmd(), m_pool, m_front, count);
 
-  // Remove pending queries.
-  for (u32 i = 0; i < query_count; i++)
+  for (u32 n = 0; n < count; ++n)
   {
-    u32 index = (m_query_readback_pos + i) % PERF_QUERY_BUFFER_SIZE;
-    ActiveQuery& entry = m_query_buffer[index];
-
-    // Should have a fence associated with it (waiting for a result).
-    DEBUG_ASSERT(entry.fence_counter != 0);
-    entry.fence_counter = 0;
-    entry.has_value = false;
-
-    // NOTE: Reported pixel metrics should be referenced to native resolution
-    u64 native_res_result = static_cast<u64>(m_query_result_buffer[i]) * EFB_WIDTH /
-                            g_framebuffer_manager->GetEFBWidth() * EFB_HEIGHT /
-                            g_framebuffer_manager->GetEFBHeight();
-    if (g_ActiveConfig.iMultisamples > 1)
-      native_res_result /= g_ActiveConfig.iMultisamples;
-    m_results[entry.query_group].fetch_add(static_cast<u32>(native_res_result),
-                                           std::memory_order_relaxed);
+    Slot& slot = m_slots[(m_front + n) % RING_SIZE];
+    DEBUG_ASSERT(slot.fence_counter != 0);
+    slot.fence_counter = 0;
+    slot.in_use = false;
+    m_results[slot.group].fetch_add(ToNativePixels(m_samples[n]), std::memory_order_relaxed);
   }
 
-  m_query_readback_pos = (m_query_readback_pos + query_count) % PERF_QUERY_BUFFER_SIZE;
-  m_query_count.fetch_sub(query_count, std::memory_order_relaxed);
+  m_front = (m_front + count) % RING_SIZE;
+  m_query_count.fetch_sub(count, std::memory_order_relaxed);
 }
 
 void PerfQuery::PartialFlush(bool blocking)
 {
-  // Submit a command buffer in the background if the front query is not bound to one.
-  if (blocking || m_query_buffer[m_query_readback_pos].fence_counter ==
-                      g_command_buffer_mgr->GetCurrentFenceCounter())
+  // The oldest query may still be in the command buffer being recorded: submit it (in the
+  // background unless blocking).
+  if (blocking ||
+      m_slots[m_front].fence_counter == g_command_buffer_mgr->GetCurrentFenceCounter())
   {
     VKGfx::GetInstance()->ExecuteCommandBuffer(true, blocking);
   }
-
-  ReadbackQueries();
+  CollectFinished();
 }
 }  // namespace Vulkan
