@@ -55,13 +55,26 @@ if(WIN32)
       ConsoleListenerWin.cpp
   )
 else()
-  # Linux: shared memory through memfd/mmap and log lines on standard error.
+  # Linux: shared memory through memfd/mmap, log lines on standard error, and the GLX and EGL
+  # OpenGL contexts.
   pixelu_add_sources(common
     IN .
       MemArenaUnix.cpp
+    IN GL/GLInterface
+      EGL.cpp EGL.h GLX.cpp GLX.h X11Window.cpp X11Window.h
     IN Logging
       ConsoleListenerNix.cpp
   )
+
+  # libX11, libGL (GLX), libEGL and libwayland-egl are opened at run time, so nothing is
+  # linked for them; only the Xlib and EGL headers are needed to build.
+  find_path(PIXELU_X11_INCLUDE_DIR X11/Xlib.h)
+  find_path(PIXELU_EGL_INCLUDE_DIR EGL/egl.h)
+  if(NOT PIXELU_X11_INCLUDE_DIR OR NOT PIXELU_EGL_INCLUDE_DIR)
+    message(FATAL_ERROR "The X11 and EGL headers are missing (Debian/Ubuntu: libx11-dev libegl-dev).")
+  endif()
+  target_include_directories(common PRIVATE ${PIXELU_X11_INCLUDE_DIR} ${PIXELU_EGL_INCLUDE_DIR})
+  target_compile_definitions(common PRIVATE PIXELU_GL_GLX_EGL)
 endif()
 
 # PixelU-Wii's own version header (Common/scmrev.h), rewritten on every build.
