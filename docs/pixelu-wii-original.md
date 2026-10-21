@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 328799 | 82.0% |
-| Dolphin, untouched | 66203 | 16.5% |
+| Original (RetroPixels) | 342179 | 85.7% |
+| Dolphin, untouched | 51520 | 12.9% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **400765** | 100% |
+| **All** | **399462** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -165,7 +165,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinQt (top level) | 14667 | 9146 | mixed (62% original) |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
-| Core/DolphinQt/Debugger | 14683 | 0 | Dolphin |
+| Core/DolphinQt/Debugger | 13379 | 13379 | original |
 | Core/DolphinQt/EmulatedUSB | 367 | 0 | Dolphin |
 | Core/DolphinQt/FIFO | 1371 | 0 | Dolphin |
 | Core/DolphinQt/GameList | 2605 | 0 | Dolphin |
@@ -180,7 +180,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/InputCommon/ControllerEmu | 3621 | 3621 | original |
 | Core/InputCommon/ControllerInterface (top level) | 1739 | 1739 | original |
 | Core/InputCommon/ControllerInterface/DInput | 1080 | 1080 | original |
-| Core/InputCommon/ControllerInterface/DualShockUDPClient | 947 | 947 | original |
+| Core/InputCommon/ControllerInterface/DualShockUDPClient | 948 | 948 | original |
 | Core/InputCommon/ControllerInterface/ForceFeedback | 288 | 288 | original |
 | Core/InputCommon/ControllerInterface/SDL | 1229 | 1229 | original |
 | Core/InputCommon/ControllerInterface/SteamDeck | 352 | 352 | original |
@@ -262,13 +262,13 @@ batch rewrites them.
 | W32 | Video backends: Vulkan | 8872 | 8872 | original |
 | W33 | Video backends: D3D11, D3D12, D3DCommon | 10186 | 10186 | original |
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8119 | 8119 | original |
-| W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 8498 | 8498 | original |
+| W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 8499 | 8499 | original |
 | W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8837 | 8837 | original |
 | W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10528 | 10528 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8126 | 0 | Dolphin |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 12387 | 0 | Dolphin |
 | W40 | DolphinQt: controller mapping and settings panes | 11333 | 0 | Dolphin |
-| W41 | DolphinQt: debugger | 14683 | 0 | Dolphin |
+| W41 | DolphinQt: debugger | 13379 | 13379 | original |
 | W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10093 | 0 | Dolphin |
 <!-- batches:end -->
 
@@ -4893,3 +4893,90 @@ step did for the old file. No key bytes are in the tree.
     `CoreDevice.h` class declarations). No run is left inside a function
     body.
   - Not rewritten: nothing; every W35 file is original code.
+
+- W41 log: rewrote all 42 W41 files, the DolphinQt debugger (13379 lines
+  now, from 14683): `AssembleInstructionDialog`, `AssemblerWidget`,
+  `AssemblyEditor`, `BranchWatchDialog`, `BranchWatchTableModel`,
+  `BreakpointDialog`, `BreakpointWidget`, `CodeViewWidget`, `CodeWidget`,
+  `EditSymbolDialog`, `GekkoSyntaxHighlight`, `JITWidget`,
+  `JitBlockTableModel`, `MemoryViewWidget`, `MemoryWidget`, `NetworkWidget`,
+  `PatchInstructionDialog`, `RegisterColumn`, `RegisterWidget`,
+  `ThreadWidget` and `WatchWidget`. Every rewritten file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. File
+  names, public declarations, signals and slots, enum values, object names,
+  widgets and their layout order, labels, tooltips, enabled/visible rules,
+  context menus, model columns, roles and sort/filter results, QSettings and
+  Config keys (and when they are read or written), the order and arguments
+  of Core/UICommon calls, and all tr() strings (byte for byte, in the same
+  context) are unchanged. No file carries a PixelU change.
+  - `CodeViewWidget`: rows are filled by one helper; the branch arrows are
+    a private struct drawn by a private delegate, and the lane assignment,
+    follow-PC and scroll logic are separate helpers. `CodeWidget`: the code
+    pane and the side panes (callstack, function calls/callers, symbols,
+    notes) are built by helpers; step over/out and the return check keep
+    the old rules.
+  - `MemoryViewWidget`: a private table class does the drawing; value text
+    to bytes, typed writes, the cell menu, label edits, breakpoint marks and
+    the scroll bar are helpers. `MemoryWidget`: the side bar is built from
+    one helper per group box in the old order; the input and display type
+    lists are tables with QT_TRANSLATE_NOOP("MemoryWidget", ...).
+  - `BranchWatchDialog` and `BranchWatchTableModel`: the proxy filter keeps
+    the branch kinds in a bitset and the address bounds in an array; the
+    model's marking, symbol rebuild and per-role text/colour/font/alignment
+    are helpers. `JITWidget` and `JitBlockTableModel`, `BreakpointWidget`,
+    `WatchWidget`, `RegisterWidget`, `ThreadWidget`, `NetworkWidget` and
+    the dialogs are built by small helpers in the old order.
+  - Preserved quirks (callers or users may rely on them): the swapped
+    highlight spans in GekkoSyntaxHighlight, the never-connected
+    RequestTableUpdate signal, the Windows socket numbers in NetworkWidget,
+    setChecked before setCheckable on actions, the code view context menu
+    using the PC's instruction for the load/store check, a memory
+    breakpoint at address 0 resetting the row flag, MemoryViewWidget
+    reusing the value prototype's alignment, the unsorted data list in
+    MemoryWidget, the HexString input quirk, the hex prefix being added
+    while its checkbox is disabled, the unblocked setCurrentText in the
+    search, and WriteValue/WriteFile calling Update while holding the
+    CPU guard.
+  - Deliberate differences (nothing a user sees in normal use):
+    - Qt connections that had no context object now use `this`, so they
+      are dropped when the widget is destroyed.
+    - `BranchWatchDialog`: hiding the dialog now undoes exactly the
+      connections that showing it made; the old code disconnected other
+      slots, so the connections leaked and stayed live while it was hidden.
+    - `BranchWatchTableModel`: the font role returns an adjusted copy
+      instead of changing the stored font.
+    - `BreakpointWidget` no longer leaks a menu; `CodeWidget`,
+      `CodeViewWidget` and `MemoryWidget` create list items only for rows
+      that pass the filter, so filtered-out items are no longer leaked.
+    - `MemoryViewWidget`: Copy Value looks the cell up again by row and
+      column instead of keeping a pointer to it.
+    - `CodeViewWidget`: the arrow-lane assert uses `<` (the old `<=` let
+      an out-of-range lane through).
+    - Bounds fixes: the clamped error span in the assembler, the assembler
+      loop bound, the JIT feature text lookup; `PatchInstructionDialog`
+      zero-pads a short block; `AssemblyEditor` initialises its flag;
+      `RegisterColumn` calls the getter once. The JIT and branch watch
+      proxy models have no debug crash override.
+  - Checked: old and new code side by side, with the untouched non-W41
+    files on both sides (only hashes were kept):
+    - `MemoryViewWidget::ConvertTextToBytes`: a harness drives all 15 types
+      over 41 inputs (615 cases). Hashes identical.
+    - Compared line by line instead, because they need the full Core
+      (CPU thread, PPC state, symbol DB, JIT, memory, sockets): every other
+      file. Each widget, menu, tooltip, connection and config key was
+      checked off against the old file; a tr() string scan finds every old
+      string in the new code with the same context.
+  - Compile check: the W41 .cpp files and MainWindow.cpp (the only other
+    source that includes W41 headers), old against new, with clang on Linux
+    and for x86_64-w64-windows-gnu, `-Wall -Wextra -Wconversion
+    -Wsign-compare -Wshadow-all -Wshorten-64-to-32`. No warning in a W41
+    file; the remaining diagnostics come from shared headers and are the
+    same as before (MainWindow.cpp: `std::expected` and the missing
+    `qpa/qplatformnativeinterface.h` on Linux, the Win32 display constants
+    in the MinGW headers). Integer narrowing and sign changes are written
+    as explicit casts, and no local or parameter hides a Qt data member
+    (`data`, `d_ptr`, `staticMetaObject`).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run is left in a W41
+    .cpp file. The runs left are public declarations in the headers
+    (signals, slots, member lists, enums).
+  - No keys, IVs, tokens or credentials are in these files.
