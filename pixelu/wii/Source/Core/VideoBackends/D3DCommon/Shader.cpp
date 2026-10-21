@@ -190,14 +190,14 @@ std::optional<SPIRV::CodeVector> ToSpirv(ShaderStage stage, std::string_view sou
   switch (stage)
   {
   case ShaderStage::Vertex:
-    return SPIRV::CompileVertexShader(fmt::format("{}{}", GraphicsPreamble(), source),
-                                      APIType::D3D, spv_version, includer);
+    return SPIRV::CompileVertexShader(fmt::format("{}{}", GraphicsPreamble(), source), APIType::D3D,
+                                      spv_version, includer);
   case ShaderStage::Pixel:
     return SPIRV::CompileFragmentShader(fmt::format("{}{}", GraphicsPreamble(), source),
                                         APIType::D3D, spv_version, includer);
   case ShaderStage::Compute:
-    return SPIRV::CompileComputeShader(fmt::format("{}{}", ComputePreamble(), source),
-                                       APIType::D3D, spv_version, includer);
+    return SPIRV::CompileComputeShader(fmt::format("{}{}", ComputePreamble(), source), APIType::D3D,
+                                       spv_version, includer);
   case ShaderStage::Geometry:
   default:
     return std::nullopt;

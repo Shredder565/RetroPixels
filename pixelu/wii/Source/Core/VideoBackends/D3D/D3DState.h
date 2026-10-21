@@ -1,10 +1,8 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
-#include <bitset>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -20,22 +18,22 @@ namespace DX11
 {
 class DXFramebuffer;
 
+// Creates D3D11 state objects for renderer states, once per distinct state.
+// The cache keeps ownership; callers hold plain pointers.
 class StateCache
 {
 public:
   ~StateCache();
 
-  // Get existing or create new render state.
-  // Returned objects is owned by the cache and does not need to be released.
   ID3D11SamplerState* Get(SamplerState state);
   ID3D11BlendState* Get(BlendingState state);
   ID3D11RasterizerState* Get(RasterizationState state);
   ID3D11DepthStencilState* Get(DepthState state);
 
-  // Convert RasterState primitive type to D3D11 primitive topology.
   static D3D11_PRIMITIVE_TOPOLOGY GetPrimitiveTopology(PrimitiveType primitive);
 
 private:
+  // Declaration order fixes the release order on shutdown.
   std::unordered_map<u32, ComPtr<ID3D11DepthStencilState>> m_depth;
   std::unordered_map<u32, ComPtr<ID3D11RasterizerState>> m_raster;
   std::unordered_map<u32, ComPtr<ID3D11BlendState>> m_blend;
@@ -45,6 +43,9 @@ private:
 
 namespace D3D
 {
+// Shadows the immediate context's pipeline bindings. Setters only record the
+// wanted binding and mark it dirty when it differs from what the context has;
+// Apply pushes the dirty ones before a draw.
 class StateManager
 {
 public:
@@ -53,245 +54,189 @@ public:
 
   void SetBlendState(ID3D11BlendState* state)
   {
-    if (m_current.blendState != state)
-      m_dirtyFlags.set(DirtyFlag_BlendState);
-
-    m_pending.blendState = state;
+    Track(m_bound.blend, m_wanted.blend, state, BIT_BLEND);
   }
-
   void SetDepthState(ID3D11DepthStencilState* state)
   {
-    if (m_current.depthState != state)
-      m_dirtyFlags.set(DirtyFlag_DepthState);
-
-    m_pending.depthState = state;
+    Track(m_bound.depth, m_wanted.depth, state, BIT_DEPTH);
   }
-
   void SetRasterizerState(ID3D11RasterizerState* state)
   {
-    if (m_current.rasterizerState != state)
-      m_dirtyFlags.set(DirtyFlag_RasterizerState);
-
-    m_pending.rasterizerState = state;
+    Track(m_bound.raster, m_wanted.raster, state, BIT_RASTER);
   }
 
   void SetTexture(size_t index, ID3D11ShaderResourceView* texture)
   {
-    if (m_current.textures[index] != texture)
-      m_dirtyFlags.set(DirtyFlag_Texture0 + index);
-
-    m_pending.textures[index] = texture;
+    Track(m_bound.srvs[index], m_wanted.srvs[index], texture, TextureBit(index));
   }
-
   void SetSampler(size_t index, ID3D11SamplerState* sampler)
   {
-    if (m_current.samplers[index] != sampler)
-      m_dirtyFlags.set(DirtyFlag_Sampler0 + index);
-
-    m_pending.samplers[index] = sampler;
+    Track(m_bound.samplers[index], m_wanted.samplers[index], sampler, SamplerBit(index));
   }
 
+  // Pixel stage b0 and b1 (b1 carries vertex constants for per-pixel lighting).
   void SetPixelConstants(ID3D11Buffer* buffer0, ID3D11Buffer* buffer1 = nullptr)
   {
-    if (m_current.pixelConstants[0] != buffer0 || m_current.pixelConstants[1] != buffer1)
-      m_dirtyFlags.set(DirtyFlag_PixelConstants);
-
-    m_pending.pixelConstants[0] = buffer0;
-    m_pending.pixelConstants[1] = buffer1;
+    if (m_bound.ps_cbs[0] != buffer0 || m_bound.ps_cbs[1] != buffer1)
+      m_dirty |= BIT_PS_CB;
+    m_wanted.ps_cbs = {buffer0, buffer1};
   }
-
   void SetVertexConstants(ID3D11Buffer* buffer)
   {
-    if (m_current.vertexConstants != buffer)
-      m_dirtyFlags.set(DirtyFlag_VertexConstants);
-
-    m_pending.vertexConstants = buffer;
+    Track(m_bound.vs_cb, m_wanted.vs_cb, buffer, BIT_VS_CB);
   }
-
+  // Custom shader constants, shared by the vertex and pixel stages.
   void SetCustomConstants(ID3D11Buffer* buffer)
   {
-    if (m_current.customConstants != buffer)
-      m_dirtyFlags.set(DirtyFlag_CustomConstants);
-
-    m_pending.customConstants = buffer;
+    Track(m_bound.custom_cb, m_wanted.custom_cb, buffer, BIT_CUSTOM_CB);
   }
-
   void SetGeometryConstants(ID3D11Buffer* buffer)
   {
-    if (m_current.geometryConstants != buffer)
-      m_dirtyFlags.set(DirtyFlag_GeometryConstants);
-
-    m_pending.geometryConstants = buffer;
+    Track(m_bound.gs_cb, m_wanted.gs_cb, buffer, BIT_GS_CB);
   }
 
   void SetVertexBuffer(ID3D11Buffer* buffer, u32 stride, u32 offset)
   {
-    if (m_current.vertexBuffer != buffer || m_current.vertexBufferStride != stride ||
-        m_current.vertexBufferOffset != offset)
-      m_dirtyFlags.set(DirtyFlag_VertexBuffer);
-
-    m_pending.vertexBuffer = buffer;
-    m_pending.vertexBufferStride = stride;
-    m_pending.vertexBufferOffset = offset;
+    if (m_bound.vb != buffer || m_bound.vb_stride != stride || m_bound.vb_offset != offset)
+      m_dirty |= BIT_VB;
+    m_wanted.vb = buffer;
+    m_wanted.vb_stride = stride;
+    m_wanted.vb_offset = offset;
   }
-
-  void SetIndexBuffer(ID3D11Buffer* buffer)
-  {
-    if (m_current.indexBuffer != buffer)
-      m_dirtyFlags.set(DirtyFlag_IndexBuffer);
-
-    m_pending.indexBuffer = buffer;
-  }
-
+  void SetIndexBuffer(ID3D11Buffer* buffer) { Track(m_bound.ib, m_wanted.ib, buffer, BIT_IB); }
   void SetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY topology)
   {
-    if (m_current.topology != topology)
-      m_dirtyFlags.set(DirtyFlag_InputAssembler);
-
-    m_pending.topology = topology;
+    Track(m_bound.topology, m_wanted.topology, topology, BIT_INPUT);
   }
-
   void SetInputLayout(ID3D11InputLayout* layout)
   {
-    if (m_current.inputLayout != layout)
-      m_dirtyFlags.set(DirtyFlag_InputAssembler);
-
-    m_pending.inputLayout = layout;
+    Track(m_bound.layout, m_wanted.layout, layout, BIT_INPUT);
   }
 
-  void SetPixelShader(ID3D11PixelShader* shader)
-  {
-    if (m_current.pixelShader != shader)
-      m_dirtyFlags.set(DirtyFlag_PixelShader);
-
-    m_pending.pixelShader = shader;
-  }
-
+  void SetPixelShader(ID3D11PixelShader* shader) { Track(m_bound.ps, m_wanted.ps, shader, BIT_PS); }
+  // Binds immediately, with class instances; the shadow is updated to match.
   void SetPixelShaderDynamic(ID3D11PixelShader* shader, ID3D11ClassInstance* const* classInstances,
                              u32 classInstancesCount)
   {
     D3D::context->PSSetShader(shader, classInstances, classInstancesCount);
-    m_current.pixelShader = shader;
-    m_pending.pixelShader = shader;
+    m_bound.ps = shader;
+    m_wanted.ps = shader;
   }
-
   void SetVertexShader(ID3D11VertexShader* shader)
   {
-    if (m_current.vertexShader != shader)
-      m_dirtyFlags.set(DirtyFlag_VertexShader);
-
-    m_pending.vertexShader = shader;
+    Track(m_bound.vs, m_wanted.vs, shader, BIT_VS);
   }
-
   void SetGeometryShader(ID3D11GeometryShader* shader)
   {
-    if (m_current.geometryShader != shader)
-      m_dirtyFlags.set(DirtyFlag_GeometryShader);
-
-    m_pending.geometryShader = shader;
+    Track(m_bound.gs, m_wanted.gs, shader, BIT_GS);
   }
 
+  // The framebuffer, the bounding-box UAV and the integer-view choice are
+  // bound together by one output-merger call.
   void SetFramebuffer(DXFramebuffer* fb)
   {
-    if (m_current.framebuffer != fb)
-      m_dirtyFlags.set(DirtyFlag_Framebuffer);
-
-    m_pending.framebuffer = fb;
+    Track(m_bound.framebuffer, m_wanted.framebuffer, fb, BIT_OUTPUT);
   }
-
   void SetOMUAV(ID3D11UnorderedAccessView* uav)
   {
-    if (m_current.uav != uav)
-      m_dirtyFlags.set(DirtyFlag_Framebuffer);
-
-    m_pending.uav = uav;
+    Track(m_bound.om_uav, m_wanted.om_uav, uav, BIT_OUTPUT);
   }
-
   void SetIntegerRTV(bool enable)
   {
-    if (m_current.use_integer_rtv != enable)
-      m_dirtyFlags.set(DirtyFlag_Framebuffer);
-
-    m_pending.use_integer_rtv = enable;
+    Track(m_bound.integer_rtv, m_wanted.integer_rtv, enable, BIT_OUTPUT);
   }
 
-  // removes currently set texture from all slots, returns mask of previously bound slots
+  // Clears every pixel-stage slot currently holding srv; returns the slots as a mask.
   u32 UnsetTexture(ID3D11ShaderResourceView* srv);
+  // Puts srv into every slot of the mask.
   void SetTextureByMask(u32 textureSlotMask, ID3D11ShaderResourceView* srv);
+  // Pushes dirty pixel-stage textures and samplers only.
   void ApplyTextures();
 
-  // call this immediately before any drawing operation or to explicitly apply pending resource
-  // state changes
+  // Pushes every dirty binding. Call right before drawing.
   void Apply();
 
-  // Binds constant buffers/textures/samplers to the compute shader stage.
-  // We don't track these explicitly because it's not often-used.
+  // Compute bindings are not shadowed per draw: they are copied from the
+  // graphics bindings on demand, since compute is rare.
   void SetComputeUAV(u32 index, ID3D11UnorderedAccessView* uav);
   void SetComputeShader(ID3D11ComputeShader* shader);
   void SyncComputeBindings();
 
 private:
-  enum DirtyFlags
+  static constexpr u32 SLOTS = VideoCommon::MAX_PIXEL_SHADER_SAMPLERS;
+  static constexpr u32 COMPUTE_SLOTS = VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS;
+
+  // Dirty bits: one per texture slot, one per sampler slot, then one per group.
+  static constexpr u64 Bit(u32 n) { return u64{1} << n; }
+  static constexpr u64 TextureBit(size_t slot) { return Bit(static_cast<u32>(slot)); }
+  static constexpr u64 SamplerBit(size_t slot) { return Bit(SLOTS + static_cast<u32>(slot)); }
+  static constexpr u64 BIT_PS_CB = u64{1} << (2 * SLOTS + 0);
+  static constexpr u64 BIT_VS_CB = u64{1} << (2 * SLOTS + 1);
+  static constexpr u64 BIT_CUSTOM_CB = u64{1} << (2 * SLOTS + 2);
+  static constexpr u64 BIT_GS_CB = u64{1} << (2 * SLOTS + 3);
+  static constexpr u64 BIT_VB = u64{1} << (2 * SLOTS + 4);
+  static constexpr u64 BIT_IB = u64{1} << (2 * SLOTS + 5);
+  static constexpr u64 BIT_PS = u64{1} << (2 * SLOTS + 6);
+  static constexpr u64 BIT_VS = u64{1} << (2 * SLOTS + 7);
+  static constexpr u64 BIT_GS = u64{1} << (2 * SLOTS + 8);
+  static constexpr u64 BIT_INPUT = u64{1} << (2 * SLOTS + 9);
+  static constexpr u64 BIT_BLEND = u64{1} << (2 * SLOTS + 10);
+  static constexpr u64 BIT_DEPTH = u64{1} << (2 * SLOTS + 11);
+  static constexpr u64 BIT_RASTER = u64{1} << (2 * SLOTS + 12);
+  static constexpr u64 BIT_OUTPUT = u64{1} << (2 * SLOTS + 13);
+  static_assert(2 * SLOTS + 13 < 64);
+
+  static constexpr u64 CONSTANT_BITS = BIT_PS_CB | BIT_VS_CB | BIT_CUSTOM_CB | BIT_GS_CB;
+  static constexpr u64 INPUT_BITS = BIT_VB | BIT_IB | BIT_INPUT;
+  static constexpr u64 SHADER_BITS = BIT_PS | BIT_VS | BIT_GS;
+
+  template <typename T>
+  void Track(const T& bound, T& wanted, T value, u64 bit)
   {
-    DirtyFlag_Texture0 = 0,
-    DirtyFlag_Sampler0 = DirtyFlag_Texture0 + VideoCommon::MAX_PIXEL_SHADER_SAMPLERS,
-    DirtyFlag_PixelConstants = DirtyFlag_Sampler0 + VideoCommon::MAX_PIXEL_SHADER_SAMPLERS,
-    DirtyFlag_VertexConstants,
-    DirtyFlag_CustomConstants,  // Custom shader constants used by both vertex/pixel stages
-    DirtyFlag_GeometryConstants,
+    if (bound != value)
+      m_dirty |= bit;
+    wanted = value;
+  }
 
-    DirtyFlag_VertexBuffer,
-    DirtyFlag_IndexBuffer,
+  void ApplyOutputMerger();
+  void ApplyConstants();
+  void ApplyInputAssembler();
+  void ApplyShaders();
 
-    DirtyFlag_PixelShader,
-    DirtyFlag_VertexShader,
-    DirtyFlag_GeometryShader,
-
-    DirtyFlag_InputAssembler,
-    DirtyFlag_BlendState,
-    DirtyFlag_DepthState,
-    DirtyFlag_RasterizerState,
-    DirtyFlag_Framebuffer,
-    DirtyFlag_Max
-  };
-
-  std::bitset<DirtyFlags::DirtyFlag_Max> m_dirtyFlags;
-
-  struct Resources
+  struct Bindings
   {
-    std::array<ID3D11ShaderResourceView*, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> textures;
-    std::array<ID3D11SamplerState*, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> samplers;
-    std::array<ID3D11Buffer*, 2> pixelConstants;
-    ID3D11Buffer* vertexConstants;
-    ID3D11Buffer* customConstants;
-    ID3D11Buffer* geometryConstants;
-    ID3D11Buffer* vertexBuffer;
-    ID3D11Buffer* indexBuffer;
-    u32 vertexBufferStride;
-    u32 vertexBufferOffset;
+    std::array<ID3D11ShaderResourceView*, SLOTS> srvs;
+    std::array<ID3D11SamplerState*, SLOTS> samplers;
+    std::array<ID3D11Buffer*, 2> ps_cbs;
+    ID3D11Buffer* vs_cb;
+    ID3D11Buffer* custom_cb;
+    ID3D11Buffer* gs_cb;
+    ID3D11Buffer* vb;
+    ID3D11Buffer* ib;
+    u32 vb_stride;
+    u32 vb_offset;
     D3D11_PRIMITIVE_TOPOLOGY topology;
-    ID3D11InputLayout* inputLayout;
-    ID3D11PixelShader* pixelShader;
-    ID3D11VertexShader* vertexShader;
-    ID3D11GeometryShader* geometryShader;
-    ID3D11BlendState* blendState;
-    ID3D11DepthStencilState* depthState;
-    ID3D11RasterizerState* rasterizerState;
+    ID3D11InputLayout* layout;
+    ID3D11PixelShader* ps;
+    ID3D11VertexShader* vs;
+    ID3D11GeometryShader* gs;
+    ID3D11BlendState* blend;
+    ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* raster;
     DXFramebuffer* framebuffer;
-    ID3D11UnorderedAccessView* uav;
-    bool use_integer_rtv;
+    ID3D11UnorderedAccessView* om_uav;
+    bool integer_rtv;
   };
 
-  Resources m_pending = {};
-  Resources m_current = {};
+  u64 m_dirty = 0;
+  Bindings m_wanted = {};  // what the next Apply should bind
+  Bindings m_bound = {};   // what the context has
 
-  // Compute resources are synced with the graphics resources when we need them.
-  ID3D11Buffer* m_compute_constants = nullptr;
-  std::array<ID3D11ShaderResourceView*, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS>
-      m_compute_textures{};
-  std::array<ID3D11SamplerState*, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS> m_compute_samplers{};
-  std::array<ID3D11UnorderedAccessView*, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS>
-      m_compute_images{};
+  // Compute stage, synced from m_wanted when a dispatch needs it.
+  ID3D11Buffer* m_compute_cb = nullptr;
+  std::array<ID3D11ShaderResourceView*, COMPUTE_SLOTS> m_compute_srvs{};
+  std::array<ID3D11SamplerState*, COMPUTE_SLOTS> m_compute_samplers{};
+  std::array<ID3D11UnorderedAccessView*, COMPUTE_SLOTS> m_compute_uavs{};
   ID3D11ComputeShader* m_compute_shader = nullptr;
 };
 

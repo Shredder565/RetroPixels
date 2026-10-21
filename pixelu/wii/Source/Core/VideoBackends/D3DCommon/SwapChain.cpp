@@ -110,8 +110,8 @@ HRESULT SwapChain::CreateFlipModel(bool stereo)
   for (const DXGI_SWAP_EFFECT effect : effects)
   {
     desc.SwapEffect = effect;
-    result = factory2->CreateSwapChainForHwnd(m_d3d_device.Get(), Window(), &desc, nullptr,
-                                              nullptr, &created);
+    result = factory2->CreateSwapChainForHwnd(m_d3d_device.Get(), Window(), &desc, nullptr, nullptr,
+                                              &created);
     if (SUCCEEDED(result))
       break;
   }
@@ -195,8 +195,8 @@ bool SwapChain::CreateSwapChain(bool stereo, bool hdr)
   }
 
   // Fullscreen is managed by the frontend, not by DXGI's Alt+Enter handling.
-  result = m_dxgi_factory->MakeWindowAssociation(Window(),
-                                                 DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER);
+  result = m_dxgi_factory->MakeWindowAssociation(Window(), DXGI_MWA_NO_WINDOW_CHANGES |
+                                                               DXGI_MWA_NO_ALT_ENTER);
   if (FAILED(result))
     WARN_LOG_FMT(VIDEO, "MakeWindowAssociation() failed: {}", Common::HRWrap(result));
 
