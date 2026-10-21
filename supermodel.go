@@ -128,6 +128,12 @@ func supermodelFind(force bool) {
 	smMu.Unlock()
 	go func() {
 		p, c := supermodel.FindROM(supermodelFolders())
+		if !c.OK {
+			// Not in the usual places: look through each drive's game folders.
+			if q, d := supermodel.FindROMOnDrives(dolphin.WiiKeysScanRoots()); q != "" && (d.OK || p == "") {
+				p, c = q, d
+			}
+		}
 		cfgMu.Lock()
 		cur := cfg.SupermodelROM
 		cfgMu.Unlock()

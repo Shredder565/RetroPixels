@@ -294,13 +294,17 @@ func IsRomFile(name string) bool {
 // version first; failing that the first one found (its Check says what's
 // wrong); "" when there's none.
 func FindROM(folders []string) (string, Check) {
+	return findIn(folders, 3)
+}
+
+func findIn(folders []string, depth int) (string, Check) {
 	var found []string
 	seen := map[string]bool{}
 	for _, d := range folders {
 		if d == "" {
 			continue
 		}
-		walk(d, 3, func(p string, e fs.DirEntry) {
+		walk(d, depth, func(p string, e fs.DirEntry) {
 			if e.IsDir() || !IsRomFile(e.Name()) {
 				return
 			}
@@ -334,6 +338,51 @@ func FindROM(folders []string) (string, Check) {
 		}
 	}
 	return firstPath, first
+}
+
+// romDirWords: folder names that look like they hold games. FindROMOnDrives
+// only goes into folders named with one of these, so a whole drive is
+// searched in moments.
+var romDirWords = []string{"rom", "arcade", "mame", "game", "emu", "sega", "model", "supermodel", "retro"}
+
+func romishDir(name string) bool {
+	n := strings.ToLower(name)
+	for _, w := range romDirWords {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// FindROMOnDrives is FindROM's last resort: from each drive root, it goes up
+// to five folders down, but only into folders whose names look like they
+// hold games (D:\Roms All Systems\Arcade Roms Mame .289\Arcade roms).
+func FindROMOnDrives(roots []string) (string, Check) {
+	var dirs []string
+	var collect func(dir string, depth int)
+	collect = func(dir string, depth int) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() || skipDirs[strings.ToLower(e.Name())] || !romishDir(e.Name()) {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			dirs = append(dirs, p)
+			if depth > 1 {
+				collect(p, depth-1)
+			}
+		}
+	}
+	for _, r := range roots {
+		if r != "" {
+			collect(r, 5)
+		}
+	}
+	return findIn(dirs, 1)
 }
 
 var skipDirs = map[string]bool{"windows": true, "$recycle.bin": true, "system volume information": true,

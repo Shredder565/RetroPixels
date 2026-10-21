@@ -138,6 +138,21 @@ func TestFindROM(t *testing.T) {
 	}
 }
 
+func TestFindROMOnDrives(t *testing.T) {
+	drive := t.TempDir()
+	good := filepath.Join(drive, "Roms All Systems", "Arcade Roms Mame .289", "Arcade roms", "swtrilgya.zip")
+	writeZip(t, good, mergedA(true))
+	// Folders that don't look like game folders are not searched.
+	writeZip(t, filepath.Join(drive, "Work", "swtrilgya.zip"), mergedA(true))
+	p, c := FindROMOnDrives([]string{drive})
+	if p != good || !c.OK {
+		t.Fatalf("FindROMOnDrives = %q %+v, want %q", p, c, good)
+	}
+	if p, _ := FindROMOnDrives([]string{filepath.Join(drive, "Work")}); p != "" {
+		t.Fatalf("searched outside game folders: %q", p)
+	}
+}
+
 func TestGameArgs(t *testing.T) {
 	rom := filepath.Join("C:", "ROMs", "swtrilgya.zip")
 	docked := GameArgs(rom, LaunchOptions{Embed: true, Hidden: true, ForceFeedback: true, Patched: true,
