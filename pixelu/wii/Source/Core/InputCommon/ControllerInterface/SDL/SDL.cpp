@@ -1,9 +1,10 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/SDL/SDL.h"
 
+#include <memory>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -27,234 +28,227 @@
 
 namespace ciface::SDL
 {
+namespace
+{
+// SDL's log categories, as shown in our log.
+std::string_view CategoryLabel(int category)
+{
+  switch (category)
+  {
+  case SDL_LOG_CATEGORY_APPLICATION:
+    return "app";
+  case SDL_LOG_CATEGORY_ERROR:
+    return "error";
+  case SDL_LOG_CATEGORY_ASSERT:
+    return "assert";
+  case SDL_LOG_CATEGORY_SYSTEM:
+    return "system";
+  case SDL_LOG_CATEGORY_AUDIO:
+    return "audio";
+  case SDL_LOG_CATEGORY_VIDEO:
+    return "video";
+  case SDL_LOG_CATEGORY_RENDER:
+    return "render";
+  case SDL_LOG_CATEGORY_INPUT:
+    return "input";
+  case SDL_LOG_CATEGORY_TEST:
+    return "test";
+  case SDL_LOG_CATEGORY_GPU:
+    return "gpu";
+  default:
+    return {};
+  }
+}
+
+Common::Log::LogLevel LevelFor(SDL_LogPriority priority)
+{
+  switch (priority)
+  {
+  case SDL_LOG_PRIORITY_VERBOSE:
+  case SDL_LOG_PRIORITY_DEBUG:
+    return Common::Log::LogLevel::LDEBUG;
+  case SDL_LOG_PRIORITY_INFO:
+    return Common::Log::LogLevel::LINFO;
+  case SDL_LOG_PRIORITY_WARN:
+    return Common::Log::LogLevel::LWARNING;
+  case SDL_LOG_PRIORITY_ERROR:
+    return Common::Log::LogLevel::LERROR;
+  default:
+    return Common::Log::LogLevel::LNOTICE;
+  }
+}
+
+void ForwardSDLLog(void*, int category, SDL_LogPriority priority, const char* message)
+{
+  const Common::Log::LogLevel level = LevelFor(priority);
+  const std::string_view label = CategoryLabel(category);
+  if (label.empty())
+  {
+    GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, level, "unknown({}): {}", category,
+                    message);
+  }
+  else
+  {
+    GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, level, "{}: {}", label, message);
+  }
+}
+
+// Gives an SDL hint setting its default value unless the user set it.
+void DefaultHint(const Config::Info<std::string>& hint, const char* value)
+{
+  if (Config::Get(hint).empty())
+    Config::SetBase(hint, value);
+}
+
+bool IsGameCubeAdapterInUse()
+{
+  for (int channel = 0; channel != SerialInterface::MAX_SI_CHANNELS; ++channel)
+  {
+    if (Config::Get(Config::GetInfoForSIDevice(channel)) == SerialInterface::SIDEVICE_WIIU_ADAPTER)
+      return true;
+  }
+  return false;
+}
 
 class InputBackend final : public ciface::InputBackend
 {
 public:
-  InputBackend(ControllerInterface* controller_interface);
+  explicit InputBackend(ControllerInterface* controller_interface);
   ~InputBackend() override;
   void PopulateDevices() override;
   void UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>& devices_to_remove) override;
 
 private:
-  void OpenAndAddDevice(SDL_JoystickID instance_id);
+  void ApplyHints();
+  void EventThread();
+  bool StartSDL();
+  void Post(Uint32 type);
 
-  bool HandleEventAndContinue(const SDL_Event& e);
+  void AddJoystick(SDL_JoystickID instance_id);
+  // Returns false once the stop event arrives.
+  bool Handle(const SDL_Event& event);
 
-  Common::Event m_init_event;
-  Uint32 m_stop_event_type;
-  Uint32 m_populate_event_type;
-  std::thread m_hotplug_thread;
+  Common::Event m_started;
+  Uint32 m_stop_event = 0;
+  Uint32 m_populate_event = 0;
+  std::thread m_thread;
 };
-
-std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface)
-{
-  return std::make_unique<InputBackend>(controller_interface);
-}
-
-static void EnableSDLLogging()
-{
-  SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
-  SDL_SetLogOutputFunction(
-      [](void*, int category, SDL_LogPriority priority, const char* message) {
-        std::string_view category_name{};
-        switch (category)
-        {
-        case SDL_LOG_CATEGORY_APPLICATION:
-          category_name = "app";
-          break;
-        case SDL_LOG_CATEGORY_ERROR:
-          category_name = "error";
-          break;
-        case SDL_LOG_CATEGORY_ASSERT:
-          category_name = "assert";
-          break;
-        case SDL_LOG_CATEGORY_SYSTEM:
-          category_name = "system";
-          break;
-        case SDL_LOG_CATEGORY_AUDIO:
-          category_name = "audio";
-          break;
-        case SDL_LOG_CATEGORY_VIDEO:
-          category_name = "video";
-          break;
-        case SDL_LOG_CATEGORY_RENDER:
-          category_name = "render";
-          break;
-        case SDL_LOG_CATEGORY_INPUT:
-          category_name = "input";
-          break;
-        case SDL_LOG_CATEGORY_TEST:
-          category_name = "test";
-          break;
-        case SDL_LOG_CATEGORY_GPU:
-          category_name = "gpu";
-          break;
-        default:
-          break;
-        }
-
-        auto log_level = Common::Log::LogLevel::LNOTICE;
-        switch (priority)
-        {
-        case SDL_LOG_PRIORITY_VERBOSE:
-        case SDL_LOG_PRIORITY_DEBUG:
-          log_level = Common::Log::LogLevel::LDEBUG;
-          break;
-        case SDL_LOG_PRIORITY_INFO:
-          log_level = Common::Log::LogLevel::LINFO;
-          break;
-        case SDL_LOG_PRIORITY_WARN:
-          log_level = Common::Log::LogLevel::LWARNING;
-          break;
-        case SDL_LOG_PRIORITY_ERROR:
-          log_level = Common::Log::LogLevel::LERROR;
-          break;
-        case SDL_LOG_PRIORITY_CRITICAL:
-        default:
-          log_level = Common::Log::LogLevel::LNOTICE;
-          break;
-        }
-
-        if (category_name.empty())
-        {
-          GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, log_level, "unknown({}): {}",
-                          category, message);
-        }
-        else
-        {
-          GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, log_level, "{}: {}",
-                          category_name, message);
-        }
-      },
-      nullptr);
-}
 
 InputBackend::InputBackend(ControllerInterface* controller_interface)
     : ciface::InputBackend(controller_interface)
 {
-  EnableSDLLogging();
+  SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
+  SDL_SetLogOutputFunction(ForwardSDLLog, nullptr);
 
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_ENHANCED_REPORTS) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+  ApplyHints();
 
-  // We have our own WGI backend. Enabling SDL's WGI handling creates even more redundant devices.
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_WGI) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_WGI, "0");
+  m_thread = std::thread([this] { EventThread(); });
+  m_started.Wait();
+}
 
-  // Disable DualSense Player LEDs; We already colorize the Primary LED
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "0");
+void InputBackend::ApplyHints()
+{
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+  // Windows.Gaming.Input devices come from our own WGInput backend; SDL's would be duplicates.
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_WGI, "0");
+  // The DualSense's light bar shows the player; its player LEDs stay off.
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "0");
+  // SDL's DirectInput support stays on: turning it off avoids rare shutdown hangs with some
+  // 8BitDo pads, but breaks DualSense and DualShock 4 hotplug.
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT, "1");
+  // Spelled out so they show up in the configuration and are easy to change.
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "1");
+  DefaultHint(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "0");
 
-  // Disabling DirectInput support apparently solves hangs on shutdown for users with
-  //  "8BitDo Ultimate 2" controllers, however, it also breaks hotplug support for Dual Sense
-  //  and DS4 Controllers, so we leave it enabled for now.
-  // It also works around a possibly related random hang on a IDirectInputDevice8_Acquire
-  //  call within SDL.
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT, "1");
+  // A GameCube adapter in use by the SI devices is left to our own driver. SDL reads this hint
+  // only when its joystick subsystem starts, so later configuration changes do not apply.
+  SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, IsGameCubeAdapterInUse() ? "0" : "1");
 
-  // Pre-populate the default Joy-Con hints so they can be easily changed
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "1");
-
-  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS) == "")
-    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "0");
-
-  // Disable SDL's GC Adapter handling when we want to handle it ourselves.
-  bool is_gc_adapter_configured = false;
-  for (int i = 0; i != SerialInterface::MAX_SI_CHANNELS; ++i)
+  // Every hint the user put in the SDL_Hints section.
+  std::shared_ptr<Config::Layer> base_layer = Config::GetLayer(Config::LayerType::Base);
+  const Config::Section& hints = base_layer->GetSection(Config::System::Main, "SDL_Hints");
+  for (const auto& [location, value] : hints)
   {
-    if (Config::Get(Config::GetInfoForSIDevice(i)) == SerialInterface::SIDEVICE_WIIU_ADAPTER)
-    {
-      is_gc_adapter_configured = true;
-      break;
-    }
-  }
-  // TODO: This hint should be adjusted when the config changes,
-  //  but SDL requires it be set before joystick initialization,
-  //  and ControllerInterface isn't prepared for SDL to spontaneously re-initialize itself.
-  SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, is_gc_adapter_configured ? "0" : "1");
-
-  // Load all the hints from the config file
-  std::shared_ptr<Config::Layer> layer = Config::GetLayer(Config::LayerType::Base);
-  const Config::Section& section = layer->GetSection(Config::System::Main, "SDL_Hints");
-  for (auto& row_data : section)
-  {
-    const Config::Location& location = row_data.first;
-    const std::optional<std::string>& value = row_data.second;
-
     if (value)
       SDL_SetHint(location.key.c_str(), value->c_str());
   }
+}
 
-  m_hotplug_thread = std::thread([this] {
-    Common::SetCurrentThreadName("SDL Hotplug Thread");
+bool InputBackend::StartSDL()
+{
+  if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMEPAD))
+  {
+    ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to initialize");
+    return false;
+  }
 
-    Common::ScopeGuard quit_guard([] {
-      // TODO: there seems to be some sort of memory leak with SDL, quit isn't freeing everything up
-      SDL_Quit();
-    });
-    {
-      Common::ScopeGuard init_guard([this] { m_init_event.Set(); });
+  const Uint32 first_event = SDL_RegisterEvents(2);
+  if (first_event == static_cast<Uint32>(-1))
+  {
+    ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to register custom events");
+    return false;
+  }
+  m_stop_event = first_event;
+  m_populate_event = first_event + 1;
 
-      if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMEPAD))
-      {
-        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to initialize");
-        return;
-      }
+  // Handle the joysticks already present before the constructor returns. Otherwise their added
+  // events (and a populate request) would be handled after ControllerInterface's first refresh
+  // cleared the list, and the devices would show up twice. Adding them here is refused anyway,
+  // as ControllerInterface is not initialised yet.
+  SDL_Event event;
+  while (SDL_PollEvent(&event))
+  {
+    if (!Handle(event))
+      return false;
+  }
+  return true;
+}
 
-      const Uint32 custom_events_start = SDL_RegisterEvents(2);
-      if (custom_events_start == static_cast<Uint32>(-1))
-      {
-        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to register custom events");
-        return;
-      }
-      m_stop_event_type = custom_events_start;
-      m_populate_event_type = custom_events_start + 1;
+void InputBackend::EventThread()
+{
+  Common::SetCurrentThreadName("SDL Hotplug Thread");
 
-      // Drain all of the events and add the initial joysticks before returning. Otherwise, the
-      // individual joystick events as well as the custom populate event will be handled _after_
-      // ControllerInterface::Init/RefreshDevices has cleared its list of devices, resulting in
-      // duplicate devices. Adding devices will actually "fail" here, as the ControllerInterface
-      // hasn't finished initializing yet.
-      SDL_Event e;
-      while (SDL_PollEvent(&e))
-      {
-        if (!HandleEventAndContinue(e))
-          return;
-      }
-    }
+  // SDL is shut down by the thread that started it, however the thread ends.
+  Common::ScopeGuard quit_sdl([] { SDL_Quit(); });
 
-    SDL_Event e;
-    while (SDL_WaitEvent(&e))
-    {
-      if (!HandleEventAndContinue(e))
-        return;
-    }
-  });
+  bool started;
+  {
+    Common::ScopeGuard release_constructor([this] { m_started.Set(); });
+    started = StartSDL();
+  }
+  if (!started)
+    return;
 
-  m_init_event.Wait();
+  SDL_Event event;
+  while (SDL_WaitEvent(&event))
+  {
+    if (!Handle(event))
+      return;
+  }
 }
 
 InputBackend::~InputBackend()
 {
-  if (!m_hotplug_thread.joinable())
+  if (!m_thread.joinable())
     return;
 
-  SDL_Event stop_event{m_stop_event_type};
-  SDL_PushEvent(&stop_event);
+  Post(m_stop_event);
+  m_thread.join();
+}
 
-  m_hotplug_thread.join();
+void InputBackend::Post(Uint32 type)
+{
+  SDL_Event event{type};
+  SDL_PushEvent(&event);
 }
 
 void InputBackend::PopulateDevices()
 {
-  if (!m_hotplug_thread.joinable())
+  if (!m_thread.joinable())
     return;
 
-  SDL_Event populate_event{m_populate_event_type};
-  SDL_PushEvent(&populate_event);
+  // Population happens on the event thread.
+  Post(m_populate_event);
 }
 
 void InputBackend::UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>&)
@@ -262,57 +256,68 @@ void InputBackend::UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>&
   SDL_UpdateGamepads();
 }
 
-void InputBackend::OpenAndAddDevice(SDL_JoystickID instance_id)
+void InputBackend::AddJoystick(SDL_JoystickID instance_id)
 {
-  SDL_Gamepad* gc = SDL_OpenGamepad(instance_id);
-  SDL_Joystick* js = SDL_OpenJoystick(instance_id);
+  SDL_Gamepad* const gamepad = SDL_OpenGamepad(instance_id);
+  SDL_Joystick* const joystick = SDL_OpenJoystick(instance_id);
+  if (joystick == nullptr)
+    return;
 
-  if (js != nullptr)
+  // Some non-controller HID devices (webcams among them) are opened as joysticks with absurd
+  // numbers of controls; those are skipped.
+  constexpr int MAX_CONTROLS = 255;
+  if (SDL_GetNumJoystickButtons(joystick) > MAX_CONTROLS ||
+      SDL_GetNumJoystickAxes(joystick) > MAX_CONTROLS ||
+      SDL_GetNumJoystickHats(joystick) > MAX_CONTROLS ||
+      SDL_GetNumJoystickBalls(joystick) > MAX_CONTROLS)
   {
-    if (SDL_GetNumJoystickButtons(js) > 255 || SDL_GetNumJoystickAxes(js) > 255 ||
-        SDL_GetNumJoystickHats(js) > 255 || SDL_GetNumJoystickBalls(js) > 255)
-    {
-      // This device is invalid, don't use it
-      // Some crazy devices (HP webcam 2100) end up as HID devices
-      // SDL tries parsing these as Joysticks
-      return;
-    }
-    auto gamepad = std::make_shared<Gamepad>(gc, js);
-    if (!gamepad->Inputs().empty() || !gamepad->Outputs().empty())
-      GetControllerInterface().AddDevice(std::move(gamepad));
+    return;
   }
+
+  auto device = std::make_shared<Gamepad>(gamepad, joystick);
+  if (device->Inputs().empty() && device->Outputs().empty())
+    return;
+
+  GetControllerInterface().AddDevice(std::move(device));
 }
 
-bool InputBackend::HandleEventAndContinue(const SDL_Event& e)
+bool InputBackend::Handle(const SDL_Event& event)
 {
-  if (e.type == SDL_EVENT_JOYSTICK_ADDED)
+  if (event.type == SDL_EVENT_JOYSTICK_ADDED)
   {
-    OpenAndAddDevice(e.jdevice.which);
+    AddJoystick(event.jdevice.which);
+    return true;
   }
-  else if (e.type == SDL_EVENT_JOYSTICK_REMOVED)
+
+  if (event.type == SDL_EVENT_JOYSTICK_REMOVED)
   {
-    GetControllerInterface().RemoveDevice([&e](const auto* device) {
+    const SDL_JoystickID gone = event.jdevice.which;
+    GetControllerInterface().RemoveDevice([gone](const Core::Device* device) {
       return device->GetSource() == "SDL" &&
-             static_cast<const Gamepad*>(device)->GetSDLInstanceID() == e.jdevice.which;
+             static_cast<const Gamepad*>(device)->GetSDLInstanceID() == gone;
     });
+    return true;
   }
-  else if (e.type == m_populate_event_type)
+
+  if (event.type == m_populate_event)
   {
     GetControllerInterface().PlatformPopulateDevices([this] {
-      int joystick_count = 0;
-      auto* const joystick_ids = SDL_GetJoysticks(&joystick_count);
-      for (auto instance_id : std::span(joystick_ids, joystick_count))
-        OpenAndAddDevice(instance_id);
-
-      SDL_free(joystick_ids);
+      int count = 0;
+      SDL_JoystickID* const ids = SDL_GetJoysticks(&count);
+      for (const SDL_JoystickID id : std::span(ids, static_cast<size_t>(count)))
+        AddJoystick(id);
+      SDL_free(ids);
     });
-  }
-  else if (e.type == m_stop_event_type)
-  {
-    return false;
+    return true;
   }
 
-  return true;
+  return event.type != m_stop_event;
+}
+}  // namespace
+
+std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface)
+{
+  return std::make_unique<InputBackend>(controller_interface);
 }
 
 }  // namespace ciface::SDL

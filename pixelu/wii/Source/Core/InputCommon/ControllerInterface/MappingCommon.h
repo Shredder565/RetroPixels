@@ -25,7 +25,8 @@ enum class Quote
 };
 
 // The expression for one control: "Device:Control" when the control's device is not the default
-// device, plain "Control" otherwise; with Quote::On it is put in backticks unless it is all letters.
+// device, plain "Control" otherwise; with Quote::On it is put in backticks unless it is all
+// letters.
 std::string GetExpressionForControl(const std::string& control_name,
                                     const Core::DeviceQualifier& control_device,
                                     const Core::DeviceQualifier& default_device,

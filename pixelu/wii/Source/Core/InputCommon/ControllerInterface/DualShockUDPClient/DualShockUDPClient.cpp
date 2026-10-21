@@ -96,9 +96,7 @@ using MotionAxis = ScaledInput<float, false>;
 class FlagInput final : public Core::Device::Input
 {
 public:
-  FlagInput(const char* name, const u8& bits, u8 mask) : m_name(name), m_bits(bits), m_mask(mask)
-  {
-  }
+  FlagInput(const char* name, const u8& bits, u8 mask) : m_name(name), m_bits(bits), m_mask(mask) {}
 
   std::string GetName() const override { return m_name; }
   ControlState GetState() const override { return (m_bits & m_mask) != 0; }
@@ -122,8 +120,7 @@ public:
     // While charging the server does not report a level.
     if (m_battery == Proto::DsBattery::Charging || m_battery == Proto::DsBattery::Charged)
       return BATTERY_INPUT_MAX_VALUE;
-    return ControlState(m_battery) / ControlState(Proto::DsBattery::Full) *
-           BATTERY_INPUT_MAX_VALUE;
+    return ControlState(m_battery) / ControlState(Proto::DsBattery::Full) * BATTERY_INPUT_MAX_VALUE;
   }
 
 private:
