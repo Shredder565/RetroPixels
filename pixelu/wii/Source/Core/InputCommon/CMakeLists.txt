@@ -26,21 +26,10 @@ pixelu_library(inputcommon
   IN ControllerInterface
     ControllerInterface.cpp ControllerInterface.h CoreDevice.cpp CoreDevice.h InputBackend.cpp
     InputBackend.h MappingCommon.cpp MappingCommon.h
-  IN ControllerInterface/DInput
-    DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp
-    DInputKeyboardMouse.h NamedKeys.h XInputFilter.cpp XInputFilter.h
   IN ControllerInterface/DualShockUDPClient
     DualShockUDPClient.cpp DualShockUDPClient.h DualShockUDPProto.h
-  IN ControllerInterface/ForceFeedback
-    ForceFeedbackDevice.cpp ForceFeedbackDevice.h
-  IN ControllerInterface/WGInput
-    WGInput.cpp WGInput.h
   IN ControllerInterface/Wiimote
     WiimoteController.cpp WiimoteController.h
-  IN ControllerInterface/Win32
-    Win32.cpp Win32.h
-  IN ControllerInterface/XInput
-    XInput.cpp XInput.h
   IN DynamicInputTextures
     DITConfiguration.cpp DITConfiguration.h DITData.h DITSpecification.cpp DITSpecification.h
 )
@@ -54,6 +43,22 @@ target_link_libraries(inputcommon
     sfml-network
     spng::spng
 )
+
+if(WIN32)
+  pixelu_add_sources(inputcommon
+    IN ControllerInterface/DInput
+      DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp
+      DInputKeyboardMouse.h NamedKeys.h XInputFilter.cpp XInputFilter.h
+    IN ControllerInterface/ForceFeedback
+      ForceFeedbackDevice.cpp ForceFeedbackDevice.h
+    IN ControllerInterface/WGInput
+      WGInput.cpp WGInput.h
+    IN ControllerInterface/Win32
+      Win32.cpp Win32.h
+    IN ControllerInterface/XInput
+      XInput.cpp XInput.h
+  )
+endif()
 
 if(ENABLE_SDL)
   pixelu_add_sources(inputcommon

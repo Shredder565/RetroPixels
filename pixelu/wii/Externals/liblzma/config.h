@@ -2,7 +2,7 @@
 //
 // Build configuration for the liblzma sources of XZ Utils 5.2.4 (fetched from
 // the XZ Utils repository, see Externals/sources.json), for PixelU-Wii's
-// Windows x64 builds. XZ Utils normally
+// Windows x64 and Linux x86-64 builds. XZ Utils normally
 // generates this file with its configure script; these are the answers for MSVC
 // on 64-bit Windows. Only the library is built, so nothing for the xz tools
 // (gettext, getopt, file times, ...) is here.
@@ -31,8 +31,23 @@
 #define HAVE_MF_BT3 1
 #define HAVE_MF_BT4 1
 
+#ifdef _WIN32
 // Threads: Windows Vista condition variables.
 #define MYTHREAD_VISTA 1
+#else
+// Linux (glibc 2.35+): POSIX threads with a monotonic clock for timed waits, the CPU
+// count from the affinity mask and the RAM size from sysconf.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+#define MYTHREAD_POSIX 1
+#define HAVE_CLOCK_GETTIME 1
+#define HAVE_DECL_CLOCK_MONOTONIC 1
+#define HAVE_PTHREAD_CONDATTR_SETCLOCK 1
+#define TUKLIB_CPUCORES_SCHED_GETAFFINITY 1
+#define TUKLIB_PHYSMEM_SYSCONF 1
+#define HAVE_UNISTD_H 1
+#endif
 
 // The C library.
 #define STDC_HEADERS 1

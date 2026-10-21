@@ -35,8 +35,8 @@ foreach(lib crypto x509 tls)
   add_library(${name} STATIC ${files})
   add_library(MbedTLS::${name} ALIAS ${name})
   target_include_directories(${name} PUBLIC "${src}/include/" PRIVATE "${src}/library/")
-  # Sockets (net_sockets.c) need Winsock.
-  target_link_libraries(${name} PUBLIC ws2_32 ${previous})
+  # Sockets (net_sockets.c) need Winsock on Windows.
+  target_link_libraries(${name} PUBLIC $<$<BOOL:${WIN32}>:ws2_32> ${previous})
   pixelu_third_party_target(${name})
   set(previous ${name})
 endforeach()

@@ -13,8 +13,13 @@ add_library(sfml-network STATIC)
 pixelu_add_sources(sfml-network
   IN "${src}/src/SFML/Network"
     Http.cpp IpAddress.cpp Packet.cpp Socket.cpp SocketSelector.cpp
-    TcpListener.cpp TcpSocket.cpp UdpSocket.cpp Win32/SocketImpl.cpp
+    TcpListener.cpp TcpSocket.cpp UdpSocket.cpp
 )
+if(WIN32)
+  pixelu_add_sources(sfml-network IN "${src}/src/SFML/Network" Win32/SocketImpl.cpp)
+else()
+  pixelu_add_sources(sfml-network IN "${src}/src/SFML/Network" Unix/SocketImpl.cpp)
+endif()
 target_link_libraries(sfml-network PUBLIC sfml-system)
 
 foreach(target sfml-system sfml-network)
