@@ -655,6 +655,17 @@ static void PlaceSections(RPLModule* rpl)
 			return;
 		cemu_assert_debug((uint32)sec.fileOffset >= temp.begin && (uint32)sec.fileOffset + (uint32)sec.sectionSize <= temp.end);
 		rpl->sectionAddressTable[i].ptr = tempMem + ((uint32)sec.fileOffset - temp.begin);
+		// symbol and string tables are read in place, so a compressed one is inflated here
+		// (relocations are inflated where they are applied)
+		if (((uint32)sec.flags & SHF_RPL_COMPRESSED) && (type == SHT_SYMTAB || type == SHT_STRTAB))
+		{
+			auto contents = ReadSectionData(rpl, i);
+			if (!contents)
+				return;
+			sec.sectionSize = (uint32)contents->size();
+			rpl->inflatedTempSections.emplace_back(std::move(*contents));
+			rpl->sectionAddressTable[i].ptr = rpl->inflatedTempSections.back().data();
+		}
 	});
 }
 

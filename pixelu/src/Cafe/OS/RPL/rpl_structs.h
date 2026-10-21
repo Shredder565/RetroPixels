@@ -188,6 +188,7 @@ struct RPLModule
 	uint32 regionOrigAddr_data; // lowest data address in the file
 	uint8* tempRegionPtr; // non-allocated sections (relocations, ...) in the loader work area
 	uint32 tempRegionAllocSize;
+	std::vector<std::vector<uint8>> inflatedTempSections; // compressed symbol/string tables, inflated (host memory)
 	std::vector<RPLSectionAddressEntry> sectionAddressTable;
 	uint32 entrypoint;
 	uint32 tlsStartAddress;
