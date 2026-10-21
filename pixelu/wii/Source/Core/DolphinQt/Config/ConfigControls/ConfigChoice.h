@@ -84,7 +84,7 @@ protected:
   }
 
 private:
-  void Store(int index) { SaveValue(m_setting, m_entries[index].second); }
+  void Store(int index) { SaveValue(m_setting, m_entries[static_cast<size_t>(index)].second); }
 
   const Config::Info<T> m_setting;
   const std::vector<std::pair<QString, T>> m_entries;

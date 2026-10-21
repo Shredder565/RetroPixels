@@ -508,10 +508,10 @@ void WiimoteControllersWidget::RunWithSpinner(std::invocable<> auto task)
   m_refresh->setEnabled(false);
   m_spinner->show();
 
-  auto pending = std::async(std::launch::async, std::move(task));
+  auto job = std::async(std::launch::async, std::move(task));
 
   auto* const ticker = new QTimer{this};
-  connect(ticker, &QTimer::timeout, this, [this, ticker, pending = std::move(pending)] {
+  connect(ticker, &QTimer::timeout, this, [this, ticker, pending = std::move(job)] {
     m_spinner->setPixmap(m_spinner->pixmap().transformed(QTransform().rotate(90)));
 
     if (pending.wait_for(std::chrono::seconds{}) != std::future_status::ready)
