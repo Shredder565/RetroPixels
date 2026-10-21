@@ -619,8 +619,8 @@ void RenderWidget::ShowForEmbedding(const QByteArray& geometry)
   const HWND hwnd = reinterpret_cast<HWND>(winId());
   const LONG_PTR ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
   m_had_app_window_style = (ex_style & WS_EX_APPWINDOW) != 0;
-  const LONG_PTR tool_style =
-      (ex_style & ~static_cast<LONG_PTR>(WS_EX_APPWINDOW)) | static_cast<LONG_PTR>(WS_EX_TOOLWINDOW);
+  const LONG_PTR tool_style = (ex_style & ~static_cast<LONG_PTR>(WS_EX_APPWINDOW)) |
+                              static_cast<LONG_PTR>(WS_EX_TOOLWINDOW);
   SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool_style);
 
   showNormal();
@@ -701,7 +701,8 @@ void RenderWidget::GiveUpDocking()
   // The taskbar picks up the style change only when the window is shown again: hide it (it is
   // off-screen anyway), turn it back into a normal window, centre it and show it.
   ShowWindow(hwnd, SW_HIDE);
-  LONG_PTR ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & ~static_cast<LONG_PTR>(WS_EX_TOOLWINDOW);
+  LONG_PTR ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  ex_style &= ~static_cast<LONG_PTR>(WS_EX_TOOLWINDOW);
   if (m_had_app_window_style)
     ex_style |= static_cast<LONG_PTR>(WS_EX_APPWINDOW);
   SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style);

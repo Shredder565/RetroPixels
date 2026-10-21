@@ -253,6 +253,13 @@ void SuspendHotkeysWhileActive(QWidget* window)
                    [] { HotkeyManagerEmu::Enable(false); });
 }
 
+// Creates a widget owned by parent; the parent is the constructor's last argument.
+template <typename Widget, typename... Args>
+Widget* MakeChild(QWidget* parent, Args&&... args)
+{
+  return new Widget(std::forward<Args>(args)..., parent);
+}
+
 std::unique_ptr<BootSessionData> SessionWithState(const std::optional<std::string>& savestate)
 {
   return std::make_unique<BootSessionData>(savestate, DeleteSavestateAfterBoot::No);
@@ -292,12 +299,14 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
 
   CreateComponents();
 
-  ConnectGameList();
-  ConnectHost();
-  ConnectToolBar();
-  ConnectRenderWidget();
-  ConnectStack();
-  ConnectMenuBar();
+  // Wire up the parts (the order matters: the stack takes over widgets the others set up).
+  using WiringStep = void (MainWindow::*)();
+  for (const WiringStep step :
+       {&MainWindow::ConnectGameList, &MainWindow::ConnectHost, &MainWindow::ConnectToolBar,
+        &MainWindow::ConnectRenderWidget, &MainWindow::ConnectStack, &MainWindow::ConnectMenuBar})
+  {
+    (this->*step)();
+  }
 
   QSettings& qsettings = Settings::GetQSettings();
   restoreState(qsettings.value(QStringLiteral("mainwindow/state")).toByteArray());
@@ -381,8 +390,9 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
 MainWindow::~MainWindow()
 {
   // NetPlay threads call back into the GUI, so they have to go before anything else does.
-  Settings::Instance().ResetNetPlayClient();
-  Settings::Instance().ResetNetPlayServer();
+  Settings& settings = Settings::Instance();
+  settings.ResetNetPlayClient();
+  settings.ResetNetPlayServer();
 
 #ifdef USE_RETRO_ACHIEVEMENTS
   Config::RemoveConfigChangedCallback(m_config_changed_callback_id);
@@ -403,7 +413,7 @@ MainWindow::~MainWindow()
   ShutdownControllers();
 
   QSettings& qsettings = Settings::GetQSettings();
-  if (!Settings::Instance().IsBatchModeEnabled())
+  if (!settings.IsBatchModeEnabled())
   {
     qsettings.setValue(QStringLiteral("mainwindow/state"), saveState());
     qsettings.setValue(QStringLiteral("mainwindow/geometry"), saveGeometry());
@@ -503,13 +513,14 @@ void MainWindow::InitCoreCallbacks()
 
 void MainWindow::CreateComponents()
 {
-  m_menu_bar = new MenuBar(this);
-  m_tool_bar = new ToolBar(this);
-  m_search_bar = new SearchBar(this);
-  m_game_count = new GameCount(this);
-  m_game_list = new GameList(this);
+  m_menu_bar = MakeChild<MenuBar>(this);
+  m_tool_bar = MakeChild<ToolBar>(this);
+  m_search_bar = MakeChild<SearchBar>(this);
+  m_game_count = MakeChild<GameCount>(this);
+  m_game_list = MakeChild<GameList>(this);
+  m_stack = MakeChild<QStackedWidget>(this);
+  // The render widget is a top-level window of its own until a game renders to the main window.
   m_render_widget = new RenderWidget;
-  m_stack = new QStackedWidget(this);
 
   for (int port = 0; port < PORT_COUNT; ++port)
   {
@@ -525,17 +536,17 @@ void MainWindow::CreateComponents()
 
 void MainWindow::CreateDebuggerWidgets()
 {
-  m_jit_widget = new JITWidget(m_system, this);
-  m_log_widget = new LogWidget(this);
-  m_log_config_widget = new LogConfigWidget(this);
-  m_memory_widget = new MemoryWidget(m_system, this);
-  m_network_widget = new NetworkWidget(this);
-  m_register_widget = new RegisterWidget(this);
-  m_thread_widget = new ThreadWidget(this);
-  m_watch_widget = new WatchWidget(this);
-  m_breakpoint_widget = new BreakpointWidget(this);
-  m_code_widget = new CodeWidget(this);
-  m_assembler_widget = new AssemblerWidget(this);
+  m_jit_widget = MakeChild<JITWidget>(this, m_system);
+  m_log_widget = MakeChild<LogWidget>(this);
+  m_log_config_widget = MakeChild<LogConfigWidget>(this);
+  m_memory_widget = MakeChild<MemoryWidget>(this, m_system);
+  m_network_widget = MakeChild<NetworkWidget>(this);
+  m_register_widget = MakeChild<RegisterWidget>(this);
+  m_thread_widget = MakeChild<ThreadWidget>(this);
+  m_watch_widget = MakeChild<WatchWidget>(this);
+  m_breakpoint_widget = MakeChild<BreakpointWidget>(this);
+  m_code_widget = MakeChild<CodeWidget>(this);
+  m_assembler_widget = MakeChild<AssemblerWidget>(this);
 }
 
 // Lets the debugger docks send each other to an address: "show this in the memory view",
@@ -579,10 +590,11 @@ void MainWindow::LinkDebuggerWidgets()
   connect(m_memory_widget, &MemoryWidget::RequestWatch, this, add_watch);
 
   // A breakpoint's code can only be shown while the CPU is stopped.
-  connect(m_breakpoint_widget, &BreakpointWidget::ShowCode, this, [this, show_in_code](u32 address) {
-    if (Core::GetState(m_system) == Core::State::Paused)
-      show_in_code(address);
-  });
+  connect(m_breakpoint_widget, &BreakpointWidget::ShowCode, this,
+          [this, show_in_code](u32 address) {
+            if (Core::GetState(m_system) == Core::State::Paused)
+              show_in_code(address);
+          });
   connect(m_breakpoint_widget, &BreakpointWidget::ShowMemory, m_memory_widget,
           &MemoryWidget::SetAddress);
 }
@@ -1560,9 +1572,9 @@ void MainWindow::StateSaveSlotAt(int slot)
   State::Save(m_system, static_cast<u32>(slot));
 }
 
-void MainWindow::StateLoadUndo()
+void MainWindow::StateSaveOldest()
 {
-  State::UndoLoadState(m_system);
+  State::SaveFirstSaved(m_system);
 }
 
 void MainWindow::StateSaveUndo()
@@ -1570,9 +1582,9 @@ void MainWindow::StateSaveUndo()
   State::UndoSaveState(m_system);
 }
 
-void MainWindow::StateSaveOldest()
+void MainWindow::StateLoadUndo()
 {
-  State::SaveFirstSaved(m_system);
+  State::UndoLoadState(m_system);
 }
 
 void MainWindow::SetStateSlot(int slot)
@@ -1613,20 +1625,24 @@ void MainWindow::BootWiiSystemMenu()
 void MainWindow::NetPlayInit()
 {
   const auto& games = m_game_list->GetGameListModel();
-  m_netplay_setup_dialog = new NetPlaySetupDialog(games, this);
-  m_netplay_dialog = new NetPlayDialog(
-      games, [this](const std::string& path, std::unique_ptr<BootSessionData> session) {
-        StartGame(path, ScanForSecondDisc::Yes, std::move(session));
-      });
-#ifdef USE_DISCORD_PRESENCE
-  m_netplay_discord = new DiscordHandler(this);
-#endif
 
-  connect(m_netplay_dialog, &NetPlayDialog::Stop, this, &MainWindow::ForceStop);
-  connect(m_netplay_dialog, &NetPlayDialog::rejected, this, &MainWindow::NetPlayQuit);
+  // The setup dialog picks between joining and hosting.
+  m_netplay_setup_dialog = new NetPlaySetupDialog(games, this);
   connect(m_netplay_setup_dialog, &NetPlaySetupDialog::Join, this, &MainWindow::NetPlayJoin);
   connect(m_netplay_setup_dialog, &NetPlaySetupDialog::Host, this, &MainWindow::NetPlayHost);
+
+  // The session dialog has no parent; the destructor deletes it.
+  const auto boot_for_session = [this](const std::string& path,
+                                       std::unique_ptr<BootSessionData> session) {
+    StartGame(path, ScanForSecondDisc::Yes, std::move(session));
+  };
+  m_netplay_dialog = new NetPlayDialog(games, boot_for_session);
+  connect(m_netplay_dialog, &NetPlayDialog::Stop, this, &MainWindow::ForceStop);
+  connect(m_netplay_dialog, &NetPlayDialog::rejected, this, &MainWindow::NetPlayQuit);
+
 #ifdef USE_DISCORD_PRESENCE
+  // Joining through a Discord invitation.
+  m_netplay_discord = new DiscordHandler(this);
   connect(m_netplay_discord, &DiscordHandler::Join, this, &MainWindow::NetPlayJoin);
   Discord::InitNetPlayFunctionality(*m_netplay_discord);
   m_netplay_discord->Start();

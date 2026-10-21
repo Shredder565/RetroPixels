@@ -101,7 +101,7 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
   // i18n: the English text uses curly quotes; use the quotation marks your language normally
   // uses.
   const QString notice =
-      tr("© 2003-2024+ Dolphin Team. “GameCube” and “Wii” are "
+      tr("\u00A9 2003-2024+ Dolphin Team. \u201cGameCube\u201d and \u201cWii\u201d are "
          "trademarks of Nintendo. Dolphin is not affiliated with Nintendo in any way.");
   auto* const footer = new QLabel(QStringLiteral("<small>%1</small>").arg(notice));
 

@@ -448,10 +448,11 @@ void Settings::ApplyStyle()
     GetToolTipStyle(background, text, emphasis, border, palette, palette);
 
     const int padding = QFontMetrics(QFont()).height() / 2;
-    style_sheet.append(QStringLiteral("QToolTip { background-color: #%1; color: #%2; padding: %3px; "
-                                      "border: 1px; border-style: solid; border-color: #%4; }")
-                           .arg(HexColor(background), HexColor(text), QString::number(padding),
-                                HexColor(border)));
+    const QString tooltip_rule =
+        QStringLiteral("QToolTip { background-color: #%1; color: #%2; padding: %3px; "
+                       "border: 1px; border-style: solid; border-color: #%4; }")
+            .arg(HexColor(background), HexColor(text), QString::number(padding), HexColor(border));
+    style_sheet.append(tooltip_rule);
   }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
@@ -606,19 +607,10 @@ void Settings::SetDefaultGame(const QString& path)
   emit DefaultGameChanged(path);
 }
 
-void Settings::RefreshGameList()
+// Game list traffic: requests go out to the game list's tracker, progress comes back from it.
+void Settings::ReloadTitleDB()
 {
-  emit GameListRefreshRequested();
-}
-
-void Settings::NotifyRefreshGameListStarted()
-{
-  emit GameListRefreshStarted();
-}
-
-void Settings::NotifyRefreshGameListComplete()
-{
-  emit GameListRefreshCompleted();
+  emit TitleDBReloadRequested();
 }
 
 void Settings::NotifyMetadataRefreshComplete()
@@ -626,9 +618,19 @@ void Settings::NotifyMetadataRefreshComplete()
   emit MetadataRefreshCompleted();
 }
 
-void Settings::ReloadTitleDB()
+void Settings::RefreshGameList()
 {
-  emit TitleDBReloadRequested();
+  emit GameListRefreshRequested();
+}
+
+void Settings::NotifyRefreshGameListComplete()
+{
+  emit GameListRefreshCompleted();
+}
+
+void Settings::NotifyRefreshGameListStarted()
+{
+  emit GameListRefreshStarted();
 }
 
 bool Settings::IsAutoRefreshEnabled() const

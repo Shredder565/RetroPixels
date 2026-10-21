@@ -256,7 +256,8 @@ bool InstallLanguage(const QString& language)
 void Translation::Initialize()
 {
   // Strings translated inside the core go through the same translators.
-  Common::RegisterStringTranslator([](const char* text) { return QObject::tr(text).toStdString(); });
+  Common::RegisterStringTranslator(
+      [](const char* text) { return QObject::tr(text).toStdString(); });
 
   const std::string chosen = Config::Get(Config::MAIN_INTERFACE_LANGUAGE);
   if (!chosen.empty())

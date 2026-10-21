@@ -83,18 +83,23 @@ private:
 
 QMessageBox::Icon IconFor(Common::MsgType style)
 {
+  QMessageBox::Icon icon = QMessageBox::NoIcon;
   switch (style)
   {
-  case Common::MsgType::Information:
-    return QMessageBox::Information;
-  case Common::MsgType::Question:
-    return QMessageBox::Question;
-  case Common::MsgType::Warning:
-    return QMessageBox::Warning;
   case Common::MsgType::Critical:
-    return QMessageBox::Critical;
+    icon = QMessageBox::Critical;
+    break;
+  case Common::MsgType::Warning:
+    icon = QMessageBox::Warning;
+    break;
+  case Common::MsgType::Question:
+    icon = QMessageBox::Question;
+    break;
+  case Common::MsgType::Information:
+    icon = QMessageBox::Information;
+    break;
   }
-  return QMessageBox::NoIcon;
+  return icon;
 }
 
 // Shows the core's alerts and questions as message boxes on the GUI thread. Warnings offer to
@@ -134,7 +139,9 @@ bool ShowCoreAlert(const char* caption, const char* text, bool yes_no, Common::M
 // redirected output, borrow that console so log output and --help text show up there.
 void AttachToParentConsole()
 {
-  const auto usable = [](HANDLE handle) { return handle != nullptr && handle != INVALID_HANDLE_VALUE; };
+  const auto usable = [](HANDLE handle) {
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+  };
   if (usable(::GetStdHandle(STD_OUTPUT_HANDLE)) || usable(::GetStdHandle(STD_ERROR_HANDLE)))
     return;
   if (AttachConsole(ATTACH_PARENT_PROCESS) == FALSE)

@@ -317,27 +317,40 @@ void Host_TitleChanged()
 #endif
 }
 
+// A rich presence spelled out field by field by the core. Without Discord support it is
+// dropped and reported as not set.
+bool Host_UpdateDiscordPresenceRaw(
+    const std::string& details, const std::string& state, const std::string& large_image_key,
+    const std::string& large_image_text, const std::string& small_image_key,
+    const std::string& small_image_text, const int64_t start_timestamp,
+    const int64_t end_timestamp, const int party_size, const int party_max)
+{
+  bool updated = false;
+#ifdef USE_DISCORD_PRESENCE
+  updated = Discord::UpdateDiscordPresenceRaw(
+      details, state, large_image_key, large_image_text, small_image_key, small_image_text,
+      start_timestamp, end_timestamp, party_size, party_max);
+#else
+  static_cast<void>(details);
+  static_cast<void>(state);
+  static_cast<void>(large_image_key);
+  static_cast<void>(large_image_text);
+  static_cast<void>(small_image_key);
+  static_cast<void>(small_image_text);
+  static_cast<void>(start_timestamp);
+  static_cast<void>(end_timestamp);
+  static_cast<void>(party_size);
+  static_cast<void>(party_max);
+#endif
+  return updated;
+}
+
 void Host_UpdateDiscordClientID(const std::string& client_id)
 {
 #ifdef USE_DISCORD_PRESENCE
   Discord::UpdateClientID(client_id);
-#endif
-}
-
-bool Host_UpdateDiscordPresenceRaw(const std::string& details, const std::string& state,
-                                   const std::string& large_image_key,
-                                   const std::string& large_image_text,
-                                   const std::string& small_image_key,
-                                   const std::string& small_image_text,
-                                   const int64_t start_timestamp, const int64_t end_timestamp,
-                                   const int party_size, const int party_max)
-{
-#ifdef USE_DISCORD_PRESENCE
-  return Discord::UpdateDiscordPresenceRaw(details, state, large_image_key, large_image_text,
-                                           small_image_key, small_image_text, start_timestamp,
-                                           end_timestamp, party_size, party_max);
 #else
-  return false;
+  static_cast<void>(client_id);
 #endif
 }
 

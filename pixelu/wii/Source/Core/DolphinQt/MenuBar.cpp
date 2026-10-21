@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include <QAction>
 #include <QActionGroup>
@@ -515,51 +516,59 @@ void MenuBar::BuildGameListViewChoice(QMenu* view)
 
 void MenuBar::BuildGameListFilterMenus(QMenu* view)
 {
-  // Entries are listed alphabetically by their (translated) label.
+  // Entries are listed alphabetically by their (translated) label: a QMap keyed by the label
+  // sorts them, and a later duplicate label replaces an earlier one.
   using Entries = QMap<QString, const Config::Info<bool>*>;
+  using Row = std::pair<const Config::Info<bool>*, QString>;
+  const auto sorted = [](std::initializer_list<Row> rows) {
+    Entries entries;
+    for (const Row& row : rows)
+      entries.insert(row.second, row.first);
+    return entries;
+  };
 
   // List Columns: each entry shows or hides a column of the list view.
-  const Entries columns{
-      {tr("Platform"), &Config::MAIN_GAMELIST_COLUMN_PLATFORM},
-      {tr("Banner"), &Config::MAIN_GAMELIST_COLUMN_BANNER},
-      {tr("Title"), &Config::MAIN_GAMELIST_COLUMN_TITLE},
-      {tr("Description"), &Config::MAIN_GAMELIST_COLUMN_DESCRIPTION},
-      {tr("Maker"), &Config::MAIN_GAMELIST_COLUMN_MAKER},
-      {tr("File Name"), &Config::MAIN_GAMELIST_COLUMN_FILE_NAME},
-      {tr("File Path"), &Config::MAIN_GAMELIST_COLUMN_FILE_PATH},
-      {tr("Game ID"), &Config::MAIN_GAMELIST_COLUMN_GAME_ID},
-      {tr("Region"), &Config::MAIN_GAMELIST_COLUMN_REGION},
-      {tr("File Size"), &Config::MAIN_GAMELIST_COLUMN_FILE_SIZE},
-      {tr("File Format"), &Config::MAIN_GAMELIST_COLUMN_FILE_FORMAT},
-      {tr("Block Size"), &Config::MAIN_GAMELIST_COLUMN_BLOCK_SIZE},
-      {tr("Compression"), &Config::MAIN_GAMELIST_COLUMN_COMPRESSION},
-      {tr("Time Played"), &Config::MAIN_GAMELIST_COLUMN_TIME_PLAYED},
-      {tr("Tags"), &Config::MAIN_GAMELIST_COLUMN_TAGS},
-  };
+  const Entries columns = sorted({
+      {&Config::MAIN_GAMELIST_COLUMN_PLATFORM, tr("Platform")},
+      {&Config::MAIN_GAMELIST_COLUMN_BANNER, tr("Banner")},
+      {&Config::MAIN_GAMELIST_COLUMN_TITLE, tr("Title")},
+      {&Config::MAIN_GAMELIST_COLUMN_DESCRIPTION, tr("Description")},
+      {&Config::MAIN_GAMELIST_COLUMN_MAKER, tr("Maker")},
+      {&Config::MAIN_GAMELIST_COLUMN_FILE_NAME, tr("File Name")},
+      {&Config::MAIN_GAMELIST_COLUMN_FILE_PATH, tr("File Path")},
+      {&Config::MAIN_GAMELIST_COLUMN_GAME_ID, tr("Game ID")},
+      {&Config::MAIN_GAMELIST_COLUMN_REGION, tr("Region")},
+      {&Config::MAIN_GAMELIST_COLUMN_FILE_SIZE, tr("File Size")},
+      {&Config::MAIN_GAMELIST_COLUMN_FILE_FORMAT, tr("File Format")},
+      {&Config::MAIN_GAMELIST_COLUMN_BLOCK_SIZE, tr("Block Size")},
+      {&Config::MAIN_GAMELIST_COLUMN_COMPRESSION, tr("Compression")},
+      {&Config::MAIN_GAMELIST_COLUMN_TIME_PLAYED, tr("Time Played")},
+      {&Config::MAIN_GAMELIST_COLUMN_TAGS, tr("Tags")},
+  });
   // Show Platforms / Show Regions: each entry filters the game list.
-  const Entries platforms{
-      {tr("Show Wii"), &Config::MAIN_GAMELIST_LIST_WII},
-      {tr("Show GameCube"), &Config::MAIN_GAMELIST_LIST_GC},
-      {tr("Show Triforce"), &Config::MAIN_GAMELIST_LIST_TRI},
-      {tr("Show WAD"), &Config::MAIN_GAMELIST_LIST_WAD},
-      {tr("Show ELF/DOL"), &Config::MAIN_GAMELIST_LIST_ELF_DOL},
-  };
-  const Entries regions{
-      {tr("Show JPN"), &Config::MAIN_GAMELIST_LIST_JPN},
-      {tr("Show PAL"), &Config::MAIN_GAMELIST_LIST_PAL},
-      {tr("Show USA"), &Config::MAIN_GAMELIST_LIST_USA},
-      {tr("Show Australia"), &Config::MAIN_GAMELIST_LIST_AUSTRALIA},
-      {tr("Show France"), &Config::MAIN_GAMELIST_LIST_FRANCE},
-      {tr("Show Germany"), &Config::MAIN_GAMELIST_LIST_GERMANY},
-      {tr("Show Italy"), &Config::MAIN_GAMELIST_LIST_ITALY},
-      {tr("Show Korea"), &Config::MAIN_GAMELIST_LIST_KOREA},
-      {tr("Show Netherlands"), &Config::MAIN_GAMELIST_LIST_NETHERLANDS},
-      {tr("Show Russia"), &Config::MAIN_GAMELIST_LIST_RUSSIA},
-      {tr("Show Spain"), &Config::MAIN_GAMELIST_LIST_SPAIN},
-      {tr("Show Taiwan"), &Config::MAIN_GAMELIST_LIST_TAIWAN},
-      {tr("Show World"), &Config::MAIN_GAMELIST_LIST_WORLD},
-      {tr("Show Unknown"), &Config::MAIN_GAMELIST_LIST_UNKNOWN},
-  };
+  const Entries platforms = sorted({
+      {&Config::MAIN_GAMELIST_LIST_WII, tr("Show Wii")},
+      {&Config::MAIN_GAMELIST_LIST_GC, tr("Show GameCube")},
+      {&Config::MAIN_GAMELIST_LIST_TRI, tr("Show Triforce")},
+      {&Config::MAIN_GAMELIST_LIST_WAD, tr("Show WAD")},
+      {&Config::MAIN_GAMELIST_LIST_ELF_DOL, tr("Show ELF/DOL")},
+  });
+  const Entries regions = sorted({
+      {&Config::MAIN_GAMELIST_LIST_JPN, tr("Show JPN")},
+      {&Config::MAIN_GAMELIST_LIST_PAL, tr("Show PAL")},
+      {&Config::MAIN_GAMELIST_LIST_USA, tr("Show USA")},
+      {&Config::MAIN_GAMELIST_LIST_AUSTRALIA, tr("Show Australia")},
+      {&Config::MAIN_GAMELIST_LIST_FRANCE, tr("Show France")},
+      {&Config::MAIN_GAMELIST_LIST_GERMANY, tr("Show Germany")},
+      {&Config::MAIN_GAMELIST_LIST_ITALY, tr("Show Italy")},
+      {&Config::MAIN_GAMELIST_LIST_KOREA, tr("Show Korea")},
+      {&Config::MAIN_GAMELIST_LIST_NETHERLANDS, tr("Show Netherlands")},
+      {&Config::MAIN_GAMELIST_LIST_RUSSIA, tr("Show Russia")},
+      {&Config::MAIN_GAMELIST_LIST_SPAIN, tr("Show Spain")},
+      {&Config::MAIN_GAMELIST_LIST_TAIWAN, tr("Show Taiwan")},
+      {&Config::MAIN_GAMELIST_LIST_WORLD, tr("Show World")},
+      {&Config::MAIN_GAMELIST_LIST_UNKNOWN, tr("Show Unknown")},
+  });
 
   using Notifier = void (MenuBar::*)(const QString&, bool);
   const auto fill = [this](QMenu* menu, const Entries& entries, Notifier notify) {
@@ -641,7 +650,8 @@ void MenuBar::BuildJITMenu()
     });
     return action;
   };
-  m_jit_no_block_linking = add_cache_switch(tr("JIT Block Linking Off"), &SConfig::bJITNoBlockLinking);
+  m_jit_no_block_linking =
+      add_cache_switch(tr("JIT Block Linking Off"), &SConfig::bJITNoBlockLinking);
   m_jit_no_block_cache = add_cache_switch(tr("Disable JIT Cache"), &SConfig::bJITNoBlockCache);
 
   AddConfigToggle(m_jit, tr("Disable Fastmem"), Config::MAIN_FASTMEM, true);
@@ -690,38 +700,38 @@ void MenuBar::BuildSymbolsMenu()
 {
   m_symbols = addMenu(tr("Symbols"));
 
-  m_symbols->addAction(tr("&Clear Symbols"), this, &MenuBar::ClearSymbols);
+  const auto entry = [this](const QString& text, auto handler) {
+    m_symbols->addAction(text, this, handler);
+  };
+  const auto divider = [this] { m_symbols->addSeparator(); };
+
+  entry(tr("&Clear Symbols"), &MenuBar::ClearSymbols);
   QMenu* const generate = m_symbols->addMenu(tr("&Generate Symbols From"));
   generate->addAction(tr("Address"), this, &MenuBar::GenerateSymbolsFromAddress);
   generate->addAction(tr("Signature Database"), this, &MenuBar::GenerateSymbolsFromSignatureDB);
   generate->addAction(tr("RSO Modules"), this, &MenuBar::GenerateSymbolsFromRSO);
   QAction* const demangled = m_symbols->addAction(tr("Show &Demangled Names"));
-  m_symbols->addSeparator();
+  divider();
 
-  m_symbols->addAction(tr("&Load Symbol Map"), this, &MenuBar::LoadSymbolMap);
-  m_symbols->addAction(tr("&Save Symbol Map"), this, &MenuBar::SaveSymbolMap);
-  m_symbols->addSeparator();
+  entry(tr("&Load Symbol Map"), &MenuBar::LoadSymbolMap);
+  entry(tr("&Save Symbol Map"), &MenuBar::SaveSymbolMap);
+  divider();
 
-  m_symbols->addAction(tr("Load &Other Map File..."), this,
-                       [this] { LoadMapFileChosenByUser(false); });
-  m_symbols->addAction(tr("Load &Bad Map File..."), this,
-                       [this] { LoadMapFileChosenByUser(true); });
-  m_symbols->addAction(tr("Save Symbol Map &As..."), this, &MenuBar::SaveSymbolMapAs);
-  m_symbols->addSeparator();
+  entry(tr("Load &Other Map File..."), [this] { LoadMapFileChosenByUser(false); });
+  entry(tr("Load &Bad Map File..."), [this] { LoadMapFileChosenByUser(true); });
+  entry(tr("Save Symbol Map &As..."), &MenuBar::SaveSymbolMapAs);
+  divider();
 
-  m_symbols->addAction(tr("Sa&ve Code"), this, &MenuBar::SaveCode);
-  m_symbols->addSeparator();
+  entry(tr("Sa&ve Code"), &MenuBar::SaveCode);
+  divider();
 
-  m_symbols->addAction(tr("C&reate Signature File..."), this, &MenuBar::CreateSignatureFile);
-  m_symbols->addAction(tr("Append to &Existing Signature File..."), this,
-                       &MenuBar::AppendSignatureFile);
-  m_symbols->addAction(tr("Combine &Two Signature Files..."), this,
-                       &MenuBar::CombineSignatureFiles);
-  m_symbols->addAction(tr("Appl&y Signature File..."), this, &MenuBar::ApplySignatureFile);
-  m_symbols->addSeparator();
+  entry(tr("C&reate Signature File..."), &MenuBar::CreateSignatureFile);
+  entry(tr("Append to &Existing Signature File..."), &MenuBar::AppendSignatureFile);
+  entry(tr("Combine &Two Signature Files..."), &MenuBar::CombineSignatureFiles);
+  entry(tr("Appl&y Signature File..."), &MenuBar::ApplySignatureFile);
+  divider();
 
-  m_symbols->addAction(tr("&Patch HLE Functions"), this,
-                       [] { HLE::PatchFunctions(TheSystem()); });
+  entry(tr("&Patch HLE Functions"), [] { HLE::PatchFunctions(TheSystem()); });
 
   demangled->setCheckable(true);
   demangled->setChecked(Settings::Instance().IsShowDemangledNames());

@@ -20,7 +20,8 @@ void AspectRatioWidget::resizeEvent(QResizeEvent* event)
 {
   const QSize area = event->size();
   const float wanted = m_ratio_w / m_ratio_h;
-  const bool too_wide = static_cast<float>(area.width()) / static_cast<float>(area.height()) > wanted;
+  const float area_ratio = static_cast<float>(area.width()) / static_cast<float>(area.height());
+  const bool too_wide = area_ratio > wanted;
 
   // The child's share is the length that keeps the ratio along the constrained axis; the two
   // gaps share what is left.

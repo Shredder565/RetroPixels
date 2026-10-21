@@ -17,15 +17,13 @@ void ShowAnalyticsPrompt(QWidget* parent)
   const QString question =
       QObject::tr("Do you authorize Dolphin to report information to Dolphin's developers?");
   const QString details =
-      QObject::tr("If authorized, Dolphin can collect data on its performance, "
-                  "feature usage, and configuration, as well as data on your system's "
-                  "hardware and operating system.\n\n"
-                  "No private data is ever collected. This data helps us understand "
-                  "how people and emulated games use Dolphin and prioritize our "
-                  "efforts. It also helps us identify rare configurations that are "
-                  "causing bugs, performance and stability issues.\n"
-                  "This authorization can be revoked at any time through Dolphin's "
-                  "settings.");
+      QObject::tr("If authorized, Dolphin can collect data on its performance, feature usage, "
+                  "and configuration, as well as data on your system's hardware and operating "
+                  "system.\n\nNo private data is ever collected. This data helps us understand how "
+                  "people and emulated games use Dolphin and prioritize our efforts. It also "
+                  "helps us identify rare configurations that are causing bugs, performance and "
+                  "stability issues.\nThis authorization can be revoked at any time through "
+                  "Dolphin's settings.");
 
   ModalMessageBox box(parent);
   box.setIcon(QMessageBox::Question);
