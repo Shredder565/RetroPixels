@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,8 +11,8 @@
 
 #include "Common/CommonTypes.h"
 
-// Refer to docs/autoupdate_overview.md for a detailed overview of the autoupdate process
-
+// A build's file list: each installed file's path (relative to the install folder) and the first
+// 16 bytes of the SHA-256 of its contents.
 struct Manifest
 {
   using Filename = std::string;
@@ -21,9 +20,10 @@ struct Manifest
   std::map<Filename, Hash> entries;
 };
 
-// Represent the operations to be performed by the updater.
+// What moving from one manifest to the next requires.
 struct TodoList
 {
+  // Content to fetch from the content store, named by its hash.
   struct DownloadOp
   {
     Manifest::Filename filename;
@@ -31,6 +31,7 @@ struct TodoList
   };
   std::vector<DownloadOp> to_download;
 
+  // A file to write; old_hash is empty for a file that is new in this build.
   struct UpdateOp
   {
     Manifest::Filename filename;
@@ -39,6 +40,7 @@ struct TodoList
   };
   std::vector<UpdateOp> to_update;
 
+  // A file the new build no longer has.
   struct DeleteOp
   {
     Manifest::Filename filename;
@@ -49,7 +51,10 @@ struct TodoList
   void Log() const;
 };
 
+// printf-style logging to the --log-file given on the command line.
 void LogToFile(const char* fmt, ...);
+// Lower-case hex.
 std::string HexEncode(const u8* buffer, size_t size);
 Manifest::Hash ComputeHash(const std::string& contents);
+// The updater's whole run, from its command-line arguments; false on any failure.
 bool RunUpdater(std::vector<std::string> args);
