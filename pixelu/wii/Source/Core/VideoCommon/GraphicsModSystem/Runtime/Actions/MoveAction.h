@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModAction.h"
 
+// Translates matching projections. Action data: {"X": .., "Y": .., "Z": ..}, each optional.
 class MoveAction final : public GraphicsModAction
 {
 public:
@@ -20,5 +20,5 @@ public:
   void OnProjectionAndTexture(GraphicsModActionData::Projection* projection) override;
 
 private:
-  Common::Vec3 m_position_offset;
+  Common::Vec3 m_offset;
 };

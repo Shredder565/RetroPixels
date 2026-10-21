@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 #include "Common/CommonTypes.h"
 #include "VideoCommon/Assets/CustomAssetLibrary.h"
 
+// Placeholder for per-draw custom pipeline state; updating it currently does nothing.
 struct CustomPipeline
 {
   void UpdatePixelData(const VideoCommon::CustomAssetLibrary* library,

@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@
 
 namespace GraphicsModActionFactory
 {
+// Builds the action a feature names ("print", "skip", "move", "scale", "custom_pipeline").
+// Returns null for unknown names or invalid action data.
 std::unique_ptr<GraphicsModAction> Create(std::string_view name, const picojson::value& json_data,
                                           std::shared_ptr<VideoCommon::CustomAssetLibrary> library);
-}
+}  // namespace GraphicsModActionFactory

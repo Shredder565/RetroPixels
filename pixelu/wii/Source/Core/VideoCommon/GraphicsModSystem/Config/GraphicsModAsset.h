@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 #include "VideoCommon/Assets/CustomAssetLibrary.h"
 #include "VideoCommon/Assets/Types.h"
 
+// An asset declared by a graphics mod: {"name": "<asset id>", "data": {"<role>": "<file>"}}.
 struct GraphicsModAssetConfig
 {
   VideoCommon::CustomAssetLibrary::AssetID m_asset_id;

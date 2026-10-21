@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,8 @@
 #include "VideoCommon/Resources/MaterialResource.h"
 #include "VideoCommon/ShaderGenCommon.h"
 
+// Event payloads passed to GraphicsModAction hooks. Pointer members are outputs the action
+// may write to.
 namespace GraphicsModActionData
 {
 struct DrawStarted
@@ -43,10 +44,12 @@ struct Projection
 {
   Common::Matrix44* matrix;
 };
+
 struct TextureLoad
 {
   std::string_view texture_name;
 };
+
 struct TextureCreate
 {
   std::string_view texture_name;
@@ -54,7 +57,7 @@ struct TextureCreate
   u32 texture_height;
   std::vector<VideoCommon::CachedAsset<VideoCommon::TextureAsset>>* custom_textures;
 
-  // Dependencies needed to reload the texture and trigger this create again
+  // Further assets whose reload should recreate the texture (and repeat this event).
   std::vector<VideoCommon::CachedAsset<VideoCommon::CustomAsset>>* additional_dependencies;
 };
 }  // namespace GraphicsModActionData

@@ -1,10 +1,11 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
 
+// Something a graphics mod does when one of its targets is hit. Each hook receives the event
+// data it may inspect or change; the defaults do nothing.
 class GraphicsModAction
 {
 public:

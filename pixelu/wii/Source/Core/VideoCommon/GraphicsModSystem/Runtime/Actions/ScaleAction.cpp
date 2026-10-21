@@ -1,75 +1,58 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/Actions/ScaleAction.h"
 
-std::unique_ptr<ScaleAction> ScaleAction::Create(const picojson::value& json_data)
+namespace
 {
-  Common::Vec3 scale;
-  const auto& x = json_data.get("X");
-  if (x.is<double>())
-  {
-    scale.x = static_cast<float>(x.get<double>());
-  }
-
-  const auto& y = json_data.get("Y");
-  if (y.is<double>())
-  {
-    scale.y = static_cast<float>(y.get<double>());
-  }
-
-  const auto& z = json_data.get("Z");
-  if (z.is<double>())
-  {
-    scale.z = static_cast<float>(z.get<double>());
-  }
-  return std::make_unique<ScaleAction>(scale);
+void ReadFactor(const picojson::value& json, const std::string& key, float* out)
+{
+  const picojson::value& factor = json.get(key);
+  if (factor.is<double>())
+    *out = static_cast<float>(factor.get<double>());
 }
 
-ScaleAction::ScaleAction(Common::Vec3 scale) : m_scale(scale)
+// Scales the x and y diagonal entries of the projection.
+void ScaleProjection(GraphicsModActionData::Projection* projection, const Common::Vec3& factors)
+{
+  if (projection == nullptr || projection->matrix == nullptr) [[unlikely]]
+    return;
+  auto& m = projection->matrix->data;
+  m[0] *= factors.x;
+  m[5] *= factors.y;
+}
+}  // namespace
+
+std::unique_ptr<ScaleAction> ScaleAction::Create(const picojson::value& json_data)
+{
+  Common::Vec3 factors;
+  ReadFactor(json_data, "X", &factors.x);
+  ReadFactor(json_data, "Y", &factors.y);
+  ReadFactor(json_data, "Z", &factors.z);
+  return std::make_unique<ScaleAction>(factors);
+}
+
+ScaleAction::ScaleAction(Common::Vec3 scale) : m_factors(scale)
 {
 }
 
 void ScaleAction::BeforeEFB(GraphicsModActionData::PreEFB* efb)
 {
-  if (!efb) [[unlikely]]
+  if (efb == nullptr || efb->scaled_width == nullptr || efb->scaled_height == nullptr) [[unlikely]]
     return;
 
-  if (!efb->scaled_width) [[unlikely]]
-    return;
-
-  if (!efb->scaled_height) [[unlikely]]
-    return;
-
-  if (m_scale.x > 0)
-    *efb->scaled_width = efb->texture_width * m_scale.x;
-
-  if (m_scale.y > 0)
-    *efb->scaled_height = efb->texture_height * m_scale.y;
+  // Only positive factors resize; the result is truncated to whole texels.
+  if (m_factors.x > 0)
+    *efb->scaled_width = static_cast<u32>(static_cast<float>(efb->texture_width) * m_factors.x);
+  if (m_factors.y > 0)
+    *efb->scaled_height = static_cast<u32>(static_cast<float>(efb->texture_height) * m_factors.y);
 }
 
 void ScaleAction::OnProjection(GraphicsModActionData::Projection* projection)
 {
-  if (!projection) [[unlikely]]
-    return;
-
-  if (!projection->matrix) [[unlikely]]
-    return;
-
-  auto& matrix = *projection->matrix;
-  matrix.data[0] = matrix.data[0] * m_scale.x;
-  matrix.data[5] = matrix.data[5] * m_scale.y;
+  ScaleProjection(projection, m_factors);
 }
 
 void ScaleAction::OnProjectionAndTexture(GraphicsModActionData::Projection* projection)
 {
-  if (!projection) [[unlikely]]
-    return;
-
-  if (!projection->matrix) [[unlikely]]
-    return;
-
-  auto& matrix = *projection->matrix;
-  matrix.data[0] = matrix.data[0] * m_scale.x;
-  matrix.data[5] = matrix.data[5] * m_scale.y;
+  ScaleProjection(projection, m_factors);
 }

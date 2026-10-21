@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 #include "VideoCommon/GraphicsModSystem/Config/GraphicsTarget.h"
 
+// A named list of targets that features refer to by name.
 struct GraphicsTargetGroupConfig
 {
   std::string m_name;

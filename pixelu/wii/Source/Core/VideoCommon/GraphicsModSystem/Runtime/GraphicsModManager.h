@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,10 @@
 #include "VideoCommon/XFMemory.h"
 
 class GraphicsModGroupConfig;
+
+// Turns the loaded graphics mods into per-target action lists that the video code queries
+// while rendering. Each Get*Actions call returns the actions registered for that target, in
+// mod and feature order, or an empty list.
 class GraphicsModManager
 {
 public:
@@ -35,30 +38,34 @@ public:
   const std::vector<GraphicsModAction*>& GetEFBActions(const FBInfo& efb) const;
   const std::vector<GraphicsModAction*>& GetXFBActions(const FBInfo& xfb) const;
 
+  // Replaces all actions with the ones described by `config`.
   void Load(const GraphicsModGroupConfig& config);
 
 private:
-  void EndOfFrame();
-  void Reset();
+  using ActionList = std::vector<GraphicsModAction*>;
+  template <typename Key, typename Hash = std::hash<Key>>
+  using ActionMap = std::unordered_map<Key, ActionList, Hash>;
 
-  class DecoratedAction;
+  void OnFrameEnded();
+  void Clear();
 
-  static inline const std::vector<GraphicsModAction*> m_default = {};
-  std::list<std::unique_ptr<GraphicsModAction>> m_actions;
-  std::unordered_map<ProjectionType, std::vector<GraphicsModAction*>>
-      m_projection_target_to_actions;
-  std::unordered_map<std::string, std::vector<GraphicsModAction*>>
-      m_projection_texture_target_to_actions;
-  std::unordered_map<std::string, std::vector<GraphicsModAction*>> m_draw_started_target_to_actions;
-  std::unordered_map<std::string, std::vector<GraphicsModAction*>> m_load_texture_target_to_actions;
-  std::unordered_map<std::string, std::vector<GraphicsModAction*>>
-      m_create_texture_target_to_actions;
-  std::unordered_map<FBInfo, std::vector<GraphicsModAction*>, FBInfoHasher> m_efb_target_to_actions;
-  std::unordered_map<FBInfo, std::vector<GraphicsModAction*>, FBInfoHasher> m_xfb_target_to_actions;
+  static inline const ActionList s_no_actions = {};
 
-  std::unordered_set<std::string> m_groups;
+  // Owns every action; the maps below hold non-owning pointers into it.
+  std::list<std::unique_ptr<GraphicsModAction>> m_owned;
 
-  Common::EventHook m_end_of_frame_event;
+  ActionMap<ProjectionType> m_on_projection;
+  // Keyed by "<texture name>_<projection type number>".
+  ActionMap<std::string> m_on_projection_with_texture;
+  ActionMap<std::string> m_on_draw_started;
+  ActionMap<std::string> m_on_texture_load;
+  ActionMap<std::string> m_on_texture_create;
+  ActionMap<FBInfo, FBInfoHasher> m_on_efb;
+  ActionMap<FBInfo, FBInfoHasher> m_on_xfb;
+
+  std::unordered_set<std::string> m_group_names;
+
+  Common::EventHook m_frame_end_hook;
 };
 
 extern std::unique_ptr<GraphicsModManager> g_graphics_mod_manager;

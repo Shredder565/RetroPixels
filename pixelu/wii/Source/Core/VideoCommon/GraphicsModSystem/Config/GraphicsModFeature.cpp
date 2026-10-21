@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Config/GraphicsModFeature.h"
 
@@ -14,34 +13,37 @@ void GraphicsModFeatureConfig::SerializeToConfig(picojson::object& json_obj) con
 
 bool GraphicsModFeatureConfig::DeserializeFromConfig(const picojson::object& obj)
 {
-  if (auto group_iter = obj.find("group"); group_iter != obj.end())
+  // All three members are optional; present ones must have the right type.
+  const auto group = obj.find("group");
+  if (group != obj.end())
   {
-    if (!group_iter->second.is<std::string>())
+    if (!group->second.is<std::string>())
     {
       ERROR_LOG_FMT(
           VIDEO,
           "Failed to load mod configuration file, specified feature's group is not a string");
       return false;
     }
-    m_group = group_iter->second.get<std::string>();
+    m_group = group->second.get<std::string>();
   }
 
-  if (auto action_iter = obj.find("action"); action_iter != obj.end())
+  const auto action = obj.find("action");
+  if (action != obj.end())
   {
-    if (!action_iter->second.is<std::string>())
+    if (!action->second.is<std::string>())
     {
       ERROR_LOG_FMT(
           VIDEO,
           "Failed to load mod configuration file, specified feature's action is not a string");
       return false;
     }
-    m_action = action_iter->second.get<std::string>();
+    m_action = action->second.get<std::string>();
   }
 
-  if (auto action_data_iter = obj.find("action_data"); action_data_iter != obj.end())
-  {
-    m_action_data = action_data_iter->second;
-  }
+  // The action interprets its own data later, so any JSON value is accepted here.
+  const auto action_data = obj.find("action_data");
+  if (action_data != obj.end())
+    m_action_data = action_data->second;
 
   return true;
 }

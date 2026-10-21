@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,7 @@
 #include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/UberShaderPixel.h"
 
+// The custom shader pieces a draw asks for; part of every cache key below.
 struct CustomShaderInstance
 {
   CustomPixelShaderContents pixel_contents;
@@ -25,6 +25,8 @@ struct CustomShaderInstance
   bool operator==(const CustomShaderInstance& other) const = default;
 };
 
+// Builds pixel shaders and pipelines for draws that use custom (graphics mod) shaders, in the
+// background. Specialized and uber pipelines each have their own compiler and caches.
 class CustomShaderCache
 {
 public:
@@ -35,16 +37,17 @@ public:
   CustomShaderCache& operator=(const CustomShaderCache&) = delete;
   CustomShaderCache& operator=(CustomShaderCache&&) = delete;
 
-  // Changes the shader host config. Shaders should be reloaded afterwards.
+  // Takes effect for shaders generated from now on; call Reload to rebuild existing ones.
   void SetHostConfig(const ShaderHostConfig& host_config) { m_host_config.bits = host_config.bits; }
 
-  // Retrieves all pending shaders/pipelines from the async compiler.
+  // Collects finished compiles (done automatically at the end of every frame).
   void RetrieveAsyncShaders();
 
-  // Reloads/recreates all shaders and pipelines.
+  // Waits for outstanding compiles, then drops every cached shader and pipeline.
   void Reload();
 
-  // The optional will be empty if this pipeline is now background compiling.
+  // A pipeline (null if creating it failed), or nothing while it is still being built. The
+  // first request for a key starts building it.
   std::optional<const AbstractPipeline*>
   GetPipelineAsync(const VideoCommon::GXPipelineUid& uid,
                    const CustomShaderInstance& custom_shaders,
@@ -55,88 +58,69 @@ public:
                    const AbstractPipelineConfig& pipeline_config);
 
 private:
-  // Configuration bits.
-  APIType m_api_type = APIType::Nothing;
-  ShaderHostConfig m_host_config = {};
-  std::unique_ptr<VideoCommon::AsyncShaderCompiler> m_async_shader_compiler;
-  std::unique_ptr<VideoCommon::AsyncShaderCompiler> m_async_uber_shader_compiler;
-
-  void AsyncCreatePipeline(const VideoCommon::GXPipelineUid& uid,
-                           const CustomShaderInstance& custom_shaders,
-                           const AbstractPipelineConfig& pipeline_config);
-  void AsyncCreatePipeline(const VideoCommon::GXUberPipelineUid& uid,
-                           const CustomShaderInstance& custom_shaders,
-                           const AbstractPipelineConfig& pipeline_config);
-
-  // Shader/Pipeline cache helper
-  template <typename Uid, typename ValueType>
-  struct Cache
+  // Results keyed by (uid, custom shader instance). Entries never move once added.
+  template <typename Uid, typename Value>
+  class InstanceCache
   {
-    struct CacheHolder
+  public:
+    struct Slot
     {
-      std::unique_ptr<ValueType> value = nullptr;
+      std::unique_ptr<Value> value;
       bool pending = true;
     };
-    using CacheElement = std::pair<CustomShaderInstance, CacheHolder>;
-    using CacheList = std::list<CacheElement>;
-    std::map<Uid, CacheList> uid_to_cachelist;
 
-    const CacheHolder* GetHolder(const Uid& uid, const CustomShaderInstance& custom_shaders) const
+    const Slot* Find(const Uid& uid, const CustomShaderInstance& instance) const
     {
-      if (auto uuid_it = uid_to_cachelist.find(uid); uuid_it != uid_to_cachelist.end())
+      const auto bucket = m_by_uid.find(uid);
+      if (bucket == m_by_uid.end())
+        return nullptr;
+      for (const auto& entry : bucket->second)
       {
-        for (const auto& [custom_shader_val, holder] : uuid_it->second)
-        {
-          if (custom_shaders == custom_shader_val)
-          {
-            return &holder;
-          }
-        }
+        if (entry.first == instance)
+          return &entry.second;
       }
-
       return nullptr;
     }
 
-    typename CacheList::iterator InsertElement(const Uid& uid,
-                                               const CustomShaderInstance& custom_shaders)
+    Slot* Add(const Uid& uid, const CustomShaderInstance& instance)
     {
-      CacheList& cachelist = uid_to_cachelist[uid];
-      CacheElement e{custom_shaders, CacheHolder{}};
-      return cachelist.emplace(cachelist.begin(), std::move(e));
+      auto& bucket = m_by_uid[uid];
+      return &bucket.emplace(bucket.begin(), instance, Slot{})->second;
     }
+
+  private:
+    std::map<Uid, std::list<std::pair<CustomShaderInstance, Slot>>> m_by_uid;
   };
 
-  Cache<PixelShaderUid, AbstractShader> m_ps_cache;
-  Cache<UberShader::PixelShaderUid, AbstractShader> m_uber_ps_cache;
-  Cache<VideoCommon::GXPipelineUid, AbstractPipeline> m_pipeline_cache;
-  Cache<VideoCommon::GXUberPipelineUid, AbstractPipeline> m_uber_pipeline_cache;
+  // One kind of pipeline (specialized or uber): its compiler and its two caches.
+  template <typename PipelineUid, typename ShaderUid>
+  struct Lane
+  {
+    std::unique_ptr<VideoCommon::AsyncShaderCompiler> compiler;
+    InstanceCache<ShaderUid, AbstractShader> shaders;
+    InstanceCache<PipelineUid, AbstractPipeline> pipelines;
+  };
 
-  using PipelineIterator = Cache<VideoCommon::GXPipelineUid, AbstractPipeline>::CacheList::iterator;
-  using UberPipelineIterator =
-      Cache<VideoCommon::GXUberPipelineUid, AbstractPipeline>::CacheList::iterator;
-  using PixelShaderIterator = Cache<PixelShaderUid, AbstractShader>::CacheList::iterator;
-  using UberPixelShaderIterator =
-      Cache<UberShader::PixelShaderUid, AbstractShader>::CacheList::iterator;
+  struct SpecializedTraits;
+  struct UberTraits;
+  template <typename Traits>
+  class PipelineJob;
+  template <typename Traits>
+  class ShaderJob;
 
-  void NotifyPipelineFinished(PipelineIterator iterator,
-                              std::unique_ptr<AbstractPipeline> pipeline);
-  void NotifyPipelineFinished(UberPipelineIterator iterator,
-                              std::unique_ptr<AbstractPipeline> pipeline);
+  template <typename Traits>
+  std::optional<const AbstractPipeline*> Lookup(const typename Traits::PipelineUid& uid,
+                                                const CustomShaderInstance& custom_shaders,
+                                                const AbstractPipelineConfig& pipeline_config);
+  template <typename Traits>
+  void QueueShader(const typename Traits::ShaderUid& uid,
+                   const CustomShaderInstance& custom_shaders);
 
-  std::unique_ptr<AbstractShader>
-  CompilePixelShader(const PixelShaderUid& uid, const CustomShaderInstance& custom_shaders) const;
-  void NotifyPixelShaderFinished(PixelShaderIterator iterator,
-                                 std::unique_ptr<AbstractShader> shader);
-  std::unique_ptr<AbstractShader>
-  CompilePixelShader(const UberShader::PixelShaderUid& uid,
-                     const CustomShaderInstance& custom_shaders) const;
-  void NotifyPixelShaderFinished(UberPixelShaderIterator iterator,
-                                 std::unique_ptr<AbstractShader> shader);
+  APIType m_api_type = APIType::Nothing;
+  ShaderHostConfig m_host_config = {};
 
-  void QueuePixelShaderCompile(const PixelShaderUid& uid,
-                               const CustomShaderInstance& custom_shaders);
-  void QueuePixelShaderCompile(const UberShader::PixelShaderUid& uid,
-                               const CustomShaderInstance& custom_shaders);
+  Lane<VideoCommon::GXPipelineUid, PixelShaderUid> m_specialized;
+  Lane<VideoCommon::GXUberPipelineUid, UberShader::PixelShaderUid> m_uber;
 
-  Common::EventHook m_frame_end_handler;
+  Common::EventHook m_frame_end_hook;
 };

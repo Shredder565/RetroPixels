@@ -1,10 +1,10 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Config/GraphicsModGroup.h"
 
+#include <algorithm>
 #include <fstream>
-#include <map>
+#include <set>
 #include <string>
 
 #include <picojson.h>
@@ -37,18 +37,19 @@ GraphicsModGroupConfig::operator=(GraphicsModGroupConfig&&) noexcept = default;
 
 void GraphicsModGroupConfig::Load()
 {
-  const std::string file_path = GetPath();
+  const std::string profile = ProfilePath();
+  std::set<std::string> from_profile;
 
-  std::set<std::string> known_paths;
-  if (File::Exists(file_path))
+  // 1. Mods listed in the profile, with the user's settings applied.
+  if (File::Exists(profile))
   {
     picojson::value root;
     std::string error;
-    if (!JsonFromFile(file_path, &root, &error))
+    if (!JsonFromFile(profile, &root, &error))
     {
       ERROR_LOG_FMT(VIDEO,
                     "Failed to load graphics mod group json file '{}' due to parse error: {}",
-                    file_path, error);
+                    profile, error);
       return;
     }
     if (!root.is<picojson::object>())
@@ -56,101 +57,89 @@ void GraphicsModGroupConfig::Load()
       ERROR_LOG_FMT(
           VIDEO,
           "Failed to load graphics mod group json file '{}' due to root not being an object!",
-          file_path);
+          profile);
       return;
     }
 
-    const auto& mods = root.get("mods");
-    if (mods.is<picojson::array>())
+    const picojson::value& listed = root.get("mods");
+    if (listed.is<picojson::array>())
     {
-      for (const auto& mod_json : mods.get<picojson::array>())
+      for (const picojson::value& entry : listed.get<picojson::array>())
       {
-        if (mod_json.is<picojson::object>())
-        {
-          const auto& mod_json_obj = mod_json.get<picojson::object>();
-          auto graphics_mod = GraphicsModConfig::Create(&mod_json_obj);
-          if (!graphics_mod)
-          {
-            continue;
-          }
-          graphics_mod->DeserializeFromProfile(mod_json_obj);
-
-          auto mod_full_path = graphics_mod->GetAbsolutePath();
-          known_paths.insert(std::move(mod_full_path));
-          m_graphics_mods.push_back(std::move(*graphics_mod));
-        }
+        if (!entry.is<picojson::object>())
+          continue;
+        const picojson::object& settings = entry.get<picojson::object>();
+        std::optional<GraphicsModConfig> mod = GraphicsModConfig::Create(&settings);
+        if (!mod)
+          continue;
+        mod->DeserializeFromProfile(settings);
+        from_profile.insert(mod->GetAbsolutePath());
+        m_mods.push_back(std::move(*mod));
       }
     }
   }
 
-  const auto try_add_mod = [&known_paths, this](const std::string& dir,
-                                                GraphicsModConfig::Source source) {
-    const auto files = Common::DoFileSearch(dir, ".json", true);
-    for (const auto& file : files)
+  // 2. Mods found on disk ("metadata.json" files). Meeting a mod that the profile already
+  // listed ends the scan of that directory.
+  const auto scan = [&](const std::string& directory, GraphicsModConfig::Source source) {
+    for (const std::string& found : Common::DoFileSearch(directory, ".json", true))
     {
-      std::string basename;
-      SplitPath(file, nullptr, &basename, nullptr);
-      if (basename == "metadata")
-      {
-        auto file_copy = file;
-        UnifyPathSeparators(file_copy);
-        if (known_paths.contains(file_copy))
-          return;
+      std::string stem;
+      SplitPath(found, nullptr, &stem, nullptr);
+      if (stem != "metadata")
+        continue;
 
-        if (auto mod = GraphicsModConfig::Create(file_copy, source))
-          m_graphics_mods.push_back(std::move(*mod));
-      }
+      std::string path = found;
+      UnifyPathSeparators(path);
+      if (from_profile.contains(path))
+        return;
+
+      if (std::optional<GraphicsModConfig> mod = GraphicsModConfig::Create(path, source))
+        m_mods.push_back(std::move(*mod));
     }
   };
 
-  const std::set<std::string> graphics_mod_user_directories =
-      GetTextureDirectoriesWithGameId(File::GetUserPath(D_GRAPHICSMOD_IDX), m_game_id);
-
-  for (const auto& graphics_mod_directory : graphics_mod_user_directories)
+  for (const std::string& directory :
+       GetTextureDirectoriesWithGameId(File::GetUserPath(D_GRAPHICSMOD_IDX), m_game_id))
   {
-    try_add_mod(graphics_mod_directory, GraphicsModConfig::Source::User);
+    scan(directory, GraphicsModConfig::Source::User);
+  }
+  for (const std::string& directory : GetTextureDirectoriesWithGameId(
+           File::GetSysDirectory() + DOLPHIN_SYSTEM_GRAPHICS_MOD_DIR, m_game_id))
+  {
+    scan(directory, GraphicsModConfig::Source::System);
   }
 
-  const std::set<std::string> graphics_mod_system_directories = GetTextureDirectoriesWithGameId(
-      File::GetSysDirectory() + DOLPHIN_SYSTEM_GRAPHICS_MOD_DIR, m_game_id);
+  // Lower weights first. (Not a stable sort: mods of equal weight keep the standard library's
+  // order.)
+  std::ranges::sort(m_mods, {}, &GraphicsModConfig::m_weight);
+  for (GraphicsModConfig& mod : m_mods)
+    m_mods_by_path[mod.GetAbsolutePath()] = &mod;
 
-  for (const auto& graphics_mod_directory : graphics_mod_system_directories)
-  {
-    try_add_mod(graphics_mod_directory, GraphicsModConfig::Source::System);
-  }
-
-  std::ranges::sort(m_graphics_mods, {}, &GraphicsModConfig::m_weight);
-  for (auto& mod : m_graphics_mods)
-  {
-    m_path_to_graphics_mod[mod.GetAbsolutePath()] = &mod;
-  }
-
-  m_change_count++;
+  ++m_change_count;
 }
 
 void GraphicsModGroupConfig::Save() const
 {
-  const std::string file_path = GetPath();
-  std::ofstream json_stream;
-  File::OpenFStream(json_stream, file_path, std::ios_base::out);
-  if (!json_stream.is_open())
+  const std::string profile = ProfilePath();
+  std::ofstream out;
+  File::OpenFStream(out, profile, std::ios_base::out);
+  if (!out.is_open())
   {
-    ERROR_LOG_FMT(VIDEO, "Failed to open graphics mod group json file '{}' for writing", file_path);
+    ERROR_LOG_FMT(VIDEO, "Failed to open graphics mod group json file '{}' for writing", profile);
     return;
   }
 
-  picojson::object serialized_root;
-  picojson::array serialized_mods;
-  for (const auto& mod : m_graphics_mods)
+  picojson::array mods;
+  for (const GraphicsModConfig& mod : m_mods)
   {
-    picojson::object serialized_mod;
-    mod.SerializeToProfile(&serialized_mod);
-    serialized_mods.emplace_back(std::move(serialized_mod));
+    picojson::object settings;
+    mod.SerializeToProfile(&settings);
+    mods.emplace_back(std::move(settings));
   }
-  serialized_root.emplace("mods", std::move(serialized_mods));
-
-  const auto output = picojson::value{serialized_root}.serialize(true);
-  json_stream << output;
+  picojson::object root;
+  root.emplace("mods", std::move(mods));
+  out << picojson::value{root}.serialize(true);
 }
 
 void GraphicsModGroupConfig::SetChangeCount(u32 change_count)
@@ -165,23 +154,18 @@ u32 GraphicsModGroupConfig::GetChangeCount() const
 
 const std::vector<GraphicsModConfig>& GraphicsModGroupConfig::GetMods() const
 {
-  return m_graphics_mods;
+  return m_mods;
 }
 
 std::vector<GraphicsModConfig>& GraphicsModGroupConfig::GetMods()
 {
-  return m_graphics_mods;
+  return m_mods;
 }
 
 GraphicsModConfig* GraphicsModGroupConfig::GetMod(std::string_view absolute_path) const
 {
-  if (const auto iter = m_path_to_graphics_mod.find(absolute_path);
-      iter != m_path_to_graphics_mod.end())
-  {
-    return iter->second;
-  }
-
-  return nullptr;
+  const auto it = m_mods_by_path.find(absolute_path);
+  return it != m_mods_by_path.end() ? it->second : nullptr;
 }
 
 const std::string& GraphicsModGroupConfig::GetGameID() const
@@ -189,8 +173,8 @@ const std::string& GraphicsModGroupConfig::GetGameID() const
   return m_game_id;
 }
 
-std::string GraphicsModGroupConfig::GetPath() const
+std::string GraphicsModGroupConfig::ProfilePath() const
 {
-  const std::string game_mod_root = File::GetUserPath(D_CONFIG_IDX) + GRAPHICSMOD_CONFIG_DIR;
-  return fmt::format("{}/{}.json", game_mod_root, m_game_id);
+  return fmt::format("{}{}/{}.json", File::GetUserPath(D_CONFIG_IDX), GRAPHICSMOD_CONFIG_DIR,
+                     m_game_id);
 }

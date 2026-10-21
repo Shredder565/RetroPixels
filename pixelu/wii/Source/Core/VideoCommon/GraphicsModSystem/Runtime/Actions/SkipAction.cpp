@@ -1,26 +1,24 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/Actions/SkipAction.h"
 
+namespace
+{
+void SetIfPresent(bool* flag)
+{
+  if (flag != nullptr) [[likely]]
+    *flag = true;
+}
+}  // namespace
+
 void SkipAction::OnDrawStarted(GraphicsModActionData::DrawStarted* draw_started)
 {
-  if (!draw_started) [[unlikely]]
-    return;
-
-  if (!draw_started->skip) [[unlikely]]
-    return;
-
-  *draw_started->skip = true;
+  if (draw_started != nullptr) [[likely]]
+    SetIfPresent(draw_started->skip);
 }
 
 void SkipAction::BeforeEFB(GraphicsModActionData::PreEFB* efb)
 {
-  if (!efb) [[unlikely]]
-    return;
-
-  if (!efb->skip) [[unlikely]]
-    return;
-
-  *efb->skip = true;
+  if (efb != nullptr) [[likely]]
+    SetIfPresent(efb->skip);
 }

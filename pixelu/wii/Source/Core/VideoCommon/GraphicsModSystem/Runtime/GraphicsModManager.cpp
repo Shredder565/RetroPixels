@@ -1,16 +1,18 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 
+#include <filesystem>
+#include <map>
 #include <string>
 #include <string_view>
 #include <variant>
 
+#include <fmt/format.h>
+
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
-#include "Common/VariantUtil.h"
 
 #include "Core/ConfigManager.h"
 
@@ -25,189 +27,189 @@
 
 std::unique_ptr<GraphicsModManager> g_graphics_mod_manager;
 
-class GraphicsModManager::DecoratedAction final : public GraphicsModAction
+namespace
+{
+// Forwards to the wrapped action only while the mod it came from is enabled. The mod's
+// settings are captured when the action is created.
+class ModGatedAction final : public GraphicsModAction
 {
 public:
-  DecoratedAction(std::unique_ptr<GraphicsModAction> action, GraphicsModConfig mod)
-      : m_action_impl(std::move(action)), m_mod(std::move(mod))
+  ModGatedAction(std::unique_ptr<GraphicsModAction> inner, GraphicsModConfig mod)
+      : m_inner(std::move(inner)), m_mod(std::move(mod))
   {
   }
-  void OnDrawStarted(GraphicsModActionData::DrawStarted* draw_started) override
+
+  void OnDrawStarted(GraphicsModActionData::DrawStarted* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnDrawStarted(draw_started);
+    if (m_mod.m_enabled)
+      m_inner->OnDrawStarted(data);
   }
-  void BeforeEFB(GraphicsModActionData::PreEFB* efb) override
+  void BeforeEFB(GraphicsModActionData::PreEFB* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->BeforeEFB(efb);
+    if (m_mod.m_enabled)
+      m_inner->BeforeEFB(data);
   }
-  void AfterEFB(GraphicsModActionData::PostEFB* efb) override
+  void AfterEFB(GraphicsModActionData::PostEFB* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->AfterEFB(efb);
+    if (m_mod.m_enabled)
+      m_inner->AfterEFB(data);
   }
-  void OnProjection(GraphicsModActionData::Projection* projection) override
+  void OnProjection(GraphicsModActionData::Projection* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnProjection(projection);
+    if (m_mod.m_enabled)
+      m_inner->OnProjection(data);
   }
-  void OnProjectionAndTexture(GraphicsModActionData::Projection* projection) override
+  void OnProjectionAndTexture(GraphicsModActionData::Projection* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnProjectionAndTexture(projection);
+    if (m_mod.m_enabled)
+      m_inner->OnProjectionAndTexture(data);
   }
-  void OnTextureLoad(GraphicsModActionData::TextureLoad* texture_load) override
+  void OnTextureLoad(GraphicsModActionData::TextureLoad* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnTextureLoad(texture_load);
+    if (m_mod.m_enabled)
+      m_inner->OnTextureLoad(data);
   }
-  void OnTextureCreate(GraphicsModActionData::TextureCreate* texture_create) override
+  void OnTextureCreate(GraphicsModActionData::TextureCreate* data) override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnTextureCreate(texture_create);
+    if (m_mod.m_enabled)
+      m_inner->OnTextureCreate(data);
   }
   void OnFrameEnd() override
   {
-    if (!m_mod.m_enabled)
-      return;
-    m_action_impl->OnFrameEnd();
+    if (m_mod.m_enabled)
+      m_inner->OnFrameEnd();
   }
 
 private:
-  std::unique_ptr<GraphicsModAction> m_action_impl;
+  std::unique_ptr<GraphicsModAction> m_inner;
   GraphicsModConfig m_mod;
 };
 
+std::string ProjectionTextureKey(const std::string& texture, ProjectionType type)
+{
+  return fmt::format("{}_{}", texture, static_cast<int>(type));
+}
+
+FBInfo DescribeFramebuffer(const FBTarget& target)
+{
+  FBInfo info;
+  info.m_width = target.m_width;
+  info.m_height = target.m_height;
+  info.m_texture_format = target.m_texture_format;
+  return info;
+}
+
+template <typename Map, typename Key>
+const std::vector<GraphicsModAction*>& ActionsFor(const Map& map, const Key& key,
+                                                  const std::vector<GraphicsModAction*>& none)
+{
+  const auto it = map.find(key);
+  return it != map.end() ? it->second : none;
+}
+
+// Points the asset's relative file names at the mod's own directory.
+VideoCommon::Assets::AssetMap ResolveAssetFiles(const GraphicsModAssetConfig& asset,
+                                                const GraphicsModConfig& mod,
+                                                const std::string& mod_directory)
+{
+  VideoCommon::Assets::AssetMap files = asset.m_map;
+  for (auto& entry : files)
+  {
+    std::filesystem::path& path = entry.second;
+    if (!path.is_absolute())
+    {
+      path = std::filesystem::path{mod_directory} / path;
+      continue;
+    }
+    WARN_LOG_FMT(VIDEO,
+                 "Specified graphics mod asset '{}' for mod '{}' has an absolute path, you "
+                 "shouldn't release this to users.",
+                 asset.m_asset_id, mod.m_title);
+  }
+  return files;
+}
+}  // namespace
+
 bool GraphicsModManager::Initialize()
 {
-  if (g_ActiveConfig.bGraphicMods)
-  {
-    // If a config change occurred in a previous session,
-    // remember the old change count value.  By setting
-    // our current change count to the old value, we
-    // avoid loading the stale data when we
-    // check for config changes.
-    const u32 old_game_mod_changes = g_ActiveConfig.graphics_mod_config ?
-                                         g_ActiveConfig.graphics_mod_config->GetChangeCount() :
-                                         0;
-    g_ActiveConfig.graphics_mod_config = GraphicsModGroupConfig(SConfig::GetInstance().GetGameID());
-    g_ActiveConfig.graphics_mod_config->Load();
-    g_ActiveConfig.graphics_mod_config->SetChangeCount(old_game_mod_changes);
-    g_graphics_mod_manager->Load(*g_ActiveConfig.graphics_mod_config);
+  if (!g_ActiveConfig.bGraphicMods)
+    return true;
 
-    m_end_of_frame_event =
-        GetVideoEvents().after_frame_event.Register([this](Core::System&) { EndOfFrame(); });
-  }
+  // Keep the change count from an earlier session so that the freshly loaded config is not
+  // mistaken for a user change.
+  auto& mod_config = g_ActiveConfig.graphics_mod_config;
+  const u32 previous_changes = mod_config ? mod_config->GetChangeCount() : 0;
+  mod_config = GraphicsModGroupConfig(SConfig::GetInstance().GetGameID());
+  mod_config->Load();
+  mod_config->SetChangeCount(previous_changes);
+  g_graphics_mod_manager->Load(*mod_config);
 
+  m_frame_end_hook =
+      GetVideoEvents().after_frame_event.Register([this](Core::System&) { OnFrameEnded(); });
   return true;
 }
 
 const std::vector<GraphicsModAction*>&
 GraphicsModManager::GetProjectionActions(ProjectionType projection_type) const
 {
-  if (const auto it = m_projection_target_to_actions.find(projection_type);
-      it != m_projection_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_projection, projection_type, s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>&
 GraphicsModManager::GetProjectionTextureActions(ProjectionType projection_type,
                                                 const std::string& texture_name) const
 {
-  const auto lookup = fmt::format("{}_{}", texture_name, static_cast<int>(projection_type));
-  if (const auto it = m_projection_texture_target_to_actions.find(lookup);
-      it != m_projection_texture_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_projection_with_texture,
+                    ProjectionTextureKey(texture_name, projection_type), s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>&
 GraphicsModManager::GetDrawStartedActions(const std::string& texture_name) const
 {
-  if (const auto it = m_draw_started_target_to_actions.find(texture_name);
-      it != m_draw_started_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_draw_started, texture_name, s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>&
 GraphicsModManager::GetTextureLoadActions(const std::string& texture_name) const
 {
-  if (const auto it = m_load_texture_target_to_actions.find(texture_name);
-      it != m_load_texture_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_texture_load, texture_name, s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>&
 GraphicsModManager::GetTextureCreateActions(const std::string& texture_name) const
 {
-  if (const auto it = m_create_texture_target_to_actions.find(texture_name);
-      it != m_create_texture_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_texture_create, texture_name, s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>& GraphicsModManager::GetEFBActions(const FBInfo& efb) const
 {
-  if (const auto it = m_efb_target_to_actions.find(efb); it != m_efb_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  return ActionsFor(m_on_efb, efb, s_no_actions);
 }
 
 const std::vector<GraphicsModAction*>& GraphicsModManager::GetXFBActions(const FBInfo& xfb) const
 {
-  if (const auto it = m_efb_target_to_actions.find(xfb); it != m_efb_target_to_actions.end())
-  {
-    return it->second;
-  }
-
-  return m_default;
+  // XFB queries are answered from the EFB table (XFB targets are recorded but never matched).
+  return ActionsFor(m_on_efb, xfb, s_no_actions);
 }
 
 void GraphicsModManager::Load(const GraphicsModGroupConfig& config)
 {
-  Reset();
+  Clear();
 
-  const auto& mods = config.GetMods();
+  const std::vector<GraphicsModConfig>& mods = config.GetMods();
 
-  auto filesystem_library = std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
-  filesystem_library->Watch(File::GetSysDirectory() + DOLPHIN_SYSTEM_GRAPHICS_MOD_DIR);
-  filesystem_library->Watch(File::GetUserPath(D_GRAPHICSMOD_IDX));
+  auto library = std::make_shared<VideoCommon::DirectFilesystemAssetLibrary>();
+  library->Watch(File::GetSysDirectory() + DOLPHIN_SYSTEM_GRAPHICS_MOD_DIR);
+  library->Watch(File::GetUserPath(D_GRAPHICSMOD_IDX));
 
-  std::map<std::string, std::vector<GraphicsTargetConfig>> group_to_targets;
-  for (const auto& mod : mods)
+  // Pass 1: collect each group's targets under its plain name (shared between mods) and under
+  // "<mod title>.<group name>" (private to the mod), and register the mods' assets.
+  std::map<std::string, std::vector<GraphicsTargetConfig>> targets_by_group;
+  for (const GraphicsModConfig& mod : mods)
   {
     for (const GraphicsTargetGroupConfig& group : mod.m_groups)
     {
-      if (const bool inserted = m_groups.insert(group.m_name).second; !inserted)
+      if (!m_group_names.insert(group.m_name).second)
       {
         WARN_LOG_FMT(
             VIDEO,
@@ -215,164 +217,95 @@ void GraphicsModManager::Load(const GraphicsModGroupConfig& config)
             group.m_name, mod.m_title);
       }
 
-      const auto internal_group = fmt::format("{}.{}", mod.m_title, group.m_name);
+      const std::string private_name = fmt::format("{}.{}", mod.m_title, group.m_name);
       for (const GraphicsTargetConfig& target : group.m_targets)
       {
-        group_to_targets[group.m_name].push_back(target);
-        group_to_targets[internal_group].push_back(target);
+        targets_by_group[group.m_name].push_back(target);
+        targets_by_group[private_name].push_back(target);
       }
     }
 
-    std::string base_path;
-    SplitPath(mod.GetAbsolutePath(), &base_path, nullptr, nullptr);
+    std::string mod_directory;
+    SplitPath(mod.GetAbsolutePath(), &mod_directory, nullptr, nullptr);
     for (const GraphicsModAssetConfig& asset : mod.m_assets)
-    {
-      auto asset_map = asset.m_map;
-      for (auto& [k, v] : asset_map)
-      {
-        if (v.is_absolute())
-        {
-          WARN_LOG_FMT(VIDEO,
-                       "Specified graphics mod asset '{}' for mod '{}' has an absolute path, you "
-                       "shouldn't release this to users.",
-                       asset.m_asset_id, mod.m_title);
-        }
-        else
-        {
-          v = std::filesystem::path{base_path} / v;
-        }
-      }
-
-      filesystem_library->SetAssetIDMapData(asset.m_asset_id, std::move(asset_map));
-    }
+      library->SetAssetIDMapData(asset.m_asset_id, ResolveAssetFiles(asset, mod, mod_directory));
   }
 
-  const auto create_action =
-      [filesystem_library = std::move(filesystem_library)](
-          const std::string_view& action_name, const picojson::value& json_data,
-          GraphicsModConfig mod_config) -> std::unique_ptr<GraphicsModAction> {
-    auto action = GraphicsModActionFactory::Create(action_name, json_data, filesystem_library);
-    if (action == nullptr)
+  const auto register_target = [this](const GraphicsTargetConfig& target,
+                                      GraphicsModAction* action) {
+    if (const auto* draw = std::get_if<DrawStartedTextureTarget>(&target))
+      m_on_draw_started[draw->m_texture_info_string].push_back(action);
+    else if (const auto* load = std::get_if<LoadTextureTarget>(&target))
+      m_on_texture_load[load->m_texture_info_string].push_back(action);
+    else if (const auto* create = std::get_if<CreateTextureTarget>(&target))
+      m_on_texture_create[create->m_texture_info_string].push_back(action);
+    else if (const auto* efb = std::get_if<EFBTarget>(&target))
+      m_on_efb[DescribeFramebuffer(*efb)].push_back(action);
+    else if (const auto* xfb = std::get_if<XFBTarget>(&target))
+      m_on_xfb[DescribeFramebuffer(*xfb)].push_back(action);
+    else if (const auto* projection = std::get_if<ProjectionTarget>(&target))
     {
-      return nullptr;
-    }
-    return std::make_unique<DecoratedAction>(std::move(action), std::move(mod_config));
-  };
-
-  for (const auto& mod : mods)
-  {
-    for (const GraphicsModFeatureConfig& feature : mod.m_features)
-    {
-      const auto internal_group = fmt::format("{}.{}", mod.m_title, feature.m_group);
-
-      const auto add_target = [&](const GraphicsTargetConfig& target) {
-        std::visit(
-            overloaded{
-                [&](const DrawStartedTextureTarget& the_target) {
-                  m_draw_started_target_to_actions[the_target.m_texture_info_string].push_back(
-                      m_actions.back().get());
-                },
-                [&](const LoadTextureTarget& the_target) {
-                  m_load_texture_target_to_actions[the_target.m_texture_info_string].push_back(
-                      m_actions.back().get());
-                },
-                [&](const CreateTextureTarget& the_target) {
-                  m_create_texture_target_to_actions[the_target.m_texture_info_string].push_back(
-                      m_actions.back().get());
-                },
-                [&](const EFBTarget& the_target) {
-                  FBInfo info;
-                  info.m_height = the_target.m_height;
-                  info.m_width = the_target.m_width;
-                  info.m_texture_format = the_target.m_texture_format;
-                  m_efb_target_to_actions[info].push_back(m_actions.back().get());
-                },
-                [&](const XFBTarget& the_target) {
-                  FBInfo info;
-                  info.m_height = the_target.m_height;
-                  info.m_width = the_target.m_width;
-                  info.m_texture_format = the_target.m_texture_format;
-                  m_xfb_target_to_actions[info].push_back(m_actions.back().get());
-                },
-                [&](const ProjectionTarget& the_target) {
-                  if (the_target.m_texture_info_string)
-                  {
-                    const auto lookup = fmt::format("{}_{}", *the_target.m_texture_info_string,
-                                                    static_cast<int>(the_target.m_projection_type));
-                    m_projection_texture_target_to_actions[lookup].push_back(
-                        m_actions.back().get());
-                  }
-                  else
-                  {
-                    m_projection_target_to_actions[the_target.m_projection_type].push_back(
-                        m_actions.back().get());
-                  }
-                },
-            },
-            target);
-      };
-
-      const auto add_action = [&](GraphicsModConfig mod_config) -> bool {
-        auto action = create_action(feature.m_action, feature.m_action_data, std::move(mod_config));
-        if (action == nullptr)
-        {
-          WARN_LOG_FMT(VIDEO, "Failed to create action '{}' for group '{}'.", feature.m_action,
-                       feature.m_group);
-          return false;
-        }
-        m_actions.push_back(std::move(action));
-        return true;
-      };
-
-      // Prefer groups in the pack over groups from another pack
-      if (const auto local_it = group_to_targets.find(internal_group);
-          local_it != group_to_targets.end())
+      if (projection->m_texture_info_string)
       {
-        if (add_action(mod))
-        {
-          for (const GraphicsTargetConfig& target : local_it->second)
-          {
-            add_target(target);
-          }
-        }
-      }
-      else if (const auto global_it = group_to_targets.find(feature.m_group);
-               global_it != group_to_targets.end())
-      {
-        if (add_action(mod))
-        {
-          for (const GraphicsTargetConfig& target : global_it->second)
-          {
-            add_target(target);
-          }
-        }
+        m_on_projection_with_texture[ProjectionTextureKey(*projection->m_texture_info_string,
+                                                          projection->m_projection_type)]
+            .push_back(action);
       }
       else
       {
+        m_on_projection[projection->m_projection_type].push_back(action);
+      }
+    }
+  };
+
+  // Pass 2: one action per feature, attached to every target of the feature's group. A mod's
+  // own group wins over a same-named group from another mod.
+  for (const GraphicsModConfig& mod : mods)
+  {
+    for (const GraphicsModFeatureConfig& feature : mod.m_features)
+    {
+      auto group = targets_by_group.find(fmt::format("{}.{}", mod.m_title, feature.m_group));
+      if (group == targets_by_group.end())
+        group = targets_by_group.find(feature.m_group);
+      if (group == targets_by_group.end())
+      {
         WARN_LOG_FMT(VIDEO, "Specified graphics mod group '{}' was not found for mod '{}'",
                      feature.m_group, mod.m_title);
+        continue;
       }
+
+      std::unique_ptr<GraphicsModAction> inner =
+          GraphicsModActionFactory::Create(feature.m_action, feature.m_action_data, library);
+      if (inner == nullptr)
+      {
+        WARN_LOG_FMT(VIDEO, "Failed to create action '{}' for group '{}'.", feature.m_action,
+                     feature.m_group);
+        continue;
+      }
+
+      GraphicsModAction* const action =
+          m_owned.emplace_back(std::make_unique<ModGatedAction>(std::move(inner), mod)).get();
+      for (const GraphicsTargetConfig& target : group->second)
+        register_target(target, action);
     }
   }
 }
 
-void GraphicsModManager::EndOfFrame()
+void GraphicsModManager::OnFrameEnded()
 {
-  for (auto&& action : m_actions)
-  {
+  for (const auto& action : m_owned)
     action->OnFrameEnd();
-  }
 }
 
-void GraphicsModManager::Reset()
+void GraphicsModManager::Clear()
 {
-  m_actions.clear();
-  m_groups.clear();
-  m_projection_target_to_actions.clear();
-  m_projection_texture_target_to_actions.clear();
-  m_draw_started_target_to_actions.clear();
-  m_load_texture_target_to_actions.clear();
-  m_create_texture_target_to_actions.clear();
-  m_efb_target_to_actions.clear();
-  m_xfb_target_to_actions.clear();
+  m_owned.clear();
+  m_group_names.clear();
+  m_on_projection.clear();
+  m_on_projection_with_texture.clear();
+  m_on_draw_started.clear();
+  m_on_texture_load.clear();
+  m_on_texture_create.clear();
+  m_on_efb.clear();
+  m_on_xfb.clear();
 }

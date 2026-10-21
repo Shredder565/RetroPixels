@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/CustomShaderCache.h"
 
@@ -9,59 +8,233 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
 
+// How the two kinds of pipeline differ.
+struct CustomShaderCache::SpecializedTraits
+{
+  using PipelineUid = VideoCommon::GXPipelineUid;
+  using ShaderUid = PixelShaderUid;
+
+  // Specialized pipelines are created even if a shader stage is missing.
+  static constexpr bool needs_both_stages = false;
+  static constexpr const char* shader_label = "Custom Pixel Shader";
+
+  static auto& LaneOf(CustomShaderCache& cache) { return cache.m_specialized; }
+  static ShaderCode Generate(APIType api, const ShaderHostConfig& host, const ShaderUid& uid)
+  {
+    return GeneratePixelShaderCode(api, host, uid.GetUidData(), {});
+  }
+};
+
+struct CustomShaderCache::UberTraits
+{
+  using PipelineUid = VideoCommon::GXUberPipelineUid;
+  using ShaderUid = UberShader::PixelShaderUid;
+
+  static constexpr bool needs_both_stages = true;
+  static constexpr const char* shader_label = "Custom Uber Pixel Shader";
+
+  static auto& LaneOf(CustomShaderCache& cache) { return cache.m_uber; }
+  static ShaderCode Generate(APIType api, const ShaderHostConfig& host, const ShaderUid& uid)
+  {
+    return GenPixelShader(api, host, uid.GetUidData());
+  }
+};
+
+// Compiles one pixel shader and stores it in its cache slot.
+template <typename Traits>
+class CustomShaderCache::ShaderJob final : public VideoCommon::AsyncShaderCompiler::WorkItem
+{
+public:
+  using Slot = typename InstanceCache<typename Traits::ShaderUid, AbstractShader>::Slot;
+
+  ShaderJob(CustomShaderCache* owner, const typename Traits::ShaderUid& uid,
+            CustomShaderInstance instance, Slot* slot)
+      : m_owner(owner), m_uid(uid), m_instance(std::move(instance)), m_slot(slot)
+  {
+  }
+
+  bool Compile() override
+  {
+    // The custom shader instance does not change the generated code yet.
+    const ShaderCode code = Traits::Generate(m_owner->m_api_type, m_owner->m_host_config, m_uid);
+    m_result = g_gfx->CreateShaderFromSource(ShaderStage::Pixel, code.GetBuffer(), nullptr,
+                                             Traits::shader_label);
+    return true;
+  }
+
+  void Retrieve() override
+  {
+    m_slot->pending = false;
+    m_slot->value = std::move(m_result);
+  }
+
+private:
+  CustomShaderCache* m_owner;
+  typename Traits::ShaderUid m_uid;
+  CustomShaderInstance m_instance;
+  Slot* m_slot;
+  std::unique_ptr<AbstractShader> m_result;
+};
+
+// Creates one pipeline once its pixel shader is available. Until then the job is re-queued
+// every time it is retrieved.
+template <typename Traits>
+class CustomShaderCache::PipelineJob final : public VideoCommon::AsyncShaderCompiler::WorkItem
+{
+public:
+  using Slot = typename InstanceCache<typename Traits::PipelineUid, AbstractPipeline>::Slot;
+
+  PipelineJob(CustomShaderCache* owner, typename Traits::PipelineUid uid,
+              CustomShaderInstance instance, Slot* slot, AbstractPipelineConfig config)
+      : m_owner(owner), m_uid(std::move(uid)), m_instance(std::move(instance)), m_slot(slot),
+        m_config(std::move(config))
+  {
+    m_ready = ResolvePixelShader();
+  }
+
+  bool Compile() override
+  {
+    if (!m_ready)
+      return true;
+    if constexpr (Traits::needs_both_stages)
+    {
+      if (m_config.pixel_shader == nullptr || m_config.vertex_shader == nullptr)
+        return false;
+    }
+    m_result = g_gfx->CreatePipeline(m_config);
+    return true;
+  }
+
+  void Retrieve() override
+  {
+    if (m_ready)
+    {
+      m_slot->pending = false;
+      m_slot->value = std::move(m_result);
+      return;
+    }
+
+    auto& compiler = *Traits::LaneOf(*m_owner).compiler;
+    compiler.QueueWorkItem(
+        compiler.template CreateWorkItem<PipelineJob>(m_owner, m_uid, m_instance, m_slot, m_config),
+        0);
+  }
+
+private:
+  // True once the pixel shader stage is settled. A compiled shader replaces the config's pixel
+  // shader; a failed one leaves the config's own shader in place.
+  bool ResolvePixelShader()
+  {
+    typename Traits::ShaderUid ps_uid = m_uid.ps_uid;
+    ClearUnusedPixelShaderUidBits(m_owner->m_api_type, m_owner->m_host_config, &ps_uid);
+
+    const auto* shader = Traits::LaneOf(*m_owner).shaders.Find(ps_uid, m_instance);
+    if (shader == nullptr)
+    {
+      m_owner->QueueShader<Traits>(ps_uid, m_instance);
+      return false;
+    }
+    if (!shader->pending && shader->value != nullptr)
+      m_config.pixel_shader = shader->value.get();
+    return !shader->pending;
+  }
+
+  CustomShaderCache* m_owner;
+  typename Traits::PipelineUid m_uid;
+  CustomShaderInstance m_instance;
+  Slot* m_slot;
+  AbstractPipelineConfig m_config;
+  std::unique_ptr<AbstractPipeline> m_result;
+  bool m_ready = false;
+};
+
 CustomShaderCache::CustomShaderCache()
 {
   m_api_type = g_backend_info.api_type;
   m_host_config.bits = ShaderHostConfig::GetCurrent().bits;
 
-  m_async_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
-  m_async_shader_compiler->StartWorkerThreads(1);  // TODO
+  // One worker per kind keeps custom shader compiles from competing with the main caches.
+  m_specialized.compiler = g_gfx->CreateAsyncShaderCompiler();
+  m_specialized.compiler->StartWorkerThreads(1);
+  m_uber.compiler = g_gfx->CreateAsyncShaderCompiler();
+  m_uber.compiler->StartWorkerThreads(1);
 
-  m_async_uber_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
-  m_async_uber_shader_compiler->StartWorkerThreads(1);  // TODO
-
-  m_frame_end_handler = GetVideoEvents().after_frame_event.Register(
+  m_frame_end_hook = GetVideoEvents().after_frame_event.Register(
       [this](Core::System&) { RetrieveAsyncShaders(); });
 }
 
 CustomShaderCache::~CustomShaderCache()
 {
-  if (m_async_shader_compiler)
+  for (VideoCommon::AsyncShaderCompiler* compiler :
+       {m_specialized.compiler.get(), m_uber.compiler.get()})
   {
-    m_async_shader_compiler->StopWorkerThreads();
-    m_async_shader_compiler->ClearAllWork();
+    if (compiler != nullptr)
+    {
+      compiler->StopWorkerThreads();
+      compiler->ClearAllWork();
+    }
   }
 
-  if (m_async_uber_shader_compiler)
-  {
-    m_async_uber_shader_compiler->StopWorkerThreads();
-    m_async_uber_shader_compiler->ClearAllWork();
-  }
+  // Release pipelines before the shaders they were built from.
+  m_uber.pipelines = {};
+  m_specialized.pipelines = {};
+  m_uber.shaders = {};
+  m_specialized.shaders = {};
 }
 
 void CustomShaderCache::RetrieveAsyncShaders()
 {
-  m_async_shader_compiler->RetrieveWorkItems();
-  m_async_uber_shader_compiler->RetrieveWorkItems();
+  m_specialized.compiler->RetrieveWorkItems();
+  m_uber.compiler->RetrieveWorkItems();
 }
 
 void CustomShaderCache::Reload()
 {
-  while (m_async_shader_compiler->HasPendingWork() || m_async_shader_compiler->HasCompletedWork())
+  for (VideoCommon::AsyncShaderCompiler* compiler :
+       {m_specialized.compiler.get(), m_uber.compiler.get()})
   {
-    m_async_shader_compiler->RetrieveWorkItems();
+    while (compiler->HasPendingWork() || compiler->HasCompletedWork())
+      compiler->RetrieveWorkItems();
   }
 
-  while (m_async_uber_shader_compiler->HasPendingWork() ||
-         m_async_uber_shader_compiler->HasCompletedWork())
+  m_specialized.shaders = {};
+  m_uber.shaders = {};
+  m_specialized.pipelines = {};
+  m_uber.pipelines = {};
+}
+
+template <typename Traits>
+std::optional<const AbstractPipeline*>
+CustomShaderCache::Lookup(const typename Traits::PipelineUid& uid,
+                          const CustomShaderInstance& custom_shaders,
+                          const AbstractPipelineConfig& pipeline_config)
+{
+  auto& lane = Traits::LaneOf(*this);
+  if (const auto* slot = lane.pipelines.Find(uid, custom_shaders))
   {
-    m_async_uber_shader_compiler->RetrieveWorkItems();
+    if (slot->pending)
+      return std::nullopt;
+    return slot->value.get();
   }
 
-  m_ps_cache = {};
-  m_uber_ps_cache = {};
-  m_pipeline_cache = {};
-  m_uber_pipeline_cache = {};
+  // The job's constructor may queue the pixel shader first, so that compile runs before the
+  // pipeline job on the same compiler.
+  auto* slot = lane.pipelines.Add(uid, custom_shaders);
+  auto job = lane.compiler->template CreateWorkItem<PipelineJob<Traits>>(this, uid, custom_shaders,
+                                                                         slot, pipeline_config);
+  lane.compiler->QueueWorkItem(std::move(job), 0);
+  return std::nullopt;
+}
+
+template <typename Traits>
+void CustomShaderCache::QueueShader(const typename Traits::ShaderUid& uid,
+                                    const CustomShaderInstance& custom_shaders)
+{
+  auto& lane = Traits::LaneOf(*this);
+  auto* slot = lane.shaders.Add(uid, custom_shaders);
+  auto job =
+      lane.compiler->template CreateWorkItem<ShaderJob<Traits>>(this, uid, custom_shaders, slot);
+  lane.compiler->QueueWorkItem(std::move(job), 0);
 }
 
 std::optional<const AbstractPipeline*>
@@ -69,14 +242,7 @@ CustomShaderCache::GetPipelineAsync(const VideoCommon::GXPipelineUid& uid,
                                     const CustomShaderInstance& custom_shaders,
                                     const AbstractPipelineConfig& pipeline_config)
 {
-  if (auto holder = m_pipeline_cache.GetHolder(uid, custom_shaders))
-  {
-    if (holder->pending)
-      return std::nullopt;
-    return holder->value.get();
-  }
-  AsyncCreatePipeline(uid, custom_shaders, pipeline_config);
-  return std::nullopt;
+  return Lookup<SpecializedTraits>(uid, custom_shaders, pipeline_config);
 }
 
 std::optional<const AbstractPipeline*>
@@ -84,304 +250,5 @@ CustomShaderCache::GetPipelineAsync(const VideoCommon::GXUberPipelineUid& uid,
                                     const CustomShaderInstance& custom_shaders,
                                     const AbstractPipelineConfig& pipeline_config)
 {
-  if (auto holder = m_uber_pipeline_cache.GetHolder(uid, custom_shaders))
-  {
-    if (holder->pending)
-      return std::nullopt;
-    return holder->value.get();
-  }
-  AsyncCreatePipeline(uid, custom_shaders, pipeline_config);
-  return std::nullopt;
-}
-
-void CustomShaderCache::AsyncCreatePipeline(const VideoCommon::GXPipelineUid& uid,
-
-                                            const CustomShaderInstance& custom_shaders,
-                                            const AbstractPipelineConfig& pipeline_config)
-{
-  class PipelineWorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
-  {
-  public:
-    PipelineWorkItem(CustomShaderCache* shader_cache, VideoCommon::GXPipelineUid uid,
-                     CustomShaderInstance custom_shaders, PipelineIterator iterator,
-                     AbstractPipelineConfig pipeline_config)
-        : m_shader_cache(shader_cache), m_uid(std::move(uid)), m_iterator(iterator),
-          m_config(std::move(pipeline_config)), m_custom_shaders(std::move(custom_shaders))
-    {
-      SetStagesReady();
-    }
-
-    void SetStagesReady()
-    {
-      m_stages_ready = true;
-
-      PixelShaderUid ps_uid = m_uid.ps_uid;
-      ClearUnusedPixelShaderUidBits(m_shader_cache->m_api_type, m_shader_cache->m_host_config,
-                                    &ps_uid);
-
-      if (auto holder = m_shader_cache->m_ps_cache.GetHolder(ps_uid, m_custom_shaders))
-      {
-        // If the pixel shader is no longer pending compilation
-        // and the shader compilation succeeded, set
-        // the pipeline to use the new pixel shader.
-        // Otherwise, use the existing shader.
-        if (!holder->pending && holder->value.get())
-        {
-          m_config.pixel_shader = holder->value.get();
-        }
-        m_stages_ready &= !holder->pending;
-      }
-      else
-      {
-        m_stages_ready &= false;
-        m_shader_cache->QueuePixelShaderCompile(ps_uid, m_custom_shaders);
-      }
-    }
-
-    bool Compile() override
-    {
-      if (m_stages_ready)
-      {
-        m_pipeline = g_gfx->CreatePipeline(m_config);
-      }
-      return true;
-    }
-
-    void Retrieve() override
-    {
-      if (m_stages_ready)
-      {
-        m_shader_cache->NotifyPipelineFinished(m_iterator, std::move(m_pipeline));
-      }
-      else
-      {
-        // Re-queue for next frame.
-        auto wi = m_shader_cache->m_async_shader_compiler->CreateWorkItem<PipelineWorkItem>(
-            m_shader_cache, m_uid, m_custom_shaders, m_iterator, m_config);
-        m_shader_cache->m_async_shader_compiler->QueueWorkItem(std::move(wi), 0);
-      }
-    }
-
-  private:
-    CustomShaderCache* m_shader_cache;
-    std::unique_ptr<AbstractPipeline> m_pipeline;
-    VideoCommon::GXPipelineUid m_uid;
-    PipelineIterator m_iterator;
-    AbstractPipelineConfig m_config;
-    CustomShaderInstance m_custom_shaders;
-    bool m_stages_ready;
-  };
-
-  auto list_iter = m_pipeline_cache.InsertElement(uid, custom_shaders);
-  auto work_item = m_async_shader_compiler->CreateWorkItem<PipelineWorkItem>(
-      this, uid, custom_shaders, list_iter, pipeline_config);
-  m_async_shader_compiler->QueueWorkItem(std::move(work_item), 0);
-}
-
-void CustomShaderCache::AsyncCreatePipeline(const VideoCommon::GXUberPipelineUid& uid,
-
-                                            const CustomShaderInstance& custom_shaders,
-                                            const AbstractPipelineConfig& pipeline_config)
-{
-  class PipelineWorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
-  {
-  public:
-    PipelineWorkItem(CustomShaderCache* shader_cache, VideoCommon::GXUberPipelineUid uid,
-                     CustomShaderInstance custom_shaders, UberPipelineIterator iterator,
-                     AbstractPipelineConfig pipeline_config)
-        : m_shader_cache(shader_cache), m_uid(std::move(uid)), m_iterator(iterator),
-          m_config(std::move(pipeline_config)), m_custom_shaders(std::move(custom_shaders))
-    {
-      SetStagesReady();
-    }
-
-    void SetStagesReady()
-    {
-      m_stages_ready = true;
-
-      UberShader::PixelShaderUid ps_uid = m_uid.ps_uid;
-      ClearUnusedPixelShaderUidBits(m_shader_cache->m_api_type, m_shader_cache->m_host_config,
-                                    &ps_uid);
-
-      if (auto holder = m_shader_cache->m_uber_ps_cache.GetHolder(ps_uid, m_custom_shaders))
-      {
-        if (!holder->pending && holder->value.get())
-        {
-          m_config.pixel_shader = holder->value.get();
-        }
-        m_stages_ready &= !holder->pending;
-      }
-      else
-      {
-        m_stages_ready &= false;
-        m_shader_cache->QueuePixelShaderCompile(ps_uid, m_custom_shaders);
-      }
-    }
-
-    bool Compile() override
-    {
-      if (m_stages_ready)
-      {
-        if (m_config.pixel_shader == nullptr || m_config.vertex_shader == nullptr)
-          return false;
-
-        m_pipeline = g_gfx->CreatePipeline(m_config);
-      }
-      return true;
-    }
-
-    void Retrieve() override
-    {
-      if (m_stages_ready)
-      {
-        m_shader_cache->NotifyPipelineFinished(m_iterator, std::move(m_pipeline));
-      }
-      else
-      {
-        // Re-queue for next frame.
-        auto wi = m_shader_cache->m_async_uber_shader_compiler->CreateWorkItem<PipelineWorkItem>(
-            m_shader_cache, m_uid, m_custom_shaders, m_iterator, m_config);
-        m_shader_cache->m_async_uber_shader_compiler->QueueWorkItem(std::move(wi), 0);
-      }
-    }
-
-  private:
-    CustomShaderCache* m_shader_cache;
-    std::unique_ptr<AbstractPipeline> m_pipeline;
-    VideoCommon::GXUberPipelineUid m_uid;
-    UberPipelineIterator m_iterator;
-    AbstractPipelineConfig m_config;
-    CustomShaderInstance m_custom_shaders;
-    bool m_stages_ready;
-  };
-
-  auto list_iter = m_uber_pipeline_cache.InsertElement(uid, custom_shaders);
-  auto work_item = m_async_uber_shader_compiler->CreateWorkItem<PipelineWorkItem>(
-      this, uid, custom_shaders, list_iter, pipeline_config);
-  m_async_uber_shader_compiler->QueueWorkItem(std::move(work_item), 0);
-}
-
-void CustomShaderCache::NotifyPipelineFinished(PipelineIterator iterator,
-                                               std::unique_ptr<AbstractPipeline> pipeline)
-{
-  iterator->second.pending = false;
-  iterator->second.value = std::move(pipeline);
-}
-
-void CustomShaderCache::NotifyPipelineFinished(UberPipelineIterator iterator,
-                                               std::unique_ptr<AbstractPipeline> pipeline)
-{
-  iterator->second.pending = false;
-  iterator->second.value = std::move(pipeline);
-}
-
-void CustomShaderCache::QueuePixelShaderCompile(const PixelShaderUid& uid,
-
-                                                const CustomShaderInstance& custom_shaders)
-{
-  class PixelShaderWorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
-  {
-  public:
-    PixelShaderWorkItem(CustomShaderCache* shader_cache, const PixelShaderUid& uid,
-                        CustomShaderInstance custom_shaders, PixelShaderIterator iter)
-        : m_shader_cache(shader_cache), m_uid(uid), m_custom_shaders(std::move(custom_shaders)),
-          m_iter(iter)
-    {
-    }
-
-    bool Compile() override
-    {
-      m_shader = m_shader_cache->CompilePixelShader(m_uid, m_custom_shaders);
-      return true;
-    }
-
-    void Retrieve() override
-    {
-      m_shader_cache->NotifyPixelShaderFinished(m_iter, std::move(m_shader));
-    }
-
-  private:
-    CustomShaderCache* m_shader_cache;
-    std::unique_ptr<AbstractShader> m_shader;
-    PixelShaderUid m_uid;
-    CustomShaderInstance m_custom_shaders;
-    PixelShaderIterator m_iter;
-  };
-
-  auto list_iter = m_ps_cache.InsertElement(uid, custom_shaders);
-  auto work_item = m_async_shader_compiler->CreateWorkItem<PixelShaderWorkItem>(
-      this, uid, custom_shaders, list_iter);
-  m_async_shader_compiler->QueueWorkItem(std::move(work_item), 0);
-}
-
-void CustomShaderCache::QueuePixelShaderCompile(const UberShader::PixelShaderUid& uid,
-
-                                                const CustomShaderInstance& custom_shaders)
-{
-  class PixelShaderWorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
-  {
-  public:
-    PixelShaderWorkItem(CustomShaderCache* shader_cache, const UberShader::PixelShaderUid& uid,
-                        CustomShaderInstance custom_shaders, UberPixelShaderIterator iter)
-        : m_shader_cache(shader_cache), m_uid(uid), m_custom_shaders(std::move(custom_shaders)),
-          m_iter(iter)
-    {
-    }
-
-    bool Compile() override
-    {
-      m_shader = m_shader_cache->CompilePixelShader(m_uid, m_custom_shaders);
-      return true;
-    }
-
-    void Retrieve() override
-    {
-      m_shader_cache->NotifyPixelShaderFinished(m_iter, std::move(m_shader));
-    }
-
-  private:
-    CustomShaderCache* m_shader_cache;
-    std::unique_ptr<AbstractShader> m_shader;
-    UberShader::PixelShaderUid m_uid;
-    CustomShaderInstance m_custom_shaders;
-    UberPixelShaderIterator m_iter;
-  };
-
-  auto list_iter = m_uber_ps_cache.InsertElement(uid, custom_shaders);
-  auto work_item = m_async_uber_shader_compiler->CreateWorkItem<PixelShaderWorkItem>(
-      this, uid, custom_shaders, list_iter);
-  m_async_uber_shader_compiler->QueueWorkItem(std::move(work_item), 0);
-}
-
-std::unique_ptr<AbstractShader>
-CustomShaderCache::CompilePixelShader(const PixelShaderUid& uid,
-                                      const CustomShaderInstance& custom_shaders) const
-{
-  const ShaderCode source_code =
-      GeneratePixelShaderCode(m_api_type, m_host_config, uid.GetUidData(), {});
-  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,
-                                       "Custom Pixel Shader");
-}
-
-std::unique_ptr<AbstractShader>
-CustomShaderCache::CompilePixelShader(const UberShader::PixelShaderUid& uid,
-                                      const CustomShaderInstance& custom_shaders) const
-{
-  const ShaderCode source_code = GenPixelShader(m_api_type, m_host_config, uid.GetUidData());
-  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,
-                                       "Custom Uber Pixel Shader");
-}
-
-void CustomShaderCache::NotifyPixelShaderFinished(PixelShaderIterator iterator,
-                                                  std::unique_ptr<AbstractShader> shader)
-{
-  iterator->second.pending = false;
-  iterator->second.value = std::move(shader);
-}
-
-void CustomShaderCache::NotifyPixelShaderFinished(UberPixelShaderIterator iterator,
-                                                  std::unique_ptr<AbstractShader> shader)
-{
-  iterator->second.pending = false;
-  iterator->second.value = std::move(shader);
+  return Lookup<UberTraits>(uid, custom_shaders, pipeline_config);
 }

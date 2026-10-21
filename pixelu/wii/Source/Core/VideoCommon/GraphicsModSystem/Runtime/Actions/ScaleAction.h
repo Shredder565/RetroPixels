@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModAction.h"
 
+// Scales matching projections and EFB copy sizes. Action data: {"X": .., "Y": .., "Z": ..}.
 class ScaleAction final : public GraphicsModAction
 {
 public:
@@ -21,5 +21,5 @@ public:
   void OnProjectionAndTexture(GraphicsModActionData::Projection*) override;
 
 private:
-  Common::Vec3 m_scale;
+  Common::Vec3 m_factors;
 };

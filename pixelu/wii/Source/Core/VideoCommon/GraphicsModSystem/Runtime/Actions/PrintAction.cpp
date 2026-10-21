@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/Actions/PrintAction.h"
 
@@ -12,13 +11,7 @@ void PrintAction::OnDrawStarted(GraphicsModActionData::DrawStarted*)
 
 void PrintAction::BeforeEFB(GraphicsModActionData::PreEFB* efb)
 {
-  if (!efb) [[unlikely]]
-    return;
-
-  if (!efb->scaled_width) [[unlikely]]
-    return;
-
-  if (!efb->scaled_height) [[unlikely]]
+  if (efb == nullptr || efb->scaled_width == nullptr || efb->scaled_height == nullptr) [[unlikely]]
     return;
 
   INFO_LOG_FMT(VIDEO, "OnEFB Called. Original [{}, {}], Scaled [{}, {}]", efb->texture_width,
@@ -37,8 +30,9 @@ void PrintAction::OnProjectionAndTexture(GraphicsModActionData::Projection*)
 
 void PrintAction::OnTextureLoad(GraphicsModActionData::TextureLoad* texture_load)
 {
-  if (!texture_load) [[unlikely]]
+  if (texture_load == nullptr) [[unlikely]]
     return;
 
+  // Two spaces before "Texture:" match the existing log format.
   INFO_LOG_FMT(VIDEO, "OnTextureLoad Called.  Texture: {}", texture_load->texture_name);
 }

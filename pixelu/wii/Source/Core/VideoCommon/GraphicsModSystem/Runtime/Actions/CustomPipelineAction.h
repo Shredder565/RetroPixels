@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@
 #include "VideoCommon/Assets/CustomAssetLibrary.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModAction.h"
 
+// Applies a material asset as a post-processing pass after an EFB copy.
+// Action data: {"material_asset": "<asset id>"}.
 class CustomPipelineAction final : public GraphicsModAction
 {
 public:
@@ -28,6 +29,6 @@ public:
   void AfterEFB(GraphicsModActionData::PostEFB*) override;
 
 private:
-  std::shared_ptr<VideoCommon::CustomAssetLibrary> m_library;
-  std::string m_material_asset;
+  std::shared_ptr<VideoCommon::CustomAssetLibrary> m_assets;
+  std::string m_material_id;
 };

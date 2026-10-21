@@ -1,10 +1,10 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModAction.h"
 
+// Drops matching draws and EFB copies.
 class SkipAction final : public GraphicsModAction
 {
 public:

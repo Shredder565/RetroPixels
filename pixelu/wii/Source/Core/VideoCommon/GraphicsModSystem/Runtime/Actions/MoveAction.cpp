@@ -1,55 +1,45 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h"
 
-std::unique_ptr<MoveAction> MoveAction::Create(const picojson::value& json_data)
+namespace
 {
-  Common::Vec3 position_offset;
-  const auto& x = json_data.get("X");
-  if (x.is<double>())
-  {
-    position_offset.x = static_cast<float>(x.get<double>());
-  }
-
-  const auto& y = json_data.get("Y");
-  if (y.is<double>())
-  {
-    position_offset.y = static_cast<float>(y.get<double>());
-  }
-
-  const auto& z = json_data.get("Z");
-  if (z.is<double>())
-  {
-    position_offset.z = static_cast<float>(z.get<double>());
-  }
-  return std::make_unique<MoveAction>(position_offset);
+// Overwrites *out with json[key] when that member is a number.
+void ReadAxis(const picojson::value& json, const std::string& key, float* out)
+{
+  const picojson::value& axis = json.get(key);
+  if (axis.is<double>())
+    *out = static_cast<float>(axis.get<double>());
 }
 
-MoveAction::MoveAction(Common::Vec3 position_offset) : m_position_offset(position_offset)
+void Translate(GraphicsModActionData::Projection* projection, const Common::Vec3& offset)
+{
+  if (projection == nullptr || projection->matrix == nullptr) [[unlikely]]
+    return;
+  Common::Matrix44& matrix = *projection->matrix;
+  matrix = matrix * Common::Matrix44::Translate(offset);
+}
+}  // namespace
+
+std::unique_ptr<MoveAction> MoveAction::Create(const picojson::value& json_data)
+{
+  Common::Vec3 offset;
+  ReadAxis(json_data, "X", &offset.x);
+  ReadAxis(json_data, "Y", &offset.y);
+  ReadAxis(json_data, "Z", &offset.z);
+  return std::make_unique<MoveAction>(offset);
+}
+
+MoveAction::MoveAction(Common::Vec3 position_offset) : m_offset(position_offset)
 {
 }
 
 void MoveAction::OnProjection(GraphicsModActionData::Projection* projection)
 {
-  if (!projection) [[unlikely]]
-    return;
-
-  if (!projection->matrix) [[unlikely]]
-    return;
-
-  auto& matrix = *projection->matrix;
-  matrix = matrix * Common::Matrix44::Translate(m_position_offset);
+  Translate(projection, m_offset);
 }
 
 void MoveAction::OnProjectionAndTexture(GraphicsModActionData::Projection* projection)
 {
-  if (!projection) [[unlikely]]
-    return;
-
-  if (!projection->matrix) [[unlikely]]
-    return;
-
-  auto& matrix = *projection->matrix;
-  matrix = matrix * Common::Matrix44::Translate(m_position_offset);
+  Translate(projection, m_offset);
 }
