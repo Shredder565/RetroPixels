@@ -3,6 +3,7 @@
 #include "VideoBackends/OGL/OGLTexture.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 
 #include "Common/Assert.h"
@@ -85,42 +86,62 @@ void AttachToFramebuffer(GLenum attachment, const OGLTexture* texture)
 }
 }  // namespace
 
+namespace
+{
+// For each texture format: the sized format used to allocate storage, and the format given
+// when the texture is specified without immutable storage (these differ only for the 8-bit
+// colour formats).
+struct FormatNames
+{
+  AbstractTextureFormat format;
+  GLenum sized;
+  GLenum unsized;
+};
+constexpr std::array<FormatNames, 14> FORMAT_NAMES{{
+    {AbstractTextureFormat::RGBA8, GL_RGBA8, GL_RGBA},
+    {AbstractTextureFormat::BGRA8, GL_RGBA8, GL_BGRA},
+    {AbstractTextureFormat::RGB10_A2, GL_RGB10_A2, GL_RGB10_A2},
+    {AbstractTextureFormat::RGBA16F, GL_RGBA16F, GL_RGBA16F},
+    {AbstractTextureFormat::R16, GL_R16, GL_R16},
+    {AbstractTextureFormat::R32F, GL_R32F, GL_R32F},
+    {AbstractTextureFormat::DXT1, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+     GL_COMPRESSED_RGBA_S3TC_DXT1_EXT},
+    {AbstractTextureFormat::DXT3, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+     GL_COMPRESSED_RGBA_S3TC_DXT3_EXT},
+    {AbstractTextureFormat::DXT5, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
+     GL_COMPRESSED_RGBA_S3TC_DXT5_EXT},
+    {AbstractTextureFormat::BPTC, GL_COMPRESSED_RGBA_BPTC_UNORM_ARB,
+     GL_COMPRESSED_RGBA_BPTC_UNORM_ARB},
+    {AbstractTextureFormat::D16, GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT16},
+    {AbstractTextureFormat::D24_S8, GL_DEPTH24_STENCIL8, GL_DEPTH24_STENCIL8},
+    {AbstractTextureFormat::D32F, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT32F},
+    {AbstractTextureFormat::D32F_S8, GL_DEPTH32F_STENCIL8, GL_DEPTH32F_STENCIL8},
+}};
+
+// Staging copies: both rectangles have the same size and lie inside their images.
+bool SameSize(const MathUtil::Rectangle<int>& a, const MathUtil::Rectangle<int>& b)
+{
+  return a.GetWidth() == b.GetWidth() && a.GetHeight() == b.GetHeight();
+}
+
+bool Inside(const MathUtil::Rectangle<int>& rect, const TextureConfig& image)
+{
+  if (rect.left < 0 || rect.top < 0)
+    return false;
+  return static_cast<u32>(rect.right) <= image.width &&
+         static_cast<u32>(rect.bottom) <= image.height;
+}
+}  // namespace
+
 GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
 {
-  switch (format)
+  for (const FormatNames& entry : FORMAT_NAMES)
   {
-  case AbstractTextureFormat::RGBA8:
-    return storage ? GL_RGBA8 : GL_RGBA;
-  case AbstractTextureFormat::BGRA8:
-    return storage ? GL_RGBA8 : GL_BGRA;
-  case AbstractTextureFormat::RGB10_A2:
-    return GL_RGB10_A2;
-  case AbstractTextureFormat::RGBA16F:
-    return GL_RGBA16F;
-  case AbstractTextureFormat::R16:
-    return GL_R16;
-  case AbstractTextureFormat::R32F:
-    return GL_R32F;
-  case AbstractTextureFormat::DXT1:
-    return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
-  case AbstractTextureFormat::DXT3:
-    return GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
-  case AbstractTextureFormat::DXT5:
-    return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-  case AbstractTextureFormat::BPTC:
-    return GL_COMPRESSED_RGBA_BPTC_UNORM_ARB;
-  case AbstractTextureFormat::D16:
-    return GL_DEPTH_COMPONENT16;
-  case AbstractTextureFormat::D24_S8:
-    return GL_DEPTH24_STENCIL8;
-  case AbstractTextureFormat::D32F:
-    return GL_DEPTH_COMPONENT32F;
-  case AbstractTextureFormat::D32F_S8:
-    return GL_DEPTH32F_STENCIL8;
-  default:
-    PanicAlertFmt("Unhandled texture format.");
-    return storage ? GL_RGBA8 : GL_RGBA;
+    if (entry.format == format)
+      return storage ? entry.sized : entry.unsized;
   }
+  PanicAlertFmt("Unhandled texture format.");
+  return storage ? GL_RGBA8 : GL_RGBA;
 }
 
 GLenum OGLTexture::GetGLFormatForImageTexture() const
@@ -456,13 +477,10 @@ void OGLStagingTexture::CopyFromTexture(const AbstractTexture* src,
                                         const MathUtil::Rectangle<int>& src_rect, u32 src_layer,
                                         u32 src_level, const MathUtil::Rectangle<int>& dst_rect)
 {
-  ASSERT(m_type == StagingTextureType::Readback || m_type == StagingTextureType::Mutable);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= src->GetConfig().width &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= src->GetConfig().height);
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= m_config.width &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= m_config.height);
+  ASSERT(m_type != StagingTextureType::Upload);
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(Inside(src_rect, src->GetConfig()));
+  ASSERT(Inside(dst_rect, m_config));
 
   const bool persistent = PersistentStaging();
 
@@ -530,13 +548,10 @@ void OGLStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect,
                                       const MathUtil::Rectangle<int>& dst_rect, u32 dst_layer,
                                       u32 /*dst_level*/)
 {
-  ASSERT(m_type == StagingTextureType::Upload || m_type == StagingTextureType::Mutable);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= m_config.width &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= m_config.height);
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= dst->GetConfig().width &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= dst->GetConfig().height);
+  ASSERT(m_type != StagingTextureType::Readback);
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(Inside(src_rect, m_config));
+  ASSERT(Inside(dst_rect, dst->GetConfig()));
 
   const bool persistent = PersistentStaging();
   const auto* texture = static_cast<const OGLTexture*>(dst);
@@ -629,14 +644,13 @@ void OGLStagingTexture::Unmap()
 // ---------------------------------------------------------------------------------------------
 // OGLFramebuffer
 
-OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                               std::vector<AbstractTexture*> additional_color_attachments,
+OGLFramebuffer::OGLFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                               std::vector<AbstractTexture*> more_colors,
                                AbstractTextureFormat color_format,
                                AbstractTextureFormat depth_format, u32 width, u32 height,
                                u32 layers, u32 samples, GLuint fbo)
-    : AbstractFramebuffer(color_attachment, depth_attachment,
-                          std::move(additional_color_attachments), color_format, depth_format,
-                          width, height, layers, samples),
+    : AbstractFramebuffer(color, depth, std::move(more_colors), color_format, depth_format, width,
+                          height, layers, samples),
       m_fbo(fbo)
 {
 }
@@ -646,20 +660,17 @@ OGLFramebuffer::~OGLFramebuffer()
   glDeleteFramebuffers(1, &m_fbo);
 }
 
-std::unique_ptr<OGLFramebuffer>
-OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachment,
-                       std::vector<AbstractTexture*> additional_color_attachments)
+std::unique_ptr<OGLFramebuffer> OGLFramebuffer::Create(OGLTexture* color, OGLTexture* depth,
+                                                       std::vector<AbstractTexture*> more_colors)
 {
-  if (!ValidateConfig(color_attachment, depth_attachment, additional_color_attachments))
+  if (!ValidateConfig(color, depth, more_colors))
     return nullptr;
 
-  const OGLTexture* sizing = color_attachment != nullptr ? color_attachment : depth_attachment;
-  const AbstractTextureFormat color_format = color_attachment != nullptr ?
-                                                 color_attachment->GetFormat() :
-                                                 AbstractTextureFormat::Undefined;
-  const AbstractTextureFormat depth_format = depth_attachment != nullptr ?
-                                                 depth_attachment->GetFormat() :
-                                                 AbstractTextureFormat::Undefined;
+  const OGLTexture* sizing = color != nullptr ? color : depth;
+  const AbstractTextureFormat color_format =
+      color != nullptr ? color->GetFormat() : AbstractTextureFormat::Undefined;
+  const AbstractTextureFormat depth_format =
+      depth != nullptr ? depth->GetFormat() : AbstractTextureFormat::Undefined;
 
   GLuint fbo = 0;
   glGenFramebuffers(1, &fbo);
@@ -667,20 +678,20 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
 
   // Colour outputs in order: the main colour attachment, then the additional ones.
   std::vector<GLenum> draw_buffers;
-  if (color_attachment != nullptr)
+  if (color != nullptr)
   {
-    AttachToFramebuffer(GL_COLOR_ATTACHMENT0, color_attachment);
+    AttachToFramebuffer(GL_COLOR_ATTACHMENT0, color);
     draw_buffers.push_back(GL_COLOR_ATTACHMENT0);
   }
-  if (depth_attachment != nullptr)
+  if (depth != nullptr)
   {
     AttachToFramebuffer(AbstractTexture::IsStencilFormat(depth_format) ?
                             GL_DEPTH_STENCIL_ATTACHMENT :
                             GL_DEPTH_ATTACHMENT,
-                        depth_attachment);
+                        depth);
   }
   GLenum next_output = GL_COLOR_ATTACHMENT1;
-  for (AbstractTexture* extra : additional_color_attachments)
+  for (AbstractTexture* extra : more_colors)
   {
     AttachToFramebuffer(next_output, static_cast<const OGLTexture*>(extra));
     draw_buffers.push_back(next_output);
@@ -691,8 +702,7 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
   DEBUG_ASSERT(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
   GetOGLGfx()->RestoreFramebufferBinding();
 
-  return std::make_unique<OGLFramebuffer>(color_attachment, depth_attachment,
-                                          std::move(additional_color_attachments), color_format,
+  return std::make_unique<OGLFramebuffer>(color, depth, std::move(more_colors), color_format,
                                           depth_format, sizing->GetWidth(), sizing->GetHeight(),
                                           sizing->GetLayers(), sizing->GetSamples(), fbo);
 }

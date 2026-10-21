@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -73,33 +74,16 @@ u32 UboAlign()
   return static_cast<u32>(ProgramShaderCache::GetUniformBufferAlignment());
 }
 
-std::string_view VersionDirective(GlslVersion version)
+// The #version line for each GlslVersion, in enum order.
+constexpr std::array<std::string_view, 10> VERSION_LINES{
+    "#version 130", "#version 140", "#version 150",    "#version 330",    "#version 400",
+    "#version 430", "#version 450", "#version 300 es", "#version 310 es", "#version 320 es",
+};
+
+std::string VersionDirective(GlslVersion version)
 {
-  switch (version)
-  {
-  case Glsl130:
-    return "#version 130";
-  case Glsl140:
-    return "#version 140";
-  case Glsl150:
-    return "#version 150";
-  case Glsl330:
-    return "#version 330";
-  case Glsl400:
-    return "#version 400";
-  case Glsl430:
-    return "#version 430";
-  case Glsl450:
-    return "#version 450";
-  case GlslEs300:
-    return "#version 300 es";
-  case GlslEs310:
-    return "#version 310 es";
-  case GlslEs320:
-    return "#version 320 es";
-  default:
-    return "#version ERROR";
-  }
+  const auto index = static_cast<size_t>(version);
+  return std::string(index < VERSION_LINES.size() ? VERSION_LINES[index] : "#version ERROR");
 }
 
 const char* StagePrefix(GLenum type)
@@ -139,6 +123,26 @@ template <typename GetLog> std::string ReadInfoLog(GLuint id, GLsizei length, Ge
 std::string VersionedExtension(bool wanted, const char* line)
 {
   return wanted ? std::string(line) : std::string();
+}
+// Programs are linked against the current state, so a worker context gets the same fixed state
+// the main context runs with (see OGLGfx). The driver is then less likely to recompile a
+// program the first time it is used for drawing.
+void MirrorMainContextState(GLContext* context)
+{
+  const auto& info = g_backend_info;
+  if (!context->IsGLES())
+    glEnable(GL_PROGRAM_POINT_SIZE);
+  if (info.bSupportsClipControl)
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+  if (info.bSupportsDepthClamp)
+  {
+    constexpr std::array<GLenum, 3> CLAMP_CAPS{GL_CLIP_DISTANCE0, GL_CLIP_DISTANCE1,
+                                               GL_DEPTH_CLAMP};
+    for (const GLenum cap : CLAMP_CAPS)
+      glEnable(cap);
+  }
+  if (info.bSupportsPrimitiveRestart)
+    GLUtil::EnablePrimitiveRestart(context);
 }
 }  // namespace
 
@@ -812,7 +816,7 @@ void ProgramShaderCache::CreateHeader()
 
   // One entry per line of the header, in order; empty entries still produce their line.
   const std::array<std::string, 27> lines{
-      std::string(VersionDirective(version)),
+      VersionDirective(version),
       VersionedExtension(version < Glsl140, "#extension GL_ARB_uniform_buffer_object : enable"),
       early_z,
       VersionedExtension(info.bSupportsBindingLayout && version < GlslEs310,
@@ -859,19 +863,23 @@ void ProgramShaderCache::CreateHeader()
     header += line;
     header += '\n';
   }
-  // HLSL-style names that the shared shader generators use.
-  header += "#define API_OPENGL 1\n"
-            "#define float2 vec2\n"
-            "#define float3 vec3\n"
-            "#define float4 vec4\n"
-            "#define uint2 uvec2\n"
-            "#define uint3 uvec3\n"
-            "#define uint4 uvec4\n"
-            "#define int2 ivec2\n"
-            "#define int3 ivec3\n"
-            "#define int4 ivec4\n"
-            "#define frac fract\n"
-            "#define lerp mix\n";
+  // The shared generators write HLSL-style type and function names; map them to GLSL.
+  header += "#define API_OPENGL 1\n";
+  constexpr std::array<std::pair<const char*, const char*>, 11> ALIASES{{
+      {"float2", "vec2"},
+      {"float3", "vec3"},
+      {"float4", "vec4"},
+      {"uint2", "uvec2"},
+      {"uint3", "uvec3"},
+      {"uint4", "uvec4"},
+      {"int2", "ivec2"},
+      {"int3", "ivec3"},
+      {"int4", "ivec4"},
+      {"frac", "fract"},
+      {"lerp", "mix"},
+  }};
+  for (const auto& [hlsl, glsl] : ALIASES)
+    header += fmt::format("#define {} {}\n", hlsl, glsl);
   s_glsl_header = std::move(header);
 }
 
@@ -880,16 +888,15 @@ void ProgramShaderCache::CreateHeader()
 
 bool SharedContextAsyncShaderCompiler::WorkerThreadInitMainThread(void** param)
 {
-  // Shared contexts must be created on the thread that owns the main context.
-  std::unique_ptr<GLContext> worker_context =
-      GetOGLGfx()->GetMainGLContext()->CreateSharedContext();
-  if (worker_context == nullptr)
-  {
-    PanicAlertFmt("Failed to create shared context for shader compiling.");
-    return false;
-  }
-  *param = worker_context.release();
-  return true;
+  // Shared contexts must be created on the thread that owns the main context. The worker
+  // takes ownership of the raw pointer and deletes it in WorkerThreadExit.
+  GLContext* const worker_context =
+      GetOGLGfx()->GetMainGLContext()->CreateSharedContext().release();
+  *param = worker_context;
+  if (worker_context != nullptr)
+    return true;
+  PanicAlertFmt("Failed to create shared context for shader compiling.");
+  return false;
 }
 
 bool SharedContextAsyncShaderCompiler::WorkerThreadInitWorkerThread(void* param)
@@ -897,23 +904,8 @@ bool SharedContextAsyncShaderCompiler::WorkerThreadInitWorkerThread(void* param)
   auto* const worker_context = static_cast<GLContext*>(param);
   if (!worker_context->MakeCurrent())
     return false;
-
   s_is_shared_context = true;
-
-  // Programs are linked against state; matching the main context's state makes it more likely
-  // the driver will not recompile them when they are first used there.
-  if (!worker_context->IsGLES())
-    glEnable(GL_PROGRAM_POINT_SIZE);
-  if (g_backend_info.bSupportsClipControl)
-    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
-  if (g_backend_info.bSupportsDepthClamp)
-  {
-    glEnable(GL_CLIP_DISTANCE0);
-    glEnable(GL_CLIP_DISTANCE1);
-    glEnable(GL_DEPTH_CLAMP);
-  }
-  if (g_backend_info.bSupportsPrimitiveRestart)
-    GLUtil::EnablePrimitiveRestart(worker_context);
+  MirrorMainContextState(worker_context);
   return true;
 }
 

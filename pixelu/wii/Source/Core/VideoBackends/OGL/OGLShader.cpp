@@ -2,6 +2,7 @@
 
 #include "VideoBackends/OGL/OGLShader.h"
 
+#include <array>
 #include <cctype>
 #include <sstream>
 #include <string>
@@ -92,20 +93,14 @@ std::string ExpandIncludes(glslang::TShader::Includer* includer, std::string_vie
   return expanded;
 }
 
+// GL shader object types, indexed by ShaderStage.
+constexpr std::array<GLenum, 4> GL_SHADER_TYPES{GL_VERTEX_SHADER, GL_GEOMETRY_SHADER,
+                                                GL_FRAGMENT_SHADER, GL_COMPUTE_SHADER};
+
 GLenum StageToGLType(ShaderStage stage)
 {
-  switch (stage)
-  {
-  case ShaderStage::Vertex:
-    return GL_VERTEX_SHADER;
-  case ShaderStage::Geometry:
-    return GL_GEOMETRY_SHADER;
-  case ShaderStage::Pixel:
-    return GL_FRAGMENT_SHADER;
-  case ShaderStage::Compute:
-    return GL_COMPUTE_SHADER;
-  }
-  return 0;
+  const auto index = static_cast<size_t>(stage);
+  return index < GL_SHADER_TYPES.size() ? GL_SHADER_TYPES[index] : 0;
 }
 }  // namespace
 

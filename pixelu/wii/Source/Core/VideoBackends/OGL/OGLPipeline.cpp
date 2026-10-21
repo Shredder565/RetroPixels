@@ -2,6 +2,7 @@
 
 #include "VideoBackends/OGL/OGLPipeline.h"
 
+#include <array>
 #include <cstring>
 #include <utility>
 
@@ -14,20 +15,13 @@ namespace OGL
 {
 namespace
 {
+// GL draw modes, indexed by PrimitiveType.
+constexpr std::array<GLenum, 4> GL_PRIMITIVES{GL_POINTS, GL_LINES, GL_TRIANGLES, GL_TRIANGLE_STRIP};
+
 GLenum PrimitiveMode(PrimitiveType primitive)
 {
-  switch (primitive)
-  {
-  case PrimitiveType::Points:
-    return GL_POINTS;
-  case PrimitiveType::Lines:
-    return GL_LINES;
-  case PrimitiveType::Triangles:
-    return GL_TRIANGLES;
-  case PrimitiveType::TriangleStrip:
-    return GL_TRIANGLE_STRIP;
-  }
-  return 0;
+  const auto index = static_cast<size_t>(primitive);
+  return index < GL_PRIMITIVES.size() ? GL_PRIMITIVES[index] : 0;
 }
 }  // namespace
 

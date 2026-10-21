@@ -284,32 +284,33 @@ bool OGLGfx::IsGLES() const
 // ---------------------------------------------------------------------------------------------
 // Object creation
 
-std::unique_ptr<AbstractTexture> OGLGfx::CreateTexture(const TextureConfig& config,
-                                                       std::string_view name)
+// The objects themselves do the GL work; these just pick the GL implementation.
+std::unique_ptr<AbstractTexture> OGLGfx::CreateTexture(const TextureConfig& tex_config,
+                                                       std::string_view label)
 {
-  return std::make_unique<OGLTexture>(config, name);
-}
-
-std::unique_ptr<AbstractStagingTexture> OGLGfx::CreateStagingTexture(StagingTextureType type,
-                                                                     const TextureConfig& config)
-{
-  return OGLStagingTexture::Create(type, config);
-}
-
-std::unique_ptr<AbstractFramebuffer>
-OGLGfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                          std::vector<AbstractTexture*> additional_color_attachments)
-{
-  return OGLFramebuffer::Create(static_cast<OGLTexture*>(color_attachment),
-                                static_cast<OGLTexture*>(depth_attachment),
-                                std::move(additional_color_attachments));
+  return std::make_unique<OGLTexture>(tex_config, label);
 }
 
 std::unique_ptr<AbstractShader>
-OGLGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
-                               VideoCommon::ShaderIncluder* shader_includer, std::string_view name)
+OGLGfx::CreateShaderFromSource(ShaderStage shader_stage, std::string_view code,
+                               VideoCommon::ShaderIncluder* includer, std::string_view label)
 {
-  return OGLShader::CreateFromSource(stage, source, shader_includer, name);
+  return OGLShader::CreateFromSource(shader_stage, code, includer, label);
+}
+
+std::unique_ptr<AbstractStagingTexture>
+OGLGfx::CreateStagingTexture(StagingTextureType kind, const TextureConfig& tex_config)
+{
+  return OGLStagingTexture::Create(kind, tex_config);
+}
+
+std::unique_ptr<AbstractFramebuffer> OGLGfx::CreateFramebuffer(AbstractTexture* color,
+                                                               AbstractTexture* depth,
+                                                               std::vector<AbstractTexture*> extra)
+{
+  auto* const gl_color = static_cast<OGLTexture*>(color);
+  auto* const gl_depth = static_cast<OGLTexture*>(depth);
+  return OGLFramebuffer::Create(gl_color, gl_depth, std::move(extra));
 }
 
 std::unique_ptr<AbstractShader> OGLGfx::CreateShaderFromBinary(ShaderStage, const void*, size_t,
