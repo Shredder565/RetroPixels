@@ -14,7 +14,6 @@ package main
 // command line are in internal/supermodel.
 
 import (
-	"bufio"
 	"errors"
 	"net/http"
 	"os"
@@ -37,12 +36,7 @@ var (
 )
 
 // supermodelHome is the player's Supermodel folder (SUPERMODEL_HOME).
-func supermodelHome() string {
-	if d := os.Getenv("RETRO_SUPERMODEL_HOME"); d != "" { // tests
-		return d
-	}
-	return filepath.Join(configDir(), "Supermodel")
-}
+func supermodelHome() string { return supermodel.Home(configDir()) }
 
 func supermodelExe() string {
 	cfgMu.Lock()
@@ -61,36 +55,18 @@ func supermodelExe() string {
 // ROM set), the ROM folders next to RetroPixels and Supermodel, and the
 // usual places for downloads.
 func supermodelFolders() []string {
-	var out []string
-	add := func(p ...string) {
-		for _, d := range p {
-			if d != "" && !containsFold(out, d) {
-				out = append(out, d)
-			}
-		}
-	}
 	mc := mame.Load()
-	add(mc.Folders...)
-	add(mame.BundleRoms())
-	if exe := supermodelExe(); exe != "" {
-		add(filepath.Join(filepath.Dir(exe), "ROMs"))
-	}
+	appDir, home := "", ""
 	if exe, err := os.Executable(); err == nil {
-		d := filepath.Dir(exe)
-		add(filepath.Join(d, "ROMs"), filepath.Join(d, "roms"))
+		appDir = filepath.Dir(exe)
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		home = h
 	}
 	cfgMu.Lock()
-	add(cfg.PixelUFolders...)
-	add(cfg.DolphinFolders...)
+	extra := append(append([]string(nil), cfg.PixelUFolders...), cfg.DolphinFolders...)
 	cfgMu.Unlock()
-	if home, err := os.UserHomeDir(); err == nil {
-		// The desktop's own Downloads, Desktop and Documents (on Linux they
-		// can have other names; see dolphin.UserFolder).
-		add(dolphin.DownloadDirs(home)...)
-		add(dolphin.UserFolder(home, "Desktop"), dolphin.UserFolder(home, "Documents"),
-			filepath.Join(home, "ROMs"), filepath.Join(home, "roms"))
-	}
-	return out
+	return supermodel.SearchFolders(append(append([]string(nil), mc.Folders...), mame.BundleRoms()), supermodelExe(), appDir, home, extra)
 }
 
 // supermodelROM is the remembered game file and what's in it ("" when
@@ -127,13 +103,8 @@ func supermodelFind(force bool) {
 	smFinding = true
 	smMu.Unlock()
 	go func() {
-		p, c := supermodel.FindROM(supermodelFolders())
-		if !c.OK {
-			// Not in the usual places: look through each drive's game folders.
-			if q, d := supermodel.FindROMOnDrives(dolphin.WiiKeysScanRoots()); q != "" && (d.OK || p == "") {
-				p, c = q, d
-			}
-		}
+		// Not in the usual places: each drive's game folders are looked through.
+		p, c := supermodel.Find(supermodelFolders(), dolphin.WiiKeysScanRoots())
 		cfgMu.Lock()
 		cur := cfg.SupermodelROM
 		cfgMu.Unlock()
@@ -176,15 +147,6 @@ func supermodelFullscreenOn() bool {
 
 // supermodelFlightOn: the Xbox thumbstick feels like a flight stick (on
 // unless the player turned it off).
-// smoothName: the flight stick smoothing in use (DefaultSmoothness when none
-// or an unknown one is saved).
-func smoothName(s string) string {
-	if _, ok := supermodel.Smoothness[s]; ok {
-		return s
-	}
-	return supermodel.DefaultSmoothness
-}
-
 func supermodelFlightOn() bool { return cfg.SupermodelPadStick == nil || !*cfg.SupermodelPadStick }
 
 func supermodelEmbedOn() bool { return cfg.SupermodelDock != nil && *cfg.SupermodelDock }
@@ -288,7 +250,7 @@ func launchSupermodel() error {
 		if ran > 20*time.Second {
 			return // it played
 		}
-		why := supermodel.Problem(out.String() + "\n" + logErrors(logFile))
+		why := supermodel.Problem(out.String() + "\n" + supermodel.LogErrors(logFile))
 		if why == "" {
 			if err == nil {
 				return
@@ -315,27 +277,6 @@ func launchSupermodel() error {
 var errNoSupermodelROM = errors.New("RetroPixels hasn't found Star Wars Trilogy Arcade yet (swtrilgya.zip or swtrilgy.zip). " +
 	"Click \"Choose the game file…\" to pick it")
 
-// logErrors: the error lines of Supermodel's log (it writes why a game
-// didn't start there as well as to its console).
-func logErrors(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	var lines []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if l := sc.Text(); strings.Contains(strings.ToLower(l), "error") {
-			lines = append(lines, l)
-		}
-	}
-	if len(lines) > 20 {
-		lines = lines[len(lines)-20:]
-	}
-	return strings.Join(lines, "\n")
-}
-
 // supermodelVersion: the first line of VERSION.txt next to it.
 func supermodelVersion(exe string) string {
 	b, err := os.ReadFile(filepath.Join(filepath.Dir(exe), "VERSION.txt"))
@@ -351,7 +292,7 @@ func supermodelStatus() map[string]any {
 	rom, c := supermodelROM()
 	cfgMu.Lock()
 	st := map[string]any{"fullscreen": supermodelFullscreenOn(), "embed": supermodelEmbedOn(), "wide": cfg.SupermodelWide,
-		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "smooth": smoothName(cfg.SupermodelSmooth), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
+		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "smooth": supermodel.SmoothnessName(cfg.SupermodelSmooth), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
 	cfgMu.Unlock()
 	smMu.Lock()
 	st["finding"], st["searched"], st["problem"] = smFinding, smSearched, smProblem
