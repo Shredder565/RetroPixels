@@ -1,0 +1,150 @@
+- B2 log: replaced Dolphin's Sys data with PixelU-Wii's own where the
+  program can do without Dolphin's copy, and made the build ship only that
+  plus a short third-party list. Sys in the package is now 2091 files: 187
+  of PixelU-Wii's own (`pixelu/wii/Data/Sys`) and 1904 third-party
+  (GameSettings is most of them). The exe name (PixelU-Wii.exe) and the
+  PixelU\wii\ package layout are unchanged.
+  - Clean room: Dolphin's Sys files and the code that reads them were
+    opened only to learn what each file must contain (names, formats,
+    sizes, which uniforms and options a shader gets, which icon names the
+    program asks for). Every new file was written fresh or is made by a
+    new generator; no body or comment was copied. No Nintendo keys, BIOS,
+    firmware, DSP ROMs or games were added.
+  - Themes (`Sys/Themes/PixelU`, 96 PNGs at 1x, 2x and 4x): one own icon
+    theme of 32 icons, drawn by `pixelu/wii/art/make_art.py` with the
+    other art. `DEFAULT_THEME_DIR` is now "PixelU" (`Common/CommonPaths.h`).
+    `Resources::GetThemeIcon` falls back, icon by icon, to the bundled
+    theme when the chosen theme folder does not exist or lacks the icon,
+    so a config that still names "Clean" or any other theme shows the
+    PixelU icons. The help text in the Interface pane says "If unsure,
+    select PixelU."
+  - Shaders (`Sys/Shaders`): own `default_pre_post_process.glsl` (the
+    resampling modes 0 to 6 in linear light, clamped to the source
+    rectangle; the NTSC-M and PAL gamut rows computed from their
+    primaries; an own NTSC-J matrix from SMPTE-C primaries and the
+    9300K+27MPCD white point (0.2838, 0.2984), with no chromatic
+    adaptation; HDR paper white; sRGB or custom gamma encoding), the
+    shaders asked for by name (`Anaglyph/dubois.glsl` with Dubois'
+    published coefficients, cited; `Passive/horizontal.glsl`), and a few
+    own extras: `Anaglyph/red_cyan`, `AutoHDR`, `grayscale`, `sepia`,
+    `scanlines`, `sharpen`.
+  - Profiles (`Sys/Profiles`): own `GCPad/SDL Gamepad.ini` (positional
+    face buttons) and `Wiimote/Wii Remote with MotionPlus Pointing.ini`,
+    using the input names PixelU-Wii's SDL and Wii Remote backends give.
+  - WiiConnect24 NAND defaults (`Sys/Wii/shared2/wc24`), made by the new
+    `pixelu/wii/Data/make_wc24.py`: `nwc24msg.cfg` and `.cbk` in the
+    initial state with no Wii ID, no password and no mlchkid (the same
+    state the program's own config reset writes), `nwc24dl.bin` with its
+    120 empty entries, `nwc24fl.bin`, and the empty send and receive
+    mailboxes (`mbox/*.ctl` with the free-entry chain, `mbox/*.mbx` with
+    the VFF header and the start of a FAT12 table for send, FAT16 for
+    receive). `misc.bin`, `nwc24fls.bin` and `mbox/Readme.txt` are no
+    longer shipped; nothing reads them from Sys.
+  - IPL fonts (`Sys/GC/font_western.bin`, `font_japanese.bin`), made by
+    the new `pixelu/wii/Data/make_ipl_fonts.py` from Noto Sans Regular
+    and Noto Sans JP Regular (SIL OFL 1.1; the script pins their SHA-256
+    and needs the two .ttf paths). It writes the boot ROM font format
+    (header, 2bpp 8x8 tiles, 21x21 cells of 24 pixels on 512x512 sheets)
+    and compresses it with its own Yay0 encoder. The Japanese glyph order
+    is worked out from the Shift JIS codecs. 7136 and 274412 bytes, under
+    the size limits the loader checks; unpacked they are the sizes the
+    loader expects. `Sys/GC/font-licenses.txt` names the fonts and carries
+    the OFL text.
+  - Sys assembly: the new `pixelu/wii/CMake/PixelUAssembleSys.cmake` runs
+    after the build (from `Core/DolphinQt/CMakeLists.txt`) and makes
+    Binaries/Sys from the third-party list it names (GameSettings,
+    ApprovedInis.json, wiitdb-*.txt, triforcetdb-*.txt, the OSD font and
+    its copyright file, codehandler.bin, GC/dsp_rom.bin and
+    GC/dsp_coef.bin, all from Dolphin's Data/Sys) with
+    `pixelu/wii/Data/Sys` over it, plus an empty Load/GraphicMods folder.
+    Nothing else of Dolphin's Data/Sys is copied.
+  - Package check: the new `pixelu/wii/Data/check_sys_package.py` checks a
+    packaged Sys file by file. Every file must be PixelU-Wii's own (same
+    bytes) or match the third-party list read from
+    PixelUAssembleSys.cmake (same bytes as Dolphin's copy). Every own file,
+    every file the program reads by name and GameSettings must be there.
+    Every icon the Qt code asks for (`GetThemeIcon` calls and the
+    `DEBUG_ICONS` lists) must be in the bundled theme, and no other theme
+    may be shipped. The workflow's "List package contents" step runs it
+    and fails on any problem; the old checks stay.
+  - COPYING: section 1 lists the own Sys data; section 3 now names only
+    what is not RetroPixels' own: GameSettings, ApprovedInis.json and
+    Languages (Dolphin community data), Dolphin's free DSP ROMs, the
+    GameTDB title lists (credited to GameTDB), the Gecko code handler and
+    the OSD font.
+  - codehandler.bin: `docs/codehandler.s` in Dolphin's tree is its source.
+    It carries an MIT licence, "Copyright (c) 2010-2017 Nuke, brkirch,
+    Y.S, Kenobi, gamemasterplc", and is based on Gecko OS's code handler.
+    It is third-party and is kept and credited as such.
+  - Checked:
+    - `make_art.py --check` (191 files, 0 differ; the B1 outputs are
+      byte for byte as before), `make_wc24.py --check` (8 files, 0
+      differ), `make_ipl_fonts.py --check` with the pinned Noto fonts
+      (both .bin files the same).
+    - The assembly script run on its own with CMake 3.28 over a Dolphin
+      2609a checkout: 2091 files. `check_sys_package.py` on that output:
+      0 problems, exit 0. On Dolphin's raw Data/Sys: 1332 problems
+      (other themes, shaders, GraphicMods, totaldb.dsy, WC24 files,
+      fonts), exit 1.
+    - Every shader compiled with glslangValidator through a scratch
+      harness that puts the Vulkan prelude, the builtin uniforms and the
+      option uniforms in front of it.
+    - The fonts: every glyph in both tables was rendered and compared with
+      the font's missing-glyph box. The two characters Noto lacks (U+203E
+      overline, U+2252 approximately equal) are drawn by the script; the
+      control-code cells are blank. The derived Shift JIS order matches
+      the order the loader expects except for the deliberate choices
+      below.
+    - The blank WC24 templates (mailbox control and VFF files,
+      nwc24fl.bin) come out byte for byte the same as Dolphin's: their
+      bytes are fixed by the format. nwc24msg.cfg and nwc24dl.bin differ.
+  - Deliberate differences:
+    - The Japanese font has the yen sign at 0x5C, ヵ, ヶ and ヴ, the
+      voiced katakana where Shift JIS puts them, and cp932's U+301F.
+    - The WC24 config has no account (no ID, password or mlchkid).
+    - The theme help text no longer names Clean; its translations in
+      Languages are now out of date for that one string.
+  - Lost by not shipping Dolphin's files:
+    - `totaldb.dsy`: the debugger's "Generate symbols from signature DB"
+      says the database is not found, and loading symbols for a game with
+      no map only finds unnamed functions. A user's own .dsy still works.
+    - `Load/GraphicMods`: the 58 stock per-game graphics mods (bloom,
+      depth of field, HUD removal and the like) are gone. User mods in the
+      User folder still work.
+    - Dolphin's other 45 post-processing shaders and its other 4 Clean
+      themes.
+    - The shared WC24 account: WiiConnect24 mail with Dolphin's shared
+      credentials no longer works out of the box; the console registers as
+      a new, unregistered one.
+  - Left as Dolphin's, and why:
+    - GameSettings, ApprovedInis.json and Languages: kept by the owner's
+      decision.
+    - GC/dsp_rom.bin and GC/dsp_coef.bin (Dolphin's free replacement
+      ROMs, not Nintendo's). An own IROM would have to reproduce the
+      ucode boot protocol and the mixing and GBA helper routines at their
+      fixed addresses. It can only be checked end to end with game ucode,
+      which this work has none of and may not ship. In dsp_coef, three of
+      the four tables are generated filters, but 23 entries are constants
+      the GBA ucode needs, which come from Nintendo's own DROM. An own
+      table would break GBA boot over the link cable under LLE, and
+      keeping those values would mean shipping Nintendo data. AX HLE also
+      reads dsp_coef.bin to resample, so any change alters every game's
+      audio, which could not be checked by ear here.
+    - Third-party, credited in COPYING: wiitdb-*.txt and
+      triforcetdb-*.txt (GameTDB), codehandler.bin (Gecko, MIT),
+      Resources/OSD_Font.ttf (Bitstream Vera Sans Mono).
+  - Found, not fixed (W19 code): the VFF reader picks FAT12 or FAT16 from
+    the volume size divided by the cluster size, so the 2 MB send mailbox,
+    FAT12 on a real Wii, is read as FAT16.
+  - Only CI can confirm:
+    - The C++ changes (Resources.cpp, CommonPaths.h, InterfacePane.cpp)
+      compile with MSVC.
+    - The Windows build runs the post-build assembly script, and the
+      package check passes in the workflow.
+    - The shaders compile on the D3D11, D3D12, OpenGL and Vulkan backends
+      (only Vulkan GLSL was checked here).
+    - The theme looks right in the running app, in light and dark style.
+    Not covered by CI either, and to be checked by hand: the fonts show
+    in GameCube games and the boot menu without a ROM dump, and the WC24
+    defaults work in games that use WiiConnect24 (for example Mario Kart
+    Wii's channel).
