@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@ class QDialogButtonBox;
 class QLabel;
 class QLineEdit;
 
+// Asks for one line of Gekko assembly and turns it into a 32-bit instruction word.
 class AssembleInstructionDialog : public QDialog
 {
   Q_OBJECT
@@ -20,17 +20,15 @@ public:
   u32 GetCode() const;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void BuildLayout();
+  void Reassemble();
 
-  void OnEditChanged();
+  u32 m_result_word;
+  u32 m_target_address;
 
-  u32 m_code;
-  u32 m_address;
-
-  QLineEdit* m_input_edit;
-  QLabel* m_error_loc_label;
-  QLabel* m_error_line_label;
-  QLabel* m_msg_label;
-  QDialogButtonBox* m_button_box;
+  QLineEdit* m_source_line = nullptr;
+  QLabel* m_status_label = nullptr;
+  QLabel* m_marked_line_label = nullptr;
+  QLabel* m_detail_label = nullptr;
+  QDialogButtonBox* m_dialog_buttons = nullptr;
 };

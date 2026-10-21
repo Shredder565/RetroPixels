@@ -1,132 +1,128 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/RegisterColumn.h"
 
-#include <cstring>
+#include <bit>
 #include <utility>
 
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 
 RegisterColumn::RegisterColumn(RegisterType type, std::function<u64()> get,
                                std::function<void(u64)> set)
-    : m_type(type), m_get_register(std::move(get)), m_set_register(std::move(set))
+    : m_kind(type), m_read(std::move(get)), m_write(std::move(set))
 {
   RefreshValue();
-  Update();
+  Redraw();
 
-  setFlags(m_set_register == nullptr ? flags() ^ Qt::ItemIsEditable :
-                                       Qt::ItemIsEditable | Qt::ItemIsEnabled);
+  // Read-only registers lose the (default) editable flag; writable ones are editable and enabled
+  // only.
+  if (m_write)
+    setFlags(Qt::ItemIsEditable | Qt::ItemIsEnabled);
+  else
+    setFlags(flags() ^ Qt::ItemIsEditable);
+
   setData(DATA_TYPE, static_cast<quint32>(type));
 }
 
 RegisterDisplay RegisterColumn::GetDisplay() const
 {
-  return m_display;
+  return m_format;
 }
 
 void RegisterColumn::SetDisplay(RegisterDisplay display)
 {
-  m_display = display;
-  Update();
-}
-
-void RegisterColumn::RefreshValue()
-{
-  QBrush brush = QPalette().brush(QPalette::Text);
-
-  if (m_value != m_get_register())
-  {
-    m_value = m_get_register();
-    brush.setColor(Qt::red);
-  }
-
-  setForeground(brush);
-
-  Update();
+  m_format = display;
+  Redraw();
 }
 
 u64 RegisterColumn::GetValue() const
 {
-  return m_value;
+  return m_shown;
+}
+
+void RegisterColumn::RefreshValue()
+{
+  // A value that changed since the last refresh is drawn in red.
+  QBrush colour = QPalette().brush(QPalette::Text);
+  const u64 current = m_read();
+  if (current != m_shown)
+  {
+    m_shown = current;
+    colour.setColor(Qt::red);
+  }
+  setForeground(colour);
+
+  Redraw();
 }
 
 void RegisterColumn::SetValue()
 {
-  u64 value = 0;
+  const QString typed = text();
+  bool ok = false;
+  u64 raw = 0;
 
-  bool valid = false;
-
-  switch (m_display)
+  switch (m_format)
   {
   case RegisterDisplay::Hex:
-    value = text().toULongLong(&valid, 16);
+    raw = typed.toULongLong(&ok, 16);
     break;
   case RegisterDisplay::SInt32:
-    value = text().toInt(&valid);
+    // Negative numbers sign-extend into the upper half.
+    raw = static_cast<u64>(static_cast<s64>(typed.toInt(&ok)));
     break;
   case RegisterDisplay::UInt32:
-    value = text().toUInt(&valid);
+    raw = typed.toUInt(&ok);
     break;
   case RegisterDisplay::Float:
-  {
-    float f = text().toFloat(&valid);
-    std::memcpy(&value, &f, sizeof(u32));
+    raw = std::bit_cast<u32>(typed.toFloat(&ok));
     break;
-  }
   case RegisterDisplay::Double:
-  {
-    double f = text().toDouble(&valid);
-    std::memcpy(&value, &f, sizeof(u64));
+    raw = std::bit_cast<u64>(typed.toDouble(&ok));
     break;
-  }
   }
 
-  if (!valid)
-    ModalMessageBox::critical(nullptr, QObject::tr("Error"), QObject::tr("Invalid input provided"));
+  if (ok)
+    m_write(raw);
   else
-    m_set_register(value);
+    ModalMessageBox::critical(nullptr, QObject::tr("Error"), QObject::tr("Invalid input provided"));
 
   RefreshValue();
 }
 
-void RegisterColumn::Update()
+int RegisterColumn::HexDigits() const
 {
-  QString text;
+  switch (m_kind)
+  {
+  case RegisterType::ibat:
+  case RegisterType::dbat:
+  case RegisterType::fpr:
+  case RegisterType::tb:
+    return 16;
+  default:
+    return 8;
+  }
+}
 
-  switch (m_display)
+void RegisterColumn::Redraw()
+{
+  QString shown;
+  switch (m_format)
   {
   case RegisterDisplay::Hex:
-    text = QStringLiteral("%1").arg(m_value,
-                                    (m_type == RegisterType::ibat || m_type == RegisterType::dbat ||
-                                             m_type == RegisterType::fpr ||
-                                             m_type == RegisterType::tb ?
-                                         sizeof(u64) :
-                                         sizeof(u32)) *
-                                        2,
-                                    16, QLatin1Char('0'));
+    shown = QStringLiteral("%1").arg(m_shown, HexDigits(), 16, QLatin1Char('0'));
     break;
   case RegisterDisplay::SInt32:
-    text = QString::number(static_cast<qint32>(m_value));
+    shown = QString::number(static_cast<qint32>(m_shown));
     break;
   case RegisterDisplay::UInt32:
-    text = QString::number(static_cast<quint32>(m_value));
+    shown = QString::number(static_cast<quint32>(m_shown));
     break;
   case RegisterDisplay::Float:
-  {
-    float tmp;
-    std::memcpy(&tmp, &m_value, sizeof(float));
-    text = QString::number(tmp);
+    shown = QString::number(std::bit_cast<float>(static_cast<u32>(m_shown)));
     break;
-  }
   case RegisterDisplay::Double:
-  {
-    double tmp;
-    std::memcpy(&tmp, &m_value, sizeof(double));
-    text = QString::number(tmp);
+    shown = QString::number(std::bit_cast<double>(m_shown));
     break;
   }
-  }
-
-  setText(text);
+  setText(shown);
 }

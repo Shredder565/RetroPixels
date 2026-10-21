@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@ class QDialogButtonBox;
 class QLabel;
 class QLineEdit;
 
+// Takes either a raw hex word or one assembly instruction and previews the other form.
 class PatchInstructionDialog : public QDialog
 {
   Q_OBJECT
@@ -20,15 +20,12 @@ public:
   u32 GetCode() const;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void Reinterpret();
 
-  void OnEditChanged();
+  u32 m_word;
+  u32 m_where;
 
-  u32 m_code;
-  u32 m_address;
-
-  QLineEdit* m_input_edit;
-  QLabel* m_preview_label;
-  QDialogButtonBox* m_button_box;
+  QLineEdit* m_entry = nullptr;
+  QLabel* m_preview = nullptr;
+  QDialogButtonBox* m_dialog_buttons = nullptr;
 };

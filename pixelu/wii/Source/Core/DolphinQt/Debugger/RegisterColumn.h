@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,32 +8,34 @@
 
 #include "Common/CommonTypes.h"
 
+// What a register cell holds; stored in the cell under DATA_TYPE.
 enum class RegisterType
 {
-  gpr,         // General purpose registers, int (r0-r31)
-  fpr,         // Floating point registers, double (f0-f31)
-  ibat,        // Instruction BATs (IBAT0-IBAT7)
-  dbat,        // Data BATs (DBAT0-DBAT7)
-  tb,          // Time base register
-  pc,          // Program counter
-  lr,          // Link register
-  ctr,         // Decremented and incremented by branch and count instructions
-  cr,          // Condition register
-  xer,         // Integer exception register
-  fpscr,       // Floating point status and control register
-  msr,         // Machine state register
-  srr,         // Machine status save/restore register (SRR0 - SRR1)
-  sr,          // Segment register (SR0 - SR15)
-  gqr,         // Graphics quantization registers (GQR0 - GQR7)
-  hid,         // Hardware Implementation-Dependent registers (HID0-2, HID4)
-  exceptions,  // Keeps track of currently triggered exceptions
-  int_mask,    // ???
-  int_cause,   // ???
-  dsisr,       // Defines the cause of data / alignment exceptions
-  dar,         // Data address register
-  pt_hashmask  // ???
+  gpr,         // r0-r31
+  fpr,         // f0-f31 (paired-single slots shown as 64-bit)
+  ibat,        // IBAT0-7, upper and lower halves together
+  dbat,        // DBAT0-7, upper and lower halves together
+  tb,          // time base
+  pc,          // program counter
+  lr,          // link register
+  ctr,         // count register
+  cr,          // condition register
+  xer,         // fixed-point exception register
+  fpscr,       // floating-point status and control
+  msr,         // machine state
+  srr,         // SRR0/SRR1
+  sr,          // SR0-15
+  gqr,         // GQR0-7
+  hid,         // HID0, HID1, HID2, HID4
+  exceptions,  // pending exception flags
+  int_mask,    // processor interface interrupt mask
+  int_cause,   // processor interface interrupt cause
+  dsisr,       // DSISR
+  dar,         // DAR
+  pt_hashmask  // page table hash mask
 };
 
+// How a cell renders its value. The numbers are used as indexes by the register view's menu.
 enum class RegisterDisplay : int
 {
   Hex = 0,
@@ -46,6 +47,7 @@ enum class RegisterDisplay : int
 
 constexpr int DATA_TYPE = Qt::UserRole;
 
+// One editable table cell bound to a register through a getter and an optional setter.
 class RegisterColumn : public QTableWidgetItem
 {
 public:
@@ -60,13 +62,13 @@ public:
   void SetValue();
 
 private:
-  void Update();
+  void Redraw();
+  int HexDigits() const;
 
-  RegisterType m_type;
+  RegisterType m_kind;
+  std::function<u64()> m_read;
+  std::function<void(u64)> m_write;
 
-  std::function<u64()> m_get_register;
-  std::function<void(u64)> m_set_register;
-
-  u64 m_value = 0;
-  RegisterDisplay m_display = RegisterDisplay::Hex;
+  u64 m_shown = 0;
+  RegisterDisplay m_format = RegisterDisplay::Hex;
 };

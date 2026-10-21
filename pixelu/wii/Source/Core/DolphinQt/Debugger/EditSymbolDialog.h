@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 #include <string>
@@ -12,6 +11,7 @@ class QLineEdit;
 class QDialogButtonBox;
 class QSpinBox;
 
+// Edits the name and length of a symbol or note in place (through the pointers it is given).
 class EditSymbolDialog : public QDialog
 {
   Q_OBJECT
@@ -26,26 +26,25 @@ public:
   explicit EditSymbolDialog(QWidget* parent, const u32 symbol_address, u32* symbol_size,
                             std::string* symbol_name, Type type = Type::Symbol);
 
-  bool DeleteRequested() const { return m_delete_chosen; }
+  bool DeleteRequested() const { return m_wants_delete; }
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void FillFunctionData();
-  void UpdateAddressData(u32 size);
-  void Accepted();
+  void BuildLayout();
+  void WireUp();
+  void LoadFromTarget();
+  void ShowLength(u32 length);
+  void Commit();
 
-  QLineEdit* m_name_edit;
-  QSpinBox* m_size_lines_spin;
-  QLineEdit* m_size_hex_edit;
-  QLineEdit* m_address_end_edit;
+  QLineEdit* m_label_field = nullptr;
+  QSpinBox* m_line_count = nullptr;
+  QLineEdit* m_length_hex = nullptr;
+  QLineEdit* m_end_hex = nullptr;
+  QDialogButtonBox* m_dialog_buttons = nullptr;
 
-  QDialogButtonBox* m_buttons;
+  const Type m_kind;
+  std::string* const m_target_name;
+  u32* const m_target_size;
+  const u32 m_start;
 
-  Type m_type;
-  std::string* m_symbol_name;
-  u32* m_symbol_size;
-  const u32 m_symbol_address;
-
-  bool m_delete_chosen = false;
+  bool m_wants_delete = false;
 };

@@ -1,7 +1,11 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/AssembleInstructionDialog.h"
+
+#include <algorithm>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <QDialogButtonBox>
 #include <QFontDatabase>
@@ -15,115 +19,132 @@
 
 namespace
 {
-QString HtmlFormatErrorLoc(const Common::GekkoAssembler::AssemblerError& err)
+namespace GA = Common::GekkoAssembler;
+
+QString Escaped(std::string_view text)
 {
-  return QObject::tr("<span style=\"color: red; font-weight: bold\">Error</span> on line %1 col %2")
-      .arg(err.line + 1)
-      .arg(err.col + 1);
+  return QString::fromStdString(std::string(text)).toHtmlEscaped();
 }
 
-QString HtmlFormatErrorLine(const Common::GekkoAssembler::AssemblerError& err)
+// Splits the offending source line into the part before the error, the error itself and the rest,
+// and underlines the middle part in red.
+QString MarkErrorSpan(const GA::AssemblerError& error)
 {
-  const QString line_pre_error =
-      QString::fromStdString(std::string(err.error_line.substr(0, err.col))).toHtmlEscaped();
-  const QString line_error =
-      QString::fromStdString(std::string(err.error_line.substr(err.col, err.len))).toHtmlEscaped();
-  const QString line_post_error =
-      QString::fromStdString(std::string(err.error_line.substr(err.col + err.len))).toHtmlEscaped();
+  const std::string_view src = error.error_line;
+  const size_t from = std::min(error.col, src.size());
+  const size_t to = std::min(src.size(), from + std::min(error.len, src.size() - from));
 
+  const QString before = Escaped(src.substr(0, from));
+  const QString bad = Escaped(src.substr(from, to - from));
+  const QString after = Escaped(src.substr(to));
+
+  // Applied one after the other, like three separate substitutions.
   return QStringLiteral("%1<u><span style=\"color:red; font-weight:bold\">%2</span></u>%3")
-      .arg(line_pre_error)
-      .arg(line_error)
-      .arg(line_post_error);
+      .arg(before)
+      .arg(bad)
+      .arg(after);
+}
+
+QString ColouredWord(const char* colour, const QString& word)
+{
+  return QStringLiteral("<span style=\"color: %1; font-weight: bold\">%2</span>")
+      .arg(QString::fromLatin1(colour))
+      .arg(word);
+}
+
+QFont MonospaceFamily()
+{
+  return QFont(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
 }
 }  // namespace
 
 AssembleInstructionDialog::AssembleInstructionDialog(QWidget* parent, u32 address, u32 value)
-    : QDialog(parent), m_code(value), m_address(address)
+    : QDialog(parent), m_result_word(value), m_target_address(address)
 {
   setWindowModality(Qt::WindowModal);
   setWindowTitle(tr("Instruction"));
 
-  CreateWidgets();
-  ConnectWidgets();
+  BuildLayout();
+
+  connect(m_dialog_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+  connect(m_dialog_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(m_source_line, &QLineEdit::textChanged, this, &AssembleInstructionDialog::Reassemble);
 }
 
-void AssembleInstructionDialog::CreateWidgets()
+void AssembleInstructionDialog::BuildLayout()
 {
-  auto* layout = new QVBoxLayout;
+  m_source_line = new QLineEdit;
+  m_status_label = new QLabel;
+  m_marked_line_label = new QLabel;
+  m_detail_label = new QLabel(tr("No input"));
+  m_dialog_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
 
-  m_input_edit = new QLineEdit;
-  m_error_loc_label = new QLabel;
-  m_error_line_label = new QLabel;
-  m_msg_label = new QLabel(tr("No input"));
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  m_marked_line_label->setFont(MonospaceFamily());
+  m_source_line->setFont(MonospaceFamily());
 
-  m_error_line_label->setFont(QFont(QFontDatabase::systemFont(QFontDatabase::FixedFont).family()));
-  m_input_edit->setFont(QFont(QFontDatabase::systemFont(QFontDatabase::FixedFont).family()));
-  layout->addWidget(m_error_loc_label);
-  layout->addWidget(m_input_edit);
-  layout->addWidget(m_error_line_label);
-  layout->addWidget(m_msg_label);
-  layout->addWidget(m_button_box);
-  m_input_edit->setText(QStringLiteral(".4byte 0x%1").arg(m_code, 8, 16, QLatin1Char('0')));
+  auto* column = new QVBoxLayout;
+  for (QWidget* w : {static_cast<QWidget*>(m_status_label), static_cast<QWidget*>(m_source_line),
+                     static_cast<QWidget*>(m_marked_line_label),
+                     static_cast<QWidget*>(m_detail_label),
+                     static_cast<QWidget*>(m_dialog_buttons)})
+  {
+    column->addWidget(w);
+  }
 
-  setLayout(layout);
-  OnEditChanged();
+  // Start from the current word, written as a raw data directive.
+  m_source_line->setText(
+      QStringLiteral(".4byte 0x%1").arg(m_result_word, 8, 16, QLatin1Char('0')));
+
+  setLayout(column);
+  Reassemble();
 }
 
-void AssembleInstructionDialog::ConnectWidgets()
+void AssembleInstructionDialog::Reassemble()
 {
-  connect(m_button_box, &QDialogButtonBox::accepted, this, &QDialog::accept);
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  std::string source = m_source_line->text().toStdString();
+  Common::ToLower(&source);
 
-  connect(m_input_edit, &QLineEdit::textChanged, this, &AssembleInstructionDialog::OnEditChanged);
-}
+  const auto outcome = GA::Assemble(source, m_target_address);
+  QPushButton* const ok_button = m_dialog_buttons->button(QDialogButtonBox::Ok);
 
-void AssembleInstructionDialog::OnEditChanged()
-{
-  using namespace Common::GekkoAssembler;
-  std::string line = m_input_edit->text().toStdString();
-  Common::ToLower(&line);
-
-  FailureOr<std::vector<CodeBlock>> asm_result = Assemble(line, m_address);
-
-  if (IsFailure(asm_result))
+  if (GA::IsFailure(outcome))
   {
-    m_button_box->button(QDialogButtonBox::Ok)->setEnabled(false);
-
-    const AssemblerError& failure = GetFailure(asm_result);
-    m_error_loc_label->setText(HtmlFormatErrorLoc(failure));
-    m_error_line_label->setText(HtmlFormatErrorLine(failure));
-    m_msg_label->setText(QString::fromStdString(failure.message).toHtmlEscaped());
+    const GA::AssemblerError& error = GA::GetFailure(outcome);
+    ok_button->setEnabled(false);
+    m_status_label->setText(
+        tr("<span style=\"color: red; font-weight: bold\">Error</span> on line %1 col %2")
+            .arg(error.line + 1)
+            .arg(error.col + 1));
+    m_marked_line_label->setText(MarkErrorSpan(error));
+    m_detail_label->setText(QString::fromStdString(error.message).toHtmlEscaped());
+    return;
   }
-  else if (GetT(asm_result).empty() || GetT(asm_result)[0].instructions.empty())
+
+  const std::vector<GA::CodeBlock>& blocks = GA::GetT(outcome);
+  const bool nothing_emitted = blocks.empty() || blocks.front().instructions.empty();
+  ok_button->setEnabled(!nothing_emitted);
+  m_marked_line_label->clear();
+
+  if (nothing_emitted)
   {
-    m_button_box->button(QDialogButtonBox::Ok)->setEnabled(false);
-
-    m_error_loc_label->setText(
-        QStringLiteral("<span style=\"color: red; font-weight: bold\">%1</span>").arg(tr("Error")));
-    m_error_line_label->clear();
-    m_msg_label->setText(tr("No input"));
+    m_status_label->setText(ColouredWord("red", tr("Error")));
+    m_detail_label->setText(tr("No input"));
+    return;
   }
-  else
-  {
-    m_button_box->button(QDialogButtonBox::Ok)->setEnabled(true);
-    m_code = 0;
 
-    const std::vector<u8>& block_bytes = GetT(asm_result)[0].instructions;
-    for (size_t i = 0; i < 4 && i < block_bytes.size(); i++)
-    {
-      m_code = (m_code << 8) | block_bytes[i];
-    }
+  // Big-endian: the first emitted byte is the most significant one.
+  u32 word = 0;
+  const std::vector<u8>& bytes = blocks.front().instructions;
+  const size_t take = std::min<size_t>(bytes.size(), 4);
+  for (size_t n = 0; n < take; ++n)
+    word = (word << 8) | bytes[n];
+  m_result_word = word;
 
-    m_error_loc_label->setText(
-        QStringLiteral("<span style=\"color: green; font-weight: bold\">%1</span>").arg(tr("OK")));
-    m_error_line_label->clear();
-    m_msg_label->setText(tr("Instruction: %1").arg(m_code, 8, 16, QLatin1Char('0')));
-  }
+  m_status_label->setText(ColouredWord("green", tr("OK")));
+  m_detail_label->setText(tr("Instruction: %1").arg(m_result_word, 8, 16, QLatin1Char('0')));
 }
 
 u32 AssembleInstructionDialog::GetCode() const
 {
-  return m_code;
+  return m_result_word;
 }
