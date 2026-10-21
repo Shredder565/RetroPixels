@@ -1,12 +1,13 @@
 name: PixelU Wii (GameCube / Wii) test build
 
-# Builds PixelU's GameCube and Wii engine. The build tree is Dolphin 2609a
-# (GPL-2.0-or-later, the submodule in pixelu/wii/dolphin: top-level CMake,
-# Externals, Data) with its Source/ replaced by pixelu/wii/Source, the code
-# being rewritten (docs/pixelu-wii-original.md), and the patches in
-# pixelu/wii/patches applied to the files outside Source/. It is its own
-# program (PixelU-Wii.exe), separate from PixelU's Wii U part, and is
-# packaged as the PixelU\wii\ folder.
+# Builds PixelU's GameCube and Wii engine from pixelu/wii: PixelU-Wii's own
+# CMake build (pixelu/wii/CMakeLists.txt, CMake/, Externals/) and sources
+# (pixelu/wii/Source, docs/pixelu-wii-original.md). From the Dolphin 2609a
+# submodule in pixelu/wii/dolphin (GPL-2.0-or-later) it takes only the
+# third-party libraries in Externals/ (their own sources, plus the prebuilt
+# Qt and FFmpeg), the Sys data and the translations. It is its own program
+# (PixelU-Wii.exe), separate from PixelU's Wii U part, and is packaged as the
+# PixelU\wii\ folder.
 # The result is a workflow artifact only: no release is made.
 
 on:
@@ -29,7 +30,7 @@ concurrency:
 
 jobs:
   build-windows:
-    # Dolphin 2609a builds with Visual Studio 2026 (its CMake presets use the
+    # PixelU-Wii builds with Visual Studio 2026 (its CMake preset uses the
     # "Visual Studio 18 2026" generator and the v145 toolset), which is on
     # this image and not on windows-2022.
     runs-on: windows-2025-vs2026
@@ -58,77 +59,37 @@ jobs:
           }
           git -C $env:DOLPHIN_DIR log -1 --format="Dolphin at %H (%s)"
 
-      - name: Use PixelU's Source
-        shell: pwsh
-        run: |
-          # pixelu/wii/Source is Dolphin's Source/ as PixelU has it (the old
-          # Source/ patches already applied, files being replaced one by one
-          # with original code). Directories the Windows build never
-          # configures (Android, UnitTests, DSPSpy, DSPTool, MacUpdater,
-          # WinUpdater, DolphinNoGUI) are not in it.
-          $src = "$env:DOLPHIN_DIR/Source"
-          Remove-Item -Recurse -Force $src
-          if (Test-Path $src) { Write-Error "could not remove $src"; exit 1 }
-          Copy-Item -Recurse pixelu/wii/Source $src
-          "Source: $((Get-ChildItem -Recurse -File $src).Count) files"
-          # PixelU-Wii's own pictures (Sys/Resources) over Dolphin's Data/Sys, and
-          # its own COPYING and Licenses, so the build folder (which links to
-          # them) has the same files as the package.
-          $own = (Resolve-Path pixelu/wii/Data/Sys).Path
-          $n = 0
-          foreach ($f in Get-ChildItem -Recurse -File $own) {
-            $dst = Join-Path "$env:DOLPHIN_DIR/Data/Sys" ([IO.Path]::GetRelativePath($own, $f.FullName))
-            New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
-            Copy-Item -Force $f.FullName $dst
-            $n++
-          }
-          "Sys: $n files of PixelU-Wii's own put over Dolphin's"
-          Copy-Item -Force pixelu/wii/COPYING "$env:DOLPHIN_DIR/COPYING"
-          Remove-Item -Recurse -Force "$env:DOLPHIN_DIR/LICENSES"
-          Copy-Item -Recurse pixelu/wii/LICENSES "$env:DOLPHIN_DIR/LICENSES"
-
-      - name: Apply PixelU patches
-        shell: pwsh
-        run: |
-          # These touch only files outside Source/ (Source/ changes live in
-          # pixelu/wii/Source itself).
-          $patches = Get-ChildItem pixelu/wii/patches/*.patch | Sort-Object Name
-          foreach ($p in $patches) {
-            Write-Host "Applying $($p.Name)"
-            git -C $env:DOLPHIN_DIR apply --whitespace=nowarn $p.FullName
-            if ($LASTEXITCODE) { exit 1 }
-          }
-          # No commit or tag is needed: PixelU-Wii's version comes from
-          # RetroPixels (main.go and its git commit, Source/Core/Common/
-          # PixelUWiiVersion.cmake), not from Dolphin's tags.
+      # Nothing in the submodule is changed or overlaid: the build reads its
+      # Externals/, Data/Sys and Languages/ where they are. Binaries/Sys is
+      # assembled by the build (Dolphin's Data/Sys with pixelu/wii/Data/Sys
+      # over it), and COPYING and Licenses come from pixelu/wii. No commit or
+      # tag is needed: PixelU-Wii's version comes from RetroPixels (main.go
+      # and its git commit, Source/Core/Common/PixelUWiiVersion.cmake).
 
       - uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: "4.2.x"
 
       - name: Configure
-        working-directory: pixelu/wii/dolphin
+        working-directory: pixelu/wii
         shell: pwsh
         run: |
+          # Updater and analytics are off by default in PixelU-Wii's CMake.
           cmake --version
-          cmake --preset visualstudio-release-x64 `
-            -DUSE_SYSTEM_LIBS=OFF `
-            -DENABLE_AUTOUPDATE=OFF `
-            -DENABLE_ANALYTICS=OFF `
-            -DENABLE_TESTS=OFF
+          cmake --preset windows-x64-release
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Build
-        working-directory: pixelu/wii/dolphin
+        working-directory: pixelu/wii
         shell: pwsh
         run: |
-          cmake --build --preset visualstudio-build-release-x64 --target dolphin-emu --parallel
+          cmake --build --preset windows-x64-release --target dolphin-emu --parallel
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Package
         shell: pwsh
         run: |
-          $bin = "$env:DOLPHIN_DIR/build/release/x64/Binaries"
+          $bin = "pixelu/wii/build/windows-x64-release/Binaries"
           Get-ChildItem $bin | Format-Table Name, Length
           # Windows paths ignore case: "package/PixelU" is not the pixelu source folder.
           $out = "package/PixelU/wii"
@@ -138,16 +99,10 @@ jobs:
           Copy-Item "$bin/qt.conf" $out
           Copy-Item -Recurse "$bin/QtPlugins" "$out/QtPlugins"
           if (Test-Path "$bin/Languages") { Copy-Item -Recurse "$bin/Languages" "$out/Languages" }
-          # Sys, COPYING and Licenses are symlinks in the build folder: copy the real ones.
-          # Sys is Dolphin's Data/Sys with PixelU-Wii's own files from
-          # pixelu/wii/Data/Sys put over it (Sys/Resources: own pictures).
-          Copy-Item -Recurse "$env:DOLPHIN_DIR/Data/Sys" "$out/Sys"
-          $own = (Resolve-Path pixelu/wii/Data/Sys).Path
-          foreach ($f in Get-ChildItem -Recurse -File $own) {
-            $dst = Join-Path "$out/Sys" ([IO.Path]::GetRelativePath($own, $f.FullName))
-            New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
-            Copy-Item -Force $f.FullName $dst
-          }
+          # Sys was assembled by the build: Dolphin's Data/Sys with PixelU-Wii's
+          # own files from pixelu/wii/Data/Sys put over it (Sys/Resources: own
+          # pictures). COPYING and Licenses may be symlinks there: copy the real ones.
+          Copy-Item -Recurse "$bin/Sys" "$out/Sys"
           # COPYING is PixelU-Wii's own notice (who owns what, which licence
           # applies); license.txt is the full GPL text; Licenses has the
           # licence texts COPYING refers to.
@@ -186,7 +141,7 @@ jobs:
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
-            "Build tree, Externals and Sys data: Dolphin $env:DOLPHIN_TAG ($dsha) with the patches in pixelu/wii/patches"
+            "Built with PixelU-Wii's own CMake; third-party libraries (Externals), Sys data and translations from Dolphin $env:DOLPHIN_TAG ($dsha)"
             "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses\"
