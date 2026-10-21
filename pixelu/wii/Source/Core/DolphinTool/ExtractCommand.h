@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,5 +7,6 @@
 
 namespace DolphinTool
 {
+// "dolphin-tool extract": lists or extracts a disc image's partitions and files.
 int Extract(const std::vector<std::string>& args);
 }  // namespace DolphinTool

@@ -1,15 +1,20 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinTool/VerifyCommand.h"
 
 #include <cstdlib>
+#include <iostream>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <OptionParser.h>
+#include <fmt/format.h>
 #include <fmt/ostream.h>
 
+#include "Common/Assert.h"
+#include "Common/CommonTypes.h"
 #include "Core/AchievementManager.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeVerifier.h"
@@ -17,80 +22,73 @@
 
 namespace DolphinTool
 {
-static std::string HashToHexString(const std::vector<u8>& hash)
+namespace
 {
-  std::stringstream ss;
-  ss << std::hex;
-  for (int i = 0; i < static_cast<int>(hash.size()); ++i)
-  {
-    ss << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
-  }
-  return ss.str();
+using Verifier = DiscIO::VolumeVerifier;
+
+std::string ToHex(const std::vector<u8>& digest)
+{
+  std::string hex;
+  for (const u8 byte : digest)
+    hex += fmt::format("{:02x}", byte);
+  return hex;
 }
 
-static void PrintFullReport(const DiscIO::VolumeVerifier::Result& result)
+void PrintDigestLine(std::string_view name, const std::vector<u8>& digest)
 {
-  if (!result.hashes.crc32.empty())
-    fmt::print(std::cout, "CRC32: {}\n", HashToHexString(result.hashes.crc32));
+  if (digest.empty())
+    fmt::print(std::cout, "{} not computed\n", name);
   else
-    fmt::print(std::cout, "CRC32 not computed\n");
+    fmt::print(std::cout, "{}: {}\n", name, ToHex(digest));
+}
 
-  if (!result.hashes.md5.empty())
-    fmt::print(std::cout, "MD5: {}\n", HashToHexString(result.hashes.md5));
-  else
-    fmt::print(std::cout, "MD5 not computed\n");
+const char* SeverityName(Verifier::Severity severity)
+{
+  switch (severity)
+  {
+  case Verifier::Severity::None:
+    return "None";
+  case Verifier::Severity::Low:
+    return "Low";
+  case Verifier::Severity::Medium:
+    return "Medium";
+  case Verifier::Severity::High:
+    return "High";
+  }
+  ASSERT(false);
+  return "";
+}
 
-  if (!result.hashes.sha1.empty())
-    fmt::print(std::cout, "SHA1: {}\n", HashToHexString(result.hashes.sha1));
-  else
-    fmt::print(std::cout, "SHA1 not computed\n");
+void PrintReport(const Verifier::Result& result)
+{
+  PrintDigestLine("CRC32", result.hashes.crc32);
+  PrintDigestLine("MD5", result.hashes.md5);
+  PrintDigestLine("SHA1", result.hashes.sha1);
 
   fmt::print(std::cout, "Problems Found: {}\n", result.problems.empty() ? "No" : "Yes");
-
-  for (const auto& problem : result.problems)
+  for (const Verifier::Problem& problem : result.problems)
   {
-    fmt::print(std::cout, "\nSeverity: ");
-    switch (problem.severity)
-    {
-    case DiscIO::VolumeVerifier::Severity::Low:
-      fmt::print(std::cout, "Low");
-      break;
-    case DiscIO::VolumeVerifier::Severity::Medium:
-      fmt::print(std::cout, "Medium");
-      break;
-    case DiscIO::VolumeVerifier::Severity::High:
-      fmt::print(std::cout, "High");
-      break;
-    case DiscIO::VolumeVerifier::Severity::None:
-      fmt::print(std::cout, "None");
-      break;
-    default:
-      ASSERT(false);
-      break;
-    }
+    fmt::print(std::cout, "\nSeverity: {}", SeverityName(problem.severity));
     fmt::print(std::cout, "\nSummary: {}\n\n", problem.text);
   }
 }
+}  // namespace
 
 int VerifyCommand(const std::vector<std::string>& args)
 {
   optparse::OptionParser parser;
-
   parser.usage("usage: verify [options]...");
-
   parser.add_option("-u", "--user")
       .type("string")
       .action("store")
       .help("User folder path, required for temporary processing files. "
             "Will be automatically created if this option is not set.")
       .set_default("");
-
   parser.add_option("-i", "--input")
       .type("string")
       .action("store")
       .help("Path to input file.")
       .metavar("FILE");
-
   parser.add_option("-a", "--algorithm")
       .type("string")
       .action("store")
@@ -100,99 +98,91 @@ int VerifyCommand(const std::vector<std::string>& args)
 
   const optparse::Values& options = parser.parse_args(args);
 
-  // Initialize the dolphin user directory, required for temporary processing files
-  // If this is not set, destructive file operations could occur due to path confusion
+  // Set up the user folder first; verification may need temporary files in it.
   UICommon::SetUserDirectory(options["user"]);
   UICommon::Init();
 
-  // Validate options
   if (!options.is_set("input"))
   {
     fmt::print(std::cerr, "Error: No input set\n");
     return EXIT_FAILURE;
   }
-  const std::string& input_file_path = options["input"];
+  const std::string& input = options["input"];
 
-  bool rc_hash_calculate = false;
-  std::string rc_hash_result = "0";
-
-  DiscIO::Hashes<bool> hashes_to_calculate{};
-  const bool algorithm_is_set = options.is_set("algorithm");
-  if (!algorithm_is_set)
+  // Without --algorithm: the verifier's default digests and a full report. With it: that one
+  // digest, printed bare. "rchash" (the RetroAchievements hash) needs achievements support.
+  const bool single_algorithm = options.is_set("algorithm");
+  DiscIO::Hashes<bool> wanted{};
+  bool want_rc_hash = false;
+  if (!single_algorithm)
   {
-    hashes_to_calculate = DiscIO::VolumeVerifier::GetDefaultHashesToCalculate();
+    wanted = Verifier::GetDefaultHashesToCalculate();
   }
   else
   {
     const std::string& algorithm = options["algorithm"];
-    if (algorithm == "crc32")
-      hashes_to_calculate.crc32 = true;
-    else if (algorithm == "md5")
-      hashes_to_calculate.md5 = true;
-    else if (algorithm == "sha1")
-      hashes_to_calculate.sha1 = true;
+    wanted.crc32 = algorithm == "crc32";
+    wanted.md5 = algorithm == "md5";
+    wanted.sha1 = algorithm == "sha1";
 #ifdef USE_RETRO_ACHIEVEMENTS
-    else if (algorithm == "rchash")
-      rc_hash_calculate = true;
+    want_rc_hash = algorithm == "rchash";
 #endif
   }
 
-  if (!hashes_to_calculate.crc32 && !hashes_to_calculate.md5 && !hashes_to_calculate.sha1 &&
-      !rc_hash_calculate)
+  if (!wanted.crc32 && !wanted.md5 && !wanted.sha1 && !want_rc_hash)
   {
-    // optparse should protect from this
     fmt::print(std::cerr, "Error: No algorithms selected for the operation\n");
     return EXIT_FAILURE;
   }
 
-  // Open the volume
-  const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(input_file_path);
+  const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(input);
   if (!volume)
   {
     fmt::print(std::cerr, "Error: Unable to open input file\n");
     return EXIT_FAILURE;
   }
 
-  // Verify the volume
-  DiscIO::VolumeVerifier verifier(*volume, false, hashes_to_calculate);
+  // The verifier runs even when only the RetroAchievements hash was asked for.
+  Verifier verifier(*volume, false, wanted);
   verifier.Start();
   while (verifier.GetBytesProcessed() != verifier.GetTotalBytes())
-  {
     verifier.Process();
-  }
   verifier.Finish();
-  const DiscIO::VolumeVerifier::Result& result = verifier.GetResult();
+  const Verifier::Result& result = verifier.GetResult();
 
+  std::string rc_hash = "0";
 #ifdef USE_RETRO_ACHIEVEMENTS
-  // Calculate rcheevos hash
-  if (rc_hash_calculate)
-  {
-    rc_hash_result = AchievementManager::CalculateHash(input_file_path);
-  }
+  if (want_rc_hash)
+    rc_hash = AchievementManager::CalculateHash(input);
 #endif
 
-  // Print the report
-  if (!algorithm_is_set)
+  if (!single_algorithm)
   {
-    PrintFullReport(result);
+    PrintReport(result);
+    return EXIT_SUCCESS;
+  }
+
+  const std::vector<u8>* digest = nullptr;
+  if (wanted.crc32 && !result.hashes.crc32.empty())
+    digest = &result.hashes.crc32;
+  else if (wanted.md5 && !result.hashes.md5.empty())
+    digest = &result.hashes.md5;
+  else if (wanted.sha1 && !result.hashes.sha1.empty())
+    digest = &result.hashes.sha1;
+
+  if (digest != nullptr)
+  {
+    fmt::print(std::cout, "{}\n", ToHex(*digest));
+  }
+  else if (want_rc_hash)
+  {
+    fmt::print(std::cout, "{}\n", rc_hash);
   }
   else
   {
-    if (hashes_to_calculate.crc32 && !result.hashes.crc32.empty())
-      fmt::print(std::cout, "{}\n", HashToHexString(result.hashes.crc32));
-    else if (hashes_to_calculate.md5 && !result.hashes.md5.empty())
-      fmt::print(std::cout, "{}\n", HashToHexString(result.hashes.md5));
-    else if (hashes_to_calculate.sha1 && !result.hashes.sha1.empty())
-      fmt::print(std::cout, "{}\n", HashToHexString(result.hashes.sha1));
-    else if (rc_hash_calculate)
-      fmt::print(std::cout, "{}\n", rc_hash_result);
-    else
-    {
-      fmt::print(std::cerr, "Error: No hash computed\n");
-      return EXIT_FAILURE;
-    }
+    fmt::print(std::cerr, "Error: No hash computed\n");
+    return EXIT_FAILURE;
   }
-
   return EXIT_SUCCESS;
 }
 }  // namespace DolphinTool

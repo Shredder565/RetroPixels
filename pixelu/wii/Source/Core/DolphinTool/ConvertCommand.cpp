@@ -1,18 +1,21 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinTool/ConvertCommand.h"
 
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <OptionParser.h>
 #include <fmt/ostream.h>
 
+#include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "DiscIO/Blob.h"
 #include "DiscIO/DiscUtils.h"
@@ -23,41 +26,50 @@
 
 namespace DolphinTool
 {
-static std::optional<DiscIO::WIARVZCompressionType>
-ParseCompressionTypeString(const std::string& compression_str)
+namespace
 {
-  if (compression_str == "none")
-    return DiscIO::WIARVZCompressionType::None;
-  else if (compression_str == "purge")
-    return DiscIO::WIARVZCompressionType::Purge;
-  else if (compression_str == "bzip2")
-    return DiscIO::WIARVZCompressionType::Bzip2;
-  else if (compression_str == "lzma")
-    return DiscIO::WIARVZCompressionType::LZMA;
-  else if (compression_str == "lzma2")
-    return DiscIO::WIARVZCompressionType::LZMA2;
-  else if (compression_str == "zstd")
-    return DiscIO::WIARVZCompressionType::Zstd;
+using DiscIO::BlobType;
+using DiscIO::WIARVZCompressionType;
+
+// Value names accepted on the command line.
+constexpr std::pair<std::string_view, BlobType> FORMAT_NAMES[] = {
+    {"iso", BlobType::PLAIN},
+    {"gcz", BlobType::GCZ},
+    {"wia", BlobType::WIA},
+    {"rvz", BlobType::RVZ},
+};
+
+constexpr std::pair<std::string_view, WIARVZCompressionType> COMPRESSION_NAMES[] = {
+    {"none", WIARVZCompressionType::None},   {"purge", WIARVZCompressionType::Purge},
+    {"bzip2", WIARVZCompressionType::Bzip2}, {"lzma", WIARVZCompressionType::LZMA},
+    {"lzma2", WIARVZCompressionType::LZMA2}, {"zstd", WIARVZCompressionType::Zstd},
+};
+
+template <typename T, std::size_t N>
+std::optional<T> Lookup(const std::pair<std::string_view, T> (&table)[N], std::string_view name)
+{
+  for (const auto& [key, value] : table)
+  {
+    if (key == name)
+      return value;
+  }
   return std::nullopt;
 }
 
-static std::optional<DiscIO::BlobType> ParseFormatString(const std::string& format_str)
+void Warn(std::string_view text)
 {
-  if (format_str == "iso")
-    return DiscIO::BlobType::PLAIN;
-  else if (format_str == "gcz")
-    return DiscIO::BlobType::GCZ;
-  else if (format_str == "wia")
-    return DiscIO::BlobType::WIA;
-  else if (format_str == "rvz")
-    return DiscIO::BlobType::RVZ;
-  return std::nullopt;
+  fmt::print(std::cerr, "Warning: {} Continuing anyway.\n", text);
 }
 
-int ConvertCommand(const std::vector<std::string>& args)
+int Fail(std::string_view text)
+{
+  fmt::print(std::cerr, "Error: {}\n", text);
+  return EXIT_FAILURE;
+}
+
+optparse::OptionParser MakeParser()
 {
   optparse::OptionParser parser;
-
   parser.usage("usage: convert [options]... [FILE]...");
 
   parser.add_option("-u", "--user")
@@ -66,286 +78,208 @@ int ConvertCommand(const std::vector<std::string>& args)
       .help("User folder path, required for temporary processing files. "
             "Will be automatically created if this option is not set.")
       .set_default("");
-
   parser.add_option("-i", "--input")
       .type("string")
       .action("store")
       .help("Path to disc image FILE.")
       .metavar("FILE");
-
   parser.add_option("-o", "--output")
       .type("string")
       .action("store")
       .help("Path to the destination FILE.")
       .metavar("FILE");
-
   parser.add_option("-f", "--format")
       .type("string")
       .action("store")
       .help("Container format to use. Default is RVZ. [%choices]")
       .choices({"iso", "gcz", "wia", "rvz"});
-
   parser.add_option("-s", "--scrub")
       .action("store_true")
       .help("Scrub junk data as part of conversion.");
-
   parser.add_option("-b", "--block_size")
       .type("int")
       .action("store")
       .help("Block size for GCZ/WIA/RVZ formats, as an integer. Suggested value for RVZ: 131072 "
             "(128 KiB)");
-
   parser.add_option("-c", "--compression")
       .type("string")
       .action("store")
       .help("Compression method to use when converting to WIA/RVZ. Suggested value for RVZ: zstd "
             "[%choices]")
       .choices({"none", "zstd", "bzip2", "lzma", "lzma2"});
-
   parser.add_option("-l", "--compression_level")
       .type("int")
       .action("store")
       .help("Level of compression for the selected method. Ignored if 'none'. Suggested value for "
             "zstd: 5");
+  return parser;
+}
 
+std::optional<int> IntOption(const optparse::Values& values, const char* name)
+{
+  if (!values.is_set(name))
+    return std::nullopt;
+  return static_cast<int>(values.get(name));
+}
+
+// The GCZ header's sub-type: 0 for GameCube, 1 for Wii, all ones for anything else.
+u32 GCZSubType(const DiscIO::Volume* volume)
+{
+  if (volume != nullptr)
+  {
+    if (volume->GetVolumeType() == DiscIO::Platform::GameCubeDisc)
+      return 0;
+    if (volume->GetVolumeType() == DiscIO::Platform::WiiDisc)
+      return 1;
+  }
+  return std::numeric_limits<u32>::max();
+}
+}  // namespace
+
+int ConvertCommand(const std::vector<std::string>& args)
+{
+  optparse::OptionParser parser = MakeParser();
   const optparse::Values& options = parser.parse_args(args);
 
-  // Initialize the dolphin user directory, required for temporary processing files
-  // If this is not set, destructive file operations could occur due to path confusion
+  // The user folder must exist before anything else: conversions write temporary files there,
+  // and a missing one could send them to an unexpected place.
   UICommon::SetUserDirectory(options["user"]);
   UICommon::Init();
 
-  // Validate options
-
-  // --input
   if (!options.is_set("input"))
-  {
-    fmt::print(std::cerr, "Error: No input set\n");
-    return EXIT_FAILURE;
-  }
-  const std::string& input_file_path = options["input"];
+    return Fail("No input set");
+  const std::string& input = options["input"];
 
-  // --output
   if (!options.is_set("output"))
-  {
-    fmt::print(std::cerr, "Error: No output set\n");
-    return EXIT_FAILURE;
-  }
-  const std::string& output_file_path = options["output"];
+    return Fail("No output set");
+  const std::string& output = options["output"];
 
-  // --format
-  const std::optional<DiscIO::BlobType> format_o = ParseFormatString(options["format"]);
-  if (!format_o.has_value())
-  {
-    fmt::print(std::cerr, "Error: No output format set\n");
-    return EXIT_FAILURE;
-  }
-  const DiscIO::BlobType format = format_o.value();
+  const std::optional<BlobType> chosen_format = Lookup(FORMAT_NAMES, options["format"]);
+  if (!chosen_format)
+    return Fail("No output format set");
+  const BlobType format = *chosen_format;
 
-  // Open the blob reader
-  std::unique_ptr<DiscIO::BlobReader> blob_reader = DiscIO::CreateBlobReader(input_file_path);
-  if (!blob_reader)
-  {
-    fmt::print(std::cerr, "Error: The input file could not be opened.\n");
-    return EXIT_FAILURE;
-  }
+  std::unique_ptr<DiscIO::BlobReader> reader = DiscIO::CreateBlobReader(input);
+  if (!reader)
+    return Fail("The input file could not be opened.");
 
-  // --scrub
   const bool scrub = static_cast<bool>(options.get("scrub"));
 
-  // Open the volume
-  const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateDisc(input_file_path);
+  // Non-disc input can still be converted, just not scrubbed.
+  const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateDisc(input);
   if (!volume)
   {
     if (scrub)
-    {
-      fmt::print(std::cerr, "Error: Scrubbing is only supported for GC/Wii disc images.\n");
-      return EXIT_FAILURE;
-    }
-
-    fmt::print(std::cerr,
-               "Warning: The input file is not a GC/Wii disc image. Continuing anyway.\n");
+      return Fail("Scrubbing is only supported for GC/Wii disc images.");
+    Warn("The input file is not a GC/Wii disc image.");
   }
 
   if (scrub)
   {
     if (volume->IsDatelDisc())
-    {
-      fmt::print(std::cerr, "Error: Scrubbing a Datel disc is not supported.\n");
-      return EXIT_FAILURE;
-    }
+      return Fail("Scrubbing a Datel disc is not supported.");
 
-    blob_reader = DiscIO::ScrubbedBlob::Create(input_file_path);
+    reader = DiscIO::ScrubbedBlob::Create(input);
+    if (!reader)
+      return Fail("Unable to process disc image. Try again without --scrub.");
 
-    if (!blob_reader)
-    {
-      fmt::print(std::cerr, "Error: Unable to process disc image. Try again without --scrub.\n");
-      return EXIT_FAILURE;
-    }
+    if (format == BlobType::RVZ)
+      Warn("Scrubbing an RVZ container does not offer significant space advantages.");
+    else if (format == BlobType::PLAIN)
+      Warn("Scrubbing does not save space when converting to ISO unless using external "
+           "compression.");
   }
-
-  if (scrub && format == DiscIO::BlobType::RVZ)
+  else if (format == BlobType::GCZ && volume &&
+           volume->GetVolumeType() == DiscIO::Platform::WiiDisc && !volume->IsDatelDisc())
   {
-    fmt::print(std::cerr, "Warning: Scrubbing an RVZ container does not offer significant space "
-                          "advantages. Continuing anyway.\n");
-  }
-
-  if (scrub && format == DiscIO::BlobType::PLAIN)
-  {
-    fmt::print(std::cerr, "Warning: Scrubbing does not save space when converting to ISO unless "
-                          "using external compression. Continuing anyway.\n");
-  }
-
-  if (!scrub && format == DiscIO::BlobType::GCZ && volume &&
-      volume->GetVolumeType() == DiscIO::Platform::WiiDisc && !volume->IsDatelDisc())
-  {
-    fmt::print(std::cerr, "Warning: Converting Wii disc images to GCZ without scrubbing may not "
-                          "offer space advantages over ISO. Continuing anyway.\n");
+    Warn("Converting Wii disc images to GCZ without scrubbing may not offer space advantages over "
+         "ISO.");
   }
 
   if (volume && volume->IsNKit())
+    Warn("Converting an NKit file, output will still be NKit!");
+
+  // Block size: required by every format except ISO.
+  const std::optional<int> block_size = IntOption(options, "block_size");
+  if (format != BlobType::PLAIN)
   {
-    fmt::print(std::cerr,
-               "Warning: Converting an NKit file, output will still be NKit! Continuing anyway.\n");
-  }
+    if (!block_size)
+      return Fail("Block size must be set for GCZ/RVZ/WIA");
+    if (!DiscIO::IsDiscImageBlockSizeValid(*block_size, format))
+      return Fail("Block size is not valid for this format");
 
-  // --block_size
-  std::optional<int> block_size_o;
-  if (options.is_set("block_size"))
-    block_size_o = static_cast<int>(options.get("block_size"));
-
-  if (format == DiscIO::BlobType::GCZ || format == DiscIO::BlobType::WIA ||
-      format == DiscIO::BlobType::RVZ)
-  {
-    if (!block_size_o.has_value())
+    if (*block_size < DiscIO::PREFERRED_MIN_BLOCK_SIZE ||
+        *block_size > DiscIO::PREFERRED_MAX_BLOCK_SIZE)
     {
-      fmt::print(std::cerr, "Error: Block size must be set for GCZ/RVZ/WIA\n");
-      return EXIT_FAILURE;
+      Warn("Block size is not ideal for performance.");
     }
 
-    if (!DiscIO::IsDiscImageBlockSizeValid(block_size_o.value(), format))
+    if (format == BlobType::GCZ && volume &&
+        !DiscIO::IsGCZBlockSizeLegacyCompatible(*block_size, volume->GetDataSize()))
     {
-      fmt::print(std::cerr, "Error: Block size is not valid for this format\n");
-      return EXIT_FAILURE;
-    }
-
-    if (block_size_o.value() < DiscIO::PREFERRED_MIN_BLOCK_SIZE ||
-        block_size_o.value() > DiscIO::PREFERRED_MAX_BLOCK_SIZE)
-    {
-      fmt::print(std::cerr,
-                 "Warning: Block size is not ideal for performance. Continuing anyway.\n");
-    }
-
-    if (format == DiscIO::BlobType::GCZ && volume &&
-        !DiscIO::IsGCZBlockSizeLegacyCompatible(block_size_o.value(), volume->GetDataSize()))
-    {
-      fmt::print(std::cerr,
-                 "Warning: For GCZs to be compatible with Dolphin < 5.0-11893, the file size "
-                 "must be an integer multiple of the block size and must not be an integer "
-                 "multiple of the block size multiplied by 32. Continuing anyway.\n");
+      Warn("For GCZs to be compatible with Dolphin < 5.0-11893, the file size must be an integer "
+           "multiple of the block size and must not be an integer multiple of the block size "
+           "multiplied by 32.");
     }
   }
 
-  // --compress, --compress_level
-  const std::optional<DiscIO::WIARVZCompressionType> compression_o =
-      ParseCompressionTypeString(options["compression"]);
+  // Compression method and level: WIA and RVZ only.
+  const std::optional<WIARVZCompressionType> compression =
+      Lookup(COMPRESSION_NAMES, options["compression"]);
+  std::optional<int> level = IntOption(options, "compression_level");
 
-  std::optional<int> compression_level_o;
-  if (options.is_set("compression_level"))
-    compression_level_o = static_cast<int>(options.get("compression_level"));
-
-  if (format == DiscIO::BlobType::WIA || format == DiscIO::BlobType::RVZ)
+  const bool wia_family = format == BlobType::WIA || format == BlobType::RVZ;
+  if (wia_family)
   {
-    if (!compression_o.has_value())
-    {
-      fmt::print(std::cerr, "Error: Compression method must be set for WIA or RVZ\n");
-      return EXIT_FAILURE;
-    }
+    if (!compression)
+      return Fail("Compression method must be set for WIA or RVZ");
 
-    if ((format == DiscIO::BlobType::WIA &&
-         compression_o.value() == DiscIO::WIARVZCompressionType::Zstd) ||
-        (format == DiscIO::BlobType::RVZ &&
-         compression_o.value() == DiscIO::WIARVZCompressionType::Purge))
-    {
-      fmt::print(std::cerr, "Error: Compression type is not supported for the container format\n");
-      return EXIT_FAILURE;
-    }
+    // WIA predates Zstandard, and RVZ has no use for Purge.
+    const bool unsupported = format == BlobType::WIA ? *compression == WIARVZCompressionType::Zstd :
+                                                       *compression == WIARVZCompressionType::Purge;
+    if (unsupported)
+      return Fail("Compression type is not supported for the container format");
 
-    if (compression_o.value() == DiscIO::WIARVZCompressionType::None)
+    if (*compression == WIARVZCompressionType::None)
     {
-      compression_level_o = 0;
+      level = 0;
     }
     else
     {
-      if (!compression_level_o.has_value())
-      {
-        fmt::print(std::cerr,
-                   "Error: Compression level must be set when compression type is not 'none'\n");
-        return EXIT_FAILURE;
-      }
+      if (!level)
+        return Fail("Compression level must be set when compression type is not 'none'");
 
-      const std::pair<int, int> range =
-          DiscIO::GetAllowedCompressionLevels(compression_o.value(), false);
-      if (compression_level_o.value() < range.first || compression_level_o.value() > range.second)
-      {
-        fmt::print(std::cerr, "Error: Compression level not in acceptable range\n");
-        return EXIT_FAILURE;
-      }
+      const auto [lowest, highest] = DiscIO::GetAllowedCompressionLevels(*compression, false);
+      if (*level < lowest || *level > highest)
+        return Fail("Compression level not in acceptable range");
     }
   }
 
-  // Perform the conversion
-  const auto NOOP_STATUS_CALLBACK = [](const std::string& text, float percent) { return true; };
+  // Progress is not shown.
+  const auto ignore_progress = [](const std::string&, float) { return true; };
 
-  bool success = false;
-
-  switch (format)
+  bool converted = false;
+  if (format == BlobType::PLAIN)
   {
-  case DiscIO::BlobType::PLAIN:
-  {
-    success = DiscIO::ConvertToPlain(blob_reader.get(), input_file_path, output_file_path,
-                                     NOOP_STATUS_CALLBACK);
-    break;
+    converted = DiscIO::ConvertToPlain(reader.get(), input, output, ignore_progress);
   }
-
-  case DiscIO::BlobType::GCZ:
+  else if (format == BlobType::GCZ)
   {
-    u32 sub_type = std::numeric_limits<u32>::max();
-    if (volume)
-    {
-      if (volume->GetVolumeType() == DiscIO::Platform::GameCubeDisc)
-        sub_type = 0;
-      else if (volume->GetVolumeType() == DiscIO::Platform::WiiDisc)
-        sub_type = 1;
-    }
-    success = DiscIO::ConvertToGCZ(blob_reader.get(), input_file_path, output_file_path, sub_type,
-                                   block_size_o.value(), NOOP_STATUS_CALLBACK);
-    break;
+    converted = DiscIO::ConvertToGCZ(reader.get(), input, output, GCZSubType(volume.get()),
+                                     *block_size, ignore_progress);
   }
-
-  case DiscIO::BlobType::WIA:
-  case DiscIO::BlobType::RVZ:
+  else if (wia_family)
   {
-    success = DiscIO::ConvertToWIAOrRVZ(blob_reader.get(), input_file_path, output_file_path,
-                                        format == DiscIO::BlobType::RVZ, compression_o.value(),
-                                        compression_level_o.value(), block_size_o.value(),
-                                        NOOP_STATUS_CALLBACK);
-    break;
+    converted = DiscIO::ConvertToWIAOrRVZ(reader.get(), input, output, format == BlobType::RVZ,
+                                          *compression, *level, *block_size, ignore_progress);
   }
-
-  default:
+  else
   {
     ASSERT(false);
-    break;
-  }
   }
 
-  if (!success)
-  {
-    fmt::print(std::cerr, "Error: Conversion failed\n");
-    return EXIT_FAILURE;
-  }
-
+  if (!converted)
+    return Fail("Conversion failed");
   return EXIT_SUCCESS;
 }
 }  // namespace DolphinTool

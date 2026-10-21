@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,5 +7,6 @@
 
 namespace DolphinTool
 {
+// "dolphin-tool header": prints container and game details of a disc image.
 int HeaderCommand(const std::vector<std::string>& args);
 }  // namespace DolphinTool

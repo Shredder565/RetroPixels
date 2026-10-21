@@ -1,18 +1,26 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinTool/ExtractCommand.h"
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
 #include <OptionParser.h>
 
+#include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
+#include "Common/StringUtil.h"
 
+#include "DiscIO/Blob.h"
 #include "DiscIO/DiscExtractor.h"
 #include "DiscIO/DiscUtils.h"
 #include "DiscIO/Filesystem.h"
@@ -20,204 +28,193 @@
 
 namespace DolphinTool
 {
-static void ExtractFile(const DiscIO::Volume& disc_volume, const DiscIO::Partition& partition,
-                        const std::string& path, const std::string& out)
+namespace
 {
-  const DiscIO::FileSystem* filesystem = disc_volume.GetFileSystem(partition);
-  if (!filesystem)
-    return;
+struct ExtractSettings
+{
+  std::string output;       // Destination folder.
+  std::string single_path;  // Path inside the disc, when only one file or folder is wanted.
+  bool single = false;
+  bool quiet = false;
+};
 
-  ExportFile(disc_volume, partition, filesystem->FindFileInfo(path).get(), out);
+// The file or folder at `path` in the partition's filesystem; null if it has none or no such entry.
+std::unique_ptr<DiscIO::FileInfo> FindEntry(const DiscIO::Volume& volume,
+                                            const DiscIO::Partition& partition,
+                                            const std::string& path)
+{
+  const DiscIO::FileSystem* filesystem = volume.GetFileSystem(partition);
+  return filesystem ? filesystem->FindFileInfo(path) : nullptr;
 }
 
-static std::unique_ptr<DiscIO::FileInfo> GetFileInfo(const DiscIO::Volume& disc_volume,
-                                                     const DiscIO::Partition& partition,
-                                                     const std::string& path)
+// Checks that the volume has a disc filesystem, explaining why not otherwise.
+bool HasDiscFilesystem(const DiscIO::Volume& volume)
 {
-  const DiscIO::FileSystem* filesystem = disc_volume.GetFileSystem(partition);
-  if (!filesystem)
-    return nullptr;
-
-  return filesystem->FindFileInfo(path);
-}
-
-static bool VolumeSupported(const DiscIO::Volume& disc_volume)
-{
-  switch (disc_volume.GetVolumeType())
-  {
-  case DiscIO::Platform::WiiWAD:
-    fmt::println(std::cerr, "Error: Wii WADs are not supported.");
-    return false;
-  case DiscIO::Platform::ELFOrDOL:
-    fmt::println(std::cerr,
-                 "Error: *.elf or *.dol have no filesystem and are therefore not supported.");
-    return false;
-  case DiscIO::Platform::WiiDisc:
-  case DiscIO::Platform::GameCubeDisc:
+  const DiscIO::Platform platform = volume.GetVolumeType();
+  if (platform == DiscIO::Platform::GameCubeDisc || platform == DiscIO::Platform::WiiDisc)
     return true;
-  default:
+
+  if (platform == DiscIO::Platform::WiiWAD)
+    fmt::println(std::cerr, "Error: Wii WADs are not supported.");
+  else if (platform == DiscIO::Platform::ELFOrDOL)
+    fmt::println(std::cerr, "Error: *.elf or *.dol have no filesystem and are therefore not supported.");
+  else
     fmt::println(std::cerr, "Error: Unknown volume type.");
-    return false;
-  }
+  return false;
 }
 
-static void ExtractDirectory(const DiscIO::Volume& disc_volume, const DiscIO::Partition& partition,
-                             const std::string& path, const std::string& out, bool quiet)
+// Writes the folder at `path` (which must exist) and everything below it into `destination`,
+// reporting each file unless quiet.
+void WriteFolder(const DiscIO::Volume& volume, const DiscIO::Partition& partition,
+                 const std::string& path, const std::string& destination, bool quiet)
 {
-  const DiscIO::FileSystem* filesystem = disc_volume.GetFileSystem(partition);
+  const DiscIO::FileSystem* filesystem = volume.GetFileSystem(partition);
   if (!filesystem)
     return;
 
-  const std::unique_ptr<DiscIO::FileInfo> info = filesystem->FindFileInfo(path);
-  u32 size = info->GetTotalChildren();
-  u32 files = 0;
-  ExportDirectory(
-      disc_volume, partition, *info, true, "", out,
-      [&files, &size, &quiet](const std::string& current) {
-        files++;
-        const float progress = static_cast<float>(files) / static_cast<float>(size) * 100;
-        if (!quiet)
-          fmt::println(std::cerr, "Extracting: {} | {}%", current, static_cast<int>(progress));
-        return false;
-      });
+  const std::unique_ptr<DiscIO::FileInfo> folder = filesystem->FindFileInfo(path);
+  const u32 total = folder->GetTotalChildren();
+  u32 done = 0;
+  DiscIO::ExportDirectory(volume, partition, *folder, true, "", destination,
+                          [&done, total, quiet](const std::string& name) {
+                            ++done;
+                            const float percent =
+                                static_cast<float>(done) / static_cast<float>(total) * 100;
+                            if (!quiet)
+                            {
+                              fmt::println(std::cerr, "Extracting: {} | {}%", name,
+                                           static_cast<int>(percent));
+                            }
+                            return false;  // Never cancel.
+                          });
 }
 
-static bool ExtractSystemData(const DiscIO::Volume& disc_volume, const DiscIO::Partition& partition,
-                              const std::string& out)
+void WriteFile(const DiscIO::Volume& volume, const DiscIO::Partition& partition,
+               const std::string& path, const std::string& destination)
 {
-  return ExportSystemData(disc_volume, partition, out);
+  const DiscIO::FileSystem* filesystem = volume.GetFileSystem(partition);
+  if (filesystem)
+    DiscIO::ExportFile(volume, partition, filesystem->FindFileInfo(path).get(), destination);
 }
 
-static void ExtractPartition(const DiscIO::Volume& disc_volume, const DiscIO::Partition& partition,
-                             const std::string& out, bool quiet)
+// Extracts into <output>/<partition name>/: everything (files/ plus the system data), or just
+// the requested file or folder under files/.
+bool ExtractFromPartition(const DiscIO::Volume& volume, const DiscIO::Partition& partition,
+                          const std::string& partition_name, const ExtractSettings& settings)
 {
-  ExtractDirectory(disc_volume, partition, "", out + "/files", quiet);
-  ExtractSystemData(disc_volume, partition, out);
+  const std::string base = settings.output + "/" + partition_name + "/";
+
+  if (!settings.single)
+  {
+    WriteFolder(volume, partition, "", base + "/files", settings.quiet);
+    DiscIO::ExportSystemData(volume, partition, base);
+    return true;
+  }
+
+  const std::unique_ptr<DiscIO::FileInfo> entry = FindEntry(volume, partition, settings.single_path);
+  if (!entry)
+    return false;
+
+  std::string target = base + "files/" + settings.single_path;
+  File::CreateFullPath(target);
+  if (entry->IsDirectory())
+  {
+    // Exported into the parent, which recreates the folder itself.
+    target = PathToString(StringToPath(target).remove_filename());
+    WriteFolder(volume, partition, settings.single_path, target, settings.quiet);
+  }
+  else
+  {
+    WriteFile(volume, partition, settings.single_path, target);
+  }
+  return true;
 }
 
-static void ListRecursively(const std::string& path, const DiscIO::FileInfo& info,
-                            std::string* result_text)
+// Prints `path` (unless it is the root) and everything below it, one per line with folders
+// ending in '/', to stdout and to `listing`.
+void ListTree(const std::string& path, const DiscIO::FileInfo& entry, std::string* listing)
 {
-  // Don't print the root.
   if (!path.empty())
   {
-    const std::string line = fmt::format("{}\n", path);
+    const std::string line = path + '\n';
     fmt::print("{}", line);
-    result_text->append(line);
+    listing->append(line);
   }
-  for (const DiscIO::FileInfo& child_info : info)
+
+  for (const DiscIO::FileInfo& child : entry)
   {
-    std::string child_path = path + child_info.GetName();
-    if (child_info.IsDirectory())
-      child_path += '/';
-    ListRecursively(child_path, child_info, result_text);
+    const std::string child_path = path + child.GetName() + (child.IsDirectory() ? "/" : "");
+    ListTree(child_path, child, listing);
   }
 }
 
-static bool ListPartition(const DiscIO::Volume& disc_volume, const DiscIO::Partition& partition,
-                          const std::string& partition_name, const std::string& path,
-                          std::string* result_text)
+bool ListPartition(const DiscIO::Volume& volume, const DiscIO::Partition& partition,
+                   const std::string& partition_name, const std::string& path, std::string* listing)
 {
-  const DiscIO::FileSystem* filesystem = disc_volume.GetFileSystem(partition);
+  const DiscIO::FileSystem* filesystem = volume.GetFileSystem(partition);
   if (!filesystem)
   {
     fmt::println(std::cerr, "Warning: partition {} has no filesystem.", partition_name);
     return false;
   }
-  const std::unique_ptr<DiscIO::FileInfo> info = filesystem->FindFileInfo(path);
 
-  if (!info)
+  const std::unique_ptr<DiscIO::FileInfo> entry = filesystem->FindFileInfo(path);
+  if (!entry)
   {
+    // Partitionless images stay silent here.
     if (!partition_name.empty())
-    {
       fmt::println(std::cerr, "Warning: {} does not exist in this partition.", path);
-    }
     return false;
   }
 
-  // Canonicalize user-provided path by reconstructing it using GetPath().
-  ListRecursively(info->GetPath(), *info, result_text);
+  // Listed under its canonical path rather than as typed.
+  ListTree(entry->GetPath(), *entry, listing);
   return true;
 }
 
-static bool ListVolume(const DiscIO::Volume& disc_volume, const std::string& path,
-                       const std::string& specific_partition_name, bool quiet,
-                       std::string* result_text)
+// Lists every partition (or only `wanted_partition`), each under a header line.
+bool ListVolume(const DiscIO::Volume& volume, const std::string& path,
+                const std::string& wanted_partition, std::string* listing)
 {
-  if (disc_volume.GetPartitions().empty())
-  {
-    return ListPartition(disc_volume, DiscIO::PARTITION_NONE, specific_partition_name, path,
-                         result_text);
-  }
+  const std::vector<DiscIO::Partition> partitions = volume.GetPartitions();
+  if (partitions.empty())
+    return ListPartition(volume, DiscIO::PARTITION_NONE, wanted_partition, path, listing);
 
-  bool success = false;
-  for (DiscIO::Partition& p : disc_volume.GetPartitions())
+  bool listed_any = false;
+  for (const DiscIO::Partition& partition : partitions)
   {
-    const std::optional<u32> partition_type = disc_volume.GetPartitionType(p);
-    if (!partition_type)
+    const std::optional<u32> type = volume.GetPartitionType(partition);
+    if (!type)
     {
       fmt::println(std::cerr, "Error: Could not get partition type.");
       return false;
     }
-    const std::string partition_name = DiscIO::NameForPartitionType(*partition_type, true);
 
-    if (!specific_partition_name.empty() &&
-        !Common::CaseInsensitiveEquals(partition_name, specific_partition_name))
-    {
+    const std::string name = DiscIO::NameForPartitionType(*type, true);
+    if (!wanted_partition.empty() && !Common::CaseInsensitiveEquals(name, wanted_partition))
       continue;
-    }
 
-    const std::string partition_start =
-        fmt::format("/// PARTITION: {} <{}> ///\n", partition_name, path);
-    fmt::print(std::cout, "{}", partition_start);
-    result_text->append(partition_start);
+    const std::string header = fmt::format("/// PARTITION: {} <{}> ///\n", name, path);
+    fmt::print(std::cout, "{}", header);
+    listing->append(header);
 
-    success |= ListPartition(disc_volume, p, partition_name, path, result_text);
+    if (ListPartition(volume, partition, name, path, listing))
+      listed_any = true;
   }
-
-  return success;
+  return listed_any;
 }
 
-static bool HandleExtractPartition(const std::string& output, const std::string& single_file_path,
-                                   const std::string& partition_name,
-                                   const DiscIO::Volume& disc_volume,
-                                   const DiscIO::Partition& partition, bool quiet, bool single)
+int Failure(const char* message)
 {
-  std::string file;
-  file.append(output).append("/");
-  file.append(partition_name).append("/");
-  if (!single)
-  {
-    ExtractPartition(disc_volume, partition, file, quiet);
-    return true;
-  }
-
-  const auto file_info = GetFileInfo(disc_volume, partition, single_file_path);
-  if (file_info != nullptr)
-  {
-    file.append("files/").append(single_file_path);
-    File::CreateFullPath(file);
-    if (file_info->IsDirectory())
-    {
-      file = PathToString(StringToPath(file).remove_filename());
-      ExtractDirectory(disc_volume, partition, single_file_path, file, quiet);
-    }
-    else
-    {
-      ExtractFile(disc_volume, partition, single_file_path, file);
-    }
-
-    return true;
-  }
-  return false;
+  fmt::println(std::cerr, "{}", message);
+  return EXIT_FAILURE;
 }
+}  // namespace
 
 int Extract(const std::vector<std::string>& args)
 {
   optparse::OptionParser parser;
-
   parser.usage("usage: extract [options]...");
-
   parser.add_option("-i", "--input")
       .type("string")
       .action("store")
@@ -249,133 +246,105 @@ int Extract(const std::vector<std::string>& args)
 
   const optparse::Values& options = parser.parse_args(args);
 
-  const bool quiet = options.is_set("quiet");
-  const bool gameonly = options.is_set("gameonly");
+  const bool has_output = options.is_set("output");
+  const bool list_mode = options.is_set("list");
+  const bool partition_given = options.is_set("partition");
+
+  ExtractSettings settings;
+  settings.quiet = options.is_set("quiet");
+  settings.single = options.is_set("single");
 
   if (!options.is_set("input"))
-  {
-    fmt::println(std::cerr, "Error: No input image set");
-    return EXIT_FAILURE;
-  }
-  const std::string& input_file_path = options["input"];
+    return Failure("Error: No input image set");
+  const std::string& input = options["input"];
 
-  const std::string& output_folder_path = options["output"];
+  settings.output = options["output"];
+  if (!has_output && !list_mode)
+    return Failure("Error: No output folder set");
 
-  if (!options.is_set("output") && !options.is_set("list"))
-  {
-    fmt::println(std::cerr, "Error: No output folder set");
-    return EXIT_FAILURE;
-  }
+  settings.single_path = options["single"];
+  // --gameonly is shorthand for --partition data.
+  const std::string wanted_partition = options.is_set("gameonly") ? "data" : options["partition"];
 
-  const std::string& single_file_path = options["single"];
-  std::string specific_partition = options["partition"];
+  if (has_output && !list_mode)
+    File::CreateDirs(settings.output);
 
-  if (options.is_set("output") && !options.is_set("list"))
-    File::CreateDirs(output_folder_path);
+  if (!DiscIO::CreateBlobReader(input))
+    return Failure("Error: Unable to open disc image");
 
-  if (gameonly)
-    specific_partition = std::string("data");
-
-  if (const std::unique_ptr<DiscIO::BlobReader> blob_reader =
-          DiscIO::CreateBlobReader(input_file_path);
-      !blob_reader)
-  {
-    fmt::println(std::cerr, "Error: Unable to open disc image");
-    return EXIT_FAILURE;
-  }
-
-  const std::unique_ptr<DiscIO::Volume> disc_volume = DiscIO::CreateVolume(input_file_path);
-
-  if (!disc_volume)
-  {
-    fmt::println(std::cerr, "Error: Unable to open volume");
-    return EXIT_FAILURE;
-  }
-
-  if (!VolumeSupported(*disc_volume))
+  const std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(input);
+  if (!volume)
+    return Failure("Error: Unable to open volume");
+  if (!HasDiscFilesystem(*volume))
     return EXIT_FAILURE;
 
-  if (options.is_set("list"))
+  if (list_mode)
   {
-    std::string list_path = options.is_set("single") ? single_file_path : "/";
-    if (quiet && !options.is_set("output"))
+    // The listing goes to stdout, and also to the --output file if given.
+    const std::string start = settings.single ? settings.single_path : "/";
+    if (settings.quiet && !has_output)
     {
-      fmt::println(std::cerr, "Error: --quiet is set but no output file provided. Please either "
-                              "remove the --quiet flag or specify --output");
-      return EXIT_FAILURE;
+      return Failure("Error: --quiet is set but no output file provided. Please either remove the "
+                     "--quiet flag or specify --output");
     }
 
-    std::string text;
-    if (!ListVolume(*disc_volume, list_path, specific_partition, quiet, &text))
-    {
-      fmt::println(std::cerr, "Error: Found nothing to list");
-      return EXIT_FAILURE;
-    }
+    std::string listing;
+    if (!ListVolume(*volume, start, wanted_partition, &listing))
+      return Failure("Error: Found nothing to list");
 
-    if (options.is_set("output"))
+    if (has_output)
     {
-      File::CreateFullPath(output_folder_path);
-      std::ofstream output_file;
-      output_file.open(output_folder_path);
-      if (!output_file.is_open())
-      {
-        fmt::println(std::cerr, "Error: Unable to open output file");
-        return EXIT_FAILURE;
-      }
-      output_file << text;
+      File::CreateFullPath(settings.output);
+      std::ofstream file;
+      file.open(settings.output);
+      if (!file.is_open())
+        return Failure("Error: Unable to open output file");
+      file << listing;
     }
-
     return EXIT_SUCCESS;
   }
 
-  bool extracted_one = false;
-
-  if (disc_volume->GetPartitions().empty())
+  bool extracted = false;
+  const std::vector<DiscIO::Partition> partitions = volume->GetPartitions();
+  if (partitions.empty())
   {
-    if (options.is_set("partition"))
+    if (partition_given)
     {
-      fmt::println(
-          std::cerr,
-          "Warning: --partition has a value even though this image doesn't have any partitions.");
+      fmt::println(std::cerr, "Warning: --partition has a value even though this image doesn't "
+                              "have any partitions.");
     }
-
-    extracted_one = HandleExtractPartition(output_folder_path, single_file_path, "", *disc_volume,
-                                           DiscIO::PARTITION_NONE, quiet, options.is_set("single"));
+    extracted = ExtractFromPartition(*volume, DiscIO::PARTITION_NONE, "", settings);
   }
   else
   {
-    for (DiscIO::Partition& p : disc_volume->GetPartitions())
+    for (const DiscIO::Partition& partition : partitions)
     {
-      if (const std::optional<u32> partition_type = disc_volume->GetPartitionType(p))
-      {
-        const std::string partition_name = DiscIO::NameForPartitionType(*partition_type, true);
+      // Partitions of unknown type are skipped.
+      const std::optional<u32> type = volume->GetPartitionType(partition);
+      if (!type)
+        continue;
 
-        if (!specific_partition.empty() &&
-            !Common::CaseInsensitiveEquals(specific_partition, partition_name))
-        {
-          continue;
-        }
+      const std::string name = DiscIO::NameForPartitionType(*type, true);
+      if (!wanted_partition.empty() && !Common::CaseInsensitiveEquals(wanted_partition, name))
+        continue;
 
-        extracted_one |=
-            HandleExtractPartition(output_folder_path, single_file_path, partition_name,
-                                   *disc_volume, p, quiet, options.is_set("single"));
-      }
+      if (ExtractFromPartition(*volume, partition, name, settings))
+        extracted = true;
     }
   }
 
-  if (!extracted_one)
+  if (!extracted)
   {
-    if (options.is_set("single"))
-      fmt::print(std::cerr, "Error: No file/folder was extracted.");
-    else
-      fmt::print(std::cerr, "Error: No partitions were extracted.");
-    if (options.is_set("partition"))
+    fmt::print(std::cerr, "{}",
+               settings.single ? "Error: No file/folder was extracted." :
+                                 "Error: No partitions were extracted.");
+    if (partition_given)
       fmt::println(std::cerr, " Maybe you misspelled your specified partition?");
     fmt::println(std::cerr, "\n");
     return EXIT_FAILURE;
   }
 
-  if (!quiet)
+  if (!settings.quiet)
     fmt::println(std::cerr, "Finished Successfully!");
   return EXIT_SUCCESS;
 }
