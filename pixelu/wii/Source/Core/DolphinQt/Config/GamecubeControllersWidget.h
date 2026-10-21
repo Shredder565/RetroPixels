@@ -1,14 +1,12 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <QWidget>
-
 #include <array>
 
+#include <QWidget>
+
 class QComboBox;
-class QHBoxLayout;
 class QGridLayout;
 class QGroupBox;
 class QPushButton;
@@ -18,6 +16,8 @@ namespace Core
 enum class State;
 }
 
+// The "GameCube Controllers" box of the controller settings: a device
+// choice and a Configure button for each of the four SI ports.
 class GamecubeControllersWidget final : public QWidget
 {
   Q_OBJECT
@@ -25,19 +25,15 @@ public:
   explicit GamecubeControllersWidget(QWidget* parent);
 
 private:
-  void LoadSettings(Core::State state);
-  void SaveSettings();
+  static constexpr size_t PORTS = 4;
 
-  void OnGCTypeChanged(size_t index);
-  void OnGCPadConfigure(size_t index);
+  void ShowConfig(Core::State state);
+  void StoreConfig();
+  void RefreshConfigureButton(size_t port);
+  void ConfigurePort(size_t port);
 
-  void CreateLayout();
-  void ConnectWidgets();
-
-  // Gamecube
-  QGroupBox* m_gc_box;
-  QGridLayout* m_gc_layout;
-  std::array<QComboBox*, 4> m_gc_controller_boxes;
-  std::array<QPushButton*, 4> m_gc_buttons;
-  std::array<QHBoxLayout*, 4> m_gc_groups;
+  QGroupBox* m_group;
+  QGridLayout* m_grid;
+  std::array<QComboBox*, PORTS> m_devices;
+  std::array<QPushButton*, PORTS> m_configure;
 };
