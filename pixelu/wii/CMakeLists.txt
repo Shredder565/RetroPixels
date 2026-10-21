@@ -2,10 +2,15 @@
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 #
 # This is the whole build: PixelU-Wii's own code in Source/, plus third-party
-# libraries built from their own sources. The third-party sources (and, for now,
-# the Sys data and translations) are taken from a checkout of Dolphin 2609a's
-# repository, by default the submodule in dolphin/; nothing else of that
-# checkout is used. Externals/ holds PixelU's build files for those libraries.
+# libraries built from their own sources. Externals/fetch.py fetches those
+# sources from each library's own upstream project into third_party/ (the list,
+# with versions, commits and checksums, is Externals/sources.json); Externals/
+# holds PixelU's build files for them. Qt and FFmpeg come from upstream too:
+# Qt's official build (installed with aqtinstall) and FFmpeg built from its
+# source (Externals/FFmpeg/build-ffmpeg.sh); see .github/workflows/pixelu-wii.yml.
+# Only the game settings (Data/Sys/GameSettings, ApprovedInis.json) and the
+# translations (Languages/po) still come from a checkout of Dolphin 2609a's
+# repository, by default a sparse one in dolphin/.
 #
 # Supported: Windows x64 with MSVC (Visual Studio 2026), see CMakePresets.json.
 
@@ -25,18 +30,33 @@ include(PixelUHelpers)
 ########################################
 # Where things come from
 
-set(PIXELU_WII_THIRD_PARTY "${PROJECT_SOURCE_DIR}/dolphin/Externals" CACHE PATH
-  "Folder with the third-party library sources (Dolphin 2609a's Externals folder with its submodules)")
+set(PIXELU_WII_THIRD_PARTY "${PROJECT_SOURCE_DIR}/third_party" CACHE PATH
+  "Folder with the third-party library sources (what Externals/fetch.py fetches)")
+set(PIXELU_WII_QT_DIR "${PIXELU_WII_THIRD_PARTY}/Qt/6.8.3/msvc2022_64" CACHE PATH
+  "Qt 6.8.3 for MSVC x64 (the official build, as aqtinstall installs it)")
+set(PIXELU_WII_FFMPEG_DIR "${PIXELU_WII_THIRD_PARTY}/FFmpeg/x64" CACHE PATH
+  "FFmpeg static libraries and headers (what Externals/FFmpeg/build-ffmpeg.sh installs)")
 set(PIXELU_WII_DOLPHIN_DATA "${PROJECT_SOURCE_DIR}/dolphin" CACHE PATH
-  "Folder with Dolphin 2609a's Data/Sys and Languages/po (game settings, databases, translations)")
+  "Folder with Dolphin 2609a's Data/Sys/GameSettings, Data/Sys/ApprovedInis.json and Languages/po")
 
 foreach(dir "${PIXELU_WII_THIRD_PARTY}/fmt/fmt" "${PIXELU_WII_DOLPHIN_DATA}/Data/Sys")
   if(NOT EXISTS "${dir}")
-    message(FATAL_ERROR "${dir} is missing. Fetch the dolphin submodule and the third-party "
-      "submodules inside it (see .github/workflows/pixelu-wii.yml), or point "
+    message(FATAL_ERROR "${dir} is missing. Run Externals/fetch.py and fetch Dolphin's game "
+      "settings and translations (see .github/workflows/pixelu-wii.yml), or point "
       "PIXELU_WII_THIRD_PARTY / PIXELU_WII_DOLPHIN_DATA somewhere else.")
   endif()
 endforeach()
+# Third-party sources that are fetched but older than sources.json say so here.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/Externals/fetch.py" --check
+            --dest "${PIXELU_WII_THIRD_PARTY}"
+    RESULT_VARIABLE fetch_check OUTPUT_VARIABLE fetch_check_out ERROR_VARIABLE fetch_check_out)
+  if(NOT fetch_check EQUAL 0)
+    message(WARNING "${fetch_check_out}Run Externals/fetch.py to bring third_party up to date.")
+  endif()
+endif()
 set(THIRD "${PIXELU_WII_THIRD_PARTY}")
 
 ########################################
@@ -175,12 +195,12 @@ if(OPENGL_GL)
 endif()
 
 if(ENCODE_FRAMEDUMPS)
-  set(FFMPEG_DIR "${THIRD}/FFmpeg-bin/x64")
+  set(FFMPEG_DIR "${PIXELU_WII_FFMPEG_DIR}")
   find_package(FFmpeg COMPONENTS avcodec avformat avutil swresample swscale)
   if(FFmpeg_FOUND)
     message(STATUS "FFmpeg found: frame dumps are encoded")
     add_definitions(-DHAVE_FFMPEG)
-    # The prebuilt FFmpeg libraries call into bcrypt.
+    # FFmpeg's static libraries call into bcrypt (random numbers in libavutil).
     set_property(TARGET FFmpeg::avutil APPEND PROPERTY INTERFACE_LINK_LIBRARIES "Bcrypt.lib")
   else()
     message(STATUS "FFmpeg not found: no frame dump encoding")
@@ -224,7 +244,7 @@ add_subdirectory(Externals/lz4 EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/libspng EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/FreeSurround)
 add_subdirectory(Externals/ed25519)
-include_directories("${THIRD}/ed25519")
+include_directories("${THIRD}/ed25519/ed25519/src")
 
 if(ENABLE_CUBEB)
   add_subdirectory(Externals/cubeb EXCLUDE_FROM_ALL)
@@ -252,7 +272,7 @@ add_subdirectory(Externals/hidapi EXCLUDE_FROM_ALL)
 
 if(USE_DISCORD_PRESENCE)
   add_subdirectory(Externals/discord-rpc EXCLUDE_FROM_ALL)
-  include_directories("${THIRD}/discord-rpc/include")
+  include_directories("${THIRD}/discord-rpc/discord-rpc/include")
 endif()
 
 if(USE_MGBA)
@@ -260,7 +280,7 @@ if(USE_MGBA)
 endif()
 
 # Header-only pieces.
-include_directories("${THIRD}/wil/include" "${THIRD}/OpenAL/include" "${THIRD}/picojson")
+include_directories("${THIRD}/wil/include" "${THIRD}/OpenAL/openal-soft/include/AL" "${THIRD}/picojson/picojson")
 
 add_subdirectory(Externals/expr)
 add_subdirectory(Externals/FatFs)

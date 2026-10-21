@@ -1,9 +1,10 @@
 # The Qt front end: PixelU-Wii.exe.
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-# The bundled Qt 6.8.3 build (from the third-party folder). Tools such as moc
-# and windeployqt run from the host's copy, which differs on an ARM64 host.
-set(DOLPHIN_QT_ROOT "${THIRD}/Qt/Qt6.8.3/x64")
+# Qt 6.8.3's official MSVC x64 build (PIXELU_WII_QT_DIR, installed with
+# aqtinstall). Tools such as moc and windeployqt run from the host's copy,
+# which differs on an ARM64 host.
+set(DOLPHIN_QT_ROOT "${PIXELU_WII_QT_DIR}")
 set(DOLPHIN_QT_TARGET_SPEC "win32-msvc")
 if(QT_HOST_PATH)
   set(DOLPHIN_QT_HOST_ROOT "${QT_HOST_PATH}")
@@ -264,16 +265,19 @@ add_custom_command(TARGET dolphin-emu POST_BUILD
             --no-system-d3d-compiler
             --no-system-dxc-compiler
             --no-opengl-sw
+            # The official Qt build has these image formats and the touch
+            # input plugin; PixelU-Wii uses none of them (PNG and SVG only).
+            --exclude-plugins qgif,qico,qjpeg,qtuiotouchplugin
             "$<TARGET_FILE:dolphin-emu>"
   VERBATIM)
 
 # Translations: each Languages/po/<lang>.po is compiled to
-# Binaries/Languages/<lang>/dolphin-emu.mo with gettext's msgfmt (the system's,
-# or the prebuilt msgfmt.exe in the third-party folder).
+# Binaries/Languages/<lang>/dolphin-emu.mo with GNU gettext's msgfmt (found on
+# PATH, or given as -DGETTEXT_MSGFMT_EXECUTABLE=...; the workflow installs
+# MSYS2's gettext-tools). Without msgfmt there are no translations.
 find_package(Gettext)
-if(NOT GETTEXT_MSGFMT_EXECUTABLE AND EXISTS "${THIRD}/gettext/msgfmt.exe")
-  message(STATUS "msgfmt: the prebuilt one in ${THIRD}/gettext")
-  set(GETTEXT_MSGFMT_EXECUTABLE "${THIRD}/gettext/msgfmt.exe")
+if(GETTEXT_MSGFMT_EXECUTABLE)
+  message(STATUS "msgfmt: ${GETTEXT_MSGFMT_EXECUTABLE}")
 endif()
 if(GETTEXT_MSGFMT_EXECUTABLE)
   set(po_dir "${PIXELU_WII_DOLPHIN_DATA}/Languages/po")
