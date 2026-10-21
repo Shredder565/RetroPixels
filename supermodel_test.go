@@ -81,7 +81,7 @@ func setupFakeSupermodel(t *testing.T, patched bool) (exe, rom, argsFile, home s
 	}
 	off := false
 	cfgMu.Lock()
-	cfg = config{SupermodelExe: exe, SupermodelEmbed: &off, AutoRecord: &off} // docking needs Windows
+	cfg = config{SupermodelExe: exe, SupermodelDock: &off, AutoRecord: &off} // docking needs Windows
 	cfgMu.Unlock()
 	smMu.Lock()
 	smFinding, smSearched, smCheck, smProblem = false, false, nil, nil
@@ -145,7 +145,7 @@ func TestSupermodelFindsTheGameOnceAndPlaysIt(t *testing.T) {
 	}
 	waitIdle(t)
 	args, _ := os.ReadFile(argsFile)
-	want := rom + " -fullscreen -desktop-res -no-wide-screen -force-feedback -input-system=sdlgamepad\nHOME=" + home
+	want := rom + " -fullscreen -desktop-res -no-wide-screen -force-feedback -input-system=" + supermodel.InputSystem + "\nHOME=" + home
 	if got := strings.TrimSpace(string(args)); got != want {
 		t.Fatalf("args:\n got %q\nwant %q", got, want)
 	}
@@ -219,7 +219,7 @@ func TestSupermodelOfficialBuild(t *testing.T) {
 	}
 	on := true
 	cfgMu.Lock()
-	cfg.SupermodelEmbed, cfg.AutoRecord = &on, &on // neither works with the official build
+	cfg.SupermodelDock, cfg.AutoRecord = &on, &on // neither works with the official build
 	cfgMu.Unlock()
 	if err := launchSupermodel(); err != nil {
 		t.Fatal(err)

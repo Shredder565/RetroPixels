@@ -50,7 +50,7 @@ func INI(c Controls) string {
 	b.WriteString("; before each game while the first line is there; delete the first line to keep\n")
 	b.WriteString("; your own changes (or delete the file to get these settings back).\n\n")
 	b.WriteString("[ Global ]\n\n")
-	w("InputSystem", "sdlgamepad")
+	w("InputSystem", InputSystem)
 	b.WriteString("\n; Common\n")
 	w("InputStart1", "KEY_1,JOY1_BUTTON8")
 	w("InputCoin1", "KEY_5,KEY_3,JOY1_BUTTON7")

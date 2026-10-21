@@ -86,7 +86,7 @@ type config struct {
 	SupermodelExe        string    `json:"supermodelExe,omitempty"`        // chosen by the player; unset = the one next to RetroPixels
 	SupermodelROM        string    `json:"supermodelRom,omitempty"`        // the game's .zip, once found or chosen
 	SupermodelFullscreen *bool     `json:"supermodelFullscreen,omitempty"` // unset = on
-	SupermodelEmbed      *bool     `json:"supermodelEmbed,omitempty"`      // unset = on
+	SupermodelDock       *bool     `json:"supermodelDock,omitempty"`       // unset = off: fullscreen in its own window
 	SupermodelWide       bool      `json:"supermodelWide,omitempty"`       // 3D view fills a wide screen
 	SupermodelInvertY    bool      `json:"supermodelInvertY,omitempty"`    // stick up dives, like the arcade's flight yoke
 	SupermodelPlayed     time.Time `json:"supermodelPlayed,omitempty"`

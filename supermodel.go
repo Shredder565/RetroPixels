@@ -167,7 +167,7 @@ func useSupermodelROM(p string) error {
 func supermodelFullscreenOn() bool {
 	return cfg.SupermodelFullscreen == nil || *cfg.SupermodelFullscreen
 }
-func supermodelEmbedOn() bool { return cfg.SupermodelEmbed == nil || *cfg.SupermodelEmbed }
+func supermodelEmbedOn() bool { return cfg.SupermodelDock != nil && *cfg.SupermodelDock }
 
 func supermodelRunning() bool {
 	runMu.Lock()
@@ -398,7 +398,7 @@ func registerSupermodelRoutes(mux *http.ServeMux) {
 		case "fullscreen":
 			set(func() { cfg.SupermodelFullscreen = &on })
 		case "embed":
-			set(func() { cfg.SupermodelEmbed = &on })
+			set(func() { cfg.SupermodelDock = &on })
 		case "wide":
 			set(func() { cfg.SupermodelWide = on })
 		case "invert-y":

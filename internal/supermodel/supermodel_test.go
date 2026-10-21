@@ -143,12 +143,12 @@ func TestGameArgs(t *testing.T) {
 	docked := GameArgs(rom, LaunchOptions{Embed: true, Hidden: true, ForceFeedback: true, Patched: true,
 		RecordDir: filepath.Join("C:", "rec"), FFmpeg: filepath.Join("C:", "ffmpeg.exe")})
 	want := []string{rom, "-window", "-borderless", "-window-pos=-20000,-20000", "-no-wide-screen", "-force-feedback",
-		"-input-system=sdlgamepad", "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
+		"-input-system=" + InputSystem, "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
 	if !reflect.DeepEqual(docked, want) {
 		t.Fatalf("docked:\n got %q\nwant %q", docked, want)
 	}
 	full := GameArgs(rom, LaunchOptions{Fullscreen: true, WideScreen: true, Patched: true})
-	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=sdlgamepad"}) {
+	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=" + InputSystem}) {
 		t.Fatalf("fullscreen: %q", full)
 	}
 	// The official build knows none of RetroPixels' options.
@@ -165,7 +165,7 @@ func TestGameArgs(t *testing.T) {
 func TestINI(t *testing.T) {
 	s := INI(Controls{})
 	for _, want := range []string{
-		iniMarker, "[ Global ]", `InputSystem = "sdlgamepad"`,
+		iniMarker, "[ Global ]", `InputSystem = "` + InputSystem + `"`,
 		`InputStart1 = "KEY_1,JOY1_BUTTON8"`, `InputCoin1 = "KEY_5,KEY_3,JOY1_BUTTON7"`,
 		`InputAnalogJoyX = "JOY1_XAXIS"`, `InputAnalogJoyY = "JOY1_YAXIS"`,
 		`InputAnalogJoyTrigger = "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS"`,

@@ -84,9 +84,11 @@ These live in `internal/supermodel/ini.go` and `GameArgs`.
 - **Keyboard (as on the MAME tab).** 5 coin, 1 start, arrow keys, Ctrl/A fire,
   Alt/S event, F2 test menu, 9 service, Esc leaves.
 - **Sound.** MusicVolume 70 for both sets.
-- **Command line.** `-input-system=sdlgamepad`, `-force-feedback` when the
+- **Command line.** `-input-system=xinput` on Windows (Xbox controllers read
+  directly, with rumble, focused or not) and `sdlgamepad` elsewhere, `-force-feedback` when the
   drive board ROM is there, and a wide-screen option.
-  - Docked (the default, needs the patched build): `-window -borderless`,
+  - Fullscreen in its own window is the default (owner, 2026-10-21).
+  - Docked ("Play inside RetroPixels", needs the patched build): `-window -borderless`,
     placed off-screen until RetroPixels docks it as an owned overlay window,
     like PixelU, because an OpenGL child window of the WebView doesn't show.
   - Not docked: `-fullscreen -desktop-res`, or `-window -res=992,768`.

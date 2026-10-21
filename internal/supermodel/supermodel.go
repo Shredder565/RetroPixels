@@ -116,10 +116,9 @@ func GameArgs(rom string, o LaunchOptions) []string {
 	if o.ForceFeedback {
 		args = append(args, "-force-feedback")
 	}
-	// Controllers through SDL's game controller support: every Xbox-style
-	// pad gets the same button numbers (see INI), and it keeps working
-	// while the docked window doesn't have the focus.
-	args = append(args, "-input-system=sdlgamepad")
+	// Xbox controllers by default (InputSystem: XInput on Windows, SDL's
+	// game controller support elsewhere; both number the buttons as INI does).
+	args = append(args, "-input-system="+InputSystem)
 	if o.Patched && o.RecordDir != "" && o.FFmpeg != "" {
 		args = append(args, "-rp-record="+o.RecordDir, "-rp-ffmpeg="+o.FFmpeg)
 	}
