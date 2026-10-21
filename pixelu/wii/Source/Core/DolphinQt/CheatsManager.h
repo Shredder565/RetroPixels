@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -29,6 +28,8 @@ enum class State;
 class System;
 }  // namespace Core
 
+// Tools > Cheats Manager: the AR and Gecko code lists of the running game, plus one tab per
+// memory search the user starts.
 class CheatsManager : public QDialog
 {
   Q_OBJECT
@@ -49,30 +50,28 @@ protected:
   void showEvent(QShowEvent* event) override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void OnStateChanged(Core::State state);
-  void OnFrameEnd();
-  void RegisterAfterFrameEventCallback();
-  void RemoveAfterFrameEventCallback();
-  void OnNewSessionCreated(const Cheats::CheatSearchSessionBase& session);
-  void OnTabCloseRequested(int index);
+  void BuildTabs();
+  void Connect();
+  void OnEmulationState(Core::State state);
+  void OnFieldEnd();
+  void AddSearchTab(const Cheats::CheatSearchSessionBase& session);
+  void CloseTab(int index);
+  void FollowGame(Core::State state);
+  void RefreshAllSearches();
 
-  void RefreshCodeTabs(Core::State state);
-  void UpdateAllCheatSearchWidgetCurrentValues();
-
+  // The game whose codes the AR and Gecko tabs show (empty while nothing runs).
   std::string m_game_id;
   std::string m_game_tdb_id;
   u16 m_revision = 0;
 
   Core::System& m_system;
 
-  QDialogButtonBox* m_button_box;
-  PartiallyClosableTabWidget* m_tab_widget = nullptr;
+  QDialogButtonBox* m_buttons = nullptr;
+  PartiallyClosableTabWidget* m_tabs = nullptr;
+  ARCodeWidget* m_ar_codes = nullptr;
+  GeckoCodeWidget* m_gecko_codes = nullptr;
+  CheatSearchFactoryWidget* m_new_search = nullptr;
 
-  ARCodeWidget* m_ar_code = nullptr;
-  GeckoCodeWidget* m_gecko_code = nullptr;
-  CheatSearchFactoryWidget* m_cheat_search_new = nullptr;
-
-  Common::EventHook m_VI_end_field_event;
+  // Set while the window is shown, to refresh the visible search results once per field.
+  Common::EventHook m_field_end_hook;
 };

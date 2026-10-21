@@ -1,9 +1,9 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/CheatSearchFactoryWidget.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QButtonGroup>
@@ -25,135 +25,137 @@
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 
+Q_DECLARE_METATYPE(Cheats::DataType);
+
+namespace
+{
+// Where MEM1 and MEM2 appear in the virtual address space.
+constexpr u32 MEM1_VIRTUAL_BASE = 0x80000000;
+constexpr u32 MEM2_VIRTUAL_BASE = 0x90000000;
+
+// A custom range may end at most at the top of the 32-bit address space.
+constexpr u64 ADDRESS_SPACE_END = 0x1'0000'0000;
+
+// Index of "32-bit Signed Integer", the type selected at first.
+constexpr int DEFAULT_DATA_TYPE_INDEX = 6;
+}  // namespace
+
 CheatSearchFactoryWidget::CheatSearchFactoryWidget()
 {
-  CreateWidgets();
-  ConnectWidgets();
-  RefreshGui();
+  auto* const layout = new QVBoxLayout{this};
+  layout->addWidget(BuildAddressSpaceGroup());
+  layout->addWidget(BuildDataTypeGroup());
+
+  m_new_search = new NonDefaultQPushButton(tr("New Search"));
+  layout->addWidget(m_new_search);
+  layout->addStretch();
+
+  connect(m_new_search, &QPushButton::clicked, this, &CheatSearchFactoryWidget::CreateSession);
+  connect(m_standard_space, &QPushButton::toggled, this,
+          &CheatSearchFactoryWidget::UpdateCustomRangeControls);
+  connect(m_custom_space, &QRadioButton::toggled, this,
+          &CheatSearchFactoryWidget::UpdateCustomRangeControls);
+
+  UpdateCustomRangeControls();
 }
 
 CheatSearchFactoryWidget::~CheatSearchFactoryWidget() = default;
 
-Q_DECLARE_METATYPE(Cheats::DataType);
-
-void CheatSearchFactoryWidget::CreateWidgets()
+QWidget* CheatSearchFactoryWidget::BuildAddressSpaceGroup()
 {
-  auto* const layout = new QVBoxLayout{this};
+  auto* const group = new QGroupBox(tr("Address Space"));
+  auto* const group_layout = new QVBoxLayout();
+  group->setLayout(group_layout);
 
-  auto* address_space_group = new QGroupBox(tr("Address Space"));
-  auto* address_space_layout = new QVBoxLayout();
-  address_space_group->setLayout(address_space_layout);
+  // Standard and custom are exclusive with each other through their common parent; the three
+  // custom modes have a button group of their own.
+  m_standard_space = new QRadioButton(tr("Typical GameCube/Wii Address Space"));
+  m_standard_space->setChecked(true);
+  m_custom_space = new QRadioButton(tr("Custom Address Space"));
 
-  m_standard_address_space = new QRadioButton(tr("Typical GameCube/Wii Address Space"));
-  m_standard_address_space->setChecked(true);
-  m_custom_address_space = new QRadioButton(tr("Custom Address Space"));
-
-  QLabel* label_standard_address_space =
+  auto* const standard_hint =
       new QLabel(tr("Sets up the search using standard MEM1 and (on Wii) MEM2 mappings in virtual "
                     "address space. This will work for the vast majority of games."));
-  label_standard_address_space->setWordWrap(true);
+  standard_hint->setWordWrap(true);
 
-  auto* custom_address_space_layout = new QVBoxLayout();
-  custom_address_space_layout->setContentsMargins(6, 6, 6, 6);
-  auto* custom_address_space_button_group = new QButtonGroup(this);
-  m_custom_virtual_address_space = new QRadioButton(tr("Use virtual addresses when possible"));
-  m_custom_virtual_address_space->setChecked(true);
-  m_custom_physical_address_space = new QRadioButton(tr("Use physical addresses"));
-  m_custom_effective_address_space =
-      new QRadioButton(tr("Use memory mapper configuration at time of scan"));
-  custom_address_space_button_group->addButton(m_custom_virtual_address_space);
-  custom_address_space_button_group->addButton(m_custom_physical_address_space);
-  custom_address_space_button_group->addButton(m_custom_effective_address_space);
-  custom_address_space_layout->addWidget(m_custom_virtual_address_space);
-  custom_address_space_layout->addWidget(m_custom_physical_address_space);
-  custom_address_space_layout->addWidget(m_custom_effective_address_space);
+  auto* const custom_layout = new QVBoxLayout();
+  custom_layout->setContentsMargins(6, 6, 6, 6);
 
-  QLabel* label_range_start = new QLabel(tr("Range Start: "));
-  m_custom_address_start = new QLineEdit(QStringLiteral("0x80000000"));
-  QLabel* label_range_end = new QLabel(tr("Range End: "));
-  m_custom_address_end = new QLineEdit(QStringLiteral("0x81800000"));
-  custom_address_space_layout->addWidget(label_range_start);
-  custom_address_space_layout->addWidget(m_custom_address_start);
-  custom_address_space_layout->addWidget(label_range_end);
-  custom_address_space_layout->addWidget(m_custom_address_end);
+  auto* const modes = new QButtonGroup(this);
+  m_virtual_addresses = new QRadioButton(tr("Use virtual addresses when possible"));
+  m_virtual_addresses->setChecked(true);
+  m_physical_addresses = new QRadioButton(tr("Use physical addresses"));
+  m_effective_addresses = new QRadioButton(tr("Use memory mapper configuration at time of scan"));
+  for (QRadioButton* const mode : {m_virtual_addresses, m_physical_addresses, m_effective_addresses})
+    modes->addButton(mode);
+  for (QRadioButton* const mode : {m_virtual_addresses, m_physical_addresses, m_effective_addresses})
+    custom_layout->addWidget(mode);
 
-  address_space_layout->addWidget(m_standard_address_space);
-  address_space_layout->addWidget(label_standard_address_space);
-  address_space_layout->addWidget(m_custom_address_space);
-  address_space_layout->addLayout(custom_address_space_layout);
+  auto* const start_label = new QLabel(tr("Range Start: "));
+  m_range_start = new QLineEdit(QStringLiteral("0x80000000"));
+  auto* const end_label = new QLabel(tr("Range End: "));
+  m_range_end = new QLineEdit(QStringLiteral("0x81800000"));
+  custom_layout->addWidget(start_label);
+  custom_layout->addWidget(m_range_start);
+  custom_layout->addWidget(end_label);
+  custom_layout->addWidget(m_range_end);
 
-  layout->addWidget(address_space_group);
-
-  auto* data_type_group = new QGroupBox(tr("Data Type"));
-  auto* data_type_layout = new QVBoxLayout();
-  data_type_group->setLayout(data_type_layout);
-
-  m_data_type_dropdown = new QComboBox();
-  m_data_type_dropdown->addItem(tr("8-bit Unsigned Integer"),
-                                QVariant::fromValue(Cheats::DataType::U8));
-  m_data_type_dropdown->addItem(tr("16-bit Unsigned Integer"),
-                                QVariant::fromValue(Cheats::DataType::U16));
-  m_data_type_dropdown->addItem(tr("32-bit Unsigned Integer"),
-                                QVariant::fromValue(Cheats::DataType::U32));
-  m_data_type_dropdown->addItem(tr("64-bit Unsigned Integer"),
-                                QVariant::fromValue(Cheats::DataType::U64));
-  m_data_type_dropdown->addItem(tr("8-bit Signed Integer"),
-                                QVariant::fromValue(Cheats::DataType::S8));
-  m_data_type_dropdown->addItem(tr("16-bit Signed Integer"),
-                                QVariant::fromValue(Cheats::DataType::S16));
-  m_data_type_dropdown->addItem(tr("32-bit Signed Integer"),
-                                QVariant::fromValue(Cheats::DataType::S32));
-  m_data_type_dropdown->addItem(tr("64-bit Signed Integer"),
-                                QVariant::fromValue(Cheats::DataType::S64));
-  m_data_type_dropdown->addItem(tr("32-bit Float"), QVariant::fromValue(Cheats::DataType::F32));
-  m_data_type_dropdown->addItem(tr("64-bit Float"), QVariant::fromValue(Cheats::DataType::F64));
-  m_data_type_dropdown->setCurrentIndex(6);  // select 32bit signed int by default
-
-  data_type_layout->addWidget(m_data_type_dropdown);
-
-  m_data_type_aligned = new QCheckBox(tr("Aligned to data type length"));
-  m_data_type_aligned->setChecked(true);
-
-  data_type_layout->addWidget(m_data_type_aligned);
-
-  layout->addWidget(data_type_group);
-
-  m_new_search = new NonDefaultQPushButton(tr("New Search"));
-  layout->addWidget(m_new_search);
-
-  layout->addStretch();
+  group_layout->addWidget(m_standard_space);
+  group_layout->addWidget(standard_hint);
+  group_layout->addWidget(m_custom_space);
+  group_layout->addLayout(custom_layout);
+  return group;
 }
 
-void CheatSearchFactoryWidget::ConnectWidgets()
+QWidget* CheatSearchFactoryWidget::BuildDataTypeGroup()
 {
-  connect(m_new_search, &QPushButton::clicked, this, &CheatSearchFactoryWidget::OnNewSearchClicked);
-  connect(m_standard_address_space, &QPushButton::toggled, this,
-          &CheatSearchFactoryWidget::OnAddressSpaceRadioChanged);
-  connect(m_custom_address_space, &QRadioButton::toggled, this,
-          &CheatSearchFactoryWidget::OnAddressSpaceRadioChanged);
+  auto* const group = new QGroupBox(tr("Data Type"));
+  auto* const group_layout = new QVBoxLayout();
+  group->setLayout(group_layout);
+
+  m_data_type = new QComboBox();
+  const std::pair<QString, Cheats::DataType> types[] = {
+      {tr("8-bit Unsigned Integer"), Cheats::DataType::U8},
+      {tr("16-bit Unsigned Integer"), Cheats::DataType::U16},
+      {tr("32-bit Unsigned Integer"), Cheats::DataType::U32},
+      {tr("64-bit Unsigned Integer"), Cheats::DataType::U64},
+      {tr("8-bit Signed Integer"), Cheats::DataType::S8},
+      {tr("16-bit Signed Integer"), Cheats::DataType::S16},
+      {tr("32-bit Signed Integer"), Cheats::DataType::S32},
+      {tr("64-bit Signed Integer"), Cheats::DataType::S64},
+      {tr("32-bit Float"), Cheats::DataType::F32},
+      {tr("64-bit Float"), Cheats::DataType::F64},
+  };
+  for (const auto& [name, type] : types)
+    m_data_type->addItem(name, QVariant::fromValue(type));
+  m_data_type->setCurrentIndex(DEFAULT_DATA_TYPE_INDEX);
+  group_layout->addWidget(m_data_type);
+
+  m_aligned = new QCheckBox(tr("Aligned to data type length"));
+  m_aligned->setChecked(true);
+  group_layout->addWidget(m_aligned);
+  return group;
 }
 
-void CheatSearchFactoryWidget::RefreshGui()
+void CheatSearchFactoryWidget::UpdateCustomRangeControls()
 {
-  bool enable_custom = m_custom_address_space->isChecked();
-  m_custom_virtual_address_space->setEnabled(enable_custom);
-  m_custom_physical_address_space->setEnabled(enable_custom);
-  m_custom_effective_address_space->setEnabled(enable_custom);
-  m_custom_address_start->setEnabled(enable_custom);
-  m_custom_address_end->setEnabled(enable_custom);
-}
-
-void CheatSearchFactoryWidget::OnAddressSpaceRadioChanged()
-{
-  RefreshGui();
-}
-
-void CheatSearchFactoryWidget::OnNewSearchClicked()
-{
-  std::vector<Cheats::MemoryRange> memory_ranges;
-  PowerPC::RequestedAddressSpace address_space;
-  if (m_standard_address_space->isChecked())
+  const bool custom = m_custom_space->isChecked();
+  for (QWidget* const control : std::initializer_list<QWidget*>{
+           m_virtual_addresses, m_physical_addresses, m_effective_addresses, m_range_start,
+           m_range_end})
   {
+    control->setEnabled(custom);
+  }
+}
+
+void CheatSearchFactoryWidget::CreateSession()
+{
+  std::vector<Cheats::MemoryRange> ranges;
+  PowerPC::RequestedAddressSpace space = PowerPC::RequestedAddressSpace::Virtual;
+
+  if (m_standard_space->isChecked())
+  {
+    // The standard ranges depend on the console and memory size of the running game.
     auto& system = Core::System::GetInstance();
     if (!Core::IsRunning(system))
     {
@@ -164,36 +166,36 @@ void CheatSearchFactoryWidget::OnNewSearchClicked()
     }
 
     auto& memory = system.GetMemory();
-    memory_ranges.emplace_back(0x80000000, memory.GetRamSizeReal());
+    ranges.emplace_back(MEM1_VIRTUAL_BASE, memory.GetRamSizeReal());
     if (system.IsWii())
-      memory_ranges.emplace_back(0x90000000, memory.GetExRamSizeReal());
-    address_space = PowerPC::RequestedAddressSpace::Virtual;
+      ranges.emplace_back(MEM2_VIRTUAL_BASE, memory.GetExRamSizeReal());
   }
   else
   {
-    const std::string address_start_str = m_custom_address_start->text().toStdString();
-    const std::string address_end_str = m_custom_address_end->text().toStdString();
-
-    u64 address_start;
-    u64 address_end;
-    if (!TryParse(address_start_str, &address_start) || !TryParse(address_end_str, &address_end))
+    // Invalid or empty ranges are silently ignored.
+    u64 start = 0;
+    u64 end = 0;
+    if (!TryParse(m_range_start->text().toStdString(), &start) ||
+        !TryParse(m_range_end->text().toStdString(), &end))
+    {
       return;
-    if (address_end <= address_start || address_end > 0x1'0000'0000)
+    }
+    if (end <= start || end > ADDRESS_SPACE_END)
       return;
 
-    memory_ranges.emplace_back(static_cast<u32>(address_start), address_end - address_start);
+    ranges.emplace_back(static_cast<u32>(start), end - start);
 
-    if (m_custom_virtual_address_space->isChecked())
-      address_space = PowerPC::RequestedAddressSpace::Virtual;
-    else if (m_custom_physical_address_space->isChecked())
-      address_space = PowerPC::RequestedAddressSpace::Physical;
+    if (m_virtual_addresses->isChecked())
+      space = PowerPC::RequestedAddressSpace::Virtual;
+    else if (m_physical_addresses->isChecked())
+      space = PowerPC::RequestedAddressSpace::Physical;
     else
-      address_space = PowerPC::RequestedAddressSpace::Effective;
+      space = PowerPC::RequestedAddressSpace::Effective;
   }
 
-  bool aligned = m_data_type_aligned->isChecked();
-  auto data_type = m_data_type_dropdown->currentData().value<Cheats::DataType>();
-  auto session = Cheats::MakeSession(std::move(memory_ranges), address_space, aligned, data_type);
+  const bool aligned = m_aligned->isChecked();
+  const auto type = m_data_type->currentData().value<Cheats::DataType>();
+  const auto session = Cheats::MakeSession(std::move(ranges), space, aligned, type);
   if (session)
     emit NewSessionCreated(*session);
 }

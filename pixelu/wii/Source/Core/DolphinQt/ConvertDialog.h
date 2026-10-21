@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,6 +22,7 @@ namespace UICommon
 class GameFile;
 }
 
+// Converts one or more disc images to ISO, GCZ, WIA or RVZ.
 class ConvertDialog final : public QDialog
 {
   Q_OBJECT
@@ -31,22 +31,20 @@ public:
   explicit ConvertDialog(QList<std::shared_ptr<const UICommon::GameFile>> files,
                          QWidget* parent = nullptr);
 
-private slots:
+private:
+  void FillBlockSizes(DiscIO::BlobType format);
+  void FillCompressionMethods(DiscIO::BlobType format);
+  void AddBlockSize(int size);
   void OnFormatChanged();
   void OnCompressionChanged();
+  bool Confirm(const QString& question);
+  bool ConfirmSettings(DiscIO::BlobType format, bool scrub);
   void Convert();
 
-private:
-  void AddToBlockSizeComboBox(int size);
-  void AddToCompressionComboBox(const QString& name, DiscIO::WIARVZCompressionType type);
-  void AddToCompressionLevelComboBox(int level);
-
-  bool ShowAreYouSureDialog(const QString& text);
-
-  QComboBox* m_format;
-  QComboBox* m_block_size;
-  QComboBox* m_compression;
-  QComboBox* m_compression_level;
-  QCheckBox* m_scrub;
+  QComboBox* m_format = nullptr;
+  QComboBox* m_block_size = nullptr;
+  QComboBox* m_compression = nullptr;
+  QComboBox* m_compression_level = nullptr;
+  QCheckBox* m_scrub = nullptr;
   QList<std::shared_ptr<const UICommon::GameFile>> m_files;
 };

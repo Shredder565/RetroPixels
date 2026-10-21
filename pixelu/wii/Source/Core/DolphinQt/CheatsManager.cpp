@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/CheatsManager.h"
 
@@ -23,162 +22,155 @@
 
 #include "VideoCommon/VideoEvents.h"
 
+namespace
+{
+const QString GEOMETRY_KEY = QStringLiteral("cheatsmanager/geometry");
+}
+
 CheatsManager::CheatsManager(Core::System& system, QWidget* parent)
     : QDialog(parent), m_system(system)
 {
   setWindowTitle(tr("Cheats Manager"));
 
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
-          &CheatsManager::OnStateChanged);
+          &CheatsManager::OnEmulationState);
 
-  CreateWidgets();
-  ConnectWidgets();
+  BuildTabs();
+  Connect();
 
-  OnStateChanged(Core::GetState(system));
+  OnEmulationState(Core::GetState(system));
 
   QtUtils::AdjustSizeWithinScreen(this);
-
-  auto& settings = Settings::GetQSettings();
-  restoreGeometry(settings.value(QStringLiteral("cheatsmanager/geometry")).toByteArray());
+  restoreGeometry(Settings::GetQSettings().value(GEOMETRY_KEY).toByteArray());
 }
 
 CheatsManager::~CheatsManager()
 {
-  auto& settings = Settings::GetQSettings();
-  settings.setValue(QStringLiteral("cheatsmanager/geometry"), saveGeometry());
+  Settings::GetQSettings().setValue(GEOMETRY_KEY, saveGeometry());
 }
 
-void CheatsManager::OnStateChanged(Core::State state)
+void CheatsManager::OnEmulationState(Core::State state)
 {
-  RefreshCodeTabs(state);
+  FollowGame(state);
+
+  // Pausing is a good moment to show the values the game left in memory.
   if (state == Core::State::Paused)
-    UpdateAllCheatSearchWidgetCurrentValues();
+    RefreshAllSearches();
 }
 
-void CheatsManager::OnFrameEnd()
+void CheatsManager::OnFieldEnd()
 {
   if (!isVisible())
     return;
 
-  auto* const selected_cheat_search_widget =
-      qobject_cast<CheatSearchWidget*>(m_tab_widget->currentWidget());
-  if (selected_cheat_search_widget != nullptr)
+  // Only the search the user is looking at is refreshed every field.
+  if (auto* const search = qobject_cast<CheatSearchWidget*>(m_tabs->currentWidget()))
+    search->UpdateTableVisibleCurrentValues(CheatSearchWidget::UpdateSource::Auto);
+}
+
+void CheatsManager::RefreshAllSearches()
+{
+  const int tab_count = m_tabs->count();
+  for (int tab = 0; tab < tab_count; ++tab)
   {
-    selected_cheat_search_widget->UpdateTableVisibleCurrentValues(
-        CheatSearchWidget::UpdateSource::Auto);
+    if (auto* const search = qobject_cast<CheatSearchWidget*>(m_tabs->widget(tab)))
+      search->UpdateTableAllCurrentValues(CheatSearchWidget::UpdateSource::Auto);
   }
 }
 
-void CheatsManager::UpdateAllCheatSearchWidgetCurrentValues()
+void CheatsManager::showEvent(QShowEvent*)
 {
-  for (int i = 0; i < m_tab_widget->count(); ++i)
-  {
-    auto* const cheat_search_widget = qobject_cast<CheatSearchWidget*>(m_tab_widget->widget(i));
-    if (cheat_search_widget != nullptr)
-      cheat_search_widget->UpdateTableAllCurrentValues(CheatSearchWidget::UpdateSource::Auto);
-  }
+  m_field_end_hook =
+      m_system.GetVideoEvents().vi_end_field_event.Register([this] { OnFieldEnd(); });
 }
 
-void CheatsManager::RegisterAfterFrameEventCallback()
+void CheatsManager::hideEvent(QHideEvent*)
 {
-  m_VI_end_field_event =
-      m_system.GetVideoEvents().vi_end_field_event.Register([this] { OnFrameEnd(); });
+  m_field_end_hook.reset();
 }
 
-void CheatsManager::RemoveAfterFrameEventCallback()
+void CheatsManager::FollowGame(Core::State state)
 {
-  m_VI_end_field_event.reset();
-}
-
-void CheatsManager::hideEvent(QHideEvent* event)
-{
-  RemoveAfterFrameEventCallback();
-}
-
-void CheatsManager::showEvent(QShowEvent* event)
-{
-  RegisterAfterFrameEventCallback();
-}
-
-void CheatsManager::RefreshCodeTabs(Core::State state)
-{
+  // The game is not settled while emulation starts or stops.
   if (state == Core::State::Starting || state == Core::State::Stopping)
     return;
 
-  const auto& game_id = state == Core::State::Running || state == Core::State::Paused ?
-                            SConfig::GetInstance().GetGameID() :
-                            std::string();
-  const auto& game_tdb_id = SConfig::GetInstance().GetGameTDBID();
-  const u16 revision = SConfig::GetInstance().GetRevision();
+  const bool game_running = state == Core::State::Running || state == Core::State::Paused;
+  const SConfig& config = SConfig::GetInstance();
+  std::string game_id = game_running ? config.GetGameID() : std::string();
+  std::string game_tdb_id = config.GetGameTDBID();
+  const u16 revision = config.GetRevision();
 
-  if (m_game_id == game_id && m_game_tdb_id == game_tdb_id && m_revision == revision)
+  if (game_id == m_game_id && game_tdb_id == m_game_tdb_id && revision == m_revision)
     return;
 
-  m_game_id = game_id;
-  m_game_tdb_id = game_tdb_id;
+  m_game_id = std::move(game_id);
+  m_game_tdb_id = std::move(game_tdb_id);
   m_revision = revision;
 
-  m_ar_code->ChangeGame(m_game_id, m_revision);
-  m_gecko_code->ChangeGame(m_game_id, m_game_tdb_id, m_revision);
+  m_ar_codes->ChangeGame(m_game_id, m_revision);
+  m_gecko_codes->ChangeGame(m_game_id, m_game_tdb_id, m_revision);
 }
 
-void CheatsManager::CreateWidgets()
+void CheatsManager::BuildTabs()
 {
-  m_tab_widget = new PartiallyClosableTabWidget;
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
+  m_tabs = new PartiallyClosableTabWidget;
+  m_buttons = new QDialogButtonBox(QDialogButtonBox::Close);
 
-  int tab_index = 0;
+  // The first three tabs are permanent; only search tabs can be closed.
+  const auto add_permanent_tab = [this](QWidget* page, const QString& title) {
+    m_tabs->setTabUnclosable(m_tabs->addTab(GetWrappedWidget(page), title));
+  };
 
-  m_ar_code = new ARCodeWidget(m_game_id, m_revision, false);
-  tab_index = m_tab_widget->addTab(GetWrappedWidget(m_ar_code), tr("AR Code"));
-  m_tab_widget->setTabUnclosable(tab_index);
+  m_ar_codes = new ARCodeWidget(m_game_id, m_revision, false);
+  add_permanent_tab(m_ar_codes, tr("AR Code"));
 
-  m_gecko_code = new GeckoCodeWidget(m_game_id, m_game_tdb_id, m_revision, false);
-  tab_index = m_tab_widget->addTab(GetWrappedWidget(m_gecko_code), tr("Gecko Codes"));
-  m_tab_widget->setTabUnclosable(tab_index);
+  m_gecko_codes = new GeckoCodeWidget(m_game_id, m_game_tdb_id, m_revision, false);
+  add_permanent_tab(m_gecko_codes, tr("Gecko Codes"));
 
-  m_cheat_search_new = new CheatSearchFactoryWidget();
-  tab_index =
-      m_tab_widget->addTab(GetWrappedWidget(m_cheat_search_new), tr("Start New Cheat Search"));
-  m_tab_widget->setTabUnclosable(tab_index);
+  m_new_search = new CheatSearchFactoryWidget();
+  add_permanent_tab(m_new_search, tr("Start New Cheat Search"));
 
-  auto* layout = new QVBoxLayout;
-  layout->addWidget(m_tab_widget);
-  layout->addWidget(m_button_box);
-
+  auto* const layout = new QVBoxLayout;
+  layout->addWidget(m_tabs);
+  layout->addWidget(m_buttons);
   setLayout(layout);
 }
 
-void CheatsManager::OnNewSessionCreated(const Cheats::CheatSearchSessionBase& session)
+void CheatsManager::AddSearchTab(const Cheats::CheatSearchSessionBase& session)
 {
-  auto* w = new CheatSearchWidget(m_system, session.Clone());
-  const int tab_index = m_tab_widget->addTab(w, tr("Cheat Search"));
-  connect(w, &CheatSearchWidget::ActionReplayCodeGenerated, m_ar_code, &ARCodeWidget::AddCode);
-  connect(w, &CheatSearchWidget::ShowMemory, this, &CheatsManager::ShowMemory);
-  connect(w, &CheatSearchWidget::RequestWatch, this, &CheatsManager::RequestWatch);
-  m_tab_widget->setCurrentIndex(tab_index);
+  auto* const search = new CheatSearchWidget(m_system, session.Clone());
+  const int tab = m_tabs->addTab(search, tr("Cheat Search"));
+
+  connect(search, &CheatSearchWidget::ActionReplayCodeGenerated, m_ar_codes,
+          &ARCodeWidget::AddCode);
+  connect(search, &CheatSearchWidget::ShowMemory, this, &CheatsManager::ShowMemory);
+  connect(search, &CheatSearchWidget::RequestWatch, this, &CheatsManager::RequestWatch);
+
+  m_tabs->setCurrentIndex(tab);
 }
 
-void CheatsManager::OnTabCloseRequested(int index)
+void CheatsManager::CloseTab(int index)
 {
-  auto* w = m_tab_widget->widget(index);
-  if (w)
-    w->deleteLater();
+  if (QWidget* const page = m_tabs->widget(index))
+    page->deleteLater();
 }
 
-void CheatsManager::ConnectWidgets()
+void CheatsManager::Connect()
 {
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-  connect(m_cheat_search_new, &CheatSearchFactoryWidget::NewSessionCreated, this,
-          &CheatsManager::OnNewSessionCreated);
-  connect(m_tab_widget, &QTabWidget::tabCloseRequested, this, &CheatsManager::OnTabCloseRequested);
-  connect(m_ar_code, &ARCodeWidget::OpenGeneralSettings, this, &CheatsManager::OpenGeneralSettings);
-  connect(m_gecko_code, &GeckoCodeWidget::OpenGeneralSettings, this,
+  connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(m_new_search, &CheatSearchFactoryWidget::NewSessionCreated, this,
+          &CheatsManager::AddSearchTab);
+  connect(m_tabs, &QTabWidget::tabCloseRequested, this, &CheatsManager::CloseTab);
+
+  connect(m_ar_codes, &ARCodeWidget::OpenGeneralSettings, this,
+          &CheatsManager::OpenGeneralSettings);
+  connect(m_gecko_codes, &GeckoCodeWidget::OpenGeneralSettings, this,
           &CheatsManager::OpenGeneralSettings);
 #ifdef USE_RETRO_ACHIEVEMENTS
-  connect(m_ar_code, &ARCodeWidget::OpenAchievementSettings, this,
+  connect(m_ar_codes, &ARCodeWidget::OpenAchievementSettings, this,
           &CheatsManager::OpenAchievementSettings);
-  connect(m_gecko_code, &GeckoCodeWidget::OpenAchievementSettings, this,
+  connect(m_gecko_codes, &GeckoCodeWidget::OpenAchievementSettings, this,
           &CheatsManager::OpenAchievementSettings);
 #endif  // USE_RETRO_ACHIEVEMENTS
 }

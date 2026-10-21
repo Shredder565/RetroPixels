@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class QLineEdit;
 class QPushButton;
 class QRadioButton;
 
+// The "Start New Cheat Search" tab: picks the memory ranges and the data type, then hands a
+// fresh search session to the cheats manager.
 class CheatSearchFactoryWidget : public QWidget
 {
   Q_OBJECT
@@ -24,26 +25,23 @@ signals:
   void NewSessionCreated(const Cheats::CheatSearchSessionBase& session);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  QWidget* BuildAddressSpaceGroup();
+  QWidget* BuildDataTypeGroup();
+  void UpdateCustomRangeControls();
+  void CreateSession();
 
-  void RefreshGui();
+  QRadioButton* m_standard_space = nullptr;
+  QRadioButton* m_custom_space = nullptr;
 
-  void OnAddressSpaceRadioChanged();
-  void OnNewSearchClicked();
+  QRadioButton* m_virtual_addresses = nullptr;
+  QRadioButton* m_physical_addresses = nullptr;
+  QRadioButton* m_effective_addresses = nullptr;
 
-  QRadioButton* m_standard_address_space;
-  QRadioButton* m_custom_address_space;
+  QLineEdit* m_range_start = nullptr;
+  QLineEdit* m_range_end = nullptr;
 
-  QRadioButton* m_custom_virtual_address_space;
-  QRadioButton* m_custom_physical_address_space;
-  QRadioButton* m_custom_effective_address_space;
+  QComboBox* m_data_type = nullptr;
+  QCheckBox* m_aligned = nullptr;
 
-  QLineEdit* m_custom_address_start;
-  QLineEdit* m_custom_address_end;
-
-  QComboBox* m_data_type_dropdown;
-  QCheckBox* m_data_type_aligned;
-
-  QPushButton* m_new_search;
+  QPushButton* m_new_search = nullptr;
 };
