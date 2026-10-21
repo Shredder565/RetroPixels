@@ -116,6 +116,17 @@ bool DropFromTextureSlots(ID3D11ShaderResourceView* srv)
 {
   return D3D::stateman->UnsetTexture(srv) != 0;
 }
+// A rectangle with a non-negative origin that ends inside width x height.
+bool FitsIn(const MathUtil::Rectangle<int>& rect, u32 width, u32 height)
+{
+  return rect.left >= 0 && rect.top >= 0 && static_cast<u32>(rect.right) <= width &&
+         static_cast<u32>(rect.bottom) <= height;
+}
+
+bool SameSize(const MathUtil::Rectangle<int>& a, const MathUtil::Rectangle<int>& b)
+{
+  return a.GetWidth() == b.GetWidth() && a.GetHeight() == b.GetHeight();
+}
 }  // namespace
 
 DXTexture::DXTexture(const TextureConfig& config, ComPtr<ID3D11Texture2D> texture,
@@ -311,13 +322,14 @@ void DXTexture::Load(u32 level, u32 /*width*/, u32 /*height*/, u32 row_length, c
 }
 
 DXStagingTexture::DXStagingTexture(StagingTextureType type, const TextureConfig& config,
-                                   ComPtr<ID3D11Texture2D> tex)
-    : AbstractStagingTexture(type, config), m_tex(std::move(tex))
+                                   ComPtr<ID3D11Texture2D> texture)
+    : AbstractStagingTexture(type, config), m_tex(std::move(texture))
 {
 }
 
 DXStagingTexture::~DXStagingTexture()
 {
+  // Called non-virtually: the object is already being torn down.
   if (IsMapped())
     DXStagingTexture::Unmap();
 }
@@ -360,13 +372,11 @@ void DXStagingTexture::CopyFromTexture(const AbstractTexture* src,
                                        u32 src_level, const MathUtil::Rectangle<int>& dst_rect)
 {
   ASSERT(m_type == StagingTextureType::Readback || m_type == StagingTextureType::Mutable);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= src->GetWidth() &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= src->GetHeight());
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= m_config.width &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= m_config.height);
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(FitsIn(src_rect, src->GetWidth(), src->GetHeight()));
+  ASSERT(FitsIn(dst_rect, m_config.width, m_config.height));
 
+  // The copy may not target a mapped texture.
   if (IsMapped())
     DXStagingTexture::Unmap();
 
@@ -396,13 +406,11 @@ void DXStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
                                      u32 dst_level)
 {
   ASSERT(m_type == StagingTextureType::Upload);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= GetWidth() &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= GetHeight());
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= dst->GetWidth() &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= dst->GetHeight());
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(FitsIn(src_rect, GetWidth(), GetHeight()));
+  ASSERT(FitsIn(dst_rect, dst->GetWidth(), dst->GetHeight()));
 
+  // The copy may not read a mapped texture.
   if (IsMapped())
     DXStagingTexture::Unmap();
 
@@ -459,17 +467,16 @@ void DXStagingTexture::Flush()
   m_needs_flush = false;
 }
 
-DXFramebuffer::DXFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                             std::vector<AbstractTexture*> additional_color_attachments,
-                             AbstractTextureFormat color_format, AbstractTextureFormat depth_format,
-                             u32 width, u32 height, u32 layers, u32 samples,
+DXFramebuffer::DXFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                             std::vector<AbstractTexture*> extra_colors,
+                             AbstractTextureFormat color_fmt, AbstractTextureFormat depth_fmt,
+                             u32 w, u32 h, u32 layer_count, u32 sample_count,
                              ComPtr<ID3D11RenderTargetView> rtv,
                              ComPtr<ID3D11RenderTargetView> integer_rtv,
                              ComPtr<ID3D11DepthStencilView> dsv,
                              std::vector<ComPtr<ID3D11RenderTargetView>> additional_rtvs)
-    : AbstractFramebuffer(color_attachment, depth_attachment,
-                          std::move(additional_color_attachments), color_format, depth_format,
-                          width, height, layers, samples),
+    : AbstractFramebuffer(color, depth, std::move(extra_colors), color_fmt, depth_fmt, w, h,
+                          layer_count, sample_count),
       m_integer_rtv(std::move(integer_rtv)), m_dsv(std::move(dsv))
 {
   m_render_targets.reserve(additional_rtvs.size() + 1);

@@ -56,50 +56,54 @@ bool Gfx::IsHeadless() const
   return m_swap_chain == nullptr;
 }
 
-std::unique_ptr<AbstractTexture> Gfx::CreateTexture(const TextureConfig& config,
-                                                    std::string_view name)
-{
-  return DXTexture::Create(config, name);
-}
+// Shaders and pipelines.
 
-std::unique_ptr<AbstractStagingTexture> Gfx::CreateStagingTexture(StagingTextureType type,
-                                                                  const TextureConfig& config)
-{
-  return DXStagingTexture::Create(type, config);
-}
-
-std::unique_ptr<AbstractFramebuffer>
-Gfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                       std::vector<AbstractTexture*> additional_color_attachments)
-{
-  return DXFramebuffer::Create(static_cast<DXTexture*>(color_attachment),
-                               static_cast<DXTexture*>(depth_attachment),
-                               std::move(additional_color_attachments));
-}
-
-std::unique_ptr<AbstractShader>
-Gfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
-                            VideoCommon::ShaderIncluder* shader_includer, std::string_view name)
+std::unique_ptr<AbstractShader> Gfx::CreateShaderFromSource(ShaderStage stage,
+                                                            std::string_view source,
+                                                            VideoCommon::ShaderIncluder* includer,
+                                                            std::string_view label)
 {
   std::optional<AbstractShader::BinaryData> code =
-      DXShader::CompileShader(D3D::feature_level, stage, source, shader_includer);
+      DXShader::CompileShader(D3D::feature_level, stage, source, includer);
   if (!code)
     return nullptr;
-  return DXShader::CreateFromBytecode(stage, std::move(*code), name);
+  return DXShader::CreateFromBytecode(stage, std::move(*code), label);
 }
 
 std::unique_ptr<AbstractShader> Gfx::CreateShaderFromBinary(ShaderStage stage, const void* data,
-                                                            size_t length, std::string_view name)
+                                                            size_t size, std::string_view label)
 {
-  return DXShader::CreateFromBytecode(stage, DXShader::CreateByteCode(data, length), name);
+  return DXShader::CreateFromBytecode(stage, DXShader::CreateByteCode(data, size), label);
 }
 
-std::unique_ptr<AbstractPipeline> Gfx::CreatePipeline(const AbstractPipelineConfig& config,
+std::unique_ptr<AbstractPipeline> Gfx::CreatePipeline(const AbstractPipelineConfig& pipeline_config,
                                                       const void* /*cache_data*/,
                                                       size_t /*cache_data_length*/)
 {
   // D3D11 has no pipeline cache blobs.
-  return DXPipeline::Create(config);
+  return DXPipeline::Create(pipeline_config);
+}
+
+// Textures and render targets.
+
+std::unique_ptr<AbstractTexture> Gfx::CreateTexture(const TextureConfig& texture_config,
+                                                    std::string_view label)
+{
+  return DXTexture::Create(texture_config, label);
+}
+
+std::unique_ptr<AbstractStagingTexture>
+Gfx::CreateStagingTexture(StagingTextureType kind, const TextureConfig& texture_config)
+{
+  return DXStagingTexture::Create(kind, texture_config);
+}
+
+std::unique_ptr<AbstractFramebuffer>
+Gfx::CreateFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                       std::vector<AbstractTexture*> extra_colors)
+{
+  return DXFramebuffer::Create(static_cast<DXTexture*>(color), static_cast<DXTexture*>(depth),
+                               std::move(extra_colors));
 }
 
 void Gfx::SetPipeline(const AbstractPipeline* pipeline)
@@ -178,16 +182,17 @@ void Gfx::DispatchComputeShader(const AbstractShader* shader, u32 /*groupsize_x*
   D3D::context->Dispatch(groups_x, groups_y, groups_z);
 }
 
+// The swap chain's single buffer is always the one drawn to.
+void Gfx::PresentBackbuffer()
+{
+  m_swap_chain->Present();
+}
+
 bool Gfx::BindBackbuffer(const ClearColor& clear_color)
 {
   CheckForSwapChainChanges();
   SetAndClearFramebuffer(m_swap_chain->GetFramebuffer(), clear_color);
   return true;
-}
-
-void Gfx::PresentBackbuffer()
-{
-  m_swap_chain->Present();
 }
 
 void Gfx::OnConfigChanged(u32 bits)

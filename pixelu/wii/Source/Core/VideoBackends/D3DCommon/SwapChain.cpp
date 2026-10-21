@@ -125,17 +125,17 @@ HRESULT SwapChain::CreateBitBltModel()
   // Windows 7 path. D3D12 never gets here in practice: a system without
   // DXGI 1.2 has no D3D12 either.
   DXGI_SWAP_CHAIN_DESC desc = {};
+  desc.OutputWindow = Window();
+  desc.Windowed = TRUE;
+  desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+  desc.Flags = 0;
+  desc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
+  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
   desc.BufferDesc.Width = m_width;
   desc.BufferDesc.Height = m_height;
   desc.BufferDesc.Format = GetDXGIFormatForAbstractFormat(m_texture_format, false);
   desc.SampleDesc.Count = 1;
   desc.SampleDesc.Quality = 0;
-  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-  desc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
-  desc.OutputWindow = Window();
-  desc.Windowed = TRUE;
-  desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-  desc.Flags = 0;
 
   m_allow_tearing_supported = false;
   return m_dxgi_factory->CreateSwapChain(m_d3d_device.Get(), &desc, &m_swap_chain);

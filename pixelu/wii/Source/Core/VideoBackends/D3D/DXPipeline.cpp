@@ -15,15 +15,14 @@
 
 namespace DX11
 {
-DXPipeline::DXPipeline(const AbstractPipelineConfig& config, ID3D11InputLayout* input_layout,
-                       ID3D11VertexShader* vertex_shader, ID3D11GeometryShader* geometry_shader,
-                       ID3D11PixelShader* pixel_shader, ID3D11RasterizerState* rasterizer_state,
-                       ID3D11DepthStencilState* depth_state, ID3D11BlendState* blend_state,
-                       D3D11_PRIMITIVE_TOPOLOGY primitive_topology, bool use_logic_op)
-    : AbstractPipeline(config), m_input_layout(input_layout), m_vertex_shader(vertex_shader),
-      m_geometry_shader(geometry_shader), m_pixel_shader(pixel_shader),
-      m_rasterizer_state(rasterizer_state), m_depth_state(depth_state), m_blend_state(blend_state),
-      m_primitive_topology(primitive_topology), m_use_logic_op(use_logic_op)
+// The pipeline keeps a reference to each object it binds.
+DXPipeline::DXPipeline(const AbstractPipelineConfig& config, ID3D11InputLayout* layout,
+                       ID3D11VertexShader* vs, ID3D11GeometryShader* gs, ID3D11PixelShader* ps,
+                       ID3D11RasterizerState* raster, ID3D11DepthStencilState* depth,
+                       ID3D11BlendState* blend, D3D11_PRIMITIVE_TOPOLOGY topology, bool logic_op)
+    : AbstractPipeline(config), m_input_layout(layout), m_vertex_shader(vs), m_geometry_shader(gs),
+      m_pixel_shader(ps), m_rasterizer_state(raster), m_depth_state(depth), m_blend_state(blend),
+      m_primitive_topology(topology), m_use_logic_op(logic_op)
 {
 }
 

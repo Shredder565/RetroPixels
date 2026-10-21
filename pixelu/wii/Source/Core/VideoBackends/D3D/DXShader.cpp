@@ -25,6 +25,14 @@ std::unique_ptr<DXShader> MakeStage(ShaderStage stage, AbstractShader::BinaryDat
     return nullptr;
   return std::make_unique<DXShader>(stage, std::move(bytecode), object.Get(), name);
 }
+
+template <typename Interface>
+Interface* ObjectAs(const ComPtr<ID3D11DeviceChild>& object, ShaderStage actual,
+                    ShaderStage expected)
+{
+  DEBUG_ASSERT(actual == expected);
+  return static_cast<Interface*>(object.Get());
+}
 }  // namespace
 
 DXShader::DXShader(ShaderStage stage, BinaryData bytecode, ID3D11DeviceChild* shader,
@@ -39,28 +47,25 @@ DXShader::DXShader(ShaderStage stage, BinaryData bytecode, ID3D11DeviceChild* sh
 
 DXShader::~DXShader() = default;
 
+// Each getter is only meant for a shader of its own stage.
 ID3D11VertexShader* DXShader::GetD3DVertexShader() const
 {
-  DEBUG_ASSERT(m_stage == ShaderStage::Vertex);
-  return static_cast<ID3D11VertexShader*>(m_shader.Get());
+  return ObjectAs<ID3D11VertexShader>(m_shader, m_stage, ShaderStage::Vertex);
 }
 
 ID3D11GeometryShader* DXShader::GetD3DGeometryShader() const
 {
-  DEBUG_ASSERT(m_stage == ShaderStage::Geometry);
-  return static_cast<ID3D11GeometryShader*>(m_shader.Get());
+  return ObjectAs<ID3D11GeometryShader>(m_shader, m_stage, ShaderStage::Geometry);
 }
 
 ID3D11PixelShader* DXShader::GetD3DPixelShader() const
 {
-  DEBUG_ASSERT(m_stage == ShaderStage::Pixel);
-  return static_cast<ID3D11PixelShader*>(m_shader.Get());
+  return ObjectAs<ID3D11PixelShader>(m_shader, m_stage, ShaderStage::Pixel);
 }
 
 ID3D11ComputeShader* DXShader::GetD3DComputeShader() const
 {
-  DEBUG_ASSERT(m_stage == ShaderStage::Compute);
-  return static_cast<ID3D11ComputeShader*>(m_shader.Get());
+  return ObjectAs<ID3D11ComputeShader>(m_shader, m_stage, ShaderStage::Compute);
 }
 
 std::unique_ptr<DXShader> DXShader::CreateFromBytecode(ShaderStage stage, BinaryData bytecode,

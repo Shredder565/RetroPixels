@@ -139,6 +139,18 @@ ID3D12Resource* ResourceOf(AbstractTexture* texture)
 {
   return static_cast<DXTexture*>(texture)->GetResource();
 }
+
+// A rectangle with a non-negative origin that ends inside width x height.
+bool FitsIn(const MathUtil::Rectangle<int>& rect, u32 width, u32 height)
+{
+  return rect.left >= 0 && rect.top >= 0 && static_cast<u32>(rect.right) <= width &&
+         static_cast<u32>(rect.bottom) <= height;
+}
+
+bool SameSize(const MathUtil::Rectangle<int>& a, const MathUtil::Rectangle<int>& b)
+{
+  return a.GetWidth() == b.GetWidth() && a.GetHeight() == b.GetHeight();
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -505,13 +517,13 @@ void DXTexture::DestroyResource()
 // ---------------------------------------------------------------------------
 // DXFramebuffer
 
-DXFramebuffer::DXFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                             std::vector<AbstractTexture*> additional_color_attachments,
-                             AbstractTextureFormat color_format, AbstractTextureFormat depth_format,
-                             u32 width, u32 height, u32 layers, u32 samples)
-    : AbstractFramebuffer(color_attachment, depth_attachment,
-                          std::move(additional_color_attachments), color_format, depth_format,
-                          width, height, layers, samples)
+// The views are made by Create() once the base class knows the formats.
+DXFramebuffer::DXFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                             std::vector<AbstractTexture*> extra_colors,
+                             AbstractTextureFormat color_fmt, AbstractTextureFormat depth_fmt,
+                             u32 w, u32 h, u32 layer_count, u32 sample_count)
+    : AbstractFramebuffer(color, depth, std::move(extra_colors), color_fmt, depth_fmt, w, h,
+                          layer_count, sample_count)
 {
 }
 
@@ -698,12 +710,9 @@ void DXStagingTexture::CopyFromTexture(const AbstractTexture* src,
 {
   const DXTexture* source = static_cast<const DXTexture*>(src);
   ASSERT(m_type == StagingTextureType::Readback || m_type == StagingTextureType::Mutable);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= source->GetWidth() &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= source->GetHeight());
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= m_config.width &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= m_config.height);
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(FitsIn(src_rect, source->GetWidth(), source->GetHeight()));
+  ASSERT(FitsIn(dst_rect, m_config.width, m_config.height));
 
   const D3D12_RESOURCE_STATES source_was = source->GetState();
   source->TransitionToState(D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -732,12 +741,9 @@ void DXStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
 {
   const DXTexture* target = static_cast<const DXTexture*>(dst);
   ASSERT(m_type == StagingTextureType::Upload || m_type == StagingTextureType::Mutable);
-  ASSERT(src_rect.GetWidth() == dst_rect.GetWidth() &&
-         src_rect.GetHeight() == dst_rect.GetHeight());
-  ASSERT(src_rect.left >= 0 && static_cast<u32>(src_rect.right) <= m_config.width &&
-         src_rect.top >= 0 && static_cast<u32>(src_rect.bottom) <= m_config.height);
-  ASSERT(dst_rect.left >= 0 && static_cast<u32>(dst_rect.right) <= target->GetWidth() &&
-         dst_rect.top >= 0 && static_cast<u32>(dst_rect.bottom) <= target->GetHeight());
+  ASSERT(SameSize(src_rect, dst_rect));
+  ASSERT(FitsIn(src_rect, m_config.width, m_config.height));
+  ASSERT(FitsIn(dst_rect, target->GetWidth(), target->GetHeight()));
 
   const D3D12_RESOURCE_STATES target_was = target->GetState();
   target->TransitionToState(D3D12_RESOURCE_STATE_COPY_DEST);

@@ -72,60 +72,64 @@ bool Gfx::IsHeadless() const
   return m_swap_chain == nullptr;
 }
 
-std::unique_ptr<AbstractTexture> Gfx::CreateTexture(const TextureConfig& config,
-                                                    std::string_view name)
-{
-  return DXTexture::Create(config, name);
-}
+// Shaders, pipelines and vertex formats.
 
-std::unique_ptr<AbstractStagingTexture> Gfx::CreateStagingTexture(StagingTextureType type,
-                                                                  const TextureConfig& config)
+std::unique_ptr<AbstractShader> Gfx::CreateShaderFromSource(ShaderStage stage,
+                                                            std::string_view source,
+                                                            VideoCommon::ShaderIncluder* includer,
+                                                            std::string_view label)
 {
-  return DXStagingTexture::Create(type, config);
-}
-
-std::unique_ptr<AbstractFramebuffer>
-Gfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                       std::vector<AbstractTexture*> additional_color_attachments)
-{
-  return DXFramebuffer::Create(AsDX(color_attachment), AsDX(depth_attachment),
-                               std::move(additional_color_attachments));
-}
-
-std::unique_ptr<AbstractShader>
-Gfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
-                            VideoCommon::ShaderIncluder* shader_includer, std::string_view name)
-{
-  return DXShader::CreateFromSource(stage, source, shader_includer, name);
+  return DXShader::CreateFromSource(stage, source, includer, label);
 }
 
 std::unique_ptr<AbstractShader> Gfx::CreateShaderFromBinary(ShaderStage stage, const void* data,
-                                                            size_t length, std::string_view name)
+                                                            size_t size, std::string_view label)
 {
-  return DXShader::CreateFromBytecode(stage, DXShader::CreateByteCode(data, length), name);
+  return DXShader::CreateFromBytecode(stage, DXShader::CreateByteCode(data, size), label);
+}
+
+std::unique_ptr<AbstractPipeline> Gfx::CreatePipeline(const AbstractPipelineConfig& pipeline_config,
+                                                      const void* blob, size_t blob_size)
+{
+  return DXPipeline::Create(pipeline_config, blob, blob_size);
 }
 
 std::unique_ptr<NativeVertexFormat>
-Gfx::CreateNativeVertexFormat(const PortableVertexDeclaration& vtx_decl)
+Gfx::CreateNativeVertexFormat(const PortableVertexDeclaration& declaration)
 {
-  return std::make_unique<DXVertexFormat>(vtx_decl);
+  return std::make_unique<DXVertexFormat>(declaration);
 }
 
-std::unique_ptr<AbstractPipeline> Gfx::CreatePipeline(const AbstractPipelineConfig& config,
-                                                      const void* cache_data,
-                                                      size_t cache_data_length)
+// Textures and render targets.
+
+std::unique_ptr<AbstractTexture> Gfx::CreateTexture(const TextureConfig& texture_config,
+                                                    std::string_view label)
 {
-  return DXPipeline::Create(config, cache_data, cache_data_length);
+  return DXTexture::Create(texture_config, label);
+}
+
+std::unique_ptr<AbstractStagingTexture>
+Gfx::CreateStagingTexture(StagingTextureType kind, const TextureConfig& texture_config)
+{
+  return DXStagingTexture::Create(kind, texture_config);
+}
+
+std::unique_ptr<AbstractFramebuffer>
+Gfx::CreateFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                       std::vector<AbstractTexture*> extra_colors)
+{
+  return DXFramebuffer::Create(AsDX(color), AsDX(depth), std::move(extra_colors));
+}
+
+// Submission without (Flush) and with (WaitForGPUIdle) waiting.
+void Gfx::WaitForGPUIdle()
+{
+  ExecuteCommandList(true);
 }
 
 void Gfx::Flush()
 {
   ExecuteCommandList(false);
-}
-
-void Gfx::WaitForGPUIdle()
-{
-  ExecuteCommandList(true);
 }
 
 void Gfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool color_enable,

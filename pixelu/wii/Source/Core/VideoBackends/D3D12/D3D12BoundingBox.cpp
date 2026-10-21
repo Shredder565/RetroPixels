@@ -42,19 +42,21 @@ void CopyBetween(ID3D12Resource* gpu_buffer, D3D12_RESOURCE_STATES copy_state, I
 }
 }  // namespace
 
-D3D12BoundingBox::~D3D12BoundingBox()
-{
-  if (m_gpu_descriptor)
-    g_dx_context->GetDescriptorHeapManager().Free(m_gpu_descriptor);
-}
-
 bool D3D12BoundingBox::Initialize()
 {
   if (!CreateBuffers())
     return false;
 
+  // The UAV stays bound for the backend's lifetime.
   Gfx::GetInstance()->SetPixelShaderUAV(m_gpu_descriptor.cpu_handle);
   return true;
+}
+
+D3D12BoundingBox::~D3D12BoundingBox()
+{
+  // Freed at once; the backend has finished with the GPU by now.
+  if (m_gpu_descriptor)
+    g_dx_context->GetDescriptorHeapManager().Free(m_gpu_descriptor);
 }
 
 std::vector<BBoxType> D3D12BoundingBox::Read(u32 index, u32 length)

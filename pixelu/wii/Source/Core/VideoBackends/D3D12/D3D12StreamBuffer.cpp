@@ -61,11 +61,12 @@ bool StreamBuffer::AllocateBuffer(u32 size)
   if (FAILED(result))
     return false;
 
-  m_size = size;
-  m_gpu_pointer = m_buffer->GetGPUVirtualAddress();
+  // Start empty, with nothing in flight.
+  m_tracked_fences.clear();
   m_current_offset = 0;
   m_current_gpu_position = 0;
-  m_tracked_fences.clear();
+  m_size = size;
+  m_gpu_pointer = m_buffer->GetGPUVirtualAddress();
   return true;
 }
 
