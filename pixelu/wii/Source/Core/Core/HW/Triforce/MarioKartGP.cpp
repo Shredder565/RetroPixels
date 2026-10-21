@@ -1,146 +1,79 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/Triforce/MarioKartGP.h"
 
-#include <fmt/ranges.h>
+#include <array>
+#include <string_view>
+#include <utility>
 
 #include "Common/BitUtils.h"
 #include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
-#include "Common/Swap.h"
-
 #include "Core/HW/GCPad.h"
-
 #include "InputCommon/GCPadStatus.h"
-
-namespace
-{
-constexpr std::array<u8, 3> ACK_NO_ERROR{'E', '0', '0'};
-constexpr std::array<u8, 3> ACK_POWER_ON{'C', '0', '1'};
-constexpr std::array<u8, 3> ACK_POWER_OFF{'C', '0', '6'};
-}  // namespace
 
 namespace Triforce
 {
 
-void MarioKartGPCommon_IOAdapter::Update()
+namespace
 {
-  auto* const io_ports = GetIOPorts();
+constexpr std::size_t WHEEL_REQUEST_SIZE = 10;
+constexpr u32 WHEEL_REQUEST_MAGIC = 0xFFFFFF01;
 
-  // TODO: Devices (e.g. Camera, Networking) can be disabled but it's not yet fully figured out.
-  constexpr u8 DISABLE_DEVICES = 0xff;
-  io_ports->GetStatusSwitches()[0] &= DISABLE_DEVICES;
+constexpr std::array<std::pair<u8, std::string_view>, 2> LAMPS{{
+    {0x04, "ITEM BUTTON"},
+    {0x08, "CANCEL BUTTON"},
+}};
 
-  const GCPadStatus pad_status = Pad::GetStatus(0);
-
-  const auto switch_inputs = io_ports->GetSwitchInputs(0);
-  // Start
-  if (pad_status.button & PAD_BUTTON_START)
-    switch_inputs[0] |= 0x80;
-
-  // Item button
-  if (pad_status.button & PAD_BUTTON_A)
-    switch_inputs[1] |= 0x20;
-  // VS-Cancel button
-  if (pad_status.button & PAD_BUTTON_B)
-    switch_inputs[1] |= 0x02;
-
-  const auto analog_inputs = io_ports->GetAnalogInputs();
-  // Steering
-  analog_inputs[0] = Common::ExpandValue<u16>(pad_status.stickX, 8);
-  // Gas
-  analog_inputs[1] = Common::ExpandValue<u16>(pad_status.triggerRight, 8);
-  // Brake
-  analog_inputs[2] = Common::ExpandValue<u16>(pad_status.triggerLeft, 8);
-}
-
-void MarioKartGPCommon_IOAdapter::HandleGenericOutputsChanged(std::span<const u8> bits_set,
-                                                              std::span<const u8> bits_cleared)
+u16 ReadBE16(std::span<const u8> bytes, std::size_t at)
 {
-  if (bits_set[0] & 0x80u)
-    m_steering_wheel->Reset();
-
-  const u8 bits_changed_0 = bits_set[0] | bits_cleared[0];
-
-  constexpr auto LED_NAMES = std::to_array<std::pair<u8, const char*>>({
-      {0x04, "ITEM BUTTON"},
-      {0x08, "CANCEL BUTTON"},
-  });
-
-  for (const auto& [led_value, led_name] : LED_NAMES)
-  {
-    if (bits_changed_0 & led_value)
-    {
-      INFO_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: {}: {}", led_name,
-                   (bits_set[0] & led_value) ? "ON" : "OFF");
-    }
-  }
+  return static_cast<u16>((bytes[at] << 8) | bytes[at + 1]);
 }
+}  // namespace
 
 void MarioKartGPSteeringWheel::Update()
 {
-  constexpr std::size_t REQUEST_SIZE = 10;
-
-  std::size_t rx_position = 0;
-  while (true)
+  const std::span<const u8> rx = GetRxByteSpan();
+  std::size_t used = 0;
+  while (rx.size() - used >= WHEEL_REQUEST_SIZE)
   {
-    const auto rx_span = GetRxByteSpan().subspan(rx_position);
-
-    if (rx_span.size() < REQUEST_SIZE)
-      break;  // Wait for more data.
-
-    ProcessRequest(rx_span.first<REQUEST_SIZE>());
-    rx_position += REQUEST_SIZE;
+    HandleRequest(rx.subspan(used, WHEEL_REQUEST_SIZE));
+    used += WHEEL_REQUEST_SIZE;
   }
-
-  ConsumeRxBytes(rx_position);
+  ConsumeRxBytes(used);
 }
 
-void MarioKartGPSteeringWheel::ProcessRequest(std::span<const u8> request)
+void MarioKartGPSteeringWheel::HandleRequest(std::span<const u8> request)
 {
-  DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "SteeringWheel: Request: {:02x}", fmt::join(request, " "));
-
-  const u32 cmd = Common::swap32(request.data());
-  if (cmd != 0xffffff01)
+  const u32 magic = (u32{request[0]} << 24) | (u32{request[1]} << 16) | (u32{request[2]} << 8) |
+                    u32{request[3]};
+  if (magic != WHEEL_REQUEST_MAGIC)
   {
-    WARN_LOG_FMT(SERIALINTERFACE_AMBB, "SteeringWheel: Unknown command: {:08x}", cmd);
+    WARN_LOG_FMT(SERIALINTERFACE_AMBB, "SteeringWheel: Unknown command: {:08x}", magic);
     return;
   }
 
-  const u16 centering_force = Common::swap16(request.data() + 4);
-  const u16 friction_force = Common::swap16(request.data() + 6);
-  const u16 roll = Common::swap16(request.data() + 8);
+  DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "SteeringWheel: FFB: {:04x} {:04x} {:04x}",
+                ReadBE16(request, 4), ReadBE16(request, 6), ReadBE16(request, 8));
 
-  DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "SteeringWheel: FFB: {:04x} {:04x} {:04x}", centering_force,
-                friction_force, roll);
-
+  std::string_view reply;
   switch (m_init_state)
   {
   case 0:
-    // The game seems to expect this on power up.
-    WriteTxBytes(ACK_NO_ERROR);
-    ++m_init_state;
+    reply = "E00";
+    m_init_state = 1;
     break;
-
+  case 1:
+    reply = "C06";
+    m_init_state = 2;
+    break;
   default:
-    // The game won't send non-zero forces unless the "POWER_ON" response is observed.
-    // After a race, the game gradually lowers the force to 0 and expects a "POWER_OFF" response.
-    // The meaning of these responses is not really understood.
-    // Cycling between "POWER_OFF" and "POWER_ON" seems to make the game happy for now..
-
-    if (m_init_state == 1)
-    {
-      WriteTxBytes(ACK_POWER_OFF);
-      ++m_init_state;
-    }
-    else
-    {
-      WriteTxBytes(ACK_POWER_ON);
-      m_init_state = 1;
-    }
+    reply = "C01";
+    m_init_state = 1;
     break;
   }
+  for (const char c : reply)
+    WriteTxByte(static_cast<u8>(c));
 }
 
 void MarioKartGPSteeringWheel::Reset()
@@ -151,7 +84,43 @@ void MarioKartGPSteeringWheel::Reset()
 
 void MarioKartGPSteeringWheel::DoState(PointerWrap& p)
 {
+  // Only the handshake position; queued serial bytes are not part of it.
   p.Do(m_init_state);
+}
+
+void MarioKartGPCommon_IOAdapter::Update()
+{
+  IOPorts& ports = *GetIOPorts();
+  const GCPadStatus pad = Pad::GetStatus(0);
+
+  const std::span<u8> p1 = ports.GetSwitchInputs(0);
+  if ((pad.button & PAD_BUTTON_START) != 0)
+    p1[0] |= 0x80;
+  if ((pad.button & PAD_BUTTON_A) != 0)
+    p1[1] |= 0x20;
+  if ((pad.button & PAD_BUTTON_B) != 0)
+    p1[1] |= 0x02;
+
+  const std::span<u16> analog = ports.GetAnalogInputs();
+  analog[0] = Common::ExpandValue<u16>(pad.stickX, 8);
+  analog[1] = Common::ExpandValue<u16>(pad.triggerRight, 8);
+  analog[2] = Common::ExpandValue<u16>(pad.triggerLeft, 8);
+}
+
+void MarioKartGPCommon_IOAdapter::HandleGenericOutputsChanged(std::span<const u8> bits_set,
+                                                              std::span<const u8> bits_cleared)
+{
+  if ((bits_set[0] & 0x80) != 0)
+    m_wheel->Reset();
+
+  const u8 changed = static_cast<u8>(bits_set[0] | bits_cleared[0]);
+  for (const auto& [bit, name] : LAMPS)
+  {
+    if ((changed & bit) == 0)
+      continue;
+    INFO_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: {}: {}", name,
+                 (bits_set[0] & bit) != 0 ? "ON" : "OFF");
+  }
 }
 
 }  // namespace Triforce

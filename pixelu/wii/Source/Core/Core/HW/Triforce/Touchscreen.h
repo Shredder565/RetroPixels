@@ -1,5 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,7 +7,8 @@
 namespace Triforce
 {
 
-// The touchscreen input used by The Key of Avalon games.
+// Touch panel on serial port B of The Key of Avalon cabinets. It only ever
+// talks: each update sends one position packet built from the C stick.
 class Touchscreen final : public SerialDevice
 {
 public:

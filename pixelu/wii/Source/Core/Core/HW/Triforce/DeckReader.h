@@ -1,8 +1,10 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <vector>
+
+#include "Common/CommonTypes.h"
 #include "Common/DirectIOFile.h"
 
 #include "Core/HW/Triforce/ICCardReader.h"
@@ -13,7 +15,9 @@ class PointerWrap;
 namespace Triforce
 {
 
-// Serial deck reader used by The Key of Avalon games.
+// The Key of Avalon's card deck reader on serial port A. Its IC card reader
+// sits behind it: IC card requests are forwarded and the reader's replies are
+// passed back unchanged. The deck itself is described by a JSON file.
 class DeckReader final : public SerialDevice
 {
 public:
@@ -21,21 +25,20 @@ public:
 
   void DoState(PointerWrap& p) override;
 
-  auto* GetICCardReader() { return &m_ic_card_reader; }
+  auto* GetICCardReader() { return &m_card_reader; }
 
 private:
-  // It seems that the IC Card Reader must be connected through the Deck Reader.
-  // The Deck Reader forwards appropriate commands to the IC Card Reader.
-  // IC Card Reader responses are passed through back to the baseboard as-is.
-  // It can't be the other way around because FirmwareUpdate sends many raw bytes.
-  // Unless FirmwareUpdate temporarily cuts off the IC Card Reader ?
-  ICCardReader m_ic_card_reader{0};
+  void Step();
+  void RunFirmwareMode();
+  void RunDeckCommand(u8 command);
+  std::vector<u8> ReadDeck() const;
 
-  void HandleFirmwareUpdate();
+  ICCardReader m_card_reader{0};
 
-  u8 m_firmware_update_timeout = 0;
+  // Nonzero while a (discarded) firmware upload is in progress.
+  u8 m_firmware_timeout = 0;
 
-  File::DirectIOFile m_firmware_dump_file;
+  File::DirectIOFile m_firmware_file;
 };
 
 }  // namespace Triforce

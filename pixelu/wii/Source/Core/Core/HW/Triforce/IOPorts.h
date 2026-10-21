@@ -1,5 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,8 +22,10 @@ namespace Triforce
 class ICCardReader;
 class IOAdapter;
 
-// Triforce GPIO peripherals connect to JVS-IO and eachother in game specific ways.
-// This class hopes to handle those customizable connections.
+// The cabinet's input and output lines as the JVS-IO board sees them. Each game
+// wires its controls, lamps and card readers differently; that wiring lives in
+// IOAdapter subclasses, which fill the inputs on every Update() and react to
+// output changes.
 class IOPorts
 {
 public:
@@ -60,25 +61,18 @@ public:
   static constexpr u16 NEUTRAL_ANALOG_VALUE = 0x8000;
 
 private:
-  std::vector<std::unique_ptr<IOAdapter>> m_io_adapters;
+  static constexpr std::size_t BYTES_PER_PLAYER = 2;
+  static constexpr std::size_t ANALOG_CHANNELS = 8;
+  static constexpr std::size_t OUTPUT_BYTES = 4;
 
-  std::array<u8, 2> m_status_switches{0xff, 0xff};
+  std::vector<std::unique_ptr<IOAdapter>> m_adapters;
 
-  // The first byte in JVSIO switch input data.
-  u8 m_system_inputs = 0x00;
-
-  static constexpr std::size_t SWITCH_INPUT_BYTES_PER_PLAYER = 2;
-
-  std::array<u8, PLAYER_COUNT * SWITCH_INPUT_BYTES_PER_PLAYER> m_switch_inputs{};
-
-  static constexpr std::size_t ANALOG_INPUT_COUNT = 8;
-
-  std::array<u16, ANALOG_INPUT_COUNT> m_analog_inputs{};
-
-  static constexpr std::size_t GENERIC_OUTPUT_BYTE_COUNT = 4;
-
-  std::array<u8, GENERIC_OUTPUT_BYTE_COUNT> m_generic_outputs{};
-
+  // Active low.
+  std::array<u8, 2> m_status_switches{0xFF, 0xFF};
+  u8 m_system_inputs = 0;
+  std::array<u8, PLAYER_COUNT * BYTES_PER_PLAYER> m_switch_inputs{};
+  std::array<u16, ANALOG_CHANNELS> m_analog_inputs{};
+  std::array<u8, OUTPUT_BYTES> m_generic_outputs{};
   std::array<bool, COIN_SLOT_COUNT> m_coin_inputs{};
 };
 
@@ -100,18 +94,20 @@ public:
   virtual void DoState(PointerWrap& p);
 
 protected:
-  IOPorts* GetIOPorts() { return m_io_ports; }
+  IOPorts* GetIOPorts() { return m_ports; }
 
-  // Invoked with newly set and cleared bits.
+  // Called after the generic outputs change, with the bits that went from 0 to
+  // 1 and from 1 to 0 (four bytes each).
   virtual void HandleGenericOutputsChanged(std::span<const u8> bits_set,
                                            std::span<const u8> bits_cleared);
 
 private:
-  void SetIOPorts(IOPorts* io_ports) { m_io_ports = io_ports; }
+  void SetIOPorts(IOPorts* io_ports) { m_ports = io_ports; }
 
-  IOPorts* m_io_ports{};
+  IOPorts* m_ports = nullptr;
 };
 
+// Test, service and coin switches; present in every game.
 class Common_IOAdapter final : public IOAdapter
 {
 public:
@@ -129,12 +125,12 @@ public:
   void Update() override;
 };
 
-// Common functionality for both VirtuaStriker4 and VirtuaStriker4_2006.
+// Controls and card slots shared by Virtua Striker 4 and its 2006 version.
 class VirtuaStriker4Common_IOAdapter final : public IOAdapter
 {
 public:
   VirtuaStriker4Common_IOAdapter(ICCardReader* card_reader_a, ICCardReader* card_reader_b)
-      : m_card_readers{card_reader_a, card_reader_b}
+      : m_readers{card_reader_a, card_reader_b}
   {
   }
 
@@ -148,14 +144,15 @@ protected:
                                    std::span<const u8> bits_cleared) override;
 
 private:
-  std::array<ICCardReader*, IOPorts::PLAYER_COUNT> const m_card_readers;
+  const std::array<ICCardReader*, IOPorts::PLAYER_COUNT> m_readers;
 };
 
+// The 2006 version's card eject lines.
 class VirtuaStriker4_2006_IOAdapter final : public IOAdapter
 {
 public:
   VirtuaStriker4_2006_IOAdapter(ICCardReader* card_reader_a, ICCardReader* card_reader_b)
-      : m_card_readers{card_reader_a, card_reader_b}
+      : m_readers{card_reader_a, card_reader_b}
   {
   }
 
@@ -167,14 +164,14 @@ private:
   static constexpr u8 SLOT_A_EJECT_BIT = 0x80;
   static constexpr u8 SLOT_B_EJECT_BIT = 0x20;
 
-  std::array<ICCardReader*, IOPorts::PLAYER_COUNT> const m_card_readers;
+  const std::array<ICCardReader*, IOPorts::PLAYER_COUNT> m_readers;
 };
 
 class GekitouProYakyuu_IOAdapter final : public IOAdapter
 {
 public:
   GekitouProYakyuu_IOAdapter(ICCardReader* card_reader_a, ICCardReader* card_reader_b)
-      : m_card_readers{card_reader_a, card_reader_b}
+      : m_readers{card_reader_a, card_reader_b}
   {
   }
 
@@ -188,18 +185,18 @@ private:
   static constexpr u8 SLOT_A_LOCK_BIT = 0x40;
   static constexpr u8 SLOT_B_LOCK_BIT = 0x10;
 
-  std::array<ICCardReader*, IOPorts::PLAYER_COUNT> const m_card_readers;
+  const std::array<ICCardReader*, IOPorts::PLAYER_COUNT> m_readers;
 };
 
 class KeyOfAvalon_IOAdapter final : public IOAdapter
 {
 public:
-  explicit KeyOfAvalon_IOAdapter(ICCardReader* card_reader) : m_card_reader{card_reader} {}
+  explicit KeyOfAvalon_IOAdapter(ICCardReader* card_reader) : m_reader{card_reader} {}
 
   void Update() override;
 
 private:
-  ICCardReader* const m_card_reader;
+  ICCardReader* const m_reader;
 };
 
 }  // namespace Triforce

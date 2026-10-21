@@ -1,15 +1,20 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <span>
+
+#include "Common/CommonTypes.h"
 #include "Core/HW/Triforce/IOPorts.h"
 #include "Core/HW/Triforce/SerialDevice.h"
+
+class PointerWrap;
 
 namespace Triforce
 {
 
-// FFB wheel used by MarioKartGP and MarioKartGP2.
+// Force-feedback wheel of Mario Kart Arcade GP and GP2, on serial port A. It
+// answers 10-byte force requests with a short ASCII handshake.
 class MarioKartGPSteeringWheel final : public SerialDevice
 {
 public:
@@ -17,20 +22,20 @@ public:
 
   void Reset();
 
-  void DoState(PointerWrap&) override;
+  void DoState(PointerWrap& p) override;
 
 private:
-  void ProcessRequest(std::span<const u8>);
+  void HandleRequest(std::span<const u8> request);
 
   u8 m_init_state = 0;
 };
 
-// Used for both MarioKartGP and MarioKartGP2.
+// Buttons, pedals and lamps of both Mario Kart Arcade GP cabinets.
 class MarioKartGPCommon_IOAdapter final : public IOAdapter
 {
 public:
   explicit MarioKartGPCommon_IOAdapter(MarioKartGPSteeringWheel* steering_wheel)
-      : m_steering_wheel{steering_wheel}
+      : m_wheel{steering_wheel}
   {
   }
 
@@ -41,7 +46,7 @@ protected:
                                    std::span<const u8> bits_cleared) override;
 
 private:
-  MarioKartGPSteeringWheel* const m_steering_wheel;
+  MarioKartGPSteeringWheel* const m_wheel;
 };
 
 }  // namespace Triforce

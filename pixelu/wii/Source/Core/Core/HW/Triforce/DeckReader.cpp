@@ -1,44 +1,32 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/Triforce/DeckReader.h"
 
+#include <array>
+#include <cmath>
+#include <limits>
+#include <string>
 #include <string_view>
 
-#include <fmt/ranges.h>
-
+#include <fmt/format.h>
 #include <picojson.h>
 
-#include "Common/BitUtils.h"
 #include "Common/ChunkFile.h"
+#include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
-#include "Common/JsonUtil.h"
 #include "Common/Logging/Log.h"
-#include "Common/ScopeGuard.h"
-#include "Common/Swap.h"
-
 #include "Core/ConfigManager.h"
+
+namespace Triforce
+{
 
 namespace
 {
+constexpr u8 REPLY_MARK = 0xAA;
+constexpr u8 FIRMWARE_TIMEOUT = 240;
+constexpr std::size_t VERSION_FIELD_SIZE = 48;
 
-// Note: Avalon literally skips `strlen("Version ")` bytes in the display.
-constexpr std::string_view CDR_PROGRAM_VERSION = "Version 1.22,2003/09/19,171-8213B";
-constexpr std::string_view CDR_BOOT_VERSION = "Version 1.04,2003/06/17,171-8213B";
-
-constexpr std::size_t EXPECTED_VERSION_STR_LENGTH = 48;
-
-// Avalon seems to not care about the actual value.
-constexpr u32 SHUTTER_TIME = 1234567890;
-
-constexpr u32 FIRMWARE_UPDATE_TIMEOUT = 240;
-
-auto GetFirmwareDumpFilename()
-{
-  return fmt::format("{}card_deck_reader_firmware.bin", File::GetUserPath(D_TRIUSER_IDX));
-}
-
-enum class CDReaderCommand : u8
+enum DeckCommand : u8
 {
   ShutterAuto = 0x61,
   BootVersion = 0x62,
@@ -48,402 +36,242 @@ enum class CDReaderCommand : u8
   ShutterGet = 0x67,
   CameraCheck = 0x68,
   Shutter = 0x69,
-  ProgramChecksum = 0x6b,
-  ShutterAlt = 0x6c,  // Not sure what the difference is. Avalon seems to only use 0x69.
-  BootChecksum = 0x6d,
-  ShutterLoad = 0x6f,
+  ProgramChecksum = 0x6B,
+  ShutterAlt = 0x6C,
+  BootChecksum = 0x6D,
+  ShutterLoad = 0x6F,
   ReadCard = 0x72,
   ShutterSave = 0x73,
   SelfTest = 0x74,
   ProgramVersion = 0x76,
 };
 
-#pragma pack(push, 1)
-struct CardIdentifier
+// A double from the deck file as an integer type: in-range values as a plain
+// conversion would give, anything else clamped (NaN as 0).
+template <typename T>
+T ToInteger(double value)
 {
-  // When the 0x01 bit is set, Avalon indexes a separate smaller table.
-  // Avalon specifically requires 0x80, 0x40, and 0x20 bits are not set.
-  // We don't know the relevance of this second table.
-  // There are even some duplicates between the two tables.
-  u8 table_index;
+  if (std::isnan(value))
+    return 0;
+  if (value <= static_cast<double>(std::numeric_limits<T>::min()))
+    return std::numeric_limits<T>::min();
+  if (value >= static_cast<double>(std::numeric_limits<T>::max()))
+    return std::numeric_limits<T>::max();
+  return static_cast<T>(value);
+}
 
-  Common::BigEndianValue<u16> card_index;
-};
-#pragma pack(pop)
-
-std::optional<std::vector<CardIdentifier>> LoadCardDeckFromFile()
+void PutText(std::vector<u8>& out, std::string_view text, std::size_t field_size)
 {
-  // Example json format:
-  // table defaults to 0. quantity defaults to 1.
-  //
-  // {
-  //   "cards": [
-  //     {
-  //       "index": 12
-  //     },
-  //     {
-  //       "table": 1,
-  //       "index": 13
-  //     },
-  //     {
-  //       "index": 18,
-  //       "quantity": 3
-  //     }
-  //   ]
-  // }
+  out.insert(out.end(), text.begin(), text.end());
+  out.resize(out.size() + (field_size - text.size()), 0);
+}
+}  // namespace
 
-  const std::string filename =
-      fmt::format("{}tricard_{}_deck.json", File::GetUserPath(D_TRIUSER_IDX),
-                  SConfig::GetInstance().GetGameID());
+std::vector<u8> DeckReader::ReadDeck() const
+{
+  const std::string path = fmt::format("{}tricard_{}_deck.json", File::GetUserPath(D_TRIUSER_IDX),
+                                       SConfig::GetInstance().GetGameID());
+  std::string text;
+  File::ReadFileToString(path, text);
 
-  std::string file_contents;
-  File::ReadFileToString(filename, file_contents);
-
-  picojson::value json_root;
-  const auto err = picojson::parse(json_root, file_contents);
-
-  if (!err.empty())
+  picojson::value root;
+  const std::string error = picojson::parse(root, text);
+  if (!error.empty())
   {
-    ERROR_LOG_FMT(SERIALINTERFACE_CARD, "LoadCardDeckFromFile: {}", err);
-    return std::nullopt;
+    ERROR_LOG_FMT(SERIALINTERFACE_CARD, "LoadCardDeckFromFile: {}", error);
+    return {};
   }
-
-  if (!json_root.is<picojson::object>())
+  if (!root.is<picojson::object>())
   {
     ERROR_LOG_FMT(SERIALINTERFACE_CARD, "LoadCardDeckFromFile: Invalid JSON root object.");
-    return std::nullopt;
+    return {};
   }
-
-  const auto cards_obj = json_root.get("cards");
-  if (!cards_obj.is<picojson::array>())
+  const picojson::value& cards = root.get("cards");
+  if (!cards.is<picojson::array>())
   {
     ERROR_LOG_FMT(SERIALINTERFACE_CARD, "LoadCardDeckFromFile: Invalid \"cards\" array.");
-    return std::nullopt;
+    return {};
   }
 
-  std::optional<std::vector<CardIdentifier>> result;
-  result.emplace();
-
-  for (const auto& item : cards_obj.get<picojson::array>())
+  std::vector<u8> entries;
+  for (const picojson::value& card : cards.get<picojson::array>())
   {
-    if (!item.is<picojson::object>())
+    if (!card.is<picojson::object>())
       continue;
 
-    const auto& item_obj = item.get<picojson::object>();
-
-    const auto card_index = ReadNumericFromJson<u16>(item_obj, "index");
-    if (!card_index)
+    const picojson::value& index = card.get("index");
+    if (!index.is<double>())
     {
       ERROR_LOG_FMT(SERIALINTERFACE_CARD, "LoadCardDeckFromFile: Invalid \"index\" field.");
       continue;
     }
+    const picojson::value& table = card.get("table");
+    const picojson::value& quantity = card.get("quantity");
 
-    CardIdentifier card_id{};
-    card_id.card_index = *card_index;
-    card_id.table_index = ReadNumericFromJson<u8>(item_obj, "table").value_or(0);
+    const u16 card_index = ToInteger<u16>(index.get<double>());
+    const u8 card_table = table.is<double>() ? ToInteger<u8>(table.get<double>()) : u8{0};
+    const u8 copies = quantity.is<double>() ? ToInteger<u8>(quantity.get<double>()) : u8{1};
 
-    const auto quantity = ReadNumericFromJson<u8>(item_obj, "quantity").value_or(1);
-    result->resize(result->size() + quantity, card_id);
+    for (u32 i = 0; i != copies; ++i)
+    {
+      entries.push_back(card_table);
+      entries.push_back(static_cast<u8>(card_index >> 8));
+      entries.push_back(static_cast<u8>(card_index & 0xFF));
+    }
   }
-
-  return result;
+  return entries;
 }
 
-}  // namespace
-
-namespace Triforce
+void DeckReader::RunDeckCommand(u8 command)
 {
+  std::vector<u8> reply{REPLY_MARK, command};
 
-void DeckReader::Update()
-{
-  Common::ScopeGuard update_ic_card_reader{[this] {
-    // Update and take any response data from the IC card reader.
-    m_ic_card_reader.Update();
-    PassThroughTxBytes(m_ic_card_reader);
-  }};
-
-  // All Deck Reader commands are exactly one byte (except FirmwareUpdate).
-  // Responses must be the correct length, which varies by command.
-  // Only the ReadCard response actually includes some kind of length field.
-  //
-  // A leading 2 bytes and trailing 1 byte are expected for all responses.
-  // Avalon seems to largely not check the actual values,
-  //  but a few handlers do verify them.
-
-  // FirmwareUpdate is the only known stateful command.
-  if (m_firmware_update_timeout != 0)
+  switch (command)
   {
-    HandleFirmwareUpdate();
-    return;
-  }
-
-  const auto input_span = GetRxByteSpan();
-
-  if (input_span.empty())
-    return;  // Wait for more data.
-
-  const u8 cd_reader_command = input_span.front();
-
-  if (cd_reader_command == 0x00)
-  {
-    // This is an IC Card Reader command.
-
-    // How does the actual hardware deal with this ?
-    // Does the Deck Reader really parse the IC Card Reader commands ?
-
-    if (input_span.size() < 4)
-      return;  // Wait for more data.
-
-    const u16 input_payload_size = Common::swap16(input_span.data() + 2);
-    const u32 total_request_size = input_payload_size + 5u;
-
-    if (input_span.size() >= total_request_size)
-    {
-      // Forward the data to the attached IC Card Reader.
-      m_ic_card_reader.WriteRxBytes(input_span.first(total_request_size));
-      ConsumeRxBytes(total_request_size);
-    }
-
-    return;
-  }
-
-  // Write header.
-  WriteTxBytes(std::array<u8, 2>{0xaa, cd_reader_command});
-
-  switch (CDReaderCommand(cd_reader_command))
-  {
-  case CDReaderCommand::SelfTest:
-  {
+  case SelfTest:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "SelfTest");
-
-    // Avalon appears to not inspect this value.
-    WriteTxByte(0x00);
-
+    reply.push_back(0x00);
     break;
-  }
-  case CDReaderCommand::SensLock:
-  {
+  case SensLock:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "SensLock");
-
-    // Avalon will ask the user to close the shutter if open.
-    constexpr bool is_closed = true;
-
-    WriteTxByte(is_closed ? 0x01 : 0x00);
-
+    reply.push_back(0x01);
     break;
-  }
-  case CDReaderCommand::ProgramVersion:
-  {
+  case ProgramVersion:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ProgramVersion");
-
-    WriteTxBytes(Common::AsU8Span((CDR_PROGRAM_VERSION)));
-
-    // Pad with zeros.
-    WriteTxBytes(std::array<u8, EXPECTED_VERSION_STR_LENGTH - CDR_PROGRAM_VERSION.size()>{});
-
+    PutText(reply, "Version 1.22,2003/09/19,171-8213B", VERSION_FIELD_SIZE);
     break;
-  }
-  case CDReaderCommand::BootVersion:
-  {
+  case BootVersion:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "BootVersion");
-
-    WriteTxBytes(Common::AsU8Span(CDR_BOOT_VERSION));
-
-    // Pad with zeros.
-    WriteTxBytes(std::array<u8, EXPECTED_VERSION_STR_LENGTH - CDR_BOOT_VERSION.size()>{});
-
+    PutText(reply, "Version 1.04,2003/06/17,171-8213B", VERSION_FIELD_SIZE);
     break;
-  }
-  case CDReaderCommand::ProgramChecksum:
-  {
+  case ProgramChecksum:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ProgramChecksum");
-
-    // Avalon seems to not care about the actual value.
-    Common::BigEndianValue<u32> fake_checksum{0x89abcdef};
-    WriteTxBytes(Common::AsU8Span(fake_checksum));
-
+    reply.insert(reply.end(), {0x89, 0xAB, 0xCD, 0xEF});
     break;
-  }
-  case CDReaderCommand::BootChecksum:
-  {
+  case BootChecksum:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "BootChecksum");
-
-    // Avalon seems to not care about the actual value.
-    Common::BigEndianValue<u32> fake_checksum{0x01234567};
-    WriteTxBytes(Common::AsU8Span(fake_checksum));
-
+    reply.insert(reply.end(), {0x01, 0x23, 0x45, 0x67});
     break;
-  }
-  case CDReaderCommand::CameraCheck:
-  {
+  case CameraCheck:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "CameraCheck");
-
-    // FYI: If `header[1] != 0x68` the game inspects some bits and 9 bytes. Some error state ?
-
-    std::array<u8, 10> response{};
-    WriteTxBytes(response);
-
+    reply.resize(reply.size() + 10, 0);
     break;
-  }
-  case CDReaderCommand::ShutterGet:
-  {
+  case ShutterGet:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ShutterGet");
-
-    Common::BigEndianValue<u32> shutter_time{SHUTTER_TIME};
-    WriteTxBytes(Common::AsU8Span(shutter_time));
-
+    reply.insert(reply.end(), {0x49, 0x96, 0x02, 0xD2});  // 1234567890
     break;
-  }
-  case CDReaderCommand::ShutterAuto:
-  {
+  case ShutterAuto:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ShutterAuto");
-
-    Common::BigEndianValue<u32> shutter_time{SHUTTER_TIME};
-    WriteTxBytes(Common::AsU8Span(shutter_time));
-
+    reply.insert(reply.end(), {0x49, 0x96, 0x02, 0xD2});
     break;
-  }
-  case CDReaderCommand::Shutter:
-  case CDReaderCommand::ShutterAlt:
-  {
+  case Shutter:
+  case ShutterAlt:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "Shutter");
     break;
-  }
-  case CDReaderCommand::ShutterLoad:
-  {
+  case ShutterLoad:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ShutterLoad");
     break;
-  }
-  case CDReaderCommand::ShutterSave:
-  {
+  case ShutterSave:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ShutterSave");
     break;
-  }
-  case CDReaderCommand::SensCard:
-  {
+  case SensCard:
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "SensCard");
-
-    // TODO: What is the meaning of this value ?
-    // Avalon tests for 0x01.
-    WriteTxByte(0x01);
-
+    reply.push_back(0x01);
     break;
-  }
-  case CDReaderCommand::ReadCard:
+  case ReadCard:
   {
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "ReadCard");
-
-    constexpr bool is_deck_empty = false;
-
-    if (is_deck_empty)
-    {
-      // I think this means that there are no cards or maybe "not ready".
-      WriteTxBytes(std::array<u8, 2>{0xaa, 0x52});
-    }
-    else
-    {
-      // We've had one, yes, but what about second header ?
-      WriteTxBytes(std::array<u8, 2>{0xaa, u8(CDReaderCommand::ReadCard)});
-
-      if (const auto deck = LoadCardDeckFromFile())
-      {
-        // What happens with more than 30 cards ?
-        WriteTxByte(u8(deck->size() * sizeof(CardIdentifier)));
-
-        WriteTxBytes(Common::AsU8Span(*deck));
-      }
-      else
-      {
-        constexpr u8 deck_size = 0;
-        WriteTxByte(deck_size);
-      }
-    }
-
+    const std::vector<u8> entries = ReadDeck();
+    reply.push_back(REPLY_MARK);
+    reply.push_back(ReadCard);
+    reply.push_back(static_cast<u8>(entries.size()));
+    reply.insert(reply.end(), entries.begin(), entries.end());
     break;
   }
-  case CDReaderCommand::FirmwareUpdate:
+  case FirmwareUpdate:
   {
     INFO_LOG_FMT(SERIALINTERFACE_CARD, "FirmwareUpdate");
-
-    m_firmware_update_timeout = FIRMWARE_UPDATE_TIMEOUT;
-
-    // The game will now send the raw firmware data which we write to a file.
-    // FYI: It appears to be SuperH4:LE code.
-
-    const auto filename = GetFirmwareDumpFilename();
-    if (m_firmware_dump_file.Open(filename, File::AccessMode::Write))
-    {
-      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "Writing firmware to: {}", filename);
-    }
+    m_firmware_timeout = FIRMWARE_TIMEOUT;
+    const std::string path = File::GetUserPath(D_TRIUSER_IDX) + "card_deck_reader_firmware.bin";
+    if (m_firmware_file.Open(path, File::AccessMode::Write))
+      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "Writing firmware to: {}", path);
     else
-    {
-      ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Failed to open: {}", filename);
-    }
-
+      ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Failed to open: {}", path);
     break;
   }
   default:
-  {
-    // TODO: I think maybe we're supposed to produce a header of {0xaa, 0x55} ?
-
-    // Responses seem to be variable in length and unspecified so we can't do much.
-    ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Unknown command: {:02x}", cd_reader_command);
+    ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Unknown command: {:02x}", command);
     break;
   }
+
+  reply.push_back(0x00);
+  WriteTxBytes(reply);
+}
+
+void DeckReader::RunFirmwareMode()
+{
+  const std::span<const u8> rx = GetRxByteSpan();
+  if (rx.empty())
+  {
+    if (--m_firmware_timeout == 0)
+    {
+      static constexpr std::array<u8, 3> done{REPLY_MARK, FirmwareUpdate, 0x00};
+      WriteTxBytes(done);
+      INFO_LOG_FMT(SERIALINTERFACE_CARD, "Fake FirmwareUpdate done.");
+      m_firmware_file.Close();
+    }
+    return;
   }
 
-  // Write footer.
-  // TODO: Is this an error code maybe ?
-  WriteTxByte(0x00);
+  if (m_firmware_file.IsOpen() && !m_firmware_file.Write(rx))
+    ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Failed to write {} bytes to firmware.", rx.size());
+  ConsumeRxBytes(rx.size());
+  m_firmware_timeout = FIRMWARE_TIMEOUT;
+}
 
-  // Every known command (other than FirmwareUpdate) is just one byte.
+void DeckReader::Step()
+{
+  if (m_firmware_timeout != 0)
+  {
+    RunFirmwareMode();
+    return;
+  }
+
+  const std::span<const u8> rx = GetRxByteSpan();
+  if (rx.empty())
+    return;
+
+  if (rx[0] == 0x00)
+  {
+    // An IC card request: hand the whole frame to the card reader.
+    if (rx.size() < 4)
+      return;
+    const std::size_t frame_size = static_cast<std::size_t>((rx[2] << 8) | rx[3]) + 5;
+    if (rx.size() < frame_size)
+      return;
+    m_card_reader.WriteRxBytes(rx.first(frame_size));
+    ConsumeRxBytes(frame_size);
+    return;
+  }
+
+  RunDeckCommand(rx[0]);
   ConsumeRxBytes(1);
 }
 
-void DeckReader::HandleFirmwareUpdate()
+void DeckReader::Update()
 {
-  const auto input_span = GetRxByteSpan();
-
-  // No idea how the real hardware works.
-  // There doesn't seem to be any sort of size field so.. here's a timeout.
-  if (input_span.empty())
-  {
-    if (--m_firmware_update_timeout == 0)
-    {
-      constexpr std::array<u8, 3> fw_update_done{0xaa, u8(CDReaderCommand::FirmwareUpdate), 0x00};
-      WriteTxBytes(fw_update_done);
-
-      INFO_LOG_FMT(SERIALINTERFACE_CARD, "Fake FirmwareUpdate done.");
-
-      m_firmware_dump_file.Close();
-    }
-  }
-  else
-  {
-    if (m_firmware_dump_file.IsOpen())
-    {
-      if (!m_firmware_dump_file.Write(input_span))
-      {
-        ERROR_LOG_FMT(SERIALINTERFACE_CARD, "Failed to write {} bytes to firmware.",
-                      input_span.size());
-      }
-    }
-
-    ConsumeRxBytes(input_span.size());
-    m_firmware_update_timeout = FIRMWARE_UPDATE_TIMEOUT;
-  }
+  Step();
+  m_card_reader.Update();
+  PassThroughTxBytes(m_card_reader);
 }
 
 void DeckReader::DoState(PointerWrap& p)
 {
   SerialDevice::DoState(p);
-
-  m_ic_card_reader.DoState(p);
-
-  p.Do(m_firmware_update_timeout);
-
+  m_card_reader.DoState(p);
+  p.Do(m_firmware_timeout);
   if (p.IsReadMode())
-    m_firmware_dump_file.Close();
+    m_firmware_file.Close();
 }
 
 }  // namespace Triforce
