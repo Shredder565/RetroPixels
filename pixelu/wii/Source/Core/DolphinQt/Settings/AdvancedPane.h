@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,16 +14,19 @@ class ConfigFloatSlider;
 class ConfigSlider;
 class ConfigSliderU32;
 class QCheckBox;
+class QDateTimeEdit;
 class QLabel;
 class QRadioButton;
 class QSlider;
-class QDateTimeEdit;
+class QVBoxLayout;
 
 namespace Core
 {
 enum class State;
 }
 
+// "Advanced" settings page: CPU core options, timing, clock/VBI/memory overrides, custom RTC
+// and the reset-everything button. Most controls lock while a game is running.
 class AdvancedPane final : public QWidget
 {
   Q_OBJECT
@@ -32,32 +34,41 @@ public:
   explicit AdvancedPane(QWidget* parent = nullptr);
 
 private:
-  void CreateLayout();
-  void ConnectLayout();
-  void Update();
+  void AddCpuGroup(QVBoxLayout* page);
+  void AddTimingGroup(QVBoxLayout* page);
+  void AddClockGroup(QVBoxLayout* page, int value_width);
+  void AddVbiGroup(QVBoxLayout* page, int value_width);
+  void AddMemoryGroup(QVBoxLayout* page, int value_width);
+  void AddRtcGroup(QVBoxLayout* page);
+  void AddResetGroup(QVBoxLayout* page);
+  void HookUpConfigWriters();
 
-  void OnResetButtonClicked();
+  void RefreshState();
+  void RefreshClockText();
+  void RefreshVbiText();
+  void ConfirmAndReset();
 
-  ConfigChoiceMap<PowerPC::CPUCore>* m_cpu_emulation_engine_combobox;
-  ConfigBool* m_enable_mmu_checkbox;
-  ConfigBool* m_pause_on_panic_checkbox;
-  ConfigBool* m_accurate_cpu_cache_checkbox;
-  ConfigBool* m_cpu_clock_override_checkbox;
-  ConfigFloatSlider* m_cpu_clock_override_slider;
-  QLabel* m_cpu_label;
+  ConfigChoiceMap<PowerPC::CPUCore>* m_cpu_core;
+  ConfigBool* m_mmu;
+  ConfigBool* m_pause_on_panic;
+  ConfigBool* m_write_back_cache;
 
-  ConfigBool* m_vi_rate_override_checkbox;
-  ConfigFloatSlider* m_vi_rate_override_slider;
-  QLabel* m_vi_label;
+  ConfigBool* m_clock_override;
+  ConfigFloatSlider* m_clock_slider;
+  QLabel* m_clock_value;
 
-  ConfigBool* m_custom_rtc_checkbox;
-  QDateTimeEdit* m_custom_rtc_datetime;
+  ConfigBool* m_vbi_override;
+  ConfigFloatSlider* m_vbi_slider;
+  QLabel* m_vbi_value;
 
-  ConfigBool* m_ram_override_checkbox;
-  ConfigSliderU32* m_mem1_override_slider;
-  QLabel* m_mem1_label;
-  ConfigSliderU32* m_mem2_override_slider;
-  QLabel* m_mem2_label;
+  ConfigBool* m_memory_override;
+  ConfigSliderU32* m_mem1_slider;
+  QLabel* m_mem1_value;
+  ConfigSliderU32* m_mem2_slider;
+  QLabel* m_mem2_value;
 
-  QPushButton* m_reset_button;
+  ConfigBool* m_custom_rtc;
+  QDateTimeEdit* m_rtc_value;
+
+  QPushButton* m_reset_all;
 };

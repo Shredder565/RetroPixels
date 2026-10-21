@@ -1,7 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Settings/AdvancedPane.h"
+
+#include <cmath>
+#include <utility>
+#include <vector>
 
 #include <QCheckBox>
 #include <QDateTimeEdit>
@@ -14,7 +17,6 @@
 #include <QSignalBlocker>
 #include <QTimeZone>
 #include <QVBoxLayout>
-#include <cmath>
 
 #include "Common/Config/Config.h"
 #include "Common/Config/Enums.h"
@@ -40,377 +42,400 @@
 
 #include "UICommon/UICommon.h"
 
-static const std::map<PowerPC::CPUCore, const char*> CPU_CORE_NAMES = {
-    {PowerPC::CPUCore::Interpreter, QT_TR_NOOP("Interpreter (slowest)")},
-    {PowerPC::CPUCore::CachedInterpreter, QT_TR_NOOP("Cached Interpreter (slower)")},
-    {PowerPC::CPUCore::JIT64, QT_TR_NOOP("JIT Recompiler for x86-64 (recommended)")},
-    {PowerPC::CPUCore::JITARM64, QT_TR_NOOP("JIT Recompiler for ARM64 (recommended)")},
-};
+namespace
+{
+// Untranslated display names of the CPU cores; translated where they're shown.
+const char* CoreDisplayName(PowerPC::CPUCore core)
+{
+  switch (core)
+  {
+  case PowerPC::CPUCore::Interpreter:
+    return QT_TR_NOOP("Interpreter (slowest)");
+  case PowerPC::CPUCore::CachedInterpreter:
+    return QT_TR_NOOP("Cached Interpreter (slower)");
+  case PowerPC::CPUCore::JIT64:
+    return QT_TR_NOOP("JIT Recompiler for x86-64 (recommended)");
+  case PowerPC::CPUCore::JITARM64:
+    return QT_TR_NOOP("JIT Recompiler for ARM64 (recommended)");
+  default:
+    return "";
+  }
+}
+
+// Group box with a vertical layout, appended to the page.
+QVBoxLayout* AddGroup(QVBoxLayout* page, const QString& title)
+{
+  auto* const group = new QGroupBox(title);
+  auto* const contents = new QVBoxLayout();
+  group->setLayout(contents);
+  page->addWidget(group);
+  return contents;
+}
+
+// A margin-less row holding a slider and its right-aligned value read-out.
+void AddSliderRow(QVBoxLayout* group, QWidget* slider, QLabel* value, int value_width)
+{
+  auto* const row = new QHBoxLayout();
+  row->setContentsMargins(0, 0, 0, 0);
+  group->addLayout(row);
+  row->addWidget(slider);
+  value->setFixedWidth(value_width);
+  value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  row->addWidget(value);
+}
+}  // namespace
 
 AdvancedPane::AdvancedPane(QWidget* parent) : QWidget(parent)
 {
-  CreateLayout();
-  Update();
+  auto* const page = new QVBoxLayout();
+  setLayout(page);
 
-  ConnectLayout();
+  AddCpuGroup(page);
+  AddTimingGroup(page);
 
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, &AdvancedPane::Update);
+  // One width for all value read-outs keeps the sliders lined up.
+  const int value_width =
+      QFontMetrics{font()}.boundingRect(QStringLiteral(" 500% (000.00 VPS)")).width();
+  AddClockGroup(page, value_width);
+  AddVbiGroup(page, value_width);
+  AddMemoryGroup(page, value_width);
+  AddRtcGroup(page);
+  AddResetGroup(page);
+  page->addStretch(1);
+
+  RefreshState();
+  HookUpConfigWriters();
+
+  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
+          &AdvancedPane::RefreshState);
 }
 
-void AdvancedPane::CreateLayout()
+void AdvancedPane::AddCpuGroup(QVBoxLayout* page)
 {
-  auto* main_layout = new QVBoxLayout();
-  setLayout(main_layout);
+  QVBoxLayout* const group = AddGroup(page, tr("CPU Options"));
 
-  auto* cpu_options_group = new QGroupBox(tr("CPU Options"));
-  auto* cpu_options_group_layout = new QVBoxLayout();
-  cpu_options_group->setLayout(cpu_options_group_layout);
-  main_layout->addWidget(cpu_options_group);
+  auto* const engine_form = new QFormLayout;
+  engine_form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+  engine_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  group->addLayout(engine_form);
 
-  auto* cpu_emulation_engine_layout = new QFormLayout;
-  cpu_emulation_engine_layout->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
-  cpu_emulation_engine_layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-  cpu_options_group_layout->addLayout(cpu_emulation_engine_layout);
+  std::vector<std::pair<QString, PowerPC::CPUCore>> cores;
+  for (const PowerPC::CPUCore core : PowerPC::AvailableCPUCores())
+    cores.emplace_back(tr(CoreDisplayName(core)), core);
+  m_cpu_core = new ConfigChoiceMap<PowerPC::CPUCore>(cores, Config::MAIN_CPU_CORE);
+  engine_form->addRow(tr("CPU Emulation Engine:"), m_cpu_core);
 
-  std::vector<std::pair<QString, PowerPC::CPUCore>> emulation_engine_choices;
-  for (PowerPC::CPUCore cpu_core : PowerPC::AvailableCPUCores())
-    emulation_engine_choices.emplace_back(tr(CPU_CORE_NAMES.at(cpu_core)), cpu_core);
-  m_cpu_emulation_engine_combobox =
-      new ConfigChoiceMap<PowerPC::CPUCore>(emulation_engine_choices, Config::MAIN_CPU_CORE);
-  cpu_emulation_engine_layout->addRow(tr("CPU Emulation Engine:"), m_cpu_emulation_engine_combobox);
+  m_mmu = new ConfigBool(tr("Enable MMU"), Config::MAIN_MMU);
+  m_mmu->SetDescription(tr("Enables the Memory Management Unit, needed for some games. (ON = "
+                           "Compatible, OFF = Fast)<br><br><dolphin_emphasis>If unsure, leave "
+                           "this unchecked.</dolphin_emphasis>"));
+  group->addWidget(m_mmu);
 
-  m_enable_mmu_checkbox = new ConfigBool(tr("Enable MMU"), Config::MAIN_MMU);
-  m_enable_mmu_checkbox->SetDescription(
-      tr("Enables the Memory Management Unit, needed for some games. (ON = Compatible, OFF = "
-         "Fast)<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  cpu_options_group_layout->addWidget(m_enable_mmu_checkbox);
+  m_pause_on_panic = new ConfigBool(tr("Pause on Panic"), Config::MAIN_PAUSE_ON_PANIC);
+  m_pause_on_panic->SetDescription(
+      tr("Pauses the emulation if a Read/Write or Unknown Instruction panic "
+         "occurs.<br>Enabling will affect performance.<br>The performance impact is the same as "
+         "having Enable MMU on.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+  group->addWidget(m_pause_on_panic);
 
-  m_pause_on_panic_checkbox = new ConfigBool(tr("Pause on Panic"), Config::MAIN_PAUSE_ON_PANIC);
-  m_pause_on_panic_checkbox->SetDescription(
-      tr("Pauses the emulation if a Read/Write or Unknown Instruction panic occurs.<br>Enabling "
-         "will affect performance.<br>The performance impact is the same as having Enable MMU "
-         "on.<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  cpu_options_group_layout->addWidget(m_pause_on_panic_checkbox);
-
-  m_accurate_cpu_cache_checkbox =
+  m_write_back_cache =
       new ConfigBool(tr("Enable Write-Back Cache (slow)"), Config::MAIN_ACCURATE_CPU_CACHE);
-  m_accurate_cpu_cache_checkbox->SetDescription(
-      tr("Enables emulation of the CPU write-back cache.<br>Enabling will have a significant "
-         "impact on performance.<br>This should be left disabled unless absolutely "
-         "needed.<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  cpu_options_group_layout->addWidget(m_accurate_cpu_cache_checkbox);
+  m_write_back_cache->SetDescription(
+      tr("Enables emulation of the CPU write-back cache.<br>Enabling will have a "
+         "significant impact on performance.<br>This should be left disabled unless absolutely "
+         "needed.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+  group->addWidget(m_write_back_cache);
+}
 
-  auto* const timing_group = new QGroupBox(tr("Timing"));
-  main_layout->addWidget(timing_group);
-  auto* timing_group_layout = new QVBoxLayout{timing_group};
-  auto* const correct_time_drift =
-      // i18n: Correct is a verb
-      new ConfigBool{tr("Correct Time Drift"), Config::MAIN_CORRECT_TIME_DRIFT};
-  correct_time_drift->SetDescription(
-      // i18n: Internet play refers to services like Wiimmfi, not the NetPlay feature in Dolphin
-      tr("Allow the emulated console to run fast after stutters,"
-         "<br>pursuing accurate overall elapsed time unless paused or speed-adjusted."
-         "<br><br>This may be useful for internet play."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  timing_group_layout->addWidget(correct_time_drift);
+void AdvancedPane::AddTimingGroup(QVBoxLayout* page)
+{
+  auto* const box = new QGroupBox(tr("Timing"));
+  page->addWidget(box);
+  auto* const group = new QVBoxLayout{box};
 
-  auto* const rush_frame_presentation =
-      // i18n: "Rush" is a verb
+  // i18n: Correct is a verb
+  auto* const drift = new ConfigBool{tr("Correct Time Drift"), Config::MAIN_CORRECT_TIME_DRIFT};
+  // i18n: Internet play refers to services like Wiimmfi, not the NetPlay feature in Dolphin
+  drift->SetDescription(tr("Allow the emulated console to run fast after stutters,<br>pursuing "
+                           "accurate overall elapsed time unless paused or "
+                           "speed-adjusted.<br><br>This may be useful for internet "
+                           "play.<br><br><dolphin_emphasis>If unsure, leave this "
+                           "unchecked.</dolphin_emphasis>"));
+  group->addWidget(drift);
+
+  // i18n: "Rush" is a verb
+  auto* const rush =
       new ConfigBool{tr("Rush Frame Presentation"), Config::MAIN_RUSH_FRAME_PRESENTATION};
-  rush_frame_presentation->SetDescription(
-      tr("Limits throttling between input and frame output,"
-         " speeding through emulation to reach presentation,"
-         " displaying sooner, and thus reducing input latency."
-         "<br><br>This will generally make frame pacing worse."
-         "<br>This setting can work either with or without Immediately Present XFB."
-         "<br>An Audio Buffer Size of at least 80 ms is recommended to ensure full effect."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  timing_group_layout->addWidget(rush_frame_presentation);
+  rush->SetDescription(
+      tr("Limits throttling between input and frame output, speeding through emulation to "
+         "reach presentation, displaying sooner, and thus reducing input latency.<br><br>This "
+         "will generally make frame pacing worse.<br>This setting can work either with or "
+         "without Immediately Present XFB.<br>An Audio Buffer Size of at least 80 ms is "
+         "recommended to ensure full effect.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+  group->addWidget(rush);
 
-  auto* const smooth_early_presentation =
-      // i18n: "Smooth" is a verb
+  // i18n: "Smooth" is a verb
+  auto* const smooth =
       new ConfigBool{tr("Smooth Early Presentation"), Config::MAIN_SMOOTH_EARLY_PRESENTATION};
-  smooth_early_presentation->SetDescription(
-      tr("Adaptively adjusts the timing of early frame presentation."
-         "<br><br>This can improve frame pacing with Immediately Present XFB"
-         " and/or Rush Frame Presentation,"
-         " while still maintaining most of the input latency benefits."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-  timing_group_layout->addWidget(smooth_early_presentation);
+  smooth->SetDescription(
+      tr("Adaptively adjusts the timing of early frame presentation.<br><br>This can improve "
+         "frame pacing with Immediately Present XFB and/or Rush Frame Presentation, while "
+         "still maintaining most of the input latency benefits.<br><br><dolphin_emphasis>If "
+         "unsure, leave this unchecked.</dolphin_emphasis>"));
+  group->addWidget(smooth);
+}
 
-  // Make all labels the same width, so that the sliders are aligned.
-  const QFontMetrics font_metrics{font()};
-  const int label_width = font_metrics.boundingRect(QStringLiteral(" 500% (000.00 VPS)")).width();
+void AdvancedPane::AddClockGroup(QVBoxLayout* page, int value_width)
+{
+  QVBoxLayout* const group = AddGroup(page, tr("Clock Override"));
 
-  auto* clock_override = new QGroupBox(tr("Clock Override"));
-  auto* clock_override_layout = new QVBoxLayout();
-  clock_override->setLayout(clock_override_layout);
-  main_layout->addWidget(clock_override);
-
-  m_cpu_clock_override_checkbox =
+  m_clock_override =
       new ConfigBool(tr("Enable Emulated CPU Clock Override"), Config::MAIN_OVERCLOCK_ENABLE);
-  clock_override_layout->addWidget(m_cpu_clock_override_checkbox);
-  connect(m_cpu_clock_override_checkbox, &QCheckBox::toggled, this, &AdvancedPane::Update);
+  group->addWidget(m_clock_override);
+  connect(m_clock_override, &QCheckBox::toggled, this, &AdvancedPane::RefreshState);
 
-  auto* cpu_clock_override_slider_layout = new QHBoxLayout();
-  cpu_clock_override_slider_layout->setContentsMargins(0, 0, 0, 0);
-  clock_override_layout->addLayout(cpu_clock_override_slider_layout);
+  m_clock_slider = new ConfigFloatSlider(0.01f, 5.0f, Config::MAIN_OVERCLOCK, 0.01f);
+  m_clock_value = new QLabel();
+  AddSliderRow(group, m_clock_slider, m_clock_value, value_width);
 
-  m_cpu_clock_override_slider = new ConfigFloatSlider(0.01f, 5.0f, Config::MAIN_OVERCLOCK, 0.01f);
-  cpu_clock_override_slider_layout->addWidget(m_cpu_clock_override_slider);
+  RefreshClockText();
+  connect(m_clock_slider, &QSlider::valueChanged, this, &AdvancedPane::RefreshClockText);
 
-  m_cpu_label = new QLabel();
-  m_cpu_label->setFixedWidth(label_width);
-  m_cpu_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  cpu_clock_override_slider_layout->addWidget(m_cpu_label);
+  m_clock_override->SetDescription(
+      tr("Adjusts the emulated CPU's clock rate.<br><br>On games that have an unstable frame "
+         "rate despite full emulation speed, higher values can improve their performance, "
+         "requiring a powerful device. Lower values reduce the emulated console's "
+         "performance, but improve the emulation speed.<br><br>WARNING: Changing this from "
+         "the default (100%) can and will break games and cause glitches. Do so at your own "
+         "risk. Please do not report bugs that occur with a non-default "
+         "clock.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+}
 
-  std::function<void()> cpu_text = [this]() {
-    const float multi = Config::Get(Config::MAIN_OVERCLOCK);
-    const int percent = static_cast<int>(std::round(multi * 100.f));
-    const int core_clock =
-        Core::System::GetInstance().GetSystemTimers().GetTicksPerSecond() / std::pow(10, 6);
-    const int clock = static_cast<int>(std::round(multi * core_clock));
-    m_cpu_label->setText(tr("%1% (%2 MHz)").arg(QString::number(percent), QString::number(clock)));
-  };
+void AdvancedPane::AddVbiGroup(QVBoxLayout* page, int value_width)
+{
+  QVBoxLayout* const group = AddGroup(page, tr("VBI Frequency Override"));
 
-  cpu_text();
-  connect(m_cpu_clock_override_slider, &QSlider::valueChanged, this, cpu_text);
-
-  m_cpu_clock_override_checkbox->SetDescription(
-      tr("Adjusts the emulated CPU's clock rate.<br><br>"
-         "On games that have an unstable frame rate despite full emulation speed, "
-         "higher values can improve their performance, requiring a powerful device. "
-         "Lower values reduce the emulated console's performance, but improve the "
-         "emulation speed.<br><br>"
-         "WARNING: Changing this from the default (100%) can and will "
-         "break games and cause glitches. Do so at your own risk. "
-         "Please do not report bugs that occur with a non-default clock."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-
-  auto* vi_rate_override = new QGroupBox(tr("VBI Frequency Override"));
-  auto* vi_rate_override_layout = new QVBoxLayout();
-  vi_rate_override->setLayout(vi_rate_override_layout);
-  main_layout->addWidget(vi_rate_override);
-
-  m_vi_rate_override_checkbox =
+  m_vbi_override =
       new ConfigBool(tr("Enable VBI Frequency Override"), Config::MAIN_VI_OVERCLOCK_ENABLE);
-  vi_rate_override_layout->addWidget(m_vi_rate_override_checkbox);
-  connect(m_vi_rate_override_checkbox, &QCheckBox::toggled, this, &AdvancedPane::Update);
+  group->addWidget(m_vbi_override);
+  connect(m_vbi_override, &QCheckBox::toggled, this, &AdvancedPane::RefreshState);
 
-  auto* vi_rate_override_slider_layout = new QHBoxLayout();
-  vi_rate_override_slider_layout->setContentsMargins(0, 0, 0, 0);
-  vi_rate_override_layout->addLayout(vi_rate_override_slider_layout);
+  m_vbi_slider = new ConfigFloatSlider(0.01f, 5.0f, Config::MAIN_VI_OVERCLOCK, 0.01f);
+  m_vbi_value = new QLabel();
+  AddSliderRow(group, m_vbi_slider, m_vbi_value, value_width);
 
-  m_vi_rate_override_slider = new ConfigFloatSlider(0.01f, 5.0f, Config::MAIN_VI_OVERCLOCK, 0.01f);
-  vi_rate_override_slider_layout->addWidget(m_vi_rate_override_slider);
+  RefreshVbiText();
+  connect(m_vbi_slider, &QSlider::valueChanged, this, &AdvancedPane::RefreshVbiText);
 
-  m_vi_label = new QLabel();
-  m_vi_label->setFixedWidth(label_width);
-  m_vi_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  vi_rate_override_slider_layout->addWidget(m_vi_label);
-  std::function<void()> vi_text = [this]() {
-    const int percent =
-        static_cast<int>(std::round(Config::Get(Config::MAIN_VI_OVERCLOCK) * 100.f));
-    float vps =
-        static_cast<float>(Core::System::GetInstance().GetVideoInterface().GetTargetRefreshRate());
-    if (vps == 0.0f || !Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE))
-      vps = 59.94f * Config::Get(Config::MAIN_VI_OVERCLOCK);
-    m_vi_label->setText(
-        tr("%1% (%2 VPS)").arg(QString::number(percent), QString::number(vps, 'f', 2)));
+  m_vbi_override->SetDescription(
+      tr("Adjusts the VBI frequency. Also adjusts the emulated CPU's clock rate, to keep it "
+         "relatively the same.<br><br>Makes games run at a different frame rate, making the "
+         "emulation less demanding when lowered, or improving smoothness when increased. "
+         "This may affect gameplay speed, as it is often tied to the frame "
+         "rate.<br><br>WARNING: Changing this from the default (100%) can and will break "
+         "games and cause glitches. Do so at your own risk. Please do not report bugs that "
+         "occur with a non-default frequency.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+}
+
+void AdvancedPane::AddMemoryGroup(QVBoxLayout* page, int value_width)
+{
+  QVBoxLayout* const group = AddGroup(page, tr("Memory Override"));
+
+  m_memory_override =
+      new ConfigBool(tr("Enable Emulated Memory Size Override"), Config::MAIN_RAM_OVERRIDE_ENABLE);
+  group->addWidget(m_memory_override);
+  connect(m_memory_override, &QCheckBox::toggled, this, &AdvancedPane::RefreshState);
+
+  // Sizes are shown in MiB; the setting itself is stored in bytes.
+  constexpr u32 MIB = 0x100000;
+
+  m_mem1_slider = new ConfigSliderU32(24, 64, Config::MAIN_MEM1_SIZE, MIB);
+  m_mem1_value = new QLabel(tr("%1 MB (MEM1)").arg(QString::number(m_mem1_slider->value())));
+  AddSliderRow(group, m_mem1_slider, m_mem1_value, value_width);
+  connect(m_mem1_slider, &QSlider::valueChanged, this, [this](int megabytes) {
+    m_mem1_value->setText(tr("%1 MB (MEM1)").arg(QString::number(megabytes)));
+  });
+
+  m_mem2_slider = new ConfigSliderU32(64, 128, Config::MAIN_MEM2_SIZE, MIB);
+  m_mem2_value = new QLabel(tr("%1 MB (MEM2)").arg(QString::number(m_mem2_slider->value())));
+  AddSliderRow(group, m_mem2_slider, m_mem2_value, value_width);
+  connect(m_mem2_slider, &QSlider::valueChanged, this, [this](int megabytes) {
+    m_mem2_value->setText(tr("%1 MB (MEM2)").arg(QString::number(megabytes)));
+  });
+
+  m_memory_override->SetDescription(
+      tr("Sets the amount of RAM in the emulated console to the values provided.<br><br><b>"
+         "WARNING</b>: Enabling this will completely break many games. By default, Dolphin "
+         "determines what value is required based on the game "
+         "information.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+}
+
+void AdvancedPane::AddRtcGroup(QVBoxLayout* page)
+{
+  auto* const box = new QGroupBox(tr("Custom RTC Options"));
+  box->setLayout(new QVBoxLayout());
+  page->addWidget(box);
+
+  m_custom_rtc = new ConfigBool(tr("Enable Custom RTC"), Config::MAIN_CUSTOM_RTC_ENABLE);
+  box->layout()->addWidget(m_custom_rtc);
+  connect(m_custom_rtc, &QCheckBox::toggled, this, &AdvancedPane::RefreshState);
+
+  m_rtc_value = new QDateTimeEdit();
+  // Include seconds in the displayed time.
+  QString format = m_rtc_value->displayFormat();
+  m_rtc_value->setDisplayFormat(format.replace(QStringLiteral("mm"), QStringLiteral("mm:ss")));
+  QtUtils::ShowFourDigitYear(m_rtc_value);
+
+  // The console clock covers 2000-01-01 00:00:00 to 2099-12-31 23:59:59, in UTC.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+  const auto utc = QTimeZone::UTC;
+#else
+  const auto utc = Qt::UTC;
+#endif
+  m_rtc_value->setDateTimeRange(QDateTime({2000, 1, 1}, {0, 0, 0}, utc),
+                                QDateTime({2099, 12, 31}, {23, 59, 59}, utc));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+  m_rtc_value->setTimeZone(QTimeZone::UTC);
+#else
+  m_rtc_value->setTimeSpec(Qt::UTC);
+#endif
+  box->layout()->addWidget(m_rtc_value);
+
+  m_custom_rtc->SetDescription(
+      tr("This setting allows you to set a custom real time clock (RTC) separate from your "
+         "current system time.<br><br><dolphin_emphasis>If unsure, leave this "
+         "unchecked.</dolphin_emphasis>"));
+}
+
+void AdvancedPane::AddResetGroup(QVBoxLayout* page)
+{
+  auto* const box = new QGroupBox(tr("Reset Dolphin Settings"));
+  box->setLayout(new QVBoxLayout());
+  page->addWidget(box);
+
+  m_reset_all = new NonDefaultQPushButton(tr("Reset All Settings"));
+  connect(m_reset_all, &QPushButton::clicked, this, &AdvancedPane::ConfirmAndReset);
+  box->layout()->addWidget(m_reset_all);
+}
+
+void AdvancedPane::HookUpConfigWriters()
+{
+  m_memory_override->setChecked(Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE));
+  connect(m_memory_override, &QCheckBox::toggled, this, [this](bool enabled) {
+    Config::SetBaseOrCurrent(Config::MAIN_RAM_OVERRIDE_ENABLE, enabled);
+    RefreshState();
+  });
+
+  connect(m_rtc_value, &QDateTimeEdit::dateTimeChanged, this, [this](const QDateTime& when) {
+    Config::SetBaseOrCurrent(Config::MAIN_CUSTOM_RTC_VALUE,
+                             static_cast<u32>(when.toSecsSinceEpoch()));
+    RefreshState();
+  });
+}
+
+void AdvancedPane::RefreshClockText()
+{
+  const float factor = Config::Get(Config::MAIN_OVERCLOCK);
+  const u32 ticks = Core::System::GetInstance().GetSystemTimers().GetTicksPerSecond();
+  const auto base_mhz = static_cast<int>(ticks / 1'000'000.0);
+
+  const QString percent = QString::number(static_cast<int>(std::round(factor * 100.f)));
+  const QString mhz =
+      QString::number(static_cast<int>(std::round(factor * static_cast<float>(base_mhz))));
+  m_clock_value->setText(tr("%1% (%2 MHz)").arg(percent, mhz));
+}
+
+void AdvancedPane::RefreshVbiText()
+{
+  const int percent = static_cast<int>(std::round(Config::Get(Config::MAIN_VI_OVERCLOCK) * 100.f));
+
+  // Without a running game (or with the override off) estimate from NTSC's 59.94 Hz.
+  auto rate =
+      static_cast<float>(Core::System::GetInstance().GetVideoInterface().GetTargetRefreshRate());
+  if (rate == 0.0f || !Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE))
+    rate = 59.94f * Config::Get(Config::MAIN_VI_OVERCLOCK);
+
+  m_vbi_value->setText(
+      tr("%1% (%2 VPS)").arg(QString::number(percent), QString::number(rate, 'f', 2)));
+}
+
+void AdvancedPane::RefreshState()
+{
+  const bool idle = Core::IsUninitialized(Core::System::GetInstance());
+  const bool clock_on = Config::Get(Config::MAIN_OVERCLOCK_ENABLE);
+  const bool vbi_on = Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE);
+  const bool memory_on = Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE);
+  const bool rtc_editable = Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE) && idle;
+
+  // These only take effect at boot.
+  for (QWidget* const boot_only :
+       std::initializer_list<QWidget*>{m_cpu_core, m_mmu, m_pause_on_panic})
+  {
+    boot_only->setEnabled(idle);
+  }
+
+  // Bold marks a value overridden by a layer above the base config (e.g. a game INI).
+  const auto emphasis = [this](bool overridden) {
+    QFont shown = font();
+    shown.setBold(overridden);
+    return shown;
   };
 
-  vi_text();
-  connect(m_vi_rate_override_slider, &QSlider::valueChanged, this, vi_text);
-
-  m_vi_rate_override_checkbox->SetDescription(
-      tr("Adjusts the VBI frequency. Also adjusts the emulated CPU's "
-         "clock rate, to keep it relatively the same.<br><br>"
-         "Makes games run at a different frame rate, making the emulation less "
-         "demanding when lowered, or improving smoothness when increased. This may "
-         "affect gameplay speed, as it is often tied to the frame rate.<br><br>"
-         "WARNING: Changing this from the default (100%) can and will "
-         "break games and cause glitches. Do so at your own risk. "
-         "Please do not report bugs that occur with a non-default frequency."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-
-  auto* ram_override = new QGroupBox(tr("Memory Override"));
-  auto* ram_override_layout = new QVBoxLayout();
-  ram_override->setLayout(ram_override_layout);
-  main_layout->addWidget(ram_override);
-
-  m_ram_override_checkbox =
-      new ConfigBool(tr("Enable Emulated Memory Size Override"), Config::MAIN_RAM_OVERRIDE_ENABLE);
-  ram_override_layout->addWidget(m_ram_override_checkbox);
-  connect(m_ram_override_checkbox, &QCheckBox::toggled, this, &AdvancedPane::Update);
-
-  auto* mem1_override_slider_layout = new QHBoxLayout();
-  mem1_override_slider_layout->setContentsMargins(0, 0, 0, 0);
-  ram_override_layout->addLayout(mem1_override_slider_layout);
-
-  m_mem1_override_slider = new ConfigSliderU32(24, 64, Config::MAIN_MEM1_SIZE, 0x100000);
-  mem1_override_slider_layout->addWidget(m_mem1_override_slider);
-
-  m_mem1_label =
-      new QLabel(tr("%1 MB (MEM1)").arg(QString::number(m_mem1_override_slider->value())));
-  m_mem1_label->setFixedWidth(label_width);
-  m_mem1_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  mem1_override_slider_layout->addWidget(m_mem1_label);
-  connect(m_mem1_override_slider, &QSlider::valueChanged, this, [this](int value) {
-    m_mem1_label->setText(tr("%1 MB (MEM1)").arg(QString::number(value)));
-  });
-
-  auto* mem2_override_slider_layout = new QHBoxLayout();
-  mem2_override_slider_layout->setContentsMargins(0, 0, 0, 0);
-  ram_override_layout->addLayout(mem2_override_slider_layout);
-
-  m_mem2_override_slider = new ConfigSliderU32(64, 128, Config::MAIN_MEM2_SIZE, 0x100000);
-  mem2_override_slider_layout->addWidget(m_mem2_override_slider);
-
-  m_mem2_label =
-      new QLabel(tr("%1 MB (MEM2)").arg(QString::number(m_mem2_override_slider->value())));
-  m_mem2_label->setFixedWidth(label_width);
-  m_mem2_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  mem2_override_slider_layout->addWidget(m_mem2_label);
-  connect(m_mem2_override_slider, &QSlider::valueChanged, this, [this](int value) {
-    m_mem2_label->setText(tr("%1 MB (MEM2)").arg(QString::number(value)));
-  });
-
-  m_ram_override_checkbox->SetDescription(
-      tr("Sets the amount of RAM in the emulated console to the values provided.<br><br>"
-         "<b>WARNING</b>: Enabling this will completely break many games. By default, Dolphin "
-         "determines what value is required based on the game information."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-
-  auto* rtc_options = new QGroupBox(tr("Custom RTC Options"));
-  rtc_options->setLayout(new QVBoxLayout());
-  main_layout->addWidget(rtc_options);
-
-  m_custom_rtc_checkbox = new ConfigBool(tr("Enable Custom RTC"), Config::MAIN_CUSTOM_RTC_ENABLE);
-  rtc_options->layout()->addWidget(m_custom_rtc_checkbox);
-  connect(m_custom_rtc_checkbox, &QCheckBox::toggled, this, &AdvancedPane::Update);
-
-  m_custom_rtc_datetime = new QDateTimeEdit();
-
-  // Show seconds
-  m_custom_rtc_datetime->setDisplayFormat(m_custom_rtc_datetime->displayFormat().replace(
-      QStringLiteral("mm"), QStringLiteral("mm:ss")));
-
-  QtUtils::ShowFourDigitYear(m_custom_rtc_datetime);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-  m_custom_rtc_datetime->setDateTimeRange(QDateTime({2000, 1, 1}, {0, 0, 0}, QTimeZone::UTC),
-                                          QDateTime({2099, 12, 31}, {23, 59, 59}, QTimeZone::UTC));
-#else
-  m_custom_rtc_datetime->setDateTimeRange(QDateTime({2000, 1, 1}, {0, 0, 0}, Qt::UTC),
-                                          QDateTime({2099, 12, 31}, {23, 59, 59}, Qt::UTC));
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-  m_custom_rtc_datetime->setTimeZone(QTimeZone::UTC);
-#else
-  m_custom_rtc_datetime->setTimeSpec(Qt::UTC);
-#endif
-  rtc_options->layout()->addWidget(m_custom_rtc_datetime);
-
-  m_custom_rtc_checkbox->SetDescription(
-      tr("This setting allows you to set a custom real time clock (RTC) separate from "
-         "your current system time."
-         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
-
-  auto* reset_group = new QGroupBox(tr("Reset Dolphin Settings"));
-  reset_group->setLayout(new QVBoxLayout());
-  main_layout->addWidget(reset_group);
-
-  m_reset_button = new NonDefaultQPushButton(tr("Reset All Settings"));
-  connect(m_reset_button, &QPushButton::clicked, this, &AdvancedPane::OnResetButtonClicked);
-
-  reset_group->layout()->addWidget(m_reset_button);
-
-  main_layout->addStretch(1);
-}
-
-void AdvancedPane::ConnectLayout()
-{
-  m_ram_override_checkbox->setChecked(Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE));
-  connect(m_ram_override_checkbox, &QCheckBox::toggled, [this](bool enable_ram_override) {
-    Config::SetBaseOrCurrent(Config::MAIN_RAM_OVERRIDE_ENABLE, enable_ram_override);
-    Update();
-  });
-
-  connect(m_custom_rtc_datetime, &QDateTimeEdit::dateTimeChanged,
-          [this](const QDateTime& date_time) {
-            Config::SetBaseOrCurrent(Config::MAIN_CUSTOM_RTC_VALUE,
-                                     static_cast<u32>(date_time.toSecsSinceEpoch()));
-            Update();
-          });
-}
-
-void AdvancedPane::Update()
-{
-  const bool is_uninitialized = Core::IsUninitialized(Core::System::GetInstance());
-  const bool enable_cpu_clock_override_widgets = Config::Get(Config::MAIN_OVERCLOCK_ENABLE);
-  const bool enable_vi_rate_override_widgets = Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE);
-  const bool enable_ram_override_widgets = Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE);
-  const bool enable_custom_rtc_widgets =
-      Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE) && is_uninitialized;
-
-  m_cpu_emulation_engine_combobox->setEnabled(is_uninitialized);
-  m_enable_mmu_checkbox->setEnabled(is_uninitialized);
-  m_pause_on_panic_checkbox->setEnabled(is_uninitialized);
-
   {
-    QFont bf = font();
-    bf.setBold(Config::GetActiveLayerForConfig(Config::MAIN_OVERCLOCK_ENABLE) !=
-               Config::LayerType::Base);
+    const QFont clock_font = emphasis(
+        Config::GetActiveLayerForConfig(Config::MAIN_OVERCLOCK_ENABLE) != Config::LayerType::Base);
+    const QSignalBlocker quiet(m_clock_override);
+    m_clock_override->setFont(clock_font);
+    m_clock_override->setChecked(clock_on);
+  }
+  m_clock_slider->setEnabled(clock_on);
+  m_clock_value->setEnabled(clock_on);
 
-    const QSignalBlocker blocker(m_cpu_clock_override_checkbox);
-    m_cpu_clock_override_checkbox->setFont(bf);
-    m_cpu_clock_override_checkbox->setChecked(enable_cpu_clock_override_widgets);
+  // Unlike the clock box above, this one is updated with signals live.
+  m_vbi_override->setFont(
+      emphasis(Config::GetActiveLayerForConfig(Config::MAIN_VI_OVERCLOCK_ENABLE) !=
+               Config::LayerType::Base));
+  m_vbi_override->setChecked(vbi_on);
+  m_vbi_slider->setEnabled(vbi_on);
+  m_vbi_value->setEnabled(vbi_on);
+
+  m_memory_override->setEnabled(idle);
+  SignalBlocking(m_memory_override)->setChecked(memory_on);
+  const bool memory_editable = memory_on && idle;
+  for (QWidget* const part :
+       std::initializer_list<QWidget*>{m_mem1_slider, m_mem1_value, m_mem2_slider, m_mem2_value})
+  {
+    part->setEnabled(memory_editable);
   }
 
-  m_cpu_clock_override_slider->setEnabled(enable_cpu_clock_override_widgets);
-  m_cpu_label->setEnabled(enable_cpu_clock_override_widgets);
+  m_custom_rtc->setEnabled(idle);
+  SignalBlocking(m_custom_rtc)->setChecked(Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE));
 
-  QFont vi_bf = font();
-  vi_bf.setBold(Config::GetActiveLayerForConfig(Config::MAIN_VI_OVERCLOCK_ENABLE) !=
-                Config::LayerType::Base);
-  m_vi_rate_override_checkbox->setFont(vi_bf);
-  m_vi_rate_override_checkbox->setChecked(enable_vi_rate_override_widgets);
+  QDateTime rtc_time;
+  rtc_time.setSecsSinceEpoch(Config::Get(Config::MAIN_CUSTOM_RTC_VALUE));
+  m_rtc_value->setEnabled(rtc_editable);
+  SignalBlocking(m_rtc_value)->setDateTime(rtc_time);
 
-  m_vi_rate_override_slider->setEnabled(enable_vi_rate_override_widgets);
-  m_vi_label->setEnabled(enable_vi_rate_override_widgets);
-
-  m_ram_override_checkbox->setEnabled(is_uninitialized);
-  SignalBlocking(m_ram_override_checkbox)->setChecked(enable_ram_override_widgets);
-
-  m_mem1_override_slider->setEnabled(enable_ram_override_widgets && is_uninitialized);
-  m_mem1_label->setEnabled(enable_ram_override_widgets && is_uninitialized);
-
-  m_mem2_override_slider->setEnabled(enable_ram_override_widgets && is_uninitialized);
-  m_mem2_label->setEnabled(enable_ram_override_widgets && is_uninitialized);
-
-  m_custom_rtc_checkbox->setEnabled(is_uninitialized);
-  SignalBlocking(m_custom_rtc_checkbox)->setChecked(Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE));
-
-  QDateTime initial_date_time;
-  initial_date_time.setSecsSinceEpoch(Config::Get(Config::MAIN_CUSTOM_RTC_VALUE));
-  m_custom_rtc_datetime->setEnabled(enable_custom_rtc_widgets);
-  SignalBlocking(m_custom_rtc_datetime)->setDateTime(initial_date_time);
-
-  m_reset_button->setEnabled(is_uninitialized);
+  m_reset_all->setEnabled(idle);
 }
 
-void AdvancedPane::OnResetButtonClicked()
+void AdvancedPane::ConfirmAndReset()
 {
-  if (ModalMessageBox::question(
-          this, tr("Reset Dolphin Settings"),
-          tr("Are you sure you want to restore all Dolphin settings to their default "
-             "values? This action cannot be undone!\n"
-             "All customizations or changes you have made will be lost.\n\n"
-             "Do you want to proceed?"),
-          ModalMessageBox::StandardButtons(ModalMessageBox::Yes | ModalMessageBox::No),
-          ModalMessageBox::No, Qt::WindowModality::WindowModal) == ModalMessageBox::No)
-  {
+  const auto answer = ModalMessageBox::question(
+      this, tr("Reset Dolphin Settings"),
+      tr("Are you sure you want to restore all Dolphin settings to their default values? This "
+         "action cannot be undone!\nAll customizations or changes you have made will be "
+         "lost.\n\nDo you want to proceed?"),
+      ModalMessageBox::StandardButtons(ModalMessageBox::Yes | ModalMessageBox::No),
+      ModalMessageBox::No, Qt::WindowModality::WindowModal);
+  if (answer == ModalMessageBox::No)
     return;
-  }
 
   SConfig::ResetAllSettings();
   UICommon::SetUserDirectory(File::GetUserPath(D_USER_IDX));
