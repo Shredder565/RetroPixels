@@ -66,7 +66,12 @@
     folder in User/ next to it (PixelU/wii/User, the name RetroPixels'
     internal/dolphin userDirFor expects), checked before the embedded
     ./user rule. The --audio_emulation help no longer prints a literal
-    "[%choices]".
+    "[%choices]". Discord presence no longer registers its
+    discord-<id>:// handler on Linux: discord-rpc did that by writing
+    ~/.local/share/applications/discord-455712169795780630.desktop and
+    ~/.config/mimeapps.list on every start, even with portable.txt (found
+    by the checks here; Windows still registers it, unchanged). CI fails
+    when such a file appears.
   - dolphin-emu-nogui: new PlatformX11.cpp, -p x11 (headless stays the
     default; -p lists headless and x11, the help is written out instead
     of "%choices"). It opens its own X connection (XInitThreads first),

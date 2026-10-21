@@ -677,6 +677,10 @@ jobs:
           timeout 180 "$check" dock "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/dock-env"
           timeout 180 "$check" rp-embed "$app" "$RUNNER_TEMP/test.dol" "$RUNNER_TEMP/dock-flag" Vulkan
           kill %1 || true
+          # None of the runs registered anything in the home folder (Discord's URL handler).
+          if compgen -G "$HOME/.local/share/applications/discord-*.desktop" > /dev/null; then
+            echo "::error::a run wrote a discord-*.desktop file to ~/.local/share/applications"; exit 1
+          fi
 
       - name: Make the tar.gz
         run: |

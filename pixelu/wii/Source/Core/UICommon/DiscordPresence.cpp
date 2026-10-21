@@ -133,7 +133,15 @@ void Init()
   callbacks.ready = OnReady;
   callbacks.joinRequest = OnJoinRequest;
   callbacks.joinGame = OnJoin;
-  Discord_Initialize(DEFAULT_CLIENT_ID.c_str(), &callbacks, 1, nullptr);
+#ifdef _WIN32
+  constexpr int register_url_handler = 1;
+#else
+  // On Linux registering the discord-<id>:// handler writes a .desktop file to
+  // ~/.local/share/applications and edits ~/.config/mimeapps.list; a portable
+  // program run by RetroPixels must not write to the home folder.
+  constexpr int register_url_handler = 0;
+#endif
+  Discord_Initialize(DEFAULT_CLIENT_ID.c_str(), &callbacks, register_url_handler, nullptr);
   UpdateDiscordPresence();
 #endif
 }
