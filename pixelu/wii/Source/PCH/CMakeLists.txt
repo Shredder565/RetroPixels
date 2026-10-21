@@ -1,68 +1,36 @@
-# The PCH that dolphin uses for MSVC is non-standard;
-# Instead of having one PCH per module, dolphin has one PCH shared between all modules.
-# So we need to implement PCH manually, rather than using the PCH support built into cmake
+# One MSVC precompiled header for all of PixelU-Wii's modules.
+# Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+#
+# CMake's target_precompile_headers builds a PCH per target. Here every module
+# shares a single pch.h compiled once by build_pch: a target opts in by linking
+# use_pch (see pixelu_use_pch), which force-includes pch.h, uses the shared .pch
+# file and orders the build after it.
 
-# linking against this interface library will cause targets to enable PCH
-add_library(use_pch INTERFACE)
-
-# Uncomment this return to disable PCH
-#return()
+set(pch_file "$<TARGET_FILE_DIR:build_pch>/dolphin.pch")
 
 add_library(build_pch pch.h pch.cpp)
-
-# fmt/format.h is included in the PCH
+# pch.h pulls in fmt.
 target_link_libraries(build_pch PUBLIC fmt::fmt)
+# pch.cpp creates the PCH; everyone, build_pch included, names the same file.
+target_compile_options(build_pch
+  PRIVATE /Ycpch.h
+  PUBLIC /Fp${pch_file}
+)
 
-# pch.cpp should be compiled with the /Yc command, which creates the precompiled header
-target_compile_options(build_pch PRIVATE /Ycpch.h)
-
-# /Fp sets the location of the PCH. By forcing it to a fixed location, all modules
-# will share this one PCH. We give it a fixed name so we can depend on it later
-target_compile_options(build_pch PUBLIC /Fp$<TARGET_FILE_DIR:build_pch>/dolphin.pch )
-
-# Sharing a PCH breaks pdb files. So we use the /Z7 option to inline the pdb into
-# the binary. However MSVC gets noisy if you set both /Zi and /Z7
-if (POLICY CMP0141)
-  # CMake 3.25 has a policy that makes us control this somewhat sanely
-  set_property(TARGET build_pch PROPERTY MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
-
-  # Unfortnually, properties don't propagate. So we also set it globally via parent scope
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>" PARENT_SCOPE)
-else()
-  if (CMAKE_CXX_FLAGS_DEBUG MATCHES "/Zi")
-    # Otherwise we do an ugly string replace to remove it from FLAGS_DEBUG
-    string(REPLACE "/Zi" "/Z7" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-    string(REPLACE "/Zi" "/Z7" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
-
-    # and also overwrite the version in the parent scope
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}" PARENT_SCOPE)
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}" PARENT_SCOPE)
-
-    target_compile_options(build_pch PUBLIC "$<$<CONFIG:Debug,RelWithDebInfo>:/Z7>")
-  endif()
-endif()
-# Setting /Z7 also requires us to disable minimal rebuilds.
+# Object files that share a PCH cannot share one .pdb, so debug information is
+# embedded in the objects (/Z7) for all targets from here on, and minimal
+# rebuild (which needs a .pdb) is off.
+set(embedded_debug_info "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
+set_property(TARGET build_pch PROPERTY MSVC_DEBUG_INFORMATION_FORMAT "${embedded_debug_info}")
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "${embedded_debug_info}" PARENT_SCOPE)
 target_compile_options(build_pch PUBLIC "$<$<CONFIG:Debug,RelWithDebInfo>:/Gm->")
 
-# To get this working with ninja, we need to tell it that compiling pch.cpp generates an extra output
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/pch.cpp PROPERTIES
-  OBJECT_OUTPUTS $<TARGET_FILE_DIR:build_pch>/dolphin.pch
-)
+# Tell single-step generators that compiling pch.cpp also writes the .pch, and
+# give them a target to wait for.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/pch.cpp" PROPERTIES OBJECT_OUTPUTS "${pch_file}")
+add_custom_target(force_build_pch DEPENDS "${pch_file}")
 
-# and then create a custom target that depends on the pch output
-# so that ninja won't start building anything that depends on this
-# target before the pch is built
-add_custom_target(force_build_pch
-  DEPENDS $<TARGET_FILE_DIR:build_pch>/dolphin.pch
-)
-
-# link the pch into anything that depends on use_pch
+add_library(use_pch INTERFACE)
 target_link_libraries(use_pch INTERFACE build_pch)
-
-# targets which use the pch need these compile options
-# /Yu - Use precompiled header named "pch.h"
-# /FI - Force include "pch.h" at top of every source file
 target_compile_options(use_pch INTERFACE /Yupch.h /FIpch.h)
-
-# For ninja, we need to depend on force_build_pch
 add_dependencies(use_pch force_build_pch)

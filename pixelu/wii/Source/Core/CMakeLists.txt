@@ -1,15 +1,9 @@
-add_subdirectory(AudioCommon)
-add_subdirectory(Common)
-add_subdirectory(Core)
-add_subdirectory(DiscIO)
-add_subdirectory(InputCommon)
-add_subdirectory(UICommon)
-add_subdirectory(VideoCommon)
-add_subdirectory(VideoBackends)
+# PixelU-Wii's modules. Original code for RetroPixels (PixelU-Wii).
+# Updater and analytics are off in PixelU-Wii, so there is no WinUpdater here.
 
-if(ENABLE_NOGUI)
-  add_subdirectory(DolphinNoGUI)
-endif()
+foreach(module AudioCommon Common Core DiscIO InputCommon UICommon VideoCommon VideoBackends)
+  add_subdirectory(${module})
+endforeach()
 
 if(ENABLE_CLI_TOOL)
   add_subdirectory(DolphinTool)
@@ -19,10 +13,4 @@ if(ENABLE_QT)
   add_subdirectory(DolphinQt)
 endif()
 
-if (WIN32)
-  add_subdirectory(UpdaterCommon)
-endif()
-
-if (WIN32 AND ENABLE_AUTOUPDATE)
-  add_subdirectory(WinUpdater)
-endif()
+add_subdirectory(UpdaterCommon)

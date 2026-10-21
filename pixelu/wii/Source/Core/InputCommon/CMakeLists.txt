@@ -1,140 +1,76 @@
-add_library(inputcommon
-  DynamicInputTextureManager.cpp
-  DynamicInputTextureManager.h
-  GCAdapter.cpp
-  GCAdapter.h
-  ImageOperations.cpp
-  ImageOperations.h
-  InputConfig.cpp
-  InputConfig.h
-  InputProfile.cpp
-  InputProfile.h
-  ControllerEmu/ControllerEmu.cpp
-  ControllerEmu/ControllerEmu.h
-  ControllerEmu/StickGate.cpp
-  ControllerEmu/StickGate.h
-  ControllerEmu/Control/Control.cpp
-  ControllerEmu/Control/Control.h
-  ControllerEmu/Control/Input.cpp
-  ControllerEmu/Control/Input.h
-  ControllerEmu/Control/Output.cpp
-  ControllerEmu/Control/Output.h
-  ControllerEmu/ControlGroup/AnalogStick.cpp
-  ControllerEmu/ControlGroup/AnalogStick.h
-  ControllerEmu/ControlGroup/Attachments.cpp
-  ControllerEmu/ControlGroup/Attachments.h
-  ControllerEmu/ControlGroup/Buttons.cpp
-  ControllerEmu/ControlGroup/Buttons.h
-  ControllerEmu/ControlGroup/ControlGroup.cpp
-  ControllerEmu/ControlGroup/ControlGroup.h
-  ControllerEmu/ControlGroup/Cursor.cpp
-  ControllerEmu/ControlGroup/Cursor.h
-  ControllerEmu/ControlGroup/Force.cpp
-  ControllerEmu/ControlGroup/Force.h
-  ControllerEmu/ControlGroup/IMUAccelerometer.cpp
-  ControllerEmu/ControlGroup/IMUAccelerometer.h
-  ControllerEmu/ControlGroup/IMUCursor.cpp
-  ControllerEmu/ControlGroup/IMUCursor.h
-  ControllerEmu/ControlGroup/IMUGyroscope.cpp
-  ControllerEmu/ControlGroup/IMUGyroscope.h
-  ControllerEmu/ControlGroup/IRPassthrough.cpp
-  ControllerEmu/ControlGroup/IRPassthrough.h
-  ControllerEmu/ControlGroup/MixedTriggers.cpp
-  ControllerEmu/ControlGroup/MixedTriggers.h
-  ControllerEmu/ControlGroup/ModifySettingsButton.cpp
-  ControllerEmu/ControlGroup/ModifySettingsButton.h
-  ControllerEmu/ControlGroup/Slider.cpp
-  ControllerEmu/ControlGroup/Slider.h
-  ControllerEmu/ControlGroup/Tilt.cpp
-  ControllerEmu/ControlGroup/Tilt.h
-  ControllerEmu/ControlGroup/Triggers.cpp
-  ControllerEmu/ControlGroup/Triggers.h
-  ControllerEmu/Setting/NumericSetting.cpp
-  ControllerEmu/Setting/NumericSetting.h
-  ControllerInterface/DualShockUDPClient/DualShockUDPClient.cpp
-  ControllerInterface/DualShockUDPClient/DualShockUDPClient.h
-  ControllerInterface/DualShockUDPClient/DualShockUDPProto.h
-  ControllerInterface/ControllerInterface.cpp
-  ControllerInterface/ControllerInterface.h
-  ControllerInterface/CoreDevice.cpp
-  ControllerInterface/CoreDevice.h
-  ControllerInterface/InputBackend.cpp
-  ControllerInterface/InputBackend.h
-  ControllerInterface/MappingCommon.cpp
-  ControllerInterface/MappingCommon.h
-  ControllerInterface/Wiimote/WiimoteController.cpp
-  ControllerInterface/Wiimote/WiimoteController.h
-  ControlReference/ControlReference.cpp
-  ControlReference/ControlReference.h
-  ControlReference/ExpressionParser.cpp
-  ControlReference/ExpressionParser.h
-  ControlReference/FunctionExpression.cpp
-  ControlReference/FunctionExpression.h
-  DynamicInputTextures/DITConfiguration.cpp
-  DynamicInputTextures/DITConfiguration.h
-  DynamicInputTextures/DITData.h
-  DynamicInputTextures/DITSpecification.cpp
-  DynamicInputTextures/DITSpecification.h
+# InputCommon: controller configuration and the input backends (DirectInput,
+# XInput, Windows.Gaming.Input, keyboard and mouse, SDL, DSU, the GameCube adapter).
+# Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+pixelu_library(inputcommon
+  IN .
+    DynamicInputTextureManager.cpp DynamicInputTextureManager.h GCAdapter.cpp GCAdapter.h
+    ImageOperations.cpp ImageOperations.h InputConfig.cpp InputConfig.h InputProfile.cpp
+    InputProfile.h
+  IN ControlReference
+    ControlReference.cpp ControlReference.h ExpressionParser.cpp ExpressionParser.h
+    FunctionExpression.cpp FunctionExpression.h
+  IN ControllerEmu
+    ControllerEmu.cpp ControllerEmu.h StickGate.cpp StickGate.h
+  IN ControllerEmu/Control
+    Control.cpp Control.h Input.cpp Input.h Output.cpp Output.h
+  IN ControllerEmu/ControlGroup
+    AnalogStick.cpp AnalogStick.h Attachments.cpp Attachments.h Buttons.cpp Buttons.h
+    ControlGroup.cpp ControlGroup.h Cursor.cpp Cursor.h Force.cpp Force.h IMUAccelerometer.cpp
+    IMUAccelerometer.h IMUCursor.cpp IMUCursor.h IMUGyroscope.cpp IMUGyroscope.h
+    IRPassthrough.cpp IRPassthrough.h MixedTriggers.cpp MixedTriggers.h
+    ModifySettingsButton.cpp ModifySettingsButton.h Slider.cpp Slider.h Tilt.cpp Tilt.h
+    Triggers.cpp Triggers.h
+  IN ControllerEmu/Setting
+    NumericSetting.cpp NumericSetting.h
+  IN ControllerInterface
+    ControllerInterface.cpp ControllerInterface.h CoreDevice.cpp CoreDevice.h InputBackend.cpp
+    InputBackend.h MappingCommon.cpp MappingCommon.h
+  IN ControllerInterface/DInput
+    DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp
+    DInputKeyboardMouse.h NamedKeys.h XInputFilter.cpp XInputFilter.h
+  IN ControllerInterface/DualShockUDPClient
+    DualShockUDPClient.cpp DualShockUDPClient.h DualShockUDPProto.h
+  IN ControllerInterface/ForceFeedback
+    ForceFeedbackDevice.cpp ForceFeedbackDevice.h
+  IN ControllerInterface/WGInput
+    WGInput.cpp WGInput.h
+  IN ControllerInterface/Wiimote
+    WiimoteController.cpp WiimoteController.h
+  IN ControllerInterface/Win32
+    Win32.cpp Win32.h
+  IN ControllerInterface/XInput
+    XInput.cpp XInput.h
+  IN DynamicInputTextures
+    DITConfiguration.cpp DITConfiguration.h DITData.h DITSpecification.cpp DITSpecification.h
 )
 
 target_link_libraries(inputcommon
-PUBLIC
-  common
-
-PRIVATE
-  fmt::fmt
-  sfml-network
-  spng::spng
+  PUBLIC
+    common
+    LibUSB::LibUSB
+  PRIVATE
+    fmt::fmt
+    sfml-network
+    spng::spng
 )
 
-if(WIN32)
-  target_sources(inputcommon PRIVATE
-    ControllerInterface/DInput/DInput.cpp
-    ControllerInterface/DInput/DInput.h
-    ControllerInterface/DInput/DInput8.h
-    ControllerInterface/DInput/DInputJoystick.cpp
-    ControllerInterface/DInput/DInputJoystick.h
-    ControllerInterface/DInput/DInputKeyboardMouse.cpp
-    ControllerInterface/DInput/DInputKeyboardMouse.h
-    ControllerInterface/DInput/NamedKeys.h
-    ControllerInterface/DInput/XInputFilter.cpp
-    ControllerInterface/DInput/XInputFilter.h
-    ControllerInterface/Win32/Win32.cpp
-    ControllerInterface/Win32/Win32.h
-    ControllerInterface/WGInput/WGInput.cpp
-    ControllerInterface/WGInput/WGInput.h
-    ControllerInterface/XInput/XInput.cpp
-    ControllerInterface/XInput/XInput.h
-    ControllerInterface/ForceFeedback/ForceFeedbackDevice.cpp
-    ControllerInterface/ForceFeedback/ForceFeedbackDevice.h
-  )
-endif()
-
-if(NOT ANDROID)
-  target_link_libraries(inputcommon PUBLIC LibUSB::LibUSB)
-endif()
-
 if(ENABLE_SDL)
-  target_sources(inputcommon PRIVATE
-    ControllerInterface/SDL/SDL.cpp
-    ControllerInterface/SDL/SDL.h
-    ControllerInterface/SDL/SDLGamepad.cpp
-    ControllerInterface/SDL/SDLGamepad.h
+  pixelu_add_sources(inputcommon
+    IN ControllerInterface/SDL
+      SDL.cpp SDL.h SDLGamepad.cpp SDLGamepad.h
   )
   target_link_libraries(inputcommon PRIVATE SDL3::SDL3)
 endif()
 
-if(MSVC)
-  # Add precompiled header
-  target_link_libraries(inputcommon PRIVATE use_pch)
-endif()
+pixelu_use_pch(inputcommon)
 
 if(TARGET Hidapi::Hidapi)
-  target_sources(inputcommon
-  PRIVATE
-    ControllerInterface/SteamDeck/SteamDeck.cpp
-    ControllerInterface/SteamDeck/SteamDeck.h
+  # The Steam Deck's built-in controls.
+  pixelu_add_sources(inputcommon
+    IN ControllerInterface/SteamDeck
+      SteamDeck.cpp SteamDeck.h
   )
   target_link_libraries(inputcommon PUBLIC Hidapi::Hidapi)
-  target_compile_definitions(inputcommon PRIVATE -DHAVE_HIDAPI=1)
+  target_compile_definitions(inputcommon PRIVATE HAVE_HIDAPI=1)
 endif()

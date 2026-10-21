@@ -1,39 +1,24 @@
-add_executable(dolphin-tool
-  ToolHeadlessPlatform.cpp
-  ExtractCommand.cpp
-  ExtractCommand.h
-  ConvertCommand.cpp
-  ConvertCommand.h
-  VerifyCommand.cpp
-  VerifyCommand.h
-  HeaderCommand.cpp
-  HeaderCommand.h
-  ToolMain.cpp
+# The command-line tool (DolphinTool.exe): convert, verify, inspect and extract
+# disc images, and run headless.
+# Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+add_executable(dolphin-tool)
+pixelu_add_sources(dolphin-tool
+  IN .
+    ConvertCommand.cpp ConvertCommand.h DolphinTool.exe.manifest DolphinTool.rc
+    ExtractCommand.cpp ExtractCommand.h HeaderCommand.cpp HeaderCommand.h
+    ToolHeadlessPlatform.cpp ToolMain.cpp VerifyCommand.cpp VerifyCommand.h
+)
+set_target_properties(dolphin-tool PROPERTIES
+  OUTPUT_NAME DolphinTool
+  DEBUG_POSTFIX D
 )
 
-if (WIN32)
-  target_sources(dolphin-tool PRIVATE DolphinTool.exe.manifest DolphinTool.rc)
-
-  set_target_properties(dolphin-tool PROPERTIES
-    DEBUG_POSTFIX    D
-    OUTPUT_NAME      DolphinTool
-  )
-endif()
-
-target_link_libraries(dolphin-tool
-PRIVATE
+target_link_libraries(dolphin-tool PRIVATE
   discio
   uicommon
   cpp-optparse
   fmt::fmt
 )
 
-if(MSVC)
-  # Add precompiled header
-  target_link_libraries(dolphin-tool PRIVATE use_pch)
-endif()
-
-set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-tool)
-if (NOT WIN32)
-  install(TARGETS dolphin-tool RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
+pixelu_use_pch(dolphin-tool)

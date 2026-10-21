@@ -1,12 +1,10 @@
-add_subdirectory(OGL)
-add_subdirectory(Null)
-add_subdirectory(Software)
+# Video backends. Original code for RetroPixels (PixelU-Wii).
+# OpenGL, null, software and the Direct3D 11/12 backends are always built;
+# Vulkan when ENABLE_VULKAN is on.
 
-if(WIN32)
-  add_subdirectory(D3DCommon)
-  add_subdirectory(D3D)
-  add_subdirectory(D3D12)
-endif()
+foreach(backend OGL Null Software D3DCommon D3D D3D12)
+  add_subdirectory(${backend})
+endforeach()
 
 if(ENABLE_VULKAN)
   add_subdirectory(Vulkan)

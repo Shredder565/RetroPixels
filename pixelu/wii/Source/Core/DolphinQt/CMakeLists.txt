@@ -1,668 +1,294 @@
-if (WIN32)
-  set(DOLPHIN_QT_X64_ROOT "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.8.3/x64")
-  set(DOLPHIN_QT_ARM64_ROOT "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.8.3/ARM64")
+# The Qt front end: PixelU-Wii.exe.
+# Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-  set(DOLPHIN_QT_ROOT "${DOLPHIN_QT_X64_ROOT}")
-  set(DOLPHIN_QT_TARGET_SPEC "win32-msvc")
-
-  if(DOLPHIN_HOST STREQUAL "ARM64")
-    set(DOLPHIN_QT_HOST_ROOT "${DOLPHIN_QT_ARM64_ROOT}")
-  else()
-    set(DOLPHIN_QT_HOST_ROOT "${DOLPHIN_QT_X64_ROOT}")
-  endif()
-
-  list(APPEND CMAKE_PREFIX_PATH "${DOLPHIN_QT_ROOT}")
+# The bundled Qt 6.8.3 build (from the third-party folder). Tools such as moc
+# and windeployqt run from the host's copy, which differs on an ARM64 host.
+set(DOLPHIN_QT_ROOT "${THIRD}/Qt/Qt6.8.3/x64")
+set(DOLPHIN_QT_TARGET_SPEC "win32-msvc")
+if(QT_HOST_PATH)
+  set(DOLPHIN_QT_HOST_ROOT "${QT_HOST_PATH}")
+else()
+  set(DOLPHIN_QT_HOST_ROOT "${DOLPHIN_QT_ROOT}")
 endif()
+list(APPEND CMAKE_PREFIX_PATH "${DOLPHIN_QT_ROOT}")
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg)
-
-if (Qt6_VERSION VERSION_GREATER_EQUAL 6.10.0)
-  # GuiPrivate is needed to #include qplatformnativeinterface.h in MainWindow.cpp with Qt 6.10+.
-  set(NEED_QT_GUI_PRIVATE_COMPONENT ON)
+message(STATUS "Qt ${Qt6_VERSION}")
+# Qt 6.10 and later keep qplatformnativeinterface.h (MainWindow.cpp) in GuiPrivate.
+if(Qt6_VERSION VERSION_GREATER_EQUAL 6.10.0)
   find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+  set(qt_gui_private Qt6::GuiPrivate)
+else()
+  set(qt_gui_private)
 endif()
-
-message(STATUS "Found Qt version ${Qt6_VERSION}")
-
+# The C++ standard is set for the whole project; Qt must not ask for another.
 set_property(TARGET Qt6::Core PROPERTY INTERFACE_COMPILE_FEATURES "")
 
-add_executable(dolphin-emu
-  AboutDialog.cpp
-  AboutDialog.h
-  CheatSearchFactoryWidget.cpp
-  CheatSearchFactoryWidget.h
-  CheatSearchWidget.cpp
-  CheatSearchWidget.h
-  CheatsManager.cpp
-  CheatsManager.h
-  Achievements/AchievementBox.cpp
-  Achievements/AchievementBox.h
-  Achievements/AchievementHeaderWidget.cpp
-  Achievements/AchievementHeaderWidget.h
-  Achievements/AchievementLeaderboardWidget.cpp
-  Achievements/AchievementLeaderboardWidget.h
-  Achievements/AchievementProgressWidget.cpp
-  Achievements/AchievementProgressWidget.h
-  Achievements/AchievementSettingsWidget.cpp
-  Achievements/AchievementSettingsWidget.h
-  Achievements/AchievementsWindow.cpp
-  Achievements/AchievementsWindow.h
-  Config/ARCodeWidget.cpp
-  Config/ARCodeWidget.h
-  Config/CheatCodeEditor.cpp
-  Config/CheatCodeEditor.h
-  Config/CheatWarningWidget.cpp
-  Config/CheatWarningWidget.h
-  Config/CommonControllersWidget.cpp
-  Config/CommonControllersWidget.h
-  Config/ConfigControls/ConfigBool.cpp
-  Config/ConfigControls/ConfigBool.h
-  Config/ConfigControls/ConfigChoice.cpp
-  Config/ConfigControls/ConfigChoice.h
-  Config/ConfigControls/ConfigControl.h
-  Config/ConfigControls/ConfigInteger.cpp
-  Config/ConfigControls/ConfigInteger.h
-  Config/ConfigControls/ConfigRadio.cpp
-  Config/ConfigControls/ConfigRadio.h
-  Config/ConfigControls/ConfigFloatSlider.cpp
-  Config/ConfigControls/ConfigFloatSlider.h
-  Config/ConfigControls/ConfigSlider.cpp
-  Config/ConfigControls/ConfigSlider.h
-  Config/ConfigControls/ConfigText.cpp
-  Config/ConfigControls/ConfigText.h
-  Config/ConfigControls/ConfigUserPath.cpp
-  Config/ConfigControls/ConfigUserPath.h
-  Config/ControllerInterface/ControllerInterfaceWindow.cpp
-  Config/ControllerInterface/ControllerInterfaceWindow.h
-  Config/SDLHints/SDLHintsWindow.cpp
-  Config/SDLHints/SDLHintsWindow.h
-  Config/ControllerInterface/DualShockUDPClientEditServerDialog.cpp
-  Config/ControllerInterface/DualShockUDPClientEditServerDialog.h
-  Config/ControllerInterface/DualShockUDPClientWidget.cpp
-  Config/ControllerInterface/DualShockUDPClientWidget.h
-  Config/ControllerInterface/DualShockUDPSettings.cpp
-  Config/ControllerInterface/DualShockUDPSettings.h
-  Config/ControllerInterface/ServerStringValidator.cpp
-  Config/ControllerInterface/ServerStringValidator.h
-  Config/ControllersPane.cpp
-  Config/ControllersPane.h
-  Config/FilesystemWidget.cpp
-  Config/FilesystemWidget.h
-  Config/FreeLookWidget.cpp
-  Config/FreeLookWidget.h
-  Config/FreeLookWindow.cpp
-  Config/FreeLookWindow.h
-  Config/GameConfigEdit.cpp
-  Config/GameConfigEdit.h
-  Config/GameConfigHighlighter.cpp
-  Config/GameConfigHighlighter.h
-  Config/GameConfigWidget.cpp
-  Config/GameConfigWidget.h
-  Config/GamecubeControllersWidget.cpp
-  Config/GamecubeControllersWidget.h
-  Config/GeckoCodeWidget.cpp
-  Config/GeckoCodeWidget.h
-  Config/Graphics/AdvancedWidget.cpp
-  Config/Graphics/AdvancedWidget.h
-  Config/Graphics/EnhancementsWidget.cpp
-  Config/Graphics/EnhancementsWidget.h
-  Config/Graphics/GeneralWidget.cpp
-  Config/Graphics/GeneralWidget.h
-  Config/Graphics/GraphicsPane.cpp
-  Config/Graphics/GraphicsPane.h
-  Config/Graphics/HacksWidget.cpp
-  Config/Graphics/HacksWidget.h
-  Config/Graphics/ColorCorrectionConfigWindow.cpp
-  Config/Graphics/ColorCorrectionConfigWindow.h
-  Config/Graphics/PostProcessingConfigWindow.cpp
-  Config/Graphics/PostProcessingConfigWindow.h
-  Config/GraphicsModListWidget.cpp
-  Config/GraphicsModListWidget.h
-  Config/GraphicsModWarningWidget.cpp
-  Config/GraphicsModWarningWidget.h
-  Config/HardcoreWarningWidget.cpp
-  Config/HardcoreWarningWidget.h
-  Config/InfoWidget.cpp
-  Config/InfoWidget.h
-  Config/LogConfigWidget.cpp
-  Config/LogConfigWidget.h
-  Config/LogWidget.cpp
-  Config/LogWidget.h
-  Config/Mapping/FreeLookGeneral.cpp
-  Config/Mapping/FreeLookGeneral.h
-  Config/Mapping/FreeLookRotation.cpp
-  Config/Mapping/FreeLookRotation.h
-  Config/Mapping/GBAPadEmu.cpp
-  Config/Mapping/GBAPadEmu.h
-  Config/Mapping/GCKeyboardEmu.cpp
-  Config/Mapping/GCKeyboardEmu.h
-  Config/Mapping/GCMicrophone.cpp
-  Config/Mapping/GCMicrophone.h
-  Config/Mapping/GCPadEmu.cpp
-  Config/Mapping/GCPadEmu.h
-  Config/Mapping/GCPadWiiUConfigDialog.cpp
-  Config/Mapping/GCPadWiiUConfigDialog.h
-  Config/Mapping/Hotkey3D.cpp
-  Config/Mapping/Hotkey3D.h
-  Config/Mapping/HotkeyControllerProfile.cpp
-  Config/Mapping/HotkeyControllerProfile.h
-  Config/Mapping/HotkeyDebugging.cpp
-  Config/Mapping/HotkeyDebugging.h
-  Config/Mapping/HotkeyGBA.cpp
-  Config/Mapping/HotkeyGBA.h
-  Config/Mapping/HotkeyGeneral.cpp
-  Config/Mapping/HotkeyGeneral.h
-  Config/Mapping/HotkeyGraphics.cpp
-  Config/Mapping/HotkeyGraphics.h
-  Config/Mapping/HotkeyStates.cpp
-  Config/Mapping/HotkeyStates.h
-  Config/Mapping/HotkeyStatesOther.cpp
-  Config/Mapping/HotkeyStatesOther.h
-  Config/Mapping/HotkeyTAS.cpp
-  Config/Mapping/HotkeyTAS.h
-  Config/Mapping/HotkeyUSBEmu.cpp
-  Config/Mapping/HotkeyUSBEmu.h
-  Config/Mapping/HotkeyWii.cpp
-  Config/Mapping/HotkeyWii.h
-  Config/Mapping/IOWindow.cpp
-  Config/Mapping/MappingButton.cpp
-  Config/Mapping/MappingButton.h
-  Config/Mapping/MappingCommon.cpp
-  Config/Mapping/MappingCommon.h
-  Config/Mapping/MappingIndicator.cpp
-  Config/Mapping/MappingIndicator.h
-  Config/Mapping/MappingNumeric.cpp
-  Config/Mapping/MappingNumeric.h
-  Config/Mapping/MappingWidget.cpp
-  Config/Mapping/MappingWidget.h
-  Config/Mapping/MappingWindow.cpp
-  Config/Mapping/MappingWindow.h
-  Config/Mapping/WiimoteEmuExtension.cpp
-  Config/Mapping/WiimoteEmuExtension.h
-  Config/Mapping/WiimoteEmuExtensionMotionInput.cpp
-  Config/Mapping/WiimoteEmuExtensionMotionInput.h
-  Config/Mapping/WiimoteEmuExtensionMotionSimulation.cpp
-  Config/Mapping/WiimoteEmuExtensionMotionSimulation.h
-  Config/Mapping/WiimoteEmuGeneral.cpp
-  Config/Mapping/WiimoteEmuGeneral.h
-  Config/Mapping/WiimoteEmuMotionControl.cpp
-  Config/Mapping/WiimoteEmuMotionControl.h
-  Config/Mapping/WiimoteEmuMotionControlIMU.cpp
-  Config/Mapping/WiimoteEmuMotionControlIMU.h
-  Config/NewPatchDialog.cpp
-  Config/NewPatchDialog.h
-  Config/PatchesWidget.cpp
-  Config/PatchesWidget.h
-  Config/PropertiesDialog.cpp
-  Config/PropertiesDialog.h
-  Config/SettingsWindow.cpp
-  Config/SettingsWindow.h
-  Config/ToolTipControls/BalloonTip.cpp
-  Config/ToolTipControls/BalloonTip.h
-  Config/ToolTipControls/ToolTipCheckBox.cpp
-  Config/ToolTipControls/ToolTipCheckBox.h
-  Config/ToolTipControls/ToolTipComboBox.cpp
-  Config/ToolTipControls/ToolTipComboBox.h
-  Config/ToolTipControls/ToolTipPushButton.cpp
-  Config/ToolTipControls/ToolTipPushButton.h
-  Config/ToolTipControls/ToolTipRadioButton.cpp
-  Config/ToolTipControls/ToolTipRadioButton.h
-  Config/ToolTipControls/ToolTipSlider.cpp
-  Config/ToolTipControls/ToolTipSlider.h
-  Config/ToolTipControls/ToolTipSpinBox.cpp
-  Config/ToolTipControls/ToolTipSpinBox.h
-  Config/ToolTipControls/ToolTipWidget.h
-  Config/VerifyWidget.cpp
-  Config/VerifyWidget.h
-  Config/WiimoteControllersWidget.cpp
-  Config/WiimoteControllersWidget.h
-  ConvertDialog.cpp
-  ConvertDialog.h
-  Debugger/AssembleInstructionDialog.cpp
-  Debugger/AssembleInstructionDialog.h
-  Debugger/AssemblerWidget.cpp
-  Debugger/AssemblerWidget.h
-  Debugger/AssemblyEditor.cpp
-  Debugger/AssemblyEditor.h
-  Debugger/BranchWatchDialog.cpp
-  Debugger/BranchWatchDialog.h
-  Debugger/BranchWatchTableModel.cpp
-  Debugger/BranchWatchTableModel.h
-  Debugger/BreakpointDialog.cpp
-  Debugger/BreakpointDialog.h
-  Debugger/BreakpointWidget.cpp
-  Debugger/BreakpointWidget.h
-  Debugger/CodeViewWidget.cpp
-  Debugger/CodeViewWidget.h
-  Debugger/CodeWidget.cpp
-  Debugger/CodeWidget.h
-  Debugger/EditSymbolDialog.cpp
-  Debugger/EditSymbolDialog.h
-  Debugger/GekkoSyntaxHighlight.cpp
-  Debugger/GekkoSyntaxHighlight.h
-  Debugger/JitBlockTableModel.cpp
-  Debugger/JitBlockTableModel.h
-  Debugger/JITWidget.cpp
-  Debugger/JITWidget.h
-  Debugger/MemoryViewWidget.cpp
-  Debugger/MemoryViewWidget.h
-  Debugger/MemoryWidget.cpp
-  Debugger/MemoryWidget.h
-  Debugger/NetworkWidget.cpp
-  Debugger/NetworkWidget.h
-  Debugger/PatchInstructionDialog.cpp
-  Debugger/PatchInstructionDialog.h
-  Debugger/RegisterColumn.cpp
-  Debugger/RegisterColumn.h
-  Debugger/RegisterWidget.cpp
-  Debugger/RegisterWidget.h
-  Debugger/ThreadWidget.cpp
-  Debugger/ThreadWidget.h
-  Debugger/WatchWidget.cpp
-  Debugger/WatchWidget.h
-  DiscordHandler.cpp
-  DiscordHandler.h
-  DiscordJoinRequestDialog.cpp
-  DiscordJoinRequestDialog.h
-  EmulatedUSB/WiiSpeakWindow.cpp
-  EmulatedUSB/WiiSpeakWindow.h
-  EmulatedUSB/LogitechMicWindow.cpp
-  EmulatedUSB/LogitechMicWindow.h
-  FIFO/FIFOAnalyzer.cpp
-  FIFO/FIFOAnalyzer.h
-  FIFO/FIFOPlayerWindow.cpp
-  FIFO/FIFOPlayerWindow.h
-  GameCount.cpp
-  GameCount.h
-  GameList/GameList.cpp
-  GameList/GameList.h
-  GameList/GameListModel.cpp
-  GameList/GameListModel.h
-  GameList/GameTracker.cpp
-  GameList/GameTracker.h
-  GameList/GridProxyModel.cpp
-  GameList/GridProxyModel.h
-  GameList/ListProxyModel.cpp
-  GameList/ListProxyModel.h
-  GCMemcardCreateNewDialog.cpp
-  GCMemcardCreateNewDialog.h
-  GCMemcardManager.cpp
-  GCMemcardManager.h
-  Host.cpp
-  Host.h
-  HotkeyScheduler.cpp
-  HotkeyScheduler.h
-  InfinityBase/InfinityBaseWindow.cpp
-  InfinityBase/InfinityBaseWindow.h
-  Main.cpp
-  MainWindow.cpp
-  MainWindow.h
-  MenuBar.cpp
-  MenuBar.h
-  NetPlay/ChunkedProgressDialog.cpp
-  NetPlay/ChunkedProgressDialog.h
-  NetPlay/GameDigestDialog.cpp
-  NetPlay/GameDigestDialog.h
-  NetPlay/GameListDialog.cpp
-  NetPlay/GameListDialog.h
-  NetPlay/ClickBlurLabel.cpp
-  NetPlay/ClickBlurLabel.h
-  NetPlay/NetPlayBrowser.cpp
-  NetPlay/NetPlayBrowser.h
-  NetPlay/NetPlayDialog.cpp
-  NetPlay/NetPlayDialog.h
-  NetPlay/NetPlaySetupDialog.cpp
-  NetPlay/NetPlaySetupDialog.h
-  NetPlay/PadMappingDialog.cpp
-  NetPlay/PadMappingDialog.h
-  NANDRepairDialog.cpp
-  NANDRepairDialog.h
-  NKitWarningDialog.cpp
-  NKitWarningDialog.h
-  QtUtils/AnalyticsPrompt.cpp
-  QtUtils/AnalyticsPrompt.h
-  QtUtils/AspectRatioWidget.cpp
-  QtUtils/AspectRatioWidget.h
-  QtUtils/BlockUserInputFilter.cpp
-  QtUtils/BlockUserInputFilter.h
-  QtUtils/ClearLayoutRecursively.cpp
-  QtUtils/ClearLayoutRecursively.h
-  QtUtils/ClickableStatusBar.h
-  QtUtils/DolphinFileDialog.cpp
-  QtUtils/DolphinFileDialog.h
-  QtUtils/DoubleClickEventFilter.cpp
-  QtUtils/DoubleClickEventFilter.h
-  QtUtils/ElidedButton.cpp
-  QtUtils/ElidedButton.h
-  QtUtils/FileOpenEventFilter.cpp
-  QtUtils/FileOpenEventFilter.h
-  QtUtils/FromStdString.h
-  QtUtils/ImageConverter.cpp
-  QtUtils/ImageConverter.h
-  QtUtils/ModalMessageBox.cpp
-  QtUtils/ModalMessageBox.h
-  QtUtils/NonAutodismissibleMenu.cpp
-  QtUtils/NonAutodismissibleMenu.h
-  QtUtils/NonDefaultQPushButton.cpp
-  QtUtils/NonDefaultQPushButton.h
-  QtUtils/ParallelProgressDialog.h
-  QtUtils/PartiallyClosableTabWidget.cpp
-  QtUtils/PartiallyClosableTabWidget.h
-  QtUtils/QtUtils.cpp
-  QtUtils/QtUtils.h
-  QtUtils/SetWindowDecorations.cpp
-  QtUtils/SetWindowDecorations.h
-  QtUtils/SignalBlocking.h
-  QtUtils/UTF8CodePointCountValidator.cpp
-  QtUtils/UTF8CodePointCountValidator.h
-  QtUtils/WindowActivationEventFilter.cpp
-  QtUtils/WindowActivationEventFilter.h
-  QtUtils/WrapInScrollArea.cpp
-  QtUtils/WrapInScrollArea.h
-  RenderWidget.cpp
-  RenderWidget.h
-  ResourcePackManager.cpp
-  ResourcePackManager.h
-  Resources.cpp
-  Resources.h
-  RiivolutionBootWidget.cpp
-  RiivolutionBootWidget.h
-  SearchBar.cpp
-  SearchBar.h
-  Settings.cpp
-  Settings.h
-  Settings/AdvancedPane.cpp
-  Settings/AdvancedPane.h
-  Settings/AudioPane.cpp
-  Settings/AudioPane.h
-  Settings/BroadbandAdapterSettingsDialog.cpp
-  Settings/BroadbandAdapterSettingsDialog.h
-  Settings/GameCubePane.cpp
-  Settings/GameCubePane.h
-  Settings/GeneralPane.cpp
-  Settings/GeneralPane.h
-  Settings/InterfacePane.cpp
-  Settings/InterfacePane.h
-  Settings/OnScreenDisplayPane.cpp
-  Settings/OnScreenDisplayPane.h
-  Settings/PathPane.cpp
-  Settings/PathPane.h
-  Settings/TriforcePane.cpp
-  Settings/TriforcePane.h
-  Settings/USBDevicePicker.cpp
-  Settings/USBDevicePicker.h
-  Settings/WiiPane.cpp
-  Settings/WiiPane.h
-  SkylanderPortal/SkylanderModifyDialog.cpp
-  SkylanderPortal/SkylanderModifyDialog.h
-  SkylanderPortal/SkylanderPortalWindow.cpp
-  SkylanderPortal/SkylanderPortalWindow.h
-  TAS/GCTASInputWindow.cpp
-  TAS/GCTASInputWindow.h
-  TAS/GBATASInputWindow.cpp
-  TAS/GBATASInputWindow.h
-  TAS/IRWidget.cpp
-  TAS/IRWidget.h
-  TAS/StickWidget.cpp
-  TAS/StickWidget.h
-  TAS/TASCheckBox.cpp
-  TAS/TASCheckBox.h
-  TAS/TASControlState.cpp
-  TAS/TASControlState.h
-  TAS/TASInputWindow.cpp
-  TAS/TASInputWindow.h
-  TAS/TASSlider.cpp
-  TAS/TASSlider.h
-  TAS/TASSpinBox.cpp
-  TAS/TASSpinBox.h
-  TAS/WiiTASInputWindow.cpp
-  TAS/WiiTASInputWindow.h
-  ToolBar.cpp
-  ToolBar.h
-  Translation.cpp
-  Translation.h
-  Updater.cpp
-  Updater.h
-  WiiUpdate.cpp
-  WiiUpdate.h
+add_executable(dolphin-emu)
+pixelu_add_sources(dolphin-emu
+  IN .
+    AboutDialog.cpp AboutDialog.h CheatSearchFactoryWidget.cpp CheatSearchFactoryWidget.h
+    CheatSearchWidget.cpp CheatSearchWidget.h CheatsManager.cpp CheatsManager.h
+    ConvertDialog.cpp ConvertDialog.h DiscordHandler.cpp DiscordHandler.h
+    DiscordJoinRequestDialog.cpp DiscordJoinRequestDialog.h DolphinQt.manifest DolphinQt.rc
+    GameCount.cpp GameCount.h GCMemcardCreateNewDialog.cpp GCMemcardCreateNewDialog.h
+    GCMemcardManager.cpp GCMemcardManager.h Host.cpp Host.h HotkeyScheduler.cpp
+    HotkeyScheduler.h Main.cpp MainWindow.cpp MainWindow.h MenuBar.cpp MenuBar.h
+    NANDRepairDialog.cpp NANDRepairDialog.h NKitWarningDialog.cpp NKitWarningDialog.h
+    RenderWidget.cpp RenderWidget.h ResourcePackManager.cpp ResourcePackManager.h Resources.cpp
+    Resources.h RiivolutionBootWidget.cpp RiivolutionBootWidget.h SearchBar.cpp SearchBar.h
+    Settings.cpp Settings.h ToolBar.cpp ToolBar.h Translation.cpp Translation.h Updater.cpp
+    Updater.h WiiUpdate.cpp WiiUpdate.h
+  IN Achievements
+    AchievementBox.cpp AchievementBox.h AchievementHeaderWidget.cpp AchievementHeaderWidget.h
+    AchievementLeaderboardWidget.cpp AchievementLeaderboardWidget.h
+    AchievementProgressWidget.cpp AchievementProgressWidget.h AchievementSettingsWidget.cpp
+    AchievementSettingsWidget.h AchievementsWindow.cpp AchievementsWindow.h
+  IN Config
+    ARCodeWidget.cpp ARCodeWidget.h CheatCodeEditor.cpp CheatCodeEditor.h
+    CheatWarningWidget.cpp CheatWarningWidget.h CommonControllersWidget.cpp
+    CommonControllersWidget.h ControllersPane.cpp ControllersPane.h FilesystemWidget.cpp
+    FilesystemWidget.h FreeLookWidget.cpp FreeLookWidget.h FreeLookWindow.cpp FreeLookWindow.h
+    GameConfigEdit.cpp GameConfigEdit.h GameConfigHighlighter.cpp GameConfigHighlighter.h
+    GameConfigWidget.cpp GameConfigWidget.h GamecubeControllersWidget.cpp
+    GamecubeControllersWidget.h GeckoCodeWidget.cpp GeckoCodeWidget.h GraphicsModListWidget.cpp
+    GraphicsModListWidget.h GraphicsModWarningWidget.cpp GraphicsModWarningWidget.h
+    HardcoreWarningWidget.cpp HardcoreWarningWidget.h InfoWidget.cpp InfoWidget.h
+    LogConfigWidget.cpp LogConfigWidget.h LogWidget.cpp LogWidget.h NewPatchDialog.cpp
+    NewPatchDialog.h PatchesWidget.cpp PatchesWidget.h PropertiesDialog.cpp PropertiesDialog.h
+    SettingsWindow.cpp SettingsWindow.h VerifyWidget.cpp VerifyWidget.h
+    WiimoteControllersWidget.cpp WiimoteControllersWidget.h
+  IN Config/ConfigControls
+    ConfigBool.cpp ConfigBool.h ConfigChoice.cpp ConfigChoice.h ConfigControl.h
+    ConfigFloatSlider.cpp ConfigFloatSlider.h ConfigInteger.cpp ConfigInteger.h ConfigRadio.cpp
+    ConfigRadio.h ConfigSlider.cpp ConfigSlider.h ConfigText.cpp ConfigText.h
+    ConfigUserPath.cpp ConfigUserPath.h
+  IN Config/ControllerInterface
+    ControllerInterfaceWindow.cpp ControllerInterfaceWindow.h
+    DualShockUDPClientEditServerDialog.cpp DualShockUDPClientEditServerDialog.h
+    DualShockUDPClientWidget.cpp DualShockUDPClientWidget.h DualShockUDPSettings.cpp
+    DualShockUDPSettings.h ServerStringValidator.cpp ServerStringValidator.h
+  IN Config/Graphics
+    AdvancedWidget.cpp AdvancedWidget.h ColorCorrectionConfigWindow.cpp
+    ColorCorrectionConfigWindow.h EnhancementsWidget.cpp EnhancementsWidget.h GeneralWidget.cpp
+    GeneralWidget.h GraphicsPane.cpp GraphicsPane.h HacksWidget.cpp HacksWidget.h
+    PostProcessingConfigWindow.cpp PostProcessingConfigWindow.h
+  IN Config/Mapping
+    FreeLookGeneral.cpp FreeLookGeneral.h FreeLookRotation.cpp FreeLookRotation.h GBAPadEmu.cpp
+    GBAPadEmu.h GCKeyboardEmu.cpp GCKeyboardEmu.h GCMicrophone.cpp GCMicrophone.h GCPadEmu.cpp
+    GCPadEmu.h GCPadWiiUConfigDialog.cpp GCPadWiiUConfigDialog.h Hotkey3D.cpp Hotkey3D.h
+    HotkeyControllerProfile.cpp HotkeyControllerProfile.h HotkeyDebugging.cpp HotkeyDebugging.h
+    HotkeyGBA.cpp HotkeyGBA.h HotkeyGeneral.cpp HotkeyGeneral.h HotkeyGraphics.cpp
+    HotkeyGraphics.h HotkeyStates.cpp HotkeyStates.h HotkeyStatesOther.cpp HotkeyStatesOther.h
+    HotkeyTAS.cpp HotkeyTAS.h HotkeyUSBEmu.cpp HotkeyUSBEmu.h HotkeyWii.cpp HotkeyWii.h
+    IOWindow.cpp MappingButton.cpp MappingButton.h MappingCommon.cpp MappingCommon.h
+    MappingIndicator.cpp MappingIndicator.h MappingNumeric.cpp MappingNumeric.h
+    MappingWidget.cpp MappingWidget.h MappingWindow.cpp MappingWindow.h WiimoteEmuExtension.cpp
+    WiimoteEmuExtension.h WiimoteEmuExtensionMotionInput.cpp WiimoteEmuExtensionMotionInput.h
+    WiimoteEmuExtensionMotionSimulation.cpp WiimoteEmuExtensionMotionSimulation.h
+    WiimoteEmuGeneral.cpp WiimoteEmuGeneral.h WiimoteEmuMotionControl.cpp
+    WiimoteEmuMotionControl.h WiimoteEmuMotionControlIMU.cpp WiimoteEmuMotionControlIMU.h
+  IN Config/SDLHints
+    SDLHintsWindow.cpp SDLHintsWindow.h
+  IN Config/ToolTipControls
+    BalloonTip.cpp BalloonTip.h ToolTipCheckBox.cpp ToolTipCheckBox.h ToolTipComboBox.cpp
+    ToolTipComboBox.h ToolTipPushButton.cpp ToolTipPushButton.h ToolTipRadioButton.cpp
+    ToolTipRadioButton.h ToolTipSlider.cpp ToolTipSlider.h ToolTipSpinBox.cpp ToolTipSpinBox.h
+    ToolTipWidget.h
+  IN Debugger
+    AssembleInstructionDialog.cpp AssembleInstructionDialog.h AssemblerWidget.cpp
+    AssemblerWidget.h AssemblyEditor.cpp AssemblyEditor.h BranchWatchDialog.cpp
+    BranchWatchDialog.h BranchWatchTableModel.cpp BranchWatchTableModel.h BreakpointDialog.cpp
+    BreakpointDialog.h BreakpointWidget.cpp BreakpointWidget.h CodeViewWidget.cpp
+    CodeViewWidget.h CodeWidget.cpp CodeWidget.h EditSymbolDialog.cpp EditSymbolDialog.h
+    GekkoSyntaxHighlight.cpp GekkoSyntaxHighlight.h JitBlockTableModel.cpp JitBlockTableModel.h
+    JITWidget.cpp JITWidget.h MemoryViewWidget.cpp MemoryViewWidget.h MemoryWidget.cpp
+    MemoryWidget.h NetworkWidget.cpp NetworkWidget.h PatchInstructionDialog.cpp
+    PatchInstructionDialog.h RegisterColumn.cpp RegisterColumn.h RegisterWidget.cpp
+    RegisterWidget.h ThreadWidget.cpp ThreadWidget.h WatchWidget.cpp WatchWidget.h
+  IN EmulatedUSB
+    LogitechMicWindow.cpp LogitechMicWindow.h WiiSpeakWindow.cpp WiiSpeakWindow.h
+  IN FIFO
+    FIFOAnalyzer.cpp FIFOAnalyzer.h FIFOPlayerWindow.cpp FIFOPlayerWindow.h
+  IN GameList
+    GameList.cpp GameList.h GameListModel.cpp GameListModel.h GameTracker.cpp GameTracker.h
+    GridProxyModel.cpp GridProxyModel.h ListProxyModel.cpp ListProxyModel.h
+  IN InfinityBase
+    InfinityBaseWindow.cpp InfinityBaseWindow.h
+  IN NetPlay
+    ChunkedProgressDialog.cpp ChunkedProgressDialog.h ClickBlurLabel.cpp ClickBlurLabel.h
+    GameDigestDialog.cpp GameDigestDialog.h GameListDialog.cpp GameListDialog.h
+    NetPlayBrowser.cpp NetPlayBrowser.h NetPlayDialog.cpp NetPlayDialog.h
+    NetPlaySetupDialog.cpp NetPlaySetupDialog.h PadMappingDialog.cpp PadMappingDialog.h
+  IN QtUtils
+    AnalyticsPrompt.cpp AnalyticsPrompt.h AspectRatioWidget.cpp AspectRatioWidget.h
+    BlockUserInputFilter.cpp BlockUserInputFilter.h ClearLayoutRecursively.cpp
+    ClearLayoutRecursively.h ClickableStatusBar.h DolphinFileDialog.cpp DolphinFileDialog.h
+    DoubleClickEventFilter.cpp DoubleClickEventFilter.h ElidedButton.cpp ElidedButton.h
+    FileOpenEventFilter.cpp FileOpenEventFilter.h FromStdString.h ImageConverter.cpp
+    ImageConverter.h ModalMessageBox.cpp ModalMessageBox.h NonAutodismissibleMenu.cpp
+    NonAutodismissibleMenu.h NonDefaultQPushButton.cpp NonDefaultQPushButton.h
+    ParallelProgressDialog.h PartiallyClosableTabWidget.cpp PartiallyClosableTabWidget.h
+    QtUtils.cpp QtUtils.h SetWindowDecorations.cpp SetWindowDecorations.h SignalBlocking.h
+    UTF8CodePointCountValidator.cpp UTF8CodePointCountValidator.h
+    WindowActivationEventFilter.cpp WindowActivationEventFilter.h WrapInScrollArea.cpp
+    WrapInScrollArea.h
+  IN Settings
+    AdvancedPane.cpp AdvancedPane.h AudioPane.cpp AudioPane.h
+    BroadbandAdapterSettingsDialog.cpp BroadbandAdapterSettingsDialog.h GameCubePane.cpp
+    GameCubePane.h GeneralPane.cpp GeneralPane.h InterfacePane.cpp InterfacePane.h
+    OnScreenDisplayPane.cpp OnScreenDisplayPane.h PathPane.cpp PathPane.h TriforcePane.cpp
+    TriforcePane.h USBDevicePicker.cpp USBDevicePicker.h WiiPane.cpp WiiPane.h
+  IN SkylanderPortal
+    SkylanderModifyDialog.cpp SkylanderModifyDialog.h SkylanderPortalWindow.cpp
+    SkylanderPortalWindow.h
+  IN Styles/Dark
+    dark.qrc
+  IN TAS
+    GBATASInputWindow.cpp GBATASInputWindow.h GCTASInputWindow.cpp GCTASInputWindow.h
+    IRWidget.cpp IRWidget.h StickWidget.cpp StickWidget.h TASCheckBox.cpp TASCheckBox.h
+    TASControlState.cpp TASControlState.h TASInputWindow.cpp TASInputWindow.h TASSlider.cpp
+    TASSlider.h TASSpinBox.cpp TASSpinBox.h WiiTASInputWindow.cpp WiiTASInputWindow.h
+)
+set_target_properties(dolphin-emu PROPERTIES
+  OUTPUT_NAME PixelU-Wii
+  DEBUG_POSTFIX D
+  WIN32_EXECUTABLE TRUE
 )
 
-if (WIN32)
-  target_sources(dolphin-emu PRIVATE
-    Styles/Dark/dark.qrc
-  )
-endif()
-
-target_compile_definitions(dolphin-emu
-PRIVATE
-  -DQT_USE_QSTRINGBUILDER
-  -DQT_NO_CAST_FROM_ASCII
-  -DQT_NO_CAST_TO_ASCII
-  # This Qt version should match Externals/Qt.
-  # It disables deprecation warnings we can't fix yet.
-  -DQT_WARN_DEPRECATED_UP_TO=0x060501
+target_compile_definitions(dolphin-emu PRIVATE
+  QT_USE_QSTRINGBUILDER
+  QT_NO_CAST_FROM_ASCII
+  QT_NO_CAST_TO_ASCII
+  # No deprecation warnings for APIs deprecated after Qt 6.5.1.
+  QT_WARN_DEPRECATED_UP_TO=0x060501
 )
-
-target_include_directories(dolphin-emu
-PRIVATE
-  ${CMAKE_CURRENT_BINARY_DIR}
+target_include_directories(dolphin-emu PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}"
   ${Qt6Gui_PRIVATE_INCLUDE_DIRS}
 )
 
-target_link_libraries(dolphin-emu
-PRIVATE
+target_link_libraries(dolphin-emu PRIVATE
   core
   Qt6::Widgets
   uicommon
   imgui
   implot
 )
-
 if(ENABLE_SDL)
-  target_link_libraries(dolphin-emu
-  PRIVATE
-    SDL3::SDL3
-  )
+  target_link_libraries(dolphin-emu PRIVATE SDL3::SDL3)
 endif()
+target_link_libraries(dolphin-emu PRIVATE
+  ${qt_gui_private}
+  gdi32.lib
+  shell32.lib
+  dwmapi.lib  # dark title bars
+)
 
-if (NEED_QT_GUI_PRIVATE_COMPONENT)
-  target_link_libraries(dolphin-emu
-  PRIVATE
-    Qt6::GuiPrivate
-  )
-endif()
-
-if (WIN32)
-  target_link_libraries(dolphin-emu
-  PRIVATE
-    gdi32.lib
-    shell32.lib
-    dwmapi.lib # Needed to set window decorations for dark theme
-  )
-endif()
-
-if (MSVC)
-  set(qtGui "")
-  set(qtGuiPriv "")
-  set(qtWidgetsPriv "")
-  list(TRANSFORM Qt6Gui_INCLUDE_DIRS PREPEND "/external:I" OUTPUT_VARIABLE qtGui)
-  list(TRANSFORM Qt6Gui_PRIVATE_INCLUDE_DIRS PREPEND "/external:I" OUTPUT_VARIABLE qtGuiPriv)
-  list(TRANSFORM Qt6Widgets_PRIVATE_INCLUDE_DIRS PREPEND "/external:I" OUTPUT_VARIABLE qtWidgetsPriv)
-  target_compile_options(dolphin-emu PRIVATE "${qtGui}")
-  target_compile_options(dolphin-emu PRIVATE "${qtGuiPriv}")
-  target_compile_options(dolphin-emu PRIVATE "${qtWidgets}")
-
-  # Qt 6.3.0 headers use std::aligned_storage instead of alignas
+if(MSVC)
+  # Qt's headers are external headers: the project's warning level does not apply.
+  list(TRANSFORM Qt6Gui_INCLUDE_DIRS PREPEND "/external:I" OUTPUT_VARIABLE qt_external)
+  list(TRANSFORM Qt6Gui_PRIVATE_INCLUDE_DIRS PREPEND "/external:I" OUTPUT_VARIABLE qt_external_private)
+  target_compile_options(dolphin-emu PRIVATE "${qt_external}" "${qt_external_private}")
+  # Qt's headers still use std::aligned_storage.
   target_compile_definitions(dolphin-emu PRIVATE _SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING)
-
-  # Qt6 requires RTTI
-  remove_cxx_flag_from_target(dolphin-emu "/GR-")
-  target_compile_options(dolphin-emu PRIVATE "/GR")
-endif()
-
-if (NOT APPLE AND NOT ANDROID)
-  # Symlink Sys
-  add_custom_command(TARGET dolphin-emu POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-      -Dtarget="${CMAKE_SOURCE_DIR}/Data/Sys"
-      -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
-      -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
-  )
-
-  # Symlink COPYING
-  add_custom_command(TARGET dolphin-emu POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-      -Dtarget="${CMAKE_SOURCE_DIR}/COPYING"
-      -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/COPYING"
-      -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
-  )
-
-  # Symlink Licenses dir
-  add_custom_command(TARGET dolphin-emu POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-      -Dtarget="${CMAKE_SOURCE_DIR}/LICENSES"
-      -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Licenses"
-      -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
-  )
-endif()
-if (WIN32)
-  # Symlink qt.conf
-  add_custom_command(TARGET dolphin-emu POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-      -Dtarget="${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win"
-      -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/qt.conf"
-      -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
-  )
-
-  if (ENABLE_AUTOUPDATE)
-    # Symlink build_info.txt
-    add_custom_command(TARGET dolphin-emu POST_BUILD
-      COMMAND ${CMAKE_COMMAND}
-        -Dtarget="${CMAKE_BINARY_DIR}/build_info.txt"
-        -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
-        -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
-    )
-  endif()
-
-
-  target_sources(dolphin-emu PRIVATE DolphinQt.manifest DolphinQt.rc)
-
-  set_target_properties(dolphin-emu PROPERTIES
-    DEBUG_POSTFIX    D
-    OUTPUT_NAME      PixelU-Wii
-    WIN32_EXECUTABLE TRUE
-  )
-  # Delegate to Qt's official deployment binary on Windows to copy over the necessary Qt-specific libraries, etc.
-  get_target_property(MOC_EXECUTABLE_LOCATION Qt6::moc IMPORTED_LOCATION)
-  get_filename_component(QT_BINARY_DIRECTORY "${MOC_EXECUTABLE_LOCATION}" DIRECTORY)
-  find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
-  find_program(QTPATHS_EXE NAMES qtpaths6 qtpaths HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
-
-  # We don't use target_qt.conf/qtpaths.bat from a Qt build because they use absolute paths.
-  configure_file(
-    "target_qt.conf.in"
-    "${CMAKE_BINARY_DIR}/target_qt.conf"
-    @ONLY
-  )
-  configure_file(
-    "qtpaths.bat.in"
-    "${CMAKE_BINARY_DIR}/qtpaths.bat"
-    @ONLY
-  )
-  set(QTPATHS_SHIM "${CMAKE_BINARY_DIR}/qtpaths.bat")
-
-  # Note: We set the PATH for the duration of this command so that the
-  #       deployment application is able to locate the Qt libraries to copy.
-  #       if the necessary paths aren't already set beforehand.
-  #
-  #       For example, consider a hypothetical emulation project named Orca.
-  #       Orca supplies its own version of Qt instead of having developers actually
-  #       install the officially supported Qt libraries -- a method that would make
-  #       wrangling around with Qt through CMake much nicer and lessen the external
-  #       library maintenance burden of the project, but alas.
-  #
-  #       In this case, as Qt is not installed through the official binary, this also
-  #       means proper path variables will not be set up, thus the need to ensure they're
-  #       always set up.
-  #
-  add_custom_command(TARGET dolphin-emu POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E env PATH="${QT_BINARY_DIRECTORY}"
-            "${WINDEPLOYQT_EXE}" --qtpaths="${QTPATHS_SHIM}"
-                                 --libdir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-                                 --plugindir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/QtPlugins"
-                                 $<IF:$<CONFIG:Debug>,--debug,--release>
-                                 --no-translations
-                                 --no-compiler-runtime
-                                 --no-system-d3d-compiler
-                                 --no-system-dxc-compiler
-                                 --no-opengl-sw
-                                 "$<TARGET_FILE:dolphin-emu>"
-  )
-endif()
-
-# Handle localization
-find_package(Gettext)
-
-if(WIN32 AND NOT Gettext_FOUND)
-  message(STATUS "Using Gettext from Externals")
-  set(GETTEXT_MSGFMT_EXECUTABLE "${CMAKE_SOURCE_DIR}/Externals/gettext/msgfmt.exe")
-endif()
-
-if(GETTEXT_MSGFMT_EXECUTABLE)
-  set(pot_file "${CMAKE_SOURCE_DIR}/Languages/po/dolphin-emu.pot")
-  file(GLOB LINGUAS ${CMAKE_SOURCE_DIR}/Languages/po/*.po)
-
-  target_sources(dolphin-emu PRIVATE ${pot_file} ${LINGUAS})
-  source_group("Localization" FILES ${LINGUAS})
-  source_group("Localization\\\\Generated" FILES ${pot_file})
-
-  foreach(po ${LINGUAS})
-    get_filename_component(lang ${po} NAME_WE)
-
-    set(mo_dir ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Languages/${lang})
-    set(mo ${mo_dir}/dolphin-emu.mo)
-
-    target_sources(dolphin-emu PRIVATE ${mo})
-    source_group("Localization\\\\Generated" FILES ${mo})
-
-    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-      set_source_files_properties(${mo} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/${lang}.lproj")
-    else()
-      install(FILES ${mo} DESTINATION share/locale/${lang}/LC_MESSAGES)
-    endif()
-
-    add_custom_command(OUTPUT ${mo}
-      COMMAND ${CMAKE_COMMAND} -E make_directory ${mo_dir}
-      COMMAND ${GETTEXT_MSGFMT_EXECUTABLE} -o ${mo} ${po}
-      DEPENDS ${po}
-    )
-  endforeach()
-endif()
-
-if (NOT WIN32)
-  install(TARGETS dolphin-emu RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  # Qt needs RTTI, which the rest of the project builds without.
+  pixelu_drop_option(dolphin-emu /GR-)
+  target_compile_options(dolphin-emu PRIVATE /GR)
 endif()
 
 if(USE_MGBA)
-  target_sources(dolphin-emu PRIVATE
-    GBAHost.cpp
-    GBAHost.h
-    GBAWidget.cpp
-    GBAWidget.h
+  pixelu_add_sources(dolphin-emu
+    IN .
+      GBAHost.cpp GBAHost.h GBAWidget.cpp GBAWidget.h
   )
 endif()
 
 if(USE_DISCORD_PRESENCE)
-  target_compile_definitions(dolphin-emu PRIVATE -DUSE_DISCORD_PRESENCE)
+  target_compile_definitions(dolphin-emu PRIVATE USE_DISCORD_PRESENCE)
 endif()
 
 if(USE_RETRO_ACHIEVEMENTS)
   target_link_libraries(dolphin-emu PRIVATE rcheevos)
-  target_compile_definitions(dolphin-emu PRIVATE -DUSE_RETRO_ACHIEVEMENTS)
+  target_compile_definitions(dolphin-emu PRIVATE USE_RETRO_ACHIEVEMENTS)
   if(RC_CLIENT_SUPPORTS_RAINTEGRATION)
-    target_compile_definitions(dolphin-emu PRIVATE -DRC_CLIENT_SUPPORTS_RAINTEGRATION)
+    target_compile_definitions(dolphin-emu PRIVATE RC_CLIENT_SUPPORTS_RAINTEGRATION)
   endif()
+endif()
+
+########################################
+# The runnable folder (build/Binaries): next to PixelU-Wii.exe go Sys, the
+# licence files, qt.conf, the Qt runtime and the translations.
+
+set(bin_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
+# Sys is the third-party checkout's Data/Sys with PixelU-Wii's own Data/Sys laid
+# over it, so it is assembled as a copy, fresh on every build.
+add_custom_command(TARGET dolphin-emu POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E rm -rf "${bin_dir}/Sys"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PIXELU_WII_DOLPHIN_DATA}/Data/Sys" "${bin_dir}/Sys"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/Data/Sys" "${bin_dir}/Sys"
+  COMMENT "Assembling Binaries/Sys"
+  VERBATIM)
+pixelu_after_build_link(dolphin-emu "${PROJECT_SOURCE_DIR}/COPYING" "${bin_dir}/COPYING")
+pixelu_after_build_link(dolphin-emu "${PROJECT_SOURCE_DIR}/LICENSES" "${bin_dir}/Licenses")
+pixelu_after_build_link(dolphin-emu "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${bin_dir}/qt.conf")
+if(ENABLE_AUTOUPDATE)
+  pixelu_after_build_link(dolphin-emu "${CMAKE_BINARY_DIR}/build_info.txt" "${bin_dir}/build_info.txt")
+endif()
+
+# windeployqt copies the Qt DLLs and plugins PixelU-Wii.exe needs. It runs
+# through qtpaths.bat, which gives qtpaths a qt.conf (target_qt.conf) with
+# paths relative to the bundled Qt rather than those of the machine Qt was
+# built on, and with Qt's bin folder as the only PATH.
+get_target_property(moc_exe Qt6::moc IMPORTED_LOCATION)
+get_filename_component(QT_BINARY_DIRECTORY "${moc_exe}" DIRECTORY)
+find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
+find_program(QTPATHS_EXE NAMES qtpaths6 qtpaths HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
+configure_file(target_qt.conf.in "${CMAKE_BINARY_DIR}/target_qt.conf" @ONLY)
+configure_file(qtpaths.bat.in "${CMAKE_BINARY_DIR}/qtpaths.bat" @ONLY)
+add_custom_command(TARGET dolphin-emu POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E env "PATH=${QT_BINARY_DIRECTORY}"
+          "${WINDEPLOYQT_EXE}"
+            "--qtpaths=${CMAKE_BINARY_DIR}/qtpaths.bat"
+            "--libdir=${bin_dir}"
+            "--plugindir=${bin_dir}/QtPlugins"
+            $<IF:$<CONFIG:Debug>,--debug,--release>
+            --no-translations
+            --no-compiler-runtime
+            --no-system-d3d-compiler
+            --no-system-dxc-compiler
+            --no-opengl-sw
+            "$<TARGET_FILE:dolphin-emu>"
+  VERBATIM)
+
+# Translations: each Languages/po/<lang>.po is compiled to
+# Binaries/Languages/<lang>/dolphin-emu.mo with gettext's msgfmt (the system's,
+# or the prebuilt msgfmt.exe in the third-party folder).
+find_package(Gettext)
+if(NOT GETTEXT_MSGFMT_EXECUTABLE AND EXISTS "${THIRD}/gettext/msgfmt.exe")
+  message(STATUS "msgfmt: the prebuilt one in ${THIRD}/gettext")
+  set(GETTEXT_MSGFMT_EXECUTABLE "${THIRD}/gettext/msgfmt.exe")
+endif()
+if(GETTEXT_MSGFMT_EXECUTABLE)
+  set(po_dir "${PIXELU_WII_DOLPHIN_DATA}/Languages/po")
+  set(pot_file "${po_dir}/dolphin-emu.pot")
+  file(GLOB po_files "${po_dir}/*.po")
+  target_sources(dolphin-emu PRIVATE "${pot_file}" ${po_files})
+  source_group("Localization" FILES ${po_files})
+  source_group("Localization\\\\Generated" FILES "${pot_file}")
+  foreach(po IN LISTS po_files)
+    get_filename_component(lang "${po}" NAME_WE)
+    set(mo "${bin_dir}/Languages/${lang}/dolphin-emu.mo")
+    add_custom_command(OUTPUT "${mo}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${bin_dir}/Languages/${lang}"
+      COMMAND "${GETTEXT_MSGFMT_EXECUTABLE}" -o "${mo}" "${po}"
+      DEPENDS "${po}"
+      VERBATIM)
+    target_sources(dolphin-emu PRIVATE "${mo}")
+    source_group("Localization\\\\Generated" FILES "${mo}")
+  endforeach()
 endif()
