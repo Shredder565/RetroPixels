@@ -1,0 +1,18 @@
+# RetroPixels' applications menu entry, as RetroPixels writes it.
+# Use "Add RetroPixels to the applications menu" in RetroPixels (at the top of
+# its window) instead of copying this file: that writes it with the folder
+# RetroPixels is in, adds the icon and the game file types, and can remove
+# them again. This copy finds RetroPixels only when it is on your PATH.
+[Desktop Entry]
+Type=Application
+Name=RetroPixels
+GenericName=Game Emulator
+Comment=Play classic console, GameCube, Wii, Wii U and arcade games
+Icon=retropixels
+TryExec=RetroPixels
+Exec=RetroPixels %f
+Terminal=false
+Categories=Game;Emulator;
+Keywords=emulator;retro;NES;SNES;Game Boy;N64;Genesis;GameCube;Wii;Wii U;arcade;MAME;
+MimeType=application/x-nes-rom;application/x-fds-disk;application/vnd.nintendo.snes.rom;application/x-snes-rom;application/x-gameboy-rom;application/x-gameboy-color-rom;application/x-gba-rom;application/x-n64-rom;application/x-genesis-rom;application/x-sms-rom;application/x-atari-2600-rom;application/x-atari-7800-rom;application/x-gamecube-rom;application/x-wii-rom;application/x-wii-wad;application/x-retropixels-snes-rom;application/x-retropixels-gamecube-wii-disc;application/x-retropixels-wiiu-game;application/x-retropixels-archipelago-patch;
+StartupWMClass=RetroPixels
