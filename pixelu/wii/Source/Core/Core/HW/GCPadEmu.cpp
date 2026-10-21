@@ -38,9 +38,15 @@ struct DefaultMapping
   const char* expression;
 };
 
-// Default keyboard mapping (Windows key names).
+// Default keyboard mapping, in the keyboard back end's key names (Windows
+// names on Windows, X11 keysym names elsewhere).
+#ifdef _WIN32
+#define PIXELU_KEY(win, x11) win
+#else
+#define PIXELU_KEY(win, x11) x11
+#endif
 constexpr DefaultMapping FACE_DEFAULTS[] = {
-    {0, "`X`"}, {1, "`Z`"}, {2, "`C`"}, {3, "`S`"}, {4, "`D`"}, {5, "`RETURN`"},
+    {0, "`X`"}, {1, "`Z`"}, {2, "`C`"}, {3, "`S`"}, {4, "`D`"}, {5, PIXELU_KEY("`RETURN`", "`Return`")},
 };
 constexpr DefaultMapping DPAD_DEFAULTS[] = {{0, "`T`"}, {1, "`G`"}, {2, "`F`"}, {3, "`H`"}};
 constexpr DefaultMapping CABINET_DEFAULTS[] = {{0, "`1`"}, {1, "`2`"}, {2, "`3`"}};
@@ -49,8 +55,11 @@ constexpr DefaultMapping C_STICK_DEFAULTS[] = {
     {0, "`I`"}, {1, "`K`"}, {2, "`J`"}, {3, "`L`"}, {4, "`Ctrl`"},
 };
 constexpr DefaultMapping MAIN_STICK_DEFAULTS[] = {
-    {0, "`UP`"}, {1, "`DOWN`"}, {2, "`LEFT`"}, {3, "`RIGHT`"}, {4, "`Shift`"},
+    {0, PIXELU_KEY("`UP`", "`Up`")},       {1, PIXELU_KEY("`DOWN`", "`Down`")},
+    {2, PIXELU_KEY("`LEFT`", "`Left`")},   {3, PIXELU_KEY("`RIGHT`", "`Right`")},
+    {4, "`Shift`"},
 };
+#undef PIXELU_KEY
 constexpr DefaultMapping TRIGGER_DEFAULTS[] = {{0, "`Q`"}, {1, "`W`"}};
 
 template <std::size_t N>
