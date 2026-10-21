@@ -78,7 +78,7 @@ void IMUGyroscope::UpdateCalibration(const StateData& state)
   const double period = m_calibration_period_setting.GetValue();
 
   // A zero period turns calibration off.
-  if (!period)
+  if (period == 0)
   {
     m_zero_rate = {};
     RestartCalibration();
@@ -179,7 +179,7 @@ ControlState IMUGyroscope::GetDeadzone() const
 bool IMUGyroscope::IsCalibrating() const
 {
   const double period = m_calibration_period_setting.GetValue();
-  if (!period)
+  if (period == 0)
     return false;
   return (Clock::now() - m_stable_since) >= Seconds(period);
 }
