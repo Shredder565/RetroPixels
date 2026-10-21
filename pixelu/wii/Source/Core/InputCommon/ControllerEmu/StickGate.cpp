@@ -58,7 +58,8 @@ double SnapToNotch(double angle, double notch_width)
 {
   constexpr double axis_spacing = MathUtil::TAU / 8;
   const double nearest_axis = std::round(angle / axis_spacing) * axis_spacing;
-  const double offset = std::fmod(angle - nearest_axis + MathUtil::PI, MathUtil::TAU) - MathUtil::PI;
+  const double offset =
+      std::fmod(angle - nearest_axis + MathUtil::PI, MathUtil::TAU) - MathUtil::PI;
   if (std::abs(offset) < notch_width / 2)
     return nearest_axis;
   return angle;
@@ -191,7 +192,10 @@ void ReshapableInput::SetCalibrationFromGate(const StickGate& gate)
   m_input_shape.resize(samples);
 
   for (u32 i = 0; i != m_input_shape.size(); ++i)
-    m_input_shape[i] = gate.GetRadiusAtAngle(MathUtil::TAU * i / static_cast<double>(m_input_shape.size()));
+  {
+    const double angle = MathUtil::TAU * i / static_cast<double>(m_input_shape.size());
+    m_input_shape[i] = gate.GetRadiusAtAngle(angle);
+  }
 }
 
 void ReshapableInput::UpdateCalibrationData(CalibrationData& data, Common::DVec2 point1,
