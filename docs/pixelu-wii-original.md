@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 199571 | 48.1% |
-| Dolphin, untouched | 203626 | 49.1% |
-| Dolphin, with PixelU changes | 5572 | 1.3% |
+| Original (RetroPixels) | 211201 | 51.0% |
+| Dolphin, untouched | 192628 | 46.5% |
+| Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **414532** | 100% |
+| **All** | **413816** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -144,15 +144,15 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/DI | 915 | 915 | original |
 | Core/Core/IOS/ES | 5115 | 5115 | original |
 | Core/Core/IOS/FS | 2744 | 2744 | original |
-| Core/Core/IOS/Network | 8395 | 0 | Dolphin + PixelU change |
+| Core/Core/IOS/Network | 7642 | 7642 | original |
 | Core/Core/IOS/SDIO | 698 | 698 | original |
 | Core/Core/IOS/STM | 199 | 199 | original |
-| Core/Core/IOS/USB (top level) | 2597 | 0 | Dolphin |
+| Core/Core/IOS/USB (top level) | 2583 | 2583 | original |
 | Core/Core/IOS/USB/Bluetooth | 8741 | 0 | Dolphin |
 | Core/Core/IOS/USB/Emulated | 5232 | 0 | Dolphin |
-| Core/Core/IOS/USB/OH0 | 576 | 0 | Dolphin |
-| Core/Core/IOS/USB/USB_HID | 584 | 0 | Dolphin |
-| Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
+| Core/Core/IOS/USB/OH0 | 616 | 616 | original |
+| Core/Core/IOS/USB/USB_HID | 585 | 585 | original |
+| Core/Core/IOS/USB/USB_VEN | 204 | 204 | original |
 | Core/Core/IOS/WFS | 1237 | 1237 | original |
 | Core/Core/PowerPC (top level) | 9982 | 9982 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
@@ -246,7 +246,7 @@ batch rewrites them.
 | W16 | DSP: x64 JIT | 3625 | 3625 | original |
 | W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 6575 | 6575 | original |
 | W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 14838 | 14838 | original |
-| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12346 | 0 | Dolphin + PixelU change |
+| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 11630 | 11630 | original |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 13973 | 0 | Dolphin |
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13237 | 13237 | original |
 | W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10095 | 0 | Dolphin + PixelU change |
