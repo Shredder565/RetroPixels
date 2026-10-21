@@ -240,7 +240,8 @@ void OGLTexture::AllocateStorage(GLenum target, GLenum internal_format)
     }
     else
     {
-      ASSERT_MSG(VIDEO, false, "Unsupported multisampled texture type");
+      // Multisampled storage exists only for 2D and 2D array textures.
+      ASSERT(false);
     }
     return;
   }
@@ -253,7 +254,7 @@ void OGLTexture::AllocateStorage(GLenum target, GLenum internal_format)
   else if (type == AbstractTextureType::Texture_2D)
     glTexStorage2D(target, levels, internal_format, width, height);
   else
-    ASSERT_MSG(VIDEO, false, "Unsupported texture type");
+    ASSERT(false);  // Only 2D and 2D array textures get immutable storage here.
 }
 
 OGLTexture::~OGLTexture()
