@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,9 @@
 class QMouseEvent;
 class QTimer;
 
+// The native window the game is drawn into, either on its own or inside the main window. It
+// passes keyboard and mouse input on to the on-screen UI, hides and confines the cursor as
+// configured, and reports focus, size and fullscreen changes to Host.
 class RenderWidget final : public QWidget
 {
   Q_OBJECT
@@ -39,36 +41,39 @@ signals:
   void FocusChanged(bool focus);
 
 private:
-  void HandleCursorTimer();
-  void OnHandleChanged(void* handle);
-  void OnHideCursorChanged();
-  void OnNeverHideCursorChanged();
-  void OnLockCursorChanged();
-  void OnKeepOnTopChanged(bool top);
-  void UpdateCursor();
-  void PassEventToPresenter(const QEvent* event);
-  void SetPresenterKeyMap();
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
-  bool IsEmbedDocked() const;
-  void CheckEmbedDocked();
-  void KeepEmbedOffscreen();
-  void ShowEmbedFallback();
 
-  static constexpr int MOUSE_HIDE_DELAY = 3000;
-  QTimer* m_mouse_timer;
-  QPoint m_last_mouse{};
-  int m_last_window_width = 0;
-  int m_last_window_height = 0;
-  float m_last_window_scale = 0;
+  void ApplyNewHandle(void* handle);
+  void ApplyAlwaysOnTop(bool on_top);
+  void RefreshCursorShape();
+  void HideIdleCursor();
+  void ReportSizeIfChanged(QSize logical_size);
+
+  void ForwardToOverlay(const QEvent* event);
+  void InstallOverlayKeyMap();
+
+  // PixelU embedding (see RenderWidget.cpp).
+  bool IsDockedByHost() const;
+  void ParkOffscreen();
+  void PollDocking();
+  void GiveUpDocking();
+
+  QTimer* m_cursor_idle_timer = nullptr;
+
+  // Last size reported through SizeChanged, in physical pixels, and the scale it was taken at.
+  int m_reported_width = 0;
+  int m_reported_height = 0;
+  float m_reported_scale = 0;
+
   bool m_cursor_locked = false;
-  bool m_lock_cursor_on_next_activation = false;
-  bool m_dont_lock_cursor_on_show = false;
-  bool m_waiting_for_message_box = false;
-  bool m_should_unpause_on_focus = false;
-  // PixelU embed mode state (see the notes in RenderWidget.cpp)
-  QTimer* m_embed_poll_timer = nullptr;
-  QTimer* m_embed_fallback_timer = nullptr;
-  bool m_embed_pending = false;
-  bool m_embed_had_appwindow = false;
+  bool m_lock_when_activated = false;
+  bool m_suppress_lock_on_show = false;
+  bool m_message_box_open = false;
+  bool m_resume_when_activated = false;
+
+  QTimer* m_dock_poll = nullptr;
+  QTimer* m_dock_deadline = nullptr;
+  bool m_waiting_for_dock = false;
+  bool m_had_app_window_style = false;
 };
