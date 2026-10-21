@@ -1,0 +1,120 @@
+- W34 log: rewrote all 65 W34 files in `Core/InputCommon` (outside
+  ControllerInterface): control references and the expression parser,
+  ControllerEmu and its control groups and settings, input configs and
+  profiles, dynamic input textures, image operations, the GameCube adapter
+  driver and the pad/keyboard status headers (8109 lines now, from 8661).
+  Every rewritten file starts with the original-code header and has no
+  Dolphin copyright or SPDX line. File names, public declarations and
+  layouts, every control group's state (deadzones, gates, calibration,
+  smoothing, the IMU and cursor maths, bit for bit), expression parse
+  results, parse errors and evaluated values, every config key, default
+  mapping and UI name, the controller and profile ini bytes, the dynamic
+  input texture JSON format and the images it produces, adapter packets and
+  rumble writes, enum values, the savestate layout and all translatable
+  strings are unchanged.
+  - Control references: ControlReference (input/output references, the
+    input gate, the hotkey suppression bookkeeping), ExpressionParser (the
+    lexer, every token and operator, precedence, variables, comments,
+    barewords, the device-qualified control syntax and every error) and
+    FunctionExpression (all functions, their argument checks and the
+    timer/toggle/smooth/hold/tap/relative state, with the same clock reads).
+  - ControllerEmu: EmulatedController (default device, ini load/save,
+    mapping expressions, the state mutex), ControlGroup and Control/Input/
+    Output, AnalogStick, Attachments, Buttons, Cursor, Force, IMUAccelerometer,
+    IMUCursor, IMUGyroscope (calibration and its timing), IRPassthrough,
+    MixedTriggers, ModifySettingsButton, Slider, Tilt, Triggers,
+    NumericSetting (the getters now live in the header) and StickGate (all
+    gate shapes, calibration, notch snapping and the deadzone maths).
+  - InputConfig and InputProfile (the profile cycling and the per-game
+    profile paths), DynamicInputTextureManager, DITConfiguration,
+    DITSpecification (split into helpers per JSON section; the same error
+    strings, in the same order, and textures read before an error stay in
+    the list), DITData.h and ImageOperations (nearest/bilinear resize,
+    aspect-preserving padding, region copy, PNG load/write).
+  - GCAdapter: the scanning, read and write threads, hotplug where libusb
+    has it, the macOS no-detach rule and FreeBSD's always-on hotplug, the
+    poll-rate measurement, rumble, the SI device-change callbacks and the
+    config callbacks. GCPadStatus.h and KeyboardStatus.h keep all 170
+    enum values (checked by script).
+  - Deliberate differences (malformed input, undefined behaviour or
+    unbuilt platforms; nothing a game or a well-formed mapping sees):
+    - ImageOperations: CopyImageRegion skips pixels whose index falls
+      outside the source or destination image. The old code wrote out of
+      bounds for a region whose top is below its bottom (seen with
+      fractional region values in a DIT JSON file) and crashed with
+      "free(): invalid pointer"; images are byte-identical otherwise.
+    - GCAdapter: the endpoint scan only runs when libusb returns a config
+      descriptor (the old code dereferenced a null descriptor when
+      libusb_get_config_descriptor failed).
+    - GCAdapter: IsDetected reads the adapter status once per call (the old
+      code read the atomic twice, so the result and the message could come
+      from different states).
+    - GCAdapter and IMUCursor: the Android (JNI) branches are not kept;
+      there is no Android build in this tree. The IMU cursor defaults to
+      enabled, as it did on every non-Android build.
+  - Checked: old and new code side by side on synthetic inputs only (no
+    games, controllers or user files), using the base versions of all
+    non-W34 files on both sides, with a fake ControllerInterface (devices,
+    inputs and outputs driven by a seeded generator) and an interposed
+    steady clock that advances on every read, so the number and order of
+    clock reads is part of each case's hash. Outputs were streamed through
+    cmp or reduced to one hash per case:
+    - Expressions: 300000 lexer cases, 100000 + 50000 random expressions
+      (parse status, error, the printed tree, evaluation over random input
+      sequences with the clock running), 100000 function cases and 300000
+      small hand-shaped cases (operators, precedence, comments, quoting,
+      device qualifiers, malformed input).
+    - Groups: 20000 stick-gate cases (every gate shape, calibration, notch
+      snapping) and 8000 controller cases building every group type with
+      random settings, mappings and inputs: group states (deadzone,
+      calibration, smoothing, IMU and cursor maths) as raw bits, ini output
+      and reload, default mappings, setting expressions and output values.
+    - Configs and textures (with a stand-in PNG codec): 7000 cases of
+      random controller configs, profile files, profile cycling and DIT
+      JSON packs (valid and damaged): ini bytes, OSD messages, logs, error
+      strings and every generated image's bytes; 50000 image-operation
+      cases (resize modes, padding, region copies). The old side was run
+      with an assertion-checked standard library, which is how the
+      CopyImageRegion overflow above was found; the generator then left
+      out such regions, and the new code was run with them for 3000 more
+      cases under the same checks.
+    - GCAdapter, against a lockstep fake libusb (device lists, open and
+      claim results, kernel driver states, interrupt transfers, failures)
+      and fake SI/Core/config: 500 cases of random reports, rumble, device
+      type resets, rescans and config changes: pad states, detection
+      status and messages, callbacks, every outgoing packet and the logs.
+      The harness's thread hand-offs are timing-dependent: the old code
+      itself gives different hashes between runs for a few cases (114,
+      212, 213, 246, 313 seen over six runs of the old code). Every case
+      where old and new differed in a long run (136, 213, 246, 318, 433)
+      matched when rerun from a few cases earlier, or gave the same pair
+      of alternative hashes in both versions; all other cases matched in
+      every run.
+    - Performance: the expression and group cases run 3.2% and 2.8% fewer
+      instructions in the new code (callgrind, 2000 expression cases and
+      200 group cases). Wall-clock timings of the parse-and-evaluate and
+      group benchmarks were within run-to-run noise (about ±8% on this
+      shared machine).
+  - Compile check: the W34 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu (GCAdapter also with __APPLE__ and
+    __FreeBSD__ defined). Fixes made for it: InputConfig's profile slot loop
+    uses std::size_t, Cursor's SetRelativeInput parameter no longer shadows
+    the ControlGroup member (also MSVC C4458), and ImageOperations computes
+    pixel indices in u32. The 167 other non-Qt files that include W34
+    headers compile exactly as on the base tree: the same files pass (96 on
+    Linux, 94 for Windows) and the ones that fail on both trees (missing
+    third-party headers here) give the same errors. With extra warnings,
+    the only W34 reports are the deprecated implicit copy of
+    DITConfiguration (already in the base tree) and IMUGyroscope's
+    `period == 0` (-Wfloat-equal; the base tree's `!period` gives
+    -Wfloat-conversion instead, which is in the required set). DolphinQt
+    was not built.
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W34 .cpp file. The runs left in W34 headers are public
+    declarations (the KeyboardStatus and GCPadStatus enums, class member
+    lists, the expression parser's token and parse-result types).
+  - Not tested: the hotplug success path (the fake libusb has no hotplug
+    events) and the timing of "reads failing" detection on a real adapter.
+  - No keys, BIOS, firmware, DSP ROMs or game data were added.
+  - Not rewritten: nothing.
