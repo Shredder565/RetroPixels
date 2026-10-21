@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class OptionParser;
 class Values;
 }  // namespace optparse
 
+// The emulator's command line, shared by the GUI and the headless front ends. Parsing also installs
+// a CommandLine config layer holding the settings the arguments override.
 namespace CommandLineParse
 {
 enum class ParserOptions

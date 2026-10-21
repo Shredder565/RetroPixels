@@ -1,13 +1,14 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/CommandLineParse.h"
 
 #include <list>
+#include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
-#include <tuple>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <OptionParser.h>
 
@@ -18,103 +19,140 @@
 
 namespace CommandLineParse
 {
-class CommandLineConfigLayerLoader final : public Config::ConfigLayerLoader
+namespace
+{
+// One command-line option. Null fields are left at optparse's defaults.
+struct OptionSpec
+{
+  const char* short_flag;
+  const char* long_flag;
+  const char* action;
+  const char* metavar;
+  const char* type;
+  const char* help;
+};
+
+constexpr OptionSpec COMMON_OPTIONS[] = {
+    {"-u", "--user", "store", nullptr, nullptr, "User folder path"},
+    {"-m", "--movie", "store", nullptr, nullptr, "Play a movie file"},
+    {"-e", "--exec", "append", "<file>", "string", "Load the specified file"},
+    {"-n", "--nand_title", "store", "<16-character ASCII title ID>", "string",
+     "Launch a NAND title"},
+    {"-C", "--config", "append", "<System>.<Section>.<Key>=<Value>", "string",
+     "Set a configuration option"},
+    {"-s", "--save_state", "store", "<file>", "string", "Load the initial save state"},
+};
+
+constexpr OptionSpec GUI_OPTIONS[] = {
+    {"-d", "--debugger", "store_true", nullptr, nullptr,
+     "Show the debugger pane and additional View menu options"},
+    {"-l", "--logger", "store_true", nullptr, nullptr, "Open the logger"},
+    {"-b", "--batch", "store_true", nullptr, nullptr,
+     "Run Dolphin without the user interface (Requires --exec or --nand-title)"},
+    {"-c", "--confirm", "store_true", nullptr, nullptr, "Set Confirm on Stop"},
+};
+
+void Register(optparse::OptionParser& parser, const OptionSpec& spec)
+{
+  optparse::Option& option = parser.add_option(spec.short_flag, spec.long_flag);
+  // The action goes first: setting a type afterwards also fixes the argument count.
+  option.action(spec.action);
+  if (spec.metavar != nullptr)
+    option.metavar(spec.metavar);
+  if (spec.type != nullptr)
+    option.type(spec.type);
+  option.help(spec.help);
+}
+
+// Takes `text` up to the next `delimiter` (or its end), dropping the delimiter.
+std::string TakeUntil(std::string_view* text, char delimiter)
+{
+  const std::size_t stop = text->find(delimiter);
+  std::string piece(text->substr(0, stop));
+  text->remove_prefix(stop == std::string_view::npos ? text->size() : stop + 1);
+  return piece;
+}
+
+// The CommandLine config layer: the dedicated options first, then each --config override.
+class ArgumentLayer final : public Config::ConfigLayerLoader
 {
 public:
-  CommandLineConfigLayerLoader(const std::list<std::string>& args, const std::string& video_backend,
-                               const std::string& audio_backend, bool batch, bool debugger)
+  ArgumentLayer(const std::list<std::string>& overrides, const std::string& video_backend,
+                const std::string& audio_emulation, bool batch, bool debugger)
       : ConfigLayerLoader(Config::LayerType::CommandLine)
   {
     if (!video_backend.empty())
-      m_values.emplace_back(Config::MAIN_GFX_BACKEND.GetLocation(), video_backend);
+      Add(Config::MAIN_GFX_BACKEND.GetLocation(), video_backend);
+    if (!audio_emulation.empty())
+      Add(Config::MAIN_DSP_HLE.GetLocation(), ValueToString(audio_emulation == "HLE"));
 
-    if (!audio_backend.empty())
-    {
-      m_values.emplace_back(Config::MAIN_DSP_HLE.GetLocation(),
-                            ValueToString(audio_backend == "HLE"));
-    }
-
-    // Batch mode hides the main window, and render to main hides the render window. To avoid a
-    // situation where we would have no window at all, disable render to main when using batch mode.
+    // Batch mode has no main window, so the game must not render into it.
     if (batch)
-      m_values.emplace_back(Config::MAIN_RENDER_TO_MAIN.GetLocation(), ValueToString(false));
-
+      Add(Config::MAIN_RENDER_TO_MAIN.GetLocation(), ValueToString(false));
     if (debugger)
-      m_values.emplace_back(Config::MAIN_ENABLE_DEBUGGING.GetLocation(), ValueToString(true));
+      Add(Config::MAIN_ENABLE_DEBUGGING.GetLocation(), ValueToString(true));
 
-    // Arguments are in the format of <System>.<Section>.<Key>=Value
-    for (const auto& arg : args)
+    // "<System>.<Section>.<Key>=<Value>"; overrides naming an unknown system are ignored. The key
+    // may contain dots, and the value ends at a second '=' if there is one.
+    for (const std::string& override_text : overrides)
     {
-      std::istringstream buffer(arg);
-      std::string system_str, section, key, value;
-      std::getline(buffer, system_str, '.');
-      std::getline(buffer, section, '.');
-      std::getline(buffer, key, '=');
-      std::getline(buffer, value, '=');
-      std::optional<Config::System> system = Config::GetSystemFromName(system_str);
-      if (system)
-      {
-        m_values.emplace_back(Config::Location{*system, std::move(section), std::move(key)},
-                              std::move(value));
-      }
+      std::string_view rest = override_text;
+      const std::string system_name = TakeUntil(&rest, '.');
+      std::string section = TakeUntil(&rest, '.');
+      std::string key = TakeUntil(&rest, '=');
+      std::string value = TakeUntil(&rest, '=');
+
+      if (const std::optional<Config::System> system = Config::GetSystemFromName(system_name))
+        Add(Config::Location{*system, std::move(section), std::move(key)}, std::move(value));
     }
   }
 
   void Load(Config::Layer* layer) override
   {
-    for (auto& value : m_values)
-    {
-      layer->Set(std::get<0>(value), std::get<1>(value));
-    }
+    for (const auto& [location, value] : m_settings)
+      layer->Set(location, value);
   }
 
-  void Save(Config::Layer* layer) override
-  {
-    // Save Nothing
-  }
+  // Command-line settings are never written back.
+  void Save(Config::Layer*) override {}
 
 private:
-  std::list<std::tuple<Config::Location, std::string>> m_values;
+  void Add(Config::Location location, std::string value)
+  {
+    m_settings.emplace_back(std::move(location), std::move(value));
+  }
+
+  std::vector<std::pair<Config::Location, std::string>> m_settings;
 };
+
+void InstallConfigLayer(const optparse::Values& values)
+{
+  std::list<std::string> overrides;
+  if (values.is_set_by_user("config"))
+    overrides = values.all("config");
+
+  const std::string video_backend = static_cast<const char*>(values.get("video_backend"));
+  const std::string audio_emulation = static_cast<const char*>(values.get("audio_emulation"));
+  const bool batch = static_cast<bool>(values.get("batch"));
+  const bool debugger = static_cast<bool>(values.get("debugger"));
+
+  Config::AddLayer(
+      std::make_unique<ArgumentLayer>(overrides, video_backend, audio_emulation, batch, debugger));
+}
+}  // namespace
 
 std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
 {
   auto parser = std::make_unique<optparse::OptionParser>();
   parser->usage("usage: %prog [options]... [FILE]...").version(Common::GetScmRevStr());
 
-  parser->add_option("-u", "--user").action("store").help("User folder path");
-  parser->add_option("-m", "--movie").action("store").help("Play a movie file");
-  parser->add_option("-e", "--exec")
-      .action("append")
-      .metavar("<file>")
-      .type("string")
-      .help("Load the specified file");
-  parser->add_option("-n", "--nand_title")
-      .action("store")
-      .metavar("<16-character ASCII title ID>")
-      .type("string")
-      .help("Launch a NAND title");
-  parser->add_option("-C", "--config")
-      .action("append")
-      .metavar("<System>.<Section>.<Key>=<Value>")
-      .type("string")
-      .help("Set a configuration option");
-  parser->add_option("-s", "--save_state")
-      .action("store")
-      .metavar("<file>")
-      .type("string")
-      .help("Load the initial save state");
+  for (const OptionSpec& spec : COMMON_OPTIONS)
+    Register(*parser, spec);
 
   if (options == ParserOptions::IncludeGUIOptions)
   {
-    parser->add_option("-d", "--debugger")
-        .action("store_true")
-        .help("Show the debugger pane and additional View menu options");
-    parser->add_option("-l", "--logger").action("store_true").help("Open the logger");
-    parser->add_option("-b", "--batch")
-        .action("store_true")
-        .help("Run Dolphin without the user interface (Requires --exec or --nand-title)");
-    parser->add_option("-c", "--confirm").action("store_true").help("Set Confirm on Stop");
+    for (const OptionSpec& spec : GUI_OPTIONS)
+      Register(*parser, spec);
   }
 
   parser->set_defaults("video_backend", "");
@@ -127,30 +165,18 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
   return parser;
 }
 
-static void AddConfigLayer(const optparse::Values& options)
-{
-  std::list<std::string> config_args;
-  if (options.is_set_by_user("config"))
-    config_args = options.all("config");
-
-  Config::AddLayer(std::make_unique<CommandLineConfigLayerLoader>(
-      std::move(config_args), static_cast<const char*>(options.get("video_backend")),
-      static_cast<const char*>(options.get("audio_emulation")),
-      static_cast<bool>(options.get("batch")), static_cast<bool>(options.get("debugger"))));
-}
-
 optparse::Values& ParseArguments(optparse::OptionParser* parser, int argc, char** argv)
 {
-  optparse::Values& options = parser->parse_args(argc, argv);
-  AddConfigLayer(options);
-  return options;
+  optparse::Values& values = parser->parse_args(argc, argv);
+  InstallConfigLayer(values);
+  return values;
 }
 
 optparse::Values& ParseArguments(optparse::OptionParser* parser,
                                  const std::vector<std::string>& arguments)
 {
-  optparse::Values& options = parser->parse_args(arguments);
-  AddConfigLayer(options);
-  return options;
+  optparse::Values& values = parser->parse_args(arguments);
+  InstallConfigLayer(values);
+  return values;
 }
 }  // namespace CommandLineParse
