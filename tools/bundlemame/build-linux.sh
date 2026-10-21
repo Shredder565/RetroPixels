@@ -46,6 +46,7 @@ done
 shift $((OPTIND - 1))
 [ $# -eq 1 ] && [ -n "$src_tgz" ] && [ -n "$tag" ] || { sed -n '2,30p' "$0" >&2; exit 2; }
 stage=$1
+case "$stage" in /*) ;; *) stage=$(pwd)/$stage ;; esac # (the build runs in MAME's folder)
 case "$tag" in mame0[0-9][0-9][0-9] | mame0[0-9][0-9]) ;; *) echo "bad tag $tag" >&2; exit 2 ;; esac
 version=0.$(echo "$tag" | sed 's/^mame0*//')
 [ -n "$jobs" ] || jobs=$(nproc)
@@ -148,6 +149,8 @@ subtarget=$MAME_SUBTARGET
 # The program is named after the subtarget: mame for all of MAME; a SOURCES=
 # build names it after its subtarget alone (rpcheck).
 if [ "$subtarget" = mame ] || [ -n "$sources" ]; then binary=$subtarget; else binary=mame$subtarget; fi
+# Its makefiles go in build/projects/sdl/<mame, or mame and the subtarget>.
+if [ "$subtarget" = mame ]; then project=mame; else project=mame$subtarget; fi
 # - the same machines and options as the MAME team's release (OPTIMIZE=3,
 #   no debug symbols); no Qt debugger (MAME's own debugger window needs Qt)
 # - SDL_INI_PATH: mame.ini is looked for in MAME's own folder only, as on
@@ -166,9 +169,9 @@ flags=$*
 cd "$src"
 if [ -n "$genie_only" ]; then
 	log "configuring MAME: $flags"
-	make "$@" REGENIE=1 "build/projects/sdl/$binary/gmake-linux/Makefile"
-	test -f "build/projects/sdl/$binary/gmake-linux/Makefile"
-	log "configured: build/projects/sdl/$binary/gmake-linux"
+	make "$@" REGENIE=1 "build/projects/sdl/$project/gmake-linux/Makefile"
+	test -f "build/projects/sdl/$project/gmake-linux/Makefile"
+	log "configured: build/projects/sdl/$project/gmake-linux"
 	exit 0
 fi
 log "building MAME ($jobs jobs): $flags"
@@ -190,12 +193,12 @@ if [ -z "$system_sdl" ]; then
 fi
 patchelf --set-rpath '$ORIGIN/lib' "$stage/mame"
 for d in artwork bgfx ctrlr hash ini keymaps language plugins roms samples; do
-	[ -d "$d" ] && cp -R "$d" "$stage/$d"
+	if [ -d "$d" ]; then cp -R "$d" "$stage/$d"; fi
 done
 find "$stage/language" -name '*.po' -delete
 cp -R docs/legal "$stage/docs/legal"
 cp COPYING "$stage/COPYING"
-[ -f uismall.bdf ] && cp uismall.bdf "$stage/"
+if [ -f uismall.bdf ]; then cp uismall.bdf "$stage/"; fi
 
 # Each program and library may need glibc $GLIBC_MAX at most.
 bins=$(find "$stage/mame" "$stage/lib" -maxdepth 1 -type f \( -name mame -o -name "*.so.0" \))
