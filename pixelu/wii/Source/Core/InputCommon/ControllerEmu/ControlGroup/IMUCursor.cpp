@@ -2,6 +2,7 @@
 
 #include "InputCommon/ControllerEmu/ControlGroup/IMUCursor.h"
 
+#include <array>
 #include <string>
 #include <utility>
 
@@ -42,12 +43,14 @@ IMUCursor::IMUCursor(std::string name_, std::string ui_name_)
 
 ControlState IMUCursor::GetTotalYaw() const
 {
-  return m_yaw_setting.GetValue() * MathUtil::TAU / 360;
+  return MathUtil::TAU * m_yaw_setting.GetValue() / 360;
 }
 
 ControlState IMUCursor::GetAccelWeight() const
 {
-  return m_accel_weight_setting.GetValue() / 100;
+  // The setting is a percentage.
+  const ControlState percent = m_accel_weight_setting.GetValue();
+  return percent / 100;
 }
 
 }  // namespace ControllerEmu

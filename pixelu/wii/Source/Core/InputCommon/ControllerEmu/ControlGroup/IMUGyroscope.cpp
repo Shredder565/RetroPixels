@@ -3,6 +3,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/IMUGyroscope.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -34,17 +35,19 @@ constexpr auto LONGEST_STABLE_PERIOD = std::chrono::hours(1);
 // Readings must arrive at least this often (per second) to count as one stable period, so a
 // pause between sessions does not get averaged in. Somewhat below the UI's 30 Hz refresh.
 constexpr auto MINIMUM_SAMPLE_RATE = 25;
+
+// Input names, in GyroControl order.
+constexpr std::array<const char*, 6> GYRO_INPUT_NAMES = {
+    _trans("Pitch Up"), _trans("Pitch Down"), _trans("Roll Left"),
+    _trans("Roll Right"), _trans("Yaw Left"), _trans("Yaw Right"),
+};
 }  // namespace
 
 IMUGyroscope::IMUGyroscope(std::string name_, std::string ui_name_)
     : ControlGroup(std::move(name_), std::move(ui_name_), GroupType::IMUGyroscope)
 {
-  AddInput(Translatability::Translate, _trans("Pitch Up"));
-  AddInput(Translatability::Translate, _trans("Pitch Down"));
-  AddInput(Translatability::Translate, _trans("Roll Left"));
-  AddInput(Translatability::Translate, _trans("Roll Right"));
-  AddInput(Translatability::Translate, _trans("Yaw Left"));
-  AddInput(Translatability::Translate, _trans("Yaw Right"));
+  for (const char* input_name : GYRO_INPUT_NAMES)
+    AddInput(Translatability::Translate, input_name);
 
   AddSetting(&m_deadzone_setting,
              {_trans("Dead Zone"),

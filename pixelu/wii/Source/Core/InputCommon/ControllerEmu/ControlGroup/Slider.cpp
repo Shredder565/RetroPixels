@@ -3,6 +3,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/Slider.h"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <string>
 
@@ -12,12 +13,19 @@
 
 namespace ControllerEmu
 {
+namespace
+{
+// Input names: moving towards the negative end, then towards the positive end.
+constexpr std::array<const char*, 2> SLIDER_INPUT_NAMES = {_trans("Left"), _trans("Right")};
+}  // namespace
+
 Slider::Slider(const std::string& name_, const std::string& ui_name_)
     : ControlGroup(name_, ui_name_, GroupType::Slider)
 {
-  AddInput(Translatability::Translate, _trans("Left"));
-  AddInput(Translatability::Translate, _trans("Right"));
+  for (const char* input_name : SLIDER_INPUT_NAMES)
+    AddInput(Translatability::Translate, input_name);
 
+  // Half the travel is ignored by default.
   AddDeadzoneSetting(&m_deadzone_setting, 50);
 }
 
@@ -27,7 +35,8 @@ Slider::Slider(const std::string& name_) : Slider(name_, name_)
 
 Slider::StateData Slider::GetState() const
 {
-  return GetState(InputOverrideFunction{});
+  const InputOverrideFunction no_override;
+  return GetState(no_override);
 }
 
 Slider::StateData Slider::GetState(const InputOverrideFunction& override_func) const

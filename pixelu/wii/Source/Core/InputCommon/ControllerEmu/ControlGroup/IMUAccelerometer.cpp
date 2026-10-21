@@ -3,6 +3,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/IMUAccelerometer.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <utility>
 
@@ -22,17 +23,19 @@ enum AccelControl : std::size_t
   ACCEL_FORWARD,
   ACCEL_BACKWARD,
 };
+
+// Input names, in AccelControl order.
+constexpr std::array<const char*, 6> ACCEL_INPUT_NAMES = {
+    _trans("Up"),    _trans("Down"),    _trans("Left"),
+    _trans("Right"), _trans("Forward"), _trans("Backward"),
+};
 }  // namespace
 
 IMUAccelerometer::IMUAccelerometer(std::string name_, std::string ui_name_)
     : ControlGroup(std::move(name_), std::move(ui_name_), GroupType::IMUAccelerometer)
 {
-  AddInput(Translatability::Translate, _trans("Up"));
-  AddInput(Translatability::Translate, _trans("Down"));
-  AddInput(Translatability::Translate, _trans("Left"));
-  AddInput(Translatability::Translate, _trans("Right"));
-  AddInput(Translatability::Translate, _trans("Forward"));
-  AddInput(Translatability::Translate, _trans("Backward"));
+  for (const char* input_name : ACCEL_INPUT_NAMES)
+    AddInput(Translatability::Translate, input_name);
 }
 
 bool IMUAccelerometer::AreInputsBound() const

@@ -88,11 +88,12 @@ public:
 
   virtual void SetToDefault() = 0;
 
-  const char* GetININame() const;
-  const char* GetUIName() const;
-  const char* GetUISuffix() const;
-  const char* GetUIDescription() const;
-  SettingVisibility GetVisibility() const;
+  // The details given at construction.
+  const char* GetININame() const { return m_details.ini_name; }
+  const char* GetUIName() const { return m_details.ui_name; }
+  const char* GetUISuffix() const { return m_details.ui_suffix; }
+  const char* GetUIDescription() const { return m_details.ui_description; }
+  SettingVisibility GetVisibility() const { return m_details.visibility; }
 
 protected:
   NumericSettingDetails m_details;
@@ -163,7 +164,15 @@ public:
   ValueType GetMinValue() const { return m_min_value; }
   ValueType GetMaxValue() const { return m_max_value; }
 
-  SettingType GetType() const override;
+  SettingType GetType() const override
+  {
+    if constexpr (std::is_same<ValueType, int>())
+      return SettingType::Int;
+    else if constexpr (std::is_same<ValueType, double>())
+      return SettingType::Double;
+    else
+      return SettingType::Bool;
+  }
 
 private:
   SettingValue<ValueType>& m_value;

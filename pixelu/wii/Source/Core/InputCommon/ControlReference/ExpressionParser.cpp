@@ -3,6 +3,7 @@
 #include "InputCommon/ControlReference/ExpressionParser.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <map>
@@ -42,37 +43,25 @@ bool IsWordCharacter(char c)
 }
 
 // The single-character operators. Everything else yields TOK_INVALID.
+struct OperatorCharacter
+{
+  char character;
+  TokenType type;
+};
+constexpr std::array<OperatorCharacter, 12> OPERATOR_CHARACTERS = {{
+    {'&', TOK_AND}, {'|', TOK_OR}, {'^', TOK_XOR}, {'+', TOK_ADD},
+    {'-', TOK_SUB}, {'*', TOK_MUL}, {'/', TOK_DIV}, {'%', TOK_MOD},
+    {'=', TOK_ASSIGN}, {'<', TOK_LTHAN}, {'>', TOK_GTHAN}, {',', TOK_COMMA},
+}};
+
 TokenType OperatorForCharacter(char c)
 {
-  switch (c)
+  for (const OperatorCharacter& entry : OPERATOR_CHARACTERS)
   {
-  case '&':
-    return TOK_AND;
-  case '|':
-    return TOK_OR;
-  case '^':
-    return TOK_XOR;
-  case '+':
-    return TOK_ADD;
-  case '-':
-    return TOK_SUB;
-  case '*':
-    return TOK_MUL;
-  case '/':
-    return TOK_DIV;
-  case '%':
-    return TOK_MOD;
-  case '=':
-    return TOK_ASSIGN;
-  case '<':
-    return TOK_LTHAN;
-  case '>':
-    return TOK_GTHAN;
-  case ',':
-    return TOK_COMMA;
-  default:
-    return TOK_INVALID;
+    if (entry.character == c)
+      return entry.type;
   }
+  return TOK_INVALID;
 }
 
 // "a op= b" exists for the arithmetic and logic operators only.
@@ -705,26 +694,26 @@ void ControlEnvironment::CleanUnusedVariables()
 
 ParseResult ParseResult::MakeEmptyResult()
 {
-  ParseResult result;
-  result.status = ParseStatus::EmptyExpression;
-  return result;
+  ParseResult empty;
+  empty.status = ParseStatus::EmptyExpression;
+  return empty;
 }
 
 ParseResult ParseResult::MakeSuccessfulResult(std::unique_ptr<Expression>&& expr)
 {
-  ParseResult result;
-  result.status = ParseStatus::Successful;
-  result.expr = std::move(expr);
-  return result;
+  ParseResult success;
+  success.expr = std::move(expr);
+  success.status = ParseStatus::Successful;
+  return success;
 }
 
 ParseResult ParseResult::MakeErrorResult(Token token, std::string description)
 {
-  ParseResult result;
-  result.status = ParseStatus::SyntaxError;
-  result.token.emplace(std::move(token));
-  result.description.emplace(std::move(description));
-  return result;
+  ParseResult failure;
+  failure.description = std::move(description);
+  failure.token = std::move(token);
+  failure.status = ParseStatus::SyntaxError;
+  return failure;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -735,34 +724,31 @@ namespace
 // Lower numbers bind tighter. Assignment and the conditional operator group to the right.
 constexpr int LOOSEST = 999;
 
+// Operators that share a strength are listed together.
+struct Binding
+{
+  TokenType type;
+  int strength;
+};
+constexpr std::array<Binding, 13> BINDINGS = {{
+    {TOK_MUL, 1}, {TOK_DIV, 1}, {TOK_MOD, 1},
+    {TOK_ADD, 2}, {TOK_SUB, 2},
+    {TOK_LTHAN, 3}, {TOK_GTHAN, 3},
+    {TOK_AND, 4},
+    {TOK_XOR, 5},
+    {TOK_OR, 6},
+    {TOK_ASSIGN, 7}, {TOK_QUESTION, 7},
+    {TOK_COMMA, 8},
+}};
+
 constexpr int BindingStrength(TokenType type)
 {
-  switch (type)
+  for (const Binding& binding : BINDINGS)
   {
-  case TOK_MUL:
-  case TOK_DIV:
-  case TOK_MOD:
-    return 1;
-  case TOK_ADD:
-  case TOK_SUB:
-    return 2;
-  case TOK_LTHAN:
-  case TOK_GTHAN:
-    return 3;
-  case TOK_AND:
-    return 4;
-  case TOK_XOR:
-    return 5;
-  case TOK_OR:
-    return 6;
-  case TOK_ASSIGN:
-  case TOK_QUESTION:
-    return 7;
-  case TOK_COMMA:
-    return 8;
-  default:
-    return LOOSEST;
+    if (binding.type == type)
+      return binding.strength;
   }
+  return LOOSEST;
 }
 
 class Parser

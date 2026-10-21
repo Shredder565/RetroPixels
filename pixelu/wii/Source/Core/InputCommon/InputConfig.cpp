@@ -148,22 +148,26 @@ void InputConfig::ClearControllers()
 
 bool InputConfig::ControllersNeedToBeCreated() const
 {
-  return m_controllers.empty();
+  // Controllers are created once and kept until ClearControllers.
+  return m_controllers.size() == 0;
 }
 
+// Profiles live in "Profiles/<directory name>/" under the user's config folder (the user's
+// own) and under the Sys folder (the bundled ones).
 std::string InputConfig::GetUserProfileDirectoryPath() const
 {
-  return fmt::format("{}Profiles/{}/", File::GetUserPath(D_CONFIG_IDX), GetProfileDirectoryName());
+  return File::GetUserPath(D_CONFIG_IDX) + "Profiles/" + GetProfileDirectoryName() + '/';
 }
 
 std::string InputConfig::GetSysProfileDirectoryPath() const
 {
-  return fmt::format("{}Profiles/{}/", File::GetSysDirectory(), GetProfileDirectoryName());
+  return File::GetSysDirectory() + "Profiles/" + GetProfileDirectoryName() + '/';
 }
 
 int InputConfig::GetControllerCount() const
 {
-  return static_cast<int>(m_controllers.size());
+  const std::size_t count = m_controllers.size();
+  return static_cast<int>(count);
 }
 
 void InputConfig::RegisterHotplugCallback()

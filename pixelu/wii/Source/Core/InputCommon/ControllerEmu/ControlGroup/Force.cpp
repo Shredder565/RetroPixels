@@ -2,6 +2,7 @@
 
 #include "InputCommon/ControllerEmu/ControlGroup/Force.h"
 
+#include <array>
 #include <string>
 
 #include "Common/Common.h"
@@ -23,16 +24,18 @@ enum ForceControl : std::size_t
   FORCE_FORWARD,
   FORCE_BACKWARD,
 };
+
+// Input names, in ForceControl order.
+constexpr std::array<const char*, 6> FORCE_INPUT_NAMES = {
+    _trans("Up"),    _trans("Down"),    _trans("Left"),
+    _trans("Right"), _trans("Forward"), _trans("Backward"),
+};
 }  // namespace
 
 Force::Force(const std::string& name_) : ReshapableInput(name_, name_, GroupType::Force)
 {
-  AddInput(Translatability::Translate, _trans("Up"));
-  AddInput(Translatability::Translate, _trans("Down"));
-  AddInput(Translatability::Translate, _trans("Left"));
-  AddInput(Translatability::Translate, _trans("Right"));
-  AddInput(Translatability::Translate, _trans("Forward"));
-  AddInput(Translatability::Translate, _trans("Backward"));
+  for (const char* input_name : FORCE_INPUT_NAMES)
+    AddInput(Translatability::Translate, input_name);
 
   AddSetting(&m_distance_setting,
              {_trans("Distance"),
@@ -103,9 +106,16 @@ ControlState Force::GetDefaultInputRadiusAtAngle(double) const
   return 1.0;
 }
 
+// Speeds are in m/s, the angle in degrees and the distance in centimeters; the getters give
+// m/s, radians and meters.
 ControlState Force::GetSpeed() const
 {
   return m_speed_setting.GetValue();
+}
+
+ControlState Force::GetTwistAngle() const
+{
+  return MathUtil::TAU * m_angle_setting.GetValue() / 360;
 }
 
 ControlState Force::GetReturnSpeed() const
@@ -113,14 +123,10 @@ ControlState Force::GetReturnSpeed() const
   return m_return_speed_setting.GetValue();
 }
 
-ControlState Force::GetTwistAngle() const
-{
-  return m_angle_setting.GetValue() * MathUtil::TAU / 360;
-}
-
 ControlState Force::GetMaxDistance() const
 {
-  return m_distance_setting.GetValue() / 100;
+  const ControlState centimeters = m_distance_setting.GetValue();
+  return centimeters / 100;
 }
 
 Shake::Shake(const std::string& name_, ControlState default_intensity_scale)
@@ -171,14 +177,12 @@ Shake::StateData Shake::GetState(bool adjusted) const
   return result;
 }
 
+// The dead zone is a percentage and the intensity is in centimeters; both come out as
+// fractions (of full input and of a meter).
 ControlState Shake::GetDeadzone() const
 {
-  return m_deadzone_setting.GetValue() / 100;
-}
-
-ControlState Shake::GetIntensity() const
-{
-  return m_intensity_setting.GetValue() / 100;
+  const ControlState percent = m_deadzone_setting.GetValue();
+  return percent / 100;
 }
 
 ControlState Shake::GetFrequency() const
@@ -186,4 +190,9 @@ ControlState Shake::GetFrequency() const
   return m_frequency_setting.GetValue();
 }
 
+ControlState Shake::GetIntensity() const
+{
+  const ControlState centimeters = m_intensity_setting.GetValue();
+  return centimeters / 100;
+}
 }  // namespace ControllerEmu

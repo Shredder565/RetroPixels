@@ -121,7 +121,8 @@ Cursor::StateData Cursor::UpdateState(Cursor::ReshapeData input)
   const double step = STEP_PER_SEC / 1000.0 * static_cast<double>(elapsed_ms);
 
   // The hold control inverts the relative-input setting while held.
-  const bool relative = m_relative_setting.GetValue() ^ controls[CURSOR_RELATIVE_HOLD]->GetState<bool>();
+  const bool relative =
+      m_relative_setting.GetValue() ^ controls[CURSOR_RELATIVE_HOLD]->GetState<bool>();
   if (!relative)
   {
     m_position.x = input.x;
@@ -137,39 +138,39 @@ Cursor::StateData Cursor::UpdateState(Cursor::ReshapeData input)
     m_position.y = std::clamp(m_position.y + input.y * step, -1.0, 1.0);
   }
 
-  StateData result = m_position;
+  StateData state = m_position;
 
   // Auto-hide: any movement (or auto-hide being off) restarts the countdown.
   const bool autohide = m_autohide_setting.GetValue();
-  const bool moved = std::abs(m_last_result.x - result.x) > AUTO_HIDE_DEADZONE ||
-                     std::abs(m_last_result.y - result.y) > AUTO_HIDE_DEADZONE;
+  const bool moved = std::abs(m_last_result.x - state.x) > AUTO_HIDE_DEADZONE ||
+                     std::abs(m_last_result.y - state.y) > AUTO_HIDE_DEADZONE;
   if (!autohide || moved)
     m_hide_countdown_ms = AUTO_HIDE_MS;
   else if (m_hide_countdown_ms != 0)
     m_hide_countdown_ms -= std::min(static_cast<int>(elapsed_ms), m_hide_countdown_ms);
 
-  m_last_result = result;
+  m_last_result = state;
 
   // Hidden once the countdown ran out, while "Hide" is held, or while the input gate is closed
   // (a closed gate makes "Hide" read as released, so it is checked on its own).
   if (m_hide_countdown_ms == 0 || !ControlReference::GetInputGate() ||
       controls[CURSOR_HIDE]->GetState<bool>())
   {
-    result.x = std::numeric_limits<ControlState>::quiet_NaN();
-    result.y = 0;
+    // A NaN x is what marks the pointer as hidden.
+    state.x = std::numeric_limits<ControlState>::quiet_NaN();
+    state.y = 0;
   }
-
-  return result;
+  return state;
 }
 
 ControlState Cursor::GetTotalYaw() const
 {
-  return m_yaw_setting.GetValue() * MathUtil::TAU / 360;
+  return MathUtil::TAU * m_yaw_setting.GetValue() / 360;
 }
 
 ControlState Cursor::GetTotalPitch() const
 {
-  return m_pitch_setting.GetValue() * MathUtil::TAU / 360;
+  return MathUtil::TAU * m_pitch_setting.GetValue() / 360;
 }
 
 ControlState Cursor::GetVerticalOffset() const
@@ -177,14 +178,13 @@ ControlState Cursor::GetVerticalOffset() const
   return m_vertical_offset_setting.GetValue() / 100;
 }
 
-void Cursor::SetRelativeInput(bool value)
+void Cursor::SetRelativeInput(bool use_relative)
 {
-  m_relative_setting.SetValue(value);
+  m_relative_setting.SetValue(use_relative);
 }
 
 bool Cursor::StateData::IsVisible() const
 {
-  return !std::isnan(x);
+  return !std::isnan(this->x);
 }
-
 }  // namespace ControllerEmu

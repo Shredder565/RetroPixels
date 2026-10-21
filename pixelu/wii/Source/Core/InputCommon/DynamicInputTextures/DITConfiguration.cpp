@@ -41,16 +41,19 @@ ImagePixelData FitToRegion(const ImagePixelData& key_image, const Rect& region,
 
 Configuration::Configuration(const std::string& json_path)
 {
+  // Only a fully read pack is valid.
+  m_valid = false;
+
+  std::string parse_error;
   picojson::value root;
-  std::string error;
-  if (!JsonFromFile(json_path, &root, &error))
+  if (!JsonFromFile(json_path, &root, &parse_error))
   {
     ERROR_LOG_FMT(VIDEO, "Failed to load dynamic input json file '{}' due to parse error: {}",
-                  json_path, error);
-    m_valid = false;
+                  json_path, parse_error);
     return;
   }
 
+  // Image names in the pack are relative to its folder.
   SplitPath(json_path, &m_base_path, nullptr, nullptr);
 
   // "specification" is optional and defaults to 1.
@@ -67,7 +70,6 @@ Configuration::Configuration(const std::string& json_path)
           VIDEO,
           "Failed to load dynamic input json file '{}', specification '{}' is not within bounds",
           json_path, number);
-      m_valid = false;
       return;
     }
     specification = static_cast<u8>(number);
@@ -78,7 +80,6 @@ Configuration::Configuration(const std::string& json_path)
     ERROR_LOG_FMT(VIDEO,
                   "Failed to load dynamic input json file '{}', specification '{}' is invalid",
                   json_path, specification);
-    m_valid = false;
     return;
   }
 
@@ -87,17 +88,9 @@ Configuration::Configuration(const std::string& json_path)
 
 Configuration::~Configuration() = default;
 
-void Configuration::GenerateTextures(const Common::IniFile& file,
-                                     const std::vector<std::string>& controller_names,
-                                     OutputDetails* output) const
-{
-  for (const Data& texture : m_dynamic_input_textures)
-    GenerateTexture(file, controller_names, texture, output);
-}
-
-void Configuration::GenerateTexture(const Common::IniFile& file,
+void Configuration::GenerateTexture(const Common::IniFile& mappings,
                                     const std::vector<std::string>& controller_names,
-                                    const Data& texture_data, OutputDetails* output) const
+                                    const Data& texture_data, OutputDetails* textures) const
 {
   // Regions whose key has no image keep the base image's pixels.
   std::optional<ImagePixelData> canvas = LoadImage(m_base_path + texture_data.m_image_name);
@@ -114,7 +107,7 @@ void Configuration::GenerateTexture(const Common::IniFile& file,
 
   for (const std::string& controller_name : controller_names)
   {
-    const Common::IniFile::Section* const section = file.GetSection(controller_name);
+    const Common::IniFile::Section* const section = mappings.GetSection(controller_name);
     if (section == nullptr)
       continue;
 
@@ -173,8 +166,16 @@ void Configuration::GenerateTexture(const Common::IniFile& file,
 
   if (changed)
   {
-    (*output)[texture_data.m_generated_folder_name][texture_data.m_hires_texture_name] =
+    (*textures)[texture_data.m_generated_folder_name][texture_data.m_hires_texture_name] =
         std::move(*canvas);
   }
+}
+
+void Configuration::GenerateTextures(const Common::IniFile& mappings,
+                                     const std::vector<std::string>& controller_names,
+                                     OutputDetails* textures) const
+{
+  for (const Data& texture : m_dynamic_input_textures)
+    GenerateTexture(mappings, controller_names, texture, textures);
 }
 }  // namespace InputCommon::DynamicInputTextures

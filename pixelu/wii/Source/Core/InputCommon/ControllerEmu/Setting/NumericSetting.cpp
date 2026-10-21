@@ -14,31 +14,6 @@ NumericSettingBase::NumericSettingBase(const NumericSettingDetails& details) : m
 {
 }
 
-const char* NumericSettingBase::GetININame() const
-{
-  return m_details.ini_name;
-}
-
-const char* NumericSettingBase::GetUIName() const
-{
-  return m_details.ui_name;
-}
-
-const char* NumericSettingBase::GetUISuffix() const
-{
-  return m_details.ui_suffix;
-}
-
-const char* NumericSettingBase::GetUIDescription() const
-{
-  return m_details.ui_description;
-}
-
-SettingVisibility NumericSettingBase::GetVisibility() const
-{
-  return m_details.visibility;
-}
-
 template <typename T>
 void NumericSetting<T>::SimplifyIfPossible()
 {
@@ -57,24 +32,7 @@ void NumericSetting<T>::SetExpressionFromValue()
   m_value.m_reference.SetExpression(fmt::format("{:+g}", value));
 }
 
-template <>
-SettingType NumericSetting<int>::GetType() const
-{
-  return SettingType::Int;
-}
-
-template <>
-SettingType NumericSetting<double>::GetType() const
-{
-  return SettingType::Double;
-}
-
-template <>
-SettingType NumericSetting<bool>::GetType() const
-{
-  return SettingType::Bool;
-}
-
+// The member functions defined here exist for these three types only.
 template class NumericSetting<int>;
 template class NumericSetting<double>;
 template class NumericSetting<bool>;
