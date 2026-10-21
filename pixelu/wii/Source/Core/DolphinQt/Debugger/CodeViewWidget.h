@@ -1,8 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <optional>
+#include <string>
 #include <vector>
 
 #include <QTableWidget>
@@ -22,10 +23,10 @@ class CPUThreadGuard;
 class System;
 }  // namespace Core
 
-struct CodeViewBranch;
-class BranchDisplayDelegate;
 class PPCSymbolDB;
 
+// Disassembly listing centred on an address, one instruction per row, with breakpoint icons,
+// symbol/note columns and a lane of arrows showing where branches go.
 class CodeViewWidget : public QTableWidget
 {
   Q_OBJECT
@@ -45,7 +46,7 @@ public:
   u32 GetContextAddress() const;
   void SetAddress(u32 address, SetAddressUpdate update);
 
-  // Set tighter row height. Set BP column sizing. This needs to run when font type changes.
+  // Recomputes row height and column widths from the current font. Call after a font change.
   void FontBasedSizing();
   void Update();
   void Update(const Core::CPUThreadGuard* guard);
@@ -62,13 +63,17 @@ signals:
   void ActivateSearch();
 
 private:
-  enum class ReplaceWith
+  // One branch to draw in the arrow column. lane is the horizontal slot it was given.
+  struct Arrow
   {
-    BLR,
-    NOP
+    u32 from = 0;
+    u32 to = 0;
+    u32 lane = 0;
+    bool links = false;
   };
+  class ArrowDelegate;
 
-  void ReplaceAddress(u32 address, ReplaceWith replace);
+  struct RowStyle;
 
   void resizeEvent(QResizeEvent*) override;
   void keyPressEvent(QKeyEvent* event) override;
@@ -76,46 +81,43 @@ private:
   void wheelEvent(QWheelEvent* event) override;
   void showEvent(QShowEvent* event) override;
 
-  void OnContextMenu();
+  void Scroll(s64 instructions);
+  void FollowPCUnlessLocked();
+  void FillRow(int row, const Core::CPUThreadGuard* guard, const RowStyle& style);
+  void AssignArrowLanes();
+  void MarkPCSelection();
+  void ApplyDebugFont(const QFont& new_font);
 
-  void AutoStep(CodeTrace::AutoStop option = CodeTrace::AutoStop::Always);
-  void OnDebugFontChanged(const QFont& font);
-  void OnFollowBranch();
-  void OnCopyAddress();
-  void OnCopyTargetAddress();
-  void OnShowInMemory();
-  void OnShowTargetInMemory();
-  void OnCopyFunction();
-  void OnCopyCode();
-  void OnCopyHex();
-  void OnSelectionChanged();
-  void OnRunToHere();
-  void OnAddFunction();
-  void OnEditSymbol();
-  void OnDeleteSymbol();
-  void OnAddNote();
-  void OnPPCComparison();
-  void OnEditNote();
-  void OnDeleteNote();
-  void OnInsertBLR();
-  void OnInsertNOP();
-  void OnReplaceInstruction();
-  void OnAssembleInstruction();
-  void DoPatchInstruction(bool assemble);
-  void OnRestoreInstruction();
+  void ShowContextMenu();
+  void RunUntil(CodeTrace::AutoStop condition);
+  void FollowBranch();
+  void CopyAddress();
+  void CopyLine();
+  void CopyHex();
+  void CopyFunction();
+  void CopyTarget();
+  void ShowTarget();
+  [[nodiscard]] std::optional<u32> ContextTarget() const;
+  [[nodiscard]] std::string DisassembleContext() const;
 
-  void CalculateBranchIndentation();
+  void AddFunctionSymbol();
+  void EditFunctionSymbol();
+  void DeleteFunctionSymbol();
+  void AddNote();
+  void EditNote();
+  void DeleteNote();
+
+  void WriteStub(u32 instruction);
+  void EditInstruction(bool assemble);
+  void RestoreInstruction();
 
   Core::System& m_system;
-  PPCSymbolDB& m_ppc_symbol_db;
-
-  bool m_updating = false;
+  PPCSymbolDB& m_symbol_db;
 
   u32 m_address = 0;
-  bool m_lock_address = false;
   u32 m_context_address = 0;
+  bool m_lock_address = false;
+  bool m_in_update = false;
 
-  std::vector<CodeViewBranch> m_branches;
-
-  friend class BranchDisplayDelegate;
+  std::vector<Arrow> m_arrows;
 };
