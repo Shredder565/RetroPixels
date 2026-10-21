@@ -49,7 +49,7 @@ func TestBrowserPlatformArgs(t *testing.T) {
 	}
 }
 
-func TestProcessTree(t *testing.T) {
+func TestEmbedProcessTree(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "sleep 30 & wait")
 	if err := cmd.Start(); err != nil {
 		t.Skip(err)
@@ -57,15 +57,15 @@ func TestProcessTree(t *testing.T) {
 	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if len(processTree(cmd.Process.Pid)) >= 2 {
+		if len(processTree("/proc", cmd.Process.Pid)) >= 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("processTree(%d) = %v", cmd.Process.Pid, processTree(cmd.Process.Pid))
+			t.Fatalf("processTree(%d) = %v", cmd.Process.Pid, processTree("/proc", cmd.Process.Pid))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if p := processTree(os.Getpid()); !p[os.Getpid()] || !p[cmd.Process.Pid] {
+	if p := processTree("/proc", os.Getpid()); !p[os.Getpid()] || !p[cmd.Process.Pid] {
 		t.Errorf("our own tree %v lacks us or the shell", p)
 	}
 }

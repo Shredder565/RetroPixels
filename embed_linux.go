@@ -35,8 +35,6 @@ package main
 import (
 	"errors"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -189,50 +187,9 @@ func findHost(c *x11.Conn) x11.Window {
 	return found[0]
 }
 
-// processTree is pid and its descendants (an engine started through a
-// launcher script owns its windows under another pid).
-func processTree(pid int) map[int]bool {
-	pids := map[int]bool{pid: true}
-	parent := map[int]int{}
-	ents, _ := os.ReadDir("/proc")
-	for _, e := range ents {
-		p, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		// pid (comm) state ppid ...; comm may hold spaces and parentheses.
-		s := string(b)
-		i := strings.LastIndexByte(s, ')')
-		if i < 0 {
-			continue
-		}
-		f := strings.Fields(s[i+1:])
-		if len(f) < 2 {
-			continue
-		}
-		if pp, err := strconv.Atoi(f[1]); err == nil {
-			parent[p] = pp
-		}
-	}
-	for changed := true; changed; {
-		changed = false
-		for p, pp := range parent {
-			if pids[pp] && !pids[p] {
-				pids[p] = true
-				changed = true
-			}
-		}
-	}
-	return pids
-}
-
 // engineWindows are the top-level windows of pid's process tree.
 func engineWindows(c *x11.Conn, pid int) []x11.Window {
-	pids := processTree(pid)
+	pids := processTree("/proc", pid)
 	var out []x11.Window
 	for p := range pids {
 		ws, err := c.WindowsByPID(p)
