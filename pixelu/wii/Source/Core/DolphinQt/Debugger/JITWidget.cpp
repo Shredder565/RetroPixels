@@ -147,9 +147,8 @@ JITWidget::JITWidget(Core::System& system, QWidget* parent) : QDockWidget(parent
   auto* const settings = &Settings::Instance();
   connect(settings, &Settings::JITVisibilityChanged, this,
           [this](bool visible) { setHidden(!visible); });
-  connect(settings, &Settings::DebugModeToggled, this, [this](bool enabled) {
-    setHidden(!enabled || !Settings::Instance().IsJITVisible());
-  });
+  connect(settings, &Settings::DebugModeToggled, this,
+          [this](bool enabled) { setHidden(!enabled || !Settings::Instance().IsJITVisible()); });
 
   // The model belongs to the proxy, which belongs to the view.
   m_blocks_view = new QTableView(nullptr);
@@ -176,8 +175,7 @@ JITWidget::JITWidget(Core::System& system, QWidget* parent) : QDockWidget(parent
   connect(m_blocks_view, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
     emit SetCodeAddress(m_filter_model->GetJitBlock(index).effectiveAddress);
   });
-  connect(m_blocks_view, &QTableView::customContextMenuRequested, this,
-          &JITWidget::ShowTableMenu);
+  connect(m_blocks_view, &QTableView::customContextMenuRequested, this, &JITWidget::ShowTableMenu);
 
   QHeaderView* const header = m_blocks_view->horizontalHeader();
   header->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -384,8 +382,7 @@ void JITWidget::Listen(bool on)
   }));
   m_links.append(
       connect(host, &Host::UpdateDisasmDialog, this, &JITWidget::ShowCurrentRowIfPaused));
-  m_links.append(
-      connect(host, &Host::PPCSymbolsChanged, this, &JITWidget::ShowCurrentRowIfPaused));
+  m_links.append(connect(host, &Host::PPCSymbolsChanged, this, &JITWidget::ShowCurrentRowIfPaused));
   // Changing breakpoints can invalidate blocks, so the selection may point at stale rows. Clearing
   // it makes the current-row handler refresh the panes.
   m_links.append(connect(host, &Host::PPCBreakpointsChanged, this,

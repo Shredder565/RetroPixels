@@ -280,8 +280,7 @@ BranchWatchDialog::BranchWatchDialog(Core::System& system, Core::BranchWatch& br
 
   m_poll = new QTimer(this);
   connect(m_poll, &QTimer::timeout, this, &BranchWatchDialog::Update);
-  connect(m_filter, &BranchWatchProxyModel::layoutChanged, this,
-          &BranchWatchDialog::RefreshStatus);
+  connect(m_filter, &BranchWatchProxyModel::layoutChanged, this, &BranchWatchDialog::RefreshStatus);
 
   auto* const column = new QVBoxLayout(nullptr);
   column->setMenuBar(menu_bar);
@@ -329,8 +328,7 @@ void BranchWatchDialog::BuildTable(PPCSymbolDB& ppc_symbol_db)
   header->setFirstSectionMovable(true);
 
   connect(m_table, &QTableView::clicked, this, &BranchWatchDialog::ClickCell);
-  connect(m_table, &QTableView::customContextMenuRequested, this,
-          &BranchWatchDialog::OpenRowMenu);
+  connect(m_table, &QTableView::customContextMenuRequested, this, &BranchWatchDialog::OpenRowMenu);
   connect(header, &QHeaderView::customContextMenuRequested, this,
           &BranchWatchDialog::OpenColumnMenu);
   auto* const delete_key = new QShortcut(QKeySequence(Qt::Key_Delete), this);
@@ -490,8 +488,7 @@ void BranchWatchDialog::BuildMiscControls()
       make_button(tr("Branch Not Overwritten"), &BranchWatchDialog::NotOverwritten);
 
   m_wipe_hits_button = new QPushButton(tr("Wipe Recent Hits"), nullptr);
-  connect(m_wipe_hits_button, &QPushButton::clicked, this,
-          [this] { m_model->OnWipeRecentHits(); });
+  connect(m_wipe_hits_button, &QPushButton::clicked, this, [this] { m_model->OnWipeRecentHits(); });
   m_wipe_hits_button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
   // Only meaningful once the reduction phase has started.
   m_wipe_hits_button->setEnabled(false);
@@ -547,8 +544,7 @@ void BranchWatchDialog::BuildRowMenus()
     menu->addActions(actions);
     return menu;
   };
-  m_instruction_menu =
-      make_menu({remove, m_invert_condition_action, m_invert_decrement_action});
+  m_instruction_menu = make_menu({remove, m_invert_condition_action, m_invert_decrement_action});
   m_condition_menu = make_menu({remove, m_unconditional_action});
   m_origin_menu = make_menu({remove, m_nop_action, m_copy_action, breakpoint});
   m_destination_menu = make_menu({remove, m_blr_action, m_copy_action, breakpoint});
@@ -560,18 +556,18 @@ void BranchWatchDialog::BuildColumnMenu()
 {
   // Longer than the table's own header labels.
   static constexpr std::array<const char*, Column::NumberOfColumns> names{
-      QT_TR_NOOP("Instruction"),   QT_TR_NOOP("Condition"),
-      QT_TR_NOOP("Origin"),        QT_TR_NOOP("Destination"),
-      QT_TR_NOOP("Recent Hits"),   QT_TR_NOOP("Total Hits"),
+      QT_TR_NOOP("Instruction"),   QT_TR_NOOP("Condition"),          QT_TR_NOOP("Origin"),
+      QT_TR_NOOP("Destination"),   QT_TR_NOOP("Recent Hits"),        QT_TR_NOOP("Total Hits"),
       QT_TR_NOOP("Origin Symbol"), QT_TR_NOOP("Destination Symbol"),
   };
 
   m_column_menu = new QMenu(this);
   for (int col = 0; col < Column::NumberOfColumns; ++col)
   {
-    QAction* const toggle = m_column_menu->addAction(
-        tr(names[static_cast<std::size_t>(col)]),
-        [this, col](bool shown) { m_table->setColumnHidden(col, !shown); });
+    QAction* const toggle =
+        m_column_menu->addAction(tr(names[static_cast<std::size_t>(col)]), [this, col](bool shown) {
+          m_table->setColumnHidden(col, !shown);
+        });
     // Checked state first, then checkable, as in the rest of this dialog.
     toggle->setChecked(!m_table->isColumnHidden(col));
     toggle->setCheckable(true);
@@ -605,8 +601,7 @@ QWidget* BranchWatchDialog::BuildMenuBar(QMenu* toolbar_menu)
   file_menu->addAction(tr("&Save Branch Watch"), this, &BranchWatchDialog::SaveToDefault);
   file_menu->addAction(tr("Save Branch Watch &As..."), this, &BranchWatchDialog::SaveToChosen);
   file_menu->addAction(tr("&Load Branch Watch"), this, &BranchWatchDialog::LoadFromDefault);
-  file_menu->addAction(tr("Load Branch Watch &From..."), this,
-                       &BranchWatchDialog::LoadFromChosen);
+  file_menu->addAction(tr("Load Branch Watch &From..."), this, &BranchWatchDialog::LoadFromChosen);
   m_autosave_action = file_menu->addAction(tr("A&uto Save"));
   m_autosave_action->setCheckable(true);
   connect(m_autosave_action, &QAction::toggled, this, &BranchWatchDialog::ChooseAutoSaveTarget);
@@ -959,7 +954,7 @@ void BranchWatchDialog::AddBreakpoints(bool break_on_hit, bool log_on_hit) const
     breakpoints.Add(m_filter->data(index, UserRole::ClickRole).value<u32>(), break_on_hit,
                     log_on_hit, {});
   }
-  emit Host::GetInstance()->PPCBreakpointsChanged();
+  emit Host::GetInstance() -> PPCBreakpointsChanged();
 }
 
 // Each breakpoint action gets an icon if any target already has that kind of breakpoint: the
@@ -972,8 +967,8 @@ void BranchWatchDialog::ShowBreakpointCoverage() const
   const BreakPoints& breakpoints = m_system.GetPowerPC().GetBreakPoints();
   for (const QModelIndex& index : std::as_const(m_menu_rows))
   {
-    const TBreakPoint* const existing = breakpoints.GetRegularBreakpoint(
-        m_filter->data(index, UserRole::ClickRole).value<u32>());
+    const TBreakPoint* const existing =
+        breakpoints.GetRegularBreakpoint(m_filter->data(index, UserRole::ClickRole).value<u32>());
     if (existing == nullptr)
       continue;
     if (existing->break_on_hit && existing->log_on_hit)
@@ -1145,8 +1140,7 @@ void BranchWatchDialog::StoreSettings() const
   };
   store_hidden(QStringLiteral("branchwatchdialog/toolbar/branch_type_hidden"),
                m_branch_type_section);
-  store_hidden(QStringLiteral("branchwatchdialog/toolbar/origin_destin_hidden"),
-               m_address_section);
+  store_hidden(QStringLiteral("branchwatchdialog/toolbar/origin_destin_hidden"), m_address_section);
   store_hidden(QStringLiteral("branchwatchdialog/toolbar/condition_hidden"), m_condition_section);
   store_hidden(QStringLiteral("branchwatchdialog/toolbar/misc_controls_hidden"), m_misc_section);
 }

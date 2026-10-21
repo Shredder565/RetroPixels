@@ -88,8 +88,7 @@ BranchWatchTableModelSymbolListValueType::BranchWatchTableModelSymbolListValueTy
 {
 }
 
-BranchWatchTableModel::BranchWatchTableModel(Core::System& system,
-                                             Core::BranchWatch& branch_watch,
+BranchWatchTableModel::BranchWatchTableModel(Core::System& system, Core::BranchWatch& branch_watch,
                                              PPCSymbolDB& ppc_symbol_db, QObject* parent)
     : QAbstractTableModel(parent), m_system(system), m_watch(branch_watch),
       m_symbol_db(ppc_symbol_db)
@@ -129,14 +128,10 @@ QVariant BranchWatchTableModel::headerData(int section, Qt::Orientation orientat
     return {};
 
   static constexpr std::array<const char*, Column::NumberOfColumns> titles{
-      QT_TR_NOOP("Instr."),
-      QT_TR_NOOP("Cond."),
-      QT_TR_NOOP("Origin"),
-      QT_TR_NOOP("Destination"),
-      QT_TR_NOOP("Recent Hits"),
-      QT_TR_NOOP("Total Hits"),
-      QT_TR_NOOP("Origin Symbol"),
-      QT_TR_NOOP("Destination Symbol"),
+      QT_TR_NOOP("Instr."),        QT_TR_NOOP("Cond."),
+      QT_TR_NOOP("Origin"),        QT_TR_NOOP("Destination"),
+      QT_TR_NOOP("Recent Hits"),   QT_TR_NOOP("Total Hits"),
+      QT_TR_NOOP("Origin Symbol"), QT_TR_NOOP("Destination Symbol"),
   };
   return tr(titles[static_cast<std::size_t>(section)]);
 }
