@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,7 +11,8 @@
 #include "Core/IOS/ES/Formats.h"
 #include "Core/IOS/USB/Bluetooth/BTReal.h"
 
-// Small utility functions for common Wii related tasks.
+// Wii NAND helpers: installing and removing titles, system updates, NAND
+// checks, and access to the emulated Bluetooth device.
 
 namespace DiscIO
 {
@@ -36,28 +36,27 @@ namespace WiiUtils
 enum class InstallType
 {
   Permanent,
+  // Recorded in SYSCONF (IPL.TID) so the next install can delete it again.
   Temporary,
 };
 
 bool InstallWAD(IOS::HLE::Kernel& ios, const DiscIO::VolumeWAD& wad, InstallType type);
-// Same as the above, but constructs a temporary IOS and VolumeWAD instance for importing
-// and does a permanent install.
+// Opens the WAD at `wad_path` and installs it permanently using a throwaway IOS.
 bool InstallWAD(const std::string& wad_path);
 
 bool UninstallTitle(u64 title_id);
 
 bool IsTitleInstalled(u64 title_id);
 
-// Checks if there's a title.tmd imported for the given title ID.
+// Whether the title's content folder holds a title.tmd.
 bool IsTMDImported(IOS::HLE::FS::FileSystem& fs, u64 title_id);
 
-// Searches for a TMD matching the given title ID in /title/00000001/00000002/data/tmds.sys.
-// Returns it if it exists, otherwise returns an empty invalid TMD.
+// Looks up the title in the System Menu's TMD store
+// (/title/00000001/00000002/data/tmds.sys). Returns an invalid TMD if absent.
 IOS::ES::TMDReader FindBackupTMD(IOS::HLE::FS::FileSystem& fs, u64 title_id);
 
-// Checks if there's a title.tmd imported for the given title ID. If there is not, we attempt to
-// re-import it from the TMDs stored in /title/00000001/00000002/data/tmds.sys.
-// Returns true if, after this function call, we have an imported title.tmd, or false if not.
+// Makes sure the title has a title.tmd, importing one from tmds.sys if needed.
+// Returns whether a title.tmd exists afterwards.
 bool EnsureTMDIsImported(IOS::HLE::FS::FileSystem& fs, IOS::HLE::ESCore& es, u64 title_id);
 
 enum class UpdateResult
@@ -65,37 +64,38 @@ enum class UpdateResult
   Succeeded,
   AlreadyUpToDate,
 
-  // Current region does not match disc region.
+  // The disc is for another region than the installed System Menu.
   RegionMismatch,
-  // Missing update partition on disc.
+  // The disc has no update partition.
   MissingUpdatePartition,
-  // Missing or invalid files on disc.
+  // The disc's update files are missing or unreadable.
   DiscReadFailed,
 
-  // NUS errors and failures.
+  // The update server failed or returned nothing usable.
   ServerFailed,
-  // General download failures.
+  // A download failed.
   DownloadFailed,
 
-  // Import failures.
+  // ES refused an import.
   ImportFailed,
-  // Update was cancelled.
+  // The callback asked to stop.
   Cancelled,
 
   NumberOfEntries,
 };
 
-// Return false to cancel the update as soon as the current title has finished updating.
+// Progress report; return false to stop once the current title is done.
 using UpdateCallback = std::function<bool(size_t processed, size_t total, u64 title_id)>;
-// Download and install the latest version of all titles (if missing) from NUS.
-// If no region is specified, the region of the installed System Menu will be used.
-// If no region is specified and no system menu is installed, the update will fail.
+// Brings all system titles up to the versions the update server lists. An
+// empty region means the installed System Menu's region; without either the
+// update fails.
 UpdateResult DoOnlineUpdate(UpdateCallback update_callback, const std::string& region);
 
-// Perform a disc update with behaviour similar to the System Menu.
+// Installs the update partition of a disc, as the System Menu would.
 UpdateResult DoDiscUpdate(UpdateCallback update_callback, const std::string& image_path);
 
-// Check the emulated NAND for common issues.
+// Result of scanning the configured NAND for known kinds of damage, with
+// usage statistics.
 struct NANDCheckResult
 {
   bool bad = false;
@@ -108,10 +108,9 @@ struct NANDCheckResult
 NANDCheckResult CheckNAND(IOS::HLE::Kernel& ios);
 bool RepairNAND(IOS::HLE::Kernel& ios);
 
-// Get the BluetoothEmuDevice for an active emulation instance.
-// It is only safe to call this from the CPU thread.
-// Returns nullptr if we're not currently emulating a Wii game or if Bluetooth passthrough is used.
+// The running Wii's emulated Bluetooth device, or nullptr when no Wii software
+// runs or passthrough is on. Call only from the CPU thread.
 std::shared_ptr<IOS::HLE::BluetoothEmuDevice> GetBluetoothEmuDevice();
-// Same as GetBluetoothEmuDevice, but for Bluetooth passthrough.
+// The passthrough counterpart of GetBluetoothEmuDevice.
 std::shared_ptr<IOS::HLE::BluetoothRealDevice> GetBluetoothRealDevice();
 }  // namespace WiiUtils
