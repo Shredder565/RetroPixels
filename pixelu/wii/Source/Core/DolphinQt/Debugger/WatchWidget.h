@@ -1,9 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QDockWidget>
+
+#include <vector>
 
 #include "Common/CommonTypes.h"
 
@@ -20,6 +21,8 @@ class CPUThreadGuard;
 class System;
 }  // namespace Core
 
+// Dock listing watched memory words (label, address, value as hex/decimal/string/float) with
+// optional locking of the value every frame.
 class WatchWidget : public QDockWidget
 {
   Q_OBJECT
@@ -37,50 +40,36 @@ protected:
   void showEvent(QShowEvent* event) override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void BuildLayout();
+  void RefreshIcons();
+  void RefreshButtons();
+  void Refill();
+  void AppendBlankRow(int row);
 
-  void OnDelete();
-  void OnClear();
-  void OnNewWatch();
+  void AskForNewWatch();
+  void RemoveSelected();
+  void RemoveAll();
+  void LoadFromIni();
+  void SaveToIni();
 
-  void OnLoad();
-  void OnSave();
+  void ShowRowMenu();
+  void CellEdited(QTableWidgetItem* item);
 
-  void UpdateButtonsEnabled();
-  void Update();
-  void SetEmptyRow(int row);
-
-  void ShowContextMenu();
-  void OnItemChanged(QTableWidgetItem* item);
-  void LockWatchAddress(const Core::CPUThreadGuard& guard, u32 address);
-  void DeleteSelectedWatches();
-  void DeleteWatch(const Core::CPUThreadGuard& guard, int row);
-  void DeleteWatchAndUpdate(int row);
-  void AddWatchBreakpoint(int row);
-  void ShowInMemory(int row);
-  void UpdateIcons();
-  void LockSelectedWatches();
-  void UnlockSelectedWatches();
+  std::vector<int> SelectedWatchIndexes() const;
+  void FreezeValue(const Core::CPUThreadGuard& guard, u32 address);
+  void RemoveWatch(const Core::CPUThreadGuard& guard, int index);
+  void RemoveWatchAndRefill(int index);
+  void SetSelectedLocked(bool locked);
 
   Core::System& m_system;
 
-  QAction* m_new;
-  QAction* m_delete;
-  QAction* m_clear;
-  QAction* m_load;
-  QAction* m_save;
-  QToolBar* m_toolbar;
-  QTableWidget* m_table;
+  QAction* m_new_action = nullptr;
+  QAction* m_delete_action = nullptr;
+  QAction* m_clear_action = nullptr;
+  QAction* m_load_action = nullptr;
+  QAction* m_save_action = nullptr;
+  QToolBar* m_bar = nullptr;
+  QTableWidget* m_list = nullptr;
 
-  bool m_updating = false;
-
-  static constexpr int NUM_COLUMNS = 7;
-  static constexpr int COLUMN_INDEX_LABEL = 0;
-  static constexpr int COLUMN_INDEX_ADDRESS = 1;
-  static constexpr int COLUMN_INDEX_HEX = 2;
-  static constexpr int COLUMN_INDEX_DECIMAL = 3;
-  static constexpr int COLUMN_INDEX_STRING = 4;
-  static constexpr int COLUMN_INDEX_FLOAT = 5;
-  static constexpr int COLUMN_INDEX_LOCK = 6;
+  bool m_refilling = false;
 };
