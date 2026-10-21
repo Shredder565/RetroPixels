@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 #include <tuple>
+#include <utility>
 
 #include "Common/Align.h"
 #include "Common/Assert.h"
@@ -268,23 +269,21 @@ bool VKTexture::CreateView(VkImageViewType type)
 
 VkFormat VKTexture::GetLinearFormat(VkFormat format)
 {
-  switch (format)
+  // sRGB formats and their plain UNORM twins; anything else is already linear.
+  static constexpr std::pair<VkFormat, VkFormat> SRGB_TO_UNORM[] = {
+      {VK_FORMAT_R8_SRGB, VK_FORMAT_R8_UNORM},
+      {VK_FORMAT_R8G8_SRGB, VK_FORMAT_R8G8_UNORM},
+      {VK_FORMAT_R8G8B8_SRGB, VK_FORMAT_R8G8B8_UNORM},
+      {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM},
+      {VK_FORMAT_B8G8R8_SRGB, VK_FORMAT_B8G8R8_UNORM},
+      {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM},
+  };
+  for (const auto& [srgb, unorm] : SRGB_TO_UNORM)
   {
-  case VK_FORMAT_R8_SRGB:
-    return VK_FORMAT_R8_UNORM;
-  case VK_FORMAT_R8G8_SRGB:
-    return VK_FORMAT_R8G8_UNORM;
-  case VK_FORMAT_R8G8B8_SRGB:
-    return VK_FORMAT_R8G8B8_UNORM;
-  case VK_FORMAT_R8G8B8A8_SRGB:
-    return VK_FORMAT_R8G8B8A8_UNORM;
-  case VK_FORMAT_B8G8R8_SRGB:
-    return VK_FORMAT_B8G8R8_UNORM;
-  case VK_FORMAT_B8G8R8A8_SRGB:
-    return VK_FORMAT_B8G8R8A8_UNORM;
-  default:
-    return format;
+    if (srgb == format)
+      return unorm;
   }
+  return format;
 }
 
 VkFormat VKTexture::GetVkFormatForHostTextureFormat(AbstractTextureFormat format)
@@ -836,18 +835,21 @@ void VKStagingTexture::Flush()
   m_needs_flush = false;
 }
 
-VKFramebuffer::VKFramebuffer(VKTexture* color_attachment, VKTexture* depth_attachment,
-                             std::vector<AbstractTexture*> additional_color_attachments, u32 width,
-                             u32 height, u32 layers, u32 samples, VkFramebuffer fb,
-                             VkRenderPass load_render_pass, VkRenderPass discard_render_pass,
-                             VkRenderPass clear_render_pass)
-    : AbstractFramebuffer(
-          color_attachment, depth_attachment, std::move(additional_color_attachments),
-          color_attachment ? color_attachment->GetFormat() : AbstractTextureFormat::Undefined,
-          depth_attachment ? depth_attachment->GetFormat() : AbstractTextureFormat::Undefined,
-          width, height, layers, samples),
-      m_fb(fb), m_load_pass(load_render_pass), m_discard_pass(discard_render_pass),
-      m_clear_pass(clear_render_pass)
+namespace
+{
+AbstractTextureFormat FormatOrUndefined(const VKTexture* tex)
+{
+  return tex != nullptr ? tex->GetFormat() : AbstractTextureFormat::Undefined;
+}
+}  // namespace
+
+VKFramebuffer::VKFramebuffer(VKTexture* color, VKTexture* depth,
+                             std::vector<AbstractTexture*> extra_colors, u32 width, u32 height,
+                             u32 layers, u32 samples, VkFramebuffer fb, VkRenderPass load_pass,
+                             VkRenderPass discard_pass, VkRenderPass clear_pass)
+    : AbstractFramebuffer(color, depth, std::move(extra_colors), FormatOrUndefined(color),
+                          FormatOrUndefined(depth), width, height, layers, samples),
+      m_fb(fb), m_load_pass(load_pass), m_discard_pass(discard_pass), m_clear_pass(clear_pass)
 {
 }
 

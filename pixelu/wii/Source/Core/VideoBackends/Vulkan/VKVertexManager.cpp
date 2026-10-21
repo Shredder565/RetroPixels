@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <utility>
 
 #include "Common/Align.h"
@@ -101,15 +102,23 @@ bool VertexManager::Initialize()
   if (!VertexManagerBase::Initialize())
     return false;
 
-  // The vertex ring is also read as a storage buffer by the dynamic vertex loader.
-  m_vertex_stream_buffer =
-      StreamBuffer::Create(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                           VERTEX_STREAM_BUFFER_SIZE);
-  m_index_stream_buffer =
-      StreamBuffer::Create(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, INDEX_STREAM_BUFFER_SIZE);
-  m_uniform_stream_buffer =
-      StreamBuffer::Create(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, UNIFORM_STREAM_BUFFER_SIZE);
-  if (!m_vertex_stream_buffer || !m_index_stream_buffer || !m_uniform_stream_buffer)
+  // The three rings, created in this order. The vertex ring is also read as a storage buffer
+  // by the dynamic vertex loader.
+  const std::pair<std::unique_ptr<StreamBuffer>*, VkBufferUsageFlags> rings[] = {
+      {&m_vertex_stream_buffer,
+       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
+      {&m_index_stream_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT},
+      {&m_uniform_stream_buffer, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
+  };
+  const u32 ring_sizes[] = {VERTEX_STREAM_BUFFER_SIZE, INDEX_STREAM_BUFFER_SIZE,
+                            UNIFORM_STREAM_BUFFER_SIZE};
+  bool rings_ok = true;
+  for (size_t n = 0; n < std::size(rings); ++n)
+  {
+    *rings[n].first = StreamBuffer::Create(rings[n].second, ring_sizes[n]);
+    rings_ok = rings_ok && *rings[n].first != nullptr;
+  }
+  if (!rings_ok)
   {
     PanicAlertFmt("Failed to allocate streaming buffers");
     return false;

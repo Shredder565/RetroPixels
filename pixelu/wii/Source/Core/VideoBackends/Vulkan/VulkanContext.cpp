@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <string_view>
+#include <utility>
 
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
@@ -519,12 +520,18 @@ void VulkanContext::PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhy
   out.bSupportsLargePoints =
       info.largePoints && info.pointSizeRange[0] <= 1.0f && info.pointSizeRange[1] >= 16;
 
-  if (DriverDetails::HasBug(DriverDetails::BUG_PRIMITIVE_RESTART))
-    out.bSupportsPrimitiveRestart = false;
-  if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_REVERSED_DEPTH_RANGE))
-    out.bSupportsReversedDepthRange = false;
-  if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DYNAMIC_SAMPLER_INDEXING))
-    out.bSupportsDynamicSamplerIndexing = false;
+  // Features that are present but broken on the detected driver.
+  static constexpr std::pair<DriverDetails::Bug, bool BackendInfo::*> BROKEN_FEATURES[] = {
+      {DriverDetails::BUG_PRIMITIVE_RESTART, &BackendInfo::bSupportsPrimitiveRestart},
+      {DriverDetails::BUG_BROKEN_REVERSED_DEPTH_RANGE, &BackendInfo::bSupportsReversedDepthRange},
+      {DriverDetails::BUG_BROKEN_DYNAMIC_SAMPLER_INDEXING,
+       &BackendInfo::bSupportsDynamicSamplerIndexing},
+  };
+  for (const auto& [bug, feature] : BROKEN_FEATURES)
+  {
+    if (DriverDetails::HasBug(bug))
+      out.*feature = false;
+  }
 
   if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DISCARD_WITH_EARLY_Z))
   {
@@ -535,31 +542,31 @@ void VulkanContext::PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhy
   }
 }
 
-void VulkanContext::PopulateBackendInfoMultisampleModes(BackendInfo* backend_info,
-                                                        VkPhysicalDevice gpu,
+void VulkanContext::PopulateBackendInfoMultisampleModes(BackendInfo* dest,
+                                                        VkPhysicalDevice physical_device,
                                                         const PhysicalDeviceInfo& info)
 {
   // MSAA is only offered at counts both EFB formats can be rendered with.
   VkImageFormatProperties color = {};
-  vkGetPhysicalDeviceImageFormatProperties(gpu, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
-                                           VK_IMAGE_TILING_OPTIMAL,
+  vkGetPhysicalDeviceImageFormatProperties(physical_device, VK_FORMAT_R8G8B8A8_UNORM,
+                                           VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, &color);
   VkImageFormatProperties depth = {};
-  vkGetPhysicalDeviceImageFormatProperties(gpu, VK_FORMAT_D32_SFLOAT, VK_IMAGE_TYPE_2D,
-                                           VK_IMAGE_TILING_OPTIMAL,
+  vkGetPhysicalDeviceImageFormatProperties(physical_device, VK_FORMAT_D32_SFLOAT,
+                                           VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
                                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &depth);
 
   const VkSampleCountFlags usable = info.framebufferColorSampleCounts &
                                     info.framebufferDepthSampleCounts & color.sampleCounts &
                                     depth.sampleCounts;
 
-  backend_info->AAModes.clear();
-  backend_info->AAModes.emplace_back(1);
+  dest->AAModes.clear();
+  dest->AAModes.emplace_back(1);
   for (u32 samples = 2; samples <= 64; samples *= 2)
   {
     // VK_SAMPLE_COUNT_n_BIT has the value n.
     if (usable & samples)
-      backend_info->AAModes.emplace_back(samples);
+      dest->AAModes.emplace_back(samples);
   }
 }
 

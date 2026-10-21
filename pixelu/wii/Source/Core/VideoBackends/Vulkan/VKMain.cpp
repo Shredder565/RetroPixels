@@ -209,30 +209,30 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
     return false;
   }
 
-  // Built in this order on purpose: each one may use the ones before it.
-  auto gfx = std::make_unique<VKGfx>(std::move(swap_chain), wsi.render_surface_scale);
-  auto vertex_manager = std::make_unique<VertexManager>();
-  auto perf_query = std::make_unique<PerfQuery>();
-  auto bbox = std::make_unique<VKBoundingBox>();
-  return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
-                          std::move(bbox));
+  // Built one after another on purpose: each constructor may use the objects made before it.
+  std::unique_ptr<AbstractGfx> renderer =
+      std::make_unique<VKGfx>(std::move(swap_chain), wsi.render_surface_scale);
+  std::unique_ptr<VertexManagerBase> vertices = std::make_unique<VertexManager>();
+  std::unique_ptr<PerfQueryBase> queries = std::make_unique<PerfQuery>();
+  std::unique_ptr<BoundingBox> bounds = std::make_unique<VKBoundingBox>();
+  return InitializeShared(std::move(renderer), std::move(vertices), std::move(queries),
+                          std::move(bounds));
 }
 
 void VideoBackend::Shutdown()
 {
-  // Nothing may still be running on the GPU while objects are torn down.
-  if (g_vulkan_context)
+  // Let the GPU finish, and write out the pipeline cache, before VideoCommon lets go of its
+  // objects; then free the backend's own singletons, newest first.
+  if (g_vulkan_context != nullptr)
     vkDeviceWaitIdle(g_vulkan_context->GetDevice());
-
-  if (g_object_cache)
-    g_object_cache->Shutdown();
-
+  if (ObjectCache* const cache = g_object_cache.get())
+    cache->Shutdown();
   ShutdownShared();
 
-  g_object_cache.reset();
+  g_object_cache = nullptr;
   StateTracker::DestroyInstance();
-  g_command_buffer_mgr.reset();
-  g_vulkan_context.reset();
+  g_command_buffer_mgr = nullptr;
+  g_vulkan_context = nullptr;
   UnloadVulkanLibrary();
 }
 

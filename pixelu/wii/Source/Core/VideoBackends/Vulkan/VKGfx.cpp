@@ -87,57 +87,60 @@ VKGfx::VKGfx(std::unique_ptr<SwapChain> swap_chain, float backbuffer_scale)
 
 VKGfx::~VKGfx() = default;
 
-bool VKGfx::IsHeadless() const
+// Object factories: thin forwards to each object type's own Create.
+
+std::unique_ptr<AbstractTexture> VKGfx::CreateTexture(const TextureConfig& cfg,
+                                                      std::string_view label)
 {
-  return m_swap_chain == nullptr;
+  return VKTexture::Create(cfg, label);
 }
 
-std::unique_ptr<AbstractTexture> VKGfx::CreateTexture(const TextureConfig& config,
-                                                      std::string_view name)
+std::unique_ptr<AbstractStagingTexture> VKGfx::CreateStagingTexture(StagingTextureType kind,
+                                                                    const TextureConfig& cfg)
 {
-  return VKTexture::Create(config, name);
-}
-
-std::unique_ptr<AbstractStagingTexture> VKGfx::CreateStagingTexture(StagingTextureType type,
-                                                                    const TextureConfig& config)
-{
-  return VKStagingTexture::Create(type, config);
-}
-
-std::unique_ptr<AbstractShader>
-VKGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
-                              VideoCommon::ShaderIncluder* shader_includer, std::string_view name)
-{
-  return VKShader::CreateFromSource(stage, source, shader_includer, name);
-}
-
-std::unique_ptr<AbstractShader> VKGfx::CreateShaderFromBinary(ShaderStage stage, const void* data,
-                                                              size_t length, std::string_view name)
-{
-  return VKShader::CreateFromBinary(stage, data, length, name);
-}
-
-std::unique_ptr<NativeVertexFormat>
-VKGfx::CreateNativeVertexFormat(const PortableVertexDeclaration& vtx_decl)
-{
-  return std::make_unique<VertexFormat>(vtx_decl);
-}
-
-std::unique_ptr<AbstractPipeline> VKGfx::CreatePipeline(const AbstractPipelineConfig& config,
-                                                        const void* /*cache_data*/,
-                                                        size_t /*cache_data_length*/)
-{
-  // Pipeline binaries go through the VkPipelineCache instead.
-  return VKPipeline::Create(config);
+  return VKStagingTexture::Create(kind, cfg);
 }
 
 std::unique_ptr<AbstractFramebuffer>
-VKGfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                         std::vector<AbstractTexture*> additional_color_attachments)
+VKGfx::CreateFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                         std::vector<AbstractTexture*> extra_colors)
 {
-  return VKFramebuffer::Create(static_cast<VKTexture*>(color_attachment),
-                               static_cast<VKTexture*>(depth_attachment),
-                               std::move(additional_color_attachments));
+  auto* const vk_color = static_cast<VKTexture*>(color);
+  auto* const vk_depth = static_cast<VKTexture*>(depth);
+  return VKFramebuffer::Create(vk_color, vk_depth, std::move(extra_colors));
+}
+
+std::unique_ptr<AbstractShader> VKGfx::CreateShaderFromSource(ShaderStage stage,
+                                                              std::string_view text,
+                                                              VideoCommon::ShaderIncluder* includer,
+                                                              std::string_view label)
+{
+  return VKShader::CreateFromSource(stage, text, includer, label);
+}
+
+std::unique_ptr<AbstractShader> VKGfx::CreateShaderFromBinary(ShaderStage stage, const void* code,
+                                                              size_t code_size,
+                                                              std::string_view label)
+{
+  return VKShader::CreateFromBinary(stage, code, code_size, label);
+}
+
+std::unique_ptr<NativeVertexFormat>
+VKGfx::CreateNativeVertexFormat(const PortableVertexDeclaration& decl)
+{
+  return std::make_unique<VertexFormat>(decl);
+}
+
+// Pipeline binaries are not used; the VkPipelineCache covers that.
+std::unique_ptr<AbstractPipeline> VKGfx::CreatePipeline(const AbstractPipelineConfig& cfg,
+                                                        const void*, size_t)
+{
+  return VKPipeline::Create(cfg);
+}
+
+bool VKGfx::IsHeadless() const
+{
+  return !m_swap_chain;
 }
 
 void VKGfx::SetPipeline(const AbstractPipeline* pipeline)
