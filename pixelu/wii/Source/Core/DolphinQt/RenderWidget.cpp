@@ -164,8 +164,8 @@ QPaintEngine* RenderWidget::paintEngine() const
 
 void RenderWidget::dragEnterEvent(QDragEnterEvent* event)
 {
-  const QMimeData* const data = event->mimeData();
-  if (data->hasUrls() && data->urls().size() == 1)
+  const QMimeData* const mime = event->mimeData();
+  if (mime->hasUrls() && mime->urls().size() == 1)
     event->acceptProposedAction();
 }
 
