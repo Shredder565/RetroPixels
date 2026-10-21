@@ -1,7 +1,8 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <string>
 
 #include <QDockWidget>
 #include <QString>
@@ -29,6 +30,8 @@ class System;
 }
 class PPCSymbolDB;
 
+// The "Code" dock: the disassembly view plus searchable lists of the call stack, symbols, notes,
+// and the calls into and out of the function being viewed. Also hosts the stepping commands.
 class CodeWidget : public QDockWidget
 {
   Q_OBJECT
@@ -57,49 +60,53 @@ signals:
   void ShowMemory(u32 address);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void UpdateCallstack();
-  void UpdateFunctionCalls(const Common::Symbol* symbol);
-  void UpdateFunctionCallers(const Common::Symbol* symbol);
-  void UpdateNotes();
-
-  void OnShowDemangledNamesChanged();
-  void OnPPCSymbolsChanged();
-  void OnSearchAddress();
-  void OnSearchSymbols();
-  void OnSelectSymbol();
-  void OnSelectNote();
-  void OnSelectCallstack();
-  void OnSelectFunctionCallers();
-  void OnSelectFunctionCalls();
-
   void closeEvent(QCloseEvent*) override;
   void showEvent(QShowEvent* event) override;
 
-  const std::string& GetSymbolDisplayName(const Common::Symbol* symbol) const;
+  QWidget* BuildCodePane();
+  void BuildSidePanes();
+  QLineEdit* AddSidePane(const QString& title, QWidget* content);
+  void Wire();
+
+  void FollowPCUnlessLocked();
+  void DemangleSettingChanged();
+  void SymbolsChanged();
+  void JumpToTypedAddress();
+  void SymbolFilterChanged();
+  void JumpToSymbol();
+  void JumpToNote();
+  void JumpToListedAddress(const QListWidget* list);
+
+  [[nodiscard]] const Common::Symbol* SymbolAtView() const;
+  void RefreshCallstack();
+  void RefreshNotes();
+  void RefreshCalls(const Common::Symbol* symbol);
+  void RefreshCallers(const Common::Symbol* symbol);
+  [[nodiscard]] QString CallEntry(const Common::Symbol& target, u32 address) const;
+  [[nodiscard]] const std::string& DisplayName(const Common::Symbol& symbol) const;
 
   Core::System& m_system;
-  PPCSymbolDB& m_ppc_symbol_db;
-  bool m_show_demangled_names;
+  PPCSymbolDB& m_symbol_db;
+  bool m_demangle = false;
+  QString m_symbol_filter;
 
   BranchWatchDialog* m_branch_watch_dialog = nullptr;
-  QLineEdit* m_search_address;
-  QToolButton* m_lock_btn;
-  QPushButton* m_branch_watch;
 
-  QLineEdit* m_search_callstack;
-  QListWidget* m_callstack_list;
-  QLineEdit* m_search_symbols;
-  QListWidget* m_symbols_list;
-  QListWidget* m_note_list;
-  QLineEdit* m_search_calls;
-  QListWidget* m_function_calls_list;
-  QLineEdit* m_search_callers;
-  QListWidget* m_function_callers_list;
-  CodeViewWidget* m_code_view;
-  QSplitter* m_box_splitter;
-  QSplitter* m_code_splitter;
+  QLineEdit* m_address_box = nullptr;
+  QToolButton* m_lock_button = nullptr;
+  QPushButton* m_branch_watch_button = nullptr;
+  CodeViewWidget* m_code_view = nullptr;
 
-  QString m_symbol_filter;
+  QListWidget* m_callstack = nullptr;
+  QLineEdit* m_callstack_filter = nullptr;
+  QListWidget* m_symbols = nullptr;
+  QListWidget* m_notes = nullptr;
+  QLineEdit* m_symbols_filter = nullptr;
+  QListWidget* m_calls = nullptr;
+  QLineEdit* m_calls_filter = nullptr;
+  QListWidget* m_callers = nullptr;
+  QLineEdit* m_callers_filter = nullptr;
+
+  QSplitter* m_side_split = nullptr;
+  QSplitter* m_main_split = nullptr;
 };
