@@ -1,8 +1,8 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include <QFont>
@@ -33,7 +33,9 @@ class NetPlayServer;
 
 class InputConfig;
 
-// UI settings to be stored in the config directory.
+// The GUI's settings hub. Settings that only the Qt front end cares about live in Qt.ini in the
+// user's config folder (see GetQSettings); the rest are front-ends to the core's Config system.
+// Changes are announced through the signals below so every window can follow them.
 class Settings final : public QObject
 {
   Q_OBJECT
@@ -51,7 +53,7 @@ public:
   static Settings& Instance();
   static QSettings& GetQSettings();
 
-  // UI
+  // Look and feel
   void TriggerThemeChanged();
   void InitDefaultPalette();
   bool IsSystemDark();
@@ -77,7 +79,8 @@ public:
   void SetStyleType(StyleType type);
   StyleType GetStyleType() const;
 
-  // this evaluates the current stylesheet settings and refreshes the GUI with them
+  // Applies the configured style, palette and style sheet to the whole application. Has to wait
+  // until the main window exists.
   void ApplyStyle();
 
   void GetToolTipStyle(QColor& window_color, QColor& text_color, QColor& emphasis_text_color,
@@ -95,7 +98,7 @@ public:
 
   void RefreshWidgetVisibility();
 
-  // GameList
+  // Game list
   QStringList GetPaths() const;
   void AddPath(const QString& path);
   void RemovePath(const QString& path);
@@ -153,7 +156,7 @@ public:
   // Cheats
   bool GetCheatsEnabled() const;
 
-  // Debug
+  // Debugger
   void SetDebugModeEnabled(bool enabled);
   bool IsDebugModeEnabled() const;
   void SetRegistersVisible(bool enabled);
@@ -179,11 +182,11 @@ public:
   void SetShowDemangledNames(bool enabled);
   bool IsShowDemangledNames() const;
 
-  // Auto-Update
+  // Updates
   QString GetAutoUpdateTrack() const;
   void SetAutoUpdateTrack(const QString& mode);
 
-  // Fallback Region
+  // Region assumed for discs and titles that do not say
   DiscIO::Region GetFallbackRegion() const;
   void SetFallbackRegion(const DiscIO::Region& region);
 
@@ -238,15 +241,23 @@ signals:
 private:
   Settings();
 
-  bool m_batch = false;
-  std::atomic<bool> m_continuously_frame_stepping = false;
+  void WatchCoreState();
+  void WatchConfig();
+  void WatchInputDevices();
 
-  std::shared_ptr<NetPlay::NetPlayClient> m_client;
-  std::shared_ptr<NetPlay::NetPlayServer> m_server;
-  Common::EventHook m_hotplug_event_hook;
-  Config::ConfigChangedCallbackID m_config_changed_callback_id;
+  std::shared_ptr<NetPlay::NetPlayClient> m_netplay_client;
+  std::shared_ptr<NetPlay::NetPlayServer> m_netplay_server;
 
-  Common::EventHook m_core_state_changed_hook;
+  // Set from the command line (-b); never stored.
+  bool m_batch_mode = false;
+  // Written by the hotkey thread, read on the GUI thread.
+  std::atomic<bool> m_frame_stepping{false};
+  // Whether a ConfigChanged emission is already queued on the GUI thread.
+  std::atomic<bool> m_config_signal_pending{false};
+
+  Common::EventHook m_devices_hook;
+  Config::ConfigChangedCallbackID m_config_callback{};
+  Common::EventHook m_core_state_hook;
 };
 
 Q_DECLARE_METATYPE(Core::State);
