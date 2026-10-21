@@ -752,6 +752,21 @@ bool Gamepad::ReadBattery()
   return true;
 }
 
+std::string Gamepad::GetName() const
+{
+  return m_name;
+}
+
+std::string Gamepad::GetSource() const
+{
+  return "SDL";
+}
+
+SDL_JoystickID Gamepad::GetSDLInstanceID() const
+{
+  return SDL_GetJoystickID(m_joystick);
+}
+
 Gamepad::~Gamepad()
 {
   if (m_haptic != nullptr)
@@ -767,21 +782,6 @@ Gamepad::~Gamepad()
     SDL_CloseGamepad(m_gamepad);
   }
   SDL_CloseJoystick(m_joystick);
-}
-
-std::string Gamepad::GetName() const
-{
-  return m_name;
-}
-
-std::string Gamepad::GetSource() const
-{
-  return "SDL";
-}
-
-SDL_JoystickID Gamepad::GetSDLInstanceID() const
-{
-  return SDL_GetJoystickID(m_joystick);
 }
 
 Core::DeviceRemoval Gamepad::UpdateInput()

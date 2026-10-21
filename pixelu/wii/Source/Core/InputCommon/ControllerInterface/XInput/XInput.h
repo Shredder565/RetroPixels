@@ -1,10 +1,7 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// XInput suffers a similar issue as XAudio2. Since Win8, it is part of the OS.
-// However, unlike XAudio2 they have not made the API incompatible - so we just
-// compile against the latest version and fall back to dynamically loading the
-// old DLL.
+// XInput is part of Windows since Windows 8. It is used through the DLL of the SDK we build
+// with when present, else through the DirectX June 2010 redistributable's xinput1_3.dll.
 
 #pragma once
 
@@ -14,15 +11,18 @@
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 
 #ifndef XINPUT_DEVSUBTYPE_FLIGHT_STICK
-#error You are building this module against the wrong version of DirectX. You probably need to remove DXSDK_DIR from your include path and/or _WIN32_WINNT is wrong.
+#error This needs the Windows SDK's xinput.h: drop any DirectX SDK (DXSDK_DIR) from the include path and check _WIN32_WINNT.
 #endif
 
 namespace ciface::XInput
 {
+// Loads the XInput DLL (once).
 void Init();
+// Replaces the XInput devices with the controllers connected now (up to four).
 void PopulateDevices();
 void DeInit();
 
+// An XInput controller in one of the four user slots.
 class Device final : public Core::Device
 {
 public:
@@ -30,11 +30,13 @@ public:
 
   std::string GetName() const override;
   std::string GetSource() const override;
+  // The slot number.
   std::optional<int> GetPreferredId() const override;
   int GetSortPriority() const override { return -2; }
 
   Core::DeviceRemoval UpdateInput() override;
 
+  // Sends the motor speeds.
   void UpdateMotors();
 
 private:
