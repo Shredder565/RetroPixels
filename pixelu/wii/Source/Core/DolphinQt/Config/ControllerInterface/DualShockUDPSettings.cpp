@@ -1,5 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DualShockUDPSettings.h"
 
@@ -9,121 +8,102 @@
 #include "Common/StringUtil.h"
 #include "InputCommon/ControllerInterface/DualShockUDPClient/DualShockUDPClient.h"
 
+namespace DSU = ciface::DualShockUDPClient::Settings;
+
 namespace
 {
-std::string SerializeServer(DualShockUDPServer server)
+std::string Encode(const DualShockUDPServer& server)
 {
-  return fmt::format("{}{}{}{}{}{}", server.description, DualShockUDPSettings::FIELD_SEPARATOR,
-                     server.server_address, DualShockUDPSettings::FIELD_SEPARATOR,
-                     server.server_port, DualShockUDPSettings::SERVER_SEPARATOR);
+  using DualShockUDPSettings::FIELD_SEPARATOR;
+  using DualShockUDPSettings::SERVER_SEPARATOR;
+  return fmt::format("{}{}{}{}{}{}", server.description, FIELD_SEPARATOR, server.server_address,
+                     FIELD_SEPARATOR, server.server_port, SERVER_SEPARATOR);
 }
 
-void MigrateIfNeeded()
+// Older versions stored a single server in Address/Port. Move such a server
+// to the end of the list (named "DS4") and clear the old keys.
+void ImportLegacyServer()
 {
-  const auto server_address_setting =
-      Config::Get(ciface::DualShockUDPClient::Settings::SERVER_ADDRESS);
-  const auto server_port_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVER_PORT);
+  const std::string address = Config::Get(DSU::SERVER_ADDRESS);
+  const int port = Config::Get(DSU::SERVER_PORT);
+  if (address.empty() || port == 0)
+    return;
 
-  // Update our servers setting if the user is using old configuration
-  if (!server_address_setting.empty() && server_port_setting != 0)
+  const std::string list = Config::Get(DSU::SERVERS);
+  Config::SetBaseOrCurrent(DSU::SERVERS, list + Encode(DualShockUDPServer{"DS4", address, port}));
+  Config::SetBase(DSU::SERVER_ADDRESS, "");
+  Config::SetBase(DSU::SERVER_PORT, 0);
+}
+
+// The stored entries, split at the server separator. The text after the
+// last separator (normally empty) counts as an entry too.
+std::vector<std::string> StoredEntries()
+{
+  ImportLegacyServer();
+  return SplitString(Config::Get(DSU::SERVERS), DualShockUDPSettings::SERVER_SEPARATOR);
+}
+
+// Rebuilds the list from entries, each followed by a separator, with
+// the entry at `index` replaced by `replacement` (or dropped when there is
+// none).
+void StoreEntries(const std::vector<std::string>& entries, size_t index,
+                  const DualShockUDPServer* replacement)
+{
+  std::string list;
+  for (size_t i = 0; i < entries.size(); ++i)
   {
-    const auto& servers_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVERS);
-    Config::SetBaseOrCurrent(ciface::DualShockUDPClient::Settings::SERVERS,
-                             servers_setting +
-                                 SerializeServer(DualShockUDPServer("DS4", server_address_setting,
-                                                                    server_port_setting)));
-    Config::SetBase(ciface::DualShockUDPClient::Settings::SERVER_ADDRESS, "");
-    Config::SetBase(ciface::DualShockUDPClient::Settings::SERVER_PORT, 0);
+    if (i != index)
+      list += entries[i] + DualShockUDPSettings::SERVER_SEPARATOR;
+    else if (replacement != nullptr)
+      list += Encode(*replacement);
   }
+  Config::SetBaseOrCurrent(DSU::SERVERS, list);
 }
-}  // Anonymous namespace
+}  // namespace
 
 namespace DualShockUDPSettings
 {
 std::vector<DualShockUDPServer> GetServers()
 {
-  MigrateIfNeeded();
-
-  const auto& servers_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVERS);
-  const auto server_details = SplitString(servers_setting, SERVER_SEPARATOR);
-
-  std::vector<DualShockUDPServer> result;
-  for (const std::string& server_detail : server_details)
+  std::vector<DualShockUDPServer> servers;
+  for (const std::string& entry : StoredEntries())
   {
-    const auto server_info = SplitString(server_detail, FIELD_SEPARATOR);
-    if (server_info.size() < 3)
+    // Entries without description, address and port are skipped, as are
+    // ports that are not numbers.
+    const std::vector<std::string> fields = SplitString(entry, FIELD_SEPARATOR);
+    if (fields.size() < 3)
       continue;
-
     int port;
-    if (TryParse(server_info[2], &port))
-    {
-      result.push_back(DualShockUDPServer(server_info[0], server_info[1], port));
-    }
+    if (!TryParse(fields[2], &port))
+      continue;
+    servers.push_back(DualShockUDPServer{fields[0], fields[1], port});
   }
-
-  return result;
+  return servers;
 }
 
 void AddServer(DualShockUDPServer server)
 {
-  MigrateIfNeeded();
-
-  const auto& servers_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVERS);
-  Config::SetBaseOrCurrent(ciface::DualShockUDPClient::Settings::SERVERS,
-                           servers_setting + SerializeServer(server));
+  ImportLegacyServer();
+  Config::SetBaseOrCurrent(DSU::SERVERS, Config::Get(DSU::SERVERS) + Encode(server));
 }
 
 void ReplaceServer(size_t index, DualShockUDPServer server)
 {
-  MigrateIfNeeded();
-
-  const auto& servers_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVERS);
-  const auto server_details = SplitString(servers_setting, SERVER_SEPARATOR);
-
-  std::string new_servers_setting;
-  for (size_t i = 0; i < server_details.size(); i++)
-  {
-    if (i == index)
-    {
-      new_servers_setting += SerializeServer(server);
-    }
-    else
-    {
-      new_servers_setting += server_details[i] + SERVER_SEPARATOR;
-    }
-  }
-
-  Config::SetBaseOrCurrent(ciface::DualShockUDPClient::Settings::SERVERS, new_servers_setting);
+  StoreEntries(StoredEntries(), index, &server);
 }
 
 void RemoveServer(size_t index)
 {
-  MigrateIfNeeded();
-
-  const auto& servers_setting = Config::Get(ciface::DualShockUDPClient::Settings::SERVERS);
-  const auto server_details = SplitString(servers_setting, SERVER_SEPARATOR);
-
-  std::string new_servers_setting;
-  for (size_t i = 0; i < server_details.size(); i++)
-  {
-    if (i == index)
-    {
-      continue;
-    }
-
-    new_servers_setting += server_details[i] + SERVER_SEPARATOR;
-  }
-
-  Config::SetBaseOrCurrent(ciface::DualShockUDPClient::Settings::SERVERS, new_servers_setting);
+  StoreEntries(StoredEntries(), index, nullptr);
 }
 
 bool IsEnabled()
 {
-  return Config::Get(ciface::DualShockUDPClient::Settings::SERVERS_ENABLED);
+  return Config::Get(DSU::SERVERS_ENABLED);
 }
 
 void SetEnabled(bool enabled)
 {
-  Config::SetBaseOrCurrent(ciface::DualShockUDPClient::Settings::SERVERS_ENABLED, enabled);
+  Config::SetBaseOrCurrent(DSU::SERVERS_ENABLED, enabled);
 }
 }  // namespace DualShockUDPSettings

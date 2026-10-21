@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class DualShockUDPClientWidget;
 class QTabWidget;
 class QDialogButtonBox;
 
+// "Alternate Input Sources": settings of input backends that need some
+// (currently only the DSU client).
 class ControllerInterfaceWindow final : public QDialog
 {
   Q_OBJECT
@@ -20,8 +21,6 @@ public:
   explicit ControllerInterfaceWindow(QWidget* parent);
 
 private:
-  void CreateMainLayout();
-
   QTabWidget* m_tab_widget;
   QDialogButtonBox* m_button_box;
 

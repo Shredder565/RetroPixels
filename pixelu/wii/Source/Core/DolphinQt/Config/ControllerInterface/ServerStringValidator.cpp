@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ControllerInterface/ServerStringValidator.h"
 
@@ -11,16 +10,16 @@ ServerStringValidator::ServerStringValidator(QObject* parent) : QValidator(paren
 {
 }
 
-QValidator::State ServerStringValidator::validate(QString& input, int& pos) const
+QValidator::State ServerStringValidator::validate(QString& input, int&) const
 {
   if (input.isEmpty())
     return Invalid;
 
-  if (input.contains(QString::fromStdString(std::string{DualShockUDPSettings::FIELD_SEPARATOR})))
-    return Invalid;
-
-  if (input.contains(QString::fromStdString(std::string{DualShockUDPSettings::SERVER_SEPARATOR})))
-    return Invalid;
-
+  for (const char separator :
+       {DualShockUDPSettings::FIELD_SEPARATOR, DualShockUDPSettings::SERVER_SEPARATOR})
+  {
+    if (input.contains(QChar::fromLatin1(separator)))
+      return Invalid;
+  }
   return Acceptable;
 }

@@ -1,11 +1,11 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <string>
 #include <vector>
 
+// One DSU (cemuhook protocol) server the client connects to.
 struct DualShockUDPServer
 {
   std::string description;
@@ -13,6 +13,8 @@ struct DualShockUDPServer
   int server_port;
 };
 
+// The DSU server list as stored in the DSUClient "Entries" setting:
+// "description:address:port;" per server.
 namespace DualShockUDPSettings
 {
 constexpr char FIELD_SEPARATOR = ':';

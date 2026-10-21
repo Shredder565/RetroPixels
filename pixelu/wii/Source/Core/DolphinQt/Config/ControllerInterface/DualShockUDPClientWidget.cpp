@@ -1,7 +1,8 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ControllerInterface/DualShockUDPClientWidget.h"
+
+#include <optional>
 
 #include <fmt/format.h>
 
@@ -17,115 +18,84 @@
 
 DualShockUDPClientWidget::DualShockUDPClientWidget()
 {
-  CreateWidgets();
-  ConnectWidgets();
-}
-
-void DualShockUDPClientWidget::CreateWidgets()
-{
-  auto* main_layout = new QVBoxLayout;
+  auto* const column = new QVBoxLayout;
 
   m_servers_enabled = new QCheckBox(tr("Enable"));
   m_servers_enabled->setChecked(DualShockUDPSettings::IsEnabled());
-  main_layout->addWidget(m_servers_enabled, 0, {});
+  column->addWidget(m_servers_enabled, 0, {});
 
   m_server_list = new QListWidget();
-  main_layout->addWidget(m_server_list);
+  column->addWidget(m_server_list);
 
   m_add_server = new NonDefaultQPushButton(tr("Add..."));
   m_edit_server = new NonDefaultQPushButton(tr("Edit"));
   m_remove_server = new NonDefaultQPushButton(tr("Remove"));
 
-  QHBoxLayout* hlayout = new QHBoxLayout;
-  hlayout->addStretch();
-  hlayout->addWidget(m_add_server);
-  hlayout->addWidget(m_edit_server);
-  hlayout->addWidget(m_remove_server);
+  auto* const buttons = new QHBoxLayout;
+  buttons->addStretch();
+  for (QPushButton* const button : {m_add_server, m_edit_server, m_remove_server})
+    buttons->addWidget(button);
+  column->addItem(buttons);
 
-  main_layout->addItem(hlayout);
+  auto* const about = new QLabel(
+      tr("The DSU protocol enables the use of input and motion data from compatible sources, "
+         "like PlayStation, Nintendo Switch and Steam controllers.<br><br>"
+         "For setup instructions, "
+         "<a href=\"https://wiki.dolphin-emu.org/index.php?title=DSU_Client\">refer to this "
+         "page</a>."));
+  about->setTextFormat(Qt::RichText);
+  about->setWordWrap(true);
+  about->setTextInteractionFlags(Qt::TextBrowserInteraction);
+  about->setOpenExternalLinks(true);
+  column->addWidget(about);
 
-  auto* description =
-      new QLabel(tr("The DSU protocol enables the use of input and motion data from compatible "
-                    "sources, like PlayStation, Nintendo Switch and Steam controllers.<br><br>"
-                    "For setup instructions, "
-                    "<a href=\"https://wiki.dolphin-emu.org/index.php?title=DSU_Client\">"
-                    "refer to this page</a>."));
-  description->setTextFormat(Qt::RichText);
-  description->setWordWrap(true);
-  description->setTextInteractionFlags(Qt::TextBrowserInteraction);
-  description->setOpenExternalLinks(true);
-  main_layout->addWidget(description);
+  setLayout(column);
+  ReloadServers();
 
-  setLayout(main_layout);
-
-  RefreshServerList();
-}
-
-void DualShockUDPClientWidget::ConnectWidgets()
-{
-  connect(m_add_server, &QPushButton::clicked, this, &DualShockUDPClientWidget::OnServerAdded);
-  connect(m_edit_server, &QPushButton::clicked, this, &DualShockUDPClientWidget::OnServerEdited);
-  connect(m_remove_server, &QPushButton::clicked, this, &DualShockUDPClientWidget::OnServerRemoved);
+  connect(m_add_server, &QPushButton::clicked, this, [this] { EditServer(false); });
+  connect(m_edit_server, &QPushButton::clicked, this, [this] { EditServer(true); });
+  connect(m_remove_server, &QPushButton::clicked, this,
+          &DualShockUDPClientWidget::RemoveSelectedServer);
   connect(m_server_list, &QListWidget::currentRowChanged, this,
-          &DualShockUDPClientWidget::OnServerSelection);
+          &DualShockUDPClientWidget::RefreshButtons);
   connect(m_servers_enabled, &QCheckBox::clicked, this,
-          &DualShockUDPClientWidget::OnServersToggled);
+          [this] { DualShockUDPSettings::SetEnabled(m_servers_enabled->isChecked()); });
 }
 
-void DualShockUDPClientWidget::SetButtonEnableStates()
+// Edit and Remove act on the selected server.
+void DualShockUDPClientWidget::RefreshButtons()
 {
-  const bool has_selection = m_server_list->currentRow() != -1;
-  m_edit_server->setEnabled(has_selection);
-  m_remove_server->setEnabled(has_selection);
+  const bool selected = m_server_list->currentRow() != -1;
+  m_edit_server->setEnabled(selected);
+  m_remove_server->setEnabled(selected);
 }
 
-void DualShockUDPClientWidget::RefreshServerList()
+void DualShockUDPClientWidget::ReloadServers()
 {
   m_server_list->clear();
-
-  for (const auto& server : DualShockUDPSettings::GetServers())
+  for (const DualShockUDPServer& server : DualShockUDPSettings::GetServers())
   {
-    QListWidgetItem* list_item = new QListWidgetItem(QString::fromStdString(
-        fmt::format("{}:{} - {}", server.description, server.server_address, server.server_port)));
-    m_server_list->addItem(list_item);
+    const std::string line =
+        fmt::format("{}:{} - {}", server.description, server.server_address, server.server_port);
+    m_server_list->addItem(new QListWidgetItem(QString::fromStdString(line)));
   }
-
-  SetButtonEnableStates();
-
+  RefreshButtons();
   emit ConfigChanged();
 }
 
-void DualShockUDPClientWidget::OnServerAdded()
+void DualShockUDPClientWidget::EditServer(bool existing)
 {
-  DualShockUDPClientEditServerDialog add_server_dialog(this, std::nullopt);
-  connect(&add_server_dialog, &DualShockUDPClientEditServerDialog::accepted, this,
-          &DualShockUDPClientWidget::RefreshServerList);
-  add_server_dialog.exec();
+  std::optional<size_t> index;
+  if (existing)
+    index = static_cast<size_t>(m_server_list->currentRow());
+  DualShockUDPClientEditServerDialog dialog(this, index);
+  connect(&dialog, &DualShockUDPClientEditServerDialog::accepted, this,
+          &DualShockUDPClientWidget::ReloadServers);
+  dialog.exec();
 }
 
-void DualShockUDPClientWidget::OnServerEdited()
+void DualShockUDPClientWidget::RemoveSelectedServer()
 {
-  DualShockUDPClientEditServerDialog edit_server_dialog(this, m_server_list->currentRow());
-  connect(&edit_server_dialog, &DualShockUDPClientEditServerDialog::accepted, this,
-          &DualShockUDPClientWidget::RefreshServerList);
-  edit_server_dialog.exec();
-}
-
-void DualShockUDPClientWidget::OnServerRemoved()
-{
-  const int row_to_remove = m_server_list->currentRow();
-
-  DualShockUDPSettings::RemoveServer(row_to_remove);
-
-  RefreshServerList();
-}
-
-void DualShockUDPClientWidget::OnServerSelection()
-{
-  SetButtonEnableStates();
-}
-
-void DualShockUDPClientWidget::OnServersToggled()
-{
-  DualShockUDPSettings::SetEnabled(m_servers_enabled->isChecked());
+  DualShockUDPSettings::RemoveServer(static_cast<size_t>(m_server_list->currentRow()));
+  ReloadServers();
 }

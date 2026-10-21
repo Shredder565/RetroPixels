@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@ class QCheckBox;
 class QListWidget;
 class QPushButton;
 
+// The DSU Client tab: the enable switch and the server list.
 class DualShockUDPClientWidget final : public QWidget
 {
   Q_OBJECT
@@ -17,21 +17,14 @@ public:
   explicit DualShockUDPClientWidget();
 
 signals:
-  // Emitted when config has changed so widgets can update to reflect the change.
+  // The server list was reloaded after a change.
   void ConfigChanged();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-
-  void SetButtonEnableStates();
-  void RefreshServerList();
-
-  void OnServerAdded();
-  void OnServerEdited();
-  void OnServerRemoved();
-  void OnServerSelection();
-  void OnServersToggled();
+  void ReloadServers();
+  void RefreshButtons();
+  void EditServer(bool existing);
+  void RemoveSelectedServer();
 
   QCheckBox* m_servers_enabled;
   QListWidget* m_server_list;

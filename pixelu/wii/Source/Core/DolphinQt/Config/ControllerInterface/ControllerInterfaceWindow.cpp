@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ControllerInterface/ControllerInterfaceWindow.h"
 
@@ -14,32 +13,27 @@
 
 ControllerInterfaceWindow::ControllerInterfaceWindow(QWidget* parent) : QDialog(parent)
 {
-  CreateMainLayout();
-
-  setWindowTitle(tr("Alternate Input Sources"));
-}
-
-void ControllerInterfaceWindow::CreateMainLayout()
-{
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
   connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
   m_tab_widget = new QTabWidget();
 #if defined(CIFACE_USE_DUALSHOCKUDPCLIENT)
   m_dsuclient_widget = new DualShockUDPClientWidget();
-  m_tab_widget->addTab(m_dsuclient_widget, tr("DSU Client"));  // TODO: use GetWrappedWidget()?
+  m_tab_widget->addTab(m_dsuclient_widget, tr("DSU Client"));
 #endif
 
-  auto* main_layout = new QVBoxLayout();
-  if (m_tab_widget->count() > 0)
+  auto* const column = new QVBoxLayout();
+  if (m_tab_widget->count() == 0)
   {
-    main_layout->addWidget(m_tab_widget);
+    column->addWidget(new QLabel(tr("Nothing to configure")), 0,
+                      Qt::AlignVCenter | Qt::AlignHCenter);
   }
   else
   {
-    main_layout->addWidget(new QLabel(tr("Nothing to configure")), 0,
-                           Qt::AlignVCenter | Qt::AlignHCenter);
+    column->addWidget(m_tab_widget);
   }
-  main_layout->addWidget(m_button_box);
-  setLayout(main_layout);
+  column->addWidget(m_button_box);
+  setLayout(column);
+
+  setWindowTitle(tr("Alternate Input Sources"));
 }
