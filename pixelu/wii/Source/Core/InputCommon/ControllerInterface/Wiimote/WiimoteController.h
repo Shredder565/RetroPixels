@@ -1,34 +1,42 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <list>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string>
 #include <vector>
 
 #include "Core/HW/WiimoteCommon/DataReport.h"
 #include "Core/HW/WiimoteCommon/WiimoteReport.h"
-#include "Core/HW/WiimoteEmu/Camera.h"
 #include "Core/HW/WiimoteEmu/Extension/Classic.h"
 #include "Core/HW/WiimoteEmu/Extension/Nunchuk.h"
+#include "Core/HW/WiimoteEmu/ExtensionPort.h"
 #include "Core/HW/WiimoteEmu/MotionPlus.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
+// Real Wii Remotes used directly as input devices (source "Bluetooth"), outside of the emulated
+// Wii Remote slots. The device drives the remote itself: it sets up reporting, the IR camera,
+// the MotionPlus and extensions, and turns the reports into inputs.
 namespace ciface::WiimoteController
 {
-using namespace WiimoteCommon;
-
+// Connects a remote taken from the real Wii Remote pool and adds it as a device.
 void AddDevice(std::unique_ptr<WiimoteReal::Wiimote>);
+// Removes up to `count` of these devices (all with nullopt) right away; their remotes go back
+// to the pool.
 void ReleaseDevices(std::optional<u32> count = std::nullopt);
 
 class Device final : public Core::Device
 {
 public:
-  Device(std::unique_ptr<WiimoteReal::Wiimote> wiimote);
+  explicit Device(std::unique_ptr<WiimoteReal::Wiimote> wiimote);
   ~Device() override;
 
   std::string GetName() const override;
@@ -39,248 +47,185 @@ public:
 
 private:
   using Clock = std::chrono::steady_clock;
+  using PassthroughMode = WiimoteEmu::MotionPlus::PassthroughMode;
 
-  enum class ExtensionID
+  // Memory read result: the bytes, or nullopt when the remote refused.
+  using ReadResult = std::optional<std::vector<u8>>;
+  using ReadCallback = std::function<void(ReadResult)>;
+  using AckCallback = std::function<void(WiimoteCommon::ErrorCode)>;
+  // Looks at an incoming report; returns true if it was the awaited reply and is now used up.
+  using ReplyMatcher = std::function<bool(const WiimoteReal::Report&)>;
+
+  // What sits on the extension port (or on the MotionPlus pass-through port).
+  enum class Extension
   {
     Nunchuk,
     Classic,
     Unsupported,
   };
 
-  enum class Checksum
+  // One reply the remote owes us. The first matcher that accepts a report consumes the entry.
+  struct PendingReply
   {
-    Good,
-    Bad,
+    Clock::time_point give_up_at;
+    std::vector<ReplyMatcher> matchers;
   };
 
-  class MotionPlusState
+  struct MotionPlusInfo
   {
-  public:
-    void SetCalibrationData(const WiimoteEmu::MotionPlus::CalibrationData&);
-    void ProcessData(const WiimoteEmu::MotionPlus::DataFormat&);
-
-    using PassthroughMode = WiimoteEmu::MotionPlus::PassthroughMode;
-
-    // State is unknown by default.
-    std::optional<PassthroughMode> current_mode;
-
-    // The last known state of the passthrough port flag.
-    // Used to detect passthrough extension port events.
-    std::optional<bool> passthrough_port;
-
-    Common::Vec3 gyro_data = {};
-
+    // Unknown until read back; PassthroughMode{} means the MotionPlus is not active.
+    std::optional<PassthroughMode> mode;
+    // Last seen "extension connected" flag of MotionPlus data, for detecting changes.
+    std::optional<bool> passthrough_connected;
     std::optional<WiimoteEmu::MotionPlus::CalibrationBlocks> calibration;
+    Common::Vec3 angular_velocity{};
   };
 
-  struct NunchukState
+  struct NunchukInfo
   {
-    using CalibrationData = WiimoteEmu::Nunchuk::CalibrationData;
+    struct Calibration
+    {
+      WiimoteEmu::Nunchuk::CalibrationData::AccelCalibration accel;
+      WiimoteEmu::Nunchuk::CalibrationData::StickCalibration stick;
+    };
 
-    void SetCalibrationData(const CalibrationData&, Checksum);
-    void ProcessData(const WiimoteEmu::Nunchuk::DataFormat&);
-
-    Common::Vec2 stick = {};
-    Common::Vec3 accel = {};
-
+    std::optional<Calibration> calibration;
+    Common::Vec2 stick{};
+    Common::Vec3 accel{};
     u8 buttons = 0;
+  };
 
+  struct ClassicInfo
+  {
     struct Calibration
     {
-      Calibration();
-
-      CalibrationData::AccelCalibration accel;
-      CalibrationData::StickCalibration stick;
+      WiimoteEmu::Classic::CalibrationData::StickCalibration left_stick;
+      WiimoteEmu::Classic::CalibrationData::StickCalibration right_stick;
+      WiimoteEmu::Classic::CalibrationData::TriggerCalibration left_trigger;
+      WiimoteEmu::Classic::CalibrationData::TriggerCalibration right_trigger;
     };
 
     std::optional<Calibration> calibration;
-  };
-
-  struct ClassicState
-  {
-    using CalibrationData = WiimoteEmu::Classic::CalibrationData;
-
-    void SetCalibrationData(const CalibrationData&, Checksum);
-    void ProcessData(const WiimoteEmu::Classic::DataFormat&);
-
-    std::array<Common::Vec2, 2> sticks = {};
-    std::array<float, 2> triggers = {};
-
+    std::array<Common::Vec2, 2> sticks{};
+    std::array<float, 2> triggers{};
     u16 buttons = 0;
-
-    struct Calibration
-    {
-      Calibration();
-
-      CalibrationData::StickCalibration left_stick;
-      CalibrationData::StickCalibration right_stick;
-
-      CalibrationData::TriggerCalibration left_trigger;
-      CalibrationData::TriggerCalibration right_trigger;
-    };
-
-    std::optional<Calibration> calibration;
   };
 
-  struct IRState
+  struct CameraInfo
   {
-    static u32 GetDesiredIRSensitivity();
-
-    void ProcessData(const DataReportManipulator& manipulator);
-    bool IsFullyConfigured() const;
-
-    u32 current_sensitivity = u32(-1);
+    // Applied sensitivity level (0-4); u32(-1) until one is written.
+    u32 sensitivity = u32(-1);
     bool enabled = false;
     bool mode_set = false;
 
-    // Average of visible IR "objects".
-    Common::Vec2 center_position = {};
-
+    // Mean of the visible objects, -1 to 1 on each axis.
+    Common::Vec2 center{};
     float distance = 0;
+    bool hidden = true;
 
-    bool is_hidden = true;
-
-    std::array<Common::Vec2, 4> raw_ir_object_position;
-    std::array<float, 4> raw_ir_object_size;
+    std::array<Common::Vec2, 4> object_position{};
+    std::array<float, 4> object_size{};
   };
 
-  class ReportHandler
-  {
-  public:
-    enum class HandlerResult
-    {
-      Handled,
-      NotHandled,
-    };
+  // Report traffic.
+  template <typename R>
+  void Send(R report, AckCallback on_ack = {});
+  void Await(std::vector<ReplyMatcher> matchers);
+  void ReadMemory(WiimoteCommon::AddressSpace, u8 slave, u16 address, u16 size, ReadCallback);
+  void AwaitReadReply(u16 address, u16 size, std::vector<u8> collected, ReadCallback);
+  void WriteMemory(WiimoteCommon::AddressSpace, u8 slave, u16 address, std::span<const u8> bytes,
+                   AckCallback on_done);
+  void WriteByte(WiimoteCommon::AddressSpace, u8 slave, u16 address, u8 value, AckCallback on_done);
 
-    ReportHandler(Clock::time_point expired_time);
-
-    template <typename R, typename T>
-    void AddHandler(std::function<R(const T&)>);
-
-    HandlerResult TryToHandleReport(const WiimoteReal::Report& report);
-
-    bool IsExpired() const;
-
-  private:
-    const Clock::time_point m_expired_time;
-    std::vector<std::function<HandlerResult(const WiimoteReal::Report& report)>> m_callbacks;
-  };
-
-  using AckReportHandler = std::function<ReportHandler::HandlerResult(const InputReportAck& reply)>;
-
-  static AckReportHandler MakeAckHandler(OutputReportID report_id,
-                                         std::function<void(WiimoteCommon::ErrorCode)> callback);
-
-  // TODO: Make parameter const. (need to modify DataReportManipulator)
-  void ProcessInputReport(WiimoteReal::Report& report);
-  void ProcessMotionPlusExtensionData(const u8* data, u32 size);
-  void ProcessNormalExtensionData(const u8* data, u32 size);
-  void ProcessExtensionEvent(bool connected);
-  void ProcessExtensionID(u8 id_0, u8 id_4, u8 id_5);
-  void ProcessStatusReport(const InputReportStatus&);
-
+  // The set-up steps RunTasks() goes through; each returns true when RunTasks must stop there.
   void RunTasks();
+  bool RequestStatusIfStale();
+  bool SetPlayerLeds();
+  bool SetReportingMode();
+  bool ReadAccelerometerCalibration();
+  bool SetUpCamera();
+  bool SilenceSpeaker();
+  bool WaitingForMotionPlus() const;
+  bool IdentifyActiveExtension();
+  bool ResetUnsupportedExtension();
+  bool PublishAttachments();
+  bool WakeInactiveMotionPlus();
+  bool SwitchActiveMotionPlusMode();
+  bool IdentifyPassthroughExtension();
+  bool SettleMotionPlusMode();
+  bool ReadMotionPlusCalibration();
+  bool ReadExtensionCalibration();
+  void ApplyNunchukCalibration(const WiimoteEmu::Nunchuk::CalibrationData&, bool trusted);
+  void ApplyClassicCalibration(const WiimoteEmu::Classic::CalibrationData&, bool trusted);
 
-  bool IsPerformingTask() const;
+  void WriteCameraSensitivity(u32 level);
+  void ChangeMotionPlusMode();
+  void OnMotionPlusSilent();
+  void HoldOffMotionPlus();
+  void OnExtensionIdentified(u8 id_0, u8 id_4, u8 id_5);
+  void OnExtensionPortChange(bool connected);
+  void OnStatus(const WiimoteCommon::InputReportStatus&);
+  u8 PlayerLeds() const;
 
-  template <typename T>
-  void QueueReport(T&& report, std::function<void(ErrorCode)> ack_callback = {});
+  bool MotionPlusKnown() const;
+  bool MotionPlusActive() const;
+  bool MotionPlusInDesiredMode() const;
 
-  template <typename... T>
-  void AddReportHandler(T&&... callbacks);
-
-  using ReadResponse = std::optional<std::vector<u8>>;
-
-  void ReadData(AddressSpace space, u8 slave, u16 address, u16 size,
-                std::function<void(ReadResponse)> callback);
-
-  void AddReadDataReplyHandler(AddressSpace space, u8 slave, u16 address, u16 size,
-                               std::vector<u8> starting_data,
-                               std::function<void(ReadResponse)> callback);
-
-  template <typename T = std::initializer_list<u8>, typename C>
-  void WriteData(AddressSpace space, u8 slave, u16 address, T&& data, C&& callback);
-
-  void ReadActiveExtensionID();
-  void SetIRSensitivity(u32 level);
-  void ConfigureSpeaker();
-  void ConfigureIRCamera();
-
-  u8 GetDesiredLEDValue() const;
-
-  void TriggerMotionPlusModeChange();
-  void TriggerMotionPlusCalibration();
-
-  bool IsMotionPlusStateKnown() const;
-  bool IsMotionPlusActive() const;
-  bool IsMotionPlusInDesiredMode() const;
-
-  bool IsWaitingForMotionPlus() const;
-  void WaitForMotionPlus();
-  void HandleMotionPlusNonResponse();
-
-  void UpdateRumble();
+  // Incoming data.
+  void HandleReport(WiimoteReal::Report& report);
+  void ReadCamera(const WiimoteCommon::DataReportManipulator&);
+  void ReadMotionPlusData(const u8* bytes, u32 size);
+  void ReadExtensionData(const u8* bytes, u32 size);
   void UpdateOrientation();
-  void UpdateExtensionNumberInput();
+  void UpdateRumble();
 
   std::unique_ptr<WiimoteReal::Wiimote> m_wiimote;
 
-  // Buttons.
-  DataReportManipulator::CoreData m_core_data = {};
+  WiimoteCommon::DataReportManipulator::CoreData m_buttons{};
+  Common::Vec3 m_accel{};
+  std::optional<WiimoteCommon::AccelCalibrationData::Calibration> m_accel_calibration;
+  // Pitch, roll and yaw, as fractions of half a turn.
+  Common::Vec3 m_rotation{};
 
-  // Accelerometer.
-  Common::Vec3 m_accel_data = {};
-  std::optional<AccelCalibrationData::Calibration> m_accel_calibration;
+  MotionPlusInfo m_motion_plus{};
+  NunchukInfo m_nunchuk{};
+  ClassicInfo m_classic{};
+  CameraInfo m_camera{};
 
-  // Pitch, Roll, Yaw inputs.
-  Common::Vec3 m_rotation_inputs = {};
+  // MotionPlus work waits until this time (the MotionPlus resets after a mode change).
+  Clock::time_point m_motion_plus_hold_until = Clock::now();
+  // Mode wanted for the MotionPlus, from the extension behind it.
+  std::optional<PassthroughMode> m_motion_plus_wanted;
 
-  MotionPlusState m_mplus_state = {};
-  NunchukState m_nunchuk_state = {};
-  ClassicState m_classic_state = {};
-  IRState m_ir_state = {};
-
-  // Used to poll for M+ periodically and wait for it to reset.
-  Clock::time_point m_mplus_wait_time = Clock::now();
-
-  // The desired mode is set based on the attached normal extension.
-  std::optional<MotionPlusState::PassthroughMode> m_mplus_desired_mode;
-
-  // Status report is requested every so often to update the battery level.
-  Clock::time_point m_status_outdated_time = Clock::now();
+  // A status report is asked for when this time passes (keeps the battery level fresh).
+  Clock::time_point m_status_due = Clock::now();
   float m_battery = 0;
   u8 m_leds = 0;
+  bool m_speaker_silenced = false;
 
-  bool m_speaker_configured = false;
-
-  // The last known state of the extension port status flag.
-  // Used to detect extension port events.
+  // Last seen extension port flag.
   std::optional<bool> m_extension_port;
+  // The extension in use (the pass-through one while the MotionPlus is active).
+  std::optional<Extension> m_extension;
 
-  // Note this refers to the passthrough extension when M+ is active.
-  std::optional<ExtensionID> m_extension_id;
-
-  // Rumble state must be saved to set the proper flag in every output report.
+  // Motor state; every output report carries it.
   bool m_rumble = false;
+  // Requested strength, done by switching the motor on and off.
+  std::atomic<ControlState> m_rumble_strength{};
+  Clock::time_point m_rumble_toggled_at = Clock::now();
 
-  // For pulse of rumble motor to simulate multiple levels.
-  std::atomic<ControlState> m_rumble_level;
-  Clock::time_point m_last_rumble_change = Clock::now();
+  // Starts disabled so that a mode is always set.
+  WiimoteCommon::InputReportID m_reporting_mode = WiimoteCommon::InputReportID::ReportDisabled;
 
-  // Assume mode is disabled so one gets set.
-  InputReportID m_reporting_mode = InputReportID::ReportDisabled;
+  // Values for the "Attached Extension" and "Attached MotionPlus" inputs.
+  WiimoteEmu::ExtensionNumber m_attached_extension = WiimoteEmu::ExtensionNumber::NONE;
+  bool m_attached_motion_plus = false;
 
-  // Used only to provide a value for a specialty "input". (for attached extension passthrough)
-  WiimoteEmu::ExtensionNumber m_extension_number_input = WiimoteEmu::ExtensionNumber::NONE;
-  bool m_mplus_attached_input = false;
+  std::list<PendingReply> m_pending_replies;
 
-  // Holds callbacks for output report replies.
-  std::list<ReportHandler> m_report_handlers;
-
-  // World rotation. (used to rotate IR data and provide pitch, roll, yaw inputs)
+  // Orientation of the world relative to the remote.
   Common::Quaternion m_orientation = Common::Quaternion::Identity();
-  Clock::time_point m_last_report_time = Clock::now();
+  Clock::time_point m_last_report_at = Clock::now();
 };
 
 }  // namespace ciface::WiimoteController
