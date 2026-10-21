@@ -15,10 +15,13 @@
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "InputCommon/ControllerInterface/InputBackend.h"
 
-// Which input backends this build has. PixelU-Wii is built for Windows only; the other platform
-// backends were removed from the tree.
+// Which input backends this build has: on Windows the Win32 one, on Linux XInput2 for the
+// keyboard and mouse (when built with X11); SDL, DSU and the Steam Deck on both.
 #ifdef _WIN32
 #define CIFACE_USE_WIN32
+#endif
+#if defined(HAVE_X11) && HAVE_X11
+#define CIFACE_USE_XLIB
 #endif
 #define CIFACE_USE_DUALSHOCKUDPCLIENT
 #if defined(HAVE_SDL3)

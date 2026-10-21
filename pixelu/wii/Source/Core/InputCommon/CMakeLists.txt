@@ -1,5 +1,6 @@
 # InputCommon: controller configuration and the input backends (DirectInput,
-# XInput, Windows.Gaming.Input, keyboard and mouse, SDL, DSU, the GameCube adapter).
+# XInput, Windows.Gaming.Input and keyboard and mouse on Windows; XInput2 keyboard and
+# mouse on Linux; SDL, DSU, the GameCube adapter).
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 pixelu_library(inputcommon
@@ -58,6 +59,26 @@ if(WIN32)
     IN ControllerInterface/XInput
       XInput.cpp XInput.h
   )
+endif()
+
+if(NOT WIN32)
+  # Keyboard and mouse on X11 (and XWayland): the XInput2 backend. libX11 and libXi are
+  # on every X11 desktop; building needs libx11-dev and libxi-dev.
+  option(ENABLE_X11 "X11 support (keyboard and mouse input through XInput2)" ON)
+  if(ENABLE_X11)
+    find_package(X11)
+    if(NOT X11_FOUND OR NOT X11_Xi_FOUND)
+      message(FATAL_ERROR "X11 keyboard and mouse input needs Xlib and XInput2 (libx11-dev, "
+        "libxi-dev; Fedora: libX11-devel, libXi-devel), or configure with -DENABLE_X11=OFF.")
+    endif()
+    pixelu_add_sources(inputcommon
+      IN ControllerInterface/Xlib
+        XInput2.cpp XInput2.h
+    )
+    target_link_libraries(inputcommon PRIVATE X11::X11 X11::Xi)
+    # Public: the emulated controllers' default mappings use the X11 key and button names.
+    target_compile_definitions(inputcommon PUBLIC HAVE_X11=1)
+  endif()
 endif()
 
 if(ENABLE_SDL)

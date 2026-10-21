@@ -11,6 +11,9 @@
 #ifdef CIFACE_USE_WIN32
 #include "InputCommon/ControllerInterface/Win32/Win32.h"
 #endif
+#ifdef CIFACE_USE_XLIB
+#include "InputCommon/ControllerInterface/Xlib/XInput2.h"
+#endif
 #ifdef CIFACE_USE_SDL
 #include "InputCommon/ControllerInterface/SDL/SDL.h"
 #endif
@@ -59,6 +62,9 @@ void ControllerInterface::Initialize(const WindowSystemInfo& wsi)
   // Backends are created (and later polled) in this order.
 #ifdef CIFACE_USE_WIN32
   m_backends.push_back(ciface::Win32::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_XLIB
+  m_backends.push_back(ciface::XInput2::CreateInputBackend(this));
 #endif
 #ifdef CIFACE_USE_SDL
   m_backends.push_back(ciface::SDL::CreateInputBackend(this));
