@@ -858,7 +858,6 @@ wxPanel* GeneralSettings2::AddAccountPage(wxNotebook* notebook)
 		row->Add(m_online_status, 1, wxALL | wxALIGN_CENTRE_VERTICAL, 5);
 		section->Add(row, 1, wxEXPAND, 5);
 
-		section->Add(new wxHyperlinkCtrl(box, wxID_ANY, _("Online play tutorial"), "https://cemu.info/online-guide"), 0, wxALL, 5);
 		column->Add(section, 0, wxEXPAND | wxALL, 5);
 	}
 

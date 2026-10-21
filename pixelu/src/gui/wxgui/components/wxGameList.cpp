@@ -125,7 +125,6 @@ namespace
 	enum
 	{
 		ID_GAME_START = wxID_HIGHEST + 1,
-		ID_GAME_WIKI,
 		ID_GAME_FAVORITE,
 		ID_GAME_RENAME,
 		ID_GAME_DIR,
@@ -1005,7 +1004,6 @@ void wxGameList::OnContextMenu(wxContextMenuEvent& /*event*/)
 			menu.AppendCheckItem(ID_GAME_FAVORITE, _("&Favorite"))->Check(GetConfig().IsGameListFavorite(titleId));
 			menu.Append(ID_GAME_RENAME, _("&Edit name"));
 			menu.AppendSeparator();
-			menu.Append(ID_GAME_WIKI, _("&Wiki page"));
 			menu.Append(ID_GAME_DIR, _("&Game directory"));
 			menu.Append(ID_GAME_SAVE_DIR, _("&Save directory"))->Enable(fs::is_directory(game.GetSaveFolder(), ec));
 			menu.Append(ID_GAME_UPDATE_DIR, _("&Update directory"))->Enable(game.HasUpdate());
@@ -1081,18 +1079,6 @@ void wxGameList::OnGameCommand(int id, uint64 titleId)
 	}
 	case ID_GAME_DIR:
 		OpenFolder(FolderOf(game.GetBase().GetPath()));
-		break;
-	case ID_GAME_WIKI:
-		// community wiki pages are named after the product code's last part plus the company code's last two characters
-		if (game.GetBase().ParseXmlInfo())
-		{
-			const std::string productCode = game.GetBase().GetMetaInfo()->GetProductCode();
-			const auto parts = TokenizeView(productCode, '-');
-			wxASSERT(!parts.empty());
-			const std::string company = game.GetBase().GetMetaInfo()->GetCompanyCode();
-			wxASSERT(company.size() >= 2);
-			wxLaunchDefaultBrowser(formatWxString("https://wiki.cemu.info/wiki/{}{}", parts.back(), company.substr(company.size() - 2)));
-		}
 		break;
 	case ID_GAME_SAVE_DIR:
 		OpenFolder(game.GetSaveFolder());

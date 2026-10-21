@@ -1868,7 +1868,6 @@ namespace
 			const wxString version = formatWxString(_("PixelU (based on Cemu)\nVersion {0}\nCompiled on {1}\nCemu's original authors: {2}"),
 													BUILD_VERSION_STRING, __DATE__ " " __TIME__, "Exzap, Petergov");
 			sizer->Add(new wxStaticText(parent, wxID_ANY, version), wxSizerFlags().Border(wxALL, 3).Border(wxTOP, 10));
-			sizer->Add(Link(parent, "https://cemu.info", "https://cemu.info"), wxSizerFlags().Expand().Border(wxTOP | wxBOTTOM, 3));
 			AddRule(parent, sizer);
 			sizer->AddSpacer(5);
 			sizer->Add(new wxStaticText(parent, wxID_ANY, _("PixelU is a Wii U emulator for RetroPixels, built from Cemu's source\nunder the Mozilla Public License 2.0.\n\nWii and Wii U are trademarks of Nintendo.\nPixelU and Cemu are not affiliated with Nintendo.")));
@@ -1917,7 +1916,7 @@ namespace
 			// ih264: source download plus its licence notice (written to a temp file and opened)
 			auto* line = new wxBoxSizer(wxHORIZONTAL);
 			line->Add(new wxStaticText(parent, wxID_ANY, "Modified ih264 from Android project ("));
-			line->Add(Link(parent, "Source", "https://cemu.info/oss/ih264d.zip"));
+			line->Add(Link(parent, "Source", "https://github.com/Shredder565/RetroPixels/tree/main/pixelu/dependencies/ih264d"));
 			line->Add(new wxStaticText(parent, wxID_ANY, " "));
 			auto* notice = Link(parent, "NOTICE", "");
 			notice->Bind(wxEVT_LEFT_DOWN, [](wxMouseEvent&) { OpenIh264Notice(); });
