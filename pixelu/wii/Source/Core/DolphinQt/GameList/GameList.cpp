@@ -1,13 +1,11 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef _WIN32
+// The desktop shortcut code needs the shell headers. They #define names (DeleteFile, interface)
+// that clash with identifiers further down, so they come first and those macros are dropped.
 #include <QCoreApplication>
 #include <shlobj.h>
 #include <wil/com.h>
-
-// This file uses some identifiers which are defined as macros in Windows headers.
-// Include and undefine the macros first thing we do to solve build errors.
 #ifdef DeleteFile
 #undef DeleteFile
 #endif
@@ -19,8 +17,13 @@
 #include "DolphinQt/GameList/GameList.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <filesystem>
+#include <string_view>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 #include <QDesktopServices>
 #include <QDir>
@@ -40,10 +43,10 @@
 #include <QTableView>
 #include <QUrl>
 
-#ifdef _WIN32
-#include "Common/Contains.h"
-#endif
+#include <fmt/format.h>
+
 #include "Common/FileUtil.h"
+#include "Common/StringUtil.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
@@ -74,106 +77,187 @@
 
 namespace
 {
-class GameListTableView : public QTableView
+using Column = GameListModel::Column;
+
+constexpr int ColumnIndex(Column column)
+{
+  return static_cast<int>(column);
+}
+
+constexpr int COLUMN_COUNT = ColumnIndex(Column::Count);
+
+// The setting that shows or hides each table column, in column order.
+const Config::Info<bool>& ColumnSetting(Column column)
+{
+  switch (column)
+  {
+  case Column::Platform:
+    return Config::MAIN_GAMELIST_COLUMN_PLATFORM;
+  case Column::Banner:
+    return Config::MAIN_GAMELIST_COLUMN_BANNER;
+  case Column::Title:
+    return Config::MAIN_GAMELIST_COLUMN_TITLE;
+  case Column::Description:
+    return Config::MAIN_GAMELIST_COLUMN_DESCRIPTION;
+  case Column::Maker:
+    return Config::MAIN_GAMELIST_COLUMN_MAKER;
+  case Column::ID:
+    return Config::MAIN_GAMELIST_COLUMN_GAME_ID;
+  case Column::Country:
+    return Config::MAIN_GAMELIST_COLUMN_REGION;
+  case Column::Size:
+    return Config::MAIN_GAMELIST_COLUMN_FILE_SIZE;
+  case Column::FileName:
+    return Config::MAIN_GAMELIST_COLUMN_FILE_NAME;
+  case Column::FilePath:
+    return Config::MAIN_GAMELIST_COLUMN_FILE_PATH;
+  case Column::FileFormat:
+    return Config::MAIN_GAMELIST_COLUMN_FILE_FORMAT;
+  case Column::BlockSize:
+    return Config::MAIN_GAMELIST_COLUMN_BLOCK_SIZE;
+  case Column::Compression:
+    return Config::MAIN_GAMELIST_COLUMN_COMPRESSION;
+  case Column::TimePlayed:
+    return Config::MAIN_GAMELIST_COLUMN_TIME_PLAYED;
+  case Column::Tags:
+  default:
+    return Config::MAIN_GAMELIST_COLUMN_TAGS;
+  }
+}
+
+// Icon and fixed-format columns keep their width; the text columns can be resized and share
+// whatever room is left (see GameList::FitColumnsToWidth).
+QHeaderView::ResizeMode ColumnResizeMode(Column column)
+{
+  switch (column)
+  {
+  case Column::Title:
+  case Column::Description:
+  case Column::Maker:
+  case Column::FileName:
+  case Column::FilePath:
+  case Column::TimePlayed:
+  case Column::Tags:
+    return QHeaderView::Interactive;
+  default:
+    return QHeaderView::Fixed;
+  }
+}
+
+const QString HEADER_STATE_KEY = QStringLiteral("tableheader/state");
+const QString GRID_SCALE_KEY = QStringLiteral("gridview/scale");
+
+// Table view tweaks: Home and End jump to the first and last game (QTableView would move to the
+// first or last column unless Ctrl is held), and only the left button double-click starts a game.
+class GameTableView final : public QTableView
 {
 public:
-  explicit GameListTableView(QWidget* parent = nullptr) : QTableView(parent) {}
+  using QTableView::QTableView;
 
 protected:
-  QModelIndex moveCursor(CursorAction cursorAction, Qt::KeyboardModifiers modifiers) override
+  QModelIndex moveCursor(CursorAction action, Qt::KeyboardModifiers modifiers) override
   {
-    // QTableView::moveCursor handles home by moving to the first column and end by moving to the
-    // last column, unless control is held in which case it ALSO moves to the first/last row.
-    // Columns are irrelevant for the game list, so treat the home/end press as if control were
-    // held.
-    if (cursorAction == CursorAction::MoveHome || cursorAction == CursorAction::MoveEnd)
-      return QTableView::moveCursor(cursorAction, modifiers | Qt::ControlModifier);
-    else
-      return QTableView::moveCursor(cursorAction, modifiers);
+    const bool jump = action == MoveHome || action == MoveEnd;
+    return QTableView::moveCursor(action, jump ? (modifiers | Qt::ControlModifier) : modifiers);
   }
 
-  virtual void mouseDoubleClickEvent(QMouseEvent* const event) override
+  void mouseDoubleClickEvent(QMouseEvent* event) override
   {
     if (event->button() == Qt::LeftButton)
       QTableView::mouseDoubleClickEvent(event);
   }
 };
 
-class GameListListView : public QListView
+class GameGridView final : public QListView
 {
 public:
-  explicit GameListListView(QWidget* parent = nullptr) : QListView(parent) {}
+  using QListView::QListView;
 
 protected:
-  virtual void mouseDoubleClickEvent(QMouseEvent* const event) override
+  void mouseDoubleClickEvent(QMouseEvent* event) override
   {
     if (event->button() == Qt::LeftButton)
       QListView::mouseDoubleClickEvent(event);
   }
 };
+
+QSortFilterProxyModel* SetUpProxy(QSortFilterProxyModel* proxy, GameListModel* source)
+{
+  proxy->setSortCaseSensitivity(Qt::CaseInsensitive);
+  proxy->setSortRole(GameListModel::SORT_ROLE);
+  proxy->setSourceModel(source);
+  return proxy;
+}
+
+void ShowResultBox(QWidget* parent, bool success, const QString& success_text,
+                   const QString& failure_text)
+{
+  ModalMessageBox box(parent);
+  box.setIcon(success ? QMessageBox::Information : QMessageBox::Critical);
+  box.setWindowTitle(success ? GameList::tr("Success") : GameList::tr("Failure"));
+  box.setText(success ? success_text : failure_text);
+  box.exec();
+}
 }  // namespace
 
 GameList::GameList(QWidget* parent) : QStackedWidget(parent), m_model(this)
 {
-  m_list_proxy = new ListProxyModel(this);
-  m_list_proxy->setSortCaseSensitivity(Qt::CaseInsensitive);
-  m_list_proxy->setSortRole(GameListModel::SORT_ROLE);
-  m_list_proxy->setSourceModel(&m_model);
-  m_grid_proxy = new GridProxyModel(this);
-  m_grid_proxy->setSortCaseSensitivity(Qt::CaseInsensitive);
-  m_grid_proxy->setSortRole(GameListModel::SORT_ROLE);
-  m_grid_proxy->setSourceModel(&m_model);
+  m_list_proxy = SetUpProxy(new ListProxyModel(this), &m_model);
+  m_grid_proxy = SetUpProxy(new GridProxyModel(this), &m_model);
 
-  MakeListView();
-  MakeGridView();
-  MakeEmptyView();
+  BuildTable();
+  BuildGrid();
+  BuildPlaceholder();
 
-  // Use List View's sorting for Grid View too.
+  // The grid has no header of its own; it follows the table's sort column and order.
   m_grid_proxy->sort(m_list_proxy->sortColumn(), m_list_proxy->sortOrder());
   connect(m_list->horizontalHeader(), &QHeaderView::sortIndicatorChanged, m_grid_proxy,
           &GridProxyModel::sort);
 
-  if (Settings::GetQSettings().contains(QStringLiteral("gridview/scale")))
-    m_model.SetScale(Settings::GetQSettings().value(QStringLiteral("gridview/scale")).toFloat());
+  const QSettings& stored = Settings::GetQSettings();
+  if (stored.contains(GRID_SCALE_KEY))
+    m_model.SetScale(stored.value(GRID_SCALE_KEY).toFloat());
 
   connect(m_list, &QTableView::doubleClicked, this, &GameList::GameSelected);
   connect(m_grid, &QListView::doubleClicked, this, &GameList::GameSelected);
-  connect(&m_model, &QAbstractItemModel::rowsInserted, this, &GameList::ConsiderViewChange);
-  connect(&m_model, &QAbstractItemModel::rowsRemoved, this, &GameList::ConsiderViewChange);
-  connect(&m_model, &QAbstractItemModel::rowsInserted, this, &GameList::UpdateGameCount);
-  connect(&m_model, &QAbstractItemModel::rowsRemoved, this, &GameList::UpdateGameCount);
+  // Rows coming and going may switch between the placeholder and a view, and change the count.
+  const auto row_signals = {&QAbstractItemModel::rowsInserted, &QAbstractItemModel::rowsRemoved};
+  for (const auto row_signal : row_signals)
+    connect(&m_model, row_signal, this, &GameList::ShowFittingPage);
+  for (const auto row_signal : row_signals)
+    connect(&m_model, row_signal, this, &GameList::UpdateGameCount);
 
   addWidget(m_list);
   addWidget(m_grid);
   addWidget(m_empty);
   m_prefer_list = Settings::Instance().GetPreferredView();
-  ConsiderViewChange();
+  ShowFittingPage();
 
-  auto* zoom_in = new QShortcut(QKeySequence::ZoomIn, this);
-  auto* zoom_out = new QShortcut(QKeySequence::ZoomOut, this);
-  zoom_in->setContext(Qt::WidgetWithChildrenShortcut);
-  zoom_out->setContext(Qt::WidgetWithChildrenShortcut);
+  for (const bool in : {true, false})
+  {
+    auto* const shortcut = new QShortcut(in ? QKeySequence::ZoomIn : QKeySequence::ZoomOut, this);
+    shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(shortcut, &QShortcut::activated, this, [this, in] { Zoom(in); });
+  }
 
-  connect(zoom_in, &QShortcut::activated, this, &GameList::ZoomIn);
-  connect(zoom_out, &QShortcut::activated, this, &GameList::ZoomOut);
-
-  // On most keyboards the key to the left of the primary delete key represents 'plus' when shift is
-  // held and 'equal' when it isn't. By common convention, pressing control and that key is treated
-  // conceptually as 'control plus' (which is then interpreted as an appropriate zooming action)
-  // instead of the technically correct 'control equal'. Qt doesn't account for this convention so
-  // an alternate shortcut is needed to avoid counterintuitive behavior.
-  const auto* zoom_in_alternate = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Equal), this);
-  connect(zoom_in_alternate, &QShortcut::activated, this, &GameList::ZoomIn);
-
-  // The above correction introduces a different inconsistency: now zooming in can be done using
-  // conceptual 'control plus' or 'control shift plus', while zooming out can only be done using
-  // 'control minus'. Adding an alternate shortcut representing 'control shift minus' restores
-  // consistency.
-  const auto* zoom_out_alternate = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Underscore), this);
-  connect(zoom_out_alternate, &QShortcut::activated, this, &GameList::ZoomOut);
+  // Ctrl and the "=/+" key means "Ctrl +" to most people, but Qt only treats Ctrl+Shift+= that
+  // way. Accept Ctrl+= for zooming in too, and Ctrl+Shift+- (Ctrl+_) for zooming out, so both
+  // directions work with or without Shift.
+  const auto* const zoom_in_plain = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Equal), this);
+  connect(zoom_in_plain, &QShortcut::activated, this, [this] { Zoom(true); });
+  const auto* const zoom_out_shift =
+      new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Underscore), this);
+  connect(zoom_out_shift, &QShortcut::activated, this, [this] { Zoom(false); });
 
   connect(&Settings::Instance(), &Settings::MetadataRefreshCompleted, this,
           [this] { m_grid_proxy->invalidate(); });
+}
+
+GameList::~GameList()
+{
+  QSettings& stored = Settings::GetQSettings();
+  stored.setValue(HEADER_STATE_KEY, m_list->horizontalHeader()->saveState());
+  stored.setValue(GRID_SCALE_KEY, m_model.GetScale());
 }
 
 void GameList::PurgeCache()
@@ -181,11 +265,10 @@ void GameList::PurgeCache()
   m_model.PurgeCache();
 }
 
-void GameList::MakeListView()
+void GameList::BuildTable()
 {
-  m_list = new GameListTableView(this);
+  m_list = new GameTableView(this);
   m_list->setModel(m_list_proxy);
-
   m_list->setTabKeyNavigation(false);
   m_list->setSelectionMode(QAbstractItemView::ExtendedSelection);
   m_list->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -195,377 +278,326 @@ void GameList::MakeListView()
   m_list->setCurrentIndex(QModelIndex());
   m_list->setContextMenuPolicy(Qt::CustomContextMenu);
   m_list->setWordWrap(false);
-  // Have 1 pixel of padding above and below the 32 pixel banners.
-  m_list->verticalHeader()->setDefaultSectionSize(32 + 2);
+  // 32 pixel banners plus a pixel of room above and below.
+  m_list->verticalHeader()->setDefaultSectionSize(34);
 
-  QHeaderView* hor_header = m_list->horizontalHeader();
+  QHeaderView* const header = m_list->horizontalHeader();
+  const QSettings& stored = Settings::GetQSettings();
+  header->restoreState(stored.value(HEADER_STATE_KEY).toByteArray());
 
-  hor_header->restoreState(
-      Settings::GetQSettings().value(QStringLiteral("tableheader/state")).toByteArray());
+  header->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(header, &QWidget::customContextMenuRequested, this, &GameList::ShowColumnsMenu);
+  connect(header, &QHeaderView::sortIndicatorChanged, this, &GameList::FitColumnsToWidth);
+  connect(header, &QHeaderView::sectionCountChanged, this, &GameList::FitColumnsToWidth);
+  connect(header, &QHeaderView::sectionMoved, this, &GameList::FitColumnsToWidth);
+  connect(header, &QHeaderView::sectionResized, this,
+          [this](int logical_index, int, int) { OnHeaderSectionResized(logical_index); });
 
-  hor_header->setContextMenuPolicy(Qt::CustomContextMenu);
-  connect(hor_header, &QWidget::customContextMenuRequested, this, &GameList::ShowHeaderContextMenu);
+  // Without a saved header the list starts sorted by title.
+  if (!stored.contains(HEADER_STATE_KEY))
+    m_list->sortByColumn(ColumnIndex(Column::Title), Qt::AscendingOrder);
 
-  connect(hor_header, &QHeaderView::sortIndicatorChanged, this, &GameList::OnHeaderViewChanged);
-  connect(hor_header, &QHeaderView::sectionCountChanged, this, &GameList::OnHeaderViewChanged);
-  connect(hor_header, &QHeaderView::sectionMoved, this, &GameList::OnHeaderViewChanged);
-  connect(hor_header, &QHeaderView::sectionResized, this, &GameList::OnSectionResized);
+  for (int column = 0; column < COLUMN_COUNT; ++column)
+    header->setSectionResizeMode(column, ColumnResizeMode(static_cast<Column>(column)));
 
-  if (!Settings::GetQSettings().contains(QStringLiteral("tableheader/state")))
-    m_list->sortByColumn(static_cast<int>(GameListModel::Column::Title), Qt::AscendingOrder);
-  {
-    const auto SetResizeMode = [&hor_header](const GameListModel::Column column,
-                                             const QHeaderView::ResizeMode mode) {
-      hor_header->setSectionResizeMode(static_cast<int>(column), mode);
-    };
-    using Column = GameListModel::Column;
-    using Mode = QHeaderView::ResizeMode;
-    SetResizeMode(Column::Platform, Mode::Fixed);
-    SetResizeMode(Column::Banner, Mode::Fixed);
-    SetResizeMode(Column::Title, Mode::Interactive);
-    SetResizeMode(Column::Description, Mode::Interactive);
-    SetResizeMode(Column::Maker, Mode::Interactive);
-    SetResizeMode(Column::ID, Mode::Fixed);
-    SetResizeMode(Column::Country, Mode::Fixed);
-    SetResizeMode(Column::Size, Mode::Fixed);
-    SetResizeMode(Column::FileName, Mode::Interactive);
-    SetResizeMode(Column::FilePath, Mode::Interactive);
-    SetResizeMode(Column::FileFormat, Mode::Fixed);
-    SetResizeMode(Column::BlockSize, Mode::Fixed);
-    SetResizeMode(Column::Compression, Mode::Fixed);
-    SetResizeMode(Column::TimePlayed, Mode::Interactive);
-    SetResizeMode(Column::Tags, Mode::Interactive);
+  // Cells are padded by 3 pixels on each side: banners are 96 pixels wide, the platform and
+  // region icons 32.
+  const std::array<std::pair<Column, int>, 5> fixed_widths{{
+      {Column::Banner, 102},
+      {Column::Platform, 38},
+      {Column::Country, 38},
+      {Column::Size, 85},
+      {Column::ID, 70},
+  }};
+  for (const auto& [column, width] : fixed_widths)
+    m_list->setColumnWidth(ColumnIndex(column), width);
 
-    // Cells have 3 pixels of padding, so the width of these needs to be image width + 6. Banners
-    // are 96 pixels wide, platform and country icons are 32 pixels wide.
-    m_list->setColumnWidth(static_cast<int>(Column::Banner), 102);
-    m_list->setColumnWidth(static_cast<int>(Column::Platform), 38);
-    m_list->setColumnWidth(static_cast<int>(Column::Country), 38);
-    m_list->setColumnWidth(static_cast<int>(Column::Size), 85);
-    m_list->setColumnWidth(static_cast<int>(Column::ID), 70);
-  }
+  // The default minimum section size differs between platforms.
+  header->setMinimumSectionSize(38);
 
-  // There's some odd platform-specific behavior with default minimum section size
-  hor_header->setMinimumSectionSize(38);
-
-  UpdateColumnVisibility();
+  ApplyColumnVisibility();
 
   m_list->verticalHeader()->hide();
   m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   m_list->setFrameStyle(QFrame::NoFrame);
 
-  hor_header->setSectionsMovable(true);
-  hor_header->setHighlightSections(false);
+  header->setSectionsMovable(true);
+  header->setHighlightSections(false);
 
-  // Work around a Qt bug where clicking in the background (below the last game) as the first
-  // action and then pressing a key (e.g. page down or end) selects the first entry in the list
-  // instead of performing that key's action.  This workaround does not work if there are no games
-  // when the view first appears, but then games are added (e.g. due to no game folders being
-  // present, and then the user adding one), but that is an infrequent situation.
+  // Qt quirk: if the first thing the user does is click the empty area below the games and then
+  // press a navigation key, Qt selects the first game instead of navigating. Selecting and
+  // deselecting a row once avoids that (as long as there were games when the view was built).
   m_list->selectRow(0);
   m_list->clearSelection();
 
-  connect(m_list, &QTableView::customContextMenuRequested, this, &GameList::ShowContextMenu);
+  connect(m_list, &QTableView::customContextMenuRequested, this, &GameList::ShowGameMenu);
   connect(m_list->selectionModel(), &QItemSelectionModel::selectionChanged,
           [this](const QItemSelection&, const QItemSelection&) {
             emit SelectionChanged(GetSelectedGame());
           });
 }
 
-GameList::~GameList()
+void GameList::ApplyColumnVisibility()
 {
-  Settings::GetQSettings().setValue(QStringLiteral("tableheader/state"),
-                                    m_list->horizontalHeader()->saveState());
-  Settings::GetQSettings().setValue(QStringLiteral("gridview/scale"), m_model.GetScale());
+  for (int column = 0; column < COLUMN_COUNT; ++column)
+  {
+    const bool shown = Config::Get(ColumnSetting(static_cast<Column>(column)));
+    m_list->setColumnHidden(column, !shown);
+  }
 }
 
-void GameList::UpdateColumnVisibility()
+void GameList::BuildPlaceholder()
 {
-  const auto SetVisiblity = [this](const GameListModel::Column column, const bool is_visible) {
-    m_list->setColumnHidden(static_cast<int>(column), !is_visible);
-  };
-
-  using Column = GameListModel::Column;
-  SetVisiblity(Column::Platform, Config::Get(Config::MAIN_GAMELIST_COLUMN_PLATFORM));
-  SetVisiblity(Column::Banner, Config::Get(Config::MAIN_GAMELIST_COLUMN_BANNER));
-  SetVisiblity(Column::Title, Config::Get(Config::MAIN_GAMELIST_COLUMN_TITLE));
-  SetVisiblity(Column::Description, Config::Get(Config::MAIN_GAMELIST_COLUMN_DESCRIPTION));
-  SetVisiblity(Column::Maker, Config::Get(Config::MAIN_GAMELIST_COLUMN_MAKER));
-  SetVisiblity(Column::ID, Config::Get(Config::MAIN_GAMELIST_COLUMN_GAME_ID));
-  SetVisiblity(Column::Country, Config::Get(Config::MAIN_GAMELIST_COLUMN_REGION));
-  SetVisiblity(Column::Size, Config::Get(Config::MAIN_GAMELIST_COLUMN_FILE_SIZE));
-  SetVisiblity(Column::FileName, Config::Get(Config::MAIN_GAMELIST_COLUMN_FILE_NAME));
-  SetVisiblity(Column::FilePath, Config::Get(Config::MAIN_GAMELIST_COLUMN_FILE_PATH));
-  SetVisiblity(Column::FileFormat, Config::Get(Config::MAIN_GAMELIST_COLUMN_FILE_FORMAT));
-  SetVisiblity(Column::BlockSize, Config::Get(Config::MAIN_GAMELIST_COLUMN_BLOCK_SIZE));
-  SetVisiblity(Column::Compression, Config::Get(Config::MAIN_GAMELIST_COLUMN_COMPRESSION));
-  SetVisiblity(Column::TimePlayed, Config::Get(Config::MAIN_GAMELIST_COLUMN_TIME_PLAYED));
-  SetVisiblity(Column::Tags, Config::Get(Config::MAIN_GAMELIST_COLUMN_TAGS));
-}
-
-void GameList::MakeEmptyView()
-{
-  const QString refreshing_msg = tr("Refreshing...");
-  const QString empty_msg = tr("Dolphin could not find any GameCube/Wii ISOs or WADs.\n"
-                               "Double-click here to set a games directory...");
+  const QString refreshing_text = tr("Refreshing...");
+  const QString no_games_text = tr("Dolphin could not find any GameCube/Wii ISOs or WADs.\n"
+                                   "Double-click here to set a games directory...");
 
   m_empty = new QLabel(this);
-  m_empty->setText(refreshing_msg);
+  m_empty->setText(refreshing_text);
   m_empty->setEnabled(false);
   m_empty->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
 
-  auto event_filter = new DoubleClickEventFilter{m_empty};
-  m_empty->installEventFilter(event_filter);
-  connect(event_filter, &DoubleClickEventFilter::doubleClicked, [this] {
-    auto current_dir = QDir::currentPath();
-    auto dir = DolphinFileDialog::getExistingDirectory(this, tr("Select a Directory"), current_dir);
+  auto* const double_click = new DoubleClickEventFilter{m_empty};
+  m_empty->installEventFilter(double_click);
+  connect(double_click, &DoubleClickEventFilter::doubleClicked, [this] {
+    const QString dir =
+        DolphinFileDialog::getExistingDirectory(this, tr("Select a Directory"), QDir::currentPath());
     if (!dir.isEmpty())
       Settings::Instance().AddPath(dir);
   });
 
-  QSizePolicy size_policy{m_empty->sizePolicy()};
-  size_policy.setRetainSizeWhenHidden(true);
-  m_empty->setSizePolicy(size_policy);
+  QSizePolicy policy = m_empty->sizePolicy();
+  policy.setRetainSizeWhenHidden(true);
+  m_empty->setSizePolicy(policy);
 
-  connect(&Settings::Instance(), &Settings::GameListRefreshRequested, this, [this, refreshing_msg] {
-    m_empty->setText(refreshing_msg);
-    m_empty->setEnabled(false);
-  });
-  connect(&Settings::Instance(), &Settings::GameListRefreshCompleted, this, [this, empty_msg] {
-    m_empty->setText(empty_msg);
-    m_empty->setEnabled(true);
-  });
+  connect(&Settings::Instance(), &Settings::GameListRefreshRequested, this,
+          [this, refreshing_text] {
+            m_empty->setText(refreshing_text);
+            m_empty->setEnabled(false);
+          });
+  connect(&Settings::Instance(), &Settings::GameListRefreshCompleted, this,
+          [this, no_games_text] {
+            m_empty->setText(no_games_text);
+            m_empty->setEnabled(true);
+          });
 }
 
-void GameList::resizeEvent(QResizeEvent* event)
+void GameList::resizeEvent(QResizeEvent*)
 {
-  OnHeaderViewChanged();
+  FitColumnsToWidth();
 }
 
-void GameList::MakeGridView()
+void GameList::BuildGrid()
 {
-  m_grid = new GameListListView(this);
+  m_grid = new GameGridView(this);
   m_grid->setModel(m_grid_proxy);
   m_grid->setSelectionMode(QAbstractItemView::ExtendedSelection);
-
-  // Row in this context refers to the full set of columns (banner, title, region, etc.) associated
-  // with a single game rather than multiple games presented visually on the same row. Even though
-  // most of these elements are hidden in grid view selecting all of them allows us to use
-  // selectedRow() which only returns rows where all elements are selected. In addition to improving
-  // consistency with list view this avoids an edge case where clicking a game in grid mode selected
-  // only the first element of the row but ctrl+a selected every element of the row, making a bunch
-  // of duplicate selections for each game.
+  // Selecting whole rows keeps selectedRows() working the same way as in the table, and stops
+  // Ctrl+A from selecting every column of a game separately.
   m_grid->setSelectionBehavior(QAbstractItemView::SelectRows);
-
   m_grid->setViewMode(QListView::IconMode);
   m_grid->setResizeMode(QListView::Adjust);
   m_grid->setWordWrap(true);
   m_grid->setContextMenuPolicy(Qt::CustomContextMenu);
   m_grid->setFrameStyle(QFrame::NoFrame);
 
-  // Work around a Qt bug where clicking in the background (below the last game) as the first action
-  // and then pressing a key (e.g. page down or end) selects the first entry in the list instead of
-  // performing that key's action.  This workaround does not work if there are no games when the
-  // view first appears, but then games are added (e.g. due to no game folders being present,
-  // and then the user adding one), but that is an infrequent situation.
+  // The same navigation quirk as in BuildTable().
   m_grid->setCurrentIndex(m_grid->indexAt(QPoint(0, 0)));
   m_grid->clearSelection();
 
-  connect(m_grid, &QTableView::customContextMenuRequested, this, &GameList::ShowContextMenu);
+  connect(m_grid, &QTableView::customContextMenuRequested, this, &GameList::ShowGameMenu);
   connect(m_grid->selectionModel(), &QItemSelectionModel::selectionChanged,
           [this](const QItemSelection&, const QItemSelection&) {
             emit SelectionChanged(GetSelectedGame());
           });
 }
 
-void GameList::ShowHeaderContextMenu(const QPoint& pos)
+void GameList::ShowColumnsMenu(const QPoint& pos)
 {
+  // The header offers the same column toggles as View > List Columns.
   const MenuBar* const menu_bar = MenuBar::GetMenuBar();
-  if (!menu_bar)
+  QMenu* const columns = menu_bar ? menu_bar->GetListColumnsMenu() : nullptr;
+  if (!columns)
     return;
 
-  QMenu* const list_columns_menu = menu_bar->GetListColumnsMenu();
-  if (!list_columns_menu)
-    return;
-
-  const QWidget* const widget = qobject_cast<QWidget*>(sender());
-  list_columns_menu->exec(widget ? widget->mapToGlobal(pos) : pos);
+  const auto* const origin = qobject_cast<QWidget*>(sender());
+  columns->exec(origin ? origin->mapToGlobal(pos) : pos);
 }
 
-void GameList::ShowContextMenu(const QPoint&)
+void GameList::ShowGameMenu(const QPoint&)
 {
-  if (!GetSelectedGame())
+  const auto game = GetSelectedGame();
+  if (!game)
     return;
-  auto& system = Core::System::GetInstance();
 
-  QMenu* menu = new QMenu(this);
+  auto* const menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
   if (HasMultipleSelected())
-  {
-    const auto selected_games = GetSelectedGames();
-
-    if (std::ranges::all_of(selected_games,
-                            [](const auto& game) { return game->ShouldAllowConversion(); }))
-    {
-      menu->addAction(tr("Convert Selected Files..."), this, &GameList::ConvertFile);
-      menu->addSeparator();
-    }
-
-    if (std::ranges::all_of(selected_games,
-                            [](const auto& game) { return DiscIO::IsWii(game->GetPlatform()); }))
-    {
-      menu->addAction(tr("Export Wii Saves"), this, &GameList::ExportWiiSave);
-      menu->addSeparator();
-    }
-
-    menu->addAction(tr("Delete Selected Files..."), this, &GameList::DeleteFile);
-  }
+    AddMultiSelectionEntries(menu);
   else
-  {
-    const auto game = GetSelectedGame();
-    const bool is_mod_descriptor = game->IsModDescriptor();
-    DiscIO::Platform platform = game->GetPlatform();
-    menu->addAction(tr("&Properties"), this, &GameList::OpenProperties);
-    if (!is_mod_descriptor && platform != DiscIO::Platform::ELFOrDOL)
-    {
-      menu->addAction(tr("&Wiki"), this, &GameList::OpenWiki);
-    }
-
-    menu->addSeparator();
-
-    if (!is_mod_descriptor && DiscIO::IsDisc(platform))
-    {
-      menu->addAction(tr("Start with Riivolution Patches..."), this,
-                      &GameList::StartWithRiivolution);
-
-      menu->addSeparator();
-
-      menu->addAction(tr("Set as &Default ISO"), this, &GameList::SetDefaultISO);
-
-      if (game->ShouldAllowConversion())
-        menu->addAction(tr("Convert File..."), this, &GameList::ConvertFile);
-
-      QAction* change_disc = menu->addAction(tr("Change &Disc"), this, &GameList::ChangeDisc);
-
-      connect(&Settings::Instance(), &Settings::EmulationStateChanged, change_disc,
-              [&system, change_disc] { change_disc->setEnabled(Core::IsRunning(system)); });
-      change_disc->setEnabled(Core::IsRunning(system));
-
-      menu->addSeparator();
-    }
-
-    if (!is_mod_descriptor && platform == DiscIO::Platform::WiiDisc)
-    {
-      auto* perform_disc_update = menu->addAction(tr("Perform System Update"), this,
-                                                  [this, file_path = game->GetFilePath()] {
-                                                    WiiUpdate::PerformDiscUpdate(file_path, this);
-                                                    // Since the update may have installed a newer
-                                                    // system menu, trigger a refresh.
-                                                    Settings::Instance().NANDRefresh();
-                                                  });
-      perform_disc_update->setEnabled(Core::IsUninitialized(system) || !system.IsWii());
-    }
-
-    if (!is_mod_descriptor && platform == DiscIO::Platform::WiiWAD)
-    {
-      QAction* wad_install_action = new QAction(tr("Install to the NAND"), menu);
-      QAction* wad_uninstall_action = new QAction(tr("Uninstall from the NAND"), menu);
-
-      connect(wad_install_action, &QAction::triggered, this, &GameList::InstallWAD);
-      connect(wad_uninstall_action, &QAction::triggered, this, &GameList::UninstallWAD);
-
-      for (QAction* a : {wad_install_action, wad_uninstall_action})
-      {
-        a->setEnabled(Core::IsUninitialized(system));
-        menu->addAction(a);
-      }
-      if (Core::IsUninitialized(system))
-        wad_uninstall_action->setEnabled(WiiUtils::IsTitleInstalled(game->GetTitleID()));
-
-      connect(&Settings::Instance(), &Settings::EmulationStateChanged, menu,
-              [=](Core::State state) {
-                wad_install_action->setEnabled(state == Core::State::Uninitialized);
-                wad_uninstall_action->setEnabled(state == Core::State::Uninitialized &&
-                                                 WiiUtils::IsTitleInstalled(game->GetTitleID()));
-              });
-
-      menu->addSeparator();
-    }
-
-    if (!is_mod_descriptor &&
-        (platform == DiscIO::Platform::WiiWAD || platform == DiscIO::Platform::WiiDisc))
-    {
-      QAction* open_wii_save_folder =
-          menu->addAction(tr("Open Wii &Save Folder"), this, &GameList::OpenWiiSaveFolder);
-      QAction* export_wii_save =
-          menu->addAction(tr("Export Wii Save"), this, &GameList::ExportWiiSave);
-
-      open_wii_save_folder->setEnabled(Core::IsUninitialized(system));
-      export_wii_save->setEnabled(Core::IsUninitialized(system));
-
-      menu->addSeparator();
-    }
-
-    if (!is_mod_descriptor && platform == DiscIO::Platform::GameCubeDisc)
-    {
-      menu->addAction(tr("Open GameCube &Save Folder"), this, &GameList::OpenGCSaveFolder);
-      menu->addSeparator();
-    }
-
-    menu->addAction(tr("Open &Containing Folder"), this, &GameList::OpenContainingFolder);
-    menu->addAction(tr("Delete File..."), this, &GameList::DeleteFile);
-#ifdef _WIN32
-    menu->addAction(tr("Add Shortcut to Desktop"), this, [this] {
-      if (!AddShortcutToDesktop())
-      {
-        ModalMessageBox::critical(this, tr("Add Shortcut to Desktop"),
-                                  tr("There was an issue adding a shortcut to the desktop"));
-      }
-    });
-#endif
-
-    menu->addSeparator();
-
-    auto* const tags_menu{new QtUtils::NonAutodismissibleMenu(tr("Tags"), menu)};
-    menu->addMenu(tags_menu);
-
-    auto path = game->GetFilePath();
-    auto game_tags = m_model.GetGameTags(path);
-
-    for (const auto& tag : m_model.GetAllTags())
-    {
-      auto* tag_action = tags_menu->addAction(tag);
-
-      tag_action->setCheckable(true);
-      tag_action->setChecked(game_tags.contains(tag));
-
-      connect(tag_action, &QAction::toggled, [path, tag, model = &m_model](bool checked) {
-        if (!checked)
-          model->RemoveGameTag(path, tag);
-        else
-          model->AddGameTag(path, tag);
-      });
-    }
-
-    menu->addAction(tr("New Tag..."), this, &GameList::NewTag);
-    menu->addAction(tr("Remove Tag..."), this, &GameList::DeleteTag);
-
-    menu->addSeparator();
-
-    QAction* netplay_host = new QAction(tr("Host with NetPlay"), menu);
-
-    connect(netplay_host, &QAction::triggered, [this, game] { emit NetPlayHost(*game); });
-
-    connect(&Settings::Instance(), &Settings::EmulationStateChanged, menu, [=](Core::State state) {
-      netplay_host->setEnabled(state == Core::State::Uninitialized);
-    });
-    netplay_host->setEnabled(Core::IsUninitialized(system));
-
-    menu->addAction(netplay_host);
-  }
+    AddSingleGameEntries(menu, GetSelectedGame());
 
   menu->exec(QCursor::pos());
+}
+
+void GameList::AddMultiSelectionEntries(QMenu* menu)
+{
+  const auto games = GetSelectedGames();
+
+  const bool all_convertible =
+      std::ranges::all_of(games, [](const auto& game) { return game->ShouldAllowConversion(); });
+  if (all_convertible)
+  {
+    menu->addAction(tr("Convert Selected Files..."), this, &GameList::ConvertSelection);
+    menu->addSeparator();
+  }
+
+  const bool all_wii =
+      std::ranges::all_of(games, [](const auto& game) { return DiscIO::IsWii(game->GetPlatform()); });
+  if (all_wii)
+  {
+    menu->addAction(tr("Export Wii Saves"), this, &GameList::ExportWiiSaves);
+    menu->addSeparator();
+  }
+
+  menu->addAction(tr("Delete Selected Files..."), this, &GameList::DeleteSelection);
+}
+
+void GameList::AddSingleGameEntries(QMenu* menu,
+                                    const std::shared_ptr<const UICommon::GameFile>& game)
+{
+  auto& system = Core::System::GetInstance();
+  auto& settings = Settings::Instance();
+
+  // Mod descriptors (.json) only get the generic entries.
+  const bool real_file = !game->IsModDescriptor();
+  const DiscIO::Platform platform = game->GetPlatform();
+
+  menu->addAction(tr("&Properties"), this, &GameList::OpenProperties);
+  if (real_file && platform != DiscIO::Platform::ELFOrDOL)
+    menu->addAction(tr("&Wiki"), this, &GameList::OpenWiki);
+  menu->addSeparator();
+
+  if (real_file && DiscIO::IsDisc(platform))
+  {
+    menu->addAction(tr("Start with Riivolution Patches..."), this,
+                    &GameList::StartWithRiivolution);
+    menu->addSeparator();
+    menu->addAction(tr("Set as &Default ISO"), this, &GameList::SetDefaultISO);
+    if (game->ShouldAllowConversion())
+      menu->addAction(tr("Convert File..."), this, &GameList::ConvertSelection);
+
+    QAction* const change_disc = menu->addAction(tr("Change &Disc"), this, &GameList::ChangeDisc);
+    connect(&settings, &Settings::EmulationStateChanged, change_disc,
+            [&system, change_disc] { change_disc->setEnabled(Core::IsRunning(system)); });
+    change_disc->setEnabled(Core::IsRunning(system));
+
+    menu->addSeparator();
+  }
+
+  if (real_file && platform == DiscIO::Platform::WiiDisc)
+  {
+    QAction* const disc_update =
+        menu->addAction(tr("Perform System Update"), this, [this, path = game->GetFilePath()] {
+          WiiUpdate::PerformDiscUpdate(path, this);
+          // The update may have installed a newer Wii Menu.
+          Settings::Instance().NANDRefresh();
+        });
+    disc_update->setEnabled(Core::IsUninitialized(system) || !system.IsWii());
+  }
+
+  if (real_file && platform == DiscIO::Platform::WiiWAD)
+  {
+    auto* const install = new QAction(tr("Install to the NAND"), menu);
+    auto* const uninstall = new QAction(tr("Uninstall from the NAND"), menu);
+    connect(install, &QAction::triggered, this, &GameList::InstallWAD);
+    connect(uninstall, &QAction::triggered, this, &GameList::UninstallWAD);
+
+    for (QAction* const action : {install, uninstall})
+    {
+      action->setEnabled(Core::IsUninitialized(system));
+      menu->addAction(action);
+    }
+    // Uninstalling only makes sense for a title that is on the NAND.
+    if (Core::IsUninitialized(system))
+      uninstall->setEnabled(WiiUtils::IsTitleInstalled(game->GetTitleID()));
+
+    connect(&settings, &Settings::EmulationStateChanged, menu,
+            [install, uninstall, game](Core::State state) {
+              const bool stopped = state == Core::State::Uninitialized;
+              install->setEnabled(stopped);
+              uninstall->setEnabled(stopped && WiiUtils::IsTitleInstalled(game->GetTitleID()));
+            });
+
+    menu->addSeparator();
+  }
+
+  if (real_file &&
+      (platform == DiscIO::Platform::WiiWAD || platform == DiscIO::Platform::WiiDisc))
+  {
+    QAction* const open_save =
+        menu->addAction(tr("Open Wii &Save Folder"), this, &GameList::OpenWiiSaveFolder);
+    QAction* const export_save =
+        menu->addAction(tr("Export Wii Save"), this, &GameList::ExportWiiSaves);
+    open_save->setEnabled(Core::IsUninitialized(system));
+    export_save->setEnabled(Core::IsUninitialized(system));
+    menu->addSeparator();
+  }
+
+  if (real_file && platform == DiscIO::Platform::GameCubeDisc)
+  {
+    menu->addAction(tr("Open GameCube &Save Folder"), this, &GameList::OpenGCSaveFolder);
+    menu->addSeparator();
+  }
+
+  menu->addAction(tr("Open &Containing Folder"), this, &GameList::OpenContainingFolder);
+  menu->addAction(tr("Delete File..."), this, &GameList::DeleteSelection);
+#ifdef _WIN32
+  menu->addAction(tr("Add Shortcut to Desktop"), this, [this] {
+    if (CreateDesktopShortcut())
+      return;
+    ModalMessageBox::critical(this, tr("Add Shortcut to Desktop"),
+                              tr("There was an issue adding a shortcut to the desktop"));
+  });
+#endif
+
+  menu->addSeparator();
+
+  AddTagEntries(menu, game->GetFilePath());
+
+  menu->addSeparator();
+
+  auto* const host = new QAction(tr("Host with NetPlay"), menu);
+  connect(host, &QAction::triggered, [this, game] { emit NetPlayHost(*game); });
+  connect(&settings, &Settings::EmulationStateChanged, menu,
+          [host](Core::State state) { host->setEnabled(state == Core::State::Uninitialized); });
+  host->setEnabled(Core::IsUninitialized(system));
+  menu->addAction(host);
+}
+
+void GameList::AddTagEntries(QMenu* menu, const std::string& path)
+{
+  // The tag submenu stays open while tags are ticked, so several can be changed at once.
+  auto* const tags_menu = new QtUtils::NonAutodismissibleMenu(tr("Tags"), menu);
+  menu->addMenu(tags_menu);
+
+  const QStringList current = m_model.GetGameTags(path);
+  for (const QString& tag : m_model.GetAllTags())
+  {
+    QAction* const toggle = tags_menu->addAction(tag);
+    toggle->setCheckable(true);
+    toggle->setChecked(current.contains(tag));
+    connect(toggle, &QAction::toggled, [model = &m_model, path, tag](bool checked) {
+      if (checked)
+        model->AddGameTag(path, tag);
+      else
+        model->RemoveGameTag(path, tag);
+    });
+  }
+
+  menu->addAction(tr("New Tag..."), this, &GameList::PromptNewTag);
+  menu->addAction(tr("Remove Tag..."), this, &GameList::PromptRemoveTag);
 }
 
 void GameList::OpenProperties()
@@ -574,61 +606,56 @@ void GameList::OpenProperties()
   if (!game)
     return;
 
-  auto property_windows = this->findChildren<PropertiesDialog*>();
-  auto it =
-      std::ranges::find(property_windows, game->GetFilePath(), &PropertiesDialog::GetFilePath);
-  if (it != property_windows.end())
+  // One properties window per game: bring an open one to the front instead.
+  const auto open_windows = findChildren<PropertiesDialog*>();
+  for (PropertiesDialog* const window : open_windows)
   {
-    (*it)->raise();
-    return;
+    if (window->GetFilePath() == game->GetFilePath())
+    {
+      window->raise();
+      return;
+    }
   }
 
-  PropertiesDialog* properties = new PropertiesDialog(this, *game);
-
+  auto* const properties = new PropertiesDialog(this, *game);
   connect(properties, &PropertiesDialog::OpenGeneralSettings, this, &GameList::OpenGeneralSettings);
   connect(properties, &PropertiesDialog::OpenGraphicsSettings, this,
           &GameList::OpenGraphicsSettings);
   connect(properties, &PropertiesDialog::finished, this,
           [properties] { properties->deleteLater(); });
-
 #ifdef USE_RETRO_ACHIEVEMENTS
   connect(properties, &PropertiesDialog::OpenAchievementSettings, this,
           &GameList::OpenAchievementSettings);
 #endif  // USE_RETRO_ACHIEVEMENTS
-
   properties->show();
 }
 
-void GameList::ExportWiiSave()
+void GameList::ExportWiiSaves()
 {
-  const QString export_dir = DolphinFileDialog::getExistingDirectory(
+  const QString target = DolphinFileDialog::getExistingDirectory(
       this, tr("Select Export Directory"), QString::fromStdString(File::GetUserPath(D_USER_IDX)),
       QFileDialog::ShowDirsOnly);
-  if (export_dir.isEmpty())
+  if (target.isEmpty())
     return;
 
-  QList<std::string> failed;
+  QString failures;
   for (const auto& game : GetSelectedGames())
   {
-    if (WiiSave::Export(game->GetTitleID(), export_dir.toStdString()) !=
-        WiiSave::CopyResult::Success)
-    {
-      failed.push_back(game->GetName(UICommon::GameFile::Variant::LongAndPossiblyCustom));
-    }
+    const auto result = WiiSave::Export(game->GetTitleID(), target.toStdString());
+    if (result == WiiSave::CopyResult::Success)
+      continue;
+    const std::string name = game->GetName(UICommon::GameFile::Variant::LongAndPossiblyCustom);
+    failures += QLatin1Char('\n');
+    failures += QString::fromStdString(name);
   }
 
-  if (!failed.isEmpty())
-  {
-    QString failed_str;
-    for (const std::string& str : failed)
-      failed_str.append(QLatin1Char{'\n'}).append(QString::fromStdString(str));
-    ModalMessageBox::critical(this, tr("Save Export"),
-                              tr("Failed to export the following save files:") + failed_str);
-  }
-  else
+  if (failures.isEmpty())
   {
     ModalMessageBox::information(this, tr("Save Export"), tr("Successfully exported save files"));
+    return;
   }
+  ModalMessageBox::critical(this, tr("Save Export"),
+                            tr("Failed to export the following save files:") + failures);
 }
 
 void GameList::OpenWiki()
@@ -637,13 +664,12 @@ void GameList::OpenWiki()
   if (!game)
     return;
 
-  QString game_id = QString::fromStdString(game->GetGameID());
-  QString url =
-      QStringLiteral("https://wiki.dolphin-emu.org/dolphin-redirect.php?gameid=").append(game_id);
+  const QString url = QStringLiteral("https://wiki.dolphin-emu.org/dolphin-redirect.php?gameid=") +
+                      QString::fromStdString(game->GetGameID());
   QDesktopServices::openUrl(QUrl(url));
 }
 
-void GameList::ConvertFile()
+void GameList::ConvertSelection()
 {
   auto games = GetSelectedGames();
   if (games.empty())
@@ -659,15 +685,9 @@ void GameList::InstallWAD()
   if (!game)
     return;
 
-  ModalMessageBox result_dialog(this);
-
-  const bool success = WiiUtils::InstallWAD(game->GetFilePath());
-
-  result_dialog.setIcon(success ? QMessageBox::Information : QMessageBox::Critical);
-  result_dialog.setWindowTitle(success ? tr("Success") : tr("Failure"));
-  result_dialog.setText(success ? tr("Successfully installed this title to the NAND.") :
-                                  tr("Failed to install this title to the NAND."));
-  result_dialog.exec();
+  const bool installed = WiiUtils::InstallWAD(game->GetFilePath());
+  ShowResultBox(this, installed, tr("Successfully installed this title to the NAND."),
+                tr("Failed to install this title to the NAND."));
 }
 
 void GameList::UninstallWAD()
@@ -676,35 +696,26 @@ void GameList::UninstallWAD()
   if (!game)
     return;
 
-  ModalMessageBox warning_dialog(this);
+  {
+    ModalMessageBox confirm(this);
+    confirm.setIcon(QMessageBox::Information);
+    confirm.setWindowTitle(tr("Confirm"));
+    confirm.setText(tr("Uninstalling the WAD will remove the currently installed version of "
+                       "this title from the NAND without deleting its save data. Continue?"));
+    confirm.setStandardButtons(QMessageBox::No | QMessageBox::Yes);
+    if (confirm.exec() == QMessageBox::No)
+      return;
+  }
 
-  warning_dialog.setIcon(QMessageBox::Information);
-  warning_dialog.setWindowTitle(tr("Confirm"));
-  warning_dialog.setText(tr("Uninstalling the WAD will remove the currently installed version of "
-                            "this title from the NAND without deleting its save data. Continue?"));
-  warning_dialog.setStandardButtons(QMessageBox::No | QMessageBox::Yes);
-
-  if (warning_dialog.exec() == QMessageBox::No)
-    return;
-
-  ModalMessageBox result_dialog(this);
-
-  const bool success = WiiUtils::UninstallTitle(game->GetTitleID());
-
-  result_dialog.setIcon(success ? QMessageBox::Information : QMessageBox::Critical);
-  result_dialog.setWindowTitle(success ? tr("Success") : tr("Failure"));
-  result_dialog.setText(success ? tr("Successfully removed this title from the NAND.") :
-                                  tr("Failed to remove this title from the NAND."));
-  result_dialog.exec();
+  const bool removed = WiiUtils::UninstallTitle(game->GetTitleID());
+  ShowResultBox(this, removed, tr("Successfully removed this title from the NAND."),
+                tr("Failed to remove this title from the NAND."));
 }
 
 void GameList::StartWithRiivolution()
 {
-  const auto game = GetSelectedGame();
-  if (!game)
-    return;
-
-  emit OnStartWithRiivolution(*game);
+  if (const auto game = GetSelectedGame())
+    emit OnStartWithRiivolution(*game);
 }
 
 void GameList::SetDefaultISO()
@@ -713,17 +724,14 @@ void GameList::SetDefaultISO()
   if (!game)
     return;
 
-  Settings::Instance().SetDefaultGame(
-      QDir::toNativeSeparators(QString::fromStdString(game->GetFilePath())));
+  const QString path = QString::fromStdString(game->GetFilePath());
+  Settings::Instance().SetDefaultGame(QDir::toNativeSeparators(path));
 }
 
 void GameList::OpenContainingFolder()
 {
-  const auto game = GetSelectedGame();
-  if (!game)
-    return;
-
-  QtUtils::ShowFileInFolder(game->GetFilePath());
+  if (const auto game = GetSelectedGame())
+    QtUtils::ShowFileInFolder(game->GetFilePath());
 }
 
 void GameList::OpenWiiSaveFolder()
@@ -732,15 +740,14 @@ void GameList::OpenWiiSaveFolder()
   if (!game)
     return;
 
-  const std::string path = game->GetWiiFSPath();
-  if (!File::Exists(path))
+  const std::string save_folder = game->GetWiiFSPath();
+  if (!File::Exists(save_folder))
   {
     ModalMessageBox::information(this, tr("Information"), tr("No save data found."));
     return;
   }
 
-  const QUrl url = QUrl::fromLocalFile(QString::fromStdString(path));
-  QDesktopServices::openUrl(url);
+  QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(save_folder)));
 }
 
 void GameList::OpenGCSaveFolder()
@@ -749,139 +756,118 @@ void GameList::OpenGCSaveFolder()
   if (!game)
     return;
 
-  bool found = false;
+  namespace fs = std::filesystem;
+  using ExpansionInterface::EXIDeviceType;
 
-  using ExpansionInterface::Slot;
-
-  for (Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+  bool shown = false;
+  for (const ExpansionInterface::Slot slot : ExpansionInterface::MEMCARD_SLOTS)
   {
-    const ExpansionInterface::EXIDeviceType current_exi_device =
-        Config::Get(Config::GetInfoForEXIDevice(slot));
-    switch (current_exi_device)
-    {
-    case ExpansionInterface::EXIDeviceType::MemoryCardFolder:
-    {
-      namespace fs = std::filesystem;
+    const EXIDeviceType device = Config::Get(Config::GetInfoForEXIDevice(slot));
 
-      std::string override_path = Config::Get(Config::GetInfoForGCIPathOverride(slot));
-      const auto dir =
-          override_path.empty() ? Config::GetGCIFolderPath(slot, game->GetRegion()) : override_path;
-
-      const auto gci_filename_prefix =
-          fs::path{fmt::format("{}-{}-", game->GetMakerID(), game->GetGameID().substr(0, 4))}
-              .native();
-      const auto gci_extension = fs::path{".gci"}.native();
-
-      for (const auto& entry : fs::directory_iterator(dir))
-      {
-        if (entry.path().filename().native().starts_with(gci_filename_prefix) &&
-            entry.path().extension() == gci_extension)
-        {
-          QtUtils::ShowFileInFolder(entry.path().generic_string());
-          found = true;
-          break;
-        }
-      }
-      break;
-    }
-    case ExpansionInterface::EXIDeviceType::MemoryCard:
+    if (device == EXIDeviceType::MemoryCard)
     {
       QtUtils::ShowFileInFolder(Config::GetMemcardPath(slot, game->GetRegion()));
-      found = true;
-      break;
+      shown = true;
+      continue;
     }
-    default:
-      break;
+    if (device != EXIDeviceType::MemoryCardFolder)
+      continue;
+
+    // A GCI folder: show the first save whose name starts with "<maker>-<4 character game ID>-".
+    const std::string folder_override = Config::Get(Config::GetInfoForGCIPathOverride(slot));
+    const std::string folder = folder_override.empty() ?
+                                   Config::GetGCIFolderPath(slot, game->GetRegion()) :
+                                   folder_override;
+    const fs::path::string_type prefix =
+        fs::path{fmt::format("{}-{}-", game->GetMakerID(), game->GetGameID().substr(0, 4))}
+            .native();
+    const fs::path gci_extension{".gci"};
+
+    std::error_code error;
+    for (fs::directory_iterator it(folder, error), end; !error && it != end; it.increment(error))
+    {
+      const fs::path& file = it->path();
+      if (file.filename().native().starts_with(prefix) &&
+          file.extension() == gci_extension.native())
+      {
+        QtUtils::ShowFileInFolder(file.generic_string());
+        shown = true;
+        break;
+      }
     }
   }
 
-  if (!found)
+  if (!shown)
     ModalMessageBox::information(this, tr("Information"), tr("No save data found."));
 }
 
 #ifdef _WIN32
-bool GameList::AddShortcutToDesktop()
+bool GameList::CreateDesktopShortcut()
 {
-  auto init = wil::CoInitializeEx_failfast(COINIT_APARTMENTTHREADED);
-  auto shell_link = wil::CoCreateInstanceNoThrow<ShellLink, IShellLink>();
-  if (!shell_link)
+  const auto com = wil::CoInitializeEx_failfast(COINIT_APARTMENTTHREADED);
+  const auto link = wil::CoCreateInstanceNoThrow<ShellLink, IShellLink>();
+  if (!link)
     return false;
 
-  std::wstring dolphin_path = QCoreApplication::applicationFilePath().toStdWString();
-  if (FAILED(shell_link->SetPath(dolphin_path.c_str())))
+  // The shortcut starts this executable with "-e <game>".
+  const std::wstring executable = QCoreApplication::applicationFilePath().toStdWString();
+  if (FAILED(link->SetPath(executable.c_str())))
     return false;
 
   const auto game = GetSelectedGame();
-  const auto& file_path = game->GetFilePath();
-  std::wstring args = UTF8ToTStr("-e \"" + file_path + "\"");
-  if (FAILED(shell_link->SetArguments(args.c_str())))
+  const std::wstring arguments = UTF8ToTStr("-e \"" + game->GetFilePath() + "\"");
+  if (FAILED(link->SetArguments(arguments.c_str())))
     return false;
 
   wil::unique_cotaskmem_string desktop;
   if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, KF_FLAG_NO_ALIAS, nullptr, &desktop)))
     return false;
 
-  std::string game_name = game->GetName(Core::TitleDatabase());
-  // Sanitize the string by removing all characters that cannot be used in NTFS file names
-  std::erase_if(game_name, [](char ch) {
-    static constexpr char illegal_characters[] = {'<', '>', ':', '\"', '/', '\\', '|', '?', '*'};
-    return Common::Contains(illegal_characters, ch);
-  });
+  // Drop the characters NTFS does not allow in file names.
+  std::string name = game->GetName(Core::TitleDatabase());
+  constexpr std::string_view forbidden = "<>:\"/\\|?*";
+  std::erase_if(name, [forbidden](char c) { return forbidden.find(c) != std::string_view::npos; });
 
-  std::wstring desktop_path = std::wstring(desktop.get()) + UTF8ToTStr("\\" + game_name + ".lnk");
-  auto persist_file = shell_link.try_query<IPersistFile>();
-  if (!persist_file)
+  const std::wstring shortcut_path = std::wstring(desktop.get()) + UTF8ToTStr("\\" + name + ".lnk");
+  const auto file = link.try_query<IPersistFile>();
+  if (!file)
     return false;
 
-  if (FAILED(persist_file->Save(desktop_path.c_str(), TRUE)))
-    return false;
-
-  return true;
+  return SUCCEEDED(file->Save(shortcut_path.c_str(), TRUE));
 }
 #endif
 
-void GameList::DeleteFile()
+void GameList::DeleteSelection()
 {
-  ModalMessageBox confirm_dialog(this);
+  ModalMessageBox confirm(this);
+  confirm.setIcon(QMessageBox::Warning);
+  confirm.setWindowTitle(tr("Confirm"));
+  confirm.setText(tr("Are you sure you want to delete this file?"));
+  confirm.setInformativeText(tr("This cannot be undone!"));
+  confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+  if (confirm.exec() != QMessageBox::Yes)
+    return;
 
-  confirm_dialog.setIcon(QMessageBox::Warning);
-  confirm_dialog.setWindowTitle(tr("Confirm"));
-  confirm_dialog.setText(tr("Are you sure you want to delete this file?"));
-  confirm_dialog.setInformativeText(tr("This cannot be undone!"));
-  confirm_dialog.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
-
-  if (confirm_dialog.exec() == QMessageBox::Yes)
+  for (const auto& game : GetSelectedGames())
   {
-    for (const auto& game : GetSelectedGames())
+    // Retry until the file is gone or the user gives up; giving up stops the whole deletion.
+    for (;;)
     {
-      bool deletion_successful = false;
-
-      while (!deletion_successful)
+      if (File::Delete(game->GetFilePath()))
       {
-        deletion_successful = File::Delete(game->GetFilePath());
-
-        if (deletion_successful)
-        {
-          m_model.RemoveGame(game->GetFilePath());
-        }
-        else
-        {
-          ModalMessageBox error_dialog(this);
-
-          error_dialog.setIcon(QMessageBox::Critical);
-          error_dialog.setWindowTitle(tr("Failure"));
-          error_dialog.setText(tr("Failed to delete the selected file."));
-          error_dialog.setInformativeText(tr("Check whether you have the permissions required to "
-                                             "delete the file or whether it's still in use."));
-          error_dialog.setStandardButtons(QMessageBox::Retry | QMessageBox::Abort);
-
-          if (error_dialog.exec() == QMessageBox::Abort)
-            break;
-        }
+        m_model.RemoveGame(game->GetFilePath());
+        break;
       }
 
-      if (!deletion_successful)
-        break;  // Something is wrong, so we should abort the whole thing
+      ModalMessageBox error(this);
+      error.setIcon(QMessageBox::Critical);
+      error.setWindowTitle(tr("Failure"));
+      error.setText(tr("Failed to delete the selected file."));
+      error.setInformativeText(tr("Check whether you have the permissions required to "
+                                  "delete the file or whether it's still in use."));
+      error.setStandardButtons(QMessageBox::Retry | QMessageBox::Abort);
+      if (error.exec() == QMessageBox::Abort)
+        return;
     }
   }
 }
@@ -896,56 +882,45 @@ void GameList::ChangeDisc()
   system.GetDVDInterface().ChangeDisc(Core::CPUThreadGuard{system}, game->GetFilePath());
 }
 
-QAbstractItemView* GameList::GetActiveView() const
+QAbstractItemView* GameList::CurrentView() const
 {
   if (currentWidget() == m_list)
-  {
     return m_list;
-  }
   return m_grid;
 }
 
-QSortFilterProxyModel* GameList::GetActiveProxyModel() const
+QSortFilterProxyModel* GameList::CurrentProxy() const
 {
   if (currentWidget() == m_list)
-  {
     return m_list_proxy;
-  }
   return m_grid_proxy;
 }
 
 std::shared_ptr<const UICommon::GameFile> GameList::GetSelectedGame() const
 {
-  QItemSelectionModel* const sel_model = GetActiveView()->selectionModel();
-  if (sel_model->hasSelection())
-  {
-    QSortFilterProxyModel* const proxy = GetActiveProxyModel();
-    QModelIndex model_index = proxy->mapToSource(sel_model->selectedIndexes()[0]);
-    return m_model.GetGameFile(model_index.row());
-  }
-  return {};
+  const QItemSelectionModel* const selection = CurrentView()->selectionModel();
+  if (!selection->hasSelection())
+    return {};
+
+  const QModelIndex first = CurrentProxy()->mapToSource(selection->selectedIndexes()[0]);
+  return m_model.GetGameFile(first.row());
 }
 
 QList<std::shared_ptr<const UICommon::GameFile>> GameList::GetSelectedGames() const
 {
-  QList<std::shared_ptr<const UICommon::GameFile>> selected_list;
-  QItemSelectionModel* const sel_model = GetActiveView()->selectionModel();
+  QList<std::shared_ptr<const UICommon::GameFile>> games;
+  const QItemSelectionModel* const selection = CurrentView()->selectionModel();
+  if (!selection->hasSelection())
+    return games;
 
-  if (sel_model->hasSelection())
-  {
-    const QModelIndexList index_list = sel_model->selectedRows();
-    for (const auto& index : index_list)
-    {
-      const QModelIndex model_index = GetActiveProxyModel()->mapToSource(index);
-      selected_list.push_back(m_model.GetGameFile(model_index.row()));
-    }
-  }
-  return selected_list;
+  for (const QModelIndex& row : selection->selectedRows())
+    games.push_back(m_model.GetGameFile(CurrentProxy()->mapToSource(row).row()));
+  return games;
 }
 
 bool GameList::HasMultipleSelected() const
 {
-  return GetActiveView()->selectionModel()->selectedRows().size() > 1;
+  return CurrentView()->selectionModel()->selectedRows().size() > 1;
 }
 
 std::shared_ptr<const UICommon::GameFile> GameList::FindGame(const std::string& path) const
@@ -973,42 +948,39 @@ void GameList::SetPreferredView(bool list)
 {
   m_prefer_list = list;
   Settings::Instance().SetPreferredView(list);
-  ConsiderViewChange();
+  ShowFittingPage();
 }
 
-void GameList::ConsiderViewChange()
+void GameList::ShowFittingPage()
 {
-  if (m_model.rowCount(QModelIndex()) > 0)
-  {
-    if (m_prefer_list)
-      setCurrentWidget(m_list);
-    else
-      setCurrentWidget(m_grid);
-  }
-  else
+  if (m_model.rowCount(QModelIndex()) == 0)
   {
     setCurrentWidget(m_empty);
+    return;
   }
+  setCurrentWidget(m_prefer_list ? static_cast<QWidget*>(m_list) : m_grid);
 }
+
 void GameList::keyPressEvent(QKeyEvent* event)
 {
-  if (event->key() == Qt::Key_Return && GetSelectedGame() != nullptr)
-  {
-    if (event->modifiers() == Qt::AltModifier)
-      OpenProperties();
-    else
-      emit GameSelected();
-  }
-  else
+  const bool start_key = event->key() == Qt::Key_Return && GetSelectedGame() != nullptr;
+  if (!start_key)
   {
     QStackedWidget::keyPressEvent(event);
+    return;
   }
+
+  // Alt+Enter opens the game's properties, Enter alone starts it.
+  if (event->modifiers() == Qt::AltModifier)
+    OpenProperties();
+  else
+    emit GameSelected();
 }
 
 void GameList::OnColumnVisibilityToggled(const QString& row, bool visible)
 {
-  using Column = GameListModel::Column;
-  static const QMap<QString, Column> rowname_to_column = {
+  // The View > List Columns entries pass their (translated) labels.
+  static const QMap<QString, Column> columns_by_label{
       {tr("Platform"), Column::Platform},
       {tr("Banner"), Column::Banner},
       {tr("Title"), Column::Title},
@@ -1026,182 +998,141 @@ void GameList::OnColumnVisibilityToggled(const QString& row, bool visible)
       {tr("Tags"), Column::Tags},
   };
 
-  m_list->setColumnHidden(static_cast<int>(rowname_to_column[row]), !visible);
+  const Column column = columns_by_label.value(row, Column::Platform);
+  m_list->setColumnHidden(ColumnIndex(column), !visible);
+}
+
+void GameList::InvalidateProxies()
+{
+  m_list_proxy->invalidate();
+  m_grid_proxy->invalidate();
 }
 
 void GameList::OnGameListVisibilityChanged()
 {
-  m_list_proxy->invalidate();
-  m_grid_proxy->invalidate();
-
+  InvalidateProxies();
   UpdateGameCount();
 }
 
-void GameList::OnSectionResized(int index, int, int)
+void GameList::OnHeaderSectionResized(int logical_index)
 {
-  auto* hor_header = m_list->horizontalHeader();
+  QHeaderView* const header = m_list->horizontalHeader();
 
-  const int vis_index = hor_header->visualIndex(index);
-  const int col_count = hor_header->count() - hor_header->hiddenSectionCount();
+  const int position = header->visualIndex(logical_index);
+  const int shown_count = header->count() - header->hiddenSectionCount();
+  const auto is_interactive = [header](int visual) {
+    return header->sectionResizeMode(header->logicalIndex(visual)) == QHeaderView::Interactive;
+  };
 
-  bool last = true;
+  bool resizable_after = false;
+  for (int visual = position + 1; visual < shown_count && !resizable_after; ++visual)
+    resizable_after = is_interactive(visual);
 
-  for (int i = vis_index + 1; i < col_count; i++)
+  if (!resizable_after)
   {
-    const int logical_index = hor_header->logicalIndex(i);
-    if (hor_header->sectionResizeMode(logical_index) != QHeaderView::Interactive)
-      continue;
-
-    last = false;
-    break;
-  }
-
-  if (!last)
-  {
-    std::vector<int> sections;
-    for (int i = 0; i < vis_index; i++)
-    {
-      const int logical_index = hor_header->logicalIndex(i);
-      if (hor_header->sectionResizeMode(logical_index) != QHeaderView::Interactive)
-        continue;
-
-      hor_header->setSectionResizeMode(logical_index, QHeaderView::Fixed);
-      sections.push_back(i);
-    }
-
-    OnHeaderViewChanged();
-
-    for (int i : sections)
-    {
-      hor_header->setSectionResizeMode(hor_header->logicalIndex(i), QHeaderView::Interactive);
-    }
-  }
-  else
-  {
-    OnHeaderViewChanged();
-  }
-}
-
-void GameList::OnHeaderViewChanged()
-{
-  static bool block = false;
-
-  if (block)
+    FitColumnsToWidth();
     return;
+  }
 
-  block = true;
-
-  UpdateColumnVisibility();
-
-  // So here's the deal: Qt's way of resizing stuff around stretched columns sucks ass
-  // That's why instead of using Stretch, we'll just make resizable columns take all the available
-  // space ourselves!
-
-  int available_width = width() - style()->pixelMetric(QStyle::PM_ScrollBarExtent);
-  int previous_width = 0;
-
-  std::vector<int> candidate_columns;
-
-  // Iterate through all columns
-  for (int i = 0; i < static_cast<int>(GameListModel::Column::Count); i++)
+  // Dragging a column edge should give or take room from the columns to its right only, so the
+  // resizable columns to its left are pinned while the widths are redistributed.
+  std::vector<int> pinned;
+  for (int visual = 0; visual < position; ++visual)
   {
-    if (m_list->isColumnHidden(i))
+    if (!is_interactive(visual))
       continue;
-
-    if (m_list->horizontalHeader()->sectionResizeMode(i) == QHeaderView::Fixed)
-    {
-      available_width -= m_list->columnWidth(i);
-    }
-    else
-    {
-      candidate_columns.push_back(i);
-      previous_width += m_list->columnWidth(i);
-    }
+    header->setSectionResizeMode(header->logicalIndex(visual), QHeaderView::Fixed);
+    pinned.push_back(visual);
   }
 
-  for (int column : candidate_columns)
-  {
-    int column_width = static_cast<int>(
-        std::max(5.f, std::ceil(available_width * (static_cast<float>(m_list->columnWidth(column)) /
-                                                   previous_width))));
+  FitColumnsToWidth();
 
-    m_list->setColumnWidth(column, column_width);
-  }
-
-  block = false;
+  for (const int visual : pinned)
+    header->setSectionResizeMode(header->logicalIndex(visual), QHeaderView::Interactive);
 }
 
-void GameList::NewTag()
+void GameList::FitColumnsToWidth()
 {
-  const auto tag =
+  // Changing widths below fires the header signals that lead back here.
+  if (m_fitting_columns)
+    return;
+  m_fitting_columns = true;
+
+  ApplyColumnVisibility();
+
+  // Instead of a stretching column (which Qt handles badly next to resizable ones), share the
+  // width left by the fixed columns among the resizable ones, in proportion to their widths.
+  QHeaderView* const header = m_list->horizontalHeader();
+  int room = width() - style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+  int flexible_total = 0;
+  std::vector<int> flexible;
+  for (int column = 0; column < COLUMN_COUNT; ++column)
+  {
+    if (m_list->isColumnHidden(column))
+      continue;
+
+    if (header->sectionResizeMode(column) == QHeaderView::Fixed)
+    {
+      room -= m_list->columnWidth(column);
+      continue;
+    }
+    flexible.push_back(column);
+    flexible_total += m_list->columnWidth(column);
+  }
+
+  for (const int column : flexible)
+  {
+    const float share = static_cast<float>(m_list->columnWidth(column)) / flexible_total;
+    const float new_width = std::max(5.f, std::ceil(room * share));
+    m_list->setColumnWidth(column, static_cast<int>(new_width));
+  }
+
+  m_fitting_columns = false;
+}
+
+void GameList::PromptNewTag()
+{
+  const QString tag =
       QInputDialog::getText(this, tr("New tag"), tr("Name for a new tag:"), QLineEdit::Normal,
                             QString{}, nullptr, Qt::WindowCloseButtonHint);
-
-  if (tag.isEmpty())
-    return;
-
-  m_model.NewTag(tag);
+  if (!tag.isEmpty())
+    m_model.NewTag(tag);
 }
 
-void GameList::DeleteTag()
+void GameList::PromptRemoveTag()
 {
-  const auto tag =
+  const QString tag =
       QInputDialog::getText(this, tr("Remove tag"), tr("Name of the tag to remove:"),
                             QLineEdit::Normal, QString{}, nullptr, Qt::WindowCloseButtonHint);
-
-  if (tag.isEmpty())
-    return;
-
-  m_model.DeleteTag(tag);
+  if (!tag.isEmpty())
+    m_model.DeleteTag(tag);
 }
 
 void GameList::SetSearchTerm(const QString& term)
 {
   m_model.SetSearchTerm(term);
-
-  m_list_proxy->invalidate();
-  m_grid_proxy->invalidate();
-
-  UpdateColumnVisibility();
+  InvalidateProxies();
+  ApplyColumnVisibility();
   UpdateGameCount();
 }
 
 void GameList::UpdateGameCount() const
 {
-  const int total_games = m_model.rowCount(QModelIndex{});
-  const int visible_games = m_list_proxy->rowCount();
-
-  emit GameCountUpdated(total_games, visible_games);
+  emit GameCountUpdated(m_model.rowCount(QModelIndex{}), m_list_proxy->rowCount());
 }
 
-void GameList::ZoomIn()
+void GameList::Zoom(bool in)
 {
-  m_model.SetScale(m_model.GetScale() + 0.1);
-
-  m_list_proxy->invalidate();
-  m_grid_proxy->invalidate();
-
-  UpdateFont();
-}
-
-void GameList::ZoomOut()
-{
-  if (m_model.GetScale() <= 0.1)
+  // Steps of a tenth, computed in double precision; the scale never goes below a tenth.
+  const double scale = m_model.GetScale();
+  if (!in && scale <= 0.1)
     return;
+  m_model.SetScale(static_cast<float>(in ? scale + 0.1 : scale - 0.1));
 
-  m_model.SetScale(m_model.GetScale() - 0.1);
+  InvalidateProxies();
 
-  m_list_proxy->invalidate();
-  m_grid_proxy->invalidate();
-
-  UpdateFont();
-}
-
-void GameList::UpdateFont()
-{
-  QFont f;
-
-  f.setPointSizeF(m_model.GetScale() * f.pointSize());
-
-  m_grid->setFont(f);
+  // The grid's captions grow and shrink with the pictures.
+  QFont font;
+  font.setPointSizeF(m_model.GetScale() * font.pointSize());
+  m_grid->setFont(font);
 }

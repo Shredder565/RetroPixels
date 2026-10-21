@@ -1,12 +1,11 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QSortFilterProxyModel>
 
-// This subclass of QSortFilterProxyModel transforms the raw data into a
-// single-column large icon + name to be displayed in a QListView.
+// The grid view's proxy. Each game shows as one item: its cover or a large banner as the
+// decoration and its title as the text.
 class GridProxyModel final : public QSortFilterProxyModel
 {
   Q_OBJECT

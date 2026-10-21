@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,9 +21,11 @@ namespace UICommon
 class GameFile;
 }
 
-// Watches directories and loads GameFiles in a separate thread.
-// To use this, just add directories using AddDirectory, and listen for the
-// GameLoaded and GameRemoved signals.
+// Keeps the game list in step with the game folders. All scanning and game file loading happens
+// on a worker thread, which reports through the three signals below.
+//
+// Nothing is emitted before Start(). Register every folder with AddDirectory() first, so that
+// the games from the cache do not vanish for a moment while the first scan catches up.
 class GameTracker final : public QFileSystemWatcher
 {
   Q_OBJECT
@@ -32,10 +33,6 @@ class GameTracker final : public QFileSystemWatcher
 public:
   explicit GameTracker(QObject* parent = nullptr);
 
-  // A GameTracker won't emit any signals until this function has been called.
-  // Before you call this function, make sure to call AddDirectory for all
-  // directories you want to track, otherwise games will briefly disappear
-  // until you call AddDirectory and the GameTracker finishes scanning the file system.
   void Start();
 
   void AddDirectory(const QString& dir);
@@ -49,53 +46,58 @@ signals:
   void GameRemoved(const std::string& path);
 
 private:
-  void LoadCache();
-  void StartInternal();
-  void UpdateDirectory(const QString& dir);
-  void UpdateFile(const QString& path);
-  void AddDirectoryInternal(const QString& dir);
-  void RemoveDirectoryInternal(const QString& dir);
-  void UpdateDirectoryInternal(const QString& dir);
-  void UpdateFileInternal(const QString& path);
-  QSet<QString> FindMissingFiles(const QString& dir);
-  void LoadGame(const QString& path);
-
-  bool AddPath(const QString& path);
-  bool RemovePath(const QString& path);
-
-  enum class CommandType
+  // What the worker thread is asked to do.
+  enum class Job
   {
-    LoadCache,
-    Start,
-    AddDirectory,
-    RemoveDirectory,
-    UpdateDirectory,
-    UpdateFile,
-    UpdateMetadata,
-    ResumeProcessing,
-    PurgeCache,
-    BeginRefresh,
-    EndRefresh,
+    ReadCache,
+    FirstScan,
+    AddFolder,
+    DropFolder,
+    RescanFolder,
+    RescanFile,
+    RefreshMetadata,
+    Resume,
+    ClearCache,
+    RefreshBegin,
+    RefreshEnd,
   };
 
-  struct Command
+  struct Task
   {
-    CommandType type;
+    Job job;
     QString path;
   };
 
-  // game path -> directories that track it
-  QMap<QString, QSet<QString>> m_tracked_files;
-  QVector<QString> m_tracked_paths;
-  Common::WorkQueueThread<Command> m_load_thread;
+  void Post(Job job, const QString& path = {});
+  void RunTask(const Task& task);
+
+  // Worker thread side.
+  void ReadCache();
+  void FirstScan();
+  void AddFolder(const QString& dir);
+  void DropFolder(const QString& dir);
+  void RescanFolder(const QString& dir);
+  void RescanFile(const QString& path);
+  QSet<QString> GamesGoneFrom(const QString& dir);
+  void LoadGame(const QString& path);
+
+  // Bookkeeping of what the file system watcher looks at.
+  bool Watch(const QString& path);
+  bool Unwatch(const QString& path);
+
+  // For each game file: the folders it was found in.
+  QMap<QString, QSet<QString>> m_owners;
+  QVector<QString> m_watched;
   UICommon::GameFileCache m_cache;
-  Common::Event m_cache_loaded_event;
-  Common::Event m_initial_games_emitted_event;
-  bool m_initial_games_emitted = false;
-  bool m_started = false;
-  bool m_needs_purge = false;
-  bool m_refresh_in_progress = false;
-  std::atomic_bool m_processing_halted = false;
+  Common::Event m_cache_ready;
+  Common::Event m_cached_games_sent;
+  bool m_cached_games_queued = false;
+  bool m_scanning_enabled = false;
+  bool m_purge_on_refresh = false;
+  bool m_refreshing = false;
+  std::atomic_bool m_halted = false;
+  // Declared last so that the worker is gone before the state it works on.
+  Common::WorkQueueThread<Task> m_worker;
 };
 
 Q_DECLARE_METATYPE(std::shared_ptr<const UICommon::GameFile>)

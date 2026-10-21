@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,6 +22,8 @@ namespace UICommon
 class GameFile;
 }
 
+// The game list's data: one row per game file, one column per property. The list and grid
+// views look at it through their own proxy models.
 class GameListModel final : public QAbstractTableModel
 {
   Q_OBJECT
@@ -30,7 +31,6 @@ class GameListModel final : public QAbstractTableModel
 public:
   explicit GameListModel(QObject* parent = nullptr);
 
-  // Qt's Model/View stuff uses these overrides.
   QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
   QVariant headerData(int section, Qt::Orientation orientation,
                       int role = Qt::DisplayRole) const override;
@@ -42,7 +42,8 @@ public:
   bool ShouldDisplayGameListItem(int index) const;
   void SetSearchTerm(const QString& term);
 
-  // Using a custom sort role as it sometimes differs slightly from the default Qt::DisplayRole.
+  // The proxies sort by this role. It mostly matches Qt::DisplayRole, but uses raw numbers for
+  // sizes and times and pads the numbers inside titles.
   static constexpr int SORT_ROLE = Qt::UserRole;
 
   enum class Column
@@ -87,18 +88,19 @@ public:
   void PurgeCache();
 
 private:
-  // Index in m_games, or -1 if it isn't found
-  int FindGameIndex(const std::string& path) const;
+  QVariant TitleData(const UICommon::GameFile& game, int role) const;
+  QVariant TimePlayedData(const UICommon::GameFile& game, int role) const;
+  int RowOf(const std::string& path) const;
+  void SetTagsOf(const std::string& path, const QStringList& tags);
+  void StoreTagNames() const;
 
-  void OnEmulationStateChanged(Core::State state);
-
-  QStringList m_tag_list;
-  QMap<QString, QVariant> m_game_tags;
+  QStringList m_tags;
+  QMap<QString, QVariant> m_tags_by_path;
 
   GameTracker m_tracker;
   QList<std::shared_ptr<const UICommon::GameFile>> m_games;
-  Core::TitleDatabase m_title_database;
-  TimePlayed m_timer;
-  QString m_term;
-  float m_scale = 1.0;
+  Core::TitleDatabase m_titles;
+  TimePlayed m_time_played;
+  QString m_search;
+  float m_zoom = 1.0;
 };

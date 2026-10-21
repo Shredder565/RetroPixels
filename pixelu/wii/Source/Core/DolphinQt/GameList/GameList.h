@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,7 @@
 class QAbstractItemView;
 class QLabel;
 class QListView;
+class QMenu;
 class QSortFilterProxyModel;
 class QTableView;
 
@@ -20,6 +20,8 @@ namespace UICommon
 class GameFile;
 }
 
+// The main window's game browser. It shows the games either as a table (the "list") or as a
+// grid of covers/banners, and a hint label when there are no games at all.
 class GameList final : public QStackedWidget
 {
   Q_OBJECT
@@ -63,54 +65,60 @@ signals:
   void OpenAchievementSettings();
 #endif  // USE_RETRO_ACHIEVEMENTS
 
+protected:
+  void keyPressEvent(QKeyEvent* event) override;
+
 private:
-  void ShowHeaderContextMenu(const QPoint& pos);
-  void ShowContextMenu(const QPoint&);
-  void OpenContainingFolder();
+  // Building the three pages.
+  void BuildTable();
+  void BuildGrid();
+  void BuildPlaceholder();
+
+  // Context menus and what their entries do.
+  void ShowColumnsMenu(const QPoint& pos);
+  void ShowGameMenu(const QPoint& pos);
+  void AddMultiSelectionEntries(QMenu* menu);
+  void AddSingleGameEntries(QMenu* menu, const std::shared_ptr<const UICommon::GameFile>& game);
+  void AddTagEntries(QMenu* menu, const std::string& path);
   void OpenProperties();
-  void OpenWiiSaveFolder();
-  void OpenGCSaveFolder();
   void OpenWiki();
   void StartWithRiivolution();
   void SetDefaultISO();
-  void DeleteFile();
-#ifdef _WIN32
-  bool AddShortcutToDesktop();
-#endif
+  void ConvertSelection();
+  void ChangeDisc();
   void InstallWAD();
   void UninstallWAD();
-  void ExportWiiSave();
-  void ConvertFile();
-  void ChangeDisc();
-  void NewTag();
-  void DeleteTag();
-  void UpdateColumnVisibility();
+  void OpenWiiSaveFolder();
+  void ExportWiiSaves();
+  void OpenGCSaveFolder();
+  void OpenContainingFolder();
+  void DeleteSelection();
+#ifdef _WIN32
+  bool CreateDesktopShortcut();
+#endif
+  void PromptNewTag();
+  void PromptRemoveTag();
 
-  void ZoomIn();
-  void ZoomOut();
+  // Table layout.
+  void ApplyColumnVisibility();
+  void OnHeaderSectionResized(int logical_index);
+  void FitColumnsToWidth();
 
-  void OnHeaderViewChanged();
-  void OnSectionResized(int index, int, int);
-
-  void MakeListView();
-  void MakeGridView();
-  void MakeEmptyView();
-  // We only have two views, just use a bool to distinguish.
+  // Views and zoom.
   void SetPreferredView(bool list);
-  QAbstractItemView* GetActiveView() const;
-  QSortFilterProxyModel* GetActiveProxyModel() const;
-  void ConsiderViewChange();
-  void UpdateFont();
+  void ShowFittingPage();
+  QAbstractItemView* CurrentView() const;
+  QSortFilterProxyModel* CurrentProxy() const;
+  void InvalidateProxies();
+  void Zoom(bool in);
 
   GameListModel m_model;
-  QSortFilterProxyModel* m_list_proxy;
-  QSortFilterProxyModel* m_grid_proxy;
+  QSortFilterProxyModel* m_list_proxy = nullptr;
+  QSortFilterProxyModel* m_grid_proxy = nullptr;
 
-  QListView* m_grid;
-  QTableView* m_list;
-  QLabel* m_empty;
-  bool m_prefer_list;
-
-protected:
-  void keyPressEvent(QKeyEvent* event) override;
+  QTableView* m_list = nullptr;
+  QListView* m_grid = nullptr;
+  QLabel* m_empty = nullptr;
+  bool m_prefer_list = true;
+  bool m_fitting_columns = false;
 };

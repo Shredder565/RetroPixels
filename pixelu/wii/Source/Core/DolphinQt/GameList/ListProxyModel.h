@@ -1,11 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QSortFilterProxyModel>
 
-// This subclass of QSortFilterProxyModel allows the data to be filtered by the view.
+// The list view's proxy: every column of GameListModel, with the game list filters applied.
 class ListProxyModel final : public QSortFilterProxyModel
 {
   Q_OBJECT

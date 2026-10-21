@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/GameList/GridProxyModel.h"
 
@@ -14,85 +13,83 @@
 
 #include "UICommon/GameFile.h"
 
-const QSize LARGE_BANNER_SIZE(144, 48);
+namespace
+{
+const QSize COVER_SIZE(160, 224);
+const QSize BIG_BANNER_SIZE(144, 48);
+
+int TitleColumn()
+{
+  return static_cast<int>(GameListModel::Column::Title);
+}
+}  // namespace
 
 GridProxyModel::GridProxyModel(QObject* parent) : QSortFilterProxyModel(parent)
 {
   setDynamicSortFilter(true);
 }
 
-QVariant GridProxyModel::data(const QModelIndex& i, int role) const
+QVariant GridProxyModel::data(const QModelIndex& index, int role) const
 {
-  QModelIndex source_index = mapToSource(i);
+  const int row = mapToSource(index).row();
+
   if (role == Qt::DisplayRole)
+    return sourceModel()->data(sourceModel()->index(row, TitleColumn()), Qt::DisplayRole);
+
+  if (role != Qt::DecorationRole)
+    return {};
+
+  auto* const games = static_cast<GameListModel*>(sourceModel());
+  const float zoom = games->GetScale();
+  const auto& cover = games->GetGameFile(row)->GetCoverImage().buffer;
+  const bool use_covers = Config::Get(Config::MAIN_USE_GAME_COVERS);
+
+  if (use_covers && !cover.empty())
   {
-    return sourceModel()->data(
-        sourceModel()->index(source_index.row(), static_cast<int>(GameListModel::Column::Title)),
-        Qt::DisplayRole);
+    const QImage image =
+        QImage::fromData(reinterpret_cast<const unsigned char*>(cover.data()),
+                         static_cast<int>(cover.size()));
+    const QPixmap picture = QPixmap::fromImage(image);
+    return picture.scaled(COVER_SIZE * zoom * picture.devicePixelRatio(), Qt::KeepAspectRatio,
+                          Qt::SmoothTransformation);
   }
-  else if (role == Qt::DecorationRole)
+
+  // No cover to show: center the banner vertically on a white tile the size a cover (or a large
+  // banner, when covers are off) would take.
+  const QSize tile_size = (use_covers ? COVER_SIZE : BIG_BANNER_SIZE) * zoom;
+  QPixmap tile(tile_size * QPixmap().devicePixelRatio());
+
+  const QModelIndex banner_cell = games->index(row, static_cast<int>(GameListModel::Column::Banner));
+  const QPixmap banner = games->data(banner_cell, Qt::DecorationRole)
+                             .value<QPixmap>()
+                             .scaled(tile.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+  tile.fill();
   {
-    auto* model = static_cast<GameListModel*>(sourceModel());
-
-    const auto& buffer = model->GetGameFile(source_index.row())->GetCoverImage().buffer;
-
-    QSize size = Config::Get(Config::MAIN_USE_GAME_COVERS) ? QSize(160, 224) : LARGE_BANNER_SIZE;
-    QPixmap pixmap(size * model->GetScale() * QPixmap().devicePixelRatio());
-
-    if (buffer.empty() || !Config::Get(Config::MAIN_USE_GAME_COVERS))
-    {
-      QPixmap banner = model
-                           ->data(model->index(source_index.row(),
-                                               static_cast<int>(GameListModel::Column::Banner)),
-                                  Qt::DecorationRole)
-                           .value<QPixmap>();
-
-      banner = banner.scaled(pixmap.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-
-      pixmap.fill();
-
-      QPainter painter(&pixmap);
-
-      painter.drawPixmap(0, pixmap.height() / 2 - banner.height() / 2, banner.width(),
-                         banner.height(), banner);
-
-      return pixmap;
-    }
-    else
-    {
-      pixmap = QPixmap::fromImage(QImage::fromData(
-          reinterpret_cast<const unsigned char*>(&buffer[0]), static_cast<int>(buffer.size())));
-
-      return pixmap.scaled(QSize(160, 224) * model->GetScale() * pixmap.devicePixelRatio(),
-                           Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    }
+    QPainter painter(&tile);
+    const int top = tile.height() / 2 - banner.height() / 2;
+    painter.drawPixmap(0, top, banner.width(), banner.height(), banner);
   }
-  return QVariant();
+  return tile;
 }
 
-bool GridProxyModel::filterAcceptsRow(int source_row, const QModelIndex& source_parent) const
+bool GridProxyModel::filterAcceptsRow(int source_row, const QModelIndex&) const
 {
-  GameListModel* glm = qobject_cast<GameListModel*>(sourceModel());
-  return glm->ShouldDisplayGameListItem(source_row);
+  const auto* const games = qobject_cast<GameListModel*>(sourceModel());
+  return games->ShouldDisplayGameListItem(source_row);
 }
 
 bool GridProxyModel::lessThan(const QModelIndex& left, const QModelIndex& right) const
 {
-  if (left.data(GameListModel::SORT_ROLE) != right.data(GameListModel::SORT_ROLE))
+  const QVariant left_key = left.data(GameListModel::SORT_ROLE);
+  const QVariant right_key = right.data(GameListModel::SORT_ROLE);
+  if (left_key != right_key)
     return QSortFilterProxyModel::lessThan(left, right);
 
-  // If two items are otherwise equal, compare them by their title
-  const auto right_title = sourceModel()
-                               ->index(right.row(), static_cast<int>(GameListModel::Column::Title))
-                               .data()
-                               .toString();
-  const auto left_title = sourceModel()
-                              ->index(left.row(), static_cast<int>(GameListModel::Column::Title))
-                              .data()
-                              .toString();
-
+  // Equal keys: order by title instead, in the current sort direction.
+  const QString a = sourceModel()->index(left.row(), TitleColumn()).data().toString();
+  const QString b = sourceModel()->index(right.row(), TitleColumn()).data().toString();
   if (sortOrder() == Qt::AscendingOrder)
-    return left_title < right_title;
-
-  return right_title < left_title;
+    return a < b;
+  return b < a;
 }
