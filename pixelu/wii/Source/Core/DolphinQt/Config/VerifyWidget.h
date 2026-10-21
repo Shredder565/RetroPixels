@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,6 +22,8 @@ namespace DiscIO
 class Volume;
 }
 
+// The Verify tab: runs the volume verifier and shows its problems, summary,
+// hashes and Redump status.
 class VerifyWidget final : public QWidget
 {
   Q_OBJECT
@@ -30,28 +31,27 @@ public:
   explicit VerifyWidget(std::shared_ptr<DiscIO::Volume> volume);
 
 private:
-  void OnEmulationStateChanged(Core::State state);
-  void CreateWidgets();
-  std::pair<QCheckBox*, QLineEdit*> AddHashLine(QFormLayout* layout, const QString& text);
-  void ConnectWidgets();
+  // A read-only hash field with its "Calculate" box, added as a form row.
+  std::pair<QCheckBox*, QLineEdit*> AddHashRow(QFormLayout* form, const QString& caption);
 
-  bool CanVerifyRedump() const;
-  void UpdateRedumpEnabled();
-  void Verify();
-  void SetProblemCellText(int row, int column, const QString& text);
+  void OnEmulationStateChanged(Core::State state);
+  bool RedumpAllowed() const;
+  void RefreshRedumpBox();
+  void RunVerification();
+  void PutProblemCell(int row, int column, const QString& text);
 
   std::shared_ptr<DiscIO::Volume> m_volume;
   QTableWidget* m_problems;
-  QTextEdit* m_summary_text;
-  QFormLayout* m_hash_layout;
-  QFormLayout* m_redump_layout;
-  QCheckBox* m_crc32_checkbox;
-  QCheckBox* m_md5_checkbox;
-  QCheckBox* m_sha1_checkbox;
-  QCheckBox* m_redump_checkbox;
-  QLineEdit* m_crc32_line_edit;
-  QLineEdit* m_md5_line_edit;
-  QLineEdit* m_sha1_line_edit;
-  QLineEdit* m_redump_line_edit;
+  QTextEdit* m_summary;
+  QFormLayout* m_hash_form;
+  QFormLayout* m_redump_form;
+  QCheckBox* m_crc32_box;
+  QCheckBox* m_md5_box;
+  QCheckBox* m_sha1_box;
+  QCheckBox* m_redump_box;
+  QLineEdit* m_crc32_field;
+  QLineEdit* m_md5_field;
+  QLineEdit* m_sha1_field;
+  QLineEdit* m_redump_field;
   QPushButton* m_verify_button;
 };
