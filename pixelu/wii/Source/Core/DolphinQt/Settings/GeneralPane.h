@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 class ConfigBool;
 class QCheckBox;
 class QComboBox;
+class QFormLayout;
 class QLabel;
 class QPushButton;
 class QRadioButton;
@@ -22,6 +22,8 @@ namespace Core
 enum class State;
 }
 
+// "General" settings page: basic emulation toggles, speed limit, update track, fallback
+// region and (when built in) usage statistics.
 class GeneralPane final : public QWidget
 {
   Q_OBJECT
@@ -29,38 +31,35 @@ public:
   explicit GeneralPane(QWidget* parent = nullptr);
 
 private:
-  void CreateLayout();
-  void ConnectLayout();
-  void CreateBasic();
-  void CreateAutoUpdate();
-  void CreateFallbackRegion();
-  void AddDescriptions();
+  QVBoxLayout* AddGroup(QVBoxLayout* page, const QString& title);
+  void BuildBasicGroup(QVBoxLayout* page);
+  void BuildUpdateGroup(QVBoxLayout* page);
+  void BuildRegionGroup(QVBoxLayout* page);
+  void SetTooltips();
+  void WireUp();
 
-  void LoadConfig();
-  void OnSaveConfig();
+  void ReadSettings();
+  void WriteSettings();
   void OnEmulationStateChanged(Core::State state);
-  void UpdateDescriptionsUsingHardcoreStatus();
+  void RefreshSpeedLimitTooltip();
 
-  // Widgets
-  QVBoxLayout* m_main_layout;
-  ToolTipComboBox* m_combobox_speedlimit;
-  ToolTipComboBox* m_combobox_update_track;
-  ToolTipComboBox* m_combobox_fallback_region;
-  ConfigBool* m_checkbox_dualcore;
-  ConfigBool* m_checkbox_cheats;
-  ConfigBool* m_checkbox_load_games_into_memory;
-  ConfigBool* m_checkbox_override_region_settings;
-  ConfigBool* m_checkbox_auto_disc_change;
+  ConfigBool* m_dual_core;
+  ConfigBool* m_cheats;
+  ConfigBool* m_preload_game;
+  ConfigBool* m_mismatched_region;
+  ConfigBool* m_auto_disc_change;
 #ifdef USE_DISCORD_PRESENCE
-  ToolTipCheckBox* m_checkbox_discord_presence;
+  ToolTipCheckBox* m_discord;
 #endif
+  ToolTipComboBox* m_speed_limit;
+  ToolTipComboBox* m_update_track;
+  ToolTipComboBox* m_fallback_region;
 
-// Analytics related
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
-  void CreateAnalytics();
-  void GenerateNewIdentity();
+  void BuildStatisticsGroup(QVBoxLayout* page);
+  void ResetStatisticsIdentity();
 
-  ToolTipPushButton* m_button_generate_new_identity;
-  ToolTipCheckBox* m_checkbox_enable_analytics;
+  ToolTipCheckBox* m_statistics;
+  ToolTipPushButton* m_new_identity;
 #endif
 };
