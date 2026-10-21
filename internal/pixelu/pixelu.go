@@ -18,14 +18,12 @@ import (
 	"retropixels/internal/dolphin"
 )
 
-// ExeName is PixelU's program file (it ships in a "PixelU" folder with its
-// resources, gameProfiles and portable folders).
-const ExeName = "PixelU.exe"
-
-// FindExe returns PixelU.exe: the one chosen by the player if it still
-// exists, else a PixelU folder next to RetroPixels (appDir\PixelU\PixelU.exe),
-// else the newest copy unpacked into Downloads
-// (home\Downloads\PixelU*\PixelU\PixelU.exe). "" if there is none.
+// FindExe returns PixelU's program (ExeName: PixelU.exe on Windows, PixelU
+// on Linux): the one chosen by the player if it still exists, else a
+// PixelU folder next to RetroPixels (appDir\PixelU\PixelU.exe), else the
+// newest copy unpacked into Downloads (home\Downloads\PixelU*\PixelU\
+// PixelU.exe; on Linux the desktop's Downloads folder, whatever its name,
+// and ~/Downloads). "" if there is none.
 func FindExe(chosen, appDir, home string) string {
 	isFile := func(p string) bool {
 		st, err := os.Stat(p)
@@ -43,10 +41,11 @@ func FindExe(chosen, appDir, home string) string {
 		return ""
 	}
 	var cands []string
-	dl := filepath.Join(home, "Downloads")
-	for _, pat := range []string{filepath.Join(dl, "PixelU*", "PixelU", ExeName), filepath.Join(dl, "PixelU*", ExeName)} {
-		m, _ := filepath.Glob(pat)
-		cands = append(cands, m...)
+	for _, dl := range dolphin.DownloadDirs(home) {
+		for _, pat := range []string{filepath.Join(dl, "PixelU*", "PixelU", ExeName), filepath.Join(dl, "PixelU*", ExeName)} {
+			m, _ := filepath.Glob(pat)
+			cands = append(cands, m...)
+		}
 	}
 	best, bestT := "", time.Time{}
 	for _, p := range cands {

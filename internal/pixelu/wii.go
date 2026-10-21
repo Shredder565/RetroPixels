@@ -2,10 +2,10 @@ package pixelu
 
 // PixelU's Wii / GameCube engine: Dolphin (GPL-2.0+) built from pixelu/wii
 // with a new name. It ships inside the PixelU folder as
-// PixelU\wii\PixelU-Wii.exe with portable.txt next to it, so it keeps its
-// settings, memory cards and saves in PixelU\wii\User. Its command line and
-// settings files are Dolphin's, so internal/dolphin starts it, docks it and
-// records it as before.
+// PixelU\wii\PixelU-Wii.exe (PixelU/wii/PixelU-Wii on Linux) with
+// portable.txt next to it, so it keeps its settings, memory cards and saves
+// in PixelU\wii\User. Its command line and settings files are Dolphin's, so
+// internal/dolphin starts it, docks it and records it as before.
 
 import (
 	"errors"
@@ -15,14 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"retropixels/internal/dolphin"
 )
 
-const (
-	// WiiExeName is the Wii / GameCube engine's program file.
-	WiiExeName = "PixelU-Wii.exe"
-	// WiiDir is its folder inside the PixelU folder.
-	WiiDir = "wii"
-)
+// WiiDir is the Wii / GameCube engine's folder inside the PixelU folder
+// (its program is WiiExeName).
+const WiiDir = "wii"
 
 // FindWiiExe returns PixelU's Wii / GameCube engine, looking in the wii
 // folder of the PixelU.exe the player chose, then appDir\PixelU\wii (next
@@ -60,14 +59,15 @@ func FindWiiExe(chosen, appDir, home string) string {
 	if home == "" {
 		return ""
 	}
-	dl := filepath.Join(home, "Downloads")
 	var cands []string
-	for _, pat := range []string{
-		filepath.Join(dl, "PixelU*", "PixelU", WiiDir, WiiExeName), // PixelU-Wii-<ver>\PixelU\wii\ (and full PixelU zips)
-		filepath.Join(dl, "PixelU*", WiiDir, WiiExeName),
-	} {
-		m, _ := filepath.Glob(pat)
-		cands = append(cands, m...)
+	for _, dl := range dolphin.DownloadDirs(home) {
+		for _, pat := range []string{
+			filepath.Join(dl, "PixelU*", "PixelU", WiiDir, WiiExeName), // PixelU-Wii-<ver>\PixelU\wii\ (and full PixelU zips)
+			filepath.Join(dl, "PixelU*", WiiDir, WiiExeName),
+		} {
+			m, _ := filepath.Glob(pat)
+			cands = append(cands, m...)
+		}
 	}
 	best, bestT := "", time.Time{}
 	for _, p := range cands {
@@ -78,12 +78,16 @@ func FindWiiExe(chosen, appDir, home string) string {
 	return best
 }
 
-// IsWiiExe tells whether exe is the Wii / GameCube engine (by file name).
+// IsWiiExe tells whether exe is the Wii / GameCube engine (by file name:
+// PixelU-Wii.exe, or PixelU-Wii as on Linux).
 func IsWiiExe(exe string) bool {
 	if i := strings.LastIndexAny(exe, `\/`); i >= 0 {
 		exe = exe[i+1:]
 	}
-	return strings.EqualFold(exe, WiiExeName)
+	if ext := filepath.Ext(exe); strings.EqualFold(ext, ".exe") {
+		exe = exe[:len(exe)-len(ext)]
+	}
+	return strings.EqualFold(exe, "PixelU-Wii")
 }
 
 // ---------------- bringing settings over from Dolphin ----------------
@@ -97,10 +101,12 @@ const ImportMarker = "RetroPixels-imported.txt"
 var ImportFiles = []string{"GCPadNew.ini", "WiimoteNew.ini", "Dolphin.ini", "GFX.ini"}
 
 // ImportDolphinUser brings the player's settings over from their old
-// Dolphin user folder (Documents\Dolphin Emulator, or a portable Dolphin's
-// User folder) into the engine's (PixelU\wii\User), the first time only:
-//   - Config\GCPadNew.ini, WiimoteNew.ini, Dolphin.ini and GFX.ini, each only
-//     if PixelU has none yet;
+// Dolphin user folder (Documents\Dolphin Emulator, ~/.local/share/dolphin-emu
+// or ~/.dolphin-emu on Linux, or a portable Dolphin's User folder; see
+// dolphin.LegacyUserDir) into the engine's (PixelU\wii\User), the first
+// time only:
+//   - Config\GCPadNew.ini, WiimoteNew.ini, Dolphin.ini and GFX.ini (from
+//     dolphin.ConfigDir(oldUser)), each only if PixelU has none yet;
 //   - GameCube memory cards and the like (everything in GC\), file by file,
 //     only where PixelU has no file of that name;
 //   - Wii saves (Wii\title\<kind>\<game>), a whole game at a time, only for
@@ -130,13 +136,17 @@ func ImportDolphinUser(oldUser, newUser string) ([]string, error) {
 		}
 		copied = append(copied, filepath.ToSlash(rel))
 	}
-	if st, err := os.Stat(oldUser); oldUser != "" && err == nil && st.IsDir() && !samePath(oldUser, newUser) {
+	// An installed Dolphin on Linux keeps its settings files apart from its
+	// data (~/.config/dolphin-emu), and may have only those; everywhere else
+	// they're in oldUser\Config.
+	oldConfig := dolphin.ConfigDir(oldUser)
+	if oldUser != "" && (isDirPath(oldUser) || isDirPath(oldConfig)) && !samePath(oldUser, newUser) {
 		for _, name := range ImportFiles {
 			rel := filepath.Join("Config", name)
-			if exists(filepath.Join(newUser, rel)) || !isRegular(filepath.Join(oldUser, rel)) {
+			if exists(filepath.Join(newUser, rel)) || !isRegular(filepath.Join(oldConfig, name)) {
 				continue
 			}
-			note(rel, copyFile(filepath.Join(oldUser, rel), filepath.Join(newUser, rel)))
+			note(rel, copyFile(filepath.Join(oldConfig, name), filepath.Join(newUser, rel)))
 		}
 		// GameCube memory cards (Card A.USA.raw, GCI folders, ...).
 		gc := filepath.Join(oldUser, "GC")
@@ -186,6 +196,11 @@ func ImportDolphinUser(oldUser, newUser string) ([]string, error) {
 }
 
 func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
+
+func isDirPath(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
 
 func isRegular(p string) bool {
 	st, err := os.Lstat(p)

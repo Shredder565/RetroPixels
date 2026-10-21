@@ -11,27 +11,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-)
 
-// ExeName is Supermodel's program file on Windows.
-const ExeName = "supermodel.exe"
+	"retropixels/internal/dolphin"
+)
 
 // PatchedMarker is a file next to supermodel.exe in RetroPixels' own build
 // (supermodel/build.sh): that build keeps the player's files in
 // SUPERMODEL_HOME, follows the docked window's size, and can record.
 const PatchedMarker = "RetroPixels.txt"
-
-func exeNames() []string {
-	if runtime.GOOS == "windows" {
-		return []string{ExeName}
-	}
-	return []string{ExeName, "supermodel"}
-}
 
 func isFile(p string) bool {
 	st, err := os.Stat(p)
@@ -41,26 +32,24 @@ func isFile(p string) bool {
 // FindExe returns Supermodel's program: the one chosen by the player if it
 // still exists, else the one that came with RetroPixels
 // (appDir\Supermodel\supermodel.exe), else the newest official download
-// unpacked into Downloads (home\Downloads\supermodel*\supermodel.exe). ""
+// unpacked into Downloads (home\Downloads\supermodel*\supermodel.exe; on
+// Linux supermodel, in the desktop's Downloads folder or ~/Downloads). ""
 // if there is none.
 func FindExe(chosen, appDir, home string) string {
 	if chosen != "" && isFile(chosen) {
 		return chosen
 	}
 	if appDir != "" {
-		for _, n := range exeNames() {
-			if p := filepath.Join(appDir, "Supermodel", n); isFile(p) {
-				return p
-			}
+		if p := filepath.Join(appDir, "Supermodel", ExeName); isFile(p) {
+			return p
 		}
 	}
 	if home == "" {
 		return ""
 	}
-	dl := filepath.Join(home, "Downloads")
 	var cands []string
-	for _, n := range exeNames() {
-		for _, pat := range []string{filepath.Join(dl, "[Ss]upermodel*", n), filepath.Join(dl, "[Ss]upermodel*", "[Ss]upermodel*", n)} {
+	for _, dl := range dolphin.DownloadDirs(home) {
+		for _, pat := range []string{filepath.Join(dl, "[Ss]upermodel*", ExeName), filepath.Join(dl, "[Ss]upermodel*", "[Ss]upermodel*", ExeName)} {
 			m, _ := filepath.Glob(pat)
 			cands = append(cands, m...)
 		}
