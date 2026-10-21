@@ -1,0 +1,160 @@
+- W36 log: rewrote all 58 W36 files in `Core/AudioCommon`,
+  `Core/UICommon` (with ResourcePack), `Core/UpdaterCommon`,
+  `Core/DolphinTool` and `PCH` (8837 lines now, from 9693), and deleted
+  the three Linux/Android backend stand-in headers W1 left in
+  `Core/AudioCommon` (`AlsaSoundStream.h`, `PulseAudioStream.h`,
+  `OpenSLESStream.h`): the new `AudioCommon.cpp` no longer includes them
+  and nothing else does. Every rewritten file starts with the original-code
+  header and has no Dolphin copyright or SPDX line. File names, public
+  declarations and layouts, the mixer output (bit for bit), the WAV bytes,
+  the savestate layout, the GameFileCache bytes (header, revision 27,
+  entry order), the resource pack and Packs.ini formats, the updater
+  manifest format and actions, command-line parse results, NetPlay index
+  requests and parsed replies, Discord presence fields, dolphin-tool output
+  text and exit codes, every config key, flag and translatable string, and
+  the current auto-update behaviour (Windows-only updater, same URLs,
+  changelog HTML and updater flags) are unchanged. CMake lists, `.rc`,
+  `.manifest` and `.filters` files were not touched.
+  - AudioCommon: the mixer (granule resampler, per-source volumes, the
+    Wii Remote speaker routing, the DTK/DSP dumps, savestate), the
+    surround decoder wrapper, the WAV writer (header, silence skipping, the
+    file split on a rate change), backend selection and volume control,
+    the Cubeb stream and utilities (context, device lists and lookup, the
+    log forwarding, the Wii Remote speaker streams), the OpenAL stream
+    (the same entry points, resolved from openal32.dll in a table), the
+    WASAPI stream and the null stream.
+  - UICommon: GameFile (the private helpers renamed; the two-disc prefix
+    table is a free function), GameFileCache, CommandLineParse (options
+    from a table), AutoUpdate, DiscordPresence, NetPlayIndex, the resource
+    pack Manifest, ResourcePack and Manager (Manifest and ResourcePack
+    getters now live in the headers), and UICommon itself (start-up and
+    shutdown order, controller start/stop from a table, user folder
+    selection including the Windows registry and portable rules, XDG
+    folders on Linux, locale, FormatSize).
+  - UpdaterCommon: manifest download, gzip, signature check, planning,
+    content-store fetch, file replacement with .bak copies and the mode
+    carry-over, deletion, the argument table, Platform.h and UI.h.
+  - DolphinTool: convert, extract (options from a table), header, verify,
+    the command table with `wmain` on Windows, the headless host hooks and
+    `resource.h` (`IDI_ICON1` only; the APSTUDIO block is gone).
+  - PCH: `pch.h` (the same headers and compiler checks), `pch.cpp` and
+    `nopch/pch.h`.
+  - Keys and IDs left byte for byte as they were: the Discord application
+    ID `455712169795780630` (`DiscordPresence.h`) and the updater's two
+    ed25519 public keys, `UPDATE_PUB_KEY` and `UPDATE_PUB_KEY_TEST`
+    (`UpdaterCommon.cpp`).
+  - Deliberate differences (malformed input, undefined behaviour or unbuilt
+    platforms; nothing a game, a well-formed file or a server reply sees):
+    - Mixer: MixSurround no longer writes past the caller's buffer when
+      the decoder is asked for more frames than its block allows.
+    - WaveFile: the "file too large" check is written so it cannot
+      overflow.
+    - CubebUtils: device lookups skip devices without an ID string (the
+      old code built a string_view from a null pointer and crashed).
+    - CubebStream: the main and speaker streams share one state callback.
+    - OpenALStream: the destructor returns early when OpenAL was never
+      loaded.
+    - WASAPIStream: the HRESULT of IMMDeviceCollection::Item is checked.
+    - GameFileCache: the header's padding word is written as zero.
+    - NetPlayIndex: the destructor also joins a keep-alive thread that has
+      already ended after a server error.
+    - ResourcePack: GetLowerPriorityPacks returns nothing for a pack that is
+      not in the list (the old code started at end() + 1); zip entries with
+      no info are reported instead of dereferenced.
+    - UICommon: registry strings get an extra zeroed terminator; the
+      Apple, Android and D-Bus branches (AutoUpdate, UICommon) are not
+      kept, as no such build exists in this tree.
+    - dolphin-tool header/verify read all values before printing (same
+      output).
+  - Checked: old and new code side by side on synthetic data only (no
+    games, keys, servers or accounts), using the base versions of all
+    non-W36 files on both sides, each side built with its own W36 headers.
+    Outputs were compared in memory (od) or as one hash per case:
+    - Mixer, surround and WAV (-O2, -ffp-contract=off, no FMA): 25 cases of
+      seeded random pushes on every source with random rates, divisors,
+      volumes and read sizes, over output rates 0/32k/48k/96k, gap
+      filling, pitch keeping, emulation speeds (including 0), buffer sizes,
+      Wii Remote routing, a paused core and clipping input; MixSurround at
+      every DPL2 quality; DTK/DSP dumps including the rate-change splits
+      and silence skipping (every WAV file's bytes); savestate measure,
+      write and read back into a fresh mixer that keeps mixing. All equal.
+    - GameFile and GameFileCache, with a spec-driven fake volume (GC and
+      Wii discs, WADs, NKit/Datel flags, banners, names per language),
+      DOL/ELF files, homebrew XML and stand-in PNG banners, mod
+      descriptors, covers (fake HTTP) and NAND banners: 8 cases (languages,
+      covers on/off) x 6 phases: path search, a fresh cache and its bytes,
+      reload and update after files change, halted updates, six damaged
+      cache files and Clear, and the staging calls on a lone GameFile;
+      every getter, sync identifier comparison and the cache bytes.
+    - Command lines: 92 cases (GUI and non-GUI parsers, argv and vector
+      forms, every option, -C overrides good and bad, choices, --help,
+      --version, unknown options): help text, values, leftovers and the
+      CommandLine config layer.
+    - Updater, with fake HTTP, crypto (a stand-in signature tied to the
+      first key byte; the full key hash is logged) and UI: 26 cases (a full
+      update with renames, .bak copies, deletions, duplicates and the mode
+      carry-over, missing flags, bad or extra signatures, corrupt gzip,
+      malformed manifests, hash mismatches, missing content, symlinks,
+      partial updates, test mode, a failing platform check, no temp
+      folder): UI calls, the log file, the files left and their modes.
+    - NetPlay index, with a fake server: 13 cases (list replies valid,
+      partly malformed, missing, bad JSON, error status; add failures;
+      keep-alive with the real 5 s interval, its no-reply and error paths)
+      plus the server ID scrambling over 16 id/password pairs and raw
+      decodes: every request URL and header and every parsed field.
+    - Resource packs, with a fake minizip: 15 manifest texts and a full
+      run (Init with a stale Packs.ini, installs with overlapping textures,
+      uninstall with hand-over to lower packs, Remove, Add at an offset,
+      SetInstalled, re-Init): pack fields, priorities, every file written
+      and Packs.ini.
+    - dolphin-tool, over spec-driven fake images, converters and verifier:
+      762 command lines across all four commands and nine inputs (every
+      format, block size, compression and level, scrubbing, JSON output,
+      listing to stdout or a file, partitions, single files): output text
+      and exit codes.
+    - Cubeb, with a fake cubeb that logs every call and pulls data: 21
+      cases (DPL2, Wii speaker routing, init/latency/stream/start/stop/log/
+      enumerate failures, device counts, log manager off): call logs with
+      parameters, log lines and output buffer hashes.
+    - Discord, with a fake discord-rpc: 12 cases (presence on/off, join
+      and join-request callbacks, RetroAchievements rich presence, empty
+      titles): every presence field, handler calls and the NetPlay config
+      written by a join.
+    - OpenAL and WASAPI cannot run here (no Windows runtime). The OpenAL
+      code makes the same 35 calls to the same 24 entry points; the WASAPI
+      call counts differ only where a helper is now called from two places
+      (the friendly-name read, the exclusive-mode Initialize).
+    - The same aborts happen in both versions, so they are kept: a resource
+      pack manifest that is a JSON array, a NetPlay list whose "sessions"
+      is not an array, a Discord join secret that is not host:port, and
+      optparse errors in dolphin-tool (it throws an int).
+  - Compile check: the W36 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu (Windows side with the PCH and
+    `_MSC_EXTENSIONS`); the old tree gives the same results except that
+    Linux `WASAPIStream.cpp` fails on a header in both. Fixes made: the
+    NetPlay JSON parse uses a `const char*` cursor (picojson's overload
+    needs a mutable iterator), and AutoUpdate zero-initialises
+    STARTUPINFO and assigns its fields (no missing-initialiser warning).
+    For the MSVC warnings that broke CI before: C4267, C4389 and C4458
+    are what -Wshorten-64-to-32, -Wsign-compare and -Wshadow-all report on
+    the Windows target (none); the new code has no bitwise `~` (C4319) and
+    no bool compared or combined with an integer or a bool literal
+    (C4805), checked by search. The 20 non-Qt files
+    outside W36 that include W36 headers compile exactly as on the base
+    tree (15 pass on Linux, 13 for Windows, the rest fail identically on
+    missing third-party headers). WinUpdater's sources compile against the
+    new UpdaterCommon headers (its `Main.cpp` fails on a pre-existing
+    `ShlObj.h` case issue). DolphinQt was not built.
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W36 .cpp file. The runs left in W36 headers are public
+    declarations (GameFile's and GameFileCache's member lists, the
+    Mixer, WaveFile, CubebStream, NetPlayIndex, Manifest, Manager,
+    DiscordPresence and CommandLineParse declarations, UpdaterCommon's
+    UI.h).
+  - Not tested: AudioCommon's backend selection and volume glue,
+    UICommon's Init/Shutdown, folder and registry code (FormatSize computes
+    the same expression), the Windows auto-update launch, and the OpenAL
+    and WASAPI streams at run time.
+  - No keys, BIOS, firmware, DSP ROMs or game data were added.
+  - Not rewritten: nothing.
