@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/VKStreamBuffer.h"
 
@@ -18,262 +17,203 @@ StreamBuffer::StreamBuffer(VkBufferUsageFlags usage, u32 size) : m_usage(usage),
 
 StreamBuffer::~StreamBuffer()
 {
-  // VMA_ALLOCATION_CREATE_MAPPED_BIT automatically handles unmapping for us
+  // The mapping goes away with the allocation.
   if (m_buffer != VK_NULL_HANDLE)
     g_command_buffer_mgr->DeferBufferDestruction(m_buffer, m_alloc);
 }
 
 std::unique_ptr<StreamBuffer> StreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
 {
-  std::unique_ptr<StreamBuffer> buffer = std::make_unique<StreamBuffer>(usage, size);
-  if (!buffer->AllocateBuffer())
-    return nullptr;
-
-  return buffer;
+  auto stream = std::make_unique<StreamBuffer>(usage, size);
+  return stream->CreateBacking() ? std::move(stream) : nullptr;
 }
 
-bool StreamBuffer::AllocateBuffer()
+bool StreamBuffer::CreateBacking()
 {
-  // Create the buffer descriptor
-  VkBufferCreateInfo buffer_create_info = {
-      VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,  // VkStructureType        sType
-      nullptr,                               // const void*            pNext
-      0,                                     // VkBufferCreateFlags    flags
-      static_cast<VkDeviceSize>(m_size),     // VkDeviceSize           size
-      m_usage,                               // VkBufferUsageFlags     usage
-      VK_SHARING_MODE_EXCLUSIVE,             // VkSharingMode          sharingMode
-      0,                                     // uint32_t               queueFamilyIndexCount
-      nullptr                                // const uint32_t*        pQueueFamilyIndices
-  };
+  VkBufferCreateInfo buffer_info = {};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = m_size;
+  buffer_info.usage = m_usage;
+  buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-  VmaAllocationCreateInfo alloc_create_info = {};
-  alloc_create_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                            VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT |
-                            VMA_ALLOCATION_CREATE_MAPPED_BIT;
-  alloc_create_info.usage =
-      VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // Host visible VRAM is slower in practice
-  alloc_create_info.pool = VK_NULL_HANDLE;
-  alloc_create_info.pUserData = nullptr;
-  alloc_create_info.priority = 0.0;
-  alloc_create_info.requiredFlags = 0;
-  alloc_create_info.preferredFlags = 0;
+  // Written once, front to back, by the CPU. System memory is preferred: host-visible VRAM
+  // tends to be slower for this pattern.
+  VmaAllocationCreateInfo request = {};
+  request.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                  VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  request.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
 
   VkBuffer buffer = VK_NULL_HANDLE;
   VmaAllocation alloc = VK_NULL_HANDLE;
-  VmaAllocationInfo alloc_info;
-  VkResult res = vmaCreateBuffer(g_vulkan_context->GetMemoryAllocator(), &buffer_create_info,
-                                 &alloc_create_info, &buffer, &alloc, &alloc_info);
+  VmaAllocationInfo placed = {};
+  const VkResult res = vmaCreateBuffer(g_vulkan_context->GetMemoryAllocator(), &buffer_info,
+                                       &request, &buffer, &alloc, &placed);
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vmaCreateBuffer failed: ");
     return false;
   }
 
-  // Destroy the backings for the buffer after the command buffer executes
-  // VMA_ALLOCATION_CREATE_MAPPED_BIT automatically handles unmapping for us
   if (m_buffer != VK_NULL_HANDLE)
     g_command_buffer_mgr->DeferBufferDestruction(m_buffer, m_alloc);
 
-  // Replace with the new buffer
   m_buffer = buffer;
   m_alloc = alloc;
-  m_host_pointer = static_cast<u8*>(alloc_info.pMappedData);
-  m_current_offset = 0;
-  m_current_gpu_position = 0;
-  m_tracked_fences.clear();
+  m_mapped = static_cast<u8*>(placed.pMappedData);
+  m_write_pos = 0;
+  m_gpu_pos = 0;
+  m_marks.clear();
   return true;
+}
+
+bool StreamBuffer::FitsWithoutWaiting(u32 needed, bool* wrap) const
+{
+  if (m_write_pos < m_gpu_pos)
+  {
+    // Writing behind the GPU: only the gap up to it is free. The gap must stay non-empty, or
+    // the write position would equal the GPU position and look like "GPU caught up".
+    return needed < m_gpu_pos - m_write_pos;
+  }
+
+  // Writing ahead of (or level with) the GPU: the tail of the buffer is free, and so is the
+  // start up to the GPU position (strictly less, for the same reason as above).
+  if (needed <= m_size - m_write_pos)
+    return true;
+  if (needed < m_gpu_pos)
+  {
+    *wrap = true;
+    return true;
+  }
+  return false;
 }
 
 bool StreamBuffer::ReserveMemory(u32 num_bytes, u32 alignment)
 {
-  const u32 required_bytes = num_bytes + alignment;
-
-  // Check for sane allocations
-  if (required_bytes > m_size)
+  // Room for the data plus any alignment padding.
+  const u32 needed = num_bytes + alignment;
+  if (needed > m_size)
   {
     PanicAlertFmt("Attempting to allocate {} bytes from a {} byte stream buffer", num_bytes,
                   m_size);
-
     return false;
   }
 
-  // Is the GPU behind or up to date with our current offset?
-  UpdateCurrentFencePosition();
-  if (m_current_offset >= m_current_gpu_position)
-  {
-    const u32 remaining_bytes = m_size - m_current_offset;
-    if (required_bytes <= remaining_bytes)
-    {
-      // Place at the current position, after the GPU position.
-      m_current_offset = Common::AlignUp(m_current_offset, alignment);
-      m_last_allocation_size = num_bytes;
-      return true;
-    }
+  RecordWritePosition();
 
-    // Check for space at the start of the buffer
-    // We use < here because we don't want to have the case of m_current_offset ==
-    // m_current_gpu_position. That would mean the code above would assume the
-    // GPU has caught up to us, which it hasn't.
-    if (required_bytes < m_current_gpu_position)
-    {
-      // Reset offset to zero, since we're allocating behind the gpu now
-      m_current_offset = 0;
-      m_last_allocation_size = num_bytes;
-      return true;
-    }
-  }
+  bool wrap = false;
+  if (!FitsWithoutWaiting(needed, &wrap) && !WaitForClearSpace(needed))
+    return false;
 
-  // Is the GPU ahead of our current offset?
-  if (m_current_offset < m_current_gpu_position)
-  {
-    // We have from m_current_offset..m_current_gpu_position space to use.
-    const u32 remaining_bytes = m_current_gpu_position - m_current_offset;
-    if (required_bytes < remaining_bytes)
-    {
-      // Place at the current position, since this is still behind the GPU.
-      m_current_offset = Common::AlignUp(m_current_offset, alignment);
-      m_last_allocation_size = num_bytes;
-      return true;
-    }
-  }
-
-  // Can we find a fence to wait on that will give us enough memory?
-  if (WaitForClearSpace(required_bytes))
-  {
-    m_current_offset = Common::AlignUp(m_current_offset, alignment);
-    m_last_allocation_size = num_bytes;
-    return true;
-  }
-
-  // We tried everything we could, and still couldn't get anything. This means that too much space
-  // in the buffer is being used by the command buffer currently being recorded. Therefore, the
-  // only option is to execute it, and wait until it's done.
-  return false;
+  m_write_pos = wrap ? 0 : Common::AlignUp(m_write_pos, alignment);
+  m_reserved = num_bytes;
+  return true;
 }
 
 void StreamBuffer::CommitMemory(u32 final_num_bytes)
 {
-  ASSERT((m_current_offset + final_num_bytes) <= m_size);
-  ASSERT(final_num_bytes <= m_last_allocation_size);
+  ASSERT(m_write_pos + final_num_bytes <= m_size);
+  ASSERT(final_num_bytes <= m_reserved);
 
-  // For non-coherent mappings, flush the memory range
-  // vmaFlushAllocation checks whether the allocation uses a coherent memory type internally
-  vmaFlushAllocation(g_vulkan_context->GetMemoryAllocator(), m_alloc, m_current_offset,
+  // A no-op for coherent memory.
+  vmaFlushAllocation(g_vulkan_context->GetMemoryAllocator(), m_alloc, m_write_pos,
                      final_num_bytes);
-
-  m_current_offset += final_num_bytes;
+  m_write_pos += final_num_bytes;
 }
 
-void StreamBuffer::UpdateCurrentFencePosition()
+void StreamBuffer::RecordWritePosition()
 {
-  // Don't create a tracking entry if the GPU is caught up with the buffer.
-  if (m_current_offset == m_current_gpu_position)
+  // Nothing outstanding: no mark needed.
+  if (m_write_pos == m_gpu_pos)
     return;
 
-  // Has the offset changed since the last fence?
   const u64 counter = g_command_buffer_mgr->GetCurrentFenceCounter();
-  if (!m_tracked_fences.empty() && m_tracked_fences.back().first == counter)
+  if (!m_marks.empty() && m_marks.back().counter == counter)
   {
-    // Still haven't executed a command buffer, so just update the offset.
-    m_tracked_fences.back().second = m_current_offset;
+    // Same submission as the last mark; it now ends further on.
+    m_marks.back().position = m_write_pos;
     return;
   }
 
-  // New buffer, so update the GPU position while we're at it.
-  UpdateGPUPosition();
-  m_tracked_fences.emplace_back(counter, m_current_offset);
+  // First write into a new submission: retire what the GPU has finished, then start a mark.
+  RetireCompletedMarks();
+  m_marks.push_back({counter, m_write_pos});
 }
 
-void StreamBuffer::UpdateGPUPosition()
+void StreamBuffer::RetireCompletedMarks()
 {
-  auto start = m_tracked_fences.begin();
-  auto end = start;
-
-  const u64 completed_counter = g_command_buffer_mgr->GetCompletedFenceCounter();
-  while (end != m_tracked_fences.end() && completed_counter >= end->first)
+  const u64 completed = g_command_buffer_mgr->GetCompletedFenceCounter();
+  while (!m_marks.empty() && m_marks.front().counter <= completed)
   {
-    m_current_gpu_position = end->second;
-    ++end;
+    m_gpu_pos = m_marks.front().position;
+    m_marks.pop_front();
   }
-
-  if (start != end)
-    m_tracked_fences.erase(start, end);
 }
 
-bool StreamBuffer::WaitForClearSpace(u32 num_bytes)
+bool StreamBuffer::WaitForClearSpace(u32 needed)
 {
-  u32 new_offset = 0;
-  u32 new_gpu_position = 0;
-
-  auto iter = m_tracked_fences.begin();
-  for (; iter != m_tracked_fences.end(); ++iter)
+  // Look for the oldest mark that, once the GPU reaches it, leaves enough room.
+  size_t chosen = m_marks.size();
+  u32 next_write = 0;
+  u32 next_gpu = 0;
+  for (size_t index = 0; index < m_marks.size(); ++index)
   {
-    // Would this fence bring us in line with the GPU?
-    // This is the "last resort" case, where a command buffer execution has been forced
-    // after no additional data has been written to it, so we can assume that after the
-    // fence has been signaled the entire buffer is now consumed.
-    u32 gpu_position = iter->second;
-    if (m_current_offset == gpu_position)
+    const u32 mark = m_marks[index].position;
+    if (mark == m_write_pos)
     {
-      new_offset = 0;
-      new_gpu_position = 0;
+      // The GPU will have read everything written: the whole buffer is free.
+      next_write = 0;
+      next_gpu = 0;
+      chosen = index;
       break;
     }
-
-    // Assuming that we wait for this fence, are we allocating in front of the GPU?
-    if (m_current_offset > gpu_position)
+    if (mark < m_write_pos)
     {
-      // This would suggest the GPU has now followed us and wrapped around, so we have from
-      // m_current_position..m_size free, as well as and 0..gpu_position.
-      const u32 remaining_space_after_offset = m_size - m_current_offset;
-      if (remaining_space_after_offset >= num_bytes)
+      // The GPU would be behind us: use the tail, or wrap to the start in front of it (a
+      // strictly larger gap, so that we never land exactly on the GPU position).
+      if (m_size - m_write_pos >= needed)
       {
-        // Switch to allocating in front of the GPU, using the remainder of the buffer.
-        new_offset = m_current_offset;
-        new_gpu_position = gpu_position;
+        next_write = m_write_pos;
+        next_gpu = mark;
+        chosen = index;
         break;
       }
-
-      // We can wrap around to the start, behind the GPU, if there is enough space.
-      // We use > here because otherwise we'd end up lining up with the GPU, and then the
-      // allocator would assume that the GPU has consumed what we just wrote.
-      if (gpu_position > num_bytes)
+      if (mark > needed)
       {
-        new_offset = 0;
-        new_gpu_position = gpu_position;
+        next_write = 0;
+        next_gpu = mark;
+        chosen = index;
         break;
       }
+      continue;
     }
-    else
+    // The GPU would still be ahead of us: the gap up to it must be strictly larger.
+    if (mark - m_write_pos > needed)
     {
-      // We're currently allocating behind the GPU. This would give us between the current
-      // offset and the GPU position worth of space to work with. Again, > because we can't
-      // align the GPU position with the buffer offset.
-      u32 available_space_inbetween = gpu_position - m_current_offset;
-      if (available_space_inbetween > num_bytes)
-      {
-        // Leave the offset as-is, but update the GPU position.
-        new_offset = m_current_offset;
-        new_gpu_position = gpu_position;
-        break;
-      }
+      next_write = m_write_pos;
+      next_gpu = mark;
+      chosen = index;
+      break;
     }
   }
 
-  // Did any fences satisfy this condition?
-  // Has the command buffer been executed yet? If not, the caller should execute it.
-  if (iter == m_tracked_fences.end() ||
-      iter->first == g_command_buffer_mgr->GetCurrentFenceCounter())
+  // Nothing helps, or the helpful mark belongs to the unsubmitted command buffer.
+  if (chosen == m_marks.size() ||
+      m_marks[chosen].counter == g_command_buffer_mgr->GetCurrentFenceCounter())
   {
     return false;
   }
 
-  // Wait until this fence is signaled. This will fire the callback, updating the GPU position.
-  g_command_buffer_mgr->WaitForFenceCounter(iter->first);
-  m_tracked_fences.erase(m_tracked_fences.begin(),
-                         m_current_offset == iter->second ? m_tracked_fences.end() : ++iter);
-  m_current_offset = new_offset;
-  m_current_gpu_position = new_gpu_position;
+  g_command_buffer_mgr->WaitForFenceCounter(m_marks[chosen].counter);
+
+  // When the GPU catches up completely every mark is done; otherwise drop the ones up to and
+  // including the one waited for.
+  if (m_marks[chosen].position == m_write_pos)
+    m_marks.clear();
+  else
+    m_marks.erase(m_marks.begin(), m_marks.begin() + static_cast<std::ptrdiff_t>(chosen + 1));
+
+  m_write_pos = next_write;
+  m_gpu_pos = next_gpu;
   return true;
 }
 

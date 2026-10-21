@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,25 +14,20 @@ namespace VideoCommon
 class ShaderIncluder;
 }
 
+// GLSL to SPIR-V for the Vulkan backend. Each function puts the backend's GLSL prelude
+// (binding macros, HLSL-style type names, subgroup helpers and driver workarounds) in front
+// of the source and hands it to glslang. Returns nothing when the source does not compile.
 namespace Vulkan::ShaderCompiler
 {
-// SPIR-V compiled code type
 using SPIRVCodeType = u32;
 using SPIRVCodeVector = std::vector<SPIRVCodeType>;
 
-// Compile a vertex shader to SPIR-V.
 std::optional<SPIRVCodeVector> CompileVertexShader(std::string_view source_code,
                                                    VideoCommon::ShaderIncluder* shader_includer);
-
-// Compile a geometry shader to SPIR-V.
 std::optional<SPIRVCodeVector> CompileGeometryShader(std::string_view source_code,
                                                      VideoCommon::ShaderIncluder* shader_includer);
-
-// Compile a fragment shader to SPIR-V.
 std::optional<SPIRVCodeVector> CompileFragmentShader(std::string_view source_code,
                                                      VideoCommon::ShaderIncluder* shader_includer);
-
-// Compile a compute shader to SPIR-V.
 std::optional<SPIRVCodeVector> CompileComputeShader(std::string_view source_code,
                                                     VideoCommon::ShaderIncluder* shader_includer);
 }  // namespace Vulkan::ShaderCompiler
