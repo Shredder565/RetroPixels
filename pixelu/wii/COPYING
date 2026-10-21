@@ -90,8 +90,9 @@ time into Licenses\Externals\<project>\.
   -----------------------------------  ----------------------------------------
   Qt 6 (Qt6*.dll, QtPlugins)           LGPL-3.0-only (LGPL-3.0-only.txt,
                                        GPL-3.0-only.txt)
-  FFmpeg (avcodec, avformat, avutil,   LGPL-2.1-or-later (LGPL-2.1-or-later.txt)
-   swresample, swscale DLLs)
+  FFmpeg (avcodec, avformat, avutil,   GPL-3.0-or-later as configured (GPL and
+   swresample, swscale; static          version 3 parts on; GPL-3.0-only.txt and
+   libraries in PixelU-Wii.exe)         Licenses\Externals\FFmpeg)
   SDL 3                                Zlib
   SFML (network)                       Zlib
   zlib-ng                              Zlib
@@ -120,7 +121,7 @@ time into Licenses\Externals\<project>\.
   watcher                              MIT
   cpp-ipc                              MIT
   cpp-optparse                         MIT
-  discord-rpc                          MIT
+  discord-rpc, RapidJSON               MIT
   expr                                 MIT
   rcheevos                             MIT
   Windows Implementation Libraries     MIT
@@ -142,9 +143,14 @@ time into Licenses\Externals\<project>\.
   Microsoft Visual C++ runtime DLLs    Microsoft's redistribution terms (Visual
                                        Studio redistributable files)
 
-Qt and FFmpeg are shipped as DLLs, so they can be replaced with other builds
-of the same version. The Qt and FFmpeg binaries come from Dolphin's
-ext-win-qt and ext-win-ffmpeg repositories.
+Qt is shipped as DLLs (the Qt Company's official 6.8.3 MSVC build), so it can
+be replaced with another build of the same version. FFmpeg is built from
+FFmpeg's own source (pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh) and linked
+statically; with FFmpeg's GPL version 3 parts in it, the executable as
+distributed is under GPL version 3, which the "or any later version" terms
+above allow. Every third-party source is fetched from its own project
+(pixelu/wii/Externals/sources.json); expr and FreeSurround, which have no
+upstream for the versions used, are kept in pixelu/wii/Externals.
 
 "GameCube" and "Wii" are trademarks of Nintendo. PixelU-Wii and RetroPixels
 are not affiliated with Nintendo or with the Dolphin project. No Nintendo
