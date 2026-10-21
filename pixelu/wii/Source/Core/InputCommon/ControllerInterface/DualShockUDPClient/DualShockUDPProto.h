@@ -3,8 +3,8 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstring>
-#include <optional>
 
 #include "Common/CommonTypes.h"
 #include "Common/Hash.h"
@@ -222,41 +222,40 @@ void Seal(Msg* msg)
 // Room for the largest packet a server sends. Received packets are decoded straight from it.
 struct ReceiveBuffer
 {
-  // Checks that the buffer holds a valid `Msg` and returns a copy of it. The checksum is taken
-  // over sizeof(Msg) bytes whatever the datagram's length was, and the header's checksum field
-  // is left zeroed afterwards.
+  // Checks that the buffer holds a valid `Msg` and, if so, copies it to `*msg` (which is left
+  // alone otherwise). The checksum is taken over sizeof(Msg) bytes whatever the datagram's
+  // length was, and the header's checksum field is left zeroed afterwards.
   template <typename Msg>
-  std::optional<Msg> Decode()
+  bool Decode(Msg* msg)
   {
-    Header header;
-    std::memcpy(&header, bytes.data(), sizeof(header));
+    u8* const raw = bytes.data();
+    constexpr std::size_t crc_offset = offsetof(Header, crc32);
+    u32 claimed_crc;
+    std::memcpy(&claimed_crc, raw + crc_offset, sizeof(claimed_crc));
+    std::memset(raw + crc_offset, 0, sizeof(claimed_crc));
 
-    const u32 claimed_crc = header.crc32;
-    header.crc32 = 0;
-    std::memcpy(bytes.data(), &header, sizeof(header));
-
-    const u32 actual_crc = Common::ComputeCRC32(bytes.data(), sizeof(Msg));
+    const u32 actual_crc = Common::ComputeCRC32(raw, sizeof(Msg));
     if (actual_crc != claimed_crc)
     {
       NOTICE_LOG_FMT(
           CONTROLLERINTERFACE,
           "DualShockUDPClient Received message with bad CRC in header: got {:08x}, expected {:08x}",
           claimed_crc, actual_crc);
-      return std::nullopt;
+      return false;
     }
 
+    Header header;
+    std::memcpy(&header, raw, sizeof(header));
     u32 message_type;
-    std::memcpy(&message_type, bytes.data() + sizeof(Header), sizeof(message_type));
-
+    std::memcpy(&message_type, raw + sizeof(Header), sizeof(message_type));
     const bool acceptable = header.protocol_version <= CEMUHOOK_PROTOCOL_VERSION &&
                             header.magic == Msg::FROM && message_type == Msg::TYPE &&
                             header.payload_size + sizeof(Header) <= sizeof(Msg);
     if (!acceptable)
-      return std::nullopt;
+      return false;
 
-    Msg msg;
-    std::memcpy(&msg, bytes.data(), sizeof(msg));
-    return msg;
+    std::memcpy(msg, raw, sizeof(Msg));
+    return true;
   }
 
   std::array<u8, sizeof(PadDataResponse)> bytes{};

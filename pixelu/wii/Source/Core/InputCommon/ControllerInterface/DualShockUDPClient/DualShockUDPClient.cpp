@@ -145,7 +145,8 @@ private:
   void AddControls();
   void ResetState();
   void RequestPadData();
-  void Absorb(const Proto::PadDataResponse& data);
+  // Takes in the pad data just decoded into m_pad.
+  void Absorb();
 
   const std::string m_name;
   const int m_slot;
@@ -276,10 +277,8 @@ void Device::RequestPadData()
     ERROR_LOG_FMT(CONTROLLERINTERFACE, "DualShockUDPClient UpdateInput send failed");
 }
 
-void Device::Absorb(const Proto::PadDataResponse& data)
+void Device::Absorb()
 {
-  m_pad = data;
-
   // Touch movement is applied while the same finger stays down.
   const Proto::Touch& touch = m_pad.touch1;
   if (m_last_touch_known && touch.id == m_last_touch.id)
@@ -309,8 +308,9 @@ Core::DeviceRemoval Device::UpdateInput()
   while (m_socket.receive(buffer.bytes.data(), buffer.bytes.size(), length, sender, sender_port) ==
          sf::Socket::Status::Done)
   {
-    if (const auto data = buffer.Decode<Proto::PadDataResponse>())
-      Absorb(*data);
+    // (Decoded straight into the device's state, which a rejected datagram leaves alone.)
+    if (buffer.Decode(&m_pad))
+      Absorb();
   }
 
   return Core::DeviceRemoval::Keep;
@@ -561,8 +561,8 @@ void InputBackend::ReceivePortInfo(sf::SocketSelector& selector, std::vector<boo
       continue;
     }
 
-    const std::optional<Proto::PortInfo> info = buffer.Decode<Proto::PortInfo>();
-    if (!info)
+    Proto::PortInfo info;
+    if (!buffer.Decode(&info))
       continue;
 
     // One valid answer per round is enough to count the server as alive, even if this thread
@@ -571,14 +571,14 @@ void InputBackend::ReceivePortInfo(sf::SocketSelector& selector, std::vector<boo
     (*awaiting_reply)[i] = false;
 
     // Slots beyond the four a server has are ignored.
-    const u8 slot = info->slot.pad_id;
+    const u8 slot = info.slot.pad_id;
     if (slot >= server.slots.size())
       continue;
 
-    if (SameController(info->slot, server.slots[slot].slot))
+    if (SameController(info.slot, server.slots[slot].slot))
       continue;
 
-    server.slots[slot] = *info;
+    server.slots[slot] = info;
     // Simplest to rebuild all our devices.
     RepopulateDevices();
   }
