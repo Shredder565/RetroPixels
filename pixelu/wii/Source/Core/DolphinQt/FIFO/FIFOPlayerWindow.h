@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include "Core/Core.h"
 
 class QDialogButtonBox;
+class QGroupBox;
 class QLabel;
 class QPushButton;
 class QSpinBox;
@@ -17,6 +17,8 @@ class FifoPlayer;
 class FifoRecorder;
 class FIFOAnalyzer;
 
+// Records GX command streams to FIFO logs and plays them back: a "Play / Record" page with the
+// file summary and the playback/recording options, and an "Analyze" page for the loaded log.
 class FIFOPlayerWindow : public QWidget
 {
   Q_OBJECT
@@ -29,10 +31,14 @@ signals:
   void LoadFIFORequested(const QString& path);
 
 private:
-  void CreateWidgets();
-  void LoadSettings();
-  void ConnectWidgets();
-  void AddDescriptions();
+  // A "From: [ ] To: [ ]" pair of spin boxes in a group box.
+  QGroupBox* BuildRangeGroup(const QString& title, QSpinBox*& from, QLabel*& from_label,
+                             QSpinBox*& to, QLabel*& to_label);
+  void BuildLayout();
+  void RestoreOptions();
+  void ConnectSignals();
+  void SetDescriptions();
+  void OnEmulationStateChanged(Core::State state);
 
   void LoadRecording();
   void SaveRecording();
@@ -50,7 +56,7 @@ private:
   void UpdateInfo();
   void UpdateLimits();
 
-  bool eventFilter(QObject* object, QEvent* event) final;
+  bool eventFilter(QObject* watched, QEvent* event) final;
 
   FifoPlayer& m_fifo_player;
   FifoRecorder& m_fifo_recorder;
@@ -78,5 +84,6 @@ private:
   QTabWidget* m_tab_widget;
 
   FIFOAnalyzer* m_analyzer;
+  // Last state acted on, with Paused folded into Running.
   Core::State m_emu_state = Core::State::Uninitialized;
 };

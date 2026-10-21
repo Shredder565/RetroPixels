@@ -1,11 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/FIFO/FIFOAnalyzer.h"
 
 #include <algorithm>
 #include <bit>
-#include <ranges>
 #include <utility>
 
 #include <QGroupBox>
@@ -32,26 +30,356 @@
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/XFStructs.h"
 
-// Values range from 0 to number of frames - 1
+namespace
+{
+// Data stored on the object rows of the tree (frame and part rows carry none):
+// the frame number (0-based),
 constexpr int FRAME_ROLE = Qt::UserRole;
-// Values range from 0 to number of parts - 1
+// the first part of the object (0-based),
 constexpr int PART_START_ROLE = Qt::UserRole + 1;
-// Values range from 1 to number of parts
+// and its last part, the draw or EFB copy that ends it.
 constexpr int PART_END_ROLE = Qt::UserRole + 2;
+
+const QString OBJECT_SPLITTER_KEY = QStringLiteral("fifoanalyzer/objectsplitter");
+const QString SEARCH_SPLITTER_KEY = QStringLiteral("fifoanalyzer/searchsplitter");
+
+QString Hex(u32 value, int digits)
+{
+  return QStringLiteral("%1").arg(value, digits, 16, QLatin1Char('0'));
+}
+
+QString HexBytes(const u8* bytes, u32 count)
+{
+  QString out;
+  for (u32 i = 0; i < count; ++i)
+    out += Hex(bytes[i], 2);
+  return out;
+}
+
+// One line per command for the detail list. CP writes are not applied to the state: the copy
+// handed in is already the state at the end of the object.
+class CommandSummary final : public OpcodeDecoder::Callback
+{
+public:
+  explicit CommandSummary(const CPState& cp_state) : m_cp_state(cp_state) {}
+
+  OPCODE_CALLBACK(void OnCP(const u8 command, const u32 value))
+  {
+    const auto [name, desc] = GetCPRegInfo(command, value);
+    ASSERT(!name.empty());
+    text = QStringLiteral("CP  %1  %2  %3")
+               .arg(Hex(command, 2), Hex(value, 8), QString::fromStdString(name));
+  }
+
+  OPCODE_CALLBACK(void OnXF(const u16 address, const u8 count, const u8* words))
+  {
+    const auto [name, desc] = GetXFTransferInfo(address, count, words);
+    ASSERT(!name.empty());
+
+    // The command word as it appears in the stream: (count - 1) << 16 | first register.
+    text = QStringLiteral("XF  %1  ").arg(Hex(address | ((count - 1u) << 16), 8));
+    for (u32 word = 0; word < count; ++word)
+      text += Hex(Common::swap32(&words[word * 4]), 8) + QLatin1Char(' ');
+    text += QStringLiteral("  ") + QString::fromStdString(name);
+  }
+
+  OPCODE_CALLBACK(void OnBP(const u8 command, const u32 value))
+  {
+    const auto [name, desc] = GetBPRegInfo(command, value);
+    ASSERT(!name.empty());
+    text = QStringLiteral("BP  %1  %2  %3")
+               .arg(Hex(command, 2), Hex(value, 6), QString::fromStdString(name));
+  }
+
+  OPCODE_CALLBACK(void OnIndexedLoad(const CPArray array, const u32 index, const u16 address,
+                                     const u8 size))
+  {
+    const auto [desc, written] = GetXFIndexedLoadInfo(array, index, address, size);
+    text = QStringLiteral("LOAD INDX %1   %2")
+               .arg(QString::fromStdString(fmt::to_string(array)), QString::fromStdString(desc));
+  }
+
+  OPCODE_CALLBACK(void OnPrimitiveCommand(const OpcodeDecoder::Primitive primitive, const u8 vat,
+                                          const u32 vertex_size, const u16 num_vertices, const u8*))
+  {
+    // The vertex bytes go to the description instead; a hex dump here would be unreadable.
+    // A count of zero is legal: the next command simply follows.
+    const u32 opcode =
+        0x80u | (u32{std::to_underlying(primitive)} << OpcodeDecoder::GX_PRIMITIVE_SHIFT) | vat;
+    text = QStringLiteral("PRIMITIVE %1 (%2)  %3 vertices %4 bytes/vertex %5 total bytes")
+               .arg(QString::fromStdString(fmt::to_string(primitive)), Hex(opcode, 2))
+               .arg(num_vertices)
+               .arg(vertex_size)
+               .arg(num_vertices * vertex_size);
+  }
+
+  OPCODE_CALLBACK(void OnDisplayList(const u32 address, const u32 size))
+  {
+    text = QObject::tr("Call display list at %1 with size %2").arg(Hex(address, 8), Hex(size, 8));
+  }
+
+  OPCODE_CALLBACK(void OnNop(const u32 count))
+  {
+    text = count > 1 ? QStringLiteral("NOP (%1x)").arg(count) : QStringLiteral("NOP");
+  }
+
+  OPCODE_CALLBACK(void OnUnknown(u8 opcode, const u8*))
+  {
+    switch (static_cast<OpcodeDecoder::Opcode>(opcode))
+    {
+    case OpcodeDecoder::Opcode::GX_CMD_UNKNOWN_METRICS:
+      text = QStringLiteral("GX_CMD_UNKNOWN_METRICS");
+      break;
+    case OpcodeDecoder::Opcode::GX_CMD_INVL_VC:
+      text = QStringLiteral("GX_CMD_INVL_VC");
+      break;
+    default:
+      text = QStringLiteral("Unknown opcode %1").arg(opcode, 2, 16);
+      break;
+    }
+  }
+
+  OPCODE_CALLBACK(void OnCommand(const u8*, u32)) {}
+
+  OPCODE_CALLBACK(CPState& GetCPState()) { return m_cp_state; }
+
+  // Left as it was by commands that report nothing.
+  QString text;
+
+private:
+  CPState m_cp_state;
+};
+
+// "<kind> register <name>", then its description or a note that there is none.
+QString RegisterText(const QString& heading, const std::string& name, const std::string& desc)
+{
+  QString out = heading + QString::fromStdString(name) + QLatin1Char('\n');
+  out += desc.empty() ? QObject::tr("No description available") : QString::fromStdString(desc);
+  return out;
+}
+
+u32 DirectColorBytes(ColorFormat format)
+{
+  switch (format)
+  {
+  case ColorFormat::RGB565:
+  case ColorFormat::RGBA4444:
+    return 2;
+  case ColorFormat::RGB888:
+  case ColorFormat::RGBA6666:
+    return 3;
+  default:
+    return 4;
+  }
+}
+
+// Writes a vertex's bytes component by component: hex digits, with float values decoded.
+class VertexDump
+{
+public:
+  VertexDump(const u8* bytes, QString& out) : m_bytes(bytes), m_out(out) {}
+
+  u32 Position() const { return m_pos; }
+
+  // A plain field (matrix index, color) of the given size, followed by two spaces.
+  void Field(u32 size)
+  {
+    m_out += HexBytes(m_bytes + m_pos, size);
+    m_pos += size;
+    m_out += QStringLiteral("  ");
+  }
+
+  // An attribute stored directly (`direct_count` values of `format`) or as an index into an
+  // array (`indexed_count` 8- or 16-bit indices). Every value is followed by a space and the
+  // attribute by one more.
+  void Attribute(VertexComponentFormat how, ComponentFormat format, u32 direct_count,
+                 u32 indexed_count = 1)
+  {
+    u32 count = direct_count;
+    switch (how)
+    {
+    case VertexComponentFormat::NotPresent:
+      return;
+    case VertexComponentFormat::Index8:
+      format = ComponentFormat::UByte;
+      count = indexed_count;
+      break;
+    case VertexComponentFormat::Index16:
+      format = ComponentFormat::UShort;
+      count = indexed_count;
+      break;
+    default:
+      break;
+    }
+
+    const u32 size = GetElementSize(format);
+    for (u32 value = 0; value < count; ++value)
+    {
+      m_out += HexBytes(m_bytes + m_pos, size);
+      if (format == ComponentFormat::Float)
+      {
+        const float decoded = std::bit_cast<float>(Common::swap32(m_bytes + m_pos));
+        m_out += QStringLiteral(" (%1)").arg(decoded);
+      }
+      m_pos += size;
+      m_out += QLatin1Char(' ');
+    }
+    m_out += QLatin1Char(' ');
+  }
+
+private:
+  const u8* m_bytes;
+  QString& m_out;
+  u32 m_pos = 0;
+};
+
+// The longer text for the description pane.
+class CommandExplanation final : public OpcodeDecoder::Callback
+{
+public:
+  explicit CommandExplanation(const CPState& cp_state) : m_cp_state(cp_state) {}
+
+  OPCODE_CALLBACK(void OnBP(const u8 command, const u32 value))
+  {
+    const auto [name, desc] = GetBPRegInfo(command, value);
+    ASSERT(!name.empty());
+    text = RegisterText(QObject::tr("BP register "), name, desc);
+  }
+
+  OPCODE_CALLBACK(void OnCP(const u8 command, const u32 value))
+  {
+    const auto [name, desc] = GetCPRegInfo(command, value);
+    ASSERT(!name.empty());
+    text = RegisterText(QObject::tr("CP register "), name, desc);
+  }
+
+  OPCODE_CALLBACK(void OnXF(const u16 address, const u8 count, const u8* words))
+  {
+    const auto [name, desc] = GetXFTransferInfo(address, count, words);
+    ASSERT(!name.empty());
+    text = RegisterText(QObject::tr("XF register "), name, desc);
+  }
+
+  OPCODE_CALLBACK(void OnIndexedLoad(const CPArray array, const u32 index, const u16 address,
+                                     const u8 size))
+  {
+    const auto [desc, written] = GetXFIndexedLoadInfo(array, index, address, size);
+
+    text = QString::fromStdString(desc) + QLatin1Char('\n');
+    switch (array)
+    {
+    case CPArray::XF_A:
+      text += QObject::tr("Usually used for position matrices");
+      break;
+    case CPArray::XF_B:
+      // i18n: A normal matrix is a matrix used for transforming normal vectors. The word "normal"
+      // does not have its usual meaning here, but rather the meaning of "perpendicular to a
+      // surface".
+      text += QObject::tr("Usually used for normal matrices");
+      break;
+    case CPArray::XF_C:
+      // i18n: Tex coord is short for texture coordinate
+      text += QObject::tr("Usually used for tex coord matrices");
+      break;
+    case CPArray::XF_D:
+      text += QObject::tr("Usually used for light objects");
+      break;
+    default:
+      break;
+    }
+    text += QLatin1Char('\n') + QString::fromStdString(written);
+  }
+
+  OPCODE_CALLBACK(void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat,
+                                          const u32 vertex_size, const u16 num_vertices,
+                                          const u8* vertex_data))
+  {
+    // i18n: In this context, a primitive means a point, line, triangle or rectangle.
+    // Do not translate the word primitive as if it was an adjective.
+    text = QObject::tr("Primitive %1")
+               .arg(QString::fromStdString(fmt::format("{} VAT {}", primitive, vat)));
+    text += QLatin1Char('\n');
+
+    const auto& [low, high] = m_cp_state.vtx_desc;
+    const VAT& format = m_cp_state.vtx_attr[vat];
+
+    VertexDump dump(vertex_data, text);
+    for (u32 vertex = 0; vertex < num_vertices; ++vertex)
+    {
+      ASSERT(dump.Position() == vertex * vertex_size);
+      text += QLatin1Char('\n');
+
+      if (low.PosMatIdx)
+        dump.Field(1);
+      for (const bool has_index : low.TexMatIdx)
+      {
+        if (has_index)
+          dump.Field(1);
+      }
+
+      dump.Attribute(low.Position, format.g0.PosFormat,
+                     format.g0.PosElements == CoordComponentCount::XY ? 2 : 3);
+
+      // With NBT there are three vectors (normal, binormal, tangent); indexed normals use one
+      // index for all of them unless NormalIndex3 gives each its own.
+      const u32 vectors = format.g0.NormalElements == NormalComponentCount::NTB ? 3 : 1;
+      const u32 values_per_vector = low.Normal == VertexComponentFormat::Direct ? 3 : 1;
+      dump.Attribute(low.Normal, format.g0.NormalFormat, values_per_vector * vectors,
+                     format.g0.NormalIndex3 ? vectors : 1);
+
+      for (u32 color = 0; color < low.Color.Size(); ++color)
+      {
+        switch (low.Color[color])
+        {
+        case VertexComponentFormat::Index8:
+          dump.Field(1);
+          break;
+        case VertexComponentFormat::Index16:
+          dump.Field(2);
+          break;
+        case VertexComponentFormat::Direct:
+          dump.Field(DirectColorBytes(format.GetColorFormat(color)));
+          break;
+        case VertexComponentFormat::NotPresent:
+          break;
+        }
+      }
+
+      for (u32 coord = 0; coord < high.TexCoord.Size(); ++coord)
+      {
+        dump.Attribute(high.TexCoord[coord], format.GetTexFormat(coord),
+                       format.GetTexElements(coord) == TexComponentCount::ST ? 2 : 1);
+      }
+    }
+  }
+
+  OPCODE_CALLBACK(void OnDisplayList(u32, u32)) { text = QObject::tr("No description available"); }
+
+  OPCODE_CALLBACK(void OnNop(u32)) { text = QObject::tr("No description available"); }
+
+  OPCODE_CALLBACK(void OnUnknown(u8, const u8*)) { text = QObject::tr("No description available"); }
+
+  OPCODE_CALLBACK(void OnCommand(const u8*, u32)) {}
+
+  OPCODE_CALLBACK(CPState& GetCPState()) { return m_cp_state; }
+
+  QString text;
+
+private:
+  CPState m_cp_state;
+};
+}  // namespace
 
 FIFOAnalyzer::FIFOAnalyzer(FifoPlayer& fifo_player) : m_fifo_player(fifo_player)
 {
-  CreateWidgets();
-  ConnectWidgets();
+  BuildLayout();
+  ConnectSignals();
 
   UpdateTree();
 
   const auto& settings = Settings::GetQSettings();
-
-  m_object_splitter->restoreState(
-      settings.value(QStringLiteral("fifoanalyzer/objectsplitter")).toByteArray());
-  m_search_splitter->restoreState(
-      settings.value(QStringLiteral("fifoanalyzer/searchsplitter")).toByteArray());
+  m_object_splitter->restoreState(settings.value(OBJECT_SPLITTER_KEY).toByteArray());
+  m_search_splitter->restoreState(settings.value(SEARCH_SPLITTER_KEY).toByteArray());
 
   OnDebugFontChanged(Settings::Instance().GetDebugFont());
   connect(&Settings::Instance(), &Settings::DebugFontChanged, this,
@@ -61,22 +389,20 @@ FIFOAnalyzer::FIFOAnalyzer(FifoPlayer& fifo_player) : m_fifo_player(fifo_player)
 FIFOAnalyzer::~FIFOAnalyzer()
 {
   auto& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("fifoanalyzer/objectsplitter"), m_object_splitter->saveState());
-  settings.setValue(QStringLiteral("fifoanalyzer/searchsplitter"), m_search_splitter->saveState());
+  settings.setValue(OBJECT_SPLITTER_KEY, m_object_splitter->saveState());
+  settings.setValue(SEARCH_SPLITTER_KEY, m_search_splitter->saveState());
 }
 
-void FIFOAnalyzer::CreateWidgets()
+void FIFOAnalyzer::BuildLayout()
 {
   m_tree_widget = new QTreeWidget;
   m_detail_list = new QListWidget;
   m_entry_detail_browser = new QTextBrowser;
 
+  // Objects on the left, their commands on the right.
   m_object_splitter = new QSplitter(Qt::Horizontal);
-
   m_object_splitter->addWidget(m_tree_widget);
   m_object_splitter->addWidget(m_detail_list);
-
   m_tree_widget->header()->hide();
 
   m_search_box = new QGroupBox(tr("Search Current Object"));
@@ -86,34 +412,33 @@ void FIFOAnalyzer::CreateWidgets()
   m_search_previous = new NonDefaultQPushButton(tr("Previous Match"));
   m_search_label = new QLabel;
 
+  // Nothing to step through until a search found something.
   m_search_next->setEnabled(false);
   m_search_previous->setEnabled(false);
 
-  auto* box_layout = new QHBoxLayout;
-
-  box_layout->addWidget(m_search_edit);
-  box_layout->addWidget(m_search_new);
-  box_layout->addWidget(m_search_next);
-  box_layout->addWidget(m_search_previous);
-  box_layout->addWidget(m_search_label);
-
-  m_search_box->setLayout(box_layout);
-
+  auto* search_row = new QHBoxLayout;
+  for (QWidget* part :
+       {static_cast<QWidget*>(m_search_edit), static_cast<QWidget*>(m_search_new),
+        static_cast<QWidget*>(m_search_next), static_cast<QWidget*>(m_search_previous),
+        static_cast<QWidget*>(m_search_label)})
+  {
+    search_row->addWidget(part);
+  }
+  m_search_box->setLayout(search_row);
   m_search_box->setMaximumHeight(m_search_box->minimumSizeHint().height());
 
+  // Description and search below.
   m_search_splitter = new QSplitter(Qt::Vertical);
-
   m_search_splitter->addWidget(m_object_splitter);
   m_search_splitter->addWidget(m_entry_detail_browser);
   m_search_splitter->addWidget(m_search_box);
 
-  auto* layout = new QHBoxLayout;
-  layout->addWidget(m_search_splitter);
-
-  setLayout(layout);
+  auto* outer = new QHBoxLayout;
+  outer->addWidget(m_search_splitter);
+  setLayout(outer);
 }
 
-void FIFOAnalyzer::ConnectWidgets()
+void FIFOAnalyzer::ConnectSignals()
 {
   connect(m_tree_widget, &QTreeWidget::itemSelectionChanged, this, &FIFOAnalyzer::UpdateDetails);
   connect(m_detail_list, &QListWidget::currentRowChanged, this, &FIFOAnalyzer::UpdateDescription);
@@ -141,190 +466,77 @@ void FIFOAnalyzer::UpdateTree()
     return;
   }
 
-  auto* recording_item = new QTreeWidgetItem({tr("Recording")});
+  auto* recording = new QTreeWidgetItem({tr("Recording")});
+  m_tree_widget->addTopLevelItem(recording);
 
-  m_tree_widget->addTopLevelItem(recording_item);
-
-  const auto* const file = m_fifo_player.GetFile();
-
-  const u32 frame_count = file->GetFrameCount();
-
-  for (u32 frame = 0; frame < frame_count; frame++)
+  const u32 frame_count = m_fifo_player.GetFile()->GetFrameCount();
+  for (u32 frame = 0; frame < frame_count; ++frame)
   {
-    auto* frame_item = new QTreeWidgetItem({tr("Frame %1").arg(frame)});
-
-    recording_item->addChild(frame_item);
+    auto* frame_row = new QTreeWidgetItem({tr("Frame %1").arg(frame)});
+    recording->addChild(frame_row);
 
     const auto& [parts, part_type_counts] = m_fifo_player.GetAnalyzedFrameInfo(frame);
-    ASSERT(parts.size() != 0);
+    ASSERT(!parts.empty());
 
-    Common::EnumMap<u32, FramePartType::EFBCopy> part_counts;
-    u32 part_start = 0;
-
-    for (u32 part_nr = 0; part_nr < parts.size(); part_nr++)
+    // Commands are not listed on their own: they belong to the draw or EFB copy they lead up
+    // to, which closes the object. Draws and copies are numbered separately.
+    Common::EnumMap<u32, FramePartType::EFBCopy> seen;
+    u32 object_start = 0;
+    for (u32 part = 0; part < parts.size(); ++part)
     {
-      const auto& part = parts[part_nr];
+      const FramePartType type = parts[part].m_type;
+      const u32 number = seen[type]++;
 
-      const u32 part_type_nr = part_counts[part.m_type];
-      part_counts[part.m_type]++;
+      QTreeWidgetItem* object_row = nullptr;
+      if (type == FramePartType::PrimitiveData)
+        object_row = new QTreeWidgetItem({tr("Object %1").arg(number)});
+      else if (type == FramePartType::EFBCopy)
+        object_row = new QTreeWidgetItem({tr("EFB copy %1").arg(number)});
+      if (!object_row)
+        continue;
 
-      QTreeWidgetItem* object_item = nullptr;
-      if (part.m_type == FramePartType::PrimitiveData)
-        object_item = new QTreeWidgetItem({tr("Object %1").arg(part_type_nr)});
-      else if (part.m_type == FramePartType::EFBCopy)
-        object_item = new QTreeWidgetItem({tr("EFB copy %1").arg(part_type_nr)});
-      // We don't create dedicated labels for FramePartType::Command;
-      // those are grouped with the primitive
-
-      if (object_item != nullptr)
-      {
-        frame_item->addChild(object_item);
-
-        object_item->setData(0, FRAME_ROLE, frame);
-        object_item->setData(0, PART_START_ROLE, part_start);
-        object_item->setData(0, PART_END_ROLE, part_nr);
-
-        part_start = part_nr + 1;
-      }
+      frame_row->addChild(object_row);
+      object_row->setData(0, FRAME_ROLE, frame);
+      object_row->setData(0, PART_START_ROLE, object_start);
+      object_row->setData(0, PART_END_ROLE, part);
+      object_start = part + 1;
     }
 
-    // We shouldn't end on a Command (it should end with an EFB copy)
-    ASSERT(part_start == parts.size());
-    // The counts we computed should match the frame's counts
-    ASSERT(std::ranges::equal(part_type_counts, part_counts));
+    // A frame ends with an EFB copy, so no commands are left over, and the tally agrees with
+    // the one made when the frame was analyzed.
+    ASSERT(object_start == parts.size());
+    ASSERT(std::ranges::equal(part_type_counts, seen));
   }
 }
 
-namespace
+std::optional<FIFOAnalyzer::ObjectSpan> FIFOAnalyzer::SelectedObject() const
 {
-class DetailCallback : public OpcodeDecoder::Callback
+  const QList<QTreeWidgetItem*> selected = m_tree_widget->selectedItems();
+  if (selected.isEmpty())
+    return std::nullopt;
+
+  const QTreeWidgetItem* row = selected[0];
+  if (row->data(0, FRAME_ROLE).isNull() || row->data(0, PART_START_ROLE).isNull())
+    return std::nullopt;
+
+  return ObjectSpan{row->data(0, FRAME_ROLE).toUInt(), row->data(0, PART_START_ROLE).toUInt(),
+                    row->data(0, PART_END_ROLE).toUInt()};
+}
+
+FIFOAnalyzer::ObjectBytes FIFOAnalyzer::BytesOf(const ObjectSpan& span) const
 {
-public:
-  explicit DetailCallback(const CPState& cpmem) : m_cpmem(cpmem) {}
+  const auto& parts = m_fifo_player.GetAnalyzedFrameInfo(span.frame).parts;
+  const FifoFrameInfo& frame = m_fifo_player.GetFile()->GetFrame(span.frame);
 
-  OPCODE_CALLBACK(void OnCP(const u8 command, const u32 value))
-  {
-    // Note: No need to update m_cpmem as it already has the final value for this object
-
-    const auto [name, desc] = GetCPRegInfo(command, value);
-    ASSERT(!name.empty());
-
-    text = QStringLiteral("CP  %1  %2  %3")
-               .arg(command, 2, 16, QLatin1Char('0'))
-               .arg(value, 8, 16, QLatin1Char('0'))
-               .arg(QString::fromStdString(name));
-  }
-
-  OPCODE_CALLBACK(void OnXF(const u16 address, const u8 count, const u8* data))
-  {
-    const auto [name, desc] = GetXFTransferInfo(address, count, data);
-    ASSERT(!name.empty());
-
-    const u32 command = address | ((count - 1) << 16);
-
-    text = QStringLiteral("XF  %1  ").arg(command, 8, 16, QLatin1Char('0'));
-
-    for (u8 i = 0; i < count; i++)
-    {
-      const u32 value = Common::swap32(&data[i * 4]);
-
-      text += QStringLiteral("%1 ").arg(value, 8, 16, QLatin1Char('0'));
-    }
-
-    text += QStringLiteral("  ") + QString::fromStdString(name);
-  }
-
-  OPCODE_CALLBACK(void OnBP(const u8 command, const u32 value))
-  {
-    const auto [name, desc] = GetBPRegInfo(command, value);
-    ASSERT(!name.empty());
-
-    text = QStringLiteral("BP  %1  %2  %3")
-               .arg(command, 2, 16, QLatin1Char('0'))
-               .arg(value, 6, 16, QLatin1Char('0'))
-               .arg(QString::fromStdString(name));
-  }
-  OPCODE_CALLBACK(void OnIndexedLoad(const CPArray array, const u32 index, const u16 address,
-                                     const u8 size))
-  {
-    const auto [desc, written] = GetXFIndexedLoadInfo(array, index, address, size);
-    text = QStringLiteral("LOAD INDX %1   %2")
-               .arg(QString::fromStdString(fmt::to_string(array)))
-               .arg(QString::fromStdString(desc));
-  }
-  OPCODE_CALLBACK(void OnPrimitiveCommand(const OpcodeDecoder::Primitive primitive, const u8 vat,
-                                          const u32 vertex_size, const u16 num_vertices,
-                                          const u8* vertex_data))
-  {
-    const auto name = fmt::to_string(primitive);
-
-    // Note that vertex_count is allowed to be 0, with no special treatment
-    // (another command just comes right after the current command, with no vertices in between)
-    const u32 object_prim_size = num_vertices * vertex_size;
-
-    const u8 opcode =
-        0x80 | std::to_underlying(primitive) << OpcodeDecoder::GX_PRIMITIVE_SHIFT | vat;
-    text = QStringLiteral("PRIMITIVE %1 (%2)  %3 vertices %4 bytes/vertex %5 total bytes")
-               .arg(QString::fromStdString(name))
-               .arg(opcode, 2, 16, QLatin1Char('0'))
-               .arg(num_vertices)
-               .arg(vertex_size)
-               .arg(object_prim_size);
-
-    // It's not really useful to have a massive unreadable hex string for the object primitives.
-    // Put it in the description instead.
-
-// #define INCLUDE_HEX_IN_PRIMITIVES
-#ifdef INCLUDE_HEX_IN_PRIMITIVES
-    text += QStringLiteral("   ");
-    for (u32 i = 0; i < object_prim_size; i++)
-    {
-      text += QStringLiteral("%1").arg(vertex_data[i], 2, 16, QLatin1Char('0'));
-    }
-#endif
-  }
-
-  OPCODE_CALLBACK(void OnDisplayList(const u32 address, const u32 size))
-  {
-    text = QObject::tr("Call display list at %1 with size %2")
-               .arg(address, 8, 16, QLatin1Char('0'))
-               .arg(size, 8, 16, QLatin1Char('0'));
-  }
-
-  OPCODE_CALLBACK(void OnNop(const u32 count))
-  {
-    if (count > 1)
-      text = QStringLiteral("NOP (%1x)").arg(count);
-    else
-      text = QStringLiteral("NOP");
-  }
-
-  OPCODE_CALLBACK(void OnUnknown(u8 opcode, const u8* data))
-  {
-    using OpcodeDecoder::Opcode;
-    if (static_cast<Opcode>(opcode) == Opcode::GX_CMD_UNKNOWN_METRICS)
-      text = QStringLiteral("GX_CMD_UNKNOWN_METRICS");
-    else if (static_cast<Opcode>(opcode) == Opcode::GX_CMD_INVL_VC)
-      text = QStringLiteral("GX_CMD_INVL_VC");
-    else
-      text = QStringLiteral("Unknown opcode %1").arg(opcode, 2, 16);
-  }
-
-  OPCODE_CALLBACK(void OnCommand(const u8* data, u32 size)) {}
-
-  OPCODE_CALLBACK(CPState& GetCPState()) { return m_cpmem; }
-
-  QString text;
-  CPState m_cpmem;
-};
-}  // namespace
+  const u32 start = parts[span.first_part].m_start;
+  const u32 end = parts[span.last_part].m_end;
+  return {frame.fifoData.data() + start, start, end - start};
+}
 
 void FIFOAnalyzer::UpdateDetails()
 {
-  // Clearing the detail list can update the selection, which causes UpdateDescription to be called
-  // immediately.  However, the object data offsets have not been recalculated yet, which can cause
-  // the wrong data to be used, potentially leading to out of bounds data or other bad things.
-  // Clear m_object_data_offsets first, so that UpdateDescription exits immediately.
+  // Clearing the list moves its current row, which runs UpdateDescription right away; with the
+  // offsets emptied first it returns without touching the old object's data.
   m_object_data_offsets.clear();
   m_detail_list->clear();
   m_search_results.clear();
@@ -335,123 +547,86 @@ void FIFOAnalyzer::UpdateDetails()
   if (!m_fifo_player.IsPlaying())
     return;
 
-  const auto items = m_tree_widget->selectedItems();
-
-  if (items.isEmpty() || items[0]->data(0, PART_START_ROLE).isNull())
+  const std::optional<ObjectSpan> span = SelectedObject();
+  if (!span)
     return;
 
-  const u32 frame_nr = items[0]->data(0, FRAME_ROLE).toUInt();
-  const u32 start_part_nr = items[0]->data(0, PART_START_ROLE).toUInt();
-  const u32 end_part_nr = items[0]->data(0, PART_END_ROLE).toUInt();
+  const ObjectBytes object = BytesOf(*span);
 
-  const auto& [parts, _part_type_counts] = m_fifo_player.GetAnalyzedFrameInfo(frame_nr);
-  const auto& fifo_frame = m_fifo_player.GetFile()->GetFrame(frame_nr);
+  // The CP state is the one after the whole object; it is right by the time any draw is reached.
+  CommandSummary summary(
+      m_fifo_player.GetAnalyzedFrameInfo(span->frame).parts[span->last_part].m_cpmem);
 
-  const u32 object_start = parts[start_part_nr].m_start;
-  const u32 object_end = parts[end_part_nr].m_end;
-  const u32 object_size = object_end - object_start;
-
-  u32 object_offset = 0;
-  // NOTE: object_info.m_cpmem is the state of cpmem _after_ all of the commands in this object.
-  // However, it doesn't matter that it doesn't match the start, since it will match by the time
-  // primitives are reached.
-  auto callback = DetailCallback(parts[end_part_nr].m_cpmem);
-
-  while (object_offset < object_size)
+  u32 offset = 0;
+  while (offset < object.size)
   {
-    const u32 start_offset = object_offset;
-    m_object_data_offsets.push_back(start_offset);
+    const u32 command_start = offset;
+    m_object_data_offsets.push_back(command_start);
+    offset += OpcodeDecoder::RunCommand(object.begin + command_start, object.size - command_start,
+                                        summary);
 
-    object_offset += OpcodeDecoder::RunCommand(&fifo_frame.fifoData[object_start + start_offset],
-                                               object_size - start_offset, callback);
-
-    QString new_label =
-        QStringLiteral("%1:  ").arg(object_start + start_offset, 8, 16, QLatin1Char('0')) +
-        callback.text;
-    m_detail_list->addItem(new_label);
+    m_detail_list->addItem(QStringLiteral("%1:  ").arg(Hex(object.fifo_offset + command_start, 8)) +
+                           summary.text);
   }
 
-  // Needed to ensure the description updates when changing objects
+  // Selecting the first command also refreshes the description for the new object.
   m_detail_list->setCurrentRow(0);
 }
 
 void FIFOAnalyzer::BeginSearch()
 {
-  const QString search_str = m_search_edit->text();
+  const QString query = m_search_edit->text();
 
   if (!m_fifo_player.IsPlaying())
     return;
 
-  const auto items = m_tree_widget->selectedItems();
-
-  if (items.isEmpty() || items[0]->data(0, FRAME_ROLE).isNull() ||
-      items[0]->data(0, PART_START_ROLE).isNull())
+  const std::optional<ObjectSpan> span = SelectedObject();
+  if (!span)
   {
     m_search_label->setText(tr("Invalid search parameters (no object selected)"));
     return;
   }
 
-  // Having PART_START_ROLE indicates that this is valid
-  const int object_idx = items[0]->parent()->indexOfChild(items[0]);
+  QTreeWidgetItem* object_row = m_tree_widget->selectedItems()[0];
+  const int row_in_frame = object_row->parent()->indexOfChild(object_row);
 
-  // TODO: Remove even string length limit
-  if (search_str.length() % 2)
+  // The query is a run of hex bytes, two digits each.
+  if (query.length() % 2 != 0)
   {
     m_search_label->setText(tr("Invalid search string (only even string lengths supported)"));
     return;
   }
 
-  const size_t length = search_str.length() / 2;
-
-  std::vector<u8> search_val;
-
-  for (size_t i = 0; i < length; i++)
+  std::vector<u8> needle;
+  for (qsizetype at = 0; at < query.length(); at += 2)
   {
-    const QString byte_str = search_str.mid(static_cast<int>(i * 2), 2);
-
-    bool good;
-    u8 value = byte_str.toUInt(&good, 16);
-
-    if (!good)
+    bool parsed = false;
+    const uint byte = query.mid(at, 2).toUInt(&parsed, 16);
+    if (!parsed)
     {
       m_search_label->setText(tr("Invalid search string (couldn't convert to number)"));
       return;
     }
-
-    search_val.push_back(value);
+    needle.push_back(static_cast<u8>(byte));
   }
 
   m_search_results.clear();
 
-  const u32 frame_nr = items[0]->data(0, FRAME_ROLE).toUInt();
-  const u32 start_part_nr = items[0]->data(0, PART_START_ROLE).toUInt();
-  const u32 end_part_nr = items[0]->data(0, PART_END_ROLE).toUInt();
-
-  const auto& [parts, _part_type_counts] = m_fifo_player.GetAnalyzedFrameInfo(frame_nr);
-  const FifoFrameInfo& fifo_frame = m_fifo_player.GetFile()->GetFrame(frame_nr);
-
-  const u32 object_start = parts[start_part_nr].m_start;
-  const u32 object_end = parts[end_part_nr].m_end;
-  const u32 object_size = object_end - object_start;
-
-  const u8* const object = &fifo_frame.fifoData[object_start];
-
-  // TODO: Support searching for bit patterns
-  for (u32 cmd_nr = 0; cmd_nr < m_object_data_offsets.size(); cmd_nr++)
+  // Each command that contains the bytes counts once.
+  const ObjectBytes object = BytesOf(*span);
+  const u32 length = static_cast<u32>(needle.size());
+  for (u32 command = 0; command < m_object_data_offsets.size(); ++command)
   {
-    const u32 cmd_start = m_object_data_offsets[cmd_nr];
-    const u32 cmd_end = (cmd_nr + 1 == m_object_data_offsets.size()) ?
-                            object_size :
-                            m_object_data_offsets[cmd_nr + 1];
+    const u32 command_start = m_object_data_offsets[command];
+    const u32 command_end = command + 1 == m_object_data_offsets.size() ?
+                                object.size :
+                                m_object_data_offsets[command + 1];
 
-    const u8* const cmd_start_ptr = &object[cmd_start];
-    const u8* const cmd_end_ptr = &object[cmd_end];
-
-    for (const u8* ptr = cmd_start_ptr; ptr < cmd_end_ptr - length + 1; ptr++)
+    for (u32 at = command_start; at + length <= command_end; ++at)
     {
-      if (std::equal(search_val.begin(), search_val.end(), ptr))
+      if (std::equal(needle.begin(), needle.end(), object.begin + at))
       {
-        m_search_results.emplace_back(frame_nr, object_idx, cmd_nr);
+        m_search_results.push_back({span->frame, static_cast<u32>(row_in_frame), command});
         break;
       }
     }
@@ -460,280 +635,53 @@ void FIFOAnalyzer::BeginSearch()
   ShowSearchResult(0);
 
   m_search_label->setText(
-      tr("Found %1 results for \"%2\"").arg(m_search_results.size()).arg(search_str));
+      tr("Found %1 results for \"%2\"").arg(m_search_results.size()).arg(query));
 }
 
 void FIFOAnalyzer::FindNext()
 {
-  const int index = m_detail_list->currentRow();
-  ASSERT(index >= 0);
+  const int current = m_detail_list->currentRow();
+  ASSERT(current >= 0);
 
-  const auto next_result = std::ranges::find_if(
-      m_search_results, [index](auto& result) { return result.m_cmd > static_cast<u32>(index); });
-  if (next_result != m_search_results.end())
-  {
-    ShowSearchResult(next_result - m_search_results.begin());
-  }
+  const auto next = std::ranges::find_if(m_search_results, [current](const SearchResult& hit) {
+    return hit.command > static_cast<u32>(current);
+  });
+  if (next != m_search_results.end())
+    ShowSearchResult(static_cast<size_t>(next - m_search_results.begin()));
 }
 
 void FIFOAnalyzer::FindPrevious()
 {
-  const int index = m_detail_list->currentRow();
-  ASSERT(index >= 0);
+  const int current = m_detail_list->currentRow();
+  ASSERT(current >= 0);
 
-  const auto prev_result =
-      std::ranges::find_if(m_search_results | std::views::reverse, [index](auto& result) {
-        return result.m_cmd < static_cast<u32>(index);
-      });
-  if (prev_result != m_search_results.rend())
+  for (size_t i = m_search_results.size(); i-- > 0;)
   {
-    ShowSearchResult((m_search_results.rend() - prev_result) - 1);
+    if (m_search_results[i].command < static_cast<u32>(current))
+    {
+      ShowSearchResult(i);
+      return;
+    }
   }
 }
 
-void FIFOAnalyzer::ShowSearchResult(const size_t index)
+void FIFOAnalyzer::ShowSearchResult(size_t index)
 {
   if (m_search_results.empty())
     return;
 
-  if (index >= m_search_results.size())
-  {
-    ShowSearchResult(m_search_results.size() - 1);
-    return;
-  }
+  // Past the end means the last one.
+  index = std::min(index, m_search_results.size() - 1);
+  const SearchResult hit = m_search_results[index];
 
-  const auto& result = m_search_results[index];
-
-  QTreeWidgetItem* object_item =
-      m_tree_widget->topLevelItem(0)->child(result.m_frame)->child(result.m_object_idx);
-
-  m_tree_widget->setCurrentItem(object_item);
-  m_detail_list->setCurrentRow(result.m_cmd);
+  m_tree_widget->setCurrentItem(m_tree_widget->topLevelItem(0)
+                                    ->child(static_cast<int>(hit.frame))
+                                    ->child(static_cast<int>(hit.object_row)));
+  m_detail_list->setCurrentRow(static_cast<int>(hit.command));
 
   m_search_next->setEnabled(index + 1 < m_search_results.size());
   m_search_previous->setEnabled(index > 0);
 }
-
-namespace
-{
-// TODO: Not sure whether we should bother translating the descriptions
-class DescriptionCallback : public OpcodeDecoder::Callback
-{
-public:
-  explicit DescriptionCallback(const CPState& cpmem) : m_cpmem(cpmem) {}
-
-  OPCODE_CALLBACK(void OnBP(const u8 command, const u32 value))
-  {
-    const auto [name, desc] = GetBPRegInfo(command, value);
-    ASSERT(!name.empty());
-
-    text = QObject::tr("BP register ");
-    text += QString::fromStdString(name);
-    text += QLatin1Char{'\n'};
-
-    if (desc.empty())
-      text += QObject::tr("No description available");
-    else
-      text += QString::fromStdString(desc);
-  }
-
-  OPCODE_CALLBACK(void OnCP(const u8 command, const u32 value))
-  {
-    // Note: No need to update m_cpmem as it already has the final value for this object
-
-    const auto [name, desc] = GetCPRegInfo(command, value);
-    ASSERT(!name.empty());
-
-    text = QObject::tr("CP register ");
-    text += QString::fromStdString(name);
-    text += QLatin1Char{'\n'};
-
-    if (desc.empty())
-      text += QObject::tr("No description available");
-    else
-      text += QString::fromStdString(desc);
-  }
-
-  OPCODE_CALLBACK(void OnXF(const u16 address, const u8 count, const u8* data))
-  {
-    const auto [name, desc] = GetXFTransferInfo(address, count, data);
-    ASSERT(!name.empty());
-
-    text = QObject::tr("XF register ");
-    text += QString::fromStdString(name);
-    text += QLatin1Char{'\n'};
-
-    if (desc.empty())
-      text += QObject::tr("No description available");
-    else
-      text += QString::fromStdString(desc);
-  }
-
-  OPCODE_CALLBACK(void OnIndexedLoad(const CPArray array, const u32 index, const u16 address,
-                                     const u8 size))
-  {
-    const auto [desc, written] = GetXFIndexedLoadInfo(array, index, address, size);
-
-    text = QString::fromStdString(desc);
-    text += QLatin1Char{'\n'};
-    switch (array)
-    {
-    case CPArray::XF_A:
-      text += QObject::tr("Usually used for position matrices");
-      break;
-    case CPArray::XF_B:
-      // i18n: A normal matrix is a matrix used for transforming normal vectors. The word "normal"
-      // does not have its usual meaning here, but rather the meaning of "perpendicular to a
-      // surface".
-      text += QObject::tr("Usually used for normal matrices");
-      break;
-    case CPArray::XF_C:
-      // i18n: Tex coord is short for texture coordinate
-      text += QObject::tr("Usually used for tex coord matrices");
-      break;
-    case CPArray::XF_D:
-      text += QObject::tr("Usually used for light objects");
-      break;
-    default:
-      break;
-    }
-    text += QLatin1Char{'\n'};
-    text += QString::fromStdString(written);
-  }
-
-  OPCODE_CALLBACK(void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat,
-                                          const u32 vertex_size, const u16 num_vertices,
-                                          const u8* vertex_data))
-  {
-    const auto name = fmt::format("{} VAT {}", primitive, vat);
-
-    // i18n: In this context, a primitive means a point, line, triangle or rectangle.
-    // Do not translate the word primitive as if it was an adjective.
-    text = QObject::tr("Primitive %1").arg(QString::fromStdString(name));
-    text += QLatin1Char{'\n'};
-
-    const auto& [low, high] = m_cpmem.vtx_desc;
-    const auto& vtx_attr = m_cpmem.vtx_attr[vat];
-
-    u32 i = 0;
-    const auto process_component = [&](const VertexComponentFormat cformat, ComponentFormat format,
-                                       const u32 non_indexed_count, const u32 indexed_count = 1) {
-      u32 count;
-      if (cformat == VertexComponentFormat::NotPresent)
-        return;
-      else if (cformat == VertexComponentFormat::Index8)
-      {
-        format = ComponentFormat::UByte;
-        count = indexed_count;
-      }
-      else if (cformat == VertexComponentFormat::Index16)
-      {
-        format = ComponentFormat::UShort;
-        count = indexed_count;
-      }
-      else
-      {
-        count = non_indexed_count;
-      }
-
-      const u32 component_size = GetElementSize(format);
-      for (u32 j = 0; j < count; j++)
-      {
-        for (u32 component_off = 0; component_off < component_size; component_off++)
-        {
-          text += QStringLiteral("%1").arg(vertex_data[i + component_off], 2, 16, QLatin1Char('0'));
-        }
-        if (format == ComponentFormat::Float)
-        {
-          const float value = std::bit_cast<float>(Common::swap32(&vertex_data[i]));
-          text += QStringLiteral(" (%1)").arg(value);
-        }
-        i += component_size;
-        text += QLatin1Char{' '};
-      }
-      text += QLatin1Char{' '};
-    };
-    const auto process_simple_component = [&](const u32 size) {
-      for (u32 component_off = 0; component_off < size; component_off++)
-      {
-        text += QStringLiteral("%1").arg(vertex_data[i + component_off], 2, 16, QLatin1Char('0'));
-      }
-      i += size;
-      text += QLatin1Char{' '};
-      text += QLatin1Char{' '};
-    };
-
-    for (u32 vertex_num = 0; vertex_num < num_vertices; vertex_num++)
-    {
-      ASSERT(i == vertex_num * vertex_size);
-
-      text += QLatin1Char{'\n'};
-      if (low.PosMatIdx)
-        process_simple_component(1);
-      for (auto texmtxidx : low.TexMatIdx)
-      {
-        if (texmtxidx)
-          process_simple_component(1);
-      }
-      process_component(low.Position, vtx_attr.g0.PosFormat,
-                        vtx_attr.g0.PosElements == CoordComponentCount::XY ? 2 : 3);
-      const u32 normal_component_count = low.Normal == VertexComponentFormat::Direct ? 3 : 1;
-      const u32 normal_elements = vtx_attr.g0.NormalElements == NormalComponentCount::NTB ? 3 : 1;
-      process_component(low.Normal, vtx_attr.g0.NormalFormat,
-                        normal_component_count * normal_elements,
-                        vtx_attr.g0.NormalIndex3 ? normal_elements : 1);
-      for (u32 c = 0; c < low.Color.Size(); c++)
-      {
-        static constexpr Common::EnumMap<u32, ColorFormat::RGBA8888> component_sizes = {
-            2,  // RGB565
-            3,  // RGB888
-            4,  // RGB888x
-            2,  // RGBA4444
-            3,  // RGBA6666
-            4,  // RGBA8888
-        };
-        switch (low.Color[c])
-        {
-        case VertexComponentFormat::Index8:
-          process_simple_component(1);
-          break;
-        case VertexComponentFormat::Index16:
-          process_simple_component(2);
-          break;
-        case VertexComponentFormat::Direct:
-          process_simple_component(component_sizes[vtx_attr.GetColorFormat(c)]);
-          break;
-        case VertexComponentFormat::NotPresent:
-          break;
-        }
-      }
-      for (u32 t = 0; t < high.TexCoord.Size(); t++)
-      {
-        process_component(high.TexCoord[t], vtx_attr.GetTexFormat(t),
-                          vtx_attr.GetTexElements(t) == TexComponentCount::ST ? 2 : 1);
-      }
-    }
-  }
-
-  OPCODE_CALLBACK(void OnDisplayList(u32 address, u32 size))
-  {
-    text = QObject::tr("No description available");
-  }
-
-  OPCODE_CALLBACK(void OnNop(u32 count)) { text = QObject::tr("No description available"); }
-  OPCODE_CALLBACK(void OnUnknown(u8 opcode, const u8* data))
-  {
-    text = QObject::tr("No description available");
-  }
-
-  OPCODE_CALLBACK(void OnCommand(const u8* data, u32 size)) {}
-
-  OPCODE_CALLBACK(CPState& GetCPState()) { return m_cpmem; }
-
-  QString text;
-  CPState m_cpmem;
-};
-}  // namespace
 
 void FIFOAnalyzer::UpdateDescription()
 {
@@ -742,31 +690,21 @@ void FIFOAnalyzer::UpdateDescription()
   if (!m_fifo_player.IsPlaying())
     return;
 
-  const auto items = m_tree_widget->selectedItems();
-
-  if (items.isEmpty() || m_object_data_offsets.empty())
+  if (m_tree_widget->selectedItems().isEmpty() || m_object_data_offsets.empty())
     return;
 
-  if (items[0]->data(0, FRAME_ROLE).isNull() || items[0]->data(0, PART_START_ROLE).isNull())
+  const std::optional<ObjectSpan> span = SelectedObject();
+  if (!span)
     return;
 
-  const u32 frame_nr = items[0]->data(0, FRAME_ROLE).toUInt();
-  const u32 start_part_nr = items[0]->data(0, PART_START_ROLE).toUInt();
-  const u32 end_part_nr = items[0]->data(0, PART_END_ROLE).toUInt();
-  const u32 entry_nr = m_detail_list->currentRow();
+  const u32 command = static_cast<u32>(m_detail_list->currentRow());
+  const ObjectBytes object = BytesOf(*span);
+  const u32 command_start = m_object_data_offsets[command];
 
-  const auto& [parts, _part_type_counts] = m_fifo_player.GetAnalyzedFrameInfo(frame_nr);
-  const FifoFrameInfo& fifo_frame = m_fifo_player.GetFile()->GetFrame(frame_nr);
-
-  const u32 object_start = parts[start_part_nr].m_start;
-  const u32 object_end = parts[end_part_nr].m_end;
-  const u32 object_size = object_end - object_start;
-  const u32 entry_start = m_object_data_offsets[entry_nr];
-
-  auto callback = DescriptionCallback(parts[end_part_nr].m_cpmem);
-  OpcodeDecoder::RunCommand(&fifo_frame.fifoData[object_start + entry_start],
-                            object_size - entry_start, callback);
-  m_entry_detail_browser->setText(callback.text);
+  CommandExplanation explanation(
+      m_fifo_player.GetAnalyzedFrameInfo(span->frame).parts[span->last_part].m_cpmem);
+  OpcodeDecoder::RunCommand(object.begin + command_start, object.size - command_start, explanation);
+  m_entry_detail_browser->setText(explanation.text);
 }
 
 void FIFOAnalyzer::OnDebugFontChanged(const QFont& font)
