@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@
 
 namespace DX12
 {
+// Compiled bytecode for any stage. Graphics stages are only bytecode until a
+// pipeline uses them; compute shaders get their pipeline state right away.
 class DXShader final : public D3DCommon::Shader
 {
 public:

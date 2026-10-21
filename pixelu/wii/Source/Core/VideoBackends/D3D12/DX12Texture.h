@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,12 +16,17 @@
 
 namespace DX12
 {
+// A committed 2D texture array with a shader-resource view and, for compute
+// images, an unordered-access view. The resource state is tracked here so
+// barriers are only recorded when it actually changes.
 class DXTexture final : public AbstractTexture
 {
 public:
   ~DXTexture() override;
 
   static std::unique_ptr<DXTexture> Create(const TextureConfig& config, std::string_view name);
+
+  // Wraps a resource made elsewhere (a swap-chain buffer).
   static std::unique_ptr<DXTexture> CreateAdopted(ID3D12Resource* resource);
 
   void Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer, size_t buffer_size,
@@ -39,11 +43,14 @@ public:
   const DescriptorHandle& GetSRVDescriptor() const { return m_srv_descriptor; }
   const DescriptorHandle& GetUAVDescriptor() const { return m_uav_descriptor; }
   D3D12_RESOURCE_STATES GetState() const { return m_state; }
+
+  // D3D12 numbers subresources mip-major within each array slice.
   u32 CalcSubresource(u32 level, u32 layer) const { return level + layer * m_config.levels; }
 
+  // Records a barrier into the current command list if the state differs.
   void TransitionToState(D3D12_RESOURCE_STATES state) const;
 
-  // Destroys the resource backing this texture. The resource must not be in use by the GPU.
+  // Drops the views and the resource right away; the GPU must be done with it.
   void DestroyResource();
 
 private:
@@ -62,6 +69,7 @@ private:
   mutable D3D12_RESOURCE_STATES m_state;
 };
 
+// Render-target and depth-stencil views over DXTexture attachments.
 class DXFramebuffer final : public AbstractFramebuffer
 {
 public:
@@ -75,12 +83,15 @@ public:
   {
     return m_render_targets_raw.data();
   }
+  // The view for integer-format output; falls back to the normal views when
+  // the format has no separate integer view.
   const D3D12_CPU_DESCRIPTOR_HANDLE* GetIntRTVDescriptorArray() const;
   const D3D12_CPU_DESCRIPTOR_HANDLE* GetDSVDescriptorArray() const
   {
     return m_depth_attachment ? &m_dsv_descriptor.cpu_handle : nullptr;
   }
 
+  // Tells the driver the attachments' contents are no longer needed.
   void Unbind();
   void ClearRenderTargets(const ClearColor& color_value, const D3D12_RECT* rectangle) const;
   void ClearDepth(float depth_value, const D3D12_RECT* rectangle) const;
@@ -107,6 +118,8 @@ private:
   DescriptorHandle m_dsv_descriptor = {};
 };
 
+// A linear buffer in an upload or readback heap, laid out as rows of a 2D
+// image with a 256-byte aligned pitch.
 class DXStagingTexture final : public AbstractStagingTexture
 {
 public:

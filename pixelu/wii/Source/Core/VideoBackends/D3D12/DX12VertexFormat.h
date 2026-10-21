@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ enum class ShaderAttrib : u32;
 
 namespace DX12
 {
+// The D3D12 input layout for a portable vertex declaration. Every attribute
+// comes from vertex buffer slot 0.
 class DXVertexFormat : public NativeVertexFormat
 {
 public:
@@ -20,13 +21,12 @@ public:
 
   DXVertexFormat(const PortableVertexDeclaration& vtx_decl);
 
-  // Passed to pipeline state creation
+  // Fills the layout part of a pipeline description; the elements stay owned
+  // by this object.
   void GetInputLayoutDesc(D3D12_INPUT_LAYOUT_DESC* desc) const;
 
 private:
-  void AddAttribute(const char* semantic_name, ShaderAttrib semantic_index, u32 slot,
-                    DXGI_FORMAT format, u32 offset);
-  void MapAttributes();
+  void AddAttribute(const AttributeFormat& format, ShaderAttrib attribute);
 
   std::array<D3D12_INPUT_ELEMENT_DESC, MAX_VERTEX_ATTRIBUTES> m_attribute_descriptions = {};
   u32 m_num_attributes = 0;

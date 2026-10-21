@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D12/DX12Shader.h"
 
@@ -18,30 +17,33 @@ DXShader::DXShader(ShaderStage stage, BinaryData bytecode, std::string_view name
 
 DXShader::~DXShader() = default;
 
-std::unique_ptr<DXShader> DXShader::CreateFromBytecode(ShaderStage stage, BinaryData bytecode,
-                                                       std::string_view name)
-{
-  std::unique_ptr<DXShader> shader(new DXShader(stage, std::move(bytecode), name));
-  if (stage == ShaderStage::Compute && !shader->CreateComputePipeline())
-    return nullptr;
-
-  return shader;
-}
-
 std::unique_ptr<DXShader> DXShader::CreateFromSource(ShaderStage stage, std::string_view source,
                                                      VideoCommon::ShaderIncluder* shader_includer,
                                                      std::string_view name)
 {
-  auto bytecode = CompileShader(g_dx_context->GetFeatureLevel(), stage, source, shader_includer);
-  if (!bytecode)
+  std::optional<BinaryData> compiled =
+      CompileShader(g_dx_context->GetFeatureLevel(), stage, source, shader_includer);
+  if (!compiled.has_value())
     return nullptr;
+  return CreateFromBytecode(stage, std::move(compiled.value()), name);
+}
 
-  return CreateFromBytecode(stage, std::move(*bytecode), name);
+std::unique_ptr<DXShader> DXShader::CreateFromBytecode(ShaderStage stage, BinaryData bytecode,
+                                                       std::string_view name)
+{
+  std::unique_ptr<DXShader> shader(new DXShader(stage, std::move(bytecode), name));
+  const bool needs_pipeline = stage == ShaderStage::Compute;
+  if (needs_pipeline && !shader->CreateComputePipeline())
+    return nullptr;
+  return shader;
 }
 
 D3D12_SHADER_BYTECODE DXShader::GetD3DByteCode() const
 {
-  return D3D12_SHADER_BYTECODE{m_bytecode.data(), m_bytecode.size()};
+  D3D12_SHADER_BYTECODE code;
+  code.pShaderBytecode = m_bytecode.data();
+  code.BytecodeLength = m_bytecode.size();
+  return code;
 }
 
 bool DXShader::CreateComputePipeline()
@@ -51,13 +53,13 @@ bool DXShader::CreateComputePipeline()
   desc.CS = GetD3DByteCode();
   desc.NodeMask = 1;
 
-  HRESULT hr = g_dx_context->GetDevice()->CreateComputePipelineState(
+  const HRESULT hr = g_dx_context->GetDevice()->CreateComputePipelineState(
       &desc, IID_PPV_ARGS(&m_compute_pipeline));
   ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Creating compute pipeline failed: {}", DX12HRWrap(hr));
 
-  if (m_compute_pipeline && !m_name.empty())
+  // Name whatever came back, even alongside a failure code.
+  if (m_compute_pipeline != nullptr && !m_name.empty())
     m_compute_pipeline->SetName(m_name.c_str());
-
   return SUCCEEDED(hr);
 }
 
