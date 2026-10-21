@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,9 @@ struct HighlightingRule;
 class QTextBlock;
 class QTextDocument;
 
+// Colours INI text in a document. Blocks are formatted directly as they
+// change, rather than through QSyntaxHighlighter, which stalls on very large
+// files.
 class GameConfigHighlighter : public QObject
 {
   Q_OBJECT
@@ -21,7 +23,7 @@ public:
   ~GameConfigHighlighter() override;
 
 private:
-  void HighlightBlock(const QTextBlock& block);
+  void FormatBlock(const QTextBlock& block);
 
   std::vector<HighlightingRule> m_rules;
 };

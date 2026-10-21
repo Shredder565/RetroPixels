@@ -1,13 +1,17 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/GameConfigWidget.h"
 
+#include <optional>
+#include <vector>
+
 #include <QFont>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QSignalBlocker>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolTip>
@@ -17,7 +21,6 @@
 #include "Common/Config/Config.h"
 #include "Common/Config/Layer.h"
 #include "Common/FileUtil.h"
-
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/GameConfigLoader.h"
@@ -31,27 +34,46 @@
 #include "DolphinQt/Config/Graphics/GraphicsPane.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
 #include "DolphinQt/QtUtils/WrapInScrollArea.h"
-
+#include "DolphinQt/Settings.h"
 #include "UICommon/GameFile.h"
 
-static void PopulateTab(QTabWidget* tab, const std::string& path, std::string& game_id,
-                        u16 revision, bool read_only)
+namespace
 {
-  for (const std::string& filename : ConfigLoaders::GetGameIniFilenames(game_id, revision))
+// Adds an editor tab for each of the game's INI files found in `directory`.
+void AddIniEditors(QTabWidget* tabs, const std::string& directory, const std::string& game_id,
+                   u16 revision, bool read_only)
+{
+  for (const std::string& name : ConfigLoaders::GetGameIniFilenames(game_id, revision))
   {
-    const std::string ini_path = path + filename;
-    if (File::Exists(ini_path))
-    {
-      auto* edit = new GameConfigEdit(nullptr, QString::fromStdString(ini_path), read_only);
-      tab->addTab(edit, QString::fromStdString(filename));
-    }
+    const std::string full_path = directory + name;
+    if (!File::Exists(full_path))
+      continue;
+    tabs->addTab(new GameConfigEdit(nullptr, QString::fromStdString(full_path), read_only),
+                 QString::fromStdString(name));
   }
 }
+
+QString DepthText(const ConfigFloatSlider* slider)
+{
+  return QString::asprintf("%.0f%%", slider->GetValue());
+}
+
+QString ConvergenceText(const ConfigFloatSlider* slider)
+{
+  return QString::asprintf("%.2f", slider->GetValue());
+}
+
+void MakeItalic(QWidget* widget)
+{
+  QFont font = widget->font();
+  font.setItalic(true);
+  widget->setFont(font);
+}
+}  // namespace
 
 GameConfigWidget::GameConfigWidget(const UICommon::GameFile& game) : m_game(game)
 {
   m_game_id = m_game.GetGameID();
-
   m_gameini_local_path =
       QString::fromStdString(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini");
 
@@ -60,320 +82,303 @@ GameConfigWidget::GameConfigWidget(const UICommon::GameFile& game) : m_game(game
   m_global_layer = std::make_unique<Config::Layer>(
       ConfigLoaders::GenerateGlobalGameConfigLoader(m_game_id, m_game.GetRevision()));
 
-  CreateWidgets();
-  connect(&Settings::Instance(), &Settings::ConfigChanged, this, &GameConfigWidget::LoadSettings);
+  QWidget* const general = BuildGeneralTab();
+  QWidget* const editors = BuildEditorTab();
 
-  PopulateTab(m_default_tab, File::GetSysDirectory() + GAMESETTINGS_DIR DIR_SEP, m_game_id,
-              m_game.GetRevision(), true);
-  PopulateTab(m_local_tab, File::GetUserPath(D_GAMESETTINGS_IDX), m_game_id, m_game.GetRevision(),
-              false);
+  auto* const tabs = new QTabWidget;
+  tabs->addTab(general, tr("General"));
+  tabs->addTab(new GraphicsPane{nullptr, m_layer.get()}, tr("Graphics"));
+  m_editor_tab = tabs->addTab(editors, tr("Editor"));
+  connect(tabs, &QTabWidget::currentChanged, this, &GameConfigWidget::OnTabChanged);
 
-  bool game_id_tab = false;
-  for (int i = 0; i < m_local_tab->count(); i++)
+  const QString legend =
+      tr("Italics mark default game settings, bold marks user settings.\nRight-click to remove "
+         "user settings.\nGraphics tabs don't display the value of a default game "
+         "setting.\nAnti-Aliasing settings are disabled when the global graphics backend "
+         "doesn't match the game setting.");
+  auto* const notice = new QLabel(tr("These settings override core Dolphin settings."));
+  QWidget* const notice_row =
+      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxQuestion, notice);
+  notice_row->setToolTip(legend);
+
+  auto* const column = new QVBoxLayout;
+  column->addWidget(notice_row);
+  column->addWidget(tabs);
+  setLayout(column);
+
+  connect(&Settings::Instance(), &Settings::ConfigChanged, this,
+          &GameConfigWidget::ShowGlobalValues);
+
+  AddIniEditors(m_default_inis, File::GetSysDirectory() + GAMESETTINGS_DIR DIR_SEP, m_game_id,
+                m_game.GetRevision(), true);
+  AddIniEditors(m_user_inis, File::GetUserPath(D_GAMESETTINGS_IDX), m_game_id,
+                m_game.GetRevision(), false);
+
+  // The user INI named after the game ID always gets an editor, even when
+  // the file doesn't exist yet.
+  bool has_own_ini = false;
+  for (int i = 0; i < m_user_inis->count(); ++i)
   {
-    if (m_local_tab->tabText(i).toStdString() == m_game_id + ".ini")
-      game_id_tab = true;
+    if (m_user_inis->tabText(i).toStdString() == m_game_id + ".ini")
+      has_own_ini = true;
+  }
+  if (!has_own_ini)
+  {
+    m_user_inis->addTab(
+        new GameConfigEdit(
+            nullptr,
+            QString::fromStdString(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini"),
+            false),
+        UserIniName());
   }
 
-  if (game_id_tab == false)
-  {
-    // Create new local game ini tab if none exists.
-    auto* edit = new GameConfigEdit(
-        nullptr, QString::fromStdString(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini"),
-        false);
-    m_local_tab->addTab(edit, QString::fromStdString(m_game_id + ".ini"));
-  }
-
-  // Fails to change font if it's directly called at this time. Is there a better workaround?
+  // Fonts set during construction don't stick, so the italics and the first
+  // refresh wait a moment.
   QTimer::singleShot(100, this, [this] {
-    SetItalics();
+    MarkGlobalSettings();
     Config::OnConfigChanged();
   });
-}
-
-void GameConfigWidget::CreateWidgets()
-{
-  Config::Layer* layer = m_layer.get();
-  // Core
-  auto* core_box = new QGroupBox(tr("Core"));
-  auto* core_layout = new QGridLayout;
-  core_box->setLayout(core_layout);
-
-  m_enable_dual_core = new ConfigBool(tr("Enable Dual Core"), Config::MAIN_CPU_THREAD, layer);
-  m_enable_mmu = new ConfigBool(tr("Enable MMU"), Config::MAIN_MMU, layer);
-  m_enable_fprf = new ConfigBool(tr("Enable FPRF"), Config::MAIN_FPRF, layer);
-  m_sync_gpu = new ConfigBool(tr("Synchronize GPU thread"), Config::MAIN_SYNC_GPU, layer);
-  m_emulate_disc_speed =
-      new ConfigBool(tr("Emulate Disc Speed"), Config::MAIN_FAST_DISC_SPEED, layer, true);
-  m_use_dsp_hle = new ConfigBool(tr("DSP HLE (fast)"), Config::MAIN_DSP_HLE, layer);
-
-  const std::vector<std::string> choice{tr("auto").toStdString(), tr("none").toStdString(),
-                                        tr("fake-completion").toStdString()};
-  m_deterministic_dual_core =
-      new ConfigStringChoice(choice, Config::MAIN_GPU_DETERMINISM_MODE, layer);
-
-  m_enable_mmu->SetDescription(tr(
-      "Enables the Memory Management Unit, needed for some games. (ON = Compatible, OFF = Fast)"));
-
-  m_enable_fprf->SetDescription(
-      tr("Enables Floating Point Result Flag calculation, needed for a few "
-         "games. (ON = Compatible, OFF = Fast)"));
-  m_sync_gpu->SetDescription(
-      tr("Synchronizes the GPU and CPU threads to help prevent random freezes "
-         "in Dual core mode. (ON = Compatible, OFF = Fast)"));
-  m_emulate_disc_speed->SetDescription(
-      tr("Enable emulated disc speed. Disabling this can cause crashes "
-         "and other problems in some games. "
-         "(ON = Compatible, OFF = Unlocked)"));
-
-  core_layout->addWidget(m_enable_dual_core, 0, 0);
-  core_layout->addWidget(m_enable_mmu, 1, 0);
-  core_layout->addWidget(m_enable_fprf, 2, 0);
-  core_layout->addWidget(m_sync_gpu, 3, 0);
-  core_layout->addWidget(m_emulate_disc_speed, 4, 0);
-  core_layout->addWidget(m_use_dsp_hle, 5, 0);
-  core_layout->addWidget(new QLabel(tr("Deterministic dual core:")), 6, 0);
-  core_layout->addWidget(m_deterministic_dual_core, 6, 1);
-
-  // Stereoscopy
-  auto* stereoscopy_box = new QGroupBox(tr("Stereoscopy"));
-  auto* stereoscopy_layout = new QGridLayout;
-  stereoscopy_box->setLayout(stereoscopy_layout);
-
-  m_depth_slider =
-      new ConfigFloatSlider(100, 200, Config::GFX_STEREO_DEPTH_PERCENTAGE, 1.0f, layer);
-  m_convergence_slider =
-      new ConfigFloatSlider(0, 1000, Config::GFX_STEREO_CONVERGENCE, 0.01f, layer);
-  auto* const depth_slider_value = new QLabel();
-  auto* const convergence_slider_value = new QLabel();
-  m_use_monoscopic_shadows =
-      new ConfigBool(tr("Monoscopic Shadows"), Config::GFX_STEREO_EFB_MONO_DEPTH, layer);
-
-  m_depth_slider->SetDescription(
-      tr("This value is multiplied with the depth set in the graphics configuration."));
-  m_convergence_slider->SetDescription(
-      tr("This value is added to the convergence value set in the graphics configuration."));
-  m_use_monoscopic_shadows->SetDescription(
-      tr("Use a single depth buffer for both eyes. Needed for a few games."));
-
-  stereoscopy_layout->addWidget(new ConfigFloatLabel(tr("Depth Percentage:"), m_depth_slider), 0,
-                                0);
-  stereoscopy_layout->addWidget(m_depth_slider, 0, 1);
-  stereoscopy_layout->addWidget(depth_slider_value, 0, 2);
-  stereoscopy_layout->addWidget(new ConfigFloatLabel(tr("Convergence:"), m_convergence_slider), 1,
-                                0);
-  stereoscopy_layout->addWidget(m_convergence_slider, 1, 1);
-  stereoscopy_layout->addWidget(convergence_slider_value, 1, 2);
-  stereoscopy_layout->addWidget(m_use_monoscopic_shadows, 2, 0);
-
-  depth_slider_value->setText(QString::asprintf("%.0f%%", m_depth_slider->GetValue()));
-  convergence_slider_value->setText(QString::asprintf("%.2f", m_convergence_slider->GetValue()));
-
-  auto* general_layout = new QVBoxLayout;
-  general_layout->addWidget(core_box);
-  general_layout->addWidget(stereoscopy_box);
-  general_layout->addStretch();
-
-  auto* general_widget = new QWidget;
-  general_widget->setLayout(general_layout);
-
-  // Editor tab
-  auto* advanced_layout = new QVBoxLayout;
-
-  auto* default_group = new QGroupBox(tr("Default Config (Read Only)"));
-  auto* default_layout = new QVBoxLayout;
-  m_default_tab = new QTabWidget;
-
-  default_group->setLayout(default_layout);
-  default_layout->addWidget(m_default_tab);
-
-  auto* local_group = new QGroupBox(tr("User Config"));
-  auto* local_layout = new QVBoxLayout;
-  m_local_tab = new QTabWidget;
-
-  local_group->setLayout(local_layout);
-  local_layout->addWidget(m_local_tab);
-
-  advanced_layout->addWidget(default_group);
-  advanced_layout->addWidget(local_group);
-
-  auto* advanced_widget = new QWidget;
-
-  advanced_widget->setLayout(advanced_layout);
-
-  auto* layout = new QVBoxLayout;
-  auto* tab_widget = new QTabWidget;
-  tab_widget->addTab(general_widget, tr("General"));
-
-  auto* const gfx_widget = new GraphicsPane{nullptr, m_layer.get()};
-  tab_widget->addTab(gfx_widget, tr("Graphics"));
-
-  const int editor_index = tab_widget->addTab(advanced_widget, tr("Editor"));
-
-  connect(tab_widget, &QTabWidget::currentChanged, this, [this, editor_index](int index) {
-    // Update the ini editor after editing other tabs.
-    if (index == editor_index)
-    {
-      // Layer only auto-saves when it is destroyed.
-      m_layer->Save();
-
-      // There can be multiple ini loaded for a game, only replace the one related to the game
-      // ini being edited.
-      for (int i = 0; i < m_local_tab->count(); i++)
-      {
-        if (m_local_tab->tabText(i).toStdString() == m_game_id + ".ini")
-        {
-          m_local_tab->removeTab(i);
-
-          auto* edit = new GameConfigEdit(
-              nullptr,
-              QString::fromStdString(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini"),
-              false);
-
-          m_local_tab->insertTab(i, edit, QString::fromStdString(m_game_id + ".ini"));
-          break;
-        }
-      }
-    }
-
-    // Update other tabs after using ini editor.
-    if (m_prev_tab_index == editor_index)
-    {
-      // Load won't clear deleted keys, so everything is wiped before loading.
-      m_layer->DeleteAllKeys();
-      m_layer->Load();
-      Config::OnConfigChanged();
-    }
-
-    m_prev_tab_index = index;
-  });
-
-  connect(m_depth_slider, &ConfigFloatSlider::valueChanged, this, [this, depth_slider_value] {
-    depth_slider_value->setText(QString::asprintf("%.0f%%", m_depth_slider->GetValue()));
-  });
-  connect(m_convergence_slider, &ConfigFloatSlider::valueChanged, this,
-          [this, convergence_slider_value] {
-            convergence_slider_value->setText(
-                QString::asprintf("%.2f", m_convergence_slider->GetValue()));
-          });
-
-  const QString help_msg = tr(
-      "Italics mark default game settings, bold marks user settings.\nRight-click to remove user "
-      "settings.\nGraphics tabs don't display the value of a default game setting.\nAnti-Aliasing "
-      "settings are disabled when the global graphics backend doesn't "
-      "match the game setting.");
-
-  auto* const help_label = new QLabel(tr("These settings override core Dolphin settings."));
-
-  auto* const help_widget =
-      QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxQuestion, help_label);
-
-  help_widget->setToolTip(help_msg);
-
-  layout->addWidget(help_widget);
-  layout->addWidget(tab_widget);
-  setLayout(layout);
 }
 
 GameConfigWidget::~GameConfigWidget()
 {
-  // Destructor saves the layer to file.
+  // Destroying the layer writes it to the user INI.
   m_layer.reset();
 
-  // If a game is running and the game properties window is closed, update local game layer with
-  // any new changes. Not sure if doing it more frequently is safe.
-  auto local_layer = Config::GetLayer(Config::LayerType::LocalGame);
-  if (local_layer && SConfig::GetInstance().GetGameID() == m_game_id)
+  // If this game is running, reload its local game layer so the changes
+  // apply now.
+  const std::shared_ptr<Config::Layer> running = Config::GetLayer(Config::LayerType::LocalGame);
+  if (running && SConfig::GetInstance().GetGameID() == m_game_id)
   {
-    local_layer->DeleteAllKeys();
-    local_layer->Load();
+    running->DeleteAllKeys();
+    running->Load();
     Config::OnConfigChanged();
   }
 
-  // Delete empty configs
+  // Don't leave an empty INI behind.
   if (File::GetSize(m_gameini_local_path.toStdString()) == 0)
     File::Delete(m_gameini_local_path.toStdString());
 }
 
-void GameConfigWidget::LoadSettings()
+QString GameConfigWidget::UserIniName() const
 {
-  // Load globals
-  auto update_bool = [this](auto config, bool reverse = false) {
-    const Config::Location& setting = config->GetLocation();
-
-    // Don't overwrite local with global
-    if (m_layer->Exists(setting) || !m_global_layer->Exists(setting))
-      return;
-
-    std::optional<bool> value = m_global_layer->Get<bool>(config->GetLocation());
-
-    if (value.has_value())
-    {
-      const QSignalBlocker blocker(config);
-      config->setChecked(value.value() ^ reverse);
-    }
-  };
-
-  auto update_int = [this](auto config) {
-    const Config::Location& setting = config->GetLocation();
-
-    if (m_layer->Exists(setting) || !m_global_layer->Exists(setting))
-      return;
-
-    std::optional<int> value = m_global_layer->Get<int>(setting);
-
-    if (value.has_value())
-    {
-      const QSignalBlocker blocker(config);
-      config->setValue(value.value());
-    }
-  };
-
-  for (ConfigBool* config : {m_enable_dual_core, m_enable_mmu, m_enable_fprf, m_sync_gpu,
-                             m_use_dsp_hle, m_use_monoscopic_shadows})
-  {
-    update_bool(config);
-  }
-
-  update_bool(m_emulate_disc_speed, true);
-
-  update_int(m_depth_slider);
-  update_int(m_convergence_slider);
+  return QString::fromStdString(m_game_id + ".ini");
 }
 
-void GameConfigWidget::SetItalics()
+QWidget* GameConfigWidget::BuildGeneralTab()
 {
-  // Mark system game settings with italics. Called once because it should never change.
-  auto italics = [this](auto config) {
-    if (!m_global_layer->Exists(config->GetLocation()))
-      return;
+  Config::Layer* const layer = m_layer.get();
 
-    QFont ifont = config->font();
-    ifont.setItalic(true);
-    config->setFont(ifont);
+  auto* const core_group = new QGroupBox(tr("Core"));
+  auto* const core_grid = new QGridLayout;
+  core_group->setLayout(core_grid);
+
+  m_dual_core = new ConfigBool(tr("Enable Dual Core"), Config::MAIN_CPU_THREAD, layer);
+  m_mmu = new ConfigBool(tr("Enable MMU"), Config::MAIN_MMU, layer);
+  m_fprf = new ConfigBool(tr("Enable FPRF"), Config::MAIN_FPRF, layer);
+  m_sync_gpu = new ConfigBool(tr("Synchronize GPU thread"), Config::MAIN_SYNC_GPU, layer);
+  // Stored as "fast disc speed", so the box is inverted.
+  m_disc_speed = new ConfigBool(tr("Emulate Disc Speed"), Config::MAIN_FAST_DISC_SPEED, layer, true);
+  m_dsp_hle = new ConfigBool(tr("DSP HLE (fast)"), Config::MAIN_DSP_HLE, layer);
+
+  // The translated names are also the stored values.
+  const std::vector<std::string> modes{tr("auto").toStdString(), tr("none").toStdString(),
+                                       tr("fake-completion").toStdString()};
+  m_determinism = new ConfigStringChoice(modes, Config::MAIN_GPU_DETERMINISM_MODE, layer);
+
+  m_mmu->SetDescription(tr("Enables the Memory Management Unit, needed for some games. "
+                           "(ON = Compatible, OFF = Fast)"));
+  m_fprf->SetDescription(tr("Enables Floating Point Result Flag calculation, needed for a "
+                            "few games. (ON = Compatible, OFF = Fast)"));
+  m_sync_gpu->SetDescription(tr("Synchronizes the GPU and CPU threads to help prevent random "
+                                "freezes in Dual core mode. (ON = Compatible, OFF = Fast)"));
+  m_disc_speed->SetDescription(tr("Enable emulated disc speed. Disabling this can cause crashes "
+                                  "and other problems in some games. (ON = Compatible, OFF = "
+                                  "Unlocked)"));
+
+  int row = 0;
+  for (QWidget* const box : {static_cast<QWidget*>(m_dual_core), static_cast<QWidget*>(m_mmu),
+                             static_cast<QWidget*>(m_fprf), static_cast<QWidget*>(m_sync_gpu),
+                             static_cast<QWidget*>(m_disc_speed), static_cast<QWidget*>(m_dsp_hle)})
+  {
+    core_grid->addWidget(box, row++, 0);
+  }
+  core_grid->addWidget(new QLabel(tr("Deterministic dual core:")), row, 0);
+  core_grid->addWidget(m_determinism, row, 1);
+
+  auto* const stereo_group = new QGroupBox(tr("Stereoscopy"));
+  auto* const stereo_grid = new QGridLayout;
+  stereo_group->setLayout(stereo_grid);
+
+  m_depth = new ConfigFloatSlider(100, 200, Config::GFX_STEREO_DEPTH_PERCENTAGE, 1.0f, layer);
+  m_convergence = new ConfigFloatSlider(0, 1000, Config::GFX_STEREO_CONVERGENCE, 0.01f, layer);
+  auto* const depth_value = new QLabel();
+  auto* const convergence_value = new QLabel();
+  m_mono_shadows =
+      new ConfigBool(tr("Monoscopic Shadows"), Config::GFX_STEREO_EFB_MONO_DEPTH, layer);
+
+  m_depth->SetDescription(
+      tr("This value is multiplied with the depth set in the graphics configuration."));
+  m_convergence->SetDescription(
+      tr("This value is added to the convergence value set in the graphics configuration."));
+  m_mono_shadows->SetDescription(
+      tr("Use a single depth buffer for both eyes. Needed for a few games."));
+
+  stereo_grid->addWidget(new ConfigFloatLabel(tr("Depth Percentage:"), m_depth), 0, 0);
+  stereo_grid->addWidget(m_depth, 0, 1);
+  stereo_grid->addWidget(depth_value, 0, 2);
+  stereo_grid->addWidget(new ConfigFloatLabel(tr("Convergence:"), m_convergence), 1, 0);
+  stereo_grid->addWidget(m_convergence, 1, 1);
+  stereo_grid->addWidget(convergence_value, 1, 2);
+  stereo_grid->addWidget(m_mono_shadows, 2, 0);
+
+  depth_value->setText(DepthText(m_depth));
+  convergence_value->setText(ConvergenceText(m_convergence));
+  connect(m_depth, &ConfigFloatSlider::valueChanged, this,
+          [this, depth_value] { depth_value->setText(DepthText(m_depth)); });
+  connect(m_convergence, &ConfigFloatSlider::valueChanged, this,
+          [this, convergence_value] { convergence_value->setText(ConvergenceText(m_convergence)); });
+
+  auto* const column = new QVBoxLayout;
+  column->addWidget(core_group);
+  column->addWidget(stereo_group);
+  column->addStretch();
+
+  auto* const page = new QWidget;
+  page->setLayout(column);
+  return page;
+}
+
+QWidget* GameConfigWidget::BuildEditorTab()
+{
+  auto* const default_group = new QGroupBox(tr("Default Config (Read Only)"));
+  auto* const default_column = new QVBoxLayout;
+  m_default_inis = new QTabWidget;
+  default_group->setLayout(default_column);
+  default_column->addWidget(m_default_inis);
+
+  auto* const user_group = new QGroupBox(tr("User Config"));
+  auto* const user_column = new QVBoxLayout;
+  m_user_inis = new QTabWidget;
+  user_group->setLayout(user_column);
+  user_column->addWidget(m_user_inis);
+
+  auto* const column = new QVBoxLayout;
+  column->addWidget(default_group);
+  column->addWidget(user_group);
+
+  auto* const page = new QWidget;
+  page->setLayout(column);
+  return page;
+}
+
+void GameConfigWidget::OnTabChanged(int index)
+{
+  // Entering the editor: write the layer out and reopen the game's own user
+  // INI so the editor shows the latest values.
+  if (index == m_editor_tab)
+  {
+    m_layer->Save();
+    ReplaceUserIniEditor();
+  }
+
+  // Leaving the editor: reload the layer from the edited files. Load()
+  // keeps keys that were deleted, so the layer is emptied first.
+  if (m_last_tab == m_editor_tab)
+  {
+    m_layer->DeleteAllKeys();
+    m_layer->Load();
+    Config::OnConfigChanged();
+  }
+
+  m_last_tab = index;
+}
+
+void GameConfigWidget::ReplaceUserIniEditor()
+{
+  // Other INIs for the game (by game ID prefix, by revision) are untouched.
+  for (int i = 0; i < m_user_inis->count(); ++i)
+  {
+    if (m_user_inis->tabText(i).toStdString() != m_game_id + ".ini")
+      continue;
+
+    m_user_inis->removeTab(i);
+    auto* const editor = new GameConfigEdit(
+        nullptr, QString::fromStdString(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini"),
+        false);
+    m_user_inis->insertTab(i, editor, UserIniName());
+    return;
+  }
+}
+
+void GameConfigWidget::ShowGlobalValues()
+{
+  // A control whose key is only set in the default INIs shows that value.
+  // User values are left alone.
+  const auto only_global = [this](const Config::Location& location) {
+    return !m_layer->Exists(location) && m_global_layer->Exists(location);
   };
 
-  for (auto* config : findChildren<ConfigBool*>())
-    italics(config);
-  for (auto* config : findChildren<ConfigFloatSlider*>())
-    italics(config);
-  for (auto* config : findChildren<ConfigInteger*>())
-    italics(config);
-  for (auto* config : findChildren<ConfigRadioInt*>())
-    italics(config);
-  for (auto* config : findChildren<ConfigChoice*>())
-    italics(config);
-  for (auto* config : findChildren<ConfigStringChoice*>())
-    italics(config);
+  const auto show_bool = [&](ConfigBool* box, bool inverted) {
+    const Config::Location& location = box->GetLocation();
+    if (!only_global(location))
+      return;
+    const std::optional<bool> value = m_global_layer->Get<bool>(box->GetLocation());
+    if (!value)
+      return;
+    const QSignalBlocker quiet(box);
+    box->setChecked(*value != inverted);
+  };
 
-  for (auto* config : findChildren<ConfigComplexChoice*>())
+  const auto show_int = [&](ConfigFloatSlider* slider) {
+    const Config::Location& location = slider->GetLocation();
+    if (!only_global(location))
+      return;
+    const std::optional<int> value = m_global_layer->Get<int>(location);
+    if (!value)
+      return;
+    const QSignalBlocker quiet(slider);
+    slider->setValue(*value);
+  };
+
+  for (ConfigBool* const box :
+       {m_dual_core, m_mmu, m_fprf, m_sync_gpu, m_dsp_hle, m_mono_shadows})
   {
-    std::pair<Config::Location, Config::Location> location = config->GetLocation();
-    if (m_global_layer->Exists(location.first) || m_global_layer->Exists(location.second))
-    {
-      QFont ifont = config->font();
-      ifont.setItalic(true);
-      config->setFont(ifont);
-    }
+    show_bool(box, false);
+  }
+  show_bool(m_disc_speed, true);
+
+  show_int(m_depth);
+  show_int(m_convergence);
+}
+
+void GameConfigWidget::MarkGlobalSettings()
+{
+  // Settings that have a default game value are drawn in italics. This only
+  // runs once; the default INIs don't change while the dialog is open.
+  const auto mark = [this](auto* control) {
+    if (m_global_layer->Exists(control->GetLocation()))
+      MakeItalic(control);
+  };
+
+  for (ConfigBool* const control : findChildren<ConfigBool*>())
+    mark(control);
+  for (ConfigFloatSlider* const control : findChildren<ConfigFloatSlider*>())
+    mark(control);
+  for (ConfigInteger* const control : findChildren<ConfigInteger*>())
+    mark(control);
+  for (ConfigRadioInt* const control : findChildren<ConfigRadioInt*>())
+    mark(control);
+  for (ConfigChoice* const control : findChildren<ConfigChoice*>())
+    mark(control);
+  for (ConfigStringChoice* const control : findChildren<ConfigStringChoice*>())
+    mark(control);
+
+  // Complex choices span two keys; either one counts.
+  for (ConfigComplexChoice* const control : findChildren<ConfigComplexChoice*>())
+  {
+    const auto [first, second] = control->GetLocation();
+    if (m_global_layer->Exists(first) || m_global_layer->Exists(second))
+      MakeItalic(control);
   }
 }

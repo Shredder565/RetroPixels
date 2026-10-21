@@ -1,7 +1,8 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/GameConfigEdit.h"
+
+#include <utility>
 
 #include <QAbstractItemView>
 #include <QCompleter>
@@ -15,6 +16,7 @@
 #include <QStringListModel>
 #include <QTextCursor>
 #include <QTextEdit>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWhatsThis>
 
@@ -24,225 +26,195 @@
 GameConfigEdit::GameConfigEdit(QWidget* parent, QString path, bool read_only)
     : QWidget{parent}, m_path(std::move(path)), m_read_only(read_only)
 {
-  CreateWidgets();
+  m_text = new QTextEdit;
+  m_text->setReadOnly(m_read_only);
+  m_text->setAcceptRichText(false);
 
-  LoadFile();
-
-  new GameConfigHighlighter(m_edit->document());
-
-  AddDescription(QStringLiteral("Core"),
-                 tr("Section that contains most CPU and Hardware related settings."));
-
-  AddDescription(QStringLiteral("CPUThread"), tr("Controls whether or not Dual Core should be "
-                                                 "enabled. Can improve performance but can also "
-                                                 "cause issues. Defaults to <b>True</b>"));
-
-  AddDescription(QStringLiteral("FastDiscSpeed"),
-                 tr("Emulate the disc speed of real hardware. Disabling can cause instability. "
-                    "Defaults to <b>True</b>"));
-
-  AddDescription(QStringLiteral("MMU"), tr("Controls whether or not the Memory Management Unit "
-                                           "should be emulated fully. Few games require it."));
-
-  AddDescription(
-      QStringLiteral("DSPHLE"),
-      tr("Controls whether to use high or low-level DSP emulation. Defaults to <b>True</b>"));
-
-  AddDescription(
-      QStringLiteral("JITFollowBranch"),
-      tr("Tries to translate branches ahead of time, improving performance in most cases. Defaults "
-         "to <b>True</b>"));
-
-  AddDescription(QStringLiteral("Gecko"), tr("Section that contains all Gecko cheat codes."));
-
-  AddDescription(QStringLiteral("ActionReplay"),
-                 tr("Section that contains all Action Replay cheat codes."));
-
-  AddDescription(QStringLiteral("Video_Settings"),
-                 tr("Section that contains all graphics related settings."));
-
-  m_completer = new QCompleter(m_edit);
-
-  auto* completion_model = new QStringListModel(m_completer);
-  completion_model->setStringList(m_completions);
-
-  m_completer->setModel(completion_model);
-  m_completer->setModelSorting(QCompleter::UnsortedModel);
-  m_completer->setCompletionMode(QCompleter::PopupCompletion);
-  m_completer->setWidget(m_edit);
-
-  ConnectWidgets();
-}
-
-void GameConfigEdit::CreateWidgets()
-{
-  m_edit = new QTextEdit;
-  m_edit->setReadOnly(m_read_only);
-  m_edit->setAcceptRichText(false);
-
-  m_refresh_button = new QPushButton(tr("Refresh"));
-  m_external_editor_button = new QPushButton(tr("Open in External Editor"));
-
+  m_reload_button = new QPushButton(tr("Refresh"));
+  m_external_button = new QPushButton(tr("Open in External Editor"));
+  // A read-only (default) INI can only be viewed here.
   if (m_read_only)
   {
-    m_refresh_button->hide();
-    m_external_editor_button->hide();
+    m_reload_button->hide();
+    m_external_button->hide();
   }
 
-  auto* button_layout = new QHBoxLayout;
-  button_layout->addWidget(m_refresh_button);
-  button_layout->addWidget(m_external_editor_button);
+  auto* const buttons = new QHBoxLayout;
+  buttons->addWidget(m_reload_button);
+  buttons->addWidget(m_external_button);
+  auto* const column = new QVBoxLayout;
+  column->addLayout(buttons);
+  column->addWidget(m_text);
+  setLayout(column);
 
-  auto* layout = new QVBoxLayout;
-  layout->addLayout(button_layout);
-  layout->addWidget(m_edit);
+  ReadFromDisk();
 
-  setLayout(layout);
+  new GameConfigHighlighter(m_text->document());
+
+  Describe(QStringLiteral("Core"),
+           tr("Section that contains most CPU and Hardware related settings."));
+  Describe(QStringLiteral("CPUThread"),
+           tr("Controls whether or not Dual Core should be enabled. Can improve performance "
+              "but can also cause issues. Defaults to <b>True</b>"));
+  Describe(QStringLiteral("FastDiscSpeed"),
+           tr("Emulate the disc speed of real hardware. Disabling can cause instability. "
+              "Defaults to <b>True</b>"));
+  Describe(QStringLiteral("MMU"),
+           tr("Controls whether or not the Memory Management Unit should be emulated "
+              "fully. Few games require it."));
+  Describe(QStringLiteral("DSPHLE"),
+           tr("Controls whether to use high or low-level DSP emulation. "
+              "Defaults to <b>True</b>"));
+  Describe(QStringLiteral("JITFollowBranch"),
+           tr("Tries to translate branches ahead of time, improving performance in most "
+              "cases. Defaults to <b>True</b>"));
+  Describe(QStringLiteral("Gecko"), tr("Section that contains all Gecko cheat codes."));
+  Describe(QStringLiteral("ActionReplay"),
+           tr("Section that contains all Action Replay cheat codes."));
+  Describe(QStringLiteral("Video_Settings"),
+           tr("Section that contains all graphics related settings."));
+
+  // Completion offers the described keywords in the order above.
+  m_completer = new QCompleter(m_text);
+  auto* const keyword_model = new QStringListModel(m_completer);
+  keyword_model->setStringList(m_keywords);
+  m_completer->setModel(keyword_model);
+  m_completer->setModelSorting(QCompleter::UnsortedModel);
+  m_completer->setCompletionMode(QCompleter::PopupCompletion);
+  m_completer->setWidget(m_text);
+
+  connect(m_text, &QTextEdit::textChanged, this, &GameConfigEdit::WriteToDisk);
+  connect(m_text, &QTextEdit::selectionChanged, this, &GameConfigEdit::ShowHelpForSelection);
+  connect(m_completer, qOverload<const QString&>(&QCompleter::activated), this,
+          &GameConfigEdit::InsertCompletion);
+  connect(m_reload_button, &QPushButton::clicked, this, &GameConfigEdit::ReadFromDisk);
+  connect(m_external_button, &QPushButton::clicked, this, &GameConfigEdit::EditExternally);
 }
 
-void GameConfigEdit::AddDescription(const QString& keyword, const QString& description)
+void GameConfigEdit::Describe(const QString& keyword, const QString& help)
 {
-  m_keyword_map[keyword] = description;
-  m_completions << keyword;
+  m_help[keyword] = help;
+  m_keywords << keyword;
 }
 
-void GameConfigEdit::LoadFile()
+void GameConfigEdit::ReadFromDisk()
 {
   QFile file(m_path);
-  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-    return;
-
-  m_edit->setPlainText(QString::fromStdString(file.readAll().toStdString()));
+  if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+    m_text->setPlainText(QString::fromStdString(file.readAll().toStdString()));
 }
 
-void GameConfigEdit::SaveFile()
+void GameConfigEdit::WriteToDisk()
 {
-  if (!isVisible() || m_read_only)
+  // Only an editable file that is on screen is written.
+  if (m_read_only || !isVisible())
     return;
 
   QFile file(m_path);
-
   if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
   {
     ModalMessageBox::warning(this, tr("Warning"), tr("Failed to open config file!"));
     return;
   }
 
-  const QByteArray contents = m_edit->toPlainText().toUtf8();
-
-  if (file.write(contents) == -1)
+  if (file.write(m_text->toPlainText().toUtf8()) == -1)
     ModalMessageBox::warning(this, tr("Warning"), tr("Failed to write config file!"));
 }
 
-void GameConfigEdit::ConnectWidgets()
+void GameConfigEdit::ShowHelpForSelection()
 {
-  connect(m_edit, &QTextEdit::textChanged, this, &GameConfigEdit::SaveFile);
-  connect(m_edit, &QTextEdit::selectionChanged, this, &GameConfigEdit::OnSelectionChanged);
-  connect(m_completer, qOverload<const QString&>(&QCompleter::activated), this,
-          &GameConfigEdit::OnAutoComplete);
-
-  connect(m_refresh_button, &QPushButton::clicked, this, &GameConfigEdit::LoadFile);
-  connect(m_external_editor_button, &QPushButton::clicked, this,
-          &GameConfigEdit::OpenExternalEditor);
+  const QString selected = m_text->textCursor().selectedText();
+  const auto found = m_help.constFind(selected);
+  if (found != m_help.constEnd())
+    QWhatsThis::showText(QCursor::pos(), found.value(), this);
 }
 
-void GameConfigEdit::OnSelectionChanged()
+QString GameConfigEdit::WordAtCursor() const
 {
-  const QString& keyword = m_edit->textCursor().selectedText();
-
-  if (m_keyword_map.contains(keyword))
-    QWhatsThis::showText(QCursor::pos(), m_keyword_map[keyword], this);
+  QTextCursor cursor = m_text->textCursor();
+  cursor.select(QTextCursor::WordUnderCursor);
+  return cursor.selectedText();
 }
 
-QString GameConfigEdit::GetTextUnderCursor()
+void GameConfigEdit::InsertCompletion(const QString& completion)
 {
-  QTextCursor tc = m_edit->textCursor();
-  tc.select(QTextCursor::WordUnderCursor);
-  return tc.selectedText();
-}
-
-void GameConfigEdit::OnAutoComplete(const QString& completion)
-{
-  QTextCursor cursor = m_edit->textCursor();
-  int extra = completion.length() - m_completer->completionPrefix().length();
+  // Append the part of the completion that hasn't been typed yet at the end
+  // of the current word.
+  const qsizetype missing = completion.length() - m_completer->completionPrefix().length();
+  QTextCursor cursor = m_text->textCursor();
   cursor.movePosition(QTextCursor::Left);
   cursor.movePosition(QTextCursor::EndOfWord);
-  cursor.insertText(completion.right(extra));
-  m_edit->setTextCursor(cursor);
+  cursor.insertText(completion.right(missing));
+  m_text->setTextCursor(cursor);
 }
 
-void GameConfigEdit::OpenExternalEditor()
+void GameConfigEdit::EditExternally()
 {
   QFile file(m_path);
-
   if (!file.exists())
   {
     if (m_read_only)
       return;
-
+    // Create an empty file for the editor to open.
     if (!file.open(QIODevice::WriteOnly))
     {
       ModalMessageBox::warning(this, tr("Error"),
                                tr("Failed to create the configuration file:\n%1").arg(m_path));
       return;
     }
-
     file.close();
   }
 
-  if (!QDesktopServices::openUrl(QUrl::fromLocalFile(m_path)))
-  {
-    ModalMessageBox::warning(this, tr("Error"),
-                             tr("Failed to open file in external editor.\nMake sure there's an "
-                                "application assigned to open INI files."));
-  }
+  if (QDesktopServices::openUrl(QUrl::fromLocalFile(m_path)))
+    return;
+
+  ModalMessageBox::warning(this, tr("Error"),
+                           tr("Failed to open file in external editor.\nMake sure there's an "
+                              "application assigned to open INI files."));
 }
 
 void GameConfigEdit::keyPressEvent(QKeyEvent* e)
 {
-  if (m_completer->popup()->isVisible())
+  QAbstractItemView* const popup = m_completer->popup();
+
+  // While the popup is open these keys belong to the completer.
+  if (popup->isVisible())
   {
-    // The following keys are forwarded by the completer to the widget
-    switch (e->key())
+    const int key = e->key();
+    if (key == Qt::Key_Enter || key == Qt::Key_Return || key == Qt::Key_Escape ||
+        key == Qt::Key_Tab || key == Qt::Key_Backtab)
     {
-    case Qt::Key_Enter:
-    case Qt::Key_Return:
-    case Qt::Key_Escape:
-    case Qt::Key_Tab:
-    case Qt::Key_Backtab:
       e->ignore();
-      return;  // let the completer do default behavior
-    default:
-      break;
+      return;
     }
   }
 
   QWidget::keyPressEvent(e);
 
-  const static QString end_of_word = QStringLiteral("~!@#$%^&*()_+{}|:\"<>?,./;'\\-=");
+  static const QString word_breaks = QStringLiteral("~!@#$%^&*()_+{}|:\"<>?,./;'\\-=");
 
-  QString completion_prefix = GetTextUnderCursor();
-
-  if (e->text().isEmpty() || completion_prefix.length() < 2 ||
-      end_of_word.contains(e->text().right(1)))
+  // Offer completions once at least two characters of a word are typed.
+  const QString prefix = WordAtCursor();
+  const QString typed = e->text();
+  if (typed.isEmpty() || prefix.length() < 2 || word_breaks.contains(typed.right(1)))
   {
-    m_completer->popup()->hide();
+    popup->hide();
     return;
   }
 
-  if (completion_prefix != m_completer->completionPrefix())
+  if (prefix != m_completer->completionPrefix())
   {
-    m_completer->setCompletionPrefix(completion_prefix);
-    m_completer->popup()->setCurrentIndex(m_completer->completionModel()->index(0, 0));
+    m_completer->setCompletionPrefix(prefix);
+    popup->setCurrentIndex(m_completer->completionModel()->index(0, 0));
   }
-  QRect cr = m_edit->cursorRect();
-  cr.setWidth(m_completer->popup()->sizeHintForColumn(0) +
-              m_completer->popup()->verticalScrollBar()->sizeHint().width());
-  m_completer->complete(cr);  // popup it up!
+
+  QRect area = m_text->cursorRect();
+  area.setWidth(popup->sizeHintForColumn(0) + popup->verticalScrollBar()->sizeHint().width());
+  m_completer->complete(area);
 }
 
 void GameConfigEdit::focusInEvent(QFocusEvent* e)
 {
-  m_completer->setWidget(m_edit);
+  m_completer->setWidget(m_text);
   QWidget::focusInEvent(e);
 }

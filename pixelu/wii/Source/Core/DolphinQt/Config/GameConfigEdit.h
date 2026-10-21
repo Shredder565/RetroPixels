@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,9 @@ class QCompleter;
 class QMenu;
 class QTextEdit;
 
+// A plain-text editor for one game INI file, with keyword completion and
+// What's This help for known keys. Edits are written back as they happen.
+// Without Q_OBJECT, its texts translate in the QWidget context.
 class GameConfigEdit : public QWidget
 {
 public:
@@ -23,29 +25,23 @@ protected:
   void focusInEvent(QFocusEvent* e) override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void ReadFromDisk();
+  void WriteToDisk();
+  void Describe(const QString& keyword, const QString& help);
 
-  void LoadFile();
-  void SaveFile();
-
-  void OnSelectionChanged();
-  void OnAutoComplete(const QString& completion);
-  void OpenExternalEditor();
-
-  QString GetTextUnderCursor();
-
-  void AddDescription(const QString& keyword, const QString& description);
+  void ShowHelpForSelection();
+  void InsertCompletion(const QString& completion);
+  void EditExternally();
+  QString WordAtCursor() const;
 
   QCompleter* m_completer;
-  QStringList m_completions;
-  QPushButton* m_refresh_button;
-  QPushButton* m_external_editor_button;
-  QTextEdit* m_edit;
+  QStringList m_keywords;
+  QPushButton* m_reload_button;
+  QPushButton* m_external_button;
+  QTextEdit* m_text;
 
   const QString m_path;
-
   bool m_read_only;
 
-  QMap<QString, QString> m_keyword_map;
+  QMap<QString, QString> m_help;
 };
