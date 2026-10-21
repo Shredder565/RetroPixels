@@ -151,17 +151,13 @@ WiimoteDevice::~WiimoteDevice() = default;
 
 void WiimoteDevice::DoState(PointerWrap& p)
 {
-  p.Do(m_link_state);
-  p.Do(m_hid_linking);
-  p.Do(m_bd);
-  p.Do(m_class);
-  p.Do(m_features);
-  p.Do(m_lmp_version);
-  p.Do(m_lmp_subversion);
-  p.Do(m_link_key);
-  p.Do(m_name);
-  p.Do(m_channels);
-  p.Do(m_reconnect_delay);
+  // Saved in this order (the order is part of the savestate format).
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_link_state, m_hid_linking);
+  // What the remote reports about itself.
+  save(m_bd, m_class, m_features, m_lmp_version, m_lmp_subversion, m_link_key, m_name);
+  // Its L2CAP channels and the pending reconnection.
+  save(m_channels, m_reconnect_delay);
 }
 
 u32 WiimoteDevice::GetNumber() const

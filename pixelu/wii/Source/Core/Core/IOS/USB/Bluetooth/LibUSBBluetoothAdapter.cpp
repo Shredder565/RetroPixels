@@ -130,19 +130,20 @@ LibUSBBluetoothAdapter::LibUSBBluetoothAdapter()
 
   if (m_handle == nullptr)
   {
-    if (m_last_open_error.empty())
-    {
-      CriticalAlertFmtT(
-          "Could not find any usable Bluetooth USB adapter for Bluetooth Passthrough.\n\n"
-          "The emulated console will now stop.");
-    }
-    else
+    // Without an adapter passthrough can't work: say why, then stop emulation.
+    if (!m_last_open_error.empty())
     {
       CriticalAlertFmtT(
           "Could not find any usable Bluetooth USB adapter for Bluetooth Passthrough.\n"
           "The following error occurred when Dolphin tried to use an adapter:\n{0}\n\n"
           "The emulated console will now stop.",
           m_last_open_error);
+    }
+    else
+    {
+      CriticalAlertFmtT(
+          "Could not find any usable Bluetooth USB adapter for Bluetooth Passthrough.\n\n"
+          "The emulated console will now stop.");
     }
     Core::QueueHostJob(&Core::Stop);
     return;

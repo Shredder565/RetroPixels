@@ -877,8 +877,9 @@ int SkylanderUSB::SubmitTransfer(std::unique_ptr<IntrMessage> cmd)
 
 int SkylanderUSB::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
 {
-  DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Isochronous: length={} endpoint={} num_packets={}",
-                m_vid, m_pid, m_active_interface, cmd->length, cmd->endpoint, cmd->num_packets);
+  // The portal has no isochronous endpoints; the transfer is never answered.
+  DEBUG_LOG_FMT(IOS_USB, "Skylander portal: ignoring isochronous transfer ({} bytes, endpoint {})",
+                cmd->length, cmd->endpoint);
   return 0;
 }
 
@@ -1110,19 +1111,12 @@ Skylander* SkylanderPortal::GetSkylander(u8 slot)
 
 Type NormalizeSkylanderType(Type type)
 {
-  switch (type)
-  {
-  case Type::Skylander:
-  case Type::Giant:
-  case Type::Swapper:
-  case Type::TrapMaster:
-  case Type::Mini:
-    return Type::Skylander;
-  case Type::Trophy:
+  if (type == Type::Trophy)
     return Type::Trophy;
-  default:
-    // Items keep no data; traps and vehicles are not supported yet.
-    return Type::Unknown;
-  }
+  // Every kind of character figure shares the same data layout.
+  const bool character = type == Type::Skylander || type == Type::Giant ||
+                         type == Type::Swapper || type == Type::TrapMaster || type == Type::Mini;
+  // Items keep no data; traps and vehicles are not supported yet.
+  return character ? Type::Skylander : Type::Unknown;
 }
 }  // namespace IOS::HLE::USB

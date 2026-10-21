@@ -383,11 +383,9 @@ int InfinityUSB::SetAltSetting(u8 /*alt_setting*/)
 
 int InfinityUSB::SubmitTransfer(std::unique_ptr<CtrlMessage> cmd)
 {
-  DEBUG_LOG_FMT(IOS_USB,
-                "[{:04x}:{:04x} {}] Control: bRequestType={:02x} bRequest={:02x} wValue={:04x}"
-                " wIndex={:04x} wLength={:04x}",
-                m_vid, m_pid, m_active_interface, cmd->request_type, cmd->request, cmd->value,
-                cmd->index, cmd->length);
+  // Control requests are accepted but never answered; games only use the interrupt pipes.
+  DEBUG_LOG_FMT(IOS_USB, "Infinity base: ignoring control request {:02x}/{:02x} ({:04x} {:04x})",
+                cmd->request_type, cmd->request, cmd->value, cmd->index);
   return 0;
 }
 

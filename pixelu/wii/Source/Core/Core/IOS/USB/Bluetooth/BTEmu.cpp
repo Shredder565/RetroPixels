@@ -224,15 +224,16 @@ void BluetoothEmuDevice::DoState(PointerWrap& p)
     return;
   }
 
+  // The order below is part of the savestate format.
   Device::DoState(p);
   p.Do(m_controller_bd);
+  // The game's pending HCI event and ACL reads.
   DoStateForMessage(GetEmulationKernel(), p, m_hci_endpoint);
   DoStateForMessage(GetEmulationKernel(), p, m_acl_endpoint);
   p.Do(m_last_ticks);
   p.DoArray(m_packet_count);
-  p.Do(m_scan_enable);
-  p.Do(m_event_queue);
-  p.Do(m_pending_acl);
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_scan_enable, m_event_queue, m_pending_acl);
   for (auto& wiimote : m_wiimotes)
     wiimote->DoState(p);
 }
