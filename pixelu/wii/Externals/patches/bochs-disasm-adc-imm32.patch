@@ -1,0 +1,15 @@
+PixelU-Wii patch for Bochs' disassembler (svn r12420), opcodes.inc.
+
+"adc r/m64, imm32" (REX.W 81 /2 id) takes a sign-extended 32-bit immediate,
+like add, or, sbb, and, sub, xor and cmp in the same table. The r12420 table
+gives it a 64-bit immediate (Iq), so the disassembler reads four bytes too
+many and every instruction after it in the JIT's host-code view is wrong.
+This changes the operand to sIdq, the one its seven siblings use.
+
+--- a/bochs/disasm/opcodes.inc
++++ b/bochs/disasm/opcodes.inc
+@@ -38,3 +38,3 @@
+ Ia_adcq_Eq_sIb = { "adc", "adcq", Eq, sIbq, XX, XX, 0 },
+-Ia_adcq_Eq_sId = { "adc", "adcq", Eq, Iq, XX, XX, 0 },
++Ia_adcq_Eq_sId = { "adc", "adcq", Eq, sIdq, XX, XX, 0 },
+ Ia_adcq_Gq_Eq = { "adc", "adcq", Gq, Eq, XX, XX, 0 },

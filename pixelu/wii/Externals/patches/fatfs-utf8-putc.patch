@@ -1,0 +1,17 @@
+PixelU-Wii patch for FatFs R0.14b, ff.c: the UTF-8 fix ChaN published for
+R0.14b on the FatFs patches page (http://elm-chan.org/fsw/ff/patches.html,
+April 2022).
+
+With the API in UTF-8 (FF_LFN_UNICODE 2, see fatfs-ffconf.patch), putc_bfd()
+(behind f_putc, f_puts and f_printf) tells a 4-byte sequence by its lead
+byte, 11110xxx. R0.14b masks the lead byte with 0xF1 instead of 0xF8, so some
+lead bytes of 2- and 3-byte sequences were taken for 4-byte ones. The mask
+is corrected; nothing else changes.
+
+--- a/source/ff.c
++++ b/source/ff.c
+@@ -6526,3 +6526,3 @@
+ 			if (((BYTE)c & 0xF0) == 0xE0) pb->ct = 2;	/* 3-byte sequence? */
+-			if (((BYTE)c & 0xF1) == 0xF0) pb->ct = 3;	/* 4-byte sequence? */
++			if (((BYTE)c & 0xF8) == 0xF0) pb->ct = 3;	/* 4-byte sequence? */
+ 			return;
