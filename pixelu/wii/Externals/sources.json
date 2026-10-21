@@ -34,7 +34,7 @@
      "dest": "enet/enet"},
     {"name": "fatfs", "version": "R0.14b", "license": "FatFs (BSD-1-Clause style)",
      "archive": ["http://elm-chan.org/fsw/ff/arc/ff14b.zip"],
-     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "sha256": "d4605ab7c418fc4cc4cb555c8129482873add6f5ca5f25810e7ca8cfd57d07cb",
      "dest": "FatFs/ff14b",
      "patches": ["fatfs-utf8-putc.patch", "fatfs-ffconf.patch"]},
     {"name": "ffmpeg", "version": "N-106414-g28d011516b (5.0-dev)", "license": "GPL-3.0-or-later as configured",
