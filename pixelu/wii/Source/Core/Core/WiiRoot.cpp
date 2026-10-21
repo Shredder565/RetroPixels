@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/WiiRoot.h"
 
@@ -33,287 +32,284 @@ namespace Core
 {
 namespace FS = IOS::HLE::FS;
 
-static std::string s_temp_wii_root;
-static std::string s_temp_redirect_root;
-static bool s_wii_root_initialized = false;
-static std::vector<IOS::HLE::FS::NandRedirect> s_nand_redirects;
-
-// When Temp NAND + Redirects are both active, we need to keep track of where each redirect path
-// should be copied back to after a successful session finish.
-struct TempRedirectPath
+namespace
 {
-  std::string real_path;
-  std::string temp_path;
+// Everyone may read and write.
+constexpr FS::Modes OPEN_MODES{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite};
+
+// NAND paths of the files BackupWiiSettings protects.
+std::string SettingTxtPath()
+{
+  return Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING;
+}
+constexpr const char* SYSCONF_NAND_PATH = "/shared2/sys/SYSCONF";
+
+struct RootState
+{
+  // Host folders of the temporary NAND and of redirected saves; both empty
+  // unless the root is temporary.
+  std::string temp_root;
+  std::string temp_redirect_root;
+  bool initialized = false;
+  std::vector<FS::NandRedirect> redirects;
+
+  // With a temporary NAND, a save redirect points into temp_redirect_root
+  // instead of its real folder; this remembers where to move it back to.
+  struct DeferredRedirect
+  {
+    std::string real_path;
+    std::string temp_path;
+  };
+  std::vector<DeferredRedirect> deferred_redirects;
 };
-static std::vector<TempRedirectPath> s_temp_nand_redirects;
+RootState s_root;
 
-const std::vector<IOS::HLE::FS::NandRedirect>& GetActiveNandRedirects()
+// Backups live in the user's Backup folder under the file's own name.
+std::string BackupPathFor(const std::string& file_name)
 {
-  return s_nand_redirects;
+  return File::GetUserPath(D_BACKUP_IDX) + file_name;
 }
 
-static bool CopyBackupFile(const std::string& path_from, const std::string& path_to)
+bool CopyIfPresent(const std::string& from, const std::string& to)
 {
-  if (!File::Exists(path_from))
+  if (!File::Exists(from))
     return false;
-
-  File::CreateFullPath(path_to);
-
-  return File::CopyRegularFile(path_from, path_to);
+  File::CreateFullPath(to);
+  return File::CopyRegularFile(from, to);
 }
 
-static void DeleteBackupFile(const std::string& file_name)
+void BackUpNandFile(const std::string& nand_path)
 {
-  File::Delete(File::GetUserPath(D_BACKUP_IDX) + file_name);
+  CopyIfPresent(File::GetUserPath(D_WIIROOT_IDX) + nand_path,
+                BackupPathFor(PathToFileName(nand_path)));
 }
 
-static void BackupFile(const std::string& path_in_nand)
+void RestoreNandFile(const std::string& nand_path)
 {
-  const std::string file_name = PathToFileName(path_in_nand);
-  const std::string original_path = File::GetUserPath(D_WIIROOT_IDX) + path_in_nand;
-  const std::string backup_path = File::GetUserPath(D_BACKUP_IDX) + file_name;
-
-  CopyBackupFile(original_path, backup_path);
+  const std::string name = PathToFileName(nand_path);
+  if (CopyIfPresent(BackupPathFor(name), File::GetUserPath(D_WIIROOT_IDX) + nand_path))
+    File::Delete(BackupPathFor(name));
 }
 
-static void RestoreFile(const std::string& path_in_nand)
+void CopyTitleSave(FS::FileSystem* from, FS::FileSystem* to, u64 title_id)
 {
-  const std::string file_name = PathToFileName(path_in_nand);
-  const std::string original_path = File::GetUserPath(D_WIIROOT_IDX) + path_in_nand;
-  const std::string backup_path = File::GetUserPath(D_BACKUP_IDX) + file_name;
-
-  if (CopyBackupFile(backup_path, original_path))
-    DeleteBackupFile(file_name);
+  to->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, Common::GetTitleDataPath(title_id) + '/', 0,
+                     OPEN_MODES);
+  const auto from_storage = WiiSave::MakeNandStorage(from, title_id);
+  const auto to_storage = WiiSave::MakeNandStorage(to, title_id);
+  WiiSave::Copy(from_storage.get(), to_storage.get());
 }
 
-static void CopySave(FS::FileSystem* source, FS::FileSystem* dest, const u64 title_id)
+// Copies one NAND file between file systems. A missing source is not an
+// error and must not leave an empty file behind.
+bool CopyFileBetweenNands(FS::FileSystem* from, const std::string& from_path, FS::FileSystem* to,
+                          const std::string& to_path)
 {
-  dest->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, Common::GetTitleDataPath(title_id) + '/',
-                       0, {FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite});
-  const auto source_save = WiiSave::MakeNandStorage(source, title_id);
-  const auto dest_save = WiiSave::MakeNandStorage(dest, title_id);
-  WiiSave::Copy(source_save.get(), dest_save.get());
-}
-
-static bool CopyNandFile(FS::FileSystem* source_fs, const std::string& source_file,
-                         FS::FileSystem* dest_fs, const std::string& dest_file)
-{
-  auto source_handle =
-      source_fs->OpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, source_file, IOS::HLE::FS::Mode::Read);
-  // If the source file doesn't exist, there is nothing more to do.
-  // This function must not create an empty file on the destination filesystem.
-  if (!source_handle)
+  const auto input = from->OpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, from_path, FS::Mode::Read);
+  if (!input)
     return true;
 
-  dest_fs->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, dest_file, 0,
-                          {FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite});
-
-  auto dest_handle =
-      dest_fs->CreateAndOpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, source_file,
-                                 {IOS::HLE::FS::Mode::ReadWrite, IOS::HLE::FS::Mode::ReadWrite,
-                                  IOS::HLE::FS::Mode::ReadWrite});
-  if (!dest_handle)
+  to->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, to_path, 0, OPEN_MODES);
+  // The file is created under the source's path (both callers pass the same path twice).
+  const auto output = to->CreateAndOpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, from_path, OPEN_MODES);
+  if (!output)
     return false;
 
-  std::vector<u8> buffer(source_handle->GetStatus()->size);
-  if (!source_handle->Read(buffer.data(), buffer.size()))
-    return false;
-  if (!dest_handle->Write(buffer.data(), buffer.size()))
-    return false;
-
-  return true;
+  std::vector<u8> contents(input->GetStatus()->size);
+  return input->Read(contents.data(), contents.size()) &&
+         output->Write(contents.data(), contents.size());
 }
 
-static void InitializeDeterministicWiiSaves(FS::FileSystem* session_fs,
-                                            const BootSessionData& boot_session_data)
+// For movies and NetPlay the temporary NAND starts with known saves: the
+// recorded game's (movie), the host's synced titles (NetPlay), or none.
+void SeedTemporarySaves(FS::FileSystem* session_fs, const BootSessionData& boot)
 {
   auto& movie = Core::System::GetInstance().GetMovie();
-  const u64 title_id = SConfig::GetInstance().GetTitleID();
-  const auto configured_fs = FS::MakeFileSystem(FS::Location::Configured);
+  const SConfig& config = SConfig::GetInstance();
+  const u64 title_id = config.GetTitleID();
+  const auto user_fs = FS::MakeFileSystem(FS::Location::Configured);
+
   if (movie.IsRecordingInput())
   {
-    if (NetPlay::IsNetPlayRunning() && !SConfig::GetInstance().bCopyWiiSaveNetplay)
+    if (NetPlay::IsNetPlayRunning() && !config.bCopyWiiSaveNetplay)
     {
       movie.SetClearSave(true);
     }
     else
     {
-      // TODO: Check for the actual save data
-      const std::string path = Common::GetTitleDataPath(title_id) + "/banner.bin";
-      movie.SetClearSave(!configured_fs->GetMetadata(IOS::PID_KERNEL, IOS::PID_KERNEL, path));
+      // A banner is taken as the sign that a save exists.
+      const std::string banner = Common::GetTitleDataPath(title_id) + "/banner.bin";
+      movie.SetClearSave(!user_fs->GetMetadata(IOS::PID_KERNEL, IOS::PID_KERNEL, banner));
     }
   }
 
-  if ((NetPlay::IsNetPlayRunning() && SConfig::GetInstance().bCopyWiiSaveNetplay) ||
-      (movie.IsMovieActive() && !movie.IsStartingFromClearSave()))
+  const bool netplay_copies = NetPlay::IsNetPlayRunning() && config.bCopyWiiSaveNetplay;
+  const bool movie_needs_save = movie.IsMovieActive() && !movie.IsStartingFromClearSave();
+  if (!netplay_copies && !movie_needs_save)
+    return;
+
+  auto* const sync_fs = boot.GetWiiSyncFS();
+  auto* const from = sync_fs ? sync_fs : user_fs.get();
+  INFO_LOG_FMT(CORE, "Wii Save Init: Copying from {} to session_fs.",
+               sync_fs ? "sync_fs" : "configured_fs");
+
+  if (movie.IsMovieActive() && !NetPlay::IsNetPlayRunning())
   {
-    auto* sync_fs = boot_session_data.GetWiiSyncFS();
-    auto& sync_titles = boot_session_data.GetWiiSyncTitles();
-
-    auto* source_fs = sync_fs ? sync_fs : configured_fs.get();
-    INFO_LOG_FMT(CORE, "Wii Save Init: Copying from {} to session_fs.",
-                 sync_fs ? "sync_fs" : "configured_fs");
-
-    // Copy the current user's save to the Blank NAND
-    if (movie.IsMovieActive() && !NetPlay::IsNetPlayRunning())
+    INFO_LOG_FMT(CORE, "Wii Save Init: Copying {0:016x}.", title_id);
+    CopyTitleSave(from, session_fs, title_id);
+  }
+  else
+  {
+    for (const u64 synced : boot.GetWiiSyncTitles())
     {
-      INFO_LOG_FMT(CORE, "Wii Save Init: Copying {0:016x}.", title_id);
-      CopySave(source_fs, session_fs, title_id);
+      INFO_LOG_FMT(CORE, "Wii Save Init: Copying {0:016x}.", synced);
+      CopyTitleSave(from, session_fs, synced);
     }
-    else
-    {
-      for (const u64 title : sync_titles)
-      {
-        INFO_LOG_FMT(CORE, "Wii Save Init: Copying {0:016x}.", title);
-        CopySave(source_fs, session_fs, title);
-      }
-    }
+  }
 
-    // Copy Mii data
-    if (!CopyNandFile(source_fs, Common::GetMiiDatabasePath(), session_fs,
-                      Common::GetMiiDatabasePath()))
-    {
-      WARN_LOG_FMT(CORE, "Failed to copy Mii database to the NAND");
-    }
+  const std::string mii_db = Common::GetMiiDatabasePath();
+  if (!CopyFileBetweenNands(from, mii_db, session_fs, mii_db))
+    WARN_LOG_FMT(CORE, "Failed to copy Mii database to the NAND");
 
-    const auto& netplay_redirect_folder = boot_session_data.GetWiiSyncRedirectFolder();
-    if (!netplay_redirect_folder.empty())
-    {
-      File::CreateDirs(s_temp_redirect_root);
-      File::Copy(netplay_redirect_folder, s_temp_redirect_root);
-    }
+  const auto& redirect_source = boot.GetWiiSyncRedirectFolder();
+  if (!redirect_source.empty())
+  {
+    File::CreateDirs(s_root.temp_redirect_root);
+    File::Copy(redirect_source, s_root.temp_redirect_root);
   }
 }
 
-static void MoveToBackupIfExists(const std::string& path)
+// A leftover temporary folder (for example after a crash) is kept as
+// "<name>.backup", replacing any older backup. `dir` ends in a separator.
+void SetAsideLeftover(const std::string& dir)
 {
-  if (File::Exists(path))
-  {
-    const std::string backup_path = path.substr(0, path.size() - 1) + ".backup";
-    WARN_LOG_FMT(IOS_FS, "Temporary directory at {} exists, moving to backup...", path);
+  if (!File::Exists(dir))
+    return;
 
-    // If backup exists, delete it as we don't want a mess
-    if (File::Exists(backup_path))
+  const std::string backup = dir.substr(0, dir.size() - 1) + ".backup";
+  WARN_LOG_FMT(IOS_FS, "Temporary directory at {} exists, moving to backup...", dir);
+  if (File::Exists(backup))
+  {
+    WARN_LOG_FMT(IOS_FS, "Temporary backup directory at {} exists, deleting...", backup);
+    File::DeleteDirRecursively(backup);
+  }
+  File::MoveWithOverwrite(dir, backup);
+}
+
+// Copies the host folder `host_dir` into NAND folder `nand_dir` ("" for the
+// root; neither has a trailing slash), recursing into subfolders. Files that
+// already exist on the NAND are left alone.
+bool InstallSystemMenuFiles(FS::FileSystem* fs, const std::string& host_dir,
+                            const std::string& nand_dir)
+{
+  const File::FSTEntry listing = File::ScanDirectoryTree(host_dir, false);
+  for (const File::FSTEntry& child : listing.children)
+  {
+    const std::string host_path = host_dir + '/' + child.virtualName;
+    const std::string nand_path = nand_dir + '/' + child.virtualName;
+
+    if (child.isDirectory)
     {
-      WARN_LOG_FMT(IOS_FS, "Temporary backup directory at {} exists, deleting...", backup_path);
-      File::DeleteDirRecursively(backup_path);
+      fs->CreateDirectory(IOS::SYSMENU_UID, IOS::SYSMENU_GID, nand_path, 0, OPEN_MODES);
+      if (!InstallSystemMenuFiles(fs, host_path, nand_path))
+        return false;
+      continue;
     }
 
-    File::MoveWithOverwrite(path, backup_path);
+    // (The existence check passes the UID as the GID too.)
+    if (fs->GetMetadata(IOS::SYSMENU_UID, IOS::SYSMENU_UID, nand_path).has_value())
+      continue;
+
+    File::IOFile source{host_path, "rb"};
+    std::vector<u8> contents(source.GetSize());
+    if (!source.ReadBytes(contents.data(), contents.size()))
+      return false;
+
+    const auto target =
+        fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, nand_path, OPEN_MODES);
+    if (!target || !target->Write(contents.data(), contents.size()))
+      return false;
   }
+  return true;
+}
+}  // namespace
+
+const std::vector<IOS::HLE::FS::NandRedirect>& GetActiveNandRedirects()
+{
+  return s_root.redirects;
 }
 
 void InitializeWiiRoot(bool use_temporary)
 {
-  ASSERT(!s_wii_root_initialized);
+  ASSERT(!s_root.initialized);
 
-  if (use_temporary)
-  {
-    s_temp_wii_root = File::GetUserPath(D_USER_IDX) + "WiiSession" DIR_SEP;
-    s_temp_redirect_root = File::GetUserPath(D_USER_IDX) + "RedirectSession" DIR_SEP;
-    WARN_LOG_FMT(IOS_FS, "Using temporary directory {} for minimal Wii FS", s_temp_wii_root);
-    WARN_LOG_FMT(IOS_FS, "Using temporary directory {} for redirected saves", s_temp_redirect_root);
-
-    // If directory exists, make a backup
-    MoveToBackupIfExists(s_temp_wii_root);
-    MoveToBackupIfExists(s_temp_redirect_root);
-
-    File::SetUserPath(D_SESSION_WIIROOT_IDX, s_temp_wii_root);
-  }
-  else
+  if (!use_temporary)
   {
     File::SetUserPath(D_SESSION_WIIROOT_IDX, File::GetUserPath(D_WIIROOT_IDX));
   }
+  else
+  {
+    const std::string user_dir = File::GetUserPath(D_USER_IDX);
+    s_root.temp_root = user_dir + "WiiSession" DIR_SEP;
+    s_root.temp_redirect_root = user_dir + "RedirectSession" DIR_SEP;
+    WARN_LOG_FMT(IOS_FS, "Using temporary directory {} for minimal Wii FS", s_root.temp_root);
+    WARN_LOG_FMT(IOS_FS, "Using temporary directory {} for redirected saves",
+                 s_root.temp_redirect_root);
 
-  s_nand_redirects.clear();
-  s_wii_root_initialized = true;
+    SetAsideLeftover(s_root.temp_root);
+    SetAsideLeftover(s_root.temp_redirect_root);
+
+    File::SetUserPath(D_SESSION_WIIROOT_IDX, s_root.temp_root);
+  }
+
+  s_root.redirects.clear();
+  s_root.initialized = true;
 }
 
 void ShutdownWiiRoot()
 {
   if (WiiRootIsTemporary())
   {
-    File::DeleteDirRecursively(s_temp_wii_root);
-    s_temp_wii_root.clear();
-    File::DeleteDirRecursively(s_temp_redirect_root);
-    s_temp_redirect_root.clear();
-    s_temp_nand_redirects.clear();
+    File::DeleteDirRecursively(s_root.temp_root);
+    s_root.temp_root.clear();
+    File::DeleteDirRecursively(s_root.temp_redirect_root);
+    s_root.temp_redirect_root.clear();
+    s_root.deferred_redirects.clear();
   }
 
-  s_nand_redirects.clear();
-  s_wii_root_initialized = false;
+  s_root.redirects.clear();
+  s_root.initialized = false;
 }
 
 bool WiiRootIsInitialized()
 {
-  return s_wii_root_initialized;
+  return s_root.initialized;
 }
 
 bool WiiRootIsTemporary()
 {
-  return !s_temp_wii_root.empty();
+  return !s_root.temp_root.empty();
 }
 
 void BackupWiiSettings()
 {
-  // Back up files which Dolphin can modify at boot, so that we can preserve the original contents.
-  // For SYSCONF, the backup is only needed in case Dolphin crashes or otherwise exists unexpectedly
-  // during emulation, since the config system will restore the SYSCONF settings at emulation end.
-  // For setting.txt, there is no other code that restores the original values for us.
-
-  BackupFile(Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING);
-  BackupFile("/shared2/sys/SYSCONF");
+  // Boot can rewrite these. setting.txt has no other mechanism that restores
+  // it, so it always needs the copy. SYSCONF is normally restored by the
+  // config system when emulation ends; its copy only matters after a crash.
+  BackUpNandFile(SettingTxtPath());
+  BackUpNandFile(SYSCONF_NAND_PATH);
 }
 
 void RestoreWiiSettings(RestoreReason reason)
 {
-  RestoreFile(Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING);
+  RestoreNandFile(SettingTxtPath());
 
-  // We must not restore the SYSCONF backup when ending emulation cleanly, since the user may have
-  // edited the SYSCONF file in the NAND using the emulated software (e.g. the Wii Menu settings).
-  if (reason == RestoreReason::CrashRecovery)
-    RestoreFile("/shared2/sys/SYSCONF");
+  // After a clean exit the user may have changed SYSCONF on purpose (e.g. in
+  // the Wii Menu), so only a crash brings the old copy back.
+  if (reason != RestoreReason::CrashRecovery)
+    File::Delete(BackupPathFor("SYSCONF"));
   else
-    DeleteBackupFile("SYSCONF");
-}
-
-/// Copy a directory from host_source_path (on the host FS) to nand_target_path on the NAND.
-///
-/// Both paths should not have trailing slashes. To specify the NAND root, use "".
-static bool CopySysmenuFilesToFS(FS::FileSystem* fs, const std::string& host_source_path,
-                                 const std::string& nand_target_path)
-{
-  const auto entries = File::ScanDirectoryTree(host_source_path, false);
-  for (const File::FSTEntry& entry : entries.children)
-  {
-    const std::string host_path = host_source_path + '/' + entry.virtualName;
-    const std::string nand_path = nand_target_path + '/' + entry.virtualName;
-    constexpr FS::Modes public_modes{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite};
-
-    if (entry.isDirectory)
-    {
-      fs->CreateDirectory(IOS::SYSMENU_UID, IOS::SYSMENU_GID, nand_path, 0, public_modes);
-      if (!CopySysmenuFilesToFS(fs, host_path, nand_path))
-        return false;
-    }
-    else
-    {
-      // Do not overwrite any existing files.
-      if (fs->GetMetadata(IOS::SYSMENU_UID, IOS::SYSMENU_UID, nand_path).has_value())
-        continue;
-
-      File::IOFile host_file{host_path, "rb"};
-      std::vector<u8> file_data(host_file.GetSize());
-      if (!host_file.ReadBytes(file_data.data(), file_data.size()))
-        return false;
-
-      const auto nand_file =
-          fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, nand_path, public_modes);
-      if (!nand_file || !nand_file->Write(file_data.data(), file_data.size()))
-        return false;
-    }
-  }
-  return true;
+    RestoreNandFile(SYSCONF_NAND_PATH);
 }
 
 void InitializeWiiFileSystemContents(
@@ -322,119 +318,104 @@ void InitializeWiiFileSystemContents(
 {
   const auto fs = Core::System::GetInstance().GetIOS()->GetFS();
 
-  // Some games (such as Mario Kart Wii) assume that NWC24 files will always be present
-  // even upon the first launch as they are normally created by the system menu.
-  // Because we do not require the system menu to be run, WiiConnect24 files must be copied
-  // to the NAND manually.
-  if (!CopySysmenuFilesToFS(fs.get(), File::GetSysDirectory() + WII_USER_DIR, ""))
+  // The System Menu normally creates the WiiConnect24 files, and some games
+  // (Mario Kart Wii, for one) expect them from the first boot. Since we boot
+  // games directly, install them from Sys.
+  if (!InstallSystemMenuFiles(fs.get(), File::GetSysDirectory() + WII_USER_DIR, ""))
     WARN_LOG_FMT(CORE, "Failed to copy initial System Menu files to the NAND");
 
-  const bool is_temp_nand = WiiRootIsTemporary();
-  if (is_temp_nand)
+  const bool temporary = WiiRootIsTemporary();
+  if (temporary)
   {
-    // Generate a SYSCONF with default settings for the temporary Wii NAND.
-    SysConf sysconf{fs};
-    sysconf.Save();
-
-    InitializeDeterministicWiiSaves(fs.get(), boot_session_data);
+    // A fresh temporary NAND gets a default SYSCONF.
+    SysConf{fs}.Save();
+    SeedTemporarySaves(fs.get(), boot_session_data);
   }
 
-  if (save_redirect)
+  if (!save_redirect)
+    return;
+
+  const u64 title_id = SConfig::GetInstance().GetTitleID();
+  std::string nand_save_dir = Common::GetTitleDataPath(title_id);
+  std::string& target = save_redirect->m_target_path;
+
+  if (temporary)
   {
-    const u64 title_id = SConfig::GetInstance().GetTitleID();
-    std::string source_path = Common::GetTitleDataPath(title_id);
-
-    if (is_temp_nand)
-    {
-      // remember the actual path for copying back on shutdown and redirect to a temp folder instead
-      s_temp_nand_redirects.emplace_back(
-          TempRedirectPath{save_redirect->m_target_path, s_temp_redirect_root});
-      save_redirect->m_target_path = s_temp_redirect_root;
-    }
-
-    if (!File::IsDirectory(save_redirect->m_target_path))
-    {
-      File::CreateDirs(save_redirect->m_target_path);
-      if (save_redirect->m_clone)
-      {
-        File::Copy(Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Session),
-                   save_redirect->m_target_path);
-      }
-    }
-    s_nand_redirects.emplace_back(IOS::HLE::FS::NandRedirect{
-        std::move(source_path), std::move(save_redirect->m_target_path)});
-    fs->SetNandRedirects(s_nand_redirects);
+    // Redirect into the temporary area; the real folder is updated at cleanup.
+    s_root.deferred_redirects.push_back({target, s_root.temp_redirect_root});
+    target = s_root.temp_redirect_root;
   }
+
+  if (!File::IsDirectory(target))
+  {
+    File::CreateDirs(target);
+    if (save_redirect->m_clone)
+    {
+      File::Copy(Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Session), target);
+    }
+  }
+
+  s_root.redirects.push_back(FS::NandRedirect{std::move(nand_save_dir), std::move(target)});
+  fs->SetNandRedirects(s_root.redirects);
 }
 
 void CleanUpWiiFileSystemContents(const BootSessionData& boot_session_data)
 {
-  // In TAS mode, copy back always.
-  // In Netplay, only copy back when we're the host and writing back is enabled.
-  const bool wii_root_is_temporary = WiiRootIsTemporary();
-  const auto* netplay_settings = boot_session_data.GetNetplaySettings();
-  const bool is_netplay_write = netplay_settings && netplay_settings->savedata_write;
-  const bool is_netplay_host = netplay_settings && netplay_settings->is_hosting;
-  const bool cleanup_required =
-      wii_root_is_temporary && (!netplay_settings || (is_netplay_write && is_netplay_host));
+  // A temporary NAND is copied back for movies always, and for NetPlay only
+  // on the host with save writing enabled.
+  const bool temporary = WiiRootIsTemporary();
+  const auto* const netplay = boot_session_data.GetNetplaySettings();
+  const bool netplay_writes = netplay && netplay->savedata_write;
+  const bool netplay_hosts = netplay && netplay->is_hosting;
+  const bool copy_back = temporary && (!netplay || (netplay_writes && netplay_hosts));
 
   INFO_LOG_FMT(CORE,
-               "Wii FS Cleanup: cleanup_required = {} (wii_root_is_temporary = {}, "
-               "is netplay = {}, is_netplay_write = {}, is_netplay_host = {})",
-               cleanup_required, wii_root_is_temporary, !!netplay_settings, is_netplay_write,
-               is_netplay_host);
-
-  if (!cleanup_required)
+               "Wii FS Cleanup: cleanup_required = {} (wii_root_is_temporary = {}, is netplay "
+               "= {}, is_netplay_write = {}, is_netplay_host = {})",
+               copy_back, temporary, netplay != nullptr, netplay_writes, netplay_hosts);
+  if (!copy_back)
     return;
 
   INFO_LOG_FMT(CORE, "Wii FS Cleanup: Copying from temporary FS to configured_fs.");
 
-  // copy back the temp nand redirected files to where they should normally be redirected to
-  for (const auto& redirect : s_temp_nand_redirects)
+  for (const auto& deferred : s_root.deferred_redirects)
   {
-    File::CreateFullPath(redirect.real_path);
-    File::MoveWithOverwrite(redirect.temp_path, redirect.real_path);
+    File::CreateFullPath(deferred.real_path);
+    File::MoveWithOverwrite(deferred.temp_path, deferred.real_path);
   }
 
-  IOS::HLE::EmulationKernel* ios = Core::System::GetInstance().GetIOS();
+  IOS::HLE::EmulationKernel* const ios = Core::System::GetInstance().GetIOS();
 
-  // clear the redirects in the session FS, otherwise the back-copy might grab redirected files
-  s_nand_redirects.clear();
+  // Drop the redirects first, so the copy below reads the session NAND itself.
+  s_root.redirects.clear();
   ios->GetFS()->SetNandRedirects({});
 
-  const auto configured_fs = FS::MakeFileSystem(FS::Location::Configured);
+  const auto user_fs = FS::MakeFileSystem(FS::Location::Configured);
 
-  // Copy back Mii data
-  if (!CopyNandFile(ios->GetFS().get(), Common::GetMiiDatabasePath(), configured_fs.get(),
-                    Common::GetMiiDatabasePath()))
-  {
+  const std::string mii_db = Common::GetMiiDatabasePath();
+  if (!CopyFileBetweenNands(ios->GetFS().get(), mii_db, user_fs.get(), mii_db))
     WARN_LOG_FMT(CORE, "Failed to copy Mii database to the NAND");
-  }
 
-  // If we started by copying only certain saves, we also only want to copy back those exact saves.
-  // This prevents a situation where you change game and create a new save that was not loaded from
-  // the real NAND during netplay, and that then overwrites your existing local save during this
-  // cleanup process.
-  const bool copy_all = !netplay_settings || netplay_settings->savedata_sync_all_wii;
-  for (const u64 title_id :
-       (copy_all ? ios->GetESCore().GetInstalledTitles() : boot_session_data.GetWiiSyncTitles()))
+  // When only some saves were synced in, only those go back; otherwise a save
+  // created for a different game during NetPlay could replace a local one.
+  const bool all_titles = !netplay || netplay->savedata_sync_all_wii;
+  const std::vector<u64> titles =
+      all_titles ? ios->GetESCore().GetInstalledTitles() : boot_session_data.GetWiiSyncTitles();
+  for (const u64 title_id : titles)
   {
     INFO_LOG_FMT(CORE, "Wii FS Cleanup: Copying {0:016x}.", title_id);
 
     const auto session_save = WiiSave::MakeNandStorage(ios->GetFS().get(), title_id);
 
-    // FS won't write the save if the directory doesn't exist
-    const std::string title_path = Common::GetTitleDataPath(title_id);
-    configured_fs->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, title_path + '/', 0,
-                                  {FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::ReadWrite});
+    // The FS only writes a save into an existing directory.
+    user_fs->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL,
+                            Common::GetTitleDataPath(title_id) + '/', 0, OPEN_MODES);
+    const auto user_save = WiiSave::MakeNandStorage(user_fs.get(), title_id);
 
-    const auto user_save = WiiSave::MakeNandStorage(configured_fs.get(), title_id);
-
-    const std::string backup_path =
+    // Keep the user's previous save as Backup/<title>.bin before replacing it.
+    const std::string backup_file =
         fmt::format("{}/{:016x}.bin", File::GetUserPath(D_BACKUP_IDX), title_id);
-    const auto backup_save = WiiSave::MakeDataBinStorage(&ios->GetIOSC(), backup_path, "w+b");
-
-    // Backup the existing save just in case it's still needed.
+    const auto backup_save = WiiSave::MakeDataBinStorage(&ios->GetIOSC(), backup_file, "w+b");
     WiiSave::Copy(user_save.get(), backup_save.get());
     WiiSave::Copy(session_save.get(), user_save.get());
   }
