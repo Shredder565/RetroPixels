@@ -1,12 +1,13 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -20,6 +21,10 @@ class CPUThreadGuard;
 class System;
 }  // namespace Core
 
+// The Triforce AM media board (DIMM / GD-ROM / NAND board). On a Triforce the
+// DVD interface talks to this board instead of a drive: it serves the game
+// image, the board's own status and command buffers, the SegaBoot firmware and
+// a small socket API that the games use for networking.
 namespace AMMediaboard
 {
 
@@ -68,6 +73,7 @@ enum InquiryType
   Version2 = 0x29484100,
 };
 
+// A window of board memory that DI commands can address.
 struct MediaBoardRange
 {
   u32 start;
@@ -78,6 +84,7 @@ struct MediaBoardRange
   MediaBoardRange(u32 start_, u32 size_, std::span<u8> buffer_);
 };
 
+// DI opcodes the board answers.
 enum class AMMBDICommand : u16
 {
   Inquiry = 0x12,
@@ -86,6 +93,8 @@ enum class AMMBDICommand : u16
   Execute = 0xAB,
 };
 
+// Board command codes. Some numbers have two names: the NETDIMM firmware
+// reuses the low command numbers.
 enum class AMMBCommand : u16
 {
   Unknown_000 = 0x000,
@@ -101,34 +110,34 @@ enum class AMMBCommand : u16
 
   TestHardware = 0x301,
 
-  // Network used by Mario Kart GPs
+  // Sockets (Mario Kart Arcade GP).
   Accept = 0x401,
   Bind = 0x402,
   Closesocket = 0x403,
   Connect = 0x404,
   GetIPbyDNS = 0x405,
   InetAddr = 0x406,
-  Ioctl = 0x407,  // Unused
+  Ioctl = 0x407,
   Listen = 0x408,
   Recv = 0x409,
   Send = 0x40A,
   Socket = 0x40B,
   Select = 0x40C,
-  Shutdown = 0x40D,  // Unused
+  Shutdown = 0x40D,
   SetSockOpt = 0x40E,
-  GetSockOpt = 0x40F,  // Unused
+  GetSockOpt = 0x40F,
   SetTimeOuts = 0x410,
   GetLastError = 0x411,
-  RouteAdd = 0x412,     // Unused
-  RouteDelete = 0x413,  // Unused
+  RouteAdd = 0x412,
+  RouteDelete = 0x413,
   GetParambyDHCPExec = 0x414,
   ModifyMyIPaddr = 0x415,
-  Recvfrom = 0x416,       // Unused
-  Sendto = 0x417,         // Unused
-  RecvDimmImage = 0x418,  // Unused
-  SendDimmImage = 0x419,  // Unused
+  Recvfrom = 0x416,
+  Sendto = 0x417,
+  RecvDimmImage = 0x418,
+  SendDimmImage = 0x419,
 
-  // Network used by F-Zero AX
+  // Cabinet link (F-Zero AX).
   InitLink = 0x601,
   Unknown_605 = 0x605,
   SetupLink = 0x606,
@@ -136,14 +145,14 @@ enum class AMMBCommand : u16
   Unknown_608 = 0x608,
   Unknown_614 = 0x614,
 
-  // All.Net used by Virtua Striker 4 2006 (Japan)
+  // All.Net (Virtua Striker 4 2006).
   AllNetInit = 0x700,
   Unknown_701 = 0x701,
   Unknown_702 = 0x702,
   Unknown_703 = 0x703,
   Unknown_704 = 0x704,
 
-  // NETDIMM Commands
+  // NETDIMM names.
   Unknown_001 = 0x001,
   GetNetworkFirmVersion = 0x101,
   Unknown_103 = 0x103,
@@ -192,52 +201,48 @@ enum MediaBoardAddress : u32
   FirmwareMagicWrite2 = 0x00700000,
 };
 
-// Mario Kart GP2 has a complete list of them
-// but in japanese
-// They somewhat match WSA errors codes
+// Socket call status codes as the board reports them (close to the WSA
+// numbering; EWOULDBLOCK and SUCCESS share a value).
 enum SocketStatusCodes
 {
-  SSC_E_4 = -4,  // Failure (abnormal argument)
-  SSC_E_3 = -3,  // Success (unsupported command)
-  SSC_E_2 =
-      -2,  // Failure (failed to send, abnormal argument, or communication condition violation)
-  SSC_E_1 = -1,  // Failure (error termination)
+  SSC_E_4 = -4,
+  SSC_E_3 = -3,
+  SSC_E_2 = -2,
+  SSC_E_1 = -1,
 
-  SSC_EINTR = 4,    // An interrupt occurred before data reception was completed
-  SSC_EBADF = 9,    // Invalid descriptor
-  SSC_E_11 = 11,    // Send operation was blocked on a non-blocking mode socket
-  SSC_EACCES = 13,  // The socket does not support broadcast addresses, but the destination address
-                    // is a broadcast address
-  SSC_EFAULT =
-      14,  // The name argument specifies a location other than an address used by the process.
-  SSC_E_23 = 23,     // System file table is full.
-  SSC_AEMFILE = 24,  // Process descriptor table is full.
-  SSC_EMSGSIZE =
-      36,  // Socket tried to send message without splitting, but message size is too large.
-  SSC_EAFNOSUPPORT = 47,   // Address prohibited for use on this socket.
-  SSC_EADDRINUSE = 48,     // Address already in use.
-  SSC_EADDRNOTAVAIL = 49,  // Prohibited address.
-  SSC_E_50 = 50,           // Non-socket descriptor.
-  SSC_ENETUNREACH = 51,    // Cannot access specified network.
-  SSC_ENOBUFS = 55,        // Insufficient buffer
-  SSC_EISCONN = 56,        // Already connected socket
-  SSC_ENOTCONN = 57,       // No connection for connection-type socket
-  SSC_ETIMEDOUT = 60,      // Timeout
-  SSC_ECONNREFUSED = 61,   // Connection request forcibly rejected
-  SSC_EHOSTUNREACH = 65,   // Remote host cannot be reached
-  SSC_EHOSTDOWN = 67,      // Remote host is down
-  SSC_EWOULDBLOCK = 70,    // Socket is in non-blocking mode and connection has not been completed
-  SSC_E_69 = 69,  // Socket is in non-blocking mode and a previously issued Connect command has not
-                  // been completed
+  SSC_EINTR = 4,
+  SSC_EBADF = 9,
+  SSC_E_11 = 11,
+  SSC_EACCES = 13,
+  SSC_EFAULT = 14,
+  SSC_E_23 = 23,
+  SSC_AEMFILE = 24,
+  SSC_EMSGSIZE = 36,
+  SSC_EAFNOSUPPORT = 47,
+  SSC_EADDRINUSE = 48,
+  SSC_EADDRNOTAVAIL = 49,
+  SSC_E_50 = 50,
+  SSC_ENETUNREACH = 51,
+  SSC_ENOBUFS = 55,
+  SSC_EISCONN = 56,
+  SSC_ENOTCONN = 57,
+  SSC_ETIMEDOUT = 60,
+  SSC_ECONNREFUSED = 61,
+  SSC_EHOSTUNREACH = 65,
+  SSC_EHOSTDOWN = 67,
+  SSC_EWOULDBLOCK = 70,
+  SSC_E_69 = 69,
   SSC_SUCCESS = 70,
 };
 
+// Number of guest socket numbers.
 static constexpr std::size_t SOCKET_FD_MAX = 64;
 
 void Init();
 void FirmwareMap(bool on);
 void InitDIMM(const DiscIO::Volume& volume);
 void InitKeys(u32 key_a, u32 key_b, u32 key_c);
+// Returns 0 when the board handled the command.
 u32 ExecuteCommand(std::array<u32, 3>& dicmd_buf, u32* diimm_buf, u32 address, u32 length);
 u32 GetGameType();
 u32 GetMediaType();
@@ -245,6 +250,7 @@ bool GetTestMenu();
 void Shutdown();
 void DoState(PointerWrap& p);
 
+// "original=replacement description", as entered in the settings.
 struct ParsedIPRedirection
 {
   std::string_view original;
@@ -259,7 +265,8 @@ struct IPRedirection
   Common::IPv4PortRange original;
   Common::IPv4PortRange replacement;
 
-  // Caller should check if it matches first!
+  // Maps an address inside `original` onto `replacement` (and back); check
+  // IsMatch first.
   Common::IPv4Port Apply(Common::IPv4Port subject) const;
   Common::IPv4Port Reverse(Common::IPv4Port subject) const;
   std::string ToString() const;
@@ -269,6 +276,7 @@ using IPRedirections = std::vector<IPRedirection>;
 
 IPRedirections GetIPRedirections();
 
+// The host socket behind a guest socket number, for the debugger.
 s32 DebuggerGetSocket(u32 triforce_fd);
 
 };  // namespace AMMediaboard
