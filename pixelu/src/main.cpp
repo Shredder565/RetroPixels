@@ -231,6 +231,12 @@ namespace
 	{
 		if (const std::optional<int> exitCode = LaunchSettings::HandleCommandline(std::forward<TArgs>(commandLine)...))
 			return *exitCode;
+#if BOOST_OS_LINUX || BOOST_OS_BSD
+		// RetroPixels can only dock X11 windows; Wayland desktops run them on XWayland. GDK falls back
+		// to Wayland when there is no X server, and a GDK_BACKEND set by the caller wins.
+		if (LaunchSettings::RPEmbedEnabled())
+			setenv("GDK_BACKEND", "x11,wayland", 0);
+#endif
 		WindowSystem::Create();
 		return 0;
 	}

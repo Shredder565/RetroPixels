@@ -88,6 +88,9 @@ public:
 #if BOOST_OS_WINDOWS
 	WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
 #endif
+	// RetroPixels' screen switch ("PixelU.Screen", see RPEmbed.h): 0 = TV, 1 = GamePad, 2 = the other one,
+	// anything else only asks. Returns whether the GamePad screen is shown now.
+	static bool SetScreenMode(int mode);
 	void OpenSettings();
 
 	PadViewFrame* GetPadView() const { return m_padView; }

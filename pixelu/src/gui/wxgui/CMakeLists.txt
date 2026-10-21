@@ -144,6 +144,10 @@ endif()
 if(ENABLE_BLUEZ)
 	pixelu_add_folder(CemuWxGui input PairingDialog.cpp PairingDialog.h)
 endif()
+# --rp-embed/--rp-parent and the screen switch on X11 (RetroPixels)
+if(UNIX AND NOT APPLE)
+	pixelu_add_folder(CemuWxGui . RPEmbedX11.cpp RPEmbedX11.h)
+endif()
 
 pixelu_library(CemuWxGui)
 
@@ -167,6 +171,8 @@ target_link_libraries(CemuWxGui
 if(ENABLE_WXWIDGETS AND UNIX AND NOT APPLE)
 	# public: guiWrapper.h includes the GDK key symbols
 	target_link_libraries(CemuWxGui PUBLIC GTK3::gtk)
+	# RPEmbedX11.cpp: XCB on the Xlib display GDK opened
+	target_link_libraries(CemuWxGui PRIVATE X11::X11 X11::xcb X11::X11_xcb)
 	if(ENABLE_WAYLAND)
 		target_link_libraries(CemuWxGui PRIVATE Wayland::Client CemuWaylandProtocols)
 	endif()

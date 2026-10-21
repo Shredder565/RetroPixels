@@ -904,25 +904,28 @@ void MainWindow::OnTimer(wxTimerEvent&)
 		ShowCursor(false);
 }
 
+bool MainWindow::SetScreenMode(int mode)
+{
+	bool& gamePadShown = LatteGPUState.isDRCPrimary;
+	switch (mode)
+	{
+	case 0: gamePadShown = false; break;
+	case 1: gamePadShown = true; break;
+	case 2: gamePadShown = !gamePadShown; break;
+	default: break;
+	}
+	return gamePadShown;
+}
+
 #if BOOST_OS_WINDOWS
 WXLRESULT MainWindow::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
 {
-	// "PixelU.Screen" from RetroPixels picks the screen this window shows:
-	// wParam 0 = TV, 1 = GamePad, 2 = the other one, anything else = just ask.
-	// The reply is 1 while the GamePad screen is shown, otherwise 0.
+	// "PixelU.Screen" from RetroPixels picks the screen this window shows (wParam is the mode of
+	// SetScreenMode). The reply is 1 while the GamePad screen is shown, otherwise 0. On Linux the same
+	// request comes as an X11 client message (RPEmbed.cpp).
 	static const UINT screenMessage = RegisterWindowMessageW(L"PixelU.Screen");
 	if (screenMessage != 0 && nMsg == screenMessage)
-	{
-		bool& gamePadShown = LatteGPUState.isDRCPrimary;
-		switch (wParam)
-		{
-		case 0: gamePadShown = false; break;
-		case 1: gamePadShown = true; break;
-		case 2: gamePadShown = !gamePadShown; break;
-		default: break;
-		}
-		return gamePadShown ? 1 : 0;
-	}
+		return SetScreenMode(wParam <= 2 ? (int)wParam : -1) ? 1 : 0;
 
 	constexpr WPARAM kDevNodesChanged = 0x0007; // DBT_DEVNODES_CHANGED
 	if (nMsg == WM_DEVICECHANGE && wParam == kDevNodesChanged)

@@ -358,8 +358,9 @@ bool CemuApp::OnInit()
 	HotkeySettings::Init(m_mainFrame);
 
 	SetTopWindow(m_mainFrame);
-	RPEmbed::BeforeShow(m_mainFrame); // PixelU: under --rp-embed it waits off-screen to be docked
-	m_mainFrame->Show();
+	// PixelU: under --rp-embed it waits to be docked, off-screen (Windows) or hidden (Linux)
+	if (RPEmbed::BeforeShow(m_mainFrame))
+		m_mainFrame->Show();
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
 	if (wxWlIsWaylandWindow(m_mainFrame))

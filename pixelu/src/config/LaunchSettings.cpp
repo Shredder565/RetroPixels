@@ -136,7 +136,7 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
 		("rp-ffmpeg", po::wvalue<std::wstring>(), "RetroPixels: full path of the ffmpeg executable used for recording")
 		("rp-opengl", "RetroPixels: draw with OpenGL instead of Vulkan for this run (Vulkan doesn't work on this PC)")
 		("rp-embed", "RetroPixels: a window that shows only the game, for docking into another window; no menus, game list or optional dialogs")
-		("rp-parent", po::value<std::string>(), "RetroPixels: (Windows) show the game as a child of this window (HWND, decimal or 0x hex), filling it; implies --rp-embed");
+		("rp-parent", po::value<std::string>(), "RetroPixels: show the game as a child of this window (Windows HWND or X11 window id, decimal or 0x hex), filling it; implies --rp-embed");
 
 	po::options_description hiddenOptions{"Hidden options"};
 	hiddenOptions.add_options()

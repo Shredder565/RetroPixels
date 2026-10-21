@@ -54,16 +54,16 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 199640 | 81.6% |
+| Original (RetroPixels) | 200330 | 81.7% |
 | Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
-| Third-party | 44933 | 18.4% |
-| **All** | **244573** | 100% |
+| Third-party | 44933 | 18.3% |
+| **All** | **245263** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
-| (top level: main.cpp, mainLLE.cpp) | 335 | 335 | original |
+| (top level: main.cpp, mainLLE.cpp) | 341 | 341 | original |
 | audio | 2861 | 1803 | mixed (63% original), 1058 lines third-party |
 | Cafe (CafeSystem, GamePatch) | 1544 | 1544 | original |
 | Cafe/Account | 694 | 694 | original |
@@ -78,7 +78,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
 | Cafe/HW/Espresso/Recompiler | 7818 | 7818 | original |
 | Cafe/HW/Latte/Common | 3130 | 3130 | original |
-| Cafe/HW/Latte/Core | 13961 | 13961 | original |
+| Cafe/HW/Latte/Core | 13974 | 13974 | original |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
 | Cafe/HW/Latte/LatteAddrLib | 1251 | 1251 | original |
 | Cafe/HW/Latte/LegacyShaderDecompiler | 5896 | 5896 | original |
@@ -156,10 +156,10 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/nex | 3333 | 3333 | original |
 | Cemu/PPCAssembler | 1893 | 1893 | original |
 | Cemu/Tools | 1584 | 1584 | original |
-| Common | 31509 | 3722 | mixed (12% original), 27787 lines third-party |
+| Common | 31535 | 3748 | mixed (12% original), 27787 lines third-party |
 | config | 2800 | 2800 | original |
 | gui/interface | 140 | 140 | original |
-| gui/wxgui (top level) | 11963 | 11963 | original |
+| gui/wxgui (top level) | 12608 | 12608 | original |
 | gui/wxgui/canvas | 294 | 294 | original |
 | gui/wxgui/components | 4014 | 4014 | original |
 | gui/wxgui/debugger | 3204 | 3204 | original |

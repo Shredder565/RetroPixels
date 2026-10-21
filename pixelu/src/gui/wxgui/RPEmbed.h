@@ -11,6 +11,12 @@
 // ShowMessage.
 // --rp-parent <HWND> (Windows): the main window is also made a child of that window and kept at the
 // size of its client area.
+//
+// Linux (X11; under --rp-embed PixelU asks GTK for X11, which Wayland desktops run as XWayland): the
+// window is created but stays unmapped, with no task bar or pager entry, until RetroPixels docks it by
+// making it transient for one of its windows (WM_TRANSIENT_FOR) or by reparenting it into one; PixelU
+// then shows it without a frame, where RetroPixels placed it. --rp-parent <X11 window id> reparents it
+// into that window, filling it. The X11 details, and the screen switch message, are in RPEmbedX11.h.
 
 class wxFrame;
 class wxString;
@@ -24,14 +30,17 @@ namespace RPEmbed
 	long FrameStyle(long defaultStyle);
 
 	// --rp-parent: makes the main frame a borderless child of the given window and keeps it sized to it;
-	// closes PixelU when that window goes away. Does nothing without --rp-parent, outside Windows, or
-	// when the window does not exist.
+	// closes PixelU when that window goes away. Does nothing without --rp-parent, when the window does
+	// not exist, or on Linux when the GUI does not run on X11.
 	void AttachToParent(wxFrame* frame);
 
-	// Call right before the main frame is shown for the first time. Unless it is already docked
-	// (--rp-parent) it is moved off-screen and watched until RetroPixels makes it a child window. When
-	// nobody docks it within 20 seconds it comes on screen as a normal window.
-	void BeforeShow(wxFrame* frame);
+	// Call right before the main frame is shown for the first time; returns whether to Show() it now.
+	// Unless it is already docked (--rp-parent) it is watched until RetroPixels docks it: on Windows
+	// it is shown off-screen meanwhile (true), on Linux it stays hidden (false) and is shown once docked.
+	// When nobody docks it within 20 seconds it comes on screen as a normal window. Also lets a stop
+	// request by signal (SIGTERM, Linux) close the window like its close button, so a recording is
+	// finished properly.
+	bool BeforeShow(wxFrame* frame);
 
 	// the main frame is docked into RetroPixels' window
 	bool IsDocked();

@@ -1,4 +1,5 @@
 // Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include <atomic>
 #include <signal.h>
 #include <execinfo.h>
 #include <string.h>
@@ -119,12 +120,29 @@ namespace
 		_Exit(1);
 	}
 
+	// set by ExceptionHandler_DeferStopSignal / by the first deferred stop signal
+	std::atomic_bool s_deferStopSignal{false};
+	std::atomic_bool s_stopRequested{false};
+
 	// Ctrl+C / termination request. There is no orderly shutdown path from a
-	// signal handler (destroying running threads aborts), so exit right away.
+	// signal handler (destroying running threads aborts), so exit right away,
+	// unless the GUI asked to close the window itself (only the first time).
 	void onTerminateSignal(int)
 	{
+		if (s_deferStopSignal.load() && !s_stopRequested.exchange(true))
+			return;
 		_Exit(0);
 	}
+}
+
+void ExceptionHandler_DeferStopSignal()
+{
+	s_deferStopSignal = true;
+}
+
+bool ExceptionHandler_StopRequested()
+{
+	return s_stopRequested.load();
 }
 
 void ExceptionHandler_Init()

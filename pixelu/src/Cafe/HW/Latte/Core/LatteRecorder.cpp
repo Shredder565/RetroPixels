@@ -284,8 +284,21 @@ namespace LatteRecorder
 		}
 		if (m_pid > 0)
 		{
+			// like on Windows: ffmpeg gets two minutes to finish the file, then it is ended
 			int status = 0;
-			while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {}
+			const auto giveUpAt = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+			pid_t waited;
+			while ((waited = waitpid(m_pid, &status, WNOHANG)) == 0 || (waited < 0 && errno == EINTR))
+			{
+				if (std::chrono::steady_clock::now() >= giveUpAt)
+				{
+					cemuLog_log(LogType::Force, "Recorder: ffmpeg did not exit in time, terminating it");
+					kill(m_pid, SIGKILL);
+					while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {}
+					break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			}
 			if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
 				cemuLog_log(LogType::Force, "Recorder: ffmpeg exited with code {}", WEXITSTATUS(status));
 			m_pid = -1;
