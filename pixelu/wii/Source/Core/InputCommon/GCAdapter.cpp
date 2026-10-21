@@ -146,7 +146,12 @@ std::atomic<int> s_pending_write_size{0};
 std::thread s_scanner;
 Common::Flag s_scanner_running;
 Common::Event s_scan_wakeup;
+// FreeBSD 11+ libusb always delivers hotplug events, so it is not asked there.
+#if defined(__FreeBSD__) && __FreeBSD__ >= 11
+bool s_use_hotplug = true;
+#else
 bool s_use_hotplug = false;
+#endif
 #if GCADAPTER_HAS_HOTPLUG
 libusb_hotplug_callback_handle s_hotplug_handle;
 #endif
@@ -409,11 +414,13 @@ bool OpenAdapter(libusb_device* device)
   }
 
   // A kernel driver bound to the adapter (1) has to be detached. "Not found" and "not
-  // supported" from the detach are fine.
+  // supported" from the detach are fine. On macOS the driver is left alone: detaching needs
+  // root or an entitlement there, and the bound driver is expected to be GCAdapterDriver.
   int driver_result = libusb_kernel_driver_active(s_device, 0);
   bool driver_in_the_way = false;
   if (driver_result == 1)
   {
+#if !defined(__APPLE__)
     driver_result = libusb_detach_kernel_driver(s_device, 0);
     driver_in_the_way = driver_result < LIBUSB_SUCCESS &&
                         driver_result != LIBUSB_ERROR_NOT_FOUND &&
@@ -423,6 +430,7 @@ bool OpenAdapter(libusb_device* device)
       ERROR_LOG_FMT(CONTROLLERINTERFACE, "libusb_detach_kernel_driver failed: {}",
                     LibusbUtils::ErrorWrap(driver_result));
     }
+#endif
   }
   else if (driver_result == LIBUSB_ERROR_NOT_SUPPORTED)
   {
@@ -601,7 +609,9 @@ void ScannerMain()
   NOTICE_LOG_FMT(CONTROLLERINTERFACE, "GC Adapter scanning thread started");
 
 #if GCADAPTER_HAS_HOTPLUG
+#if !defined(__FreeBSD__)
   s_use_hotplug = libusb_has_capability(LIBUSB_CAP_HAS_HOTPLUG) != 0;
+#endif
   if (s_use_hotplug)
   {
     const auto events = static_cast<libusb_hotplug_event>(LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED |
