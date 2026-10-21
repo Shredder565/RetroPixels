@@ -1,10 +1,11 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package main
 
 import "errors"
 
-// Docking Dolphin into the app window is Windows-only; elsewhere it keeps its own window.
+// Docking engines into the app window is for Windows and Linux (embed_linux.go);
+// elsewhere they keep their own windows.
 
 func embedDolphin(pid int, exited <-chan struct{}) {}
 
