@@ -13,7 +13,7 @@
 # repository, by default a sparse one in dolphin/.
 #
 # Supported: Windows x64 with MSVC (Visual Studio 2026), and Linux x86-64 with
-# GCC 12+ or Clang 16+ (glibc 2.35 and newer); see CMakePresets.json.
+# GCC 12+ (glibc 2.35 and newer; Clang 19+ should work too); see CMakePresets.json.
 
 cmake_minimum_required(VERSION 3.25...4.2.1)
 
@@ -126,9 +126,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
     message(FATAL_ERROR "PixelU-Wii needs GCC 12 or newer (C++23).")
   endif()
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "PixelU-Wii needs Clang 16 or newer (C++23).")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
+  # Older Clang cannot use libstdc++'s <expected> (it needs P2493 concepts).
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+    message(FATAL_ERROR "PixelU-Wii needs Clang 19 or newer (C++23 std::expected).")
   endif()
 elseif(NOT MSVC)
   message(FATAL_ERROR "PixelU-Wii builds with MSVC, GCC or Clang, not ${CMAKE_CXX_COMPILER_ID}.")
@@ -219,7 +220,7 @@ else()
     -Wall
     -Wno-unused-parameter
     -Wno-missing-field-initializers
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-class-memaccess>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-Wno-class-memaccess>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-invalid-offsetof>
   )
   if(CMAKE_GENERATOR MATCHES "Ninja")
