@@ -1448,10 +1448,17 @@ void Device::UpdateRumble()
   const auto off_for = RUMBLE_PERIOD - on_for;
   const Clock::time_point now = Clock::now();
 
-  const auto phase = m_rumble ? on_for : off_for;
-  const auto other_phase = m_rumble ? off_for : on_for;
-  if (other_phase.count() == 0 || now < m_rumble_toggled_at + phase)
+  // The motor stays as it is for its current state's share of the period, and for good when
+  // the other state's share is zero.
+  if (m_rumble)
+  {
+    if (off_for.count() == 0 || now < m_rumble_toggled_at + on_for)
+      return;
+  }
+  else if (on_for.count() == 0 || now < m_rumble_toggled_at + off_for)
+  {
     return;
+  }
 
   m_rumble_toggled_at = now;
   m_rumble = !m_rumble;
