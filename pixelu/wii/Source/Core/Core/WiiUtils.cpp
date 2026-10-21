@@ -912,8 +912,10 @@ NANDCheckResult ScanNAND(IOS::HLE::Kernel& ios, bool repair)
       }
     }
 
-    // Titles that are not disc titles need a ticket.
-    if (!IOS::ES::IsDiscTitle(title_id) && !es.FindSignedTicket(title_id).IsValid())
+    // Titles that are not disc titles need a ticket. (The ticket is looked up
+    // for every title, disc titles included.)
+    const IOS::ES::TicketReader ticket = es.FindSignedTicket(title_id);
+    if (!IOS::ES::IsDiscTitle(title_id) && !ticket.IsValid())
     {
       ERROR_LOG_FMT(CORE, "CheckNAND: Missing ticket for title {:016x}", title_id);
       remove_title();
