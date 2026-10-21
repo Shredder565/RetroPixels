@@ -2,12 +2,15 @@ name: PixelU Wii (GameCube / Wii) test build
 
 # Builds PixelU's GameCube and Wii engine from pixelu/wii: PixelU-Wii's own
 # CMake build (pixelu/wii/CMakeLists.txt, CMake/, Externals/) and sources
-# (pixelu/wii/Source, docs/pixelu-wii-original.md). From the Dolphin 2609a
-# submodule in pixelu/wii/dolphin (GPL-2.0-or-later) it takes only the
-# third-party libraries in Externals/ (their own sources, plus the prebuilt
-# Qt and FFmpeg), the translations and the few Sys files that are not
-# PixelU-Wii's own (GameSettings, ApprovedInis.json, the GameTDB title lists,
-# the OSD font, the Gecko code handler and the DSP ROMs; the list is in
+# (pixelu/wii/Source, docs/pixelu-wii-original.md). Third-party libraries
+# come from their own upstream projects: the sources listed (with commits and
+# checksums) in pixelu/wii/Externals/sources.json, Qt's official 6.8.3 MSVC
+# build (aqtinstall) and FFmpeg built here from its source. From Dolphin
+# 2609a's repository (GPL-2.0-or-later; the commit is the one the
+# pixelu/wii/dolphin submodule pins) it takes, in a sparse checkout, only the
+# translations (Languages/po) and the few Sys files that are not PixelU-Wii's
+# own (GameSettings, ApprovedInis.json, the GameTDB title lists, the OSD font,
+# the Gecko code handler and the DSP ROMs; the list is in
 # pixelu/wii/CMake/PixelUAssembleSys.cmake). It is its own program
 # (PixelU-Wii.exe), separate from PixelU's Wii U part, and is packaged as the
 # PixelU\wii\ folder.
@@ -41,33 +44,140 @@ jobs:
     env:
       DOLPHIN_TAG: "2609a"
       DOLPHIN_DIR: "pixelu/wii/dolphin"
+      QT_VERSION: "6.8.3"
+      QT_ARCH: "win64_msvc2022_64"
+      AQT_VERSION: "3.3.0"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
 
-      - name: Fetch Dolphin and its Externals
+      - name: Fetch Dolphin's game settings, Sys files and translations (sparse)
         shell: pwsh
         run: |
-          # The submodule is marked "update = none" in .gitmodules so that
-          # other builds of this repo don't download Dolphin; --checkout overrides it.
-          git submodule update --init --checkout --depth 1 $env:DOLPHIN_DIR
+          # Only what pixelu/wii/CMake/PixelUAssembleSys.cmake takes from
+          # Dolphin's Data/Sys, plus Languages/po: no source, no Externals.
+          # The commit is the one the pixelu/wii/dolphin submodule pins.
+          $sha = (git ls-tree HEAD $env:DOLPHIN_DIR).Split()[2]
+          $list = (Get-Content -Raw pixelu/wii/CMake/PixelUAssembleSys.cmake) -replace '(?m)#.*$', ''
+          $block = [regex]::Match($list, 'set\(from_third_party(.*?)\n\)', 'Singleline').Groups[1].Value
+          $paths = @([regex]::Matches($block, '"([^"]+)"') | ForEach-Object { "/Data/Sys/" + $_.Groups[1].Value })
+          $paths += "/Languages/po/"
+          "Dolphin $env:DOLPHIN_TAG at $sha, sparse paths:"; $paths
+          New-Item -ItemType Directory -Force $env:DOLPHIN_DIR | Out-Null
+          git -C $env:DOLPHIN_DIR init -q
+          git -C $env:DOLPHIN_DIR remote add origin https://github.com/dolphin-emu/dolphin.git
+          git -C $env:DOLPHIN_DIR sparse-checkout set --no-cone @paths
+          git -C $env:DOLPHIN_DIR fetch -q --depth 1 --filter=blob:none origin $sha
           if ($LASTEXITCODE) { exit 1 }
-          git -C $env:DOLPHIN_DIR fetch --depth 1 origin tag $env:DOLPHIN_TAG
-          git -C $env:DOLPHIN_DIR submodule update --init --recursive --depth 1 --jobs 8
-          if ($LASTEXITCODE) {
-            Write-Host "Shallow fetch of the Externals failed; fetching them in full"
-            git -C $env:DOLPHIN_DIR submodule update --init --recursive --jobs 8
-            if ($LASTEXITCODE) { exit 1 }
-          }
+          git -C $env:DOLPHIN_DIR -c advice.detachedHead=false checkout -q FETCH_HEAD
+          if ($LASTEXITCODE) { exit 1 }
           git -C $env:DOLPHIN_DIR log -1 --format="Dolphin at %H (%s)"
+          foreach ($p in $paths) {
+            $hits = @(Get-ChildItem -Recurse -File -Path "$env:DOLPHIN_DIR$p" -ErrorAction SilentlyContinue)
+            if (-not $hits) { Write-Error "nothing fetched for $p"; exit 1 }
+          }
+          foreach ($d in "Source", "Externals", "Data/Sys/Themes", "Data/Sys/Shaders") {
+            if (Test-Path "$env:DOLPHIN_DIR/$d") { Write-Error "$d was fetched; the checkout must stay sparse"; exit 1 }
+          }
+          $files = @(Get-ChildItem -Recurse -File $env:DOLPHIN_DIR | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' })
+          "Dolphin checkout: {0} files, {1:N1} MB" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
 
-      # Nothing in the submodule is changed or overlaid: the build reads its
-      # Externals/, Data/Sys and Languages/ where they are. Binaries/Sys is
-      # assembled by the build (pixelu/wii/Data/Sys plus the short third-party
-      # list in pixelu/wii/CMake/PixelUAssembleSys.cmake), and COPYING and Licenses come from pixelu/wii. No commit or
-      # tag is needed: PixelU-Wii's version comes from RetroPixels (main.go
-      # and its git commit, Source/Core/Common/PixelUWiiVersion.cmake).
+      # Binaries/Sys is assembled by the build (pixelu/wii/Data/Sys plus the
+      # short third-party list in pixelu/wii/CMake/PixelUAssembleSys.cmake),
+      # and COPYING and Licenses come from pixelu/wii. No commit or tag is
+      # needed: PixelU-Wii's version comes from RetroPixels (main.go and its
+      # git commit, Source/Core/Common/PixelUWiiVersion.cmake).
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the third-party sources from their own projects
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          python pixelu/wii/Externals/fetch.py --list
+          python pixelu/wii/Externals/fetch.py --jobs 8
+          if ($LASTEXITCODE) { exit 1 }
+
+      # Qt 6.8.3, the Qt Company's own MSVC 2022 x64 build, base and SVG
+      # modules (Dolphin's ext-win-qt was its own build of the same version
+      # and modules). aqtinstall checks every archive against the SHA-256 the
+      # Qt download server lists for it.
+      - uses: actions/cache@v4
+        id: qt-cache
+        with:
+          path: pixelu/wii/third_party/Qt
+          key: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-qtbase-qtsvg-aqt${{ env.AQT_VERSION }}
+
+      - name: Install Qt (official build)
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install "aqtinstall==$env:AQT_VERSION"
+          if ($LASTEXITCODE) { exit 1 }
+          python -m aqt install-qt windows desktop $env:QT_VERSION $env:QT_ARCH --archives qtbase qtsvg -O pixelu/wii/third_party/Qt
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Check Qt
+        shell: pwsh
+        run: |
+          $qt = "pixelu/wii/third_party/Qt/$env:QT_VERSION/msvc2022_64"
+          foreach ($f in "bin/Qt6Core.dll", "bin/Qt6Gui.dll", "bin/Qt6Widgets.dll", "bin/Qt6Svg.dll", "bin/windeployqt.exe", "bin/qtpaths.exe", "bin/moc.exe", "lib/cmake/Qt6/Qt6Config.cmake", "plugins/platforms/qwindows.dll", "plugins/imageformats/qsvg.dll", "plugins/iconengines/qsvgicon.dll", "plugins/styles/qmodernwindowsstyle.dll") {
+            if (-not (Test-Path "$qt/$f")) { Write-Error "Qt: missing $f"; exit 1 }
+          }
+          & "$qt/bin/qtpaths.exe" --qt-query QT_VERSION
+
+      # MSYS2 gives make and nasm for FFmpeg's build and GNU gettext's msgfmt
+      # for the translations (Dolphin's prebuilt msgfmt.exe is no longer used).
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MSYS
+          update: false
+          path-type: inherit
+          install: make diffutils mingw-w64-x86_64-nasm mingw-w64-x86_64-gettext-tools
+
+      # FFmpeg: static libraries built from FFmpeg's source at the commit of
+      # Dolphin's ext-win-ffmpeg (N-106414-g28d011516b) with the same
+      # configuration (Externals/FFmpeg/build-ffmpeg.sh). Cached between runs.
+      - uses: actions/cache@v4
+        id: ffmpeg-cache
+        with:
+          path: pixelu/wii/third_party/FFmpeg/x64
+          key: ffmpeg-${{ hashFiles('pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh', 'pixelu/wii/Externals/sources.json') }}
+
+      - name: Fetch FFmpeg's source
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python pixelu/wii/Externals/fetch.py --group ffmpeg
+          if ($LASTEXITCODE) { exit 1 }
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        with:
+          arch: x64
+
+      - name: Build FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          nasm -v
+          bash pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh pixelu/wii/third_party/FFmpeg/ffmpeg pixelu/wii/third_party/FFmpeg/x64
+
+      - name: Check FFmpeg
+        shell: pwsh
+        run: |
+          $ff = "pixelu/wii/third_party/FFmpeg/x64"
+          Get-Content "$ff/BUILD-INFO.txt"
+          foreach ($l in "avcodec", "avformat", "avutil", "swresample", "swscale") {
+            if (-not (Test-Path "$ff/lib/$l.lib")) { Write-Error "FFmpeg: missing lib/$l.lib"; exit 1 }
+            if (-not (Test-Path "$ff/include/lib$l/$l.h")) { Write-Error "FFmpeg: missing include/lib$l/$l.h"; exit 1 }
+          }
+          if (-not (Select-String -Quiet -Path "$ff/include/libavutil/ffversion.h" -Pattern 'N-106414-g28d011516b')) { Write-Error "FFmpeg: not N-106414-g28d011516b"; exit 1 }
 
       - uses: jwlawson/actions-setup-cmake@v2
         with:
@@ -78,8 +188,11 @@ jobs:
         shell: pwsh
         run: |
           # Updater and analytics are off by default in PixelU-Wii's CMake.
+          $msgfmt = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "mingw64\bin\msgfmt.exe"
+          if (-not (Test-Path $msgfmt)) { Write-Error "msgfmt not found at $msgfmt"; exit 1 }
+          & $msgfmt --version | Select-Object -First 1
           cmake --version
-          cmake --preset windows-x64-release
+          cmake --preset windows-x64-release "-DGETTEXT_MSGFMT_EXECUTABLE=$msgfmt"
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Build
@@ -113,21 +226,23 @@ jobs:
           Copy-Item pixelu/wii/LICENSES/GPL-2.0-or-later.txt "$out/license.txt"
           Copy-Item -Recurse pixelu/wii/LICENSES "$out/Licenses"
           # Each third-party project's own licence files (with its copyright
-          # lines) go to Licenses/Externals/<project>/. Not shipped, so left
-          # out: googletest (tests off), MoltenVK and libadrenotools (not
-          # Windows), gettext (a build tool).
-          $skip = @("gtest", "MoltenVK", "libadrenotools", "gettext")
+          # lines) go to Licenses/Externals/<project>/: the fetched ones in
+          # pixelu/wii/third_party (FFmpeg's from its installed libraries, as
+          # its source is only there when it was rebuilt) and the two kept in
+          # pixelu/wii/Externals (FreeSurround's licence is in its file
+          # headers; its README.txt says where it comes from).
           $pattern = '^(licen[cs]e|copying|copyright|notice|unlicense)([._-].*)?$|copyright'
           $ext_dirs = 0
-          foreach ($ext in Get-ChildItem -Directory "$env:DOLPHIN_DIR/Externals") {
-            if ($skip -contains $ext.Name) { continue }
-            $found = Get-ChildItem -Recurse -File -Depth 2 $ext.FullName | Where-Object { $_.Name -match $pattern }
+          $projects = @(Get-ChildItem -Directory pixelu/wii/third_party) + @(Get-Item pixelu/wii/Externals/expr, pixelu/wii/Externals/FreeSurround)
+          foreach ($ext in $projects) {
+            $found = @(Get-ChildItem -Recurse -File -Depth 2 $ext.FullName | Where-Object { $_.Name -match $pattern -and $_.FullName -notmatch '[\\/]FFmpeg[\\/]ffmpeg[\\/]' })
+            if ($ext.Name -eq "FreeSurround") { $found = @(Get-Item "$($ext.FullName)/README.txt") }
             foreach ($f in $found) {
               $dst = Join-Path "$out/Licenses/Externals/$($ext.Name)" ([IO.Path]::GetRelativePath($ext.FullName, $f.FullName))
               New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
               Copy-Item -Force $f.FullName $dst
             }
-            if ($found) { $ext_dirs++ } else { Write-Host "no licence file found in Externals/$($ext.Name)" }
+            if ($found) { $ext_dirs++ } else { Write-Host "no licence file found in $($ext.Name)" }
           }
           "Licenses/Externals: licence files of $ext_dirs projects"
           # Dolphin links the Visual C++ runtime as DLLs: ship them next to the
@@ -144,7 +259,7 @@ jobs:
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
-            "Built with PixelU-Wii's own CMake; third-party libraries (Externals), translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
+            "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $env:QT_VERSION official build; FFmpeg built from source); translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
             "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses\"
