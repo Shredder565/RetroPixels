@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
+#include "Common/Assert.h"
 #include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
 
@@ -431,6 +432,12 @@ JVSIOBoard::HandlerResponse JVSIOBoard::HandleCommand(JVSIOCommand cmd, FrameCon
         const std::span<const u8> switches = std::as_const(*m_ports).GetSwitchInputs(player);
         written = std::min<std::size_t>(bytes_per_player, switches.size());
         response.Bytes(switches.first(written));
+      }
+      else
+      {
+        // Only two players have inputs; the rest read as zero (spec 13.4). The check is kept so
+        // the request is still reported.
+        ASSERT(player < IOPorts::PLAYER_COUNT);
       }
       for (; written < bytes_per_player; ++written)
         response.Byte(0);

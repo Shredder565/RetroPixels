@@ -822,6 +822,7 @@ void CommandRecv(std::size_t p)
   const u32 guest = Word(p);
   const u32 offset = Word(p + 1);
   u32 length = Word(p + 2);
+  const HostSocket s = HostFor(guest);
 
   const std::span<u8> buffer = BoardSpan(offset);
   if (buffer.size() < length)
@@ -831,7 +832,6 @@ void CommandRecv(std::size_t p)
     length = 0;
   }
 
-  const HostSocket s = HostFor(guest);
   const auto result =
       recv(s, reinterpret_cast<char*>(buffer.data()), static_cast<int>(length), 0);
   if (result < 0)
@@ -862,6 +862,7 @@ void CommandSend(std::size_t p)
   const u32 guest = Word(p);
   const u32 offset = Word(p + 1);
   u32 length = Word(p + 2);
+  const HostSocket s = HostFor(guest);
 
   const std::span<u8> buffer = BoardSpan(offset);
   if (buffer.size() < length)
@@ -871,7 +872,6 @@ void CommandSend(std::size_t p)
     length = 0;
   }
 
-  const HostSocket s = HostFor(guest);
   const auto result = send(s, reinterpret_cast<const char*>(buffer.data()),
                            static_cast<int>(length), Common::SEND_FLAGS);
   if (result < 0)
@@ -1000,6 +1000,7 @@ void CommandSetSockOpt(std::size_t p)
   const u32 option = Word(p + 2);
   const u32 value_offset = Word(p + 3);
   const u32 value_length = Word(p + 4);
+  const HostSocket s = HostFor(guest);
 
   const std::span<u8> value = BoardSpan(value_offset);
   if (value.size() < value_length)
@@ -1010,7 +1011,6 @@ void CommandSetSockOpt(std::size_t p)
     return;
   }
 
-  const HostSocket s = HostFor(guest);
   const int result = setsockopt(s, static_cast<int>(level), static_cast<int>(option),
                                 reinterpret_cast<const char*>(value.data()),
                                 static_cast<SockLen>(value_length));
