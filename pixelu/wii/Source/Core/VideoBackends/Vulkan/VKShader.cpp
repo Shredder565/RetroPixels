@@ -1,7 +1,9 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/VKShader.h"
+
+#include <cstring>
+#include <optional>
 
 #include "Common/Align.h"
 
@@ -13,138 +15,129 @@
 
 namespace Vulkan
 {
+using ShaderCompiler::SPIRVCodeType;
+using ShaderCompiler::SPIRVCodeVector;
+
 VKShader::VKShader(ShaderStage stage, std::vector<u32> spv, VkShaderModule mod,
                    std::string_view name)
-    : AbstractShader(stage), m_spv(std::move(spv)), m_module(mod),
-      m_compute_pipeline(VK_NULL_HANDLE), m_name(name)
+    : AbstractShader(stage), m_spv(std::move(spv)), m_module(mod), m_name(name)
 {
-  if (!m_name.empty() && g_backend_info.bSupportsSettingObjectNames)
-  {
-    VkDebugUtilsObjectNameInfoEXT name_info = {};
-    name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-    name_info.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
-    name_info.objectHandle = reinterpret_cast<uint64_t>(m_module);
-    name_info.pObjectName = m_name.data();
-    vkSetDebugUtilsObjectNameEXT(g_vulkan_context->GetDevice(), &name_info);
-  }
+  SetDebugName(VK_OBJECT_TYPE_SHADER_MODULE, reinterpret_cast<u64>(m_module));
 }
 
 VKShader::VKShader(std::vector<u32> spv, VkPipeline compute_pipeline, std::string_view name)
-    : AbstractShader(ShaderStage::Compute), m_spv(std::move(spv)), m_module(VK_NULL_HANDLE),
+    : AbstractShader(ShaderStage::Compute), m_spv(std::move(spv)),
       m_compute_pipeline(compute_pipeline), m_name(name)
 {
-  if (!m_name.empty() && g_backend_info.bSupportsSettingObjectNames)
-  {
-    VkDebugUtilsObjectNameInfoEXT name_info = {};
-    name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-    name_info.objectType = VK_OBJECT_TYPE_PIPELINE;
-    name_info.objectHandle = reinterpret_cast<uint64_t>(m_compute_pipeline);
-    name_info.pObjectName = m_name.data();
-    vkSetDebugUtilsObjectNameEXT(g_vulkan_context->GetDevice(), &name_info);
-  }
+  SetDebugName(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<u64>(m_compute_pipeline));
+}
+
+void VKShader::SetDebugName(VkObjectType type, u64 handle)
+{
+  if (m_name.empty() || !g_backend_info.bSupportsSettingObjectNames)
+    return;
+  VkDebugUtilsObjectNameInfoEXT label = {};
+  label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  label.objectType = type;
+  label.objectHandle = handle;
+  label.pObjectName = m_name.data();
+  vkSetDebugUtilsObjectNameEXT(g_vulkan_context->GetDevice(), &label);
 }
 
 VKShader::~VKShader()
 {
-  if (m_stage != ShaderStage::Compute)
-    vkDestroyShaderModule(g_vulkan_context->GetDevice(), m_module, nullptr);
+  const VkDevice device = g_vulkan_context->GetDevice();
+  if (m_stage == ShaderStage::Compute)
+    vkDestroyPipeline(device, m_compute_pipeline, nullptr);
   else
-    vkDestroyPipeline(g_vulkan_context->GetDevice(), m_compute_pipeline, nullptr);
+    vkDestroyShaderModule(device, m_module, nullptr);
 }
 
 AbstractShader::BinaryData VKShader::GetBinary() const
 {
-  BinaryData ret(sizeof(u32) * m_spv.size());
-  std::memcpy(ret.data(), m_spv.data(), sizeof(u32) * m_spv.size());
-  return ret;
+  const size_t bytes = m_spv.size() * sizeof(u32);
+  BinaryData blob(bytes);
+  std::memcpy(blob.data(), m_spv.data(), bytes);
+  return blob;
 }
 
-static std::unique_ptr<VKShader>
-CreateShaderObject(ShaderStage stage, ShaderCompiler::SPIRVCodeVector spv, std::string_view name)
+namespace
 {
-  VkShaderModuleCreateInfo info = {};
-  info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  info.codeSize = spv.size() * sizeof(u32);
-  info.pCode = spv.data();
+std::unique_ptr<VKShader> Instantiate(ShaderStage stage, SPIRVCodeVector spv, std::string_view name)
+{
+  const VkDevice device = g_vulkan_context->GetDevice();
 
-  VkShaderModule mod;
-  VkResult res = vkCreateShaderModule(g_vulkan_context->GetDevice(), &info, nullptr, &mod);
+  VkShaderModuleCreateInfo module_info = {};
+  module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  module_info.codeSize = spv.size() * sizeof(u32);
+  module_info.pCode = spv.data();
+
+  VkShaderModule shader_module = VK_NULL_HANDLE;
+  VkResult res = vkCreateShaderModule(device, &module_info, nullptr, &shader_module);
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkCreateShaderModule failed: ");
-    return VK_NULL_HANDLE;
+    return nullptr;
   }
 
-  // If it's a graphics shader, we defer pipeline creation.
+  // Graphics stages are linked later, in pipelines.
   if (stage != ShaderStage::Compute)
-    return std::make_unique<VKShader>(stage, std::move(spv), mod, name);
+    return std::make_unique<VKShader>(stage, std::move(spv), shader_module, name);
 
-  // If it's a compute shader, we create the pipeline straight away.
-  const VkComputePipelineCreateInfo pipeline_info = {
-      VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      nullptr,
-      0,
-      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT,
-       mod, "main", nullptr},
-      g_object_cache->GetPipelineLayout(PIPELINE_LAYOUT_COMPUTE),
-      VK_NULL_HANDLE,
-      -1};
+  VkComputePipelineCreateInfo pipeline_info = {};
+  pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  pipeline_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                         nullptr,
+                         0,
+                         VK_SHADER_STAGE_COMPUTE_BIT,
+                         shader_module,
+                         "main",
+                         nullptr};
+  pipeline_info.layout = g_object_cache->GetPipelineLayout(PIPELINE_LAYOUT_COMPUTE);
+  pipeline_info.basePipelineHandle = VK_NULL_HANDLE;
+  pipeline_info.basePipelineIndex = -1;
 
-  VkPipeline pipeline;
-  res = vkCreateComputePipelines(g_vulkan_context->GetDevice(), g_object_cache->GetPipelineCache(),
-                                 1, &pipeline_info, nullptr, &pipeline);
-
-  // Shader module is no longer needed, now it is compiled to a pipeline.
-  vkDestroyShaderModule(g_vulkan_context->GetDevice(), mod, nullptr);
-
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  res = vkCreateComputePipelines(device, g_object_cache->GetPipelineCache(), 1, &pipeline_info,
+                                 nullptr, &pipeline);
+  // The pipeline holds everything it needs; the module can go either way.
+  vkDestroyShaderModule(device, shader_module, nullptr);
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkCreateComputePipelines failed: ");
     return nullptr;
   }
-
   return std::make_unique<VKShader>(std::move(spv), pipeline, name);
 }
+}  // namespace
 
 std::unique_ptr<VKShader> VKShader::CreateFromSource(ShaderStage stage, std::string_view source,
                                                      VideoCommon::ShaderIncluder* shader_includer,
                                                      std::string_view name)
 {
-  std::optional<ShaderCompiler::SPIRVCodeVector> spv;
-  switch (stage)
-  {
-  case ShaderStage::Vertex:
+  std::optional<SPIRVCodeVector> spv;
+  if (stage == ShaderStage::Vertex)
     spv = ShaderCompiler::CompileVertexShader(source, shader_includer);
-    break;
-  case ShaderStage::Geometry:
+  else if (stage == ShaderStage::Geometry)
     spv = ShaderCompiler::CompileGeometryShader(source, shader_includer);
-    break;
-  case ShaderStage::Pixel:
+  else if (stage == ShaderStage::Pixel)
     spv = ShaderCompiler::CompileFragmentShader(source, shader_includer);
-    break;
-  case ShaderStage::Compute:
+  else if (stage == ShaderStage::Compute)
     spv = ShaderCompiler::CompileComputeShader(source, shader_includer);
-    break;
-  default:
-    break;
-  }
 
-  if (!spv)
+  if (!spv.has_value())
     return nullptr;
-
-  return CreateShaderObject(stage, std::move(*spv), name);
+  return Instantiate(stage, std::move(*spv), name);
 }
 
 std::unique_ptr<VKShader> VKShader::CreateFromBinary(ShaderStage stage, const void* data,
                                                      size_t length, std::string_view name)
 {
-  const size_t size_in_words = Common::AlignUp(length, sizeof(ShaderCompiler::SPIRVCodeType)) /
-                               sizeof(ShaderCompiler::SPIRVCodeType);
-  ShaderCompiler::SPIRVCodeVector spv(size_in_words);
-  if (length > 0)
+  // Round up to whole words; a partial last word is zero-padded.
+  SPIRVCodeVector spv(Common::AlignUp(length, sizeof(SPIRVCodeType)) / sizeof(SPIRVCodeType));
+  if (length != 0)
     std::memcpy(spv.data(), data, length);
-
-  return CreateShaderObject(stage, std::move(spv), name);
+  return Instantiate(stage, std::move(spv), name);
 }
 
 }  // namespace Vulkan

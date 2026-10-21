@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,10 @@ class VKTexture;
 class StreamBuffer;
 class VertexFormat;
 
+// Mirrors the bindings the backend wants and records only what changed into the command
+// buffer: vertex/index buffers, pipeline, viewport, scissor and the descriptor sets (new sets
+// are allocated from the per-frame pools whenever their contents change). Also manages the
+// render pass for the current framebuffer.
 class StateTracker
 {
 public:
@@ -45,123 +48,112 @@ public:
   void SetTexelBuffer(u32 index, VkBufferView view);
   void SetImageTexture(u32 index, VkImageView view);
 
+  // Replaces every binding of this view with the dummy texture (the view is going away).
   void UnbindTexture(VkImageView view);
 
-  // Set dirty flags on everything to force re-bind at next draw time.
+  // Forgets what was recorded, so the next Bind() records everything again (new command
+  // buffer).
   void InvalidateCachedState();
 
-  // Ends a render pass if we're currently in one.
-  // When Bind() is next called, the pass will be restarted.
-  // Calling this function is allowed even if a pass has not begun.
-  bool InRenderPass() const { return m_current_render_pass != VK_NULL_HANDLE; }
+  bool InRenderPass() const { return m_render_pass != VK_NULL_HANDLE; }
+  // Begin a load (or don't-care) pass over the whole framebuffer; no-ops inside a pass.
   void BeginRenderPass();
   void BeginDiscardRenderPass();
+  // Safe to call outside a pass. Bind() starts a new one when needed.
   void EndRenderPass();
 
-  // Ends the current render pass if it was a clear render pass.
+  // Begins a clearing pass over `area`; must not be in a pass.
   void BeginClearRenderPass(const VkRect2D& area, const VkClearValue* clear_values,
                             u32 num_clear_values);
+  // Ends the current pass only if it is the clearing pass.
   void EndClearRenderPass();
 
   void SetViewport(const VkViewport& viewport);
   void SetScissor(const VkRect2D& scissor);
 
-  // Binds all dirty state to the command buffer.
-  // If this returns false, you should not issue the draw.
+  // Records the changed graphics state. False (draw nothing) without a pipeline.
   bool Bind();
-
-  // Binds all dirty compute state to the command buffer.
-  // If this returns false, you should not dispatch the shader.
+  // Records the changed compute state. False (dispatch nothing) without a compute shader.
   bool BindCompute();
 
-  // Returns true if the specified rectangle is inside the current render area (used for clears).
+  // Whether the rectangle lies inside the current pass's render area.
   bool IsWithinRenderArea(s32 x, s32 y, u32 width, u32 height) const;
 
 private:
-  // Number of descriptor sets for game draws.
-  enum
-  {
-    NUM_GX_DESCRIPTOR_SETS = 3,
-    NUM_UTILITY_DESCRIPTOR_SETS = 2,
-    NUM_COMPUTE_DESCRIPTOR_SETS = 1
-  };
+  static constexpr u32 GX_SET_COUNT = 3;
+  static constexpr u32 UTILITY_SET_COUNT = 2;
 
-  enum DIRTY_FLAG : u32
+  // What has to be recorded (or rewritten) before the next draw or dispatch.
+  enum Dirty : u32
   {
-    DIRTY_FLAG_GX_UBOS = (1 << 0),
-    DIRTY_FLAG_GX_UBO_OFFSETS = (1 << 1),
-    DIRTY_FLAG_GX_SAMPLERS = (1 << 4),
-    DIRTY_FLAG_GX_SSBO = (1 << 5),
-    DIRTY_FLAG_UTILITY_UBO = (1 << 2),
-    DIRTY_FLAG_UTILITY_UBO_OFFSET = (1 << 3),
-    DIRTY_FLAG_UTILITY_BINDINGS = (1 << 6),
-    DIRTY_FLAG_COMPUTE_BINDINGS = (1 << 7),
-    DIRTY_FLAG_VERTEX_BUFFER = (1 << 8),
-    DIRTY_FLAG_INDEX_BUFFER = (1 << 9),
-    DIRTY_FLAG_VIEWPORT = (1 << 10),
-    DIRTY_FLAG_SCISSOR = (1 << 11),
-    DIRTY_FLAG_PIPELINE = (1 << 12),
-    DIRTY_FLAG_COMPUTE_SHADER = (1 << 13),
-    DIRTY_FLAG_DESCRIPTOR_SETS = (1 << 14),
-    DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET = (1 << 15),
+    GX_UBOS = 1u << 0,
+    GX_UBO_OFFSETS = 1u << 1,
+    UTILITY_UBO = 1u << 2,
+    UTILITY_UBO_OFFSET = 1u << 3,
+    GX_SAMPLERS = 1u << 4,
+    GX_SSBO = 1u << 5,
+    UTILITY_BINDINGS = 1u << 6,
+    COMPUTE_BINDINGS = 1u << 7,
+    VERTEX_BUFFER = 1u << 8,
+    INDEX_BUFFER = 1u << 9,
+    VIEWPORT = 1u << 10,
+    SCISSOR = 1u << 11,
+    PIPELINE = 1u << 12,
+    COMPUTE_SHADER = 1u << 13,
+    BIND_SETS = 1u << 14,
+    BIND_COMPUTE_SET = 1u << 15,
 
-    DIRTY_FLAG_ALL_DESCRIPTORS = DIRTY_FLAG_GX_UBOS | DIRTY_FLAG_UTILITY_UBO |
-                                 DIRTY_FLAG_GX_SAMPLERS | DIRTY_FLAG_GX_SSBO |
-                                 DIRTY_FLAG_UTILITY_BINDINGS | DIRTY_FLAG_COMPUTE_BINDINGS
+    // Everything that needs a fresh descriptor set.
+    ALL_SET_CONTENTS =
+        GX_UBOS | UTILITY_UBO | GX_SAMPLERS | GX_SSBO | UTILITY_BINDINGS | COMPUTE_BINDINGS,
+    // Texture or sampler changes touch every set that holds samplers.
+    SAMPLER_USERS = GX_SAMPLERS | UTILITY_BINDINGS | COMPUTE_BINDINGS,
   };
 
   bool Initialize();
+  void StartPass(VkRenderPass pass, const VkRect2D& area, u32 clear_count,
+                 const VkClearValue* clears);
+  bool ViewportInsideRenderArea() const;
 
-  // Check that the specified viewport is within the render area.
-  // If not, ends the render pass if it is a clear render pass.
-  bool IsViewportWithinRenderArea() const;
+  void WriteGXSets();
+  void WriteUtilitySets();
+  void WriteComputeSet();
 
-  void UpdateDescriptorSet();
-  void UpdateGXDescriptorSet();
-  void UpdateUtilityDescriptorSet();
-  void UpdateComputeDescriptorSet();
+  u32 m_dirty = 0;
 
-  // Which bindings/state has to be updated before the next draw.
-  u32 m_dirty_flags = 0;
-
-  // input assembly
   VkBuffer m_vertex_buffer = VK_NULL_HANDLE;
-  VkDeviceSize m_vertex_buffer_offset = 0;
+  VkDeviceSize m_vertex_offset = 0;
   VkBuffer m_index_buffer = VK_NULL_HANDLE;
-  VkDeviceSize m_index_buffer_offset = 0;
+  VkDeviceSize m_index_offset = 0;
   VkIndexType m_index_type = VK_INDEX_TYPE_UINT16;
 
-  // pipeline state
   const VKPipeline* m_pipeline = nullptr;
   const VKShader* m_compute_shader = nullptr;
 
-  // shader bindings
-  struct
-  {
-    std::array<VkDescriptorBufferInfo, NUM_UBO_DESCRIPTOR_SET_BINDINGS> gx_ubo_bindings;
-    std::array<u32, NUM_UBO_DESCRIPTOR_SET_BINDINGS> gx_ubo_offsets;
-    VkDescriptorBufferInfo utility_ubo_binding;
-    u32 utility_ubo_offset;
-    std::array<VkDescriptorImageInfo, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> samplers;
-    std::array<VkBufferView, NUM_COMPUTE_TEXEL_BUFFERS> texel_buffers;
-    VkDescriptorBufferInfo ssbo;
-    VkDescriptorBufferInfo gx_uber_vertex_ssbo;
-    std::array<VkDescriptorImageInfo, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS> image_textures;
-  } m_bindings = {};
-  std::array<VkDescriptorSet, NUM_GX_DESCRIPTOR_SETS> m_gx_descriptor_sets = {};
-  std::array<VkDescriptorSet, NUM_UTILITY_DESCRIPTOR_SETS> m_utility_descriptor_sets = {};
-  VkDescriptorSet m_compute_descriptor_set = VK_NULL_HANDLE;
+  // Descriptor contents. Sampled textures are shared by the GX, utility and compute sets.
+  std::array<VkDescriptorBufferInfo, NUM_UBO_DESCRIPTOR_SET_BINDINGS> m_gx_ubos = {};
+  std::array<u32, NUM_UBO_DESCRIPTOR_SET_BINDINGS> m_gx_ubo_offsets = {};
+  VkDescriptorBufferInfo m_utility_ubo = {};
+  u32 m_utility_ubo_offset = 0;
+  std::array<VkDescriptorImageInfo, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_textures = {};
+  std::array<VkBufferView, NUM_COMPUTE_TEXEL_BUFFERS> m_texel_buffers = {};
+  VkDescriptorBufferInfo m_bbox_ssbo = {};
+  VkDescriptorBufferInfo m_vertex_ssbo = {};
+  std::array<VkDescriptorImageInfo, VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS> m_images = {};
 
-  // rasterization
+  std::array<VkDescriptorSet, GX_SET_COUNT> m_gx_sets = {};
+  std::array<VkDescriptorSet, UTILITY_SET_COUNT> m_utility_sets = {};
+  VkDescriptorSet m_compute_set = VK_NULL_HANDLE;
+
   VkViewport m_viewport = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
   VkRect2D m_scissor = {{0, 0}, {1, 1}};
 
-  // uniform buffers
-  std::unique_ptr<VKTexture> m_dummy_texture;
-  std::unique_ptr<VKTexture> m_dummy_compute_texture;
+  // Bound in place of missing textures and images.
+  std::unique_ptr<VKTexture> m_null_texture;
+  std::unique_ptr<VKTexture> m_null_image;
 
   VKFramebuffer* m_framebuffer = nullptr;
-  VkRenderPass m_current_render_pass = VK_NULL_HANDLE;
-  VkRect2D m_framebuffer_render_area = {};
+  VkRenderPass m_render_pass = VK_NULL_HANDLE;
+  VkRect2D m_render_area = {};
 };
 }  // namespace Vulkan

@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,28 +11,26 @@ enum class ShaderAttrib : u32;
 
 namespace Vulkan
 {
+// The Vulkan vertex input description of a vertex declaration: one binding (the vertex
+// buffer) and one attribute per enabled component, at the shader's attribute locations.
 class VertexFormat : public ::NativeVertexFormat
 {
 public:
   VertexFormat(const PortableVertexDeclaration& vtx_decl);
 
-  // Passed to pipeline state creation
+  // For pipeline creation; points into this object.
   const VkPipelineVertexInputStateCreateInfo& GetVertexInputStateInfo() const;
 
-  // Converting PortableVertexDeclaration -> Vulkan types
+  // Fill the attribute list, then the input state that refers to it.
   void MapAttributes();
   void SetupInputState();
 
 private:
   void AddAttribute(ShaderAttrib location, uint32_t binding, VkFormat format, uint32_t offset);
 
-  VkVertexInputBindingDescription m_binding_description = {};
-
-  std::array<VkVertexInputAttributeDescription, MAX_VERTEX_ATTRIBUTES> m_attribute_descriptions =
-      {};
-
-  VkPipelineVertexInputStateCreateInfo m_input_state_info = {};
-
-  uint32_t m_num_attributes = 0;
+  VkVertexInputBindingDescription m_binding = {};
+  std::array<VkVertexInputAttributeDescription, MAX_VERTEX_ATTRIBUTES> m_attributes = {};
+  VkPipelineVertexInputStateCreateInfo m_input_state = {};
+  uint32_t m_attribute_count = 0;
 };
 }  // namespace Vulkan

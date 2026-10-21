@@ -1,7 +1,8 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/StateTracker.h"
+
+#include <cstring>
 
 #include "Common/Assert.h"
 
@@ -16,724 +17,576 @@
 
 namespace Vulkan
 {
-static std::unique_ptr<StateTracker> s_state_tracker;
+namespace
+{
+std::unique_ptr<StateTracker> s_tracker;
+
+VkCommandBuffer Cmd()
+{
+  return g_command_buffer_mgr->GetCurrentCommandBuffer();
+}
+
+VkDescriptorSet NewSet(DESCRIPTOR_SET_LAYOUT layout)
+{
+  return g_command_buffer_mgr->AllocateDescriptorSet(g_object_cache->GetDescriptorSetLayout(layout));
+}
+
+VkWriteDescriptorSet BufferWrite(VkDescriptorSet set, u32 binding, VkDescriptorType type,
+                                 const VkDescriptorBufferInfo* info)
+{
+  return {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, binding, 0, 1, type, nullptr,
+          info, nullptr};
+}
+
+VkWriteDescriptorSet ImageWrite(VkDescriptorSet set, u32 binding, u32 count,
+                                VkDescriptorType type, const VkDescriptorImageInfo* images)
+{
+  return {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, binding, 0, count, type, images,
+          nullptr, nullptr};
+}
+
+VkWriteDescriptorSet TexelWrite(VkDescriptorSet set, u32 binding, u32 count,
+                                const VkBufferView* views)
+{
+  return {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          nullptr,
+          set,
+          binding,
+          0,
+          count,
+          VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+          nullptr,
+          nullptr,
+          views};
+}
+
+bool SameBuffer(const VkDescriptorBufferInfo& info, VkBuffer buffer, VkDeviceSize offset,
+                VkDeviceSize range)
+{
+  return info.buffer == buffer && info.offset == offset && info.range == range;
+}
+}  // namespace
 
 StateTracker::StateTracker() = default;
-
 StateTracker::~StateTracker() = default;
 
 StateTracker* StateTracker::GetInstance()
 {
-  return s_state_tracker.get();
+  return s_tracker.get();
 }
 
 bool StateTracker::CreateInstance()
 {
-  ASSERT(!s_state_tracker);
-  s_state_tracker = std::make_unique<StateTracker>();
-  if (!s_state_tracker->Initialize())
-  {
-    s_state_tracker.reset();
-    return false;
-  }
-  return true;
+  ASSERT(!s_tracker);
+  s_tracker = std::make_unique<StateTracker>();
+  if (s_tracker->Initialize())
+    return true;
+  s_tracker.reset();
+  return false;
 }
 
 void StateTracker::DestroyInstance()
 {
-  if (!s_state_tracker)
+  if (!s_tracker)
     return;
 
-  // When the dummy texture is destroyed, it unbinds itself, then references itself.
-  // Clear everything out so this doesn't happen.
-  for (auto& it : s_state_tracker->m_bindings.samplers)
-    it.imageView = VK_NULL_HANDLE;
-  for (auto& it : s_state_tracker->m_bindings.image_textures)
-    it.imageView = VK_NULL_HANDLE;
-  s_state_tracker->m_dummy_texture.reset();
-  s_state_tracker->m_dummy_compute_texture.reset();
-
-  s_state_tracker.reset();
+  // A dying texture unbinds itself through this tracker. Clear the bindings first so the
+  // dummies never find (and rebind) themselves while being destroyed.
+  for (VkDescriptorImageInfo& texture : s_tracker->m_textures)
+    texture.imageView = VK_NULL_HANDLE;
+  for (VkDescriptorImageInfo& image : s_tracker->m_images)
+    image.imageView = VK_NULL_HANDLE;
+  s_tracker->m_null_texture.reset();
+  s_tracker->m_null_image.reset();
+  s_tracker.reset();
 }
 
 bool StateTracker::Initialize()
 {
-  // Create a dummy texture which can be used in place of a real binding.
-  m_dummy_texture = VKTexture::Create(TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
-                                                    AbstractTextureType::Texture_2DArray),
-                                      "");
-  if (!m_dummy_texture)
+  const VkCommandBuffer init_cmd = g_command_buffer_mgr->GetCurrentInitCommandBuffer();
+
+  m_null_texture = VKTexture::Create(TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                                                   AbstractTextureType::Texture_2DArray),
+                                     "");
+  if (!m_null_texture)
     return false;
-  m_dummy_texture->TransitionToLayout(g_command_buffer_mgr->GetCurrentInitCommandBuffer(),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-  // Create a dummy compute texture which can be used in place of a real binding
-  m_dummy_compute_texture = VKTexture::Create(
-      TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, AbstractTextureFlag_ComputeImage,
-                    AbstractTextureType::Texture_2DArray),
-      "");
-  if (!m_dummy_compute_texture)
+  m_null_texture->TransitionToLayout(init_cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+  m_null_image = VKTexture::Create(TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8,
+                                                 AbstractTextureFlag_ComputeImage,
+                                                 AbstractTextureType::Texture_2DArray),
+                                   "");
+  if (!m_null_image)
     return false;
-  m_dummy_compute_texture->TransitionToLayout(g_command_buffer_mgr->GetCurrentInitCommandBuffer(),
-                                              VK_IMAGE_LAYOUT_GENERAL);
+  m_null_image->TransitionToLayout(init_cmd, VK_IMAGE_LAYOUT_GENERAL);
 
-  // Initialize all samplers to point by default
-  for (size_t i = 0; i < VideoCommon::MAX_PIXEL_SHADER_SAMPLERS; i++)
-  {
-    m_bindings.samplers[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    m_bindings.samplers[i].imageView = m_dummy_texture->GetView();
-    m_bindings.samplers[i].sampler = g_object_cache->GetPointSampler();
-  }
+  const VkSampler point = g_object_cache->GetPointSampler();
+  for (VkDescriptorImageInfo& texture : m_textures)
+    texture = {point, m_null_texture->GetView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  for (VkDescriptorImageInfo& image : m_images)
+    image = {point, m_null_image->GetView(), VK_IMAGE_LAYOUT_GENERAL};
 
-  for (size_t i = 0; i < VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS; i++)
-  {
-    m_bindings.image_textures[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    m_bindings.image_textures[i].imageView = m_dummy_compute_texture->GetView();
-    m_bindings.image_textures[i].sampler = g_object_cache->GetPointSampler();
-  }
-
-  // Default dirty flags include all descriptors
   InvalidateCachedState();
   return true;
 }
 
 void StateTracker::SetVertexBuffer(VkBuffer buffer, VkDeviceSize offset, u32 size)
 {
-  if (m_vertex_buffer != buffer || m_vertex_buffer_offset != offset)
+  if (m_vertex_buffer != buffer || m_vertex_offset != offset)
   {
     m_vertex_buffer = buffer;
-    m_vertex_buffer_offset = offset;
-    m_dirty_flags |= DIRTY_FLAG_VERTEX_BUFFER;
+    m_vertex_offset = offset;
+    m_dirty |= VERTEX_BUFFER;
   }
-  if (m_bindings.gx_uber_vertex_ssbo.buffer != buffer ||
-      m_bindings.gx_uber_vertex_ssbo.offset != offset ||
-      m_bindings.gx_uber_vertex_ssbo.range != size)
+  // The same vertices, read as storage by the dynamic vertex loader.
+  if (!SameBuffer(m_vertex_ssbo, buffer, offset, size))
   {
-    m_bindings.gx_uber_vertex_ssbo.buffer = buffer;
-    m_bindings.gx_uber_vertex_ssbo.offset = offset;
-    m_bindings.gx_uber_vertex_ssbo.range = size;
-    m_dirty_flags |= DIRTY_FLAG_GX_SSBO;
+    m_vertex_ssbo = {buffer, offset, size};
+    m_dirty |= GX_SSBO;
   }
 }
 
 void StateTracker::SetIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type)
 {
-  if (m_index_buffer == buffer && m_index_buffer_offset == offset && m_index_type == type)
+  if (m_index_buffer == buffer && m_index_offset == offset && m_index_type == type)
     return;
-
   m_index_buffer = buffer;
-  m_index_buffer_offset = offset;
+  m_index_offset = offset;
   m_index_type = type;
-  m_dirty_flags |= DIRTY_FLAG_INDEX_BUFFER;
+  m_dirty |= INDEX_BUFFER;
 }
 
 void StateTracker::SetFramebuffer(VKFramebuffer* framebuffer)
 {
-  // Should not be changed within a render pass.
   ASSERT(!InRenderPass());
   m_framebuffer = framebuffer;
 }
 
 void StateTracker::SetPipeline(const VKPipeline* pipeline)
 {
-  if (m_pipeline == pipeline)
+  if (pipeline == m_pipeline)
     return;
 
-  // If the usage changes, we need to re-bind everything, as the layout is different.
-  const bool new_usage =
-      pipeline && (!m_pipeline || m_pipeline->GetUsage() != pipeline->GetUsage());
-
+  // A different usage means a different pipeline layout: every set must be bound again.
+  const bool layout_changes =
+      pipeline != nullptr && (m_pipeline == nullptr || pipeline->GetUsage() != m_pipeline->GetUsage());
   m_pipeline = pipeline;
-  m_dirty_flags |= DIRTY_FLAG_PIPELINE;
-  if (new_usage)
-    m_dirty_flags |= DIRTY_FLAG_DESCRIPTOR_SETS;
+  m_dirty |= PIPELINE;
+  if (layout_changes)
+    m_dirty |= BIND_SETS;
 }
 
 void StateTracker::SetComputeShader(const VKShader* shader)
 {
-  if (m_compute_shader == shader)
+  if (shader == m_compute_shader)
     return;
-
   m_compute_shader = shader;
-  m_dirty_flags |= DIRTY_FLAG_COMPUTE_SHADER;
+  m_dirty |= COMPUTE_SHADER;
 }
 
 void StateTracker::SetGXUniformBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size)
 {
-  auto& binding = m_bindings.gx_ubo_bindings[index];
-  if (binding.buffer != buffer || binding.range != size)
+  // Buffers are dynamic: only a new buffer or size needs a new set, a new offset is a rebind.
+  VkDescriptorBufferInfo& ubo = m_gx_ubos[index];
+  if (ubo.buffer != buffer || ubo.range != size)
   {
-    binding.buffer = buffer;
-    binding.range = size;
-    m_dirty_flags |= DIRTY_FLAG_GX_UBOS;
+    ubo.buffer = buffer;
+    ubo.range = size;
+    m_dirty |= GX_UBOS;
   }
-
-  if (m_bindings.gx_ubo_offsets[index] != offset)
+  if (m_gx_ubo_offsets[index] != offset)
   {
-    m_bindings.gx_ubo_offsets[index] = offset;
-    m_dirty_flags |= DIRTY_FLAG_GX_UBO_OFFSETS;
+    m_gx_ubo_offsets[index] = offset;
+    m_dirty |= GX_UBO_OFFSETS;
   }
 }
 
 void StateTracker::SetUtilityUniformBuffer(VkBuffer buffer, u32 offset, u32 size)
 {
-  auto& binding = m_bindings.utility_ubo_binding;
-  if (binding.buffer != buffer || binding.range != size)
+  // Shared by utility draws and compute dispatches.
+  if (m_utility_ubo.buffer != buffer || m_utility_ubo.range != size)
   {
-    binding.buffer = buffer;
-    binding.range = size;
-    m_dirty_flags |= DIRTY_FLAG_UTILITY_UBO;
+    m_utility_ubo.buffer = buffer;
+    m_utility_ubo.range = size;
+    m_dirty |= UTILITY_UBO;
   }
-
-  if (m_bindings.utility_ubo_offset != offset)
+  if (m_utility_ubo_offset != offset)
   {
-    m_bindings.utility_ubo_offset = offset;
-    m_dirty_flags |= DIRTY_FLAG_UTILITY_UBO_OFFSET | DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET;
+    m_utility_ubo_offset = offset;
+    m_dirty |= UTILITY_UBO_OFFSET | BIND_COMPUTE_SET;
   }
 }
 
 void StateTracker::SetTexture(u32 index, VkImageView view)
 {
-  if (m_bindings.samplers[index].imageView == view)
+  VkDescriptorImageInfo& texture = m_textures[index];
+  if (texture.imageView == view)
     return;
-
-  m_bindings.samplers[index].imageView = view;
-  m_bindings.samplers[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  m_dirty_flags |=
-      DIRTY_FLAG_GX_SAMPLERS | DIRTY_FLAG_UTILITY_BINDINGS | DIRTY_FLAG_COMPUTE_BINDINGS;
+  texture.imageView = view;
+  texture.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  m_dirty |= SAMPLER_USERS;
 }
 
 void StateTracker::SetSampler(u32 index, VkSampler sampler)
 {
-  if (m_bindings.samplers[index].sampler == sampler)
+  VkDescriptorImageInfo& texture = m_textures[index];
+  if (texture.sampler == sampler)
     return;
-
-  m_bindings.samplers[index].sampler = sampler;
-  m_dirty_flags |=
-      DIRTY_FLAG_GX_SAMPLERS | DIRTY_FLAG_UTILITY_BINDINGS | DIRTY_FLAG_COMPUTE_BINDINGS;
+  texture.sampler = sampler;
+  m_dirty |= SAMPLER_USERS;
 }
 
 void StateTracker::SetSSBO(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
 {
-  if (m_bindings.ssbo.buffer == buffer && m_bindings.ssbo.offset == offset &&
-      m_bindings.ssbo.range == range)
-  {
+  if (SameBuffer(m_bbox_ssbo, buffer, offset, range))
     return;
-  }
-
-  m_bindings.ssbo.buffer = buffer;
-  m_bindings.ssbo.offset = offset;
-  m_bindings.ssbo.range = range;
-  m_dirty_flags |= DIRTY_FLAG_GX_SSBO;
+  m_bbox_ssbo = {buffer, offset, range};
+  m_dirty |= GX_SSBO;
 }
 
 void StateTracker::SetTexelBuffer(u32 index, VkBufferView view)
 {
-  if (m_bindings.texel_buffers[index] == view)
+  if (m_texel_buffers[index] == view)
     return;
-
-  m_bindings.texel_buffers[index] = view;
-  m_dirty_flags |= DIRTY_FLAG_UTILITY_BINDINGS | DIRTY_FLAG_COMPUTE_BINDINGS;
+  m_texel_buffers[index] = view;
+  m_dirty |= UTILITY_BINDINGS | COMPUTE_BINDINGS;
 }
 
 void StateTracker::SetImageTexture(u32 index, VkImageView view)
 {
-  if (m_bindings.image_textures[index].imageView == view)
+  VkDescriptorImageInfo& image = m_images[index];
+  if (image.imageView == view)
     return;
-
-  m_bindings.image_textures[index].imageView = view;
-  m_bindings.image_textures[index].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  m_dirty_flags |= DIRTY_FLAG_COMPUTE_BINDINGS;
+  image.imageView = view;
+  image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  m_dirty |= COMPUTE_BINDINGS;
 }
 
 void StateTracker::UnbindTexture(VkImageView view)
 {
-  for (VkDescriptorImageInfo& it : m_bindings.samplers)
+  // Only the stored bindings change; sets already written keep the old view until rewritten.
+  for (VkDescriptorImageInfo& texture : m_textures)
   {
-    if (it.imageView == view)
-    {
-      it.imageView = m_dummy_texture->GetView();
-      it.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
+    if (texture.imageView != view)
+      continue;
+    texture.imageView = m_null_texture->GetView();
+    texture.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
-
-  for (VkDescriptorImageInfo& it : m_bindings.image_textures)
+  for (VkDescriptorImageInfo& image : m_images)
   {
-    if (it.imageView == view)
-    {
-      it.imageView = m_dummy_compute_texture->GetView();
-      it.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
+    if (image.imageView != view)
+      continue;
+    image.imageView = m_null_image->GetView();
+    // Recorded as a sampled layout, as it always has been.
+    image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
 }
 
 void StateTracker::InvalidateCachedState()
 {
-  m_gx_descriptor_sets.fill(VK_NULL_HANDLE);
-  m_utility_descriptor_sets.fill(VK_NULL_HANDLE);
-  m_compute_descriptor_set = VK_NULL_HANDLE;
-  m_dirty_flags |= DIRTY_FLAG_ALL_DESCRIPTORS | DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR |
-                   DIRTY_FLAG_PIPELINE | DIRTY_FLAG_COMPUTE_SHADER | DIRTY_FLAG_DESCRIPTOR_SETS |
-                   DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET;
+  m_gx_sets.fill(VK_NULL_HANDLE);
+  m_utility_sets.fill(VK_NULL_HANDLE);
+  m_compute_set = VK_NULL_HANDLE;
+  m_dirty |= ALL_SET_CONTENTS | VIEWPORT | SCISSOR | PIPELINE | COMPUTE_SHADER | BIND_SETS |
+             BIND_COMPUTE_SET;
   if (m_vertex_buffer != VK_NULL_HANDLE)
-    m_dirty_flags |= DIRTY_FLAG_VERTEX_BUFFER;
+    m_dirty |= VERTEX_BUFFER;
   if (m_index_buffer != VK_NULL_HANDLE)
-    m_dirty_flags |= DIRTY_FLAG_INDEX_BUFFER;
+    m_dirty |= INDEX_BUFFER;
+}
+
+void StateTracker::StartPass(VkRenderPass pass, const VkRect2D& area, u32 clear_count,
+                             const VkClearValue* clears)
+{
+  m_render_pass = pass;
+  m_render_area = area;
+  const VkRenderPassBeginInfo info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                                      nullptr,
+                                      m_render_pass,
+                                      m_framebuffer->GetFB(),
+                                      m_render_area,
+                                      clear_count,
+                                      clears};
+  vkCmdBeginRenderPass(Cmd(), &info, VK_SUBPASS_CONTENTS_INLINE);
 }
 
 void StateTracker::BeginRenderPass()
 {
   if (InRenderPass())
     return;
-
-  m_current_render_pass = m_framebuffer->GetLoadRenderPass();
-  m_framebuffer_render_area = m_framebuffer->GetRect();
+  m_render_pass = m_framebuffer->GetLoadRenderPass();
+  m_render_area = m_framebuffer->GetRect();
   m_framebuffer->PrepareForRenderPass();
-
-  VkRenderPassBeginInfo begin_info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-                                      nullptr,
-                                      m_current_render_pass,
-                                      m_framebuffer->GetFB(),
-                                      m_framebuffer_render_area,
-                                      0,
-                                      nullptr};
-
-  vkCmdBeginRenderPass(g_command_buffer_mgr->GetCurrentCommandBuffer(), &begin_info,
-                       VK_SUBPASS_CONTENTS_INLINE);
+  StartPass(m_render_pass, m_render_area, 0, nullptr);
 }
 
 void StateTracker::BeginDiscardRenderPass()
 {
   if (InRenderPass())
     return;
-
-  m_current_render_pass = m_framebuffer->GetDiscardRenderPass();
-  m_framebuffer_render_area = m_framebuffer->GetRect();
-
-  VkRenderPassBeginInfo begin_info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-                                      nullptr,
-                                      m_current_render_pass,
-                                      m_framebuffer->GetFB(),
-                                      m_framebuffer_render_area,
-                                      0,
-                                      nullptr};
-
-  vkCmdBeginRenderPass(g_command_buffer_mgr->GetCurrentCommandBuffer(), &begin_info,
-                       VK_SUBPASS_CONTENTS_INLINE);
+  // The contents are about to be overwritten: no barrier against the previous pass.
+  StartPass(m_framebuffer->GetDiscardRenderPass(), m_framebuffer->GetRect(), 0, nullptr);
 }
 
 void StateTracker::EndRenderPass()
 {
   if (!InRenderPass())
     return;
-
-  vkCmdEndRenderPass(g_command_buffer_mgr->GetCurrentCommandBuffer());
-  m_current_render_pass = VK_NULL_HANDLE;
+  vkCmdEndRenderPass(Cmd());
+  m_render_pass = VK_NULL_HANDLE;
 }
 
 void StateTracker::BeginClearRenderPass(const VkRect2D& area, const VkClearValue* clear_values,
                                         u32 num_clear_values)
 {
   ASSERT(!InRenderPass());
-
-  m_current_render_pass = m_framebuffer->GetClearRenderPass();
-  m_framebuffer_render_area = area;
+  m_render_pass = m_framebuffer->GetClearRenderPass();
+  m_render_area = area;
   m_framebuffer->PrepareForRenderPass();
+  StartPass(m_render_pass, m_render_area, num_clear_values, clear_values);
+}
 
-  VkRenderPassBeginInfo begin_info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-                                      nullptr,
-                                      m_current_render_pass,
-                                      m_framebuffer->GetFB(),
-                                      m_framebuffer_render_area,
-                                      num_clear_values,
-                                      clear_values};
-
-  vkCmdBeginRenderPass(g_command_buffer_mgr->GetCurrentCommandBuffer(), &begin_info,
-                       VK_SUBPASS_CONTENTS_INLINE);
+void StateTracker::EndClearRenderPass()
+{
+  // Bind() will then start the load pass.
+  if (m_render_pass == m_framebuffer->GetClearRenderPass())
+    EndRenderPass();
 }
 
 void StateTracker::SetViewport(const VkViewport& viewport)
 {
-  if (memcmp(&m_viewport, &viewport, sizeof(viewport)) == 0)
+  // Bitwise, so that -0.0 and NaN changes are recorded too.
+  if (std::memcmp(&m_viewport, &viewport, sizeof(viewport)) == 0)
     return;
-
   m_viewport = viewport;
-  m_dirty_flags |= DIRTY_FLAG_VIEWPORT;
+  m_dirty |= VIEWPORT;
 }
 
 void StateTracker::SetScissor(const VkRect2D& scissor)
 {
-  if (memcmp(&m_scissor, &scissor, sizeof(scissor)) == 0)
+  if (std::memcmp(&m_scissor, &scissor, sizeof(scissor)) == 0)
     return;
-
   m_scissor = scissor;
-  m_dirty_flags |= DIRTY_FLAG_SCISSOR;
-}
-
-bool StateTracker::Bind()
-{
-  // Must have a pipeline.
-  if (!m_pipeline)
-    return false;
-
-  // Check the render area if we were in a clear pass.
-  if (m_current_render_pass == m_framebuffer->GetClearRenderPass() && !IsViewportWithinRenderArea())
-    EndRenderPass();
-
-  // Get a new descriptor set if any parts have changed
-  UpdateDescriptorSet();
-
-  // Start render pass if not already started
-  if (!InRenderPass())
-    BeginRenderPass();
-
-  // Re-bind parts of the pipeline
-  const VkCommandBuffer command_buffer = g_command_buffer_mgr->GetCurrentCommandBuffer();
-  const bool needs_vertex_buffer = !g_backend_info.bSupportsDynamicVertexLoader ||
-                                   m_pipeline->GetUsage() != AbstractPipelineUsage::GXUber;
-  if (needs_vertex_buffer && (m_dirty_flags & DIRTY_FLAG_VERTEX_BUFFER))
-  {
-    vkCmdBindVertexBuffers(command_buffer, 0, 1, &m_vertex_buffer, &m_vertex_buffer_offset);
-    m_dirty_flags &= ~DIRTY_FLAG_VERTEX_BUFFER;
-  }
-
-  if (m_dirty_flags & DIRTY_FLAG_INDEX_BUFFER)
-    vkCmdBindIndexBuffer(command_buffer, m_index_buffer, m_index_buffer_offset, m_index_type);
-
-  if (m_dirty_flags & DIRTY_FLAG_PIPELINE)
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipeline());
-
-  if (m_dirty_flags & DIRTY_FLAG_VIEWPORT)
-    vkCmdSetViewport(command_buffer, 0, 1, &m_viewport);
-
-  if (m_dirty_flags & DIRTY_FLAG_SCISSOR)
-    vkCmdSetScissor(command_buffer, 0, 1, &m_scissor);
-
-  m_dirty_flags &=
-      ~(DIRTY_FLAG_INDEX_BUFFER | DIRTY_FLAG_PIPELINE | DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR);
-  return true;
-}
-
-bool StateTracker::BindCompute()
-{
-  if (!m_compute_shader)
-    return false;
-
-  // Can't kick compute in a render pass.
-  if (InRenderPass())
-    EndRenderPass();
-
-  const VkCommandBuffer command_buffer = g_command_buffer_mgr->GetCurrentCommandBuffer();
-  if (m_dirty_flags & DIRTY_FLAG_COMPUTE_SHADER)
-  {
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      m_compute_shader->GetComputePipeline());
-  }
-
-  UpdateComputeDescriptorSet();
-  m_dirty_flags &= ~DIRTY_FLAG_COMPUTE_SHADER;
-  return true;
+  m_dirty |= SCISSOR;
 }
 
 bool StateTracker::IsWithinRenderArea(s32 x, s32 y, u32 width, u32 height) const
 {
-  // Check that the viewport does not lie outside the render area.
-  // If it does, we need to switch to a normal load/store render pass.
-  s32 left = m_framebuffer_render_area.offset.x;
-  s32 top = m_framebuffer_render_area.offset.y;
-  s32 right = left + static_cast<s32>(m_framebuffer_render_area.extent.width);
-  s32 bottom = top + static_cast<s32>(m_framebuffer_render_area.extent.height);
-  s32 test_left = x;
-  s32 test_top = y;
-  s32 test_right = test_left + static_cast<s32>(width);
-  s32 test_bottom = test_top + static_cast<s32>(height);
-  return test_left >= left && test_right <= right && test_top >= top && test_bottom <= bottom;
+  const s32 area_x0 = m_render_area.offset.x;
+  const s32 area_y0 = m_render_area.offset.y;
+  const s32 area_x1 = area_x0 + static_cast<s32>(m_render_area.extent.width);
+  const s32 area_y1 = area_y0 + static_cast<s32>(m_render_area.extent.height);
+  const s32 x1 = x + static_cast<s32>(width);
+  const s32 y1 = y + static_cast<s32>(height);
+  return x >= area_x0 && x1 <= area_x1 && y >= area_y0 && y1 <= area_y1;
 }
 
-bool StateTracker::IsViewportWithinRenderArea() const
+bool StateTracker::ViewportInsideRenderArea() const
 {
   return IsWithinRenderArea(static_cast<s32>(m_viewport.x), static_cast<s32>(m_viewport.y),
                             static_cast<u32>(m_viewport.width),
                             static_cast<u32>(m_viewport.height));
 }
 
-void StateTracker::EndClearRenderPass()
+bool StateTracker::Bind()
 {
-  if (m_current_render_pass != m_framebuffer->GetClearRenderPass())
-    return;
+  if (m_pipeline == nullptr)
+    return false;
 
-  // End clear render pass. Bind() will call BeginRenderPass() which
-  // will switch to the load/store render pass.
-  EndRenderPass();
-}
+  // A clearing pass only covers its clear rectangle; drawing outside it needs the full pass.
+  if (m_render_pass == m_framebuffer->GetClearRenderPass() && !ViewportInsideRenderArea())
+    EndRenderPass();
 
-void StateTracker::UpdateDescriptorSet()
-{
-  if (m_pipeline->GetUsage() != AbstractPipelineUsage::Utility)
-    UpdateGXDescriptorSet();
+  if (m_pipeline->GetUsage() == AbstractPipelineUsage::Utility)
+    WriteUtilitySets();
   else
-    UpdateUtilityDescriptorSet();
+    WriteGXSets();
+
+  if (!InRenderPass())
+    BeginRenderPass();
+
+  const VkCommandBuffer cmd = Cmd();
+  const u32 dirty = m_dirty;
+
+  // Ubershaders with the dynamic vertex loader fetch vertices from the storage buffer. The
+  // vertex buffer stays pending for the next pipeline that uses it.
+  const bool uses_vertex_buffer = !g_backend_info.bSupportsDynamicVertexLoader ||
+                                  m_pipeline->GetUsage() != AbstractPipelineUsage::GXUber;
+  u32 recorded = INDEX_BUFFER | PIPELINE | VIEWPORT | SCISSOR;
+  if (uses_vertex_buffer && (dirty & VERTEX_BUFFER) != 0)
+  {
+    vkCmdBindVertexBuffers(cmd, 0, 1, &m_vertex_buffer, &m_vertex_offset);
+    recorded |= VERTEX_BUFFER;
+  }
+  if ((dirty & INDEX_BUFFER) != 0)
+    vkCmdBindIndexBuffer(cmd, m_index_buffer, m_index_offset, m_index_type);
+  if ((dirty & PIPELINE) != 0)
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipeline());
+  if ((dirty & VIEWPORT) != 0)
+    vkCmdSetViewport(cmd, 0, 1, &m_viewport);
+  if ((dirty & SCISSOR) != 0)
+    vkCmdSetScissor(cmd, 0, 1, &m_scissor);
+
+  m_dirty &= ~recorded;
+  return true;
 }
 
-void StateTracker::UpdateGXDescriptorSet()
+bool StateTracker::BindCompute()
 {
-  const size_t MAX_DESCRIPTOR_WRITES = NUM_UBO_DESCRIPTOR_SET_BINDINGS +  // UBO
-                                       1 +                                // Samplers
-                                       2;                                 // SSBO
-  std::array<VkWriteDescriptorSet, MAX_DESCRIPTOR_WRITES> writes;
-  u32 num_writes = 0;
+  if (m_compute_shader == nullptr)
+    return false;
 
-  const bool needs_gs_ubo =
+  // Dispatches cannot happen inside a render pass.
+  EndRenderPass();
+
+  if ((m_dirty & COMPUTE_SHADER) != 0)
+  {
+    vkCmdBindPipeline(Cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
+                      m_compute_shader->GetComputePipeline());
+  }
+  WriteComputeSet();
+  m_dirty &= ~static_cast<u32>(COMPUTE_SHADER);
+  return true;
+}
+
+void StateTracker::WriteGXSets()
+{
+  // Set 0: GX uniform buffers. Set 1: pixel samplers. Set 2: storage buffers.
+  std::array<VkWriteDescriptorSet, NUM_UBO_DESCRIPTOR_SET_BINDINGS + 3> writes;
+  u32 count = 0;
+
+  const bool gs_ubo_used =
       g_backend_info.bSupportsGeometryShaders || g_ActiveConfig.UseVSForLinePointExpand();
+  const u32 dynamic_offsets = gs_ubo_used ? NUM_UBO_DESCRIPTOR_SET_BINDINGS :
+                                            NUM_UBO_DESCRIPTOR_SET_BINDINGS - 1;
 
-  if (m_dirty_flags & DIRTY_FLAG_GX_UBOS || m_gx_descriptor_sets[0] == VK_NULL_HANDLE)
+  if ((m_dirty & GX_UBOS) != 0 || m_gx_sets[0] == VK_NULL_HANDLE)
   {
-    m_gx_descriptor_sets[0] = g_command_buffer_mgr->AllocateDescriptorSet(
-        g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS));
-
-    for (size_t i = 0; i < NUM_UBO_DESCRIPTOR_SET_BINDINGS; i++)
+    m_gx_sets[0] = NewSet(DESCRIPTOR_SET_LAYOUT_STANDARD_UNIFORM_BUFFERS);
+    for (u32 binding = 0; binding < NUM_UBO_DESCRIPTOR_SET_BINDINGS; ++binding)
     {
-      if (i == UBO_DESCRIPTOR_SET_BINDING_GS && !needs_gs_ubo)
-      {
+      if (binding == UBO_DESCRIPTOR_SET_BINDING_GS && !gs_ubo_used)
         continue;
-      }
-
-      // If custom shaders haven't been used, their buffer range is 0
-      if (i == UBO_DESCRIPTOR_SET_BINDING_CUST && m_bindings.gx_ubo_bindings[i].range == 0)
-      {
+      // No custom shader has run yet: its buffer is still empty.
+      if (binding == UBO_DESCRIPTOR_SET_BINDING_CUST && m_gx_ubos[binding].range == 0)
         continue;
-      }
-
-      writes[num_writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                              nullptr,
-                              m_gx_descriptor_sets[0],
-                              static_cast<uint32_t>(i),
-                              0,
-                              1,
-                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                              nullptr,
-                              &m_bindings.gx_ubo_bindings[i],
-                              nullptr};
+      writes[count++] = BufferWrite(m_gx_sets[0], binding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                                    &m_gx_ubos[binding]);
     }
-
-    m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_GX_UBOS) | DIRTY_FLAG_DESCRIPTOR_SETS;
+    m_dirty = (m_dirty & ~static_cast<u32>(GX_UBOS)) | BIND_SETS;
   }
 
-  if (m_dirty_flags & DIRTY_FLAG_GX_SAMPLERS || m_gx_descriptor_sets[1] == VK_NULL_HANDLE)
+  if ((m_dirty & GX_SAMPLERS) != 0 || m_gx_sets[1] == VK_NULL_HANDLE)
   {
-    m_gx_descriptor_sets[1] = g_command_buffer_mgr->AllocateDescriptorSet(
-        g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS));
-
-    writes[num_writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                            nullptr,
-                            m_gx_descriptor_sets[1],
-                            0,
-                            0,
-                            static_cast<u32>(VideoCommon::MAX_PIXEL_SHADER_SAMPLERS),
-                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                            m_bindings.samplers.data(),
-                            nullptr,
-                            nullptr};
-    m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_GX_SAMPLERS) | DIRTY_FLAG_DESCRIPTOR_SETS;
+    m_gx_sets[1] = NewSet(DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS);
+    writes[count++] =
+        ImageWrite(m_gx_sets[1], 0, static_cast<u32>(VideoCommon::MAX_PIXEL_SHADER_SAMPLERS),
+                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_textures.data());
+    m_dirty = (m_dirty & ~static_cast<u32>(GX_SAMPLERS)) | BIND_SETS;
   }
 
-  const bool needs_bbox_ssbo = g_backend_info.bSupportsBBox;
-  const bool needs_vertex_ssbo = (g_backend_info.bSupportsDynamicVertexLoader &&
-                                  m_pipeline->GetUsage() == AbstractPipelineUsage::GXUber) ||
-                                 g_ActiveConfig.UseVSForLinePointExpand();
-  const bool needs_ssbo = needs_bbox_ssbo || needs_vertex_ssbo;
-
-  if (needs_ssbo &&
-      (m_dirty_flags & DIRTY_FLAG_GX_SSBO || m_gx_descriptor_sets[2] == VK_NULL_HANDLE))
+  const bool vs_expand = g_ActiveConfig.UseVSForLinePointExpand();
+  const bool uber_vertices = g_backend_info.bSupportsDynamicVertexLoader &&
+                             m_pipeline->GetUsage() == AbstractPipelineUsage::GXUber;
+  const bool storage_set_used = g_backend_info.bSupportsBBox || uber_vertices || vs_expand;
+  if (storage_set_used && ((m_dirty & GX_SSBO) != 0 || m_gx_sets[2] == VK_NULL_HANDLE))
   {
-    m_gx_descriptor_sets[2] =
-        g_command_buffer_mgr->AllocateDescriptorSet(g_object_cache->GetDescriptorSetLayout(
-            DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS));
-
-    writes[num_writes++] = {
-        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_gx_descriptor_sets[2], 0,      0, 1,
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,      nullptr, &m_bindings.ssbo,        nullptr};
-
-    if (g_backend_info.bSupportsDynamicVertexLoader || g_ActiveConfig.UseVSForLinePointExpand())
+    m_gx_sets[2] = NewSet(DESCRIPTOR_SET_LAYOUT_STANDARD_SHADER_STORAGE_BUFFERS);
+    writes[count++] =
+        BufferWrite(m_gx_sets[2], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &m_bbox_ssbo);
+    // The layout only has the vertex binding when something can read it.
+    if (g_backend_info.bSupportsDynamicVertexLoader || vs_expand)
     {
-      writes[num_writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                              nullptr,
-                              m_gx_descriptor_sets[2],
-                              1,
-                              0,
-                              1,
-                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                              nullptr,
-                              &m_bindings.gx_uber_vertex_ssbo,
-                              nullptr};
+      writes[count++] =
+          BufferWrite(m_gx_sets[2], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &m_vertex_ssbo);
     }
-
-    m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_GX_SSBO) | DIRTY_FLAG_DESCRIPTOR_SETS;
+    m_dirty = (m_dirty & ~static_cast<u32>(GX_SSBO)) | BIND_SETS;
   }
 
-  if (num_writes > 0)
-    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), num_writes, writes.data(), 0, nullptr);
+  if (count != 0)
+    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), count, writes.data(), 0, nullptr);
 
-  if (m_dirty_flags & DIRTY_FLAG_DESCRIPTOR_SETS)
+  if ((m_dirty & BIND_SETS) != 0)
   {
-    vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipelineLayout(), 0,
-                            needs_ssbo ? NUM_GX_DESCRIPTOR_SETS : (NUM_GX_DESCRIPTOR_SETS - 1),
-                            m_gx_descriptor_sets.data(),
-                            needs_gs_ubo ? NUM_UBO_DESCRIPTOR_SET_BINDINGS :
-                                           (NUM_UBO_DESCRIPTOR_SET_BINDINGS - 1),
-                            m_bindings.gx_ubo_offsets.data());
-    m_dirty_flags &= ~(DIRTY_FLAG_DESCRIPTOR_SETS | DIRTY_FLAG_GX_UBO_OFFSETS);
+    vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_pipeline->GetVkPipelineLayout(), 0,
+                            storage_set_used ? GX_SET_COUNT : GX_SET_COUNT - 1, m_gx_sets.data(),
+                            dynamic_offsets, m_gx_ubo_offsets.data());
+    m_dirty &= ~static_cast<u32>(BIND_SETS | GX_UBO_OFFSETS);
   }
-  else if (m_dirty_flags & DIRTY_FLAG_GX_UBO_OFFSETS)
+  else if ((m_dirty & GX_UBO_OFFSETS) != 0)
   {
-    vkCmdBindDescriptorSets(
-        g_command_buffer_mgr->GetCurrentCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-        m_pipeline->GetVkPipelineLayout(), 0, 1, m_gx_descriptor_sets.data(),
-        needs_gs_ubo ? NUM_UBO_DESCRIPTOR_SET_BINDINGS : (NUM_UBO_DESCRIPTOR_SET_BINDINGS - 1),
-        m_bindings.gx_ubo_offsets.data());
-    m_dirty_flags &= ~DIRTY_FLAG_GX_UBO_OFFSETS;
+    // Only the offsets moved: rebind the uniform set alone.
+    vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_pipeline->GetVkPipelineLayout(), 0, 1, m_gx_sets.data(),
+                            dynamic_offsets, m_gx_ubo_offsets.data());
+    m_dirty &= ~static_cast<u32>(GX_UBO_OFFSETS);
   }
 }
 
-void StateTracker::UpdateUtilityDescriptorSet()
+void StateTracker::WriteUtilitySets()
 {
-  // Max number of updates - UBO, Samplers, TexelBuffer
-  std::array<VkWriteDescriptorSet, 3> dswrites;
-  u32 writes = 0;
+  // Set 0: the utility uniform buffer. Set 1: samplers and one texel buffer.
+  std::array<VkWriteDescriptorSet, 3> writes;
+  u32 count = 0;
 
-  // Allocate descriptor sets.
-  if (m_dirty_flags & DIRTY_FLAG_UTILITY_UBO || m_utility_descriptor_sets[0] == VK_NULL_HANDLE)
+  if ((m_dirty & UTILITY_UBO) != 0 || m_utility_sets[0] == VK_NULL_HANDLE)
   {
-    m_utility_descriptor_sets[0] = g_command_buffer_mgr->AllocateDescriptorSet(
-        g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_UTILITY_UNIFORM_BUFFER));
-
-    dswrites[writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                          nullptr,
-                          m_utility_descriptor_sets[0],
-                          0,
-                          0,
-                          1,
-                          VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                          nullptr,
-                          &m_bindings.utility_ubo_binding,
-                          nullptr};
-
-    m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_UTILITY_UBO) | DIRTY_FLAG_DESCRIPTOR_SETS;
+    m_utility_sets[0] = NewSet(DESCRIPTOR_SET_LAYOUT_UTILITY_UNIFORM_BUFFER);
+    writes[count++] = BufferWrite(m_utility_sets[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                                  &m_utility_ubo);
+    m_dirty = (m_dirty & ~static_cast<u32>(UTILITY_UBO)) | BIND_SETS;
   }
 
-  if (m_dirty_flags & DIRTY_FLAG_UTILITY_BINDINGS || m_utility_descriptor_sets[1] == VK_NULL_HANDLE)
+  if ((m_dirty & UTILITY_BINDINGS) != 0 || m_utility_sets[1] == VK_NULL_HANDLE)
   {
-    m_utility_descriptor_sets[1] = g_command_buffer_mgr->AllocateDescriptorSet(
-        g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_UTILITY_SAMPLERS));
-
-    dswrites[writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                          nullptr,
-                          m_utility_descriptor_sets[1],
-                          0,
-                          0,
-                          NUM_UTILITY_PIXEL_SAMPLERS,
-                          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                          m_bindings.samplers.data(),
-                          nullptr,
-                          nullptr};
-    dswrites[writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                          nullptr,
-                          m_utility_descriptor_sets[1],
-                          8,
-                          0,
-                          1,
-                          VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                          nullptr,
-                          nullptr,
-                          m_bindings.texel_buffers.data()};
-
-    m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_UTILITY_BINDINGS) | DIRTY_FLAG_DESCRIPTOR_SETS;
+    m_utility_sets[1] = NewSet(DESCRIPTOR_SET_LAYOUT_UTILITY_SAMPLERS);
+    writes[count++] = ImageWrite(m_utility_sets[1], 0, NUM_UTILITY_PIXEL_SAMPLERS,
+                                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_textures.data());
+    writes[count++] = TexelWrite(m_utility_sets[1], 8, 1, m_texel_buffers.data());
+    m_dirty = (m_dirty & ~static_cast<u32>(UTILITY_BINDINGS)) | BIND_SETS;
   }
 
-  if (writes > 0)
-    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), writes, dswrites.data(), 0, nullptr);
+  if (count != 0)
+    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), count, writes.data(), 0, nullptr);
 
-  if (m_dirty_flags & DIRTY_FLAG_DESCRIPTOR_SETS)
-  {
-    vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipelineLayout(), 0,
-                            NUM_UTILITY_DESCRIPTOR_SETS, m_utility_descriptor_sets.data(), 1,
-                            &m_bindings.utility_ubo_offset);
-    m_dirty_flags &= ~(DIRTY_FLAG_DESCRIPTOR_SETS | DIRTY_FLAG_UTILITY_UBO_OFFSET);
-  }
-  else if (m_dirty_flags & DIRTY_FLAG_UTILITY_UBO_OFFSET)
-  {
-    vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipelineLayout(), 0,
-                            1, m_utility_descriptor_sets.data(), 1, &m_bindings.utility_ubo_offset);
-    m_dirty_flags &= ~(DIRTY_FLAG_DESCRIPTOR_SETS | DIRTY_FLAG_UTILITY_UBO_OFFSET);
-  }
+  // Either both sets, or only the uniform set for a new offset.
+  const u32 sets_to_bind =
+      (m_dirty & BIND_SETS) != 0 ? UTILITY_SET_COUNT : ((m_dirty & UTILITY_UBO_OFFSET) != 0 ? 1 : 0);
+  if (sets_to_bind == 0)
+    return;
+  vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_pipeline->GetVkPipelineLayout(), 0, sets_to_bind,
+                          m_utility_sets.data(), 1, &m_utility_ubo_offset);
+  m_dirty &= ~static_cast<u32>(BIND_SETS | UTILITY_UBO_OFFSET);
 }
 
-void StateTracker::UpdateComputeDescriptorSet()
+void StateTracker::WriteComputeSet()
 {
-  // Max number of updates - UBO, Samplers, TexelBuffer, Image
-  std::array<VkWriteDescriptorSet, 4> dswrites;
-
-  // Allocate descriptor sets.
-  if (m_dirty_flags & DIRTY_FLAG_COMPUTE_BINDINGS)
+  // One set: uniform buffer, samplers, texel buffers, storage images (see the set layout).
+  if ((m_dirty & COMPUTE_BINDINGS) != 0)
   {
-    m_compute_descriptor_set = g_command_buffer_mgr->AllocateDescriptorSet(
-        g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_COMPUTE));
-    dswrites[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                   nullptr,
-                   m_compute_descriptor_set,
-                   0,
-                   0,
-                   1,
-                   VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                   nullptr,
-                   &m_bindings.utility_ubo_binding,
-                   nullptr};
-    dswrites[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                   nullptr,
-                   m_compute_descriptor_set,
-                   1,
-                   0,
-                   VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS,
-                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                   m_bindings.samplers.data(),
-                   nullptr,
-                   nullptr};
-    dswrites[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                   nullptr,
-                   m_compute_descriptor_set,
-                   1 + VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS,
-                   0,
-                   NUM_COMPUTE_TEXEL_BUFFERS,
-                   VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                   nullptr,
-                   nullptr,
-                   m_bindings.texel_buffers.data()};
-    dswrites[3] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                   nullptr,
-                   m_compute_descriptor_set,
-                   1 + VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS + NUM_COMPUTE_TEXEL_BUFFERS,
-                   0,
-                   VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS,
-                   VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                   m_bindings.image_textures.data(),
-                   nullptr,
-                   nullptr};
-
-    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), static_cast<uint32_t>(dswrites.size()),
-                           dswrites.data(), 0, nullptr);
-    m_dirty_flags =
-        (m_dirty_flags & ~DIRTY_FLAG_COMPUTE_BINDINGS) | DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET;
+    constexpr u32 SAMPLERS = VideoCommon::MAX_COMPUTE_SHADER_SAMPLERS;
+    m_compute_set = NewSet(DESCRIPTOR_SET_LAYOUT_COMPUTE);
+    const std::array<VkWriteDescriptorSet, 4> writes = {
+        BufferWrite(m_compute_set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &m_utility_ubo),
+        ImageWrite(m_compute_set, 1, SAMPLERS, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                   m_textures.data()),
+        TexelWrite(m_compute_set, 1 + SAMPLERS, NUM_COMPUTE_TEXEL_BUFFERS, m_texel_buffers.data()),
+        ImageWrite(m_compute_set, 1 + SAMPLERS + NUM_COMPUTE_TEXEL_BUFFERS, SAMPLERS,
+                   VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, m_images.data()),
+    };
+    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), static_cast<u32>(writes.size()),
+                           writes.data(), 0, nullptr);
+    m_dirty = (m_dirty & ~static_cast<u32>(COMPUTE_BINDINGS)) | BIND_COMPUTE_SET;
   }
 
-  if (m_dirty_flags & DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET)
+  if ((m_dirty & BIND_COMPUTE_SET) != 0)
   {
-    vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
+    vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
                             g_object_cache->GetPipelineLayout(PIPELINE_LAYOUT_COMPUTE), 0, 1,
-                            &m_compute_descriptor_set, 1, &m_bindings.utility_ubo_offset);
-    m_dirty_flags &= ~DIRTY_FLAG_COMPUTE_DESCRIPTOR_SET;
+                            &m_compute_set, 1, &m_utility_ubo_offset);
+    m_dirty &= ~static_cast<u32>(BIND_COMPUTE_SET);
   }
 }
 

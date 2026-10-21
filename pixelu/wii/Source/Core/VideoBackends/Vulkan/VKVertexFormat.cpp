@@ -1,10 +1,10 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Vulkan/VKVertexFormat.h"
 
+#include <algorithm>
+
 #include "Common/Assert.h"
-#include "Common/EnumMap.h"
 
 #include "VideoBackends/Vulkan/ObjectCache.h"
 
@@ -13,54 +13,41 @@
 
 namespace Vulkan
 {
-static VkFormat VarToVkFormat(ComponentFormat t, uint32_t components, bool integer)
+namespace
 {
-  using ComponentArray = std::array<VkFormat, 4>;
-  static constexpr auto f = [](ComponentArray a) { return a; };  // Deduction helper
+// [component type][integer?][component count - 1]. Floats (and the invalid float encodings
+// 5..7, clamped to row 4) are read as floats even when marked integer.
+constexpr VkFormat ATTRIBUTE_FORMATS[5][2][4] = {
+    // UByte
+    {{VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8A8_UNORM},
+     {VK_FORMAT_R8_UINT, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8B8_UINT, VK_FORMAT_R8G8B8A8_UINT}},
+    // Byte
+    {{VK_FORMAT_R8_SNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8B8_SNORM, VK_FORMAT_R8G8B8A8_SNORM},
+     {VK_FORMAT_R8_SINT, VK_FORMAT_R8G8_SINT, VK_FORMAT_R8G8B8_SINT, VK_FORMAT_R8G8B8A8_SINT}},
+    // UShort
+    {{VK_FORMAT_R16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16B16_UNORM,
+      VK_FORMAT_R16G16B16A16_UNORM},
+     {VK_FORMAT_R16_UINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16B16_UINT,
+      VK_FORMAT_R16G16B16A16_UINT}},
+    // Short
+    {{VK_FORMAT_R16_SNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16B16_SNORM,
+      VK_FORMAT_R16G16B16A16_SNORM},
+     {VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_SINT, VK_FORMAT_R16G16B16_SINT,
+      VK_FORMAT_R16G16B16A16_SINT}},
+    // Float
+    {{VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+      VK_FORMAT_R32G32B32A32_SFLOAT},
+     {VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+      VK_FORMAT_R32G32B32A32_SFLOAT}},
+};
 
-  static constexpr Common::EnumMap<ComponentArray, ComponentFormat::InvalidFloat7>
-      float_type_lookup = {
-          f({VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM,
-             VK_FORMAT_R8G8B8A8_UNORM}),  // UByte
-          f({VK_FORMAT_R8_SNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8B8_SNORM,
-             VK_FORMAT_R8G8B8A8_SNORM}),  // Byte
-          f({VK_FORMAT_R16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16B16_UNORM,
-             VK_FORMAT_R16G16B16A16_UNORM}),  // UShort
-          f({VK_FORMAT_R16_SNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16B16_SNORM,
-             VK_FORMAT_R16G16B16A16_SNORM}),  // Short
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Float
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-      };
-
-  static constexpr Common::EnumMap<ComponentArray, ComponentFormat::InvalidFloat7>
-      integer_type_lookup = {
-          f({VK_FORMAT_R8_UINT, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8B8_UINT,
-             VK_FORMAT_R8G8B8A8_UINT}),  // UByte
-          f({VK_FORMAT_R8_SINT, VK_FORMAT_R8G8_SINT, VK_FORMAT_R8G8B8_SINT,
-             VK_FORMAT_R8G8B8A8_SINT}),  // Byte
-          f({VK_FORMAT_R16_UINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16B16_UINT,
-             VK_FORMAT_R16G16B16A16_UINT}),  // UShort
-          f({VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_SINT, VK_FORMAT_R16G16B16_SINT,
-             VK_FORMAT_R16G16B16A16_SINT}),  // Short
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Float
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-          f({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-             VK_FORMAT_R32G32B32A32_SFLOAT}),  // Invalid
-      };
-
-  ASSERT(components > 0 && components <= 4);
-  return integer ? integer_type_lookup[t][components - 1] : float_type_lookup[t][components - 1];
+VkFormat AttributeFormat(const ::AttributeFormat& attr)
+{
+  ASSERT(attr.components > 0 && attr.components <= 4);
+  const u32 row = std::min(static_cast<u32>(attr.type), 4u);
+  return ATTRIBUTE_FORMATS[row][attr.integer ? 1 : 0][attr.components - 1];
 }
+}  // namespace
 
 VertexFormat::VertexFormat(const PortableVertexDeclaration& vtx_decl) : NativeVertexFormat(vtx_decl)
 {
@@ -70,76 +57,44 @@ VertexFormat::VertexFormat(const PortableVertexDeclaration& vtx_decl) : NativeVe
 
 const VkPipelineVertexInputStateCreateInfo& VertexFormat::GetVertexInputStateInfo() const
 {
-  return m_input_state_info;
+  return m_input_state;
 }
 
 void VertexFormat::MapAttributes()
 {
-  m_num_attributes = 0;
+  m_attribute_count = 0;
+  // All attributes come from binding 0, in shader location order of the declaration.
+  const auto add = [this](ShaderAttrib location, const ::AttributeFormat& attr) {
+    if (attr.enable)
+      AddAttribute(location, 0, AttributeFormat(attr), static_cast<uint32_t>(attr.offset));
+  };
 
-  if (m_decl.position.enable)
-    AddAttribute(
-        ShaderAttrib::Position, 0,
-        VarToVkFormat(m_decl.position.type, m_decl.position.components, m_decl.position.integer),
-        m_decl.position.offset);
-
-  for (uint32_t i = 0; i < 3; i++)
-  {
-    if (m_decl.normals[i].enable)
-      AddAttribute(ShaderAttrib::Normal + i, 0,
-                   VarToVkFormat(m_decl.normals[i].type, m_decl.normals[i].components,
-                                 m_decl.normals[i].integer),
-                   m_decl.normals[i].offset);
-  }
-
-  for (uint32_t i = 0; i < 2; i++)
-  {
-    if (m_decl.colors[i].enable)
-      AddAttribute(ShaderAttrib::Color0 + i, 0,
-                   VarToVkFormat(m_decl.colors[i].type, m_decl.colors[i].components,
-                                 m_decl.colors[i].integer),
-                   m_decl.colors[i].offset);
-  }
-
-  for (uint32_t i = 0; i < 8; i++)
-  {
-    if (m_decl.texcoords[i].enable)
-      AddAttribute(ShaderAttrib::TexCoord0 + i, 0,
-                   VarToVkFormat(m_decl.texcoords[i].type, m_decl.texcoords[i].components,
-                                 m_decl.texcoords[i].integer),
-                   m_decl.texcoords[i].offset);
-  }
-
-  if (m_decl.posmtx.enable)
-    AddAttribute(ShaderAttrib::PositionMatrix, 0,
-                 VarToVkFormat(m_decl.posmtx.type, m_decl.posmtx.components, m_decl.posmtx.integer),
-                 m_decl.posmtx.offset);
+  add(ShaderAttrib::Position, m_decl.position);
+  for (size_t n = 0; n < 3; ++n)
+    add(ShaderAttrib::Normal + static_cast<int>(n), m_decl.normals[n]);
+  for (size_t n = 0; n < 2; ++n)
+    add(ShaderAttrib::Color0 + static_cast<int>(n), m_decl.colors[n]);
+  for (size_t n = 0; n < 8; ++n)
+    add(ShaderAttrib::TexCoord0 + static_cast<int>(n), m_decl.texcoords[n]);
+  add(ShaderAttrib::PositionMatrix, m_decl.posmtx);
 }
 
 void VertexFormat::SetupInputState()
 {
-  m_binding_description.binding = 0;
-  m_binding_description.stride = m_decl.stride;
-  m_binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  m_binding = {0, static_cast<uint32_t>(m_decl.stride), VK_VERTEX_INPUT_RATE_VERTEX};
 
-  m_input_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  m_input_state_info.pNext = nullptr;
-  m_input_state_info.flags = 0;
-  m_input_state_info.vertexBindingDescriptionCount = 1;
-  m_input_state_info.pVertexBindingDescriptions = &m_binding_description;
-  m_input_state_info.vertexAttributeDescriptionCount = m_num_attributes;
-  m_input_state_info.pVertexAttributeDescriptions = m_attribute_descriptions.data();
+  m_input_state = {};
+  m_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  m_input_state.vertexBindingDescriptionCount = 1;
+  m_input_state.pVertexBindingDescriptions = &m_binding;
+  m_input_state.vertexAttributeDescriptionCount = m_attribute_count;
+  m_input_state.pVertexAttributeDescriptions = m_attributes.data();
 }
 
 void VertexFormat::AddAttribute(ShaderAttrib location, uint32_t binding, VkFormat format,
                                 uint32_t offset)
 {
-  ASSERT(m_num_attributes < MAX_VERTEX_ATTRIBUTES);
-
-  m_attribute_descriptions[m_num_attributes].location = static_cast<uint32_t>(location);
-  m_attribute_descriptions[m_num_attributes].binding = binding;
-  m_attribute_descriptions[m_num_attributes].format = format;
-  m_attribute_descriptions[m_num_attributes].offset = offset;
-  m_num_attributes++;
+  ASSERT(m_attribute_count < MAX_VERTEX_ATTRIBUTES);
+  m_attributes[m_attribute_count++] = {static_cast<uint32_t>(location), binding, format, offset};
 }
 }  // namespace Vulkan

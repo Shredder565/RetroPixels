@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,8 @@
 
 namespace Vulkan
 {
+// A compiled shader. Graphics stages keep their VkShaderModule for pipeline creation; compute
+// shaders are turned into their pipeline at once (the module is not kept).
 class VKShader final : public AbstractShader
 {
 public:
@@ -24,6 +25,7 @@ public:
 
   VkShaderModule GetShaderModule() const { return m_module; }
   VkPipeline GetComputePipeline() const { return m_compute_pipeline; }
+  // The SPIR-V words as bytes.
   BinaryData GetBinary() const override;
 
   static std::unique_ptr<VKShader> CreateFromSource(ShaderStage stage, std::string_view source,
@@ -33,9 +35,11 @@ public:
                                                     size_t length, std::string_view name);
 
 private:
+  void SetDebugName(VkObjectType type, u64 handle);
+
   std::vector<u32> m_spv;
-  VkShaderModule m_module;
-  VkPipeline m_compute_pipeline;
+  VkShaderModule m_module = VK_NULL_HANDLE;
+  VkPipeline m_compute_pipeline = VK_NULL_HANDLE;
   std::string m_name;
 };
 
