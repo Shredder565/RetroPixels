@@ -23,6 +23,9 @@ import (
 	"retropixels/internal/pixelu"
 )
 
+// checkVulkan is pixelu.CheckVulkan (tests with a fake engine replace it).
+var checkVulkan = pixelu.CheckVulkan
+
 // exeFile names a program as it is on this system, for messages:
 // "RetroPixels.exe" on Windows, "RetroPixels" on Linux.
 func exeFile(name string) string {
@@ -152,7 +155,7 @@ func launchPixelUGame(path string) error {
 	useGL := cfg.PixelUOpenGL
 	cfgMu.Unlock()
 	if !useGL {
-		if err := pixelu.CheckVulkan(); err != nil {
+		if err := checkVulkan(); err != nil {
 			return vulkanError{err}
 		}
 	}

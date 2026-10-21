@@ -32,6 +32,10 @@ sleep "${FAKE_PLAY:-1}"
 
 func setupFakePixelU(t *testing.T) (argsFile string, game string) {
 	t.Helper()
+	// The fake engine needs no Vulkan driver (CI runners have none).
+	old := checkVulkan
+	checkVulkan = func() error { return nil }
+	t.Cleanup(func() { checkVulkan = old })
 	games := filepath.Join(t.TempDir(), "Nintendo Wii - Wii U games")
 	game = filepath.Join(games, "WII  U -Hyrule Warriors (US).wua")
 	os.MkdirAll(games, 0o755)
