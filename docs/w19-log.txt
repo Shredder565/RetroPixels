@@ -109,3 +109,9 @@
     the user's SSL files (`SSL.cpp`), the mail-check HMAC key
     (`MAIL_CHECK_KEY` in `NetKDRequest.h`) and the `WC24PubkMod` layout
     (no key bytes), unchanged.
+
+Merge note: W19 was based on ec993f7, before the keys step removed
+MAIL_CHECK_KEY. On merge, KDCheckMail in the rewritten NetKDRequest.cpp takes
+the key from the owner's wii_keys.txt (IOSC::LoadOwnerKey("wc24_mail_check_key",
+20)) and skips the HMAC check with a warning when it is absent, as the keys
+step did for the old file. No key bytes are in the tree.
