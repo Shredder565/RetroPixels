@@ -148,29 +148,29 @@ func TestLegacyUserDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("APPDATA", ad)
-	if got := LegacyUserDir(""); got != "" {
+	if got := legacyUserDirFor("windows", ""); got != "" {
 		t.Fatalf("no old Dolphin: %q", got)
 	}
 	os.MkdirAll(filepath.Join(ad, "Dolphin Emulator"), 0o755)
-	if got := LegacyUserDir(""); got != filepath.Join(ad, "Dolphin Emulator") {
+	if got := legacyUserDirFor("windows", ""); got != filepath.Join(ad, "Dolphin Emulator") {
 		t.Errorf("AppData: %q", got)
 	}
 	docs := filepath.Join(home, "Documents", "Dolphin Emulator")
 	os.MkdirAll(docs, 0o755)
-	if got := LegacyUserDir(""); got != docs {
+	if got := legacyUserDirFor("windows", ""); got != docs {
 		t.Errorf("Documents: %q", got)
 	}
 	old := filepath.Join(t.TempDir(), "Dolphin-x64", "Dolphin.exe")
 	os.MkdirAll(filepath.Join(filepath.Dir(old), "User"), 0o755)
-	if got := LegacyUserDir(old); got != docs {
+	if got := legacyUserDirFor("windows", old); got != docs {
 		t.Errorf("not portable: %q", got)
 	}
 	os.WriteFile(filepath.Join(filepath.Dir(old), "portable.txt"), nil, 0o644)
-	if got := LegacyUserDir(old); got != filepath.Join(filepath.Dir(old), "User") {
+	if got := legacyUserDirFor("windows", old); got != filepath.Join(filepath.Dir(old), "User") {
 		t.Errorf("portable: %q", got)
 	}
 	t.Setenv("RETRO_OLD_DOLPHIN_USER", "old")
-	if LegacyUserDir(old) != "old" {
+	if legacyUserDirFor("windows", old) != "old" {
 		t.Error("override")
 	}
 }
@@ -281,8 +281,8 @@ func TestUserDir(t *testing.T) {
 	ad := t.TempDir()
 	t.Setenv("APPDATA", ad)
 	t.Setenv("HOME", t.TempDir())
-	if UserDir("") != filepath.Join(ad, "Dolphin Emulator") {
-		t.Errorf("default: %s", UserDir(""))
+	if userDirFor("windows", "") != filepath.Join(ad, "Dolphin Emulator") {
+		t.Errorf("default: %s", userDirFor("windows", ""))
 	}
 	t.Setenv("RETRO_DOLPHIN_USER", "/x")
 	if UserDir(exe) != "/x" {

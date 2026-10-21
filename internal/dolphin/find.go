@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -229,4 +230,85 @@ func GameFor(path string) (Game, bool) {
 	}
 	return Game{Name: DisplayName(filepath.Base(path), di), File: filepath.Base(path), Path: path, Platform: di.Platform,
 		ID: di.ID, Size: st.Size(), Added: st.ModTime()}, true
+}
+
+// ---------------- the player's own folders ----------------
+
+// xdgUserDirKeys: the user-dirs.dirs names of the player's folders.
+var xdgUserDirKeys = map[string]string{
+	"Downloads": "XDG_DOWNLOAD_DIR", "Desktop": "XDG_DESKTOP_DIR", "Documents": "XDG_DOCUMENTS_DIR",
+	"Videos": "XDG_VIDEOS_DIR", "Music": "XDG_MUSIC_DIR", "Pictures": "XDG_PICTURES_DIR",
+}
+
+// xdgConfigHome is $XDG_CONFIG_HOME, or home/.config when it's unset or not
+// an absolute path (as the XDG spec says).
+func xdgConfigHome(home string) string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(d) {
+		return d
+	}
+	return filepath.Join(home, ".config")
+}
+
+// xdgDataHome is $XDG_DATA_HOME, or home/.local/share.
+func xdgDataHome(home string) string {
+	if d := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(d) {
+		return d
+	}
+	return filepath.Join(home, ".local", "share")
+}
+
+// UserFolder is one of the player's own folders in home ("Downloads",
+// "Desktop", "Documents", "Videos", "Music" or "Pictures"). On Linux the
+// desktop can name it differently (in the player's language, or moved
+// somewhere else) in ~/.config/user-dirs.dirs; that one is used when it's
+// set there. On Windows it is always home\<name>.
+func UserFolder(home, name string) string {
+	return userFolderFor(runtime.GOOS, home, name)
+}
+
+func userFolderFor(goos, home, name string) string {
+	def := filepath.Join(home, name)
+	key, ok := xdgUserDirKeys[name]
+	if goos == "windows" || !ok || home == "" {
+		return def
+	}
+	f, err := os.Open(filepath.Join(xdgConfigHome(home), "user-dirs.dirs"))
+	if err != nil {
+		return def
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
+	for sc.Scan() {
+		k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if !ok || strings.TrimSpace(k) != key {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+			continue
+		}
+		v = v[1 : len(v)-1]
+		switch {
+		case v == "$HOME" || v == "$HOME/":
+			return home
+		case strings.HasPrefix(v, "$HOME/"):
+			return filepath.Join(home, filepath.FromSlash(v[len("$HOME/"):]))
+		case filepath.IsAbs(v):
+			return filepath.Clean(v)
+		}
+	}
+	return def
+}
+
+// DownloadDirs: where the player's downloads land: the desktop's Downloads
+// folder (UserFolder) first, then home/Downloads when that's another one.
+func DownloadDirs(home string) []string {
+	if home == "" {
+		return nil
+	}
+	out := []string{UserFolder(home, "Downloads")}
+	if d := filepath.Join(home, "Downloads"); filepath.Clean(d) != filepath.Clean(out[0]) {
+		out = append(out, d)
+	}
+	return out
 }
