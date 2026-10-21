@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 395315 | 98.6% |
+| Original (RetroPixels) | 396667 | 98.6% |
 | Dolphin, untouched | 0 | 0.0% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **401078** | 100% |
+| **All** | **402430** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -126,7 +126,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/DSP/Jit | 3625 | 3625 | original |
 | Core/Core/FifoPlayer | 1943 | 1943 | original |
 | Core/Core/HLE | 1429 | 1429 | original |
-| Core/Core/HW (top level) | 9961 | 9961 | original |
+| Core/Core/HW (top level) | 9970 | 9970 | original |
 | Core/Core/HW/DSPHLE | 6575 | 6575 | original |
 | Core/Core/HW/DSPLLE | 571 | 571 | original |
 | Core/Core/HW/DVD | 4591 | 4591 | original |
@@ -162,8 +162,8 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/JitCommon | 2164 | 2164 | original |
 | Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
 | Core/DiscIO | 15966 | 15966 | original |
-| Core/DolphinNoGUI | 432 | 432 | original |
-| Core/DolphinQt (top level) | 14642 | 14642 | original |
+| Core/DolphinNoGUI | 808 | 808 | original |
+| Core/DolphinQt (top level) | 14786 | 14786 | original |
 | Core/DolphinQt/Achievements | 1364 | 1364 | original |
 | Core/DolphinQt/Config | 18036 | 18036 | original |
 | Core/DolphinQt/Debugger | 13379 | 13379 | original |
@@ -171,8 +171,9 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinQt/FIFO | 1321 | 1321 | original |
 | Core/DolphinQt/GameList | 2599 | 2599 | original |
 | Core/DolphinQt/InfinityBase | 446 | 446 | original |
+| Core/DolphinQt/LinuxCheck | 488 | 488 | original |
 | Core/DolphinQt/NetPlay | 3464 | 3464 | original |
-| Core/DolphinQt/QtUtils | 1382 | 1382 | original |
+| Core/DolphinQt/QtUtils | 1703 | 1703 | original |
 | Core/DolphinQt/Settings | 4485 | 4485 | original |
 | Core/DolphinQt/SkylanderPortal | 1392 | 1392 | original |
 | Core/DolphinQt/TAS | 2003 | 2003 | original |
@@ -193,7 +194,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/InputCommon/ControlReference | 2015 | 2015 | original |
 | Core/InputCommon/DynamicInputTextures | 502 | 502 | original |
 | Core/InputCommon/LinuxCheck | 458 | 458 | original |
-| Core/UICommon | 3858 | 3858 | original |
+| Core/UICommon | 3872 | 3872 | original |
 | Core/UpdaterCommon | 817 | 817 | original |
 | Core/VideoBackends/D3D | 3741 | 3741 | original |
 | Core/VideoBackends/D3D12 | 5306 | 5306 | original |
@@ -231,7 +232,7 @@ batch rewrites them.
 <!-- batches:start -->
 | Batch | Scope | Lines | Original lines | Status |
 |---|---|---:|---:|---|
-| W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 2200 | 2200 | original |
+| W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 2293 | 2293 | original |
 | W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13468 | 13468 | original |
 | W3 | Common: platform, memory, network, crypto, file formats | 9032 | 9032 | original |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9417 | 9417 | original |
@@ -243,7 +244,7 @@ batch rewrites them.
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8543 | 8543 | original |
 | W11 | HW: DVD and GameCube memory cards | 7736 | 7736 | original |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 7819 | 7819 | original |
-| W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 9674 | 9674 | original |
+| W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 9683 | 9683 | original |
 | W14 | HW: Wii Remote (common, emulated, real) | 11267 | 11267 | original |
 | W15 | DSP: core, interpreter, LLE glue | 8461 | 8461 | original |
 | W16 | DSP: x64 JIT | 3625 | 3625 | original |
@@ -266,14 +267,14 @@ batch rewrites them.
 | W33 | Video backends: D3D11, D3D12, D3DCommon | 10186 | 10186 | original |
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8119 | 8119 | original |
 | W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 8547 | 8547 | original |
-| W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8837 | 8837 | original |
-| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10552 | 10552 | original |
+| W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8851 | 8851 | original |
+| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10924 | 10924 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8071 | 8071 | original |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 11734 | 11734 | original |
 | W40 | DolphinQt: controller mapping and settings panes | 10787 | 10787 | original |
 | W41 | DolphinQt: debugger | 13379 | 13379 | original |
-| W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10376 | 10376 | original |
-| - | not in any batch | 890 | 890 | original |
+| W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10864 | 10864 | original |
+| - | not in any batch | 1266 | 1266 | original |
 <!-- batches:end -->
 
 After the last batch, Dolphin's files outside `Source/` are what is left:
@@ -6694,3 +6695,184 @@ step did for the old file. No key bytes are in the tree.
       -DENABLE_X11=OFF.
     - With the Null video backend a game runs faster than real time and the
       mixer logs "Granule Queue has completely filled" (not Linux-specific).
+- L5d log (the PixelU-Wii program on Linux, own): the Qt program
+  (DolphinQt) builds and runs on Linux as `PixelU-Wii`, docks into
+  RetroPixels under the contract of embed_linux.go, keeps its settings in
+  PixelU/wii/User through portable.txt, and has a Linux job in
+  .github/workflows/pixelu-wii.yml that builds, packages, checks and
+  hands the package to bundle-linux.yml. dolphin-emu-nogui gained an X11
+  platform. Work started from 9ba8d99. New files carry the original-code
+  header; Dolphin was read only to learn what a piece has to do (the
+  option names, the config system names, which class the frontends
+  expect), never copied.
+  - The Qt program (pixelu/wii/Source/Core/DolphinQt):
+    - CMake: off Windows the target is still dolphin-emu, the program
+      PixelU-Wii. It links X11::xcb (configure stops when xcb is missing
+      with ENABLE_X11 on) and Qt D-Bus when Qt has it. windeployqt and
+      qt.conf.win are now Windows only (the Windows build is unchanged,
+      see "Windows" below).
+    - Handles: the render widget's native window goes to the core as
+      {WindowSystemType::X11, Display*, X window id}, as before. Qt is
+      forced to xcb (QT_QPA_PLATFORM unset), so under Wayland it runs on
+      XWayland. Only when there is no DISPLAY but a WAYLAND_DISPLAY does
+      Qt stay on Wayland; a resize then also sets the presenter's
+      backbuffer (Host::ResizeSurface), since Wayland surfaces report no
+      size. That path is untested (no Wayland compositor here).
+    - --rp-embed (Main.cpp) is taken off the command line before Qt sees
+      it and means PIXELU_EMBED=1, which is what RetroPixels sets today
+      (internal/dolphin dolphin.go). Both work.
+    - Docking (new QtUtils/X11Docking.cpp/.h, RenderWidget.cpp): in embed
+      mode the render window gets _RETROPIXELS_EMBED = 1 (CARDINAL) and,
+      before Qt maps it, is reparented into a 1x1 holder window that is
+      never mapped. So it is "mapped" for Qt and the renderer (it gets
+      resize events, the swap chain is made) but not viewable, and the
+      window manager never sees it: no MapRequest, not in
+      _NET_CLIENT_LIST. Every 100 ms it looks whether its parent carries
+      _RETROPIXELS_DOCK (RetroPixels' pid): then it is docked and stays
+      put. After 20 s without that (the Windows deadline) the mark is
+      removed and the window goes back to the root window, centred on the
+      screen, raised and activated, as an ordinary window.
+      _NET_WM_PID and WM_DELETE_WINDOW come from Qt. The xcb calls use
+      Qt's own connection (QNativeInterface::QX11Application); without
+      xcb (Wayland) docking is off and the window just shows.
+      WA_DontShowOnScreen was tried on paper and dropped: Qt then sends
+      no resize events to the widget (QWidgetWindow::updateSize), and the
+      picture would not follow RetroPixels' layout.
+    - QtUtils/SignalDaemon.cpp/.h (new; MainWindow.cpp already included
+      it): SIGINT and SIGTERM end the program cleanly (self-pipe and a
+      QSocketNotifier, then MainWindow's close path, status 0).
+    - Screen saver: besides UICommon's X11 call, the program asks
+      org.freedesktop.ScreenSaver for Inhibit/UnInhibit over D-Bus while
+      a game runs (MainWindow::UpdateScreenSaverInhibition). Linking Qt
+      D-Bus also turns on QtUtils' "show in file manager" through
+      org.freedesktop.FileManager1.
+    - LinuxCheck/DockCheck.cpp (new): pixelu-wii-dock-check
+      (EXCLUDE_FROM_ALL). Modes:
+      - plain / nogui: the game window appears, shows the test DOL (mean
+        green over 0.5, read back from the screen), SIGINT ends it with 0.
+      - dock / rp-embed: a window marked _RETROPIXELS_EMBED appears; for
+        3 s it is not viewable and not managed; it is docked as
+        embed_linux.go docks (unmap and a synthetic UnmapNotify, save
+        set, reparent into a box with _RETROPIXELS_DOCK, resize, map);
+        the game shows inside RetroPixels' window; it is still docked
+        after the 20 s deadline; the picture follows a resize;
+        WM_DELETE_WINDOW stops the game and the program ends with 0.
+      - give-up: nobody docks it; after the deadline it is an ordinary,
+        unmarked window with the game in it; SIGTERM ends it with 0.
+  - UICommon: on Linux, portable.txt next to the program keeps the user
+    folder in User/ next to it (PixelU/wii/User, the name RetroPixels'
+    internal/dolphin userDirFor expects), checked before the embedded
+    ./user rule. The --audio_emulation help no longer prints a literal
+    "[%choices]". Discord presence no longer registers its
+    discord-<id>:// handler on Linux: discord-rpc did that by writing
+    ~/.local/share/applications/discord-455712169795780630.desktop and
+    ~/.config/mimeapps.list on every start, even with portable.txt (found
+    by the checks here; Windows still registers it, unchanged). CI fails
+    when such a file appears.
+  - dolphin-emu-nogui: new PlatformX11.cpp, -p x11 (headless stays the
+    default; -p lists headless and x11, the help is written out instead
+    of "%choices"). It opens its own X connection (XInitThreads first),
+    makes a window from the render window settings (size; position only
+    when one is saved, -1 means the window manager places it), sets the
+    title, WM_CLASS pixelu-wii/PixelU-Wii, _NET_WM_PID,
+    WM_CLIENT_MACHINE, WM_DELETE_WINDOW and size hints, fullscreen
+    through _NET_WM_STATE, a blank cursor when the cursor is hidden.
+    The loop polls the X socket and an eventfd: the close button stops
+    the game, ConfigureNotify resizes the presenter's surface, F11 and
+    Alt+Return toggle fullscreen; title and size requests from other
+    threads are applied there.
+  - tools/pixelu-wii-linux-deploy.sh (new, shellcheck clean): the Linux
+    counterpart of windeployqt. Copies the program (RUNPATH $ORIGIN/lib)
+    and puts next to it lib/ (the Qt libraries it and its plugins need,
+    with ICU, and the xcb-util family / xkbcommon-x11 that desktops do
+    not always have; RUNPATH $ORIGIN), QtPlugins/ (xcb, SVG image and
+    icon engines required; offscreen, Wayland, GTK 3 and XDG portal
+    themes when the Qt has them and their libraries load; each finds
+    lib/ two folders up) and qt.conf. It then checks that every file
+    resolves without LD_LIBRARY_PATH and takes Qt only from the folder.
+    Works with aqt's layout and with a distribution's /usr.
+  - CI, build-linux in pixelu-wii.yml (the Windows job is byte for byte
+    unchanged):
+    - ubuntu-22.04 (glibc 2.35 floor), GCC 12, CMake 4.2, Ninja.
+    - Qt 6.8.3 linux_gcc_64 by aqtinstall 3.3.0 (qtbase, qtsvg,
+      qtwayland, icu), cached. FFmpeg from source with the Windows job's
+      build-ffmpeg.sh (PIXELU_FFMPEG_HOST_TEST=1, host GCC), cached.
+    - Sys assembled by PixelUAssembleSys.cmake from the sparse Dolphin
+      checkout (the same sparse paths as the Windows job), translations
+      from Languages/po.
+    - Checks: glibc floor and no libLLVM; package contents and
+      check_sys_package.py; --version (offscreen) and nothing written to
+      the home folder; under Xvfb with a PulseAudio null sink:
+      pixelu-wii-input-check, nogui headless start-up (Booting from
+      executable, Shutdown complete, status 0), cubeb on the pulse
+      backend with a stream of the nogui pid (pactl), the game on screen
+      for nogui -p x11 and the Qt program on OpenGL (llvmpipe) and
+      Vulkan (lavapipe), then give-up without a window manager and dock
+      / rp-embed under openbox.
+    - Artifact PixelU-Wii-linux-x64: one PixelU-Wii-linux.tar.gz with
+      PixelU/wii/PixelU-Wii inside (tools/linux/package.sh finds it), then
+      `gh workflow run bundle-linux.yml`.
+  - Checked here (Ubuntu-like container, GCC 12, system Qt 6.4.2 because
+    download.qt.io is blocked, so no aqt Qt locally):
+    - Configure and build of dolphin-emu, dolphin-emu-nogui,
+      pixelu-wii-input-check and pixelu-wii-dock-check; clang-format
+      (the repository's style) clean on all new and changed lines.
+    - Under Xvfb (and openbox for docking), the same commands as the CI
+      steps: input check passed; nogui headless boots the test DOL and
+      ends with status 0 and "Shutdown complete"; cubeb on PulseAudio
+      with a sink input of the nogui pid; dock-check plain and nogui
+      pass on OGL and Vulkan; give-up, dock and rp-embed pass.
+    - The deploy script against /usr Qt: the deployed program runs
+      (--version, plain on OGL and Vulkan), without -u it makes
+      User/ next to itself, and nothing goes to ~/.config or
+      ~/.local/share.
+    - FFmpeg: build-ffmpeg.sh with PIXELU_FFMPEG_HOST_TEST=1 builds the
+      five static libraries; they link into a PIE with -z text (no text
+      relocations) and the ffv1, mpeg4, utvideo encoders and the avi
+      muxer are there; the configure step reports "FFmpeg found", the
+      whole tree builds and links with it, and nogui -p x11 with
+      -C Dolphin.Movie.DumpFrames=True writes an AVI (MPEG-4, 640x528)
+      to User/Dump/Frames.
+    - Windows: a clang-cl Windows configure (mingw headers, a stand-in
+      Qt) of 9ba8d99 and of this tree give the same 1944 compile
+      commands; build.ninja differs only in the version root, a
+      path-hashed depfile name and the order of phony lists; the
+      PixelU-Wii.exe link line is the same. GOOS=windows go build and go
+      test ./... on Linux pass, gofmt is clean (no Go code changed).
+  - Notes:
+    - `-C GFX.Settings...` (from L5b's notes) is not a bug: the system is
+      called "Graphics" in -C (Config.cpp's names), so
+      `-C Graphics.Settings.X=Y`.
+    - Qt 6.4's moc cannot parse C++20 concepts in libstdc++ 12 headers
+      (<concepts>, through WiimoteControllersWidget.h). Only the local
+      build hit this; it was built with an extra moc include that
+      defines libstdc++'s visibility macros. Qt 6.8.3 (CI) is not
+      affected. Building against a distribution's Qt older than 6.5 needs
+      that or a newer Qt.
+    - The libstdc++ floor is GCC 12's (GLIBCXX_3.4.30), which Ubuntu
+      22.04 and Debian 12 ship; glibc 2.35 in CI.
+    - GOOS=windows go vet reports "possible misuse of unsafe.Pointer" in
+      winapi_windows.go:87-88 (comCall); that is older than L5d and not
+      in its files.
+    - pixelu/wii/Externals/pugixml/CMakeLists.txt sets
+      PUGIXML_BUILD_DEFINES to OFF, which pugixml turns into a -DOFF
+      define on every file that uses it (Windows too). Harmless, but it
+      should be set to "" (not an L5d file).
+    - For L2b (embed_linux.go): withdraw() waits up to 1 s for the window
+      to reach the root window, but a waiting PixelU-Wii window never
+      does (it sits in its holder). Windows marked _RETROPIXELS_EMBED
+      can skip that wait.
+    - A Go test in the main package that docks the real PixelU-Wii
+      (as there is for PixelU) would cover the RetroPixels side;
+      pixelu-wii-dock-check covers the program's side.
+  - Not done:
+    - Fullscreen at a chosen resolution (XRandR) and cursor locking or
+      confining on Linux.
+    - Screen saver inhibition without D-Bus beyond UICommon's X11 call.
+    - A native Wayland run (only XWayland is supported and checked).
+  - Only CI or a real desktop can confirm: the aqt archive names
+    (qtwayland, icu) and that Qt 6.8.3's plugins deploy as described;
+    FFmpeg's host build on Ubuntu 22.04 (here a newer distribution);
+    lavapipe and llvmpipe on the runner; openbox there; the package on a
+    real GNOME/KDE desktop, under XWayland, and docked by RetroPixels
+    itself.
