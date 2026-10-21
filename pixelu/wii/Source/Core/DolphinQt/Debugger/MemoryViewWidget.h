@@ -1,9 +1,15 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
-#include <mutex>
 
+#include <map>
+#include <mutex>
+#include <optional>
+#include <utility>
+#include <vector>
+
+#include <QColor>
+#include <QString>
 #include <QStyledItemDelegate>
 #include <QWidget>
 
@@ -26,7 +32,8 @@ class System;
 
 class PPCSymbolDB;
 
-// Captures direct editing of the table.
+// Reports what the user typed into a table cell instead of storing it in the model, so the
+// memory view can write it to emulated memory itself.
 class TableEditDelegate : public QStyledItemDelegate
 {
   Q_OBJECT
@@ -41,8 +48,8 @@ signals:
   void editFinished(const int row, const int column, const QString& text) const;
 };
 
-class MemoryViewTable;
-
+// A hex-editor style view of emulated memory. The view has no ends: it scrolls around the whole
+// 32-bit address space, so it uses its own always-centred scroll bar.
 class MemoryViewWidget final : public QWidget
 {
   Q_OBJECT
@@ -120,41 +127,52 @@ signals:
   void ActivateSearch();
 
 private:
-  void OnEditSymbol(EditSymbolType type, u32 addr);
-  void OnContextMenu(const QPoint& pos);
-  void OnCopyAddress(u32 addr);
-  void OnCopyHex(u32 addr);
-  void UpdateBreakpointTags();
-  void TriggerActivateSearch();
-  void UpdateColumns();
-  void ScrollbarActionTriggered(int action);
-  void ScrollbarSliderReleased();
+  class Grid;
+  using ValueMap = std::map<u32, std::optional<QString>>;
+
+  void ScrollRows(s64 rows);
+  void WriteTypedText(int row, int column, const QString& text);
+  void ShowCellMenu(const QPoint& pos);
+  void EditLabel(EditSymbolType kind, u32 address);
+  void CopyAddress(u32 address) const;
+  void CopyHex(u32 address) const;
+  void RefreshBreakpointMarks();
+  void RefreshValueCells();
+  void ScrollBarAction();
+  void RecentreScrollBar();
+  [[nodiscard]] int DataSpan() const;
+  [[nodiscard]] std::optional<Type> DualViewType() const;
 
   std::optional<QString> ValueToString(const Core::CPUThreadGuard& guard, u32 address, Type type);
 
   Core::System& m_system;
-  PPCSymbolDB& m_ppc_symbol_db;
+  PPCSymbolDB& m_symbol_db;
 
-  MemoryViewTable* m_table;
-  QScrollBar* m_scrollbar;
+  Grid* m_grid = nullptr;
+  QScrollBar* m_scroll = nullptr;
+
   AddressSpace::Type m_address_space{};
   Type m_type = Type::Hex32;
   BPType m_bp_type = BPType::ReadWrite;
-  bool m_do_log = true;
-  u32 m_address = 0x80000000;
-  std::pair<u32, u32> m_address_range;
-  std::map<u32, std::optional<QString>> m_values;
-  std::map<u32, std::optional<QString>> m_values_dual_view;
-  u32 m_address_highlight = 0;
-  int m_font_width = 0;
-  int m_font_vspace = 0;
-  int m_bytes_per_row = 16;
-  int m_alignment = 16;
-  int m_data_columns;
+  bool m_log_hits = true;
   bool m_dual_view = false;
   bool m_show_symbols = true;
-  std::mutex m_updating;
-  QColor m_highlight_color = QColor(120, 255, 255, 100);
 
-  friend class MemoryViewTable;
+  u32 m_address = 0x80000000;
+  u32 m_highlight_address = 0;
+  // First address shown and one past the last.
+  std::pair<u32, u32> m_shown_range{};
+  int m_bytes_per_row = 16;
+  int m_alignment = 16;
+  int m_value_columns = 0;
+
+  int m_char_width = 0;
+  int m_line_height = 0;
+  // Alpha 100 while change highlighting is on, 0 while it is off.
+  QColor m_highlight = QColor(120, 255, 255, 100);
+
+  ValueMap m_values;
+  ValueMap m_dual_values;
+  // Held while the table or the captured values are being changed; the CPU thread only tries it.
+  std::mutex m_busy;
 };

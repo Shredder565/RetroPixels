@@ -1,10 +1,14 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/MemoryViewWidget.h"
 
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <limits>
+#include <type_traits>
 
 #include <QApplication>
 #include <QClipboard>
@@ -14,15 +18,14 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QStyledItemDelegate>
 #include <QTableWidget>
 #include <QtGlobal>
 
 #include "Common/Align.h"
-#include "Common/BitUtils.h"
 #include "Common/StringUtil.h"
-#include "Common/Swap.h"
 #include "Core/Core.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/PowerPC/BreakPoints.h"
@@ -34,562 +37,519 @@
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 
-// "Most mouse types work in steps of 15 degrees, in which case the delta value is a multiple of
-// 120; i.e., 120 units * 1/8 = 15 degrees." (http://doc.qt.io/qt-5/qwheelevent.html#angleDelta)
-constexpr double SCROLL_FRACTION_DEGREES = 15.;
-
-// Number of columns that don't contain the value of a memory address.
-constexpr int MISC_COLUMNS = 2;
-constexpr auto USER_ROLE_IS_ROW_BREAKPOINT_CELL = Qt::UserRole;
-constexpr auto USER_ROLE_CELL_ADDRESS = Qt::UserRole + 1;
-constexpr auto USER_ROLE_VALUE_TYPE = Qt::UserRole + 2;
-constexpr auto USER_ROLE_VALID_ADDRESS = Qt::UserRole + 3;
-
-// Numbers for the scrollbar. These affect how much big the draggable part of the scrollbar is, how
-// smooth it scrolls, and how much memory it traverses while dragging.
-constexpr int SCROLLBAR_MINIMUM = 0;
-constexpr int SCROLLBAR_PAGESTEP = 250;
-constexpr int SCROLLBAR_MAXIMUM = 20000;
-constexpr int SCROLLBAR_CENTER = SCROLLBAR_MAXIMUM / 2;
-
-const QString INVALID_MEMORY = QStringLiteral("-");
-
-void TableEditDelegate::setModelData(QWidget* editor, QAbstractItemModel* model,
-                                     const QModelIndex& index) const
+namespace
 {
-  // Triggers on placing data into a cell. Editor has the text to be input, index has the location.
-  const QString input = qobject_cast<QLineEdit*>(editor)->text();
-  emit editFinished(index.row(), index.column(), input);
+using ViewType = MemoryViewWidget::Type;
+
+// Table layout: column 0 is the row breakpoint toggle, column 1 the row address, then the value
+// columns, then (optionally) the symbol column.
+constexpr int BREAKPOINT_COLUMN = 0;
+constexpr int ADDRESS_COLUMN = 1;
+constexpr int FIRST_VALUE_COLUMN = 2;
+
+// Per-cell data roles.
+constexpr int ROLE_ROW_TOGGLE = Qt::UserRole;
+constexpr int ROLE_ADDRESS = Qt::UserRole + 1;
+constexpr int ROLE_VALUE_TYPE = Qt::UserRole + 2;
+constexpr int ROLE_READABLE = Qt::UserRole + 3;
+
+// The scroll bar never runs out: its handle is returned to the middle after every move, and only
+// the distance moved matters.
+constexpr int SCROLL_MIN = 0;
+constexpr int SCROLL_MAX = 20000;
+constexpr int SCROLL_PAGE = 250;
+constexpr int SCROLL_MIDDLE = SCROLL_MAX / 2;
+
+// A wheel notch is 120 eighths of a degree.
+constexpr double WHEEL_EIGHTHS_PER_NOTCH = 15.0 * 8;
+
+QString Unreadable()
+{
+  return QStringLiteral("-");
 }
 
-class MemoryViewTable final : public QTableWidget
+QString Hex8Text(u32 value)
+{
+  return QStringLiteral("%1").arg(value, 8, 16, QLatin1Char('0'));
+}
+
+struct TypeInfo
+{
+  int bytes;
+  // Widest text the type produces, plus one character of gap.
+  int chars;
+};
+
+TypeInfo InfoOf(ViewType type)
+{
+  switch (type)
+  {
+  case ViewType::Hex8:
+    return {1, 3};
+  case ViewType::Hex16:
+    return {2, 5};
+  case ViewType::Hex32:
+    return {4, 9};
+  case ViewType::Hex64:
+    return {8, 17};
+  case ViewType::Unsigned8:
+    return {1, 4};
+  case ViewType::Unsigned16:
+    return {2, 6};
+  case ViewType::Unsigned32:
+    return {4, 11};
+  case ViewType::Signed8:
+    return {1, 5};
+  case ViewType::Signed16:
+    return {2, 7};
+  case ViewType::Signed32:
+    return {4, 12};
+  case ViewType::ASCII:
+    return {1, 2};
+  case ViewType::Float32:
+    return {4, 11};  // e.g. -3.403e+38
+  case ViewType::Double:
+    return {8, 12};  // e.g. -1.798e+308
+  default:
+    return {1, 10};
+  }
+}
+
+int BytesOf(ViewType type)
+{
+  return InfoOf(type).bytes;
+}
+
+bool RightAligned(ViewType type)
+{
+  switch (type)
+  {
+  case ViewType::Unsigned8:
+  case ViewType::Unsigned16:
+  case ViewType::Unsigned32:
+  case ViewType::Signed8:
+  case ViewType::Signed16:
+  case ViewType::Signed32:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// value as bytes in big-endian (emulated memory) order.
+template <typename T>
+std::vector<u8> GuestBytes(T value)
+{
+  using U = std::make_unsigned_t<T>;
+  const U bits = static_cast<U>(value);
+  std::vector<u8> out(sizeof(T));
+  for (std::size_t i = 0; i < sizeof(T); ++i)
+    out[i] = static_cast<u8>(bits >> (8 * (sizeof(T) - 1 - i)));
+  return out;
+}
+
+std::vector<u8> RawBytes(const QByteArray& array)
+{
+  return std::vector<u8>(array.begin(), array.end());
+}
+
+// Floating point values get a leading space when positive so the digits line up with negatives.
+QString FloatText(double value)
+{
+  QString text = QString::number(value, 'g', 4);
+  if (!text.startsWith(QLatin1Char('-')))
+    text.prepend(QLatin1Char(' '));
+  return text;
+}
+}  // namespace
+
+void TableEditDelegate::setModelData(QWidget* editor, QAbstractItemModel*,
+                                     const QModelIndex& index) const
+{
+  // The model is deliberately left untouched; the view refreshes the cell from memory.
+  emit editFinished(index.row(), index.column(), qobject_cast<QLineEdit*>(editor)->text());
+}
+
+// The table part of the view. Keyboard, wheel and mouse input move or act on the owning widget.
+class MemoryViewWidget::Grid final : public QTableWidget
 {
 public:
-  explicit MemoryViewTable(MemoryViewWidget* parent) : QTableWidget(parent), m_view(parent)
+  explicit Grid(MemoryViewWidget* owner) : QTableWidget(owner), m_owner(owner)
   {
     horizontalHeader()->hide();
     verticalHeader()->hide();
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setShowGrid(false);
     setContextMenuPolicy(Qt::CustomContextMenu);
-    // Selection will be set programmatically. User will still get an outline on clicked items.
+    // Selection is only ever set from code (to mark the searched address).
     setSelectionMode(NoSelection);
     setTextElideMode(Qt::TextElideMode::ElideNone);
 
-    // Route user's direct cell inputs to an editFinished signal. Much better than an itemChanged
-    // signal and QSignalBlock juggling.
-    TableEditDelegate* table_edit_delegate = new TableEditDelegate(this);
-    setItemDelegate(table_edit_delegate);
+    auto* const editing = new TableEditDelegate(this);
+    setItemDelegate(editing);
 
-    // Prevent colors from changing based on focus.
-    QPalette palette(m_view->palette());
-    palette.setBrush(QPalette::Inactive, QPalette::Highlight, palette.brush(QPalette::Highlight));
-    palette.setBrush(QPalette::Inactive, QPalette::HighlightedText,
-                     palette.brush(QPalette::HighlightedText));
-    setPalette(palette);
+    // Keep the highlight colours the same whether or not the table has focus.
+    QPalette colours(m_owner->palette());
+    colours.setBrush(QPalette::Inactive, QPalette::Highlight, colours.brush(QPalette::Highlight));
+    colours.setBrush(QPalette::Inactive, QPalette::HighlightedText,
+                     colours.brush(QPalette::HighlightedText));
+    setPalette(colours);
 
     setRowCount(30);
     setColumnCount(8);
 
-    connect(this, &MemoryViewTable::customContextMenuRequested, m_view,
-            &MemoryViewWidget::OnContextMenu);
-    connect(table_edit_delegate, &TableEditDelegate::editFinished, this,
-            &MemoryViewTable::OnDirectTableEdit);
+    connect(this, &Grid::customContextMenuRequested, m_owner, &MemoryViewWidget::ShowCellMenu);
+    connect(editing, &TableEditDelegate::editFinished, m_owner, &MemoryViewWidget::WriteTypedText);
   }
 
+  // How many rows of the current height fit.
+  int FittingRows() const
+  {
+    return static_cast<int>(
+        std::round(static_cast<float>(height()) / static_cast<float>(rowHeight(0)) - 0.25));
+  }
+
+protected:
   void resizeEvent(QResizeEvent* event) override
   {
     QTableWidget::resizeEvent(event);
-    // Remakes table if vertically resized
-    const int rows = std::round((height() / static_cast<float>(rowHeight(0))) - 0.25);
-    if (rows != rowCount())
-      m_view->UpdateDispatcher(MemoryViewWidget::UpdateType::Full);
+    if (FittingRows() != rowCount())
+      m_owner->UpdateDispatcher(UpdateType::Full);
   }
 
   void keyPressEvent(QKeyEvent* event) override
   {
-    switch (event->key())
+    const int key = event->key();
+    if (key == Qt::Key_Up || key == Qt::Key_Down)
     {
-    case Qt::Key_Up:
-      m_view->m_address -= m_view->m_bytes_per_row;
-      break;
-    case Qt::Key_Down:
-      m_view->m_address += m_view->m_bytes_per_row;
-      break;
-    case Qt::Key_PageUp:
-      m_view->m_address -= this->rowCount() * m_view->m_bytes_per_row;
-      break;
-    case Qt::Key_PageDown:
-      m_view->m_address += this->rowCount() * m_view->m_bytes_per_row;
-      break;
-    case Qt::Key_G:
-      if (event->modifiers() == Qt::ControlModifier)
-      {
-        m_view->TriggerActivateSearch();
-        return;
-      }
-      [[fallthrough]];
-    default:
-      QWidget::keyPressEvent(event);
+      m_owner->ScrollRows(key == Qt::Key_Up ? -1 : 1);
       return;
     }
-    m_view->UpdateDispatcher(MemoryViewWidget::UpdateType::Addresses);
+    if (key == Qt::Key_PageUp || key == Qt::Key_PageDown)
+    {
+      const s64 page = rowCount();
+      m_owner->ScrollRows(key == Qt::Key_PageUp ? -page : page);
+      return;
+    }
+    if (key == Qt::Key_G && event->modifiers() == Qt::ControlModifier)
+    {
+      emit m_owner->ActivateSearch();
+      return;
+    }
+    // Not the table's own handler: its cursor-key navigation is not wanted here.
+    QWidget::keyPressEvent(event);
   }
 
   void wheelEvent(QWheelEvent* event) override
   {
-    auto delta =
-        -static_cast<int>(std::round((event->angleDelta().y() / (SCROLL_FRACTION_DEGREES * 8))));
-
-    if (delta == 0)
-      return;
-
-    m_view->m_address += delta * m_view->m_bytes_per_row;
-    m_view->UpdateDispatcher(MemoryViewWidget::UpdateType::Addresses);
+    const int notches =
+        static_cast<int>(std::round(event->angleDelta().y() / WHEEL_EIGHTHS_PER_NOTCH));
+    if (notches != 0)
+      m_owner->ScrollRows(-s64{notches});
   }
 
   void mousePressEvent(QMouseEvent* event) override
   {
+    // Right clicks are handled by the context menu; nothing else reacts to other buttons.
     if (event->button() != Qt::LeftButton)
       return;
-
-    auto* item = this->itemAt(event->pos());
-    if (!item)
+    const QTableWidgetItem* const cell = itemAt(event->pos());
+    if (cell == nullptr)
       return;
 
-    if (item->data(USER_ROLE_IS_ROW_BREAKPOINT_CELL).toBool())
-    {
-      const u32 address = item->data(USER_ROLE_CELL_ADDRESS).toUInt();
-      m_view->ToggleBreakpoint(address, true);
-    }
+    if (cell->data(ROLE_ROW_TOGGLE).toBool())
+      m_owner->ToggleBreakpoint(cell->data(ROLE_ADDRESS).toUInt(), true);
     else
-    {
       QTableWidget::mousePressEvent(event);
-    }
-  }
-
-  void OnDirectTableEdit(const int row, const int column, const QString& text)
-  {
-    QTableWidgetItem* item = this->item(row, column);
-    MemoryViewWidget::Type type =
-        static_cast<MemoryViewWidget::Type>(item->data(USER_ROLE_VALUE_TYPE).toInt());
-    std::vector<u8> bytes = m_view->ConvertTextToBytes(type, text);
-
-    u32 address = item->data(USER_ROLE_CELL_ADDRESS).toUInt();
-    u32 end_address = address + static_cast<u32>(bytes.size()) - 1;
-    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(m_view->GetAddressSpace());
-    {
-      const Core::CPUThreadGuard guard(m_view->m_system);
-
-      if (!bytes.empty() && accessors->IsValidAddress(guard, address) &&
-          accessors->IsValidAddress(guard, end_address))
-      {
-        for (const u8 c : bytes)
-          accessors->WriteU8(guard, address++, c);
-      }
-    }
-
-    m_view->UpdateDispatcher(MemoryViewWidget::UpdateType::Values);
   }
 
 private:
-  MemoryViewWidget* m_view;
+  MemoryViewWidget* m_owner;
 };
 
 MemoryViewWidget::MemoryViewWidget(Core::System& system, QWidget* parent)
-    : QWidget(parent), m_system(system), m_ppc_symbol_db(m_system.GetPPCSymbolDB())
+    : QWidget(parent), m_system(system), m_symbol_db(m_system.GetPPCSymbolDB())
 {
-  auto* layout = new QHBoxLayout();
-  layout->setContentsMargins(0, 0, 0, 0);
+  auto* const row = new QHBoxLayout();
+  row->setContentsMargins(0, 0, 0, 0);
 
-  m_table = new MemoryViewTable(this);
-  layout->addWidget(m_table);
+  m_grid = new Grid(this);
+  row->addWidget(m_grid);
 
-  // Since the Memory View is infinitely long -- it wraps around -- we can't use a normal scroll
-  // bar, so this initializes a custom one that is always centered but otherwise still behaves more
-  // or less like a regular scrollbar.
-  m_scrollbar = new QScrollBar(this);
-  m_scrollbar->setRange(SCROLLBAR_MINIMUM, SCROLLBAR_MAXIMUM);
-  m_scrollbar->setPageStep(SCROLLBAR_PAGESTEP);
-  m_scrollbar->setValue(SCROLLBAR_CENTER);
-  connect(m_scrollbar, &QScrollBar::actionTriggered, this,
-          &MemoryViewWidget::ScrollbarActionTriggered);
-  connect(m_scrollbar, &QScrollBar::sliderReleased, this,
-          &MemoryViewWidget::ScrollbarSliderReleased);
-  layout->addWidget(m_scrollbar);
+  m_scroll = new QScrollBar(this);
+  m_scroll->setRange(SCROLL_MIN, SCROLL_MAX);
+  m_scroll->setPageStep(SCROLL_PAGE);
+  m_scroll->setValue(SCROLL_MIDDLE);
+  connect(m_scroll, &QScrollBar::actionTriggered, this, &MemoryViewWidget::ScrollBarAction);
+  connect(m_scroll, &QScrollBar::sliderReleased, this, &MemoryViewWidget::RecentreScrollBar);
+  row->addWidget(m_scroll);
+  setLayout(row);
 
-  this->setLayout(layout);
-
-  connect(&Settings::Instance(), &Settings::DebugFontChanged, this, &MemoryViewWidget::UpdateFont);
-  connect(Host::GetInstance(), &Host::PPCSymbolsChanged, this,
-          [this] { UpdateDispatcher(UpdateType::Symbols); });
-  connect(Host::GetInstance(), &Host::PPCBreakpointsChanged, this,
-          &MemoryViewWidget::UpdateBreakpointTags);
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this] {
-    // UpdateDisasmDialog currently catches pauses, no need to signal it twice.
+  const Settings* const settings = &Settings::Instance();
+  const Host* const host = Host::GetInstance();
+  connect(settings, &Settings::DebugFontChanged, this, &MemoryViewWidget::UpdateFont);
+  connect(host, &Host::PPCSymbolsChanged, this, [this] { UpdateDispatcher(UpdateType::Symbols); });
+  connect(host, &Host::PPCBreakpointsChanged, this, &MemoryViewWidget::RefreshBreakpointMarks);
+  connect(settings, &Settings::EmulationStateChanged, this, [this] {
+    // Pauses already arrive through UpdateDisasmDialog.
     if (Core::GetState(m_system) != Core::State::Paused)
       UpdateDispatcher(UpdateType::Values);
   });
-  connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this, [this] {
-    // Disasm spam will break updates while running. Only need it for things like steps when paused
-    // and breaks which trigger a pause.
+  connect(host, &Host::UpdateDisasmDialog, this, [this] {
+    // That signal fires constantly while running; only react to steps and breaks.
     if (Core::GetState(m_system) != Core::State::Running)
       UpdateDispatcher(UpdateType::Values);
   });
-
-  // CPU Thread to Main Thread.
+  // Values captured on the CPU thread are shown from here, on the GUI thread.
   connect(this, &MemoryViewWidget::AutoUpdate, this,
           [this] { UpdateDispatcher(UpdateType::Auto); });
-  connect(&Settings::Instance(), &Settings::ThemeChanged, this,
-          [this] { UpdateDispatcher(UpdateType::Full); });
+  connect(settings, &Settings::ThemeChanged, this, [this] { UpdateDispatcher(UpdateType::Full); });
 
-  // Also calls create table.
+  // Builds the table as well.
   UpdateFont(Settings::Instance().GetDebugFont());
 }
 
 void MemoryViewWidget::UpdateFont(const QFont& font)
 {
-  const QFontMetrics fm(font);
-  m_font_vspace = fm.lineSpacing() + 4;
-  // BoundingRect is too unpredictable, a custom one would be needed for each view type. Different
-  // fonts have wildly different spacing between two characters and horizontalAdvance includes
-  // spacing.
-  m_font_width = fm.horizontalAdvance(QLatin1Char('0'));
-  m_table->setFont(font);
-
+  const QFontMetrics metrics(font);
+  m_line_height = metrics.lineSpacing() + 4;
+  // The advance of '0' (which includes inter-character spacing) sizes the value columns; a
+  // bounding box differs too much between fonts.
+  m_char_width = metrics.horizontalAdvance(QLatin1Char('0'));
+  m_grid->setFont(font);
   UpdateDispatcher(UpdateType::Full);
 }
 
-void MemoryViewWidget::TriggerActivateSearch()
+int MemoryViewWidget::DataSpan() const
 {
-  emit ActivateSearch();
+  return m_bytes_per_row / BytesOf(m_type);
 }
 
-constexpr int GetTypeSize(MemoryViewWidget::Type type)
+// In dual view the left half shows the same memory as plain hex of the same width.
+std::optional<MemoryViewWidget::Type> MemoryViewWidget::DualViewType() const
 {
-  switch (type)
+  if (!m_dual_view)
+    return std::nullopt;
+  switch (BytesOf(m_type))
   {
-  case MemoryViewWidget::Type::ASCII:
-  case MemoryViewWidget::Type::Hex8:
-  case MemoryViewWidget::Type::Unsigned8:
-  case MemoryViewWidget::Type::Signed8:
-    return 1;
-  case MemoryViewWidget::Type::Unsigned16:
-  case MemoryViewWidget::Type::Signed16:
-  case MemoryViewWidget::Type::Hex16:
-    return 2;
-  case MemoryViewWidget::Type::Hex32:
-  case MemoryViewWidget::Type::Unsigned32:
-  case MemoryViewWidget::Type::Signed32:
-  case MemoryViewWidget::Type::Float32:
-    return 4;
-  case MemoryViewWidget::Type::Double:
-  case MemoryViewWidget::Type::Hex64:
-    return 8;
+  case 1:
+    return Type::Hex8;
+  case 2:
+    return Type::Hex16;
+  case 8:
+    return Type::Hex64;
   default:
-    return 1;
-  }
-}
-
-constexpr int GetCharacterCount(MemoryViewWidget::Type type)
-{
-  // Max number of characters +1 for spacing between columns.
-  switch (type)
-  {
-  case MemoryViewWidget::Type::ASCII:  // A
-    return 2;
-  case MemoryViewWidget::Type::Hex8:  // Byte = FF
-    return 3;
-  case MemoryViewWidget::Type::Unsigned8:  // UCHAR_MAX = 255
-    return 4;
-  case MemoryViewWidget::Type::Hex16:    // 2 Bytes = FFFF
-  case MemoryViewWidget::Type::Signed8:  // CHAR_MIN = -128
-    return 5;
-  case MemoryViewWidget::Type::Unsigned16:  // USHORT_MAX = 65535
-    return 6;
-  case MemoryViewWidget::Type::Signed16:  // SHORT_MIN = -32768
-    return 7;
-  case MemoryViewWidget::Type::Hex32:  // 4 Bytes = FFFFFFFF
-    return 9;
-  case MemoryViewWidget::Type::Float32:     // Rounded and Negative FLT_MAX = -3.403e+38
-  case MemoryViewWidget::Type::Unsigned32:  // UINT_MAX = 4294967295
-    return 11;
-  case MemoryViewWidget::Type::Double:    // Rounded and Negative DBL_MAX = -1.798e+308
-  case MemoryViewWidget::Type::Signed32:  // INT_MIN = -2147483648
-    return 12;
-  case MemoryViewWidget::Type::Hex64:  // For dual_view + Double. 8 Bytes = FFFFFFFFFFFFFFFF
-    return 17;
-  default:
-    return 10;
+    return Type::Hex32;
   }
 }
 
 void MemoryViewWidget::UpdateDispatcher(UpdateType type)
 {
-  std::unique_lock lock(m_updating, std::defer_lock);
-
-  // A full update may change parameters like row count, so make sure it goes through.
+  std::unique_lock lock(m_busy, std::defer_lock);
+  // A full rebuild may change the row count, so it waits for the lock instead of skipping.
   if (type == UpdateType::Full)
     lock.lock();
   else if (!isVisible() || !lock.try_lock())
     return;
 
-  // Check if table needs to be created.
-  if (m_table->item(2, 1) == nullptr)
+  // Anything but a full update needs the table to exist already.
+  if (m_grid->item(2, 1) == nullptr)
     type = UpdateType::Full;
 
-  switch (type)
+  if (type == UpdateType::Auto)
   {
-  case UpdateType::Full:
+    if (!m_values.empty())
+      RefreshValueCells();
+    return;
+  }
+
+  // Each kind of update also does everything the cheaper kinds below it do.
+  const bool rebuild = type == UpdateType::Full;
+  const bool readdress = rebuild || type == UpdateType::Addresses;
+  const bool reread = readdress || type == UpdateType::Values;
+  if (rebuild)
     CreateTable();
-    [[fallthrough]];
-  case UpdateType::Addresses:
+  if (readdress)
     Update();
-    [[fallthrough]];
-  case UpdateType::Values:
+  if (reread)
+  {
     if (Core::GetState(m_system) == Core::State::Paused)
       GetValues();
-    UpdateColumns();
-    [[fallthrough]];
-  case UpdateType::Symbols:
-    UpdateSymbols();
-    break;
-  case UpdateType::Auto:
-    // Values were captured on CPU thread while doing a callback.
-    if (m_values.size() != 0)
-      UpdateColumns();
-    break;
-  default:
-    break;
+    RefreshValueCells();
   }
+  UpdateSymbols();
 }
 
 void MemoryViewWidget::CreateTable()
 {
-  m_table->clearContents();
+  m_grid->clearContents();
 
-  // This sets all row heights and determines horizontal ascii spacing.
-  // Could be placed in UpdateFont() but doesn't apply correctly unless called more.
-  m_table->verticalHeader()->setDefaultSectionSize(m_font_vspace);
-  m_table->verticalHeader()->setMinimumSectionSize(m_font_vspace);
-  m_table->horizontalHeader()->setMinimumSectionSize(m_font_width * 2);
+  // Row heights (and so the vertical spacing) only take reliably when set here.
+  m_grid->verticalHeader()->setDefaultSectionSize(m_line_height);
+  m_grid->verticalHeader()->setMinimumSectionSize(m_line_height);
+  m_grid->horizontalHeader()->setMinimumSectionSize(m_char_width * 2);
 
-  // Set column and row parameters.
-  // Span is the number of unique memory values covered in one row.
-  const int data_span = m_bytes_per_row / GetTypeSize(m_type);
-  m_data_columns = m_dual_view ? data_span * 2 : data_span;
-  const int total_columns = MISC_COLUMNS + m_data_columns + (m_show_symbols ? 1 : 0);
+  const int span = DataSpan();
+  m_value_columns = m_dual_view ? span * 2 : span;
+  const int columns = FIRST_VALUE_COLUMN + m_value_columns + (m_show_symbols ? 1 : 0);
+  const int rows = m_grid->FittingRows();
+  m_grid->setColumnCount(columns);
+  m_grid->setRowCount(rows);
+  m_grid->setColumnWidth(BREAKPOINT_COLUMN, m_grid->rowHeight(0));
 
-  const int rows =
-      std::round((m_table->height() / static_cast<float>(m_table->rowHeight(0))) - 0.25);
+  const std::optional<Type> left_type = DualViewType();
 
-  m_table->setColumnCount(total_columns);
-  m_table->setRowCount(rows);
-  m_table->setColumnWidth(0, m_table->rowHeight(0));
+  QTableWidgetItem toggle_cell;
+  toggle_cell.setFlags(Qt::ItemIsEnabled);
+  toggle_cell.setData(ROLE_ROW_TOGGLE, true);
+  toggle_cell.setData(ROLE_VALUE_TYPE, static_cast<int>(Type::Null));
 
-  // Get optional dual-view type
-  std::optional<Type> left_type = std::nullopt;
+  QTableWidgetItem address_cell(Unreadable());
+  address_cell.setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+  address_cell.setData(ROLE_ROW_TOGGLE, false);
+  address_cell.setData(ROLE_VALUE_TYPE, static_cast<int>(Type::Null));
 
-  if (m_dual_view)
+  // One prototype is reused for every value cell. Its alignment is only ever set for right-hand
+  // cells, so dual-view left cells after the first row inherit whatever was set last.
+  QTableWidgetItem value_cell(Unreadable());
+  value_cell.setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
+  value_cell.setData(ROLE_ROW_TOGGLE, false);
+  const Qt::Alignment right_alignment =
+      (RightAligned(m_type) ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter;
+
+  for (int r = 0; r < rows; ++r)
   {
-    if (GetTypeSize(m_type) == 1)
-      left_type = Type::Hex8;
-    else if (GetTypeSize(m_type) == 2)
-      left_type = Type::Hex16;
-    else if (GetTypeSize(m_type) == 8)
-      left_type = Type::Hex64;
-    else
-      left_type = Type::Hex32;
-  }
-
-  // Create cells and add data that won't be changing.
-  // Breakpoint buttons
-  auto bp_item = QTableWidgetItem();
-  bp_item.setFlags(Qt::ItemIsEnabled);
-  bp_item.setData(USER_ROLE_IS_ROW_BREAKPOINT_CELL, true);
-  bp_item.setData(USER_ROLE_VALUE_TYPE, static_cast<int>(Type::Null));
-
-  // Row Addresses
-  auto row_item = QTableWidgetItem(INVALID_MEMORY);
-  row_item.setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-  row_item.setData(USER_ROLE_IS_ROW_BREAKPOINT_CELL, false);
-  row_item.setData(USER_ROLE_VALUE_TYPE, static_cast<int>(Type::Null));
-
-  // Data item
-  auto item = QTableWidgetItem(INVALID_MEMORY);
-  item.setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
-  item.setData(USER_ROLE_IS_ROW_BREAKPOINT_CELL, false);
-
-  for (int i = 0; i < rows; i++)
-  {
-    m_table->setItem(i, 0, bp_item.clone());
-    m_table->setItem(i, 1, row_item.clone());
-
-    for (int c = 0; c < m_data_columns; c++)
+    m_grid->setItem(r, BREAKPOINT_COLUMN, toggle_cell.clone());
+    m_grid->setItem(r, ADDRESS_COLUMN, address_cell.clone());
+    for (int c = 0; c < m_value_columns; ++c)
     {
-      if (left_type && c < data_span)
+      if (left_type && c < span)
       {
-        item.setData(USER_ROLE_VALUE_TYPE, static_cast<int>(left_type.value()));
+        value_cell.setData(ROLE_VALUE_TYPE, static_cast<int>(*left_type));
       }
       else
       {
-        item.setData(USER_ROLE_VALUE_TYPE, static_cast<int>(m_type));
-
-        // Left type will never be these.
-        auto text_alignment = Qt::AlignLeft;
-        if (m_type == Type::Signed32 || m_type == Type::Unsigned32 || m_type == Type::Signed16 ||
-            m_type == Type::Unsigned16 || m_type == Type::Signed8 || m_type == Type::Unsigned8)
-        {
-          text_alignment = Qt::AlignRight;
-        }
-        item.setTextAlignment(text_alignment | Qt::AlignVCenter);
+        value_cell.setData(ROLE_VALUE_TYPE, static_cast<int>(m_type));
+        value_cell.setTextAlignment(right_alignment);
       }
-
-      m_table->setItem(i, c + MISC_COLUMNS, item.clone());
+      m_grid->setItem(r, FIRST_VALUE_COLUMN + c, value_cell.clone());
     }
 
-    if (!m_show_symbols)
-      continue;
-
-    // Symbols
-    auto* description_item = new QTableWidgetItem(QStringLiteral("-"));
-    description_item->setFlags(Qt::ItemIsEnabled);
-
-    m_table->setItem(i, m_table->columnCount() - 1, description_item);
+    if (m_show_symbols)
+    {
+      auto* const label = new QTableWidgetItem(QStringLiteral("-"));
+      label->setFlags(Qt::ItemIsEnabled);
+      m_grid->setItem(r, m_grid->columnCount() - 1, label);
+    }
   }
 
-  // Update column width
-  int start_fill = MISC_COLUMNS;
+  // Widths: the dual-view left half (with a wider gap after it), then everything else, the
+  // symbol column included.
+  int next = FIRST_VALUE_COLUMN;
   if (left_type)
   {
-    const int width_left = m_font_width * GetCharacterCount(left_type.value());
-
-    for (int i = 0; i < data_span - 1; i++)
-      m_table->setColumnWidth(i + start_fill, width_left);
-
-    // Extra spacing between dual views.
-    m_table->setColumnWidth(start_fill + data_span - 1, width_left + m_font_width * 2);
-
-    start_fill += data_span;
+    const int left_width = m_char_width * InfoOf(*left_type).chars;
+    for (int c = 0; c < span - 1; ++c)
+      m_grid->setColumnWidth(next + c, left_width);
+    m_grid->setColumnWidth(next + span - 1, left_width + m_char_width * 2);
+    next += span;
   }
-
-  // If dual-view, updates the right-side columns only.
-  const int width = m_font_width * GetCharacterCount(m_type);
-  for (int i = start_fill; i < total_columns; i++)
-    m_table->setColumnWidth(i, width);
+  const int width = m_char_width * InfoOf(m_type).chars;
+  for (int c = next; c < columns; ++c)
+    m_grid->setColumnWidth(c, width);
 }
 
 void MemoryViewWidget::Update()
 {
-  m_table->clearSelection();
+  m_grid->clearSelection();
 
-  // Update addresses
-  const u32 address = Common::AlignDown(m_address, m_alignment);
-  u32 row_address = address - (m_table->rowCount() / 2) * m_bytes_per_row;
-  const int data_span = m_bytes_per_row / GetTypeSize(m_type);
+  const int rows = m_grid->rowCount();
+  const u32 row_bytes = static_cast<u32>(m_bytes_per_row);
+  const u32 value_bytes = static_cast<u32>(BytesOf(m_type));
+  const u32 centre = Common::AlignDown(m_address, static_cast<std::size_t>(m_alignment));
+  const u32 first = centre - static_cast<u32>(rows / 2) * row_bytes;
+  m_shown_range = {first, first + static_cast<u32>(rows) * row_bytes};
 
-  m_address_range.first = row_address;
-  m_address_range.second = row_address + m_table->rowCount() * m_bytes_per_row;
-
-  for (int i = 0; i < m_table->rowCount(); i++, row_address += m_bytes_per_row)
+  const int span = DataSpan();
+  for (int r = 0; r < rows; ++r)
   {
-    auto* bp_item = m_table->item(i, 0);
-    bp_item->setData(USER_ROLE_CELL_ADDRESS, row_address);
+    const u32 row_address = first + static_cast<u32>(r) * row_bytes;
+    m_grid->item(r, BREAKPOINT_COLUMN)->setData(ROLE_ADDRESS, row_address);
+    QTableWidgetItem* const address_cell = m_grid->item(r, ADDRESS_COLUMN);
+    address_cell->setText(Hex8Text(row_address));
+    address_cell->setData(ROLE_ADDRESS, row_address);
 
-    auto* row_item = m_table->item(i, 1);
-    row_item->setText(QStringLiteral("%1").arg(row_address, 8, 16, QLatin1Char('0')));
-    row_item->setData(USER_ROLE_CELL_ADDRESS, row_address);
-
-    for (int c = 0; c < m_data_columns; c++)
+    for (int c = 0; c < m_value_columns; ++c)
     {
-      auto* item = m_table->item(i, c + MISC_COLUMNS);
-
-      u32 item_address;
-      if (m_dual_view && c >= data_span)
-        item_address = row_address + (c - data_span) * GetTypeSize(m_type);
-      else
-        item_address = row_address + c * GetTypeSize(m_type);
-
-      item->setData(USER_ROLE_CELL_ADDRESS, item_address);
-
-      // Reset highlighting.
-      item->setBackground(Qt::transparent);
-      item->setData(USER_ROLE_VALID_ADDRESS, false);
+      // The right half of a dual view repeats the addresses of the left half.
+      const int slot = (m_dual_view && c >= span) ? c - span : c;
+      QTableWidgetItem* const cell = m_grid->item(r, FIRST_VALUE_COLUMN + c);
+      cell->setData(ROLE_ADDRESS, row_address + static_cast<u32>(slot) * value_bytes);
+      cell->setBackground(Qt::transparent);
+      cell->setData(ROLE_READABLE, false);
     }
 
     if (m_show_symbols)
-      m_table->item(i, m_table->columnCount() - 1)->setData(USER_ROLE_CELL_ADDRESS, row_address);
+      m_grid->item(r, m_grid->columnCount() - 1)->setData(ROLE_ADDRESS, row_address);
   }
 
-  UpdateBreakpointTags();
+  RefreshBreakpointMarks();
 }
 
-void MemoryViewWidget::UpdateColumns()
+// Writes the captured values into the cells. A cell whose value changed is tinted with the
+// highlight colour, which then fades by one alpha step per refresh.
+void MemoryViewWidget::RefreshValueCells()
 {
-  for (int i = 0; i < m_table->rowCount(); i++)
+  const auto lookup = [](const ValueMap& values, u32 address) -> std::optional<QString> {
+    const auto found = values.find(address);
+    return found == values.end() ? std::nullopt : found->second;
+  };
+
+  for (int r = 0; r < m_grid->rowCount(); ++r)
   {
-    for (int c = 0; c < m_data_columns; c++)
+    for (int c = 0; c < m_value_columns; ++c)
     {
-      auto* cell_item = m_table->item(i, c + MISC_COLUMNS);
-      if (!cell_item)
+      QTableWidgetItem* const cell = m_grid->item(r, FIRST_VALUE_COLUMN + c);
+      if (cell == nullptr)
         return;
 
-      const u32 cell_address = cell_item->data(USER_ROLE_CELL_ADDRESS).toUInt();
-      const Type type = static_cast<Type>(cell_item->data(USER_ROLE_VALUE_TYPE).toInt());
-      std::optional<QString> new_text;
+      const u32 address = cell->data(ROLE_ADDRESS).toUInt();
+      const Type type = static_cast<Type>(cell->data(ROLE_VALUE_TYPE).toInt());
+      // Only the dual-view left half has a type other than m_type.
+      const std::optional<QString> text =
+          lookup(type == m_type ? m_values : m_dual_values, address);
 
-      // Dual view auto sets the type of the left-side based on m_type. Only time type and
-      // m_type differ.
-      if (type != m_type)
-      {
-        new_text = m_values_dual_view.empty() || !m_values_dual_view.contains(cell_address) ?
-                       std::nullopt :
-                       m_values_dual_view.at(cell_address);
-      }
-      else
-      {
-        new_text = m_values.empty() || !m_values.contains(cell_address) ? std::nullopt :
-                                                                          m_values.at(cell_address);
-      }
+      if (address == m_highlight_address)
+        cell->setSelected(true);
 
-      // Set search address to selected / colored
-      if (cell_address == m_address_highlight)
-        cell_item->setSelected(true);
-
-      // Color recently changed items.
-      QColor bcolor = cell_item->background().color();
-      const bool valid = cell_item->data(USER_ROLE_VALID_ADDRESS).toBool();
-
-      // It gets a bit complicated, because invalid addresses becoming valid should not be
-      // colored.
-      if (!new_text.has_value())
+      QColor tint = cell->background().color();
+      const bool was_readable = cell->data(ROLE_READABLE).toBool();
+      if (!text)
       {
-        cell_item->setBackground(Qt::transparent);
-        cell_item->setData(USER_ROLE_VALID_ADDRESS, false);
-        cell_item->setText(INVALID_MEMORY);
+        cell->setBackground(Qt::transparent);
+        cell->setData(ROLE_READABLE, false);
+        cell->setText(Unreadable());
       }
-      else if (!valid)
+      else if (!was_readable)
       {
-        // Wasn't valid on last update, is valid now.
-        cell_item->setData(USER_ROLE_VALID_ADDRESS, true);
-        cell_item->setText(new_text.value());
+        // Becoming readable is not a change worth highlighting.
+        cell->setData(ROLE_READABLE, true);
+        cell->setText(*text);
       }
-      else if (bcolor.rgb() != m_highlight_color.rgb() && bcolor != Qt::transparent)
+      else if (tint.rgb() != m_highlight.rgb() && tint != Qt::transparent)
       {
-        // Filter out colors that shouldn't change, such as breakpoints.
-        cell_item->setText(new_text.value());
+        // Some other colour (a breakpoint) is in charge of this cell.
+        cell->setText(*text);
       }
-      else if (cell_item->text() != new_text.value())
+      else if (cell->text() != *text)
       {
-        // Cell changed, apply highlighting.
-        cell_item->setBackground(m_highlight_color);
-        cell_item->setText(new_text.value());
+        cell->setBackground(m_highlight);
+        cell->setText(*text);
       }
-      else if (bcolor.alpha() > 0)
+      else if (tint.alpha() > 0)
       {
-        // Fade out highlighting each frame.
-        bcolor.setAlpha(bcolor.alpha() - 1);
-        cell_item->setBackground(bcolor);
+        tint.setAlpha(tint.alpha() - 1);
+        cell->setBackground(tint);
       }
     }
   }
@@ -600,201 +560,145 @@ void MemoryViewWidget::UpdateSymbols()
   if (!m_show_symbols)
     return;
 
-  // Update symbols
-  for (int i = 0; i < m_table->rowCount(); i++)
+  const int label_column = m_grid->columnCount() - 1;
+  for (int r = 0; r < m_grid->rowCount(); ++r)
   {
-    auto* item = m_table->item(i, m_table->columnCount() - 1);
-    if (!item)
+    QTableWidgetItem* const label = m_grid->item(r, label_column);
+    if (label == nullptr)
       continue;
 
-    const u32 address = item->data(USER_ROLE_CELL_ADDRESS).toUInt();
-    const Common::Note* note = m_ppc_symbol_db.GetNoteFromAddr(address);
-
-    std::string desc;
-    if (note == nullptr)
-      desc = m_ppc_symbol_db.GetDescription(address);
-    else
-      desc = note->name;
-
-    item->setText(QString::fromStdString(" " + desc));
+    // A note takes precedence over the symbol description.
+    const u32 address = label->data(ROLE_ADDRESS).toUInt();
+    const Common::Note* const note = m_symbol_db.GetNoteFromAddr(address);
+    const std::string text = note != nullptr ? note->name : m_symbol_db.GetDescription(address);
+    label->setText(QString::fromStdString(" " + text));
   }
-
-  if (m_show_symbols)
-    m_table->resizeColumnToContents(m_table->columnCount() - 1);
+  m_grid->resizeColumnToContents(label_column);
 }
 
-// Always runs on CPU thread from a callback.
+// Called on the CPU thread at the end of a frame. Never blocks, and never touches widgets.
 void MemoryViewWidget::UpdateOnFrameEnd()
 {
-  std::unique_lock lock(m_updating, std::try_to_lock);
-  if (lock)
-  {
-    GetValues();
-    // Should not directly trigger widget updates on a cpu thread. Signal main thread to do it.
-    emit AutoUpdate();
-  }
+  const std::unique_lock lock(m_busy, std::try_to_lock);
+  if (!lock)
+    return;
+  GetValues();
+  emit AutoUpdate();
 }
 
 void MemoryViewWidget::GetValues()
 {
   m_values.clear();
-  m_values_dual_view.clear();
+  m_dual_values.clear();
+  const std::optional<Type> left_type = DualViewType();
 
-  // Check for dual view type
-  Type type = Type::Null;
-
-  if (m_dual_view)
+  const Core::CPUThreadGuard guard(m_system);
+  const u32 step = static_cast<u32>(BytesOf(m_type));
+  const auto [begin, end] = m_shown_range;
+  const u32 count = (end - begin) / step;
+  for (u32 i = 0; i < count; ++i)
   {
-    if (GetTypeSize(m_type) == 1)
-      type = Type::Hex8;
-    else if (GetTypeSize(m_type) == 2)
-      type = Type::Hex16;
-    else if (GetTypeSize(m_type) == 8)
-      type = Type::Hex64;
-    else
-      type = Type::Hex32;
-  }
-
-  // Grab memory values as QStrings
-  Core::CPUThreadGuard guard(m_system);
-
-  const u32 type_size = static_cast<u32>(GetTypeSize(m_type));
-  const auto& [range_begin, range_end] = m_address_range;
-  const u32 address_count = (range_end - range_begin) / type_size;
-
-  for (u32 i = 0; i < address_count; ++i)
-  {
-    const u32 address = range_begin + i * type_size;
-    m_values.insert(std::pair(address, ValueToString(guard, address, m_type)));
-
-    if (m_dual_view)
-      m_values_dual_view.insert(std::pair(address, ValueToString(guard, address, type)));
+    const u32 address = begin + i * step;
+    m_values.emplace(address, ValueToString(guard, address, m_type));
+    if (left_type)
+      m_dual_values.emplace(address, ValueToString(guard, address, *left_type));
   }
 }
 
-// May only be called if we have taken on the role of the CPU thread
+// Must only be called with the CPU thread's role held (see the guard).
 std::optional<QString> MemoryViewWidget::ValueToString(const Core::CPUThreadGuard& guard,
                                                        u32 address, Type type)
 {
-  const AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(m_address_space);
-  if (!accessors->IsValidAddress(guard, address))
+  const AddressSpace::Accessors* const memory = AddressSpace::GetAccessors(m_address_space);
+  if (!memory->IsValidAddress(guard, address))
     return std::nullopt;
+
+  const auto padded_hex = [](u64 value, int digits) {
+    return QStringLiteral("%1").arg(value, digits, 16, QLatin1Char('0'));
+  };
 
   switch (type)
   {
   case Type::Hex8:
-  {
-    const u8 value = accessors->ReadU8(guard, address);
-    return QStringLiteral("%1").arg(value, 2, 16, QLatin1Char('0'));
-  }
+    return padded_hex(memory->ReadU8(guard, address), 2);
+  case Type::Hex16:
+    return padded_hex(memory->ReadU16(guard, address), 4);
+  case Type::Hex32:
+    return padded_hex(memory->ReadU32(guard, address), 8);
+  case Type::Hex64:
+    return padded_hex(memory->ReadU64(guard, address), 16);
   case Type::ASCII:
   {
-    const char value = accessors->ReadU8(guard, address);
-    return Common::IsPrintableCharacter(value) ? QString{QChar::fromLatin1(value)} :
-                                                 QString{QChar::fromLatin1('.')};
-  }
-  case Type::Hex16:
-  {
-    const u16 value = accessors->ReadU16(guard, address);
-    return QStringLiteral("%1").arg(value, 4, 16, QLatin1Char('0'));
-  }
-  case Type::Hex32:
-  {
-    const u32 value = accessors->ReadU32(guard, address);
-    return QStringLiteral("%1").arg(value, 8, 16, QLatin1Char('0'));
-  }
-  case Type::Hex64:
-  {
-    const u64 value = accessors->ReadU64(guard, address);
-    return QStringLiteral("%1").arg(value, 16, 16, QLatin1Char('0'));
+    const char character = static_cast<char>(memory->ReadU8(guard, address));
+    return QString{QChar::fromLatin1(Common::IsPrintableCharacter(character) ? character : '.')};
   }
   case Type::Unsigned8:
-    return QString::number(accessors->ReadU8(guard, address));
+    return QString::number(memory->ReadU8(guard, address));
   case Type::Unsigned16:
-    return QString::number(accessors->ReadU16(guard, address));
+    return QString::number(memory->ReadU16(guard, address));
   case Type::Unsigned32:
-    return QString::number(accessors->ReadU32(guard, address));
+    return QString::number(memory->ReadU32(guard, address));
   case Type::Signed8:
-    return QString::number(std::bit_cast<s8>(accessors->ReadU8(guard, address)));
+    return QString::number(std::bit_cast<s8>(memory->ReadU8(guard, address)));
   case Type::Signed16:
-    return QString::number(std::bit_cast<s16>(accessors->ReadU16(guard, address)));
+    return QString::number(std::bit_cast<s16>(memory->ReadU16(guard, address)));
   case Type::Signed32:
-    return QString::number(std::bit_cast<s32>(accessors->ReadU32(guard, address)));
+    return QString::number(std::bit_cast<s32>(memory->ReadU32(guard, address)));
   case Type::Float32:
-  {
-    QString string = QString::number(accessors->ReadF32(guard, address), 'g', 4);
-    // Align to first digit.
-    if (!string.startsWith(QLatin1Char('-')))
-      string.prepend(QLatin1Char(' '));
-
-    return string;
-  }
+    return FloatText(memory->ReadF32(guard, address));
   case Type::Double:
-  {
-    QString string =
-        QString::number(std::bit_cast<double>(accessors->ReadU64(guard, address)), 'g', 4);
-    // Align to first digit.
-    if (!string.startsWith(QLatin1Char('-')))
-      string.prepend(QLatin1Char(' '));
-
-    return string;
-  }
+    return FloatText(std::bit_cast<double>(memory->ReadU64(guard, address)));
   default:
     return std::nullopt;
   }
 }
 
-void MemoryViewWidget::UpdateBreakpointTags()
+// Paints value cells covered by a memory breakpoint red and shows the row icon when any are.
+void MemoryViewWidget::RefreshBreakpointMarks()
 {
-  for (int i = 0; i < m_table->rowCount(); i++)
+  const bool effective = m_address_space == AddressSpace::Type::Effective;
+  const int value_bytes = BytesOf(m_type);
+  MemChecks& checks = m_system.GetPowerPC().GetMemChecks();
+
+  for (int r = 0; r < m_grid->rowCount(); ++r)
   {
-    bool row_breakpoint = false;
-
-    for (int c = 0; c < m_data_columns; c++)
+    bool marked = false;
+    for (int c = 0; c < m_value_columns; ++c)
     {
-      // Pull address from cell itself, helpful for dual column view.
-      auto cell = m_table->item(i, c + MISC_COLUMNS);
-      const u32 address = cell->data(USER_ROLE_CELL_ADDRESS).toUInt();
-
+      QTableWidgetItem* const cell = m_grid->item(r, FIRST_VALUE_COLUMN + c);
+      const u32 address = cell->data(ROLE_ADDRESS).toUInt();
+      // Address 0 is treated as "no address" and also clears what earlier cells found.
       if (address == 0)
       {
-        row_breakpoint = false;
+        marked = false;
         continue;
       }
 
-      if (m_address_space == AddressSpace::Type::Effective &&
-          m_system.GetPowerPC().GetMemChecks().GetMemCheck(address, GetTypeSize(m_type)) != nullptr)
-      {
-        row_breakpoint = true;
-        cell->setBackground(Qt::red);
-      }
-      else
-      {
-        cell->setBackground(Qt::transparent);
-      }
+      const bool covered =
+          effective &&
+          checks.GetMemCheck(address, static_cast<std::size_t>(value_bytes)) != nullptr;
+      cell->setBackground(covered ? QBrush(Qt::red) : QBrush(Qt::transparent));
+      marked = marked || covered;
     }
 
-    if (row_breakpoint)
+    QTableWidgetItem* const toggle = m_grid->item(r, BREAKPOINT_COLUMN);
+    if (marked)
     {
-      m_table->item(i, 0)->setData(
-          Qt::DecorationRole,
-          Resources::GetThemeIcon("debugger_breakpoint")
-              .pixmap(QSize(m_table->rowHeight(0) - 3, m_table->rowHeight(0) - 3)));
+      const int edge = m_grid->rowHeight(0) - 3;
+      toggle->setData(Qt::DecorationRole,
+                      Resources::GetThemeIcon("debugger_breakpoint").pixmap(QSize(edge, edge)));
     }
     else
     {
-      m_table->item(i, 0)->setData(Qt::DecorationRole, QIcon());
+      toggle->setData(Qt::DecorationRole, QIcon());
     }
   }
 }
 
 void MemoryViewWidget::SetAddressSpace(AddressSpace::Type address_space)
 {
-  if (m_address_space == address_space)
-  {
+  if (address_space == m_address_space)
     return;
-  }
-
   m_address_space = address_space;
   UpdateDispatcher(UpdateType::Addresses);
 }
@@ -804,161 +708,83 @@ AddressSpace::Type MemoryViewWidget::GetAddressSpace() const
   return m_address_space;
 }
 
+// Parses text typed into a cell of the given type into the bytes to store, most significant
+// first. Returns nothing if the text does not fit the type.
 std::vector<u8> MemoryViewWidget::ConvertTextToBytes(Type type, QStringView input_text) const
 {
-  if (type == Type::Null)
-    return {};
-
-  bool good = false;
-  int radix = 0;
+  bool ok = false;
+  // 0 lets Qt pick the base from the prefix (0x, 0); the hex types force 16.
+  const int base = (type == Type::Hex8 || type == Type::Hex16 || type == Type::Hex32) ? 16 : 0;
 
   switch (type)
   {
   case Type::ASCII:
-  {
-    const QByteArray qbytes = input_text.toUtf8();
-    std::vector<u8> bytes;
-
-    for (const char c : qbytes)
-      bytes.push_back(static_cast<u8>(c));
-
-    return bytes;
-  }
+    return RawBytes(input_text.toUtf8());
   case Type::Float32:
   {
-    const float float_value = input_text.toFloat(&good);
-
-    if (good)
-    {
-      const u32 value = std::bit_cast<u32>(float_value);
-      auto std_array = Common::BitCastToArray<u8>(Common::swap32(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const float value = input_text.toFloat(&ok);
+    return ok ? GuestBytes(std::bit_cast<u32>(value)) : std::vector<u8>{};
   }
   case Type::Double:
   {
-    const double double_value = input_text.toDouble(&good);
-
-    if (good)
-    {
-      const u64 value = std::bit_cast<u64>(double_value);
-      auto std_array = Common::BitCastToArray<u8>(Common::swap64(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const double value = input_text.toDouble(&ok);
+    return ok ? GuestBytes(std::bit_cast<u64>(value)) : std::vector<u8>{};
   }
   case Type::Signed8:
   {
-    const short value = input_text.toShort(&good, radix);
-    good &= std::numeric_limits<signed char>::min() <= value &&
-            value <= std::numeric_limits<signed char>::max();
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap8(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const short value = input_text.toShort(&ok, base);
+    ok = ok && value >= std::numeric_limits<s8>::min() && value <= std::numeric_limits<s8>::max();
+    return ok ? GuestBytes(static_cast<u8>(value)) : std::vector<u8>{};
   }
   case Type::Signed16:
   {
-    const short value = input_text.toShort(&good, radix);
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap16(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const short value = input_text.toShort(&ok, base);
+    return ok ? GuestBytes(static_cast<u16>(value)) : std::vector<u8>{};
   }
   case Type::Signed32:
   {
-    const int value = input_text.toInt(&good, radix);
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap32(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const int value = input_text.toInt(&ok, base);
+    return ok ? GuestBytes(static_cast<u32>(value)) : std::vector<u8>{};
   }
   case Type::Hex8:
-    radix = 16;
-    [[fallthrough]];
   case Type::Unsigned8:
   {
-    const unsigned short value = input_text.toUShort(&good, radix);
-    good &= (value & 0xFF00) == 0;
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap8(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const unsigned short value = input_text.toUShort(&ok, base);
+    ok = ok && value <= 0xFF;
+    return ok ? GuestBytes(static_cast<u8>(value)) : std::vector<u8>{};
   }
   case Type::Hex16:
-    radix = 16;
-    [[fallthrough]];
   case Type::Unsigned16:
   {
-    const unsigned short value = input_text.toUShort(&good, radix);
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap16(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const unsigned short value = input_text.toUShort(&ok, base);
+    return ok ? GuestBytes(static_cast<u16>(value)) : std::vector<u8>{};
   }
   case Type::Hex32:
-    radix = 16;
-    [[fallthrough]];
   case Type::Unsigned32:
   {
-    const u32 value = input_text.toUInt(&good, radix);
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap32(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const u32 value = input_text.toUInt(&ok, base);
+    return ok ? GuestBytes(value) : std::vector<u8>{};
   }
   case Type::Hex64:
   {
-    const u64 value = input_text.toULongLong(&good, 16);
-    if (good)
-    {
-      auto std_array = Common::BitCastToArray<u8>(Common::swap64(value));
-      return std::vector<u8>(std_array.begin(), std_array.end());
-    }
-    break;
+    const u64 value = input_text.toULongLong(&ok, 16);
+    return ok ? GuestBytes(value) : std::vector<u8>{};
   }
   case Type::HexString:
   {
-    // Confirm it is only hex bytes
-    const QRegularExpression is_hex(QStringLiteral("^([0-9A-F]{2})*$"),
-                                    QRegularExpression::CaseInsensitiveOption);
+    // Whole bytes only: an even number of hex digits.
+    static const QRegularExpression whole_bytes(QStringLiteral("^([0-9A-F]{2})*$"),
+                                                QRegularExpression::CaseInsensitiveOption);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-    const QRegularExpressionMatch match = is_hex.matchView(input_text);
+    const bool matches = whole_bytes.matchView(input_text).hasMatch();
 #else
-    const QRegularExpressionMatch match = is_hex.match(input_text);
+    const bool matches = whole_bytes.match(input_text).hasMatch();
 #endif
-    good = match.hasMatch();
-    if (good)
-    {
-      const QByteArray qbytes = QByteArray::fromHex(input_text.toUtf8());
-      std::vector<u8> bytes;
-
-      for (const char c : qbytes)
-        bytes.push_back(static_cast<u8>(c));
-
-      return bytes;
-    }
-    break;
+    return matches ? RawBytes(QByteArray::fromHex(input_text.toUtf8())) : std::vector<u8>{};
   }
   default:
-    // Do nothing
-    break;
+    return {};
   }
-
-  return {};
 }
 
 void MemoryViewWidget::SetDisplay(Type type, int bytes_per_row, int alignment, bool dual_view)
@@ -966,58 +792,46 @@ void MemoryViewWidget::SetDisplay(Type type, int bytes_per_row, int alignment, b
   m_type = type;
   m_bytes_per_row = bytes_per_row;
   m_dual_view = dual_view;
-  if (alignment == 0)
-    m_alignment = GetTypeSize(type);
-  else
-    m_alignment = alignment;
-
+  // An alignment of 0 means "align to the value size".
+  m_alignment = alignment != 0 ? alignment : BytesOf(type);
   UpdateDispatcher(UpdateType::Full);
 }
 
 void MemoryViewWidget::ToggleHighlights(bool enabled)
 {
-  // m_highlight_color should hold the current highlight color even when disabled, so it can
-  // be used if re-enabled. If modifying the enabled alpha, change in .h file as well.
+  // The colour is kept while disabled; only its alpha says whether highlighting is on.
+  m_highlight.setAlpha(enabled ? 100 : 0);
   if (enabled)
-  {
-    m_highlight_color.setAlpha(100);
-  }
-  else
-  {
-    // Treated as being interchangeable with Qt::transparent.
-    m_highlight_color.setAlpha(0);
+    return;
 
-    // Immediately remove highlights when paused.
-    for (int i = 0; i < m_table->rowCount(); i++)
-    {
-      for (int c = 0; c < m_data_columns; c++)
-        m_table->item(i, c + MISC_COLUMNS)->setBackground(m_highlight_color);
-    }
+  // Clear the current tints straight away (matters while paused).
+  for (int r = 0; r < m_grid->rowCount(); ++r)
+  {
+    for (int c = 0; c < m_value_columns; ++c)
+      m_grid->item(r, FIRST_VALUE_COLUMN + c)->setBackground(m_highlight);
   }
 }
 
 void MemoryViewWidget::SetHighlightColor()
 {
-  // Could allow custom alphas to be set, which would change fade-out rate.
-  QColor color = QColorDialog::getColor(m_highlight_color);
-  if (!color.isValid())
+  QColor picked = QColorDialog::getColor(m_highlight);
+  if (!picked.isValid())
     return;
 
-  const bool enabled = m_highlight_color.alpha() != 0;
-  m_highlight_color = color;
-  m_highlight_color.setAlpha(enabled ? 100 : 0);
+  const bool enabled = m_highlight.alpha() != 0;
+  m_highlight = picked;
+  m_highlight.setAlpha(enabled ? 100 : 0);
   if (!enabled)
     return;
 
-  // Immediately update colors. Only useful for playing with colors while paused.
-  for (int i = 0; i < m_table->rowCount(); i++)
+  // Recolour the existing tints, each keeping how far it has faded.
+  for (int r = 0; r < m_grid->rowCount(); ++r)
   {
-    for (int c = 0; c < m_data_columns; c++)
+    for (int c = 0; c < m_value_columns; ++c)
     {
-      auto* item = m_table->item(i, c + MISC_COLUMNS);
-      // Get current cell alpha state.
-      color.setAlpha(item->background().color().alpha());
-      m_table->item(i, c + MISC_COLUMNS)->setBackground(color);
+      QTableWidgetItem* const cell = m_grid->item(r, FIRST_VALUE_COLUMN + c);
+      picked.setAlpha(cell->background().color().alpha());
+      cell->setBackground(picked);
     }
   }
 }
@@ -1029,84 +843,81 @@ void MemoryViewWidget::SetBPType(BPType type)
 
 void MemoryViewWidget::SetAddress(u32 address)
 {
-  m_address_highlight = address;
-  if (m_address == address)
+  m_highlight_address = address;
+  if (address == m_address)
     return;
-
   m_address = address;
-
   UpdateDispatcher(UpdateType::Addresses);
 }
 
 void MemoryViewWidget::SetBPLoggingEnabled(bool enabled)
 {
-  m_do_log = enabled;
+  m_log_hits = enabled;
 }
 
+void MemoryViewWidget::ScrollRows(s64 rows)
+{
+  m_address = static_cast<u32>(m_address + static_cast<u64>(rows * m_bytes_per_row));
+  UpdateDispatcher(UpdateType::Addresses);
+}
+
+// Toggles a memory breakpoint on one value, or on every value of the row starting at addr. For a
+// row, any existing breakpoint on it means "clear the row" rather than "fill it".
 void MemoryViewWidget::ToggleBreakpoint(u32 addr, bool row)
 {
   if (m_address_space != AddressSpace::Type::Effective)
     return;
 
-  const auto length = GetTypeSize(m_type);
-  const int breaks = row ? (m_bytes_per_row / length) : 1;
-  bool overlap = false;
-
-  auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-
-  // Row breakpoint should either remove any breakpoint left on the row, or activate all
-  // breakpoints.
-  if (row && memchecks.OverlapsMemcheck(addr, m_bytes_per_row))
-    overlap = true;
+  const int length = BytesOf(m_type);
+  const int count = row ? m_bytes_per_row / length : 1;
+  MemChecks& checks = m_system.GetPowerPC().GetMemChecks();
+  const bool clear_only = row && checks.OverlapsMemcheck(addr, static_cast<u32>(m_bytes_per_row));
 
   {
     const Core::CPUThreadGuard guard(m_system);
-    DelayedMemCheckUpdate delayed_update(&memchecks);
-
-    for (int i = 0; i < breaks; i++)
+    DelayedMemCheckUpdate pending(&checks);
+    for (int i = 0; i < count; ++i)
     {
-      u32 address = addr + length * i;
-      TMemCheck* check_ptr = memchecks.GetMemCheck(address, length);
-
-      if (check_ptr == nullptr && !overlap)
+      const u32 address = addr + static_cast<u32>(length * i);
+      const TMemCheck* const existing =
+          checks.GetMemCheck(address, static_cast<std::size_t>(length));
+      if (existing != nullptr)
       {
-        TMemCheck check;
-        check.start_address = address;
-        check.end_address = check.start_address + length - 1;
-        check.is_ranged = length > 0;
-        check.is_break_on_read = (m_bp_type == BPType::ReadOnly || m_bp_type == BPType::ReadWrite);
-        check.is_break_on_write =
-            (m_bp_type == BPType::WriteOnly || m_bp_type == BPType::ReadWrite);
-        check.log_on_hit = m_do_log;
-        check.break_on_hit = true;
+        // Removing by the found start also handles checks that are not aligned to the view.
+        pending |= checks.Remove(existing->start_address);
+        continue;
+      }
+      if (clear_only)
+        continue;
 
-        delayed_update |= memchecks.Add(std::move(check));
-      }
-      else if (check_ptr != nullptr)
-      {
-        // Using the pointer fixes misaligned breakpoints (0x11 breakpoint in 0x10 aligned view).
-        delayed_update |= memchecks.Remove(check_ptr->start_address);
-      }
+      TMemCheck check;
+      check.start_address = address;
+      check.end_address = address + static_cast<u32>(length) - 1;
+      check.is_ranged = length > 0;
+      check.is_break_on_read = m_bp_type != BPType::WriteOnly;
+      check.is_break_on_write = m_bp_type != BPType::ReadOnly;
+      check.log_on_hit = m_log_hits;
+      check.break_on_hit = true;
+      pending |= checks.Add(std::move(check));
     }
   }
 
-  emit Host::GetInstance()->PPCBreakpointsChanged();
+  emit Host::GetInstance() -> PPCBreakpointsChanged();
 }
 
-void MemoryViewWidget::OnCopyAddress(u32 addr)
+void MemoryViewWidget::CopyAddress(u32 address) const
 {
-  QApplication::clipboard()->setText(QStringLiteral("%1").arg(addr, 8, 16, QLatin1Char('0')));
+  QApplication::clipboard()->setText(Hex8Text(address));
 }
 
-void MemoryViewWidget::OnCopyHex(u32 addr)
+void MemoryViewWidget::CopyHex(u32 address) const
 {
-  const auto length = GetTypeSize(m_type);
-
-  const u64 value =
-      AddressSpace::GetAccessors(m_address_space)->ReadU64(Core::CPUThreadGuard{m_system}, addr);
-
+  // Read a full 64-bit word and keep as many leading digits as the value type has.
+  const qsizetype digits = BytesOf(m_type) * 2;
+  const u64 word =
+      AddressSpace::GetAccessors(m_address_space)->ReadU64(Core::CPUThreadGuard{m_system}, address);
   QApplication::clipboard()->setText(
-      QStringLiteral("%1").arg(value, sizeof(u64) * 2, 16, QLatin1Char('0')).left(length * 2));
+      QStringLiteral("%1").arg(word, 16, 16, QLatin1Char('0')).left(digits));
 }
 
 void MemoryViewWidget::ShowSymbols(bool enable)
@@ -1115,170 +926,165 @@ void MemoryViewWidget::ShowSymbols(bool enable)
   UpdateDispatcher(UpdateType::Full);
 }
 
-void MemoryViewWidget::OnEditSymbol(EditSymbolType type, u32 addr)
+void MemoryViewWidget::EditLabel(EditSymbolType kind, u32 address)
 {
-  // Add Note and Add Region use these values.
-  std::string name = "";
-  std::string object_name = "";
-  u32 size = GetTypeSize(m_type);
-  u32 address = addr;
+  // Defaults for a new note or region at the clicked value.
+  std::string name;
+  std::string object_name;
+  u32 size = static_cast<u32>(BytesOf(m_type));
+  u32 start = address;
   EditSymbolDialog::Type dialog_type = EditSymbolDialog::Type::Note;
 
-  // Add and edit region are tied to the same context menu action.
-  if (type == EditSymbolType::EditRegion)
+  if (kind == EditSymbolType::EditRegion)
   {
-    // If symbol doesn't exist, it's safe to add a new region.
-    const Common::Symbol* const symbol = m_ppc_symbol_db.GetSymbolFromAddr(addr);
     dialog_type = EditSymbolDialog::Type::Symbol;
-
-    if (symbol != nullptr)
+    if (const Common::Symbol* const symbol = m_symbol_db.GetSymbolFromAddr(address))
     {
-      // Leave the more specialized function editing to code widget.
+      // Functions are edited from the code view; only data regions are handled here.
       if (symbol->type != Common::Symbol::Type::Data)
         return;
-
-      // Edit data region.
       name = symbol->name;
       object_name = symbol->object_name;
       size = symbol->size;
-      address = symbol->address;
+      start = symbol->address;
     }
   }
-  else if (type == EditSymbolType::EditNote)
+  else if (kind == EditSymbolType::EditNote)
   {
-    const Common::Note* note = m_ppc_symbol_db.GetNoteFromAddr(addr);
+    const Common::Note* const note = m_symbol_db.GetNoteFromAddr(address);
     if (note == nullptr)
       return;
-
     name = note->name;
     size = note->size;
-    address = note->address;
+    start = note->address;
   }
 
-  EditSymbolDialog dialog(this, address, &size, &name, dialog_type);
-
+  EditSymbolDialog dialog(this, start, &size, &name, dialog_type);
   if (dialog.exec() != QDialog::Accepted)
     return;
 
+  const bool region = kind == EditSymbolType::EditRegion;
   if (dialog.DeleteRequested())
   {
-    if (type == EditSymbolType::EditRegion)
-      m_ppc_symbol_db.DeleteFunction(address);
+    if (region)
+      m_symbol_db.DeleteFunction(start);
     else
-      m_ppc_symbol_db.DeleteNote(address);
+      m_symbol_db.DeleteNote(start);
   }
-  else if (type == EditSymbolType::EditRegion)
+  else if (region)
   {
-    m_ppc_symbol_db.AddKnownSymbol(Core::CPUThreadGuard{m_system}, address, size, name, object_name,
-                                   Common::Symbol::Type::Data);
+    m_symbol_db.AddKnownSymbol(Core::CPUThreadGuard{m_system}, start, size, name, object_name,
+                               Common::Symbol::Type::Data);
   }
   else
   {
-    m_ppc_symbol_db.AddKnownNote(address, size, name);
-    m_ppc_symbol_db.DetermineNoteLayers();
+    m_symbol_db.AddKnownNote(start, size, name);
+    m_symbol_db.DetermineNoteLayers();
   }
-
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  emit Host::GetInstance() -> PPCSymbolsChanged();
 }
 
-void MemoryViewWidget::OnContextMenu(const QPoint& pos)
+void MemoryViewWidget::ShowCellMenu(const QPoint& pos)
 {
-  auto* item_selected = m_table->itemAt(pos);
-
-  // We don't have a meaningful context menu to show for when the user right-clicks either free
-  // space in the table or the row breakpoint cell.
-  if (!item_selected || item_selected->data(USER_ROLE_IS_ROW_BREAKPOINT_CELL).toBool())
+  const QTableWidgetItem* const cell = m_grid->itemAt(pos);
+  // Empty space and the row breakpoint cells have no menu.
+  if (cell == nullptr || cell->data(ROLE_ROW_TOGGLE).toBool())
     return;
 
-  const u32 addr = item_selected->data(USER_ROLE_CELL_ADDRESS).toUInt();
-  const bool item_has_value =
-      item_selected->data(USER_ROLE_VALUE_TYPE).toInt() != static_cast<int>(Type::Null) &&
-      AddressSpace::GetAccessors(m_address_space)
-          ->IsValidAddress(Core::CPUThreadGuard{m_system}, addr);
+  const int cell_row = cell->row();
+  const int cell_column = cell->column();
+  const u32 address = cell->data(ROLE_ADDRESS).toUInt();
+  const bool has_value = cell->data(ROLE_VALUE_TYPE).toInt() != static_cast<int>(Type::Null) &&
+                         AddressSpace::GetAccessors(m_address_space)
+                             ->IsValidAddress(Core::CPUThreadGuard{m_system}, address);
 
-  auto* menu = new QMenu(this);
+  auto* const menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
-  menu->addAction(tr("Copy Address"), this, [this, addr] { OnCopyAddress(addr); });
-
-  auto* copy_hex = menu->addAction(tr("Copy Hex"), this, [this, addr] { OnCopyHex(addr); });
-  copy_hex->setEnabled(item_has_value);
-
-  auto* copy_value = menu->addAction(tr("Copy Value"), this, [item_selected] {
-    QApplication::clipboard()->setText(item_selected->text());
-  });
-  copy_value->setEnabled(item_has_value);
-
+  menu->addAction(tr("Copy Address"), this, [this, address] { CopyAddress(address); });
+  menu->addAction(tr("Copy Hex"), this, [this, address] { CopyHex(address); })
+      ->setEnabled(has_value);
+  menu->addAction(tr("Copy Value"), this,
+                  [this, cell_row, cell_column] {
+                    // Looked up again: the table may have been rebuilt while the menu was open.
+                    if (const QTableWidgetItem* const now = m_grid->item(cell_row, cell_column))
+                      QApplication::clipboard()->setText(now->text());
+                  })
+      ->setEnabled(has_value);
   menu->addSeparator();
 
-  auto* note_add_action = menu->addAction(
-      tr("Add Note"), this, [this, addr] { OnEditSymbol(EditSymbolType::AddNote, addr); });
-  auto* note_edit_action = menu->addAction(
-      tr("Edit Note"), this, [this, addr] { OnEditSymbol(EditSymbolType::EditNote, addr); });
+  QAction* const add_note = menu->addAction(
+      tr("Add Note"), this, [this, address] { EditLabel(EditSymbolType::AddNote, address); });
+  QAction* const edit_note = menu->addAction(
+      tr("Edit Note"), this, [this, address] { EditLabel(EditSymbolType::EditNote, address); });
   menu->addAction(tr("Add or edit region label"), this,
-                  [this, addr] { OnEditSymbol(EditSymbolType::EditRegion, addr); });
+                  [this, address] { EditLabel(EditSymbolType::EditRegion, address); });
 
-  auto* note = m_ppc_symbol_db.GetNoteFromAddr(addr);
-  note_edit_action->setEnabled(note != nullptr);
-  // A note cannot be added on top of the starting address of another note.
-  if (note != nullptr && note->address == addr)
-    note_add_action->setEnabled(false);
-
+  // Notes can be edited anywhere inside them, but a new one cannot start where one already does.
+  const Common::Note* const note = m_symbol_db.GetNoteFromAddr(address);
+  edit_note->setEnabled(note != nullptr);
+  if (note != nullptr && note->address == address)
+    add_note->setEnabled(false);
   menu->addSeparator();
 
-  menu->addAction(tr("Show in code"), this, [this, addr] { emit ShowCode(addr); });
-
+  menu->addAction(tr("Show in code"), this, [this, address] { emit ShowCode(address); });
   menu->addSeparator();
 
-  menu->addAction(tr("Add to watch"), this, [this, addr] {
-    const QString name = QStringLiteral("mem_%1").arg(addr, 8, 16, QLatin1Char('0'));
-    emit RequestWatch(name, addr);
+  menu->addAction(tr("Add to watch"), this, [this, address] {
+    emit RequestWatch(QStringLiteral("mem_%1").arg(address, 8, 16, QLatin1Char('0')), address);
   });
-
-  menu->addAction(tr("Toggle Breakpoint"), this, [this, addr] { ToggleBreakpoint(addr, false); });
+  menu->addAction(tr("Toggle Breakpoint"), this,
+                  [this, address] { ToggleBreakpoint(address, false); });
 
   menu->exec(QCursor::pos());
 }
 
-void MemoryViewWidget::ScrollbarActionTriggered(int action)
+void MemoryViewWidget::WriteTypedText(int row, int column, const QString& text)
 {
-  const int difference = m_scrollbar->sliderPosition() - m_scrollbar->value();
-  if (difference == 0)
-    return;
+  const QTableWidgetItem* const cell = m_grid->item(row, column);
+  const Type type = static_cast<Type>(cell->data(ROLE_VALUE_TYPE).toInt());
+  const std::vector<u8> bytes = ConvertTextToBytes(type, text);
+  u32 address = cell->data(ROLE_ADDRESS).toUInt();
+  const u32 last = address + static_cast<u32>(bytes.size()) - 1;
 
-  if (m_scrollbar->isSliderDown())
+  AddressSpace::Accessors* const memory = AddressSpace::GetAccessors(m_address_space);
   {
-    // User is currently dragging the scrollbar.
-    // Adjust the memory view by the exact drag difference.
-    m_address += difference * m_bytes_per_row;
-    UpdateDispatcher(UpdateType::Addresses);
-  }
-  else
-  {
-    if (std::abs(difference) == 1)
+    // Written only if both ends are mapped.
+    const Core::CPUThreadGuard guard(m_system);
+    if (!bytes.empty() && memory->IsValidAddress(guard, address) &&
+        memory->IsValidAddress(guard, last))
     {
-      // User clicked the arrows at the top or bottom, go up/down one row.
-      m_address += difference * m_bytes_per_row;
+      for (const u8 byte : bytes)
+        memory->WriteU8(guard, address++, byte);
     }
-    else
-    {
-      // User clicked the free part of the scrollbar, go up/down one page.
-      m_address += (difference < 0 ? -1 : 1) * m_bytes_per_row * m_table->rowCount();
-    }
-
-    UpdateDispatcher(UpdateType::Addresses);
-    // Manually reset the draggable part of the bar back to the center.
-    m_scrollbar->setSliderPosition(SCROLLBAR_CENTER);
   }
+  UpdateDispatcher(UpdateType::Values);
 }
 
-void MemoryViewWidget::ScrollbarSliderReleased()
+// Dragging moves by the distance dragged; a click on an arrow moves one row and a click on the
+// trough one page. Clicks put the handle straight back in the middle.
+void MemoryViewWidget::ScrollBarAction()
 {
-  // Reset the draggable part of the bar back to the center.
-  m_scrollbar->setValue(SCROLLBAR_CENTER);
+  const int moved = m_scroll->sliderPosition() - m_scroll->value();
+  if (moved == 0)
+    return;
+
+  if (m_scroll->isSliderDown())
+  {
+    ScrollRows(moved);
+    return;
+  }
+
+  ScrollRows(std::abs(moved) == 1 ? moved : (moved < 0 ? -1 : 1) * m_grid->rowCount());
+  m_scroll->setSliderPosition(SCROLL_MIDDLE);
+}
+
+void MemoryViewWidget::RecentreScrollBar()
+{
+  m_scroll->setValue(SCROLL_MIDDLE);
 }
 
 void MemoryViewWidget::SetFocus() const
 {
-  m_table->setFocus();
+  m_grid->setFocus();
 }
