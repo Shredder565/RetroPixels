@@ -176,7 +176,8 @@ auto NewSearch(const Core::CPUThreadGuard& guard, std::span<const MemoryRange> m
 }
 
 template <typename T>
-auto NextSearch(const Core::CPUThreadGuard& guard, std::span<const SearchResult<T>> previous_results,
+auto NextSearch(const Core::CPUThreadGuard& guard,
+                std::span<const SearchResult<T>> previous_results,
                 PowerPC::RequestedAddressSpace address_space,
                 const std::function<bool(const T& new_value, const T& old_value)>& validator)
     -> std::expected<std::vector<SearchResult<T>>, SearchErrorCode>

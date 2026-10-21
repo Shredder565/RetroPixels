@@ -22,9 +22,20 @@ namespace Core
 {
 namespace
 {
+// The emulated socket number as the host's socket API wants it (unsigned on Windows).
+auto HostSocket(s32 socket)
+{
+#ifdef _WIN32
+  return static_cast<SOCKET>(socket);
+#else
+  return socket;
+#endif
+}
+
 std::string DumpPath(std::string_view suffix)
 {
-  return File::GetUserPath(D_DUMPSSL_IDX) + SConfig::GetInstance().GetGameID() + std::string(suffix);
+  return File::GetUserPath(D_DUMPSSL_IDX) + SConfig::GetInstance().GetGameID() +
+         std::string(suffix);
 }
 
 void AppendToFile(const std::string& path, const void* data, std::size_t length)
@@ -144,21 +155,24 @@ void PCAPSSLCaptureLogger::LogSocketData(Direction direction, const void* data,
 {
   // The socket queries below must not change the error the game sees for its own call.
   const auto saved_error = Common::SaveNetworkErrorState();
-  Common::ScopeGuard restore_error([&saved_error] { Common::RestoreNetworkErrorState(saved_error); });
+  Common::ScopeGuard restore_error(
+      [&saved_error] { Common::RestoreNetworkErrorState(saved_error); });
 
   sockaddr_in local;
   socklen_t local_length = sizeof(local);
-  if (getsockname(socket, reinterpret_cast<sockaddr*>(&local), &local_length) != 0)
+  if (getsockname(HostSocket(socket), reinterpret_cast<sockaddr*>(&local), &local_length) != 0)
     return;
 
   sockaddr_in connected_peer;
   socklen_t peer_length = sizeof(connected_peer);
   if (peer == nullptr &&
-      getpeername(socket, reinterpret_cast<sockaddr*>(&connected_peer), &peer_length) != 0)
+      getpeername(HostSocket(socket), reinterpret_cast<sockaddr*>(&connected_peer),
+                  &peer_length) != 0)
   {
     return;
   }
-  const sockaddr_in& remote = peer != nullptr ? *reinterpret_cast<sockaddr_in*>(peer) : connected_peer;
+  const sockaddr_in& remote =
+      peer != nullptr ? *reinterpret_cast<sockaddr_in*>(peer) : connected_peer;
 
   const auto* bytes = static_cast<const u8*>(data);
   const auto size = static_cast<u16>(length);
@@ -173,7 +187,8 @@ void PCAPSSLCaptureLogger::WritePacket(Direction direction, const u8* data, u16 
 {
   int type = 0;
   socklen_t type_length = sizeof(type);
-  if (getsockopt(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &type_length) != 0)
+  if (getsockopt(HostSocket(socket), SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type),
+                 &type_length) != 0)
     return;
   if (type != SOCK_STREAM && type != SOCK_DGRAM)
     return;

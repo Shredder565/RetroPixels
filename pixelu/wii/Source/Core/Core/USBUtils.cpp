@@ -5,10 +5,12 @@
 #include <array>
 #include <charconv>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <fmt/format.h>
@@ -41,37 +43,73 @@ namespace USBUtils
 {
 namespace
 {
-// Names for the USB devices Wii games are known to use.
-const std::map<DeviceInfo, std::string> s_known_devices{{
-    {{0x046d, 0x0a03}, "Logitech Microphone"},
-    {{0x057e, 0x0308}, "Wii Speak"},
-    {{0x057e, 0x0309}, "Nintendo USB Microphone"},
-    {{0x057e, 0x030a}, "Ubisoft Motion Tracking Camera"},
-    {{0x0e6f, 0x0129}, "Disney Infinity Reader (Portal Device)"},
-    {{0x12ba, 0x0200}, "Harmonix Guitar for PlayStation 3"},
-    {{0x12ba, 0x0210}, "Harmonix Drum Kit for PlayStation 3"},
-    {{0x12ba, 0x0218}, "Harmonix Drum Kit for PlayStation 3"},
-    {{0x12ba, 0x2330}, "Harmonix RB3 Keyboard for PlayStation 3"},
-    {{0x12ba, 0x2338}, "Harmonix RB3 MIDI Keyboard Interface for PlayStation 3"},
-    {{0x12ba, 0x2430}, "Harmonix RB3 Mustang Guitar for PlayStation 3"},
-    {{0x12ba, 0x2438}, "Harmonix RB3 MIDI Guitar Interface for PlayStation 3"},
-    {{0x12ba, 0x2530}, "Harmonix RB3 Squier Guitar for PlayStation 3"},
-    {{0x12ba, 0x2538}, "Harmonix RB3 MIDI Guitar Interface for PlayStation 3"},
-    {{0x1430, 0x0100}, "Tony Hawk Ride Skateboard"},
-    {{0x1430, 0x0150}, "Skylanders Portal"},
-    {{0x1bad, 0x0004}, "Harmonix Guitar Controller for Nintendo Wii"},
-    {{0x1bad, 0x0005}, "Harmonix Drum Controller for Nintendo Wii"},
-    {{0x1bad, 0x3010}, "Harmonix Guitar Controller for Nintendo Wii"},
-    {{0x1bad, 0x3110}, "Harmonix Drum Controller for Nintendo Wii"},
-    {{0x1bad, 0x3138}, "Harmonix Drum Controller for Nintendo Wii"},
-    {{0x1bad, 0x3330}, "Harmonix RB3 Keyboard for Nintendo Wii"},
-    {{0x1bad, 0x3338}, "Harmonix RB3 MIDI Keyboard Interface for Nintendo Wii"},
-    {{0x1bad, 0x3430}, "Harmonix RB3 Mustang Guitar for Nintendo Wii"},
-    {{0x1bad, 0x3438}, "Harmonix RB3 MIDI Guitar Interface for Nintendo Wii"},
-    {{0x1bad, 0x3530}, "Harmonix RB3 Squier Guitar for Nintendo Wii"},
-    {{0x1bad, 0x3538}, "Harmonix RB3 MIDI Guitar Interface for Nintendo Wii"},
-    {{0x21a4, 0xac40}, "EA Active NFL"},
-}};
+// Names for the USB devices Wii games are known to use, listed per vendor.
+struct VendorProducts
+{
+  u16 vendor;
+  std::initializer_list<std::pair<u16, const char*>> products;
+};
+
+const std::map<DeviceInfo, std::string> s_known_devices = [] {
+  const VendorProducts vendors[] = {
+      {0x046d,
+       {
+           {0x0a03, "Logitech Microphone"},
+       }},
+      {0x057e,
+       {
+           {0x0308, "Wii Speak"},
+           {0x0309, "Nintendo USB Microphone"},
+           {0x030a, "Ubisoft Motion Tracking Camera"},
+       }},
+      {0x0e6f,
+       {
+           {0x0129, "Disney Infinity Reader (Portal Device)"},
+       }},
+      {0x12ba,
+       {
+           {0x0200, "Harmonix Guitar for PlayStation 3"},
+           {0x0210, "Harmonix Drum Kit for PlayStation 3"},
+           {0x0218, "Harmonix Drum Kit for PlayStation 3"},
+           {0x2330, "Harmonix RB3 Keyboard for PlayStation 3"},
+           {0x2338, "Harmonix RB3 MIDI Keyboard Interface for PlayStation 3"},
+           {0x2430, "Harmonix RB3 Mustang Guitar for PlayStation 3"},
+           {0x2438, "Harmonix RB3 MIDI Guitar Interface for PlayStation 3"},
+           {0x2530, "Harmonix RB3 Squier Guitar for PlayStation 3"},
+           {0x2538, "Harmonix RB3 MIDI Guitar Interface for PlayStation 3"},
+       }},
+      {0x1430,
+       {
+           {0x0100, "Tony Hawk Ride Skateboard"},
+           {0x0150, "Skylanders Portal"},
+       }},
+      {0x1bad,
+       {
+           {0x0004, "Harmonix Guitar Controller for Nintendo Wii"},
+           {0x0005, "Harmonix Drum Controller for Nintendo Wii"},
+           {0x3010, "Harmonix Guitar Controller for Nintendo Wii"},
+           {0x3110, "Harmonix Drum Controller for Nintendo Wii"},
+           {0x3138, "Harmonix Drum Controller for Nintendo Wii"},
+           {0x3330, "Harmonix RB3 Keyboard for Nintendo Wii"},
+           {0x3338, "Harmonix RB3 MIDI Keyboard Interface for Nintendo Wii"},
+           {0x3430, "Harmonix RB3 Mustang Guitar for Nintendo Wii"},
+           {0x3438, "Harmonix RB3 MIDI Guitar Interface for Nintendo Wii"},
+           {0x3530, "Harmonix RB3 Squier Guitar for Nintendo Wii"},
+           {0x3538, "Harmonix RB3 MIDI Guitar Interface for Nintendo Wii"},
+       }},
+      {0x21a4,
+       {
+           {0xac40, "EA Active NFL"},
+       }},
+  };
+  std::map<DeviceInfo, std::string> names;
+  for (const VendorProducts& entry : vendors)
+  {
+    for (const auto& [product, name] : entry.products)
+      names.emplace(DeviceInfo{entry.vendor, product}, name);
+  }
+  return names;
+}();
 
 // Parses a leading hexadecimal number (trailing characters are ignored).
 bool ParseHexPrefix(std::string_view text, u16* value)

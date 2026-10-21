@@ -48,43 +48,56 @@ namespace
 {
 constexpr char kReportEndpoint[] = "https://analytics.dolphin-emu.org/report";
 
-// Report names of the GameQuirk values, in enum order.
-constexpr std::array<const char*, static_cast<size_t>(GameQuirk::Count)> kQuirkNames{
-    "uses-DVDLowStopLaser",
-    "uses-DVDLowOffset",
-    "uses-DVDLowReadDiskBca",
-    "uses-DVDLowRequestDiscStatus",
-    "uses-DVDLowRequestRetryNumber",
-    "uses-DVDLowSerMeasControl",
-    "uses-different-partition-command",
-    "uses-di-interrupt-command",
-    "mismatched-gpu-texgens-between-xf-and-bp",
-    "mismatched-gpu-colors-between-xf-and-bp",
-    "uses-uncommon-wd-mode",
-    "uses-wd-unimplemented-ioctl",
-    "uses-unknown-bp-command",
-    "uses-unknown-cp-command",
-    "uses-unknown-xf-command",
-    "uses-maybe-invalid-cp-command",
-    "uses-cp-perf-command",
-    "uses-unimplemented-ax-command",
-    "uses-ax-initial-time-delay",
-    "uses-ax-wiimote-lowpass",
-    "uses-ax-wiimote-biquad",
-    "sets-xf-clipdisable-bit-0",
-    "sets-xf-clipdisable-bit-1",
-    "sets-xf-clipdisable-bit-2",
-    "mismatched-gpu-colors-between-cp-and-xf",
-    "mismatched-gpu-normals-between-cp-and-xf",
-    "mismatched-gpu-tex-coords-between-cp-and-xf",
-    "mismatched-gpu-matrix-indices-between-cp-and-xf",
-    "reads-bounding-box",
-    "invalid-position-component-format",
-    "invalid-normal-component-format",
-    "invalid-texture-coordinate-component-format",
-    "invalid-color-component-format",
-};
-static_assert(kQuirkNames.back() != nullptr, "every GameQuirk needs a name");
+// The name a quirk is reported under. The names are part of the report format.
+const char* QuirkReportName(GameQuirk quirk)
+{
+  switch (quirk)
+  {
+  case GameQuirk::UsesDVDLowStopLaser: return "uses-DVDLowStopLaser";
+  case GameQuirk::UsesDVDLowOffset: return "uses-DVDLowOffset";
+  case GameQuirk::UsesDVDLowReadDiskBCA: return "uses-DVDLowReadDiskBca";
+  case GameQuirk::UsesDVDLowRequestDiscStatus: return "uses-DVDLowRequestDiscStatus";
+  case GameQuirk::UsesDVDLowRequestRetryNumber: return "uses-DVDLowRequestRetryNumber";
+  case GameQuirk::UsesDVDLowSerMeasControl: return "uses-DVDLowSerMeasControl";
+  case GameQuirk::UsesDifferentPartitionCommand: return "uses-different-partition-command";
+  case GameQuirk::UsesDIInterruptMaskCommand: return "uses-di-interrupt-command";
+  case GameQuirk::MismatchedGPUTexGensBetweenXFAndBP:
+    return "mismatched-gpu-texgens-between-xf-and-bp";
+  case GameQuirk::MismatchedGPUColorsBetweenXFAndBP:
+    return "mismatched-gpu-colors-between-xf-and-bp";
+  case GameQuirk::UsesUncommonWDMode: return "uses-uncommon-wd-mode";
+  case GameQuirk::UsesWDUnimplementedIOCtl: return "uses-wd-unimplemented-ioctl";
+  case GameQuirk::UsesUnknownBPCommand: return "uses-unknown-bp-command";
+  case GameQuirk::UsesUnknownCPCommand: return "uses-unknown-cp-command";
+  case GameQuirk::UsesUnknownXFCommand: return "uses-unknown-xf-command";
+  case GameQuirk::UsesMaybeInvalidCPCommand: return "uses-maybe-invalid-cp-command";
+  case GameQuirk::UsesCPPerfCommand: return "uses-cp-perf-command";
+  case GameQuirk::UsesUnimplementedAXCommand: return "uses-unimplemented-ax-command";
+  case GameQuirk::UsesAXInitialTimeDelay: return "uses-ax-initial-time-delay";
+  case GameQuirk::UsesAXWiimoteLowPass: return "uses-ax-wiimote-lowpass";
+  case GameQuirk::UsesAXWiimoteBiquad: return "uses-ax-wiimote-biquad";
+  case GameQuirk::SetsXFClipDisableBit0: return "sets-xf-clipdisable-bit-0";
+  case GameQuirk::SetsXFClipDisableBit1: return "sets-xf-clipdisable-bit-1";
+  case GameQuirk::SetsXFClipDisableBit2: return "sets-xf-clipdisable-bit-2";
+  case GameQuirk::MismatchedGPUColorsBetweenCPAndXF:
+    return "mismatched-gpu-colors-between-cp-and-xf";
+  case GameQuirk::MismatchedGPUNormalsBetweenCPAndXF:
+    return "mismatched-gpu-normals-between-cp-and-xf";
+  case GameQuirk::MismatchedGPUTexCoordsBetweenCPAndXF:
+    return "mismatched-gpu-tex-coords-between-cp-and-xf";
+  case GameQuirk::MismatchedGPUMatrixIndicesBetweenCPAndXF:
+    return "mismatched-gpu-matrix-indices-between-cp-and-xf";
+  case GameQuirk::ReadsBoundingBox: return "reads-bounding-box";
+  case GameQuirk::InvalidPositionComponentFormat: return "invalid-position-component-format";
+  case GameQuirk::InvalidNormalComponentFormat: return "invalid-normal-component-format";
+  case GameQuirk::InvalidTextureCoordinateComponentFormat:
+    return "invalid-texture-coordinate-component-format";
+  case GameQuirk::InvalidColorComponentFormat: return "invalid-color-component-format";
+  case GameQuirk::Count:
+    break;
+  }
+  return "unknown-quirk";
+}
 
 constexpr u64 kMicrosecondsPerSecond = 1000000;
 
@@ -357,7 +370,7 @@ void DolphinAnalytics::ReportGameQuirk(GameQuirk quirk)
 
   Common::AnalyticsReportBuilder report(m_per_game_builder);
   report.AddData("type", "quirk");
-  report.AddData("quirk", kQuirkNames[index]);
+  report.AddData("quirk", QuirkReportName(quirk));
   Send(report);
 }
 

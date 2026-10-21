@@ -239,7 +239,8 @@ int CodeRunner::Step(const AREntry& line)
 
   if (word.word >= 0x00002000 && word.word < 0x00003000)
   {
-    LogStep("This action replay simulator does not support codes that modify Action Replay itself.");
+    LogStep("This action replay simulator does not support codes that modify Action Replay "
+            "itself.");
     PanicAlertFmtT(
         "This action replay simulator does not support codes that modify Action Replay itself.");
     return -1;

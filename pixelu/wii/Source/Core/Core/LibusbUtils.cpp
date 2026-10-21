@@ -84,7 +84,8 @@ private:
     {
       const int result = libusb_handle_events_timeout_completed(m_context, &timeout, nullptr);
       if (result != LIBUSB_SUCCESS)
-        WARN_LOG_FMT(IOS_USB, "libusb_handle_events_timeout_completed failed: {}", ErrorWrap(result));
+        WARN_LOG_FMT(IOS_USB, "libusb_handle_events_timeout_completed failed: {}",
+                     ErrorWrap(result));
     }
   }
 
@@ -108,40 +109,51 @@ Context::Context() : m_impl{std::make_unique<Impl>()}
 
 Context::~Context() = default;
 
-Context::operator libusb_context*() const
-{
-  return m_impl->GetContext();
-}
-
+// A context is usable only when libusb initialised (and is present at all).
 bool Context::IsValid() const
 {
   return m_impl->GetContext() != nullptr;
 }
 
-int Context::GetDeviceList(const GetDeviceListCallback& callback) const
+int Context::GetDeviceList(const GetDeviceListCallback& visit) const
 {
-  return m_impl->GetDeviceList(callback);
+  return m_impl->GetDeviceList(visit);
 }
 
-std::pair<int, ConfigDescriptor> MakeConfigDescriptor(libusb_device* device, u8 config_num)
+Context::operator libusb_context*() const
 {
-#if defined(__LIBUSB__)
-  libusb_config_descriptor* descriptor = nullptr;
-  const int result = libusb_get_config_descriptor(device, config_num, &descriptor);
-  if (result == LIBUSB_SUCCESS)
-    return {result, ConfigDescriptor{descriptor, libusb_free_config_descriptor}};
-#else
-  const int result = -1;
-#endif
-  return {result, ConfigDescriptor{nullptr, [](libusb_config_descriptor*) {}}};
+  return m_impl->GetContext();
 }
+
+std::pair<int, ConfigDescriptor> MakeConfigDescriptor([[maybe_unused]] libusb_device* device,
+                                                      [[maybe_unused]] u8 config_num)
+{
+  // A failed lookup still hands out a (null) descriptor with a do-nothing deleter.
+  const auto none = [] { return ConfigDescriptor{nullptr, [](libusb_config_descriptor*) {}}; };
+#if defined(__LIBUSB__)
+  libusb_config_descriptor* config = nullptr;
+  const int status = libusb_get_config_descriptor(device, config_num, &config);
+  if (status != LIBUSB_SUCCESS)
+    return {status, none()};
+  return {status, ConfigDescriptor{config, libusb_free_config_descriptor}};
+#else
+  return {-1, none()};
+#endif
+}
+
+#if !defined(__LIBUSB__)
+namespace
+{
+constexpr char kNoLibusb[] = "__LIBUSB__ not defined";
+}
+#endif
 
 const char* ErrorWrap::GetName() const
 {
 #if defined(__LIBUSB__)
   return libusb_error_name(m_error);
 #else
-  return "__LIBUSB__ not defined";
+  return kNoLibusb;
 #endif
 }
 
@@ -150,7 +162,7 @@ const char* ErrorWrap::GetStrError() const
 #if defined(__LIBUSB__)
   return libusb_strerror(static_cast<libusb_error>(m_error));
 #else
-  return "__LIBUSB__ not defined";
+  return kNoLibusb;
 #endif
 }
 

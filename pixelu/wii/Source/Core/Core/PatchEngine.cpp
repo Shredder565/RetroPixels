@@ -188,7 +188,8 @@ std::optional<PatchEntry> DeserializeLine(std::string line)
 std::string SerializeLine(const PatchEntry& entry)
 {
   std::string line =
-      fmt::format("0x{:08X}:{}:0x{:08X}", entry.address, PatchTypeAsString(entry.type), entry.value);
+      fmt::format("0x{:08X}:{}:0x{:08X}", entry.address, PatchTypeAsString(entry.type),
+                  entry.value);
   if (entry.conditional)
     line += fmt::format(":0x{:08X}", entry.comparand);
   return line;
