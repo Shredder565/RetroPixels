@@ -1,9 +1,13 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/MenuBar.h"
 
+#include <array>
+#include <cctype>
 #include <future>
+#include <initializer_list>
+#include <optional>
+#include <string_view>
 
 #include <QAction>
 #include <QActionGroup>
@@ -73,657 +77,449 @@
 
 QPointer<MenuBar> MenuBar::s_menu_bar;
 
-QString MenuBar::GetSignatureSelector() const
+namespace
 {
-  return QStringLiteral("%1 (*.dsy);; %2 (*.csv);; %3 (*.mega)")
-      .arg(tr("Dolphin Signature File"), tr("Dolphin Signature CSV File"),
-           tr("WiiTools Signature MEGA File"));
+constexpr int STATE_SLOT_COUNT = 10;
+
+Core::System& TheSystem()
+{
+  return Core::System::GetInstance();
 }
+
+void AnnounceSymbolsChanged()
+{
+  emit Host::GetInstance()->PPCSymbolsChanged();
+}
+
+// A checkable entry that mirrors a boolean config setting (or its opposite, for "Disable ..."
+// entries of settings that enable something), written with SetBaseOrCurrent.
+QAction* AddConfigToggle(QMenu* menu, const QString& text, const Config::Info<bool>& setting,
+                         bool inverted = false)
+{
+  QAction* const action = menu->addAction(text);
+  action->setCheckable(true);
+  action->setChecked(Config::Get(setting) != inverted);
+  QObject::connect(action, &QAction::toggled, action, [&setting, inverted](bool checked) {
+    Config::SetBaseOrCurrent(setting, checked != inverted);
+  });
+  return action;
+}
+
+// A checkable entry bound to one of Settings' visibility flags. When `changed` is given, the
+// entry also follows changes made elsewhere.
+QAction* AddSettingsToggle(QMenu* menu, const QString& text, bool (Settings::*is_set)() const,
+                           void (Settings::*set)(bool),
+                           void (Settings::*changed)(bool) = nullptr)
+{
+  Settings* const settings = &Settings::Instance();
+  QAction* const action = menu->addAction(text);
+  action->setCheckable(true);
+  action->setChecked((settings->*is_set)());
+  QObject::connect(action, &QAction::toggled, settings, set);
+  if (changed != nullptr)
+    QObject::connect(settings, changed, action, &QAction::setChecked);
+  return action;
+}
+
+void OpenWebPage(const char* url)
+{
+  QDesktopServices::openUrl(QUrl(QString::fromLatin1(url)));
+}
+}  // namespace
 
 MenuBar::MenuBar(QWidget* parent) : QMenuBar(parent)
 {
   s_menu_bar = this;
 
-  AddFileMenu();
-  AddEmulationMenu();
-  AddMovieMenu();
-  AddOptionsMenu();
-  AddToolsMenu();
-  AddViewMenu();
-  AddJITMenu();
-  AddSymbolsMenu();
-  AddHelpMenu();
+  BuildFileMenu();
+  BuildEmulationMenu();
+  BuildMovieMenu();
+  BuildOptionsMenu();
+  BuildToolsMenu();
+  BuildViewMenu();
+  BuildJITMenu();
+  BuildSymbolsMenu();
+  BuildHelpMenu();
 
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
-          [=, this](Core::State state) { OnEmulationStateChanged(state); });
-  connect(&Settings::Instance(), &Settings::ConfigChanged, this, &MenuBar::OnConfigChanged);
+  Settings* const settings = &Settings::Instance();
+  connect(settings, &Settings::EmulationStateChanged, this,
+          [this](Core::State state) { ReflectEmulationState(state); });
+  connect(settings, &Settings::ConfigChanged, this, &MenuBar::ReflectConfig);
   connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this,
-          [this] { OnEmulationStateChanged(Core::GetState(Core::System::GetInstance())); });
+          [this] { ReflectEmulationState(Core::GetState(TheSystem())); });
 
-  OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this, &MenuBar::OnDebugModeToggled);
+  ReflectEmulationState(Core::GetState(TheSystem()));
+  connect(settings, &Settings::DebugModeToggled, this, &MenuBar::ReflectDebugMode);
 
-  connect(this, &MenuBar::SelectionChanged, this, &MenuBar::OnSelectionChanged);
-  connect(this, &MenuBar::RecordingStatusChanged, this, &MenuBar::OnRecordingStatusChanged);
-  connect(this, &MenuBar::ReadOnlyModeChanged, this, &MenuBar::OnReadOnlyModeChanged);
+  connect(this, &MenuBar::SelectionChanged, this, &MenuBar::ReflectSelectedGame);
+  connect(this, &MenuBar::RecordingStatusChanged, this, &MenuBar::ReflectRecordingStatus);
+  connect(this, &MenuBar::ReadOnlyModeChanged, this,
+          [this](bool read_only) { m_read_only->setChecked(read_only); });
 }
 
-void MenuBar::OnEmulationStateChanged(Core::State state)
+// --- Menu construction -------------------------------------------------------------------------
+
+void MenuBar::BuildFileMenu()
 {
-  bool running = state != Core::State::Uninitialized;
-  bool playing = running && state != Core::State::Paused;
+  QMenu* const file = addMenu(tr("&File"));
 
-  // File
-  m_eject_disc->setEnabled(running);
-  m_change_disc->setEnabled(running);
-
-  // Emulation
-  m_play_action->setEnabled(!playing);
-  m_play_action->setVisible(!playing);
-  m_pause_action->setEnabled(playing);
-  m_pause_action->setVisible(playing);
-  m_stop_action->setEnabled(running);
-  m_stop_action->setVisible(running);
-  m_reset_action->setEnabled(running);
-  m_fullscreen_action->setEnabled(running);
-  m_screenshot_action->setEnabled(running);
-  m_state_save_menu->setEnabled(running);
-
-  const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
-  m_state_load_menu->setEnabled(running && !hardcore);
-  m_frame_advance_action->setEnabled(running && !hardcore);
-
-  // Movie
-  m_recording_read_only->setEnabled(running);
-  if (!running)
-  {
-    m_recording_stop->setEnabled(false);
-    m_recording_export->setEnabled(false);
-  }
-  const bool can_start_from_boot = m_game_selected && state == Core::State::Uninitialized;
-  const bool can_start_from_savestate =
-      state == Core::State::Running || state == Core::State::Paused;
-  m_recording_play->setEnabled(can_start_from_boot && !hardcore);
-  m_recording_start->setEnabled((can_start_from_boot || can_start_from_savestate) &&
-                                !Core::System::GetInstance().GetMovie().IsPlayingInput());
-
-  // JIT
-  const bool jit_exists = Core::System::GetInstance().GetJitInterface().GetCore() != nullptr;
-  m_jit_interpreter_core->setEnabled(running);
-  m_jit_block_linking->setEnabled(!running);
-  m_jit_disable_cache->setEnabled(!running);
-  m_jit_disable_fastmem_arena->setEnabled(!running);
-  m_jit_disable_large_entry_points_map->setEnabled(!running);
-  m_jit_clear_cache->setEnabled(running);
-  m_jit_log_coverage->setEnabled(!running);
-  m_jit_search_instruction->setEnabled(running);
-  m_jit_wipe_profiling_data->setEnabled(jit_exists);
-  m_jit_write_cache_log_dump->setEnabled(jit_exists);
-
-  // Symbols
-  m_symbols->setEnabled(running);
-
-  UpdateStateSlotMenu();
-  UpdateToolsMenu(state);
-
-  OnDebugModeToggled(Settings::Instance().IsDebugModeEnabled());
-}
-
-void MenuBar::OnConfigChanged()
-{
-  SignalBlocking(m_jit_profile_blocks)
-      ->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING));
-  SignalBlocking(m_movie_window)->setChecked(Config::Get(Config::MAIN_MOVIE_SHOW_OSD));
-}
-
-void MenuBar::OnDebugModeToggled(bool enabled)
-{
-  // Options
-  m_boot_to_pause->setVisible(enabled);
-  m_reset_ignore_panic_handler->setVisible(enabled);
-  m_change_font->setVisible(enabled);
-
-  // View
-  m_show_code->setVisible(enabled);
-  m_show_registers->setVisible(enabled);
-  m_show_threads->setVisible(enabled);
-  m_show_watch->setVisible(enabled);
-  m_show_breakpoints->setVisible(enabled);
-  m_show_memory->setVisible(enabled);
-  m_show_network->setVisible(enabled);
-  m_show_jit->setVisible(enabled);
-  m_show_assembler->setVisible(enabled);
-
-  if (enabled)
-  {
-    addMenu(m_jit);
-    addMenu(m_symbols);
-  }
-  else
-  {
-    removeAction(m_jit->menuAction());
-    removeAction(m_symbols->menuAction());
-  }
-}
-
-void MenuBar::OnWipeJitBlockProfilingData()
-{
-  auto& system = Core::System::GetInstance();
-  system.GetJitInterface().WipeBlockProfilingData(Core::CPUThreadGuard{system});
-}
-
-void MenuBar::OnWriteJitBlockLogDump()
-{
-  const std::string filename = fmt::format("{}{}.txt", File::GetUserPath(D_DUMPDEBUG_JITBLOCKS_IDX),
-                                           SConfig::GetInstance().GetGameID());
-  File::IOFile f(filename, "w");
-  if (!f)
-  {
-    ModalMessageBox::warning(
-        this, tr("Error"),
-        tr("Failed to open \"%1\" for writing.").arg(QString::fromStdString(filename)));
-    return;
-  }
-  auto& system = Core::System::GetInstance();
-  system.GetJitInterface().JitBlockLogDump(Core::CPUThreadGuard{system}, f.GetHandle());
-  if (static bool ignore = false; ignore == false)
-  {
-    const int button_pressed = ModalMessageBox::information(
-        this, tr("Success"), tr("Wrote to \"%1\".").arg(QString::fromStdString(filename)),
-        QMessageBox::Ok | QMessageBox::Ignore);
-    if (button_pressed == QMessageBox::Ignore)
-      ignore = true;
-  }
-}
-
-void MenuBar::AddFileMenu()
-{
-  QMenu* file_menu = addMenu(tr("&File"));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
-  m_open_action = file_menu->addAction(tr("&Open..."), QKeySequence::Open, this, &MenuBar::Open);
+  file->addAction(tr("&Open..."), QKeySequence::Open, this, &MenuBar::Open);
 #else
-  m_open_action = file_menu->addAction(tr("&Open..."), this, &MenuBar::Open, QKeySequence::Open);
+  file->addAction(tr("&Open..."), this, &MenuBar::Open, QKeySequence::Open);
 #endif
+  file->addSeparator();
 
-  file_menu->addSeparator();
+  m_change_disc = file->addAction(tr("Change &Disc..."), this, &MenuBar::ChangeDisc);
+  m_eject_disc = file->addAction(tr("&Eject Disc"), this, &MenuBar::EjectDisc);
+  file->addSeparator();
 
-  m_change_disc = file_menu->addAction(tr("Change &Disc..."), this, &MenuBar::ChangeDisc);
-  m_eject_disc = file_menu->addAction(tr("&Eject Disc"), this, &MenuBar::EjectDisc);
+  file->addAction(tr("Open &User Folder"), this, &MenuBar::OpenUserFolder);
+  // The config and cache folders get entries of their own only when they are not simply the
+  // usual subfolders of the user folder.
+  const std::string user_folder = File::GetUserPath(D_USER_IDX);
+  if (File::GetUserPath(D_CONFIG_IDX) != user_folder + CONFIG_DIR DIR_SEP)
+    file->addAction(tr("Open &Config Folder"), this, &MenuBar::OpenConfigFolder);
+  if (File::GetUserPath(D_CACHE_IDX) != user_folder + CACHE_DIR DIR_SEP)
+    file->addAction(tr("Open C&ache Folder"), this, &MenuBar::OpenCacheFolder);
+  file->addSeparator();
 
-  file_menu->addSeparator();
-
-  m_open_user_folder =
-      file_menu->addAction(tr("Open &User Folder"), this, &MenuBar::OpenUserFolder);
-
-  const std::string user_path = File::GetUserPath(D_USER_IDX);
-  if (user_path + CONFIG_DIR DIR_SEP != File::GetUserPath(D_CONFIG_IDX))
-  {
-    m_open_config_folder =
-        file_menu->addAction(tr("Open &Config Folder"), this, &MenuBar::OpenConfigFolder);
-  }
-  if (user_path + CACHE_DIR DIR_SEP != File::GetUserPath(D_CACHE_IDX))
-  {
-    m_open_cache_folder =
-        file_menu->addAction(tr("Open C&ache Folder"), this, &MenuBar::OpenCacheFolder);
-  }
-
-  file_menu->addSeparator();
-
-  m_exit_action = file_menu->addAction(tr("E&xit"), this, &MenuBar::Exit);
-  m_exit_action->setShortcuts({QKeySequence::Quit, QKeySequence(Qt::ALT | Qt::Key_F4)});
+  QAction* const exit = file->addAction(tr("E&xit"), this, &MenuBar::Exit);
+  exit->setShortcuts({QKeySequence::Quit, QKeySequence(Qt::ALT | Qt::Key_F4)});
 }
 
-void MenuBar::AddToolsMenu()
+void MenuBar::BuildEmulationMenu()
 {
-  QMenu* tools_menu = addMenu(tr("&Tools"));
+  QMenu* const emulation = addMenu(tr("&Emulation"));
 
-  tools_menu->addAction(tr("&Resource Pack Manager"), this,
-                        [this] { emit ShowResourcePackManager(); });
+  m_play = emulation->addAction(tr("&Play"), this, &MenuBar::Play);
+  m_pause = emulation->addAction(tr("&Pause"), this, &MenuBar::Pause);
+  m_stop = emulation->addAction(tr("&Stop"), this, &MenuBar::Stop);
+  m_reset = emulation->addAction(tr("&Reset"), this, &MenuBar::Reset);
+  m_fullscreen = emulation->addAction(tr("Toggle &Fullscreen"), this, &MenuBar::Fullscreen);
+  m_frame_advance = emulation->addAction(tr("&Frame Advance"), this, &MenuBar::FrameAdvance);
+  m_screenshot = emulation->addAction(tr("Take Screenshot"), this, &MenuBar::Screenshot);
+  emulation->addSeparator();
 
-  tools_menu->addAction(tr("&Cheats Manager"), this, [this] { emit ShowCheatsManager(); });
+  BuildSaveStateMenus(emulation);
+}
 
-  tools_menu->addAction(tr("&FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
-
-  auto* usb_device_menu = new QMenu(tr("&Emulated USB Devices"), tools_menu);
-  usb_device_menu->addAction(tr("&Skylanders Portal"), this, &MenuBar::ShowSkylanderPortal);
-  usb_device_menu->addAction(tr("&Infinity Base"), this, &MenuBar::ShowInfinityBase);
-  usb_device_menu->addAction(tr("&Wii Speak"), this, &MenuBar::ShowWiiSpeakWindow);
-  usb_device_menu->addAction(tr("&Logitech USB Microphone"), this, &MenuBar::ShowLogitechMicWindow);
-  tools_menu->addMenu(usb_device_menu);
-
-  tools_menu->addSeparator();
-
-  tools_menu->addAction(tr("Start &NetPlay..."), this, &MenuBar::StartNetPlay);
-  tools_menu->addAction(tr("Browse &NetPlay Sessions...."), this, &MenuBar::BrowseNetPlay);
-
-  tools_menu->addSeparator();
-
-#ifdef USE_RETRO_ACHIEVEMENTS
-  m_achievements_action =
-      tools_menu->addAction(tr("&Achievements"), this, [this] { emit ShowAchievementsWindow(); });
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-  m_achievements_dev_menu = tools_menu->addMenu(tr("RetroAchievements Development"));
-  m_raintegration_event_hook = AchievementManager::GetInstance().dev_menu_update_event.Register(
-      [this] { QueueOnObject(this, [this] { UpdateAchievementDevelopmentMenu(); }); });
-  m_achievements_dev_menu->menuAction()->setVisible(false);
-#endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
-  tools_menu->addSeparator();
-#endif  // USE_RETRO_ACHIEVEMENTS
-
-  QMenu* gc_ipl = tools_menu->addMenu(tr("Load &GameCube Main Menu"));
-
-  m_ntscj_ipl = gc_ipl->addAction(tr("NTSC-&J"), this,
-                                  [this] { emit BootGameCubeIPL(DiscIO::Region::NTSC_J); });
-  m_ntscu_ipl = gc_ipl->addAction(tr("NTSC-&U"), this,
-                                  [this] { emit BootGameCubeIPL(DiscIO::Region::NTSC_U); });
-  m_pal_ipl =
-      gc_ipl->addAction(tr("&PAL"), this, [this] { emit BootGameCubeIPL(DiscIO::Region::PAL); });
-
-  m_dev_ipl = gc_ipl->addAction(tr("&Triforce"), this,
-                                [this] { emit BootGameCubeIPL(DiscIO::Region::Unknown); });
-
-  tools_menu->addAction(tr("&Memory Card Manager"), this, [this] { emit ShowMemcardManager(); });
-
-  tools_menu->addSeparator();
-
-  // Label will be set by a NANDRefresh later
-  m_boot_sysmenu = tools_menu->addAction(QString{}, this, [this] { emit BootWiiSystemMenu(); });
-  m_wad_install_action = tools_menu->addAction(tr("Install &WAD..."), this, &MenuBar::InstallWAD);
-  m_manage_nand_menu = tools_menu->addMenu(tr("Manage &NAND"));
-  m_import_backup = m_manage_nand_menu->addAction(tr("Import &BootMii NAND Backup..."), this,
-                                                  [this] { emit ImportNANDBackup(); });
-  m_check_nand = m_manage_nand_menu->addAction(tr("Check &NAND..."), this, &MenuBar::CheckNAND);
-  m_extract_certificates = m_manage_nand_menu->addAction(tr("Extract &Certificates from NAND"),
-                                                         this, &MenuBar::NANDExtractCertificates);
-
-  m_boot_sysmenu->setEnabled(false);
-
-  connect(&Settings::Instance(), &Settings::NANDRefresh, this,
-          [this] { UpdateToolsMenu(Core::State::Uninitialized); });
-
-  m_perform_online_update_menu = tools_menu->addMenu(tr("Perform Online System &Update"));
-  m_perform_online_update_for_current_region = m_perform_online_update_menu->addAction(
-      tr("&Current Region"), this, [this] { emit PerformOnlineUpdate(""); });
-  m_perform_online_update_menu->addSeparator();
-  m_perform_online_update_menu->addAction(tr("&Europe"), this,
-                                          [this] { emit PerformOnlineUpdate("EUR"); });
-  m_perform_online_update_menu->addAction(tr("&Japan"), this,
-                                          [this] { emit PerformOnlineUpdate("JPN"); });
-  m_perform_online_update_menu->addAction(tr("&Korea"), this,
-                                          [this] { emit PerformOnlineUpdate("KOR"); });
-  m_perform_online_update_menu->addAction(tr("&United States"), this,
-                                          [this] { emit PerformOnlineUpdate("USA"); });
-
-  tools_menu->addSeparator();
-
-  m_import_wii_save =
-      tools_menu->addAction(tr("Import &Wii Save..."), this, &MenuBar::ImportWiiSave);
-  m_import_wii_saves =
-      tools_menu->addAction(tr("Import &Wii Saves..."), this, &MenuBar::ImportWiiSaves);
-  m_export_wii_saves =
-      tools_menu->addAction(tr("Export All &Wii Saves"), this, &MenuBar::ExportWiiSaves);
-
-  auto* const connect_wii_remotes_menu{
-      new QtUtils::NonAutodismissibleMenu(tr("&Connect Wii Remotes"), tools_menu)};
-
-  tools_menu->addSeparator();
-  tools_menu->addMenu(connect_wii_remotes_menu);
-
-  for (int i = 0; i < 4; i++)
+void MenuBar::BuildSaveStateMenus(QMenu* emulation)
+{
+  m_load_state = emulation->addMenu(tr("&Load State"));
+  m_load_state->addAction(tr("Load State from File"), this, &MenuBar::StateLoad);
+  m_load_state->addAction(tr("Load State from Selected Slot"), this, &MenuBar::StateLoadSlot);
+  m_load_from_slot = m_load_state->addMenu(tr("Load State from Slot"));
+  m_load_state->addAction(tr("Undo Load State"), this, &MenuBar::StateLoadUndo);
+  for (int slot = 1; slot <= STATE_SLOT_COUNT; ++slot)
   {
-    m_wii_remotes[i] = connect_wii_remotes_menu->addAction(
-        tr("Connect Wii Remote &%1").arg(i + 1), this, [this, i] { emit ConnectWiiRemote(i); });
-    m_wii_remotes[i]->setCheckable(true);
+    // Labels are filled in by RelabelStateSlots.
+    QAction* const entry = m_load_from_slot->addAction(QString{});
+    connect(entry, &QAction::triggered, this, [this, slot] { emit StateLoadSlotAt(slot); });
   }
 
-  connect_wii_remotes_menu->addSeparator();
-
-  m_wii_remotes[4] = connect_wii_remotes_menu->addAction(tr("Connect &Balance Board"), this,
-                                                         [this] { emit ConnectWiiRemote(4); });
-  m_wii_remotes[4]->setCheckable(true);
-}
-
-void MenuBar::AddEmulationMenu()
-{
-  QMenu* emu_menu = addMenu(tr("&Emulation"));
-  m_play_action = emu_menu->addAction(tr("&Play"), this, &MenuBar::Play);
-  m_pause_action = emu_menu->addAction(tr("&Pause"), this, &MenuBar::Pause);
-  m_stop_action = emu_menu->addAction(tr("&Stop"), this, &MenuBar::Stop);
-  m_reset_action = emu_menu->addAction(tr("&Reset"), this, &MenuBar::Reset);
-  m_fullscreen_action = emu_menu->addAction(tr("Toggle &Fullscreen"), this, &MenuBar::Fullscreen);
-  m_frame_advance_action = emu_menu->addAction(tr("&Frame Advance"), this, &MenuBar::FrameAdvance);
-
-  m_screenshot_action = emu_menu->addAction(tr("Take Screenshot"), this, &MenuBar::Screenshot);
-
-  emu_menu->addSeparator();
-
-  AddStateLoadMenu(emu_menu);
-  AddStateSaveMenu(emu_menu);
-  AddStateSlotMenu(emu_menu);
-  UpdateStateSlotMenu();
-
-  for (QMenu* menu : {m_state_load_menu, m_state_save_menu, m_state_slot_menu})
-    connect(menu, &QMenu::aboutToShow, this, &MenuBar::UpdateStateSlotMenu);
-}
-
-void MenuBar::AddStateLoadMenu(QMenu* emu_menu)
-{
-  m_state_load_menu = emu_menu->addMenu(tr("&Load State"));
-  m_state_load_menu->addAction(tr("Load State from File"), this, &MenuBar::StateLoad);
-  m_state_load_menu->addAction(tr("Load State from Selected Slot"), this, &MenuBar::StateLoadSlot);
-  m_state_load_slots_menu = m_state_load_menu->addMenu(tr("Load State from Slot"));
-  m_state_load_menu->addAction(tr("Undo Load State"), this, &MenuBar::StateLoadUndo);
-
-  for (int i = 1; i <= 10; i++)
+  m_save_state = emulation->addMenu(tr("Sa&ve State"));
+  m_save_state->addAction(tr("Save State to File"), this, &MenuBar::StateSave);
+  m_save_state->addAction(tr("Save State to Selected Slot"), this, &MenuBar::StateSaveSlot);
+  m_save_state->addAction(tr("Save State to Oldest Slot"), this, &MenuBar::StateSaveOldest);
+  m_save_to_slot = m_save_state->addMenu(tr("Save State to Slot"));
+  m_save_state->addAction(tr("Undo Save State"), this, &MenuBar::StateSaveUndo);
+  for (int slot = 1; slot <= STATE_SLOT_COUNT; ++slot)
   {
-    QAction* action = m_state_load_slots_menu->addAction(QString{});
-
-    connect(action, &QAction::triggered, this, [=, this] { emit StateLoadSlotAt(i); });
+    QAction* const entry = m_save_to_slot->addAction(QString{});
+    connect(entry, &QAction::triggered, this, [this, slot] { emit StateSaveSlotAt(slot); });
   }
-}
 
-void MenuBar::AddStateSaveMenu(QMenu* emu_menu)
-{
-  m_state_save_menu = emu_menu->addMenu(tr("Sa&ve State"));
-  m_state_save_menu->addAction(tr("Save State to File"), this, &MenuBar::StateSave);
-  m_state_save_menu->addAction(tr("Save State to Selected Slot"), this, &MenuBar::StateSaveSlot);
-  m_state_save_menu->addAction(tr("Save State to Oldest Slot"), this, &MenuBar::StateSaveOldest);
-  m_state_save_slots_menu = m_state_save_menu->addMenu(tr("Save State to Slot"));
-  m_state_save_menu->addAction(tr("Undo Save State"), this, &MenuBar::StateSaveUndo);
-
-  for (int i = 1; i <= 10; i++)
+  m_select_slot = emulation->addMenu(tr("Select State Slot"));
+  m_slot_choices = new QActionGroup(this);
+  for (int slot = 1; slot <= STATE_SLOT_COUNT; ++slot)
   {
-    QAction* action = m_state_save_slots_menu->addAction(QString{});
+    QAction* const entry = m_select_slot->addAction(QString{});
+    entry->setCheckable(true);
+    entry->setActionGroup(m_slot_choices);
+    if (Settings::Instance().GetStateSlot() == slot)
+      entry->setChecked(true);
 
-    connect(action, &QAction::triggered, this, [=, this] { emit StateSaveSlotAt(i); });
-  }
-}
-
-void MenuBar::AddStateSlotMenu(QMenu* emu_menu)
-{
-  m_state_slot_menu = emu_menu->addMenu(tr("Select State Slot"));
-  m_state_slots = new QActionGroup(this);
-
-  for (int i = 1; i <= 10; i++)
-  {
-    QAction* action = m_state_slot_menu->addAction(QString{});
-    action->setCheckable(true);
-    action->setActionGroup(m_state_slots);
-    if (Settings::Instance().GetStateSlot() == i)
-      action->setChecked(true);
-
-    connect(action, &QAction::triggered, this, [=, this] { emit SetStateSlot(i); });
-    connect(this, &MenuBar::SetStateSlot, [action, i](const int slot) {
-      if (slot == i)
-        action->setChecked(true);
+    connect(entry, &QAction::triggered, this, [this, slot] { emit SetStateSlot(slot); });
+    // Follow slot changes from anywhere (hotkeys included).
+    connect(this, &MenuBar::SetStateSlot, entry, [entry, slot](int selected) {
+      if (selected == slot)
+        entry->setChecked(true);
     });
   }
+
+  RelabelStateSlots();
+
+  // The labels show what each slot holds, which can change at any time.
+  for (QMenu* const menu : {m_load_state, m_save_state, m_select_slot})
+    connect(menu, &QMenu::aboutToShow, this, &MenuBar::RelabelStateSlots);
 }
 
-void MenuBar::UpdateStateSlotMenu()
+void MenuBar::BuildMovieMenu()
 {
-  QList<QAction*> actions_slot = m_state_slots->actions();
-  QList<QAction*> actions_load = m_state_load_slots_menu->actions();
-  QList<QAction*> actions_save = m_state_save_slots_menu->actions();
-  for (int i = 0; i < actions_slot.length(); i++)
+  auto* const movie = new QtUtils::NonAutodismissibleMenu(tr("&Movie"), this);
+  addMenu(movie);
+
+  m_start_recording =
+      movie->addAction(tr("Start Re&cording Input"), this, [this] { emit StartRecording(); });
+  m_play_recording =
+      movie->addAction(tr("P&lay Input Recording..."), this, [this] { emit PlayRecording(); });
+  m_stop_recording =
+      movie->addAction(tr("Stop Playing/Recording Input"), this, [this] { emit StopRecording(); });
+  m_export_recording =
+      movie->addAction(tr("Export Recording..."), this, [this] { emit ExportRecording(); });
+  for (QAction* const action :
+       {m_start_recording, m_play_recording, m_stop_recording, m_export_recording})
   {
-    int slot = i + 1;
-    QString info = QString::fromStdString(State::GetInfoStringOfSlot(slot));
-    actions_load.at(i)->setText(tr("Load from Slot %1 - %2").arg(slot).arg(info));
-    actions_save.at(i)->setText(tr("Save to Slot %1 - %2").arg(slot).arg(info));
-    actions_slot.at(i)->setText(tr("Select Slot %1 - %2").arg(slot).arg(info));
+    action->setEnabled(false);
   }
+
+  m_read_only = movie->addAction(tr("&Read-Only Mode"));
+  m_read_only->setCheckable(true);
+  m_read_only->setChecked(TheSystem().GetMovie().IsReadOnly());
+  connect(m_read_only, &QAction::toggled, this,
+          [](bool read_only) { TheSystem().GetMovie().SetReadOnly(read_only); });
+
+  movie->addAction(tr("TAS Input"), this, [this] { emit ShowTASInput(); });
+  movie->addSeparator();
+
+  AddConfigToggle(movie, tr("Pause at End of Movie"), Config::MAIN_MOVIE_PAUSE_MOVIE);
+  m_movie_window = AddConfigToggle(movie, tr("Enable Movie Window"), Config::MAIN_MOVIE_SHOW_OSD);
+  movie->addAction(tr("Customize Movie Window"), this, &MenuBar::ConfigureOSD);
+  movie->addSeparator();
+
+  AddConfigToggle(movie, tr("Dump Frames"), Config::MAIN_MOVIE_DUMP_FRAMES);
+  AddConfigToggle(movie, tr("Dump Audio"), Config::MAIN_DUMP_AUDIO);
 }
 
-void MenuBar::AddViewMenu()
+void MenuBar::BuildOptionsMenu()
 {
-  auto* const view_menu{new QtUtils::NonAutodismissibleMenu(tr("&View"), this)};
-  addMenu(view_menu);
-  QAction* show_log = view_menu->addAction(tr("Show &Log"));
-  show_log->setCheckable(true);
-  show_log->setChecked(Settings::Instance().IsLogVisible());
+  auto* const options = new QtUtils::NonAutodismissibleMenu(tr("&Options"), this);
+  addMenu(options);
 
-  connect(show_log, &QAction::toggled, &Settings::Instance(), &Settings::SetLogVisible);
-
-  QAction* show_log_config = view_menu->addAction(tr("Show Log &Configuration"));
-  show_log_config->setCheckable(true);
-  show_log_config->setChecked(Settings::Instance().IsLogConfigVisible());
-
-  connect(show_log_config, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetLogConfigVisible);
-
-  QAction* show_toolbar = view_menu->addAction(tr("Show &Toolbar"));
-  show_toolbar->setCheckable(true);
-  show_toolbar->setChecked(Settings::Instance().IsToolBarVisible());
-
-  connect(show_toolbar, &QAction::toggled, &Settings::Instance(), &Settings::SetToolBarVisible);
-
-  connect(&Settings::Instance(), &Settings::LogVisibilityChanged, show_log, &QAction::setChecked);
-  connect(&Settings::Instance(), &Settings::LogConfigVisibilityChanged, show_log_config,
-          &QAction::setChecked);
-  connect(&Settings::Instance(), &Settings::ToolBarVisibilityChanged, show_toolbar,
-          &QAction::setChecked);
-
-  QAction* lock_widgets = view_menu->addAction(tr("&Lock Widgets In Place"));
-  lock_widgets->setCheckable(true);
-  lock_widgets->setChecked(Settings::Instance().AreWidgetsLocked());
-
-  connect(lock_widgets, &QAction::toggled, &Settings::Instance(), &Settings::SetWidgetsLocked);
-
-  view_menu->addSeparator();
-
-  m_show_code = view_menu->addAction(tr("&Code"));
-  m_show_code->setCheckable(true);
-  m_show_code->setChecked(Settings::Instance().IsCodeVisible());
-
-  connect(m_show_code, &QAction::toggled, &Settings::Instance(), &Settings::SetCodeVisible);
-  connect(&Settings::Instance(), &Settings::CodeVisibilityChanged, m_show_code,
-          &QAction::setChecked);
-
-  m_show_registers = view_menu->addAction(tr("&Registers"));
-  m_show_registers->setCheckable(true);
-  m_show_registers->setChecked(Settings::Instance().IsRegistersVisible());
-
-  connect(m_show_registers, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetRegistersVisible);
-  connect(&Settings::Instance(), &Settings::RegistersVisibilityChanged, m_show_registers,
-          &QAction::setChecked);
-
-  m_show_threads = view_menu->addAction(tr("&Threads"));
-  m_show_threads->setCheckable(true);
-  m_show_threads->setChecked(Settings::Instance().IsThreadsVisible());
-
-  connect(m_show_threads, &QAction::toggled, &Settings::Instance(), &Settings::SetThreadsVisible);
-  connect(&Settings::Instance(), &Settings::ThreadsVisibilityChanged, m_show_threads,
-          &QAction::setChecked);
-
-  // i18n: This kind of "watch" is used for watching emulated memory.
-  // It's not related to timekeeping devices.
-  m_show_watch = view_menu->addAction(tr("&Watch"));
-  m_show_watch->setCheckable(true);
-  m_show_watch->setChecked(Settings::Instance().IsWatchVisible());
-
-  connect(m_show_watch, &QAction::toggled, &Settings::Instance(), &Settings::SetWatchVisible);
-  connect(&Settings::Instance(), &Settings::WatchVisibilityChanged, m_show_watch,
-          &QAction::setChecked);
-
-  m_show_breakpoints = view_menu->addAction(tr("&Breakpoints"));
-  m_show_breakpoints->setCheckable(true);
-  m_show_breakpoints->setChecked(Settings::Instance().IsBreakpointsVisible());
-
-  connect(m_show_breakpoints, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetBreakpointsVisible);
-  connect(&Settings::Instance(), &Settings::BreakpointsVisibilityChanged, m_show_breakpoints,
-          &QAction::setChecked);
-
-  m_show_memory = view_menu->addAction(tr("&Memory"));
-  m_show_memory->setCheckable(true);
-  m_show_memory->setChecked(Settings::Instance().IsMemoryVisible());
-
-  connect(m_show_memory, &QAction::toggled, &Settings::Instance(), &Settings::SetMemoryVisible);
-  connect(&Settings::Instance(), &Settings::MemoryVisibilityChanged, m_show_memory,
-          &QAction::setChecked);
-
-  m_show_network = view_menu->addAction(tr("&Network"));
-  m_show_network->setCheckable(true);
-  m_show_network->setChecked(Settings::Instance().IsNetworkVisible());
-
-  connect(m_show_network, &QAction::toggled, &Settings::Instance(), &Settings::SetNetworkVisible);
-  connect(&Settings::Instance(), &Settings::NetworkVisibilityChanged, m_show_network,
-          &QAction::setChecked);
-
-  m_show_jit = view_menu->addAction(tr("&JIT"));
-  m_show_jit->setCheckable(true);
-  m_show_jit->setChecked(Settings::Instance().IsJITVisible());
-  connect(m_show_jit, &QAction::toggled, &Settings::Instance(), &Settings::SetJITVisible);
-  connect(&Settings::Instance(), &Settings::JITVisibilityChanged, m_show_jit, &QAction::setChecked);
-
-  m_show_assembler = view_menu->addAction(tr("&Assembler"));
-  m_show_assembler->setCheckable(true);
-  m_show_assembler->setChecked(Settings::Instance().IsAssemblerVisible());
-  connect(m_show_assembler, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetAssemblerVisible);
-  connect(&Settings::Instance(), &Settings::AssemblerVisibilityChanged, m_show_assembler,
-          &QAction::setChecked);
-
-  view_menu->addSeparator();
-
-  AddGameListTypeSection(view_menu);
-  view_menu->addSeparator();
-  AddListColumnsMenu(view_menu);
-  view_menu->addSeparator();
-  AddShowPlatformsMenu(view_menu);
-  AddShowRegionsMenu(view_menu);
-
-  view_menu->addSeparator();
-  QAction* const show_game_count = view_menu->addAction(tr("Show Game Count"));
-  show_game_count->setCheckable(true);
-  show_game_count->setChecked(Settings::Instance().IsGameCountVisible());
-  connect(show_game_count, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetGameCountVisible);
-
-  view_menu->addSeparator();
-  QAction* const purge_action =
-      view_menu->addAction(tr("Purge Game List Cache"), this, &MenuBar::PurgeGameListCache);
-  purge_action->setEnabled(false);
-  connect(&Settings::Instance(), &Settings::GameListRefreshRequested, purge_action,
-          [purge_action] { purge_action->setEnabled(false); });
-  connect(&Settings::Instance(), &Settings::GameListRefreshStarted, purge_action,
-          [purge_action] { purge_action->setEnabled(true); });
-  view_menu->addSeparator();
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
-  view_menu->addAction(tr("Search"), QKeySequence::Find, this, &MenuBar::ShowSearch);
+  options->addAction(tr("Co&nfiguration"), QKeySequence::Preferences, this, &MenuBar::Configure);
 #else
-  view_menu->addAction(tr("Search"), this, &MenuBar::ShowSearch, QKeySequence::Find);
+  options->addAction(tr("Co&nfiguration"), this, &MenuBar::Configure, QKeySequence::Preferences);
 #endif
-}
+  options->addSeparator();
 
-void MenuBar::AddOptionsMenu()
-{
-  auto* const options_menu{new QtUtils::NonAutodismissibleMenu(tr("&Options"), this)};
-  addMenu(options_menu);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
-  options_menu->addAction(tr("Co&nfiguration"), QKeySequence::Preferences, this,
-                          &MenuBar::Configure);
-#else
-  options_menu->addAction(tr("Co&nfiguration"), this, &MenuBar::Configure,
-                          QKeySequence::Preferences);
-#endif
-  options_menu->addSeparator();
-  options_menu->addAction(tr("&Graphics Settings"), this, &MenuBar::ConfigureGraphics);
-  options_menu->addAction(tr("&Audio Settings"), this, &MenuBar::ConfigureAudio);
-  m_controllers_action =
-      options_menu->addAction(tr("&Controller Settings"), this, &MenuBar::ConfigureControllers);
-  options_menu->addAction(tr("&Hotkey Settings"), this, &MenuBar::ConfigureHotkeys);
-  options_menu->addAction(tr("&Free Look Settings"), this, &MenuBar::ConfigureFreelook);
+  options->addAction(tr("&Graphics Settings"), this, &MenuBar::ConfigureGraphics);
+  options->addAction(tr("&Audio Settings"), this, &MenuBar::ConfigureAudio);
+  options->addAction(tr("&Controller Settings"), this, &MenuBar::ConfigureControllers);
+  options->addAction(tr("&Hotkey Settings"), this, &MenuBar::ConfigureHotkeys);
+  options->addAction(tr("&Free Look Settings"), this, &MenuBar::ConfigureFreelook);
+  options->addSeparator();
 
-  options_menu->addSeparator();
-
-  // Debugging mode only
-  m_boot_to_pause = options_menu->addAction(tr("Boot to Pause"));
+  // The rest is only shown in debug mode.
+  m_boot_to_pause = options->addAction(tr("Boot to Pause"));
   m_boot_to_pause->setCheckable(true);
   m_boot_to_pause->setChecked(SConfig::GetInstance().bBootToPause);
-
   connect(m_boot_to_pause, &QAction::toggled, this,
-          [](bool enable) { SConfig::GetInstance().bBootToPause = enable; });
+          [](bool pause) { SConfig::GetInstance().bBootToPause = pause; });
 
-  m_reset_ignore_panic_handler = options_menu->addAction(tr("Reset Ignore Panic Handler"));
-
-  connect(m_reset_ignore_panic_handler, &QAction::triggered, this, [] {
+  m_reset_panic_ignore = options->addAction(tr("Reset Ignore Panic Handler"));
+  connect(m_reset_panic_ignore, &QAction::triggered, this, [] {
+    // "Ignore for this session" is a CurrentRun override; dropping it restores panic alerts.
     Config::DeleteKey(Config::LayerType::CurrentRun, Config::MAIN_USE_PANIC_HANDLERS);
   });
 
-  m_change_font = options_menu->addAction(tr("&Font..."), this, &MenuBar::ChangeDebugFont);
+  m_debug_font = options->addAction(tr("&Font..."), this, &MenuBar::ChangeDebugFont);
 }
 
-void MenuBar::InstallUpdateManually()
+void MenuBar::BuildToolsMenu()
 {
-  const std::string autoupdate_track = Config::Get(Config::MAIN_AUTOUPDATE_UPDATE_TRACK);
-  const std::string manual_track = autoupdate_track.empty() ? "dev" : autoupdate_track;
-  auto* const updater = new Updater(this->parentWidget(), manual_track,
-                                    Config::Get(Config::MAIN_AUTOUPDATE_HASH_OVERRIDE));
+  QMenu* const tools = addMenu(tr("&Tools"));
 
-  updater->CheckForUpdate();
-}
+  tools->addAction(tr("&Resource Pack Manager"), this, [this] { emit ShowResourcePackManager(); });
+  tools->addAction(tr("&Cheats Manager"), this, [this] { emit ShowCheatsManager(); });
+  tools->addAction(tr("&FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
 
-void MenuBar::AddHelpMenu()
-{
-  QMenu* help_menu = addMenu(tr("&Help"));
+  auto* const usb_devices = new QMenu(tr("&Emulated USB Devices"), tools);
+  usb_devices->addAction(tr("&Skylanders Portal"), this, &MenuBar::ShowSkylanderPortal);
+  usb_devices->addAction(tr("&Infinity Base"), this, &MenuBar::ShowInfinityBase);
+  usb_devices->addAction(tr("&Wii Speak"), this, &MenuBar::ShowWiiSpeakWindow);
+  usb_devices->addAction(tr("&Logitech USB Microphone"), this, &MenuBar::ShowLogitechMicWindow);
+  tools->addMenu(usb_devices);
+  tools->addSeparator();
 
-  QAction* website = help_menu->addAction(tr("&Website"));
-  connect(website, &QAction::triggered, this,
-          [] { QDesktopServices::openUrl(QUrl(QStringLiteral("https://dolphin-emu.org/"))); });
-  QAction* documentation = help_menu->addAction(tr("Online &Documentation"));
-  connect(documentation, &QAction::triggered, this, [] {
-    QDesktopServices::openUrl(QUrl(QStringLiteral("https://dolphin-emu.org/docs/guides")));
-  });
-  QAction* github = help_menu->addAction(tr("&GitHub Repository"));
-  connect(github, &QAction::triggered, this, [] {
-    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/dolphin-emu/dolphin")));
-  });
-  QAction* bugtracker = help_menu->addAction(tr("&Bug Tracker"));
-  connect(bugtracker, &QAction::triggered, this, [] {
-    QDesktopServices::openUrl(
-        QUrl(QStringLiteral("https://bugs.dolphin-emu.org/projects/emulator")));
-  });
+  tools->addAction(tr("Start &NetPlay..."), this, &MenuBar::StartNetPlay);
+  tools->addAction(tr("Browse &NetPlay Sessions...."), this, &MenuBar::BrowseNetPlay);
+  tools->addSeparator();
 
-  if (AutoUpdateChecker::SystemSupportsAutoUpdates())
+#ifdef USE_RETRO_ACHIEVEMENTS
+  tools->addAction(tr("&Achievements"), this, [this] { emit ShowAchievementsWindow(); });
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  // Filled in (and shown) when RAIntegration provides its development menu.
+  m_ra_development = tools->addMenu(tr("RetroAchievements Development"));
+  m_ra_menu_hook = AchievementManager::GetInstance().dev_menu_update_event.Register(
+      [this] { QueueOnObject(this, [this] { UpdateAchievementDevelopmentMenu(); }); });
+  m_ra_development->menuAction()->setVisible(false);
+#endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
+  tools->addSeparator();
+#endif  // USE_RETRO_ACHIEVEMENTS
+
+  QMenu* const gc_main_menu = tools->addMenu(tr("Load &GameCube Main Menu"));
+  const auto add_ipl = [this, gc_main_menu](const QString& text, DiscIO::Region region) {
+    return gc_main_menu->addAction(text, this, [this, region] { emit BootGameCubeIPL(region); });
+  };
+  m_gc_ipl[0] = add_ipl(tr("NTSC-&J"), DiscIO::Region::NTSC_J);
+  m_gc_ipl[1] = add_ipl(tr("NTSC-&U"), DiscIO::Region::NTSC_U);
+  m_gc_ipl[2] = add_ipl(tr("&PAL"), DiscIO::Region::PAL);
+  m_gc_ipl[3] = add_ipl(tr("&Triforce"), DiscIO::Region::Unknown);
+
+  tools->addAction(tr("&Memory Card Manager"), this, [this] { emit ShowMemcardManager(); });
+  tools->addSeparator();
+
+  // Labelled by UpdateToolsMenu, which knows the installed System Menu version.
+  m_boot_system_menu = tools->addAction(QString{}, this, [this] { emit BootWiiSystemMenu(); });
+  m_install_wad = tools->addAction(tr("Install &WAD..."), this, &MenuBar::InstallWAD);
+
+  QMenu* const manage_nand = tools->addMenu(tr("Manage &NAND"));
+  m_import_nand_backup = manage_nand->addAction(tr("Import &BootMii NAND Backup..."), this,
+                                                [this] { emit ImportNANDBackup(); });
+  m_check_nand = manage_nand->addAction(tr("Check &NAND..."), this, &MenuBar::CheckNAND);
+  manage_nand->addAction(tr("Extract &Certificates from NAND"), this,
+                         &MenuBar::NANDExtractCertificates);
+
+  m_boot_system_menu->setEnabled(false);
+  connect(&Settings::Instance(), &Settings::NANDRefresh, this,
+          [this] { UpdateToolsMenu(Core::State::Uninitialized); });
+
+  m_online_update = tools->addMenu(tr("Perform Online System &Update"));
+  const auto add_update = [this](const QString& text, const char* region) {
+    return m_online_update->addAction(text, this,
+                                      [this, region] { emit PerformOnlineUpdate(region); });
+  };
+  m_online_update_current_region = add_update(tr("&Current Region"), "");
+  m_online_update->addSeparator();
+  add_update(tr("&Europe"), "EUR");
+  add_update(tr("&Japan"), "JPN");
+  add_update(tr("&Korea"), "KOR");
+  add_update(tr("&United States"), "USA");
+  tools->addSeparator();
+
+  m_import_wii_save = tools->addAction(tr("Import &Wii Save..."), this, &MenuBar::ImportWiiSave);
+  m_import_wii_saves =
+      tools->addAction(tr("Import &Wii Saves..."), this, &MenuBar::ImportWiiSaves);
+  m_export_wii_saves =
+      tools->addAction(tr("Export All &Wii Saves"), this, &MenuBar::ExportWiiSaves);
+
+  auto* const remotes = new QtUtils::NonAutodismissibleMenu(tr("&Connect Wii Remotes"), tools);
+  tools->addSeparator();
+  tools->addMenu(remotes);
+
+  for (int index = 0; index < 5; ++index)
   {
-    help_menu->addSeparator();
-
-    help_menu->addAction(tr("&Check for Updates..."), this, &MenuBar::InstallUpdateManually);
+    if (index == 4)
+      remotes->addSeparator();
+    const QString text =
+        index < 4 ? tr("Connect Wii Remote &%1").arg(index + 1) : tr("Connect &Balance Board");
+    QAction* const entry =
+        remotes->addAction(text, this, [this, index] { emit ConnectWiiRemote(index); });
+    entry->setCheckable(true);
+    m_wii_remotes[static_cast<std::size_t>(index)] = entry;
   }
+}
 
-#ifndef __APPLE__
-  help_menu->addSeparator();
+void MenuBar::BuildViewMenu()
+{
+  auto* const view = new QtUtils::NonAutodismissibleMenu(tr("&View"), this);
+  addMenu(view);
+
+  AddSettingsToggle(view, tr("Show &Log"), &Settings::IsLogVisible, &Settings::SetLogVisible,
+                    &Settings::LogVisibilityChanged);
+  AddSettingsToggle(view, tr("Show Log &Configuration"), &Settings::IsLogConfigVisible,
+                    &Settings::SetLogConfigVisible, &Settings::LogConfigVisibilityChanged);
+  AddSettingsToggle(view, tr("Show &Toolbar"), &Settings::IsToolBarVisible,
+                    &Settings::SetToolBarVisible, &Settings::ToolBarVisibilityChanged);
+  AddSettingsToggle(view, tr("&Lock Widgets In Place"), &Settings::AreWidgetsLocked,
+                    &Settings::SetWidgetsLocked);
+  view->addSeparator();
+
+  BuildDebuggerPanelToggles(view);
+  view->addSeparator();
+
+  BuildGameListViewChoice(view);
+  view->addSeparator();
+  BuildGameListFilterMenus(view);
+
+  view->addSeparator();
+  AddSettingsToggle(view, tr("Show Game Count"), &Settings::IsGameCountVisible,
+                    &Settings::SetGameCountVisible);
+
+  view->addSeparator();
+  // Purging is offered once the game list has started scanning, and not again until the next
+  // requested refresh has started.
+  QAction* const purge =
+      view->addAction(tr("Purge Game List Cache"), this, &MenuBar::PurgeGameListCache);
+  purge->setEnabled(false);
+  connect(&Settings::Instance(), &Settings::GameListRefreshRequested, purge,
+          [purge] { purge->setEnabled(false); });
+  connect(&Settings::Instance(), &Settings::GameListRefreshStarted, purge,
+          [purge] { purge->setEnabled(true); });
+  view->addSeparator();
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
+  view->addAction(tr("Search"), QKeySequence::Find, this, &MenuBar::ShowSearch);
+#else
+  view->addAction(tr("Search"), this, &MenuBar::ShowSearch, QKeySequence::Find);
 #endif
-
-  help_menu->addAction(tr("&About"), this, &MenuBar::ShowAboutDialog);
 }
 
-void MenuBar::AddGameListTypeSection(QMenu* view_menu)
+void MenuBar::BuildDebuggerPanelToggles(QMenu* view)
 {
-  QAction* list_view = view_menu->addAction(tr("List View"));
-  list_view->setCheckable(true);
-
-  QAction* grid_view = view_menu->addAction(tr("Grid View"));
-  grid_view->setCheckable(true);
-
-  QActionGroup* list_group = new QActionGroup(this);
-  list_group->addAction(list_view);
-  list_group->addAction(grid_view);
-
-  bool prefer_list = Settings::Instance().GetPreferredView();
-  list_view->setChecked(prefer_list);
-  grid_view->setChecked(!prefer_list);
-
-  connect(list_view, &QAction::triggered, this, &MenuBar::ShowList);
-  connect(grid_view, &QAction::triggered, this, &MenuBar::ShowGrid);
+  // Shown in debug mode only (see ReflectDebugMode).
+  m_debugger_panels = {
+      AddSettingsToggle(view, tr("&Code"), &Settings::IsCodeVisible, &Settings::SetCodeVisible,
+                        &Settings::CodeVisibilityChanged),
+      AddSettingsToggle(view, tr("&Registers"), &Settings::IsRegistersVisible,
+                        &Settings::SetRegistersVisible, &Settings::RegistersVisibilityChanged),
+      AddSettingsToggle(view, tr("&Threads"), &Settings::IsThreadsVisible,
+                        &Settings::SetThreadsVisible, &Settings::ThreadsVisibilityChanged),
+      // i18n: A "watch" here is a list of memory locations whose values are being observed, not
+      // a clock.
+      AddSettingsToggle(view, tr("&Watch"), &Settings::IsWatchVisible, &Settings::SetWatchVisible,
+                        &Settings::WatchVisibilityChanged),
+      AddSettingsToggle(view, tr("&Breakpoints"), &Settings::IsBreakpointsVisible,
+                        &Settings::SetBreakpointsVisible, &Settings::BreakpointsVisibilityChanged),
+      AddSettingsToggle(view, tr("&Memory"), &Settings::IsMemoryVisible,
+                        &Settings::SetMemoryVisible, &Settings::MemoryVisibilityChanged),
+      AddSettingsToggle(view, tr("&Network"), &Settings::IsNetworkVisible,
+                        &Settings::SetNetworkVisible, &Settings::NetworkVisibilityChanged),
+      AddSettingsToggle(view, tr("&JIT"), &Settings::IsJITVisible, &Settings::SetJITVisible,
+                        &Settings::JITVisibilityChanged),
+      AddSettingsToggle(view, tr("&Assembler"), &Settings::IsAssemblerVisible,
+                        &Settings::SetAssemblerVisible, &Settings::AssemblerVisibilityChanged),
+  };
 }
 
-void MenuBar::AddListColumnsMenu(QMenu* view_menu)
+void MenuBar::BuildGameListViewChoice(QMenu* view)
 {
-  static const QMap<QString, const Config::Info<bool>*> columns{
+  QAction* const as_list = view->addAction(tr("List View"));
+  as_list->setCheckable(true);
+  QAction* const as_grid = view->addAction(tr("Grid View"));
+  as_grid->setCheckable(true);
+
+  auto* const choice = new QActionGroup(this);
+  choice->addAction(as_list);
+  choice->addAction(as_grid);
+
+  const bool list_preferred = Settings::Instance().GetPreferredView();
+  as_list->setChecked(list_preferred);
+  as_grid->setChecked(!list_preferred);
+
+  connect(as_list, &QAction::triggered, this, &MenuBar::ShowList);
+  connect(as_grid, &QAction::triggered, this, &MenuBar::ShowGrid);
+}
+
+void MenuBar::BuildGameListFilterMenus(QMenu* view)
+{
+  // Entries are listed alphabetically by their (translated) label.
+  using Entries = QMap<QString, const Config::Info<bool>*>;
+
+  // List Columns: each entry shows or hides a column of the list view.
+  const Entries columns{
       {tr("Platform"), &Config::MAIN_GAMELIST_COLUMN_PLATFORM},
       {tr("Banner"), &Config::MAIN_GAMELIST_COLUMN_BANNER},
       {tr("Title"), &Config::MAIN_GAMELIST_COLUMN_TITLE},
@@ -738,56 +534,17 @@ void MenuBar::AddListColumnsMenu(QMenu* view_menu)
       {tr("Block Size"), &Config::MAIN_GAMELIST_COLUMN_BLOCK_SIZE},
       {tr("Compression"), &Config::MAIN_GAMELIST_COLUMN_COMPRESSION},
       {tr("Time Played"), &Config::MAIN_GAMELIST_COLUMN_TIME_PLAYED},
-      {tr("Tags"), &Config::MAIN_GAMELIST_COLUMN_TAGS}};
-
-  QActionGroup* column_group = new QActionGroup(this);
-  m_cols_menu = new QtUtils::NonAutodismissibleMenu(tr("List Columns"), view_menu);
-  view_menu->addMenu(m_cols_menu);
-  column_group->setExclusive(false);
-
-  for (const auto& key : columns.keys())
-  {
-    const Config::Info<bool>* const config = columns[key];
-    QAction* action = column_group->addAction(m_cols_menu->addAction(key));
-    action->setCheckable(true);
-    action->setChecked(Config::Get(*config));
-    connect(action, &QAction::toggled, [this, config, key](bool value) {
-      Config::SetBase(*config, value);
-      emit ColumnVisibilityToggled(key, value);
-    });
-  }
-}
-
-void MenuBar::AddShowPlatformsMenu(QMenu* view_menu)
-{
-  static const QMap<QString, const Config::Info<bool>*> platform_map{
+      {tr("Tags"), &Config::MAIN_GAMELIST_COLUMN_TAGS},
+  };
+  // Show Platforms / Show Regions: each entry filters the game list.
+  const Entries platforms{
       {tr("Show Wii"), &Config::MAIN_GAMELIST_LIST_WII},
       {tr("Show GameCube"), &Config::MAIN_GAMELIST_LIST_GC},
       {tr("Show Triforce"), &Config::MAIN_GAMELIST_LIST_TRI},
       {tr("Show WAD"), &Config::MAIN_GAMELIST_LIST_WAD},
-      {tr("Show ELF/DOL"), &Config::MAIN_GAMELIST_LIST_ELF_DOL}};
-
-  QActionGroup* platform_group = new QActionGroup(this);
-  auto* const plat_menu{new QtUtils::NonAutodismissibleMenu(tr("Show Platforms"), view_menu)};
-  view_menu->addMenu(plat_menu);
-  platform_group->setExclusive(false);
-
-  for (const auto& key : platform_map.keys())
-  {
-    const Config::Info<bool>* const config = platform_map[key];
-    QAction* action = platform_group->addAction(plat_menu->addAction(key));
-    action->setCheckable(true);
-    action->setChecked(Config::Get(*config));
-    connect(action, &QAction::toggled, [this, config, key](bool value) {
-      Config::SetBase(*config, value);
-      emit GameListPlatformVisibilityToggled(key, value);
-    });
-  }
-}
-
-void MenuBar::AddShowRegionsMenu(QMenu* view_menu)
-{
-  static const QMap<QString, const Config::Info<bool>*> region_map{
+      {tr("Show ELF/DOL"), &Config::MAIN_GAMELIST_LIST_ELF_DOL},
+  };
+  const Entries regions{
       {tr("Show JPN"), &Config::MAIN_GAMELIST_LIST_JPN},
       {tr("Show PAL"), &Config::MAIN_GAMELIST_LIST_PAL},
       {tr("Show USA"), &Config::MAIN_GAMELIST_LIST_USA},
@@ -801,287 +558,154 @@ void MenuBar::AddShowRegionsMenu(QMenu* view_menu)
       {tr("Show Spain"), &Config::MAIN_GAMELIST_LIST_SPAIN},
       {tr("Show Taiwan"), &Config::MAIN_GAMELIST_LIST_TAIWAN},
       {tr("Show World"), &Config::MAIN_GAMELIST_LIST_WORLD},
-      {tr("Show Unknown"), &Config::MAIN_GAMELIST_LIST_UNKNOWN}};
+      {tr("Show Unknown"), &Config::MAIN_GAMELIST_LIST_UNKNOWN},
+  };
 
-  auto* const region_menu{new QtUtils::NonAutodismissibleMenu(tr("Show Regions"), view_menu)};
-  view_menu->addMenu(region_menu);
-  const QAction* const show_all_regions = region_menu->addAction(tr("Show All"));
-  const QAction* const hide_all_regions = region_menu->addAction(tr("Hide All"));
+  using Notifier = void (MenuBar::*)(const QString&, bool);
+  const auto fill = [this](QMenu* menu, const Entries& entries, Notifier notify) {
+    auto* const group = new QActionGroup(this);
+    group->setExclusive(false);
+    for (auto it = entries.cbegin(); it != entries.cend(); ++it)
+    {
+      const QString label = it.key();
+      const Config::Info<bool>* const setting = it.value();
+      QAction* const entry = group->addAction(menu->addAction(label));
+      entry->setCheckable(true);
+      entry->setChecked(Config::Get(*setting));
+      connect(entry, &QAction::toggled, this, [this, setting, label, notify](bool shown) {
+        Config::SetBase(*setting, shown);
+        emit(this->*notify)(label, shown);
+      });
+    }
+  };
+
+  m_list_columns = new QtUtils::NonAutodismissibleMenu(tr("List Columns"), view);
+  view->addMenu(m_list_columns);
+  fill(m_list_columns, columns, &MenuBar::ColumnVisibilityToggled);
+  view->addSeparator();
+
+  auto* const platform_menu = new QtUtils::NonAutodismissibleMenu(tr("Show Platforms"), view);
+  view->addMenu(platform_menu);
+  fill(platform_menu, platforms, &MenuBar::GameListPlatformVisibilityToggled);
+
+  // Regions also have "Show All" and "Hide All". Each region entry applies a new state the same
+  // way whether it came from the entry itself or from those two.
+  auto* const region_menu = new QtUtils::NonAutodismissibleMenu(tr("Show Regions"), view);
+  view->addMenu(region_menu);
+  const QAction* const show_all = region_menu->addAction(tr("Show All"));
+  const QAction* const hide_all = region_menu->addAction(tr("Hide All"));
   region_menu->addSeparator();
 
-  for (const auto& key : region_map.keys())
+  for (auto it = regions.cbegin(); it != regions.cend(); ++it)
   {
-    const Config::Info<bool>* const config = region_map[key];
-    QAction* const menu_item = region_menu->addAction(key);
-    menu_item->setCheckable(true);
-    menu_item->setChecked(Config::Get(*config));
+    const QString label = it.key();
+    const Config::Info<bool>* const setting = it.value();
+    QAction* const entry = region_menu->addAction(label);
+    entry->setCheckable(true);
+    entry->setChecked(Config::Get(*setting));
 
-    const auto set_visibility = [this, config, key, menu_item](bool visibility) {
-      menu_item->setChecked(visibility);
-      Config::SetBase(*config, visibility);
-      emit GameListRegionVisibilityToggled(key, visibility);
+    const auto apply = [this, entry, setting, label](bool shown) {
+      entry->setChecked(shown);
+      Config::SetBase(*setting, shown);
+      emit GameListRegionVisibilityToggled(label, shown);
     };
-    const auto set_visible = std::bind(set_visibility, true);
-    const auto set_hidden = std::bind(set_visibility, false);
-
-    connect(menu_item, &QAction::toggled, set_visibility);
-    connect(show_all_regions, &QAction::triggered, menu_item, set_visible);
-    connect(hide_all_regions, &QAction::triggered, menu_item, set_hidden);
+    connect(entry, &QAction::toggled, this, apply);
+    connect(show_all, &QAction::triggered, entry, [apply] { apply(true); });
+    connect(hide_all, &QAction::triggered, entry, [apply] { apply(false); });
   }
 }
 
-void MenuBar::AddMovieMenu()
-{
-  auto* const movie_menu{new QtUtils::NonAutodismissibleMenu(tr("&Movie"), this)};
-  addMenu(movie_menu);
-  m_recording_start =
-      movie_menu->addAction(tr("Start Re&cording Input"), this, [this] { emit StartRecording(); });
-  m_recording_play =
-      movie_menu->addAction(tr("P&lay Input Recording..."), this, [this] { emit PlayRecording(); });
-  m_recording_stop = movie_menu->addAction(tr("Stop Playing/Recording Input"), this,
-                                           [this] { emit StopRecording(); });
-  m_recording_export =
-      movie_menu->addAction(tr("Export Recording..."), this, [this] { emit ExportRecording(); });
-
-  m_recording_start->setEnabled(false);
-  m_recording_play->setEnabled(false);
-  m_recording_stop->setEnabled(false);
-  m_recording_export->setEnabled(false);
-
-  m_recording_read_only = movie_menu->addAction(tr("&Read-Only Mode"));
-  m_recording_read_only->setCheckable(true);
-  m_recording_read_only->setChecked(Core::System::GetInstance().GetMovie().IsReadOnly());
-  connect(m_recording_read_only, &QAction::toggled,
-          [](bool value) { Core::System::GetInstance().GetMovie().SetReadOnly(value); });
-
-  movie_menu->addAction(tr("TAS Input"), this, [this] { emit ShowTASInput(); });
-
-  movie_menu->addSeparator();
-
-  auto* pause_at_end = movie_menu->addAction(tr("Pause at End of Movie"));
-  pause_at_end->setCheckable(true);
-  pause_at_end->setChecked(Config::Get(Config::MAIN_MOVIE_PAUSE_MOVIE));
-  connect(pause_at_end, &QAction::toggled,
-          [](bool value) { Config::SetBaseOrCurrent(Config::MAIN_MOVIE_PAUSE_MOVIE, value); });
-
-  m_movie_window = movie_menu->addAction(tr("Enable Movie Window"));
-  m_movie_window->setCheckable(true);
-  m_movie_window->setChecked(Config::Get(Config::MAIN_MOVIE_SHOW_OSD));
-  connect(m_movie_window, &QAction::toggled,
-          [](bool value) { Config::SetBaseOrCurrent(Config::MAIN_MOVIE_SHOW_OSD, value); });
-
-  movie_menu->addAction(tr("Customize Movie Window"), this, &MenuBar::ConfigureOSD);
-
-  movie_menu->addSeparator();
-
-  auto* dump_frames = movie_menu->addAction(tr("Dump Frames"));
-  dump_frames->setCheckable(true);
-  dump_frames->setChecked(Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES));
-  connect(dump_frames, &QAction::toggled,
-          [](bool value) { Config::SetBaseOrCurrent(Config::MAIN_MOVIE_DUMP_FRAMES, value); });
-
-  auto* dump_audio = movie_menu->addAction(tr("Dump Audio"));
-  dump_audio->setCheckable(true);
-  dump_audio->setChecked(Config::Get(Config::MAIN_DUMP_AUDIO));
-  connect(dump_audio, &QAction::toggled,
-          [](bool value) { Config::SetBaseOrCurrent(Config::MAIN_DUMP_AUDIO, value); });
-}
-
-void MenuBar::AddJITMenu()
+void MenuBar::BuildJITMenu()
 {
   m_jit = new QtUtils::NonAutodismissibleMenu(tr("JIT"), this);
   addMenu(m_jit);
 
-  m_jit_interpreter_core = m_jit->addAction(tr("Interpreter Core"));
-  m_jit_interpreter_core->setCheckable(true);
-  m_jit_interpreter_core->setChecked(Config::Get(Config::MAIN_CPU_CORE) ==
-                                     PowerPC::CPUCore::Interpreter);
-
-  connect(m_jit_interpreter_core, &QAction::toggled, [](bool enabled) {
-    Core::System::GetInstance().GetPowerPC().SetMode(enabled ? PowerPC::CoreMode::Interpreter :
-                                                               PowerPC::CoreMode::JIT);
+  m_jit_interpreter = m_jit->addAction(tr("Interpreter Core"));
+  m_jit_interpreter->setCheckable(true);
+  m_jit_interpreter->setChecked(Config::Get(Config::MAIN_CPU_CORE) ==
+                                PowerPC::CPUCore::Interpreter);
+  connect(m_jit_interpreter, &QAction::toggled, this, [](bool interpreter) {
+    TheSystem().GetPowerPC().SetMode(interpreter ? PowerPC::CoreMode::Interpreter :
+                                                   PowerPC::CoreMode::JIT);
   });
-
   m_jit->addSeparator();
 
-  m_jit_block_linking = m_jit->addAction(tr("JIT Block Linking Off"));
-  m_jit_block_linking->setCheckable(true);
-  m_jit_block_linking->setChecked(SConfig::GetInstance().bJITNoBlockLinking);
-  connect(m_jit_block_linking, &QAction::toggled, [this](bool enabled) {
-    SConfig::GetInstance().bJITNoBlockLinking = enabled;
-    ClearCache();
-  });
+  // These two live in SConfig and only take effect for newly compiled blocks.
+  const auto add_cache_switch = [this](const QString& text, bool SConfig::*flag) {
+    QAction* const action = m_jit->addAction(text);
+    action->setCheckable(true);
+    action->setChecked(SConfig::GetInstance().*flag);
+    connect(action, &QAction::toggled, this, [this, flag](bool on) {
+      SConfig::GetInstance().*flag = on;
+      ClearJitCache();
+    });
+    return action;
+  };
+  m_jit_no_block_linking = add_cache_switch(tr("JIT Block Linking Off"), &SConfig::bJITNoBlockLinking);
+  m_jit_no_block_cache = add_cache_switch(tr("Disable JIT Cache"), &SConfig::bJITNoBlockCache);
 
-  m_jit_disable_cache = m_jit->addAction(tr("Disable JIT Cache"));
-  m_jit_disable_cache->setCheckable(true);
-  m_jit_disable_cache->setChecked(SConfig::GetInstance().bJITNoBlockCache);
-  connect(m_jit_disable_cache, &QAction::toggled, [this](bool enabled) {
-    SConfig::GetInstance().bJITNoBlockCache = enabled;
-    ClearCache();
-  });
-
-  m_jit_disable_fastmem = m_jit->addAction(tr("Disable Fastmem"));
-  m_jit_disable_fastmem->setCheckable(true);
-  m_jit_disable_fastmem->setChecked(!Config::Get(Config::MAIN_FASTMEM));
-  connect(m_jit_disable_fastmem, &QAction::toggled,
-          [](bool enabled) { Config::SetBaseOrCurrent(Config::MAIN_FASTMEM, !enabled); });
-
-  m_jit_disable_page_table_fastmem = m_jit->addAction(tr("Disable Page Table Fastmem"));
-  m_jit_disable_page_table_fastmem->setCheckable(true);
-  m_jit_disable_page_table_fastmem->setChecked(!Config::Get(Config::MAIN_PAGE_TABLE_FASTMEM));
-  connect(m_jit_disable_page_table_fastmem, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_PAGE_TABLE_FASTMEM, !enabled);
-  });
-
-  m_jit_disable_fastmem_arena = m_jit->addAction(tr("Disable Fastmem Arena"));
-  m_jit_disable_fastmem_arena->setCheckable(true);
-  m_jit_disable_fastmem_arena->setChecked(!Config::Get(Config::MAIN_FASTMEM_ARENA));
-  connect(m_jit_disable_fastmem_arena, &QAction::toggled,
-          [](bool enabled) { Config::SetBaseOrCurrent(Config::MAIN_FASTMEM_ARENA, !enabled); });
-
-  m_jit_disable_large_entry_points_map = m_jit->addAction(tr("Disable Large Entry Points Map"));
-  m_jit_disable_large_entry_points_map->setCheckable(true);
-  m_jit_disable_large_entry_points_map->setChecked(
-      !Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP));
-  connect(m_jit_disable_large_entry_points_map, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_LARGE_ENTRY_POINTS_MAP, !enabled);
-  });
-
-  m_jit_clear_cache = m_jit->addAction(tr("Clear Cache"), this, &MenuBar::ClearCache);
-
+  AddConfigToggle(m_jit, tr("Disable Fastmem"), Config::MAIN_FASTMEM, true);
+  AddConfigToggle(m_jit, tr("Disable Page Table Fastmem"), Config::MAIN_PAGE_TABLE_FASTMEM, true);
+  m_jit_no_fastmem_arena =
+      AddConfigToggle(m_jit, tr("Disable Fastmem Arena"), Config::MAIN_FASTMEM_ARENA, true);
+  m_jit_no_large_entry_map = AddConfigToggle(m_jit, tr("Disable Large Entry Points Map"),
+                                             Config::MAIN_LARGE_ENTRY_POINTS_MAP, true);
+  m_jit_clear_cache = m_jit->addAction(tr("Clear Cache"), this, &MenuBar::ClearJitCache);
   m_jit->addSeparator();
 
-  m_jit_log_coverage =
-      m_jit->addAction(tr("Log JIT Instruction Coverage"), this, &MenuBar::LogInstructions);
-  m_jit_search_instruction =
-      m_jit->addAction(tr("Search for an Instruction"), this, &MenuBar::SearchInstruction);
-
+  m_jit_log_coverage = m_jit->addAction(tr("Log JIT Instruction Coverage"), this,
+                                        [] { PPCTables::LogCompiledInstructions(); });
+  m_jit_search =
+      m_jit->addAction(tr("Search for an Instruction"), this, &MenuBar::SearchForInstruction);
   m_jit->addSeparator();
 
-  m_jit_profile_blocks = m_jit->addAction(tr("Enable JIT Block Profiling"));
-  m_jit_profile_blocks->setCheckable(true);
-  m_jit_profile_blocks->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING));
-  connect(m_jit_profile_blocks, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING, enabled);
-  });
-  m_jit_wipe_profiling_data = m_jit->addAction(tr("Wipe JIT Block Profiling Data"), this,
-                                               &MenuBar::OnWipeJitBlockProfilingData);
-  m_jit_write_cache_log_dump =
-      m_jit->addAction(tr("Write JIT Block Log Dump"), this, &MenuBar::OnWriteJitBlockLogDump);
-
+  m_jit_profiling = AddConfigToggle(m_jit, tr("Enable JIT Block Profiling"),
+                                    Config::MAIN_DEBUG_JIT_ENABLE_PROFILING);
+  m_jit_wipe_profiling = m_jit->addAction(tr("Wipe JIT Block Profiling Data"), this,
+                                          &MenuBar::WipeJitProfilingData);
+  m_jit_block_dump =
+      m_jit->addAction(tr("Write JIT Block Log Dump"), this, &MenuBar::WriteJitBlockLogDump);
   m_jit->addSeparator();
 
-  m_jit_off = m_jit->addAction(tr("JIT Off (JIT Core)"));
-  m_jit_off->setCheckable(true);
-  m_jit_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_OFF));
-  connect(m_jit_off, &QAction::toggled,
-          [](bool enabled) { Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_OFF, enabled); });
-
-  m_jit_loadstore_off = m_jit->addAction(tr("JIT LoadStore Off"));
-  m_jit_loadstore_off->setCheckable(true);
-  m_jit_loadstore_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_OFF));
-  connect(m_jit_loadstore_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_OFF, enabled);
-  });
-
-  m_jit_loadstore_lbzx_off = m_jit->addAction(tr("JIT LoadStore lbzx Off"));
-  m_jit_loadstore_lbzx_off->setCheckable(true);
-  m_jit_loadstore_lbzx_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_LBZX_OFF));
-  connect(m_jit_loadstore_lbzx_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_LBZX_OFF, enabled);
-  });
-
-  m_jit_loadstore_lxz_off = m_jit->addAction(tr("JIT LoadStore lXz Off"));
-  m_jit_loadstore_lxz_off->setCheckable(true);
-  m_jit_loadstore_lxz_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_LXZ_OFF));
-  connect(m_jit_loadstore_lxz_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_LXZ_OFF, enabled);
-  });
-
-  m_jit_loadstore_lwz_off = m_jit->addAction(tr("JIT LoadStore lwz Off"));
-  m_jit_loadstore_lwz_off->setCheckable(true);
-  m_jit_loadstore_lwz_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_LWZ_OFF));
-  connect(m_jit_loadstore_lwz_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_LWZ_OFF, enabled);
-  });
-
-  m_jit_loadstore_floating_off = m_jit->addAction(tr("JIT LoadStore Floating Off"));
-  m_jit_loadstore_floating_off->setCheckable(true);
-  m_jit_loadstore_floating_off->setChecked(
-      Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_FLOATING_OFF));
-  connect(m_jit_loadstore_floating_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_FLOATING_OFF, enabled);
-  });
-
-  m_jit_loadstore_paired_off = m_jit->addAction(tr("JIT LoadStore Paired Off"));
-  m_jit_loadstore_paired_off->setCheckable(true);
-  m_jit_loadstore_paired_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_LOAD_STORE_PAIRED_OFF));
-  connect(m_jit_loadstore_paired_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_LOAD_STORE_PAIRED_OFF, enabled);
-  });
-
-  m_jit_floatingpoint_off = m_jit->addAction(tr("JIT FloatingPoint Off"));
-  m_jit_floatingpoint_off->setCheckable(true);
-  m_jit_floatingpoint_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_FLOATING_POINT_OFF));
-  connect(m_jit_floatingpoint_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_FLOATING_POINT_OFF, enabled);
-  });
-
-  m_jit_integer_off = m_jit->addAction(tr("JIT Integer Off"));
-  m_jit_integer_off->setCheckable(true);
-  m_jit_integer_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_INTEGER_OFF));
-  connect(m_jit_integer_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_INTEGER_OFF, enabled);
-  });
-
-  m_jit_paired_off = m_jit->addAction(tr("JIT Paired Off"));
-  m_jit_paired_off->setCheckable(true);
-  m_jit_paired_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_PAIRED_OFF));
-  connect(m_jit_paired_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_PAIRED_OFF, enabled);
-  });
-
-  m_jit_systemregisters_off = m_jit->addAction(tr("JIT SystemRegisters Off"));
-  m_jit_systemregisters_off->setCheckable(true);
-  m_jit_systemregisters_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF));
-  connect(m_jit_systemregisters_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF, enabled);
-  });
-
-  m_jit_branch_off = m_jit->addAction(tr("JIT Branch Off"));
-  m_jit_branch_off->setCheckable(true);
-  m_jit_branch_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_BRANCH_OFF));
-  connect(m_jit_branch_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_BRANCH_OFF, enabled);
-  });
-
-  m_jit_register_cache_off = m_jit->addAction(tr("JIT Register Cache Off"));
-  m_jit_register_cache_off->setCheckable(true);
-  m_jit_register_cache_off->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_REGISTER_CACHE_OFF));
-  connect(m_jit_register_cache_off, &QAction::toggled, [](bool enabled) {
-    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_REGISTER_CACHE_OFF, enabled);
-  });
+  // Per-category switches that make the JIT fall back to the interpreter.
+  AddConfigToggle(m_jit, tr("JIT Off (JIT Core)"), Config::MAIN_DEBUG_JIT_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore Off"), Config::MAIN_DEBUG_JIT_LOAD_STORE_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore lbzx Off"), Config::MAIN_DEBUG_JIT_LOAD_STORE_LBZX_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore lXz Off"), Config::MAIN_DEBUG_JIT_LOAD_STORE_LXZ_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore lwz Off"), Config::MAIN_DEBUG_JIT_LOAD_STORE_LWZ_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore Floating Off"),
+                  Config::MAIN_DEBUG_JIT_LOAD_STORE_FLOATING_OFF);
+  AddConfigToggle(m_jit, tr("JIT LoadStore Paired Off"),
+                  Config::MAIN_DEBUG_JIT_LOAD_STORE_PAIRED_OFF);
+  AddConfigToggle(m_jit, tr("JIT FloatingPoint Off"), Config::MAIN_DEBUG_JIT_FLOATING_POINT_OFF);
+  AddConfigToggle(m_jit, tr("JIT Integer Off"), Config::MAIN_DEBUG_JIT_INTEGER_OFF);
+  AddConfigToggle(m_jit, tr("JIT Paired Off"), Config::MAIN_DEBUG_JIT_PAIRED_OFF);
+  AddConfigToggle(m_jit, tr("JIT SystemRegisters Off"),
+                  Config::MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF);
+  AddConfigToggle(m_jit, tr("JIT Branch Off"), Config::MAIN_DEBUG_JIT_BRANCH_OFF);
+  AddConfigToggle(m_jit, tr("JIT Register Cache Off"), Config::MAIN_DEBUG_JIT_REGISTER_CACHE_OFF);
 }
 
-void MenuBar::AddSymbolsMenu()
+void MenuBar::BuildSymbolsMenu()
 {
   m_symbols = addMenu(tr("Symbols"));
 
   m_symbols->addAction(tr("&Clear Symbols"), this, &MenuBar::ClearSymbols);
-
-  auto* generate = m_symbols->addMenu(tr("&Generate Symbols From"));
+  QMenu* const generate = m_symbols->addMenu(tr("&Generate Symbols From"));
   generate->addAction(tr("Address"), this, &MenuBar::GenerateSymbolsFromAddress);
   generate->addAction(tr("Signature Database"), this, &MenuBar::GenerateSymbolsFromSignatureDB);
   generate->addAction(tr("RSO Modules"), this, &MenuBar::GenerateSymbolsFromRSO);
-  m_debugger_show_demangled_names = m_symbols->addAction(tr("Show &Demangled Names"));
+  QAction* const demangled = m_symbols->addAction(tr("Show &Demangled Names"));
   m_symbols->addSeparator();
 
   m_symbols->addAction(tr("&Load Symbol Map"), this, &MenuBar::LoadSymbolMap);
   m_symbols->addAction(tr("&Save Symbol Map"), this, &MenuBar::SaveSymbolMap);
   m_symbols->addSeparator();
 
-  m_symbols->addAction(tr("Load &Other Map File..."), this, &MenuBar::LoadOtherSymbolMap);
-  m_symbols->addAction(tr("Load &Bad Map File..."), this, &MenuBar::LoadBadSymbolMap);
+  m_symbols->addAction(tr("Load &Other Map File..."), this,
+                       [this] { LoadMapFileChosenByUser(false); });
+  m_symbols->addAction(tr("Load &Bad Map File..."), this,
+                       [this] { LoadMapFileChosenByUser(true); });
   m_symbols->addAction(tr("Save Symbol Map &As..."), this, &MenuBar::SaveSymbolMapAs);
   m_symbols->addSeparator();
 
@@ -1096,160 +720,330 @@ void MenuBar::AddSymbolsMenu()
   m_symbols->addAction(tr("Appl&y Signature File..."), this, &MenuBar::ApplySignatureFile);
   m_symbols->addSeparator();
 
-  m_symbols->addAction(tr("&Patch HLE Functions"), this, &MenuBar::PatchHLEFunctions);
+  m_symbols->addAction(tr("&Patch HLE Functions"), this,
+                       [] { HLE::PatchFunctions(TheSystem()); });
 
-  m_debugger_show_demangled_names->setCheckable(true);
-  m_debugger_show_demangled_names->setChecked(Settings::Instance().IsShowDemangledNames());
-  connect(m_debugger_show_demangled_names, &QAction::toggled, &Settings::Instance(),
-          &Settings::SetShowDemangledNames);
-  connect(&Settings::Instance(), &Settings::ShowDemangledNamesChanged,
-          m_debugger_show_demangled_names, &QAction::setChecked);
+  demangled->setCheckable(true);
+  demangled->setChecked(Settings::Instance().IsShowDemangledNames());
+  connect(demangled, &QAction::toggled, &Settings::Instance(), &Settings::SetShowDemangledNames);
+  connect(&Settings::Instance(), &Settings::ShowDemangledNamesChanged, demangled,
+          &QAction::setChecked);
+}
+
+void MenuBar::BuildHelpMenu()
+{
+  QMenu* const help = addMenu(tr("&Help"));
+
+  connect(help->addAction(tr("&Website")), &QAction::triggered, this,
+          [] { OpenWebPage("https://dolphin-emu.org/"); });
+  connect(help->addAction(tr("Online &Documentation")), &QAction::triggered, this,
+          [] { OpenWebPage("https://dolphin-emu.org/docs/guides"); });
+  connect(help->addAction(tr("&GitHub Repository")), &QAction::triggered, this,
+          [] { OpenWebPage("https://github.com/dolphin-emu/dolphin"); });
+  connect(help->addAction(tr("&Bug Tracker")), &QAction::triggered, this,
+          [] { OpenWebPage("https://bugs.dolphin-emu.org/projects/emulator"); });
+
+  if (AutoUpdateChecker::SystemSupportsAutoUpdates())
+  {
+    help->addSeparator();
+    help->addAction(tr("&Check for Updates..."), this, &MenuBar::InstallUpdateManually);
+  }
+
+#ifndef __APPLE__
+  help->addSeparator();
+#endif
+  help->addAction(tr("&About"), this, &MenuBar::ShowAboutDialog);
+}
+
+QString MenuBar::SignatureFileFilter() const
+{
+  return QStringLiteral("%1 (*.dsy);; %2 (*.csv);; %3 (*.mega)")
+      .arg(tr("Dolphin Signature File"), tr("Dolphin Signature CSV File"),
+           tr("WiiTools Signature MEGA File"));
+}
+
+// --- Keeping the menus current ---------------------------------------------------------------
+
+void MenuBar::ReflectEmulationState(Core::State state)
+{
+  const bool has_game = state != Core::State::Uninitialized;
+  const bool unpaused = has_game && state != Core::State::Paused;
+
+  m_eject_disc->setEnabled(has_game);
+  m_change_disc->setEnabled(has_game);
+
+  // Play and Pause take turns; Stop only appears with a game.
+  m_play->setEnabled(!unpaused);
+  m_play->setVisible(!unpaused);
+  m_pause->setEnabled(unpaused);
+  m_pause->setVisible(unpaused);
+  m_stop->setEnabled(has_game);
+  m_stop->setVisible(has_game);
+  m_reset->setEnabled(has_game);
+  m_fullscreen->setEnabled(has_game);
+  m_screenshot->setEnabled(has_game);
+  m_save_state->setEnabled(has_game);
+
+  // Hardcore achievements forbid loading states and frame advance.
+  const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
+  m_load_state->setEnabled(has_game && !hardcore);
+  m_frame_advance->setEnabled(has_game && !hardcore);
+
+  m_read_only->setEnabled(has_game);
+  if (!has_game)
+  {
+    m_stop_recording->setEnabled(false);
+    m_export_recording->setEnabled(false);
+  }
+  // A recording starts either at boot (a game is selected and nothing runs) or from a state.
+  const bool can_record_from_boot = m_game_selected && state == Core::State::Uninitialized;
+  const bool can_record_from_state =
+      state == Core::State::Running || state == Core::State::Paused;
+  m_play_recording->setEnabled(can_record_from_boot && !hardcore);
+  m_start_recording->setEnabled((can_record_from_boot || can_record_from_state) &&
+                                !TheSystem().GetMovie().IsPlayingInput());
+
+  // Settings that need a stopped core vs. actions that need a running one.
+  const bool jit_present = TheSystem().GetJitInterface().GetCore() != nullptr;
+  m_jit_interpreter->setEnabled(has_game);
+  m_jit_no_block_linking->setEnabled(!has_game);
+  m_jit_no_block_cache->setEnabled(!has_game);
+  m_jit_no_fastmem_arena->setEnabled(!has_game);
+  m_jit_no_large_entry_map->setEnabled(!has_game);
+  m_jit_clear_cache->setEnabled(has_game);
+  m_jit_log_coverage->setEnabled(!has_game);
+  m_jit_search->setEnabled(has_game);
+  m_jit_wipe_profiling->setEnabled(jit_present);
+  m_jit_block_dump->setEnabled(jit_present);
+
+  m_symbols->setEnabled(has_game);
+
+  RelabelStateSlots();
+  UpdateToolsMenu(state);
+
+  ReflectDebugMode(Settings::Instance().IsDebugModeEnabled());
+}
+
+void MenuBar::ReflectConfig()
+{
+  SignalBlocking(m_jit_profiling)->setChecked(Config::Get(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING));
+  SignalBlocking(m_movie_window)->setChecked(Config::Get(Config::MAIN_MOVIE_SHOW_OSD));
+}
+
+void MenuBar::ReflectDebugMode(bool enabled)
+{
+  for (QAction* const action : {m_boot_to_pause, m_reset_panic_ignore, m_debug_font})
+    action->setVisible(enabled);
+  for (QAction* const action : m_debugger_panels)
+    action->setVisible(enabled);
+
+  // The JIT and Symbols menus are (re)appended at the end of the bar in debug mode.
+  if (enabled)
+  {
+    addMenu(m_jit);
+    addMenu(m_symbols);
+  }
+  else
+  {
+    removeAction(m_jit->menuAction());
+    removeAction(m_symbols->menuAction());
+  }
+}
+
+void MenuBar::ReflectSelectedGame(const std::shared_ptr<const UICommon::GameFile>& game_file)
+{
+  m_game_selected = game_file != nullptr;
+
+  auto& system = TheSystem();
+  const bool from_boot = m_game_selected && Core::IsUninitialized(system);
+  const bool from_state = Core::IsRunning(system);
+  m_play_recording->setEnabled(from_boot);
+  m_start_recording->setEnabled((from_boot || from_state) && !system.GetMovie().IsPlayingInput());
+}
+
+void MenuBar::ReflectRecordingStatus(bool recording)
+{
+  auto& system = TheSystem();
+  const bool from_boot = m_game_selected && Core::IsUninitialized(system);
+  const bool from_state = Core::IsRunning(system);
+
+  m_start_recording->setEnabled(!recording && (from_boot || from_state));
+  m_stop_recording->setEnabled(recording);
+  m_export_recording->setEnabled(recording);
+}
+
+void MenuBar::RelabelStateSlots()
+{
+  const QList<QAction*> select = m_slot_choices->actions();
+  const QList<QAction*> load = m_load_from_slot->actions();
+  const QList<QAction*> save = m_save_to_slot->actions();
+  for (qsizetype index = 0; index < select.size(); ++index)
+  {
+    const int slot = static_cast<int>(index) + 1;
+    const QString contents =
+        QString::fromStdString(State::GetInfoStringOfSlot(static_cast<u32>(slot)));
+    load[index]->setText(tr("Load from Slot %1 - %2").arg(slot).arg(contents));
+    save[index]->setText(tr("Save to Slot %1 - %2").arg(slot).arg(contents));
+    select[index]->setText(tr("Select Slot %1 - %2").arg(slot).arg(contents));
+  }
 }
 
 void MenuBar::UpdateToolsMenu(const Core::State state)
 {
-  const bool is_uninitialized = state == Core::State::Uninitialized;
-  const bool is_running = state == Core::State::Running || state == Core::State::Paused;
+  const bool stopped = state == Core::State::Uninitialized;
+  const bool running = state == Core::State::Running || state == Core::State::Paused;
 
-  m_boot_sysmenu->setEnabled(is_uninitialized);
-  m_perform_online_update_menu->setEnabled(is_uninitialized);
-  m_ntscj_ipl->setEnabled(is_uninitialized && File::Exists(Config::GetBootROMPath(JAP_DIR)));
-  m_ntscu_ipl->setEnabled(is_uninitialized && File::Exists(Config::GetBootROMPath(USA_DIR)));
-  m_pal_ipl->setEnabled(is_uninitialized && File::Exists(Config::GetBootROMPath(EUR_DIR)));
-  m_dev_ipl->setEnabled(is_uninitialized && File::Exists(Config::GetBootROMPath(DEV_DIR)));
-  m_wad_install_action->setEnabled(is_uninitialized);
-  m_import_backup->setEnabled(is_uninitialized);
-  m_check_nand->setEnabled(is_uninitialized);
-  m_import_wii_save->setEnabled(is_uninitialized);
-  m_import_wii_saves->setEnabled(is_uninitialized);
-  m_export_wii_saves->setEnabled(is_uninitialized);
-
-  if (is_uninitialized)
+  // NAND, save and boot tools need the core stopped.
+  m_boot_system_menu->setEnabled(stopped);
+  m_online_update->setEnabled(stopped);
+  static constexpr std::array<const char*, 4> IPL_REGION_DIRS{JAP_DIR, USA_DIR, EUR_DIR, DEV_DIR};
+  for (std::size_t i = 0; i < m_gc_ipl.size(); ++i)
+    m_gc_ipl[i]->setEnabled(stopped && File::Exists(Config::GetBootROMPath(IPL_REGION_DIRS[i])));
+  for (QAction* const action : {m_install_wad, m_import_nand_backup, m_check_nand,
+                                m_import_wii_save, m_import_wii_saves, m_export_wii_saves})
   {
-    IOS::HLE::Kernel ios;
-    const auto tmd = ios.GetESCore().FindInstalledTMD(Titles::SYSTEM_MENU);
-
-    const QString sysmenu_version =
-        tmd.IsValid() ? QString::fromStdString(
-                            DiscIO::GetSysMenuVersionString(tmd.GetTitleVersion(), tmd.IsvWii())) :
-                        QString{};
-
-    const QString sysmenu_text = (tmd.IsValid() && tmd.IsvWii()) ? tr("Load vWii &System Menu %1") :
-                                                                   tr("Load Wii &System Menu %1");
-
-    m_boot_sysmenu->setText(sysmenu_text.arg(sysmenu_version));
-
-    m_boot_sysmenu->setEnabled(tmd.IsValid());
-
-    for (QAction* action : m_perform_online_update_menu->actions())
-      action->setEnabled(!tmd.IsValid());
-    m_perform_online_update_for_current_region->setEnabled(tmd.IsValid());
+    action->setEnabled(stopped);
   }
 
-  const auto bt = WiiUtils::GetBluetoothEmuDevice();
-  const bool enable_wiimotes = is_running && bt != nullptr;
-
-  for (std::size_t i = 0; i < m_wii_remotes.size(); i++)
+  if (stopped)
   {
-    QAction* const wii_remote = m_wii_remotes[i];
+    // Look at the NAND for an installed System Menu.
+    IOS::HLE::Kernel ios;
+    const auto tmd = ios.GetESCore().FindInstalledTMD(Titles::SYSTEM_MENU);
+    const bool installed = tmd.IsValid();
 
-    wii_remote->setEnabled(enable_wiimotes);
-    if (enable_wiimotes)
-      wii_remote->setChecked(bt->AccessWiimoteByIndex(i)->IsConnected());
+    QString version;
+    if (installed)
+    {
+      version = QString::fromStdString(
+          DiscIO::GetSysMenuVersionString(tmd.GetTitleVersion(), tmd.IsvWii()));
+    }
+    const QString label = (installed && tmd.IsvWii()) ? tr("Load vWii &System Menu %1") :
+                                                        tr("Load Wii &System Menu %1");
+    m_boot_system_menu->setText(label.arg(version));
+    m_boot_system_menu->setEnabled(installed);
+
+    // Without a System Menu only a region-specific update can install one.
+    for (QAction* const action : m_online_update->actions())
+      action->setEnabled(!installed);
+    m_online_update_current_region->setEnabled(installed);
+  }
+
+  // Remotes can be connected while an emulated Bluetooth adapter is in use.
+  const auto bluetooth = WiiUtils::GetBluetoothEmuDevice();
+  const bool remotes_available = running && bluetooth != nullptr;
+  for (std::size_t index = 0; index < m_wii_remotes.size(); ++index)
+  {
+    m_wii_remotes[index]->setEnabled(remotes_available);
+    if (remotes_available)
+      m_wii_remotes[index]->setChecked(bluetooth->AccessWiimoteByIndex(index)->IsConnected());
   }
 }
 
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
 void MenuBar::UpdateAchievementDevelopmentMenu()
 {
-  auto* dev_menu = AchievementManager::GetInstance().GetDevelopmentMenu();
-  if (dev_menu)
+  const rc_client_raintegration_menu_t* const ra_menu =
+      AchievementManager::GetInstance().GetDevelopmentMenu();
+  if (ra_menu == nullptr)
   {
-    m_achievements_dev_menu->menuAction()->setVisible(true);
-    m_achievements_dev_menu->clear();
-    for (u32 i = 0; i < dev_menu->num_items; i++)
-    {
-      const auto& menu_item = dev_menu->items[i];
-      if (menu_item.label == nullptr)
-      {
-        m_achievements_dev_menu->addSeparator();
-        continue;
-      }
-      auto* ra_dev_menu_item = m_achievements_dev_menu->addAction(
-          QString::fromStdString(menu_item.label), this,
-          [menu_item] { AchievementManager::GetInstance().ActivateDevMenuItem(menu_item.id); });
-      ra_dev_menu_item->setEnabled(menu_item.enabled);
-      // Recommended hardcode by RAIntegration.dll developer Jamiras
-      ra_dev_menu_item->setCheckable(i < 2);
-      ra_dev_menu_item->setChecked(menu_item.checked);
-    }
+    m_ra_development->menuAction()->setVisible(false);
+    return;
   }
-  else
+
+  m_ra_development->menuAction()->setVisible(true);
+  m_ra_development->clear();
+  for (u32 index = 0; index < ra_menu->num_items; ++index)
   {
-    m_achievements_dev_menu->menuAction()->setVisible(false);
+    const auto& item = ra_menu->items[index];
+    // Items without a label are separators.
+    if (item.label == nullptr)
+    {
+      m_ra_development->addSeparator();
+      continue;
+    }
+
+    QAction* const action = m_ra_development->addAction(
+        QString::fromStdString(item.label), this,
+        [id = item.id] { AchievementManager::GetInstance().ActivateDevMenuItem(id); });
+    action->setEnabled(item.enabled);
+    // RAIntegration's first two items are toggles; the rest are plain commands.
+    action->setCheckable(index < 2);
+    action->setChecked(item.checked);
   }
 }
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
 
+void MenuBar::InstallUpdateManually()
+{
+  // Without a configured track, a manual check looks at development builds.
+  std::string track = Config::Get(Config::MAIN_AUTOUPDATE_UPDATE_TRACK);
+  if (track.empty())
+    track = "dev";
+
+  auto* const updater =
+      new Updater(parentWidget(), track, Config::Get(Config::MAIN_AUTOUPDATE_HASH_OVERRIDE));
+  updater->CheckForUpdate();
+}
+
+// --- Tools -------------------------------------------------------------------------------------
+
 void MenuBar::InstallWAD()
 {
-  QString wad_file = DolphinFileDialog::getOpenFileName(this, tr("Select Title to Install to NAND"),
-                                                        QString(), tr("WAD files (*.wad)"));
-
-  if (wad_file.isEmpty())
+  const QString wad = DolphinFileDialog::getOpenFileName(
+      this, tr("Select Title to Install to NAND"), QString(), tr("WAD files (*.wad)"));
+  if (wad.isEmpty())
     return;
 
-  if (WiiUtils::InstallWAD(wad_file.toStdString()))
-  {
-    Settings::Instance().NANDRefresh();
-    ModalMessageBox::information(this, tr("Success"),
-                                 tr("Successfully installed this title to the NAND."));
-  }
-  else
+  if (!WiiUtils::InstallWAD(wad.toStdString()))
   {
     ModalMessageBox::critical(this, tr("Failure"), tr("Failed to install this title to the NAND."));
+    return;
   }
+
+  Settings::Instance().NANDRefresh();
+  ModalMessageBox::information(this, tr("Success"),
+                               tr("Successfully installed this title to the NAND."));
 }
 
 void MenuBar::ImportWiiSave()
 {
-  QString file =
+  const QString source =
       DolphinFileDialog::getOpenFileName(this, tr("Select Save File"), QDir::currentPath(),
                                          tr("Wii save files (*.bin);;"
                                             "All Files (*)"));
-
-  if (file.isEmpty())
+  if (source.isEmpty())
     return;
 
-  auto can_overwrite = [&] {
-    return ModalMessageBox::question(
-               this, tr("Save Import"),
-               tr("Save data for this title already exists in the NAND. Consider backing up "
-                  "the current data before overwriting.\n\nOverwrite existing save data?")) ==
-           QMessageBox::Yes;
+  const auto may_overwrite = [this] {
+    const auto answer = ModalMessageBox::question(
+        this, tr("Save Import"),
+        tr("Save data for this title already exists in the NAND. Consider backing up "
+           "the current data before overwriting.\n\nOverwrite existing save data?"));
+    return answer == QMessageBox::Yes;
   };
 
-  const auto result = WiiSave::Import(file.toStdString(), can_overwrite);
-  switch (result)
+  const QString title = tr("Save Import");
+  switch (WiiSave::Import(source.toStdString(), may_overwrite))
   {
   case WiiSave::CopyResult::Success:
-    ModalMessageBox::information(this, tr("Save Import"), tr("Successfully imported save file."));
+    ModalMessageBox::information(this, title, tr("Successfully imported save file."));
+    break;
+  case WiiSave::CopyResult::Cancelled:
     break;
   case WiiSave::CopyResult::CorruptedSource:
-    ModalMessageBox::critical(this, tr("Save Import"),
+    ModalMessageBox::critical(this, title,
                               tr("Failed to import save file. The given file appears to be "
                                  "corrupted or is not a valid Wii save."));
     break;
   case WiiSave::CopyResult::TitleMissing:
     ModalMessageBox::critical(
-        this, tr("Save Import"),
+        this, title,
         tr("Failed to import save file. Please launch the game once, then try again."));
-    break;
-  case WiiSave::CopyResult::Cancelled:
     break;
   default:
     ModalMessageBox::critical(
-        this, tr("Save Import"),
+        this, title,
         tr("Failed to import save file. Your NAND may be corrupt, or something is preventing "
            "access to files within it. Try repairing your NAND (Tools -> Manage NAND -> Check "
            "NAND...), then import the save again."));
@@ -1259,753 +1053,655 @@ void MenuBar::ImportWiiSave()
 
 void MenuBar::ImportWiiSaves()
 {
-  QString folder =
+  const QString folder =
       DolphinFileDialog::getExistingDirectory(this, tr("Select Save Folder"), QDir::currentPath());
-
   if (folder.isEmpty())
     return;
 
-  QDirIterator it(folder, QStringList(QStringLiteral("*.bin")), QDir::Files,
-                  QDirIterator::Subdirectories);
-  QStringList failure_details;
-  size_t success_count = 0;
-  size_t fail_count = 0;
-  bool yes_all = false;
-  bool no_all = false;
-
-  while (it.hasNext())
+  // "Yes to all" / "No to all" answers stick for the rest of the folder.
+  enum class Standing
   {
-    const QString file = it.next();
+    Ask,
+    AlwaysOverwrite,
+    NeverOverwrite,
+  };
+  Standing standing = Standing::Ask;
 
-    auto can_overwrite = [&] {
-      if (yes_all)
-        return true;
-      if (no_all)
-        return false;
+  std::size_t imported = 0;
+  std::size_t failed = 0;
+  QStringList failures;
 
-      auto response = ModalMessageBox::question(
+  QDirIterator files(folder, QStringList(QStringLiteral("*.bin")), QDir::Files,
+                     QDirIterator::Subdirectories);
+  while (files.hasNext())
+  {
+    const QString file = files.next();
+
+    const auto may_overwrite = [this, &standing, &file] {
+      if (standing != Standing::Ask)
+        return standing == Standing::AlwaysOverwrite;
+
+      const auto answer = ModalMessageBox::question(
           this, tr("Save Import"),
           tr("%1: Save data for this title already exists in the NAND. Consider backing up "
              "the current data before overwriting.\n\nOverwrite existing save data?")
               .arg(file),
           QMessageBox::StandardButton::YesAll | QMessageBox::StandardButton::Yes |
               QMessageBox::StandardButton::No | QMessageBox::StandardButton::NoAll);
-
-      if (response == QMessageBox::YesAll)
-      {
-        yes_all = true;
-        return true;
-      }
-      else if (response == QMessageBox::NoAll)
-      {
-        no_all = true;
-        return false;
-      }
-      return response == QMessageBox::Yes;
+      if (answer == QMessageBox::YesAll)
+        standing = Standing::AlwaysOverwrite;
+      else if (answer == QMessageBox::NoAll)
+        standing = Standing::NeverOverwrite;
+      return answer == QMessageBox::YesAll || answer == QMessageBox::Yes;
     };
 
-    const auto result = WiiSave::Import(file.toStdString(), can_overwrite);
-    switch (result)
+    QString problem;
+    switch (WiiSave::Import(file.toStdString(), may_overwrite))
     {
     case WiiSave::CopyResult::Success:
-      success_count++;
-      break;
+      ++imported;
+      continue;
+    case WiiSave::CopyResult::Cancelled:
+      continue;
     case WiiSave::CopyResult::CorruptedSource:
-      fail_count++;
-      failure_details.append(tr("%1: Failed to import save file. The given file appears to be "
-                                "corrupted or is not a valid Wii save.")
-                                 .arg(file));
+      problem = tr("%1: Failed to import save file. The given file appears to be "
+                   "corrupted or is not a valid Wii save.");
       break;
     case WiiSave::CopyResult::TitleMissing:
-      fail_count++;
-      failure_details.append(
-          tr("%1: Failed to import save file. Please launch the game once, then try again.")
-              .arg(file));
-      break;
-    case WiiSave::CopyResult::Cancelled:
+      problem = tr("%1: Failed to import save file. Please launch the game once, then try again.");
       break;
     default:
-      fail_count++;
-      failure_details.append(
+      problem =
           tr("%1: Failed to import save file. Your NAND may be corrupt, or something is preventing "
              "access to files within it. Try repairing your NAND (Tools -> Manage NAND -> Check "
-             "NAND...), then import the save again.")
-              .arg(file));
+             "NAND...), then import the save again.");
       break;
     }
+    ++failed;
+    failures.append(problem.arg(file));
   }
 
-  if (success_count == 0 && fail_count == 0)
+  if (imported == 0 && failed == 0)
     return;
 
-  ModalMessageBox::information(this, tr("Save Import"),
-                               tr("Successfully imported %1 save file(s) with %2 failure(s)")
-                                   .arg(success_count)
-                                   .arg(fail_count),
-                               QMessageBox::Ok, QMessageBox::NoButton, Qt::WindowModal,
-                               failure_details.join(QStringLiteral("\n\n")));
+  ModalMessageBox::information(
+      this, tr("Save Import"),
+      tr("Successfully imported %1 save file(s) with %2 failure(s)").arg(imported).arg(failed),
+      QMessageBox::Ok, QMessageBox::NoButton, Qt::WindowModal,
+      failures.join(QStringLiteral("\n\n")));
 }
 
 void MenuBar::ExportWiiSaves()
 {
-  const QString export_dir = DolphinFileDialog::getExistingDirectory(
+  const QString destination = DolphinFileDialog::getExistingDirectory(
       this, tr("Select Export Directory"), QString::fromStdString(File::GetUserPath(D_USER_IDX)),
       QFileDialog::ShowDirsOnly);
-  if (export_dir.isEmpty())
+  if (destination.isEmpty())
     return;
 
-  const size_t count = WiiSave::ExportAll(export_dir.toStdString());
+  const std::size_t exported = WiiSave::ExportAll(destination.toStdString());
   ModalMessageBox::information(this, tr("Save Export"),
-                               tr("Exported %n save(s)", "", static_cast<int>(count)));
+                               tr("Exported %n save(s)", "", static_cast<int>(exported)));
 }
 
 void MenuBar::CheckNAND()
 {
-  IOS::HLE::Kernel ios;
-  WiiUtils::NANDCheckResult result = WiiUtils::CheckNAND(ios);
-  if (!result.bad)
-  {
-    const bool overfull = result.used_clusters_user > IOS::HLE::FS::USER_CLUSTERS ||
-                          result.used_clusters_system > IOS::HLE::FS::SYSTEM_CLUSTERS;
-    const QString user_cluster_message =
-        tr("The user-accessible part of your NAND contains %1 blocks (%2 KiB) "
-           "of data, out of an allowed maximum of %3 blocks (%4 KiB).")
-            .arg(Common::AlignUp(result.used_clusters_user, IOS::HLE::FS::CLUSTERS_PER_BLOCK) /
-                 IOS::HLE::FS::CLUSTERS_PER_BLOCK)
-            .arg((result.used_clusters_user * IOS::HLE::FS::CLUSTER_SIZE) / 1024)
-            .arg(IOS::HLE::FS::USER_CLUSTERS / IOS::HLE::FS::CLUSTERS_PER_BLOCK)
-            .arg((IOS::HLE::FS::USER_CLUSTERS * IOS::HLE::FS::CLUSTER_SIZE) / 1024);
-    const QString system_cluster_message =
-        tr("The system-reserved part of your NAND contains %1 blocks (%2 KiB) "
-           "of data, out of an allowed maximum of %3 blocks (%4 KiB).")
-            .arg(Common::AlignUp(result.used_clusters_system, IOS::HLE::FS::CLUSTERS_PER_BLOCK) /
-                 IOS::HLE::FS::CLUSTERS_PER_BLOCK)
-            .arg((result.used_clusters_system * IOS::HLE::FS::CLUSTER_SIZE) / 1024)
-            .arg(IOS::HLE::FS::SYSTEM_CLUSTERS / IOS::HLE::FS::CLUSTERS_PER_BLOCK)
-            .arg((IOS::HLE::FS::SYSTEM_CLUSTERS * IOS::HLE::FS::CLUSTER_SIZE) / 1024);
+  namespace FS = IOS::HLE::FS;
 
-    if (overfull)
+  IOS::HLE::Kernel ios;
+  const WiiUtils::NANDCheckResult result = WiiUtils::CheckNAND(ios);
+
+  if (result.bad)
+  {
     {
-      ModalMessageBox::warning(this, tr("NAND Check"),
-                               QStringLiteral("<b>%1</b><br/><br/>%2<br/><br/>%3")
-                                   .arg(tr("Your NAND contains more data than allowed. Wii "
-                                           "software may behave incorrectly or not allow saving."))
-                                   .arg(user_cluster_message)
-                                   .arg(system_cluster_message));
+      NANDRepairDialog dialog(result, this);
+      if (dialog.exec() != QDialog::Accepted)
+        return;
+    }
+
+    if (WiiUtils::RepairNAND(ios))
+    {
+      ModalMessageBox::information(this, tr("NAND Check"), tr("The NAND has been repaired."));
     }
     else
     {
-      ModalMessageBox::information(this, tr("NAND Check"),
-                                   QStringLiteral("<b>%1</b><br/><br/>%2<br/><br/>%3")
-                                       .arg(tr("No issues have been detected."))
-                                       .arg(user_cluster_message)
-                                       .arg(system_cluster_message));
+      ModalMessageBox::critical(this, tr("NAND Check"),
+                                tr("The NAND could not be repaired. It is recommended to back up "
+                                   "your current data and start over with a fresh NAND."));
     }
     return;
   }
 
-  {
-    NANDRepairDialog dialog(result, this);
-    if (dialog.exec() != QDialog::Accepted)
-      return;
-  }
+  // Healthy: report how full each part of the NAND is, in blocks and KiB.
+  const QString user_usage =
+      tr("The user-accessible part of your NAND contains %1 blocks (%2 KiB) "
+         "of data, out of an allowed maximum of %3 blocks (%4 KiB).")
+          .arg(Common::AlignUp(result.used_clusters_user, FS::CLUSTERS_PER_BLOCK) /
+               FS::CLUSTERS_PER_BLOCK)
+          .arg((result.used_clusters_user * FS::CLUSTER_SIZE) / 1024)
+          .arg(FS::USER_CLUSTERS / FS::CLUSTERS_PER_BLOCK)
+          .arg((FS::USER_CLUSTERS * FS::CLUSTER_SIZE) / 1024);
+  const QString system_usage =
+      tr("The system-reserved part of your NAND contains %1 blocks (%2 KiB) "
+         "of data, out of an allowed maximum of %3 blocks (%4 KiB).")
+          .arg(Common::AlignUp(result.used_clusters_system, FS::CLUSTERS_PER_BLOCK) /
+               FS::CLUSTERS_PER_BLOCK)
+          .arg((result.used_clusters_system * FS::CLUSTER_SIZE) / 1024)
+          .arg(FS::SYSTEM_CLUSTERS / FS::CLUSTERS_PER_BLOCK)
+          .arg((FS::SYSTEM_CLUSTERS * FS::CLUSTER_SIZE) / 1024);
 
-  if (WiiUtils::RepairNAND(ios))
-  {
-    ModalMessageBox::information(this, tr("NAND Check"), tr("The NAND has been repaired."));
-    return;
-  }
-
-  ModalMessageBox::critical(this, tr("NAND Check"),
-                            tr("The NAND could not be repaired. It is recommended to back up "
-                               "your current data and start over with a fresh NAND."));
+  const bool too_full = result.used_clusters_user > FS::USER_CLUSTERS ||
+                        result.used_clusters_system > FS::SYSTEM_CLUSTERS;
+  const QString headline =
+      too_full ? tr("Your NAND contains more data than allowed. Wii "
+                    "software may behave incorrectly or not allow saving.") :
+                 tr("No issues have been detected.");
+  const QString report = QStringLiteral("<b>%1</b><br/><br/>%2<br/><br/>%3")
+                             .arg(headline)
+                             .arg(user_usage)
+                             .arg(system_usage);
+  if (too_full)
+    ModalMessageBox::warning(this, tr("NAND Check"), report);
+  else
+    ModalMessageBox::information(this, tr("NAND Check"), report);
 }
 
 void MenuBar::NANDExtractCertificates()
 {
-  if (DiscIO::NANDImporter().ExtractCertificates())
-  {
-    ModalMessageBox::information(this, tr("Success"),
-                                 tr("Successfully extracted certificates from NAND"));
-  }
-  else
+  if (!DiscIO::NANDImporter().ExtractCertificates())
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Failed to extract certificates from NAND"));
+    return;
   }
-}
-
-void MenuBar::OnSelectionChanged(const std::shared_ptr<const UICommon::GameFile>& game_file)
-{
-  m_game_selected = !!game_file;
-
-  auto& system = Core::System::GetInstance();
-  const bool can_start_from_boot = m_game_selected && Core::IsUninitialized(system);
-  const bool can_start_from_savestate = Core::IsRunning(system);
-  m_recording_play->setEnabled(can_start_from_boot);
-  m_recording_start->setEnabled((can_start_from_boot || can_start_from_savestate) &&
-                                !system.GetMovie().IsPlayingInput());
-}
-
-void MenuBar::OnRecordingStatusChanged(bool recording)
-{
-  auto& system = Core::System::GetInstance();
-  const bool can_start_from_boot = m_game_selected && Core::IsUninitialized(system);
-  const bool can_start_from_savestate = Core::IsRunning(system);
-
-  m_recording_start->setEnabled(!recording && (can_start_from_boot || can_start_from_savestate));
-  m_recording_stop->setEnabled(recording);
-  m_recording_export->setEnabled(recording);
-}
-
-void MenuBar::OnReadOnlyModeChanged(bool read_only)
-{
-  m_recording_read_only->setChecked(read_only);
+  ModalMessageBox::information(this, tr("Success"),
+                               tr("Successfully extracted certificates from NAND"));
 }
 
 void MenuBar::ChangeDebugFont()
 {
-  bool okay;
-  QFont font = QFontDialog::getFont(&okay, Settings::Instance().GetDebugFont(), this,
-                                    tr("Pick a debug font"));
-
-  if (okay)
+  bool chosen = false;
+  const QFont font = QFontDialog::getFont(&chosen, Settings::Instance().GetDebugFont(), this,
+                                          tr("Pick a debug font"));
+  if (chosen)
     Settings::Instance().SetDebugFont(font);
 }
 
-void MenuBar::ClearSymbols()
-{
-  auto result = ModalMessageBox::warning(this, tr("Confirmation"),
-                                         tr("Do you want to clear the list of symbol names?"),
-                                         QMessageBox::Yes | QMessageBox::Cancel);
+// --- JIT ---------------------------------------------------------------------------------------
 
-  if (result == QMessageBox::Cancel)
+void MenuBar::ClearJitCache()
+{
+  auto& system = TheSystem();
+  system.GetJitInterface().ClearCache(Core::CPUThreadGuard{system});
+}
+
+void MenuBar::WipeJitProfilingData()
+{
+  auto& system = TheSystem();
+  system.GetJitInterface().WipeBlockProfilingData(Core::CPUThreadGuard{system});
+}
+
+void MenuBar::WriteJitBlockLogDump()
+{
+  const std::string path = fmt::format(
+      "{}{}.txt", File::GetUserPath(D_DUMPDEBUG_JITBLOCKS_IDX), SConfig::GetInstance().GetGameID());
+  const QString shown_path = QString::fromStdString(path);
+
+  File::IOFile dump(path, "w");
+  if (!dump)
+  {
+    ModalMessageBox::warning(this, tr("Error"),
+                             tr("Failed to open \"%1\" for writing.").arg(shown_path));
+    return;
+  }
+
+  auto& system = TheSystem();
+  system.GetJitInterface().JitBlockLogDump(Core::CPUThreadGuard{system}, dump.GetHandle());
+
+  // The confirmation can be turned off for the rest of the session with Ignore.
+  if (m_quiet_block_dump)
+    return;
+  const int answer =
+      ModalMessageBox::information(this, tr("Success"), tr("Wrote to \"%1\".").arg(shown_path),
+                                   QMessageBox::Ok | QMessageBox::Ignore);
+  if (answer == QMessageBox::Ignore)
+    m_quiet_block_dump = true;
+}
+
+void MenuBar::SearchForInstruction()
+{
+  bool accepted = false;
+  const QString wanted =
+      QInputDialog::getText(this, tr("Search instruction"), tr("Instruction:"), QLineEdit::Normal,
+                            QString{}, &accepted, Qt::WindowCloseButtonHint);
+  if (!accepted)
     return;
 
-  Core::System::GetInstance().GetPPCSymbolDB().Clear();
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  auto& system = TheSystem();
+  const u32 ram_end = Memory::MEM1_BASE_ADDR + system.GetMemory().GetRamSizeReal();
+  const std::string mnemonic = wanted.toStdString();
+  const Core::CPUThreadGuard guard(system);
+
+  // Every word of MEM1 is decoded; matches are reported in the log.
+  bool any = false;
+  for (u32 address = Memory::MEM1_BASE_ADDR; address < ram_end; address += 4)
+  {
+    const u32 word = PowerPC::MMU::HostRead<u32>(guard, address);
+    if (PPCTables::GetInstructionName(word, address) != mnemonic)
+      continue;
+    NOTICE_LOG_FMT(POWERPC, "Found {} at {:08x}", mnemonic, address);
+    any = true;
+  }
+  if (!any)
+    NOTICE_LOG_FMT(POWERPC, "Opcode {} not found", mnemonic);
+}
+
+// --- Symbols -----------------------------------------------------------------------------------
+
+void MenuBar::ClearSymbols()
+{
+  const auto answer = ModalMessageBox::warning(
+      this, tr("Confirmation"), tr("Do you want to clear the list of symbol names?"),
+      QMessageBox::Yes | QMessageBox::Cancel);
+  if (answer == QMessageBox::Cancel)
+    return;
+
+  TheSystem().GetPPCSymbolDB().Clear();
+  AnnounceSymbolsChanged();
 }
 
 void MenuBar::GenerateSymbolsFromAddress()
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  auto& ppc_symbol_db = system.GetPPCSymbolDB();
+  auto& system = TheSystem();
+  const u32 ram_end = Memory::MEM1_BASE_ADDR + system.GetMemory().GetRamSizeReal();
 
   const Core::CPUThreadGuard guard(system);
-
-  PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR,
-                            Memory::MEM1_BASE_ADDR + memory.GetRamSizeReal(), &ppc_symbol_db);
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR, ram_end, &system.GetPPCSymbolDB());
+  AnnounceSymbolsChanged();
 }
 
 void MenuBar::GenerateSymbolsFromSignatureDB()
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  auto& ppc_symbol_db = system.GetPPCSymbolDB();
+  auto& system = TheSystem();
+  auto& symbols = system.GetPPCSymbolDB();
+  const u32 ram_end = Memory::MEM1_BASE_ADDR + system.GetMemory().GetRamSizeReal();
+  const QString database_name = QString::fromStdString(TOTALDB);
 
   const Core::CPUThreadGuard guard(system);
+  PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR, ram_end, &symbols);
 
-  PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR,
-                            Memory::MEM1_BASE_ADDR + memory.GetRamSizeReal(), &ppc_symbol_db);
-  SignatureDB db(SignatureDB::HandlerType::DSY);
-  if (db.Load(File::GetSysDirectory() + TOTALDB))
+  SignatureDB database(SignatureDB::HandlerType::DSY);
+  if (database.Load(File::GetSysDirectory() + TOTALDB))
   {
-    db.Apply(guard, &ppc_symbol_db);
-    ModalMessageBox::information(
-        this, tr("Information"),
-        tr("Generated symbol names from '%1'").arg(QString::fromStdString(TOTALDB)));
-    db.List();
+    database.Apply(guard, &symbols);
+    ModalMessageBox::information(this, tr("Information"),
+                                 tr("Generated symbol names from '%1'").arg(database_name));
+    database.List();
   }
   else
   {
-    ModalMessageBox::critical(
-        this, tr("Error"),
-        tr("'%1' not found, no symbol names generated").arg(QString::fromStdString(TOTALDB)));
+    ModalMessageBox::critical(this, tr("Error"),
+                              tr("'%1' not found, no symbol names generated").arg(database_name));
   }
 
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  AnnounceSymbolsChanged();
+}
+
+void MenuBar::LoadRSOChain(u32 address, const QString& address_text)
+{
+  auto& system = TheSystem();
+  const Core::CPUThreadGuard guard(system);
+
+  RSOChainView chain;
+  if (!chain.Load(guard, address))
+  {
+    ModalMessageBox::warning(this, tr("Error"),
+                             tr("Failed to load RSO module at %1").arg(address_text));
+    return;
+  }
+  chain.Apply(guard, &system.GetPPCSymbolDB());
+  AnnounceSymbolsChanged();
 }
 
 void MenuBar::GenerateSymbolsFromRSO()
 {
-  // i18n: RSO refers to a proprietary format for shared objects (like DLL files).
-  const int ret =
+  // i18n: RSO is the format of the Wii's relocatable modules (comparable to DLL files).
+  const int auto_detect =
       ModalMessageBox::question(this, tr("RSO auto-detection"), tr("Auto-detect RSO modules?"));
-  if (ret == QMessageBox::Yes)
-    return GenerateSymbolsFromRSOAuto();
-
-  const QString text =
-      QInputDialog::getText(this, tr("Input"), tr("Enter the RSO module address:"),
-                            QLineEdit::Normal, QString{}, nullptr, Qt::WindowCloseButtonHint);
-  bool good;
-  const uint address = text.toUInt(&good, 16);
-
-  if (!good)
+  if (auto_detect == QMessageBox::Yes)
   {
-    ModalMessageBox::warning(this, tr("Error"), tr("Invalid RSO module address: %1").arg(text));
+    GenerateSymbolsFromRSOAuto();
     return;
   }
 
-  auto& system = Core::System::GetInstance();
-  const Core::CPUThreadGuard guard(system);
+  const QString typed =
+      QInputDialog::getText(this, tr("Input"), tr("Enter the RSO module address:"),
+                            QLineEdit::Normal, QString{}, nullptr, Qt::WindowCloseButtonHint);
+  bool is_hex = false;
+  const uint address = typed.toUInt(&is_hex, 16);
+  if (!is_hex)
+  {
+    ModalMessageBox::warning(this, tr("Error"), tr("Invalid RSO module address: %1").arg(typed));
+    return;
+  }
 
-  RSOChainView rso_chain;
-  if (rso_chain.Load(guard, static_cast<u32>(address)))
-  {
-    rso_chain.Apply(guard, &system.GetPPCSymbolDB());
-    emit Host::GetInstance()->PPCSymbolsChanged();
-  }
-  else
-  {
-    ModalMessageBox::warning(this, tr("Error"), tr("Failed to load RSO module at %1").arg(text));
-  }
+  LoadRSOChain(static_cast<u32>(address), typed);
 }
 
 void MenuBar::GenerateSymbolsFromRSOAuto()
 {
   ParallelProgressDialog progress(tr("Modules found: %1").arg(0), tr("Cancel"), 0, 0, this);
-  progress.GetRaw()->setWindowTitle(tr("Detecting RSO Modules"));
-  progress.GetRaw()->setMinimumDuration(1000 * 10);
-  progress.GetRaw()->setWindowModality(Qt::WindowModal);
+  QProgressDialog* const dialog = progress.GetRaw();
+  dialog->setWindowTitle(tr("Detecting RSO Modules"));
+  dialog->setMinimumDuration(10 * 1000);
+  dialog->setWindowModality(Qt::WindowModal);
 
-  auto future = std::async(std::launch::async, [&progress, this]() -> RSOVector {
+  // The scan runs on a worker thread; the dialog's event loop ends when it calls Reset().
+  std::future<RSOVector> scan = std::async(std::launch::async, [this, &progress] {
     progress.SetValue(0);
-    auto matches = DetectRSOModules(progress);
+    RSOVector found = DetectRSOModules(progress);
     progress.Reset();
-
-    return matches;
+    return found;
   });
-  progress.GetRaw()->exec();
+  dialog->exec();
+  const RSOVector modules = scan.get();
 
-  const auto matches = future.get();
-
-  QStringList items;
-  for (const auto& match : matches)
+  QStringList choices;
+  for (const RSOPairEntry& module : modules)
   {
-    const QString item = QLatin1String("%1 %2");
-    items << item.arg(QString::number(match.first, 16), QString::fromStdString(match.second));
+    choices.append(QStringLiteral("%1 %2").arg(QString::number(module.first, 16),
+                                               QString::fromStdString(module.second)));
   }
-
-  if (items.empty())
+  if (choices.isEmpty())
   {
     ModalMessageBox::warning(this, tr("Error"), tr("Unable to auto-detect RSO module"));
     return;
   }
 
-  bool ok;
-  const QString item =
-      QInputDialog::getItem(this, tr("Input"), tr("Select the RSO module address:"), items, 0,
-                            false, &ok, Qt::WindowCloseButtonHint);
-
-  if (!ok)
+  bool picked = false;
+  const QString choice =
+      QInputDialog::getItem(this, tr("Input"), tr("Select the RSO module address:"), choices, 0,
+                            false, &picked, Qt::WindowCloseButtonHint);
+  if (!picked)
     return;
 
-  RSOChainView rso_chain;
-  const u32 address = item.mid(0, item.indexOf(QLatin1Char(' '))).toUInt(nullptr, 16);
-
-  auto& system = Core::System::GetInstance();
-  const Core::CPUThreadGuard guard(system);
-
-  if (rso_chain.Load(guard, address))
-  {
-    rso_chain.Apply(guard, &system.GetPPCSymbolDB());
-    emit Host::GetInstance()->PPCSymbolsChanged();
-  }
-  else
-  {
-    ModalMessageBox::warning(this, tr("Error"), tr("Failed to load RSO module at %1").arg(address));
-  }
+  // Each choice starts with the header address in hex.
+  const u32 address = choice.left(choice.indexOf(QLatin1Char(' '))).toUInt(nullptr, 16);
+  LoadRSOChain(address, QString::number(address));
 }
 
+// Looks for loaded RSO modules by their file names. A module's name (such as "xyz.elf") is stored
+// in memory with the module, and the module header has a (name offset, name length) pair pointing
+// at it; the header begins 16 bytes before that pair.
 RSOVector MenuBar::DetectRSOModules(ParallelProgressDialog& progress)
 {
-  Core::CPUThreadGuard guard(Core::System::GetInstance());
-
-  constexpr std::array<std::string_view, 2> search_for = {".elf", ".plf"};
-
-  const AddressSpace::Accessors* accessors =
+  const Core::CPUThreadGuard guard(TheSystem());
+  const AddressSpace::Accessors* const memory =
       AddressSpace::GetAccessors(AddressSpace::Type::Effective);
 
-  RSOVector matches;
-
-  // Find filepath to elf/plf commonly used by RSO modules
-  for (const auto& str : search_for)
-  {
-    u32 next = 0;
-    while (true)
+  // Bytes before the extension that can belong to the name: printable, at most 260 of them.
+  const auto printable_run_before = [&guard](u32 address) {
+    constexpr u32 LONGEST_NAME = 260;
+    u32 length = 0;
+    while (length < LONGEST_NAME &&
+           std::isprint(PowerPC::MMU::HostRead<u8>(guard, address - (length + 1))))
     {
-      if (progress.WasCanceled())
-      {
-        return matches;
-      }
+      ++length;
+    }
+    return length;
+  };
 
-      auto found_addr = accessors->Search(guard, next, reinterpret_cast<const u8*>(str.data()),
-                                          str.size() + 1, true);
-
-      if (!found_addr.has_value())
+  RSOVector modules;
+  for (const std::string_view extension : {std::string_view(".elf"), std::string_view(".plf")})
+  {
+    u32 search_from = 0;
+    while (!progress.WasCanceled())
+    {
+      // The extension, with its terminating NUL.
+      const std::optional<u32> extension_at =
+          memory->Search(guard, search_from, reinterpret_cast<const u8*>(extension.data()),
+                         extension.size() + 1, true);
+      if (!extension_at)
         break;
-
-      next = *found_addr + 1;
-
-      // Non-null data can precede the module name.
-      // Get the maximum name length that a module could have.
-      auto get_max_module_name_len = [&guard, found_addr] {
-        constexpr u32 MODULE_NAME_MAX_LENGTH = 260;
-        u32 len = 0;
-
-        for (; len < MODULE_NAME_MAX_LENGTH; ++len)
-        {
-          const auto res = PowerPC::MMU::HostRead<u8>(guard, *found_addr - (len + 1));
-          if (!std::isprint(res))
-          {
-            break;
-          }
-        }
-
-        return len;
-      };
+      search_from = *extension_at + 1;
 
       if (progress.WasCanceled())
-      {
-        return matches;
-      }
+        return modules;
 
-      const auto max_name_length = get_max_module_name_len();
-      auto found = false;
-      u32 module_name_length = 0;
-
-      // Look for the Module Name Offset Field based on each possible length
-      for (u32 i = 0; i < max_name_length; ++i)
+      // Try each possible start of the name, longest first: a candidate start is right if some
+      // word in memory points at it and is followed by the matching name length.
+      const u32 longest = printable_run_before(*extension_at);
+      std::optional<u32> name_field;
+      u32 name_length = 0;
+      for (u32 skipped = 0; skipped < longest; ++skipped)
       {
         if (progress.WasCanceled())
-        {
-          return matches;
-        }
+          return modules;
 
-        const auto lookup_addr = (*found_addr - max_name_length) + i;
-
-        const std::array<u8, 4> ref = {
-            static_cast<u8>(lookup_addr >> 24), static_cast<u8>(lookup_addr >> 16),
-            static_cast<u8>(lookup_addr >> 8), static_cast<u8>(lookup_addr)};
-
-        // Get the field (Module Name Offset) that point to the string
-        const auto module_name_offset_addr =
-            accessors->Search(guard, lookup_addr, ref.data(), ref.size(), false);
-        if (!module_name_offset_addr.has_value())
+        const u32 name_start = *extension_at - longest + skipped;
+        const std::array<u8, 4> pointer_bytes{
+            static_cast<u8>(name_start >> 24), static_cast<u8>(name_start >> 16),
+            static_cast<u8>(name_start >> 8), static_cast<u8>(name_start)};
+        const std::optional<u32> pointer_at = memory->Search(
+            guard, name_start, pointer_bytes.data(), pointer_bytes.size(), false);
+        if (!pointer_at)
           continue;
 
-        // The next 4 bytes should be the module name length
-        module_name_length = accessors->ReadU32(guard, *module_name_offset_addr + 4);
-        if (module_name_length == max_name_length - i + str.length())
+        name_length = memory->ReadU32(guard, *pointer_at + 4);
+        if (name_length == longest - skipped + extension.length())
         {
-          found_addr = module_name_offset_addr;
-          found = true;
+          name_field = pointer_at;
           break;
         }
       }
-
-      if (!found)
+      if (!name_field)
         continue;
 
-      const auto module_name_offset = accessors->ReadU32(guard, *found_addr);
-
-      // Go to the beginning of the RSO header
-      matches.emplace_back(*found_addr - 16, PowerPC::MMU::HostGetString(guard, module_name_offset,
-                                                                         module_name_length));
-
-      progress.SetLabelText(tr("Modules found: %1").arg(matches.size()));
+      const u32 name_address = memory->ReadU32(guard, *name_field);
+      modules.emplace_back(*name_field - 16,
+                           PowerPC::MMU::HostGetString(guard, name_address, name_length));
+      progress.SetLabelText(tr("Modules found: %1").arg(modules.size()));
     }
+    if (progress.WasCanceled())
+      return modules;
   }
 
-  return matches;
+  return modules;
 }
 
 void MenuBar::LoadSymbolMap()
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  auto& ppc_symbol_db = system.GetPPCSymbolDB();
+  auto& system = TheSystem();
+  auto& symbols = system.GetPPCSymbolDB();
 
-  std::string existing_map_file, writable_map_file;
-  bool map_exists = PPCSymbolDB::FindMapFile(&existing_map_file, &writable_map_file);
-
-  if (!map_exists)
+  std::string existing_map;
+  std::string writable_map;
+  if (PPCSymbolDB::FindMapFile(&existing_map, &writable_map))
   {
-    ppc_symbol_db.Clear();
-
-    {
-      const Core::CPUThreadGuard guard(system);
-
-      PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR + 0x1300000,
-                                Memory::MEM1_BASE_ADDR + memory.GetRamSizeReal(), &ppc_symbol_db);
-      SignatureDB db(SignatureDB::HandlerType::DSY);
-      if (db.Load(File::GetSysDirectory() + TOTALDB))
-        db.Apply(guard, &ppc_symbol_db);
-    }
-
-    ModalMessageBox::warning(this, tr("Warning"),
-                             tr("'%1' not found, scanning for common functions instead")
-                                 .arg(QString::fromStdString(writable_map_file)));
+    const QString path = QString::fromStdString(existing_map);
+    if (!TryLoadMapFile(path))
+      return;
+    ModalMessageBox::information(this, tr("Information"), tr("Loaded symbols from '%1'").arg(path));
   }
   else
   {
-    const QString existing_map_file_path = QString::fromStdString(existing_map_file);
-
-    if (!TryLoadMapFile(existing_map_file_path))
-      return;
-
-    ModalMessageBox::information(this, tr("Information"),
-                                 tr("Loaded symbols from '%1'").arg(existing_map_file_path));
+    // No map for this game: scan for functions (above the usual OS area) and name what the
+    // signature database recognises.
+    symbols.Clear();
+    {
+      const u32 ram_end = Memory::MEM1_BASE_ADDR + system.GetMemory().GetRamSizeReal();
+      const Core::CPUThreadGuard guard(system);
+      PPCAnalyst::FindFunctions(guard, Memory::MEM1_BASE_ADDR + 0x1300000, ram_end, &symbols);
+      SignatureDB database(SignatureDB::HandlerType::DSY);
+      if (database.Load(File::GetSysDirectory() + TOTALDB))
+        database.Apply(guard, &symbols);
+    }
+    ModalMessageBox::warning(this, tr("Warning"),
+                             tr("'%1' not found, scanning for common functions instead")
+                                 .arg(QString::fromStdString(writable_map)));
   }
 
   HLE::PatchFunctions(system);
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  AnnounceSymbolsChanged();
+}
+
+void MenuBar::LoadMapFileChosenByUser(bool bad)
+{
+  const QString path = DolphinFileDialog::getOpenFileName(
+      this, tr("Load Map File"), QString::fromStdString(File::GetUserPath(D_MAPS_IDX)),
+      tr("Dolphin Map File (*.map)"));
+  if (path.isEmpty() || !TryLoadMapFile(path, bad))
+    return;
+
+  HLE::PatchFunctions(TheSystem());
+  AnnounceSymbolsChanged();
 }
 
 void MenuBar::SaveSymbolMap()
 {
-  std::string existing_map_file, writable_map_file;
-  PPCSymbolDB::FindMapFile(&existing_map_file, &writable_map_file);
-
-  TrySaveSymbolMap(QString::fromStdString(writable_map_file));
-}
-
-void MenuBar::LoadOtherSymbolMap()
-{
-  const QString file = DolphinFileDialog::getOpenFileName(
-      this, tr("Load Map File"), QString::fromStdString(File::GetUserPath(D_MAPS_IDX)),
-      tr("Dolphin Map File (*.map)"));
-
-  if (file.isEmpty())
-    return;
-
-  if (!TryLoadMapFile(file))
-    return;
-
-  auto& system = Core::System::GetInstance();
-  HLE::PatchFunctions(system);
-  emit Host::GetInstance()->PPCSymbolsChanged();
-}
-
-void MenuBar::LoadBadSymbolMap()
-{
-  const QString file = DolphinFileDialog::getOpenFileName(
-      this, tr("Load Map File"), QString::fromStdString(File::GetUserPath(D_MAPS_IDX)),
-      tr("Dolphin Map File (*.map)"));
-
-  if (file.isEmpty())
-    return;
-
-  if (!TryLoadMapFile(file, true))
-    return;
-
-  auto& system = Core::System::GetInstance();
-  HLE::PatchFunctions(system);
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  std::string existing_map;
+  std::string writable_map;
+  PPCSymbolDB::FindMapFile(&existing_map, &writable_map);
+  TrySaveSymbolMap(QString::fromStdString(writable_map));
 }
 
 void MenuBar::SaveSymbolMapAs()
 {
-  const std::string& title_id_str = SConfig::GetInstance().m_debugger_game_id;
-  const QString file = DolphinFileDialog::getSaveFileName(
-      this, tr("Save Map File"),
-      QString::fromStdString(File::GetUserPath(D_MAPS_IDX) + "/" + title_id_str + ".map"),
-      tr("Dolphin Map File (*.map)"));
-
-  if (file.isEmpty())
-    return;
-
-  TrySaveSymbolMap(file);
+  const std::string& game_id = SConfig::GetInstance().m_debugger_game_id;
+  const QString suggested =
+      QString::fromStdString(File::GetUserPath(D_MAPS_IDX) + "/" + game_id + ".map");
+  const QString path = DolphinFileDialog::getSaveFileName(this, tr("Save Map File"), suggested,
+                                                          tr("Dolphin Map File (*.map)"));
+  if (!path.isEmpty())
+    TrySaveSymbolMap(path);
 }
 
 void MenuBar::SaveCode()
 {
-  std::string existing_map_file, writable_map_file;
-  PPCSymbolDB::FindMapFile(&existing_map_file, &writable_map_file);
+  std::string existing_map;
+  std::string writable_map;
+  PPCSymbolDB::FindMapFile(&existing_map, &writable_map);
 
-  const std::string path =
-      writable_map_file.substr(0, writable_map_file.find_last_of('.')) + "_code.map";
+  // Next to the symbol map: "<map name without extension>_code.map".
+  const std::string path = writable_map.substr(0, writable_map.find_last_of('.')) + "_code.map";
 
-  auto& system = Core::System::GetInstance();
-  if (!system.GetPPCSymbolDB().SaveCodeMap(Core::CPUThreadGuard{system}, path))
-  {
-    ModalMessageBox::warning(
-        this, tr("Error"),
-        tr("Failed to save code map to path '%1'").arg(QString::fromStdString(path)));
-  }
+  auto& system = TheSystem();
+  if (system.GetPPCSymbolDB().SaveCodeMap(Core::CPUThreadGuard{system}, path))
+    return;
+  ModalMessageBox::warning(
+      this, tr("Error"),
+      tr("Failed to save code map to path '%1'").arg(QString::fromStdString(path)));
 }
 
 bool MenuBar::TryLoadMapFile(const QString& path, const bool bad)
 {
-  auto& system = Core::System::GetInstance();
-  auto& ppc_symbol_db = system.GetPPCSymbolDB();
+  auto& system = TheSystem();
+  if (system.GetPPCSymbolDB().LoadMap(Core::CPUThreadGuard{system}, path.toStdString(), bad))
+    return true;
 
-  if (!ppc_symbol_db.LoadMap(Core::CPUThreadGuard{system}, path.toStdString(), bad))
-  {
-    ModalMessageBox::warning(this, tr("Error"), tr("Failed to load map file '%1'").arg(path));
-    return false;
-  }
-
-  return true;
+  ModalMessageBox::warning(this, tr("Error"), tr("Failed to load map file '%1'").arg(path));
+  return false;
 }
 
 void MenuBar::TrySaveSymbolMap(const QString& path)
 {
-  if (Core::System::GetInstance().GetPPCSymbolDB().SaveSymbolMap(path.toStdString()))
-    return;
-
-  ModalMessageBox::warning(this, tr("Error"),
-                           tr("Failed to save symbol map to path '%1'").arg(path));
+  if (!TheSystem().GetPPCSymbolDB().SaveSymbolMap(path.toStdString()))
+  {
+    ModalMessageBox::warning(this, tr("Error"),
+                             tr("Failed to save symbol map to path '%1'").arg(path));
+  }
 }
 
 void MenuBar::CreateSignatureFile()
 {
-  const QString text = QInputDialog::getText(
+  const QString prefix = QInputDialog::getText(
       this, tr("Input"), tr("Only export symbols with prefix:\n(Blank for all symbols)"),
       QLineEdit::Normal, QString{}, nullptr, Qt::WindowCloseButtonHint);
 
-  const QString file = DolphinFileDialog::getSaveFileName(this, tr("Save Signature File"),
-                                                          QDir::homePath(), GetSignatureSelector());
-  if (file.isEmpty())
+  const QString target = DolphinFileDialog::getSaveFileName(
+      this, tr("Save Signature File"), QDir::homePath(), SignatureFileFilter());
+  if (target.isEmpty())
     return;
 
-  const std::string prefix = text.toStdString();
-  const std::string save_path = file.toStdString();
-  SignatureDB db(save_path);
-  db.Populate(&Core::System::GetInstance().GetPPCSymbolDB(), prefix);
-
-  if (!db.Save(save_path))
+  const std::string target_path = target.toStdString();
+  SignatureDB database(target_path);
+  database.Populate(&TheSystem().GetPPCSymbolDB(), prefix.toStdString());
+  if (!database.Save(target_path))
   {
-    ModalMessageBox::warning(this, tr("Error"), tr("Failed to save signature file '%1'").arg(file));
+    ModalMessageBox::warning(this, tr("Error"),
+                             tr("Failed to save signature file '%1'").arg(target));
     return;
   }
-
-  db.List();
+  database.List();
 }
 
 void MenuBar::AppendSignatureFile()
 {
-  const QString text = QInputDialog::getText(
+  const QString prefix = QInputDialog::getText(
       this, tr("Input"), tr("Only append symbols with prefix:\n(Blank for all symbols)"),
       QLineEdit::Normal, QString{}, nullptr, Qt::WindowCloseButtonHint);
 
-  const QString file = DolphinFileDialog::getSaveFileName(this, tr("Append Signature To"),
-                                                          QDir::homePath(), GetSignatureSelector());
-  if (file.isEmpty())
+  const QString target = DolphinFileDialog::getSaveFileName(
+      this, tr("Append Signature To"), QDir::homePath(), SignatureFileFilter());
+  if (target.isEmpty())
     return;
 
-  const std::string prefix = text.toStdString();
-  const std::string signature_path = file.toStdString();
-  SignatureDB db(signature_path);
-  db.Populate(&Core::System::GetInstance().GetPPCSymbolDB(), prefix);
-  db.List();
-  db.Load(signature_path);
-  if (!db.Save(signature_path))
+  // Current symbols first, then whatever the file already holds, written back together.
+  const std::string target_path = target.toStdString();
+  SignatureDB database(target_path);
+  database.Populate(&TheSystem().GetPPCSymbolDB(), prefix.toStdString());
+  database.List();
+  database.Load(target_path);
+  if (!database.Save(target_path))
   {
     ModalMessageBox::warning(this, tr("Error"),
-                             tr("Failed to append to signature file '%1'").arg(file));
+                             tr("Failed to append to signature file '%1'").arg(target));
     return;
   }
-
-  db.List();
+  database.List();
 }
 
 void MenuBar::ApplySignatureFile()
 {
-  const QString file = DolphinFileDialog::getOpenFileName(this, tr("Apply Signature File"),
-                                                          QDir::homePath(), GetSignatureSelector());
-
-  if (file.isEmpty())
+  const QString source = DolphinFileDialog::getOpenFileName(
+      this, tr("Apply Signature File"), QDir::homePath(), SignatureFileFilter());
+  if (source.isEmpty())
     return;
 
-  auto& system = Core::System::GetInstance();
-
-  const std::string load_path = file.toStdString();
-  SignatureDB db(load_path);
-  db.Load(load_path);
-  db.Apply(Core::CPUThreadGuard{system}, &system.GetPPCSymbolDB());
-  db.List();
+  auto& system = TheSystem();
+  const std::string source_path = source.toStdString();
+  SignatureDB database(source_path);
+  database.Load(source_path);
+  database.Apply(Core::CPUThreadGuard{system}, &system.GetPPCSymbolDB());
+  database.List();
   HLE::PatchFunctions(system);
-  emit Host::GetInstance()->PPCSymbolsChanged();
+  AnnounceSymbolsChanged();
 }
 
 void MenuBar::CombineSignatureFiles()
 {
-  const QString priorityFile = DolphinFileDialog::getOpenFileName(
-      this, tr("Choose Priority Input File"), QDir::homePath(), GetSignatureSelector());
-  if (priorityFile.isEmpty())
+  // Entries of the first file win over those of the second.
+  const QString primary = DolphinFileDialog::getOpenFileName(
+      this, tr("Choose Priority Input File"), QDir::homePath(), SignatureFileFilter());
+  if (primary.isEmpty())
+    return;
+  const QString secondary = DolphinFileDialog::getOpenFileName(
+      this, tr("Choose Secondary Input File"), QDir::homePath(), SignatureFileFilter());
+  if (secondary.isEmpty())
+    return;
+  const QString output = DolphinFileDialog::getSaveFileName(
+      this, tr("Save Combined Output File As"), QDir::homePath(), SignatureFileFilter());
+  if (output.isEmpty())
     return;
 
-  const QString secondaryFile = DolphinFileDialog::getOpenFileName(
-      this, tr("Choose Secondary Input File"), QDir::homePath(), GetSignatureSelector());
-  if (secondaryFile.isEmpty())
-    return;
-
-  const QString saveFile = DolphinFileDialog::getSaveFileName(
-      this, tr("Save Combined Output File As"), QDir::homePath(), GetSignatureSelector());
-  if (saveFile.isEmpty())
-    return;
-
-  const std::string load_pathPriorityFile = priorityFile.toStdString();
-  const std::string load_pathSecondaryFile = secondaryFile.toStdString();
-  const std::string save_path = saveFile.toStdString();
-  SignatureDB db(load_pathPriorityFile);
-  db.Load(load_pathPriorityFile);
-  db.Load(load_pathSecondaryFile);
-  if (!db.Save(save_path))
+  const std::string primary_path = primary.toStdString();
+  SignatureDB database(primary_path);
+  database.Load(primary_path);
+  database.Load(secondary.toStdString());
+  if (!database.Save(output.toStdString()))
   {
     ModalMessageBox::warning(this, tr("Error"),
-                             tr("Failed to save to signature file '%1'").arg(saveFile));
+                             tr("Failed to save to signature file '%1'").arg(output));
     return;
   }
-
-  db.List();
-}
-
-void MenuBar::PatchHLEFunctions()
-{
-  auto& system = Core::System::GetInstance();
-  HLE::PatchFunctions(system);
-}
-
-void MenuBar::ClearCache()
-{
-  auto& system = Core::System::GetInstance();
-  system.GetJitInterface().ClearCache(Core::CPUThreadGuard{system});
-}
-
-void MenuBar::LogInstructions()
-{
-  PPCTables::LogCompiledInstructions();
-}
-
-void MenuBar::SearchInstruction()
-{
-  bool good;
-  const QString op =
-      QInputDialog::getText(this, tr("Search instruction"), tr("Instruction:"), QLineEdit::Normal,
-                            QString{}, &good, Qt::WindowCloseButtonHint);
-
-  if (!good)
-    return;
-
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-
-  const std::string op_std = op.toStdString();
-  const Core::CPUThreadGuard guard(system);
-
-  bool found = false;
-  for (u32 addr = Memory::MEM1_BASE_ADDR; addr < Memory::MEM1_BASE_ADDR + memory.GetRamSizeReal();
-       addr += 4)
-  {
-    if (op_std == PPCTables::GetInstructionName(PowerPC::MMU::HostRead<u32>(guard, addr), addr))
-    {
-      NOTICE_LOG_FMT(POWERPC, "Found {} at {:08x}", op_std, addr);
-      found = true;
-    }
-  }
-  if (!found)
-    NOTICE_LOG_FMT(POWERPC, "Opcode {} not found", op_std);
+  database.List();
 }
