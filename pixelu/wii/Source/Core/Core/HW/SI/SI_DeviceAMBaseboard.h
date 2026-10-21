@@ -1,7 +1,9 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
+#include <memory>
 
 #include "Core/HW/MagCard/MagneticCardReader.h"
 #include "Core/HW/SI/SI.h"
@@ -17,7 +19,10 @@ class SerialDevice;
 namespace SerialInterface
 {
 
-// Triforce (GC-AM) baseboard
+// The Triforce (GC-AM) baseboard as seen from an SI port. Command 0x70 packs
+// requests for the baseboard itself, its JVS-IO board and its two serial ports
+// into one buffer; the answers come back in the same packed form, one request
+// late.
 class CSIDevice_AMBaseboard final : public ISIDevice
 {
 public:
@@ -35,22 +40,16 @@ public:
 private:
   static constexpr u32 RESPONSE_SIZE = SerialInterfaceManager::BUFFER_SIZE;
 
-  // Reply has to be delayed due a bug in the parser
-  std::array<std::array<u8, RESPONSE_SIZE>, 2> m_response_buffers{};
-  u8 m_current_response_buffer_index = 0;
+  int RunBaseboardCommand(u8* buffer, int request_length);
+
+  std::array<std::array<u8, RESPONSE_SIZE>, 2> m_responses{};
+  u8 m_response_index = 0;
 
   Triforce::IOPorts m_io_ports;
-
-  std::unique_ptr<Triforce::JVSIOBoard> m_jvs_io_board;
-
-  // Magnetic Card Reader
-  MagCard::MagneticCardReader::Settings m_mag_card_settings;
-
-  // Serial A
-  std::unique_ptr<Triforce::SerialDevice> m_serial_device_a;
-
-  // Serial B
-  std::unique_ptr<Triforce::SerialDevice> m_serial_device_b;
+  std::unique_ptr<Triforce::JVSIOBoard> m_jvs;
+  MagCard::MagneticCardReader::Settings m_card_settings;
+  std::unique_ptr<Triforce::SerialDevice> m_serial_a;
+  std::unique_ptr<Triforce::SerialDevice> m_serial_b;
 };
 
 }  // namespace SerialInterface
