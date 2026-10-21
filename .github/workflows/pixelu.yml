@@ -160,6 +160,14 @@ jobs:
           mkdir -p "$out/portable" dist
           cp pixelu/bin/PixelU_release "$out/PixelU"
           strip "$out/PixelU"
+          # libbluetooth (BlueZ, for Wii Remotes over Bluetooth) isn't on every
+          # desktop, so it goes in lib/ next to PixelU, found through RUNPATH.
+          sudo apt-get install -y -q --no-install-recommends patchelf
+          mkdir -p "$out/lib"
+          cp -L "$(ldconfig -p | sed -n 's/.*libbluetooth\.so\.3 (libc6,x86-64) => //p' | head -n 1)" "$out/lib/libbluetooth.so.3"
+          patchelf --set-rpath '$ORIGIN/lib' "$out/PixelU"
+          cp /usr/share/doc/libbluetooth3/copyright "$out/lib/libbluetooth-COPYRIGHT.txt"
+          echo "libbluetooth.so.3 is BlueZ's library from Ubuntu 22.04 (libbluetooth3, GPL-2.0-or-later); source: apt-get source bluez, or https://launchpad.net/ubuntu/+source/bluez" > "$out/lib/README.txt"
           cp -r pixelu/bin/resources "$out/resources"
           cp -r pixelu/bin/gameProfiles "$out/gameProfiles"
           cp pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
