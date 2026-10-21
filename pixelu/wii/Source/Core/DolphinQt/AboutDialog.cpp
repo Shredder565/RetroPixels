@@ -61,13 +61,15 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
   // left open, as it always has been.
   QStringList page;
   page << QStringLiteral("<p style='font-size:38pt; font-weight:400;'>PixelU Wii</p>");
-  page << QStringLiteral("<p style='font-size:18pt;'>Version %1 (based on Dolphin)</p>")
+  page << QStringLiteral("<p style='font-size:18pt;'>Version %1</p>")
               .arg(version);
   // PixelU: what this build is and where its source lives.
-  page << Paragraph({QStringLiteral("PixelU's GameCube and Wii engine is a lightly modified build "
-                                    "of Dolphin,<br>"),
-                     QStringLiteral("made for RetroPixels. All credit for the emulation goes to "
-                                    "the Dolphin Team.<br>"),
+  page << Paragraph({QStringLiteral("PixelU Wii is RetroPixels' GameCube and Wii engine. It began "
+                                    "as a build of Dolphin<br>"),
+                     QStringLiteral("and has been rewritten as RetroPixels' own code. The parts "
+                                    "still from Dolphin<br>"),
+                     QStringLiteral("and its community data are listed in COPYING. Thanks to the "
+                                    "Dolphin Team.<br>"),
                      QStringLiteral("Source and changes: ") +
                          Link(QStringLiteral("https://github.com/shredder565/retropixels/tree/"
                                              "claude/wiiu-emulator-urpcen/pixelu/wii"),
@@ -81,29 +83,25 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
                     QStringLiteral("font-size: small;"));
   page << Paragraph({QStringLiteral("Dolphin: ") + Link(QStringLiteral("https://dolphin-emu.org/"),
                                                         QStringLiteral("dolphin-emu.org"))});
-  // i18n: "free" as in freedom (the licence), not as in price.
-  page << Paragraph({tr("Dolphin is a free and open-source GameCube and Wii emulator.")});
   page << Paragraph(
       {tr("This software should not be used to play games you do not legally own.")});
   page << QStringLiteral("<p>\n") +
-              Link(QStringLiteral("https://github.com/dolphin-emu/dolphin/blob/master/COPYING"),
+              Link(QStringLiteral("https://github.com/shredder565/retropixels/blob/"
+                                  "claude/wiiu-emulator-urpcen/pixelu/wii/COPYING"),
                    tr("License")) +
               QStringLiteral(" |\n") +
-              Link(QStringLiteral("https://github.com/dolphin-emu/dolphin/graphs/contributors"),
-                   tr("Authors")) +
-              QStringLiteral(" |\n") +
-              Link(QStringLiteral("https://forums.dolphin-emu.org/"), tr("Support"));
+              Link(QStringLiteral("https://github.com/shredder565/retropixels/issues"),
+                   tr("Support"));
 
   auto* const info = new QLabel(QLatin1Char('\n') + page.join(QStringLiteral("\n\n")) +
                                 QLatin1Char('\n'));
   info->setTextInteractionFlags(Qt::TextBrowserInteraction);
   info->setOpenExternalLinks(true);
 
-  // i18n: the English text uses curly quotes; use the quotation marks your language normally
-  // uses.
   const QString notice =
-      tr("\u00A9 2003-2024+ Dolphin Team. \u201cGameCube\u201d and \u201cWii\u201d are "
-         "trademarks of Nintendo. Dolphin is not affiliated with Nintendo in any way.");
+      QStringLiteral("Contains code and data from Dolphin, \u00A9 2003-2024+ Dolphin Team. "
+                     "\u201cGameCube\u201d and \u201cWii\u201d are trademarks of Nintendo. "
+                     "PixelU Wii is not affiliated with Nintendo in any way.");
   auto* const footer = new QLabel(QStringLiteral("<small>%1</small>").arg(notice));
 
   auto* const logo = new QLabel();
