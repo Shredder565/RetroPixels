@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -24,8 +23,8 @@ namespace Core
 class System;
 }
 
-class CustomDelegate;
-
+// Dock listing the instruction breakpoints and memory checks, with toggles per column and
+// load/save to the game's INI.
 class BreakpointWidget : public QDockWidget
 {
   Q_OBJECT
@@ -51,31 +50,33 @@ protected:
   void showEvent(QShowEvent* event) override;
 
 private:
-  void CreateWidgets();
+  void BuildLayout();
+  void RefreshIcons();
+  void ApplyFont(const QFont& font);
 
-  void EditBreakpoint(u32 address, int edit, std::optional<QString> = std::nullopt);
-  void EditMBP(u32 address, int edit, std::optional<QString> = std::nullopt);
+  void CellClicked(QTableWidgetItem* item);
+  void CellEdited(QTableWidgetItem* item);
+  void ShowRowMenu(const QPoint& pos);
 
-  void OnClear();
-  void OnClicked(QTableWidgetItem* item);
-  void OnToggleBreaking();
-  void OnNewBreakpoint();
-  void OnEditBreakpoint(u32 address, bool is_instruction_bp);
-  void OnLoad();
-  void OnSave();
-  void OnContextMenu(const QPoint& pos);
-  void OnItemChanged(QTableWidgetItem* item);
-  void OnDebugFontChanged(const QFont& font);
+  void ToggleBreaking();
+  void ClearAll();
+  void CreateNew();
+  void OpenEditor(u32 address, bool instruction);
+  void LoadFromIni();
+  void SaveToIni();
 
-  void UpdateIcons();
+  void ReplaceBreakpoint(u32 address, int column, std::optional<QString> text = std::nullopt);
+  void ReplaceMemCheck(u32 address, int column, std::optional<QString> text = std::nullopt);
+  void StoreMemCheck(u32 from, u32 to, bool ranged, bool on_read, bool on_write, bool do_log,
+                     bool do_break, const QString& condition);
 
   Core::System& m_system;
 
-  QToolBar* m_toolbar;
-  QTableWidget* m_table;
-  QAction* m_enabled;
-  QAction* m_new;
-  QAction* m_clear;
-  QAction* m_load;
-  QAction* m_save;
+  QToolBar* m_bar = nullptr;
+  QTableWidget* m_list = nullptr;
+  QAction* m_toggle_action = nullptr;
+  QAction* m_new_action = nullptr;
+  QAction* m_clear_action = nullptr;
+  QAction* m_load_action = nullptr;
+  QAction* m_save_action = nullptr;
 };

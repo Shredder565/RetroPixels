@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,7 +16,10 @@ class QLabel;
 class QLineEdit;
 class QRadioButton;
 class QPushButton;
+class QWidget;
 
+// Creates an instruction or memory breakpoint, or edits an existing one, and hands the result to
+// the breakpoint widget.
 class BreakpointDialog : public QDialog
 {
   Q_OBJECT
@@ -36,41 +38,43 @@ public:
   void accept() override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void BuildLayout();
+  void WireUp();
+  void SyncKindBoxes();
+  void SyncRangeFields();
+  void SetActionChoice(bool break_on_hit, bool log_on_hit);
+  void ExplainConditions();
+  void ComplainAbout(const QString& field);
 
-  void OnBPTypeChanged();
-  void OnAddressTypeChanged();
-  void ShowConditionHelp();
+  // Kind of breakpoint
+  QRadioButton* m_code_kind = nullptr;
+  QRadioButton* m_memory_kind = nullptr;
 
-  // Instruction BPs
-  QRadioButton* m_instruction_bp;
-  QGroupBox* m_instruction_box;
-  QLineEdit* m_instruction_address;
+  // Instruction breakpoint
+  QWidget* m_code_section = nullptr;
+  QGroupBox* m_code_box = nullptr;
+  QLineEdit* m_code_address = nullptr;
 
-  // Memory BPs
-  QRadioButton* m_memory_bp;
-  QRadioButton* m_memory_use_address;
-  QRadioButton* m_memory_use_range;
-  QGroupBox* m_memory_box;
-  QLabel* m_memory_address_from_label;
-  QLineEdit* m_memory_address_from;
-  QLabel* m_memory_address_to_label;
-  QLineEdit* m_memory_address_to;
-  QRadioButton* m_memory_on_read;
-  QRadioButton* m_memory_on_read_and_write;
-  QRadioButton* m_memory_on_write;
+  // Memory breakpoint
+  QWidget* m_memory_section = nullptr;
+  QGroupBox* m_memory_box = nullptr;
+  QRadioButton* m_single_address = nullptr;
+  QRadioButton* m_address_range = nullptr;
+  QLabel* m_first_caption = nullptr;
+  QLineEdit* m_first_address = nullptr;
+  QLabel* m_last_caption = nullptr;
+  QLineEdit* m_last_address = nullptr;
+  QRadioButton* m_on_read = nullptr;
+  QRadioButton* m_on_write = nullptr;
+  QRadioButton* m_on_access = nullptr;
 
-  // Action
-  QRadioButton* m_do_log;
-  QRadioButton* m_do_break;
-  QRadioButton* m_do_log_and_break;
+  // What a hit does
+  QRadioButton* m_log_only = nullptr;
+  QRadioButton* m_break_only = nullptr;
+  QRadioButton* m_log_and_break = nullptr;
+  QLineEdit* m_condition = nullptr;
 
-  QLineEdit* m_conditional;
-  QPushButton* m_cond_help_btn;
-
-  QDialogButtonBox* m_buttons;
-  BreakpointWidget* m_parent;
-
-  OpenMode m_open_mode;
+  QDialogButtonBox* m_dialog_buttons = nullptr;
+  BreakpointWidget* const m_owner;
+  const OpenMode m_mode;
 };
