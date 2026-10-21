@@ -1,4 +1,4 @@
-# The Qt front end: PixelU-Wii.exe.
+# The Qt front end: PixelU-Wii.exe (PixelU-Wii on Linux).
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 # Qt 6.8.3's official MSVC x64 build (PIXELU_WII_QT_DIR, installed with
@@ -182,12 +182,51 @@ target_link_libraries(dolphin-emu PRIVATE
 if(ENABLE_SDL)
   target_link_libraries(dolphin-emu PRIVATE SDL3::SDL3)
 endif()
-target_link_libraries(dolphin-emu PRIVATE
-  ${qt_gui_private}
-  gdi32.lib
-  shell32.lib
-  dwmapi.lib  # dark title bars
-)
+target_link_libraries(dolphin-emu PRIVATE ${qt_gui_private})
+if(WIN32)
+  target_link_libraries(dolphin-emu PRIVATE
+    gdi32.lib
+    shell32.lib
+    dwmapi.lib  # dark title bars
+  )
+else()
+  # Linux: SIGINT/SIGTERM reach the GUI thread through SignalDaemon, and the render window is
+  # docked into RetroPixels through X11 (QtUtils/X11Docking; under Wayland Qt runs on XWayland,
+  # see Main.cpp). That goes through Qt's own X connection (libxcb, which Qt's xcb platform
+  # uses too; building needs libxcb1-dev, which libx11-dev brings along).
+  pixelu_add_sources(dolphin-emu
+    IN QtUtils
+      SignalDaemon.cpp SignalDaemon.h X11Docking.cpp X11Docking.h
+  )
+  # Qt D-Bus (part of Qt's base module, which Qt Gui itself uses on Linux): the desktop's
+  # screen saver is held off while a game runs (MainWindow), and "Open Containing Folder"
+  # selects the file in the file manager (QtUtils).
+  find_package(Qt6 QUIET COMPONENTS DBus)
+  if(TARGET Qt6::DBus)
+    target_link_libraries(dolphin-emu PRIVATE Qt6::DBus)
+  else()
+    message(STATUS "Qt D-Bus not found: no screen saver inhibition on Linux")
+  endif()
+  if(ENABLE_X11)
+    find_package(X11)
+    if(NOT X11_xcb_FOUND)
+      message(FATAL_ERROR "Docking into RetroPixels needs libxcb's headers (libxcb1-dev), "
+        "or configure with -DENABLE_X11=OFF.")
+    endif()
+    target_link_libraries(dolphin-emu PRIVATE X11::xcb)
+    target_compile_definitions(dolphin-emu PRIVATE PIXELU_QT_X11=1)
+
+    # pixelu-wii-dock-check: plays RetroPixels' part and checks the game window (plain,
+    # docked, given up). Xlib only; not built unless asked for (ninja pixelu-wii-dock-check).
+    add_executable(pixelu-wii-dock-check EXCLUDE_FROM_ALL)
+    pixelu_add_sources(pixelu-wii-dock-check
+      IN LinuxCheck
+        DockCheck.cpp
+    )
+    set_target_properties(pixelu-wii-dock-check PROPERTIES AUTOMOC OFF AUTORCC OFF)
+    target_link_libraries(pixelu-wii-dock-check PRIVATE X11::X11)
+  endif()
+endif()
 
 if(MSVC)
   # Qt's headers are external headers: the project's warning level does not apply.
@@ -238,11 +277,18 @@ add_custom_command(TARGET dolphin-emu POST_BUILD
   VERBATIM)
 pixelu_after_build_link(dolphin-emu "${PROJECT_SOURCE_DIR}/COPYING" "${bin_dir}/COPYING")
 pixelu_after_build_link(dolphin-emu "${PROJECT_SOURCE_DIR}/LICENSES" "${bin_dir}/Licenses")
-pixelu_after_build_link(dolphin-emu "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${bin_dir}/qt.conf")
+if(WIN32)
+  pixelu_after_build_link(dolphin-emu "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${bin_dir}/qt.conf")
+endif()
 if(ENABLE_AUTOUPDATE)
   pixelu_after_build_link(dolphin-emu "${CMAKE_BINARY_DIR}/build_info.txt" "${bin_dir}/build_info.txt")
 endif()
 
+# On Linux the program in Binaries runs against the Qt it was built with (its
+# RUNPATH is $ORIGIN/lib, so a system Qt, or LD_LIBRARY_PATH for the aqt one);
+# tools/pixelu-wii-linux-deploy.sh makes the portable folder with Qt's
+# libraries in lib/ and its plugins in QtPlugins/.
+if(WIN32)
 # windeployqt copies the Qt DLLs and plugins PixelU-Wii.exe needs. It runs
 # through qtpaths.bat, which gives qtpaths a qt.conf (target_qt.conf) with
 # paths relative to the bundled Qt rather than those of the machine Qt was
@@ -270,6 +316,7 @@ add_custom_command(TARGET dolphin-emu POST_BUILD
             --exclude-plugins qgif,qico,qjpeg,qtuiotouchplugin
             "$<TARGET_FILE:dolphin-emu>"
   VERBATIM)
+endif()
 
 # Translations: each Languages/po/<lang>.po is compiled to
 # Binaries/Languages/<lang>/dolphin-emu.mo with GNU gettext's msgfmt (found on

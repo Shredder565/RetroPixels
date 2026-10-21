@@ -198,11 +198,20 @@ void Host::SetTASInputFocus(const bool focus)
   m_tas_has_focus = focus;
 }
 
-void Host::ResizeSurface(int, int)
+void Host::ResizeSurface(int new_width, int new_height)
 {
-  // The presenter asks the window for its size itself.
-  if (g_presenter)
-    g_presenter->ResizeSurface();
+  if (!g_presenter)
+    return;
+#ifndef _WIN32
+  // A Wayland surface has no size of its own (only without an X server: Main.cpp), so the
+  // presenter is told the window's size first. Elsewhere it asks the window itself.
+  if (QGuiApplication::platformName() == QLatin1String("wayland"))
+    g_presenter->SetBackbuffer(new_width, new_height);
+#else
+  static_cast<void>(new_width);
+  static_cast<void>(new_height);
+#endif
+  g_presenter->ResizeSurface();
 }
 
 // The functions below are the core's side of the interface (declared in Core/Host.h).

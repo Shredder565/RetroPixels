@@ -27,7 +27,7 @@ public:
   void SetWaitingForMessageBox(bool waiting_for_message_box);
   void SetCursorLocked(bool locked, bool follow_aspect_ratio = true);
 
-  // PixelU: true when RetroPixels started us with PIXELU_EMBED=1 (Windows only).
+  // PixelU: true when RetroPixels started us with PIXELU_EMBED=1 (Windows, and Linux on X11).
   static bool IsEmbedMode();
   // PixelU: show the render window parked off-screen, waiting for RetroPixels to dock it.
   void ShowForEmbedding(const QByteArray& geometry);
@@ -56,6 +56,7 @@ private:
   // PixelU embedding (see RenderWidget.cpp).
   bool IsDockedByHost() const;
   void ParkOffscreen();
+  void WatchForDocking();
   void PollDocking();
   void GiveUpDocking();
 

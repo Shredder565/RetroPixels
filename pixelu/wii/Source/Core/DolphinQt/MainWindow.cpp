@@ -37,6 +37,11 @@
 #include <qpa/qplatformnativeinterface.h>
 #endif
 
+#if defined(QT_DBUS_LIB)
+#include <QDBusInterface>
+#include <QDBusReply>
+#endif
+
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
 #include "Common/ScopeGuard.h"
@@ -264,6 +269,36 @@ std::unique_ptr<BootSessionData> SessionWithState(const std::optional<std::strin
 {
   return std::make_unique<BootSessionData>(savestate, DeleteSavestateAfterBoot::No);
 }
+
+#if defined(QT_DBUS_LIB)
+// Linux desktops (GNOME, KDE, Xfce, ...) keep the screen on while a program holds an inhibition
+// of org.freedesktop.ScreenSaver on the session bus. Without a session bus or that service this
+// does nothing.
+void InhibitDesktopScreenSaver(bool inhibit)
+{
+  static std::optional<uint> s_cookie;
+  if (inhibit == s_cookie.has_value())
+    return;
+
+  const QString service = QStringLiteral("org.freedesktop.ScreenSaver");
+  QDBusInterface saver(service, QStringLiteral("/org/freedesktop/ScreenSaver"), service);
+  if (!saver.isValid())
+    return;
+  if (inhibit)
+  {
+    const QDBusReply<uint> reply =
+        saver.call(QStringLiteral("Inhibit"), QStringLiteral("PixelU Wii"),
+                   QStringLiteral("A game is running"));
+    if (reply.isValid())
+      s_cookie = reply.value();
+  }
+  else
+  {
+    saver.call(QStringLiteral("UnInhibit"), *s_cookie);
+    s_cookie.reset();
+  }
+}
+#endif
 
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__)
 // SIGINT and SIGTERM are handed to SignalDaemon, which turns them into a Qt signal on the GUI
@@ -1772,6 +1807,9 @@ void MainWindow::UpdateScreenSaverInhibition()
   {
     m_is_screensaver_inhibited = should_inhibit;
     UICommon::InhibitScreenSaver(should_inhibit);
+#if defined(QT_DBUS_LIB)
+    InhibitDesktopScreenSaver(should_inhibit);
+#endif
   }
 }
 

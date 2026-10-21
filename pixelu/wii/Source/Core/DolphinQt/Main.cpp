@@ -10,6 +10,7 @@
 
 #ifdef __linux__
 #include <cstdlib>
+#include <cstring>
 #endif
 
 #include <list>
@@ -159,11 +160,36 @@ void PrepareLinuxPlatform()
   // support is turned off.
   setenv("QT_XCB_NO_XI2", "1", true);
 #endif
-  // Games cannot render on Wayland; default to XCB, and override an explicit Wayland choice.
+  // PixelU: run on X11, which under a Wayland desktop means XWayland: the game window can only
+  // be docked into RetroPixels there, and the keyboard and mouse backend is X11's. An explicit
+  // Wayland choice is overridden too. Only without any X server (no DISPLAY) is Wayland left to
+  // Qt, so the program still starts; games then draw through the video backends' Wayland
+  // surfaces, without docking.
+  const char* const display = getenv("DISPLAY");
+  const char* const wayland = getenv("WAYLAND_DISPLAY");
+  if ((display == nullptr || display[0] == '\0') && wayland != nullptr && wayland[0] != '\0')
+    return;
   const char* const platform = getenv("QT_QPA_PLATFORM");
   const bool asked_for_wayland =
       platform != nullptr && Common::CaseInsensitiveContains(platform, "wayland");
   setenv("QT_QPA_PLATFORM", "xcb", asked_for_wayland);
+}
+
+// PixelU: "--rp-embed" (RetroPixels' flag for its engines) is the same as PIXELU_EMBED=1: the
+// game window waits to be docked into RetroPixels (RenderWidget). It is taken out of argv here,
+// since neither Qt nor the option parser knows it.
+void TakeEmbedFlag(int* argc, char* argv[])
+{
+  int kept = 1;
+  for (int i = 1; i < *argc; ++i)
+  {
+    if (std::strcmp(argv[i], "--rp-embed") == 0)
+      setenv("PIXELU_EMBED", "1", 1);
+    else
+      argv[kept++] = argv[i];
+  }
+  argv[kept] = nullptr;
+  *argc = kept;
 }
 #endif
 
@@ -226,6 +252,7 @@ int RunApplication(int argc, char* argv[])
 #endif
 
 #ifdef __linux__
+  TakeEmbedFlag(&argc, argv);
   PrepareLinuxPlatform();
 #endif
 

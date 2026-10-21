@@ -27,6 +27,9 @@
 
 #include "DolphinQt/Host.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
+#ifdef __linux__
+#include "DolphinQt/QtUtils/X11Docking.h"
+#endif
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 
@@ -48,6 +51,12 @@
 // anything that moves it gets undone; once docked, RetroPixels alone places and sizes it. If no
 // dock happens within 20 seconds the window becomes an ordinary, centred window after all.
 // Outside embed mode, and on other platforms, all of this is inert.
+//
+// On Linux (X11, or XWayland under Wayland) the window is not parked off-screen, since window
+// managers keep windows on screen: it is marked for RetroPixels and kept inside an unmapped
+// window of ours until RetroPixels reparents it into its own (QtUtils/X11Docking.h). The same
+// 20 seconds apply before it becomes an ordinary window. PIXELU_EMBED=1 or --rp-embed (Main.cpp)
+// turns it on.
 namespace
 {
 [[maybe_unused]] constexpr int PARKING_SPOT = -32000;
@@ -424,6 +433,11 @@ bool RenderWidget::event(QEvent* event)
     break;
 
   case QEvent::WinIdChange:
+#ifdef __linux__
+    // PixelU: a new native window while waiting to be docked has to wait in the holder too.
+    if (m_waiting_for_dock)
+      QtUtils::X11Docking::Prepare(winId());
+#endif
     emit HandleChanged(reinterpret_cast<void*>(winId()));
     break;
 
@@ -577,6 +591,11 @@ bool RenderWidget::IsEmbedMode()
 #ifdef _WIN32
   static const bool embedded = qEnvironmentVariable("PIXELU_EMBED") == QStringLiteral("1");
   return embedded;
+#elif defined(__linux__)
+  // Docking needs X11; on any other Qt platform the window is an ordinary one.
+  static const bool embedded = qEnvironmentVariable("PIXELU_EMBED") == QStringLiteral("1") &&
+                               QtUtils::X11Docking::IsAvailable();
+  return embedded;
 #else
   return false;
 #endif
@@ -594,6 +613,9 @@ bool RenderWidget::IsDockedByHost() const
     return false;
   const bool child_style = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0;
   return child_style || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow();
+#elif defined(__linux__)
+  // Docked means our parent is RetroPixels' dock window (it carries _RETROPIXELS_DOCK).
+  return IsEmbedMode() && QtUtils::X11Docking::IsDocked(internalWinId());
 #else
   return false;
 #endif
@@ -629,6 +651,34 @@ void RenderWidget::ShowForEmbedding(const QByteArray& geometry)
   m_waiting_for_dock = true;
   ParkOffscreen();
 
+  WatchForDocking();
+#elif defined(__linux__)
+  // Shown again (another boot) after RetroPixels already docked us: its layout stands.
+  if (IsDockedByHost())
+  {
+    show();
+    return;
+  }
+
+  // Keep the saved size; the position does not matter while RetroPixels has the window. Do not
+  // take focus from RetroPixels.
+  restoreGeometry(geometry);
+  setAttribute(Qt::WA_ShowWithoutActivating);
+
+  // Create the native window while hidden (WA_NativeWindow makes winId() do that), mark it and
+  // move it into the holder, so that showing it does not put it on the desktop.
+  m_waiting_for_dock = QtUtils::X11Docking::Prepare(winId());
+  showNormal();
+  if (m_waiting_for_dock)
+    WatchForDocking();
+#else
+  showNormal();
+  restoreGeometry(geometry);
+#endif
+}
+
+void RenderWidget::WatchForDocking()
+{
   if (m_dock_poll == nullptr)
   {
     m_dock_poll = new QTimer(this);
@@ -642,10 +692,6 @@ void RenderWidget::ShowForEmbedding(const QByteArray& geometry)
   }
   m_dock_poll->start();
   m_dock_deadline->start();
-#else
-  showNormal();
-  restoreGeometry(geometry);
-#endif
 }
 
 void RenderWidget::PollDocking()
@@ -718,6 +764,29 @@ void RenderWidget::GiveUpDocking()
   }
 
   ShowWindow(hwnd, SW_SHOW);
+  raise();
+  activateWindow();
+#elif defined(__linux__)
+  if (!m_waiting_for_dock)
+    return;
+  m_waiting_for_dock = false;
+  if (m_dock_poll != nullptr)
+    m_dock_poll->stop();
+
+  if (IsDockedByHost())
+    return;
+
+  // Out of the holder and onto the desktop, centred, as an ordinary window that the window
+  // manager frames and activates.
+  setAttribute(Qt::WA_ShowWithoutActivating, false);
+  QPoint top_left(0, 0);
+  if (const QScreen* const screen = QGuiApplication::primaryScreen())
+  {
+    QRect area(QPoint(0, 0), size());
+    area.moveCenter(screen->availableGeometry().center());
+    top_left = area.topLeft() * screen->devicePixelRatio();
+  }
+  QtUtils::X11Docking::Release(winId(), top_left);
   raise();
   activateWindow();
 #endif
