@@ -1,0 +1,326 @@
+diff --git a/pixelu/wii/Externals/SFML/CMakeLists.txt b/pixelu/wii/Externals/SFML/CMakeLists.txt
+index 94b607a..cb8927e 100644
+--- a/pixelu/wii/Externals/SFML/CMakeLists.txt
++++ b/pixelu/wii/Externals/SFML/CMakeLists.txt
+@@ -13,8 +13,13 @@ add_library(sfml-network STATIC)
+ pixelu_add_sources(sfml-network
+   IN "${src}/src/SFML/Network"
+     Http.cpp IpAddress.cpp Packet.cpp Socket.cpp SocketSelector.cpp
+-    TcpListener.cpp TcpSocket.cpp UdpSocket.cpp Win32/SocketImpl.cpp
++    TcpListener.cpp TcpSocket.cpp UdpSocket.cpp
+ )
++if(WIN32)
++  pixelu_add_sources(sfml-network IN "${src}/src/SFML/Network" Win32/SocketImpl.cpp)
++else()
++  pixelu_add_sources(sfml-network IN "${src}/src/SFML/Network" Unix/SocketImpl.cpp)
++endif()
+ target_link_libraries(sfml-network PUBLIC sfml-system)
+ 
+ foreach(target sfml-system sfml-network)
+diff --git a/pixelu/wii/Externals/curl/CMakeLists.txt b/pixelu/wii/Externals/curl/CMakeLists.txt
+index 891d167..e1b4c9d 100644
+--- a/pixelu/wii/Externals/curl/CMakeLists.txt
++++ b/pixelu/wii/Externals/curl/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ # libcurl (curl licence): HTTP(S) for RetroAchievements, the netplay index, WC24
+ # and game update checks. curl's own CMake project as a static, HTTP-only library
+-# using Windows' Schannel for TLS, without compression or other extras.
++# using Windows' Schannel for TLS (on Linux the Mbed TLS built here, with the
++# system's certificates in /etc/ssl/certs), without compression or other extras.
+ set(BUILD_CURL_EXE OFF)
+ set(BUILD_EXAMPLES OFF)
+ set(BUILD_LIBCURL_DOCS OFF)
+@@ -11,7 +12,21 @@ set(BUILD_TESTING OFF)
+ set(CURL_ENABLE_EXPORT_TARGET OFF)
+ set(ENABLE_CURL_MANUAL OFF)
+ set(HTTP_ONLY ON)
+-set(CURL_USE_SCHANNEL ON)
++if(WIN32)
++  set(CURL_USE_SCHANNEL ON)
++else()
++  set(CURL_USE_OPENSSL OFF)
++  set(CURL_USE_MBEDTLS ON)
++  set(CURL_USE_PKGCONFIG OFF)
++  set(MBEDTLS_INCLUDE_DIR "${THIRD}/mbedtls/include")
++  set(MBEDTLS_LIBRARY mbedtls)
++  set(MBEDX509_LIBRARY mbedx509)
++  set(MBEDCRYPTO_LIBRARY mbedcrypto)
++  # Every distribution has its CA certificates in (or linked from) /etc/ssl/certs;
++  # Mbed TLS reads each file there, so a bundle file in it works as well.
++  set(CURL_CA_BUNDLE "none" CACHE STRING "" FORCE)
++  set(CURL_CA_PATH "/etc/ssl/certs" CACHE STRING "" FORCE)
++endif()
+ set(CURL_USE_LIBPSL OFF)
+ set(CURL_USE_LIBSSH2 OFF)
+ set(USE_LIBIDN2 OFF)
+diff --git a/pixelu/wii/Externals/discord-rpc/CMakeLists.txt b/pixelu/wii/Externals/discord-rpc/CMakeLists.txt
+index 846f799..36b2d4c 100644
+--- a/pixelu/wii/Externals/discord-rpc/CMakeLists.txt
++++ b/pixelu/wii/Externals/discord-rpc/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ # discord-rpc (MIT) with the RapidJSON (MIT) it is built against, both from
+ # their own repositories:
+-# Discord Rich Presence. Built here from its Windows sources as a static library
+-# with the background I/O thread.
++# Discord Rich Presence. Built here from its Windows or Linux sources as a static
++# library with the background I/O thread.
+ cmake_minimum_required(VERSION 3.2.0...4.1.1)
+ project(DiscordRPC)
+ set(src "${THIRD}/discord-rpc/discord-rpc")
+@@ -11,9 +11,17 @@ pixelu_add_sources(discord-rpc
+   IN "${src}/include" discord_rpc.h discord_register.h
+   IN "${src}/src"
+     discord_rpc.cpp rpc_connection.cpp rpc_connection.h serialization.cpp serialization.h
+-    connection.h backoff.h msg_queue.h connection_win.cpp discord_register_win.cpp
++    connection.h backoff.h msg_queue.h
+ )
+ target_include_directories(discord-rpc PRIVATE "${src}/include" "${THIRD}/discord-rpc/rapidjson/include")
+-target_compile_definitions(discord-rpc PRIVATE DISCORD_WINDOWS)
+-target_link_libraries(discord-rpc PRIVATE psapi advapi32)
++if(WIN32)
++  pixelu_add_sources(discord-rpc IN "${src}/src" connection_win.cpp discord_register_win.cpp)
++  target_compile_definitions(discord-rpc PRIVATE DISCORD_WINDOWS)
++  target_link_libraries(discord-rpc PRIVATE psapi advapi32)
++else()
++  pixelu_add_sources(discord-rpc IN "${src}/src" connection_unix.cpp discord_register_linux.cpp)
++  target_compile_definitions(discord-rpc PRIVATE DISCORD_LINUX)
++  find_package(Threads REQUIRED)
++  target_link_libraries(discord-rpc PRIVATE Threads::Threads)
++endif()
+ pixelu_third_party_target(discord-rpc)
+diff --git a/pixelu/wii/Externals/hidapi/CMakeLists.txt b/pixelu/wii/Externals/hidapi/CMakeLists.txt
+index 1423638..5c2527a 100644
+--- a/pixelu/wii/Externals/hidapi/CMakeLists.txt
++++ b/pixelu/wii/Externals/hidapi/CMakeLists.txt
+@@ -1,9 +1,17 @@
+ # HIDAPI (BSD-3-Clause and others): real Wii Remotes and the Steam Deck controls,
+-# through its Windows backend.
++# through its Windows backend, or on Linux its hidraw backend (which finds
++# devices through libudev, part of every systemd or eudev system).
+ project(hidapi)
+ set(src "${THIRD}/hidapi/hidapi-src")
+ 
+-add_library(hidapi STATIC "${src}/hidapi/hidapi.h" "${src}/windows/hid.c")
++if(WIN32)
++  add_library(hidapi STATIC "${src}/hidapi/hidapi.h" "${src}/windows/hid.c")
++else()
++  find_package(PkgConfig REQUIRED)
++  pkg_check_modules(UDEV REQUIRED IMPORTED_TARGET libudev)
++  add_library(hidapi STATIC "${src}/hidapi/hidapi.h" "${src}/linux/hid.c")
++  target_link_libraries(hidapi PRIVATE PkgConfig::UDEV)
++endif()
+ target_include_directories(hidapi PUBLIC "${src}/hidapi")
+ add_library(Hidapi::Hidapi ALIAS hidapi)
+ pixelu_third_party_target(hidapi)
+diff --git a/pixelu/wii/Externals/liblzma/config.h b/pixelu/wii/Externals/liblzma/config.h
+index b87adfb..841172f 100644
+--- a/pixelu/wii/Externals/liblzma/config.h
++++ b/pixelu/wii/Externals/liblzma/config.h
+@@ -2,7 +2,7 @@
+ //
+ // Build configuration for the liblzma sources of XZ Utils 5.2.4 (fetched from
+ // the XZ Utils repository, see Externals/sources.json), for PixelU-Wii's
+-// Windows x64 builds. XZ Utils normally
++// Windows x64 and Linux x86-64 builds. XZ Utils normally
+ // generates this file with its configure script; these are the answers for MSVC
+ // on 64-bit Windows. Only the library is built, so nothing for the xz tools
+ // (gettext, getopt, file times, ...) is here.
+@@ -31,8 +31,23 @@
+ #define HAVE_MF_BT3 1
+ #define HAVE_MF_BT4 1
+ 
++#ifdef _WIN32
+ // Threads: Windows Vista condition variables.
+ #define MYTHREAD_VISTA 1
++#else
++// Linux (glibc 2.35+): POSIX threads with a monotonic clock for timed waits, the CPU
++// count from the affinity mask and the RAM size from sysconf.
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE 1
++#endif
++#define MYTHREAD_POSIX 1
++#define HAVE_CLOCK_GETTIME 1
++#define HAVE_DECL_CLOCK_MONOTONIC 1
++#define HAVE_PTHREAD_CONDATTR_SETCLOCK 1
++#define TUKLIB_CPUCORES_SCHED_GETAFFINITY 1
++#define TUKLIB_PHYSMEM_SYSCONF 1
++#define HAVE_UNISTD_H 1
++#endif
+ 
+ // The C library.
+ #define STDC_HEADERS 1
+diff --git a/pixelu/wii/Externals/libusb/CMakeLists.txt b/pixelu/wii/Externals/libusb/CMakeLists.txt
+index 9d70e9d..e7d4fd3 100644
+--- a/pixelu/wii/Externals/libusb/CMakeLists.txt
++++ b/pixelu/wii/Externals/libusb/CMakeLists.txt
+@@ -1,18 +1,32 @@
+ # libusb (LGPL-2.1-or-later): USB passthrough, the GameCube adapter and real
+-# Bluetooth adapters. Built from its Windows sources (WinUSB and UsbDK backends)
+-# with the config.h libusb ships for MSVC in libusb/msvc.
++# Bluetooth adapters. On Windows built from its Windows sources (WinUSB and UsbDK
++# backends) with the config.h libusb ships for MSVC in libusb/msvc; on Linux from
++# its usbfs backend with netlink hot-plug (no libudev) and PixelU-Wii's
++# linux/config.h.
+ set(src "${THIRD}/libusb/libusb")
+ 
+ add_library(usb STATIC EXCLUDE_FROM_ALL)
+ pixelu_add_sources(usb
+   IN "${src}/libusb" core.c descriptor.c hotplug.c io.c strerror.c sync.c
+-  IN "${src}/libusb/os" events_windows.c threads_windows.c windows_common.c windows_usbdk.c windows_winusb.c
+ )
++if(WIN32)
++  pixelu_add_sources(usb
++    IN "${src}/libusb/os" events_windows.c threads_windows.c windows_common.c windows_usbdk.c windows_winusb.c
++  )
++  set(usb_config "${src}/msvc")
++else()
++  pixelu_add_sources(usb
++    IN "${src}/libusb/os" events_posix.c threads_posix.c linux_usbfs.c linux_netlink.c
++  )
++  set(usb_config "${CMAKE_CURRENT_SOURCE_DIR}/linux")
++  find_package(Threads REQUIRED)
++  target_link_libraries(usb PRIVATE Threads::Threads)
++endif()
+ set_target_properties(usb PROPERTIES VERSION 1.0.26)
+ # BEFORE: other libraries have a config.h too; libusb's must win.
+ target_include_directories(usb BEFORE
+   PUBLIC "${src}/libusb"
+-  PRIVATE "${src}/msvc"
++  PRIVATE "${usb_config}"
+ )
+ pixelu_third_party_target(usb)
+ 
+diff --git a/pixelu/wii/Externals/libusb/linux/config.h b/pixelu/wii/Externals/libusb/linux/config.h
+new file mode 100644
+index 0000000..84effc1
+--- /dev/null
++++ b/pixelu/wii/Externals/libusb/linux/config.h
+@@ -0,0 +1,31 @@
++/* Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
++ *
++ * libusb's config.h for the Linux build (the part libusb's configure script
++ * would write): glibc 2.35+ on x86-64, the usbfs backend with netlink hot-plug
++ * events (no libudev). Only what libusb's core, the POSIX event/thread code and
++ * the Linux backend test for is defined. */
++#ifndef PIXELU_LIBUSB_LINUX_CONFIG_H
++#define PIXELU_LIBUSB_LINUX_CONFIG_H
++
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE 1
++#endif
++
++#define DEFAULT_VISIBILITY __attribute__((visibility("default")))
++#define PRINTF_FORMAT(a, b) __attribute__((__format__(__printf__, a, b)))
++#define ENABLE_LOGGING 1
++
++#define PLATFORM_POSIX 1
++#define HAVE_OS_TIMER 1
++#define HAVE_TIMERFD 1
++#define HAVE_EVENTFD 1
++#define HAVE_PIPE2 1
++#define HAVE_NFDS_T 1
++#define HAVE_CLOCK_GETTIME 1
++#define HAVE_PTHREAD_CONDATTR_SETCLOCK 1
++#define HAVE_PTHREAD_SETNAME_NP 1
++#define HAVE_SYS_TIME_H 1
++#define HAVE_ASM_TYPES_H 1
++#define HAVE_SYSLOG 1
++
++#endif
+diff --git a/pixelu/wii/Externals/mbedtls/CMakeLists.txt b/pixelu/wii/Externals/mbedtls/CMakeLists.txt
+index cb3b58a..39ee996 100644
+--- a/pixelu/wii/Externals/mbedtls/CMakeLists.txt
++++ b/pixelu/wii/Externals/mbedtls/CMakeLists.txt
+@@ -35,8 +35,8 @@ foreach(lib crypto x509 tls)
+   add_library(${name} STATIC ${files})
+   add_library(MbedTLS::${name} ALIAS ${name})
+   target_include_directories(${name} PUBLIC "${src}/include/" PRIVATE "${src}/library/")
+-  # Sockets (net_sockets.c) need Winsock.
+-  target_link_libraries(${name} PUBLIC ws2_32 ${previous})
++  # Sockets (net_sockets.c) need Winsock on Windows.
++  target_link_libraries(${name} PUBLIC $<$<BOOL:${WIN32}>:ws2_32> ${previous})
+   pixelu_third_party_target(${name})
+   set(previous ${name})
+ endforeach()
+diff --git a/pixelu/wii/Externals/rcheevos/CMakeLists.txt b/pixelu/wii/Externals/rcheevos/CMakeLists.txt
+index e4d117c..bf1c39a 100644
+--- a/pixelu/wii/Externals/rcheevos/CMakeLists.txt
++++ b/pixelu/wii/Externals/rcheevos/CMakeLists.txt
+@@ -26,7 +26,7 @@ target_compile_definitions(rcheevos PRIVATE
+   RC_HASH_NO_ENCRYPTED
+   RC_HASH_NO_ROM
+   RC_HASH_NO_ZIP
+-  RC_CLIENT_SUPPORTS_RAINTEGRATION
++  $<$<BOOL:${RC_CLIENT_SUPPORTS_RAINTEGRATION}>:RC_CLIENT_SUPPORTS_RAINTEGRATION>
+   _CRT_SECURE_NO_WARNINGS
+ )
+ pixelu_third_party_target(rcheevos)
+diff --git a/pixelu/wii/Source/Core/InputCommon/CMakeLists.txt b/pixelu/wii/Source/Core/InputCommon/CMakeLists.txt
+index e5aa7d2..b42dbd7 100644
+--- a/pixelu/wii/Source/Core/InputCommon/CMakeLists.txt
++++ b/pixelu/wii/Source/Core/InputCommon/CMakeLists.txt
+@@ -26,21 +26,10 @@ pixelu_library(inputcommon
+   IN ControllerInterface
+     ControllerInterface.cpp ControllerInterface.h CoreDevice.cpp CoreDevice.h InputBackend.cpp
+     InputBackend.h MappingCommon.cpp MappingCommon.h
+-  IN ControllerInterface/DInput
+-    DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp
+-    DInputKeyboardMouse.h NamedKeys.h XInputFilter.cpp XInputFilter.h
+   IN ControllerInterface/DualShockUDPClient
+     DualShockUDPClient.cpp DualShockUDPClient.h DualShockUDPProto.h
+-  IN ControllerInterface/ForceFeedback
+-    ForceFeedbackDevice.cpp ForceFeedbackDevice.h
+-  IN ControllerInterface/WGInput
+-    WGInput.cpp WGInput.h
+   IN ControllerInterface/Wiimote
+     WiimoteController.cpp WiimoteController.h
+-  IN ControllerInterface/Win32
+-    Win32.cpp Win32.h
+-  IN ControllerInterface/XInput
+-    XInput.cpp XInput.h
+   IN DynamicInputTextures
+     DITConfiguration.cpp DITConfiguration.h DITData.h DITSpecification.cpp DITSpecification.h
+ )
+@@ -55,6 +44,22 @@ target_link_libraries(inputcommon
+     spng::spng
+ )
+ 
++if(WIN32)
++  pixelu_add_sources(inputcommon
++    IN ControllerInterface/DInput
++      DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp
++      DInputKeyboardMouse.h NamedKeys.h XInputFilter.cpp XInputFilter.h
++    IN ControllerInterface/ForceFeedback
++      ForceFeedbackDevice.cpp ForceFeedbackDevice.h
++    IN ControllerInterface/WGInput
++      WGInput.cpp WGInput.h
++    IN ControllerInterface/Win32
++      Win32.cpp Win32.h
++    IN ControllerInterface/XInput
++      XInput.cpp XInput.h
++  )
++endif()
++
+ if(ENABLE_SDL)
+   pixelu_add_sources(inputcommon
+     IN ControllerInterface/SDL
+diff --git a/pixelu/wii/Source/Core/VideoBackends/CMakeLists.txt b/pixelu/wii/Source/Core/VideoBackends/CMakeLists.txt
+index d272d8c..79aeec6 100644
+--- a/pixelu/wii/Source/Core/VideoBackends/CMakeLists.txt
++++ b/pixelu/wii/Source/Core/VideoBackends/CMakeLists.txt
+@@ -2,9 +2,14 @@
+ # OpenGL, null, software and the Direct3D 11/12 backends are always built;
+ # Vulkan when ENABLE_VULKAN is on.
+ 
+-foreach(backend OGL Null Software D3DCommon D3D D3D12)
++foreach(backend OGL Null Software)
+   add_subdirectory(${backend})
+ endforeach()
++if(WIN32)
++  foreach(backend D3DCommon D3D D3D12)
++    add_subdirectory(${backend})
++  endforeach()
++endif()
+ 
+ if(ENABLE_VULKAN)
+   add_subdirectory(Vulkan)
