@@ -1,30 +1,34 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Precompiled header for the MSVC build: headers used across most of the code base. On Windows
+// it also stops early with a clear message when the compiler or SDK is too old.
 
 #ifdef _WIN32
 
-#define STRINGIFY_HELPER(x) #x
-#define STRINGIFY(x) STRINGIFY_HELPER(x)
+#define PCH_QUOTE_(x) #x
+#define PCH_QUOTE(x) PCH_QUOTE_(x)
 
+// Visual Studio 2026 or newer.
 #if defined _MSC_FULL_VER && _MSC_FULL_VER < 195136252
-#pragma message("Current _MSC_FULL_VER: " STRINGIFY(_MSC_FULL_VER))
+#pragma message("Current _MSC_FULL_VER: " PCH_QUOTE(_MSC_FULL_VER))
 #error Please update your build environment to the latest Visual Studio 2026!
 #endif
 
+// Windows SDK 10.0.22621 (the first to define NTDDI_WIN10_NI) or newer.
 #include <sdkddkver.h>
 #ifndef NTDDI_WIN10_NI
-#pragma message("Current WDK_NTDDI_VERSION: " STRINGIFY(WDK_NTDDI_VERSION))
+#pragma message("Current WDK_NTDDI_VERSION: " PCH_QUOTE(WDK_NTDDI_VERSION))
 #error Windows 10.0.22621 SDK or later is required
 #endif
 
-#undef STRINGIFY
-#undef STRINGIFY_HELPER
+#undef PCH_QUOTE
+#undef PCH_QUOTE_
 
-#endif
+#endif  // _WIN32
 
+// C++ library.
 #include <algorithm>
 #include <array>
-#include <assert.h>
 #include <bitset>
 #include <cassert>
 #include <cctype>
@@ -36,65 +40,65 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <ctype.h>
 #include <deque>
-#include <errno.h>
-#if !defined ANDROID && !defined _WIN32
-#include <execinfo.h>
-#endif
-#include <fcntl.h>
 #include <filesystem>
-#include <float.h>
-#include <fmt/format.h>
 #include <fstream>
 #include <functional>
-#ifndef _WIN32
-#include <getopt.h>
-#endif
-#if defined _WIN32 && defined _M_X86_64
-#include <intrin.h>
-#endif
 #include <iomanip>
 #include <iostream>
-#include <limits.h>
 #include <limits>
 #include <list>
-#include <locale.h>
 #include <map>
-#include <math.h>
-#include <memory.h>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <optional>
-#ifndef _WIN32
-#include <pthread.h>
-#endif
 #include <queue>
 #include <set>
 #include <sstream>
 #include <stack>
-#include <stdarg.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <string_view>
 #include <thread>
-#include <time.h>
 #include <type_traits>
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
+// C library, under its C names too, since some code uses those.
+#include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <float.h>
+#include <limits.h>
+#include <locale.h>
+#include <math.h>
+#include <memory.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include <fmt/format.h>
+
+// Platform headers.
 #ifdef _WIN32
+#ifdef _M_X86_64
+#include <intrin.h>
+#endif
 #include <windows.h>
+#else
+#ifndef ANDROID
+#include <execinfo.h>
+#endif
+#include <getopt.h>
+#include <pthread.h>
+#include <unistd.h>
 #endif
 
 #include "Common/Common.h"

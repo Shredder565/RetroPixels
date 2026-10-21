@@ -1,4 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
+// The translation unit MSVC builds the precompiled header from.
 #include "pch.h"

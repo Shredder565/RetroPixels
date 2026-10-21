@@ -1,4 +1,5 @@
-// dummy include to help with disabling pch for a single file
-// cmake doesn't provide a clean way to disable MSVC's force include option
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// So we can just point it at an empty file instead.
+// Intentionally empty. MSVC force-includes pch.h into every source; pointing a single target's
+// include path here instead turns the precompiled header off for it, which CMake has no direct
+// switch for.
