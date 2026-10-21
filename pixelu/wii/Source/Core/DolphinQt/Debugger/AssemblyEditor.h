@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class QRect;
 class QWheelEvent;
 class GekkoSyntaxHighlight;
 
+// One tab of the assembler: a plain text editor with a line-number gutter, Gekko syntax
+// highlighting and a "#<base address>" header line in the saved file.
 class AsmEditor : public QPlainTextEdit
 {
   Q_OBJECT;
@@ -21,16 +22,16 @@ public:
   AsmEditor(QString file_path, int editor_num, bool dark_scheme, QWidget* parent = nullptr);
   void LineNumberAreaPaintEvent(QPaintEvent* event);
   int LineNumberAreaWidth();
-  const QString& Path() const { return m_path; }
-  const QString& FileName() const { return m_filename; }
-  const QString& EditorTitle() const { return m_title_ambiguous ? Path() : FileName(); }
-  const QString& BaseAddress() const { return m_base_address; }
+  const QString& Path() const { return m_file_path; }
+  const QString& FileName() const { return m_file_name; }
+  const QString& EditorTitle() const { return m_show_full_path ? Path() : FileName(); }
+  const QString& BaseAddress() const { return m_base; }
   void SetBaseAddress(const QString& ba);
-  void SetAmbiguous(bool b) { m_title_ambiguous = b; }
-  int EditorNum() const { return m_editor_num; }
+  void SetAmbiguous(bool b) { m_show_full_path = b; }
+  int EditorNum() const { return m_number; }
   bool LoadFromPath();
-  bool IsDirty() const { return m_dirty; }
-  bool IsAmbiguous() const { return m_title_ambiguous; }
+  bool IsDirty() const { return m_modified; }
+  bool IsAmbiguous() const { return m_show_full_path; }
   bool PathsMatch(const QString& path) const;
   void Zoom(int amount);
 
@@ -50,32 +51,23 @@ protected:
   void wheelEvent(QWheelEvent* event) override;
 
 private:
-  void UpdateLineNumberAreaWidth(int new_block_count);
-  void HighlightCurrentLine();
-  void UpdateLineNumberArea(const QRect& rect, int dy);
-  int CharWidth() const;
+  class Gutter;
 
-  class LineNumberArea : public QWidget
-  {
-  public:
-    LineNumberArea(AsmEditor* editor) : QWidget(editor), asm_editor(editor) {}
-    QSize sizeHint() const override;
+  void FitGutter();
+  void ScrollGutter(const QRect& rect, int dy);
+  void RefreshCursorLine();
+  void MarkModified(bool modified);
+  bool ShowErrorTip(const QPoint& local, const QPoint& global);
+  int SpaceWidth() const;
 
-  protected:
-    void paintEvent(QPaintEvent* event) override;
-
-  private:
-    AsmEditor* asm_editor;
-  };
-
-  QWidget* m_line_number_area;
-  GekkoSyntaxHighlight* m_highlighter;
-  QString m_path;
-  QString m_filename;
-  QString m_base_address;
-  const int m_editor_num;
-  bool m_dirty;
-  QTextBlock m_last_block;
-  bool m_title_ambiguous;
-  bool m_dark_scheme;
+  QWidget* m_gutter = nullptr;
+  GekkoSyntaxHighlight* m_syntax = nullptr;
+  QString m_file_path;
+  QString m_file_name;
+  QString m_base;
+  const int m_number;
+  bool m_modified = false;
+  QTextBlock m_cursor_block;
+  bool m_show_full_path = false;
+  const bool m_dark;
 };

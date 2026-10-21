@@ -1,369 +1,335 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/AssemblyEditor.h"
 
+#include <cctype>
+#include <cmath>
+#include <filesystem>
+#include <string>
+#include <utility>
+
 #include <QFile>
+#include <QFontDatabase>
+#include <QHelpEvent>
 #include <QPainter>
 #include <QTextBlock>
 #include <QToolTip>
 
-#include <filesystem>
-#include <utility>
-
-#include "Common/StringUtil.h"
 #include "DolphinQt/Debugger/GekkoSyntaxHighlight.h"
 
-QSize AsmEditor::LineNumberArea::sizeHint() const
+namespace
 {
-  return QSize(asm_editor->LineNumberAreaWidth(), 0);
+QString LeafName(const QString& path)
+{
+  return QString::fromStdString(std::filesystem::path(path.toStdString()).filename().string());
 }
 
-void AsmEditor::LineNumberArea::paintEvent(QPaintEvent* event)
+// The first line of a saved file may be "#<base address>", optionally indented.
+// Returns false if the line is not such a header (or has nothing after the '#', at end of file).
+bool ParseBaseHeader(const std::string& line, QString* base)
 {
-  asm_editor->LineNumberAreaPaintEvent(event);
+  size_t pos = 0;
+  while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos])))
+    ++pos;
+  if (pos == line.size() || line[pos] != '#')
+    return false;
+
+  std::string value = line.substr(pos + 1);
+  if (value.empty())
+    return false;
+  if (value.back() == '\n')
+    value.pop_back();
+  *base = value.empty() ? QStringLiteral("0") : QString::fromStdString(value);
+  return true;
 }
+}  // namespace
+
+// Draws the line numbers to the left of the text.
+class AsmEditor::Gutter final : public QWidget
+{
+public:
+  explicit Gutter(AsmEditor* owner) : QWidget(owner), m_owner(owner) {}
+  QSize sizeHint() const override { return {m_owner->LineNumberAreaWidth(), 0}; }
+
+protected:
+  void paintEvent(QPaintEvent* event) override { m_owner->LineNumberAreaPaintEvent(event); }
+
+private:
+  AsmEditor* m_owner;
+};
 
 AsmEditor::AsmEditor(QString path, int editor_num, bool dark_scheme, QWidget* parent)
-    : QPlainTextEdit(parent), m_path(std::move(path)), m_base_address(QStringLiteral("0")),
-      m_editor_num(editor_num), m_dirty(false), m_dark_scheme(dark_scheme)
+    : QPlainTextEdit(parent), m_file_path(std::move(path)), m_base(QStringLiteral("0")),
+      m_number(editor_num), m_dark(dark_scheme)
 {
-  if (!m_path.isEmpty())
-  {
-    m_filename =
-        QString::fromStdString(std::filesystem::path(m_path.toStdString()).filename().string());
-  }
+  if (!m_file_path.isEmpty())
+    m_file_name = LeafName(m_file_path);
 
-  m_line_number_area = new LineNumberArea(this);
-  m_highlighter = new GekkoSyntaxHighlight(document(), currentCharFormat(), dark_scheme);
-  m_last_block = textCursor().block();
+  m_gutter = new Gutter(this);
+  m_syntax = new GekkoSyntaxHighlight(document(), currentCharFormat(), dark_scheme);
+  m_cursor_block = textCursor().block();
 
-  QFont mono_font(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
-  mono_font.setPointSize(12);
-  setFont(mono_font);
-  m_line_number_area->setFont(mono_font);
+  QFont fixed(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
+  fixed.setPointSize(12);
+  setFont(fixed);
+  m_gutter->setFont(fixed);
 
-  UpdateLineNumberAreaWidth(0);
-  HighlightCurrentLine();
+  FitGutter();
+  RefreshCursorLine();
   setMouseTracking(true);
 
-  connect(this, &AsmEditor::blockCountChanged, this, &AsmEditor::UpdateLineNumberAreaWidth);
-  connect(this, &AsmEditor::updateRequest, this, &AsmEditor::UpdateLineNumberArea);
-  connect(this, &AsmEditor::cursorPositionChanged, this, &AsmEditor::HighlightCurrentLine);
-  connect(this, &AsmEditor::textChanged, this, [this] {
-    m_dirty = true;
-    emit DirtyChanged();
-  });
+  connect(this, &AsmEditor::blockCountChanged, this, [this](int) { FitGutter(); });
+  connect(this, &AsmEditor::updateRequest, this, &AsmEditor::ScrollGutter);
+  connect(this, &AsmEditor::cursorPositionChanged, this, &AsmEditor::RefreshCursorLine);
+  connect(this, &AsmEditor::textChanged, this, [this] { MarkModified(true); });
+}
+
+void AsmEditor::MarkModified(bool modified)
+{
+  m_modified = modified;
+  emit DirtyChanged();
+}
+
+int AsmEditor::SpaceWidth() const
+{
+  return fontMetrics().horizontalAdvance(QLatin1Char(' '));
 }
 
 int AsmEditor::LineNumberAreaWidth()
 {
-  int num_digits = 1;
-  for (int max = qMax(1, blockCount()); max >= 10; max /= 10, ++num_digits)
-  {
-  }
-
-  return 3 + CharWidth() * qMax(2, num_digits);
+  // Room for at least two digits, plus a few pixels of padding.
+  int digits = 1;
+  for (int lines = std::max(1, blockCount()); lines >= 10; lines /= 10)
+    ++digits;
+  return 3 + SpaceWidth() * std::max(2, digits);
 }
 
 void AsmEditor::SetBaseAddress(const QString& ba)
 {
-  if (ba != m_base_address)
-  {
-    m_base_address = ba;
-    m_dirty = true;
-    emit DirtyChanged();
-  }
+  if (ba == m_base)
+    return;
+  m_base = ba;
+  MarkModified(true);
 }
 
 bool AsmEditor::LoadFromPath()
 {
-  QFile file(m_path);
-  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-  {
+  QFile source(m_file_path);
+  if (!source.open(QIODevice::ReadOnly | QIODevice::Text))
     return false;
-  }
 
-  const std::string base_addr_line = file.readLine().toStdString();
-  std::string base_address = "";
-  for (size_t i = 0; i < base_addr_line.length(); i++)
-  {
-    if (std::isspace(base_addr_line[i]))
-    {
-      continue;
-    }
-    else if (base_addr_line[i] == '#')
-    {
-      base_address = base_addr_line.substr(i + 1);
-      break;
-    }
-    else
-    {
-      break;
-    }
-  }
-
-  if (base_address.empty())
-  {
-    file.seek(0);
-  }
+  QString header_base;
+  if (ParseBaseHeader(source.readLine().toStdString(), &header_base))
+    m_base = header_base;
   else
-  {
-    StringPopBackIf(&base_address, '\n');
-    if (base_address.empty())
-    {
-      base_address = "0";
-    }
-    m_base_address = QString::fromStdString(base_address);
-  }
+    source.seek(0);
 
-  const bool old_block = blockSignals(true);
-  setPlainText(QString::fromStdString(file.readAll().toStdString()));
-  blockSignals(old_block);
+  // Loading is not an edit: keep the text-changed signal (and the modified flag) quiet.
+  const bool was_blocked = blockSignals(true);
+  setPlainText(QString::fromUtf8(source.readAll()));
+  blockSignals(was_blocked);
   return true;
 }
 
 bool AsmEditor::PathsMatch(const QString& path) const
 {
-  if (m_path.isEmpty() || path.isEmpty())
-  {
+  if (path.isEmpty() || m_file_path.isEmpty())
     return false;
-  }
-  return std::filesystem::path(m_path.toStdString()) == std::filesystem::path(path.toStdString());
+  return std::filesystem::path(path.toStdString()) ==
+         std::filesystem::path(m_file_path.toStdString());
 }
 
 void AsmEditor::Zoom(int amount)
 {
   if (amount > 0)
-  {
     zoomIn(amount);
-  }
   else
-  {
     zoomOut(-amount);
-  }
-  m_line_number_area->setFont(font());
+  m_gutter->setFont(font());
 }
 
 bool AsmEditor::SaveFile(const QString& save_path)
 {
-  QFile file(save_path);
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-  {
+  QFile target(save_path);
+  if (!target.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
     return false;
-  }
 
-  if (m_path != save_path)
+  if (save_path != m_file_path)
   {
-    m_path = save_path;
-    m_filename =
-        QString::fromStdString(std::filesystem::path(m_path.toStdString()).filename().string());
+    m_file_path = save_path;
+    m_file_name = LeafName(m_file_path);
     emit PathChanged();
   }
 
-  if (file.write(QStringLiteral("#%1\n").arg(m_base_address).toUtf8()) == -1)
-  {
+  const QByteArray header = QStringLiteral("#%1\n").arg(m_base).toUtf8();
+  if (target.write(header) == -1 || target.write(toPlainText().toUtf8()) == -1)
     return false;
-  }
 
-  if (file.write(toPlainText().toUtf8()) == -1)
-  {
-    return false;
-  }
-
-  m_dirty = false;
-  emit DirtyChanged();
+  MarkModified(false);
   return true;
 }
 
-void AsmEditor::UpdateLineNumberAreaWidth(int)
+void AsmEditor::FitGutter()
 {
   setViewportMargins(LineNumberAreaWidth(), 0, 0, 0);
 }
 
-void AsmEditor::UpdateLineNumberArea(const QRect& rect, int dy)
+void AsmEditor::ScrollGutter(const QRect& rect, int dy)
 {
-  if (dy != 0)
-  {
-    m_line_number_area->scroll(0, dy);
-  }
+  if (dy == 0)
+    m_gutter->update(0, rect.y(), m_gutter->width(), rect.height());
   else
-  {
-    m_line_number_area->update(0, rect.y(), m_line_number_area->width(), rect.height());
-  }
+    m_gutter->scroll(0, dy);
 
   if (rect.contains(viewport()->rect()))
-  {
-    UpdateLineNumberAreaWidth(0);
-  }
-}
-
-int AsmEditor::CharWidth() const
-{
-  return fontMetrics().horizontalAdvance(QLatin1Char(' '));
+    FitGutter();
 }
 
 void AsmEditor::resizeEvent(QResizeEvent* e)
 {
   QPlainTextEdit::resizeEvent(e);
-
-  const QRect cr = contentsRect();
-  m_line_number_area->setGeometry(QRect(cr.left(), cr.top(), LineNumberAreaWidth(), cr.height()));
+  const QRect inner = contentsRect();
+  m_gutter->setGeometry(QRect(inner.left(), inner.top(), LineNumberAreaWidth(), inner.height()));
 }
 
 void AsmEditor::paintEvent(QPaintEvent* event)
 {
   QPlainTextEdit::paintEvent(event);
 
+  // An error at the end of a line has no characters to underline; draw a short red bar instead.
   QPainter painter(viewport());
-  QTextCursor tc(document());
+  QPen bar(Qt::red);
+  bar.setStyle(Qt::SolidLine);
+  bar.setWidth(1);
+  painter.setPen(bar);
 
-  QPen p = QPen(Qt::red);
-  p.setStyle(Qt::PenStyle::SolidLine);
-  p.setWidth(1);
-  painter.setPen(p);
-  const int width = CharWidth();
-
-  for (QTextBlock blk = firstVisibleBlock(); blk.isVisible() && blk.isValid(); blk = blk.next())
+  const int bar_length = SpaceWidth();
+  QTextCursor probe(document());
+  for (QTextBlock line = firstVisibleBlock(); line.isValid() && line.isVisible();
+       line = line.next())
   {
-    if (blk.userData() == nullptr)
-    {
+    const auto* info = static_cast<const BlockInfo*>(line.userData());
+    if (!info || !info->error_at_eol)
       continue;
-    }
 
-    BlockInfo* info = static_cast<BlockInfo*>(blk.userData());
-    if (info->error_at_eol)
-    {
-      tc.setPosition(blk.position() + blk.length() - 1);
-      tc.clearSelection();
-      const QRect qr = cursorRect(tc);
-      painter.drawLine(qr.x(), qr.y() + qr.height(), qr.x() + width, qr.y() + qr.height());
-    }
+    probe.setPosition(line.position() + line.length() - 1);
+    probe.clearSelection();
+    const QRect at = cursorRect(probe);
+    const int y = at.y() + at.height();
+    painter.drawLine(at.x(), y, at.x() + bar_length, y);
   }
+}
+
+bool AsmEditor::ShowErrorTip(const QPoint& local, const QPoint& global)
+{
+  QTextCursor probe = cursorForPosition(local);
+  const QTextBlock line = probe.block();
+  const auto* info = static_cast<const BlockInfo*>(line.userData());
+  if (!info || !info->error)
+    return false;
+
+  const int start = line.position() + static_cast<int>(info->error->col);
+  const int end = line.position() + static_cast<int>(info->error->col + info->error->len);
+  const int gutter = LineNumberAreaWidth();
+
+  QRect hot;
+  if (info->error_at_eol)
+  {
+    probe.setPosition(end);
+    const QRect left = cursorRect(probe);
+    // The width here is measured from the viewport's left edge, as it always was.
+    hot = QRect(left.x() + gutter, left.y(), left.x() + SpaceWidth(), left.height());
+  }
+  else
+  {
+    probe.setPosition(start);
+    const QRect left = cursorRect(probe);
+    probe.setPosition(end);
+    const QRect right = cursorRect(probe);
+    hot = QRect(left.x() + gutter, left.y(), right.x() - left.x(), left.height());
+  }
+
+  if (!hot.contains(local))
+    return false;
+  QToolTip::showText(global, QString::fromStdString(info->error->message));
+  return true;
 }
 
 bool AsmEditor::event(QEvent* e)
 {
-  if (e->type() == QEvent::ToolTip)
-  {
-    QHelpEvent* he = static_cast<QHelpEvent*>(e);
-    QTextCursor hover_cursor = cursorForPosition(he->pos());
-    QTextBlock hover_block = hover_cursor.block();
+  if (e->type() != QEvent::ToolTip)
+    return QPlainTextEdit::event(e);
 
-    BlockInfo* info = static_cast<BlockInfo*>(hover_block.userData());
-    if (info == nullptr || !info->error)
-    {
-      QToolTip::hideText();
-      return true;
-    }
-
-    QRect check_rect;
-    if (info->error_at_eol)
-    {
-      hover_cursor.setPosition(hover_block.position() +
-                               static_cast<int>(info->error->col + info->error->len));
-      const QRect cursor_left = cursorRect(hover_cursor);
-      const int area_width = CharWidth();
-      check_rect = QRect(cursor_left.x() + LineNumberAreaWidth(), cursor_left.y(),
-                         cursor_left.x() + area_width, cursor_left.height());
-    }
-    else
-    {
-      hover_cursor.setPosition(hover_block.position() + static_cast<int>(info->error->col));
-      const QRect cursor_left = cursorRect(hover_cursor);
-      hover_cursor.setPosition(hover_block.position() +
-                               static_cast<int>(info->error->col + info->error->len));
-      const QRect cursor_right = cursorRect(hover_cursor);
-      check_rect = QRect(cursor_left.x() + LineNumberAreaWidth(), cursor_left.y(),
-                         cursor_right.x() - cursor_left.x(), cursor_left.height());
-    }
-    if (check_rect.contains(he->pos()))
-    {
-      QToolTip::showText(he->globalPos(), QString::fromStdString(info->error->message));
-    }
-    else
-    {
-      QToolTip::hideText();
-    }
-    return true;
-  }
-  return QPlainTextEdit::event(e);
+  const auto* help = static_cast<QHelpEvent*>(e);
+  if (!ShowErrorTip(help->pos(), help->globalPos()))
+    QToolTip::hideText();
+  return true;
 }
 
 void AsmEditor::keyPressEvent(QKeyEvent* event)
 {
-  // HACK: Change shift+enter to enter to keep lines as blocks
-  if (event->modifiers() & Qt::ShiftModifier &&
-      (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return))
-  {
+  // Shift+Enter would insert a soft line break inside the block; treat it as a plain Enter so every
+  // line stays its own block.
+  const bool is_enter = event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
+  if (is_enter && (event->modifiers() & Qt::ShiftModifier))
     event->setModifiers(event->modifiers() & ~Qt::ShiftModifier);
-  }
   QPlainTextEdit::keyPressEvent(event);
 }
 
 void AsmEditor::wheelEvent(QWheelEvent* event)
 {
   QPlainTextEdit::wheelEvent(event);
+  if (!(event->modifiers() & Qt::ControlModifier))
+    return;
 
-  if (event->modifiers() & Qt::ControlModifier)
-  {
-    auto delta = static_cast<int>(std::round((event->angleDelta().y() / 120.0)));
-    if (delta != 0)
-    {
-      emit ZoomRequested(delta);
-    }
-  }
+  const int steps = static_cast<int>(std::round(event->angleDelta().y() / 120.0));
+  if (steps != 0)
+    emit ZoomRequested(steps);
 }
 
-void AsmEditor::HighlightCurrentLine()
+void AsmEditor::RefreshCursorLine()
 {
-  const bool old_state = blockSignals(true);
+  const bool was_blocked = blockSignals(true);
+  const QTextCursor cursor = textCursor();
 
-  if (m_last_block.blockNumber() != textCursor().blockNumber())
+  // Redraw the line the cursor left without its bracket highlight.
+  if (cursor.blockNumber() != m_cursor_block.blockNumber())
   {
-    m_highlighter->SetMode(2);
-    m_highlighter->rehighlightBlock(m_last_block);
-
-    m_last_block = textCursor().block();
+    m_syntax->SetMode(2);
+    m_syntax->rehighlightBlock(m_cursor_block);
+    m_cursor_block = textCursor().block();
   }
 
-  m_highlighter->SetCursorLoc(textCursor().positionInBlock());
-  m_highlighter->SetMode(1);
-  m_highlighter->rehighlightBlock(textCursor().block());
-  m_highlighter->SetMode(0);
+  m_syntax->SetCursorLoc(cursor.positionInBlock());
+  m_syntax->SetMode(1);
+  m_syntax->rehighlightBlock(textCursor().block());
+  m_syntax->SetMode(0);
 
-  blockSignals(old_state);
+  blockSignals(was_blocked);
 }
 
 void AsmEditor::LineNumberAreaPaintEvent(QPaintEvent* event)
 {
-  QPainter painter(m_line_number_area);
-  if (m_dark_scheme)
-  {
-    painter.fillRect(event->rect(), QColor::fromRgb(76, 76, 76));
-  }
-  else
-  {
-    painter.fillRect(event->rect(), QColor::fromRgb(180, 180, 180));
-  }
+  QPainter painter(m_gutter);
+  const QRect dirty = event->rect();
+  painter.fillRect(dirty, m_dark ? QColor::fromRgb(76, 76, 76) : QColor::fromRgb(180, 180, 180));
 
-  QTextBlock block = firstVisibleBlock();
-  int block_num = block.blockNumber();
-  int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
-  int bottom = top + qRound(blockBoundingRect(block).height());
+  const int gutter_width = m_gutter->width();
+  const int text_height = fontMetrics().height();
 
-  while (block.isValid() && top <= event->rect().bottom())
+  QTextBlock line = firstVisibleBlock();
+  int number = line.blockNumber() + 1;
+  int y_top = qRound(blockBoundingGeometry(line).translated(contentOffset()).top());
+  int y_bottom = y_top + qRound(blockBoundingRect(line).height());
+
+  for (; line.isValid() && y_top <= dirty.bottom(); ++number)
   {
-    if (block.isVisible() && bottom >= event->rect().top())
-    {
-      const QString num = QString::number(block_num + 1);
-      painter.drawText(0, top, m_line_number_area->width(), fontMetrics().height(), Qt::AlignRight,
-                       num);
-    }
+    if (line.isVisible() && y_bottom >= dirty.top())
+      painter.drawText(0, y_top, gutter_width, text_height, Qt::AlignRight,
+                       QString::number(number));
 
-    block = block.next();
-    top = bottom;
-    bottom = top + qRound(blockBoundingRect(block).height());
-    ++block_num;
+    line = line.next();
+    y_top = y_bottom;
+    y_bottom = y_top + qRound(blockBoundingRect(line).height());
   }
 }

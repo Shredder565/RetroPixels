@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,9 +6,13 @@
 #include <QTextCharFormat>
 
 #include <optional>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "Common/Assembler/AssemblerShared.h"
 
+// Roles a span of assembly text can be drawn in.
 enum class HighlightFormat
 {
   Directive,
@@ -29,6 +32,8 @@ enum class HighlightFormat
   Error,
 };
 
+// Per-line results of the last full parse, kept on the text block so that cheap re-highlights
+// (bracket matching) can reuse them.
 struct BlockInfo : public QTextBlockUserData
 {
   std::vector<std::tuple<int, int, HighlightFormat>> block_format;
@@ -46,15 +51,16 @@ public:
                                 bool dark_scheme);
 
   void HighlightSubstr(int start, int len, HighlightFormat format);
-  void SetMode(int mode) { m_mode = mode; }
-  void SetCursorLoc(int loc) { m_cursor_loc = loc; }
+  // 0: parse the line again; 1: only redraw, adding the bracket pair at the cursor.
+  void SetMode(int mode) { m_pass = mode; }
+  void SetCursorLoc(int loc) { m_cursor_column = loc; }
 
 protected:
   void highlightBlock(const QString& line) override;
 
 private:
-  int m_mode = 0;
-  int m_cursor_loc = 0;
-  QTextCharFormat m_base_format;
-  int m_theme_idx = 0;
+  int m_pass = 0;
+  int m_cursor_column = 0;
+  QTextCharFormat m_plain;
+  bool m_dark = false;
 };

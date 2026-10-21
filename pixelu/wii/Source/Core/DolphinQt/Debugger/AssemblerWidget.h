@@ -1,9 +1,10 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QDockWidget>
+
+#include <vector>
 
 #include "Common/Assembler/GekkoAssembler.h"
 #include "Core/Core.h"
@@ -23,12 +24,15 @@ namespace Core
 class System;
 }  // namespace Core
 
+// Dock with tabs of assembly source, an output pane that shows the assembled bytes as raw hex,
+// Action Replay or Gecko codes, and an Inject action that patches the result into memory.
 class AssemblerWidget : public QDockWidget
 {
   Q_OBJECT
 public:
   explicit AssemblerWidget(QWidget* parent);
 
+  // Asks about unsaved tabs before the application quits. False cancels the quit.
   bool ApplicationCloseRequest();
 
   ~AssemblerWidget() override;
@@ -37,64 +41,51 @@ protected:
   void closeEvent(QCloseEvent*) override;
 
 private:
-  enum class AsmKind
-  {
-    Raw,
-    ActionReplay,
-    Gecko,
-    GeckoExec,
-    GeckoTrampoline
-  };
-  static constexpr int OUTPUT_BOX_WIDTH = 18;
-  void CreateWidgets();
-  void ConnectWidgets();
+  using Blocks = std::vector<Common::GekkoAssembler::CodeBlock>;
 
-  void OnEditChanged();
+  void BuildLayout();
+  void AddShortcuts();
+  void FitOutputWidth();
+  void RefreshIcons();
 
-  void OnAssemble(std::vector<Common::GekkoAssembler::CodeBlock>* asm_out);
-  void OnCopyOutput();
-  void OnOpen();
-  void OnNew();
-  void OnInject();
-  void OnSave();
-  void OnZoomIn();
-  void OnZoomOut();
-  void OnZoomReset();
-  void OnBaseAddressChanged();
-  void OnTabChange(int index);
-  QString TabTextForEditor(AsmEditor* editor, bool with_dirty);
-  AsmEditor* GetEditor(int idx);
-  void NewEditor(const QString& path = QStringLiteral());
+  AsmEditor* EditorAt(int index) const;
+  AsmEditor* CurrentEditor() const;
+  int IndexOf(const AsmEditor* editor) const;
+
+  bool AssembleCurrent(Blocks* blocks);
+  void InjectCurrent();
+  void OpenFiles();
+  void SaveCurrent();
   bool SaveEditor(AsmEditor* editor);
-  void OnEmulationStateChanged(Core::State state);
-  void OnTabClose(int index);
-  void CloseTab(int index, AsmEditor* editor);
-  int AllocateTabNum();
-  void FreeTabNum(int num);
-  void UpdateTabText(AsmEditor* editor);
-  void DisambiguateTabTitles(AsmEditor* editor);
-  void UpdateIcons();
-  void ZoomAllEditors(int amount);
+  void AddEditor(const QString& path = QString());
+  void RequestCloseTab(int index);
+  void RemoveTab(int index, AsmEditor* editor);
 
-  static constexpr int INVALID_EDITOR_NUM = -1;
+  QString TitleFor(const AsmEditor* editor, bool mark_unsaved) const;
+  void RetitleTab(AsmEditor* editor);
+  void ResolveDuplicateTitles(AsmEditor* added);
+
+  int TakeUntitledNumber();
+  void ReturnUntitledNumber(int number);
+  void ZoomEverything(int steps);
 
   Core::System& m_system;
 
-  QTabWidget* m_asm_tabs;
-  QPlainTextEdit* m_output_box;
-  QComboBox* m_output_type;
-  QPushButton* m_copy_output_button;
-  QTextEdit* m_error_box;
-  QLineEdit* m_address_line;
-  QToolBar* m_toolbar;
-  QAction* m_open;
-  QAction* m_new;
-  QAction* m_assemble;
-  QAction* m_inject;
-  QAction* m_save;
+  QTabWidget* m_tabs = nullptr;
+  QPlainTextEdit* m_output = nullptr;
+  QComboBox* m_format_choice = nullptr;
+  QPushButton* m_copy_button = nullptr;
+  QTextEdit* m_messages = nullptr;
+  QLineEdit* m_base_field = nullptr;
+  QToolBar* m_bar = nullptr;
+  QAction* m_open_action = nullptr;
+  QAction* m_new_action = nullptr;
+  QAction* m_assemble_action = nullptr;
+  QAction* m_inject_action = nullptr;
+  QAction* m_save_action = nullptr;
 
-  std::list<int> m_free_editor_nums;
-  int m_unnamed_editor_count;
-  int m_net_zoom_delta;
-  bool m_dark_scheme;
+  std::vector<int> m_returned_numbers;
+  int m_next_untitled = 0;
+  int m_zoom_total = 0;
+  bool m_dark = false;
 };

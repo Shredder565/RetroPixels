@@ -1,263 +1,240 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/GekkoSyntaxHighlight.h"
 
-#include "Common/Assembler/GekkoParser.h"
-
+#include <algorithm>
 #include <utility>
 
-#include <QLabel>
-#include <QPalette>
+#include <QColor>
+
+#include "Common/Assembler/GekkoParser.h"
 
 namespace
 {
-using namespace Common::GekkoAssembler;
-using namespace Common::GekkoAssembler::detail;
+namespace GA = Common::GekkoAssembler;
+namespace GAD = Common::GekkoAssembler::detail;
 
-class HighlightParsePlugin : public ParsePlugin
+using Span = std::tuple<int, int, HighlightFormat>;
+
+// Listens to the parser and records which columns of the line play which role.
+class SpanCollector final : public GAD::ParsePlugin
 {
 public:
-  ~HighlightParsePlugin() override = default;
+  std::vector<Span> TakeSpans() { return std::move(m_spans); }
+  std::vector<std::pair<int, int>> TakeBracketPairs() { return std::move(m_pairs); }
 
-  std::vector<std::pair<int, int>>&& MoveParens() { return std::move(m_matched_parens); }
-  std::vector<std::tuple<int, int, HighlightFormat>>&& MoveFormatting()
+  void OnDirectivePre(GA::GekkoDirective) override { MarkNext(HighlightFormat::Directive); }
+  void OnInstructionPre(const GAD::ParseInfo&, bool) override
   {
-    return std::move(m_formatting);
+    MarkNext(HighlightFormat::Mnemonic);
   }
 
-  void OnDirectivePre(GekkoDirective) override { HighlightCurToken(HighlightFormat::Directive); }
-
-  void OnInstructionPre(const ParseInfo&, bool) override
+  void OnTerminal(GAD::Terminal kind, const GAD::AssemblerToken&) override
   {
-    HighlightCurToken(HighlightFormat::Mnemonic);
-  }
-
-  void OnTerminal(Terminal type, const AssemblerToken& val) override
-  {
-    switch (type)
-    {
-    case Terminal::NumLabFwd:
-    case Terminal::NumLabBwd:
-    case Terminal::Id:
-      HighlightCurToken(HighlightFormat::Symbol);
-      break;
-
-    case Terminal::Hex:
-    case Terminal::Dec:
-    case Terminal::Oct:
-    case Terminal::Bin:
-    case Terminal::Flt:
-      HighlightCurToken(HighlightFormat::Immediate);
-      break;
-
-    case Terminal::GPR:
-      HighlightCurToken(HighlightFormat::GPR);
-      break;
-
-    case Terminal::FPR:
-      HighlightCurToken(HighlightFormat::FPR);
-      break;
-
-    case Terminal::SPR:
-      HighlightCurToken(HighlightFormat::SPR);
-      break;
-
-    case Terminal::CRField:
-      HighlightCurToken(HighlightFormat::CRField);
-      break;
-
-    case Terminal::Lt:
-    case Terminal::Gt:
-    case Terminal::Eq:
-    case Terminal::So:
-      HighlightCurToken(HighlightFormat::CRFlag);
-      break;
-
-    case Terminal::Str:
-      HighlightCurToken(HighlightFormat::Str);
-      break;
-
-    default:
-      break;
-    }
+    if (const std::optional<HighlightFormat> role = RoleOf(kind))
+      MarkNext(*role);
   }
 
   void OnHiaddr(std::string_view) override
   {
-    HighlightCurToken(HighlightFormat::Symbol);
-    auto&& [ha_pos, ha_tok] = m_owner->lexer.LookaheadTagRef(2);
-    m_formatting.emplace_back(static_cast<int>(ha_pos.col),
-                              static_cast<int>(ha_tok.token_val.length()), HighlightFormat::HaLa);
+    MarkNext(HighlightFormat::Symbol);
+    // The "@ha"/"@l" suffix sits two tokens further on.
+    const auto& [where, suffix] = m_owner->lexer.LookaheadTagRef(2);
+    m_spans.emplace_back(static_cast<int>(where.col), static_cast<int>(suffix.token_val.length()),
+                         HighlightFormat::HaLa);
   }
+  void OnLoaddr(std::string_view name) override { OnHiaddr(name); }
 
-  void OnLoaddr(std::string_view id) override { OnHiaddr(id); }
-
-  void OnOpenParen(ParenType type) override
+  void OnOpenParen(GAD::ParenType) override { m_open.push_back(Column()); }
+  void OnCloseParen(GAD::ParenType) override
   {
-    m_paren_stack.push_back(static_cast<int>(m_owner->lexer.ColNumber()));
-  }
-
-  void OnCloseParen(ParenType type) override
-  {
-    if (m_paren_stack.empty())
-    {
+    if (m_open.empty())
       return;
-    }
-
-    m_matched_parens.emplace_back(m_paren_stack.back(),
-                                  static_cast<int>(m_owner->lexer.ColNumber()));
-    m_paren_stack.pop_back();
+    m_pairs.emplace_back(m_open.back(), Column());
+    m_open.pop_back();
   }
 
   void OnError() override
   {
-    m_formatting.emplace_back(static_cast<int>(m_owner->error->col),
-                              static_cast<int>(m_owner->error->len), HighlightFormat::Error);
+    const GA::AssemblerError& error = *m_owner->error;
+    m_spans.emplace_back(static_cast<int>(error.col), static_cast<int>(error.len),
+                         HighlightFormat::Error);
   }
 
-  void OnLabelDecl(std::string_view name) override
-  {
-    const int len = static_cast<int>(m_owner->lexer.LookaheadRef().token_val.length());
-    const int off = static_cast<int>(m_owner->lexer.ColNumber());
-    m_formatting.emplace_back(len, off, HighlightFormat::Symbol);
-  }
-
-  void OnNumericLabelDecl(std::string_view name, u32 parse_num) override
-  {
-    const int len = static_cast<int>(m_owner->lexer.LookaheadRef().token_val.length());
-    const int off = static_cast<int>(m_owner->lexer.ColNumber());
-    m_formatting.emplace_back(len, off, HighlightFormat::Symbol);
-  }
-
-  void OnVarDecl(std::string_view name) override { OnLabelDecl(name); }
+  // Declarations record (length, column) rather than (column, length); kept as it always was.
+  void OnLabelDecl(std::string_view) override { MarkNextSwapped(); }
+  void OnNumericLabelDecl(std::string_view, u32) override { MarkNextSwapped(); }
+  void OnVarDecl(std::string_view) override { MarkNextSwapped(); }
 
 private:
-  std::vector<int> m_paren_stack;
-  std::vector<std::pair<int, int>> m_matched_parens;
-  std::vector<std::tuple<int, int, HighlightFormat>> m_formatting;
-
-  void HighlightCurToken(HighlightFormat format)
+  static std::optional<HighlightFormat> RoleOf(GAD::Terminal kind)
   {
-    const int len = static_cast<int>(m_owner->lexer.LookaheadRef().token_val.length());
-    const int off = static_cast<int>(m_owner->lexer.ColNumber());
-    m_formatting.emplace_back(off, len, format);
+    using T = GAD::Terminal;
+    switch (kind)
+    {
+    case T::Id:
+    case T::NumLabFwd:
+    case T::NumLabBwd:
+      return HighlightFormat::Symbol;
+    case T::Hex:
+    case T::Dec:
+    case T::Oct:
+    case T::Bin:
+    case T::Flt:
+      return HighlightFormat::Immediate;
+    case T::GPR:
+      return HighlightFormat::GPR;
+    case T::FPR:
+      return HighlightFormat::FPR;
+    case T::SPR:
+      return HighlightFormat::SPR;
+    case T::CRField:
+      return HighlightFormat::CRField;
+    case T::Lt:
+    case T::Gt:
+    case T::Eq:
+    case T::So:
+      return HighlightFormat::CRFlag;
+    case T::Str:
+      return HighlightFormat::Str;
+    default:
+      return std::nullopt;
+    }
   }
+
+  int Column() const { return static_cast<int>(m_owner->lexer.ColNumber()); }
+  int NextLength() const
+  {
+    return static_cast<int>(m_owner->lexer.LookaheadRef().token_val.length());
+  }
+
+  void MarkNext(HighlightFormat role) { m_spans.emplace_back(Column(), NextLength(), role); }
+  void MarkNextSwapped()
+  {
+    m_spans.emplace_back(NextLength(), Column(), HighlightFormat::Symbol);
+  }
+
+  std::vector<int> m_open;
+  std::vector<std::pair<int, int>> m_pairs;
+  std::vector<Span> m_spans;
 };
+
+// Gruvbox colours; index 0 for light themes, 1 for dark ones.
+struct ThemeColour
+{
+  QRgb light;
+  QRgb dark;
+};
+
+constexpr ThemeColour DIRECTIVE_TINT{0x9d0006, 0xfb4934};
+constexpr ThemeColour MNEMONIC_TINT{0x79740e, 0xb8bb26};
+constexpr ThemeColour NUMBER_TINT{0xb57614, 0xfabd2f};
+constexpr ThemeColour REGISTER_TINT{0x076678, 0x83a598};
+constexpr ThemeColour HALA_TINT{0xaf3a03, 0xfe8019};
+constexpr ThemeColour BRACKET_FILL{0xd5c4a1, 0x504945};
+constexpr ThemeColour STRING_TINT{0x98971a, 0x98971a};
+constexpr ThemeColour COMMENT_TINT{0x689d6a, 0x689d6a};
 }  // namespace
+
+GekkoSyntaxHighlight::GekkoSyntaxHighlight(QTextDocument* document, QTextCharFormat base_format,
+                                           bool dark_scheme)
+    : QSyntaxHighlighter(document), m_plain(std::move(base_format)), m_dark(dark_scheme)
+{
+}
 
 void GekkoSyntaxHighlight::highlightBlock(const QString& text)
 {
-  BlockInfo* info = static_cast<BlockInfo*>(currentBlockUserData());
-  if (info == nullptr)
+  auto* info = static_cast<BlockInfo*>(currentBlockUserData());
+  if (!info)
   {
     info = new BlockInfo;
     setCurrentBlockUserData(info);
   }
 
-  qsizetype comment_idx = text.indexOf(QLatin1Char('#'));
-  if (comment_idx != -1)
-  {
-    HighlightSubstr(comment_idx, text.length() - comment_idx, HighlightFormat::Comment);
-  }
+  const qsizetype hash = text.indexOf(QLatin1Char('#'));
+  if (hash >= 0)
+    HighlightSubstr(static_cast<int>(hash), static_cast<int>(text.length() - hash),
+                    HighlightFormat::Comment);
 
-  if (m_mode == 0)
+  switch (m_pass)
   {
-    HighlightParsePlugin plugin;
-    ParseWithPlugin(&plugin, text.toStdString());
-
-    info->block_format = plugin.MoveFormatting();
-    info->parens = plugin.MoveParens();
-    info->error = std::move(plugin.Error());
-    info->error_at_eol = info->error && info->error->len == 0;
+  case 0:
+  {
+    SpanCollector collector;
+    GAD::ParseWithPlugin(&collector, text.toStdString());
+    info->block_format = collector.TakeSpans();
+    info->parens = collector.TakeBracketPairs();
+    info->error = std::move(collector.Error());
+    info->error_at_eol = info->error.has_value() && info->error->len == 0;
+    break;
   }
-  else if (m_mode == 1)
+  case 1:
   {
-    auto paren_it = std::ranges::find_if(info->parens, [this](const std::pair<int, int>& p) {
-      return p.first == m_cursor_loc || p.second == m_cursor_loc;
+    const auto pair = std::ranges::find_if(info->parens, [this](const std::pair<int, int>& p) {
+      return p.first == m_cursor_column || p.second == m_cursor_column;
     });
-    if (paren_it != info->parens.end())
+    if (pair != info->parens.end())
     {
-      HighlightSubstr(paren_it->first, 1, HighlightFormat::Paren);
-      HighlightSubstr(paren_it->second, 1, HighlightFormat::Paren);
+      HighlightSubstr(pair->first, 1, HighlightFormat::Paren);
+      HighlightSubstr(pair->second, 1, HighlightFormat::Paren);
     }
+    break;
+  }
+  default:
+    break;
   }
 
-  for (auto&& [off, len, format] : info->block_format)
-  {
-    HighlightSubstr(off, len, format);
-  }
-}
-
-GekkoSyntaxHighlight::GekkoSyntaxHighlight(QTextDocument* document, QTextCharFormat base_format,
-                                           bool dark_scheme)
-    : QSyntaxHighlighter(document), m_base_format(std::move(base_format))
-{
-  QPalette base_scheme;
-  m_theme_idx = dark_scheme ? 1 : 0;
+  for (const auto& [column, length, role] : info->block_format)
+    HighlightSubstr(column, length, role);
 }
 
 void GekkoSyntaxHighlight::HighlightSubstr(int start, int len, HighlightFormat format)
 {
-  QTextCharFormat hl_format = m_base_format;
-  const QColor DIRECTIVE_COLOR[2] = {QColor(0x9d, 0x00, 0x06),
-                                     QColor(0xfb, 0x49, 0x34)};  // Gruvbox darkred
-  const QColor MNEMONIC_COLOR[2] = {QColor(0x79, 0x74, 0x0e),
-                                    QColor(0xb8, 0xbb, 0x26)};  // Gruvbox darkgreen
-  const QColor IMM_COLOR[2] = {QColor(0xb5, 0x76, 0x14),
-                               QColor(0xfa, 0xbd, 0x2f)};  // Gruvbox darkyellow
-  const QColor BUILTIN_COLOR[2] = {QColor(0x07, 0x66, 0x78),
-                                   QColor(0x83, 0xa5, 0x98)};  // Gruvbox darkblue
-  const QColor HA_LA_COLOR[2] = {QColor(0xaf, 0x3a, 0x03),
-                                 QColor(0xfe, 0x80, 0x19)};  // Gruvbox darkorange
-  const QColor HOVER_BG_COLOR[2] = {QColor(0xd5, 0xc4, 0xa1),
-                                    QColor(0x50, 0x49, 0x45)};  // Gruvbox bg2
-  const QColor STRING_COLOR[2] = {QColor(0x98, 0x97, 0x1a),
-                                  QColor(0x98, 0x97, 0x1a)};  // Gruvbox green
-  const QColor COMMENT_COLOR[2] = {QColor(0x68, 0x9d, 0x6a),
-                                   QColor(0x68, 0x9d, 0x6a)};  // Gruvbox aqua
+  const auto pick = [this](const ThemeColour& c) { return QColor(m_dark ? c.dark : c.light); };
 
+  QTextCharFormat look = m_plain;
   switch (format)
   {
   case HighlightFormat::Directive:
-    hl_format.setForeground(DIRECTIVE_COLOR[m_theme_idx]);
+    look.setForeground(pick(DIRECTIVE_TINT));
     break;
   case HighlightFormat::Mnemonic:
-    hl_format.setForeground(MNEMONIC_COLOR[m_theme_idx]);
-    break;
-  case HighlightFormat::Symbol:
+    look.setForeground(pick(MNEMONIC_TINT));
     break;
   case HighlightFormat::Immediate:
-    hl_format.setForeground(IMM_COLOR[m_theme_idx]);
+    look.setForeground(pick(NUMBER_TINT));
     break;
   case HighlightFormat::GPR:
   case HighlightFormat::FPR:
   case HighlightFormat::SPR:
   case HighlightFormat::CRField:
   case HighlightFormat::CRFlag:
-    hl_format.setForeground(BUILTIN_COLOR[m_theme_idx]);
+    look.setForeground(pick(REGISTER_TINT));
     break;
   case HighlightFormat::Str:
-    hl_format.setForeground(STRING_COLOR[m_theme_idx]);
+    look.setForeground(pick(STRING_TINT));
     break;
   case HighlightFormat::HaLa:
-    hl_format.setForeground(HA_LA_COLOR[m_theme_idx]);
+    look.setForeground(pick(HALA_TINT));
     break;
   case HighlightFormat::Paren:
-    hl_format.setBackground(HOVER_BG_COLOR[m_theme_idx]);
-    break;
-  case HighlightFormat::Default:
-    hl_format.clearForeground();
-    hl_format.clearBackground();
+    look.setBackground(pick(BRACKET_FILL));
     break;
   case HighlightFormat::Comment:
-    hl_format.setForeground(COMMENT_COLOR[m_theme_idx]);
+    look.setForeground(pick(COMMENT_TINT));
     break;
   case HighlightFormat::Error:
-    hl_format.setUnderlineColor(Qt::red);
-    hl_format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+    look.setUnderlineColor(Qt::red);
+    look.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+    break;
+  case HighlightFormat::Default:
+    look.clearForeground();
+    look.clearBackground();
+    break;
+  case HighlightFormat::Symbol:
+    // Symbols keep the plain look.
     break;
   }
 
-  setFormat(start, len, hl_format);
+  setFormat(start, len, look);
 }
