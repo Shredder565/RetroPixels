@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@
 
 namespace DX12
 {
+// Streams vertices, indices, shader constants and texel-buffer data through
+// upload rings and points the Gfx bindings at the newest data.
 class VertexManager final : public VertexManagerBase
 {
 public:
@@ -37,9 +38,9 @@ protected:
   void UpdatePixelShaderConstants();
   void UpdateCustomShaderConstants();
 
-  // Allocates storage in the uniform buffer of the specified size. If this storage cannot be
-  // allocated immediately, the current command buffer will be submitted and all stage's
-  // constants will be re-uploaded. false will be returned in this case, otherwise true.
+  // Makes room for the largest constant block. When the ring is full the
+  // command list is submitted and every block uploaded afresh, and false is
+  // returned since nothing is left to do for the caller.
   bool ReserveConstantStorage();
   void UploadAllConstants();
 

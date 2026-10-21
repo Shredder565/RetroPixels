@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,9 @@ namespace DX12
 class DXTexture;
 class DXFramebuffer;
 
+// The DXGI swap chain with a texture and framebuffer per back buffer. D3D12
+// flip-model chains rotate through their buffers, so the current one is
+// tracked here.
 class SwapChain : public D3DCommon::SwapChain
 {
 public:

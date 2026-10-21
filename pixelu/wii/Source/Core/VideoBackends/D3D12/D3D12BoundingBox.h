@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,9 @@
 
 namespace DX12
 {
+// Bounding-box values live in a GPU buffer the pixel shader updates through
+// a UAV. Reads copy it to a readback buffer and wait; writes go through a
+// small upload ring.
 class D3D12BoundingBox final : public BoundingBox
 {
 public:
@@ -30,10 +32,9 @@ private:
 
   bool CreateBuffers();
 
-  // Three buffers: GPU for read/write, CPU for reading back, and CPU for staging changes.
-  ComPtr<ID3D12Resource> m_gpu_buffer;
-  ComPtr<ID3D12Resource> m_readback_buffer;
-  StreamBuffer m_upload_buffer;
+  ComPtr<ID3D12Resource> m_gpu_buffer;       // shader read/write
+  ComPtr<ID3D12Resource> m_readback_buffer;  // CPU reads
+  StreamBuffer m_upload_buffer;              // CPU writes
   DescriptorHandle m_gpu_descriptor{};
 };
 

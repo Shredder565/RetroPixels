@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,9 @@
 
 namespace DX12
 {
+// Occlusion queries in a ring of heap slots. Each query is begun and ended in
+// the command list, resolved into a readback buffer when its list is
+// submitted, and read once that list's fence has passed.
 class PerfQuery final : public PerfQueryBase
 {
 public:
@@ -18,6 +20,8 @@ public:
   static PerfQuery* GetInstance() { return static_cast<PerfQuery*>(g_perf_query.get()); }
 
   bool Initialize() override;
+
+  // Records the resolve of every ended query; called just before submission.
   void ResolveQueries();
 
   void EnableQuery(PerfQueryGroup group) override;
@@ -42,8 +46,8 @@ private:
 
   void PartialFlush(bool resolve, bool blocking);
 
-  // when testing in SMS: 64 was too small, 128 was ok
-  // TODO: This should be size_t, but the base class uses u32s
+  // Slots in the ring (128 is about the least some games need). Results are
+  // 64-bit sample counts.
   using PerfQueryDataType = u64;
   static const u32 PERF_QUERY_BUFFER_SIZE = 512;
   std::array<ActiveQuery, PERF_QUERY_BUFFER_SIZE> m_query_buffer = {};

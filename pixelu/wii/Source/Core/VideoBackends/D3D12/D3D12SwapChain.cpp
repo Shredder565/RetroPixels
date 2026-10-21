@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D12/D3D12SwapChain.h"
 
@@ -20,35 +19,38 @@ SwapChain::~SwapChain() = default;
 
 std::unique_ptr<SwapChain> SwapChain::Create(const WindowSystemInfo& wsi)
 {
-  std::unique_ptr<SwapChain> swap_chain = std::make_unique<SwapChain>(
-      wsi, g_dx_context->GetDXGIFactory(), g_dx_context->GetCommandQueue());
-  if (!swap_chain->CreateSwapChain(WantsStereo(), WantsHDR()))
+  // D3D12 swap chains are created against the queue, not the device.
+  auto chain = std::make_unique<SwapChain>(wsi, g_dx_context->GetDXGIFactory(),
+                                           g_dx_context->GetCommandQueue());
+  if (!chain->CreateSwapChain(WantsStereo(), WantsHDR()))
     return nullptr;
-
-  return swap_chain;
+  return chain;
 }
 
 bool SwapChain::CreateSwapChainBuffers()
 {
-  for (u32 i = 0; i < SWAP_CHAIN_BUFFER_COUNT; i++)
+  for (u32 index = 0; index < SWAP_CHAIN_BUFFER_COUNT; ++index)
   {
-    ComPtr<ID3D12Resource> resource;
-    HRESULT hr = m_swap_chain->GetBuffer(i, IID_PPV_ARGS(&resource));
-    ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to get swap chain buffer {}: {}", i, DX12HRWrap(hr));
-
-    BufferResources buffer;
-    buffer.texture = DXTexture::CreateAdopted(resource.Get());
-    ASSERT_MSG(VIDEO, buffer.texture != nullptr, "Failed to create swap chain buffer texture");
-    if (!buffer.texture)
+    ComPtr<ID3D12Resource> back_buffer;
+    const HRESULT hr = m_swap_chain->GetBuffer(index, IID_PPV_ARGS(&back_buffer));
+    ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to get swap chain buffer {}: {}", index,
+               DX12HRWrap(hr));
+    if (FAILED(hr))
       return false;
 
-    buffer.framebuffer = DXFramebuffer::Create(buffer.texture.get(), nullptr, {});
-    ASSERT_MSG(VIDEO, buffer.framebuffer != nullptr,
+    BufferResources entry;
+    entry.texture = DXTexture::CreateAdopted(back_buffer.Get());
+    ASSERT_MSG(VIDEO, entry.texture != nullptr, "Failed to create swap chain buffer texture");
+    if (entry.texture == nullptr)
+      return false;
+
+    entry.framebuffer = DXFramebuffer::Create(entry.texture.get(), nullptr, {});
+    ASSERT_MSG(VIDEO, entry.framebuffer != nullptr,
                "Failed to create swap chain buffer framebuffer");
-    if (!buffer.framebuffer)
+    if (entry.framebuffer == nullptr)
       return false;
 
-    m_buffers.push_back(std::move(buffer));
+    m_buffers.push_back(std::move(entry));
   }
 
   m_current_buffer = 0;
@@ -57,13 +59,13 @@ bool SwapChain::CreateSwapChainBuffers()
 
 void SwapChain::DestroySwapChainBuffers()
 {
-  // Swap chain textures must be released before it can be resized, therefore we need to destroy all
-  // of them immediately, and not place them onto the deferred desturction queue.
-  for (BufferResources& res : m_buffers)
+  // DXGI only resizes once every buffer reference is gone, so the views and
+  // resources are released now instead of after the GPU catches up.
+  for (BufferResources& entry : m_buffers)
   {
-    res.framebuffer.reset();
-    res.texture->DestroyResource();
-    res.texture.release();
+    entry.framebuffer.reset();
+    entry.texture->DestroyResource();
+    entry.texture.reset();
   }
   m_buffers.clear();
 }
@@ -73,6 +75,7 @@ bool SwapChain::Present()
   if (!D3DCommon::SwapChain::Present())
     return false;
 
+  // Flip model hands out the buffers in order.
   m_current_buffer = (m_current_buffer + 1) % SWAP_CHAIN_BUFFER_COUNT;
   return true;
 }

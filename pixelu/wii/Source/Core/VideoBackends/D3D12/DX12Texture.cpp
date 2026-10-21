@@ -496,6 +496,10 @@ void DXTexture::DestroyResource()
   if (m_srv_descriptor)
     views.Free(m_srv_descriptor);
   m_resource.Reset();
+
+  // Nothing is left for the destructor to defer.
+  m_uav_descriptor = {};
+  m_srv_descriptor = {};
 }
 
 // ---------------------------------------------------------------------------
