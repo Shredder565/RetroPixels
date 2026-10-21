@@ -1,11 +1,11 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/JITWidget.h"
 
 #include <algorithm>
+#include <array>
 #include <optional>
-#include <ranges>
+#include <sstream>
 #include <utility>
 
 #include <QHBoxLayout>
@@ -22,8 +22,8 @@
 
 #include <fmt/ostream.h>
 
-#include "Common/CommonFuncs.h"
 #include "Common/GekkoDisassembler.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/PowerPC/JitCommon/JitCache.h"
 #include "Core/PowerPC/JitInterface.h"
@@ -39,319 +39,488 @@
 #include "DolphinQt/Settings.h"
 #include "UICommon/UICommon.h"
 
+// Filters the block table by effective address range, a covered physical address and a symbol name
+// substring.
 class JitBlockProxyModel final : public QSortFilterProxyModel
 {
-  friend JITWidget;
-
 public:
-  explicit JitBlockProxyModel(QObject* parent = nullptr);
-  ~JitBlockProxyModel() override;
+  enum class AddressFilter
+  {
+    MinEffective,
+    MaxEffective,
+    CoversPhysical,
+  };
 
-  JitBlockProxyModel(const JitBlockProxyModel&) = delete;
-  JitBlockProxyModel(JitBlockProxyModel&&) = delete;
-  JitBlockProxyModel& operator=(const JitBlockProxyModel&) = delete;
-  JitBlockProxyModel& operator=(JitBlockProxyModel&&) = delete;
+  using QSortFilterProxyModel::QSortFilterProxyModel;
 
-  bool filterAcceptsRow(int source_row, const QModelIndex& source_parent) const override;
-  [[noreturn]] void setSourceModel(QAbstractItemModel* source_model) override;
-  void setSourceModel(JitBlockTableModel* source_model);
-  JitBlockTableModel* sourceModel() const;
+  void SetBlocks(JitBlockTableModel* blocks)
+  {
+    m_blocks = blocks;
+    QSortFilterProxyModel::setSourceModel(blocks);
+  }
 
-  const JitBlock& GetJitBlock(const QModelIndex& index);
+  const JitBlock& GetJitBlock(const QModelIndex& index) const
+  {
+    return m_blocks->GetJitBlock(mapToSource(index));
+  }
 
-  // Always connected slots (external signals)
-  void OnSymbolTextChanged(const QString& text);
-  template <std::optional<u32> JitBlockProxyModel::* member>
-  void OnAddressTextChanged(const QString& text);
+  void SetSymbolText(const QString& text)
+  {
+    m_symbol_part = text;
+    invalidateRowsFilter();
+  }
+
+  // An empty or non-hex text removes that filter.
+  void SetAddressText(AddressFilter which, const QString& text)
+  {
+    bool ok = false;
+    const u32 value = text.toUInt(&ok, 16);
+    std::optional<u32>& slot = which == AddressFilter::MinEffective ? m_min_effective :
+                               which == AddressFilter::MaxEffective ? m_max_effective :
+                                                                      m_covered_physical;
+    slot = ok ? std::optional<u32>(value) : std::nullopt;
+    invalidateRowsFilter();
+  }
+
+protected:
+  bool filterAcceptsRow(int source_row, const QModelIndex& source_parent) const override
+  {
+    if (source_parent.isValid())
+      return false;
+
+    if (!m_symbol_part.isEmpty())
+    {
+      const QVariant& name = *m_blocks->GetSymbolList()[source_row];
+      if (!name.isValid() || !name.toString().contains(m_symbol_part, Qt::CaseInsensitive))
+        return false;
+    }
+
+    const JitBlock& block = m_blocks->GetJitBlockRefs()[source_row];
+    if (m_min_effective && block.effectiveAddress < *m_min_effective)
+      return false;
+    if (m_max_effective && block.effectiveAddress > *m_max_effective)
+      return false;
+    if (m_covered_physical && !block.physical_addresses.contains(*m_covered_physical))
+      return false;
+    return true;
+  }
 
 private:
-  std::optional<u32> m_em_address_min, m_em_address_max, m_pm_address_covered;
-  QString m_symbol_name = {};
+  JitBlockTableModel* m_blocks = nullptr;
+  std::optional<u32> m_min_effective;
+  std::optional<u32> m_max_effective;
+  std::optional<u32> m_covered_physical;
+  QString m_symbol_part;
 };
 
-const JitBlock& JitBlockProxyModel::GetJitBlock(const QModelIndex& index)
+namespace
 {
-  return sourceModel()->GetJitBlock(mapToSource(index));
-}
-
-void JitBlockProxyModel::OnSymbolTextChanged(const QString& text)
+// Guest instructions of a block, one per line, with a symbol description line before each run of
+// consecutive addresses.
+void WriteGuestListing(const JitBlock& block, PPCSymbolDB& symbols, std::ostream& out)
 {
-  m_symbol_name = text;
-  invalidateRowsFilter();
-}
-
-template <std::optional<u32> JitBlockProxyModel::* member>
-void JitBlockProxyModel::OnAddressTextChanged(const QString& text)
-{
-  bool ok = false;
-  if (const u32 value = text.toUInt(&ok, 16); ok)
-    this->*member = value;
-  else
-    this->*member = std::nullopt;
-  invalidateRowsFilter();
-}
-
-bool JitBlockProxyModel::filterAcceptsRow(int source_row, const QModelIndex& source_parent) const
-{
-  if (source_parent.isValid()) [[unlikely]]
-    return false;
-  if (!m_symbol_name.isEmpty())
+  // Instruction addresses are multiples of 4, so 1 never matches the first one.
+  u32 expected = 1;
+  for (const auto& [address, instruction] : block.original_buffer)
   {
-    if (const QVariant& symbol_name_v = *sourceModel()->GetSymbolList()[source_row];
-        !symbol_name_v.isValid() || !static_cast<const QString*>(symbol_name_v.data())
-                                         ->contains(m_symbol_name, Qt::CaseInsensitive))
-    {
-      return false;
-    }
-  }
-  const JitBlock& block = sourceModel()->GetJitBlockRefs()[source_row];
-  if (m_em_address_min.has_value())
-  {
-    if (block.effectiveAddress < m_em_address_min.value())
-      return false;
-  }
-  if (m_em_address_max.has_value())
-  {
-    if (block.effectiveAddress > m_em_address_max.value())
-      return false;
-  }
-  if (m_pm_address_covered.has_value())
-  {
-    if (!block.physical_addresses.contains(m_pm_address_covered.value()))
-      return false;
-  }
-  return true;
-}
-
-// Virtual setSourceModel is forbidden for type-safety reasons.
-void JitBlockProxyModel::setSourceModel(QAbstractItemModel* source_model)
-{
-  Crash();
-}
-
-void JitBlockProxyModel::setSourceModel(JitBlockTableModel* source_model)
-{
-  QSortFilterProxyModel::setSourceModel(source_model);
-}
-
-JitBlockTableModel* JitBlockProxyModel::sourceModel() const
-{
-  return static_cast<JitBlockTableModel*>(QSortFilterProxyModel::sourceModel());
-}
-
-JitBlockProxyModel::JitBlockProxyModel(QObject* parent) : QSortFilterProxyModel(parent)
-{
-}
-
-JitBlockProxyModel::~JitBlockProxyModel() = default;
-
-void JITWidget::UpdateProfilingButton()
-{
-  const QSignalBlocker blocker(m_toggle_profiling_button);
-  const bool enabled = Config::Get(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING);
-  m_toggle_profiling_button->setText(enabled ? tr("Stop Profiling") : tr("Start Profiling"));
-  m_toggle_profiling_button->setChecked(enabled);
-}
-
-void JITWidget::UpdateOtherButtons(Core::State state)
-{
-  const bool jit_exists = m_system.GetJitInterface().GetCore() != nullptr;
-  m_clear_cache_button->setEnabled(jit_exists);
-  m_wipe_profiling_button->setEnabled(jit_exists);
-}
-
-void JITWidget::UpdateDebugFont(const QFont& font)
-{
-  m_table_view->setFont(font);
-  m_ppc_asm_widget->setFont(font);
-  m_host_near_asm_widget->setFont(font);
-  m_host_far_asm_widget->setFont(font);
-}
-
-void JITWidget::ClearDisassembly()
-{
-  m_ppc_asm_widget->clear();
-  m_host_near_asm_widget->clear();
-  m_host_far_asm_widget->clear();
-  m_status_bar->clearMessage();
-}
-
-void JITWidget::ShowFreeMemoryStatus()
-{
-  const std::vector memory_stats = m_system.GetJitInterface().GetMemoryStats();
-  QString message = tr("Free memory:");
-  for (const auto& [name, stats] : memory_stats)
-  {
-    const auto& [free_size, fragmentation_ratio] = stats;
-    // i18n: Of each memory region, %1 is its remaining size displayed in an appropriate scale
-    // of bytes (e.g. MiB), %2 is its untranslated name, and %3 is its fragmentation percentage.
-    message.append(tr(" %1 %2 (%3% fragmented)")
-                       .arg(QString::fromStdString(UICommon::FormatSize(free_size, 2)))
-                       .arg(QtUtils::FromStdString(name))
-                       .arg(fragmentation_ratio * 100.0, 0, 'f', 2));
-  }
-  m_status_bar->showMessage(message);
-}
-
-void JITWidget::UpdateContent(Core::State state)
-{
-  ClearDisassembly();
-  if (state == Core::State::Paused)
-    ShowFreeMemoryStatus();
-}
-
-static void DisassembleCodeBuffer(const JitBlock& block, PPCSymbolDB& ppc_symbol_db,
-                                  std::ostream& stream)
-{
-  // Instructions are 4 byte aligned, so next_address = 1 will never produce a false-negative.
-  for (u32 next_address = 1; const auto& [address, inst] : block.original_buffer)
-  {
-    if (address != next_address)
-    {
-      stream << ppc_symbol_db.GetDescription(address) << '\n';
-      next_address = address;
-    }
-    fmt::print(stream, "0x{:08x}\t{}\n", address,
-               Common::GekkoDisassembler::Disassemble(inst.hex, address));
-    next_address += sizeof(UGeckoInstruction);
+    if (address != expected)
+      out << symbols.GetDescription(address) << '\n';
+    fmt::print(out, "0x{:08x}\t{}\n", address,
+               Common::GekkoDisassembler::Disassemble(instruction.hex, address));
+    expected = address + static_cast<u32>(sizeof(UGeckoInstruction));
   }
 }
 
-void JITWidget::CrossDisassemble(const JitBlock& block)
+// Takes what was written so far and leaves the stream empty for the next listing.
+QString Drain(std::ostringstream& stream)
 {
-  // TODO C++20: std::ostringstream::view() + QtUtils::FromStdString + std::ostream::seekp(0) would
-  // save a lot of wasted allocation here, but compiler support for the first thing isn't here yet.
-  std::ostringstream stream;
-  DisassembleCodeBuffer(block, m_system.GetPPCSymbolDB(), stream);
-  m_ppc_asm_widget->setPlainText(QString::fromStdString(std::move(stream).str()));
+  return QString::fromStdString(std::move(stream).str());
+}
+}  // namespace
 
-  auto& jit_interface = m_system.GetJitInterface();
+JITWidget::JITWidget(Core::System& system, QWidget* parent) : QDockWidget(parent), m_system(system)
+{
+  setWindowTitle(tr("JIT Blocks"));
+  setObjectName(QStringLiteral("jitwidget"));
+  setAllowedAreas(Qt::AllDockWidgetAreas);
 
-  const auto host_near_instruction_count = jit_interface.DisassembleNearCode(block, stream);
-  m_host_near_asm_widget->setPlainText(QString::fromStdString(std::move(stream).str()));
+  auto* const settings = &Settings::Instance();
+  connect(settings, &Settings::JITVisibilityChanged, this,
+          [this](bool visible) { setHidden(!visible); });
+  connect(settings, &Settings::DebugModeToggled, this, [this](bool enabled) {
+    setHidden(!enabled || !Settings::Instance().IsJITVisible());
+  });
 
-  const auto host_far_instruction_count = jit_interface.DisassembleFarCode(block, stream);
-  m_host_far_asm_widget->setPlainText(QString::fromStdString(std::move(stream).str()));
+  // The model belongs to the proxy, which belongs to the view.
+  m_blocks_view = new QTableView(nullptr);
+  m_filter_model = new JitBlockProxyModel(m_blocks_view);
+  m_blocks_model = new JitBlockTableModel(m_system, m_system.GetJitInterface(),
+                                          m_system.GetPPCSymbolDB(), m_filter_model);
+  connect(this, &JITWidget::HideSignal, m_blocks_model, &JitBlockTableModel::OnHideSignal);
+  connect(this, &JITWidget::ShowSignal, m_blocks_model, &JitBlockTableModel::OnShowSignal);
 
-  // i18n: "near" and "far" refer to the near code cache and far code cache of Dolphin's JITs.
-  // %1 and %2 are instruction counts from the near and far code caches, respectively. %3 is a
-  // percentage calculated from how inefficient (in other words, "blown-up") a given JIT block's
-  // recompilation was when considering the host instruction count vs the PPC instruction count.
-  m_status_bar->showMessage(tr("Host instruction count: %1 near %2 far (%3% blowup)")
-                                .arg(host_near_instruction_count)
-                                .arg(host_far_instruction_count)
-                                .arg(static_cast<double>(100 * (host_near_instruction_count +
-                                                                host_far_instruction_count)) /
-                                             block.originalSize -
-                                         100.0,
-                                     0, 'f', 2));
+  m_filter_model->SetBlocks(m_blocks_model);
+  m_filter_model->setSortRole(UserRole::SortRole);
+  m_filter_model->setSortCaseSensitivity(Qt::CaseInsensitive);
+
+  m_blocks_view->setModel(m_filter_model);
+  m_blocks_view->setSortingEnabled(true);
+  m_blocks_view->sortByColumn(Column::EffectiveAddress, Qt::AscendingOrder);
+  m_blocks_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  m_blocks_view->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_blocks_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  m_blocks_view->setContextMenuPolicy(Qt::CustomContextMenu);
+  m_blocks_view->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_blocks_view->setCornerButtonEnabled(false);
+  m_blocks_view->verticalHeader()->hide();
+  connect(m_blocks_view, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+    emit SetCodeAddress(m_filter_model->GetJitBlock(index).effectiveAddress);
+  });
+  connect(m_blocks_view, &QTableView::customContextMenuRequested, this,
+          &JITWidget::ShowTableMenu);
+
+  QHeaderView* const header = m_blocks_view->horizontalHeader();
+  header->setContextMenuPolicy(Qt::CustomContextMenu);
+  header->setStretchLastSection(true);
+  header->setSectionsMovable(true);
+  header->setFirstSectionMovable(true);
+  connect(header, &QHeaderView::sortIndicatorChanged, m_blocks_model,
+          &JitBlockTableModel::OnSortIndicatorChanged);
+  connect(header, &QHeaderView::customContextMenuRequested, this, [this](const QPoint& pos) {
+    m_columns_menu->exec(m_blocks_view->horizontalHeader()->mapToGlobal(pos));
+  });
+
+  connect(m_blocks_view->selectionModel(), &QItemSelectionModel::currentChanged, this,
+          [this](const QModelIndex& current, const QModelIndex&) { ShowRow(current); });
+
+  auto* const filter_row = new QHBoxLayout(nullptr);
+  const auto add_address_filter = [&](QLineEdit* field, const QString& hint,
+                                      JitBlockProxyModel::AddressFilter which) {
+    field->setPlaceholderText(hint);
+    connect(field, &QLineEdit::textChanged, m_filter_model,
+            [proxy = m_filter_model, which](const QString& text) {
+              proxy->SetAddressText(which, text);
+            });
+    filter_row->addWidget(field);
+  };
+  add_address_filter(new QLineEdit(nullptr), tr("Min Effective Address"),
+                     JitBlockProxyModel::AddressFilter::MinEffective);
+  add_address_filter(new QLineEdit(nullptr), tr("Max Effective Address"),
+                     JitBlockProxyModel::AddressFilter::MaxEffective);
+  m_covers_filter = new QLineEdit(nullptr);
+  add_address_filter(m_covers_filter, tr("Recompiles Physical Address"),
+                     JitBlockProxyModel::AddressFilter::CoversPhysical);
+
+  auto* const symbol_filter = new QLineEdit(nullptr);
+  symbol_filter->setPlaceholderText(tr("Symbol Name"));
+  // The model is told first, so that it can resolve all symbol names before the proxy filters.
+  connect(symbol_filter, &QLineEdit::textChanged, m_blocks_model,
+          &JitBlockTableModel::OnFilterSymbolTextChanged);
+  connect(symbol_filter, &QLineEdit::textChanged, m_filter_model,
+          [proxy = m_filter_model](const QString& text) { proxy->SetSymbolText(text); });
+  filter_row->addWidget(symbol_filter);
+
+  m_profiling_button = new QPushButton(nullptr);
+  m_profiling_button->setToolTip(
+      tr("Toggle software JIT block profiling (will clear the JIT cache)."));
+  m_profiling_button->setCheckable(true);
+  connect(m_profiling_button, &QPushButton::toggled, this, [](bool enabled) {
+    Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING, enabled);
+  });
+  filter_row->addWidget(m_profiling_button);
+
+  m_clear_button = new QPushButton(tr("Clear Cache"), nullptr);
+  connect(m_clear_button, &QPushButton::clicked, this,
+          [this] { m_system.GetJitInterface().ClearCache(Core::CPUThreadGuard{m_system}); });
+  filter_row->addWidget(m_clear_button);
+
+  m_wipe_button = new QPushButton(tr("Wipe Profiling"), nullptr);
+  m_wipe_button->setToolTip(tr("Re-initialize software JIT block profiling data."));
+  connect(m_wipe_button, &QPushButton::clicked, this, [this] {
+    m_system.GetJitInterface().WipeBlockProfilingData(Core::CPUThreadGuard{m_system});
+  });
+  filter_row->addWidget(m_wipe_button);
+
+  BuildPanes();
+  BuildMenus();
+  RestoreLayout();
+
+  // Full names for the column menu; the table header uses short forms of these.
+  static constexpr std::array<const char*, Column::NumberOfColumns> column_names{
+      QT_TR_NOOP("PPC Feature Flags"),
+      // i18n: an address as the guest sees it, before any MMU translation.
+      QT_TR_NOOP("Effective Address"),
+      QT_TR_NOOP("Code Buffer Size"),
+      // i18n: how many guest instructions in the block were already compiled elsewhere.
+      QT_TR_NOOP("Repeat Instructions"),
+      // i18n: size of the code the JIT emitted into its near (hot) code area.
+      QT_TR_NOOP("Host Near Code Size"),
+      // i18n: size of the code the JIT emitted into its far (cold) code area.
+      QT_TR_NOOP("Host Far Code Size"),
+      QT_TR_NOOP("Run Count"),
+      // i18n: the three "Cycles" columns count CPU instruction cycles.
+      QT_TR_NOOP("Cycles Spent"),
+      QT_TR_NOOP("Cycles Average"),
+      QT_TR_NOOP("Cycles Percent"),
+      // i18n: ns = nanoseconds.
+      QT_TR_NOOP("Time Spent (ns)"),
+      // i18n: ns = nanoseconds.
+      QT_TR_NOOP("Time Average (ns)"),
+      QT_TR_NOOP("Time Percent"),
+      // i18n: the name of the debug symbol the block starts in.
+      QT_TR_NOOP("Symbol"),
+  };
+  m_columns_menu = new QMenu(this);
+  for (int col = 0; col < Column::NumberOfColumns; ++col)
+  {
+    QAction* toggle = m_columns_menu->addAction(
+        tr(column_names[static_cast<size_t>(col)]),
+        [this, col](bool shown) { m_blocks_view->setColumnHidden(col, !shown); });
+    // Set before the action becomes checkable, as it always was.
+    toggle->setChecked(!m_blocks_view->isColumnHidden(col));
+    toggle->setCheckable(true);
+  }
+
+  auto* const column = new QVBoxLayout(nullptr);
+  column->setContentsMargins(2, 2, 2, 2);
+  column->setSpacing(0);
+  column->addLayout(filter_row);
+  column->addWidget(m_vertical_split);
+  column->addWidget(m_status);
+
+  auto* const body = new QWidget(nullptr);
+  body->setLayout(column);
+  setWidget(body);
 }
 
-void JITWidget::CrossDisassemble(const QModelIndex& index)
+JITWidget::~JITWidget()
 {
-  if (index.isValid())
+  StoreLayout();
+}
+
+void JITWidget::BuildPanes()
+{
+  m_horizontal_split = new QSplitter(Qt::Horizontal, nullptr);
+  const auto add_pane = [this](const QString& hint) {
+    auto* pane = new QPlainTextEdit(nullptr);
+    pane->setWordWrapMode(QTextOption::NoWrap);
+    pane->setPlaceholderText(hint);
+    pane->setReadOnly(true);
+    m_horizontal_split->addWidget(pane);
+    return pane;
+  };
+  m_guest_pane = add_pane(tr("PPC Instruction Coverage"));
+  m_near_pane = add_pane(tr("Host Near Code Cache"));
+  m_far_pane = add_pane(tr("Host Far Code Cache"));
+
+  m_vertical_split = new QSplitter(Qt::Vertical, nullptr);
+  m_vertical_split->addWidget(m_blocks_view);
+  m_vertical_split->addWidget(m_horizontal_split);
+
+  m_status = new ClickableStatusBar(nullptr);
+  m_status->setSizeGripEnabled(false);
+  connect(m_status, &ClickableStatusBar::pressed, this, [this] {
+    if (Core::GetState(m_system) == Core::State::Paused)
+      ShowFreeSpace();
+  });
+}
+
+void JITWidget::BuildMenus()
+{
+  m_row_menu = new QMenu(this);
+  m_row_menu->addAction(tr("View &Code"), this, [this] {
+    // The code view takes effective addresses only, so the block's effective address is used as is.
+    const QModelIndex current = m_blocks_view->currentIndex();
+    if (current.isValid())
+      emit SetCodeAddress(m_filter_model->GetJitBlock(current).effectiveAddress);
+  });
+  // Erasing clears the selection, and the current-row handler then refreshes the panes.
+  m_row_menu->addAction(tr("&Erase Block(s)"), this, &JITWidget::EraseSelectedBlocks);
+}
+
+void JITWidget::RestoreLayout()
+{
+  QSettings& stored = Settings::GetQSettings();
+  restoreGeometry(stored.value(QStringLiteral("jitwidget/geometry")).toByteArray());
+  // Visibility goes before floating so that a floating dock comes up correctly.
+  setHidden(!Settings::Instance().IsJITVisible() || !Settings::Instance().IsDebugModeEnabled());
+  setFloating(stored.value(QStringLiteral("jitwidget/floating")).toBool());
+  m_blocks_view->horizontalHeader()->restoreState(
+      stored.value(QStringLiteral("jitwidget/tableheader/state")).toByteArray());
+  m_vertical_split->restoreState(
+      stored.value(QStringLiteral("jitwidget/tablesplitter")).toByteArray());
+  m_horizontal_split->restoreState(
+      stored.value(QStringLiteral("jitwidget/disasmsplitter")).toByteArray());
+}
+
+void JITWidget::StoreLayout() const
+{
+  QSettings& stored = Settings::GetQSettings();
+  stored.setValue(QStringLiteral("jitwidget/geometry"), saveGeometry());
+  stored.setValue(QStringLiteral("jitwidget/floating"), isFloating());
+  stored.setValue(QStringLiteral("jitwidget/tableheader/state"),
+                  m_blocks_view->horizontalHeader()->saveState());
+  stored.setValue(QStringLiteral("jitwidget/tablesplitter"), m_vertical_split->saveState());
+  stored.setValue(QStringLiteral("jitwidget/disasmsplitter"), m_horizontal_split->saveState());
+}
+
+void JITWidget::Listen(bool on)
+{
+  if (!on)
   {
-    CrossDisassemble(m_table_proxy->GetJitBlock(index));
+    for (const QMetaObject::Connection& link : m_links)
+      disconnect(link);
+    m_links.clear();
     return;
   }
-  UpdateContent(Core::GetState(m_system));
+
+  auto* const host = Host::GetInstance();
+  auto* const settings = &Settings::Instance();
+  m_links.append(connect(host, &Host::JitCacheInvalidation, this, [this] {
+    if (Core::GetState(m_system) != Core::State::Paused)
+      return;
+    ClearPanes();
+    ShowFreeSpace();
+  }));
+  m_links.append(
+      connect(host, &Host::UpdateDisasmDialog, this, &JITWidget::ShowCurrentRowIfPaused));
+  m_links.append(
+      connect(host, &Host::PPCSymbolsChanged, this, &JITWidget::ShowCurrentRowIfPaused));
+  // Changing breakpoints can invalidate blocks, so the selection may point at stale rows. Clearing
+  // it makes the current-row handler refresh the panes.
+  m_links.append(connect(host, &Host::PPCBreakpointsChanged, this,
+                         [this] { m_blocks_view->selectionModel()->clear(); }));
+  m_links.append(
+      connect(settings, &Settings::ConfigChanged, this, &JITWidget::RefreshProfilingButton));
+  m_links.append(connect(settings, &Settings::DebugFontChanged, this, &JITWidget::ApplyFont));
+  m_links.append(
+      connect(settings, &Settings::EmulationStateChanged, this, &JITWidget::StateChanged));
 }
 
-void JITWidget::CrossDisassemble()
+void JITWidget::RefreshProfilingButton()
 {
-  CrossDisassemble(m_table_view->currentIndex());
+  const QSignalBlocker quiet(m_profiling_button);
+  const bool profiling = Config::Get(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING);
+  m_profiling_button->setText(profiling ? tr("Stop Profiling") : tr("Start Profiling"));
+  m_profiling_button->setChecked(profiling);
 }
 
-void JITWidget::TableEraseBlocks()
+void JITWidget::RefreshButtons()
 {
-  auto* const selection_model = m_table_view->selectionModel();
-  QModelIndexList index_list = selection_model->selectedRows();
-  selection_model->clear();  // Side effect: currentChanged will be emitted (this is intended).
+  const bool have_jit = m_system.GetJitInterface().GetCore() != nullptr;
+  m_clear_button->setEnabled(have_jit);
+  m_wipe_button->setEnabled(have_jit);
+}
 
-  std::ranges::transform(index_list, index_list.begin(), [this](const QModelIndex& index) {
-    return m_table_proxy->mapToSource(index);
-  });
-  std::ranges::sort(index_list, std::less{});  // QModelIndex is incompatible with std::ranges::less
-  for (const QModelIndex& index : std::ranges::reverse_view{index_list})
+void JITWidget::ApplyFont(const QFont& font)
+{
+  for (QWidget* target : {static_cast<QWidget*>(m_blocks_view), static_cast<QWidget*>(m_guest_pane),
+                          static_cast<QWidget*>(m_near_pane), static_cast<QWidget*>(m_far_pane)})
   {
-    if (!index.isValid())
-      continue;
-    m_table_model->removeRow(index.row());
+    target->setFont(font);
   }
 }
 
-void JITWidget::LoadQSettings()
+void JITWidget::ClearPanes()
 {
-  auto& settings = Settings::GetQSettings();
-
-  restoreGeometry(settings.value(QStringLiteral("jitwidget/geometry")).toByteArray());
-  setHidden(!Settings::Instance().IsJITVisible() || !Settings::Instance().IsDebugModeEnabled());
-  // macOS: setFloating() needs to be after setHidden() for proper window presentation
-  // according to Settings
-  setFloating(settings.value(QStringLiteral("jitwidget/floating")).toBool());
-  m_table_view->horizontalHeader()->restoreState(
-      settings.value(QStringLiteral("jitwidget/tableheader/state")).toByteArray());
-  m_table_splitter->restoreState(
-      settings.value(QStringLiteral("jitwidget/tablesplitter")).toByteArray());
-  m_disasm_splitter->restoreState(
-      settings.value(QStringLiteral("jitwidget/disasmsplitter")).toByteArray());
+  m_guest_pane->clear();
+  m_near_pane->clear();
+  m_far_pane->clear();
+  m_status->clearMessage();
 }
 
-void JITWidget::SaveQSettings() const
+void JITWidget::ShowFreeSpace()
 {
-  auto& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("jitwidget/geometry"), saveGeometry());
-  settings.setValue(QStringLiteral("jitwidget/floating"), isFloating());
-  settings.setValue(QStringLiteral("jitwidget/tableheader/state"),
-                    m_table_view->horizontalHeader()->saveState());
-  settings.setValue(QStringLiteral("jitwidget/tablesplitter"), m_table_splitter->saveState());
-  settings.setValue(QStringLiteral("jitwidget/disasmsplitter"), m_disasm_splitter->saveState());
+  QString message = tr("Free memory:");
+  for (const auto& [region, stats] : m_system.GetJitInterface().GetMemoryStats())
+  {
+    const auto& [free_bytes, fragmentation] = stats;
+    // i18n: one entry per JIT memory region. %1 = free space with a unit such as MiB,
+    // %2 = the region's (untranslated) name, %3 = how fragmented it is, in percent.
+    message.append(tr(" %1 %2 (%3% fragmented)")
+                       .arg(QString::fromStdString(UICommon::FormatSize(free_bytes, 2)))
+                       .arg(QtUtils::FromStdString(region))
+                       .arg(fragmentation * 100.0, 0, 'f', 2));
+  }
+  m_status->showMessage(message);
 }
 
-void JITWidget::ConnectSlots()
+void JITWidget::StateChanged(Core::State state)
 {
-  auto* const host = Host::GetInstance();
-  connect(host, &Host::JitCacheInvalidation, this, &JITWidget::OnJitCacheInvalidation);
-  connect(host, &Host::UpdateDisasmDialog, this, &JITWidget::OnUpdateDisasmDialog);
-  connect(host, &Host::PPCSymbolsChanged, this, &JITWidget::OnPPCSymbolsUpdated);
-  connect(host, &Host::PPCBreakpointsChanged, this, &JITWidget::OnPPCBreakpointsChanged);
-  auto* const settings = &Settings::Instance();
-  connect(settings, &Settings::ConfigChanged, this, &JITWidget::OnConfigChanged);
-  connect(settings, &Settings::DebugFontChanged, this, &JITWidget::OnDebugFontChanged);
-  connect(settings, &Settings::EmulationStateChanged, this, &JITWidget::OnEmulationStateChanged);
+  RefreshButtons();
+  ClearPanes();
+  if (state == Core::State::Paused)
+    ShowFreeSpace();
 }
 
-void JITWidget::DisconnectSlots()
+void JITWidget::ShowBlock(const JitBlock& block)
 {
-  auto* const host = Host::GetInstance();
-  disconnect(host, &Host::JitCacheInvalidation, this, &JITWidget::OnJitCacheInvalidation);
-  disconnect(host, &Host::UpdateDisasmDialog, this, &JITWidget::OnUpdateDisasmDialog);
-  disconnect(host, &Host::PPCSymbolsChanged, this, &JITWidget::OnPPCSymbolsUpdated);
-  disconnect(host, &Host::PPCBreakpointsChanged, this, &JITWidget::OnPPCBreakpointsChanged);
-  auto* const settings = &Settings::Instance();
-  disconnect(settings, &Settings::ConfigChanged, this, &JITWidget::OnConfigChanged);
-  disconnect(settings, &Settings::DebugFontChanged, this, &JITWidget::OnDebugFontChanged);
-  disconnect(settings, &Settings::EmulationStateChanged, this, &JITWidget::OnEmulationStateChanged);
+  std::ostringstream listing;
+  WriteGuestListing(block, m_system.GetPPCSymbolDB(), listing);
+  m_guest_pane->setPlainText(Drain(listing));
+
+  auto& jit = m_system.GetJitInterface();
+  const size_t near_count = jit.DisassembleNearCode(block, listing);
+  m_near_pane->setPlainText(Drain(listing));
+  const size_t far_count = jit.DisassembleFarCode(block, listing);
+  m_far_pane->setPlainText(Drain(listing));
+
+  // How many times larger the host code is than the guest code, as a percentage over 100%.
+  const double blowup =
+      static_cast<double>(100 * (near_count + far_count)) / block.originalSize - 100.0;
+  // i18n: %1 = host instructions emitted into the near code cache, %2 = into the far code
+  // cache; %3 = extra host code relative to the guest instructions, as a percentage.
+  m_status->showMessage(tr("Host instruction count: %1 near %2 far (%3% blowup)")
+                            .arg(near_count)
+                            .arg(far_count)
+                            .arg(blowup, 0, 'f', 2));
 }
 
-void JITWidget::Show()
+void JITWidget::ShowRow(const QModelIndex& index)
 {
-  ConnectSlots();
-  // Handle every slot that may have missed a signal while this widget was hidden.
-  // OnJitCacheInvalidation() can be skipped.
-  // OnUpdateDisasmDialog() can be skipped.
-  // OnPPCSymbolsUpdated() can be skipped.
-  // OnPPCBreakpointsChanged() can be skipped.
-  OnConfigChanged();
-  OnDebugFontChanged(Settings::Instance().GetDebugFont());
-  OnEmulationStateChanged(Core::GetState(m_system));
+  if (!index.isValid())
+  {
+    ClearPanes();
+    if (Core::GetState(m_system) == Core::State::Paused)
+      ShowFreeSpace();
+    return;
+  }
+  ShowBlock(m_filter_model->GetJitBlock(index));
 }
 
-void JITWidget::Hide()
+void JITWidget::ShowCurrentRowIfPaused()
 {
-  DisconnectSlots();
-  ClearDisassembly();
+  if (Core::GetState(m_system) != Core::State::Paused)
+    return;
+  ShowRow(m_blocks_view->currentIndex());
+}
+
+void JITWidget::EraseSelectedBlocks()
+{
+  QItemSelectionModel* const selection = m_blocks_view->selectionModel();
+  QModelIndexList rows = selection->selectedRows();
+  // Clearing the selection changes the current row, which refreshes the panes.
+  selection->clear();
+
+  for (QModelIndex& row : rows)
+    row = m_filter_model->mapToSource(row);
+  // Remove from the bottom up so that earlier rows keep their numbers.
+  std::sort(rows.begin(), rows.end());
+  for (auto it = rows.crbegin(); it != rows.crend(); ++it)
+  {
+    if (it->isValid())
+      m_blocks_model->removeRow(it->row());
+  }
+}
+
+void JITWidget::ShowTableMenu(const QPoint& pos)
+{
+  const QPoint where = m_blocks_view->viewport()->mapToGlobal(pos);
+  // With every column hidden, offer the column menu so that the user can get them back.
+  if (m_blocks_view->horizontalHeader()->hiddenSectionCount() == Column::NumberOfColumns)
+    m_columns_menu->exec(where);
+  else
+    m_row_menu->exec(where);
 }
 
 void JITWidget::OnRequestPPCComparison(u32 address, bool translate_address)
@@ -361,135 +530,17 @@ void JITWidget::OnRequestPPCComparison(u32 address, bool translate_address)
 
   if (translate_address)
   {
-    const std::optional<u32> pm_address = m_system.GetMMU().GetTranslatedAddress(address);
-    if (!pm_address.has_value())
+    const std::optional<u32> physical = m_system.GetMMU().GetTranslatedAddress(address);
+    if (!physical)
     {
       ModalMessageBox::warning(
           this, tr("Error"),
           tr("Effective address %1 has no physical address translation.").arg(address, 0, 16));
       return;
     }
-    address = pm_address.value();
+    address = *physical;
   }
-  m_pm_address_covered_line_edit->setText(QString::number(address, 16));
-}
-
-void JITWidget::OnVisibilityToggled(bool visible)
-{
-  setHidden(!visible);
-}
-
-void JITWidget::OnDebugModeToggled(bool enabled)
-{
-  setHidden(!enabled || !Settings::Instance().IsJITVisible());
-}
-
-void JITWidget::OnToggleProfiling(bool enabled)
-{
-  Config::SetBaseOrCurrent(Config::MAIN_DEBUG_JIT_ENABLE_PROFILING, enabled);
-}
-
-void JITWidget::OnClearCache()
-{
-  m_system.GetJitInterface().ClearCache(Core::CPUThreadGuard{m_system});
-}
-
-void JITWidget::OnWipeProfiling()
-{
-  m_system.GetJitInterface().WipeBlockProfilingData(Core::CPUThreadGuard{m_system});
-}
-
-void JITWidget::OnTableCurrentChanged(const QModelIndex& current, const QModelIndex& previous)
-{
-  CrossDisassemble(current);
-}
-
-void JITWidget::OnTableDoubleClicked(const QModelIndex& index)
-{
-  emit SetCodeAddress(m_table_proxy->GetJitBlock(index).effectiveAddress);
-}
-
-void JITWidget::OnTableContextMenu(const QPoint& pos)
-{
-  // There needs to be an option somewhere for a user to recover from hiding every column.
-  if (m_table_view->horizontalHeader()->hiddenSectionCount() == Column::NumberOfColumns)
-  {
-    m_column_visibility_menu->exec(m_table_view->viewport()->mapToGlobal(pos));
-    return;
-  }
-  m_table_context_menu->exec(m_table_view->viewport()->mapToGlobal(pos));
-}
-
-void JITWidget::OnTableHeaderContextMenu(const QPoint& pos)
-{
-  m_column_visibility_menu->exec(m_table_view->horizontalHeader()->mapToGlobal(pos));
-}
-
-void JITWidget::OnTableMenuViewCode()
-{
-  // TODO: CodeWidget doesn't support it yet, but eventually signal if the address should be
-  // translated with ((block.feature_flags & CPUEmuFeatureFlags::FEATURE_FLAG_MSR_IR) != 0).
-  if (const QModelIndex& index = m_table_view->currentIndex(); index.isValid())
-    emit SetCodeAddress(m_table_proxy->GetJitBlock(index).effectiveAddress);
-}
-
-void JITWidget::OnTableMenuEraseBlocks()
-{
-  TableEraseBlocks();  // Side effect: currentChanged will be emitted (this is intended).
-  // Because currentChanged has been emitted, OnTableCurrentChanged has already handled the rest.
-}
-
-void JITWidget::OnStatusBarPressed()
-{
-  if (Core::GetState(m_system) == Core::State::Paused)
-    ShowFreeMemoryStatus();
-}
-
-void JITWidget::OnJitCacheInvalidation()
-{
-  if (Core::GetState(m_system) != Core::State::Paused)
-    return;
-  ClearDisassembly();
-  ShowFreeMemoryStatus();
-}
-
-void JITWidget::OnUpdateDisasmDialog()
-{
-  if (Core::GetState(m_system) != Core::State::Paused)
-    return;
-  CrossDisassemble();
-}
-
-void JITWidget::OnPPCSymbolsUpdated()
-{
-  if (Core::GetState(m_system) != Core::State::Paused)
-    return;
-  CrossDisassemble();
-}
-
-void JITWidget::OnPPCBreakpointsChanged()
-{
-  // Whatever row(s) might have been selected could no longer exist, because adding or removing
-  // breakpoints can invalidate JIT blocks. We must clear the selection to avoid stale indices.
-  auto* const selection_model = m_table_view->selectionModel();
-  selection_model->clear();  // Side effect: currentChanged will be emitted (this is intended).
-  // Because currentChanged has been emitted, OnTableCurrentChanged has already handled the rest.
-}
-
-void JITWidget::OnConfigChanged()
-{
-  UpdateProfilingButton();
-}
-
-void JITWidget::OnDebugFontChanged(const QFont& font)
-{
-  UpdateDebugFont(font);
-}
-
-void JITWidget::OnEmulationStateChanged(Core::State state)
-{
-  UpdateOtherButtons(state);
-  UpdateContent(state);
+  m_covers_filter->setText(QString::number(address, 16));
 }
 
 void JITWidget::closeEvent(QCloseEvent*)
@@ -500,183 +551,17 @@ void JITWidget::closeEvent(QCloseEvent*)
 void JITWidget::showEvent(QShowEvent*)
 {
   emit ShowSignal();
-  Show();
+  Listen(true);
+  // Catch up on settings and state that may have changed while hidden. Block, symbol and
+  // breakpoint changes need nothing here.
+  RefreshProfilingButton();
+  ApplyFont(Settings::Instance().GetDebugFont());
+  StateChanged(Core::GetState(m_system));
 }
 
 void JITWidget::hideEvent(QHideEvent*)
 {
   emit HideSignal();
-  Hide();
-}
-
-JITWidget::JITWidget(Core::System& system, QWidget* parent) : QDockWidget(parent), m_system(system)
-{
-  setWindowTitle(tr("JIT Blocks"));
-  setObjectName(QStringLiteral("jitwidget"));
-  setAllowedAreas(Qt::AllDockWidgetAreas);
-
-  auto* const settings = &Settings::Instance();
-  connect(settings, &Settings::JITVisibilityChanged, this, &JITWidget::OnVisibilityToggled);
-  connect(settings, &Settings::DebugModeToggled, this, &JITWidget::OnDebugModeToggled);
-
-  m_table_view = new QTableView(nullptr);
-  m_table_proxy = new JitBlockProxyModel(m_table_view);
-  m_table_model = new JitBlockTableModel(m_system, m_system.GetJitInterface(),
-                                         m_system.GetPPCSymbolDB(), m_table_proxy);
-
-  connect(this, &JITWidget::HideSignal, m_table_model, &JitBlockTableModel::OnHideSignal);
-  connect(this, &JITWidget::ShowSignal, m_table_model, &JitBlockTableModel::OnShowSignal);
-
-  m_table_proxy->setSourceModel(m_table_model);
-  m_table_proxy->setSortRole(UserRole::SortRole);
-  m_table_proxy->setSortCaseSensitivity(Qt::CaseInsensitive);
-
-  m_table_view->setModel(m_table_proxy);
-  m_table_view->setSortingEnabled(true);
-  m_table_view->sortByColumn(Column::EffectiveAddress, Qt::AscendingOrder);
-  m_table_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
-  m_table_view->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_table_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  m_table_view->setContextMenuPolicy(Qt::CustomContextMenu);
-  m_table_view->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_table_view->setCornerButtonEnabled(false);
-  m_table_view->verticalHeader()->hide();
-  connect(m_table_view, &QTableView::doubleClicked, this, &JITWidget::OnTableDoubleClicked);
-  connect(m_table_view, &QTableView::customContextMenuRequested, this,
-          &JITWidget::OnTableContextMenu);
-
-  auto* const horizontal_header = m_table_view->horizontalHeader();
-  horizontal_header->setContextMenuPolicy(Qt::CustomContextMenu);
-  horizontal_header->setStretchLastSection(true);
-  horizontal_header->setSectionsMovable(true);
-  horizontal_header->setFirstSectionMovable(true);
-  connect(horizontal_header, &QHeaderView::sortIndicatorChanged, m_table_model,
-          &JitBlockTableModel::OnSortIndicatorChanged);
-  connect(horizontal_header, &QHeaderView::customContextMenuRequested, this,
-          &JITWidget::OnTableHeaderContextMenu);
-
-  auto* const selection_model = m_table_view->selectionModel();
-  connect(selection_model, &QItemSelectionModel::currentChanged, this,
-          &JITWidget::OnTableCurrentChanged);
-
-  auto* const controls_layout = new QHBoxLayout(nullptr);
-  const auto address_filter_routine = [&](QLineEdit* line_edit, const QString& placeholder_text,
-                                          void (JitBlockProxyModel::*slot)(const QString&)) {
-    line_edit->setPlaceholderText(placeholder_text);
-    connect(line_edit, &QLineEdit::textChanged, m_table_proxy, slot);
-    controls_layout->addWidget(line_edit);
-  };
-  address_filter_routine(
-      new QLineEdit(nullptr), tr("Min Effective Address"),
-      &JitBlockProxyModel::OnAddressTextChanged<&JitBlockProxyModel::m_em_address_min>);
-  address_filter_routine(
-      new QLineEdit(nullptr), tr("Max Effective Address"),
-      &JitBlockProxyModel::OnAddressTextChanged<&JitBlockProxyModel::m_em_address_max>);
-  address_filter_routine(
-      m_pm_address_covered_line_edit = new QLineEdit(nullptr), tr("Recompiles Physical Address"),
-      &JitBlockProxyModel::OnAddressTextChanged<&JitBlockProxyModel::m_pm_address_covered>);
-
-  auto* const symbol_name_line_edit = new QLineEdit(nullptr);
-  symbol_name_line_edit->setPlaceholderText(tr("Symbol Name"));
-  connect(symbol_name_line_edit, &QLineEdit::textChanged, m_table_model,
-          &JitBlockTableModel::OnFilterSymbolTextChanged);
-  connect(symbol_name_line_edit, &QLineEdit::textChanged, m_table_proxy,
-          &JitBlockProxyModel::OnSymbolTextChanged);
-  controls_layout->addWidget(symbol_name_line_edit);
-
-  m_toggle_profiling_button = new QPushButton(nullptr);
-  m_toggle_profiling_button->setToolTip(
-      tr("Toggle software JIT block profiling (will clear the JIT cache)."));
-  m_toggle_profiling_button->setCheckable(true);
-  connect(m_toggle_profiling_button, &QPushButton::toggled, this, &JITWidget::OnToggleProfiling);
-  controls_layout->addWidget(m_toggle_profiling_button);
-
-  m_clear_cache_button = new QPushButton(tr("Clear Cache"), nullptr);
-  connect(m_clear_cache_button, &QPushButton::clicked, this, &JITWidget::OnClearCache);
-  controls_layout->addWidget(m_clear_cache_button);
-
-  m_wipe_profiling_button = new QPushButton(tr("Wipe Profiling"), nullptr);
-  m_wipe_profiling_button->setToolTip(tr("Re-initialize software JIT block profiling data."));
-  connect(m_wipe_profiling_button, &QPushButton::clicked, this, &JITWidget::OnWipeProfiling);
-  controls_layout->addWidget(m_wipe_profiling_button);
-
-  m_disasm_splitter = new QSplitter(Qt::Horizontal, nullptr);
-  const auto text_box_routine = [&](QPlainTextEdit* text_edit, const QString& placeholder_text) {
-    text_edit->setWordWrapMode(QTextOption::NoWrap);
-    text_edit->setPlaceholderText(placeholder_text);
-    text_edit->setReadOnly(true);
-    m_disasm_splitter->addWidget(text_edit);
-  };
-  text_box_routine(m_ppc_asm_widget = new QPlainTextEdit(nullptr), tr("PPC Instruction Coverage"));
-  text_box_routine(m_host_near_asm_widget = new QPlainTextEdit(nullptr),
-                   tr("Host Near Code Cache"));
-  text_box_routine(m_host_far_asm_widget = new QPlainTextEdit(nullptr), tr("Host Far Code Cache"));
-
-  m_table_splitter = new QSplitter(Qt::Vertical, nullptr);
-  m_table_splitter->addWidget(m_table_view);
-  m_table_splitter->addWidget(m_disasm_splitter);
-
-  m_status_bar = new ClickableStatusBar(nullptr);
-  m_status_bar->setSizeGripEnabled(false);
-  connect(m_status_bar, &ClickableStatusBar::pressed, this, &JITWidget::OnStatusBarPressed);
-
-  m_table_context_menu = new QMenu(this);
-  m_table_context_menu->addAction(tr("View &Code"), this, &JITWidget::OnTableMenuViewCode);
-  m_table_context_menu->addAction(tr("&Erase Block(s)"), this, &JITWidget::OnTableMenuEraseBlocks);
-
-  LoadQSettings();
-
-  m_column_visibility_menu = new QMenu(this);
-  // These table header display names have abbreviated counterparts in JitBlockTableModel.cpp
-  static constexpr std::array<const char*, Column::NumberOfColumns> headers = {
-      QT_TR_NOOP("PPC Feature Flags"),
-      // i18n: "Effective" means this memory address might be translated within the MMU.
-      QT_TR_NOOP("Effective Address"),
-      QT_TR_NOOP("Code Buffer Size"),
-      // i18n: This means to say it is a count of PPC instructions recompiled more than once.
-      QT_TR_NOOP("Repeat Instructions"),
-      // i18n: "Near Code" refers to the near code cache of Dolphin's JITs.
-      QT_TR_NOOP("Host Near Code Size"),
-      // i18n: "Far Code" refers to the far code cache of Dolphin's JITs.
-      QT_TR_NOOP("Host Far Code Size"),
-      QT_TR_NOOP("Run Count"),
-      // i18n: "Cycles" means instruction cycles.
-      QT_TR_NOOP("Cycles Spent"),
-      // i18n: "Cycles" means instruction cycles.
-      QT_TR_NOOP("Cycles Average"),
-      // i18n: "Cycles" means instruction cycles.
-      QT_TR_NOOP("Cycles Percent"),
-      // i18n: "ns" is an abbreviation of nanoseconds.
-      QT_TR_NOOP("Time Spent (ns)"),
-      // i18n: "ns" is an abbreviation of nanoseconds.
-      QT_TR_NOOP("Time Average (ns)"),
-      QT_TR_NOOP("Time Percent"),
-      // i18n: "Symbol" means debugging symbol (its name in particular).
-      QT_TR_NOOP("Symbol"),
-  };
-  for (int column = 0; column < Column::NumberOfColumns; ++column)
-  {
-    auto* const action =
-        m_column_visibility_menu->addAction(tr(headers[column]), [this, column](bool enabled) {
-          m_table_view->setColumnHidden(column, !enabled);
-        });
-    action->setChecked(!m_table_view->isColumnHidden(column));
-    action->setCheckable(true);
-  }
-
-  auto* const main_layout = new QVBoxLayout(nullptr);
-  main_layout->setContentsMargins(2, 2, 2, 2);
-  main_layout->setSpacing(0);
-  main_layout->addLayout(controls_layout);
-  main_layout->addWidget(m_table_splitter);
-  main_layout->addWidget(m_status_bar);
-
-  auto* const main_widget = new QWidget(nullptr);
-  main_widget->setLayout(main_layout);
-  setWidget(main_widget);
-}
-
-JITWidget::~JITWidget()
-{
-  SaveQSettings();
+  Listen(false);
+  ClearPanes();
 }

@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -29,6 +28,7 @@ enum EnumType : int;
 class MemoryWidget;
 class QCloseEvent;
 class QFont;
+class QHideEvent;
 class QLineEdit;
 class QMenu;
 class QPlainTextEdit;
@@ -37,6 +37,8 @@ class QShowEvent;
 class QSplitter;
 class QTableView;
 
+// Dock listing the JIT's compiled blocks (filterable and sortable) and showing, for the current
+// block, the guest code it covers next to the host code generated for it.
 class JITWidget final : public QDockWidget
 {
   Q_OBJECT
@@ -58,7 +60,7 @@ public:
   JITWidget& operator=(const JITWidget&) = delete;
   JITWidget& operator=(JITWidget&&) = delete;
 
-  // Always connected slots (external signals)
+  // Shows the blocks that cover a guest address (translated from an effective one if asked).
   void OnRequestPPCComparison(u32 address, bool translate_address);
 
 private:
@@ -66,66 +68,42 @@ private:
   void showEvent(QShowEvent* event) override;
   void hideEvent(QHideEvent* event) override;
 
-  void UpdateProfilingButton();
-  void UpdateOtherButtons(Core::State state);
-  void UpdateDebugFont(const QFont& font);
-  void ClearDisassembly();
-  void ShowFreeMemoryStatus();
-  void UpdateContent(Core::State state);
-  void CrossDisassemble(const JitBlock& block);
-  void CrossDisassemble(const QModelIndex& index);
-  void CrossDisassemble();
-  void TableEraseBlocks();
+  void BuildPanes();
+  void BuildMenus();
+  void RestoreLayout();
+  void StoreLayout() const;
+  void Listen(bool on);
 
-  // Setup and teardown
-  void LoadQSettings();
-  void SaveQSettings() const;
-  void ConnectSlots();
-  void DisconnectSlots();
-  void Show();
-  void Hide();
-
-  // Always connected slots (external signals)
-  void OnVisibilityToggled(bool visible);
-  void OnDebugModeToggled(bool visible);
-
-  // Always connected slots (internal signals)
-  void OnToggleProfiling(bool enabled);
-  void OnClearCache();
-  void OnWipeProfiling();
-  void OnTableCurrentChanged(const QModelIndex& current, const QModelIndex& previous);
-  void OnTableDoubleClicked(const QModelIndex& index);
-  void OnTableContextMenu(const QPoint& pos);
-  void OnTableHeaderContextMenu(const QPoint& pos);
-  void OnTableMenuViewCode();
-  void OnTableMenuEraseBlocks();
-  void OnStatusBarPressed();
-
-  // Conditionally connected slots (external signals)
-  void OnJitCacheInvalidation();
-  void OnUpdateDisasmDialog();
-  void OnPPCSymbolsUpdated();
-  void OnPPCBreakpointsChanged();
-  void OnConfigChanged();
-  void OnDebugFontChanged(const QFont& font);
-  void OnEmulationStateChanged(Core::State state);
+  void RefreshProfilingButton();
+  void RefreshButtons();
+  void ApplyFont(const QFont& font);
+  void ClearPanes();
+  void ShowFreeSpace();
+  void StateChanged(Core::State state);
+  void ShowBlock(const JitBlock& block);
+  void ShowRow(const QModelIndex& index);
+  void ShowCurrentRowIfPaused();
+  void EraseSelectedBlocks();
+  void ShowTableMenu(const QPoint& pos);
 
   Core::System& m_system;
 
-  QLineEdit* m_pm_address_covered_line_edit;
-  QPushButton* m_clear_cache_button;
-  QPushButton* m_toggle_profiling_button;
-  QPushButton* m_wipe_profiling_button;
-  QTableView* m_table_view;
-  JitBlockProxyModel* m_table_proxy;
-  JitBlockTableModel* m_table_model;
-  QPlainTextEdit* m_ppc_asm_widget;
-  QPlainTextEdit* m_host_near_asm_widget;
-  QPlainTextEdit* m_host_far_asm_widget;
-  QSplitter* m_table_splitter;
-  QSplitter* m_disasm_splitter;
-  ClickableStatusBar* m_status_bar;
+  QLineEdit* m_covers_filter = nullptr;
+  QPushButton* m_clear_button = nullptr;
+  QPushButton* m_profiling_button = nullptr;
+  QPushButton* m_wipe_button = nullptr;
+  QTableView* m_blocks_view = nullptr;
+  JitBlockProxyModel* m_filter_model = nullptr;
+  JitBlockTableModel* m_blocks_model = nullptr;
+  QPlainTextEdit* m_guest_pane = nullptr;
+  QPlainTextEdit* m_near_pane = nullptr;
+  QPlainTextEdit* m_far_pane = nullptr;
+  QSplitter* m_vertical_split = nullptr;
+  QSplitter* m_horizontal_split = nullptr;
+  ClickableStatusBar* m_status = nullptr;
 
-  QMenu* m_table_context_menu;
-  QMenu* m_column_visibility_menu;
+  QMenu* m_row_menu = nullptr;
+  QMenu* m_columns_menu = nullptr;
+
+  QList<QMetaObject::Connection> m_links;
 };
