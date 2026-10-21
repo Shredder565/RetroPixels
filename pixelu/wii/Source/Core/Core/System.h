@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,121 +6,58 @@
 
 #include "Common/CommonTypes.h"
 
-class GeometryShaderManager;
+// Forward declarations of every subsystem the System owns.
+
+// Hardware.
+namespace AudioInterface { class AudioInterfaceManager; }
+namespace CPU { class CPUManager; }
+namespace CoreTiming { class CoreTimingManager; }
+namespace DSP { class DSPManager; }
+namespace DVD { class DVDInterface; class DVDThread; }
+namespace ExpansionInterface { class ExpansionInterfaceManager; }
+namespace GPFifo { class GPFifoManager; }
+namespace HSP { class HSPManager; }
+namespace IOS { class WiiIPC; }
+namespace Memory { class MemoryManager; }
+namespace MemoryInterface { class MemoryInterfaceManager; }
+namespace ProcessorInterface { class ProcessorInterfaceManager; }
+namespace SerialInterface { class SerialInterfaceManager; }
+namespace SystemTimers { class SystemTimersManager; }
+namespace VideoInterface { class VideoInterfaceManager; }
+struct Sram;
+
+// CPU emulation.
+namespace PowerPC { class MMU; class PowerPCManager; struct PowerPCState; }
 class Interpreter;
 class JitInterface;
-class PerformanceMetrics;
-class PixelShaderManager;
-class SoundStream;
-struct Sram;
-class VertexShaderManager;
-struct VideoEvents;
-class XFStateManager;
+class PPCSymbolDB;
 
-namespace AudioInterface
-{
-class AudioInterfaceManager;
-}
-namespace CPU
-{
-class CPUManager;
-}
-namespace CommandProcessor
-{
-class CommandProcessorManager;
-}
-namespace CoreTiming
-{
-class CoreTimingManager;
-}
-namespace DSP
-{
-class DSPManager;
-}
-namespace DVD
-{
-class DVDInterface;
-class DVDThread;
-}  // namespace DVD
-namespace ExpansionInterface
-{
-class ExpansionInterfaceManager;
-}
-namespace Fifo
-{
-class FifoManager;
-}
+// IOS and emulated USB devices.
+namespace IOS::HLE { class EmulationKernel; class USBScanner; }
+namespace IOS::HLE::USB { class SkylanderPortal; class InfinityBase; }
+
+// Graphics.
+namespace CommandProcessor { class CommandProcessorManager; }
+namespace Fifo { class FifoManager; }
+namespace PixelEngine { class PixelEngineManager; }
+namespace VideoCommon { class CustomResourceManager; }
+class GeometryShaderManager;
+class PixelShaderManager;
+class VertexShaderManager;
+class XFStateManager;
+struct VideoEvents;
+class PerformanceMetrics;
+
+// Everything else.
+namespace Movie { class MovieManager; }
 class FifoPlayer;
 class FifoRecorder;
-namespace GPFifo
-{
-class GPFifoManager;
-}
-namespace IOS::HLE
-{
-class EmulationKernel;
-class USBScanner;
-}  // namespace IOS::HLE
-namespace HSP
-{
-class HSPManager;
-}
-namespace IOS
-{
-class WiiIPC;
-}
-namespace IOS::HLE::USB
-{
-class SkylanderPortal;
-class InfinityBase;
-}  // namespace IOS::HLE::USB
-namespace Memory
-{
-class MemoryManager;
-}
-namespace MemoryInterface
-{
-class MemoryInterfaceManager;
-}
-namespace Movie
-{
-class MovieManager;
-}
-namespace PixelEngine
-{
-class PixelEngineManager;
-}
-namespace PowerPC
-{
-class MMU;
-class PowerPCManager;
-struct PowerPCState;
-}  // namespace PowerPC
-class PPCSymbolDB;
-namespace ProcessorInterface
-{
-class ProcessorInterfaceManager;
-}
-namespace SerialInterface
-{
-class SerialInterfaceManager;
-}
-namespace SystemTimers
-{
-class SystemTimersManager;
-}
-namespace VideoCommon
-{
-class CustomResourceManager;
-}  // namespace VideoCommon
-namespace VideoInterface
-{
-class VideoInterfaceManager;
-}
+class SoundStream;
 
 namespace Core
 {
-// Central class that encapsulates the running system.
+// The one emulated console: owns every subsystem object and a few flags
+// that are fixed for the length of an emulation session.
 class System
 {
 public:
@@ -129,17 +65,17 @@ public:
 
   System(const System&) = delete;
   System& operator=(const System&) = delete;
-
   System(System&&) = delete;
   System& operator=(System&&) = delete;
 
-  // Intermediate instance accessor until global state is eliminated.
+  // The process-wide instance, created on first use.
   static System& GetInstance()
   {
-    static System instance;
-    return instance;
+    static System s_system;
+    return s_system;
   }
 
+  // Latches the session settings (dual core, MMU, pause on panic, memory size).
   void Initialize();
 
   bool IsDualCoreMode() const { return m_separate_cpu_and_gpu_threads; }
@@ -209,8 +145,9 @@ public:
 private:
   System();
 
-  struct Impl;
-  std::unique_ptr<Impl> m_impl;
+  // All subsystem objects live here, defined in System.cpp.
+  struct Parts;
+  std::unique_ptr<Parts> m_parts;
 
   bool m_separate_cpu_and_gpu_threads = false;
   bool m_mmu_enabled = false;

@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/System.h"
 
@@ -7,6 +6,7 @@
 
 #include "AudioCommon/SoundStream.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FifoPlayer/FifoRecorder.h"
@@ -26,13 +26,13 @@
 #include "Core/HW/SystemTimers.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/HW/WII_IPC.h"
+#include "Core/IOS/USB/Emulated/Infinity.h"
+#include "Core/IOS/USB/Emulated/Skylanders/Skylander.h"
+#include "Core/IOS/USB/USBScanner.h"
 #include "Core/Movie.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
-#include "IOS/USB/Emulated/Infinity.h"
-#include "IOS/USB/Emulated/Skylanders/Skylander.h"
-#include "IOS/USB/USBScanner.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/GeometryShaderManager.h"
@@ -46,69 +46,71 @@
 
 namespace Core
 {
-struct System::Impl
+// The members are constructed top to bottom and destroyed bottom to top.
+// That order is load-bearing: some constructors register hooks with objects
+// declared above them (the video events come first for that reason), and the
+// MMU and interpreter take references to the PowerPC core and memory.
+struct System::Parts
 {
-  explicit Impl(System& system)
-      : m_audio_interface(system), m_core_timing(system), m_command_processor{system},
-        m_cpu(system), m_dsp(system), m_dvd_interface(system), m_dvd_thread(system),
-        m_expansion_interface(system), m_fifo{system}, m_gp_fifo(system), m_wii_ipc(system),
-        m_memory(system), m_pixel_engine{system}, m_power_pc(system),
-        m_mmu(system, m_memory, m_power_pc), m_processor_interface(system),
-        m_serial_interface(system), m_system_timers(system), m_video_interface(system),
-        m_interpreter(system, m_power_pc.GetPPCState(), m_mmu, m_power_pc.GetBranchWatch(),
-                      m_power_pc.GetSymbolDB()),
-        m_jit_interface(system), m_fifo_player(system), m_fifo_recorder(system), m_movie(system)
+  explicit Parts(System& owner)
+      : audio_interface(owner), core_timing(owner), command_processor{owner}, cpu(owner),
+        dsp(owner), dvd_interface(owner), dvd_thread(owner), expansion_interface(owner),
+        fifo{owner}, gp_fifo(owner), wii_ipc(owner), memory(owner), pixel_engine{owner},
+        power_pc(owner), mmu(owner, memory, power_pc), processor_interface(owner),
+        serial_interface(owner), system_timers(owner), video_interface(owner),
+        interpreter(owner, power_pc.GetPPCState(), mmu, power_pc.GetBranchWatch(),
+                    power_pc.GetSymbolDB()),
+        jit_interface(owner), fifo_player(owner), fifo_recorder(owner), movie(owner)
   {
   }
 
-  // Built first since other constructors may register hooks right away.
-  VideoEvents m_video_events;
+  VideoEvents video_events;
 
-  std::unique_ptr<SoundStream> m_sound_stream;
-  bool m_sound_stream_running = false;
-  bool m_audio_dump_started = false;
+  std::unique_ptr<SoundStream> sound_stream;
+  bool sound_stream_running = false;
+  bool audio_dump_started = false;
 
-  std::unique_ptr<IOS::HLE::EmulationKernel> m_ios;
+  std::unique_ptr<IOS::HLE::EmulationKernel> ios;
 
-  AudioInterface::AudioInterfaceManager m_audio_interface;
-  CoreTiming::CoreTimingManager m_core_timing;
-  CommandProcessor::CommandProcessorManager m_command_processor;
-  CPU::CPUManager m_cpu;
-  DSP::DSPManager m_dsp;
-  DVD::DVDInterface m_dvd_interface;
-  DVD::DVDThread m_dvd_thread;
-  ExpansionInterface::ExpansionInterfaceManager m_expansion_interface;
-  Fifo::FifoManager m_fifo;
-  GeometryShaderManager m_geometry_shader_manager;
-  GPFifo::GPFifoManager m_gp_fifo;
-  HSP::HSPManager m_hsp;
-  IOS::HLE::USB::InfinityBase m_infinity_base;
-  IOS::HLE::USB::SkylanderPortal m_skylander_portal;
-  IOS::WiiIPC m_wii_ipc;
-  Memory::MemoryManager m_memory;
-  MemoryInterface::MemoryInterfaceManager m_memory_interface;
-  PerformanceMetrics m_perf_metrics;
-  PixelEngine::PixelEngineManager m_pixel_engine;
-  PixelShaderManager m_pixel_shader_manager;
-  PowerPC::PowerPCManager m_power_pc;
-  PowerPC::MMU m_mmu;
-  ProcessorInterface::ProcessorInterfaceManager m_processor_interface;
-  SerialInterface::SerialInterfaceManager m_serial_interface;
-  Sram m_sram;
-  SystemTimers::SystemTimersManager m_system_timers;
-  IOS::HLE::USBScanner m_usb_scanner;
-  VertexShaderManager m_vertex_shader_manager;
-  XFStateManager m_xf_state_manager;
-  VideoInterface::VideoInterfaceManager m_video_interface;
-  Interpreter m_interpreter;
-  JitInterface m_jit_interface;
-  VideoCommon::CustomResourceManager m_custom_resource_manager;
-  FifoPlayer m_fifo_player;
-  FifoRecorder m_fifo_recorder;
-  Movie::MovieManager m_movie;
+  AudioInterface::AudioInterfaceManager audio_interface;
+  CoreTiming::CoreTimingManager core_timing;
+  CommandProcessor::CommandProcessorManager command_processor;
+  CPU::CPUManager cpu;
+  DSP::DSPManager dsp;
+  DVD::DVDInterface dvd_interface;
+  DVD::DVDThread dvd_thread;
+  ExpansionInterface::ExpansionInterfaceManager expansion_interface;
+  Fifo::FifoManager fifo;
+  GeometryShaderManager geometry_shaders;
+  GPFifo::GPFifoManager gp_fifo;
+  HSP::HSPManager hsp;
+  IOS::HLE::USB::InfinityBase infinity_base;
+  IOS::HLE::USB::SkylanderPortal skylander_portal;
+  IOS::WiiIPC wii_ipc;
+  Memory::MemoryManager memory;
+  MemoryInterface::MemoryInterfaceManager memory_interface;
+  PerformanceMetrics perf_metrics;
+  PixelEngine::PixelEngineManager pixel_engine;
+  PixelShaderManager pixel_shaders;
+  PowerPC::PowerPCManager power_pc;
+  PowerPC::MMU mmu;
+  ProcessorInterface::ProcessorInterfaceManager processor_interface;
+  SerialInterface::SerialInterfaceManager serial_interface;
+  Sram sram;
+  SystemTimers::SystemTimersManager system_timers;
+  IOS::HLE::USBScanner usb_scanner;
+  VertexShaderManager vertex_shaders;
+  XFStateManager xf_state;
+  VideoInterface::VideoInterfaceManager video_interface;
+  Interpreter interpreter;
+  JitInterface jit_interface;
+  VideoCommon::CustomResourceManager custom_resources;
+  FifoPlayer fifo_player;
+  FifoRecorder fifo_recorder;
+  Movie::MovieManager movie;
 };
 
-System::System() : m_impl{std::make_unique<Impl>(*this)}
+System::System() : m_parts{std::make_unique<Parts>(*this)}
 {
 }
 
@@ -122,242 +124,257 @@ void System::Initialize()
   m_simulated_memory_size = SConfig::GetInstance().GetSimulatedMemorySize();
 }
 
+// Sound output state.
+
 SoundStream* System::GetSoundStream() const
 {
-  return m_impl->m_sound_stream.get();
+  return m_parts->sound_stream.get();
 }
 
 void System::SetSoundStream(std::unique_ptr<SoundStream> sound_stream)
 {
-  m_impl->m_sound_stream = std::move(sound_stream);
+  m_parts->sound_stream = std::move(sound_stream);
 }
 
 bool System::IsSoundStreamRunning() const
 {
-  return m_impl->m_sound_stream_running;
+  return m_parts->sound_stream_running;
 }
 
 void System::SetSoundStreamRunning(bool running)
 {
-  m_impl->m_sound_stream_running = running;
+  m_parts->sound_stream_running = running;
 }
 
 bool System::IsAudioDumpStarted() const
 {
-  return m_impl->m_audio_dump_started;
+  return m_parts->audio_dump_started;
 }
 
 void System::SetAudioDumpStarted(bool started)
 {
-  m_impl->m_audio_dump_started = started;
+  m_parts->audio_dump_started = started;
 }
+
+// The IOS kernel only exists while a Wii title runs.
 
 IOS::HLE::EmulationKernel* System::GetIOS() const
 {
-  return m_impl->m_ios.get();
+  return m_parts->ios.get();
 }
 
 void System::SetIOS(std::unique_ptr<IOS::HLE::EmulationKernel> ios)
 {
-  m_impl->m_ios = std::move(ios);
+  m_parts->ios = std::move(ios);
 }
+
+// Hardware.
 
 AudioInterface::AudioInterfaceManager& System::GetAudioInterface() const
 {
-  return m_impl->m_audio_interface;
+  return m_parts->audio_interface;
 }
 
 CPU::CPUManager& System::GetCPU() const
 {
-  return m_impl->m_cpu;
+  return m_parts->cpu;
 }
 
 CoreTiming::CoreTimingManager& System::GetCoreTiming() const
 {
-  return m_impl->m_core_timing;
-}
-
-CommandProcessor::CommandProcessorManager& System::GetCommandProcessor() const
-{
-  return m_impl->m_command_processor;
+  return m_parts->core_timing;
 }
 
 DSP::DSPManager& System::GetDSP() const
 {
-  return m_impl->m_dsp;
+  return m_parts->dsp;
 }
 
 DVD::DVDInterface& System::GetDVDInterface() const
 {
-  return m_impl->m_dvd_interface;
+  return m_parts->dvd_interface;
 }
 
 DVD::DVDThread& System::GetDVDThread() const
 {
-  return m_impl->m_dvd_thread;
+  return m_parts->dvd_thread;
 }
 
 ExpansionInterface::ExpansionInterfaceManager& System::GetExpansionInterface() const
 {
-  return m_impl->m_expansion_interface;
-}
-
-Fifo::FifoManager& System::GetFifo() const
-{
-  return m_impl->m_fifo;
-}
-
-FifoPlayer& System::GetFifoPlayer() const
-{
-  return m_impl->m_fifo_player;
-}
-
-FifoRecorder& System::GetFifoRecorder() const
-{
-  return m_impl->m_fifo_recorder;
-}
-
-GeometryShaderManager& System::GetGeometryShaderManager() const
-{
-  return m_impl->m_geometry_shader_manager;
+  return m_parts->expansion_interface;
 }
 
 GPFifo::GPFifoManager& System::GetGPFifo() const
 {
-  return m_impl->m_gp_fifo;
+  return m_parts->gp_fifo;
 }
 
 HSP::HSPManager& System::GetHSP() const
 {
-  return m_impl->m_hsp;
-}
-
-Interpreter& System::GetInterpreter() const
-{
-  return m_impl->m_interpreter;
-}
-
-JitInterface& System::GetJitInterface() const
-{
-  return m_impl->m_jit_interface;
-}
-
-IOS::HLE::USB::SkylanderPortal& System::GetSkylanderPortal() const
-{
-  return m_impl->m_skylander_portal;
-}
-
-IOS::HLE::USB::InfinityBase& System::GetInfinityBase() const
-{
-  return m_impl->m_infinity_base;
+  return m_parts->hsp;
 }
 
 IOS::WiiIPC& System::GetWiiIPC() const
 {
-  return m_impl->m_wii_ipc;
+  return m_parts->wii_ipc;
 }
 
 Memory::MemoryManager& System::GetMemory() const
 {
-  return m_impl->m_memory;
+  return m_parts->memory;
 }
 
 MemoryInterface::MemoryInterfaceManager& System::GetMemoryInterface() const
 {
-  return m_impl->m_memory_interface;
-}
-
-PowerPC::MMU& System::GetMMU() const
-{
-  return m_impl->m_mmu;
-}
-
-Movie::MovieManager& System::GetMovie() const
-{
-  return m_impl->m_movie;
-}
-
-PerformanceMetrics& System::GetPerfMetrics() const
-{
-  return m_impl->m_perf_metrics;
-}
-
-PixelEngine::PixelEngineManager& System::GetPixelEngine() const
-{
-  return m_impl->m_pixel_engine;
-}
-
-PixelShaderManager& System::GetPixelShaderManager() const
-{
-  return m_impl->m_pixel_shader_manager;
-}
-
-PowerPC::PowerPCManager& System::GetPowerPC() const
-{
-  return m_impl->m_power_pc;
-}
-
-PowerPC::PowerPCState& System::GetPPCState() const
-{
-  return m_impl->m_power_pc.GetPPCState();
-}
-
-PPCSymbolDB& System::GetPPCSymbolDB() const
-{
-  return m_impl->m_power_pc.GetSymbolDB();
+  return m_parts->memory_interface;
 }
 
 ProcessorInterface::ProcessorInterfaceManager& System::GetProcessorInterface() const
 {
-  return m_impl->m_processor_interface;
+  return m_parts->processor_interface;
 }
 
 SerialInterface::SerialInterfaceManager& System::GetSerialInterface() const
 {
-  return m_impl->m_serial_interface;
+  return m_parts->serial_interface;
 }
 
 Sram& System::GetSRAM() const
 {
-  return m_impl->m_sram;
+  return m_parts->sram;
 }
 
 SystemTimers::SystemTimersManager& System::GetSystemTimers() const
 {
-  return m_impl->m_system_timers;
-}
-
-IOS::HLE::USBScanner& System::GetUSBScanner() const
-{
-  return m_impl->m_usb_scanner;
-}
-
-VertexShaderManager& System::GetVertexShaderManager() const
-{
-  return m_impl->m_vertex_shader_manager;
-}
-
-XFStateManager& System::GetXFStateManager() const
-{
-  return m_impl->m_xf_state_manager;
+  return m_parts->system_timers;
 }
 
 VideoInterface::VideoInterfaceManager& System::GetVideoInterface() const
 {
-  return m_impl->m_video_interface;
+  return m_parts->video_interface;
+}
+
+// CPU emulation.
+
+PowerPC::PowerPCManager& System::GetPowerPC() const
+{
+  return m_parts->power_pc;
+}
+
+PowerPC::PowerPCState& System::GetPPCState() const
+{
+  return m_parts->power_pc.GetPPCState();
+}
+
+PPCSymbolDB& System::GetPPCSymbolDB() const
+{
+  return m_parts->power_pc.GetSymbolDB();
+}
+
+PowerPC::MMU& System::GetMMU() const
+{
+  return m_parts->mmu;
+}
+
+Interpreter& System::GetInterpreter() const
+{
+  return m_parts->interpreter;
+}
+
+JitInterface& System::GetJitInterface() const
+{
+  return m_parts->jit_interface;
+}
+
+// Emulated USB toys and the USB device scanner.
+
+IOS::HLE::USB::SkylanderPortal& System::GetSkylanderPortal() const
+{
+  return m_parts->skylander_portal;
+}
+
+IOS::HLE::USB::InfinityBase& System::GetInfinityBase() const
+{
+  return m_parts->infinity_base;
+}
+
+IOS::HLE::USBScanner& System::GetUSBScanner() const
+{
+  return m_parts->usb_scanner;
+}
+
+// Graphics.
+
+CommandProcessor::CommandProcessorManager& System::GetCommandProcessor() const
+{
+  return m_parts->command_processor;
+}
+
+Fifo::FifoManager& System::GetFifo() const
+{
+  return m_parts->fifo;
+}
+
+PixelEngine::PixelEngineManager& System::GetPixelEngine() const
+{
+  return m_parts->pixel_engine;
+}
+
+GeometryShaderManager& System::GetGeometryShaderManager() const
+{
+  return m_parts->geometry_shaders;
+}
+
+PixelShaderManager& System::GetPixelShaderManager() const
+{
+  return m_parts->pixel_shaders;
+}
+
+VertexShaderManager& System::GetVertexShaderManager() const
+{
+  return m_parts->vertex_shaders;
+}
+
+XFStateManager& System::GetXFStateManager() const
+{
+  return m_parts->xf_state;
 }
 
 VideoCommon::CustomResourceManager& System::GetCustomResourceManager() const
 {
-  return m_impl->m_custom_resource_manager;
+  return m_parts->custom_resources;
 }
 
 VideoEvents& System::GetVideoEvents() const
 {
-  return m_impl->m_video_events;
+  return m_parts->video_events;
+}
+
+PerformanceMetrics& System::GetPerfMetrics() const
+{
+  return m_parts->perf_metrics;
+}
+
+// FIFO logs and movies.
+
+FifoPlayer& System::GetFifoPlayer() const
+{
+  return m_parts->fifo_player;
+}
+
+FifoRecorder& System::GetFifoRecorder() const
+{
+  return m_parts->fifo_recorder;
+}
+
+Movie::MovieManager& System::GetMovie() const
+{
+  return m_parts->movie;
 }
 }  // namespace Core
 
+// Declared in VideoCommon/VideoEvents.h for code that has no System at hand.
 VideoEvents& GetVideoEvents()
 {
   return Core::System::GetInstance().GetVideoEvents();

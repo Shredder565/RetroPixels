@@ -1,11 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Core
-
-// The external interface to the emulator core. Plus some extras.
-// This is another part of the emu that needs cleaning - Core.cpp really has
-// too much random junk inside.
+// The core's control surface for front ends: starting and stopping
+// emulation, pausing, frame stepping, running code on the CPU thread, and the
+// queue of jobs the core hands back to the host thread.
 
 #pragma once
 
@@ -28,6 +25,7 @@ class System;
 bool GetIsThrottlerTempDisabled();
 void SetIsThrottlerTempDisabled(bool disable);
 
+// Called by the video interface at every emulated field.
 void Callback_NewField(Core::System& system);
 
 enum class State
@@ -39,66 +37,59 @@ enum class State
   Starting,
 };
 
-// Console type values based on:
-//  - YAGCD 4.2.1.1.2
-//  - OSInit (GameCube ELF from Finding Nemo)
-//  - OSReportInfo (Wii ELF from Rayman Raving Rabbids)
+// The console type word games read from low memory (0x8000002C) or OSReport.
+// Values as documented by YAGCD section 4.2.1.1.2 and printed by retail SDK
+// OSInit/OSReportInfo builds.
 enum class ConsoleType : u32
 {
-  // 0x0XXXXXXX Retail units - Gamecube
+  // GameCube retail hardware.
   HW1 = 1,
   HW2 = 2,
   LatestProductionBoard = 3,
   Reserved = 4,
 
-  // 0x0XXXXXXX Retail units - Wii
-  PreProductionBoard0 = 0x10,    // Pre-production board 0
-  PreProductionBoard1 = 0x11,    // Pre-production board 1
-  PreProductionBoard2_1 = 0x12,  // Pre-production board 2-1
-  PreProductionBoard2_2 = 0x20,  // Pre-production board 2-2
+  // Wii retail and pre-production boards.
+  PreProductionBoard0 = 0x10,
+  PreProductionBoard1 = 0x11,
+  PreProductionBoard2_1 = 0x12,
+  PreProductionBoard2_2 = 0x20,
   RVL_Retail1 = 0x21,
   RVL_Retail2 = 0x22,
   RVL_Retail3 = 0x23,
-  RVA1 = 0x100,  // Revolution Arcade
+  RVA1 = 0x100,  // Revolution arcade board
 
-  // 0x1XXXXXXX Devkits - Gamecube
-  // Emulators
-  MacEmulator = 0x10000000,  // Mac Emulator
-  PcEmulator = 0x10000001,   // PC Emulator
-
-  // Embedded PowerPC series
-  Arthur = 0x10000002,  // EPPC Arthur
-  Minnow = 0x10000003,  // EPPC Minnow
-
-  // Development HW
-  // Version = (console_type & 0x0fffffff) - 3
+  // GameCube development systems. For FirstDevkit..ReservedDevkit the devkit
+  // version is (value & 0x0fffffff) - 3.
+  MacEmulator = 0x10000000,
+  PcEmulator = 0x10000001,
+  Arthur = 0x10000002,  // EPPC "Arthur" board
+  Minnow = 0x10000003,  // EPPC "Minnow" board
   FirstDevkit = 0x10000004,
   SecondDevkit = 0x10000005,
   LatestDevkit = 0x10000006,
   ReservedDevkit = 0x10000007,
 
-  // 0x1XXXXXXX Devkits - Wii
-  RevolutionEmulator = 0x10000008,  // Revolution Emulator
-  NDEV1_0 = 0x10000010,             // NDEV 1.0
-  NDEV1_1 = 0x10000011,             // NDEV 1.1
-  NDEV1_2 = 0x10000012,             // NDEV 1.2
-  NDEV2_0 = 0x10000020,             // NDEV 2.0
-  NDEV2_1 = 0x10000021,             // NDEV 2.1
+  // Wii development systems.
+  RevolutionEmulator = 0x10000008,
+  NDEV1_0 = 0x10000010,
+  NDEV1_1 = 0x10000011,
+  NDEV1_2 = 0x10000012,
+  NDEV2_0 = 0x10000020,
+  NDEV2_1 = 0x10000021,
 
-  // 0x2XXXXXXX TDEV-based emulation HW
-  // Version = (console_type & 0x0fffffff) - 3
+  // TDEV-based emulation hardware; version as for the devkits.
   HW2TDEVSystem = 0x20000005,
   LatestTDEVSystem = 0x20000006,
   ReservedTDEVSystem = 0x20000007,
 };
 
-// This is an RAII alternative to using PauseAndLock. If constructed from any thread other than the
-// CPU thread, the CPU thread is paused, and the current thread temporarily becomes the CPU thread.
-// If constructed from the CPU thread, nothing special happens.
+// Scoped access to emulator state that only the CPU thread may touch.
 //
-// Some functions use a parameter of this type to indicate that the function should only be called
-// from the CPU thread. If the parameter is a pointer, the function has a fallback for being called
-// from the wrong thread (with the argument being set to nullptr).
+// On the CPU thread this does nothing. On any other thread it pauses the CPU
+// thread and lets the current thread act as the CPU thread until the guard is
+// destroyed. Functions that take a CPUThreadGuard reference must be called this
+// way; ones that take a pointer accept nullptr and then fall back to something
+// thread-safe.
 class CPUThreadGuard final
 {
 public:
@@ -118,32 +109,35 @@ private:
   bool m_was_unpaused = false;
 };
 
-// These three are normally called from the Host thread. However, they can be called from any thread
-// that isn't launched by the emulator core.
+// Session control. Meant for the host (UI) thread, but any thread the core
+// did not start may call them.
 bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi);
 void Stop(Core::System& system);
 void Shutdown(Core::System& system);
 
+// Marks the calling thread as (no longer) the CPU or GPU thread.
 void DeclareAsCPUThread();
 void UndeclareAsCPUThread();
 void DeclareAsGPUThread();
 void UndeclareAsGPUThread();
 
+// A log line naming the calling thread, for the shutdown sequence.
 std::string StopMessage(bool main_thread, std::string_view message);
 
-// Returns true when GetState returns Running or Paused.
+// Running or Paused.
 bool IsRunning(Core::System& system);
-// Returns true when GetState returns Starting, Running or Paused.
+// Starting, Running or Paused.
 bool IsRunningOrStarting(Core::System& system);
-// Returns true when GetState returns Uninitialized.
+// Uninitialized.
 bool IsUninitialized(Core::System& system);
 
-bool IsCPUThread();  // this tells us whether we are the CPU thread.
+bool IsCPUThread();
 bool IsGPUThread();
 
+// True while something (a movie, NetPlay) needs bit-exact reproducible emulation.
 bool WantsDeterminism();
 
-// SetState can be called from any thread.
+// Pause or resume; safe from any thread, ignored unless emulation is running.
 void SetState(Core::System& system, State state, bool report_state_change = true,
               bool override_achievement_restrictions = false);
 State GetState(Core::System& system);
@@ -151,36 +145,32 @@ State GetState(Core::System& system);
 void SaveScreenShot();
 void SaveScreenShot(std::string_view name);
 
-// This displays messages in a user-visible way.
+// Shows an on-screen message while emulation runs.
 void DisplayMessage(std::string message, int time_in_ms);
 
 void FrameUpdateOnCPUThread();
 void OnFrameEnd(Core::System& system);
 
-// Run a function on the CPU thread, asynchronously.
+// Runs `function` on the CPU thread: immediately when called from it,
+// otherwise queued for it while it is briefly paused.
 void RunOnCPUThread(Core::System& system, Common::MoveOnlyFunction<void()> function);
 
-// for calling back into UI code without introducing a dependency on it in core
+// State change notifications for the UI.
 using StateChangedCallbackFunc = std::function<void(Core::State)>;
-
 [[nodiscard]] Common::EventHook AddOnStateChangedCallback(StateChangedCallbackFunc callback);
 void NotifyStateChanged(Core::State state);
 
 void UpdateWantDeterminism(Core::System& system, bool initial = false);
 
-// Queue an arbitrary function to asynchronously run once on the Host thread later.
-// Threadsafe. Can be called by any thread, including the Host itself.
-// Jobs will be executed in RELATIVE order. If you queue 2 jobs from the same thread
-// then they will be executed in the order they were queued; however, there is no
-// global order guarantee across threads - jobs from other threads may execute in
-// between.
-// NOTE: Make sure the jobs check the global state instead of assuming everything is
-//   still the same as when the job was queued.
-// NOTE: Jobs that are not set to run during stop will be discarded instead.
+// Hands `job` to the host thread, which runs it from HostDispatchJobs.
+// Thread-safe. Jobs queued by one thread run in the order they were queued;
+// jobs from different threads may interleave. A job should re-check the
+// emulator's state when it runs. Unless run_during_stop is set, jobs still
+// queued while emulation is stopping or stopped are dropped.
 void QueueHostJob(std::function<void(Core::System&)> job, bool run_during_stop = false);
 
-// Should be called periodically by the Host to run pending jobs.
-// WMUserJobDispatch will be sent when something is added to the queue.
+// Runs the queued host jobs; called by the host thread, which is told about
+// new jobs through Host_Message(WMUserJobDispatch).
 void HostDispatchJobs(Core::System& system);
 
 void DoFrameStep(Core::System& system);
@@ -188,5 +178,4 @@ void DoFrameStep(Core::System& system);
 void UpdateInputGate(bool require_focus, bool require_full_focus = false);
 
 void UpdateTitle(Core::System& system);
-
 }  // namespace Core
