@@ -329,9 +329,9 @@ std::optional<IPCReply> OH0::DeviceIOCtlV(const u64 device_id, const IOCtlVReque
   if (!device)
     return IPCReply(IPC_ENOENT);
 
-  constexpr std::array TRANSFERS = {USB::IOCTLV_USBV0_CTRLMSG, USB::IOCTLV_USBV0_BLKMSG,
-                                     USB::IOCTLV_USBV0_LBLKMSG, USB::IOCTLV_USBV0_INTRMSG,
-                                     USB::IOCTLV_USBV0_ISOMSG};
+  constexpr std::array<u32, 5> TRANSFERS = {
+      USB::IOCTLV_USBV0_CTRLMSG, USB::IOCTLV_USBV0_BLKMSG, USB::IOCTLV_USBV0_LBLKMSG,
+      USB::IOCTLV_USBV0_INTRMSG, USB::IOCTLV_USBV0_ISOMSG};
   if (std::ranges::find(TRANSFERS, request.request) != TRANSFERS.end())
   {
     return HandleTransfer(device, request.request,
