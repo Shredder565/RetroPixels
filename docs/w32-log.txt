@@ -9,8 +9,8 @@
   copyright or SPDX line. The Vulkan `CMakeLists.txt` is not a W32 file and
   is unchanged. `VulkanEntryPoints.inl` stays a list of the public API names
   (same names, same order, same module/instance/device and required
-  split; the row macros have new names, used only by `VulkanLoader`). The public
-  names, signatures, enums and layouts are kept: `Constants.h` (descriptor
+  split; the row macros have new names, used only by `VulkanLoader`).
+  The public names, signatures, enums and layouts are kept: `Constants.h` (descriptor
   set layouts, pipeline layouts, binding numbers, buffer sizes),
   `VulkanContext` and its `PhysicalDeviceInfo`, `CommandBufferManager`,
   `ObjectCache`, `StateTracker`, `StagingBuffer`, `StreamBuffer`,
