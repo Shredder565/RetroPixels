@@ -1,10 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include <QComboBox>
@@ -17,6 +17,7 @@ class ControlReference;
 class MappingWindow;
 class QAbstractButton;
 class QDialogButtonBox;
+class QHBoxLayout;
 class QLineEdit;
 class QTableWidget;
 class QVBoxLayout;
@@ -26,14 +27,21 @@ class QPushButton;
 class QSlider;
 class QSpinBox;
 class QTextDocument;
+class QTimer;
 
 namespace ControllerEmu
 {
 class EmulatedController;
 }
 
+namespace ciface::ExpressionParser
+{
+enum class ParseStatus;
+}
+
 class InputStateLineEdit;
 
+// Colours the tokens of a control expression as the document changes.
 class ControlExpressionSyntaxHighlighter final : public QObject
 {
   Q_OBJECT
@@ -41,9 +49,10 @@ public:
   explicit ControlExpressionSyntaxHighlighter(QTextDocument* parent);
 
 private:
-  void Highlight(QTextDocument* text_edit);
+  void Recolor(QTextDocument* document);
 };
 
+// Combo box that ignores the mouse wheel, so scrolling the dialog can't change it.
 class QComboBoxWithMouseWheelDisabled : public QComboBox
 {
   Q_OBJECT
@@ -51,10 +60,11 @@ public:
   explicit QComboBoxWithMouseWheelDisabled(QWidget* parent = nullptr) : QComboBox(parent) {}
 
 protected:
-  // Consumes event while doing nothing
   void wheelEvent(QWheelEvent* event) override;
 };
 
+// Editor for a single control reference's expression: pick a device and control, combine
+// with operators/functions/variables, set the multiplier, and detect inputs or test outputs.
 class IOWindow final : public QDialog
 {
   Q_OBJECT
@@ -65,7 +75,7 @@ public:
     Output
   };
 
-  explicit IOWindow(MappingWindow* window, ControllerEmu::EmulatedController* m_controller,
+  explicit IOWindow(MappingWindow* window, ControllerEmu::EmulatedController* controller,
                     ControlReference* ref, Type type);
 
 signals:
@@ -73,70 +83,66 @@ signals:
   void TestOutputComplete();
 
 private:
-  std::shared_ptr<ciface::Core::Device> GetSelectedDevice() const;
-
-  void CreateMainLayout();
-  void ConnectWidgets();
-  void ConfigChanged();
-  void Update();
-
-  void OnDialogButtonPressed(QAbstractButton* button);
-  void OnDeviceChanged();
-  void OnRangeChanged(int range);
-
-  void AppendSelectedOption();
-  void UpdateOptionList();
-  void UpdateDeviceList();
-  void ReleaseDevices();
-
   enum class UpdateMode
   {
     Normal,
     Force,
   };
 
-  void UpdateExpression(std::string new_expression, UpdateMode mode = UpdateMode::Normal);
+  bool IsInputEditor() const { return m_type == Type::Input; }
 
-  // Main Layout
-  QVBoxLayout* m_main_layout;
+  void BuildWidgets();
+  void FillHelperCombos();
+  void SetUpControlTable();
+  void ArrangeWidgets();
 
-  // Devices
-  QComboBox* m_devices_combo;
+  void WireSelection();
+  void WireDetection();
+  void WireOutputTest();
+  void WireEditing();
 
-  // Options
-  QTableWidget* m_option_list;
+  void SyncFromReference();
+  void Tick();
 
-  // Scalar
-  QSpinBox* m_scalar_spinbox;
+  void OnButtonBoxClicked(QAbstractButton* button);
+  void OnDeviceSelected();
+  void OnMultiplierChanged(int percent);
 
-  // Shared actions
-  QPushButton* m_select_button;
-  QComboBox* m_operators_combo;
-  QComboBox* m_variables_combo;
+  void InsertCurrentControl();
+  void FillControlTable();
+  void FillDeviceCombo();
+  void DropDeviceHandle();
+  void RefreshVariableItems();
+  void ShowParseResult(const std::optional<std::string>& error,
+                       ciface::ExpressionParser::ParseStatus status);
 
-  // Input actions
-  QPushButton* m_detect_button;
-  std::unique_ptr<ciface::Core::InputDetector> m_input_detector;
-  QComboBox* m_functions_combo;
+  void ApplyExpression(std::string expression, UpdateMode mode = UpdateMode::Normal);
 
-  // Output actions
-  QPushButton* m_test_button;
-  QTimer* m_output_test_timer;
+  ControlReference* const m_reference;
+  ControllerEmu::EmulatedController* const m_controller;
+  const Type m_type;
 
-  // Textarea
-  QPlainTextEdit* m_expression_text;
-  InputStateLineEdit* m_parse_text;
-
-  // Buttonbox
-  QDialogButtonBox* m_button_box;
-  QPushButton* m_clear_button;
-
-  ControlReference* m_reference;
+  // Expression to restore if the dialog is closed without OK.
   std::string m_original_expression;
-  ControllerEmu::EmulatedController* m_controller;
 
-  ciface::Core::DeviceQualifier m_devq;
-  Type m_type;
-  std::shared_ptr<ciface::Core::Device> m_selected_device;
-  std::mutex m_selected_device_mutex;
+  ciface::Core::DeviceQualifier m_device_qualifier;
+  std::shared_ptr<ciface::Core::Device> m_device;
+  std::mutex m_device_mutex;
+
+  std::unique_ptr<ciface::Core::InputDetector> m_detector;
+
+  QComboBox* m_device_combo;
+  QTableWidget* m_control_table;
+  QPushButton* m_insert_button;
+  QPushButton* m_detect_button;
+  QPushButton* m_test_button;
+  QDialogButtonBox* m_buttons;
+  QPushButton* m_clear_button;
+  QSpinBox* m_multiplier;
+  InputStateLineEdit* m_status_line;
+  QPlainTextEdit* m_editor;
+  QComboBox* m_operator_combo;
+  QComboBox* m_function_combo;
+  QComboBox* m_variable_combo;
+  QTimer* m_test_timer;
 };
