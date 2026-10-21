@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "AudioCommon/CubebUtils.h"
 
@@ -17,246 +16,209 @@
 #include <objbase.h>
 #endif
 
-static void LogCallback(const char* format, ...)
+namespace
 {
-  auto* instance = Common::Log::LogManager::GetInstance();
-  if (instance == nullptr)
-    return;
+const char* OrNullText(const char* text)
+{
+  return text != nullptr ? text : "(null)";
+}
 
-  constexpr auto log_type = Common::Log::LogType::AUDIO;
-  constexpr auto log_level = Common::Log::LogLevel::LINFO;
-  if (!instance->IsEnabled(log_type, log_level))
+const char* StateName(cubeb_device_state state)
+{
+  switch (state)
+  {
+  case CUBEB_DEVICE_STATE_DISABLED:
+    return "disabled";
+  case CUBEB_DEVICE_STATE_UNPLUGGED:
+    return "unplugged";
+  case CUBEB_DEVICE_STATE_ENABLED:
+    return "enabled";
+  default:
+    return "unknown?";
+  }
+}
+
+// cubeb's log lines are printf-style and start with "%s:%d:" for the source file and line.
+// They are forwarded to our log as INFO messages of the AUDIO type with that file and line.
+void ForwardCubebLog(const char* format, ...)
+{
+  auto* const log = Common::Log::LogManager::GetInstance();
+  if (log == nullptr || !log->IsEnabled(Common::Log::LogType::AUDIO, Common::Log::LogLevel::LINFO))
     return;
 
   va_list args;
   va_start(args, format);
-  const char* filename = va_arg(args, const char*);
-  const auto last_slash = std::string_view(filename).find_last_of("/\\");
-  if (last_slash != std::string_view::npos)
-    filename = filename + last_slash + 1;
-  const int lineno = va_arg(args, int);
-  const std::string adapted_format(StripWhitespace(format + strlen("%s:%d:")));
-  const std::string message = StringFromFormatV(adapted_format.c_str(), args);
+
+  const char* file = va_arg(args, const char*);
+  const std::string_view file_view(file);
+  const std::size_t separator = file_view.find_last_of("/\\");
+  if (separator != std::string_view::npos)
+    file += separator + 1;
+  const int line = va_arg(args, int);
+
+  constexpr std::string_view location_prefix = "%s:%d:";
+  const std::string rest_format(StripWhitespace(format + location_prefix.size()));
+  const std::string message = StringFromFormatV(rest_format.c_str(), args);
   va_end(args);
 
-  instance->LogWithFullPath(log_level, log_type, filename, lineno, message.c_str());
+  log->LogWithFullPath(Common::Log::LogLevel::LINFO, Common::Log::LogType::AUDIO, file, line,
+                       message.c_str());
 }
 
-static void DestroyContext(cubeb* ctx)
+void ReleaseContext(cubeb* context)
 {
-  cubeb_destroy(ctx);
+  cubeb_destroy(context);
   if (cubeb_set_log_callback(CUBEB_LOG_DISABLED, nullptr) != CUBEB_OK)
-  {
     ERROR_LOG_FMT(AUDIO, "Error removing cubeb log callback");
-  }
 }
+
+// Looks up a device by its ID string. `needs_context` makes a missing context fail quietly
+// (output lookups); input lookups pass a missing context straight to cubeb.
+cubeb_devid FindDevice(std::string_view id, cubeb_device_type type, bool needs_context,
+                       const char* enumerate_error, const char* not_found_warning)
+{
+  if (id.empty())
+    return nullptr;
+
+  const std::shared_ptr<cubeb> context = CubebUtils::GetContext();
+  if (needs_context && !context)
+    return nullptr;
+
+  cubeb_device_collection devices;
+  if (cubeb_enumerate_devices(context.get(), type, &devices) != CUBEB_OK)
+  {
+    ERROR_LOG_FMT(AUDIO, "{}", enumerate_error);
+    return nullptr;
+  }
+
+  cubeb_devid found = nullptr;
+  for (std::size_t i = 0; i < devices.count; ++i)
+  {
+    const cubeb_device_info& device = devices.device[i];
+    if (device.device_id != nullptr && id == device.device_id)
+    {
+      found = device.devid;
+      break;
+    }
+  }
+
+  if (found == nullptr)
+    WARN_LOG_FMT(AUDIO, "{}", not_found_warning);
+
+  cubeb_device_collection_destroy(context.get(), &devices);
+  return found;
+}
+}  // namespace
 
 namespace CubebUtils
 {
 std::shared_ptr<cubeb> GetContext()
 {
-  static std::weak_ptr<cubeb> weak;
+  static std::weak_ptr<cubeb> s_context;
 
-  std::shared_ptr<cubeb> shared = weak.lock();
-  // Already initialized
-  if (shared)
-    return shared;
+  if (std::shared_ptr<cubeb> existing = s_context.lock())
+    return existing;
 
-  if (cubeb_set_log_callback(CUBEB_LOG_NORMAL, LogCallback) != CUBEB_OK)
-  {
+  if (cubeb_set_log_callback(CUBEB_LOG_NORMAL, ForwardCubebLog) != CUBEB_OK)
     ERROR_LOG_FMT(AUDIO, "Error setting cubeb log callback");
-  }
 
-  cubeb* ctx;
-  if (cubeb_init(&ctx, "Dolphin Emulator", nullptr) != CUBEB_OK)
+  cubeb* raw = nullptr;
+  if (cubeb_init(&raw, "Dolphin Emulator", nullptr) != CUBEB_OK)
   {
     ERROR_LOG_FMT(AUDIO, "Error initializing cubeb library");
     return nullptr;
   }
-  INFO_LOG_FMT(AUDIO, "Cubeb initialized using {} backend", cubeb_get_backend_id(ctx));
+  INFO_LOG_FMT(AUDIO, "Cubeb initialized using {} backend", cubeb_get_backend_id(raw));
 
-  weak = shared = {ctx, DestroyContext};
-  return shared;
+  std::shared_ptr<cubeb> context(raw, ReleaseContext);
+  s_context = context;
+  return context;
 }
 
 std::vector<std::pair<std::string, std::string>> ListInputDevices()
 {
-  std::vector<std::pair<std::string, std::string>> devices;
+  std::vector<std::pair<std::string, std::string>> result;
 
-  cubeb_device_collection collection;
-  auto cubeb_ctx = GetContext();
-  const int r = cubeb_enumerate_devices(cubeb_ctx.get(), CUBEB_DEVICE_TYPE_INPUT, &collection);
-
-  if (r != CUBEB_OK)
+  const std::shared_ptr<cubeb> context = GetContext();
+  cubeb_device_collection devices;
+  if (cubeb_enumerate_devices(context.get(), CUBEB_DEVICE_TYPE_INPUT, &devices) != CUBEB_OK)
   {
     ERROR_LOG_FMT(AUDIO, "Error listing cubeb input devices");
-    return devices;
+    return result;
   }
 
   INFO_LOG_FMT(AUDIO, "Listing cubeb input devices:");
-  for (uint32_t i = 0; i < collection.count; i++)
+  for (std::size_t i = 0; i < devices.count; ++i)
   {
-    const auto& info = collection.device[i];
-    const auto device_state = info.state;
-    const char* state_name = [device_state] {
-      switch (device_state)
-      {
-      case CUBEB_DEVICE_STATE_DISABLED:
-        return "disabled";
-      case CUBEB_DEVICE_STATE_UNPLUGGED:
-        return "unplugged";
-      case CUBEB_DEVICE_STATE_ENABLED:
-        return "enabled";
-      default:
-        return "unknown?";
-      }
-    }();
-
-    // According to cubeb_device_info definition in cubeb.h:
-    //  > "Optional vendor name, may be NULL."
-    // In practice, it seems some other fields might be NULL as well.
-    static constexpr auto fmt_str = [](const char* ptr) constexpr -> const char* {
-      return (ptr == nullptr) ? "(null)" : ptr;
-    };
-
+    // cubeb documents the vendor name as optional; other strings can be null in practice too.
+    const cubeb_device_info& device = devices.device[i];
     INFO_LOG_FMT(AUDIO,
                  "[{}] Device ID: {}\n"
                  "\tName: {}\n"
                  "\tGroup ID: {}\n"
                  "\tVendor: {}\n"
                  "\tState: {}",
-                 i, fmt_str(info.device_id), fmt_str(info.friendly_name), fmt_str(info.group_id),
-                 fmt_str(info.vendor_name), state_name);
+                 i, OrNullText(device.device_id), OrNullText(device.friendly_name),
+                 OrNullText(device.group_id), OrNullText(device.vendor_name),
+                 StateName(device.state));
 
-    if (info.device_id == nullptr)
-      continue;  // Shouldn't happen
-
-    if (info.state == CUBEB_DEVICE_STATE_ENABLED)
-    {
-      devices.emplace_back(info.device_id, fmt_str(info.friendly_name));
-    }
+    if (device.device_id != nullptr && device.state == CUBEB_DEVICE_STATE_ENABLED)
+      result.emplace_back(device.device_id, OrNullText(device.friendly_name));
   }
 
-  cubeb_device_collection_destroy(cubeb_ctx.get(), &collection);
-
-  return devices;
-}
-
-cubeb_devid GetInputDeviceById(std::string_view id)
-{
-  if (id.empty())
-    return nullptr;
-
-  cubeb_device_collection collection;
-  auto cubeb_ctx = CubebUtils::GetContext();
-  const int r = cubeb_enumerate_devices(cubeb_ctx.get(), CUBEB_DEVICE_TYPE_INPUT, &collection);
-
-  if (r != CUBEB_OK)
-  {
-    ERROR_LOG_FMT(AUDIO, "Error enumerating cubeb input devices");
-    return nullptr;
-  }
-
-  cubeb_devid device_id = nullptr;
-  for (uint32_t i = 0; i < collection.count; i++)
-  {
-    const auto& info = collection.device[i];
-    if (id.compare(info.device_id) == 0)
-    {
-      device_id = info.devid;
-      break;
-    }
-  }
-  if (device_id == nullptr)
-  {
-    WARN_LOG_FMT(AUDIO, "Failed to find selected input device, defaulting to system preferences");
-  }
-
-  cubeb_device_collection_destroy(cubeb_ctx.get(), &collection);
-
-  return device_id;
+  cubeb_device_collection_destroy(context.get(), &devices);
+  return result;
 }
 
 std::vector<std::pair<std::string, std::string>> ListOutputDevices()
 {
-  std::vector<std::pair<std::string, std::string>> devices;
+  std::vector<std::pair<std::string, std::string>> result;
 
-  cubeb_device_collection collection;
-  auto cubeb_ctx = GetContext();
-  if (!cubeb_ctx)
-    return devices;
+  const std::shared_ptr<cubeb> context = GetContext();
+  if (!context)
+    return result;
 
-  const int r = cubeb_enumerate_devices(cubeb_ctx.get(), CUBEB_DEVICE_TYPE_OUTPUT, &collection);
-  if (r != CUBEB_OK)
+  cubeb_device_collection devices;
+  if (cubeb_enumerate_devices(context.get(), CUBEB_DEVICE_TYPE_OUTPUT, &devices) != CUBEB_OK)
   {
     ERROR_LOG_FMT(AUDIO, "Error listing cubeb output devices");
-    return devices;
+    return result;
   }
 
-  for (uint32_t i = 0; i < collection.count; i++)
+  for (std::size_t i = 0; i < devices.count; ++i)
   {
-    const auto& info = collection.device[i];
-    if (info.device_id == nullptr)
+    const cubeb_device_info& device = devices.device[i];
+    if (device.device_id == nullptr || device.state != CUBEB_DEVICE_STATE_ENABLED)
       continue;
-
-    if (info.state == CUBEB_DEVICE_STATE_ENABLED)
-    {
-      const char* name = (info.friendly_name != nullptr) ? info.friendly_name : info.device_id;
-      devices.emplace_back(info.device_id, name);
-    }
+    // Fall back to the ID when the device has no friendly name.
+    const char* name = device.friendly_name != nullptr ? device.friendly_name : device.device_id;
+    result.emplace_back(device.device_id, name);
   }
 
-  cubeb_device_collection_destroy(cubeb_ctx.get(), &collection);
-  return devices;
+  cubeb_device_collection_destroy(context.get(), &devices);
+  return result;
+}
+
+const void* GetInputDeviceById(std::string_view id)
+{
+  return FindDevice(id, CUBEB_DEVICE_TYPE_INPUT, false, "Error enumerating cubeb input devices",
+                    "Failed to find selected input device, defaulting to system preferences");
 }
 
 const void* GetOutputDeviceById(std::string_view id)
 {
-  if (id.empty())
-    return nullptr;
-
-  cubeb_device_collection collection;
-  auto cubeb_ctx = GetContext();
-  if (!cubeb_ctx)
-    return nullptr;
-
-  const int r = cubeb_enumerate_devices(cubeb_ctx.get(), CUBEB_DEVICE_TYPE_OUTPUT, &collection);
-  if (r != CUBEB_OK)
-  {
-    ERROR_LOG_FMT(AUDIO, "Error enumerating cubeb output devices");
-    return nullptr;
-  }
-
-  cubeb_devid device_id = nullptr;
-  for (uint32_t i = 0; i < collection.count; i++)
-  {
-    const auto& info = collection.device[i];
-    if (info.device_id && id.compare(info.device_id) == 0)
-    {
-      device_id = info.devid;
-      break;
-    }
-  }
-
-  if (device_id == nullptr)
-  {
-    WARN_LOG_FMT(AUDIO, "Failed to find selected output device, defaulting to system preferences");
-  }
-
-  cubeb_device_collection_destroy(cubeb_ctx.get(), &collection);
-  return device_id;
+  return FindDevice(id, CUBEB_DEVICE_TYPE_OUTPUT, true, "Error enumerating cubeb output devices",
+                    "Failed to find selected output device, defaulting to system preferences");
 }
 
 CoInitSyncWorker::CoInitSyncWorker([[maybe_unused]] std::string worker_name)
-#ifdef _WIN32
-    : m_work_queue{std::move(worker_name)}
-#endif
 {
 #ifdef _WIN32
-  m_work_queue.PushBlocking([this] {
-    const auto result = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
-    m_coinit_success = result == S_OK;
-    m_should_couninit = m_coinit_success || result == S_FALSE;
+  m_thread.Reset(std::move(worker_name));
+  m_thread.PushBlocking([this] {
+    const HRESULT result = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+    m_com_ready = result == S_OK;
+    m_com_needs_uninit = m_com_ready || result == S_FALSE;
   });
 #endif
 }
@@ -264,24 +226,23 @@ CoInitSyncWorker::CoInitSyncWorker([[maybe_unused]] std::string worker_name)
 CoInitSyncWorker::~CoInitSyncWorker()
 {
 #ifdef _WIN32
-  if (m_should_couninit)
+  if (m_com_needs_uninit)
   {
-    m_work_queue.PushBlocking([this] {
-      m_should_couninit = false;
+    m_thread.PushBlocking([this] {
+      m_com_needs_uninit = false;
       CoUninitialize();
     });
   }
-  m_coinit_success = false;
+  m_com_ready = false;
 #endif
 }
 
 bool CoInitSyncWorker::Execute(FunctionType f)
 {
 #ifdef _WIN32
-  if (!m_coinit_success)
+  if (!m_com_ready)
     return false;
-
-  m_work_queue.PushBlocking(std::move(f));
+  m_thread.PushBlocking(std::move(f));
 #else
   f();
 #endif

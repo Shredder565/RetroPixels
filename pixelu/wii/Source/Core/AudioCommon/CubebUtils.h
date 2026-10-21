@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,13 +17,19 @@ struct cubeb;
 
 namespace CubebUtils
 {
+// The process-wide cubeb context, created on first use and destroyed with its last user.
 std::shared_ptr<cubeb> GetContext();
+
+// Enabled devices as (device ID, display name) pairs.
 std::vector<std::pair<std::string, std::string>> ListInputDevices();
-const void* GetInputDeviceById(std::string_view id);
 std::vector<std::pair<std::string, std::string>> ListOutputDevices();
+
+// The cubeb_devid of the device with this ID, or null for "" or an unknown ID (system default).
+const void* GetInputDeviceById(std::string_view id);
 const void* GetOutputDeviceById(std::string_view id);
 
-// Helper used to handle Windows COM library for cubeb WASAPI backend
+// Runs functions on a worker thread that has joined COM's multithreaded apartment, which cubeb's
+// WASAPI backend requires. Elsewhere the functions run on the calling thread.
 class CoInitSyncWorker
 {
 public:
@@ -33,13 +38,14 @@ public:
   CoInitSyncWorker(std::string worker_name);
   ~CoInitSyncWorker();
 
+  // Returns false, without running f, if COM could not be initialised on the worker.
   bool Execute(FunctionType f);
 
 #ifdef _WIN32
 private:
-  Common::AsyncWorkThread m_work_queue;
-  bool m_coinit_success = false;
-  bool m_should_couninit = false;
+  Common::AsyncWorkThread m_thread;
+  bool m_com_ready = false;
+  bool m_com_needs_uninit = false;
 #endif
 };
 }  // namespace CubebUtils

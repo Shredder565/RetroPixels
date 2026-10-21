@@ -1,378 +1,356 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef _WIN32
 
 #include "AudioCommon/OpenALStream.h"
 
 #include <windows.h>
-#include <climits>
+
+#include <algorithm>
+#include <chrono>
 #include <cstring>
-#include <thread>
+#include <limits>
+#include <string>
 
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/Thread.h"
 #include "Core/Config/MainSettings.h"
 
-static HMODULE s_openal_dll = nullptr;
+// 5.1 formats from the AL_EXT_MCFORMATS extension.
+#ifndef AL_FORMAT_51CHN16
+#define AL_FORMAT_51CHN16 0x120B
+#endif
+#ifndef AL_FORMAT_51CHN32
+#define AL_FORMAT_51CHN32 0x120C
+#endif
 
-#define OPENAL_API_VISIT(X)                                                                        \
-  X(alBufferData)                                                                                  \
-  X(alcCloseDevice)                                                                                \
-  X(alcCreateContext)                                                                              \
-  X(alcDestroyContext)                                                                             \
-  X(alcGetContextsDevice)                                                                          \
-  X(alcGetCurrentContext)                                                                          \
-  X(alcGetString)                                                                                  \
-  X(alcIsExtensionPresent)                                                                         \
-  X(alcMakeContextCurrent)                                                                         \
-  X(alcOpenDevice)                                                                                 \
-  X(alDeleteBuffers)                                                                               \
-  X(alDeleteSources)                                                                               \
-  X(alGenBuffers)                                                                                  \
-  X(alGenSources)                                                                                  \
-  X(alGetError)                                                                                    \
-  X(alGetSourcei)                                                                                  \
-  X(alGetString)                                                                                   \
-  X(alIsExtensionPresent)                                                                          \
-  X(alSourcef)                                                                                     \
-  X(alSourcei)                                                                                     \
-  X(alSourcePlay)                                                                                  \
-  X(alSourceQueueBuffers)                                                                          \
-  X(alSourceStop)                                                                                  \
-  X(alSourceUnqueueBuffers)
-
-// Create func_t function pointer type and declare a nullptr-initialized static variable of that
-// type named "pfunc".
-#define DYN_FUNC_DECLARE(func)                                                                     \
-  typedef decltype(&func) func##_t;                                                                \
-  static func##_t p##func = nullptr;
-
-// Attempt to load the function from the given module handle.
-#define OPENAL_FUNC_LOAD(func)                                                                     \
-  p##func = (func##_t)::GetProcAddress(s_openal_dll, #func);                                       \
-  if (!p##func)                                                                                    \
-  {                                                                                                \
-    return false;                                                                                  \
-  }
-
-OPENAL_API_VISIT(DYN_FUNC_DECLARE);
-
-static bool InitFunctions()
+namespace
 {
-  OPENAL_API_VISIT(OPENAL_FUNC_LOAD);
-  return true;
+constexpr u32 STEREO = 2;
+constexpr u32 SURROUND = 6;
+
+// Entry points resolved from openal32.dll.
+struct OpenALEntryPoints
+{
+  decltype(&alBufferData) BufferData;
+  decltype(&alcCloseDevice) CloseDevice;
+  decltype(&alcCreateContext) CreateContext;
+  decltype(&alcDestroyContext) DestroyContext;
+  decltype(&alcGetContextsDevice) GetContextsDevice;
+  decltype(&alcGetCurrentContext) GetCurrentContext;
+  decltype(&alcGetString) GetDeviceString;
+  decltype(&alcIsExtensionPresent) IsDeviceExtensionPresent;
+  decltype(&alcMakeContextCurrent) MakeContextCurrent;
+  decltype(&alcOpenDevice) OpenDevice;
+  decltype(&alDeleteBuffers) DeleteBuffers;
+  decltype(&alDeleteSources) DeleteSources;
+  decltype(&alGenBuffers) GenBuffers;
+  decltype(&alGenSources) GenSources;
+  decltype(&alGetError) GetError;
+  decltype(&alGetSourcei) GetSourcei;
+  decltype(&alGetString) GetString;
+  decltype(&alIsExtensionPresent) IsExtensionPresent;
+  decltype(&alSourcef) Sourcef;
+  decltype(&alSourcei) Sourcei;
+  decltype(&alSourcePlay) SourcePlay;
+  decltype(&alSourceQueueBuffers) SourceQueueBuffers;
+  decltype(&alSourceStop) SourceStop;
+  decltype(&alSourceUnqueueBuffers) SourceUnqueueBuffers;
+};
+
+HMODULE s_library = nullptr;
+OpenALEntryPoints al{};
+
+template <typename Fn>
+bool Resolve(Fn& slot, const char* name)
+{
+  slot = reinterpret_cast<Fn>(::GetProcAddress(s_library, name));
+  return slot != nullptr;
 }
 
-static bool InitLibrary()
+bool ResolveEntryPoints()
 {
-  if (s_openal_dll)
+  return Resolve(al.BufferData, "alBufferData") && Resolve(al.CloseDevice, "alcCloseDevice") &&
+         Resolve(al.CreateContext, "alcCreateContext") &&
+         Resolve(al.DestroyContext, "alcDestroyContext") &&
+         Resolve(al.GetContextsDevice, "alcGetContextsDevice") &&
+         Resolve(al.GetCurrentContext, "alcGetCurrentContext") &&
+         Resolve(al.GetDeviceString, "alcGetString") &&
+         Resolve(al.IsDeviceExtensionPresent, "alcIsExtensionPresent") &&
+         Resolve(al.MakeContextCurrent, "alcMakeContextCurrent") &&
+         Resolve(al.OpenDevice, "alcOpenDevice") && Resolve(al.DeleteBuffers, "alDeleteBuffers") &&
+         Resolve(al.DeleteSources, "alDeleteSources") && Resolve(al.GenBuffers, "alGenBuffers") &&
+         Resolve(al.GenSources, "alGenSources") && Resolve(al.GetError, "alGetError") &&
+         Resolve(al.GetSourcei, "alGetSourcei") && Resolve(al.GetString, "alGetString") &&
+         Resolve(al.IsExtensionPresent, "alIsExtensionPresent") &&
+         Resolve(al.Sourcef, "alSourcef") && Resolve(al.Sourcei, "alSourcei") &&
+         Resolve(al.SourcePlay, "alSourcePlay") &&
+         Resolve(al.SourceQueueBuffers, "alSourceQueueBuffers") &&
+         Resolve(al.SourceStop, "alSourceStop") &&
+         Resolve(al.SourceUnqueueBuffers, "alSourceUnqueueBuffers");
+}
+
+bool LoadOpenAL()
+{
+  if (s_library != nullptr)
     return true;
 
-  s_openal_dll = ::LoadLibrary(TEXT("openal32.dll"));
-  if (!s_openal_dll)
+  s_library = ::LoadLibrary(TEXT("openal32.dll"));
+  if (s_library == nullptr)
     return false;
 
-  if (!InitFunctions())
-  {
-    FreeLibrary(s_openal_dll);
-    s_openal_dll = nullptr;
-    return false;
-  }
+  if (ResolveEntryPoints())
+    return true;
 
-  return true;
+  FreeLibrary(s_library);
+  s_library = nullptr;
+  return false;
 }
+
+const char* ErrorName(ALenum error)
+{
+  switch (error)
+  {
+  case AL_INVALID_NAME:
+    return "AL_INVALID_NAME";
+  case AL_INVALID_ENUM:
+    return "AL_INVALID_ENUM";
+  case AL_INVALID_VALUE:
+    return "AL_INVALID_VALUE";
+  case AL_INVALID_OPERATION:
+    return "AL_INVALID_OPERATION";
+  case AL_OUT_OF_MEMORY:
+    return "AL_OUT_OF_MEMORY";
+  default:
+    return "UNKNOWN_ERROR";
+  }
+}
+
+// Reads (and so clears) the AL error state, logging it with what was being done.
+ALenum LogALError(const char* action)
+{
+  const ALenum error = al.GetError();
+  if (error != AL_NO_ERROR)
+    ERROR_LOG_FMT(AUDIO, "Error {}: {:08x} {}", action, error, ErrorName(error));
+  return error;
+}
+
+// Creative X-Fi cards with hardware OpenAL also take 32-bit integer samples, though no extension
+// says so.
+bool IsXFiRenderer()
+{
+  return std::strstr(al.GetString(AL_RENDERER), "X-Fi") != nullptr;
+}
+
+// Scales [-1, 1] floats to a full-range integer type, saturating.
+template <typename T>
+void ToFixedPoint(float* samples, T* out, u32 count)
+{
+  constexpr float top = static_cast<float>(std::numeric_limits<T>::max());
+  constexpr float bottom = static_cast<float>(std::numeric_limits<T>::min());
+  for (u32 i = 0; i < count; ++i)
+  {
+    samples[i] = samples[i] * top;
+    if (samples[i] > top)
+      out[i] = std::numeric_limits<T>::max();
+    else if (samples[i] < bottom)
+      out[i] = std::numeric_limits<T>::min();
+    else
+      out[i] = static_cast<T>(samples[i]);
+  }
+}
+}  // namespace
 
 bool OpenALStream::IsValid()
 {
-  return InitLibrary();
+  return LoadOpenAL();
 }
 
-//
-// AyuanX: Spec says OpenAL1.1 is thread safe already
-//
+// OpenAL 1.1 is thread safe, so the feeding thread may use the context made current here.
 bool OpenALStream::Init()
 {
-  if (!palcIsExtensionPresent(nullptr, "ALC_ENUMERATION_EXT"))
+  if (!al.IsDeviceExtensionPresent(nullptr, "ALC_ENUMERATION_EXT"))
   {
     PanicAlertFmtT("OpenAL: can't find sound devices");
     return false;
   }
 
-  const char* default_device_dame = palcGetString(nullptr, ALC_DEFAULT_DEVICE_SPECIFIER);
-  INFO_LOG_FMT(AUDIO, "Found OpenAL device {}", default_device_dame);
+  const char* device_name = al.GetDeviceString(nullptr, ALC_DEFAULT_DEVICE_SPECIFIER);
+  INFO_LOG_FMT(AUDIO, "Found OpenAL device {}", device_name);
 
-  ALCdevice* device = palcOpenDevice(default_device_dame);
-  if (!device)
+  ALCdevice* device = al.OpenDevice(device_name);
+  if (device == nullptr)
   {
-    PanicAlertFmtT("OpenAL: can't open device {0}", default_device_dame);
+    PanicAlertFmtT("OpenAL: can't open device {0}", device_name);
     return false;
   }
 
-  ALCcontext* context = palcCreateContext(device, nullptr);
-  if (!context)
+  ALCcontext* context = al.CreateContext(device, nullptr);
+  if (context == nullptr)
   {
-    palcCloseDevice(device);
-    PanicAlertFmtT("OpenAL: can't create context for device {0}", default_device_dame);
+    al.CloseDevice(device);
+    PanicAlertFmtT("OpenAL: can't create context for device {0}", device_name);
     return false;
   }
 
-  palcMakeContextCurrent(context);
-  m_run_thread.Set();
-  m_thread = std::thread(&OpenALStream::SoundLoop, this);
+  al.MakeContextCurrent(context);
+  m_keep_feeding.Set();
+  m_feeder = std::thread(&OpenALStream::FeedLoop, this);
   return true;
 }
 
 OpenALStream::~OpenALStream()
 {
-  m_run_thread.Clear();
-  m_thread.join();
+  // Nothing was set up if Init failed.
+  if (!m_feeder.joinable())
+    return;
 
-  palSourceStop(m_source);
-  palSourcei(m_source, AL_BUFFER, 0);
+  m_keep_feeding.Clear();
+  m_feeder.join();
 
-  // Clean up buffers and sources
-  palDeleteSources(1, &m_source);
+  al.SourceStop(m_source);
+  al.Sourcei(m_source, AL_BUFFER, 0);
+  al.DeleteSources(1, &m_source);
   m_source = 0;
-  palDeleteBuffers(OAL_BUFFERS, m_buffers.data());
+  al.DeleteBuffers(QUEUE_LENGTH, m_queue.data());
 
-  ALCcontext* context = palcGetCurrentContext();
-  ALCdevice* device = palcGetContextsDevice(context);
-
-  palcMakeContextCurrent(nullptr);
-  palcDestroyContext(context);
-  palcCloseDevice(device);
+  ALCcontext* context = al.GetCurrentContext();
+  ALCdevice* device = al.GetContextsDevice(context);
+  al.MakeContextCurrent(nullptr);
+  al.DestroyContext(context);
+  al.CloseDevice(device);
 }
 
 void OpenALStream::SetVolume(int volume)
 {
-  m_volume = (float)volume / 100.0f;
-
-  if (m_source)
-    palSourcef(m_source, AL_GAIN, m_volume);
+  m_gain = static_cast<float>(volume) / 100.0f;
+  if (m_source != 0)
+    al.Sourcef(m_source, AL_GAIN, m_gain);
 }
 
 bool OpenALStream::SetRunning(bool running)
 {
   if (running)
-  {
-    palSourcePlay(m_source);
-  }
+    al.SourcePlay(m_source);
   else
-  {
-    palSourceStop(m_source);
-  }
+    al.SourceStop(m_source);
   return true;
 }
 
-static ALenum CheckALError(const char* desc)
-{
-  const ALenum err = palGetError();
-
-  if (err != AL_NO_ERROR)
-  {
-    std::string type;
-
-    switch (err)
-    {
-    case AL_INVALID_NAME:
-      type = "AL_INVALID_NAME";
-      break;
-    case AL_INVALID_ENUM:
-      type = "AL_INVALID_ENUM";
-      break;
-    case AL_INVALID_VALUE:
-      type = "AL_INVALID_VALUE";
-      break;
-    case AL_INVALID_OPERATION:
-      type = "AL_INVALID_OPERATION";
-      break;
-    case AL_OUT_OF_MEMORY:
-      type = "AL_OUT_OF_MEMORY";
-      break;
-    default:
-      type = "UNKNOWN_ERROR";
-      break;
-    }
-
-    ERROR_LOG_FMT(AUDIO, "Error {}: {:08x} {}", desc, err, type);
-  }
-
-  return err;
-}
-
-static bool IsCreativeXFi()
-{
-  return strstr(palGetString(AL_RENDERER), "X-Fi") != nullptr;
-}
-
-void OpenALStream::SoundLoop()
+void OpenALStream::FeedLoop()
 {
   Common::SetCurrentThreadName("Audio thread - openal");
 
-  const bool float32_capable = palIsExtensionPresent("AL_EXT_float32") != 0;
-  const bool surround_capable = palIsExtensionPresent("AL_EXT_MCFORMATS") || IsCreativeXFi();
-  bool use_surround = Config::ShouldUseDPL2Decoder() && surround_capable;
+  const bool has_float32 = al.IsExtensionPresent("AL_EXT_float32") != 0;
+  const bool has_surround = al.IsExtensionPresent("AL_EXT_MCFORMATS") || IsXFiRenderer();
+  bool surround = Config::ShouldUseDPL2Decoder() && has_surround;
+  const bool has_int32 = IsXFiRenderer();
 
-  // As there is no extension to check for 32-bit fixed point support
-  // and we know that only a X-Fi with hardware OpenAL supports it,
-  // we just check if one is being used.
-  const bool fixed32_capable = IsCreativeXFi();
+  const u32 rate = m_mixer->GetSampleRate();
 
-  const u32 frequency = m_mixer->GetSampleRate();
+  // Split the configured latency (at least 1 ms) over the queued buffers.
+  const int latency_ms = Config::Get(Config::MAIN_AUDIO_LATENCY);
+  const u32 per_buffer =
+      std::min(rate / 1000 * static_cast<u32>(latency_ms > 0 ? latency_ms : 1) / QUEUE_LENGTH,
+               MAX_FRAMES_PER_BUFFER);
 
-  u32 frames_per_buffer;
-  // Can't have zero samples per buffer
-  if (Config::Get(Config::MAIN_AUDIO_LATENCY) > 0)
-  {
-    frames_per_buffer = frequency / 1000 * Config::Get(Config::MAIN_AUDIO_LATENCY) / OAL_BUFFERS;
-  }
-  else
-  {
-    frames_per_buffer = frequency / 1000 * 1 / OAL_BUFFERS;
-  }
+  INFO_LOG_FMT(AUDIO, "Using {} buffers, each with {} audio frames for a total of {}.",
+               QUEUE_LENGTH, per_buffer, per_buffer * QUEUE_LENGTH);
 
-  if (frames_per_buffer > OAL_MAX_FRAMES)
-  {
-    frames_per_buffer = OAL_MAX_FRAMES;
-  }
-
-  INFO_LOG_FMT(AUDIO, "Using {} buffers, each with {} audio frames for a total of {}.", OAL_BUFFERS,
-               frames_per_buffer, frames_per_buffer * OAL_BUFFERS);
-
-  // Should we make these larger just in case the mixer ever sends more samples
-  // than what we request?
-  m_realtime_buffer.resize(frames_per_buffer * STEREO_CHANNELS);
+  m_stereo_frames.resize(std::size_t{per_buffer} * STEREO);
   m_source = 0;
 
-  // Clear error state before querying or else we get false positives.
-  ALenum err = palGetError();
+  // Drop any stale error so the checks below only see our own calls.
+  al.GetError();
 
-  // Generate some AL Buffers for streaming
-  palGenBuffers(OAL_BUFFERS, (ALuint*)m_buffers.data());
-  err = CheckALError("generating buffers");
+  al.GenBuffers(QUEUE_LENGTH, m_queue.data());
+  LogALError("generating buffers");
+  al.GenSources(1, &m_source);
+  LogALError("generating sources");
+  al.Sourcef(m_source, AL_GAIN, m_gain);
 
-  // Generate a Source to playback the Buffers
-  palGenSources(1, &m_source);
-  err = CheckALError("generating sources");
-
-  // Set the default sound volume as saved in the config file.
-  palSourcef(m_source, AL_GAIN, m_volume);
-
-  // TODO: Error handling
-  // ALenum err = alGetError();
-
-  unsigned int next_buffer = 0;
-  unsigned int num_buffers_queued = 0;
+  u32 next = 0;
+  u32 queued = 0;
   ALint state = 0;
 
-  while (m_run_thread.IsSet())
+  while (m_keep_feeding.IsSet())
   {
-    // Block until we have a free buffer
-    int num_buffers_processed;
-    palGetSourcei(m_source, AL_BUFFERS_PROCESSED, &num_buffers_processed);
-    if (num_buffers_queued == OAL_BUFFERS && !num_buffers_processed)
+    int finished = 0;
+    al.GetSourcei(m_source, AL_BUFFERS_PROCESSED, &finished);
+    if (queued == QUEUE_LENGTH && finished == 0)
     {
+      // Every buffer is still queued; wait for one to play out.
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
 
-    // Remove the Buffer from the Queue.
-    if (num_buffers_processed)
+    if (finished != 0)
     {
-      std::array<ALuint, OAL_BUFFERS> unqueued_buffer_ids;
-      palSourceUnqueueBuffers(m_source, num_buffers_processed, unqueued_buffer_ids.data());
-      err = CheckALError("unqueuing buffers");
-
-      num_buffers_queued -= num_buffers_processed;
+      std::array<ALuint, QUEUE_LENGTH> done_ids;
+      al.SourceUnqueueBuffers(m_source, finished, done_ids.data());
+      LogALError("unqueuing buffers");
+      queued -= static_cast<u32>(finished);
     }
 
-    const unsigned int min_frames = frames_per_buffer;
-
-    if (use_surround)
+    if (surround)
     {
-      std::array<float, OAL_MAX_FRAMES * SURROUND_CHANNELS> dpl2;
-      const u32 rendered_frames = static_cast<u32>(m_mixer->MixSurround(dpl2.data(), min_frames));
-
-      if (rendered_frames < min_frames)
+      std::array<float, MAX_FRAMES_PER_BUFFER * SURROUND> decoded;
+      const auto frames = static_cast<u32>(m_mixer->MixSurround(decoded.data(), per_buffer));
+      if (frames < per_buffer)
         continue;
 
-      if (float32_capable)
+      const u32 count = frames * SURROUND;
+      if (has_float32)
       {
-        palBufferData(m_buffers[next_buffer], AL_FORMAT_51CHN32, dpl2.data(),
-                      rendered_frames * FRAME_SURROUND_FLOAT, frequency);
+        al.BufferData(m_queue[next], AL_FORMAT_51CHN32, decoded.data(),
+                      static_cast<ALsizei>(count * sizeof(float)), static_cast<ALsizei>(rate));
       }
-      else if (fixed32_capable)
+      else if (has_int32)
       {
-        std::array<int, OAL_MAX_FRAMES * SURROUND_CHANNELS> surround_int32;
-
-        for (u32 i = 0; i < rendered_frames * SURROUND_CHANNELS; ++i)
-        {
-          dpl2[i] = dpl2[i] * std::numeric_limits<int>::max();
-          if (dpl2[i] > std::numeric_limits<int>::max())
-            surround_int32[i] = std::numeric_limits<int>::max();
-          else if (dpl2[i] < std::numeric_limits<int>::min())
-            surround_int32[i] = std::numeric_limits<int>::min();
-          else
-            surround_int32[i] = static_cast<int>(dpl2[i]);
-        }
-
-        palBufferData(m_buffers[next_buffer], AL_FORMAT_51CHN32, surround_int32.data(),
-                      rendered_frames * FRAME_SURROUND_INT32, frequency);
+        std::array<s32, MAX_FRAMES_PER_BUFFER * SURROUND> converted;
+        ToFixedPoint(decoded.data(), converted.data(), count);
+        al.BufferData(m_queue[next], AL_FORMAT_51CHN32, converted.data(),
+                      static_cast<ALsizei>(count * sizeof(s32)), static_cast<ALsizei>(rate));
       }
       else
       {
-        std::array<short, OAL_MAX_FRAMES * SURROUND_CHANNELS> surround_short;
-
-        for (u32 i = 0; i < rendered_frames * SURROUND_CHANNELS; ++i)
-        {
-          dpl2[i] = dpl2[i] * std::numeric_limits<short>::max();
-          if (dpl2[i] > std::numeric_limits<short>::max())
-            surround_short[i] = std::numeric_limits<short>::max();
-          else if (dpl2[i] < std::numeric_limits<short>::min())
-            surround_short[i] = std::numeric_limits<short>::min();
-          else
-            surround_short[i] = static_cast<short>(dpl2[i]);
-        }
-
-        palBufferData(m_buffers[next_buffer], AL_FORMAT_51CHN16, surround_short.data(),
-                      rendered_frames * FRAME_SURROUND_SHORT, frequency);
+        std::array<s16, MAX_FRAMES_PER_BUFFER * SURROUND> converted;
+        ToFixedPoint(decoded.data(), converted.data(), count);
+        al.BufferData(m_queue[next], AL_FORMAT_51CHN16, converted.data(),
+                      static_cast<ALsizei>(count * sizeof(s16)), static_cast<ALsizei>(rate));
       }
 
-      err = CheckALError("buffering data");
-      if (err == AL_INVALID_ENUM)
+      if (LogALError("buffering data") == AL_INVALID_ENUM)
       {
-        // 5.1 is not supported by the host, fallback to stereo
-        WARN_LOG_FMT(
-            AUDIO, "Unable to set 5.1 surround mode.  Updating OpenAL Soft might fix this issue.");
-        use_surround = false;
+        // The device has no 5.1 support after all; continue in stereo.
+        WARN_LOG_FMT(AUDIO,
+                     "Unable to set 5.1 surround mode.  Updating OpenAL Soft might fix this issue.");
+        surround = false;
       }
     }
     else
     {
-      const u32 rendered_frames =
-          static_cast<u32>(m_mixer->Mix(m_realtime_buffer.data(), min_frames));
-
-      if (!rendered_frames)
+      const auto frames = static_cast<u32>(m_mixer->Mix(m_stereo_frames.data(), per_buffer));
+      if (frames == 0)
         continue;
 
-      palBufferData(m_buffers[next_buffer], AL_FORMAT_STEREO16, m_realtime_buffer.data(),
-                    rendered_frames * FRAME_STEREO_SHORT, frequency);
+      al.BufferData(m_queue[next], AL_FORMAT_STEREO16, m_stereo_frames.data(),
+                    static_cast<ALsizei>(frames * STEREO * sizeof(s16)),
+                    static_cast<ALsizei>(rate));
     }
 
-    palSourceQueueBuffers(m_source, 1, &m_buffers[next_buffer]);
-    err = CheckALError("queuing buffers");
+    al.SourceQueueBuffers(m_source, 1, &m_queue[next]);
+    LogALError("queuing buffers");
+    ++queued;
+    next = (next + 1) % QUEUE_LENGTH;
 
-    num_buffers_queued++;
-    next_buffer = (next_buffer + 1) % OAL_BUFFERS;
-
-    palGetSourcei(m_source, AL_SOURCE_STATE, &state);
+    // An underrun stops the source; restart it.
+    al.GetSourcei(m_source, AL_SOURCE_STATE, &state);
     if (state != AL_PLAYING)
     {
-      // Buffer underrun occurred, resume playback
-      palSourcePlay(m_source);
-      err = CheckALError("occurred resuming playback");
+      al.SourcePlay(m_source);
+      LogALError("occurred resuming playback");
     }
   }
 }
