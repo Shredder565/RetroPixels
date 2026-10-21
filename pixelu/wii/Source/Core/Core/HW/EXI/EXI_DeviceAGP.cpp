@@ -376,27 +376,13 @@ u32 CEXIAgp::ImmRead(u32 _uSize)
 
 void CEXIAgp::DoState(PointerWrap& p)
 {
-  p.Do(m_slot);
-  p.Do(m_address);
-  p.Do(m_current_cmd);
-  p.Do(m_eeprom);
-  p.Do(m_eeprom_cmd);
-  p.Do(m_eeprom_data);
-  p.Do(m_eeprom_mask);
-  p.Do(m_eeprom_pos);
-  p.Do(m_eeprom_size);
-  p.Do(m_eeprom_add_end);
-  p.Do(m_eeprom_add_mask);
-  p.Do(m_eeprom_read_mask);
-  p.Do(m_eeprom_status_mask);
-  p.Do(m_eeprom_write_status);
-  p.Do(m_hash);
-  p.Do(m_position);
-  p.Do(m_return_pos);
-  p.Do(m_rom);
-  p.Do(m_rom_mask);
-  p.Do(m_rom_size);
-  p.Do(m_rw_offset);
+  // Savestate order is fixed (spec): slot, ROM cursor and command, the EEPROM block, then the
+  // cartridge image and its bookkeeping.
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_slot, m_address, m_current_cmd, m_eeprom, m_eeprom_cmd, m_eeprom_data, m_eeprom_mask,
+       m_eeprom_pos, m_eeprom_size, m_eeprom_add_end, m_eeprom_add_mask, m_eeprom_read_mask,
+       m_eeprom_status_mask, m_eeprom_write_status, m_hash, m_position, m_return_pos, m_rom,
+       m_rom_mask, m_rom_size, m_rw_offset);
 }
 
 }  // namespace ExpansionInterface

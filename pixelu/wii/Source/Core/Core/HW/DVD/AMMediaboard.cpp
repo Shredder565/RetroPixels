@@ -61,6 +61,7 @@ using HostSocket = SOCKET;
 constexpr HostSocket NO_SOCKET = INVALID_SOCKET;
 using PollEntry = WSAPOLLFD;
 using SockLen = int;
+using IoLength = int;
 
 int SocketError()
 {
@@ -87,6 +88,7 @@ using HostSocket = int;
 constexpr HostSocket NO_SOCKET = -1;
 using PollEntry = pollfd;
 using SockLen = socklen_t;
+using IoLength = std::size_t;
 
 // Windows numbering: a call that would block reports WSAEWOULDBLOCK.
 int SocketError()
@@ -833,7 +835,7 @@ void CommandRecv(std::size_t p)
   }
 
   const auto result =
-      recv(s, reinterpret_cast<char*>(buffer.data()), static_cast<int>(length), 0);
+      recv(s, reinterpret_cast<char*>(buffer.data()), static_cast<IoLength>(length), 0);
   if (result < 0)
   {
     // A non-blocking socket with nothing to do yet is normal and not logged.
@@ -873,7 +875,7 @@ void CommandSend(std::size_t p)
   }
 
   const auto result = send(s, reinterpret_cast<const char*>(buffer.data()),
-                           static_cast<int>(length), Common::SEND_FLAGS);
+                           static_cast<IoLength>(length), Common::SEND_FLAGS);
   if (result < 0)
   {
     // A non-blocking socket with nothing to do yet is normal and not logged.
@@ -1452,27 +1454,32 @@ u32 DIRead(u32 offset, u32 address, u32 length)
       memory.Write_U32_Swap(0x20000000, address);
       memory.Write_U32(0x4743414D, address + 4);  // "GCAM"
       break;
-    case 0x80000100:
-      memory.Write_U32_Swap(0x001F1F1F, address);
-      break;
-    case FirmwareStatus1:
-      memory.Write_U32_Swap(0x000001FA, address);
-      break;
-    case FirmwareStatus2:
-      memory.Write_U32_Swap(1, address);
-      break;
-    case 0x80000160:
-      memory.Write_U32(0x00001E00, address);
-      break;
-    case 0x80000180:
-      memory.Write_U32(0, address);
-      break;
-    case 0x800001A0:
-      memory.Write_U32(0xFFFFFFFF, address);
-      break;
     default:
-      UnhandledRead(offset, length);
+    {
+      // Status words that are a single value; `swapped` ones are stored little-endian.
+      struct StatusWord
+      {
+        u32 offset;
+        u32 value;
+        bool swapped;
+      };
+      static constexpr std::array<StatusWord, 6> words{{
+          {0x80000100, 0x001F1F1F, true},
+          {FirmwareStatus1, 0x000001FA, true},
+          {FirmwareStatus2, 1, true},
+          {0x80000160, 0x00001E00, false},
+          {0x80000180, 0, false},
+          {0x800001A0, 0xFFFFFFFF, false},
+      }};
+      const auto word = std::ranges::find(words, offset, &StatusWord::offset);
+      if (word == words.end())
+        UnhandledRead(offset, length);
+      else if (word->swapped)
+        memory.Write_U32_Swap(word->value, address);
+      else
+        memory.Write_U32(word->value, address);
       break;
+    }
     }
     return 0;
   }

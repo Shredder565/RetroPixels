@@ -43,24 +43,16 @@ constexpr std::size_t FRAME_OVERHEAD = 5;
 constexpr u8 EJECT_TIME = 120;
 constexpr u8 EJECT_REPORT_THRESHOLD = 60;
 
+// clang-format off
 enum Command : u8
 {
-  GetStatus = 0x10,
-  SetBaudrate = 0x11,
-  FieldOn = 0x14,
-  FieldOff = 0x15,
-  Eject = 0x16,
-  InsertCheck = 0x20,
-  AntiCollision = 0x21,
-  SelectCard = 0x22,
-  ReadPage = 0x24,
-  WritePage = 0x25,
-  DecreaseUseCount = 0x26,
-  HaltCard = 0x27,
-  ReadUseCount = 0x33,
-  ReadPages = 0x34,
-  WritePages = 0x35,
+  GetStatus = 0x10, SetBaudrate,                  // 0x10, 0x11
+  FieldOn = 0x14, FieldOff, Eject,                // 0x14..0x16
+  InsertCheck = 0x20, AntiCollision, SelectCard,  // 0x20..0x22
+  ReadPage = 0x24, WritePage, DecreaseUseCount, HaltCard,  // 0x24..0x27
+  ReadUseCount = 0x33, ReadPages, WritePages,     // 0x33..0x35
 };
+// clang-format on
 
 u16 BE16At(std::span<const u8> bytes, std::size_t at)
 {

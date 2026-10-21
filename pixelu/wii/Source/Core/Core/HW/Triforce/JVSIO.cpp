@@ -18,57 +18,32 @@
 namespace Triforce
 {
 
+// clang-format off
+// Frame status and per-command report bytes; both count up from 1.
 enum class JVSIOStatusCode : u8
 {
-  Okay = 1,
-  UnknownCommand = 2,
-  ChecksumError = 3,
-  ResponseOverflow = 4,
+  Okay = 1, UnknownCommand, ChecksumError, ResponseOverflow,
 };
-
 enum class JVSIOReportCode : u8
 {
-  Okay = 1,
-  ParameterSizeError = 2,
-  ParameterDataError = 3,
-  Busy = 4,
+  Okay = 1, ParameterSizeError, ParameterDataError, Busy,
 };
 
+// Command bytes. Each group is numbered consecutively from its first entry.
 enum class JVSIOCommand : u8
 {
-  IOIdentify = 0x10,
-  CommandRevision = 0x11,
-  JVSRevision = 0x12,
-  CommVersion = 0x13,
-  FeatureCheck = 0x14,
-  MainID = 0x15,
-
-  SwitchInput = 0x20,
-  CoinInput = 0x21,
-  AnalogInput = 0x22,
-  RotaryInput = 0x23,
-  KeycodeInput = 0x24,
-  ScreenPositionInput = 0x25,
-  MiscSwitchInput = 0x26,
-
-  RemainingPayout = 0x2E,
-  DataRetransmit = 0x2F,
-  CoinCounterDec = 0x30,
-  PayoutCounterInc = 0x31,
-  GenericOutput = 0x32,
-  AnalogOutput = 0x33,
-  CharacterOutput = 0x34,
-  CoinCounterInc = 0x35,
-  PayoutCounterDec = 0x36,
-  GenericOutputByte = 0x37,
-  GenericOutputBit = 0x38,
-
-  NamcoCommand = 0x70,
-
-  Reset = 0xF0,
-  SetAddress = 0xF1,
-  CommMethodChange = 0xF2,
+  // 0x10..0x15: identification.
+  IOIdentify = 0x10, CommandRevision, JVSRevision, CommVersion, FeatureCheck, MainID,
+  // 0x20..0x2F: inputs.
+  SwitchInput = 0x20, CoinInput, AnalogInput, RotaryInput, KeycodeInput, ScreenPositionInput,
+  MiscSwitchInput, RemainingPayout = 0x2E, DataRetransmit,
+  // 0x30..0x38: outputs.
+  CoinCounterDec = 0x30, PayoutCounterInc, GenericOutput, AnalogOutput, CharacterOutput,
+  CoinCounterInc, PayoutCounterDec, GenericOutputByte, GenericOutputBit,
+  // Vendor and broadcast commands.
+  NamcoCommand = 0x70, Reset = 0xF0, SetAddress, CommMethodChange,
 };
+// clang-format on
 
 // Reads a decoded request (the payload without the checksum) front to back.
 class JVSIORequestReader

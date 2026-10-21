@@ -26,25 +26,17 @@ constexpr u8 REPLY_MARK = 0xAA;
 constexpr u8 FIRMWARE_TIMEOUT = 240;
 constexpr std::size_t VERSION_FIELD_SIZE = 48;
 
+// clang-format off
 enum DeckCommand : u8
 {
-  ShutterAuto = 0x61,
-  BootVersion = 0x62,
-  SensLock = 0x63,
-  SensCard = 0x65,
-  FirmwareUpdate = 0x66,
-  ShutterGet = 0x67,
-  CameraCheck = 0x68,
-  Shutter = 0x69,
-  ProgramChecksum = 0x6B,
-  ShutterAlt = 0x6C,
-  BootChecksum = 0x6D,
+  ShutterAuto = 0x61, BootVersion, SensLock,                          // 0x61..0x63
+  SensCard = 0x65, FirmwareUpdate, ShutterGet, CameraCheck, Shutter,  // 0x65..0x69
+  ProgramChecksum = 0x6B, ShutterAlt, BootChecksum,                   // 0x6B..0x6D
   ShutterLoad = 0x6F,
-  ReadCard = 0x72,
-  ShutterSave = 0x73,
-  SelfTest = 0x74,
+  ReadCard = 0x72, ShutterSave, SelfTest,                             // 0x72..0x74
   ProgramVersion = 0x76,
 };
+// clang-format on
 
 // A double from the deck file as an integer type: in-range values as a plain
 // conversion would give, anything else clamped (NaN as 0).
