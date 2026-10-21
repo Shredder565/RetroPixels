@@ -1,19 +1,23 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/NetPlayChatUI.h"
 
 #include <imgui.h>
 
-constexpr float DEFAULT_WINDOW_WIDTH = 220.0f;
-constexpr float DEFAULT_WINDOW_HEIGHT = 400.0f;
-
-constexpr size_t MAX_BACKLOG_SIZE = 100;
-
 std::unique_ptr<NetPlayChatUI> g_netplay_chat_ui;
 
+namespace
+{
+// Minimum window size, in unscaled pixels.
+constexpr float MIN_WIDTH = 220.0f;
+constexpr float MIN_HEIGHT = 400.0f;
+
+// Lines kept in the log: once there are more than this, the oldest goes when a line arrives.
+constexpr std::size_t LOG_LIMIT = 100;
+}  // namespace
+
 NetPlayChatUI::NetPlayChatUI(std::function<void(const std::string&)> callback)
-    : m_message_callback{std::move(callback)}
+    : m_on_send{std::move(callback)}
 {
 }
 
@@ -21,86 +25,74 @@ NetPlayChatUI::~NetPlayChatUI() = default;
 
 void NetPlayChatUI::Display()
 {
-  const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
+  const float s = ImGui::GetIO().DisplayFramebufferScale.x;
 
-  ImGui::SetNextWindowPos(ImVec2(10.0f * scale, 10.0f * scale), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(
-      ImVec2(DEFAULT_WINDOW_WIDTH * scale, DEFAULT_WINDOW_HEIGHT * scale),
-      ImGui::GetIO().DisplaySize);
+  ImGui::SetNextWindowPos(ImVec2(10.0f * s, 10.0f * s), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(MIN_WIDTH * s, MIN_HEIGHT * s),
+                                      ImGui::GetIO().DisplaySize);
 
-  if (!ImGui::Begin("Chat", nullptr, ImGuiWindowFlags_None))
+  const bool open = ImGui::Begin("Chat", nullptr, ImGuiWindowFlags_None);
+  if (open)
   {
-    ImGui::End();
-    return;
+    // The log fills the window except for the input row at the bottom.
+    ImGui::BeginChild("Scrolling", ImVec2(0, -30 * s), true, ImGuiWindowFlags_None);
+    for (const auto& line : m_log)
+    {
+      const Color& rgb = line.second;
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f), "%s", line.first.c_str());
+      ImGui::PopTextWrapPos();
+    }
+
+    if (m_pending_scroll)
+    {
+      ImGui::SetScrollHereY(1.0f);
+      m_pending_scroll = false;
+    }
+    // New lines only scroll the log if the user hasn't scrolled up.
+    m_following_tail = ImGui::GetScrollY() == ImGui::GetScrollMaxY();
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    ImGui::PushItemWidth(-50.0f * s);
+    const bool entered = ImGui::InputText("##NetplayMessageBuffer", m_input, IM_ARRAYSIZE(m_input),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+    if (entered)
+      SendChatMessage();
+
+    if (m_focus_requested)
+    {
+      // Focus the input field just submitted.
+      ImGui::SetKeyboardFocusHere(-1);
+      m_focus_requested = false;
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Send"))
+      SendChatMessage();
   }
-
-  ImGui::BeginChild("Scrolling", ImVec2(0, -30 * scale), true, ImGuiWindowFlags_None);
-  for (const auto& [text, color] : m_messages)
-  {
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(ImVec4(color[0], color[1], color[2], 1.0f), "%s", text.c_str());
-    ImGui::PopTextWrapPos();
-  }
-
-  if (m_scroll_to_bottom)
-  {
-    ImGui::SetScrollHereY(1.0f);
-    m_scroll_to_bottom = false;
-  }
-
-  m_is_scrolled_to_bottom = ImGui::GetScrollY() == ImGui::GetScrollMaxY();
-
-  ImGui::EndChild();
-
-  ImGui::Spacing();
-
-  ImGui::PushItemWidth(-50.0f * scale);
-
-  if (ImGui::InputText("##NetplayMessageBuffer", m_message_buf, IM_ARRAYSIZE(m_message_buf),
-                       ImGuiInputTextFlags_EnterReturnsTrue))
-  {
-    SendChatMessage();
-  }
-
-  if (m_activate)
-  {
-    ImGui::SetKeyboardFocusHere(-1);
-    m_activate = false;
-  }
-
-  ImGui::PopItemWidth();
-
-  ImGui::SameLine();
-
-  if (ImGui::Button("Send"))
-    SendChatMessage();
-
   ImGui::End();
 }
 
 void NetPlayChatUI::AppendChat(std::string message, Color color)
 {
-  if (m_messages.size() > MAX_BACKLOG_SIZE)
-    m_messages.pop_front();
+  if (m_log.size() > LOG_LIMIT)
+    m_log.pop_front();
+  m_log.emplace_back(std::move(message), color);
 
-  m_messages.emplace_back(std::move(message), color);
-
-  // Only scroll to bottom, if we were at the bottom previously
-  if (m_is_scrolled_to_bottom)
-    m_scroll_to_bottom = true;
+  if (m_following_tail)
+    m_pending_scroll = true;
 }
 
 void NetPlayChatUI::SendChatMessage()
 {
-  // Check whether the input field is empty
-  if (m_message_buf[0] != '\0')
-  {
-    if (m_message_callback)
-      m_message_callback(m_message_buf);
+  if (m_input[0] == '\0')
+    return;
 
-    // 'Empty' the buffer
-    m_message_buf[0] = '\0';
-  }
+  if (m_on_send)
+    m_on_send(m_input);
+  m_input[0] = '\0';
 }
 
 void NetPlayChatUI::Activate()
@@ -108,5 +100,5 @@ void NetPlayChatUI::Activate()
   if (ImGui::IsItemFocused())
     ImGui::SetWindowFocus(nullptr);
   else
-    m_activate = true;
+    m_focus_requested = true;
 }

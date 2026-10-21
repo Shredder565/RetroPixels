@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,42 +18,41 @@ struct ImTextureData;
 
 namespace VideoCommon
 {
-// OnScreenUI handles all the ImGui rendering.
+// Owns the Dear ImGui / ImPlot contexts and draws their output (statistics, the performance
+// overlay, OSD messages, NetPlay chat, achievement indicators) with the active video backend.
 class OnScreenUI
 {
 public:
   OnScreenUI() = default;
   ~OnScreenUI();
 
-  // ImGui initialization depends on being able to create textures and pipelines, so do it last.
+  // Creates the contexts, the font atlas setup and the pipeline. Needs the backend to be up,
+  // since it creates GPU objects.
   bool Initialize(u32 width, u32 height, float scale);
 
-  // Returns a lock for the ImGui mutex, enabling data structures to be modified from outside.
-  // Use with care, only non-drawing functions should be called from outside the video thread,
-  // as the drawing is tied to a "frame".
+  // The lock that guards all ImGui state. Code outside the video thread may take it to change
+  // ImGui data, but must not draw: drawing belongs to the frame being built.
   std::unique_lock<std::mutex> GetImGuiLock();
 
   bool IsReady() { return m_ready; }
 
-  // Sets up ImGui state for the next frame.
-  // This function itself acquires the ImGui lock, so it should not be held.
+  // Starts a new ImGui frame for a back buffer of the given size (takes the lock).
   void BeginImGuiFrame(u32 width, u32 height);
-
-  // Same as above but without locking the ImGui lock.
+  // The same, for callers that already hold the lock.
   void BeginImGuiFrameUnlocked(u32 width, u32 height);
 
-  // Renders ImGui windows to the currently-bound framebuffer.
-  // Should be called with the ImGui lock held.
+  // Draws the finished ImGui frame into the bound framebuffer. Call with the lock held.
   void DrawImGui();
 
-  // Recompiles ImGui pipeline - call when stereo mode changes.
+  // Rebuilds the ImGui pipeline (for example when the stereo mode changes).
   bool RecompileImGuiPipeline();
 
   void SetScale(float backbuffer_scale);
 
+  // Emits this frame's windows and ends the ImGui frame.
   void Finalize();
 
-  // Receive keyboard and mouse from QT
+  // Keyboard and mouse input forwarded from the UI.
   void SetKeyMap(const DolphinKeyMap& key_map);
   void SetKey(u32 key, bool is_down, const char* chars);
   void SetMousePos(float x, float y);
@@ -65,20 +63,25 @@ private:
   void DrawChallengesAndLeaderboards();
   void UpdateImguiTexture(ImTextureData* tex);
 
-  // ImGui resources.
-  std::unique_ptr<NativeVertexFormat> m_imgui_vertex_format;
-  std::vector<std::unique_ptr<AbstractTexture>> m_imgui_textures;
-  std::unique_ptr<AbstractPipeline> m_imgui_pipeline;
-  std::map<u32, int> m_dolphin_to_imgui_map;
-  std::mutex m_imgui_mutex;
-  u64 m_imgui_last_frame_time = 0;
+  void CreateAtlasTexture(ImTextureData* tex);
+  void PatchAtlasTexture(ImTextureData* tex);
+  void ReleaseAtlasTexture(ImTextureData* tex);
+
+  std::unique_ptr<NativeVertexFormat> m_vertex_format;
+  // Textures ImGui asked for (font atlas pages); ImGui refers to them by pointer.
+  std::vector<std::unique_ptr<AbstractTexture>> m_atlas_textures;
+  std::unique_ptr<AbstractPipeline> m_pipeline;
+  // Host key code (low 9 bits) -> ImGuiKey.
+  std::map<u32, int> m_host_key_to_imgui;
+  std::mutex m_lock;
+  u64 m_last_frame_us = 0;
 
   u32 m_backbuffer_width = 1;
   u32 m_backbuffer_height = 1;
   float m_backbuffer_scale = 1.0;
 
 #ifdef USE_RETRO_ACHIEVEMENTS
-  std::map<int, std::unique_ptr<AbstractTexture>, std::less<>> m_challenge_texture_map;
+  std::map<int, std::unique_ptr<AbstractTexture>, std::less<>> m_challenge_badges;
 #endif  // USE_RETRO_ACHIEVEMENTS
 
   bool m_ready = false;

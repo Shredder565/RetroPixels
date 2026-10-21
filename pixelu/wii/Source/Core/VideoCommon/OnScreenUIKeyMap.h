@@ -1,13 +1,12 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/EnumMap.h"
 
-// The main point of this is to allow other parts of dolphin to set ImGui's key map without
-// having to import ImGui headers.
-// But the idea is that it can be expanded in the future with more keys to support more things.
+// The keys the on-screen UI understands, so the Qt side can describe its key codes without
+// including ImGui. A, C, V, X, Y and Z are there for the text-edit shortcuts (select all, copy,
+// paste, cut, redo, undo).
 enum class DolphinKey
 {
   Tab,
@@ -26,12 +25,13 @@ enum class DolphinKey
   Enter,
   Escape,
   KeyPadEnter,
-  A,  // for text edit CTRL+A: select all
-  C,  // for text edit CTRL+C: copy
-  V,  // for text edit CTRL+V: paste
-  X,  // for text edit CTRL+X: cut
-  Y,  // for text edit CTRL+Y: redo
-  Z,  // for text edit CTRL+Z: undo
+  A,
+  C,
+  V,
+  X,
+  Y,
+  Z,
 };
 
+// Host key code for each DolphinKey.
 using DolphinKeyMap = Common::EnumMap<int, DolphinKey::Z>;

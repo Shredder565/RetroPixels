@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/OnScreenUI.h"
 
@@ -31,17 +30,81 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 
-#include <inttypes.h>
+#include <algorithm>
+#include <array>
+#include <cinttypes>
 #include <mutex>
+#include <span>
+#include <string>
 
 #include <imgui.h>
 #include <implot.h>
 
 namespace VideoCommon
 {
+namespace
+{
+// Flags shared by the small, fixed, non-interactive windows (achievement badges, leaderboards).
+constexpr ImGuiWindowFlags OVERLAY_FLAGS =
+    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav |
+    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing;
+
+// ImGui key for each DolphinKey, in DolphinKey order.
+constexpr std::array<ImGuiKey, static_cast<std::size_t>(DolphinKey::Z) + 1> IMGUI_KEY_FOR = {
+    ImGuiKey_Tab,       ImGuiKey_LeftArrow, ImGuiKey_RightArrow, ImGuiKey_UpArrow,
+    ImGuiKey_DownArrow, ImGuiKey_PageUp,    ImGuiKey_PageDown,   ImGuiKey_Home,
+    ImGuiKey_End,       ImGuiKey_Insert,    ImGuiKey_Delete,     ImGuiKey_Backspace,
+    ImGuiKey_Space,     ImGuiKey_Enter,     ImGuiKey_Escape,     ImGuiKey_KeypadEnter,
+    ImGuiKey_A,         ImGuiKey_C,         ImGuiKey_V,          ImGuiKey_X,
+    ImGuiKey_Y,         ImGuiKey_Z,
+};
+
+// The layout of ImDrawVert as the backend sees it: float2 position, float2 UV, RGBA8 colour.
+PortableVertexDeclaration ImGuiVertexLayout()
+{
+  PortableVertexDeclaration decl = {};
+  decl.position = {ComponentFormat::Float, 2, offsetof(ImDrawVert, pos), true, false};
+  decl.texcoords[0] = {ComponentFormat::Float, 2, offsetof(ImDrawVert, uv), true, false};
+  decl.colors[0] = {ComponentFormat::UByte, 4, offsetof(ImDrawVert, col), true, false};
+  decl.stride = sizeof(ImDrawVert);
+  return decl;
+}
+
+// The user's OSD_Font.ttf if there is one, else the one shipped in Sys/Resources, else "".
+std::string FindOsdFont()
+{
+  std::string path = File::GetUserPath(D_LOAD_IDX) + "OSD_Font.ttf";
+  if (File::Exists(path))
+    return path;
+  path = File::GetSysDirectory() + DIR_SEP + RESOURCES_DIR + DIR_SEP + "OSD_Font.ttf";
+  if (File::Exists(path))
+    return path;
+  return {};
+}
+
+// A 2D-array RGBA8 texture description, as used for every texture the UI creates.
+TextureConfig UiTextureConfig(u32 width, u32 height)
+{
+  return TextureConfig(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                       AbstractTextureType::Texture_2DArray);
+}
+
+void LoadRgba(AbstractTexture& texture, u32 width, u32 height, const u8* pixels)
+{
+  texture.Load(0, width, height, width, pixels, sizeof(u32) * width * height);
+}
+
+MathUtil::Rectangle<int> ToFramebufferRect(int left, int top, int right, int bottom)
+{
+  return g_gfx->ConvertFramebufferRectangle(MathUtil::Rectangle<int>(left, top, right, bottom),
+                                            g_gfx->GetCurrentFramebuffer());
+}
+}  // namespace
+
 bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
 {
-  std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
+  std::unique_lock guard(m_lock);
 
   if (!IMGUI_CHECKVERSION())
   {
@@ -59,135 +122,121 @@ bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
     return false;
   }
 
-  // Don't create an ini file. TODO: Do we want this in the future?
+  // Window positions are not persisted.
   ImGui::GetIO().IniFilename = nullptr;
   SetScale(scale);
 
-  PortableVertexDeclaration vdecl = {};
-  vdecl.position = {ComponentFormat::Float, 2, offsetof(ImDrawVert, pos), true, false};
-  vdecl.texcoords[0] = {ComponentFormat::Float, 2, offsetof(ImDrawVert, uv), true, false};
-  vdecl.colors[0] = {ComponentFormat::UByte, 4, offsetof(ImDrawVert, col), true, false};
-  vdecl.stride = sizeof(ImDrawVert);
-  m_imgui_vertex_format = g_gfx->CreateNativeVertexFormat(vdecl);
-  if (!m_imgui_vertex_format)
+  m_vertex_format = g_gfx->CreateNativeVertexFormat(ImGuiVertexLayout());
+  if (!m_vertex_format)
   {
     PanicAlertFmt("Failed to create ImGui vertex format");
     return false;
   }
 
-  // Font defaults
   ImGuiIO& io = ImGui::GetIO();
-  m_imgui_textures.clear();
+  m_atlas_textures.clear();
 
-  // User supplied font
-  std::string file = File::GetUserPath(D_LOAD_IDX) + "OSD_Font.ttf";
-
-  bool font_exists = File::Exists(file);
-  if (!font_exists)
-  {
-    // Default supplied font
-    file = File::GetSysDirectory() + DIR_SEP + RESOURCES_DIR + DIR_SEP + "OSD_Font.ttf";
-    font_exists = File::Exists(file);
-  }
-
-  if (font_exists)
+  if (const std::string font = FindOsdFont(); !font.empty())
   {
     io.Fonts->Clear();
-    io.Fonts->AddFontFromFileTTF(file.c_str());
+    io.Fonts->AddFontFromFileTTF(font.c_str());
   }
 
-  // Setup new font management behavior
+  // We create and update the atlas textures ourselves (see UpdateImguiTexture) and honour
+  // ImDrawCmd::VtxOffset.
   io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
 
   if (!RecompileImGuiPipeline())
     return false;
 
-  m_imgui_last_frame_time = Common::Timer::NowUs();
+  m_last_frame_us = Common::Timer::NowUs();
   m_ready = true;
-  BeginImGuiFrameUnlocked(width, height);  // lock is already held
-
+  BeginImGuiFrameUnlocked(width, height);
   return true;
 }
 
 OnScreenUI::~OnScreenUI()
 {
-  std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
+  std::unique_lock guard(m_lock);
 
   ImGui::EndFrame();
   ImPlot::DestroyContext();
   ImGui::DestroyContext();
-  m_imgui_textures.clear();
+  m_atlas_textures.clear();
 }
 
 bool OnScreenUI::RecompileImGuiPipeline()
 {
-  if (g_presenter->GetBackbufferFormat() == AbstractTextureFormat::Undefined)
-  {
-    // No backbuffer (nogui) means no imgui rendering will happen
-    // Some backends don't like making pipelines with no render targets
+  const AbstractTextureFormat target_format = g_presenter->GetBackbufferFormat();
+  // Without a back buffer (no window) nothing is drawn, and some backends refuse pipelines
+  // without a colour target.
+  if (target_format == AbstractTextureFormat::Undefined)
     return true;
-  }
 
-  const bool linear_space_output =
-      g_presenter->GetBackbufferFormat() == AbstractTextureFormat::RGBA16F;
+  // A floating-point back buffer is linear, so the pixel shader converts the sRGB UI colours.
+  const bool linear_output = target_format == AbstractTextureFormat::RGBA16F;
 
-  std::unique_ptr<AbstractShader> vertex_shader = g_gfx->CreateShaderFromSource(
+  std::unique_ptr<AbstractShader> vs = g_gfx->CreateShaderFromSource(
       ShaderStage::Vertex, FramebufferShaderGen::GenerateImGuiVertexShader(), nullptr,
       "ImGui vertex shader");
-  std::unique_ptr<AbstractShader> pixel_shader = g_gfx->CreateShaderFromSource(
-      ShaderStage::Pixel, FramebufferShaderGen::GenerateImGuiPixelShader(linear_space_output),
-      nullptr, "ImGui pixel shader");
-  if (!vertex_shader || !pixel_shader)
+  std::unique_ptr<AbstractShader> ps = g_gfx->CreateShaderFromSource(
+      ShaderStage::Pixel, FramebufferShaderGen::GenerateImGuiPixelShader(linear_output), nullptr,
+      "ImGui pixel shader");
+  if (!vs || !ps)
   {
     PanicAlertFmt("Failed to compile ImGui shaders");
     return false;
   }
 
-  // GS is used to render the UI to both eyes in stereo modes.
-  std::unique_ptr<AbstractShader> geometry_shader;
+  // With stereo, a pass-through geometry shader puts the UI on both layers.
+  std::unique_ptr<AbstractShader> gs;
   if (g_gfx->UseGeometryShaderForUI())
   {
-    geometry_shader = g_gfx->CreateShaderFromSource(
+    gs = g_gfx->CreateShaderFromSource(
         ShaderStage::Geometry, FramebufferShaderGen::GeneratePassthroughGeometryShader(1, 1),
         nullptr, "ImGui passthrough geometry shader");
-    if (!geometry_shader)
+    if (!gs)
     {
       PanicAlertFmt("Failed to compile ImGui geometry shader");
       return false;
     }
   }
 
-  AbstractPipelineConfig pconfig = {};
-  pconfig.vertex_format = m_imgui_vertex_format.get();
-  pconfig.vertex_shader = vertex_shader.get();
-  pconfig.geometry_shader = geometry_shader.get();
-  pconfig.pixel_shader = pixel_shader.get();
-  pconfig.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
-  pconfig.depth_state = RenderState::GetNoDepthTestingDepthState();
-  pconfig.blending_state = RenderState::GetNoBlendingBlendState();
-  pconfig.blending_state.blend_enable = true;
-  pconfig.blending_state.src_factor = SrcBlendFactor::SrcAlpha;
-  pconfig.blending_state.dst_factor = DstBlendFactor::InvSrcAlpha;
-  pconfig.blending_state.src_factor_alpha = SrcBlendFactor::Zero;
-  pconfig.blending_state.dst_factor_alpha = DstBlendFactor::One;
-  pconfig.framebuffer_state.color_texture_format = g_presenter->GetBackbufferFormat();
-  pconfig.framebuffer_state.depth_texture_format = AbstractTextureFormat::Undefined;
-  pconfig.framebuffer_state.samples = 1;
-  pconfig.framebuffer_state.per_sample_shading = false;
-  pconfig.usage = AbstractPipelineUsage::Utility;
-  m_imgui_pipeline = g_gfx->CreatePipeline(pconfig);
-  if (!m_imgui_pipeline)
+  AbstractPipelineConfig config = {};
+  config.vertex_format = m_vertex_format.get();
+  config.vertex_shader = vs.get();
+  config.geometry_shader = gs.get();
+  config.pixel_shader = ps.get();
+  config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+  config.depth_state = RenderState::GetNoDepthTestingDepthState();
+
+  // Straight alpha blending for colour; the destination alpha is kept.
+  BlendingState blend = RenderState::GetNoBlendingBlendState();
+  blend.blend_enable = true;
+  blend.src_factor = SrcBlendFactor::SrcAlpha;
+  blend.dst_factor = DstBlendFactor::InvSrcAlpha;
+  blend.src_factor_alpha = SrcBlendFactor::Zero;
+  blend.dst_factor_alpha = DstBlendFactor::One;
+  config.blending_state = blend;
+
+  config.framebuffer_state.color_texture_format = target_format;
+  config.framebuffer_state.depth_texture_format = AbstractTextureFormat::Undefined;
+  config.framebuffer_state.samples = 1;
+  config.framebuffer_state.per_sample_shading = false;
+  config.usage = AbstractPipelineUsage::Utility;
+
+  m_pipeline = g_gfx->CreatePipeline(config);
+  if (!m_pipeline)
   {
     PanicAlertFmt("Failed to create imgui pipeline");
     return false;
   }
-
   return true;
 }
 
 void OnScreenUI::BeginImGuiFrame(u32 width, u32 height)
 {
-  std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
+  std::unique_lock guard(m_lock);
   BeginImGuiFrameUnlocked(width, height);
 }
 
@@ -196,95 +245,91 @@ void OnScreenUI::BeginImGuiFrameUnlocked(u32 width, u32 height)
   m_backbuffer_width = width;
   m_backbuffer_height = height;
 
-  const u64 current_time_us = Common::Timer::NowUs();
-  const u64 time_diff_us = current_time_us - m_imgui_last_frame_time;
-  const float time_diff_secs = static_cast<float>(time_diff_us / 1000000.0);
-  m_imgui_last_frame_time = current_time_us;
+  const u64 now_us = Common::Timer::NowUs();
+  const u64 elapsed_us = now_us - m_last_frame_us;
+  m_last_frame_us = now_us;
 
-  // Update I/O with window dimensions.
   ImGuiIO& io = ImGui::GetIO();
-  io.DisplaySize =
-      ImVec2(static_cast<float>(m_backbuffer_width), static_cast<float>(m_backbuffer_height));
-  io.DeltaTime = time_diff_secs;
+  io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
+  io.DeltaTime = static_cast<float>(static_cast<double>(elapsed_us) / 1000000.0);
 
   ImGui::NewFrame();
 }
 
 void OnScreenUI::DrawImGui()
 {
-  ImDrawData* draw_data = ImGui::GetDrawData();
-  if (!draw_data)
+  ImDrawData* const frame = ImGui::GetDrawData();
+  if (frame == nullptr)
     return;
 
-  g_gfx->SetViewport(0.0f, 0.0f, static_cast<float>(m_backbuffer_width),
-                     static_cast<float>(m_backbuffer_height), 0.0f, 1.0f);
+  const float width = static_cast<float>(m_backbuffer_width);
+  const float height = static_cast<float>(m_backbuffer_height);
+  g_gfx->SetViewport(0.0f, 0.0f, width, height, 0.0f, 1.0f);
 
-  // Uniform buffer for draws.
-  struct ImGuiUbo
+  // The vertex shader maps pixel positions to clip space with this scale.
+  struct UiConstants
   {
-    float u_rcp_viewport_size_mul2[2];
-    float padding[2];
+    float pixel_to_clip[2];
+    float pad[2];
   };
-  ImGuiUbo ubo = {{1.0f / m_backbuffer_width * 2.0f, 1.0f / m_backbuffer_height * 2.0f}};
+  UiConstants constants = {};
+  constants.pixel_to_clip[0] = 1.0f / width * 2.0f;
+  constants.pixel_to_clip[1] = 1.0f / height * 2.0f;
 
-  // Set up common state for drawing.
-  g_gfx->SetPipeline(m_imgui_pipeline.get());
+  g_gfx->SetPipeline(m_pipeline.get());
   g_gfx->SetSamplerState(0, RenderState::GetPointSamplerState());
-  g_vertex_manager->UploadUtilityUniforms(&ubo, sizeof(ubo));
+  g_vertex_manager->UploadUtilityUniforms(&constants, sizeof(constants));
 
-  for (int i = 0; i < draw_data->CmdListsCount; i++)
+  for (const ImDrawList* list :
+       std::span(frame->CmdLists.Data, static_cast<std::size_t>(frame->CmdLists.Size)))
   {
-    const ImDrawList* cmdlist = draw_data->CmdLists[i];
-    if (cmdlist->VtxBuffer.empty() || cmdlist->IdxBuffer.empty())
+    // An empty list ends the drawing for this frame (the scissor reset below is skipped too).
+    if (list->VtxBuffer.empty() || list->IdxBuffer.empty())
       return;
 
-    u32 base_vertex, base_index;
-    g_vertex_manager->UploadUtilityVertices(cmdlist->VtxBuffer.Data, sizeof(ImDrawVert),
-                                            cmdlist->VtxBuffer.Size, cmdlist->IdxBuffer.Data,
-                                            cmdlist->IdxBuffer.Size, &base_vertex, &base_index);
+    u32 first_vertex = 0;
+    u32 first_index = 0;
+    g_vertex_manager->UploadUtilityVertices(
+        list->VtxBuffer.Data, sizeof(ImDrawVert), static_cast<u32>(list->VtxBuffer.Size),
+        list->IdxBuffer.Data, static_cast<u32>(list->IdxBuffer.Size), &first_vertex, &first_index);
 
-    for (const ImDrawCmd& cmd : cmdlist->CmdBuffer)
+    for (const ImDrawCmd& cmd : list->CmdBuffer)
     {
-      if (cmd.UserCallback)
+      if (cmd.UserCallback != nullptr)
       {
-        cmd.UserCallback(cmdlist, &cmd);
+        cmd.UserCallback(list, &cmd);
         continue;
       }
 
-      g_gfx->SetScissorRect(g_gfx->ConvertFramebufferRectangle(
-          MathUtil::Rectangle<int>(
-              static_cast<int>(cmd.ClipRect.x), static_cast<int>(cmd.ClipRect.y),
-              static_cast<int>(cmd.ClipRect.z), static_cast<int>(cmd.ClipRect.w)),
-          g_gfx->GetCurrentFramebuffer()));
+      const ImVec4& clip = cmd.ClipRect;
+      g_gfx->SetScissorRect(ToFramebufferRect(static_cast<int>(clip.x), static_cast<int>(clip.y),
+                                              static_cast<int>(clip.z), static_cast<int>(clip.w)));
       g_gfx->SetTexture(0, reinterpret_cast<const AbstractTexture*>(cmd.GetTexID()));
-      g_gfx->DrawIndexed(base_index, cmd.ElemCount, base_vertex);
-      base_index += cmd.ElemCount;
+      g_gfx->DrawIndexed(first_index, cmd.ElemCount, first_vertex);
+      first_index += cmd.ElemCount;
     }
   }
 
-  // Some capture software (such as OBS) hooks SwapBuffers and uses glBlitFramebuffer to copy our
-  // back buffer just before swap. Because glBlitFramebuffer honors the scissor test, the capture
-  // itself will be clipped to whatever bounds were last set by ImGui, resulting in a rather useless
-  // capture whenever any ImGui windows are open. We'll reset the scissor rectangle to the entire
-  // viewport here to avoid this problem.
-  g_gfx->SetScissorRect(g_gfx->ConvertFramebufferRectangle(
-      MathUtil::Rectangle<int>(0, 0, m_backbuffer_width, m_backbuffer_height),
-      g_gfx->GetCurrentFramebuffer()));
+  // Leave the scissor covering the whole back buffer: capture tools that copy the back buffer
+  // with a scissor-respecting blit (OBS's GL capture, for one) would otherwise only get the area
+  // of the last ImGui draw.
+  g_gfx->SetScissorRect(ToFramebufferRect(0, 0, static_cast<int>(m_backbuffer_width),
+                                          static_cast<int>(m_backbuffer_height)));
 }
 
-// Create On-Screen-Messages
 void OnScreenUI::DrawDebugText()
 {
   if (Config::Get(Config::MAIN_MOVIE_SHOW_OSD))
   {
-    // Position under the FPS display.
+    const float font = ImGui::GetFontSize();
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+
+    // Right-aligned, below the frame rate counters.
     ImGui::SetNextWindowPos(
-        ImVec2(ImGui::GetIO().DisplaySize.x - ImGui::GetFontSize() * m_backbuffer_scale,
-               80.f * m_backbuffer_scale),
+        ImVec2(display.x - font * m_backbuffer_scale, 80.f * m_backbuffer_scale),
         ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(5.0f * ImGui::GetFontSize() * m_backbuffer_scale,
-                                               2.1f * ImGui::GetFontSize() * m_backbuffer_scale),
-                                        ImGui::GetIO().DisplaySize);
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(5.0f * font * m_backbuffer_scale, 2.1f * font * m_backbuffer_scale), display);
     if (ImGui::Begin("Movie", nullptr, ImGuiWindowFlags_NoFocusOnAppearing))
     {
       auto& movie = Core::System::GetInstance().GetMovie();
@@ -301,6 +346,7 @@ void OnScreenUI::DrawDebugText()
         if (movie.IsRecordingInput())
           ImGui::Text("Input: %" PRIu64, movie.GetCurrentInputCount());
       }
+
       if (Config::Get(Config::MAIN_SHOW_LAG))
         ImGui::Text("Lag: %" PRIu64 "\n", movie.GetCurrentLagCount());
       if (Config::Get(Config::MAIN_MOVIE_SHOW_INPUT_DISPLAY))
@@ -328,9 +374,8 @@ void OnScreenUI::DrawDebugText()
   if (g_ActiveConfig.bOverlayScissorStats)
     g_stats.DisplayScissor();
 
-  const std::string profile_output = Common::Profiler::ToString();
-  if (!profile_output.empty())
-    ImGui::TextUnformatted(profile_output.c_str());
+  if (const std::string profile = Common::Profiler::ToString(); !profile.empty())
+    ImGui::TextUnformatted(profile.c_str());
 }
 
 void OnScreenUI::DrawChallengesAndLeaderboards()
@@ -338,75 +383,66 @@ void OnScreenUI::DrawChallengesAndLeaderboards()
   if (!Config::Get(Config::MAIN_OSD_MESSAGES))
     return;
 #ifdef USE_RETRO_ACHIEVEMENTS
-  auto& instance = AchievementManager::GetInstance();
-  std::lock_guard lg{instance.GetLock()};
-  const bool challenge_indicators_enabled = Config::Get(Config::RA_CHALLENGE_INDICATORS_ENABLED);
-  const bool challenges_updated = instance.AreChallengesUpdated();
-  const auto& challenges = instance.GetActiveChallenges();
+  auto& achievements = AchievementManager::GetInstance();
+  std::lock_guard achievements_guard{achievements.GetLock()};
 
-  if (!challenge_indicators_enabled)
+  const bool show_badges = Config::Get(Config::RA_CHALLENGE_INDICATORS_ENABLED);
+  const bool changed = achievements.AreChallengesUpdated();
+  const auto& active = achievements.GetActiveChallenges();
+
+  if (changed)
+    achievements.ResetChallengesUpdated();
+
+  if (!show_badges)
   {
-    if (challenges_updated)
-      instance.ResetChallengesUpdated();
-    if (!m_challenge_texture_map.empty())
-      m_challenge_texture_map.clear();
+    if (!m_challenge_badges.empty())
+      m_challenge_badges.clear();
   }
-  else if (challenges_updated || m_challenge_texture_map.size() != challenges.size())
+  else if (changed || m_challenge_badges.size() != active.size())
   {
-    if (challenges_updated)
-      instance.ResetChallengesUpdated();
-    m_challenge_texture_map.clear();
-    for (const auto& name : challenges)
+    // Rebuild every badge texture from the current challenge list.
+    m_challenge_badges.clear();
+    for (const auto& id : active)
     {
-      const auto& icon = instance.GetAchievementBadge(name, false);
-      const u32 width = icon.width;
-      const u32 height = icon.height;
-      TextureConfig tex_config(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
-                               AbstractTextureType::Texture_2DArray);
-      auto res = m_challenge_texture_map.insert_or_assign(name, g_gfx->CreateTexture(tex_config));
-      res.first->second->Load(0, width, height, width, icon.data.data(),
-                              sizeof(u32) * width * height);
+      const auto& badge = achievements.GetAchievementBadge(id, false);
+      auto placed = m_challenge_badges.insert_or_assign(
+          static_cast<int>(id), g_gfx->CreateTexture(UiTextureConfig(badge.width, badge.height)));
+      LoadRgba(*placed.first->second, badge.width, badge.height, badge.data.data());
     }
   }
 
-  float leaderboard_y = ImGui::GetIO().DisplaySize.y;
-  if (challenge_indicators_enabled && !m_challenge_texture_map.empty())
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  float leaderboard_bottom = display.y;
+  if (show_badges && !m_challenge_badges.empty())
   {
-    float scale = ImGui::GetIO().DisplaySize.y / 1024.0;
+    // Badges are sized relative to a 1024-pixel-high window, in the bottom-right corner.
+    const float badge_scale = static_cast<float>(display.y / 1024.0);
     ImGui::SetNextWindowSize(ImVec2(0, 0));
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y), 0,
-                            ImVec2(1, 1));
-    if (ImGui::Begin("Challenges", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav |
-                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing))
+    ImGui::SetNextWindowPos(ImVec2(display.x, display.y), 0, ImVec2(1, 1));
+    if (ImGui::Begin("Challenges", nullptr, OVERLAY_FLAGS))
     {
-      for (auto& [name, texture] : m_challenge_texture_map)
+      for (const auto& entry : m_challenge_badges)
       {
-        ImGui::Image(*texture.get(), ImVec2(static_cast<float>(texture->GetWidth()) * scale,
-                                            static_cast<float>(texture->GetHeight()) * scale));
+        AbstractTexture& badge = *entry.second;
+        ImGui::Image(badge, ImVec2(static_cast<float>(badge.GetWidth()) * badge_scale,
+                                   static_cast<float>(badge.GetHeight()) * badge_scale));
         ImGui::SameLine();
       }
     }
-    leaderboard_y -= ImGui::GetWindowHeight();
+    leaderboard_bottom -= ImGui::GetWindowHeight();
     ImGui::End();
   }
 
-  const auto& leaderboard_progress = instance.GetActiveLeaderboards();
-  if (Config::Get(Config::RA_LEADERBOARD_TRACKER_ENABLED) && !leaderboard_progress.empty())
+  const auto& leaderboards = achievements.GetActiveLeaderboards();
+  if (Config::Get(Config::RA_LEADERBOARD_TRACKER_ENABLED) && !leaderboards.empty())
   {
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x, leaderboard_y), 0,
-                            ImVec2(1.0, 1.0));
+    // Stacked above the badges.
+    ImGui::SetNextWindowPos(ImVec2(display.x, leaderboard_bottom), 0, ImVec2(1.0, 1.0));
     ImGui::SetNextWindowSize(ImVec2(0.0f, 0.0f));
-    if (ImGui::Begin("Leaderboards", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav |
-                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing))
+    if (ImGui::Begin("Leaderboards", nullptr, OVERLAY_FLAGS))
     {
-      for (const auto& value : leaderboard_progress)
-        ImGui::TextUnformatted(value.c_str());
+      for (const auto& line : leaderboards)
+        ImGui::TextUnformatted(line.c_str());
     }
     ImGui::End();
   }
@@ -415,125 +451,131 @@ void OnScreenUI::DrawChallengesAndLeaderboards()
 
 void OnScreenUI::Finalize()
 {
-  auto lock = GetImGuiLock();
+  auto guard = GetImGuiLock();
 
-  auto& perf_metrics = Core::System::GetInstance().GetPerfMetrics();
-  perf_metrics.DrawImGuiStats(m_backbuffer_scale);
+  Core::System::GetInstance().GetPerfMetrics().DrawImGuiStats(m_backbuffer_scale);
   DrawDebugText();
   OSD::DrawMessages();
   DrawChallengesAndLeaderboards();
   ImGui::Render();
 
-  // Check for font changes
+  // Pick up a changed OSD font size for the next frame.
   ImGuiStyle& style = ImGui::GetStyle();
-  const int size = Config::Get(Config::MAIN_OSD_FONT_SIZE);
-  if (size != style.FontSizeBase)
-    style.FontSizeBase = static_cast<float>(size);
+  const int font_size = Config::Get(Config::MAIN_OSD_FONT_SIZE);
+  if (static_cast<float>(font_size) != style.FontSizeBase)
+    style.FontSizeBase = static_cast<float>(font_size);
 
-  // Create or update fonts.
-  ImDrawData* draw_data = ImGui::GetDrawData();
-  if (draw_data->Textures != nullptr)
-    for (ImTextureData* tex : *draw_data->Textures)
-      if (tex->Status != ImTextureStatus_OK)
-        UpdateImguiTexture(tex);
+  // Serve ImGui's texture requests (font atlas creation, partial updates, destruction).
+  ImDrawData* const frame = ImGui::GetDrawData();
+  if (frame->Textures == nullptr)
+    return;
+  for (ImTextureData* tex : *frame->Textures)
+  {
+    if (tex->Status != ImTextureStatus_OK)
+      UpdateImguiTexture(tex);
+  }
 }
 
 void OnScreenUI::UpdateImguiTexture(ImTextureData* tex)
 {
-  if (tex->Status == ImTextureStatus_WantCreate)
+  switch (tex->Status)
   {
-    // Create new font texture.
-    IM_ASSERT(tex->TexID == ImTextureID_Invalid);
-    IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+  case ImTextureStatus_WantCreate:
+    CreateAtlasTexture(tex);
+    break;
+  case ImTextureStatus_WantUpdates:
+    PatchAtlasTexture(tex);
+    break;
+  case ImTextureStatus_WantDestroy:
+    // Wait until ImGui has stopped using it for a frame.
+    if (tex->UnusedFrames > 0)
+      ReleaseAtlasTexture(tex);
+    break;
+  default:
+    break;
+  }
+}
 
-    TextureConfig font_tex_config(tex->Width, tex->Height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
-                                  AbstractTextureType::Texture_2DArray);
-    std::unique_ptr<AbstractTexture> font_tex =
-        g_gfx->CreateTexture(font_tex_config, "ImGui font texture");
+void OnScreenUI::CreateAtlasTexture(ImTextureData* tex)
+{
+  IM_ASSERT(tex->TexID == ImTextureID_Invalid);
+  IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
 
-    if (!font_tex)
+  const u32 width = static_cast<u32>(tex->Width);
+  const u32 height = static_cast<u32>(tex->Height);
+  std::unique_ptr<AbstractTexture> texture =
+      g_gfx->CreateTexture(UiTextureConfig(width, height), "ImGui font texture");
+  if (!texture)
+  {
+    PanicAlertFmt("Failed to create ImGui texture");
+    return;
+  }
+
+  LoadRgba(*texture, width, height, static_cast<const u8*>(tex->Pixels));
+
+  tex->SetTexID(static_cast<ImTextureID>(*texture));
+  m_atlas_textures.push_back(std::move(texture));
+  tex->SetStatus(ImTextureStatus_OK);
+}
+
+void OnScreenUI::PatchAtlasTexture(ImTextureData* tex)
+{
+  AbstractTexture* const target = reinterpret_cast<AbstractTexture*>(tex->GetTexID());
+  if (target == nullptr || tex->TexID == ImTextureID_Invalid)
+  {
+    PanicAlertFmt("ImGui texture not created before update");
+    return;
+  }
+
+  for (const ImTextureRect& dirty : tex->Updates)
+  {
+    const int x = static_cast<int>(dirty.x);
+    const int y = static_cast<int>(dirty.y);
+    const int w = static_cast<int>(dirty.w);
+    const int h = static_cast<int>(dirty.h);
+
+    // Copy the dirty rectangle row by row into an upload texture, then onto the atlas.
+    std::unique_ptr<AbstractStagingTexture> upload = g_gfx->CreateStagingTexture(
+        StagingTextureType::Upload, UiTextureConfig(static_cast<u32>(w), static_cast<u32>(h)));
+
+    const int row_bytes = w * tex->BytesPerPixel;
+    for (int row = 0; row < h; ++row)
     {
-      PanicAlertFmt("Failed to create ImGui texture");
-      return;
+      upload->WriteTexels(MathUtil::Rectangle<int>{0, row, w, row + 1},
+                          tex->GetPixelsAt(x, y + row), static_cast<u32>(row_bytes));
     }
 
-    font_tex->Load(0, tex->Width, tex->Height, tex->Width, tex->Pixels,
-                   sizeof(u32) * tex->Width * tex->Height);
-
-    tex->SetTexID(static_cast<ImTextureID>(*font_tex.get()));
-    // Keeps the texture alive.
-    m_imgui_textures.push_back(std::move(font_tex));
-    tex->SetStatus(ImTextureStatus_OK);
+    upload->CopyToTexture(MathUtil::Rectangle<int>{0, 0, w, h}, target,
+                          MathUtil::Rectangle<int>{x, y, x + w, y + h}, 0, 0);
   }
-  else if (tex->Status == ImTextureStatus_WantUpdates)
-  {
-    AbstractTexture* font_tex = reinterpret_cast<AbstractTexture*>(tex->GetTexID());
 
-    if (!font_tex || tex->TexID == ImTextureID_Invalid)
-    {
-      PanicAlertFmt("ImGui texture not created before update");
-      return;
-    }
+  tex->SetStatus(ImTextureStatus_OK);
+}
 
-    for (const ImTextureRect& r : tex->Updates)
-    {
-      // Rect of texture that will be updated.
-      const int x_offset = static_cast<int>(r.x);
-      const int y_offset = static_cast<int>(r.y);
-      const int width = static_cast<int>(r.w);
-      const int height = static_cast<int>(r.h);
+void OnScreenUI::ReleaseAtlasTexture(ImTextureData* tex)
+{
+  const AbstractTexture* const target = reinterpret_cast<AbstractTexture*>(tex->GetTexID());
+  tex->SetTexID(ImTextureID_Invalid);
 
-      // Create a staging texture to update the font texture with.
-      TextureConfig font_tex_config(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
-                                    AbstractTextureType::Texture_2DArray);
-      std::unique_ptr<AbstractStagingTexture> stage =
-          g_gfx->CreateStagingTexture(StagingTextureType::Upload, font_tex_config);
+  const auto owned = std::ranges::find_if(
+      m_atlas_textures, [target](const auto& texture) { return texture.get() == target; });
+  m_atlas_textures.erase(owned);
 
-      const int src_pitch = width * tex->BytesPerPixel;
-
-      // Write to staging texture.
-      for (int y = 0; y < height; y++)
-      {
-        const MathUtil::Rectangle<int> rect_line = {0, y, width, y + 1};
-        stage->WriteTexels(rect_line, tex->GetPixelsAt(x_offset, y_offset + y), src_pitch);
-      }
-
-      // Copy to font texture.
-      const MathUtil::Rectangle<int> rect_staging = {0, 0, width, height};
-      const MathUtil::Rectangle<int> rect_target = {x_offset, y_offset, width + x_offset,
-                                                    height + y_offset};
-
-      stage->CopyToTexture(rect_staging, font_tex, rect_target, 0, 0);
-    }
-
-    tex->SetStatus(ImTextureStatus_OK);
-  }
-  else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0)
-  {
-    AbstractTexture* font_tex = reinterpret_cast<AbstractTexture*>(tex->GetTexID());
-
-    tex->SetTexID(ImTextureID_Invalid);
-
-    m_imgui_textures.erase(
-        std::find_if(m_imgui_textures.begin(), m_imgui_textures.end(),
-                     [font_tex](auto& element) { return element.get() == font_tex; }));
-
-    tex->Status = ImTextureStatus_Destroyed;
-  }
+  tex->Status = ImTextureStatus_Destroyed;
 }
 
 std::unique_lock<std::mutex> OnScreenUI::GetImGuiLock()
 {
-  return std::unique_lock<std::mutex>(m_imgui_mutex);
+  return std::unique_lock<std::mutex>(m_lock);
 }
 
 void OnScreenUI::SetScale(float backbuffer_scale)
 {
-  ImGui::GetIO().DisplayFramebufferScale.x = backbuffer_scale;
-  ImGui::GetIO().DisplayFramebufferScale.y = backbuffer_scale;
+  ImGuiIO& io = ImGui::GetIO();
+  io.DisplayFramebufferScale.x = backbuffer_scale;
+  io.DisplayFramebufferScale.y = backbuffer_scale;
 
-  // ScaleAllSizes scales in-place, so calling it twice will double-apply the scale
-  // Reset the style first so that the scale is applied to the base style, not an already-scaled one
+  // ScaleAllSizes multiplies the current sizes, so start again from the default style each time.
   ImGuiStyle& style = ImGui::GetStyle();
   style = {};
   style.FontScaleMain = backbuffer_scale;
@@ -542,59 +584,48 @@ void OnScreenUI::SetScale(float backbuffer_scale)
 
   m_backbuffer_scale = backbuffer_scale;
 }
+
 void OnScreenUI::SetKeyMap(const DolphinKeyMap& key_map)
 {
-  static constexpr DolphinKeyMap dolphin_to_imgui_map = {
-      ImGuiKey_Tab,       ImGuiKey_LeftArrow, ImGuiKey_RightArrow, ImGuiKey_UpArrow,
-      ImGuiKey_DownArrow, ImGuiKey_PageUp,    ImGuiKey_PageDown,   ImGuiKey_Home,
-      ImGuiKey_End,       ImGuiKey_Insert,    ImGuiKey_Delete,     ImGuiKey_Backspace,
-      ImGuiKey_Space,     ImGuiKey_Enter,     ImGuiKey_Escape,     ImGuiKey_KeypadEnter,
-      ImGuiKey_A,         ImGuiKey_C,         ImGuiKey_V,          ImGuiKey_X,
-      ImGuiKey_Y,         ImGuiKey_Z,
-  };
-
-  auto lock = GetImGuiLock();
-
-  if (!ImGui::GetCurrentContext())
+  auto guard = GetImGuiLock();
+  if (ImGui::GetCurrentContext() == nullptr)
     return;
 
-  m_dolphin_to_imgui_map.clear();
-  for (int dolphin_key = 0; dolphin_key <= static_cast<int>(DolphinKey::Z); dolphin_key++)
+  m_host_key_to_imgui.clear();
+  for (std::size_t index = 0; index < IMGUI_KEY_FOR.size(); ++index)
   {
-    const int imgui_key = dolphin_to_imgui_map[DolphinKey(dolphin_key)];
-    if (imgui_key >= 0)
-    {
-      const int mapped_key = key_map[DolphinKey(dolphin_key)];
-      m_dolphin_to_imgui_map[mapped_key & 0x1FF] = imgui_key;
-    }
+    const DolphinKey key = static_cast<DolphinKey>(index);
+    const u32 host_code = static_cast<u32>(key_map[key] & 0x1FF);
+    m_host_key_to_imgui[host_code] = static_cast<int>(IMGUI_KEY_FOR[index]);
   }
 }
 
 void OnScreenUI::SetKey(u32 key, bool is_down, const char* chars)
 {
-  auto lock = GetImGuiLock();
-  if (auto iter = m_dolphin_to_imgui_map.find(key); iter != m_dolphin_to_imgui_map.end())
-    ImGui::GetIO().AddKeyEvent((ImGuiKey)iter->second, is_down);
+  auto guard = GetImGuiLock();
+  ImGuiIO& io = ImGui::GetIO();
 
-  if (chars)
-    ImGui::GetIO().AddInputCharactersUTF8(chars);
+  const auto mapped = m_host_key_to_imgui.find(key);
+  if (mapped != m_host_key_to_imgui.end())
+    io.AddKeyEvent(static_cast<ImGuiKey>(mapped->second), is_down);
+
+  if (chars != nullptr)
+    io.AddInputCharactersUTF8(chars);
 }
 
 void OnScreenUI::SetMousePos(float x, float y)
 {
-  auto lock = GetImGuiLock();
-
+  auto guard = GetImGuiLock();
   ImGui::GetIO().AddMousePosEvent(x, y);
 }
 
 void OnScreenUI::SetMousePress(u32 button_mask)
 {
-  auto lock = GetImGuiLock();
+  auto guard = GetImGuiLock();
+  ImGuiIO& io = ImGui::GetIO();
 
-  for (size_t i = 0; i < std::size(ImGui::GetIO().MouseDown); i++)
-  {
-    ImGui::GetIO().AddMouseButtonEvent(static_cast<int>(i), (button_mask & (1u << i)) != 0);
-  }
+  const int button_count = static_cast<int>(std::size(io.MouseDown));
+  for (int button = 0; button < button_count; ++button)
+    io.AddMouseButtonEvent(button, ((button_mask >> button) & 1u) != 0);
 }
-
 }  // namespace VideoCommon

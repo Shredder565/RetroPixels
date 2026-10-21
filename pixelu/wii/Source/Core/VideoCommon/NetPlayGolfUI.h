@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@ namespace NetPlay
 class NetPlayClient;
 }
 
+// The NetPlay golf-mode window (ImGui): shows who has control and lets the local player take
+// it or hand it to another player.
 class NetPlayGolfUI
 {
 public:
@@ -19,7 +20,7 @@ public:
   void Display();
 
 private:
-  std::weak_ptr<NetPlay::NetPlayClient> m_netplay_client;
+  std::weak_ptr<NetPlay::NetPlayClient> m_client;
 };
 
 extern std::unique_ptr<NetPlayGolfUI> g_netplay_golf_ui;
