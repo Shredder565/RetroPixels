@@ -1,7 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <memory>
 
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/ControllerEmu/StickGate.h"
@@ -9,6 +10,7 @@
 
 namespace ControllerEmu
 {
+// A two-axis stick mapped from four directions plus a "Modifier" that shortens its travel.
 class AnalogStick : public ReshapableInput
 {
 public:
@@ -26,10 +28,10 @@ public:
 private:
   Control* GetModifierInput() const override;
 
-  std::unique_ptr<StickGate> m_stick_gate;
+  std::unique_ptr<StickGate> m_gate;
 };
 
-// An AnalogStick with an OctagonStickGate
+// An AnalogStick with an octagonal gate whose size and virtual notches are settings.
 class OctagonAnalogStick : public AnalogStick
 {
 public:
@@ -40,8 +42,8 @@ public:
   ControlState GetGateRadiusAtAngle(double ang) const override;
 
 private:
-  SettingValue<double> m_virtual_notch_setting;
-  SettingValue<double> m_gate_size_setting;
+  SettingValue<double> m_notch_width;
+  SettingValue<double> m_gate_percent;
 };
 
 }  // namespace ControllerEmu

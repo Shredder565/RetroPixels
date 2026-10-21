@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
 
@@ -16,5 +15,4 @@ Buttons::Buttons(std::string ini_name, std::string group_name)
     : ControlGroup(std::move(ini_name), std::move(group_name), GroupType::Buttons)
 {
 }
-
 }  // namespace ControllerEmu

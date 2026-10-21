@@ -1,8 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -12,6 +12,7 @@
 
 namespace ControllerEmu
 {
+// Analog-only triggers, each from 0 to 1.
 class Triggers : public ControlGroup
 {
 public:

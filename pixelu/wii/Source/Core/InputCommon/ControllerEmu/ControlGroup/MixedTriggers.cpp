@@ -1,11 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/MixedTriggers.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <string>
 
 #include "Common/Common.h"
@@ -15,6 +15,51 @@
 
 namespace ControllerEmu
 {
+namespace
+{
+// Reads every trigger. With an override function, each trigger's digital state (as 0 or 1)
+// and then its analog value are offered to it before they are stored.
+void ReadTriggers(const MixedTriggers& group, u16* digital, const u16* bitmasks,
+                  ControlState* analog, const InputOverrideFunction* override_func, bool adjusted)
+{
+  const ControlState threshold = group.GetThreshold();
+  ControlState deadzone = group.GetDeadzone();
+  // The mapping UI shows the values without a dead zone.
+  if (!adjusted)
+    deadzone = 0.0;
+
+  const std::size_t count = group.GetTriggerCount();
+  for (std::size_t i = 0; i != count; ++i)
+  {
+    const Control& button = *group.controls[i];
+    const Control& axis = *group.controls[count + i];
+
+    const ControlState press = ControlGroup::ApplyDeadzone(button.GetState(), deadzone);
+    ControlState travel = ControlGroup::ApplyDeadzone(axis.GetState(), deadzone);
+
+    bool clicked = false;
+    if (press >= threshold)
+    {
+      clicked = true;
+      travel = 1.0;
+    }
+
+    if (override_func != nullptr)
+    {
+      const auto& replace = *override_func;
+      if (const auto value = replace(group.name, button.name, static_cast<ControlState>(clicked)))
+        clicked = ControlStateCast<bool>(*value);
+      if (const auto value = replace(group.name, axis.name, travel))
+        travel = *value;
+    }
+
+    if (clicked)
+      *digital |= bitmasks[i];
+    analog[i] = std::min(travel, 1.0);
+  }
+}
+}  // namespace
+
 MixedTriggers::MixedTriggers(const std::string& name_)
     : ControlGroup(name_, GroupType::MixedTriggers)
 {
@@ -22,9 +67,9 @@ MixedTriggers::MixedTriggers(const std::string& name_)
 
   AddSetting(&m_threshold_setting,
              {_trans("Threshold"),
-              // i18n: The percent symbol.
+              // i18n: Unit suffix, percent.
               _trans("%"),
-              // i18n: Refers to the "threshold" setting for pressure sensitive gamepad inputs.
+              // i18n: Tooltip of the press threshold of pressure-sensitive buttons.
               _trans("Input strength required for activation.")},
              90, 1, 100);
 }
@@ -32,81 +77,14 @@ MixedTriggers::MixedTriggers(const std::string& name_)
 void MixedTriggers::GetState(u16* const digital, const u16* bitmasks, ControlState* analog,
                              bool adjusted) const
 {
-  const ControlState threshold = GetThreshold();
-  ControlState deadzone = GetDeadzone();
-
-  // Return raw values. (used in UI)
-  if (!adjusted)
-  {
-    deadzone = 0.0;
-  }
-
-  const int trigger_count = int(controls.size() / 2);
-  for (int i = 0; i != trigger_count; ++i)
-  {
-    const ControlState button_value = ApplyDeadzone(controls[i]->GetState(), deadzone);
-    ControlState analog_value =
-        std::min(ApplyDeadzone(controls[trigger_count + i]->GetState(), deadzone), 1.0);
-
-    // Apply threshold:
-    if (button_value >= threshold)
-    {
-      // Fully activate analog:
-      analog_value = 1.0;
-
-      // Activate button:
-      *digital |= bitmasks[i];
-    }
-
-    analog[i] = analog_value;
-  }
+  ReadTriggers(*this, digital, bitmasks, analog, nullptr, adjusted);
 }
 
 void MixedTriggers::GetState(u16* digital, const u16* bitmasks, ControlState* analog,
                              const InputOverrideFunction& override_func, bool adjusted) const
 {
-  if (!override_func)
-    return GetState(digital, bitmasks, analog, adjusted);
-
-  const ControlState threshold = GetThreshold();
-  ControlState deadzone = GetDeadzone();
-
-  // Return raw values. (used in UI)
-  if (!adjusted)
-  {
-    deadzone = 0.0;
-  }
-
-  const int trigger_count = int(controls.size() / 2);
-  for (int i = 0; i != trigger_count; ++i)
-  {
-    bool button_bool = false;
-    const ControlState button_value = ApplyDeadzone(controls[i]->GetState(), deadzone);
-    ControlState analog_value = ApplyDeadzone(controls[trigger_count + i]->GetState(), deadzone);
-
-    // Apply threshold:
-    if (button_value >= threshold)
-    {
-      analog_value = 1.0;
-      button_bool = true;
-    }
-
-    if (const std::optional<ControlState> button_override =
-            override_func(name, controls[i]->name, static_cast<ControlState>(button_bool)))
-    {
-      button_bool = std::lround(*button_override) > 0;
-    }
-
-    if (const std::optional<ControlState> analog_override =
-            override_func(name, controls[trigger_count + i]->name, analog_value))
-    {
-      analog_value = *analog_override;
-    }
-
-    if (button_bool)
-      *digital |= bitmasks[i];
-    analog[i] = std::min(analog_value, 1.0);
-  }
+  ReadTriggers(*this, digital, bitmasks, analog, override_func ? &override_func : nullptr,
+               adjusted);
 }
 
 ControlState MixedTriggers::GetDeadzone() const

@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,9 @@
 
 namespace ControllerEmu
 {
+// Gyroscope data from a host device, with automatic zero-rate calibration: once the reading has
+// stayed within the dead zone of its running mean for the calibration period, that mean becomes
+// the new zero.
 class IMUGyroscope : public ControlGroup
 {
 public:
@@ -22,10 +24,11 @@ public:
   IMUGyroscope(std::string name, std::string ui_name);
 
   StateData GetRawState() const;
-  // Also updates the state by default
+  // Calibrated and dead-zoned rates; nothing when no axis is mapped. `update` also advances the
+  // calibration.
   std::optional<StateData> GetState(bool update = true);
 
-  // Value is in rad/s.
+  // In rad/s.
   ControlState GetDeadzone() const;
 
   bool IsCalibrating() const;
@@ -41,8 +44,8 @@ private:
   SettingValue<double> m_deadzone_setting;
   SettingValue<double> m_calibration_period_setting;
 
-  StateData m_calibration = {};
-  MathUtil::RunningMean<StateData> m_running_calibration;
-  Clock::time_point m_calibration_period_start = Clock::now();
+  StateData m_zero_rate = {};
+  MathUtil::RunningMean<StateData> m_stable_mean;
+  Clock::time_point m_stable_since = Clock::now();
 };
 }  // namespace ControllerEmu

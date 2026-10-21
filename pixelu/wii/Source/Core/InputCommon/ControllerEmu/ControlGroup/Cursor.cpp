@@ -1,13 +1,13 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 
 #include "Common/Common.h"
 #include "Common/MathUtil.h"
@@ -19,42 +19,53 @@
 
 namespace ControllerEmu
 {
+namespace
+{
+enum CursorControl : std::size_t
+{
+  CURSOR_UP,
+  CURSOR_DOWN,
+  CURSOR_LEFT,
+  CURSOR_RIGHT,
+  CURSOR_HIDE,
+  CURSOR_RECENTER,
+  CURSOR_RELATIVE_HOLD,
+};
+}  // namespace
+
 Cursor::Cursor(std::string name_, std::string ui_name_)
     : ReshapableInput(std::move(name_), std::move(ui_name_), GroupType::Cursor),
       m_last_update(Clock::now())
 {
-  for (auto& named_direction : named_directions)
-    AddInput(Translatability::Translate, named_direction);
-
+  for (const char* direction : named_directions)
+    AddInput(Translatability::Translate, direction);
   AddInput(Translatability::Translate, _trans("Hide"));
   AddInput(Translatability::Translate, _trans("Recenter"));
-
   AddInput(Translatability::Translate, _trans("Relative Input Hold"));
 
-  // Default values chosen to reach screen edges in most games including the Wii Menu.
-
+  // The defaults reach the screen edges in most games, the Wii Menu included.
   AddSetting(&m_vertical_offset_setting,
-             // i18n: Refers to a positional offset applied to an emulated wiimote.
+             // i18n: How far the emulated Wii Remote is moved up or down.
              {_trans("Vertical Offset"),
-              // i18n: The symbol/abbreviation for centimeters.
+              // i18n: Unit suffix, centimeters.
               _trans("cm")},
              10, -100, 100);
 
   AddSetting(&m_yaw_setting,
-             // i18n: Refers to an amount of rotational movement about the "yaw" axis.
+             // i18n: Rotation about the vertical ("yaw") axis.
              {_trans("Total Yaw"),
-              // i18n: The symbol/abbreviation for degrees (unit of angular measure).
+              // i18n: Unit suffix, degrees.
               _trans("°"),
-              // i18n: Refers to emulated wii remote movements.
+              // i18n: Tooltip of a Wii Remote pointing setting.
               _trans("Total rotation about the yaw axis.")},
              25, 0, 360);
 
   AddSetting(&m_pitch_setting,
-             // i18n: Refers to an amount of rotational movement about the "pitch" axis.
+             // i18n: Rotation about the side-to-side ("pitch") axis.
              {_trans("Total Pitch"),
-              // i18n: The symbol/abbreviation for degrees (unit of angular measure).
+              // i18n: Unit suffix, degrees.
               _trans("°"),
-              // i18n: Refers to emulated wii remote movements.
+              // i18n: Tooltip of a Wii Remote pointing setting.
               _trans("Total rotation about the pitch axis.")},
              20, 0, 360);
 
@@ -64,13 +75,11 @@ Cursor::Cursor(std::string name_, std::string ui_name_)
 
 Cursor::ReshapeData Cursor::GetReshapableState(bool adjusted) const
 {
-  const ControlState y = controls[0]->GetState() - controls[1]->GetState();
-  const ControlState x = controls[3]->GetState() - controls[2]->GetState();
+  const ControlState y = controls[CURSOR_UP]->GetState() - controls[CURSOR_DOWN]->GetState();
+  const ControlState x = controls[CURSOR_RIGHT]->GetState() - controls[CURSOR_LEFT]->GetState();
 
-  // Return raw values. (used in UI)
   if (!adjusted)
     return {x, y};
-
   return Reshape(x, y, 0.0);
 }
 
@@ -82,8 +91,9 @@ ControlState Cursor::GetGateRadiusAtAngle(double ang) const
 Cursor::StateData Cursor::GetState(const bool adjusted)
 {
   const ReshapeData input = GetReshapableState(adjusted);
-  const StateData state = adjusted ? UpdateState(input) : StateData{input.x, input.y};
-  return state;
+  if (!adjusted)
+    return StateData{input.x, input.y};
+  return UpdateState(input);
 }
 
 Cursor::StateData Cursor::GetState(const bool adjusted,
@@ -93,70 +103,57 @@ Cursor::StateData Cursor::GetState(const bool adjusted,
   if (!override_func)
     return state;
 
-  if (const std::optional<ControlState> x_override = override_func(name, X_INPUT_OVERRIDE, state.x))
-    state.x = *x_override;
-  if (const std::optional<ControlState> y_override = override_func(name, Y_INPUT_OVERRIDE, state.y))
-    state.y = *y_override;
-
+  if (const std::optional<ControlState> x = override_func(name, X_INPUT_OVERRIDE, state.x))
+    state.x = *x;
+  if (const std::optional<ControlState> y = override_func(name, Y_INPUT_OVERRIDE, state.y))
+    state.y = *y;
   return state;
 }
 
 Cursor::StateData Cursor::UpdateState(Cursor::ReshapeData input)
 {
-  // TODO: Using system time is ugly.
-  // Kill this after state is moved into wiimote rather than this class.
-  const auto now = Clock::now();
-  const auto ms_since_update =
+  // Wall-clock based for now; the pointer state really belongs to the emulated Wii Remote.
+  const Clock::time_point now = Clock::now();
+  const auto elapsed_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_update).count();
   m_last_update = now;
 
-  const double max_step = STEP_PER_SEC / 1000.0 * ms_since_update;
+  const double step = STEP_PER_SEC / 1000.0 * static_cast<double>(elapsed_ms);
 
-  // Relative input:
-  if (m_relative_setting.GetValue() ^ (controls[6]->GetState<bool>()))
+  // The hold control inverts the relative-input setting while held.
+  const bool relative = m_relative_setting.GetValue() ^ controls[CURSOR_RELATIVE_HOLD]->GetState<bool>();
+  if (!relative)
   {
-    // Recenter:
-    if (controls[5]->GetState<bool>())
-    {
-      m_state.x = 0.0;
-      m_state.y = 0.0;
-    }
-    else
-    {
-      m_state.x = std::clamp(m_state.x + input.x * max_step, -1.0, 1.0);
-      m_state.y = std::clamp(m_state.y + input.y * max_step, -1.0, 1.0);
-    }
+    m_position.x = input.x;
+    m_position.y = input.y;
   }
-  // Absolute input:
+  else if (controls[CURSOR_RECENTER]->GetState<bool>())
+  {
+    m_position = {};
+  }
   else
   {
-    m_state.x = input.x;
-    m_state.y = input.y;
+    m_position.x = std::clamp(m_position.x + input.x * step, -1.0, 1.0);
+    m_position.y = std::clamp(m_position.y + input.y * step, -1.0, 1.0);
   }
 
-  StateData result = m_state;
+  StateData result = m_position;
 
+  // Auto-hide: any movement (or auto-hide being off) restarts the countdown.
   const bool autohide = m_autohide_setting.GetValue();
+  const bool moved = std::abs(m_last_result.x - result.x) > AUTO_HIDE_DEADZONE ||
+                     std::abs(m_last_result.y - result.y) > AUTO_HIDE_DEADZONE;
+  if (!autohide || moved)
+    m_hide_countdown_ms = AUTO_HIDE_MS;
+  else if (m_hide_countdown_ms != 0)
+    m_hide_countdown_ms -= std::min(static_cast<int>(elapsed_ms), m_hide_countdown_ms);
 
-  // Auto-hide timer:
-  // TODO: should Z movement reset this?
-  if (!autohide || std::abs(m_prev_result.x - result.x) > AUTO_HIDE_DEADZONE ||
-      std::abs(m_prev_result.y - result.y) > AUTO_HIDE_DEADZONE)
-  {
-    m_auto_hide_timer = AUTO_HIDE_MS;
-  }
-  else if (m_auto_hide_timer)
-  {
-    m_auto_hide_timer -= std::min<int>(ms_since_update, m_auto_hide_timer);
-  }
+  m_last_result = result;
 
-  m_prev_result = result;
-
-  // If auto-hide time is up, the hide button is held, or the input gate is disabled, hide the
-  // cursor.  We need to check the input gate explicitly as the hide button check always returns
-  // false if the input gate is disabled (e.g. the window is not focused with background input
-  // disabled)
-  if (!m_auto_hide_timer || !ControlReference::GetInputGate() || controls[4]->GetState<bool>())
+  // Hidden once the countdown ran out, while "Hide" is held, or while the input gate is closed
+  // (a closed gate makes "Hide" read as released, so it is checked on its own).
+  if (m_hide_countdown_ms == 0 || !ControlReference::GetInputGate() ||
+      controls[CURSOR_HIDE]->GetState<bool>())
   {
     result.x = std::numeric_limits<ControlState>::quiet_NaN();
     result.y = 0;

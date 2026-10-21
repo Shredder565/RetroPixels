@@ -1,10 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/ModifySettingsButton.h"
 
 #include <cstddef>
-#include <memory>
 #include <string>
 #include <utility>
 
@@ -20,52 +18,43 @@ ModifySettingsButton::ModifySettingsButton(const std::string& button_name) : But
 void ModifySettingsButton::AddInput(std::string button_name, bool toggle)
 {
   ControlGroup::AddInput(Translatability::Translate, std::move(button_name));
-  m_threshold_exceeded.emplace_back(false);
-  m_associated_settings.emplace_back(false);
-  m_associated_settings_toggle.emplace_back(toggle);
+  m_pressed.push_back(false);
+  m_active.push_back(false);
+  m_is_toggle.push_back(toggle);
 }
 
 void ModifySettingsButton::UpdateState()
 {
-  for (size_t i = 0; i < controls.size(); ++i)
+  for (std::size_t i = 0; i != controls.size(); ++i)
   {
-    const bool state = controls[i]->GetState<bool>();
+    const bool held = controls[i]->GetState<bool>();
 
-    if (!m_associated_settings_toggle[i])
+    if (!m_is_toggle[i])
     {
-      // not toggled
-      m_associated_settings[i] = state;
+      m_active[i] = held;
+      continue;
     }
-    else
+
+    // A toggle flips once per press (states loaded from savestates do not count as presses).
+    if (held && !m_pressed[i])
     {
-      // toggle (loading savestates does not en-/disable toggle)
-      // after we passed the threshold, we en-/disable. but after that, we don't change it
-      // anymore
-      if (!m_threshold_exceeded[i] && state)
-      {
-        m_associated_settings[i] = !m_associated_settings[i];
-
-        if (m_associated_settings[i])
-          OSD::AddMessage(controls[i]->ui_name + ": on");
-        else
-          OSD::AddMessage(controls[i]->ui_name + ": off");
-
-        m_threshold_exceeded[i] = true;
-      }
-
-      if (!state)
-        m_threshold_exceeded[i] = false;
+      const bool now_on = !m_active[i];
+      m_active[i] = now_on;
+      OSD::AddMessage(controls[i]->ui_name + (now_on ? ": on" : ": off"));
+      m_pressed[i] = true;
     }
+    if (!held)
+      m_pressed[i] = false;
   }
 }
 
 const std::vector<bool>& ModifySettingsButton::IsSettingToggled() const
 {
-  return m_associated_settings_toggle;
+  return m_is_toggle;
 }
 
 const std::vector<bool>& ModifySettingsButton::GetSettingsModifier() const
 {
-  return m_associated_settings;
+  return m_active;
 }
 }  // namespace ControllerEmu

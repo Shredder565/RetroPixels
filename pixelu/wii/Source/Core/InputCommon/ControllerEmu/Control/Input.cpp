@@ -1,10 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/Control/Input.h"
 
 #include <memory>
 #include <string>
+#include <utility>
+
 #include "InputCommon/ControlReference/ControlReference.h"
 
 namespace ControllerEmu

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/Triggers.h"
 
@@ -20,33 +19,25 @@ Triggers::Triggers(const std::string& name_) : ControlGroup(name_, GroupType::Tr
 
 Triggers::StateData Triggers::GetState() const
 {
-  const size_t trigger_count = controls.size();
-  const ControlState deadzone = m_deadzone_setting.GetValue() / 100;
-
-  StateData result(trigger_count);
-  for (size_t i = 0; i < trigger_count; ++i)
-    result.data[i] = std::min(ApplyDeadzone(controls[i]->GetState(), deadzone), 1.0);
-
-  return result;
+  return GetState(InputOverrideFunction{});
 }
 
 Triggers::StateData Triggers::GetState(const InputOverrideFunction& override_func) const
 {
-  if (!override_func)
-    return GetState();
-
-  const size_t trigger_count = controls.size();
   const ControlState deadzone = m_deadzone_setting.GetValue() / 100;
 
-  StateData result(trigger_count);
-  for (size_t i = 0; i < trigger_count; ++i)
+  StateData result(controls.size());
+  for (std::size_t i = 0; i != controls.size(); ++i)
   {
-    ControlState state = ApplyDeadzone(controls[i]->GetState(), deadzone);
-    if (std::optional<ControlState> state_override = override_func(name, controls[i]->name, state))
-      state = *state_override;
-    result.data[i] = std::min(state, 1.0);
+    const Control& trigger = *controls[i];
+    ControlState value = ApplyDeadzone(trigger.GetState(), deadzone);
+    if (override_func)
+    {
+      if (const std::optional<ControlState> replaced = override_func(name, trigger.name, value))
+        value = *replaced;
+    }
+    result.data[i] = std::min(value, 1.0);
   }
-
   return result;
 }
 

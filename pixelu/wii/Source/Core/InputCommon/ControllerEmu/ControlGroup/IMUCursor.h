@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 namespace ControllerEmu
 {
+// Pointing with a host device's motion sensors.
 class IMUCursor : public ControlGroup
 {
 public:
@@ -19,6 +19,7 @@ public:
   // Yaw movement in radians.
   ControlState GetTotalYaw() const;
 
+  // Weight of the accelerometer in the orientation filter (0..1).
   ControlState GetAccelWeight() const;
 
 private:

@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,8 +13,10 @@
 
 namespace ciface::ExpressionParser
 {
+// Values above this count as "pressed" for conditions, toggles, hotkey modifiers and the like.
 constexpr ControlState CONDITION_THRESHOLD = 0.5;
 
+// Base of the built-in functions (toggle, if, sin, smooth, ...).
 class FunctionExpression : public Expression
 {
 public:
@@ -23,6 +24,7 @@ public:
   {
   };
 
+  // The expected argument list, shown to the user as "name(text)".
   struct ExpectedArguments
   {
     std::string text;
@@ -36,6 +38,7 @@ public:
   void SetArguments(std::vector<std::unique_ptr<Expression>>&& args);
   virtual ArgumentValidation ValidateArguments() = 0;
 
+  // Functions ignore writes unless they say otherwise.
   void SetValue(ControlState value) override;
 
 protected:
@@ -46,6 +49,7 @@ private:
   std::vector<std::unique_ptr<Expression>> m_args;
 };
 
+// Returns nullptr for names that are not functions.
 std::unique_ptr<FunctionExpression> MakeFunctionExpression(std::string_view name);
 
 }  // namespace ciface::ExpressionParser

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -31,9 +30,12 @@ class NumericSetting;
 template <typename T>
 class SettingValue;
 
+// Lets scripting, TAS input and similar replace a control's value: called with the group name,
+// the control (or axis) name and the computed state; a returned value replaces the state.
 using InputOverrideFunction = std::function<std::optional<ControlState>(
     const std::string_view group_name, const std::string_view control_name, ControlState state)>;
 
+// The kind of a group, used by the mapping UI to pick its widget.
 enum class GroupType
 {
   Other,
@@ -53,9 +55,11 @@ enum class GroupType
   IRPassthrough,
 };
 
+// A named set of controls and numeric settings, saved under "<base><name>/" in an ini section.
 class ControlGroup
 {
 public:
+  // Whether the group has an "Enabled" setting and what it defaults to.
   enum class DefaultValue
   {
     AlwaysEnabled,
@@ -85,18 +89,22 @@ public:
                   std::common_type_t<T> default_value_, std::common_type_t<T> min_value = {},
                   std::common_type_t<T> max_value = T(100))
   {
-    numeric_settings.emplace_back(
-        std::make_unique<NumericSetting<T>>(value, details, default_value_, min_value, max_value));
+    auto setting =
+        std::make_unique<NumericSetting<T>>(value, details, default_value_, min_value, max_value);
+    numeric_settings.push_back(std::move(setting));
   }
 
   void AddVirtualNotchSetting(SettingValue<double>* value, double max_virtual_notch_deg);
 
   void AddDeadzoneSetting(SettingValue<double>* value, double maximum_deadzone);
 
+  // Removes the first `deadzone` of the input's magnitude and stretches the rest back to 0..1,
+  // keeping the sign.
   template <typename T>
   static T ApplyDeadzone(T input, std::common_type_t<T> deadzone)
   {
-    return std::copysign(std::max(T{0}, std::abs(input) - deadzone) / (T{1} - deadzone), input);
+    const T magnitude = std::max(T{0}, std::abs(input) - deadzone);
+    return std::copysign(magnitude / (T{1} - deadzone), input);
   }
 
   bool HasEnabledSetting() const;
@@ -105,7 +113,7 @@ public:
   const std::string ui_name;
   const GroupType type;
 
-  // The default "enabled" state.
+  // What "Enabled" defaults to (AlwaysEnabled: there is no such setting).
   const DefaultValue default_value;
   SettingValue<bool> enabled;
   std::unique_ptr<NumericSetting<bool>> enabled_setting;

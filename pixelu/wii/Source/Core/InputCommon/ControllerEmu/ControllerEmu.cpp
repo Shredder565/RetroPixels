@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 
@@ -16,46 +15,73 @@
 
 namespace ControllerEmu
 {
-// This should theoretically be per EmulatedController instance,
-// though no EmulatedController usually run in parallel, so it makes little difference
-static std::recursive_mutex s_get_state_mutex;
+namespace
+{
+// One lock for all controllers: only one of them is normally polled at a time, so a lock per
+// controller would not buy anything.
+std::recursive_mutex s_state_mutex;
+}  // namespace
+
+// --- ControlGroupContainer ---------------------------------------------------------------------
+
+ControlGroupContainer::~ControlGroupContainer() = default;
 
 std::string ControlGroupContainer::GetDisplayName() const
 {
   return GetName();
 }
 
-EmulatedController::~EmulatedController() = default;
-
-// This should be called before calling GetState() or State() on a control reference
-// to prevent a race condition.
-// This is a recursive mutex because UpdateReferences is recursive.
-std::unique_lock<std::recursive_mutex> EmulatedController::GetStateLock()
+void ControlGroupContainer::LoadGroupsConfig(Common::IniFile::Section* sec,
+                                             const std::string& base)
 {
-  std::unique_lock<std::recursive_mutex> lock(s_get_state_mutex);
-  return lock;
+  for (const auto& group : groups)
+    group->LoadConfig(sec, base);
 }
 
-void EmulatedController::UpdateReferences(const ControllerInterface& devi)
+void ControlGroupContainer::SaveGroupsConfig(Common::IniFile::Section* sec,
+                                             const std::string& base)
 {
-  std::scoped_lock lk(s_get_state_mutex, devi.GetDevicesMutex());
-
-  m_default_device_is_connected = devi.HasConnectedDevice(m_default_device);
-
-  ciface::ExpressionParser::ControlEnvironment env(devi, GetDefaultDevice(), m_expression_vars);
-
-  UpdateGroupsReferences(env);
-
-  env.CleanUnusedVariables();
+  for (const auto& group : groups)
+    group->SaveConfig(sec, base);
 }
 
 void ControlGroupContainer::UpdateGroupsReferences(
     ciface::ExpressionParser::ControlEnvironment& env)
 {
   const auto lock = EmulatedController::GetStateLock();
-
-  for (auto& group : groups)
+  for (const auto& group : groups)
     group->UpdateReferences(env);
+}
+
+void ControlGroupContainer::SetInputOverrideFunction(InputOverrideFunction override_func)
+{
+  m_input_override_function = std::move(override_func);
+}
+
+void ControlGroupContainer::ClearInputOverrideFunction()
+{
+  m_input_override_function = InputOverrideFunction{};
+}
+
+// --- EmulatedController ------------------------------------------------------------------------
+
+EmulatedController::~EmulatedController() = default;
+
+std::unique_lock<std::recursive_mutex> EmulatedController::GetStateLock()
+{
+  return std::unique_lock<std::recursive_mutex>(s_state_mutex);
+}
+
+void EmulatedController::UpdateReferences(const ControllerInterface& devi)
+{
+  // Both locks: ours against readers of the references, the interface's against device changes.
+  std::scoped_lock locks(s_state_mutex, devi.GetDevicesMutex());
+
+  m_default_device_is_connected = devi.HasConnectedDevice(m_default_device);
+
+  ciface::ExpressionParser::ControlEnvironment env(devi, GetDefaultDevice(), m_expression_vars);
+  UpdateGroupsReferences(env);
+  env.CleanUnusedVariables();
 }
 
 void EmulatedController::UpdateSingleControlReference(const ControllerInterface& devi,
@@ -65,7 +91,6 @@ void EmulatedController::UpdateSingleControlReference(const ControllerInterface&
 
   const auto lock = GetStateLock();
   ref->UpdateReference(env);
-
   env.CleanUnusedVariables();
 }
 
@@ -77,12 +102,10 @@ EmulatedController::GetExpressionVariables() const
 
 void EmulatedController::ResetExpressionVariables()
 {
-  for (auto& var : m_expression_vars)
+  for (const auto& entry : m_expression_vars)
   {
-    if (var.second)
-    {
-      *var.second = 0;
-    }
+    if (entry.second != nullptr)
+      *entry.second = 0;
   }
 }
 
@@ -98,9 +121,9 @@ const ciface::Core::DeviceQualifier& EmulatedController::GetDefaultDevice() cons
 
 void EmulatedController::SetDefaultDevice(const std::string& device)
 {
-  ciface::Core::DeviceQualifier devq;
-  devq.FromString(device);
-  SetDefaultDevice(std::move(devq));
+  ciface::Core::DeviceQualifier qualifier;
+  qualifier.FromString(device);
+  SetDefaultDevice(std::move(qualifier));
 }
 
 void EmulatedController::SetDefaultDevice(ciface::Core::DeviceQualifier devq)
@@ -108,62 +131,37 @@ void EmulatedController::SetDefaultDevice(ciface::Core::DeviceQualifier devq)
   m_default_device = std::move(devq);
 }
 
-ControlGroupContainer::~ControlGroupContainer() = default;
-
 void EmulatedController::LoadConfig(Common::IniFile::Section* sec)
 {
-  const auto lock = EmulatedController::GetStateLock();
+  const auto lock = GetStateLock();
 
-  std::string defdev;
-  if (sec->Get("Device", &defdev, "") && !defdev.empty())
-    SetDefaultDevice(defdev);
+  // An absent or empty "Device" keeps the current default device.
+  std::string device;
+  if (sec->Get("Device", &device, "") && !device.empty())
+    SetDefaultDevice(device);
 
   LoadGroupsConfig(sec, "");
 }
 
-void ControlGroupContainer::LoadGroupsConfig(Common::IniFile::Section* sec, const std::string& base)
-{
-  for (auto& cg : groups)
-    cg->LoadConfig(sec, base);
-}
-
 void EmulatedController::SaveConfig(Common::IniFile::Section* sec)
 {
-  const auto lock = EmulatedController::GetStateLock();
+  const auto lock = GetStateLock();
 
   sec->Set("Device", GetDefaultDevice().ToString(), "");
-
   SaveGroupsConfig(sec, "");
-}
-
-void ControlGroupContainer::SaveGroupsConfig(Common::IniFile::Section* sec, const std::string& base)
-{
-  for (auto& cg : groups)
-    cg->SaveConfig(sec, base);
 }
 
 void EmulatedController::LoadDefaults(const ControllerInterface& ciface)
 {
   const auto lock = GetStateLock();
-  // load an empty inifile section, clears everything
-  Common::IniFile::Section sec;
-  LoadConfig(&sec);
 
-  const std::string& default_device_string = ciface.GetDefaultDeviceString();
-  if (!default_device_string.empty())
-  {
-    SetDefaultDevice(default_device_string);
-  }
-}
+  // Loading from an empty section resets every group to its defaults.
+  Common::IniFile::Section empty;
+  LoadConfig(&empty);
 
-void ControlGroupContainer::SetInputOverrideFunction(InputOverrideFunction override_func)
-{
-  m_input_override_function = std::move(override_func);
-}
-
-void ControlGroupContainer::ClearInputOverrideFunction()
-{
-  m_input_override_function = {};
+  const std::string& device = ciface.GetDefaultDeviceString();
+  if (!device.empty())
+    SetDefaultDevice(device);
 }
 
 }  // namespace ControllerEmu

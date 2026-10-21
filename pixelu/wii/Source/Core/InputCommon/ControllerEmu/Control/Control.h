@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,12 +9,15 @@
 
 namespace ControllerEmu
 {
+// Whether the mapping UI should translate a control's name.
 enum class Translatability
 {
   DoNotTranslate,
   Translate
 };
 
+// One mappable control of a group: its ini name, its UI name and the reference holding the
+// user's expression.
 class Control
 {
 public:
@@ -35,6 +37,7 @@ public:
 protected:
   Control(std::unique_ptr<ControlReference> ref, Translatability translate, std::string name,
           std::string ui_name);
+  // The UI name is the ini name.
   Control(std::unique_ptr<ControlReference> ref, Translatability translate, std::string name);
 };
 

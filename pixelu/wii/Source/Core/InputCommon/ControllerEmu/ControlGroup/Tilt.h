@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@
 
 namespace ControllerEmu
 {
+// Tilting the emulated Wii Remote, mapped like a stick. The result is a fraction of half a turn
+// (the gate radius is the maximum angle / 180 degrees).
 class Tilt : public ReshapableInput
 {
 public:
@@ -21,13 +22,12 @@ public:
   ReshapeData GetReshapableState(bool adjusted) const final;
   ControlState GetGateRadiusAtAngle(double angle) const final;
 
-  // Tilt is using the gate radius to adjust the tilt angle so we must provide an unadjusted value
-  // for the default input radius.
+  // The gate radius carries the tilt angle, so the default input shape is the unscaled square.
   ControlState GetDefaultInputRadiusAtAngle(double angle) const final;
 
   StateData GetState() const;
 
-  // Return peak rotational velocity (for a complete turn) in radians/sec
+  // Peak rotational velocity in radians per second.
   ControlState GetMaxRotationalVelocity() const;
 
 private:

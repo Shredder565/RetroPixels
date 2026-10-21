@@ -1,38 +1,36 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cmath>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "InputCommon/ControlReference/ExpressionParser.h"
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
 namespace ControllerEmu
 {
+// Converts a control state to the type a caller asks for (see the specialisations below).
 template <typename T>
 T ControlStateCast(ControlState value);
-}
+}  // namespace ControllerEmu
 
-// ControlReference
-//
-// These are what you create to actually use the inputs, InputReference or OutputReference.
-//
-// After being bound to devices and controls with UpdateReference,
-// each one can link to multiple devices and controls
-// when you change a ControlReference's expression,
-// you must use UpdateReference on it to rebind controls
-//
-
+// A ControlReference owns one mapping expression (the text a user typed for a button, an axis or
+// a rumble motor) together with its parsed form. After the text changes, UpdateReference() has to
+// be called to resolve the device controls the expression names.
 class ControlReference
 {
 public:
-  // Note: this is per thread.
+  // The input gate is a per-thread switch. While it is closed every input reads as 0 (used when
+  // the render window does not have focus and background input is off).
   static void SetInputGate(bool enable);
   static bool GetInputGate();
 
   virtual ~ControlReference();
+
+  // Inputs return their current value; outputs take the value to send and return 0.
   virtual ControlState State(const ControlState state = 0) = 0;
   virtual bool IsInput() const = 0;
 
@@ -47,13 +45,16 @@ public:
   void UpdateReference(ciface::ExpressionParser::ControlEnvironment& env);
   std::string GetExpression() const;
 
-  // Returns a human-readable error description when the given expression is invalid.
+  // Stores and parses a new expression. On a syntax error the text is still kept and a
+  // human-readable description of the problem is returned.
   std::optional<std::string> SetExpression(std::string expr);
 
+  // Scale applied to the expression's value (the "Range" a user can set per control).
   ControlState range = 1;
 
 protected:
   ControlReference();
+
   std::string m_expression;
   std::unique_ptr<ciface::ExpressionParser::Expression> m_parsed_expression;
   ciface::ExpressionParser::ParseStatus m_parse_status =
@@ -62,17 +63,17 @@ protected:
 
 namespace ControllerEmu
 {
+// A digital reading is "on" once the value rounds to 1 or more.
 template <>
 inline bool ControlStateCast<bool>(ControlState value)
 {
-  // Round to nearest of 0 or 1.
-  return std::lround(value) > 0;
+  return std::lround(value) >= 1;
 }
 
 template <>
 inline int ControlStateCast<int>(ControlState value)
 {
-  return std::lround(value);
+  return static_cast<int>(std::lround(value));
 }
 
 template <>
@@ -82,11 +83,7 @@ inline ControlState ControlStateCast<ControlState>(ControlState value)
 }
 }  // namespace ControllerEmu
 
-//
-// InputReference
-//
-// Control reference for inputs
-//
+// Reference used for every mapped input (buttons, axes, settings).
 class InputReference : public ControlReference
 {
 public:
@@ -95,11 +92,7 @@ public:
   ControlState State(const ControlState state) override;
 };
 
-//
-// OutputReference
-//
-// Control reference for outputs
-//
+// Reference used for outputs such as rumble motors.
 class OutputReference : public ControlReference
 {
 public:

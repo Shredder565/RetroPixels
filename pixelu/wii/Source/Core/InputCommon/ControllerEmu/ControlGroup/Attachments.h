@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,14 +13,16 @@
 
 namespace ControllerEmu
 {
+// Something that can be plugged into a controller (a Wii Remote extension).
 class AttachedController : public ControlGroupContainer
 {
 public:
   virtual void LoadDefaults();
 };
 
-// A container of the selected and available attachments
-// for configuration saving/loading purposes
+// The list of possible attachments and the selected one. The selection is saved by the
+// attachment's name (or as an expression), and each attachment's groups are saved under
+// "<attachment name>/".
 class Attachments : public ControlGroup
 {
 public:
@@ -29,6 +30,7 @@ public:
 
   void AddAttachment(std::unique_ptr<AttachedController> att);
 
+  // Index into the attachment list; out-of-range selections read as 0.
   u32 GetSelectedAttachment() const;
   void SetSelectedAttachment(u32 val);
 
@@ -43,11 +45,11 @@ public:
   void UpdateReferences(ciface::ExpressionParser::ControlEnvironment& env) override;
 
 private:
-  SubscribableSettingValue<int> m_selection_value;
-  // This is here and not added to the list of numeric_settings because it's serialized differently,
-  // by string (to be independent from the enum), and visualized differently in the UI.
-  // For the rest, it's treated similarly to other numeric_settings in the group.
-  NumericSetting<int> m_selection_setting = {&m_selection_value, {""}, 0, 0, 0};
+  // Declared before the setting, which writes its default into it on construction.
+  SubscribableSettingValue<int> m_selection;
+  // Not part of numeric_settings: it is saved by name rather than by number and the UI shows it
+  // as a list. Otherwise it behaves like the group's other settings.
+  NumericSetting<int> m_selection_setting = {&m_selection, {""}, 0, 0, 0};
 
   std::vector<std::unique_ptr<AttachedController>> m_attachments;
 };

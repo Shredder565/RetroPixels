@@ -1,8 +1,9 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/Slider.h"
 
+#include <algorithm>
+#include <optional>
 #include <string>
 
 #include "Common/Common.h"
@@ -26,26 +27,21 @@ Slider::Slider(const std::string& name_) : Slider(name_, name_)
 
 Slider::StateData Slider::GetState() const
 {
-  const ControlState deadzone = m_deadzone_setting.GetValue() / 100;
-  const ControlState state = controls[1]->GetState() - controls[0]->GetState();
-
-  return {std::clamp(ApplyDeadzone(state, deadzone), -1.0, 1.0)};
+  return GetState(InputOverrideFunction{});
 }
 
 Slider::StateData Slider::GetState(const InputOverrideFunction& override_func) const
 {
-  if (!override_func)
-    return GetState();
-
   const ControlState deadzone = m_deadzone_setting.GetValue() / 100;
-  ControlState state = controls[1]->GetState() - controls[0]->GetState();
+  const ControlState position = controls[1]->GetState() - controls[0]->GetState();
 
-  state = ApplyDeadzone(state, deadzone);
-
-  if (std::optional<ControlState> state_override = override_func(name, X_INPUT_OVERRIDE, state))
-    state = *state_override;
-
-  return {std::clamp(state, -1.0, 1.0)};
+  ControlState value = ApplyDeadzone(position, deadzone);
+  if (override_func)
+  {
+    if (const std::optional<ControlState> replaced = override_func(name, X_INPUT_OVERRIDE, value))
+      value = *replaced;
+  }
+  return {std::clamp(value, -1.0, 1.0)};
 }
 
 }  // namespace ControllerEmu

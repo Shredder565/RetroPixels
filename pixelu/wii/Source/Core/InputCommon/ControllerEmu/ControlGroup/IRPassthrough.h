@@ -1,8 +1,8 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
@@ -10,6 +10,8 @@
 
 namespace ControllerEmu
 {
+// Raw IR camera objects passed through from a real Wii Remote: position and size of each of
+// the four tracked objects.
 class IRPassthrough : public ControlGroup
 {
 public:

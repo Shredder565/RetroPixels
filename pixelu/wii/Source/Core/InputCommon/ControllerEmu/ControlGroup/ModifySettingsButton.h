@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@
 
 namespace ControllerEmu
 {
+// Hotkey-style buttons that switch settings on and off, either while held or as toggles.
 class ModifySettingsButton : public Buttons
 {
 public:
@@ -19,12 +19,15 @@ public:
 
   void UpdateState();
 
+  // Per button: whether it toggles (true) or acts while held (false).
   const std::vector<bool>& IsSettingToggled() const;
+  // Per button: whether its setting is currently switched on.
   const std::vector<bool>& GetSettingsModifier() const;
 
 private:
-  std::vector<bool> m_threshold_exceeded;  // internal calculation (if "state" was above threshold)
-  std::vector<bool> m_associated_settings_toggle;  // is setting toggled or hold?
-  std::vector<bool> m_associated_settings;         // result
+  // Per button: a toggle press already counted and not yet released.
+  std::vector<bool> m_pressed;
+  std::vector<bool> m_is_toggle;
+  std::vector<bool> m_active;
 };
 }  // namespace ControllerEmu

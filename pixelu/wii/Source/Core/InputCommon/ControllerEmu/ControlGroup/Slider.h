@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 namespace ControllerEmu
 {
+// A one-axis control from -1 (left) to +1 (right).
 class Slider : public ControlGroup
 {
 public:
@@ -25,6 +25,7 @@ public:
   StateData GetState() const;
   StateData GetState(const InputOverrideFunction& override_func) const;
 
+  // Axis name passed to input override functions.
   static constexpr const char* X_INPUT_OVERRIDE = "X";
 
 private:

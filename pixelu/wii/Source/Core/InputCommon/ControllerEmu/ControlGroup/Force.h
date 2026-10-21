@@ -1,9 +1,7 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <array>
 #include <string>
 
 #include "Common/Matrix.h"
@@ -11,6 +9,8 @@
 
 namespace ControllerEmu
 {
+// Swinging the emulated Wii Remote: a reshaped up/down/left/right position plus a
+// forward/backward axis, with speeds and a twist angle for the motion simulation.
 class Force : public ReshapableInput
 {
 public:
@@ -25,14 +25,14 @@ public:
 
   StateData GetState(bool adjusted = true) const;
 
-  // Velocities returned in m/s.
+  // Velocities in m/s.
   ControlState GetSpeed() const;
   ControlState GetReturnSpeed() const;
 
-  // Return twist angle in radians.
+  // Twist at the ends of the swing, in radians.
   ControlState GetTwistAngle() const;
 
-  // Return swing distance in meters.
+  // Swing distance in meters.
   ControlState GetMaxDistance() const;
 
 private:
@@ -42,6 +42,7 @@ private:
   SettingValue<double> m_angle_setting;
 };
 
+// Shaking the emulated Wii Remote along each axis.
 class Shake : public ControlGroup
 {
 public:
@@ -53,10 +54,10 @@ public:
 
   ControlState GetDeadzone() const;
 
-  // Return total travel distance in meters.
+  // Total travel distance in meters.
   ControlState GetIntensity() const;
 
-  // Return frequency in Hz.
+  // Shakes per second.
   ControlState GetFrequency() const;
 
 private:

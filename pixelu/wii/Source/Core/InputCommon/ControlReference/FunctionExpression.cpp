@@ -1,709 +1,531 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControlReference/FunctionExpression.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 namespace ciface::ExpressionParser
 {
-using Clock = std::chrono::steady_clock;
-using FSec = std::chrono::duration<ControlState>;
-
-// usage: toggle(toggle_state_input, [clear_state_input])
-class ToggleExpression : public FunctionExpression
+namespace
 {
+using Clock = std::chrono::steady_clock;
+using Seconds = std::chrono::duration<ControlState>;
+
+ControlState ToSeconds(Clock::duration span)
+{
+  return std::chrono::duration_cast<Seconds>(span).count();
+}
+
+Clock::duration FromSeconds(ControlState seconds)
+{
+  return std::chrono::duration_cast<Clock::duration>(Seconds(seconds));
+}
+
+bool IsHigh(ControlState value)
+{
+  return value > CONDITION_THRESHOLD;
+}
+
+bool IsLow(ControlState value)
+{
+  return value < CONDITION_THRESHOLD;
+}
+
+// A function taking between min_args and max_args arguments. `usage` is the argument list
+// shown in the "Expected arguments" error.
+class Builtin : public FunctionExpression
+{
+protected:
+  Builtin(u32 min_args, u32 max_args, const char* usage)
+      : m_min_args(min_args), m_max_args(max_args), m_usage(usage)
+  {
+  }
+
+  ControlState Arg(u32 index) { return GetArg(index).GetValue(); }
+
 private:
-  ArgumentValidation ValidateArguments() override
+  ArgumentValidation ValidateArguments() final
   {
-    // Optional 2nd argument for clearing state:
-    if (GetArgCount() == 1 || GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"toggle_state_input, [clear_state_input]"};
+    const u32 count = GetArgCount();
+    if (count < m_min_args || count > m_max_args)
+      return ExpectedArguments{m_usage};
+    return ArgumentsAreValid{};
   }
 
-  ControlState GetValue() override
-  {
-    const ControlState inner_value = GetArg(0).GetValue();
-
-    if (inner_value < CONDITION_THRESHOLD)
-    {
-      m_released = true;
-    }
-    else if (m_released && inner_value > CONDITION_THRESHOLD)
-    {
-      m_released = false;
-      m_state ^= true;
-    }
-
-    if (2 == GetArgCount() && GetArg(1).GetValue() > CONDITION_THRESHOLD)
-    {
-      m_state = false;
-    }
-
-    return m_state;
-  }
-
-  bool m_released{};
-  bool m_state{};
+  const u32 m_min_args;
+  const u32 m_max_args;
+  const char* const m_usage;
 };
 
-// usage: not(expression)
-class NotExpression : public FunctionExpression
+constexpr const char* ONE_EXPRESSION = "expression";
+
+// --- Pure arithmetic ---------------------------------------------------------------------------
+
+// One-argument math functions: abs, sin, cos, ...
+class UnaryMath final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
+public:
+  using Operation = ControlState (*)(ControlState);
+
+  explicit UnaryMath(Operation operation) : Builtin(1, 1, ONE_EXPRESSION), m_operation(operation)
   {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
   }
 
-  ControlState GetValue() override { return 1.0 - GetArg(0).GetValue(); }
+  ControlState GetValue() override { return m_operation(Arg(0)); }
+
+private:
+  const Operation m_operation;
+};
+
+// "not(x)" is 1 - x, and writes to it write 1 - value to x.
+class Not final : public Builtin
+{
+public:
+  Not() : Builtin(1, 1, ONE_EXPRESSION) {}
+
+  ControlState GetValue() override { return 1.0 - Arg(0); }
   void SetValue(ControlState value) override { GetArg(0).SetValue(1.0 - value); }
 };
 
-// usage: abs(expression)
-class AbsExpression final : public FunctionExpression
+class Negate final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::abs(GetArg(0).GetValue()); }
+public:
+  Negate() : Builtin(1, 1, ONE_EXPRESSION) {}
+  ControlState GetValue() override { return 0.0 - Arg(0); }
 };
 
-// usage: sin(expression)
-class SinExpression : public FunctionExpression
+class Identity final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::sin(GetArg(0).GetValue()); }
+public:
+  Identity() : Builtin(1, 1, ONE_EXPRESSION) {}
+  ControlState GetValue() override { return Arg(0); }
 };
 
-// usage: cos(expression)
-class CosExpression : public FunctionExpression
+// The two-argument functions keep both argument reads inside one call so they are evaluated in
+// the order the compiler picks for function arguments, as mappings have always seen it.
+class Atan2 final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::cos(GetArg(0).GetValue()); }
+public:
+  Atan2() : Builtin(2, 2, "y, x") {}
+  ControlState GetValue() override { return std::atan2(Arg(0), Arg(1)); }
 };
 
-// usage: tan(expression)
-class TanExpression : public FunctionExpression
+class Pow final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::tan(GetArg(0).GetValue()); }
+public:
+  Pow() : Builtin(2, 2, "base, exponent") {}
+  ControlState GetValue() override { return std::pow(Arg(0), Arg(1)); }
 };
 
-// usage: asin(expression)
-class ASinExpression : public FunctionExpression
+class Min final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::asin(GetArg(0).GetValue()); }
+public:
+  Min() : Builtin(2, 2, "a, b") {}
+  ControlState GetValue() override { return std::min(Arg(0), Arg(1)); }
 };
 
-// usage: acos(expression)
-class ACosExpression : public FunctionExpression
+class Max final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::acos(GetArg(0).GetValue()); }
+public:
+  Max() : Builtin(2, 2, "a, b") {}
+  ControlState GetValue() override { return std::max(Arg(0), Arg(1)); }
 };
 
-// usage: atan(expression)
-class ATanExpression : public FunctionExpression
+class Clamp final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::atan(GetArg(0).GetValue()); }
+public:
+  Clamp() : Builtin(3, 3, "value, min, max") {}
+  ControlState GetValue() override { return std::clamp(Arg(0), Arg(1), Arg(2)); }
 };
 
-// usage: atan2(y, x)
-class ATan2Expression : public FunctionExpression
+// "deadzone(x, d)": cuts off |x| <= d and rescales the rest back to the full range.
+class Deadzone final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"y, x"};
-  }
+public:
+  Deadzone() : Builtin(2, 2, "input, amount") {}
 
   ControlState GetValue() override
   {
-    return std::atan2(GetArg(0).GetValue(), GetArg(1).GetValue());
+    const ControlState input = Arg(0);
+    const ControlState amount = Arg(1);
+    const ControlState outside = std::max(0.0, std::abs(input) - amount);
+    return std::copysign(outside / (1.0 - amount), input);
   }
 };
 
-// usage: sqrt(expression)
-class SqrtExpression : public FunctionExpression
+// "if(c, a, b)" (also "c ? a : b"). Only the chosen branch is evaluated, and an assignment to
+// the conditional assigns to that branch.
+class Conditional final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return std::sqrt(GetArg(0).GetValue()); }
-};
-
-// usage: pow(base, exponent)
-class PowExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"base, exponent"};
-  }
-
-  ControlState GetValue() override { return std::pow(GetArg(0).GetValue(), GetArg(1).GetValue()); }
-};
-
-// usage: min(a, b)
-class MinExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"a, b"};
-  }
-
-  ControlState GetValue() override { return std::min(GetArg(0).GetValue(), GetArg(1).GetValue()); }
-};
-
-// usage: max(a, b)
-class MaxExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"a, b"};
-  }
-
-  ControlState GetValue() override { return std::max(GetArg(0).GetValue(), GetArg(1).GetValue()); }
-};
-
-// usage: clamp(value, min, max)
-class ClampExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 3)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"value, min, max"};
-  }
-
-  ControlState GetValue() override
-  {
-    return std::clamp(GetArg(0).GetValue(), GetArg(1).GetValue(), GetArg(2).GetValue());
-  }
-};
-
-// usage: timer(seconds)
-class TimerExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"seconds"};
-  }
-
-  ControlState GetValue() override
-  {
-    const auto now = Clock::now();
-    const auto elapsed = now - m_start_time;
-
-    const ControlState val = GetArg(0).GetValue();
-
-    ControlState progress = std::chrono::duration_cast<FSec>(elapsed).count() / val;
-
-    if (std::isinf(progress) || progress < 0.0)
-    {
-      // User configured a non-positive timer. Reset the timer and return 0.0.
-      progress = 0.0;
-      m_start_time = now;
-    }
-    else if (progress >= 1.0)
-    {
-      const ControlState reset_count = std::floor(progress);
-
-      m_start_time += std::chrono::duration_cast<Clock::duration>(FSec(val * reset_count));
-      progress -= reset_count;
-    }
-
-    return progress;
-  }
-
-private:
-  Clock::time_point m_start_time = Clock::now();
-};
-
-// usage: if(condition, true_expression, false_expression)
-class IfExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 3)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"condition, true_expression, false_expression"};
-  }
+public:
+  Conditional() : Builtin(3, 3, "condition, true_expression, false_expression") {}
 
   ControlState GetValue() override { return GetLValue()->GetValue(); }
 
-  Expression* GetLValue() override
-  {
-    return (GetArg(0).GetValue() > CONDITION_THRESHOLD) ? &GetArg(1) : &GetArg(2);
-  }
+  Expression* GetLValue() override { return &GetArg(IsHigh(Arg(0)) ? 1 : 2); }
 };
 
-// usage: minus(expression)
-class UnaryMinusExpression : public FunctionExpression
+// --- Stateful functions --------------------------------------------------------------------------
+
+// "toggle(x, [reset])": flips on each press of x; a high reset forces it off.
+class Toggle final : public Builtin
 {
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
+public:
+  Toggle() : Builtin(1, 2, "toggle_state_input, [clear_state_input]") {}
 
   ControlState GetValue() override
   {
-    // Subtraction for clarity:
-    return 0.0 - GetArg(0).GetValue();
-  }
-};
-
-// usage: plus(expression)
-class UnaryPlusExpression : public FunctionExpression
-{
-private:
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 1)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"expression"};
-  }
-
-  ControlState GetValue() override { return GetArg(0).GetValue(); }
-};
-
-// usage: deadzone(input, amount)
-class DeadzoneExpression : public FunctionExpression
-{
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, amount"};
-  }
-
-  ControlState GetValue() override
-  {
-    const ControlState val = GetArg(0).GetValue();
-    const ControlState deadzone = GetArg(1).GetValue();
-    return std::copysign(std::max(0.0, std::abs(val) - deadzone) / (1.0 - deadzone), val);
-  }
-};
-
-// usage: smooth(input, seconds_up, seconds_down = seconds_up)
-// seconds is seconds to change from 0.0 to 1.0
-class SmoothExpression : public FunctionExpression
-{
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2 || GetArgCount() == 3)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, seconds_up, seconds_down = seconds_up"};
-  }
-
-  ControlState GetValue() override
-  {
-    const auto now = Clock::now();
-    const auto elapsed = now - m_last_update;
-    m_last_update = now;
-
-    const ControlState desired_value = GetArg(0).GetValue();
-
-    const ControlState smooth_up = GetArg(1).GetValue();
-    const ControlState smooth_down = GetArgCount() == 3 ? GetArg(2).GetValue() : smooth_up;
-
-    const ControlState smooth = (desired_value < m_value) ? smooth_down : smooth_up;
-    const ControlState max_move = std::chrono::duration_cast<FSec>(elapsed).count() / smooth;
-
-    if (std::isinf(max_move))
+    const ControlState input = Arg(0);
+    if (IsLow(input))
     {
-      m_value = desired_value;
+      m_armed = true;
     }
-    else
+    else if (m_armed && IsHigh(input))
     {
-      const ControlState diff = desired_value - m_value;
-      m_value += std::copysign(std::min(max_move, std::abs(diff)), diff);
+      m_armed = false;
+      m_on = !m_on;
     }
 
-    return m_value;
+    if (GetArgCount() == 2 && IsHigh(Arg(1)))
+      m_on = false;
+
+    return m_on;
   }
 
 private:
-  ControlState m_value = 0.0;
-  Clock::time_point m_last_update = Clock::now();
+  bool m_armed = false;
+  bool m_on = false;
 };
 
-// usage: hold(input, seconds)
-class HoldExpression : public FunctionExpression
+// "timer(period)": a saw wave rising from 0 to 1 once per period.
+class Timer final : public Builtin
 {
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, seconds"};
-  }
+public:
+  Timer() : Builtin(1, 1, "seconds") {}
 
   ControlState GetValue() override
   {
-    const auto now = Clock::now();
+    const Clock::time_point now = Clock::now();
+    const Clock::duration since_start = now - m_cycle_start;
+    const ControlState period = Arg(0);
 
-    const ControlState input = GetArg(0).GetValue();
-
-    if (input < CONDITION_THRESHOLD)
+    ControlState phase = ToSeconds(since_start) / period;
+    if (std::isinf(phase) || phase < 0.0)
     {
-      m_state = false;
-      m_start_time = Clock::now();
-    }
-    else if (!m_state)
-    {
-      const auto hold_time = now - m_start_time;
-
-      if (std::chrono::duration_cast<FSec>(hold_time).count() >= GetArg(1).GetValue())
-        m_state = true;
+      // A zero or negative period: restart and stay at 0.
+      m_cycle_start = now;
+      return 0.0;
     }
 
-    return m_state;
+    if (phase >= 1.0)
+    {
+      const ControlState whole_cycles = std::floor(phase);
+      m_cycle_start += FromSeconds(period * whole_cycles);
+      phase -= whole_cycles;
+    }
+    return phase;
   }
 
 private:
-  bool m_state = false;
-  Clock::time_point m_start_time = Clock::now();
+  Clock::time_point m_cycle_start = Clock::now();
 };
 
-// usage: tap(input, seconds, taps=2)
-class TapExpression : public FunctionExpression
+// "smooth(x, up, [down])": follows x, moving by at most 1 per `up` seconds when rising and 1
+// per `down` seconds (default: `up`) when falling.
+class Smooth final : public Builtin
 {
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2 || GetArgCount() == 3)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, seconds, taps = 2"};
-  }
+public:
+  Smooth() : Builtin(2, 3, "input, seconds_up, seconds_down = seconds_up") {}
 
   ControlState GetValue() override
   {
-    const auto now = Clock::now();
+    const Clock::time_point now = Clock::now();
+    const Clock::duration since_last = now - m_last_poll;
+    m_last_poll = now;
 
-    const auto elapsed = std::chrono::duration_cast<FSec>(now - m_start_time).count();
+    const ControlState target = Arg(0);
+    const ControlState rise_time = Arg(1);
+    const ControlState fall_time = GetArgCount() == 3 ? Arg(2) : rise_time;
 
-    const ControlState input = GetArg(0).GetValue();
-    const ControlState seconds = GetArg(1).GetValue();
+    const ControlState duration = target < m_current ? fall_time : rise_time;
+    const ControlState step_limit = ToSeconds(since_last) / duration;
 
-    const bool is_time_up = elapsed > seconds;
+    if (std::isinf(step_limit))
+    {
+      m_current = target;
+    }
+    else
+    {
+      const ControlState distance = target - m_current;
+      m_current += std::copysign(std::min(step_limit, std::abs(distance)), distance);
+    }
+    return m_current;
+  }
 
-    const u32 desired_taps = GetArgCount() == 3 ? u32(GetArg(2).GetValue() + 0.5) : 2;
+private:
+  ControlState m_current = 0.0;
+  Clock::time_point m_last_poll = Clock::now();
+};
 
-    if (input < CONDITION_THRESHOLD)
+// "hold(x, seconds)": goes high once x has been held for the given time.
+class Hold final : public Builtin
+{
+public:
+  Hold() : Builtin(2, 2, "input, seconds") {}
+
+  ControlState GetValue() override
+  {
+    const Clock::time_point now = Clock::now();
+
+    if (IsLow(Arg(0)))
+    {
+      m_fired = false;
+      m_pressed_at = Clock::now();
+    }
+    else if (!m_fired && ToSeconds(now - m_pressed_at) >= Arg(1))
+    {
+      m_fired = true;
+    }
+    return m_fired;
+  }
+
+private:
+  bool m_fired = false;
+  Clock::time_point m_pressed_at = Clock::now();
+};
+
+// "tap(x, seconds, [count])": high while x is held for the count-th (default 2nd) press of a
+// series that started less than `seconds` ago.
+class Tap final : public Builtin
+{
+public:
+  Tap() : Builtin(2, 3, "input, seconds, taps = 2") {}
+
+  ControlState GetValue() override
+  {
+    const Clock::time_point now = Clock::now();
+    const ControlState since_first = ToSeconds(now - m_series_start);
+
+    const ControlState input = Arg(0);
+    const ControlState window = Arg(1);
+    const bool expired = since_first > window;
+    const u32 wanted = GetArgCount() == 3 ? static_cast<u32>(Arg(2) + 0.5) : 2;
+
+    if (IsLow(input))
     {
       m_released = true;
-
-      if (m_taps > 0 && is_time_up)
-      {
-        m_taps = 0;
-      }
+      if (expired && m_count > 0)
+        m_count = 0;
+      return 0.0;
     }
-    else
+
+    if (m_released)
     {
-      if (m_released)
-      {
-        if (!m_taps)
-        {
-          m_start_time = now;
-        }
-
-        ++m_taps;
-        m_released = false;
-      }
-
-      return desired_taps == m_taps;
+      if (m_count == 0)
+        m_series_start = now;
+      m_released = false;
+      ++m_count;
     }
-
-    return 0.0;
+    return m_count == wanted;
   }
 
 private:
   bool m_released = true;
-  u32 m_taps = 0;
-  Clock::time_point m_start_time = Clock::now();
+  u32 m_count = 0;
+  Clock::time_point m_series_start = Clock::now();
 };
 
-// usage: relative(input, speed, [max_abs_value, [shared_state]])
-// speed is max movement per second
-class RelativeExpression : public FunctionExpression
+// "relative(x, speed, [limit], [$shared])": integrates x * speed over time into a value between
+// 0 and `limit` (default 1; a negative limit integrates downwards and reports the negated value).
+// A shared variable lets two mappings (e.g. up and down) drive the same value.
+class Relative final : public Builtin
 {
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() >= 2 && GetArgCount() <= 4)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, speed, [max_abs_value, [shared_state]]"};
-  }
+public:
+  Relative() : Builtin(2, 4, "input, speed, [max_abs_value, [shared_state]]") {}
 
   ControlState GetValue() override
   {
-    // There is a lot of funky math in this function but it allows for a variety of uses:
-    //
-    // e.g. A single mapping with a relatively adjusted value between 0.0 and 1.0
-    // Potentially useful for a trigger input
-    //  relative(`Up` - `Down`, 2.0)
-    //
-    // e.g. A value with two mappings (such as analog stick Up/Down)
-    // The shared state allows the two mappings to work together.
-    // This mapping (for up) returns a value clamped between 0.0 and 1.0
-    //  relative(`Up`, 2.0, 1.0, $y)
-    // This mapping (for down) returns the negative value clamped between 0.0 and 1.0
-    // (Adjustments created by `Down` are applied negatively to the shared state)
-    //  relative(`Down`, 2.0, -1.0, $y)
+    const Clock::time_point now = Clock::now();
+    const bool shared = GetArgCount() >= 4;
 
-    const auto now = Clock::now();
+    if (shared)
+      m_value = Arg(3);
 
-    if (GetArgCount() >= 4)
-      m_state = GetArg(3).GetValue();
+    const ControlState elapsed = ToSeconds(now - m_last_poll);
+    m_last_poll = now;
 
-    const auto elapsed = std::chrono::duration_cast<FSec>(now - m_last_update).count();
-    m_last_update = now;
+    const ControlState input = Arg(0);
+    const ControlState speed = Arg(1);
+    const ControlState limit = GetArgCount() >= 3 ? Arg(2) : 1.0;
 
-    const ControlState input = GetArg(0).GetValue();
-    const ControlState speed = GetArg(1).GetValue();
+    const ControlState wanted_move = input * elapsed * speed;
+    const ControlState room_below = std::abs(0.0 - m_value);
+    const ControlState room_above = std::abs(limit - m_value);
+    const ControlState direction = std::copysign(1.0, limit);
 
-    const ControlState max_abs_value = (GetArgCount() >= 3) ? GetArg(2).GetValue() : 1.0;
+    m_value += std::min(std::max(wanted_move, -room_below), room_above) * direction;
 
-    const ControlState max_move = input * elapsed * speed;
-    const ControlState diff_from_zero = std::abs(0.0 - m_state);
-    const ControlState diff_from_max = std::abs(max_abs_value - m_state);
+    if (shared)
+      GetArg(3).SetValue(m_value);
 
-    m_state += std::min(std::max(max_move, -diff_from_zero), diff_from_max) *
-               std::copysign(1.0, max_abs_value);
-
-    if (GetArgCount() >= 4)
-      const_cast<Expression&>(GetArg(3)).SetValue(m_state);
-
-    return std::max(0.0, m_state * std::copysign(1.0, max_abs_value));
+    return std::max(0.0, m_value * direction);
   }
 
 private:
-  ControlState m_state = 0.0;
-  Clock::time_point m_last_update = Clock::now();
+  ControlState m_value = 0.0;
+  Clock::time_point m_last_poll = Clock::now();
 };
 
-// usage: pulse(input, seconds)
-class PulseExpression : public FunctionExpression
+// "pulse(x, seconds)": each press of x keeps the output high for the given time (presses during
+// a pulse extend it).
+class Pulse final : public Builtin
 {
-  ArgumentValidation ValidateArguments() override
-  {
-    if (GetArgCount() == 2)
-      return ArgumentsAreValid{};
-    else
-      return ExpectedArguments{"input, seconds"};
-  }
+public:
+  Pulse() : Builtin(2, 2, "input, seconds") {}
 
   ControlState GetValue() override
   {
-    const auto now = Clock::now();
+    const Clock::time_point now = Clock::now();
+    const ControlState input = Arg(0);
 
-    const ControlState input = GetArg(0).GetValue();
-
-    if (input < CONDITION_THRESHOLD)
+    if (IsLow(input))
     {
       m_released = true;
     }
     else if (m_released)
     {
       m_released = false;
-
-      const auto seconds = std::chrono::duration_cast<Clock::duration>(FSec(GetArg(1).GetValue()));
-
-      if (m_state)
+      const Clock::duration length = FromSeconds(Arg(1));
+      if (!m_active)
       {
-        m_release_time += seconds;
+        m_active = true;
+        m_ends_at = now + length;
       }
       else
       {
-        m_state = true;
-        m_release_time = now + seconds;
+        m_ends_at += length;
       }
     }
 
-    if (m_state && now >= m_release_time)
-    {
-      m_state = false;
-    }
-
-    return m_state;
+    if (m_active && now >= m_ends_at)
+      m_active = false;
+    return m_active;
   }
 
 private:
   bool m_released = false;
-  bool m_state = false;
-  Clock::time_point m_release_time = Clock::now();
+  bool m_active = false;
+  Clock::time_point m_ends_at = Clock::now();
 };
+
+// --- Name lookup ---------------------------------------------------------------------------------
+
+using Factory = std::unique_ptr<FunctionExpression> (*)();
+
+template <typename T>
+std::unique_ptr<FunctionExpression> Create()
+{
+  return std::make_unique<T>();
+}
+
+template <ControlState (*Operation)(ControlState)>
+std::unique_ptr<FunctionExpression> CreateMath()
+{
+  return std::make_unique<UnaryMath>(Operation);
+}
+
+ControlState Abs(ControlState v)
+{
+  return std::abs(v);
+}
+ControlState Sin(ControlState v)
+{
+  return std::sin(v);
+}
+ControlState Cos(ControlState v)
+{
+  return std::cos(v);
+}
+ControlState Tan(ControlState v)
+{
+  return std::tan(v);
+}
+ControlState Asin(ControlState v)
+{
+  return std::asin(v);
+}
+ControlState Acos(ControlState v)
+{
+  return std::acos(v);
+}
+ControlState Atan(ControlState v)
+{
+  return std::atan(v);
+}
+ControlState Sqrt(ControlState v)
+{
+  return std::sqrt(v);
+}
+
+struct NamedFunction
+{
+  std::string_view name;
+  Factory create;
+};
+
+constexpr std::array<NamedFunction, 25> FUNCTIONS{{
+    {"abs", CreateMath<Abs>},
+    {"acos", CreateMath<Acos>},
+    {"asin", CreateMath<Asin>},
+    {"atan", CreateMath<Atan>},
+    {"atan2", Create<Atan2>},
+    {"clamp", Create<Clamp>},
+    {"cos", CreateMath<Cos>},
+    {"deadzone", Create<Deadzone>},
+    {"hold", Create<Hold>},
+    {"if", Create<Conditional>},
+    {"max", Create<Max>},
+    {"min", Create<Min>},
+    {"minus", Create<Negate>},
+    {"not", Create<Not>},
+    {"plus", Create<Identity>},
+    {"pow", Create<Pow>},
+    {"pulse", Create<Pulse>},
+    {"relative", Create<Relative>},
+    {"sin", CreateMath<Sin>},
+    {"smooth", Create<Smooth>},
+    {"sqrt", CreateMath<Sqrt>},
+    {"tan", CreateMath<Tan>},
+    {"tap", Create<Tap>},
+    {"timer", Create<Timer>},
+    {"toggle", Create<Toggle>},
+}};
+}  // namespace
 
 std::unique_ptr<FunctionExpression> MakeFunctionExpression(std::string_view name)
 {
-  if (name == "not")
-    return std::make_unique<NotExpression>();
-  if (name == "if")
-    return std::make_unique<IfExpression>();
-  if (name == "abs")
-    return std::make_unique<AbsExpression>();
-  if (name == "sin")
-    return std::make_unique<SinExpression>();
-  if (name == "cos")
-    return std::make_unique<CosExpression>();
-  if (name == "tan")
-    return std::make_unique<TanExpression>();
-  if (name == "asin")
-    return std::make_unique<ASinExpression>();
-  if (name == "acos")
-    return std::make_unique<ACosExpression>();
-  if (name == "atan")
-    return std::make_unique<ATanExpression>();
-  if (name == "atan2")
-    return std::make_unique<ATan2Expression>();
-  if (name == "sqrt")
-    return std::make_unique<SqrtExpression>();
-  if (name == "pow")
-    return std::make_unique<PowExpression>();
-  if (name == "min")
-    return std::make_unique<MinExpression>();
-  if (name == "max")
-    return std::make_unique<MaxExpression>();
-  if (name == "clamp")
-    return std::make_unique<ClampExpression>();
-  if (name == "timer")
-    return std::make_unique<TimerExpression>();
-  if (name == "toggle")
-    return std::make_unique<ToggleExpression>();
-  if (name == "minus")
-    return std::make_unique<UnaryMinusExpression>();
-  if (name == "plus")
-    return std::make_unique<UnaryPlusExpression>();
-  if (name == "deadzone")
-    return std::make_unique<DeadzoneExpression>();
-  if (name == "smooth")
-    return std::make_unique<SmoothExpression>();
-  if (name == "hold")
-    return std::make_unique<HoldExpression>();
-  if (name == "tap")
-    return std::make_unique<TapExpression>();
-  if (name == "relative")
-    return std::make_unique<RelativeExpression>();
-  if (name == "pulse")
-    return std::make_unique<PulseExpression>();
-
-  return nullptr;
+  const auto entry = std::ranges::find(FUNCTIONS, name, &NamedFunction::name);
+  if (entry == FUNCTIONS.end())
+    return nullptr;
+  return entry->create();
 }
 
 int FunctionExpression::CountNumControls() const
 {
-  int result = 0;
-
-  for (auto& arg : m_args)
-    result += arg->CountNumControls();
-
-  return result;
+  int count = 0;
+  for (const auto& argument : m_args)
+    count += argument->CountNumControls();
+  return count;
 }
 
 void FunctionExpression::UpdateReferences(ControlEnvironment& env)
 {
-  for (auto& arg : m_args)
-    arg->UpdateReferences(env);
+  for (const auto& argument : m_args)
+    argument->UpdateReferences(env);
 }
 
 void FunctionExpression::SetArguments(std::vector<std::unique_ptr<Expression>>&& args)
@@ -718,7 +540,7 @@ Expression& FunctionExpression::GetArg(u32 number)
 
 u32 FunctionExpression::GetArgCount() const
 {
-  return u32(m_args.size());
+  return static_cast<u32>(m_args.size());
 }
 
 void FunctionExpression::SetValue(ControlState)

@@ -1,5 +1,4 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,11 +6,16 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
+// The mapping expression language: tokens, the parser entry points, the expression tree
+// interface and the environment that binds control names to device inputs and outputs.
 namespace ciface::ExpressionParser
 {
+// Token kinds. The numeric order matters: binary operators form one contiguous block (with the
+// operators that can be combined with '=' at its start), see Token::IsBinaryOperator().
 enum TokenType
 {
   TOK_WHITESPACE,
@@ -28,7 +32,6 @@ enum TokenType
   TOK_HOTKEY,
   TOK_QUESTION,
   TOK_COLON,
-  // Binary Ops:
   TOK_BINARY_OPS_BEGIN,
   TOK_COMPOUND_ASSIGN_OPS_BEGIN = TOK_BINARY_OPS_BEGIN,
   TOK_AND = TOK_BINARY_OPS_BEGIN,
@@ -51,9 +54,11 @@ class Token
 {
 public:
   TokenType type;
+  // Text of names, literals and variables; for a compound assignment ("+=" and so on) the
+  // operator character.
   std::string data;
 
-  // Position in the input string:
+  // Where the token was found in the source text (used for syntax highlighting).
   std::size_t string_position = 0;
   std::size_t string_length = 0;
 
@@ -66,9 +71,10 @@ public:
 enum class ParseStatus
 {
   Successful,
-  // Note that the expression could still work in this case (be valid and return a value)
+  // The text did not parse. A fallback expression (the whole text as one control name) may
+  // still be usable.
   SyntaxError,
-  // Will return the default value
+  // Nothing but whitespace: the control reads its default value.
   EmptyExpression,
 };
 
@@ -80,66 +86,41 @@ public:
 
   explicit Lexer(std::string expr_);
 
+  // Appends every token up to and including TOK_EOF. Stops after the first TOK_INVALID and
+  // reports SyntaxError in that case.
   ParseStatus Tokenize(std::vector<Token>& tokens);
 
 private:
-  template <typename F>
-  std::string FetchCharsWhile(F&& func)
-  {
-    std::string value;
-    while (it != expr.end() && func(*it))
-    {
-      value += *it;
-      ++it;
-    }
-    return value;
-  }
-
-  std::string FetchWordChars();
-  Token GetDelimitedToken(TokenType type, char delimiter);
-  Token GetDelimitedLiteral();
-  Token GetVariable();
-  Token GetFullyQualifiedControl();
-  Token GetBareword(char c);
-  Token GetRealLiteral(char c);
-
-  Token PeekToken();
-  Token NextToken();
+  Token ScanOne();
+  std::string TakeWordCharacters();
+  Token TakeQuoted(TokenType type, char closing);
+  Token TakeNumber(char first);
 };
 
 class ControlQualifier
 {
 public:
-  bool has_device;
+  bool has_device = false;
   Core::DeviceQualifier device_qualifier;
-  // Makes no distinction between input and output
+  // Name of the input or output (the parser does not tell them apart).
   std::string control_name;
 
-  ControlQualifier() : has_device(false) {}
+  ControlQualifier() = default;
 
   operator std::string() const
   {
-    if (has_device)
-      return device_qualifier.ToString() + ":" + control_name;
-    else
+    if (!has_device)
       return control_name;
+    return device_qualifier.ToString() + ":" + control_name;
   }
 
+  // "Device:Control" names a device explicitly; the last ':' separates the two parts.
   void FromString(const std::string& str)
   {
-    const auto col_pos = str.find_last_of(':');
-
-    has_device = (str.npos != col_pos);
-    if (has_device)
-    {
-      device_qualifier.FromString(str.substr(0, col_pos));
-      control_name = str.substr(col_pos + 1);
-    }
-    else
-    {
-      device_qualifier.FromString("");
-      control_name = str;
-    }
+    const std::size_t split = str.rfind(':');
+    has_device = split != std::string::npos;
+    device_qualifier.FromString(has_device ? str.substr(0, split) : std::string());
+    control_name = has_device ? str.substr(split + 1) : str;
   }
 };
 
@@ -150,22 +131,24 @@ public:
 
   ControlEnvironment(const Core::DeviceContainer& container_, const Core::DeviceQualifier& default_,
                      VariableContainer& vars)
-      : m_variables(vars), container(container_), default_device(default_)
+      : m_vars(vars), m_devices(container_), m_default(default_)
   {
   }
 
   std::shared_ptr<Core::Device> FindDevice(const ControlQualifier& qualifier) const;
   Core::Device::Input* FindInput(const ControlQualifier& qualifier) const;
   Core::Device::Output* FindOutput(const ControlQualifier& qualifier) const;
-  // Returns an existing variable by the specified name if already existing. Creates it otherwise.
+
+  // Returns the variable with this name, creating it (with value 0) if needed.
   std::shared_ptr<ControlState> GetVariablePtr(const std::string& name);
 
+  // Drops variables that no expression refers to any more.
   void CleanUnusedVariables();
 
 private:
-  VariableContainer& m_variables;
-  const Core::DeviceContainer& container;
-  const Core::DeviceQualifier& default_device;
+  VariableContainer& m_vars;
+  const Core::DeviceContainer& m_devices;
+  const Core::DeviceQualifier& m_default;
 };
 
 class Expression
@@ -177,7 +160,8 @@ public:
   virtual int CountNumControls() const = 0;
   virtual void UpdateReferences(ControlEnvironment& finder) = 0;
 
-  // Perform any side effects and return Expression to be SetValue'd.
+  // Runs the expression's side effects and returns the expression an assignment should write
+  // to (the expression itself unless it is an assignment, a comma or a conditional).
   virtual Expression* GetLValue();
 };
 
@@ -191,8 +175,7 @@ public:
   ParseStatus status = ParseStatus::EmptyExpression;
   std::unique_ptr<Expression> expr;
 
-  // Used for parse errors:
-  // TODO: This should probably be moved elsewhere:
+  // Set for syntax errors: the offending token and a translated description.
   std::optional<Token> token;
   std::optional<std::string> description;
 

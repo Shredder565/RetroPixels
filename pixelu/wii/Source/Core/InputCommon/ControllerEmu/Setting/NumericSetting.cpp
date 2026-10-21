@@ -1,20 +1,18 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/Setting/NumericSetting.h"
 
+#include <string>
+
 #include <fmt/format.h>
+
+#include "Common/StringUtil.h"
 
 namespace ControllerEmu
 {
 NumericSettingBase::NumericSettingBase(const NumericSettingDetails& details) : m_details(details)
 {
 }
-
-// Explicit instantiations so generic definitions can exist outside of the header.
-template class NumericSetting<int>;
-template class NumericSetting<double>;
-template class NumericSetting<bool>;
 
 const char* NumericSettingBase::GetININame() const
 {
@@ -42,19 +40,21 @@ SettingVisibility NumericSettingBase::GetVisibility() const
 }
 
 template <typename T>
-void NumericSetting<T>::SetExpressionFromValue()
+void NumericSetting<T>::SimplifyIfPossible()
 {
-  // Always include -/+ sign to prevent CoalesceExpression binding.
-  // e.g. 1 is a valid input name for keyboard devices, +1 is not.
-  m_value.m_input.SetExpression(fmt::format("{:+g}", ControlState(GetValue())));
+  const std::string trimmed(StripWhitespace(m_value.m_reference.GetExpression()));
+  ValueType parsed{};
+  if (TryParse(trimmed, &parsed))
+    m_value.SetValue(parsed);
 }
 
 template <typename T>
-void NumericSetting<T>::SimplifyIfPossible()
+void NumericSetting<T>::SetExpressionFromValue()
 {
-  ValueType value;
-  if (TryParse(std::string(StripWhitespace(m_value.m_input.GetExpression())), &value))
-    m_value.SetValue(value);
+  // The explicit sign keeps a number from being read as a key name: "1" is a key on keyboard
+  // devices, "+1" is not.
+  const ControlState value = ControlState(GetValue());
+  m_value.m_reference.SetExpression(fmt::format("{:+g}", value));
 }
 
 template <>
@@ -74,5 +74,9 @@ SettingType NumericSetting<bool>::GetType() const
 {
   return SettingType::Bool;
 }
+
+template class NumericSetting<int>;
+template class NumericSetting<double>;
+template class NumericSetting<bool>;
 
 }  // namespace ControllerEmu

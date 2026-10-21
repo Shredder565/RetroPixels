@@ -1,11 +1,14 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/Attachments.h"
 
+#include <cstddef>
+#include <utility>
+
+#include "Common/StringUtil.h"
+
 namespace ControllerEmu
 {
-
 void AttachedController::LoadDefaults()
 {
 }
@@ -16,23 +19,20 @@ Attachments::Attachments(const std::string& name_) : ControlGroup(name_, GroupTy
 
 void Attachments::AddAttachment(std::unique_ptr<AttachedController> att)
 {
-  m_attachments.emplace_back(std::move(att));
+  m_attachments.push_back(std::move(att));
 }
 
 u32 Attachments::GetSelectedAttachment() const
 {
-  // This is originally an int, treat it as such
-  const int value = m_selection_value.GetValue();
-
-  if (value > 0 && static_cast<size_t>(value) < m_attachments.size())
-    return u32(value);
-
-  return 0;
+  const int index = m_selection.GetValue();
+  if (index <= 0 || static_cast<std::size_t>(index) >= m_attachments.size())
+    return 0;
+  return static_cast<u32>(index);
 }
 
 void Attachments::SetSelectedAttachment(u32 val)
 {
-  m_selection_setting.SetValue(val);
+  m_selection_setting.SetValue(static_cast<int>(val));
 }
 
 NumericSetting<int>& Attachments::GetSelectionSetting()
@@ -42,7 +42,7 @@ NumericSetting<int>& Attachments::GetSelectionSetting()
 
 SubscribableSettingValue<int>& Attachments::GetAttachmentSetting()
 {
-  return m_selection_value;
+  return m_selection;
 }
 
 const std::vector<std::unique_ptr<AttachedController>>& Attachments::GetAttachmentList() const
@@ -56,22 +56,18 @@ void Attachments::LoadConfig(Common::IniFile::Section* sec, const std::string& b
 
   SetSelectedAttachment(0);
 
-  std::string attachment_text;
-  sec->Get(base + name, &attachment_text, "");
+  std::string selection;
+  sec->Get(base + name, &selection, "");
 
-  // First assume attachment string is a valid expression.
-  // If it instead matches one of the names of our attachments it is overridden below.
-  GetSelectionSetting().GetInputReference().SetExpression(attachment_text);
+  // The text is taken as an expression unless it turns out to be an attachment's name.
+  m_selection_setting.GetInputReference().SetExpression(selection);
 
-  u32 n = 0;
-  for (auto& ai : GetAttachmentList())
+  for (u32 index = 0; index != m_attachments.size(); ++index)
   {
-    ai->LoadGroupsConfig(sec, base + ai->GetName() + "/");
-
-    if (ai->GetName() == attachment_text)
-      SetSelectedAttachment(n);
-
-    ++n;
+    AttachedController& attachment = *m_attachments[index];
+    attachment.LoadGroupsConfig(sec, base + attachment.GetName() + "/");
+    if (attachment.GetName() == selection)
+      SetSelectedAttachment(index);
   }
 }
 
@@ -79,28 +75,29 @@ void Attachments::SaveConfig(Common::IniFile::Section* sec, const std::string& b
 {
   ControlGroup::SaveConfig(sec, base);
 
-  if (GetSelectionSetting().IsSimpleValue())
+  std::string selection;
+  if (m_selection_setting.IsSimpleValue())
   {
-    sec->Set(base + name, GetAttachmentList()[GetSelectedAttachment()]->GetName(), "None");
+    selection = m_attachments[GetSelectedAttachment()]->GetName();
   }
   else
   {
-    std::string expression = GetSelectionSetting().GetInputReference().GetExpression();
-    ReplaceBreaksWithSpaces(expression);
-    sec->Set(base + name, expression, "None");
+    selection = m_selection_setting.GetInputReference().GetExpression();
+    ReplaceBreaksWithSpaces(selection);
   }
+  sec->Set(base + name, selection, "None");
 
-  for (auto& ai : GetAttachmentList())
-    ai->SaveGroupsConfig(sec, base + ai->GetName() + "/");
+  for (const auto& attachment : m_attachments)
+    attachment->SaveGroupsConfig(sec, base + attachment->GetName() + "/");
 }
 
 void Attachments::UpdateReferences(ciface::ExpressionParser::ControlEnvironment& env)
 {
   ControlGroup::UpdateReferences(env);
 
-  GetSelectionSetting().GetInputReference().UpdateReference(env);
+  m_selection_setting.GetInputReference().UpdateReference(env);
 
-  for (auto& attachment : GetAttachmentList())
+  for (const auto& attachment : m_attachments)
     attachment->UpdateGroupsReferences(env);
 }
 

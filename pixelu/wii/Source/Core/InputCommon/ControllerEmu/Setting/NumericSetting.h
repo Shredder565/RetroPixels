@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,11 +7,13 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/IniFile.h"
+#include "Common/StringUtil.h"
 #include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
@@ -28,9 +29,11 @@ enum class SettingType
 enum class SettingVisibility
 {
   Normal,
+  // Shown only in the advanced view of the mapping UI.
   Advanced,
 };
 
+// Names and texts of a numeric setting. All strings are static, untranslated literals.
 struct NumericSettingDetails
 {
   NumericSettingDetails(const char* const _ini_name, const char* const _ui_suffix = nullptr,
@@ -38,23 +41,22 @@ struct NumericSettingDetails
                         const char* const _ui_name = nullptr,
                         SettingVisibility _visibility = SettingVisibility::Normal)
       : ini_name(_ini_name), ui_suffix(_ui_suffix), ui_description(_ui_description),
-        ui_name(_ui_name ? _ui_name : _ini_name), visibility(_visibility)
+        ui_name(_ui_name != nullptr ? _ui_name : _ini_name), visibility(_visibility)
   {
   }
 
-  // The name used in ini files.
+  // Key in the ini file.
   const char* const ini_name;
 
-  // A string applied to the number in the UI (unit of measure).
+  // Unit shown after the number in the UI.
   const char* const ui_suffix;
 
-  // Detailed description of the setting.
+  // Tooltip text.
   const char* const ui_description;
 
-  // The name used in the UI (if different from ini file).
+  // Label in the UI (the ini name unless given).
   const char* const ui_name;
 
-  // Advanced settings should be harder to change in the UI. They might confuse users.
   const SettingVisibility visibility;
 };
 
@@ -73,12 +75,13 @@ public:
   virtual InputReference& GetInputReference() = 0;
   virtual const InputReference& GetInputReference() const = 0;
 
+  // True when the setting holds a plain number rather than an expression.
   virtual bool IsSimpleValue() const = 0;
 
-  // Convert a literal expression e.g. "7.0" to a regular value. (disables expression parsing)
+  // Turns an expression that is just a number (e.g. "7.0") back into a plain value.
   virtual void SimplifyIfPossible() = 0;
 
-  // Convert a regular value to an expression. (used before expression editing)
+  // Turns the plain value into an equivalent expression (before the user edits it as one).
   virtual void SetExpressionFromValue() = 0;
 
   virtual SettingType GetType() const = 0;
@@ -98,6 +101,7 @@ protected:
 template <typename T>
 class SettingValue;
 
+// A setting of type int, double or bool, stored in a SettingValue owned by the group.
 template <typename T>
 class NumericSetting final : public NumericSettingBase
 {
@@ -106,7 +110,7 @@ public:
 
   static_assert(std::is_same<ValueType, int>() || std::is_same<ValueType, double>() ||
                     std::is_same<ValueType, bool>(),
-                "NumericSetting is only implemented for int, double, and bool.");
+                "NumericSetting supports int, double and bool.");
 
   NumericSetting(SettingValue<ValueType>* value, const NumericSettingDetails& details,
                  ValueType default_value, ValueType min_value, ValueType max_value)
@@ -118,40 +122,39 @@ public:
 
   void SetToDefault() override { m_value.SetValue(m_default_value); }
 
+  // A present key is read as an expression (and simplified to a number when it is one); an
+  // absent key restores the default.
   void LoadFromIni(const Common::IniFile::Section& section, const std::string& group_name) override
   {
-    std::string str_value;
-    if (section.Get(group_name + m_details.ini_name, &str_value))
-    {
-      m_value.m_input.SetExpression(std::move(str_value));
-      SimplifyIfPossible();
-    }
-    else
+    std::string text;
+    if (!section.Get(group_name + m_details.ini_name, &text))
     {
       SetValue(m_default_value);
+      return;
     }
+    m_value.m_reference.SetExpression(std::move(text));
+    SimplifyIfPossible();
   }
 
   void SaveToIni(Common::IniFile::Section& section, const std::string& group_name) const override
   {
-    if (IsSimpleValue())
+    const std::string key = group_name + m_details.ini_name;
+    if (!IsSimpleValue())
     {
-      section.Set(group_name + m_details.ini_name, GetValue(), m_default_value);
-    }
-    else
-    {
-      // We can't save line breaks in a single line config. Restoring them is too complicated.
-      std::string expression = m_value.m_input.GetExpression();
+      // Ini values are single lines.
+      std::string expression = m_value.m_reference.GetExpression();
       ReplaceBreaksWithSpaces(expression);
-      section.Set(group_name + m_details.ini_name, expression, "");
+      section.Set(key, expression, "");
+      return;
     }
+    section.Set(key, GetValue(), m_default_value);
   }
 
   bool IsSimpleValue() const override { return m_value.IsSimpleValue(); }
   void SimplifyIfPossible() override;
   void SetExpressionFromValue() override;
-  InputReference& GetInputReference() override { return m_value.m_input; }
-  const InputReference& GetInputReference() const override { return m_value.m_input; }
+  InputReference& GetInputReference() override { return m_value.m_reference; }
+  const InputReference& GetInputReference() const override { return m_value.m_reference; }
 
   ValueType GetValue() const { return m_value.GetValue(); }
   void SetValue(ValueType value) { m_value.SetValue(value); }
@@ -170,6 +173,8 @@ private:
   const ValueType m_max_value;
 };
 
+// The value behind a setting: either a plain number or the result of an input expression.
+// Read by the CPU thread and written by the UI thread.
 template <typename T>
 class SettingValue
 {
@@ -182,107 +187,101 @@ public:
 
   virtual ValueType GetValue() const
   {
-    // Only update dynamic values when the input gate is enabled.
-    // Otherwise settings will all change to 0 when window focus is lost.
-    // This is very undesirable for things like battery level or attached extension.
+    // An expression is re-evaluated only while the input gate is open, so losing window focus
+    // does not reset settings such as the battery level or the attached extension to 0.
     if (!IsSimpleValue() && ControlReference::GetInputGate())
-      m_value = m_input.GetState<ValueType>();
-
-    return m_value;
+      m_cached = m_reference.GetState<ValueType>();
+    return m_cached;
   }
 
-  ValueType GetCachedValue() const { return m_value; }
+  ValueType GetCachedValue() const { return m_cached; }
 
-  bool IsSimpleValue() const { return m_input.GetExpression().empty(); }
+  bool IsSimpleValue() const { return m_reference.GetExpression().empty(); }
 
+  // Stores a plain value (and drops any expression).
   virtual void SetValue(const ValueType value)
   {
-    m_value = value;
-
-    // Clear the expression to use our new "simple" value.
-    m_input.SetExpression("");
+    m_cached = value;
+    m_reference.SetExpression("");
   }
 
 private:
-  // Values are R/W by both UI and CPU threads.
-  mutable std::atomic<ValueType> m_value = {};
+  mutable std::atomic<ValueType> m_cached = {};
 
-  // Unfortunately InputReference's state grabbing is non-const requiring mutable here.
-  mutable InputReference m_input;
+  // Reading a reference's state is not const.
+  mutable InputReference m_reference;
 };
 
+// A SettingValue that calls back when its value changes (used to follow the attached extension
+// and Motion Plus).
 template <typename ValueType>
 class SubscribableSettingValue final : public SettingValue<ValueType>
 {
 public:
   using Base = SettingValue<ValueType>;
+  using SettingChangedCallback = std::function<void(ValueType)>;
 
   ValueType GetValue() const override
   {
-    const ValueType cached_value = GetCachedValue();
+    const ValueType before = GetCachedValue();
     if (IsSimpleValue())
-      return cached_value;
+      return before;
 
-    const ValueType updated_value = Base::GetValue();
-    if (updated_value != cached_value)
-      TriggerCallbacks();
-
-    return updated_value;
+    const ValueType now = Base::GetValue();
+    if (now != before)
+      NotifyAll();
+    return now;
   }
 
   void SetValue(const ValueType value) override
   {
-    if (value != GetCachedValue())
+    if (value == GetCachedValue())
     {
-      Base::SetValue(value);
-      TriggerCallbacks();
+      // Same value: no notification, but an expression still gives way to the plain value.
+      if (!IsSimpleValue())
+        Base::SetValue(value);
+      return;
     }
-    else if (!IsSimpleValue())
-    {
-      // The setting has an expression with a cached value equal to the one currently being set.
-      // Don't trigger the callbacks (since the value didn't change), but clear the expression and
-      // make the setting a simple value instead.
-      Base::SetValue(value);
-    }
+    Base::SetValue(value);
+    NotifyAll();
   }
 
   ValueType GetCachedValue() const { return Base::GetCachedValue(); }
   bool IsSimpleValue() const { return Base::IsSimpleValue(); }
 
-  using SettingChangedCallback = std::function<void(ValueType)>;
-
   int AddCallback(const SettingChangedCallback& callback)
   {
-    std::lock_guard lock(m_mutex);
-    const int callback_id = m_next_callback_id;
-    ++m_next_callback_id;
-    m_callback_pairs.emplace_back(callback_id, callback);
-
-    return callback_id;
+    std::lock_guard guard(m_callbacks_mutex);
+    const int id = m_next_id++;
+    m_callbacks.emplace_back(id, callback);
+    return id;
   }
 
   void RemoveCallback(const int id)
   {
-    std::lock_guard lock(m_mutex);
-    const auto iter = std::ranges::find(m_callback_pairs, id, &IDCallbackPair::first);
-    if (iter != m_callback_pairs.end())
-      m_callback_pairs.erase(iter);
+    std::lock_guard guard(m_callbacks_mutex);
+    const auto match = std::ranges::find_if(
+        m_callbacks, [id](const Subscription& subscription) { return subscription.first == id; });
+    if (match != m_callbacks.end())
+      m_callbacks.erase(match);
   }
 
 private:
-  void TriggerCallbacks() const
+  using Subscription = std::pair<int, SettingChangedCallback>;
+
+  void NotifyAll() const
   {
-    std::lock_guard lock(m_mutex);
+    std::lock_guard guard(m_callbacks_mutex);
+    // The value is read again (re-evaluating an expression) for the callbacks.
     const ValueType value = Base::GetValue();
-    for (const auto& pair : m_callback_pairs)
-      pair.second(value);
+    for (const Subscription& subscription : m_callbacks)
+      subscription.second(value);
   }
 
-  using IDCallbackPair = std::pair<int, SettingChangedCallback>;
-  std::vector<IDCallbackPair> m_callback_pairs;
-  int m_next_callback_id = 0;
+  std::vector<Subscription> m_callbacks;
+  int m_next_id = 0;
 
-  mutable std::mutex m_mutex;
+  mutable std::mutex m_callbacks_mutex;
 };
 
 }  // namespace ControllerEmu

@@ -1,9 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "Common/Matrix.h"
@@ -13,28 +13,27 @@
 
 namespace ControllerEmu
 {
-// Minimum stick distance from the center before virtual notches are applied.
+// Virtual notches only snap a stick that is at least this far out.
 constexpr ControlState MINIMUM_NOTCH_DISTANCE = 0.9;
 
-// An abstract class representing the plastic shell that limits an analog stick's movement.
+// The outline that limits how far a stick can move, as a radius per direction.
 class StickGate
 {
 public:
-  // Angle is in radians and should be non-negative
+  // Angle in radians, not negative.
   virtual ControlState GetRadiusAtAngle(double ang) const = 0;
 
-  // This is provided purely as an optimization for ReshapableInput to produce a minimal amount of
-  // calibration points that are saved in our config.
+  // The smallest number of evenly spaced samples that describes the shape exactly, if there is
+  // one (keeps saved calibration data short).
   virtual std::optional<u32> GetIdealCalibrationSampleCount() const;
 
   virtual ~StickGate() = default;
 };
 
-// An octagon-shaped stick gate is found on most Nintendo GC/Wii analog sticks.
+// The eight-sided gate of GameCube and Wii sticks. `radius` is the distance to the corners.
 class OctagonStickGate : public StickGate
 {
 public:
-  // Radius of circumscribed circle
   explicit OctagonStickGate(ControlState radius);
   ControlState GetRadiusAtAngle(double ang) const final;
   std::optional<u32> GetIdealCalibrationSampleCount() const final;
@@ -43,7 +42,7 @@ private:
   const ControlState m_radius;
 };
 
-// A round-shaped stick gate. Possibly found on 3rd-party accessories.
+// A circular gate.
 class RoundStickGate : public StickGate
 {
 public:
@@ -55,7 +54,7 @@ private:
   const ControlState m_radius;
 };
 
-// A square-shaped stick gate. e.g. keyboard input.
+// A square gate (e.g. four keys driving a stick).
 class SquareStickGate : public StickGate
 {
 public:
@@ -67,20 +66,22 @@ private:
   const ControlState m_half_width;
 };
 
+// A two-axis group whose raw input is reshaped: recentred, scaled from the user's calibrated
+// input shape to the emulated gate, given a dead zone and optionally snapped to notches.
 class ReshapableInput : public ControlGroup
 {
 public:
-  // This is the number of samples we generate but any number could be loaded from config.
+  // Samples produced by the calibration UI (saved data may hold any number).
   static constexpr int CALIBRATION_SAMPLE_COUNT = 32;
 
-  // Contains input radius maximums at evenly-spaced angles.
+  // Maximum input radius at evenly spaced angles, starting at angle 0.
   using CalibrationData = std::vector<ControlState>;
 
   ReshapableInput(std::string name, std::string ui_name, GroupType type);
 
   using ReshapeData = Common::DVec2;
 
-  // Angle is in radians and should be non-negative
+  // Angles in radians, not negative.
   ControlState GetDeadzoneRadiusAtAngle(double angle) const;
   ControlState GetInputRadiusAtAngle(double angle) const;
 
@@ -95,6 +96,7 @@ public:
   void SetCalibrationToDefault();
   void SetCalibrationFromGate(const StickGate& gate);
 
+  // Grows the calibration so that it reaches the segment from point1 to point2.
   static void UpdateCalibrationData(CalibrationData& data, Common::DVec2 point1,
                                     Common::DVec2 point2);
   static ControlState GetCalibrationDataRadiusAtAngle(const CalibrationData& data, double angle);
@@ -105,6 +107,7 @@ public:
   const ReshapeData& GetCenter() const;
   void SetCenter(ReshapeData center);
 
+  // Axis names passed to input override functions.
   static constexpr const char* X_INPUT_OVERRIDE = "X";
   static constexpr const char* Y_INPUT_OVERRIDE = "Y";
   static constexpr const char* Z_INPUT_OVERRIDE = "Z";
@@ -113,14 +116,15 @@ protected:
   ReshapeData Reshape(ControlState x, ControlState y, ControlState modifier = 0.0,
                       ControlState clamp = 1.0) const;
 
+  // The "Modifier" control, for groups that have one.
   virtual Control* GetModifierInput() const;
 
 private:
   void LoadConfig(Common::IniFile::Section*, const std::string& base_name) override;
   void SaveConfig(Common::IniFile::Section*, const std::string& base_name) override;
 
-  CalibrationData m_calibration;
-  SettingValue<double> m_deadzone_setting;
+  CalibrationData m_input_shape;
+  SettingValue<double> m_deadzone;
   ReshapeData m_center;
 };
 

@@ -1,9 +1,10 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerEmu/ControlGroup/IMUGyroscope.h"
 
 #include <algorithm>
+#include <cmath>
+#include <utility>
 
 #include "Common/Common.h"
 #include "Common/MathUtil.h"
@@ -13,14 +14,27 @@
 
 namespace ControllerEmu
 {
-// Maximum period for calculating an average stable value.
-// Just to prevent failures due to timer overflow.
-static constexpr auto MAXIMUM_CALIBRATION_DURATION = std::chrono::hours(1);
+namespace
+{
+enum GyroControl : std::size_t
+{
+  PITCH_UP,
+  PITCH_DOWN,
+  ROLL_LEFT,
+  ROLL_RIGHT,
+  YAW_LEFT,
+  YAW_RIGHT,
+};
 
-// If calibration updates do not happen at this rate, restart calibration period.
-// This prevents calibration across periods of no regular updates. (e.g. between game sessions)
-// This is made slightly lower than the UI update frequency of 30.
-static constexpr auto WORST_ACCEPTABLE_CALIBRATION_UPDATE_FREQUENCY = 25;
+using Seconds = std::chrono::duration<double>;
+
+// A stable period is restarted after this long (keeps the clock arithmetic bounded).
+constexpr auto LONGEST_STABLE_PERIOD = std::chrono::hours(1);
+
+// Readings must arrive at least this often (per second) to count as one stable period, so a
+// pause between sessions does not get averaged in. Somewhat below the UI's 30 Hz refresh.
+constexpr auto MINIMUM_SAMPLE_RATE = 25;
+}  // namespace
 
 IMUGyroscope::IMUGyroscope(std::string name_, std::string ui_name_)
     : ControlGroup(std::move(name_), std::move(ui_name_), GroupType::IMUGyroscope)
@@ -34,101 +48,96 @@ IMUGyroscope::IMUGyroscope(std::string name_, std::string ui_name_)
 
   AddSetting(&m_deadzone_setting,
              {_trans("Dead Zone"),
-              // i18n: "°/s" is the symbol for degrees (angular measurement) divided by seconds.
+              // i18n: Unit suffix, degrees per second.
               _trans("°/s"),
-              // i18n: Refers to the dead-zone setting of gyroscope input.
+              // i18n: Tooltip of the gyroscope dead zone setting.
               _trans("Angular velocity to ignore and remap.")},
              2, 0, 180);
 
   AddSetting(&m_calibration_period_setting,
              {_trans("Calibration Period"),
-              // i18n: "s" is the symbol for seconds.
+              // i18n: Unit suffix, seconds.
               _trans("s"),
-              // i18n: Refers to the "Calibration" setting of gyroscope input.
+              // i18n: Tooltip of the gyroscope calibration setting.
               _trans("Time period of stable input to trigger calibration. (zero to disable)")},
              3, 0, 30);
 }
 
 void IMUGyroscope::RestartCalibration()
 {
-  m_calibration_period_start = Clock::now();
-  m_running_calibration.Clear();
+  m_stable_since = Clock::now();
+  m_stable_mean.Clear();
 }
 
 void IMUGyroscope::UpdateCalibration(const StateData& state)
 {
-  const auto now = Clock::now();
-  const auto calibration_period = m_calibration_period_setting.GetValue();
+  const Clock::time_point now = Clock::now();
+  const double period = m_calibration_period_setting.GetValue();
 
-  // If calibration time is zero. User is choosing to not calibrate.
-  if (!calibration_period)
+  // A zero period turns calibration off.
+  if (period == 0)
   {
-    // Set calibration to zero.
-    m_calibration = {};
+    m_zero_rate = {};
     RestartCalibration();
     return;
   }
 
-  // If there is no running calibration a new gyro was just mapped or calibration was just enabled,
-  // apply the current state as calibration, it's often better than zeros.
-  if (!m_running_calibration.Count())
+  if (m_stable_mean.Count() == 0)
   {
-    m_calibration = state;
+    // Calibration just started (a gyro was mapped or calibration enabled): the first reading is
+    // a better zero than nothing.
+    m_zero_rate = state;
   }
   else
   {
-    const auto calibration_freq =
-        m_running_calibration.Count() /
-        std::chrono::duration_cast<std::chrono::duration<double>>(now - m_calibration_period_start)
-            .count();
+    const double sample_rate =
+        static_cast<double>(m_stable_mean.Count()) /
+        std::chrono::duration_cast<Seconds>(now - m_stable_since).count();
+    const StateData drift = state - m_stable_mean.Mean();
+    const double deadzone = GetDeadzone();
 
-    const auto potential_calibration = m_running_calibration.Mean();
-    const auto current_difference = state - potential_calibration;
-    const auto deadzone = GetDeadzone();
-
-    // Check for required calibration update frequency
-    // and if current data is within deadzone distance of mean stable value.
-    if (calibration_freq < WORST_ACCEPTABLE_CALIBRATION_UPDATE_FREQUENCY ||
-        std::ranges::any_of(current_difference.data,
-                            [&](auto c) { return std::abs(c) > deadzone; }))
+    const bool too_slow = sample_rate < MINIMUM_SAMPLE_RATE;
+    if (too_slow || std::ranges::any_of(drift.data, [&](float rate) {
+          return std::abs(rate) > deadzone;
+        }))
     {
       RestartCalibration();
     }
   }
 
-  // Update running mean stable value.
-  m_running_calibration.Push(state);
+  m_stable_mean.Push(state);
 
-  // Apply calibration after configured time.
-  const auto calibration_duration = now - m_calibration_period_start;
-  if (calibration_duration >= std::chrono::duration<double>(calibration_period))
+  // Stable for long enough: the mean becomes the zero rate.
+  const Clock::duration stable_for = now - m_stable_since;
+  if (stable_for >= Seconds(period))
   {
-    m_calibration = m_running_calibration.Mean();
-
-    if (calibration_duration >= MAXIMUM_CALIBRATION_DURATION)
+    m_zero_rate = m_stable_mean.Mean();
+    if (stable_for >= LONGEST_STABLE_PERIOD)
     {
       RestartCalibration();
-      m_running_calibration.Push(m_calibration);
+      m_stable_mean.Push(m_zero_rate);
     }
   }
 }
 
 auto IMUGyroscope::GetRawState() const -> StateData
 {
-  return StateData(controls[1]->GetState() - controls[0]->GetState(),
-                   controls[2]->GetState() - controls[3]->GetState(),
-                   controls[4]->GetState() - controls[5]->GetState());
+  return StateData(
+      static_cast<float>(controls[PITCH_DOWN]->GetState() - controls[PITCH_UP]->GetState()),
+      static_cast<float>(controls[ROLL_LEFT]->GetState() - controls[ROLL_RIGHT]->GetState()),
+      static_cast<float>(controls[YAW_LEFT]->GetState() - controls[YAW_RIGHT]->GetState()));
 }
 
 bool IMUGyroscope::AreInputsBound() const
 {
-  return std::ranges::any_of(
-      controls, [](const auto& control) { return control->control_ref->BoundCount() > 0; });
+  return std::ranges::any_of(controls, [](const std::unique_ptr<Control>& control) {
+    return control->control_ref->BoundCount() > 0;
+  });
 }
 
 bool IMUGyroscope::CanCalibrate() const
 {
-  // If the input gate is disabled, miscalibration to zero values would occur.
+  // With the input gate closed every reading is 0, which would calibrate to a wrong zero.
   return ControlReference::GetInputGate();
 }
 
@@ -138,25 +147,23 @@ std::optional<IMUGyroscope::StateData> IMUGyroscope::GetState(bool update)
   {
     if (update)
     {
-      // Set calibration to zero.
-      m_calibration = {};
+      m_zero_rate = {};
       RestartCalibration();
     }
     return std::nullopt;
   }
 
-  auto state = GetRawState();
+  StateData state = GetRawState();
 
-  // Alternatively we could open the control gate around GetRawState() while calibrating,
-  // but that would imply background input would temporarily be treated differently for our controls
+  // Calibration reads the gated state too, so background input behaves like everything else.
   if (update && CanCalibrate())
     UpdateCalibration(state);
 
-  state -= m_calibration;
+  state -= m_zero_rate;
 
-  // Apply "deadzone".
-  for (auto& c : state.data)
-    c *= std::abs(c) > GetDeadzone();
+  // Rates inside the dead zone become 0 (the dead zone is read for each axis).
+  for (float& rate : state.data)
+    rate *= static_cast<float>(std::abs(rate) > GetDeadzone());
 
   return state;
 }
@@ -168,9 +175,10 @@ ControlState IMUGyroscope::GetDeadzone() const
 
 bool IMUGyroscope::IsCalibrating() const
 {
-  const auto calibration_period = m_calibration_period_setting.GetValue();
-  return calibration_period && (Clock::now() - m_calibration_period_start) >=
-                                   std::chrono::duration<double>(calibration_period);
+  const double period = m_calibration_period_setting.GetValue();
+  if (period == 0)
+    return false;
+  return (Clock::now() - m_stable_since) >= Seconds(period);
 }
 
 }  // namespace ControllerEmu

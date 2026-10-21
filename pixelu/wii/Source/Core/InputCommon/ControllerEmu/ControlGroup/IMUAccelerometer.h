@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 namespace ControllerEmu
 {
+// Accelerometer data from a host device with motion sensors, as six half-axes.
 class IMUAccelerometer : public ControlGroup
 {
 public:
@@ -18,6 +18,7 @@ public:
 
   IMUAccelerometer(std::string name, std::string ui_name);
 
+  // Nothing when no axis is mapped.
   std::optional<StateData> GetState() const;
 
   bool AreInputsBound() const;

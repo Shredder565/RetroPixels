@@ -1,9 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cmath>
+#include <cstddef>
+#include <optional>
 #include <string>
 
 #include "InputCommon/ControllerEmu/Control/Control.h"
@@ -11,6 +12,8 @@
 
 namespace ControllerEmu
 {
+// A group of digital buttons. GetState() ORs bitmasks[i] into *buttons for each pressed
+// control i (bitmasks has one entry per control, in control order).
 class Buttons : public ControlGroup
 {
 public:
@@ -20,8 +23,11 @@ public:
   template <typename C>
   void GetState(C* const buttons, const C* bitmasks) const
   {
-    for (auto& control : controls)
-      *buttons |= *(bitmasks++) * control->GetState<bool>();
+    for (std::size_t i = 0; i != controls.size(); ++i)
+    {
+      if (controls[i]->GetState<bool>())
+        *buttons |= bitmasks[i];
+    }
   }
 
   template <typename C>
@@ -29,14 +35,19 @@ public:
                 const InputOverrideFunction& override_func) const
   {
     if (!override_func)
-      return GetState(buttons, bitmasks);
-
-    for (auto& control : controls)
     {
-      ControlState state = control->GetState();
-      if (std::optional<ControlState> state_override = override_func(name, control->name, state))
-        state = *state_override;
-      *buttons |= *(bitmasks++) * (std::lround(state) > 0);
+      GetState(buttons, bitmasks);
+      return;
+    }
+
+    for (std::size_t i = 0; i != controls.size(); ++i)
+    {
+      const Control& control = *controls[i];
+      ControlState state = control.GetState();
+      if (const std::optional<ControlState> replaced = override_func(name, control.name, state))
+        state = *replaced;
+      if (ControlStateCast<bool>(state))
+        *buttons |= bitmasks[i];
     }
   }
 };
