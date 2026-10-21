@@ -1,37 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// OpenGL Backend Documentation
-/*
-
-1.1 Display settings
-
-Internal and fullscreen resolution: Since the only internal resolutions allowed
-are also fullscreen resolution allowed by the system there is only need for one
-resolution setting that applies to both the internal resolution and the
-fullscreen resolution.  - Apparently no, someone else doesn't agree
-
-Todo: Make the internal resolution option apply instantly, currently only the
-native and 2x option applies instantly. To do this we need to be able to change
-the reinitialize FramebufferManager:Init() while a game is running.
-
-1.2 Screenshots
-
-
-The screenshots should be taken from the internal representation of the picture
-regardless of what the current window size is. Since AA and wireframe is
-applied together with the picture resizing this rule is not currently applied
-to AA or wireframe pictures, they are instead taken from whatever the window
-size is.
-
-Todo: Render AA and wireframe to a separate picture used for the screenshot in
-addition to the one for display.
-
-1.3 AA
-
-Make AA apply instantly during gameplay if possible
-
-*/
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/VideoBackend.h"
 
@@ -60,6 +27,70 @@ Make AA apply instantly during gameplay if possible
 
 namespace OGL
 {
+namespace
+{
+// Quad-buffered stereo needs a stereo pixel format, so it is decided at context creation.
+std::unique_ptr<GLContext> CreateMainContext(const WindowSystemInfo& wsi)
+{
+  const bool stereo = g_Config.stereo_mode == StereoMode::QuadBuffer;
+  return GLContext::Create(wsi, stereo, true, Config::Get(Config::GFX_PREFER_GLES));
+}
+
+// Settings that hold for every GL driver. The ones marked "assumed" are only a starting point
+// for the options dialog and are replaced with what the driver really offers by
+// PopulateConfig().
+void SetFixedBackendInfo()
+{
+  auto& info = g_backend_info;
+  info.api_type = APIType::OpenGL;
+  info.MaxTextureSize = 16384;
+  info.bUsesLowerLeftOrigin = true;
+  info.bSupportsExclusiveFullscreen = false;
+  info.bSupportsGeometryShaders = true;
+  info.bSupportsComputeShaders = false;
+  info.bSupports3DVision = false;
+  info.bSupportsPostProcessing = true;
+  info.bSupportsSSAA = true;
+  info.bSupportsReversedDepthRange = true;
+  info.bSupportsLogicOp = true;
+  info.bSupportsMultithreading = false;
+  info.bSupportsCopyToVram = true;
+  info.bSupportsLargePoints = true;
+  info.bSupportsDepthReadback = true;
+  info.bSupportsPartialDepthCopies = true;
+  info.bSupportsShaderBinaries = false;
+  info.bSupportsPipelineCacheData = false;
+  info.bSupportsLodBiasInSampler = true;
+  info.bSupportsPartialMultisampleResolve = true;
+  // GL has no pipeline objects for a dynamic vertex loader to save.
+  info.bSupportsDynamicVertexLoader = false;
+
+  // Offered without checking for texel buffers / SSBOs, since no context exists when the
+  // options dialog asks; the option can therefore show on drivers that cannot do it.
+  info.bSupportsGPUTextureDecoding = true;
+  info.bSupportsBBox = true;
+
+  // Assumed.
+  info.bSupportsDualSourceBlend = true;
+  info.bSupportsPrimitiveRestart = true;
+  info.bSupportsPaletteConversion = true;
+  info.bSupportsClipControl = true;
+  info.bSupportsDepthClamp = true;
+  info.bSupportsST3CTextures = false;
+  info.bSupportsBPTCTextures = false;
+  info.bSupportsCoarseDerivatives = false;
+  info.bSupportsTextureQueryLevels = false;
+  info.bSupportsSettingObjectNames = false;
+
+  info.bUsesExplictQuadBuffering = true;
+
+  info.Adapters.clear();
+
+  // 1 means no anti-aliasing, as in the D3D backends.
+  info.AAModes = {1, 2, 4, 8};
+}
+}  // namespace
+
 std::string VideoBackend::GetConfigName() const
 {
   return CONFIG_NAME;
@@ -67,44 +98,32 @@ std::string VideoBackend::GetConfigName() const
 
 std::string VideoBackend::GetDisplayName() const
 {
-  if (g_ogl_config.bIsES)
-    return _trans("OpenGL ES");
-  else
-    return _trans("OpenGL");
+  return g_ogl_config.bIsES ? _trans("OpenGL ES") : _trans("OpenGL");
 }
 
 void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
 {
-  std::unique_ptr<GLContext> temp_gl_context =
-      GLContext::Create(wsi, g_Config.stereo_mode == StereoMode::QuadBuffer, true,
-                        Config::Get(Config::GFX_PREFER_GLES));
-
-  if (!temp_gl_context)
-    return;
-
-  FillBackendInfo(temp_gl_context.get());
+  // A throwaway context, just to ask the driver what it can do.
+  const std::unique_ptr<GLContext> probe = CreateMainContext(wsi);
+  if (probe != nullptr)
+    FillBackendInfo(probe.get());
 }
 
 bool VideoBackend::InitializeGLExtensions(GLContext* context)
 {
-  // Init extension support.
   if (!GLExtensions::Init(context))
   {
-    // OpenGL 2.0 is required for all shader based drawings. There is no way to get this by
-    // extensions
+    // Everything is drawn with shaders, which need at least GL 2.0.
     PanicAlertFmtT("GPU: OGL ERROR: Does your video card support OpenGL 2.0?");
     return false;
   }
 
-  if (GLExtensions::Version() < 300)
-  {
-    // integer vertex attributes require a gl3 only function
-    PanicAlertFmtT("GPU: OGL ERROR: Need OpenGL version 3.\n"
-                   "GPU: Does your video card support OpenGL 3?");
-    return false;
-  }
-
-  return true;
+  // Integer vertex attributes need a GL 3 entry point.
+  if (GLExtensions::Version() >= 300)
+    return true;
+  PanicAlertFmtT("GPU: OGL ERROR: Need OpenGL version 3.\n"
+                 "GPU: Does your video card support OpenGL 3?");
+  return false;
 }
 
 bool VideoBackend::FillBackendInfo(GLContext* context)
@@ -112,105 +131,44 @@ bool VideoBackend::FillBackendInfo(GLContext* context)
   if (!InitializeGLExtensions(context))
     return false;
 
-  g_backend_info.api_type = APIType::OpenGL;
-  g_backend_info.MaxTextureSize = 16384;
-  g_backend_info.bUsesLowerLeftOrigin = true;
-  g_backend_info.bSupportsExclusiveFullscreen = false;
-  g_backend_info.bSupportsGeometryShaders = true;
-  g_backend_info.bSupportsComputeShaders = false;
-  g_backend_info.bSupports3DVision = false;
-  g_backend_info.bSupportsPostProcessing = true;
-  g_backend_info.bSupportsSSAA = true;
-  g_backend_info.bSupportsReversedDepthRange = true;
-  g_backend_info.bSupportsLogicOp = true;
-  g_backend_info.bSupportsMultithreading = false;
-  g_backend_info.bSupportsCopyToVram = true;
-  g_backend_info.bSupportsLargePoints = true;
-  g_backend_info.bSupportsDepthReadback = true;
-  g_backend_info.bSupportsPartialDepthCopies = true;
-  g_backend_info.bSupportsShaderBinaries = false;
-  g_backend_info.bSupportsPipelineCacheData = false;
-  g_backend_info.bSupportsLodBiasInSampler = true;
-  g_backend_info.bSupportsPartialMultisampleResolve = true;
-  // Unnecessary since OGL doesn't use pipelines
-  g_backend_info.bSupportsDynamicVertexLoader = false;
+  SetFixedBackendInfo();
 
-  // TODO: There is a bug here, if texel buffers or SSBOs/atomics are not supported the graphics
-  // options will show the option when it is not supported. The only way around this would be
-  // creating a context when calling this function to determine what is available.
-  g_backend_info.bSupportsGPUTextureDecoding = true;
-  g_backend_info.bSupportsBBox = true;
-
-  // Overwritten in OGLConfig.cpp later
-  g_backend_info.bSupportsDualSourceBlend = true;
-  g_backend_info.bSupportsPrimitiveRestart = true;
-  g_backend_info.bSupportsPaletteConversion = true;
-  g_backend_info.bSupportsClipControl = true;
-  g_backend_info.bSupportsDepthClamp = true;
-  g_backend_info.bSupportsST3CTextures = false;
-  g_backend_info.bSupportsBPTCTextures = false;
-  g_backend_info.bSupportsCoarseDerivatives = false;
-  g_backend_info.bSupportsTextureQueryLevels = false;
-  g_backend_info.bSupportsSettingObjectNames = false;
-
-  g_backend_info.bUsesExplictQuadBuffering = true;
-
-  g_backend_info.Adapters.clear();
-
-  // aamodes - 1 is to stay consistent with D3D (means no AA)
-  g_backend_info.AAModes = {1, 2, 4, 8};
-
-  // check for the max vertex attributes
-  GLint numvertexattribs = 0;
-  glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &numvertexattribs);
-  if (numvertexattribs < 16)
+  GLint vertex_attribs = 0;
+  glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &vertex_attribs);
+  if (vertex_attribs < 16)
   {
     PanicAlertFmtT("GPU: OGL ERROR: Number of attributes {0} not enough.\n"
                    "GPU: Does your video card support OpenGL 2.x?",
-                   numvertexattribs);
+                   vertex_attribs);
     return false;
   }
 
-  // check the max texture width and height
-  GLint max_texture_size = 0;
-  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-  g_backend_info.MaxTextureSize = static_cast<u32>(max_texture_size);
-  if (max_texture_size < 1024)
+  GLint texture_limit = 0;
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &texture_limit);
+  g_backend_info.MaxTextureSize = static_cast<u32>(texture_limit);
+  if (texture_limit < 1024)
   {
-    PanicAlertFmtT("GL_MAX_TEXTURE_SIZE is {0} - must be at least 1024.", max_texture_size);
+    PanicAlertFmtT("GL_MAX_TEXTURE_SIZE is {0} - must be at least 1024.", texture_limit);
     return false;
   }
 
-  if (!PopulateConfig(context))
-  {
-    // Not all needed extensions are supported, so we have to stop here.
-    // Else some of the next calls might crash.
-    return false;
-  }
-
-  // TODO: Move the remaining fields from the Renderer constructor here.
-  return true;
+  // Stops here when a required extension is missing; later setup could crash without it.
+  return PopulateConfig(context);
 }
 
 bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 {
-  std::unique_ptr<GLContext> main_gl_context =
-      GLContext::Create(wsi, g_Config.stereo_mode == StereoMode::QuadBuffer, true,
-                        Config::Get(Config::GFX_PREFER_GLES));
-  if (!main_gl_context)
+  std::unique_ptr<GLContext> context = CreateMainContext(wsi);
+  if (context == nullptr || !FillBackendInfo(context.get()))
     return false;
 
-  if (!FillBackendInfo(main_gl_context.get()))
-    return false;
-
-  auto gfx = std::make_unique<OGLGfx>(std::move(main_gl_context), wsi.render_surface_scale);
+  auto gfx = std::make_unique<OGLGfx>(std::move(context), wsi.render_surface_scale);
   ProgramShaderCache::Init();
   g_sampler_cache = std::make_unique<SamplerCache>();
 
   auto vertex_manager = std::make_unique<VertexManager>();
   auto perf_query = GetPerfQuery(gfx->IsGLES());
   auto bounding_box = std::make_unique<OGLBoundingBox>();
-
   return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
                           std::move(bounding_box));
 }
@@ -218,7 +176,6 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 void VideoBackend::Shutdown()
 {
   ShutdownShared();
-
   ProgramShaderCache::Shutdown();
   g_sampler_cache.reset();
 }
