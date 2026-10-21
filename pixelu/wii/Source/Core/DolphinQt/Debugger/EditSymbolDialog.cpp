@@ -52,8 +52,9 @@ void EditSymbolDialog::BuildLayout()
   // i18n: %1 = an address, %2 = the warning text
   const QString heading_format =
       is_symbol ? tr("Editing symbol starting at: %1\n%2") : tr("Editing note starting at: %1\n%2");
-  auto* heading = new QLabel(heading_format.arg(QString::number(m_start, 16))
-                                 .arg(tr("Warning: Must save the symbol map for changes to be kept.")));
+  auto* heading =
+      new QLabel(heading_format.arg(QString::number(m_start, 16))
+                     .arg(tr("Warning: Must save the symbol map for changes to be kept.")));
 
   m_label_field = new QLineEdit();
   m_label_field->setPlaceholderText(is_symbol ? tr("Symbol name") : tr("Note name"));

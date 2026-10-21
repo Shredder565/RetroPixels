@@ -137,7 +137,8 @@ QTableWidgetItem* StateCell(s32 fd)
   socklen_t len = sizeof(listening);
   const bool queried =
       getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, reinterpret_cast<char*>(&listening), &len) == 0;
-  return Cell(queried && listening > 0 ? QTableWidget::tr("Listening") : QTableWidget::tr("Unbound"));
+  return Cell(queried && listening > 0 ? QTableWidget::tr("Listening") :
+                                         QTableWidget::tr("Unbound"));
 }
 
 QTableWidgetItem* BlockingCell(const IOS::HLE::WiiSockMan& sockets, s32 wii_fd)

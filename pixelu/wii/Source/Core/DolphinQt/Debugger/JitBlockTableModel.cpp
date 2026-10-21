@@ -152,7 +152,8 @@ void JitBlockTableModel::Listen(bool on)
     return;
   }
 
-  m_links.append(connect(host, &Host::JitCacheInvalidation, this, &JitBlockTableModel::SnapshotNow));
+  m_links.append(
+      connect(host, &Host::JitCacheInvalidation, this, &JitBlockTableModel::SnapshotNow));
   // Wiping the profile only changes the numbers, not the rows.
   m_links.append(connect(host, &Host::JitProfileDataWiped, this, [this] {
     const int rows = rowCount();
@@ -166,8 +167,10 @@ void JitBlockTableModel::Listen(bool on)
   // the HLE patcher invalidate blocks) takes a new snapshot.
   m_links.append(connect(host, &Host::UpdateDisasmDialog, this, &JitBlockTableModel::SnapshotNow));
   m_links.append(connect(host, &Host::PPCSymbolsChanged, this, &JitBlockTableModel::SnapshotNow));
-  m_links.append(connect(host, &Host::PPCBreakpointsChanged, this, &JitBlockTableModel::SnapshotNow));
-  m_links.append(connect(settings, &Settings::EmulationStateChanged, this, &JitBlockTableModel::Snapshot));
+  m_links.append(
+      connect(host, &Host::PPCBreakpointsChanged, this, &JitBlockTableModel::SnapshotNow));
+  m_links.append(
+      connect(settings, &Settings::EmulationStateChanged, this, &JitBlockTableModel::Snapshot));
 }
 
 void JitBlockTableModel::OnShowSignal()

@@ -543,8 +543,9 @@ void BreakpointWidget::OpenEditor(u32 address, bool instruction)
 {
   auto& power_pc = m_system.GetPowerPC();
   BreakpointDialog* dialog =
-      instruction ? new BreakpointDialog(this, power_pc.GetBreakPoints().GetRegularBreakpoint(address)) :
-                    new BreakpointDialog(this, power_pc.GetMemChecks().GetMemCheck(address));
+      instruction ?
+          new BreakpointDialog(this, power_pc.GetBreakPoints().GetRegularBreakpoint(address)) :
+          new BreakpointDialog(this, power_pc.GetMemChecks().GetMemCheck(address));
   dialog->setAttribute(Qt::WA_DeleteOnClose, true);
   dialog->exec();
 

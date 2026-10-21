@@ -223,7 +223,8 @@ void WatchWidget::Refill()
           QString::number(PowerPC::MMU::HostRead<u32>(guard, watch.address)));
       cells[COL_STRING]->setText(
           QString::fromStdString(PowerPC::MMU::HostGetString(guard, watch.address, 32)));
-      cells[COL_FLOAT]->setText(QString::number(PowerPC::MMU::HostRead<float>(guard, watch.address)));
+      cells[COL_FLOAT]->setText(
+          QString::number(PowerPC::MMU::HostRead<float>(guard, watch.address)));
       cells[COL_LOCKED]->setCheckState(watch.locked ? Qt::Checked : Qt::Unchecked);
     }
 

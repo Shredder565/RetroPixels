@@ -75,8 +75,9 @@ QString DoubleBitsAt(const Table& table, size_t index)
 
 QString ReadWordAsHex(const Core::CPUThreadGuard& guard, u32 address)
 {
-  const u32 word =
-      PowerPC::MMU::HostIsRAMAddress(guard, address) ? PowerPC::MMU::HostRead<u32>(guard, address) : 0;
+  const u32 word = PowerPC::MMU::HostIsRAMAddress(guard, address) ?
+                       PowerPC::MMU::HostRead<u32>(guard, address) :
+                       0;
   return Hex8(word);
 }
 
@@ -301,7 +302,8 @@ void ThreadWidget::ShowAddressMenu(QTableWidget* table)
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
   const QString watch_name = QStringLiteral("thread_context_%1").arg(Hex8(address));
-  menu->addAction(tr("Add &breakpoint"), this, [this, address] { emit RequestBreakpoint(address); });
+  menu->addAction(tr("Add &breakpoint"), this,
+                  [this, address] { emit RequestBreakpoint(address); });
   menu->addAction(tr("Add memory breakpoint"), this,
                   [this, address] { emit RequestMemoryBreakpoint(address); });
   menu->addAction(tr("Add to &watch"), this,
