@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 230482 | 56.5% |
-| Dolphin, untouched | 167445 | 41.0% |
+| Original (RetroPixels) | 243332 | 59.8% |
+| Dolphin, untouched | 153401 | 37.7% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **407914** | 100% |
+| **All** | **406720** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -116,7 +116,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Common/Debug | 436 | 436 | original |
 | Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
 | Core/Common/Logging | 581 | 581 | original |
-| Core/Core (top level) | 25031 | 892 | mixed (4% original) |
+| Core/Core (top level) | 23837 | 13742 | mixed (58% original) |
 | Core/Core/Boot | 2838 | 2838 | original |
 | Core/Core/Config | 2398 | 2398 | original |
 | Core/Core/ConfigLoaders | 1245 | 1245 | original |
@@ -250,7 +250,7 @@ batch rewrites them.
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 9104 | 9104 | original |
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13237 | 13237 | original |
 | W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10095 | 0 | Dolphin + PixelU change |
-| W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 14044 | 0 | Dolphin |
+| W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 12850 | 12850 | original |
 | W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 11051 | 11051 | original |
 | W25 | VideoCommon: vertex loaders and vertex manager | 4192 | 4192 | original |
 | W26 | VideoCommon: texture cache and decoders | 7527 | 7527 | original |
@@ -3444,3 +3444,122 @@ step did for the old file. No key bytes are in the tree.
       remaining runs are declarations in headers (class and struct
       layouts, enums and member lists).
   - Not rewritten: nothing. Every W20 file is original code.
+
+- W23 log: rewrote all 34 W23 files in `Core/Core`: cheats, patches, cheat
+  search, NetPlay, achievements, analytics, USB utilities and network
+  capture (12850 lines now, from 14044). Every rewritten file starts with
+  the original-code header and has no Dolphin copyright or SPDX line. File
+  names, public declarations and layouts, config keys, ini/file formats
+  (AR/Gecko/patch ini sections, Gecko codelist and codehandler layout, the
+  pcap and SSL dump files), the savestate layout, every memory write a cheat
+  or patch makes and when it makes it, cheat search results, NetPlay packet
+  bytes and their order, sync and desync decisions, every rcheevos call and
+  its order, hardcore and approved-code decisions, analytics report
+  contents, Windows behaviour and all translatable strings are unchanged.
+  - Cheats and patches: ARDecrypt (AR alphabet, DES and verification line),
+    ActionReplay (the AR simulator: every opcode, conditional and
+    fill-and-slide path), GeckoCode (codehandler install, codelist layout,
+    hook patching), GeckoCodeConfig (ini load/save, the online code list
+    download format), PatchEngine (ini patches, speed hacks, the patch and
+    on-frame application order), WC24PatchEngine, CheatSearch,
+    CheatGeneration and CheatCodes.h.
+  - NetPlay: NetPlayProto.h (message ids, enums and constants), NetPlayCommon
+    (compressed buffers, files and folders, the folder packet format, the
+    external IP lookup), NetPlayClient (the message table, pad/Wii Remote
+    buffers, golf mode, chunked data, save/code/GBA sync, desync checks,
+    MD5 digests) and NetPlayServer (connection and kick handling, pad and
+    Wii Remote mapping, the start sequence, save/code/SD/GBA sync, chunked
+    data thread, traversal, UPnP and the session index).
+  - AchievementManager: init/login/logout/shutdown, game load and disc
+    changes through the custom hash reader, per-frame and idle work,
+    hardcore mode, approved-code filtering, badges and their cache,
+    leaderboards, client events, HTTP requests, memory reads, DoState and
+    the RAIntegration (Windows) block.
+  - DolphinAnalytics (the same report keys, values and order; quirk names
+    now come from a switch over GameQuirk), USBUtils (the known-device table
+    is listed per vendor; same names), LibusbUtils and NetworkCaptureLogger.
+  - Deliberate differences (malformed input, undefined behaviour or
+    internal only; nothing a game or a well-formed peer sees):
+    - ARDecrypt: a character outside the AR alphabet decodes as 0 (the old
+      code did pointer arithmetic on strchr's nullptr).
+    - CheatSearch: an invalid CompareType fails the search with a
+      DEBUG_ASSERT (the old code threw std::bad_function_call).
+    - GeckoCodeConfig: no longer special-cases being handed the same ini
+      object as both the global and the local ini (no caller does).
+    - PatchEngine: LoadPatches no longer loads the merged game ini that it
+      never used (it only cost file reads).
+    - NetPlay packet reads into locals start zeroed, so a truncated packet
+      reads 0/false instead of indeterminate values (client: save counts,
+      Mii and "exists" flags, has-redirect, raw/GCI card slot, size and
+      count, GBA slot, SerializedWiimoteState; server: the TimeBase frame
+      and digest progress). The Wii save Header and BkHeader buffers are
+      value-initialised.
+    - NetPlayCommon: a folder level whose entry count is missing is a
+      failed decompression (the old code used the count uninitialised).
+    - NetPlayClient: m_wait_on_input and m_wait_on_input_received start
+      false (they were uninitialised until the first game start or golf
+      message, so an early GetNetPads could return false at random).
+    - NetPlayClient: a reassembled chunked message is erased by id after it
+      has been handled (the old code erased an iterator that a nested
+      ChunkedDataEnd/Abort for the same id inside the reassembled data had
+      already invalidated, and crashed).
+    - NetPlayServer: SyncCodes asks for the game's ini file names once
+      instead of twice (a pure function).
+    - Common::Flag members became std::atomic<bool> (same semantics).
+  - Checked: old and new code side by side on synthetic inputs only (no
+    games, servers or accounts), using the base versions of all non-W23
+    files on both sides, comparing hashes of the output streams:
+    - Cheats: 2000 seeds of AR codes (encrypted and plain), Gecko codes,
+      patches, WC24 patches and cheat searches over fake guest memory:
+      every memory write in order, search results, ini output and alerts.
+    - USB, capture, analytics: 300 seeds of fake libusb/udev device lists,
+      VID:PID parsing, every product id up to 0x3600 for each known vendor,
+      pcap/SSL capture output and analytics reports.
+    - NetPlay, over a fake in-process ENet with per-thread send logs:
+      400 seeds of buffer/file/folder round trips and damaged folder
+      packets; 300 client seeds of random server messages (with the
+      GUI/CPU-thread calls) and 200 server seeds of random peers and client
+      messages: every packet's bytes, channel and peer, UI callbacks,
+      config and file writes. Cases whose outputs differed were rerun one
+      at a time and then matched, except where noted: client case 127 (the
+      old code crashes on a nested chunk end, see above) and server case
+      135 (a chunk-thread versus server-thread interleaving that also
+      varies between runs of the old code; same packets in both). The
+      client harness never removes the local player (that leaves
+      m_local_player dangling in both versions), the server harness only
+      starts a game once the host's own game is selected (both versions
+      dereference a missing game), and the old side was compiled with
+      m_wait_on_input initialised (see above).
+    - AchievementManager, against a recording fake rcheevos (every rc_*
+      call and argument, stored callbacks answered by the driver): 600
+      seeds with a valid approved-code list, 200 with a list whose hash
+      does not match and 200 without the list, of random login/load/disc/
+      frame/idle/pause/DoState/code-filter/event/HTTP/memory-read
+      sequences: identical rc call logs, OSD messages, update events,
+      config writes, badge cache files and savestate bytes. One difference
+      found this way was fixed (DoState now asks the PointerWrap mode at
+      each step, as before, so a short state buffer still stops the load).
+  - Compile check: the W23 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu (AchievementManager with
+    USE_RETRO_ACHIEVEMENTS, and with RC_CLIENT_SUPPORTS_RAINTEGRATION on
+    Windows, against stand-in rcheevos headers since rcheevos is not in the
+    tree here). NetworkCaptureLogger now converts sockets to SOCKET for the
+    Windows socket calls (the base tree had -Wsign-conversion there).
+    Lines over 100 columns were wrapped. Element and value types match in
+    every find/count/contains (MSVC C4389). The other non-Qt files that
+    include AchievementManager.h compile as on the base tree, with and
+    without USE_RETRO_ACHIEVEMENTS (OnScreenUI and VerifyCommand fail on
+    both trees for missing implot/OptionParser headers; DolphinQt was not
+    built).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W23 .cpp file. The runs left in W23 headers are public
+    declarations (NetPlay message ids and enums, class member lists, the
+    AchievementManager interface).
+  - Key material: the GameCube Action Replay DES key in ARDecrypt.cpp
+    (`gensubtable`: 34 1C 84 9E FD A4 B6 7B) was already in the base tree
+    and is kept byte for byte. `ACHIEVEMENT_APPROVED_LIST_HASH` is the SHA-1
+    of Data/Sys/ApprovedInis.json, generated by CMake into
+    AchievementApprovedHash.h; it is a file checksum, not a key. No keys,
+    certificates, firmware or game data were added.
+  - Not rewritten: nothing.
