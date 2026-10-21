@@ -293,7 +293,7 @@ auto BluetoothRealDevice::ProcessHCIEvent(BufferType event) -> BufferType
     qos[2] = sizeof(HCI::QoSSetupParams);
     u8* const params = &qos[3];
     std::copy_n(event.data() + 3, 2, params);  // connection handle
-    params[3] = HCI::SERVICE_GUARANTEED;
+    params[3] = HCI::QOS_GUARANTEED;
     PutLE32(params + 4, 0xffffffff);  // token rate
     PutLE32(params + 8, 0xffffffff);  // peak bandwidth
     PutLE32(params + 12, 10000);      // latency (microseconds)
@@ -303,7 +303,7 @@ auto BluetoothRealDevice::ProcessHCIEvent(BufferType event) -> BufferType
   else if (code == HCI::Event::QOS_SETUP_COMPLETE && event.size() > 6)
   {
     const u8 service = event[6];
-    if (service == HCI::SERVICE_GUARANTEED)
+    if (service == HCI::QOS_GUARANTEED)
       INFO_LOG_FMT(IOS_WIIMOTE, "Adapter set up guaranteed service");
     else
       WARN_LOG_FMT(IOS_WIIMOTE, "Adapter set up service type {} instead", service);

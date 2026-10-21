@@ -133,8 +133,8 @@ constexpr u8 LINK_TYPE_SCO = 0x00;
 constexpr u8 LINK_TYPE_ACL = 0x01;
 
 // QoS service types.
-constexpr u8 SERVICE_BEST_EFFORT = 0x01;
-constexpr u8 SERVICE_GUARANTEED = 0x02;
+constexpr u8 QOS_BEST_EFFORT = 0x01;
+constexpr u8 QOS_GUARANTEED = 0x02;
 
 // The 16-bit handle field of an ACL packet: a 12-bit connection handle, then the packet
 // boundary flag (2 bits) and the broadcast flag (2 bits).
