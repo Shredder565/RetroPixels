@@ -1,9 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Graphics/PostProcessingConfigWindow.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 #include <QCheckBox>
@@ -23,359 +23,251 @@
 #include "VideoCommon/PostProcessing.h"
 #include "VideoCommon/Present.h"
 
-using ConfigurationOption = VideoCommon::PostProcessingConfiguration::ConfigurationOption;
-using OptionType = ConfigurationOption::OptionType;
+namespace
+{
+using OptionType = VideoCommon::PostProcessingConfiguration::ConfigurationOption::OptionType;
+
+QSlider* NewStepSlider(int steps, int position, int tick)
+{
+  auto* const slider = new QSlider(Qt::Orientation::Horizontal);
+  slider->setMinimum(0);
+  slider->setMaximum(steps);
+  slider->setValue(position);
+  slider->setTickInterval(tick);
+  return slider;
+}
+
+QLineEdit* NewValueField(const QString& text)
+{
+  auto* const field = new QLineEdit(text);
+  field->setEnabled(false);
+  return field;
+}
+}  // namespace
 
 PostProcessingConfigWindow::PostProcessingConfigWindow(EnhancementsWidget* parent,
                                                        const std::string& shader)
-    : QDialog(parent), m_shader(shader)
+    : QDialog(parent)
 {
-  if (g_presenter && g_presenter->GetPostProcessor())
+  // While a game runs, edit the live configuration so changes show at once.
+  VideoCommon::PostProcessing* const live =
+      g_presenter ? g_presenter->GetPostProcessor() : nullptr;
+  if (live != nullptr)
   {
-    m_post_processor = g_presenter->GetPostProcessor()->GetConfig();
+    m_config = live->GetConfig();
   }
   else
   {
-    m_post_processor = new VideoCommon::PostProcessingConfiguration();
-    m_post_processor->LoadShader(m_shader);
+    m_own_config = std::make_unique<VideoCommon::PostProcessingConfiguration>();
+    m_config = m_own_config.get();
+    m_config->LoadShader(shader);
   }
 
   setWindowTitle(tr("Post-Processing Shader Configuration"));
 
-  PopulateGroups();
-  Create();
-  ConnectWidgets();
+  BuildTree();
+  BuildTabs();
+  connect(m_buttons, &QDialogButtonBox::accepted, this, &PostProcessingConfigWindow::accept);
 
   adjustSize();
 }
 
 PostProcessingConfigWindow::~PostProcessingConfigWindow()
 {
-  m_post_processor->SaveOptionsConfiguration();
-  if (!(g_presenter && g_presenter->GetPostProcessor()))
-  {
-    delete m_post_processor;
-  }
+  m_config->SaveOptionsConfiguration();
 }
 
-void PostProcessingConfigWindow::PopulateGroups()
+// Hangs every option under the option it depends on, in option name order.
+void PostProcessingConfigWindow::BuildTree()
 {
-  const VideoCommon::PostProcessingConfiguration::ConfigMap& config_map =
-      m_post_processor->GetOptions();
-
-  auto config_groups = std::vector<std::unique_ptr<ConfigGroup>>();
-  for (const auto& it : config_map)
+  std::unordered_map<std::string, OptionNode*> by_name;
+  for (const auto& [name, option] : m_config->GetOptions())
   {
-    auto config_group = std::make_unique<ConfigGroup>(&it.second);
-    m_config_map[it.first] = config_group.get();
-    config_groups.push_back(std::move(config_group));
+    auto node = std::make_unique<OptionNode>();
+    node->option = &option;
+    by_name[name] = node.get();
+    m_nodes.push_back(std::move(node));
   }
 
-  for (auto& config_group : config_groups)
+  for (const std::unique_ptr<OptionNode>& node : m_nodes)
   {
-    const std::string& parent_name = config_group->GetParent();
-    if (parent_name.empty())
-    {
-      m_config_groups.emplace_back(std::move(config_group));
-    }
+    const std::string& depends_on = node->option->m_dependent_option;
+    const auto parent = depends_on.empty() ? by_name.end() : by_name.find(depends_on);
+    if (parent == by_name.end())
+      m_roots.push_back(node.get());
     else
-    {
-      m_config_map[parent_name]->AddSubGroup(std::move(config_group));
-    }
+      parent->second->dependants.push_back(node.get());
   }
 }
 
-void PostProcessingConfigWindow::Create()
+void PostProcessingConfigWindow::BuildTabs()
 {
   m_tabs = new QTabWidget();
   auto* const general = new QWidget(m_tabs);
-  auto* const general_layout = new QGridLayout(general);
+  auto* const general_grid = new QGridLayout(general);
 
-  u32 row = 0;
-  bool add_general_page = false;
-  for (auto& it : m_config_groups)
+  u32 general_row = 0;
+  bool general_used = false;
+  for (OptionNode* const root : m_roots)
   {
-    if (it->HasSubGroups())
+    if (root->dependants.empty())
     {
-      auto* const tab = CreateDependentTab(it);
-      m_tabs->addTab(tab, QString::fromStdString(it->GetGUIName()));
+      general_used = true;
+      general_row = AddOptionRow(*root, general_grid, general_row);
+      continue;
+    }
 
-      if (it->GetConfigurationOption()->m_type == OptionType::Bool)
-      {
-        it->EnableSuboptions(it->GetCheckboxValue());
-      }
-    }
-    else
-    {
-      if (!add_general_page)
-      {
-        add_general_page = true;
-      }
-      row = it->AddWidgets(this, general_layout, row);
-    }
+    // The option first, then its direct dependants.
+    auto* const page = new QWidget(m_tabs);
+    auto* const grid = new QGridLayout(page);
+    u32 row = AddOptionRow(*root, grid, 0);
+    for (OptionNode* const dependant : root->dependants)
+      row = AddOptionRow(*dependant, grid, row);
+    m_tabs->addTab(page, QString::fromStdString(root->option->m_gui_name));
+
+    if (root->option->m_type == OptionType::Bool)
+      SetDependantsEnabled(*root, root->checkbox->isChecked());
   }
 
-  if (add_general_page)
-  {
+  if (general_used)
     m_tabs->insertTab(0, general, tr("General"));
-  }
 
   m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok);
-
-  auto* layout = new QVBoxLayout(this);
-  layout->addWidget(m_tabs);
-  layout->addWidget(m_buttons);
+  auto* const column = new QVBoxLayout(this);
+  column->addWidget(m_tabs);
+  column->addWidget(m_buttons);
 }
 
-void PostProcessingConfigWindow::ConnectWidgets()
+u32 PostProcessingConfigWindow::AddOptionRow(OptionNode& node, QGridLayout* grid, u32 row)
 {
-  connect(m_buttons, &QDialogButtonBox::accepted, this, &PostProcessingConfigWindow::accept);
-}
-
-QWidget*
-PostProcessingConfigWindow::CreateDependentTab(const std::unique_ptr<ConfigGroup>& config_group)
-{
-  auto* const tab = new QWidget(m_tabs);
-  auto* const layout = new QGridLayout(tab);
-
-  u32 row = config_group->AddWidgets(this, layout, 0);
-  for (const auto& child : config_group->GetSubGroups())
-  {
-    row = child->AddWidgets(this, layout, row);
-  }
-
-  return tab;
-}
-
-void PostProcessingConfigWindow::UpdateBool(ConfigGroup* const config_group, const bool state)
-{
-  m_post_processor->SetOptionb(config_group->GetOptionName(), state);
-
-  config_group->EnableSuboptions(state);
-}
-
-void PostProcessingConfigWindow::UpdateInteger(ConfigGroup* const config_group, const int value)
-{
-  const ConfigurationOption& config_option =
-      m_post_processor->GetOption(config_group->GetOptionName());
-
-  const size_t vector_size = config_option.m_integer_values.size();
-
-  for (size_t i = 0; i < vector_size; ++i)
-  {
-    const int current_step = config_group->GetSliderValue(i);
-    const s32 current_value = config_option.m_integer_step_values[i] * current_step +
-                              config_option.m_integer_min_values[i];
-    m_post_processor->SetOptioni(config_option.m_option_name, static_cast<int>(i), current_value);
-    config_group->SetSliderText(i, QString::number(current_value));
-  }
-}
-
-void PostProcessingConfigWindow::UpdateFloat(ConfigGroup* const config_group, const int value)
-{
-  const ConfigurationOption& config_option =
-      m_post_processor->GetOption(config_group->GetOptionName());
-
-  const size_t vector_size = config_option.m_float_values.size();
-
-  for (size_t i = 0; i < vector_size; ++i)
-  {
-    const int current_step = config_group->GetSliderValue(static_cast<unsigned int>(i));
-    const float current_value =
-        config_option.m_float_step_values[i] * current_step + config_option.m_float_min_values[i];
-    m_post_processor->SetOptionf(config_option.m_option_name, static_cast<int>(i), current_value);
-    config_group->SetSliderText(i, QString::asprintf("%f", current_value));
-  }
-}
-
-PostProcessingConfigWindow::ConfigGroup::ConfigGroup(const ConfigurationOption* config_option)
-    : m_config_option(config_option)
-{
-}
-
-const std::string& PostProcessingConfigWindow::ConfigGroup::GetGUIName() const noexcept
-{
-  return m_config_option->m_gui_name;
-}
-
-const std::string& PostProcessingConfigWindow::ConfigGroup::GetParent() const noexcept
-{
-  return m_config_option->m_dependent_option;
-}
-
-const std::string& PostProcessingConfigWindow::ConfigGroup::GetOptionName() const noexcept
-{
-  return m_config_option->m_option_name;
-}
-
-void PostProcessingConfigWindow::ConfigGroup::AddSubGroup(std::unique_ptr<ConfigGroup>&& subgroup)
-{
-  m_subgroups.emplace_back(std::move(subgroup));
-}
-
-bool PostProcessingConfigWindow::ConfigGroup::HasSubGroups() const noexcept
-{
-  return !m_subgroups.empty();
-}
-
-const ConfigurationOption*
-PostProcessingConfigWindow::ConfigGroup::GetConfigurationOption() const noexcept
-{
-  return m_config_option;
-}
-
-const std::vector<std::unique_ptr<PostProcessingConfigWindow::ConfigGroup>>&
-PostProcessingConfigWindow::ConfigGroup::GetSubGroups() const noexcept
-{
-  return m_subgroups;
-}
-
-u32 PostProcessingConfigWindow::ConfigGroup::AddWidgets(PostProcessingConfigWindow* const parent,
-                                                        QGridLayout* const grid, const u32 row)
-{
-  auto* const name = new QLabel(QString::fromStdString(m_config_option->m_gui_name));
-  grid->addWidget(name, row, 0);
-
-  switch (m_config_option->m_type)
+  grid->addWidget(new QLabel(QString::fromStdString(node.option->m_gui_name)),
+                  static_cast<int>(row), 0);
+  switch (node.option->m_type)
   {
   case OptionType::Bool:
-    return AddBool(parent, grid, row);
+    return AddBoolRow(node, grid, row);
   case OptionType::Float:
-    return AddFloat(parent, grid, row);
+    return AddFloatRows(node, grid, row);
   case OptionType::Integer:
-    return AddInteger(parent, grid, row);
-  default:
-    // obviously shouldn't get here
-    std::abort();
+    return AddIntegerRows(node, grid, row);
   }
+  std::abort();
 }
 
-u32 PostProcessingConfigWindow::ConfigGroup::AddBool(PostProcessingConfigWindow* const parent,
-                                                     QGridLayout* const grid, const u32 row)
+u32 PostProcessingConfigWindow::AddBoolRow(OptionNode& node, QGridLayout* grid, u32 row)
 {
-  m_checkbox = new QCheckBox();
-  m_checkbox->setChecked(m_config_option->m_bool_value);
-  QObject::connect(m_checkbox, &QCheckBox::toggled,
-                   [this, parent](bool checked) { parent->UpdateBool(this, checked); });
-  grid->addWidget(m_checkbox, row, 2);
-
+  node.checkbox = new QCheckBox();
+  node.checkbox->setChecked(node.option->m_bool_value);
+  connect(node.checkbox, &QCheckBox::toggled, this,
+          [this, &node](bool checked) { StoreBool(node, checked); });
+  grid->addWidget(node.checkbox, static_cast<int>(row), 2);
   return row + 1;
 }
 
-u32 PostProcessingConfigWindow::ConfigGroup::AddInteger(PostProcessingConfigWindow* const parent,
-                                                        QGridLayout* const grid, u32 row)
+// Sliders count steps from the minimum. The step count is rounded up, so
+// an odd step size still reaches the maximum. Options with several
+// components take one grid row per component, plus one.
+u32 PostProcessingConfigWindow::AddIntegerRows(OptionNode& node, QGridLayout* grid, u32 row)
 {
-  const size_t vector_size = m_config_option->m_integer_values.size();
-
-  for (size_t i = 0; i < vector_size; ++i)
+  const Option& option = *node.option;
+  const size_t components = option.m_integer_values.size();
+  for (size_t i = 0; i < components; ++i)
   {
-    const double range =
-        m_config_option->m_integer_max_values[i] - m_config_option->m_integer_min_values[i];
-    // "How many steps we have is the range divided by the step interval configured.
-    //  This may not be 100% spot on accurate since developers can have odd stepping intervals
-    //  set.
-    //  Round up so if it is outside our range, then set it to the minimum or maximum"
-    const int steps =
-        std::ceil(range / static_cast<double>(m_config_option->m_integer_step_values[i]));
-    const int current_value = std::round(
-        (m_config_option->m_integer_values[i] - m_config_option->m_integer_min_values[i]) /
-        static_cast<double>(m_config_option->m_integer_step_values[i]));
+    const s32 low = option.m_integer_min_values[i];
+    const double step = static_cast<double>(option.m_integer_step_values[i]);
+    const double span = option.m_integer_max_values[i] - low;
+    const int steps = static_cast<int>(std::ceil(span / step));
+    const int position = static_cast<int>(std::round((option.m_integer_values[i] - low) / step));
 
-    auto* const slider = new QSlider(Qt::Orientation::Horizontal);
-    slider->setMinimum(0);
-    slider->setMaximum(steps);
-    slider->setValue(current_value);
-    slider->setTickInterval(range / steps);
-    QObject::connect(slider, &QSlider::valueChanged,
-                     [this, parent](int value) { parent->UpdateInteger(this, value); });
+    QSlider* const slider = NewStepSlider(steps, position, static_cast<int>(span / steps));
+    connect(slider, &QSlider::valueChanged, this, [this, &node](int) { StoreIntegers(node); });
+    QLineEdit* const field = NewValueField(QString::number(option.m_integer_values[i]));
 
-    auto* const value_box = new QLineEdit(QString::number(m_config_option->m_integer_values[i]));
-    value_box->setEnabled(false);
-
-    grid->addWidget(slider, row, 1);
-    grid->addWidget(value_box, row, 2);
-
-    m_sliders.push_back(slider);
-    m_value_boxes.push_back(value_box);
-    if (vector_size > 1)
-    {
-      row++;
-    }
+    grid->addWidget(slider, static_cast<int>(row), 1);
+    grid->addWidget(field, static_cast<int>(row), 2);
+    node.sliders.push_back(slider);
+    node.value_fields.push_back(field);
+    if (components > 1)
+      ++row;
   }
-
   return row + 1;
 }
 
-u32 PostProcessingConfigWindow::ConfigGroup::AddFloat(PostProcessingConfigWindow* const parent,
-                                                      QGridLayout* const grid, u32 row)
+u32 PostProcessingConfigWindow::AddFloatRows(OptionNode& node, QGridLayout* grid, u32 row)
 {
-  const size_t vector_size = m_config_option->m_float_values.size();
-
-  for (size_t i = 0; i < vector_size; ++i)
+  const Option& option = *node.option;
+  const size_t components = option.m_float_values.size();
+  for (size_t i = 0; i < components; ++i)
   {
-    const float range =
-        m_config_option->m_float_max_values[i] - m_config_option->m_float_min_values[i];
-    const int steps = std::ceil(range / m_config_option->m_float_step_values[i]);
-    const int current_value =
-        std::round((m_config_option->m_float_values[i] - m_config_option->m_float_min_values[i]) /
-                   m_config_option->m_float_step_values[i]);
+    const float low = option.m_float_min_values[i];
+    const float step = option.m_float_step_values[i];
+    const float span = option.m_float_max_values[i] - low;
+    const int steps = static_cast<int>(std::ceil(span / step));
+    const int position = static_cast<int>(std::round((option.m_float_values[i] - low) / step));
 
-    auto* const slider = new QSlider(Qt::Orientation::Horizontal);
-    slider->setMinimum(0);
-    slider->setMaximum(steps);
-    slider->setValue(current_value);
-    slider->setTickInterval(range / steps);
-    QObject::connect(slider, &QSlider::valueChanged,
-                     [this, parent](int value) { parent->UpdateFloat(this, value); });
+    QSlider* const slider =
+        NewStepSlider(steps, position, static_cast<int>(span / static_cast<float>(steps)));
+    connect(slider, &QSlider::valueChanged, this, [this, &node](int) { StoreFloats(node); });
+    QLineEdit* const field =
+        NewValueField(QString::asprintf("%f", static_cast<double>(option.m_float_values[i])));
 
-    auto* const value_box =
-        new QLineEdit(QString::asprintf("%f", m_config_option->m_float_values[i]));
-    value_box->setEnabled(false);
-
-    grid->addWidget(slider, row, 1);
-    grid->addWidget(value_box, row, 2);
-
-    m_sliders.push_back(slider);
-    m_value_boxes.push_back(value_box);
-    if (vector_size > 1)
-    {
-      row++;
-    }
+    grid->addWidget(slider, static_cast<int>(row), 1);
+    grid->addWidget(field, static_cast<int>(row), 2);
+    node.sliders.push_back(slider);
+    node.value_fields.push_back(field);
+    if (components > 1)
+      ++row;
   }
-
   return row + 1;
 }
 
-void PostProcessingConfigWindow::ConfigGroup::EnableSuboptions(const bool state)
+// Enables or disables every option below node, at any depth. Options more
+// than one level down have no controls of their own.
+void PostProcessingConfigWindow::SetDependantsEnabled(const OptionNode& node, bool enabled)
 {
-  for (auto& it : m_subgroups)
+  for (const OptionNode* const dependant : node.dependants)
   {
-    if (it->m_config_option->m_type == OptionType::Bool)
+    if (dependant->option->m_type == OptionType::Bool)
     {
-      it->m_checkbox->setEnabled(state);
+      if (dependant->checkbox != nullptr)
+        dependant->checkbox->setEnabled(enabled);
     }
     else
     {
-      for (auto& slider : it->m_sliders)
-      {
-        slider->setEnabled(state);
-      }
+      for (QSlider* const slider : dependant->sliders)
+        slider->setEnabled(enabled);
     }
-    it->EnableSuboptions(state);
+    SetDependantsEnabled(*dependant, enabled);
   }
 }
 
-int PostProcessingConfigWindow::ConfigGroup::GetCheckboxValue() const
+void PostProcessingConfigWindow::StoreBool(OptionNode& node, bool value)
 {
-  return m_checkbox->isChecked();
+  m_config->SetOptionb(node.option->m_option_name, value);
+  SetDependantsEnabled(node, value);
 }
 
-int PostProcessingConfigWindow::ConfigGroup::GetSliderValue(size_t index) const
+void PostProcessingConfigWindow::StoreIntegers(OptionNode& node)
 {
-  return m_sliders[index]->value();
+  const Option& option = m_config->GetOption(node.option->m_option_name);
+  for (size_t i = 0; i < option.m_integer_values.size(); ++i)
+  {
+    const s32 value = option.m_integer_step_values[i] * node.sliders[i]->value() +
+                      option.m_integer_min_values[i];
+    m_config->SetOptioni(option.m_option_name, static_cast<int>(i), value);
+    node.value_fields[i]->setText(QString::number(value));
+  }
 }
 
-void PostProcessingConfigWindow::ConfigGroup::SetSliderText(size_t index, const QString& text)
+void PostProcessingConfigWindow::StoreFloats(OptionNode& node)
 {
-  m_value_boxes[index]->setText(text);
+  const Option& option = m_config->GetOption(node.option->m_option_name);
+  for (size_t i = 0; i < option.m_float_values.size(); ++i)
+  {
+    const float value =
+        option.m_float_step_values[i] * static_cast<float>(node.sliders[i]->value()) +
+        option.m_float_min_values[i];
+    m_config->SetOptionf(option.m_option_name, static_cast<int>(i), value);
+    node.value_fields[i]->setText(QString::asprintf("%f", static_cast<double>(value)));
+  }
 }

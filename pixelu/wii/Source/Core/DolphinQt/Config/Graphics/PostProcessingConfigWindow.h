@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,10 @@ class QSlider;
 class QTabWidget;
 class QWidget;
 
+// Edits the [configuration] options of a post-processing shader: a check
+// box per bool option and a slider per component of number options.
+// Options other options depend on get a tab of their own with their
+// dependants; the rest share a "General" tab.
 class PostProcessingConfigWindow final : public QDialog
 {
   Q_OBJECT
@@ -30,51 +33,36 @@ public:
   ~PostProcessingConfigWindow() override;
 
 private:
-  class ConfigGroup final
+  using Option = VideoCommon::PostProcessingConfiguration::ConfigurationOption;
+
+  // One option, its controls and the options that depend on it.
+  struct OptionNode
   {
-  public:
-    explicit ConfigGroup(
-        const VideoCommon::PostProcessingConfiguration::ConfigurationOption* config_option);
-
-    const std::string& GetGUIName() const noexcept;
-    const std::string& GetParent() const noexcept;
-    const std::string& GetOptionName() const noexcept;
-    void AddSubGroup(std::unique_ptr<ConfigGroup>&& subgroup);
-    bool HasSubGroups() const noexcept;
-    const VideoCommon::PostProcessingConfiguration::ConfigurationOption*
-    GetConfigurationOption() const noexcept;
-    const std::vector<std::unique_ptr<ConfigGroup>>& GetSubGroups() const noexcept;
-    u32 AddWidgets(PostProcessingConfigWindow* parent, QGridLayout* grid, u32 row);
-    void EnableSuboptions(bool state);
-    int GetCheckboxValue() const;
-    int GetSliderValue(size_t index) const;
-    void SetSliderText(size_t index, const QString& text);
-
-  private:
-    u32 AddBool(PostProcessingConfigWindow* parent, QGridLayout* grid, u32 row);
-    u32 AddInteger(PostProcessingConfigWindow* parent, QGridLayout* grid, u32 row);
-    u32 AddFloat(PostProcessingConfigWindow* parent, QGridLayout* grid, u32 row);
-
-    QCheckBox* m_checkbox = nullptr;
-    std::vector<QSlider*> m_sliders;
-    std::vector<QLineEdit*> m_value_boxes;
-
-    const VideoCommon::PostProcessingConfiguration::ConfigurationOption* m_config_option;
-    std::vector<std::unique_ptr<ConfigGroup>> m_subgroups;
+    const Option* option = nullptr;
+    QCheckBox* checkbox = nullptr;
+    std::vector<QSlider*> sliders;
+    std::vector<QLineEdit*> value_fields;
+    std::vector<OptionNode*> dependants;
   };
-  void Create();
-  void ConnectWidgets();
-  QWidget* CreateDependentTab(const std::unique_ptr<ConfigGroup>& config_group);
-  void PopulateGroups();
-  void UpdateBool(ConfigGroup* config_group, bool state);
-  void UpdateInteger(ConfigGroup* config_group, int value);
-  void UpdateFloat(ConfigGroup* config_group, int value);
+
+  void BuildTree();
+  void BuildTabs();
+  u32 AddOptionRow(OptionNode& node, QGridLayout* grid, u32 row);
+  u32 AddBoolRow(OptionNode& node, QGridLayout* grid, u32 row);
+  u32 AddIntegerRows(OptionNode& node, QGridLayout* grid, u32 row);
+  u32 AddFloatRows(OptionNode& node, QGridLayout* grid, u32 row);
+  static void SetDependantsEnabled(const OptionNode& node, bool enabled);
+
+  void StoreBool(OptionNode& node, bool value);
+  void StoreIntegers(OptionNode& node);
+  void StoreFloats(OptionNode& node);
 
   QTabWidget* m_tabs;
   QDialogButtonBox* m_buttons;
 
-  const std::string& m_shader;
-  VideoCommon::PostProcessingConfiguration* m_post_processor;
-  std::unordered_map<std::string, ConfigGroup*> m_config_map;
-  std::vector<std::unique_ptr<ConfigGroup>> m_config_groups;
+  // Either the running presenter's configuration or m_own_config.
+  VideoCommon::PostProcessingConfiguration* m_config;
+  std::unique_ptr<VideoCommon::PostProcessingConfiguration> m_own_config;
+  std::vector<std::unique_ptr<OptionNode>> m_nodes;
+  std::vector<OptionNode*> m_roots;
 };

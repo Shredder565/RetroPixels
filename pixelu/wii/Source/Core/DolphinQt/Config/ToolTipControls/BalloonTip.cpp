@@ -193,7 +193,7 @@ void BalloonTip::paintEvent(QPaintEvent* const event)
 void BalloonTip::PlaceAndPaint(const QPoint& arrow_target, const ShowArrow show_arrow,
                                const int border_width)
 {
-  const float half_border = border_width / 2.0f;
+  const float half_border = static_cast<float>(border_width) / 2.0f;
 
   // Room around the labels for the outline, the rounded corners and an arrow
   // above or below.
@@ -219,7 +219,7 @@ void BalloonTip::PlaceAndPaint(const QPoint& arrow_target, const ShowArrow show_
   // boxes.
   const int arrow_edge =
       std::min(ARROW_INSET + border_width + static_cast<int>(half_border), (window_w - ARROW_WIDTH) / 2);
-  const int arrow_point_from_edge = static_cast<int>(arrow_edge + ARROW_HALF_WIDTH);
+  const int arrow_point_from_edge = static_cast<int>(static_cast<float>(arrow_edge) + ARROW_HALF_WIDTH);
 
   QScreen* screen = QGuiApplication::screenAt(arrow_target);
   if (screen == nullptr)  // target off every screen: use the cursor's
@@ -274,7 +274,7 @@ void BalloonTip::PlaceAndPaint(const QPoint& arrow_target, const ShowArrow show_
       inside.moveTo(arrow_mid, arrow_root_y);
       inside.lineTo(arrow_mid, arrow_inner_point_y);
 
-      for (int column = 1; column <= ARROW_HALF_WIDTH; ++column)
+      for (int column = 1; column <= ARROW_WIDTH / 2; ++column)
       {
         const float inset = static_cast<float>(column) - 0.5f;
         const float edge_y = arrow_root_y + sign * static_cast<float>(column);

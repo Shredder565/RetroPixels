@@ -150,7 +150,7 @@ void ConfigComplexChoice::SaveValue(int choice)
     Config::OnConfigChanged();
   };
 
-  const auto& picked = m_choices[choice];
+  const auto& picked = m_choices[static_cast<size_t>(choice)];
   std::visit(write, m_first, picked.first);
   std::visit(write, m_second, picked.second);
 }

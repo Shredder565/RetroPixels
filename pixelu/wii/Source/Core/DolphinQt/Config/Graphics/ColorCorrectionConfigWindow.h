@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,10 +8,13 @@ class ConfigBool;
 class ConfigChoice;
 class ConfigFloatSlider;
 class QDialogButtonBox;
+class QGroupBox;
 class QLabel;
 class QRadioButton;
 class QWidget;
 
+// The colour correction options opened from Graphics > Enhancements:
+// colour space, gamma and HDR paper white.
 class ColorCorrectionConfigWindow final : public QDialog
 {
   Q_OBJECT
@@ -20,8 +22,11 @@ public:
   explicit ColorCorrectionConfigWindow(QWidget* parent);
 
 private:
-  void Create();
-  void ConnectWidgets();
+  QGroupBox* BuildColorSpaceGroup();
+  QGroupBox* BuildGammaGroup();
+  QGroupBox* BuildHdrGroup();
+  void LinkControls();
+  void RefreshGammaTargets();
 
   ConfigBool* m_correct_color_space;
   ConfigChoice* m_game_color_space;

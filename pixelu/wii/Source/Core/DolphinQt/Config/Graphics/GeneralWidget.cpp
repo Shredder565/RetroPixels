@@ -298,7 +298,7 @@ void GeneralWidget::ConfirmBackendChoice()
     if (picked == -1)  // the setting names no available backend
       return;
 
-    const auto warning = backends[picked]->GetWarningMessage();
+    const auto warning = backends[static_cast<size_t>(picked)]->GetWarningMessage();
     if (warning)
     {
       ModalMessageBox question(this);

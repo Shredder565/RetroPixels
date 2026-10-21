@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@ class ConfigBool;
 class ConfigSlider;
 class ConfigSliderLabel;
 class GraphicsPane;
+class QGroupBox;
 class QString;
 
 namespace Config
@@ -16,6 +16,7 @@ namespace Config
 class Layer;
 }  // namespace Config
 
+// Graphics > Hacks: EFB, texture cache, XFB and other speed hacks.
 class HacksWidget final : public QWidget
 {
   Q_OBJECT
@@ -23,34 +24,32 @@ public:
   explicit HacksWidget(GraphicsPane* gfx_pane);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void AddDescriptions();
-
-  void UpdateGPUTextureDecodingEnabled(const QString& backend_name);
-  void UpdateBoundingBoxEnabled(const QString& backend_name);
-  void UpdateDeferEFBCopiesEnabled();
-  void UpdateSkipPresentingDuplicateFramesEnabled();
+  QGroupBox* BuildEfbGroup();
+  QGroupBox* BuildTextureCacheGroup();
+  QGroupBox* BuildXfbGroup();
+  QGroupBox* BuildOtherGroup();
+  void WatchDependencies();
+  void SetDescriptions();
 
   void OnBackendChanged(const QString& backend_name);
+  void RefreshGpuTextureDecoding(const QString& backend_name);
+  void RefreshBoundingBox(const QString& backend_name);
+  void RefreshDeferEfbCopies();
+  void RefreshSkipDuplicateFrames();
 
-  // EFB
   ConfigBool* m_skip_efb_cpu;
   ConfigBool* m_ignore_format_changes;
   ConfigBool* m_store_efb_copies;
   ConfigBool* m_defer_efb_copies;
 
-  // Texture Cache
   ConfigSliderLabel* m_accuracy_label;
   ConfigSlider* m_accuracy;
   ConfigBool* m_gpu_texture_decoding;
 
-  // External Framebuffer
   ConfigBool* m_store_xfb_copies;
   ConfigBool* m_immediate_xfb;
   ConfigBool* m_skip_duplicate_xfbs;
 
-  // Other
   ConfigBool* m_fast_depth_calculation;
   ConfigBool* m_disable_bounding_box;
   ConfigBool* m_vertex_rounding;

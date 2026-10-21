@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@ class ConfigComplexChoice;
 class ConfigStringChoice;
 class ConfigFloatSlider;
 class GraphicsPane;
+class QGroupBox;
 class QPushButton;
 class QLabel;
 class ToolTipPushButton;
@@ -22,6 +22,8 @@ class Info;
 class Layer;
 }  // namespace Config
 
+// Graphics > Enhancements: resolution, anti-aliasing, filtering,
+// resampling, colour correction, post-processing and stereoscopy.
 class EnhancementsWidget final : public QWidget
 {
   Q_OBJECT
@@ -29,19 +31,21 @@ public:
   explicit EnhancementsWidget(GraphicsPane* gfx_pane);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void AddDescriptions();
+  QGroupBox* BuildEnhancementsGroup();
+  QGroupBox* BuildStereoscopyGroup();
+  QStringList ResolutionChoices() const;
+  void SetDescriptions();
 
   void OnBackendChanged();
-  void UpdateAntialiasingOptions();
-  void LoadPostProcessingShaders();
-  void ShaderChanged();
+  void OnStereoModeChanged();
+  void RebuildAntialiasingChoices();
+  void RebuildPostProcessingChoices();
+  void OnPostProcessingShaderChanged();
+  void ShowStereoValues();
 
-  void ConfigureColorCorrection();
-  void ConfigurePostProcessingShader();
+  void OpenColorCorrection();
+  void OpenPostProcessingOptions();
 
-  // Enhancements
   ConfigChoice* m_ir_combo;
   ConfigComplexChoice* m_antialiasing_combo;
   ConfigComplexChoice* m_texture_filtering_combo;
@@ -58,7 +62,6 @@ private:
   ConfigBool* m_arbitrary_mipmap_detection;
   ConfigBool* m_hdr;
 
-  // Stereoscopy
   ConfigChoice* m_3d_mode;
   ConfigFloatSlider* m_3d_depth;
   QLabel* m_3d_depth_value;
