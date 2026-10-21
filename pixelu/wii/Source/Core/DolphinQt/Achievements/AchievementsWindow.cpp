@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef USE_RETRO_ACHIEVEMENTS
 #include "DolphinQt/Achievements/AchievementsWindow.h"
@@ -24,18 +23,24 @@
 #include "DolphinQt/QtUtils/WrapInScrollArea.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+// Tab order: Settings, Progress, Leaderboards.
+constexpr int PROGRESS_TAB = 1;
+constexpr int LEADERBOARDS_TAB = 2;
+}  // namespace
+
 AchievementsWindow::AchievementsWindow(QWidget* parent) : QDialog(parent)
 {
   setWindowTitle(tr("Achievements"));
 
-  CreateMainLayout();
-  ConnectWidgets();
+  BuildLayout();
+  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
+  // The manager reports from its own threads.
   m_event_hook = AchievementManager::GetInstance().update_event.Register(
       [this](AchievementManager::UpdatedItems updated_items) {
-        QueueOnObject(this, [this, updated_items = std::move(updated_items)] {
-          AchievementsWindow::UpdateData(updated_items);
-        });
+        QueueOnObject(this, [this, items = std::move(updated_items)] { UpdateData(items); });
       });
   UpdateData(AchievementManager::UpdatedItems{.all = true});
 
@@ -49,9 +54,15 @@ void AchievementsWindow::showEvent(QShowEvent* event)
   update();
 }
 
-void AchievementsWindow::CreateMainLayout()
+void AchievementsWindow::SetGameTabsVisible(bool visible)
 {
-  const auto is_game_loaded = AchievementManager::GetInstance().IsGameLoaded();
+  m_tab_widget->setTabVisible(PROGRESS_TAB, visible);
+  m_tab_widget->setTabVisible(LEADERBOARDS_TAB, visible);
+}
+
+void AchievementsWindow::BuildLayout()
+{
+  const bool game_loaded = AchievementManager::GetInstance().IsGameLoaded();
 
   m_header_widget = new AchievementHeaderWidget(this);
   m_tab_widget = new QTabWidget();
@@ -64,57 +75,56 @@ void AchievementsWindow::CreateMainLayout()
 
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
 
-  auto* const layout = new QVBoxLayout{this};
-  layout->addWidget(m_header_widget);
-  layout->addWidget(m_tab_widget);
-  layout->addWidget(m_button_box);
+  auto* const outer = new QVBoxLayout{this};
+  outer->addWidget(m_header_widget);
+  outer->addWidget(m_tab_widget);
+  outer->addWidget(m_button_box);
 
   adjustSize();
 
-  m_tab_widget->setTabVisible(1, is_game_loaded);
-  m_tab_widget->setTabVisible(2, is_game_loaded);
-}
-
-void AchievementsWindow::ConnectWidgets()
-{
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  SetGameTabsVisible(game_loaded);
 }
 
 void AchievementsWindow::UpdateData(const AchievementManager::UpdatedItems& updated_items)
 {
   m_settings_widget->UpdateData(updated_items.failed_login_code);
+
   if (updated_items.all)
   {
     m_header_widget->UpdateData();
     m_progress_widget->UpdateData(true);
     m_leaderboard_widget->UpdateData(true);
-    static_cast<QScrollArea*>(m_tab_widget->widget(1))->verticalScrollBar()->setValue(0);
-    static_cast<QScrollArea*>(m_tab_widget->widget(2))->verticalScrollBar()->setValue(0);
+    // Fresh lists start at the top.
+    for (int tab : {PROGRESS_TAB, LEADERBOARDS_TAB})
+      static_cast<QScrollArea*>(m_tab_widget->widget(tab))->verticalScrollBar()->setValue(0);
   }
   else
   {
+    const bool achievements_changed =
+        updated_items.all_achievements || !updated_items.achievements.empty();
     if (updated_items.player_icon || updated_items.game_icon || updated_items.rich_presence ||
-        updated_items.all_achievements || updated_items.achievements.size() > 0)
+        achievements_changed)
     {
       m_header_widget->UpdateData();
     }
+
     if (updated_items.all_achievements || updated_items.rich_presence)
       m_progress_widget->UpdateData(false);
-    else if (updated_items.achievements.size() > 0)
+    else if (!updated_items.achievements.empty())
       m_progress_widget->UpdateData(updated_items.achievements);
+
     if (updated_items.all_leaderboards)
       m_leaderboard_widget->UpdateData(false);
-    else if (updated_items.leaderboards.size() > 0)
+    else if (!updated_items.leaderboards.empty())
       m_leaderboard_widget->UpdateData(updated_items.leaderboards);
   }
 
   {
-    auto& instance = AchievementManager::GetInstance();
-    std::lock_guard lg{instance.GetLock()};
-    const bool is_game_loaded = instance.IsGameLoaded();
-    m_header_widget->setVisible(instance.HasAPIToken());
-    m_tab_widget->setTabVisible(1, is_game_loaded);
-    m_tab_widget->setTabVisible(2, is_game_loaded);
+    auto& manager = AchievementManager::GetInstance();
+    std::lock_guard guard{manager.GetLock()};
+    const bool game_loaded = manager.IsGameLoaded();
+    m_header_widget->setVisible(manager.HasAPIToken());
+    SetGameTabsVisible(game_loaded);
   }
   update();
 }

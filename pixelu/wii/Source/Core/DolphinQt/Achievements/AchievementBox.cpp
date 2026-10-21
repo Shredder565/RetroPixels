@@ -1,13 +1,18 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef USE_RETRO_ACHIEVEMENTS
 #include "DolphinQt/Achievements/AchievementBox.h"
 
+#include <cstring>
+#include <mutex>
+#include <string_view>
+
 #include <QByteArray>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
+#include <QPixmap>
 #include <QProgressBar>
 #include <QSizePolicy>
 #include <QVBoxLayout>
@@ -17,52 +22,67 @@
 
 #include "DolphinQt/QtUtils/FromStdString.h"
 
-static constexpr size_t PROGRESS_LENGTH = 24;
+namespace
+{
+// rc_client keeps the measured progress text in a buffer of this size.
+constexpr size_t PROGRESS_TEXT_SIZE = 24;
+
+QLabel* WrappingLabel(const char* utf8)
+{
+  auto* label = new QLabel(QString::fromUtf8(utf8, static_cast<qsizetype>(std::strlen(utf8))));
+  label->setWordWrap(true);
+  label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+  return label;
+}
+}  // namespace
 
 AchievementBox::AchievementBox(QWidget* parent, const rc_client_achievement_t* achievement)
     : QGroupBox(parent), m_achievement(achievement)
 {
-  const auto& instance = AchievementManager::GetInstance();
-  if (!instance.IsGameLoaded())
+  // Without a game there is nothing to show (and the achievement data is gone).
+  if (!AchievementManager::GetInstance().IsGameLoaded())
     return;
 
   m_badge = new QLabel();
-  QLabel* title = new QLabel(QString::fromUtf8(achievement->title, strlen(achievement->title)));
-  title->setWordWrap(true);
-  title->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
-  QLabel* description =
-      new QLabel(QString::fromUtf8(achievement->description, strlen(achievement->description)));
-  description->setWordWrap(true);
-  description->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
-  QLabel* points = new QLabel(tr("%1 points").arg(achievement->points));
+  QLabel* title = WrappingLabel(achievement->title);
+  QLabel* description = WrappingLabel(achievement->description);
+  auto* points = new QLabel(tr("%1 points").arg(achievement->points));
   m_status = new QLabel();
+
+  // The bar keeps its room when hidden, so boxes line up whether or not they track progress.
+  // The progress text sits on top of it.
   m_progress_bar = new QProgressBar();
-  QSizePolicy sp_retain = m_progress_bar->sizePolicy();
-  sp_retain.setRetainSizeWhenHidden(true);
-  m_progress_bar->setSizePolicy(sp_retain);
+  QSizePolicy keep_space = m_progress_bar->sizePolicy();
+  keep_space.setRetainSizeWhenHidden(true);
+  m_progress_bar->setSizePolicy(keep_space);
   m_progress_label = new QLabel();
   m_progress_label->setStyleSheet(QStringLiteral("background-color:transparent;"));
   m_progress_label->setAlignment(Qt::AlignCenter);
 
-  QVBoxLayout* a_col_left = new QVBoxLayout();
-  a_col_left->addSpacerItem(new QSpacerItem(0, 0));
-  a_col_left->addWidget(m_badge);
-  a_col_left->addSpacerItem(new QSpacerItem(0, 0));
-  a_col_left->setSizeConstraint(QLayout::SetFixedSize);
-  a_col_left->setAlignment(Qt::AlignCenter);
-  QVBoxLayout* a_col_right = new QVBoxLayout();
-  a_col_right->addWidget(title);
-  a_col_right->addWidget(description);
-  a_col_right->addWidget(points);
-  a_col_right->addWidget(m_status);
-  a_col_right->addWidget(m_progress_bar);
-  QVBoxLayout* a_prog_layout = new QVBoxLayout(m_progress_bar);
-  a_prog_layout->setContentsMargins(0, 0, 0, 0);
-  a_prog_layout->addWidget(m_progress_label);
-  QHBoxLayout* a_total = new QHBoxLayout();
-  a_total->addLayout(a_col_left);
-  a_total->addLayout(a_col_right);
-  setLayout(a_total);
+  // Badge on the left, centred vertically; the text on the right.
+  auto* badge_column = new QVBoxLayout();
+  badge_column->addSpacerItem(new QSpacerItem(0, 0));
+  badge_column->addWidget(m_badge);
+  badge_column->addSpacerItem(new QSpacerItem(0, 0));
+  badge_column->setSizeConstraint(QLayout::SetFixedSize);
+  badge_column->setAlignment(Qt::AlignCenter);
+
+  auto* text_column = new QVBoxLayout();
+  for (QWidget* line : {static_cast<QWidget*>(title), static_cast<QWidget*>(description),
+                        static_cast<QWidget*>(points), static_cast<QWidget*>(m_status),
+                        static_cast<QWidget*>(m_progress_bar)})
+  {
+    text_column->addWidget(line);
+  }
+
+  auto* over_bar = new QVBoxLayout(m_progress_bar);
+  over_bar->setContentsMargins(0, 0, 0, 0);
+  over_bar->addWidget(m_progress_label);
+
+  auto* columns = new QHBoxLayout();
+  columns->addLayout(badge_column);
+  columns->addLayout(text_column);
+  setLayout(columns);
 
   UpdateData();
 }
@@ -70,42 +90,42 @@ AchievementBox::AchievementBox(QWidget* parent, const rc_client_achievement_t* a
 void AchievementBox::UpdateData()
 {
   {
-    std::lock_guard lg{AchievementManager::GetInstance().GetLock()};
-    // rc_client guarantees m_achievement will be valid as long as the game is loaded
-    if (!AchievementManager::GetInstance().IsGameLoaded())
+    auto& manager = AchievementManager::GetInstance();
+    std::lock_guard guard{manager.GetLock()};
+    if (!manager.IsGameLoaded())
       return;
 
-    const auto& badge = AchievementManager::GetInstance().GetAchievementBadge(
-        m_achievement->id, !m_achievement->unlocked);
-    std::string_view color = AchievementManager::GRAY;
+    const auto& badge = manager.GetAchievementBadge(m_achievement->id, !m_achievement->unlocked);
+
+    // The frame shows how it was unlocked: gold for hardcore, blue for softcore.
+    std::string_view frame = AchievementManager::GRAY;
     if (m_achievement->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE)
-      color = AchievementManager::GOLD;
+      frame = AchievementManager::GOLD;
     else if (m_achievement->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE)
-      color = AchievementManager::BLUE;
-    QImage i_badge(badge.data.data(), badge.width, badge.height, QImage::Format_RGBA8888);
+      frame = AchievementManager::BLUE;
+
+    const QImage image(badge.data.data(), static_cast<int>(badge.width),
+                       static_cast<int>(badge.height), QImage::Format_RGBA8888);
     m_badge->setPixmap(
-        QPixmap::fromImage(i_badge).scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        QPixmap::fromImage(image).scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     m_badge->adjustSize();
     m_badge->setStyleSheet(
-        QStringLiteral("border: 4px solid %1").arg(QtUtils::FromStdString(color)));
+        QStringLiteral("border: 4px solid %1").arg(QtUtils::FromStdString(frame)));
 
-    if (m_achievement->unlocked)
+    if (!m_achievement->unlocked)
     {
-      if (m_achievement->unlock_time != 0)
-      {
-        m_status->setText(
-            // i18n: %1 is a date/time.
-            tr("Unlocked at %1")
-                .arg(QDateTime::fromSecsSinceEpoch(m_achievement->unlock_time).toString()));
-      }
-      else
-      {
-        m_status->setText(tr("Unlocked"));
-      }
+      m_status->setText(tr("Locked"));
+    }
+    else if (m_achievement->unlock_time == 0)
+    {
+      m_status->setText(tr("Unlocked"));
     }
     else
     {
-      m_status->setText(tr("Locked"));
+      // i18n: %1 is a date/time.
+      m_status->setText(
+          tr("Unlocked at %1")
+              .arg(QDateTime::fromSecsSinceEpoch(m_achievement->unlock_time).toString()));
     }
   }
 
@@ -114,26 +134,27 @@ void AchievementBox::UpdateData()
 
 void AchievementBox::UpdateProgress()
 {
-  std::lock_guard lg{AchievementManager::GetInstance().GetLock()};
-  // rc_client guarantees m_achievement will be valid as long as the game is loaded
-  if (!AchievementManager::GetInstance().IsGameLoaded())
+  auto& manager = AchievementManager::GetInstance();
+  std::lock_guard guard{manager.GetLock()};
+  if (!manager.IsGameLoaded())
     return;
 
-  if (m_achievement->measured_percent > 0.000)
-  {
-    m_progress_bar->setRange(0, 100);
-    m_progress_bar->setValue(m_achievement->unlocked ? 100 : m_achievement->measured_percent);
-    m_progress_bar->setTextVisible(false);
-    m_progress_label->setText(
-        QString::fromUtf8(m_achievement->measured_progress,
-                          qstrnlen(m_achievement->measured_progress, PROGRESS_LENGTH)));
-    m_progress_label->setVisible(!m_achievement->unlocked);
-    m_progress_bar->setVisible(true);
-  }
-  else
+  // Only measured achievements (those with a percentage) get the bar.
+  if (!(m_achievement->measured_percent > 0.000))
   {
     m_progress_bar->setVisible(false);
+    return;
   }
+
+  m_progress_bar->setRange(0, 100);
+  m_progress_bar->setValue(
+      m_achievement->unlocked ? 100 : static_cast<int>(m_achievement->measured_percent));
+  m_progress_bar->setTextVisible(false);
+  const auto text_length =
+      static_cast<qsizetype>(qstrnlen(m_achievement->measured_progress, PROGRESS_TEXT_SIZE));
+  m_progress_label->setText(QString::fromUtf8(m_achievement->measured_progress, text_length));
+  m_progress_label->setVisible(!m_achievement->unlocked);
+  m_progress_bar->setVisible(true);
 }
 
 #endif  // USE_RETRO_ACHIEVEMENTS

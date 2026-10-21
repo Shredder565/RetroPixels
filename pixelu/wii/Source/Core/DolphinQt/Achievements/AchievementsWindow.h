@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,9 @@ class QDialogButtonBox;
 class QTabWidget;
 class UpdateCallback;
 
+// RetroAchievements: the player/game header over Settings, Progress and Leaderboards tabs. The
+// last two only show while a game is loaded. Updates from the achievement manager are applied
+// on the UI thread.
 class AchievementsWindow : public QDialog
 {
   Q_OBJECT
@@ -26,9 +28,9 @@ public:
   void ForceSettingsTab();
 
 private:
-  void CreateMainLayout();
+  void BuildLayout();
   void showEvent(QShowEvent* event) override;
-  void ConnectWidgets();
+  void SetGameTabsVisible(bool visible);
 
   AchievementHeaderWidget* m_header_widget;
   QTabWidget* m_tab_widget;

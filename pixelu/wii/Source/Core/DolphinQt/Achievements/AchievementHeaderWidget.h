@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@ class QGroupBox;
 class QLabel;
 class QProgressBar;
 
+// The top of the achievements window: player and game icons, who is playing what, the score,
+// overall progress and the game's rich presence text. Hidden while logged out.
 class AchievementHeaderWidget final : public QWidget
 {
   Q_OBJECT

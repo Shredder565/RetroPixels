@@ -1,13 +1,13 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #ifdef USE_RETRO_ACHIEVEMENTS
 #include "DolphinQt/Achievements/AchievementProgressWidget.h"
 
+#include <cstring>
+#include <memory>
+
 #include <QGroupBox>
 #include <QLabel>
-#include <QLineEdit>
-#include <QProgressBar>
 #include <QString>
 #include <QVBoxLayout>
 
@@ -20,15 +20,29 @@ AchievementProgressWidget::AchievementProgressWidget(QWidget* parent) : QWidget(
 {
   m_common_box = new QGroupBox();
   m_common_layout = new QVBoxLayout();
-
   m_common_box->setLayout(m_common_layout);
 
-  auto* layout = new QVBoxLayout;
-  layout->setContentsMargins(0, 0, 0, 0);
-  layout->setAlignment(Qt::AlignTop);
-  layout->addWidget(m_common_box);
-  layout->setSizeConstraint(QLayout::SetFixedSize);
-  setLayout(layout);
+  auto* outer = new QVBoxLayout;
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->setAlignment(Qt::AlignTop);
+  outer->addWidget(m_common_box);
+  outer->setSizeConstraint(QLayout::SetFixedSize);
+  setLayout(outer);
+}
+
+void AchievementProgressWidget::DetachEntries()
+{
+  while (QLayoutItem* item = m_common_layout->takeAt(0))
+  {
+    QWidget* entry = item->widget();
+    m_common_layout->removeWidget(entry);
+    // Only the headings are plain labels; boxes are owned by m_achievement_boxes.
+    if (std::strcmp(entry->metaObject()->className(), "QLabel") == 0)
+    {
+      entry->deleteLater();
+      delete item;
+    }
+  }
 }
 
 void AchievementProgressWidget::UpdateData(bool clean_all)
@@ -40,59 +54,53 @@ void AchievementProgressWidget::UpdateData(bool clean_all)
   }
   else
   {
-    while (auto* item = m_common_layout->takeAt(0))
-    {
-      auto* widget = item->widget();
-      m_common_layout->removeWidget(widget);
-      if (std::strcmp(widget->metaObject()->className(), "QLabel") == 0)
-      {
-        widget->deleteLater();
-        delete item;
-      }
-    }
+    DetachEntries();
   }
 
-  auto& instance = AchievementManager::GetInstance();
-  if (!instance.IsGameLoaded())
+  auto& manager = AchievementManager::GetInstance();
+  if (!manager.IsGameLoaded())
     return;
-  auto* client = instance.GetClient();
-  auto* achievement_list =
-      rc_client_create_achievement_list(client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
-                                        RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
-  if (!achievement_list)
+
+  rc_client_achievement_list_t* list = rc_client_create_achievement_list(
+      manager.GetClient(), RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
+      RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+  if (!list)
     return;
-  for (u32 ix = 0; ix < achievement_list->num_buckets; ix++)
+
+  for (u32 b = 0; b < list->num_buckets; ++b)
   {
-    m_common_layout->addWidget(new QLabel(tr(achievement_list->buckets[ix].label)));
-    for (u32 jx = 0; jx < achievement_list->buckets[ix].num_achievements; jx++)
+    const rc_client_achievement_bucket_t& bucket = list->buckets[b];
+    m_common_layout->addWidget(new QLabel(tr(bucket.label)));
+
+    for (u32 a = 0; a < bucket.num_achievements; ++a)
     {
-      auto* achievement = achievement_list->buckets[ix].achievements[jx];
-      auto box_itr = m_achievement_boxes.lower_bound(achievement->id);
-      if (box_itr != m_achievement_boxes.end() && box_itr->first == achievement->id)
+      const rc_client_achievement_t* achievement = bucket.achievements[a];
+
+      // Reuse the box made for this achievement earlier, with its progress brought up to date.
+      auto slot = m_achievement_boxes.lower_bound(achievement->id);
+      if (slot != m_achievement_boxes.end() && slot->first == achievement->id)
       {
-        box_itr->second->UpdateProgress();
-        m_common_layout->addWidget(box_itr->second.get());
+        slot->second->UpdateProgress();
       }
       else
       {
-        const auto new_box_itr = m_achievement_boxes.try_emplace(
-            box_itr, achievement->id, std::make_shared<AchievementBox>(this, achievement));
-        m_common_layout->addWidget(new_box_itr->second.get());
+        slot = m_achievement_boxes.try_emplace(slot, achievement->id,
+                                               std::make_shared<AchievementBox>(this, achievement));
       }
+      m_common_layout->addWidget(slot->second.get());
     }
   }
-  rc_client_destroy_achievement_list(achievement_list);
+
+  rc_client_destroy_achievement_list(list);
 }
 
 void AchievementProgressWidget::UpdateData(
     const std::set<AchievementManager::AchievementId>& update_ids)
 {
-  for (auto& [id, box] : m_achievement_boxes)
+  for (const auto& [id, box] : m_achievement_boxes)
   {
     if (update_ids.contains(id))
-    {
       box->UpdateData();
-    }
   }
 }
 

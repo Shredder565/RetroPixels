@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,18 +12,19 @@ class QLineEdit;
 class QPushButton;
 class ToolTipCheckBox;
 
+// The Settings tab: turning RetroAchievements on, logging in and out, and the gameplay and
+// display options.
 class AchievementSettingsWidget final : public QWidget
 {
   Q_OBJECT
 public:
   explicit AchievementSettingsWidget(QWidget* parent);
+  // Shows why a login failed (unless the code is RC_OK) and reloads the settings.
   void UpdateData(int login_failed_code);
 
 private:
-  void OnControllerInterfaceConfigure();
-
-  void CreateLayout();
-  void ConnectWidgets();
+  void BuildLayout();
+  void ConnectSignals();
 
   void LoadSettings();
   void SaveSettings();
@@ -33,13 +33,8 @@ private:
   void Login();
   void Logout();
   void ToggleHardcore();
-  void ToggleUnofficial();
-  void ToggleEncore();
   void ToggleSpectator();
-  void ToggleLeaderboardTracker();
-  void ToggleChallengeIndicators();
   void ToggleDiscordPresence();
-  void ToggleProgress();
 
   QGroupBox* m_common_box;
   QVBoxLayout* m_common_layout;
