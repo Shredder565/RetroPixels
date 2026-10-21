@@ -2026,4 +2026,656 @@ info "Received AT command: {command}"; then:
 Replying appends to the AT reply, sets register `05` = `u8(reply length)`
 and interrupt `02` = (reply not empty), from the CPU.
 
-<!-- next -->
+## 13. Undefined behaviour in the old code, and what to do instead
+
+The old code has a few paths that read or write out of bounds, shift by a
+negative amount or depend on the clock. The harness never drives them (it
+keeps a shadow model of the device state and skips the unsafe step), so any
+safe behaviour keeps the hashes equal. Each item gives the recommended
+behaviour, chosen so that it matches the old code's defined neighbours.
+
+### 13.1 AGP (section 11)
+
+| Path | Old code | Do instead |
+|---|---|---|
+| ROM file opens but is empty | ROM mask = `FFFFFFFF` on an empty vector; ROM reads index past the end | treat ROM reads of an empty ROM as `00` (what the missing-file case gives: 0x2000 zero bytes, mask 0) |
+| `AE0C0000` bit write with `pos > end + 63` (and not the "special" position) | shift count `end + 63 - pos` is negative | change no bit; the rest of the row (position += 1, return position = 0, hash) still happens |
+| `AE0B0000` read with `pos > 67` | shift count `63 - (pos - 4)` is negative | the bit reads as 0, so `v = 0A`; position += 1 and the hash as usual |
+| `AE0B0000` read or `AE0C0000` 64-bit store when the EEPROM has fewer than 8 bytes (a nonstandard `.sav` size of 1-7) | reads or writes a u64 past the end of the byte vector | read: `v = 0A`; store: skip the store, write status still becomes true |
+| `AE040000` read with the EEPROM position at or past the EEPROM size (the position grows with `AE0C`/`AE0B`) | reads past the end | `v = FF`, as if there were no EEPROM |
+
+The u64 accesses into the byte vector are also type-punned through a cast;
+write them with `std::memcpy` (or byte loops) giving the same host-order
+value.
+
+### 13.2 Modem (section 12)
+
+- `ImmRead(size)` with `size > 4` copies `size` bytes into a 4-byte buffer.
+  EXI immediate transfers are 1 to 4 bytes; clamp `size` to 4 for the copy
+  and keep the descriptor bookkeeping with the clamped size.
+- `DMAWrite`/`DMARead` pass `memory.GetPointerForRange(addr, size)` on
+  without checking it. A bad range gives a null pointer, and the old code then
+  appends from or copies to null. Instead, a null pointer means
+  nothing is copied: the transfer still counts against the descriptor, and a
+  write still runs the AT command or HDLC step on what is already buffered.
+  The harness only uses valid ranges.
+
+### 13.3 Magnetic card readers (section 9.3)
+
+`53` WriteData with the track byte `31`, `32`, `34` or `35`: the old code
+takes track `t`'s data from payload offset `69 * t` (the track number, not
+its position in the list). The length check allows only `69 * count` bytes,
+so for these lists the subspan runs past the end of the payload. Store the
+`k`-th listed track from offset `69 * k`. For `30`, `33` and `36` this is
+identical to the old code, and those are the only defined cases. The harness
+sends `31`/`32`/`34`/`35` only with a wrong length (the `ILLEGAL_ERR` path).
+
+### 13.4 JVS (section 5.6)
+
+`20` SwitchInput with a player count above 2 calls
+`IOPorts::GetSwitchInputs(i)` for `i >= 2`. In the old code that is an
+`ASSERT` (a yes/no panic; continuing reads past the 2-player array). Instead,
+send zero bytes for players 2 and up, `bytes_per_player` of them each. An
+`ASSERT` may stay or go: the harness records only that an assertion fired
+(13.8), and does not drive this path. A truncated `20` followed by another
+command reads that command byte as a parameter (5.6), which is defined; the
+harness only ends frames with truncated commands.
+
+### 13.5 Deck reader JSON (section 8.2)
+
+`"index"`, `"table"` and `"quantity"` are converted from `double` with a
+plain cast. Out-of-range values, NaN and infinities are UB. Convert in-range
+integral values exactly as the cast does. For anything else (negative, too
+large, non-integral beyond truncation, NaN), clamp to the type's range, with
+NaN as 0. The harness writes only in-range integers.
+
+### 13.6 Media board (section 2)
+
+- `dimm_disc` is only set by `InitDIMM`. A game read (2.6 step 15) before
+  `InitDIMM` dereferences null. Treat a missing reader as a failed read
+  (return 1). The harness always calls `InitDIMM` after `Init`.
+- Select with no usable timeout polls with -1 (infinite). That is the
+  specified behaviour. The harness's fake `poll` never blocks, so the new
+  code must make the same `poll` call and not substitute a finite timeout.
+- `BindEphemeralPort` seeds `std::mt19937` from the clock, so the ports it
+  tries are not reproducible. Keep the distribution, the attempt count and
+  the per-attempt info log ("BindEphemeralPort: bind ..."). The harness
+  masks the port of a bind that this log line follows, and drops the line
+  itself from the log hash.
+- The old file includes `Common/UnixUtil.h`, which the tree no longer has
+  (deleted in W1). The only thing used from it was a "retry while the call
+  returns -1 with `errno == EINTR`" wrapper around POSIX socket calls. The
+  new file must do that retry itself (a small local helper), not include
+  the header. The harness supplies a shim only for building the old file.
+- "Unhandled Media Board Read/Write" panics format argument 0 twice, so the
+  "length" shows the offset (**Quirk**, keep it; see 14).
+
+### 13.7 EXI baseboard (section 10.2)
+
+When the backup file cannot be opened, the fallback name is
+`tribackup_tmp_<std::rand()><GameID>.bin` after `std::srand(time)`. That
+name is not reproducible. Keep the behaviour (same panic text, `srand` with
+the current time, one `rand()`); the harness does not drive it.
+
+### 13.8 Assertions in general
+
+The harness fakes a yes/no panic as "yes". It records an `ASSERT` (an alert
+whose text starts with `Failed check:` or holds a `Source:` line) only as
+the line `ASSERT` in the log stream, without file, line or condition. Other
+alerts are recorded in full in the behaviour stream (style, type and text).
+
+### 13.9 What could not be pinned down
+
+- **Windows-only socket behaviour.** The media board's socket paths are
+  specified for both branches (2.9), but the harness runs only the POSIX
+  branch against fake sockets. Real blocking, partial sends, `WSAGetLastError`
+  numbering on Windows and `SO_SNDTIMEO` on Windows (milliseconds, not a
+  `timeval`) are specified from reading the code and are not checked.
+- **Threads.** The modem's receive path runs on the tapserver thread
+  (`AddToReceiveBuffer`, `SendComplete`) and takes a lock. The harness
+  delivers frames on the main thread between operations, so lock ordering
+  and interleavings are not checked.
+- **Real time.** The magnetic card reader's person model uses fixed
+  simulated steps (50 ms per update; 500 ms and 100 ms thresholds) and no
+  wall clock, so it is covered. The media board's ephemeral port (13.6) and
+  the EXI baseboard fallback name (13.7) are not.
+- **Real game data.** The harness serves a synthetic disc pattern and random
+  `segaboot.gcm`, network config and card files. Behaviour with real
+  firmware or games is covered only to the extent that it follows the same
+  paths.
+
+## 14. Strings
+
+### 14.1 User-visible strings (must stay verbatim)
+
+Panic alerts. A `T` suffix means the format goes through translation
+(`PanicAlertFmtT`), so the string is also a translation key. Do not change
+it, its argument indexes or its `{0}` reuse.
+
+| Where | Kind | Text |
+|---|---|---|
+| media board Init (2.5) | PanicAlertFmt | `Failed to open/create: {}` (the full path of each of `trinetcfg.bin`, `trinetctrl.bin`, `triextra.bin`, `tridimm.bin`, `backup.bin`, checked in that order) |
+| media board Init | PanicAlertFmt | `Failed to open segaboot.gcm({}), which is required for test menus.` |
+| media board Init | PanicAlertFmt | `Failed to read: {}` (the segaboot path) |
+| media board DMA read (2.6) | PanicAlertFmtT | `Unhandled Media Board Read: offset={0:08x} length={0:08x}` (**Quirk**: both fields show argument 0, the offset) |
+| media board DMA write | PanicAlertFmtT | `Unhandled Media Board Write: offset={0:08x} length={0:08x}` (same quirk) |
+| media board Execute1 | PanicAlertFmtT | `Unhandled Media Board Command:{0:04x}` |
+| media board DI Execute | PanicAlertFmtT | `Unhandled Media Board Execute:{0:04x}` |
+| media board ExecuteCommand | PanicAlertFmtT | `Unhandled Media Board Command:{0:02x}` |
+| game type (2.2) | PanicAlertFmtT | `Unknown game ID:{0:08x}, using default controls.` |
+| SI baseboard (3.3) | PanicAlertFmt | `SI: Unknown command` |
+| EXI baseboard (10.2) | PanicAlertFmt | `Failed to open {}\nFile might be in use.` |
+
+On-screen messages:
+
+| Where | Call | Text |
+|---|---|---|
+| media board bind failure (2.9) | `OSD::AddMessage(msg, OSD::Duration::SHORT, OSD::Color::RED)` | `Failed to bind socket {ip}:{port}` (also logged as an error) |
+| I/O ports test switch (4.3) | `OSD::AddMessage(..., OSD::Duration::NORMAL, OSD::Color::RED)` | `Test menu is disabled due to missing SegaBoot.` |
+| magnetic card (9) | `Core::DisplayMessage(..., 4000)` | `Inserted Magnetic Card`, `Writing Magnetic Card`, `Inserting cleaning card`, `Ejected Magnetic Card`, `Created Magnetic Card` |
+
+### 14.2 Log format strings
+
+Every log format string in the old files, as a `fmt` format string with the
+C escapes of the source (`\n`, `\"`). Each entry gives the level (E error,
+W warning, N notice, I info, D debug) and the log category. Debug lines are
+compiled out at the default log level, so the harness never sees them. A
+string listed once may be logged from several places. The harness hashes
+every line it sees as `<level letter><LogType number> <formatted text>`, so
+for the log hash to match, both the level and the category matter as well
+as the text.
+
+The SI baseboard's "Overflow details" message prints three host pointers
+with `fmt::ptr`. The harness masks `0x` followed by 9 to 16 hex digits as
+`0xPTR`, so print real pointers in the same `fmt::ptr` form. The
+"BindEphemeralPort:" info line is left out of the log hash (13.6).
+
+#### Media board (2)
+
+- W AMMEDIABOARD: `Invalid MediaBoardRange: start=0x{:08x}, size=0x{:06x}, buffer_size=0x{:06x}`
+- W AMMEDIABOARD: `GC-AM: Bad GuestSocket value: {}`
+- E AMMEDIABOARD: `GuestSocket not found. This should not happen.`
+- E AMMEDIABOARD: `GC-AM: Read overflow: offset=0x{:08x}, length={}, source_size={}`
+- E AMMEDIABOARD: `GC-AM: Memory buffer too small: address=0x{:08x}, length={}, span={}`
+- E AMMEDIABOARD: `GC-AM: Write overflow: offset=0x{:08x}, length={}, destination_size={}`
+- E AMMEDIABOARD: `GC-AM: failed to create socket ({})`
+- D AMMEDIABOARD: `GC-AM: {:08x} {:08x} {:08x} {:08x}`
+- D AMMEDIABOARD: `GC-AM: TestHardware phase 2 ({}): sending result response (testStatus=2, checkProgress=100)`
+- E AMMEDIABOARD: `Bad IP redirection string: {}`
+- I AMMEDIABOARD: `BindEphemeralPort: bind ({}:{}) = {} ({})`
+- I AMMEDIABOARD: `NetDIMMConnect: {}:{}`
+- I AMMEDIABOARD: `NetDIMMConnect: Redirecting to: {}:{}`
+- I AMMEDIABOARD_NET: `NetDIMMConnect: connect( {}({}), ({},{}:{}) ):{} ({})`
+- W AMMEDIABOARD: `NetDIMMConnect: connect: {} ({})`
+- E AMMEDIABOARD: `NetDIMMConnect: PlatformPoll: {}`
+- E AMMEDIABOARD: `NetDIMMConnect: getsockopt: {}`
+- I AMMEDIABOARD_NET: `NetDIMMConnect: connect( {}({}) ) succeeded`
+- E AMMEDIABOARD_NET: `NetDIMMConnect: connect( {}({}) ) failed with error {}: {}`
+- E AMMEDIABOARD_NET: `NetDIMMAccept: bad parmeters`
+- D AMMEDIABOARD: `NetDIMMAccept: {}({})`
+- E AMMEDIABOARD: `NetDIMMAccept: PlatformPoll: {}`
+- D AMMEDIABOARD: `NetDIMMAccept: Timeout.`
+- E AMMEDIABOARD: `AMMBCommandAccept: accept( {}({}) ) failed: {}`
+- N AMMEDIABOARD: `AMMBCommandAccept: {}:{}`
+- N AMMEDIABOARD: `AMMBCommandAccept: Translating result to: {}:{}`
+- I AMMEDIABOARD: `GetAdjustedBindIPv4Port: Considering game modified IP: {}`
+- I AMMEDIABOARD: `GetAdjustedBindIPv4Port: Redirecting to: {}:{}`
+- N AMMEDIABOARD: `NetDIMMBind: {}({}) {}, {}, {}:{}`
+- I AMMEDIABOARD_NET: `NetDIMMBind: bind( {}({}), ({},{}:{}) ):{}`
+- E AMMEDIABOARD: `NetDIMMBind: {} with error {}: {}`
+- E AMMEDIABOARD_NET: `AMMBCommandRecv: Bad data offset or length: off={:08x} len={}`
+- E AMMEDIABOARD_NET: `GC-AM: recv( {}, 0x{:08x}, {} ) failed with error {}: {}`
+- I AMMEDIABOARD_NET: `GC-AM: recv( {}, 0x{:08x}, {} ):0 shutdown received`
+- D AMMEDIABOARD_NET: `GC-AM: recv( {}, 0x{:08x}, {} ):{} {}`
+- E AMMEDIABOARD_NET: `AMMBCommandSend: Bad data offset or length: off={:08x} len={}`
+- E AMMEDIABOARD_NET: `GC-AM: send( {}({}), 0x{:08x}, {} ) failed with error {}: {}`
+- D AMMEDIABOARD_NET: `GC-AM: send( {}({}), 0x{:08x}, {} ): {} {}`
+- N AMMEDIABOARD_NET: `GC-AM: socket( {}, {} ):{}`
+- N AMMEDIABOARD_NET: `GC-AM: closesocket( {}({}) ):{}`
+- E AMMEDIABOARD_NET: `AMMBCommandConnect: Unexpected length: {}`
+- E AMMEDIABOARD_NET: `AMMBCommandConnect: Bad address offset: {:08x}`
+- E AMMEDIABOARD_NET: `AMMBCommandAccept: Bad address offset or addrlen: off={:08x} len={}`
+- E AMMEDIABOARD_NET: `AMMBCommandBind: Unexpected length: {}`
+- E AMMEDIABOARD_NET: `AMMBCommandBind: Bad address offset: {:08x}`
+- E AMMEDIABOARD_NET: `Bad FDSET offset: {:08x}`
+- E AMMEDIABOARD_NET: `AMMBCommandSelect: Bad timeout offset: {:08x}`
+- W AMMEDIABOARD: `AMMBCommandSelect: Infinite timout!`
+- D AMMEDIABOARD_NET: `GC-AM: select( {}, 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x} ) timeout={}`
+- D AMMEDIABOARD: `AMMBCommandSelect: Polling with socket count: {}`
+- D AMMEDIABOARD_NET: `GC-AM: select result: {}`
+- E AMMEDIABOARD_NET: `GC-AM: select failed: {} ({})`
+- E AMMEDIABOARD_NET: `AMMBCommandSetSockOpt: Bad optval offset or length: off={:08x} len={}`
+- N AMMEDIABOARD_NET: `GC-AM: setsockopt( {:d}, {:04x}, {}, {:p}, {} ):{:d} ({})`
+- N AMMEDIABOARD_NET: `GC-AM: modifyMyIPaddr({})`
+- E AMMEDIABOARD: `GC-AM: Write overflow: address=0x{:08x}, length={}, span={}`
+- E AMMEDIABOARD: `GC-AM: Read overflow: address=0x{:08x}, length={}, span={}`
+- D AMMEDIABOARD: `GC-AM: {:08x} {:08x} DMA=addr:{:08x},len:{:08x} Keys: {:08x} {:08x} {:08x}`
+- E AMMEDIABOARD: `Unhandled Media Board Read: offset={0:08x} length={0:08x}`
+- I AMMEDIABOARD: `GC-AM: Read All.Net Buffer ({:08x},{})`
+- D AMMEDIABOARD: `GC-AM: NetConfig Read (intercepted) offset={:08x} config[0]={}`
+- D AMMEDIABOARD: `GC-AM: Read Execute1 response (saved)`
+- D AMMEDIABOARD: `GC-AM: Read Execute2 response (saved)`
+- D AMMEDIABOARD: `GC-AM: Read MediaBoard ({:08x},{:08x})`
+- D AMMEDIABOARD: `GC-AM: Execute command: (2){0:04X}`
+- D AMMEDIABOARD: `GC-AM: TestHardware (Execute2): type={:08x} str_ptr={:08x}`
+- E AMMEDIABOARD_NET: `GC-AM: Invalid size for address: InetAddr():{}`
+- N AMMEDIABOARD_NET: `GC-AM: InetAddr( {} )`
+- N AMMEDIABOARD_NET: `GC-AM: listen( {}, {} ):{:d}`
+- I AMMEDIABOARD_NET: `GC-AM: SetTimeOuts( {}({}), {}, {}, {} ):{}`
+- E AMMEDIABOARD_NET: `GC-AM: Invalid Socket: SetTimeOuts( {}({}), {}, {}, {} ):{}`
+- N AMMEDIABOARD_NET: `GC-AM: GetParambyDHCPExec({})`
+- D AMMEDIABOARD_NET: `GC-AM: GetLastError( {}({}) ):EWOULDBLOCK`
+- N AMMEDIABOARD_NET: `GC-AM: GetLastError( {}({}) ):{}`
+- N AMMEDIABOARD_NET: `GC-AM: InitLink`
+- N AMMEDIABOARD_NET: `GC-AM: AllNetInit`
+- D AMMEDIABOARD: `GC-AM: Cleanup command {:04x} (Execute2)`
+- E AMMEDIABOARD: `GC-AM: Command:{0:04x}`
+- E AMMEDIABOARD: `GC-AM: Command Unhandled!`
+- E AMMEDIABOARD: `GC-AM: Invalid firmware buffer range: offset={}, length={}`
+- E AMMEDIABOARD: `GC-AM: Invalid DIMM Disc read from: offset={}, length={}`
+- E AMMEDIABOARD: `GC-AM: Invalid firmware write: offset={}, length={}`
+- I AMMEDIABOARD: `GC-AM: Write Firmware ({:08x})`
+- D AMMEDIABOARD: `GC-AM: Execute command: (1):{0:04X}`
+- D AMMEDIABOARD: `GC-AM: TestHardware (Execute1 inner): type={:08x} str_ptr={:08x}`
+- D AMMEDIABOARD: `GC-AM: Cleanup command {:04x} (Execute1)`
+- E AMMEDIABOARD: `Unhandled Media Board Command:{0:04x}`
+- D AMMEDIABOARD: `GC-AM: NetConfig persist to trinetcfg.bin (status={})`
+- D AMMEDIABOARD: `GC-AM: Write MediaBoard ({:08x},{:08x})`
+- E AMMEDIABOARD: `Unhandled Media Board Write: offset={0:08x} length={0:08x}`
+- D AMMEDIABOARD: `GC-AM: TestHardware: ({:08x})`
+- D AMMEDIABOARD: `GC-AM:               ({:08x})`
+- N AMMEDIABOARD: `GC-AM: 0x605`
+- N AMMEDIABOARD_NET: `GC-AM: SetupLink:`
+- N AMMEDIABOARD_NET: `GC-AM:  Size: ({}) `
+- N AMMEDIABOARD_NET: `GC-AM:  Port: ({})`
+- N AMMEDIABOARD_NET: `GC-AM:LinkNum:({:02x})`
+- N AMMEDIABOARD_NET: `GC-AM:        ({:02x})`
+- N AMMEDIABOARD_NET: `GC-AM:        ({:04x})`
+- N AMMEDIABOARD_NET: `GC-AM:   IP:  ({})`
+- N AMMEDIABOARD_NET: `GC-AM:        ({:08x})`
+- N AMMEDIABOARD_NET: `GC-AM: SearchDevices: ({})`
+- N AMMEDIABOARD_NET: `GC-AM:        Offset: ({:04x})`
+- N AMMEDIABOARD_NET: `GC-AM:                ({:08x})`
+- E AMMEDIABOARD_NET: `SearchDevices: Bad data offset: {:08x}`
+- N AMMEDIABOARD_NET: `GC-AM: {:08x} {:08x} {:08x} {:08x}`
+- N AMMEDIABOARD_NET: `GC-AM: 0x608( {} {} {} )`
+- N AMMEDIABOARD_NET: `GC-AM: 0x614`
+- E AMMEDIABOARD: `GC-AM: Execute buffer UNKNOWN:{0:04x}`
+- E AMMEDIABOARD: `Unhandled Media Board Execute:{0:04x}`
+- E AMMEDIABOARD: `Unhandled Media Board Command:{0:02x}`
+- W AMMEDIABOARD: `GC-AM: Bad socket fd used by the debugger: {}`
+
+#### SI baseboard (3)
+
+- E SERIALINTERFACE_AMBB: `Bad command_length: {} for request_length: {}`
+- E SERIALINTERFACE_AMBB: `GC-AM: data_in overflow in {}`
+- E SERIALINTERFACE_AMBB: `GC-AM: data_out overflow in {}`
+- E SERIALINTERFACE_AMBB: `Overflow details:\n - data_in(begin={}, current={}, end={}, n_in={})\n - data_out(offset={}, size={}, n_out={})`
+- D SERIALINTERFACE_AMBB: `GC-AM: Command 0x10, {:02x} (READ STATUS&SWITCHES)`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x11, {:02x} (READ SERIAL NR)`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x12, {:02x} {:02x}`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x14, {:02x} {:02x}`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x15, {:02x} (READ FIRM VERSION)`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x16, {:02x} (READ FPGA VERSION)`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x1F, {:02x} {:02x} {:02x} {:02x} {:02x} (REGION)`
+- D SERIALINTERFACE_AMBB: `GC-AM: Command 0x21, {:02x}, {:02x}, {:02x}, {:02x}`
+- D SERIALINTERFACE_AMBB: `GC-AM: Command 0x22, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}`
+- D SERIALINTERFACE_AMBB: `GC-AM: Command 0x23, {:02x} {:02x}`
+- D SERIALINTERFACE_AMBB: `GC-AM: Command 0x24, {:02x} {:02x}`
+- N SERIALINTERFACE_AMBB: `GC-AM: Command 0x60, {:02x} {:02x} {:02x}`
+- E SERIALINTERFACE_AMBB: `GC-AM: Command {:02x} (unknown) {:02x} {:02x} {:02x} {:02x} {:02x}`
+- D SERIALINTERFACE_AMBB: `Command response: {}`
+- E SERIALINTERFACE: `Unknown SI command (0x{:08x})`
+- W SERIALINTERFACE_AMBB: `Unhandled SendCommand(0x{:08x}, 0x{:02x})`
+
+#### I/O ports (4)
+
+- W SERIALINTERFACE_JVSIO: `SetGenericOutputs: Unexpected byte count: {}`
+- D SERIALINTERFACE_JVSIO: `SetGenericOutputs: set:{:02x} clr:{:02x} ({:02x})`
+- I SERIALINTERFACE_JVSIO: `JVS-IO: Slot 1: {}`
+- I SERIALINTERFACE_JVSIO: `JVS-IO: Slot 2: {}`
+
+#### JVS (5)
+
+- E SERIALINTERFACE_JVSIO: `Expected JVSIO_SYNC`
+- E SERIALINTERFACE_JVSIO: `Empty payload`
+- E SERIALINTERFACE_JVSIO: `Bad checksum`
+- W SERIALINTERFACE_JVSIO: `Unexpected destination node: 0x{:02x}`
+- W SERIALINTERFACE_JVSIO: `Excess request bytes: {}`
+- E SERIALINTERFACE_JVSIO: `Reset: ParameterSizeError`
+- N SERIALINTERFACE_JVSIO: `Reset`
+- E SERIALINTERFACE_JVSIO: `SetAddress: ParameterSizeError`
+- I SERIALINTERFACE_JVSIO: `SetAddress: {}`
+- E SERIALINTERFACE_JVSIO: `ProcessBroadcastFrame: UnknownCommand: {:02x}`
+- I SERIALINTERFACE_JVSIO: `DataRetransmit`
+- E SERIALINTERFACE_JVSIO: `HandleCommand: cmd:{:02x} StatusCode:{}`
+- E SERIALINTERFACE_JVSIO: `HandleCommand: cmd:{:02x} ReportCode:{}`
+- I SERIALINTERFACE_JVSIO: `CommandRevision`
+- I SERIALINTERFACE_JVSIO: `JVSRevision`
+- I SERIALINTERFACE_JVSIO: `CommVersion`
+- I SERIALINTERFACE_JVSIO: `MainID: {}`
+- D SERIALINTERFACE_JVSIO: `SwitchInput: player_count:{} bytes_per_player:{}`
+- D SERIALINTERFACE_JVSIO: `AnalogInput: channel_count:{}`
+- D SERIALINTERFACE_JVSIO: `GenericOutput: {}`
+- D SERIALINTERFACE_JVSIO: `CoinInput: slot_count:{}`
+- N SERIALINTERFACE_JVSIO: `CoinCounter: slot:{} adjustment:{}`
+- I SERIALINTERFACE_JVSIO: `IOIdentify`
+- I SERIALINTERFACE_JVSIO: `FeatureCheck`
+- I SERIALINTERFACE_JVSIO: `NAMCO_COMMAND({:02x}): {:02x}`
+- E SERIALINTERFACE_JVSIO: `Unknown NAMCO_COMMAND: {:02x}`
+
+#### F-Zero AX (6.1)
+
+- I SERIALINTERFACE_JVSIO: `JVS-IO: {}: {}`
+- W SERIALINTERFACE_AMBB: `SteeringWheel: Bad checksum!`
+- D SERIALINTERFACE_AMBB: `SteeringWheel: Request: {:02x}`
+- D SERIALINTERFACE_AMBB: `SteeringWheel: servo_position: {}`
+
+#### Mario Kart GP (6.2)
+
+- I SERIALINTERFACE_JVSIO: `JVS-IO: {}: {}`
+- D SERIALINTERFACE_AMBB: `SteeringWheel: Request: {:02x}`
+- W SERIALINTERFACE_AMBB: `SteeringWheel: Unknown command: {:08x}`
+- D SERIALINTERFACE_AMBB: `SteeringWheel: FFB: {:04x} {:04x} {:04x}`
+- I SERIALINTERFACE_AMBB: `SteeringWheel: Reset`
+
+#### Touchscreen (6.3)
+
+- W SERIALINTERFACE_AMBB: `Unexpected write of {} bytes to touchscreen.`
+
+#### IC card reader (7)
+
+- W SERIALINTERFACE_CARD: `Unexpected size of {} for file: {}`
+- E SERIALINTERFACE_CARD: `Failed to read from file: {}`
+- I SERIALINTERFACE_CARD: `Loaded {} bytes from file: {}`
+- E SERIALINTERFACE_CARD: `Bad checksum!`
+- E SERIALINTERFACE_CARD: `Undersized payload size {} for command: {:02x}`
+- W SERIALINTERFACE_CARD: `Oversized payload size {} for command: {:02x}`
+- E SERIALINTERFACE_CARD: `Unexpected card session: {:04x}`
+- I SERIALINTERFACE_CARD: `GetStatus`
+- I SERIALINTERFACE_CARD: `SetBaudrate: {:02x}`
+- I SERIALINTERFACE_CARD: `FieldOn`
+- I SERIALINTERFACE_CARD: `FieldOff`
+- I SERIALINTERFACE_CARD: `InsertCheck: {}`
+- I SERIALINTERFACE_CARD: `AntiCollision: unk0:{:04x} unk1:{:02x}`
+- I SERIALINTERFACE_CARD: `SelectCard: {:02x}`
+- W SERIALINTERFACE_CARD: `SelectCard: Unexpected Card ID.`
+- I SERIALINTERFACE_CARD: `ReadPage: session:{:04x} page:{}`
+- I SERIALINTERFACE_CARD: `WritePage: session:{:04x} unk:{} page:{}`
+- I SERIALINTERFACE_CARD: `DecreaseUseCount: session:{:04x}, page:{} amount:{}`
+- I SERIALINTERFACE_CARD: `HaltCard: session:{:04x}`
+- I SERIALINTERFACE_CARD: `ReadPages: session:{:04x} page:{} page_count:{}`
+- E SERIALINTERFACE_CARD: `WritePages: Undersized payload size: {}`
+- I SERIALINTERFACE_CARD: `WritePages: session:{:04x} page:{} page_count:{}`
+- E SERIALINTERFACE_CARD: `Unknown command: {:02x}`
+- W SERIALINTERFACE_CARD: `ReadData: Attempt to read beyond end of card.`
+- D SERIALINTERFACE_CARD: `\n{}`
+- W SERIALINTERFACE_CARD: `WriteData: Read-only page.`
+- W SERIALINTERFACE_CARD: `WriteData: Attempt to write beyond end of card.`
+- N SERIALINTERFACE_CARD: `DecreaseUseCount: {} -> {}`
+- E SERIALINTERFACE_CARD: `FlushData: Failed to write to: {}`
+- N SERIALINTERFACE_CARD: `Creating new IC Card data.`
+- N SERIALINTERFACE_CARD: `InsertCard`
+- N SERIALINTERFACE_CARD: `EjectCard`
+
+#### Deck reader (8)
+
+- E SERIALINTERFACE_CARD: `LoadCardDeckFromFile: {}`
+- E SERIALINTERFACE_CARD: `LoadCardDeckFromFile: Invalid JSON root object.`
+- E SERIALINTERFACE_CARD: `LoadCardDeckFromFile: Invalid \"cards\" array.`
+- E SERIALINTERFACE_CARD: `LoadCardDeckFromFile: Invalid \"index\" field.`
+- I SERIALINTERFACE_CARD: `SelfTest`
+- I SERIALINTERFACE_CARD: `SensLock`
+- I SERIALINTERFACE_CARD: `ProgramVersion`
+- I SERIALINTERFACE_CARD: `BootVersion`
+- I SERIALINTERFACE_CARD: `ProgramChecksum`
+- I SERIALINTERFACE_CARD: `BootChecksum`
+- I SERIALINTERFACE_CARD: `CameraCheck`
+- I SERIALINTERFACE_CARD: `ShutterGet`
+- I SERIALINTERFACE_CARD: `ShutterAuto`
+- I SERIALINTERFACE_CARD: `Shutter`
+- I SERIALINTERFACE_CARD: `ShutterLoad`
+- I SERIALINTERFACE_CARD: `ShutterSave`
+- I SERIALINTERFACE_CARD: `SensCard`
+- I SERIALINTERFACE_CARD: `ReadCard`
+- I SERIALINTERFACE_CARD: `FirmwareUpdate`
+- N SERIALINTERFACE_CARD: `Writing firmware to: {}`
+- E SERIALINTERFACE_CARD: `Failed to open: {}`
+- E SERIALINTERFACE_CARD: `Unknown command: {:02x}`
+- I SERIALINTERFACE_CARD: `Fake FirmwareUpdate done.`
+- E SERIALINTERFACE_CARD: `Failed to write {} bytes to firmware.`
+
+#### Magnetic card reader (9)
+
+- W SERIALINTERFACE_CARD: `Shutdown before ejecting card!`
+- I SERIALINTERFACE_CARD: `Command_33_ReadData: CardCapture`
+- N SERIALINTERFACE_CARD: `Capturing Card.`
+- D SERIALINTERFACE_CARD: `Command_33_ReadData: mode {:02x} track {:02x}`
+- W SERIALINTERFACE_CARD: `Command_33_ReadData: Empty track {:02x}`
+- W SERIALINTERFACE_CARD: `Command_53_WriteData: Failed.`
+- I SERIALINTERFACE_CARD: `Command_53_WriteData: Writing {} track(s) to memory.`
+- N SERIALINTERFACE_CARD: `Inserting cleaning card.`
+- N SERIALINTERFACE_CARD: `Reading card data from: {}`
+- E SERIALINTERFACE_CARD: `ReadCardFile: Incorrect card file size: {}`
+- E SERIALINTERFACE_CARD: `File read failed.`
+- D SERIALINTERFACE_CARD: `ReadCardFile: track:{} data:{}`
+- N SERIALINTERFACE_CARD: `Writing card data to: {}`
+- D SERIALINTERFACE_CARD: `WriteCardFile: Skipping empty track:{}`
+- D SERIALINTERFACE_CARD: `WriteCardFile: track:{} data:{}`
+- E SERIALINTERFACE_CARD: `File write failed.`
+- W SERIALINTERFACE_CARD: `SetPError: {:02x}`
+- W SERIALINTERFACE_CARD: `SetSError: {:02x}`
+- D SERIALINTERFACE_CARD: `Process: ENQ`
+- E SERIALINTERFACE_CARD: `Process: Unexpected {:02x}`
+- D SERIALINTERFACE_CARD: `Writing ACK`
+- W SERIALINTERFACE_CARD: `Writing NACK`
+- D SERIALINTERFACE_CARD: `ReceivePacket: {}`
+- W SERIALINTERFACE_CARD: `ReceivePacket: Bad packet size!`
+- W SERIALINTERFACE_CARD: `ReceivePacket: Missing END_OF_TEXT!`
+- W SERIALINTERFACE_CARD: `ReceivePacket: Bad checksum!`
+- I SERIALINTERFACE_CARD: `ReceivePacket: Cancelling command: {:02x}`
+- W SERIALINTERFACE_CARD: `ReceivePacket: Running command: {:02x} interrupted by command: {:02x}`
+- N SERIALINTERFACE_CARD: `Inserting card.`
+- N SERIALINTERFACE_CARD: `Removing card.`
+- D SERIALINTERFACE_CARD: `StepStateMachine command: {:02x}`
+- W SERIALINTERFACE_CARD: `HandlePacket: Unhandled command {:02x}`
+- I SERIALINTERFACE_CARD: `MoveCard: {}`
+- N SERIALINTERFACE_CARD: `Ejecting card.`
+- N SERIALINTERFACE_CARD: `Dispensing a new card.`
+
+#### C1231BR (9.6)
+
+- I SERIALINTERFACE_CARD: `Shutter: {}`
+
+#### C1231LR (9.6)
+
+(no log strings)
+
+#### EXI baseboard (10)
+
+- D SP1: `AM-BB: ChipSelect={}`
+- D SP1: `AM-BB: IRQ`
+- E SP1: `AM-BB: Backup DMA Write overflow: address=0x{:08x}, length={}, span={}`
+- N SP1: `AM-BB: COMMAND: Backup DMA Write: {:08x} {:x}`
+- E SP1: `AM-BB: Backup DMA Read overflow: address=0x{:08x}, length={}, span={}`
+- N SP1: `AM-BB: COMMAND: Backup DMA Read: {:08x} {:x}`
+- D SP1: `AM-BB: > {:02x}`
+- D SP1: `AM-BB: cs: {:02x}, w: {:02x}`
+- D SP1: `AM-BB: COMMAND: BackupOffsetSet:{:04x}`
+- D SP1: `AM-BB: COMMAND: BackupWrite:{:04x}-{:02x}`
+- D SP1: `AM-BB: COMMAND: BackupRead :{:04x}`
+- N SP1: `AM-BB: COMMAND: DMAOffsetLengthSet :{:04x} {:02x}`
+- N SP1: `AM-BB: COMMAND: ReadISR  :{:02x} {:02x}:{:02x} {:02x}`
+- N SP1: `AM-BB: COMMAND: WriteISR :{:02x} {:02x}`
+- N SP1: `AM-BB: COMMAND: ReadIMR  :{:02x} {:02x}`
+- N SP1: `AM-BB: COMMAND: WriteIMR :{:02x} {:02x}`
+- N SP1: `AM-BB: COMMAND: WriteLANCNT :{:02x} {:02x}`
+- E SP1: `AM-BB: COMMAND: {:02x} {:02x} {:02x}`
+- E SP1: `Unknown AM-BB command: {:02x}`
+- D SP1: `AM-BB < {:02x}`
+
+#### AGP (11)
+
+- I EXPANSIONINTERFACE: `Loaded GBA rom: {} card: {}`
+- I EXPANSIONINTERFACE: `Loaded GBA sav: {} card: {}`
+- D EXPANSIONINTERFACE: `AGP read {:x}`
+- D EXPANSIONINTERFACE: `AGP command {:x}`
+
+#### Modem (12)
+
+- I SP1: `Created tapserver physical network interface.`
+- E SP1: `Received EXI IMM write {:x} ({} bytes) after read command {:x}`
+- E SP1: `Received EXI DMA write {:x} ({} bytes) after read command {:x}`
+- E SP1: `Received EXI DMA write {:x} ({} bytes) to registers {:x}`
+- E SP1: `Received EXI IMM read ({} bytes) with no pending transfer`
+- E SP1: `Received EXI IMM read ({} bytes) after write command {:x}`
+- E SP1: `Received EXI DMA read {:x} ({} bytes) with no pending transfer`
+- E SP1: `Received EXI DMA read {:x} ({} bytes) after write command {:x}`
+- E SP1: `Received EXI DMA read {:x} ({} bytes) to registers {:x}`
+- E SP1: `More bytes requested ({}) than originally requested for transfer {:x}`
+- E SP1: `Invalid modem read transfer type {:x}`
+- E SP1: `More bytes received ({}) than expected for transfer {:x}`
+- E SP1: `Invalid modem write transfer type {:x}`
+- I SP1: `Received AT command: {}`
+
+## 15. Keys, credentials and identifiers
+
+The old files hold **no cryptographic keys, IVs or credentials**:
+
+- The media board's command keys (`InitKeys`, 2.5/2.6) are not constants.
+  The game's IPL writes them into emulated RAM (words 0, 4 and 8), and the
+  board reads them from there at run time, XORs the command words with them
+  and multiplies them by a per-command seed. Nothing secret is in the code.
+- No Nintendo keys, IPL/BIOS, DSP ROM, firmware or game data are in these
+  files. `segaboot.gcm` (the Triforce boot firmware) is a user-supplied file;
+  the spec describes only how it is opened and read. The harness writes
+  random bytes in its place.
+
+The old code does contain fixed identifiers. They are behaviour data that
+games read back, not secrets, and this spec lists them where they are used.
+**Owner decision:** they are listed so that phase B can match the old
+behaviour. If the owner prefers neutral values, phase B can change them; then
+the affected hashes are expected to differ and the cases must be noted.
+
+| Identifier | Where | Use |
+|---|---|---|
+| `AADE-01B98394904` | 3.3, SI baseboard `11` | baseboard serial number reply |
+| `A89E-27A50364511` | 2.7, 2.11 | media board serial (Execute `0x103`) |
+| `AP:S1234-5678,OS:S9012-3456,0000` | 9.3 `F0` | magnetic card reader version reply |
+| IC card serial prefixes `95 71 26 4x`, `95 71 44 00`, `95 71 76 50` | 7.4 | the first serial bytes of a new card |
+| region table (20 bytes) | 3.3 `1F` | region reply |
+| All.Net reply string (252 bytes) | 2.11 | network setup reply (`sega.com`, a fixed date, `place_id=1234`) |
+| deck reader version strings | 8.2 | version replies |
+| JVS board identify strings | 5.6 | board names (Namco, Sega boards) |
+
+None of these is a Nintendo or Sega secret: they are serial-number-shaped
+placeholders, version strings and a configuration reply. No action is
+needed beyond the owner's call above.
+
+## 16. Test plan and harness
+
+### 16.1 What the harness does
+
+`tools/w43-harness/` builds one program, `w43h`, from:
+- the 15 device files under test;
+- the original `Triforce/SerialDevice.cpp` and `EXI/Modem/TAPServerModem.cpp`;
+- the real `Common` file, string, network, random, socket-context, JSON and
+  config code;
+- `fakes.cpp`, which fakes every other neighbour: emulated memory (24 MiB,
+  mirrored), CoreTiming (events are queued and fired on demand), EXI/SI
+  interrupts, pads, SConfig/game ID, OSD and display messages, HLE patches,
+  DiscIO (a fake volume and blob reader with a deterministic pattern), the
+  tapserver connection, the logger and the panic handler;
+- `harness.cpp`, which drives the devices.
+
+Sockets are faked by linking with `-Wl,--wrap=` for `socket`, `close`, `bind`,
+`connect`, `listen`, `accept`, `recv`, `send`, `setsockopt`, `getsockopt`,
+`poll` and `ioctl`. Fake descriptors start at 1000. The result of each call
+comes from the case seed and a per-call-kind counter, so it does not depend
+on timing. `close` and `ioctl` on descriptors below 1000 go to the real
+functions.
+
+The harness includes only the devices' public headers. It uses the
+declarations that sections 2.2, 3.1, 4.1, 5.1, 6, 7.1, 8.1, 9.1, 10.1, 11.1
+and 12.1 say may be kept (12.1 must be kept), so it builds unchanged against
+the new files as long as those declarations stay.
+
+Each case runs in a forked child, in its own directory
+`<dir>/case/{user/Triforce,work}`. The user path points at `user`, and the
+current directory is `work`, because AGP with an empty path writes `.sav`
+there (11.2). A case drives a seeded random sequence through the device's
+public interface. It includes savestate round trips into fresh instances:
+`STATE` lines carry the size and hash of the saved bytes, so the `DoState`
+layouts are checked byte for byte. At the end it hashes the files the device
+left and the emulated RAM.
+
+Every observable effect becomes a line: replies, register reads, memory
+writes, files, events, interrupts, socket and tapserver calls, alerts and OSD
+messages. These go to the **behaviour** hash. Log lines go to the separate
+**log** hash. Before hashing, the case directory is replaced by `$DIR`, and
+`0x` followed by 9 to 16 hex digits by `0xPTR`. The case kinds:
+
+| Kind | Drives |
+|---|---|
+| `jvs-namco`, `jvs-13551`, `jvs-13844` | a JVS board directly with random frames (escapes, bad checksums, broadcasts, address assignment, every command) |
+| `si-<game>` (12 game IDs, including an unknown and a short one) | the SI baseboard `RunBuffer` with every sub-command, the JVS board, serial devices and adapters of that game, test/service switches, coin and pad input |
+| `wheel-fzero`, `wheel-mkgp`, `touch` | the serial wheel and touchscreen devices |
+| `iccard`, `deck` | IC card and deck reader packets, card files, JSON decks, firmware mode |
+| `magcard-br`, `magcard-lr` | the C1231BR / C1231LR card readers: packets, ACK/NAK, card files, insert/eject, the simulated person |
+| `exi-baseboard` | the EXI baseboard commands, interrupts, DMA and backup file |
+| `agp`, `agp-32m` | AGP ROM and EEPROM commands with several save sizes, and a sparse 32 MiB ROM |
+| `modem` | the modem registers, AT commands, packets and tapserver frames |
+| `mb-misc`, `mb-cmd`, `mb-net` | the media board: init/firmware/keys, DMA reads/writes, Execute1/Execute2/DI Execute board commands, network commands against fake sockets |
+
+### 16.2 Build and run
+
+Needs g++ 13 or later and the third-party headers `fmt/` (any recent fmt
+works with `FMT_HEADER_ONLY`), `picojson.h` and `mbedtls/` (headers only).
+If the system lacks them, point `W43_INC` (colon-separated) at folders that
+have them. Build output goes to scratch space:
+
+```
+W43_INC=/path/inc:/path/inc/picojson tools/w43-harness/build.sh <out_dir> [Source/Core dir]
+<out_dir>/w43h --dir <scratch_dir> --seed 1 --cases 6 > new.txt
+diff tools/w43-harness/expected-seed1.txt new.txt
+```
+
+Options: `--seed N` (default 1), `--cases N` per kind (default 6),
+`--only kind,kind`, `--case K` (one case index), `--trace` (print every line
+with a `B` or `L` prefix: use it with `--only` and `--case` to find the first
+differing line), `--list`. Each case prints `kind #i seed=... beh=<hash>
+log=<hash> lines=<behaviour lines>/<log lines>`, and the run ends with
+`cases=N crashes=M`. A crash (a signal or a non-zero exit in the child) is
+reported as `CRASH status=...` and counts as a failure. Use a separate
+`<out_dir>` for each source tree. `build.sh` reuses objects only when they
+are newer than their sources and the flags are unchanged. To stop a stray
+run, use `pkill -x w43h`.
+
+### 16.3 Old-side results
+
+Built against the old files at f2330ef (this branch):
+- `--seed 1 --cases 6`: 29 kinds, 174 cases, 0 crashes, 348 hashes (one
+  behaviour and one log hash per case). The reference output is
+  `tools/w43-harness/expected-seed1.txt`.
+- The output is byte-identical across repeated runs, across different
+  `--dir` paths, and across `-O0`, `-O1` and `-O2` builds (`W43_OPT`).
+- `--seed 7 --cases 25` (725 cases) gives 0 crashes and identical output
+  for two different `--dir` paths.
+
+### 16.4 Acceptance for phase B
+
+1. `build.sh` builds `w43h` against the new files with no changes to
+   `tools/w43-harness/`.
+2. `--seed 1 --cases 6` gives no crashes, and every `beh=` hash equals
+   `expected-seed1.txt`.
+3. `log=` hashes are expected to match too when the log strings of section
+   14 are kept verbatim. Any case whose log hash differs must be explained
+   by a deliberate rewording.
+4. For extra coverage, also run `--seed 7 --cases 25` against both trees
+   (the old tree from git history, built by someone allowed to, or in CI)
+   and compare.
+5. A behaviour difference is found with `--only <kind> --case <i> --trace`
+   on both sides; the first differing `B` line names the operation.
+
+If the harness itself changes, `expected-seed1.txt` must be regenerated
+from the old files with the same commit of the harness.
