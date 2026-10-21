@@ -1,7 +1,8 @@
 // Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 //
-// Build configuration for the liblzma sources (XZ Utils 5.2.4) in Dolphin's
-// Externals/liblzma, for PixelU-Wii's Windows x64 builds. XZ Utils normally
+// Build configuration for the liblzma sources of XZ Utils 5.2.4 (fetched from
+// the XZ Utils repository, see Externals/sources.json), for PixelU-Wii's
+// Windows x64 builds. XZ Utils normally
 // generates this file with its configure script; these are the answers for MSVC
 // on 64-bit Windows. Only the library is built, so nothing for the xz tools
 // (gettext, getopt, file times, ...) is here.
@@ -54,6 +55,16 @@
 #define HAVE_IMMINTRIN_H 1
 #endif
 #define HAVE__MM_MOVEMASK_EPI8 1
+
+// tuklib_integer.h uses DWORD and the _BitScan* intrinsics when built with
+// MSVC, without including the headers that declare them.
+#ifdef _MSC_VER
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <intrin.h>
+#endif
 
 // Memory to assume when the real amount cannot be read.
 #define ASSUME_RAM 128

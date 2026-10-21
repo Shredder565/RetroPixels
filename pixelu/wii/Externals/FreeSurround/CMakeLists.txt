@@ -1,6 +1,6 @@
-# FreeSurround (GPL-2.0-or-later, with KISS FFT; vendored in Dolphin's Externals):
-# stereo to 5.1 upmixing for the audio backends.
-set(src "${THIRD}/FreeSurround")
+# FreeSurround (GPL-2.0-or-later, with KISS FFT, BSD-3-Clause): stereo to 5.1
+# upmixing for the audio backends. Kept in this folder, see README.txt.
+set(src "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_library(FreeSurround STATIC
   "${src}/source/ChannelMaps.cpp"
