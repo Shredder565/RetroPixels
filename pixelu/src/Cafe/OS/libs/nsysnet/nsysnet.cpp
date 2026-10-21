@@ -953,6 +953,19 @@ namespace nsysnet
 		}
 
 		// the guest's values are already in network order
+		// glibc turns these four names into __bswap macros when optimising, drop them here
+#ifdef htons
+#undef htons
+#endif
+#ifdef htonl
+#undef htonl
+#endif
+#ifdef ntohs
+#undef ntohs
+#endif
+#ifdef ntohl
+#undef ntohl
+#endif
 		uint32 htons(uint32 v) { return v; }
 		uint32 htonl(uint32 v) { return v; }
 		uint32 ntohs(uint32 v) { return v; }

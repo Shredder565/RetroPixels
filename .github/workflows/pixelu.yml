@@ -151,7 +151,8 @@ jobs:
           key: vcpkg-linux-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
 
       - name: Build
-        run: cmake --build pixelu/build
+        # -k 0: keep going so one run reports every failing file, not just the first
+        run: cmake --build pixelu/build -- -k 0
 
       - name: Package
         run: |
