@@ -229,8 +229,13 @@ void ClearMessages()
 {
   Board& board = GetBoard();
   std::lock_guard guard(board.lock);
-  for (auto& queue : board.queues)
-    queue.clear();
+  // Release newest-first, last type first, so icon textures are freed in the same order as
+  // before (callers may log or count backend releases).
+  for (auto queue = board.queues.rbegin(); queue != board.queues.rend(); ++queue)
+  {
+    while (!queue->empty())
+      queue->pop_back();
+  }
 }
 
 void SetObscuredPixelsLeft(int width)
