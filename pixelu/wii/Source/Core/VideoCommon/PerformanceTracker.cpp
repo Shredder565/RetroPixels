@@ -1,9 +1,9 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/PerformanceTracker.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <utility>
@@ -15,185 +15,179 @@
 #include "Common/MathUtil.h"
 #include "VideoCommon/VideoConfig.h"
 
-static constexpr double SAMPLE_RC_RATIO = 0.25;
-static constexpr u64 MAX_DT_QUEUE_SIZE = 1UL << 12;
-static constexpr u64 MAX_QUALITY_GRAPH_SIZE = 1UL << 8;
+namespace
+{
+// The smoothing time constant of the rate is this fraction of the window.
+constexpr double SMOOTHING_FRACTION = 0.25;
+// Upper bound on the number of intervals kept.
+constexpr std::size_t WINDOW_CAPACITY = std::size_t{1} << 12;
+// Below this many intervals each one is plotted as a step (two points), above it as one point.
+constexpr std::size_t STEP_PLOT_LIMIT = std::size_t{1} << 8;
+static_assert(2 * STEP_PLOT_LIMIT <= WINDOW_CAPACITY);
+
+// Plot scratch space: one point per interval, two in step mode, plus the live point.
+std::array<float, WINDOW_CAPACITY + 1> s_plot_x;
+std::array<float, WINDOW_CAPACITY + 1> s_plot_y;
+}  // namespace
 
 PerformanceTracker::PerformanceTracker(std::optional<std::string> log_name,
                                        const std::optional<DT> sample_window_duration)
-    : m_log_name{std::move(log_name)}, m_sample_window_duration{sample_window_duration}
+    : m_log_name{std::move(log_name)}, m_fixed_window{sample_window_duration}
 {
   Reset();
 }
 
 void PerformanceTracker::Reset()
 {
-  m_raw_dts.Clear();
-  m_dt_queue.clear();
-
-  m_dt_total = DT::zero();
-  m_last_raw_dt = DT::zero();
-  m_last_time = Clock::now();
-  m_hz_avg = 0.0;
-  m_dt_avg = DT::zero();
-  m_dt_std = DT::zero();
-  m_is_last_time_sane = false;
+  m_incoming.Clear();
+  m_window.clear();
+  m_window_sum = DT::zero();
+  m_latest_interval = DT::zero();
+  m_previous_count = Clock::now();
+  m_smoothed_hz = 0.0;
+  m_mean_interval = DT::zero();
+  m_interval_stddev = DT::zero();
+  m_have_previous = false;
 }
 
 void PerformanceTracker::Count()
 {
-  const TimePoint current_time{Clock::now()};
+  const TimePoint now = Clock::now();
+  const DT interval = now - m_previous_count;
+  m_previous_count = now;
 
-  const DT diff{current_time - m_last_time};
-  m_last_time = current_time;
-
-  if (!m_is_last_time_sane)
-  {
-    m_is_last_time_sane = true;
+  // The first call after a reset (or a pause) has nothing to measure against.
+  if (!m_have_previous.exchange(true))
     return;
-  }
 
-  m_last_raw_dt = diff;
-  m_raw_dts.Push(diff);
+  m_latest_interval = interval;
+  m_incoming.Push(interval);
 }
 
 void PerformanceTracker::UpdateStats()
 {
-  DT diff{};
-  while (m_raw_dts.Pop(diff))
-    HandleRawDt(diff);
+  DT interval{};
+  while (m_incoming.Pop(interval))
+    TakeInterval(interval);
 
-  // Update Std Dev
-  MathUtil::RunningVariance<double> variance;
-  for (auto dt : m_dt_queue)
-    variance.Push(DT_s(dt).count());
-  m_dt_std = std::chrono::duration_cast<DT>(DT_s(variance.PopulationStandardDeviation()));
+  MathUtil::RunningVariance<double> spread;
+  for (const DT sample : m_window)
+    spread.Push(DT_s(sample).count());
+  m_interval_stddev = std::chrono::duration_cast<DT>(DT_s(spread.PopulationStandardDeviation()));
 }
 
-void PerformanceTracker::HandleRawDt(DT diff)
+void PerformanceTracker::TakeInterval(DT interval)
 {
-  if (m_dt_queue.size() == MAX_DT_QUEUE_SIZE)
-    PopBack();
+  if (m_window.size() == WINDOW_CAPACITY)
+    DropOldest();
+  AddNewest(interval);
 
-  PushFront(diff);
+  // Keep the intervals that end inside the window (the newest one always stays).
+  const DT window = GetSampleWindow();
+  while (m_window_sum - m_window.back() >= window)
+    DropOldest();
 
-  const DT window{GetSampleWindow()};
+  const DT mean = m_window_sum / m_window.size();
+  const double rate = DT_s(1.0) / mean;
+  m_mean_interval = mean;
 
-  while (m_dt_total - m_dt_queue.back() >= window)
-    PopBack();
+  // Exponential smoothing whose time constant follows the window (or the data, while the window
+  // is not full yet).
+  const DT_s time_constant = SMOOTHING_FRACTION * std::min(window, m_window_sum);
+  const double weight = 1.0 - std::exp(-(DT_s(interval) / time_constant));
 
-  // Simple Moving Average Throughout the Window
-  const DT dt_avg = m_dt_total / m_dt_queue.size();
-  const double hz = DT_s(1.0) / dt_avg;
-  m_dt_avg = dt_avg;
+  const double previous = m_smoothed_hz.load();
+  // Restart from the plain rate if the smoothed value went infinite or NaN.
+  m_smoothed_hz = std::isfinite(previous) ? previous + weight * (rate - previous) : rate;
 
-  // Exponential Moving Average
-  const DT_s rc = SAMPLE_RC_RATIO * std::min(window, m_dt_total);
-  const double a = 1.0 - std::exp(-(DT_s(diff) / rc));
-
-  // Sometimes euler averages can break when the average is inf/nan
-  const auto hz_avg = m_hz_avg.load();
-  if (std::isfinite(hz_avg))
-    m_hz_avg = hz_avg + a * (hz - hz_avg);
-  else
-    m_hz_avg = hz;
-
-  LogRenderTimeToFile(diff);
+  AppendToLog(interval);
 }
 
 DT PerformanceTracker::GetSampleWindow() const
 {
-  return m_sample_window_duration.value_or(
-      duration_cast<DT>(DT_us{std::max(1, g_ActiveConfig.iPerfSampleUSec)}));
+  if (m_fixed_window)
+    return *m_fixed_window;
+  const int period_us = std::max(1, g_ActiveConfig.iPerfSampleUSec);
+  return std::chrono::duration_cast<DT>(DT_us{period_us});
 }
 
 double PerformanceTracker::GetHzAvg() const
 {
-  return m_hz_avg;
+  return m_smoothed_hz;
 }
 
 DT PerformanceTracker::GetDtAvg() const
 {
-  return m_dt_avg;
+  return m_mean_interval;
 }
 
 DT PerformanceTracker::GetDtStd() const
 {
-  return m_dt_std;
+  return m_interval_stddev;
 }
 
 DT PerformanceTracker::GetLastRawDt() const
 {
-  return m_last_raw_dt;
+  return m_latest_interval;
 }
 
 void PerformanceTracker::InvalidateLastTime()
 {
-  m_is_last_time_sane = false;
+  m_have_previous = false;
 }
 
 void PerformanceTracker::ImPlotPlotLines(const char* label) const
 {
-  // "quality" graph uses twice as many points.
-  static_assert(MAX_QUALITY_GRAPH_SIZE * 2 <= MAX_DT_QUEUE_SIZE);
-  static std::array<float, MAX_DT_QUEUE_SIZE + 1> x, y;
-
-  if (m_dt_queue.empty())
+  if (m_window.empty())
     return;
 
-  // Decides if there are too many points to plot using rectangles
-  const bool quality = m_dt_queue.size() < MAX_QUALITY_GRAPH_SIZE;
-
-  std::size_t point_index = 0;
-  const auto add_point = [&](DT dt, DT shift_x, float prev_ms) {
-    const float ms = DT_ms{dt}.count();
-
-    if (quality)
+  // x runs right to left: 0 is now, each interval moves one interval's length further back.
+  const bool steps = m_window.size() < STEP_PLOT_LIMIT;
+  std::size_t count = 0;
+  const auto plot = [steps, &count](DT height, DT width, float start_ms) {
+    const float height_ms = static_cast<float>(DT_ms{height}.count());
+    if (steps)
     {
-      x[point_index] = prev_ms;
-      y[point_index] = ms;
-      ++point_index;
+      s_plot_x[count] = start_ms;
+      s_plot_y[count] = height_ms;
+      ++count;
     }
-
-    x[point_index] = prev_ms + DT_ms{shift_x}.count();
-    y[point_index] = ms;
-    ++point_index;
+    s_plot_x[count] = static_cast<float>(start_ms + DT_ms{width}.count());
+    s_plot_y[count] = height_ms;
+    ++count;
   };
 
-  // Rightmost point.
-  const auto update_time = Clock::now() - m_last_time;
-  const auto predicted_frame_time = std::max(update_time, m_dt_queue.front());
-  add_point(predicted_frame_time, DT{}, 0);
+  // The frame in progress: at least as long as the time since the last Count().
+  const DT since_last = Clock::now() - m_previous_count;
+  plot(std::max(since_last, m_window.front()), DT{}, 0);
 
-  // Other points, right to left.
-  for (auto dt : m_dt_queue)
-    add_point(dt, dt, x[point_index - 1]);
+  for (const DT interval : m_window)
+    plot(interval, interval, s_plot_x[count - 1]);
 
-  ImPlot::PlotLine(label, x.data(), y.data(), static_cast<int>(point_index));
+  ImPlot::PlotLine(label, s_plot_x.data(), s_plot_y.data(), static_cast<int>(count));
 }
 
-void PerformanceTracker::PushFront(DT value)
+void PerformanceTracker::AddNewest(DT interval)
 {
-  m_dt_queue.push_front(value);
-  m_dt_total += value;
+  m_window.push_front(interval);
+  m_window_sum += interval;
 }
 
-void PerformanceTracker::PopBack()
+void PerformanceTracker::DropOldest()
 {
-  m_dt_total -= m_dt_queue.back();
-  m_dt_queue.pop_back();
+  m_window_sum -= m_window.back();
+  m_window.pop_back();
 }
 
-void PerformanceTracker::LogRenderTimeToFile(DT val)
+void PerformanceTracker::AppendToLog(DT interval)
 {
   if (!m_log_name || !g_ActiveConfig.bLogRenderTimeToFile)
     return;
 
-  if (!m_bench_file.is_open())
+  if (!m_log_file.is_open())
   {
-    File::OpenFStream(m_bench_file, File::GetUserPath(D_LOGS_IDX) + *m_log_name,
-                      std::ios_base::out);
+    File::OpenFStream(m_log_file, File::GetUserPath(D_LOGS_IDX) + *m_log_name, std::ios_base::out);
   }
 
-  m_bench_file << std::fixed << std::setprecision(8) << DT_ms(val).count() << std::endl;
+  m_log_file << std::fixed << std::setprecision(8) << DT_ms(interval).count() << std::endl;
 }

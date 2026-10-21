@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,9 +10,14 @@
 #include "Common/CommonTypes.h"
 #include "Common/SPSCQueue.h"
 
+// Measures the rate of a recurring event (presented frames, v-blanks): the time between
+// consecutive Count() calls is averaged over a sliding window.
 class PerformanceTracker
 {
 public:
+  // `log_name`: file in the log folder that each interval is appended to when render-time
+  // logging is on. `sample_window_duration`: fixed averaging window; by default the window is
+  // the configured performance sample period.
   PerformanceTracker(std::optional<std::string> log_name = std::nullopt,
                      const std::optional<DT> sample_window_duration = std::nullopt);
   ~PerformanceTracker() = default;
@@ -25,51 +29,49 @@ public:
 
   void Reset();
 
-  // Calls must come from the same thread.
-  // UpdateStats is expected to be called regularly to empty the SPSC queue.
+  // Consumes the intervals recorded by Count() and refreshes the averages. Always call it from
+  // the same thread, and regularly, so the queue doesn't grow.
   void UpdateStats();
+  // Plots the intervals of the window with ImPlot.
   void ImPlotPlotLines(const char* label) const;
 
-  // May call from any thread, but not concurrently, not that you'd want to..
+  // Records one occurrence of the event. Any thread, one at a time.
   void Count();
 
-  // May call from any thread.
+  // Readers, safe from any thread.
   DT GetSampleWindow() const;
   double GetHzAvg() const;
   DT GetDtAvg() const;
   DT GetDtStd() const;
   DT GetLastRawDt() const;
+  // The next Count() only restarts the measurement (used after pauses).
   void InvalidateLastTime();
 
 private:
-  void LogRenderTimeToFile(DT val);
+  void TakeInterval(DT interval);
+  void AddNewest(DT interval);
+  void DropOldest();
+  void AppendToLog(DT interval);
 
-  void HandleRawDt(DT value);
-  void PushFront(DT value);
-  void PopBack();
-
-  // Name of log file and file stream
   std::optional<std::string> m_log_name;
-  std::ofstream m_bench_file;
+  std::ofstream m_log_file;
 
-  // Last time Count() was called
-  TimePoint m_last_time;
-  std::atomic<bool> m_is_last_time_sane = false;
+  // Time of the previous Count(), and whether it can be used as the start of an interval.
+  TimePoint m_previous_count;
+  std::atomic<bool> m_have_previous = false;
 
-  // Push'd from Count()
-  //  and Pop'd from UpdateStats()
-  Common::SPSCQueue<DT> m_raw_dts;
-  std::atomic<DT> m_last_raw_dt = DT::zero();
+  // Intervals from Count() waiting for UpdateStats().
+  Common::SPSCQueue<DT> m_incoming;
+  std::atomic<DT> m_latest_interval = DT::zero();
 
-  // Amount of time to sample dt's over (defaults to config)
-  const std::optional<DT> m_sample_window_duration;
+  const std::optional<DT> m_fixed_window;
 
-  // Queue + Running Total used to calculate average dt
-  DT m_dt_total = DT::zero();
-  std::deque<DT> m_dt_queue;
+  // The intervals inside the window, newest first, and their sum.
+  std::deque<DT> m_window;
+  DT m_window_sum = DT::zero();
 
-  // Average rate/time throughout the window
-  std::atomic<DT> m_dt_avg = DT::zero();  // Uses Moving Average
-  std::atomic<double> m_hz_avg = 0.0;     // Uses Moving Average + Euler Average
-  std::atomic<DT> m_dt_std = DT::zero();
+  // Published results: mean interval, smoothed rate and the intervals' standard deviation.
+  std::atomic<DT> m_mean_interval = DT::zero();
+  std::atomic<double> m_smoothed_hz = 0.0;
+  std::atomic<DT> m_interval_stddev = DT::zero();
 };
