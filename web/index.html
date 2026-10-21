@@ -338,7 +338,7 @@
 </head>
 <body>
 <header>
-  <h1>RETRO<span>PIXELS</span> <small id="appVersion" class="muted" style="font-size:12px;font-weight:400;letter-spacing:0"></small></h1>
+  <h1>RETRO<span>PIXELS</span> <small id="appVersion" class="muted" style="font-size:12px;font-weight:400;letter-spacing:0"></small> <button class="btn ghost sm" id="desktopMenu" hidden style="margin-left:8px;vertical-align:middle;letter-spacing:0" title="Puts RetroPixels in your desktop's applications menu, with its icon, and offers it for game files in Open With"></button></h1>
   <div class="pad-status" title="Press any button on the controller if it isn't detected">
     <span class="dot" id="padDot"></span>
     <span id="padName">No controller — press any button on your Xbox controller</span>
@@ -2730,6 +2730,40 @@
     const el = document.getElementById("game");
     (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
   });
+
+  // ---------- Linux desktop: applications menu, games opened from the file manager (desktop_linux.go) ----------
+  if (DESKTOP && OS === "linux") {
+    const menuBtn = document.getElementById("desktopMenu");
+    const showMenu = r => { menuBtn.hidden = false; menuBtn.dataset.on = r.installed ? "1" : ""; menuBtn.textContent = r.installed ? "Remove from the applications menu" : "Add RetroPixels to the applications menu"; };
+    api("/api/desktop/menu").then(showMenu).catch(() => {});
+    menuBtn.addEventListener("click", async () => {
+      const add = !menuBtn.dataset.on;
+      const r = await swAct(() => api("/api/desktop/menu", { action: add ? "add" : "remove" }), add ? "" : "RetroPixels was removed from the applications menu");
+      if (r) showMenu(r);
+      if (r && add) alert("RetroPixels is now in your applications menu, and it's offered for game files.\n\n" +
+        "To make double-clicking a game open it here: right-click a game in your file manager, choose Open With, pick RetroPixels and make it the default. " +
+        "Do this once for each kind of game file (.sfc, .nes, .iso and so on).\n\nIf you move the RetroPixels folder, start RetroPixels from its new place once.");
+    });
+    const openID = new URLSearchParams(location.search).get("open");
+    if (openID) (async () => {
+      history.replaceState(null, "", location.pathname);
+      try {
+        const g = await api("/api/desktop/open?id=" + encodeURIComponent(openID));
+        if (g.kind === "dolphin" || g.kind === "pixelu") {
+          showTab(g.kind === "pixelu" ? "wiiu" : g.wii ? "wii" : "gc");
+          sendEmbedArea();
+          await api(g.kind === "pixelu" ? "/api/pixelu/play" : "/api/dol/play", { path: g.path });
+          toast(`Starting ${g.name}…`);
+          setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
+          return;
+        }
+        const res = await fetch("/api/desktop/file?id=" + encodeURIComponent(openID), { headers: { "X-Retro-Token": DESKTOP.token } });
+        if (!res.ok) throw new Error(`Couldn't read ${g.name} (${res.status})`);
+        showTab("classic");
+        startGame(new File([await res.blob()], g.name));
+      } catch (e) { toast(e.message, true); }
+    })();
+  }
 })();
 </script>
 </body>
