@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 372779 | 93.6% |
-| Dolphin, untouched | 19674 | 4.9% |
+| Original (RetroPixels) | 383155 | 96.1% |
+| Dolphin, untouched | 9581 | 2.4% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **398216** | 100% |
+| **All** | **398499** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -163,18 +163,18 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
 | Core/DiscIO | 15966 | 15966 | original |
 | Core/DolphinQt (top level) | 14617 | 14617 | original |
-| Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
+| Core/DolphinQt/Achievements | 1364 | 1364 | original |
 | Core/DolphinQt/Config | 18036 | 18036 | original |
 | Core/DolphinQt/Debugger | 13379 | 13379 | original |
-| Core/DolphinQt/EmulatedUSB | 367 | 0 | Dolphin |
-| Core/DolphinQt/FIFO | 1371 | 0 | Dolphin |
+| Core/DolphinQt/EmulatedUSB | 386 | 386 | original |
+| Core/DolphinQt/FIFO | 1321 | 1321 | original |
 | Core/DolphinQt/GameList | 2599 | 2599 | original |
-| Core/DolphinQt/InfinityBase | 403 | 0 | Dolphin |
-| Core/DolphinQt/NetPlay | 3201 | 0 | Dolphin |
+| Core/DolphinQt/InfinityBase | 446 | 446 | original |
+| Core/DolphinQt/NetPlay | 3464 | 3464 | original |
 | Core/DolphinQt/QtUtils | 1382 | 1382 | original |
 | Core/DolphinQt/Settings | 4485 | 4485 | original |
-| Core/DolphinQt/SkylanderPortal | 1499 | 0 | Dolphin |
-| Core/DolphinQt/TAS | 1979 | 0 | Dolphin |
+| Core/DolphinQt/SkylanderPortal | 1392 | 1392 | original |
+| Core/DolphinQt/TAS | 2003 | 2003 | original |
 | Core/DolphinTool | 1245 | 1245 | original |
 | Core/InputCommon (top level) | 1981 | 1981 | original |
 | Core/InputCommon/ControllerEmu | 3621 | 3621 | original |
@@ -269,7 +269,7 @@ batch rewrites them.
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 11734 | 11734 | original |
 | W40 | DolphinQt: controller mapping and settings panes | 10787 | 10787 | original |
 | W41 | DolphinQt: debugger | 13379 | 13379 | original |
-| W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10093 | 0 | Dolphin |
+| W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10376 | 10376 | original |
 <!-- batches:end -->
 
 After the last batch, Dolphin's files outside `Source/` are what is left:
@@ -5692,3 +5692,112 @@ step did for the old file. No key bytes are in the tree.
     - `.github/workflows/bundle-test.yml` still says PixelU-Wii is Dolphin
       "with the changes in pixelu/wii/patches". That file is not part of
       this batch, so the line is left for whoever owns it.
+
+- W42 log: rewrote all 62 W42 files, the DolphinQt NetPlay, TAS, FIFO,
+  achievements, portal and emulated-USB windows (10376 lines now, from
+  10093): `Achievements/*` (`AchievementBox`, `AchievementHeaderWidget`,
+  `AchievementLeaderboardWidget`, `AchievementProgressWidget`,
+  `AchievementSettingsWidget`, `AchievementsWindow`), `LogitechMicWindow`,
+  `WiiSpeakWindow`, `FIFOAnalyzer`, `FIFOPlayerWindow`,
+  `InfinityBaseWindow`, `ChunkedProgressDialog`, `ClickBlurLabel`,
+  `GameDigestDialog`, `GameListDialog`, `NetPlayBrowser`, `NetPlayDialog`,
+  `NetPlaySetupDialog`, `PadMappingDialog`, `SkylanderModifyDialog`,
+  `SkylanderPortalWindow` and `TAS/*` (the GC, GBA and Wii input windows,
+  `TASInputWindow`, the stick and IR widgets, and the check box, slider,
+  spin box and control state). Every rewritten file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. File
+  names, public declarations, signals and slots, enum values, object names,
+  widgets and their layout order, labels, tooltips, shortcuts,
+  enabled/visible rules, context menus, model columns, roles and
+  sort/filter results, QSettings and Config keys (and when they are read or
+  written), the order and arguments of Core/UICommon calls, dialog flow and
+  all tr() strings (byte for byte, in the same context) are unchanged. No
+  file carries a PixelU change.
+  - TAS: `TASInputWindow` polls through private helpers per kind (button,
+    ranged, scaled); the input overrider keys its table by control. The GC,
+    GBA and Wii windows are built from button tables, and the Wii window
+    builds its IR, motion, classic trigger and button boxes in helpers in
+    the old order. `TASControlState` keeps a generation/value snapshot.
+  - `LogitechMicWindow` and `WiiSpeakWindow` build each group box in a
+    helper. `InfinityBaseWindow` adds one row per position from a helper;
+    the create-figure dialog has a private create handler.
+  - `SkylanderPortalWindow`: the slot column, finder column, collection
+    folder, suggested file name and collection scan are helpers; the
+    filters and the game/element/type labels are tables (with the i18n
+    comments). `SkylanderModifyDialog` checks its fields from a table of
+    QT_TR_NOOP messages.
+  - `FIFOPlayerWindow`: the range group, layout, saved options, signals and
+    descriptions are helpers, and the emulation-state lambda is a member.
+    `FIFOAnalyzer`: object spans and bytes are looked up by helpers, the
+    command summary and explanation are separate callbacks, and the search
+    scans by index.
+  - Achievements: the window builds its tabs from a table and hides the
+    game tabs in one helper; the settings tab saves from a table of RA_*
+    settings; the header, leaderboard and progress widgets use small
+    helpers for badges, the grid and detaching entries.
+  - NetPlay: `NetPlayDialog` builds each menu (data, network, checksum,
+    other) in a helper, with shared toggle and exclusive-group helpers, and
+    the player table, host code and game status text are helpers.
+    `NetPlaySetupDialog` builds the connect and host tabs separately and
+    checks host requirements from a QT_TR_NOOP table. `NetPlayBrowser`
+    keeps its QSettings keys as named constants and builds the filter box
+    in a helper. The other dialogs use small helpers in the old order.
+  - Preserved quirks (callers or users may rely on them): the Skylander
+    `arg(u16, u16)` id text, which treats the second number as a field
+    width; the modify dialog zeroing toy_code on save; `PadMappingDialog`
+    using the stored player id directly as the combo index; the stale
+    layout rows an achievements tab can leave behind on a refresh (seen as
+    a crash in the harness on both sides);
+    the NetPlay browser connecting only the all/private radios and the two
+    check boxes; the achievements window asking IsGameLoaded before
+    HasAPIToken; and the Wii TAS window fetching the remote before choosing
+    overrides. Chained `.arg()` calls were kept wherever user text could
+    contain '%'.
+  - Deliberate differences (nothing a user sees in normal use):
+    - Qt connections that had no context object now use `this` (the TAS
+      shortcut, the create-figure dialog, the NetPlay setup dialog), so
+      they are dropped when the widget is destroyed.
+    - `NetPlayDialog`: the traversal port is read byte by byte instead of
+      with `ntohs`, and the private `SendMessage` is now `SendChatLine`
+      (`SendMessage` is a Win32 macro). Together these fix the base tree's
+      compile errors on the Windows target.
+    - Dead private code dropped: Skylander GetGameID/GetElementID/GetTypeID,
+      AchievementSettingsWidget::OnControllerInterfaceConfigure (with its
+      include), FIFOAnalyzer's INCLUDE_HEX_IN_PRIMITIVES block, and a no-op
+      setDirection call in the Skylander window.
+    - The FIFO search result is copied instead of held by reference;
+      `GameListDialog` reads the row count once; `SkylanderModifyDialog`
+      initialises every field of the figure it saves. Integer narrowing
+      and sign changes are explicit casts.
+  - Checked: old and new code side by side with Qt 6.4 offscreen harnesses,
+    built against fakes for Core, UICommon, Settings, the file dialogs and
+    the emulated devices, with the untouched non-W42 files on both sides.
+    Each run dumps the widget tree (class, object name, text, tooltip,
+    state, layout positions, focus chain), model contents, tr() strings,
+    Config and QSettings writes and call logs after random interaction
+    sequences. Only hashes were kept.
+    - TAS (6 seeds x 400 steps): same tree, calls and tr() set; only the
+      tr() call count differs, where one string is now looked up once.
+    - EmulatedUSB (5 seeds, plus 3 with HAVE_CUBEB): identical.
+    - InfinityBase (5 seeds), Skylanders (6 seeds, covering modify, load
+      and create): same tree, calls and tr() set.
+    - FIFO (8 seeds), achievements (6 seeds): identical.
+    - NetPlay (all 8 dialogs; 14 seeds, 5 with Discord presence, 3 without
+      mGBA, 3 with UPnP): identical. After the final audit edits, 8 seeds
+      give the same tree, calls and tr() set.
+    - Also compared line by line against the old files for the paths the
+      fakes do not reach. A tr() string scan finds every old string in the
+      new code with the same context.
+  - Compile check: the W42 .cpp files and MainWindow.cpp (the only other
+    source that includes W42 headers), old against new, with clang on Linux
+    and for x86_64-w64-windows-gnu, `-Wall -Wextra -Wconversion
+    -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, with HAVE_CUBEB, with
+    and without USE_DISCORD_PRESENCE, and with USE_UPNP for the setup
+    dialog. No warning in a W42 file. MainWindow.cpp's diagnostics are the
+    same before and after (they come from shared headers and the Win32
+    display constants in the MinGW headers). No local or parameter hides a
+    Qt data member (`data`, `d_ptr`).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run is left in a W42
+    .cpp file. The runs left are public declarations in the headers
+    (signals, slots, member lists, enums).
+  - No keys, IVs, tokens or credentials are in these files.
