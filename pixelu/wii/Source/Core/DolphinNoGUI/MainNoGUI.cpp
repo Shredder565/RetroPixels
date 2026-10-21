@@ -5,7 +5,7 @@
 // process gets SIGINT/SIGTERM, and exits. Messages that would be dialog boxes go to standard
 // error and are answered "yes".
 //
-//     dolphin-emu-nogui [-u USERDIR] [-v Null] [-p headless] [-e] FILE
+//     dolphin-emu-nogui [-u USERDIR] [-v Null] [-p headless|x11] [-e] FILE
 
 #include <atomic>
 #include <csignal>
@@ -93,6 +93,10 @@ std::unique_ptr<Platform> CreatePlatform(const std::string& name)
 {
   if (name.empty() || name == "headless")
     return Platform::CreateHeadless();
+#ifdef PIXELU_NOGUI_X11
+  if (name == "x11")
+    return Platform::CreateX11();
+#endif
   return nullptr;
 }
 
@@ -194,8 +198,10 @@ void Host_PPCBreakpointsChanged()
 {
 }
 
-void Host_RequestRenderWindowSize(int, int)
+void Host_RequestRenderWindowSize(int width, int height)
 {
+  if (s_platform)
+    s_platform->RequestWindowSize(width, height);
 }
 
 void Host_UpdateDisasmDialog()
@@ -244,10 +250,18 @@ int main(int argc, char* argv[])
 {
   const auto parser =
       CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
+#ifdef PIXELU_NOGUI_X11
+  parser->add_option("-p", "--platform")
+      .action("store")
+      .choices({"headless", "x11"})
+      .help("Where the emulator runs: headless (no window, the default) or x11 (a window on "
+            "$DISPLAY)");
+#else
   parser->add_option("-p", "--platform")
       .action("store")
       .choices({"headless"})
-      .help("Where the emulator runs: [%choices] (the default)");
+      .help("Where the emulator runs: headless (no window, the default)");
+#endif
   // optparse prints its own message for a bad command line and then throws the exit status.
   const optparse::Values* parsed = nullptr;
   try

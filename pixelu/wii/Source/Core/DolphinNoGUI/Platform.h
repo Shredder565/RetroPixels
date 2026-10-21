@@ -32,12 +32,21 @@ public:
   // Called by Host_Message(WMUserJobDispatch); wakes MainLoop() early. Any thread.
   virtual void JobsQueued() {}
 
-  // Called by Host_UpdateTitle.
+  // Called by Host_UpdateTitle. Any thread.
   virtual void SetTitle(std::string_view title) {}
+
+  // Called by Host_RequestRenderWindowSize (the game's picture size, for auto-sized windows).
+  // Any thread.
+  virtual void RequestWindowSize(int width, int height) {}
 
   // The headless platform: nothing on screen, for the Null video backend, the software renderer's
   // frame dumps, tests and servers.
   static std::unique_ptr<Platform> CreateHeadless();
+
+#ifdef PIXELU_NOGUI_X11
+  // A window on the X server in $DISPLAY (PlatformX11.cpp).
+  static std::unique_ptr<Platform> CreateX11();
+#endif
 
 private:
   std::atomic<bool> m_shutdown_requested{false};
