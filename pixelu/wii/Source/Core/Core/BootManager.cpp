@@ -91,8 +91,8 @@ void MatchLanguageAndCountryToRegion(const Core::System& system, const SConfig& 
     return;
 
   const DiscIO::Region region = config.m_region;
-  Config::SetCurrent(Config::MAIN_GC_LANGUAGE,
-                     DiscIO::ToGameCubeLanguage(config.GetLanguageAdjustedForRegion(false, region)));
+  const DiscIO::Language gc_language = config.GetLanguageAdjustedForRegion(false, region);
+  Config::SetCurrent(Config::MAIN_GC_LANGUAGE, DiscIO::ToGameCubeLanguage(gc_language));
 
   if (!system.IsWii())
     return;

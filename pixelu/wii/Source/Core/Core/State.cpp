@@ -794,9 +794,10 @@ u64 GetUnixTimeOfSlot(u32 slot)
 
 void SaveAs(Core::System& system, std::string filename)
 {
-  Core::RunOnCPUThread(system, [&system, path = std::move(filename), lock = HoldSaveTask()]() mutable {
+  auto task = [&system, path = std::move(filename), lock = HoldSaveTask()]() mutable {
     CaptureAndQueue(system, std::move(path));
-  });
+  };
+  Core::RunOnCPUThread(system, std::move(task));
 }
 
 void LoadAs(Core::System& system, std::string filename)

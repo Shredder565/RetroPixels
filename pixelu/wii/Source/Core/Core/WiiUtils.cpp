@@ -396,17 +396,16 @@ private:
   bool NeedsInstall(const TitleInfo& title);
 
   UpdateResult InstallTitle(const std::string& prefix_url, const TitleInfo& title,
-                                   std::unordered_set<u64>* updated_titles);
+                            std::unordered_set<u64>* updated_titles);
   UpdateResult ImportContents(const std::string& prefix_url, const TitleInfo& title,
                               const IOS::ES::TMDReader& tmd, ESCore::Context& context);
 
   std::pair<IOS::ES::TMDReader, std::vector<u8>> FetchTMD(const std::string& prefix_url,
-                                                             const TitleInfo& title);
+                                                          const TitleInfo& title);
   std::pair<std::vector<u8>, std::vector<u8>> FetchTicket(const std::string& prefix_url,
-                                                             const TitleInfo& title);
+                                                          const TitleInfo& title);
   std::optional<std::vector<u8>> FetchContent(const std::string& prefix_url,
-                                                 const TitleInfo& title, u32 cid);
-
+                                              const TitleInfo& title, u32 cid);
 };
 
 OnlineSystemUpdater::TitleList
@@ -575,8 +574,8 @@ UpdateResult OnlineSystemUpdater::ImportContents(const std::string& prefix_url,
 }
 
 UpdateResult OnlineSystemUpdater::InstallTitle(const std::string& prefix_url,
-                                                      const TitleInfo& title,
-                                                      std::unordered_set<u64>* updated_titles)
+                                               const TitleInfo& title,
+                                               std::unordered_set<u64>* updated_titles)
 {
   // boot2 updates are not supported; treat them as done.
   if (title.id == Titles::BOOT2)
@@ -694,7 +693,7 @@ OnlineSystemUpdater::FetchTicket(const std::string& prefix_url, const TitleInfo&
 }
 
 std::optional<std::vector<u8>> OnlineSystemUpdater::FetchContent(const std::string& prefix_url,
-                                                                    const TitleInfo& title, u32 cid)
+                                                                 const TitleInfo& title, u32 cid)
 {
   return m_http.Get(fmt::format("{}/{:016x}/{:08x}", prefix_url, title.id, cid));
 }
@@ -712,8 +711,9 @@ public:
 private:
   UpdateCallback m_update_callback;
   std::unique_ptr<DiscIO::VolumeDisc> m_volume;
-  DiscIO::Partition m_partition;
   // The update partition, once found.
+  DiscIO::Partition m_partition;
+
   // Manifest layout: a 32-byte header, then 512-byte big-endian entries.
 #pragma pack(push, 1)
   struct ManifestHeader
@@ -740,7 +740,6 @@ private:
   UpdateResult InstallFromManifest(std::string_view manifest_name);
   UpdateResult InstallEntry(u32 type, std::bitset<32> attrs, const TitleInfo& title,
                             std::string_view path);
-
 };
 
 UpdateResult DiscSystemUpdater::DoDiscUpdate()

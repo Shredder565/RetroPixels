@@ -111,7 +111,8 @@ bool CopyFileBetweenNands(FS::FileSystem* from, const std::string& from_path, FS
 
   to->CreateFullPath(IOS::PID_KERNEL, IOS::PID_KERNEL, to_path, 0, OPEN_MODES);
   // The file is created under the source's path (both callers pass the same path twice).
-  const auto output = to->CreateAndOpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, from_path, OPEN_MODES);
+  const auto output =
+      to->CreateAndOpenFile(IOS::PID_KERNEL, IOS::PID_KERNEL, from_path, OPEN_MODES);
   if (!output)
     return false;
 

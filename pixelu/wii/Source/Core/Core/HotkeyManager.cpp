@@ -496,7 +496,8 @@ bool IsPressed(int id, bool held)
 {
   const HotkeyManager& manager = TheManager();
   const auto group = static_cast<unsigned int>(manager.FindGroupByID(id));
-  const auto bit = u32{1} << static_cast<unsigned int>(manager.GetIndexForGroup(static_cast<int>(group), id));
+  const int index = manager.GetIndexForGroup(static_cast<int>(group), id);
+  const auto bit = u32{1} << static_cast<unsigned int>(index);
 
   u32& seen = s_seen_down[group];
   if ((s_sample.button[group] & bit) == 0)

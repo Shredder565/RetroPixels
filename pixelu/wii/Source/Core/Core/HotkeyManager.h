@@ -225,7 +225,6 @@ enum HotkeyGroup : int
   NUM_HOTKEY_GROUPS,
 };
 
-
 // One bit per hotkey, by its index inside its group.
 struct HotkeyStatus
 {

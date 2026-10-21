@@ -206,7 +206,8 @@ void FreeLookController::UpdateInput(CameraControllerInput* camera)
   // Free look has its own background-input setting: switch the input gate to
   // it for this update and put the previous gate back afterwards.
   const bool previous_gate = ControlReference::GetInputGate();
-  Common::ScopeGuard restore_gate{[previous_gate] { ControlReference::SetInputGate(previous_gate); }};
+  Common::ScopeGuard restore_gate{
+      [previous_gate] { ControlReference::SetInputGate(previous_gate); }};
   Core::UpdateInputGate(!Config::Get(Config::FREE_LOOK_BACKGROUND_INPUT));
 
   // Seconds since the previous update; the first update counts as one second.
