@@ -1,0 +1,113 @@
+name: Supermodel (Sega Model 3) build
+
+# Builds RetroPixels' Supermodel from supermodel/: the pinned upstream commit
+# with RetroPixels' patches (GPL-3.0). supermodel.exe is cross-built for
+# 64-bit Windows with MinGW-w64 on Ubuntu 24.04, against the SDL2, SDL2_net
+# and zlib releases pinned (with SHA-256) in supermodel/pins.sh. A Linux
+# build of the same source is started headless as a check. The result is a
+# workflow artifact only: no release is made. bundle-test.yml calls this
+# workflow to put Supermodel in the RetroPixels test download.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - "supermodel/**"
+      - ".github/workflows/supermodel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MinGW-w64
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64
+          dpkg -l | grep -E 'mingw-w64' | awk '{print $2, $3}'
+          x86_64-w64-mingw32-g++-posix --version | head -n 1
+
+      - name: Build supermodel.exe
+        run: sh supermodel/build.sh windows package
+
+      - name: Check the program
+        run: |
+          exe=package/Supermodel/supermodel.exe
+          test -s "$exe"
+          x86_64-w64-mingw32-objdump -p "$exe" > pe.txt
+          grep -q 'Subsystem.*Windows CUI' pe.txt
+          # Statically linked: only DLLs that come with Windows.
+          dlls=$(grep 'DLL Name' pe.txt | awk '{print tolower($3)}' | sort -u | tr '\n' ' ')
+          echo "imports: $dlls"
+          for d in $dlls; do
+            case "$d" in
+              advapi32.dll|gdi32.dll|glu32.dll|imm32.dll|iphlpapi.dll|kernel32.dll|msvcrt.dll|ole32.dll|oleaut32.dll|opengl32.dll|setupapi.dll|shell32.dll|user32.dll|version.dll|winmm.dll|ws2_32.dll) ;;
+              *) echo "unexpected DLL: $d"; exit 1 ;;
+            esac
+          done
+          # RetroPixels' changes are in it.
+          grep -a -q 'rp-record' "$exe"
+          grep -a -q 'SUPERMODEL_HOME' "$exe"
+          grep -a -q 'retropixels-1' "$exe"
+          test -f package/Supermodel/RetroPixels.txt
+          test -f package/Supermodel/Config/Games.xml
+          test -f package/Supermodel/LICENSE.txt
+          tar -tzf package/Supermodel/Supermodel-source.tar.gz | grep -q 'Supermodel/Src/OSD/RetroPixels.cpp'
+          cat package/Supermodel/VERSION.txt
+          ls -la package/Supermodel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Supermodel-windows-x64
+          path: package
+          retention-days: 14
+
+  linux-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev xvfb xauth mesa-utils libgl1-mesa-dri
+
+      - name: Build for Linux
+        run: sh supermodel/build.sh linux linux-package
+
+      - name: Start it headless
+        run: |
+          cd linux-package/Supermodel
+          export SUPERMODEL_HOME="$RUNNER_TEMP/smhome"
+          ./supermodel -help | tee help.txt
+          grep -q -- '-rp-record' help.txt
+          grep -q -- '-desktop-res' help.txt
+          ./supermodel -print-games | grep -q 'swtrilgya'
+          # The player's own files go to SUPERMODEL_HOME.
+          test -f "$SUPERMODEL_HOME/Config/Supermodel.ini"
+          test -f "$SUPERMODEL_HOME/Log/Supermodel.log"
+          grep -q 'retropixels-1' "$SUPERMODEL_HOME/Log/Supermodel.log"
+          # OpenGL works under Xvfb with Mesa (llvmpipe).
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1280x1024x24' ./supermodel -print-gl-info | tee gl.txt
+          grep -q 'Version' gl.txt
+          # No ROM set: it must say so, not crash.
+          set +e
+          xvfb-run -a ./supermodel "$RUNNER_TEMP/swtrilgya.zip" > norom.txt 2>&1
+          code=$?
+          set -e
+          cat norom.txt
+          [ "$code" -ne 0 ] && [ "$code" -lt 128 ]
+
+      - name: RetroPixels' Supermodel code (Go)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: go test ./internal/supermodel/ . -run 'Supermodel|CheckROM|FindROM|GameArgs|INI|FindExe|Problem|Command'
