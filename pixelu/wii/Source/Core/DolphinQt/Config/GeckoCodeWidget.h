@@ -1,12 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <QWidget>
-
 #include <string>
 #include <vector>
+
+#include <QWidget>
 
 #include "Common/CommonTypes.h"
 
@@ -18,14 +17,16 @@ class HardcoreWarningWidget;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
-class QTextEdit;
 class QPushButton;
+class QTextEdit;
 
 namespace Gecko
 {
 class GeckoCode;
 }
 
+// The Gecko tab: a game's Gecko codes with their details, editing, sorting,
+// downloading from the code server and saving to the user's game INI.
 class GeckoCodeWidget : public QWidget
 {
   Q_OBJECT
@@ -43,47 +44,49 @@ signals:
 #endif  // USE_RETRO_ACHIEVEMENTS
 
 private:
-  void OnSelectionChanged();
-  void OnItemChanged(QListWidgetItem* item);
-  void OnListReordered();
-  void OnContextMenuRequested();
+  void BuildLayout();
+  void WireUp();
 
-  void CreateWidgets();
-  void ConnectWidgets();
-  void UpdateList();
-  void AddCode();
-  void EditCode();
-  void RemoveCode();
-  void DownloadCodes();
-  void ToggleAllCodes();
-  void LoadCodes();
-  void SaveCodes();
-  void SortAlphabetically();
-  void SortEnabledCodesFirst();
-  void SortDisabledCodesFirst();
-  void UpdateToggleButton();
+  void ReadCodes();
+  void WriteCodes();
+  void RebuildList();
+  void ActivateIfRunning();
+  bool AllEnabled() const;
+  void RefreshToggleAllButton();
 
-  bool IsEveryCodeEnabled();
+  void ShowSelectedDetails();
+  void OnCheckToggled(QListWidgetItem* item);
+  void OnRowsMoved();
+  void ShowSortMenu();
+  void SortByName();
+  void PutEnabledFirst();
+  void PutDisabledFirst();
+
+  void NewCode();
+  void EditCurrent();
+  void RemoveCurrent();
+  void FetchFromServer();
+  void ToggleAll();
 
   std::string m_game_id;
   std::string m_gametdb_id;
   u16 m_game_revision;
 
-  CheatWarningWidget* m_warning;
+  CheatWarningWidget* m_cheat_warning;
 #ifdef USE_RETRO_ACHIEVEMENTS
-  HardcoreWarningWidget* m_hc_warning;
+  HardcoreWarningWidget* m_hardcore_warning;
 #endif  // USE_RETRO_ACHIEVEMENTS
-  QListWidget* m_code_list;
-  QLabel* m_name_label;
-  QLabel* m_creator_label;
-  QTextEdit* m_code_description;
-  QTextEdit* m_code_view;
-  QPushButton* m_add_code;
-  QPushButton* m_edit_code;
-  QPushButton* m_remove_code;
-  QPushButton* m_download_codes;
-  QPushButton* m_toggle_all_codes;
-  CheatCodeEditor* m_cheat_code_editor;
-  std::vector<Gecko::GeckoCode> m_gecko_codes;
+  QListWidget* m_list;
+  QLabel* m_name;
+  QLabel* m_creator;
+  QTextEdit* m_notes;
+  QTextEdit* m_lines;
+  QPushButton* m_add_button;
+  QPushButton* m_edit_button;
+  QPushButton* m_remove_button;
+  QPushButton* m_download_button;
+  QPushButton* m_toggle_all_button;
+  CheatCodeEditor* m_editor;
+  std::vector<Gecko::GeckoCode> m_codes;
   bool m_restart_required;
 };
