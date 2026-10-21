@@ -1,9 +1,10 @@
 # Building PixelU
 
-RetroPixels ships PixelU for 64-bit Windows only. The release build is made by
+RetroPixels ships PixelU for 64-bit Windows and Linux. The builds are made by
 `.github/workflows/pixelu.yml` in the repository root. It runs on every push
-to `pixelu/` and produces the `PixelU-windows-x64` workflow artifact, then
-starts `bundle-test.yml`, which puts that build into the RetroPixels download.
+to `pixelu/` and produces the `PixelU-windows-x64` and `PixelU-linux-x64`
+workflow artifacts, then starts `bundle-test.yml` and `bundle-linux.yml`,
+which put them into the RetroPixels downloads.
 
 ## Windows (what CI does)
 
@@ -38,13 +39,40 @@ To stamp a version, pass `EMULATOR_VERSION_MAJOR`, `EMULATOR_VERSION_MINOR`
 and `EMULATOR_VERSION_PATCH`. Without them, PixelU shows the commit hash as
 its version.
 
-## Linux and macOS
+## Linux (what CI does)
 
-The CMake files still configure on Linux (GTK and, optionally, Wayland) and
-on macOS (Vulkan through MoltenVK, `-DMACOS_BUNDLE=ON` for an .app). These
-builds are not tested and RetroPixels does not ship them. On Linux, building
-without vcpkg (`-DENABLE_VCPKG=OFF`) needs the same libraries installed
-system-wide.
+The `build-linux` job of `.github/workflows/pixelu.yml` builds on Ubuntu 22.04
+(glibc 2.35, the oldest base RetroPixels supports) with GCC 12 and vcpkg's
+`x64-linux` triplet, so the libraries are linked statically as on Windows.
+GTK 3, X11/XCB, Wayland, libGL and the Vulkan loader come from the system
+(the empty ports in `dependencies/vcpkg_overlay_ports_linux`); the job lists
+the packages it installs.
+
+```
+cd retropixels/pixelu        # a recursive clone, as for Windows
+./dependencies/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+CC=gcc-12 CXX=g++-12 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+The program is `bin/PixelU_release`. CI packs it as `PixelU/PixelU` with
+`resources`, `gameProfiles` and an empty `portable` folder into
+`PixelU-linux.tar.gz` (artifact `PixelU-linux-x64`), checks that it needs no
+newer glibc or libstdc++ than Ubuntu 22.04's, and runs RetroPixels' own demo
+(`wiiu/testdata/demo.rpx`) under Xvfb, with Vulkan (lavapipe) and with OpenGL
+(llvmpipe), through the docking tests in `internal/pixelu/screen_linux_test.go`
+(`dist/linux/demo-test.sh`). Building without vcpkg (`-DENABLE_VCPKG=OFF`)
+needs the same libraries installed system-wide.
+
+Docked into RetroPixels (`--rp-embed`), PixelU runs on X11, which Wayland
+desktops provide through XWayland; see `src/gui/wxgui/RPEmbed.h` and
+`RPEmbedX11.h`.
+
+## macOS
+
+The CMake files still configure on macOS (Vulkan through MoltenVK,
+`-DMACOS_BUNDLE=ON` for an .app). That build is not tested and RetroPixels
+does not ship it.
 
 ## Checking a change
 
