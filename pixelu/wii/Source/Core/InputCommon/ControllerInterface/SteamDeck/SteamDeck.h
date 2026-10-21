@@ -1,12 +1,12 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include "InputCommon/ControllerInterface/InputBackend.h"
-
 #include <memory>
 
+#include "InputCommon/ControllerInterface/InputBackend.h"
+
+// The Steam Deck's built-in controls, read directly over HID.
 namespace ciface::SteamDeck
 {
 std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface);
