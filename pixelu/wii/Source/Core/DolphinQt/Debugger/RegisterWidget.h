@@ -1,9 +1,9 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <functional>
+#include <string>
 
 #include <QDockWidget>
 
@@ -18,6 +18,8 @@ namespace Core
 class System;
 }
 
+// Dock showing the CPU registers in a grid of label/value cells; values are editable where the
+// register can be written.
 class RegisterWidget : public QDockWidget
 {
   Q_OBJECT
@@ -40,22 +42,20 @@ protected:
   void showEvent(QShowEvent* event) override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void PopulateTable();
+  void BuildLayout();
+  void FillGrid();
+  void ApplyFont(const QFont& font);
+  void CellEdited(QTableWidgetItem* item);
+  void ShowCellMenu();
+  void RefreshIfPaused();
+  void RunUntilRegisterChanges(const std::string& reg) const;
 
-  void ShowContextMenu();
-  void OnItemChanged(QTableWidgetItem* item);
-  void OnDebugFontChanged(const QFont& font);
-
-  void AddRegister(int row, int column, RegisterType type, const std::string& register_name,
-                   std::function<u64()> get_reg, std::function<void(u64)> set_reg);
-
-  void AutoStep(const std::string& reg) const;
-  void Update();
+  void Place(int row, int column, RegisterType type, const std::string& name,
+             std::function<u64()> read, std::function<void(u64)> write);
+  void SetFormatQuietly(RegisterColumn* cell, RegisterDisplay format);
 
   Core::System& m_system;
 
-  QTableWidget* m_table;
-  bool m_updating = false;
+  QTableWidget* m_grid = nullptr;
+  bool m_refreshing = false;
 };

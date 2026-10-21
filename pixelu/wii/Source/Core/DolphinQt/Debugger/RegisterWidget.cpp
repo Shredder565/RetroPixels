@@ -1,14 +1,16 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/RegisterWidget.h"
 
+#include <array>
 #include <utility>
 
 #include <QActionGroup>
+#include <QCursor>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -23,45 +25,54 @@
 #include "DolphinQt/Host.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+// The grid: r0-r31 in columns 0/1, f0-f31 (both halves) in 2/3/4, special registers in 5/6, segment
+// registers, GQRs and HIDs in 7/8.
+constexpr int GRID_COLUMNS = 9;
+constexpr int GPR_COLUMN = 0;
+constexpr int FPR_COLUMN = 2;
+constexpr int PS1_COLUMN = 4;
+constexpr int SPECIAL_COLUMN = 5;
+constexpr int SIDE_COLUMN = 7;
+constexpr int REGISTER_ROWS = 32;
+}  // namespace
+
 RegisterWidget::RegisterWidget(QWidget* parent)
     : QDockWidget(parent), m_system(Core::System::GetInstance())
 {
   setWindowTitle(tr("Registers"));
   setObjectName(QStringLiteral("registers"));
 
-  setHidden(!Settings::Instance().IsRegistersVisible() ||
-            !Settings::Instance().IsDebugModeEnabled());
-
+  auto& settings = Settings::Instance();
+  setHidden(!settings.IsRegistersVisible() || !settings.IsDebugModeEnabled());
   setAllowedAreas(Qt::AllDockWidgetAreas);
 
-  CreateWidgets();
+  BuildLayout();
 
-  auto& settings = Settings::GetQSettings();
+  QSettings& stored = Settings::GetQSettings();
+  restoreGeometry(stored.value(QStringLiteral("registerwidget/geometry")).toByteArray());
+  setFloating(stored.value(QStringLiteral("registerwidget/floating")).toBool());
 
-  restoreGeometry(settings.value(QStringLiteral("registerwidget/geometry")).toByteArray());
-  // macOS: setHidden() needs to be evaluated before setFloating() for proper window presentation
-  // according to Settings
-  setFloating(settings.value(QStringLiteral("registerwidget/floating")).toBool());
+  FillGrid();
 
-  PopulateTable();
-  ConnectWidgets();
+  connect(m_grid, &QTableWidget::customContextMenuRequested, this, &RegisterWidget::ShowCellMenu);
+  connect(m_grid, &QTableWidget::itemChanged, this, &RegisterWidget::CellEdited);
+  connect(&settings, &Settings::DebugFontChanged, this, &RegisterWidget::ApplyFont);
 
-  connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this, &RegisterWidget::Update);
-
-  connect(&Settings::Instance(), &Settings::RegistersVisibilityChanged, this,
+  connect(Host::GetInstance(), &Host::UpdateDisasmDialog, this, &RegisterWidget::RefreshIfPaused);
+  connect(&settings, &Settings::RegistersVisibilityChanged, this,
           [this](bool visible) { setHidden(!visible); });
-
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this, [this](bool enabled) {
+  connect(&settings, &Settings::DebugModeToggled, this, [this](bool enabled) {
     setHidden(!enabled || !Settings::Instance().IsRegistersVisible());
   });
 }
 
 RegisterWidget::~RegisterWidget()
 {
-  auto& settings = Settings::GetQSettings();
-
-  settings.setValue(QStringLiteral("registerwidget/geometry"), saveGeometry());
-  settings.setValue(QStringLiteral("registerwidget/floating"), isFloating());
+  QSettings& stored = Settings::GetQSettings();
+  stored.setValue(QStringLiteral("registerwidget/geometry"), saveGeometry());
+  stored.setValue(QStringLiteral("registerwidget/floating"), isFloating());
 }
 
 void RegisterWidget::closeEvent(QCloseEvent*)
@@ -69,230 +80,161 @@ void RegisterWidget::closeEvent(QCloseEvent*)
   Settings::Instance().SetRegistersVisible(false);
 }
 
-void RegisterWidget::showEvent(QShowEvent* event)
+void RegisterWidget::showEvent(QShowEvent*)
 {
-  Update();
+  RefreshIfPaused();
 }
 
-void RegisterWidget::CreateWidgets()
+void RegisterWidget::BuildLayout()
 {
-  m_table = new QTableWidget;
-  m_table->setTabKeyNavigation(false);
+  m_grid = new QTableWidget;
+  m_grid->setTabKeyNavigation(false);
+  m_grid->setColumnCount(GRID_COLUMNS);
+  m_grid->verticalHeader()->setVisible(false);
+  m_grid->setContextMenuPolicy(Qt::CustomContextMenu);
+  m_grid->setSelectionMode(QAbstractItemView::NoSelection);
 
-  m_table->setColumnCount(9);
+  ApplyFont(Settings::Instance().GetDebugFont());
 
-  m_table->verticalHeader()->setVisible(false);
-  m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-  m_table->setSelectionMode(QAbstractItemView::NoSelection);
+  // Blank header labels: the header is only there so that columns can be resized.
+  QStringList blank_headers;
+  for (int i = 0; i < GRID_COLUMNS; ++i)
+    blank_headers.append(QString{});
+  m_grid->setHorizontalHeaderLabels(blank_headers);
 
-  OnDebugFontChanged(Settings::Instance().GetDebugFont());
-
-  QStringList empty_list;
-
-  for (auto i = 0; i < 9; i++)
-    empty_list << QString{};
-
-  m_table->setHorizontalHeaderLabels(empty_list);
-
-  QWidget* widget = new QWidget;
-  auto* layout = new QVBoxLayout;
-  layout->addWidget(m_table);
-  layout->setContentsMargins(2, 2, 2, 2);
-  widget->setLayout(layout);
-
-  setWidget(widget);
+  auto* column = new QVBoxLayout;
+  column->addWidget(m_grid);
+  column->setContentsMargins(2, 2, 2, 2);
+  auto* body = new QWidget;
+  body->setLayout(column);
+  setWidget(body);
 }
 
-void RegisterWidget::ConnectWidgets()
+void RegisterWidget::ApplyFont(const QFont& font)
 {
-  connect(m_table, &QTableWidget::customContextMenuRequested, this,
-          &RegisterWidget::ShowContextMenu);
-  connect(m_table, &QTableWidget::itemChanged, this, &RegisterWidget::OnItemChanged);
-  connect(&Settings::Instance(), &Settings::DebugFontChanged, this,
-          &RegisterWidget::OnDebugFontChanged);
+  if (!m_grid)
+    return;
+  m_grid->setFont(font);
+  const int line = m_grid->fontMetrics().height();
+  m_grid->verticalHeader()->setDefaultSectionSize(line);
+  m_grid->horizontalHeader()->setFixedHeight(line * 5 / 4);
 }
 
-void RegisterWidget::OnItemChanged(QTableWidgetItem* item)
+void RegisterWidget::CellEdited(QTableWidgetItem* item)
 {
-  if (!item->data(DATA_TYPE).isNull() && !m_updating)
-    static_cast<RegisterColumn*>(item)->SetValue();
+  // Only value cells carry a register type; labels are ignored, and so are our own redraws.
+  if (m_refreshing || item->data(DATA_TYPE).isNull())
+    return;
+  static_cast<RegisterColumn*>(item)->SetValue();
 }
 
-void RegisterWidget::OnDebugFontChanged(const QFont& font)
+void RegisterWidget::SetFormatQuietly(RegisterColumn* cell, RegisterDisplay format)
 {
-  if (m_table)
-  {
-    m_table->setFont(font);
-    const auto fontHeight = m_table->fontMetrics().height();
-    m_table->verticalHeader()->setDefaultSectionSize(fontHeight);
-
-    // Header height doesn't have to be great. As there are no labels, its only purpose is to make
-    // columns resizable.
-    m_table->horizontalHeader()->setFixedHeight(fontHeight * 5 / 4);
-  }
+  m_refreshing = true;
+  cell->SetDisplay(format);
+  m_refreshing = false;
 }
 
-void RegisterWidget::ShowContextMenu()
+void RegisterWidget::ShowCellMenu()
 {
-  QMenu* menu = new QMenu(this);
+  auto* menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
-  auto* raw_item = m_table->currentItem();
-
-  if (raw_item != nullptr && !raw_item->data(DATA_TYPE).isNull())
+  QTableWidgetItem* current = m_grid->currentItem();
+  if (current && !current->data(DATA_TYPE).isNull())
   {
-    auto* item = static_cast<RegisterColumn*>(raw_item);
-    auto type = static_cast<RegisterType>(item->data(DATA_TYPE).toInt());
-    auto display = item->GetDisplay();
+    auto* cell = static_cast<RegisterColumn*>(current);
+    const auto kind = static_cast<RegisterType>(cell->data(DATA_TYPE).toInt());
+    const RegisterDisplay shown_as = cell->GetDisplay();
 
     // i18n: This kind of "watch" is used for watching emulated memory.
     // It's not related to timekeeping devices.
-    menu->addAction(tr("Add to &watch"), this, [this, item] {
-      const u32 address = item->GetValue();
-      const QString name = QStringLiteral("reg_%1").arg(address, 8, 16, QLatin1Char('0'));
-      emit RequestWatch(name, address);
+    menu->addAction(tr("Add to &watch"), this, [this, cell] {
+      const u32 address = static_cast<u32>(cell->GetValue());
+      emit RequestWatch(QStringLiteral("reg_%1").arg(address, 8, 16, QLatin1Char('0')), address);
     });
-    menu->addAction(tr("Add memory &breakpoint"), this,
-                    [this, item] { emit RequestMemoryBreakpoint(item->GetValue()); });
+    menu->addAction(tr("Add memory &breakpoint"), this, [this, cell] {
+      emit RequestMemoryBreakpoint(static_cast<u32>(cell->GetValue()));
+    });
     menu->addAction(tr("View &memory"), this,
-                    [this, item] { emit RequestViewInMemory(item->GetValue()); });
+                    [this, cell] { emit RequestViewInMemory(static_cast<u32>(cell->GetValue())); });
     menu->addAction(tr("View &code"), this,
-                    [this, item] { emit RequestViewInCode(item->GetValue()); });
-
+                    [this, cell] { emit RequestViewInCode(static_cast<u32>(cell->GetValue())); });
     menu->addSeparator();
 
-    QActionGroup* group = new QActionGroup(menu);
-    group->setExclusive(true);
-
-    auto* view_hex = menu->addAction(tr("Hexadecimal"));
-    auto* view_int = menu->addAction(tr("Signed Integer"));
-    auto* view_uint = menu->addAction(tr("Unsigned Integer"));
+    // One choice for this cell, then the same choices for the whole column.
+    auto* exclusive = new QActionGroup(menu);
+    exclusive->setExclusive(true);
+    std::array<QAction*, 5> this_cell{};
+    this_cell[0] = menu->addAction(tr("Hexadecimal"));
+    this_cell[1] = menu->addAction(tr("Signed Integer"));
+    this_cell[2] = menu->addAction(tr("Unsigned Integer"));
     // i18n: A floating point number
-    auto* view_float = menu->addAction(tr("Float"));
+    this_cell[3] = menu->addAction(tr("Float"));
     // i18n: A double precision floating point number
-    auto* view_double = menu->addAction(tr("Double"));
-
+    this_cell[4] = menu->addAction(tr("Double"));
     menu->addSeparator();
 
-    auto* view_hex_column = menu->addAction(tr("All Hexadecimal"));
-    view_hex_column->setData(static_cast<int>(RegisterDisplay::Hex));
-    auto* view_int_column = menu->addAction(tr("All Signed Integer"));
-    view_int_column->setData(static_cast<int>(RegisterDisplay::SInt32));
-    auto* view_uint_column = menu->addAction(tr("All Unsigned Integer"));
-    view_uint_column->setData(static_cast<int>(RegisterDisplay::UInt32));
+    std::array<QAction*, 5> whole_column{};
+    whole_column[0] = menu->addAction(tr("All Hexadecimal"));
+    whole_column[1] = menu->addAction(tr("All Signed Integer"));
+    whole_column[2] = menu->addAction(tr("All Unsigned Integer"));
     // i18n: A floating point number
-    auto* view_float_column = menu->addAction(tr("All Float"));
-    view_float_column->setData(static_cast<int>(RegisterDisplay::Float));
+    whole_column[3] = menu->addAction(tr("All Float"));
     // i18n: A double precision floating point number
-    auto* view_double_column = menu->addAction(tr("All Double"));
-    view_double_column->setData(static_cast<int>(RegisterDisplay::Double));
+    whole_column[4] = menu->addAction(tr("All Double"));
+    for (size_t i = 0; i < whole_column.size(); ++i)
+      whole_column[i]->setData(static_cast<int>(i));
 
-    if (type == RegisterType::gpr || type == RegisterType::fpr)
+    if (kind == RegisterType::gpr || kind == RegisterType::fpr)
     {
       menu->addSeparator();
-
-      const std::string type_string =
-          fmt::format("{}{}", type == RegisterType::gpr ? "r" : "f", m_table->currentItem()->row());
+      const std::string reg =
+          fmt::format("{}{}", kind == RegisterType::gpr ? "r" : "f", m_grid->currentItem()->row());
       menu->addAction(tr("Run until hit (ignoring breakpoints)"),
-                      [this, type_string] { AutoStep(type_string); });
+                      [this, reg] { RunUntilRegisterChanges(reg); });
     }
 
-    for (auto* action : {view_hex, view_int, view_uint, view_float, view_double})
+    for (QAction* action : this_cell)
     {
       action->setCheckable(true);
       action->setVisible(false);
-      action->setActionGroup(group);
+      action->setActionGroup(exclusive);
     }
-
-    for (auto* action : {view_hex_column, view_int_column, view_uint_column, view_float_column,
-                         view_double_column})
-    {
+    for (QAction* action : whole_column)
       action->setVisible(false);
+
+    this_cell[static_cast<size_t>(shown_as)]->setChecked(true);
+
+    // Integer registers offer the 32-bit views, float registers hex and double.
+    std::array<bool, 5> offered{};
+    if (kind == RegisterType::gpr)
+      offered = {true, true, true, true, false};
+    else if (kind == RegisterType::fpr)
+      offered = {true, false, false, false, true};
+    for (size_t i = 0; i < offered.size(); ++i)
+    {
+      if (!offered[i])
+        continue;
+      this_cell[i]->setVisible(true);
+      whole_column[i]->setVisible(true);
     }
 
-    switch (display)
+    for (size_t i = 0; i < this_cell.size(); ++i)
     {
-    case RegisterDisplay::Hex:
-      view_hex->setChecked(true);
-      break;
-    case RegisterDisplay::SInt32:
-      view_int->setChecked(true);
-      break;
-    case RegisterDisplay::UInt32:
-      view_uint->setChecked(true);
-      break;
-    case RegisterDisplay::Float:
-      view_float->setChecked(true);
-      break;
-    case RegisterDisplay::Double:
-      view_double->setChecked(true);
-      break;
+      const auto format = static_cast<RegisterDisplay>(i);
+      connect(this_cell[i], &QAction::triggered, this,
+              [this, cell, format] { SetFormatQuietly(cell, format); });
     }
-
-    switch (type)
+    for (QAction* action : whole_column)
     {
-    case RegisterType::gpr:
-      view_hex->setVisible(true);
-      view_int->setVisible(true);
-      view_uint->setVisible(true);
-      view_float->setVisible(true);
-      view_hex_column->setVisible(true);
-      view_int_column->setVisible(true);
-      view_uint_column->setVisible(true);
-      view_float_column->setVisible(true);
-      break;
-    case RegisterType::fpr:
-      view_hex->setVisible(true);
-      view_double->setVisible(true);
-      view_hex_column->setVisible(true);
-      view_double_column->setVisible(true);
-      break;
-    default:
-      break;
-    }
-
-    connect(view_hex, &QAction::triggered, [this, item] {
-      m_updating = true;
-      item->SetDisplay(RegisterDisplay::Hex);
-      m_updating = false;
-    });
-
-    connect(view_int, &QAction::triggered, [this, item] {
-      m_updating = true;
-      item->SetDisplay(RegisterDisplay::SInt32);
-      m_updating = false;
-    });
-
-    connect(view_uint, &QAction::triggered, [this, item] {
-      m_updating = true;
-      item->SetDisplay(RegisterDisplay::UInt32);
-      m_updating = false;
-    });
-
-    connect(view_float, &QAction::triggered, [this, item] {
-      m_updating = true;
-      item->SetDisplay(RegisterDisplay::Float);
-      m_updating = false;
-    });
-
-    connect(view_double, &QAction::triggered, [this, item] {
-      m_updating = true;
-      item->SetDisplay(RegisterDisplay::Double);
-      m_updating = false;
-    });
-
-    for (auto* action : {view_hex_column, view_int_column, view_uint_column, view_float_column,
-                         view_double_column})
-    {
-      connect(action, &QAction::triggered, [this, action] {
-        m_updating = true;
-        auto col = m_table->currentItem()->column();
-        for (int i = 0; i < 32; i++)
-        {
-          auto* update_item = static_cast<RegisterColumn*>(m_table->item(i, col));
-          update_item->SetDisplay(static_cast<RegisterDisplay>(action->data().toInt()));
-        }
-        m_updating = false;
+      connect(action, &QAction::triggered, this, [this, action] {
+        m_refreshing = true;
+        const int col = m_grid->currentItem()->column();
+        const auto format = static_cast<RegisterDisplay>(action->data().toInt());
+        for (int row = 0; row < REGISTER_ROWS; ++row)
+          static_cast<RegisterColumn*>(m_grid->item(row, col))->SetDisplay(format);
+        m_refreshing = false;
       });
     }
 
@@ -300,266 +242,191 @@ void RegisterWidget::ShowContextMenu()
   }
 
   menu->addAction(tr("Update"), this, [this] { emit RequestTableUpdate(); });
-
   menu->exec(QCursor::pos());
 }
 
-void RegisterWidget::AutoStep(const std::string& reg) const
+void RegisterWidget::RunUntilRegisterChanges(const std::string& reg) const
 {
   CodeTrace trace;
   trace.SetRegTracked(reg);
 
-  QMessageBox msgbox(
+  QMessageBox timeout_box(
       QMessageBox::NoIcon, tr("Timed Out"),
       tr("<font color='#ff0000'>AutoStepping timed out. Current instruction is irrelevant."),
       QMessageBox::Cancel);
-  QPushButton* run_button = msgbox.addButton(tr("Keep Running"), QMessageBox::AcceptRole);
+  QPushButton* keep_going = timeout_box.addButton(tr("Keep Running"), QMessageBox::AcceptRole);
 
-  while (true)
+  // Step until the register changes; after a time-out the user may let it run on.
+  for (;;)
   {
-    const AutoStepResults results = [this, &trace] {
-      Core::CPUThreadGuard guard(m_system);
-      return trace.AutoStepping(guard, true);
-    }();
-
+    AutoStepResults results;
+    {
+      const Core::CPUThreadGuard guard(m_system);
+      results = trace.AutoStepping(guard, true);
+    }
     emit Host::GetInstance()->UpdateDisasmDialog();
 
     if (!results.timed_out)
-      break;
-
-    // Can keep running and try again after a time out.
-    msgbox.exec();
-    if (msgbox.clickedButton() != (QAbstractButton*)run_button)
-      break;
+      return;
+    timeout_box.exec();
+    if (timeout_box.clickedButton() != static_cast<QAbstractButton*>(keep_going))
+      return;
   }
 }
 
-void RegisterWidget::PopulateTable()
+void RegisterWidget::FillGrid()
 {
-  for (int i = 0; i < 32; i++)
+  auto state = [this]() -> PowerPC::PowerPCState& { return m_system.GetPPCState(); };
+
+  for (int i = 0; i < REGISTER_ROWS; ++i)
   {
-    // General purpose registers (int)
-    AddRegister(
-        i, 0, RegisterType::gpr, fmt::format("r{}", i),
-        [this, i] { return m_system.GetPPCState().gpr[i]; },
-        [this, i](u64 value) { m_system.GetPPCState().gpr[i] = value; });
-
-    // Floating point registers (double)
-    AddRegister(
-        i, 2, RegisterType::fpr, fmt::format("f{}", i),
-        [this, i] { return m_system.GetPPCState().ps[i].PS0AsU64(); },
-        [this, i](u64 value) { m_system.GetPPCState().ps[i].SetPS0(value); });
-
-    AddRegister(
-        i, 4, RegisterType::fpr, "", [this, i] { return m_system.GetPPCState().ps[i].PS1AsU64(); },
-        [this, i](u64 value) { m_system.GetPPCState().ps[i].SetPS1(value); });
+    const size_t n = static_cast<size_t>(i);
+    Place(
+        i, GPR_COLUMN, RegisterType::gpr, fmt::format("r{}", i),
+        [state, n] { return u64{state().gpr[n]}; },
+        [state, n](u64 v) { state().gpr[n] = static_cast<u32>(v); });
+    Place(
+        i, FPR_COLUMN, RegisterType::fpr, fmt::format("f{}", i),
+        [state, n] { return state().ps[n].PS0AsU64(); },
+        [state, n](u64 v) { state().ps[n].SetPS0(v); });
+    Place(
+        i, PS1_COLUMN, RegisterType::fpr, "", [state, n] { return state().ps[n].PS1AsU64(); },
+        [state, n](u64 v) { state().ps[n].SetPS1(v); });
   }
 
-  // The IBAT and DBAT registers have a large gap between
-  // registers 3 and 4 so we can't just use SPR_IBAT0U or
-  // SPR_DBAT0U as low-index the entire way
-  for (int i = 0; i < 4; i++)
+  // BATs: upper word in the high half, lower word in the low half. BAT4-7 live in a separate SPR
+  // block from BAT0-3.
+  const auto bat_reader = [state](int upper_spr, int lower_spr) {
+    return [state, upper_spr, lower_spr] {
+      const auto& ppc = state();
+      return (u64{ppc.spr[upper_spr]} << 32) + ppc.spr[lower_spr];
+    };
+  };
+  for (int i = 0; i < 4; ++i)
   {
-    // IBAT registers
-    AddRegister(
-        i, 5, RegisterType::ibat, fmt::format("IBAT{}", i),
-        [this, i] {
-          const auto& ppc_state = m_system.GetPPCState();
-          return (static_cast<u64>(ppc_state.spr[SPR_IBAT0U + i * 2]) << 32) +
-                 ppc_state.spr[SPR_IBAT0L + i * 2];
-        },
-        nullptr);
-    AddRegister(
-        i + 4, 5, RegisterType::ibat, fmt::format("IBAT{}", 4 + i),
-        [this, i] {
-          const auto& ppc_state = m_system.GetPPCState();
-          return (static_cast<u64>(ppc_state.spr[SPR_IBAT4U + i * 2]) << 32) +
-                 ppc_state.spr[SPR_IBAT4L + i * 2];
-        },
-        nullptr);
-
-    // DBAT registers
-    AddRegister(
-        i + 8, 5, RegisterType::dbat, fmt::format("DBAT{}", i),
-        [this, i] {
-          const auto& ppc_state = m_system.GetPPCState();
-          return (static_cast<u64>(ppc_state.spr[SPR_DBAT0U + i * 2]) << 32) +
-                 ppc_state.spr[SPR_DBAT0L + i * 2];
-        },
-        nullptr);
-    AddRegister(
-        i + 12, 5, RegisterType::dbat, fmt::format("DBAT{}", 4 + i),
-        [this, i] {
-          const auto& ppc_state = m_system.GetPPCState();
-          return (static_cast<u64>(ppc_state.spr[SPR_DBAT4U + i * 2]) << 32) +
-                 ppc_state.spr[SPR_DBAT4L + i * 2];
-        },
-        nullptr);
+    Place(i, SPECIAL_COLUMN, RegisterType::ibat, fmt::format("IBAT{}", i),
+          bat_reader(SPR_IBAT0U + i * 2, SPR_IBAT0L + i * 2), nullptr);
+    Place(i + 4, SPECIAL_COLUMN, RegisterType::ibat, fmt::format("IBAT{}", i + 4),
+          bat_reader(SPR_IBAT4U + i * 2, SPR_IBAT4L + i * 2), nullptr);
+    Place(i + 8, SPECIAL_COLUMN, RegisterType::dbat, fmt::format("DBAT{}", i),
+          bat_reader(SPR_DBAT0U + i * 2, SPR_DBAT0L + i * 2), nullptr);
+    Place(i + 12, SPECIAL_COLUMN, RegisterType::dbat, fmt::format("DBAT{}", i + 4),
+          bat_reader(SPR_DBAT4U + i * 2, SPR_DBAT4L + i * 2), nullptr);
   }
 
-  for (int i = 0; i < 8; i++)
+  for (int i = 0; i < 8; ++i)
   {
-    // Graphics quantization registers
-    AddRegister(
-        i + 16, 7, RegisterType::gqr, fmt::format("GQR{}", i),
-        [this, i] { return m_system.GetPPCState().spr[SPR_GQR0 + i]; }, nullptr);
+    const int spr = SPR_GQR0 + i;
+    Place(
+        i + 16, SIDE_COLUMN, RegisterType::gqr, fmt::format("GQR{}", i),
+        [state, spr] { return u64{state().spr[spr]}; }, nullptr);
   }
 
-  // HID registers
-  AddRegister(
-      24, 7, RegisterType::hid, "HID0", [this] { return m_system.GetPPCState().spr[SPR_HID0]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_HID0] = static_cast<u32>(value); });
-  AddRegister(
-      25, 7, RegisterType::hid, "HID1", [this] { return m_system.GetPPCState().spr[SPR_HID1]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_HID1] = static_cast<u32>(value); });
-  AddRegister(
-      26, 7, RegisterType::hid, "HID2", [this] { return m_system.GetPPCState().spr[SPR_HID2]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_HID2] = static_cast<u32>(value); });
-  AddRegister(
-      27, 7, RegisterType::hid, "HID4", [this] { return m_system.GetPPCState().spr[SPR_HID4]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_HID4] = static_cast<u32>(value); });
+  // Readers and writers for a plain 32-bit SPR.
+  const auto spr_read = [state](int spr) { return [state, spr] { return u64{state().spr[spr]}; }; };
+  const auto spr_write = [state](int spr) {
+    return [state, spr](u64 v) { state().spr[spr] = static_cast<u32>(v); };
+  };
 
-  for (int i = 0; i < 16; i++)
+  Place(24, SIDE_COLUMN, RegisterType::hid, "HID0", spr_read(SPR_HID0), spr_write(SPR_HID0));
+  Place(25, SIDE_COLUMN, RegisterType::hid, "HID1", spr_read(SPR_HID1), spr_write(SPR_HID1));
+  Place(26, SIDE_COLUMN, RegisterType::hid, "HID2", spr_read(SPR_HID2), spr_write(SPR_HID2));
+  Place(27, SIDE_COLUMN, RegisterType::hid, "HID4", spr_read(SPR_HID4), spr_write(SPR_HID4));
+
+  for (int i = 0; i < 16; ++i)
   {
-    // SR registers
-    AddRegister(
-        i, 7, RegisterType::sr, fmt::format("SR{}", i),
-        [this, i] { return m_system.GetPPCState().sr[i]; },
-        [this, i](u64 value) {
-          m_system.GetPPCState().sr[i] = value;
+    const size_t n = static_cast<size_t>(i);
+    Place(
+        i, SIDE_COLUMN, RegisterType::sr, fmt::format("SR{}", i),
+        [state, n] { return u64{state().sr[n]}; },
+        [this, state, n](u64 v) {
+          state().sr[n] = static_cast<u32>(v);
           m_system.GetMMU().SRUpdated();
         });
   }
 
-  // Special registers
-  // TB
-  AddRegister(
-      16, 5, RegisterType::tb, "TB",
+  Place(
+      16, SPECIAL_COLUMN, RegisterType::tb, "TB",
       [this] { return m_system.GetPowerPC().ReadFullTimeBaseValue(); }, nullptr);
-
-  // PC
-  AddRegister(
-      17, 5, RegisterType::pc, "PC", [this] { return m_system.GetPPCState().pc; },
-      [this](u64 value) { m_system.GetPPCState().pc = value; });
-
-  // LR
-  AddRegister(
-      18, 5, RegisterType::lr, "LR", [this] { return m_system.GetPPCState().spr[SPR_LR]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_LR] = value; });
-
-  // CTR
-  AddRegister(
-      19, 5, RegisterType::ctr, "CTR", [this] { return m_system.GetPPCState().spr[SPR_CTR]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_CTR] = value; });
-
-  // CR
-  AddRegister(
-      20, 5, RegisterType::cr, "CR", [this] { return m_system.GetPPCState().cr.Get(); },
-      [this](u64 value) { m_system.GetPPCState().cr.Set(value); });
-
-  // XER
-  AddRegister(
-      21, 5, RegisterType::xer, "XER", [this] { return m_system.GetPPCState().GetXER().Hex; },
-      [this](u64 value) { m_system.GetPPCState().SetXER(UReg_XER(value)); });
-
-  // FPSCR
-  AddRegister(
-      22, 5, RegisterType::fpscr, "FPSCR", [this] { return m_system.GetPPCState().fpscr.Hex; },
-      [this](u64 value) { m_system.GetPPCState().fpscr = static_cast<u32>(value); });
-
-  // MSR
-  AddRegister(
-      23, 5, RegisterType::msr, "MSR", [this] { return m_system.GetPPCState().msr.Hex; },
-      [this](u64 value) {
-        m_system.GetPPCState().msr.Hex = value;
+  Place(
+      17, SPECIAL_COLUMN, RegisterType::pc, "PC", [state] { return u64{state().pc}; },
+      [state](u64 v) { state().pc = static_cast<u32>(v); });
+  Place(18, SPECIAL_COLUMN, RegisterType::lr, "LR", spr_read(SPR_LR), spr_write(SPR_LR));
+  Place(19, SPECIAL_COLUMN, RegisterType::ctr, "CTR", spr_read(SPR_CTR), spr_write(SPR_CTR));
+  Place(
+      20, SPECIAL_COLUMN, RegisterType::cr, "CR", [state] { return u64{state().cr.Get()}; },
+      [state](u64 v) { state().cr.Set(static_cast<u32>(v)); });
+  Place(
+      21, SPECIAL_COLUMN, RegisterType::xer, "XER", [state] { return u64{state().GetXER().Hex}; },
+      [state](u64 v) { state().SetXER(UReg_XER(static_cast<u32>(v))); });
+  Place(
+      22, SPECIAL_COLUMN, RegisterType::fpscr, "FPSCR",
+      [state] { return u64{state().fpscr.Hex}; },
+      [state](u64 v) { state().fpscr = static_cast<u32>(v); });
+  Place(
+      23, SPECIAL_COLUMN, RegisterType::msr, "MSR", [state] { return u64{state().msr.Hex}; },
+      [this, state](u64 v) {
+        state().msr.Hex = static_cast<u32>(v);
         m_system.GetPowerPC().MSRUpdated();
       });
-
-  // SRR 0-1
-  AddRegister(
-      24, 5, RegisterType::srr, "SRR0", [this] { return m_system.GetPPCState().spr[SPR_SRR0]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_SRR0] = value; });
-  AddRegister(
-      25, 5, RegisterType::srr, "SRR1", [this] { return m_system.GetPPCState().spr[SPR_SRR1]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_SRR1] = value; });
-
-  // Exceptions
-  AddRegister(
-      26, 5, RegisterType::exceptions, "Exceptions",
-      [this] { return m_system.GetPPCState().Exceptions; },
-      [this](u64 value) { m_system.GetPPCState().Exceptions = value; });
-
-  // Int Mask
-  AddRegister(
-      27, 5, RegisterType::int_mask, "Int Mask",
-      [this] { return m_system.GetProcessorInterface().GetMask(); }, nullptr);
-
-  // Int Cause
-  AddRegister(
-      28, 5, RegisterType::int_cause, "Int Cause",
-      [this] { return m_system.GetProcessorInterface().GetCause(); }, nullptr);
-
-  // DSISR
-  AddRegister(
-      29, 5, RegisterType::dsisr, "DSISR", [this] { return m_system.GetPPCState().spr[SPR_DSISR]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_DSISR] = value; });
-  // DAR
-  AddRegister(
-      30, 5, RegisterType::dar, "DAR", [this] { return m_system.GetPPCState().spr[SPR_DAR]; },
-      [this](u64 value) { m_system.GetPPCState().spr[SPR_DAR] = value; });
-
-  // Hash Mask
-  AddRegister(
-      31, 5, RegisterType::pt_hashmask, "Hash Mask",
-      [this] {
-        const auto& ppc_state = m_system.GetPPCState();
-        return ppc_state.pagetable_mask | ppc_state.pagetable_base;
+  Place(24, SPECIAL_COLUMN, RegisterType::srr, "SRR0", spr_read(SPR_SRR0), spr_write(SPR_SRR0));
+  Place(25, SPECIAL_COLUMN, RegisterType::srr, "SRR1", spr_read(SPR_SRR1), spr_write(SPR_SRR1));
+  Place(
+      26, SPECIAL_COLUMN, RegisterType::exceptions, "Exceptions",
+      [state] { return u64{state().Exceptions}; },
+      [state](u64 v) { state().Exceptions = static_cast<u32>(v); });
+  Place(
+      27, SPECIAL_COLUMN, RegisterType::int_mask, "Int Mask",
+      [this] { return u64{m_system.GetProcessorInterface().GetMask()}; }, nullptr);
+  Place(
+      28, SPECIAL_COLUMN, RegisterType::int_cause, "Int Cause",
+      [this] { return u64{m_system.GetProcessorInterface().GetCause()}; }, nullptr);
+  Place(29, SPECIAL_COLUMN, RegisterType::dsisr, "DSISR", spr_read(SPR_DSISR),
+        spr_write(SPR_DSISR));
+  Place(30, SPECIAL_COLUMN, RegisterType::dar, "DAR", spr_read(SPR_DAR), spr_write(SPR_DAR));
+  Place(
+      31, SPECIAL_COLUMN, RegisterType::pt_hashmask, "Hash Mask",
+      [state] {
+        const auto& ppc = state();
+        return u64{ppc.pagetable_mask | ppc.pagetable_base};
       },
       nullptr);
 
   emit RequestTableUpdate();
-  m_table->resizeColumnsToContents();
+  m_grid->resizeColumnsToContents();
 }
 
-void RegisterWidget::AddRegister(int row, int column, RegisterType type,
-                                 const std::string& register_name, std::function<u64()> get_reg,
-                                 std::function<void(u64)> set_reg)
+void RegisterWidget::Place(int row, int column, RegisterType type, const std::string& name,
+                           std::function<u64()> read, std::function<void(u64)> write)
 {
-  auto* value = new RegisterColumn(type, std::move(get_reg), std::move(set_reg));
+  auto* cell = new RegisterColumn(type, std::move(read), std::move(write));
 
-  if (m_table->rowCount() <= row)
-    m_table->setRowCount(row + 1);
+  if (row >= m_grid->rowCount())
+    m_grid->setRowCount(row + 1);
 
-  bool has_label = !register_name.empty();
-
-  if (has_label)
+  // Unnamed cells (the second paired-single half) sit directly in the given column.
+  int value_column = column;
+  if (!name.empty())
   {
-    auto* label = new QTableWidgetItem(QString::fromStdString(register_name));
+    auto* label = new QTableWidgetItem(QString::fromStdString(name));
     label->setFlags(Qt::ItemIsEnabled);
-
-    QFont label_font = label->font();
-    label_font.setBold(true);
-    label->setFont(label_font);
-
-    m_table->setItem(row, column, label);
-    m_table->setItem(row, column + 1, value);
-    m_table->item(row, column + 1)->setTextAlignment(Qt::AlignVCenter | Qt::AlignRight);
+    QFont bold = label->font();
+    bold.setBold(true);
+    label->setFont(bold);
+    m_grid->setItem(row, column, label);
+    value_column = column + 1;
   }
-  else
-  {
-    m_table->setItem(row, column, value);
-    m_table->item(row, column)->setTextAlignment(Qt::AlignVCenter | Qt::AlignRight);
-  }
+  m_grid->setItem(row, value_column, cell);
+  cell->setTextAlignment(Qt::AlignVCenter | Qt::AlignRight);
 
-  connect(this, &RegisterWidget::UpdateTable, [value] { value->RefreshValue(); });
+  connect(this, &RegisterWidget::UpdateTable, this, [cell] { cell->RefreshValue(); });
 }
 
-void RegisterWidget::Update()
+void RegisterWidget::RefreshIfPaused()
 {
-  if (isVisible() && Core::GetState(m_system) == Core::State::Paused)
-  {
-    m_updating = true;
-    emit UpdateTable();
-    m_updating = false;
-  }
+  if (!isVisible() || Core::GetState(m_system) != Core::State::Paused)
+    return;
+  m_refreshing = true;
+  emit UpdateTable();
+  m_refreshing = false;
 }
