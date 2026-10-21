@@ -1,10 +1,136 @@
-Most of Dolphin's original source code is licensed under GPLv2+. Part of the
-source code distributed in this repository is derived from other projects and
-may have stronger or weaker licensing requirement. Overall, in aggregate, the
-entirety of this repository is compatible with the GPLv3 license.
+PixelU-Wii: copyright and licences
+===================================
 
-Per-file licensing information is provided via SPDX tags [1]. The licenses
-referenced in these tags can be found in the LICENSES/ directory within this
-source repository.
+PixelU-Wii (PixelU\wii\PixelU-Wii.exe) is RetroPixels' GameCube and Wii
+engine. This file says who owns which parts of it and under which terms each
+part is shipped. The licence texts are in the Licenses folder next to this
+file; license.txt is the GNU GPL version 2.
 
-[1] https://spdx.dev/
+
+1. RetroPixels' original code and art
+-------------------------------------
+
+Every source file that starts with the line
+
+    Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+was written for RetroPixels from scratch and is RetroPixels' work. So are
+the program icon, the pictures in Sys\Resources (except the font files) and
+the Windows dark style, all drawn by pixelu/wii/art/make_art.py.
+
+No licence has been chosen for RetroPixels' original code yet. This notice
+does not grant one and does not choose one.
+
+The program as a whole: while PixelU-Wii.exe still contains Dolphin code
+(section 2) and is linked with GPL-licensed components (section 4), the
+executable is a work based on Dolphin and is distributed under the terms of
+the GNU General Public License, version 2 or (at your option) any later
+version (license.txt, Licenses\GPL-2.0-or-later.txt). The source code is at
+https://github.com/shredder565/retropixels (folder pixelu/wii).
+
+
+2. Dolphin code that is still in PixelU-Wii
+-------------------------------------------
+
+PixelU-Wii started as Dolphin 2609a (https://dolphin-emu.org/,
+https://github.com/dolphin-emu/dolphin) and is being rewritten one file at a
+time (docs/pixelu-wii-original.md lists what is left). Source files without
+the line above are Dolphin's, Copyright Dolphin Emulator Project, and keep
+the licence named in their SPDX-License-Identifier line: mostly
+GPL-2.0-or-later, a few MIT, BSD-3-Clause or CC0-1.0 (Licenses folder).
+The build system and Externals glue still come from Dolphin's tree at 2609a
+(GPL-2.0-or-later).
+
+
+3. Dolphin community data, shipped unchanged
+--------------------------------------------
+
+These are Dolphin community data (GPL-2.0-or-later), shipped unchanged:
+
+  Sys\GameSettings\          per-game settings and patches
+  Sys\ApprovedInis.json      hashes of those settings for RetroAchievements
+                             hardcore mode
+  Languages\                 translations of the program's texts (compiled
+                             from Dolphin's Languages/po)
+
+The rest of Sys, apart from Sys\Resources, also still comes from Dolphin
+2609a unchanged and is under the same terms (GPL-2.0-or-later, Copyright
+Dolphin Emulator Project): Sys\Themes, Sys\Shaders, Sys\Load, Sys\Profiles,
+Sys\Wii, Sys\GC (including the free replacement DSP ROM and the IPL fonts
+Dolphin generated from Droid Sans, Apache-2.0), Sys\totaldb.dsy and
+Sys\codehandler.bin (Gecko code handler, based on Gecko OS / kenobi's
+handler). The game title lists Sys\wiitdb-*.txt and Sys\triforcetdb-en.txt
+are GameTDB data (https://www.gametdb.com/) as distributed with Dolphin.
+
+
+4. Third-party components
+-------------------------
+
+PixelU-Wii includes or links the following projects. Each keeps its own
+licence and copyright. The standard licence texts are in Licenses\; each
+project's own licence file, with its copyright lines, is copied at build
+time into Licenses\Externals\<project>\.
+
+  Component                            Licence (Licenses\...)
+  -----------------------------------  ----------------------------------------
+  Qt 6 (Qt6*.dll, QtPlugins)           LGPL-3.0-only (LGPL-3.0-only.txt,
+                                       GPL-3.0-only.txt)
+  FFmpeg (avcodec, avformat, avutil,   LGPL-2.1-or-later (LGPL-2.1-or-later.txt)
+   swresample, swscale DLLs)
+  SDL 3                                Zlib
+  SFML (network)                       Zlib
+  zlib-ng                              Zlib
+  minizip-ng                           Zlib
+  ed25519 (Orson Peters)               Zlib
+  libspng                              BSD-2-Clause
+  LZ4                                  BSD-2-Clause
+  xxHash                               BSD-2-Clause
+  picojson                             BSD-2-Clause
+  Zstandard                            BSD-3-Clause (or GPL-2.0)
+  MiniUPnPc                            BSD-3-Clause
+  hidapi                               BSD-3-Clause (one of its licence choices)
+  FatFs (ChaN)                         FatFs licence (BSD-1-Clause style;
+                                       Licenses\Externals\FatFs)
+  cubeb                                ISC
+  mbed TLS                             Apache-2.0
+  SPIRV-Cross                          Apache-2.0
+  glslang                              BSD-3-Clause, MIT and Apache-2.0 parts
+  Vulkan-Headers                       Apache-2.0 / MIT
+  VulkanMemoryAllocator                MIT
+  Dear ImGui, ImPlot                   MIT
+  fmt                                  MIT
+  ENet                                 MIT
+  pugixml                              MIT
+  tinygltf                             MIT
+  watcher                              MIT
+  cpp-ipc                              MIT
+  cpp-optparse                         MIT
+  discord-rpc                          MIT
+  expr                                 MIT
+  rcheevos                             MIT
+  Windows Implementation Libraries     MIT
+  curl                                 curl licence
+  bzip2                                bzip2-1.0.6
+  liblzma (XZ Utils)                   0BSD / public domain
+  mGBA                                 MPL-2.0
+  libusb                               LGPL-2.1-or-later
+  libiconv                             LGPL-2.1-or-later
+  Bochs disassembler                   LGPL-2.1-or-later
+  OpenAL headers                       LGPL-2.0-or-later (LGPL-2.1-or-later.txt
+                                       covers the later versions)
+  LZO                                  GPL-2.0-or-later
+  FreeSurround                         GPL-2.0-or-later
+  Khronos OpenGL headers               MIT
+  TAP-Windows header (OpenVPN)         GPL-2.0 (header only)
+  Bitstream Vera Sans Mono             Bitstream-Vera (Sys\Resources\
+   (Sys\Resources\OSD_Font.ttf)         OSD_Font_VeraMono_Copyright.txt)
+  Microsoft Visual C++ runtime DLLs    Microsoft's redistribution terms (Visual
+                                       Studio redistributable files)
+
+Qt and FFmpeg are shipped as DLLs, so they can be replaced with other builds
+of the same version. The Qt and FFmpeg binaries come from Dolphin's
+ext-win-qt and ext-win-ffmpeg repositories.
+
+"GameCube" and "Wii" are trademarks of Nintendo. PixelU-Wii and RetroPixels
+are not affiliated with Nintendo or with the Dolphin project. No Nintendo
+keys, firmware, BIOS/IPL images or games are included.
