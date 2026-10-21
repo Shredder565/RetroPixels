@@ -1,11 +1,12 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Debugger/JitBlockTableModel.h"
 
 #include <array>
+#include <chrono>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "Common/Assert.h"
 #include "Core/Core.h"
@@ -14,367 +15,334 @@
 #include "DolphinQt/Host.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+using Column = JitBlockTableModelColumn::EnumType;
+
+QString Dashes()
+{
+  return QStringLiteral(" --- ");
+}
+
+QVariant SymbolNameOrNothing(const Common::Symbol* symbol)
+{
+  if (!symbol)
+    return QVariant{};
+  return QString::fromStdString(symbol->name);
+}
+
+// "DR", "IR" and "PERFMON" joined by '|', in that order.
+QString FeatureText(CPUEmuFeatureFlags flags)
+{
+  QStringList parts;
+  if (flags & FEATURE_FLAG_MSR_DR)
+    parts.append(QStringLiteral("DR"));
+  if (flags & FEATURE_FLAG_MSR_IR)
+    parts.append(QStringLiteral("IR"));
+  if (flags & FEATURE_FLAG_PERFMON)
+    parts.append(QStringLiteral("PERFMON"));
+  return parts.join(QLatin1Char('|'));
+}
+
+// Guest instructions that are compiled more than once (the block's length minus the number of
+// distinct instruction addresses).
+size_t RepeatCount(const JitBlock& block)
+{
+  return block.originalSize -
+         block.physical_addresses.get_stats().first / sizeof(UGeckoInstruction);
+}
+
+QString Percent(double share)
+{
+  return QStringLiteral("%1%").arg(share, 10, 'f', 6);
+}
+}  // namespace
+
+JitBlockTableModel::JitBlockTableModel(Core::System& system, JitInterface& jit_interface,
+                                       PPCSymbolDB& ppc_symbol_db, QObject* parent)
+    : QAbstractTableModel(parent), m_system(system), m_jit(jit_interface),
+      m_symbol_db(ppc_symbol_db)
+{
+}
+
+JitBlockTableModel::~JitBlockTableModel() = default;
+
 const JitBlock& JitBlockTableModel::GetJitBlock(const QModelIndex& index) const
 {
   ASSERT(index.isValid());
-  return m_jit_blocks[index.row()];
+  return m_blocks[index.row()];
 }
 
-void JitBlockTableModel::SumOverallCosts()
+void JitBlockTableModel::TotalUpCosts()
 {
-  m_overall_cycles_spent = 0;
-  m_overall_time_spent = {};
-  for (const JitBlock& block : m_jit_blocks)
+  m_total_cycles = 0;
+  m_total_time = {};
+  for (const JitBlock& block : m_blocks)
   {
-    if (block.profile_data == nullptr)
-      continue;
-    m_overall_cycles_spent += block.profile_data->cycles_spent;
-    m_overall_time_spent += block.profile_data->time_spent;
-  };
-}
-
-static QVariant GetSymbolNameQVariant(const Common::Symbol* symbol)
-{
-  return symbol ? QString::fromStdString(symbol->name) : QVariant{};
-}
-
-void JitBlockTableModel::PrefetchSymbols()
-{
-  m_symbol_list.clear();
-  m_symbol_list.reserve(m_jit_blocks.size());
-  // If the table viewing this model will be accessing every element,
-  // it would be a waste of effort to lazy-initialize the symbol list.
-  if (m_sorting_by_symbols || m_filtering_by_symbols)
-  {
-    for (const JitBlock& block : m_jit_blocks)
+    if (const auto* profile = block.profile_data.get())
     {
-      m_symbol_list.emplace_back(
-          GetSymbolNameQVariant(m_ppc_symbol_db.GetSymbolFromAddr(block.effectiveAddress)));
+      m_total_cycles += profile->cycles_spent;
+      m_total_time += profile->time_spent;
     }
   }
-  else
+}
+
+void JitBlockTableModel::LookUpSymbols()
+{
+  m_symbols.clear();
+  m_symbols.reserve(m_blocks.size());
+
+  // Sorting or filtering by symbol touches every row anyway, so resolve the names now; otherwise
+  // each name is looked up the first time it is shown.
+  const bool resolve_now = m_symbol_sort || m_symbol_filter;
+  for (const JitBlock& block : m_blocks)
   {
-    for (const JitBlock& block : m_jit_blocks)
+    if (resolve_now)
     {
-      m_symbol_list.emplace_back([this, &block] {
-        return GetSymbolNameQVariant(m_ppc_symbol_db.GetSymbolFromAddr(block.effectiveAddress));
+      m_symbols.emplace_back(
+          SymbolNameOrNothing(m_symbol_db.GetSymbolFromAddr(block.effectiveAddress)));
+    }
+    else
+    {
+      m_symbols.emplace_back([this, &block] {
+        return SymbolNameOrNothing(m_symbol_db.GetSymbolFromAddr(block.effectiveAddress));
       });
     }
   }
 }
 
-void JitBlockTableModel::Clear()
+void JitBlockTableModel::Empty()
 {
   emit layoutAboutToBeChanged();
-  m_jit_blocks.clear();
-  m_symbol_list.clear();
+  m_blocks.clear();
+  m_symbols.clear();
   emit layoutChanged();
 }
 
-void JitBlockTableModel::Update(Core::State state)
+void JitBlockTableModel::Snapshot(Core::State state)
 {
   emit layoutAboutToBeChanged();
-  m_jit_blocks.clear();
+  m_blocks.clear();
+  // Blocks can only be read safely while the CPU is paused.
   if (state == Core::State::Paused)
   {
-    m_jit_blocks.reserve(m_jit_interface.GetBlockCount());
-    m_jit_interface.RunOnBlocks(Core::CPUThreadGuard{m_system}, [this](const JitBlock& block) {
-      m_jit_blocks.emplace_back(block);
-    });
-    SumOverallCosts();
+    m_blocks.reserve(static_cast<qsizetype>(m_jit.GetBlockCount()));
+    m_jit.RunOnBlocks(Core::CPUThreadGuard{m_system},
+                      [this](const JitBlock& block) { m_blocks.emplace_back(block); });
+    TotalUpCosts();
   }
-  PrefetchSymbols();
+  LookUpSymbols();
   emit layoutChanged();
 }
 
-void JitBlockTableModel::UpdateProfileData()
+void JitBlockTableModel::SnapshotNow()
 {
-  const int row_count = rowCount();
-  if (row_count <= 0)
-    return;
-  SumOverallCosts();
-  static const QList<int> roles = {Qt::DisplayRole};
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::RunCount), createIndex(last, Column::TimePercent), roles);
+  Snapshot(Core::GetState(m_system));
 }
 
-void JitBlockTableModel::UpdateSymbols()
-{
-  const int row_count = rowCount();
-  if (row_count <= 0)
-    return;
-  PrefetchSymbols();
-  static const QList<int> roles = {Qt::DisplayRole};
-  const int last = row_count - 1;
-  emit dataChanged(createIndex(0, Column::Symbol), createIndex(last, Column::Symbol), roles);
-}
-
-void JitBlockTableModel::ConnectSlots()
+void JitBlockTableModel::Listen(bool on)
 {
   auto* const host = Host::GetInstance();
-  connect(host, &Host::JitCacheInvalidation, this, &JitBlockTableModel::OnJitCacheInvalidation);
-  connect(host, &Host::JitProfileDataWiped, this, &JitBlockTableModel::OnJitProfileDataWiped);
-  connect(host, &Host::UpdateDisasmDialog, this, &JitBlockTableModel::OnUpdateDisasmDialog);
-  connect(host, &Host::PPCSymbolsChanged, this, &JitBlockTableModel::OnPPCSymbolsUpdated);
-  connect(host, &Host::PPCBreakpointsChanged, this, &JitBlockTableModel::OnPPCBreakpointsChanged);
   auto* const settings = &Settings::Instance();
-  connect(settings, &Settings::EmulationStateChanged, this,
-          &JitBlockTableModel::OnEmulationStateChanged);
-}
+  if (!on)
+  {
+    for (const QMetaObject::Connection& link : m_links)
+      disconnect(link);
+    m_links.clear();
+    return;
+  }
 
-void JitBlockTableModel::DisconnectSlots()
-{
-  auto* const host = Host::GetInstance();
-  disconnect(host, &Host::JitCacheInvalidation, this, &JitBlockTableModel::OnJitCacheInvalidation);
-  disconnect(host, &Host::JitProfileDataWiped, this, &JitBlockTableModel::OnJitProfileDataWiped);
-  disconnect(host, &Host::UpdateDisasmDialog, this, &JitBlockTableModel::OnUpdateDisasmDialog);
-  disconnect(host, &Host::PPCSymbolsChanged, this, &JitBlockTableModel::OnPPCSymbolsUpdated);
-  disconnect(host, &Host::PPCBreakpointsChanged, this,
-             &JitBlockTableModel::OnPPCBreakpointsChanged);
-  auto* const settings = &Settings::Instance();
-  disconnect(settings, &Settings::EmulationStateChanged, this,
-             &JitBlockTableModel::OnEmulationStateChanged);
-}
-
-void JitBlockTableModel::Show()
-{
-  ConnectSlots();
-  // Every slot that may have missed a signal while this model was hidden can be handled by:
-  Update(Core::GetState(m_system));
-}
-
-void JitBlockTableModel::Hide()
-{
-  DisconnectSlots();
-  Clear();
+  m_links.append(connect(host, &Host::JitCacheInvalidation, this, &JitBlockTableModel::SnapshotNow));
+  // Wiping the profile only changes the numbers, not the rows.
+  m_links.append(connect(host, &Host::JitProfileDataWiped, this, [this] {
+    const int rows = rowCount();
+    if (rows <= 0)
+      return;
+    TotalUpCosts();
+    emit dataChanged(createIndex(0, Column::RunCount), createIndex(rows - 1, Column::TimePercent),
+                     {Qt::DisplayRole});
+  }));
+  // Anything that may leave stale block references (including symbol loads, which can make
+  // the HLE patcher invalidate blocks) takes a new snapshot.
+  m_links.append(connect(host, &Host::UpdateDisasmDialog, this, &JitBlockTableModel::SnapshotNow));
+  m_links.append(connect(host, &Host::PPCSymbolsChanged, this, &JitBlockTableModel::SnapshotNow));
+  m_links.append(connect(host, &Host::PPCBreakpointsChanged, this, &JitBlockTableModel::SnapshotNow));
+  m_links.append(connect(settings, &Settings::EmulationStateChanged, this, &JitBlockTableModel::Snapshot));
 }
 
 void JitBlockTableModel::OnShowSignal()
 {
-  Show();
+  Listen(true);
+  // Catch up on whatever was missed while hidden.
+  SnapshotNow();
 }
 
 void JitBlockTableModel::OnHideSignal()
 {
-  Hide();
+  Listen(false);
+  Empty();
 }
 
 void JitBlockTableModel::OnSortIndicatorChanged(int logicalIndex, Qt::SortOrder)
 {
-  m_sorting_by_symbols = logicalIndex == Column::Symbol;
+  m_symbol_sort = logicalIndex == Column::Symbol;
 }
 
 void JitBlockTableModel::OnFilterSymbolTextChanged(const QString& string)
 {
-  m_filtering_by_symbols = !string.isEmpty();
+  m_symbol_filter = !string.isEmpty();
 }
 
-void JitBlockTableModel::OnJitCacheInvalidation()
+QVariant JitBlockTableModel::TextFor(const QModelIndex& index) const
 {
-  Update(Core::GetState(m_system));
-}
+  const int col = index.column();
+  if (col == Column::Symbol)
+  {
+    const QVariant& name = *m_symbols[index.row()];
+    return name.isValid() ? name : QVariant(Dashes());
+  }
 
-void JitBlockTableModel::OnJitProfileDataWiped()
-{
-  UpdateProfileData();
-}
-
-void JitBlockTableModel::OnUpdateDisasmDialog()
-{
-  // This should hopefully catch all the little things that lead to stale JitBlock references.
-  Update(Core::GetState(m_system));
-}
-
-void JitBlockTableModel::OnPPCSymbolsUpdated()
-{
-  // Previously, this was only a call to `UpdateSymbols`, but HLE patch engine code can
-  // invalidate JIT blocks when specific symbols are loaded. What can be done about it?
-  Update(Core::GetState(m_system));
-}
-
-void JitBlockTableModel::OnPPCBreakpointsChanged()
-{
-  Update(Core::GetState(m_system));
-}
-
-void JitBlockTableModel::OnEmulationStateChanged(Core::State state)
-{
-  Update(state);
-}
-
-static QString GetQStringDescription(const CPUEmuFeatureFlags flags)
-{
-  static const std::array<QString, (FEATURE_FLAG_END_OF_ENUMERATION - 1) << 1> descriptions = {
-      QStringLiteral(""),           QStringLiteral("DR"),
-      QStringLiteral("IR"),         QStringLiteral("DR|IR"),
-      QStringLiteral("PERFMON"),    QStringLiteral("DR|PERFMON"),
-      QStringLiteral("IR|PERFMON"), QStringLiteral("DR|IR|PERFMON"),
-  };
-  return descriptions[flags];
-}
-
-static QVariant GetValidSymbolStringVariant(const QVariant& symbol_name_v)
-{
-  if (symbol_name_v.isValid())
-    return symbol_name_v;
-  return QStringLiteral(" --- ");
-}
-
-QVariant JitBlockTableModel::DisplayRoleData(const QModelIndex& index) const
-{
-  const int column = index.column();
-  if (column == Column::Symbol)
-    return GetValidSymbolStringVariant(*m_symbol_list[index.row()]);
-
-  const JitBlock& jit_block = m_jit_blocks[index.row()];
-  switch (column)
+  const JitBlock& block = m_blocks[index.row()];
+  switch (col)
   {
   case Column::PPCFeatureFlags:
-    return GetQStringDescription(jit_block.feature_flags);
+    return FeatureText(block.feature_flags);
   case Column::EffectiveAddress:
-    return QString::number(jit_block.effectiveAddress, 16);
+    return QString::number(block.effectiveAddress, 16);
   case Column::CodeBufferSize:
-    return QString::number(jit_block.originalSize * sizeof(UGeckoInstruction));
+    return QString::number(block.originalSize * sizeof(UGeckoInstruction));
   case Column::RepeatInstructions:
-    return QString::number(jit_block.originalSize - jit_block.physical_addresses.get_stats().first /
-                                                        sizeof(UGeckoInstruction));
+    return QString::number(RepeatCount(block));
   case Column::HostNearCodeSize:
-    return QString::number(jit_block.near_end - jit_block.near_begin);
+    return QString::number(block.near_end - block.near_begin);
   case Column::HostFarCodeSize:
-    return QString::number(jit_block.far_end - jit_block.far_begin);
+    return QString::number(block.far_end - block.far_begin);
+  default:
+    break;
   }
-  const JitBlock::ProfileData* const profile_data = jit_block.profile_data.get();
-  if (profile_data == nullptr)
-    return QStringLiteral(" --- ");
-  switch (column)
+
+  // The remaining columns are profiling numbers.
+  const JitBlock::ProfileData* profile = block.profile_data.get();
+  if (!profile)
+    return Dashes();
+
+  const bool never_ran = profile->run_count == 0;
+  switch (col)
   {
   case Column::RunCount:
-    return QString::number(profile_data->run_count);
+    return QString::number(profile->run_count);
   case Column::CyclesSpent:
-    return QString::number(profile_data->cycles_spent);
+    return QString::number(profile->cycles_spent);
   case Column::CyclesAverage:
-    if (profile_data->run_count == 0)
-      return QStringLiteral(" --- ");
-    return QString::number(
-        static_cast<double>(profile_data->cycles_spent) / profile_data->run_count, 'f', 6);
+    if (never_ran)
+      return Dashes();
+    return QString::number(static_cast<double>(profile->cycles_spent) /
+                               static_cast<double>(profile->run_count),
+                           'f', 6);
   case Column::CyclesPercent:
-    if (m_overall_cycles_spent == 0)
-      return QStringLiteral(" --- ");
-    return QStringLiteral("%1%").arg(100.0 * profile_data->cycles_spent / m_overall_cycles_spent,
-                                     10, 'f', 6);
+    if (m_total_cycles == 0)
+      return Dashes();
+    return Percent(100.0 * static_cast<double>(profile->cycles_spent) /
+                   static_cast<double>(m_total_cycles));
   case Column::TimeSpent:
-  {
-    const auto cast_time =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(profile_data->time_spent);
-    return QString::number(cast_time.count());
-  }
+    return QString::number(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(profile->time_spent).count());
   case Column::TimeAverage:
   {
-    if (profile_data->run_count == 0)
-      return QStringLiteral(" --- ");
-    const auto cast_time = std::chrono::duration_cast<std::chrono::duration<double, std::nano>>(
-        profile_data->time_spent);
-    return QString::number(cast_time.count() / profile_data->run_count, 'f', 6);
+    if (never_ran)
+      return Dashes();
+    const double nanoseconds =
+        std::chrono::duration_cast<std::chrono::duration<double, std::nano>>(profile->time_spent)
+            .count();
+    return QString::number(nanoseconds / static_cast<double>(profile->run_count), 'f', 6);
   }
   case Column::TimePercent:
-  {
-    if (m_overall_time_spent == JitBlock::ProfileData::Clock::duration{})
-      return QStringLiteral(" --- ");
-    return QStringLiteral("%1%").arg(
-        100.0 * profile_data->time_spent.count() / m_overall_time_spent.count(), 10, 'f', 6);
+    if (m_total_time == JitBlock::ProfileData::Clock::duration{})
+      return Dashes();
+    return Percent(100.0 * static_cast<double>(profile->time_spent.count()) /
+                   static_cast<double>(m_total_time.count()));
+  default:
+    return QVariant();
   }
-  }
-  static_assert(Column::NumberOfColumns == 14);
-  std::unreachable();
 }
 
-QVariant JitBlockTableModel::TextAlignmentRoleData(const QModelIndex& index) const
+QVariant JitBlockTableModel::AlignmentFor(const QModelIndex& index) const
 {
   switch (index.column())
   {
   case Column::PPCFeatureFlags:
   case Column::EffectiveAddress:
     return Qt::AlignCenter;
-  case Column::CodeBufferSize:
-  case Column::RepeatInstructions:
-  case Column::HostNearCodeSize:
-  case Column::HostFarCodeSize:
-  case Column::RunCount:
-  case Column::CyclesSpent:
-  case Column::CyclesAverage:
-  case Column::CyclesPercent:
-  case Column::TimeSpent:
-  case Column::TimeAverage:
-  case Column::TimePercent:
-    return QVariant::fromValue(Qt::AlignRight | Qt::AlignVCenter);
   case Column::Symbol:
     return QVariant::fromValue(Qt::AlignLeft | Qt::AlignVCenter);
+  default:
+    // Every number column is right aligned.
+    return QVariant::fromValue(Qt::AlignRight | Qt::AlignVCenter);
   }
-  static_assert(Column::NumberOfColumns == 14);
-  std::unreachable();
 }
 
-QVariant JitBlockTableModel::SortRoleData(const QModelIndex& index) const
+QVariant JitBlockTableModel::SortKeyFor(const QModelIndex& index) const
 {
-  const int column = index.column();
-  if (column == Column::Symbol)
-    return *m_symbol_list[index.row()];
+  const int col = index.column();
+  if (col == Column::Symbol)
+    return *m_symbols[index.row()];
 
-  const JitBlock& jit_block = m_jit_blocks[index.row()];
-  switch (column)
+  const JitBlock& block = m_blocks[index.row()];
+  switch (col)
   {
   case Column::PPCFeatureFlags:
-    return jit_block.feature_flags;
+    return block.feature_flags;
   case Column::EffectiveAddress:
-    return jit_block.effectiveAddress;
+    return block.effectiveAddress;
   case Column::CodeBufferSize:
-    return static_cast<qulonglong>(jit_block.originalSize);
+    return static_cast<qulonglong>(block.originalSize);
   case Column::RepeatInstructions:
-    return static_cast<qulonglong>(jit_block.originalSize -
-                                   jit_block.physical_addresses.get_stats().first /
-                                       sizeof(UGeckoInstruction));
+    return static_cast<qulonglong>(RepeatCount(block));
   case Column::HostNearCodeSize:
-    return static_cast<qulonglong>(jit_block.near_end - jit_block.near_begin);
+    return static_cast<qulonglong>(block.near_end - block.near_begin);
   case Column::HostFarCodeSize:
-    return static_cast<qulonglong>(jit_block.far_end - jit_block.far_begin);
+    return static_cast<qulonglong>(block.far_end - block.far_begin);
+  default:
+    break;
   }
-  const JitBlock::ProfileData* const profile_data = jit_block.profile_data.get();
-  if (profile_data == nullptr)
+
+  const JitBlock::ProfileData* profile = block.profile_data.get();
+  if (!profile)
     return QVariant();
-  switch (column)
+
+  // Percentages sort like the totals they are computed from.
+  switch (col)
   {
   case Column::RunCount:
-    return static_cast<qulonglong>(profile_data->run_count);
+    return static_cast<qulonglong>(profile->run_count);
   case Column::CyclesSpent:
   case Column::CyclesPercent:
-    return static_cast<qulonglong>(profile_data->cycles_spent);
+    return static_cast<qulonglong>(profile->cycles_spent);
   case Column::CyclesAverage:
-    if (profile_data->run_count == 0)
+    if (profile->run_count == 0)
       return QVariant();
-    return static_cast<double>(profile_data->cycles_spent) / profile_data->run_count;
+    return static_cast<double>(profile->cycles_spent) / static_cast<double>(profile->run_count);
   case Column::TimeSpent:
   case Column::TimePercent:
-    return static_cast<qulonglong>(profile_data->time_spent.count());
+    return static_cast<qulonglong>(profile->time_spent.count());
   case Column::TimeAverage:
-    if (profile_data->run_count == 0)
+    if (profile->run_count == 0)
       return QVariant();
-    return static_cast<double>(profile_data->time_spent.count()) / profile_data->run_count;
+    return static_cast<double>(profile->time_spent.count()) /
+           static_cast<double>(profile->run_count);
+  default:
+    return QVariant();
   }
-  static_assert(Column::NumberOfColumns == 14);
-  std::unreachable();
 }
 
 QVariant JitBlockTableModel::data(const QModelIndex& index, int role) const
 {
-  switch (role)
-  {
-  case Qt::DisplayRole:
-    return DisplayRoleData(index);
-  case Qt::TextAlignmentRole:
-    return TextAlignmentRoleData(index);
-  case UserRole::SortRole:
-    return SortRoleData(index);
-  }
+  if (role == Qt::DisplayRole)
+    return TextFor(index);
+  if (role == Qt::TextAlignmentRole)
+    return AlignmentFor(index);
+  if (role == UserRole::SortRole)
+    return SortKeyFor(index);
   return QVariant();
 }
 
@@ -383,8 +351,8 @@ QVariant JitBlockTableModel::headerData(int section, Qt::Orientation orientation
   if (orientation != Qt::Horizontal || role != Qt::DisplayRole)
     return QVariant();
 
-  // These abbreviated table header display names have unabbreviated counterparts in JITWidget.cpp.
-  static constexpr std::array<const char*, Column::NumberOfColumns> headers = {
+  // Short forms; the JIT widget's column menu shows the full names.
+  static constexpr std::array<const char*, Column::NumberOfColumns> titles{
       // i18n: PPC Feature Flags
       QT_TR_NOOP("PPC Feat. Flags"),
       // i18n: Effective Address
@@ -410,48 +378,32 @@ QVariant JitBlockTableModel::headerData(int section, Qt::Orientation orientation
       QT_TR_NOOP("Time %"),
       QT_TR_NOOP("Symbol"),
   };
-
-  return tr(headers[section]);
+  return tr(titles[static_cast<size_t>(section)]);
 }
 
 int JitBlockTableModel::rowCount(const QModelIndex& parent) const
 {
-  if (parent.isValid()) [[unlikely]]
-    return 0;
-  return m_jit_blocks.size();
+  return parent.isValid() ? 0 : static_cast<int>(m_blocks.size());
 }
 
 int JitBlockTableModel::columnCount(const QModelIndex& parent) const
 {
-  if (parent.isValid()) [[unlikely]]
-    return 0;
-  return Column::NumberOfColumns;
+  return parent.isValid() ? 0 : static_cast<int>(Column::NumberOfColumns);
 }
 
 bool JitBlockTableModel::removeRows(int row, int count, const QModelIndex& parent)
 {
-  if (parent.isValid() || row < 0) [[unlikely]]
+  if (parent.isValid() || row < 0)
     return false;
-  if (count <= 0) [[unlikely]]
+  if (count <= 0)
     return true;
 
-  beginRemoveRows(parent, row, row + count - 1);  // Last is inclusive in Qt!
-  for (const JitBlock& block :
-       std::span{m_jit_blocks.data() + row, static_cast<std::size_t>(count)})
-  {
-    m_jit_interface.EraseSingleBlock(block);
-  }
-  m_jit_blocks.remove(row, count);
-  m_symbol_list.remove(row, count);
+  // Removing a row also throws the block out of the JIT cache.
+  beginRemoveRows(parent, row, row + count - 1);
+  for (const JitBlock& block : std::span{m_blocks.data() + row, static_cast<size_t>(count)})
+    m_jit.EraseSingleBlock(block);
+  m_blocks.remove(row, count);
+  m_symbols.remove(row, count);
   endRemoveRows();
   return true;
 }
-
-JitBlockTableModel::JitBlockTableModel(Core::System& system, JitInterface& jit_interface,
-                                       PPCSymbolDB& ppc_symbol_db, QObject* parent)
-    : QAbstractTableModel(parent), m_system(system), m_jit_interface(jit_interface),
-      m_ppc_symbol_db(ppc_symbol_db)
-{
-}
-
-JitBlockTableModel::~JitBlockTableModel() = default;

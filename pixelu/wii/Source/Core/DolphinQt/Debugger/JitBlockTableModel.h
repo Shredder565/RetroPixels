@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -50,6 +49,8 @@ enum EnumType : int
 };
 }
 
+// The JIT's compiled blocks as a table, with profiling numbers. Rows are a snapshot of the block
+// cache taken while emulation is paused; the model only listens for changes while it is shown.
 class JitBlockTableModel final : public QAbstractTableModel
 {
   Q_OBJECT
@@ -78,49 +79,36 @@ public:
   bool removeRows(int row, int count, const QModelIndex& parent = QModelIndex{}) override;
 
   const JitBlock& GetJitBlock(const QModelIndex& index) const;
-  const JitBlockRefs& GetJitBlockRefs() const { return m_jit_blocks; }
-  const SymbolList& GetSymbolList() const { return m_symbol_list; }
+  const JitBlockRefs& GetJitBlockRefs() const { return m_blocks; }
+  const SymbolList& GetSymbolList() const { return m_symbols; }
 
-  // Always connected slots (external signals)
+  // Always connected (driven by the owning widget).
   void OnShowSignal();
   void OnHideSignal();
   void OnSortIndicatorChanged(int logicalIndex, Qt::SortOrder order);
   void OnFilterSymbolTextChanged(const QString& string);
 
 private:
-  [[nodiscard]] QVariant DisplayRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant TextAlignmentRoleData(const QModelIndex& index) const;
-  [[nodiscard]] QVariant SortRoleData(const QModelIndex& index) const;
+  [[nodiscard]] QVariant TextFor(const QModelIndex& index) const;
+  [[nodiscard]] QVariant AlignmentFor(const QModelIndex& index) const;
+  [[nodiscard]] QVariant SortKeyFor(const QModelIndex& index) const;
 
-  void SumOverallCosts();
-  void PrefetchSymbols();
-  void Clear();
-  void Update(Core::State state);
-  void UpdateProfileData();
-  void UpdateSymbols();
-
-  // Setup and teardown
-  void ConnectSlots();
-  void DisconnectSlots();
-  void Show();
-  void Hide();
-
-  // Conditionally connected slots (external signals)
-  void OnJitCacheInvalidation();
-  void OnJitProfileDataWiped();
-  void OnUpdateDisasmDialog();
-  void OnPPCSymbolsUpdated();
-  void OnPPCBreakpointsChanged();
-  void OnEmulationStateChanged(Core::State state);
+  void TotalUpCosts();
+  void LookUpSymbols();
+  void Snapshot(Core::State state);
+  void SnapshotNow();
+  void Empty();
+  void Listen(bool on);
 
   Core::System& m_system;
-  JitInterface& m_jit_interface;
-  PPCSymbolDB& m_ppc_symbol_db;
+  JitInterface& m_jit;
+  PPCSymbolDB& m_symbol_db;
 
-  JitBlockRefs m_jit_blocks;
-  SymbolList m_symbol_list;
-  u64 m_overall_cycles_spent;
-  JitBlock::ProfileData::Clock::duration m_overall_time_spent;
-  bool m_sorting_by_symbols = false;
-  bool m_filtering_by_symbols = false;
+  QList<QMetaObject::Connection> m_links;
+  JitBlockRefs m_blocks;
+  SymbolList m_symbols;
+  u64 m_total_cycles = 0;
+  JitBlock::ProfileData::Clock::duration m_total_time{};
+  bool m_symbol_sort = false;
+  bool m_symbol_filter = false;
 };
