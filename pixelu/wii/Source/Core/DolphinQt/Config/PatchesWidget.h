@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,6 +22,8 @@ namespace UICommon
 class GameFile;
 }
 
+// The Patches tab of the game properties: the game's OnFrame patches, which
+// can be switched on and off, added, cloned, edited and removed.
 class PatchesWidget : public QWidget
 {
   Q_OBJECT
@@ -35,19 +36,18 @@ signals:
 #endif  // USE_RETRO_ACHIEVEMENTS
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void SavePatches();
-  void Update();
-  void UpdateActions();
+  void RebuildList();
+  void RefreshButtons();
+  void WritePatches();
+  bool RunEditor(PatchEngine::Patch& patch);
 
-  void OnItemChanged(QListWidgetItem*);
-  void OnAdd();
-  void OnRemove();
-  void OnEdit();
+  void OnCheckToggled(QListWidgetItem* item);
+  void AddPatch();
+  void EditSelected();
+  void RemoveSelected();
 
 #ifdef USE_RETRO_ACHIEVEMENTS
-  HardcoreWarningWidget* m_hc_warning;
+  HardcoreWarningWidget* m_hardcore_warning;
 #endif  // USE_RETRO_ACHIEVEMENTS
   QListWidget* m_list;
   QPushButton* m_add_button;

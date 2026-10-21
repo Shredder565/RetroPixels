@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,11 +17,13 @@ struct PatchEntry;
 class QDialogButtonBox;
 class QGroupBox;
 class QLineEdit;
-class QVBoxLayout;
 class QPushButton;
+class QVBoxLayout;
 
 struct NewPatchEntry;
 
+// Edits a patch's name and entries; the patch is only written on Save.
+// There is no Q_OBJECT here, so texts translate in the QDialog context.
 class NewPatchDialog : public QDialog
 {
 public:
@@ -30,20 +31,20 @@ public:
   ~NewPatchDialog() override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void AddEntry();
+  QGroupBox* MakeEntryBox(const PatchEngine::PatchEntry& entry);
+  void AppendBlankEntry();
+  bool AllFieldsValid() const;
 
   void accept() override;
 
-  QGroupBox* CreateEntry(const PatchEngine::PatchEntry& entry);
+  QLineEdit* m_name;
+  QWidget* m_entries_widget;
+  QVBoxLayout* m_entries_column;
+  QPushButton* m_add_entry;
+  QDialogButtonBox* m_buttons;
 
-  QLineEdit* m_name_edit;
-  QWidget* m_entry_widget;
-  QVBoxLayout* m_entry_layout;
-  QPushButton* m_add_button;
-  QDialogButtonBox* m_button_box;
-
+  // Owned separately from the widgets because the edit handlers hold
+  // pointers to them.
   std::vector<std::unique_ptr<NewPatchEntry>> m_entries;
 
   PatchEngine::Patch& m_patch;

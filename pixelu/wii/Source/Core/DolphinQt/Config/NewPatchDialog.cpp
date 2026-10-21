@@ -1,7 +1,10 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/NewPatchDialog.h"
+
+#include <algorithm>
+#include <array>
+#include <utility>
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -17,15 +20,14 @@
 #include "Core/PatchEngine.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 
+// One entry box: the three hex fields and the entry they edit. Handlers
+// hold a pointer to it, so it never moves.
 struct NewPatchEntry
 {
   NewPatchEntry() = default;
-
-  // These entries share the lifetime of their associated text widgets, and because they are
-  // captured by pointer by various edit handlers, they should not copied or moved.
   NewPatchEntry(const NewPatchEntry&) = delete;
-  NewPatchEntry& operator=(const NewPatchEntry&) = delete;
   NewPatchEntry(NewPatchEntry&&) = delete;
+  NewPatchEntry& operator=(const NewPatchEntry&) = delete;
   NewPatchEntry& operator=(NewPatchEntry&&) = delete;
 
   QLineEdit* address = nullptr;
@@ -34,222 +36,196 @@ struct NewPatchEntry
   PatchEngine::PatchEntry entry;
 };
 
+namespace
+{
+bool IsHex(const QLineEdit* field)
+{
+  bool ok = false;
+  field->text().toUInt(&ok, 16);
+  return ok;
+}
+
+// Parses a field as hex, drawing it bold red when it doesn't parse.
+u32 ReadHexField(QLineEdit* field, const QString& text)
+{
+  bool ok = false;
+  const u32 number = text.toUInt(&ok, 16);
+
+  QFont look;
+  look.setBold(!ok);
+  QPalette colours;
+  if (!ok)
+    colours.setColor(QPalette::Text, Qt::red);
+  field->setFont(look);
+  field->setPalette(colours);
+
+  return number;
+}
+
+QString AsHex(u32 number)
+{
+  return QStringLiteral("%1").arg(number, 8, 16, QLatin1Char('0'));
+}
+}  // namespace
+
 NewPatchDialog::NewPatchDialog(QWidget* parent, PatchEngine::Patch& patch)
     : QDialog(parent), m_patch(patch)
 {
   setWindowTitle(tr("Patch Editor"));
 
-  CreateWidgets();
-  ConnectWidgets();
+  m_name = new QLineEdit;
+  m_name->setPlaceholderText(tr("Patch name"));
+  m_name->setText(QString::fromStdString(m_patch.name));
 
-  for (size_t i = 0; i < m_patch.entries.size(); i++)
-  {
-    m_entry_layout->addWidget(CreateEntry(m_patch.entries[i]));
-  }
+  m_entries_widget = new QWidget;
+  m_entries_column = new QVBoxLayout;
+  auto* const scroller = new QScrollArea;
+  m_entries_widget->setLayout(m_entries_column);
+  scroller->setWidget(m_entries_widget);
+  scroller->setWidgetResizable(true);
 
+  m_add_entry = new QPushButton(tr("Add"));
+  m_buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+
+  auto* const grid = new QGridLayout;
+  grid->addWidget(m_name, 0, 0);
+  grid->addWidget(scroller, 1, 0);
+  grid->addWidget(m_add_entry, 2, 0);
+  grid->addWidget(m_buttons, 3, 0);
+  setLayout(grid);
+
+  // The name is written to the patch as it is typed.
+  connect(m_name, &QLineEdit::textEdited,
+          [this](const QString& text) { m_patch.name = text.toStdString(); });
+  connect(m_add_entry, &QPushButton::clicked, this, &NewPatchDialog::AppendBlankEntry);
+  connect(m_buttons, &QDialogButtonBox::accepted, this, &NewPatchDialog::accept);
+  connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+  for (const PatchEngine::PatchEntry& entry : m_patch.entries)
+    m_entries_column->addWidget(MakeEntryBox(entry));
+
+  // A new patch starts with one blank entry and switched on.
   if (m_patch.entries.empty())
   {
-    AddEntry();
+    AppendBlankEntry();
     m_patch.enabled = true;
   }
 }
 
 NewPatchDialog::~NewPatchDialog() = default;
 
-void NewPatchDialog::CreateWidgets()
+void NewPatchDialog::AppendBlankEntry()
 {
-  m_name_edit = new QLineEdit;
-  m_name_edit->setPlaceholderText(tr("Patch name"));
-  m_name_edit->setText(QString::fromStdString(m_patch.name));
-
-  m_entry_widget = new QWidget;
-  m_entry_layout = new QVBoxLayout;
-
-  auto* scroll_area = new QScrollArea;
-  m_entry_widget->setLayout(m_entry_layout);
-  scroll_area->setWidget(m_entry_widget);
-  scroll_area->setWidgetResizable(true);
-
-  m_add_button = new QPushButton(tr("Add"));
-
-  m_button_box = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
-
-  auto* layout = new QGridLayout;
-
-  layout->addWidget(m_name_edit, 0, 0);
-  layout->addWidget(scroll_area, 1, 0);
-  layout->addWidget(m_add_button, 2, 0);
-  layout->addWidget(m_button_box, 3, 0);
-
-  setLayout(layout);
+  m_entries_column->addWidget(MakeEntryBox({}));
 }
 
-void NewPatchDialog::ConnectWidgets()
+QGroupBox* NewPatchDialog::MakeEntryBox(const PatchEngine::PatchEntry& entry)
 {
-  connect(m_name_edit, &QLineEdit::textEdited,
-          [this](const QString& name) { m_patch.name = name.toStdString(); });
+  auto* const box = new QGroupBox();
 
-  connect(m_add_button, &QPushButton::clicked, this, &NewPatchDialog::AddEntry);
+  auto* const size_box = new QGroupBox(tr("Type"));
+  auto* const size_row = new QHBoxLayout;
+  auto* const remove = new QPushButton(tr("Remove"));
 
-  connect(m_button_box, &QDialogButtonBox::accepted, this, &NewPatchDialog::accept);
-  connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-}
+  const std::array<std::pair<QRadioButton*, PatchEngine::PatchType>, 3> sizes{{
+      {new QRadioButton(tr("8-bit")), PatchEngine::PatchType::Patch8Bit},
+      {new QRadioButton(tr("16-bit")), PatchEngine::PatchType::Patch16Bit},
+      {new QRadioButton(tr("32-bit")), PatchEngine::PatchType::Patch32Bit},
+  }};
+  for (const auto& [button, type] : sizes)
+    size_row->addWidget(button);
+  size_box->setLayout(size_row);
 
-void NewPatchDialog::AddEntry()
-{
-  m_entry_layout->addWidget(CreateEntry({}));
-}
+  auto* const address = new QLineEdit;
+  auto* const value = new QLineEdit;
+  auto* const comparand = new QLineEdit;
 
-static u32 OnTextEdited(QLineEdit* edit, const QString& text)
-{
-  bool okay = false;
-  u32 value = text.toUInt(&okay, 16);
+  NewPatchEntry* const state = m_entries.emplace_back(std::make_unique<NewPatchEntry>()).get();
+  state->address = address;
+  state->value = value;
+  state->comparand = comparand;
+  state->entry = entry;
 
-  QFont font;
-  QPalette palette;
+  auto* const conditional = new QCheckBox(tr("Conditional"));
+  auto* const comparand_caption = new QLabel(tr("Comparand:"));
 
-  font.setBold(!okay);
+  auto* const grid = new QGridLayout;
+  grid->addWidget(size_box, 0, 0, 1, -1);
+  grid->addWidget(new QLabel(tr("Address:")), 1, 0);
+  grid->addWidget(address, 1, 1);
+  grid->addWidget(new QLabel(tr("Value:")), 2, 0);
+  grid->addWidget(value, 2, 1);
+  grid->addWidget(conditional, 3, 0, 1, -1);
+  grid->addWidget(comparand_caption, 4, 0);
+  grid->addWidget(comparand, 4, 1);
+  grid->addWidget(remove, 5, 0, 1, -1);
+  box->setLayout(grid);
 
-  if (!okay)
-    palette.setColor(QPalette::Text, Qt::red);
-
-  edit->setFont(font);
-  edit->setPalette(palette);
-
-  return value;
-}
-
-QGroupBox* NewPatchDialog::CreateEntry(const PatchEngine::PatchEntry& entry)
-{
-  QGroupBox* box = new QGroupBox();
-
-  auto* type = new QGroupBox(tr("Type"));
-  auto* type_layout = new QHBoxLayout;
-  auto* remove = new QPushButton(tr("Remove"));
-
-  auto* byte = new QRadioButton(tr("8-bit"));
-  auto* word = new QRadioButton(tr("16-bit"));
-  auto* dword = new QRadioButton(tr("32-bit"));
-
-  type_layout->addWidget(byte);
-  type_layout->addWidget(word);
-  type_layout->addWidget(dword);
-  type->setLayout(type_layout);
-
-  auto* address = new QLineEdit;
-  auto* value = new QLineEdit;
-  auto* comparand = new QLineEdit;
-
-  auto* new_entry = m_entries.emplace_back(std::make_unique<NewPatchEntry>()).get();
-  new_entry->address = address;
-  new_entry->value = value;
-  new_entry->comparand = comparand;
-  new_entry->entry = entry;
-
-  auto* conditional = new QCheckBox(tr("Conditional"));
-  auto* comparand_label = new QLabel(tr("Comparand:"));
-
-  auto* layout = new QGridLayout;
-  layout->addWidget(type, 0, 0, 1, -1);
-  layout->addWidget(new QLabel(tr("Address:")), 1, 0);
-  layout->addWidget(address, 1, 1);
-  layout->addWidget(new QLabel(tr("Value:")), 2, 0);
-  layout->addWidget(value, 2, 1);
-  layout->addWidget(conditional, 3, 0, 1, -1);
-  layout->addWidget(comparand_label, 4, 0);
-  layout->addWidget(comparand, 4, 1);
-  layout->addWidget(remove, 5, 0, 1, -1);
-  box->setLayout(layout);
-
-  connect(address, &QLineEdit::textEdited, [new_entry](const QString& text) {
-    new_entry->entry.address = OnTextEdited(new_entry->address, text);
+  connect(address, &QLineEdit::textEdited, [state](const QString& text) {
+    state->entry.address = ReadHexField(state->address, text);
+  });
+  connect(value, &QLineEdit::textEdited, [state](const QString& text) {
+    state->entry.value = ReadHexField(state->value, text);
+  });
+  connect(comparand, &QLineEdit::textEdited, [state](const QString& text) {
+    state->entry.comparand = ReadHexField(state->comparand, text);
   });
 
-  connect(value, &QLineEdit::textEdited, [new_entry](const QString& text) {
-    new_entry->entry.value = OnTextEdited(new_entry->value, text);
+  // The last remaining entry cannot be removed.
+  connect(remove, &QPushButton::clicked, [this, box, state] {
+    if (m_entries.size() <= 1)
+      return;
+    box->setVisible(false);
+    m_entries_column->removeWidget(box);
+    box->deleteLater();
+    const auto found = std::ranges::find_if(
+        m_entries, [state](const std::unique_ptr<NewPatchEntry>& e) { return e.get() == state; });
+    m_entries.erase(found);
   });
 
-  connect(comparand, &QLineEdit::textEdited, [new_entry](const QString& text) {
-    new_entry->entry.comparand = OnTextEdited(new_entry->comparand, text);
+  for (const auto& [button, type] : sizes)
+  {
+    connect(button, &QRadioButton::toggled, [state, kind = type](bool checked) {
+      if (checked)
+        state->entry.type = kind;
+    });
+  }
+  for (const auto& [button, type] : sizes)
+    button->setChecked(entry.type == type);
+
+  connect(conditional, &QCheckBox::toggled, [state, comparand_caption, comparand](bool on) {
+    state->entry.conditional = on;
+    comparand_caption->setVisible(on);
+    comparand->setVisible(on);
   });
-
-  connect(remove, &QPushButton::clicked, [this, box, new_entry] {
-    if (m_entries.size() > 1)
-    {
-      box->setVisible(false);
-      m_entry_layout->removeWidget(box);
-      box->deleteLater();
-
-      m_entries.erase(
-          std::ranges::find(m_entries, new_entry, [](const auto& e) { return e.get(); }));
-    }
-  });
-
-  connect(byte, &QRadioButton::toggled, [new_entry](bool checked) {
-    if (checked)
-      new_entry->entry.type = PatchEngine::PatchType::Patch8Bit;
-  });
-
-  connect(word, &QRadioButton::toggled, [new_entry](bool checked) {
-    if (checked)
-      new_entry->entry.type = PatchEngine::PatchType::Patch16Bit;
-  });
-
-  connect(dword, &QRadioButton::toggled, [new_entry](bool checked) {
-    if (checked)
-      new_entry->entry.type = PatchEngine::PatchType::Patch32Bit;
-  });
-
-  byte->setChecked(entry.type == PatchEngine::PatchType::Patch8Bit);
-  word->setChecked(entry.type == PatchEngine::PatchType::Patch16Bit);
-  dword->setChecked(entry.type == PatchEngine::PatchType::Patch32Bit);
-
-  connect(conditional, &QCheckBox::toggled, [new_entry, comparand_label, comparand](bool checked) {
-    new_entry->entry.conditional = checked;
-    comparand_label->setVisible(checked);
-    comparand->setVisible(checked);
-  });
-
   conditional->setChecked(entry.conditional);
-  comparand_label->setVisible(entry.conditional);
+  comparand_caption->setVisible(entry.conditional);
   comparand->setVisible(entry.conditional);
 
-  address->setText(QStringLiteral("%1").arg(entry.address, 8, 16, QLatin1Char('0')));
-  value->setText(QStringLiteral("%1").arg(entry.value, 8, 16, QLatin1Char('0')));
-  comparand->setText(QStringLiteral("%1").arg(entry.comparand, 8, 16, QLatin1Char('0')));
+  address->setText(AsHex(entry.address));
+  value->setText(AsHex(entry.value));
+  comparand->setText(AsHex(entry.comparand));
 
   return box;
 }
 
+bool NewPatchDialog::AllFieldsValid() const
+{
+  // The comparand only counts for conditional entries.
+  return std::ranges::all_of(m_entries, [](const std::unique_ptr<NewPatchEntry>& e) {
+    return IsHex(e->address) && IsHex(e->value) && (!e->entry.conditional || IsHex(e->comparand));
+  });
+}
+
 void NewPatchDialog::accept()
 {
-  if (m_name_edit->text().isEmpty())
+  if (m_name->text().isEmpty())
   {
     ModalMessageBox::critical(this, tr("Error"), tr("You have to enter a name."));
     return;
   }
 
-  bool valid = true;
-
-  for (const auto& entry : m_entries)
-  {
-    entry->address->text().toUInt(&valid, 16);
-    if (!valid)
-      break;
-
-    entry->value->text().toUInt(&valid, 16);
-    if (!valid)
-      break;
-
-    if (entry->entry.conditional)
-    {
-      entry->comparand->text().toUInt(&valid, 16);
-      if (!valid)
-        break;
-    }
-  }
-
-  if (!valid)
+  if (!AllFieldsValid())
   {
     ModalMessageBox::critical(
         this, tr("Error"),
@@ -258,11 +234,8 @@ void NewPatchDialog::accept()
   }
 
   m_patch.entries.clear();
-
-  for (const auto& entry : m_entries)
-  {
-    m_patch.entries.emplace_back(entry->entry);
-  }
+  for (const std::unique_ptr<NewPatchEntry>& e : m_entries)
+    m_patch.entries.emplace_back(e->entry);
 
   QDialog::accept();
 }
