@@ -1,18 +1,18 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/InputBackend.h"
 
 namespace ciface
 {
 InputBackend::InputBackend(ControllerInterface* controller_interface)
-    : m_controller_interface(*controller_interface)
+    : m_owner(*controller_interface)
 {
 }
 
 InputBackend::~InputBackend() = default;
 
-void InputBackend::UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>& devices_to_remove)
+// Most backends poll inside their devices, so the backend-wide hooks do nothing by default.
+void InputBackend::UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>&)
 {
 }
 
@@ -22,7 +22,7 @@ void InputBackend::HandleWindowChange()
 
 ControllerInterface& InputBackend::GetControllerInterface()
 {
-  return m_controller_interface;
+  return m_owner;
 }
 
 }  // namespace ciface

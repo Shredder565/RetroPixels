@@ -1,9 +1,9 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/MappingCommon.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <ranges>
@@ -24,104 +24,41 @@
 
 namespace ciface::MappingCommon
 {
-// Pressing inputs at the same time will result in the & operator vs a hotkey expression.
-constexpr auto HOTKEY_VS_CONJUNCION_THRESHOLD = std::chrono::milliseconds(50);
-
-// Some devices (e.g. DS4) provide an analog and digital input for the trigger.
-// We prefer just the analog input for simultaneous digital+analog input detections.
-constexpr auto SPURIOUS_TRIGGER_COMBO_THRESHOLD = std::chrono::milliseconds(150);
-
-std::string GetExpressionForControl(const std::string& control_name,
-                                    const ciface::Core::DeviceQualifier& control_device,
-                                    const ciface::Core::DeviceQualifier& default_device,
-                                    Quote quote)
+namespace
 {
-  std::string expr;
+using Detection = Core::InputDetector::Detection;
 
-  // non-default device
-  if (control_device != default_device)
+// Two inputs pressed further apart than this form a hotkey ("@(a+b)") rather than a
+// simultaneous combination ("a&b").
+constexpr auto HOTKEY_GAP = std::chrono::milliseconds(50);
+
+// A digital detection this close to an analog one is taken to come from the same physical
+// control (e.g. a DualShock 4 trigger reports both).
+constexpr auto TRIGGER_PAIR_GAP = std::chrono::milliseconds(150);
+
+// Time the user gets for each direction when mapping a stick.
+constexpr auto DIRECTION_WAIT = std::chrono::seconds{4};
+
+// Collects the alternatives of an expression while walking through the detections in order.
+class AlternativesBuilder
+{
+public:
+  AlternativesBuilder(const Core::DeviceQualifier& default_device, Quote quote)
+      : m_default_device(default_device), m_quote(quote)
   {
-    expr += control_device.ToString();
-    expr += ':';
   }
 
-  // append the control name
-  expr += control_name;
-
-  if (quote == Quote::On)
+  void Press(const Detection& detection)
   {
-    // If our expression contains any non-alpha characters
-    // we should quote it
-    if (!std::ranges::all_of(expr, Common::IsAlpha))
-      expr = fmt::format("`{}`", expr);
-  }
-
-  return expr;
-}
-
-std::string BuildExpression(const Core::InputDetector::Results& detections,
-                            const ciface::Core::DeviceQualifier& default_device, Quote quote)
-{
-  std::vector<const Core::InputDetector::Detection*> pressed_inputs;
-
-  std::vector<std::string> alternations;
-
-  const auto get_control_expression = [&](auto& detection) {
-    // Return the parent-most name if there is one for better hotkey strings.
-    // Detection of L/R_Ctrl will be changed to just Ctrl.
-    // Users can manually map L_Ctrl if they so desire.
-    const auto input = (quote == Quote::On) ?
-                           detection.device->GetParentMostInput(detection.input) :
-                           detection.input;
-
-    ciface::Core::DeviceQualifier device_qualifier;
-    device_qualifier.FromDevice(detection.device.get());
-
-    return MappingCommon::GetExpressionForControl(input->GetName(), device_qualifier,
-                                                  default_device, quote);
-  };
-
-  bool new_alternation = false;
-
-  const auto handle_press = [&](auto& detection) {
-    pressed_inputs.emplace_back(&detection);
-    new_alternation = true;
-  };
-
-  const auto handle_release = [&] {
-    if (!new_alternation)
-      return;
-
-    new_alternation = false;
-
-    std::vector<std::string> alternation;
-    for (auto* input : pressed_inputs)
-      alternation.push_back(get_control_expression(*input));
-
-    const bool is_hotkey = pressed_inputs.size() >= 2 &&
-                           (pressed_inputs[1]->press_time - pressed_inputs[0]->press_time) >
-                               HOTKEY_VS_CONJUNCION_THRESHOLD;
-
-    if (is_hotkey)
+    // Inputs let go before this press end the current combination.
+    auto it = m_held.begin();
+    while (it != m_held.end())
     {
-      alternations.push_back(fmt::format("@({})", fmt::join(alternation, "+")));
-    }
-    else
-    {
-      std::ranges::sort(alternation);
-      alternations.push_back(fmt::to_string(fmt::join(alternation, "&")));
-    }
-  };
-
-  for (auto& detection : detections)
-  {
-    // Remove since-released inputs.
-    for (auto it = pressed_inputs.begin(); it != pressed_inputs.end();)
-    {
-      if ((*it)->release_time && (*it)->release_time <= detection.press_time)
+      const Detection& held = **it;
+      if (held.release_time && held.release_time <= detection.press_time)
       {
-        handle_release();
-        it = pressed_inputs.erase(it);
+        Flush();
+        it = m_held.erase(it);
       }
       else
       {
@@ -129,106 +66,182 @@ std::string BuildExpression(const Core::InputDetector::Results& detections,
       }
     }
 
-    handle_press(detection);
+    m_held.push_back(&detection);
+    m_has_new_press = true;
   }
 
-  handle_release();
+  // Turns the held inputs into an alternative, if something was pressed since the last one.
+  void Flush()
+  {
+    if (!m_has_new_press)
+      return;
+    m_has_new_press = false;
 
-  // Remove duplicates
-  std::ranges::sort(alternations);
-  const auto unique_result = std::ranges::unique(alternations);
-  alternations.erase(unique_result.begin(), unique_result.end());
+    std::vector<std::string> parts;
+    for (const Detection* held : m_held)
+      parts.push_back(ControlExpression(*held));
 
-  return fmt::to_string(fmt::join(alternations, "|"));
+    const bool pressed_in_turn =
+        m_held.size() >= 2 && (m_held[1]->press_time - m_held[0]->press_time) > HOTKEY_GAP;
+    if (pressed_in_turn)
+    {
+      m_alternatives.push_back(fmt::format("@({})", fmt::join(parts, "+")));
+      return;
+    }
+
+    std::ranges::sort(parts);
+    m_alternatives.push_back(fmt::to_string(fmt::join(parts, "&")));
+  }
+
+  // The finished expression: distinct alternatives, sorted, separated by '|'.
+  std::string Finish()
+  {
+    Flush();
+
+    std::ranges::sort(m_alternatives);
+    const auto duplicates = std::ranges::unique(m_alternatives);
+    m_alternatives.erase(duplicates.begin(), duplicates.end());
+
+    return fmt::to_string(fmt::join(m_alternatives, "|"));
+  }
+
+private:
+  std::string ControlExpression(const Detection& detection) const
+  {
+    // With quoting on, a modifier is written by its combined name ("Ctrl" for "L_Ctrl") so
+    // hotkeys read naturally; the specific side can still be mapped by hand.
+    const Core::Device::Input* const input =
+        m_quote == Quote::On ? detection.device->GetParentMostInput(detection.input) :
+                               detection.input;
+
+    Core::DeviceQualifier qualifier;
+    qualifier.FromDevice(detection.device.get());
+    return GetExpressionForControl(input->GetName(), qualifier, m_default_device, m_quote);
+  }
+
+  const Core::DeviceQualifier& m_default_device;
+  const Quote m_quote;
+
+  std::vector<const Detection*> m_held;
+  std::vector<std::string> m_alternatives;
+  bool m_has_new_press = false;
+};
+}  // namespace
+
+std::string GetExpressionForControl(const std::string& control_name,
+                                    const ciface::Core::DeviceQualifier& control_device,
+                                    const ciface::Core::DeviceQualifier& default_device,
+                                    Quote quote)
+{
+  std::string expression;
+  if (!(control_device == default_device))
+    expression = control_device.ToString() + ':';
+  expression += control_name;
+
+  // Anything but plain letters must be quoted to be parsed back as one name.
+  if (quote == Quote::On && !std::ranges::all_of(expression, Common::IsAlpha))
+    return fmt::format("`{}`", expression);
+
+  return expression;
+}
+
+std::string BuildExpression(const Core::InputDetector::Results& detections,
+                            const ciface::Core::DeviceQualifier& default_device, Quote quote)
+{
+  AlternativesBuilder builder(default_device, quote);
+  for (const Detection& detection : detections)
+    builder.Press(detection);
+  return builder.Finish();
 }
 
 void RemoveSpuriousTriggerCombinations(Core::InputDetector::Results* detections)
 {
-  const auto is_spurious = [&](const auto& detection) {
-    return std::ranges::any_of(*detections, [&](const auto& d) {
-      // This is a spurious digital detection if a "smooth" (analog) detection is temporally near.
-      return &d != &detection && d.IsAnalogPress() && !detection.IsAnalogPress() &&
-             abs(d.press_time - detection.press_time) < SPURIOUS_TRIGGER_COMBO_THRESHOLD;
-    });
-  };
+  Core::InputDetector::Results& all = *detections;
 
-  std::erase_if(*detections, is_spurious);
+  // A digital detection is dropped when an analog one happened close to it. The check looks at
+  // the list as the removal rearranges it.
+  std::erase_if(all, [&all](const Detection& candidate) {
+    if (candidate.IsAnalogPress())
+      return false;
+    return std::ranges::any_of(all, [&candidate](const Detection& other) {
+      return &other != &candidate && other.IsAnalogPress() &&
+             std::chrono::abs(other.press_time - candidate.press_time) < TRIGGER_PAIR_GAP;
+    });
+  });
 }
 
 void RemoveDetectionsAfterTimePoint(Core::InputDetector::Results* results, Clock::time_point after)
 {
-  const auto is_after_time = [&](const Core::InputDetector::Detection& detection) {
+  // Still-held detections count as released at `after`.
+  std::erase_if(*results, [after](const Detection& detection) {
     return detection.release_time.value_or(after) >= after;
-  };
-
-  std::erase_if(*results, is_after_time);
+  });
 }
 
 bool ContainsCompleteDetection(const Core::InputDetector::Results& results)
 {
-  return std::ranges::any_of(results, [](const Core::InputDetector::Detection& detection) {
-    return detection.release_time.has_value();
-  });
+  return std::ranges::any_of(
+      results, [](const Detection& detection) { return detection.release_time.has_value(); });
 }
 
 ReshapableInputMapper::ReshapableInputMapper(const Core::DeviceContainer& container,
                                              std::span<const std::string> device_strings)
 {
-  m_input_detector.Start(container, device_strings);
+  m_detector.Start(container, device_strings);
 }
 
 bool ReshapableInputMapper::Update()
 {
-  const auto prev_size = m_input_detector.GetResults().size();
+  const size_t count_before = m_detector.GetResults().size();
 
-  constexpr auto wait_time = std::chrono::seconds{4};
-  m_input_detector.Update(wait_time, wait_time, wait_time * REQUIRED_INPUT_COUNT);
+  // Each direction gets the same wait, and the whole mapping the sum of them.
+  m_detector.Update(DIRECTION_WAIT, DIRECTION_WAIT, DIRECTION_WAIT * REQUIRED_INPUT_COUNT);
 
-  return m_input_detector.GetResults().size() != prev_size;
+  return m_detector.GetResults().size() != count_before;
 }
 
 float ReshapableInputMapper::GetCurrentAngle() const
 {
-  constexpr auto quarter_circle = float(MathUtil::TAU) * 0.25f;
-  return quarter_circle - (float(m_input_detector.GetResults().size()) * quarter_circle);
+  // Up first, then clockwise: a quarter turn less for each detected direction.
+  constexpr float quarter_turn = float(MathUtil::TAU) * 0.25f;
+  const float done = float(m_detector.GetResults().size());
+  return quarter_turn - done * quarter_turn;
 }
 
 bool ReshapableInputMapper::IsComplete() const
 {
-  return m_input_detector.GetResults().size() >= REQUIRED_INPUT_COUNT ||
-         m_input_detector.IsComplete();
+  return m_detector.IsComplete() || m_detector.GetResults().size() >= REQUIRED_INPUT_COUNT;
 }
 
 bool ReshapableInputMapper::IsCalibrationNeeded() const
 {
-  return std::ranges::any_of(m_input_detector.GetResults() | std::views::take(REQUIRED_INPUT_COUNT),
-                             &ciface::Core::InputDetector::Detection::IsAnalogPress);
+  const auto first_four = m_detector.GetResults() | std::views::take(REQUIRED_INPUT_COUNT);
+  return std::ranges::any_of(first_four, &Detection::IsAnalogPress);
 }
 
 bool ReshapableInputMapper::ApplyResults(ControllerEmu::EmulatedController* controller,
                                          ControllerEmu::ReshapableInput* stick)
 {
-  auto const detections = m_input_detector.TakeResults();
-
-  if (detections.size() < REQUIRED_INPUT_COUNT)
+  const Core::InputDetector::Results detected = m_detector.TakeResults();
+  if (detected.size() < REQUIRED_INPUT_COUNT)
     return false;
 
-  // Transpose URDL to UDLR.
-  const std::array results{detections[0], detections[2], detections[3], detections[1]};
+  // Detected as up, right, down, left; the stick's controls are up, down, left, right.
+  static constexpr std::array<size_t, REQUIRED_INPUT_COUNT> detection_for_control{0, 2, 3, 1};
 
   const auto default_device = controller->GetDefaultDevice();
 
-  for (std::size_t i = 0; i != results.size(); ++i)
+  for (size_t control = 0; control != REQUIRED_INPUT_COUNT; ++control)
   {
-    ciface::Core::DeviceQualifier device_qualifier;
-    device_qualifier.FromDevice(results[i].device.get());
+    const Detection& source = detected[detection_for_control[control]];
 
-    stick->controls[i]->control_ref->SetExpression(ciface::MappingCommon::GetExpressionForControl(
-        results[i].input->GetName(), device_qualifier, default_device,
-        ciface::MappingCommon::Quote::On));
+    Core::DeviceQualifier qualifier;
+    qualifier.FromDevice(source.device.get());
 
-    controller->UpdateSingleControlReference(g_controller_interface,
-                                             stick->controls[i]->control_ref.get());
+    ControlReference* const reference = stick->controls[control]->control_ref.get();
+    reference->SetExpression(
+        GetExpressionForControl(source.input->GetName(), qualifier, default_device, Quote::On));
+    controller->UpdateSingleControlReference(g_controller_interface, reference);
   }
 
   controller->GetConfig()->GenerateControllerTextures();
@@ -237,45 +250,35 @@ bool ReshapableInputMapper::ApplyResults(ControllerEmu::EmulatedController* cont
 }
 
 CalibrationBuilder::CalibrationBuilder(std::optional<Common::DVec2> center)
-    : m_calibration_data(ControllerEmu::ReshapableInput::CALIBRATION_SAMPLE_COUNT, 0.0),
-      m_center{center}
+    : m_samples(ControllerEmu::ReshapableInput::CALIBRATION_SAMPLE_COUNT, 0.0), m_origin{center}
 {
 }
 
 void CalibrationBuilder::Update(Common::DVec2 point)
 {
-  if (!m_center.has_value())
-    m_center = point;
+  if (!m_origin)
+    m_origin = point;
 
-  const auto new_point = point - *m_center;
-  ControllerEmu::ReshapableInput::UpdateCalibrationData(m_calibration_data, m_prev_point,
-                                                        new_point);
-  m_prev_point = new_point;
+  const Common::DVec2 offset = point - *m_origin;
+  ControllerEmu::ReshapableInput::UpdateCalibrationData(m_samples, m_last_offset, offset);
+  m_last_offset = offset;
 }
 
 bool CalibrationBuilder::IsCalibrationDataSensible() const
 {
-  // Even the GC controller's small range would pass this test.
-  constexpr double REASONABLE_AVERAGE_RADIUS = 0.6;
+  // Average radius the user must reach; even the GameCube stick's short throw passes.
+  constexpr double MIN_MEAN_RADIUS = 0.6;
+  // Spread of the radius around the circle; about what a square gate gives. More than this
+  // means only part of the range was covered.
+  constexpr double MAX_RADIUS_DEVIATION = 0.14;
 
-  // Test that the average input radius is not below a threshold.
-  // This will make sure the user has actually moved their stick from neutral.
+  MathUtil::RunningVariance<ControlState> radius;
+  for (const ControlState sample : m_samples)
+    radius.Push(sample);
 
-  MathUtil::RunningVariance<ControlState> stats;
-
-  for (const auto x : m_calibration_data)
-    stats.Push(x);
-
-  if (stats.Mean() < REASONABLE_AVERAGE_RADIUS)
+  if (radius.Mean() < MIN_MEAN_RADIUS)
     return false;
-
-  // Test that the standard deviation is below a threshold.
-  // This will make sure the user has not just filled in one side of their input.
-
-  // Approx. deviation of a square input gate, anything much more than that would be unusual.
-  constexpr double REASONABLE_DEVIATION = 0.14;
-
-  return stats.StandardDeviation() < REASONABLE_DEVIATION;
+  return radius.StandardDeviation() < MAX_RADIUS_DEVIATION;
 }
 
 bool CalibrationBuilder::IsComplete() const
@@ -283,25 +286,26 @@ bool CalibrationBuilder::IsComplete() const
   if (!IsCalibrationDataSensible())
     return false;
 
-  const auto half_calibration =
-      0.5 * GetCalibrationRadiusAtAngle(std::atan2(m_prev_point.y, m_prev_point.x) + MathUtil::TAU);
-  return m_prev_point.LengthSquared() < (half_calibration * half_calibration);
+  // Back within half the calibrated radius of the centre.
+  const double angle = std::atan2(m_last_offset.y, m_last_offset.x) + MathUtil::TAU;
+  const double half_radius = 0.5 * GetCalibrationRadiusAtAngle(angle);
+  return m_last_offset.LengthSquared() < half_radius * half_radius;
 }
 
 ControlState CalibrationBuilder::GetCalibrationRadiusAtAngle(double angle) const
 {
-  return ControllerEmu::ReshapableInput::GetCalibrationDataRadiusAtAngle(m_calibration_data, angle);
+  return ControllerEmu::ReshapableInput::GetCalibrationDataRadiusAtAngle(m_samples, angle);
 }
 
 void CalibrationBuilder::ApplyResults(ControllerEmu::ReshapableInput* stick)
 {
   stick->SetCenter(GetCenter());
-  stick->SetCalibrationData(std::move(m_calibration_data));
+  stick->SetCalibrationData(std::move(m_samples));
 }
 
 Common::DVec2 CalibrationBuilder::GetCenter() const
 {
-  return m_center.value_or(Common::DVec2{});
+  return m_origin.value_or(Common::DVec2{});
 }
 
 }  // namespace ciface::MappingCommon

@@ -1,8 +1,8 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -15,21 +15,10 @@
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "InputCommon/ControllerInterface/InputBackend.h"
 
-// enable disable sources
+// Which input backends this build has. PixelU-Wii is built for Windows only; the other platform
+// backends were removed from the tree.
 #ifdef _WIN32
 #define CIFACE_USE_WIN32
-#endif
-#ifdef HAVE_X11
-#define CIFACE_USE_XLIB
-#endif
-#if defined(__APPLE__)
-#define CIFACE_USE_OSX
-#endif
-#if defined(HAVE_LIBEVDEV) && defined(HAVE_LIBUDEV)
-#define CIFACE_USE_EVDEV
-#endif
-#if defined(USE_PIPES)
-#define CIFACE_USE_PIPES
 #endif
 #define CIFACE_USE_DUALSHOCKUDPCLIENT
 #if defined(HAVE_SDL3)
@@ -41,10 +30,8 @@
 
 namespace ciface
 {
-// A thread local "input channel" is maintained to handle the state of relative inputs.
-// This allows simultaneous use of relative inputs across different input contexts.
-// e.g. binding relative mouse movements to both GameCube controllers and FreeLook.
-// These operate at different rates and processing one would break the other without separate state.
+// Relative inputs (mouse movement and the like) keep a separate value for each consumer, since
+// each consumer reads them at its own rate. The channel of the reading thread picks the value.
 enum class InputChannel
 {
   Host,
@@ -56,60 +43,52 @@ enum class InputChannel
 
 }  // namespace ciface
 
-//
-// ControllerInterface
-//
-// Some crazy shit I made to control different device inputs and outputs
-// from lots of different sources, hopefully more easily.
-//
+// The registry of host input devices. Backends add and remove devices (also from their own
+// hotplug threads); everything else reads the list and is told when it changes.
 class ControllerInterface : public ciface::Core::DeviceContainer
 {
 public:
   enum class WindowChangeReason
   {
-    // Application is shutting down
+    // The application is exiting.
     Exit,
     Other
   };
 
   enum class RefreshReason
   {
-    // Only the window changed.
+    // Nothing but the render window changed.
     WindowChangeOnly,
-    // User requested, or any other internal reason (e.g. init).
-    // The window might have changed anyway.
+    // Anything else (user request, initialisation...). The window may have changed too.
     Other
   };
 
   ControllerInterface() : m_is_init(false) {}
   void Initialize(const WindowSystemInfo& wsi);
-  // Only call from one thread at a time.
+  // Not thread safe: call from one thread at a time.
   void ChangeWindow(void* hwnd, WindowChangeReason reason = WindowChangeReason::Other);
-  // Can be called by any thread at any time (when initialized).
+  // Thread safe once initialised.
   void RefreshDevices(RefreshReason reason = RefreshReason::Other);
   void Shutdown();
   bool AddDevice(std::shared_ptr<ciface::Core::Device> device);
-  // Removes all the devices the function returns true to.
-  // If all the devices shared ptrs need to be destroyed immediately,
-  // set force_devices_release to true.
+  // Removes every device `callback` returns true for. With `force_devices_release`, listeners
+  // are told at once even during a population, so they drop their references immediately.
   void RemoveDevice(std::function<bool(const ciface::Core::Device*)> callback,
                     bool force_devices_release = false);
-  // This is mandatory to use on device populations functions that can be called concurrently by
-  // more than one thread, or that are called by a single other thread.
-  // Without this, our devices list might end up in a mixed state.
+  // Runs a backend's device population as one batch: listeners hear about the result once, and
+  // populations from different threads do not interleave.
   void PlatformPopulateDevices(const std::function<void()>& callback);
   bool IsInit() const { return m_is_init; }
   void UpdateInput();
 
-  // Set adjustment from the full render window aspect-ratio to the drawn aspect-ratio.
-  // Used to fit mouse cursor inputs to the relevant region of the render window.
+  // The ratio between the render window's aspect ratio and the drawn picture's, used to map the
+  // mouse cursor onto the picture.
   void SetAspectRatioAdjustment(float);
 
-  // Calculated from the aspect-ratio adjustment.
-  // Inputs based on window coordinates should be multiplied by this.
+  // Scale to apply to window-relative inputs, derived from the aspect ratio adjustment.
   Common::Vec2 GetWindowInputScale() const;
 
-  // Request that the mouse cursor should be centered in the render window at the next opportunity.
+  // Asks for the mouse cursor to be moved to the centre of the render window.
   void SetMouseCenteringRequested(bool center);
 
   bool IsMouseCenteringRequested() const;
@@ -123,55 +102,59 @@ public:
   WindowSystemInfo GetWindowSystemInfo() const;
 
 private:
+  // Drops every device (outputs reset first) and tells the listeners.
   void ClearDevices();
 
-  void InvokeDevicesChangedCallbacks();
+  void NotifyDevicesChanged();
 
-  Common::HookableEvent<> m_devices_changed_event;
+  // Ends one population level; the outermost one tells the listeners.
+  void EndPopulation();
 
-  mutable std::recursive_mutex m_devices_population_mutex;
+  Common::HookableEvent<> m_devices_changed;
+
+  // Serialises everything that adds or removes devices.
+  mutable std::recursive_mutex m_population_lock;
   std::atomic<bool> m_is_init;
-  // This is now always protected by m_devices_population_mutex, so
-  // it doesn't really need to be a counter or atomic anymore (it could be a raw bool),
-  // but we keep it so for simplicity, in case we changed the design.
-  std::atomic<int> m_populating_devices_counter;
-  WindowSystemInfo m_wsi;
-  std::atomic<float> m_aspect_ratio_adjustment = 1;
-  std::atomic<bool> m_requested_mouse_centering = false;
+  // Nesting depth of populations in progress; listeners are told when it drops back to zero.
+  std::atomic<int> m_population_depth;
+  WindowSystemInfo m_window_info;
+  std::atomic<float> m_aspect_adjustment = 1;
+  std::atomic<bool> m_center_mouse = false;
 
-  std::vector<std::unique_ptr<ciface::InputBackend>> m_input_backends;
+  std::vector<std::unique_ptr<ciface::InputBackend>> m_backends;
 };
 
 namespace ciface
 {
+// A relative input's movement, kept per input channel: Move() adds to every channel, and each
+// channel's Update() turns what accumulated into the value that channel reads.
 template <typename T>
 class RelativeInputState
 {
 public:
   void Update()
   {
-    const auto channel = int(ControllerInterface::GetCurrentInputChannel());
-
-    m_value[channel] = m_delta[channel];
-    m_delta[channel] = {};
+    const auto index = static_cast<size_t>(ControllerInterface::GetCurrentInputChannel());
+    m_current[index] = m_pending[index];
+    m_pending[index] = {};
   }
 
   T GetValue() const
   {
-    const auto channel = int(ControllerInterface::GetCurrentInputChannel());
-
-    return m_value[channel];
+    return m_current[static_cast<size_t>(ControllerInterface::GetCurrentInputChannel())];
   }
 
   void Move(T delta)
   {
-    for (auto& d : m_delta)
-      d += delta;
+    for (T& pending : m_pending)
+      pending += delta;
   }
 
 private:
-  std::array<T, int(InputChannel::Count)> m_value;
-  std::array<T, int(InputChannel::Count)> m_delta;
+  static constexpr size_t CHANNELS = static_cast<size_t>(InputChannel::Count);
+
+  std::array<T, CHANNELS> m_current{};
+  std::array<T, CHANNELS> m_pending{};
 };
 }  // namespace ciface
 

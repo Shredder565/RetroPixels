@@ -1,5 +1,4 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
@@ -8,7 +7,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include <fmt/format.h>
@@ -17,67 +15,112 @@
 
 namespace ciface::Core
 {
-// Compared to an input's current state (ideally 1.0) minus abs(initial_state) (ideally 0.0).
-// Note: Detect() logic assumes this is greater than 0.5.
-constexpr ControlState INPUT_DETECT_THRESHOLD = 0.55;
+namespace
+{
+// A press is detected once an input rises this far above its starting value. Release is below
+// (1 - threshold); the detection logic relies on the threshold being above one half.
+constexpr ControlState DETECTION_LEVEL = 0.55;
+constexpr ControlState RELEASE_LEVEL = 1 - DETECTION_LEVEL;
 
-class CombinedInput final : public Device::Input
+// Pressed while either of two inputs is; e.g. "Shift" for "LSHIFT" and "RSHIFT".
+class EitherInput final : public Device::Input
 {
 public:
-  using Inputs = std::pair<Device::Input*, Device::Input*>;
-
-  CombinedInput(std::string name, Inputs inputs)
-      : m_name(std::move(name)), m_inputs(std::move(inputs))
+  EitherInput(std::string label, Device::Input* a, Device::Input* b)
+      : m_label(std::move(label)), m_a(a), m_b(b)
   {
   }
+
+  std::string GetName() const override { return m_label; }
+
   ControlState GetState() const override
   {
-    ControlState result = 0;
-
-    if (m_inputs.first)
-      result = m_inputs.first->GetState();
-
-    if (m_inputs.second)
-      result = std::max(result, m_inputs.second->GetState());
-
-    return result;
+    ControlState level = 0;
+    if (m_a != nullptr)
+      level = m_a->GetState();
+    if (m_b != nullptr)
+      level = std::max(level, m_b->GetState());
+    return level;
   }
-  std::string GetName() const override { return m_name; }
+
   bool IsDetectable() const override { return false; }
-  bool IsChild(const Input* input) const override
+
+  bool IsChild(const Input* part) const override { return part == m_a || part == m_b; }
+
+private:
+  const std::string m_label;
+  Device::Input* const m_a;
+  Device::Input* const m_b;
+};
+
+// Treats a whole axis as one input running from 0.0 (fully `from`) to 1.0 (fully `to`), with
+// 0.5 in the middle. Used where an axis may rest at one end (triggers) rather than the centre.
+class WholeAxisInput final : public Device::Input
+{
+public:
+  WholeAxisInput(Device::Input* from, Device::Input* to) : m_from(*from), m_to(*to) {}
+
+  ControlState GetState() const override
   {
-    return m_inputs.first == input || m_inputs.second == input;
+    return (1 + std::max(0.0, m_to.GetState()) - std::max(0.0, m_from.GetState())) / 2;
+  }
+
+  // "Full Axis X+" spans from "Axis X-" to "Axis X+".
+  std::string GetName() const override { return "Full " + m_to.GetName(); }
+
+  bool IsDetectable() const override { return m_from.IsDetectable() && m_to.IsDetectable(); }
+
+  bool IsHidden() const override { return m_from.IsHidden() && m_to.IsHidden(); }
+
+  bool IsMatchingName(std::string_view name) const override
+  {
+    if (Control::IsMatchingName(name))
+      return true;
+
+    // Configurations from before the "Full" prefix call this input "Axis X-+": the name of the
+    // starting half followed by the sign of the end half.
+    const std::string to_name = m_to.GetName();
+    std::string legacy = m_from.GetName();
+    legacy.push_back(to_name.back());
+    return name == legacy;
   }
 
 private:
-  const std::string m_name;
-  const std::pair<Device::Input*, Device::Input*> m_inputs;
+  Device::Input& m_from;
+  Device::Input& m_to;
 };
+
+// Reads the device id field of a qualifier string the way a formatted stream extraction does,
+// keeping its platform's handling of malformed numbers.
+int ParseQualifierId(const std::string& text)
+{
+  int id = -1;
+  std::istringstream(text) >> id;
+  return id;
+}
+}  // namespace
 
 Device::~Device()
 {
-  // delete inputs
-  for (Device::Input* input : m_inputs)
-    delete input;
-
-  // delete outputs
-  for (Device::Output* output : m_outputs)
-    delete output;
+  for (Input* in : m_input_list)
+    delete in;
+  for (Output* out : m_output_list)
+    delete out;
 }
 
 std::optional<int> Device::GetPreferredId() const
 {
-  return {};
+  return std::nullopt;
 }
 
-void Device::AddInput(Device::Input* const i)
+void Device::AddInput(Input* const i)
 {
-  m_inputs.push_back(i);
+  m_input_list.push_back(i);
 }
 
-void Device::AddOutput(Device::Output* const o)
+void Device::AddOutput(Output* const o)
 {
-  m_outputs.push_back(o);
+  m_output_list.push_back(o);
 }
 
 std::string Device::GetQualifiedName() const
@@ -85,45 +128,37 @@ std::string Device::GetQualifiedName() const
   return fmt::format("{}/{}/{}", GetSource(), GetId(), GetName());
 }
 
-auto Device::GetParentMostInput(Input* child) const -> Input*
+Device::Input* Device::GetParentMostInput(Input* input) const
 {
-  for (auto* input : m_inputs)
+  // Climb while some input of this device combines the current one.
+  Input* current = input;
+  for (;;)
   {
-    if (input->IsChild(child))
-    {
-      // Running recursively is currently unnecessary but it doesn't hurt.
-      return GetParentMostInput(input);
-    }
+    const auto parent = std::ranges::find_if(
+        m_input_list, [current](const Input* candidate) { return candidate->IsChild(current); });
+    if (parent == m_input_list.end())
+      return current;
+    current = *parent;
   }
-
-  return child;
 }
 
 Device::Input* Device::FindInput(std::string_view name) const
 {
-  for (Input* input : m_inputs)
-  {
-    if (input->IsMatchingName(name))
-      return input;
-  }
-
-  return nullptr;
+  const auto it = std::ranges::find_if(
+      m_input_list, [name](const Input* candidate) { return candidate->IsMatchingName(name); });
+  return it == m_input_list.end() ? nullptr : *it;
 }
 
 Device::Output* Device::FindOutput(std::string_view name) const
 {
-  for (Output* output : m_outputs)
-  {
-    if (output->IsMatchingName(name))
-      return output;
-  }
-
-  return nullptr;
+  const auto it = std::ranges::find_if(
+      m_output_list, [name](const Output* candidate) { return candidate->IsMatchingName(name); });
+  return it == m_output_list.end() ? nullptr : *it;
 }
 
 bool Device::Control::IsMatchingName(std::string_view name) const
 {
-  return GetName() == name;
+  return name == GetName();
 }
 
 bool Device::Control::IsHidden() const
@@ -131,372 +166,314 @@ bool Device::Control::IsHidden() const
   return false;
 }
 
-class FullAnalogSurface final : public Device::Input
-{
-public:
-  FullAnalogSurface(Input* low, Input* high) : m_low(*low), m_high(*high) {}
-
-  ControlState GetState() const override
-  {
-    return (1 + std::max(0.0, m_high.GetState()) - std::max(0.0, m_low.GetState())) / 2;
-  }
-
-  std::string GetName() const override
-  {
-    // E.g. "Full Axis X+"
-    return "Full " + m_high.GetName();
-  }
-
-  bool IsDetectable() const override { return m_low.IsDetectable() && m_high.IsDetectable(); }
-
-  bool IsHidden() const override { return m_low.IsHidden() && m_high.IsHidden(); }
-
-  bool IsMatchingName(std::string_view name) const override
-  {
-    if (Control::IsMatchingName(name))
-      return true;
-
-    // Old naming scheme was "Axis X-+" which is too visually similar to "Axis X+".
-    // This has caused countless problems for users with mysterious misconfigurations.
-    // We match this old name to support old configurations.
-    const auto old_name = m_low.GetName() + *m_high.GetName().rbegin();
-
-    return old_name == name;
-  }
-
-private:
-  Input& m_low;
-  Input& m_high;
-};
-
 void Device::AddFullAnalogSurfaceInputs(Input* low, Input* high)
 {
   AddInput(low);
   AddInput(high);
-  AddInput(new FullAnalogSurface(low, high));
-  AddInput(new FullAnalogSurface(high, low));
+  AddInput(new WholeAxisInput(low, high));
+  AddInput(new WholeAxisInput(high, low));
 }
 
 void Device::AddCombinedInput(std::string name, const std::pair<std::string, std::string>& inputs)
 {
-  AddInput(new CombinedInput(std::move(name), {FindInput(inputs.first), FindInput(inputs.second)}));
+  Input* const first = FindInput(inputs.first);
+  Input* const second = FindInput(inputs.second);
+  AddInput(new EitherInput(std::move(name), first, second));
 }
 
-//
-// DeviceQualifier :: ToString
-//
-// Get string from a device qualifier / serialize
-//
 std::string DeviceQualifier::ToString() const
 {
-  if (source.empty() && (cid < 0) && name.empty())
+  const bool has_id = cid >= 0;
+  if (!has_id && source.empty() && name.empty())
     return {};
 
-  if (cid > -1)
-    return fmt::format("{}/{}/{}", source, cid, name);
-  else
+  if (!has_id)
     return fmt::format("{}//{}", source, name);
+  return fmt::format("{}/{}/{}", source, cid, name);
 }
 
-//
-// DeviceQualifier :: FromString
-//
-// Set a device qualifier from a string / unserialize
-//
+// "Source/Id/Name". The pieces are split the way line-oriented stream reads would split them:
+// the id is read from the second piece, the name runs to the end of the line, and with only two
+// pieces the second one also serves as the name.
 void DeviceQualifier::FromString(const std::string& str)
 {
   *this = {};
 
-  std::istringstream ss(str);
+  const size_t first_slash = str.find('/');
+  if (first_slash == std::string::npos)
+  {
+    source = str;
+    cid = ParseQualifierId({});
+    return;
+  }
 
-  std::getline(ss, source, '/');
+  source = str.substr(0, first_slash);
+  const std::string rest = str.substr(first_slash + 1);
 
-  // silly
-  std::getline(ss, name, '/');
-  std::istringstream(name) >> cid;
+  const size_t second_slash = rest.find('/');
+  if (second_slash == std::string::npos)
+  {
+    name = rest;
+    cid = ParseQualifierId(rest);
+    return;
+  }
 
-  std::getline(ss, name);
+  cid = ParseQualifierId(rest.substr(0, second_slash));
+  const std::string tail = rest.substr(second_slash + 1);
+  name = tail.substr(0, tail.find('\n'));
 }
 
-//
-// DeviceQualifier :: FromDevice
-//
-// Set a device qualifier from a device
-//
 void DeviceQualifier::FromDevice(const Device* const dev)
 {
-  name = dev->GetName();
-  cid = dev->GetId();
   source = dev->GetSource();
+  cid = dev->GetId();
+  name = dev->GetName();
 }
 
 bool DeviceQualifier::operator==(const Device* const dev) const
 {
-  if (dev->GetId() == cid)
-    if (dev->GetName() == name)
-      if (dev->GetSource() == source)
-        return true;
-
-  return false;
+  return cid == dev->GetId() && name == dev->GetName() && source == dev->GetSource();
 }
 
 bool DeviceQualifier::operator==(const DeviceQualifier& devq) const
 {
-  return std::tie(cid, name, source) == std::tie(devq.cid, devq.name, devq.source);
+  return cid == devq.cid && name == devq.name && source == devq.source;
 }
 
 std::shared_ptr<Device> DeviceContainer::FindDevice(const DeviceQualifier& devq) const
 {
-  std::lock_guard lk(m_devices_mutex);
-  for (const auto& d : m_devices)
-  {
-    if (devq == d.get())
-      return d;
-  }
-
-  return nullptr;
+  std::lock_guard guard(m_devices_mutex);
+  const auto it = std::ranges::find_if(
+      m_devices, [&devq](const std::shared_ptr<Device>& dev) { return devq == dev.get(); });
+  return it == m_devices.end() ? nullptr : *it;
 }
 
 std::vector<std::shared_ptr<Device>> DeviceContainer::GetAllDevices() const
 {
-  std::lock_guard lk(m_devices_mutex);
-
+  std::lock_guard guard(m_devices_mutex);
   return m_devices;
 }
 
 std::vector<std::string> DeviceContainer::GetAllDeviceStrings() const
 {
-  std::lock_guard lk(m_devices_mutex);
+  std::lock_guard guard(m_devices_mutex);
 
-  std::vector<std::string> device_strings;
-  DeviceQualifier device_qualifier;
-
-  for (const auto& d : m_devices)
+  std::vector<std::string> strings;
+  strings.reserve(m_devices.size());
+  for (const std::shared_ptr<Device>& dev : m_devices)
   {
-    device_qualifier.FromDevice(d.get());
-    device_strings.emplace_back(device_qualifier.ToString());
+    DeviceQualifier qualifier;
+    qualifier.FromDevice(dev.get());
+    strings.push_back(qualifier.ToString());
   }
-
-  return device_strings;
+  return strings;
 }
 
 bool DeviceContainer::HasDefaultDevice() const
 {
-  std::lock_guard lk(m_devices_mutex);
-  // Devices are already sorted by priority
-  return !m_devices.empty() && m_devices[0]->GetSortPriority() >= 0;
+  std::lock_guard guard(m_devices_mutex);
+  // The list is kept sorted, so only the head can be a default device.
+  return !m_devices.empty() && m_devices.front()->GetSortPriority() >= 0;
 }
 
 std::string DeviceContainer::GetDefaultDeviceString() const
 {
-  std::lock_guard lk(m_devices_mutex);
-  // Devices are already sorted by priority
-  if (m_devices.empty() || m_devices[0]->GetSortPriority() < 0)
+  std::lock_guard guard(m_devices_mutex);
+  if (m_devices.empty() || m_devices.front()->GetSortPriority() < 0)
     return "";
 
-  DeviceQualifier device_qualifier;
-  device_qualifier.FromDevice(m_devices[0].get());
-  return device_qualifier.ToString();
+  DeviceQualifier qualifier;
+  qualifier.FromDevice(m_devices.front().get());
+  return qualifier.ToString();
 }
 
 Device::Input* DeviceContainer::FindInput(std::string_view name, const Device* def_dev) const
 {
-  if (def_dev)
+  // The given device wins; otherwise the first device that has such an input.
+  if (def_dev != nullptr)
   {
-    Device::Input* const inp = def_dev->FindInput(name);
-    if (inp)
-      return inp;
+    if (Device::Input* const found = def_dev->FindInput(name))
+      return found;
   }
 
-  std::lock_guard lk(m_devices_mutex);
-  for (const auto& d : m_devices)
+  std::lock_guard guard(m_devices_mutex);
+  for (const std::shared_ptr<Device>& dev : m_devices)
   {
-    Device::Input* const i = d->FindInput(name);
-
-    if (i)
-      return i;
+    if (Device::Input* const found = dev->FindInput(name))
+      return found;
   }
-
   return nullptr;
 }
 
 Device::Output* DeviceContainer::FindOutput(std::string_view name, const Device* def_dev) const
 {
+  // Outputs are only ever looked up on the given device.
   return def_dev->FindOutput(name);
 }
 
 bool DeviceContainer::HasConnectedDevice(const DeviceQualifier& qualifier) const
 {
-  const auto device = FindDevice(qualifier);
-  return device != nullptr && device->IsValid();
+  const std::shared_ptr<Device> dev = FindDevice(qualifier);
+  return dev && dev->IsValid();
 }
 
-struct InputDetector::Impl
+// The inputs being watched, grouped by device.
+struct InputDetector::Watch
 {
-  struct InputState
+  // One watched input.
+  struct Tracker
   {
-    InputState(ciface::Core::Device::Input* input_) : input{input_} { stats.Push(0.0); }
-
-    ciface::Core::Device::Input* input;
-    ControlState initial_state = input->GetState();
-    ControlState last_state = initial_state;
-    MathUtil::RunningVariance<ControlState> stats;
-
-    // Prevent multiple detections until after release.
-    bool is_ready = true;
-
-    void Update()
+    explicit Tracker(Device::Input* watched)
+        : input(watched), start_level(watched->GetState()), previous_level(start_level)
     {
-      const auto new_state = input->GetState();
+      // A zero step to begin with keeps the statistics meaningful for an instant press.
+      steps.Push(0.0);
+    }
 
-      if (!is_ready && new_state < (1 - INPUT_DETECT_THRESHOLD))
+    // Reads the input and records how far it moved since the previous read.
+    void Sample()
+    {
+      const ControlState level = input->GetState();
+
+      // Once a detected input is let go it may be detected again, from a fresh history.
+      if (!armed && level < RELEASE_LEVEL)
       {
-        last_state = new_state;
-        is_ready = true;
-        stats.Clear();
+        previous_level = level;
+        armed = true;
+        steps.Clear();
       }
 
-      const auto difference = new_state - last_state;
-      stats.Push(difference);
-      last_state = new_state;
+      steps.Push(level - previous_level);
+      previous_level = level;
     }
 
-    bool IsPressed()
+    // Pressed means: armed, and risen well above where it started.
+    bool IsPressedNow() const
     {
-      if (!is_ready)
-        return false;
-
-      // We want an input that was initially 0.0 and currently 1.0.
-      const auto detection_score = (last_state - std::abs(initial_state));
-      return detection_score > INPUT_DETECT_THRESHOLD;
+      return armed && previous_level - std::abs(start_level) > DETECTION_LEVEL;
     }
+
+    // How evenly the input rose; 1 for a single jump, more for a gradual (analog) press.
+    ControlState Smoothness() const { return 1 / std::sqrt(steps.Variance() / steps.Mean()); }
+
+    Device::Input* input;
+    ControlState start_level;
+    ControlState previous_level;
+    MathUtil::RunningVariance<ControlState> steps;
+    bool armed = true;
   };
 
-  struct DeviceState
+  struct WatchedDevice
   {
     std::shared_ptr<Device> device;
-
-    std::vector<InputState> input_states;
+    std::vector<Tracker> trackers;
   };
 
-  std::vector<DeviceState> device_states;
+  std::vector<WatchedDevice> devices;
 };
 
-InputDetector::InputDetector() : m_start_time{}, m_state{}
+InputDetector::InputDetector() : m_started_at{}, m_watch{}
 {
 }
+
+InputDetector::~InputDetector() = default;
 
 void InputDetector::Start(const DeviceContainer& container,
                           std::span<const std::string> device_strings)
-
 {
-  m_start_time = Clock::now();
-  m_detections = {};
-  m_state = std::make_unique<Impl>();
+  m_started_at = Clock::now();
+  m_found = {};
+  m_watch = std::make_unique<Watch>();
 
-  // Acquire devices and initial input states.
-  for (const auto& device_string : device_strings)
+  for (const std::string& device_string : device_strings)
   {
-    DeviceQualifier dq;
-    dq.FromString(device_string);
-    auto device = container.FindDevice(dq);
-
-    if (!device)
+    DeviceQualifier qualifier;
+    qualifier.FromString(device_string);
+    std::shared_ptr<Device> dev = container.FindDevice(qualifier);
+    if (!dev)
       continue;
 
-    std::vector<Impl::InputState> input_states;
-
-    for (auto* input : device->Inputs())
+    // Absolute positions and motion sensors would trigger detection all by themselves.
+    std::vector<Watch::Tracker> trackers;
+    for (Device::Input* in : dev->Inputs())
     {
-      // Don't detect things like absolute cursor positions, accelerometers, or gyroscopes.
-      if (!input->IsDetectable())
-        continue;
-
-      // Undesirable axes will have negative values here when trying to map a
-      // "FullAnalogSurface".
-      input_states.push_back(Impl::InputState{input});
+      if (in->IsDetectable())
+        trackers.push_back(Watch::Tracker{in});
     }
 
-    if (!input_states.empty())
-    {
-      m_state->device_states.emplace_back(
-          Impl::DeviceState{std::move(device), std::move(input_states)});
-    }
+    if (!trackers.empty())
+      m_watch->devices.push_back(Watch::WatchedDevice{std::move(dev), std::move(trackers)});
   }
 
-  // If no inputs were found via the supplied device strings, immediately complete.
-  if (m_state->device_states.empty())
-    m_state.reset();
+  // Nothing to watch: done straight away.
+  if (m_watch->devices.empty())
+    m_watch.reset();
 }
 
 void InputDetector::Update(std::chrono::milliseconds initial_wait,
                            std::chrono::milliseconds confirmation_wait,
                            std::chrono::milliseconds maximum_wait)
 {
-  if (m_state)
+  if (!m_watch)
+    return;
+
+  const auto now = Clock::now();
+  const auto running_for = now - m_started_at;
+
+  // Stop on the overall limit, when nothing was pressed within the initial wait, or once the
+  // last detection has been released for the confirmation wait.
+  const bool out_of_time = running_for >= maximum_wait;
+  const bool nothing_pressed = m_found.empty() && running_for >= initial_wait;
+  const bool confirmed = !m_found.empty() && m_found.back().release_time.has_value() &&
+                         now >= *m_found.back().release_time + confirmation_wait;
+  if (out_of_time || nothing_pressed || confirmed)
   {
-    const auto now = Clock::now();
-    const auto elapsed_time = now - m_start_time;
+    m_watch.reset();
+    return;
+  }
 
-    if (elapsed_time >= maximum_wait || (m_detections.empty() && elapsed_time >= initial_wait) ||
-        (!m_detections.empty() && m_detections.back().release_time.has_value() &&
-         now >= *m_detections.back().release_time + confirmation_wait))
+  for (Watch::WatchedDevice& watched : m_watch->devices)
+  {
+    for (Watch::Tracker& tracker : watched.trackers)
     {
-      m_state.reset();
-      return;
+      tracker.Sample();
+      if (!tracker.IsPressedNow())
+        continue;
+
+      tracker.armed = false;
+
+      Detection found;
+      found.device = watched.device;
+      found.input = tracker.input;
+      found.press_time = now;
+      found.smoothness = tracker.Smoothness();
+      m_found.push_back(std::move(found));
     }
+  }
 
-    for (auto& device_state : m_state->device_states)
-    {
-      for (auto& input_state : device_state.input_states)
-      {
-        input_state.Update();
-
-        if (input_state.IsPressed())
-        {
-          input_state.is_ready = false;
-
-          // Digital presses will evaluate as 1 here.
-          // Analog presses will evaluate greater than 1.
-          const auto smoothness =
-              1 / std::sqrt(input_state.stats.Variance() / input_state.stats.Mean());
-
-          Detection new_detection;
-          new_detection.device = device_state.device;
-          new_detection.input = input_state.input;
-          new_detection.press_time = now;
-          new_detection.smoothness = smoothness;
-
-          // We found an input. Add it to our detections.
-          m_detections.emplace_back(std::move(new_detection));
-        }
-      }
-    }
-
-    // Check for any releases of our detected inputs.
-    for (auto& d : m_detections)
-    {
-      if (!d.release_time.has_value() && d.input->GetState() < (1 - INPUT_DETECT_THRESHOLD))
-        d.release_time = Clock::now();
-    }
+  // Note when detected inputs are let go.
+  for (Detection& detection : m_found)
+  {
+    if (detection.release_time.has_value())
+      continue;
+    if (detection.input->GetState() < RELEASE_LEVEL)
+      detection.release_time = Clock::now();
   }
 }
 
-InputDetector::~InputDetector() = default;
-
 bool InputDetector::IsComplete() const
 {
-  return !m_state;
+  return m_watch == nullptr;
 }
 
 auto InputDetector::GetResults() const -> const Results&
 {
-  return m_detections;
+  return m_found;
 }
 
 auto InputDetector::TakeResults() -> Results
 {
-  return std::move(m_detections);
+  return std::move(m_found);
 }
 
 }  // namespace ciface::Core

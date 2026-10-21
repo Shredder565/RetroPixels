@@ -1,8 +1,9 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <optional>
+#include <span>
 #include <string>
 
 #include "Common/Matrix.h"
@@ -14,6 +15,7 @@ namespace ControllerEmu
 class EmulatedController;
 }  // namespace ControllerEmu
 
+// Helpers for turning detected inputs into mapping expressions, used by the mapping UI.
 namespace ciface::MappingCommon
 {
 enum class Quote
@@ -22,89 +24,85 @@ enum class Quote
   Off
 };
 
+// The expression for one control: "Device:Control" when the control's device is not the default
+// device, plain "Control" otherwise; with Quote::On it is put in backticks unless it is all letters.
 std::string GetExpressionForControl(const std::string& control_name,
                                     const Core::DeviceQualifier& control_device,
                                     const Core::DeviceQualifier& default_device,
                                     Quote quote = Quote::On);
 
+// Builds an expression from a sequence of detections: inputs held together become "a&b" (or a
+// "@(a+b)" hotkey when pressed one after another), separate presses become alternatives "a|b".
 std::string BuildExpression(const Core::InputDetector::Results&,
                             const Core::DeviceQualifier& default_device, Quote quote);
 
+// Drops digital detections made alongside an analog one (e.g. the click at the end of a trigger).
 void RemoveSpuriousTriggerCombinations(Core::InputDetector::Results*);
+// Drops detections still held at, or released at or after, `after`.
 void RemoveDetectionsAfterTimePoint(Core::InputDetector::Results*, Clock::time_point after);
+// True if any detection has been released.
 bool ContainsCompleteDetection(const Core::InputDetector::Results&);
 
-// class for detecting four directional input mappings in sequence.
+// Maps the four directions of a stick (or similar) by detecting them one after another,
+// starting with up and going clockwise.
 class ReshapableInputMapper
 {
 public:
-  // Four cardinal directions.
   static constexpr std::size_t REQUIRED_INPUT_COUNT = 4;
 
-  // Caller should hold the "StateLock".
+  // The caller holds the controller state lock.
   ReshapableInputMapper(const Core::DeviceContainer& container,
                         std::span<const std::string> device_strings);
 
-  // Reads inputs and updates internal state.
-  // Returns true if an input was detected in this call.
-  //  (useful for UI animation)
-  // Caller should hold the "StateLock".
+  // Polls the inputs; returns true if a new direction was detected by this call.
+  // The caller holds the controller state lock.
   bool Update();
 
-  // A counter-clockwise angle in radians for the currently desired input direction.
-  // Used for a graphical indicator in the UI.
-  // 0 == East
+  // Angle of the direction wanted next, in radians counter-clockwise from east (for the UI).
   float GetCurrentAngle() const;
 
-  // True if all four directions have been detected or the timer expired.
+  // True once all four directions are detected or the time ran out.
   bool IsComplete() const;
 
-  // Returns true if "analog" inputs were detected and calibration should be performed.
-  // Must use *before* ApplyResults.
+  // True if any of the four detections was analog, so the stick should be calibrated.
+  // Must be asked before ApplyResults().
   bool IsCalibrationNeeded() const;
 
-  // Use when IsComplete returns true.
-  // Updates the mappings on the provided ReshapableInput.
-  // Caller should hold the "StateLock".
+  // Writes the four mappings once IsComplete(). The caller holds the controller state lock.
   bool ApplyResults(ControllerEmu::EmulatedController*, ControllerEmu::ReshapableInput* stick);
 
 private:
-  Core::InputDetector m_input_detector;
+  Core::InputDetector m_detector;
 };
 
+// Records the shape of a stick's range of motion while the user turns it around.
 class CalibrationBuilder
 {
 public:
-  // Provide nullopt if you want to calibrate the center on first Update.
+  // With nullopt the first point seen becomes the centre.
   explicit CalibrationBuilder(std::optional<Common::DVec2> center = Common::DVec2{});
 
-  // Updates the calibration data using the provided point and the previous point.
+  // Adds the movement from the previous point to `point`.
   void Update(Common::DVec2 point);
 
-  // Returns true when the calibration data seems to be reasonably filled in.
-  // Used to update the UI to encourage the user to click the "Finish" button.
+  // True once the data looks like a full turn of a stick (for the UI's "Finish" hint).
   bool IsCalibrationDataSensible() const;
 
-  // Returns true when the calibration data seems sensible,
-  //  and the input then approaches the center position.
+  // True once the data is sensible and the stick is back near the centre.
   bool IsComplete() const;
 
-  // Grabs the calibration value at the provided angle.
-  // Used to render the calibration in the UI while it's in progress.
+  // The recorded radius at `angle`, for drawing the calibration in progress.
   ControlState GetCalibrationRadiusAtAngle(double angle) const;
 
-  // Sets the calibration data of the provided ReshapableInput.
-  // Caller should hold the "StateLock".
+  // Stores the centre and calibration in `stick`. The caller holds the controller state lock.
   void ApplyResults(ControllerEmu::ReshapableInput* stick);
 
   Common::DVec2 GetCenter() const;
 
 private:
-  ControllerEmu::ReshapableInput::CalibrationData m_calibration_data;
-
-  std::optional<Common::DVec2> m_center = std::nullopt;
-
-  Common::DVec2 m_prev_point{};
+  ControllerEmu::ReshapableInput::CalibrationData m_samples;
+  std::optional<Common::DVec2> m_origin = std::nullopt;
+  Common::DVec2 m_last_offset{};
 };
 
 }  // namespace ciface::MappingCommon
