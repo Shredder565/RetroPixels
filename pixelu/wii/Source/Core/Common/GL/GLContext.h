@@ -11,7 +11,7 @@
 
 // An OpenGL rendering context bound to one window (or an offscreen surface). The base class is
 // the "no context" implementation: every operation fails or does nothing. A window-system
-// specific subclass (WGL on Windows) does the real work.
+// specific subclass (WGL on Windows; GLX and EGL on Linux) does the real work.
 class GLContext
 {
 public:
@@ -42,6 +42,10 @@ public:
   // Re-reads the drawable size after the window was resized.
   virtual void Update();
   virtual void UpdateSurface(void* window_handle);
+
+  // The drawable size for window systems that cannot measure their surface (Wayland); it takes
+  // effect at the next Update(). Ignored everywhere else.
+  virtual void SetSurfaceSize(u32 width, u32 height);
 
   virtual void Swap();
   virtual void SwapInterval(int interval);

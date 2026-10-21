@@ -722,6 +722,10 @@ void OGLGfx::PickUpSurfaceResize()
   if (!g_presenter->SurfaceResizedTestAndClear())
     return;
 
+  // Where the window system cannot measure the surface (Wayland), the size is the one the
+  // frontend gave the presenter; elsewhere the context ignores it and measures the window.
+  m_context->SetSurfaceSize(static_cast<u32>(std::max(g_presenter->GetBackbufferWidth(), 0)),
+                            static_cast<u32>(std::max(g_presenter->GetBackbufferHeight(), 0)));
   m_context->Update();
   ResizeWindowFramebuffer();
 }
