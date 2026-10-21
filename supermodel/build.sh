@@ -101,7 +101,9 @@ windows_deps() {
 
 # package <program> <outdir>
 package() {
-	out="$2/Supermodel"
+	# Absolute, because the source tarball is written from inside $src.
+	mkdir -p "$2"
+	out="$(cd "$2" && pwd)/Supermodel"
 	rm -rf "$out"
 	mkdir -p "$out/Config" "$out/Assets"
 	cp "$1" "$out/"
