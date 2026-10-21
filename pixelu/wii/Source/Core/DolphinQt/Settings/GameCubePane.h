@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,7 @@ class ConfigChoice;
 class ConfigText;
 class ConfigUserPath;
 class QComboBox;
+class QGridLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -25,67 +25,82 @@ class QPushButton;
 class QString;
 class QVBoxLayout;
 
+// "GameCube" settings page: IPL options, the EXI devices in slots A/B/SP1 (with the
+// memory card / GCI folder / GBA cartridge paths of slots A and B) and, with mGBA, the GBA
+// BIOS, ROM and save locations.
 class GameCubePane : public QWidget
 {
   Q_OBJECT
 public:
   explicit GameCubePane(MainWindow* main_window);
 
+  // Asks for a GBA ROM; returns an empty string if cancelled.
   static std::string GetOpenGBARom(std::string_view title);
 
 signals:
   void ShowTriforceWindow();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  using Slot = ExpansionInterface::Slot;
 
-  void LoadSettings();
-  void SaveSettings();
+  // Path editors shown under a memory card slot, depending on the selected device.
+  struct CardSlotPaths
+  {
+    QLabel* memcard_label = nullptr;
+    QLineEdit* memcard = nullptr;
+    QLabel* cartridge_label = nullptr;
+    QLineEdit* cartridge = nullptr;
+    QLabel* gci_label = nullptr;
+    QLabel* gci_override_warning = nullptr;
+    QLineEdit* gci = nullptr;
+  };
+
+  QWidget* BuildIplBox();
+  QWidget* BuildDeviceBox();
+  void BuildCardSlotPaths(Slot slot);
+  void FillDeviceCombos();
+#ifdef HAS_LIBMGBA
+  QWidget* BuildGbaBox();
+#endif
+  void WireUp();
+
+  void ReadConfig();
+  void WriteDevices();
 
   void OnEmulationStateChanged();
 
-  void UpdateButton(ExpansionInterface::Slot slot);
-  void OnConfigPressed(ExpansionInterface::Slot slot);
+  void RefreshSlot(Slot slot);
+  void ConfigureSlot(Slot slot);
 
-  void BrowseMemcard(ExpansionInterface::Slot slot);
-  bool SetMemcard(ExpansionInterface::Slot slot, const QString& filename);
-  void BrowseGCIFolder(ExpansionInterface::Slot slot);
-  bool SetGCIFolder(ExpansionInterface::Slot slot, const QString& path);
-  void BrowseAGPRom(ExpansionInterface::Slot slot);
-  void SetAGPRom(ExpansionInterface::Slot slot, const QString& filename);
+  void PickMemcard(Slot slot);
+  bool ApplyMemcard(Slot slot, const QString& filename);
+  void PickGCIFolder(Slot slot);
+  bool ApplyGCIFolder(Slot slot, const QString& path);
+  void PickCartridge(Slot slot);
+  void ApplyCartridge(Slot slot, const QString& filename);
 
 #ifdef HAS_LIBMGBA
-  void BrowseGBABios();
-  void BrowseGBARom(size_t index);
-  void SaveRomPathChanged();
-  void BrowseGBASaves();
+  void PickGBABios();
+  void PickGBARom(size_t index);
+  void OnSavesBesideRomToggled();
+  void PickGBASaves();
 #endif  // HAS_LIBMGBA
 
-  ConfigBool* m_skip_main_menu;
-  ConfigChoice* m_language_combo;
+  ConfigBool* m_skip_ipl;
+  ConfigChoice* m_ipl_language;
 
-  Common::EnumMap<QPushButton*, ExpansionInterface::Slot::SP1> m_slot_buttons;
-  Common::EnumMap<QComboBox*, ExpansionInterface::Slot::SP1> m_slot_combos;
+  Common::EnumMap<QComboBox*, Slot::SP1> m_device_combos;
+  Common::EnumMap<QPushButton*, Slot::SP1> m_configure_buttons;
+  Common::EnumMap<QHBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_memcard_rows;
+  Common::EnumMap<QHBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_cartridge_rows;
+  Common::EnumMap<QVBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_gci_rows;
+  Common::EnumMap<CardSlotPaths, ExpansionInterface::MAX_MEMCARD_SLOT> m_paths;
 
-  Common::EnumMap<QHBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_memcard_path_layouts;
-  Common::EnumMap<QLabel*, ExpansionInterface::MAX_MEMCARD_SLOT> m_memcard_path_labels;
-  Common::EnumMap<QLineEdit*, ExpansionInterface::MAX_MEMCARD_SLOT> m_memcard_paths;
-
-  Common::EnumMap<QHBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_agp_path_layouts;
-  Common::EnumMap<QLabel*, ExpansionInterface::MAX_MEMCARD_SLOT> m_agp_path_labels;
-  Common::EnumMap<QLineEdit*, ExpansionInterface::MAX_MEMCARD_SLOT> m_agp_paths;
-
-  Common::EnumMap<QVBoxLayout*, ExpansionInterface::MAX_MEMCARD_SLOT> m_gci_path_layouts;
-  Common::EnumMap<QLabel*, ExpansionInterface::MAX_MEMCARD_SLOT> m_gci_path_labels;
-  Common::EnumMap<QLabel*, ExpansionInterface::MAX_MEMCARD_SLOT> m_gci_override_labels;
-  Common::EnumMap<QLineEdit*, ExpansionInterface::MAX_MEMCARD_SLOT> m_gci_paths;
-
-  ConfigBool* m_gba_save_rom_path;
-  QPushButton* m_gba_browse_bios;
-  ConfigUserPath* m_gba_bios_edit;
-  std::array<QPushButton*, 5> m_gba_browse_roms;
-  std::array<ConfigText*, 5> m_gba_rom_edits;
-  QPushButton* m_gba_browse_saves;
-  ConfigUserPath* m_gba_saves_edit;
+  ConfigUserPath* m_gba_bios;
+  QPushButton* m_gba_bios_browse;
+  std::array<ConfigText*, 5> m_gba_roms;
+  std::array<QPushButton*, 5> m_gba_rom_browse;
+  ConfigBool* m_gba_saves_beside_rom;
+  ConfigUserPath* m_gba_saves;
+  QPushButton* m_gba_saves_browse;
 };
