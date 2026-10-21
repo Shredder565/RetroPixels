@@ -156,36 +156,6 @@ ResourcePack::ResourcePack(const std::string& path) : m_path(path)
   } while (mz_zip_reader_goto_next_entry(zip.Get()) != MZ_END_OF_LIST);
 }
 
-bool ResourcePack::IsValid() const
-{
-  return m_valid;
-}
-
-const std::vector<char>& ResourcePack::GetLogo() const
-{
-  return m_logo_data;
-}
-
-const std::string& ResourcePack::GetPath() const
-{
-  return m_path;
-}
-
-const std::string& ResourcePack::GetError() const
-{
-  return m_error;
-}
-
-const Manifest* ResourcePack::GetManifest() const
-{
-  return m_manifest.get();
-}
-
-const std::vector<std::string>& ResourcePack::GetTextures() const
-{
-  return m_textures;
-}
-
 bool ResourcePack::Install(const std::string& path)
 {
   if (!IsValid())

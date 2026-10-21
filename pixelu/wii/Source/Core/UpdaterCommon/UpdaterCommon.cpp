@@ -135,9 +135,9 @@ bool SignatureMatches(const std::string& signed_text, const std::string& encoded
   constexpr std::size_t SIGNATURE_SIZE = 64;
   std::array<u8, SIGNATURE_SIZE> signature{};
   std::size_t decoded_size = 0;
-  const int result = mbedtls_base64_decode(
-      signature.data(), signature.size(), &decoded_size,
-      reinterpret_cast<const u8*>(encoded_signature.data()), encoded_signature.size());
+  const int result = mbedtls_base64_decode(signature.data(), signature.size(), &decoded_size,
+                                           reinterpret_cast<const u8*>(encoded_signature.data()),
+                                           encoded_signature.size());
   if (result != 0 || decoded_size != SIGNATURE_SIZE)
   {
     LogToFile("Invalid base64: %s\n", encoded_signature.c_str());
@@ -211,8 +211,9 @@ std::optional<Manifest> DownloadManifest(const std::string& url)
   const std::vector<std::string> signatures = SplitString(text->substr(blank_line + 2), '\n');
   text->resize(blank_line + 1);
 
-  const bool verified = std::ranges::any_of(
-      signatures, [&text](const std::string& signature) { return SignatureMatches(*text, signature); });
+  const bool verified = std::ranges::any_of(signatures, [&text](const std::string& signature) {
+    return SignatureMatches(*text, signature);
+  });
   if (!verified)
   {
     LogToFile("Could not verify signature of the manifest.\n");
@@ -398,7 +399,8 @@ bool WriteUpdatedFiles(std::span<const TodoList::UpdateOp> updates, const std::s
   return true;
 }
 
-bool RemoveDroppedFiles(std::span<const TodoList::DeleteOp> deletions, const std::string& install_dir)
+bool RemoveDroppedFiles(std::span<const TodoList::DeleteOp> deletions,
+                        const std::string& install_dir)
 {
   for (const TodoList::DeleteOp& op : deletions)
   {

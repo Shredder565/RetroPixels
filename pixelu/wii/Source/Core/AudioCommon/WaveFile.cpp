@@ -45,11 +45,11 @@ std::array<u8, HEADER_BYTES> MakeHeader(u32 sample_rate)
   PutLE32(header, RIFF_SIZE_OFFSET, PLACEHOLDER_SIZE);
   PutTag(header, 8, "WAVE");
   PutTag(header, 12, "fmt ");
-  PutLE32(header, 16, 16);              // fmt chunk size
-  PutLE32(header, 20, 0x00020001);      // PCM, 2 channels
-  PutLE32(header, 24, sample_rate);     // frames per second
-  PutLE32(header, 28, sample_rate * 4); // bytes per second
-  PutLE32(header, 32, 0x00100004);      // 4 bytes per frame, 16 bits per sample
+  PutLE32(header, 16, 16);               // fmt chunk size
+  PutLE32(header, 20, 0x00020001);       // PCM, 2 channels
+  PutLE32(header, 24, sample_rate);      // frames per second
+  PutLE32(header, 28, sample_rate * 4);  // bytes per second
+  PutLE32(header, 32, 0x00100004);       // 4 bytes per frame, 16 bits per sample
   PutTag(header, 36, "data");
   PutLE32(header, DATA_SIZE_OFFSET, PLACEHOLDER_SIZE - 32);
   return header;
@@ -87,8 +87,7 @@ bool WaveFileWriter::Start(const std::string& filename, u32 sample_rate_divisor)
     return false;
   }
 
-  m_file.Open(filename, "wb");
-  if (!m_file)
+  if (!m_file.Open(filename, "wb"))
   {
     PanicAlertFmtT(
         "The file {0} could not be opened for writing. Please check if it's already opened "
@@ -102,7 +101,8 @@ bool WaveFileWriter::Start(const std::string& filename, u32 sample_rate_divisor)
     SplitPath(filename, nullptr, &m_stem, nullptr);
   m_divisor = sample_rate_divisor;
 
-  const auto sample_rate = static_cast<u32>(Mixer::FIXED_SAMPLE_RATE_DIVIDEND / sample_rate_divisor);
+  const auto sample_rate =
+      static_cast<u32>(Mixer::FIXED_SAMPLE_RATE_DIVIDEND / sample_rate_divisor);
   const std::array<u8, HEADER_BYTES> header = MakeHeader(sample_rate);
   m_file.WriteBytes(header.data(), header.size());
 
@@ -150,7 +150,8 @@ void WaveFileWriter::AddStereoSamplesBE(const short* sample_data, u32 count,
   // Swap to little-endian, put the left channel first and apply the volume (256 = unity).
   for (std::size_t frame = 0; frame < count; ++frame)
   {
-    const auto left = static_cast<s16>(Common::swap16(static_cast<u16>(sample_data[2 * frame + 1])));
+    const auto left =
+        static_cast<s16>(Common::swap16(static_cast<u16>(sample_data[2 * frame + 1])));
     const auto right = static_cast<s16>(Common::swap16(static_cast<u16>(sample_data[2 * frame])));
     m_scratch[2 * frame] = static_cast<s16>(left * l_volume / 256);
     m_scratch[2 * frame + 1] = static_cast<s16>(right * r_volume / 256);

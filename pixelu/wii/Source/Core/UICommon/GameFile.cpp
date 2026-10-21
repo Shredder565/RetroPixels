@@ -265,63 +265,49 @@ bool GameFile::IsExecutable() const
   return extension == ".dol" || extension == ".elf";
 }
 
+bool GameFile::IsModDescriptor() const
+{
+  return m_blob_type == DiscIO::BlobType::MOD_DESCRIPTOR;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Cache serialisation
 
+// Serialises the fields in the order given.
+template <typename... Fields>
+static void DoInOrder(PointerWrap& p, Fields&... fields)
+{
+  (p.Do(fields), ...);
+}
+
 void GameBanner::DoState(PointerWrap& p)
 {
-  p.Do(buffer);
-  p.Do(width);
-  p.Do(height);
+  DoInOrder(p, buffer, width, height);
 }
 
 void GameCover::DoState(PointerWrap& p)
 {
-  p.Do(buffer);
+  DoInOrder(p, buffer);
 }
 
 void GameFile::DoState(PointerWrap& p)
 {
-  // The field order is the cache file layout.
-  p.Do(m_valid);
-  p.Do(m_file_path);
-  p.Do(m_file_name);
-
-  p.Do(m_file_size);
-  p.Do(m_volume_size);
-  p.Do(m_volume_size_type);
-  p.Do(m_is_datel_disc);
-  p.Do(m_is_nkit);
-
-  for (auto* strings : {&m_short_names, &m_long_names, &m_short_makers, &m_long_makers,
-                        &m_descriptions})
-  {
-    p.Do(*strings);
-  }
-  p.Do(m_internal_name);
-  p.Do(m_game_id);
-  p.Do(m_gametdb_id);
-  p.Do(m_title_id);
-  p.Do(m_maker_id);
-
-  p.Do(m_region);
-  p.Do(m_country);
-  p.Do(m_platform);
-  p.Do(m_blob_type);
-  p.Do(m_block_size);
-  p.Do(m_compression_method);
-  p.Do(m_revision);
-  p.Do(m_disc_number);
-  p.Do(m_is_two_disc_game);
-  p.Do(m_apploader_date);
-
-  p.Do(m_custom_name);
-  p.Do(m_custom_description);
-  p.Do(m_custom_maker);
-  for (GameBanner* banner : {&m_volume_banner, &m_custom_banner})
-    banner->DoState(p);
-  for (GameCover* cover : {&m_default_cover, &m_custom_cover})
-    cover->DoState(p);
+  // This order is the cache file layout.
+  // Where the file is and how big.
+  DoInOrder(p, m_valid, m_file_path, m_file_name, m_file_size, m_volume_size, m_volume_size_type,
+            m_is_datel_disc, m_is_nkit);
+  // Names and IDs read from the volume.
+  DoInOrder(p, m_short_names, m_long_names, m_short_makers, m_long_makers, m_descriptions,
+            m_internal_name, m_game_id, m_gametdb_id, m_title_id, m_maker_id);
+  // Classification and container details.
+  DoInOrder(p, m_region, m_country, m_platform, m_blob_type, m_block_size, m_compression_method,
+            m_revision, m_disc_number, m_is_two_disc_game, m_apploader_date);
+  // Optional metadata and images.
+  DoInOrder(p, m_custom_name, m_custom_description, m_custom_maker);
+  m_volume_banner.DoState(p);
+  m_custom_banner.DoState(p);
+  m_default_cover.DoState(p);
+  m_custom_cover.DoState(p);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -345,6 +331,17 @@ bool GameFile::CustomCoverChanged()
 void GameFile::CustomCoverCommit()
 {
   m_custom_cover = std::move(m_pending.custom_cover);
+}
+
+// A custom image wins over the one from the volume or the cover cache.
+const GameCover& GameFile::GetCoverImage() const
+{
+  return m_custom_cover.empty() ? m_default_cover : m_custom_cover;
+}
+
+const GameBanner& GameFile::GetBannerImage() const
+{
+  return m_custom_banner.empty() ? m_volume_banner : m_custom_banner;
 }
 
 void GameFile::DownloadDefaultCover()
@@ -553,7 +550,8 @@ const std::string& GameFile::GetMaker(Variant variant) const
 
 const std::string& GameFile::GetDescription(Variant variant) const
 {
-  const bool use_custom = variant == Variant::LongAndPossiblyCustom && !m_custom_description.empty();
+  const bool use_custom =
+      variant == Variant::LongAndPossiblyCustom && !m_custom_description.empty();
   return use_custom ? m_custom_description : PickForConfig(m_descriptions);
 }
 
@@ -707,6 +705,12 @@ std::string GameFile::GetWiiFSPath() const
   return Common::GetTitleDataPath(m_title_id, Common::FromWhichRoot::Configured);
 }
 
+bool GameFile::ShouldAllowConversion() const
+{
+  return DiscIO::IsDisc(m_platform) && m_volume_size_type == DiscIO::DataSizeType::Accurate &&
+         !IsModDescriptor();
+}
+
 bool GameFile::ShouldShowFileFormatDetails() const
 {
   if (m_blob_type == DiscIO::BlobType::DRIVE || m_blob_type == DiscIO::BlobType::MOD_DESCRIPTOR)
@@ -736,27 +740,6 @@ std::string GameFile::GetFileFormatName() const
   if (!m_is_nkit)
     return container;
   return Common::FmtFormatT("{0} (NKit)", container);
-}
-
-bool GameFile::ShouldAllowConversion() const
-{
-  return DiscIO::IsDisc(m_platform) && m_volume_size_type == DiscIO::DataSizeType::Accurate &&
-         !IsModDescriptor();
-}
-
-bool GameFile::IsModDescriptor() const
-{
-  return m_blob_type == DiscIO::BlobType::MOD_DESCRIPTOR;
-}
-
-const GameBanner& GameFile::GetBannerImage() const
-{
-  return m_custom_banner.empty() ? m_volume_banner : m_custom_banner;
-}
-
-const GameCover& GameFile::GetCoverImage() const
-{
-  return m_custom_cover.empty() ? m_default_cover : m_custom_cover;
 }
 
 }  // namespace UICommon

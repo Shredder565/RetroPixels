@@ -87,9 +87,9 @@ void ApplyFolderSettings()
   }
 
   OverrideFolder(D_DUMP_IDX, Config::Get(Config::MAIN_DUMP_PATH));
-  for (const unsigned int index :
-       {D_DUMPAUDIO_IDX, D_DUMPDSP_IDX, D_DUMPSSL_IDX, D_DUMPFRAMES_IDX, D_DUMPOBJECTS_IDX,
-        D_DUMPTEXTURES_IDX, D_DUMPDEBUG_IDX, D_DUMPDEBUG_BRANCHWATCH_IDX, D_DUMPDEBUG_JITBLOCKS_IDX})
+  for (const unsigned int index : {D_DUMPAUDIO_IDX, D_DUMPDSP_IDX, D_DUMPSSL_IDX, D_DUMPFRAMES_IDX,
+                                   D_DUMPOBJECTS_IDX, D_DUMPTEXTURES_IDX, D_DUMPDEBUG_IDX,
+                                   D_DUMPDEBUG_BRANCHWATCH_IDX, D_DUMPDEBUG_JITBLOCKS_IDX})
   {
     MakeFolder(index);
   }
@@ -116,6 +116,24 @@ void ApplyAlertSettings()
   Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
   Common::SetAbortOnPanicAlert(Config::Get(Config::MAIN_ABORT_ON_PANIC_ALERT));
 }
+
+// Emulated input layers, started in this order and stopped in the same order. (The GameCube
+// adapter is started with them but only stopped in Shutdown.)
+struct EmulatedInput
+{
+  void (*start)();
+  void (*stop)();
+};
+
+constexpr EmulatedInput EMULATED_INPUTS[] = {
+    {Pad::Initialize, Pad::Shutdown},
+    {Pad::InitializeGBA, Pad::ShutdownGBA},
+    {Keyboard::Initialize, Keyboard::Shutdown},
+    {[] { Wiimote::Initialize(Wiimote::InitializeMode::DO_NOT_WAIT_FOR_WIIMOTES); },
+     Wiimote::Shutdown},
+    {HotkeyManagerEmu::Initialize, HotkeyManagerEmu::Shutdown},
+    {FreeLook::Initialize, FreeLook::Shutdown},
+};
 
 // Tries one locale name; false if the C library does not know it.
 bool TryLocale(const std::string& name)
@@ -160,8 +178,7 @@ std::string WindowsUserFolder()
   DWORD local_flag = 0;
   std::optional<std::wstring> registered_path;
   wil::unique_hkey key;
-  if (RegOpenKeyEx(HKEY_CURRENT_USER, REGISTRY_KEY, 0, KEY_QUERY_VALUE, key.put()) ==
-      ERROR_SUCCESS)
+  if (RegOpenKeyEx(HKEY_CURRENT_USER, REGISTRY_KEY, 0, KEY_QUERY_VALUE, key.put()) == ERROR_SUCCESS)
   {
     DWORD size = sizeof(local_flag);
     if (RegQueryValueEx(key.get(), TEXT("LocalUserConfig"), nullptr, nullptr,
@@ -240,8 +257,8 @@ std::optional<std::string> PosixUserFolder()
   File::SetUserPath(D_USER_IDX,
                     FromEnvironment("XDG_DATA_HOME", home_folder + ".local" DIR_SEP "share") +
                         suffix);
-  File::SetUserPath(D_CONFIG_IDX, FromEnvironment("XDG_CONFIG_HOME", home_folder + ".config") +
-                                      suffix);
+  File::SetUserPath(D_CONFIG_IDX,
+                    FromEnvironment("XDG_CONFIG_HOME", home_folder + ".config") + suffix);
   File::SetUserPath(D_CACHE_IDX,
                     FromEnvironment("XDG_CACHE_HOME", home_folder + ".cache") + suffix);
   return std::nullopt;
@@ -274,11 +291,12 @@ void Shutdown()
   Config::RemoveConfigChangedCallback(s_config_callback);
 
   // Roughly the reverse of Init, with the controller back ends that outlive a game in between.
-  Statistics::Shutdown();
-  GCAdapter::Shutdown();
-  WiimoteReal::Shutdown();
-  Common::Log::LogManager::Shutdown();
-  Discord::Shutdown();
+  // The configuration goes last since the others may still read it.
+  for (const auto stop : {Statistics::Shutdown, GCAdapter::Shutdown, WiimoteReal::Shutdown,
+                          Common::Log::LogManager::Shutdown, Discord::Shutdown})
+  {
+    stop();
+  }
   g_Config.Shutdown();
   SConfig::Shutdown();
   Config::Shutdown();
@@ -300,6 +318,7 @@ void InitControllers(const WindowSystemInfo& wsi)
   if (g_controller_interface.IsInit())
     return;
 
+  // Host input devices come first; the emulated controllers map onto them.
   g_controller_interface.Initialize(wsi);
   if (!g_controller_interface.HasDefaultDevice())
   {
@@ -308,23 +327,14 @@ void InitControllers(const WindowSystemInfo& wsi)
   }
 
   GCAdapter::Init();
-  Pad::Initialize();
-  Pad::InitializeGBA();
-  Keyboard::Initialize();
-  Wiimote::Initialize(Wiimote::InitializeMode::DO_NOT_WAIT_FOR_WIIMOTES);
-  HotkeyManagerEmu::Initialize();
-  FreeLook::Initialize();
+  for (const EmulatedInput& input : EMULATED_INPUTS)
+    input.start();
 }
 
 void ShutdownControllers()
 {
-  Pad::Shutdown();
-  Pad::ShutdownGBA();
-  Keyboard::Shutdown();
-  Wiimote::Shutdown();
-  HotkeyManagerEmu::Shutdown();
-  FreeLook::Shutdown();
-
+  for (const EmulatedInput& input : EMULATED_INPUTS)
+    input.stop();
   g_controller_interface.Shutdown();
 }
 

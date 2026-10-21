@@ -47,6 +47,12 @@ void SetVolumeSetting(Core::System& system, int volume)
   Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, volume);
   UpdateSoundStream(system);
 }
+
+// Whether audio dumping is switched on in the settings.
+bool DumpSettingOn()
+{
+  return Config::Get(Config::MAIN_DUMP_AUDIO);
+}
 }  // namespace
 
 void InitSoundStream(Core::System& system)
@@ -80,7 +86,8 @@ void PostInitSoundStream(Core::System& system)
   UpdateSoundStream(system);
   SetSoundStreamRunning(system, true);
 
-  if (Config::Get(Config::MAIN_DUMP_AUDIO) && !system.IsAudioDumpStarted())
+  // Start dumping right away if the setting is on.
+  if (DumpSettingOn() && !system.IsAudioDumpStarted())
     StartAudioDump(system);
 }
 
@@ -88,7 +95,7 @@ void ShutdownSoundStream(Core::System& system)
 {
   INFO_LOG_FMT(AUDIO, "Shutting down sound stream");
 
-  if (Config::Get(Config::MAIN_DUMP_AUDIO) && system.IsAudioDumpStarted())
+  if (DumpSettingOn() && system.IsAudioDumpStarted())
     StopAudioDump(system);
 
   SetSoundStreamRunning(system, false);

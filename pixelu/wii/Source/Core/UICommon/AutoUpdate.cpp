@@ -101,7 +101,8 @@ std::string ChangelogHtml(const picojson::array& versions)
       html += "<div style=\"margin-top: 0.4em;\"></div>";
 
     if (version["pr_url"].is<std::string>())
-      html += fmt::format("<a href=\"{}\">{}</a>", Text(version, "pr_url"), Text(version, "shortrev"));
+      html +=
+          fmt::format("<a href=\"{}\">{}</a>", Text(version, "pr_url"), Text(version, "shortrev"));
     else
       html += Text(version, "shortrev");
 

@@ -174,13 +174,11 @@ void InitNetPlayFunctionality(Handler& handler)
 #endif
 }
 
-bool UpdateDiscordPresenceRaw(const std::string& details, const std::string& state,
-                              const std::string& large_image_key,
-                              const std::string& large_image_text,
-                              const std::string& small_image_key,
-                              const std::string& small_image_text, const int64_t start_timestamp,
-                              const int64_t end_timestamp, const int party_size,
-                              const int party_max)
+bool UpdateDiscordPresenceRaw(const std::string& details_text, const std::string& state_text,
+                              const std::string& large_key, const std::string& large_text,
+                              const std::string& small_key, const std::string& small_text,
+                              const int64_t start_time, const int64_t end_time, const int members,
+                              const int capacity)
 {
 #ifdef USE_DISCORD_PRESENCE
   // Raw presence is for homebrew that brought its own application; the default one is ours.
@@ -188,22 +186,22 @@ bool UpdateDiscordPresenceRaw(const std::string& details, const std::string& sta
     return false;
 
   DiscordRichPresence presence{};
-  presence.details = details.c_str();
-  presence.state = state.c_str();
-  presence.largeImageKey = large_image_key.c_str();
-  presence.largeImageText = large_image_text.c_str();
-  presence.smallImageKey = small_image_key.c_str();
-  presence.smallImageText = small_image_text.c_str();
-  presence.startTimestamp = start_timestamp;
-  presence.endTimestamp = end_timestamp;
-  presence.partySize = party_size;
-  presence.partyMax = party_max;
+  presence.details = details_text.c_str();
+  presence.state = state_text.c_str();
+  presence.largeImageKey = large_key.c_str();
+  presence.largeImageText = large_text.c_str();
+  presence.smallImageKey = small_key.c_str();
+  presence.smallImageText = small_text.c_str();
+  presence.startTimestamp = start_time;
+  presence.endTimestamp = end_time;
+  presence.partySize = members;
+  presence.partyMax = capacity;
   Discord_UpdatePresence(&presence);
   return true;
 #else
-  (void)details, (void)state, (void)large_image_key, (void)large_image_text;
-  (void)small_image_key, (void)small_image_text, (void)start_timestamp, (void)end_timestamp;
-  (void)party_size, (void)party_max;
+  (void)details_text, (void)state_text, (void)large_key, (void)large_text;
+  (void)small_key, (void)small_text, (void)start_time, (void)end_time;
+  (void)members, (void)capacity;
   return false;
 #endif
 }

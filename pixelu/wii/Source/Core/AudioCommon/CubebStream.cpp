@@ -172,7 +172,8 @@ bool CubebStream::SetRunning(bool running)
 
 void CubebStream::SetVolume(int volume)
 {
-  OnCubebThread([this, volume] { cubeb_stream_set_volume(m_main, static_cast<float>(volume) / 100.0f); });
+  OnCubebThread(
+      [this, volume] { cubeb_stream_set_volume(m_main, static_cast<float>(volume) / 100.0f); });
 }
 
 long CubebStream::OnMainData(cubeb_stream*, void* user_data, const void*, void* output_buffer,

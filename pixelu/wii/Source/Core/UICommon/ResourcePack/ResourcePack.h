@@ -20,14 +20,16 @@ class ResourcePack
 public:
   explicit ResourcePack(const std::string& path);
 
-  bool IsValid() const;
-  const std::vector<char>& GetLogo() const;
+  bool IsValid() const { return m_valid; }
+  // The bytes of logo.png; empty if the pack has none.
+  const std::vector<char>& GetLogo() const { return m_logo_data; }
 
-  const std::string& GetPath() const;
-  const std::string& GetError() const;
-  const Manifest* GetManifest() const;
+  const std::string& GetPath() const { return m_path; }
+  const std::string& GetError() const { return m_error; }
+  // Null when the archive or its manifest.json could not be read.
+  const Manifest* GetManifest() const { return m_manifest.get(); }
   // Texture paths relative to textures/.
-  const std::vector<std::string>& GetTextures() const;
+  const std::vector<std::string>& GetTextures() const { return m_textures; }
 
   // `path` is the user folder.
   bool Install(const std::string& path);

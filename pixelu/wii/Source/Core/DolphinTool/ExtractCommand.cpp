@@ -39,9 +39,8 @@ struct ExtractSettings
 };
 
 // The file or folder at `path` in the partition's filesystem; null if it has none or no such entry.
-std::unique_ptr<DiscIO::FileInfo> FindEntry(const DiscIO::Volume& volume,
-                                            const DiscIO::Partition& partition,
-                                            const std::string& path)
+std::unique_ptr<DiscIO::FileInfo>
+FindEntry(const DiscIO::Volume& volume, const DiscIO::Partition& partition, const std::string& path)
 {
   const DiscIO::FileSystem* filesystem = volume.GetFileSystem(partition);
   return filesystem ? filesystem->FindFileInfo(path) : nullptr;
@@ -57,7 +56,8 @@ bool HasDiscFilesystem(const DiscIO::Volume& volume)
   if (platform == DiscIO::Platform::WiiWAD)
     fmt::println(std::cerr, "Error: Wii WADs are not supported.");
   else if (platform == DiscIO::Platform::ELFOrDOL)
-    fmt::println(std::cerr, "Error: *.elf or *.dol have no filesystem and are therefore not supported.");
+    fmt::println(std::cerr,
+                 "Error: *.elf or *.dol have no filesystem and are therefore not supported.");
   else
     fmt::println(std::cerr, "Error: Unknown volume type.");
   return false;
@@ -75,18 +75,17 @@ void WriteFolder(const DiscIO::Volume& volume, const DiscIO::Partition& partitio
   const std::unique_ptr<DiscIO::FileInfo> folder = filesystem->FindFileInfo(path);
   const u32 total = folder->GetTotalChildren();
   u32 done = 0;
-  DiscIO::ExportDirectory(volume, partition, *folder, true, "", destination,
-                          [&done, total, quiet](const std::string& name) {
-                            ++done;
-                            const float percent =
-                                static_cast<float>(done) / static_cast<float>(total) * 100;
-                            if (!quiet)
-                            {
-                              fmt::println(std::cerr, "Extracting: {} | {}%", name,
-                                           static_cast<int>(percent));
-                            }
-                            return false;  // Never cancel.
-                          });
+  DiscIO::ExportDirectory(
+      volume, partition, *folder, true, "", destination,
+      [&done, total, quiet](const std::string& name) {
+        ++done;
+        const float percent = static_cast<float>(done) / static_cast<float>(total) * 100;
+        if (!quiet)
+        {
+          fmt::println(std::cerr, "Extracting: {} | {}%", name, static_cast<int>(percent));
+        }
+        return false;  // Never cancel.
+      });
 }
 
 void WriteFile(const DiscIO::Volume& volume, const DiscIO::Partition& partition,
@@ -111,7 +110,8 @@ bool ExtractFromPartition(const DiscIO::Volume& volume, const DiscIO::Partition&
     return true;
   }
 
-  const std::unique_ptr<DiscIO::FileInfo> entry = FindEntry(volume, partition, settings.single_path);
+  const std::unique_ptr<DiscIO::FileInfo> entry =
+      FindEntry(volume, partition, settings.single_path);
   if (!entry)
     return false;
 
@@ -204,6 +204,27 @@ bool ListVolume(const DiscIO::Volume& volume, const std::string& path,
   return listed_any;
 }
 
+struct OptionSpec
+{
+  const char* short_flag;
+  const char* long_flag;
+  bool takes_value;     // A string value; otherwise a switch.
+  const char* metavar;  // Null for the default.
+  const char* help;
+};
+
+constexpr OptionSpec OPTIONS[] = {
+    {"-i", "--input", true, "FILE", "Path to disc image FILE."},
+    {"-o", "--output", true, "FOLDER", "Path to the destination FOLDER."},
+    {"-p", "--partition", true, nullptr, "Which specific partition you want to extract."},
+    {"-s", "--single", true, nullptr, "Which specific file/directory you want to extract."},
+    {"-l", "--list", false, nullptr,
+     "List all files in volume/partition. Will print the directory/file specified with --single "
+     "if defined."},
+    {"-q", "--quiet", false, nullptr, "Mute all messages except for errors."},
+    {"-g", "--gameonly", false, nullptr, "Only extracts the DATA partition."},
+};
+
 int Failure(const char* message)
 {
   fmt::println(std::cerr, "{}", message);
@@ -215,34 +236,16 @@ int Extract(const std::vector<std::string>& args)
 {
   optparse::OptionParser parser;
   parser.usage("usage: extract [options]...");
-  parser.add_option("-i", "--input")
-      .type("string")
-      .action("store")
-      .help("Path to disc image FILE.")
-      .metavar("FILE");
-  parser.add_option("-o", "--output")
-      .type("string")
-      .action("store")
-      .help("Path to the destination FOLDER.")
-      .metavar("FOLDER");
-  parser.add_option("-p", "--partition")
-      .type("string")
-      .action("store")
-      .help("Which specific partition you want to extract.");
-  parser.add_option("-s", "--single")
-      .type("string")
-      .action("store")
-      .help("Which specific file/directory you want to extract.");
-  parser.add_option("-l", "--list")
-      .action("store_true")
-      .help("List all files in volume/partition. Will print the directory/file specified with "
-            "--single if defined.");
-  parser.add_option("-q", "--quiet")
-      .action("store_true")
-      .help("Mute all messages except for errors.");
-  parser.add_option("-g", "--gameonly")
-      .action("store_true")
-      .help("Only extracts the DATA partition.");
+  for (const OptionSpec& spec : OPTIONS)
+  {
+    optparse::Option& option = parser.add_option(spec.short_flag, spec.long_flag);
+    option.action(spec.takes_value ? "store" : "store_true");
+    if (spec.takes_value)
+      option.type("string");
+    option.help(spec.help);
+    if (spec.metavar != nullptr)
+      option.metavar(spec.metavar);
+  }
 
   const optparse::Values& options = parser.parse_args(args);
 

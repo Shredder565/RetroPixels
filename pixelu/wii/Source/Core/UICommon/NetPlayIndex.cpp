@@ -147,8 +147,8 @@ NetPlayIndex::List(const std::map<std::string, std::string>& filters)
     const bool strings_ok = name.is<std::string>() && region.is<std::string>() &&
                             method.is<std::string>() && server_id.is<std::string>() &&
                             game.is<std::string>() && version.is<std::string>();
-    const bool others_ok = password.is<bool>() && players.is<double>() && port.is<double>() &&
-                           in_game.is<bool>();
+    const bool others_ok =
+        password.is<bool>() && players.is<double>() && port.is<double>() && in_game.is<bool>();
     if (!strings_ok || !others_ok)
       continue;
 
@@ -171,16 +171,17 @@ NetPlayIndex::List(const std::map<std::string, std::string>& filters)
 bool NetPlayIndex::Add(const NetPlaySession& session)
 {
   Common::HttpRequest http;
-  const std::string url = fmt::format(
-      "{}/v0/session/add?name={}&region={}&game={}&password={:d}&method={}&server_id={}"
-      "&in_game={:d}&port={}&player_count={}&version={}",
-      IndexRoot(), http.EscapeComponent(session.name), http.EscapeComponent(session.region),
-      http.EscapeComponent(session.game_id), session.has_password, session.method,
-      session.server_id, session.in_game, session.port, session.player_count,
-      Common::GetScmDescStr());
+  const std::string url =
+      fmt::format("{}/v0/session/add?name={}&region={}&game={}&password={:d}&method={}&server_id={}"
+                  "&in_game={:d}&port={}&player_count={}&version={}",
+                  IndexRoot(), http.EscapeComponent(session.name),
+                  http.EscapeComponent(session.region), http.EscapeComponent(session.game_id),
+                  session.has_password, session.method, session.server_id, session.in_game,
+                  session.port, session.player_count, Common::GetScmDescStr());
 
   std::optional<picojson::value> json;
-  if (std::optional<std::string> error = ReplyError(http.Get(url, INDEX_HEADERS, Codes::All), &json))
+  if (std::optional<std::string> error =
+          ReplyError(http.Get(url, INDEX_HEADERS, Codes::All), &json))
   {
     m_last_error = std::move(*error);
     return false;
@@ -299,8 +300,8 @@ bool NetPlaySession::EncryptID(std::string_view password)
   u8 position = 0;
   for (const char c : plain)
   {
-    const u8 mixed = static_cast<u8>((Byte(c) ^ Byte(password[position % password.size()])) +
-                                     position);
+    const u8 mixed =
+        static_cast<u8>((Byte(c) ^ Byte(password[position % password.size()])) + position);
     scrambled.push_back(Char(u32{'A'} + (mixed >> 4)));
     scrambled.push_back(Char(u32{'A'} + (mixed & 0x0F)));
     ++position;
@@ -325,7 +326,8 @@ std::optional<std::string> NetPlaySession::DecryptID(std::string_view password) 
     const u32 high = static_cast<u32>(server_id[i] - 'A');
     const u32 low = static_cast<u32>(server_id[i + 1] - 'A');
     const u8 mixed = static_cast<u8>((high << 4) | low);
-    plain.push_back(Char(static_cast<u8>(mixed - position) ^ Byte(password[position % password.size()])));
+    plain.push_back(
+        Char(static_cast<u8>(mixed - position) ^ Byte(password[position % password.size()])));
     ++position;
   }
 

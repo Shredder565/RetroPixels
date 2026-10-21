@@ -108,7 +108,8 @@ void VisitRenderEndpoints(const std::function<bool(ComPtr<IMMDevice>, std::strin
 }
 
 // Initialises the client for exclusive mode with the given buffer period (in 100 ns units).
-HRESULT InitializeExclusive(IAudioClient* client, REFERENCE_TIME period, WAVEFORMATEXTENSIBLE* format)
+HRESULT InitializeExclusive(IAudioClient* client, REFERENCE_TIME period,
+                            WAVEFORMATEXTENSIBLE* format)
 {
   return client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, STREAM_FLAGS, period, period,
                             reinterpret_cast<WAVEFORMATEX*>(format), nullptr);
@@ -260,7 +261,8 @@ bool WASAPIStream::SetRunning(bool running)
 
   if (!Check("Failed to initialize IAudioClient", result))
     return false;
-  if (!Check("Failed to get buffer size from IAudioClient", client->GetBufferSize(&m_buffer_frames)))
+  if (!Check("Failed to get buffer size from IAudioClient",
+             client->GetBufferSize(&m_buffer_frames)))
     return false;
 
   ComPtr<IAudioRenderClient> renderer;

@@ -71,48 +71,4 @@ void Manifest::Fail(const char* reason)
   m_error = reason;
 }
 
-bool Manifest::IsValid() const
-{
-  return m_valid;
-}
-
-bool Manifest::IsCompressed() const
-{
-  return m_compressed;
-}
-
-const std::string& Manifest::GetName() const
-{
-  return m_name;
-}
-
-const std::string& Manifest::GetVersion() const
-{
-  return m_version;
-}
-
-const std::string& Manifest::GetID() const
-{
-  return m_id;
-}
-
-const std::string& Manifest::GetError() const
-{
-  return m_error;
-}
-
-const std::optional<std::string>& Manifest::GetAuthors() const
-{
-  return m_authors;
-}
-
-const std::optional<std::string>& Manifest::GetDescription() const
-{
-  return m_description;
-}
-
-const std::optional<std::string>& Manifest::GetWebsite() const
-{
-  return m_website;
-}
 }  // namespace ResourcePack

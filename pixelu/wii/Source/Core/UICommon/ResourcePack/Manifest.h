@@ -14,18 +14,19 @@ class Manifest
 public:
   explicit Manifest(const std::string& text);
 
-  bool IsValid() const;
-  bool IsCompressed() const;
+  bool IsValid() const { return m_valid; }
+  bool IsCompressed() const { return m_compressed; }
 
-  const std::string& GetName() const;
-  const std::string& GetVersion() const;
-  const std::string& GetID() const;
-  const std::string& GetError() const;
+  const std::string& GetName() const { return m_name; }
+  const std::string& GetVersion() const { return m_version; }
+  const std::string& GetID() const { return m_id; }
+  // Why the manifest is invalid.
+  const std::string& GetError() const { return m_error; }
 
   // Authors are joined with ", ".
-  const std::optional<std::string>& GetAuthors() const;
-  const std::optional<std::string>& GetDescription() const;
-  const std::optional<std::string>& GetWebsite() const;
+  const std::optional<std::string>& GetAuthors() const { return m_authors; }
+  const std::optional<std::string>& GetDescription() const { return m_description; }
+  const std::optional<std::string>& GetWebsite() const { return m_website; }
 
 private:
   void Fail(const char* reason);

@@ -324,8 +324,8 @@ void OpenALStream::FeedLoop()
       if (LogALError("buffering data") == AL_INVALID_ENUM)
       {
         // The device has no 5.1 support after all; continue in stereo.
-        WARN_LOG_FMT(AUDIO,
-                     "Unable to set 5.1 surround mode.  Updating OpenAL Soft might fix this issue.");
+        WARN_LOG_FMT(
+            AUDIO, "Unable to set 5.1 surround mode.  Updating OpenAL Soft might fix this issue.");
         surround = false;
       }
     }
