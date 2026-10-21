@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 #include <QDialog>
 #include <QIcon>
+#include <QList>
 #include <QModelIndexList>
 
 #include "Common/CommonTypes.h"
@@ -43,6 +43,8 @@ namespace BranchWatchTableModelUserRole
 enum EnumType : int;
 }
 
+// The Branch Watch tool: records branches the emulated CPU takes, lets the user narrow them down
+// step by step, and offers patches, breakpoints and navigation for the survivors.
 class BranchWatchDialog : public QDialog
 {
   Q_OBJECT
@@ -61,109 +63,129 @@ public:
   BranchWatchDialog& operator=(const BranchWatchDialog&) = delete;
   BranchWatchDialog& operator=(BranchWatchDialog&&) = delete;
 
+  // Refreshes the hit counts (and the status line while blacklisting). Stepping the CPU does not
+  // report a state change, so the code widget calls this itself after a step.
+  void Update() const;
+
 protected:
   void hideEvent(QHideEvent* event) override;
   void showEvent(QShowEvent* event) override;
 
 private:
-  void OnStartPause(bool checked) const;
-  void OnClearBranchWatch();
-  void OnSave();
-  void OnSaveAs();
-  void OnLoad();
-  void OnLoadFrom();
-  void OnCodePathWasTaken();
-  void OnCodePathNotTaken();
-  void OnBranchWasOverwritten();
-  void OnBranchNotOverwritten();
-  void OnWipeRecentHits() const;
-  void OnWipeInspection() const;
-  void OnTimeout() const;
-  void OnEmulationStateChanged(Core::State new_state) const;
-  void OnThemeChanged();
-  void OnHelp();
-  void OnToggleAutoSave(bool checked);
-  void OnHideShowControls(bool checked) const;
-  void OnToggleIgnoreApploader(bool checked) const;
+  using ModelStep = void (BranchWatchTableModel::*)(const Core::CPUThreadGuard&);
 
-  void OnTableClicked(const QModelIndex& index) const;
-  void OnTableContextMenu(const QPoint& pos) const;
-  void OnTableHeaderContextMenu(const QPoint& pos) const;
-  void OnTableDelete() const;
-  void OnTableDeleteKeypress() const;
-  void OnTableSetBLR() const;
-  void OnTableSetNOP() const;
-  void OnTableInvertCondition() const;
-  void OnTableInvertDecrementCheck() const;
-  void OnTableMakeUnconditional() const;
-  void OnTableCopyAddress() const;
-  void OnTableSetBreakpointBreak() const;
-  void OnTableSetBreakpointLog() const;
-  void OnTableSetBreakpointBoth() const;
+  // Construction pieces, called in this order.
+  void BuildTable(PPCSymbolDB& ppc_symbol_db);
+  void BuildToolControls();
+  void BuildBranchTypeFilters();
+  void BuildAddressFilters();
+  void BuildConditionFilters();
+  void BuildMiscControls();
+  void BuildRowMenus();
+  void BuildColumnMenu();
+  QMenu* BuildToolbarMenu();
+  QWidget* BuildMenuBar(QMenu* toolbar_menu);
 
-  void ConnectSlots();
-  void DisconnectSlots();
-  void Show();
-  void Hide();
-  void LoadQSettings();
-  void SaveQSettings() const;
+  // Tool controls and menu bar.
+  void ToggleRecording(bool on) const;
+  void RunStep(ModelStep step);
+  void ClearWatch();
+  void PathWasTaken();
+  void PathNotTaken();
+  void WasOverwritten();
+  void NotOverwritten();
+  void SaveToDefault();
+  void SaveToChosen();
+  void LoadFromDefault();
+  void LoadFromChosen();
+  void ChooseAutoSaveTarget(bool on);
+  void ToggleControls(bool hidden) const;
+  void ShowHelp();
 
-public:
-  // TODO: Step doesn't cause EmulationStateChanged to be emitted, so it has to call this manually.
-  void Update() const;
+  // Table interaction. The rows a context-menu action works on are kept in m_menu_rows.
+  void ClickCell(const QModelIndex& index) const;
+  void OpenRowMenu(const QPoint& pos) const;
+  void OpenColumnMenu(const QPoint& pos) const;
+  void DeleteMenuRows() const;
+  void DeleteSelectedRows() const;
+  void CopyAddresses() const;
+  void PatchTargets(u32 instruction) const;
+  void PatchOrigins(u32 (*edit)(u32)) const;
+  void AddBreakpoints(bool break_on_hit, bool log_on_hit) const;
 
-private:
-  void UpdateStatus() const;
-  void UpdateIcons();
-  void Save(const Core::CPUThreadGuard& guard, const std::string& filepath);
-  void Load(const Core::CPUThreadGuard& guard, const std::string& filepath);
+  QMenu* PrepareRowMenu(int column) const;
+  void RefreshOpenRowMenu(bool running) const;
+  void PrepareInstructionMenu(bool running) const;
+  void PrepareConditionMenu(bool running) const;
+  void PrepareOriginMenu(bool running) const;
+  void PrepareDestinationMenu(bool running) const;
+  void PrepareSymbolMenu(bool running) const;
+  void ShowBreakpointCoverage() const;
+  [[nodiscard]] bool AllMenuRowsConditional() const;
+
+  // Life cycle.
+  void Attach();
+  void Detach();
+  void StateChanged(Core::State state) const;
+  void ReloadIcons();
+  void RestoreSettings();
+  void StoreSettings() const;
+  void RefreshStatus() const;
+
+  // Snapshot files.
+  void WriteSnapshot(const Core::CPUThreadGuard& guard, const std::string& path);
+  void ReadSnapshot(const Core::CPUThreadGuard& guard, const std::string& path);
   void AutoSave(const Core::CPUThreadGuard& guard);
-  void SetStubPatches(u32 value) const;
-  void SetEditPatches(u32 (*transform)(u32)) const;
-  void SetBreakpoints(bool break_on_hit, bool log_on_hit) const;
-
-  void SetBreakpointMenuActionsIcons() const;
-  QMenu* GetTableContextMenu(const QModelIndex& index) const;
-  void RefreshVisibleContextMenuActions(bool core_initialized) const;
-  void RefreshContextMenuActions_Instruction(bool core_initialized) const;
-  void RefreshContextMenuActions_Condition(bool core_initialized) const;
-  void RefreshContextMenuActions_Origin(bool core_initialized) const;
-  void RefreshContextMenuActions_Destin(bool core_initialized) const;
-  void RefreshContextMenuActions_Symbol(bool core_initialized) const;
 
   Core::System& m_system;
-  Core::BranchWatch& m_branch_watch;
+  Core::BranchWatch& m_watch;
   CodeWidget* m_code_widget;
 
-  QPushButton *m_btn_start_pause, *m_btn_clear_watch, *m_btn_path_was_taken, *m_btn_path_not_taken,
-      *m_btn_was_overwritten, *m_btn_not_overwritten, *m_btn_wipe_recent_hits;
-  QAction* m_act_autosave;
-  QAction* m_act_invert_condition;
-  QAction* m_act_invert_decrement_check;
-  QAction* m_act_make_unconditional;
-  QAction* m_act_insert_nop;
-  QAction* m_act_insert_blr;
-  QAction* m_act_copy_address;
-  QMenu* m_mnu_set_breakpoint;
-  QAction* m_act_break_on_hit;
-  QAction* m_act_log_on_hit;
-  QAction* m_act_both_on_hit;
-  QMenu *m_mnu_table_context_instruction, *m_mnu_table_context_condition,
-      *m_mnu_table_context_origin, *m_mnu_table_context_destin, *m_mnu_table_context_symbol,
-      *m_mnu_table_context_other;
-  QMenu* m_mnu_column_visibility;
+  QTableView* m_table = nullptr;
+  BranchWatchProxyModel* m_filter = nullptr;
+  BranchWatchTableModel* m_model = nullptr;
+  QStatusBar* m_status = nullptr;
+  QToolBar* m_controls = nullptr;
+  QTimer* m_poll = nullptr;
 
-  QToolBar* m_control_toolbar;
-  QAction *m_act_branch_type_filters, *m_act_origin_destin_filters, *m_act_condition_filters,
-      *m_act_misc_controls;
-  QTableView* m_table_view;
-  BranchWatchProxyModel* m_table_proxy;
-  BranchWatchTableModel* m_table_model;
-  QStatusBar* m_status_bar;
-  QTimer* m_timer;
+  QPushButton* m_record_button = nullptr;
+  QPushButton* m_clear_button = nullptr;
+  QPushButton* m_taken_button = nullptr;
+  QPushButton* m_not_taken_button = nullptr;
+  QPushButton* m_overwritten_button = nullptr;
+  QPushButton* m_not_overwritten_button = nullptr;
+  QPushButton* m_wipe_hits_button = nullptr;
 
-  QIcon m_icn_full, m_icn_partial;
+  // Toolbar sections, as the actions QToolBar returns for them (used to show or hide each).
+  QAction* m_branch_type_section = nullptr;
+  QAction* m_address_section = nullptr;
+  QAction* m_condition_section = nullptr;
+  QAction* m_misc_section = nullptr;
 
-  mutable QModelIndexList m_index_list_temp;
-  std::optional<std::string> m_autosave_filepath;
+  QAction* m_autosave_action = nullptr;
+  QAction* m_invert_condition_action = nullptr;
+  QAction* m_invert_decrement_action = nullptr;
+  QAction* m_unconditional_action = nullptr;
+  QAction* m_nop_action = nullptr;
+  QAction* m_blr_action = nullptr;
+  QAction* m_copy_action = nullptr;
+  QMenu* m_breakpoint_menu = nullptr;
+  QAction* m_break_action = nullptr;
+  QAction* m_log_action = nullptr;
+  QAction* m_break_log_action = nullptr;
+
+  QMenu* m_instruction_menu = nullptr;
+  QMenu* m_condition_menu = nullptr;
+  QMenu* m_origin_menu = nullptr;
+  QMenu* m_destination_menu = nullptr;
+  QMenu* m_symbol_menu = nullptr;
+  QMenu* m_hits_menu = nullptr;
+  QMenu* m_column_menu = nullptr;
+
+  QIcon m_all_icon;
+  QIcon m_some_icon;
+
+  QList<QMetaObject::Connection> m_links;
+  mutable QModelIndexList m_menu_rows;
+  std::optional<std::string> m_autosave_path;
 };
