@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,8 @@ class DXShader;
 class DXPipeline;
 class SwapChain;
 
+// The D3D12 renderer. Bindings are recorded here and only written into the
+// command list, in one go, when a draw or dispatch needs them.
 class Gfx final : public ::AbstractGfx
 {
 public:
@@ -76,66 +77,60 @@ public:
 
   SurfaceInfo GetSurfaceInfo() const override;
 
-  // Completes the current render pass, executes the command buffer, and restores state ready for
-  // next render. Use when you want to kick the current buffer to make room for new data.
+  // Resolves pending queries, submits the command list and marks every
+  // binding for re-recording in the next one. Also used to free up ring and
+  // descriptor space.
   void ExecuteCommandList(bool wait_for_completion);
 
-  // Setting constant buffer handles.
+  // Constant buffer slot 0 pixel, 1 vertex, 2 custom pixel, 3 geometry.
   void SetConstantBuffer(u32 index, D3D12_GPU_VIRTUAL_ADDRESS address);
 
-  // Setting textures via descriptor handles. This is assumed to be in the shadow heap.
+  // A pixel-stage texture slot, by its CPU-side SRV descriptor.
   void SetTextureDescriptor(u32 index, D3D12_CPU_DESCRIPTOR_HANDLE handle);
 
-  // Pixel shader UAV.
+  // The bounding-box UAV.
   void SetPixelShaderUAV(D3D12_CPU_DESCRIPTOR_HANDLE handle);
 
-  // Graphics vertex/index buffer binding.
   void SetVertexBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, D3D12_CPU_DESCRIPTOR_HANDLE srv,
                        u32 stride, u32 size);
   void SetIndexBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, u32 size, DXGI_FORMAT format);
 
-  // Binds all dirty state
+  // Records every changed binding; false when nothing can be drawn yet.
   bool ApplyState();
 
 protected:
   void OnConfigChanged(u32 bits) override;
 
 private:
-  // Dirty bits
-  enum DirtyStates
+  // Bindings waiting to be recorded. The four constant buffer bits are
+  // consecutive so a slot number can select its bit.
+  enum PendingBit : u32
   {
-    DirtyState_Framebuffer = (1 << 0),
-    DirtyState_Pipeline = (1 << 1),
-    DirtyState_Textures = (1 << 2),
-    DirtyState_Samplers = (1 << 3),
-    DirtyState_Viewport = (1 << 4),
-    DirtyState_ScissorRect = (1 << 5),
-    DirtyState_ComputeImageTexture = (1 << 6),
-    DirtyState_PS_UAV = (1 << 7),
-    DirtyState_PS_CBV = (1 << 8),
-    DirtyState_VS_CBV = (1 << 9),
-    DirtyState_CUS_CBV = (1 << 10),
-    DirtyState_GS_CBV = (1 << 11),
-    DirtyState_SRV_Descriptor = (1 << 12),
-    DirtyState_Sampler_Descriptor = (1 << 13),
-    DirtyState_UAV_Descriptor = (1 << 14),
-    DirtyState_VertexBuffer = (1 << 15),
-    DirtyState_IndexBuffer = (1 << 16),
-    DirtyState_PrimitiveTopology = (1 << 17),
-    DirtyState_RootSignature = (1 << 18),
-    DirtyState_ComputeRootSignature = (1 << 19),
-    DirtyState_DescriptorHeaps = (1 << 20),
-    DirtyState_VS_SRV = (1 << 21),
-    DirtyState_VS_SRV_Descriptor = (1 << 22),
+    PENDING_FRAMEBUFFER = 1u << 0,
+    PENDING_PIPELINE = 1u << 1,
+    PENDING_TEXTURE_TABLE = 1u << 2,  // texture slots changed, table must be rebuilt
+    PENDING_SAMPLER_TABLE = 1u << 3,  // sampler states changed, group must be found
+    PENDING_VIEWPORT = 1u << 4,
+    PENDING_SCISSOR = 1u << 5,
+    PENDING_COMPUTE_IMAGE = 1u << 6,
+    PENDING_PS_UAV_TABLE = 1u << 7,
+    PENDING_CBV_PIXEL = 1u << 8,
+    PENDING_CBV_VERTEX = 1u << 9,
+    PENDING_CBV_CUSTOM = 1u << 10,
+    PENDING_CBV_GEOMETRY = 1u << 11,
+    PENDING_BIND_TEXTURES = 1u << 12,  // texture table built, root argument to set
+    PENDING_BIND_SAMPLERS = 1u << 13,
+    PENDING_BIND_PS_UAV = 1u << 14,
+    PENDING_VERTEX_BUFFER = 1u << 15,
+    PENDING_INDEX_BUFFER = 1u << 16,
+    PENDING_TOPOLOGY = 1u << 17,
+    PENDING_ROOT_SIGNATURE = 1u << 18,
+    PENDING_COMPUTE_ROOT_SIGNATURE = 1u << 19,
+    PENDING_DESCRIPTOR_HEAPS = 1u << 20,
+    PENDING_VS_SRV_TABLE = 1u << 21,
+    PENDING_BIND_VS_SRV = 1u << 22,
 
-    DirtyState_All =
-        DirtyState_Framebuffer | DirtyState_Pipeline | DirtyState_Textures | DirtyState_Samplers |
-        DirtyState_Viewport | DirtyState_ScissorRect | DirtyState_ComputeImageTexture |
-        DirtyState_PS_UAV | DirtyState_PS_CBV | DirtyState_VS_CBV | DirtyState_CUS_CBV |
-        DirtyState_GS_CBV | DirtyState_SRV_Descriptor | DirtyState_Sampler_Descriptor |
-        DirtyState_UAV_Descriptor | DirtyState_VertexBuffer | DirtyState_IndexBuffer |
-        DirtyState_PrimitiveTopology | DirtyState_RootSignature | DirtyState_ComputeRootSignature |
-        DirtyState_DescriptorHeaps | DirtyState_VS_SRV | DirtyState_VS_SRV_Descriptor
+    PENDING_EVERYTHING = (1u << 23) - 1,
   };
 
   void CheckForSwapChainChanges();
@@ -152,32 +147,34 @@ private:
 
   float m_backbuffer_scale;
 
-  // Owned objects
   std::unique_ptr<SwapChain> m_swap_chain;
 
-  // Current state
-  struct
+  // What the next draw should see.
+  struct Bindings
   {
     ID3D12RootSignature* root_signature = nullptr;
-    DXShader* compute_shader = nullptr;
     std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> constant_buffers = {};
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> textures = {};
     D3D12_CPU_DESCRIPTOR_HANDLE vs_srv = {};
     D3D12_CPU_DESCRIPTOR_HANDLE ps_uav = {};
     SamplerStateSet samplers = {};
-    const DXTexture* compute_image_texture = nullptr;
+    const DXTexture* compute_image = nullptr;
     D3D12_VIEWPORT viewport = {};
     D3D12_RECT scissor = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE vertex_srv_descriptor_base = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE srv_descriptor_base = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE sampler_descriptor_base = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE uav_descriptor_base = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE compute_uav_descriptor_base = {};
+
+    // Shader-visible copies made for the current command list.
+    D3D12_GPU_DESCRIPTOR_HANDLE vs_srv_table = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE texture_table = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE ps_uav_table = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE compute_uav_table = {};
+
     D3D12_VERTEX_BUFFER_VIEW vertex_buffer = {};
     D3D12_INDEX_BUFFER_VIEW index_buffer = {};
-    D3D12_PRIMITIVE_TOPOLOGY primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    bool using_integer_rtv = false;
-  } m_state;
-  u32 m_dirty_bits = DirtyState_All;
+    D3D12_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    bool integer_rtv = false;
+  };
+  Bindings m_state;
+  u32 m_dirty_bits = PENDING_EVERYTHING;
 };
 }  // namespace DX12

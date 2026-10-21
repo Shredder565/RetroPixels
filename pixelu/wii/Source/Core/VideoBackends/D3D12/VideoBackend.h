@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 
 namespace DX12
 {
+// Registers the Direct3D 12 renderer with the video core.
 class VideoBackend final : public VideoBackendBase
 {
 public:

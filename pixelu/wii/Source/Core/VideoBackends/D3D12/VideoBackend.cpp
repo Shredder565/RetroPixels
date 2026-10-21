@@ -1,11 +1,12 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/D3D12/VideoBackend.h"
 
+#include <memory>
 #include <string>
 
 #include "Common/CommonTypes.h"
+#include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
 
 #include "Core/ConfigManager.h"
@@ -36,7 +37,7 @@ std::string VideoBackend::GetDisplayName() const
   return "Direct3D 12";
 }
 
-void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
+void VideoBackend::InitBackendInfo(const WindowSystemInfo& /*wsi*/)
 {
   if (!D3DCommon::LoadLibraries())
     return;
@@ -47,66 +48,72 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
 
 void VideoBackend::FillBackendInfo()
 {
-  g_backend_info.api_type = APIType::D3D;
-  g_backend_info.bUsesLowerLeftOrigin = false;
-  g_backend_info.bSupportsExclusiveFullscreen = true;
-  g_backend_info.bSupportsDualSourceBlend = true;
-  g_backend_info.bSupportsPrimitiveRestart = true;
-  g_backend_info.bSupportsGeometryShaders = true;
-  g_backend_info.bSupports3DVision = false;
-  g_backend_info.bSupportsEarlyZ = true;
-  g_backend_info.bSupportsBindingLayout = false;
-  g_backend_info.bSupportsBBox = true;
-  g_backend_info.bSupportsGSInstancing = true;
-  g_backend_info.bSupportsPaletteConversion = true;
-  g_backend_info.bSupportsPostProcessing = true;
-  g_backend_info.bSupportsClipControl = true;
-  g_backend_info.bSupportsSSAA = true;
-  g_backend_info.bSupportsFragmentStoresAndAtomics = true;
-  g_backend_info.bSupportsDepthClamp = true;
-  g_backend_info.bSupportsReversedDepthRange = false;
-  g_backend_info.bSupportsComputeShaders = true;
-  g_backend_info.bSupportsLogicOp = true;
-  g_backend_info.bSupportsMultithreading = false;
-  g_backend_info.bSupportsGPUTextureDecoding = true;
-  g_backend_info.bSupportsST3CTextures = false;
-  g_backend_info.bSupportsCopyToVram = true;
-  g_backend_info.bSupportsBitfield = false;
-  g_backend_info.bSupportsDynamicSamplerIndexing = false;
-  g_backend_info.bSupportsBPTCTextures = false;
-  g_backend_info.bSupportsFramebufferFetch = false;
-  g_backend_info.bSupportsBackgroundCompiling = true;
-  g_backend_info.bSupportsLargePoints = false;
-  g_backend_info.bSupportsDepthReadback = true;
-  g_backend_info.bSupportsPartialDepthCopies = false;
-  g_backend_info.Adapters = D3DCommon::GetAdapterNames();
-  g_backend_info.AAModes = DXContext::GetAAModes(g_Config.iAdapter);
-  g_backend_info.bSupportsShaderBinaries = true;
-  g_backend_info.bSupportsPipelineCacheData = true;
-  g_backend_info.bSupportsCoarseDerivatives = true;
-  g_backend_info.bSupportsTextureQueryLevels = true;
-  g_backend_info.bSupportsLodBiasInSampler = true;
-  g_backend_info.bSupportsSettingObjectNames = true;
-  g_backend_info.bSupportsPartialMultisampleResolve = true;
-  g_backend_info.bSupportsDynamicVertexLoader = true;
-  g_backend_info.bSupportsVSLinePointExpand = true;
-  g_backend_info.bSupportsHDROutput = true;
+  auto& info = g_backend_info;
+  info.api_type = APIType::D3D;
 
-  // We can only check texture support once we have a device.
-  if (g_dx_context)
-  {
-    g_backend_info.bSupportsST3CTextures =
-        g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC1_UNORM) &&
-        g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC2_UNORM) &&
-        g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC3_UNORM);
-    g_backend_info.bSupportsBPTCTextures =
-        g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC7_UNORM);
-  }
+  // Supported on every D3D12 device.
+  info.bSupportsExclusiveFullscreen = true;
+  info.bSupportsDualSourceBlend = true;
+  info.bSupportsPrimitiveRestart = true;
+  info.bSupportsGeometryShaders = true;
+  info.bSupportsGSInstancing = true;
+  info.bSupportsComputeShaders = true;
+  info.bSupportsEarlyZ = true;
+  info.bSupportsBBox = true;
+  info.bSupportsFragmentStoresAndAtomics = true;
+  info.bSupportsLogicOp = true;
+  info.bSupportsSSAA = true;
+  info.bSupportsPaletteConversion = true;
+  info.bSupportsPostProcessing = true;
+  info.bSupportsClipControl = true;
+  info.bSupportsDepthClamp = true;
+  info.bSupportsGPUTextureDecoding = true;
+  info.bSupportsCopyToVram = true;
+  info.bSupportsBackgroundCompiling = true;
+  info.bSupportsDepthReadback = true;
+  info.bSupportsShaderBinaries = true;
+  info.bSupportsPipelineCacheData = true;
+  info.bSupportsCoarseDerivatives = true;
+  info.bSupportsTextureQueryLevels = true;
+  info.bSupportsLodBiasInSampler = true;
+  info.bSupportsSettingObjectNames = true;
+  info.bSupportsPartialMultisampleResolve = true;
+  info.bSupportsDynamicVertexLoader = true;
+  info.bSupportsVSLinePointExpand = true;
+  info.bSupportsHDROutput = true;
+
+  // Not offered by this backend.
+  info.bUsesLowerLeftOrigin = false;
+  info.bSupports3DVision = false;
+  info.bSupportsBindingLayout = false;
+  info.bSupportsReversedDepthRange = false;
+  info.bSupportsMultithreading = false;
+  info.bSupportsBitfield = false;
+  info.bSupportsDynamicSamplerIndexing = false;
+  info.bSupportsFramebufferFetch = false;
+  info.bSupportsLargePoints = false;
+  info.bSupportsPartialDepthCopies = false;
+
+  // Compressed formats are off until a device can be asked (below).
+  info.bSupportsST3CTextures = false;
+  info.bSupportsBPTCTextures = false;
+
+  // The sample counts may need a temporary device.
+  info.Adapters = D3DCommon::GetAdapterNames();
+  info.AAModes = DXContext::GetAAModes(static_cast<u32>(g_Config.iAdapter));
+
+  if (!g_dx_context)
+    return;
+
+  info.bSupportsST3CTextures = g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC1_UNORM) &&
+                               g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC2_UNORM) &&
+                               g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC3_UNORM);
+  info.bSupportsBPTCTextures = g_dx_context->SupportsTextureFormat(DXGI_FORMAT_BC7_UNORM);
 }
 
 bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 {
-  if (!DXContext::Create(g_Config.iAdapter, g_Config.bEnableValidationLayer))
+  if (!DXContext::Create(static_cast<u32>(g_Config.iAdapter), g_Config.bEnableValidationLayer))
   {
     PanicAlertFmtT("Failed to create D3D12 context");
     return false;
@@ -115,36 +122,43 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
   FillBackendInfo();
   UpdateActiveConfig();
 
+  // Undoes the steps so far when a later one fails.
+  const auto give_up = [this] {
+    DXContext::Destroy();
+    ShutdownShared();
+    return false;
+  };
+
   if (!g_dx_context->CreateGlobalResources())
   {
     PanicAlertFmtT("Failed to create D3D12 global resources");
-    DXContext::Destroy();
-    ShutdownShared();
-    return false;
+    return give_up();
   }
 
+  // Headless runs have no window and so no swap chain.
   std::unique_ptr<SwapChain> swap_chain;
-  if (wsi.render_surface && !(swap_chain = SwapChain::Create(wsi)))
+  if (wsi.render_surface)
   {
-    PanicAlertFmtT("Failed to create D3D swap chain");
-    DXContext::Destroy();
-    ShutdownShared();
-    return false;
+    swap_chain = SwapChain::Create(wsi);
+    if (!swap_chain)
+    {
+      PanicAlertFmtT("Failed to create D3D swap chain");
+      return give_up();
+    }
   }
 
-  // Create main wrapper instances.
   auto gfx = std::make_unique<DX12::Gfx>(std::move(swap_chain), wsi.render_surface_scale);
   auto vertex_manager = std::make_unique<DX12::VertexManager>();
   auto perf_query = std::make_unique<DX12::PerfQuery>();
   auto bounding_box = std::make_unique<DX12::D3D12BoundingBox>();
-
   return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
                           std::move(bounding_box));
 }
 
 void VideoBackend::Shutdown()
 {
-  // Keep the debug runtime happy...
+  // Let the GPU finish before anything it uses is released, so the debug
+  // layer has nothing to report.
   if (g_gfx)
     Gfx::GetInstance()->ExecuteCommandList(true);
 
