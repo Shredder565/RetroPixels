@@ -1,15 +1,16 @@
 From: RetroPixels
 Subject: [PATCH] RetroPixels: flight stick feel for a gamepad thumbstick (RP_FLIGHTSTICK)
 
-A round dead zone, the round gate stretched to a square one, and a cubic
-response curve for full-range stick axes, turned on by RetroPixels through
-the RP_FLIGHTSTICK environment variable. GPL-3.0-or-later, as Supermodel.
+A round dead zone, the round gate stretched to a square one, a cubic
+response curve and time-based smoothing for full-range stick axes, turned
+on by RetroPixels through the RP_FLIGHTSTICK environment variable.
+GPL-3.0-or-later, as Supermodel.
 ---
 diff --git a/Src/Inputs/InputSystem.cpp b/Src/Inputs/InputSystem.cpp
-index 05bbafe..9883028 100644
+index 05bbafe..9a4fcf2 100644
 --- a/Src/Inputs/InputSystem.cpp
 +++ b/Src/Inputs/InputSystem.cpp
-@@ -1,2600 +1,2711 @@
+@@ -1,2600 +1,2755 @@
 -/**
 - ** Supermodel
 - ** A Sega Model 3 Arcade Emulator.
@@ -2651,6 +2652,10 @@ index 05bbafe..9883028 100644
 +#include "OSD/Thread.h"
 +#include <algorithm>
 +#include <cmath>
++#include <chrono>
++#include <map>
++#include <cstring>
++#include <cstdlib>
 +#include <cstdlib>
 +#include <cstring>
 +#include <string>
@@ -5100,8 +5105,8 @@ index 05bbafe..9883028 100644
 +/*
 + * RetroPixels: flight stick feel for a gamepad's thumbstick.
 + *
-+ * RP_FLIGHTSTICK (set by RetroPixels) turns it on: "curve=N,dead=N" with
-+ * both as percentages, or "off". A thumbstick has a round gate, a short
++ * RP_FLIGHTSTICK (set by RetroPixels) turns it on: "curve=N,dead=N,smooth=N"
++ * (curve and dead as percentages, smooth in milliseconds), or "off". A thumbstick has a round gate, a short
 + * throw and no resistance, so on its own it aims jumpily and can't reach a
 + * corner. Here the two axes of a stick are read together and:
 + *   - the dead zone is round (no drift, no sticky axis when pushing
@@ -5109,7 +5114,11 @@ index 05bbafe..9883028 100644
 + *   - the round gate is stretched to a square one, so full left and full
 + *     up at once reaches the corner, as on a flight stick;
 + *   - a cubic response curve gives fine control near the centre and still
-+ *     full deflection at the edge.
++ *     full deflection at the edge;
++ *   - the aim is smoothed over time (an exponential filter with a time
++ *     constant of "smooth" ms), like a yoke's weight and spring: thumbstick
++ *     jitter and twitches no longer jump the aim, and letting go glides
++ *     back to the centre.
 + * Only full-range stick axes (X/Y and RX/RY) are shaped; triggers and
 + * half-axis mappings are left alone.
 + */
@@ -5118,9 +5127,24 @@ index 05bbafe..9883028 100644
 +  struct FlightStickSettings
 +  {
 +    bool on = false;
-+    double curve = 0.45;
-+    double dead = 0.08;
++    double curve = 0.60;
++    double dead = 0.05;
++    double smooth = 0.060; // seconds; 0 = no smoothing
 +  };
++
++  // Each axis's smoothed position and when it was last read.
++  struct FlightStickState
++  {
++    double value = 0;
++    std::chrono::steady_clock::time_point time;
++    bool have = false;
++  };
++
++  std::map<const void *, FlightStickState> &FlightStickStates()
++  {
++    static std::map<const void *, FlightStickState> states;
++    return states;
++  }
 +
 +  const FlightStickSettings &GetFlightStickSettings()
 +  {
@@ -5148,6 +5172,8 @@ index 05bbafe..9883028 100644
 +            fs.curve = std::max(0.0, std::min(1.0, v));
 +          else if (key == "dead")
 +            fs.dead = std::max(0.0, std::min(0.5, v));
++          else if (key == "smooth")
++            fs.smooth = std::max(0.0, std::min(0.5, v / 10.0)); // ms
 +        }
 +        pos = end + 1;
 +      }
@@ -5187,14 +5213,33 @@ index 05bbafe..9883028 100644
 +  double u = AxisFraction(joyVal, m_axisMinVal, m_axisOffVal, m_axisMaxVal);
 +  double w = AxisFraction(m_system->GetJoyAxisValue(m_joyNum, partner), m_axisMinVal, m_axisOffVal, m_axisMaxVal);
 +  double r = std::sqrt(u * u + w * w);
-+  if (r <= fs.dead || r == 0)
++  double x = 0;
++  if (r > fs.dead && r > 0)
++  {
++    double r2 = std::min(1.0, (r - fs.dead) / (1.0 - fs.dead));
++    double m = std::max(std::fabs(u), std::fabs(w));
++    x = std::max(-1.0, std::min(1.0, u * r2 / m));
++    double ax = std::fabs(x);
++    ax = (1.0 - fs.curve) * ax + fs.curve * ax * ax * ax;
++    x = x < 0 ? -ax : ax;
++  }
++  if (fs.smooth > 0)
++  {
++    // Time-based, so it feels the same whatever the frame rate and however
++    // often the axis is read in a frame.
++    FlightStickState &st = FlightStickStates()[this];
++    auto now = std::chrono::steady_clock::now();
++    double dt = st.have ? std::chrono::duration<double>(now - st.time).count() : 1.0;
++    if (dt > 0.25)
++      st.value = x; // not read for a while: start where the stick is
++    else if (dt > 0)
++      st.value += (x - st.value) * (1.0 - std::exp(-dt / fs.smooth));
++    st.time = now;
++    st.have = true;
++    x = st.value;
++  }
++  if (std::fabs(x) < 0.002)
 +    return m_axisOffVal;
-+  double r2 = std::min(1.0, (r - fs.dead) / (1.0 - fs.dead));
-+  double m = std::max(std::fabs(u), std::fabs(w));
-+  double x = std::max(-1.0, std::min(1.0, u * r2 / m));
-+  double ax = std::fabs(x);
-+  ax = (1.0 - fs.curve) * ax + fs.curve * ax * ax * ax;
-+  x = x < 0 ? -ax : ax;
 +  double range = x > 0 ? (double)(m_axisMaxVal - m_axisOffVal) : (double)(m_axisOffVal - m_axisMinVal);
 +  int out = m_axisOffVal + (int)std::lround(x * range);
 +  // Never land exactly on the centre for a stick that is pushed.

@@ -28,19 +28,34 @@ type Controls struct {
 
 // Flight stick feel (RetroPixels' build of Supermodel, patch 0002): a round
 // dead zone of FlightStickDead %, the round gate stretched to a square,
-// and a cubic response curve of FlightStickCurve % for fine aim near the
-// centre with full deflection at the edge.
+// a cubic response curve of FlightStickCurve % for fine aim near the
+// centre with full deflection at the edge, and the aim smoothed over time
+// like a yoke's weight and spring (Smoothness).
 const (
-	FlightStickCurve = 45
-	FlightStickDead  = 8
+	FlightStickCurve = 60
+	FlightStickDead  = 5
 )
 
+// Smoothness: how much the aim is smoothed, as the filter's time constant.
+var Smoothness = map[string]int{"off": 0, "light": 35, "medium": 60, "heavy": 100}
+
+// DefaultSmoothness is used when none is chosen (or an unknown one is).
+const DefaultSmoothness = "medium"
+
+// SmoothnessMS is the filter's time constant for a smoothness name.
+func SmoothnessMS(name string) int {
+	if ms, ok := Smoothness[name]; ok {
+		return ms
+	}
+	return Smoothness[DefaultSmoothness]
+}
+
 // FlightStickEnv is the environment variable that turns it on or off.
-func FlightStickEnv(on bool) string {
+func FlightStickEnv(on bool, smoothness string) string {
 	if !on {
 		return "RP_FLIGHTSTICK=off"
 	}
-	return fmt.Sprintf("RP_FLIGHTSTICK=curve=%d,dead=%d", FlightStickCurve, FlightStickDead)
+	return fmt.Sprintf("RP_FLIGHTSTICK=curve=%d,dead=%d,smooth=%d", FlightStickCurve, FlightStickDead, SmoothnessMS(smoothness))
 }
 
 // INI is Supermodel.ini for Star Wars Trilogy Arcade, played from RetroPixels.

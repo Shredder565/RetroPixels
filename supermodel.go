@@ -176,6 +176,15 @@ func supermodelFullscreenOn() bool {
 
 // supermodelFlightOn: the Xbox thumbstick feels like a flight stick (on
 // unless the player turned it off).
+// smoothName: the flight stick smoothing in use (DefaultSmoothness when none
+// or an unknown one is saved).
+func smoothName(s string) string {
+	if _, ok := supermodel.Smoothness[s]; ok {
+		return s
+	}
+	return supermodel.DefaultSmoothness
+}
+
 func supermodelFlightOn() bool { return cfg.SupermodelPadStick == nil || !*cfg.SupermodelPadStick }
 
 func supermodelEmbedOn() bool { return cfg.SupermodelDock != nil && *cfg.SupermodelDock }
@@ -263,7 +272,10 @@ func launchSupermodel() error {
 		}
 	}
 	cmd, out := supermodel.Command(exe, home, supermodel.GameArgs(rom, o)...)
-	cmd.Env = append(cmd.Env, supermodel.FlightStickEnv(flight))
+	cfgMu.Lock()
+	smooth := cfg.SupermodelSmooth
+	cfgMu.Unlock()
+	cmd.Env = append(cmd.Env, supermodel.FlightStickEnv(flight, smooth))
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
 		onStart = embedSupermodel
@@ -339,7 +351,7 @@ func supermodelStatus() map[string]any {
 	rom, c := supermodelROM()
 	cfgMu.Lock()
 	st := map[string]any{"fullscreen": supermodelFullscreenOn(), "embed": supermodelEmbedOn(), "wide": cfg.SupermodelWide,
-		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
+		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "smooth": smoothName(cfg.SupermodelSmooth), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
 	cfgMu.Unlock()
 	smMu.Lock()
 	st["finding"], st["searched"], st["problem"] = smFinding, smSearched, smProblem
@@ -373,6 +385,7 @@ func registerSupermodelRoutes(mux *http.ServeMux) {
 		var b struct {
 			Action string `json:"action"`
 			On     bool   `json:"on"`
+			Value  string `json:"value"`
 		}
 		if !readBody(w, r, &b) {
 			return
@@ -417,6 +430,12 @@ func registerSupermodelRoutes(mux *http.ServeMux) {
 		case "flight-stick":
 			off := !on
 			set(func() { cfg.SupermodelPadStick = &off })
+		case "smoothness":
+			if _, ok := supermodel.Smoothness[b.Value]; !ok {
+				err = errors.New("unknown smoothness: " + b.Value)
+			} else {
+				set(func() { cfg.SupermodelSmooth = b.Value })
+			}
 		case "invert-y":
 			set(func() { cfg.SupermodelInvertY = on })
 		case "record":

@@ -90,6 +90,7 @@ type config struct {
 	SupermodelWide       bool      `json:"supermodelWide,omitempty"`       // 3D view fills a wide screen
 	SupermodelInvertY    bool      `json:"supermodelInvertY,omitempty"`    // stick up dives, like the arcade's flight yoke
 	SupermodelPadStick   *bool     `json:"supermodelPadStick,omitempty"`   // unset = off: the plain thumbstick, no flight stick feel
+	SupermodelSmooth     string    `json:"supermodelSmooth,omitempty"`     // flight stick smoothing: off, light, medium, heavy; unset = medium
 	SupermodelPlayed     time.Time `json:"supermodelPlayed,omitempty"`
 }
 

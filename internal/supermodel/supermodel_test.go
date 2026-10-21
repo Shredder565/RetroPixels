@@ -314,10 +314,16 @@ func TestCommand(t *testing.T) {
 }
 
 func TestFlightStick(t *testing.T) {
-	if got := FlightStickEnv(true); got != "RP_FLIGHTSTICK=curve=45,dead=8" {
+	if got := FlightStickEnv(true, ""); got != "RP_FLIGHTSTICK=curve=60,dead=5,smooth=60" {
 		t.Errorf("FlightStickEnv(true) = %q", got)
 	}
-	if got := FlightStickEnv(false); got != "RP_FLIGHTSTICK=off" {
+	if got := FlightStickEnv(true, "heavy"); got != "RP_FLIGHTSTICK=curve=60,dead=5,smooth=100" {
+		t.Errorf("FlightStickEnv(heavy) = %q", got)
+	}
+	if got := FlightStickEnv(true, "off"); got != "RP_FLIGHTSTICK=curve=60,dead=5,smooth=0" {
+		t.Errorf("FlightStickEnv(off smoothing) = %q", got)
+	}
+	if got := FlightStickEnv(false, "light"); got != "RP_FLIGHTSTICK=off" {
 		t.Errorf("FlightStickEnv(false) = %q", got)
 	}
 	on, off := INI(Controls{FlightStick: true}), INI(Controls{})

@@ -51,12 +51,14 @@ the download.
 
 What the patches change
 -----------------------
-0002-flight-stick.patch: RP_FLIGHTSTICK ("curve=N,dead=N" in percent, or
-"off"; RetroPixels sets it) makes a gamepad's thumbstick aim like a flight
-stick: the two axes of a stick are read together, with a round dead zone,
-the round gate stretched to a square one (so the corners can be reached),
-and a cubic response curve (fine near the centre, full at the edge). Only
-full-range stick axes are shaped.
+0002-flight-stick.patch: RP_FLIGHTSTICK ("curve=N,dead=N,smooth=N", curve
+and dead in percent and smooth in milliseconds, or "off"; RetroPixels sets
+it) makes a gamepad's thumbstick aim like a flight stick: the two axes of a
+stick are read together, with a round dead zone, the round gate stretched
+to a square one (so the corners can be reached), a cubic response curve
+(fine near the centre, full at the edge), and time-based smoothing like a
+yoke's weight and spring (jitter doesn't jump the aim, and letting go
+glides back to the centre). Only full-range stick axes are shaped.
 
 0001-retropixels.patch:
 - SUPERMODEL_HOME: when this environment variable names a folder, the
