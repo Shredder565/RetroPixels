@@ -1,12 +1,12 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <QDockWidget>
-
 #include <mutex>
 #include <string>
+#include <utility>
+
+#include <QDockWidget>
 
 #include "Common/FixedSizeQueue.h"
 #include "Common/Logging/LogManager.h"
@@ -18,6 +18,8 @@ class QPlainTextEdit;
 class QPushButton;
 class QTimer;
 
+// The Log dock. Messages arrive from any thread into a bounded queue and
+// are moved into the text view by a timer while the dock is visible.
 class LogWidget final : public QDockWidget
 {
   Q_OBJECT
@@ -29,45 +31,41 @@ protected:
   void closeEvent(QCloseEvent*) override;
 
 private:
-  // LogListener instances are owned by LogManager, so we can't make LogWidget inherit from
-  // LogListener, since Qt should be in control of LogWidget's lifetime. Instead we have
-  // this LogListenerImpl class to act as an adapter.
-  class LogListenerImpl final : public Common::Log::LogListener
+  // The log manager owns its listeners, while Qt owns this widget, so a
+  // small forwarding listener is registered instead of the widget itself.
+  class Forwarder final : public Common::Log::LogListener
   {
   public:
-    explicit LogListenerImpl(LogWidget* log_widget) : m_log_widget(log_widget) {}
+    explicit Forwarder(LogWidget* target) : m_target(target) {}
 
   private:
     void Log(Common::Log::LogLevel level, const char* text) override
     {
-      m_log_widget->Log(level, text);
+      m_target->Enqueue(level, text);
     }
 
-    LogWidget* m_log_widget;
+    LogWidget* m_target;
   };
 
-  void UpdateLog();
-  void UpdateFont();
-  void CreateWidgets();
-  void ConnectWidgets();
-  void LoadSettings();
-  void SaveSettings();
+  using Line = std::pair<std::string, Common::Log::LogLevel>;
 
-  void Log(Common::Log::LogLevel level, const char* text);
+  // The text view keeps at most this many lines, and so does the queue.
+  static constexpr int MAX_LINES = 5000;
 
-  // Log
-  QCheckBox* m_log_wrap;
-  QComboBox* m_log_font;
-  QPushButton* m_log_clear;
-  QPlainTextEdit* m_log_text;
+  void Enqueue(Common::Log::LogLevel level, const char* text);
+  void Drain();
+  void ApplyFont();
+  void ApplyWrap();
+  void RestoreState();
+  void StoreState();
+
+  QCheckBox* m_wrap;
+  QComboBox* m_font;
+  QPushButton* m_clear;
+  QPlainTextEdit* m_text;
 
   QTimer* m_timer;
 
-  using LogEntry = std::pair<std::string, Common::Log::LogLevel>;
-
-  // Maximum number of lines to show in log viewer
-  static constexpr int MAX_LOG_LINES = 5000;
-
-  std::mutex m_log_mutex;
-  Common::FixedSizeQueue<LogEntry, MAX_LOG_LINES> m_log_ring_buffer;
+  std::mutex m_pending_lock;
+  Common::FixedSizeQueue<Line, MAX_LINES> m_pending;
 };

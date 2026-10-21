@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@ class QPushButton;
 class QRadioButton;
 class QVBoxLayout;
 
+// The Log Configuration dock: verbosity, which outputs are written to, and
+// which log types are enabled.
 class LogConfigWidget final : public QDockWidget
 {
   Q_OBJECT
@@ -23,23 +24,27 @@ protected:
   void closeEvent(QCloseEvent* event) override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void LoadSettings();
-  void SaveSettings();
+  void Build();
+  void Wire();
+  void ReadState();
+  void WriteState();
+  void ToggleAllTypes();
+  void HighlightVerbosity();
 
-  QRadioButton* m_verbosity_notice;
-  QRadioButton* m_verbosity_error;
-  QRadioButton* m_verbosity_warning;
-  QRadioButton* m_verbosity_info;
-  QRadioButton* m_verbosity_debug;
+  QRadioButton* m_notice;
+  QRadioButton* m_error;
+  QRadioButton* m_warning;
+  QRadioButton* m_info;
+  QRadioButton* m_debug;
 
-  QCheckBox* m_out_file;
-  QCheckBox* m_out_console;
-  QCheckBox* m_out_window;
-  QPushButton* m_types_toggle;
-  QListWidget* m_types_list;
+  QCheckBox* m_to_file;
+  QCheckBox* m_to_console;
+  QCheckBox* m_to_window;
+  QPushButton* m_toggle_types;
+  QListWidget* m_types;
 
-  bool m_all_enabled = true;
-  bool m_block_save = false;
+  // What the toggle button last set; cleared if any type starts disabled.
+  bool m_all_on = true;
+  // Set while the toggle button changes every item, to save once at the end.
+  bool m_suspend_writes = false;
 };
