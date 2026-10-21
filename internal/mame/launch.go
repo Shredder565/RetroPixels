@@ -3,6 +3,7 @@ package mame
 import (
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -17,7 +18,8 @@ type LaunchOptions struct {
 }
 
 // RomPath is MAME's ROM search path for a game: the game's own folder, your
-// ROM folders, and MAME's own "roms" folder.
+// ROM folders, and MAME's own "roms" folder (for the distribution's MAME on
+// Linux, the ROM folders its mame.ini names: ~/mame/roms and the shared ones).
 func RomPath(exe, gameFolder string, folders []string) string {
 	var parts []string
 	seen := map[string]bool{}
@@ -36,6 +38,11 @@ func RomPath(exe, gameFolder string, folders []string) string {
 		add(f)
 	}
 	add(filepath.Join(filepath.Dir(exe), "roms"))
+	if isSystemExe(exe) {
+		for _, d := range systemRomDirs() {
+			add(d)
+		}
+	}
 	return strings.Join(parts, ";")
 }
 
@@ -50,8 +57,8 @@ func GameArgs(short, rompath string, opts Options, o LaunchOptions) []string {
 		if has("maximize") {
 			args = append(args, "-nomaximize")
 		}
-		if has("keyboardprovider") {
-			args = append(args, "-keyboardprovider", "win32")
+		if has("keyboardprovider") && embedKeyboard != "" {
+			args = append(args, "-keyboardprovider", embedKeyboard)
 		}
 	}
 	if has("skip_gameinfo") {
@@ -63,12 +70,22 @@ func GameArgs(short, rompath string, opts Options, o LaunchOptions) []string {
 	return args
 }
 
+// embedKeyboard is the keyboard provider a docked MAME uses: Windows'
+// messages on Windows; on Linux MAME's own default (SDL, which gets the keys
+// of the docked X11 window it has the focus of).
+var embedKeyboard = func() string {
+	if runtime.GOOS == "windows" {
+		return "win32"
+	}
+	return ""
+}()
+
 // Command makes the command that runs MAME, in its own folder (where it keeps
-// mame.ini, its saves and its settings). MAME's messages are kept (see
+// mame.ini, its saves and its settings; see WorkDir). MAME's messages are kept (see
 // Output) so a game that won't start can say why.
 func Command(exe string, args ...string) (*exec.Cmd, *Output) {
 	cmd := exec.Command(exe, args...)
-	cmd.Dir = filepath.Dir(exe)
+	cmd.Dir = WorkDir(exe)
 	hideConsole(cmd)
 	out := &Output{}
 	cmd.Stdout = out

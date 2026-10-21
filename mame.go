@@ -199,7 +199,13 @@ func launchMameGame(path, exe string) error {
 	return err
 }
 
+// mameReleases lists the MAME team's ready-made releases (Windows only: on
+// Linux the list is empty, and the page says to use the built-in MAME or the
+// system's mame package).
 func mameReleases(refresh bool) ([]mame.Release, error) {
+	if !mame.DownloadsAvailable {
+		return []mame.Release{}, nil
+	}
 	mameMu.Lock()
 	if !refresh && mameRels != nil && time.Since(mameRelsAt) < time.Hour {
 		r := mameRels
@@ -219,6 +225,9 @@ func mameReleases(refresh bool) ([]mame.Release, error) {
 
 // startMameInstall downloads one official release in the background.
 func startMameInstall(version string) error {
+	if !mame.DownloadsAvailable {
+		return mame.ErrNoDownloads
+	}
 	rels, err := mameReleases(false)
 	if err != nil {
 		return err
@@ -335,7 +344,7 @@ func registerMameRoutes(mux *http.ServeMux) {
 				start = filepath.Dir(filepath.Dir(def.Exe))
 			}
 			var p string
-			p, err = pickFile("Choose a MAME (mame.exe) to add", "MAME (mame*.exe)|mame*.exe|Programs (*.exe)|*.exe", start)
+			p, err = pickFile("Choose a MAME ("+mame.ExeName+") to add", programFilter("MAME", mame.ExePattern), start)
 			if err == nil && p != "" {
 				_, err = mame.AddExe(p)
 				reload = true

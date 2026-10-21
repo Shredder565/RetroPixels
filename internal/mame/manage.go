@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -15,10 +14,13 @@ func AddExe(exe string) (Install, error) {
 	if err != nil || st.IsDir() {
 		return Install{}, errors.New("that file isn't there")
 	}
-	if !strings.EqualFold(filepath.Ext(exe), ".exe") {
-		return Install{}, errors.New("that isn't a program (.exe)")
+	if err := checkProgram(exe); err != nil {
+		return Install{}, err
 	}
 	if reMameInstaller.MatchString(filepath.Base(exe)) {
+		if !DownloadsAvailable {
+			return Install{}, errors.New("that's the MAME team's Windows download, which doesn't run on Linux. Use the MAME that comes with RetroPixels, or install your system's mame package")
+		}
 		return Install{}, errors.New("that's MAME's download file (it unpacks MAME). Use Download in RetroPixels instead, or run it and then choose the mame.exe it unpacks")
 	}
 	in := Install{Exe: exe, Version: ProbeVersion(exe), Added: time.Now()}
@@ -91,4 +93,9 @@ func Plan(c Config, path, exe string, o LaunchOptions) (Launch, error) {
 }
 
 // ErrNoMAME: no MAME has been added or downloaded yet.
-var ErrNoMAME = errors.New("MAME isn't set up yet: add a MAME you have (its mame.exe), or download one")
+var ErrNoMAME = func() error {
+	if !DownloadsAvailable {
+		return errors.New("MAME isn't set up yet: add a MAME you have (its mame program), or install your system's mame package and use Find MAME on this PC")
+	}
+	return errors.New("MAME isn't set up yet: add a MAME you have (its mame.exe), or download one")
+}()

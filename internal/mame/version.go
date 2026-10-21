@@ -98,7 +98,7 @@ func run(exe string, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Dir = filepath.Dir(exe)
+	cmd.Dir = WorkDir(exe)
 	hideProbe(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out

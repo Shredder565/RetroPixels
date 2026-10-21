@@ -51,9 +51,10 @@ func AVIs(dir string) []string {
 }
 
 // KeepSnapshots moves the screenshots taken while recording (F12) from dir
-// to MAME's own snap folder next to exe, where they'd have gone anyway.
+// to MAME's own snap folder (next to exe, or in ~/.mame for a MAME installed
+// for the whole system on Linux), where they'd have gone anyway.
 func KeepSnapshots(dir, exe string) {
-	snap := filepath.Join(filepath.Dir(exe), "snap")
+	snap := filepath.Join(WorkDir(exe), "snap")
 	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".png") {
 			return nil
