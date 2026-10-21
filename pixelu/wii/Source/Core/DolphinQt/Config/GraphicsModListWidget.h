@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -30,6 +29,9 @@ namespace UICommon
 class GameFile;
 }
 
+// The Graphics Mods tab: the game's graphics mods in priority order, with
+// enable boxes and details of the selected mod. Changes reach a running game
+// at once and are written to disk when saved or on destruction.
 class GraphicsModListWidget : public QWidget
 {
   Q_OBJECT
@@ -45,30 +47,25 @@ signals:
   void OpenGraphicsSettings();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void Reload();
+  void OnSelectionChanged();
+  void OnCheckToggled(QListWidgetItem* item);
+  void OnRowsMoved();
+  void ShowDetails(const std::optional<std::string>& mod_path);
+  void PushToRunningGame();
+  void OpenModFolder();
+  void TrackEmulationState(Core::State state);
 
-  void RefreshModList();
-  void ModSelectionChanged();
-  void ModItemChanged(QListWidgetItem* item);
+  bool m_game_running = false;
+  bool m_unsaved = false;
 
-  void OnModChanged(const std::optional<std::string>& absolute_path);
+  QListWidget* m_list;
 
-  void SaveModList();
+  QLabel* m_title;
+  QVBoxLayout* m_details;
 
-  void OpenGraphicsModDir();
-
-  void CalculateGameRunning(Core::State state);
-  bool m_loaded_game_is_running = false;
-  bool m_needs_save = false;
-
-  QListWidget* m_mod_list;
-
-  QLabel* m_selected_mod_name;
-  QVBoxLayout* m_mod_meta_layout;
-
-  QPushButton* m_open_directory_button;
-  QPushButton* m_refresh;
+  QPushButton* m_open_folder;
+  QPushButton* m_reload;
   GraphicsModWarningWidget* m_warning;
 
   std::string m_game_id;

@@ -1,7 +1,9 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/GraphicsModListWidget.h"
+
+#include <algorithm>
+#include <set>
 
 #include <QCheckBox>
 #include <QDesktopServices>
@@ -12,8 +14,6 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
-
-#include <set>
 
 #include "Common/FileUtil.h"
 #include "Core/ConfigManager.h"
@@ -29,221 +29,186 @@
 GraphicsModListWidget::GraphicsModListWidget(const UICommon::GameFile& game)
     : m_game_id(game.GetGameID()), m_mod_group(m_game_id)
 {
-  CalculateGameRunning(Core::GetState(Core::System::GetInstance()));
-  if (m_loaded_game_is_running && g_Config.graphics_mod_config)
-  {
+  TrackEmulationState(Core::GetState(Core::System::GetInstance()));
+  // Continue the running game's change count so it notices our edits.
+  if (m_game_running && g_Config.graphics_mod_config)
     m_mod_group.SetChangeCount(g_Config.graphics_mod_config->GetChangeCount());
-  }
-  CreateWidgets();
-  ConnectWidgets();
 
-  RefreshModList();
-  OnModChanged(std::nullopt);
+  auto* const outer = new QVBoxLayout(this);
+  auto* const columns = new QHBoxLayout;
+  auto* const left = new QVBoxLayout;
+
+  // Rows are dragged to set the mods' priority.
+  m_list = new QListWidget;
+  m_list->setSortingEnabled(false);
+  m_list->setSelectionBehavior(QAbstractItemView::SelectionBehavior::SelectItems);
+  m_list->setSelectionMode(QAbstractItemView::SelectionMode::SingleSelection);
+  m_list->setSelectionRectVisible(true);
+  m_list->setDragDropMode(QAbstractItemView::InternalMove);
+
+  m_open_folder = new QPushButton(tr("Open Directory..."));
+  m_reload = new QPushButton(tr("&Refresh List"));
+  auto* const buttons = new QHBoxLayout;
+  buttons->addWidget(m_open_folder);
+  buttons->addWidget(m_reload);
+
+  left->addWidget(m_list);
+  left->addLayout(buttons);
+
+  auto* const right = new QVBoxLayout;
+  m_title = new QLabel();
+  right->addWidget(m_title);
+  m_details = new QVBoxLayout;
+  right->addLayout(m_details);
+  right->addStretch();
+
+  columns->addLayout(left);
+  columns->addLayout(right, 1);
+
+  m_warning = new GraphicsModWarningWidget(this);
+  outer->addWidget(m_warning);
+  outer->addLayout(columns);
+  setLayout(outer);
+
+  connect(m_warning, &GraphicsModWarningWidget::GraphicsModEnableSettings, this,
+          &GraphicsModListWidget::OpenGraphicsSettings);
+  connect(m_list, &QListWidget::itemSelectionChanged, this,
+          &GraphicsModListWidget::OnSelectionChanged);
+  connect(m_list, &QListWidget::itemChanged, this, &GraphicsModListWidget::OnCheckToggled);
+  connect(m_list->model(), &QAbstractItemModel::rowsMoved, this,
+          &GraphicsModListWidget::OnRowsMoved);
+  connect(m_open_folder, &QPushButton::clicked, this, &GraphicsModListWidget::OpenModFolder);
+  connect(m_reload, &QPushButton::clicked, this, &GraphicsModListWidget::Reload);
+  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
+          &GraphicsModListWidget::TrackEmulationState);
+
+  Reload();
+  ShowDetails(std::nullopt);
 }
 
 GraphicsModListWidget::~GraphicsModListWidget()
 {
-  if (m_needs_save)
-  {
+  if (m_unsaved)
     m_mod_group.Save();
-  }
 }
 
-void GraphicsModListWidget::CreateWidgets()
+void GraphicsModListWidget::Reload()
 {
-  auto* main_v_layout = new QVBoxLayout(this);
-
-  auto* main_layout = new QHBoxLayout;
-
-  auto* left_v_layout = new QVBoxLayout;
-
-  m_mod_list = new QListWidget;
-  m_mod_list->setSortingEnabled(false);
-  m_mod_list->setSelectionBehavior(QAbstractItemView::SelectionBehavior::SelectItems);
-  m_mod_list->setSelectionMode(QAbstractItemView::SelectionMode::SingleSelection);
-  m_mod_list->setSelectionRectVisible(true);
-  m_mod_list->setDragDropMode(QAbstractItemView::InternalMove);
-
-  m_open_directory_button = new QPushButton(tr("Open Directory..."));
-  m_refresh = new QPushButton(tr("&Refresh List"));
-  QHBoxLayout* hlayout = new QHBoxLayout;
-  hlayout->addWidget(m_open_directory_button);
-  hlayout->addWidget(m_refresh);
-
-  left_v_layout->addWidget(m_mod_list);
-  left_v_layout->addLayout(hlayout);
-
-  auto* right_v_layout = new QVBoxLayout;
-
-  m_selected_mod_name = new QLabel();
-  right_v_layout->addWidget(m_selected_mod_name);
-
-  m_mod_meta_layout = new QVBoxLayout;
-  right_v_layout->addLayout(m_mod_meta_layout);
-  right_v_layout->addStretch();
-
-  main_layout->addLayout(left_v_layout);
-  main_layout->addLayout(right_v_layout, 1);
-
-  m_warning = new GraphicsModWarningWidget(this);
-  main_v_layout->addWidget(m_warning);
-  main_v_layout->addLayout(main_layout);
-
-  setLayout(main_v_layout);
-}
-
-void GraphicsModListWidget::ConnectWidgets()
-{
-  connect(m_warning, &GraphicsModWarningWidget::GraphicsModEnableSettings, this,
-          &GraphicsModListWidget::OpenGraphicsSettings);
-
-  connect(m_mod_list, &QListWidget::itemSelectionChanged, this,
-          &GraphicsModListWidget::ModSelectionChanged);
-
-  connect(m_mod_list, &QListWidget::itemChanged, this, &GraphicsModListWidget::ModItemChanged);
-
-  connect(m_mod_list->model(), &QAbstractItemModel::rowsMoved, this,
-          &GraphicsModListWidget::SaveModList);
-
-  connect(m_open_directory_button, &QPushButton::clicked, this,
-          &GraphicsModListWidget::OpenGraphicsModDir);
-
-  connect(m_refresh, &QPushButton::clicked, this, &GraphicsModListWidget::RefreshModList);
-
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
-          &GraphicsModListWidget::CalculateGameRunning);
-}
-
-void GraphicsModListWidget::RefreshModList()
-{
-  if (m_needs_save)
-  {
+  if (m_unsaved)
     SaveToDisk();
-  }
 
-  m_mod_list->setCurrentItem(nullptr);
-  m_mod_list->clear();
+  m_list->setCurrentItem(nullptr);
+  m_list->clear();
 
   m_mod_group = GraphicsModGroupConfig(m_game_id);
   m_mod_group.Load();
 
-  std::set<std::string> groups;
-
+  // A mod is listed only if one of its features targets a group that some
+  // mod of this game defines.
+  std::set<std::string> known_groups;
   for (const GraphicsModConfig& mod : m_mod_group.GetMods())
   {
     for (const GraphicsTargetGroupConfig& group : mod.m_groups)
-      groups.insert(group.m_name);
+      known_groups.insert(group.m_name);
   }
 
   for (const GraphicsModConfig& mod : m_mod_group.GetMods())
   {
-    // If no group matches the mod's features, or if the mod has no features, skip it
-    if (std::ranges::none_of(mod.m_features, [&groups](const GraphicsModFeatureConfig& feature) {
-          return groups.contains(feature.m_group);
-        }))
-    {
+    const bool usable =
+        std::ranges::any_of(mod.m_features, [&known_groups](const GraphicsModFeatureConfig& f) {
+          return known_groups.contains(f.m_group);
+        });
+    if (!usable)
       continue;
-    }
 
-    QListWidgetItem* item = new QListWidgetItem(QString::fromStdString(mod.m_title));
-    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-    item->setData(Qt::UserRole, QString::fromStdString(mod.GetAbsolutePath()));
-    item->setCheckState(mod.m_enabled ? Qt::Checked : Qt::Unchecked);
-
-    m_mod_list->addItem(item);
+    auto* const row = new QListWidgetItem(QString::fromStdString(mod.m_title));
+    row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
+    row->setData(Qt::UserRole, QString::fromStdString(mod.GetAbsolutePath()));
+    row->setCheckState(mod.m_enabled ? Qt::Checked : Qt::Unchecked);
+    m_list->addItem(row);
   }
 }
 
-void GraphicsModListWidget::ModSelectionChanged()
+void GraphicsModListWidget::OnSelectionChanged()
 {
-  if (m_mod_list->currentItem() == nullptr)
+  QListWidgetItem* const current = m_list->currentItem();
+  if (current == nullptr || m_list->count() == 0)
     return;
-  if (m_mod_list->count() == 0)
-    return;
-  const auto absolute_path = m_mod_list->currentItem()->data(Qt::UserRole).toString().toStdString();
-  OnModChanged(absolute_path);
+  ShowDetails(current->data(Qt::UserRole).toString().toStdString());
 }
 
-void GraphicsModListWidget::ModItemChanged(QListWidgetItem* item)
+void GraphicsModListWidget::OnCheckToggled(QListWidgetItem* item)
 {
-  const auto absolute_path = item->data(Qt::UserRole).toString();
-  GraphicsModConfig* mod = m_mod_group.GetMod(absolute_path.toStdString());
-  if (!mod)
+  GraphicsModConfig* const mod = m_mod_group.GetMod(item->data(Qt::UserRole).toString().toStdString());
+  if (mod == nullptr)
     return;
 
-  const bool was_enabled = mod->m_enabled;
-  const bool should_enable = item->checkState() == Qt::Checked;
-  mod->m_enabled = should_enable;
-  if (was_enabled == should_enable)
+  const bool enable = item->checkState() == Qt::Checked;
+  const bool changed = mod->m_enabled != enable;
+  mod->m_enabled = enable;
+  if (!changed)
     return;
 
   m_mod_group.SetChangeCount(m_mod_group.GetChangeCount() + 1);
-  if (m_loaded_game_is_running)
-  {
-    g_Config.graphics_mod_config = m_mod_group;
-  }
-  m_needs_save = true;
+  PushToRunningGame();
 }
 
-void GraphicsModListWidget::OnModChanged(const std::optional<std::string>& absolute_path)
+void GraphicsModListWidget::OnRowsMoved()
 {
-  ClearLayoutRecursively(m_mod_meta_layout);
+  // Each mod's weight becomes its row number.
+  QAbstractItemModel* const model = m_list->model();
+  for (int row = 0; row < m_list->count(); ++row)
+  {
+    const std::string path = model->data(model->index(row, 0), Qt::UserRole).toString().toStdString();
+    m_mod_group.GetMod(path)->m_weight = static_cast<u16>(row);
+  }
+  PushToRunningGame();
+}
 
+void GraphicsModListWidget::PushToRunningGame()
+{
+  if (m_game_running)
+    g_Config.graphics_mod_config = m_mod_group;
+  m_unsaved = true;
+}
+
+void GraphicsModListWidget::ShowDetails(const std::optional<std::string>& mod_path)
+{
+  ClearLayoutRecursively(m_details);
   adjustSize();
 
-  if (!absolute_path)
+  if (!mod_path)
   {
-    m_selected_mod_name->setText(tr("No graphics mod selected"));
-    m_selected_mod_name->setAlignment(Qt::AlignCenter);
+    m_title->setText(tr("No graphics mod selected"));
+    m_title->setAlignment(Qt::AlignCenter);
     return;
   }
 
-  const GraphicsModConfig* mod = m_mod_group.GetMod(*absolute_path);
-  if (!mod)
+  const GraphicsModConfig* const mod = m_mod_group.GetMod(*mod_path);
+  if (mod == nullptr)
     return;
 
-  m_selected_mod_name->setText(QString::fromStdString(mod->m_title));
-  m_selected_mod_name->setAlignment(Qt::AlignLeft);
-  QFont font = m_selected_mod_name->font();
-  font.setWeight(QFont::Bold);
-  m_selected_mod_name->setFont(font);
+  m_title->setText(QString::fromStdString(mod->m_title));
+  m_title->setAlignment(Qt::AlignLeft);
+  QFont heading = m_title->font();
+  heading.setWeight(QFont::Bold);
+  m_title->setFont(heading);
 
   if (!mod->m_author.empty())
-  {
-    auto* author_label = new QLabel(tr("By: %1").arg(QString::fromStdString(mod->m_author)));
-    m_mod_meta_layout->addWidget(author_label);
-  }
+    m_details->addWidget(new QLabel(tr("By: %1").arg(QString::fromStdString(mod->m_author))));
 
   if (!mod->m_description.empty())
   {
-    auto* description_label =
+    auto* const about =
         new QLabel(tr("Description: %1").arg(QString::fromStdString(mod->m_description)));
-    description_label->setWordWrap(true);
-    m_mod_meta_layout->addWidget(description_label);
+    about->setWordWrap(true);
+    m_details->addWidget(about);
   }
-}
-
-void GraphicsModListWidget::SaveModList()
-{
-  for (int i = 0; i < m_mod_list->count(); i++)
-  {
-    const auto absolute_path = m_mod_list->model()
-                                   ->data(m_mod_list->model()->index(i, 0), Qt::UserRole)
-                                   .toString()
-                                   .toStdString();
-    m_mod_group.GetMod(absolute_path)->m_weight = i;
-  }
-
-  if (m_loaded_game_is_running)
-  {
-    g_Config.graphics_mod_config = m_mod_group;
-  }
-  m_needs_save = true;
 }
 
 void GraphicsModListWidget::SaveToDisk()
 {
-  m_needs_save = false;
+  m_unsaved = false;
   m_mod_group.Save();
 }
 
@@ -252,13 +217,14 @@ const GraphicsModGroupConfig& GraphicsModListWidget::GetGraphicsModConfig() cons
   return m_mod_group;
 }
 
-void GraphicsModListWidget::CalculateGameRunning(Core::State state)
+void GraphicsModListWidget::TrackEmulationState(Core::State state)
 {
-  m_loaded_game_is_running =
-      state == Core::State::Running ? m_game_id == SConfig::GetInstance().GetGameID() : false;
+  // Changes only go live when the game being edited is the one running.
+  m_game_running =
+      state == Core::State::Running && m_game_id == SConfig::GetInstance().GetGameID();
 }
 
-void GraphicsModListWidget::OpenGraphicsModDir()
+void GraphicsModListWidget::OpenModFolder()
 {
   QDesktopServices::openUrl(
       QUrl::fromLocalFile(QString::fromStdString(File::GetUserPath(D_GRAPHICSMOD_IDX))));
