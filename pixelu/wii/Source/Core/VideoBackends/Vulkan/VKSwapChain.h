@@ -28,6 +28,11 @@ public:
   // A surface for the window in `wsi`, or VK_NULL_HANDLE.
   static VkSurfaceKHR CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi);
 
+#if defined(RP_VULKAN_LINUX_SURFACES)
+  static VkSurfaceKHR CreateX11Surface(VkInstance instance, const WindowSystemInfo& wsi);
+  static VkSurfaceKHR CreateWaylandSurface(VkInstance instance, const WindowSystemInfo& wsi);
+#endif
+
   // Builds the swap chain and image objects on an existing surface (taken over).
   static std::unique_ptr<SwapChain> Create(const WindowSystemInfo& wsi, VkSurfaceKHR surface,
                                            bool vsync);

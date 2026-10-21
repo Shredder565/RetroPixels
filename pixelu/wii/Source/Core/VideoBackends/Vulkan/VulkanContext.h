@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -72,6 +73,9 @@ public:
   // Returns VK_NULL_HANDLE on failure; the API version asked for goes to out_vk_api_version.
   static VkInstance CreateVulkanInstance(WindowSystemType wstype, bool enable_debug_utils,
                                          bool enable_validation_layer, u32* out_vk_api_version);
+
+  // Whether the instance made last by CreateVulkanInstance has this extension enabled.
+  static bool IsInstanceExtensionEnabled(std::string_view name);
 
   // The physical devices of an instance, in driver order (empty on failure).
   static GPUList EnumerateGPUs(VkInstance instance);

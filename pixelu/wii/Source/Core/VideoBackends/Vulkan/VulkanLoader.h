@@ -12,6 +12,36 @@
 
 #include "vulkan/vulkan.h"
 
+#if defined(__linux__)
+// The X11 (Xlib and XCB) and Wayland surface extensions. Their headers are included directly
+// instead of through VK_USE_PLATFORM_*, which would pull <X11/Xlib.h> (and its None, Bool,
+// Status... macros) into every file of the backend. The window-system types they name are
+// handles only: Xlib's Display is an opaque struct and Window/VisualID are unsigned longs
+// (XIDs); XCB's ids are 32-bit; Wayland's objects are opaque structs. So the headers build
+// without any window-system development package, and the macros below keep even the type
+// names out of the global namespace.
+#define RP_VULKAN_LINUX_SURFACES 1
+struct RpXlibDisplay;
+using RpXlibWindow = unsigned long;
+using RpXlibVisualID = unsigned long;
+#define Display RpXlibDisplay
+#define Window RpXlibWindow
+#define VisualID RpXlibVisualID
+#include "vulkan/vulkan_xlib.h"
+#undef VisualID
+#undef Window
+#undef Display
+
+typedef struct xcb_connection_t xcb_connection_t;
+typedef uint32_t xcb_window_t;
+typedef uint32_t xcb_visualid_t;
+#include "vulkan/vulkan_xcb.h"
+
+struct wl_display;
+struct wl_surface;
+#include "vulkan/vulkan_wayland.h"
+#endif
+
 // VK_EXT_full_screen_exclusive needs a Win32 monitor handle, so it is only offered on Windows.
 #if defined(WIN32)
 #define SUPPORTS_VULKAN_EXCLUSIVE_FULLSCREEN 1

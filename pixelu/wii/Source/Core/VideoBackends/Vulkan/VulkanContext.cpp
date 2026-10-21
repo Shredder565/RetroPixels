@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <utility>
 
 #include "Common/Assert.h"
+#include "Common/Contains.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
@@ -22,6 +24,11 @@ std::unique_ptr<VulkanContext> g_vulkan_context;
 namespace
 {
 constexpr const char* KHRONOS_VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
+
+// The instance extensions the last successful CreateVulkanInstance enabled. Surface creation
+// asks for them: a loader hands out entry points of extensions it knows even when they are
+// not enabled, so a non-null pointer proves nothing.
+std::vector<std::string> s_instance_extensions;
 
 // Pushes `link` right behind `head` in a pNext chain.
 template <typename Head, typename Link>
@@ -328,7 +335,14 @@ VkInstance VulkanContext::CreateVulkanInstance(WindowSystemType wstype, bool ena
     LOG_VULKAN_ERROR(res, "vkCreateInstance failed: ");
     return VK_NULL_HANDLE;
   }
+
+  s_instance_extensions.assign(extensions.begin(), extensions.end());
   return instance;
+}
+
+bool VulkanContext::IsInstanceExtensionEnabled(std::string_view name)
+{
+  return Common::Contains(s_instance_extensions, name);
 }
 
 bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension_list,
@@ -393,6 +407,23 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
     return false;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
   if (wstype == WindowSystemType::Windows && !enable(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, true))
+    return false;
+#endif
+#if defined(RP_VULKAN_LINUX_SURFACES)
+  if (wstype == WindowSystemType::X11)
+  {
+    // Either X11 surface type will do: Xlib takes the frontend's Display* directly, XCB goes
+    // through the XCB connection under it. Drivers normally offer both.
+    const bool xlib = enable(VK_KHR_XLIB_SURFACE_EXTENSION_NAME, false);
+    const bool xcb = enable(VK_KHR_XCB_SURFACE_EXTENSION_NAME, false);
+    if (!xlib && !xcb)
+    {
+      ERROR_LOG_FMT(VIDEO, "Vulkan: Missing required extension {} or {}.",
+                    VK_KHR_XLIB_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME);
+      return false;
+    }
+  }
+  if (wstype == WindowSystemType::Wayland && !enable(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, true))
     return false;
 #endif
 

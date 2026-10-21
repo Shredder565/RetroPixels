@@ -8,6 +8,7 @@
 
 #include "Common/Assert.h"
 #include "Common/Contains.h"
+#include "Common/DynamicLibrary.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
@@ -98,12 +99,111 @@ VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSys
     }
     return surface;
   }
+#elif defined(RP_VULKAN_LINUX_SURFACES)
+  if (wsi.type == WindowSystemType::X11)
+    return CreateX11Surface(instance, wsi);
+  if (wsi.type == WindowSystemType::Wayland)
+    return CreateWaylandSurface(instance, wsi);
 #else
   static_cast<void>(instance);
   static_cast<void>(wsi);
 #endif
   return VK_NULL_HANDLE;
 }
+
+#if defined(RP_VULKAN_LINUX_SURFACES)
+// On X11 the frontend hands over its Xlib Display* (display_connection) and the X window id of
+// the render widget (render_surface, an XID stored in a pointer).
+VkSurfaceKHR SwapChain::CreateX11Surface(VkInstance instance, const WindowSystemInfo& wsi)
+{
+  const auto window_id = reinterpret_cast<uintptr_t>(wsi.render_surface);
+  if (wsi.display_connection == nullptr || window_id == 0)
+  {
+    ERROR_LOG_FMT(VIDEO, "Vulkan: X11 surface needs a display connection and a window");
+    return VK_NULL_HANDLE;
+  }
+
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  if (VulkanContext::IsInstanceExtensionEnabled(VK_KHR_XLIB_SURFACE_EXTENSION_NAME) &&
+      vkCreateXlibSurfaceKHR != nullptr)
+  {
+    VkXlibSurfaceCreateInfoKHR info = {};
+    info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    info.dpy = static_cast<RpXlibDisplay*>(wsi.display_connection);
+    info.window = static_cast<RpXlibWindow>(window_id);
+    const VkResult res = vkCreateXlibSurfaceKHR(instance, &info, nullptr, &surface);
+    if (res == VK_SUCCESS)
+    {
+      INFO_LOG_FMT(VIDEO, "Vulkan: Xlib surface for window {:#x}", window_id);
+      return surface;
+    }
+    LOG_VULKAN_ERROR(res, "vkCreateXlibSurfaceKHR failed: ");
+  }
+
+  if (VulkanContext::IsInstanceExtensionEnabled(VK_KHR_XCB_SURFACE_EXTENSION_NAME) &&
+      vkCreateXcbSurfaceKHR != nullptr)
+  {
+    // The XCB connection an Xlib display runs on comes from libX11-xcb, which every Xlib
+    // program that uses XCB already has loaded; it is looked up at run time so the backend does
+    // not link against X11 at all.
+    using GetXcbConnectionFn = xcb_connection_t* (*)(void* display);
+    static Common::DynamicLibrary x11_xcb(
+        Common::DynamicLibrary::GetVersionedFilename("X11-xcb", 1).c_str());
+    const auto get_xcb_connection =
+        x11_xcb.IsOpen() ?
+            reinterpret_cast<GetXcbConnectionFn>(x11_xcb.GetSymbolAddress("XGetXCBConnection")) :
+            nullptr;
+
+    xcb_connection_t* const connection =
+        get_xcb_connection != nullptr ? get_xcb_connection(wsi.display_connection) : nullptr;
+    if (connection == nullptr)
+    {
+      ERROR_LOG_FMT(VIDEO, "Vulkan: no XCB connection for the X11 display (libX11-xcb.so.1)");
+      return VK_NULL_HANDLE;
+    }
+
+    VkXcbSurfaceCreateInfoKHR info = {};
+    info.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+    info.connection = connection;
+    info.window = static_cast<xcb_window_t>(window_id);
+    const VkResult res = vkCreateXcbSurfaceKHR(instance, &info, nullptr, &surface);
+    if (res == VK_SUCCESS)
+    {
+      INFO_LOG_FMT(VIDEO, "Vulkan: XCB surface for window {:#x}", window_id);
+      return surface;
+    }
+    LOG_VULKAN_ERROR(res, "vkCreateXcbSurfaceKHR failed: ");
+  }
+
+  return VK_NULL_HANDLE;
+}
+
+// On Wayland display_connection is the wl_display* and render_surface the wl_surface*.
+VkSurfaceKHR SwapChain::CreateWaylandSurface(VkInstance instance, const WindowSystemInfo& wsi)
+{
+  if (wsi.display_connection == nullptr || wsi.render_surface == nullptr ||
+      vkCreateWaylandSurfaceKHR == nullptr)
+  {
+    ERROR_LOG_FMT(VIDEO, "Vulkan: Wayland surface needs a display, a surface and {}",
+                  VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+    return VK_NULL_HANDLE;
+  }
+
+  VkWaylandSurfaceCreateInfoKHR info = {};
+  info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+  info.display = static_cast<wl_display*>(wsi.display_connection);
+  info.surface = static_cast<wl_surface*>(wsi.render_surface);
+
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  const VkResult res = vkCreateWaylandSurfaceKHR(instance, &info, nullptr, &surface);
+  if (res != VK_SUCCESS)
+  {
+    LOG_VULKAN_ERROR(res, "vkCreateWaylandSurfaceKHR failed: ");
+    return VK_NULL_HANDLE;
+  }
+  return surface;
+}
+#endif
 
 std::unique_ptr<SwapChain> SwapChain::Create(const WindowSystemInfo& wsi, VkSurfaceKHR surface,
                                              bool vsync)
