@@ -130,6 +130,9 @@ private:
 
   hid_device* const m_handle;
   InputReport m_report{};
+  // Where reports are read to. A member, cleared once, so that a short read never leaves
+  // undefined bytes and no update pays for clearing it.
+  InputReport m_incoming{};
   int m_updates_since_imu_refresh = 0;
 };
 
@@ -254,7 +257,7 @@ Core::DeviceRemoval Device::UpdateInput()
   }
 
   // Only the newest of the queued reports matters.
-  InputReport incoming{};
+  InputReport& incoming = m_incoming;
   bool received = false;
   while (hid_read(m_handle, reinterpret_cast<unsigned char*>(&incoming), sizeof(incoming)) > 0)
     received = true;
