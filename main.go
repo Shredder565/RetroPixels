@@ -267,6 +267,7 @@ func newMux() *http.ServeMux {
 	registerWiiURoutes(mux)
 	registerArcadeRoutes(mux)
 	registerAPRoutes(mux)
+	registerDesktopRoutes(mux)
 	return mux
 }
 
@@ -287,7 +288,7 @@ func main() {
 
 	if alreadyRunning() {
 		// Bring up another window on the copy that's already running.
-		_ = openAppWindow(url, false)
+		_ = openAppWindow(url+desktopHandOff(os.Args[1:]), false)
 		return
 	}
 
@@ -313,7 +314,7 @@ func main() {
 	ap.start()
 
 	// Opens the window and blocks until it closes. Then the app exits.
-	if err := openAppWindow(url, true); err != nil {
+	if err := openAppWindow(url+desktopStart(os.Args[1:]), true); err != nil {
 		showError(err.Error())
 		os.Exit(1)
 	}
