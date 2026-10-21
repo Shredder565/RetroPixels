@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,8 +17,10 @@ class IniFile;
 
 namespace InputCommon::DynamicInputTextures
 {
-// Output folder name to image name to image data
+// Output folder name -> image file name -> image.
 using OutputDetails = std::map<std::string, std::map<std::string, ImagePixelData>>;
+
+// One pack description (a JSON file).
 class Configuration
 {
 public:

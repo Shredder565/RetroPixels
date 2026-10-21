@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,12 +13,19 @@ namespace DynamicInputTextures
 {
 class Configuration;
 }
+
+// Dynamic input textures: texture packs that draw the user's own key/button images into a
+// game's button prompts. The packs live in <User>/Load/DynamicInputTextures/<game id>/ as JSON
+// files; the generated textures are written as hi-res textures.
 class DynamicInputTextureManager
 {
 public:
   DynamicInputTextureManager();
   ~DynamicInputTextureManager();
+
+  // Reads the pack descriptions for the running game.
   void Load();
+  // Draws the textures for the mappings in `file` (one section per controller name).
   void GenerateTextures(const Common::IniFile& file,
                         const std::vector<std::string>& controller_names);
 

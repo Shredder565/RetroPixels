@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,8 @@ class EmulatedController;
 
 namespace InputProfile
 {
+// Profile files named by a comma-separated setting (as in a game ini): each entry is a profile
+// name or a directory of profiles, relative to `root`.
 std::vector<std::string> GetProfilesFromSetting(const std::string& setting,
                                                 const std::string& root);
 
@@ -24,29 +25,19 @@ enum class CycleDirection : int
   Backward = -1
 };
 
+// Steps a Wii Remote through the user's input profiles (hotkeys "next/previous profile").
 class ProfileCycler
 {
 public:
   void NextWiimoteProfile(int controller_index);
   void PreviousWiimoteProfile(int controller_index);
+  // Same, limited to the profiles the running game's ini names.
   void NextWiimoteProfileForGame(int controller_index);
   void PreviousWiimoteProfileForGame(int controller_index);
 
 private:
-  void CycleProfile(CycleDirection cycle_direction, InputConfig* device_configuration,
-                    int& profile_index, int controller_index);
-  void CycleProfileForGame(CycleDirection cycle_direction, InputConfig* device_configuration,
-                           int& profile_index, const std::string& setting, int controller_index);
-  std::vector<std::string> GetProfilesForDevice(InputConfig* device_configuration);
-  std::string GetProfile(CycleDirection cycle_direction, int& profile_index,
-                         const std::vector<std::string>& profiles);
-  std::vector<std::string> GetMatchingProfilesFromSetting(const std::string& setting,
-                                                          const std::vector<std::string>& profiles,
-                                                          InputConfig* device_configuration);
-  void UpdateToProfile(const std::string& profile_filename,
-                       ControllerEmu::EmulatedController* controller,
-                       InputConfig* device_configuration);
-  std::string GetWiimoteInputProfilesForGame(int controller_index);
+  // `game_setting` is null to cycle through all profiles.
+  void Cycle(CycleDirection direction, int controller_index, const std::string* game_setting);
 
   int m_wiimote_profile_index = 0;
 };

@@ -1,10 +1,14 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/InputConfig.h"
 
+#include <array>
+#include <cstddef>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "Common/FileUtil.h"
 #include "Common/IniFile.h"
@@ -16,6 +20,18 @@
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/InputProfile.h"
+
+namespace
+{
+// Suffixes of the game ini keys naming per-game profiles ("PadProfile1", "WiimoteProfileBB"...).
+// Only the first four are looked up.
+constexpr std::array<std::string_view, MAX_BBMOTES> PROFILE_SLOT_NAMES = {"1", "2", "3", "4",
+                                                                          "BB"};
+constexpr std::size_t PROFILE_SLOTS_CHECKED = 4;
+
+// How long the "Loading game specific input profile" message stays up.
+constexpr int PROFILE_MESSAGE_MS = 6000;
+}  // namespace
 
 InputConfig::InputConfig(std::string ini_name, std::string gui_name,
                          std::string profile_directory_name, std::string profile_key)
@@ -29,113 +45,100 @@ InputConfig::~InputConfig() = default;
 
 bool InputConfig::LoadConfig()
 {
-  Common::IniFile inifile;
-  bool useProfile[MAX_BBMOTES] = {false, false, false, false, false};
-  static constexpr std::array<std::string_view, MAX_BBMOTES> num = {"1", "2", "3", "4", "BB"};
-  std::string profile[MAX_BBMOTES];
+  // The profile file each controller slot should use instead of the main ini, if any.
+  std::array<std::string, MAX_BBMOTES> game_profiles;
+  std::array<bool, MAX_BBMOTES> use_game_profile{};
 
   if (SConfig::GetInstance().GetGameID() != "00000000")
   {
-    const std::string profile_directory = GetUserProfileDirectoryPath();
-
+    const std::string profile_root = GetUserProfileDirectoryPath();
     Common::IniFile game_ini = SConfig::GetInstance().LoadGameIni();
-    auto* control_section = game_ini.GetOrCreateSection("Controls");
+    const Common::IniFile::Section* const controls = game_ini.GetOrCreateSection("Controls");
 
-    for (int i = 0; i < 4; i++)
+    for (std::size_t slot = 0; slot < PROFILE_SLOTS_CHECKED; ++slot)
     {
-      const auto profile_name = fmt::format("{}Profile{}", GetProfileKey(), num[i]);
+      const std::string key =
+          fmt::format("{}Profile{}", GetProfileKey(), PROFILE_SLOT_NAMES[slot]);
+      std::string setting;
+      if (!controls->Exists(key) || !controls->Get(key, &setting))
+        continue;
 
-      if (control_section->Exists(profile_name))
+      const std::vector<std::string> found =
+          InputProfile::GetProfilesFromSetting(setting, profile_root);
+      if (found.empty())
       {
-        std::string profile_setting;
-        if (control_section->Get(profile_name, &profile_setting))
-        {
-          auto profiles = InputProfile::GetProfilesFromSetting(profile_setting, profile_directory);
-
-          if (profiles.empty())
-          {
-            // TODO: PanicAlert shouldn't be used for this.
-            PanicAlertFmtT("No profiles found for game setting '{0}'", profile_setting);
-            continue;
-          }
-
-          // Use the first profile by default
-          profile[i] = profiles[0];
-          useProfile[i] = true;
-        }
+        PanicAlertFmtT("No profiles found for game setting '{0}'", setting);
+        continue;
       }
+
+      // The first match is the one used at start.
+      game_profiles[slot] = found.front();
+      use_game_profile[slot] = true;
     }
   }
 
-  if (inifile.Load(File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini") &&
-      !inifile.GetSections().empty())
+  Common::IniFile ini;
+  const bool loaded = ini.Load(File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini");
+  if (!loaded || ini.GetSections().empty())
   {
-    int n = 0;
-
-    for (auto& controller : m_controllers)
+    // Defaults go to the first controller only. The others are just cleared, so they do not all
+    // end up mapped to the same default device.
+    for (std::size_t index = 0; index != m_controllers.size(); ++index)
     {
-      Common::IniFile::Section config;
-      // Load settings from ini
-      if (useProfile[n])
-      {
-        std::string base;
-        SplitPath(profile[n], nullptr, &base, nullptr);
-        Core::DisplayMessage("Loading game specific input profile '" + base + "' for device '" +
-                                 controller->GetName() + "'",
-                             6000);
-
-        inifile.Load(profile[n]);
-        config = *inifile.GetOrCreateSection("Profile");
-      }
+      ControllerEmu::EmulatedController& controller = *m_controllers[index];
+      if (index == 0)
+        controller.LoadDefaults(g_controller_interface);
       else
-      {
-        config = *inifile.GetOrCreateSection(controller->GetName());
-      }
-      controller->LoadConfig(&config);
-      controller->UpdateReferences(g_controller_interface);
-
-      // Next profile
-      n++;
-    }
-    return true;
-  }
-  else
-  {
-    // Only load the default profile for the first controller and clear the others,
-    // otherwise they would all share the same mappings on the same (default) device
-    if (m_controllers.size() > 0)
-    {
-      m_controllers[0]->LoadDefaults(g_controller_interface);
-      m_controllers[0]->UpdateReferences(g_controller_interface);
-    }
-    for (size_t i = 1; i < m_controllers.size(); ++i)
-    {
-      // Calling the base version just clears all settings without overwriting them with a default
-      m_controllers[i]->EmulatedController::LoadDefaults(g_controller_interface);
-      m_controllers[i]->UpdateReferences(g_controller_interface);
+        controller.EmulatedController::LoadDefaults(g_controller_interface);
+      controller.UpdateReferences(g_controller_interface);
     }
     return false;
   }
+
+  for (std::size_t slot = 0; slot != m_controllers.size(); ++slot)
+  {
+    ControllerEmu::EmulatedController& controller = *m_controllers[slot];
+
+    // Note that loading a game profile replaces the ini's contents, so later controllers without
+    // a profile read their section from that profile file.
+    Common::IniFile::Section section;
+    if (use_game_profile[slot])
+    {
+      std::string profile_name;
+      SplitPath(game_profiles[slot], nullptr, &profile_name, nullptr);
+      Core::DisplayMessage("Loading game specific input profile '" + profile_name +
+                               "' for device '" + controller.GetName() + "'",
+                           PROFILE_MESSAGE_MS);
+
+      ini.Load(game_profiles[slot]);
+      section = *ini.GetOrCreateSection("Profile");
+    }
+    else
+    {
+      section = *ini.GetOrCreateSection(controller.GetName());
+    }
+
+    controller.LoadConfig(&section);
+    controller.UpdateReferences(g_controller_interface);
+  }
+  return true;
 }
 
 void InputConfig::SaveConfig()
 {
-  std::string ini_filename = File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini";
+  const std::string path = File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini";
 
-  Common::IniFile inifile;
-  inifile.Load(ini_filename);
-
-  for (auto& controller : m_controllers)
-  {
-    controller->SaveConfig(inifile.GetOrCreateSection(controller->GetName()));
-  }
-
-  inifile.Save(ini_filename);
+  // Other sections of the file are kept.
+  Common::IniFile ini;
+  ini.Load(path);
+  for (const auto& controller : m_controllers)
+    controller->SaveConfig(ini.GetOrCreateSection(controller->GetName()));
+  ini.Save(path);
 }
 
 ControllerEmu::EmulatedController* InputConfig::GetController(int index) const
 {
-  return m_controllers.at(index).get();
+  return m_controllers.at(static_cast<std::size_t>(index)).get();
 }
 
 void InputConfig::ClearControllers()
@@ -165,10 +168,9 @@ int InputConfig::GetControllerCount() const
 
 void InputConfig::RegisterHotplugCallback()
 {
-  // Update control references on all controllers
-  // as configured devices may have been added or removed.
+  // Devices came or went: rebind every controller's references.
   m_hotplug_event_hook = g_controller_interface.RegisterDevicesChangedCallback([this] {
-    for (auto& controller : m_controllers)
+    for (const auto& controller : m_controllers)
       controller->UpdateReferences(g_controller_interface);
   });
 }
@@ -180,47 +182,42 @@ void InputConfig::UnregisterHotplugCallback()
 
 bool InputConfig::IsControllerControlledByGamepadDevice(int index) const
 {
-  if (static_cast<size_t>(index) >= m_controllers.size())
+  if (static_cast<std::size_t>(index) >= m_controllers.size())
     return false;
 
-  const auto& controller = m_controllers.at(index).get()->GetDefaultDevice();
+  const ciface::Core::DeviceQualifier& device = m_controllers[static_cast<std::size_t>(index)]
+                                                    ->GetDefaultDevice();
 
-  // By default on Android, no device is selected
-  if (controller.source == "")
+  // No device selected.
+  if (device.source.empty())
     return false;
 
-  // Filter out anything which obviously not a gamepad
-  return !((controller.source == "Quartz")      // OSX Quartz Keyboard/Mouse
-           || (controller.source == "XInput2")  // Linux and BSD Keyboard/Mouse
-           || (controller.source == "Android" && controller.cid <= 0)  // Android non-gamepad device
-           || (controller.source == "DInput" &&
-               controller.name == "Keyboard Mouse"));  // Windows Keyboard/Mouse
+  // Keyboard and mouse sources of the various platforms are not gamepads.
+  const bool keyboard_mouse = device.source == "Quartz" || device.source == "XInput2" ||
+                              (device.source == "Android" && device.cid <= 0) ||
+                              (device.source == "DInput" && device.name == "Keyboard Mouse");
+  return !keyboard_mouse;
 }
 
 void InputConfig::GenerateControllerTextures(const Common::IniFile& file)
 {
   m_dynamic_input_tex_config_manager.Load();
 
-  std::vector<std::string> controller_names;
-  for (auto& controller : m_controllers)
-  {
-    controller_names.push_back(controller->GetName());
-  }
+  std::vector<std::string> names;
+  names.reserve(m_controllers.size());
+  for (const auto& controller : m_controllers)
+    names.push_back(controller->GetName());
 
-  m_dynamic_input_tex_config_manager.GenerateTextures(file, controller_names);
+  m_dynamic_input_tex_config_manager.GenerateTextures(file, names);
 }
 
 void InputConfig::GenerateControllerTextures()
 {
-  const std::string ini_filename = File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini";
+  // Textures follow the current mappings, which may not have been saved yet.
+  Common::IniFile ini;
+  ini.Load(File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini");
+  for (const auto& controller : m_controllers)
+    controller->SaveConfig(ini.GetOrCreateSection(controller->GetName()));
 
-  Common::IniFile inifile;
-  inifile.Load(ini_filename);
-
-  for (auto& controller : m_controllers)
-  {
-    controller->SaveConfig(inifile.GetOrCreateSection(controller->GetName()));
-  }
-
-  GenerateControllerTextures(inifile);
+  GenerateControllerTextures(ini);
 }

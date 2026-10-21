@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/DynamicInputTextureManager.h"
 
@@ -23,51 +22,42 @@ DynamicInputTextureManager::~DynamicInputTextureManager() = default;
 void DynamicInputTextureManager::Load()
 {
   m_configuration.clear();
-  const std::set<std::string> dynamic_input_directories =
+
+  // The pack directories of the most specific game id that has any.
+  const std::set<std::string> directories =
       GetTextureDirectoriesForFirstMatchingGameId(File::GetUserPath(D_DYNAMICINPUT_IDX),
                                                   SConfig::GetInstance().GetGameIDsForTextures());
 
-  for (const auto& dynamic_input_directory : dynamic_input_directories)
+  for (const std::string& directory : directories)
   {
-    const auto json_files = Common::DoFileSearch(dynamic_input_directory, ".json");
-    for (auto& file : json_files)
-    {
-      m_configuration.emplace_back(file);
-    }
+    for (const std::string& json_path : Common::DoFileSearch(directory, ".json"))
+      m_configuration.emplace_back(json_path);
   }
 }
 
 void DynamicInputTextureManager::GenerateTextures(const Common::IniFile& file,
                                                   const std::vector<std::string>& controller_names)
 {
-  DynamicInputTextures::OutputDetails output;
-  for (const auto& configuration : m_configuration)
+  DynamicInputTextures::OutputDetails generated;
+  for (const DynamicInputTextures::Configuration& configuration : m_configuration)
+    configuration.GenerateTextures(file, controller_names, &generated);
+
+  // Each output folder is marked for the game's preferred texture id with an empty
+  // "gameids/<id>.txt" file.
+  const std::string& game_id = SConfig::GetInstance().GetGameIDForTextures();
+  for (const auto& [folder_name, images] : generated)
   {
-    configuration.GenerateTextures(file, controller_names, &output);
-  }
-  // write to highest preference gameid for textures
-  const std::string& game_id_for_textures = SConfig::GetInstance().GetGameIDForTextures();
-  for (const auto& [generated_folder_name, images] : output)
-  {
-    const auto hi_res_folder = File::GetUserPath(D_HIRESTEXTURES_IDX) + generated_folder_name;
+    const std::string folder = File::GetUserPath(D_HIRESTEXTURES_IDX) + folder_name;
+    if (!File::IsDirectory(folder))
+      File::CreateDir(folder);
 
-    if (!File::IsDirectory(hi_res_folder))
-    {
-      File::CreateDir(hi_res_folder);
-    }
-
-    const auto game_id_folder = hi_res_folder + DIR_SEP + "gameids";
-    if (!File::IsDirectory(game_id_folder))
-    {
-      File::CreateDir(game_id_folder);
-    }
-
-    File::CreateEmptyFile(game_id_folder + DIR_SEP + game_id_for_textures + ".txt");
+    const std::string id_folder = folder + DIR_SEP + "gameids";
+    if (!File::IsDirectory(id_folder))
+      File::CreateDir(id_folder);
+    File::CreateEmptyFile(id_folder + DIR_SEP + game_id + ".txt");
 
     for (const auto& [image_name, image] : images)
-    {
-      WriteImage(hi_res_folder + DIR_SEP + image_name, image);
-    }
+      WriteImage(folder + DIR_SEP + image_name, image);
   }
 }
 }  // namespace InputCommon

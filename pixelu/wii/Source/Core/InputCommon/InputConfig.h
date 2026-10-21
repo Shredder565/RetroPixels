@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,6 +20,8 @@ namespace ControllerEmu
 class EmulatedController;
 }
 
+// The emulated controllers of one kind (GameCube pads, Wii Remotes, hotkeys, ...) and the ini
+// file their mappings live in (<User>/Config/<ini_name>.ini, one section per controller).
 class InputConfig
 {
 public:
@@ -29,13 +30,15 @@ public:
 
   ~InputConfig();
 
+  // Loads the mappings, using a game's profiles where its game ini names any. Returns false (and
+  // loads defaults) when the ini file is missing or empty.
   bool LoadConfig();
   void SaveConfig();
 
   template <typename T, typename... Args>
   void CreateController(Args&&... args)
   {
-    m_controllers.emplace_back(std::make_unique<T>(std::forward<Args>(args)...));
+    m_controllers.push_back(std::make_unique<T>(std::forward<Args>(args)...));
   }
 
   ControllerEmu::EmulatedController* GetController(int index) const;
@@ -50,7 +53,7 @@ public:
   std::string GetSysProfileDirectoryPath() const;
   int GetControllerCount() const;
 
-  // These should be used after creating all controllers and before clearing them, respectively.
+  // Call after creating all controllers and before clearing them, respectively.
   void RegisterHotplugCallback();
   void UnregisterHotplugCallback();
 
