@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 350260 | 87.7% |
-| Dolphin, untouched | 43394 | 10.9% |
+| Original (RetroPixels) | 361047 | 90.5% |
+| Dolphin, untouched | 32061 | 8.0% |
 | Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **399417** | 100% |
+| **All** | **398871** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -164,7 +164,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DiscIO | 15966 | 15966 | original |
 | Core/DolphinQt (top level) | 14619 | 14619 | original |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
-| Core/DolphinQt/Config | 18978 | 0 | Dolphin |
+| Core/DolphinQt/Config | 18689 | 6302 | mixed (34% original) |
 | Core/DolphinQt/Debugger | 13379 | 13379 | original |
 | Core/DolphinQt/EmulatedUSB | 367 | 0 | Dolphin |
 | Core/DolphinQt/FIFO | 1371 | 0 | Dolphin |
@@ -172,7 +172,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinQt/InfinityBase | 403 | 0 | Dolphin |
 | Core/DolphinQt/NetPlay | 3201 | 0 | Dolphin |
 | Core/DolphinQt/QtUtils | 1382 | 1382 | original |
-| Core/DolphinQt/Settings | 4742 | 0 | Dolphin |
+| Core/DolphinQt/Settings | 4485 | 4485 | original |
 | Core/DolphinQt/SkylanderPortal | 1499 | 0 | Dolphin |
 | Core/DolphinQt/TAS | 1979 | 0 | Dolphin |
 | Core/DolphinTool | 1245 | 1245 | original |
@@ -267,7 +267,7 @@ batch rewrites them.
 | W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10529 | 10529 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8071 | 8071 | original |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 12387 | 0 | Dolphin |
-| W40 | DolphinQt: controller mapping and settings panes | 11333 | 0 | Dolphin |
+| W40 | DolphinQt: controller mapping and settings panes | 10787 | 10787 | original |
 | W41 | DolphinQt: debugger | 13379 | 13379 | original |
 | W42 | DolphinQt: NetPlay, TAS, FIFO, achievements, portals, emulated USB | 10093 | 0 | Dolphin |
 <!-- batches:end -->
@@ -5294,3 +5294,103 @@ step did for the old file. No key bytes are in the tree.
     2.21.0"; the PowerShell overlay and licence-copy loops (not run here:
     no PowerShell in this sandbox) and the new package checks pass; the
     dark style looks right on real Windows dark mode.
+
+- W40 log: rewrote all 84 W40 files, the DolphinQt controller mapping
+  window and its pages plus the settings panes (10787 lines now, from
+  11333): every file under `Config/Mapping/` (`MappingWindow`,
+  `MappingWidget`, `MappingButton`, `MappingNumeric`, `MappingCommon`,
+  `MappingIndicator`, `IOWindow`, `GCPadWiiUConfigDialog` and the
+  GameCube, GBA, keyboard, microphone, Wii Remote, extension, motion,
+  hotkey and free-look pages) and every file under `Settings/`
+  (`AdvancedPane`, `AudioPane`, `BroadbandAdapterSettingsDialog`,
+  `GameCubePane`, `GeneralPane`, `InterfacePane`, `OnScreenDisplayPane`,
+  `PathPane`, `TriforcePane`, `USBDevicePicker`, `WiiPane`). Every
+  rewritten file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. File names, public declarations, signals and
+  slots, enum values, object names, widget order and layout, labels,
+  tooltips, enabled/visible rules, context menus, every config key a
+  control reads or writes (and when), the order and arguments of
+  Core/UICommon/InputCommon calls, and all tr() strings (byte for byte, in
+  the same translation context) are unchanged.
+  - Translation contexts kept exactly: the classes without Q_OBJECT
+    (`MappingDouble`/`MappingBool`, the mapping processor,
+    `CalibrationWidget`, `IPRedirectionsDialog`, `OnScreenDisplayPane`, the
+    IOWindow delegate and line edit) still have none, and the explicit
+    `QWidget::tr("%1%")` and `QObject::tr("<System Language>")` stay.
+  - Indicators paint with the same arithmetic and expression grouping, so
+    the pixels are identical; `MixedTriggers` still reads threshold and
+    dead zone before the state.
+  - Preserved quirks: the IOWindow highlighter's
+    `start >= block_start + block.length()` test, the VBI checkbox being
+    set without a signal blocker, skipped IP redirection rows still saving
+    empty entries, `m_lock_cursor` being reparented before the layout is
+    set, and the repeated `AutoUpdateChecker::SystemSupportsAutoUpdates()`
+    calls in GeneralPane (build, read, tooltips, wiring, write).
+  - Deliberate differences (nothing a user sees in normal use):
+    - Qt connections that had no context object now use `this`, so they
+      are dropped when the widget is destroyed.
+    - `MappingWindow`: the "Successfully deleted" message box that was
+      built and never shown is gone, and the "Extension Motion Input" /
+      "Extension Motion Simulation" tab names are only looked up for Wii
+      Remote windows (same texts).
+    - `USBDevicePicker`: after a refresh the selection is restored by
+      comparing device info under a signal blocker, instead of through an
+      item pointer that `clear()` had already freed; the unused
+      `DEVICE_REFRESH_INTERVAL_MS` constant and the `WiiPane.h` include are
+      gone.
+    - Redundant no-op calls are dropped: a second `setLayout` on the mouse
+      group box (InterfacePane), repeated `setPen` calls before a pen was
+      used (MappingIndicator), and `ReshapableInputIndicator::Update` calls
+      that did nothing.
+    - `GameCubePane` translates each device name once instead of once per
+      slot (same strings).
+    - Float/bool tests in MappingIndicator are written as explicit
+      comparisons, and integer-to-float conversions as explicit casts.
+  - Checked: old and new code side by side, built with Qt 6.4 offscreen
+    against fakes that record every call, using the untouched non-W40
+    files on both sides (real Common::Config, ConfigControls, ToolTip
+    controls, InputCommon ControllerEmu/ControlReference/ControllerInterface,
+    InputConfig and the real GC pad, keyboard, GBA pad, hotkey, free-look
+    and emulated Wii Remote controllers; only hashes were kept):
+    - Settings panes: every pane, the broadband adapter dialog in all five
+      modes and the USB device picker, driven with seeded random clicks,
+      combo/slider/spin/text/table/list edits, emulation state changes,
+      NetPlay toggles and pane rebuilds, with every dialog they open
+      answered and poked (10 seeds of 150 steps per pane, dialog and
+      picker; the BBA dialog with 10 opens per seed; 5 seeds of 120 steps
+      without the optional defines; all identical). Compared: widget tree after
+      every step, config changes as they happen, fake calls in order, and
+      the tr() lookups. Also built without Cubeb, Discord, analytics and
+      mGBA.
+    - Mapping: every MappingWindow type and port on a virtual clock (Qt
+      timers, input detection and indicator animation only advance when
+      the driver moves time), with fake input devices, random input
+      changes, device hotplug, left/middle/right clicks on mapping
+      buttons, the IOWindow and the profile menu, and a hash of every
+      indicator's pixels after each step; plus the Wii U adapter dialog
+      (all 11 window types for seeds 1-2 at 40 steps and seeds 3-6 at 60
+      steps, the Wii U dialog for 6 seeds; all identical apart from the
+      dropped "Successfully deleted" box).
+    - Compared line by line instead, because the harness builds for Linux
+      with Qt 6.4: the `_WIN32` branches (WASAPI device in AudioPane, tap
+      server texts in the BBA dialog, the light/dark styles and the cursor
+      lock in InterfacePane) and the Qt 6.5/6.7 branches (RTC time zone in
+      AdvancedPane, `checkStateChanged` in MappingNumeric and
+      GameCubePane). A tr() literal scan over all `#ifdef` branches finds
+      every old string in the new code; the only strings gone are the two
+      of the unshown "Successfully deleted" box.
+  - Compile check: the W40 .cpp files and the DolphinQt sources that
+    include W40 headers (MainWindow, Settings window, GameCube and Wii
+    Remote controller widgets, free-look widget, NetPlay dialog, GBA
+    widget), old against new, with clang on Linux and for
+    x86_64-w64-windows-gnu, `-Wall -Wextra -Wconversion -Wsign-compare
+    -Wshadow-all -Wshorten-64-to-32`, with and without HAVE_CUBEB,
+    HAS_LIBMGBA, USE_DISCORD_PRESENCE, USE_ANALYTICS and HAVE_CPPIPC. The
+    rewritten files are clean except for the existing sign-conversion
+    warning in `ConfigChoice.h:78`, which the old build has too; the
+    dependents have the same diagnostics as before. No local or parameter
+    is named after an inherited Qt member (`data`, `d_ptr`,
+    `staticMetaObject`), which MSVC reports as C4458.
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run is left in a W40
+    .cpp file. The runs left are public declarations in the headers.
+  - No keys, IVs, tokens or credentials are in these files.
