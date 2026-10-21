@@ -1,7 +1,11 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/WiimoteControllersWidget.h"
+
+#include <chrono>
+#include <future>
+#include <optional>
+#include <utility>
 
 #include <QAction>
 #include <QApplication>
@@ -9,18 +13,20 @@
 #include <QComboBox>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScreen>
+#include <QStyleOptionButton>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QVariant>
 
 #include "Common/Config/Config.h"
+#include "Common/Logging/Log.h"
 #include "Common/WorkQueueThread.h"
-
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/ConfigManager.h"
@@ -33,7 +39,6 @@
 #include "Core/System.h"
 #include "Core/USBUtils.h"
 #include "Core/WiiUtils.h"
-
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
@@ -43,296 +48,276 @@
 #include "DolphinQt/Settings/USBDevicePicker.h"
 
 #if defined(_WIN32)
-#include "Core/HW//WiimoteReal/IOWin.h"
+#include "Core/HW/WiimoteReal/IOWin.h"
 #endif
+
+namespace
+{
+// Slot source menu rows, matching the WiimoteSource values.
+constexpr int SOURCE_EMULATED = 1;
+
+Core::State CurrentState()
+{
+  return Core::GetState(Core::System::GetInstance());
+}
+
+// Width of a radio button's indicator plus its gap, so the rows under each
+// radio button line up with its text.
+int RadioIndent()
+{
+  const QStyle* const style = QApplication::style();
+  QStyleOptionButton option;
+  // The macOS style reports the contents rect differently.
+  if (style->objectName() == QStringLiteral("macintosh"))
+    return style->subElementRect(QStyle::SE_RadioButtonIndicator, &option).width();
+  return style->subElementRect(QStyle::SE_RadioButtonContents, &option).left();
+}
+
+// The grid's real horizontal spacing: an unset spacing reports -1, so fall
+// back to the style's value, then to Qt's built-in default of 6 pixels.
+int GridHorizontalGap(const QGridLayout* grid)
+{
+  const int own = grid->horizontalSpacing();
+  if (own >= 0)
+    return own;
+
+  const int from_style =
+      grid->parentWidget()->style()->pixelMetric(QStyle::PM_LayoutHorizontalSpacing);
+  if (from_style >= 0)
+    return from_style;
+
+  const float ratio = static_cast<float>(QGuiApplication::primaryScreen()->devicePixelRatio());
+  return static_cast<int>(ratio * 6);
+}
+}  // namespace
 
 WiimoteControllersWidget::WiimoteControllersWidget(QWidget* parent) : QWidget(parent)
 {
-  CreateLayout();
-  ConnectWidgets();
+  BuildLayout();
+  WireUp();
 
   connect(&Settings::Instance(), &Settings::ConfigChanged, this,
-          [this] { LoadSettings(Core::GetState(Core::System::GetInstance())); });
+          [this] { ShowConfig(CurrentState()); });
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
-          [this](Core::State state) { LoadSettings(state); });
-  LoadSettings(Core::GetState(Core::System::GetInstance()));
+          [this](Core::State state) { ShowConfig(state); });
+  ShowConfig(CurrentState());
 
-  m_bluetooth_adapter_refresh_thread.Reset("Bluetooth Adapter Refresh Thread");
-  StartBluetoothAdapterRefresh();
+  m_scan_thread.Reset("Bluetooth Adapter Refresh Thread");
+  ScanForAdapters();
 }
 
 WiimoteControllersWidget::~WiimoteControllersWidget()
 {
-  m_bluetooth_adapter_refresh_thread.WaitForCompletion();
+  m_scan_thread.WaitForCompletion();
 }
 
-void WiimoteControllersWidget::StartBluetoothAdapterRefresh()
+void WiimoteControllersWidget::BuildLayout()
 {
-#ifdef __LIBUSB__
-  if (m_bluetooth_adapter_scan_in_progress)
-    return;
+  m_grid = new QGridLayout();
+  m_group = new QGroupBox(tr("Wii Remotes"));
+  m_group->setLayout(m_grid);
 
-  m_bluetooth_adapters->clear();
-  m_bluetooth_adapters->setDisabled(true);
-  m_bluetooth_adapters->addItem(tr("Scanning for adapters..."));
+  m_passthrough_bt = new QRadioButton(tr("Passthrough a Bluetooth adapter"));
+  m_adapter_caption = new QLabel(tr("Adapter"));
+  m_adapters = new QComboBox();
+  m_rescan_adapters = new NonDefaultQPushButton(tr("Refresh"));
+  m_sync = new NonDefaultQPushButton(tr("Sync"));
+  m_reset = new NonDefaultQPushButton(tr("Reset"));
 
-  m_bluetooth_adapter_scan_in_progress = true;
-
-  const auto scan_func = [this]() {
-    INFO_LOG_FMT(COMMON, "Refreshing Bluetooth adapter list...");
-    auto device_list = USBUtils::ListDevices(LibUSBBluetoothAdapter::IsBluetoothDevice);
-    INFO_LOG_FMT(COMMON, "{} Bluetooth adapters available.", device_list.size());
-    const auto refresh_complete_func = [this, devices = std::move(device_list)]() {
-      OnBluetoothAdapterRefreshComplete(devices);
-    };
-    QueueOnObject(this, refresh_complete_func);
-  };
-
-  m_bluetooth_adapter_refresh_thread.Push(scan_func);
-#endif
-}
-
-void WiimoteControllersWidget::OnBluetoothAdapterRefreshComplete(
-    std::span<const USBUtils::DeviceInfo> devices)
-{
-  const int configured_vid = Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_VID);
-  const int configured_pid = Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_PID);
-  bool found_configured_device = configured_vid == -1 || configured_pid == -1;
-
-  m_bluetooth_adapters->clear();
-  m_bluetooth_adapter_scan_in_progress = false;
-
-  const auto state = Core::GetState(Core::System::GetInstance());
-  UpdateBluetoothAdapterWidgetsEnabled(state);
-
-  m_bluetooth_adapters->addItem(tr("Automatic"));
-
-  for (auto& device : devices)
-  {
-    m_bluetooth_adapters->addItem(QString::fromStdString(device.ToDisplayString()),
-                                  QVariant::fromValue(device));
-
-    if (!found_configured_device &&
-        LibUSBBluetoothAdapter::IsConfiguredBluetoothDevice(device.vid, device.pid))
-    {
-      found_configured_device = true;
-      m_bluetooth_adapters->setCurrentIndex(m_bluetooth_adapters->count() - 1);
-    }
-  }
-
-  if (!found_configured_device)
-  {
-    const QString name = QLatin1Char{'['} + tr("disconnected") + QLatin1Char(']');
-    const std::string name_str = name.toStdString();
-
-    USBUtils::DeviceInfo disconnected_device;
-    disconnected_device.vid = configured_vid;
-    disconnected_device.pid = configured_pid;
-
-    const QString device_info =
-        QString::fromStdString(disconnected_device.ToDisplayString(name_str));
-
-    m_bluetooth_adapters->insertSeparator(m_bluetooth_adapters->count());
-    m_bluetooth_adapters->addItem(device_info, QVariant::fromValue(disconnected_device));
-    m_bluetooth_adapters->setCurrentIndex(m_bluetooth_adapters->count() - 1);
-  }
-
-  m_bluetooth_adapters->insertSeparator(m_bluetooth_adapters->count());
-  m_bluetooth_adapters->addItem(tr("More Options..."));
-}
-
-static int GetRadioButtonIndicatorWidth()
-{
-  const QStyle* style = QApplication::style();
-  QStyleOptionButton opt;
-
-  // TODO: why does the macOS style act different? Is it because of the magic with
-  // Cocoa widgets it does behind the scenes?
-  if (style->objectName() == QStringLiteral("macintosh"))
-    return style->subElementRect(QStyle::SE_RadioButtonIndicator, &opt).width();
-
-  return style->subElementRect(QStyle::SE_RadioButtonContents, &opt).left();
-}
-
-static int GetLayoutHorizontalSpacing(const QGridLayout* layout)
-{
-  // TODO: shouldn't layout->horizontalSpacing() do all this? Why does it return -1?
-  int hspacing = layout->horizontalSpacing();
-  if (hspacing >= 0)
-    return hspacing;
-
-  // According to docs, this is the fallback if horizontalSpacing() isn't set.
-  auto style = layout->parentWidget()->style();
-  hspacing = style->pixelMetric(QStyle::PM_LayoutHorizontalSpacing);
-  if (hspacing >= 0)
-    return hspacing;
-
-  // Docs claim this is deprecated, but on macOS with Qt 5.8 this is the only one that actually
-  // works.
-  float pixel_ratio = QGuiApplication::primaryScreen()->devicePixelRatio();
-#ifdef __APPLE__
-  // TODO is this still required?
-  hspacing = pixel_ratio * style->pixelMetric(QStyle::PM_LayoutHorizontalSpacing);
-  if (hspacing >= 0)
-    return hspacing;
-#endif
-
-  // Ripped from qtbase/src/widgets/styles/qcommonstyle.cpp
-  return pixel_ratio * 6;
-}
-
-void WiimoteControllersWidget::CreateLayout()
-{
-  m_wiimote_layout = new QGridLayout();
-  m_wiimote_box = new QGroupBox(tr("Wii Remotes"));
-  m_wiimote_box->setLayout(m_wiimote_layout);
-
-  m_wiimote_passthrough = new QRadioButton(tr("Passthrough a Bluetooth adapter"));
-  m_bluetooth_adapters_label = new QLabel(tr("Adapter"));
-  m_bluetooth_adapters = new QComboBox();
-  m_bluetooth_adapters_refresh = new NonDefaultQPushButton(tr("Refresh"));
-  m_wiimote_sync = new NonDefaultQPushButton(tr("Sync"));
-  m_wiimote_reset = new NonDefaultQPushButton(tr("Reset"));
-
-  m_wiimote_refresh_indicator = new QLabel{};
-  m_wiimote_refresh_indicator->hide();
-  m_wiimote_refresh = new QToolButton();
-  auto* const wiimote_refresh_action = new QAction(tr("Refresh"), m_wiimote_refresh);
-  m_wiimote_refresh->setDefaultAction(wiimote_refresh_action);
-  connect(wiimote_refresh_action, &QAction::triggered, this,
-          &WiimoteControllersWidget::OnWiimoteRefreshPressed);
-  m_wiimote_refresh->setPopupMode(QToolButton::ToolButtonPopupMode::MenuButtonPopup);
+  // The refresh button's menu holds the Windows-only host pairing actions;
+  // the spinner beside it turns while one of them runs.
+  m_spinner = new QLabel{};
+  m_spinner->hide();
+  m_refresh = new QToolButton();
+  auto* const refresh_action = new QAction(tr("Refresh"), m_refresh);
+  m_refresh->setDefaultAction(refresh_action);
+  connect(refresh_action, &QAction::triggered, this,
+          &WiimoteControllersWidget::RefreshRealRemotes);
+  m_refresh->setPopupMode(QToolButton::ToolButtonPopupMode::MenuButtonPopup);
 
 #if defined(_WIN32)
-  m_wiimote_refresh_indicator->setPixmap(
-      style()->standardIcon(QStyle::SP_BrowserReload).pixmap(16, 16));
+  m_spinner->setPixmap(style()->standardIcon(QStyle::SP_BrowserReload).pixmap(16, 16));
 
-  auto* const wiimote_sync_action = new QAction(tr("Sync"), m_wiimote_refresh);
-  m_wiimote_refresh->addAction(wiimote_sync_action);
-  connect(wiimote_sync_action, &QAction::triggered, this,
-          &WiimoteControllersWidget::TriggerHostWiimoteSync);
+  auto* const pair_action = new QAction(tr("Sync"), m_refresh);
+  m_refresh->addAction(pair_action);
+  connect(pair_action, &QAction::triggered, this, &WiimoteControllersWidget::PairHostRemotes);
 
-  auto* const wiimote_reset_action = new QAction(tr("Reset"), m_wiimote_refresh);
-  m_wiimote_refresh->addAction(wiimote_reset_action);
-  connect(wiimote_reset_action, &QAction::triggered, this,
-          &WiimoteControllersWidget::TriggerHostWiimoteReset);
+  auto* const forget_action = new QAction(tr("Reset"), m_refresh);
+  m_refresh->addAction(forget_action);
+  connect(forget_action, &QAction::triggered, this, &WiimoteControllersWidget::ForgetHostRemotes);
 #endif
 
-  m_wiimote_pt_labels[0] = new QLabel(tr("Sync real Wii Remotes and pair them"));
-  m_wiimote_pt_labels[1] = new QLabel(tr("Reset all saved Wii Remote pairings"));
-  m_wiimote_emu = new QRadioButton(tr("Emulate the Wii's Bluetooth adapter"));
-  m_wiimote_continuous_scanning = new QCheckBox(tr("Continuous Scanning"));
-  m_wiimote_real_balance_board = new QCheckBox(tr("Real Balance Board"));
-  m_wiimote_speaker_data = new QCheckBox(tr("Enable Speaker Data"));
-  m_wiimote_ciface = new QCheckBox(tr("Connect Wii Remotes for Emulated Controllers"));
+  m_passthrough_captions[0] = new QLabel(tr("Sync real Wii Remotes and pair them"));
+  m_passthrough_captions[1] = new QLabel(tr("Reset all saved Wii Remote pairings"));
+  m_emulate_bt = new QRadioButton(tr("Emulate the Wii's Bluetooth adapter"));
+  m_continuous_scanning = new QCheckBox(tr("Continuous Scanning"));
+  m_balance_board = new QCheckBox(tr("Real Balance Board"));
+  m_speaker_data = new QCheckBox(tr("Enable Speaker Data"));
+  m_for_ciface = new QCheckBox(tr("Connect Wii Remotes for Emulated Controllers"));
 
-  m_wiimote_layout->setVerticalSpacing(7);
-  m_wiimote_layout->setColumnMinimumWidth(0, GetRadioButtonIndicatorWidth() -
-                                                 GetLayoutHorizontalSpacing(m_wiimote_layout));
-  m_wiimote_layout->setColumnStretch(2, 1);
+  // Column 0 is only as wide as a radio indicator, so columns 1.. line up
+  // with the radio buttons' text.
+  m_grid->setVerticalSpacing(7);
+  m_grid->setColumnMinimumWidth(0, RadioIndent() - GridHorizontalGap(m_grid));
+  m_grid->setColumnStretch(2, 1);
 
-  // Passthrough BT
-  m_wiimote_layout->addWidget(m_wiimote_passthrough, m_wiimote_layout->rowCount(), 0, 1, -1);
+  const auto next_row = [this] { return m_grid->rowCount(); };
 
-  int adapter_row = m_wiimote_layout->rowCount();
-  m_wiimote_layout->addWidget(m_bluetooth_adapters_label, adapter_row, 1, 1, 1);
-  m_wiimote_layout->addWidget(m_bluetooth_adapters, adapter_row, 2, 1, 1);
-  m_wiimote_layout->addWidget(m_bluetooth_adapters_refresh, adapter_row, 3, 1, 1);
+  m_grid->addWidget(m_passthrough_bt, next_row(), 0, 1, -1);
 
-  int sync_row = m_wiimote_layout->rowCount();
-  m_wiimote_layout->addWidget(m_wiimote_pt_labels[0], sync_row, 1, 1, 2);
-  m_wiimote_layout->addWidget(m_wiimote_sync, sync_row, 3);
+  int row = next_row();
+  m_grid->addWidget(m_adapter_caption, row, 1, 1, 1);
+  m_grid->addWidget(m_adapters, row, 2, 1, 1);
+  m_grid->addWidget(m_rescan_adapters, row, 3, 1, 1);
 
-  int reset_row = m_wiimote_layout->rowCount();
-  m_wiimote_layout->addWidget(m_wiimote_pt_labels[1], reset_row, 1, 1, 2);
-  m_wiimote_layout->addWidget(m_wiimote_reset, reset_row, 3);
+  row = next_row();
+  m_grid->addWidget(m_passthrough_captions[0], row, 1, 1, 2);
+  m_grid->addWidget(m_sync, row, 3);
 
-  // Emulated BT
-  m_wiimote_layout->addWidget(m_wiimote_emu, m_wiimote_layout->rowCount(), 0, 1, -1);
+  row = next_row();
+  m_grid->addWidget(m_passthrough_captions[1], row, 1, 1, 2);
+  m_grid->addWidget(m_reset, row, 3);
 
-  for (size_t i = 0; i < m_wiimote_groups.size(); i++)
+  m_grid->addWidget(m_emulate_bt, next_row(), 0, 1, -1);
+
+  for (size_t slot = 0; slot < SLOTS; ++slot)
   {
-    auto* wm_label = m_wiimote_labels[i] = new QLabel(tr("Wii Remote %1").arg(i + 1));
-    auto* wm_box = m_wiimote_boxes[i] = new QComboBox();
-    auto* wm_button = m_wiimote_buttons[i] = new NonDefaultQPushButton(tr("Configure"));
+    m_slot_labels[slot] = new QLabel(tr("Wii Remote %1").arg(slot + 1));
+    m_slot_sources[slot] = new QComboBox();
+    m_slot_configure[slot] = new NonDefaultQPushButton(tr("Configure"));
+    for (const QString& source : {tr("None"), tr("Emulated Wii Remote"), tr("Real Wii Remote")})
+      m_slot_sources[slot]->addItem(source);
 
-    for (const auto& item : {tr("None"), tr("Emulated Wii Remote"), tr("Real Wii Remote")})
-      wm_box->addItem(item);
-
-    int wm_row = m_wiimote_layout->rowCount();
-    m_wiimote_layout->addWidget(wm_label, wm_row, 1);
-    m_wiimote_layout->addWidget(wm_box, wm_row, 2);
-    m_wiimote_layout->addWidget(wm_button, wm_row, 3);
+    row = next_row();
+    m_grid->addWidget(m_slot_labels[slot], row, 1);
+    m_grid->addWidget(m_slot_sources[slot], row, 2);
+    m_grid->addWidget(m_slot_configure[slot], row, 3);
   }
 
-  m_wiimote_layout->addWidget(m_wiimote_real_balance_board, m_wiimote_layout->rowCount(), 1, 1, -1);
-  m_wiimote_layout->addWidget(m_wiimote_speaker_data, m_wiimote_layout->rowCount(), 1, 1, -1);
+  m_grid->addWidget(m_balance_board, next_row(), 1, 1, -1);
+  m_grid->addWidget(m_speaker_data, next_row(), 1, 1, -1);
+  m_grid->addWidget(m_for_ciface, next_row(), 0, 1, -1);
 
-  m_wiimote_layout->addWidget(m_wiimote_ciface, m_wiimote_layout->rowCount(), 0, 1, -1);
+  row = next_row();
+  auto* const scanning_row = new QHBoxLayout;
+  scanning_row->addWidget(m_continuous_scanning);
+  scanning_row->addStretch(1);
+  scanning_row->addWidget(m_spinner);
+  m_grid->addLayout(scanning_row, row, 0, 1, 3);
+  m_grid->addWidget(m_refresh, row, 3);
 
-  int continuous_scanning_row = m_wiimote_layout->rowCount();
-
-  auto* const left_of_refresh_button_layout = new QHBoxLayout;
-  left_of_refresh_button_layout->addWidget(m_wiimote_continuous_scanning);
-  left_of_refresh_button_layout->addStretch(1);
-  left_of_refresh_button_layout->addWidget(m_wiimote_refresh_indicator);
-
-  m_wiimote_layout->addLayout(left_of_refresh_button_layout, continuous_scanning_row, 0, 1, 3);
-  m_wiimote_layout->addWidget(m_wiimote_refresh, continuous_scanning_row, 3);
-
-  auto* layout = new QVBoxLayout;
-  layout->setContentsMargins(0, 0, 0, 0);
-  layout->setAlignment(Qt::AlignTop);
-  layout->addWidget(m_wiimote_box);
-  setLayout(layout);
+  auto* const column = new QVBoxLayout;
+  column->setContentsMargins(0, 0, 0, 0);
+  column->setAlignment(Qt::AlignTop);
+  column->addWidget(m_group);
+  setLayout(column);
 }
 
-void WiimoteControllersWidget::ConnectWidgets()
+void WiimoteControllersWidget::WireUp()
 {
-  connect(m_wiimote_passthrough, &QRadioButton::toggled, this, [this] {
-    SaveSettings();
-    LoadSettings(Core::GetState(Core::System::GetInstance()));
-  });
-  connect(m_wiimote_ciface, &QCheckBox::toggled, this, [this] {
-    SaveSettings();
-    LoadSettings(Core::GetState(Core::System::GetInstance()));
+  connect(m_passthrough_bt, &QRadioButton::toggled, this,
+          &WiimoteControllersWidget::StoreAndReload);
+  connect(m_for_ciface, &QCheckBox::toggled, this, [this] {
+    StoreAndReload();
     WiimoteReal::HandleWiimotesInControllerInterfaceSettingChange();
   });
-  connect(m_wiimote_continuous_scanning, &QCheckBox::toggled, this, [this] {
-    SaveSettings();
-    LoadSettings(Core::GetState(Core::System::GetInstance()));
-  });
+  connect(m_continuous_scanning, &QCheckBox::toggled, this,
+          &WiimoteControllersWidget::StoreAndReload);
 
-  connect(m_wiimote_real_balance_board, &QCheckBox::toggled, this,
-          &WiimoteControllersWidget::SaveSettings);
-  connect(m_wiimote_speaker_data, &QCheckBox::toggled, this,
-          &WiimoteControllersWidget::SaveSettings);
-  connect(m_bluetooth_adapters, &QComboBox::activated, this,
-          &WiimoteControllersWidget::OnBluetoothPassthroughDeviceChanged);
-  connect(m_bluetooth_adapters_refresh, &QPushButton::clicked, this,
-          &WiimoteControllersWidget::StartBluetoothAdapterRefresh);
-  connect(m_wiimote_sync, &QPushButton::clicked, this,
-          &WiimoteControllersWidget::OnBluetoothPassthroughSyncPressed);
-  connect(m_wiimote_reset, &QPushButton::clicked, this,
-          &WiimoteControllersWidget::OnBluetoothPassthroughResetPressed);
+  connect(m_balance_board, &QCheckBox::toggled, this, &WiimoteControllersWidget::StoreConfig);
+  connect(m_speaker_data, &QCheckBox::toggled, this, &WiimoteControllersWidget::StoreConfig);
+  connect(m_adapters, &QComboBox::activated, this, &WiimoteControllersWidget::OnAdapterPicked);
+  connect(m_rescan_adapters, &QPushButton::clicked, this,
+          &WiimoteControllersWidget::ScanForAdapters);
+  connect(m_sync, &QPushButton::clicked, this, &WiimoteControllersWidget::SyncPassthroughRemotes);
+  connect(m_reset, &QPushButton::clicked, this,
+          &WiimoteControllersWidget::ResetPassthroughPairings);
 
-  for (size_t i = 0; i < m_wiimote_groups.size(); i++)
+  for (size_t slot = 0; slot < SLOTS; ++slot)
   {
-    connect(m_wiimote_boxes[i], &QComboBox::currentIndexChanged, this, [this] {
-      SaveSettings();
-      LoadSettings(Core::GetState(Core::System::GetInstance()));
-    });
-    connect(m_wiimote_buttons[i], &QPushButton::clicked, this,
-            [this, i] { OnWiimoteConfigure(i); });
+    connect(m_slot_sources[slot], &QComboBox::currentIndexChanged, this,
+            [this] { StoreAndReload(); });
+    connect(m_slot_configure[slot], &QPushButton::clicked, this,
+            [this, slot] { ConfigureSlot(slot); });
   }
 }
 
-void WiimoteControllersWidget::OnBluetoothPassthroughDeviceChanged(int index)
+void WiimoteControllersWidget::StoreAndReload()
 {
-  std::optional<USBUtils::DeviceInfo> device_info;
-  bool needs_refresh = false;
-  // "Automatic" selection
-  if (index == 0)
+  StoreConfig();
+  ShowConfig(CurrentState());
+}
+
+// Lists Bluetooth adapters on the worker thread; the menu shows a
+// placeholder until the result comes back.
+void WiimoteControllersWidget::ScanForAdapters()
+{
+#ifdef __LIBUSB__
+  if (m_scanning)
+    return;
+
+  m_adapters->clear();
+  m_adapters->setDisabled(true);
+  m_adapters->addItem(tr("Scanning for adapters..."));
+  m_scanning = true;
+
+  m_scan_thread.Push([this] {
+    INFO_LOG_FMT(COMMON, "Refreshing Bluetooth adapter list...");
+    std::vector<USBUtils::DeviceInfo> found =
+        USBUtils::ListDevices(LibUSBBluetoothAdapter::IsBluetoothDevice);
+    INFO_LOG_FMT(COMMON, "{} Bluetooth adapters available.", found.size());
+    QueueOnObject(this, [this, adapters = std::move(found)] { OnAdaptersScanned(adapters); });
+  });
+#endif
+}
+
+// Menu layout: "Automatic", the adapters found, then (if the configured
+// adapter wasn't found) a separator and that adapter marked disconnected,
+// then a separator and "More Options...".
+void WiimoteControllersWidget::OnAdaptersScanned(std::span<const USBUtils::DeviceInfo> devices)
+{
+  const int wanted_vid = Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_VID);
+  const int wanted_pid = Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_PID);
+  // -1 means no adapter is configured, so there is nothing to look for.
+  bool selected = wanted_vid == -1 || wanted_pid == -1;
+
+  m_adapters->clear();
+  m_scanning = false;
+  RefreshAdapterControls(CurrentState());
+
+  m_adapters->addItem(tr("Automatic"));
+
+  for (const USBUtils::DeviceInfo& device : devices)
+  {
+    m_adapters->addItem(QString::fromStdString(device.ToDisplayString()),
+                        QVariant::fromValue(device));
+    if (selected || !LibUSBBluetoothAdapter::IsConfiguredBluetoothDevice(device.vid, device.pid))
+      continue;
+    selected = true;
+    m_adapters->setCurrentIndex(m_adapters->count() - 1);
+  }
+
+  if (!selected)
+  {
+    const QString marker = QLatin1Char{'['} + tr("disconnected") + QLatin1Char(']');
+    USBUtils::DeviceInfo missing;
+    missing.vid = static_cast<u16>(wanted_vid);
+    missing.pid = static_cast<u16>(wanted_pid);
+
+    m_adapters->insertSeparator(m_adapters->count());
+    m_adapters->addItem(QString::fromStdString(missing.ToDisplayString(marker.toStdString())),
+                        QVariant::fromValue(missing));
+    m_adapters->setCurrentIndex(m_adapters->count() - 1);
+  }
+
+  m_adapters->insertSeparator(m_adapters->count());
+  m_adapters->addItem(tr("More Options..."));
+}
+
+void WiimoteControllersWidget::OnAdapterPicked(int row)
+{
+  // "Automatic" forgets the configured adapter.
+  if (row == 0)
   {
     Config::DeleteKey(Config::GetActiveLayerForConfig(Config::MAIN_BLUETOOTH_PASSTHROUGH_PID),
                       Config::MAIN_BLUETOOTH_PASSTHROUGH_PID);
@@ -340,38 +325,38 @@ void WiimoteControllersWidget::OnBluetoothPassthroughDeviceChanged(int index)
                       Config::MAIN_BLUETOOTH_PASSTHROUGH_VID);
     return;
   }
-  // "More Options..." selection
-  else if (index == m_bluetooth_adapters->count() - 1)
+
+  std::optional<USBUtils::DeviceInfo> choice;
+  const bool from_picker = row == m_adapters->count() - 1;
+  if (from_picker)
   {
-    device_info = USBDevicePicker::Run(this, tr("Select a Bluetooth Device"));
-    needs_refresh = true;
+    // "More Options..." lets any USB device be chosen.
+    choice = USBDevicePicker::Run(this, tr("Select a Bluetooth Device"));
   }
   else
   {
-    const QVariant item_data = m_bluetooth_adapters->itemData(index);
-
-    if (!item_data.isValid() || !item_data.canConvert<USBUtils::DeviceInfo>())
+    const QVariant stored = m_adapters->itemData(row);
+    if (!stored.isValid() || !stored.canConvert<USBUtils::DeviceInfo>())
     {
       ERROR_LOG_FMT(COMMON, "Invalid Bluetooth device info selected in WiimoteControllersWidget");
       return;
     }
-    device_info = item_data.value<USBUtils::DeviceInfo>();
+    choice = stored.value<USBUtils::DeviceInfo>();
   }
 
-  if (device_info.has_value())
+  if (choice)
   {
-    Config::SetBaseOrCurrent(Config::MAIN_BLUETOOTH_PASSTHROUGH_PID, device_info->pid);
-    Config::SetBaseOrCurrent(Config::MAIN_BLUETOOTH_PASSTHROUGH_VID, device_info->vid);
+    Config::SetBaseOrCurrent(Config::MAIN_BLUETOOTH_PASSTHROUGH_PID, choice->pid);
+    Config::SetBaseOrCurrent(Config::MAIN_BLUETOOTH_PASSTHROUGH_VID, choice->vid);
   }
-  if (needs_refresh)
-    StartBluetoothAdapterRefresh();
+  // The picked device may not be in the menu yet.
+  if (from_picker)
+    ScanForAdapters();
 }
 
-void WiimoteControllersWidget::OnBluetoothPassthroughResetPressed()
+void WiimoteControllersWidget::ResetPassthroughPairings()
 {
-  const auto ios = Core::System::GetInstance().GetIOS();
-
-  if (!ios)
+  if (!Core::System::GetInstance().GetIOS())
   {
     ModalMessageBox::warning(
         this, tr("Warning"),
@@ -379,151 +364,136 @@ void WiimoteControllersWidget::OnBluetoothPassthroughResetPressed()
     return;
   }
 
-  auto device = WiiUtils::GetBluetoothRealDevice();
-  if (device != nullptr)
-    device->TriggerSyncButtonHeldEvent();
+  // Holding the adapter's sync button clears its pairings.
+  if (const auto adapter = WiiUtils::GetBluetoothRealDevice())
+    adapter->TriggerSyncButtonHeldEvent();
 }
 
-void WiimoteControllersWidget::OnBluetoothPassthroughSyncPressed()
+void WiimoteControllersWidget::SyncPassthroughRemotes()
 {
-  const auto ios = Core::System::GetInstance().GetIOS();
-
-  if (!ios)
+  if (!Core::System::GetInstance().GetIOS())
   {
     ModalMessageBox::warning(this, tr("Warning"),
                              tr("A sync can only be triggered when a Wii game is running."));
     return;
   }
 
-  auto device = WiiUtils::GetBluetoothRealDevice();
-  if (device != nullptr)
-    device->TriggerSyncButtonPressedEvent();
+  if (const auto adapter = WiiUtils::GetBluetoothRealDevice())
+    adapter->TriggerSyncButtonPressedEvent();
 }
 
-void WiimoteControllersWidget::OnWiimoteRefreshPressed()
+void WiimoteControllersWidget::RefreshRealRemotes()
 {
   WiimoteReal::Refresh();
 }
 
-void WiimoteControllersWidget::OnWiimoteConfigure(size_t index)
+void WiimoteControllersWidget::ConfigureSlot(size_t slot)
 {
-  MappingWindow::Type type;
-  switch (m_wiimote_boxes[index]->currentIndex())
-  {
-  case 0:  // None
-  case 2:  // Real Wii Remote
+  // Only emulated remotes have mappings.
+  if (m_slot_sources[slot]->currentIndex() != SOURCE_EMULATED)
     return;
-  case 1:  // Emulated Wii Remote
-    type = MappingWindow::Type::MAPPING_WIIMOTE_EMU;
-    break;
-  default:
-    return;
-  }
 
-  MappingWindow* window = new MappingWindow(this, type, static_cast<int>(index));
+  auto* const window =
+      new MappingWindow(this, MappingWindow::Type::MAPPING_WIIMOTE_EMU, static_cast<int>(slot));
   window->setAttribute(Qt::WA_DeleteOnClose, true);
   window->setWindowModality(Qt::WindowModality::WindowModal);
   window->show();
 }
 
-void WiimoteControllersWidget::UpdateBluetoothAdapterWidgetsEnabled(const Core::State state)
+void WiimoteControllersWidget::RefreshAdapterControls(const Core::State state)
 {
+  // The adapter can't change under a running Wii game, nor be picked while
+  // a scan is running.
   const bool running = state != Core::State::Uninitialized;
-  const bool running_wii = running && Core::System::GetInstance().IsWii();
-  const bool enable_adapter_refresh = m_wiimote_passthrough->isChecked() && !running_wii;
-  const bool enable_adapter_selection =
-      enable_adapter_refresh && !m_bluetooth_adapter_scan_in_progress;
+  const bool wii_running = running && Core::System::GetInstance().IsWii();
+  const bool can_rescan = m_passthrough_bt->isChecked() && !wii_running;
+  const bool can_pick = can_rescan && !m_scanning;
 
-  m_bluetooth_adapters_label->setEnabled(enable_adapter_selection);
-  m_bluetooth_adapters->setEnabled(enable_adapter_selection);
-  m_bluetooth_adapters_refresh->setEnabled(enable_adapter_refresh);
+  m_adapter_caption->setEnabled(can_pick);
+  m_adapters->setEnabled(can_pick);
+  m_rescan_adapters->setEnabled(can_rescan);
 }
 
-void WiimoteControllersWidget::LoadSettings(Core::State state)
+void WiimoteControllersWidget::ShowConfig(Core::State state)
 {
-  for (size_t i = 0; i < m_wiimote_groups.size(); i++)
+  for (size_t slot = 0; slot < SLOTS; ++slot)
   {
-    SignalBlocking(m_wiimote_boxes[i])
-        ->setCurrentIndex(int(Config::Get(Config::GetInfoForWiimoteSource(int(i)))));
+    const WiimoteSource source = Config::Get(Config::GetInfoForWiimoteSource(static_cast<int>(slot)));
+    SignalBlocking(m_slot_sources[slot])->setCurrentIndex(static_cast<int>(source));
   }
-  SignalBlocking(m_wiimote_real_balance_board)
+  SignalBlocking(m_balance_board)
       ->setChecked(Config::Get(Config::WIIMOTE_BB_SOURCE) == WiimoteSource::Real);
-  SignalBlocking(m_wiimote_speaker_data)
-      ->setChecked(Config::Get(Config::MAIN_WIIMOTE_ENABLE_SPEAKER));
-  SignalBlocking(m_wiimote_ciface)
+  SignalBlocking(m_speaker_data)->setChecked(Config::Get(Config::MAIN_WIIMOTE_ENABLE_SPEAKER));
+  SignalBlocking(m_for_ciface)
       ->setChecked(Config::Get(Config::MAIN_CONNECT_WIIMOTES_FOR_CONTROLLER_INTERFACE));
-  SignalBlocking(m_wiimote_continuous_scanning)
+  SignalBlocking(m_continuous_scanning)
       ->setChecked(Config::Get(Config::MAIN_WIIMOTE_CONTINUOUS_SCANNING));
 
-  if (Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
-    SignalBlocking(m_wiimote_passthrough)->setChecked(true);
-  else
-    SignalBlocking(m_wiimote_emu)->setChecked(true);
+  QRadioButton* const mode =
+      Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED) ? m_passthrough_bt : m_emulate_bt;
+  SignalBlocking(mode)->setChecked(true);
 
-  // Make sure continuous scanning setting is applied.
+  // Applies the continuous scanning setting.
   WiimoteReal::Initialize(::Wiimote::InitializeMode::DO_NOT_WAIT_FOR_WIIMOTES);
 
   const bool running = state != Core::State::Uninitialized;
+  m_emulate_bt->setEnabled(!running);
+  m_passthrough_bt->setEnabled(!running);
 
-  m_wiimote_emu->setEnabled(!running);
-  m_wiimote_passthrough->setEnabled(!running);
+  // While a GameCube game runs, nothing Bluetooth related can be changed.
+  const bool gc_running = running && !Core::System::GetInstance().IsWii();
+  const bool passthrough = m_passthrough_bt->isChecked();
+  const bool passthrough_usable = passthrough && !gc_running;
+  const bool emulation_usable = !passthrough && !gc_running;
+  const bool netplay = NetPlay::IsNetPlayRunning();
+  const bool netplay_running = running && netplay;
 
-  const bool running_gc = running && !Core::System::GetInstance().IsWii();
-  const bool enable_passthrough = m_wiimote_passthrough->isChecked() && !running_gc;
-  const bool enable_emu_bt = !m_wiimote_passthrough->isChecked() && !running_gc;
-  const bool is_netplay = NetPlay::IsNetPlayRunning();
-  const bool running_netplay = running && is_netplay;
+  RefreshAdapterControls(state);
 
-  UpdateBluetoothAdapterWidgetsEnabled(state);
+  m_sync->setEnabled(passthrough_usable);
+  m_reset->setEnabled(passthrough_usable);
+  for (QLabel* const caption : m_passthrough_captions)
+    caption->setEnabled(passthrough_usable);
 
-  m_wiimote_sync->setEnabled(enable_passthrough);
-  m_wiimote_reset->setEnabled(enable_passthrough);
-
-  for (auto* pt_label : m_wiimote_pt_labels)
-    pt_label->setEnabled(enable_passthrough);
-
-  const int num_local_wiimotes = is_netplay ? NetPlay::NumLocalWiimotes() : 4;
-  for (size_t i = 0; i < m_wiimote_groups.size(); i++)
+  // In netplay only this player's own remotes can be configured.
+  const int local_slots = netplay ? NetPlay::NumLocalWiimotes() : 4;
+  for (size_t slot = 0; slot < SLOTS; ++slot)
   {
-    m_wiimote_labels[i]->setEnabled(enable_emu_bt);
-    m_wiimote_boxes[i]->setEnabled(enable_emu_bt && !running_netplay);
-
-    const bool is_emu_wiimote = m_wiimote_boxes[i]->currentIndex() == 1;
-    m_wiimote_buttons[i]->setEnabled(enable_emu_bt && is_emu_wiimote &&
-                                     static_cast<int>(i) < num_local_wiimotes);
+    m_slot_labels[slot]->setEnabled(emulation_usable);
+    m_slot_sources[slot]->setEnabled(emulation_usable && !netplay_running);
+    const bool emulated = m_slot_sources[slot]->currentIndex() == SOURCE_EMULATED;
+    m_slot_configure[slot]->setEnabled(emulation_usable && emulated &&
+                                       static_cast<int>(slot) < local_slots);
   }
 
-  m_wiimote_real_balance_board->setEnabled(enable_emu_bt && !running_netplay);
-  m_wiimote_speaker_data->setEnabled(enable_emu_bt && !running_netplay);
+  m_balance_board->setEnabled(emulation_usable && !netplay_running);
+  m_speaker_data->setEnabled(emulation_usable && !netplay_running);
 
-  const bool ciface_wiimotes = m_wiimote_ciface->isChecked();
-
-  m_wiimote_refresh->setEnabled((enable_emu_bt || ciface_wiimotes) &&
-                                !m_wiimote_continuous_scanning->isChecked());
-  m_wiimote_continuous_scanning->setEnabled(enable_emu_bt || ciface_wiimotes);
+  // Real remotes are looked for when emulating or when they feed the
+  // controller interface; a manual refresh is pointless while scanning.
+  const bool real_remotes_used = emulation_usable || m_for_ciface->isChecked();
+  m_refresh->setEnabled(real_remotes_used && !m_continuous_scanning->isChecked());
+  m_continuous_scanning->setEnabled(real_remotes_used);
 }
 
-void WiimoteControllersWidget::SaveSettings()
+void WiimoteControllersWidget::StoreConfig()
 {
   {
-    Config::ConfigChangeCallbackGuard config_guard;
-    Config::SetBaseOrCurrent(Config::MAIN_WIIMOTE_ENABLE_SPEAKER,
-                             m_wiimote_speaker_data->isChecked());
+    const Config::ConfigChangeCallbackGuard batch;
+    Config::SetBaseOrCurrent(Config::MAIN_WIIMOTE_ENABLE_SPEAKER, m_speaker_data->isChecked());
     Config::SetBaseOrCurrent(Config::MAIN_CONNECT_WIIMOTES_FOR_CONTROLLER_INTERFACE,
-                             m_wiimote_ciface->isChecked());
+                             m_for_ciface->isChecked());
     Config::SetBaseOrCurrent(Config::MAIN_WIIMOTE_CONTINUOUS_SCANNING,
-                             m_wiimote_continuous_scanning->isChecked());
+                             m_continuous_scanning->isChecked());
     Config::SetBaseOrCurrent(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED,
-                             m_wiimote_passthrough->isChecked());
-
-    const WiimoteSource bb_source =
-        m_wiimote_real_balance_board->isChecked() ? WiimoteSource::Real : WiimoteSource::None;
-    Config::SetBaseOrCurrent(Config::WIIMOTE_BB_SOURCE, bb_source);
-
-    for (size_t i = 0; i < m_wiimote_groups.size(); i++)
+                             m_passthrough_bt->isChecked());
+    Config::SetBaseOrCurrent(Config::WIIMOTE_BB_SOURCE, m_balance_board->isChecked() ?
+                                                            WiimoteSource::Real :
+                                                            WiimoteSource::None);
+    for (size_t slot = 0; slot < SLOTS; ++slot)
     {
-      const int index = m_wiimote_boxes[i]->currentIndex();
-      Config::SetBaseOrCurrent(Config::GetInfoForWiimoteSource(int(i)), WiimoteSource(index));
+      Config::SetBaseOrCurrent(Config::GetInfoForWiimoteSource(static_cast<int>(slot)),
+                               static_cast<WiimoteSource>(m_slot_sources[slot]->currentIndex()));
     }
   }
 
@@ -531,38 +501,36 @@ void WiimoteControllersWidget::SaveSettings()
 }
 
 #if defined(_WIN32)
-void WiimoteControllersWidget::AsyncRefreshActionHelper(std::invocable<> auto func)
+// Runs a host pairing task in the background, disabling the refresh button
+// and turning the spinner a quarter turn every 250 ms until it finishes.
+void WiimoteControllersWidget::RunWithSpinner(std::invocable<> auto task)
 {
-  m_wiimote_refresh->setEnabled(false);
-  m_wiimote_refresh_indicator->show();
+  m_refresh->setEnabled(false);
+  m_spinner->show();
 
-  auto result = std::async(std::launch::async, std::move(func));
+  auto pending = std::async(std::launch::async, std::move(task));
 
-  auto* const animation = new QTimer{this};
-  connect(animation, &QTimer::timeout, this, [this, animation, result = std::move(result)] {
-    // Spin the refresh indicator.
-    m_wiimote_refresh_indicator->setPixmap(
-        m_wiimote_refresh_indicator->pixmap().transformed(QTransform().rotate(90)));
+  auto* const ticker = new QTimer{this};
+  connect(ticker, &QTimer::timeout, this, [this, ticker, pending = std::move(pending)] {
+    m_spinner->setPixmap(m_spinner->pixmap().transformed(QTransform().rotate(90)));
 
-    if (result.wait_for(std::chrono::seconds{}) != std::future_status::ready)
+    if (pending.wait_for(std::chrono::seconds{}) != std::future_status::ready)
       return;
 
-    // When the async task is done, re-enable the button and hide the indicator.
-    animation->deleteLater();
-    m_wiimote_refresh_indicator->hide();
-    m_wiimote_refresh->setEnabled(true);
+    ticker->deleteLater();
+    m_spinner->hide();
+    m_refresh->setEnabled(true);
   });
-
-  animation->start(250);
+  ticker->start(250);
 }
 
-void WiimoteControllersWidget::TriggerHostWiimoteSync()
+void WiimoteControllersWidget::PairHostRemotes()
 {
-  AsyncRefreshActionHelper(WiimoteReal::WiimoteScannerWindows::FindAndAuthenticateWiimotes);
+  RunWithSpinner(WiimoteReal::WiimoteScannerWindows::FindAndAuthenticateWiimotes);
 }
 
-void WiimoteControllersWidget::TriggerHostWiimoteReset()
+void WiimoteControllersWidget::ForgetHostRemotes()
 {
-  AsyncRefreshActionHelper(WiimoteReal::WiimoteScannerWindows::RemoveRememberedWiimotes);
+  RunWithSpinner(WiimoteReal::WiimoteScannerWindows::RemoveRememberedWiimotes);
 }
 #endif

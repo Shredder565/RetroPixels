@@ -1,9 +1,9 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <concepts>
 #include <span>
 
 #include <QWidget>
@@ -14,19 +14,21 @@
 class QAction;
 class QCheckBox;
 class QComboBox;
-class QHBoxLayout;
 class QGridLayout;
-class QToolButton;
 class QGroupBox;
+class QHBoxLayout;
 class QLabel;
 class QPushButton;
 class QRadioButton;
+class QToolButton;
 
 namespace Core
 {
 enum class State;
 }
 
+// The "Wii Remotes" box of the controller settings: Bluetooth passthrough
+// or emulation, the four Wii Remote slots and real-remote options.
 class WiimoteControllersWidget final : public QWidget
 {
   Q_OBJECT
@@ -35,48 +37,50 @@ public:
   ~WiimoteControllersWidget() override;
 
 private:
-  void SaveSettings();
-  void OnBluetoothPassthroughDeviceChanged(int index);
-  void OnBluetoothPassthroughSyncPressed();
-  void OnBluetoothPassthroughResetPressed();
-  void OnBluetoothAdapterRefreshComplete(std::span<const USBUtils::DeviceInfo> devices);
-  void OnWiimoteRefreshPressed();
-  void OnWiimoteConfigure(size_t index);
-  void StartBluetoothAdapterRefresh();
-  void UpdateBluetoothAdapterWidgetsEnabled(Core::State state);
+  static constexpr size_t SLOTS = 4;
 
-  void CreateLayout();
-  void ConnectWidgets();
-  void LoadSettings(Core::State state);
+  void BuildLayout();
+  void WireUp();
+  void ShowConfig(Core::State state);
+  void StoreConfig();
+  void StoreAndReload();
+  void RefreshAdapterControls(Core::State state);
+
+  void ScanForAdapters();
+  void OnAdaptersScanned(std::span<const USBUtils::DeviceInfo> devices);
+  void OnAdapterPicked(int row);
+  void SyncPassthroughRemotes();
+  void ResetPassthroughPairings();
+  void RefreshRealRemotes();
+  void ConfigureSlot(size_t slot);
 
 #if defined(_WIN32)
-  void AsyncRefreshActionHelper(std::invocable<> auto);
-  void TriggerHostWiimoteSync();
-  void TriggerHostWiimoteReset();
+  void RunWithSpinner(std::invocable<> auto task);
+  void PairHostRemotes();
+  void ForgetHostRemotes();
 #endif
 
-  QGroupBox* m_wiimote_box;
-  QGridLayout* m_wiimote_layout;
-  std::array<QLabel*, 4> m_wiimote_labels;
-  std::array<QComboBox*, 4> m_wiimote_boxes;
-  std::array<QPushButton*, 4> m_wiimote_buttons;
-  std::array<QHBoxLayout*, 4> m_wiimote_groups;
-  std::array<QLabel*, 2> m_wiimote_pt_labels;
+  QGroupBox* m_group;
+  QGridLayout* m_grid;
+  std::array<QLabel*, SLOTS> m_slot_labels;
+  std::array<QComboBox*, SLOTS> m_slot_sources;
+  std::array<QPushButton*, SLOTS> m_slot_configure;
+  std::array<QLabel*, 2> m_passthrough_captions;
 
-  Common::AsyncWorkThreadSP m_bluetooth_adapter_refresh_thread;
-  bool m_bluetooth_adapter_scan_in_progress = false;
+  Common::AsyncWorkThreadSP m_scan_thread;
+  bool m_scanning = false;
 
-  QRadioButton* m_wiimote_emu;
-  QRadioButton* m_wiimote_passthrough;
-  QLabel* m_bluetooth_adapters_label;
-  QComboBox* m_bluetooth_adapters;
-  QPushButton* m_bluetooth_adapters_refresh;
-  QPushButton* m_wiimote_sync;
-  QPushButton* m_wiimote_reset;
-  QCheckBox* m_wiimote_continuous_scanning;
-  QCheckBox* m_wiimote_real_balance_board;
-  QCheckBox* m_wiimote_speaker_data;
-  QCheckBox* m_wiimote_ciface;
-  QToolButton* m_wiimote_refresh;
-  QLabel* m_wiimote_refresh_indicator;
+  QRadioButton* m_emulate_bt;
+  QRadioButton* m_passthrough_bt;
+  QLabel* m_adapter_caption;
+  QComboBox* m_adapters;
+  QPushButton* m_rescan_adapters;
+  QPushButton* m_sync;
+  QPushButton* m_reset;
+  QCheckBox* m_continuous_scanning;
+  QCheckBox* m_balance_board;
+  QCheckBox* m_speaker_data;
+  QCheckBox* m_for_ciface;
+  QToolButton* m_refresh;
+  QLabel* m_spinner;
 };
