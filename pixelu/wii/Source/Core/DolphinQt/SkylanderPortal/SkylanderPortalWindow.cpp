@@ -1,17 +1,19 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// DolphinQt code copied and modified for Dolphin from the RPCS3 Qt utility for Creating, Loading
-// and Clearing Skylanders
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/SkylanderPortal/SkylanderPortalWindow.h"
 
+#include <memory>
+#include <string>
+
 #include <QCheckBox>
-#include <QComboBox>
-#include <QCompleter>
+#include <QCloseEvent>
+#include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -19,17 +21,17 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRadioButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QScrollArea>
-#include <QStackedWidget>
 #include <QString>
-#include <QStringConverter>
 #include <QStringList>
-#include <QThread>
 #include <QVBoxLayout>
 
+#include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 
-#include "Common/FileUtil.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/IOS/USB/Emulated/Skylanders/Skylander.h"
 #include "Core/System.h"
@@ -37,7 +39,83 @@
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
-#include "SkylanderModifyDialog.h"
+#include "DolphinQt/SkylanderPortal/SkylanderModifyDialog.h"
+
+namespace
+{
+using FigureDump = std::array<u8, 0x40 * 0x10>;
+
+const auto& KnownFigures()
+{
+  return IOS::HLE::USB::list_skylanders;
+}
+
+// A group box holding a frameless scroll area, the way every filter on the finder side looks.
+struct FilterPanel
+{
+  QGroupBox* box;
+  QVBoxLayout* box_layout;
+  QScrollArea* scroller;
+  QFrame* contents;
+};
+
+FilterPanel StartFilterPanel(const QString& title)
+{
+  FilterPanel panel;
+  panel.box = new QGroupBox(title);
+  panel.box_layout = new QVBoxLayout();
+  panel.scroller = new QScrollArea();
+  panel.scroller->setContentsMargins(0, 0, 0, 0);
+  panel.scroller->setFrameStyle(QFrame::NoFrame);
+  panel.contents = new QFrame();
+  panel.contents->setContentsMargins(0, 0, 0, 0);
+  return panel;
+}
+
+void FinishFilterPanel(const FilterPanel& panel, QLayout* contents_layout, bool centered,
+                       QVBoxLayout* filters)
+{
+  panel.contents->setLayout(contents_layout);
+  panel.scroller->setWidget(panel.contents);
+  if (centered)
+    panel.scroller->setAlignment(Qt::AlignHCenter);
+  panel.box_layout->addWidget(panel.scroller);
+  panel.box->setLayout(panel.box_layout);
+  panel.box->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  filters->addWidget(panel.box);
+}
+
+QFrame* SlotSeparator()
+{
+  auto* rule = new QFrame();
+  rule->setFrameShape(QFrame::HLine);
+  rule->setFrameShadow(QFrame::Sunken);
+  return rule;
+}
+
+// The "id" property of whichever radio button is checked, or the fallback if none is.
+template <size_t N> int CheckedRadioId(const std::array<QRadioButton*, N>& radios, int fallback)
+{
+  for (const QRadioButton* radio : radios)
+  {
+    if (radio->isChecked())
+      return radio->property("id").toInt();
+  }
+  return fallback;
+}
+
+QStringList FigureFilePatterns()
+{
+  return {QStringLiteral("*.sky"), QStringLiteral("*.bin"), QStringLiteral("*.dmp"),
+          QStringLiteral("*.dump")};
+}
+
+// Packs a figure's ID and variant into the value stored on its list entry.
+uint PackIds(u16 id, u16 var)
+{
+  return (static_cast<uint>(id) << 16) | var;
+}
+}  // namespace
 
 SkylanderPortalWindow::SkylanderPortalWindow(QWidget* parent) : QWidget(parent)
 {
@@ -46,429 +124,358 @@ SkylanderPortalWindow::SkylanderPortalWindow(QWidget* parent) : QWidget(parent)
   setObjectName(QStringLiteral("skylanders_manager"));
   setMinimumSize(QSize(650, 500));
 
+  // Created up front: the list refresh during BuildLayout() already looks at it.
   m_only_show_collection = new QCheckBox(tr("Only Show Collection"));
 
-  CreateMainWindow();
+  BuildLayout();
 
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
           &SkylanderPortalWindow::OnEmulationStateChanged);
-
   installEventFilter(this);
-
   OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
 
   connect(m_skylander_list, &QListWidget::itemSelectionChanged, this,
           &SkylanderPortalWindow::UpdateCurrentIDs);
 
-  QDir skylanders_folder;
-  // skylanders folder in user directory
-  QString user_path =
-      QString::fromStdString(File::GetUserPath(D_USER_IDX)) + QStringLiteral("Skylanders");
-  // first time initialize path in config
-  if (Config::Get(Config::MAIN_SKYLANDERS_PATH).empty())
-  {
-    Config::SetBase(Config::MAIN_SKYLANDERS_PATH, user_path.toStdString());
-    skylanders_folder = QDir(user_path);
-  }
-  else
-  {
-    skylanders_folder = QDir(QString::fromStdString(Config::Get(Config::MAIN_SKYLANDERS_PATH)));
-  }
-  if (!skylanders_folder.exists())
-    skylanders_folder.mkdir(skylanders_folder.path());
-
-  m_collection_path = QDir::toNativeSeparators(skylanders_folder.path()) + QDir::separator();
-  m_last_skylander_path = m_collection_path;
-  m_path_edit->setText(m_collection_path);
+  SetUpCollectionFolder();
 }
 
 SkylanderPortalWindow::~SkylanderPortalWindow() = default;
 
-// Window creation
-void SkylanderPortalWindow::CreateMainWindow()
+void SkylanderPortalWindow::SetUpCollectionFolder()
 {
-  auto* main_layout = new QVBoxLayout();
+  // Without a configured collection, use (and remember) a Skylanders folder in the user directory.
+  const QString default_folder =
+      QString::fromStdString(File::GetUserPath(D_USER_IDX)) + QStringLiteral("Skylanders");
+  QDir folder;
+  if (Config::Get(Config::MAIN_SKYLANDERS_PATH).empty())
+  {
+    Config::SetBase(Config::MAIN_SKYLANDERS_PATH, default_folder.toStdString());
+    folder = QDir(default_folder);
+  }
+  else
+  {
+    folder = QDir(QString::fromStdString(Config::Get(Config::MAIN_SKYLANDERS_PATH)));
+  }
 
-  auto* select_layout = new QHBoxLayout;
+  if (!folder.exists())
+    folder.mkdir(folder.path());
 
+  m_collection_path = QDir::toNativeSeparators(folder.path()) + QDir::separator();
+  m_last_skylander_path = m_collection_path;
+  m_path_edit->setText(m_collection_path);
+}
+
+void SkylanderPortalWindow::BuildLayout()
+{
+  auto* outer = new QVBoxLayout();
+  auto* columns = new QHBoxLayout;
+
+  // Tall enough that the element filter fits without a scroll bar.
   setMinimumWidth(770);
-
-  // yes, that +1 on 755 is needed to avoid scroll bars on the element selection
   setMinimumHeight(756);
 
-  // left and right widgets within window separated into own functions for readability
-  select_layout->addLayout(CreateSlotLayout());
-  select_layout->addLayout(CreateFinderLayout());
-  select_layout->setStretch(0, 1);
-  select_layout->setStretch(1, 2);
+  columns->addLayout(BuildSlotColumn());
+  columns->addLayout(BuildFinderColumn());
+  columns->setStretch(0, 1);
+  columns->setStretch(1, 2);
+  outer->addLayout(columns);
 
-  main_layout->addLayout(select_layout);
-
-  // create command buttons at bottom of window
-  QBoxLayout* command_layout = new QHBoxLayout;
+  // The row of actions along the bottom.
+  QBoxLayout* actions = new QHBoxLayout;
   m_command_buttons = new QFrame();
-  command_layout->setAlignment(Qt::AlignCenter);
-  auto* create_btn = new QPushButton(tr("Customize"));
-  auto* load_file_btn = new QPushButton(tr("Load File"));
-  auto* clear_btn = new QPushButton(tr("Clear Slot"));
-  auto* load_btn = new QPushButton(tr("Load Slot"));
-  auto* modify_btn = new QPushButton(tr("Modify Slot"));
-  connect(create_btn, &QAbstractButton::clicked, this,
-          &SkylanderPortalWindow::CreateSkylanderAdvanced);
-  connect(clear_btn, &QAbstractButton::clicked, this, [this] { ClearSlot(GetCurrentSlot()); });
-  connect(load_btn, &QAbstractButton::clicked, this, &SkylanderPortalWindow::LoadSelected);
-  connect(load_file_btn, &QAbstractButton::clicked, this, &SkylanderPortalWindow::LoadFromFile);
-  connect(modify_btn, &QAbstractButton::clicked, this, &SkylanderPortalWindow::ModifySkylander);
-  command_layout->addWidget(create_btn);
-  command_layout->addWidget(load_file_btn);
-  command_layout->addWidget(clear_btn);
-  command_layout->addWidget(load_btn);
-  command_layout->addWidget(modify_btn);
-  m_command_buttons->setLayout(command_layout);
-  main_layout->addWidget(m_command_buttons);
+  actions->setAlignment(Qt::AlignCenter);
+  const std::pair<QString, std::function<void()>> commands[] = {
+      {tr("Customize"), [this] { CreateSkylanderAdvanced(); }},
+      {tr("Load File"), [this] { LoadFromFile(); }},
+      {tr("Clear Slot"), [this] { ClearSlot(GetCurrentSlot()); }},
+      {tr("Load Slot"), [this] { LoadSelected(); }},
+      {tr("Modify Slot"), [this] { ModifySkylander(); }},
+  };
+  for (const auto& [caption, handler] : commands)
+  {
+    auto* button = new QPushButton(caption);
+    connect(button, &QAbstractButton::clicked, this, handler);
+    actions->addWidget(button);
+  }
+  m_command_buttons->setLayout(actions);
+  outer->addWidget(m_command_buttons);
 
-  setLayout(main_layout);
+  setLayout(outer);
 
   RefreshList();
   m_skylander_list->setCurrentItem(m_skylander_list->item(0), QItemSelectionModel::Select);
   UpdateSlotNames();
 }
 
-QVBoxLayout* SkylanderPortalWindow::CreateSlotLayout()
+QVBoxLayout* SkylanderPortalWindow::BuildSlotColumn()
 {
-  auto* slot_layout = new QVBoxLayout();
+  auto* column = new QVBoxLayout();
 
-  // WIDGET: Portal Enable Checkbox
-  auto* checkbox_layout = new QVBoxLayout();
+  auto* toggle_row = new QVBoxLayout();
   m_enabled_checkbox = new QCheckBox(tr("Emulate Skylander Portal"), this);
   m_enabled_checkbox->setChecked(Config::Get(Config::MAIN_EMULATE_SKYLANDER_PORTAL));
   m_emulating = Config::Get(Config::MAIN_EMULATE_SKYLANDER_PORTAL);
   connect(m_enabled_checkbox, &QCheckBox::toggled, this, &SkylanderPortalWindow::EmulatePortal);
-  checkbox_layout->addWidget(m_enabled_checkbox);
-  slot_layout->addLayout(checkbox_layout);
+  toggle_row->addWidget(m_enabled_checkbox);
+  column->addLayout(toggle_row);
 
-  // WIDGET: Portal Slots
-  // Helper function for creating slots
-  auto add_line = [](QVBoxLayout* vbox) {
-    auto* line = new QFrame();
-    line->setFrameShape(QFrame::HLine);
-    line->setFrameShadow(QFrame::Sunken);
-    vbox->addWidget(line);
-  };
-
-  // Create portal slots
-  auto* portal_slots_group = new QGroupBox(tr("Portal Slots"));
-  auto* portal_slots_layout = new QVBoxLayout();
+  // One row per portal slot: a radio button to pick it, its caption and the figure's name.
+  auto* slots_box = new QGroupBox(tr("Portal Slots"));
+  auto* slots_box_layout = new QVBoxLayout();
   m_group_skylanders = new QFrame();
-  auto* vbox_group = new QVBoxLayout();
-  auto* scroll_area = new QScrollArea();
+  auto* slot_rows = new QVBoxLayout();
+  auto* scroller = new QScrollArea();
 
-  for (auto i = 0; i < MAX_SKYLANDERS; i++)
+  for (size_t slot = 0; slot < MAX_SKYLANDERS; ++slot)
   {
-    if (i != 0)
-    {
-      add_line(vbox_group);
-    }
+    if (slot > 0)
+      slot_rows->addWidget(SlotSeparator());
 
-    auto* hbox_skylander = new QHBoxLayout();
-    auto* label_skyname = new QLabel(tr("Skylander %1").arg(i + 1));
-    m_edit_skylanders[i] = new QLineEdit();
-    m_edit_skylanders[i]->setEnabled(false);
+    auto* caption = new QLabel(tr("Skylander %1").arg(static_cast<int>(slot) + 1));
+    auto* figure_name = new QLineEdit();
+    figure_name->setEnabled(false);
+    m_edit_skylanders[slot] = figure_name;
 
-    QRadioButton* button = new QRadioButton;
-    m_slot_radios[i] = button;
-    button->setProperty("id", i);
-    hbox_skylander->addWidget(button);
-    hbox_skylander->addWidget(label_skyname);
-    hbox_skylander->addWidget(m_edit_skylanders[i]);
+    auto* picker = new QRadioButton;
+    picker->setProperty("id", static_cast<int>(slot));
+    m_slot_radios[slot] = picker;
 
-    vbox_group->addLayout(hbox_skylander);
+    auto* row = new QHBoxLayout();
+    row->addWidget(picker);
+    row->addWidget(caption);
+    row->addWidget(figure_name);
+    slot_rows->addLayout(row);
   }
   m_slot_radios[0]->setChecked(true);
 
-  m_group_skylanders->setLayout(vbox_group);
+  m_group_skylanders->setLayout(slot_rows);
   m_group_skylanders->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-  scroll_area->setWidget(m_group_skylanders);
-  scroll_area->setWidgetResizable(true);
-  scroll_area->setFrameStyle(QFrame::NoFrame);
+  scroller->setWidget(m_group_skylanders);
+  scroller->setWidgetResizable(true);
+  scroller->setFrameStyle(QFrame::NoFrame);
   m_group_skylanders->setVisible(Config::Get(Config::MAIN_EMULATE_SKYLANDER_PORTAL));
-  portal_slots_layout->addWidget(scroll_area);
-  portal_slots_group->setLayout(portal_slots_layout);
-  slot_layout->addWidget(portal_slots_group);
+  slots_box_layout->addWidget(scroller);
+  slots_box->setLayout(slots_box_layout);
+  column->addWidget(slots_box);
 
-  return slot_layout;
+  return column;
 }
 
-QVBoxLayout* SkylanderPortalWindow::CreateFinderLayout()
+QVBoxLayout* SkylanderPortalWindow::BuildFinderColumn()
 {
-  auto* main_layout = new QVBoxLayout();
+  auto* column = new QVBoxLayout();
 
-  // WIDGET: Skylander List
   m_skylander_list = new QListWidget;
   connect(m_skylander_list, &QListWidget::itemDoubleClicked, this,
           &SkylanderPortalWindow::LoadSelected);
 
-  auto* collection_layout = new QHBoxLayout();
-
-  // WIDGET: Skylander Collection Path
-  collection_layout->addWidget(new QLabel(tr("Skylander Collection Path:")));
+  // Collection folder.
+  auto* folder_row = new QHBoxLayout();
+  folder_row->addWidget(new QLabel(tr("Skylander Collection Path:")));
   m_path_edit = new QLineEdit;
-  collection_layout->addWidget(m_path_edit);
+  folder_row->addWidget(m_path_edit);
   m_path_select = new QPushButton(tr("Choose"));
   connect(m_path_edit, &QLineEdit::editingFinished, this,
           &SkylanderPortalWindow::OnCollectionPathChanged);
   connect(m_path_select, &QAbstractButton::clicked, this,
           &SkylanderPortalWindow::SelectCollectionPath);
-  collection_layout->addWidget(m_path_select);
+  folder_row->addWidget(m_path_select);
+  column->addLayout(folder_row);
 
-  main_layout->addLayout(collection_layout);
+  auto* finder = new QVBoxLayout();
 
-  auto* finder_layout = new QVBoxLayout();
-
-  // WIDGET: Search Bar
-  auto* search_bar_layout = new QHBoxLayout;
+  // Name search.
+  auto* search_row = new QHBoxLayout;
   m_sky_search = new QLineEdit;
   m_sky_search->setClearButtonEnabled(true);
   connect(m_sky_search, &QLineEdit::textChanged, this, &SkylanderPortalWindow::RefreshList);
-  search_bar_layout->addWidget(new QLabel(tr("Search:")));
-  search_bar_layout->addWidget(m_sky_search);
-  finder_layout->addLayout(search_bar_layout);
+  search_row->addWidget(new QLabel(tr("Search:")));
+  search_row->addWidget(m_sky_search);
+  finder->addLayout(search_row);
 
-  auto* finder_list_layout = new QHBoxLayout();
+  auto* list_row = new QHBoxLayout();
+  auto* filters = new QVBoxLayout();
 
-  auto* search_filters_layout = new QVBoxLayout();
-
-  // WIDGET: Filter by Game
-  auto* search_game_group = new QGroupBox(tr("Game"));
-  auto* search_game_layout = new QVBoxLayout();
-  auto* search_checkbox_scroll_area = new QScrollArea();
-  search_checkbox_scroll_area->setContentsMargins(0, 0, 0, 0);
-  search_checkbox_scroll_area->setFrameStyle(QFrame::NoFrame);
-  auto* search_checkbox_group = new QFrame();
-  search_checkbox_group->setContentsMargins(0, 0, 0, 0);
-  auto* search_checkbox_layout = new QVBoxLayout();
-
-  for (size_t i = 0; i < m_game_filters.size(); ++i)
+  // Which games' figures to list; all of them to begin with.
+  const FilterPanel games = StartFilterPanel(tr("Game"));
+  auto* game_column = new QVBoxLayout();
+  for (QCheckBox*& game : m_game_filters)
   {
-    QCheckBox* checkbox = new QCheckBox(this);
-    checkbox->setChecked(true);
-    connect(checkbox, &QCheckBox::toggled, this, &SkylanderPortalWindow::RefreshList);
-    m_game_filters[i] = checkbox;
-    search_checkbox_layout->addWidget(checkbox);
+    game = new QCheckBox(this);
+    game->setChecked(true);
+    connect(game, &QCheckBox::toggled, this, &SkylanderPortalWindow::RefreshList);
+    game_column->addWidget(game);
   }
-  // i18n: Figures for the game Skylanders: Spyro's Adventure. The game has the same title in all
-  // countries it was released in, except Japan, where it's named スカイランダーズ スパイロの大冒険.
-  m_game_filters[GetGameID(Game::SpyrosAdv)]->setText(tr("Spyro's Adventure"));
-  // i18n: Figures for the game Skylanders: Giants. The game has the same title in all countries
-  // it was released in. It was not released in Japan.
-  m_game_filters[GetGameID(Game::Giants)]->setText(tr("Giants"));
-  // i18n: Figures for the game Skylanders: Swap Force. The game has the same title in all countries
-  // it was released in. It was not released in Japan.
-  m_game_filters[GetGameID(Game::SwapForce)]->setText(tr("Swap Force"));
-  // i18n: Figures for the game Skylanders: Trap Team. The game has the same title in all countries
-  // it was released in. It was not released in Japan.
-  m_game_filters[GetGameID(Game::TrapTeam)]->setText(tr("Trap Team"));
-  // i18n: Figures for the games Skylanders: SuperChargers (not available for the Wii) and
-  // Skylanders: SuperChargers Racing (available for the Wii). The games have the same titles in
-  // all countries they were released in. They were not released in Japan.
-  m_game_filters[GetGameID(Game::Superchargers)]->setText(tr("SuperChargers"));
-  search_checkbox_group->setLayout(search_checkbox_layout);
-  search_checkbox_scroll_area->setWidget(search_checkbox_group);
-  search_game_layout->addWidget(search_checkbox_scroll_area);
-  search_game_group->setLayout(search_game_layout);
-  search_game_group->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-  search_filters_layout->addWidget(search_game_group);
+  const std::pair<Game, QString> game_names[] = {
+      // i18n: Figures for the game Skylanders: Spyro's Adventure. The game has the same title in
+      // all countries it was released in, except Japan, where it's named スカイランダーズ
+      // スパイロの大冒険.
+      {Game::SpyrosAdv, tr("Spyro's Adventure")},
+      // i18n: Figures for the game Skylanders: Giants. The game has the same title in all
+      // countries it was released in. It was not released in Japan.
+      {Game::Giants, tr("Giants")},
+      // i18n: Figures for the game Skylanders: Swap Force. The game has the same title in all
+      // countries it was released in. It was not released in Japan.
+      {Game::SwapForce, tr("Swap Force")},
+      // i18n: Figures for the game Skylanders: Trap Team. The game has the same title in all
+      // countries it was released in. It was not released in Japan.
+      {Game::TrapTeam, tr("Trap Team")},
+      // i18n: Figures for the games Skylanders: SuperChargers (not available for the Wii) and
+      // Skylanders: SuperChargers Racing (available for the Wii). The games have the same titles
+      // in all countries they were released in. They were not released in Japan.
+      {Game::Superchargers, tr("SuperChargers")},
+  };
+  for (const auto& [game, name] : game_names)
+    m_game_filters[static_cast<size_t>(game)]->setText(name);
+  FinishFilterPanel(games, game_column, false, filters);
 
-  // WIDGET: Filter by Element
+  // Radio choices are owned by the window while they are made, and split over two columns:
+  // even ids on the left, odd ones on the right. The first one starts checked.
+  const auto make_choices = [this](auto& choices, QVBoxLayout* left, QVBoxLayout* right) {
+    for (size_t i = 0; i < choices.size(); ++i)
+    {
+      auto* choice = new QRadioButton(this);
+      choice->setProperty("id", static_cast<int>(i));
+      if (i == 0)
+        choice->setChecked(true);
+      connect(choice, &QRadioButton::toggled, this, &SkylanderPortalWindow::RefreshList);
+      choices[i] = choice;
+      (i % 2 == 0 ? left : right)->addWidget(choice);
+    }
+  };
 
   // i18n: Elements are a trait of Skylanders figures. For official translations of this term,
   // check the Skylanders SuperChargers manual at https://support.activision.com/manuals
-  auto* search_element_group = new QGroupBox(tr("Element"));
-  auto* search_element_layout = new QVBoxLayout();
-  auto* search_radio_scroll_area = new QScrollArea();
-  search_radio_scroll_area->setContentsMargins(0, 0, 0, 0);
-  search_radio_scroll_area->setFrameStyle(QFrame::NoFrame);
-  auto* search_radio_group = new QFrame();
-  search_radio_group->setContentsMargins(0, 0, 0, 0);
-  auto* search_radio_layout = new QHBoxLayout();
-
-  auto* radio_layout_left = new QVBoxLayout();
-  auto* radio_layout_right = new QVBoxLayout();
-  for (int i = 0; i < NUM_SKYLANDER_ELEMENTS_RADIO; i++)
-  {
-    QRadioButton* radio = new QRadioButton(this);
-    radio->setProperty("id", i);
-    if (i == 0)
-    {
-      radio->setChecked(true);
-    }
-    connect(radio, &QRadioButton::toggled, this, &SkylanderPortalWindow::RefreshList);
-    m_element_filter[i] = radio;
-
-    if (i % 2 == 0)
-    {
-      radio_layout_left->addWidget(radio);
-    }
-    else
-    {
-      radio_layout_right->addWidget(radio);
-    }
-  }
-  search_radio_layout->addLayout(radio_layout_left);
-  search_radio_layout->setDirection(QBoxLayout::Direction::LeftToRight);
-  search_radio_layout->addSpacing(35);
-  search_radio_layout->addLayout(radio_layout_right);
+  const FilterPanel elements = StartFilterPanel(tr("Element"));
+  auto* element_columns = new QHBoxLayout();
+  auto* element_left = new QVBoxLayout();
+  auto* element_right = new QVBoxLayout();
+  make_choices(m_element_filter, element_left, element_right);
+  element_columns->addLayout(element_left);
+  element_columns->addSpacing(35);
+  element_columns->addLayout(element_right);
 
   m_element_filter[0]->setText(tr("All"));
   m_element_filter[0]->setChecked(true);
-  // i18n: One of the elements in the Skylanders games. Japanese: まほう. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Magic)]->setText(tr("Magic"));
-  // i18n: One of the elements in the Skylanders games. Japanese: 水. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Water)]->setText(tr("Water"));
-  // i18n: One of the elements in the Skylanders games. Japanese: マシン. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Tech)]->setText(tr("Tech"));
-  // i18n: One of the elements in the Skylanders games. Japanese: 火. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Fire)]->setText(tr("Fire"));
-  // i18n: One of the elements in the Skylanders games. Japanese: 土. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Earth)]->setText(tr("Earth"));
-  // i18n: One of the elements in the Skylanders games. Japanese: ライフ. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Life)]->setText(tr("Life"));
-  // i18n: One of the elements in the Skylanders games. Japanese: 風. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Air)]->setText(tr("Air"));
-  // i18n: One of the elements in the Skylanders games. Japanese: アンデッド. For official
-  // translations in other languages, check the SuperChargers manual at
-  // https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Undead)]->setText(tr("Undead"));
-  // i18n: One of the elements in the Skylanders games. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Dark)]->setText(tr("Dark"));
-  // i18n: One of the elements in the Skylanders games. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_element_filter[GetElementID(Element::Light)]->setText(tr("Light"));
-  m_element_filter[GetElementID(Element::Other)]->setText(tr("Other"));
+  const std::pair<Element, QString> element_names[] = {
+      // i18n: One of the elements in the Skylanders games. Japanese: まほう. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Magic, tr("Magic")},
+      // i18n: One of the elements in the Skylanders games. Japanese: 水. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Water, tr("Water")},
+      // i18n: One of the elements in the Skylanders games. Japanese: マシン. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Tech, tr("Tech")},
+      // i18n: One of the elements in the Skylanders games. Japanese: 火. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Fire, tr("Fire")},
+      // i18n: One of the elements in the Skylanders games. Japanese: 土. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Earth, tr("Earth")},
+      // i18n: One of the elements in the Skylanders games. Japanese: ライフ. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Life, tr("Life")},
+      // i18n: One of the elements in the Skylanders games. Japanese: 風. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Air, tr("Air")},
+      // i18n: One of the elements in the Skylanders games. Japanese: アンデッド. For official
+      // translations in other languages, check the SuperChargers manual at
+      // https://support.activision.com/manuals
+      {Element::Undead, tr("Undead")},
+      // i18n: One of the elements in the Skylanders games. For official translations in other
+      // languages, check the SuperChargers manual at https://support.activision.com/manuals
+      {Element::Dark, tr("Dark")},
+      // i18n: One of the elements in the Skylanders games. For official translations in other
+      // languages, check the SuperChargers manual at https://support.activision.com/manuals
+      {Element::Light, tr("Light")},
+      {Element::Other, tr("Other")},
+  };
+  for (const auto& [element, name] : element_names)
+    m_element_filter[static_cast<size_t>(element)]->setText(name);
+  FinishFilterPanel(elements, element_columns, true, filters);
 
-  search_radio_group->setLayout(search_radio_layout);
-  search_radio_scroll_area->setWidget(search_radio_group);
-  search_element_layout->addWidget(search_radio_scroll_area);
-  search_radio_scroll_area->setAlignment(Qt::AlignHCenter);
-  search_element_group->setLayout(search_element_layout);
-  search_element_group->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-  search_filters_layout->addWidget(search_element_group);
-
-  // Widget: Filter by Type
-  auto* search_type_group = new QGroupBox(tr("Figure type"));
-  auto* search_type_layout = new QVBoxLayout();
-  auto* search_type_radio_scroll_area = new QScrollArea();
-  search_type_radio_scroll_area->setContentsMargins(0, 0, 0, 0);
-  search_type_radio_scroll_area->setFrameStyle(QFrame::NoFrame);
-  auto* search_type_radio_group = new QFrame();
-  search_type_radio_group->setContentsMargins(0, 0, 0, 0);
-  auto* search_type_radio_layout = new QHBoxLayout();
-
-  auto* radio_type_layout_left = new QVBoxLayout();
-  auto* radio_type_layout_right = new QVBoxLayout();
-  for (int i = 0; i < NUM_SKYLANDER_TYPES; i++)
-  {
-    QRadioButton* radio = new QRadioButton(this);
-    radio->setProperty("id", i);
-    if (i == 0)
-    {
-      radio->setChecked(true);
-    }
-    connect(radio, &QRadioButton::toggled, this, &SkylanderPortalWindow::RefreshList);
-    m_type_filter[i] = radio;
-
-    if (i % 2 == 0)
-    {
-      radio_type_layout_left->addWidget(radio);
-    }
-    else
-    {
-      radio_type_layout_right->addWidget(radio);
-    }
-  }
-  search_type_radio_layout->addLayout(radio_type_layout_left);
-  search_type_radio_layout->addLayout(radio_type_layout_right);
+  const FilterPanel types = StartFilterPanel(tr("Figure type"));
+  auto* type_columns = new QHBoxLayout();
+  auto* type_left = new QVBoxLayout();
+  auto* type_right = new QVBoxLayout();
+  make_choices(m_type_filter, type_left, type_right);
+  type_columns->addLayout(type_left);
+  type_columns->addLayout(type_right);
 
   m_type_filter[0]->setText(tr("All"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Skylander)]->setText(tr("Skylander"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Giant)]->setText(tr("Giant"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Swapper)]->setText(tr("Swapper"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::TrapMaster)]->setText(tr("Trap Master"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Mini)]->setText(tr("Mini"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Item)]->setText(tr("Item"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Trophy)]->setText(tr("Trophy"));
-  // i18n: One of the figure types in the Skylanders games. For official translations
-  // in other languages, check the SuperChargers manual at https://support.activision.com/manuals
-  m_type_filter[GetTypeID(Type::Vehicle)]->setText(tr("Vehicle"));
-  // i18n: One of the figure types in the Skylanders games.
-  m_type_filter[GetTypeID(Type::Trap)]->setText(tr("Trap"));
+  const std::pair<Type, QString> type_names[] = {
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Skylander, tr("Skylander")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Giant, tr("Giant")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Swapper, tr("Swapper")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::TrapMaster, tr("Trap Master")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Mini, tr("Mini")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Item, tr("Item")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Trophy, tr("Trophy")},
+      // i18n: One of the figure types in the Skylanders games. For official translations in
+      // other languages, check the SuperChargers manual at https://support.activision.com/manuals
+      {Type::Vehicle, tr("Vehicle")},
+      // i18n: One of the figure types in the Skylanders games.
+      {Type::Trap, tr("Trap")},
+  };
+  for (const auto& [type, name] : type_names)
+    m_type_filter[static_cast<size_t>(type)]->setText(name);
+  FinishFilterPanel(types, type_columns, true, filters);
 
-  search_type_radio_group->setLayout(search_type_radio_layout);
-  search_type_radio_scroll_area->setWidget(search_type_radio_group);
-  search_type_radio_scroll_area->setAlignment(Qt::AlignHCenter);
-  search_type_layout->addWidget(search_type_radio_scroll_area);
-  search_type_group->setLayout(search_type_layout);
-  search_type_group->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-  search_filters_layout->addWidget(search_type_group);
-
-  // Widget: Other Filters
+  // Anything else.
   auto* other_box = new QGroupBox(tr("Other"));
   auto* other_layout = new QVBoxLayout;
   connect(m_only_show_collection, &QCheckBox::toggled, this, &SkylanderPortalWindow::RefreshList);
   other_layout->addWidget(m_only_show_collection);
   other_box->setLayout(other_layout);
-  search_filters_layout->addWidget(other_box);
+  filters->addWidget(other_box);
 
-  search_checkbox_scroll_area->setMinimumWidth(search_radio_group->width() + 20);
-  search_radio_scroll_area->setMinimumWidth(search_radio_group->width() + 20);
-  other_box->setMinimumWidth(search_radio_group->width() + 20);
+  // Every filter is as wide as the element choices plus a little room for a scroll bar.
+  const int filter_width = elements.contents->width() + 20;
+  games.scroller->setMinimumWidth(filter_width);
+  elements.scroller->setMinimumWidth(filter_width);
+  other_box->setMinimumWidth(filter_width);
 
-  search_filters_layout->addStretch(1);
+  filters->addStretch(1);
+  list_row->addLayout(filters);
+  list_row->addWidget(m_skylander_list);
+  finder->addLayout(list_row);
+  column->addLayout(finder);
 
-  finder_list_layout->addLayout(search_filters_layout);
-
-  finder_list_layout->addWidget(m_skylander_list);
-
-  finder_layout->addLayout(finder_list_layout);
-
-  main_layout->addLayout(finder_layout);
-
-  return main_layout;
+  return column;
 }
 
-bool SkylanderPortalWindow::eventFilter(QObject* object, QEvent* event)
+bool SkylanderPortalWindow::eventFilter(QObject*, QEvent* event)
 {
-  if (event->type() == QEvent::KeyPress)
+  // Escape hides the window; the key is never swallowed.
+  if (event->type() == QEvent::KeyPress &&
+      static_cast<QKeyEvent*>(event)->matches(QKeySequence::Cancel))
   {
-    // Close when escape is pressed
-    if (static_cast<QKeyEvent*>(event)->matches(QKeySequence::Cancel))
-      hide();
+    hide();
   }
-
   return false;
 }
 
-void SkylanderPortalWindow::closeEvent(QCloseEvent* event)
+void SkylanderPortalWindow::closeEvent(QCloseEvent*)
 {
   hide();
 }
 
-// UI
 void SkylanderPortalWindow::EmulatePortal(bool emulate)
 {
   Config::SetBaseOrCurrent(Config::MAIN_EMULATE_SKYLANDER_PORTAL, emulate);
@@ -479,18 +486,32 @@ void SkylanderPortalWindow::EmulatePortal(bool emulate)
 
 void SkylanderPortalWindow::SelectCollectionPath()
 {
-  QString dir = QDir::toNativeSeparators(DolphinFileDialog::getExistingDirectory(
+  QString folder = QDir::toNativeSeparators(DolphinFileDialog::getExistingDirectory(
       this, tr("Select Skylander Collection"), m_collection_path));
-  if (!dir.isEmpty())
+  if (!folder.isEmpty())
   {
-    dir += QDir::separator();
-    m_path_edit->setText(dir);
-    m_collection_path = dir;
+    folder += QDir::separator();
+    m_path_edit->setText(folder);
+    m_collection_path = folder;
   }
-  Config::SetBase(Config::MAIN_SKYLANDERS_PATH, dir.toStdString());
+  // Stored even when the picker was cancelled.
+  Config::SetBase(Config::MAIN_SKYLANDERS_PATH, folder.toStdString());
 
   if (m_only_show_collection->isChecked())
     RefreshList();
+}
+
+QString SkylanderPortalWindow::SuggestedFileName(const QString& folder) const
+{
+  const auto known = KnownFigures().find(std::make_pair(m_sky_id, m_sky_var));
+  if (known != KnownFigures().end())
+    return folder + QString::fromStdString(std::string(known->second.name) + ".sky");
+
+  // i18n: This is used to create a file name. The string must end in ".sky".
+  const QString pattern = tr("Unknown(%1 %2).sky");
+  // The variant lands in the field-width argument, so %2 is left as it is; the file names this
+  // produces are kept as they always were.
+  return folder + pattern.arg(m_sky_id, static_cast<int>(m_sky_var));
 }
 
 void SkylanderPortalWindow::LoadSelected()
@@ -501,51 +522,31 @@ void SkylanderPortalWindow::LoadSelected()
   const u8 slot = GetCurrentSlot();
 
   QString file_path;
-  if (m_only_show_collection->isChecked())
-  {
-    if (m_skylander_list->currentItem() == nullptr)
-      return;
-    file_path =
-        m_collection_path + m_skylander_list->currentItem()->text() + QStringLiteral(".sky");
-  }
-  else
+  if (!m_only_show_collection->isChecked())
   {
     file_path = GetFilePath(m_sky_id, m_sky_var);
   }
-
-  if (file_path.isEmpty())
-  {
-    QMessageBox::StandardButton create_file_response;
-    create_file_response =
-        QMessageBox::question(this, tr("Create Skylander File"),
-                              tr("Skylander not found in this collection. Create new file?"),
-                              QMessageBox::Yes | QMessageBox::No);
-
-    if (create_file_response == QMessageBox::Yes)
-    {
-      QString predef_name = m_collection_path;
-      const auto found_sky =
-          IOS::HLE::USB::list_skylanders.find(std::make_pair(m_sky_id, m_sky_var));
-      if (found_sky != IOS::HLE::USB::list_skylanders.end())
-      {
-        predef_name += QString::fromStdString(std::string(found_sky->second.name) + ".sky");
-      }
-      else
-      {
-        // i18n: This is used to create a file name. The string must end in ".sky".
-        const QString str = tr("Unknown(%1 %2).sky");
-        predef_name += str.arg(m_sky_id, m_sky_var);
-      }
-
-      CreateSkyfile(predef_name, true);
-    }
-  }
   else
   {
-    m_last_skylander_path = QFileInfo(file_path).absolutePath() + QLatin1Char{'/'};
-
-    LoadSkyfilePath(slot, file_path);
+    const QListWidgetItem* picked = m_skylander_list->currentItem();
+    if (!picked)
+      return;
+    file_path = m_collection_path + picked->text() + QStringLiteral(".sky");
   }
+
+  if (!file_path.isEmpty())
+  {
+    m_last_skylander_path = QFileInfo(file_path).absolutePath() + QLatin1Char{'/'};
+    LoadSkyfilePath(slot, file_path);
+    return;
+  }
+
+  const auto answer =
+      QMessageBox::question(this, tr("Create Skylander File"),
+                            tr("Skylander not found in this collection. Create new file?"),
+                            QMessageBox::Yes | QMessageBox::No);
+  if (answer == QMessageBox::Yes)
+    CreateSkyfile(SuggestedFileName(m_collection_path), true);
 }
 
 void SkylanderPortalWindow::LoadFromFile()
@@ -554,231 +555,197 @@ void SkylanderPortalWindow::LoadFromFile()
   const QString file_path =
       DolphinFileDialog::getOpenFileName(this, tr("Select Skylander File"), m_last_skylander_path,
                                          tr("Skylander (*.sky *.bin *.dmp *.dump);;All Files (*)"));
-  ;
   if (file_path.isEmpty())
-  {
     return;
-  }
+
   m_last_skylander_path =
       QDir::toNativeSeparators(QFileInfo(file_path).absolutePath()) + QDir::separator();
-
   LoadSkyfilePath(slot, file_path);
 }
 
 void SkylanderPortalWindow::CreateSkylanderAdvanced()
 {
-  QDialog* create_window = new QDialog;
-
+  // A small free-standing dialog for typing in any ID and variant.
+  auto* dialog = new QDialog;
   auto* layout = new QVBoxLayout;
 
-  auto* hbox_idvar = new QHBoxLayout();
-  auto* label_id = new QLabel(tr("ID:"));
-  auto* label_var = new QLabel(tr("Variant:"));
-  auto* edit_id = new QLineEdit(tr("0"));
-  auto* edit_var = new QLineEdit(tr("0"));
-  auto* rxv = new QRegularExpressionValidator(QRegularExpression(QStringLiteral("\\d*")), this);
-  edit_id->setValidator(rxv);
-  edit_var->setValidator(rxv);
-  hbox_idvar->addWidget(label_id);
-  hbox_idvar->addWidget(edit_id);
-  hbox_idvar->addWidget(label_var);
-  hbox_idvar->addWidget(edit_var);
-  layout->addLayout(hbox_idvar);
+  auto* fields = new QHBoxLayout();
+  auto* id_caption = new QLabel(tr("ID:"));
+  auto* var_caption = new QLabel(tr("Variant:"));
+  auto* id_field = new QLineEdit(tr("0"));
+  auto* var_field = new QLineEdit(tr("0"));
+  auto* digits_only =
+      new QRegularExpressionValidator(QRegularExpression(QStringLiteral("\\d*")), this);
+  id_field->setValidator(digits_only);
+  var_field->setValidator(digits_only);
+  fields->addWidget(id_caption);
+  fields->addWidget(id_field);
+  fields->addWidget(var_caption);
+  fields->addWidget(var_field);
+  layout->addLayout(fields);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
   buttons->button(QDialogButtonBox::Ok)->setText(tr("Create"));
   layout->addWidget(buttons);
+  dialog->setLayout(layout);
 
-  create_window->setLayout(layout);
-
-  connect(buttons, &QDialogButtonBox::accepted, this, [=, this] {
-    bool ok_id = false, ok_var = false;
-    m_sky_id = edit_id->text().toUShort(&ok_id);
-    if (!ok_id)
+  connect(buttons, &QDialogButtonBox::accepted, this, [this, dialog, id_field, var_field] {
+    // Each value is taken even when it doesn't parse (it is then 0).
+    bool parsed = false;
+    m_sky_id = id_field->text().toUShort(&parsed);
+    if (!parsed)
     {
       QMessageBox::warning(this, tr("Error converting value"), tr("ID entered is invalid!"),
                            QMessageBox::Ok);
       return;
     }
-    m_sky_var = edit_var->text().toUShort(&ok_var);
-    if (!ok_var)
+    m_sky_var = var_field->text().toUShort(&parsed);
+    if (!parsed)
     {
       QMessageBox::warning(this, tr("Error converting value"), tr("Variant entered is invalid!"),
                            QMessageBox::Ok);
       return;
     }
 
-    QString predef_name = m_last_skylander_path;
-    const auto found_sky = IOS::HLE::USB::list_skylanders.find(std::make_pair(m_sky_id, m_sky_var));
-    if (found_sky != IOS::HLE::USB::list_skylanders.end())
-    {
-      predef_name += QString::fromStdString(std::string(found_sky->second.name) + ".sky");
-    }
-    else
-    {
-      // i18n: This is used to create a file name. The string must end in ".sky".
-      QString str = tr("Unknown(%1 %2).sky");
-      predef_name += str.arg(m_sky_id, m_sky_var);
-    }
-
-    QString file_path = DolphinFileDialog::getSaveFileName(
-        this, tr("Create Skylander File"), predef_name, tr("Skylander (*.sky);;All Files (*)"));
-    if (file_path.isEmpty())
-    {
+    const QString target = DolphinFileDialog::getSaveFileName(
+        this, tr("Create Skylander File"), SuggestedFileName(m_last_skylander_path),
+        tr("Skylander (*.sky);;All Files (*)"));
+    if (target.isEmpty())
       return;
-    }
 
-    CreateSkyfile(file_path, true);
-    create_window->accept();
+    CreateSkyfile(target, true);
+    dialog->accept();
   });
+  connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
 
-  connect(buttons, &QDialogButtonBox::rejected, create_window, &QDialog::reject);
-
-  create_window->show();
-  create_window->raise();
+  dialog->show();
+  dialog->raise();
 }
 
 void SkylanderPortalWindow::ModifySkylander()
 {
-  if (auto sky_slot = m_sky_slots[GetCurrentSlot()])
-  {
-    new SkylanderModifyDialog(this, sky_slot.value().portal_slot);
-  }
-  else
+  const std::optional<Skylander> occupant = m_sky_slots[GetCurrentSlot()];
+  if (!occupant)
   {
     QMessageBox::warning(this, tr("Failed to modify Skylander!"),
                          tr("Make sure there is a Skylander in slot %1!").arg(GetCurrentSlot()),
                          QMessageBox::Ok);
+    return;
   }
+  // The dialog shows itself (or explains why it can't) and lives as a child of this window.
+  new SkylanderModifyDialog(this, occupant->portal_slot);
 }
 
 void SkylanderPortalWindow::ClearSlot(u8 slot)
 {
-  auto& system = Core::System::GetInstance();
-  if (auto slot_infos = m_sky_slots[slot])
+  const std::optional<Skylander> occupant = m_sky_slots[slot];
+  if (!occupant)
+    return;
+
+  if (!Core::System::GetInstance().GetSkylanderPortal().RemoveSkylander(occupant->portal_slot))
   {
-    if (!system.GetSkylanderPortal().RemoveSkylander(slot_infos->portal_slot))
-    {
-      QMessageBox::warning(this, tr("Failed to clear Skylander!"),
-                           tr("Failed to clear the Skylander from slot %1!").arg(slot),
-                           QMessageBox::Ok);
-      return;
-    }
-    m_sky_slots[slot].reset();
-    if (m_only_show_collection->isChecked())
-      RefreshList();
-    UpdateSlotNames();
+    QMessageBox::warning(this, tr("Failed to clear Skylander!"),
+                         tr("Failed to clear the Skylander from slot %1!").arg(slot),
+                         QMessageBox::Ok);
+    return;
   }
+
+  m_sky_slots[slot].reset();
+  if (m_only_show_collection->isChecked())
+    RefreshList();
+  UpdateSlotNames();
 }
 
-// Behind the scenes
 void SkylanderPortalWindow::OnCollectionPathChanged()
 {
   m_collection_path = m_path_edit->text();
-  Config::SetBase(Config::MAIN_SKYLANDERS_PATH, m_path_edit->text().toStdString());
+  Config::SetBase(Config::MAIN_SKYLANDERS_PATH, m_collection_path.toStdString());
   RefreshList();
 }
 
 void SkylanderPortalWindow::OnEmulationStateChanged(Core::State state)
 {
-  const bool running = state != Core::State::Uninitialized;
-
-  m_enabled_checkbox->setEnabled(!running);
+  // The portal can only be plugged in or out while nothing is running.
+  m_enabled_checkbox->setEnabled(state == Core::State::Uninitialized);
 }
 
 void SkylanderPortalWindow::UpdateCurrentIDs()
 {
-  const u32 sky_info = m_skylander_list->currentItem()->data(1).toUInt();
-  if (sky_info != 0xFFFFFFFF)
+  const uint packed = m_skylander_list->currentItem()->data(1).toUInt();
+  if (packed == 0xFFFFFFFF)
+    return;
+  m_sky_id = static_cast<u16>(packed >> 16);
+  m_sky_var = static_cast<u16>(packed & 0xFFFF);
+}
+
+void SkylanderPortalWindow::ScanCollection(const CollectionVisitor& visit) const
+{
+  auto& portal = Core::System::GetInstance().GetSkylanderPortal();
+  for (const QFileInfo& file : QDir(m_collection_path).entryInfoList(FigureFilePatterns()))
   {
-    m_sky_id = sky_info >> 16;
-    m_sky_var = sky_info & 0xFFFF;
+    // Files that can't be opened, or are too short to be a dump, are skipped.
+    File::IOFile dump_file(file.filePath().toStdString(), "r+b");
+    if (!dump_file)
+      continue;
+    FigureDump dump;
+    if (!dump_file.ReadBytes(dump.data(), dump.size()))
+      continue;
+    if (!visit(file, portal.CalculateIDs(dump)))
+      return;
   }
+}
+
+void SkylanderPortalWindow::AddListEntry(const QString& name, std::pair<const u16, const u16> ids,
+                                         bool dark_theme)
+{
+  auto* entry = new QListWidgetItem(name);
+  entry->setBackground(GetBaseColor(ids, dark_theme));
+  entry->setForeground(QBrush(dark_theme ? QColor(220, 220, 220) : QColor(0, 0, 0)));
+  entry->setData(1, PackIds(ids.first, ids.second));
+  m_skylander_list->addItem(entry);
 }
 
 void SkylanderPortalWindow::RefreshList()
 {
-  const bool is_dark_theme = Settings::Instance().IsThemeDark();
+  const bool dark_theme = Settings::Instance().IsThemeDark();
 
-  const int row = m_skylander_list->currentRow();
+  const int previous_row = m_skylander_list->currentRow();
   m_skylander_list->clear();
-  if (m_only_show_collection->isChecked())
+
+  if (!m_only_show_collection->isChecked())
   {
-    const QDir collection = QDir(m_collection_path);
-    auto& system = Core::System::GetInstance();
-    for (const auto& file : collection.entryInfoList(
-             QStringList() << QStringLiteral("*.sky") << QStringLiteral("*.bin")
-                           << QStringLiteral("*.dmp") << QStringLiteral("*.dump")))
+    for (const auto& [ids, info] : KnownFigures())
     {
-      File::IOFile sky_file(file.filePath().toStdString(), "r+b");
-      if (!sky_file)
-      {
-        continue;
-      }
-      std::array<u8, 0x40 * 0x10> file_data;
-      if (!sky_file.ReadBytes(file_data.data(), file_data.size()))
-      {
-        continue;
-      }
-      auto ids = system.GetSkylanderPortal().CalculateIDs(file_data);
-      if (PassesFilter(file.baseName(), ids.first, ids.second))
-      {
-        const uint qvar = (ids.first << 16) | ids.second;
-        QListWidgetItem* skylander = new QListWidgetItem(file.baseName());
-        if (is_dark_theme)
-        {
-          skylander->setBackground(GetBaseColor(ids, true));
-          skylander->setForeground(QBrush(QColor(220, 220, 220)));
-        }
-        else
-        {
-          skylander->setBackground(GetBaseColor(ids, false));
-          skylander->setForeground(QBrush(QColor(0, 0, 0)));
-        }
-        skylander->setData(1, qvar);
-        m_skylander_list->addItem(skylander);
-      }
+      const QString name = tr(info.name);
+      if (PassesFilter(name, ids.first, ids.second))
+        AddListEntry(name, ids, dark_theme);
     }
   }
   else
   {
-    for (const auto& entry : IOS::HLE::USB::list_skylanders)
-    {
-      int id = entry.first.first;
-      int var = entry.first.second;
-      if (PassesFilter(tr(entry.second.name), id, var))
-      {
-        const uint qvar = (entry.first.first << 16) | entry.first.second;
-        QListWidgetItem* skylander = new QListWidgetItem(tr(entry.second.name));
-        if (is_dark_theme)
-        {
-          skylander->setBackground(GetBaseColor(entry.first, true));
-          skylander->setForeground(QBrush(QColor(220, 220, 220)));
-        }
-        else
-        {
-          skylander->setBackground(GetBaseColor(entry.first, false));
-          skylander->setForeground(QBrush(QColor(0, 0, 0)));
-        }
-        skylander->setData(1, qvar);
-        m_skylander_list->addItem(skylander);
-      }
-    }
+    ScanCollection([&](const QFileInfo& file, std::pair<u16, u16> ids) {
+      if (PassesFilter(file.baseName(), ids.first, ids.second))
+        AddListEntry(file.baseName(), ids, dark_theme);
+      return true;
+    });
   }
-  if (m_skylander_list->count() >= row)
+
+  // Put the selection back on the same row; if the list got shorter than that, on its last row.
+  const int count = m_skylander_list->count();
+  int row = previous_row;
+  if (count < previous_row)
   {
-    m_skylander_list->setCurrentItem(m_skylander_list->item(row), QItemSelectionModel::Select);
+    if (count == 0)
+      return;
+    row = count - 1;
   }
-  else if (m_skylander_list->count() > 0)
-  {
-    m_skylander_list->setCurrentItem(m_skylander_list->item(m_skylander_list->count() - 1),
-                                     QItemSelectionModel::Select);
-  }
+  m_skylander_list->setCurrentItem(m_skylander_list->item(row), QItemSelectionModel::Select);
 }
 
 void SkylanderPortalWindow::CreateSkyfile(const QString& path, bool load_after)
 {
   {
+    // Write the blank figure and close the file again before it gets loaded.
     IOS::HLE::USB::SkylanderFigure figure(path.toStdString());
     if (!figure.Create(m_sky_id, m_sky_var))
     {
@@ -799,8 +766,8 @@ void SkylanderPortalWindow::CreateSkyfile(const QString& path, bool load_after)
 
 void SkylanderPortalWindow::LoadSkyfilePath(u8 slot, const QString& path)
 {
-  File::IOFile sky_file(path.toStdString(), "r+b");
-  if (!sky_file)
+  File::IOFile dump_file(path.toStdString(), "r+b");
+  if (!dump_file)
   {
     QMessageBox::warning(this, tr("Failed to open the Skylander file!"),
                          tr("Failed to open the Skylander file:\n%1\n\nThe file may already be in "
@@ -809,8 +776,8 @@ void SkylanderPortalWindow::LoadSkyfilePath(u8 slot, const QString& path)
                          QMessageBox::Ok);
     return;
   }
-  std::array<u8, 0x40 * 0x10> file_data;
-  if (!sky_file.ReadBytes(file_data.data(), file_data.size()))
+  FigureDump dump;
+  if (!dump_file.ReadBytes(dump.data(), dump.size()))
   {
     QMessageBox::warning(
         this, tr("Failed to read the Skylander file!"),
@@ -819,88 +786,71 @@ void SkylanderPortalWindow::LoadSkyfilePath(u8 slot, const QString& path)
     return;
   }
 
+  // Whatever was in the slot goes first.
   ClearSlot(slot);
 
-  auto& system = Core::System::GetInstance();
-  const std::pair<u16, u16> id_var = system.GetSkylanderPortal().CalculateIDs(file_data);
-  const u8 portal_slot = system.GetSkylanderPortal().LoadSkylander(
-      std::make_unique<IOS::HLE::USB::SkylanderFigure>(std::move(sky_file)));
+  auto& portal = Core::System::GetInstance().GetSkylanderPortal();
+  const std::pair<u16, u16> ids = portal.CalculateIDs(dump);
+  const u8 portal_slot =
+      portal.LoadSkylander(std::make_unique<IOS::HLE::USB::SkylanderFigure>(std::move(dump_file)));
   if (portal_slot == 0xFF)
   {
     QMessageBox::warning(this, tr("Failed to load the Skylander file!"),
                          tr("Failed to load the Skylander file:\n%1").arg(path), QMessageBox::Ok);
     return;
   }
-  m_sky_slots[slot] = {portal_slot, id_var.first, id_var.second};
+
+  m_sky_slots[slot] = Skylander{portal_slot, ids.first, ids.second};
   RefreshList();
   UpdateSlotNames();
 }
 
 void SkylanderPortalWindow::UpdateSlotNames()
 {
-  for (auto i = 0; i < MAX_SKYLANDERS; i++)
+  for (size_t slot = 0; slot < MAX_SKYLANDERS; ++slot)
   {
-    QString display_string;
-    if (auto sd = m_sky_slots[i])
+    const std::optional<Skylander>& occupant = m_sky_slots[slot];
+    QString shown;
+    if (!occupant)
     {
-      auto found_sky =
-          IOS::HLE::USB::list_skylanders.find(std::make_pair(sd->m_sky_id, sd->m_sky_var));
-      if (found_sky != IOS::HLE::USB::list_skylanders.end())
-      {
-        display_string = QString::fromStdString(found_sky->second.name);
-      }
-      else
-      {
-        // i18n: "Var" is short for "variant"
-        display_string = tr("Unknown (Id:%1 Var:%2)").arg(sd->m_sky_id).arg(sd->m_sky_var);
-      }
+      shown = tr("None");
+    }
+    else if (const auto known = KnownFigures().find({occupant->m_sky_id, occupant->m_sky_var});
+             known != KnownFigures().end())
+    {
+      shown = QString::fromStdString(known->second.name);
     }
     else
     {
-      display_string = tr("None");
+      // i18n: "Var" is short for "variant"
+      shown = tr("Unknown (Id:%1 Var:%2)").arg(occupant->m_sky_id).arg(occupant->m_sky_var);
     }
-
-    m_edit_skylanders[i]->setText(display_string);
+    m_edit_skylanders[slot]->setText(shown);
   }
 }
 
-// Helpers
 bool SkylanderPortalWindow::PassesFilter(const QString& name, u16 id, u16 var) const
 {
-  const auto skypair = IOS::HLE::USB::list_skylanders.find(std::make_pair(id, var));
-  IOS::HLE::USB::SkyData character;
-  if (skypair == IOS::HLE::USB::list_skylanders.end())
-  {
+  // Only known figures are ever listed.
+  const auto known = KnownFigures().find(std::make_pair(id, var));
+  if (known == KnownFigures().end())
     return false;
-  }
-  else
-  {
-    character = skypair->second;
-  }
+  const IOS::HLE::USB::SkyData& info = known->second;
 
-  bool pass = false;
-
-  // Check against active game filters
-  for (size_t i = 0; i < NUM_SKYLANDER_GAMES; i++)
-  {
-    if (m_game_filters[i]->isChecked() && character.game == (Game)i)
-    {
-      pass = true;
-    }
-  }
-  if (!pass)
+  const auto game = static_cast<size_t>(info.game);
+  if (game >= NUM_SKYLANDER_GAMES || !m_game_filters[game]->isChecked())
     return false;
 
-  // Check against search bar filter
   if (!name.contains(m_sky_search->text(), Qt::CaseInsensitive))
     return false;
 
-  // Check against active element filter
-  if ((Element)GetElementRadio() != character.element && GetElementRadio() != 0)
+  // Id 0 on the element and type filters means "All".
+  const int element = GetElementRadio();
+  if (element != 0 && static_cast<Element>(element) != info.element)
     return false;
 
-  // Check against active type filter
-  if ((Type)GetTypeRadio() != character.type && GetTypeRadio() != 0)
+  const int type = GetTypeRadio();
+  if (type != 0 && static_cast<Type>(type) != info.type)
     return false;
 
   return true;
@@ -908,102 +858,63 @@ bool SkylanderPortalWindow::PassesFilter(const QString& name, u16 id, u16 var) c
 
 QString SkylanderPortalWindow::GetFilePath(u16 id, u16 var) const
 {
-  const QDir collection = QDir(m_collection_path);
-  auto& system = Core::System::GetInstance();
-  for (const auto& file : collection.entryInfoList(
-           QStringList() << QStringLiteral("*.sky") << QStringLiteral("*.bin")
-                         << QStringLiteral("*.dmp") << QStringLiteral("*.dump")))
-  {
-    File::IOFile sky_file(file.filePath().toStdString(), "r+b");
-    if (!sky_file)
-    {
-      continue;
-    }
-    std::array<u8, 0x40 * 0x10> file_data;
-    if (!sky_file.ReadBytes(file_data.data(), file_data.size()))
-    {
-      continue;
-    }
-    auto ids = system.GetSkylanderPortal().CalculateIDs(file_data);
-    if (ids.first == id && ids.second == var)
-    {
-      return file.filePath();
-    }
-  }
-  return {};
+  QString match;
+  ScanCollection([&](const QFileInfo& file, std::pair<u16, u16> ids) {
+    if (ids.first != id || ids.second != var)
+      return true;
+    match = file.filePath();
+    return false;
+  });
+  return match;
 }
 
 u8 SkylanderPortalWindow::GetCurrentSlot() const
 {
-  for (const auto* radio : m_slot_radios)
-  {
-    if (radio->isChecked())
-    {
-      return radio->property("id").toInt();
-    }
-  }
-  return 0;
+  return static_cast<u8>(CheckedRadioId(m_slot_radios, 0));
 }
 
 int SkylanderPortalWindow::GetElementRadio() const
 {
-  for (const auto* radio : m_element_filter)
-  {
-    if (radio->isChecked())
-    {
-      return radio->property("id").toInt();
-    }
-  }
-  return -1;
+  return CheckedRadioId(m_element_filter, -1);
 }
 
 int SkylanderPortalWindow::GetTypeRadio() const
 {
-  for (const auto* radio : m_type_filter)
-  {
-    if (radio->isChecked())
-    {
-      return radio->property("id").toInt();
-    }
-  }
-  return -1;
+  return CheckedRadioId(m_type_filter, -1);
 }
 
 QBrush SkylanderPortalWindow::GetBaseColor(std::pair<const u16, const u16> ids, bool dark_theme)
 {
-  auto skylander = IOS::HLE::USB::list_skylanders.find(ids);
-
-  if (skylander == IOS::HLE::USB::list_skylanders.end())
-    return QBrush(dark_theme ? QColor(32, 32, 32) : QColor(255, 255, 255));
-
-  switch (skylander->second.game)
+  // Each game's figures get their own tint, in a dark and a light version.
+  struct Tint
   {
-  case Game::SpyrosAdv:
-    return QBrush(dark_theme ? QColor(10, 42, 90) : QColor(240, 255, 240));
-  case Game::Giants:
-    return QBrush(dark_theme ? QColor(120, 16, 12) : QColor(255, 240, 215));
-  case Game::SwapForce:
-    return QBrush(dark_theme ? QColor(28, 45, 12) : QColor(240, 245, 255));
-  case Game::TrapTeam:
-    return QBrush(dark_theme ? QColor(0, 56, 76) : QColor(255, 240, 240));
-  case Game::Superchargers:
-    return QBrush(dark_theme ? QColor(90, 12, 12) : QColor(247, 228, 215));
-  default:
-    return QBrush(dark_theme ? QColor(32, 32, 32) : QColor(255, 255, 255));
+    QColor dark;
+    QColor light;
+  };
+  const Tint neutral{QColor(32, 32, 32), QColor(255, 255, 255)};
+
+  Tint tint = neutral;
+  const auto known = KnownFigures().find(ids);
+  if (known != KnownFigures().end())
+  {
+    switch (known->second.game)
+    {
+    case Game::SpyrosAdv:
+      tint = {QColor(10, 42, 90), QColor(240, 255, 240)};
+      break;
+    case Game::Giants:
+      tint = {QColor(120, 16, 12), QColor(255, 240, 215)};
+      break;
+    case Game::SwapForce:
+      tint = {QColor(28, 45, 12), QColor(240, 245, 255)};
+      break;
+    case Game::TrapTeam:
+      tint = {QColor(0, 56, 76), QColor(255, 240, 240)};
+      break;
+    case Game::Superchargers:
+      tint = {QColor(90, 12, 12), QColor(247, 228, 215)};
+      break;
+    }
   }
-}
-
-int SkylanderPortalWindow::GetGameID(Game game)
-{
-  return (int)game;
-}
-
-int SkylanderPortalWindow::GetElementID(Element elem)
-{
-  return (int)elem;
-}
-
-int SkylanderPortalWindow::GetTypeID(Type type)
-{
-  return (int)type;
+  return QBrush(dark_theme ? tint.dark : tint.light);
 }
