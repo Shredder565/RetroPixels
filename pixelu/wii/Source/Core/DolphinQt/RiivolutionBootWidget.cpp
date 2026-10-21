@@ -145,9 +145,9 @@ void RiivolutionBootWidget::AddXMLsFromUserFolder()
 
 void RiivolutionBootWidget::AskForXMLs()
 {
+  const QString start_folder = QString::fromStdString(File::GetUserPath(D_RIIVOLUTION_IDX));
   const QStringList picked = QFileDialog::getOpenFileNames(
-      this, tr("Select Riivolution XML file"),
-      QString::fromStdString(File::GetUserPath(D_RIIVOLUTION_IDX)),
+      this, tr("Select Riivolution XML file"), start_folder,
       QStringLiteral("%1 (*.xml);;%2 (*)").arg(tr("Riivolution XML files")).arg(tr("All Files")));
 
   for (const QString& picked_path : picked)
