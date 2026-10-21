@@ -86,6 +86,12 @@ private:
   void* m_reserved_region = nullptr;
   void* m_memory_handle = nullptr;
   WindowsMemoryFunctions m_memory_functions;
+#else
+  // The memory file behind every view (see MemArenaUnix.cpp), and the fastmem reservation.
+  int m_shm_fd = -1;
+  size_t m_shm_size = 0;
+  void* m_reserved_region = nullptr;
+  size_t m_reserved_size = 0;
 #endif
 };
 

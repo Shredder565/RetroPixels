@@ -4,7 +4,8 @@
 
 #include "Common/Logging/LogManager.h"
 
-// Sends log lines to the debugger output (OutputDebugString on Windows).
+// Sends log lines to the debugger output (OutputDebugString) on Windows, and to standard error
+// (coloured on a terminal) on Linux.
 class ConsoleListener : public Common::Log::LogListener
 {
 public:
