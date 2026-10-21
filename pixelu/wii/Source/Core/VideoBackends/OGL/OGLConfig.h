@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,20 +6,23 @@ class GLContext;
 
 namespace OGL
 {
+// GLSL dialect the shader header declares. Desktop versions first, then ES; code compares
+// with < and >=, so the order matters.
 enum GlslVersion
 {
   Glsl130,
   Glsl140,
   Glsl150,
   Glsl330,
-  Glsl400,    // and above
-  Glsl430,    // 430 - 440
-  Glsl450,    // 450 - xxx
-  GlslEs300,  // GLES 3.0
-  GlslEs310,  // GLES 3.1
-  GlslEs320,  // GLES 3.2
+  Glsl400,  // GL 4.0 - 4.2
+  Glsl430,  // GL 4.3 - 4.4
+  Glsl450,  // GL 4.5 and newer
+  GlslEs300,
+  GlslEs310,
+  GlslEs320,
 };
 
+// Which extension (if any) provides gl_PointSize in ES geometry shaders.
 enum class EsPointSizeType
 {
   PointSizeNone,
@@ -28,6 +30,7 @@ enum class EsPointSizeType
   PointSizeExt,
 };
 
+// Where texture buffers come from on ES.
 enum class EsTexbufType
 {
   TexbufNone,
@@ -36,6 +39,7 @@ enum class EsTexbufType
   TexbufExt
 };
 
+// Framebuffer fetch extension in use, if any.
 enum class EsFbFetchType
 {
   FbFetchNone,
@@ -43,6 +47,7 @@ enum class EsFbFetchType
   FbFetchArm,
 };
 
+// How multisampled array textures are allocated.
 enum class MultisampleTexStorageType
 {
   TexStorageNone,
@@ -50,7 +55,8 @@ enum class MultisampleTexStorageType
   TexStorageOes,
 };
 
-// ogl-only config, so not in VideoConfig.h
+// Capabilities of the GL context that only this backend cares about (the shared ones live in
+// g_backend_info). Filled by PopulateConfig.
 struct VideoConfig
 {
   bool bIsES;
@@ -74,7 +80,7 @@ struct VideoConfig
   bool bSupportsBitfield;
   bool bSupportsTextureSubImage;
   EsFbFetchType SupportedFramebufferFetch;
-  bool bSupportsKHRShaderSubgroup;  // basic + arithmetic + ballot
+  bool bSupportsKHRShaderSubgroup;  // basic, arithmetic and ballot together
   bool bSupportsExplicitLayoutInShader;
 
   const char* gl_vendor;
@@ -82,7 +88,11 @@ struct VideoConfig
   const char* gl_version;
 };
 
+// Identifies the driver from the vendor/renderer/version strings for DriverDetails.
 void InitDriverInfo();
+
+// Reads the context's capabilities into g_ogl_config and g_backend_info. False (after telling
+// the user) when the context lacks something the backend needs.
 bool PopulateConfig(GLContext* main_gl_context);
 
 extern VideoConfig g_ogl_config;

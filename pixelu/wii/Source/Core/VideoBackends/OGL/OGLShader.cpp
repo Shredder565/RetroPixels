@@ -1,113 +1,98 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/OGLShader.h"
 
-#include <algorithm>
 #include <cctype>
+#include <sstream>
+#include <string>
 
 #include "VideoBackends/OGL/ProgramShaderCache.h"
 
 #include "VideoCommon/ShaderCompileUtils.h"
-#include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/VideoConfig.h"
 
 namespace OGL
 {
 namespace
 {
-std::string ResolveIncludeStatements(glslang::TShader::Includer* shader_includer,
-                                     std::string_view source, const char* includer_name = "",
-                                     std::size_t depth = 1)
+constexpr std::string_view INCLUDE_DIRECTIVE = "#include";
+
+// What follows "#include" on a line: the file name and whether it was written <like_this>.
+// A line whose name is cut off ("<name" or "\"name" with no closing mark) is not an include
+// we handle. Anything else after the directive is treated as an empty quoted name.
+struct IncludeTarget
 {
-  if (!shader_includer)
+  bool usable = false;
+  bool system = false;
+  std::string name;
+};
+
+IncludeTarget ParseIncludeTarget(std::string_view rest)
+{
+  IncludeTarget target;
+  size_t open = 0;
+  while (open < rest.size() && std::isspace(static_cast<unsigned char>(rest[open])))
+    ++open;
+
+  const char opener = open < rest.size() ? rest[open] : '\0';
+  if (opener != '<' && opener != '"')
   {
-    return std::string{source};
+    target.usable = true;
+    return target;
   }
 
-  std::string source_str(source);
-  std::istringstream iss(source_str);
+  const char closer = opener == '<' ? '>' : '"';
+  const size_t name_start = open + 1;
+  if (name_start >= rest.size())
+    return target;
+  const size_t close = rest.find(closer, name_start);
+  if (close == std::string_view::npos)
+    return target;
 
-  ShaderCode output;
-  std::string line;
-  while (std::getline(iss, line))
-  {
-    if (line.empty())
-    {
-      output.Write("{}\n", line);
-      continue;
-    }
-
-    std::string_view include_preprocessor = "#include";
-    if (!line.starts_with(include_preprocessor))
-    {
-      output.Write("{}\n", line);
-      continue;
-    }
-
-    const std::string after_include = line.substr(include_preprocessor.size());
-
-    bool local_include = true;
-    std::string_view filename;
-    // First non-whitespace character after include
-    const std::string::const_iterator non_whitespace_iter = std::find_if_not(
-        after_include.begin(), after_include.end(), [](char ch) { return std::isspace(ch); });
-    if (*non_whitespace_iter == '<')
-    {
-      const auto after_less = std::next(non_whitespace_iter);
-      if (after_less == after_include.end())
-      {
-        // Found less-than at the end, malformed
-        output.Write("{}\n", line);
-        continue;
-      }
-      const auto end_iter = std::find(after_less, after_include.end(), '>');
-      if (end_iter == after_include.end())
-      {
-        // Include spans multiple lines or is malformed, just pass it along
-        output.Write("{}\n", line);
-        continue;
-      }
-      filename = std::string_view(after_less, end_iter);
-      local_include = false;
-    }
-    else if (*non_whitespace_iter == '"')
-    {
-      const auto after_quote = std::next(non_whitespace_iter);
-      if (after_quote == after_include.end())
-      {
-        // Found quote at the end, malformed
-        output.Write("{}\n", line);
-        continue;
-      }
-      const auto end_iter = std::find(after_quote, after_include.end(), '"');
-      if (end_iter == after_include.end())
-      {
-        // Include spans multiple lines or is malformed, just pass it along
-        output.Write("{}\n", line);
-        continue;
-      }
-      filename = std::string_view(after_quote, end_iter);
-    }
-
-    const std::string header_path = std::string{filename};
-    auto include_result =
-        local_include ? shader_includer->includeLocal(header_path.c_str(), includer_name, depth) :
-                        shader_includer->includeSystem(header_path.c_str(), includer_name, depth);
-    if (!include_result)
-    {
-      output.Write("{}\n", line);
-      continue;
-    }
-
-    output.Write("{}", ResolveIncludeStatements(shader_includer, include_result->headerData,
-                                                header_path.c_str(), ++depth));
-  }
-
-  return output.GetBuffer();
+  target.usable = true;
+  target.system = opener == '<';
+  target.name = std::string(rest.substr(name_start, close - name_start));
+  return target;
 }
-}  // namespace
-static GLenum GetGLShaderTypeForStage(ShaderStage stage)
+
+// GL compiles plain source strings, so #include lines are expanded here with the includer the
+// caller gave (if any). Lines the includer cannot resolve are passed through unchanged; every
+// line comes out newline-terminated. Each expanded include in a file gets the next depth.
+std::string ExpandIncludes(glslang::TShader::Includer* includer, std::string_view source,
+                           const char* includer_name = "", size_t depth = 1)
+{
+  if (includer == nullptr)
+    return std::string(source);
+
+  std::string expanded;
+  std::istringstream lines{std::string(source)};
+  std::string line;
+  while (std::getline(lines, line))
+  {
+    const bool is_include = std::string_view(line).starts_with(INCLUDE_DIRECTIVE);
+    const IncludeTarget target =
+        is_include ? ParseIncludeTarget(std::string_view(line).substr(INCLUDE_DIRECTIVE.size())) :
+                     IncludeTarget{};
+    glslang::TShader::Includer::IncludeResult* result = nullptr;
+    if (target.usable)
+    {
+      result = target.system ? includer->includeSystem(target.name.c_str(), includer_name, depth) :
+                               includer->includeLocal(target.name.c_str(), includer_name, depth);
+    }
+    if (result == nullptr)
+    {
+      expanded += line;
+      expanded += '\n';
+      continue;
+    }
+
+    ++depth;
+    expanded += ExpandIncludes(includer, result->headerData, target.name.c_str(), depth);
+  }
+  return expanded;
+}
+
+GLenum StageToGLType(ShaderStage stage)
 {
   switch (stage)
   {
@@ -119,65 +104,63 @@ static GLenum GetGLShaderTypeForStage(ShaderStage stage)
     return GL_FRAGMENT_SHADER;
   case ShaderStage::Compute:
     return GL_COMPUTE_SHADER;
-  default:
-    return 0;
   }
+  return 0;
 }
+}  // namespace
 
 OGLShader::OGLShader(ShaderStage stage, GLenum gl_type, GLuint gl_id, std::string source,
                      std::string name)
-    : AbstractShader(stage), m_id(ProgramShaderCache::GenerateShaderID()), m_type(gl_type),
-      m_gl_id(gl_id), m_source(std::move(source)), m_name(std::move(name))
+    : AbstractShader(stage), m_uid(ProgramShaderCache::GenerateShaderID()), m_gl_type(gl_type),
+      m_shader(gl_id), m_source(std::move(source)), m_name(std::move(name))
 {
-  if (!m_name.empty() && g_backend_info.bSupportsSettingObjectNames)
-  {
-    glObjectLabel(GL_SHADER, m_gl_id, (GLsizei)m_name.size(), m_name.c_str());
-  }
+  Label(GL_SHADER, m_shader);
 }
 
 OGLShader::OGLShader(GLuint gl_compute_program_id, std::string source, std::string name)
-    : AbstractShader(ShaderStage::Compute), m_id(ProgramShaderCache::GenerateShaderID()),
-      m_type(GL_COMPUTE_SHADER), m_gl_compute_program_id(gl_compute_program_id),
+    : AbstractShader(ShaderStage::Compute), m_uid(ProgramShaderCache::GenerateShaderID()),
+      m_gl_type(GL_COMPUTE_SHADER), m_compute_program(gl_compute_program_id),
       m_source(std::move(source)), m_name(std::move(name))
 {
-  if (!m_name.empty() && g_backend_info.bSupportsSettingObjectNames)
-  {
-    glObjectLabel(GL_PROGRAM, m_gl_compute_program_id, (GLsizei)m_name.size(), m_name.c_str());
-  }
+  Label(GL_PROGRAM, m_compute_program);
+}
+
+void OGLShader::Label(GLenum identifier, GLuint object) const
+{
+  if (m_name.empty() || !g_backend_info.bSupportsSettingObjectNames)
+    return;
+  glObjectLabel(identifier, object, static_cast<GLsizei>(m_name.size()), m_name.c_str());
 }
 
 OGLShader::~OGLShader()
 {
-  if (m_stage != ShaderStage::Compute)
-    glDeleteShader(m_gl_id);
+  if (m_stage == ShaderStage::Compute)
+    glDeleteProgram(m_compute_program);
   else
-    glDeleteProgram(m_gl_compute_program_id);
+    glDeleteShader(m_shader);
 }
 
 std::unique_ptr<OGLShader> OGLShader::CreateFromSource(ShaderStage stage, std::string_view source,
                                                        VideoCommon::ShaderIncluder* shader_includer,
                                                        std::string_view name)
 {
-  // Note: while the source will all be available, any errors will not
-  // reference the correct paths
-  std::string source_str = ResolveIncludeStatements(shader_includer, source);
-  std::string name_str(name);
-  if (stage != ShaderStage::Compute)
-  {
-    GLenum shader_type = GetGLShaderTypeForStage(stage);
-    GLuint shader_id = ProgramShaderCache::CompileSingleShader(shader_type, source_str);
-    if (!shader_id)
-      return nullptr;
+  // The expanded text is what GL sees, so compile errors refer to its line numbers rather
+  // than to the included files.
+  std::string text = ExpandIncludes(shader_includer, source);
 
-    return std::make_unique<OGLShader>(stage, shader_type, shader_id, std::move(source_str),
-                                       std::move(name_str));
+  if (stage == ShaderStage::Compute)
+  {
+    SHADER program;
+    if (!ProgramShaderCache::CompileComputeShader(program, text))
+      return nullptr;
+    return std::make_unique<OGLShader>(program.glprogid, std::move(text), std::string(name));
   }
 
-  // Compute shaders.
-  SHADER prog;
-  if (!ProgramShaderCache::CompileComputeShader(prog, source_str))
+  const GLenum type = StageToGLType(stage);
+  const GLuint shader = ProgramShaderCache::CompileSingleShader(type, text);
+  if (shader == 0)
     return nullptr;
-  return std::make_unique<OGLShader>(prog.glprogid, std::move(source_str), std::move(name_str));
+  return std::make_unique<OGLShader>(stage, type, shader, std::move(text), std::string(name));
 }
 
 }  // namespace OGL

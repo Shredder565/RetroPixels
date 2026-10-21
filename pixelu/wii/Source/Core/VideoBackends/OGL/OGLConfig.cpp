@@ -1,12 +1,14 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/OGL/OGLConfig.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <iterator>
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fmt/ranges.h>
 
@@ -24,738 +26,670 @@
 
 namespace OGL
 {
-void InitDriverInfo()
+namespace
 {
-  const std::string_view svendor(g_ogl_config.gl_vendor);
-  const std::string_view srenderer(g_ogl_config.gl_renderer);
-  const std::string_view sversion(g_ogl_config.gl_version);
+bool Has(const char* name)
+{
+  return GLExtensions::Supports(name);
+}
+
+bool HasAny(std::initializer_list<const char*> names)
+{
+  return std::ranges::any_of(names, [](const char* name) { return Has(name); });
+}
+
+bool Bug(DriverDetails::Bug bug)
+{
+  return DriverDetails::HasBug(bug);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Driver identification
+
+struct DriverId
+{
   DriverDetails::Vendor vendor = DriverDetails::VENDOR_UNKNOWN;
   DriverDetails::Driver driver = DriverDetails::DRIVER_UNKNOWN;
   DriverDetails::Family family = DriverDetails::Family::UNKNOWN;
   double version = 0.0;
+};
 
-  // Get the vendor first
-  if (svendor == "NVIDIA Corporation")
+// The GL_VENDOR string decides the vendor, except that any Mesa version string means Mesa.
+void IdentifyVendor(std::string_view vendor, std::string_view renderer, std::string_view version,
+                    DriverId* id)
+{
+  using namespace DriverDetails;
+  if (vendor == "NVIDIA Corporation")
+    id->vendor = renderer == "NVIDIA Tegra" ? VENDOR_TEGRA : VENDOR_NVIDIA;
+  else if (vendor == "ATI Technologies Inc." || vendor == "Advanced Micro Devices, Inc.")
+    id->vendor = VENDOR_ATI;
+  else if (version.contains("Mesa"))
+    id->vendor = VENDOR_MESA;
+  else if (vendor.contains("Intel"))
+    id->vendor = VENDOR_INTEL;
+  else if (vendor == "ARM")
+    id->vendor = VENDOR_ARM;
+  else if (vendor == "http://limadriver.org/")
   {
-    if (srenderer != "NVIDIA Tegra")
-    {
-      vendor = DriverDetails::VENDOR_NVIDIA;
-    }
-    else
-    {
-      vendor = DriverDetails::VENDOR_TEGRA;
-    }
+    id->vendor = VENDOR_ARM;
+    id->driver = DRIVER_LIMA;  // (ReadMaliVersion replaces this with DRIVER_ARM.)
   }
-  else if (svendor == "ATI Technologies Inc." || svendor == "Advanced Micro Devices, Inc.")
-  {
-    vendor = DriverDetails::VENDOR_ATI;
-  }
-  else if (sversion.contains("Mesa"))
-  {
-    vendor = DriverDetails::VENDOR_MESA;
-  }
-  else if (svendor.contains("Intel"))
-  {
-    vendor = DriverDetails::VENDOR_INTEL;
-  }
-  else if (svendor == "ARM")
-  {
-    vendor = DriverDetails::VENDOR_ARM;
-  }
-  else if (svendor == "http://limadriver.org/")
-  {
-    vendor = DriverDetails::VENDOR_ARM;
-    driver = DriverDetails::DRIVER_LIMA;
-  }
-  else if (svendor == "Qualcomm")
-  {
-    vendor = DriverDetails::VENDOR_QUALCOMM;
-  }
-  else if (svendor == "Imagination Technologies")
-  {
-    vendor = DriverDetails::VENDOR_IMGTEC;
-  }
-  else if (svendor == "Vivante Corporation")
-  {
-    vendor = DriverDetails::VENDOR_VIVANTE;
-  }
-
-  // Get device family and driver version...if we care about it
-  switch (vendor)
-  {
-  case DriverDetails::VENDOR_QUALCOMM:
-  {
-    driver = DriverDetails::DRIVER_QUALCOMM;
-    double glVersion;
-    sscanf(g_ogl_config.gl_version, "OpenGL ES %lg V@%lg", &glVersion, &version);
-  }
-  break;
-  case DriverDetails::VENDOR_ARM:
-    // Currently the Mali-T line has two families in it.
-    // Mali-T6xx and Mali-T7xx
-    // These two families are similar enough that they share bugs in their drivers.
-    //
-    // Mali drivers provide no way to explicitly find out what video driver is running.
-    // This is similar to how we can't find the Nvidia driver version in Windows.
-    // Good thing is that ARM introduces a new video driver about once every two years so we can
-    // find the driver version by the features it exposes.
-    // r2p0 - No OpenGL ES 3.0 support (We don't support this)
-    // r3p0 - OpenGL ES 3.0 support
-    // r4p0 - Supports 'GL_EXT_shader_pixel_local_storage' extension.
-
-    driver = DriverDetails::DRIVER_ARM;
-    if (GLExtensions::Supports("GL_EXT_shader_pixel_local_storage"))
-      version = 400;
-    else
-      version = 300;
-    break;
-  case DriverDetails::VENDOR_MESA:
-  {
-    if (svendor == "nouveau")
-    {
-      driver = DriverDetails::DRIVER_NOUVEAU;
-    }
-    else if (svendor == "Intel Open Source Technology Center")
-    {
-      driver = DriverDetails::DRIVER_I965;
-      if (srenderer.contains("Sandybridge"))
-        family = DriverDetails::Family::INTEL_SANDY;
-      else if (srenderer.contains("Ivybridge"))
-        family = DriverDetails::Family::INTEL_IVY;
-    }
-    else if (srenderer.contains("AMD") || srenderer.contains("ATI"))
-    {
-      driver = DriverDetails::DRIVER_R600;
-    }
-
-    int major = 0;
-    int minor = 0;
-    int release = 0;
-    sscanf(g_ogl_config.gl_version, "%*s (Core Profile) Mesa %d.%d.%d", &major, &minor, &release);
-    version = 100 * major + 10 * minor + release;
-  }
-  break;
-  case DriverDetails::VENDOR_INTEL:  // Happens in OS X/Windows
-  {
-    u32 market_name;
-    sscanf(g_ogl_config.gl_renderer, "Intel HD Graphics %d", &market_name);
-    switch (market_name)
-    {
-    case 2000:
-    case 3000:
-      family = DriverDetails::Family::INTEL_SANDY;
-      break;
-    case 2500:
-    case 4000:
-      family = DriverDetails::Family::INTEL_IVY;
-      break;
-    default:
-      family = DriverDetails::Family::UNKNOWN;
-      break;
-    };
-#ifdef _WIN32
-    int glmajor = 0;
-    int glminor = 0;
-    int major = 0;
-    int minor = 0;
-    int release = 0;
-    int revision = 0;
-    // Example version string: '4.3.0 - Build 10.18.10.3907'
-    sscanf(g_ogl_config.gl_version, "%d.%d.0 - Build %d.%d.%d.%d", &glmajor, &glminor, &major,
-           &minor, &release, &revision);
-    version = 100000000 * major + 1000000 * minor + 10000 * release + revision;
-    version /= 10000;
-#endif
-  }
-  break;
-  case DriverDetails::VENDOR_NVIDIA:
-  {
-    int glmajor = 0;
-    int glminor = 0;
-    int glrelease = 0;
-    int major = 0;
-    int minor = 0;
-    // TODO: this is known to be broken on Windows
-    // Nvidia seems to have removed their driver version from this string, so we can't get it.
-    // hopefully we'll never have to workaround Nvidia bugs
-    sscanf(g_ogl_config.gl_version, "%d.%d.%d NVIDIA %d.%d", &glmajor, &glminor, &glrelease, &major,
-           &minor);
-    version = 100 * major + minor;
-  }
-  break;
-  case DriverDetails::VENDOR_IMGTEC:
-  {
-    // Example version string:
-    // "OpenGL ES 3.2 build 1.9@4850625"
-    // Ends up as "109.4850625" - "1.9" being the branch, "4850625" being the build's change ID
-    // The change ID only makes sense to compare within a branch
-    driver = DriverDetails::DRIVER_IMGTEC;
-    double gl_version;
-    int major, minor, change;
-    constexpr double change_scale = 10000000;
-    sscanf(g_ogl_config.gl_version, "OpenGL ES %lg build %d.%d@%d", &gl_version, &major, &minor,
-           &change);
-    version = 100 * major + minor;
-    if (change >= change_scale)
-    {
-      ERROR_LOG_FMT(VIDEO, "Version changeID overflow - change:{} scale:{}", change, change_scale);
-    }
-    else
-    {
-      version += static_cast<double>(change) / change_scale;
-    }
-  }
-  break;
-  // We don't care about these
-  default:
-    break;
-  }
-  DriverDetails::Init(DriverDetails::API_OPENGL, vendor, driver, version, family,
-                      std::string(srenderer));
+  else if (vendor == "Qualcomm")
+    id->vendor = VENDOR_QUALCOMM;
+  else if (vendor == "Imagination Technologies")
+    id->vendor = VENDOR_IMGTEC;
+  else if (vendor == "Vivante Corporation")
+    id->vendor = VENDOR_VIVANTE;
 }
 
-bool PopulateConfig(GLContext* m_main_gl_context)
+void ReadQualcommVersion(const char* version, DriverId* id)
 {
-  bool bSuccess = true;
-  bool supports_glsl_cache = false;
+  // "OpenGL ES 3.1 V@145.0 ..." -> 145.0
+  id->driver = DriverDetails::DRIVER_QUALCOMM;
+  double es_version = 0.0;
+  std::sscanf(version, "OpenGL ES %lg V@%lg", &es_version, &id->version);
+}
 
-  g_ogl_config.gl_vendor = (const char*)glGetString(GL_VENDOR);
-  g_ogl_config.gl_renderer = (const char*)glGetString(GL_RENDERER);
-  g_ogl_config.gl_version = (const char*)glGetString(GL_VERSION);
+void ReadMaliVersion(DriverId* id)
+{
+  // The Mali driver does not report its release. r4p0 added pixel local storage, and anything
+  // older without ES 3.0 is unsupported anyway, so the extension tells the two apart.
+  id->driver = DriverDetails::DRIVER_ARM;
+  id->version = Has("GL_EXT_shader_pixel_local_storage") ? 400 : 300;
+}
 
-  if (!m_main_gl_context->IsGLES())
+void ReadMesaDetails(std::string_view vendor, std::string_view renderer, const char* version,
+                     DriverId* id)
+{
+  if (vendor == "nouveau")
   {
-    if (!GLExtensions::Supports("GL_ARB_framebuffer_object"))
-    {
-      // We want the ogl3 framebuffer instead of the ogl2 one for better blitting support.
-      // It's also compatible with the gles3 one.
-      PanicAlertFmtT("GPU: ERROR: Need GL_ARB_framebuffer_object for multiple render targets.\n"
-                     "GPU: Does your video card support OpenGL 3.0?");
-      bSuccess = false;
-    }
-
-    if (!GLExtensions::Supports("GL_ARB_vertex_array_object"))
-    {
-      // This extension is used to replace lots of pointer setting function.
-      // Also gles3 requires to use it.
-      PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_vertex_array_object.\n"
-                     "GPU: Does your video card support OpenGL 3.0?");
-      bSuccess = false;
-    }
-
-    if (!GLExtensions::Supports("GL_ARB_map_buffer_range"))
-    {
-      // ogl3 buffer mapping for better streaming support.
-      // The ogl2 one also isn't in gles3.
-      PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_map_buffer_range.\n"
-                     "GPU: Does your video card support OpenGL 3.0?");
-      bSuccess = false;
-    }
-
-    if (!GLExtensions::Supports("GL_ARB_uniform_buffer_object"))
-    {
-      // ubo allow us to keep the current constants on shader switches
-      // we also can stream them much nicer and pack into it whatever we want to
-      PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_uniform_buffer_object.\n"
-                     "GPU: Does your video card support OpenGL 3.1?");
-      bSuccess = false;
-    }
-    else if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_UBO))
-    {
-      PanicAlertFmtT(
-          "Buggy GPU driver detected.\n"
-          "Please either install the closed-source GPU driver or update your Mesa 3D version.");
-      bSuccess = false;
-    }
-
-    if (!GLExtensions::Supports("GL_ARB_sampler_objects"))
-    {
-      // Our sampler cache uses this extension. It could easily be workaround and it's by far the
-      // highest requirement, but it seems that no driver lacks support for it.
-      PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_sampler_objects.\n"
-                     "GPU: Does your video card support OpenGL 3.3?");
-      bSuccess = false;
-    }
+    id->driver = DriverDetails::DRIVER_NOUVEAU;
+  }
+  else if (vendor == "Intel Open Source Technology Center")
+  {
+    id->driver = DriverDetails::DRIVER_I965;
+    if (renderer.contains("Sandybridge"))
+      id->family = DriverDetails::Family::INTEL_SANDY;
+    else if (renderer.contains("Ivybridge"))
+      id->family = DriverDetails::Family::INTEL_IVY;
+  }
+  else if (renderer.contains("AMD") || renderer.contains("ATI"))
+  {
+    id->driver = DriverDetails::DRIVER_R600;
   }
 
-  // Copy the GPU name to g_Config, so Analytics can see it.
-  g_backend_info.AdapterName = g_ogl_config.gl_renderer;
+  int major = 0, minor = 0, release = 0;
+  std::sscanf(version, "%*s (Core Profile) Mesa %d.%d.%d", &major, &minor, &release);
+  id->version = 100 * major + 10 * minor + release;
+}
 
-  g_backend_info.bSupportsDualSourceBlend = (GLExtensions::Supports("GL_ARB_blend_func_extended") ||
-                                             GLExtensions::Supports("GL_EXT_blend_func_extended"));
-  g_backend_info.bSupportsPrimitiveRestart =
-      !DriverDetails::HasBug(DriverDetails::BUG_PRIMITIVE_RESTART) &&
-      ((GLExtensions::Version() >= 310) || GLExtensions::Supports("GL_NV_primitive_restart"));
-  g_backend_info.bSupportsGSInstancing = GLExtensions::Supports("GL_ARB_gpu_shader5");
-  g_backend_info.bSupportsSSAA = GLExtensions::Supports("GL_ARB_gpu_shader5") &&
-                                 GLExtensions::Supports("GL_ARB_sample_shading");
-  g_backend_info.bSupportsGeometryShaders =
-      GLExtensions::Version() >= 320 &&
-      !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_GEOMETRY_SHADERS);
-  g_backend_info.bSupportsPaletteConversion =
-      GLExtensions::Supports("GL_ARB_texture_buffer_object") ||
-      GLExtensions::Supports("GL_OES_texture_buffer") ||
-      GLExtensions::Supports("GL_EXT_texture_buffer");
-  g_backend_info.bSupportsClipControl = GLExtensions::Supports("GL_ARB_clip_control");
-  g_ogl_config.bSupportsCopySubImage =
-      (GLExtensions::Supports("GL_ARB_copy_image") || GLExtensions::Supports("GL_NV_copy_image") ||
-       GLExtensions::Supports("GL_EXT_copy_image") ||
-       GLExtensions::Supports("GL_OES_copy_image")) &&
-      !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_COPYIMAGE);
-  g_ogl_config.bSupportsTextureSubImage = GLExtensions::Supports("ARB_get_texture_sub_image");
+void ReadIntelDetails(const char* renderer, [[maybe_unused]] const char* version, DriverId* id)
+{
+  int model = 0;
+  std::sscanf(renderer, "Intel HD Graphics %d", &model);
+  if (model == 2000 || model == 3000)
+    id->family = DriverDetails::Family::INTEL_SANDY;
+  else if (model == 2500 || model == 4000)
+    id->family = DriverDetails::Family::INTEL_IVY;
+  else
+    id->family = DriverDetails::Family::UNKNOWN;
 
-  // Desktop OpenGL supports the binding layout if it supports 420pack
-  // OpenGL ES 3.1 supports it implicitly without an extension
-  g_backend_info.bSupportsBindingLayout = GLExtensions::Supports("GL_ARB_shading_language_420pack");
+#ifdef _WIN32
+  // e.g. "4.3.0 - Build 10.18.10.3907": the build number is the driver version.
+  int gl_major = 0, gl_minor = 0;
+  int b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+  std::sscanf(version, "%d.%d.0 - Build %d.%d.%d.%d", &gl_major, &gl_minor, &b0, &b1, &b2, &b3);
+  const int packed = 100000000 * b0 + 1000000 * b1 + 10000 * b2 + b3;
+  id->version = static_cast<double>(packed) / 10000;
+#endif
+}
 
-  // Clip distance support is useless without a method to clamp the depth range
-  g_backend_info.bSupportsDepthClamp = GLExtensions::Supports("GL_ARB_depth_clamp");
+void ReadNvidiaVersion(const char* version, DriverId* id)
+{
+  // "4.6.0 NVIDIA 535.98" on Linux; Windows drivers leave the number out.
+  int gl_major = 0, gl_minor = 0, gl_release = 0;
+  int major = 0, minor = 0;
+  std::sscanf(version, "%d.%d.%d NVIDIA %d.%d", &gl_major, &gl_minor, &gl_release, &major, &minor);
+  id->version = 100 * major + minor;
+}
 
-  // Desktop OpenGL supports bitfield manulipation and dynamic sampler indexing if it supports
-  // shader5. OpenGL ES 3.1 supports it implicitly without an extension
-  g_backend_info.bSupportsBitfield = GLExtensions::Supports("GL_ARB_gpu_shader5");
-  g_backend_info.bSupportsDynamicSamplerIndexing = GLExtensions::Supports("GL_ARB_gpu_shader5");
+void ReadImgTecVersion(const char* version, DriverId* id)
+{
+  // "OpenGL ES 3.2 build 1.9@4850625": branch 1.9 becomes 109, the change number the fraction.
+  // Change numbers are only comparable within one branch.
+  id->driver = DriverDetails::DRIVER_IMGTEC;
+  constexpr double CHANGE_SCALE = 10000000;
+  double es_version = 0.0;
+  int branch_major = 0, branch_minor = 0, change = 0;
+  std::sscanf(version, "OpenGL ES %lg build %d.%d@%d", &es_version, &branch_major, &branch_minor,
+              &change);
+  id->version = 100 * branch_major + branch_minor;
+  if (change < CHANGE_SCALE)
+    id->version += static_cast<double>(change) / CHANGE_SCALE;
+  else
+    ERROR_LOG_FMT(VIDEO, "Version changeID overflow - change:{} scale:{}", change, CHANGE_SCALE);
+}
 
-  g_ogl_config.bIsES = m_main_gl_context->IsGLES();
-  supports_glsl_cache = GLExtensions::Supports("GL_ARB_get_program_binary");
-  g_ogl_config.bSupportsGLPinnedMemory = GLExtensions::Supports("GL_AMD_pinned_memory");
-  g_ogl_config.bSupportsGLSync = GLExtensions::Supports("GL_ARB_sync");
-  g_ogl_config.bSupportsGLBaseVertex = GLExtensions::Supports("GL_ARB_draw_elements_base_vertex") ||
-                                       GLExtensions::Supports("GL_EXT_draw_elements_base_vertex") ||
-                                       GLExtensions::Supports("GL_OES_draw_elements_base_vertex");
-  g_ogl_config.bSupportsGLBufferStorage = GLExtensions::Supports("GL_ARB_buffer_storage") ||
-                                          GLExtensions::Supports("GL_EXT_buffer_storage");
-  g_ogl_config.bSupportsMSAA = GLExtensions::Supports("GL_ARB_texture_multisample");
-  g_ogl_config.bSupportViewportFloat = GLExtensions::Supports("GL_ARB_viewport_array");
-  g_ogl_config.bSupportsDebug =
-      GLExtensions::Supports("GL_KHR_debug") || GLExtensions::Supports("GL_ARB_debug_output");
-  g_ogl_config.bSupportsTextureStorage = GLExtensions::Supports("GL_ARB_texture_storage");
-  g_ogl_config.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageNone;
-  g_ogl_config.bSupportsImageLoadStore = GLExtensions::Supports("GL_ARB_shader_image_load_store");
-  g_ogl_config.bSupportsConservativeDepth = GLExtensions::Supports("GL_ARB_conservative_depth");
-  g_ogl_config.bSupportsAniso = GLExtensions::Supports("GL_EXT_texture_filter_anisotropic");
-  g_backend_info.bSupportsComputeShaders = GLExtensions::Supports("GL_ARB_compute_shader");
-  g_backend_info.bSupportsST3CTextures = GLExtensions::Supports("GL_EXT_texture_compression_s3tc");
-  g_backend_info.bSupportsBPTCTextures = GLExtensions::Supports("GL_ARB_texture_compression_bptc");
-  g_backend_info.bSupportsCoarseDerivatives =
-      GLExtensions::Supports("GL_ARB_derivative_control") || GLExtensions::Version() >= 450;
-  g_backend_info.bSupportsTextureQueryLevels =
-      GLExtensions::Supports("GL_ARB_texture_query_levels") || GLExtensions::Version() >= 430;
+// ---------------------------------------------------------------------------------------------
+// Capability detection
 
-  if (GLExtensions::Supports("GL_ARB_shader_storage_buffer_object"))
+// Desktop GL extensions the backend cannot work without. Every check runs so the user sees
+// all of what is missing.
+bool CheckDesktopRequirements()
+{
+  bool ok = true;
+  if (!Has("GL_ARB_framebuffer_object"))
   {
-    GLint fs = 0;
-    GLint vs = 0;
-    glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &fs);
-    glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vs);
-    g_backend_info.bSupportsFragmentStoresAndAtomics = fs >= 1;
-    g_backend_info.bSupportsVSLinePointExpand = vs >= 1;
+    // Needed for blitting between framebuffers (and matches what ES 3 has).
+    PanicAlertFmtT("GPU: ERROR: Need GL_ARB_framebuffer_object for multiple render targets.\n"
+                   "GPU: Does your video card support OpenGL 3.0?");
+    ok = false;
+  }
+  if (!Has("GL_ARB_vertex_array_object"))
+  {
+    PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_vertex_array_object.\n"
+                   "GPU: Does your video card support OpenGL 3.0?");
+    ok = false;
+  }
+  if (!Has("GL_ARB_map_buffer_range"))
+  {
+    // All the streaming buffers map ranges.
+    PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_map_buffer_range.\n"
+                   "GPU: Does your video card support OpenGL 3.0?");
+    ok = false;
+  }
+  if (!Has("GL_ARB_uniform_buffer_object"))
+  {
+    PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_uniform_buffer_object.\n"
+                   "GPU: Does your video card support OpenGL 3.1?");
+    ok = false;
+  }
+  else if (Bug(DriverDetails::BUG_BROKEN_UBO))
+  {
+    PanicAlertFmtT(
+        "Buggy GPU driver detected.\n"
+        "Please either install the closed-source GPU driver or update your Mesa 3D version.");
+    ok = false;
+  }
+  if (!Has("GL_ARB_sampler_objects"))
+  {
+    // The sampler cache is built on sampler objects.
+    PanicAlertFmtT("GPU: OGL ERROR: Need GL_ARB_sampler_objects.\n"
+                   "GPU: Does your video card support OpenGL 3.3?");
+    ok = false;
+  }
+  return ok;
+}
+
+// What the extension list says, before the version-specific adjustments.
+void ReadExtensionFeatures(bool is_es, bool* program_binaries)
+{
+  auto& info = g_backend_info;
+  auto& gl = g_ogl_config;
+  const u32 version = GLExtensions::Version();
+  const bool shader5 = Has("GL_ARB_gpu_shader5");
+
+  info.bSupportsDualSourceBlend =
+      HasAny({"GL_ARB_blend_func_extended", "GL_EXT_blend_func_extended"});
+  info.bSupportsPrimitiveRestart = !Bug(DriverDetails::BUG_PRIMITIVE_RESTART) &&
+                                   (version >= 310 || Has("GL_NV_primitive_restart"));
+  info.bSupportsGSInstancing = shader5;
+  info.bSupportsSSAA = shader5 && Has("GL_ARB_sample_shading");
+  info.bSupportsGeometryShaders =
+      version >= 320 && !Bug(DriverDetails::BUG_BROKEN_GEOMETRY_SHADERS);
+  info.bSupportsPaletteConversion =
+      HasAny({"GL_ARB_texture_buffer_object", "GL_OES_texture_buffer", "GL_EXT_texture_buffer"});
+  info.bSupportsClipControl = Has("GL_ARB_clip_control");
+  gl.bSupportsCopySubImage =
+      HasAny({"GL_ARB_copy_image", "GL_NV_copy_image", "GL_EXT_copy_image", "GL_OES_copy_image"}) &&
+      !Bug(DriverDetails::BUG_BROKEN_COPYIMAGE);
+  // Note: asked for without the "GL_" prefix, as it always has been.
+  gl.bSupportsTextureSubImage = Has("ARB_get_texture_sub_image");
+
+  // Binding layout qualifiers on desktop come with 420pack (ES 3.1 has them built in).
+  info.bSupportsBindingLayout = Has("GL_ARB_shading_language_420pack");
+  // Clip distances are only useful with depth clamping.
+  info.bSupportsDepthClamp = Has("GL_ARB_depth_clamp");
+  // Bitfield ops and dynamic sampler indexing come with shader5 on desktop.
+  info.bSupportsBitfield = shader5;
+  info.bSupportsDynamicSamplerIndexing = shader5;
+
+  gl.bIsES = is_es;
+  *program_binaries = Has("GL_ARB_get_program_binary");
+  gl.bSupportsGLPinnedMemory = Has("GL_AMD_pinned_memory");
+  gl.bSupportsGLSync = Has("GL_ARB_sync");
+  gl.bSupportsGLBaseVertex =
+      HasAny({"GL_ARB_draw_elements_base_vertex", "GL_EXT_draw_elements_base_vertex",
+              "GL_OES_draw_elements_base_vertex"});
+  gl.bSupportsGLBufferStorage = HasAny({"GL_ARB_buffer_storage", "GL_EXT_buffer_storage"});
+  gl.bSupportsMSAA = Has("GL_ARB_texture_multisample");
+  gl.bSupportViewportFloat = Has("GL_ARB_viewport_array");
+  gl.bSupportsDebug = HasAny({"GL_KHR_debug", "GL_ARB_debug_output"});
+  gl.bSupportsTextureStorage = Has("GL_ARB_texture_storage");
+  gl.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageNone;
+  gl.bSupportsImageLoadStore = Has("GL_ARB_shader_image_load_store");
+  gl.bSupportsConservativeDepth = Has("GL_ARB_conservative_depth");
+  gl.bSupportsAniso = Has("GL_EXT_texture_filter_anisotropic");
+  info.bSupportsComputeShaders = Has("GL_ARB_compute_shader");
+  info.bSupportsST3CTextures = Has("GL_EXT_texture_compression_s3tc");
+  info.bSupportsBPTCTextures = Has("GL_ARB_texture_compression_bptc");
+  info.bSupportsCoarseDerivatives = Has("GL_ARB_derivative_control") || version >= 450;
+  info.bSupportsTextureQueryLevels = Has("GL_ARB_texture_query_levels") || version >= 430;
+
+  // Fragment stores (bounding box) and vertex-shader line/point expansion read SSBOs.
+  if (Has("GL_ARB_shader_storage_buffer_object"))
+  {
+    GLint fragment_blocks = 0;
+    GLint vertex_blocks = 0;
+    glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &fragment_blocks);
+    glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vertex_blocks);
+    info.bSupportsFragmentStoresAndAtomics = fragment_blocks >= 1;
+    info.bSupportsVSLinePointExpand = vertex_blocks >= 1;
   }
   else
   {
-    g_backend_info.bSupportsFragmentStoresAndAtomics = false;
-    g_backend_info.bSupportsVSLinePointExpand = false;
+    info.bSupportsFragmentStoresAndAtomics = false;
+    info.bSupportsVSLinePointExpand = false;
   }
 
-  if (GLExtensions::Supports("GL_EXT_shader_framebuffer_fetch"))
+  if (Has("GL_EXT_shader_framebuffer_fetch"))
+    gl.SupportedFramebufferFetch = EsFbFetchType::FbFetchExt;
+  else if (Has("GL_ARM_shader_framebuffer_fetch"))
+    gl.SupportedFramebufferFetch = EsFbFetchType::FbFetchArm;
+  else
+    gl.SupportedFramebufferFetch = EsFbFetchType::FbFetchNone;
+  info.bSupportsFramebufferFetch = gl.SupportedFramebufferFetch != EsFbFetchType::FbFetchNone;
+}
+
+void ApplyESProfile(bool* program_binaries)
+{
+  auto& info = g_backend_info;
+  auto& gl = g_ogl_config;
+
+  if (Has("GL_OES_geometry_point_size"))
+    gl.SupportedESPointSize = EsPointSizeType::PointSizeOes;
+  else if (Has("GL_EXT_geometry_point_size"))
+    gl.SupportedESPointSize = EsPointSizeType::PointSizeExt;
+  else
+    gl.SupportedESPointSize = EsPointSizeType::PointSizeNone;
+
+  if (Has("VERSION_GLES_3_2"))
+    gl.SupportedESTextureBuffer = EsTexbufType::TexbufCore;
+  else if (Has("GL_OES_texture_buffer"))
+    gl.SupportedESTextureBuffer = EsTexbufType::TexbufOes;
+  else if (Has("GL_EXT_texture_buffer"))
+    gl.SupportedESTextureBuffer = EsTexbufType::TexbufExt;
+  else
+    gl.SupportedESTextureBuffer = EsTexbufType::TexbufNone;
+
+  // ES 3.0 has program binaries and sync objects in core.
+  *program_binaries = true;
+  gl.bSupportsGLSync = true;
+
+  // No depth clamp extension to go with GL_EXT_clip_cull_distance, no logic ops, no LOD bias
+  // sampler parameter.
+  info.bSupportsDepthClamp = false;
+  info.bSupportsLogicOp = false;
+  info.bSupportsLodBiasInSampler = false;
+  // glReadPixels cannot read depth on ES; glGetTextureSubImage can, where it exists.
+  info.bSupportsDepthReadback = gl.bSupportsTextureSubImage;
+
+  const bool has_point_size = gl.SupportedESPointSize != EsPointSizeType::PointSizeNone;
+  const u32 version = GLExtensions::Version();
+  if (version == 300)
   {
-    g_ogl_config.SupportedFramebufferFetch = EsFbFetchType::FbFetchExt;
+    gl.eSupportedGLSLVersion = GlslEs300;
+    gl.bSupportsAEP = false;
+    gl.bSupportsTextureStorage = true;
+    info.bSupportsGeometryShaders = false;
+    return;
   }
-  else if (GLExtensions::Supports("GL_ARM_shader_framebuffer_fetch"))
+
+  // ES 3.1 and newer.
+  gl.bSupportsAEP = Has("GL_ANDROID_extension_pack_es31a");
+  info.bSupportsBindingLayout = true;
+  gl.bSupportsImageLoadStore = true;
+  info.bSupportsComputeShaders = true;
+  info.bSupportsFragmentStoresAndAtomics = true;
+  gl.bSupportsMSAA = true;
+  gl.bSupportsTextureStorage = true;
+  info.bSupportsBitfield = true;
+
+  if (version == 310)
   {
-    g_ogl_config.SupportedFramebufferFetch = EsFbFetchType::FbFetchArm;
+    // Geometry shaders, sample shading and sampler indexing need the extension pack on 3.1.
+    gl.eSupportedGLSLVersion = GlslEs310;
+    info.bSupportsGeometryShaders = gl.bSupportsAEP;
+    info.bSupportsGSInstancing = info.bSupportsGeometryShaders && has_point_size;
+    info.bSupportsSSAA = gl.bSupportsAEP;
+    if (Has("GL_OES_texture_storage_multisample_2d_array"))
+      gl.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageOes;
+    info.bSupportsDynamicSamplerIndexing = gl.bSupportsAEP;
+    return;
+  }
+
+  gl.eSupportedGLSLVersion = GlslEs320;
+  info.bSupportsGeometryShaders = true;
+  info.bSupportsGSInstancing = has_point_size;
+  info.bSupportsPaletteConversion = true;
+  info.bSupportsSSAA = true;
+  gl.bSupportsCopySubImage = true;
+  gl.bSupportsGLBaseVertex = true;
+  gl.bSupportsDebug = true;
+  gl.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
+  info.bSupportsDynamicSamplerIndexing = true;
+  info.bSupportsSettingObjectNames = true;
+}
+
+bool ApplyDesktopProfile()
+{
+  auto& info = g_backend_info;
+  auto& gl = g_ogl_config;
+  bool ok = true;
+
+  if (Has("GL_ARB_texture_storage_multisample"))
+    gl.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
+
+  const u32 version = GLExtensions::Version();
+  if (version < 300)
+  {
+    PanicAlertFmtT("GPU: OGL ERROR: Need at least GLSL 1.30\n"
+                   "GPU: Does your video card support OpenGL 3.0?\n"
+                   "GPU: Your driver supports GLSL {0}",
+                   reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION)));
+    ok = false;
+  }
+  else if (version == 300 || version == 310)
+  {
+    // GLSL 1.30/1.40 have no layout qualifiers (needed for early depth and image access) and
+    // no geometry shaders.
+    gl.eSupportedGLSLVersion = version == 300 ? Glsl130 : Glsl140;
+    gl.bSupportsImageLoadStore = false;
+    gl.bSupportsConservativeDepth = false;
+    info.bSupportsGeometryShaders = false;
+  }
+  else if (version == 320)
+  {
+    gl.eSupportedGLSLVersion = Glsl150;
+  }
+  else if (version == 330)
+  {
+    gl.eSupportedGLSLVersion = Glsl330;
+    gl.bSupportsExplicitLayoutInShader = Has("GL_ARB_explicit_attrib_location");
+  }
+  else if (version >= 430)
+  {
+    // The GLSL version follows the GL version; GL_SHADING_LANGUAGE_VERSION is not parsed.
+    gl.eSupportedGLSLVersion = version >= 450 ? Glsl450 : Glsl430;
+    gl.bSupportsTextureStorage = true;
+    gl.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
+    gl.bSupportsImageLoadStore = true;
+    gl.bSupportsExplicitLayoutInShader = true;
+    info.bSupportsSSAA = true;
+    info.bSupportsSettingObjectNames = true;
+    info.bSupportsComputeShaders = true;  // core in 4.3
+    if (version >= 450)
+      gl.bSupportsTextureSubImage = true;
   }
   else
   {
-    g_ogl_config.SupportedFramebufferFetch = EsFbFetchType::FbFetchNone;
+    // 4.0 - 4.2 (and any other version between 3.3 and 4.3).
+    gl.eSupportedGLSLVersion = Glsl400;
+    info.bSupportsSSAA = true;
+    if (version == 420)
+    {
+      gl.bSupportsTextureStorage = true;
+      gl.bSupportsImageLoadStore = true;
+    }
   }
-  g_backend_info.bSupportsFramebufferFetch =
-      g_ogl_config.SupportedFramebufferFetch != EsFbFetchType::FbFetchNone;
 
-  if (m_main_gl_context->IsGLES())
+  gl.bSupportsAEP = false;
+
+  // gl_PointSize only takes effect on desktop with GL_PROGRAM_POINT_SIZE (ES has it always).
+  glEnable(GL_PROGRAM_POINT_SIZE);
+  return ok;
+}
+
+// Sample counts the driver offers for multisampled array textures of the given format, largest
+// first, with 1 added at the end when the driver leaves it out.
+std::vector<int> QuerySampleCounts(GLenum internal_format, const char* kind, const char* kind_short)
+{
+  GLint count = 0;
+  glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, internal_format, GL_NUM_SAMPLE_COUNTS, 1,
+                        &count);
+  ASSERT_MSG(VIDEO, count >= 0, "negative GL_NUM_SAMPLE_COUNTS for {} does not make sense: {}",
+             kind, count);
+
+  std::vector<int> counts;
+  counts.reserve(static_cast<size_t>(std::max(count, 0)) + 1);
+  if (count > 0)
   {
-    g_ogl_config.SupportedESPointSize =
-        GLExtensions::Supports("GL_OES_geometry_point_size") ? EsPointSizeType::PointSizeOes :
-        GLExtensions::Supports("GL_EXT_geometry_point_size") ? EsPointSizeType::PointSizeExt :
-                                                               EsPointSizeType::PointSizeNone;
-    g_ogl_config.SupportedESTextureBuffer =
-        GLExtensions::Supports("VERSION_GLES_3_2")      ? EsTexbufType::TexbufCore :
-        GLExtensions::Supports("GL_OES_texture_buffer") ? EsTexbufType::TexbufOes :
-        GLExtensions::Supports("GL_EXT_texture_buffer") ? EsTexbufType::TexbufExt :
-                                                          EsTexbufType::TexbufNone;
-
-    supports_glsl_cache = true;
-    g_ogl_config.bSupportsGLSync = true;
-
-    // TODO: Implement support for GL_EXT_clip_cull_distance when there is an extension for
-    // depth clamping.
-    g_backend_info.bSupportsDepthClamp = false;
-
-    // GLES does not support logic op.
-    g_backend_info.bSupportsLogicOp = false;
-
-    // glReadPixels() can't be used with non-color formats. But, if we support
-    // ARB_get_texture_sub_image (unlikely, except maybe on NVIDIA), we can use that instead.
-    g_backend_info.bSupportsDepthReadback = g_ogl_config.bSupportsTextureSubImage;
-
-    // GL_TEXTURE_LOD_BIAS is not supported on GLES.
-    g_backend_info.bSupportsLodBiasInSampler = false;
-
-    if (GLExtensions::Version() == 300)
-    {
-      g_ogl_config.eSupportedGLSLVersion = GlslEs300;
-      g_ogl_config.bSupportsAEP = false;
-      g_ogl_config.bSupportsTextureStorage = true;
-      g_backend_info.bSupportsGeometryShaders = false;
-    }
-    else if (GLExtensions::Version() == 310)
-    {
-      g_ogl_config.eSupportedGLSLVersion = GlslEs310;
-      g_ogl_config.bSupportsAEP = GLExtensions::Supports("GL_ANDROID_extension_pack_es31a");
-      g_backend_info.bSupportsBindingLayout = true;
-      g_ogl_config.bSupportsImageLoadStore = true;
-      g_backend_info.bSupportsGeometryShaders = g_ogl_config.bSupportsAEP;
-      g_backend_info.bSupportsComputeShaders = true;
-      g_backend_info.bSupportsGSInstancing =
-          g_backend_info.bSupportsGeometryShaders &&
-          g_ogl_config.SupportedESPointSize != EsPointSizeType::PointSizeNone;
-      g_backend_info.bSupportsSSAA = g_ogl_config.bSupportsAEP;
-      g_backend_info.bSupportsFragmentStoresAndAtomics = true;
-      g_ogl_config.bSupportsMSAA = true;
-      g_ogl_config.bSupportsTextureStorage = true;
-      if (GLExtensions::Supports("GL_OES_texture_storage_multisample_2d_array"))
-        g_ogl_config.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageOes;
-      g_backend_info.bSupportsBitfield = true;
-      g_backend_info.bSupportsDynamicSamplerIndexing = g_ogl_config.bSupportsAEP;
-    }
-    else
-    {
-      g_ogl_config.eSupportedGLSLVersion = GlslEs320;
-      g_ogl_config.bSupportsAEP = GLExtensions::Supports("GL_ANDROID_extension_pack_es31a");
-      g_backend_info.bSupportsBindingLayout = true;
-      g_ogl_config.bSupportsImageLoadStore = true;
-      g_backend_info.bSupportsGeometryShaders = true;
-      g_backend_info.bSupportsComputeShaders = true;
-      g_backend_info.bSupportsGSInstancing =
-          g_ogl_config.SupportedESPointSize != EsPointSizeType::PointSizeNone;
-      g_backend_info.bSupportsPaletteConversion = true;
-      g_backend_info.bSupportsSSAA = true;
-      g_backend_info.bSupportsFragmentStoresAndAtomics = true;
-      g_ogl_config.bSupportsCopySubImage = true;
-      g_ogl_config.bSupportsGLBaseVertex = true;
-      g_ogl_config.bSupportsDebug = true;
-      g_ogl_config.bSupportsMSAA = true;
-      g_ogl_config.bSupportsTextureStorage = true;
-      g_ogl_config.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
-      g_backend_info.bSupportsBitfield = true;
-      g_backend_info.bSupportsDynamicSamplerIndexing = true;
-      g_backend_info.bSupportsSettingObjectNames = true;
-    }
+    counts.resize(static_cast<size_t>(count));
+    static_assert(sizeof(GLint) == sizeof(int));
+    glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, internal_format, GL_SAMPLES, count,
+                          counts.data());
+    ASSERT_MSG(VIDEO, std::ranges::is_sorted(counts | std::views::reverse),
+               "GPU driver didn't return sorted {} AA modes: [{}]", kind_short,
+               fmt::join(counts, ", "));
   }
+  if (counts.empty() || counts.back() != 1)
+    counts.push_back(1);
+  return counts;
+}
+
+void DetectAAModes()
+{
+  auto& modes = g_backend_info.AAModes;
+  modes.clear();
+
+  if (!g_ogl_config.bSupportsMSAA)
+  {
+    modes = {1};
+    return;
+  }
+
+  if (Has("VERSION_4_2") || Has("VERSION_GLES_3"))
+  {
+    // Ask per format. Both lists are taken for the EFB colour format. (The ES
+    // GL_TEXTURE_2D_MULTISAMPLE_ARRAY_OES token has the same value, 0x9102.)
+    const GLenum format = OGLTexture::GetGLInternalFormatForTextureFormat(
+        FramebufferManager::GetEFBColorFormat(), true);
+    const std::vector<int> color = QuerySampleCounts(format, "colors", "color");
+    const std::vector<int> depth = QuerySampleCounts(format, "depth", "depth");
+
+    // Counts usable for both, ascending (the lists are descending, so walk them reversed).
+    modes.clear();
+    modes.reserve(std::min(color.size(), depth.size()));
+    std::ranges::set_intersection(color | std::views::reverse, depth | std::views::reverse,
+                                  std::back_inserter(modes));
+    return;
+  }
+
+  // Without the per-format query the limit is the smallest of the general limits. (The colour
+  // texture limit is read for depth as well.)
+  GLint color_limit = 0;
+  GLint depth_limit = 0;
+  GLint framebuffer_limit = 0;
+  glGetIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &color_limit);
+  glGetIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &depth_limit);
+  glGetIntegerv(GL_MAX_SAMPLES, &framebuffer_limit);
+
+  // Every power of two from the limit down to 1, listed ascending for the UI.
+  u32 samples = static_cast<u32>(std::min({framebuffer_limit, color_limit, depth_limit}));
+  for (; samples > 1; samples /= 2)
+    modes.insert(modes.begin(), samples);
+  modes.insert(modes.begin(), 1);
+}
+
+void DetectSubgroupSupport()
+{
+  auto& gl = g_ogl_config;
+  // The subgroup paths also use gl_HelperInvocation (GLSL 4.50 / ES 3.20).
+  const bool helper_invocation =
+      gl.bIsES ? gl.eSupportedGLSLVersion >= GlslEs320 : gl.eSupportedGLSLVersion >= Glsl450;
+  gl.bSupportsKHRShaderSubgroup = Has("GL_KHR_shader_subgroup") && helper_invocation;
+  if (!gl.bSupportsKHRShaderSubgroup)
+    return;
+
+  constexpr GLint needed = GL_SUBGROUP_FEATURE_BASIC_BIT_KHR |
+                           GL_SUBGROUP_FEATURE_ARITHMETIC_BIT_KHR |
+                           GL_SUBGROUP_FEATURE_BALLOT_BIT_KHR;
+  GLint features = 0;
+  glGetIntegerv(GL_SUBGROUP_SUPPORTED_FEATURES_KHR, &features);
+  if ((features & needed) != needed)
+    gl.bSupportsKHRShaderSubgroup = false;
+}
+
+void ReportMissingFeatures(bool program_binaries)
+{
+  const auto& info = g_backend_info;
+  const auto& gl = g_ogl_config;
+  const std::pair<bool, const char*> checks[] = {
+      {info.bSupportsDualSourceBlend, "DualSourceBlend "},
+      {info.bSupportsPrimitiveRestart, "PrimitiveRestart "},
+      {info.bSupportsEarlyZ, "EarlyZ "},
+      {gl.bSupportsGLPinnedMemory, "PinnedMemory "},
+      {program_binaries, "ShaderCache "},
+      {gl.bSupportsGLBaseVertex, "BaseVertex "},
+      {gl.bSupportsGLBufferStorage, "BufferStorage "},
+      {gl.bSupportsGLSync, "Sync "},
+      {gl.bSupportsMSAA, "MSAA "},
+      {info.bSupportsSSAA, "SSAA "},
+      {info.bSupportsGSInstancing, "GSInstancing "},
+      {info.bSupportsClipControl, "ClipControl "},
+      {gl.bSupportsCopySubImage, "CopyImageSubData "},
+      {info.bSupportsDepthClamp, "DepthClamp "},
+  };
+  std::string missing;
+  for (const auto& [present, label] : checks)
+  {
+    if (!present)
+      missing += label;
+  }
+
+  if (missing.empty())
+    INFO_LOG_FMT(VIDEO, "All used OGL Extensions are available.");
   else
+    WARN_LOG_FMT(VIDEO, "Missing OGL Extensions: {}", missing);
+}
+}  // namespace
+
+void InitDriverInfo()
+{
+  const char* vendor = g_ogl_config.gl_vendor;
+  const char* renderer = g_ogl_config.gl_renderer;
+  const char* version = g_ogl_config.gl_version;
+
+  DriverId id;
+  IdentifyVendor(vendor, renderer, version, &id);
+
+  switch (id.vendor)
   {
-    if (GLExtensions::Supports("GL_ARB_texture_storage_multisample"))
-      g_ogl_config.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
-
-    if (GLExtensions::Version() < 300)
-    {
-      PanicAlertFmtT("GPU: OGL ERROR: Need at least GLSL 1.30\n"
-                     "GPU: Does your video card support OpenGL 3.0?\n"
-                     "GPU: Your driver supports GLSL {0}",
-                     reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION)));
-      bSuccess = false;
-    }
-    else if (GLExtensions::Version() == 300)
-    {
-      g_ogl_config.eSupportedGLSLVersion = Glsl130;
-      g_ogl_config.bSupportsImageLoadStore = false;  // layout keyword is only supported on glsl150+
-      g_ogl_config.bSupportsConservativeDepth =
-          false;  // layout keyword is only supported on glsl150+
-      g_backend_info.bSupportsGeometryShaders =
-          false;  // geometry shaders are only supported on glsl150+
-    }
-    else if (GLExtensions::Version() == 310)
-    {
-      g_ogl_config.eSupportedGLSLVersion = Glsl140;
-      g_ogl_config.bSupportsImageLoadStore = false;  // layout keyword is only supported on glsl150+
-      g_ogl_config.bSupportsConservativeDepth =
-          false;  // layout keyword is only supported on glsl150+
-      g_backend_info.bSupportsGeometryShaders =
-          false;  // geometry shaders are only supported on glsl150+
-    }
-    else if (GLExtensions::Version() == 320)
-    {
-      g_ogl_config.eSupportedGLSLVersion = Glsl150;
-    }
-    else if (GLExtensions::Version() == 330)
-    {
-      g_ogl_config.eSupportedGLSLVersion = Glsl330;
-      g_ogl_config.bSupportsExplicitLayoutInShader =
-          GLExtensions::Supports("GL_ARB_explicit_attrib_location");
-    }
-    else if (GLExtensions::Version() >= 430)
-    {
-      // TODO: We should really parse the GL_SHADING_LANGUAGE_VERSION token.
-      if (GLExtensions::Version() >= 450)
-      {
-        g_ogl_config.eSupportedGLSLVersion = Glsl450;
-      }
-      else
-      {
-        g_ogl_config.eSupportedGLSLVersion = Glsl430;
-      }
-      g_ogl_config.bSupportsTextureStorage = true;
-      g_ogl_config.SupportedMultisampleTexStorage = MultisampleTexStorageType::TexStorageCore;
-      g_ogl_config.bSupportsImageLoadStore = true;
-      g_ogl_config.bSupportsExplicitLayoutInShader = true;
-      g_backend_info.bSupportsSSAA = true;
-      g_backend_info.bSupportsSettingObjectNames = true;
-
-      // Compute shaders are core in GL4.3.
-      g_backend_info.bSupportsComputeShaders = true;
-      if (GLExtensions::Version() >= 450)
-        g_ogl_config.bSupportsTextureSubImage = true;
-    }
-    else
-    {
-      g_ogl_config.eSupportedGLSLVersion = Glsl400;
-      g_backend_info.bSupportsSSAA = true;
-
-      if (GLExtensions::Version() == 420)
-      {
-        // Texture storage and shader image load/store are core in GL4.2.
-        g_ogl_config.bSupportsTextureStorage = true;
-        g_ogl_config.bSupportsImageLoadStore = true;
-      }
-    }
-
-    // Desktop OpenGL can't have the Android Extension Pack
-    g_ogl_config.bSupportsAEP = false;
-
-    // Desktop GL requires GL_PROGRAM_POINT_SIZE set to use gl_PointSize in shaders.
-    // It is implicitly enabled in GLES.
-    glEnable(GL_PROGRAM_POINT_SIZE);
+  case DriverDetails::VENDOR_QUALCOMM:
+    ReadQualcommVersion(version, &id);
+    break;
+  case DriverDetails::VENDOR_ARM:
+    ReadMaliVersion(&id);
+    break;
+  case DriverDetails::VENDOR_MESA:
+    ReadMesaDetails(vendor, renderer, version, &id);
+    break;
+  case DriverDetails::VENDOR_INTEL:
+    ReadIntelDetails(renderer, version, &id);
+    break;
+  case DriverDetails::VENDOR_NVIDIA:
+    ReadNvidiaVersion(version, &id);
+    break;
+  case DriverDetails::VENDOR_IMGTEC:
+    ReadImgTecVersion(version, &id);
+    break;
+  default:
+    // Nothing else is needed for the remaining vendors.
+    break;
   }
 
-  // Supported by all GS-supporting ES and 4.3+
-  g_backend_info.bSupportsGLLayerInFS =
-      g_backend_info.bSupportsGeometryShaders && g_ogl_config.eSupportedGLSLVersion >= Glsl430;
+  DriverDetails::Init(DriverDetails::API_OPENGL, id.vendor, id.driver, id.version, id.family,
+                      std::string(renderer));
+}
 
-  g_backend_info.bSupportsBBox = g_backend_info.bSupportsFragmentStoresAndAtomics;
+bool PopulateConfig(GLContext* main_gl_context)
+{
+  auto& info = g_backend_info;
+  auto& gl = g_ogl_config;
+  const bool is_es = main_gl_context->IsGLES();
 
-  // Either method can do early-z tests. See PixelShaderGen for details.
-  g_backend_info.bSupportsEarlyZ =
-      g_ogl_config.bSupportsImageLoadStore || g_ogl_config.bSupportsConservativeDepth;
+  gl.gl_vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+  gl.gl_renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+  gl.gl_version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
 
-  g_backend_info.AAModes.clear();
-  if (g_ogl_config.bSupportsMSAA)
+  bool ok = is_es || CheckDesktopRequirements();
+
+  // Analytics reads the adapter name from here.
+  info.AdapterName = gl.gl_renderer;
+
+  bool program_binaries = false;
+  ReadExtensionFeatures(is_es, &program_binaries);
+
+  if (is_es)
+    ApplyESProfile(&program_binaries);
+  else if (!ApplyDesktopProfile())
+    ok = false;
+
+  // Layer selection in the pixel shader: every ES with geometry shaders, desktop 4.3+.
+  info.bSupportsGLLayerInFS = info.bSupportsGeometryShaders && gl.eSupportedGLSLVersion >= Glsl430;
+  info.bSupportsBBox = info.bSupportsFragmentStoresAndAtomics;
+  // Early depth tests work through either qualifier (see the pixel shader generator).
+  info.bSupportsEarlyZ = gl.bSupportsImageLoadStore || gl.bSupportsConservativeDepth;
+
+  DetectAAModes();
+  DetectSubgroupSupport();
+
+  // GPU texture decoding needs texel buffers, compute shaders and image stores.
+  info.bSupportsGPUTextureDecoding =
+      info.bSupportsPaletteConversion && info.bSupportsComputeShaders && gl.bSupportsImageLoadStore;
+  info.bSupportsBackgroundCompiling = !Bug(DriverDetails::BUG_SHARED_CONTEXT_SHADER_COMPILATION);
+
+  // Program binaries are only worth it when the driver has at least one binary format.
+  if (program_binaries)
   {
-    bool supportsGetInternalFormat =
-        GLExtensions::Supports("VERSION_4_2") || GLExtensions::Supports("VERSION_GLES_3");
-    if (supportsGetInternalFormat)
-    {
-      // Note: GL_TEXTURE_2D_MULTISAMPLE_ARRAY_OES should technically be used for
-      // GL_OES_texture_storage_multisample_2d_array, but both are 0x9102 so it does not matter.
-
-      std::vector<int> color_aa_modes;
-      {
-        GLenum colorInternalFormat = OGLTexture::GetGLInternalFormatForTextureFormat(
-            FramebufferManager::GetEFBColorFormat(), true);
-        GLint num_color_sample_counts = 0;
-        glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, colorInternalFormat,
-                              GL_NUM_SAMPLE_COUNTS, 1, &num_color_sample_counts);
-
-        ASSERT_MSG(VIDEO, num_color_sample_counts >= 0,
-                   "negative GL_NUM_SAMPLE_COUNTS for colors does not make sense: {}",
-                   num_color_sample_counts);
-        color_aa_modes.reserve(num_color_sample_counts + 1);
-        if (num_color_sample_counts > 0)
-        {
-          color_aa_modes.resize(num_color_sample_counts);
-
-          static_assert(sizeof(GLint) == sizeof(u32));
-          glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, colorInternalFormat, GL_SAMPLES,
-                                num_color_sample_counts,
-                                reinterpret_cast<GLint*>(color_aa_modes.data()));
-          ASSERT_MSG(VIDEO, std::ranges::is_sorted(color_aa_modes | std::views::reverse),
-                     "GPU driver didn't return sorted color AA modes: [{}]",
-                     fmt::join(color_aa_modes, ", "));
-        }
-
-        if (color_aa_modes.empty() || color_aa_modes.back() != 1)
-          color_aa_modes.push_back(1);
-      }
-
-      std::vector<int> depth_aa_modes;
-      {
-        GLenum depthInternalFormat = OGLTexture::GetGLInternalFormatForTextureFormat(
-            FramebufferManager::GetEFBColorFormat(), true);
-        GLint num_depth_sample_counts = 0;
-        glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, depthInternalFormat,
-                              GL_NUM_SAMPLE_COUNTS, 1, &num_depth_sample_counts);
-
-        ASSERT_MSG(VIDEO, num_depth_sample_counts >= 0,
-                   "negative GL_NUM_SAMPLE_COUNTS for depth does not make sense: {}",
-                   num_depth_sample_counts);
-        depth_aa_modes.reserve(num_depth_sample_counts + 1);
-        if (num_depth_sample_counts > 0)
-        {
-          depth_aa_modes.resize(num_depth_sample_counts);
-
-          static_assert(sizeof(GLint) == sizeof(u32));
-          glGetInternalformativ(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, depthInternalFormat, GL_SAMPLES,
-                                num_depth_sample_counts,
-                                reinterpret_cast<GLint*>(depth_aa_modes.data()));
-          ASSERT_MSG(VIDEO, std::ranges::is_sorted(depth_aa_modes | std::views::reverse),
-                     "GPU driver didn't return sorted depth AA modes: [{}]",
-                     fmt::join(depth_aa_modes, ", "));
-        }
-
-        if (depth_aa_modes.empty() || depth_aa_modes.back() != 1)
-          depth_aa_modes.push_back(1);
-      }
-
-      // The spec says supported sample formats are returned in descending numeric order.
-      // It also says "Only positive values are returned", but does not specify whether 1 is
-      // included or not; it seems like NVIDIA and Intel GPUs do not include it.
-      // We've inserted 1 at the back of both if not present to handle this.
-      g_backend_info.AAModes.clear();
-      g_backend_info.AAModes.reserve(std::min(color_aa_modes.size(), depth_aa_modes.size()));
-      // We only want AA modes that are supported for both the color and depth textures. Probably
-      // the support is the same, though. views::reverse is used to swap the order ahead of time.
-      std::ranges::set_intersection(color_aa_modes | std::views::reverse,
-                                    depth_aa_modes | std::views::reverse,
-                                    std::back_inserter(g_backend_info.AAModes));
-    }
-    else
-    {
-      // The documentation for glGetInternalformativ says its value is at least the minimum of
-      // GL_MAX_SAMPLES, GL_MAX_COLOR_TEXTURE_SAMPLES, and GL_MAX_DEPTH_TEXTURE_SAMPLES (and
-      // GL_MAX_INTEGER_SAMPLES for integer textures, assumed not applicable here).
-      GLint max_color_samples = 0;
-      glGetIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &max_color_samples);
-      GLint max_depth_samples = 0;
-      glGetIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &max_depth_samples);
-      // Note: The desktop OpenGL ref pages don't actually say that GL_MAX_SAMPLES is a valid
-      // parameter for glGetIntegerv (though the ES ones do). However, MAX_SAMPLES is
-      // referenced in the GL 3.1 spec and by GL_ARB_texture_multisample (which is written against
-      // the OpenGL 3.1 spec), so presumably it is valid.
-      GLint max_samples = 0;
-      glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
-      u32 supported_max_samples =
-          static_cast<u32>(std::min({max_samples, max_color_samples, max_depth_samples}));
-
-      while (supported_max_samples > 1)
-      {
-        g_backend_info.AAModes.push_back(supported_max_samples);
-        supported_max_samples /= 2;
-      }
-      g_backend_info.AAModes.push_back(1);
-      // The UI wants ascending order
-      std::ranges::reverse(g_backend_info.AAModes);
-    }
+    GLint formats = 0;
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &formats);
+    program_binaries = formats > 0;
   }
-  else
+  info.bSupportsPipelineCacheData = program_binaries;
+
+  // Nothing is drawn multisampled into the window, and blitting into a multisampled default
+  // framebuffer fails, so a driver that forces MSAA on it is a fatal setup problem.
+  GLint window_samples = 0;
+  glGetIntegerv(GL_SAMPLES, &window_samples);
+  if (window_samples > 1)
   {
-    g_backend_info.AAModes = {1};
-  }
-
-  const bool bSupportsIsHelperInvocation = g_ogl_config.bIsES ?
-                                               g_ogl_config.eSupportedGLSLVersion >= GlslEs320 :
-                                               g_ogl_config.eSupportedGLSLVersion >= Glsl450;
-  g_ogl_config.bSupportsKHRShaderSubgroup =
-      GLExtensions::Supports("GL_KHR_shader_subgroup") && bSupportsIsHelperInvocation;
-  if (g_ogl_config.bSupportsKHRShaderSubgroup)
-  {
-    // Check for the features: basic + arithmetic + ballot
-    GLint supported_features = 0;
-    glGetIntegerv(GL_SUBGROUP_SUPPORTED_FEATURES_KHR, &supported_features);
-    if (~supported_features &
-        (GL_SUBGROUP_FEATURE_BASIC_BIT_KHR | GL_SUBGROUP_FEATURE_ARITHMETIC_BIT_KHR |
-         GL_SUBGROUP_FEATURE_BALLOT_BIT_KHR))
-    {
-      g_ogl_config.bSupportsKHRShaderSubgroup = false;
-    }
-  }
-
-  // We require texel buffers, image load store, and compute shaders to enable GPU texture decoding.
-  // If the driver doesn't expose the extensions, but supports GL4.3/GLES3.1, it will still be
-  // enabled in the version check below.
-  g_backend_info.bSupportsGPUTextureDecoding = g_backend_info.bSupportsPaletteConversion &&
-                                               g_backend_info.bSupportsComputeShaders &&
-                                               g_ogl_config.bSupportsImageLoadStore;
-
-  // Background compiling is supported only when shared contexts aren't broken.
-  g_backend_info.bSupportsBackgroundCompiling =
-      !DriverDetails::HasBug(DriverDetails::BUG_SHARED_CONTEXT_SHADER_COMPILATION);
-
-  // Program binaries are supported on GL4.1+, ARB_get_program_binary, or ES3.
-  if (supports_glsl_cache)
-  {
-    // We need to check the number of formats supported. If zero, don't bother getting the binaries.
-    GLint num_formats = 0;
-    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &num_formats);
-    supports_glsl_cache = num_formats > 0;
-  }
-  g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
-
-  int samples;
-  glGetIntegerv(GL_SAMPLES, &samples);
-  if (samples > 1)
-  {
-    // MSAA on default framebuffer isn't working because of glBlitFramebuffer.
-    // It also isn't useful as we don't render anything to the default framebuffer.
-    // We also try to get a non-msaa fb, so this only happens when forced by the driver.
     PanicAlertFmtT(
         "The graphics driver is forcibly enabling anti-aliasing for Dolphin. You need to "
         "turn this off in the graphics driver's settings in order for Dolphin to work.\n\n"
         "(MSAA with {0} samples found on default framebuffer)",
-        samples);
-    bSuccess = false;
+        window_samples);
+    ok = false;
   }
 
-  if (!bSuccess)
+  if (!ok)
     return false;
 
   g_Config.VerifyValidity();
   UpdateActiveConfig();
 
-  OSD::AddMessage(fmt::format("Video Info: {}, {}, {}", g_ogl_config.gl_vendor,
-                              g_ogl_config.gl_renderer, g_ogl_config.gl_version),
-                  5000);
-
-  if (!g_ogl_config.bSupportsGLBufferStorage && !g_ogl_config.bSupportsGLPinnedMemory)
+  OSD::AddMessage(
+      fmt::format("Video Info: {}, {}, {}", gl.gl_vendor, gl.gl_renderer, gl.gl_version), 5000);
+  if (!gl.bSupportsGLBufferStorage && !gl.bSupportsGLPinnedMemory)
   {
     OSD::AddMessage(fmt::format("Your OpenGL driver does not support {}_buffer_storage.",
-                                m_main_gl_context->IsGLES() ? "EXT" : "ARB"),
+                                is_es ? "EXT" : "ARB"),
                     60000);
     OSD::AddMessage("This device's performance may be poor.", 60000);
   }
+  INFO_LOG_FMT(VIDEO, "Video Info: {}, {}, {}", gl.gl_vendor, gl.gl_renderer, gl.gl_version);
 
-  INFO_LOG_FMT(VIDEO, "Video Info: {}, {}, {}", g_ogl_config.gl_vendor, g_ogl_config.gl_renderer,
-               g_ogl_config.gl_version);
-
-  const std::string missing_extensions = fmt::format(
-      "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-      g_backend_info.bSupportsDualSourceBlend ? "" : "DualSourceBlend ",
-      g_backend_info.bSupportsPrimitiveRestart ? "" : "PrimitiveRestart ",
-      g_backend_info.bSupportsEarlyZ ? "" : "EarlyZ ",
-      g_ogl_config.bSupportsGLPinnedMemory ? "" : "PinnedMemory ",
-      supports_glsl_cache ? "" : "ShaderCache ",
-      g_ogl_config.bSupportsGLBaseVertex ? "" : "BaseVertex ",
-      g_ogl_config.bSupportsGLBufferStorage ? "" : "BufferStorage ",
-      g_ogl_config.bSupportsGLSync ? "" : "Sync ", g_ogl_config.bSupportsMSAA ? "" : "MSAA ",
-      g_backend_info.bSupportsSSAA ? "" : "SSAA ",
-      g_backend_info.bSupportsGSInstancing ? "" : "GSInstancing ",
-      g_backend_info.bSupportsClipControl ? "" : "ClipControl ",
-      g_ogl_config.bSupportsCopySubImage ? "" : "CopyImageSubData ",
-      g_backend_info.bSupportsDepthClamp ? "" : "DepthClamp ");
-
-  if (missing_extensions.empty())
-    INFO_LOG_FMT(VIDEO, "All used OGL Extensions are available.");
-  else
-    WARN_LOG_FMT(VIDEO, "Missing OGL Extensions: {}", missing_extensions);
-
+  ReportMissingFeatures(program_binaries);
   return true;
 }
 

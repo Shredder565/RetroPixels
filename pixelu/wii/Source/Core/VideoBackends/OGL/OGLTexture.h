@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,8 @@
 
 namespace OGL
 {
+// A GL texture object. Textures are created and uploaded through the dedicated
+// GL_MUTABLE_TEXTURE_INDEX unit so that draw-time bindings stay untouched.
 class OGLTexture final : public AbstractTexture
 {
 public:
@@ -31,42 +32,42 @@ public:
   void Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer, size_t buffer_size,
             u32 layer) override;
 
-  GLuint GetGLTextureId() const { return m_texId; }
+  GLuint GetGLTextureId() const { return m_id; }
+
+  // The bind target for this texture's type and sample count.
   GLenum GetGLTarget() const
   {
-    if (m_config.type == AbstractTextureType::Texture_2DArray)
+    const bool ms = m_config.IsMultisampled();
+    switch (m_config.type)
     {
-      if (m_config.IsMultisampled())
-        return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
-      else
-        return GL_TEXTURE_2D_ARRAY;
-    }
-    else if (m_config.type == AbstractTextureType::Texture_2D)
-    {
-      if (m_config.IsMultisampled())
-        return GL_TEXTURE_2D_MULTISAMPLE;
-      else
-        return GL_TEXTURE_2D;
-    }
-    else if (m_config.type == AbstractTextureType::Texture_CubeMap)
-    {
+    case AbstractTextureType::Texture_2D:
+      return ms ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D;
+    case AbstractTextureType::Texture_CubeMap:
       return GL_TEXTURE_CUBE_MAP;
+    case AbstractTextureType::Texture_2DArray:
+      return ms ? GL_TEXTURE_2D_MULTISAMPLE_ARRAY : GL_TEXTURE_2D_ARRAY;
     }
-
     return GL_TEXTURE_2D_ARRAY;
   }
+
+  // Internal format for a texture format: the sized one when allocating storage, otherwise the
+  // one glTexImage* takes (unsized for the 8-bit colour formats).
   static GLenum GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage);
   GLenum GetGLFormatForImageTexture() const;
 
 private:
-  void BlitFramebuffer(OGLTexture* srcentry, const MathUtil::Rectangle<int>& src_rect,
-                       u32 src_layer, u32 src_level, const MathUtil::Rectangle<int>& dst_rect,
-                       u32 dst_layer, u32 dst_level);
+  void AllocateStorage(GLenum target, GLenum internal_format);
+  void BlitInto(const OGLTexture* src, const MathUtil::Rectangle<int>& src_rect, u32 src_layer,
+                u32 src_level, const MathUtil::Rectangle<int>& dst_rect, u32 dst_layer,
+                u32 dst_level);
 
-  GLuint m_texId;
-  std::string m_name;
+  GLuint m_id = 0;
+  std::string m_label;
 };
 
+// A pixel pack/unpack buffer object used to move texture data between the GPU and the CPU.
+// With buffer storage, sync objects and image load/store, the buffer stays mapped for its whole
+// life and a fence tracks when the GPU side of a copy is done.
 class OGLStagingTexture final : public AbstractStagingTexture
 {
 public:
@@ -91,13 +92,15 @@ private:
   OGLStagingTexture(StagingTextureType type, const TextureConfig& config, GLenum target,
                     GLuint buffer_name, size_t buffer_size, char* map_ptr, size_t map_stride);
 
-private:
-  GLenum m_target;
-  GLuint m_buffer_name;
-  size_t m_buffer_size;
+  void ReplaceFence();
+
+  GLenum m_bind_target;
+  GLuint m_buffer;
+  size_t m_size;
   GLsync m_fence = nullptr;
 };
 
+// A framebuffer object. The window framebuffer is FBO 0 with no attachments.
 class OGLFramebuffer final : public AbstractFramebuffer
 {
 public:
@@ -113,10 +116,10 @@ public:
 
   GLuint GetFBO() const { return m_fbo; }
 
-  // Used for updating the dimensions of the system/window framebuffer.
+  // For the window framebuffer, whose size follows the window.
   void UpdateDimensions(u32 width, u32 height);
 
-protected:
+private:
   GLuint m_fbo;
 };
 
