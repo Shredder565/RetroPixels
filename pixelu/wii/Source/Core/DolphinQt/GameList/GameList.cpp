@@ -269,15 +269,18 @@ void GameList::BuildTable()
 {
   m_list = new GameTableView(this);
   m_list->setModel(m_list_proxy);
-  m_list->setTabKeyNavigation(false);
-  m_list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  // Whole rows are selected, several at a time; the context menu is our own.
   m_list->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_list->setAlternatingRowColors(true);
+  m_list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+  // Plain striped rows on one line each, without grid lines.
+  m_list->setWordWrap(false);
   m_list->setShowGrid(false);
+  m_list->setAlternatingRowColors(true);
+  // Tab moves focus out of the table instead of between cells.
+  m_list->setTabKeyNavigation(false);
   m_list->setSortingEnabled(true);
   m_list->setCurrentIndex(QModelIndex());
-  m_list->setContextMenuPolicy(Qt::CustomContextMenu);
-  m_list->setWordWrap(false);
   // 32 pixel banners plus a pixel of room above and below.
   m_list->verticalHeader()->setDefaultSectionSize(34);
 
@@ -923,31 +926,31 @@ bool GameList::HasMultipleSelected() const
   return CurrentView()->selectionModel()->selectedRows().size() > 1;
 }
 
-std::shared_ptr<const UICommon::GameFile> GameList::FindGame(const std::string& path) const
+std::shared_ptr<const UICommon::GameFile> GameList::FindGame(const std::string& file_path) const
 {
-  return m_model.FindGame(path);
+  return m_model.FindGame(file_path);
 }
 
 std::shared_ptr<const UICommon::GameFile>
-GameList::FindSecondDisc(const UICommon::GameFile& game) const
+GameList::FindSecondDisc(const UICommon::GameFile& first_disc) const
 {
-  return m_model.FindSecondDisc(game);
+  return m_model.FindSecondDisc(first_disc);
 }
 
-std::string GameList::GetNetPlayName(const UICommon::GameFile& game) const
+std::string GameList::GetNetPlayName(const UICommon::GameFile& entry) const
 {
-  return m_model.GetNetPlayName(game);
+  return m_model.GetNetPlayName(entry);
 }
 
-void GameList::SetViewColumn(int col, bool view)
+void GameList::SetViewColumn(int column, bool visible)
 {
-  m_list->setColumnHidden(col, !view);
+  m_list->setColumnHidden(column, !visible);
 }
 
-void GameList::SetPreferredView(bool list)
+void GameList::SetPreferredView(bool prefer_list)
 {
-  m_prefer_list = list;
-  Settings::Instance().SetPreferredView(list);
+  m_prefer_list = prefer_list;
+  Settings::Instance().SetPreferredView(prefer_list);
   ShowFittingPage();
 }
 
@@ -980,23 +983,29 @@ void GameList::keyPressEvent(QKeyEvent* event)
 void GameList::OnColumnVisibilityToggled(const QString& row, bool visible)
 {
   // The View > List Columns entries pass their (translated) labels.
-  static const QMap<QString, Column> columns_by_label{
-      {tr("Platform"), Column::Platform},
-      {tr("Banner"), Column::Banner},
-      {tr("Title"), Column::Title},
-      {tr("Description"), Column::Description},
-      {tr("Maker"), Column::Maker},
-      {tr("File Name"), Column::FileName},
-      {tr("File Path"), Column::FilePath},
-      {tr("Game ID"), Column::ID},
-      {tr("Region"), Column::Country},
-      {tr("File Size"), Column::Size},
-      {tr("File Format"), Column::FileFormat},
-      {tr("Block Size"), Column::BlockSize},
-      {tr("Compression"), Column::Compression},
-      {tr("Time Played"), Column::TimePlayed},
-      {tr("Tags"), Column::Tags},
-  };
+  // Built once, on first use, in column order.
+  static const QMap<QString, Column> columns_by_label = [] {
+    QMap<QString, Column> labels;
+    const auto add = [&labels](const QString& label, Column column) {
+      labels.insert(label, column);
+    };
+    add(tr("Platform"), Column::Platform);
+    add(tr("Banner"), Column::Banner);
+    add(tr("Title"), Column::Title);
+    add(tr("Description"), Column::Description);
+    add(tr("Maker"), Column::Maker);
+    add(tr("File Name"), Column::FileName);
+    add(tr("File Path"), Column::FilePath);
+    add(tr("Game ID"), Column::ID);
+    add(tr("Region"), Column::Country);
+    add(tr("File Size"), Column::Size);
+    add(tr("File Format"), Column::FileFormat);
+    add(tr("Block Size"), Column::BlockSize);
+    add(tr("Compression"), Column::Compression);
+    add(tr("Time Played"), Column::TimePlayed);
+    add(tr("Tags"), Column::Tags);
+    return labels;
+  }();
 
   const Column column = columns_by_label.value(row, Column::Platform);
   m_list->setColumnHidden(ColumnIndex(column), !visible);

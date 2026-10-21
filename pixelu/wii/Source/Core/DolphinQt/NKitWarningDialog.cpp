@@ -30,18 +30,19 @@ NKitWarningDialog::NKitWarningDialog(QWidget* parent) : QDialog(parent)
   setWindowTitle(tr("NKit Warning"));
   setWindowIcon(Resources::GetAppIcon());
 
-  auto* const explanation = new QLabel(tr(
-      "You are about to run an NKit disc image. NKit disc images cause problems that don't "
-      "happen with normal disc images. These problems include:\n"
-      "\n"
-      "• The emulated loading times are longer\n"
-      "• You can't use NetPlay with people who have normal disc images\n"
-      "• Input recordings are not compatible between NKit disc images and normal disc images\n"
-      "• Savestates are not compatible between NKit disc images and normal disc images\n"
-      "• Some games can crash, such as Super Paper Mario and Metal Gear Solid: The Twin Snakes\n"
-      "• Wii games don't work at all in older versions of Dolphin and in many other programs\n"
-      "\n"
-      "Are you sure you want to continue anyway?"));
+  // Each line break sits at the start of the line it begins.
+  auto* const explanation = new QLabel(
+      tr("You are about to run an NKit disc image. NKit disc images cause problems that "
+         "don't happen with normal disc images. These problems include:"
+         "\n"
+         "\n• The emulated loading times are longer"
+         "\n• You can't use NetPlay with people who have normal disc images"
+         "\n• Input recordings are not compatible between NKit disc images and normal disc images"
+         "\n• Savestates are not compatible between NKit disc images and normal disc images"
+         "\n• Some games can crash, such as Super Paper Mario and Metal Gear Solid: The Twin Snakes"
+         "\n• Wii games don't work at all in older versions of Dolphin and in many other programs"
+         "\n"
+         "\nAre you sure you want to continue anyway?"));
   explanation->setWordWrap(true);
 
   auto* const understood = new QCheckBox(tr("I am aware of the risks and want to continue"));

@@ -99,16 +99,16 @@ ConvertDialog::ConvertDialog(QList<std::shared_ptr<const UICommon::GameFile>> fi
   auto* const convert_button = new QPushButton(tr("Convert..."));
 
   auto* const explanation = new QLabel(
-      tr("ISO: A simple and robust format which is supported by many programs. It takes up more "
-         "space than any other format.\n\n"
-         "GCZ: A basic compressed format which is compatible with most versions of Dolphin and "
-         "some other programs. It can't efficiently compress junk data (unless removed) or "
-         "encrypted Wii data.\n\n"
-         "WIA: An advanced compressed format which is compatible with Dolphin 5.0-12188 and later, "
-         "and a few other programs. It can efficiently compress encrypted Wii data, but not junk "
-         "data (unless removed).\n\n"
-         "RVZ: An advanced compressed format which is compatible with Dolphin 5.0-12188 and later. "
-         "It can efficiently compress both junk data and encrypted Wii data."));
+      tr("ISO: A simple and robust format which is supported by many programs. It takes "
+         "up more space than any other format.\n\n"
+         "GCZ: A basic compressed format which is compatible with most versions of "
+         "Dolphin and some other programs. It can't efficiently compress junk data "
+         "(unless removed) or encrypted Wii data.\n\n"
+         "WIA: An advanced compressed format which is compatible with Dolphin 5.0-12188 "
+         "and later, and a few other programs. It can efficiently compress encrypted "
+         "Wii data, but not junk data (unless removed).\n\n"
+         "RVZ: An advanced compressed format which is compatible with Dolphin 5.0-12188 "
+         "and later. It can efficiently compress both junk data and encrypted Wii data."));
   explanation->setWordWrap(true);
   explanation->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
 

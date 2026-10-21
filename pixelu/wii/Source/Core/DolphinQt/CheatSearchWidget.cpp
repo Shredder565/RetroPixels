@@ -80,22 +80,14 @@ u32 ResultIndexOf(const QTableWidgetItem* item)
 
 int ValueSize(Cheats::DataType type)
 {
-  switch (type)
-  {
-  case Cheats::DataType::U16:
-  case Cheats::DataType::S16:
-    return 2;
-  case Cheats::DataType::U32:
-  case Cheats::DataType::S32:
-  case Cheats::DataType::F32:
-    return 4;
-  case Cheats::DataType::U64:
-  case Cheats::DataType::S64:
-  case Cheats::DataType::F64:
+  using T = Cheats::DataType;
+  if (type == T::U64 || type == T::S64 || type == T::F64)
     return 8;
-  default:
-    return 1;
-  }
+  if (type == T::U32 || type == T::S32 || type == T::F32)
+    return 4;
+  if (type == T::U16 || type == T::S16)
+    return 2;
+  return 1;
 }
 
 QString Hex32(u64 value)
@@ -152,60 +144,45 @@ QString CheatSearchWidget::DescribeSession() const
     ranges = tr("%1 memory ranges").arg(range_count);
   }
 
-  QString space;
-  switch (m_session->GetAddressSpace())
-  {
-  case PowerPC::RequestedAddressSpace::Effective:
-    space = tr("Address space by CPU state");
-    break;
-  case PowerPC::RequestedAddressSpace::Physical:
-    space = tr("Physical address space");
-    break;
-  case PowerPC::RequestedAddressSpace::Virtual:
-    space = tr("Virtual address space");
-    break;
-  default:
-    space = tr("Unknown address space");
-    break;
-  }
+  const auto space_name = [](PowerPC::RequestedAddressSpace space) -> QString {
+    using S = PowerPC::RequestedAddressSpace;
+    if (space == S::Effective)
+      return tr("Address space by CPU state");
+    if (space == S::Physical)
+      return tr("Physical address space");
+    if (space == S::Virtual)
+      return tr("Virtual address space");
+    return tr("Unknown address space");
+  };
 
-  QString type;
-  switch (m_session->GetDataType())
-  {
-  case Cheats::DataType::U8:
-    type = tr("8-bit Unsigned Integer");
-    break;
-  case Cheats::DataType::U16:
-    type = tr("16-bit Unsigned Integer");
-    break;
-  case Cheats::DataType::U32:
-    type = tr("32-bit Unsigned Integer");
-    break;
-  case Cheats::DataType::U64:
-    type = tr("64-bit Unsigned Integer");
-    break;
-  case Cheats::DataType::S8:
-    type = tr("8-bit Signed Integer");
-    break;
-  case Cheats::DataType::S16:
-    type = tr("16-bit Signed Integer");
-    break;
-  case Cheats::DataType::S32:
-    type = tr("32-bit Signed Integer");
-    break;
-  case Cheats::DataType::S64:
-    type = tr("64-bit Signed Integer");
-    break;
-  case Cheats::DataType::F32:
-    type = tr("32-bit Float");
-    break;
-  case Cheats::DataType::F64:
-    type = tr("64-bit Float");
-    break;
-  default:
-    type = tr("Unknown data type");
-    break;
-  }
+  // Listed by width, unsigned before signed before floating point.
+  const auto type_name = [](Cheats::DataType type) -> QString {
+    using T = Cheats::DataType;
+    if (type == T::U8)
+      return tr("8-bit Unsigned Integer");
+    if (type == T::S8)
+      return tr("8-bit Signed Integer");
+    if (type == T::U16)
+      return tr("16-bit Unsigned Integer");
+    if (type == T::S16)
+      return tr("16-bit Signed Integer");
+    if (type == T::U32)
+      return tr("32-bit Unsigned Integer");
+    if (type == T::S32)
+      return tr("32-bit Signed Integer");
+    if (type == T::F32)
+      return tr("32-bit Float");
+    if (type == T::U64)
+      return tr("64-bit Unsigned Integer");
+    if (type == T::S64)
+      return tr("64-bit Signed Integer");
+    if (type == T::F64)
+      return tr("64-bit Float");
+    return tr("Unknown data type");
+  };
+
+  const QString space = space_name(m_session->GetAddressSpace());
+  const QString type = type_name(m_session->GetDataType());
 
   const QString alignment = m_session->GetAligned() ? tr("aligned") : tr("unaligned");
   return tr("%1, %2, %3, %4").arg(ranges).arg(space).arg(type).arg(alignment);

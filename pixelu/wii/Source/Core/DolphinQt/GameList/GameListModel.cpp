@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <utility>
 
 #include <QDir>
 #include <QFileInfo>
@@ -317,38 +318,31 @@ QVariant GameListModel::headerData(int section, Qt::Orientation orientation, int
   if (orientation != Qt::Horizontal || role != Qt::DisplayRole)
     return {};
 
-  // The platform and region columns only show icons, so they have no header text.
-  switch (static_cast<Column>(section))
+  // Untranslated header texts, translated on the way out. The platform and region columns only
+  // show icons, so they have no header text.
+  static constexpr std::pair<Column, const char*> header_texts[] = {
+      {Column::Banner, QT_TR_NOOP("Banner")},
+      {Column::Title, QT_TR_NOOP("Title")},
+      {Column::Description, QT_TR_NOOP("Description")},
+      {Column::Maker, QT_TR_NOOP("Maker")},
+      {Column::ID, QT_TR_NOOP("ID")},
+      {Column::Size, QT_TR_NOOP("Size")},
+      {Column::FileName, QT_TR_NOOP("File Name")},
+      {Column::FilePath, QT_TR_NOOP("File Path")},
+      {Column::FileFormat, QT_TR_NOOP("File Format")},
+      {Column::BlockSize, QT_TR_NOOP("Block Size")},
+      {Column::Compression, QT_TR_NOOP("Compression")},
+      {Column::TimePlayed, QT_TR_NOOP("Time Played")},
+      {Column::Tags, QT_TR_NOOP("Tags")},
+  };
+
+  const auto column = static_cast<Column>(section);
+  for (const auto& [header_column, text] : header_texts)
   {
-  case Column::Banner:
-    return tr("Banner");
-  case Column::Title:
-    return tr("Title");
-  case Column::Description:
-    return tr("Description");
-  case Column::Maker:
-    return tr("Maker");
-  case Column::ID:
-    return tr("ID");
-  case Column::Size:
-    return tr("Size");
-  case Column::FileName:
-    return tr("File Name");
-  case Column::FilePath:
-    return tr("File Path");
-  case Column::FileFormat:
-    return tr("File Format");
-  case Column::BlockSize:
-    return tr("Block Size");
-  case Column::Compression:
-    return tr("Compression");
-  case Column::TimePlayed:
-    return tr("Time Played");
-  case Column::Tags:
-    return tr("Tags");
-  default:
-    return {};
+    if (header_column == column)
+      return tr(text);
   }
+  return {};
 }
 
 int GameListModel::rowCount(const QModelIndex& parent) const

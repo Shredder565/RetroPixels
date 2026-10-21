@@ -76,18 +76,14 @@ QString UserCardFolder()
 
 QString FormatName(Memcard::SavefileFormat format)
 {
-  switch (format)
-  {
-  case Memcard::SavefileFormat::GCI:
-    return QObject::tr("Native GCI File");
-  case Memcard::SavefileFormat::GCS:
+  using Format = Memcard::SavefileFormat;
+  if (format == Format::GCS)
     return QObject::tr("MadCatz Gameshark files");
-  case Memcard::SavefileFormat::SAV:
+  if (format == Format::SAV)
     return QObject::tr("Datel MaxDrive/Pro files");
-  default:
-    ASSERT(false);
-    return QObject::tr("Native GCI File");
-  }
+  // Anything unexpected is reported as GCI after the assertion.
+  ASSERT(format == Format::GCI);
+  return QObject::tr("Native GCI File");
 }
 
 void SetUpSaveTable(QTableWidget* table)
@@ -814,15 +810,12 @@ QString GCMemcardManager::GetErrorMessagesForErrorCode(const Memcard::GCMemcardE
 
 QString GCMemcardManager::GetErrorMessageForErrorCode(Memcard::ReadSavefileErrorCode code)
 {
-  switch (code)
-  {
-  case Memcard::ReadSavefileErrorCode::OpenFileFail:
+  using Failure = Memcard::ReadSavefileErrorCode;
+  if (code == Failure::OpenFileFail)
     return tr("Failed to open file.");
-  case Memcard::ReadSavefileErrorCode::IOError:
+  if (code == Failure::IOError)
     return tr("Failed to read from file.");
-  case Memcard::ReadSavefileErrorCode::DataCorrupted:
+  if (code == Failure::DataCorrupted)
     return tr("Data in unrecognized format or corrupted.");
-  default:
-    return tr("Unknown error.");
-  }
+  return tr("Unknown error.");
 }

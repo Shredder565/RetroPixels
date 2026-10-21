@@ -43,6 +43,9 @@ namespace
 {
 using CoreHandle = std::weak_ptr<HW::GBA::Core>;
 
+// Volume up/down change the volume by this many percent.
+constexpr int VOLUME_STEP = 10;
+
 // Stops the core, then starts it again with another ROM (none for an empty path). If the new
 // ROM doesn't start, the configured ROM is put back and started instead.
 void SwapRom(const CoreHandle& core, std::string_view rom_path = {})
@@ -97,6 +100,17 @@ QString PickFile(QWidget* parent, bool for_saving, const QString& filter)
                    DolphinFileDialog::getOpenFileName(parent, caption, QString(), filter, nullptr,
                                                       QFileDialog::Options());
   return QDir::toNativeSeparators(path);
+}
+
+// Under NetPlay, the pad that this GBA is attached to, if that pad is one of ours.
+std::optional<NetPlay::PadDetails> NetPlayPadOf(int device_number)
+{
+  if (!NetPlay::IsNetPlayRunning())
+    return std::nullopt;
+  const NetPlay::PadDetails pad = NetPlay::GetPadDetails(device_number);
+  if (pad.local_pad >= 4)
+    return std::nullopt;
+  return pad;
 }
 }  // namespace
 
@@ -171,12 +185,12 @@ void GBAWidget::SetVolume(int volume)
 
 void GBAWidget::VolumeDown()
 {
-  SetVolume(m_volume - 10);
+  SetVolume(m_volume - VOLUME_STEP);
 }
 
 void GBAWidget::VolumeUp()
 {
-  SetVolume(m_volume + 10);
+  SetVolume(m_volume + VOLUME_STEP);
 }
 
 bool GBAWidget::IsMuted()
@@ -591,24 +605,16 @@ GBAWidgetController::~GBAWidgetController()
 
 void GBAWidgetController::Create(std::weak_ptr<HW::GBA::Core> core, const HW::GBA::CoreInfo& info)
 {
-  // Under NetPlay, look up who this GBA belongs to.
-  std::optional<NetPlay::PadDetails> netplay_pad;
-  if (NetPlay::IsNetPlayRunning())
-  {
-    const NetPlay::PadDetails details = NetPlay::GetPadDetails(info.device_number);
-    if (details.local_pad < 4)
-      netplay_pad = details;
-  }
-  m_widget = new GBAWidget(std::move(core), info, netplay_pad);
+  m_widget = new GBAWidget(std::move(core), info, NetPlayPadOf(info.device_number));
 }
 
-void GBAWidgetController::GameChanged(const HW::GBA::CoreInfo& info)
+void GBAWidgetController::GameChanged(const HW::GBA::CoreInfo& new_info)
 {
-  m_widget->GameChanged(info);
+  m_widget->GameChanged(new_info);
 }
 
-void GBAWidgetController::FrameEnded(std::span<const u32> video_buffer)
+void GBAWidgetController::FrameEnded(std::span<const u32> frame)
 {
-  m_widget->SetVideoBuffer(video_buffer);
+  m_widget->SetVideoBuffer(frame);
 }
 #endif  // HAS_LIBMGBA
