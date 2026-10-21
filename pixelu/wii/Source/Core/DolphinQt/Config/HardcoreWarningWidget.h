@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 class QLabel;
 class QPushButton;
 
+// Shown above code lists while RetroAchievements hardcore mode is on.
 class HardcoreWarningWidget : public QWidget
 {
   Q_OBJECT
@@ -19,10 +19,7 @@ signals:
   void OpenAchievementSettings();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-
-  void Update();
+  void Refresh();
 
   QPushButton* m_settings_button;
 };

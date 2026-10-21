@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 
 #include "Common/Config/ConfigInfo.h"
 
+// A line edit bound to a string setting, saved when editing finishes.
 class ConfigText : public ConfigControl<QLineEdit>
 {
   Q_OBJECT
@@ -24,5 +24,5 @@ protected:
   const Config::Info<std::string> m_setting;
 
 private:
-  void Update();
+  void StoreText();
 };

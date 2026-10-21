@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipPushButton.h"
 
@@ -8,7 +7,9 @@ ToolTipPushButton::ToolTipPushButton(const QString& text, QWidget* parent)
 {
 }
 
+// Middle of the button.
 QPoint ToolTipPushButton::GetToolTipPosition() const
 {
-  return pos() + QPoint(width() / 2, height() / 2);
+  const QSize button = size();
+  return pos() + QPoint(button.width() / 2, button.height() / 2);
 }

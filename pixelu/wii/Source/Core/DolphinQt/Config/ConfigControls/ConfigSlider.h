@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,8 @@
 #include "Common/CommonTypes.h"
 #include "Common/Config/ConfigInfo.h"
 
+// A slider bound to an int setting, either directly (minimum..maximum) or
+// through a list of allowed values, one per tick.
 class ConfigSlider final : public ConfigControl<ToolTipSlider>
 {
   Q_OBJECT
@@ -22,8 +23,7 @@ public:
   ConfigSlider(int minimum, int maximum, const Config::Info<int>& setting, Config::Layer* layer,
                int tick = 0);
 
-  // Generates a slider with tick_values.size() ticks. Each tick corresponds to the integer at that
-  // index in the vector.
+  // One tick per entry of tick_values; tick i stands for tick_values[i].
   ConfigSlider(std::vector<int> tick_values, const Config::Info<int>& setting,
                Config::Layer* layer);
 
@@ -34,11 +34,11 @@ protected:
 
 private:
   const Config::Info<int> m_setting;
-
-  // Mappings for slider ticks to config values. Identity mapping is assumed if this is empty.
-  std::vector<int> m_tick_values;
+  // Empty for a direct slider.
+  std::vector<int> m_stops;
 };
 
+// A slider bound to a u32 setting, which holds the slider value times scale.
 class ConfigSliderU32 final : public ConfigControl<ToolTipSlider>
 {
   Q_OBJECT
@@ -54,10 +54,10 @@ protected:
 
 private:
   const Config::Info<u32> m_setting;
-
-  u32 m_scale = 1;
+  const u32 m_scale;
 };
 
+// A caption that turns bold together with its ConfigSlider.
 class ConfigSliderLabel final : public QLabel
 {
   Q_OBJECT
@@ -66,5 +66,5 @@ public:
   ConfigSliderLabel(const QString& text, ConfigSlider* slider);
 
 private:
-  QPointer<ConfigSlider> m_slider;
+  QPointer<ConfigSlider> m_buddy;
 };

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@
 class QLabel;
 class QPushButton;
 
+// The strip above a cheat list that says why the codes will not apply right
+// now (cheats are off, or the running game needs a restart).
 class CheatWarningWidget : public QWidget
 {
   Q_OBJECT
@@ -20,13 +21,10 @@ signals:
   void OpenCheatEnableSettings();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void Refresh(bool running);
 
-  void Update(bool running);
-
-  QLabel* m_text;
-  QPushButton* m_config_button;
+  QLabel* m_message;
+  QPushButton* m_settings_button;
   const std::string m_game_id;
-  bool m_restart_required;
+  const bool m_needs_restart;
 };

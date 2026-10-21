@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,7 @@ class HardcoreWarningWidget;
 #endif  // USE_RETRO_ACHIEVEMENTS
 class QDialogButtonBox;
 
+// Dialog wrapping FreeLookWidget with a Close button.
 class FreeLookWindow final : public QDialog
 {
   Q_OBJECT
@@ -22,9 +22,6 @@ signals:
 #endif  // USE_RETRO_ACHIEVEMENTS
 
 private:
-  void CreateMainLayout();
-  void ConnectWidgets();
-
 #ifdef USE_RETRO_ACHIEVEMENTS
   HardcoreWarningWidget* m_hc_warning;
 #endif  // USE_RETRO_ACHIEVEMENTS

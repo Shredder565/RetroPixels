@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigInteger.h"
 
@@ -15,8 +14,7 @@ ConfigInteger::ConfigInteger(int minimum, int maximum, const Config::Info<int>& 
   setMinimum(minimum);
   setMaximum(maximum);
   setSingleStep(step);
-  setValue(ReadValue(setting));
-
+  OnConfigChanged();
   connect(this, &ConfigInteger::valueChanged, this, &ConfigInteger::Update);
 }
 
@@ -31,11 +29,10 @@ void ConfigInteger::OnConfigChanged()
 }
 
 ConfigIntegerLabel::ConfigIntegerLabel(const QString& text, ConfigInteger* widget)
-    : QLabel(text), m_widget(QPointer<ConfigInteger>(widget))
+    : QLabel(text), m_buddy(widget)
 {
   connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this] {
-    // Label shares font changes with ConfigInteger to mark game ini settings.
-    if (m_widget)
-      setFont(m_widget->font());
+    if (!m_buddy.isNull())
+      setFont(m_buddy->font());
   });
 }

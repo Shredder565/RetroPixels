@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/FreeLookWidget.h"
 
@@ -17,31 +16,32 @@
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+#ifdef USE_RETRO_ACHIEVEMENTS
+// Free Look counts as a cheat, so hardcore mode locks the switch.
+void LockForHardcore(QWidget* toggle)
+{
+  toggle->setEnabled(!AchievementManager::GetInstance().IsHardcoreModeActive());
+}
+#endif  // USE_RETRO_ACHIEVEMENTS
+}  // namespace
+
 FreeLookWidget::FreeLookWidget(QWidget* parent) : QWidget(parent)
 {
-  CreateLayout();
-  LoadSettings();
-  ConnectWidgets();
-}
-
-void FreeLookWidget::CreateLayout()
-{
-  auto* layout = new QVBoxLayout();
-
-  m_enable_freelook = new ConfigBool(tr("Enable"), Config::FREE_LOOK_ENABLED);
-  m_enable_freelook->SetDescription(
+  m_enabled = new ConfigBool(tr("Enable"), Config::FREE_LOOK_ENABLED);
+  m_enabled->SetDescription(
       tr("Allows manipulation of the in-game camera.<br><br><dolphin_emphasis>If unsure, "
          "leave this unchecked.</dolphin_emphasis>"));
 #ifdef USE_RETRO_ACHIEVEMENTS
-  const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
-  m_enable_freelook->setEnabled(!hardcore);
+  LockForHardcore(m_enabled);
 #endif  // USE_RETRO_ACHIEVEMENTS
-  m_freelook_controller_configure_button = new NonDefaultQPushButton(tr("Configure Controller"));
+  m_configure_button = new NonDefaultQPushButton(tr("Configure Controller"));
 
-  m_freelook_control_type = new ConfigChoice({tr("Six Axis"), tr("First Person"), tr("Orbital")},
-                                             Config::FL1_CONTROL_TYPE);
-  m_freelook_control_type->SetTitle(tr("Free Look Control Type"));
-  m_freelook_control_type->SetDescription(tr(
+  m_control_type = new ConfigChoice({tr("Six Axis"), tr("First Person"), tr("Orbital")},
+                                    Config::FL1_CONTROL_TYPE);
+  m_control_type->SetTitle(tr("Free Look Control Type"));
+  m_control_type->SetDescription(tr(
       "Changes the in-game camera type during Free Look.<br><br>"
       "Six Axis: Offers full camera control on all axes, akin to moving a spacecraft in zero "
       "gravity. This is the most powerful Free Look option but is the most challenging to use.<br> "
@@ -51,62 +51,62 @@ void FreeLookWidget::CreateLayout()
       "Orbital: Rotates the free camera around the original camera. Has no lateral movement, only "
       "rotation and you may zoom up to the camera's origin point."));
 
-  auto* description =
-      new QLabel(tr("Free Look allows for manipulation of the in-game camera. "
-                    "Different camera types are available from the dropdown.<br><br>"
-                    "For detailed instructions, "
-                    "<a href=\"https://wiki.dolphin-emu.org/index.php?title=Free_Look\">"
-                    "refer to this page</a>."));
-  description->setTextFormat(Qt::RichText);
-  description->setWordWrap(true);
-  description->setTextInteractionFlags(Qt::TextBrowserInteraction);
-  description->setOpenExternalLinks(true);
+  auto* const help = new QLabel(tr("Free Look allows for manipulation of the in-game camera. "
+                                   "Different camera types are available from the dropdown.<br><br>"
+                                   "For detailed instructions, "
+                                   "<a href=\"https://wiki.dolphin-emu.org/index.php?title=Free_Look\">"
+                                   "refer to this page</a>."));
+  help->setTextFormat(Qt::RichText);
+  help->setWordWrap(true);
+  help->setTextInteractionFlags(Qt::TextBrowserInteraction);
+  help->setOpenExternalLinks(true);
 
-  m_freelook_background_input =
-      new ConfigBool(tr("Background Input"), Config::FREE_LOOK_BACKGROUND_INPUT);
+  m_background_input = new ConfigBool(tr("Background Input"), Config::FREE_LOOK_BACKGROUND_INPUT);
 
-  auto* hlayout = new QHBoxLayout();
-  hlayout->addWidget(new QLabel(tr("Camera 1")));
-  hlayout->addWidget(m_freelook_control_type);
-  hlayout->addWidget(m_freelook_controller_configure_button);
+  auto* const camera_row = new QHBoxLayout();
+  camera_row->addWidget(new QLabel(tr("Camera 1")));
+  camera_row->addWidget(m_control_type);
+  camera_row->addWidget(m_configure_button);
 
-  layout->addWidget(m_enable_freelook);
-  layout->addLayout(hlayout);
-  layout->addWidget(m_freelook_background_input);
-  layout->addWidget(description);
+  auto* const column = new QVBoxLayout();
+  column->addWidget(m_enabled);
+  column->addLayout(camera_row);
+  column->addWidget(m_background_input);
+  column->addWidget(help);
+  setLayout(column);
 
-  setLayout(layout);
-}
+  RefreshEnabledState();
 
-void FreeLookWidget::ConnectWidgets()
-{
-  connect(m_freelook_controller_configure_button, &QPushButton::clicked, this,
-          &FreeLookWidget::OnFreeLookControllerConfigured);
+  connect(m_configure_button, &QPushButton::clicked, this,
+          &FreeLookWidget::OpenControllerMapping);
   connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this] {
-    const QSignalBlocker blocker(this);
-    LoadSettings();
+    const QSignalBlocker quiet(this);
+    RefreshEnabledState();
   });
 }
 
-void FreeLookWidget::OnFreeLookControllerConfigured()
+void FreeLookWidget::OpenControllerMapping()
 {
-  if (m_freelook_controller_configure_button != QObject::sender())
+  if (QObject::sender() != m_configure_button)
     return;
-  const int index = 0;
-  MappingWindow* window = new MappingWindow(this, MappingWindow::Type::MAPPING_FREELOOK, index);
+  // Free Look has a single mapping, port 0.
+  auto* const window = new MappingWindow(this, MappingWindow::Type::MAPPING_FREELOOK, 0);
   window->setAttribute(Qt::WA_DeleteOnClose, true);
   window->setWindowModality(Qt::WindowModality::WindowModal);
   window->show();
 }
 
-void FreeLookWidget::LoadSettings()
+// The camera options only apply while Free Look is on.
+void FreeLookWidget::RefreshEnabledState()
 {
-  const bool checked = Config::Get(Config::FREE_LOOK_ENABLED);
+  const bool on = Config::Get(Config::FREE_LOOK_ENABLED);
 #ifdef USE_RETRO_ACHIEVEMENTS
-  const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
-  m_enable_freelook->setEnabled(!hardcore);
+  LockForHardcore(m_enabled);
 #endif  // USE_RETRO_ACHIEVEMENTS
-  m_freelook_control_type->setEnabled(checked);
-  m_freelook_controller_configure_button->setEnabled(checked);
-  m_freelook_background_input->setEnabled(checked);
+  for (QWidget* const option :
+       {static_cast<QWidget*>(m_control_type), static_cast<QWidget*>(m_configure_button),
+        static_cast<QWidget*>(m_background_input)})
+  {
+    option->setEnabled(on);
+  }
 }

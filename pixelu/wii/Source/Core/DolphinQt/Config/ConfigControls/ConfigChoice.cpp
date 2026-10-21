@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigChoice.h"
 
@@ -10,14 +9,13 @@ ConfigChoice::ConfigChoice(const QStringList& options, const Config::Info<int>& 
     : ConfigControl(setting.GetLocation(), layer), m_setting(setting)
 {
   addItems(options);
-  setCurrentIndex(ReadValue(setting));
-
-  connect(this, &QComboBox::currentIndexChanged, this, &ConfigChoice::Update);
+  OnConfigChanged();
+  connect(this, &QComboBox::currentIndexChanged, this, &ConfigChoice::Store);
 }
 
-void ConfigChoice::Update(int choice)
+void ConfigChoice::Store(int index)
 {
-  SaveValue(m_setting, choice);
+  SaveValue(m_setting, index);
 }
 
 void ConfigChoice::OnConfigChanged()
@@ -30,60 +28,53 @@ ConfigChoiceU32::ConfigChoiceU32(const QStringList& options, const Config::Info<
     : ConfigControl(setting.GetLocation(), layer), m_setting(setting)
 {
   addItems(options);
-  setCurrentIndex(ReadValue(setting));
-
-  connect(this, &QComboBox::currentIndexChanged, this, &ConfigChoiceU32::Update);
+  OnConfigChanged();
+  connect(this, &QComboBox::currentIndexChanged, this, &ConfigChoiceU32::Store);
 }
 
-void ConfigChoiceU32::Update(int choice)
+void ConfigChoiceU32::Store(int index)
 {
-  SaveValue(m_setting, (u32)choice);
+  SaveValue(m_setting, static_cast<u32>(index));
 }
 
 void ConfigChoiceU32::OnConfigChanged()
 {
-  setCurrentIndex(ReadValue(m_setting));
+  setCurrentIndex(static_cast<int>(ReadValue(m_setting)));
 }
 
 ConfigStringChoice::ConfigStringChoice(std::span<const std::string> options,
                                        const Config::Info<std::string>& setting,
                                        Config::Layer* layer)
-    : ConfigControl(setting.GetLocation(), layer), m_setting(setting), m_text_is_data(true)
+    : ConfigControl(setting.GetLocation(), layer), m_setting(setting), m_value_is_label(true)
 {
-  for (const auto& op : options)
-    addItem(QString::fromStdString(op));
-
+  for (const std::string& option : options)
+    addItem(QString::fromStdString(option));
   Load();
-  connect(this, &QComboBox::currentIndexChanged, this, &ConfigStringChoice::Update);
+  connect(this, &QComboBox::currentIndexChanged, this, &ConfigStringChoice::Store);
 }
 
 ConfigStringChoice::ConfigStringChoice(std::span<const std::pair<QString, QString>> options,
                                        const Config::Info<std::string>& setting,
                                        Config::Layer* layer)
-    : ConfigControl(setting.GetLocation(), layer), m_setting(setting), m_text_is_data(false)
+    : ConfigControl(setting.GetLocation(), layer), m_setting(setting), m_value_is_label(false)
 {
-  for (const auto& [option_text, option_data] : options)
-    addItem(option_text, option_data);
-
+  for (const auto& option : options)
+    addItem(option.first, option.second);
   Load();
-  connect(this, &QComboBox::currentIndexChanged, this, &ConfigStringChoice::Update);
+  connect(this, &QComboBox::currentIndexChanged, this, &ConfigStringChoice::Store);
 }
 
-void ConfigStringChoice::Update(int index)
+void ConfigStringChoice::Store(int index)
 {
-  if (m_text_is_data)
-    SaveValue(m_setting, itemText(index).toStdString());
-  else
-    SaveValue(m_setting, itemData(index).toString().toStdString());
+  const QString value = m_value_is_label ? itemText(index) : itemData(index).toString();
+  SaveValue(m_setting, value.toStdString());
 }
 
+// Public so owners can reselect after changing the item list.
 void ConfigStringChoice::Load()
 {
-  const QString setting_value = QString::fromStdString(ReadValue(m_setting));
-  const int index = m_text_is_data ? findText(setting_value) : findData(setting_value);
-
-  // This can be called publicly.
-  setCurrentIndex(index);
+  const QString stored = QString::fromStdString(ReadValue(m_setting));
+  setCurrentIndex(m_value_is_label ? findText(stored) : findData(stored));
 }
 
 void ConfigStringChoice::OnConfigChanged()
@@ -93,121 +84,125 @@ void ConfigStringChoice::OnConfigChanged()
 
 ConfigComplexChoice::ConfigComplexChoice(const InfoVariant& setting1, const InfoVariant& setting2,
                                          Config::Layer* layer)
-    : m_layer(layer), m_setting1(setting1), m_setting2(setting2)
+    : m_layer(layer), m_first(setting1), m_second(setting2)
 {
   connect(&Settings::Instance(), &Settings::ConfigChanged, this, &ConfigComplexChoice::Refresh);
   connect(this, &QComboBox::currentIndexChanged, this, &ConfigComplexChoice::SaveValue);
 }
 
+const std::pair<Config::Location, Config::Location> ConfigComplexChoice::GetLocation() const
+{
+  const auto location_of = [](const auto& info) { return info.GetLocation(); };
+  return {std::visit(location_of, m_first), std::visit(location_of, m_second)};
+}
+
 void ConfigComplexChoice::Refresh()
 {
-  auto& location = GetLocation();
-
-  QFont bf = font();
-  if (m_layer != nullptr)
+  const auto [first, second] = GetLocation();
+  bool own_value;
+  if (m_layer == nullptr)
   {
-    bf.setBold(m_layer->Exists(location.first) || m_layer->Exists(location.second));
+    own_value = Config::GetActiveLayerForConfig(first) != Config::LayerType::Base ||
+                Config::GetActiveLayerForConfig(second) != Config::LayerType::Base;
   }
   else
   {
-    bf.setBold(Config::GetActiveLayerForConfig(location.first) != Config::LayerType::Base ||
-               Config::GetActiveLayerForConfig(location.second) != Config::LayerType::Base);
+    own_value = m_layer->Exists(first) || m_layer->Exists(second);
   }
 
-  setFont(bf);
+  QFont face = font();
+  face.setBold(own_value);
+  setFont(face);
   UpdateComboIndex();
 }
 
 void ConfigComplexChoice::Add(const QString& name, const OptionVariant option1,
                               const OptionVariant option2)
 {
-  const QSignalBlocker blocker(this);
+  const QSignalBlocker quiet(this);
   addItem(name);
-  m_options.push_back(std::make_pair(option1, option2));
+  m_choices.emplace_back(option1, option2);
 }
 
 void ConfigComplexChoice::Reset()
 {
   clear();
-  m_options.clear();
-}
-
-void ConfigComplexChoice::SaveValue(int choice)
-{
-  auto Set = [this](auto& setting, auto& value) {
-    if (m_layer != nullptr)
-    {
-      m_layer->Set(setting.GetLocation(), value);
-      Config::OnConfigChanged();
-      return;
-    }
-
-    Config::SetBaseOrCurrent(setting, value);
-  };
-
-  std::visit(Set, m_setting1, m_options[choice].first);
-  std::visit(Set, m_setting2, m_options[choice].second);
-}
-
-void ConfigComplexChoice::UpdateComboIndex()
-{
-  auto get_layer_value = [this](auto& setting) {
-    if (m_layer != nullptr)
-      return static_cast<OptionVariant>(m_layer->Get(setting));
-
-    return static_cast<OptionVariant>(Config::Get(setting));
-  };
-
-  auto get_default_value = [](auto& setting) { return OptionVariant(setting.GetDefaultValue()); };
-
-  auto is_current_value = [&](const InfoVariant& info, const OptionVariant& option) {
-    return std::visit(get_layer_value, info) ==
-           (std::holds_alternative<Config::DefaultState>(option) ?
-                std::visit(get_default_value, info) :
-                option);
-  };
-
-  auto is_correct_option = [&](const std::pair<OptionVariant, OptionVariant>& option) {
-    return is_current_value(m_setting1, option.first) &&
-           is_current_value(m_setting2, option.second);
-  };
-
-  auto it = std::find_if(m_options.begin(), m_options.end(), is_correct_option);
-  int index;
-
-  if (it == m_options.end())
-    index = m_default_index;
-  else
-    index = static_cast<int>(std::distance(m_options.begin(), it));
-
-  // Will crash if not blocked
-  const QSignalBlocker blocker(this);
-  setCurrentIndex(index);
+  m_choices.clear();
 }
 
 void ConfigComplexChoice::SetDefault(int index)
 {
-  m_default_index = index;
+  m_fallback_index = index;
 }
 
-const std::pair<Config::Location, Config::Location> ConfigComplexChoice::GetLocation() const
+void ConfigComplexChoice::SaveValue(int choice)
 {
-  auto visit = [](auto& v) { return v.GetLocation(); };
+  // Writes one option into one setting. A DefaultState option removes the
+  // key; other values may differ in type from the setting and are stored as
+  // they are.
+  const auto write = [this](const auto& info, const auto& value) {
+    if (m_layer == nullptr)
+    {
+      Config::SetBaseOrCurrent(info, value);
+      return;
+    }
+    m_layer->Set(info.GetLocation(), value);
+    Config::OnConfigChanged();
+  };
 
-  return {std::visit(visit, m_setting1), std::visit(visit, m_setting2)};
+  const auto& picked = m_choices[choice];
+  std::visit(write, m_first, picked.first);
+  std::visit(write, m_second, picked.second);
+}
+
+// Whether a setting currently holds an option's value (or, for a
+// DefaultState option, its default). Values only match with the same
+// alternative type, so a u32 option never matches an int setting.
+bool ConfigComplexChoice::Matches(const InfoVariant& setting, const OptionVariant& option) const
+{
+  const OptionVariant current = std::visit(
+      [this](const auto& info) -> OptionVariant {
+        if (m_layer == nullptr)
+          return Config::Get(info);
+        return m_layer->Get(info);
+      },
+      setting);
+
+  if (!std::holds_alternative<Config::DefaultState>(option))
+    return current == option;
+
+  const OptionVariant fallback =
+      std::visit([](const auto& info) -> OptionVariant { return info.GetDefaultValue(); }, setting);
+  return current == fallback;
+}
+
+void ConfigComplexChoice::UpdateComboIndex()
+{
+  int index = m_fallback_index;
+  for (size_t i = 0; i < m_choices.size(); ++i)
+  {
+    if (Matches(m_first, m_choices[i].first) && Matches(m_second, m_choices[i].second))
+    {
+      index = static_cast<int>(i);
+      break;
+    }
+  }
+
+  // Selecting must not write back through SaveValue.
+  const QSignalBlocker quiet(this);
+  setCurrentIndex(index);
 }
 
 void ConfigComplexChoice::mousePressEvent(QMouseEvent* event)
 {
-  if (event->button() == Qt::RightButton && m_layer != nullptr)
-  {
-    auto& location = GetLocation();
-    m_layer->DeleteKey(location.first);
-    m_layer->DeleteKey(location.second);
-    Config::OnConfigChanged();
-  }
-  else
+  if (m_layer == nullptr || event->button() != Qt::RightButton)
   {
     QComboBox::mousePressEvent(event);
+    return;
   }
+
+  const auto [first, second] = GetLocation();
+  m_layer->DeleteKey(first);
+  m_layer->DeleteKey(second);
+  Config::OnConfigChanged();
 }

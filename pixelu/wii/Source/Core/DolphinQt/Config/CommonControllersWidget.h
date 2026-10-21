@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@ class QGroupBox;
 class QVBoxLayout;
 class QPushButton;
 
+// The "Common" box of the Controllers page: background input and the
+// buttons that open the alternate input source and SDL hint windows.
 class CommonControllersWidget final : public QWidget
 {
   Q_OBJECT
@@ -17,18 +18,13 @@ public:
   explicit CommonControllersWidget(QWidget* parent);
 
 private:
-  void OnControllerInterfaceConfigure();
-  void OnSDLHintConfigure();
+  template <class Window>
+  void OpenModal();
 
-  void CreateLayout();
-  void ConnectWidgets();
+  void Reload();
+  void StoreBackgroundInput();
 
-  void LoadSettings();
-  void SaveSettings();
-
-  QGroupBox* m_common_box;
-  QVBoxLayout* m_common_layout;
-  QCheckBox* m_common_bg_input;
-  QPushButton* m_common_configure_controller_interface;
-  QPushButton* m_common_configure_sdl_hints;
+  QCheckBox* m_background_input;
+  QPushButton* m_input_sources_button;
+  QPushButton* m_sdl_hints_button;
 };

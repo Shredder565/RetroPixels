@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 
 #include "Common/Config/ConfigInfo.h"
 
+// One radio button of a group that together pick the value of an int
+// setting; this button stands for m_value.
 class ConfigRadioInt final : public ConfigControl<ToolTipRadioButton>
 {
   Q_OBJECT
@@ -16,8 +17,8 @@ public:
                  Config::Layer* layer = nullptr);
 
 signals:
-  // Since selecting a new radio button deselects the old one, ::toggled will generate two signals.
-  // These are convenience functions so you can receive only one signal if desired.
+  // A change of selection toggles two buttons; these let a listener follow
+  // just the one that was picked, or just the one that was dropped.
   void OnSelected(int new_value);
   void OnDeselected(int old_value);
 
@@ -25,8 +26,8 @@ protected:
   void OnConfigChanged() override;
 
 private:
-  void Update();
+  void Toggled(bool checked);
 
   const Config::Info<int> m_setting;
-  int m_value;
+  const int m_value;
 };

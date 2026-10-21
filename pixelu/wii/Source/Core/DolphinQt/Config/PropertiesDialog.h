@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,7 @@ namespace UICommon
 class GameFile;
 }
 
+// The per-game Properties window opened from the game list.
 class PropertiesDialog final : public StackedSettingsWindow
 {
   Q_OBJECT

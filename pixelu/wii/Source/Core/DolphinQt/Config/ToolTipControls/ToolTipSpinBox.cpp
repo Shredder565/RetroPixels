@@ -1,9 +1,10 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipSpinBox.h"
 
+// Middle of the field.
 QPoint ToolTipSpinBox::GetToolTipPosition() const
 {
-  return pos() + QPoint(width() / 2, height() / 2);
+  const QSize field = size();
+  return pos() + QPoint(field.width() / 2, field.height() / 2);
 }

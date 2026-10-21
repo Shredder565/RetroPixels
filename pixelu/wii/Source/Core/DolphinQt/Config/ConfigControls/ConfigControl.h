@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,10 @@ class Info;
 struct Location;
 }  // namespace Config
 
+// Base for widgets bound to one config setting. Without a layer the widget
+// edits the effective configuration; with one (a game's INI being edited)
+// it edits that layer only, falls back to the global value for display,
+// shows layer-local values in bold and drops the key on a right click.
 template <class Derived>
 class ConfigControl : public Derived
 {
@@ -24,97 +27,86 @@ public:
   ConfigControl(const Config::Location& location, Config::Layer* layer)
       : m_location(location), m_layer(layer)
   {
-    ConnectConfig();
+    WatchConfig();
   }
   ConfigControl(const QString& label, const Config::Location& location, Config::Layer* layer)
       : Derived(label), m_location(location), m_layer(layer)
   {
-    ConnectConfig();
+    WatchConfig();
   }
   ConfigControl(const Qt::Orientation& orient, const Config::Location& location,
                 Config::Layer* layer)
       : Derived(orient), m_location(location), m_layer(layer)
   {
-    ConnectConfig();
+    WatchConfig();
   }
 
   const Config::Location GetLocation() const { return m_location; }
 
 protected:
-  void ConnectConfig()
-  {
-    Derived::connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this] {
-      QFont bf = Derived::font();
-      bf.setBold(IsConfigLocal());
-      Derived::setFont(bf);
-
-      // This isn't signal blocked because the UI may need to be updated.
-      m_updating = true;
-      OnConfigChanged();
-      m_updating = false;
-    });
-  }
-
   template <typename T>
   void SaveValue(const Config::Info<T>& setting, const T& value)
   {
-    // Avoid OnConfigChanged -> option changed to current config's value -> unnecessary save ->
-    // ConfigChanged.
-    if (m_updating)
+    // Refreshing from the config must not write the same value back.
+    if (m_refreshing)
       return;
 
-    if (m_layer != nullptr)
+    if (m_layer == nullptr)
     {
-      m_layer->Set(m_location, value);
-      Config::OnConfigChanged();
+      Config::SetBaseOrCurrent(setting, value);
       return;
     }
-
-    Config::SetBaseOrCurrent(setting, value);
+    m_layer->Set(m_location, value);
+    Config::OnConfigChanged();
   }
 
   template <typename T>
   const T ReadValue(const Config::Info<T>& setting) const
   {
-    // For loading game specific settings.  If the game setting doesn't exist, load the current
-    // global setting. There's no way to know what game is being edited, so GlobalGame settings
-    // can't be shown, but otherwise would be good to include.
-    if (m_layer != nullptr)
-    {
-      if (m_layer->Exists(m_location))
-        return m_layer->Get(setting);
-      else
-        return Config::GetBase(setting);
-    }
-
-    return Config::Get(setting);
+    if (m_layer == nullptr)
+      return Config::Get(setting);
+    // The game being edited is unknown here, so a missing game value shows
+    // the global (base) one.
+    return m_layer->Exists(m_location) ? m_layer->Get(setting) : Config::GetBase(setting);
   }
 
   virtual void OnConfigChanged() {}
 
 private:
-  bool IsConfigLocal() const
+  void WatchConfig()
   {
-    if (m_layer != nullptr)
-      return m_layer->Exists(m_location);
-    else
+    Derived::connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this] {
+      QFont face = Derived::font();
+      face.setBold(HasOwnValue());
+      Derived::setFont(face);
+
+      // Not signal blocked: dependants may need the change notifications.
+      m_refreshing = true;
+      OnConfigChanged();
+      m_refreshing = false;
+    });
+  }
+
+  bool HasOwnValue() const
+  {
+    if (m_layer == nullptr)
       return Config::GetActiveLayerForConfig(m_location) != Config::LayerType::Base;
+    return m_layer->Exists(m_location);
   }
 
   void mousePressEvent(QMouseEvent* event) override
   {
-    if (m_layer != nullptr && event->button() == Qt::RightButton)
-    {
-      m_layer->DeleteKey(m_location);
-      Config::OnConfigChanged();
-    }
-    else
+    const bool reset_request = m_layer != nullptr && event->button() == Qt::RightButton;
+    if (!reset_request)
     {
       Derived::mousePressEvent(event);
+      return;
     }
+    m_layer->DeleteKey(m_location);
+    Config::OnConfigChanged();
   }
 
-  bool m_updating = false;
+  bool m_refreshing = false;
   const Config::Location m_location;
   Config::Layer* m_layer;
 };

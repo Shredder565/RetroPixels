@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ControllersPane.h"
 
@@ -11,19 +10,13 @@
 
 ControllersPane::ControllersPane()
 {
-  CreateMainLayout();
-}
+  auto* const column = new QVBoxLayout{this};
 
-void ControllersPane::CreateMainLayout()
-{
-  auto* const layout = new QVBoxLayout{this};
-
-  auto* const gamecube_controllers = new GamecubeControllersWidget(this);
+  QWidget* const gamecube = new GamecubeControllersWidget(this);
   m_wiimote_controllers = new WiimoteControllersWidget(this);
-  auto* const common = new CommonControllersWidget(this);
+  QWidget* const shared = new CommonControllersWidget(this);
 
-  layout->addWidget(gamecube_controllers);
-  layout->addWidget(m_wiimote_controllers);
-  layout->addWidget(common);
-  layout->addStretch(1);
+  for (QWidget* const section : {gamecube, static_cast<QWidget*>(m_wiimote_controllers), shared})
+    column->addWidget(section);
+  column->addStretch(1);
 }

@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipRadioButton.h"
 
@@ -11,16 +10,17 @@ ToolTipRadioButton::ToolTipRadioButton(const QString& label) : ToolTipWidget(lab
   SetTitle(label);
 }
 
+// The arrow points at the middle of the round indicator.
 QPoint ToolTipRadioButton::GetToolTipPosition() const
 {
-  int radio_button_width = 18;
-  if (style())
+  int indicator_width = 18;
+  if (QStyle* const current_style = style())
   {
-    QStyleOptionButton opt;
-    initStyleOption(&opt);
-    radio_button_width =
-        style()->subElementRect(QStyle::SubElement::SE_RadioButtonIndicator, &opt, this).width();
+    QStyleOptionButton option;
+    initStyleOption(&option);
+    const QRect dot =
+        current_style->subElementRect(QStyle::SubElement::SE_RadioButtonIndicator, &option, this);
+    indicator_width = dot.width();
   }
-
-  return pos() + QPoint(radio_button_width / 2, height() / 2);
+  return pos() + QPoint(indicator_width / 2, height() / 2);
 }

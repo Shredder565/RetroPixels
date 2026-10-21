@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,8 +13,11 @@ class QEvent;
 class QHideEvent;
 class QTimerEvent;
 
+// Hover time in milliseconds before a control shows its balloon.
 constexpr int TOOLTIP_DELAY = 300;
 
+// Mixes a delayed BalloonTip into any QWidget subclass. The subclass says
+// where the balloon's arrow should point, in its parent's coordinates.
 template <class Derived>
 class ToolTipWidget : public Derived
 {
@@ -23,62 +25,62 @@ public:
   using Derived::Derived;
 
   void SetTitle(QString title) { m_title = std::move(title); }
-
   void SetDescription(QString description) { m_description = std::move(description); }
 
 private:
+  virtual QPoint GetToolTipPosition() const = 0;
+
   void enterEvent(QEnterEvent* const event) override
   {
-    // If the timer is already running, or the cursor is reentering the ToolTipWidget after having
-    // hovered over the BalloonTip, don't start a new timer.
-    if (!m_timer_id && !BalloonTip::IsWidgetBalloonTipActive(*this))
-      m_timer_id = this->startTimer(TOOLTIP_DELAY);
-
+    // Coming back from the balloon itself (or a hover already pending)
+    // must not restart the countdown.
+    const bool pending = m_hover_timer.has_value();
+    if (!pending && !BalloonTip::IsWidgetBalloonTipActive(*this))
+      m_hover_timer = this->startTimer(TOOLTIP_DELAY);
     Derived::enterEvent(event);
   }
 
   void leaveEvent(QEvent* const event) override
   {
-    // If the cursor would still be inside the ToolTipWidget but the BalloonTip is covering that
-    // part of it, keep the BalloonTip open. In that case the BalloonTip will then track the cursor
-    // and close itself if it leaves the bounding box of this ToolTipWidget.
-    if (!BalloonTip::IsCursorInsideWidgetBoundingBox(*this) || !BalloonTip::IsCursorOnBalloonTip())
-      KillTimerAndHideBalloon();
-
+    // The balloon may sit on top of part of this control; leaving onto it
+    // while still inside our rectangle keeps it up (the balloon then
+    // watches the cursor itself).
+    const bool onto_own_balloon =
+        BalloonTip::IsCursorInsideWidgetBoundingBox(*this) && BalloonTip::IsCursorOnBalloonTip();
+    if (!onto_own_balloon)
+      CancelHover();
     Derived::leaveEvent(event);
   }
 
   void hideEvent(QHideEvent* const event) override
   {
-    KillTimerAndHideBalloon();
-
+    CancelHover();
     Derived::hideEvent(event);
   }
 
   void timerEvent(QTimerEvent* const event) override
   {
-    this->killTimer(*m_timer_id);
-    m_timer_id.reset();
-
-    BalloonTip::ShowBalloon(m_title, m_description,
-                            this->parentWidget()->mapToGlobal(GetToolTipPosition()), this);
-
+    StopHoverTimer();
+    const QPoint arrow_tip = this->parentWidget()->mapToGlobal(GetToolTipPosition());
+    BalloonTip::ShowBalloon(m_title, m_description, arrow_tip, this);
     Derived::timerEvent(event);
   }
 
-  virtual QPoint GetToolTipPosition() const = 0;
-
-  void KillTimerAndHideBalloon()
+  void StopHoverTimer()
   {
-    if (m_timer_id)
-    {
-      this->killTimer(*m_timer_id);
-      m_timer_id.reset();
-    }
+    if (!m_hover_timer)
+      return;
+    this->killTimer(*m_hover_timer);
+    m_hover_timer = std::nullopt;
+  }
+
+  void CancelHover()
+  {
+    StopHoverTimer();
     BalloonTip::HideBalloon();
   }
 
-  std::optional<int> m_timer_id;
+  std::optional<int> m_hover_timer;
   QString m_title;
   QString m_description;
 };

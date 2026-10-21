@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,8 +9,9 @@
 
 #include "Common/Config/ConfigInfo.h"
 
-// Automatically converts an int slider into a float one.
-// Do not read the int values or ranges directly from it.
+// A slider for a float setting. Internally the QSlider counts steps from
+// the minimum (0 .. range/step), so its raw int value and range mean
+// nothing to callers; use GetValue().
 class ConfigFloatSlider final : public ConfigControl<ToolTipSlider>
 {
   Q_OBJECT
@@ -20,18 +20,22 @@ public:
                     Config::Layer* layer = nullptr);
   void Update(int value);
 
-  // Returns the adjusted float value
+  // The setting value the slider currently stands for.
   float GetValue() const;
 
 protected:
   void OnConfigChanged() override;
 
 private:
-  float m_minimum;
-  float m_step;
+  int StepsFromMinimum(float value) const;
+  float ValueAtStep(int step) const;
+
+  const float m_base;
+  const float m_step;
   const Config::Info<float> m_setting;
 };
 
+// A caption that turns bold together with its ConfigFloatSlider.
 class ConfigFloatLabel final : public QLabel
 {
 public:

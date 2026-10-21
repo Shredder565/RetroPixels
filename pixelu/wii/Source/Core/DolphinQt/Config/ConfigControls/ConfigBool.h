@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 #include "Common/Config/ConfigInfo.h"
 
+// A check box bound to a bool setting; with reverse set, ticked means false.
 class ConfigBool final : public ConfigControl<ToolTipCheckBox>
 {
   Q_OBJECT
@@ -20,8 +20,8 @@ protected:
   void OnConfigChanged() override;
 
 private:
-  void Update();
+  void Store(bool checked);
 
   const Config::Info<bool> m_setting;
-  bool m_reverse;
+  const bool m_inverted;
 };

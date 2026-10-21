@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,9 @@
 
 #include "DolphinQt/Config/ConfigControls/ConfigText.h"
 
+// A path field for one of File's user directories (D_*IDX). It shows the
+// directory in use when the setting is empty, and applies edits to File's
+// user path table as well as to the setting.
 class ConfigUserPath final : public ConfigText
 {
   Q_OBJECT
@@ -21,8 +23,8 @@ protected:
   void OnConfigChanged() override;
 
 private:
-  void RefreshText();
-  void Update();
+  void ShowEffectivePath();
+  void ApplyPath();
 
   const unsigned int m_dir_index;
 };

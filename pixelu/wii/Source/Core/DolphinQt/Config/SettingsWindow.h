@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,7 +9,8 @@ class QListWidget;
 class MainWindow;
 class QEvent;
 
-// A settings window with a QListWidget to switch between panes of a QStackedWidget.
+// A dialog with a list of page names on the left; picking one shows that
+// page on the right. A Close button sits under the pages.
 class StackedSettingsWindow : public QDialog
 {
   Q_OBJECT
@@ -22,20 +22,20 @@ public:
 protected:
   void AddPane(QWidget*, const QString& name);
 
-  // Adds a scrollable Pane.
+  // The same, with the page inside a scroll area.
   void AddWrappedPane(QWidget*, const QString& name);
 
-  // For derived classes to call after they create their settings panes.
+  // Subclasses call this once every page is added.
   void OnDoneCreatingPanes();
 
   void changeEvent(QEvent* event) override;
 
 private:
-  void UpdateNavigationListStyle();
+  void RecolourPageList();
 
-  QStackedWidget* m_stacked_panes = nullptr;
-  QListWidget* m_navigation_list = nullptr;
-  bool m_handling_theme_change = false;
+  QStackedWidget* m_pages = nullptr;
+  QListWidget* m_page_list = nullptr;
+  bool m_in_theme_change = false;
 };
 
 enum class SettingsWindowPaneIndex : int
@@ -53,6 +53,7 @@ enum class SettingsWindowPaneIndex : int
   Advanced,
 };
 
+// The main Settings dialog. Its pages are in SettingsWindowPaneIndex order.
 class SettingsWindow final : public StackedSettingsWindow
 {
   Q_OBJECT

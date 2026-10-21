@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,9 @@ namespace Config
 class Layer;
 }  // namespace Config
 
+// The graphics settings: General, Enhancements, Hacks and Advanced tabs.
+// With a config layer (a game's INI) the tabs edit that layer; main_window
+// is null in that case.
 class GraphicsPane final : public QWidget
 {
   Q_OBJECT
@@ -26,7 +28,6 @@ signals:
   void UpdateGPUTextureDecoding();
 
 private:
-  void CreateMainLayout();
   void OnBackendChanged(const QString& backend);
 
   MainWindow* const m_main_window;

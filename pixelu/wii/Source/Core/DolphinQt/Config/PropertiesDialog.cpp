@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/PropertiesDialog.h"
 
@@ -27,60 +26,60 @@
 PropertiesDialog::PropertiesDialog(QWidget* parent, const UICommon::GameFile& game)
     : StackedSettingsWindow{parent}, m_filepath(game.GetFilePath())
 {
+  const auto q = [](const std::string& s) { return QString::fromStdString(s); };
   setWindowTitle(QStringLiteral("%1: %2 - %3")
-                     .arg(QString::fromStdString(game.GetFileName()),
-                          QString::fromStdString(game.GetGameID()),
-                          QString::fromStdString(game.GetLongName())));
+                     .arg(q(game.GetFileName()), q(game.GetGameID()), q(game.GetLongName())));
 
   auto* const info = new InfoWidget(game);
-  auto* const ar = new ARCodeWidget(game.GetGameID(), game.GetRevision());
-  auto* const gecko =
+  auto* const ar_codes = new ARCodeWidget(game.GetGameID(), game.GetRevision());
+  auto* const gecko_codes =
       new GeckoCodeWidget(game.GetGameID(), game.GetGameTDBID(), game.GetRevision());
   auto* const patches = new PatchesWidget(game);
   auto* const game_config = new GameConfigWidget(game);
-  auto* const graphics_mod_list = new GraphicsModListWidget(game);
+  auto* const mods = new GraphicsModListWidget(game);
 
-  connect(gecko, &GeckoCodeWidget::OpenGeneralSettings, this,
+  connect(gecko_codes, &GeckoCodeWidget::OpenGeneralSettings, this,
           &PropertiesDialog::OpenGeneralSettings);
-
-  connect(ar, &ARCodeWidget::OpenGeneralSettings, this, &PropertiesDialog::OpenGeneralSettings);
+  connect(ar_codes, &ARCodeWidget::OpenGeneralSettings, this,
+          &PropertiesDialog::OpenGeneralSettings);
 #ifdef USE_RETRO_ACHIEVEMENTS
-  connect(ar, &ARCodeWidget::OpenAchievementSettings, this,
+  connect(ar_codes, &ARCodeWidget::OpenAchievementSettings, this,
           &PropertiesDialog::OpenAchievementSettings);
-  connect(gecko, &GeckoCodeWidget::OpenAchievementSettings, this,
+  connect(gecko_codes, &GeckoCodeWidget::OpenAchievementSettings, this,
           &PropertiesDialog::OpenAchievementSettings);
   connect(patches, &PatchesWidget::OpenAchievementSettings, this,
           &PropertiesDialog::OpenAchievementSettings);
 #endif  // USE_RETRO_ACHIEVEMENTS
-
-  connect(graphics_mod_list, &GraphicsModListWidget::OpenGraphicsSettings, this,
+  connect(mods, &GraphicsModListWidget::OpenGraphicsSettings, this,
           &PropertiesDialog::OpenGraphicsSettings);
 
-  // Note: Intentional selective use of AddWrappedPane for a sensible dialog "minimumSize".
+  // Only the info and mod pages scroll; that keeps the dialog's minimum
+  // size reasonable.
   AddWrappedPane(info, tr("Info"));
   AddPane(game_config, tr("Game Config"));
   AddPane(patches, tr("Patches"));
-  AddPane(ar, tr("AR Codes"));
-  AddPane(gecko, tr("Gecko Codes"));
-  AddWrappedPane(graphics_mod_list, tr("Graphics Mods"));
+  AddPane(ar_codes, tr("AR Codes"));
+  AddPane(gecko_codes, tr("Gecko Codes"));
+  AddWrappedPane(mods, tr("Graphics Mods"));
 
-  if (game.GetPlatform() != DiscIO::Platform::ELFOrDOL)
+  // Disc images and WADs also get Verify, and discs a file browser.
+  const DiscIO::Platform platform = game.GetPlatform();
+  if (platform != DiscIO::Platform::ELFOrDOL)
   {
-    std::shared_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(game.GetFilePath());
-    if (volume)
+    const std::shared_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(game.GetFilePath());
+    if (volume != nullptr)
     {
-      auto* const verify = new VerifyWidget(volume);
-      AddPane(verify, tr("Verify"));
-
+      QWidget* const verify_page = new VerifyWidget(volume);
+      AddPane(verify_page, tr("Verify"));
       if (DiscIO::IsDisc(game.GetPlatform()))
       {
-        auto* const filesystem = new FilesystemWidget(volume);
-        AddPane(filesystem, tr("Filesystem"));
+        QWidget* const files_page = new FilesystemWidget(volume);
+        AddPane(files_page, tr("Filesystem"));
       }
     }
   }
 
-  connect(this, &QDialog::rejected, graphics_mod_list, &GraphicsModListWidget::SaveToDisk);
+  connect(this, &QDialog::rejected, mods, &GraphicsModListWidget::SaveToDisk);
 
   OnDoneCreatingPanes();
 }

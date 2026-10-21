@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,11 +8,15 @@
 
 class QEnterEvent;
 class QEvent;
+class QLabel;
 class QMouseEvent;
 class QPaintEvent;
 class QPoint;
 class QString;
+class QVBoxLayout;
 
+// A speech-bubble tool tip: a rounded box with a small arrow pointing at the
+// control it describes. Only one exists at a time.
 class BalloonTip : public QWidget
 {
   Q_OBJECT
@@ -45,9 +48,9 @@ protected:
   void paintEvent(QPaintEvent* event) override;
 
 private:
-  void UpdateBoundsAndRedraw(const QPoint& target_arrow_tip_position, ShowArrow show_arrow,
-                             int border_width);
+  QLabel* AddTextLabel(QVBoxLayout* column, const QString& text);
+  void PlaceAndPaint(const QPoint& arrow_target, ShowArrow show_arrow, int border_width);
 
-  QColor m_border_color;
-  QPixmap m_pixmap;
+  QColor m_outline;
+  QPixmap m_bubble;
 };

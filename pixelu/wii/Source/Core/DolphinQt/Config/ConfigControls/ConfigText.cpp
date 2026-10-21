@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigText.h"
 
@@ -12,25 +11,22 @@ ConfigText::ConfigText(const Config::Info<std::string>& setting) : ConfigText(se
 ConfigText::ConfigText(const Config::Info<std::string>& setting, Config::Layer* layer)
     : ConfigControl(setting.GetLocation(), layer), m_setting(setting)
 {
-  setText(QString::fromStdString(ReadValue(setting)));
-
-  connect(this, &QLineEdit::editingFinished, this, &ConfigText::Update);
+  OnConfigChanged();
+  connect(this, &QLineEdit::editingFinished, this, &ConfigText::StoreText);
 }
 
+// Sets the text programmatically and saves it, as if the user had typed it.
 void ConfigText::SetTextAndUpdate(const QString& text)
 {
-  if (text == this->text())
+  if (this->text() == text)
     return;
-
   setText(text);
-  Update();
+  StoreText();
 }
 
-void ConfigText::Update()
+void ConfigText::StoreText()
 {
-  const std::string value = text().toStdString();
-
-  SaveValue(m_setting, value);
+  SaveValue(m_setting, text().toStdString());
 }
 
 void ConfigText::OnConfigChanged()

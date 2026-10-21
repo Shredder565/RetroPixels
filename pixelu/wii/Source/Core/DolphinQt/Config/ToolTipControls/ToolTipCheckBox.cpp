@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipCheckBox.h"
 
@@ -11,16 +10,17 @@ ToolTipCheckBox::ToolTipCheckBox(const QString& label) : ToolTipWidget(label)
   SetTitle(label);
 }
 
+// The arrow points at the middle of the tick box rather than the whole control.
 QPoint ToolTipCheckBox::GetToolTipPosition() const
 {
-  int checkbox_width = 18;
-  if (style())
+  int indicator_width = 18;
+  if (QStyle* const current_style = style())
   {
-    QStyleOptionButton opt;
-    initStyleOption(&opt);
-    checkbox_width =
-        style()->subElementRect(QStyle::SubElement::SE_CheckBoxIndicator, &opt, this).width();
+    QStyleOptionButton option;
+    initStyleOption(&option);
+    const QRect box =
+        current_style->subElementRect(QStyle::SubElement::SE_CheckBoxIndicator, &option, this);
+    indicator_width = box.width();
   }
-
-  return pos() + QPoint(checkbox_width / 2, height() / 2);
+  return pos() + QPoint(indicator_width / 2, height() / 2);
 }

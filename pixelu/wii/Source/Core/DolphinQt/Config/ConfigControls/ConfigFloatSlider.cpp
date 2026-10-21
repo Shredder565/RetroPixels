@@ -1,51 +1,58 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-#include <QPointer>
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigFloatSlider.h"
+
+#include <cmath>
+
+#include <QPointer>
 
 ConfigFloatSlider::ConfigFloatSlider(float minimum, float maximum,
                                      const Config::Info<float>& setting, float step,
                                      Config::Layer* layer)
-    : ConfigControl(Qt::Horizontal, setting.GetLocation(), layer), m_minimum(minimum), m_step(step),
+    : ConfigControl(Qt::Horizontal, setting.GetLocation(), layer), m_base(minimum), m_step(step),
       m_setting(setting)
 {
-  const float range = maximum - minimum;
-  const int steps = std::round(range / step);
-  const int interval = std::round(range / steps);
-  const int current_value = std::round((ReadValue(setting) - minimum) / step);
+  const float span = maximum - minimum;
+  const int step_count = static_cast<int>(std::round(span / m_step));
 
   setMinimum(0);
-  setMaximum(steps);
-  setTickInterval(interval);
-  setValue(current_value);
+  setMaximum(step_count);
+  setTickInterval(static_cast<int>(std::round(span / static_cast<float>(step_count))));
+  setValue(StepsFromMinimum(ReadValue(m_setting)));
 
   connect(this, &ConfigFloatSlider::valueChanged, this, &ConfigFloatSlider::Update);
 }
 
+int ConfigFloatSlider::StepsFromMinimum(float value) const
+{
+  return static_cast<int>(std::round((value - m_base) / m_step));
+}
+
+float ConfigFloatSlider::ValueAtStep(int step) const
+{
+  return m_step * static_cast<float>(step) + m_base;
+}
+
 void ConfigFloatSlider::Update(int value)
 {
-  const float current_value = (m_step * value) + m_minimum;
-
-  SaveValue(m_setting, current_value);
+  SaveValue(m_setting, ValueAtStep(value));
 }
 
 float ConfigFloatSlider::GetValue() const
 {
-  return (m_step * value()) + m_minimum;
+  return ValueAtStep(value());
 }
 
 void ConfigFloatSlider::OnConfigChanged()
 {
-  setValue(std::round((ReadValue(m_setting) - m_minimum) / m_step));
+  setValue(StepsFromMinimum(ReadValue(m_setting)));
 }
 
 ConfigFloatLabel::ConfigFloatLabel(const QString& text, ConfigFloatSlider* widget) : QLabel(text)
 {
-  connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this, widget = QPointer{widget}] {
-    // Label shares font changes with ConfigFloatSlider to mark game ini settings.
-    if (widget)
-      setFont(widget->font());
+  const QPointer<ConfigFloatSlider> buddy(widget);
+  connect(&Settings::Instance(), &Settings::ConfigChanged, this, [this, buddy] {
+    if (!buddy.isNull())
+      setFont(buddy->font());
   });
 }

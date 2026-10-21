@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/GraphicsModWarningWidget.h"
 
@@ -14,47 +13,28 @@
 
 GraphicsModWarningWidget::GraphicsModWarningWidget(QWidget* parent) : QWidget(parent)
 {
-  CreateWidgets();
-  ConnectWidgets();
+  m_message = new QLabel();
+  m_settings_button = new QPushButton(tr("Configure Dolphin"));
+  m_settings_button->setHidden(true);
 
-  connect(&Settings::Instance(), &Settings::EnableGfxModsChanged, this,
-          &GraphicsModWarningWidget::Update);
-  Update();
-}
+  auto* const row = new QHBoxLayout{this};
+  row->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, m_message));
+  row->addWidget(m_settings_button);
+  row->setContentsMargins(0, 0, 0, 0);
 
-void GraphicsModWarningWidget::CreateWidgets()
-{
-  m_text = new QLabel();
-
-  m_config_button = new QPushButton(tr("Configure Dolphin"));
-  m_config_button->setHidden(true);
-
-  auto* const layout = new QHBoxLayout{this};
-
-  layout->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, m_text));
-  layout->addWidget(m_config_button);
-
-  layout->setContentsMargins(0, 0, 0, 0);
-}
-
-void GraphicsModWarningWidget::Update()
-{
-  bool hide_widget = true;
-  bool hide_config_button = true;
-
-  if (!Settings::Instance().GetGraphicModsEnabled())
-  {
-    hide_widget = false;
-    hide_config_button = false;
-    m_text->setText(tr("Graphics mods are currently disabled."));
-  }
-
-  setHidden(hide_widget);
-  m_config_button->setHidden(hide_config_button);
-}
-
-void GraphicsModWarningWidget::ConnectWidgets()
-{
-  connect(m_config_button, &QPushButton::clicked, this,
+  connect(m_settings_button, &QPushButton::clicked, this,
           &GraphicsModWarningWidget::GraphicsModEnableSettings);
+  connect(&Settings::Instance(), &Settings::EnableGfxModsChanged, this,
+          &GraphicsModWarningWidget::Refresh);
+
+  Refresh();
+}
+
+void GraphicsModWarningWidget::Refresh()
+{
+  const bool mods_off = !Settings::Instance().GetGraphicModsEnabled();
+  if (mods_off)
+    m_message->setText(tr("Graphics mods are currently disabled."));
+  setHidden(!mods_off);
+  m_settings_button->setHidden(!mods_off);
 }

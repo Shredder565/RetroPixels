@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
 
@@ -10,21 +9,19 @@ ConfigBool::ConfigBool(const QString& label, const Config::Info<bool>& setting, 
 
 ConfigBool::ConfigBool(const QString& label, const Config::Info<bool>& setting,
                        Config::Layer* layer, bool reverse)
-    : ConfigControl(label, setting.GetLocation(), layer), m_setting(setting), m_reverse(reverse)
+    : ConfigControl(label, setting.GetLocation(), layer), m_setting(setting), m_inverted(reverse)
 {
-  setChecked(ReadValue(setting) ^ reverse);
-
-  connect(this, &QCheckBox::toggled, this, &ConfigBool::Update);
+  setChecked(ReadValue(m_setting) != m_inverted);
+  connect(this, &QCheckBox::toggled, this, &ConfigBool::Store);
 }
 
-void ConfigBool::Update()
+void ConfigBool::Store(bool)
 {
-  const bool value = static_cast<bool>(isChecked() ^ m_reverse);
-
+  const bool value = isChecked() != m_inverted;
   SaveValue(m_setting, value);
 }
 
 void ConfigBool::OnConfigChanged()
 {
-  setChecked(ReadValue(m_setting) ^ m_reverse);
+  setChecked(ReadValue(m_setting) != m_inverted);
 }

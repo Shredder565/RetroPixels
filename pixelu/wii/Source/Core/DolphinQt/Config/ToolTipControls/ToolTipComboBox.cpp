@@ -1,9 +1,10 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipComboBox.h"
 
+// Middle of the box.
 QPoint ToolTipComboBox::GetToolTipPosition() const
 {
-  return pos() + QPoint(width() / 2, height() / 2);
+  const QSize box = size();
+  return pos() + QPoint(box.width() / 2, box.height() / 2);
 }

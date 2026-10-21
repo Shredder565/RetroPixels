@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ConfigControls/ConfigUserPath.h"
 
@@ -21,39 +20,37 @@ ConfigUserPath::ConfigUserPath(const unsigned int dir_index,
                                const Config::Info<std::string>& setting, Config::Layer* layer)
     : ConfigText(setting, layer), m_dir_index(dir_index)
 {
-  OnConfigChanged();
-
-  connect(this, &QLineEdit::editingFinished, this, &ConfigUserPath::Update);
+  ShowEffectivePath();
+  // Runs after ConfigText's own editingFinished handler.
+  connect(this, &QLineEdit::editingFinished, this, &ConfigUserPath::ApplyPath);
 }
 
-// Display the effective path: if Config has a value, use it; otherwise fall back to UserPath.
-// Config values only serve to initialize UserPath at startup, an empty config meaning "use the
-// current UserPath".
-void ConfigUserPath::RefreshText()
+// The setting only seeds File's user path at start-up; empty means "keep the
+// path File already has", so that path is what the field shows.
+void ConfigUserPath::ShowEffectivePath()
 {
-  const std::string config_value = ReadValue(m_setting);
-  const std::string userpath_value = File::GetUserPath(m_dir_index);
-  const QString text = QString::fromStdString(config_value.empty() ? userpath_value : config_value);
-  setText(text);
+  const std::string configured = ReadValue(m_setting);
+  const std::string& in_use = File::GetUserPath(m_dir_index);
+  setText(QString::fromStdString(configured.empty() ? in_use : configured));
 }
 
-void ConfigUserPath::Update()
+void ConfigUserPath::ApplyPath()
 {
-  const QString new_text = text().trimmed();
-  if (new_text.isEmpty())
+  const QString entered = text().trimmed();
+  if (!entered.isEmpty())
   {
-    ModalMessageBox::warning(this, tr("Empty Value"),
-                             tr("This field cannot be left empty. Please enter a value."));
-    RefreshText();
+    const std::string path = entered.toStdString();
+    File::SetUserPath(m_dir_index, path);
+    SaveValue(m_setting, path);
     return;
   }
 
-  const std::string value = new_text.toStdString();
-  File::SetUserPath(m_dir_index, value);
-  SaveValue(m_setting, value);
+  ModalMessageBox::warning(this, tr("Empty Value"),
+                           tr("This field cannot be left empty. Please enter a value."));
+  ShowEffectivePath();
 }
 
 void ConfigUserPath::OnConfigChanged()
 {
-  RefreshText();
+  ShowEffectivePath();
 }

@@ -1,8 +1,8 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/BalloonTip.h"
 
+#include <algorithm>
 #include <memory>
 
 #include <QApplication>
@@ -21,21 +21,45 @@
 #include <QString>
 #include <QVBoxLayout>
 
-#if defined(__APPLE__)
-#include <QToolTip>
-#endif
-
 #include "DolphinQt/QtUtils/QueueOnObject.h"
 #include "DolphinQt/Settings.h"
 
 namespace
 {
-std::unique_ptr<BalloonTip> s_the_balloon_tip = nullptr;
-// Remember the parent ToolTipWidget so cursor-related events can see whether the cursor is inside
-// the parent's bounding box or not. Use this variable instead of BalloonTip's parent() member
-// because the ToolTipWidget isn't responsible for deleting the BalloonTip and so doesn't set its
-// parent member.
-QWidget* s_parent = nullptr;
+// The one balloon on screen, if any.
+std::unique_ptr<BalloonTip> g_balloon;
+// The control the balloon belongs to. The balloon is a top-level window, so
+// this is tracked here rather than through QObject parenting.
+QWidget* g_owner = nullptr;
+
+// Arrow shape, in pixels. The width is odd so the point is one pixel wide.
+constexpr int ARROW_WIDTH = 35;
+constexpr float ARROW_HALF_WIDTH = ARROW_WIDTH / 2.0f;
+constexpr int ARROW_HEIGHT = (ARROW_WIDTH + 1) / 2;
+// Gap between the text and the inside of the outline.
+constexpr int TEXT_PADDING = 12;
+// Inner corner radius of the box; the outline width is added on top.
+constexpr float CORNER_RADIUS = 7.0f;
+// Preferred distance of the arrow from the box's near side.
+constexpr int ARROW_INSET = 34;
+
+const QString EMPHASIS_OPEN = QStringLiteral("<dolphin_emphasis>");
+const QString EMPHASIS_CLOSE = QStringLiteral("</dolphin_emphasis>");
+
+// Deleting the balloon from inside one of its own event handlers would free
+// the object under Qt's feet, so the hide is posted to the owner instead.
+void HideLater()
+{
+  QueueOnObject(g_owner, BalloonTip::HideBalloon);
+}
+
+QPen ThinFlatPen(const QColor& colour, int width)
+{
+  // Flat caps keep one-pixel strokes from growing past their end points.
+  QPen pen(colour, width);
+  pen.setCapStyle(Qt::FlatCap);
+  return pen;
+}
 }  // namespace
 
 void BalloonTip::ShowBalloon(const QString& title, const QString& message,
@@ -43,358 +67,249 @@ void BalloonTip::ShowBalloon(const QString& title, const QString& message,
                              const ShowArrow show_arrow, const int border_width)
 {
   HideBalloon();
-  if (message.isEmpty() && title.isEmpty())
+  if (title.isEmpty() && message.isEmpty())
     return;
 
-#if defined(__APPLE__)
-  QString the_message = message;
-  the_message.replace(QStringLiteral("<dolphin_emphasis>"), QStringLiteral("<b>"));
-  the_message.replace(QStringLiteral("</dolphin_emphasis>"), QStringLiteral("</b>"));
-  QToolTip::showText(target_arrow_tip_position, the_message, parent);
-#else
-  s_the_balloon_tip = std::make_unique<BalloonTip>(PrivateTag{}, title, message, parent);
-  s_the_balloon_tip->UpdateBoundsAndRedraw(target_arrow_tip_position, show_arrow, border_width);
-#endif
+  g_balloon = std::make_unique<BalloonTip>(PrivateTag{}, title, message, parent);
+  g_balloon->PlaceAndPaint(target_arrow_tip_position, show_arrow, border_width);
 }
 
 void BalloonTip::HideBalloon()
 {
-  s_parent = nullptr;
-#if defined(__APPLE__)
-  QToolTip::hideText();
-#else
-  if (s_the_balloon_tip == nullptr)
+  g_owner = nullptr;
+  if (!g_balloon)
     return;
-  s_the_balloon_tip->hide();
-  s_the_balloon_tip.reset();
-#endif
+  g_balloon->hide();
+  g_balloon.reset();
+}
+
+bool BalloonTip::IsCursorInsideWidgetBoundingBox(const QWidget& widget)
+{
+  return widget.rect().contains(widget.mapFromGlobal(QCursor::pos()));
+}
+
+bool BalloonTip::IsCursorOnBalloonTip()
+{
+  if (!g_balloon)
+    return false;
+  return QApplication::widgetAt(QCursor::pos()) == g_balloon.get();
+}
+
+bool BalloonTip::IsWidgetBalloonTipActive(const QWidget& widget)
+{
+  return g_owner == &widget;
 }
 
 BalloonTip::BalloonTip(PrivateTag, const QString& title, QString message, QWidget* const parent)
     : QWidget(nullptr, Qt::ToolTip)
 {
-  s_parent = parent;
+  g_owner = parent;
   setMouseTracking(true);
 
-  QColor window_color;
-  QColor text_color;
-  QColor dolphin_emphasis;
-  Settings::Instance().GetToolTipStyle(window_color, text_color, dolphin_emphasis, m_border_color,
+  QColor background;
+  QColor foreground;
+  QColor highlight;
+  Settings::Instance().GetToolTipStyle(background, foreground, highlight, m_outline,
                                        parent->palette(), palette());
-  const auto style_sheet = QStringLiteral("background-color: #%1; color: #%2;")
-                               .arg(window_color.rgba(), 0, 16)
-                               .arg(text_color.rgba(), 0, 16);
-  setStyleSheet(style_sheet);
 
-  // Replace text in our our message if specific "tags" are used
-  message.replace(QStringLiteral("<dolphin_emphasis>"),
-                  QStringLiteral("<font color=\"#%1\"><b>").arg(dolphin_emphasis.rgba(), 0, 16));
-  message.replace(QStringLiteral("</dolphin_emphasis>"), QStringLiteral("</b></font>"));
+  const QString sheet = QStringLiteral("background-color: #%1; color: #%2;")
+                            .arg(background.rgba(), 0, 16)
+                            .arg(foreground.rgba(), 0, 16);
+  setStyleSheet(sheet);
 
-  auto* const balloontip_layout = new QVBoxLayout;
-  balloontip_layout->setSizeConstraint(QLayout::SetFixedSize);
-  setLayout(balloontip_layout);
+  // The descriptions mark key phrases with a pseudo tag; turn it into real
+  // rich text in the highlight colour.
+  const QString highlight_open =
+      QStringLiteral("<font color=\"#%1\"><b>").arg(highlight.rgba(), 0, 16);
+  message.replace(EMPHASIS_OPEN, highlight_open);
+  message.replace(EMPHASIS_CLOSE, QStringLiteral("</b></font>"));
 
-  const auto create_label = [=](const QString& text) {
-    QLabel* const label = new QLabel;
-    balloontip_layout->addWidget(label);
-
-    label->setText(text);
-    label->setTextFormat(Qt::RichText);
-
-    const int max_width = label->screen()->availableGeometry().width() / 3;
-    label->setMaximumWidth(max_width);
-
-    if (label->sizeHint().width() > max_width)
-    {
-      label->setWordWrap(true);
-      label->setMinimumWidth(max_width);
-    }
-
-    return label;
-  };
+  auto* const column = new QVBoxLayout;
+  column->setSizeConstraint(QLayout::SetFixedSize);
+  setLayout(column);
 
   if (!title.isEmpty())
   {
-    QLabel* const title_label = create_label(title);
-
-    QFont title_font = title_label->font();
-    title_font.setBold(true);
-    title_label->setFont(title_font);
+    QLabel* const heading = AddTextLabel(column, title);
+    QFont bold = heading->font();
+    bold.setBold(true);
+    heading->setFont(bold);
   }
-
   if (!message.isEmpty())
-    create_label(message);
+    AddTextLabel(column, message);
 }
 
-bool BalloonTip::IsCursorInsideWidgetBoundingBox(const QWidget& widget)
+// Long texts wrap at a third of the screen width.
+QLabel* BalloonTip::AddTextLabel(QVBoxLayout* const column, const QString& text)
 {
-  const QPoint local_cursor_position = widget.mapFromGlobal(QCursor::pos());
-  return widget.rect().contains(local_cursor_position);
-}
+  auto* const label = new QLabel;
+  column->addWidget(label);
+  label->setText(text);
+  label->setTextFormat(Qt::RichText);
 
-bool BalloonTip::IsCursorOnBalloonTip()
-{
-  return s_the_balloon_tip != nullptr &&
-         QApplication::widgetAt(QCursor::pos()) == s_the_balloon_tip.get();
-}
-
-bool BalloonTip::IsWidgetBalloonTipActive(const QWidget& widget)
-{
-  return &widget == s_parent;
-}
-
-// Hiding the balloon causes the BalloonTip widget to be deleted. Triggering that deletion while
-// inside a BalloonTip event handler leads to a use-after-free crash or worse, so queue the deletion
-// for later.
-static void QueueHideBalloon()
-{
-  QueueOnObject(s_parent, BalloonTip::HideBalloon);
+  const int widest = label->screen()->availableGeometry().width() / 3;
+  label->setMaximumWidth(widest);
+  if (label->sizeHint().width() > widest)
+  {
+    label->setWordWrap(true);
+    label->setMinimumWidth(widest);
+  }
+  return label;
 }
 
 void BalloonTip::enterEvent(QEnterEvent* const event)
 {
-  if (!IsCursorInsideWidgetBoundingBox(*s_parent))
-    QueueHideBalloon();
-
+  if (!IsCursorInsideWidgetBoundingBox(*g_owner))
+    HideLater();
   QWidget::enterEvent(event);
 }
 
 void BalloonTip::mouseMoveEvent(QMouseEvent* const event)
 {
-  if (!IsCursorInsideWidgetBoundingBox(*s_parent))
-    QueueHideBalloon();
-
+  if (!IsCursorInsideWidgetBoundingBox(*g_owner))
+    HideLater();
   QWidget::mouseMoveEvent(event);
 }
 
 void BalloonTip::leaveEvent(QEvent* const event)
 {
-  if (QApplication::widgetAt(QCursor::pos()) != s_parent)
-    QueueHideBalloon();
-
+  if (QApplication::widgetAt(QCursor::pos()) != g_owner)
+    HideLater();
   QWidget::leaveEvent(event);
 }
 
 void BalloonTip::paintEvent(QPaintEvent* const event)
 {
-  QPainter painter(this);
-  painter.drawPixmap(rect(), m_pixmap);
-
+  {
+    QPainter painter(this);
+    painter.drawPixmap(rect(), m_bubble);
+  }
   QWidget::paintEvent(event);
 }
 
-void BalloonTip::UpdateBoundsAndRedraw(const QPoint& target_arrow_tip_position,
-                                       const ShowArrow show_arrow, const int border_full_width)
+// Sizes the window around the labels, paints the bubble (box plus arrow)
+// into m_bubble with a matching window mask, and moves the window so the
+// arrow's point lands on arrow_target while the box stays on screen.
+void BalloonTip::PlaceAndPaint(const QPoint& arrow_target, const ShowArrow show_arrow,
+                               const int border_width)
 {
-  const float border_half_width = border_full_width / 2.0;
+  const float half_border = border_width / 2.0f;
 
-  // This should be odd so that the arrow tip is a single pixel wide.
-  const int arrow_full_width = 35;
-  const float arrow_half_width = arrow_full_width / 2.0;
-  // The y distance between the inner edge of the rectangle border and the inner tip of the arrow
-  // border, and also the distance between the outer edge of the rectangle border and the outer tip
-  // of the arrow border
-  const int arrow_height = (1 + arrow_full_width) / 2;
+  // Room around the labels for the outline, the rounded corners and an arrow
+  // above or below.
+  const int corner_room = static_cast<int>(half_border / 4);
+  const int side_margin = border_width + corner_room + TEXT_PADDING;
+  const int end_margin = side_margin + ARROW_HEIGHT;
+  layout()->setContentsMargins(side_margin, end_margin, side_margin, end_margin);
 
-  // Distance between the label layout and the inner rectangle border edge
-  const int balloon_interior_padding = 12;
-  // Prevent the corners of the label layout from portruding into the rounded rectangle corners at
-  // larger border sizes.
-  const int rounded_corner_margin = border_half_width / 4;
-  const int horizontal_margin =
-      border_full_width + rounded_corner_margin + balloon_interior_padding;
-  const int vertical_margin = horizontal_margin + arrow_height;
+  const QSize window_size = sizeHint();
+  const int window_w = window_size.width();
+  const int window_h = window_size.height();
 
-  // Create enough space around the layout containing the title and message to draw the balloon and
-  // both arrow tips (at most one of which will be visible)
-  layout()->setContentsMargins(horizontal_margin, vertical_margin, horizontal_margin,
-                               vertical_margin);
+  // The box outline runs along the middle of the border stroke.
+  const float box_left = half_border;
+  const float box_top = half_border + ARROW_HEIGHT;
+  const float box_w = static_cast<float>(window_w - border_width);
+  const float box_h = static_cast<float>(window_h - border_width - 2 * ARROW_HEIGHT);
+  const float box_bottom = box_top + box_h;
+  // Qt measures a rounded corner's radius to the outside of the curve.
+  const float corner = CORNER_RADIUS + static_cast<float>(border_width);
 
-  QSize size_hint = sizeHint();
+  // Keep the arrow on the straight part of the edge, or centre it on narrow
+  // boxes.
+  const int arrow_edge =
+      std::min(ARROW_INSET + border_width + static_cast<int>(half_border), (window_w - ARROW_WIDTH) / 2);
+  const int arrow_point_from_edge = static_cast<int>(arrow_edge + ARROW_HALF_WIDTH);
 
-  // These positions represent the middle of each edge of the BalloonTip's rounded rectangle
-  const float rect_width = size_hint.width() - border_full_width;
-  const float rect_height = size_hint.height() - border_full_width - 2 * arrow_height;
-  const float rect_top = border_half_width + arrow_height;
-  const float rect_bottom = rect_top + rect_height;
-  const float rect_left = border_half_width;
-  // rect_right isn't used for anything
-
-  // Qt defines the radius of a rounded rectangle as "the radius of the ellipses defining the
-  // corner". Unlike the rectangle's edges this corresponds to the outside of the rounded curve
-  // instead of its middle, so we add the full width to the inner radius instead of the half width
-  const float corner_base_inner_radius = 7.0;
-  const float corner_outer_radius = corner_base_inner_radius + border_full_width;
-
-  // This value is arbitrary but works well.
-  const int base_arrow_x_offset = 34;
-  // Adjust the offset inward to compensate for the border and rounded corner widths. This ensures
-  // the arrow is on the flat part of the top/bottom border.
-  const int adjusted_arrow_x_offset =
-      base_arrow_x_offset + border_full_width + static_cast<int>(border_half_width);
-  // If the border is wide enough (or the BalloonTip small enough) the offset might end up past the
-  // midpoint; if that happens just use the midpoint instead
-  const int centered_arrow_x_offset = (size_hint.width() - arrow_full_width) / 2;
-  // If the arrow is on the left this is the distance between the left edge of the BalloonTip and
-  // the left edge of the arrow interior; otherwise the distance between the right edges.
-  const int arrow_nearest_edge_x_offset =
-      std::min(adjusted_arrow_x_offset, centered_arrow_x_offset);
-  const int arrow_tip_x_offset = arrow_nearest_edge_x_offset + arrow_half_width;
-
-  // The BalloonTip should be contained entirely within the screen that contains the target
-  // position.
-  QScreen* screen = QGuiApplication::screenAt(target_arrow_tip_position);
-  if (screen == nullptr)
-  {
-    // If the target position isn't on any screen (which can happen if the window is partly off the
-    // screen and the user hovers over the label) then use the screen containing the cursor instead.
+  QScreen* screen = QGuiApplication::screenAt(arrow_target);
+  if (screen == nullptr)  // target off every screen: use the cursor's
     screen = QGuiApplication::screenAt(QCursor::pos());
-  }
-  const QRect screen_rect = screen->geometry();
+  const QRect screen_area = screen->geometry();
 
-  QPainterPath rect_path;
-  rect_path.addRoundedRect(rect_left, rect_top, rect_width, rect_height, corner_outer_radius,
-                           corner_outer_radius);
+  // Balloon above the target (arrow on its bottom edge) when there is room,
+  // and extending to the right (arrow near its left end) when that fits.
+  const bool above = arrow_target.y() - window_h + ARROW_HEIGHT >= 0;
+  const bool extends_right =
+      arrow_target.x() + window_w - arrow_point_from_edge < screen_area.width();
 
-  // The default pen cap style Qt::SquareCap extends drawn lines one half width before the starting
-  // point and one half width after the ending point such that the starting and ending points are
-  // surrounded by drawn pixels in both dimensions instead of just for the width. This is a
-  // reasonable default but we need to draw lines precisely, and this behavior causes problems when
-  // drawing lines of length and width 1 (which we do for the arrow interior, and also the arrow
-  // border when border_full_width is 1). For those lines to correctly end up as a pixel we would
-  // need to offset the start and end points by 0.5 inward. However, doing that would lead them to
-  // be at the same point, and if the endpoints of a line are the same Qt simply doesn't draw it
-  // regardless of the cap style.
-  //
-  // Using Qt::FlatCap instead fixes the issue.
+  const float sign = above ? 1.0f : -1.0f;
+  const float arrow_root_y = above ? box_bottom - half_border : box_top + half_border;
+  const float arrow_inner_point_y = arrow_root_y + static_cast<float>(above ? ARROW_HEIGHT : -ARROW_HEIGHT);
+  const float stroke_step = static_cast<float>(above ? border_width : -border_width);
+  const float arrow_outer_point_y = arrow_inner_point_y + stroke_step;
+  const float arrow_left =
+      static_cast<float>(extends_right ? arrow_edge : window_w - arrow_edge - ARROW_WIDTH);
+  const float arrow_right = arrow_left + ARROW_WIDTH;
+  const float arrow_mid = arrow_left + ARROW_HALF_WIDTH;
 
-  m_pixmap = QPixmap(size_hint);
+  QPainterPath box;
+  box.addRoundedRect(box_left, box_top, box_w, box_h, corner, corner);
 
-  QPen border_pen(m_border_color, border_full_width);
-  border_pen.setCapStyle(Qt::FlatCap);
-
-  QPainter balloon_painter(&m_pixmap);
-  balloon_painter.setPen(border_pen);
-  balloon_painter.setBrush(palette().color(QPalette::Window));
-  balloon_painter.drawPath(rect_path);
-
-  QBitmap mask_bitmap(size_hint);
-  mask_bitmap.fill(Qt::color0);
-
-  QPen mask_pen(Qt::color1, border_full_width);
-  mask_pen.setCapStyle(Qt::FlatCap);
-
-  QPainter mask_painter(&mask_bitmap);
-  mask_painter.setPen(mask_pen);
-  mask_painter.setBrush(QBrush(Qt::color1));
-  mask_painter.drawPath(rect_path);
-
-  const bool arrow_at_bottom =
-      target_arrow_tip_position.y() - size_hint.height() + arrow_height >= 0;
-  const bool arrow_at_left =
-      target_arrow_tip_position.x() + size_hint.width() - arrow_tip_x_offset < screen_rect.width();
-
-  const float arrow_base_y =
-      arrow_at_bottom ? rect_bottom - border_half_width : rect_top + border_half_width;
-
-  const float arrow_tip_vertical_offset = arrow_at_bottom ? arrow_height : -arrow_height;
-  const float arrow_tip_interior_y = arrow_base_y + arrow_tip_vertical_offset;
-  const float arrow_tip_exterior_y =
-      arrow_tip_interior_y + (arrow_at_bottom ? border_full_width : -border_full_width);
-  const float arrow_base_left_edge_x =
-      arrow_at_left ? arrow_nearest_edge_x_offset :
-                      size_hint.width() - arrow_nearest_edge_x_offset - arrow_full_width;
-  const float arrow_base_right_edge_x = arrow_base_left_edge_x + arrow_full_width;
-  const float arrow_tip_x = arrow_base_left_edge_x + arrow_half_width;
-
-  if (show_arrow == ShowArrow::Yes)
+  const QColor fill = palette().color(QPalette::Window);
+  m_bubble = QPixmap(window_size);
+  QBitmap shape(window_size);
+  shape.fill(Qt::color0);
   {
-    // Drawing diagonal lines in Qt is filled with edge cases and inexplicable behavior. Getting it
-    // to do what you want at one border size is simple enough, but doing so flexibly is an exercise
-    // in futility. Some examples:
-    // * For some values of x, diagonal lines of width x and x+1 are drawn exactly the same.
-    // * When drawing a triangle where p1 and p3 have exactly the same y value, they can be drawn at
-    // different heights.
-    // * Lines of width 1 sometimes get drawn one pixel past where they should even with FlatCap,
-    // but only on the left side (regardless of which direction the stroke was).
-    //
-    // Instead of dealing with all that, fake it with vertical lines which are much better behaved.
-    // Draw a bunch of vertical lines with width 1 to form the arrow border and interior.
+    QPainter bubble(&m_bubble);
+    QPainter mask(&shape);
 
-    QPainterPath arrow_border_path;
-    QPainterPath arrow_interior_fill_path;
-    const float y_end_offset = arrow_at_bottom ? border_full_width : -border_full_width;
+    bubble.setPen(ThinFlatPen(m_outline, border_width));
+    bubble.setBrush(fill);
+    bubble.drawPath(box);
 
-    // Draw the arrow border and interior lines from the outside inward. Each loop iteration draws
-    // one pair of border lines and one pair of interior lines.
-    for (int i = 1; i <= arrow_half_width; i++)
+    mask.setPen(ThinFlatPen(Qt::color1, border_width));
+    mask.setBrush(QBrush(Qt::color1));
+    mask.drawPath(box);
+
+    if (show_arrow == ShowArrow::Yes)
     {
-      const float x_offset_from_arrow_base_edge = i - 0.5;
-      const float border_y_start = arrow_base_y + (arrow_at_bottom ? i : -i);
-      const float border_y_end = border_y_start + y_end_offset;
-      const float interior_y_start = arrow_base_y;
-      const float interior_y_end = border_y_start;
-      const float left_line_x = arrow_base_left_edge_x + x_offset_from_arrow_base_edge;
-      const float right_line_x = arrow_base_right_edge_x - x_offset_from_arrow_base_edge;
+      // Slanted strokes rasterise unpredictably, so the arrow is built from
+      // one-pixel vertical strokes instead: a short outline segment and an
+      // interior fill segment per column, mirrored about the point.
+      QPainterPath outline;
+      QPainterPath inside;
 
-      arrow_border_path.moveTo(left_line_x, border_y_start);
-      arrow_border_path.lineTo(left_line_x, border_y_end);
+      outline.moveTo(arrow_mid, arrow_inner_point_y);
+      outline.lineTo(arrow_mid, arrow_inner_point_y + stroke_step);
+      inside.moveTo(arrow_mid, arrow_root_y);
+      inside.lineTo(arrow_mid, arrow_inner_point_y);
 
-      arrow_border_path.moveTo(right_line_x, border_y_start);
-      arrow_border_path.lineTo(right_line_x, border_y_end);
+      for (int column = 1; column <= ARROW_HALF_WIDTH; ++column)
+      {
+        const float inset = static_cast<float>(column) - 0.5f;
+        const float edge_y = arrow_root_y + sign * static_cast<float>(column);
+        for (const float x : {arrow_left + inset, arrow_right - inset})
+        {
+          outline.moveTo(x, edge_y);
+          outline.lineTo(x, edge_y + stroke_step);
+          inside.moveTo(x, arrow_root_y);
+          inside.lineTo(x, edge_y);
+        }
+      }
 
-      arrow_interior_fill_path.moveTo(left_line_x, interior_y_start);
-      arrow_interior_fill_path.lineTo(left_line_x, interior_y_end);
+      bubble.setPen(ThinFlatPen(m_outline, 1));
+      bubble.drawPath(outline);
+      bubble.setPen(ThinFlatPen(fill, 1));
+      bubble.drawPath(inside);
 
-      arrow_interior_fill_path.moveTo(right_line_x, interior_y_start);
-      arrow_interior_fill_path.lineTo(right_line_x, interior_y_end);
+      mask.setPen(ThinFlatPen(Qt::color1, 1));
+      mask.drawPath(outline);
+      mask.drawPath(inside);
     }
-    // The middle border line
-    arrow_border_path.moveTo(arrow_tip_x, arrow_tip_interior_y);
-    arrow_border_path.lineTo(arrow_tip_x, arrow_tip_interior_y + y_end_offset);
-
-    // The middle interior line
-    arrow_interior_fill_path.moveTo(arrow_tip_x, arrow_base_y);
-    arrow_interior_fill_path.lineTo(arrow_tip_x, arrow_tip_interior_y);
-
-    border_pen.setWidth(1);
-
-    balloon_painter.setPen(border_pen);
-    balloon_painter.drawPath(arrow_border_path);
-
-    QPen arrow_interior_fill_pen(palette().color(QPalette::Window), 1);
-    arrow_interior_fill_pen.setCapStyle(Qt::FlatCap);
-    balloon_painter.setPen(arrow_interior_fill_pen);
-    balloon_painter.drawPath(arrow_interior_fill_path);
-
-    mask_pen.setWidth(1);
-    mask_painter.setPen(mask_pen);
-
-    mask_painter.drawPath(arrow_border_path);
-    mask_painter.drawPath(arrow_interior_fill_path);
   }
+  setMask(shape);
 
-  setMask(mask_bitmap);
+  // Put the arrow's point on the target (drawn or not), then slide the
+  // balloon sideways until it is fully on the screen.
+  const int wanted_x = arrow_target.x() - static_cast<int>(arrow_mid);
+  const int max_x = screen_area.left() + screen_area.width() - window_w;
+  const int x = std::max(screen_area.left(), std::min(max_x, wanted_x));
+  // arrow_outer_point_y is the far side of the point pixel; when the arrow
+  // hangs below the box, the pixel above it is the point.
+  const int below_fix = above ? 0 : 1;
+  const int y = static_cast<int>(static_cast<float>(arrow_target.y()) - arrow_outer_point_y -
+                                 static_cast<float>(below_fix));
 
-  // Place the arrow tip at the target position whether the arrow tip is drawn or not
-  const int target_balloontip_global_x =
-      target_arrow_tip_position.x() - static_cast<int>(arrow_tip_x);
-  const int rightmost_valid_balloontip_global_x =
-      screen_rect.left() + screen_rect.width() - size_hint.width();
-  // If the balloon would extend off the screen, push it left or right until it's not
-  const int actual_balloontip_global_x =
-      std::max(screen_rect.left(),
-               std::min(rightmost_valid_balloontip_global_x, target_balloontip_global_x));
-  // The tip pixel should be in the middle of the control, and arrow_tip_exterior_y is at the bottom
-  // of that pixel. When arrow_at_bottom is true the arrow is above arrow_tip_exterior_y and so the
-  // tip pixel is in the right place, but when it's false the arrow is below arrow_tip_exterior_y
-  // so the tip pixel would be the one below that. Make this adjustment to fix that.
-  const int tip_pixel_adjustment = arrow_at_bottom ? 0 : 1;
-  const int actual_balloontip_global_y =
-      target_arrow_tip_position.y() - arrow_tip_exterior_y - tip_pixel_adjustment;
-
-  move(actual_balloontip_global_x, actual_balloontip_global_y);
-
+  move(x, y);
   show();
 }

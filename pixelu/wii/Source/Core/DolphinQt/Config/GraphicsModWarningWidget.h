@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 class QLabel;
 class QPushButton;
 
+// Shown above the graphics mod list while graphics mods are turned off.
 class GraphicsModWarningWidget final : public QWidget
 {
   Q_OBJECT
@@ -18,11 +18,8 @@ signals:
   void GraphicsModEnableSettings();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
+  void Refresh();
 
-  void Update();
-
-  QLabel* m_text;
-  QPushButton* m_config_button;
+  QLabel* m_message;
+  QPushButton* m_settings_button;
 };

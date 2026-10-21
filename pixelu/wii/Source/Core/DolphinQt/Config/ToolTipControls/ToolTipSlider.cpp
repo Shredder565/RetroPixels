@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/ToolTipControls/ToolTipSlider.h"
 
@@ -10,16 +9,16 @@ ToolTipSlider::ToolTipSlider(Qt::Orientation orientation) : ToolTipWidget(orient
 {
 }
 
+// The arrow points at the slider's handle.
 QPoint ToolTipSlider::GetToolTipPosition() const
 {
-  QRect handle_rect(0, 0, 15, 15);
-  if (style())
+  QRect handle(0, 0, 15, 15);
+  if (QStyle* const current_style = style())
   {
-    QStyleOptionSlider opt;
-    initStyleOption(&opt);
-    handle_rect = style()->subControlRect(QStyle::ComplexControl::CC_Slider, &opt,
-                                          QStyle::SubControl::SC_SliderHandle, this);
+    QStyleOptionSlider option;
+    initStyleOption(&option);
+    handle = current_style->subControlRect(QStyle::ComplexControl::CC_Slider, &option,
+                                           QStyle::SubControl::SC_SliderHandle, this);
   }
-
-  return pos() + handle_rect.center();
+  return pos() + handle.center();
 }

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/CheatWarningWidget.h"
 
@@ -19,59 +18,43 @@
 #include "DolphinQt/Settings.h"
 
 CheatWarningWidget::CheatWarningWidget(std::string game_id, bool restart_required, QWidget* parent)
-    : QWidget(parent), m_game_id(std::move(game_id)), m_restart_required(restart_required)
+    : QWidget(parent), m_game_id(std::move(game_id)), m_needs_restart(restart_required)
 {
-  CreateWidgets();
-  ConnectWidgets();
+  m_message = new QLabel();
+  m_settings_button = new QPushButton(tr("Configure Dolphin"));
+  m_settings_button->setHidden(true);
 
-  connect(&Settings::Instance(), &Settings::EnableCheatsChanged, this,
-          [this] { Update(Core::IsRunning(Core::System::GetInstance())); });
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this](Core::State state) {
-    Update(state == Core::State::Running || state == Core::State::Paused);
+  auto* const row = new QHBoxLayout{this};
+  row->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, m_message));
+  row->addWidget(m_settings_button);
+  row->setContentsMargins(0, 0, 0, 0);
+
+  connect(m_settings_button, &QPushButton::clicked, this,
+          &CheatWarningWidget::OpenCheatEnableSettings);
+
+  Settings& settings = Settings::Instance();
+  connect(&settings, &Settings::EnableCheatsChanged, this,
+          [this] { Refresh(Core::IsRunning(Core::System::GetInstance())); });
+  connect(&settings, &Settings::EmulationStateChanged, this, [this](Core::State state) {
+    Refresh(state == Core::State::Running || state == Core::State::Paused);
   });
 
-  Update(Core::IsRunning(Core::System::GetInstance()));
+  Refresh(Core::IsRunning(Core::System::GetInstance()));
 }
 
-void CheatWarningWidget::CreateWidgets()
+void CheatWarningWidget::Refresh(bool running)
 {
-  m_text = new QLabel();
-  m_config_button = new QPushButton(tr("Configure Dolphin"));
+  // "Cheats are off" wins over the restart note, and is the only case that
+  // offers the settings button.
+  const bool this_game_running =
+      running && SConfig::GetInstance().GetGameID() == m_game_id && m_needs_restart;
+  const bool cheats_off = !Settings::Instance().GetCheatsEnabled();
 
-  m_config_button->setHidden(true);
+  if (this_game_running)
+    m_message->setText(tr("Changing cheats will only take effect when the game is restarted."));
+  if (cheats_off)
+    m_message->setText(tr("Dolphin's cheat system is currently disabled."));
 
-  auto* const layout = new QHBoxLayout{this};
-
-  layout->addWidget(QtUtils::CreateIconWarning(this, QStyle::SP_MessageBoxWarning, m_text));
-  layout->addWidget(m_config_button);
-
-  layout->setContentsMargins(0, 0, 0, 0);
-}
-
-void CheatWarningWidget::Update(bool running)
-{
-  bool hide_widget = true;
-  bool hide_config_button = true;
-
-  if (running && SConfig::GetInstance().GetGameID() == m_game_id && m_restart_required)
-  {
-    hide_widget = false;
-    m_text->setText(tr("Changing cheats will only take effect when the game is restarted."));
-  }
-
-  if (!Settings::Instance().GetCheatsEnabled())
-  {
-    hide_widget = false;
-    hide_config_button = false;
-    m_text->setText(tr("Dolphin's cheat system is currently disabled."));
-  }
-
-  setHidden(hide_widget);
-  m_config_button->setHidden(hide_config_button);
-}
-
-void CheatWarningWidget::ConnectWidgets()
-{
-  connect(m_config_button, &QPushButton::clicked, this,
-          &CheatWarningWidget::OpenCheatEnableSettings);
+  setHidden(!this_game_running && !cheats_off);
+  m_settings_button->setHidden(!cheats_off);
 }

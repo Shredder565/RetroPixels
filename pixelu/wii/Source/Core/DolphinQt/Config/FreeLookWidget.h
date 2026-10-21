@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,8 @@ class QCheckBox;
 class QPushButton;
 class ToolTipCheckBox;
 
+// Free Look options: on/off, camera 1's control scheme and its mapping
+// window, and background input.
 class FreeLookWidget final : public QWidget
 {
   Q_OBJECT
@@ -18,15 +19,11 @@ public:
   explicit FreeLookWidget(QWidget* parent);
 
 private:
-  void CreateLayout();
-  void ConnectWidgets();
+  void OpenControllerMapping();
+  void RefreshEnabledState();
 
-  void OnFreeLookControllerConfigured();
-  void LoadSettings();
-  void SaveSettings();
-
-  ConfigBool* m_enable_freelook;
-  ConfigChoice* m_freelook_control_type;
-  QPushButton* m_freelook_controller_configure_button;
-  QCheckBox* m_freelook_background_input;
+  ConfigBool* m_enabled;
+  ConfigChoice* m_control_type;
+  QPushButton* m_configure_button;
+  ConfigBool* m_background_input;
 };

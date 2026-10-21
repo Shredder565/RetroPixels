@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 #include "Common/Config/ConfigInfo.h"
 
+// A spin box bound to an int setting.
 class ConfigInteger final : public ConfigControl<ToolTipSpinBox>
 {
   Q_OBJECT
@@ -28,6 +28,7 @@ private:
   const Config::Info<int> m_setting;
 };
 
+// A caption that turns bold together with its ConfigInteger.
 class ConfigIntegerLabel final : public QLabel
 {
   Q_OBJECT
@@ -36,5 +37,5 @@ public:
   ConfigIntegerLabel(const QString& text, ConfigInteger* widget);
 
 private:
-  QPointer<ConfigInteger> m_widget;
+  QPointer<ConfigInteger> m_buddy;
 };

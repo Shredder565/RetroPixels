@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/FreeLookWindow.h"
 
@@ -13,34 +12,25 @@
 
 FreeLookWindow::FreeLookWindow(QWidget* parent) : QDialog(parent)
 {
-  CreateMainLayout();
-  ConnectWidgets();
+  auto* const column = new QVBoxLayout();
 
-  setWindowTitle(tr("Free Look Settings"));
-}
-
-void FreeLookWindow::CreateMainLayout()
-{
 #ifdef USE_RETRO_ACHIEVEMENTS
   m_hc_warning = new HardcoreWarningWidget(this);
 #endif  // USE_RETRO_ACHIEVEMENTS
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
   connect(m_button_box, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-  auto* main_layout = new QVBoxLayout();
-
 #ifdef USE_RETRO_ACHIEVEMENTS
-  main_layout->addWidget(m_hc_warning);
+  column->addWidget(m_hc_warning);
 #endif  // USE_RETRO_ACHIEVEMENTS
-  main_layout->addWidget(new FreeLookWidget(this));
-  main_layout->addWidget(m_button_box);
-  setLayout(main_layout);
-}
+  column->addWidget(new FreeLookWidget(this));
+  column->addWidget(m_button_box);
+  setLayout(column);
 
-void FreeLookWindow::ConnectWidgets()
-{
 #ifdef USE_RETRO_ACHIEVEMENTS
   connect(m_hc_warning, &HardcoreWarningWidget::OpenAchievementSettings, this,
           &FreeLookWindow::OpenAchievementSettings);
 #endif  // USE_RETRO_ACHIEVEMENTS
+
+  setWindowTitle(tr("Free Look Settings"));
 }
