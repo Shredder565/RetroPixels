@@ -1,0 +1,219 @@
+- W33 log: rewrote all 58 W33 files as original code: the D3D11 backend
+  (`VideoBackends/D3D`: `D3DBase`, `D3DBoundingBox`, `D3DGfx`, `D3DMain.cpp`,
+  `D3DNativeVertexFormat.cpp`, `D3DPerfQuery`, `D3DState`, `D3DSwapChain`,
+  `D3DVertexManager`, `DXPipeline`, `DXShader`, `DXTexture`,
+  `VideoBackend.h`), the D3D12 backend (`VideoBackends/D3D12`: `Common.h`,
+  `D3D12BoundingBox`, `D3D12Gfx`, `D3D12PerfQuery`, `D3D12StreamBuffer`,
+  `D3D12SwapChain`, `D3D12VertexManager`, `DX12Context`, `DX12Pipeline`,
+  `DX12Shader`, `DX12Texture`, `DX12VertexFormat`, `DescriptorAllocator`,
+  `DescriptorHeapManager`, `VideoBackend`) and `VideoBackends/D3DCommon`
+  (`D3DCommon`, `Shader`, `SwapChain`). They have 10186 lines now (from
+  10047). Every file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. The backend `CMakeLists.txt` files are not W33
+  files and are unchanged. The public names, signatures, enums and layouts
+  are kept: `D3DCommon` (`LoadLibraries`, the factory and format helpers,
+  `SetDebugObjectName`), `D3DCommon::Shader` and `SwapChain`, `DX11::D3D`
+  globals and functions, `StateManager`/`StateCache` public methods,
+  `DX12::DXContext` and its enums and root-parameter indices, the descriptor
+  heap and allocator interfaces, `StreamBuffer`, the texture, framebuffer,
+  staging, shader, pipeline and vertex-format classes, both `Gfx` classes,
+  vertex managers, perf queries and bounding boxes, and both
+  `VideoBackend` classes. Changed in the headers, with no user outside W33:
+  private members and helpers have new names (the D3D11 `StateManager`
+  dirty mask and bindings, the D3D12 `Gfx` pending bits and binding state,
+  the vertex managers' buffer members), and the D3D11 framebuffer keeps one
+  extra member for its integer render-target array (see below).
+  - Design:
+    - `D3DCommon`: the loaded runtime libraries and entry points are one
+      `RuntimeLibraries` struct; the format mapping is one row table indexed
+      by `AbstractTextureFormat` (storage, typeless, SRV, RTV, integer RTV,
+      DSV) plus a reverse table; debug names go through one `TryNameChild`
+      template, first as a D3D11 child, then as a D3D12 child.
+    - `Shader`: the HLSL preamble is written by a small `PreambleWriter`
+      from an alias table (byte-identical text); `ProfileFor` picks the
+      profile by shader-model generation; SPIR-V to HLSL, compile and the
+      failure report are separate helpers.
+    - `SwapChain`: creation is `CreateFlipModel` (flip-discard, then
+      flip-sequential) or `CreateBitBltModel`, with `TryEnableHDR`,
+      `LeaveFullscreen` and `RecreateWith` around the same DXGI calls.
+    - `D3DBase`: device creation is `MakeDevice` and `TryCreateDebugDevice`
+      with `ConfigureInfoQueue`; the capability probes (`SupportsLogicOp`
+      and the others) share a `ProbeDevice` that owns its library, factory,
+      adapter and device; teardown is `ReleaseRuntime`.
+    - `D3DState`: `StateManager` tracks wanted and bound state in two
+      `Bindings` with one `u64` dirty mask (textures, samplers, then one bit
+      per group); `Apply` runs `ApplyOutputMerger`, `ApplyConstants`,
+      `ApplyInputAssembler`, `ApplyShaders` and `ApplyTextures` in the old
+      order; compute bindings use one `SyncRuns` template. `StateCache`
+      builds descriptors from filter, address-mode and blend-factor tables.
+    - `DXTexture`, `DXShader`, `DXPipeline`, `D3DNativeVertexFormat`,
+      `D3DVertexManager`, `D3DPerfQuery`, `D3DBoundingBox`, `D3DGfx`: view
+      and desc builders as helpers (`MakeTextureDesc`, `MakeRtvDesc`,
+      `MakeDsvDesc`, `ResolveViewFormat`), one `MakeStage` template for the
+      shader stages, a vertex-format table, `DynamicBufferDesc` /
+      `CreateConstantBuffer` / `WriteConstants` / `CreateTexelView` in the
+      vertex manager, a `RingEntry` ring with `CollectReady` /
+      `CollectOldest` / `ToNativeResolution` in the perf query.
+    - D3D12 `DX12Context`: the loaded runtime is a `D3D12Runtime`; root
+      signatures are built by a `RootSignatureBuilder` (`AddCBV`,
+      `AddConstants`, `AddTable`, `Build`).
+    - D3D12 `StreamBuffer`, `DescriptorHeapManager`, `DescriptorAllocator`:
+      space search is `SpaceIfGPUAt` returning an optional range; free
+      blocks are bitsets filled with `assign` and searched lowest-first;
+      sampler descriptors come from the same filter and address tables as
+      D3D11.
+    - D3D12 `DX12Texture`, `DX12Pipeline`, `DX12VertexFormat`: file-local
+      helpers (`HeapOfType`, `LinearBufferDesc`, `BoxFor`, `FootprintAt`,
+      `MakeUploadBuffer`, `ArrayRtvDesc`, `ArrayDsvDesc`; `TopologyFor`,
+      `FillRasterizer`, `FillDepth`, `FillBlend` with factor and logic-op
+      tables; packed-format tables for the vertex attributes).
+    - D3D12 `Gfx`: a `PendingBit` enum (same bit values) and one `Bindings`
+      struct; descriptor staging is `StageDescriptor`. The vertex manager
+      names its constant-buffer slots and offsets; `CreateBufferView` and
+      `StageBlock` replace the inline sequences. `PerfQuery` uses
+      `IsCountedGroup` and `ScaleToNative` around the same ring.
+  - Kept as before (outputs, quirks):
+    - Every D3D11, D3D12, DXGI and d3dcompiler call, in order and with its
+      arguments, including the descriptors' field values, debug object
+      names, the private-data GUIDs, feature checks and their order, and
+      the info-queue filters.
+    - The HLSL preamble and all shader texts, the bytecode cache blobs (the
+      D3D12 `GetCacheData` still calls `GetBufferSize` twice), the
+      bounding-box and perf-query results (the D3D11 ready-store without and
+      the spin-wait with the MSAA division; D3D12 scaling), EFB peeks and
+      pokes, the swap-chain choices (flip-discard, flip-sequential, bit-blt;
+      tearing, HDR colour space, buffer count and format), command-list
+      submission and fence waits, descriptor sizes and counts (65536
+      descriptors per D3D12 list, the 1024 reset threshold), stream-buffer
+      sizes and wrap rules, backend info, config keys, driver-bug
+      workarounds, savestate layout (none in W33) and the translatable,
+      panic and log texts.
+    - Quirks: the D3D11 `SetPipeline` current-pipeline handling; the
+      D3D11 bounding-box staging buffer with stride 4; the global input
+      layout lock; constant buffers created vertex, geometry, pixel; the
+      `>= BUFFER_SIZE` wrap comparison; `SetPixelConstants` passing the
+      vertex buffer only with per-pixel lighting; the D3D12 SRV descriptor
+      writing `Texture2DArray`/`Texture2DMSArray` fields through the union
+      for every dimension; the D3D12 DSV allocation panic reading "Failed to
+      allocate RTV descriptor"; extra D3D12 attachments using the colour
+      format; staging textures destroyed without an Unmap; the D3D12 root
+      signature build reporting success when `CreateRootSignature` fails;
+      the pixel and custom constant reserve before the dirty check, no
+      retry in `UploadUtilityUniforms`; `SetName` on a failed shader; the
+      `"Direct3D 12"` name untranslated; "Dolphin Version: " in the
+      bad-shader reports.
+  - Deliberate differences:
+    - The invalid wrap value 3 maps to clamp in both sampler builders (D3D11
+      `StateCache`, D3D12 `SamplerHeapManager`); the old code read past a
+      three-element array.
+    - D3D11 framebuffers with additional colour attachments return
+      [integer RTV, additional RTVs...] as their integer render-target
+      array; the old code read past `m_integer_rtv` into `m_dsv` (undefined
+      behaviour). New private member `m_integer_targets_raw`.
+    - D3D12 swap chain: `DestroySwapChainBuffers` destroys its textures
+      normally (the texture clears its descriptor handles in
+      `DestroyResource`); the old code leaked them through `release()`.
+      `CreateSwapChainBuffers` returns false when `GetBuffer` fails; the old
+      code went on with a null resource.
+    - The D3D12 `RootSignatureBuilder` zero-initialises its parameter and
+      range arrays; only unused union bytes differ.
+    - The D3D11 perf-query read index is `u32`; the dead null check after a
+      dereference in D3D12 `SetTexture` is gone (same behaviour).
+    - `DXShader` raises one parameterised ASSERT ("Failed to create {}
+      shader: {}") with the same output text as the per-stage ones.
+    - `D3DBase` capability probe: the factory and adapter are kept until the
+      D3D11.1 query is done (the old order released them first; same calls
+      otherwise).
+    - Conversions are explicit casts (adapter index, back-buffer size,
+      copy rectangles, vertex-format loops, stream sizes);
+      `ReportLiveDeviceObjects` takes a cast flag combination (no
+      `operator|` for `D3D11_RLDO_FLAGS` in every SDK); the D3D12
+      `ResourceBarrier` helper is `inline` instead of `static`; the format
+      support mask is `const` instead of `constexpr` (flag operators are
+      not constexpr in every SDK). Unused parameters are unnamed.
+  - Checked:
+    - Old vs new, each built from its own W33 files with the untouched
+      non-W33 base files on both sides (VideoCommon renderer abstraction,
+      vertex manager base, framebuffer manager, presenter, shader
+      generators, SPIR-V compiler interface, config), as a Windows x64
+      program (mingw g++, DirectX-Headers, SPIRV-Cross at the pinned commit)
+      run under Wine, against recording fake COM objects. A generator reads
+      the preprocessed SDK headers and writes one logging stub for every
+      method of 37 interfaces and their parent chains (D3D11 device 5,
+      context 4, resources, views, shaders, states, queries, debug and info
+      queue; D3D12 device, queue, allocator, list, fence, descriptor and
+      query heaps, resource, root signature, PSO, debug and info queue;
+      DXGI factory 7, adapter 4, output 6, swap chain 4; `ID3D10Blob`), with
+      semantic dumps of every descriptor struct (unions keyed on their
+      discriminator, pointed-to arrays, byte hashes of initial data, shader
+      bytecode and root signatures). The fakes keep resource contents, map,
+      copy, update, resolve and readback data, fence values that complete late,
+      query results that are not ready at first, and return scripted values:
+      random adapter counts, feature levels, D3D12 availability, debug layer,
+      tearing, HDR colour space, `IDXGISwapChain4`, logic-op support, MSAA
+      counts, format support, and injected `E_OUTOFMEMORY` failures on creation
+      and texture maps; `D3DCompile` returns bytecode as a function of the
+      source, or fails. SPIR-V is canned per source hash and goes through the
+      real SPIRV-Cross. Each case picks D3D11 or D3D12 and runs library loading,
+      backend info (dumped field by field), the backend start-up, a warm-up
+      (EFB-like framebuffer, shaders, vertex formats, pipelines) and random
+      actions of 22 kinds (textures, uploads, staging copies and maps,
+      framebuffers, shaders with compile failures and bad-shader reports, vertex
+      formats, pipelines with cache data, bindings, GX draws through the vertex
+      manager with uniform uploads, utility draws, copies and resolves, compute
+      dispatch, present and resize, fullscreen switching, flush, perf-query
+      bursts, bounding box, destruction), then teardown. One hash per case,
+      streamed; verbose logs only to locate differences.
+      - 3000 cases of 80 actions: 2993 identical. 7 cases crash on both
+        builds with the same calls up to the crash: an injected failure of
+        a buffer the D3D11 code checks with an ASSERT and then uses (the
+        stream buffer, a constant buffer, or a depth-stencil state), then
+        `Map` on the null buffer. Base behaviour, unchanged.
+      - 300 cases of 400 actions: all identical, no crash.
+      - Coverage over 100 cases: 397 GX draws, 223 distinct logged calls
+        and actions; perf-query begin, end, get-data and
+        `ResolveQueryData`; bounding-box reads and writes; staging
+        readbacks; swap-chain resizes; failure paths.
+    - The harness found one difference in the rewrite before the final
+      runs: the capability probe released the factory and adapter before
+      the D3D11.1 query (fixed, so the calls are the same as before).
+    - Not driven, compared line by line against the old files: the
+      `GetBuffer` failure path (see above), `Map` failures on the stream
+      buffers, real `D3DCompile` output and GPU semantics, fullscreen on a
+      real output (the fake keeps the state; `SetFullscreenState`,
+      `GetFullscreenState` and the request logic are the same calls in the
+      same order). Assertion locations and quoted expressions are not
+      compared.
+    - Speed, interleaved runs on the same machine with the fakes and
+      recorder in a no-logging build at -O2: 20 cases (D3D11 and D3D12),
+      each 20000 actions of a draw-heavy mix (55% GX draws through the
+      vertex manager, 25% texture, sampler, buffer and constant bindings,
+      10% pipeline switches, 5% utility draws, 5% presents). Six runs per
+      side: median 10392 ms old, 9946 ms new; minimum 9076 ms old, 9414 ms
+      new. The differences go both ways within the run-to-run noise (about
+      10%); no measurable change in draw submission or state changes. Most
+      of the time is in the fakes, so this bounds the backend cost rather
+      than isolating it.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, `x86_64-w64-windows-gnu` with the DirectX-Headers,
+      against the untouched tree: the 29 W33 .cpp files and
+      `VideoBackendBase.cpp` show no warning from W33 code (151 in the old
+      files). The remaining message is outside W33 and the same on the
+      base tree (`MsgHandler.h`, unused `format`). On Linux every W33 file
+      stops at the missing D3D headers, on both trees, with no W33 warning
+      before that. No `bool` mixed with an integer under `|` or `&`, no unary
+      minus on unsigned values, no `~` widened, no signed/unsigned compares.
+      Fixes made for these checks: casts (copy rectangles, `SetBackbuffer`,
+      adapter index, stream sizes, vertex-format loops, the perf-query
+      index), `? TRUE : FALSE` for `BlendEnable`, the `D3D11_RLDO_FLAGS`
+      cast, `inline` for `ResourceBarrier`, `const` for the format-support
+      mask, unused parameters unnamed, and a lambda capturing `[this]`.
+      MSVC was not run.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W33 .cpp
+      file. Remaining runs are in headers only (declarations: `D3DGfx.h`,
+      `D3D12Gfx.h`, `DX12Context.h`, `SwapChain.h`, `DXTexture.h`,
+      `DX12Texture.h`, `D3D12VertexManager.h`, `D3D12SwapChain.h`,
+      `D3DVertexManager.h`, `D3D12PerfQuery.h`, `DXPipeline.h`,
+      `DescriptorHeapManager.h`, `DX12Shader.h`, `DXShader.h`,
+      `D3D12StreamBuffer.h`, `VideoBackend.h`, `DescriptorAllocator.h`,
+      `D3D12BoundingBox.h`).
