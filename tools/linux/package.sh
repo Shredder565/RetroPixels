@@ -228,7 +228,7 @@ system_lib() {
 		libgbm.so.1 | libdrm.so.2 | libX11.so.6 | libX11-xcb.so.1 | libXext.so.6 | libXrandr.so.2 | libXi.so.6 | \
 		libXcursor.so.1 | libXfixes.so.3 | libXinerama.so.1 | libXrender.so.1 | libXss.so.1 | libXxf86vm.so.1 | \
 		libSM.so.6 | libICE.so.6 | libxcb*.so.* | libxkbcommon.so.0 | libxkbcommon-x11.so.0 | libwayland-*.so.0 | libwayland-egl.so.1 | \
-		libasound.so.2 | libpulse.so.0 | libpulse-simple.so.0 | libudev.so.1 | libdbus-1.so.3 | \
+		libasound.so.2 | libpulse.so.0 | libpulse-simple.so.0 | libudev.so.1 | libdbus-1.so.3 | libzstd.so.1 | \
 		libgtk-3.so.0 | libgdk-3.so.0 | libglib-2.0.so.0 | libgobject-2.0.so.0 | libgio-2.0.so.0 | libgmodule-2.0.so.0 | \
 		libgthread-2.0.so.0 | libpango-1.0.so.0 | libpangocairo-1.0.so.0 | libpangoft2-1.0.so.0 | libcairo.so.2 | \
 		libcairo-gobject.so.2 | libgdk_pixbuf-2.0.so.0 | libatk-1.0.so.0 | libharfbuzz.so.0 | libfontconfig.so.1 | \
