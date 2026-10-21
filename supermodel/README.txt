@@ -10,23 +10,33 @@ This folder holds RetroPixels' changes to Supermodel, not a copy of it:
 
   pins.sh       the upstream commit (24d2ffc, 2026-07-26, the same code as the
                 official "supermodel-0.3a-20260726-git-24d2ffc" Windows build)
-                and, for the Windows build, the exact SDL2, SDL2_net and zlib
-                releases, each with its SHA-256
+                and the exact SDL2, SDL2_net and zlib releases, each with its
+                SHA-256: the MinGW builds for Windows, the source tarballs of
+                the same SDL2 and SDL2_net releases for Linux
   patches/      RetroPixels' changes, applied in order with "git apply"
   build.sh      fetches the pinned commit, applies the patches and builds:
                   sh supermodel/build.sh check            patches apply?
-                  sh supermodel/build.sh linux   out      Linux build
+                  sh supermodel/build.sh linux   out      Linux build (SDL2 and
+                                                         SDL2_net built from source)
                   sh supermodel/build.sh windows out      Windows build
                                                          (MinGW-w64 cross build)
                 The result is out/Supermodel: supermodel(.exe), Config/Games.xml,
                 Config/Music.xml, Assets/, LICENSE.txt, README.txt,
                 RetroPixels.txt (what was changed), VERSION.txt and
                 Supermodel-source.tar.gz (the exact source it was built from).
+                The Linux build also has lib/: libSDL2-2.0.so.0,
+                libSDL2_net-2.0.so.0 and Mesa's libGLU.so.1 with their
+                licences in lib/LICENSES, found through the program's RUNPATH
+                ($ORIGIN/lib), so nothing needs to be installed.
   COPYING       the GNU General Public License, version 3
 
-.github/workflows/supermodel.yml builds it (Windows, plus a Linux build that
-is started headless as a check) and .github/workflows/bundle-test.yml puts the
-Windows build in the RetroPixels test download as Supermodel\supermodel.exe.
+.github/workflows/supermodel.yml builds it: Windows (artifact
+Supermodel-windows-x64) and Linux on Ubuntu 22.04, so it runs on glibc 2.35 and
+later (artifact Supermodel-linux-x64: Supermodel-linux.tar.gz, started headless
+under Xvfb as a check). .github/workflows/bundle-test.yml puts the Windows build
+in the RetroPixels test download as Supermodel\supermodel.exe, and
+.github/workflows/bundle-linux.yml the Linux one in the Linux download as
+Supermodel/supermodel.
 
 Licence
 -------

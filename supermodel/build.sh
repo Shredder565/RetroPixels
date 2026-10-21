@@ -3,13 +3,17 @@
 # pinned upstream commit plus the patches in patches/ (see README.txt).
 #
 #   sh supermodel/build.sh fetch            get the source and apply the patches
-#   sh supermodel/build.sh linux   <outdir> build for Linux (needs SDL2, SDL2_net, GL/GLU and zlib dev packages)
+#   sh supermodel/build.sh linux   <outdir> build for Linux, with the pinned SDL2 and SDL2_net built from
+#                                           source and bundled in lib/ (needs cmake, GL/GLU, zlib and SDL's
+#                                           X11/Wayland/PulseAudio/ALSA dev packages; see supermodel.yml)
 #   sh supermodel/build.sh windows <outdir> cross-build supermodel.exe for 64-bit Windows with MinGW-w64
 #   sh supermodel/build.sh check            only check the pins and that the patches apply
 #
 # <outdir>/Supermodel gets the program and the files it needs next to it
 # (Config/Games.xml, Config/Music.xml, Assets/), its licence, what was
 # changed, and the source it was built from (Supermodel-source.tar.gz).
+# On Linux also lib/ with the bundled libraries (found through the
+# program's RUNPATH $ORIGIN/lib) and their licences in lib/LICENSES.
 # SM_WORK sets the working folder (default: supermodel/build, not committed).
 set -eu
 
@@ -99,6 +103,85 @@ windows_deps() {
 	touch "$stamp"
 }
 
+# The pinned SDL2 and SDL2_net as shared libraries in $work/deps/linux.
+# SDL loads X11, Wayland, PulseAudio, PipeWire, ALSA and udev itself when it
+# starts (by their sonames), so only their headers are needed here, and the
+# program uses whichever of them the player's system has.
+linux_deps() {
+	deps="$work/deps"
+	prefix="$deps/linux"
+	stamp="$prefix/.pins-$SDL2_SRC_SHA256-$SDL2_NET_SRC_SHA256"
+	[ -f "$stamp" ] && return
+	command -v cmake >/dev/null || { echo "needs cmake" >&2; exit 1; }
+	mkdir -p "$deps/dl"
+	download "$SDL2_SRC_URL" "$SDL2_SRC_SHA256" "$deps/dl/SDL2-src.tar.gz"
+	download "$SDL2_NET_SRC_URL" "$SDL2_NET_SRC_SHA256" "$deps/dl/SDL2_net-src.tar.gz"
+	rm -rf "$prefix" "$deps/lx"
+	mkdir -p "$prefix" "$deps/lx"
+	tar -xzf "$deps/dl/SDL2-src.tar.gz" -C "$deps/lx"
+	tar -xzf "$deps/dl/SDL2_net-src.tar.gz" -C "$deps/lx"
+	log "building SDL $SDL2_VERSION"
+	cmake -S "$deps/lx/SDL2-$SDL2_VERSION" -B "$deps/lx/sdl-build" -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+		-DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF -DSDL_RPATH=OFF \
+		-DSDL_X11=ON -DSDL_WAYLAND=ON -DSDL_PULSEAUDIO=ON -DSDL_PIPEWIRE=ON -DSDL_ALSA=ON \
+		-DSDL_OPENGL=ON -DSDL_HIDAPI=ON >"$deps/lx/sdl-cmake.log" || { cat "$deps/lx/sdl-cmake.log"; exit 1; }
+	cmake --build "$deps/lx/sdl-build" -j"$jobs" >/dev/null
+	cmake --install "$deps/lx/sdl-build" >/dev/null
+	# What Supermodel needs on a desktop must be in it: X11 (Wayland desktops
+	# run it on XWayland), PulseAudio (PipeWire desktops serve it too) and
+	# ALSA for sound, Linux joysticks and force feedback, udev for hot plug.
+	conf="$prefix/include/SDL2/SDL_config.h"
+	for d in SDL_VIDEO_DRIVER_X11 SDL_VIDEO_OPENGL_GLX SDL_AUDIO_DRIVER_PULSEAUDIO SDL_AUDIO_DRIVER_ALSA \
+		SDL_JOYSTICK_LINUX SDL_HAPTIC_LINUX HAVE_LIBUDEV_H SDL_VIDEO_DRIVER_X11_XINPUT2; do
+		grep -q "^#define $d 1" "$conf" || { echo "SDL was built without $d (a dev package is missing)" >&2; exit 1; }
+	done
+	grep -E '^#define SDL_(VIDEO_DRIVER|AUDIO_DRIVER)_[A-Z0-9_]+ 1' "$conf" | sed 's/^#define /  /; s/ 1$//'
+	log "building SDL_net $SDL2_NET_VERSION"
+	cmake -S "$deps/lx/SDL2_net-$SDL2_NET_VERSION" -B "$deps/lx/net-build" -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_PREFIX_PATH="$prefix" -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+		-DBUILD_SHARED_LIBS=ON -DSDL2NET_SAMPLES=OFF -DSDL2NET_INSTALL=ON \
+		'-DCMAKE_INSTALL_RPATH=$ORIGIN' >"$deps/lx/net-cmake.log" || { cat "$deps/lx/net-cmake.log"; exit 1; }
+	cmake --build "$deps/lx/net-build" -j"$jobs" >/dev/null
+	cmake --install "$deps/lx/net-build" >/dev/null
+	mkdir -p "$prefix/licenses"
+	cp "$deps/lx/SDL2-$SDL2_VERSION/LICENSE.txt" "$prefix/licenses/SDL2.txt"
+	cp "$deps/lx/SDL2_net-$SDL2_NET_VERSION/LICENSE.txt" "$prefix/licenses/SDL2_net.txt"
+	rm -rf "$deps/lx"
+	touch "$stamp"
+}
+
+# linux_libs <program> <folder>: the bundled libraries in <folder>/lib.
+linux_libs() {
+	prefix="$work/deps/linux"
+	mkdir -p "$2/lib/LICENSES"
+	cp -L "$prefix/lib/libSDL2-2.0.so.0" "$prefix/lib/libSDL2_net-2.0.so.0" "$2/lib/"
+	cp "$prefix/licenses/SDL2.txt" "$prefix/licenses/SDL2_net.txt" "$2/lib/LICENSES/"
+	# GLU (gluPerspective in the legacy 3D engine) is not on every desktop:
+	# the build machine's Mesa GLU goes with it.
+	glu=$(ldd "$1" | awk '$1 == "libGLU.so.1" { print $3 }')
+	[ -n "$glu" ] && [ -f "$glu" ] || { echo "libGLU.so.1 not found" >&2; exit 1; }
+	cp -L "$glu" "$2/lib/libGLU.so.1"
+	for c in /usr/share/doc/libglu1-mesa/copyright /usr/share/licenses/glu/LICENSE; do
+		if [ -f "$c" ]; then
+			cp "$c" "$2/lib/LICENSES/GLU.txt"
+			break
+		fi
+	done
+	[ -f "$2/lib/LICENSES/GLU.txt" ] || { echo "GLU licence not found" >&2; exit 1; }
+	chmod 0644 "$2/lib/"*.so*
+	strip --strip-unneeded "$2/lib/"*.so*
+	# Every library the program loads is bundled or one a desktop has.
+	LD_LIBRARY_PATH='' ldd "$2/supermodel" | tee "$work/ldd.txt"
+	if grep -q 'not found' "$work/ldd.txt"; then
+		echo "a library is missing" >&2
+		exit 1
+	fi
+	for l in libSDL2-2.0.so.0 libSDL2_net-2.0.so.0 libGLU.so.1; do
+		grep -q "$l => $2/lib/$l" "$work/ldd.txt" || { echo "$l is not loaded from lib/" >&2; exit 1; }
+	done
+}
+
 # package <program> <outdir>
 package() {
 	# Absolute, because the source tarball is written from inside $src.
@@ -107,6 +190,9 @@ package() {
 	rm -rf "$out"
 	mkdir -p "$out/Config" "$out/Assets"
 	cp "$1" "$out/"
+	if [ "${3:-}" = linux ]; then
+		linux_libs "$1" "$out"
+	fi
 	cp "$src/Config/Games.xml" "$src/Config/Music.xml" "$out/Config/"
 	cp "$src/Assets/"*.bmp "$out/Assets/" 2>/dev/null || true
 	cp "$src/Docs/LICENSE.txt" "$out/LICENSE.txt"
@@ -118,6 +204,7 @@ package() {
 		echo "Upstream: $SUPERMODEL_REPO commit $SUPERMODEL_COMMIT"
 		echo "Licence: GNU General Public License v3 or later (LICENSE.txt)"
 		echo "Source: Supermodel-source.tar.gz in this folder (upstream commit with RetroPixels' patches applied)"
+		[ "${3:-}" = linux ] && echo "Built on $(. /etc/os-release && echo "$PRETTY_NAME") with GCC $(gcc -dumpfullversion), SDL $SDL2_VERSION and SDL_net $SDL2_NET_VERSION (lib/, zlib licence), GLU from Mesa (lib/libGLU.so.1, SGI Free Software License B); needs glibc 2.35 or later and OpenGL"
 		[ "${3:-}" = windows ] && echo "Built with MinGW-w64 ($(x86_64-w64-mingw32-gcc-posix -dumpversion)), SDL $SDL2_VERSION, SDL_net $SDL2_NET_VERSION, zlib $ZLIB_VERSION (statically linked)"
 		echo "No games, ROMs or BIOS files are included."
 	} > "$out/VERSION.txt"
@@ -140,9 +227,14 @@ fetch)
 linux)
 	[ $# -ge 2 ] || { echo "usage: $0 linux <outdir>" >&2; exit 2; }
 	fetch
+	linux_deps
 	musashi obj
+	prefix="$work/deps/linux"
 	log "building for Linux"
-	make -C "$src" -s -f Makefiles/Makefile.UNIX -j"$jobs"
+	# The pinned SDL from $prefix, found at run time in lib/ next to the
+	# program ($$ is make's $, the quotes keep the shell off $ORIGIN).
+	PATH="$prefix/bin:$PATH" make -C "$src" -s -f Makefiles/Makefile.UNIX -j"$jobs" \
+		PLATFORM_LDFLAGS="-L$prefix/lib -lSDL2 -lSDL2_net -lGL -lGLU -lz -lm -lstdc++ -lpthread -Wl,--enable-new-dtags,-rpath,'\$\$ORIGIN/lib'"
 	package "$src/bin/supermodel" "$2" linux
 	;;
 windows)
@@ -162,7 +254,7 @@ windows)
 	package "$exe" "$2" windows
 	;;
 *)
-	sed -n '2,15p' "$0"
+	sed -n '2,20p' "$0"
 	exit 2
 	;;
 esac
