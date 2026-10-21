@@ -49,10 +49,12 @@ QString BorderStyle(std::string_view color)
 }
 }  // namespace
 
-AchievementHeaderWidget::AchievementHeaderWidget(QWidget* parent) : QWidget(parent)
+AchievementHeaderWidget::AchievementHeaderWidget(QWidget* owner) : QWidget(owner)
 {
+  // Badges of the player and of the running game.
   m_user_icon = new QLabel();
   m_game_icon = new QLabel();
+  // Text lines: who is playing, their score, then the game's progress and rich presence.
   m_name = new QLabel();
   m_points = new QLabel();
   m_game_progress = new QProgressBar();

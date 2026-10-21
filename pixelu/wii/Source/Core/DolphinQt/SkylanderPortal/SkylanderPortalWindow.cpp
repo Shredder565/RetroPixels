@@ -742,26 +742,27 @@ void SkylanderPortalWindow::RefreshList()
   m_skylander_list->setCurrentItem(m_skylander_list->item(row), QItemSelectionModel::Select);
 }
 
-void SkylanderPortalWindow::CreateSkyfile(const QString& path, bool load_after)
+void SkylanderPortalWindow::CreateSkyfile(const QString& file_path, bool then_load)
 {
   {
     // Write the blank figure and close the file again before it gets loaded.
-    IOS::HLE::USB::SkylanderFigure figure(path.toStdString());
-    if (!figure.Create(m_sky_id, m_sky_var))
+    IOS::HLE::USB::SkylanderFigure blank(file_path.toStdString());
+    const bool created = blank.Create(m_sky_id, m_sky_var);
+    if (!created)
     {
-      QMessageBox::warning(
-          this, tr("Failed to create Skylander file!"),
-          tr("Failed to create Skylander file:\n%1\n\nThe Skylander may already be on the portal.")
-              .arg(path),
-          QMessageBox::Ok);
+      const QString details = tr("Failed to create Skylander file:\n%1\n\nThe Skylander may "
+                                 "already be on the portal.")
+                                  .arg(file_path);
+      QMessageBox::warning(this, tr("Failed to create Skylander file!"), details, QMessageBox::Ok);
       return;
     }
-    figure.Close();
+    blank.Close();
   }
-  m_last_skylander_path = QFileInfo(path).absolutePath() + QLatin1Char{'/'};
+  // The next file dialog starts in the folder the figure was created in.
+  m_last_skylander_path = QFileInfo(file_path).absolutePath() + QLatin1Char{'/'};
 
-  if (load_after)
-    LoadSkyfilePath(GetCurrentSlot(), path);
+  if (then_load)
+    LoadSkyfilePath(GetCurrentSlot(), file_path);
 }
 
 void SkylanderPortalWindow::LoadSkyfilePath(u8 slot, const QString& path)

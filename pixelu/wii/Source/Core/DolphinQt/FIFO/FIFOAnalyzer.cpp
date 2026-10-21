@@ -265,29 +265,28 @@ public:
   {
     const auto [desc, written] = GetXFIndexedLoadInfo(array, index, address, size);
 
-    text = QString::fromStdString(desc) + QLatin1Char('\n');
-    switch (array)
-    {
-    case CPArray::XF_A:
-      text += QObject::tr("Usually used for position matrices");
-      break;
-    case CPArray::XF_B:
-      // i18n: A normal matrix is a matrix used for transforming normal vectors. The word "normal"
-      // does not have its usual meaning here, but rather the meaning of "perpendicular to a
-      // surface".
-      text += QObject::tr("Usually used for normal matrices");
-      break;
-    case CPArray::XF_C:
-      // i18n: Tex coord is short for texture coordinate
-      text += QObject::tr("Usually used for tex coord matrices");
-      break;
-    case CPArray::XF_D:
-      text += QObject::tr("Usually used for light objects");
-      break;
-    default:
-      break;
-    }
-    text += QLatin1Char('\n') + QString::fromStdString(written);
+    // What each indexed-load array is typically used for (nothing for other arrays).
+    const auto typical_use = [array]() -> QString {
+      switch (array)
+      {
+      case CPArray::XF_A:
+        return QObject::tr("Usually used for position matrices");
+      case CPArray::XF_B:
+        // i18n: A normal matrix is a matrix used for transforming normal vectors. The word
+        // "normal" does not have its usual meaning here, but rather the meaning of
+        // "perpendicular to a surface".
+        return QObject::tr("Usually used for normal matrices");
+      case CPArray::XF_C:
+        // i18n: Tex coord is short for texture coordinate
+        return QObject::tr("Usually used for tex coord matrices");
+      case CPArray::XF_D:
+        return QObject::tr("Usually used for light objects");
+      default:
+        return {};
+      }
+    };
+    text = QString::fromStdString(desc) + QLatin1Char('\n') + typical_use() + QLatin1Char('\n') +
+           QString::fromStdString(written);
   }
 
   OPCODE_CALLBACK(void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat,
@@ -440,9 +439,11 @@ void FIFOAnalyzer::BuildLayout()
 
 void FIFOAnalyzer::ConnectSignals()
 {
+  // Selecting in one pane refreshes the pane to its right.
   connect(m_tree_widget, &QTreeWidget::itemSelectionChanged, this, &FIFOAnalyzer::UpdateDetails);
   connect(m_detail_list, &QListWidget::currentRowChanged, this, &FIFOAnalyzer::UpdateDescription);
 
+  // Enter in the search field acts like "Search".
   connect(m_search_edit, &QLineEdit::returnPressed, this, &FIFOAnalyzer::BeginSearch);
   connect(m_search_new, &QPushButton::clicked, this, &FIFOAnalyzer::BeginSearch);
   connect(m_search_next, &QPushButton::clicked, this, &FIFOAnalyzer::FindNext);
@@ -451,6 +452,8 @@ void FIFOAnalyzer::ConnectSignals()
 
 void FIFOAnalyzer::Update()
 {
+  // Rebuild from the left: frames/objects, then the selected object's commands, then the
+  // description of the selected command.
   UpdateTree();
   UpdateDetails();
   UpdateDescription();
@@ -460,9 +463,10 @@ void FIFOAnalyzer::UpdateTree()
 {
   m_tree_widget->clear();
 
-  if (!m_fifo_player.IsPlaying())
+  const bool have_recording = m_fifo_player.IsPlaying();
+  if (!have_recording)
   {
-    m_tree_widget->addTopLevelItem(new QTreeWidgetItem({tr("No recording loaded.")}));
+    m_tree_widget->addTopLevelItem(new QTreeWidgetItem(QStringList{tr("No recording loaded.")}));
     return;
   }
 

@@ -3,7 +3,9 @@
 #ifdef USE_RETRO_ACHIEVEMENTS
 #include "DolphinQt/Achievements/AchievementsWindow.h"
 
+#include <array>
 #include <mutex>
+#include <utility>
 
 #include <rcheevos/include/rc_error.h>
 
@@ -69,9 +71,15 @@ void AchievementsWindow::BuildLayout()
   m_settings_widget = new AchievementSettingsWidget(m_tab_widget);
   m_progress_widget = new AchievementProgressWidget(m_tab_widget);
   m_leaderboard_widget = new AchievementLeaderboardWidget(m_tab_widget);
-  m_tab_widget->addTab(GetWrappedWidget(m_settings_widget), tr("Settings"));
-  m_tab_widget->addTab(GetWrappedWidget(m_progress_widget), tr("Progress"));
-  m_tab_widget->addTab(GetWrappedWidget(m_leaderboard_widget), tr("Leaderboards"));
+
+  // Each page scrolls on its own; the order matches PROGRESS_TAB and LEADERBOARDS_TAB.
+  const std::array<std::pair<QWidget*, QString>, 3> pages{{
+      {m_settings_widget, tr("Settings")},
+      {m_progress_widget, tr("Progress")},
+      {m_leaderboard_widget, tr("Leaderboards")},
+  }};
+  for (const auto& [page, title] : pages)
+    m_tab_widget->addTab(GetWrappedWidget(page), title);
 
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Close);
 

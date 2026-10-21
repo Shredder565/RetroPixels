@@ -3,6 +3,7 @@
 #ifdef USE_RETRO_ACHIEVEMENTS
 #include "DolphinQt/Achievements/AchievementSettingsWidget.h"
 
+#include <initializer_list>
 #include <string>
 
 #include <QLabel>
@@ -92,11 +93,14 @@ void AchievementSettingsWidget::BuildLayout()
          "Dolphin does not save your password locally and uses an API token to maintain login."));
   m_common_username_label = new QLabel(tr("Username"));
   m_common_username_input = new QLineEdit(QStringLiteral(""));
+  // The password is only ever typed here; it is sent once to log in and never stored.
   m_common_password_label = new QLabel(tr("Password"));
   m_common_password_input = new QLineEdit(QStringLiteral(""));
   m_common_password_input->setEchoMode(QLineEdit::Password);
+  // Only one of the two buttons is visible at a time, depending on the login state.
   m_common_login_button = new QPushButton(tr("Log In"));
   m_common_logout_button = new QPushButton(tr("Log Out"));
+  // Red error line, shown after a failed attempt.
   m_common_login_failed = new QLabel(tr("Login Failed"));
   m_common_login_failed->setStyleSheet(QStringLiteral("QLabel { color : red; }"));
   m_common_login_failed->setVisible(false);
@@ -168,14 +172,14 @@ void AchievementSettingsWidget::BuildLayout()
          "Displays a brief popup message whenever the player makes progress on an achievement "
          "that tracks an accumulated value, such as 60 out of 120 stars."));
 
-  m_common_layout->addWidget(m_common_integration_enabled_input);
-  m_common_layout->addWidget(m_common_username_label);
-  m_common_layout->addWidget(m_common_username_input);
-  m_common_layout->addWidget(m_common_password_label);
-  m_common_layout->addWidget(m_common_password_input);
-  m_common_layout->addWidget(m_common_login_button);
-  m_common_layout->addWidget(m_common_logout_button);
-  m_common_layout->addWidget(m_common_login_failed);
+  // Account block, top to bottom.
+  for (QWidget* account_part : std::initializer_list<QWidget*>{
+           m_common_integration_enabled_input, m_common_username_label, m_common_username_input,
+           m_common_password_label, m_common_password_input, m_common_login_button,
+           m_common_logout_button, m_common_login_failed})
+  {
+    m_common_layout->addWidget(account_part);
+  }
 
   // i18n: Settings that affect the functionality of unlocking achievements.
   m_common_layout->addWidget(new QLabel(tr("Function Settings")));
@@ -241,11 +245,16 @@ void AchievementSettingsWidget::LoadSettings()
   SignalBlocking(m_common_username_label)->setEnabled(enabled);
   if (!username.empty())
     SignalBlocking(m_common_username_input)->setText(QString::fromStdString(username));
-  SignalBlocking(m_common_username_input)->setEnabled(enabled && logged_out);
-  SignalBlocking(m_common_password_label)->setVisible(logged_out);
-  SignalBlocking(m_common_password_label)->setEnabled(enabled);
-  SignalBlocking(m_common_password_input)->setVisible(logged_out);
-  SignalBlocking(m_common_password_input)->setEnabled(enabled);
+  const bool name_editable = enabled && logged_out;
+  SignalBlocking(m_common_username_input)->setEnabled(name_editable);
+
+  for (QWidget* const password_part :
+       std::initializer_list<QWidget*>{m_common_password_label, m_common_password_input})
+  {
+    SignalBlocking(password_part)->setVisible(logged_out);
+    SignalBlocking(password_part)->setEnabled(enabled);
+  }
+
   SignalBlocking(m_common_login_button)->setVisible(logged_out);
   SignalBlocking(m_common_login_button)->setEnabled(enabled && Core::IsUninitialized(system));
   SignalBlocking(m_common_login_button)

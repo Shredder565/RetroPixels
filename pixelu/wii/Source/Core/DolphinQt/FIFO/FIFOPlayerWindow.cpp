@@ -338,14 +338,17 @@ void FIFOPlayerWindow::OnFIFOLoaded()
   UpdateLimits();
   UpdateControls();
 
+  // The analyzer tab shows the newly loaded file too.
   m_analyzer->Update();
 }
 
 void FIFOPlayerWindow::OnConfigChanged()
 {
-  Config::SetBase(Config::MAIN_FIFOPLAYER_EARLY_MEMORY_UPDATES,
-                  m_early_memory_updates->isChecked());
-  Config::SetBase(Config::MAIN_FIFOPLAYER_LOOP_REPLAY, m_loop->isChecked());
+  // Both options are stored as soon as they are toggled.
+  const bool early_updates = m_early_memory_updates->isChecked();
+  Config::SetBase(Config::MAIN_FIFOPLAYER_EARLY_MEMORY_UPDATES, early_updates);
+  const bool loop_replay = m_loop->isChecked();
+  Config::SetBase(Config::MAIN_FIFOPLAYER_LOOP_REPLAY, loop_replay);
 }
 
 void FIFOPlayerWindow::OnLimitsChanged()
