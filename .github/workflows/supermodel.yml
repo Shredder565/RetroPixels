@@ -151,8 +151,8 @@ jobs:
           cd "$RUNNER_TEMP/try/Supermodel"
           ldd ./supermodel | tee ldd.txt
           if grep -q 'not found' ldd.txt; then exit 1; fi
-          grep -q "libSDL2-2.0.so.0 => $PWD/lib/" ldd.txt
-          grep -q "libSDL2_net-2.0.so.0 => $PWD/lib/" ldd.txt
+          grep -Eq "libSDL2-2.0.so.0 => $PWD/(\./)?lib/" ldd.txt
+          grep -Eq "libSDL2_net-2.0.so.0 => $PWD/(\./)?lib/" ldd.txt
           export SUPERMODEL_HOME="$RUNNER_TEMP/smhome"
           ./supermodel -help | tee help.txt
           grep -q -- '-rp-record' help.txt
