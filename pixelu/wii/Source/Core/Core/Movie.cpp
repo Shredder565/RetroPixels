@@ -1097,13 +1097,15 @@ bool MovieManager::PlayWiimote(int wiimote, DesiredWiimoteState* desired_state)
               serialized.data.begin());
   if (!WiimoteEmu::DeserializeDesiredState(desired_state, serialized))
   {
+    // The hint is shown when the movie has no GameCube pads (established
+    // behaviour, even though the advice reads as if it were the other case).
     const bool no_gc_pads = m_controllers == ControllerTypeArray{};
     PanicAlertFmtT("Aborting playback. Error in DeserializeDesiredState. byte:{0}{1}",
                    m_current_byte,
-                   no_gc_pads ? "" :
-                                " Try re-creating the recording with all GameCube "
+                   no_gc_pads ? " Try re-creating the recording with all GameCube "
                                 "controllers disabled (in Configure > GameCube > "
-                                "Device Settings).");
+                                "Device Settings)." :
+                                "");
     return give_up();
   }
 
