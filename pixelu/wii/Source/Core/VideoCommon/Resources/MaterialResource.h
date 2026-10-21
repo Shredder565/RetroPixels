@@ -1,11 +1,12 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -25,10 +26,14 @@
 
 namespace VideoCommon
 {
+// A material asset turned into a ready pipeline: its shader resource, the textures it samples,
+// its packed uniform values and, optionally, a chained material drawn after it.
 class MaterialResource final : public Resource
 {
 public:
+  // An EFB post processing material.
   explicit MaterialResource(Resource::ResourceContext resource_context);
+  // A material replacing the draws that use `pipeline_uid`.
   MaterialResource(Resource::ResourceContext resource_context, GXPipelineUid pipeline_uid);
 
   struct TextureLikeReference
@@ -44,36 +49,30 @@ public:
   {
   public:
     AbstractPipeline* GetPipeline() const { return m_pipeline.get(); }
-    std::span<const u8> GetUniforms() const { return m_uniform_data; }
-    std::span<const TextureLikeReference> GetTextures() const { return m_texture_like_references; }
-    MaterialResource* GetNextMaterial() const { return m_next_material; }
+    std::span<const u8> GetUniforms() const { return m_uniforms; }
+    std::span<const TextureLikeReference> GetTextures() const { return m_bindings; }
+    MaterialResource* GetNextMaterial() const { return m_next; }
 
   private:
     friend class MaterialResource;
     std::unique_ptr<AbstractPipeline> m_pipeline = nullptr;
-    Common::UniqueBuffer<u8> m_uniform_data;
-    std::shared_ptr<MaterialData> m_material_data = nullptr;
-    ShaderResource* m_shader_resource = nullptr;
+    Common::UniqueBuffer<u8> m_uniforms;
+    std::shared_ptr<MaterialData> m_material = nullptr;
+    ShaderResource* m_shader = nullptr;
 
-    using TextureLikeResource = Resource*;
-    Common::SmallVector<TextureLikeResource, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS>
-        m_texture_like_resources;
+    // One entry per texture slot of the material; a slot without an asset stays empty.
+    using TextureSource = std::variant<std::shared_ptr<TextureAndSamplerResource::Data>>;
+    Common::SmallVector<Resource*, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_texture_resources;
+    Common::SmallVector<TextureSource, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_texture_sources;
+    Common::SmallVector<TextureLikeReference, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_bindings;
 
-    // Variant for future expansion...
-    using TextureLikeData = std::variant<std::shared_ptr<TextureAndSamplerResource::Data>>;
-    Common::SmallVector<TextureLikeData, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS>
-        m_texture_like_data;
-
-    Common::SmallVector<TextureLikeReference, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS>
-        m_texture_like_references;
-
-    MaterialResource* m_next_material = nullptr;
+    MaterialResource* m_next = nullptr;
     std::size_t m_shader_key;
-    std::string m_preprocessor_settings;
-    std::atomic_bool m_processing_finished;
+    std::string m_defines;
+    std::atomic_bool m_build_done;
   };
 
-  const std::shared_ptr<Data>& GetData() const { return m_current_data; }
+  const std::shared_ptr<Data>& GetData() const { return m_live; }
   void MarkAsActive() override;
   void MarkAsPending() override;
 
@@ -83,21 +82,28 @@ private:
   Resource::TaskComplete CollectDependencyData() override;
   Resource::TaskComplete ProcessData() override;
 
-  static void CreateTextureData(Data* data);
-  static void SetShaderKey(Data* data, GXPipelineUid* uid);
-  static void WriteUniforms(Data* data);
+  // Fills the binding slots and the HAS_SAMPLER_n defines from the material's texture list.
+  static void PrepareBindings(Data& data);
+  // Hash of the pipeline (if any) and the defines; picks the matching shader resource.
+  static void ComputeShaderKey(Data& data, const GXPipelineUid* uid);
+  // Fills in AbstractTexture pointers and samplers once all textures are ready.
+  void ResolveBindings(Data& data, ShaderResource::Data& shader) const;
+  // Runs on the shader compiler thread.
+  static bool BuildPipeline(Data& data, const ShaderResource::Data& shader,
+                            const GXPipelineUid* uid, FramebufferState framebuffer);
+  static void PackUniforms(Data& data);
 
-  std::shared_ptr<Data> m_current_data;
+  std::shared_ptr<Data> m_live;
+  std::shared_ptr<Data> m_staging;
+  // Whether m_staging has already been handed to the shader compiler.
+  bool m_build_queued = false;
 
-  std::shared_ptr<Data> m_load_data;
-  bool m_processing_load_data = false;
+  // Owned by the asset cache.
+  MaterialAsset* m_asset = nullptr;
 
-  // Note: asset cache owns the asset, we access as a reference
-  MaterialAsset* m_material_asset = nullptr;
-
-  // If provided, denotes this material will be used as a custom draw material.
-  // If not provided, denotes this will be used as an efb post processing material.
+  // Set for custom draw materials, empty for EFB post processing ones. Its vertex format points
+  // at m_vertex_format, a copy owned here.
   std::optional<GXPipelineUid> m_uid;
-  std::unique_ptr<NativeVertexFormat> m_uid_vertex_format_copy;
+  std::unique_ptr<NativeVertexFormat> m_vertex_format;
 };
 }  // namespace VideoCommon

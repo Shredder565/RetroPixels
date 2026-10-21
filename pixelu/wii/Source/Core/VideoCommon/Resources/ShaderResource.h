@@ -1,10 +1,11 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <atomic>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include "VideoCommon/Resources/Resource.h"
 
@@ -14,6 +15,9 @@
 
 namespace VideoCommon
 {
+// Compiles the vertex, pixel and (when needed) geometry shaders for a raster surface shader
+// asset. With a pipeline UID the custom code is wrapped in the emulated GX shaders for that
+// draw; without one it is wrapped in a full screen post processing pass.
 class ShaderResource final : public Resource
 {
 public:
@@ -28,22 +32,24 @@ public:
     AbstractShader* GetPixelShader() const;
     AbstractShader* GetGeometryShader() const;
 
+    // All required stages were created.
     bool IsCompiled() const;
+    // The texture type the shader declares for sampler `index` (2D when unknown).
     AbstractTextureType GetTextureType(std::size_t index);
 
   private:
     friend class ShaderResource;
-    std::unique_ptr<AbstractShader> m_vertex_shader;
-    std::unique_ptr<AbstractShader> m_pixel_shader;
-    std::unique_ptr<AbstractShader> m_geometry_shader;
-    std::shared_ptr<RasterSurfaceShaderData> m_shader_data;
-    bool m_needs_geometry_shader = false;
-    std::atomic_bool m_processing_finished;
+    std::unique_ptr<AbstractShader> m_vs;
+    std::unique_ptr<AbstractShader> m_ps;
+    std::unique_ptr<AbstractShader> m_gs;
+    std::shared_ptr<RasterSurfaceShaderData> m_source;
+    bool m_gs_required = false;
+    std::atomic_bool m_compile_done;
   };
 
   // Changes the shader host config. Shaders should be reloaded afterwards.
   void SetHostConfig(const ShaderHostConfig& host_config);
-  const std::shared_ptr<Data>& GetData() const { return m_current_data; }
+  const std::shared_ptr<Data>& GetData() const { return m_live; }
 
   void MarkAsActive() override;
   void MarkAsPending() override;
@@ -53,19 +59,23 @@ private:
   Resource::TaskComplete CollectPrimaryData() override;
   TaskComplete ProcessData() override;
 
-  // Note: asset cache owns the asset, we access as a reference
-  RasterSurfaceShaderAsset* m_shader_asset = nullptr;
+  // Runs on the shader compiler thread. A null uid builds the post processing variant.
+  static void CompileStages(Data& data, GXPipelineUid* uid, const ShaderHostConfig& host,
+                            std::string_view defines);
 
-  std::shared_ptr<Data> m_current_data;
-  std::shared_ptr<Data> m_load_data;
+  // Owned by the asset cache.
+  RasterSurfaceShaderAsset* m_asset = nullptr;
 
-  bool m_processing_load_data = false;
+  std::shared_ptr<Data> m_live;
+  std::shared_ptr<Data> m_staging;
 
-  ShaderHostConfig m_shader_host_config;
+  // Whether m_staging has already been handed to the shader compiler.
+  bool m_compile_queued = false;
 
-  // If provided, denotes this shader will be used as a custom draw shader.
-  // If not provided, denotes this will be used as an efb post processing shader.
+  ShaderHostConfig m_host_config;
+
+  // Set for custom draw shaders, empty for EFB post processing shaders.
   std::optional<GXPipelineUid> m_uid;
-  std::string m_preprocessor_settings;
+  std::string m_defines;
 };
 }  // namespace VideoCommon

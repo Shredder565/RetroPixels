@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/MaterialResource.h"
 
@@ -7,6 +6,7 @@
 
 #include <xxh3.h>
 
+#include "Common/MsgHandler.h"
 #include "Common/VariantUtil.h"
 
 #include "VideoCommon/AbstractGfx.h"
@@ -17,422 +17,339 @@
 #include "VideoCommon/Resources/CustomResourceManager.h"
 #include "VideoCommon/VideoConfig.h"
 
-namespace
-{
-// TODO: absorb this with TextureCacheBase
-bool IsAnisotropicEnhancementSafe(const SamplerState::TM0& tm0)
-{
-  return !(tm0.min_filter == FilterMode::Near && tm0.mag_filter == FilterMode::Near);
-}
-
-// TODO: absorb this with TextureCacheBase
-SamplerState CalculateSamplerAnisotropy(const SamplerState& initial_sampler)
-{
-  SamplerState state = initial_sampler;
-  if (g_ActiveConfig.iMaxAnisotropy != AnisotropicFilteringMode::Default &&
-      IsAnisotropicEnhancementSafe(state.tm0))
-  {
-    state.tm0.anisotropic_filtering = std::to_underlying(g_ActiveConfig.iMaxAnisotropy);
-  }
-
-  if (state.tm0.anisotropic_filtering != 0)
-  {
-    // https://www.opengl.org/registry/specs/EXT/texture_filter_anisotropic.txt
-    // For predictable results on all hardware/drivers, only use one of:
-    //	GL_LINEAR + GL_LINEAR (No Mipmaps [Bilinear])
-    //	GL_LINEAR + GL_LINEAR_MIPMAP_LINEAR (w/ Mipmaps [Trilinear])
-    // Letting the game set other combinations will have varying arbitrary results;
-    // possibly being interpreted as equal to bilinear/trilinear, implicitly
-    // disabling anisotropy, or changing the anisotropic algorithm employed.
-    state.tm0.min_filter = FilterMode::Linear;
-    state.tm0.mag_filter = FilterMode::Linear;
-    state.tm0.mipmap_filter = FilterMode::Linear;
-  }
-  return state;
-}
-}  // namespace
-
 namespace VideoCommon
 {
+namespace
+{
+// Material texture slots are bound after the eight samplers of the emulated GX pipeline.
+constexpr u32 FIRST_CUSTOM_SAMPLER = 8;
+
+// Applies the user's anisotropic filtering setting the same way game textures get it.
+// Point-sampled textures are left alone. Once anisotropy is on, all three filters are forced
+// to linear, since other filter combinations give driver-dependent results with anisotropy.
+SamplerState WithUserAnisotropy(SamplerState state)
+{
+  const bool point_sampled =
+      state.tm0.min_filter == FilterMode::Near && state.tm0.mag_filter == FilterMode::Near;
+  const AnisotropicFilteringMode user = g_ActiveConfig.iMaxAnisotropy;
+  if (user != AnisotropicFilteringMode::Default && !point_sampled)
+    state.tm0.anisotropic_filtering = static_cast<u32>(std::to_underlying(user));
+
+  if (state.tm0.anisotropic_filtering == 0)
+    return state;
+  state.tm0.min_filter = FilterMode::Linear;
+  state.tm0.mag_filter = FilterMode::Linear;
+  state.tm0.mipmap_filter = FilterMode::Linear;
+  return state;
+}
+
+// Folds one dependency's state into the overall result: an error ends collection at once,
+// anything not yet built means "try again later".
+bool Accumulate(Resource::TaskComplete dependency, bool& all_ready)
+{
+  if (dependency == Resource::TaskComplete::Error)
+    return false;
+  all_ready = all_ready && dependency == Resource::TaskComplete::Yes;
+  return true;
+}
+
+// A shader compiler job that runs a callable on the worker thread; nothing to retrieve.
+template <typename Fn>
+class CallbackJob final : public AsyncShaderCompiler::WorkItem
+{
+public:
+  explicit CallbackJob(Fn fn) : m_fn(std::move(fn)) {}
+  bool Compile() override { return m_fn(); }
+  void Retrieve() override {}
+
+private:
+  Fn m_fn;
+};
+}  // namespace
+
 MaterialResource::MaterialResource(Resource::ResourceContext resource_context)
     : Resource(std::move(resource_context))
 {
-  m_material_asset = m_resource_context.asset_cache->CreateAsset<MaterialAsset>(
-      m_resource_context.primary_asset_id, m_resource_context.asset_library, this);
+  const ResourceContext& ctx = m_resource_context;
+  m_asset =
+      ctx.asset_cache->CreateAsset<MaterialAsset>(ctx.primary_asset_id, ctx.asset_library, this);
 }
 
 MaterialResource::MaterialResource(Resource::ResourceContext resource_context,
                                    GXPipelineUid pipeline_uid)
-    : Resource(std::move(resource_context)), m_uid(std::move(pipeline_uid))
+    : MaterialResource(std::move(resource_context))
 {
-  m_material_asset = m_resource_context.asset_cache->CreateAsset<MaterialAsset>(
-      m_resource_context.primary_asset_id, m_resource_context.asset_library, this);
-  m_uid_vertex_format_copy =
-      g_gfx->CreateNativeVertexFormat(m_uid->vertex_format->GetVertexDeclaration());
-  m_uid->vertex_format = m_uid_vertex_format_copy.get();
-}
-
-void MaterialResource::ResetData()
-{
-  if (m_current_data)
-  {
-    m_current_data->m_shader_resource->RemoveReference(this);
-    for (const auto& texture_like_resource : m_current_data->m_texture_like_resources)
-    {
-      if (texture_like_resource)
-        texture_like_resource->RemoveReference(this);
-    }
-    if (m_current_data->m_next_material)
-      m_current_data->m_next_material->RemoveReference(this);
-  }
-  m_load_data = std::make_shared<Data>();
-  m_processing_load_data = false;
-}
-
-Resource::TaskComplete MaterialResource::CollectPrimaryData()
-{
-  const auto material_data = m_material_asset->GetData();
-  if (!material_data) [[unlikely]]
-  {
-    return Resource::TaskComplete::No;
-  }
-  m_load_data->m_material_data = material_data;
-
-  // A shader asset is required to function
-  if (m_load_data->m_material_data->shader_asset == "")
-  {
-    return Resource::TaskComplete::Error;
-  }
-
-  CreateTextureData(m_load_data.get());
-  SetShaderKey(m_load_data.get(), m_uid ? &*m_uid : nullptr);
-
-  return Resource::TaskComplete::Yes;
-}
-
-Resource::TaskComplete MaterialResource::CollectDependencyData()
-{
-  bool loaded = true;
-  {
-    auto* const shader_resource = m_resource_context.resource_manager->GetShaderFromAsset(
-        m_load_data->m_material_data->shader_asset, m_load_data->m_shader_key, m_uid,
-        m_load_data->m_preprocessor_settings, m_resource_context.asset_library);
-    shader_resource->AddReference(this);
-    m_load_data->m_shader_resource = shader_resource;
-    const auto data_processed = shader_resource->IsDataProcessed();
-    if (data_processed == TaskComplete::Error)
-      return TaskComplete::Error;
-
-    loaded &= data_processed == TaskComplete::Yes;
-  }
-
-  for (std::size_t i = 0; i < m_load_data->m_material_data->textures.size(); i++)
-  {
-    const auto& texture_and_sampler = m_load_data->m_material_data->textures[i];
-    if (texture_and_sampler.asset == "")
-      continue;
-
-    const auto texture = m_resource_context.resource_manager->GetTextureAndSamplerFromAsset(
-        texture_and_sampler.asset, m_resource_context.asset_library);
-    m_load_data->m_texture_like_resources[i] = texture;
-    m_load_data->m_texture_like_data[i] = texture->GetData();
-    texture->AddReference(this);
-
-    const auto data_processed = texture->IsDataProcessed();
-    if (data_processed == TaskComplete::Error)
-      return TaskComplete::Error;
-
-    loaded &= data_processed == TaskComplete::Yes;
-  }
-
-  if (m_load_data->m_material_data->next_material_asset != "")
-  {
-    if (m_uid)
-    {
-      m_load_data->m_next_material = m_resource_context.resource_manager->GetDrawMaterialFromAsset(
-          m_load_data->m_material_data->next_material_asset, *m_uid,
-          m_resource_context.asset_library);
-    }
-    else
-    {
-      m_load_data->m_next_material =
-          m_resource_context.resource_manager->GetPostProcessingMaterialFromAsset(
-              m_load_data->m_material_data->next_material_asset, m_resource_context.asset_library);
-    }
-    m_load_data->m_next_material->AddReference(this);
-    const auto data_processed = m_load_data->m_next_material->IsDataProcessed();
-    if (data_processed == TaskComplete::Error)
-      return TaskComplete::Error;
-
-    loaded &= data_processed == TaskComplete::Yes;
-  }
-
-  return loaded ? TaskComplete::Yes : TaskComplete::No;
-}
-
-Resource::TaskComplete MaterialResource::ProcessData()
-{
-  auto shader_data = m_load_data->m_shader_resource->GetData();
-
-  if (!shader_data) [[unlikely]]
-    return Resource::TaskComplete::Error;
-
-  for (std::size_t i = 0; i < m_load_data->m_texture_like_data.size(); i++)
-  {
-    auto& texture_like_reference = m_load_data->m_texture_like_references[i];
-    const auto& texture_and_sampler = m_load_data->m_material_data->textures[i];
-
-    // If the texture doesn't exist, use one of the placeholders
-    if (texture_and_sampler.asset == "")
-    {
-      const auto texture_type = shader_data->GetTextureType(i);
-      if (texture_type == AbstractTextureType::Texture_2D)
-        texture_like_reference.texture = m_resource_context.invalid_color_texture;
-      else if (texture_type == AbstractTextureType::Texture_2DArray)
-        texture_like_reference.texture = m_resource_context.invalid_array_texture;
-      else if (texture_type == AbstractTextureType::Texture_CubeMap)
-        texture_like_reference.texture = m_resource_context.invalid_cubemap_texture;
-
-      if (texture_like_reference.texture == nullptr)
-      {
-        PanicAlertFmt("Invalid texture (texture_type={}) is not found during material "
-                      "resource processing (asset_id={})",
-                      texture_type, m_resource_context.primary_asset_id);
-      }
-
-      continue;
-    }
-
-    auto& texture_like_data = m_load_data->m_texture_like_data[i];
-
-    std::visit(overloaded{[&](const std::shared_ptr<TextureAndSamplerResource::Data>& data) {
-                 texture_like_reference.texture = data->GetTexture();
-                 texture_like_reference.sampler = CalculateSamplerAnisotropy(data->GetSampler());
-                 ;
-               }},
-               texture_like_data);
-  }
-
-  class WorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
-  {
-  public:
-    WorkItem(std::shared_ptr<MaterialResource::Data> material_resource_data,
-             std::shared_ptr<ShaderResource::Data> shader_resource_data,
-             VideoCommon::GXPipelineUid* uid, FramebufferState frame_buffer_state)
-        : m_material_resource_data(std::move(material_resource_data)),
-          m_shader_resource_data(std::move(shader_resource_data)), m_uid(uid),
-          m_frame_buffer_state(std::move(frame_buffer_state))
-    {
-    }
-
-    bool Compile() override
-    {
-      // Sanity check
-      if (!m_shader_resource_data->IsCompiled())
-      {
-        m_material_resource_data->m_processing_finished = true;
-        return false;
-      }
-
-      AbstractPipelineConfig config;
-      config.vertex_shader = m_shader_resource_data->GetVertexShader();
-      config.pixel_shader = m_shader_resource_data->GetPixelShader();
-      config.geometry_shader = m_shader_resource_data->GetGeometryShader();
-
-      if (m_uid)
-      {
-        // Draw based pipeline
-        const auto actual_uid = ApplyDriverBugs(*m_uid);
-
-        if (m_material_resource_data->m_material_data->blending_state)
-          config.blending_state = *m_material_resource_data->m_material_data->blending_state;
-        else
-          config.blending_state = actual_uid.blending_state;
-
-        if (m_material_resource_data->m_material_data->depth_state)
-          config.depth_state = *m_material_resource_data->m_material_data->depth_state;
-        else
-          config.depth_state = actual_uid.depth_state;
-
-        config.framebuffer_state = std::move(m_frame_buffer_state);
-        config.framebuffer_state.additional_color_attachment_count = 0;
-
-        config.rasterization_state = actual_uid.rasterization_state;
-        if (m_material_resource_data->m_material_data->cull_mode)
-        {
-          config.rasterization_state.cull_mode =
-              *m_material_resource_data->m_material_data->cull_mode;
-        }
-
-        config.vertex_format = actual_uid.vertex_format;
-        config.usage = AbstractPipelineUsage::GX;
-      }
-      else
-      {
-        // Post processing based pipeline
-
-        // Many of these properties don't make sense to replace but we expose them for draw
-        // based materials, might as well allow them to be used if the user wants
-
-        if (m_material_resource_data->m_material_data->blending_state)
-          config.blending_state = *m_material_resource_data->m_material_data->blending_state;
-        else
-          config.blending_state = RenderState::GetNoBlendingBlendState();
-
-        if (m_material_resource_data->m_material_data->depth_state)
-          config.depth_state = *m_material_resource_data->m_material_data->depth_state;
-        else
-          config.depth_state = RenderState::GetNoDepthTestingDepthState();
-
-        config.framebuffer_state = RenderState::GetRGBA8FramebufferState();
-
-        config.rasterization_state =
-            RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
-        if (m_material_resource_data->m_material_data->cull_mode)
-        {
-          config.rasterization_state.cull_mode =
-              *m_material_resource_data->m_material_data->cull_mode;
-        }
-
-        config.vertex_format = nullptr;
-        config.usage = AbstractPipelineUsage::Utility;
-      }
-
-      m_material_resource_data->m_pipeline = g_gfx->CreatePipeline(config);
-      if (m_material_resource_data->m_pipeline)
-      {
-        WriteUniforms(m_material_resource_data.get());
-      }
-      m_material_resource_data->m_processing_finished = true;
-      return true;
-    }
-    void Retrieve() override {}
-
-  private:
-    std::shared_ptr<MaterialResource::Data> m_material_resource_data;
-    std::shared_ptr<ShaderResource::Data> m_shader_resource_data;
-    VideoCommon::GXPipelineUid* m_uid;
-    FramebufferState m_frame_buffer_state;
-  };
-
-  if (!m_processing_load_data)
-  {
-    auto wi = m_resource_context.shader_compiler->CreateWorkItem<WorkItem>(
-        m_load_data, std::move(shader_data), m_uid ? &*m_uid : nullptr,
-        g_framebuffer_manager->GetEFBFramebufferState());
-
-    // We don't need priority, that is already handled by the resource system
-    m_resource_context.shader_compiler->QueueWorkItem(std::move(wi), 0);
-    m_processing_load_data = true;
-  }
-
-  if (!m_load_data->m_processing_finished)
-    return TaskComplete::No;
-
-  if (!m_load_data->m_pipeline)
-  {
-    return TaskComplete::Error;
-  }
-
-  std::swap(m_current_data, m_load_data);
-  return TaskComplete::Yes;
+  // The uid outlives the vertex format it was given, so keep a private copy of that format.
+  m_uid.emplace(std::move(pipeline_uid));
+  m_vertex_format = g_gfx->CreateNativeVertexFormat(m_uid->vertex_format->GetVertexDeclaration());
+  m_uid->vertex_format = m_vertex_format.get();
 }
 
 void MaterialResource::MarkAsActive()
 {
-  if (!m_current_data) [[unlikely]]
+  if (m_live == nullptr) [[unlikely]]
     return;
 
-  m_resource_context.asset_cache->MarkAssetActive(m_material_asset);
-  for (const auto& texture_like_resource : m_current_data->m_texture_like_resources)
+  m_resource_context.asset_cache->MarkAssetActive(m_asset);
+  for (Resource* texture : m_live->m_texture_resources)
   {
-    if (texture_like_resource)
-      texture_like_resource->MarkAsActive();
+    if (texture != nullptr)
+      texture->MarkAsActive();
   }
-  if (m_current_data->m_shader_resource)
-    m_current_data->m_shader_resource->MarkAsActive();
-  if (m_current_data->m_next_material)
-    m_current_data->m_next_material->MarkAsActive();
+  if (m_live->m_shader != nullptr)
+    m_live->m_shader->MarkAsActive();
+  if (m_live->m_next != nullptr)
+    m_live->m_next->MarkAsActive();
 }
 
 void MaterialResource::MarkAsPending()
 {
-  m_resource_context.asset_cache->MarkAssetPending(m_material_asset);
+  m_resource_context.asset_cache->MarkAssetPending(m_asset);
 }
 
-void MaterialResource::CreateTextureData(Data* data)
+void MaterialResource::ResetData()
 {
-  ShaderCode preprocessor_settings;
-
-  const auto& material_data = *data->m_material_data;
-  data->m_texture_like_data.clear();
-  data->m_texture_like_resources.clear();
-  data->m_texture_like_references.clear();
-  const u32 custom_sampler_index_offset = 8;
-  for (u32 i = 0; i < static_cast<u32>(material_data.textures.size()); i++)
+  // Stop listening to what the current build depends on; the new build registers again.
+  if (m_live != nullptr)
   {
-    const auto& texture_and_sampler = material_data.textures[i];
-    data->m_texture_like_references.push_back(TextureLikeReference{});
-
-    TextureAndSamplerResource* value = nullptr;
-    data->m_texture_like_resources.push_back(value);
-    data->m_texture_like_data.push_back(std::shared_ptr<TextureAndSamplerResource::Data>{});
-
-    auto& texture_like_reference = data->m_texture_like_references[i];
-
-    if (texture_and_sampler.asset == "")
+    m_live->m_shader->RemoveReference(this);
+    for (Resource* texture : m_live->m_texture_resources)
     {
-      preprocessor_settings.Write("#define HAS_SAMPLER_{} 0\n", i);
-
-      // For an invalid asset, force the sampler to use the default sampler
-      texture_like_reference.sampler_origin =
-          VideoCommon::TextureSamplerValue::SamplerOrigin::Asset;
-      texture_like_reference.texture_hash = "";
+      if (texture != nullptr)
+        texture->RemoveReference(this);
     }
-    else
+    if (m_live->m_next != nullptr)
+      m_live->m_next->RemoveReference(this);
+  }
+  m_staging = std::make_shared<Data>();
+  m_build_queued = false;
+}
+
+Resource::TaskComplete MaterialResource::CollectPrimaryData()
+{
+  std::shared_ptr<MaterialData> material = m_asset->GetData();
+  if (material == nullptr) [[unlikely]]
+    return TaskComplete::No;
+  m_staging->m_material = std::move(material);
+
+  // There is nothing to draw with without a shader.
+  if (m_staging->m_material->shader_asset.empty())
+    return TaskComplete::Error;
+
+  PrepareBindings(*m_staging);
+  ComputeShaderKey(*m_staging, m_uid ? &*m_uid : nullptr);
+  return TaskComplete::Yes;
+}
+
+Resource::TaskComplete MaterialResource::CollectDependencyData()
+{
+  Data& staging = *m_staging;
+  const MaterialData& material = *staging.m_material;
+  CustomResourceManager& manager = *m_resource_context.resource_manager;
+  const auto& library = m_resource_context.asset_library;
+  bool all_ready = true;
+
+  ShaderResource* shader = manager.GetShaderFromAsset(material.shader_asset, staging.m_shader_key,
+                                                      m_uid, staging.m_defines, library);
+  shader->AddReference(this);
+  staging.m_shader = shader;
+  if (!Accumulate(shader->IsDataProcessed(), all_ready))
+    return TaskComplete::Error;
+
+  for (std::size_t slot = 0; slot < material.textures.size(); ++slot)
+  {
+    const CustomAssetLibrary::AssetID& texture_id = material.textures[slot].asset;
+    if (texture_id.empty())
+      continue;
+
+    TextureAndSamplerResource* texture = manager.GetTextureAndSamplerFromAsset(texture_id, library);
+    staging.m_texture_resources[slot] = texture;
+    staging.m_texture_sources[slot] = texture->GetData();
+    texture->AddReference(this);
+    if (!Accumulate(texture->IsDataProcessed(), all_ready))
+      return TaskComplete::Error;
+  }
+
+  const CustomAssetLibrary::AssetID& next_id = material.next_material_asset;
+  if (!next_id.empty())
+  {
+    MaterialResource* next = m_uid ? manager.GetDrawMaterialFromAsset(next_id, *m_uid, library) :
+                                     manager.GetPostProcessingMaterialFromAsset(next_id, library);
+    staging.m_next = next;
+    next->AddReference(this);
+    if (!Accumulate(next->IsDataProcessed(), all_ready))
+      return TaskComplete::Error;
+  }
+
+  return all_ready ? TaskComplete::Yes : TaskComplete::No;
+}
+
+void MaterialResource::ResolveBindings(Data& data, ShaderResource::Data& shader) const
+{
+  const MaterialData& material = *data.m_material;
+  for (std::size_t slot = 0; slot < data.m_texture_sources.size(); ++slot)
+  {
+    TextureLikeReference& binding = data.m_bindings[slot];
+    if (!material.textures[slot].asset.empty())
     {
-      preprocessor_settings.Write("#define HAS_SAMPLER_{} 1\n", i);
-
-      texture_like_reference.sampler_origin = texture_and_sampler.sampler_origin;
-      texture_like_reference.texture_hash = texture_and_sampler.texture_hash;
+      std::visit(overloaded{[&](const std::shared_ptr<TextureAndSamplerResource::Data>& source) {
+                   binding.texture = source->GetTexture();
+                   binding.sampler = WithUserAnisotropy(source->GetSampler());
+                 }},
+                 data.m_texture_sources[slot]);
+      continue;
     }
 
-    texture_like_reference.sampler_index = i + custom_sampler_index_offset;
-    texture_like_reference.texture = nullptr;
+    // No texture given: bind the placeholder matching what the shader declared.
+    const AbstractTextureType type = shader.GetTextureType(slot);
+    switch (type)
+    {
+    case AbstractTextureType::Texture_2D:
+      binding.texture = m_resource_context.invalid_color_texture;
+      break;
+    case AbstractTextureType::Texture_2DArray:
+      binding.texture = m_resource_context.invalid_array_texture;
+      break;
+    case AbstractTextureType::Texture_CubeMap:
+      binding.texture = m_resource_context.invalid_cubemap_texture;
+      break;
+    }
+    if (binding.texture == nullptr)
+    {
+      PanicAlertFmt("Invalid texture (texture_type={}) is not found during material "
+                    "resource processing (asset_id={})",
+                    type, m_resource_context.primary_asset_id);
+    }
   }
-
-  data->m_preprocessor_settings = preprocessor_settings.GetBuffer();
 }
 
-void MaterialResource::SetShaderKey(Data* data, GXPipelineUid* uid)
+bool MaterialResource::BuildPipeline(Data& data, const ShaderResource::Data& shader,
+                                     const GXPipelineUid* uid, FramebufferState framebuffer)
 {
-  XXH3_state_t shader_key_hash;
-  XXH3_INITSTATE(&shader_key_hash);
-  XXH3_64bits_reset_withSeed(&shader_key_hash, static_cast<XXH64_hash_t>(1));
+  if (!shader.IsCompiled())
+    return false;
 
-  if (uid)
-    UpdateHashWithPipeline(*uid, &shader_key_hash);
-  XXH3_64bits_update(&shader_key_hash, data->m_preprocessor_settings.c_str(),
-                     data->m_preprocessor_settings.size());
+  const MaterialData& material = *data.m_material;
+  AbstractPipelineConfig config;
+  config.vertex_shader = shader.GetVertexShader();
+  config.pixel_shader = shader.GetPixelShader();
+  config.geometry_shader = shader.GetGeometryShader();
 
-  data->m_shader_key = XXH3_64bits_digest(&shader_key_hash);
+  if (uid != nullptr)
+  {
+    // Replaces a game draw: start from that draw's state.
+    const GXPipelineUid patched = ApplyDriverBugs(*uid);
+    config.vertex_format = patched.vertex_format;
+    config.rasterization_state = patched.rasterization_state;
+    config.depth_state = material.depth_state.value_or(patched.depth_state);
+    config.blending_state = material.blending_state.value_or(patched.blending_state);
+    config.framebuffer_state = std::move(framebuffer);
+    config.framebuffer_state.additional_color_attachment_count = 0;
+    config.usage = AbstractPipelineUsage::GX;
+  }
+  else
+  {
+    // A full screen pass over the EFB copy. The draw-only overrides are honoured here too.
+    config.vertex_format = nullptr;
+    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+    config.depth_state = material.depth_state.value_or(RenderState::GetNoDepthTestingDepthState());
+    config.blending_state =
+        material.blending_state.value_or(RenderState::GetNoBlendingBlendState());
+    config.framebuffer_state = RenderState::GetRGBA8FramebufferState();
+    config.usage = AbstractPipelineUsage::Utility;
+  }
+  if (material.cull_mode)
+    config.rasterization_state.cull_mode = *material.cull_mode;
+
+  data.m_pipeline = g_gfx->CreatePipeline(config);
+  if (data.m_pipeline != nullptr)
+    PackUniforms(data);
+  return true;
 }
 
-void MaterialResource::WriteUniforms(Data* data)
+Resource::TaskComplete MaterialResource::ProcessData()
 {
-  // Calculate the size in memory of the buffer
-  std::size_t max_uniformdata_size = 0;
-  for (const auto& property : data->m_material_data->properties)
-  {
-    max_uniformdata_size += VideoCommon::MaterialProperty::GetMemorySize(property);
-  }
-  data->m_uniform_data = Common::UniqueBuffer<u8>(max_uniformdata_size);
+  std::shared_ptr<ShaderResource::Data> shader = m_staging->m_shader->GetData();
+  if (shader == nullptr) [[unlikely]]
+    return TaskComplete::Error;
 
-  // Now write the memory
-  u8* uniform_data = data->m_uniform_data.data();
-  for (const auto& property : data->m_material_data->properties)
+  ResolveBindings(*m_staging, *shader);
+
+  if (!m_build_queued)
   {
-    VideoCommon::MaterialProperty::WriteToMemory(uniform_data, property);
+    auto build = [data = m_staging, shader_data = std::move(shader),
+                  uid = m_uid ? &*m_uid : nullptr,
+                  framebuffer = g_framebuffer_manager->GetEFBFramebufferState()] {
+      const bool built = BuildPipeline(*data, *shader_data, uid, framebuffer);
+      data->m_build_done = true;
+      return built;
+    };
+    AsyncShaderCompiler& compiler = *m_resource_context.shader_compiler;
+    // Ordering between resources is already decided by the resource system.
+    compiler.QueueWorkItem(compiler.CreateWorkItem<CallbackJob<decltype(build)>>(build), 0);
+    m_build_queued = true;
   }
+
+  if (!m_staging->m_build_done)
+    return TaskComplete::No;
+  if (m_staging->m_pipeline == nullptr)
+    return TaskComplete::Error;
+
+  m_live.swap(m_staging);
+  return TaskComplete::Yes;
+}
+
+void MaterialResource::PrepareBindings(Data& data)
+{
+  const std::vector<TextureSamplerValue>& textures = data.m_material->textures;
+  data.m_texture_sources.clear();
+  data.m_texture_resources.clear();
+  data.m_bindings.clear();
+
+  std::string defines;
+  for (u32 slot = 0; slot < static_cast<u32>(textures.size()); ++slot)
+  {
+    const TextureSamplerValue& texture = textures[slot];
+    const bool has_asset = !texture.asset.empty();
+
+    data.m_texture_resources.push_back(nullptr);
+    data.m_texture_sources.push_back(std::shared_ptr<TextureAndSamplerResource::Data>{});
+
+    TextureLikeReference binding{};
+    binding.sampler_index = slot + FIRST_CUSTOM_SAMPLER;
+    binding.texture = nullptr;
+    // An empty slot always uses the default sampler.
+    binding.sampler_origin =
+        has_asset ? texture.sampler_origin : TextureSamplerValue::SamplerOrigin::Asset;
+    binding.texture_hash = has_asset ? std::string_view(texture.texture_hash) : "";
+    data.m_bindings.push_back(binding);
+
+    defines += fmt::format("#define HAS_SAMPLER_{} {}\n", slot, has_asset ? 1 : 0);
+  }
+  data.m_defines = std::move(defines);
+}
+
+void MaterialResource::ComputeShaderKey(Data& data, const GXPipelineUid* uid)
+{
+  XXH3_state_t state;
+  XXH3_INITSTATE(&state);
+  XXH3_64bits_reset_withSeed(&state, XXH64_hash_t{1});
+  if (uid != nullptr)
+    UpdateHashWithPipeline(*uid, &state);
+  XXH3_64bits_update(&state, data.m_defines.data(), data.m_defines.size());
+  data.m_shader_key = static_cast<std::size_t>(XXH3_64bits_digest(&state));
+}
+
+void MaterialResource::PackUniforms(Data& data)
+{
+  const std::vector<MaterialProperty>& properties = data.m_material->properties;
+  std::size_t total = 0;
+  for (const MaterialProperty& property : properties)
+    total += MaterialProperty::GetMemorySize(property);
+
+  data.m_uniforms = Common::UniqueBuffer<u8>(total);
+  u8* cursor = data.m_uniforms.data();
+  for (const MaterialProperty& property : properties)
+    MaterialProperty::WriteToMemory(cursor, property);
 }
 }  // namespace VideoCommon

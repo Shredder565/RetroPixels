@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/TextureAndSamplerResource.h"
 
@@ -11,93 +10,94 @@ namespace VideoCommon
 TextureAndSamplerResource::TextureAndSamplerResource(Resource::ResourceContext resource_context)
     : Resource(std::move(resource_context))
 {
-  m_texture_and_sampler_asset = m_resource_context.asset_cache->CreateAsset<TextureAndSamplerAsset>(
-      m_resource_context.primary_asset_id, m_resource_context.asset_library, this);
+  const ResourceContext& ctx = m_resource_context;
+  m_asset = ctx.asset_cache->CreateAsset<TextureAndSamplerAsset>(ctx.primary_asset_id,
+                                                                 ctx.asset_library, this);
 }
 
 void TextureAndSamplerResource::MarkAsActive()
 {
-  m_resource_context.asset_cache->MarkAssetActive(m_texture_and_sampler_asset);
+  m_resource_context.asset_cache->MarkAssetActive(m_asset);
 }
 
 void TextureAndSamplerResource::MarkAsPending()
 {
-  m_resource_context.asset_cache->MarkAssetPending(m_texture_and_sampler_asset);
+  m_resource_context.asset_cache->MarkAssetPending(m_asset);
 }
 
 const std::shared_ptr<TextureAndSamplerResource::Data>& TextureAndSamplerResource::GetData() const
 {
-  return m_current_data;
+  return m_live;
 }
 
 void TextureAndSamplerResource::ResetData()
 {
-  m_load_data = std::make_shared<Data>();
+  m_staging = std::make_shared<Data>();
 }
 
 Resource::TaskComplete TextureAndSamplerResource::CollectPrimaryData()
 {
-  m_load_data->m_texture_and_sampler_data = m_texture_and_sampler_asset->GetData();
-  if (!m_load_data->m_texture_and_sampler_data)
-    return Resource::TaskComplete::No;
+  Data& staging = *m_staging;
+  staging.m_texture_and_sampler_data = m_asset->GetData();
+  const TextureAndSamplerData* source = staging.m_texture_and_sampler_data.get();
+  if (source == nullptr)
+    return TaskComplete::No;
 
-  auto& texture_data = m_load_data->m_texture_and_sampler_data->texture_data;
-  if (texture_data.m_slices.empty())
-    return Resource::TaskComplete::Error;
+  // Without a first mip level there is nothing to size the texture from.
+  const auto& slices = source->texture_data.m_slices;
+  if (slices.empty() || slices.front().m_levels.empty())
+    return TaskComplete::Error;
+  const auto& top = slices.front().m_levels.front();
 
-  if (texture_data.m_slices[0].m_levels.empty())
-    return Resource::TaskComplete::Error;
-
-  const auto& first_level = texture_data.m_slices[0].m_levels[0];
-
-  auto& config = m_load_data->m_config;
-  config.format = first_level.format;
-  config.flags = 0;
-  config.layers = 1;
+  // Only one layer and one level are requested from the pool, whatever the asset holds.
+  TextureConfig& config = staging.m_config;
+  config.width = top.width;
+  config.height = top.height;
   config.levels = 1;
-  config.type = m_load_data->m_texture_and_sampler_data->type;
+  config.layers = 1;
   config.samples = 1;
-
-  config.width = first_level.width;
-  config.height = first_level.height;
-
-  return Resource::TaskComplete::Yes;
+  config.format = top.format;
+  config.type = source->type;
+  config.flags = 0;
+  return TaskComplete::Yes;
 }
 
 Resource::TaskComplete TextureAndSamplerResource::ProcessData()
 {
-  auto texture = m_resource_context.texture_pool->AllocateTexture(m_load_data->m_config);
-  if (!texture) [[unlikely]]
-    return Resource::TaskComplete::Error;
+  TexturePool& pool = *m_resource_context.texture_pool;
+  Data& staging = *m_staging;
 
-  m_load_data->m_texture = std::move(texture);
+  staging.m_texture = pool.AllocateTexture(staging.m_config);
+  AbstractTexture* const gpu = staging.m_texture.get();
+  if (gpu == nullptr) [[unlikely]]
+    return TaskComplete::Error;
 
-  auto& texture_data = m_load_data->m_texture_and_sampler_data->texture_data;
-  for (std::size_t slice_index = 0; slice_index < texture_data.m_slices.size(); slice_index++)
+  const auto& slices = staging.m_texture_and_sampler_data->texture_data.m_slices;
+  u32 slice_index = 0;
+  for (const auto& slice : slices)
   {
-    auto& slice = texture_data.m_slices[slice_index];
-    for (u32 level_index = 0; level_index < static_cast<u32>(slice.m_levels.size()); ++level_index)
+    u32 level_index = 0;
+    for (const auto& level : slice.m_levels)
     {
-      auto& level = slice.m_levels[level_index];
-      m_load_data->m_texture->Load(level_index, level.width, level.height, level.row_length,
-                                   level.data.data(), level.data.size(),
-                                   static_cast<u32>(slice_index));
+      gpu->Load(level_index, level.width, level.height, level.row_length, level.data.data(),
+                level.data.size(), slice_index);
+      ++level_index;
     }
+    ++slice_index;
   }
-  std::swap(m_current_data, m_load_data);
 
-  // Release old data back to the pool
-  if (m_load_data)
-    m_resource_context.texture_pool->ReleaseTexture(std::move(m_load_data->m_texture));
-
-  return Resource::TaskComplete::Yes;
+  // Publish the new upload; the one it replaces goes back to the pool.
+  m_live.swap(m_staging);
+  if (m_staging != nullptr)
+    pool.ReleaseTexture(std::move(m_staging->m_texture));
+  return TaskComplete::Yes;
 }
 
 void TextureAndSamplerResource::OnUnloadRequested()
 {
-  if (!m_current_data)
+  if (m_live == nullptr)
     return;
-  m_resource_context.texture_pool->ReleaseTexture(std::move(m_current_data->m_texture));
-  m_current_data = nullptr;
+  m_resource_context.texture_pool->ReleaseTexture(std::move(m_live->m_texture));
+  m_live.reset();
 }
 }  // namespace VideoCommon

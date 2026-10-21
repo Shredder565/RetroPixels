@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/CustomResourceManager.h"
 
@@ -10,82 +9,95 @@
 
 namespace VideoCommon
 {
+namespace
+{
+constexpr const char* WORKER_NAME = "resource-worker";
+
+// Creates the resource in `slot` on first use, then lets it make progress.
+template <typename T, typename Create>
+T* ProcessSlot(std::unique_ptr<T>& slot, Create&& create)
+{
+  if (slot == nullptr)
+    slot = create();
+  slot->Process();
+  return slot.get();
+}
+}  // namespace
+
 void CustomResourceManager::Initialize()
 {
-  m_asset_cache.Initialize();
-  m_worker_thread.Reset("resource-worker");
+  m_cache.Initialize();
+  m_worker.Reset(WORKER_NAME);
   m_host_config.bits = ShaderHostConfig::GetCurrent().bits;
-  m_async_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
 
-  m_async_shader_compiler->StartWorkerThreads(1);  // TODO expose to config
+  m_compiler = g_gfx->CreateAsyncShaderCompiler();
+  m_compiler->StartWorkerThreads(1);
 
-  m_xfb_event =
+  // Asset loads are published once per presented frame.
+  m_frame_hook =
       GetVideoEvents().after_frame_event.Register([this](Core::System&) { XFBTriggered(); });
 
-  m_invalid_array_texture = CreateInvalidArrayTexture();
-  m_invalid_color_texture = CreateInvalidColorTexture();
-  m_invalid_cubemap_texture = CreateInvalidCubemapTexture();
-  m_invalid_transparent_texture = CreateInvalidTransparentTexture();
+  m_placeholder_array = CreateInvalidArrayTexture();
+  m_placeholder_color = CreateInvalidColorTexture();
+  m_placeholder_cubemap = CreateInvalidCubemapTexture();
+  m_placeholder_transparent = CreateInvalidTransparentTexture();
 }
 
 void CustomResourceManager::Shutdown()
 {
-  if (m_async_shader_compiler)
+  if (m_compiler != nullptr)
   {
-    m_async_shader_compiler->StopWorkerThreads();
-    m_async_shader_compiler->ClearAllWork();
+    m_compiler->StopWorkerThreads();
+    m_compiler->ClearAllWork();
   }
-
-  m_asset_cache.Shutdown();
-  m_worker_thread.Shutdown();
+  m_cache.Shutdown();
+  m_worker.Shutdown();
   Reset();
 }
 
 void CustomResourceManager::Reset()
 {
-  m_draw_material_resources.clear();
-  m_postprocessing_material_resources.clear();
-  m_shader_resources.clear();
-  m_texture_data_resources.clear();
-  m_texture_sampler_resources.clear();
+  // Materials go first since they reference shaders and textures.
+  m_draw_materials.clear();
+  m_post_materials.clear();
+  m_shaders.clear();
+  m_texture_data.clear();
+  m_textures.clear();
 
-  m_invalid_transparent_texture.reset();
-  m_invalid_color_texture.reset();
-  m_invalid_cubemap_texture.reset();
-  m_invalid_array_texture.reset();
+  // Not recreated here: resources built after a Reset see null placeholders until the next
+  // Initialize.
+  m_placeholder_transparent.reset();
+  m_placeholder_color.reset();
+  m_placeholder_cubemap.reset();
+  m_placeholder_array.reset();
 
-  m_asset_cache.Reset();
-  m_texture_pool.Reset();
-  m_worker_thread.Reset("resource-worker");
+  m_cache.Reset();
+  m_pool.Reset();
+  m_worker.Reset(WORKER_NAME);
 }
 
 void CustomResourceManager::MarkAssetDirty(const CustomAssetLibrary::AssetID& asset_id)
 {
-  m_asset_cache.MarkAssetDirty(asset_id);
+  m_cache.MarkAssetDirty(asset_id);
 }
 
 void CustomResourceManager::XFBTriggered()
 {
-  m_asset_cache.Update();
+  m_cache.Update();
 }
 
 void CustomResourceManager::SetHostConfig(const ShaderHostConfig& host_config)
 {
-  for (auto& [id, shader_resources] : m_shader_resources)
+  for (auto& per_asset : m_shaders)
   {
-    for (auto& [key, shader_resource] : shader_resources)
+    for (auto& entry : per_asset.second)
     {
-      shader_resource->SetHostConfig(host_config);
-
-      // Hack to get access to resource internals
-      Resource* resource = shader_resource.get();
-
-      // Tell shader and references to trigger a reload
-      // on next usage
-      resource->NotifyAssetChanged(false);
+      ShaderResource& shader = *entry.second;
+      shader.SetHostConfig(host_config);
+      // Rebuild the shader (and whatever uses it) the next time it is requested.
+      static_cast<Resource&>(shader).Restart(false);
     }
   }
-
   m_host_config.bits = host_config.bits;
 }
 
@@ -93,42 +105,29 @@ TextureDataResource* CustomResourceManager::GetTextureDataFromAsset(
     const CustomAssetLibrary::AssetID& asset_id,
     std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  auto& resource = m_texture_data_resources[asset_id];
-  if (resource == nullptr)
-  {
-    resource =
-        std::make_unique<TextureDataResource>(CreateResourceContext(asset_id, std::move(library)));
-  }
-  resource->Process();
-  return resource.get();
+  return ProcessSlot(m_texture_data[asset_id], [&] {
+    return std::make_unique<TextureDataResource>(MakeContext(asset_id, std::move(library)));
+  });
 }
 
 MaterialResource* CustomResourceManager::GetDrawMaterialFromAsset(
     const CustomAssetLibrary::AssetID& asset_id, const GXPipelineUid& pipeline_uid,
     std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  auto& resource = m_draw_material_resources[asset_id][PipelineToHash(pipeline_uid)];
-  if (resource == nullptr)
-  {
-    resource = std::make_unique<MaterialResource>(
-        CreateResourceContext(asset_id, std::move(library)), pipeline_uid);
-  }
-  resource->Process();
-  return resource.get();
+  auto& slot = m_draw_materials[asset_id][PipelineToHash(pipeline_uid)];
+  return ProcessSlot(slot, [&] {
+    return std::make_unique<MaterialResource>(MakeContext(asset_id, std::move(library)),
+                                              pipeline_uid);
+  });
 }
 
 MaterialResource* CustomResourceManager::GetPostProcessingMaterialFromAsset(
     const CustomAssetLibrary::AssetID& asset_id,
     std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  auto& resource = m_postprocessing_material_resources[asset_id];
-  if (resource == nullptr)
-  {
-    resource =
-        std::make_unique<MaterialResource>(CreateResourceContext(asset_id, std::move(library)));
-  }
-  resource->Process();
-  return resource.get();
+  return ProcessSlot(m_post_materials[asset_id], [&] {
+    return std::make_unique<MaterialResource>(MakeContext(asset_id, std::move(library)));
+  });
 }
 
 ShaderResource* CustomResourceManager::GetShaderFromAsset(
@@ -136,44 +135,37 @@ ShaderResource* CustomResourceManager::GetShaderFromAsset(
     const std::optional<GXPipelineUid>& pipeline_uid, const std::string& preprocessor_settings,
     std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  auto& resource = m_shader_resources[asset_id][shader_key];
-  if (resource == nullptr)
-  {
-    resource = std::make_unique<ShaderResource>(CreateResourceContext(asset_id, std::move(library)),
-                                                pipeline_uid, preprocessor_settings, m_host_config);
-  }
-  resource->Process();
-  return resource.get();
+  return ProcessSlot(m_shaders[asset_id][shader_key], [&] {
+    return std::make_unique<ShaderResource>(MakeContext(asset_id, std::move(library)), pipeline_uid,
+                                            preprocessor_settings, m_host_config);
+  });
 }
 
 TextureAndSamplerResource* CustomResourceManager::GetTextureAndSamplerFromAsset(
     const CustomAssetLibrary::AssetID& asset_id,
     std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  auto& resource = m_texture_sampler_resources[asset_id];
-  if (resource == nullptr)
-  {
-    resource = std::make_unique<TextureAndSamplerResource>(
-        CreateResourceContext(asset_id, std::move(library)));
-  }
-  resource->Process();
-  return resource.get();
+  return ProcessSlot(m_textures[asset_id], [&] {
+    return std::make_unique<TextureAndSamplerResource>(MakeContext(asset_id, std::move(library)));
+  });
 }
 
-Resource::ResourceContext CustomResourceManager::CreateResourceContext(
-    const CustomAssetLibrary::AssetID& asset_id,
-    std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
+Resource::ResourceContext
+CustomResourceManager::MakeContext(const CustomAssetLibrary::AssetID& asset_id,
+                                   std::shared_ptr<VideoCommon::CustomAssetLibrary> library)
 {
-  return Resource::ResourceContext{asset_id,
-                                   std::move(library),
-                                   &m_asset_cache,
-                                   this,
-                                   &m_texture_pool,
-                                   &m_worker_thread,
-                                   m_async_shader_compiler.get(),
-                                   m_invalid_array_texture.get(),
-                                   m_invalid_color_texture.get(),
-                                   m_invalid_cubemap_texture.get(),
-                                   m_invalid_transparent_texture.get()};
+  Resource::ResourceContext context{};
+  context.primary_asset_id = asset_id;
+  context.asset_library = std::move(library);
+  context.asset_cache = &m_cache;
+  context.resource_manager = this;
+  context.texture_pool = &m_pool;
+  context.worker_queue = &m_worker;
+  context.shader_compiler = m_compiler.get();
+  context.invalid_array_texture = m_placeholder_array.get();
+  context.invalid_color_texture = m_placeholder_color.get();
+  context.invalid_cubemap_texture = m_placeholder_cubemap.get();
+  context.invalid_transparent_texture = m_placeholder_transparent.get();
+  return context;
 }
 }  // namespace VideoCommon

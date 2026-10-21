@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,9 @@
 
 namespace VideoCommon
 {
+// Owns every custom resource, the asset cache they load through and the services they share.
+// Each Get* call returns the resource for that asset (creating it on first use) after advancing
+// its build; callers check IsDataProcessed() before using the data.
 class CustomResourceManager
 {
 public:
@@ -56,36 +58,36 @@ public:
                                 std::shared_ptr<VideoCommon::CustomAssetLibrary> library);
 
 private:
-  Resource::ResourceContext
-  CreateResourceContext(const CustomAssetLibrary::AssetID& asset_id,
-                        std::shared_ptr<VideoCommon::CustomAssetLibrary> library);
-  CustomAssetCache m_asset_cache;
-  TexturePool m_texture_pool;
-  Common::AsyncWorkThreadSP m_worker_thread;
-  std::unique_ptr<AsyncShaderCompiler> m_async_shader_compiler;
+  Resource::ResourceContext MakeContext(const CustomAssetLibrary::AssetID& asset_id,
+                                        std::shared_ptr<VideoCommon::CustomAssetLibrary> library);
 
-  using PipelineIdToMaterial = std::map<std::size_t, std::unique_ptr<MaterialResource>>;
-  std::map<CustomAssetLibrary::AssetID, PipelineIdToMaterial> m_draw_material_resources;
+  template <typename T>
+  using Owned = std::unique_ptr<T>;
+  template <typename T>
+  using ByAsset = std::map<CustomAssetLibrary::AssetID, T>;
+  // Second level key: pipeline hash for draw materials, shader key for shaders.
+  template <typename T>
+  using ByAssetAndKey = ByAsset<std::map<std::size_t, Owned<T>>>;
 
-  using ShaderKeyToShader = std::map<std::size_t, std::unique_ptr<ShaderResource>>;
-  std::map<CustomAssetLibrary::AssetID, ShaderKeyToShader> m_shader_resources;
+  CustomAssetCache m_cache;
+  TexturePool m_pool;
+  Common::AsyncWorkThreadSP m_worker;
+  std::unique_ptr<AsyncShaderCompiler> m_compiler;
 
-  std::map<CustomAssetLibrary::AssetID, std::unique_ptr<TextureDataResource>>
-      m_texture_data_resources;
-
-  std::map<CustomAssetLibrary::AssetID, std::unique_ptr<TextureAndSamplerResource>>
-      m_texture_sampler_resources;
-
-  std::map<CustomAssetLibrary::AssetID, std::unique_ptr<MaterialResource>>
-      m_postprocessing_material_resources;
+  ByAssetAndKey<MaterialResource> m_draw_materials;
+  ByAssetAndKey<ShaderResource> m_shaders;
+  ByAsset<Owned<TextureDataResource>> m_texture_data;
+  ByAsset<Owned<TextureAndSamplerResource>> m_textures;
+  ByAsset<Owned<MaterialResource>> m_post_materials;
 
   ShaderHostConfig m_host_config;
 
-  Common::EventHook m_xfb_event;
+  Common::EventHook m_frame_hook;
 
-  std::unique_ptr<AbstractTexture> m_invalid_transparent_texture;
-  std::unique_ptr<AbstractTexture> m_invalid_color_texture;
-  std::unique_ptr<AbstractTexture> m_invalid_cubemap_texture;
-  std::unique_ptr<AbstractTexture> m_invalid_array_texture;
+  // Placeholders bound in material texture slots that have no texture.
+  std::unique_ptr<AbstractTexture> m_placeholder_transparent;
+  std::unique_ptr<AbstractTexture> m_placeholder_color;
+  std::unique_ptr<AbstractTexture> m_placeholder_cubemap;
+  std::unique_ptr<AbstractTexture> m_placeholder_array;
 };
 }  // namespace VideoCommon

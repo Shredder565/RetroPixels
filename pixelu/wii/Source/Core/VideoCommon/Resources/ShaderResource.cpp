@@ -1,12 +1,16 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/ShaderResource.h"
 
+#include <array>
+#include <iterator>
+#include <string>
 #include <string_view>
 #include <utility>
 
 #include <fmt/format.h>
+
+#include "Common/StringUtil.h"
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/Assets/CustomAssetCache.h"
@@ -22,530 +26,416 @@ namespace VideoCommon
 {
 namespace
 {
-// TODO: the uniform buffer is combined due to the utility path only having a single
-// set of constants, this isn't ideal (both for the end user, where it's more readable
-// to see 'custom_uniforms' before variables and from Dolphin because the
-// standard uniforms have to be packed with the custom ones
-void GeneratePostProcessUniformOutput(ShaderCode& shader_source, std::string_view block_name,
-                                      std::string_view uniforms)
+// Custom samplers are bound after the eight samplers the emulated GX pipeline uses.
+constexpr std::size_t FIRST_CUSTOM_SAMPLER = 8;
+
+// ---------------------------------------------------------------------------------------------
+// Post processing wrapper
+//
+// The utility pipeline only has one constant buffer, so the standard post processing values and
+// the asset's own uniforms share a block. Each scalar is padded out to a full vec4 slot (std140).
+
+struct PaddedScalar
 {
-  shader_source.Write("UBO_BINDING(std140, 1) uniform {} {{\n", block_name);
-  shader_source.Write("\tvec4 source_resolution;\n");
-  shader_source.Write("\tvec4 target_resolution;\n");
-  shader_source.Write("\tvec4 window_resolution;\n");
-  shader_source.Write("\tvec4 source_region;\n");
-  shader_source.Write("\tint source_layer;\n");
-  shader_source.Write("\tint source_layer_pad1;\n");
-  shader_source.Write("\tint source_layer_pad2;\n");
-  shader_source.Write("\tint source_layer_pad3;\n");
-  shader_source.Write("\tuint time;\n");
-  shader_source.Write("\tuint time_pad1;\n");
-  shader_source.Write("\tuint time_pad2;\n");
-  shader_source.Write("\tuint time_pad3;\n");
-  shader_source.Write("\tint graphics_api;\n");
-  shader_source.Write("\tint graphics_api_pad1;\n");
-  shader_source.Write("\tint graphics_api_pad2;\n");
-  shader_source.Write("\tint graphics_api_pad3;\n");
-  shader_source.Write("\tuint efb_scale;\n");
-  shader_source.Write("\tuint efb_scale_pad1;\n");
-  shader_source.Write("\tuint efb_scale_pad2;\n");
-  shader_source.Write("\tuint efb_scale_pad3;\n");
-  if (!uniforms.empty())
+  std::string_view type;
+  std::string_view name;
+};
+constexpr std::array<std::string_view, 4> VEC4_UNIFORMS = {"source_resolution", "target_resolution",
+                                                           "window_resolution", "source_region"};
+constexpr std::array<PaddedScalar, 4> SCALAR_UNIFORMS = {{
+    {"int", "source_layer"},
+    {"uint", "time"},
+    {"int", "graphics_api"},
+    {"uint", "efb_scale"},
+}};
+
+void AppendUniformBlock(std::string& out, std::string_view block, std::string_view custom)
+{
+  auto sink = std::back_inserter(out);
+  fmt::format_to(sink, "UBO_BINDING(std140, 1) uniform {} {{\n", block);
+  for (const std::string_view name : VEC4_UNIFORMS)
+    fmt::format_to(sink, "\tvec4 {};\n", name);
+  for (const PaddedScalar& scalar : SCALAR_UNIFORMS)
   {
-    shader_source.Write("{}", uniforms);
+    fmt::format_to(sink, "\t{} {};\n", scalar.type, scalar.name);
+    for (int pad = 1; pad <= 3; ++pad)
+      fmt::format_to(sink, "\t{} {}_pad{};\n", scalar.type, scalar.name, pad);
   }
-  shader_source.Write("}};\n");
+  out += custom;
+  out += "};\n";
 }
 
-// TODO: move this to a more standard post processing file
-// once post processing has been cleaned up
-void GeneratePostProcessingVertexShader(ShaderCode& shader_source,
-                                        const CustomVertexContents& custom_contents)
+// A struct whose members are given one per line, followed by a blank line.
+void AppendStruct(std::string& out, std::string_view name, std::string_view members)
 {
-  // Note: if blocks are the same, they need to match for the OpenGL backend
-  GeneratePostProcessUniformOutput(shader_source, "PSBlock", custom_contents.uniforms);
+  out += "struct ";
+  out += name;
+  out += "\n{\n";
+  out += members;
+  out += "};\n\n";
+}
 
-  // Define some defines that are shared with custom draw shaders,
-  // so that a common shader code could possibly be used in both
-  shader_source.Write("#define HAS_COLOR_0 0\n");
-  shader_source.Write("#define HAS_COLOR_1 0\n");
-  shader_source.Write("#define HAS_NORMAL 0\n");
-  shader_source.Write("#define HAS_BINORMAL 0\n");
-  shader_source.Write("#define HAS_TANGENT 0\n");
-  shader_source.Write("#define HAS_TEXTURE_COORD_0 1\n");
-  for (u32 i = 1; i < 8; i++)
+// `fallback` is the stage's default entry point, used when the asset brings no code.
+void AppendCustomCode(std::string& out, std::string_view custom, std::string_view fallback)
+{
+  if (custom.empty())
   {
-    shader_source.Write("#define HAS_TEXTURE_COORD_{} 0\n", i);
+    out += fallback;
+    return;
+  }
+  out += custom;
+  out += '\n';
+}
+
+constexpr std::string_view VERTEX_MEMBERS = "\tvec4 position;\n"
+                                            "\tvec3 texture_coord_0;\n";
+
+constexpr std::string_view VS_EMULATED =
+    "void dolphin_process_emulated_vertex(in DolphinVertexInput vertex_input, out "
+    "DolphinVertexOutput vertex_output)\n"
+    "{\n"
+    "\tvertex_output.position = vertex_input.position;\n"
+    "\tvertex_output.texture_coord_0 = vertex_input.texture_coord_0;\n"
+    "}\n";
+
+constexpr std::string_view VS_DEFAULT_ENTRY =
+    "void process_vertex(in DolphinVertexInput vertex_input, out DolphinVertexOutput "
+    "vertex_output)\n"
+    "{\n"
+    "\tdolphin_process_emulated_vertex(vertex_input, vertex_output);\n"
+    "}\n";
+
+// Builds a triangle covering the whole target from gl_VertexID alone. The closing brace is
+// appended by the caller after the optional Vulkan flip.
+constexpr std::string_view VS_MAIN =
+    "void main()\n"
+    "{\n"
+    "\tDolphinVertexInput vertex_input;\n"
+    "\tvec3 vert = vec3(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2), 0.0f);\n"
+    "\tvertex_input.position = vec4(vert.xy * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), "
+    "0.0f, 1.0f);\n"
+    "\tvertex_input.texture_coord_0 = vec3(source_region.xy + (source_region.zw * vert.xy), "
+    "0.0f);\n"
+    "\tDolphinVertexOutput vertex_output;\n"
+    "\tprocess_vertex(vertex_input, vertex_output);\n"
+    "\tgl_Position = vertex_output.position;\n"
+    "\tv_tex0 = vertex_output.texture_coord_0;\n";
+
+constexpr std::array<std::string_view, 5> ABSENT_ATTRIBUTES = {"COLOR_0", "COLOR_1", "NORMAL",
+                                                               "BINORMAL", "TANGENT"};
+
+std::string PostProcessVertexSource(const CustomVertexContents& custom)
+{
+  std::string out;
+  // OpenGL requires the block to be declared identically in both stages.
+  AppendUniformBlock(out, "PSBlock", custom.uniforms);
+
+  // The same attribute defines custom draw shaders get, so one source can serve both.
+  for (const std::string_view attribute : ABSENT_ATTRIBUTES)
+    fmt::format_to(std::back_inserter(out), "#define HAS_{} 0\n", attribute);
+  for (u32 coord = 0; coord < 8; ++coord)
+  {
+    fmt::format_to(std::back_inserter(out), "#define HAS_TEXTURE_COORD_{} {}\n", coord,
+                   coord == 0 ? 1 : 0);
   }
 
-  // Write the common structs, might want to consider
-  // moving these to another location?
-  shader_source.Write("struct DolphinVertexInput\n");
-  shader_source.Write("{{\n");
-  shader_source.Write("\tvec4 position;\n");
-  shader_source.Write("\tvec3 texture_coord_0;\n");
-  shader_source.Write("}};\n\n");
-
-  shader_source.Write("struct DolphinVertexOutput\n");
-  shader_source.Write("{{\n");
-  shader_source.Write("\tvec4 position;\n");
-  shader_source.Write("\tvec3 texture_coord_0;\n");
-  shader_source.Write("}};\n\n");
-
-  constexpr std::string_view emulated_vertex_definition =
-      "void dolphin_process_emulated_vertex(in DolphinVertexInput vertex_input, out "
-      "DolphinVertexOutput vertex_output)";
-  shader_source.Write("{}\n", emulated_vertex_definition);
-  shader_source.Write("{{\n");
-  shader_source.Write("\tvertex_output.position = vertex_input.position;\n");
-  shader_source.Write("\tvertex_output.texture_coord_0 = vertex_input.texture_coord_0;\n");
-  shader_source.Write("}}\n");
-
-  if (custom_contents.shader.empty())
-  {
-    shader_source.Write(
-        "void process_vertex(in DolphinVertexInput vertex_input, out DolphinVertexOutput "
-        "vertex_output)\n");
-    shader_source.Write("{{\n");
-
-    shader_source.Write("\tdolphin_process_emulated_vertex(vertex_input, vertex_output);\n");
-
-    shader_source.Write("}}\n");
-  }
-  else
-  {
-    shader_source.Write("{}\n", custom_contents.shader);
-  }
+  AppendStruct(out, "DolphinVertexInput", VERTEX_MEMBERS);
+  AppendStruct(out, "DolphinVertexOutput", VERTEX_MEMBERS);
+  out += VS_EMULATED;
+  AppendCustomCode(out, custom.shader, VS_DEFAULT_ENTRY);
 
   if (g_backend_info.bSupportsGeometryShaders)
-  {
-    shader_source.Write("VARYING_LOCATION(0) out VertexData {{\n");
-    shader_source.Write("\tvec3 v_tex0;\n");
-    shader_source.Write("}};\n");
-  }
+    out += "VARYING_LOCATION(0) out VertexData {\n\tvec3 v_tex0;\n};\n";
   else
-  {
-    shader_source.Write("VARYING_LOCATION(0) out vec3 v_tex0;\n");
-  }
+    out += "VARYING_LOCATION(0) out vec3 v_tex0;\n";
 
-  shader_source.Write("void main()\n");
-  shader_source.Write("{{\n");
-  shader_source.Write("\tDolphinVertexInput vertex_input;\n");
-  shader_source.Write("\tvec3 vert = vec3(float((gl_VertexID << 1) & 2), "
-                      "float(gl_VertexID & 2), 0.0f);\n");
-  shader_source.Write("\tvertex_input.position = vec4(vert.xy * "
-                      "float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n");
-  shader_source.Write("\tvertex_input.texture_coord_0 = vec3(source_region.xy + "
-                      "(source_region.zw * vert.xy), 0.0f);\n");
-  shader_source.Write("\tDolphinVertexOutput vertex_output;\n");
-  shader_source.Write("\tprocess_vertex(vertex_input, vertex_output);\n");
-  shader_source.Write("\tgl_Position = vertex_output.position;\n");
-  shader_source.Write("\tv_tex0 = vertex_output.texture_coord_0;\n");
-
-  // NDC space is flipped in Vulkan
+  out += VS_MAIN;
+  // Vulkan's clip space has Y pointing down.
   if (g_backend_info.api_type == APIType::Vulkan)
-  {
-    shader_source.Write("\tgl_Position.y = -gl_Position.y;\n");
-  }
-
-  shader_source.Write("}}\n");
+    out += "\tgl_Position.y = -gl_Position.y;\n";
+  out += "}\n";
+  return out;
 }
 
-void GeneratePostProcessingPixelShader(ShaderCode& shader_source,
-                                       const CustomPixelContents& custom_contents)
-{
-  GeneratePostProcessUniformOutput(shader_source, "PSBlock", custom_contents.uniforms);
+constexpr std::string_view PS_EMULATED =
+    "void dolphin_process_emulated_fragment(in DolphinFragmentInput frag_input, out "
+    "DolphinFragmentOutput frag_output)\n"
+    "{\n"
+    "\tfrag_output.main = texture(samp0, frag_input.tex0);\n"
+    "}\n";
 
-  shader_source.Write("SAMPLER_BINDING(0) uniform sampler2DArray samp0;\n");
+constexpr std::string_view PS_DEFAULT_ENTRY =
+    "void process_fragment(in DolphinFragmentInput frag_input, out DolphinFragmentOutput "
+    "frag_output)\n"
+    "{\n"
+    "\tdolphin_process_emulated_fragment(frag_input, frag_output);\n"
+    "}\n";
+
+constexpr std::string_view PS_MAIN = "void main()\n"
+                                     "{\n"
+                                     "\tDolphinFragmentInput frag_input;\n"
+                                     "\tfrag_input.tex0 = v_tex0;\n"
+                                     "\tDolphinFragmentOutput frag_output;\n"
+                                     "\tprocess_fragment(frag_input, frag_output);\n"
+                                     "\tocol0 = frag_output.main;\n"
+                                     "}\n";
+
+std::string PostProcessPixelSource(const CustomPixelContents& custom)
+{
+  std::string out;
+  AppendUniformBlock(out, "PSBlock", custom.uniforms);
+  out += "SAMPLER_BINDING(0) uniform sampler2DArray samp0;\n";
 
   if (g_backend_info.bSupportsGeometryShaders)
-  {
-    shader_source.Write("VARYING_LOCATION(0) in VertexData {{\n");
-    shader_source.Write("\tvec3 v_tex0;\n");
-    shader_source.Write("}};\n");
-  }
+    out += "VARYING_LOCATION(0) in VertexData {\n\tvec3 v_tex0;\n};\n";
   else
-  {
-    shader_source.Write("VARYING_LOCATION(0) in float3 v_tex0;\n");
-  }
+    out += "VARYING_LOCATION(0) in float3 v_tex0;\n";
 
-  shader_source.Write("FRAGMENT_OUTPUT_LOCATION(0) out vec4 ocol0;\n");
-
-  shader_source.Write("struct DolphinFragmentInput\n");
-  shader_source.Write("{{\n");
-  for (u32 i = 0; i < 1; i++)
-  {
-    shader_source.Write("\tvec3 tex{};\n", i);
-  }
-  shader_source.Write("\n");
-
-  shader_source.Write("}};\n\n");
-
-  shader_source.Write("struct DolphinFragmentOutput\n");
-  shader_source.Write("{{\n");
-  shader_source.Write("\tvec4 main;\n");
-  shader_source.Write("}};\n\n");
-
-  constexpr std::string_view emulated_fragment_definition =
-      "void dolphin_process_emulated_fragment(in DolphinFragmentInput frag_input, out "
-      "DolphinFragmentOutput frag_output)";
-  shader_source.Write("{}\n", emulated_fragment_definition);
-  shader_source.Write("{{\n");
-  shader_source.Write("\tfrag_output.main = texture(samp0, frag_input.tex0);\n");
-  shader_source.Write("}}\n");
-
-  if (custom_contents.shader.empty())
-  {
-    shader_source.Write(
-        "void process_fragment(in DolphinFragmentInput frag_input, out DolphinFragmentOutput "
-        "frag_output)\n");
-    shader_source.Write("{{\n");
-
-    shader_source.Write("\tdolphin_process_emulated_fragment(frag_input, frag_output);\n");
-
-    shader_source.Write("}}\n");
-  }
-  else
-  {
-    shader_source.Write("{}\n", custom_contents.shader);
-  }
-
-  shader_source.Write("void main()\n");
-  shader_source.Write("{{\n");
-  shader_source.Write("\tDolphinFragmentInput frag_input;\n");
-  shader_source.Write("\tfrag_input.tex0 = v_tex0;\n");
-  shader_source.Write("\tDolphinFragmentOutput frag_output;\n");
-  shader_source.Write("\tprocess_fragment(frag_input, frag_output);\n");
-  shader_source.Write("\tocol0 = frag_output.main;\n");
-  shader_source.Write("}}\n");
+  out += "FRAGMENT_OUTPUT_LOCATION(0) out vec4 ocol0;\n";
+  // The input struct has a trailing blank line inside it.
+  AppendStruct(out, "DolphinFragmentInput", "\tvec3 tex0;\n\n");
+  AppendStruct(out, "DolphinFragmentOutput", "\tvec4 main;\n");
+  out += PS_EMULATED;
+  AppendCustomCode(out, custom.shader, PS_DEFAULT_ENTRY);
+  out += PS_MAIN;
+  return out;
 }
 
-std::unique_ptr<AbstractShader> CompileGeometryShader(GeometryShaderUid* uid, APIType api_type,
-                                                      ShaderHostConfig host_config)
-{
-  if (!uid)
-  {
-    return g_gfx->CreateShaderFromSource(
-        ShaderStage::Geometry, FramebufferShaderGen::GeneratePassthroughGeometryShader(1, 0),
-        nullptr, "Custom Post Processing Geometry Shader");
-  }
+// ---------------------------------------------------------------------------------------------
+// Asset code, shared by both stages
 
-  const ShaderCode source_code =
-      GenerateGeometryShaderCode(api_type, host_config, uid->GetUidData());
-  return g_gfx->CreateShaderFromSource(ShaderStage::Geometry, source_code.GetBuffer(), nullptr,
+std::string_view SamplerTypeName(AbstractTextureType type)
+{
+  switch (type)
+  {
+  case AbstractTextureType::Texture_2D:
+    return "sampler2D";
+  case AbstractTextureType::Texture_2DArray:
+    return "sampler2DArray";
+  case AbstractTextureType::Texture_CubeMap:
+    return "samplerCube";
+  }
+  return {};
+}
+
+// The asset's code for one stage, preceded by the material's defines and the sampler
+// declarations. HAS_<name> is defined for each sampler the material binds a texture to.
+std::string CustomStageBody(std::string_view defines, const RasterSurfaceShaderData& asset,
+                            const std::string& stage_source)
+{
+  std::string out(defines);
+  auto sink = std::back_inserter(out);
+  for (std::size_t index = 0; index < asset.samplers.size(); ++index)
+  {
+    const auto& sampler = asset.samplers[index];
+    fmt::format_to(sink, "SAMPLER_BINDING({}) uniform {} samp_{};\n", FIRST_CUSTOM_SAMPLER + index,
+                   SamplerTypeName(sampler.type), sampler.name);
+    fmt::format_to(sink, "#if HAS_SAMPLER_{} == 1\n#define HAS_{} 1\n#endif\n\n", index,
+                   sampler.name);
+  }
+  out += '\n';
+  out += ReplaceAll(stage_source, "\r\n", "\n");
+  return out;
+}
+
+// Declarations for the asset's uniform properties.
+std::string CustomUniforms(const RasterSurfaceShaderData& asset)
+{
+  ShaderCode code;
+  for (const ShaderProperty& property : asset.uniform_properties)
+    ShaderProperty::WriteAsShaderCode(code, property);
+  std::string out = code.GetBuffer();
+  if (!asset.uniform_properties.empty())
+    out += "\n\n";
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage creation. A null uid selects the post processing wrapper.
+
+std::unique_ptr<AbstractShader> BuildGeometryShader(GeometryShaderUid* uid, APIType api,
+                                                    const ShaderHostConfig& host)
+{
+  if (uid == nullptr)
+  {
+    std::string passthrough = FramebufferShaderGen::GeneratePassthroughGeometryShader(1, 0);
+    return g_gfx->CreateShaderFromSource(ShaderStage::Geometry, std::move(passthrough), nullptr,
+                                         "Custom Post Processing Geometry Shader");
+  }
+  const ShaderCode code = GenerateGeometryShaderCode(api, host, uid->GetUidData());
+  return g_gfx->CreateShaderFromSource(ShaderStage::Geometry, code.GetBuffer(), nullptr,
                                        fmt::format("Geometry shader: {}", *uid->GetUidData()));
 }
 
-std::unique_ptr<AbstractShader>
-CompilePixelShader(PixelShaderUid* uid, std::string_view preprocessor_settings, APIType api_type,
-                   const ShaderHostConfig& host_config, RasterSurfaceShaderData* shader_data)
+std::unique_ptr<AbstractShader> BuildPixelShader(PixelShaderUid* uid, std::string_view defines,
+                                                 APIType api, const ShaderHostConfig& host,
+                                                 const RasterSurfaceShaderData& asset)
 {
-  ShaderCode shader_code;
+  const std::string body = CustomStageBody(defines, asset, asset.pixel_source);
+  const std::string uniforms = CustomUniforms(asset);
+  const CustomPixelContents contents{.shader = body, .uniforms = uniforms};
 
-  // Write any preprocessor values that were passed in
-  shader_code.Write("{}", preprocessor_settings);
-
-  // TODO: in the future we could dynamically determine the amount of samplers
-  // available, for now just hardcode to start at 8 (the first non game
-  // sampler index available)
-  const std::size_t custom_sampler_index_offset = 8;
-  for (std::size_t i = 0; i < shader_data->samplers.size(); i++)
-  {
-    const auto& sampler = shader_data->samplers[i];
-    std::string_view sampler_type;
-    switch (sampler.type)
-    {
-    case AbstractTextureType::Texture_2D:
-      sampler_type = "sampler2D";
-      break;
-    case AbstractTextureType::Texture_2DArray:
-      sampler_type = "sampler2DArray";
-      break;
-    case AbstractTextureType::Texture_CubeMap:
-      sampler_type = "samplerCube";
-      break;
-    };
-    shader_code.Write("SAMPLER_BINDING({}) uniform {} samp_{};\n", custom_sampler_index_offset + i,
-                      sampler_type, sampler.name);
-
-    // Sampler usage is passed in from the material
-    // Write a new preprocessor value with the sampler name
-    // for easier code in the shader
-    shader_code.Write("#if HAS_SAMPLER_{} == 1\n", i);
-    shader_code.Write("#define HAS_{} 1\n", sampler.name);
-    shader_code.Write("#endif\n");
-
-    shader_code.Write("\n");
-  }
-  shader_code.Write("\n");
-
-  // Now write the custom shader
-  shader_code.Write("{}", ReplaceAll(shader_data->pixel_source, "\r\n", "\n"));
-
-  // Write out the uniform data
-  ShaderCode uniform_code;
-  for (const auto& property : shader_data->uniform_properties)
-  {
-    VideoCommon::ShaderProperty::WriteAsShaderCode(uniform_code, property);
-  }
-  if (!shader_data->uniform_properties.empty())
-    uniform_code.Write("\n\n");
-
-  // Compile the shader
-  CustomPixelContents contents{.shader = shader_code.GetBuffer(),
-                               .uniforms = uniform_code.GetBuffer()};
-
-  ShaderCode source_code;
-  if (uid)
-  {
-    source_code = GeneratePixelShaderCode(api_type, host_config, uid->GetUidData(), contents);
-  }
+  std::string source;
+  if (uid != nullptr)
+    source = GeneratePixelShaderCode(api, host, uid->GetUidData(), contents).GetBuffer();
   else
-  {
-    GeneratePostProcessingPixelShader(source_code, contents);
-  }
-  ShaderIncluder* shader_includer =
-      shader_data->shader_includer ? &*shader_data->shader_includer : nullptr;
-  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), shader_includer,
-                                       "Custom Pixel Shader");
+    source = PostProcessPixelSource(contents);
+  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, std::move(source),
+                                       asset.shader_includer.get(), "Custom Pixel Shader");
 }
 
-std::unique_ptr<AbstractShader>
-CompileVertexShader(VertexShaderUid* uid, std::string_view preprocessor_settings, APIType api_type,
-                    const ShaderHostConfig& host_config, const RasterSurfaceShaderData& shader_data)
+std::unique_ptr<AbstractShader> BuildVertexShader(VertexShaderUid* uid, std::string_view defines,
+                                                  APIType api, const ShaderHostConfig& host,
+                                                  const RasterSurfaceShaderData& asset)
 {
-  ShaderCode shader_code;
+  const std::string body = CustomStageBody(defines, asset, asset.vertex_source);
+  const std::string uniforms = CustomUniforms(asset);
+  const CustomVertexContents contents{.shader = body, .uniforms = uniforms};
 
-  // Write any preprocessor values that were passed in
-  shader_code.Write("{}", preprocessor_settings);
-
-  // TODO: in the future we could dynamically determine the amount of samplers
-  // available, for now just hardcode to start at 8 (the first non game
-  // sampler index available)
-  const std::size_t custom_sampler_index_offset = 8;
-  for (std::size_t i = 0; i < shader_data.samplers.size(); i++)
-  {
-    const auto& sampler = shader_data.samplers[i];
-    std::string_view sampler_type = "";
-    switch (sampler.type)
-    {
-    case AbstractTextureType::Texture_2D:
-      sampler_type = "sampler2D";
-      break;
-    case AbstractTextureType::Texture_2DArray:
-      sampler_type = "sampler2DArray";
-      break;
-    case AbstractTextureType::Texture_CubeMap:
-      sampler_type = "samplerCube";
-      break;
-    };
-    shader_code.Write("SAMPLER_BINDING({}) uniform {} samp_{};\n", custom_sampler_index_offset + i,
-                      sampler_type, sampler.name);
-
-    // Sampler usage is passed in from the material
-    // Write a new preprocessor value with the sampler name
-    // for easier code in the shader
-    shader_code.Write("#if HAS_SAMPLER_{} == 1\n", i);
-    shader_code.Write("#define HAS_{} 1\n", sampler.name);
-    shader_code.Write("#endif\n");
-
-    shader_code.Write("\n");
-  }
-  shader_code.Write("\n");
-
-  // Now write the custom shader
-  shader_code.Write("{}", ReplaceAll(shader_data.vertex_source, "\r\n", "\n"));
-
-  // Write out the uniform data
-  ShaderCode uniform_code;
-  for (const auto& property : shader_data.uniform_properties)
-  {
-    VideoCommon::ShaderProperty::WriteAsShaderCode(uniform_code, property);
-  }
-  if (!shader_data.uniform_properties.empty())
-    uniform_code.Write("\n\n");
-
-  // Compile the shader
-  CustomVertexContents contents{.shader = shader_code.GetBuffer(),
-                                .uniforms = uniform_code.GetBuffer()};
-
-  ShaderCode source_code;
-  if (uid)
-  {
-    source_code = GenerateVertexShaderCode(api_type, host_config, uid->GetUidData(), contents);
-  }
+  std::string source;
+  if (uid != nullptr)
+    source = GenerateVertexShaderCode(api, host, uid->GetUidData(), contents).GetBuffer();
   else
-  {
-    GeneratePostProcessingVertexShader(source_code, contents);
-  }
-  return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer(), nullptr,
+    source = PostProcessVertexSource(contents);
+  return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, std::move(source), nullptr,
                                        "Custom Vertex Shader");
 }
+
+// A shader compiler job that runs a callable on the worker thread; nothing to retrieve.
+template <typename Fn>
+class CallbackJob final : public AsyncShaderCompiler::WorkItem
+{
+public:
+  explicit CallbackJob(Fn fn) : m_fn(std::move(fn)) {}
+  bool Compile() override { return m_fn(); }
+  void Retrieve() override {}
+
+private:
+  Fn m_fn;
+};
 }  // namespace
+
 ShaderResource::ShaderResource(Resource::ResourceContext resource_context,
                                std::optional<GXPipelineUid> pipeline_uid,
                                std::string preprocessor_setting,
                                const ShaderHostConfig& shader_host_config)
-    : Resource(std::move(resource_context)), m_shader_host_config{.bits = shader_host_config.bits},
-      m_uid(std::move(pipeline_uid)), m_preprocessor_settings(std::move(preprocessor_setting))
+    : Resource(std::move(resource_context)), m_host_config{.bits = shader_host_config.bits},
+      m_uid(std::move(pipeline_uid)), m_defines(std::move(preprocessor_setting))
 {
-  m_shader_asset = m_resource_context.asset_cache->CreateAsset<RasterSurfaceShaderAsset>(
-      m_resource_context.primary_asset_id, m_resource_context.asset_library, this);
+  const ResourceContext& ctx = m_resource_context;
+  m_asset = ctx.asset_cache->CreateAsset<RasterSurfaceShaderAsset>(ctx.primary_asset_id,
+                                                                   ctx.asset_library, this);
 }
 
 void ShaderResource::SetHostConfig(const ShaderHostConfig& host_config)
 {
-  m_shader_host_config.bits = host_config.bits;
-}
-
-void ShaderResource::MarkAsPending()
-{
-  m_resource_context.asset_cache->MarkAssetPending(m_shader_asset);
+  m_host_config.bits = host_config.bits;
 }
 
 void ShaderResource::MarkAsActive()
 {
-  m_resource_context.asset_cache->MarkAssetActive(m_shader_asset);
+  m_resource_context.asset_cache->MarkAssetActive(m_asset);
+}
+
+void ShaderResource::MarkAsPending()
+{
+  m_resource_context.asset_cache->MarkAssetPending(m_asset);
 }
 
 AbstractShader* ShaderResource::Data::GetVertexShader() const
 {
-  if (!m_vertex_shader)
-    return nullptr;
-  return m_vertex_shader.get();
+  return m_vs.get();
 }
 
 AbstractShader* ShaderResource::Data::GetPixelShader() const
 {
-  if (!m_pixel_shader)
-    return nullptr;
-  return m_pixel_shader.get();
+  return m_ps.get();
 }
 
 AbstractShader* ShaderResource::Data::GetGeometryShader() const
 {
-  if (!m_geometry_shader)
-    return nullptr;
-  return m_geometry_shader.get();
+  return m_gs.get();
 }
 
 bool ShaderResource::Data::IsCompiled() const
 {
-  return m_vertex_shader && m_pixel_shader && (!m_needs_geometry_shader || m_geometry_shader);
+  const bool gs_ok = m_gs != nullptr || !m_gs_required;
+  return m_vs != nullptr && m_ps != nullptr && gs_ok;
 }
 
 AbstractTextureType ShaderResource::Data::GetTextureType(std::size_t index)
 {
-  // If the data doesn't exist, just pick one...
-  if (!m_shader_data || index >= m_shader_data->samplers.size()) [[unlikely]]
+  if (m_source == nullptr || index >= m_source->samplers.size()) [[unlikely]]
     return AbstractTextureType::Texture_2D;
-
-  return m_shader_data->samplers[index].type;
+  return m_source->samplers[index].type;
 }
 
 void ShaderResource::ResetData()
 {
-  m_load_data = std::make_shared<Data>();
-  m_processing_load_data = false;
+  m_staging = std::make_shared<Data>();
+  m_compile_queued = false;
 }
 
 Resource::TaskComplete ShaderResource::CollectPrimaryData()
 {
-  const auto shader_data = m_shader_asset->GetData();
-  if (!shader_data) [[unlikely]]
-  {
-    return Resource::TaskComplete::No;
-  }
-  m_load_data->m_shader_data = shader_data;
+  std::shared_ptr<RasterSurfaceShaderData> source = m_asset->GetData();
+  if (source == nullptr) [[unlikely]]
+    return TaskComplete::No;
+  m_staging->m_source = std::move(source);
+  return TaskComplete::Yes;
+}
 
-  return Resource::TaskComplete::Yes;
+void ShaderResource::CompileStages(Data& data, GXPipelineUid* uid, const ShaderHostConfig& host,
+                                   std::string_view defines)
+{
+  const APIType api = g_backend_info.api_type;
+  const RasterSurfaceShaderData& asset = *data.m_source;
+
+  if (uid == nullptr)
+  {
+    // A full screen pass only needs a geometry stage to expand stereo layers.
+    data.m_gs_required = host.backend_geometry_shaders && host.stereo;
+    if (data.m_gs_required)
+      data.m_gs = BuildGeometryShader(nullptr, api, host);
+    data.m_ps = BuildPixelShader(nullptr, defines, api, host, asset);
+    data.m_vs = BuildVertexShader(nullptr, defines, api, host, asset);
+    return;
+  }
+
+  GXPipelineUid patched = ApplyDriverBugs(*uid);
+  ClearUnusedPixelShaderUidBits(api, host, &patched.ps_uid);
+  data.m_gs_required =
+      host.backend_geometry_shaders && !patched.gs_uid.GetUidData()->IsPassthrough();
+  if (data.m_gs_required)
+    data.m_gs = BuildGeometryShader(&patched.gs_uid, api, host);
+  data.m_ps = BuildPixelShader(&patched.ps_uid, defines, api, host, asset);
+  data.m_vs = BuildVertexShader(&patched.vs_uid, defines, api, host, asset);
 }
 
 Resource::TaskComplete ShaderResource::ProcessData()
 {
-  class WorkItem final : public VideoCommon::AsyncShaderCompiler::WorkItem
+  if (!m_compile_queued)
   {
-  public:
-    WorkItem(std::shared_ptr<ShaderResource::Data> resource_data, VideoCommon::GXPipelineUid* uid,
-             u32 shader_bits, std::string_view preprocessor_settings)
-        : m_resource_data(std::move(resource_data)), m_uid(uid), m_shader_bits(shader_bits),
-          m_preprocessor_settings(preprocessor_settings)
-    {
-    }
-
-    bool Compile() override
-    {
-      const ShaderHostConfig shader_host_config{.bits = m_shader_bits};
-      if (m_uid)
-      {
-        // Draw based shader
-        auto actual_uid = ApplyDriverBugs(*m_uid);
-
-        ClearUnusedPixelShaderUidBits(g_backend_info.api_type, shader_host_config,
-                                      &actual_uid.ps_uid);
-        m_resource_data->m_needs_geometry_shader = shader_host_config.backend_geometry_shaders &&
-                                                   !actual_uid.gs_uid.GetUidData()->IsPassthrough();
-
-        if (m_resource_data->m_needs_geometry_shader)
-        {
-          m_resource_data->m_geometry_shader = CompileGeometryShader(
-              &actual_uid.gs_uid, g_backend_info.api_type, shader_host_config);
-        }
-        m_resource_data->m_pixel_shader =
-            CompilePixelShader(&actual_uid.ps_uid, m_preprocessor_settings, g_backend_info.api_type,
-                               shader_host_config, m_resource_data->m_shader_data.get());
-        m_resource_data->m_vertex_shader = CompileVertexShader(
-            &actual_uid.vs_uid, m_preprocessor_settings, g_backend_info.api_type,
-            shader_host_config, *m_resource_data->m_shader_data);
-      }
-      else
-      {
-        // Post processing based shader
-
-        m_resource_data->m_needs_geometry_shader =
-            shader_host_config.backend_geometry_shaders && shader_host_config.stereo;
-        if (m_resource_data->m_needs_geometry_shader)
-        {
-          m_resource_data->m_geometry_shader =
-              CompileGeometryShader(nullptr, g_backend_info.api_type, shader_host_config);
-        }
-        m_resource_data->m_pixel_shader =
-            CompilePixelShader(nullptr, m_preprocessor_settings, g_backend_info.api_type,
-                               shader_host_config, m_resource_data->m_shader_data.get());
-        m_resource_data->m_vertex_shader =
-            CompileVertexShader(nullptr, m_preprocessor_settings, g_backend_info.api_type,
-                                shader_host_config, *m_resource_data->m_shader_data);
-      }
-      m_resource_data->m_processing_finished = true;
+    // The compile reads m_defines through a view, and the uid in place; both live as long as
+    // this resource.
+    auto compile = [data = m_staging, uid = m_uid ? &*m_uid : nullptr, bits = m_host_config.bits,
+                    defines = std::string_view(m_defines)] {
+      CompileStages(*data, uid, ShaderHostConfig{.bits = bits}, defines);
+      data->m_compile_done = true;
       return true;
-    }
-    void Retrieve() override {}
-
-  private:
-    std::shared_ptr<ShaderResource::Data> m_resource_data;
-    VideoCommon::GXPipelineUid* m_uid;
-    u32 m_shader_bits;
-    std::string_view m_preprocessor_settings;
-  };
-
-  if (!m_processing_load_data)
-  {
-    std::string_view preprocessor_settings = m_preprocessor_settings;
-    auto wi = m_resource_context.shader_compiler->CreateWorkItem<WorkItem>(
-        m_load_data, m_uid ? &*m_uid : nullptr, m_shader_host_config.bits, preprocessor_settings);
-
-    // We don't need priority, that is already handled by the resource system
-    m_resource_context.shader_compiler->QueueWorkItem(std::move(wi), 0);
-    m_processing_load_data = true;
+    };
+    AsyncShaderCompiler& compiler = *m_resource_context.shader_compiler;
+    // Ordering between resources is already decided by the resource system.
+    compiler.QueueWorkItem(compiler.CreateWorkItem<CallbackJob<decltype(compile)>>(compile), 0);
+    m_compile_queued = true;
   }
 
-  if (!m_load_data->m_processing_finished)
-    return Resource::TaskComplete::No;
+  if (!m_staging->m_compile_done)
+    return TaskComplete::No;
+  if (!m_staging->IsCompiled())
+    return TaskComplete::Error;
 
-  if (!m_load_data->IsCompiled())
-    return Resource::TaskComplete::Error;
-
-  std::swap(m_current_data, m_load_data);
-  return Resource::TaskComplete::Yes;
+  m_live.swap(m_staging);
+  return TaskComplete::Yes;
 }
 }  // namespace VideoCommon

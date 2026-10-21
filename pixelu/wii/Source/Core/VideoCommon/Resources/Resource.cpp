@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/Resource.h"
 
@@ -15,115 +14,102 @@ Resource::Resource(ResourceContext resource_context)
 void Resource::Process()
 {
   MarkAsActive();
-
-  if (m_data_processed == TaskComplete::Error)
-    return;
-
-  ProcessCurrentTask();
+  if (m_data_processed != TaskComplete::Error)
+    Advance();
 }
 
-void Resource::ProcessCurrentTask()
+void Resource::Advance()
 {
-  Task next_task = m_current_task;
-  TaskComplete task_complete = TaskComplete::No;
-  switch (m_current_task)
+  for (;;)
   {
-  case Task::ReloadData:
-    ResetData();
-    task_complete = TaskComplete::Yes;
-    next_task = Task::CollectPrimaryData;
-    break;
-  case Task::CollectPrimaryData:
-    task_complete = CollectPrimaryData();
-    next_task = Task::CollectDependencyData;
-    if (task_complete == TaskComplete::No)
-      MarkAsPending();
-    break;
-  case Task::CollectDependencyData:
-    task_complete = CollectDependencyData();
-    next_task = Task::ProcessData;
-    break;
-  case Task::ProcessData:
-    task_complete = ProcessData();
-    next_task = Task::DataAvailable;
-    break;
-  case Task::DataAvailable:
-    // Early out, we're already at our end state
-    return;
-  default:
-    ERROR_LOG_FMT(VIDEO, "Unknown task '{}' for resource '{}'", static_cast<int>(m_current_task),
-                  m_resource_context.primary_asset_id);
-    return;
-  };
+    TaskComplete outcome;
+    Step following;
+    switch (m_step)
+    {
+    case Step::Reset:
+      ResetData();
+      outcome = TaskComplete::Yes;
+      following = Step::CollectPrimary;
+      break;
+    case Step::CollectPrimary:
+      outcome = CollectPrimaryData();
+      following = Step::CollectDependencies;
+      // Still waiting on the asset: ask for it to be loaded sooner.
+      if (outcome == TaskComplete::No)
+        MarkAsPending();
+      break;
+    case Step::CollectDependencies:
+      outcome = CollectDependencyData();
+      following = Step::Process;
+      break;
+    case Step::Process:
+      outcome = ProcessData();
+      following = Step::Done;
+      break;
+    case Step::Done:
+      return;
+    default:
+      ERROR_LOG_FMT(VIDEO, "Unknown task '{}' for resource '{}'", static_cast<int>(m_step),
+                    m_resource_context.primary_asset_id);
+      return;
+    }
 
-  if (task_complete == Resource::TaskComplete::Yes)
-  {
-    m_current_task = next_task;
-    if (next_task == Resource::Task::DataAvailable)
+    if (outcome == TaskComplete::No)
+      return;  // try the same step again next time
+    if (outcome == TaskComplete::Error)
     {
-      m_data_processed = task_complete;
+      // Stays failed until the asset changes.
+      m_data_processed = TaskComplete::Error;
+      return;
     }
-    else
+
+    m_step = following;
+    if (m_step == Step::Done)
     {
-      // No need to wait for the next resource request
-      // process the new task immediately
-      ProcessCurrentTask();
+      m_data_processed = TaskComplete::Yes;
+      return;
     }
-  }
-  else if (task_complete == Resource::TaskComplete::Error)
-  {
-    // If we failed our task due to an error,
-    // we can't service this resource request,
-    // wait for a reload and mark the whole
-    // data processing as an error
-    m_data_processed = task_complete;
   }
 }
 
-void Resource::NotifyAssetChanged(bool has_error)
+void Resource::Restart(bool failed)
 {
-  m_data_processed = has_error ? TaskComplete::Error : TaskComplete::No;
-  m_current_task = Task::ReloadData;
-
-  for (Resource* reference : m_references)
-  {
-    reference->NotifyAssetChanged(has_error);
-  }
+  m_data_processed = failed ? TaskComplete::Error : TaskComplete::No;
+  m_step = Step::Reset;
+  for (Resource* dependent : m_dependents)
+    dependent->Restart(failed);
 }
 
-void Resource::NotifyAssetUnloaded()
+void Resource::PropagateUnload()
 {
   OnUnloadRequested();
-
-  for (Resource* reference : m_references)
-  {
-    reference->NotifyAssetUnloaded();
-  }
+  for (Resource* dependent : m_dependents)
+    dependent->PropagateUnload();
 }
 
 void Resource::AddReference(Resource* reference)
 {
-  m_references.insert(reference);
+  m_dependents.insert(reference);
 }
 
 void Resource::RemoveReference(Resource* reference)
 {
-  m_references.erase(reference);
+  m_dependents.erase(reference);
 }
 
 void Resource::NotifyAssetLoadSuccess()
 {
-  NotifyAssetChanged(false);
+  Restart(false);
 }
 
 void Resource::NotifyAssetLoadFailed()
 {
-  NotifyAssetChanged(true);
+  Restart(true);
 }
 
 void Resource::AssetUnloaded()
 {
-  NotifyAssetUnloaded();
+  PropagateUnload();
 }
 
 void Resource::OnUnloadRequested()

@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@
 
 namespace VideoCommon
 {
+// Uploads a texture asset to a GPU texture (taken from the shared texture pool) and keeps the
+// sampler settings that came with it.
 class TextureAndSamplerResource final : public Resource
 {
 public:
@@ -31,6 +32,7 @@ public:
     TextureConfig m_config;
   };
 
+  // The most recently uploaded texture, or null before the first upload completes.
   const std::shared_ptr<Data>& GetData() const;
 
 private:
@@ -40,10 +42,11 @@ private:
 
   void OnUnloadRequested() override;
 
-  // Note: asset cache owns the asset, we access as a reference
-  TextureAndSamplerAsset* m_texture_and_sampler_asset = nullptr;
+  // Owned by the asset cache.
+  TextureAndSamplerAsset* m_asset = nullptr;
 
-  std::shared_ptr<Data> m_current_data;
-  std::shared_ptr<Data> m_load_data;
+  // m_live is what callers see; m_staging is being built and replaces it once uploaded.
+  std::shared_ptr<Data> m_live;
+  std::shared_ptr<Data> m_staging;
 };
 }  // namespace VideoCommon

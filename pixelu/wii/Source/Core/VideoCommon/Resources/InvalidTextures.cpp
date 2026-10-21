@@ -1,58 +1,55 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/InvalidTextures.h"
+
+#include <array>
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/TextureConfig.h"
 
 namespace VideoCommon
 {
+namespace
+{
+using Pixel = std::array<u8, 4>;
+
+constexpr Pixel CLEAR{0, 0, 0, 0};
+constexpr Pixel MAGENTA{255, 0, 255, 255};
+
+// Creates a 1x1 RGBA8 texture with `layers` layers, each filled with `pixel`.
+std::unique_ptr<AbstractTexture> SolidTexture(AbstractTextureType type, u32 layers,
+                                              const Pixel& pixel, std::string_view name)
+{
+  const TextureConfig config(1, 1, 1, layers, 1, AbstractTextureFormat::RGBA8, 0, type);
+  std::unique_ptr<AbstractTexture> texture = g_gfx->CreateTexture(config, name);
+  for (u32 layer = 0; layer < layers; ++layer)
+    texture->Load(0, 1, 1, 1, pixel.data(), pixel.size(), layer);
+  return texture;
+}
+}  // namespace
+
 std::unique_ptr<AbstractTexture> CreateInvalidTransparentTexture()
 {
-  const TextureConfig tex_config{
-      1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, 0, AbstractTextureType::Texture_2D};
-  auto texture = g_gfx->CreateTexture(tex_config, "Invalid Transparent Texture");
-  const std::array<u8, 4> pixel{0, 0, 0, 0};
-  texture->Load(0, 1, 1, 1, pixel.data(), pixel.size());
-  return texture;
+  return SolidTexture(AbstractTextureType::Texture_2D, 1, CLEAR, "Invalid Transparent Texture");
 }
 
 std::unique_ptr<AbstractTexture> CreateInvalidColorTexture()
 {
-  const TextureConfig tex_config{
-      1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, 0, AbstractTextureType::Texture_2D};
-  auto texture = g_gfx->CreateTexture(tex_config, "Invalid Color Texture");
-  const std::array<u8, 4> pixel{255, 0, 255, 255};
-  texture->Load(0, 1, 1, 1, pixel.data(), pixel.size());
-  return texture;
+  return SolidTexture(AbstractTextureType::Texture_2D, 1, MAGENTA, "Invalid Color Texture");
 }
 
 std::unique_ptr<AbstractTexture> CreateInvalidCubemapTexture()
 {
 #ifdef __APPLE__
-  // TODO: figure out cube map oddness on Apple (specifically Metal)
+  // Cube maps misbehave on Metal; callers cope with a missing texture.
   return nullptr;
 #else
-  const TextureConfig tex_config{
-      1, 1, 1, 6, 1, AbstractTextureFormat::RGBA8, 0, AbstractTextureType::Texture_CubeMap};
-  auto texture = g_gfx->CreateTexture(tex_config, "Invalid Cubemap Texture");
-  const std::array<u8, 4> pixel{255, 0, 255, 255};
-  for (u32 i = 0; i < tex_config.layers; i++)
-  {
-    texture->Load(0, tex_config.width, tex_config.height, 1, pixel.data(), pixel.size(), i);
-  }
-  return texture;
+  return SolidTexture(AbstractTextureType::Texture_CubeMap, 6, MAGENTA, "Invalid Cubemap Texture");
 #endif
 }
 
 std::unique_ptr<AbstractTexture> CreateInvalidArrayTexture()
 {
-  const TextureConfig tex_config{
-      1, 1, 1, 1, 1, AbstractTextureFormat::RGBA8, 0, AbstractTextureType::Texture_2DArray};
-  auto texture = g_gfx->CreateTexture(tex_config, "Invalid Array Texture");
-  const std::array<u8, 4> pixel{255, 0, 255, 255};
-  texture->Load(0, 1, 1, 1, pixel.data(), pixel.size());
-  return texture;
+  return SolidTexture(AbstractTextureType::Texture_2DArray, 1, MAGENTA, "Invalid Array Texture");
 }
 }  // namespace VideoCommon

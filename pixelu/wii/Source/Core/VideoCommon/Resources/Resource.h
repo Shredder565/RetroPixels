@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,13 +18,16 @@ class CustomAssetCache;
 class CustomResourceManager;
 class TexturePool;
 
-// A resource is an abstract object that maintains
-// relationships between assets (ex: a material that references a texture),
-// as well as a standard way of calculating the final data (ex: a material's AbstractPipeline)
+// Runtime object built from one primary asset plus whatever it depends on (a material and
+// its shader and textures, say), producing data the renderer can use directly.
+//
+// Building happens in steps, advanced by Process(): reset, collect the primary asset's data,
+// collect dependencies, process. A step that is not ready yet is retried on the next Process
+// call. Any change to the asset (or to a resource that references this one) starts over.
 class Resource : public AssetListener
 {
 public:
-  // Everything the resource needs to manage itself
+  // Services a resource may use.
   struct ResourceContext
   {
     CustomAssetLibrary::AssetID primary_asset_id;
@@ -49,9 +51,12 @@ public:
     Error,
   };
 
+  // Marks the resource as in use and advances building as far as possible.
   void Process();
+  // Yes once built, Error if building failed (until the asset changes), No otherwise.
   TaskComplete IsDataProcessed() const { return m_data_processed; }
 
+  // `reference` depends on this resource and is reset whenever this one is.
   void AddReference(Resource* reference);
   void RemoveReference(Resource* reference);
 
@@ -62,15 +67,16 @@ protected:
   ResourceContext m_resource_context;
 
 private:
-  void ProcessCurrentTask();
-  void NotifyAssetChanged(bool has_error);
-  void NotifyAssetUnloaded();
+  void Advance();
+  void Restart(bool failed);
+  void PropagateUnload();
 
   void NotifyAssetLoadSuccess() final;
   void NotifyAssetLoadFailed() final;
   void AssetUnloaded() final;
   virtual void OnUnloadRequested();
 
+  // Build steps, overridden by each kind of resource. The defaults succeed immediately.
   friend class CustomResourceManager;
   virtual void ResetData();
   virtual TaskComplete CollectPrimaryData();
@@ -79,16 +85,16 @@ private:
 
   TaskComplete m_data_processed = TaskComplete::No;
 
-  enum class Task
+  enum class Step
   {
-    ReloadData,
-    CollectPrimaryData,
-    CollectDependencyData,
-    ProcessData,
-    DataAvailable,
+    Reset,
+    CollectPrimary,
+    CollectDependencies,
+    Process,
+    Done,
   };
-  Task m_current_task = Task::ReloadData;
+  Step m_step = Step::Reset;
 
-  std::unordered_set<Resource*> m_references;
+  std::unordered_set<Resource*> m_dependents;
 };
 }  // namespace VideoCommon

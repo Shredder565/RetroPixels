@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/TextureDataResource.h"
 
@@ -10,39 +9,41 @@ namespace VideoCommon
 TextureDataResource::TextureDataResource(Resource::ResourceContext resource_context)
     : Resource(std::move(resource_context))
 {
-  m_texture_asset = m_resource_context.asset_cache->CreateAsset<TextureAsset>(
-      m_resource_context.primary_asset_id, m_resource_context.asset_library, this);
+  const ResourceContext& ctx = m_resource_context;
+  m_asset =
+      ctx.asset_cache->CreateAsset<TextureAsset>(ctx.primary_asset_id, ctx.asset_library, this);
 }
 
 std::shared_ptr<CustomTextureData> TextureDataResource::GetData() const
 {
-  return m_current_texture_data;
+  return m_pixels;
 }
 
 CustomAsset::TimeType TextureDataResource::GetLoadTime() const
 {
-  return m_current_time;
-}
-
-Resource::TaskComplete TextureDataResource::CollectPrimaryData()
-{
-  const auto last_load_time = m_texture_asset->GetLastLoadedTime();
-  const auto asset = m_texture_asset->GetData();
-  if (!asset)
-    return Resource::TaskComplete::No;
-
-  m_current_texture_data = asset;
-  m_current_time = last_load_time;
-  return Resource::TaskComplete::Yes;
+  return m_loaded_at;
 }
 
 void TextureDataResource::MarkAsActive()
 {
-  m_resource_context.asset_cache->MarkAssetActive(m_texture_asset);
+  m_resource_context.asset_cache->MarkAssetActive(m_asset);
 }
 
 void TextureDataResource::MarkAsPending()
 {
-  m_resource_context.asset_cache->MarkAssetPending(m_texture_asset);
+  m_resource_context.asset_cache->MarkAssetPending(m_asset);
+}
+
+Resource::TaskComplete TextureDataResource::CollectPrimaryData()
+{
+  // Take the timestamp first so it can never be newer than the data it is paired with.
+  const CustomAsset::TimeType stamp = m_asset->GetLastLoadedTime();
+  std::shared_ptr<CustomTextureData> pixels = m_asset->GetData();
+  if (pixels == nullptr)
+    return TaskComplete::No;
+
+  m_pixels = std::move(pixels);
+  m_loaded_at = stamp;
+  return TaskComplete::Yes;
 }
 }  // namespace VideoCommon

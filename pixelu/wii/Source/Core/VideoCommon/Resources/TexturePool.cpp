@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Resources/TexturePool.h"
 
@@ -12,32 +11,30 @@ namespace VideoCommon
 {
 void TexturePool::Reset()
 {
-  m_cache.clear();
+  m_free.clear();
 }
 
 std::unique_ptr<AbstractTexture> TexturePool::AllocateTexture(const TextureConfig& config)
 {
-  const auto iter = m_cache.find(config);
-  if (iter != m_cache.end())
+  if (const auto pooled = m_free.find(config); pooled != m_free.end())
   {
-    auto entry = std::move(iter->second);
-    m_cache.erase(iter);
-    return entry;
+    std::unique_ptr<AbstractTexture> reused = std::move(pooled->second);
+    m_free.erase(pooled);
+    return reused;
   }
 
-  std::unique_ptr<AbstractTexture> texture = g_gfx->CreateTexture(config);
-  if (!texture)
+  std::unique_ptr<AbstractTexture> created = g_gfx->CreateTexture(config);
+  if (created == nullptr)
   {
     ERROR_LOG_FMT(VIDEO, "Failed to allocate a {}x{}x{} texture", config.width, config.height,
                   config.layers);
-    return {};
   }
-  return texture;
+  return created;
 }
 
 void TexturePool::ReleaseTexture(std::unique_ptr<AbstractTexture> texture)
 {
-  auto config = texture->GetConfig();
-  (void)m_cache.emplace(config, std::move(texture));
+  const TextureConfig config = texture->GetConfig();
+  m_free.emplace(config, std::move(texture));
 }
 }  // namespace VideoCommon
