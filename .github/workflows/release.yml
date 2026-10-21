@@ -12,9 +12,14 @@ name: Release
 # (A workflow on a branch other than the default one can't be run by hand.
 # These tags don't start with "v", so ci.yml's tag release doesn't run; the
 # release's own v<version> tag is made by the publish step.)
+# It can also be started by a push to the work branch whose commit message
+# has "[release <version>]" or "[release-dryrun <version>]" (the agent that
+# builds RetroPixels can't push tags or run workflows by hand); any other push
+# skips it.
 on:
   push:
     tags: ["release-v*", "release-dryrun-v*"]
+    branches: [claude/wiiu-emulator-urpcen]
   workflow_dispatch:
     inputs:
       version:
@@ -35,6 +40,7 @@ concurrency:
 
 jobs:
   check:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[release')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -42,7 +48,15 @@ jobs:
     steps:
       - name: Which version
         id: v
+        env:
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          m=$(printf '%s\n' "$MSG" | sed -n 's/.*\[release-dryrun \([0-9.]*\)\].*/dryrun \1/p; s/.*\[release \([0-9.]*\)\].*/publish \1/p' | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ -n "$m" ]; then
+            echo "version=${m#* }" >> "$GITHUB_OUTPUT"
+            if [ "${m%% *}" = dryrun ]; then echo "dry_run=true" >> "$GITHUB_OUTPUT"; else echo "dry_run=false" >> "$GITHUB_OUTPUT"; fi
+            exit 0
+          fi
           case "$GITHUB_REF_NAME" in
             release-dryrun-v*) echo "version=${GITHUB_REF_NAME#release-dryrun-v}" >> "$GITHUB_OUTPUT"; echo "dry_run=true" >> "$GITHUB_OUTPUT" ;;
             release-v*) echo "version=${GITHUB_REF_NAME#release-v}" >> "$GITHUB_OUTPUT"; echo "dry_run=false" >> "$GITHUB_OUTPUT" ;;
