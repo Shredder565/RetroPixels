@@ -159,27 +159,28 @@ SettingsWindow::SettingsWindow(MainWindow* parent) : StackedSettingsWindow{paren
   setWindowTitle(tr("Settings"));
 
   // Keep in step with SettingsWindowPaneIndex.
-  AddWrappedPane(new GeneralPane, tr("General"));
-  AddPane(new GraphicsPane{parent, nullptr}, tr("Graphics"));
-  AddWrappedPane(new ControllersPane, tr("Controllers"));
-  AddWrappedPane(new InterfacePane, tr("Interface"));
-  AddWrappedPane(new OnScreenDisplayPane, tr("On-Screen Display"));
-  AddWrappedPane(new AudioPane, tr("Audio"));
-  AddWrappedPane(new PathPane, tr("Paths"));
-  AddWrappedPane(new GameCubePane{parent}, tr("GameCube"));
-  AddWrappedPane(new WiiPane, tr("Wii"));
-  AddWrappedPane(new TriforcePane, tr("Triforce"));
-  AddWrappedPane(new AdvancedPane, tr("Advanced"));
+  AddWrappedPane(new GeneralPane(), tr("General"));
+  AddPane(new GraphicsPane(parent, nullptr), tr("Graphics"));
+  AddWrappedPane(new ControllersPane(), tr("Controllers"));
+  AddWrappedPane(new InterfacePane(), tr("Interface"));
+  AddWrappedPane(new OnScreenDisplayPane(), tr("On-Screen Display"));
+  AddWrappedPane(new AudioPane(), tr("Audio"));
+  AddWrappedPane(new PathPane(), tr("Paths"));
+  AddWrappedPane(new GameCubePane(parent), tr("GameCube"));
+  AddWrappedPane(new WiiPane(), tr("Wii"));
+  AddWrappedPane(new TriforcePane(), tr("Triforce"));
+  AddWrappedPane(new AdvancedPane(), tr("Advanced"));
 
   OnDoneCreatingPanes();
 }
 
-void SettingsWindow::SelectPane(SettingsWindowPaneIndex index)
-{
-  ActivatePane(std::to_underlying(index));
-}
-
+// Closing the window is when the settings are written to disk.
 void SettingsWindow::closeEvent(QCloseEvent*)
 {
   Config::Save();
+}
+
+void SettingsWindow::SelectPane(SettingsWindowPaneIndex pane)
+{
+  ActivatePane(static_cast<int>(pane));
 }

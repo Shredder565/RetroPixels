@@ -69,14 +69,18 @@ QGroupBox* HacksWidget::BuildEfbGroup()
 
   // The first two are "skip"/"ignore" boxes over enable settings, so they
   // are inverted.
-  m_skip_efb_cpu = new ConfigBool(tr("Skip EFB Access from CPU"),
-                                  Config::GFX_HACK_EFB_ACCESS_ENABLE, m_game_layer, true);
-  m_ignore_format_changes = new ConfigBool(
-      tr("Ignore Format Changes"), Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES, m_game_layer, true);
-  m_store_efb_copies = new ConfigBool(tr("Store EFB Copies to Texture Only"),
-                                      Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, m_game_layer);
-  m_defer_efb_copies = new ConfigBool(tr("Defer EFB Copies to RAM"),
-                                      Config::GFX_HACK_DEFER_EFB_COPIES, m_game_layer);
+  const auto box_for = [this](const QString& label, const Config::Info<bool>& setting,
+                              bool inverted) {
+    return new ConfigBool(label, setting, m_game_layer, inverted);
+  };
+  m_skip_efb_cpu =
+      box_for(tr("Skip EFB Access from CPU"), Config::GFX_HACK_EFB_ACCESS_ENABLE, true);
+  m_ignore_format_changes =
+      box_for(tr("Ignore Format Changes"), Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES, true);
+  m_store_efb_copies =
+      box_for(tr("Store EFB Copies to Texture Only"), Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, false);
+  m_defer_efb_copies =
+      box_for(tr("Defer EFB Copies to RAM"), Config::GFX_HACK_DEFER_EFB_COPIES, false);
 
   grid->addWidget(m_skip_efb_cpu, 0, 0);
   grid->addWidget(m_ignore_format_changes, 0, 1);
@@ -137,15 +141,18 @@ QGroupBox* HacksWidget::BuildOtherGroup()
   auto* const grid = new QGridLayout();
   box->setLayout(grid);
 
+  const auto box_for = [this](const QString& label, const Config::Info<bool>& setting,
+                              bool inverted) {
+    return new ConfigBool(label, setting, m_game_layer, inverted);
+  };
   m_fast_depth_calculation =
-      new ConfigBool(tr("Fast Depth Calculation"), Config::GFX_FAST_DEPTH_CALC, m_game_layer);
-  m_disable_bounding_box =
-      new ConfigBool(tr("Disable Bounding Box"), Config::GFX_HACK_BBOX_ENABLE, m_game_layer, true);
-  m_vertex_rounding =
-      new ConfigBool(tr("Vertex Rounding"), Config::GFX_HACK_VERTEX_ROUNDING, m_game_layer);
-  m_save_texture_cache_state = new ConfigBool(
-      tr("Save Texture Cache to State"), Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE, m_game_layer);
-  m_vi_skip = new ConfigBool(tr("VBI Skip"), Config::GFX_HACK_VI_SKIP, m_game_layer);
+      box_for(tr("Fast Depth Calculation"), Config::GFX_FAST_DEPTH_CALC, false);
+  // Stored as "bounding box enabled".
+  m_disable_bounding_box = box_for(tr("Disable Bounding Box"), Config::GFX_HACK_BBOX_ENABLE, true);
+  m_vertex_rounding = box_for(tr("Vertex Rounding"), Config::GFX_HACK_VERTEX_ROUNDING, false);
+  m_save_texture_cache_state =
+      box_for(tr("Save Texture Cache to State"), Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE, false);
+  m_vi_skip = box_for(tr("VBI Skip"), Config::GFX_HACK_VI_SKIP, false);
 
   grid->addWidget(m_fast_depth_calculation, 0, 0);
   grid->addWidget(m_disable_bounding_box, 0, 1);

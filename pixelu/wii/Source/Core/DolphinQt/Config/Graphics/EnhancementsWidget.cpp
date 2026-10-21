@@ -182,21 +182,20 @@ QGroupBox* EnhancementsWidget::BuildEnhancementsGroup()
   m_configure_post_processing_effect = new NonDefaultQPushButton(tr("Configure"));
   m_configure_post_processing_effect->setDisabled(true);
 
-  m_scaled_efb_copy =
-      new ConfigBool(tr("Scaled EFB Copy"), Config::GFX_HACK_COPY_EFB_SCALED, m_game_layer);
-  m_per_pixel_lighting =
-      new ConfigBool(tr("Per-Pixel Lighting"), Config::GFX_ENABLE_PIXEL_LIGHTING, m_game_layer);
-  m_widescreen_hack =
-      new ConfigBool(tr("Widescreen Hack"), Config::GFX_WIDESCREEN_HACK, m_game_layer);
-  m_disable_fog = new ConfigBool(tr("Disable Fog"), Config::GFX_DISABLE_FOG, m_game_layer);
-  m_force_24bit_color =
-      new ConfigBool(tr("Force 24-Bit Color"), Config::GFX_ENHANCE_FORCE_TRUE_COLOR, m_game_layer);
-  m_disable_copy_filter = new ConfigBool(tr("Disable Copy Filter"),
-                                         Config::GFX_ENHANCE_DISABLE_COPY_FILTER, m_game_layer);
+  // The plain on/off enhancements, all bound to the game layer.
+  const auto toggle = [this](const QString& label, const Config::Info<bool>& setting) {
+    return new ConfigBool(label, setting, m_game_layer);
+  };
+  m_scaled_efb_copy = toggle(tr("Scaled EFB Copy"), Config::GFX_HACK_COPY_EFB_SCALED);
+  m_per_pixel_lighting = toggle(tr("Per-Pixel Lighting"), Config::GFX_ENABLE_PIXEL_LIGHTING);
+  m_widescreen_hack = toggle(tr("Widescreen Hack"), Config::GFX_WIDESCREEN_HACK);
+  m_disable_fog = toggle(tr("Disable Fog"), Config::GFX_DISABLE_FOG);
+  m_force_24bit_color = toggle(tr("Force 24-Bit Color"), Config::GFX_ENHANCE_FORCE_TRUE_COLOR);
+  m_disable_copy_filter =
+      toggle(tr("Disable Copy Filter"), Config::GFX_ENHANCE_DISABLE_COPY_FILTER);
   m_arbitrary_mipmap_detection =
-      new ConfigBool(tr("Arbitrary Mipmap Detection"),
-                     Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION, m_game_layer);
-  m_hdr = new ConfigBool(tr("HDR Post-Processing"), Config::GFX_ENHANCE_HDR_OUTPUT, m_game_layer);
+      toggle(tr("Arbitrary Mipmap Detection"), Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION);
+  m_hdr = toggle(tr("HDR Post-Processing"), Config::GFX_ENHANCE_HDR_OUTPUT);
 
   // Captioned rows whose control spans the rest of the row.
   const std::pair<QString, QWidget*> captioned[] = {
@@ -242,18 +241,23 @@ QGroupBox* EnhancementsWidget::BuildStereoscopyGroup()
   auto* const grid = new QGridLayout();
   box->setLayout(grid);
 
-  m_3d_mode = new ConfigChoice({tr("Off"), tr("Side-by-Side"), tr("Top-and-Bottom"), tr("Anaglyph"),
-                                tr("HDMI 3D"), tr("Passive")},
-                               Config::GFX_STEREO_MODE, m_game_layer);
+  // Mode names in StereoMode order.
+  const QStringList modes{tr("Off"),      tr("Side-by-Side"), tr("Top-and-Bottom"),
+                          tr("Anaglyph"), tr("HDMI 3D"),      tr("Passive")};
+  m_3d_mode = new ConfigChoice(modes, Config::GFX_STEREO_MODE, m_game_layer);
+
+  // Depth moves in whole percent, convergence in hundredths.
+  Config::Layer* const layer = m_game_layer;
   m_3d_depth = new ConfigFloatSlider(0, Config::GFX_STEREO_DEPTH_MAXIMUM, Config::GFX_STEREO_DEPTH,
-                                     1.0f, m_game_layer);
+                                     1.0f, layer);
   m_3d_convergence = new ConfigFloatSlider(0, Config::GFX_STEREO_CONVERGENCE_MAXIMUM,
-                                           Config::GFX_STEREO_CONVERGENCE, 0.01f, m_game_layer);
+                                           Config::GFX_STEREO_CONVERGENCE, 0.01f, layer);
   m_3d_depth_value = new QLabel();
   m_3d_convergence_value = new QLabel();
-  m_3d_swap_eyes = new ConfigBool(tr("Swap Eyes"), Config::GFX_STEREO_SWAP_EYES, m_game_layer);
-  m_3d_per_eye_resolution = new ConfigBool(
-      tr("Use Full Resolution Per Eye"), Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL, m_game_layer);
+  m_3d_swap_eyes = new ConfigBool(tr("Swap Eyes"), Config::GFX_STEREO_SWAP_EYES, layer);
+  m_3d_per_eye_resolution =
+      new ConfigBool(tr("Use Full Resolution Per Eye"), Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL,
+                     layer);
 
   grid->addWidget(new QLabel(tr("Stereoscopic 3D Mode:")), 0, 0);
   grid->addWidget(m_3d_mode, 0, 1);

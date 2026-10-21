@@ -27,25 +27,25 @@ DualShockUDPClientEditServerDialog::DualShockUDPClientEditServerDialog(
 
   auto* const grid = new QGridLayout;
 
-  m_description = new QLineEdit();
+  // Text fields refuse the characters used to separate stored servers.
+  const auto separator_free_field = [](const QString& text) {
+    auto* const field = new QLineEdit(text);
+    field->setValidator(new ServerStringValidator(field));
+    return field;
+  };
+
+  // A new server starts from the defaults; an existing one from its entry.
+  DualShockUDPServer shown{"", ciface::DualShockUDPClient::DEFAULT_SERVER_ADDRESS,
+                           ciface::DualShockUDPClient::DEFAULT_SERVER_PORT};
+  if (editing)
+    shown = DualShockUDPSettings::GetServers()[*m_existing_index];
+
+  m_description = separator_free_field(QString::fromStdString(shown.description));
   m_description->setPlaceholderText(tr("BetterJoy, DS4Windows, etc"));
-  m_description->setValidator(new ServerStringValidator(m_description));
-
-  m_server_address =
-      new QLineEdit(QString::fromStdString(ciface::DualShockUDPClient::DEFAULT_SERVER_ADDRESS));
-  m_server_address->setValidator(new ServerStringValidator(m_server_address));
-
+  m_server_address = separator_free_field(QString::fromStdString(shown.server_address));
   m_server_port = new QSpinBox();
   m_server_port->setMaximum(65535);
-  m_server_port->setValue(ciface::DualShockUDPClient::DEFAULT_SERVER_PORT);
-
-  if (editing)
-  {
-    const DualShockUDPServer current = DualShockUDPSettings::GetServers()[*m_existing_index];
-    m_description->setText(QString::fromStdString(current.description));
-    m_server_address->setText(QString::fromStdString(current.server_address));
-    m_server_port->setValue(current.server_port);
-  }
+  m_server_port->setValue(shown.server_port);
 
   // Row 0 stays empty.
   const std::pair<QString, QWidget*> fields[] = {

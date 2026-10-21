@@ -11,9 +11,8 @@ ConfigInteger::ConfigInteger(int minimum, int maximum, const Config::Info<int>& 
                              Config::Layer* layer, int step)
     : ConfigControl(setting.GetLocation(), layer), m_setting(setting)
 {
-  setMinimum(minimum);
-  setMaximum(maximum);
   setSingleStep(step);
+  setRange(minimum, maximum);
   OnConfigChanged();
   connect(this, &ConfigInteger::valueChanged, this, &ConfigInteger::Update);
 }
