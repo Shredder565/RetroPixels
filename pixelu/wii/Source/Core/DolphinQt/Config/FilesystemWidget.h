@@ -1,11 +1,11 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <memory>
+
 #include <QDialog>
 #include <QIcon>
-#include <memory>
 
 class QStandardItem;
 class QStandardItemModel;
@@ -19,6 +19,8 @@ class Volume;
 struct Partition;
 }  // namespace DiscIO
 
+// The Filesystem tab: a tree of the disc's partitions, folders and files,
+// with a context menu for extracting them.
 class FilesystemWidget final : public QWidget
 {
   Q_OBJECT
@@ -27,26 +29,25 @@ public:
   ~FilesystemWidget() override;
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void PopulateView();
-  void PopulateDirectory(int partition_id, QStandardItem* root, const DiscIO::Partition& partition);
-  void PopulateDirectory(int partition_id, QStandardItem* root, const DiscIO::FileInfo& directory);
+  void FillTree();
+  void AddPartitionContents(int partition_index, QStandardItem* parent,
+                            const DiscIO::Partition& partition);
+  void AddFolderContents(int partition_index, QStandardItem* parent,
+                         const DiscIO::FileInfo& folder);
 
-  QString SelectFolder();
+  void OpenMenu(const QPoint& position);
+  QString AskForFolder();
+  DiscIO::Partition PartitionAt(int index);
 
-  void ShowContextMenu(const QPoint&);
+  void SavePartition(const DiscIO::Partition& partition, const QString& destination);
+  void SaveFolder(const DiscIO::Partition& partition, const QString& path,
+                  const QString& destination);
+  void SaveFile(const DiscIO::Partition& partition, const QString& path,
+                const QString& destination);
+  bool SaveSystemData(const DiscIO::Partition& partition, const QString& destination);
 
-  void ExtractPartition(const DiscIO::Partition& partition, const QString& out);
-  void ExtractDirectory(const DiscIO::Partition& partition, const QString& path,
-                        const QString& out);
-  void ExtractFile(const DiscIO::Partition& partition, const QString& path, const QString& out);
-  bool ExtractSystemData(const DiscIO::Partition& partition, const QString& out);
-
-  DiscIO::Partition GetPartitionFromID(int id);
-
-  QStandardItemModel* m_tree_model;
-  QTreeView* m_tree_view;
+  QStandardItemModel* m_model;
+  QTreeView* m_tree;
 
   std::shared_ptr<DiscIO::Volume> m_volume;
 

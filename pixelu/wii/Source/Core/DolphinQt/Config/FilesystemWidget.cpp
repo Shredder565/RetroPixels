@@ -1,7 +1,9 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/FilesystemWidget.h"
+
+#include <future>
+#include <optional>
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -13,374 +15,349 @@
 #include <QStyleFactory>
 #include <QTreeView>
 
-#include <future>
-
 #include "Common/StringUtil.h"
-
 #include "DiscIO/DiscExtractor.h"
 #include "DiscIO/DiscUtils.h"
 #include "DiscIO/Filesystem.h"
 #include "DiscIO/Volume.h"
-
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/ParallelProgressDialog.h"
 #include "DolphinQt/Resources.h"
-
 #include "UICommon/UICommon.h"
 
-constexpr int ENTRY_PARTITION = Qt::UserRole;
-constexpr int ENTRY_NAME = Qt::UserRole + 1;
-constexpr int ENTRY_TYPE = Qt::UserRole + 2;
+namespace
+{
+// Item data roles in the first column.
+constexpr int ROLE_PARTITION = Qt::UserRole;      // index into GetPartitions(), or -1
+constexpr int ROLE_PATH = Qt::UserRole + 1;       // path inside the partition
+constexpr int ROLE_KIND = Qt::UserRole + 2;       // NodeKind
 
-enum class EntryType
+enum class NodeKind
 {
   Disc = -2,
   Partition = -1,
   File = 0,
-  Dir = 1
+  Folder = 1,
 };
-Q_DECLARE_METATYPE(EntryType);
+}  // namespace
+
+Q_DECLARE_METATYPE(NodeKind);
 
 FilesystemWidget::FilesystemWidget(std::shared_ptr<DiscIO::Volume> volume)
     : m_volume(std::move(volume))
 {
-  CreateWidgets();
-  ConnectWidgets();
-  PopulateView();
-}
+  // A grid rather than a box layout: with some styles (KDE Plasma) a tree
+  // alone in a QVBoxLayout is drawn with square corners.
+  auto* const grid = new QGridLayout{this};
 
-FilesystemWidget::~FilesystemWidget() = default;
+  m_model = new QStandardItemModel(0, 2);
+  m_model->setHorizontalHeaderLabels({tr("Name"), tr("Size")});
 
-void FilesystemWidget::CreateWidgets()
-{
-  // Note: At least with KDE Plasma,
-  //  QTreeView takes on an ugly square-corner style when alone in a QVBoxLayout.
-  // QGridLayout does not produce this problem.
-  auto* const layout = new QGridLayout{this};
+  m_tree = new QTreeView(this);
+  m_tree->setModel(m_model);
+  m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+  m_model->setParent(m_tree);
 
-  m_tree_model = new QStandardItemModel(0, 2);
-  m_tree_model->setHorizontalHeaderLabels({tr("Name"), tr("Size")});
-
-  m_tree_view = new QTreeView(this);
-  m_tree_view->setModel(m_tree_model);
-  m_tree_view->setContextMenuPolicy(Qt::CustomContextMenu);
-  m_tree_model->setParent(m_tree_view);
-
-  auto* header = m_tree_view->header();
-
+  QHeaderView* const header = m_tree->header();
   header->setSectionResizeMode(0, QHeaderView::Stretch);
   header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
   header->setStretchLastSection(false);
   header->setDefaultAlignment(Qt::AlignCenter);
 
-// Windows: Set style to (old) windows, which draws branch lines
 #ifdef _WIN32
+  // The Vista style draws no branch lines; the classic Windows style does.
   if (QApplication::style()->objectName() == QStringLiteral("windowsvista"))
-    m_tree_view->setStyle(QStyleFactory::create(QStringLiteral("windows")));
+    m_tree->setStyle(QStyleFactory::create(QStringLiteral("windows")));
 #endif
 
-  layout->addWidget(m_tree_view);
+  grid->addWidget(m_tree);
+
+  connect(m_tree, &QTreeView::customContextMenuRequested, this, &FilesystemWidget::OpenMenu);
+
+  FillTree();
 }
 
-void FilesystemWidget::ConnectWidgets()
-{
-  connect(m_tree_view, &QTreeView::customContextMenuRequested, this,
-          &FilesystemWidget::ShowContextMenu);
-}
+FilesystemWidget::~FilesystemWidget() = default;
 
-void FilesystemWidget::PopulateView()
+void FilesystemWidget::FillTree()
 {
-  // Cache these two icons, the tree will use them a lot.
+  // Every file and folder row uses one of these two.
   m_folder_icon = Resources::GetResourceIcon("isoproperties_folder");
   m_file_icon = Resources::GetResourceIcon("isoproperties_file");
 
-  auto* disc = new QStandardItem(tr("Disc"));
+  auto* const disc = new QStandardItem(tr("Disc"));
   disc->setEditable(false);
   disc->setIcon(Resources::GetResourceIcon("isoproperties_disc"));
-  disc->setData(QVariant::fromValue(EntryType::Disc), ENTRY_TYPE);
-  m_tree_model->appendRow(disc);
-  m_tree_view->expand(disc->index());
+  disc->setData(QVariant::fromValue(NodeKind::Disc), ROLE_KIND);
+  m_model->appendRow(disc);
+  m_tree->expand(disc->index());
 
-  const auto& partitions = m_volume->GetPartitions();
-
-  for (size_t i = 0; i < partitions.size(); i++)
+  const std::vector<DiscIO::Partition>& partitions = m_volume->GetPartitions();
+  for (size_t index = 0; index < partitions.size(); ++index)
   {
-    auto* item = new QStandardItem;
-    item->setEditable(false);
+    auto* const node = new QStandardItem;
+    node->setEditable(false);
+    node->setIcon(Resources::GetResourceIcon("isoproperties_disc"));
+    node->setData(static_cast<qlonglong>(index), ROLE_PARTITION);
+    node->setData(QVariant::fromValue(NodeKind::Partition), ROLE_KIND);
 
-    item->setIcon(Resources::GetResourceIcon("isoproperties_disc"));
-    item->setData(static_cast<qlonglong>(i), ENTRY_PARTITION);
-    item->setData(QVariant::fromValue(EntryType::Partition), ENTRY_TYPE);
+    AddPartitionContents(static_cast<int>(index), node, partitions[index]);
+    disc->appendRow(node);
 
-    PopulateDirectory(static_cast<int>(i), item, partitions[i]);
-
-    disc->appendRow(item);
-
-    if (m_volume->GetGamePartition() == partitions[i])
-      m_tree_view->expand(item->index());
+    // The game partition starts expanded.
+    if (m_volume->GetGamePartition() == partitions[index])
+      m_tree->expand(node->index());
   }
 
+  // Discs without partitions (GameCube) hang their files off the disc node.
   if (partitions.empty())
-    PopulateDirectory(-1, disc, DiscIO::PARTITION_NONE);
+    AddPartitionContents(-1, disc, DiscIO::PARTITION_NONE);
 }
 
-void FilesystemWidget::PopulateDirectory(int partition_id, QStandardItem* root,
-                                         const DiscIO::Partition& partition)
+void FilesystemWidget::AddPartitionContents(int partition_index, QStandardItem* parent,
+                                            const DiscIO::Partition& partition)
 {
-  auto partition_type = m_volume->GetPartitionType(partition);
-  auto game_id = m_volume->GetGameID(partition);
-  auto title_id = m_volume->GetTitleID(partition);
+  const std::optional<u32> type = m_volume->GetPartitionType(partition);
+  const std::string game_id = m_volume->GetGameID(partition);
+  const std::optional<u64> title_id = m_volume->GetTitleID(partition);
 
-  QString text = root->text();
+  // The node's label: "<existing text> - <type> - <game ID> - <title ID> (<4CC>)".
+  QString label = parent->text();
+  if (!label.isEmpty())
+    label += QStringLiteral(" - ");
 
-  if (!text.isEmpty())
-    text += QStringLiteral(" - ");
-
-  if (partition_type)
+  if (type)
   {
-    QString partition_type_str;
-    switch (partition_type.value())
-    {
-    case DiscIO::PARTITION_DATA:
-      partition_type_str = tr("Data Partition (%1)").arg(partition_type.value());
-      break;
-    case DiscIO::PARTITION_UPDATE:
-      partition_type_str = tr("Update Partition (%1)").arg(partition_type.value());
-      break;
-    case DiscIO::PARTITION_CHANNEL:
-      partition_type_str = tr("Channel Partition (%1)").arg(partition_type.value());
-      break;
-    case DiscIO::PARTITION_INSTALL:
-      partition_type_str = tr("Install Partition (%1)").arg(partition_type.value());
-      break;
-    default:
-      partition_type_str =
-          tr("Other Partition (%1)").arg(partition_type.value(), 8, 16, QLatin1Char('0'));
-      break;
-    }
-    text += partition_type_str + QStringLiteral(" - ");
+    const u32 value = *type;
+    QString type_name;
+    if (value == DiscIO::PARTITION_DATA)
+      type_name = tr("Data Partition (%1)").arg(value);
+    else if (value == DiscIO::PARTITION_UPDATE)
+      type_name = tr("Update Partition (%1)").arg(value);
+    else if (value == DiscIO::PARTITION_CHANNEL)
+      type_name = tr("Channel Partition (%1)").arg(value);
+    else if (value == DiscIO::PARTITION_INSTALL)
+      type_name = tr("Install Partition (%1)").arg(value);
+    else
+      type_name = tr("Other Partition (%1)").arg(value, 8, 16, QLatin1Char('0'));
+    label += type_name + QStringLiteral(" - ");
   }
 
-  text += QString::fromStdString(game_id);
+  label += QString::fromStdString(game_id);
 
   if (title_id)
   {
-    text += QStringLiteral(" - %1 (").arg(title_id.value(), 16, 16, QLatin1Char('0'));
-    for (u32 i = 0; i < 4; i++)
+    const u64 id = *title_id;
+    label += QStringLiteral(" - %1 (").arg(id, 16, 16, QLatin1Char('0'));
+    // The low four bytes as characters, with dots for unprintable ones.
+    for (int shift = 24; shift >= 0; shift -= 8)
     {
-      char c = static_cast<char>(title_id.value() >> 8 * (3 - i));
-      if (Common::IsPrintableCharacter(c))
-        text += QLatin1Char(c);
-      else
-        text += QLatin1Char('.');
+      const char letter = static_cast<char>(id >> shift);
+      label += QLatin1Char(Common::IsPrintableCharacter(letter) ? letter : '.');
     }
-    text += QLatin1Char(')');
+    label += QLatin1Char(')');
   }
 
-  root->setText(text);
+  parent->setText(label);
 
-  const DiscIO::FileSystem* const file_system = m_volume->GetFileSystem(partition);
-  if (file_system)
-    PopulateDirectory(partition_id, root, file_system->GetRoot());
+  if (const DiscIO::FileSystem* const file_system = m_volume->GetFileSystem(partition))
+    AddFolderContents(partition_index, parent, file_system->GetRoot());
 }
 
-void FilesystemWidget::PopulateDirectory(int partition_id, QStandardItem* root,
-                                         const DiscIO::FileInfo& directory)
+void FilesystemWidget::AddFolderContents(int partition_index, QStandardItem* parent,
+                                         const DiscIO::FileInfo& folder)
 {
-  for (const auto& info : directory)
+  for (const DiscIO::FileInfo& entry : folder)
   {
-    auto* item = new QStandardItem(QString::fromStdString(info.GetName()));
-    item->setEditable(false);
-    item->setIcon(info.IsDirectory() ? m_folder_icon : m_file_icon);
+    const bool is_folder = entry.IsDirectory();
 
-    if (info.IsDirectory())
-      PopulateDirectory(partition_id, item, info);
+    auto* const name = new QStandardItem(QString::fromStdString(entry.GetName()));
+    name->setEditable(false);
+    name->setIcon(is_folder ? m_folder_icon : m_file_icon);
+    if (is_folder)
+      AddFolderContents(partition_index, name, entry);
 
-    item->setData(partition_id, ENTRY_PARTITION);
-    item->setData(QString::fromStdString(info.GetPath()), ENTRY_NAME);
-    item->setData(QVariant::fromValue(info.IsDirectory() ? EntryType::Dir : EntryType::File),
-                  ENTRY_TYPE);
+    name->setData(partition_index, ROLE_PARTITION);
+    name->setData(QString::fromStdString(entry.GetPath()), ROLE_PATH);
+    name->setData(QVariant::fromValue(is_folder ? NodeKind::Folder : NodeKind::File), ROLE_KIND);
 
-    const auto size = info.GetTotalSize();
+    auto* const size =
+        new QStandardItem(QString::fromStdString(UICommon::FormatSize(entry.GetTotalSize())));
+    size->setTextAlignment(Qt::AlignRight);
+    size->setEditable(false);
 
-    auto* size_item = new QStandardItem(QString::fromStdString(UICommon::FormatSize(size)));
-    size_item->setTextAlignment(Qt::AlignRight);
-    size_item->setEditable(false);
-
-    root->appendRow({item, size_item});
+    parent->appendRow({name, size});
   }
 }
 
-QString FilesystemWidget::SelectFolder()
+QString FilesystemWidget::AskForFolder()
 {
   return DolphinFileDialog::getExistingDirectory(this, QObject::tr("Choose Folder to Extract To"));
 }
 
-void FilesystemWidget::ShowContextMenu(const QPoint&)
+DiscIO::Partition FilesystemWidget::PartitionAt(int index)
 {
-  auto* selection = m_tree_view->selectionModel();
+  if (index == -1)
+    return DiscIO::PARTITION_NONE;
+  return m_volume->GetPartitions()[static_cast<size_t>(index)];
+}
+
+void FilesystemWidget::OpenMenu(const QPoint&)
+{
+  QItemSelectionModel* const selection = m_tree->selectionModel();
   if (!selection->hasSelection())
     return;
 
-  auto* item = m_tree_model->itemFromIndex(selection->selectedIndexes()[0]);
+  QStandardItem* const item = m_model->itemFromIndex(selection->selectedIndexes()[0]);
 
-  QMenu* menu = new QMenu(this);
+  auto* const menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose, true);
 
-  EntryType type = item->data(ENTRY_TYPE).value<EntryType>();
+  const NodeKind kind = item->data(ROLE_KIND).value<NodeKind>();
+  const DiscIO::Partition partition =
+      kind == NodeKind::Disc ? DiscIO::PARTITION_NONE :
+                               PartitionAt(item->data(ROLE_PARTITION).toInt());
+  const QString path = item->data(ROLE_PATH).toString();
 
-  DiscIO::Partition partition = type == EntryType::Disc ?
-                                    DiscIO::PARTITION_NONE :
-                                    GetPartitionFromID(item->data(ENTRY_PARTITION).toInt());
-  QString path = item->data(ENTRY_NAME).toString();
+  // A partition, or a disc without partitions, is the top of a filesystem.
+  const bool top_level =
+      kind == NodeKind::Partition || (kind == NodeKind::Disc && m_volume->GetPartitions().empty());
 
-  const bool is_filesystem_root = (type == EntryType::Disc && m_volume->GetPartitions().empty()) ||
-                                  type == EntryType::Partition;
-
-  if (type == EntryType::Dir || is_filesystem_root)
+  if (kind == NodeKind::Folder || top_level)
   {
     menu->addAction(tr("Extract Files..."), this, [this, partition, path] {
-      auto folder = SelectFolder();
-
-      if (!folder.isEmpty())
-        ExtractDirectory(partition, path, folder);
+      const QString destination = AskForFolder();
+      if (!destination.isEmpty())
+        SaveFolder(partition, path, destination);
     });
   }
 
-  if (is_filesystem_root)
+  if (top_level)
   {
     menu->addAction(tr("Extract System Data..."), this, [this, partition] {
-      auto folder = SelectFolder();
-
-      if (folder.isEmpty())
+      const QString destination = AskForFolder();
+      if (destination.isEmpty())
         return;
-
-      if (ExtractSystemData(partition, folder))
+      if (SaveSystemData(partition, destination))
+      {
         ModalMessageBox::information(this, tr("Success"),
                                      tr("Successfully extracted system data."));
+      }
       else
+      {
         ModalMessageBox::critical(this, tr("Error"), tr("Failed to extract system data."));
+      }
     });
   }
 
-  switch (type)
+  if (kind == NodeKind::Disc)
   {
-  case EntryType::Disc:
     menu->addAction(tr("Extract Entire Disc..."), this, [this] {
-      auto folder = SelectFolder();
-
-      if (folder.isEmpty())
+      const QString destination = AskForFolder();
+      if (destination.isEmpty())
         return;
 
       if (m_volume->GetPartitions().empty())
       {
-        ExtractPartition(DiscIO::PARTITION_NONE, folder);
+        SavePartition(DiscIO::PARTITION_NONE, destination);
+        return;
       }
-      else
+      // Each partition with a known type goes to a folder named after it.
+      for (DiscIO::Partition& each : m_volume->GetPartitions())
       {
-        for (DiscIO::Partition& p : m_volume->GetPartitions())
-        {
-          if (const std::optional<u32> partition_type = m_volume->GetPartitionType(p))
-          {
-            const std::string partition_name = DiscIO::NameForPartitionType(*partition_type, true);
-            ExtractPartition(p, folder + QChar(u'/') + QString::fromStdString(partition_name));
-          }
-        }
+        const std::optional<u32> type = m_volume->GetPartitionType(each);
+        if (!type)
+          continue;
+        const std::string folder_name = DiscIO::NameForPartitionType(*type, true);
+        SavePartition(each, destination + QChar(u'/') + QString::fromStdString(folder_name));
       }
     });
-    break;
-  case EntryType::Partition:
+  }
+  else if (kind == NodeKind::Partition)
+  {
     menu->addAction(tr("Extract Entire Partition..."), this, [this, partition] {
-      auto folder = SelectFolder();
-      if (!folder.isEmpty())
-        ExtractPartition(partition, folder);
+      const QString destination = AskForFolder();
+      if (!destination.isEmpty())
+        SavePartition(partition, destination);
     });
-    break;
-  case EntryType::File:
+  }
+  else if (kind == NodeKind::File)
+  {
     menu->addAction(tr("Extract File..."), this, [this, partition, path] {
-      auto dest =
-          DolphinFileDialog::getSaveFileName(this, tr("Save File To"), QFileInfo(path).fileName());
-
-      if (!dest.isEmpty())
-        ExtractFile(partition, path, dest);
+      const QString destination = DolphinFileDialog::getSaveFileName(this, tr("Save File To"),
+                                                                     QFileInfo(path).fileName());
+      if (!destination.isEmpty())
+        SaveFile(partition, path, destination);
     });
-    break;
-  case EntryType::Dir:
-    // Handled above the switch statement
-    break;
   }
 
   menu->exec(QCursor::pos());
 }
 
-DiscIO::Partition FilesystemWidget::GetPartitionFromID(int id)
+void FilesystemWidget::SavePartition(const DiscIO::Partition& partition,
+                                     const QString& destination)
 {
-  return id == -1 ? DiscIO::PARTITION_NONE : m_volume->GetPartitions()[id];
+  // Files go to <destination>/files, system data to <destination>/sys.
+  SaveFolder(partition, QString{}, destination + QStringLiteral("/files"));
+  SaveSystemData(partition, destination);
 }
 
-void FilesystemWidget::ExtractPartition(const DiscIO::Partition& partition, const QString& out)
+bool FilesystemWidget::SaveSystemData(const DiscIO::Partition& partition,
+                                      const QString& destination)
 {
-  ExtractDirectory(partition, QString{}, out + QStringLiteral("/files"));
-  ExtractSystemData(partition, out);
+  return DiscIO::ExportSystemData(*m_volume, partition, destination.toStdString());
 }
 
-bool FilesystemWidget::ExtractSystemData(const DiscIO::Partition& partition, const QString& out)
+void FilesystemWidget::SaveFolder(const DiscIO::Partition& partition, const QString& path,
+                                  const QString& destination)
 {
-  return DiscIO::ExportSystemData(*m_volume, partition, out.toStdString());
-}
-
-void FilesystemWidget::ExtractDirectory(const DiscIO::Partition& partition, const QString& path,
-                                        const QString& out)
-{
-  const DiscIO::FileSystem* filesystem = m_volume->GetFileSystem(partition);
-  if (!filesystem)
+  const DiscIO::FileSystem* const file_system = m_volume->GetFileSystem(partition);
+  if (file_system == nullptr)
     return;
 
-  std::unique_ptr<DiscIO::FileInfo> info = filesystem->FindFileInfo(path.toStdString());
-  u32 size = info->GetTotalChildren();
+  const std::unique_ptr<DiscIO::FileInfo> folder = file_system->FindFileInfo(path.toStdString());
+  const u32 entry_count = folder->GetTotalChildren();
 
-  ParallelProgressDialog dialog(this);
-  dialog.GetRaw()->setMinimum(0);
-  dialog.GetRaw()->setMaximum(size);
-  dialog.GetRaw()->setWindowTitle(tr("Progress"));
+  ParallelProgressDialog progress_dialog(this);
+  progress_dialog.GetRaw()->setMinimum(0);
+  progress_dialog.GetRaw()->setMaximum(static_cast<int>(entry_count));
+  progress_dialog.GetRaw()->setWindowTitle(tr("Progress"));
 
-  const bool all = path.isEmpty();
+  // An empty path means the whole partition.
+  const bool whole = path.isEmpty();
 
-  std::future<void> future = std::async(std::launch::async, [&] {
-    int progress = 0;
-
+  std::future<void> worker = std::async(std::launch::async, [&] {
+    int done = 0;
     DiscIO::ExportDirectory(
-        *m_volume, partition, *info, true, path.toStdString(), out.toStdString(),
-        [all, &dialog, &progress](const std::string& current) {
-          dialog.SetLabelText(
-              (all ? QObject::tr("Extracting All Files...") :
-                     QObject::tr("Extracting Directory..."))
-                  .append(QStringLiteral(" %1").arg(QString::fromStdString(current))));
-          dialog.SetValue(++progress);
-
+        *m_volume, partition, *folder, true, path.toStdString(), destination.toStdString(),
+        [whole, &progress_dialog, &done](const std::string& current) {
+          const QString heading = whole ? QObject::tr("Extracting All Files...") :
+                                          QObject::tr("Extracting Directory...");
+          progress_dialog.SetLabelText(
+              QString(heading).append(QStringLiteral(" %1").arg(QString::fromStdString(current))));
+          progress_dialog.SetValue(++done);
           QCoreApplication::processEvents();
-          return dialog.WasCanceled();
+          return progress_dialog.WasCanceled();
         });
-
-    dialog.Reset();
+    progress_dialog.Reset();
   });
 
-  dialog.GetRaw()->exec();
-  future.get();
+  progress_dialog.GetRaw()->exec();
+  worker.get();
 }
 
-void FilesystemWidget::ExtractFile(const DiscIO::Partition& partition, const QString& path,
-                                   const QString& out)
+void FilesystemWidget::SaveFile(const DiscIO::Partition& partition, const QString& path,
+                                const QString& destination)
 {
-  const DiscIO::FileSystem* filesystem = m_volume->GetFileSystem(partition);
-  if (!filesystem)
+  const DiscIO::FileSystem* const file_system = m_volume->GetFileSystem(partition);
+  if (file_system == nullptr)
     return;
 
-  bool success = DiscIO::ExportFile(
-      *m_volume, partition, filesystem->FindFileInfo(path.toStdString()).get(), out.toStdString());
-
-  if (success)
+  const bool ok =
+      DiscIO::ExportFile(*m_volume, partition, file_system->FindFileInfo(path.toStdString()).get(),
+                         destination.toStdString());
+  if (ok)
     ModalMessageBox::information(this, tr("Success"), tr("Successfully extracted file."));
   else
     ModalMessageBox::critical(this, tr("Error"), tr("Failed to extract file."));

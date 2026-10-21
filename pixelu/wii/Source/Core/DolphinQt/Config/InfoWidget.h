@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,11 +15,13 @@ class Volume;
 }
 
 class QComboBox;
+class QFormLayout;
 class QGroupBox;
 class QLineEdit;
 class QPixmap;
 class QTextEdit;
 
+// The Info tab of the game properties: file, game and banner details.
 class InfoWidget final : public QWidget
 {
   Q_OBJECT
@@ -29,21 +30,21 @@ public:
   ~InfoWidget() override;
 
 private:
-  void ChangeLanguage();
-  void SaveBanner();
+  QGroupBox* FileSection();
+  QGroupBox* GameSection();
+  QGroupBox* BannerSection();
+  QWidget* BannerPreview(const QPixmap& image);
+  void BuildLanguageBox();
+  void ShowBannerText();
+  void ExportBanner();
 
-  QGroupBox* CreateFileDetails();
-  QGroupBox* CreateGameDetails();
-  QGroupBox* CreateBannerDetails();
-  QLineEdit* CreateValueDisplay(const QString& value);
-  QLineEdit* CreateValueDisplay(const std::string& value = "");
-  void CreateLanguageSelector();
-  QWidget* CreateBannerGraphic(const QPixmap& image);
+  QLineEdit* ReadOnlyField(const QString& text);
+  QLineEdit* ReadOnlyField(const std::string& text = "");
 
   std::unique_ptr<DiscIO::Volume> m_volume;
   UICommon::GameFile m_game;
-  QComboBox* m_language_selector;
-  QLineEdit* m_name = {};
-  QLineEdit* m_maker = {};
-  QTextEdit* m_description = {};
+  QComboBox* m_language;
+  QLineEdit* m_banner_name = nullptr;
+  QLineEdit* m_banner_maker = nullptr;
+  QTextEdit* m_banner_description = nullptr;
 };
