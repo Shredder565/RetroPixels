@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,18 +12,22 @@
 
 namespace D3DCommon
 {
+// The DXGI swap chain both D3D backends present through. Owns the DXGI object
+// and the window/stereo/HDR/fullscreen choices; the backend subclass owns the
+// views or descriptors of the back buffers.
 class SwapChain
 {
 public:
   SwapChain(const WindowSystemInfo& wsi, IDXGIFactory* dxgi_factory, IUnknown* d3d_device);
   virtual ~SwapChain();
 
-  // Sufficient buffers for triple buffering.
+  // Three back buffers.
   static const u32 SWAP_CHAIN_BUFFER_COUNT = 3;
 
-  // Returns true if the stereo mode is quad-buffering.
+  // Whether the configuration asks for quad-buffered stereo.
   static bool WantsStereo();
 
+  // Whether the configuration asks for HDR output.
   static bool WantsHDR();
 
   IDXGISwapChain* GetDXGISwapChain() const { return m_swap_chain.Get(); }
@@ -35,17 +38,17 @@ public:
   u32 GetWidth() const { return m_width; }
   u32 GetHeight() const { return m_height; }
 
-  // Mode switches.
   bool GetFullscreen() const;
   void SetFullscreen(bool request);
 
-  // Checks for loss of exclusive fullscreen.
+  // Returns true when exclusive fullscreen was gained or lost since the last call.
   bool CheckForFullscreenChange();
 
-  // Presents the swap chain to the screen.
   virtual bool Present();
 
+  // Recreates the swap chain for a new window.
   bool ChangeSurface(void* native_handle);
+  // Resizes the buffers to the window's current size.
   bool ResizeSwapChain();
   void SetStereo(bool stereo);
   void SetHDR(bool hdr);
@@ -73,6 +76,14 @@ protected:
   bool m_allow_tearing_supported = false;
   bool m_has_fullscreen = false;
   bool m_fullscreen_request = false;
+
+private:
+  HWND Window() const;
+  HRESULT CreateFlipModel(bool stereo);
+  HRESULT CreateBitBltModel();
+  bool TryEnableHDR();
+  void LeaveFullscreen();
+  bool RecreateWith(bool stereo, bool hdr);
 };
 
 }  // namespace D3DCommon
