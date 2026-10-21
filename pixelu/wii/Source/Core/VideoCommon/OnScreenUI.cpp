@@ -100,27 +100,30 @@ MathUtil::Rectangle<int> ToFramebufferRect(int left, int top, int right, int bot
   return g_gfx->ConvertFramebufferRectangle(MathUtil::Rectangle<int>(left, top, right, bottom),
                                             g_gfx->GetCurrentFramebuffer());
 }
+
+// Sets up the ImGui and ImPlot contexts; reports the first step that fails.
+bool CreateUiContexts()
+{
+  const char* failure = nullptr;
+  if (!IMGUI_CHECKVERSION())
+    failure = "ImGui version check failed";
+  else if (ImGui::CreateContext() == nullptr)
+    failure = "Creating ImGui context failed";
+  else if (ImPlot::CreateContext() == nullptr)
+    failure = "Creating ImPlot context failed";
+
+  if (failure != nullptr)
+    PanicAlertFmt("{}", failure);
+  return failure == nullptr;
+}
 }  // namespace
 
 bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
 {
   std::unique_lock guard(m_lock);
 
-  if (!IMGUI_CHECKVERSION())
-  {
-    PanicAlertFmt("ImGui version check failed");
+  if (!CreateUiContexts())
     return false;
-  }
-  if (!ImGui::CreateContext())
-  {
-    PanicAlertFmt("Creating ImGui context failed");
-    return false;
-  }
-  if (!ImPlot::CreateContext())
-  {
-    PanicAlertFmt("Creating ImPlot context failed");
-    return false;
-  }
 
   // Window positions are not persisted.
   ImGui::GetIO().IniFilename = nullptr;
@@ -317,65 +320,80 @@ void OnScreenUI::DrawImGui()
                                           static_cast<int>(m_backbuffer_height)));
 }
 
+namespace
+{
+// The movie window's contents: playback or recording position, then the optional extras.
+void WriteMovieStatus(Movie::MovieManager& movie)
+{
+  const u64 frame = movie.GetCurrentFrame();
+  if (movie.IsPlayingInput())
+  {
+    const u64 inputs = movie.GetCurrentInputCount();
+    ImGui::Text("Frame: %" PRIu64 " / %" PRIu64, frame, movie.GetTotalFrames());
+    ImGui::Text("Input: %" PRIu64 " / %" PRIu64, inputs, movie.GetTotalInputCount());
+  }
+  else if (Config::Get(Config::MAIN_SHOW_FRAME_COUNT))
+  {
+    ImGui::Text("Frame: %" PRIu64, frame);
+    const bool recording = movie.IsRecordingInput();
+    if (recording)
+      ImGui::Text("Input: %" PRIu64, movie.GetCurrentInputCount());
+  }
+
+  const bool show_lag = Config::Get(Config::MAIN_SHOW_LAG);
+  if (show_lag)
+    ImGui::Text("Lag: %" PRIu64 "\n", movie.GetCurrentLagCount());
+
+  const auto line = [](const std::string& text) { ImGui::TextUnformatted(text.c_str()); };
+  if (Config::Get(Config::MAIN_MOVIE_SHOW_INPUT_DISPLAY))
+    line(movie.GetInputDisplay());
+  if (Config::Get(Config::MAIN_MOVIE_SHOW_RTC))
+    line(movie.GetRTCDisplay());
+  if (Config::Get(Config::MAIN_MOVIE_SHOW_RERECORD))
+    line(movie.GetRerecords());
+}
+
+void DrawMovieWindow(float ui_scale)
+{
+  const float font = ImGui::GetFontSize();
+  const ImVec2 screen = ImGui::GetIO().DisplaySize;
+
+  // Anchored by its top-right corner, below the frame rate counters.
+  const ImVec2 anchor(screen.x - font * ui_scale, 80.f * ui_scale);
+  ImGui::SetNextWindowPos(anchor, ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
+  const ImVec2 min_size(5.0f * font * ui_scale, 2.1f * font * ui_scale);
+  ImGui::SetNextWindowSizeConstraints(min_size, screen);
+
+  const bool visible = ImGui::Begin("Movie", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
+  if (visible)
+    WriteMovieStatus(Core::System::GetInstance().GetMovie());
+  ImGui::End();
+}
+
+template <typename Draw>
+void DrawWhen(bool wanted, Draw&& draw)
+{
+  if (wanted)
+    draw();
+}
+}  // namespace
+
 void OnScreenUI::DrawDebugText()
 {
   if (Config::Get(Config::MAIN_MOVIE_SHOW_OSD))
-  {
-    const float font = ImGui::GetFontSize();
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    DrawMovieWindow(m_backbuffer_scale);
 
-    // Right-aligned, below the frame rate counters.
-    ImGui::SetNextWindowPos(
-        ImVec2(display.x - font * m_backbuffer_scale, 80.f * m_backbuffer_scale),
-        ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowSizeConstraints(
-        ImVec2(5.0f * font * m_backbuffer_scale, 2.1f * font * m_backbuffer_scale), display);
-    if (ImGui::Begin("Movie", nullptr, ImGuiWindowFlags_NoFocusOnAppearing))
-    {
-      auto& movie = Core::System::GetInstance().GetMovie();
-      if (movie.IsPlayingInput())
-      {
-        ImGui::Text("Frame: %" PRIu64 " / %" PRIu64, movie.GetCurrentFrame(),
-                    movie.GetTotalFrames());
-        ImGui::Text("Input: %" PRIu64 " / %" PRIu64, movie.GetCurrentInputCount(),
-                    movie.GetTotalInputCount());
-      }
-      else if (Config::Get(Config::MAIN_SHOW_FRAME_COUNT))
-      {
-        ImGui::Text("Frame: %" PRIu64, movie.GetCurrentFrame());
-        if (movie.IsRecordingInput())
-          ImGui::Text("Input: %" PRIu64, movie.GetCurrentInputCount());
-      }
+  // The remaining overlays, in drawing order.
+  DrawWhen(g_ActiveConfig.bOverlayStats, [] { g_stats.Display(); });
+  DrawWhen(Config::Get(Config::GFX_SHOW_NETPLAY_MESSAGES) && g_netplay_chat_ui,
+           [] { g_netplay_chat_ui->Display(); });
+  DrawWhen(Config::Get(Config::NETPLAY_GOLF_MODE_OVERLAY) && g_netplay_golf_ui,
+           [] { g_netplay_golf_ui->Display(); });
+  DrawWhen(g_ActiveConfig.bOverlayProjStats, [] { g_stats.DisplayProj(); });
+  DrawWhen(g_ActiveConfig.bOverlayScissorStats, [] { g_stats.DisplayScissor(); });
 
-      if (Config::Get(Config::MAIN_SHOW_LAG))
-        ImGui::Text("Lag: %" PRIu64 "\n", movie.GetCurrentLagCount());
-      if (Config::Get(Config::MAIN_MOVIE_SHOW_INPUT_DISPLAY))
-        ImGui::TextUnformatted(movie.GetInputDisplay().c_str());
-      if (Config::Get(Config::MAIN_MOVIE_SHOW_RTC))
-        ImGui::TextUnformatted(movie.GetRTCDisplay().c_str());
-      if (Config::Get(Config::MAIN_MOVIE_SHOW_RERECORD))
-        ImGui::TextUnformatted(movie.GetRerecords().c_str());
-    }
-    ImGui::End();
-  }
-
-  if (g_ActiveConfig.bOverlayStats)
-    g_stats.Display();
-
-  if (Config::Get(Config::GFX_SHOW_NETPLAY_MESSAGES) && g_netplay_chat_ui)
-    g_netplay_chat_ui->Display();
-
-  if (Config::Get(Config::NETPLAY_GOLF_MODE_OVERLAY) && g_netplay_golf_ui)
-    g_netplay_golf_ui->Display();
-
-  if (g_ActiveConfig.bOverlayProjStats)
-    g_stats.DisplayProj();
-
-  if (g_ActiveConfig.bOverlayScissorStats)
-    g_stats.DisplayScissor();
-
-  if (const std::string profile = Common::Profiler::ToString(); !profile.empty())
-    ImGui::TextUnformatted(profile.c_str());
+  const std::string profiler_text = Common::Profiler::ToString();
+  DrawWhen(!profiler_text.empty(), [&] { ImGui::TextUnformatted(profiler_text.c_str()); });
 }
 
 void OnScreenUI::DrawChallengesAndLeaderboards()

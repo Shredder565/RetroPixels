@@ -97,9 +97,11 @@ void Resource::RemoveReference(Resource* reference)
   m_dependents.erase(reference);
 }
 
-void Resource::NotifyAssetLoadSuccess()
+// AssetListener: a load (successful or not) restarts the build; an unload frees what was built.
+
+void Resource::AssetUnloaded()
 {
-  Restart(false);
+  PropagateUnload();
 }
 
 void Resource::NotifyAssetLoadFailed()
@@ -107,20 +109,14 @@ void Resource::NotifyAssetLoadFailed()
   Restart(true);
 }
 
-void Resource::AssetUnloaded()
+void Resource::NotifyAssetLoadSuccess()
 {
-  PropagateUnload();
+  Restart(false);
 }
 
-void Resource::OnUnloadRequested()
-{
-}
+// Default build steps: nothing to do, so each completes at once.
 
-void Resource::ResetData()
-{
-}
-
-Resource::TaskComplete Resource::CollectPrimaryData()
+Resource::TaskComplete Resource::ProcessData()
 {
   return TaskComplete::Yes;
 }
@@ -130,8 +126,16 @@ Resource::TaskComplete Resource::CollectDependencyData()
   return TaskComplete::Yes;
 }
 
-Resource::TaskComplete Resource::ProcessData()
+Resource::TaskComplete Resource::CollectPrimaryData()
 {
   return TaskComplete::Yes;
+}
+
+void Resource::ResetData()
+{
+}
+
+void Resource::OnUnloadRequested()
+{
 }
 }  // namespace VideoCommon

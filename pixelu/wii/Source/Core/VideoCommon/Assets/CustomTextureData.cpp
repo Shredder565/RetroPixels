@@ -367,13 +367,9 @@ namespace VideoCommon
 {
 bool LoadDDSTexture(CustomTextureData* texture, const std::string& filename)
 {
-  File::IOFile file;
-  file.Open(filename, "rb");
-  if (!file.IsOpen())
-    return false;
-
+  File::IOFile file(filename, "rb");
   DdsLayout layout;
-  if (!ReadDdsLayout(file, layout))
+  if (!file.IsOpen() || !ReadDdsLayout(file, layout))
     return false;
   if (!file.Seek(static_cast<s64>(layout.data_offset), File::SeekOrigin::Begin))
     return false;
@@ -418,13 +414,9 @@ bool LoadDDSTexture(CustomTextureData* texture, const std::string& filename)
 bool LoadDDSTexture(CustomTextureData::ArraySlice::Level* level, const std::string& filename,
                     u32 mip_level)
 {
-  File::IOFile file;
-  file.Open(filename, "rb");
-  if (!file.IsOpen())
-    return false;
-
+  File::IOFile file(filename, "rb");
   DdsLayout layout;
-  if (!ReadDdsLayout(file, layout))
+  if (!file.IsOpen() || !ReadDdsLayout(file, layout))
     return false;
 
   // The headers have just been read, so the file is positioned at the top level.

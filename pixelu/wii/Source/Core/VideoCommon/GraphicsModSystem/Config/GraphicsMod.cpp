@@ -91,12 +91,12 @@ void CopyStringIfPresent(const picojson::value& object, const std::string& key, 
 std::optional<GraphicsModConfig> GraphicsModConfig::Create(const std::string& file_path,
                                                            Source source)
 {
+  std::string parse_error;
   picojson::value root;
-  std::string error;
-  if (!JsonFromFile(file_path, &root, &error))
+  if (!JsonFromFile(file_path, &root, &parse_error))
   {
     ERROR_LOG_FMT(VIDEO, "Failed to load graphics mod json file '{}' due to parse error: {}",
-                  file_path, error);
+                  file_path, parse_error);
     return std::nullopt;
   }
 

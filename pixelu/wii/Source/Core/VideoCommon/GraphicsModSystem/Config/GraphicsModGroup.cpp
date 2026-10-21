@@ -24,16 +24,13 @@ GraphicsModGroupConfig::GraphicsModGroupConfig(std::string game_id) : m_game_id(
 {
 }
 
-GraphicsModGroupConfig::~GraphicsModGroupConfig() = default;
-
-GraphicsModGroupConfig::GraphicsModGroupConfig(const GraphicsModGroupConfig&) = default;
-
+// Copying and moving are member-wise.
 GraphicsModGroupConfig::GraphicsModGroupConfig(GraphicsModGroupConfig&&) noexcept = default;
-
-GraphicsModGroupConfig& GraphicsModGroupConfig::operator=(const GraphicsModGroupConfig&) = default;
-
 GraphicsModGroupConfig&
 GraphicsModGroupConfig::operator=(GraphicsModGroupConfig&&) noexcept = default;
+GraphicsModGroupConfig::GraphicsModGroupConfig(const GraphicsModGroupConfig&) = default;
+GraphicsModGroupConfig& GraphicsModGroupConfig::operator=(const GraphicsModGroupConfig&) = default;
+GraphicsModGroupConfig::~GraphicsModGroupConfig() = default;
 
 void GraphicsModGroupConfig::Load()
 {

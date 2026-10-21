@@ -18,26 +18,21 @@ namespace
 {
 constexpr float WINDOW_OPACITY = 0.7f;
 
-// Graph grid lines, in ms: 0, the frame times of common refresh rates down to 2 Hz, 1 s and 2 s.
-constexpr std::array<double, 17> GRAPH_TICKS_MS = {
-    0.0,
-    1000.0 / 360.0,
-    1000.0 / 240.0,
-    1000.0 / 180.0,
-    1000.0 / 120.0,
-    1000.0 / 90.00,
-    1000.0 / 59.94,
-    1000.0 / 40.00,
-    1000.0 / 29.97,
-    1000.0 / 24.00,
-    1000.0 / 20.00,
-    1000.0 / 15.00,
-    1000.0 / 10.00,
-    1000.0 / 5.000,
-    1000.0 / 2.000,
-    1000.0,
-    2000.0,
-};
+// Refresh rates whose frame times get a grid line on the graphs.
+constexpr std::array<double, 14> GRID_RATES_HZ = {360.0, 240.0, 180.0, 120.0, 90.0, 59.94, 40.0,
+                                                  29.97, 24.0,  20.0,  15.0,  10.0, 5.0,   2.0};
+
+// Graph grid lines, in ms: 0, the frame time of each rate above, then 1 s and 2 s.
+constexpr std::array<double, GRID_RATES_HZ.size() + 3> GRAPH_TICKS_MS = [] {
+  std::array<double, GRID_RATES_HZ.size() + 3> ticks{};
+  std::size_t next = 0;
+  ticks[next++] = 0.0;
+  for (const double hz : GRID_RATES_HZ)
+    ticks[next++] = 1000.0 / hz;
+  ticks[next++] = 1000.0;
+  ticks[next] = 2000.0;
+  return ticks;
+}();
 }  // namespace
 
 // Where the next overlay window goes and how windows are placed this frame. Windows line up
@@ -103,28 +98,11 @@ void PerformanceMetrics::Reset()
   m_fps_counter.Reset();
   m_vps_counter.Reset();
 
+  m_markers.clear();
   m_slept = DT::zero();
-  m_markers = {};
-
   m_speed = 0;
   m_max_speed = 0;
-
   m_frame_presentation_offset = DT{};
-}
-
-void PerformanceMetrics::CountFrame()
-{
-  m_fps_counter.Count();
-}
-
-void PerformanceMetrics::CountVBlank()
-{
-  m_vps_counter.Count();
-}
-
-void PerformanceMetrics::CountThrottleSleep(DT sleep)
-{
-  m_slept += sleep;
 }
 
 void PerformanceMetrics::AdjustClockSpeed(s64 ticks, u32 new_ppc_clock, u32 old_ppc_clock)
@@ -158,15 +136,36 @@ void PerformanceMetrics::CountPerformanceMarker(s64 core_ticks, u32 ticks_per_se
   m_max_speed.store(emulated / (busy - first.busy), std::memory_order_relaxed);
 }
 
-double PerformanceMetrics::GetFPS() const
+// Event counters fed by the video and core threads.
+
+void PerformanceMetrics::CountThrottleSleep(DT sleep)
 {
-  return m_fps_counter.GetHzAvg();
+  m_slept += sleep;
 }
 
-double PerformanceMetrics::GetVPS() const
+void PerformanceMetrics::CountVBlank()
 {
-  return m_vps_counter.GetHzAvg();
+  m_vps_counter.Count();
 }
+
+void PerformanceMetrics::CountFrame()
+{
+  m_fps_counter.Count();
+}
+
+// Values published by the presentation code for the stats window.
+
+void PerformanceMetrics::SetLatestFrameBufferSize(u32 width, u32 height)
+{
+  m_frame_buffer_size.store(FrameBufferSize{width, height}, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::SetLatestFramePresentationOffset(DT offset)
+{
+  m_frame_presentation_offset.store(offset, std::memory_order_relaxed);
+}
+
+// Readers; safe from any thread.
 
 double PerformanceMetrics::GetSpeed() const
 {
@@ -178,14 +177,14 @@ double PerformanceMetrics::GetMaxSpeed() const
   return m_max_speed.load(std::memory_order_relaxed);
 }
 
-void PerformanceMetrics::SetLatestFramePresentationOffset(DT offset)
+double PerformanceMetrics::GetVPS() const
 {
-  m_frame_presentation_offset.store(offset, std::memory_order_relaxed);
+  return m_vps_counter.GetHzAvg();
 }
 
-void PerformanceMetrics::SetLatestFrameBufferSize(u32 width, u32 height)
+double PerformanceMetrics::GetFPS() const
 {
-  m_frame_buffer_size.store(FrameBufferSize{width, height}, std::memory_order_relaxed);
+  return m_fps_counter.GetHzAvg();
 }
 
 void PerformanceMetrics::DrawGraphs(OverlayLayout& layout)
