@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Movie.h"
 
@@ -68,42 +67,224 @@
 
 namespace Movie
 {
-using namespace WiimoteCommon;
-using namespace WiimoteEmu;
+using WiimoteEmu::Classic;
+using WiimoteEmu::DesiredWiimoteState;
+using WiimoteEmu::Nunchuk;
+using WiimoteEmu::SerializedWiimoteState;
 
-static bool IsMovieHeader(const std::array<u8, 4>& magic)
+namespace
 {
-  return magic[0] == 'D' && magic[1] == 'T' && magic[2] == 'M' && magic[3] == 0x1A;
+constexpr std::array<u8, 4> DTM_MAGIC{'D', 'T', 'M', 0x1A};
+constexpr size_t HEADER_SIZE = sizeof(DTMHeader);
+constexpr size_t PAD_RECORD_SIZE = sizeof(ControllerState);
+constexpr size_t FIRST_WIIMOTE_LINE = 4;
+
+// Name of the state that a recording started from a running game begins with.
+std::string RecordingStartStatePath()
+{
+  return File::GetUserPath(D_STATESAVES_IDX) + "dtm.sav";
 }
 
-static std::array<u8, 20> ConvertGitRevisionToBytes(const std::string& revision)
+bool WiimoteSourceEnabled(int index)
 {
-  std::array<u8, 20> revision_bytes{};
+  return Config::Get(Config::GetInfoForWiimoteSource(index)) != WiimoteSource::None;
+}
 
-  if (revision.size() % 2 == 0 && std::ranges::all_of(revision, Common::IsXDigit))
+// The header stores the build's git hash as 20 raw bytes, two hex digits per
+// byte. A revision string that is not pairs of hex digits is stored as text.
+std::array<u8, 20> RevisionToHeaderBytes(const std::string& revision)
+{
+  std::array<u8, 20> out{};
+  const bool is_hex_pairs =
+      revision.size() % 2 == 0 && std::ranges::all_of(revision, Common::IsXDigit);
+  if (!is_hex_pairs)
   {
-    // The revision string normally contains a git commit hash,
-    // which is 40 hexadecimal digits long. In DTM files, each pair of
-    // hexadecimal digits is stored as one byte, for a total of 20 bytes.
-    size_t bytes_to_write = std::min(revision.size() / 2, revision_bytes.size());
-    unsigned int temp;
-    for (size_t i = 0; i < bytes_to_write; ++i)
+    std::copy_n(revision.begin(), std::min(revision.size(), out.size()), out.begin());
+    return out;
+  }
+
+  const auto nibble = [](char c) -> u8 {
+    if (c >= '0' && c <= '9')
+      return static_cast<u8>(c - '0');
+    if (c >= 'a' && c <= 'f')
+      return static_cast<u8>(c - 'a' + 10);
+    return static_cast<u8>(c - 'A' + 10);
+  };
+  const size_t count = std::min(revision.size() / 2, out.size());
+  for (size_t n = 0; n < count; ++n)
+    out[n] = static_cast<u8>((nibble(revision[2 * n]) << 4) | nibble(revision[2 * n + 1]));
+  return out;
+}
+
+// A 2D analog value. When both axes sit at an edge or the centre, it is
+// written as directions ("LEFT", "UP"...), otherwise as raw numbers.
+std::string StickText(u32 x, u32 y, const std::string& prefix, u32 range = 255)
+{
+  const u32 center = range / 2 + 1;
+  const auto is_extreme = [&](u32 v) { return v <= 1 || v == center || v >= range; };
+  if (!is_extreme(x) || !is_extreme(y))
+    return fmt::format("{}:{},{}", prefix, x, y);
+
+  const char* const horizontal = x == center ? nullptr : (x < center ? "LEFT" : "RIGHT");
+  const char* const vertical = y == center ? nullptr : (y < center ? "DOWN" : "UP");
+  if (horizontal && vertical)
+    return fmt::format("{}:{},{}", prefix, horizontal, vertical);
+  if (horizontal)
+    return fmt::format("{}:{}", prefix, horizontal);
+  if (vertical)
+    return fmt::format("{}:{}", prefix, vertical);
+  return {};
+}
+
+// A 1D analog value: nothing at rest, the bare name when fully pressed.
+std::string TriggerText(u32 value, const std::string& prefix, u32 range = 255)
+{
+  if (value == 0)
+    return {};
+  if (value == range)
+    return prefix;
+  return fmt::format("{}:{}", prefix, value);
+}
+
+void AppendPressed(std::string& out, std::initializer_list<std::pair<bool, const char*>> buttons)
+{
+  for (const auto& [pressed, label] : buttons)
+  {
+    if (pressed)
+      out += label;
+  }
+}
+
+std::string PadDisplayLine(const ControllerState& s, int port)
+{
+  std::string line = fmt::format("P{}:", port + 1);
+  if (!s.is_connected)
+    return line + " DISCONNECTED";
+
+  AppendPressed(line, {{s.A, " A"},
+                       {s.B, " B"},
+                       {s.X, " X"},
+                       {s.Y, " Y"},
+                       {s.Z, " Z"},
+                       {s.Start, " START"},
+                       {s.DPadUp, " UP"},
+                       {s.DPadDown, " DOWN"},
+                       {s.DPadLeft, " LEFT"},
+                       {s.DPadRight, " RIGHT"},
+                       {s.reset, " RESET"}});
+
+  // A trigger reads as pressed when its digital bit is set or it is all the way in.
+  line += (s.L || s.TriggerL == 255) ? std::string(" L") : TriggerText(s.TriggerL, " L");
+  line += (s.R || s.TriggerR == 255) ? std::string(" R") : TriggerText(s.TriggerR, " R");
+  line += StickText(s.AnalogStickX, s.AnalogStickY, " ANA");
+  line += StickText(s.CStickX, s.CStickY, " C");
+  return line;
+}
+
+void AppendNunchuk(std::string& line, const Nunchuk::DesiredState& nunchuk)
+{
+  const u8 pressed = nunchuk.GetButtons();
+  AppendPressed(line, {{(pressed & Nunchuk::BUTTON_C) != 0, " C"},
+                       {(pressed & Nunchuk::BUTTON_Z) != 0, " Z"}});
+  line += fmt::format(" N-ACC:{},{},{}", nunchuk.GetAccelX(), nunchuk.GetAccelY(),
+                      nunchuk.GetAccelZ());
+  line += StickText(nunchuk.jx, nunchuk.jy, " ANA");
+}
+
+void AppendClassic(std::string& line, const Classic::DesiredState& classic)
+{
+  const u16 pressed = classic.GetButtons();
+  const auto has = [pressed](u16 mask) { return (pressed & mask) != 0; };
+  AppendPressed(line, {{has(Classic::PAD_LEFT), " LEFT"},
+                       {has(Classic::PAD_RIGHT), " RIGHT"},
+                       {has(Classic::PAD_DOWN), " DOWN"},
+                       {has(Classic::PAD_UP), " UP"},
+                       {has(Classic::BUTTON_A), " A"},
+                       {has(Classic::BUTTON_B), " B"},
+                       {has(Classic::BUTTON_X), " X"},
+                       {has(Classic::BUTTON_Y), " Y"},
+                       {has(Classic::BUTTON_ZL), " ZL"},
+                       {has(Classic::BUTTON_ZR), " ZR"},
+                       {has(Classic::BUTTON_PLUS), " +"},
+                       {has(Classic::BUTTON_MINUS), " -"},
+                       {has(Classic::BUTTON_HOME), " HOME"}});
+
+  constexpr u32 trigger_range = (1u << Classic::TRIGGER_BITS) - 1;
+  constexpr u32 left_range = (1u << Classic::LEFT_STICK_BITS) - 1;
+  constexpr u32 right_range = (1u << Classic::RIGHT_STICK_BITS) - 1;
+  line += TriggerText(classic.GetLeftTrigger().value, " L", trigger_range);
+  line += TriggerText(classic.GetRightTrigger().value, " R", trigger_range);
+  const auto left = classic.GetLeftStick().value;
+  line += StickText(left.x, left.y, " ANA", left_range);
+  const auto right = classic.GetRightStick().value;
+  line += StickText(right.x, right.y, " R-ANA", right_range);
+}
+
+std::string WiimoteDisplayLine(int index, const DesiredWiimoteState& state)
+{
+  std::string line = fmt::format("R{}:", index + 1);
+
+  const auto& b = state.buttons;
+  if ((b.hex & WiimoteCommon::ButtonData::BUTTON_MASK) != 0)
+  {
+    AppendPressed(line, {{b.left != 0, " LEFT"},
+                         {b.right != 0, " RIGHT"},
+                         {b.down != 0, " DOWN"},
+                         {b.up != 0, " UP"},
+                         {b.a != 0, " A"},
+                         {b.b != 0, " B"},
+                         {b.plus != 0, " +"},
+                         {b.minus != 0, " -"},
+                         {b.one != 0, " 1"},
+                         {b.two != 0, " 2"},
+                         {b.home != 0, " HOME"}});
+  }
+
+  if (state.acceleration != state.DEFAULT_ACCELERATION)
+  {
+    const auto& accel = state.acceleration.value;
+    line += fmt::format(" ACC:{},{},{}", accel.x, accel.y, accel.z);
+  }
+
+  if (state.camera_points != state.DEFAULT_CAMERA)
+  {
+    std::string ir;
+    for (const auto& point : state.camera_points)
     {
-      sscanf(&revision[2 * i], "%02x", &temp);
-      revision_bytes[i] = temp;
+      if (ir.empty())
+        ir = " IR:";
+      else
+        ir += ',';
+      // A size of 0xff marks a point the camera does not see.
+      ir += point.size == 0xff ? std::string("_") :
+                                 fmt::format("{},{}", point.position.x, point.position.y);
     }
-  }
-  else
-  {
-    // If the revision string for some reason doesn't only contain hexadecimal digit
-    // pairs, we instead copy the string with no conversion. This probably doesn't match
-    // the intended design of the DTM format, but it's the most sensible fallback.
-    size_t bytes_to_write = std::min(revision.size(), revision_bytes.size());
-    std::copy_n(std::begin(revision), bytes_to_write, std::begin(revision_bytes));
+    line += ir;
   }
 
-  return revision_bytes;
+  if (state.extension.data.index() == static_cast<size_t>(WiimoteEmu::ExtensionNumber::NONE))
+    return line;
+
+  const auto name_only = [&line](const char* name) {
+    line += ' ';
+    line += name;
+  };
+  std::visit(overloaded{
+                 [](const std::monostate&) {},
+                 [&](const Nunchuk::DesiredState& s) { AppendNunchuk(line, s); },
+                 [&](const Classic::DesiredState& s) { AppendClassic(line, s); },
+                 [&](const WiimoteEmu::Guitar::DesiredState&) { name_only("Guitar"); },
+                 [&](const WiimoteEmu::Drums::DesiredState&) { name_only("Drums"); },
+                 [&](const WiimoteEmu::Turntable::DesiredState&) { name_only("Turntable"); },
+                 [&](const WiimoteEmu::UDrawTablet::DesiredState&) { name_only("UDraw"); },
+                 [&](const WiimoteEmu::DrawsomeTablet::DesiredState&) { name_only("Drawsome"); },
+                 [&](const WiimoteEmu::TaTaCon::DesiredState&) { name_only("TaTaCon"); },
+                 [&](const WiimoteEmu::Shinkansen::DesiredState&) { name_only("Shinkansen"); },
+             },
+             state.extension.data);
+  return line;
 }
+}  // namespace
 
 MovieManager::MovieManager(Core::System& system) : m_system(system)
 {
@@ -111,98 +292,94 @@ MovieManager::MovieManager(Core::System& system) : m_system(system)
 
 MovieManager::~MovieManager() = default;
 
-// NOTE: GPU Thread
+void MovieManager::SetInputDisplay(size_t slot, std::string text)
+{
+  std::lock_guard lock(m_input_display_lock);
+  m_input_display[slot] = std::move(text);
+}
+
 std::string MovieManager::GetInputDisplay()
 {
+  // Without a movie, show whatever is currently plugged in.
   if (!IsMovieActive())
   {
     m_controllers = {};
     m_wiimotes = {};
-
-    const auto& si = m_system.GetSerialInterface();
-    for (int i = 0; i < 4; ++i)
+    const auto& serial = m_system.GetSerialInterface();
+    for (size_t port = 0; port < m_controllers.size(); ++port)
     {
-      if (si.GetDeviceType(i) == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
-        m_controllers[i] = ControllerType::GBA;
-      else if (si.GetDeviceType(i) != SerialInterface::SIDEVICE_NONE)
-        m_controllers[i] = ControllerType::GC;
+      const int channel = static_cast<int>(port);
+      const auto device = serial.GetDeviceType(channel);
+      if (device == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
+        m_controllers[port] = ControllerType::GBA;
+      else if (device != SerialInterface::SIDEVICE_NONE)
+        m_controllers[port] = ControllerType::GC;
       else
-        m_controllers[i] = ControllerType::None;
-      m_wiimotes[i] = Config::Get(Config::GetInfoForWiimoteSource(i)) != WiimoteSource::None;
+        m_controllers[port] = ControllerType::None;
+      m_wiimotes[port] = WiimoteSourceEnabled(channel);
     }
   }
 
-  std::string input_display;
+  std::string text;
+  std::lock_guard lock(m_input_display_lock);
+  for (int port = 0; port < 4; ++port)
   {
-    std::lock_guard guard(m_input_display_lock);
-    for (int i = 0; i < 4; ++i)
-    {
-      if (IsUsingPad(i))
-        input_display += m_input_display[i] + '\n';
-    }
-    for (int i = 0; i < 4; ++i)
-    {
-      if (IsUsingWiimote(i))
-        input_display += m_input_display[i + 4] + '\n';
-    }
+    if (IsUsingPad(port))
+      text += m_input_display[static_cast<size_t>(port)] + '\n';
   }
-  return input_display;
+  for (int remote = 0; remote < 4; ++remote)
+  {
+    if (IsUsingWiimote(remote))
+      text += m_input_display[FIRST_WIIMOTE_LINE + static_cast<size_t>(remote)] + '\n';
+  }
+  return text;
 }
 
-// NOTE: GPU Thread
 std::string MovieManager::GetRTCDisplay() const
 {
   using ExpansionInterface::CEXIIPL;
-
-  const time_t current_time = CEXIIPL::GetEmulatedTime(m_system, CEXIIPL::UNIX_EPOCH);
-  const tm gm_time = fmt::gmtime(current_time);
-
-  // Use current locale for formatting time, as fmt is locale-agnostic by default.
-  return fmt::format(std::locale{""}, "Date/Time: {:%c}", gm_time);
+  const time_t now = CEXIIPL::GetEmulatedTime(m_system, CEXIIPL::UNIX_EPOCH);
+  // fmt ignores the locale unless given one; use the user's for %c.
+  return fmt::format(std::locale{""}, "Date/Time: {:%c}", fmt::gmtime(now));
 }
 
-// NOTE: GPU Thread
 std::string MovieManager::GetRerecords() const
 {
-  if (IsMovieActive())
-    return fmt::format("Rerecords: {}", m_rerecords);
-
-  return "Rerecords: N/A";
+  if (!IsMovieActive())
+    return "Rerecords: N/A";
+  return fmt::format("Rerecords: {}", m_rerecords);
 }
 
 void MovieManager::FrameUpdate()
 {
-  m_current_frame++;
+  ++m_current_frame;
   if (!m_polled)
-    m_current_lag_count++;
+    ++m_current_lag_count;
 
+  // While recording, the totals track the current position.
   if (IsRecordingInput())
   {
     m_total_frames = m_current_frame;
     m_total_lag_count = m_current_lag_count;
   }
-
   m_polled = false;
 }
 
-// called when game is booting up, even if no movie is active,
-// but potentially after BeginRecordingInput or PlayInput has been called.
-// NOTE: EmuThread
 void MovieManager::Init(const BootParameters& boot)
 {
-  if (std::holds_alternative<BootParameters::Disc>(boot.parameters))
-    m_current_file_name = std::get<BootParameters::Disc>(boot.parameters).path;
-  else
-    m_current_file_name.clear();
+  const auto* const disc = std::get_if<BootParameters::Disc>(&boot.parameters);
+  m_current_file_name = disc ? disc->path : std::string();
 
   m_polled = false;
   m_save_config = false;
+
   if (IsPlayingInput())
   {
     ReadHeader();
-    std::thread md5thread(&MovieManager::CheckMD5, this);
-    md5thread.detach();
-    if (strncmp(m_temp_header.gameID.data(), SConfig::GetInstance().GetGameID().c_str(), 6))
+    std::thread(&MovieManager::CheckMD5, this).detach();
+
+    const std::string running_id = SConfig::GetInstance().GetGameID();
+    if (std::strncmp(m_temp_header.gameID.data(), running_id.c_str(), 6) != 0)
     {
       PanicAlertFmtT("The recorded game ({0}) is not the same as the selected game ({1})",
                      m_temp_header.GetGameID(), SConfig::GetInstance().GetGameID());
@@ -213,253 +390,187 @@ void MovieManager::Init(const BootParameters& boot)
   if (IsRecordingInput())
   {
     GetSettings();
-    std::thread md5thread(&MovieManager::GetMD5, this);
-    md5thread.detach();
+    std::thread(&MovieManager::GetMD5, this).detach();
     m_tick_count_at_last_input = 0;
   }
 
-  memset(&m_pad_state, 0, sizeof(m_pad_state));
+  m_pad_state = {};
+  for (std::string& line : m_input_display)
+    line.clear();
 
-  for (auto& disp : m_input_display)
-    disp.clear();
+  if (IsMovieActive())
+    return;
 
-  if (!IsMovieActive())
-  {
-    m_recording_from_save_state = false;
-    m_rerecords = 0;
-    m_current_byte = 0;
-    m_current_frame = 0;
-    m_current_lag_count = 0;
-    m_current_input_count = 0;
-  }
+  m_recording_from_save_state = false;
+  m_rerecords = 0;
+  m_current_byte = 0;
+  m_current_frame = 0;
+  m_current_lag_count = 0;
+  m_current_input_count = 0;
 }
 
-// NOTE: CPU Thread
 void MovieManager::InputUpdate()
 {
-  m_current_input_count++;
-
+  ++m_current_input_count;
   if (!IsRecordingInput())
     return;
 
-  const auto& core_timing = m_system.GetCoreTiming();
+  const auto& timing = m_system.GetCoreTiming();
   m_total_input_count = m_current_input_count;
-  m_total_tick_count += core_timing.GetTicks() - m_tick_count_at_last_input;
-  m_tick_count_at_last_input = core_timing.GetTicks();
+  m_total_tick_count += timing.GetTicks() - m_tick_count_at_last_input;
+  m_tick_count_at_last_input = timing.GetTicks();
 }
 
-// NOTE: CPU Thread
-void MovieManager::SetPolledDevice()
-{
-  m_polled = true;
-}
+void MovieManager::SetPolledDevice() { m_polled = true; }
 
-// NOTE: Host Thread
 void MovieManager::SetReadOnly(bool bEnabled)
 {
-  if (m_read_only != bEnabled)
+  if (bEnabled != m_read_only)
     Core::DisplayMessage(bEnabled ? "Read-only mode." : "Read+Write mode.", 1000);
-
   m_read_only = bEnabled;
 }
 
-bool MovieManager::IsRecordingInput() const
-{
-  return (m_play_mode == PlayMode::Recording);
-}
+bool MovieManager::IsRecordingInput() const { return m_play_mode == PlayMode::Recording; }
 
-bool MovieManager::IsRecordingInputFromSaveState() const
-{
-  return m_recording_from_save_state;
-}
+bool MovieManager::IsRecordingInputFromSaveState() const { return m_recording_from_save_state; }
 
 bool MovieManager::IsJustStartingRecordingInputFromSaveState() const
 {
-  return IsRecordingInputFromSaveState() && m_current_frame == 0;
+  return m_current_frame == 0 && IsRecordingInputFromSaveState();
 }
 
 bool MovieManager::IsJustStartingPlayingInputFromSaveState() const
 {
-  return IsRecordingInputFromSaveState() && m_current_frame == 1 && IsPlayingInput();
+  return m_current_frame == 1 && IsRecordingInputFromSaveState() && IsPlayingInput();
 }
 
-bool MovieManager::IsPlayingInput() const
-{
-  return (m_play_mode == PlayMode::Playing);
-}
+bool MovieManager::IsPlayingInput() const { return m_play_mode == PlayMode::Playing; }
 
-bool MovieManager::IsMovieActive() const
-{
-  return m_play_mode != PlayMode::None;
-}
+bool MovieManager::IsMovieActive() const { return m_play_mode != PlayMode::None; }
 
-bool MovieManager::IsReadOnly() const
-{
-  return m_read_only;
-}
+bool MovieManager::IsReadOnly() const { return m_read_only; }
 
-u64 MovieManager::GetRecordingStartTime() const
-{
-  return m_recording_start_time;
-}
+u64 MovieManager::GetRecordingStartTime() const { return m_recording_start_time; }
 
-u64 MovieManager::GetCurrentFrame() const
-{
-  return m_current_frame;
-}
+u64 MovieManager::GetCurrentFrame() const { return m_current_frame; }
 
-u64 MovieManager::GetTotalFrames() const
-{
-  return m_total_frames;
-}
+u64 MovieManager::GetTotalFrames() const { return m_total_frames; }
 
-u64 MovieManager::GetCurrentInputCount() const
-{
-  return m_current_input_count;
-}
+u64 MovieManager::GetCurrentInputCount() const { return m_current_input_count; }
 
-u64 MovieManager::GetTotalInputCount() const
-{
-  return m_total_input_count;
-}
+u64 MovieManager::GetTotalInputCount() const { return m_total_input_count; }
 
-u64 MovieManager::GetCurrentLagCount() const
-{
-  return m_current_lag_count;
-}
+u64 MovieManager::GetCurrentLagCount() const { return m_current_lag_count; }
 
-u64 MovieManager::GetTotalLagCount() const
-{
-  return m_total_lag_count;
-}
+u64 MovieManager::GetTotalLagCount() const { return m_total_lag_count; }
 
-void MovieManager::SetClearSave(bool enabled)
-{
-  m_clear_save = enabled;
-}
+void MovieManager::SetClearSave(bool enabled) { m_clear_save = enabled; }
 
 void MovieManager::SignalDiscChange(const std::string& new_path)
 {
-  if (IsRecordingInput())
+  if (!IsRecordingInput())
+    return;
+
+  // Only the file name goes into the header (npos + 1 wraps to 0: no separator).
+  const size_t name_start = new_path.find_last_of("/\\") + 1;
+  std::string file_name = new_path.substr(name_start);
+  if (file_name.length() > sizeof(DTMHeader::discChange))
   {
-    size_t size_of_path_without_filename = new_path.find_last_of("/\\") + 1;
-    std::string filename = new_path.substr(size_of_path_without_filename);
-    constexpr size_t maximum_length = sizeof(DTMHeader::discChange);
-    if (filename.length() > maximum_length)
-    {
-      PanicAlertFmtT("The disc change to \"{0}\" could not be saved in the .dtm file.\n"
-                     "The filename of the disc image must not be longer than 40 characters.",
-                     filename);
-    }
-    m_disc_change_filename = filename;
-    m_has_disc_change = true;
+    PanicAlertFmtT("The disc change to \"{0}\" could not be saved in the .dtm "
+                   "file.\nThe filename of the disc image must not be "
+                   "longer than 40 characters.",
+                   file_name);
   }
+  m_disc_change_filename = std::move(file_name);
+  m_has_disc_change = true;
 }
 
-void MovieManager::SetReset(bool reset)
-{
-  m_reset = reset;
-}
+void MovieManager::SetReset(bool reset) { m_reset = reset; }
 
 bool MovieManager::IsUsingPad(int controller) const
 {
-  return m_controllers[controller] != ControllerType::None;
+  return m_controllers[static_cast<size_t>(controller)] != ControllerType::None;
 }
 
-bool MovieManager::IsUsingBongo(int controller) const
-{
-  return ((m_bongos & (1 << controller)) != 0);
-}
+bool MovieManager::IsUsingBongo(int controller) const { return (m_bongos >> controller & 1) != 0; }
 
 bool MovieManager::IsUsingGBA(int controller) const
 {
-  return m_controllers[controller] == ControllerType::GBA;
+  return m_controllers[static_cast<size_t>(controller)] == ControllerType::GBA;
 }
 
 bool MovieManager::IsUsingWiimote(int wiimote) const
 {
-  return m_wiimotes[wiimote];
+  return m_wiimotes[static_cast<size_t>(wiimote)];
 }
 
-bool MovieManager::IsConfigSaved() const
-{
-  return m_save_config;
-}
+bool MovieManager::IsConfigSaved() const { return m_save_config; }
 
-bool MovieManager::IsStartingFromClearSave() const
-{
-  return m_clear_save;
-}
+bool MovieManager::IsStartingFromClearSave() const { return m_clear_save; }
 
 bool MovieManager::IsUsingMemcard(ExpansionInterface::Slot slot) const
 {
-  switch (slot)
-  {
-  case ExpansionInterface::Slot::A:
+  if (slot == ExpansionInterface::Slot::A)
     return (m_memcards & 1) != 0;
-  case ExpansionInterface::Slot::B:
+  if (slot == ExpansionInterface::Slot::B)
     return (m_memcards & 2) != 0;
-  default:
-    return false;
-  }
+  return false;
 }
 
-bool MovieManager::IsNetPlayRecording() const
-{
-  return m_net_play;
-}
+bool MovieManager::IsNetPlayRecording() const { return m_net_play; }
 
-// NOTE: Host Thread
+// Both ChangePads functions only read the current device settings; the
+// result is not stored anywhere, matching the established behaviour.
 void MovieManager::ChangePads()
 {
   if (!Core::IsRunning(m_system))
     return;
 
-  ControllerTypeArray controllers{};
-
-  for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
+  [[maybe_unused]] ControllerTypeArray detected{};
+  for (int channel = 0; channel < SerialInterface::MAX_SI_CHANNELS; ++channel)
   {
-    const SerialInterface::SIDevices si_device = Config::Get(Config::GetInfoForSIDevice(i));
-    if (si_device == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
-      controllers[i] = ControllerType::GBA;
-    else if (SerialInterface::SIDevice_IsGCController(si_device))
-      controllers[i] = ControllerType::GC;
-    else
-      controllers[i] = ControllerType::None;
+    const auto device = Config::Get(Config::GetInfoForSIDevice(channel));
+    ControllerType type = ControllerType::None;
+    if (device == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
+      type = ControllerType::GBA;
+    else if (SerialInterface::SIDevice_IsGCController(device))
+      type = ControllerType::GC;
+    detected[static_cast<size_t>(channel)] = type;
   }
 }
 
-// NOTE: Host / Emu Threads
 void MovieManager::ChangeWiiPads()
 {
-  WiimoteEnabledArray wiimotes{};
-
-  for (int i = 0; i < MAX_WIIMOTES; ++i)
-  {
-    wiimotes[i] = Config::Get(Config::GetInfoForWiimoteSource(i)) != WiimoteSource::None;
-  }
+  [[maybe_unused]] WiimoteEnabledArray detected{};
+  for (int index = 0; index < MAX_WIIMOTES; ++index)
+    detected[static_cast<size_t>(index)] = WiimoteSourceEnabled(index);
 }
 
-// NOTE: Host Thread
 bool MovieManager::BeginRecordingInput(const ControllerTypeArray& controllers,
                                        const WiimoteEnabledArray& wiimotes)
 {
-  if (m_play_mode != PlayMode::None ||
-      (controllers == ControllerTypeArray{} && wiimotes == WiimoteEnabledArray{}))
+  if (m_play_mode != PlayMode::None)
+    return false;
+  if (controllers == ControllerTypeArray{} && wiimotes == WiimoteEnabledArray{})
     return false;
 
   Core::DisplayMessage("Starting movie recording", 2000);
-
-  Core::CPUThreadGuard cpu_thread_guard{m_system};
+  const Core::CPUThreadGuard guard{m_system};
 
   m_controllers = controllers;
   m_wiimotes = wiimotes;
-  m_current_frame = m_total_frames = 0;
-  m_current_lag_count = m_total_lag_count = 0;
-  m_current_input_count = m_total_input_count = 0;
-  m_total_tick_count = m_tick_count_at_last_input = 0;
+  m_current_frame = 0;
+  m_total_frames = 0;
+  m_current_lag_count = 0;
+  m_total_lag_count = 0;
+  m_current_input_count = 0;
+  m_total_input_count = 0;
+  m_total_tick_count = 0;
+  m_tick_count_at_last_input = 0;
   m_bongos = 0;
   m_memcards = 0;
+
+  // The emulated RTC start: the NetPlay clock, a custom RTC or the host clock.
   if (NetPlay::IsNetPlayRunning())
   {
     m_net_play = true;
@@ -476,48 +587,47 @@ bool MovieManager::BeginRecordingInput(const ControllerTypeArray& controllers,
 
   m_rerecords = 0;
 
-  for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
+  for (int channel = 0; channel < SerialInterface::MAX_SI_CHANNELS; ++channel)
   {
-    const SerialInterface::SIDevices si_device = Config::Get(Config::GetInfoForSIDevice(i));
-    if (si_device == SerialInterface::SIDEVICE_GC_TARUKONGA)
-      m_bongos |= (1 << i);
+    if (Config::Get(Config::GetInfoForSIDevice(channel)) == SerialInterface::SIDEVICE_GC_TARUKONGA)
+      m_bongos = static_cast<u8>(m_bongos | (1 << channel));
   }
 
+  // Recording a running game starts from a fresh savestate of it.
   if (Core::IsRunning(m_system))
   {
-    const std::string save_path = File::GetUserPath(D_STATESAVES_IDX) + "dtm.sav";
-    if (File::Exists(save_path))
-      File::Delete(save_path);
-
-    State::SaveAs(m_system, save_path);
+    const std::string state_path = RecordingStartStatePath();
+    if (File::Exists(state_path))
+      File::Delete(state_path);
+    State::SaveAs(m_system, state_path);
     m_recording_from_save_state = true;
 
-    std::thread md5thread(&MovieManager::GetMD5, this);
-    md5thread.detach();
+    std::thread(&MovieManager::GetMD5, this).detach();
     GetSettings();
   }
 
-  // Wiimotes cause desync issues if they're not reset before launching the game
+  // Wii Remotes must start from a reset state or playback desyncs. (For
+  // GameCube games this does nothing harmful.)
   if (!Core::IsRunning(m_system))
-  {
-    // This will also reset the Wiimotes for GameCube games, but that shouldn't do anything
     ::Wiimote::ResetAllWiimotes();
-  }
 
   m_play_mode = PlayMode::Recording;
   m_author = Config::Get(Config::MAIN_MOVIE_MOVIE_AUTHOR);
   m_temp_input.clear();
-
   m_current_byte = 0;
 
-  // This is a bit of a hack, SYSCONF movie code expects the movie layer active for both recording
-  // and playback. That layer is really only designed for playback, not recording. Also, we can't
-  // know if we're using a Wii at this point. So, we'll assume a Wii is used here. In practice,
-  // this shouldn't affect anything for GC (as its only unique setting is language, which will be
-  // taken from base settings as expected)
-  static DTMHeader header = {.bWii = true};
-  ConfigLoaders::SaveToDTM(&header);
-  Config::AddLayer(ConfigLoaders::GenerateMovieConfigLoader(&header));
+  // The SYSCONF code reads the Movie config layer during recording as well as
+  // playback, so install one built from the current settings. Whether this is
+  // a Wii game is unknown here, so assume it is; GameCube only uses the
+  // language from it, which comes from the base settings anyway. The header
+  // lives on because the layer keeps a pointer to it.
+  static DTMHeader s_recording_layer_header = [] {
+    DTMHeader header{};
+    header.bWii = true;
+    return header;
+  }();
+  ConfigLoaders::SaveToDTM(&s_recording_layer_header);
+  Config::AddLayer(ConfigLoaders::GenerateMovieConfigLoader(&s_recording_layer_header));
 
   if (Core::IsRunning(m_system))
     Core::UpdateWantDeterminism(m_system);
@@ -525,255 +635,41 @@ bool MovieManager::BeginRecordingInput(const ControllerTypeArray& controllers,
   return true;
 }
 
-static std::string Analog2DToString(u32 x, u32 y, const std::string& prefix, u32 range = 255)
-{
-  const u32 center = range / 2 + 1;
-
-  if ((x <= 1 || x == center || x >= range) && (y <= 1 || y == center || y >= range))
-  {
-    if (x != center || y != center)
-    {
-      if (x != center && y != center)
-      {
-        return fmt::format("{}:{},{}", prefix, x < center ? "LEFT" : "RIGHT",
-                           y < center ? "DOWN" : "UP");
-      }
-
-      if (x != center)
-      {
-        return fmt::format("{}:{}", prefix, x < center ? "LEFT" : "RIGHT");
-      }
-
-      return fmt::format("{}:{}", prefix, y < center ? "DOWN" : "UP");
-    }
-
-    return "";
-  }
-
-  return fmt::format("{}:{},{}", prefix, x, y);
-}
-
-static std::string Analog1DToString(u32 v, const std::string& prefix, u32 range = 255)
-{
-  if (v == 0)
-    return "";
-
-  if (v == range)
-    return prefix;
-
-  return fmt::format("{}:{}", prefix, v);
-}
-
-// NOTE: CPU Thread
-static std::string GenerateInputDisplayString(ControllerState padState, int controllerID)
-{
-  std::string display_str = fmt::format("P{}:", controllerID + 1);
-
-  if (padState.is_connected)
-  {
-    if (padState.A)
-      display_str += " A";
-    if (padState.B)
-      display_str += " B";
-    if (padState.X)
-      display_str += " X";
-    if (padState.Y)
-      display_str += " Y";
-    if (padState.Z)
-      display_str += " Z";
-    if (padState.Start)
-      display_str += " START";
-
-    if (padState.DPadUp)
-      display_str += " UP";
-    if (padState.DPadDown)
-      display_str += " DOWN";
-    if (padState.DPadLeft)
-      display_str += " LEFT";
-    if (padState.DPadRight)
-      display_str += " RIGHT";
-    if (padState.reset)
-      display_str += " RESET";
-
-    if (padState.TriggerL == 255 || padState.L)
-      display_str += " L";
-    else
-      display_str += Analog1DToString(padState.TriggerL, " L");
-
-    if (padState.TriggerR == 255 || padState.R)
-      display_str += " R";
-    else
-      display_str += Analog1DToString(padState.TriggerR, " R");
-
-    display_str += Analog2DToString(padState.AnalogStickX, padState.AnalogStickY, " ANA");
-    display_str += Analog2DToString(padState.CStickX, padState.CStickY, " C");
-  }
-  else
-  {
-    display_str += " DISCONNECTED";
-  }
-
-  return display_str;
-}
-
-// NOTE: CPU Thread
-static std::string GenerateWiiInputDisplayString(int index, const DesiredWiimoteState& state)
-{
-  std::string display_str = fmt::format("R{}:", index + 1);
-
-  const auto& buttons = state.buttons;
-  if (buttons.hex & WiimoteCommon::ButtonData::BUTTON_MASK)
-  {
-    if (buttons.left)
-      display_str += " LEFT";
-    if (buttons.right)
-      display_str += " RIGHT";
-    if (buttons.down)
-      display_str += " DOWN";
-    if (buttons.up)
-      display_str += " UP";
-    if (buttons.a)
-      display_str += " A";
-    if (buttons.b)
-      display_str += " B";
-    if (buttons.plus)
-      display_str += " +";
-    if (buttons.minus)
-      display_str += " -";
-    if (buttons.one)
-      display_str += " 1";
-    if (buttons.two)
-      display_str += " 2";
-    if (buttons.home)
-      display_str += " HOME";
-  }
-
-  if (state.acceleration != state.DEFAULT_ACCELERATION)
-  {
-    const AccelData& accel_data = state.acceleration;
-    display_str +=
-        fmt::format(" ACC:{},{},{}", accel_data.value.x, accel_data.value.y, accel_data.value.z);
-  }
-
-  if (state.camera_points != state.DEFAULT_CAMERA)
-  {
-    display_str += " IR:";
-    for (auto& point : state.camera_points)
-    {
-      if (point.size == 0xff)
-        display_str += "_,";
-      else
-        display_str += fmt::format("{},{},", point.position.x, point.position.y);
-    }
-    display_str.pop_back();
-  }
-
-  if (state.extension.data.index() != ExtensionNumber::NONE)
-  {
-    const auto ext_visitor = overloaded{
-        [&](const Nunchuk::DesiredState& nunchuk) {
-          const auto bt = nunchuk.GetButtons();
-          if (bt & Nunchuk::BUTTON_C)
-            display_str += " C";
-          if (bt & Nunchuk::BUTTON_Z)
-            display_str += " Z";
-          display_str += fmt::format(" N-ACC:{},{},{}", nunchuk.GetAccelX(), nunchuk.GetAccelY(),
-                                     nunchuk.GetAccelZ());
-          display_str += Analog2DToString(nunchuk.jx, nunchuk.jy, " ANA");
-        },
-        [&](const Classic::DesiredState& cc) {
-          const auto bt = cc.GetButtons();
-          constexpr std::pair<u16, const char*> named_buttons[] = {
-              {Classic::PAD_LEFT, "LEFT"},    {Classic::PAD_RIGHT, "RIGHT"},
-              {Classic::PAD_DOWN, "DOWN"},    {Classic::PAD_UP, "UP"},
-              {Classic::BUTTON_A, "A"},       {Classic::BUTTON_B, "B"},
-              {Classic::BUTTON_X, "X"},       {Classic::BUTTON_Y, "Y"},
-              {Classic::BUTTON_ZL, "ZL"},     {Classic::BUTTON_ZR, "ZR"},
-              {Classic::BUTTON_PLUS, "+"},    {Classic::BUTTON_MINUS, "-"},
-              {Classic::BUTTON_HOME, "HOME"},
-          };
-          for (auto& [value, name] : named_buttons)
-          {
-            if (bt & value)
-            {
-              display_str += ' ';
-              display_str += name;
-            }
-          }
-          constexpr auto trigger_max = (1 << Classic::TRIGGER_BITS) - 1;
-          display_str += Analog1DToString(cc.GetLeftTrigger().value, " L", trigger_max);
-          display_str += Analog1DToString(cc.GetRightTrigger().value, " R", trigger_max);
-
-          constexpr auto lstick_max = (1 << Classic::LEFT_STICK_BITS) - 1;
-          const auto left_stick = cc.GetLeftStick().value;
-          display_str += Analog2DToString(left_stick.x, left_stick.y, " ANA", lstick_max);
-
-          constexpr auto rstick_max = (1 << Classic::RIGHT_STICK_BITS) - 1;
-          const auto right_stick = cc.GetRightStick().value;
-          display_str += Analog2DToString(right_stick.x, right_stick.y, " R-ANA", rstick_max);
-        },
-        [&](const Guitar::DesiredState&) { display_str += " Guitar"; },
-        [&](const Drums::DesiredState&) { display_str += " Drums"; },
-        [&](const Turntable::DesiredState&) { display_str += " Turntable"; },
-        [&](const UDrawTablet::DesiredState&) { display_str += " UDraw"; },
-        [&](const DrawsomeTablet::DesiredState&) { display_str += " Drawsome"; },
-        [&](const TaTaCon::DesiredState&) { display_str += " TaTaCon"; },
-        [&](const Shinkansen::DesiredState&) { display_str += " Shinkansen"; },
-        [](const auto& arg) {
-          static_assert(std::is_same_v<std::monostate, std::decay_t<decltype(arg)>>,
-                        "unimplemented extension");
-        },
-    };
-    std::visit(ext_visitor, state.extension.data);
-  }
-
-  return display_str;
-}
-
-// NOTE: CPU Thread
 void MovieManager::CheckPadStatus(const GCPadStatus* PadStatus, int controllerID)
 {
-  m_pad_state.A = ((PadStatus->button & PAD_BUTTON_A) != 0);
-  m_pad_state.B = ((PadStatus->button & PAD_BUTTON_B) != 0);
-  m_pad_state.X = ((PadStatus->button & PAD_BUTTON_X) != 0);
-  m_pad_state.Y = ((PadStatus->button & PAD_BUTTON_Y) != 0);
-  m_pad_state.Z = ((PadStatus->button & PAD_TRIGGER_Z) != 0);
-  m_pad_state.Start = ((PadStatus->button & PAD_BUTTON_START) != 0);
+  const u16 held = PadStatus->button;
+  const auto has = [held](u16 mask) { return (held & mask) != 0; };
 
-  m_pad_state.DPadUp = ((PadStatus->button & PAD_BUTTON_UP) != 0);
-  m_pad_state.DPadDown = ((PadStatus->button & PAD_BUTTON_DOWN) != 0);
-  m_pad_state.DPadLeft = ((PadStatus->button & PAD_BUTTON_LEFT) != 0);
-  m_pad_state.DPadRight = ((PadStatus->button & PAD_BUTTON_RIGHT) != 0);
+  ControllerState& s = m_pad_state;
+  s.Start = has(PAD_BUTTON_START);
+  s.A = has(PAD_BUTTON_A);
+  s.B = has(PAD_BUTTON_B);
+  s.X = has(PAD_BUTTON_X);
+  s.Y = has(PAD_BUTTON_Y);
+  s.Z = has(PAD_TRIGGER_Z);
+  s.DPadUp = has(PAD_BUTTON_UP);
+  s.DPadDown = has(PAD_BUTTON_DOWN);
+  s.DPadLeft = has(PAD_BUTTON_LEFT);
+  s.DPadRight = has(PAD_BUTTON_RIGHT);
+  s.L = has(PAD_TRIGGER_L);
+  s.R = has(PAD_TRIGGER_R);
+  s.get_origin = has(PAD_GET_ORIGIN);
+  s.is_connected = PadStatus->isConnected;
 
-  m_pad_state.L = ((PadStatus->button & PAD_TRIGGER_L) != 0);
-  m_pad_state.R = ((PadStatus->button & PAD_TRIGGER_R) != 0);
-  m_pad_state.TriggerL = PadStatus->triggerLeft;
-  m_pad_state.TriggerR = PadStatus->triggerRight;
+  s.TriggerL = PadStatus->triggerLeft;
+  s.TriggerR = PadStatus->triggerRight;
+  s.AnalogStickX = PadStatus->stickX;
+  s.AnalogStickY = PadStatus->stickY;
+  s.CStickX = PadStatus->substickX;
+  s.CStickY = PadStatus->substickY;
 
-  m_pad_state.AnalogStickX = PadStatus->stickX;
-  m_pad_state.AnalogStickY = PadStatus->stickY;
+  // Disc swaps and resets are one-shot events attached to the next poll.
+  s.disc = std::exchange(m_has_disc_change, false);
+  s.reset = std::exchange(m_reset, false);
 
-  m_pad_state.CStickX = PadStatus->substickX;
-  m_pad_state.CStickY = PadStatus->substickY;
-
-  m_pad_state.is_connected = PadStatus->isConnected;
-
-  m_pad_state.get_origin = (PadStatus->button & PAD_GET_ORIGIN) != 0;
-
-  m_pad_state.disc = m_has_disc_change;
-  m_has_disc_change = false;
-  m_pad_state.reset = m_reset;
-  m_reset = false;
-
-  {
-    std::string display_str = GenerateInputDisplayString(m_pad_state, controllerID);
-
-    std::lock_guard guard(m_input_display_lock);
-    m_input_display[controllerID] = std::move(display_str);
-  }
+  SetInputDisplay(static_cast<size_t>(controllerID), PadDisplayLine(s, controllerID));
 }
 
-// NOTE: CPU Thread
 void MovieManager::RecordInput(const GCPadStatus* PadStatus, int controllerID)
 {
   if (!IsRecordingInput() || !IsUsingPad(controllerID))
@@ -781,25 +677,19 @@ void MovieManager::RecordInput(const GCPadStatus* PadStatus, int controllerID)
 
   CheckPadStatus(PadStatus, controllerID);
 
-  m_temp_input.resize(m_current_byte + sizeof(ControllerState));
-  memcpy(&m_temp_input[m_current_byte], &m_pad_state, sizeof(ControllerState));
-  m_current_byte += sizeof(ControllerState);
+  m_temp_input.resize(m_current_byte + PAD_RECORD_SIZE);
+  std::memcpy(m_temp_input.data() + m_current_byte, &m_pad_state, PAD_RECORD_SIZE);
+  m_current_byte += PAD_RECORD_SIZE;
 }
 
-// NOTE: CPU Thread
 void MovieManager::CheckWiimoteStatus(int wiimote, const DesiredWiimoteState& desired_state)
 {
   SetPolledDevice();
-
-  {
-    std::string display_str = GenerateWiiInputDisplayString(wiimote, desired_state);
-
-    std::lock_guard guard(m_input_display_lock);
-    m_input_display[wiimote + 4] = std::move(display_str);
-  }
+  SetInputDisplay(FIRST_WIIMOTE_LINE + static_cast<size_t>(wiimote),
+                  WiimoteDisplayLine(wiimote, desired_state));
 
   if (IsRecordingInput())
-    RecordWiimote(wiimote, SerializeDesiredState(desired_state));
+    RecordWiimote(wiimote, WiimoteEmu::SerializeDesiredState(desired_state));
 }
 
 void MovieManager::RecordWiimote(int wiimote, const SerializedWiimoteState& serialized_state)
@@ -809,64 +699,66 @@ void MovieManager::RecordWiimote(int wiimote, const SerializedWiimoteState& seri
 
   InputUpdate();
 
-  const u8 size = serialized_state.length;
-  m_temp_input.resize(m_current_byte + size + 1);
-  m_temp_input[m_current_byte++] = size;
-  std::copy_n(serialized_state.data.data(), size, m_temp_input.data() + m_current_byte);
-  m_current_byte += size;
+  // Each Wii Remote record is a length byte followed by that many bytes.
+  const u8 length = serialized_state.length;
+  m_temp_input.resize(m_current_byte + 1 + length);
+  m_temp_input[m_current_byte] = length;
+  ++m_current_byte;
+  std::copy_n(serialized_state.data.begin(), length, m_temp_input.data() + m_current_byte);
+  m_current_byte += length;
 }
 
-// NOTE: EmuThread / Host Thread
 void MovieManager::ReadHeader()
 {
-  for (int i = 0; i < 4; ++i)
+  const DTMHeader& h = m_temp_header;
+  for (size_t port = 0; port < 4; ++port)
   {
-    if (m_temp_header.GBAControllers & (1 << i))
-      m_controllers[i] = ControllerType::GBA;
-    else if (m_temp_header.controllers & (1 << i))
-      m_controllers[i] = ControllerType::GC;
+    const u8 bit = static_cast<u8>(1u << port);
+    if ((h.GBAControllers & bit) != 0)
+      m_controllers[port] = ControllerType::GBA;
+    else if ((h.controllers & bit) != 0)
+      m_controllers[port] = ControllerType::GC;
     else
-      m_controllers[i] = ControllerType::None;
-    m_wiimotes[i] = (m_temp_header.controllers & (1 << (i + 4))) != 0;
+      m_controllers[port] = ControllerType::None;
+    m_wiimotes[port] = (h.controllers >> (port + 4) & 1) != 0;
   }
-  m_recording_start_time = m_temp_header.recordingStartTime;
-  if (m_rerecords < m_temp_header.numRerecords)
-    m_rerecords = m_temp_header.numRerecords;
 
-  if (m_temp_header.bSaveConfig)
-  {
-    m_save_config = true;
-    Config::AddLayer(ConfigLoaders::GenerateMovieConfigLoader(&m_temp_header));
-    m_clear_save = m_temp_header.bClearSave;
-    m_memcards = m_temp_header.memcards;
-    m_bongos = m_temp_header.bongos;
-    m_net_play = m_temp_header.bNetPlay;
-    m_revision = m_temp_header.revision;
-  }
-  else
+  m_recording_start_time = h.recordingStartTime;
+  m_rerecords = std::max(m_rerecords, h.numRerecords);
+
+  if (!h.bSaveConfig)
   {
     GetSettings();
   }
+  else
+  {
+    m_save_config = true;
+    Config::AddLayer(ConfigLoaders::GenerateMovieConfigLoader(&m_temp_header));
+    m_clear_save = h.bClearSave;
+    m_memcards = h.memcards;
+    m_bongos = h.bongos;
+    m_net_play = h.bNetPlay;
+    m_revision = h.revision;
+  }
 
-  m_disc_change_filename = {m_temp_header.discChange.begin(), m_temp_header.discChange.end()};
-  m_author = {m_temp_header.author.begin(), m_temp_header.author.end()};
-  m_md5 = m_temp_header.md5;
-  m_dsp_irom_hash = m_temp_header.DSPiromHash;
-  m_dsp_coef_hash = m_temp_header.DSPcoefHash;
+  // Both strings keep the header's full fixed width, padding included.
+  m_disc_change_filename.assign(h.discChange.begin(), h.discChange.end());
+  m_author.assign(h.author.begin(), h.author.end());
+  m_md5 = h.md5;
+  m_dsp_irom_hash = h.DSPiromHash;
+  m_dsp_coef_hash = h.DSPcoefHash;
 }
 
-// NOTE: Host Thread
 bool MovieManager::PlayInput(const std::string& movie_path,
                              std::optional<std::string>* savestate_path)
 {
   if (m_play_mode != PlayMode::None)
     return false;
 
-  File::IOFile recording_file(movie_path, "rb");
-  if (!recording_file.ReadArray(&m_temp_header, 1))
+  File::IOFile movie(movie_path, "rb");
+  if (!movie.ReadArray(&m_temp_header, 1))
     return false;
-
-  if (!IsMovieHeader(m_temp_header.filetype))
+  if (m_temp_header.filetype != DTM_MAGIC)
   {
     PanicAlertFmtT("Invalid recording file");
     return false;
@@ -877,314 +769,277 @@ bool MovieManager::PlayInput(const std::string& movie_path,
   if (AchievementManager::GetInstance().IsHardcoreModeActive())
     return false;
 
-  m_total_frames = m_temp_header.frameCount;
-  m_total_lag_count = m_temp_header.lagCount;
-  m_total_input_count = m_temp_header.inputCount;
-  m_total_tick_count = m_temp_header.tickCount;
+  // Playback starts at the beginning and runs to the recorded totals.
   m_current_frame = 0;
-  m_current_lag_count = 0;
   m_current_input_count = 0;
-
+  m_current_lag_count = 0;
+  m_total_frames = m_temp_header.frameCount;
+  m_total_input_count = m_temp_header.inputCount;
+  m_total_lag_count = m_temp_header.lagCount;
+  m_total_tick_count = m_temp_header.tickCount;
   m_play_mode = PlayMode::Playing;
 
-  // Wiimotes cause desync issues if they're not reset before launching the game
+  // Same reason as in BeginRecordingInput: reset Wii Remotes before boot.
   ::Wiimote::ResetAllWiimotes();
-
   Core::UpdateWantDeterminism(m_system);
 
-  m_temp_input.resize(recording_file.GetSize() - 256);
-  recording_file.ReadBytes(m_temp_input.data(), m_temp_input.size());
+  m_temp_input.resize(movie.GetSize() - HEADER_SIZE);
+  movie.ReadBytes(m_temp_input.data(), m_temp_input.size());
   m_current_byte = 0;
-  recording_file.Close();
+  movie.Close();
 
-  // Load savestate (and skip to frame data)
-  if (m_temp_header.bFromSaveState && savestate_path)
+  if (!m_temp_header.bFromSaveState || savestate_path == nullptr)
+    return true;
+
+  // The movie starts from <movie>.sav; the caller loads it.
+  const std::string state_file = movie_path + ".sav";
+  if (File::Exists(state_file))
   {
-    const std::string savestate_path_temp = movie_path + ".sav";
-    if (File::Exists(savestate_path_temp))
-    {
-      *savestate_path = savestate_path_temp;
-    }
-    else
-    {
-      PanicAlertFmtT("Movie {0} indicates that it starts from a savestate, but {1} doesn't exist. "
-                     "The movie will likely not sync!",
-                     movie_path, savestate_path_temp);
-    }
-
-    m_recording_from_save_state = true;
+    *savestate_path = state_file;
+  }
+  else
+  {
+    PanicAlertFmtT("Movie {0} indicates that it starts from a savestate, but {1} "
+                   "doesn't exist. The movie will likely not sync!",
+                   movie_path, state_file);
+  }
+  m_recording_from_save_state = true;
 
 #ifdef USE_RETRO_ACHIEVEMENTS
-    // On the chance someone tries to re-enable before the TAS can start
-    Config::SetBase(Config::RA_HARDCORE_ENABLED, false);
+  // Keep hardcore mode from being turned back on before the movie starts.
+  Config::SetBase(Config::RA_HARDCORE_ENABLED, false);
 #endif  // USE_RETRO_ACHIEVEMENTS
 
-    LoadInput(movie_path);
-  }
-
+  LoadInput(movie_path);
   return true;
 }
 
 void MovieManager::DoState(PointerWrap& p)
 {
-  // many of these could be useful to save even when no movie is active,
-  // and the data is tiny, so let's just save it regardless of movie state.
+  // Saved whether or not a movie runs; the totals come back from the movie
+  // file in LoadInput.
   p.Do(m_current_frame);
   p.Do(m_current_byte);
   p.Do(m_current_lag_count);
   p.Do(m_current_input_count);
   p.Do(m_polled);
   p.Do(m_tick_count_at_last_input);
-  // other variables (such as s_totalBytes and m_total_frames) are set in LoadInput
 }
 
-// NOTE: Host Thread
+void MovieManager::SwitchPlayMode(PlayMode mode, const char* message)
+{
+  if (m_play_mode == mode)
+    return;
+  m_play_mode = mode;
+  Core::UpdateWantDeterminism(m_system);
+  Core::DisplayMessage(message, 2000);
+}
+
+// Explains to the user where the movie in a loaded savestate first differs
+// from the one in memory.
+void MovieManager::ReportMismatch(const std::vector<u8>& saved_input, size_t index)
+{
+  if (IsUsingWiimote(0))
+  {
+    const size_t file_offset = index + HEADER_SIZE;
+    PanicAlertFmtT("Warning: You loaded a save whose movie mismatches on byte {0} "
+                   "({1:#x}). You should load another save before continuing, or "
+                   "load this state with read-only mode off. Otherwise you'll "
+                   "probably get a desync.",
+                   file_offset, file_offset);
+    std::ranges::copy(saved_input, m_temp_input.begin());
+    return;
+  }
+
+  const size_t frame = index / PAD_RECORD_SIZE;
+  ControllerState c;
+  ControllerState m;
+  std::memcpy(&c, m_temp_input.data() + frame * PAD_RECORD_SIZE, PAD_RECORD_SIZE);
+  std::memcpy(&m, saved_input.data() + frame * PAD_RECORD_SIZE, PAD_RECORD_SIZE);
+  // The savestate's "Connected" value repeats the current movie's bit; this
+  // is the established output.
+  PanicAlertFmtT("Warning: You loaded a save whose movie mismatches on frame "
+                 "{0}. You should load another save before continuing, or load "
+                 "this state with read-only mode off. Otherwise you'll probably "
+                 "get a desync.\n\nMore information: The current movie is {1} "
+                 "frames long and the savestate's movie is {2} frames long.\n\n"
+                 "On frame {3}, the current movie presses:\nStart={4}, A={5}, "
+                 "B={6}, X={7}, Y={8}, Z={9}, DUp={10}, DDown={11}, DLeft={12}, "
+                 "DRight={13}, L={14}, R={15}, LT={16}, RT={17}, AnalogX={18}, "
+                 "AnalogY={19}, CX={20}, CY={21}, Connected={22}\n\nOn frame "
+                 "{23}, the savestate's movie presses:\nStart={24}, A={25}, "
+                 "B={26}, X={27}, Y={28}, Z={29}, DUp={30}, DDown={31}, "
+                 "DLeft={32}, DRight={33}, L={34}, R={35}, LT={36}, RT={37}, "
+                 "AnalogX={38}, AnalogY={39}, CX={40}, CY={41}, Connected={42}",
+                 frame, m_total_frames, m_temp_header.frameCount,  //
+                 frame, c.Start, c.A, c.B, c.X, c.Y, c.Z, c.DPadUp, c.DPadDown, c.DPadLeft,
+                 c.DPadRight, c.L, c.R, c.TriggerL, c.TriggerR, c.AnalogStickX, c.AnalogStickY,
+                 c.CStickX, c.CStickY, c.is_connected,  //
+                 frame, m.Start, m.A, m.B, m.X, m.Y, m.Z, m.DPadUp, m.DPadDown, m.DPadLeft,
+                 m.DPadRight, m.L, m.R, m.TriggerL, m.TriggerR, m.AnalogStickX, m.AnalogStickY,
+                 m.CStickX, m.CStickY, c.is_connected);
+}
+
 void MovieManager::LoadInput(const std::string& movie_path)
 {
-  File::IOFile t_record;
-  if (!t_record.Open(movie_path, "r+b"))
+  File::IOFile movie;
+  if (!movie.Open(movie_path, "r+b"))
   {
     PanicAlertFmtT("Failed to read {0}", movie_path);
     EndPlayInput(false);
     return;
   }
 
-  t_record.ReadArray(&m_temp_header, 1);
-
-  if (!IsMovieHeader(m_temp_header.filetype))
+  movie.ReadArray(&m_temp_header, 1);
+  if (m_temp_header.filetype != DTM_MAGIC)
   {
     PanicAlertFmtT("Savestate movie {0} is corrupted, movie recording stopping...", movie_path);
     EndPlayInput(false);
     return;
   }
   ReadHeader();
+
+  // Loading a state in read+write mode is a rerecord; note it in the file.
   if (!m_read_only)
   {
-    m_rerecords++;
+    ++m_rerecords;
     m_temp_header.numRerecords = m_rerecords;
-    t_record.Seek(0, File::SeekOrigin::Begin);
-    t_record.WriteArray(&m_temp_header, 1);
+    movie.Seek(0, File::SeekOrigin::Begin);
+    movie.WriteArray(&m_temp_header, 1);
   }
 
   ChangePads();
   if (m_system.IsWii())
     ChangeWiiPads();
 
-  u64 totalSavedBytes = t_record.GetSize() - 256;
+  const u64 file_input_size = movie.GetSize() - HEADER_SIZE;
+  bool past_end = false;
 
-  bool afterEnd = false;
-  // This can only happen if the user manually deletes data from the dtm.
-  if (m_current_byte > totalSavedBytes)
+  // Only possible if the .dtm was cut short by hand.
+  if (m_current_byte > file_input_size)
   {
-    PanicAlertFmtT(
-        "Warning: You loaded a save whose movie ends before the current frame in the save "
-        "(byte {0} < {1}) (frame {2} < {3}). You should load another save before continuing.",
-        totalSavedBytes + 256, m_current_byte + 256, m_temp_header.frameCount, m_current_frame);
-    afterEnd = true;
+    PanicAlertFmtT("Warning: You loaded a save whose movie ends before the current "
+                   "frame in the save (byte {0} < {1}) (frame {2} < {3}). You "
+                   "should load another save before continuing.",
+                   file_input_size + HEADER_SIZE, m_current_byte + HEADER_SIZE,
+                   m_temp_header.frameCount, m_current_frame);
+    past_end = true;
   }
 
   if (!m_read_only || m_temp_input.empty())
   {
+    // Take the whole movie from the file.
     m_total_frames = m_temp_header.frameCount;
     m_total_lag_count = m_temp_header.lagCount;
     m_total_input_count = m_temp_header.inputCount;
-    m_total_tick_count = m_tick_count_at_last_input = m_temp_header.tickCount;
+    m_total_tick_count = m_temp_header.tickCount;
+    m_tick_count_at_last_input = m_temp_header.tickCount;
 
-    m_temp_input.resize(static_cast<size_t>(totalSavedBytes));
-    t_record.ReadBytes(m_temp_input.data(), m_temp_input.size());
+    m_temp_input.resize(static_cast<size_t>(file_input_size));
+    movie.ReadBytes(m_temp_input.data(), m_temp_input.size());
   }
-  else if (m_current_byte > 0)
+  else if (m_current_byte > 0 && m_current_byte <= file_input_size)
   {
-    if (m_current_byte > totalSavedBytes)
+    // Read-only with a movie in memory: the state's movie must agree with it
+    // up to the state's position.
+    if (m_current_byte > m_temp_input.size())
     {
-    }
-    else if (m_current_byte > m_temp_input.size())
-    {
-      afterEnd = true;
-      PanicAlertFmtT(
-          "Warning: You loaded a save that's after the end of the current movie. (byte {0} "
-          "> {1}) (input {2} > {3}). You should load another save before continuing, or load "
-          "this state with read-only mode off.",
-          m_current_byte + 256, m_temp_input.size() + 256, m_current_input_count,
-          m_total_input_count);
-    }
-    else if (m_current_byte > 0 && !m_temp_input.empty())
-    {
-      // verify identical from movie start to the save's current frame
-      std::vector<u8> movInput(m_current_byte);
-      t_record.ReadArray(movInput.data(), movInput.size());
-
-      const auto mismatch_result = std::ranges::mismatch(movInput, m_temp_input);
-
-      if (mismatch_result.in1 != movInput.end())
-      {
-        const ptrdiff_t mismatch_index = std::distance(movInput.begin(), mismatch_result.in1);
-
-        // this is a "you did something wrong" alert for the user's benefit.
-        // we'll try to say what's going on in excruciating detail, otherwise the user might not
-        // believe us.
-        if (IsUsingWiimote(0))
-        {
-          const size_t byte_offset = static_cast<size_t>(mismatch_index) + sizeof(DTMHeader);
-
-          // TODO: more detail
-          PanicAlertFmtT("Warning: You loaded a save whose movie mismatches on byte {0} ({1:#x}). "
-                         "You should load another save before continuing, or load this state with "
-                         "read-only mode off. Otherwise you'll probably get a desync.",
-                         byte_offset, byte_offset);
-
-          std::ranges::copy(movInput, m_temp_input.begin());
-        }
-        else
-        {
-          const ptrdiff_t frame = mismatch_index / sizeof(ControllerState);
-          ControllerState curPadState;
-          memcpy(&curPadState, &m_temp_input[frame * sizeof(ControllerState)],
-                 sizeof(ControllerState));
-          ControllerState movPadState;
-          memcpy(&movPadState, &movInput[frame * sizeof(ControllerState)], sizeof(ControllerState));
-          PanicAlertFmtT(
-              "Warning: You loaded a save whose movie mismatches on frame {0}. You should load "
-              "another save before continuing, or load this state with read-only mode off. "
-              "Otherwise you'll probably get a desync.\n\n"
-              "More information: The current movie is {1} frames long and the savestate's movie "
-              "is {2} frames long.\n\n"
-              "On frame {3}, the current movie presses:\n"
-              "Start={4}, A={5}, B={6}, X={7}, Y={8}, Z={9}, DUp={10}, DDown={11}, DLeft={12}, "
-              "DRight={13}, L={14}, R={15}, LT={16}, RT={17}, AnalogX={18}, AnalogY={19}, CX={20}, "
-              "CY={21}, Connected={22}"
-              "\n\n"
-              "On frame {23}, the savestate's movie presses:\n"
-              "Start={24}, A={25}, B={26}, X={27}, Y={28}, Z={29}, DUp={30}, DDown={31}, "
-              "DLeft={32}, DRight={33}, L={34}, R={35}, LT={36}, RT={37}, AnalogX={38}, "
-              "AnalogY={39}, CX={40}, CY={41}, Connected={42}",
-              frame, m_total_frames, m_temp_header.frameCount, frame, curPadState.Start,
-              curPadState.A, curPadState.B, curPadState.X, curPadState.Y, curPadState.Z,
-              curPadState.DPadUp, curPadState.DPadDown, curPadState.DPadLeft, curPadState.DPadRight,
-              curPadState.L, curPadState.R, curPadState.TriggerL, curPadState.TriggerR,
-              curPadState.AnalogStickX, curPadState.AnalogStickY, curPadState.CStickX,
-              curPadState.CStickY, curPadState.is_connected, frame, movPadState.Start,
-              movPadState.A, movPadState.B, movPadState.X, movPadState.Y, movPadState.Z,
-              movPadState.DPadUp, movPadState.DPadDown, movPadState.DPadLeft, movPadState.DPadRight,
-              movPadState.L, movPadState.R, movPadState.TriggerL, movPadState.TriggerR,
-              movPadState.AnalogStickX, movPadState.AnalogStickY, movPadState.CStickX,
-              movPadState.CStickY, curPadState.is_connected);
-        }
-      }
-    }
-  }
-  t_record.Close();
-
-  m_save_config = m_temp_header.bSaveConfig;
-
-  if (!afterEnd)
-  {
-    if (m_read_only)
-    {
-      if (m_play_mode != PlayMode::Playing)
-      {
-        m_play_mode = PlayMode::Playing;
-        Core::UpdateWantDeterminism(m_system);
-        Core::DisplayMessage("Switched to playback", 2000);
-      }
+      past_end = true;
+      PanicAlertFmtT("Warning: You loaded a save that's after the end of the current "
+                     "movie. (byte {0} > {1}) (input {2} > {3}). You should load "
+                     "another save before continuing, or load this state with "
+                     "read-only mode off.",
+                     m_current_byte + HEADER_SIZE, m_temp_input.size() + HEADER_SIZE,
+                     m_current_input_count, m_total_input_count);
     }
     else
     {
-      if (m_play_mode != PlayMode::Recording)
+      std::vector<u8> saved_input(static_cast<size_t>(m_current_byte));
+      movie.ReadArray(saved_input.data(), saved_input.size());
+      const auto first_difference = std::ranges::mismatch(saved_input, m_temp_input).in1;
+      if (first_difference != saved_input.end())
       {
-        m_play_mode = PlayMode::Recording;
-        Core::UpdateWantDeterminism(m_system);
-        Core::DisplayMessage("Switched to recording", 2000);
+        ReportMismatch(saved_input,
+                       static_cast<size_t>(std::distance(saved_input.begin(), first_difference)));
       }
     }
   }
-  else
-  {
+  movie.Close();
+
+  m_save_config = m_temp_header.bSaveConfig;
+
+  if (past_end)
     EndPlayInput(false);
-  }
+  else if (m_read_only)
+    SwitchPlayMode(PlayMode::Playing, "Switched to playback");
+  else
+    SwitchPlayMode(PlayMode::Recording, "Switched to recording");
 }
 
-// NOTE: CPU Thread
 void MovieManager::CheckInputEnd()
 {
-  if (m_current_byte >= m_temp_input.size() ||
-      (m_system.GetCoreTiming().GetTicks() > m_total_tick_count &&
-       !IsRecordingInputFromSaveState()))
+  const bool out_of_data = m_current_byte >= m_temp_input.size();
+  // A movie from boot also ends once the recorded tick count has passed.
+  if (out_of_data || (m_system.GetCoreTiming().GetTicks() > m_total_tick_count &&
+                      !IsRecordingInputFromSaveState()))
   {
     EndPlayInput(!m_read_only);
   }
 }
 
-// NOTE: CPU Thread
 void MovieManager::PlayController(GCPadStatus* PadStatus, int controllerID)
 {
-  // Correct playback is entirely dependent on the emulator polling the controllers
-  // in the same order done during recording
+  // Playback relies on the game polling pads in the same order as when it was
+  // recorded.
   if (!IsPlayingInput() || !IsUsingPad(controllerID) || m_temp_input.empty())
     return;
 
-  if (m_current_byte + sizeof(ControllerState) > m_temp_input.size())
+  if (m_current_byte + PAD_RECORD_SIZE > m_temp_input.size())
   {
     PanicAlertFmtT("Premature movie end in PlayController. {0} + {1} > {2}", m_current_byte,
-                   sizeof(ControllerState), m_temp_input.size());
+                   PAD_RECORD_SIZE, m_temp_input.size());
     EndPlayInput(!m_read_only);
     return;
   }
 
-  memcpy(&m_pad_state, &m_temp_input[m_current_byte], sizeof(ControllerState));
-  m_current_byte += sizeof(ControllerState);
+  std::memcpy(&m_pad_state, m_temp_input.data() + m_current_byte, PAD_RECORD_SIZE);
+  m_current_byte += PAD_RECORD_SIZE;
 
-  PadStatus->isConnected = m_pad_state.is_connected;
+  const ControllerState& s = m_pad_state;
+  PadStatus->isConnected = s.is_connected;
+  PadStatus->triggerLeft = s.TriggerL;
+  PadStatus->triggerRight = s.TriggerR;
+  PadStatus->stickX = s.AnalogStickX;
+  PadStatus->stickY = s.AnalogStickY;
+  PadStatus->substickX = s.CStickX;
+  PadStatus->substickY = s.CStickY;
 
-  PadStatus->triggerLeft = m_pad_state.TriggerL;
-  PadStatus->triggerRight = m_pad_state.TriggerR;
-
-  PadStatus->stickX = m_pad_state.AnalogStickX;
-  PadStatus->stickY = m_pad_state.AnalogStickY;
-
-  PadStatus->substickX = m_pad_state.CStickX;
-  PadStatus->substickY = m_pad_state.CStickY;
-
-  PadStatus->button = 0;
-  PadStatus->button |= PAD_USE_ORIGIN;
-
-  if (m_pad_state.A)
-  {
-    PadStatus->button |= PAD_BUTTON_A;
+  u16 buttons = PAD_USE_ORIGIN;
+  const auto set_if = [&buttons](bool pressed, u16 mask) {
+    if (pressed)
+      buttons |= mask;
+  };
+  set_if(s.A, PAD_BUTTON_A);
+  set_if(s.B, PAD_BUTTON_B);
+  set_if(s.X, PAD_BUTTON_X);
+  set_if(s.Y, PAD_BUTTON_Y);
+  set_if(s.Z, PAD_TRIGGER_Z);
+  set_if(s.Start, PAD_BUTTON_START);
+  set_if(s.DPadUp, PAD_BUTTON_UP);
+  set_if(s.DPadDown, PAD_BUTTON_DOWN);
+  set_if(s.DPadLeft, PAD_BUTTON_LEFT);
+  set_if(s.DPadRight, PAD_BUTTON_RIGHT);
+  set_if(s.L, PAD_TRIGGER_L);
+  set_if(s.R, PAD_TRIGGER_R);
+  set_if(s.get_origin, PAD_GET_ORIGIN);
+  PadStatus->button = buttons;
+  // A and B are also analog; a press is played back as fully in.
+  if (s.A)
     PadStatus->analogA = 0xFF;
-  }
-  if (m_pad_state.B)
-  {
-    PadStatus->button |= PAD_BUTTON_B;
+  if (s.B)
     PadStatus->analogB = 0xFF;
-  }
-  if (m_pad_state.X)
-    PadStatus->button |= PAD_BUTTON_X;
-  if (m_pad_state.Y)
-    PadStatus->button |= PAD_BUTTON_Y;
-  if (m_pad_state.Z)
-    PadStatus->button |= PAD_TRIGGER_Z;
-  if (m_pad_state.Start)
-    PadStatus->button |= PAD_BUTTON_START;
 
-  if (m_pad_state.DPadUp)
-    PadStatus->button |= PAD_BUTTON_UP;
-  if (m_pad_state.DPadDown)
-    PadStatus->button |= PAD_BUTTON_DOWN;
-  if (m_pad_state.DPadLeft)
-    PadStatus->button |= PAD_BUTTON_LEFT;
-  if (m_pad_state.DPadRight)
-    PadStatus->button |= PAD_BUTTON_RIGHT;
-
-  if (m_pad_state.L)
-    PadStatus->button |= PAD_TRIGGER_L;
-  if (m_pad_state.R)
-    PadStatus->button |= PAD_TRIGGER_R;
-
-  if (m_pad_state.get_origin)
-    PadStatus->button |= PAD_GET_ORIGIN;
-
-  if (m_pad_state.disc)
+  if (s.disc)
   {
     const Core::CPUThreadGuard guard(m_system);
     if (!m_system.GetDVDInterface().AutoChangeDisc(guard))
@@ -1194,263 +1049,250 @@ void MovieManager::PlayController(GCPadStatus* PadStatus, int controllerID)
     }
   }
 
-  if (m_pad_state.reset)
+  if (s.reset)
     m_system.GetProcessorInterface().ResetButton_Tap();
 
-  {
-    std::string display_str = GenerateInputDisplayString(m_pad_state, controllerID);
-
-    std::lock_guard guard(m_input_display_lock);
-    m_input_display[controllerID] = std::move(display_str);
-  }
+  SetInputDisplay(static_cast<size_t>(controllerID), PadDisplayLine(s, controllerID));
 
   CheckInputEnd();
 }
 
-// NOTE: CPU Thread
 bool MovieManager::PlayWiimote(int wiimote, DesiredWiimoteState* desired_state)
 {
   if (!IsPlayingInput() || !IsUsingWiimote(wiimote) || m_temp_input.empty())
     return false;
 
-  if (m_current_byte + sizeof(u8) > m_temp_input.size())
+  // Failing any check below ends playback (or resumes recording).
+  const auto give_up = [this] {
+    EndPlayInput(!m_read_only);
+    return false;
+  };
+
+  if (m_current_byte + 1 > m_temp_input.size())
   {
     PanicAlertFmtT("Premature movie end in PlayWiimote. {0} + 1 > {1}", m_current_byte,
                    m_temp_input.size());
-    EndPlayInput(!m_read_only);
-    return false;
+    return give_up();
   }
 
   SerializedWiimoteState serialized;
   serialized.length = m_temp_input[m_current_byte];
-
-  if (serialized.length > serialized.data.size())
+  const size_t length = serialized.length;
+  if (length > serialized.data.size())
   {
     PanicAlertFmtT("Invalid serialized length:{0} in PlayWiimote. byte:{1}",
                    static_cast<int>(serialized.length), m_current_byte);
-    EndPlayInput(!m_read_only);
-    return false;
+    return give_up();
   }
 
   ++m_current_byte;
-  if (m_current_byte + serialized.length > m_temp_input.size())
+  if (m_current_byte + length > m_temp_input.size())
   {
     PanicAlertFmtT("Premature movie end in PlayWiimote. {0} + {1} > {2}", m_current_byte,
                    static_cast<int>(serialized.length), m_temp_input.size());
-    EndPlayInput(!m_read_only);
-    return false;
+    return give_up();
   }
 
-  std::copy_n(m_temp_input.data() + m_current_byte, serialized.length, serialized.data.data());
+  std::copy_n(m_temp_input.data() + m_current_byte, length,
+              serialized.data.begin());
   if (!WiimoteEmu::DeserializeDesiredState(desired_state, serialized))
   {
+    const bool no_gc_pads = m_controllers == ControllerTypeArray{};
     PanicAlertFmtT("Aborting playback. Error in DeserializeDesiredState. byte:{0}{1}",
                    m_current_byte,
-                   (m_controllers == ControllerTypeArray{}) ?
-                       " Try re-creating the recording with all GameCube controllers "
-                       "disabled (in Configure > GameCube > Device Settings)." :
-                       "");
-    EndPlayInput(!m_read_only);
-    return false;
+                   no_gc_pads ? "" :
+                                " Try re-creating the recording with all GameCube "
+                                "controllers disabled (in Configure > GameCube > "
+                                "Device Settings).");
+    return give_up();
   }
 
-  m_current_byte += serialized.length;
+  m_current_byte += length;
   ++m_current_input_count;
 
   CheckInputEnd();
   return true;
 }
 
-// NOTE: Host / EmuThread / CPU Thread
 void MovieManager::EndPlayInput(bool cont)
 {
   if (cont)
   {
-    // If !IsMovieActive(), changing m_play_mode requires calling UpdateWantDeterminism
+    // Going from None to Recording would need UpdateWantDeterminism.
     ASSERT(IsMovieActive());
-
     m_play_mode = PlayMode::Recording;
     Core::DisplayMessage("Reached movie end. Resuming recording.", 2000);
+    return;
   }
-  else if (m_play_mode != PlayMode::None)
-  {
-    // We can be called by EmuThread during boot (CPU::State::PowerDown)
-    auto& cpu = m_system.GetCPU();
-    const bool was_running = Core::IsRunning(m_system) && !cpu.IsStepping();
-    if (was_running && Config::Get(Config::MAIN_MOVIE_PAUSE_MOVIE))
-      cpu.Break();
-    m_rerecords = 0;
-    m_current_byte = 0;
-    m_play_mode = PlayMode::None;
-    Core::DisplayMessage("Movie End.", 2000);
-    m_recording_from_save_state = false;
-    Config::RemoveLayer(Config::LayerType::Movie);
-    // we don't clear these things because otherwise we can't resume playback if we load a movie
-    // state later
-    // m_total_frames = s_totalBytes = 0;
-    // delete tmpInput;
-    // tmpInput = nullptr;
 
-    Core::QueueHostJob([](Core::System& system) { Core::UpdateWantDeterminism(system); });
-  }
+  if (m_play_mode == PlayMode::None)
+    return;
+
+  // May run on the EmuThread while booting, before the CPU runs.
+  auto& cpu = m_system.GetCPU();
+  const bool cpu_was_running = Core::IsRunning(m_system) && !cpu.IsStepping();
+  if (cpu_was_running && Config::Get(Config::MAIN_MOVIE_PAUSE_MOVIE))
+    cpu.Break();
+
+  m_rerecords = 0;
+  m_current_byte = 0;
+  m_play_mode = PlayMode::None;
+  Core::DisplayMessage("Movie End.", 2000);
+  m_recording_from_save_state = false;
+  Config::RemoveLayer(Config::LayerType::Movie);
+  // The totals and input data stay, so a later movie savestate can resume.
+
+  Core::QueueHostJob([](Core::System& system) { Core::UpdateWantDeterminism(system); });
 }
 
-// NOTE: Save State + Host Thread
 void MovieManager::SaveRecording(const std::string& filename)
 {
-  File::IOFile save_record(filename, "wb");
-  // Create the real header now and write it
+  File::IOFile out(filename, "wb");
+
   DTMHeader header;
-  memset(&header, 0, sizeof(DTMHeader));
-
-  header.filetype[0] = 'D';
-  header.filetype[1] = 'T';
-  header.filetype[2] = 'M';
-  header.filetype[3] = 0x1A;
-  strncpy(header.gameID.data(), SConfig::GetInstance().GetGameID().c_str(), 6);
+  std::memset(&header, 0, sizeof(header));
+  header.filetype = DTM_MAGIC;
+  std::strncpy(header.gameID.data(), SConfig::GetInstance().GetGameID().c_str(), 6);
   header.bWii = m_system.IsWii();
-
   header.bFromSaveState = m_recording_from_save_state;
   header.frameCount = m_total_frames;
   header.lagCount = m_total_lag_count;
   header.inputCount = m_total_input_count;
   header.numRerecords = m_rerecords;
   header.recordingStartTime = m_recording_start_time;
-
   header.bSaveConfig = true;
+
+  // Fills the settings fields; the fields after it override what it wrote.
   ConfigLoaders::SaveToDTM(&header);
+
   header.memcards = m_memcards;
   header.bClearSave = m_clear_save;
   header.bNetPlay = m_net_play;
-  strncpy(header.discChange.data(), m_disc_change_filename.c_str(), header.discChange.size());
-  strncpy(header.author.data(), m_author.c_str(), header.author.size());
+  std::strncpy(header.discChange.data(), m_disc_change_filename.c_str(),
+               header.discChange.size());
+  std::strncpy(header.author.data(), m_author.c_str(), header.author.size());
   header.md5 = m_md5;
   header.revision = m_revision;
   header.DSPiromHash = m_dsp_irom_hash;
   header.DSPcoefHash = m_dsp_coef_hash;
   header.tickCount = m_total_tick_count;
+  header.uniqueID = 0;  // never implemented
 
-  // TODO
-  header.uniqueID = 0;
-  // header.audioEmulator;
+  out.WriteArray(&header, 1);
+  bool ok = out.WriteBytes(m_temp_input.data(), m_temp_input.size());
 
-  save_record.WriteArray(&header, 1);
+  // A movie that starts from a state carries that state alongside it.
+  if (ok && m_recording_from_save_state)
+    ok = File::CopyRegularFile(RecordingStartStatePath(), filename + ".sav");
 
-  bool success = save_record.WriteBytes(m_temp_input.data(), m_temp_input.size());
-
-  if (success && m_recording_from_save_state)
-  {
-    std::string stateFilename = filename + ".sav";
-    success = File::CopyRegularFile(File::GetUserPath(D_STATESAVES_IDX) + "dtm.sav", stateFilename);
-  }
-
-  if (success)
-    Core::DisplayMessage(fmt::format("DTM {} saved", filename), 2000);
-  else
-    Core::DisplayMessage(fmt::format("Failed to save {}", filename), 2000);
+  Core::DisplayMessage(ok ? fmt::format("DTM {} saved", filename) :
+                            fmt::format("Failed to save {}", filename),
+                       2000);
 }
 
-// NOTE: EmuThread / Host Thread
+namespace
+{
+// Adler-32 of a DSP ROM file, read as big-endian u16 words. Missing words
+// (short or absent file) stay zero.
+u32 HashDSPRom(const std::string& user_file, const char* rom_name, size_t words, size_t bytes)
+{
+  std::string path = user_file;
+  if (!File::Exists(path))
+    path = File::GetSysDirectory() + GC_SYS_DIR DIR_SEP + rom_name;
+
+  std::vector<u16> rom(words);
+  File::IOFile file(path, "rb");
+  file.ReadArray(rom.data(), rom.size());
+  file.Close();
+  std::ranges::transform(rom, rom.begin(), [](u16 word) { return Common::swap16(word); });
+  return Common::HashAdler32(reinterpret_cast<const u8*>(rom.data()), bytes);
+}
+}  // namespace
+
 void MovieManager::GetSettings()
 {
   using ExpansionInterface::EXIDeviceType;
-  const EXIDeviceType slot_a_type = Config::Get(Config::MAIN_SLOT_A);
-  const EXIDeviceType slot_b_type = Config::Get(Config::MAIN_SLOT_B);
-  const bool slot_a_has_raw_memcard = slot_a_type == EXIDeviceType::MemoryCard;
-  const bool slot_a_has_gci_folder = slot_a_type == EXIDeviceType::MemoryCardFolder;
-  const bool slot_b_has_raw_memcard = slot_b_type == EXIDeviceType::MemoryCard;
-  const bool slot_b_has_gci_folder = slot_b_type == EXIDeviceType::MemoryCardFolder;
+  using ExpansionInterface::Slot;
+
+  const EXIDeviceType type_a = Config::Get(Config::MAIN_SLOT_A);
+  const EXIDeviceType type_b = Config::Get(Config::MAIN_SLOT_B);
+  const bool raw_card_a = type_a == EXIDeviceType::MemoryCard;
+  const bool folder_a = type_a == EXIDeviceType::MemoryCardFolder;
+  const bool raw_card_b = type_b == EXIDeviceType::MemoryCard;
+  const bool folder_b = type_b == EXIDeviceType::MemoryCardFolder;
 
   m_save_config = true;
   m_net_play = NetPlay::IsNetPlayRunning();
+
+  // "Clear save": nothing saved for this game yet, so playback should also
+  // start without saves.
   if (m_system.IsWii())
   {
-    u64 title_id = SConfig::GetInstance().GetTitleID();
-    m_clear_save = !File::Exists(
-        Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Session) + "/banner.bin");
+    const u64 title_id = SConfig::GetInstance().GetTitleID();
+    const std::string banner =
+        Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Session) + "/banner.bin";
+    m_clear_save = !File::Exists(banner);
   }
   else
   {
-    const auto raw_memcard_exists = [](ExpansionInterface::Slot card_slot) {
-      return File::Exists(Config::GetMemcardPath(card_slot, SConfig::GetInstance().m_region));
+    const auto card_file_exists = [](Slot slot) {
+      return File::Exists(Config::GetMemcardPath(slot, SConfig::GetInstance().m_region));
     };
-    const auto gci_folder_has_saves = [this](ExpansionInterface::Slot card_slot) {
-      const auto [path, migrate] = ExpansionInterface::CEXIMemoryCard::GetGCIFolderPath(
-          card_slot, ExpansionInterface::AllowMovieFolder::No, *this);
-      const u64 number_of_saves = File::ScanDirectoryTree(path, false).size;
-      return number_of_saves > 0;
+    const auto folder_has_files = [this](Slot slot) {
+      const auto [folder, migrate] = ExpansionInterface::CEXIMemoryCard::GetGCIFolderPath(
+          slot, ExpansionInterface::AllowMovieFolder::No, *this);
+      return File::ScanDirectoryTree(folder, false).size > 0;
     };
-
-    m_clear_save = !(slot_a_has_raw_memcard && raw_memcard_exists(ExpansionInterface::Slot::A)) &&
-                   !(slot_b_has_raw_memcard && raw_memcard_exists(ExpansionInterface::Slot::B)) &&
-                   !(slot_a_has_gci_folder && gci_folder_has_saves(ExpansionInterface::Slot::A)) &&
-                   !(slot_b_has_gci_folder && gci_folder_has_saves(ExpansionInterface::Slot::B));
+    // Checked in this order, stopping at the first slot with saves.
+    const bool any_saves = (raw_card_a && card_file_exists(Slot::A)) ||
+                           (raw_card_b && card_file_exists(Slot::B)) ||
+                           (folder_a && folder_has_files(Slot::A)) ||
+                           (folder_b && folder_has_files(Slot::B));
+    m_clear_save = !any_saves;
   }
-  m_memcards |= (slot_a_has_raw_memcard || slot_a_has_gci_folder) << 0;
-  m_memcards |= (slot_b_has_raw_memcard || slot_b_has_gci_folder) << 1;
 
-  m_revision = ConvertGitRevisionToBytes(Common::GetScmRevGitStr());
+  if (raw_card_a || folder_a)
+    m_memcards |= 1;
+  if (raw_card_b || folder_b)
+    m_memcards |= 2;
 
-  if (!Config::Get(Config::MAIN_DSP_HLE))
-  {
-    std::string irom_file = File::GetUserPath(D_GCUSER_IDX) + DSP_IROM;
-    std::string coef_file = File::GetUserPath(D_GCUSER_IDX) + DSP_COEF;
+  m_revision = RevisionToHeaderBytes(Common::GetScmRevGitStr());
 
-    if (!File::Exists(irom_file))
-      irom_file = File::GetSysDirectory() + GC_SYS_DIR DIR_SEP DSP_IROM;
-    if (!File::Exists(coef_file))
-      coef_file = File::GetSysDirectory() + GC_SYS_DIR DIR_SEP DSP_COEF;
-    std::vector<u16> irom(DSP::DSP_IROM_SIZE);
-    File::IOFile file_irom(irom_file, "rb");
-
-    file_irom.ReadArray(irom.data(), irom.size());
-    file_irom.Close();
-    for (u16& entry : irom)
-      entry = Common::swap16(entry);
-
-    std::vector<u16> coef(DSP::DSP_COEF_SIZE);
-    File::IOFile file_coef(coef_file, "rb");
-
-    file_coef.ReadArray(coef.data(), coef.size());
-    file_coef.Close();
-    for (u16& entry : coef)
-      entry = Common::swap16(entry);
-    m_dsp_irom_hash =
-        Common::HashAdler32(reinterpret_cast<u8*>(irom.data()), DSP::DSP_IROM_BYTE_SIZE);
-    m_dsp_coef_hash =
-        Common::HashAdler32(reinterpret_cast<u8*>(coef.data()), DSP::DSP_COEF_BYTE_SIZE);
-  }
-  else
+  if (Config::Get(Config::MAIN_DSP_HLE))
   {
     m_dsp_irom_hash = 0;
     m_dsp_coef_hash = 0;
+    return;
   }
+
+  const std::string user_dir = File::GetUserPath(D_GCUSER_IDX);
+  m_dsp_irom_hash =
+      HashDSPRom(user_dir + DSP_IROM, DSP_IROM, DSP::DSP_IROM_SIZE, DSP::DSP_IROM_BYTE_SIZE);
+  m_dsp_coef_hash =
+      HashDSPRom(user_dir + DSP_COEF, DSP_COEF, DSP::DSP_COEF_SIZE, DSP::DSP_COEF_BYTE_SIZE);
 }
 
-// NOTE: Entrypoint for own thread
 void MovieManager::CheckMD5()
 {
   if (m_current_file_name.empty())
     return;
 
-  // The MD5 hash was introduced in 3.0-846-gca650d4435.
-  // Before that, these header bytes were set to zero.
+  // Movies older than the MD5 field have zeros there; nothing to compare.
   if (m_temp_header.md5 == std::array<u8, 16>{})
     return;
 
   Core::DisplayMessage("Verifying checksum...", 2000);
 
-  std::array<u8, 16> game_md5;
+  std::array<u8, 16> disc_md5;
   mbedtls_md_file(mbedtls_md_info_from_type(MBEDTLS_MD_MD5), m_current_file_name.c_str(),
-                  game_md5.data());
+                  disc_md5.data());
 
-  if (game_md5 == m_md5)
-    Core::DisplayMessage("Checksum of current game matches the recorded game.", 2000);
-  else
+  if (disc_md5 != m_md5)
     Core::DisplayMessage("Checksum of current game does not match the recorded game!", 3000);
+  else
+    Core::DisplayMessage("Checksum of current game matches the recorded game.", 2000);
 }
 
-// NOTE: Entrypoint for own thread
 void MovieManager::GetMD5()
 {
   if (m_current_file_name.empty())
@@ -1462,10 +1304,12 @@ void MovieManager::GetMD5()
   Core::DisplayMessage("Finished calculating checksum.", 2000);
 }
 
-// NOTE: EmuThread
 void MovieManager::Shutdown()
 {
-  m_current_input_count = m_total_input_count = m_total_frames = m_tick_count_at_last_input = 0;
+  m_current_input_count = 0;
+  m_total_input_count = 0;
+  m_total_frames = 0;
+  m_tick_count_at_last_input = 0;
   m_temp_input.clear();
 }
 }  // namespace Movie

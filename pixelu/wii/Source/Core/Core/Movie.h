@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -39,11 +38,10 @@ class EncryptionKey;
 enum ExtensionNumber : u8;
 }  // namespace WiimoteEmu
 
-// Per-(video )Movie actions
-
+// TAS movies: recording and playing back controller input in the DTM format.
 namespace Movie
 {
-// Enumerations and structs
+// What sits in each GameCube controller port of a movie.
 enum class ControllerType
 {
   None = 0,
@@ -53,66 +51,69 @@ enum class ControllerType
 using ControllerTypeArray = std::array<ControllerType, 4>;
 using WiimoteEnabledArray = std::array<bool, 4>;
 
-// GameCube Controller State
+// One GameCube pad poll as stored in a DTM file. The layout is part of the
+// file format and must not change.
 #pragma pack(push, 1)
 struct ControllerState
 {
-  bool Start : 1, A : 1, B : 1, X : 1, Y : 1, Z : 1;  // Binary buttons, 6 bits
-  bool DPadUp : 1, DPadDown : 1,                      // Binary D-Pad buttons, 4 bits
-      DPadLeft : 1, DPadRight : 1;
-  bool L : 1, R : 1;      // Binary triggers, 2 bits
-  bool disc : 1;          // Checks for disc being changed
-  bool reset : 1;         // Console reset button
-  bool is_connected : 1;  // Should controller be treated as connected
-  bool get_origin : 1;    // Special bit to indicate analog origin reset
+  // Byte 0 and 1: digital inputs, one bit each.
+  bool Start : 1, A : 1, B : 1, X : 1, Y : 1, Z : 1;
+  bool DPadUp : 1, DPadDown : 1, DPadLeft : 1, DPadRight : 1;
+  bool L : 1, R : 1;
+  bool disc : 1;          // the disc was swapped at this poll
+  bool reset : 1;         // the reset button was tapped at this poll
+  bool is_connected : 1;  // the pad counts as plugged in
+  bool get_origin : 1;    // the game asked for the analog origin again
 
-  u8 TriggerL, TriggerR;          // Triggers, 16 bits
-  u8 AnalogStickX, AnalogStickY;  // Main Stick, 16 bits
-  u8 CStickX, CStickY;            // Sub-Stick, 16 bits
+  // Bytes 2 to 7: analog values.
+  u8 TriggerL, TriggerR;
+  u8 AnalogStickX, AnalogStickY;
+  u8 CStickX, CStickY;
 };
 static_assert(sizeof(ControllerState) == 8, "ControllerState should be 8 bytes");
 #pragma pack(pop)
 
-// When making changes to the DTM format, keep in mind that there are programs other
-// than Dolphin that parse DTM files. The format is expected to be relatively stable.
+// The 256-byte header at the start of every DTM file. Other tools read this
+// format too, so the layout stays fixed; new options go into the reserved bytes.
 #pragma pack(push, 1)
 struct DTMHeader
 {
+  // gameID without its trailing NULs.
   std::string_view GetGameID() const
   {
     return {gameID.data(), strnlen(gameID.data(), gameID.size())};
   }
 
-  std::array<u8, 4> filetype;  // Unique Identifier (always "DTM"0x1A)
+  std::array<u8, 4> filetype;  // magic: 'D' 'T' 'M' 0x1A
 
-  std::array<char, 6> gameID;  // The Game ID
-  bool bWii;                   // Wii game
+  std::array<char, 6> gameID;
+  bool bWii;
 
-  u8 controllers;  // Controllers plugged in (from least to most significant,
-                   // the bits are GC controllers 1-4 and Wiimotes 1-4)
+  // Bit n (0-3): GameCube port n+1 in use; bit n+4: Wii Remote n+1 in use.
+  u8 controllers;
 
-  bool
-      bFromSaveState;  // false indicates that the recording started from bootup, true for savestate
-  u64 frameCount;      // Number of frames in the recording
-  u64 inputCount;      // Number of input frames in recording
-  u64 lagCount;        // Number of lag frames in the recording
-  u64 uniqueID;        // (not implemented) A Unique ID comprised of: md5(time + Game ID)
-  u32 numRerecords;    // Number of rerecords/'cuts' of this TAS
-  std::array<char, 32> author;  // Author's name (encoded in UTF-8)
+  bool bFromSaveState;  // starts from <movie>.sav rather than from boot
+  u64 frameCount;
+  u64 inputCount;
+  u64 lagCount;
+  u64 uniqueID;  // always written as 0
+  u32 numRerecords;
+  std::array<char, 32> author;  // UTF-8
 
-  std::array<char, 16> videoBackend;   // UTF-8 representation of the video backend
-  std::array<char, 16> audioEmulator;  // UTF-8 representation of the audio emulator
-  std::array<u8, 16> md5;              // MD5 of game iso
+  std::array<char, 16> videoBackend;   // UTF-8
+  std::array<char, 16> audioEmulator;  // UTF-8
+  std::array<u8, 16> md5;              // MD5 of the disc image
 
-  u64 recordingStartTime;  // seconds since 1970 that recording started (used for RTC)
+  u64 recordingStartTime;  // RTC at the start, in seconds since 1970
 
-  bool bSaveConfig;  // Loads the settings below on startup if true
+  // The settings below are applied during playback when bSaveConfig is set.
+  bool bSaveConfig;
   bool bSkipIdle;
   bool bDualCore;
   bool bProgressive;
   bool bDSPHLE;
   bool bFastDiscSpeed;
-  u8 CPUCore;  // Uses the values of PowerPC::CPUCore
+  u8 CPUCore;  // a PowerPC::CPUCore value
   bool bEFBAccessEnable;
   bool bEFBCopyEnable;
   bool bSkipEFBCopyToRam;
@@ -120,9 +121,9 @@ struct DTMHeader
   bool bEFBEmulateFormatChanges;
   bool bImmediateXFB;
   bool bSkipXFBCopyToRam;
-  u8 memcards;      // Memcards inserted (from least to most significant, the bits are slot A and B)
-  bool bClearSave;  // Create a new memory card when playing back a movie if true
-  u8 bongos;        // Bongos plugged in (from least to most significant, the bits are ports 1-4)
+  u8 memcards;      // bit 0: slot A, bit 1: slot B
+  bool bClearSave;  // start playback with a fresh memory card or save
+  u8 bongos;        // bit n: port n+1 has bongos
   bool bSyncGPU;
   bool bNetPlay;
   bool bPAL60;
@@ -130,16 +131,16 @@ struct DTMHeader
   u8 reserved3;
   bool bFollowBranch;
   bool bUseFMA;
-  u8 GBAControllers;                // GBA Controllers plugged in (the bits are ports 1-4)
-  bool bWidescreen;                 // true indicates SYSCONF aspect ratio is 16:9, false for 4:3
-  u8 countryCode;                   // SYSCONF country code
-  std::array<u8, 5> reserved;       // Padding for any new config options
-  std::array<char, 40> discChange;  // Name of iso file to switch to, for two disc games.
-  std::array<u8, 20> revision;      // Git hash
+  u8 GBAControllers;  // bit n: port n+1 has an emulated GBA
+  bool bWidescreen;   // SYSCONF aspect ratio is 16:9
+  u8 countryCode;     // SYSCONF country code
+  std::array<u8, 5> reserved;
+  std::array<char, 40> discChange;  // file name of the disc to switch to
+  std::array<u8, 20> revision;      // build's git hash, as bytes
   u32 DSPiromHash;
   u32 DSPcoefHash;
-  u64 tickCount;                 // Number of ticks in the recording
-  std::array<u8, 11> reserved2;  // Make heading 256 bytes, just because we can
+  u64 tickCount;
+  std::array<u8, 11> reserved2;  // pads the header to 256 bytes
 };
 static_assert(sizeof(DTMHeader) == 256, "DTMHeader should be 256 bytes");
 
@@ -164,6 +165,7 @@ public:
 
   void FrameUpdate();
   void InputUpdate();
+  // Runs at every boot, with or without a movie.
   void Init(const BootParameters& boot);
 
   void SetPolledDevice();
@@ -219,6 +221,7 @@ public:
   void CheckPadStatus(const GCPadStatus* PadStatus, int controllerID);
   void CheckWiimoteStatus(int wiimote, const WiimoteEmu::DesiredWiimoteState& desired_state);
 
+  // On-screen display helpers; called from the GPU thread.
   std::string GetInputDisplay();
   std::string GetRTCDisplay() const;
   std::string GetRerecords() const;
@@ -226,7 +229,12 @@ public:
 private:
   void GetSettings();
   void CheckInputEnd();
+  void SetInputDisplay(size_t slot, std::string text);
+  // Switches to `mode` (with a message) unless the movie is already in it.
+  void SwitchPlayMode(PlayMode mode, const char* message);
+  void ReportMismatch(const std::vector<u8>& saved_input, size_t index);
 
+  // Run on detached threads.
   void CheckMD5();
   void GetMD5();
 
@@ -236,19 +244,21 @@ private:
 
   std::array<ControllerType, 4> m_controllers{};
   std::array<bool, 4> m_wiimotes{};
+  // The pad poll being recorded or played back.
   ControllerState m_pad_state{};
   DTMHeader m_temp_header{};
+  // Input data after the header; m_current_byte is the read/write position.
   std::vector<u8> m_temp_input;
   u64 m_current_byte = 0;
   u64 m_current_frame = 0;
-  u64 m_total_frames = 0;  // VI
+  u64 m_total_frames = 0;  // in VI frames
   u64 m_current_lag_count = 0;
   u64 m_total_lag_count = 0;
   u64 m_current_input_count = 0;
   u64 m_total_input_count = 0;
   u64 m_total_tick_count = 0;
   u64 m_tick_count_at_last_input = 0;
-  u64 m_recording_start_time = 0;  // seconds since 1970 that recording started
+  u64 m_recording_start_time = 0;
   bool m_save_config = false;
   bool m_net_play = false;
   bool m_clear_save = false;
@@ -264,11 +274,14 @@ private:
   u32 m_dsp_coef_hash = 0;
 
   bool m_recording_from_save_state = false;
+  // Whether any input device was read during the current frame.
   bool m_polled = false;
 
+  // Disc image of the running game; empty when not booted from a disc.
   std::string m_current_file_name;
 
-  // m_input_display is used by both CPU and GPU (is mutable).
+  // Lines for GetInputDisplay: pads 1-4, then Wii Remotes 1-4. Written on the
+  // CPU thread and read on the GPU thread, hence the lock.
   std::mutex m_input_display_lock;
   std::array<std::string, 8> m_input_display;
 
