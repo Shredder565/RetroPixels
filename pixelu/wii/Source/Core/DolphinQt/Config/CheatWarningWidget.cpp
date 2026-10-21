@@ -48,10 +48,10 @@ void CheatWarningWidget::Refresh(bool running)
   // offers the settings button.
   const bool this_game_running =
       running && SConfig::GetInstance().GetGameID() == m_game_id && m_needs_restart;
-  const bool cheats_off = !Settings::Instance().GetCheatsEnabled();
-
   if (this_game_running)
     m_message->setText(tr("Changing cheats will only take effect when the game is restarted."));
+
+  const bool cheats_off = !Settings::Instance().GetCheatsEnabled();
   if (cheats_off)
     m_message->setText(tr("Dolphin's cheat system is currently disabled."));
 
