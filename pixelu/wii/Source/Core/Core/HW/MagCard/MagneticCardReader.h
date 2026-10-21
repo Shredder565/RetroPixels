@@ -1,9 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Based on: https://github.com/GXTX/YACardEmu
-// Copyright (C) 2020-2023 wutno (https://github.com/GXTX)
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,13 +16,17 @@
 namespace MagCard
 {
 
+// Sanwa-style magnetic card reader/writer with a thermal printer, as used on
+// serial port B by F-Zero AX and Mario Kart Arcade GP. The host polls with ENQ
+// and gets a status packet back; commands arrive as STX packets and run over
+// several polls. A simulated player inserts and takes the card.
 class MagneticCardReader : public Triforce::SerialDevice
 {
 public:
-  static constexpr std::size_t TRACK_SIZE = 69;  // A nice amount of data.
+  static constexpr std::size_t TRACK_SIZE = 69;
   static constexpr std::size_t NUM_TRACKS = 3;
 
-  // This data is not part of the card reader state.
+  // Owned by the baseboard; not saved with the reader.
   struct Settings
   {
     std::string card_name;
@@ -50,10 +49,9 @@ public:
   void DoState(PointerWrap& p) override;
 
 protected:
-  // Status bytes:
+  // Where the card is. Each model reports these with its own values.
   enum class R : u8
   {
-    // Note: Derived classes define the real values in GetPositionValue().
     NO_CARD,
     READ_WRITE_HEAD,
     THERMAL_HEAD,
@@ -62,17 +60,19 @@ protected:
 
     MAX_POSITIONS,
   };
+
+  // Error status.
   enum class P : u8
   {
     NO_ERR = 0x30,
     READ_ERR = 0x31,
     WRITE_ERR = 0x32,
     CARD_JAM = 0x33,
-    MOTOR_ERR = 0x34,  // transport system motor error
+    MOTOR_ERR = 0x34,
     PRINT_ERR = 0x35,
-    ILLEGAL_ERR = 0x38,  // generic error
-    BATTERY_ERR = 0x40,  // low battery voltage
-    SYSTEM_ERR = 0x41,   // reader/writer system err
+    ILLEGAL_ERR = 0x38,
+    BATTERY_ERR = 0x40,
+    SYSTEM_ERR = 0x41,
     TRACK_1_READ_ERR = 0x51,
     TRACK_2_READ_ERR = 0x52,
     TRACK_3_READ_ERR = 0x53,
@@ -80,6 +80,8 @@ protected:
     TRACK_1_AND_3_READ_ERR = 0x55,
     TRACK_2_AND_3_READ_ERR = 0x56,
   };
+
+  // Job status.
   enum class S : u8
   {
     NO_JOB = 0x30,
@@ -111,95 +113,65 @@ protected:
     ResetSpecifications = 0x32,
   };
 
-  bool ReceivePacket(std::span<const u8> packet);
-  void BuildPacket();
-
-  void StepStateMachine(DT elapsed_time);
-  void StepStatePerson(DT elapsed_time);
-
-  // This is what actually maps the "R" position value to a number.
+  // The model's wire value for the card position (and its flag bits).
   virtual u8 GetPositionValue() = 0;
-
-  void SetPError(P error_code);
-  void SetSError(S error_code);
-
-  void ClearCardInMemory();
-
-  // Read/Write with host filesystem.
-  void ReadCardFile();
-  void WriteCardFile();
-
-  bool IsRunningCommand() const;
-  void FinishCommand();
-
-  u8 GetCurrentCommand() const;
-
-  // Is a card anywhere the machine can sense it ?
-  bool IsCardPresent() const;
-
-  // Is a card beyond the "ENTRY_SLOT" position ?
-  bool IsCardLoaded() const;
 
   virtual bool IsReadyForCard();
 
-  // Move the card through the machine.
+  virtual void Command_10_Initialize();
+  virtual void Command_D0_ControlShutter();
+
+  void SetPError(P error_code);
+  void SetSError(S error_code);
+  void FinishCommand();
+
   void MoveCard(R new_position);
 
-  // Unloads the card and moves it to the "ENTRY_SLOT" position.
-  void EjectCard();
-
-  // Feeds a new card into the machine from an internal hopper.
-  void DispenseCard();
-
-  // Commands
-  virtual void Command_10_Initialize();
-  void Command_20_ReadStatus();
-  void Command_33_ReadData();  // Multi-track read.
-  void Command_35_GetData();   // Read the entire card.
-  void Command_40_Cancel();
-  void Command_53_WriteData();  // Multi-track write.
-  void Command_78_PrintSettings();
-  void Command_7A_RegisterFont();
-  void Command_7B_PrintImage();
-  void Command_7C_PrintLine();
-  void Command_7D_Erase();  // Erase the printed image.
-  void Command_7E_PrintBarcode();
-  void Command_80_EjectCard();
-  void Command_A0_Clean();
-  void Command_B0_DispenseCard();
-  void Command_C0_ControlLED();
-  void Command_C1_SetPrintRetry();
-  virtual void Command_D0_ControlShutter();
-  void Command_F0_GetVersion();
+  // Somewhere the reader can sense it, the entry slot included.
+  bool IsCardPresent() const;
+  // Past the entry slot.
+  bool IsCardLoaded() const;
 
   Settings* const m_card_settings;
 
-  // R P S values that are sent in every ENQUIRY response.
   Status m_status{};
 
-  // A byte sent in every ENQUIRY response.
-  // TODO: What's the default value on just powered up hardware ?
-  u8 m_current_command = 0;
-
-  // The data included in every ENQUIRY response.
-  std::vector<u8> m_command_payload;
-
-  // The card track data in memory.
-  using TrackData = std::optional<std::array<u8, TRACK_SIZE>>;
-  std::array<TrackData, NUM_TRACKS> m_card_data;
-
-  // The parameter data of the command being processed.
+  // The parameters of the running command.
   std::vector<u8> m_current_packet;
 
-  // The progress state of the current command.
-  // 0 == not running a command.
-  // TODO: Change this to emulated milliseconds or something.
-  s32 m_current_step = 0;
+private:
+  using Track = std::optional<std::array<u8, TRACK_SIZE>>;
 
-  // Used to delay re-insertion of cards after ejection.
-  // This avoids having to expose card "Take"/"Insert" actions.
-  DT m_time_since_machine_moved_card{};
-  DT m_time_since_person_moved_card{};
+  bool AcceptPacket(std::span<const u8> packet);
+  void SendStatus();
+  void StepCommand();
+  void StepPerson();
+  void RunCommand();
+
+  bool IsRunning() const { return m_step > 0; }
+  std::string CardFilePath() const;
+  bool CardFileExists() const;
+  void LoadCardFile();
+  void SaveCardFile();
+  void ClearTracks();
+  void EjectCard();
+  void DispenseCard();
+  void AppendTrack(std::size_t index);
+
+  void ReadData();
+  void GetData();
+  void WriteData();
+  void PrintLine(bool check_size);
+  void PrintBarcode();
+  void Clean();
+  void Dispense();
+
+  u8 m_command = 0;
+  std::vector<u8> m_reply;
+  s32 m_step = 0;
+  std::array<Track, NUM_TRACKS> m_tracks;
+  DT m_machine_time{};
+  DT m_person_time{};
 };
 
 }  // namespace MagCard

@@ -1,82 +1,70 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Based on: https://github.com/GXTX/YACardEmu
-// Copyright (C) 2020-2023 wutno (https://github.com/GXTX)
-// Copyright (C) 2022-2023 tugpoat (https://github.com/tugpoat)
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/MagCard/C1231BR.h"
+
+#include <array>
+
+#include "Common/ChunkFile.h"
+#include "Common/Logging/Log.h"
 
 namespace MagCard
 {
 
+namespace
+{
+constexpr u8 SHUTTER_OPEN_FLAG = 0x80;
+constexpr u8 SHUTTER_CLOSED_FLAG = 0x40;
+constexpr u8 DISPENSER_HAS_CARDS_FLAG = 0x20;
+
+constexpr u8 OPEN_ARGUMENT = 0x31;
+}  // namespace
+
+bool C1231BR::IsReadyForCard()
+{
+  return !IsCardPresent() && m_shutter_open;
+}
+
+u8 C1231BR::GetPositionValue()
+{
+  // Indexed by R.
+  static constexpr std::array<u8, 5> positions{0x00, 0x18, 0x07, 0x1C, 0x01};
+
+  const std::size_t index = static_cast<std::size_t>(m_status.r);
+  u8 value = index < positions.size() ? positions[index] : u8{0};
+  value |= m_shutter_open ? SHUTTER_OPEN_FLAG : SHUTTER_CLOSED_FLAG;
+  if (!m_card_settings->report_dispenser_empty)
+    value |= DISPENSER_HAS_CARDS_FLAG;
+  return value;
+}
+
 void C1231BR::Command_10_Initialize()
 {
-  // TODO: Not hardware tested.
-  if (!m_current_packet.empty())
+  // "Eject after": open up and push the card back to the slot, data kept.
+  if (!m_current_packet.empty() &&
+      m_current_packet[0] == static_cast<u8>(InitMode::EjectAfter))
   {
-    if (InitMode(m_current_packet[0]) == InitMode::EjectAfter)
-    {
-      m_is_shutter_open = true;
-      MoveCard(R::ENTRY_SLOT);
-    }
+    m_shutter_open = true;
+    MoveCard(R::ENTRY_SLOT);
   }
-
-  // m_status.SoftReset(); // TODO: Needed ?
   FinishCommand();
 }
 
 void C1231BR::Command_D0_ControlShutter()
 {
-  enum class Action : u8
-  {
-    Close = 0x30,
-    Open = 0x31,
-  };
-
   if (m_current_packet.empty())
   {
     SetPError(P::SYSTEM_ERR);
-    FinishCommand();
     return;
   }
-
-  m_is_shutter_open = Action(m_current_packet[0]) == Action::Open;
-
-  INFO_LOG_FMT(SERIALINTERFACE_CARD, "Shutter: {}", m_is_shutter_open ? "Open" : "Close");
-
+  m_shutter_open = m_current_packet[0] == OPEN_ARGUMENT;
+  INFO_LOG_FMT(SERIALINTERFACE_CARD, "Shutter: {}", m_shutter_open ? "Open" : "Close");
   FinishCommand();
-}
-
-u8 C1231BR::GetPositionValue()
-{
-  // True "R" (Card Position) values.
-  // FYI: I see a 0xd0 command transition from: 11000 -> 01110 -> 00111
-  // Are these 5 bits individual sensors placed within the machine ?
-  static constexpr std::array<u8, std::size_t(R::MAX_POSITIONS)> POSITION_VALUES{
-      0b00000,  // NO_CARD
-      0b11000,  // READ_WRITE_HEAD
-      0b00111,  // THERMAL_HEAD
-      0b11100,  // DISPENSER_THERMAL
-      0b00001,  // ENTRY_SLOT
-  };
-
-  return (m_is_shutter_open ? 0x80u : 0x40u) |
-         (m_card_settings->report_dispenser_empty ? 0x00u : 0x20u) |
-         POSITION_VALUES[u8(m_status.r)];
 }
 
 void C1231BR::DoState(PointerWrap& p)
 {
   MagneticCardReader::DoState(p);
-
-  p.Do(m_is_shutter_open);
-}
-
-bool C1231BR::IsReadyForCard()
-{
-  return !IsCardPresent() && m_is_shutter_open;
+  p.Do(m_shutter_open);
 }
 
 }  // namespace MagCard
