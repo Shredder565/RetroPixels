@@ -30,5 +30,7 @@ SDL2_RELEASE="libsdl-org/SDL release-2.30.12"
 
 SDL2_TTF_VERSION=2.24.0
 SDL2_TTF_URL=https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
-SDL2_TTF_SHA256=
+# (GitHub lists no SHA-256 for this file: this is what its download had on
+# the MAME for Linux workflow, and the one Homebrew pins for it.)
+SDL2_TTF_SHA256=0b2bf1e7b6568adbdbc9bb924643f79d9dedafe061fa1ed687d1d9ac4e453bfd
 SDL2_TTF_RELEASE="libsdl-org/SDL_ttf release-2.24.0"
