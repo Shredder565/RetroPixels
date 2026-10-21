@@ -5,7 +5,10 @@ name: PixelU Wii (GameCube / Wii) test build
 # (pixelu/wii/Source, docs/pixelu-wii-original.md). From the Dolphin 2609a
 # submodule in pixelu/wii/dolphin (GPL-2.0-or-later) it takes only the
 # third-party libraries in Externals/ (their own sources, plus the prebuilt
-# Qt and FFmpeg), the Sys data and the translations. It is its own program
+# Qt and FFmpeg), the translations and the few Sys files that are not
+# PixelU-Wii's own (GameSettings, ApprovedInis.json, the GameTDB title lists,
+# the OSD font, the Gecko code handler and the DSP ROMs; the list is in
+# pixelu/wii/CMake/PixelUAssembleSys.cmake). It is its own program
 # (PixelU-Wii.exe), separate from PixelU's Wii U part, and is packaged as the
 # PixelU\wii\ folder.
 # The result is a workflow artifact only: no release is made.
@@ -61,8 +64,8 @@ jobs:
 
       # Nothing in the submodule is changed or overlaid: the build reads its
       # Externals/, Data/Sys and Languages/ where they are. Binaries/Sys is
-      # assembled by the build (Dolphin's Data/Sys with pixelu/wii/Data/Sys
-      # over it), and COPYING and Licenses come from pixelu/wii. No commit or
+      # assembled by the build (pixelu/wii/Data/Sys plus the short third-party
+      # list in pixelu/wii/CMake/PixelUAssembleSys.cmake), and COPYING and Licenses come from pixelu/wii. No commit or
       # tag is needed: PixelU-Wii's version comes from RetroPixels (main.go
       # and its git commit, Source/Core/Common/PixelUWiiVersion.cmake).
 
@@ -99,9 +102,9 @@ jobs:
           Copy-Item "$bin/qt.conf" $out
           Copy-Item -Recurse "$bin/QtPlugins" "$out/QtPlugins"
           if (Test-Path "$bin/Languages") { Copy-Item -Recurse "$bin/Languages" "$out/Languages" }
-          # Sys was assembled by the build: Dolphin's Data/Sys with PixelU-Wii's
-          # own files from pixelu/wii/Data/Sys put over it (Sys/Resources: own
-          # pictures). COPYING and Licenses may be symlinks there: copy the real ones.
+          # Sys was assembled by the build: PixelU-Wii's own pixelu/wii/Data/Sys
+          # plus the third-party files listed in PixelUAssembleSys.cmake, taken
+          # from Dolphin's Data/Sys. COPYING and Licenses may be symlinks there: copy the real ones.
           Copy-Item -Recurse "$bin/Sys" "$out/Sys"
           # COPYING is PixelU-Wii's own notice (who owns what, which licence
           # applies); license.txt is the full GPL text; Licenses has the
@@ -141,7 +144,7 @@ jobs:
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
-            "Built with PixelU-Wii's own CMake; third-party libraries (Externals), Sys data and translations from Dolphin $env:DOLPHIN_TAG ($dsha)"
+            "Built with PixelU-Wii's own CMake; third-party libraries (Externals), translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
             "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses\"
@@ -174,6 +177,12 @@ jobs:
             }
           }
           if (-not (Test-Path "$out/Sys/GameSettings")) { Write-Error "missing Sys/GameSettings"; exit 1 }
+          # Every Sys file is PixelU-Wii's own or on the third-party list, with the
+          # right bytes; none of the dropped Dolphin files (other themes and shaders,
+          # GraphicMods, totaldb.dsy, its WC24 files and fonts) is there; every
+          # theme icon and named shader the program loads is.
+          python pixelu/wii/Data/check_sys_package.py "$out/Sys" "$env:DOLPHIN_DIR/Data/Sys"
+          if ($LASTEXITCODE) { Write-Error "Sys package check failed"; exit 1 }
 
       - name: Smoke test (exe starts and prints its version)
         shell: pwsh
