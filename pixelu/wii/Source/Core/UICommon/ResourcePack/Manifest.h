@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 
 namespace ResourcePack
 {
+// A resource pack's manifest.json. "name", "version" and "id" are required strings; "authors"
+// (array), "description", "website" (strings) and "compressed" (bool) are optional.
 class Manifest
 {
 public:
@@ -21,11 +22,14 @@ public:
   const std::string& GetID() const;
   const std::string& GetError() const;
 
+  // Authors are joined with ", ".
   const std::optional<std::string>& GetAuthors() const;
   const std::optional<std::string>& GetDescription() const;
   const std::optional<std::string>& GetWebsite() const;
 
 private:
+  void Fail(const char* reason);
+
   bool m_valid = true;
   bool m_compressed = false;
 

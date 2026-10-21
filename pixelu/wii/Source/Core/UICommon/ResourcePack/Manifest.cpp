@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/ResourcePack/Manifest.h"
 
@@ -7,33 +6,38 @@
 
 namespace ResourcePack
 {
-Manifest::Manifest(const std::string& json)
+namespace
 {
-  picojson::value out;
-  auto error = picojson::parse(out, json);
+std::optional<std::string> OptionalText(const picojson::value& field)
+{
+  if (!field.is<std::string>())
+    return std::nullopt;
+  return field.to_str();
+}
+}  // namespace
 
-  if (!error.empty())
+Manifest::Manifest(const std::string& text)
+{
+  picojson::value root;
+  if (!picojson::parse(root, text).empty())
   {
-    m_error = "Failed to parse manifest.";
-    m_valid = false;
+    Fail("Failed to parse manifest.");
     return;
   }
 
-  // Required fields
-  picojson::value& name = out.get("name");
-  picojson::value& version = out.get("version");
-  picojson::value& id = out.get("id");
+  const picojson::value& name = root.get("name");
+  const picojson::value& version = root.get("version");
+  const picojson::value& id = root.get("id");
+  const picojson::value& authors = root.get("authors");
+  const picojson::value& description = root.get("description");
+  const picojson::value& website = root.get("website");
+  const picojson::value& compressed = root.get("compressed");
 
-  // Optional fields
-  picojson::value& authors = out.get("authors");
-  picojson::value& description = out.get("description");
-  picojson::value& website = out.get("website");
-  picojson::value& compressed = out.get("compressed");
-
-  if (!name.is<std::string>() || !id.is<std::string>() || !version.is<std::string>())
+  const bool required_ok =
+      name.is<std::string>() && version.is<std::string>() && id.is<std::string>();
+  if (!required_ok)
   {
-    m_error = "Some objects have a bad type.";
-    m_valid = false;
+    Fail("Some objects have a bad type.");
     return;
   }
 
@@ -41,31 +45,40 @@ Manifest::Manifest(const std::string& json)
   m_version = version.to_str();
   m_id = id.to_str();
 
+  // Array members are listed by their JSON text form (strings as themselves); an empty array
+  // counts as no authors.
   if (authors.is<picojson::array>())
   {
-    std::string author_list;
-    for (const auto& o : authors.get<picojson::array>())
+    const picojson::array& list = authors.get<picojson::array>();
+    if (!list.empty())
     {
-      author_list += o.to_str() + ", ";
+      std::string joined = list.front().to_str();
+      for (std::size_t i = 1; i < list.size(); ++i)
+        joined += ", " + list[i].to_str();
+      m_authors = std::move(joined);
     }
-
-    if (!author_list.empty())
-      m_authors = author_list.substr(0, author_list.size() - 2);
   }
 
-  if (description.is<std::string>())
-    m_description = description.to_str();
-
-  if (website.is<std::string>())
-    m_website = website.to_str();
-
+  m_description = OptionalText(description);
+  m_website = OptionalText(website);
   if (compressed.is<bool>())
     m_compressed = compressed.get<bool>();
+}
+
+void Manifest::Fail(const char* reason)
+{
+  m_valid = false;
+  m_error = reason;
 }
 
 bool Manifest::IsValid() const
 {
   return m_valid;
+}
+
+bool Manifest::IsCompressed() const
+{
+  return m_compressed;
 }
 
 const std::string& Manifest::GetName() const
@@ -102,10 +115,4 @@ const std::optional<std::string>& Manifest::GetWebsite() const
 {
   return m_website;
 }
-
-bool Manifest::IsCompressed() const
-{
-  return m_compressed;
-}
-
 }  // namespace ResourcePack

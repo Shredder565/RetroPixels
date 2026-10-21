@@ -1,10 +1,12 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/ResourcePack/ResourcePack.h"
 
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <mz.h>
 #include <mz_os.h>
@@ -18,7 +20,6 @@
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/MinizipUtil.h"
-#include "Common/ScopeGuard.h"
 #include "Common/StringUtil.h"
 
 #include "UICommon/ResourcePack/Manager.h"
@@ -26,94 +27,133 @@
 
 namespace ResourcePack
 {
-constexpr char TEXTURE_PATH[] = HIRES_TEXTURES_DIR DIR_SEP;
+namespace
+{
+// Archive folder holding the textures, and where they go under the user folder.
+constexpr std::string_view ARCHIVE_TEXTURE_DIR = "textures/";
+constexpr char INSTALLED_TEXTURE_DIR[] = HIRES_TEXTURES_DIR DIR_SEP;
+
+// Owns a minizip reader handle.
+class ZipReader
+{
+public:
+  ZipReader() : m_handle(mz_zip_reader_create()) {}
+  ~ZipReader()
+  {
+    if (m_handle != nullptr)
+      mz_zip_reader_delete(&m_handle);
+  }
+  ZipReader(const ZipReader&) = delete;
+  ZipReader& operator=(const ZipReader&) = delete;
+
+  bool Created() const { return m_handle != nullptr; }
+  void* Get() const { return m_handle; }
+
+  // Information about the current entry, or null.
+  mz_zip_file* CurrentEntry() const
+  {
+    mz_zip_file* info = nullptr;
+    if (mz_zip_reader_entry_get_info(m_handle, &info) != MZ_OK)
+      return nullptr;
+    return info;
+  }
+
+private:
+  void* m_handle;
+};
+
+// Whether any of `packs` lists `texture` (optionally only counting installed packs).
+bool AnyPackHas(const std::vector<ResourcePack*>& packs, const std::string& texture,
+                bool installed_only)
+{
+  return std::ranges::any_of(packs, [&](const ResourcePack* pack) {
+    if (installed_only && !IsInstalled(*pack))
+      return false;
+    return Common::Contains(pack->GetTextures(), texture);
+  });
+}
+}  // namespace
+
+bool ResourcePack::Invalidate(std::string reason)
+{
+  m_valid = false;
+  m_error = std::move(reason);
+  return false;
+}
 
 ResourcePack::ResourcePack(const std::string& path) : m_path(path)
 {
-  void* zip_reader = mz_zip_reader_create();
-  if (!zip_reader)
+  ZipReader zip;
+  if (!zip.Created())
   {
-    m_valid = false;
-    m_error = "Failed to create zip reader";
+    Invalidate("Failed to create zip reader");
+    return;
+  }
+  if (mz_zip_reader_open_file(zip.Get(), path.c_str()) != MZ_OK)
+  {
+    Invalidate("Failed to open resource pack");
     return;
   }
 
-  Common::ScopeGuard file_guard{[&] { mz_zip_reader_delete(&zip_reader); }};
-
-  if (mz_zip_reader_open_file(zip_reader, path.c_str()) != MZ_OK)
+  // The manifest is required and must parse.
+  if (mz_zip_reader_locate_entry(zip.Get(), "manifest.json", 0) != MZ_OK)
   {
-    m_valid = false;
-    m_error = "Failed to open resource pack";
+    Invalidate("Resource pack is missing a manifest.");
+    return;
+  }
+  const mz_zip_file* manifest_entry = zip.CurrentEntry();
+  if (manifest_entry == nullptr)
+  {
+    Invalidate("Failed to access manifest.json");
+    return;
+  }
+  std::string manifest_text(static_cast<std::size_t>(manifest_entry->uncompressed_size), '\0');
+  if (!Common::ReadFileFromZip(zip.Get(), &manifest_text))
+  {
+    Invalidate("Failed to read manifest.json");
     return;
   }
 
-  if (mz_zip_reader_locate_entry(zip_reader, "manifest.json", 0) != MZ_OK)
-  {
-    m_valid = false;
-    m_error = "Resource pack is missing a manifest.";
-    return;
-  }
-
-  mz_zip_file* manifest_info;
-  if (mz_zip_reader_entry_get_info(zip_reader, &manifest_info) != MZ_OK)
-  {
-    m_valid = false;
-    m_error = "Failed to access manifest.json";
-    return;
-  }
-
-  std::string manifest_contents(manifest_info->uncompressed_size, '\0');
-  if (!Common::ReadFileFromZip(zip_reader, &manifest_contents))
-  {
-    m_valid = false;
-    m_error = "Failed to read manifest.json";
-    return;
-  }
-
-  m_manifest = std::make_shared<Manifest>(manifest_contents);
+  m_manifest = std::make_shared<Manifest>(manifest_text);
   if (!m_manifest->IsValid())
   {
-    m_valid = false;
-    m_error = "Manifest error: " + m_manifest->GetError();
+    Invalidate("Manifest error: " + m_manifest->GetError());
     return;
   }
 
-  if (mz_zip_reader_locate_entry(zip_reader, "logo.png", 0) == MZ_OK)
+  // The logo is optional, but must be readable if present.
+  if (mz_zip_reader_locate_entry(zip.Get(), "logo.png", 0) == MZ_OK)
   {
-    mz_zip_file* logo_info;
-    mz_zip_reader_entry_get_info(zip_reader, &logo_info);
-
-    m_logo_data.resize(logo_info->uncompressed_size);
-
-    if (!Common::ReadFileFromZip(zip_reader, &m_logo_data))
+    const mz_zip_file* logo_entry = zip.CurrentEntry();
+    if (logo_entry != nullptr)
+      m_logo_data.resize(static_cast<std::size_t>(logo_entry->uncompressed_size));
+    if (logo_entry == nullptr || !Common::ReadFileFromZip(zip.Get(), &m_logo_data))
     {
-      m_valid = false;
-      m_error = "Failed to read logo.png";
+      Invalidate("Failed to read logo.png");
       return;
     }
   }
 
-  mz_zip_reader_goto_first_entry(zip_reader);
-
+  // List the non-empty files under textures/. Unless the manifest says the pack is compressed,
+  // every texture must be stored uncompressed.
+  mz_zip_reader_goto_first_entry(zip.Get());
   do
   {
-    mz_zip_file* texture_info;
-    mz_zip_reader_entry_get_info(zip_reader, &texture_info);
-    std::string filename(texture_info->filename);
-
-    if (!filename.starts_with("textures/") || texture_info->uncompressed_size == 0)
+    const mz_zip_file* entry = zip.CurrentEntry();
+    if (entry == nullptr)
       continue;
 
-    // If a texture is compressed and the manifest doesn't state that, abort.
-    if (!m_manifest->IsCompressed() && texture_info->compression_method != 0)
+    const std::string name = entry->filename;
+    if (!name.starts_with(ARCHIVE_TEXTURE_DIR) || entry->uncompressed_size == 0)
+      continue;
+
+    if (entry->compression_method != 0 && !m_manifest->IsCompressed())
     {
-      m_valid = false;
-      m_error = "Texture " + filename + " is compressed!";
+      Invalidate("Texture " + name + " is compressed!");
       return;
     }
-
-    m_textures.push_back(filename.substr(9));
-  } while (mz_zip_reader_goto_next_entry(zip_reader) != MZ_END_OF_LIST);
+    m_textures.push_back(name.substr(ARCHIVE_TEXTURE_DIR.size()));
+  } while (mz_zip_reader_goto_next_entry(zip.Get()) != MZ_END_OF_LIST);
 }
 
 bool ResourcePack::IsValid() const
@@ -154,93 +194,70 @@ bool ResourcePack::Install(const std::string& path)
     return false;
   }
 
-  void* zip_reader = mz_zip_reader_create();
-  if (!zip_reader)
-  {
-    m_valid = false;
-    m_error = "Failed to create zip reader";
+  ZipReader zip;
+  if (!zip.Created())
+    return Invalidate("Failed to create zip reader");
+  if (mz_zip_reader_open_file(zip.Get(), m_path.c_str()) != MZ_OK)
+    return Invalidate("Failed to open resource pack");
+  if (mz_zip_reader_goto_first_entry(zip.Get()) != MZ_OK)
     return false;
-  }
 
-  Common::ScopeGuard file_guard{[&] { mz_zip_reader_delete(&zip_reader); }};
-
-  if (mz_zip_reader_open_file(zip_reader, m_path.c_str()) != MZ_OK)
-  {
-    m_valid = false;
-    m_error = "Failed to open resource pack";
-    return false;
-  }
-
-  if (mz_zip_reader_goto_first_entry(zip_reader) != MZ_OK)
-    return false;
+  const std::string texture_root = path + INSTALLED_TEXTURE_DIR;
 
   do
   {
-    mz_zip_file* texture_info{};
-    if (mz_zip_reader_entry_get_info(zip_reader, &texture_info) != MZ_OK)
-    {
+    const mz_zip_file* entry = zip.CurrentEntry();
+    if (entry == nullptr)
       return false;
-    }
 
-    const std::string texture_zip_path = texture_info->filename;
-
-    const std::string texture_zip_path_prefix = "textures/";
-    if (!texture_zip_path.starts_with(texture_zip_path_prefix))
+    const std::string entry_name = entry->filename;
+    if (!entry_name.starts_with(ARCHIVE_TEXTURE_DIR))
       continue;
-    const std::string texture_name = texture_zip_path.substr(texture_zip_path_prefix.size());
 
-    auto texture_it = std::ranges::find_if(m_textures, [&texture_name](const std::string& texture) {
-      return mz_path_compare_wc(texture.c_str(), texture_name.c_str(), 1) == MZ_OK;
+    // Match the entry against the pack's texture list (wildcards allowed, case ignored), and
+    // install it under the listed name.
+    const std::string relative = entry_name.substr(ARCHIVE_TEXTURE_DIR.size());
+    const auto listed = std::ranges::find_if(m_textures, [&relative](const std::string& texture) {
+      return mz_path_compare_wc(texture.c_str(), relative.c_str(), 1) == MZ_OK;
     });
-    if (texture_it == m_textures.cend())
+    if (listed == m_textures.end())
       continue;
-    const auto texture = *texture_it;
+    const std::string texture = *listed;
 
-    // Check if a higher priority pack already provides a given texture, don't overwrite it
-    bool provided_by_other_pack = false;
-    for (const auto& pack : GetHigherPriorityPacks(*this))
+    // A higher-priority pack's copy wins.
+    if (AnyPackHas(GetHigherPriorityPacks(*this), texture, false))
+      continue;
+
+    const std::string target = texture_root + texture;
+    std::string target_dir;
+    if (!SplitPath(target, &target_dir, nullptr, nullptr))
+      continue;
+    if (!File::CreateFullPath(target_dir))
     {
-      if (Common::Contains(pack->GetTextures(), texture))
-      {
-        provided_by_other_pack = true;
-        break;
-      }
-    }
-    if (provided_by_other_pack)
-      continue;
-
-    const std::string texture_path = path + TEXTURE_PATH + texture;
-    std::string texture_full_dir;
-    if (!SplitPath(texture_path, &texture_full_dir, nullptr, nullptr))
-      continue;
-
-    if (!File::CreateFullPath(texture_full_dir))
-    {
-      m_error = "Failed to create full path " + texture_full_dir;
+      m_error = "Failed to create full path " + target_dir;
       return false;
     }
 
-    const size_t data_size = static_cast<size_t>(texture_info->uncompressed_size);
-    auto data = std::make_unique<u8[]>(data_size);
-    if (!Common::ReadFileFromZip(zip_reader, data.get(), data_size))
+    const auto size = static_cast<std::size_t>(entry->uncompressed_size);
+    const auto contents = std::make_unique<u8[]>(size);
+    if (!Common::ReadFileFromZip(zip.Get(), contents.get(), size))
     {
       m_error = "Failed to read texture " + texture;
       return false;
     }
 
-    File::IOFile out(texture_path, "wb");
-    if (!out)
+    File::IOFile output(target, "wb");
+    if (!output)
     {
       m_error = "Failed to open " + texture;
       return false;
     }
-    if (!out.WriteBytes(data.get(), data_size))
+    if (!output.WriteBytes(contents.get(), size))
     {
       m_error = "Failed to write " + texture;
       return false;
     }
-
-  } while (mz_zip_reader_goto_next_entry(zip_reader) == MZ_OK);
+  } while (mz_zip_reader_goto_next_entry(zip.Get()) == MZ_OK);
 
   SetInstalled(*this, true);
   return true;
@@ -254,62 +271,44 @@ bool ResourcePack::Uninstall(const std::string& path)
     return false;
   }
 
-  auto lower = GetLowerPriorityPacks(*this);
-
+  // Taken while this pack still counts as installed.
+  const std::vector<ResourcePack*> lower = GetLowerPriorityPacks(*this);
   SetInstalled(*this, false);
 
-  for (const auto& texture : m_textures)
+  const std::string texture_root = path + INSTALLED_TEXTURE_DIR;
+
+  for (const std::string& texture : m_textures)
   {
-    bool provided_by_other_pack = false;
-
-    // Check if a higher priority pack already provides a given texture, don't delete it
-    for (const auto& pack : GetHigherPriorityPacks(*this))
-    {
-      if (::ResourcePack::IsInstalled(*pack) && Common::Contains(pack->GetTextures(), texture))
-      {
-        provided_by_other_pack = true;
-        break;
-      }
-    }
-
-    if (provided_by_other_pack)
+    // An installed higher-priority pack's copy stays.
+    if (AnyPackHas(GetHigherPriorityPacks(*this), texture, true))
       continue;
 
-    // Check if a lower priority pack provides a given texture - if so, install it.
-    for (auto& pack : lower)
+    // Otherwise the first installed lower-priority pack with this texture takes over.
+    const auto successor = std::ranges::find_if(lower, [&texture](ResourcePack* pack) {
+      return IsInstalled(*pack) && Common::Contains(pack->GetTextures(), texture);
+    });
+    if (successor != lower.end())
     {
-      if (::ResourcePack::IsInstalled(*pack) && Common::Contains(pack->GetTextures(), texture))
-      {
-        pack->Install(path);
-
-        provided_by_other_pack = true;
-        break;
-      }
+      (*successor)->Install(path);
+      continue;
     }
 
-    if (provided_by_other_pack)
-      continue;
-
-    const std::string texture_path = path + TEXTURE_PATH + texture;
-    if (File::Exists(texture_path) && !File::Delete(texture_path))
+    const std::string target = texture_root + texture;
+    if (File::Exists(target) && !File::Delete(target))
     {
       m_error = "Failed to delete texture " + texture;
       return false;
     }
 
-    // Recursively delete empty directories
-
-    std::string dir;
-    SplitPath(texture_path, &dir, nullptr, nullptr);
-
-    while (dir.length() > (path + TEXTURE_PATH).length())
+    // Remove the folders above the texture that are now empty, up to the texture root. Each step
+    // trims the trailing separator and one more character before taking the parent folder.
+    std::string folder;
+    SplitPath(target, &folder, nullptr, nullptr);
+    while (folder.size() > texture_root.size())
     {
-      const auto is_empty = Common::DoFileSearch(dir).empty();
-
-      if (is_empty)
-        File::DeleteDir(dir);
-
-      SplitPath(dir.substr(0, dir.size() - 2), &dir, nullptr, nullptr);
+      if (Common::DoFileSearch(folder).empty())
+        File::DeleteDir(folder);
+      SplitPath(folder.substr(0, folder.size() - 2), &folder, nullptr, nullptr);
     }
   }
 
@@ -318,7 +317,7 @@ bool ResourcePack::Uninstall(const std::string& path)
 
 bool ResourcePack::operator==(const ResourcePack& pack) const
 {
-  return pack.GetPath() == m_path;
+  return m_path == pack.GetPath();
 }
 
 }  // namespace ResourcePack

@@ -1,195 +1,179 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/ResourcePack/Manager.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <string>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/FileSearch.h"
 #include "Common/FileUtil.h"
 #include "Common/IniFile.h"
 
-#include <algorithm>
-
 namespace ResourcePack
 {
 namespace
 {
-std::vector<ResourcePack> packs;
-std::string packs_path;
+std::vector<ResourcePack> s_packs;
+std::string s_ini_path;
 
-Common::IniFile GetPackConfig()
+// Packs.ini sections: [Order] maps manifest ID to priority index, [Installed] lists installed
+// packs.
+constexpr char ORDER_SECTION[] = "Order";
+constexpr char INSTALLED_SECTION[] = "Installed";
+
+// Loads Packs.ini (missing is fine) and remembers its path for the matching save.
+Common::IniFile LoadPackIni()
 {
-  packs_path = File::GetUserPath(D_RESOURCEPACK_IDX) + "/Packs.ini";
-
-  Common::IniFile file;
-  file.Load(packs_path);
-
-  return file;
+  s_ini_path = File::GetUserPath(D_RESOURCEPACK_IDX) + "/Packs.ini";
+  Common::IniFile ini;
+  ini.Load(s_ini_path);
+  return ini;
 }
-}  // Anonymous namespace
+
+const std::string& IdOf(const ResourcePack& pack)
+{
+  return pack.GetManifest()->GetID();
+}
+
+// Position of `pack` in the list, or the list size if it is not there.
+std::size_t IndexOf(const ResourcePack& pack)
+{
+  return static_cast<std::size_t>(std::ranges::find(s_packs, pack) - s_packs.begin());
+}
+}  // namespace
 
 bool Init()
 {
-  packs.clear();
-  const std::vector<std::string> pack_list =
+  s_packs.clear();
+  const std::vector<std::string> archives =
       Common::DoFileSearch(File::GetUserPath(D_RESOURCEPACK_IDX), ".zip");
 
-  Common::IniFile file = GetPackConfig();
+  Common::IniFile ini = LoadPackIni();
+  Common::IniFile::Section* order = ini.GetOrCreateSection(ORDER_SECTION);
 
-  auto* order = file.GetOrCreateSection("Order");
-
-  struct OrderHelper
+  // Packs are added sorted by manifest ID (an unreadable pack sorts by its path).
+  struct Candidate
   {
-    size_t pack_list_index;
-    std::string manifest_id;
+    std::size_t archive;
+    std::string sort_key;
   };
-
-  std::vector<OrderHelper> pack_list_order;
-  pack_list_order.reserve(pack_list.size());
-  for (size_t i = 0; i < pack_list.size(); ++i)
+  std::vector<Candidate> candidates;
+  candidates.reserve(archives.size());
+  for (std::size_t i = 0; i < archives.size(); ++i)
   {
-    const ResourcePack pack(pack_list[i]);
-    std::string manifest_id = pack.IsValid() ? pack.GetManifest()->GetID() : pack_list[i];
-    pack_list_order.emplace_back(OrderHelper{i, std::move(manifest_id)});
+    const ResourcePack probe(archives[i]);
+    candidates.push_back({i, probe.IsValid() ? IdOf(probe) : archives[i]});
   }
+  std::ranges::sort(candidates, {}, &Candidate::sort_key);
 
-  std::ranges::sort(pack_list_order, {}, &OrderHelper::manifest_id);
-
-  bool error = false;
-  for (size_t i = 0; i < pack_list_order.size(); ++i)
+  bool all_added = true;
+  for (std::size_t rank = 0; rank < candidates.size(); ++rank)
   {
-    const auto& path = pack_list[pack_list_order[i].pack_list_index];
-
-    const ResourcePack* const pack = Add(path);
-    if (pack == nullptr)
+    const ResourcePack* added = Add(archives[candidates[rank].archive]);
+    if (added == nullptr)
     {
-      error = true;
+      all_added = false;
       continue;
     }
-
-    order->Set(pack->GetManifest()->GetID(), static_cast<u64>(i));
+    order->Set(IdOf(*added), static_cast<u64>(rank));
   }
 
-  file.Save(packs_path);
-
-  return !error;
+  // Note that this writes the copy loaded above, replacing what the Add calls saved.
+  ini.Save(s_ini_path);
+  return all_added;
 }
 
 std::vector<ResourcePack>& GetPacks()
 {
-  return packs;
-}
-
-std::vector<ResourcePack*> GetLowerPriorityPacks(const ResourcePack& pack)
-{
-  std::vector<ResourcePack*> list;
-  for (auto it = std::ranges::find(packs, pack) + 1; it != packs.end(); ++it)
-  {
-    auto& entry = *it;
-    if (!IsInstalled(pack))
-      continue;
-
-    list.push_back(&entry);
-  }
-
-  return list;
+  return s_packs;
 }
 
 std::vector<ResourcePack*> GetHigherPriorityPacks(const ResourcePack& pack)
 {
-  std::vector<ResourcePack*> list;
-  auto end = std::ranges::find(packs, pack);
-
-  for (auto it = packs.begin(); it != end; ++it)
+  std::vector<ResourcePack*> result;
+  const std::size_t stop = IndexOf(pack);
+  for (std::size_t i = 0; i < stop; ++i)
   {
-    auto& entry = *it;
-    if (!IsInstalled(entry))
-      continue;
-    list.push_back(&entry);
+    if (IsInstalled(s_packs[i]))
+      result.push_back(&s_packs[i]);
   }
+  return result;
+}
 
-  return list;
+std::vector<ResourcePack*> GetLowerPriorityPacks(const ResourcePack& pack)
+{
+  // Long-standing behaviour kept: whether the packs are listed depends on `pack` itself being
+  // installed, not on each lower pack. A pack that is not in the list has no lower packs.
+  std::vector<ResourcePack*> result;
+  const std::size_t start = IndexOf(pack) + 1;
+  if (start >= s_packs.size() || !IsInstalled(pack))
+    return result;
+
+  for (std::size_t i = start; i < s_packs.size(); ++i)
+    result.push_back(&s_packs[i]);
+  return result;
 }
 
 ResourcePack* Add(const std::string& path, int offset)
 {
   if (offset == -1)
-    offset = static_cast<int>(packs.size());
+    offset = static_cast<int>(s_packs.size());
 
   ResourcePack pack(path);
-
   if (!pack.IsValid())
     return nullptr;
 
-  Common::IniFile file = GetPackConfig();
+  // Record the new pack's slot and shift everything after it down by one.
+  Common::IniFile ini = LoadPackIni();
+  Common::IniFile::Section* order = ini.GetOrCreateSection(ORDER_SECTION);
+  order->Set(IdOf(pack), offset);
+  for (int i = offset; i < static_cast<int>(s_packs.size()); ++i)
+    order->Set(IdOf(s_packs[static_cast<std::size_t>(i)]), i + 1);
+  ini.Save(s_ini_path);
 
-  auto* order = file.GetOrCreateSection("Order");
-
-  order->Set(pack.GetManifest()->GetID(), offset);
-
-  for (int i = offset; i < static_cast<int>(packs.size()); i++)
-    order->Set(packs[i].GetManifest()->GetID(), i + 1);
-
-  file.Save(packs_path);
-
-  auto it = packs.insert(packs.begin() + offset, std::move(pack));
-  return &*it;
+  return &*s_packs.insert(s_packs.begin() + offset, std::move(pack));
 }
 
 bool Remove(ResourcePack& pack)
 {
-  const auto result = pack.Uninstall(File::GetUserPath(D_USER_IDX));
-
-  if (!result)
+  if (!pack.Uninstall(File::GetUserPath(D_USER_IDX)))
     return false;
 
-  auto pack_iterator = std::ranges::find(packs, pack);
-
-  if (pack_iterator == packs.end())
+  const std::size_t index = IndexOf(pack);
+  if (index == s_packs.size())
     return false;
 
-  Common::IniFile file = GetPackConfig();
+  // Drop the pack's slot and shift everything after it up by one.
+  Common::IniFile ini = LoadPackIni();
+  Common::IniFile::Section* order = ini.GetOrCreateSection(ORDER_SECTION);
+  order->Delete(IdOf(pack));
+  for (std::size_t i = index + 1; i < s_packs.size(); ++i)
+    order->Set(IdOf(s_packs[i]), static_cast<int>(i) - 1);
+  ini.Save(s_ini_path);
 
-  auto* order = file.GetOrCreateSection("Order");
-
-  order->Delete(pack.GetManifest()->GetID());
-
-  int offset = pack_iterator - packs.begin();
-
-  for (int i = offset + 1; i < static_cast<int>(packs.size()); i++)
-    order->Set(packs[i].GetManifest()->GetID(), i - 1);
-
-  file.Save(packs_path);
-
-  packs.erase(pack_iterator);
-
+  s_packs.erase(s_packs.begin() + static_cast<std::ptrdiff_t>(index));
   return true;
 }
 
 void SetInstalled(const ResourcePack& pack, bool installed)
 {
-  Common::IniFile file = GetPackConfig();
-
-  auto* install = file.GetOrCreateSection("Installed");
-
+  Common::IniFile ini = LoadPackIni();
+  Common::IniFile::Section* section = ini.GetOrCreateSection(INSTALLED_SECTION);
   if (installed)
-    install->Set(pack.GetManifest()->GetID(), installed);
+    section->Set(IdOf(pack), true);
   else
-    install->Delete(pack.GetManifest()->GetID());
-
-  file.Save(packs_path);
+    section->Delete(IdOf(pack));
+  ini.Save(s_ini_path);
 }
 
 bool IsInstalled(const ResourcePack& pack)
 {
-  Common::IniFile file = GetPackConfig();
-
-  auto* install = file.GetOrCreateSection("Installed");
-
-  bool installed;
-
-  install->Get(pack.GetManifest()->GetID(), &installed, false);
-
+  Common::IniFile ini = LoadPackIni();
+  bool installed = false;
+  ini.GetOrCreateSection(INSTALLED_SECTION)->Get(IdOf(pack), &installed, false);
   return installed;
 }
 
