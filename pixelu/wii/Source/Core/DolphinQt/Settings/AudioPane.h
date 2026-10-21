@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,13 +17,15 @@ class ConfigComplexChoice;
 class ConfigRadioBool;
 class ConfigSlider;
 class ConfigStringChoice;
+class QFormLayout;
 class QGroupBox;
 class QHBoxLayout;
 class QLabel;
 class QRadioButton;
 class SettingsWindow;
-class ConfigBool;
 
+// "Audio" settings page: DSP engine, backend options, playback tweaks, the volume slider and
+// (with Cubeb) per-Wii-Remote speaker routing.
 class AudioPane final : public QWidget
 {
   Q_OBJECT
@@ -32,51 +33,49 @@ public:
   explicit AudioPane();
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void AddDescriptions();
+  QGroupBox* BuildDspBox();
+  QGroupBox* BuildVolumeBox();
+  QGroupBox* BuildBackendBox();
+  QGroupBox* BuildPlaybackBox();
+#ifdef HAVE_CUBEB
+  QGroupBox* BuildRoutingBox();
+#endif
+  void SetTooltips();
+  void WireUp();
 
   void OnEmulationStateChanged(bool running);
   void OnBackendChanged();
   void OnDspChanged();
+  void RefreshRoutingState();
 
-  void UpdateWiimoteRoutingEnabled();
+  // Whether any available backend lets the user set the latency.
+  bool m_has_latency_setting = false;
 
-  void CheckNeedForLatencyControl();
-  bool m_latency_control_supported;
+  ConfigComplexChoice* m_dsp_engine;
 
-  QHBoxLayout* m_main_layout;
+  ConfigSlider* m_volume;
+  QLabel* m_volume_value;
 
-  // DSP Engine
-  ConfigComplexChoice* m_dsp_combo;
-
-  // Volume
-  ConfigSlider* m_volume_slider;
-  QLabel* m_volume_indicator;
-
-  // Backend
   QLabel* m_backend_label;
-  ConfigStringChoice* m_backend_combo;
+  ConfigStringChoice* m_backend;
 
-  ConfigBool* m_dolby_pro_logic;
-  QLabel* m_dolby_quality_label;
-  ConfigChoice* m_dolby_quality_combo;
+  ConfigBool* m_dpl2;
+  QLabel* m_dpl2_quality_label;
+  ConfigChoice* m_dpl2_quality;
 
-  QLabel* m_latency_label;
-  ConfigSlider* m_latency_slider;
+  QLabel* m_latency_label = nullptr;
+  ConfigSlider* m_latency = nullptr;
 #ifdef _WIN32
   QLabel* m_wasapi_device_label;
-  ConfigStringChoice* m_wasapi_device_combo;
+  ConfigStringChoice* m_wasapi_device;
 #endif
 
-  // Misc Settings
-  ConfigBool* m_audio_fill_gaps;
-  ConfigBool* m_audio_preserve_pitch;
-  ConfigBool* m_speed_up_mute_enable;
+  ConfigBool* m_fill_gaps;
+  ConfigBool* m_preserve_pitch;
+  ConfigBool* m_mute_when_unthrottled;
 
-  // Wiimote Audio Routing
-  QGroupBox* m_wiimote_routing_box = nullptr;
-  ConfigBool* m_wiimote_routing_enable = nullptr;
-  std::array<ConfigBool*, 4> m_wiimote_output_enable{};
-  std::array<ConfigStringChoice*, 4> m_wiimote_output_device{};
+  QGroupBox* m_routing_box = nullptr;
+  ConfigBool* m_routing = nullptr;
+  std::array<ConfigBool*, 4> m_routed_remote{};
+  std::array<ConfigStringChoice*, 4> m_routed_device{};
 };
