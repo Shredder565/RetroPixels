@@ -1,10 +1,10 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <SFML/Network/Packet.hpp>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -42,6 +42,7 @@ struct SerializedWiimoteState;
 
 namespace NetPlay
 {
+// What the NetPlay window does for the client. Most calls come from the network thread.
 class NetPlayUI
 {
 public:
@@ -95,6 +96,7 @@ public:
   virtual void SetHostWiiSyncData(std::vector<u64> titles, std::string redirect_folder) = 0;
 };
 
+// Another participant as the client sees them.
 class Player
 {
 public:
@@ -107,6 +109,8 @@ public:
   bool IsHost() const { return pid == 1; }
 };
 
+// One player's connection to a NetPlay host. The constructor connects (directly or through the
+// traversal server) and starts the network thread; everything the host sends is handled there.
 class NetPlayClient : public Common::TraversalClientClient
 {
 public:
@@ -120,7 +124,7 @@ public:
   std::vector<const Player*> GetPlayers();
   const NetSettings& GetNetSettings() const;
 
-  // Called from the GUI thread.
+  // GUI thread.
   bool IsConnected() const { return m_is_connected; }
   bool StartGame(const std::string& path);
   void InvokeStop();
@@ -134,7 +138,7 @@ public:
   void RequestGolfControl();
   std::string GetCurrentGolfer();
 
-  // Send and receive pads values
+  // Input exchange, from the CPU thread.
   struct WiimoteDataBatchEntry
   {
     int wiimote;
@@ -148,7 +152,7 @@ public:
   void OnTraversalStateChanged() override;
   void OnConnectReady(ENetAddress addr) override;
   void OnConnectFailed(Common::TraversalConnectFailedReason reason) override;
-  void OnTtlDetermined(u8 ttl) override {}
+  void OnTtlDetermined(u8) override {}
 
   bool IsFirstInGamePad(int ingame_pad) const;
   int NumLocalPads() const;
@@ -178,32 +182,115 @@ public:
 
   static SyncIdentifier GetSDCardIdentifier();
 
-protected:
-  struct AsyncQueueEntry
+private:
+  enum class LinkState
+  {
+    AwaitingTraversalServer,
+    AwaitingHostAddress,
+    Connecting,
+    AwaitingWelcome,
+    Connected,
+    Failed
+  };
+
+  struct QueuedPacket
   {
     sf::Packet packet;
     u8 channel_id = 0;
   };
 
+  using Handler = void (NetPlayClient::*)(sf::Packet&);
+  // The member that handles a message from the host, or nullptr for an unknown one.
+  static Handler LookupHandler(MessageID id);
+
+  // Connection and transport.
+  bool Connect();
+  void Disconnect();
+  void Send(const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL);
+  void DrainOutgoingQueue();
   void ClearBuffers();
 
-  struct
-  {
-    std::recursive_mutex game;
-    // lock order
-    std::recursive_mutex players;
-    std::recursive_mutex async_queue_write;
-  } m_crit;
+  // Messages from the host.
+  void OnData(sf::Packet& packet);
+  void HandlePlayerJoin(sf::Packet& packet);
+  void HandlePlayerLeave(sf::Packet& packet);
+  void HandleChat(sf::Packet& packet);
+  void HandleChunkStart(sf::Packet& packet);
+  void HandleChunkEnd(sf::Packet& packet);
+  void HandleChunkPayload(sf::Packet& packet);
+  void HandleChunkAbort(sf::Packet& packet);
+  void HandlePadMapping(sf::Packet& packet);
+  void HandleWiimoteMapping(sf::Packet& packet);
+  void HandleGBAConfig(sf::Packet& packet);
+  void HandlePadData(sf::Packet& packet);
+  void HandlePadHostData(sf::Packet& packet);
+  void HandleWiimoteData(sf::Packet& packet);
+  void HandlePadBuffer(sf::Packet& packet);
+  void HandleHostInputAuthority(sf::Packet& packet);
+  void HandleGolfSwitch(sf::Packet& packet);
+  void HandleGolfPrepare(sf::Packet& packet);
+  void HandleChangeGame(sf::Packet& packet);
+  void HandleGameStatus(sf::Packet& packet);
+  void HandleStartGame(sf::Packet& packet);
+  void HandleStopGame(sf::Packet& packet);
+  void HandlePowerButton(sf::Packet& packet);
+  void HandlePing(sf::Packet& packet);
+  void HandlePlayerPing(sf::Packet& packet);
+  void HandleDesync(sf::Packet& packet);
+  void HandleSaveSync(sf::Packet& packet);
+  void HandleCodeSync(sf::Packet& packet);
+  void HandleDigestRequest(sf::Packet& packet);
+  void HandleDigestProgress(sf::Packet& packet);
+  void HandleDigestResult(sf::Packet& packet);
+  void HandleDigestAbort(sf::Packet& packet);
 
-  Common::SPSCQueue<AsyncQueueEntry> m_async_queue;
+  // Save data sync.
+  void ReceiveSaveCount(sf::Packet& packet);
+  void ReceiveRawMemcard(sf::Packet& packet);
+  void ReceiveGCIFolder(sf::Packet& packet);
+  void ReceiveWiiSaves(sf::Packet& packet);
+  void ReceiveGBASave(sf::Packet& packet);
+  void ReportSaveSync(bool success);
+
+  // Cheat code sync.
+  void ReceiveGeckoCount(sf::Packet& packet);
+  void ReceiveGeckoCodes(sf::Packet& packet);
+  void ReceiveARCount(sf::Packet& packet);
+  void ReceiveARCodes(sf::Packet& packet);
+  void ReportCodeSync(bool success);
+
+  // Input.
+  bool PollLocalPad(int local_pad, sf::Packet& packet);
+  void SendPadHostPoll(PadIndex pad_num);
+  bool AddLocalWiimoteToBuffer(int local_wiimote, const WiimoteEmu::SerializedWiimoteState& state,
+                               sf::Packet& packet);
+  void AddPadStateToPacket(int in_game_pad, const GCPadStatus& pad, sf::Packet& packet);
+  void AddWiimoteStateToPacket(int in_game_pad, const WiimoteEmu::SerializedWiimoteState& state,
+                               sf::Packet& packet);
+  void ReadPadEntries(sf::Packet& packet, bool from_host);
+
+  void SendStartGamePacket();
+  void SendStopGamePacket();
+  void SendGameStatus();
+  void ComputeGameDigest(const SyncIdentifier& sync_identifier);
+  void DisplayPlayersPing();
+  u32 GetPlayersMaxPing() const;
+
+  // Lock order: game, then players, then the outgoing queue.
+  std::recursive_mutex m_game_mutex;
+  std::recursive_mutex m_players_mutex;
+  std::recursive_mutex m_outgoing_mutex;
+
+  Common::SPSCQueue<QueuedPacket> m_outgoing;
 
   std::array<Common::SPSCQueue<GCPadStatus>, 4> m_pad_buffer;
   std::array<Common::SPSCQueue<WiimoteEmu::SerializedWiimoteState>, 4> m_wiimote_buffer;
 
+  // Host input authority: the newest state received for each pad, and whether one has arrived.
   std::array<GCPadStatus, 4> m_last_pad_status{};
   std::array<bool, 4> m_first_pad_status_received{};
 
-  std::chrono::time_point<std::chrono::steady_clock> m_buffer_under_target_last;
+  std::chrono::steady_clock::time_point m_buffer_under_target_last;
 
   NetPlayUI* m_dialog = nullptr;
 
@@ -212,108 +299,24 @@ protected:
   std::thread m_thread;
 
   SyncIdentifier m_selected_game;
-  Common::Flag m_is_running{false};
-  Common::Flag m_do_loop{true};
+  std::atomic<bool> m_is_running{false};
+  std::atomic<bool> m_do_loop{true};
 
-  // In non-host input authority mode, this is how many packets each client should
-  // try to keep in-flight to the other clients. In host input authority mode, this is how
-  // many incoming input packets need to be queued up before the client starts
-  // speeding up the game to drain the buffer.
+  // Without host input authority: how many pad states each client keeps in flight to the others.
+  // With it: how many queued states make this client speed up to drain them.
   unsigned int m_target_buffer_size = 20;
   bool m_host_input_authority = false;
   PlayerId m_current_golfer = 1;
 
-  // This bool will stall the client at the start of GetNetPads, used for switching input control
-  // without deadlocking. Use the correspondingly named Event to wake it up.
-  bool m_wait_on_input;
-  bool m_wait_on_input_received;
+  // Golf handover: GetNetPads parks while m_wait_on_input is set (m_wait_on_input_event wakes it)
+  // and acknowledges the request once when m_wait_on_input_received is set.
+  bool m_wait_on_input = false;
+  bool m_wait_on_input_received = false;
 
   Player* m_local_player = nullptr;
-
   u32 m_current_game = 0;
-
-  bool m_is_recording = false;
-
-private:
-  enum class ConnectionState
-  {
-    WaitingForTraversalClientConnection,
-    WaitingForTraversalClientConnectReady,
-    Connecting,
-    WaitingForHelloResponse,
-    Connected,
-    Failure
-  };
-
-  void SendStartGamePacket();
-  void SendStopGamePacket();
-
-  void SyncSaveDataResponse(bool success);
-  void SyncCodeResponse(bool success);
-
-  bool PollLocalPad(int local_pad, sf::Packet& packet);
-  void SendPadHostPoll(PadIndex pad_num);
-
-  bool AddLocalWiimoteToBuffer(int local_wiimote, const WiimoteEmu::SerializedWiimoteState& state,
-                               sf::Packet& packet);
-
-  void AddPadStateToPacket(int in_game_pad, const GCPadStatus& np, sf::Packet& packet);
-  void AddWiimoteStateToPacket(int in_game_pad, const WiimoteEmu::SerializedWiimoteState& np,
-                               sf::Packet& packet);
-  void Send(const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL);
-  void Disconnect();
-  bool Connect();
-  void SendGameStatus();
-  void ComputeGameDigest(const SyncIdentifier& sync_identifier);
-  void DisplayPlayersPing();
-  u32 GetPlayersMaxPing() const;
-
-  void OnData(sf::Packet& packet);
-  void OnPlayerJoin(sf::Packet& packet);
-  void OnPlayerLeave(sf::Packet& packet);
-  void OnChatMessage(sf::Packet& packet);
-  void OnChunkedDataStart(sf::Packet& packet);
-  void OnChunkedDataEnd(sf::Packet& packet);
-  void OnChunkedDataPayload(sf::Packet& packet);
-  void OnChunkedDataAbort(sf::Packet& packet);
-  void OnPadMapping(sf::Packet& packet);
-  void OnWiimoteMapping(sf::Packet& packet);
-  void OnGBAConfig(sf::Packet& packet);
-  void OnPadData(sf::Packet& packet);
-  void OnPadHostData(sf::Packet& packet);
-  void OnWiimoteData(sf::Packet& packet);
-  void OnPadBuffer(sf::Packet& packet);
-  void OnHostInputAuthority(sf::Packet& packet);
-  void OnGolfSwitch(sf::Packet& packet);
-  void OnGolfPrepare(sf::Packet& packet);
-  void OnChangeGame(sf::Packet& packet);
-  void OnGameStatus(sf::Packet& packet);
-  void OnStartGame(sf::Packet& packet);
-  void OnStopGame(sf::Packet& packet);
-  void OnPowerButton();
-  void OnPing(sf::Packet& packet);
-  void OnPlayerPingData(sf::Packet& packet);
-  void OnDesyncDetected(sf::Packet& packet);
-  void OnSyncSaveData(sf::Packet& packet);
-  void OnSyncSaveDataNotify(sf::Packet& packet);
-  void OnSyncSaveDataRaw(sf::Packet& packet);
-  void OnSyncSaveDataGCI(sf::Packet& packet);
-  void OnSyncSaveDataWii(sf::Packet& packet);
-  void OnSyncSaveDataGBA(sf::Packet& packet);
-  void OnSyncCodes(sf::Packet& packet);
-  void OnSyncCodesNotify();
-  void OnSyncCodesNotifyGecko(sf::Packet& packet);
-  void OnSyncCodesDataGecko(sf::Packet& packet);
-  void OnSyncCodesNotifyAR(sf::Packet& packet);
-  void OnSyncCodesDataAR(sf::Packet& packet);
-  void OnComputeGameDigest(sf::Packet& packet);
-  void OnGameDigestProgress(sf::Packet& packet);
-  void OnGameDigestResult(sf::Packet& packet);
-  void OnGameDigestError(sf::Packet& packet);
-  void OnGameDigestAbort();
-
   bool m_is_connected = false;
-  ConnectionState m_connection_state = ConnectionState::Failure;
+  LinkState m_link_state = LinkState::Failed;
 
   PlayerId m_pid = 0;
   NetSettings m_net_settings{};
@@ -322,21 +325,26 @@ private:
   std::string m_player_name;
   bool m_connecting = false;
   Common::TraversalClient* m_traversal_client = nullptr;
+
   std::thread m_game_digest_thread;
   bool m_should_compute_game_digest = false;
+
   Common::Event m_gc_pad_event;
   Common::Event m_wii_pad_event;
   Common::Event m_first_pad_status_received_event;
   Common::Event m_wait_on_input_event;
-  u8 m_sync_save_data_count = 0;
-  u8 m_sync_save_data_success_count = 0;
-  u16 m_sync_gecko_codes_count = 0;
-  u16 m_sync_gecko_codes_success_count = 0;
-  bool m_sync_gecko_codes_complete = false;
-  u16 m_sync_ar_codes_count = 0;
-  u16 m_sync_ar_codes_success_count = 0;
-  bool m_sync_ar_codes_complete = false;
-  std::unordered_map<u32, sf::Packet> m_chunked_data_receive_queue;
+
+  u8 m_saves_expected = 0;
+  u8 m_saves_received = 0;
+  u16 m_gecko_lines_expected = 0;
+  u16 m_gecko_lines_received = 0;
+  bool m_gecko_synced = false;
+  u16 m_ar_lines_expected = 0;
+  u16 m_ar_lines_received = 0;
+  bool m_ar_synced = false;
+
+  // Chunked transfers in progress, by transfer ID.
+  std::unordered_map<u32, sf::Packet> m_chunks;
 
   u64 m_initial_rtc = 0;
   u32 m_timebase_frame = 0;

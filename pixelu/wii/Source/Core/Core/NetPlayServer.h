@@ -1,10 +1,10 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <SFML/Network/Packet.hpp>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -27,6 +27,8 @@ namespace NetPlay
 class NetPlayUI;
 struct SaveSyncInfo;
 
+// The host side of a NetPlay session. It relays input and chat between the clients, decides the
+// settings everyone plays with and sends large data (saves) in chunks from a second thread.
 class NetPlayServer : public Common::TraversalClientClient
 {
 public:
@@ -75,6 +77,7 @@ public:
   bool is_connected = false;
 
 private:
+  // A connected player.
   class Client
   {
   public:
@@ -87,6 +90,7 @@ private:
 
     ENetPeer* socket = nullptr;
     u32 ping = 0;
+    // The game number the client last reported starting.
     u32 current_game = 0;
 
     Common::QoSSession qos_session;
@@ -95,73 +99,100 @@ private:
     bool IsHost() const { return pid == 1; }
   };
 
-  enum class TargetMode
+  // Whom a queued packet goes to: one player, or everyone but one (0 for nobody).
+  enum class Audience
   {
     Only,
     AllExcept
   };
 
-  struct AsyncQueueEntry
+  struct OutgoingPacket
   {
     sf::Packet packet;
-    PlayerId target_pid{};
-    TargetMode target_mode{};
+    PlayerId pid{};
+    Audience audience{};
     u8 channel_id = 0;
   };
 
-  struct ChunkedDataQueueEntry
+  struct ChunkedTransfer
   {
     sf::Packet packet;
-    PlayerId target_pid{};
-    TargetMode target_mode{};
+    PlayerId pid{};
+    Audience audience{};
     std::string title;
   };
 
+  // A message handler's verdict: false drops the sender.
+  using Verdict = bool;
+
+  // Game start.
   bool SetupNetSettings();
   std::optional<SaveSyncInfo> CollectSaveSyncInfo();
   bool SyncSaveData(const SaveSyncInfo& sync_info);
   bool SyncCodes();
   void CheckSyncAndStartGame();
-
   u64 GetInitialNetPlayRTC() const;
 
-  template <typename... Data>
-  void SendResponseToPlayer(const Client& player, const MessageID message_id,
-                            Data&&... data_to_send);
-  template <typename... Data>
-  void SendResponseToAllPlayers(const MessageID message_id, Data&&... data_to_send);
+  // Transport.
   void SendToClients(const sf::Packet& packet, PlayerId skip_pid = 0,
                      u8 channel_id = DEFAULT_CHANNEL);
   void Send(ENetPeer* socket, const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL);
+  void DrainOutgoingQueue();
+  void BroadcastPing();
+
+  // Connections.
   ConnectionError OnConnect(ENetPeer* socket, sf::Packet& received_packet);
-  unsigned int OnDisconnect(const Client& player);
-  unsigned int OnData(sf::Packet& packet, Client& player);
+  void OnDisconnect(const Client& player);
+  void HandleReceive(ENetPeer* peer, sf::Packet& packet);
+  void HandlePeerGone(ENetPeer* peer);
+  void AssignNewUserAPad(const Client& player);
+  PlayerId GiveFirstAvailableIDTo(ENetPeer* player);
+  void StopGameBecauseOf(PlayerId pid);
+
+  // Messages from clients.
+  Verdict OnData(sf::Packet& packet, Client& player);
+  Verdict RelayChat(sf::Packet& packet, Client& player);
+  Verdict NoteChunkProgress(sf::Packet& packet, Client& player);
+  Verdict NoteChunkComplete(sf::Packet& packet, Client& player);
+  Verdict RelayPads(sf::Packet& packet, Client& player);
+  Verdict RelayGolferPads(sf::Packet& packet, Client& player);
+  Verdict RelayWiimotes(sf::Packet& packet, Client& player);
+  Verdict GolfRequest(sf::Packet& packet, Client& player);
+  Verdict GolfRelease(sf::Packet& packet, Client& player);
+  Verdict GolfAcquire(sf::Packet& packet, Client& player);
+  Verdict GolfPrepared(sf::Packet& packet, Client& player);
+  Verdict NotePong(sf::Packet& packet, Client& player);
+  Verdict NoteGameStarted(sf::Packet& packet, Client& player);
+  Verdict StopRequested(sf::Packet& packet, Client& player);
+  Verdict RelayGameStatus(sf::Packet& packet, Client& player);
+  Verdict NoteCapabilities(sf::Packet& packet, Client& player);
+  Verdict RelayPowerButton(sf::Packet& packet, Client& player);
+  Verdict CompareTimeBase(sf::Packet& packet, Client& player);
+  Verdict RelayDigestProgress(sf::Packet& packet, Client& player);
+  Verdict SaveSyncReply(sf::Packet& packet, Client& player);
+  Verdict CodeSyncReply(sf::Packet& packet, Client& player);
 
   void OnTraversalStateChanged() override;
   void OnConnectReady(ENetAddress) override {}
   void OnConnectFailed(Common::TraversalConnectFailedReason) override {}
   void OnTtlDetermined(u8 ttl) override;
+
   void UpdatePadMapping();
   void UpdateGBAConfig();
   void UpdateWiimoteMapping();
   std::vector<std::pair<std::string, std::string>> GetInterfaceListInternal() const;
+
   void ChunkedDataThreadFunc();
-  void ChunkedDataSend(sf::Packet&& packet, PlayerId pid, const TargetMode target_mode);
+  void ChunkedDataSend(sf::Packet&& packet, PlayerId pid, Audience audience);
   void ChunkedDataAbort();
 
   void SetupIndex();
   bool PlayerHasControllerMapped(PlayerId pid) const;
 
-  // pulled from OnConnect()
-  void AssignNewUserAPad(const Client& player);
-  // pulled from OnConnect()
-  // returns the PID given
-  PlayerId GiveFirstAvailableIDTo(ENetPeer* player);
-
   NetSettings m_settings;
 
   bool m_is_running = false;
-  bool m_do_loop = false;
+  std::atomic<bool> m_do_loop = false;
   Common::Timer m_ping_timer;
   u32 m_ping_key = 0;
   bool m_update_pings = false;
@@ -170,39 +201,43 @@ private:
   PadMappingArray m_pad_map;
   GBAConfigArray m_gba_config;
   PadMappingArray m_wiimote_map;
+
+  // Game start waits for every client to confirm both syncs.
   unsigned int m_save_data_synced_players = 0;
   unsigned int m_codes_synced_players = 0;
   bool m_saves_synced = true;
   bool m_codes_synced = true;
   bool m_start_pending = false;
+
   bool m_host_input_authority = false;
   PlayerId m_current_golfer = 1;
   PlayerId m_pending_golfer = 0;
 
+  // By player ID.
   std::map<PlayerId, Client> m_players;
 
+  // Desync detection: the time base each player reported for a frame.
   std::unordered_map<u32, std::vector<std::pair<PlayerId, u64>>> m_timebase_by_frame;
   bool m_desync_detected = false;
 
-  struct
-  {
-    std::recursive_mutex game;
-    // lock order
-    std::recursive_mutex players;
-    std::recursive_mutex async_queue_write;
-    std::recursive_mutex chunked_data_queue_write;
-  } m_crit;
+  // Lock order: game, then players, then the two queues.
+  std::recursive_mutex m_game_mutex;
+  std::recursive_mutex m_players_mutex;
+  std::recursive_mutex m_outgoing_mutex;
+  std::recursive_mutex m_chunked_mutex;
 
-  Common::SPSCQueue<AsyncQueueEntry> m_async_queue;
-  Common::SPSCQueue<ChunkedDataQueueEntry> m_chunked_data_queue;
+  Common::SPSCQueue<OutgoingPacket> m_outgoing;
+  Common::SPSCQueue<ChunkedTransfer> m_chunked_queue;
 
   SyncIdentifier m_selected_game_identifier;
   std::string m_selected_game_name;
   std::thread m_thread;
+
   Common::Event m_chunked_data_event;
   Common::Event m_chunked_data_complete_event;
   std::thread m_chunked_data_thread;
   u32 m_next_chunked_data_id = 0;
+  // Completion acknowledgements received per transfer.
   std::unordered_map<u32, unsigned int> m_chunked_data_complete_count;
   bool m_abort_chunked_data = false;
 
