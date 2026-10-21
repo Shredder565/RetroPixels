@@ -229,11 +229,20 @@ std::string FromEnvironment(const char* name, const std::string& fallback)
   return value != nullptr && value[0] == '/' ? std::string(value) : fallback;
 }
 
-// Elsewhere: an embedded User folder, portable.txt next to the executable, $DOLPHIN_EMU_USERPATH,
-// ~/.dolphin-emu (outside Flatpak), and otherwise the XDG data, config and cache folders.
-// Returns nullopt when it set the XDG folders itself.
+// PixelU: the folder portable.txt asks for. It is "User" next to the executable on every system,
+// as RetroPixels expects (PixelU/wii/User, internal/dolphin's userDirFor), not Dolphin's
+// lower-case Unix "user".
+constexpr char PIXELU_PORTABLE_FOLDER[] = "User";
+
+// Elsewhere: portable.txt next to the executable (PixelU's packages have it), an embedded user
+// folder, $DOLPHIN_EMU_USERPATH, ~/.dolphin-emu (outside Flatpak), and otherwise the XDG data,
+// config and cache folders. Returns nullopt when it set the XDG folders itself.
 std::optional<std::string> PosixUserFolder()
 {
+  const std::string exe_folder = File::GetExeDirectory();
+  if (File::Exists(exe_folder + DIR_SEP "portable.txt"))
+    return exe_folder + DIR_SEP + PIXELU_PORTABLE_FOLDER + DIR_SEP;
+
   if (File::IsDirectory(ROOT_DIR DIR_SEP EMBEDDED_USER_DIR))
     return ROOT_DIR DIR_SEP EMBEDDED_USER_DIR DIR_SEP;
 
@@ -243,9 +252,6 @@ std::optional<std::string> PosixUserFolder()
     home = std::getenv("PWD");
   const std::string home_folder = std::string(home != nullptr ? home : "") + DIR_SEP;
 
-  const std::string exe_folder = File::GetExeDirectory();
-  if (File::Exists(exe_folder + DIR_SEP "portable.txt"))
-    return exe_folder + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
   if (custom != nullptr)
     return std::string(custom);
 

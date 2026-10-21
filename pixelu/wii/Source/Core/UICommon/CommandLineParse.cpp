@@ -160,7 +160,7 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
   parser->add_option("-v", "--video_backend").action("store").help("Specify a video backend");
   parser->add_option("-a", "--audio_emulation")
       .choices({"HLE", "LLE"})
-      .help("Choose audio emulation from [%choices]");
+      .help("Choose audio emulation from [HLE|LLE]");
 
   return parser;
 }
