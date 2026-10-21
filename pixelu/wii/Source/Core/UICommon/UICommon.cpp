@@ -1,15 +1,20 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "UICommon/UICommon.h"
 
 #include <algorithm>
 #include <clocale>
 #include <cmath>
+#include <cstdlib>
 #include <locale>
 #include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #ifdef _WIN32
-#include <shlobj.h>  // for SHGetFolderPath
+#include <shlobj.h>
 
 #include <wil/resource.h>
 #endif
@@ -23,6 +28,7 @@
 #include "Common/Logging/LogManager.h"
 #include "Common/MathUtil.h"
 #include "Common/MsgHandler.h"
+#include "Common/StringUtil.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
@@ -49,90 +55,209 @@
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 
-#ifdef HAVE_QTDBUS
-#include "UICommon/DBusUtils.h"
-#endif
-
-#ifdef __APPLE__
-#include <IOKit/pwr_mgt/IOPMLib.h>
-#endif
-
 namespace UICommon
 {
-static Config::ConfigChangedCallbackID s_config_changed_callback_id;
-static Common::HookableEvent<> s_flush_unsaved_data_event_hook;
-
-static void CreateDumpPath(std::string path)
+namespace
 {
-  if (!path.empty())
-    File::SetUserPath(D_DUMP_IDX, std::move(path));
-  File::CreateFullPath(File::GetUserPath(D_DUMPAUDIO_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDSP_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPSSL_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPFRAMES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPOBJECTS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPTEXTURES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_BRANCHWATCH_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_JITBLOCKS_IDX));
+Config::ConfigChangedCallbackID s_config_callback;
+Common::HookableEvent<> s_flush_requested;
+
+void MakeFolder(unsigned int user_path_index, const char* subfolder = "")
+{
+  File::CreateFullPath(File::GetUserPath(user_path_index) + subfolder);
 }
 
-static void CreateLoadPath(std::string path)
+// Points `index` at a configured folder; an empty setting keeps the default.
+void OverrideFolder(unsigned int index, std::string configured)
 {
-  if (!path.empty())
-    File::SetUserPath(D_LOAD_IDX, std::move(path));
-  File::CreateFullPath(File::GetUserPath(D_HIRESTEXTURES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_RIIVOLUTION_IDX));
-  File::CreateFullPath(File::GetUserPath(D_GRAPHICSMOD_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DYNAMICINPUT_IDX));
+  if (!configured.empty())
+    File::SetUserPath(index, std::move(configured));
 }
 
-static void CreateResourcePackPath(std::string path)
-{
-  if (!path.empty())
-    File::SetUserPath(D_RESOURCEPACK_IDX, std::move(path));
-}
-
-static void CreateWFSPath(const std::string& path)
-{
-  if (!path.empty())
-    File::SetUserPath(D_WFSROOT_IDX, path + '/');
-}
-
-static void InitCustomPaths()
+// Applies the folder settings that can change while running.
+void ApplyFolderSettings()
 {
   File::SetUserPath(D_WIIROOT_IDX, Config::Get(Config::MAIN_FS_PATH));
-  CreateLoadPath(Config::Get(Config::MAIN_LOAD_PATH));
-  CreateDumpPath(Config::Get(Config::MAIN_DUMP_PATH));
-  CreateResourcePackPath(Config::Get(Config::MAIN_RESOURCEPACK_PATH));
-  CreateWFSPath(Config::Get(Config::MAIN_WFS_PATH));
+
+  OverrideFolder(D_LOAD_IDX, Config::Get(Config::MAIN_LOAD_PATH));
+  for (const unsigned int index :
+       {D_HIRESTEXTURES_IDX, D_RIIVOLUTION_IDX, D_GRAPHICSMOD_IDX, D_DYNAMICINPUT_IDX})
+  {
+    MakeFolder(index);
+  }
+
+  OverrideFolder(D_DUMP_IDX, Config::Get(Config::MAIN_DUMP_PATH));
+  for (const unsigned int index :
+       {D_DUMPAUDIO_IDX, D_DUMPDSP_IDX, D_DUMPSSL_IDX, D_DUMPFRAMES_IDX, D_DUMPOBJECTS_IDX,
+        D_DUMPTEXTURES_IDX, D_DUMPDEBUG_IDX, D_DUMPDEBUG_BRANCHWATCH_IDX, D_DUMPDEBUG_JITBLOCKS_IDX})
+  {
+    MakeFolder(index);
+  }
+
+  OverrideFolder(D_RESOURCEPACK_IDX, Config::Get(Config::MAIN_RESOURCEPACK_PATH));
+
+  if (const std::string wfs = Config::Get(Config::MAIN_WFS_PATH); !wfs.empty())
+    File::SetUserPath(D_WFSROOT_IDX, wfs + '/');
+
   File::SetUserPath(F_WIISDCARDIMAGE_IDX, Config::Get(Config::MAIN_WII_SD_CARD_IMAGE_PATH));
   File::SetUserPath(D_WIISDCARDSYNCFOLDER_IDX,
                     Config::Get(Config::MAIN_WII_SD_CARD_SYNC_FOLDER_PATH));
-  File::CreateFullPath(File::GetUserPath(D_WIISDCARDSYNCFOLDER_IDX));
+  MakeFolder(D_WIISDCARDSYNCFOLDER_IDX);
+
 #ifdef HAS_LIBMGBA
   File::SetUserPath(F_GBABIOS_IDX, Config::Get(Config::MAIN_GBA_BIOS_PATH));
   File::SetUserPath(D_GBASAVES_IDX, Config::Get(Config::MAIN_GBA_SAVES_PATH));
-  File::CreateFullPath(File::GetUserPath(D_GBASAVES_IDX));
+  MakeFolder(D_GBASAVES_IDX);
 #endif
 }
 
-static void RefreshConfig()
+void ApplyAlertSettings()
 {
   Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
   Common::SetAbortOnPanicAlert(Config::Get(Config::MAIN_ABORT_ON_PANIC_ALERT));
 }
+
+// Tries one locale name; false if the C library does not know it.
+bool TryLocale(const std::string& name)
+{
+#ifdef __linux__
+  // glibc locale names carry the encoding.
+  const std::string full_name = name.empty() ? name : name + ".UTF-8";
+#else
+  const std::string& full_name = name;
+#endif
+  // setlocale doubles as the validity check, since constructing a std::locale with an unknown
+  // name would throw.
+  if (std::setlocale(LC_ALL, full_name.c_str()) == nullptr)
+    return false;
+  std::locale::global(std::locale(full_name));
+  return true;
+}
+
+#ifdef _WIN32
+constexpr wchar_t REGISTRY_KEY[] = L"Software\\Dolphin Emulator";
+
+std::optional<std::string> KnownFolder(REFKNOWNFOLDERID id)
+{
+  wil::unique_cotaskmem_string path;
+  if (FAILED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, path.put())))
+    return std::nullopt;
+  return TStrToUTF8(path.get());
+}
+
+// The Windows user folder, in order of preference:
+//   1. <exe folder>\User when the registry value LocalUserConfig is non-zero or portable.txt
+//      sits next to the executable;
+//   2. the folder in the registry value UserConfigPath;
+//   3. Documents\Dolphin Emulator, if it exists (the default of older versions);
+//   4. AppData\Roaming\Dolphin Emulator, which is then also written to UserConfigPath so older
+//      versions find it too;
+//   5. <exe folder>\User.
+std::string WindowsUserFolder()
+{
+  const std::optional<std::string> appdata = KnownFolder(FOLDERID_RoamingAppData);
+
+  DWORD local_flag = 0;
+  std::optional<std::wstring> registered_path;
+  wil::unique_hkey key;
+  if (RegOpenKeyEx(HKEY_CURRENT_USER, REGISTRY_KEY, 0, KEY_QUERY_VALUE, key.put()) ==
+      ERROR_SUCCESS)
+  {
+    DWORD size = sizeof(local_flag);
+    if (RegQueryValueEx(key.get(), TEXT("LocalUserConfig"), nullptr, nullptr,
+                        reinterpret_cast<LPBYTE>(&local_flag), &size) != ERROR_SUCCESS)
+    {
+      local_flag = 0;
+    }
+
+    // Ask for the size first, then read. The extra zeroed element guarantees termination.
+    size = 0;
+    RegQueryValueEx(key.get(), TEXT("UserConfigPath"), nullptr, nullptr, nullptr, &size);
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegQueryValueEx(key.get(), TEXT("UserConfigPath"), nullptr, nullptr,
+                        reinterpret_cast<LPBYTE>(buffer.data()), &size) == ERROR_SUCCESS)
+    {
+      registered_path = std::wstring(buffer.data());
+    }
+  }
+
+  const std::string portable_folder = File::GetExeDirectory() + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
+  const bool portable =
+      local_flag != 0 || File::Exists(File::GetExeDirectory() + DIR_SEP "portable.txt");
+
+  std::optional<std::string> legacy_folder;
+  if (const std::optional<std::string> documents = KnownFolder(FOLDERID_Documents))
+    legacy_folder = *documents + DIR_SEP NORMAL_USER_DIR DIR_SEP;
+
+  if (portable)
+    return portable_folder;
+  if (registered_path)
+    return WStringToUTF8(*registered_path);
+  if (legacy_folder && File::Exists(*legacy_folder))
+    return *legacy_folder;
+  if (!appdata)
+    return portable_folder;
+
+  std::string roaming_folder = *appdata + DIR_SEP NORMAL_USER_DIR DIR_SEP;
+  const std::wstring wide = UTF8ToWString(roaming_folder);
+  RegSetKeyValueW(HKEY_CURRENT_USER, REGISTRY_KEY, L"UserConfigPath", REG_SZ, wide.c_str(),
+                  static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
+  return roaming_folder;
+}
+#else
+std::string FromEnvironment(const char* name, const std::string& fallback)
+{
+  // Only absolute paths count, as the XDG specification requires.
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] == '/' ? std::string(value) : fallback;
+}
+
+// Elsewhere: an embedded User folder, portable.txt next to the executable, $DOLPHIN_EMU_USERPATH,
+// ~/.dolphin-emu (outside Flatpak), and otherwise the XDG data, config and cache folders.
+// Returns nullopt when it set the XDG folders itself.
+std::optional<std::string> PosixUserFolder()
+{
+  if (File::IsDirectory(ROOT_DIR DIR_SEP EMBEDDED_USER_DIR))
+    return ROOT_DIR DIR_SEP EMBEDDED_USER_DIR DIR_SEP;
+
+  const char* custom = std::getenv("DOLPHIN_EMU_USERPATH");
+  const char* home = std::getenv("HOME");
+  if (home == nullptr)
+    home = std::getenv("PWD");
+  const std::string home_folder = std::string(home != nullptr ? home : "") + DIR_SEP;
+
+  const std::string exe_folder = File::GetExeDirectory();
+  if (File::Exists(exe_folder + DIR_SEP "portable.txt"))
+    return exe_folder + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
+  if (custom != nullptr)
+    return std::string(custom);
+
+  std::string dot_folder = home_folder + "." NORMAL_USER_DIR DIR_SEP;
+  if (!File::Exists("/.flatpak-info") && File::Exists(dot_folder))
+    return dot_folder;
+
+  const std::string suffix = DIR_SEP NORMAL_USER_DIR DIR_SEP;
+  File::SetUserPath(D_USER_IDX,
+                    FromEnvironment("XDG_DATA_HOME", home_folder + ".local" DIR_SEP "share") +
+                        suffix);
+  File::SetUserPath(D_CONFIG_IDX, FromEnvironment("XDG_CONFIG_HOME", home_folder + ".config") +
+                                      suffix);
+  File::SetUserPath(D_CACHE_IDX,
+                    FromEnvironment("XDG_CACHE_HOME", home_folder + ".cache") + suffix);
+  return std::nullopt;
+}
+#endif
+}  // namespace
 
 void Init()
 {
   Core::RestoreWiiSettings(Core::RestoreReason::CrashRecovery);
 
   Config::Init();
-  const auto config_changed_callback = [] {
-    InitCustomPaths();
-    RefreshConfig();
-  };
-  s_config_changed_callback_id = Config::AddConfigChangedCallback(config_changed_callback);
+  s_config_callback = Config::AddConfigChangedCallback([] {
+    ApplyFolderSettings();
+    ApplyAlertSettings();
+  });
   Config::AddLayer(ConfigLoaders::GenerateBaseConfigLoader());
   SConfig::Init();
   g_Config.Init();
@@ -141,13 +266,14 @@ void Init()
   VideoBackendBase::ActivateBackend(Config::Get(Config::MAIN_GFX_BACKEND));
   Statistics::Init();
 
-  RefreshConfig();
+  ApplyAlertSettings();
 }
 
 void Shutdown()
 {
-  Config::RemoveConfigChangedCallback(s_config_changed_callback_id);
+  Config::RemoveConfigChangedCallback(s_config_callback);
 
+  // Roughly the reverse of Init, with the controller back ends that outlive a game in between.
   Statistics::Shutdown();
   GCAdapter::Shutdown();
   WiimoteReal::Shutdown();
@@ -158,15 +284,15 @@ void Shutdown()
   Config::Shutdown();
 }
 
-[[nodiscard]] Common::EventHook AddFlushUnsavedDataCallback(std::function<void()> callback)
+Common::EventHook AddFlushUnsavedDataCallback(std::function<void()> callback)
 {
-  return s_flush_unsaved_data_event_hook.Register(std::move(callback));
+  return s_flush_requested.Register(std::move(callback));
 }
 
 void FlushUnsavedData()
 {
   INFO_LOG_FMT(CORE, "Flushing unsaved data...");
-  s_flush_unsaved_data_event_hook.Trigger();
+  s_flush_requested.Trigger();
 }
 
 void InitControllers(const WindowSystemInfo& wsi)
@@ -175,10 +301,8 @@ void InitControllers(const WindowSystemInfo& wsi)
     return;
 
   g_controller_interface.Initialize(wsi);
-
   if (!g_controller_interface.HasDefaultDevice())
   {
-    // Note that the CI default device could be still temporarily removed at any time
     WARN_LOG_FMT(CONTROLLERINTERFACE, "No default device has been added in time. Premade control "
                                       "mappings intended for the default device may not work.");
   }
@@ -206,99 +330,76 @@ void ShutdownControllers()
 
 void SetLocale(std::string locale_name)
 {
-  auto set_locale = [](const std::string& locale) {
-#ifdef __linux__
-    std::string adjusted_locale = locale;
-    if (!locale.empty())
-      adjusted_locale += ".UTF-8";
-#else
-    const std::string& adjusted_locale = locale;
-#endif
-
-    // setlocale sets the C locale, and global sets the C and C++ locales, so the call to setlocale
-    // would be redundant if it wasn't for not having any other good way to check whether
-    // the locale name is valid. (Constructing a std::locale object for an unsupported
-    // locale name throws std::runtime_error, and exception handling is disabled in Dolphin.)
-    if (!std::setlocale(LC_ALL, adjusted_locale.c_str()))
-      return false;
-    std::locale::global(std::locale(adjusted_locale));
-    return true;
-  };
-
 #ifdef _WIN32
-  constexpr char PREFERRED_SEPARATOR = '-';
-  constexpr char OTHER_SEPARATOR = '_';
+  constexpr char SEPARATOR = '-';
+  constexpr char FOREIGN_SEPARATOR = '_';
 #else
-  constexpr char PREFERRED_SEPARATOR = '_';
-  constexpr char OTHER_SEPARATOR = '-';
+  constexpr char SEPARATOR = '_';
+  constexpr char FOREIGN_SEPARATOR = '-';
 #endif
 
-  // Users who use a system language other than English are unlikely to prefer American date and
-  // time formats, so let's explicitly request "en_GB" if Dolphin's language is set to "en".
-  // (The settings window only allows setting "en", not anything like "en_US" or "en_GB".)
-  // Users who prefer the American formats are likely to have their system language set to en_US,
-  // and are thus likely to leave Dolphin's language as the default value "" (<System Language>).
+  // The language setting only offers plain "en"; use British conventions for it, since anyone
+  // wanting US formats most likely runs an en_US system and keeps the system-language default.
   if (locale_name == "en")
     locale_name = "en_GB";
+  std::ranges::replace(locale_name, FOREIGN_SEPARATOR, SEPARATOR);
 
-  std::ranges::replace(locale_name, OTHER_SEPARATOR, PREFERRED_SEPARATOR);
-
-  // Use the specified locale if supported.
-  if (set_locale(locale_name))
+  // Try the full name, then drop one subtag at a time; the last attempt, with an empty name,
+  // selects the system locale. If even that fails, the current locale stays.
+  if (TryLocale(locale_name))
     return;
-
-  // Remove subcodes until we get a supported locale. If that doesn't give us a supported locale,
-  // "" is passed to set_locale in order to get the system default locale.
   while (!locale_name.empty())
   {
-    const size_t separator_index = locale_name.rfind(PREFERRED_SEPARATOR);
-    locale_name.erase(separator_index == std::string::npos ? 0 : separator_index);
-    if (set_locale(locale_name))
+    const std::size_t cut = locale_name.rfind(SEPARATOR);
+    locale_name.resize(cut == std::string::npos ? 0 : cut);
+    if (TryLocale(locale_name))
       return;
   }
-
-  // If none of the locales tried above are supported, we just keep using whatever locale is set
-  // (which is the classic locale by default).
 }
 
 void CreateDirectories()
 {
-  File::CreateFullPath(File::GetUserPath(D_RESOURCEPACK_IDX));
-  File::CreateFullPath(File::GetUserPath(D_USER_IDX));
-  File::CreateFullPath(File::GetUserPath(D_CACHE_IDX));
-  File::CreateFullPath(File::GetUserPath(D_COVERCACHE_IDX));
-  File::CreateFullPath(File::GetUserPath(D_CONFIG_IDX));
-  File::CreateFullPath(File::GetUserPath(D_CONFIG_IDX) + GRAPHICSMOD_CONFIG_DIR DIR_SEP);
-  File::CreateFullPath(File::GetUserPath(D_DUMPDSP_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPSSL_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPTEXTURES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_BRANCHWATCH_IDX));
-  File::CreateFullPath(File::GetUserPath(D_DUMPDEBUG_JITBLOCKS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_GAMESETTINGS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_GCUSER_IDX));
-  File::CreateFullPath(File::GetUserPath(D_GCUSER_IDX) + USA_DIR DIR_SEP);
-  File::CreateFullPath(File::GetUserPath(D_GCUSER_IDX) + EUR_DIR DIR_SEP);
-  File::CreateFullPath(File::GetUserPath(D_GCUSER_IDX) + JAP_DIR DIR_SEP);
-  File::CreateFullPath(File::GetUserPath(D_TRIUSER_IDX));
-  File::CreateFullPath(File::GetUserPath(D_HIRESTEXTURES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_GRAPHICSMOD_IDX));
-  File::CreateFullPath(File::GetUserPath(D_LOGS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_MAPS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_SCREENSHOTS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_SHADERS_IDX));
-  File::CreateFullPath(File::GetUserPath(D_SHADERS_IDX) + ANAGLYPH_DIR DIR_SEP);
-  File::CreateFullPath(File::GetUserPath(D_RETROACHIEVEMENTSCACHE_IDX));
-  File::CreateFullPath(File::GetUserPath(D_STATESAVES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_ASM_ROOT_IDX));
-  File::CreateFullPath(File::GetUserPath(D_WFSROOT_IDX));
-#ifndef ANDROID
-  File::CreateFullPath(File::GetUserPath(D_THEMES_IDX));
-  File::CreateFullPath(File::GetUserPath(D_STYLES_IDX));
-#else
-  // Disable media scanning in directories with a .nomedia file
-  File::CreateEmptyFile(File::GetUserPath(D_COVERCACHE_IDX) + DIR_SEP NOMEDIA_FILE);
-#endif
+  struct Folder
+  {
+    unsigned int index;
+    const char* subfolder;
+  };
+  static constexpr Folder FOLDERS[] = {
+      {D_RESOURCEPACK_IDX, ""},
+      {D_USER_IDX, ""},
+      {D_CACHE_IDX, ""},
+      {D_COVERCACHE_IDX, ""},
+      {D_CONFIG_IDX, ""},
+      {D_CONFIG_IDX, GRAPHICSMOD_CONFIG_DIR DIR_SEP},
+      {D_DUMPDSP_IDX, ""},
+      {D_DUMPSSL_IDX, ""},
+      {D_DUMPTEXTURES_IDX, ""},
+      {D_DUMPDEBUG_IDX, ""},
+      {D_DUMPDEBUG_BRANCHWATCH_IDX, ""},
+      {D_DUMPDEBUG_JITBLOCKS_IDX, ""},
+      {D_GAMESETTINGS_IDX, ""},
+      {D_GCUSER_IDX, ""},
+      {D_GCUSER_IDX, USA_DIR DIR_SEP},
+      {D_GCUSER_IDX, EUR_DIR DIR_SEP},
+      {D_GCUSER_IDX, JAP_DIR DIR_SEP},
+      {D_TRIUSER_IDX, ""},
+      {D_HIRESTEXTURES_IDX, ""},
+      {D_GRAPHICSMOD_IDX, ""},
+      {D_LOGS_IDX, ""},
+      {D_MAPS_IDX, ""},
+      {D_SCREENSHOTS_IDX, ""},
+      {D_SHADERS_IDX, ""},
+      {D_SHADERS_IDX, ANAGLYPH_DIR DIR_SEP},
+      {D_RETROACHIEVEMENTSCACHE_IDX, ""},
+      {D_STATESAVES_IDX, ""},
+      {D_ASM_ROOT_IDX, ""},
+      {D_WFSROOT_IDX, ""},
+      {D_THEMES_IDX, ""},
+      {D_STYLES_IDX, ""},
+  };
+
+  for (const Folder& folder : FOLDERS)
+    MakeFolder(folder.index, folder.subfolder);
 }
 
 void SetUserDirectory(std::string custom_path)
@@ -310,176 +411,12 @@ void SetUserDirectory(std::string custom_path)
     return;
   }
 
-  std::string user_path;
 #ifdef _WIN32
-  // Detect where the User directory is. There are five different cases
-  // (on top of the command line flag, which overrides all this):
-  // 1. GetExeDirectory()\portable.txt exists
-  //    -> Use GetExeDirectory()\User
-  // 2. HKCU\Software\Dolphin Emulator\LocalUserConfig exists and is true
-  //    -> Use GetExeDirectory()\User
-  // 3. HKCU\Software\Dolphin Emulator\UserConfigPath exists
-  //    -> Use this as the user directory path
-  // 4. My Documents\Dolphin Emulator exists (default user folder before PR 10708)
-  //    -> Use this as the user directory path
-  // 5. AppData\Roaming exists
-  //    -> Use AppData\Roaming\Dolphin Emulator as the User directory path
-  // 6. Default
-  //    -> Use GetExeDirectory()\User
-
-  // Get AppData path in case we need it.
-  wil::unique_cotaskmem_string appdata;
-  bool appdata_found = SUCCEEDED(
-      SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, nullptr, appdata.put()));
-
-  // Check our registry keys
-  wil::unique_hkey hkey;
-  DWORD local = 0;
-  std::unique_ptr<TCHAR[]> configPath;
-  if (RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\Dolphin Emulator"), 0, KEY_QUERY_VALUE,
-                   hkey.put()) == ERROR_SUCCESS)
-  {
-    DWORD size = sizeof(local);
-    if (RegQueryValueEx(hkey.get(), TEXT("LocalUserConfig"), nullptr, nullptr,
-                        reinterpret_cast<LPBYTE>(&local), &size) != ERROR_SUCCESS)
-    {
-      local = 0;
-    }
-
-    size = 0;
-    RegQueryValueEx(hkey.get(), TEXT("UserConfigPath"), nullptr, nullptr, nullptr, &size);
-    configPath = std::make_unique<TCHAR[]>(size / sizeof(TCHAR));
-    if (RegQueryValueEx(hkey.get(), TEXT("UserConfigPath"), nullptr, nullptr,
-                        reinterpret_cast<LPBYTE>(configPath.get()), &size) != ERROR_SUCCESS)
-    {
-      configPath.reset();
-    }
-  }
-
-  local = local != 0 || File::Exists(File::GetExeDirectory() + DIR_SEP "portable.txt");
-
-  // Attempt to check if the old User directory exists in Documents.
-  wil::unique_cotaskmem_string documents;
-  bool documents_found = SUCCEEDED(
-      SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, documents.put()));
-
-  std::optional<std::string> old_user_folder;
-  if (documents_found)
-  {
-    old_user_folder = TStrToUTF8(documents.get()) + DIR_SEP NORMAL_USER_DIR DIR_SEP;
-  }
-
-  if (local)  // Case 1-2
-  {
-    user_path = File::GetExeDirectory() + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
-  }
-  else if (configPath)  // Case 3
-  {
-    user_path = TStrToUTF8(configPath.get());
-  }
-  else if (old_user_folder && File::Exists(old_user_folder.value()))  // Case 4
-  {
-    user_path = old_user_folder.value();
-  }
-  else if (appdata_found)  // Case 5
-  {
-    user_path = TStrToUTF8(appdata.get()) + DIR_SEP NORMAL_USER_DIR DIR_SEP;
-
-    // Set the UserConfigPath value in the registry for backwards compatibility with older Dolphin
-    // builds, which will look for the default User directory in Documents. If we set this key,
-    // they will use this as the User directory instead.
-    // (If we're in this case, then this key doesn't exist, so it's OK to set it.)
-    std::wstring wstr_path = UTF8ToWString(user_path);
-    RegSetKeyValueW(HKEY_CURRENT_USER, TEXT("Software\\Dolphin Emulator"), TEXT("UserConfigPath"),
-                    REG_SZ, wstr_path.c_str(),
-                    static_cast<DWORD>((wstr_path.size() + 1) * sizeof(wchar_t)));
-  }
-  else  // Case 6
-  {
-    user_path = File::GetExeDirectory() + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
-  }
+  File::SetUserPath(D_USER_IDX, WindowsUserFolder());
 #else
-  if (File::IsDirectory(ROOT_DIR DIR_SEP EMBEDDED_USER_DIR))
-  {
-    user_path = ROOT_DIR DIR_SEP EMBEDDED_USER_DIR DIR_SEP;
-  }
-  else
-  {
-    const char* env_path = getenv("DOLPHIN_EMU_USERPATH");
-    const char* home = getenv("HOME");
-    if (!home)
-      home = getenv("PWD");
-    if (!home)
-      home = "";
-    std::string home_path = std::string(home) + DIR_SEP;
-
-    // On a non-Apple and non-Android POSIX system, there are 4 cases:
-    // 1. GetExeDirectory()/portable.txt exists
-    //    -> Use GetExeDirectory()/User
-    // 2. $DOLPHIN_EMU_USERPATH is set
-    //    -> Use $DOLPHIN_EMU_USERPATH
-    // 3. ~/.dolphin-emu directory exists, and we're not in flatpak
-    //    -> Use ~/.dolphin-emu
-    // 4. Default
-    //    -> Use XDG basedir, see
-    //    http://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
-    //
-    // On macOS:
-    // 1. GetExeDirectory()/portable.txt exists
-    //    -> Use GetExeDirectory()/User
-    // 2. $DOLPHIN_EMU_USERPATH is set
-    //    -> Use $DOLPHIN_EMU_USERPATH
-    // 3. Default
-    //
-    // On Android, custom_path is set, so this code path is never reached.
-    std::string exe_path = File::GetExeDirectory();
-    if (File::Exists(exe_path + DIR_SEP "portable.txt"))
-    {
-      user_path = exe_path + DIR_SEP PORTABLE_USER_DIR DIR_SEP;
-    }
-    else if (env_path)
-    {
-      user_path = env_path;
-    }
-#if defined(__APPLE__) || defined(ANDROID)
-    else
-    {
-      user_path = home_path + NORMAL_USER_DIR DIR_SEP;
-    }
-#else
-    else
-    {
-      user_path = home_path + "." NORMAL_USER_DIR DIR_SEP;
-
-      if (File::Exists("/.flatpak-info") || !File::Exists(user_path))
-      {
-        const char* data_home = getenv("XDG_DATA_HOME");
-        std::string data_path =
-            std::string(data_home && data_home[0] == '/' ? data_home :
-                                                           (home_path + ".local" DIR_SEP "share")) +
-            DIR_SEP NORMAL_USER_DIR DIR_SEP;
-
-        const char* config_home = getenv("XDG_CONFIG_HOME");
-        std::string config_path =
-            std::string(config_home && config_home[0] == '/' ? config_home :
-                                                               (home_path + ".config")) +
-            DIR_SEP NORMAL_USER_DIR DIR_SEP;
-
-        const char* cache_home = getenv("XDG_CACHE_HOME");
-        std::string cache_path =
-            std::string(cache_home && cache_home[0] == '/' ? cache_home : (home_path + ".cache")) +
-            DIR_SEP NORMAL_USER_DIR DIR_SEP;
-
-        File::SetUserPath(D_USER_IDX, data_path);
-        File::SetUserPath(D_CONFIG_IDX, config_path);
-        File::SetUserPath(D_CACHE_IDX, cache_path);
-        return;
-      }
-    }
+  if (std::optional<std::string> folder = PosixUserFolder())
+    File::SetUserPath(D_USER_IDX, std::move(*folder));
 #endif
-  }
-#endif
-  File::SetUserPath(D_USER_IDX, std::move(user_path));
 }
 
 bool TriggerSTMPowerEvent()
@@ -488,70 +425,44 @@ bool TriggerSTMPowerEvent()
   if (!ios)
     return false;
 
-  const auto stm = ios->GetDeviceByName("/dev/stm/eventhook");
-  if (!stm || !std::static_pointer_cast<IOS::HLE::STMEventHookDevice>(stm)->HasHookInstalled())
+  // Only titles that registered an STM event hook react to the power button.
+  const auto device = ios->GetDeviceByName("/dev/stm/eventhook");
+  if (!device)
+    return false;
+  const auto hook = std::static_pointer_cast<IOS::HLE::STMEventHookDevice>(device);
+  if (!hook->HasHookInstalled())
     return false;
 
   Core::DisplayMessage("Shutting down", 30000);
   ios->GetSystem().GetProcessorInterface().PowerButton_Tap();
-
   return true;
 }
 
 void InhibitScreenSaver(bool inhibit)
 {
-  // Inhibit the screensaver. Depending on the operating system this may also
-  // disable low-power states and/or screen dimming.
-
-#ifdef HAVE_QTDBUS
-  DBusUtils::InhibitScreenSaver(inhibit);
-#endif
-
 #ifdef _WIN32
-  // Prevents Windows from sleeping, turning off the display, or idling
-  SetThreadExecutionState(ES_CONTINUOUS |
-                          (inhibit ? (ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) : 0));
-#endif
-
-#ifdef __APPLE__
-  static IOPMAssertionID s_power_assertion = kIOPMNullAssertionID;
+  // Keeps the display on and the system awake (no idle sleep) while set.
+  EXECUTION_STATE state = ES_CONTINUOUS;
   if (inhibit)
-  {
-    CFStringRef reason_for_activity = CFSTR("Emulation Running");
-    if (IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep,
-                                    kIOPMAssertionLevelOn, reason_for_activity,
-                                    &s_power_assertion) != kIOReturnSuccess)
-    {
-      s_power_assertion = kIOPMNullAssertionID;
-    }
-  }
-  else
-  {
-    if (s_power_assertion != kIOPMNullAssertionID)
-    {
-      IOPMAssertionRelease(s_power_assertion);
-      s_power_assertion = kIOPMNullAssertionID;
-    }
-  }
+    state |= ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED;
+  SetThreadExecutionState(state);
+#else
+  (void)inhibit;
 #endif
 }
 
 std::string FormatSize(u64 bytes, int decimals)
 {
   // i18n: The symbol for the unit "bytes"
-  const char* const unit_symbols[] = {_trans("B"),   _trans("KiB"), _trans("MiB"), _trans("GiB"),
-                                      _trans("TiB"), _trans("PiB"), _trans("EiB")};
+  static constexpr const char* UNITS[] = {_trans("B"),   _trans("KiB"), _trans("MiB"),
+                                          _trans("GiB"), _trans("TiB"), _trans("PiB"),
+                                          _trans("EiB")};
 
-  // Find largest power of 2 less than size.
-  // div 10 to get largest named unit less than size
-  // 10 == log2(1024) (number of B in a KiB, KiB in a MiB, etc)
-  // Max value is 63 / 10 = 6
+  // Each unit is 2^10 of the previous one; a u64 needs at most EiB (log2 63 / 10 = 6).
   const int unit = MathUtil::IntLog2(std::max<u64>(bytes, 1)) / 10;
-
-  // Don't need exact values, only 5 most significant digits
-  const double unit_size = std::pow(2, unit * 10);
-  return fmt::format("{:.{}Lf} {}", bytes / unit_size, decimals,
-                     Common::GetStringT(unit_symbols[unit]));
+  const double scale = std::pow(2, unit * 10);
+  const double value = static_cast<double>(bytes) / scale;
+  return fmt::format("{:.{}Lf} {}", value, decimals, Common::GetStringT(UNITS[unit]));
 }
 
 }  // namespace UICommon
