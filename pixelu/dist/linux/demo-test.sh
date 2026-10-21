@@ -39,6 +39,10 @@ status=0
 RETRO_X11_REQUIRE=1 RETRO_PIXELU_BIN="$copy/PixelU" RETRO_PIXELU_ARGS="$args" RETRO_PIXELU_SHOTS="$shots" \
 	go test ./internal/pixelu -run 'SetScreen|PixelU' -v -count=1 -timeout 15m || status=1
 find "$copy" -name log.txt -exec cp {} "$shots/" \; 2>/dev/null || true
+if [ "$status" != 0 ] && [ -f "$shots/log.txt" ]; then
+	echo "--- end of PixelU's log.txt (last test) ---"
+	tail -n 80 "$shots/log.txt"
+fi
 
 found=0
 for f in "$shots"/*.png; do
