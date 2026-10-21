@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <asmv3:application>
-    <asmv3:windowsSettings>
-      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
-    </asmv3:windowsSettings>
-  </asmv3:application>
+<!-- Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin. -->
+<!-- Application manifest of PixelU-Wii.exe: Windows 10 and later, and paths
+     longer than MAX_PATH where the system allows them. DPI awareness is left
+     to Qt, which sets it when the program starts. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
+      <!-- Windows 10 / 11 -->
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
     </application>
   </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

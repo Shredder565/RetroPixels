@@ -1,6 +1,7 @@
-// Microsoft Visual C++ generated resource script.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 //
-#include "resource.h"
-IDI_ICON1               ICON                    "..\\..\\..\\Installer\\Dolphin.ico"
-"dolphin"               ICON                    "..\\..\\..\\Installer\\Dolphin.ico"
+// Windows resources of the command-line tool: the same icon as PixelU-Wii.exe.
 
+#include "resource.h"
+
+IDI_ICON1 ICON "../DolphinQt/PixelU-Wii.ico"
