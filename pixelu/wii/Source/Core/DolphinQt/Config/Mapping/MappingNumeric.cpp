@@ -1,111 +1,115 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/MappingNumeric.h"
 
 #include <limits>
 
+#include <QSignalBlocker>
+
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
+
+namespace
+{
+// Appended to editors whose setting is driven by an input expression.
+QString ExpressionMarker()
+{
+  return QString::fromUtf8("🎮");
+}
+}  // namespace
 
 MappingDouble::MappingDouble(MappingWidget* parent, ControllerEmu::NumericSetting<double>* setting)
     : QDoubleSpinBox(parent), m_setting(*setting)
 {
   setDecimals(2);
 
-  if (const auto ui_description = m_setting.GetUIDescription())
-    setToolTip(tr(ui_description));
+  const char* const description = m_setting.GetUIDescription();
+  if (description != nullptr)
+    setToolTip(tr(description));
 
-  connect(this, &QDoubleSpinBox::valueChanged, this, [this, parent](double value) {
-    m_setting.SetValue(value);
-    ConfigChanged();
+  connect(this, &QDoubleSpinBox::valueChanged, this, [this, parent](double new_value) {
+    m_setting.SetValue(new_value);
+    ShowSetting();
     parent->SaveSettings();
   });
-
-  connect(parent, &MappingWidget::ConfigChanged, this, &MappingDouble::ConfigChanged);
-  connect(parent, &MappingWidget::Update, this, &MappingDouble::Update);
+  connect(parent, &MappingWidget::ConfigChanged, this, &MappingDouble::ShowSetting);
+  connect(parent, &MappingWidget::Update, this, &MappingDouble::FollowLiveValue);
 }
 
-// Overriding QDoubleSpinBox's fixup to set the default value when input is cleared.
 void MappingDouble::fixup(QString& input) const
 {
   input = QString::number(m_setting.GetDefaultValue());
 }
 
-void MappingDouble::ConfigChanged()
+void MappingDouble::ShowSetting()
 {
-  const QSignalBlocker blocker(this);
+  const QSignalBlocker no_feedback(this);
 
   QString suffix;
+  if (const char* const unit = m_setting.GetUISuffix(); unit != nullptr)
+    suffix = QLatin1Char{' '} + tr(unit);
 
-  if (const auto ui_suffix = m_setting.GetUISuffix())
-    suffix += QLatin1Char{' '} + tr(ui_suffix);
-
-  if (m_setting.IsSimpleValue())
+  const bool plain_value = m_setting.IsSimpleValue();
+  if (plain_value)
   {
     setRange(m_setting.GetMinValue(), m_setting.GetMaxValue());
-    setButtonSymbols(ButtonSymbols::UpDownArrows);
   }
   else
   {
-    constexpr auto inf = std::numeric_limits<double>::infinity();
-    setRange(-inf, inf);
-    setButtonSymbols(ButtonSymbols::NoButtons);
-    suffix += QString::fromUtf8(" 🎮");
+    // An expression can produce any value.
+    const double unbounded = std::numeric_limits<double>::infinity();
+    setRange(-unbounded, unbounded);
+    suffix += QLatin1Char{' '} + ExpressionMarker();
   }
-
+  setButtonSymbols(plain_value ? ButtonSymbols::UpDownArrows : ButtonSymbols::NoButtons);
   setSuffix(suffix);
-
   setValue(m_setting.GetValue());
 }
 
-void MappingDouble::Update()
+void MappingDouble::FollowLiveValue()
 {
+  // Plain values do not change by themselves; and do not disturb the user while typing.
   if (m_setting.IsSimpleValue() || hasFocus())
     return;
 
-  const QSignalBlocker blocker(this);
+  const QSignalBlocker no_feedback(this);
   setValue(m_setting.GetValue());
 }
 
 MappingBool::MappingBool(MappingWidget* parent, ControllerEmu::NumericSetting<bool>* setting)
     : QCheckBox(parent), m_setting(*setting)
 {
-  if (const auto ui_description = m_setting.GetUIDescription())
-    setToolTip(tr(ui_description));
+  const char* const description = m_setting.GetUIDescription();
+  if (description != nullptr)
+    setToolTip(tr(description));
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-  connect(this, &QCheckBox::checkStateChanged, this, [this, parent](Qt::CheckState value) {
-#else
-  connect(this, &QCheckBox::stateChanged, this, [this, parent](int value) {
-#endif
-    m_setting.SetValue(value != 0);
-    ConfigChanged();
+  const auto on_user_toggle = [this, parent](auto state) {
+    m_setting.SetValue(state != 0);
+    ShowSetting();
     parent->SaveSettings();
-  });
-
-  connect(parent, &MappingWidget::ConfigChanged, this, &MappingBool::ConfigChanged);
-  connect(parent, &MappingWidget::Update, this, &MappingBool::Update);
+  };
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+  connect(this, &QCheckBox::checkStateChanged, this, on_user_toggle);
+#else
+  connect(this, &QCheckBox::stateChanged, this, on_user_toggle);
+#endif
+  connect(parent, &MappingWidget::ConfigChanged, this, &MappingBool::ShowSetting);
+  connect(parent, &MappingWidget::Update, this, &MappingBool::FollowLiveValue);
 
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
 }
 
-void MappingBool::ConfigChanged()
+void MappingBool::ShowSetting()
 {
-  const QSignalBlocker blocker(this);
-
-  if (m_setting.IsSimpleValue())
-    setText({});
-  else
-    setText(QString::fromUtf8("🎮"));
-
+  const QSignalBlocker no_feedback(this);
+  setText(m_setting.IsSimpleValue() ? QString{} : ExpressionMarker());
   setChecked(m_setting.GetValue());
 }
 
-void MappingBool::Update()
+void MappingBool::FollowLiveValue()
 {
   if (m_setting.IsSimpleValue())
     return;
 
-  const QSignalBlocker blocker(this);
+  const QSignalBlocker no_feedback(this);
   setChecked(m_setting.GetValue());
 }

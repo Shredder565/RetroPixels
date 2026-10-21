@@ -1,73 +1,71 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Config/Mapping/MappingButton.h"
 
-#include <QApplication>
-#include <QFontMetrics>
 #include <QMouseEvent>
 #include <QString>
+#include <QStringList>
 
 #include "DolphinQt/Config/Mapping/IOWindow.h"
 #include "DolphinQt/Config/Mapping/MappingWidget.h"
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
-
 #include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 
-constexpr int SLIDER_TICK_COUNT = 100;
-
-// Escape ampersands and simplify the text for a short preview
-static QString RefToDisplayString(ControlReference* ref)
+namespace
 {
-  const bool expression_valid =
-      ref->GetParseStatus() != ciface::ExpressionParser::ParseStatus::SyntaxError;
+// Range given back to a control when its mapping is cleared (100%).
+constexpr double CLEARED_RANGE = 1.0;
+
+// The button text: the expression with each `quoted control` reduced to its control name
+// (":" in front when it names a device), blanks outside the quotes dropped, the backticks
+// and line breaks removed and '&' doubled so Qt does not take it as a mnemonic. A
+// expression with a syntax error is shown as written, apart from the last three steps.
+QString ButtonText(ControlReference* reference)
+{
+  const bool parsed =
+      reference->GetParseStatus() != ciface::ExpressionParser::ParseStatus::SyntaxError;
+
   QString expression;
   {
-    const auto lock = ControllerEmu::EmulatedController::GetStateLock();
-    expression = QString::fromStdString(ref->GetExpression());
+    const auto state_lock = ControllerEmu::EmulatedController::GetStateLock();
+    expression = QString::fromStdString(reference->GetExpression());
   }
 
-  // Split by "`" so that we can give a better preview of control,
-  // without including their device in front of them, which is usually
-  // too long to actually see the control.
-  QStringList controls = expression.split(QLatin1Char{'`'});
-  // Do try to simplify controls if the parsing had failed, as it might create false positives.
-  if (expression_valid)
+  // Splitting on '`' puts the quoted controls at the odd positions.
+  const QStringList pieces = expression.split(QLatin1Char{'`'});
+  QString text;
+  for (qsizetype i = 0; i < pieces.size(); ++i)
   {
-    for (int i = 0; i < controls.size(); i++)
+    QString piece = pieces[i];
+    if (parsed)
     {
-      // We have two ` for control so make sure to only consider the odd ones.
-      if (i % 2)
+      if (i % 2 == 1)
       {
-        // Use the code from the ControlQualifier instead of duplicating it.
         ciface::ExpressionParser::ControlQualifier qualifier;
-        qualifier.FromString(controls[i].toStdString());
-        // If the control has got a device specifier/path, add ":" in front of it, to make it clear.
-        controls[i] = qualifier.has_device ? QStringLiteral(":") : QString();
-        controls[i].append(QString::fromStdString(qualifier.control_name));
+        qualifier.FromString(piece.toStdString());
+        piece = QString::fromStdString(qualifier.control_name);
+        if (qualifier.has_device)
+          piece.prepend(QLatin1Char{':'});
       }
       else
       {
-        controls[i].remove(QLatin1Char{' '});
+        piece.remove(QLatin1Char{' '});
       }
     }
+    text += piece;
   }
-  // Do not re-add "`" to the final string, we don't need to see it.
-  expression = controls.join(QStringLiteral(""));
 
-  expression.remove(QLatin1Char{'\t'});
-  expression.remove(QLatin1Char{'\n'});
-  expression.remove(QLatin1Char{'\r'});
-  expression.replace(QLatin1Char{'&'}, QStringLiteral("&&"));
-
-  return expression;
+  for (const char line_char : {'\t', '\n', '\r'})
+    text.remove(QLatin1Char{line_char});
+  text.replace(QLatin1Char{'&'}, QStringLiteral("&&"));
+  return text;
 }
+}  // namespace
 
-MappingButton::MappingButton(MappingWidget* parent, ControlReference* ref, ControlType control_type)
-    : ElidedButton{RefToDisplayString(ref)}, m_mapping_window{parent->GetParent()},
-      m_reference{ref}, m_control_type{control_type}
+MappingButton::MappingButton(MappingWidget* widget, ControlReference* ref, ControlType type)
+    : ElidedButton{ButtonText(ref)}, m_window{widget->GetParent()}, m_reference{ref}, m_type{type}
 {
   if (m_reference->IsInput())
   {
@@ -79,63 +77,9 @@ MappingButton::MappingButton(MappingWidget* parent, ControlReference* ref, Contr
     setToolTip(tr("Left/Right-click to configure output.\nMiddle-click to clear."));
   }
 
-  connect(this, &MappingButton::clicked, this, &MappingButton::Clicked);
-
-  connect(parent, &MappingWidget::ConfigChanged, this, &MappingButton::ConfigChanged);
-  connect(this, &MappingButton::ConfigChanged,
-          [this] { setText(RefToDisplayString(m_reference)); });
-}
-
-void MappingButton::AdvancedPressed()
-{
-  m_mapping_window->CancelMapping();
-
-  IOWindow io(m_mapping_window, m_mapping_window->GetController(), m_reference,
-              m_reference->IsInput() ? IOWindow::Type::Input : IOWindow::Type::Output);
-  io.exec();
-
-  ConfigChanged();
-  m_mapping_window->Save();
-}
-
-void MappingButton::Clicked()
-{
-  if (!m_reference->IsInput())
-  {
-    AdvancedPressed();
-    return;
-  }
-
-  m_mapping_window->QueueInputDetection(this);
-}
-
-void MappingButton::Clear()
-{
-  m_reference->range = 100.0 / SLIDER_TICK_COUNT;
-
-  m_reference->SetExpression("");
-  m_mapping_window->GetController()->UpdateSingleControlReference(g_controller_interface,
-                                                                  m_reference);
-
-  m_mapping_window->Save();
-
-  m_mapping_window->UnQueueInputDetection(this);
-}
-
-void MappingButton::mouseReleaseEvent(QMouseEvent* event)
-{
-  switch (event->button())
-  {
-  case Qt::MouseButton::MiddleButton:
-    Clear();
-    return;
-  case Qt::MouseButton::RightButton:
-    AdvancedPressed();
-    return;
-  default:
-    QPushButton::mouseReleaseEvent(event);
-    return;
-  }
+  connect(this, &MappingButton::clicked, this, &MappingButton::OnLeftClick);
+  connect(widget, &MappingWidget::ConfigChanged, this, &MappingButton::ConfigChanged);
+  connect(this, &MappingButton::ConfigChanged, this, [this] { setText(ButtonText(m_reference)); });
 }
 
 ControlReference* MappingButton::GetControlReference()
@@ -143,7 +87,49 @@ ControlReference* MappingButton::GetControlReference()
   return m_reference;
 }
 
-auto MappingButton::GetControlType() const -> ControlType
+MappingButton::ControlType MappingButton::GetControlType() const
 {
-  return m_control_type;
+  return m_type;
+}
+
+void MappingButton::OnLeftClick()
+{
+  // Outputs cannot be detected, so a click edits them directly.
+  if (m_reference->IsInput())
+    emit m_window->QueueInputDetection(this);
+  else
+    OpenExpressionEditor();
+}
+
+void MappingButton::OpenExpressionEditor()
+{
+  emit m_window->CancelMapping();
+
+  const auto kind = m_reference->IsInput() ? IOWindow::Type::Input : IOWindow::Type::Output;
+  IOWindow editor(m_window, m_window->GetController(), m_reference, kind);
+  editor.exec();
+
+  emit ConfigChanged();
+  emit m_window->Save();
+}
+
+void MappingButton::ClearMapping()
+{
+  m_reference->range = CLEARED_RANGE;
+  m_reference->SetExpression("");
+  m_window->GetController()->UpdateSingleControlReference(g_controller_interface, m_reference);
+
+  emit m_window->Save();
+  emit m_window->UnQueueInputDetection(this);
+}
+
+void MappingButton::mouseReleaseEvent(QMouseEvent* event)
+{
+  const Qt::MouseButton button = event->button();
+  if (button == Qt::MouseButton::MiddleButton)
+    ClearMapping();
+  else if (button == Qt::MouseButton::RightButton)
+    OpenExpressionEditor();
+  else
+    QPushButton::mouseReleaseEvent(event);
 }

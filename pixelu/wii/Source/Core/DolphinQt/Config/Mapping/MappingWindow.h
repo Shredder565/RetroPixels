@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,18 +12,17 @@ class EmulatedController;
 
 class InputConfig;
 class MappingButton;
+class MappingWidget;
 
+class QAction;
 class QComboBox;
-class QDialogButtonBox;
-class QEvent;
-class QHBoxLayout;
 class QGroupBox;
-class QVBoxLayout;
 class QPushButton;
 class QTabWidget;
-class QToolButton;
 class QWidget;
 
+// The controller configuration window: device selection, reset buttons and profiles on top,
+// and one tab per mapping page of the chosen controller type.
 class MappingWindow final : public QDialog
 {
   Q_OBJECT
@@ -60,9 +58,9 @@ public:
   void ActivateExtensionTab();
 
 signals:
-  // Emitted when config has changed so widgets can update to reflect the change.
+  // The configuration changed; pages re-read it.
   void ConfigChanged();
-  // Emitted at INDICATOR_UPDATE_FREQ Hz for real-time indicators to be updated.
+  // Ticks at the screen refresh rate so the live indicators can redraw.
   void Update();
   void Save();
 
@@ -71,70 +69,58 @@ signals:
   void CancelMapping();
 
 private:
-  void SetMappingType(Type type);
-  void CreateDevicesLayout();
-  void CreateProfilesLayout();
-  void CreateResetLayout();
-  void CreateMainLayout();
-  void ConnectWidgets();
+  QGroupBox* BuildDeviceBox();
+  QGroupBox* BuildProfileBox();
+  QGroupBox* BuildResetBox();
+  void BuildWindow(QGroupBox* devices, QGroupBox* reset, QGroupBox* profiles);
+  void WireUp();
+  void StartIndicatorTimer();
 
-  QWidget* AddWidget(const QString& name, QWidget* widget);
-
-  void RefreshDevices();
-
-  void OnSelectProfile(int index);
-  void OnProfileTextChanged(const QString& text);
-  void OnDeleteProfilePressed();
-  void OnLoadProfilePressed();
-  void OnSaveProfilePressed();
-  void OnOpenProfileFolder();
-  void UpdateProfileIndex();
-  void UpdateProfileButtonState();
-  void PopulateProfileSelection();
-  void UpdateDeviceList();
-
-  void OnDefaultFieldsPressed();
-  void OnClearFieldsPressed();
-  void OnSelectDevice(int index);
-
-  ControllerEmu::EmulatedController* m_controller = nullptr;
-
-  // Main
-  QVBoxLayout* m_main_layout;
-  QHBoxLayout* m_config_layout;
-  QDialogButtonBox* m_button_box;
+  // Creates the pages of `type`, then loads its configuration and profiles.
+  void AddPages(Type type);
+  QWidget* AddPage(const QString& title, QWidget* page);
+  QString MotionSimulationTabTitle() const;
+  QString MotionInputTabTitle() const;
 
   // Devices
-  QGroupBox* m_devices_box;
-  QHBoxLayout* m_devices_layout;
-  QComboBox* m_devices_combo;
-  QAction* m_other_device_mappings;
-  QAction* m_wait_for_alternate_mappings;
-  QAction* m_iterative_mapping;
+  void FillDeviceList();
+  void DeviceChosen();
 
   // Profiles
-  QGroupBox* m_profiles_box;
-  QHBoxLayout* m_profiles_layout;
-  QComboBox* m_profiles_combo;
-  QPushButton* m_profiles_load;
-  QPushButton* m_profiles_save;
-  QToolButton* m_profile_other_actions;
-  QAction* m_profiles_delete;
-  QAction* m_profiles_open_folder;
+  void FillProfileList();
+  void MatchTypedProfileName();
+  void RefreshProfileButtons();
+  void LoadProfile();
+  void SaveProfile();
+  void DeleteProfile();
+  void OpenProfileFolder();
+  void ShowMissingProfileError(const QString& name);
 
   // Reset
-  QGroupBox* m_reset_box;
-  QHBoxLayout* m_reset_layout;
-  QPushButton* m_reset_default;
-  QPushButton* m_reset_clear;
+  void ResetToDefaults();
+  void ClearMappings();
+  void ReloadMappings();
 
-  QTabWidget* m_tab_widget;
-  QWidget* m_extension_motion_input_tab;
-  QWidget* m_extension_motion_simulation_tab;
-  const QString EXTENSION_MOTION_INPUT_TAB_NAME = tr("Extension Motion Input");
-  const QString EXTENSION_MOTION_SIMULATION_TAB_NAME = tr("Extension Motion Simulation");
-
-  Type m_mapping_type;
   const int m_port;
-  InputConfig* m_config;
+  ControllerEmu::EmulatedController* m_controller = nullptr;
+  InputConfig* m_config = nullptr;
+
+  QComboBox* m_devices = nullptr;
+  QAction* m_map_other_devices = nullptr;
+  QAction* m_wait_for_alternates = nullptr;
+  QAction* m_iterative_mapping = nullptr;
+
+  QComboBox* m_profiles = nullptr;
+  QPushButton* m_load_profile = nullptr;
+  QPushButton* m_save_profile = nullptr;
+  QAction* m_delete_profile = nullptr;
+  QAction* m_open_profile_folder = nullptr;
+
+  QPushButton* m_reset_defaults = nullptr;
+  QPushButton* m_reset_clear = nullptr;
+
+  QTabWidget* m_tabs = nullptr;
+  // The Nunchuk motion tabs, which are only in the tab bar while a Nunchuk is attached.
+  QWidget* m_motion_simulation_tab = nullptr;
+  QWidget* m_motion_input_tab = nullptr;
 };

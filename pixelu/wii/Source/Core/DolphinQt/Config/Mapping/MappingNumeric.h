@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,16 +10,23 @@
 
 class MappingWidget;
 
+// Editors for the numeric settings of a control group. A setting may hold a plain value or
+// an input expression; in the latter case the editor follows the live value and is marked
+// with a controller symbol.
+
+// Note: these classes have no Q_OBJECT, so their tr() texts use the context of the Qt base
+// class (QDoubleSpinBox and QCheckBox). Existing translations depend on that.
 class MappingDouble : public QDoubleSpinBox
 {
 public:
   MappingDouble(MappingWidget* parent, ControllerEmu::NumericSetting<double>* setting);
 
 private:
+  // An emptied field falls back to the setting's default value.
   void fixup(QString& input) const override;
 
-  void ConfigChanged();
-  void Update();
+  void ShowSetting();
+  void FollowLiveValue();
 
   ControllerEmu::NumericSetting<double>& m_setting;
 };
@@ -31,8 +37,8 @@ public:
   MappingBool(MappingWidget* widget, ControllerEmu::NumericSetting<bool>* setting);
 
 private:
-  void ConfigChanged();
-  void Update();
+  void ShowSetting();
+  void FollowLiveValue();
 
   ControllerEmu::NumericSetting<bool>& m_setting;
 };
