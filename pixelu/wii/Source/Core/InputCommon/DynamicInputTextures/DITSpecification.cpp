@@ -1,7 +1,9 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "InputCommon/DynamicInputTextures/DITSpecification.h"
+
+#include <algorithm>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -9,56 +11,180 @@
 #include "Common/Logging/Log.h"
 #include "Core/ConfigManager.h"
 
+// Version 1 pack layout:
+//   preserve_aspect_ratio (bool, default true), generated_folder_name (string, default
+//   "<game id>_Generated"), default_host_controls (object),
+//   output_textures: { <texture name>: { image, emulated_controls, host_controls? } }
+// emulated_controls maps controller -> control -> list of [left, top, right, bottom] regions;
+// host_controls maps host device -> host control -> key image.
 namespace InputCommon::DynamicInputTextures
 {
-bool ProcessSpecificationV1(picojson::value& root, std::vector<Data>& input_textures,
-                            const std::string& base_path, const std::string& json_file)
+namespace
 {
-  const picojson::value& output_textures_json = root.get("output_textures");
-  if (!output_textures_json.is<picojson::object>())
+// Settings from the top level that every texture of the pack shares.
+struct SharedSettings
+{
+  bool preserve_aspect_ratio = true;
+  std::string generated_folder_name;
+  picojson::object host_controls;
+};
+
+SharedSettings ReadSharedSettings(const picojson::value& root)
+{
+  SharedSettings shared;
+
+  const picojson::value& aspect = root.get("preserve_aspect_ratio");
+  if (aspect.is<bool>())
+    shared.preserve_aspect_ratio = aspect.get<bool>();
+
+  const picojson::value& folder = root.get("generated_folder_name");
+  const std::string& game_id = SConfig::GetInstance().GetGameID();
+  shared.generated_folder_name = fmt::format("{}_Generated", game_id);
+  if (folder.is<std::string>())
+    shared.generated_folder_name = folder.get<std::string>();
+
+  const picojson::value& host_controls = root.get("default_host_controls");
+  if (host_controls.is<picojson::object>())
+    shared.host_controls = host_controls.get<picojson::object>();
+
+  return shared;
+}
+
+// One [left, top, right, bottom] entry.
+bool ReadRegion(const picojson::value& value, const std::string& json_file,
+                const std::string& controller, const std::string& control, Rect* region)
+{
+  if (!value.is<picojson::array>())
   {
-    ERROR_LOG_FMT(
-        VIDEO,
-        "Failed to load dynamic input json file '{}' because 'output_textures' is missing or "
-        "was not of type object",
-        json_file);
+    ERROR_LOG_FMT(VIDEO,
+                  "Failed to load dynamic input json file '{}' because emulated controller '{}' "
+                  "key '{}' has a region with the incorrect type.  Expected array ",
+                  json_file, controller, control);
     return false;
   }
 
-  const picojson::value& preserve_aspect_ratio_json = root.get("preserve_aspect_ratio");
-
-  bool preserve_aspect_ratio = true;
-  if (preserve_aspect_ratio_json.is<bool>())
+  const picojson::array& edges = value.get<picojson::array>();
+  if (edges.size() != 4)
   {
-    preserve_aspect_ratio = preserve_aspect_ratio_json.get<bool>();
+    ERROR_LOG_FMT(VIDEO,
+                  "Failed to load dynamic input json file '{}' because emulated controller '{}' "
+                  "key '{}' has a region that does not have 4 offsets (left, top, right, "
+                  "bottom).",
+                  json_file, controller, control);
+    return false;
   }
 
-  const picojson::value& generated_folder_name_json = root.get("generated_folder_name");
-
-  const std::string& game_id = SConfig::GetInstance().GetGameID();
-  std::string generated_folder_name = fmt::format("{}_Generated", game_id);
-  if (generated_folder_name_json.is<std::string>())
+  const bool all_numbers =
+      std::ranges::all_of(edges, [](const picojson::value& edge) { return edge.is<double>(); });
+  if (!all_numbers)
   {
-    generated_folder_name = generated_folder_name_json.get<std::string>();
+    ERROR_LOG_FMT(VIDEO,
+                  "Failed to load dynamic input json file '{}' because emulated controller '{}' "
+                  "key '{}' has a region that has the incorrect offset type.",
+                  json_file, controller, control);
+    return false;
   }
 
-  const picojson::value& default_host_controls_json = root.get("default_host_controls");
-  picojson::object default_host_controls;
-  if (default_host_controls_json.is<picojson::object>())
+  region->left = static_cast<u32>(edges[0].get<double>());
+  region->top = static_cast<u32>(edges[1].get<double>());
+  region->right = static_cast<u32>(edges[2].get<double>());
+  region->bottom = static_cast<u32>(edges[3].get<double>());
+  return true;
+}
+
+// The "emulated_controls" object of one texture.
+bool ReadEmulatedControls(const picojson::object& controllers, const std::string& json_file,
+                          Data* texture)
+{
+  for (const auto& [controller, controls] : controllers)
   {
-    default_host_controls = default_host_controls_json.get<picojson::object>();
+    if (!controls.is<picojson::object>())
+    {
+      ERROR_LOG_FMT(VIDEO,
+                    "Failed to load dynamic input json file '{}' because 'emulated_controls' "
+                    "map key '{}' is incorrect type.  Expected map  ",
+                    json_file, controller);
+      return false;
+    }
+
+    Data::EmulatedKeyToRegionsMap& destination = texture->m_emulated_controllers[controller];
+    for (const auto& [control, region_list] : controls.get<picojson::object>())
+    {
+      if (!region_list.is<picojson::array>())
+      {
+        ERROR_LOG_FMT(VIDEO,
+                      "Failed to load dynamic input json file '{}' because emulated controller "
+                      "'{}' key '{}' has incorrect value type.  Expected array ",
+                      json_file, controller, control);
+        return false;
+      }
+
+      std::vector<Rect> regions;
+      for (const picojson::value& entry : region_list.get<picojson::array>())
+      {
+        Rect region;
+        if (!ReadRegion(entry, json_file, controller, control, &region))
+          return false;
+        regions.push_back(region);
+      }
+      destination.insert_or_assign(control, std::move(regions));
+    }
+  }
+  return true;
+}
+
+// The host controls of one texture (its own, else the pack's defaults).
+bool ReadHostControls(const picojson::object& devices, const std::string& json_file,
+                      Data* texture)
+{
+  if (devices.empty())
+  {
+    ERROR_LOG_FMT(VIDEO,
+                  "Failed to load dynamic input json file '{}' because field "
+                  "'host_controls' is missing ",
+                  json_file);
+    return false;
   }
 
-  const auto output_textures = output_textures_json.get<picojson::object>();
-  for (auto& [name, data] : output_textures)
+  for (const auto& [device, controls] : devices)
   {
-    Data texture_data;
-    texture_data.m_hires_texture_name = name;
+    if (!controls.is<picojson::object>())
+    {
+      ERROR_LOG_FMT(VIDEO,
+                    "Failed to load dynamic input json file '{}' because 'host_controls' "
+                    "map key '{}' is incorrect type ",
+                    json_file, device);
+      return false;
+    }
 
-    // Required fields
-    const picojson::value& image = data.get("image");
-    const picojson::value& emulated_controls = data.get("emulated_controls");
+    Data::HostKeyToImagePath& destination = texture->m_host_devices[device];
+    // Values that are not strings are taken in their JSON text form.
+    for (const auto& [control, key_image] : controls.get<picojson::object>())
+      destination.insert_or_assign(control, key_image.to_str());
+  }
+  return true;
+}
+}  // namespace
 
+bool ProcessSpecificationV1(picojson::value& root, std::vector<Data>& input_textures,
+                            const std::string& base_path, const std::string& json_file)
+{
+  const picojson::value& textures_json = root.get("output_textures");
+  if (!textures_json.is<picojson::object>())
+  {
+    ERROR_LOG_FMT(VIDEO,
+                  "Failed to load dynamic input json file '{}' because 'output_textures' is "
+                  "missing or was not of type object",
+                  json_file);
+    return false;
+  }
+
+  const SharedSettings shared = ReadSharedSettings(root);
+
+  for (const auto& [texture_name, texture_json] : textures_json.get<picojson::object>())
+  {
+    const picojson::value& image = texture_json.get("image");
+    const picojson::value& emulated_controls = texture_json.get("emulated_controls");
     if (!image.is<std::string>() || !emulated_controls.is<picojson::object>())
     {
       ERROR_LOG_FMT(VIDEO,
@@ -69,130 +195,34 @@ bool ProcessSpecificationV1(picojson::value& root, std::vector<Data>& input_text
       return false;
     }
 
-    texture_data.m_image_name = image.to_str();
-    texture_data.m_preserve_aspect_ratio = preserve_aspect_ratio;
-    texture_data.m_generated_folder_name = generated_folder_name;
+    Data texture;
+    texture.m_hires_texture_name = texture_name;
+    texture.m_image_name = image.get<std::string>();
+    texture.m_preserve_aspect_ratio = shared.preserve_aspect_ratio;
+    texture.m_generated_folder_name = shared.generated_folder_name;
 
-    const std::string image_full_path = base_path + texture_data.m_image_name;
-    if (!File::Exists(image_full_path))
+    const std::string image_path = base_path + texture.m_image_name;
+    if (!File::Exists(image_path))
     {
       ERROR_LOG_FMT(VIDEO,
                     "Failed to load dynamic input json file '{}' because the image '{}' "
                     "could not be loaded",
-                    json_file, image_full_path);
+                    json_file, image_path);
       return false;
     }
 
-    const auto& emulated_controls_json = emulated_controls.get<picojson::object>();
-    for (auto& [emulated_controller_name, map] : emulated_controls_json)
-    {
-      if (!map.is<picojson::object>())
-      {
-        ERROR_LOG_FMT(VIDEO,
-                      "Failed to load dynamic input json file '{}' because 'emulated_controls' "
-                      "map key '{}' is incorrect type.  Expected map  ",
-                      json_file, emulated_controller_name);
-        return false;
-      }
-
-      auto& key_to_regions = texture_data.m_emulated_controllers[emulated_controller_name];
-      for (auto& [emulated_control, regions_array] : map.get<picojson::object>())
-      {
-        if (!regions_array.is<picojson::array>())
-        {
-          ERROR_LOG_FMT(
-              VIDEO,
-              "Failed to load dynamic input json file '{}' because emulated controller '{}' "
-              "key '{}' has incorrect value type.  Expected array ",
-              json_file, emulated_controller_name, emulated_control);
-          return false;
-        }
-
-        std::vector<Rect> region_rects;
-        for (auto& region : regions_array.get<picojson::array>())
-        {
-          Rect r;
-          if (!region.is<picojson::array>())
-          {
-            ERROR_LOG_FMT(
-                VIDEO,
-                "Failed to load dynamic input json file '{}' because emulated controller '{}' "
-                "key '{}' has a region with the incorrect type.  Expected array ",
-                json_file, emulated_controller_name, emulated_control);
-            return false;
-          }
-
-          auto region_offsets = region.get<picojson::array>();
-
-          if (region_offsets.size() != 4)
-          {
-            ERROR_LOG_FMT(
-                VIDEO,
-                "Failed to load dynamic input json file '{}' because emulated controller '{}' "
-                "key '{}' has a region that does not have 4 offsets (left, top, right, "
-                "bottom).",
-                json_file, emulated_controller_name, emulated_control);
-            return false;
-          }
-
-          if (!std::ranges::all_of(region_offsets, &picojson::value::is<double>))
-          {
-            ERROR_LOG_FMT(
-                VIDEO,
-                "Failed to load dynamic input json file '{}' because emulated controller '{}' "
-                "key '{}' has a region that has the incorrect offset type.",
-                json_file, emulated_controller_name, emulated_control);
-            return false;
-          }
-
-          r.left = static_cast<u32>(region_offsets[0].get<double>());
-          r.top = static_cast<u32>(region_offsets[1].get<double>());
-          r.right = static_cast<u32>(region_offsets[2].get<double>());
-          r.bottom = static_cast<u32>(region_offsets[3].get<double>());
-          region_rects.push_back(r);
-        }
-        key_to_regions.insert_or_assign(emulated_control, std::move(region_rects));
-      }
-    }
-
-    // Default to the default controls but overwrite if the creator
-    // has provided something specific
-    picojson::object host_controls = default_host_controls;
-    const picojson::value& host_controls_json = data.get("host_controls");
-    if (host_controls_json.is<picojson::object>())
-    {
-      host_controls = host_controls_json.get<picojson::object>();
-    }
-
-    if (host_controls.empty())
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Failed to load dynamic input json file '{}' because field "
-                    "'host_controls' is missing ",
-                    json_file);
+    if (!ReadEmulatedControls(emulated_controls.get<picojson::object>(), json_file, &texture))
       return false;
-    }
 
-    for (auto& [host_device, map] : host_controls)
-    {
-      if (!map.is<picojson::object>())
-      {
-        ERROR_LOG_FMT(VIDEO,
-                      "Failed to load dynamic input json file '{}' because 'host_controls' "
-                      "map key '{}' is incorrect type ",
-                      json_file, host_device);
-        return false;
-      }
-      auto& host_control_to_imagename = texture_data.m_host_devices[host_device];
-      for (auto& [host_control, image_name] : map.get<picojson::object>())
-      {
-        host_control_to_imagename.insert_or_assign(host_control, image_name.to_str());
-      }
-    }
+    const picojson::value& own_host_controls = texture_json.get("host_controls");
+    const picojson::object& host_controls = own_host_controls.is<picojson::object>() ?
+                                                own_host_controls.get<picojson::object>() :
+                                                shared.host_controls;
+    if (!ReadHostControls(host_controls, json_file, &texture))
+      return false;
 
-    input_textures.emplace_back(std::move(texture_data));
+    input_textures.emplace_back(std::move(texture));
   }
-
   return true;
 }
 }  // namespace InputCommon::DynamicInputTextures
