@@ -19,6 +19,7 @@
 #include <array>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "Common/Assert.h"
 #include "Common/CommonPaths.h"
@@ -215,19 +216,18 @@ void GameCubePane::FillDeviceCombos()
       m_device_combos[slot]->addItem(name, static_cast<int>(device));
   }
 
-  static constexpr EXIDeviceType serial_port_devices[] = {
-      EXIDeviceType::None,
-      EXIDeviceType::Dummy,
-      EXIDeviceType::Ethernet,
-      EXIDeviceType::EthernetXLink,
-      EXIDeviceType::EthernetTapServer,
-      EXIDeviceType::EthernetBuiltIn,
+  // Serial port 1: the network adapters (IPC only where cpp-ipc is built), modem and baseboard.
+  std::vector<EXIDeviceType> serial_port_devices{EXIDeviceType::None,
+                                                 EXIDeviceType::Dummy,
+                                                 EXIDeviceType::Ethernet,
+                                                 EXIDeviceType::EthernetXLink,
+                                                 EXIDeviceType::EthernetTapServer,
+                                                 EXIDeviceType::EthernetBuiltIn};
 #ifdef HAVE_CPPIPC
-      EXIDeviceType::EthernetIPC,
+  serial_port_devices.push_back(EXIDeviceType::EthernetIPC);
 #endif
-      EXIDeviceType::ModemTapServer,
-      EXIDeviceType::Baseboard,
-  };
+  serial_port_devices.push_back(EXIDeviceType::ModemTapServer);
+  serial_port_devices.push_back(EXIDeviceType::Baseboard);
   for (const EXIDeviceType device : serial_port_devices)
     m_device_combos[Slot::SP1]->addItem(display_name(device), static_cast<int>(device));
 }
