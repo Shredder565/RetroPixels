@@ -18,8 +18,9 @@ name: MAME for Linux
 # package's MAME/ folder as they are ("MAME 0.xxx/mame" with the built-in
 # marker, and roms/). bundle-linux.yml takes it from the newest successful
 # run; this starts bundle-linux.yml when it's done. When the MAME team makes a
-# new release, run this by hand (or push a change to tools/bundlemame) so the
-# Linux download follows the Windows one.
+# new release, run this by hand so the Linux download follows the Windows one.
+# It runs by hand only (owner's call, 2026-10-21): MAME for Linux is built
+# last, after the rest of the Linux download.
 
 on:
   workflow_dispatch:
@@ -28,12 +29,6 @@ on:
         description: "MAME version (e.g. 0.289); empty = the newest, as the Windows download"
         required: false
         default: ""
-  push:
-    branches: [claude/wiiu-emulator-urpcen]
-    paths:
-      - tools/bundlemame/**
-      - internal/mame/install.go
-      - .github/workflows/mame-linux.yml
 
 permissions:
   contents: read

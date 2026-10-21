@@ -170,7 +170,11 @@ Order: L1a, L1b, L2a, L3, L4, L5a, L6, L7, L8, L10, L11a can all start at
 once. Then L2b (after L2a), L5b and L5c (after L5a), then L5d; L11b–d in
 order. L9 starts early with the Go programs only and picks up each engine
 artifact when its batch is done. The Linux download is "complete" when
-L1–L8 and L9–L10 are done; Native (L11) and L12 follow.
+L1–L8 and L9–L10 are done; L12 follows.
+
+**Owner decisions, 2026-10-21:** RetroPixels Native is not built for Linux
+(L11a–L11d are dropped; Native stays Windows-only). MAME for Linux
+(mame-linux.yml) runs by hand only and is built last, after everything else.
 
 ## Checking on a Linux container without a GPU
 

@@ -4,7 +4,7 @@
 #   sh tools/linux/package.sh [-v VERSION] [-e ENGINE=PATH]... [-n NOTES] OUTDIR
 #
 # OUTDIR/RetroPixels-VERSION/ gets the same layout as the Windows download:
-#   RetroPixels, RetroPixels-Native (once it is a Linux program),
+#   RetroPixels (RetroPixels Native is Windows-only),
 #   PixelU/PixelU, PixelU/wii/PixelU-Wii, MAME/MAME 0.xxx/mame,
 #   Supermodel/supermodel, README.txt, CHANGELOG.txt, licences, VERSION.txt,
 #   RetroPixels.desktop and retropixels.png (once tools/linux has them),
@@ -82,15 +82,8 @@ log "building RetroPixels $ver"
 	cd "$root"
 	export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
 	go build -trimpath -ldflags "-s -w" -o "$dir/RetroPixels" .
-	# RetroPixels Native is a Windows program until its Linux front end is
-	# there (main_other.go prints that it's a Windows program).
-	if go list -f '{{join .GoFiles " "}}' ./cmd/retropixels-native | tr ' ' '\n' | grep -qx main_other.go &&
-		grep -q 'is a Windows program' cmd/retropixels-native/main_other.go; then
-		echo "RetroPixels Native: not a Linux program yet, left out"
-		: >"$tmp/no-native"
-	else
-		go build -trimpath -ldflags "-s -w -X main.version=$ver" -o "$dir/RetroPixels-Native" ./cmd/retropixels-native
-	fi
+	# RetroPixels Native is Windows-only: it is not built for Linux (owner's
+	# call, 2026-10-21).
 )
 
 # ---- engines ----
@@ -196,11 +189,7 @@ repo=${REPO:-}
 	else
 		echo "- Supermodel (Sega Model 3): not in this build"
 	fi
-	if [ -f "$tmp/no-native" ]; then
-		echo "- RetroPixels Native is not in the Linux download yet (it is a Windows program for now)"
-	else
-		echo "- RetroPixels-Native: RetroPixels' native front end"
-	fi
+	echo "- RetroPixels Native is Windows-only and is not part of the Linux download"
 	if [ -n "$notes" ] && [ -s "$notes" ]; then
 		echo "Engine builds used:"
 		sed 's/^/  /' "$notes"
