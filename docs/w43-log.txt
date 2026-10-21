@@ -1,0 +1,149 @@
+- W43 log: rewrote all 30 W43 files (15 .cpp, 15 .h) from
+  `docs/w43-spec.md`: the AM media board (`Core/HW/DVD/AMMediaboard`), the
+  SI AM baseboard (`Core/HW/SI/SI_DeviceAMBaseboard`), the Triforce serial
+  devices (`Core/HW/Triforce/`: JVSIO, IOPorts, ICCardReader, DeckReader,
+  FZeroAX, MarioKartGP, Touchscreen), the magnetic card readers
+  (`Core/HW/MagCard/`: MagneticCardReader, C1231BR, C1231LR) and the EXI
+  baseboard, AGP and modem (`Core/HW/EXI/EXI_DeviceBaseboard`,
+  `EXI_DeviceAGP`, `EXI_DeviceModem`). 7850 lines now, from 9581. Every
+  rewritten file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. `Triforce/SerialDevice` and
+  `EXI/Modem/TAPServerModem` are not W43 files and were not touched.
+  - Clean room: phase B worked from the spec, the old public headers and
+    the output of the old harness binary only. The old .cpp files, their
+    git history and Dolphin's copies were not opened; the old files were
+    replaced by writing over them without reading them. Where the spec
+    left a log text or byte layout open, the old harness binary (built
+    from a scratch worktree at fdccad9 and only run) was run with
+    `--trace`, and its trace lines were used as the reference.
+  - Accidental exposure: one search for `WSAPoll\|ioctlsocket` over
+    `Core` and `Common`, run before the old `AMMediaboard.cpp` had been
+    written over, printed three of its lines: a variadic `ioctlsocket`
+    wrapper declaration, a `WSAPoll(...)` return with casts of the vector
+    size and the timeout, and an `ioctlsocket(host_socket, FIONBIO, &val)`
+    call. Nothing was taken from them; the new file wraps the same two
+    Winsock calls in its own helpers (`SetBlocking`, `PollSockets`) with
+    its own names and types. No further searches were run over the old
+    files.
+  - Public interfaces kept as the spec allows (sections 2.2, 3.1, 4.1, 5.1,
+    6, 7.1, 8.1, 9.1, 10.1, 11.1, 12.1). Private members were renamed
+    where the spec does not fix them. The modem header keeps
+    `NetworkInterface`, `TAPServerNetworkInterface`, `SendComplete` and
+    `AddToReceiveBuffer` (12.1). The fixed identifiers in section 15
+    (serial numbers, version strings, region table, the All.Net reply, IC
+    card serial prefixes, board names) are kept byte for byte.
+  - Spec questions and how they were settled:
+    - All.Net reply size: 2.11 and 15 say 252 bytes with the NUL, but the
+      text given is 229 characters (230 with the NUL). The harness reads
+      230 bytes (`Read overflow ... length=230`, and the bytes after the
+      NUL are not written). The copy uses the size of the text with its
+      NUL; a static_assert pins it at 230.
+    - SI baseboard overflow names: the spec gives no name for the data-in
+      overflow message of commands 0x12, 0x14, 0x21, 0x22, 0x23, 0x24 and
+      0x60. The old trace prints `Unknown_22` and `Unknown_60`, so these
+      use `Unknown_` plus two hex digits; commands outside the table use
+      `Unknown_` plus decimal, as 3.3 says.
+    - Modem reset descriptor: 12 and the harness use `0x00008000`; the old
+      header's helper produced `0x80000000`. The spec value is used and
+      the helper was dropped from the header.
+    - Accept (2.9): the table row does not say whether the address check
+      is nested in the addrlen check. The harness calls NetDIMMAccept with
+      both pointers null when the addrlen offset is unusable (no "bad
+      parmeters" error), so the address is only looked at when the length
+      word is usable.
+    - Recv and Send: "logs by result" does not say what a would-block
+      result logs. The old trace has no line for a recv that fails with
+      EAGAIN, so would-block results are not logged. Send follows recv;
+      the harness never makes a send would-block, so that half is not
+      checked.
+    - Order of the "Bad GuestSocket" warning: Recv, Send and SetSockOpt
+      look up the host socket before checking the buffer (the warning
+      comes before the "Bad data offset" or "Bad optval" error); Connect
+      looks it up after the destination and redirection logs. Both orders
+      are as the old trace shows.
+    - BindEphemeralPort binds with family AF_INET, whatever family the
+      guest passed; the connect that follows uses the guest's family (old
+      trace: `bind ... fam=2` then `connect ... fam=3`).
+    - "Invalid firmware write" logs the offset into the firmware buffer
+      (offset - 0x400000), as the old trace shows.
+    - IC card SetBaudrate logs the whole payload, not only the 8 bytes the
+      length check asks for.
+    - AGP `AE03` 4-byte read: the spec does not apply the status-mask
+      check there; it is not applied.
+    - The setsockopt notice prints the socket error even when the call
+      succeeded (a stale value), and the socket() notice prints the result
+      as unsigned, as the old trace shows.
+    - Log texts that the spec gives only as a format were filled in from
+      the old trace: IC card byte lists joined with spaces and the full
+      card path; magnetic card logs with the card name only; EXI baseboard
+      ReadISR arguments; the AGP slot through the EXI slot formatter; modem
+      errors with the descriptor; the media board SetupLink, SearchDevices
+      and 0x608 field layouts.
+    - 13 says the harness never drives the undefined paths. It does drive
+      13.4 (SwitchInput for more than two players) in some seeds; see the
+      harness results below.
+  - Deliberate differences (undefined behaviour in the old code, spec 13;
+    nothing a well-formed request sees):
+    - AGP (13.1): an empty ROM reads as zero; EEPROM shifts past the
+      64-bit word change no bit or read as 0; u64 EEPROM accesses use
+      memcpy and are skipped when the EEPROM is shorter than 8 bytes; the
+      `AE04` read past the EEPROM reads FF.
+    - Modem (13.2): immediate reads and writes are clamped to 4 bytes; a
+      null DMA pointer copies nothing but the transfer still counts.
+    - Magnetic cards (13.3): WriteData stores the k-th listed track from
+      offset 69 * k.
+    - JVS (13.4): SwitchInput sends zero bytes for players 2 and up; the
+      player assertion is kept, so the log still shows one ASSERT per
+      missing player.
+    - Deck reader (13.5): out-of-range JSON numbers are clamped, NaN as 0.
+    - Media board (13.6): a game read with no DIMM disc reader returns 1;
+      the EINTR retry is a local helper (no Common/UnixUtil.h); the
+      ephemeral port range `first + [0, 999]` is computed in u16 with
+      wrap-around instead of the old signed arithmetic. Select with no
+      usable timeout still polls with -1.
+    - EXI baseboard (13.7): kept as specified (srand(time) and one rand()
+      for the fallback backup name).
+  - Checked: `tools/w43-harness/` built unchanged against the new files.
+    - Seed 1, 6 cases per kind (174 cases): equal to `expected-seed1.txt`
+      line for line, 0 crashes.
+    - Fresh seeds against the old files built in a scratch worktree at
+      fdccad9: seed 7 x 25 (725 cases), seeds 2, 3, 4, 5 x 20 (580 each),
+      seed 11 x 30 (870 cases). 4089 cases in all, 0 crashes. All
+      behaviour and log hashes are equal except two cases, both 13.4:
+      - seed 2 si-unknownid #3: SwitchInput for 48 players (the old code
+        read past the switch array; one more output byte, probably an
+        escaped 0xE0 or 0xD0 in the garbage it read);
+      - seed 11 si-shortid #17: SwitchInput past player 2, where the old
+        code copied analog input bytes and heap pointers into the reply.
+        The old code is not repeatable here: two runs of the old binary
+        gave different behaviour hashes for this case.
+      Log hashes are equal in both cases.
+  - Compile check: the 15 W43 .cpp files are clean with clang 18 `-Wall
+    -Wextra -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`,
+    on Linux and for x86_64-w64-windows-gnu (only third-party and non-W43
+    headers warn). libstdc++ 13 with clang 18 hides std::expected, so
+    `__cpp_concepts` was raised for the check (JVSIO.h used std::expected
+    before W43 too). Fix made: recv/send lengths use the platform length
+    type (int on Windows, size_t on POSIX). For the MSVC warnings: C4267,
+    C4389 and C4458 are what -Wshorten-64-to-32, -Wsign-compare and
+    -Wshadow-all report (none); the two `~` uses complement a value of the
+    target's own width (no C4319); no bool is combined with an integer
+    (C4805); no pointer to member is a template argument. Dependents
+    compile with the same results as on the base tree: SerialDevice,
+    TAPServerModem, DVDInterface, Boot, Boot_BS2Emu (clean), SI_Device and
+    EXI_Device (both fail on the missing SFML header, on both trees), and
+    DolphinQt TriforcePane, NetworkWidget and MappingWindow (syntax check
+    against the system Qt 6 headers, clean on both trees).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W43 .cpp file. Runs fixed: the JVS, IC card and deck
+    command enums are written in grouped form, the AGP savestate goes
+    through one fold, and the single-word media board status replies come
+    from a table. The runs left are in W43 headers and are public
+    declarations the spec keeps (the media board enums and address list,
+    the modem's network interface classes, IOPorts, MagneticCardReader,
+    JVSIO, the EXI and SI baseboard class declarations).
+  - Not tested: the Windows socket branch at run time, real tapserver
+    traffic and threads, and the AGP/baseboard fallback paths the harness
+    does not drive (13.7, 13.9).
+  - No keys, BIOS, firmware or game data were added.
+  - Not rewritten: nothing.
