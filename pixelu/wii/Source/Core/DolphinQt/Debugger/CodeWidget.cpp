@@ -643,6 +643,22 @@ void CodeWidget::StepOut()
   Core::DisplayMessage(outcome.toStdString(), MESSAGE_MS);
 }
 
+void CodeWidget::ToggleBreakpoint()
+{
+  m_code_view->ToggleBreakpoint();
+}
+
+void CodeWidget::AddBreakpoint()
+{
+  m_code_view->AddBreakpoint();
+}
+
+void CodeWidget::SetPC()
+{
+  m_system.GetPPCState().pc = m_code_view->GetAddress();
+  Update();
+}
+
 void CodeWidget::Skip()
 {
   m_system.GetPPCState().pc += 4;
@@ -653,20 +669,4 @@ void CodeWidget::ShowPC()
 {
   m_code_view->SetAddress(m_system.GetPPCState().pc, CodeViewWidget::SetAddressUpdate::WithUpdate);
   Update();
-}
-
-void CodeWidget::SetPC()
-{
-  m_system.GetPPCState().pc = m_code_view->GetAddress();
-  Update();
-}
-
-void CodeWidget::ToggleBreakpoint()
-{
-  m_code_view->ToggleBreakpoint();
-}
-
-void CodeWidget::AddBreakpoint()
-{
-  m_code_view->AddBreakpoint();
 }
