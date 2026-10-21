@@ -78,16 +78,7 @@ func openAppWindow(url string, wait bool) error {
 
 	profile := filepath.Join(dataDir(), "BrowserProfile")
 	_ = os.MkdirAll(profile, 0o755)
-	cmd := exec.Command(browser,
-		"--app="+url,
-		"--user-data-dir="+profile,
-		"--class="+appName, // the window's WM_CLASS, so the desktop file's icon is used
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--window-size=1280,900",
-		"--autoplay-policy=no-user-gesture-required",
-		"--disable-features=Translate",
-	)
+	cmd := exec.Command(browser, appWindowArgs(url, profile)...)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("couldn't open the %s window: %v", appName, err)
 	}
@@ -97,6 +88,57 @@ func openAppWindow(url string, wait bool) error {
 	}
 	_ = cmd.Wait()
 	waitForPageToClose()
+	return nil
+}
+
+// appWindowArgs is the browser's command line for the app window.
+func appWindowArgs(url, profile string) []string {
+	return append(browserPlatformArgs(),
+		"--app="+url,
+		"--user-data-dir="+profile,
+		"--class="+appName, // the window's WM_CLASS, so the desktop file's icon is used; embed_linux.go finds the window by it
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--window-size=1280,900",
+		"--autoplay-policy=no-user-gesture-required",
+		"--disable-features=Translate",
+	)
+}
+
+// On a Wayland desktop the app window and the engines run under XWayland
+// (the desktop's X server), so engine windows can be docked into the app
+// window: Wayland has no way to put one program's window inside another's.
+// RETROPIXELS_WAYLAND=native leaves every program on Wayland (no docking).
+func useXWayland() bool {
+	return os.Getenv("WAYLAND_DISPLAY") != "" && os.Getenv("DISPLAY") != "" &&
+		!strings.EqualFold(os.Getenv("RETROPIXELS_WAYLAND"), "native")
+}
+
+// xwaylandEnv makes the engines' toolkits pick X11: Qt (PixelU-Wii), GTK
+// (PixelU's wxWidgets UI, zenity), SDL 2 (Supermodel, MAME) and SDL 3.
+var xwaylandEnv = [][2]string{
+	{"QT_QPA_PLATFORM", "xcb"},
+	{"GDK_BACKEND", "x11"},
+	{"SDL_VIDEODRIVER", "x11"},
+	{"SDL_VIDEO_DRIVER", "x11"},
+}
+
+func init() {
+	if useXWayland() {
+		// Every program RetroPixels starts inherits these.
+		for _, kv := range xwaylandEnv {
+			_ = os.Setenv(kv[0], kv[1])
+		}
+	}
+}
+
+// browserPlatformArgs: Chrome and the others pick Wayland by themselves on
+// a Wayland desktop; under XWayland the app window is an X11 window the
+// engines can be docked into.
+func browserPlatformArgs() []string {
+	if useXWayland() {
+		return []string{"--ozone-platform=x11"}
+	}
 	return nil
 }
 
