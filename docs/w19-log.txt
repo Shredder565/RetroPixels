@@ -1,0 +1,111 @@
+- W19 log: rewrote all 58 W19 files as original code (11616 lines now, from
+  12334): the IOS USB host layer and network devices in `Core/IOS/USB`
+  (`Common`, `Host`, `LibusbDevice`, `USBScanner`, `USBV0`, `USBV4`,
+  `USBV5`, `OH0/OH0`, `OH0/OH0Device`, `USB_HID/HIDv4`, `USB_HID/HIDv5`,
+  `USB_KBD`, `USB_VEN/VEN`) and `Core/IOS/Network` (`Socket`, `SSL`,
+  `IP/Top`, `ICMP.h`, `ICMPLin`, `MACUtils`, `NCD/Manage`,
+  `NCD/WiiNetConfig`, `WD/Command`, and the WiiConnect24 code in `KD`:
+  `NetKDRequest`, `NetKDTime`, `NWC24Config`, `NWC24DL`, `VFF/VFFUtil`,
+  `WC24File.h`, `Mail/MailCommon.h`, `Mail/WC24Send`,
+  `Mail/WC24FriendList`). Every file starts with the original-code header
+  and has no Dolphin copyright or SPDX line. File names, public
+  declarations, on-disc and guest structure layouts (`DLList`,
+  `ConfigData`, `SendList`, `FriendList`, `WC24File`, `WC24PubkMod`, the
+  USB descriptor and V0/V4/V5 request layouts, `BSSInfo`, `WD::Info`), enum
+  values, savestate `DoState` order, config keys and every translatable
+  string are unchanged.
+  - USB: the host/scanner pair (hotplug, the first-scan wait, device
+    add/remove notifications in the same order), the libusb backend
+    (claiming and detaching interfaces, control/bulk/interrupt/isochronous
+    submission and the same reply values and lengths), OH0 and OH0Device
+    (path parsing, the same vector counts per transfer type and the
+    `EACCES` on IOS versions with the new USB stack), USBV0/V4/V5 (device
+    change buffers, `GETDEVPARAMS` layouts, interface and alt-setting
+    handling), HIDv4/HIDv5, VEN, and the keyboard (`USB_KBD`, the same
+    key tables and modifier handling).
+  - Network: the socket manager (blocking and non-blocking calls,
+    `poll`/`select` results, the same host error codes and their Wii
+    mappings), the SSL device (the same mbedtls calls, results and reply
+    buffers), IP top (all ioctl/ioctlv commands, `getaddrinfo`,
+    interface and route lookups), ICMP, NCD, WD and MAC address handling.
+  - WiiConnect24: the KD request device (mail check, send and download,
+    the scheduler thread and its spans, async replies), the KD time
+    device, and the config, download list, send list, friend list and VFF
+    code; the same files are read and written with the same contents.
+  - Deliberate differences (no game sees these):
+    - `USBScanner`: the device list is cleared while holding its lock.
+    - `LibusbDevice`: the transfer-type name used in a log line falls back
+      to "Unknown" for a type outside the table (the old code threw
+      `std::out_of_range`).
+    - `USB_KBD`: the host key tables are defined on every platform; they
+      are only used on Windows, as before.
+    - `WD/Command`: the scan reply is written with `CopyToEmu` (same
+      bytes); an invalid guest address is now reported by the memory
+      manager instead of crashing through an unchecked pointer.
+    - `WC24FriendList`: the in-memory list is value-initialised, so a list
+      that cannot be read is written back as zeros instead of leftover
+      memory.
+    - `Socket`, `IP/Top`: the `sockaddr` and option buffers handed to the
+      host are zero-initialised; the old code could copy uninitialised
+      stack bytes to the guest (for example the `getsockopt` value of a
+      short option).
+    - `IP/Top`: the global `format_as(addrinfo)` was replaced by a local
+      formatting helper (same text).
+    - Some log message texts changed (log lines only, not translatable).
+  - Old behaviour kept on purpose:
+    - `IP/Top`: the route lookup still leaks its netlink socket when
+      `setsockopt(SO_RCVTIMEO)` fails.
+    - The padding byte at the end of the config and endpoint descriptors
+      copied to the guest is still whatever the host structure held.
+    - `GetConfigurations()[0]` is still read without checking for an empty
+      list; VEN still reads the first input vector without checking that
+      there is one; NCD still uses `io_vectors.at()` (throws when a vector
+      is missing).
+    - KD: the download task search still leaves a subtask ID set by an
+      entry that was not picked in the end; the config, download list and
+      send list are still written back as they are when they could not be
+      read; `ASSERT(!IsDisabled())` fires in the same places.
+  - Fixes after the rewrite:
+    - `LibusbDevice`: the `#ifndef __APPLE__` guard around
+      `libusb_detach_kernel_driver` in `ClaimAllInterfaces` had been lost
+      in the rewrite and was restored (macOS must not detach kernel
+      drivers).
+    - `SSL`: each certificate digest carries a comment naming its file;
+      the digest bytes are unchanged.
+  - Warning fixes: the rewritten files have none of the old code's sign,
+    narrowing and unused-parameter warnings (`USBV5`, `LibusbDevice`,
+    `HIDv5`, `OH0`, `Host`, `USB_KBD`, `Socket`, `WD/Command`,
+    `NetKDRequest`); conversions are explicit casts with the same values,
+    and unused parameters are unnamed or `[[maybe_unused]]`.
+  - Checked: old and new code side by side in harnesses built from the W19
+    files and the untouched base for everything else, with fake host
+    sockets, DNS, mbedtls entry points, libusb, HTTP, crypto and clock that
+    record every call. Each case is one hash of reply values and delays,
+    guest memory, host calls, async replies, alerts, savestate bytes and
+    NAND file contents, streamed through `cmp`; all identical, and each
+    old build run twice to confirm it is deterministic:
+    - Sockets, SSL and IP top: 1000 cases of 2000 steps and 300 of 5000
+      (a mutated `EALREADY`/`EINPROGRESS` mapping was caught in 22 of 300).
+    - USB host, scanner, libusb, OH0, V0/V4/V5, HID, VEN and keyboard with
+      hotplug and transfer completion: 300 cases of 3000 steps.
+    - WiiConnect24 over synthetic config, download list, friend list, send
+      list, VFF and key-module files (random bytes, no real keys) with a
+      fake HTTP server and the scheduler thread stepped by the clock: 300
+      cases of 2000 steps.
+    - NCD, WD and MAC address handling with varied MAC settings and config
+      files: 500 cases of 3000 steps.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: no warnings
+      in W19 files, nor from W19 headers in the dependents checked
+      (`IOS`, `MainSettings`, `NetKDRequest`, `Socket`). `AMMediaboard`,
+      `BBA/BuiltIn` and `NetworkWidget` fail on missing headers
+      (`UnixUtil.h`, SFML, Qt) the same way on the base tree; on the
+      Windows target `IP/Top` stops at `NET_IFINDEX_UNSPECIFIED`, which
+      the MinGW headers lack, also on the base tree (MSVC's have it).
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W19 .cpp
+      file. Remaining runs are in headers only (public declarations,
+      structure layouts, enum values and names).
+  - Key material: none added. The files keep the three SHA-256 digests of
+    the user's SSL files (`SSL.cpp`), the mail-check HMAC key
+    (`MAIL_CHECK_KEY` in `NetKDRequest.h`) and the `WC24PubkMod` layout
+    (no key bytes), unchanged.
