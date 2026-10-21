@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/EmulatedUSB/WiiSpeakWindow.h"
 
@@ -11,6 +10,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QSlider>
 #include <QString>
 #include <QVBoxLayout>
 
@@ -23,6 +23,17 @@
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+constexpr int GAIN_FLOOR = -50;
+constexpr int GAIN_CEILING = 50;
+
+QString GainCaption(int db)
+{
+  return WiiSpeakWindow::tr("Volume modifier (value: %1dB)").arg(db);
+}
+}  // namespace
+
 WiiSpeakWindow::WiiSpeakWindow(QWidget* parent) : QWidget(parent)
 {
   // i18n: Window for managing the Wii Speak microphone
@@ -31,95 +42,94 @@ WiiSpeakWindow::WiiSpeakWindow(QWidget* parent) : QWidget(parent)
   setObjectName(QStringLiteral("wii_speak_manager"));
   setMinimumSize(QSize(700, 200));
 
-  CreateMainWindow();
+  BuildLayout();
 
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
           &WiiSpeakWindow::OnEmulationStateChanged);
-
   OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
 }
 
 WiiSpeakWindow::~WiiSpeakWindow() = default;
 
-void WiiSpeakWindow::CreateMainWindow()
+void WiiSpeakWindow::BuildLayout()
 {
-  auto* main_layout = new QVBoxLayout();
-  auto* label = new QLabel();
-  label->setText(QStringLiteral("<center><i>%1</i></center>")
-                     .arg(tr("Some settings cannot be changed when emulation is running.")));
-  main_layout->addWidget(label);
+  auto* column = new QVBoxLayout();
 
-  auto* checkbox_group = new QGroupBox();
-  auto* checkbox_layout = new QHBoxLayout();
-  checkbox_layout->setAlignment(Qt::AlignHCenter);
-  m_checkbox_enabled = new QCheckBox(tr("Emulate Wii Speak"), this);
-  m_checkbox_enabled->setChecked(Config::Get(Config::MAIN_EMULATE_WII_SPEAK));
-  connect(m_checkbox_enabled, &QCheckBox::toggled, this, &WiiSpeakWindow::EmulateWiiSpeak);
-  checkbox_layout->addWidget(m_checkbox_enabled);
-  checkbox_group->setLayout(checkbox_layout);
-  main_layout->addWidget(checkbox_group);
+  auto* notice = new QLabel();
+  notice->setText(QStringLiteral("<center><i>%1</i></center>")
+                      .arg(tr("Some settings cannot be changed when emulation is running.")));
+  column->addWidget(notice);
 
-  auto* config_group = new QGroupBox(tr("Microphone Configuration"));
-  auto* config_layout = new QHBoxLayout();
+  // Plugged in or not; only changeable while nothing is running.
+  auto* presence_box = new QGroupBox();
+  auto* presence_row = new QHBoxLayout();
+  presence_row->setAlignment(Qt::AlignHCenter);
+  m_plugged_in = new QCheckBox(tr("Emulate Wii Speak"), this);
+  m_plugged_in->setChecked(Config::Get(Config::MAIN_EMULATE_WII_SPEAK));
+  connect(m_plugged_in, &QCheckBox::toggled, this, &WiiSpeakWindow::EmulateWiiSpeak);
+  presence_row->addWidget(m_plugged_in);
+  presence_box->setLayout(presence_row);
+  column->addWidget(presence_box);
 
-  auto checkbox_mic_muted = new QCheckBox(tr("Mute"), this);
-  checkbox_mic_muted->setChecked(Settings::Instance().IsWiiSpeakMuted());
-  connect(&Settings::Instance(), &Settings::WiiSpeakMuteChanged, checkbox_mic_muted,
-          &QCheckBox::setChecked);
-  connect(checkbox_mic_muted, &QCheckBox::toggled, &Settings::Instance(),
-          &Settings::SetWiiSpeakMuted);
-  checkbox_mic_muted->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
-  config_layout->addWidget(checkbox_mic_muted);
+  column->addWidget(BuildMicrophoneBox());
 
-  auto* volume_layout = new QGridLayout();
-  static constexpr int FILTER_MIN = -50;
-  static constexpr int FILTER_MAX = 50;
-  const int volume_modifier =
-      std::clamp<int>(Config::Get(Config::MAIN_WII_SPEAK_VOLUME_MODIFIER), FILTER_MIN, FILTER_MAX);
-  auto filter_slider = new QSlider(Qt::Horizontal, this);
-  auto slider_label = new QLabel(tr("Volume modifier (value: %1dB)").arg(volume_modifier));
-  connect(filter_slider, &QSlider::valueChanged, this, [slider_label](int value) {
-    Config::SetBaseOrCurrent(Config::MAIN_WII_SPEAK_VOLUME_MODIFIER, value);
-    slider_label->setText(tr("Volume modifier (value: %1dB)").arg(value));
+  setLayout(column);
+}
+
+QGroupBox* WiiSpeakWindow::BuildMicrophoneBox()
+{
+  auto* box = new QGroupBox(tr("Microphone Configuration"));
+  auto* row = new QHBoxLayout();
+
+  // Mute follows the shared setting both ways (it can also be toggled by hotkey).
+  auto* mute = new QCheckBox(tr("Mute"), this);
+  Settings& settings = Settings::Instance();
+  mute->setChecked(settings.IsWiiSpeakMuted());
+  connect(&settings, &Settings::WiiSpeakMuteChanged, mute, &QCheckBox::setChecked);
+  connect(mute, &QCheckBox::toggled, &settings, &Settings::SetWiiSpeakMuted);
+  mute->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+  row->addWidget(mute);
+
+  auto* gain_grid = new QGridLayout();
+  const int gain = std::clamp<int>(Config::Get(Config::MAIN_WII_SPEAK_VOLUME_MODIFIER), GAIN_FLOOR,
+                                   GAIN_CEILING);
+  auto* gain_slider = new QSlider(Qt::Horizontal, this);
+  auto* gain_caption = new QLabel(GainCaption(gain));
+  connect(gain_slider, &QSlider::valueChanged, this, [gain_caption](int db) {
+    Config::SetBaseOrCurrent(Config::MAIN_WII_SPEAK_VOLUME_MODIFIER, db);
+    gain_caption->setText(GainCaption(db));
   });
-  filter_slider->setMinimum(FILTER_MIN);
-  filter_slider->setMaximum(FILTER_MAX);
-  filter_slider->setValue(volume_modifier);
-  filter_slider->setTickPosition(QSlider::TicksBothSides);
-  filter_slider->setTickInterval(10);
-  filter_slider->setSingleStep(1);
-  volume_layout->addWidget(new QLabel(QStringLiteral("%1dB").arg(FILTER_MIN)), 0, 0, Qt::AlignLeft);
-  volume_layout->addWidget(slider_label, 0, 1, Qt::AlignCenter);
-  volume_layout->addWidget(new QLabel(QStringLiteral("%1dB").arg(FILTER_MAX)), 0, 2,
-                           Qt::AlignRight);
-  volume_layout->addWidget(filter_slider, 1, 0, 1, 3);
-  config_layout->addLayout(volume_layout);
-  config_layout->setStretch(1, 3);
+  gain_slider->setMinimum(GAIN_FLOOR);
+  gain_slider->setMaximum(GAIN_CEILING);
+  gain_slider->setValue(gain);
+  gain_slider->setTickPosition(QSlider::TicksBothSides);
+  gain_slider->setTickInterval(10);
+  gain_slider->setSingleStep(1);
+  gain_grid->addWidget(new QLabel(QStringLiteral("%1dB").arg(GAIN_FLOOR)), 0, 0, Qt::AlignLeft);
+  gain_grid->addWidget(gain_caption, 0, 1, Qt::AlignCenter);
+  gain_grid->addWidget(new QLabel(QStringLiteral("%1dB").arg(GAIN_CEILING)), 0, 2, Qt::AlignRight);
+  gain_grid->addWidget(gain_slider, 1, 0, 1, 3);
+  row->addLayout(gain_grid);
+  row->setStretch(1, 3);
 
-  m_combobox_microphones = new QComboBox();
+  m_input_device = new QComboBox();
 #ifndef HAVE_CUBEB
-  m_combobox_microphones->addItem(QLatin1String("(%1)").arg(tr("Audio backend unsupported")),
-                                  QString{});
+  m_input_device->addItem(QLatin1String("(%1)").arg(tr("Audio backend unsupported")), QString{});
 #else
-  m_combobox_microphones->addItem(QLatin1String("(%1)").arg(tr("Autodetect preferred microphone")),
-                                  QString{});
-  for (auto& [device_id, device_name] : CubebUtils::ListInputDevices())
-  {
-    const auto user_data = QString::fromStdString(device_id);
-    m_combobox_microphones->addItem(QString::fromStdString(device_name), user_data);
-  }
+  m_input_device->addItem(QLatin1String("(%1)").arg(tr("Autodetect preferred microphone")),
+                          QString{});
+  for (const auto& [id, name] : CubebUtils::ListInputDevices())
+    m_input_device->addItem(QString::fromStdString(name), QString::fromStdString(id));
 #endif
-  connect(m_combobox_microphones, &QComboBox::currentIndexChanged, this,
+  // Connected before the saved device is selected, so selecting it stores it again.
+  connect(m_input_device, &QComboBox::currentIndexChanged, this,
           &WiiSpeakWindow::OnInputDeviceChange);
+  const QString saved_id = QString::fromStdString(Config::Get(Config::MAIN_WII_SPEAK_MICROPHONE));
+  m_input_device->setCurrentIndex(m_input_device->findData(saved_id));
+  row->addWidget(m_input_device);
 
-  auto current_device_id = QString::fromStdString(Config::Get(Config::MAIN_WII_SPEAK_MICROPHONE));
-  m_combobox_microphones->setCurrentIndex(m_combobox_microphones->findData(current_device_id));
-  config_layout->addWidget(m_combobox_microphones);
-
-  config_group->setLayout(config_layout);
-  main_layout->addWidget(config_group);
-
-  setLayout(main_layout);
+  box->setLayout(row);
+  return box;
 }
 
 void WiiSpeakWindow::EmulateWiiSpeak(bool emulate)
@@ -129,18 +139,15 @@ void WiiSpeakWindow::EmulateWiiSpeak(bool emulate)
 
 void WiiSpeakWindow::OnEmulationStateChanged(Core::State state)
 {
-  const bool running = state != Core::State::Uninitialized;
-
-  m_checkbox_enabled->setEnabled(!running);
-  m_combobox_microphones->setEnabled(!running);
+  const bool locked = state != Core::State::Uninitialized;
+  m_plugged_in->setEnabled(!locked);
+  m_input_device->setEnabled(!locked);
 }
 
 void WiiSpeakWindow::OnInputDeviceChange()
 {
-  auto user_data = m_combobox_microphones->currentData();
-  if (!user_data.isValid())
+  const QVariant chosen = m_input_device->currentData();
+  if (!chosen.isValid())
     return;
-
-  const std::string device_id = user_data.toString().toStdString();
-  Config::SetBaseOrCurrent(Config::MAIN_WII_SPEAK_MICROPHONE, device_id);
+  Config::SetBaseOrCurrent(Config::MAIN_WII_SPEAK_MICROPHONE, chosen.toString().toStdString());
 }

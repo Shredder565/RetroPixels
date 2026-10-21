@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/EmulatedUSB/LogitechMicWindow.h"
 
@@ -11,6 +10,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QSlider>
 #include <QString>
 
 #ifdef HAVE_CUBEB
@@ -23,6 +23,23 @@
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 
+namespace
+{
+// The volume offset slider covers -50 dB .. +50 dB.
+constexpr int GAIN_FLOOR = -50;
+constexpr int GAIN_CEILING = 50;
+
+QString GainCaption(int db)
+{
+  return LogitechMicWindow::tr("Volume modifier (value: %1dB)").arg(db);
+}
+
+QLabel* GainEndLabel(int db)
+{
+  return new QLabel(QStringLiteral("%1dB").arg(db));
+}
+}  // namespace
+
 LogitechMicWindow::LogitechMicWindow(QWidget* parent) : QWidget(parent)
 {
   setWindowTitle(tr("Logitech USB Microphone Manager"));
@@ -30,133 +47,123 @@ LogitechMicWindow::LogitechMicWindow(QWidget* parent) : QWidget(parent)
   setObjectName(QStringLiteral("logitech_mic_manager"));
   setMinimumSize(QSize(700, 200));
 
-  CreateMainWindow();
+  BuildLayout();
 
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
           &LogitechMicWindow::OnEmulationStateChanged);
-
   OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
 }
 
-void LogitechMicWindow::CreateMainWindow()
+void LogitechMicWindow::BuildLayout()
 {
-  auto* const main_layout = new QVBoxLayout;
-  auto* const label = new QLabel;
-  label->setText(QStringLiteral("<center><i>%1</i></center>")
-                     .arg(tr("Some settings cannot be changed when emulation is running.")));
-  main_layout->addWidget(label);
+  auto* const column = new QVBoxLayout;
 
-  CreateCheckboxGroup(main_layout);
+  auto* const notice = new QLabel;
+  notice->setText(QStringLiteral("<center><i>%1</i></center>")
+                      .arg(tr("Some settings cannot be changed when emulation is running.")));
+  column->addWidget(notice);
 
-  CreateMicrophoneConfigurationGroup(main_layout);
+  column->addWidget(BuildPresenceBox());
+  column->addWidget(BuildMicrophonesBox());
 
-  setLayout(main_layout);
+  setLayout(column);
 }
 
-void LogitechMicWindow::CreateCheckboxGroup(QVBoxLayout* main_layout)
+QGroupBox* LogitechMicWindow::BuildPresenceBox()
 {
-  auto* checkbox_group = new QGroupBox();
-  auto* checkbox_layout = new QHBoxLayout();
-  checkbox_layout->setAlignment(Qt::AlignHCenter);
+  auto* box = new QGroupBox();
+  auto* row = new QHBoxLayout();
+  row->setAlignment(Qt::AlignHCenter);
 
-  for (std::size_t index = 0; index != Config::EMULATED_LOGITECH_MIC_COUNT; ++index)
+  for (std::size_t mic = 0; mic < m_plugged_in.size(); ++mic)
   {
-    m_mic_enabled_checkboxes[index] = new ConfigBool(
-        tr("Emulate Logitech USB Mic %1").arg(index + 1), Config::MAIN_EMULATE_LOGITECH_MIC[index]);
-    checkbox_layout->addWidget(m_mic_enabled_checkboxes[index]);
+    m_plugged_in[mic] = new ConfigBool(tr("Emulate Logitech USB Mic %1").arg(mic + 1),
+                                       Config::MAIN_EMULATE_LOGITECH_MIC[mic]);
+    row->addWidget(m_plugged_in[mic]);
   }
 
-  checkbox_group->setLayout(checkbox_layout);
-  main_layout->addWidget(checkbox_group);
+  box->setLayout(row);
+  return box;
 }
 
-void LogitechMicWindow::CreateMicrophoneConfigurationGroup(QVBoxLayout* main_layout)
+QGroupBox* LogitechMicWindow::BuildMicrophonesBox()
 {
-  auto* main_config_group = new QGroupBox(tr("Microphone Configuration"));
-  auto* main_config_layout = new QVBoxLayout();
+  auto* box = new QGroupBox(tr("Microphone Configuration"));
+  auto* stack = new QVBoxLayout();
 
-  for (std::size_t index = 0; index != Config::EMULATED_LOGITECH_MIC_COUNT; ++index)
-  {
-    // i18n: %1 is a number from 1 to 4.
-    auto* config_group = new QGroupBox(tr("Microphone %1 Configuration").arg(index + 1));
-    auto* const config_layout = new QHBoxLayout();
+  for (std::size_t mic = 0; mic < m_input_device.size(); ++mic)
+    stack->addWidget(BuildMicrophoneBox(mic));
 
-    auto* const mic_muted = new ConfigBool(tr("Mute"), Config::MAIN_LOGITECH_MIC_MUTED[index]);
-    mic_muted->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
-    config_layout->addWidget(mic_muted);
+  box->setLayout(stack);
+  return box;
+}
 
-    static constexpr int FILTER_MIN = -50;
-    static constexpr int FILTER_MAX = 50;
+QGroupBox* LogitechMicWindow::BuildMicrophoneBox(std::size_t mic)
+{
+  // i18n: %1 is a number from 1 to 4.
+  auto* box = new QGroupBox(tr("Microphone %1 Configuration").arg(mic + 1));
+  auto* const row = new QHBoxLayout();
 
-    auto* volume_layout = new QGridLayout();
-    const int volume_modifier = std::clamp<int>(
-        Config::Get(Config::MAIN_LOGITECH_MIC_VOLUME_MODIFIER[index]), FILTER_MIN, FILTER_MAX);
-    auto* const filter_slider = new QSlider(Qt::Horizontal, this);
-    auto* const slider_label = new QLabel(tr("Volume modifier (value: %1dB)").arg(volume_modifier));
-    connect(filter_slider, &QSlider::valueChanged, this, [slider_label, index](int value) {
-      Config::SetBaseOrCurrent(Config::MAIN_LOGITECH_MIC_VOLUME_MODIFIER[index], value);
-      slider_label->setText(tr("Volume modifier (value: %1dB)").arg(value));
-    });
-    filter_slider->setMinimum(FILTER_MIN);
-    filter_slider->setMaximum(FILTER_MAX);
-    filter_slider->setValue(volume_modifier);
-    filter_slider->setTickPosition(QSlider::TicksBothSides);
-    filter_slider->setTickInterval(10);
-    filter_slider->setSingleStep(1);
-    volume_layout->addWidget(new QLabel(QStringLiteral("%1dB").arg(FILTER_MIN)), 0, 0,
-                             Qt::AlignLeft);
-    volume_layout->addWidget(slider_label, 0, 1, Qt::AlignCenter);
-    volume_layout->addWidget(new QLabel(QStringLiteral("%1dB").arg(FILTER_MAX)), 0, 2,
-                             Qt::AlignRight);
-    volume_layout->addWidget(filter_slider, 1, 0, 1, 3);
-    config_layout->addLayout(volume_layout);
-    config_layout->setStretch(1, 3);
+  auto* const mute = new ConfigBool(tr("Mute"), Config::MAIN_LOGITECH_MIC_MUTED[mic]);
+  mute->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+  row->addWidget(mute);
 
-    m_mic_device_comboboxes[index] = new QComboBox();
+  // Volume offset: a captioned slider with the range ends labelled.
+  auto* gain_grid = new QGridLayout();
+  const int gain = std::clamp<int>(Config::Get(Config::MAIN_LOGITECH_MIC_VOLUME_MODIFIER[mic]),
+                                   GAIN_FLOOR, GAIN_CEILING);
+  auto* const gain_slider = new QSlider(Qt::Horizontal, this);
+  auto* const gain_caption = new QLabel(GainCaption(gain));
+  connect(gain_slider, &QSlider::valueChanged, this, [gain_caption, mic](int db) {
+    Config::SetBaseOrCurrent(Config::MAIN_LOGITECH_MIC_VOLUME_MODIFIER[mic], db);
+    gain_caption->setText(GainCaption(db));
+  });
+  gain_slider->setMinimum(GAIN_FLOOR);
+  gain_slider->setMaximum(GAIN_CEILING);
+  gain_slider->setValue(gain);
+  gain_slider->setTickPosition(QSlider::TicksBothSides);
+  gain_slider->setTickInterval(10);
+  gain_slider->setSingleStep(1);
+  gain_grid->addWidget(GainEndLabel(GAIN_FLOOR), 0, 0, Qt::AlignLeft);
+  gain_grid->addWidget(gain_caption, 0, 1, Qt::AlignCenter);
+  gain_grid->addWidget(GainEndLabel(GAIN_CEILING), 0, 2, Qt::AlignRight);
+  gain_grid->addWidget(gain_slider, 1, 0, 1, 3);
+  row->addLayout(gain_grid);
+  row->setStretch(1, 3);
+
+  // Host input device. The first entry (empty id) means "let the backend choose".
+  QComboBox* const device = new QComboBox();
+  m_input_device[mic] = device;
 #ifndef HAVE_CUBEB
-    m_mic_device_comboboxes[index]->addItem(
-        QLatin1String("(%1)").arg(tr("Audio backend unsupported")), QString{});
+  device->addItem(QLatin1String("(%1)").arg(tr("Audio backend unsupported")), QString{});
 #else
-    m_mic_device_comboboxes[index]->addItem(
-        QLatin1String("(%1)").arg(tr("Autodetect preferred microphone")), QString{});
-    for (auto& [device_id, device_name] : CubebUtils::ListInputDevices())
-    {
-      const auto user_data = QString::fromStdString(device_id);
-      m_mic_device_comboboxes[index]->addItem(QString::fromStdString(device_name), user_data);
-    }
+  device->addItem(QLatin1String("(%1)").arg(tr("Autodetect preferred microphone")), QString{});
+  for (const auto& [id, name] : CubebUtils::ListInputDevices())
+    device->addItem(QString::fromStdString(name), QString::fromStdString(id));
 #endif
-    auto current_device_id =
-        QString::fromStdString(Config::Get(Config::MAIN_LOGITECH_MIC_MICROPHONE[index]));
-    m_mic_device_comboboxes[index]->setCurrentIndex(
-        m_mic_device_comboboxes[index]->findData(current_device_id));
-    connect(m_mic_device_comboboxes[index], &QComboBox::currentIndexChanged, this,
-            [index, this]() { OnInputDeviceChange(index); });
-    config_layout->addWidget(m_mic_device_comboboxes[index]);
+  const QString saved_id =
+      QString::fromStdString(Config::Get(Config::MAIN_LOGITECH_MIC_MICROPHONE[mic]));
+  device->setCurrentIndex(device->findData(saved_id));
+  connect(device, &QComboBox::currentIndexChanged, this, [this, mic] { OnInputDeviceChange(mic); });
+  row->addWidget(device);
 
-    config_group->setLayout(config_layout);
-    main_config_layout->addWidget(config_group);
-  }
-
-  main_config_group->setLayout(main_config_layout);
-  main_layout->addWidget(main_config_group);
+  box->setLayout(row);
+  return box;
 }
 
 void LogitechMicWindow::OnEmulationStateChanged(Core::State state)
 {
-  const bool running = state != Core::State::Uninitialized;
-
-  for (std::size_t index = 0; index != Config::EMULATED_LOGITECH_MIC_COUNT; ++index)
-  {
-    m_mic_enabled_checkboxes[index]->setEnabled(!running);
-  }
+  // Plugging microphones in or out only takes effect at boot.
+  const bool locked = state != Core::State::Uninitialized;
+  for (ConfigBool* plugged_in : m_plugged_in)
+    plugged_in->setEnabled(!locked);
 }
 
 void LogitechMicWindow::OnInputDeviceChange(std::size_t index)
 {
-  auto user_data = m_mic_device_comboboxes[index]->currentData();
-  if (user_data.isValid())
-  {
-    const std::string device_id = user_data.toString().toStdString();
-    Config::SetBaseOrCurrent(Config::MAIN_LOGITECH_MIC_MICROPHONE[index], device_id);
-  }
+  const QVariant chosen = m_input_device[index]->currentData();
+  if (!chosen.isValid())
+    return;
+  Config::SetBaseOrCurrent(Config::MAIN_LOGITECH_MIC_MICROPHONE[index],
+                           chosen.toString().toStdString());
 }

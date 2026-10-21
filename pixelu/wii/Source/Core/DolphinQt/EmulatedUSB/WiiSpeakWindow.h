@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,7 +8,9 @@
 
 class QCheckBox;
 class QComboBox;
+class QGroupBox;
 
+// Settings for the emulated Wii Speak: plugged in or not, mute, volume offset and host device.
 class WiiSpeakWindow : public QWidget
 {
   Q_OBJECT
@@ -18,11 +19,12 @@ public:
   ~WiiSpeakWindow() override;
 
 private:
-  void CreateMainWindow();
+  void BuildLayout();
+  QGroupBox* BuildMicrophoneBox();
   void OnEmulationStateChanged(Core::State state);
   void EmulateWiiSpeak(bool emulate);
   void OnInputDeviceChange();
 
-  QCheckBox* m_checkbox_enabled;
-  QComboBox* m_combobox_microphones;
+  QCheckBox* m_plugged_in;
+  QComboBox* m_input_device;
 };
