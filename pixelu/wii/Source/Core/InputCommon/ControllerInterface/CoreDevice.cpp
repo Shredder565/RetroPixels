@@ -240,12 +240,51 @@ bool DeviceQualifier::operator==(const DeviceQualifier& devq) const
   return cid == devq.cid && name == devq.name && source == devq.source;
 }
 
+#ifndef _WIN32
+namespace
+{
+// RetroPixels' "Set up Xbox controller" (and any configuration made on Windows) names the first
+// Xbox controller "XInput/0/Gamepad". Other systems have no XInput, so there that name stands for
+// the SDL gamepads: "XInput/<n>/Gamepad" is the n-th SDL device that has a gamepad mapping, lowest
+// id first. The SDL gamepads also answer to XInput's input names ("Button A", "Left X+",
+// "Trigger L", "Start", "Motor L"...), so such a configuration works unchanged.
+std::shared_ptr<Device> FindXInputStandIn(const std::vector<std::shared_ptr<Device>>& devices,
+                                          const DeviceQualifier& devq)
+{
+  constexpr int XINPUT_SLOTS = 4;
+  if (devq.source != "XInput" || devq.name != "Gamepad" || devq.cid < 0 || devq.cid >= XINPUT_SLOTS)
+  {
+    return nullptr;
+  }
+
+  std::vector<std::shared_ptr<Device>> gamepads;
+  for (const std::shared_ptr<Device>& dev : devices)
+  {
+    // Only mapped gamepads have the named stick axes and Start.
+    if (dev->GetSource() == "SDL" && dev->FindInput("Left X+") != nullptr &&
+        dev->FindInput("Start") != nullptr)
+    {
+      gamepads.push_back(dev);
+    }
+  }
+  std::ranges::stable_sort(gamepads, {}, &Device::GetId);
+  return size_t(devq.cid) < gamepads.size() ? gamepads[size_t(devq.cid)] : nullptr;
+}
+}  // namespace
+#endif
+
 std::shared_ptr<Device> DeviceContainer::FindDevice(const DeviceQualifier& devq) const
 {
   std::lock_guard guard(m_devices_mutex);
   const auto it = std::ranges::find_if(
       m_devices, [&devq](const std::shared_ptr<Device>& dev) { return devq == dev.get(); });
-  return it == m_devices.end() ? nullptr : *it;
+  if (it != m_devices.end())
+    return *it;
+#ifndef _WIN32
+  return FindXInputStandIn(m_devices, devq);
+#else
+  return nullptr;
+#endif
 }
 
 std::vector<std::shared_ptr<Device>> DeviceContainer::GetAllDevices() const
