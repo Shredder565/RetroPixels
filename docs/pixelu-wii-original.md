@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 309773 | 77.1% |
-| Dolphin, untouched | 83245 | 20.7% |
-| Dolphin, with PixelU changes | 3170 | 0.8% |
+| Original (RetroPixels) | 320301 | 79.8% |
+| Dolphin, untouched | 75455 | 18.8% |
+| Dolphin, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **401951** | 100% |
+| **All** | **401519** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -162,7 +162,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/JitCommon | 2164 | 2164 | original |
 | Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
 | Core/DiscIO | 15966 | 15966 | original |
-| Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
+| Core/DolphinQt (top level) | 14667 | 9146 | mixed (62% original) |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
 | Core/DolphinQt/Debugger | 14683 | 0 | Dolphin |
@@ -171,7 +171,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinQt/GameList | 2605 | 0 | Dolphin |
 | Core/DolphinQt/InfinityBase | 403 | 0 | Dolphin |
 | Core/DolphinQt/NetPlay | 3201 | 0 | Dolphin |
-| Core/DolphinQt/QtUtils | 1405 | 0 | Dolphin |
+| Core/DolphinQt/QtUtils | 1382 | 1382 | original |
 | Core/DolphinQt/Settings | 4742 | 0 | Dolphin |
 | Core/DolphinQt/SkylanderPortal | 1499 | 0 | Dolphin |
 | Core/DolphinQt/TAS | 1979 | 0 | Dolphin |
@@ -264,7 +264,7 @@ batch rewrites them.
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8119 | 8119 | original |
 | W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 9252 | 0 | Dolphin |
 | W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 8837 | 8837 | original |
-| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10960 | 0 | Dolphin + PixelU change |
+| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10528 | 10528 | original |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8126 | 0 | Dolphin |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 12387 | 0 | Dolphin |
 | W40 | DolphinQt: controller mapping and settings panes | 11333 | 0 | Dolphin |
@@ -4693,3 +4693,91 @@ step did for the old file. No key bytes are in the tree.
       `DescriptorHeapManager.h`, `DX12Shader.h`, `DXShader.h`,
       `D3D12StreamBuffer.h`, `VideoBackend.h`, `DescriptorAllocator.h`,
       `D3D12BoundingBox.h`).
+
+- W37 log: rewrote all 68 W37 files, the DolphinQt main window, menu bar,
+  toolbar, host, settings object, render widget, hotkey scheduler, main.cpp,
+  resources/theme handling, translation loader and the Qt utility helpers
+  (10528 lines now, from 10960): `AboutDialog`, `GameCount`, `Host`,
+  `HotkeyScheduler`, `Main.cpp`, `MainWindow`, `MenuBar`, `RenderWidget`,
+  `Resources`, `SearchBar`, `Settings`, `ToolBar`, `Translation`,
+  `resource.h` and every file under `QtUtils/`. Every rewritten file starts
+  with the original-code header and has no Dolphin copyright or SPDX line.
+  File names, public declarations, signals and slots, object names, every
+  menu and toolbar action (text, order, shortcut, enabled/checked rules),
+  command-line flags, window titles, QSettings and Config keys, the order and
+  arguments of Core/UICommon calls, and all tr() strings (byte for byte,
+  with their disambiguation) are unchanged.
+  - PixelU changes kept exactly: `RenderWidget::IsEmbedMode()` and
+    `ShowForEmbedding(geometry)` for RetroPixels' embedded launch, no saving
+    of the render geometry on stop in embed mode, the embedded show path
+    in MainWindow, and the idle title
+    "PixelU Wii (based on Dolphin %1)" with the SCM description.
+  - `MainWindow`: construction runs the same Connect* steps in the same
+    order from one table; boot, stop (with the same confirm/hardcore/cursor
+    rules), disc change and second-disc scan, state load/save and slots,
+    NetPlay host/join/quit, FIFO, recording and read-only mode, drag and
+    drop, the debugger widgets, the Wii remote/GBA windows and the
+    platform window-system description. The confirm-to-stop dialog,
+    resource pack check and settings-pane routing are now private helpers.
+  - `MenuBar`: the menus are built from small row tables and helper
+    lambdas, in the old order. `Settings`: QSettings and Config access,
+    the game-list/theme/debug signals. `HotkeyScheduler`: polling thread,
+    frame advance state machine, throttle, speed limit, stereo, EFB scale,
+    aspect ratio, profiles, GBA, state slots. `Translation`: gettext .mo
+    loading with context lookup, language choice.
+  - Preserved quirks (callers or users may rely on them): HK_SET_PC emits
+    Skip, "Copy XFB:" keeps its text, the inverted fog OSD message,
+    `OnStartRecording` emitting ReadOnlyModeChanged(true) after
+    SetReadOnly(false), MAIN_CURRENT_STATE_PATH being set even when the
+    dialog is cancelled, and the u32 wrap in DecrementSelectedStateSlot.
+  - Deliberate differences (nothing a user sees in normal use):
+    - `Translation`: the .mo reader checks the file size and the table and
+      string bounds and logs "too small" for a short file. Only malformed
+      files are affected; the old code read out of bounds on them.
+    - Qt connections that had no context object now use `this` (or the
+      event filter) as context, so they are dropped when it is destroyed.
+    - The throttle hotkey is read with one Held() call per frame (repeated
+      calls returned the same value).
+    - `Settings`: the volume is cast to u16 explicitly; a member replaces a
+      function-static. `MenuBar`: a member replaces the `m_quiet_block_dump`
+      static.
+    - Main.cpp defines `wWinMain` directly instead of through an
+      `app_main` macro. The NAND import progress callback takes ints.
+    - `MainWindow`: explicit casts for State::Load/Save slots, Wii remote
+      indexes and `sa_flags`. `m_stack` is created before the render
+      widget (no visible effect). NetPlayHost no longer keeps the server
+      pointer alive across NetPlayQuit.
+    - The tr("Check for updates") call for an unused placeholder action
+      is gone; the action never showed it.
+  - Checked: old and new code side by side, built with Qt 6.4 offscreen
+    against fakes that record every call, using the untouched non-W37
+    files on both sides (only hashes were kept):
+    - QtUtils: the widgets, event filters, validators, file dialogs, modal
+      message boxes, image conversion, aspect-ratio widget, parallel
+      progress dialog and queued-call helpers driven through a scripted
+      session. Transcripts identical.
+    - Translation and AboutDialog: 107 cases (About with and without a
+      pending update, 21 language settings including damaged, empty,
+      unsorted and other-revision catalogues, times 5 system languages).
+      All identical.
+    - Compared line by line instead, because they need the full Core
+      (emulator state, boot, NetPlay, debugger, video backend):
+      `MainWindow`, `MenuBar`, `ToolBar`, `Settings`, `Host`,
+      `HotkeyScheduler`, `RenderWidget`, Main.cpp, `Resources`,
+      `resource.h`. Every menu/toolbar action, tr() string, shortcut,
+      connection and config key was checked off against the old file;
+      a tr() string scan finds every old string in the new code.
+  - Compile check: the W37 .cpp files and the 199 DolphinQt sources that
+    include W37 headers, old against new, with clang on Linux and for
+    x86_64-w64-windows-gnu, `-Wall -Wextra -Wconversion -Wsign-compare
+    -Wshadow-all -Wshorten-64-to-32`. The rewritten files are clean except
+    for two trigraph warnings from the "*.s??" filter string, which the old
+    file has too. The other files have the same diagnostics as before
+    (missing `QtUtils/SignalDaemon.h` and `DATA_DIR` on Linux,
+    `DWM_WINDOW_CORNER_PREFERENCE` in the MinGW headers). Integer
+    narrowing and sign changes are written as explicit casts (MSVC /W4
+    with warnings as errors).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run is left in a W37
+    .cpp file. The runs left are public declarations in the headers
+    (signals, slots, member lists, enums).
+  - No keys, IVs, tokens or credentials are in these files.
