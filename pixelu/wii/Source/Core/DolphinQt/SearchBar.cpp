@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/SearchBar.h"
 
@@ -11,66 +10,53 @@
 
 SearchBar::SearchBar(QWidget* parent) : QWidget(parent)
 {
-  CreateWidgets();
-  ConnectWidgets();
+  m_query = new QLineEdit;
+  m_close = new QPushButton(tr("Close"));
+  m_query->setPlaceholderText(tr("Search games..."));
+
+  auto* const row = new QHBoxLayout;
+  row->addWidget(m_query);
+  row->addWidget(m_close);
+  row->setSizeConstraint(QLayout::SetMinAndMaxSize);
+  setLayout(row);
+
+  // Every edit re-filters the list straight away.
+  connect(m_query, &QLineEdit::textChanged, this, &SearchBar::Search);
+  connect(m_close, &QPushButton::clicked, this, &SearchBar::Hide);
 
   setFixedHeight(32);
-
   setHidden(true);
 
   installEventFilter(this);
 }
 
-void SearchBar::CreateWidgets()
-{
-  m_search_edit = new QLineEdit;
-  m_close_button = new QPushButton(tr("Close"));
-
-  m_search_edit->setPlaceholderText(tr("Search games..."));
-
-  auto* layout = new QHBoxLayout;
-
-  layout->addWidget(m_search_edit);
-  layout->addWidget(m_close_button);
-  layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
-
-  setLayout(layout);
-}
-
 void SearchBar::Show()
 {
-  m_search_edit->setFocus();
-  m_search_edit->selectAll();
+  m_query->setFocus();
+  m_query->selectAll();
 
-  // Re-apply the filter string.
-  emit Search(m_search_edit->text());
+  // The text may still be there from last time; filter with it again.
+  emit Search(m_query->text());
 
   show();
 }
 
 void SearchBar::Hide()
 {
-  // Clear the filter string.
+  // Hiding the bar shows every game again, but keeps the text for next time.
   emit Search(QString());
 
-  m_search_edit->clearFocus();
+  m_query->clearFocus();
 
   hide();
 }
 
-void SearchBar::ConnectWidgets()
+bool SearchBar::eventFilter(QObject*, QEvent* event)
 {
-  connect(m_search_edit, &QLineEdit::textChanged, this, &SearchBar::Search);
-  connect(m_close_button, &QPushButton::clicked, this, &SearchBar::Hide);
-}
-
-bool SearchBar::eventFilter(QObject* object, QEvent* event)
-{
-  if (event->type() == QEvent::KeyPress)
+  if (event->type() == QEvent::KeyPress &&
+      static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape)
   {
-    if (static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape)
-      Hide();
+    Hide();
   }
-
   return false;
 }

@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 class QLineEdit;
 class QPushButton;
 
+// The game list's search field. Hidden until Show() is called; Escape or Close hides it again and
+// clears the filter.
 class SearchBar : public QWidget
 {
   Q_OBJECT
@@ -21,11 +22,8 @@ signals:
   void Search(const QString& search);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-
   bool eventFilter(QObject* object, QEvent* event) final;
 
-  QLineEdit* m_search_edit;
-  QPushButton* m_close_button;
+  QLineEdit* m_query;
+  QPushButton* m_close;
 };

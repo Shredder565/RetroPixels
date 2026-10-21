@@ -1,9 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 namespace Translation
 {
+// Installs the translation for the configured interface language (or the system's languages)
+// and routes the core's translatable strings through Qt.
 void Initialize();
 }

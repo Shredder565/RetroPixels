@@ -1,7 +1,8 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Resources.h"
+
+#include <array>
 
 #include <QFileInfo>
 #include <QIcon>
@@ -13,104 +14,106 @@
 
 #include "Core/Config/MainSettings.h"
 
-bool Resources::m_svg_supported;
-QList<QIcon> Resources::m_platforms;
-QList<QIcon> Resources::m_countries;
-QList<QIcon> Resources::m_misc;
+bool Resources::s_can_load_svg;
+QList<QIcon> Resources::s_platform_icons;
+QList<QIcon> Resources::s_flag_icons;
+QList<QIcon> Resources::s_misc_icons;
 
-QIcon Resources::LoadNamedIcon(std::string_view name, const QString& dir)
+namespace
 {
-  const QString base_path = dir + QLatin1Char{'/'} + QString::fromLatin1(name);
-  const QString svg_path = base_path + QStringLiteral(".svg");
+// File names, in the order of DiscIO::Platform, DiscIO::Country and Resources::MiscID.
+constexpr std::array<std::string_view, 5> PLATFORM_ICON_NAMES{
+    "Platform_Gamecube", "Platform_Triforce", "Platform_Wii", "Platform_Wad", "Platform_File"};
+constexpr std::array<std::string_view, 14> FLAG_ICON_NAMES{
+    "Flag_Europe",      "Flag_Japan",  "Flag_USA",    "Flag_Australia",
+    "Flag_France",      "Flag_Germany", "Flag_Italy",  "Flag_Korea",
+    "Flag_Netherlands", "Flag_Russia", "Flag_Spain",  "Flag_Taiwan",
+    "Flag_International", "Flag_Unknown"};
+constexpr std::array<std::string_view, 2> MISC_ICON_NAMES{"nobanner", "dolphin_logo"};
 
-  // Prefer svg
-  if (m_svg_supported && QFileInfo(svg_path).exists())
-    return QIcon(svg_path);
+// PNG variants for 1x, 2x and 4x pixel ratios ("name.png", "name@2x.png", "name@4x.png").
+constexpr std::array<int, 3> PNG_SCALES{1, 2, 4};
 
-  QIcon icon;
-
-  auto load_png = [&](int scale) {
-    QString suffix = QStringLiteral(".png");
-    if (scale > 1)
-      suffix = QString::fromLatin1("@%1x.png").arg(scale);
-
-    QPixmap pixmap(base_path + suffix);
-    if (!pixmap.isNull())
-    {
-      pixmap.setDevicePixelRatio(scale);
-      icon.addPixmap(pixmap);
-    }
-  };
-
-  // Since we are caching the files, we need to try and load all known sizes up-front.
-  // Otherwise, a dynamic change of devicePixelRatio could result in use of non-ideal image from
-  // cache while a better one exists on disk.
-  for (auto scale : {1, 2, 4})
-    load_png(scale);
-
-  if (icon.isNull())
-  {
-    ERROR_LOG_FMT(COMMON, "LoadNamedIcon: \"{}\" could not be loaded.", name);
-  }
-
-  return icon;
+QString PngPath(const QString& stem, int scale)
+{
+  if (scale == 1)
+    return stem + QStringLiteral(".png");
+  return stem + QString::fromLatin1("@%1x.png").arg(scale);
 }
 
-static QString GetCurrentThemeDir()
-{
-  return QString::fromStdString(File::GetThemeDir(Config::Get(Config::MAIN_THEME_NAME)));
-}
-
-static QString GetResourcesDir()
+QString SysResourcesFolder()
 {
   return QString::fromStdString(File::GetSysDirectory() + "Resources");
 }
 
+QString CurrentThemeFolder()
+{
+  return QString::fromStdString(File::GetThemeDir(Config::Get(Config::MAIN_THEME_NAME)));
+}
+}  // namespace
+
+QIcon Resources::LoadNamedIcon(std::string_view name, const QString& dir)
+{
+  const QString stem = dir + QLatin1Char{'/'} + QString::fromLatin1(name);
+
+  // An SVG, when there is one and Qt can read it, scales to anything.
+  const QString svg = stem + QStringLiteral(".svg");
+  if (s_can_load_svg && QFileInfo(svg).exists())
+    return QIcon(svg);
+
+  // Otherwise add every PNG size present now. QIcon caches what it is given, so adding them all
+  // up front means a later change of pixel ratio still finds the best match.
+  QIcon icon;
+  for (const int scale : PNG_SCALES)
+  {
+    QPixmap pixmap(PngPath(stem, scale));
+    if (pixmap.isNull())
+      continue;
+    pixmap.setDevicePixelRatio(scale);
+    icon.addPixmap(pixmap);
+  }
+
+  if (icon.isNull())
+    ERROR_LOG_FMT(COMMON, "LoadNamedIcon: \"{}\" could not be loaded.", name);
+
+  return icon;
+}
+
 QIcon Resources::GetResourceIcon(std::string_view name)
 {
-  return LoadNamedIcon(name, GetResourcesDir());
+  return LoadNamedIcon(name, SysResourcesFolder());
 }
 
 QIcon Resources::GetThemeIcon(std::string_view name)
 {
-  return LoadNamedIcon(name, GetCurrentThemeDir());
+  return LoadNamedIcon(name, CurrentThemeFolder());
 }
 
 void Resources::Init()
 {
-  m_svg_supported = QImageReader::supportedImageFormats().contains("svg");
+  s_can_load_svg = QImageReader::supportedImageFormats().contains("svg");
 
-  for (std::string_view platform :
-       {"Platform_Gamecube", "Platform_Triforce", "Platform_Wii", "Platform_Wad", "Platform_File"})
-  {
-    m_platforms.append(GetResourceIcon(platform));
-  }
-
-  for (std::string_view country :
-       {"Flag_Europe", "Flag_Japan", "Flag_USA", "Flag_Australia", "Flag_France", "Flag_Germany",
-        "Flag_Italy", "Flag_Korea", "Flag_Netherlands", "Flag_Russia", "Flag_Spain", "Flag_Taiwan",
-        "Flag_International", "Flag_Unknown"})
-  {
-    m_countries.append(GetResourceIcon(country));
-  }
-
-  m_misc.append(GetResourceIcon("nobanner"));
-  m_misc.append(GetResourceIcon("dolphin_logo"));
+  for (const std::string_view name : PLATFORM_ICON_NAMES)
+    s_platform_icons.append(GetResourceIcon(name));
+  for (const std::string_view name : FLAG_ICON_NAMES)
+    s_flag_icons.append(GetResourceIcon(name));
+  for (const std::string_view name : MISC_ICON_NAMES)
+    s_misc_icons.append(GetResourceIcon(name));
 }
 
 QIcon Resources::GetPlatform(DiscIO::Platform platform)
 {
-  return m_platforms[static_cast<int>(platform)];
+  return s_platform_icons[static_cast<int>(platform)];
 }
 
 QIcon Resources::GetCountry(DiscIO::Country country)
 {
-  return m_countries[static_cast<int>(country)];
+  return s_flag_icons[static_cast<int>(country)];
 }
 
 QIcon Resources::GetMisc(MiscID id)
 {
-  return m_misc[static_cast<int>(id)];
+  return s_misc_icons[static_cast<int>(id)];
 }
 
 QIcon Resources::GetAppIcon()

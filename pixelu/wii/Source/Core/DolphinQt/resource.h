@@ -1,14 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-//{{NO_DEPENDENCIES}}
-// Microsoft Visual C++ generated include file.
-// Used by DolphinQt.rc
-//
+// Resource IDs for DolphinQt.rc (the Windows resource script).
+
+// The application icon (the first icon resource, which Explorer shows for the .exe).
 #define IDI_ICON1 101
 
-// Next default values for new objects
-//
+// Next free IDs, for the Visual Studio resource editor.
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE 102

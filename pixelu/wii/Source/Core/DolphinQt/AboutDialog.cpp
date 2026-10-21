@@ -1,9 +1,9 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/AboutDialog.h"
 
 #include <QLabel>
+#include <QStringList>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QtGlobal>
@@ -15,120 +15,111 @@
 
 #include "DolphinQt/Resources.h"
 
+namespace
+{
+QString Paragraph(const QStringList& lines, const QString& style = {})
+{
+  const QString open = style.isEmpty() ? QStringLiteral("<p>") :
+                                         QStringLiteral("<p style='%1'>").arg(style);
+  return open + QLatin1Char('\n') + lines.join(QLatin1Char('\n')) + QStringLiteral("\n</p>");
+}
+
+QString Link(const QString& url, const QString& text)
+{
+  return QStringLiteral("<a href='%1'>%2</a>").arg(url, text);
+}
+}  // namespace
+
 AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
 {
+  // PixelU: our own window title (not translated).
   setWindowTitle(QStringLiteral("About PixelU Wii"));
 
-  QString branch_str = QString::fromStdString(Common::GetScmBranchStr());
-  const int commits_ahead = Common::GetScmCommitsAheadMaster();
-  if (commits_ahead > 0)
+  QString branch = QString::fromStdString(Common::GetScmBranchStr());
+  if (const int ahead = Common::GetScmCommitsAheadMaster(); ahead > 0)
   {
-    branch_str = tr("%1 (%2)").arg(
-        branch_str,
-        // i18n: A positive number of version control commits made compared to some named branch
-        tr("%1 commit(s) ahead of %2").arg(commits_ahead).arg(QStringLiteral("master")));
+    // i18n: how many version control commits this build has on top of another branch.
+    const QString ahead_text =
+        tr("%1 commit(s) ahead of %2").arg(ahead).arg(QStringLiteral("master"));
+    branch = tr("%1 (%2)").arg(branch, ahead_text);
   }
 
 #ifdef HAVE_SDL3
-  const int sdl_version = SDL_GetVersion();
-  QString sdl_str = QString::fromStdString("%1.%2.%3")
-                        .arg(SDL_VERSIONNUM_MAJOR(sdl_version))
-                        .arg(SDL_VERSIONNUM_MINOR(sdl_version))
-                        .arg(SDL_VERSIONNUM_MICRO(sdl_version));
-#endif
-
-  const QString text =
-      QStringLiteral(R"(
-<p style='font-size:38pt; font-weight:400;'>PixelU Wii</p>
-
-<p style='font-size:18pt;'>Based on Dolphin %VERSION_STRING%</p>
-
-<p>
-PixelU's GameCube and Wii engine is a lightly modified build of Dolphin,<br>
-made for RetroPixels. All credit for the emulation goes to the Dolphin Team.<br>
-Source and changes: <a href='https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii'>github.com/shredder565/retropixels (pixelu/wii)</a>
-</p>
-
-<p style='font-size: small;'>
-%BRANCH%<br>
-%REVISION%<br><br>
-%QT_VERSION%<br>
-%SDL_VERSION%
-</p>
-
-<p>
-Dolphin: <a href='https://dolphin-emu.org/'>dolphin-emu.org</a>
-</p>
-
-<p>
-%ABOUT_DOLPHIN%
-</p>
-
-<p>
-%GAMES_YOU_OWN%
-</p>
-
-<p>
-<a href='https://github.com/dolphin-emu/dolphin/blob/master/COPYING'>%LICENSE%</a> |
-<a href='https://github.com/dolphin-emu/dolphin/graphs/contributors'>%AUTHORS%</a> |
-<a href='https://forums.dolphin-emu.org/'>%SUPPORT%</a>
-)")
-          .replace(QStringLiteral("%VERSION_STRING%"),
-                   QString::fromUtf8(Common::GetScmDescStr().c_str()))
-          .replace(QStringLiteral("%BRANCH%"),
-                   // i18n: "Branch" means the version control term, not a literal tree branch.
-                   tr("Branch: %1").arg(branch_str))
-          .replace(QStringLiteral("%REVISION%"),
-                   tr("Revision: %1").arg(QString::fromUtf8(Common::GetScmRevGitStr().c_str())))
-          .replace(QStringLiteral("%QT_VERSION%"),
-                   tr("Using Qt %1").arg(QStringLiteral(QT_VERSION_STR)))
-#ifdef HAVE_SDL3
-          .replace(QStringLiteral("%SDL_VERSION%"), tr("Using SDL %1").arg(sdl_str))
+  const int sdl = SDL_GetVersion();
+  const QString sdl_line = tr("Using SDL %1").arg(QStringLiteral("%1.%2.%3")
+                                                      .arg(SDL_VERSIONNUM_MAJOR(sdl))
+                                                      .arg(SDL_VERSIONNUM_MINOR(sdl))
+                                                      .arg(SDL_VERSIONNUM_MICRO(sdl)));
 #else
-          .replace(QStringLiteral("%SDL_VERSION%"), tr("SDL disabled"))
+  const QString sdl_line = tr("SDL disabled");
 #endif
-          .replace(QStringLiteral("%CHECK_FOR_UPDATES%"), tr("Check for updates"))
-          .replace(QStringLiteral("%ABOUT_DOLPHIN%"),
-                   // i18n: The word "free" in the standard phrase "free and open source"
-                   // is "free" as in "freedom" - it refers to certain properties of the
-                   // software's license, not the software's price. (It is true that Dolphin
-                   // can be downloaded at no cost, but that's not what this message says.)
-                   tr("Dolphin is a free and open-source GameCube and Wii emulator."))
-          .replace(QStringLiteral("%GAMES_YOU_OWN%"),
-                   tr("This software should not be used to play games you do not legally own."))
-          .replace(QStringLiteral("%LICENSE%"), tr("License"))
-          .replace(QStringLiteral("%AUTHORS%"), tr("Authors"))
-          .replace(QStringLiteral("%SUPPORT%"), tr("Support"));
 
-  QLabel* text_label = new QLabel(text);
-  text_label->setTextInteractionFlags(Qt::TextBrowserInteraction);
-  text_label->setOpenExternalLinks(true);
+  const QString version = QString::fromUtf8(Common::GetScmDescStr().c_str());
+  const QString revision = QString::fromUtf8(Common::GetScmRevGitStr().c_str());
 
-  QLabel* copyright = new QLabel(
-      QStringLiteral("<small>%1</small>")
-          .arg(
-              // i18n: This message uses curly quotes in English. If you want to use curly quotes
-              // in your translation, please use the type of curly quotes that's appropriate for
-              // your language. If you aren't sure which type is appropriate, see
-              // https://en.wikipedia.org/wiki/Quotation_mark#Specific_language_features
-              tr("\u00A9 2003-2024+ Dolphin Team. \u201cGameCube\u201d and \u201cWii\u201d are "
-                 "trademarks of Nintendo. Dolphin is not affiliated with Nintendo in any way.")));
+  // The page is a sequence of paragraphs separated by blank lines. The last one (the links) is
+  // left open, as it always has been.
+  QStringList page;
+  page << QStringLiteral("<p style='font-size:38pt; font-weight:400;'>PixelU Wii</p>");
+  page << QStringLiteral("<p style='font-size:18pt;'>Based on Dolphin %1</p>").arg(version);
+  // PixelU: what this build is and where its source lives.
+  page << Paragraph({QStringLiteral("PixelU's GameCube and Wii engine is a lightly modified build "
+                                    "of Dolphin,<br>"),
+                     QStringLiteral("made for RetroPixels. All credit for the emulation goes to "
+                                    "the Dolphin Team.<br>"),
+                     QStringLiteral("Source and changes: ") +
+                         Link(QStringLiteral("https://github.com/shredder565/retropixels/tree/"
+                                             "claude/wiiu-emulator-urpcen/pixelu/wii"),
+                              QStringLiteral("github.com/shredder565/retropixels (pixelu/wii)"))});
+  // i18n: "Branch" is the version control term.
+  page << Paragraph({tr("Branch: %1").arg(branch) + QStringLiteral("<br>"),
+                     tr("Revision: %1").arg(revision) + QStringLiteral("<br><br>"),
+                     tr("Using Qt %1").arg(QStringLiteral(QT_VERSION_STR)) +
+                         QStringLiteral("<br>"),
+                     sdl_line},
+                    QStringLiteral("font-size: small;"));
+  page << Paragraph({QStringLiteral("Dolphin: ") + Link(QStringLiteral("https://dolphin-emu.org/"),
+                                                        QStringLiteral("dolphin-emu.org"))});
+  // i18n: "free" as in freedom (the licence), not as in price.
+  page << Paragraph({tr("Dolphin is a free and open-source GameCube and Wii emulator.")});
+  page << Paragraph(
+      {tr("This software should not be used to play games you do not legally own.")});
+  page << QStringLiteral("<p>\n") +
+              Link(QStringLiteral("https://github.com/dolphin-emu/dolphin/blob/master/COPYING"),
+                   tr("License")) +
+              QStringLiteral(" |\n") +
+              Link(QStringLiteral("https://github.com/dolphin-emu/dolphin/graphs/contributors"),
+                   tr("Authors")) +
+              QStringLiteral(" |\n") +
+              Link(QStringLiteral("https://forums.dolphin-emu.org/"), tr("Support"));
 
-  QLabel* logo = new QLabel();
+  auto* const info = new QLabel(QLatin1Char('\n') + page.join(QStringLiteral("\n\n")) +
+                                QLatin1Char('\n'));
+  info->setTextInteractionFlags(Qt::TextBrowserInteraction);
+  info->setOpenExternalLinks(true);
+
+  // i18n: the English text uses curly quotes; use the quotation marks your language normally
+  // uses.
+  const QString notice =
+      tr("© 2003-2024+ Dolphin Team. “GameCube” and “Wii” are "
+         "trademarks of Nintendo. Dolphin is not affiliated with Nintendo in any way.");
+  auto* const footer = new QLabel(QStringLiteral("<small>%1</small>").arg(notice));
+
+  auto* const logo = new QLabel();
   logo->setPixmap(Resources::GetAppIcon().pixmap(200, 200));
   logo->setContentsMargins(30, 0, 30, 0);
 
-  QVBoxLayout* main_layout = new QVBoxLayout;
-  QHBoxLayout* h_layout = new QHBoxLayout;
+  auto* const outer = new QVBoxLayout;
+  auto* const top_row = new QHBoxLayout;
 
-  setLayout(main_layout);
-  main_layout->setSizeConstraint(QLayout::SetFixedSize);
-  main_layout->addLayout(h_layout);
-  main_layout->addWidget(copyright);
-  copyright->setAlignment(Qt::AlignCenter);
-  copyright->setContentsMargins(0, 15, 0, 0);
+  setLayout(outer);
+  outer->setSizeConstraint(QLayout::SetFixedSize);
+  outer->addLayout(top_row);
+  outer->addWidget(footer);
+  footer->setAlignment(Qt::AlignCenter);
+  footer->setContentsMargins(0, 15, 0, 0);
 
-  h_layout->setAlignment(Qt::AlignLeft);
-  h_layout->addWidget(logo);
-  h_layout->addWidget(text_label);
+  top_row->setAlignment(Qt::AlignLeft);
+  top_row->addWidget(logo);
+  top_row->addWidget(info);
 }

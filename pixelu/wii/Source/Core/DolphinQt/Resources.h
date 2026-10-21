@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,7 +12,8 @@ enum class Country;
 enum class Platform;
 }  // namespace DiscIO
 
-// Store for various QPixmaps that will be used repeatedly.
+// Icons used all over the UI. The platform, flag and misc icons are loaded once by Init();
+// theme and resource icons are loaded on request.
 class Resources final
 {
 public:
@@ -30,6 +30,7 @@ public:
 
   static QIcon GetMisc(MiscID id);
 
+  // An icon from Sys/Resources, or from the current theme's folder.
   static QIcon GetResourceIcon(std::string_view name);
   static QIcon GetThemeIcon(std::string_view name);
   static QIcon GetAppIcon();
@@ -38,8 +39,8 @@ private:
   Resources() {}
   static QIcon LoadNamedIcon(std::string_view name, const QString& dir);
 
-  static bool m_svg_supported;
-  static QList<QIcon> m_platforms;
-  static QList<QIcon> m_countries;
-  static QList<QIcon> m_misc;
+  static bool s_can_load_svg;
+  static QList<QIcon> s_platform_icons;
+  static QList<QIcon> s_flag_icons;
+  static QList<QIcon> s_misc_icons;
 };

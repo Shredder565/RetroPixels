@@ -1,10 +1,10 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <QStatusBar>
 
+// The bar under the game list that says how many games there are.
 class GameCount : public QStatusBar
 {
   Q_OBJECT
