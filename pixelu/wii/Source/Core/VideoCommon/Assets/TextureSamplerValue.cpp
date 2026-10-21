@@ -1,9 +1,6 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Assets/TextureSamplerValue.h"
-
-#include <optional>
 
 #include "Common/JsonUtil.h"
 #include "Common/StringUtil.h"
@@ -12,45 +9,31 @@ namespace VideoCommon
 {
 namespace
 {
-std::optional<TextureSamplerValue::SamplerOrigin>
-ReadSamplerOriginFromJSON(const picojson::object& json)
-{
-  auto sampler_origin = ReadStringFromJson(json, "sampler_origin").value_or("");
-  Common::ToLower(&sampler_origin);
-
-  if (sampler_origin == "asset")
-  {
-    return TextureSamplerValue::SamplerOrigin::Asset;
-  }
-  else if (sampler_origin == "texture_hash")
-  {
-    return TextureSamplerValue::SamplerOrigin::TextureHash;
-  }
-
-  return std::nullopt;
-}
+constexpr const char* ORIGIN_ASSET = "asset";
+constexpr const char* ORIGIN_TEXTURE_HASH = "texture_hash";
 }  // namespace
+
 std::string TextureSamplerValue::ToString(SamplerOrigin sampler_origin)
 {
-  if (sampler_origin == SamplerOrigin::Asset)
-    return "asset";
-
-  return "texture_hash";
+  return sampler_origin == SamplerOrigin::Asset ? ORIGIN_ASSET : ORIGIN_TEXTURE_HASH;
 }
 
 bool TextureSamplerValue::FromJson(const picojson::object& json, TextureSamplerValue* data)
 {
   data->asset = ReadStringFromJson(json, "asset").value_or("");
   data->texture_hash = ReadStringFromJson(json, "texture_hash").value_or("");
-  data->sampler_origin =
-      ReadSamplerOriginFromJSON(json).value_or(TextureSamplerValue::SamplerOrigin::Asset);
 
+  // The origin name is case-insensitive; anything unrecognised means "asset".
+  std::string origin = ReadStringFromJson(json, "sampler_origin").value_or("");
+  Common::ToLower(&origin);
+  data->sampler_origin =
+      origin == ORIGIN_TEXTURE_HASH ? SamplerOrigin::TextureHash : SamplerOrigin::Asset;
   return true;
 }
 
 void TextureSamplerValue::ToJson(picojson::object* obj, const TextureSamplerValue& data)
 {
-  if (!obj) [[unlikely]]
+  if (obj == nullptr) [[unlikely]]
     return;
 
   obj->emplace("asset", data.asset);

@@ -1,491 +1,363 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Assets/CustomTextureData.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <functional>
+#include <optional>
+#include <utility>
 
-#include "Common/Align.h"
 #include "Common/IOFile.h"
 #include "Common/Image.h"
 #include "Common/Logging/Log.h"
 #include "VideoCommon/VideoConfig.h"
 
+// DDS reader, written from Microsoft's public description of the DDS file format
+// ("DDS" / "DDS_HEADER" / "DDS_PIXELFORMAT" / "DDS_HEADER_DXT10" reference pages).
+//
+// A file is the magic "DDS ", a 124-byte header, an optional 20-byte DX10 header (when the
+// four-character code is "DX10"), then each array slice's mip chain, largest level first.
+// Only block-compressed formats the backend can sample directly and a handful of 8-bit-per-
+// channel RGB(A) layouts are accepted; anything else is left to the generic image loader.
+
 namespace
 {
-// From https://raw.githubusercontent.com/Microsoft/DirectXTex/master/DirectXTex/DDS.h
-//
-// This header defines constants and structures that are useful when parsing
-// DDS files.  DDS files were originally designed to use several structures
-// and constants that are native to DirectDraw and are defined in ddraw.h,
-// such as DDSURFACEDESC2 and DDSCAPS2.  This file defines similar
-// (compatible) constants and structures so that one can use DDS files
-// without needing to include ddraw.h.
-//
-// THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
-// ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-// THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A
-// PARTICULAR PURPOSE.
-//
-// Copyright (c) Microsoft Corporation. All rights reserved.
-//
-// http://go.microsoft.com/fwlink/?LinkId=248926
+using Level = VideoCommon::CustomTextureData::ArraySlice::Level;
 
-#pragma pack(push, 1)
-
-const uint32_t DDS_MAGIC = 0x20534444;  // "DDS "
-
-struct DDS_PIXELFORMAT
+constexpr u32 FourCC(char a, char b, char c, char d)
 {
-  uint32_t dwSize;
-  uint32_t dwFlags;
-  uint32_t dwFourCC;
-  uint32_t dwRGBBitCount;
-  uint32_t dwRBitMask;
-  uint32_t dwGBitMask;
-  uint32_t dwBBitMask;
-  uint32_t dwABitMask;
-};
-
-#define DDS_FOURCC 0x00000004      // DDPF_FOURCC
-#define DDS_RGB 0x00000040         // DDPF_RGB
-#define DDS_RGBA 0x00000041        // DDPF_RGB | DDPF_ALPHAPIXELS
-#define DDS_LUMINANCE 0x00020000   // DDPF_LUMINANCE
-#define DDS_LUMINANCEA 0x00020001  // DDPF_LUMINANCE | DDPF_ALPHAPIXELS
-#define DDS_ALPHA 0x00000002       // DDPF_ALPHA
-#define DDS_PAL8 0x00000020        // DDPF_PALETTEINDEXED8
-#define DDS_PAL8A 0x00000021       // DDPF_PALETTEINDEXED8 | DDPF_ALPHAPIXELS
-#define DDS_BUMPDUDV 0x00080000    // DDPF_BUMPDUDV
-
-#define DDS_CUBEMAP_POSITIVEX 0x00000600  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_POSITIVEX
-#define DDS_CUBEMAP_NEGATIVEX 0x00000a00  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_NEGATIVEX
-#define DDS_CUBEMAP_POSITIVEY 0x00001200  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_POSITIVEY
-#define DDS_CUBEMAP_NEGATIVEY 0x00002200  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_NEGATIVEY
-#define DDS_CUBEMAP_POSITIVEZ 0x00004200  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_POSITIVEZ
-#define DDS_CUBEMAP_NEGATIVEZ 0x00008200  // DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_NEGATIVEZ
-
-#define DDS_CUBEMAP_ALLFACES                                                                       \
-  (DDS_CUBEMAP_POSITIVEX | DDS_CUBEMAP_NEGATIVEX | DDS_CUBEMAP_POSITIVEY | DDS_CUBEMAP_NEGATIVEY | \
-   DDS_CUBEMAP_POSITIVEZ | DDS_CUBEMAP_NEGATIVEZ)
-
-#define DDS_CUBEMAP 0x00000200  // DDSCAPS2_CUBEMAP
-
-#ifndef MAKEFOURCC
-#define MAKEFOURCC(ch0, ch1, ch2, ch3)                                                             \
-  ((uint32_t)(uint8_t)(ch0) | ((uint32_t)(uint8_t)(ch1) << 8) | ((uint32_t)(uint8_t)(ch2) << 16) | \
-   ((uint32_t)(uint8_t)(ch3) << 24))
-#endif /* defined(MAKEFOURCC) */
-
-#define DDS_HEADER_FLAGS_TEXTURE                                                                   \
-  0x00001007  // DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT
-#define DDS_HEADER_FLAGS_MIPMAP 0x00020000      // DDSD_MIPMAPCOUNT
-#define DDS_HEADER_FLAGS_VOLUME 0x00800000      // DDSD_DEPTH
-#define DDS_HEADER_FLAGS_PITCH 0x00000008       // DDSD_PITCH
-#define DDS_HEADER_FLAGS_LINEARSIZE 0x00080000  // DDSD_LINEARSIZE
-
-// Subset here matches D3D10_RESOURCE_DIMENSION and D3D11_RESOURCE_DIMENSION
-enum DDS_RESOURCE_DIMENSION
-{
-  DDS_DIMENSION_TEXTURE1D = 2,
-  DDS_DIMENSION_TEXTURE2D = 3,
-  DDS_DIMENSION_TEXTURE3D = 4,
-};
-
-struct DDS_HEADER
-{
-  uint32_t dwSize;
-  uint32_t dwFlags;
-  uint32_t dwHeight;
-  uint32_t dwWidth;
-  uint32_t dwPitchOrLinearSize;
-  uint32_t dwDepth;  // only if DDS_HEADER_FLAGS_VOLUME is set in dwFlags
-  uint32_t dwMipMapCount;
-  uint32_t dwReserved1[11];
-  DDS_PIXELFORMAT ddspf;
-  uint32_t dwCaps;
-  uint32_t dwCaps2;
-  uint32_t dwCaps3;
-  uint32_t dwCaps4;
-  uint32_t dwReserved2;
-};
-
-struct DDS_HEADER_DXT10
-{
-  uint32_t dxgiFormat;
-  uint32_t resourceDimension;
-  uint32_t miscFlag;  // see DDS_RESOURCE_MISC_FLAG
-  uint32_t arraySize;
-  uint32_t miscFlags2;  // see DDS_MISC_FLAGS2
-};
-
-#pragma pack(pop)
-
-static_assert(sizeof(DDS_HEADER) == 124, "DDS Header size mismatch");
-static_assert(sizeof(DDS_HEADER_DXT10) == 20, "DDS DX10 Extended Header size mismatch");
-
-constexpr DDS_PIXELFORMAT DDSPF_A8R8G8B8 = {
-    sizeof(DDS_PIXELFORMAT), DDS_RGBA, 0, 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000};
-constexpr DDS_PIXELFORMAT DDSPF_X8R8G8B8 = {
-    sizeof(DDS_PIXELFORMAT), DDS_RGB, 0, 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0x00000000};
-constexpr DDS_PIXELFORMAT DDSPF_A8B8G8R8 = {
-    sizeof(DDS_PIXELFORMAT), DDS_RGBA, 0, 32, 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000};
-constexpr DDS_PIXELFORMAT DDSPF_X8B8G8R8 = {
-    sizeof(DDS_PIXELFORMAT), DDS_RGB, 0, 32, 0x000000ff, 0x0000ff00, 0x00ff0000, 0x00000000};
-constexpr DDS_PIXELFORMAT DDSPF_R8G8B8 = {
-    sizeof(DDS_PIXELFORMAT), DDS_RGB, 0, 24, 0x00ff0000, 0x0000ff00, 0x000000ff, 0x00000000};
-
-// End of Microsoft code from DDS.h.
-
-static constexpr bool DDSPixelFormatMatches(const DDS_PIXELFORMAT& pf1, const DDS_PIXELFORMAT& pf2)
-{
-  return std::tie(pf1.dwSize, pf1.dwFlags, pf1.dwFourCC, pf1.dwRGBBitCount, pf1.dwRBitMask,
-                  pf1.dwGBitMask, pf1.dwGBitMask, pf1.dwBBitMask, pf1.dwABitMask) ==
-         std::tie(pf2.dwSize, pf2.dwFlags, pf2.dwFourCC, pf2.dwRGBBitCount, pf2.dwRBitMask,
-                  pf2.dwGBitMask, pf2.dwGBitMask, pf2.dwBBitMask, pf2.dwABitMask);
+  return u32(u8(a)) | (u32(u8(b)) << 8) | (u32(u8(c)) << 16) | (u32(u8(d)) << 24);
 }
 
-struct DDSLoadInfo
+constexpr u32 MAGIC = FourCC('D', 'D', 'S', ' ');
+
+// Word indices into the 124-byte header (31 little-endian u32s).
+enum HeaderWord : std::size_t
 {
-  u32 block_size = 1;
-  u32 bytes_per_block = 4;
+  H_SIZE = 0,
+  H_FLAGS = 1,
+  H_HEIGHT = 2,
+  H_WIDTH = 3,
+  H_PITCH_OR_LINEAR_SIZE = 4,
+  H_MIP_COUNT = 6,
+  H_PIXEL_FORMAT = 18,  // eight words: size, flags, fourcc, bit count, R, G, B, A masks
+  H_CAPS2 = 27,
+  H_WORDS = 31,
+};
+constexpr std::size_t PF_FLAGS = 1;
+constexpr std::size_t PF_FOURCC = 2;
+constexpr std::size_t PF_BIT_COUNT = 3;
+
+// Words of the DX10 extension header.
+constexpr std::size_t X_DXGI_FORMAT = 0;
+constexpr std::size_t X_ARRAY_SIZE = 3;
+constexpr std::size_t X_WORDS = 5;
+
+// Header flags (DDSD_*).
+constexpr u32 HF_REQUIRED = 0x1 | 0x2 | 0x4 | 0x1000;  // caps, height, width, pixel format
+constexpr u32 HF_PITCH = 0x8;
+constexpr u32 HF_MIPMAPCOUNT = 0x20000;
+constexpr u32 HF_LINEARSIZE = 0x80000;
+constexpr u32 HF_DEPTH = 0x800000;
+
+// Pixel format flags (DDPF_*).
+constexpr u32 PFF_ALPHAPIXELS = 0x1;
+constexpr u32 PFF_FOURCC = 0x4;
+constexpr u32 PFF_RGB = 0x40;
+
+// caps2 (DDSCAPS2_*): the cube map bit plus the six face bits.
+constexpr u32 CAPS2_CUBEMAP = 0x200;
+constexpr u32 CAPS2_ALL_FACES = CAPS2_CUBEMAP | 0xFC00;
+
+// What has to happen to an uncompressed level to make it RGBA8.
+enum class Fixup
+{
+  None,          // stored R, G, B, A
+  SwapRB,        // stored B, G, R, A
+  SwapRBOpaque,  // stored B, G, R, unused
+  Opaque,        // stored R, G, B, unused
+  ExpandBGR,     // stored B, G, R (three bytes per texel)
+};
+
+struct UncompressedLayout
+{
+  u32 flags;
+  u32 bit_count;
+  std::array<u32, 4> masks;  // R, G, B, A
+  Fixup fixup;
+};
+
+constexpr std::array<UncompressedLayout, 5> UNCOMPRESSED_LAYOUTS{{
+    {PFF_RGB | PFF_ALPHAPIXELS,
+     32,
+     {0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000},
+     Fixup::SwapRB},
+    {PFF_RGB, 32, {0x00ff0000, 0x0000ff00, 0x000000ff, 0}, Fixup::SwapRBOpaque},
+    {PFF_RGB, 32, {0x000000ff, 0x0000ff00, 0x00ff0000, 0}, Fixup::Opaque},
+    {PFF_RGB, 24, {0x00ff0000, 0x0000ff00, 0x000000ff, 0}, Fixup::ExpandBGR},
+    {PFF_RGB | PFF_ALPHAPIXELS, 32, {0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000}, Fixup::None},
+}};
+
+struct CompressedLayout
+{
+  u32 fourcc;       // legacy four-character code, or 0 when only a DXGI format names it
+  u32 dxgi_format;  // DXGI_FORMAT value used in a DX10 header
+  AbstractTextureFormat format;
+  u32 bytes_per_block;
+  bool is_s3tc;
+};
+
+constexpr std::array<CompressedLayout, 4> COMPRESSED_LAYOUTS{{
+    {FourCC('D', 'X', 'T', '1'), 71, AbstractTextureFormat::DXT1, 8, true},
+    {FourCC('D', 'X', 'T', '3'), 74, AbstractTextureFormat::DXT3, 16, true},
+    {FourCC('D', 'X', 'T', '5'), 77, AbstractTextureFormat::DXT5, 16, true},
+    {0, 98, AbstractTextureFormat::BPTC, 16, false},
+}};
+
+// Everything needed to read the image data that follows the headers.
+struct DdsLayout
+{
   u32 width = 0;
   u32 height = 0;
   u32 mip_count = 0;
-  u32 array_size = 0;
+  u32 slice_count = 0;
   AbstractTextureFormat format = AbstractTextureFormat::RGBA8;
-  size_t first_mip_offset = 0;
-  size_t first_mip_size = 0;
-  u32 first_mip_row_length = 0;
+  u32 block_extent = 1;     // texels along each side of one block (1 = uncompressed)
+  u32 bytes_per_block = 4;  // bytes per block (per texel when uncompressed)
+  Fixup fixup = Fixup::None;
 
-  std::function<void(VideoCommon::CustomTextureData::ArraySlice::Level*)> conversion_function;
+  std::size_t data_offset = 0;
+  u32 top_row_length = 0;
+  std::size_t top_size = 0;
 };
 
-static constexpr u32 GetBlockCount(u32 extent, u32 block_size)
+u32 BlocksAcross(u32 texels, u32 block_extent)
 {
-  return std::max(Common::AlignUp(extent, block_size) / block_size, 1u);
+  return std::max((texels + block_extent - 1) / block_extent, 1u);
 }
 
-static u32 CalculateMipCount(u32 width, u32 height)
+u32 FullMipChainLength(u32 width, u32 height)
 {
-  u32 mip_width = width;
-  u32 mip_height = height;
-  u32 mip_count = 1;
-  while (mip_width > 1 || mip_height > 1)
-  {
-    mip_width = std::max(mip_width / 2, 1u);
-    mip_height = std::max(mip_height / 2, 1u);
-    mip_count++;
-  }
-
-  return mip_count;
+  u32 levels = 1;
+  for (u32 longest = std::max(width, height); longest > 1; longest /= 2)
+    ++levels;
+  return levels;
 }
 
-static void ConvertTexture_X8B8G8R8(VideoCommon::CustomTextureData::ArraySlice::Level* level)
+// 6 for a complete cube map, 1 for a plain texture, nothing for a partial cube map.
+std::optional<u32> SliceCountFromCaps(u32 caps2)
 {
-  u8* data_ptr = level->data.data();
-  for (u32 row = 0; row < level->height; row++)
-  {
-    for (u32 x = 0; x < level->row_length; x++)
-    {
-      // Set alpha channel to full intensity.
-      data_ptr[3] = 0xFF;
-      data_ptr += sizeof(u32);
-    }
-  }
+  if ((caps2 & CAPS2_CUBEMAP) == 0)
+    return 1;
+  if ((caps2 & CAPS2_ALL_FACES) != CAPS2_ALL_FACES)
+    return std::nullopt;
+  return 6;
 }
 
-static void ConvertTexture_A8R8G8B8(VideoCommon::CustomTextureData::ArraySlice::Level* level)
+// Fills in format details for a pixel format that uses a four-character code.
+bool ReadCompressedFormat(File::IOFile& file, const std::array<u32, H_WORDS>& header,
+                          DdsLayout& layout, std::size_t& headers_size)
 {
-  u8* data_ptr = level->data.data();
-  for (u32 row = 0; row < level->height; row++)
+  const u32 fourcc = header[H_PIXEL_FORMAT + PF_FOURCC];
+  u32 dxgi_format = 0;
+
+  if (fourcc == FourCC('D', 'X', '1', '0'))
   {
-    for (u32 x = 0; x < level->row_length; x++)
-    {
-      // Byte swap ABGR -> RGBA
-      u32 val;
-      std::memcpy(&val, data_ptr, sizeof(val));
-      val = ((val & 0xFF00FF00) | ((val >> 16) & 0xFF) | ((val << 16) & 0xFF0000));
-      std::memcpy(data_ptr, &val, sizeof(u32));
-      data_ptr += sizeof(u32);
-    }
-  }
-}
-
-static void ConvertTexture_X8R8G8B8(VideoCommon::CustomTextureData::ArraySlice::Level* level)
-{
-  u8* data_ptr = level->data.data();
-  for (u32 row = 0; row < level->height; row++)
-  {
-    for (u32 x = 0; x < level->row_length; x++)
-    {
-      // Byte swap XBGR -> RGBX, and set alpha to full intensity.
-      u32 val;
-      std::memcpy(&val, data_ptr, sizeof(val));
-      val = ((val & 0x0000FF00) | ((val >> 16) & 0xFF) | ((val << 16) & 0xFF0000)) | 0xFF000000;
-      std::memcpy(data_ptr, &val, sizeof(u32));
-      data_ptr += sizeof(u32);
-    }
-  }
-}
-
-static void ConvertTexture_R8G8B8(VideoCommon::CustomTextureData::ArraySlice::Level* level)
-{
-  Common::UniqueBuffer<u8> new_data(level->row_length * level->height * sizeof(u32));
-
-  const u8* rgb_data_ptr = level->data.data();
-  u8* data_ptr = new_data.data();
-
-  for (u32 row = 0; row < level->height; row++)
-  {
-    for (u32 x = 0; x < level->row_length; x++)
-    {
-      // This is BGR in memory.
-      u32 val;
-      std::memcpy(&val, rgb_data_ptr, sizeof(val));
-      val = ((val & 0x0000FF00) | ((val >> 16) & 0xFF) | ((val << 16) & 0xFF0000)) | 0xFF000000;
-      std::memcpy(data_ptr, &val, sizeof(u32));
-      data_ptr += sizeof(u32);
-      rgb_data_ptr += 3;
-    }
-  }
-
-  level->data = std::move(new_data);
-}
-
-static bool ParseDDSHeader(File::IOFile& file, DDSLoadInfo* info)
-{
-  // Exit as early as possible for non-DDS textures, since all extensions are currently
-  // passed through this function.
-  u32 magic;
-  if (!file.ReadBytes(&magic, sizeof(magic)) || magic != DDS_MAGIC)
-    return false;
-
-  DDS_HEADER header;
-  size_t header_size = sizeof(header);
-  if (!file.ReadBytes(&header, header_size) || header.dwSize < header_size)
-    return false;
-
-  // Required fields.
-  if ((header.dwFlags & DDS_HEADER_FLAGS_TEXTURE) != DDS_HEADER_FLAGS_TEXTURE)
-    return false;
-
-  // Image should be 2D.
-  if (header.dwFlags & DDS_HEADER_FLAGS_VOLUME)
-    return false;
-
-  // Presence of width/height fields is already tested by DDS_HEADER_FLAGS_TEXTURE.
-  info->width = header.dwWidth;
-  info->height = header.dwHeight;
-  if (info->width == 0 || info->height == 0)
-    return false;
-
-  // Check for mip levels.
-  if (header.dwFlags & DDS_HEADER_FLAGS_MIPMAP)
-  {
-    info->mip_count = header.dwMipMapCount;
-    if (header.dwMipMapCount != 0)
-      info->mip_count = header.dwMipMapCount;
-    else
-      info->mip_count = CalculateMipCount(info->width, info->height);
+    std::array<u32, X_WORDS> extension;
+    if (!file.ReadBytes(extension.data(), sizeof(extension)))
+      return false;
+    headers_size += sizeof(extension);
+    dxgi_format = extension[X_DXGI_FORMAT];
+    layout.slice_count = extension[X_ARRAY_SIZE];
   }
   else
   {
-    info->mip_count = 1;
-  }
-
-  // Handle fourcc formats vs uncompressed formats.
-  bool has_fourcc = (header.ddspf.dwFlags & DDS_FOURCC) != 0;
-  bool needs_s3tc = false;
-  if (has_fourcc)
-  {
-    // Handle DX10 extension header.
-    u32 dxt10_format = 0;
-    if (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', '1', '0'))
-    {
-      DDS_HEADER_DXT10 dxt10_header;
-      if (!file.ReadBytes(&dxt10_header, sizeof(dxt10_header)))
-        return false;
-
-      info->array_size = dxt10_header.arraySize;
-      header_size += sizeof(dxt10_header);
-      dxt10_format = dxt10_header.dxgiFormat;
-    }
-    else
-    {
-      if (header.dwCaps2 & DDS_CUBEMAP)
-      {
-        if ((header.dwCaps2 & DDS_CUBEMAP_ALLFACES) != DDS_CUBEMAP_ALLFACES)
-        {
-          return false;
-        }
-
-        info->array_size = 6;
-      }
-      else
-      {
-        info->array_size = 1;
-      }
-    }
-
-    // Currently, we only handle compressed textures here, and leave the rest to the SOIL loader.
-    // In the future, this could be extended, but these isn't much benefit in doing so currently.
-    if (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', 'T', '1') || dxt10_format == 71)
-    {
-      info->format = AbstractTextureFormat::DXT1;
-      info->block_size = 4;
-      info->bytes_per_block = 8;
-      needs_s3tc = true;
-    }
-    else if (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', 'T', '3') || dxt10_format == 74)
-    {
-      info->format = AbstractTextureFormat::DXT3;
-      info->block_size = 4;
-      info->bytes_per_block = 16;
-      needs_s3tc = true;
-    }
-    else if (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', 'T', '5') || dxt10_format == 77)
-    {
-      info->format = AbstractTextureFormat::DXT5;
-      info->block_size = 4;
-      info->bytes_per_block = 16;
-      needs_s3tc = true;
-    }
-    else if (dxt10_format == 98)
-    {
-      info->format = AbstractTextureFormat::BPTC;
-      info->block_size = 4;
-      info->bytes_per_block = 16;
-      if (!g_backend_info.bSupportsBPTCTextures)
-        return false;
-    }
-    else
-    {
-      // Leave all remaining formats to SOIL.
+    const std::optional<u32> slices = SliceCountFromCaps(header[H_CAPS2]);
+    if (!slices)
       return false;
-    }
-  }
-  else
-  {
-    if (DDSPixelFormatMatches(header.ddspf, DDSPF_A8R8G8B8))
-    {
-      info->conversion_function = ConvertTexture_A8R8G8B8;
-    }
-    else if (DDSPixelFormatMatches(header.ddspf, DDSPF_X8R8G8B8))
-    {
-      info->conversion_function = ConvertTexture_X8R8G8B8;
-    }
-    else if (DDSPixelFormatMatches(header.ddspf, DDSPF_X8B8G8R8))
-    {
-      info->conversion_function = ConvertTexture_X8B8G8R8;
-    }
-    else if (DDSPixelFormatMatches(header.ddspf, DDSPF_R8G8B8))
-    {
-      info->conversion_function = ConvertTexture_R8G8B8;
-    }
-    else if (DDSPixelFormatMatches(header.ddspf, DDSPF_A8B8G8R8))
-    {
-      // This format is already in RGBA order, so no conversion necessary.
-    }
-    else
-    {
-      return false;
-    }
-
-    if (header.dwCaps2 & DDS_CUBEMAP)
-    {
-      if ((header.dwCaps2 & DDS_CUBEMAP_ALLFACES) != DDS_CUBEMAP_ALLFACES)
-      {
-        return false;
-      }
-
-      info->array_size = 6;
-    }
-    else
-    {
-      info->array_size = 1;
-    }
-
-    // All these formats are RGBA, just with byte swapping.
-    info->format = AbstractTextureFormat::RGBA8;
-    info->block_size = 1;
-    info->bytes_per_block = header.ddspf.dwRGBBitCount / 8;
+    layout.slice_count = *slices;
   }
 
-  // We also need to ensure the backend supports these formats natively before loading them,
-  // otherwise, fallback to SOIL, which will decompress them to RGBA.
-  if (needs_s3tc && !g_backend_info.bSupportsST3CTextures)
+  const auto match = std::ranges::find_if(COMPRESSED_LAYOUTS, [&](const CompressedLayout& c) {
+    return (c.fourcc != 0 && c.fourcc == fourcc) || c.dxgi_format == dxgi_format;
+  });
+  // Other codes are left to the generic loader.
+  if (match == COMPRESSED_LAYOUTS.end())
     return false;
 
-  // Mip levels smaller than the block size are padded to multiples of the block size.
-  u32 blocks_wide = GetBlockCount(info->width, info->block_size);
-  u32 blocks_high = GetBlockCount(info->height, info->block_size);
+  layout.format = match->format;
+  layout.block_extent = 4;
+  layout.bytes_per_block = match->bytes_per_block;
 
-  // Pitch can be specified in the header, otherwise we can derive it from the dimensions. For
-  // compressed formats, both DDS_HEADER_FLAGS_LINEARSIZE and DDS_HEADER_FLAGS_PITCH should be
-  // set. See https://msdn.microsoft.com/en-us/library/windows/desktop/bb943982(v=vs.85).aspx
-  if (header.dwFlags & DDS_HEADER_FLAGS_PITCH && header.dwFlags & DDS_HEADER_FLAGS_LINEARSIZE)
-  {
-    // Convert pitch (in bytes) to texels/row length.
-    if (header.dwPitchOrLinearSize < info->bytes_per_block)
-    {
-      // Likely a corrupted or invalid file.
-      return false;
-    }
-
-    info->first_mip_row_length =
-        std::max(header.dwPitchOrLinearSize / info->bytes_per_block, 1u) * info->block_size;
-    info->first_mip_size = static_cast<size_t>(info->first_mip_row_length / info->block_size) *
-                           info->block_size * blocks_high;
-  }
-  else
-  {
-    // Assume no padding between rows of blocks.
-    info->first_mip_row_length = blocks_wide * info->block_size;
-    info->first_mip_size = blocks_wide * static_cast<size_t>(info->bytes_per_block) * blocks_high;
-  }
-
-  // Check for truncated or corrupted files.
-  info->first_mip_offset = sizeof(magic) + header_size;
-  if (info->first_mip_offset >= file.GetSize())
+  // Only formats the backend samples natively are kept compressed; the generic loader
+  // decompresses the rest.
+  if (match->format == AbstractTextureFormat::BPTC && !g_backend_info.bSupportsBPTCTextures)
     return false;
-
+  if (match->is_s3tc && !g_backend_info.bSupportsST3CTextures)
+    return false;
   return true;
 }
 
-static bool ReadMipLevel(VideoCommon::CustomTextureData::ArraySlice::Level* level,
-                         File::IOFile& file, const std::string& filename, u32 mip_level,
-                         const DDSLoadInfo& info, u32 width, u32 height, u32 row_length,
-                         size_t size)
+// Fills in format details for an uncompressed RGB(A) pixel format.
+bool ReadUncompressedFormat(const std::array<u32, H_WORDS>& header, DdsLayout& layout)
 {
-  // D3D11 cannot handle block compressed textures where the first mip level is
-  // not a multiple of the block size.
-  if (mip_level == 0 && info.block_size > 1 &&
-      ((width % info.block_size) != 0 || (height % info.block_size) != 0))
+  const u32* pf = &header[H_PIXEL_FORMAT];
+  const auto match = std::ranges::find_if(UNCOMPRESSED_LAYOUTS, [&](const UncompressedLayout& u) {
+    return pf[0] == 32 && pf[PF_FLAGS] == u.flags && pf[PF_FOURCC] == 0 &&
+           pf[PF_BIT_COUNT] == u.bit_count && pf[4] == u.masks[0] && pf[5] == u.masks[1] &&
+           pf[6] == u.masks[2] && pf[7] == u.masks[3];
+  });
+  if (match == UNCOMPRESSED_LAYOUTS.end())
+    return false;
+
+  const std::optional<u32> slices = SliceCountFromCaps(header[H_CAPS2]);
+  if (!slices)
+    return false;
+
+  layout.fixup = match->fixup;
+  layout.slice_count = *slices;
+  layout.format = AbstractTextureFormat::RGBA8;
+  layout.block_extent = 1;
+  layout.bytes_per_block = pf[PF_BIT_COUNT] / 8;
+  return true;
+}
+
+// Reads the headers. Returns false for anything that is not a DDS file this loader handles.
+bool ReadDdsLayout(File::IOFile& file, DdsLayout& layout)
+{
+  // Cheap rejection first: every custom texture file is offered to this reader.
+  u32 magic = 0;
+  if (!file.ReadBytes(&magic, sizeof(magic)) || magic != MAGIC)
+    return false;
+
+  std::array<u32, H_WORDS> header;
+  std::size_t headers_size = sizeof(header);
+  if (!file.ReadBytes(header.data(), sizeof(header)) || header[H_SIZE] < sizeof(header))
+    return false;
+
+  const u32 flags = header[H_FLAGS];
+  if ((flags & HF_REQUIRED) != HF_REQUIRED)
+    return false;
+  // Volume textures are not supported.
+  if ((flags & HF_DEPTH) != 0)
+    return false;
+
+  layout.width = header[H_WIDTH];
+  layout.height = header[H_HEIGHT];
+  if (layout.width == 0 || layout.height == 0)
+    return false;
+
+  if ((flags & HF_MIPMAPCOUNT) == 0)
+    layout.mip_count = 1;
+  else if (header[H_MIP_COUNT] == 0)
+    layout.mip_count = FullMipChainLength(layout.width, layout.height);
+  else
+    layout.mip_count = header[H_MIP_COUNT];
+
+  const bool compressed = (header[H_PIXEL_FORMAT + PF_FLAGS] & PFF_FOURCC) != 0;
+  const bool known = compressed ? ReadCompressedFormat(file, header, layout, headers_size) :
+                                  ReadUncompressedFormat(header, layout);
+  if (!known)
+    return false;
+
+  const u32 blocks_x = BlocksAcross(layout.width, layout.block_extent);
+  const u32 blocks_y = BlocksAcross(layout.height, layout.block_extent);
+
+  if ((flags & HF_PITCH) != 0 && (flags & HF_LINEARSIZE) != 0)
+  {
+    // The writer gave an explicit row pitch in bytes.
+    const u32 pitch = header[H_PITCH_OR_LINEAR_SIZE];
+    if (pitch < layout.bytes_per_block)
+      return false;
+    const u32 blocks_per_row = std::max(pitch / layout.bytes_per_block, 1u);
+    layout.top_row_length = blocks_per_row * layout.block_extent;
+    layout.top_size =
+        std::size_t{layout.top_row_length / layout.block_extent} * layout.block_extent * blocks_y;
+  }
+  else
+  {
+    // Rows of blocks are packed without padding.
+    layout.top_row_length = blocks_x * layout.block_extent;
+    layout.top_size = std::size_t{blocks_x} * layout.bytes_per_block * blocks_y;
+  }
+
+  layout.data_offset = sizeof(magic) + headers_size;
+  // A file that ends right after its headers has no image.
+  return layout.data_offset < file.GetSize();
+}
+
+// In-place fixups for four-byte texels. Texels past the end of the buffer are ignored.
+void FixFourByteTexels(Level& level, Fixup fixup)
+{
+  const std::size_t texels =
+      std::min(std::size_t{level.row_length} * level.height, level.data.size() / 4);
+  u8* p = level.data.data();
+  for (std::size_t i = 0; i < texels; ++i, p += 4)
+  {
+    if (fixup != Fixup::Opaque)
+      std::swap(p[0], p[2]);
+    if (fixup != Fixup::SwapRB)
+      p[3] = 0xFF;
+  }
+}
+
+// Widens three-byte B, G, R texels into a new R, G, B, A buffer. Source bytes past the end of
+// the buffer read as zero.
+void ExpandBGRTexels(Level& level)
+{
+  const std::size_t texels = std::size_t{level.row_length} * level.height;
+  Common::UniqueBuffer<u8> rgba(texels * 4);
+
+  const u8* src = level.data.data();
+  const std::size_t src_size = level.data.size();
+  const auto source_byte = [&](std::size_t at) -> u8 { return at < src_size ? src[at] : 0; };
+
+  u8* out = rgba.data();
+  for (std::size_t i = 0; i < texels; ++i)
+  {
+    const std::size_t at = i * 3;
+    out[i * 4 + 0] = source_byte(at + 2);
+    out[i * 4 + 1] = source_byte(at + 1);
+    out[i * 4 + 2] = source_byte(at + 0);
+    out[i * 4 + 3] = 0xFF;
+  }
+  level.data = std::move(rgba);
+}
+
+bool ReadLevel(Level& level, File::IOFile& file, const std::string& filename, u32 mip_level,
+               const DdsLayout& layout, u32 width, u32 height, u32 row_length, std::size_t size)
+{
+  // Backends require the top level of a block-compressed texture to be whole blocks.
+  const u32 extent = layout.block_extent;
+  if (mip_level == 0 && extent > 1 && (width % extent != 0 || height % extent != 0))
   {
     ERROR_LOG_FMT(VIDEO,
                   "Invalid dimensions for DDS texture {}. For compressed textures of this format, "
                   "the width/height of the first mip level must be a multiple of {}.",
-                  filename, info.block_size);
+                  filename, extent);
     return false;
   }
 
-  // Copy to the final storage location.
-  level->width = width;
-  level->height = height;
-  level->format = info.format;
-  level->row_length = row_length;
-  level->data.reset(size);
-  if (!file.ReadBytes(level->data.data(), level->data.size()))
+  level.width = width;
+  level.height = height;
+  level.format = layout.format;
+  level.row_length = row_length;
+  level.data.reset(size);
+  if (!file.ReadBytes(level.data.data(), level.data.size()))
     return false;
 
-  // Apply conversion function for uncompressed textures.
-  if (info.conversion_function)
-    info.conversion_function(level);
-
+  switch (layout.fixup)
+  {
+  case Fixup::None:
+    break;
+  case Fixup::ExpandBGR:
+    ExpandBGRTexels(level);
+    break;
+  default:
+    FixFourByteTexels(level, layout.fixup);
+    break;
+  }
   return true;
 }
 
@@ -500,45 +372,42 @@ bool LoadDDSTexture(CustomTextureData* texture, const std::string& filename)
   if (!file.IsOpen())
     return false;
 
-  DDSLoadInfo info;
-  if (!ParseDDSHeader(file, &info))
+  DdsLayout layout;
+  if (!ReadDdsLayout(file, layout))
+    return false;
+  if (!file.Seek(static_cast<s64>(layout.data_offset), File::SeekOrigin::Begin))
     return false;
 
-  if (!file.Seek(info.first_mip_offset, File::SeekOrigin::Begin))
-    return false;
-
-  for (u32 arr_i = 0; arr_i < info.array_size; arr_i++)
+  for (u32 slice_index = 0; slice_index < layout.slice_count; ++slice_index)
   {
     auto& slice = texture->m_slices.emplace_back();
-    // Read first mip level, as it may have a custom pitch.
-    CustomTextureData::ArraySlice::Level first_level;
-    if (!ReadMipLevel(&first_level, file, filename, 0, info, info.width, info.height,
-                      info.first_mip_row_length, info.first_mip_size))
+
+    // The top level may use the pitch from the header.
+    Level top;
+    if (!ReadLevel(top, file, filename, 0, layout, layout.width, layout.height,
+                   layout.top_row_length, layout.top_size))
     {
       return false;
     }
+    slice.m_levels.push_back(std::move(top));
 
-    slice.m_levels.push_back(std::move(first_level));
-
-    // Read in any remaining mip levels in the file.
-    // If the .dds file does not contain a full mip chain, we'll fall back to the old path.
-    u32 mip_width = info.width;
-    u32 mip_height = info.height;
-    for (u32 i = 1; i < info.mip_count; i++)
+    // Smaller levels are always tightly packed. A truncated chain simply ends early.
+    u32 w = layout.width;
+    u32 h = layout.height;
+    for (u32 mip = 1; mip < layout.mip_count; ++mip)
     {
-      mip_width = std::max(mip_width / 2, 1u);
-      mip_height = std::max(mip_height / 2, 1u);
+      w = std::max(w / 2, 1u);
+      h = std::max(h / 2, 1u);
+      const u32 blocks_x = BlocksAcross(w, layout.block_extent);
+      const u32 blocks_y = BlocksAcross(h, layout.block_extent);
+      const std::size_t bytes = std::size_t{blocks_x} * layout.bytes_per_block * blocks_y;
 
-      // Pitch can't be specified with each mip level, so we have to calculate it ourselves.
-      u32 blocks_wide = GetBlockCount(mip_width, info.block_size);
-      u32 blocks_high = GetBlockCount(mip_height, info.block_size);
-      u32 mip_row_length = blocks_wide * info.block_size;
-      size_t mip_size = blocks_wide * static_cast<size_t>(info.bytes_per_block) * blocks_high;
-      CustomTextureData::ArraySlice::Level level;
-      if (!ReadMipLevel(&level, file, filename, i, info, mip_width, mip_height, mip_row_length,
-                        mip_size))
+      Level level;
+      if (!ReadLevel(level, file, filename, mip, layout, w, h, blocks_x * layout.block_extent,
+                     bytes))
+      {
         break;
-
+      }
       slice.m_levels.push_back(std::move(level));
     }
   }
@@ -549,45 +418,44 @@ bool LoadDDSTexture(CustomTextureData* texture, const std::string& filename)
 bool LoadDDSTexture(CustomTextureData::ArraySlice::Level* level, const std::string& filename,
                     u32 mip_level)
 {
-  // Only loading a single mip level.
   File::IOFile file;
   file.Open(filename, "rb");
   if (!file.IsOpen())
     return false;
 
-  DDSLoadInfo info;
-  if (!ParseDDSHeader(file, &info))
+  DdsLayout layout;
+  if (!ReadDdsLayout(file, layout))
     return false;
 
-  return ReadMipLevel(level, file, filename, mip_level, info, info.width, info.height,
-                      info.first_mip_row_length, info.first_mip_size);
+  // The headers have just been read, so the file is positioned at the top level.
+  return ReadLevel(*level, file, filename, mip_level, layout, layout.width, layout.height,
+                   layout.top_row_length, layout.top_size);
 }
 
 bool LoadPNGTexture(CustomTextureData::ArraySlice::Level* level, const std::string& filename)
 {
-  if (!level) [[unlikely]]
+  if (level == nullptr) [[unlikely]]
     return false;
 
   File::IOFile file;
   file.Open(filename, "rb");
-  Common::UniqueBuffer<u8> buffer(file.GetSize());
-  file.ReadBytes(buffer.data(), file.GetSize());
-
-  return LoadPNGTexture(level, buffer);
+  const u64 size = file.GetSize();
+  Common::UniqueBuffer<u8> contents(static_cast<std::size_t>(size));
+  file.ReadBytes(contents.data(), static_cast<std::size_t>(size));
+  return LoadPNGTexture(level, contents);
 }
 
 bool LoadPNGTexture(CustomTextureData::ArraySlice::Level* level, std::span<const u8> buffer)
 {
-  if (!level) [[unlikely]]
+  if (level == nullptr) [[unlikely]]
     return false;
 
-  if (!Common::LoadPNG(buffer, &level->data, &level->width, &level->height))
+  if (!Common::LoadPNG(buffer, &level->data, &level->width, &level->height) || level->data.empty())
+  {
     return false;
+  }
 
-  if (level->data.empty())
-    return false;
-
-  // Loaded PNG images are converted to RGBA.
+  // The PNG decoder always produces tightly packed RGBA8.
   level->format = AbstractTextureFormat::RGBA8;
   level->row_length = level->width;
   return true;

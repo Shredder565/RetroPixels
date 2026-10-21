@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,16 +10,14 @@
 
 namespace VideoCommon
 {
-// A structure that provides metadata about a texture to a material
+// A texture input of a material: which texture asset to bind and where its sampler state
+// comes from.
 struct TextureSamplerValue
 {
   CustomAssetLibrary::AssetID asset;
 
-  // Where does the sampler originate from
-  // If 'Asset' is used, the sampler is pulled
-  // directly from the asset properties
-  // If 'TextureHash' is chosen, the sampler is pulled
-  // from the game with the corresponding texture hash
+  // Asset: use the sampler stored with the texture asset.
+  // TextureHash: use whatever sampler the game uses for the texture named by texture_hash.
   enum class SamplerOrigin
   {
     Asset,
@@ -30,6 +27,7 @@ struct TextureSamplerValue
   SamplerOrigin sampler_origin = SamplerOrigin::Asset;
   std::string texture_hash;
 
+  // Missing fields fall back to defaults, so this always succeeds.
   static bool FromJson(const picojson::object& json, TextureSamplerValue* data);
   static void ToJson(picojson::object* obj, const TextureSamplerValue& data);
 };

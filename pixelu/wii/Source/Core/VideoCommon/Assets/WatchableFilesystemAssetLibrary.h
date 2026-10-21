@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 namespace VideoCommon
 {
+// An asset library whose backing files are watched, so edits on disk can trigger reloads.
 class WatchableFilesystemAssetLibrary : public CustomAssetLibrary, public Common::FilesystemWatcher
 {
 };

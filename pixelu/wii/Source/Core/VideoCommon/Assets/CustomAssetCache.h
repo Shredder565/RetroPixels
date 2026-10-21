@@ -1,11 +1,12 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <deque>
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -18,22 +19,23 @@
 
 namespace VideoCommon
 {
-// The asset cache manages custom assets (textures, shaders, meshes).
-// These assets are loaded using a priority system,
-// where assets requested more often gets loaded first.  This system
-// also tracks memory usage and if memory usage goes over a calculated limit,
-// then assets will be purged with older assets being targeted first.
+// Owns every custom asset (textures, shaders, materials, meshes) of the session.
+//
+// Assets that are wanted get queued for loading, most recently requested first, and loaded
+// within a RAM budget derived from the machine's physical memory. When the loaded assets grow
+// past the budget, the ones used least recently are unloaded again.
 class CustomAssetCache
 {
 public:
-  // A generic interface to describe an asset
-  // and load state
+  // Bookkeeping for one asset.
   struct AssetData
   {
     std::unique_ptr<CustomAsset> asset;
 
+    // Told about load results and unloads. One entry per CreateAsset call.
     std::vector<AssetListener*> listeners;
 
+    // Set when a reload is requested; a load that started earlier does not satisfy it.
     CustomAsset::TimeType load_request_time = {};
     bool has_load_error = false;
 
@@ -46,35 +48,37 @@ public:
     LoadStatus load_status = LoadStatus::PendingReload;
   };
 
+  // Returns the asset named asset_id, creating it as a T the first time, and registers
+  // `listener` for it.
   template <typename T>
   T* CreateAsset(const CustomAssetLibrary::AssetID& asset_id,
                  std::shared_ptr<VideoCommon::CustomAssetLibrary> library, AssetListener* listener)
   {
-    const auto [it, added] =
-        m_asset_id_to_handle.try_emplace(asset_id, m_asset_handle_to_data.size());
-    if (added)
+    std::size_t handle;
+    if (const auto found = m_handles.find(asset_id); found != m_handles.end())
     {
-      AssetData asset_data;
-      asset_data.asset = std::make_unique<T>(std::move(library), asset_id, it->second);
-      asset_data.load_request_time = {};
-      asset_data.has_load_error = false;
-
-      m_asset_handle_to_data.insert_or_assign(it->second, std::move(asset_data));
+      handle = found->second;
+    }
+    else
+    {
+      // Handles are handed out in creation order, so they double as indices into m_assets.
+      handle = m_assets.size();
+      m_handles.emplace(asset_id, handle);
+      AssetData& fresh = m_assets.emplace_back();
+      fresh.asset = std::make_unique<T>(std::move(library), asset_id, handle);
     }
 
-    auto& asset_data_from_handle = m_asset_handle_to_data[it->second];
-    asset_data_from_handle.listeners.push_back(listener);
-    asset_data_from_handle.load_status = AssetData::LoadStatus::PendingReload;
-
-    return static_cast<T*>(asset_data_from_handle.asset.get());
+    AssetData& data = m_assets[handle];
+    data.listeners.push_back(listener);
+    data.load_status = AssetData::LoadStatus::PendingReload;
+    return static_cast<T*>(data.asset.get());
   }
 
+  // Null when no asset with that id was created.
   AssetData* GetAssetData(const CustomAssetLibrary::AssetID& asset_id)
   {
-    const auto it_handle = m_asset_id_to_handle.find(asset_id);
-    if (it_handle == m_asset_id_to_handle.end())
-      return nullptr;
-    return &m_asset_handle_to_data[it_handle->second];
+    const auto found = m_handles.find(asset_id);
+    return found != m_handles.end() ? &m_assets[found->second] : nullptr;
   }
 
   void Initialize();
@@ -82,118 +86,63 @@ public:
 
   void Reset();
 
-  // Request that an asset be reloaded
+  // Queues a reload of the asset (for example because its file changed). Thread safe.
   void MarkAssetDirty(const CustomAssetLibrary::AssetID& asset_id);
 
-  // Notify the system that we are interested in this asset and
-  // are waiting for it to be loaded
+  // Something is waiting for this asset: load it before other pending assets.
   void MarkAssetPending(CustomAsset* asset);
 
-  // Notify the system we are interested in this asset and
-  // it has seen activity
+  // The asset was just used: keep it loaded longer than other assets.
   void MarkAssetActive(CustomAsset* asset);
 
+  // Applies reload requests and load results, enforces the RAM budget and schedules loads.
   void Update();
 
 private:
-  void ProcessDirtyAssets();
-  void ProcessLoadedAssets();
-  void RemoveAssetsUntilBelowMemoryLimit();
-
-  // Maintains a priority-sorted list of assets.
-  // Used to figure out which assets to load or unload first.
-  // Most recently used assets get marked with highest priority.
-  class AssetPriorityQueue
+  // Assets ordered from most to least recently used, with constant time lookup by handle.
+  class RecencyQueue
   {
   public:
-    const auto& Elements() const { return m_assets; }
+    const std::list<CustomAsset*>& Items() const { return m_order; }
+    bool Empty() const { return m_order.empty(); }
+    std::size_t Count() const { return m_order.size(); }
 
-    // Inserts or moves the asset to the top of the queue.
-    void MakeAssetHighestPriority(u64 asset_handle, CustomAsset* asset)
-    {
-      RemoveAsset(asset_handle);
-      m_assets.push_front(asset);
-
-      // See CreateAsset for how a handle gets defined
-      if (asset_handle >= m_iterator_lookup.size())
-        m_iterator_lookup.resize(asset_handle + 1, m_assets.end());
-
-      m_iterator_lookup[asset_handle] = m_assets.begin();
-    }
-
-    // Inserts an asset at lowest priority or
-    //  does nothing if asset is already in the queue.
-    void InsertAsset(u64 asset_handle, CustomAsset* asset)
-    {
-      if (asset_handle >= m_iterator_lookup.size())
-        m_iterator_lookup.resize(asset_handle + 1, m_assets.end());
-
-      if (m_iterator_lookup[asset_handle] == m_assets.end())
-      {
-        m_assets.push_back(asset);
-        m_iterator_lookup[asset_handle] = std::prev(m_assets.end());
-      }
-    }
-
-    CustomAsset* RemoveLowestPriorityAsset()
-    {
-      if (m_assets.empty()) [[unlikely]]
-        return nullptr;
-      auto* const ret = m_assets.back();
-      if (ret != nullptr)
-      {
-        m_iterator_lookup[ret->GetHandle()] = m_assets.end();
-      }
-      m_assets.pop_back();
-      return ret;
-    }
-
-    void RemoveAsset(u64 asset_handle)
-    {
-      if (asset_handle >= m_iterator_lookup.size())
-        return;
-
-      const auto iter = m_iterator_lookup[asset_handle];
-      if (iter != m_assets.end())
-      {
-        m_assets.erase(iter);
-        m_iterator_lookup[asset_handle] = m_assets.end();
-      }
-    }
-
-    bool IsEmpty() const { return m_assets.empty(); }
-
-    std::size_t Size() const { return m_assets.size(); }
+    // Puts the asset at the front, moving it there if already queued.
+    void Promote(std::size_t handle, CustomAsset* asset);
+    // Puts the asset at the back unless it is already queued.
+    void Append(std::size_t handle, CustomAsset* asset);
+    void Erase(std::size_t handle);
+    // Takes the asset at the back (the least recently used). The queue must not be empty.
+    CustomAsset* PopBack();
 
   private:
-    std::list<CustomAsset*> m_assets;
+    std::list<CustomAsset*>::iterator& Slot(std::size_t handle);
 
-    // Handle-to-iterator lookup for fast access.
-    // Grows as needed on insert.
-    std::vector<decltype(m_assets)::iterator> m_iterator_lookup;
+    std::list<CustomAsset*> m_order;
+    // Indexed by handle; m_order.end() marks "not queued".
+    std::vector<std::list<CustomAsset*>::iterator> m_position;
   };
 
-  // Assets that are currently active in memory, in order of most recently used by the game.
-  AssetPriorityQueue m_active_assets;
+  void TakeDirtyAssets();
+  void TakeLoadResults();
+  void EvictToBudget();
 
-  // Assets that need to be loaded.
-  // e.g. Because the game tried to use them or because they changed on disk.
-  // Ordered by most recently used.
-  AssetPriorityQueue m_pending_assets;
+  // Loaded assets, most recently used first; eviction takes from the back.
+  RecencyQueue m_loaded;
+  // Assets waiting to be loaded, most recently requested first.
+  RecencyQueue m_wanted;
 
-  std::map<std::size_t, AssetData> m_asset_handle_to_data;
-  std::map<CustomAssetLibrary::AssetID, std::size_t> m_asset_id_to_handle;
+  // Indexed by handle. A deque so AssetData references survive growth.
+  std::deque<AssetData> m_assets;
+  std::map<CustomAssetLibrary::AssetID, std::size_t> m_handles;
 
-  // Memory used by currently "loaded" assets.
-  u64 m_ram_used = 0;
-
-  // A calculated amount of memory to avoid exceeding.
-  u64 m_max_ram_available = 0;
+  u64 m_bytes_loaded = 0;
+  u64 m_byte_budget = 0;
 
   std::mutex m_dirty_mutex;
-  std::set<CustomAssetLibrary::AssetID> m_dirty_assets;
+  std::set<CustomAssetLibrary::AssetID> m_dirty;
 
-  CustomAssetLoader m_asset_loader;
+  CustomAssetLoader m_loader;
 };
 
 }  // namespace VideoCommon

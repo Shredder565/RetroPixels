@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@
 
 namespace VideoCommon
 {
+// A texture together with how it is meant to be sampled. The JSON metadata names the texture
+// type and, for 2D textures, optional wrap and filter modes.
 struct TextureAndSamplerData
 {
   static bool FromJson(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& json,
@@ -23,6 +24,7 @@ struct TextureAndSamplerData
   SamplerState sampler;
 };
 
+// Image data only.
 class TextureAsset final : public CustomLoadableAsset<CustomTextureData>
 {
 public:
@@ -32,6 +34,7 @@ private:
   CustomAssetLibrary::LoadInfo LoadImpl(const CustomAssetLibrary::AssetID& asset_id) override;
 };
 
+// Image data plus type and sampler.
 class TextureAndSamplerAsset final : public CustomLoadableAsset<TextureAndSamplerData>
 {
 public:

@@ -1,7 +1,9 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Assets/CustomAssetCache.h"
+
+#include <algorithm>
+#include <utility>
 
 #include "Common/Logging/Log.h"
 #include "Common/MemoryUtil.h"
@@ -12,143 +14,177 @@
 
 namespace VideoCommon
 {
+// ---------------------------------------------------------------------------------------------
+// RecencyQueue
+// ---------------------------------------------------------------------------------------------
+
+std::list<CustomAsset*>::iterator& CustomAssetCache::RecencyQueue::Slot(std::size_t handle)
+{
+  if (handle >= m_position.size())
+    m_position.resize(handle + 1, m_order.end());
+  return m_position[handle];
+}
+
+void CustomAssetCache::RecencyQueue::Promote(std::size_t handle, CustomAsset* asset)
+{
+  auto& slot = Slot(handle);
+  if (slot != m_order.end())
+    m_order.erase(slot);
+  slot = m_order.insert(m_order.begin(), asset);
+}
+
+void CustomAssetCache::RecencyQueue::Append(std::size_t handle, CustomAsset* asset)
+{
+  auto& slot = Slot(handle);
+  if (slot == m_order.end())
+    slot = m_order.insert(m_order.end(), asset);
+}
+
+void CustomAssetCache::RecencyQueue::Erase(std::size_t handle)
+{
+  if (handle >= m_position.size())
+    return;
+  auto& slot = m_position[handle];
+  if (slot == m_order.end())
+    return;
+  m_order.erase(slot);
+  slot = m_order.end();
+}
+
+CustomAsset* CustomAssetCache::RecencyQueue::PopBack()
+{
+  CustomAsset* const asset = m_order.back();
+  m_position[asset->GetHandle()] = m_order.end();
+  m_order.pop_back();
+  return asset;
+}
+
+// ---------------------------------------------------------------------------------------------
+// CustomAssetCache
+// ---------------------------------------------------------------------------------------------
+
 void CustomAssetCache::Initialize()
 {
-  // Use half of available system memory but leave at least 2GiB unused for system stability.
-  constexpr size_t must_keep_unused = 2 * size_t(1024 * 1024 * 1024);
+  // Budget: at most half of physical memory, and never touch the last 2 GiB.
+  constexpr std::size_t reserve_floor = std::size_t{2} << 30;
+  const std::size_t physical = Common::MemPhysical();
+  const std::size_t reserved = std::max(physical / 2, std::min(physical, reserve_floor));
+  m_byte_budget = physical - reserved;
 
-  const size_t sys_mem = Common::MemPhysical();
-  const size_t keep_unused_mem = std::max(sys_mem / 2, std::min(sys_mem, must_keep_unused));
-
-  m_max_ram_available = sys_mem - keep_unused_mem;
-
-  if (m_max_ram_available == 0)
+  if (m_byte_budget == 0)
     ERROR_LOG_FMT(VIDEO, "Not enough system memory for custom resources.");
 
-  m_asset_loader.Initialize();
+  m_loader.Initialize();
 }
 
 void CustomAssetCache::Shutdown()
 {
   Reset();
-
-  m_asset_loader.Shutdown();
+  m_loader.Shutdown();
 }
 
 void CustomAssetCache::Reset()
 {
-  m_asset_loader.Reset(true);
+  m_loader.Reset(true);
 
-  m_active_assets = {};
-  m_pending_assets = {};
-  m_asset_handle_to_data.clear();
-  m_asset_id_to_handle.clear();
-  m_dirty_assets.clear();
-  m_ram_used = 0;
+  m_loaded = {};
+  m_wanted = {};
+  m_assets.clear();
+  m_handles.clear();
+  m_dirty.clear();
+  m_bytes_loaded = 0;
 }
 
 void CustomAssetCache::MarkAssetDirty(const CustomAssetLibrary::AssetID& asset_id)
 {
   std::lock_guard guard(m_dirty_mutex);
-  m_dirty_assets.insert(asset_id);
+  m_dirty.insert(asset_id);
 }
 
 void CustomAssetCache::MarkAssetPending(CustomAsset* asset)
 {
-  m_pending_assets.MakeAssetHighestPriority(asset->GetHandle(), asset);
+  m_wanted.Promote(asset->GetHandle(), asset);
 }
 
 void CustomAssetCache::MarkAssetActive(CustomAsset* asset)
 {
-  m_active_assets.MakeAssetHighestPriority(asset->GetHandle(), asset);
+  m_loaded.Promote(asset->GetHandle(), asset);
 }
 
 void CustomAssetCache::Update()
 {
-  ProcessDirtyAssets();
-  ProcessLoadedAssets();
+  TakeDirtyAssets();
+  TakeLoadResults();
 
-  if (m_ram_used > m_max_ram_available)
-  {
-    RemoveAssetsUntilBelowMemoryLimit();
-  }
+  if (m_bytes_loaded > m_byte_budget)
+    EvictToBudget();
 
-  if (m_pending_assets.IsEmpty())
+  if (m_wanted.Empty() || m_bytes_loaded > m_byte_budget)
     return;
 
-  if (m_ram_used > m_max_ram_available)
-    return;
-
-  const u64 allowed_memory = m_max_ram_available - m_ram_used;
-  m_asset_loader.ScheduleAssetsToLoad(m_pending_assets.Elements(), allowed_memory);
+  m_loader.ScheduleAssetsToLoad(m_wanted.Items(), m_byte_budget - m_bytes_loaded);
 }
 
-void CustomAssetCache::ProcessDirtyAssets()
+void CustomAssetCache::TakeDirtyAssets()
 {
-  decltype(m_dirty_assets) dirty_assets;
-
-  if (const auto lk = std::unique_lock{m_dirty_mutex, std::try_to_lock})
-    std::swap(dirty_assets, m_dirty_assets);
-
-  const auto now = CustomAsset::ClockType::now();
-  for (const auto& asset_id : dirty_assets)
+  // Never stall the video thread on this: if the watcher holds the lock, try next frame.
+  std::set<CustomAssetLibrary::AssetID> dirty;
   {
-    if (const auto it = m_asset_id_to_handle.find(asset_id); it != m_asset_id_to_handle.end())
-    {
-      const auto asset_handle = it->second;
-      AssetData& asset_data = m_asset_handle_to_data[asset_handle];
-      asset_data.load_status = AssetData::LoadStatus::PendingReload;
-      asset_data.load_request_time = now;
-
-      // Asset was reloaded, clear any errors we might have
-      asset_data.has_load_error = false;
-
-      m_pending_assets.InsertAsset(it->second, asset_data.asset.get());
-
-      DEBUG_LOG_FMT(VIDEO, "Dirty asset pending reload: {}", asset_data.asset->GetAssetId());
-    }
+    std::unique_lock lock(m_dirty_mutex, std::try_to_lock);
+    if (lock.owns_lock())
+      dirty.swap(m_dirty);
   }
-}
 
-void CustomAssetCache::ProcessLoadedAssets()
-{
-  const auto load_results = m_asset_loader.TakeLoadResults();
-
-  // Update the ram with the change in memory from the loader
-  //
-  // Note: Assets with outstanding reload requests will have
-  // two copies in memory temporarily (the old data stored in
-  // the asset shared_ptr that the resource manager owns, and
-  // the new data loaded from the loader in the asset's shared_ptr)
-  // This temporary duplication will not be reflected in the
-  // resource manager's ram used
-  m_ram_used += load_results.change_in_memory;
-
-  for (const auto& [handle, load_successful] : load_results.asset_handles)
+  const CustomAsset::TimeType requested = CustomAsset::ClockType::now();
+  for (const CustomAssetLibrary::AssetID& id : dirty)
   {
-    AssetData& asset_data = m_asset_handle_to_data[handle];
-
-    // If we have a reload request that is newer than our loaded time
-    // we need to wait for another reload.
-    if (asset_data.load_request_time > asset_data.asset->GetLastLoadedTime())
+    const auto found = m_handles.find(id);
+    if (found == m_handles.end())
       continue;
 
-    m_pending_assets.RemoveAsset(handle);
+    AssetData& data = m_assets[found->second];
+    data.load_status = AssetData::LoadStatus::PendingReload;
+    data.load_request_time = requested;
+    // A new version on disk deserves a fresh attempt.
+    data.has_load_error = false;
+    m_wanted.Append(found->second, data.asset.get());
 
-    asset_data.load_request_time = {};
-    if (!load_successful)
+    DEBUG_LOG_FMT(VIDEO, "Dirty asset pending reload: {}", data.asset->GetAssetId());
+  }
+}
+
+void CustomAssetCache::TakeLoadResults()
+{
+  const CustomAssetLoader::LoadResults results = m_loader.TakeLoadResults();
+
+  // The loader reports net bytes. While an asset reloads, its old and new data briefly both
+  // exist; only the loader's accounting is tracked here.
+  m_bytes_loaded += static_cast<u64>(results.change_in_memory);
+
+  for (const auto& [handle, succeeded] : results.asset_handles)
+  {
+    AssetData& data = m_assets[handle];
+
+    // A reload was requested after this load began, so the result is already stale.
+    if (data.load_request_time > data.asset->GetLastLoadedTime())
+      continue;
+
+    m_wanted.Erase(handle);
+    data.load_request_time = {};
+
+    if (succeeded)
     {
-      asset_data.has_load_error = true;
+      m_loaded.Append(handle, data.asset.get());
+      data.load_status = AssetData::LoadStatus::LoadFinished;
     }
     else
     {
-      m_active_assets.InsertAsset(handle, asset_data.asset.get());
-      asset_data.load_status = AssetData::LoadStatus::LoadFinished;
+      data.has_load_error = true;
     }
 
-    for (const auto& listener : asset_data.listeners)
+    for (AssetListener* listener : data.listeners)
     {
-      if (load_successful)
+      if (succeeded)
         listener->NotifyAssetLoadSuccess();
       else
         listener->NotifyAssetLoadFailed();
@@ -156,37 +192,28 @@ void CustomAssetCache::ProcessLoadedAssets()
   }
 }
 
-void CustomAssetCache::RemoveAssetsUntilBelowMemoryLimit()
+void CustomAssetCache::EvictToBudget()
 {
-  const u64 threshold_ram = m_max_ram_available * 8 / 10;
+  // Evict down to 80% of the budget so the next few loads do not trigger eviction again.
+  const u64 target = m_byte_budget * 8 / 10;
+  if (m_bytes_loaded > target)
+    INFO_LOG_FMT(VIDEO, "Memory usage over threshold: {}", UICommon::FormatSize(m_bytes_loaded));
 
-  if (m_ram_used > threshold_ram)
+  while (m_bytes_loaded > target && !m_loaded.Empty())
   {
-    INFO_LOG_FMT(VIDEO, "Memory usage over threshold: {}", UICommon::FormatSize(m_ram_used));
-  }
+    CustomAsset* const victim = m_loaded.PopBack();
+    AssetData& data = m_assets[victim->GetHandle()];
 
-  // Clear out least recently used resources until
-  // we get safely in our threshold
-  while (m_ram_used > threshold_ram && m_active_assets.Size() > 0)
-  {
-    auto* const asset = m_active_assets.RemoveLowestPriorityAsset();
-
-    AssetData& asset_data = m_asset_handle_to_data[asset->GetHandle()];
-
-    for (const auto& listener : asset_data.listeners)
-    {
+    for (AssetListener* listener : data.listeners)
       listener->AssetUnloaded();
-    }
 
-    // Remove the asset's copy
-    const std::size_t bytes_unloaded = asset_data.asset->Unload();
-    m_ram_used -= bytes_unloaded;
+    const std::size_t freed = data.asset->Unload();
+    m_bytes_loaded -= freed;
+    data.load_status = AssetData::LoadStatus::Unloaded;
+    data.load_request_time = {};
 
-    asset_data.load_status = AssetData::LoadStatus::Unloaded;
-    asset_data.load_request_time = {};
-
-    INFO_LOG_FMT(VIDEO, "Unloading asset: {} ({})", asset_data.asset->GetAssetId(),
-                 UICommon::FormatSize(bytes_unloaded));
+    INFO_LOG_FMT(VIDEO, "Unloading asset: {} ({})", data.asset->GetAssetId(),
+                 UICommon::FormatSize(freed));
   }
 }
 

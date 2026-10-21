@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,9 +15,8 @@
 
 namespace VideoCommon
 {
-// This class takes any number of assets
-// and loads them across a configurable
-// thread pool
+// Loads assets on a small pool of worker threads. The cache hands it a list of assets in
+// priority order together with a memory budget, then collects the results each frame.
 class CustomAssetLoader
 {
 public:
@@ -32,51 +30,44 @@ public:
   void Initialize();
   void Shutdown();
 
+  // An asset handle and whether its load produced data.
   using AssetHandle = std::pair<std::size_t, bool>;
   struct LoadResults
-
   {
     std::vector<AssetHandle> asset_handles;
+    // Bytes gained minus bytes released since the previous call.
     s64 change_in_memory;
   };
 
-  // Returns a vector of loaded asset handle / loaded result pairs
-  //  and the change in memory.
+  // Hands over everything finished since the previous call.
   LoadResults TakeLoadResults();
 
-  // Schedule assets to load on the worker threads
-  //  and set how much memory is available for loading these additional assets.
+  // Replaces the work queue with `assets_to_load` (highest priority first). Workers stop taking
+  // new items once they have loaded more than `allowed_memory` bytes.
   void ScheduleAssetsToLoad(std::list<CustomAsset*> assets_to_load, u64 allowed_memory);
 
+  // Drops queued work and pending results; the pool is restarted with the same size if asked.
   void Reset(bool restart_worker_threads = true);
 
 private:
-  bool StartWorkerThreads(u32 num_worker_threads);
-  bool ResizeWorkerThreads(u32 num_worker_threads);
-  bool HasWorkerThreads() const;
-  void StopWorkerThreads();
+  void SpawnWorkers(std::size_t count);
+  void JoinWorkers();
+  void WorkerMain(u32 index);
 
-  void WorkerThreadRun(u32 thread_index);
+  std::vector<std::thread> m_workers;
+  Common::Flag m_stopping;
 
-  Common::Flag m_exit_flag;
+  // Work queue, guarded by m_queue_mutex together with m_budget and m_busy.
+  std::mutex m_queue_mutex;
+  std::condition_variable m_queue_cv;
+  std::list<CustomAsset*> m_queue;
+  s64 m_budget = 0;
+  std::set<std::size_t> m_busy;
 
-  std::vector<std::thread> m_worker_threads;
+  // Finished work, guarded by m_results_mutex.
+  std::mutex m_results_mutex;
+  std::vector<AssetHandle> m_finished;
 
-  std::mutex m_assets_to_load_lock;
-  std::list<CustomAsset*> m_assets_to_load;
-
-  std::condition_variable m_worker_thread_wake;
-
-  std::vector<AssetHandle> m_asset_handles_loaded;
-
-  // Memory available to load new assets.
-  s64 m_allowed_memory = 0;
-
-  // Change in memory from just-loaded/unloaded asset results yet to be taken by the Manager.
-  std::atomic<s64> m_change_in_memory = 0;
-
-  std::mutex m_assets_loaded_lock;
-
-  std::set<std::size_t> m_handles_in_progress;
+  std::atomic<s64> m_memory_delta = 0;
 };
 }  // namespace VideoCommon

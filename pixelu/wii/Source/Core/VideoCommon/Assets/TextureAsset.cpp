@@ -1,9 +1,11 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/Assets/TextureAsset.h"
 
-#include <optional>
+#include <array>
+#include <span>
+#include <string_view>
+#include <utility>
 
 #include "Common/JsonUtil.h"
 #include "Common/Logging/Log.h"
@@ -14,277 +16,199 @@ namespace VideoCommon
 {
 namespace
 {
-std::optional<WrapMode> ReadWrapModeFromJSON(const picojson::object& json, const std::string& uv)
+template <typename Mode>
+using ModeName = std::pair<std::string_view, Mode>;
+
+constexpr std::array<ModeName<WrapMode>, 3> WRAP_NAMES{{
+    {"clamp", WrapMode::Clamp},
+    {"repeat", WrapMode::Repeat},
+    {"mirror", WrapMode::Mirror},
+}};
+
+constexpr std::array<ModeName<FilterMode>, 2> FILTER_NAMES{{
+    {"linear", FilterMode::Linear},
+    {"near", FilterMode::Near},
+}};
+
+constexpr std::array<std::pair<std::string_view, AbstractTextureType>, 3> TYPE_NAMES{{
+    {"texture2d", AbstractTextureType::Texture_2D},
+    {"texturecube", AbstractTextureType::Texture_CubeMap},
+    {"texture2darray", AbstractTextureType::Texture_2DArray},
+}};
+
+template <typename Mode>
+std::string_view NameOf(std::span<const ModeName<Mode>> names, Mode mode)
 {
-  auto uv_mode = ReadStringFromJson(json, uv).value_or("");
-  Common::ToLower(&uv_mode);
-
-  if (uv_mode == "clamp")
+  for (const auto& [name, value] : names)
   {
-    return WrapMode::Clamp;
+    if (value == mode)
+      return name;
   }
-  else if (uv_mode == "repeat")
-  {
-    return WrapMode::Repeat;
-  }
-  else if (uv_mode == "mirror")
-  {
-    return WrapMode::Mirror;
-  }
-
-  return std::nullopt;
+  return {};
 }
 
-std::optional<FilterMode> ReadFilterModeFromJSON(const picojson::object& json,
-                                                 const std::string& filter)
+// Reads group[key] as one of `names` (case-insensitive) into *out.
+template <typename Mode>
+bool ReadMode(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& group,
+              std::string_view group_name, const std::string& key,
+              std::span<const ModeName<Mode>> names, Mode* out)
 {
-  auto filter_mode = ReadStringFromJson(json, filter).value_or("");
-  Common::ToLower(&filter_mode);
-
-  if (filter_mode == "linear")
+  std::string text = ReadStringFromJson(group, key).value_or("");
+  Common::ToLower(&text);
+  for (const auto& [name, value] : names)
   {
-    return FilterMode::Linear;
-  }
-  else if (filter_mode == "near")
-  {
-    return FilterMode::Near;
+    if (text == name)
+    {
+      *out = value;
+      return true;
+    }
   }
 
-  return std::nullopt;
+  ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, '{}[{}]' has an invalid value", asset_id,
+                group_name, key);
+  return false;
 }
 
-bool ParseSampler(const VideoCommon::CustomAssetLibrary::AssetID& asset_id,
-                  const picojson::object& json, SamplerState* sampler)
+// Returns the object stored under `name`, null if absent, or reports a type error.
+bool FindGroup(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& json,
+               const std::string& name, const picojson::object** group)
 {
-  if (!sampler) [[unlikely]]
+  *group = nullptr;
+  const auto it = json.find(name);
+  if (it == json.end())
+    return true;
+  if (!it->second.is<picojson::object>())
+  {
+    ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, '{}' is not the right type", asset_id,
+                  name);
     return false;
+  }
+  *group = &it->second.get<picojson::object>();
+  return true;
+}
 
+// Starts from the linear sampler and applies the optional "wrap_mode" and "filter_mode" groups.
+// Inside a group that is present, every field is required.
+bool ReadSampler(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& json,
+                 SamplerState* sampler)
+{
   *sampler = RenderState::GetLinearSamplerState();
+  auto& tm0 = sampler->tm0;
 
-  const auto sampler_state_wrap_iter = json.find("wrap_mode");
-  if (sampler_state_wrap_iter != json.end())
+  const picojson::object* wrap = nullptr;
+  if (!FindGroup(asset_id, json, "wrap_mode", &wrap))
+    return false;
+  if (wrap != nullptr)
   {
-    if (!sampler_state_wrap_iter->second.is<picojson::object>())
-    {
-      ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, 'wrap_mode' is not the right type",
-                    asset_id);
+    const std::span<const ModeName<WrapMode>> names = WRAP_NAMES;
+    WrapMode mode{};
+    if (!ReadMode(asset_id, *wrap, "wrap_mode", "u", names, &mode))
       return false;
-    }
-    const auto sampler_state_wrap_obj = sampler_state_wrap_iter->second.get<picojson::object>();
-
-    if (const auto mode = ReadWrapModeFromJSON(sampler_state_wrap_obj, "u"))
-    {
-      sampler->tm0.wrap_u = *mode;
-    }
-    else
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Asset '{}' failed to parse json, 'wrap_mode[u]' has an invalid "
-                    "value",
-                    asset_id);
+    tm0.wrap_u = mode;
+    if (!ReadMode(asset_id, *wrap, "wrap_mode", "v", names, &mode))
       return false;
-    }
-
-    if (const auto mode = ReadWrapModeFromJSON(sampler_state_wrap_obj, "v"))
-    {
-      sampler->tm0.wrap_v = *mode;
-    }
-    else
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Asset '{}' failed to parse json, 'wrap_mode[v]' has an invalid "
-                    "value",
-                    asset_id);
-      return false;
-    }
+    tm0.wrap_v = mode;
   }
 
-  const auto sampler_state_filter_iter = json.find("filter_mode");
-  if (sampler_state_filter_iter != json.end())
+  const picojson::object* filter = nullptr;
+  if (!FindGroup(asset_id, json, "filter_mode", &filter))
+    return false;
+  if (filter != nullptr)
   {
-    if (!sampler_state_filter_iter->second.is<picojson::object>())
-    {
-      ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, 'filter_mode' is not the right type",
-                    asset_id);
+    const std::span<const ModeName<FilterMode>> names = FILTER_NAMES;
+    FilterMode mode{};
+    if (!ReadMode(asset_id, *filter, "filter_mode", "min", names, &mode))
       return false;
-    }
-    const auto sampler_state_filter_obj = sampler_state_filter_iter->second.get<picojson::object>();
-
-    if (const auto mode = ReadFilterModeFromJSON(sampler_state_filter_obj, "min"))
-    {
-      sampler->tm0.min_filter = *mode;
-    }
-    else
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Asset '{}' failed to parse json, 'filter_mode[min]' has an invalid "
-                    "value",
-                    asset_id);
+    tm0.min_filter = mode;
+    if (!ReadMode(asset_id, *filter, "filter_mode", "mag", names, &mode))
       return false;
-    }
-
-    if (const auto mode = ReadFilterModeFromJSON(sampler_state_filter_obj, "mag"))
-    {
-      sampler->tm0.mag_filter = *mode;
-    }
-    else
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Asset '{}' failed to parse json, 'filter_mode[mag]' has an invalid "
-                    "value",
-                    asset_id);
+    tm0.mag_filter = mode;
+    if (!ReadMode(asset_id, *filter, "filter_mode", "mipmap", names, &mode))
       return false;
-    }
-
-    if (const auto mode = ReadFilterModeFromJSON(sampler_state_filter_obj, "mipmap"))
-    {
-      sampler->tm0.mipmap_filter = *mode;
-    }
-    else
-    {
-      ERROR_LOG_FMT(VIDEO,
-                    "Asset '{}' failed to parse json, 'filter_mode[mipmap]' has an invalid "
-                    "value",
-                    asset_id);
-      return false;
-    }
+    tm0.mipmap_filter = mode;
   }
 
   return true;
 }
 }  // namespace
+
 bool TextureAndSamplerData::FromJson(const CustomAssetLibrary::AssetID& asset_id,
                                      const picojson::object& json, TextureAndSamplerData* data)
 {
-  const auto type_iter = json.find("type");
-  if (type_iter == json.end())
+  const auto entry = json.find("type");
+  if (entry == json.end())
   {
     ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, property entry 'type' not found",
                   asset_id);
     return false;
   }
-  if (!type_iter->second.is<std::string>())
+  if (!entry->second.is<std::string>())
   {
     ERROR_LOG_FMT(VIDEO,
-                  "Asset '{}' failed to parse json, property entry 'type' is not "
-                  "the right json type",
+                  "Asset '{}' failed to parse json, property entry 'type' is not the right json "
+                  "type",
                   asset_id);
     return false;
   }
-  std::string type = type_iter->second.to_str();
+
+  std::string type = entry->second.to_str();
   Common::ToLower(&type);
-
-  if (type == "texture2d")
+  const auto known = std::ranges::find(TYPE_NAMES, std::string_view{type},
+                                       &std::pair<std::string_view, AbstractTextureType>::first);
+  if (known == TYPE_NAMES.end())
   {
-    data->type = AbstractTextureType::Texture_2D;
-
-    if (!ParseSampler(asset_id, json, &data->sampler))
-    {
-      return false;
-    }
-  }
-  else if (type == "texturecube")
-  {
-    data->type = AbstractTextureType::Texture_CubeMap;
-  }
-  else if (type == "texture2darray")
-  {
-    data->type = AbstractTextureType::Texture_2DArray;
-  }
-  else
-  {
-    ERROR_LOG_FMT(VIDEO,
-                  "Asset '{}' failed to parse json, texture type '{}' "
-                  "an invalid option",
+    ERROR_LOG_FMT(VIDEO, "Asset '{}' failed to parse json, texture type '{}' an invalid option",
                   asset_id, type);
     return false;
   }
 
+  data->type = known->second;
+  // Only 2D textures carry their own sampler settings.
+  if (data->type == AbstractTextureType::Texture_2D)
+    return ReadSampler(asset_id, json, &data->sampler);
   return true;
 }
 
 void TextureAndSamplerData::ToJson(picojson::object* obj, const TextureAndSamplerData& data)
 {
-  if (!obj) [[unlikely]]
+  if (obj == nullptr) [[unlikely]]
     return;
 
-  auto& json_obj = *obj;
-  switch (data.type)
+  for (const auto& [name, type] : TYPE_NAMES)
   {
-  case AbstractTextureType::Texture_2D:
-    json_obj.emplace("type", "texture2d");
-    break;
-  case AbstractTextureType::Texture_CubeMap:
-    json_obj.emplace("type", "texturecube");
-    break;
-  case AbstractTextureType::Texture_2DArray:
-    json_obj.emplace("type", "texture2darray");
-    break;
-  };
-
-  auto wrap_mode_to_string = [](WrapMode mode) {
-    switch (mode)
+    if (type == data.type)
     {
-    case WrapMode::Clamp:
-      return "clamp";
-    case WrapMode::Mirror:
-      return "mirror";
-    case WrapMode::Repeat:
-      return "repeat";
-    };
+      obj->emplace("type", std::string{name});
+      break;
+    }
+  }
 
-    return "";
-  };
-  auto filter_mode_to_string = [](FilterMode mode) {
-    switch (mode)
-    {
-    case FilterMode::Linear:
-      return "linear";
-    case FilterMode::Near:
-      return "near";
-    };
+  const auto& tm0 = data.sampler.tm0;
+  const std::span<const ModeName<WrapMode>> wraps = WRAP_NAMES;
+  const std::span<const ModeName<FilterMode>> filters = FILTER_NAMES;
 
-    return "";
-  };
+  picojson::object wrap;
+  wrap.emplace("u", std::string{NameOf(wraps, tm0.wrap_u.Value())});
+  wrap.emplace("v", std::string{NameOf(wraps, tm0.wrap_v.Value())});
+  obj->emplace("wrap_mode", std::move(wrap));
 
-  picojson::object wrap_mode;
-  wrap_mode.emplace("u", wrap_mode_to_string(data.sampler.tm0.wrap_u));
-  wrap_mode.emplace("v", wrap_mode_to_string(data.sampler.tm0.wrap_v));
-  json_obj.emplace("wrap_mode", wrap_mode);
-
-  picojson::object filter_mode;
-  filter_mode.emplace("min", filter_mode_to_string(data.sampler.tm0.min_filter));
-  filter_mode.emplace("mag", filter_mode_to_string(data.sampler.tm0.mag_filter));
-  filter_mode.emplace("mipmap", filter_mode_to_string(data.sampler.tm0.mipmap_filter));
-  json_obj.emplace("filter_mode", filter_mode);
+  picojson::object filter;
+  filter.emplace("min", std::string{NameOf(filters, tm0.min_filter.Value())});
+  filter.emplace("mag", std::string{NameOf(filters, tm0.mag_filter.Value())});
+  filter.emplace("mipmap", std::string{NameOf(filters, tm0.mipmap_filter.Value())});
+  obj->emplace("filter_mode", std::move(filter));
 }
 
 CustomAssetLibrary::LoadInfo TextureAsset::LoadImpl(const CustomAssetLibrary::AssetID& asset_id)
 {
-  auto potential_data = std::make_shared<CustomTextureData>();
-  const auto loaded_info = m_owning_library->LoadTexture(asset_id, potential_data.get());
-  if (loaded_info.bytes_loaded == 0)
-    return {};
-  {
-    std::lock_guard lk(m_data_lock);
-    m_loaded = true;
-    m_data = std::move(potential_data);
-  }
-  return loaded_info;
+  return ReadAndPublish(
+      [&](CustomTextureData* data) { return m_owning_library->LoadTexture(asset_id, data); });
 }
 
 CustomAssetLibrary::LoadInfo
 TextureAndSamplerAsset::LoadImpl(const CustomAssetLibrary::AssetID& asset_id)
 {
-  auto potential_data = std::make_shared<TextureAndSamplerData>();
-  const auto loaded_info = m_owning_library->LoadTexture(asset_id, potential_data.get());
-  if (loaded_info.bytes_loaded == 0)
-    return {};
-  {
-    std::lock_guard lk(m_data_lock);
-    m_loaded = true;
-    m_data = std::move(potential_data);
-  }
-  return loaded_info;
+  return ReadAndPublish(
+      [&](TextureAndSamplerData* data) { return m_owning_library->LoadTexture(asset_id, data); });
 }
 }  // namespace VideoCommon

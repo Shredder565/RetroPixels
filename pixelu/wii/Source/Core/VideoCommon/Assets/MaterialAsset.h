@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,9 +19,12 @@ class ShaderCode;
 
 namespace VideoCommon
 {
+// One uniform value supplied by a material.
 struct MaterialProperty
 {
+  // Writes the value into a uniform buffer (one 16-byte slot) and advances `buffer`.
   static void WriteToMemory(u8*& buffer, const MaterialProperty& property);
+  // Bytes WriteToMemory uses for the property.
   static std::size_t GetMemorySize(const MaterialProperty& property);
   using Value =
       std::variant<s32, std::array<s32, 2>, std::array<s32, 3>, std::array<s32, 4>, float,
@@ -30,6 +32,8 @@ struct MaterialProperty
   Value m_value;
 };
 
+// A material supplies the inputs of a shader asset: uniform values, textures and optional
+// render state overrides. It may chain to another material.
 struct MaterialData
 {
   static bool FromJson(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& json,
@@ -46,10 +50,7 @@ struct MaterialData
   std::vector<TextureSamplerValue> textures;
 };
 
-// Much like Unity and Unreal materials, a Dolphin material does very little on its own
-// Its sole purpose is to provide data (through properties) that are used in conjunction
-// with a shader asset that is provided by name.  It is up to user of this asset to
-// use the two together to create the relevant runtime data
+// Holds MaterialData; pairing it with the named shader is left to whoever uses the asset.
 class MaterialAsset final : public CustomLoadableAsset<MaterialData>
 {
 public:

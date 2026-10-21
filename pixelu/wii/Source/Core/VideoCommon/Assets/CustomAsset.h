@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,13 +6,14 @@
 #include "VideoCommon/Assets/CustomAssetLibrary.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 
 namespace VideoCommon
 {
-// An abstract class that provides operations for loading
-// data from a 'CustomAssetLibrary'
+// Base for every asset: one entry of a CustomAssetLibrary that can be loaded and unloaded.
+// Subclasses implement LoadImpl/UnloadImpl for their own data type.
 class CustomAsset
 {
 public:
@@ -28,22 +28,19 @@ public:
   CustomAsset& operator=(const CustomAsset&) = delete;
   CustomAsset& operator=(CustomAsset&&) = delete;
 
-  // Loads the asset from the library returning the number of bytes loaded
+  // Reads the asset; returns the bytes read, or 0 if the load produced nothing.
   std::size_t Load();
 
-  // Unloads the asset data, resets the bytes loaded and
-  // returns the number of bytes unloaded
+  // Drops the asset's data; returns the byte count it was holding.
   std::size_t Unload();
 
-  // Returns the time that the data was last loaded
+  // When the data currently held was read (the moment the read began).
   TimeType GetLastLoadedTime() const;
 
-  // Returns an id that uniquely identifies this asset
   const CustomAssetLibrary::AssetID& GetAssetId() const;
 
-  // Returns an id that is unique to this game session
-  // This is a faster form to hash and can be used
-  // as an index
+  // A small number naming this asset for the current session, cheaper to use as a key than
+  // the asset id.
   std::size_t GetHandle() const;
 
 protected:
@@ -52,59 +49,64 @@ protected:
 private:
   virtual CustomAssetLibrary::LoadInfo LoadImpl(const CustomAssetLibrary::AssetID& asset_id) = 0;
   virtual void UnloadImpl() = 0;
-  CustomAssetLibrary::AssetID m_asset_id;
-  std::size_t m_handle;
 
-  mutable std::mutex m_info_lock;
-  std::size_t m_bytes_loaded = 0;
-  std::atomic<TimeType> m_last_loaded_time = {};
+  CustomAssetLibrary::AssetID m_id;
+  std::size_t m_session_handle;
+
+  // Serializes Load and Unload.
+  mutable std::mutex m_load_mutex;
+  std::size_t m_resident_bytes = 0;
+  std::atomic<TimeType> m_load_time = {};
 };
 
-// An abstract class that is expected to
-// be the base class for all assets
-// It provides a simple interface for
-// verifying that an asset data of type
-// 'UnderlyingType' is loaded by
-// checking against 'GetData()'
+// An asset whose loaded form is a shared UnderlyingType.
 template <typename UnderlyingType>
 class CustomLoadableAsset : public CustomAsset
 {
 public:
   using CustomAsset::CustomAsset;
 
-  // Callees should understand that the type returned is
-  // a local copy and 'GetData()' needs to be called
-  // to ensure the latest copy is available if
-  // they want to handle reloads
+  // Returns the data held right now, or null when nothing is loaded. A reload replaces the
+  // pointer, so callers that care about reloads should call this again rather than keep it.
   [[nodiscard]] std::shared_ptr<UnderlyingType> GetData() const
   {
-    std::lock_guard lk(m_data_lock);
-    if (m_loaded)
-      return m_data;
-    return nullptr;
+    std::lock_guard guard(m_data_mutex);
+    return m_has_data ? m_data : nullptr;
   }
 
 protected:
-  bool m_loaded = false;
-  mutable std::mutex m_data_lock;
+  // Lets `read` fill a new UnderlyingType and makes it the current data if any bytes were
+  // read. The previous data stays current when the read produces nothing.
+  template <typename ReadFn>
+  CustomAssetLibrary::LoadInfo ReadAndPublish(ReadFn&& read)
+  {
+    auto fresh = std::make_shared<UnderlyingType>();
+    const CustomAssetLibrary::LoadInfo info = read(fresh.get());
+    if (info.bytes_loaded == 0)
+      return {};
+
+    std::lock_guard guard(m_data_mutex);
+    m_data = std::move(fresh);
+    m_has_data = true;
+    return info;
+  }
+
+  // Guarded by m_data_mutex.
+  bool m_has_data = false;
+  mutable std::mutex m_data_mutex;
   std::shared_ptr<UnderlyingType> m_data;
 
 private:
   void UnloadImpl() override
   {
-    std::lock_guard lk(m_data_lock);
-    m_loaded = false;
+    std::lock_guard guard(m_data_mutex);
     m_data.reset();
+    m_has_data = false;
   }
 };
 
-// A helper struct that contains
-// an asset with a last cached write time
-// This can be used to determine if the asset
-// has diverged from the last known state
-// To know if it is time to update other dependencies
-// based on the asset data
-// TODO C++20: use a 'derived_from' concept against 'CustomAsset' when available
+// An asset paired with the load time its user last saw, so the user can tell whether the asset
+// has been reloaded since.
 template <typename AssetType>
 struct CachedAsset
 {

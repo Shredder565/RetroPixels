@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <picojson.h>
 
@@ -25,6 +25,7 @@ class IOFile;
 
 namespace VideoCommon
 {
+// One drawable piece of a mesh: interleaved vertices, 16-bit indices and the material it uses.
 struct MeshDataChunk
 {
   std::unique_ptr<u8[]> vertex_data;
@@ -34,6 +35,7 @@ struct MeshDataChunk
   u32 num_indices;
   PortableVertexDeclaration vertex_declaration;
   PrimitiveType primitive_type;
+  // VB_HAS_* bits for the attributes present.
   u32 components_available;
   Common::Vec3 minimum_position;
   Common::Vec3 maximum_position;
@@ -43,14 +45,17 @@ struct MeshDataChunk
 
 struct MeshData
 {
+  // The JSON metadata maps mesh material names to material asset ids.
   static bool FromJson(const CustomAssetLibrary::AssetID& asset_id, const picojson::object& json,
                        MeshData* data);
   static void ToJson(picojson::object& obj, const MeshData& data);
 
+  // The binary ".dolmesh" layout written by ToDolphinMesh.
   static bool FromDolphinMesh(std::span<const u8> raw_data, MeshData* data);
 
   static bool ToDolphinMesh(File::IOFile* file_data, const MeshData& data);
 
+  // Reads a text glTF (.gltf) file; binary .glb files are rejected.
   static bool FromGLTF(std::string_view gltf_file, MeshData* data);
 
   std::vector<MeshDataChunk> m_mesh_chunks;
