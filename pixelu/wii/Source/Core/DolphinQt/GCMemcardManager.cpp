@@ -302,7 +302,7 @@ void GCMemcardManager::FillTable(Slot slot)
 
   for (int row = 0; row < save_count; ++row)
   {
-    const u8 index = card.GetFileIndex(row);
+    const u8 index = card.GetFileIndex(static_cast<u8>(row));
 
     const auto comments = card.GetSaveComments(index);
     const u16 blocks = card.DEntry_BlockCount(index);
@@ -734,7 +734,7 @@ void GCMemcardManager::AnimateIcons()
   ++m_tick;
 }
 
-QPixmap GCMemcardManager::BannerOf(int file_index, Slot slot)
+QPixmap GCMemcardManager::BannerOf(u8 file_index, Slot slot)
 {
   const auto pixels = m_cards[slot]->ReadBannerRGBA8(file_index);
   if (!pixels)
@@ -746,7 +746,7 @@ QPixmap GCMemcardManager::BannerOf(int file_index, Slot slot)
   return QPixmap::fromImage(image);
 }
 
-GCMemcardManager::AnimatedIcon GCMemcardManager::IconOf(int file_index, Slot slot)
+GCMemcardManager::AnimatedIcon GCMemcardManager::IconOf(u8 file_index, Slot slot)
 {
   Memcard::GCMemcard& card = *m_cards[slot];
   AnimatedIcon icon;

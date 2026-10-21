@@ -136,7 +136,7 @@ ConvertDialog::ConvertDialog(QList<std::shared_ptr<const UICommon::GameFile>> fi
 
 void ConvertDialog::AddBlockSize(int size)
 {
-  m_block_size->addItem(QString::fromStdString(UICommon::FormatSize(size, 0)), size);
+  m_block_size->addItem(QString::fromStdString(UICommon::FormatSize(static_cast<u64>(size), 0)), size);
 
   // Sizes arrive smallest first, so this ends up on the preferred size, or the largest one
   // below it when the preferred size is not on offer.
@@ -463,7 +463,7 @@ void ConvertDialog::Convert()
       break;
     case BlobType::GCZ:
       job = [&] {
-        const int sub_type = file->GetPlatform() == DiscIO::Platform::WiiDisc ? 1 : 0;
+        const u32 sub_type = file->GetPlatform() == DiscIO::Platform::WiiDisc ? 1 : 0;
         return DiscIO::ConvertToGCZ(reader.get(), source, destination_path, sub_type, block_size,
                                     report);
       };

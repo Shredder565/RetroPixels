@@ -43,7 +43,7 @@ QIcon LogoOf(const ResourcePack::ResourcePack& pack)
 {
   const std::vector<char>& bytes = pack.GetLogo();
   QPixmap logo;
-  logo.loadFromData(reinterpret_cast<const uchar*>(bytes.data()), static_cast<int>(bytes.size()));
+  logo.loadFromData(reinterpret_cast<const uchar*>(bytes.data()), static_cast<uint>(bytes.size()));
   return QIcon(logo);
 }
 }  // namespace

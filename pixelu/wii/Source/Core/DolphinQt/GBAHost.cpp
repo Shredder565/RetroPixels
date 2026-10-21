@@ -17,8 +17,8 @@ GBAHost::GBAHost(std::weak_ptr<HW::GBA::Core> core) : m_core(std::move(core))
   m_controller->moveToThread(qApp->thread());
 
   const HW::GBA::CoreInfo info = m_core.lock()->GetCoreInfo();
-  QueueOnObject(m_controller, [controller = m_controller, core = m_core, info] {
-    controller->Create(core, info);
+  QueueOnObject(m_controller, [controller = m_controller, gba = m_core, info] {
+    controller->Create(gba, info);
   });
 }
 

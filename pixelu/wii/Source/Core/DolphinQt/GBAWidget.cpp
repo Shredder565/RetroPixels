@@ -52,7 +52,7 @@ void SwapRom(const CoreHandle& core, std::string_view rom_path = {})
     if (!gba)
       return;
 
-    const auto& setting = Config::MAIN_GBA_ROM_PATHS[gba->GetCoreInfo().device_number];
+    const auto& setting = Config::MAIN_GBA_ROM_PATHS[static_cast<size_t>(gba->GetCoreInfo().device_number)];
     gba->Stop();
     Config::SetCurrent(setting, rom);
 
@@ -73,11 +73,11 @@ void InsertCard(const CoreHandle& core, std::string_view card_path)
   });
 }
 
-// Runs `action` on the CPU thread with the core, if it still exists.
+// Runs `work` on the CPU thread with the core, if it still exists.
 template <typename Action>
-void WithCore(const CoreHandle& core, Action action)
+void WithCore(const CoreHandle& core, Action work)
 {
-  Core::RunOnCPUThread(Core::System::GetInstance(), [core, action = std::move(action)] {
+  Core::RunOnCPUThread(Core::System::GetInstance(), [core, action = std::move(work)] {
     if (const auto gba = core.lock())
       action(*gba);
   });
@@ -345,9 +345,10 @@ void GBAWidget::UpdateTitle()
 void GBAWidget::ApplyVolume()
 {
   // The mixer takes volumes from 0 to 256.
-  const int level = m_muted ? 0 : m_volume * 256 / 100;
+  const auto level = static_cast<u32>(m_muted ? 0 : m_volume * 256 / 100);
   auto& system = Core::System::GetInstance();
-  system.GetSoundStream()->GetMixer()->SetGBAVolume(m_info.device_number, level, level);
+  system.GetSoundStream()->GetMixer()->SetGBAVolume(static_cast<size_t>(m_info.device_number),
+                                                    level, level);
   UpdateTitle();
 }
 
@@ -520,7 +521,8 @@ QRect GBAWidget::ScreenRect() const
 
   // Scale to fit while keeping the aspect ratio, centred, with black bars on the other axis.
   const bool wider_than_window =
-      static_cast<float>(m_info.width) / m_info.height > static_cast<float>(width()) / height();
+      static_cast<float>(m_info.width) / static_cast<float>(m_info.height) >
+      static_cast<float>(width()) / static_cast<float>(height());
   if (wider_than_window)
   {
     const int scaled_height =

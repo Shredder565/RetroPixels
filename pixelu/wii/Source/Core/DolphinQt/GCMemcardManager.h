@@ -76,8 +76,8 @@ private:
   void CreateCard(ExpansionInterface::Slot slot);
   void AnimateIcons();
 
-  QPixmap BannerOf(int file_index, ExpansionInterface::Slot slot);
-  AnimatedIcon IconOf(int file_index, ExpansionInterface::Slot slot);
+  QPixmap BannerOf(u8 file_index, ExpansionInterface::Slot slot);
+  AnimatedIcon IconOf(u8 file_index, ExpansionInterface::Slot slot);
 
   // Buttons between the two slots.
   QPushButton* m_switch_button = nullptr;
