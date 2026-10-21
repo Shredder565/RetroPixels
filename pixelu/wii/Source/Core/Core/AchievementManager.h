@@ -1,5 +1,8 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// RetroAchievements support: one manager owns the rcheevos client, feeds it frames and memory,
+// fetches badges and turns client events into on-screen messages. Without
+// USE_RETRO_ACHIEVEMENTS only a do-nothing stand-in remains (see the end of this file).
 
 #pragma once
 
@@ -61,6 +64,7 @@ struct ARCode;
 class AchievementManager
 {
 public:
+  // Produces the current name of the badge to fetch (empty: nothing to fetch).
   using BadgeNameFunction = std::function<std::string(const AchievementManager&)>;
 
   static constexpr size_t HASH_SIZE = 33;
@@ -82,6 +86,7 @@ public:
   static constexpr std::string_view GOLD = "#FFD700";
   static constexpr std::string_view BLUE = "#0B71C1";
 
+  // One row of a leaderboard as shown to the player.
   struct LeaderboardEntry
   {
     std::string username;
@@ -97,6 +102,7 @@ public:
     std::unordered_map<u32, LeaderboardEntry> entries;
   };
 
+  // What an update_event notification says has changed.
   struct UpdatedItems
   {
     bool all = false;
@@ -113,6 +119,7 @@ public:
   Common::HookableEvent<int> login_event;
 
   static AchievementManager& GetInstance();
+  // `hwnd` is the main window; only RAIntegration (Windows) uses it.
   void Init(void* hwnd);
   void Login(const std::string& password);
   bool HasAPIToken() const;
@@ -121,6 +128,7 @@ public:
   bool IsGameLoaded() const;
   void SetBackgroundExecutionAllowed(bool allowed);
 
+  // The RetroAchievements hash of a disc image, as text.
   static std::string CalculateHash(const std::string& file_path);
 
   void FetchPlayerBadge();
@@ -134,6 +142,7 @@ public:
   std::recursive_mutex& GetLock();
   bool IsHardcoreModeActive() const;
 
+  // In hardcore mode only codes listed (by hash) in the shipped approved list may run.
   void FilterApprovedPatches(std::vector<PatchEngine::Patch>& patches, std::string_view game_id,
                              u16 revision) const;
   void FilterApprovedGeckoCodes(std::vector<Gecko::GeckoCode>& codes, std::string_view game_id,
@@ -171,6 +180,7 @@ public:
   bool CheckForModifications() { return rc_client_raintegration_has_modifications(m_client); }
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
 
+  // Savestates carry the client's progress so that unlocks survive a load.
   void DoState(PointerWrap& p);
 
   void CloseGame();
@@ -180,6 +190,7 @@ public:
 private:
   AchievementManager() = default;
 
+  // An open "file" of the hasher: the volume being identified and a read position.
   struct FilereaderState
   {
     int64_t position = 0;
@@ -256,6 +267,7 @@ private:
   static void GameTitleEstimateHandler(char* buffer, u32 buffer_size, rc_client_t* client);
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
 
+  // ---- state; m_lock guards most of it, m_filereader_lock the hasher's reader set-up.
   rc_client_t* m_client{};
   std::atomic<Core::System*> m_system{};
   std::unique_ptr<DiscIO::Volume> m_loading_volume;
@@ -294,6 +306,7 @@ private:
 
 #else  // USE_RETRO_ACHIEVEMENTS
 
+// Without achievements nothing is ever restricted.
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -316,14 +329,12 @@ public:
 
   constexpr bool IsHardcoreModeActive() { return false; }
 
-  constexpr bool ShouldGeckoCodeBeActivated(const Gecko::GeckoCode& code, std::string_view game_id,
-                                            u16 revision)
+  constexpr bool ShouldGeckoCodeBeActivated(const Gecko::GeckoCode& code, std::string_view, u16)
   {
     return code.enabled;
   }
 
-  constexpr bool ShouldARCodeBeActivated(const ActionReplay::ARCode& code, std::string_view game_id,
-                                         u16 revision)
+  constexpr bool ShouldARCodeBeActivated(const ActionReplay::ARCode& code, std::string_view, u16)
   {
     return code.enabled;
   }
@@ -332,7 +343,7 @@ public:
 
   constexpr void ChangeDisc(const DiscIO::Volume*) {}
 
-  constexpr void SetBackgroundExecutionAllowed(bool allowed) {}
+  constexpr void SetBackgroundExecutionAllowed(bool) {}
 
   constexpr void DoFrame() {}
 
