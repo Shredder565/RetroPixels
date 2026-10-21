@@ -1,9 +1,10 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/WiiUpdate.h"
 
+#include <functional>
 #include <future>
+#include <utility>
 
 #include <QCloseEvent>
 #include <QObject>
@@ -22,130 +23,145 @@
 
 namespace WiiUpdate
 {
-static void ShowResult(QWidget* parent, WiiUtils::UpdateResult result)
+namespace
+{
+using Result = WiiUtils::UpdateResult;
+using UpdateJob = std::function<Result(WiiUtils::UpdateCallback)>;
+
+// A half-finished update leaves mismatched system software behind, so the dialog cannot be
+// dismissed (Esc and the close button both end up in reject()); only the cancel button, which
+// asks the update to stop at the next title, is offered.
+class UpdateProgressDialog final : public QProgressDialog
+{
+public:
+  using QProgressDialog::QProgressDialog;
+
+protected:
+  void reject() override {}
+};
+
+void ReportFailure(QWidget* parent, const QString& text)
+{
+  ModalMessageBox::critical(parent, QObject::tr("Update failed"), text);
+}
+
+// After a successful (or unnecessary) update the NAND's certificates are extracted again.
+void ReportSuccess(QWidget* parent, const QString& text)
+{
+  ModalMessageBox::information(parent, QObject::tr("Update completed"), text);
+  DiscIO::NANDImporter().ExtractCertificates();
+}
+
+void ShowResult(QWidget* parent, Result result)
 {
   switch (result)
   {
-  case WiiUtils::UpdateResult::Succeeded:
-    ModalMessageBox::information(parent, QObject::tr("Update completed"),
-                                 QObject::tr("The emulated Wii console has been updated."));
-    DiscIO::NANDImporter().ExtractCertificates();
-    break;
-  case WiiUtils::UpdateResult::AlreadyUpToDate:
-    ModalMessageBox::information(parent, QObject::tr("Update completed"),
-                                 QObject::tr("The emulated Wii console is already up-to-date."));
-    DiscIO::NANDImporter().ExtractCertificates();
-    break;
-  case WiiUtils::UpdateResult::ServerFailed:
-    ModalMessageBox::critical(parent, QObject::tr("Update failed"),
-                              QObject::tr("Could not download update information from Nintendo. "
-                                          "Please check your Internet connection and try again."));
-    break;
-  case WiiUtils::UpdateResult::DownloadFailed:
-    ModalMessageBox::critical(parent, QObject::tr("Update failed"),
-                              QObject::tr("Could not download update files from Nintendo. "
-                                          "Please check your Internet connection and try again."));
-    break;
-  case WiiUtils::UpdateResult::ImportFailed:
-    ModalMessageBox::critical(parent, QObject::tr("Update failed"),
-                              QObject::tr("Could not install an update to the Wii system memory. "
-                                          "Please refer to logs for more information."));
-    break;
-  case WiiUtils::UpdateResult::Cancelled:
+  case Result::Succeeded:
+    ReportSuccess(parent, QObject::tr("The emulated Wii console has been updated."));
+    return;
+  case Result::AlreadyUpToDate:
+    ReportSuccess(parent, QObject::tr("The emulated Wii console is already up-to-date."));
+    return;
+  case Result::ServerFailed:
+    ReportFailure(parent, QObject::tr("Could not download update information from Nintendo. "
+                                      "Please check your Internet connection and try again."));
+    return;
+  case Result::DownloadFailed:
+    ReportFailure(parent, QObject::tr("Could not download update files from Nintendo. "
+                                      "Please check your Internet connection and try again."));
+    return;
+  case Result::ImportFailed:
+    ReportFailure(parent, QObject::tr("Could not install an update to the Wii system memory. "
+                                      "Please refer to logs for more information."));
+    return;
+  case Result::Cancelled:
     ModalMessageBox::warning(
         parent, QObject::tr("Update cancelled"),
         QObject::tr("The update has been cancelled. It is strongly recommended to "
                     "finish it in order to avoid inconsistent system software versions."));
-    break;
-  case WiiUtils::UpdateResult::RegionMismatch:
-    ModalMessageBox::critical(
-        parent, QObject::tr("Update failed"),
-        QObject::tr("The game's region does not match your console's. "
-                    "To avoid issues with the system menu, it is not possible "
-                    "to update the emulated console using this disc."));
-    break;
-  case WiiUtils::UpdateResult::MissingUpdatePartition:
-  case WiiUtils::UpdateResult::DiscReadFailed:
-    ModalMessageBox::critical(parent, QObject::tr("Update failed"),
-                              QObject::tr("The game disc does not contain any usable "
-                                          "update information."));
-    break;
+    return;
+  case Result::RegionMismatch:
+    ReportFailure(parent, QObject::tr("The game's region does not match your console's. "
+                                      "To avoid issues with the system menu, it is not possible "
+                                      "to update the emulated console using this disc."));
+    return;
+  case Result::MissingUpdatePartition:
+  case Result::DiscReadFailed:
+    ReportFailure(parent, QObject::tr("The game disc does not contain any usable "
+                                      "update information."));
+    return;
   default:
     ASSERT(false);
-    break;
+    return;
   }
 }
 
-template <typename Callable, typename... Args>
-static WiiUtils::UpdateResult ShowProgress(QWidget* parent, Callable function, Args&&... args)
+// Runs the update on a worker thread while a modal progress dialog shows which title is being
+// installed. The worker hears about a cancel through the callback's return value.
+Result RunWithProgress(QWidget* parent, const UpdateJob& job)
 {
-  // Do not allow the user to close the dialog. Instead, wait until the update is finished
-  // or cancelled.
-  class UpdateProgressDialog final : public QProgressDialog
-  {
-  public:
-    using QProgressDialog::QProgressDialog;
+  UpdateProgressDialog progress{parent};
+  progress.setLabelText(QObject::tr("Preparing to update...\nThis can take a while."));
+  progress.setWindowTitle(QObject::tr("Updating"));
+  // Without this QProgressDialog comes up too small for its text.
+  progress.setMinimumSize(360, 150);
 
-  protected:
-    void reject() override {}
+  // A button of our own, so it can be greyed out once pressed. setCancelButton() hands it to the
+  // dialog; the stock canceled() handling (which would reset the dialog) is replaced.
+  auto* const stop = new QPushButton(QObject::tr("&Cancel"), parent);
+  progress.setCancelButton(stop);
+  Common::Flag stopping;
+  QObject::disconnect(&progress, &QProgressDialog::canceled, nullptr, nullptr);
+  QObject::connect(&progress, &QProgressDialog::canceled, [&] {
+    progress.setLabelText(QObject::tr("Finishing the update...\nThis can take a while."));
+    stop->setEnabled(false);
+    stopping.Set();
+  });
+
+  // Called on the worker for each title. Progress is shown on the dialog's thread; once a cancel
+  // has been asked for, the label keeps saying so.
+  const WiiUtils::UpdateCallback on_title = [&](size_t done, size_t total, u64 title_id) {
+    QueueOnObject(&progress, [&progress, &stopping, done, total, title_id] {
+      if (stopping.IsSet())
+        return;
+      progress.setRange(0, static_cast<int>(total));
+      progress.setValue(static_cast<int>(done));
+      progress.setLabelText(QObject::tr("Updating title %1...\nThis can take a while.")
+                                .arg(title_id, 16, 16, QLatin1Char('0')));
+    });
+    return !stopping.IsSet();
   };
 
-  UpdateProgressDialog dialog{parent};
-  dialog.setLabelText(QObject::tr("Preparing to update...\nThis can take a while."));
-  dialog.setWindowTitle(QObject::tr("Updating"));
-  // QProgressDialog doesn't set its minimum size correctly.
-  dialog.setMinimumSize(360, 150);
-
-  // QProgressDialog doesn't allow us to disable the cancel button when it's pressed,
-  // so we have to pass it our own push button. Note: the dialog takes ownership of it.
-  auto* cancel_button = new QPushButton(QObject::tr("&Cancel"), parent);
-  dialog.setCancelButton(cancel_button);
-  Common::Flag was_cancelled;
-  QObject::disconnect(&dialog, &QProgressDialog::canceled, nullptr, nullptr);
-  QObject::connect(&dialog, &QProgressDialog::canceled, [&] {
-    dialog.setLabelText(QObject::tr("Finishing the update...\nThis can take a while."));
-    cancel_button->setEnabled(false);
-    was_cancelled.Set();
+  std::future<Result> outcome = std::async(std::launch::async, [&] {
+    const Result finished = job(on_title);
+    QueueOnObject(&progress, [&progress] { progress.done(0); });
+    return finished;
   });
 
-  std::future<WiiUtils::UpdateResult> result = std::async(std::launch::async, [&] {
-    const WiiUtils::UpdateResult res = function(
-        [&](size_t processed, size_t total, u64 title_id) {
-          QueueOnObject(&dialog, [&dialog, &was_cancelled, processed, total, title_id] {
-            if (was_cancelled.IsSet())
-              return;
-
-            dialog.setRange(0, static_cast<int>(total));
-            dialog.setValue(static_cast<int>(processed));
-            dialog.setLabelText(QObject::tr("Updating title %1...\nThis can take a while.")
-                                    .arg(title_id, 16, 16, QLatin1Char('0')));
-          });
-          return !was_cancelled.IsSet();
-        },
-        std::forward<Args>(args)...);
-    QueueOnObject(&dialog, [&dialog] { dialog.done(0); });
-    return res;
-  });
-
-  dialog.exec();
-  return result.get();
+  progress.exec();
+  return outcome.get();
 }
+}  // namespace
 
 void PerformOnlineUpdate(const std::string& region, QWidget* parent)
 {
-  const int confirm = ModalMessageBox::question(
+  const int answer = ModalMessageBox::question(
       parent, QObject::tr("Confirm"),
       QObject::tr("Connect to the Internet and perform an online system update?"));
-  if (confirm != QMessageBox::Yes)
+  if (answer != QMessageBox::Yes)
     return;
 
-  const WiiUtils::UpdateResult result = ShowProgress(parent, WiiUtils::DoOnlineUpdate, region);
+  const Result result = RunWithProgress(parent, [&region](WiiUtils::UpdateCallback callback) {
+    return WiiUtils::DoOnlineUpdate(std::move(callback), region);
+  });
   ShowResult(parent, result);
 }
 
 void PerformDiscUpdate(const std::string& file_path, QWidget* parent)
 {
-  const WiiUtils::UpdateResult result = ShowProgress(parent, WiiUtils::DoDiscUpdate, file_path);
+  const Result result = RunWithProgress(parent, [&file_path](WiiUtils::UpdateCallback callback) {
+    return WiiUtils::DoDiscUpdate(std::move(callback), file_path);
+  });
   ShowResult(parent, result);
 }
 }  // namespace WiiUpdate

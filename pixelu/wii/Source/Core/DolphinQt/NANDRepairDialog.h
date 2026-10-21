@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@ namespace WiiUtils
 struct NANDCheckResult;
 }
 
+// Shown after a NAND check found problems: explains what a repair will do, including which
+// titles it has to delete, and asks whether to go ahead (accepted) or not (rejected).
 class NANDRepairDialog final : public QDialog
 {
   Q_OBJECT

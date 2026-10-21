@@ -1,7 +1,8 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/NANDRepairDialog.h"
+
+#include <string>
 
 #include <QApplication>
 #include <QDialog>
@@ -23,86 +24,96 @@
 #include "DiscIO/WiiSaveBanner.h"
 #include "DolphinQt/Resources.h"
 
+namespace
+{
+QLabel* WrappedLabel(const QString& text)
+{
+  auto* const label = new QLabel(text);
+  label->setWordWrap(true);
+  return label;
+}
+
+// One line per title: its ID, then the best name available. The title database is asked
+// first; failing that, the save banner gives a name and, when it has any text, a description.
+std::string DescribeTitles(const WiiUtils::NANDCheckResult& result)
+{
+  Core::TitleDatabase database;
+  const DiscIO::Language language = SConfig::GetInstance().GetCurrentLanguage(true);
+
+  std::string listing;
+  for (const u64 id : result.titles_to_remove)
+  {
+    std::string line = fmt::format("{:016x}", id);
+
+    const std::string known_name = database.GetChannelName(id, language);
+    if (known_name.empty())
+    {
+      const DiscIO::WiiSaveBanner banner(id);
+      if (banner.IsValid())
+      {
+        line += " - " + banner.GetName();
+        const std::string about = banner.GetDescription();
+        if (!StripWhitespace(about).empty())
+          line += " - " + about;
+      }
+    }
+    else
+    {
+      line += " - " + known_name;
+    }
+
+    listing += line;
+    listing += '\n';
+  }
+  return listing;
+}
+}  // namespace
+
 NANDRepairDialog::NANDRepairDialog(const WiiUtils::NANDCheckResult& result, QWidget* parent)
     : QDialog(parent)
 {
   setWindowTitle(tr("NAND Check"));
   setWindowIcon(Resources::GetAppIcon());
 
-  QVBoxLayout* main_layout = new QVBoxLayout();
-
-  QLabel* damaged_label =
-      new QLabel(tr("The emulated NAND is damaged. System titles such as the Wii Menu and "
-                    "the Wii Shop Channel may not work correctly."));
-  damaged_label->setWordWrap(true);
-  main_layout->addWidget(damaged_label);
+  // Text and buttons on the right.
+  auto* const text_column = new QVBoxLayout();
+  text_column->addWidget(
+      WrappedLabel(tr("The emulated NAND is damaged. System titles such as the Wii Menu and "
+                      "the Wii Shop Channel may not work correctly.")));
 
   if (!result.titles_to_remove.empty())
   {
-    QLabel* warning_label =
-        new QLabel(tr("WARNING: Fixing this NAND requires the deletion of titles that have "
-                      "incomplete data on the NAND, including all associated save data. "
-                      "By continuing, the following title(s) will be removed:"));
-    warning_label->setWordWrap(true);
-    main_layout->addWidget(warning_label);
+    text_column->addWidget(
+        WrappedLabel(tr("WARNING: Fixing this NAND requires the deletion of titles that have "
+                        "incomplete data on the NAND, including all associated save data. "
+                        "By continuing, the following title(s) will be removed:")));
 
-    std::string title_listings;
-    Core::TitleDatabase title_db;
-    const DiscIO::Language language = SConfig::GetInstance().GetCurrentLanguage(true);
-    for (const u64 title_id : result.titles_to_remove)
-    {
-      title_listings += fmt::format("{:016x}", title_id);
+    auto* const doomed_titles = new QPlainTextEdit(QString::fromStdString(DescribeTitles(result)));
+    doomed_titles->setReadOnly(true);
+    text_column->addWidget(doomed_titles);
 
-      const std::string database_name = title_db.GetChannelName(title_id, language);
-      if (!database_name.empty())
-      {
-        title_listings += " - " + database_name;
-      }
-      else
-      {
-        DiscIO::WiiSaveBanner banner(title_id);
-        if (banner.IsValid())
-        {
-          title_listings += " - " + banner.GetName();
-          const std::string description = banner.GetDescription();
-          if (!StripWhitespace(description).empty())
-            title_listings += " - " + description;
-        }
-      }
-
-      title_listings += "\n";
-    }
-
-    QPlainTextEdit* title_box = new QPlainTextEdit(QString::fromStdString(title_listings));
-    title_box->setReadOnly(true);
-    main_layout->addWidget(title_box);
-
-    QLabel* maybe_fix_label = new QLabel(tr("Launching these titles may also fix the issues."));
-    maybe_fix_label->setWordWrap(true);
-    main_layout->addWidget(maybe_fix_label);
+    text_column->addWidget(WrappedLabel(tr("Launching these titles may also fix the issues.")));
   }
 
-  QLabel* question_label = new QLabel(tr("Do you want to try to repair the NAND?"));
-  question_label->setWordWrap(true);
-  main_layout->addWidget(question_label);
+  text_column->addWidget(WrappedLabel(tr("Do you want to try to repair the NAND?")));
 
-  QDialogButtonBox* button_box = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No);
-  main_layout->addWidget(button_box);
+  auto* const answers = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No);
+  text_column->addWidget(answers);
 
-  QHBoxLayout* top_layout = new QHBoxLayout();
+  // A large warning icon on the left, pinned to the top.
+  auto* const warning_icon = new QLabel;
+  warning_icon->setPixmap(
+      QApplication::style()->standardIcon(QStyle::SP_MessageBoxWarning).pixmap(100));
+  warning_icon->setAlignment(Qt::AlignTop);
 
-  QIcon icon = QApplication::style()->standardIcon(QStyle::SP_MessageBoxWarning);
-  QLabel* icon_label = new QLabel;
-  icon_label->setPixmap(icon.pixmap(100));
-  icon_label->setAlignment(Qt::AlignTop);
-  top_layout->addWidget(icon_label);
-  top_layout->addSpacing(10);
+  auto* const row = new QHBoxLayout();
+  row->addWidget(warning_icon);
+  row->addSpacing(10);
+  row->addLayout(text_column);
+  setLayout(row);
 
-  top_layout->addLayout(main_layout);
-
-  setLayout(top_layout);
   resize(600, 400);
 
-  connect(button_box->button(QDialogButtonBox::Yes), &QPushButton::clicked, this, &QDialog::accept);
-  connect(button_box->button(QDialogButtonBox::No), &QPushButton::clicked, this, &QDialog::reject);
+  connect(answers->button(QDialogButtonBox::Yes), &QPushButton::clicked, this, &QDialog::accept);
+  connect(answers->button(QDialogButtonBox::No), &QPushButton::clicked, this, &QDialog::reject);
 }

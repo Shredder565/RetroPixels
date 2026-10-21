@@ -1,9 +1,11 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/ResourcePackManager.h"
 
+#include <array>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <QDesktopServices>
 #include <QDialogButtonBox>
@@ -19,326 +21,310 @@
 #include "UICommon/ResourcePack/Manager.h"
 #include "UICommon/ResourcePack/ResourcePack.h"
 
-ResourcePackManager::ResourcePackManager(QWidget* widget) : QDialog(widget)
+namespace
 {
-  CreateWidgets();
-  ConnectWidgets();
-  RepopulateTable();
+enum Column : int
+{
+  LOGO,
+  NAME,
+  VERSION,
+  DESCRIPTION,
+  AUTHOR,
+  WEBSITE,
+  COLUMN_COUNT
+};
+
+QString ToQString(const std::optional<std::string>& text)
+{
+  return QString::fromStdString(text.value_or(""));
+}
+
+QIcon LogoOf(const ResourcePack::ResourcePack& pack)
+{
+  const std::vector<char>& bytes = pack.GetLogo();
+  QPixmap logo;
+  logo.loadFromData(reinterpret_cast<const uchar*>(bytes.data()), static_cast<int>(bytes.size()));
+  return QIcon(logo);
+}
+}  // namespace
+
+ResourcePackManager::ResourcePackManager(QWidget* parent) : QDialog(parent)
+{
+  BuildLayout();
+  WireUp();
+  FillTable();
 
   setWindowTitle(tr("Resource Pack Manager"));
-
   resize(QSize(900, 600));
 }
 
-void ResourcePackManager::CreateWidgets()
+void ResourcePackManager::BuildLayout()
 {
-  auto* layout = new QGridLayout;
+  m_packs = new QTableWidget;
+  m_packs->setTabKeyNavigation(false);
 
-  m_table_widget = new QTableWidget;
-  m_table_widget->setTabKeyNavigation(false);
+  m_folder_button = new NonDefaultQPushButton(tr("Open Directory..."));
+  m_toggle_button = new NonDefaultQPushButton(tr("Install"));
+  m_delete_button = new NonDefaultQPushButton(tr("Remove"));
+  m_rescan_button = new NonDefaultQPushButton(tr("Refresh"));
+  m_up_button = new NonDefaultQPushButton(tr("Up"));
+  m_down_button = new NonDefaultQPushButton(tr("Down"));
 
-  m_open_directory_button = new NonDefaultQPushButton(tr("Open Directory..."));
-  m_change_button = new NonDefaultQPushButton(tr("Install"));
-  m_remove_button = new NonDefaultQPushButton(tr("Remove"));
-  m_refresh_button = new NonDefaultQPushButton(tr("Refresh"));
-  m_priority_up_button = new NonDefaultQPushButton(tr("Up"));
-  m_priority_down_button = new NonDefaultQPushButton(tr("Down"));
+  auto* const close_box = new QDialogButtonBox(QDialogButtonBox::Ok);
+  connect(close_box, &QDialogButtonBox::accepted, this, &QDialog::accept);
 
-  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok);
+  // The table fills the left; the action buttons stack down the right in a single column.
+  auto* const grid = new QGridLayout;
+  grid->addWidget(m_packs, 0, 0, 7, 1);
+  const std::array side_buttons{m_folder_button, m_toggle_button, m_delete_button,
+                                m_rescan_button, m_up_button,     m_down_button};
+  int grid_row = 0;
+  for (QPushButton* const button : side_buttons)
+    grid->addWidget(button, grid_row++, 1);
+  grid->addWidget(close_box, 7, 1, Qt::AlignRight);
 
-  connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-
-  layout->addWidget(m_table_widget, 0, 0, 7, 1);
-  layout->addWidget(m_open_directory_button, 0, 1);
-  layout->addWidget(m_change_button, 1, 1);
-  layout->addWidget(m_remove_button, 2, 1);
-  layout->addWidget(m_refresh_button, 3, 1);
-  layout->addWidget(m_priority_up_button, 4, 1);
-  layout->addWidget(m_priority_down_button, 5, 1);
-
-  layout->addWidget(buttons, 7, 1, Qt::AlignRight);
-  setLayout(layout);
-  setLayout(layout);
+  // Applied twice, as it always has been; the second call only makes Qt print a warning.
+  setLayout(grid);
+  setLayout(grid);
 }
 
-void ResourcePackManager::ConnectWidgets()
+void ResourcePackManager::WireUp()
 {
-  connect(m_open_directory_button, &QPushButton::clicked, this,
-          &ResourcePackManager::OpenResourcePackDir);
-  connect(m_refresh_button, &QPushButton::clicked, this, &ResourcePackManager::Refresh);
-  connect(m_change_button, &QPushButton::clicked, this, &ResourcePackManager::Change);
-  connect(m_remove_button, &QPushButton::clicked, this, &ResourcePackManager::Remove);
-  connect(m_priority_up_button, &QPushButton::clicked, this, &ResourcePackManager::PriorityUp);
-  connect(m_priority_down_button, &QPushButton::clicked, this, &ResourcePackManager::PriorityDown);
+  connect(m_folder_button, &QPushButton::clicked, this, &ResourcePackManager::ShowPackFolder);
+  connect(m_rescan_button, &QPushButton::clicked, this, &ResourcePackManager::Rescan);
+  connect(m_toggle_button, &QPushButton::clicked, this, &ResourcePackManager::ToggleInstalled);
+  connect(m_delete_button, &QPushButton::clicked, this, &ResourcePackManager::DeleteSelected);
+  connect(m_up_button, &QPushButton::clicked, this, &ResourcePackManager::MoveSelectedUp);
+  connect(m_down_button, &QPushButton::clicked, this, &ResourcePackManager::MoveSelectedDown);
 
-  connect(m_table_widget, &QTableWidget::itemSelectionChanged, this,
-          &ResourcePackManager::SelectionChanged);
-
-  connect(m_table_widget, &QTableWidget::itemDoubleClicked, this,
-          &ResourcePackManager::ItemDoubleClicked);
+  connect(m_packs, &QTableWidget::itemSelectionChanged, this, &ResourcePackManager::UpdateButtons);
+  connect(m_packs, &QTableWidget::itemDoubleClicked, this, &ResourcePackManager::FollowLink);
 }
 
-void ResourcePackManager::OpenResourcePackDir()
+void ResourcePackManager::ShowPackFolder()
 {
-  QDesktopServices::openUrl(
-      QUrl::fromLocalFile(QString::fromStdString(File::GetUserPath(D_RESOURCEPACK_IDX))));
+  const QString folder = QString::fromStdString(File::GetUserPath(D_RESOURCEPACK_IDX));
+  QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
 }
 
-void ResourcePackManager::RepopulateTable()
+void ResourcePackManager::FillTable()
 {
-  m_table_widget->clear();
-  m_table_widget->setColumnCount(6);
-
-  m_table_widget->setHorizontalHeaderLabels(
+  m_packs->clear();
+  m_packs->setColumnCount(COLUMN_COUNT);
+  m_packs->setHorizontalHeaderLabels(
       {QString{}, tr("Name"), tr("Version"), tr("Description"), tr("Author"), tr("Website")});
 
-  auto* header = m_table_widget->horizontalHeader();
-
-  for (int i = 0; i < 4; i++)
-    header->setSectionResizeMode(i, QHeaderView::ResizeToContents);
-
+  QHeaderView* const header = m_packs->horizontalHeader();
+  for (const int column : {LOGO, NAME, VERSION, DESCRIPTION})
+    header->setSectionResizeMode(column, QHeaderView::ResizeToContents);
   header->setStretchLastSection(true);
   header->setHighlightSections(false);
 
-  int size = static_cast<int>(ResourcePack::GetPacks().size());
+  std::vector<ResourcePack::ResourcePack>& packs = ResourcePack::GetPacks();
+  const int pack_count = static_cast<int>(packs.size());
 
-  m_table_widget->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_table_widget->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_packs->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_packs->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_packs->setRowCount(pack_count);
+  m_packs->setIconSize(QSize(32, 32));
 
-  m_table_widget->setRowCount(size);
-  m_table_widget->setIconSize(QSize(32, 32));
-
-  for (int i = 0; i < size; i++)
+  for (int row = 0; row < pack_count; ++row)
   {
-    const auto& pack = ResourcePack::GetPacks()[size - 1 - i];
-    const auto* manifest = pack.GetManifest();
-    const auto& authors = manifest->GetAuthors();
+    const ResourcePack::ResourcePack& pack = packs[static_cast<size_t>(PackIndexOfRow(row))];
+    const ResourcePack::Manifest& manifest = *pack.GetManifest();
 
-    auto* logo_item = new QTableWidgetItem;
-    auto* name_item = new QTableWidgetItem(QString::fromStdString(manifest->GetName()));
-    auto* version_item = new QTableWidgetItem(QString::fromStdString(manifest->GetVersion()));
-    auto* author_item =
-        new QTableWidgetItem(authors ? QString::fromStdString(*authors) : tr("Unknown author"));
-    auto* description_item =
-        new QTableWidgetItem(QString::fromStdString(manifest->GetDescription().value_or("")));
-    auto* website_item =
-        new QTableWidgetItem(QString::fromStdString(manifest->GetWebsite().value_or("")));
+    std::array<QTableWidgetItem*, COLUMN_COUNT> cells{};
+    cells[LOGO] = new QTableWidgetItem;
+    cells[LOGO]->setIcon(LogoOf(pack));
+    cells[NAME] = new QTableWidgetItem(QString::fromStdString(manifest.GetName()));
+    cells[VERSION] = new QTableWidgetItem(QString::fromStdString(manifest.GetVersion()));
+    cells[DESCRIPTION] = new QTableWidgetItem(ToQString(manifest.GetDescription()));
+    cells[AUTHOR] = new QTableWidgetItem(manifest.GetAuthors() ?
+                                             QString::fromStdString(*manifest.GetAuthors()) :
+                                             tr("Unknown author"));
 
-    QPixmap logo;
+    // The website looks like a link, and double-clicking it opens the URL kept in UserRole.
+    const QString url = ToQString(manifest.GetWebsite());
+    cells[WEBSITE] = new QTableWidgetItem(url);
+    QFont underlined = cells[WEBSITE]->font();
+    underlined.setUnderline(true);
+    cells[WEBSITE]->setFont(underlined);
+    cells[WEBSITE]->setForeground(QBrush(Qt::blue));
+    cells[WEBSITE]->setData(Qt::UserRole, url);
 
-    logo.loadFromData(reinterpret_cast<const uchar*>(pack.GetLogo().data()),
-                      (int)pack.GetLogo().size());
-
-    logo_item->setIcon(QIcon(logo));
-
-    QFont link_font = website_item->font();
-
-    link_font.setUnderline(true);
-
-    website_item->setFont(link_font);
-    website_item->setForeground(QBrush(Qt::blue));
-    website_item->setData(Qt::UserRole, website_item->text());
-
-    for (auto* item :
-         {logo_item, name_item, version_item, author_item, description_item, website_item})
+    // Installed packs stand out in bold on green.
+    const bool installed = ResourcePack::IsInstalled(pack);
+    for (QTableWidgetItem* const cell : cells)
     {
-      item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-
-      if (ResourcePack::IsInstalled(pack))
-      {
-        item->setBackground(QColor(Qt::green));
-
-        auto font = item->font();
-        font.setBold(true);
-        item->setFont(font);
-      }
+      cell->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+      if (!installed)
+        continue;
+      cell->setBackground(QColor(Qt::green));
+      QFont bold = cell->font();
+      bold.setBold(true);
+      cell->setFont(bold);
     }
 
-    m_table_widget->setItem(i, 0, logo_item);
-    m_table_widget->setItem(i, 1, name_item);
-    m_table_widget->setItem(i, 2, version_item);
-    m_table_widget->setItem(i, 3, description_item);
-    m_table_widget->setItem(i, 4, author_item);
-    m_table_widget->setItem(i, 5, website_item);
+    for (int column = 0; column < COLUMN_COUNT; ++column)
+      m_packs->setItem(row, column, cells[static_cast<size_t>(column)]);
   }
 
-  SelectionChanged();
+  UpdateButtons();
 }
 
-// Revert the indices as to be more intuitive for users
-int ResourcePackManager::GetResourcePackIndex(QTableWidgetItem* item) const
+int ResourcePackManager::PackIndexOfRow(int row) const
 {
-  return m_table_widget->rowCount() - 1 - item->row();
+  return m_packs->rowCount() - 1 - row;
 }
 
-void ResourcePackManager::Change()
+ResourcePack::ResourcePack* ResourcePackManager::SelectedPack() const
 {
-  auto items = m_table_widget->selectedItems();
+  const QList<QTableWidgetItem*> selection = m_packs->selectedItems();
+  if (selection.empty())
+    return nullptr;
+  const int index = PackIndexOfRow(selection.front()->row());
+  return &ResourcePack::GetPacks()[static_cast<size_t>(index)];
+}
 
-  if (items.empty())
+void ResourcePackManager::ToggleInstalled()
+{
+  const ResourcePack::ResourcePack* const pack = SelectedPack();
+  if (pack == nullptr)
     return;
 
-  if (ResourcePack::IsInstalled(ResourcePack::GetPacks()[GetResourcePackIndex(items[0])]))
-  {
-    Uninstall();
-  }
+  if (ResourcePack::IsInstalled(*pack))
+    UninstallSelected();
   else
+    InstallSelected();
+}
+
+void ResourcePackManager::InstallSelected()
+{
+  ResourcePack::ResourcePack* const pack = SelectedPack();
+  if (pack == nullptr)
+    return;
+
+  if (!pack->Install(File::GetUserPath(D_LOAD_IDX)))
   {
-    Install();
+    const QString why = QString::fromStdString(pack->GetError());
+    ModalMessageBox::critical(this, tr("Error"), tr("Failed to install pack: %1").arg(why));
   }
+  FillTable();
 }
 
-void ResourcePackManager::Install()
+void ResourcePackManager::UninstallSelected()
 {
-  auto items = m_table_widget->selectedItems();
-
-  if (items.empty())
+  ResourcePack::ResourcePack* const pack = SelectedPack();
+  if (pack == nullptr)
     return;
 
-  auto& item = ResourcePack::GetPacks()[GetResourcePackIndex(items[0])];
-
-  bool success = item.Install(File::GetUserPath(D_LOAD_IDX));
-
-  if (!success)
+  if (!pack->Uninstall(File::GetUserPath(D_LOAD_IDX)))
   {
-    ModalMessageBox::critical(
-        this, tr("Error"),
-        tr("Failed to install pack: %1").arg(QString::fromStdString(item.GetError())));
+    const QString why = QString::fromStdString(pack->GetError());
+    ModalMessageBox::critical(this, tr("Error"), tr("Failed to uninstall pack: %1").arg(why));
   }
-
-  RepopulateTable();
+  FillTable();
 }
 
-void ResourcePackManager::Uninstall()
+void ResourcePackManager::DeleteSelected()
 {
-  auto items = m_table_widget->selectedItems();
-
-  if (items.empty())
+  if (m_packs->selectedItems().empty())
     return;
 
-  auto& item = ResourcePack::GetPacks()[GetResourcePackIndex(items[0])];
+  ModalMessageBox confirm(this);
+  confirm.setWindowTitle(tr("Confirmation"));
+  confirm.setText(tr("Are you sure you want to delete this pack?"));
+  confirm.setIcon(QMessageBox::Warning);
+  confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Abort);
+  if (confirm.exec() != QMessageBox::Yes)
+    return;
 
-  bool success = item.Uninstall(File::GetUserPath(D_LOAD_IDX));
-
-  if (!success)
-  {
-    ModalMessageBox::critical(
-        this, tr("Error"),
-        tr("Failed to uninstall pack: %1").arg(QString::fromStdString(item.GetError())));
-  }
-
-  RepopulateTable();
+  // Uninstalling first takes its textures out of the load folder; it also refills the table,
+  // which is why the pack is looked up before that.
+  ResourcePack::ResourcePack& doomed = *SelectedPack();
+  const std::string file = doomed.GetPath();
+  UninstallSelected();
+  ResourcePack::Remove(doomed);
+  File::Delete(file);
+  FillTable();
 }
 
-void ResourcePackManager::Remove()
+// Moving a pack re-adds it at a neighbouring index, then selects the row at that index's number.
+// The first and last rows are special-cased the same way the buttons always have been.
+void ResourcePackManager::MoveSelectedDown()
 {
-  auto items = m_table_widget->selectedItems();
-
-  if (items.empty())
+  const QList<QTableWidgetItem*> selection = m_packs->selectedItems();
+  if (selection.empty())
     return;
 
-  ModalMessageBox box(this);
-  box.setWindowTitle(tr("Confirmation"));
-  box.setText(tr("Are you sure you want to delete this pack?"));
-  box.setIcon(QMessageBox::Warning);
-  box.setStandardButtons(QMessageBox::Yes | QMessageBox::Abort);
-
-  if (box.exec() != QMessageBox::Yes)
+  const int row = selection.front()->row();
+  if (row >= m_packs->rowCount())
     return;
 
-  ResourcePack::ResourcePack& selected_pack =
-      ResourcePack::GetPacks()[GetResourcePackIndex(items[0])];
-  const std::string selected_pack_path = selected_pack.GetPath();
-  Uninstall();
-  ResourcePack::Remove(selected_pack);
-  File::Delete(selected_pack_path);
-  RepopulateTable();
-}
-
-void ResourcePackManager::PriorityDown()
-{
-  auto items = m_table_widget->selectedItems();
-
-  if (items.empty())
-    return;
-
-  auto row = GetResourcePackIndex(items[0]);
-
-  if (items[0]->row() >= m_table_widget->rowCount())
-    return;
-
-  auto& pack = ResourcePack::GetPacks()[row];
-  std::string path = pack.GetPath();
-
-  row--;
+  int index = PackIndexOfRow(row);
+  ResourcePack::ResourcePack& pack = ResourcePack::GetPacks()[static_cast<size_t>(index)];
+  const std::string file = pack.GetPath();
+  index -= 1;
 
   ResourcePack::Remove(pack);
-  ResourcePack::Add(path, row);
+  ResourcePack::Add(file, index);
+  FillTable();
 
-  RepopulateTable();
-
-  m_table_widget->selectRow(row == 0 ? m_table_widget->rowCount() - 1 : row);
+  m_packs->selectRow(index == 0 ? m_packs->rowCount() - 1 : index);
 }
 
-void ResourcePackManager::PriorityUp()
+void ResourcePackManager::MoveSelectedUp()
 {
-  auto items = m_table_widget->selectedItems();
-
-  if (items.empty())
+  const QList<QTableWidgetItem*> selection = m_packs->selectedItems();
+  if (selection.empty())
     return;
 
-  auto row = GetResourcePackIndex(items[0]);
-
-  if (items[0]->row() == 0)
+  const int row = selection.front()->row();
+  if (row == 0)
     return;
 
-  auto& pack = ResourcePack::GetPacks()[row];
-  std::string path = pack.GetPath();
+  int index = PackIndexOfRow(row);
+  ResourcePack::ResourcePack& pack = ResourcePack::GetPacks()[static_cast<size_t>(index)];
+  const std::string file = pack.GetPath();
+  index += 1;
 
-  row++;
-
+  const bool past_end = row == m_packs->rowCount();
   ResourcePack::Remove(pack);
-  ResourcePack::Add(path, items[0]->row() == m_table_widget->rowCount() ? -1 : row);
+  ResourcePack::Add(file, past_end ? -1 : index);
+  FillTable();
 
-  RepopulateTable();
-
-  m_table_widget->selectRow(row == m_table_widget->rowCount() - 1 ? 0 : row);
+  m_packs->selectRow(index == m_packs->rowCount() - 1 ? 0 : index);
 }
 
-void ResourcePackManager::Refresh()
+void ResourcePackManager::Rescan()
 {
   ResourcePack::Init();
-  RepopulateTable();
+  FillTable();
 }
 
-void ResourcePackManager::SelectionChanged()
+void ResourcePackManager::UpdateButtons()
 {
-  auto items = m_table_widget->selectedItems();
+  const QList<QTableWidgetItem*> selection = m_packs->selectedItems();
+  const bool any = !selection.empty();
 
-  const bool has_selection = !items.empty();
-
-  if (has_selection)
+  if (any)
   {
-    m_change_button->setText(
-        ResourcePack::IsInstalled(ResourcePack::GetPacks()[GetResourcePackIndex(items[0])]) ?
-            tr("Uninstall") :
-            tr("Install"));
+    const auto& pack =
+        ResourcePack::GetPacks()[static_cast<size_t>(PackIndexOfRow(selection.front()->row()))];
+    m_toggle_button->setText(ResourcePack::IsInstalled(pack) ? tr("Uninstall") : tr("Install"));
   }
 
-  for (auto* item : {m_change_button, m_remove_button})
-    item->setEnabled(has_selection);
+  m_toggle_button->setEnabled(any);
+  m_delete_button->setEnabled(any);
 
-  m_priority_down_button->setEnabled(has_selection &&
-                                     items[0]->row() < m_table_widget->rowCount() - 1);
-  m_priority_up_button->setEnabled(has_selection && items[0]->row() != 0);
+  const int row = any ? selection.front()->row() : -1;
+  m_down_button->setEnabled(any && row < m_packs->rowCount() - 1);
+  m_up_button->setEnabled(any && row != 0);
 }
 
-void ResourcePackManager::ItemDoubleClicked(QTableWidgetItem* item)
+void ResourcePackManager::FollowLink(QTableWidgetItem* item)
 {
-  auto item_data = item->data(Qt::UserRole);
-
-  if (item_data.isNull())
-    return;
-
-  QDesktopServices::openUrl(QUrl(item_data.toString()));
+  const QVariant url = item->data(Qt::UserRole);
+  if (!url.isNull())
+    QDesktopServices::openUrl(QUrl(url.toString()));
 }

@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,35 +8,46 @@ class QPushButton;
 class QTableWidget;
 class QTableWidgetItem;
 
+namespace ResourcePack
+{
+class ResourcePack;
+}
+
+// Lists the resource packs found in the user's ResourcePacks folder (the last pack of the
+// manager's list in the first row) and lets the user install, uninstall, delete and reorder them.
+// Note: deliberately no Q_OBJECT, so tr() translates in the QDialog context.
 class ResourcePackManager : public QDialog
 {
 public:
   explicit ResourcePackManager(QWidget* parent = nullptr);
 
 private:
-  void CreateWidgets();
-  void ConnectWidgets();
-  void OpenResourcePackDir();
-  void RepopulateTable();
-  void Change();
-  void Install();
-  void Uninstall();
-  void Remove();
-  void PriorityUp();
-  void PriorityDown();
-  void Refresh();
+  void BuildLayout();
+  void WireUp();
 
-  void SelectionChanged();
-  void ItemDoubleClicked(QTableWidgetItem* item);
+  void FillTable();
+  void UpdateButtons();
 
-  int GetResourcePackIndex(QTableWidgetItem* item) const;
+  // The pack behind the first selected cell, or null when nothing is selected.
+  ResourcePack::ResourcePack* SelectedPack() const;
+  // Table rows and pack indices run in opposite directions.
+  int PackIndexOfRow(int row) const;
 
-  QPushButton* m_open_directory_button;
-  QPushButton* m_change_button;
-  QPushButton* m_remove_button;
-  QPushButton* m_refresh_button;
-  QPushButton* m_priority_up_button;
-  QPushButton* m_priority_down_button;
+  void ToggleInstalled();
+  void InstallSelected();
+  void UninstallSelected();
+  void DeleteSelected();
+  void MoveSelectedUp();
+  void MoveSelectedDown();
+  void Rescan();
+  void ShowPackFolder();
+  void FollowLink(QTableWidgetItem* item);
 
-  QTableWidget* m_table_widget;
+  QTableWidget* m_packs = nullptr;
+  QPushButton* m_folder_button = nullptr;
+  QPushButton* m_toggle_button = nullptr;
+  QPushButton* m_delete_button = nullptr;
+  QPushButton* m_rescan_button = nullptr;
+  QPushButton* m_up_button = nullptr;
+  QPushButton* m_down_button = nullptr;
 };

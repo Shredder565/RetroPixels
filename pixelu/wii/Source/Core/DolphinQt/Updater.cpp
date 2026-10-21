@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DolphinQt/Updater.h"
 
@@ -19,7 +18,7 @@
 #include "DolphinQt/QtUtils/RunOnObject.h"
 #include "DolphinQt/Settings.h"
 
-// Refer to docs/autoupdate_overview.md for a detailed overview of the autoupdate process
+// docs/autoupdate_overview.md describes the whole auto-update flow.
 
 Updater::Updater(QWidget* parent, std::string update_track, std::string hash_override)
     : m_parent(parent), m_update_track(std::move(update_track)),
@@ -30,90 +29,92 @@ Updater::Updater(QWidget* parent, std::string update_track, std::string hash_ove
 
 void Updater::run()
 {
-  AutoUpdateChecker::CheckForUpdate(m_update_track, m_hash_override,
-                                    AutoUpdateChecker::CheckType::Automatic);
+  AutoUpdateChecker::CheckForUpdate(m_update_track, m_hash_override, CheckType::Automatic);
 }
 
 void Updater::CheckForUpdate()
 {
-  AutoUpdateChecker::CheckForUpdate(m_update_track, m_hash_override,
-                                    AutoUpdateChecker::CheckType::Manual);
+  AutoUpdateChecker::CheckForUpdate(m_update_track, m_hash_override, CheckType::Manual);
 }
 
-void Updater::OnUpdateAvailable(const NewVersionInformation& info)
+void Updater::CloseParent()
 {
-  if (std::getenv("DOLPHIN_UPDATE_SERVER_URL"))
-  {
-    TriggerUpdate(info, AutoUpdateChecker::RestartMode::RESTART_AFTER_UPDATE);
-    RunOnObject(m_parent, [this] {
-      m_parent->close();
-      return 0;
-    });
-    return;
-  }
+  RunOnObject(m_parent, [this] {
+    m_parent->close();
+    return 0;
+  });
+}
 
-  bool later = false;
-
-  std::optional<int> choice = RunOnObject(m_parent, [&] {
-    QDialog* dialog = new QDialog(m_parent);
+std::optional<int> Updater::AskUser(const NewVersionInformation& info, bool* install_on_exit)
+{
+  return RunOnObject(m_parent, [this, &info, install_on_exit] {
+    auto* const dialog = new QDialog(m_parent);
     dialog->setAttribute(Qt::WA_DeleteOnClose, true);
     dialog->setWindowTitle(tr("Update available"));
 
-    auto* label = new QLabel(
+    auto* const column = new QVBoxLayout;
+    dialog->setLayout(column);
+
+    auto* const headline = new QLabel(
         tr("<h2>A new version of Dolphin is available!</h2>Dolphin %1 is available for "
            "download. "
            "You are running %2.<br> Would you like to update?<br><h4>Release Notes:</h4>")
             .arg(QString::fromStdString(info.new_shortrev))
             .arg(QString::fromStdString(Common::GetScmDescStr())));
-    label->setTextFormat(Qt::RichText);
+    headline->setTextFormat(Qt::RichText);
+    column->addWidget(headline);
 
-    auto* changelog = new QTextBrowser;
+    auto* const notes = new QTextBrowser;
+    notes->setHtml(QString::fromStdString(info.changelog_html));
+    notes->setOpenExternalLinks(true);
+    notes->setMinimumWidth(400);
+    column->addWidget(notes);
 
-    changelog->setHtml(QString::fromStdString(info.changelog_html));
-    changelog->setOpenExternalLinks(true);
-    changelog->setMinimumWidth(400);
+    auto* const defer = new QCheckBox(tr("Update after closing Dolphin"));
+    connect(defer, &QCheckBox::toggled, [install_on_exit](bool on) { *install_on_exit = on; });
+    column->addWidget(defer);
 
-    auto* update_later_check = new QCheckBox(tr("Update after closing Dolphin"));
+    auto* const choices = new QDialogButtonBox;
+    QPushButton* const never =
+        choices->addButton(tr("Never Auto-Update"), QDialogButtonBox::DestructiveRole);
+    choices->addButton(tr("Remind Me Later"), QDialogButtonBox::RejectRole);
+    choices->addButton(tr("Install Update"), QDialogButtonBox::AcceptRole);
+    column->addWidget(choices);
 
-    connect(update_later_check, &QCheckBox::toggled, [&](bool checked) { later = checked; });
-
-    auto* buttons = new QDialogButtonBox;
-
-    auto* never_btn =
-        buttons->addButton(tr("Never Auto-Update"), QDialogButtonBox::DestructiveRole);
-    buttons->addButton(tr("Remind Me Later"), QDialogButtonBox::RejectRole);
-    buttons->addButton(tr("Install Update"), QDialogButtonBox::AcceptRole);
-
-    auto* layout = new QVBoxLayout;
-    dialog->setLayout(layout);
-
-    layout->addWidget(label);
-    layout->addWidget(changelog);
-    layout->addWidget(update_later_check);
-    layout->addWidget(buttons);
-
-    connect(never_btn, &QPushButton::clicked, [dialog] {
+    // "Never" switches auto-update off by clearing the track, then dismisses the dialog.
+    connect(never, &QPushButton::clicked, [dialog] {
       Settings::Instance().SetAutoUpdateTrack(QString{});
       dialog->reject();
     });
-
-    connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(choices, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    connect(choices, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
 
     return dialog->exec();
   });
+}
 
-  if (choice && *choice == QDialog::Accepted)
+void Updater::OnUpdateAvailable(const NewVersionInformation& info)
+{
+  // With a custom update server (used for testing the updater) the update is applied without
+  // asking.
+  if (std::getenv("DOLPHIN_UPDATE_SERVER_URL") != nullptr)
   {
-    TriggerUpdate(info, later ? AutoUpdateChecker::RestartMode::NO_RESTART_AFTER_UPDATE :
-                                AutoUpdateChecker::RestartMode::RESTART_AFTER_UPDATE);
-
-    if (!later)
-    {
-      RunOnObject(m_parent, [this] {
-        m_parent->close();
-        return 0;
-      });
-    }
+    TriggerUpdate(info, RestartMode::RESTART_AFTER_UPDATE);
+    CloseParent();
+    return;
   }
+
+  bool install_on_exit = false;
+  const std::optional<int> answer = AskUser(info, &install_on_exit);
+  if (answer != QDialog::Accepted)
+    return;
+
+  if (install_on_exit)
+  {
+    TriggerUpdate(info, RestartMode::NO_RESTART_AFTER_UPDATE);
+    return;
+  }
+
+  TriggerUpdate(info, RestartMode::RESTART_AFTER_UPDATE);
+  CloseParent();
 }

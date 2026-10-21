@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 class QWidget;
 
+// Updates the emulated Wii's system software, either from Nintendo's update servers or from the
+// update partition of a disc image, with a progress dialog and a result message.
 namespace WiiUpdate
 {
 void PerformOnlineUpdate(const std::string& region, QWidget* parent = nullptr);
