@@ -66,7 +66,7 @@ stubs were written for running the server's tests. What each needs:
 | File and folder dialogs | PowerShell WinForms | zenity or kdialog (filters converted, "All files" added); `RETRO_TEST_PICK(_DIR)` answer them in tests | **L0 done** |
 | Open folder | explorer.exe | xdg-open | **L0 done** |
 | Is a program running | tasklist; Toolhelp32 (internal/dolphin) | /proc (exe link and argv[0]; "X" counts for "X.exe"; Wine found too) | **L0 done** |
-| .7z unpack (`systemUnpack7z`) | Windows 11 tar.exe | 7zz/7z/7za or bsdtar if installed; RetroPixels' own 7-Zip reader (sevenzip/) is the fallback on both | **L0 done** (main); internal/dolphin/unpack_other.go still stub → L1a |
+| .7z unpack (internal/dolphin `systemUnpack7z`) | Windows 11 tar.exe, else RetroPixels' own 7-Zip reader (sevenzip/) | 7zz/7z/7za or bsdtar when installed, else the same own reader (main's `systemUnpack7z` is unused on every system) | **L0 done** (internal/dolphin/unpack_linux.go) |
 | Single instance | /ping on port 47821 | same code, already portable | — |
 | Window icon (appicon_windows.go) | ExtractIconExW + WM_SETICON | `--class=RetroPixels` + `StartupWMClass` in the .desktop file + the page favicon; no code | L9 |
 | Tray / menus | none in the web app (the page is the UI) | — | — |
@@ -144,8 +144,8 @@ is updated only by the coordinator (each worker reports its result).
 
 | Batch | What | Owns | Needs |
 |---|---|---|---|
-| **L0** ✓ | Survey, this plan; Linux app window, dialogs, open folder, /proc, 7z in the Go app | platform_linux.go, internal/dolphin/proc_linux.go (+ tests) | — |
-| **L1a** | Engine names and folders on Linux: `PixelU`, `PixelU-Wii`, `supermodel` without .exe; `Downloads/…` finding; pick-dialog filters; Linux Dolphin user dir; Wii keys scan roots; system 7z in internal/dolphin | internal/pixelu/pixelu.go, internal/pixelu/wii.go, internal/supermodel/supermodel.go, internal/dolphin/{config,find,wiikeys_other,unpack_other}.go (+ `_linux.go` splits), internal/oldname, pixelu.go, supermodel.go, dolphin.go | L0 |
+| **L0** ✓ | Survey, this plan; Linux app window, dialogs, open folder, /proc, 7z in the Go app | platform_linux.go, internal/dolphin/{proc,unpack}_linux.go (+ tests) | — |
+| **L1a** | Engine names and folders on Linux: `PixelU`, `PixelU-Wii`, `supermodel` without .exe; `Downloads/…` finding; pick-dialog filters; Linux Dolphin user dir; Wii keys scan roots | internal/pixelu/pixelu.go, internal/pixelu/wii.go, internal/supermodel/supermodel.go, internal/dolphin/{config,find,wiikeys_other}.go (+ `_linux.go` splits), internal/oldname, pixelu.go, supermodel.go, dolphin.go | L0 |
 | **L1b** | The page on Linux: `window.RETRO_DESKTOP.os`, per-system wording and file filters in the page | web/index.html (wording only), main.go (one line) | — |
 | **L2a** | `internal/x11`: our own X11 protocol client in pure Go (connect over the Unix socket, MIT-MAGIC-COOKIE auth, atoms, QueryTree, GetProperty, ReparentWindow, Configure/Map/Unmap, SendEvent, events) | internal/x11/** | — |
 | **L2b** | Docking on Linux: `embed_linux.go` (child for PixelU-Wii/MAME, transient overlay for PixelU/Supermodel, kept below the game bar, focus, Stop via WM_DELETE_WINDOW then SIGTERM), `stopEmbeddedGame`, `pixeluScreen` caller; on Wayland Chrome and the engines are started for XWayland | embed_linux.go, embed_other.go (tag), platform_linux.go (browser flags) | L2a, L0 |

@@ -2,8 +2,8 @@ package main
 
 // The Linux side of platform_windows.go: the app window (Chrome, Chromium,
 // Edge or Brave in app mode, else the default browser), file and folder
-// dialogs (zenity or kdialog), opening folders (xdg-open), the running
-// programs (/proc) and .7z unpacking (7-Zip or bsdtar, when installed).
+// dialogs (zenity or kdialog), opening folders (xdg-open) and the running
+// programs (/proc). (.7z files are unpacked in internal/dolphin.)
 
 import (
 	"errors"
@@ -255,23 +255,4 @@ func openFolder(p string) error {
 		return fmt.Errorf("couldn't open %s: %v", p, err)
 	}
 	return nil
-}
-
-// systemUnpack7z unpacks a .7z with 7-Zip or bsdtar when one is installed.
-func systemUnpack7z(archive, dest string) error {
-	for _, z := range []string{"7zz", "7z", "7za"} {
-		if p, err := exec.LookPath(z); err == nil {
-			if out, err := exec.Command(p, "x", "-y", "-bd", "-o"+dest, archive).CombinedOutput(); err != nil {
-				return fmt.Errorf("%s: %v %s", z, err, strings.TrimSpace(string(out)))
-			}
-			return nil
-		}
-	}
-	if p, err := exec.LookPath("bsdtar"); err == nil {
-		if out, err := exec.Command(p, "-x", "-f", archive, "-C", dest).CombinedOutput(); err != nil {
-			return fmt.Errorf("bsdtar: %v %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
-	}
-	return errors.New("no system 7z unpacker")
 }
