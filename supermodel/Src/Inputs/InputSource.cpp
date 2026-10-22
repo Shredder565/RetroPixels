@@ -1,31 +1,4 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * InputSource.cpp
- *
- * Implementation of CInputSource. Obtains input values from the platform-
- * dependent input system and returns them as bools for switches and integer
- * values for analog inputs.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 
 #include "InputSource.h"
 
@@ -33,37 +6,26 @@
 #include "Input.h"
 #include "InputSystem.h"
 
-using namespace std;
-
-CInputSource::CInputSource(ESourceType sourceType) : m_acquired(0), type(sourceType)
+CInputSource::CInputSource(ESourceType sourceType)
+	: m_acquired(0), type(sourceType)
 {
-	//
 }
 
 void CInputSource::Acquire()
 {
 	m_acquired++;
-
-#ifdef DEBUG
-	CInputSystem::totalSrcsAcquired++;
-#endif
 }
 
 void CInputSource::Release()
 {
-	if (--m_acquired == 0)
+	m_acquired--;
+	if (m_acquired == 0)
 		delete this;
-
-#ifdef DEBUG
-	CInputSystem::totalSrcsReleased++;
-#endif
 }
 
 int CInputSource::Clamp(int val, int minVal, int maxVal)
 {
-	if      (val > maxVal) return maxVal;
-	else if (val < minVal) return minVal;
-	else                   return val;
+	return val > maxVal ? maxVal : (val < minVal ? minVal : val);
 }
 
 int CInputSource::Scale(int val, int fromMinVal, int fromMaxVal, int toMinVal, int toMaxVal)
@@ -73,68 +35,39 @@ int CInputSource::Scale(int val, int fromMinVal, int fromMaxVal, int toMinVal, i
 
 int CInputSource::Scale(int val, int fromMinVal, int fromOffVal, int fromMaxVal, int toMinVal, int toOffVal, int toMaxVal)
 {
-	double fromRange;
-	double frac;
-	if (fromMaxVal > fromMinVal)
-	{
-		val = Clamp(val, fromMinVal, fromMaxVal);
-		if (val > fromOffVal)
-		{
-			fromRange = (double)(fromMaxVal - fromOffVal);
-			frac = (double)(val - fromOffVal) / fromRange;
-		}
-		else if (val < fromOffVal)
-		{
-			fromRange = (double)(fromOffVal - fromMinVal);
-			frac = (double)(val - fromOffVal) / fromRange;
-		}
-		else
-			return toOffVal;
-	}
-	else if (fromMinVal > fromMaxVal)
-	{
-		val = Clamp(val, fromMaxVal, fromMinVal);
-		if (val > fromOffVal)
-		{
-			fromRange = (double)(fromMinVal - fromOffVal);
-			frac = (double)(fromOffVal - val) / fromRange;
-		}
-		else if (val < fromOffVal)
-		{
-			fromRange = (double)(fromOffVal - fromMaxVal);
-			frac = (double)(fromOffVal - val) / fromRange;
-		}
-		else
-			return toOffVal;
-	}
-	else
+	// Where val lies between the rest value (0) and the far end of its side
+	// (+1 on the side of fromMaxVal, -1 on the side of fromMinVal).
+	if (fromMaxVal == fromMinVal)
 		return toOffVal;
-	double toRange;
-	if (toMaxVal > toMinVal)
-	{
-		if (frac >= 0)
-			toRange = (double)(toMaxVal - toOffVal);
-		else
-			toRange = (double)(toOffVal - toMinVal);
-		return toOffVal + (int)(toRange * frac);
-	}
+	bool fromForward = fromMaxVal > fromMinVal;
+	val = fromForward ? Clamp(val, fromMinVal, fromMaxVal) : Clamp(val, fromMaxVal, fromMinVal);
+	if (val == fromOffVal)
+		return toOffVal;
+	// The distance from rest, counted positive towards fromMaxVal.
+	int distance = fromForward ? val - fromOffVal : fromOffVal - val;
+	bool towardsMax = fromForward ? val > fromOffVal : val < fromOffVal;
+	int span = towardsMax ? (fromForward ? fromMaxVal - fromOffVal : fromOffVal - fromMaxVal)
+	                      : (fromForward ? fromOffVal - fromMinVal : fromMinVal - fromOffVal);
+	double frac = (double)distance / (double)span;
+
+	// The same position on the 'to' side.
+	bool toForward = toMaxVal > toMinVal;
+	int toSpan;
+	if (frac >= 0)
+		toSpan = toForward ? toMaxVal - toOffVal : toOffVal - toMaxVal;
 	else
-	{
-		if (frac >= 0)
-			toRange = (double)(toOffVal - toMaxVal);
-		else
-			toRange = (double)(toMinVal - toOffVal);
-		return toOffVal - (int)(toRange * frac);
-	}
+		toSpan = toForward ? toOffVal - toMinVal : toMinVal - toOffVal;
+	int offset = (int)((double)toSpan * frac);
+	return toForward ? toOffVal + offset : toOffVal - offset;
 }
 
 bool CInputSource::IsActive() const
 {
-	bool boolVal;
-	return GetValueAsSwitch(boolVal);
+	bool unused = false;
+	return GetValueAsSwitch(unused);
 }
 
-bool CInputSource::SendForceFeedbackCmd(ForceFeedbackCmd ffCmd)
+bool CInputSource::SendForceFeedbackCmd(ForceFeedbackCmd)
 {
 	return false;
 }

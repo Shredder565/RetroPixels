@@ -1,23 +1,7 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// In-place byte order reversal of buffers of 16- or 32-bit words (ROM images
+// are stored big-endian on the Model 3's PowerPC side).
 
 #ifndef INCLUDED_BYTESWAP_H
 #define INCLUDED_BYTESWAP_H
@@ -27,7 +11,12 @@
 
 namespace Util
 {
+  // Swaps the two bytes of every whole 16-bit word in the first 'size' bytes
+  // (a trailing odd byte is left alone).
   void FlipEndian16(uint8_t *buffer, size_t size);
+
+  // Reverses the four bytes of every whole 32-bit word in the first 'size'
+  // bytes (up to three trailing bytes are left alone).
   void FlipEndian32(uint8_t *buffer, size_t size);
 } // Util
 

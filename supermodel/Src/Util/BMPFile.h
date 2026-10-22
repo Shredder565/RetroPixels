@@ -1,369 +1,173 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Writing a surface to a 32-bit Windows bitmap (BITMAPV4HEADER, BI_BITFIELDS,
+// BGRA byte order), for screenshots and for dumping texture RAM in each of
+// the Real3D texel formats. A pixel format is a type with bytes_per_pixel and
+// static GetRed/GetGreen/GetBlue/GetAlpha(const uint8_t *pixel).
 
 #ifndef INCLUDED_BMPFILE_HPP
 #define INCLUDED_BMPFILE_HPP
 
 #include "OSD/Logger.h"
-#include <memory>
-#include <string>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
 namespace Util
 {
-  namespace detail
+  namespace bmp
   {
-    #pragma pack(push, 1)
-
-    struct BMPHeader
+    // Texture RAM words are read in the host's byte order.
+    inline uint16_t Texel16(const uint8_t *pixel)
     {
-      uint8_t id[2];
-      uint32_t file_size;
-      uint16_t reserved1;
-      uint16_t reserved2;
-      uint32_t bitmap_offset;
-      BMPHeader(uint32_t _file_size, uint32_t _bitmap_offset)
-        : file_size(_file_size),
-          reserved1(0),
-          reserved2(0),
-          bitmap_offset(_bitmap_offset)
-      {
-  	    id[0] = 'B';
-  	    id[1] = 'M';
-  	  }
-    };
+      uint16_t v;
+      std::memcpy(&v, pixel, 2);
+      return v;
+    }
 
-    // BITMAPV4HEADER
-    struct BMPInfoHeader
+    // An n-bit channel value spread over 0..255 (truncating, as the float
+    // product 255/max * v).
+    template <unsigned Bits>
+    inline uint8_t Expand(unsigned v)
     {
-      uint32_t size;
-      int32_t width;
-      int32_t height;
-      uint16_t num_planes;
-      uint16_t bits_per_pixel;
-      uint32_t compression_method;
-      uint32_t bitmap_size;
-      int32_t horizontal_resolution;
-      int32_t vertical_resolution;
-      uint32_t num_palette_colors;
-      uint32_t num_important_colors;
-      uint32_t red_mask;
-      uint32_t green_mask;
-      uint32_t blue_mask;
-      uint32_t alpha_mask;
-      uint32_t color_space;
-      uint32_t endpoints_red_x;
-      uint32_t endpoints_red_y;
-      uint32_t endpoints_red_z;
-      uint32_t endpoints_green_x;
-      uint32_t endpoints_green_y;
-      uint32_t endpoints_green_z;
-      uint32_t endpoints_blue_x;
-      uint32_t endpoints_blue_y;
-      uint32_t endpoints_blue_z;
-      uint32_t gamma_red;
-      uint32_t gamma_green;
-      uint32_t gamma_blue;
-      BMPInfoHeader(int32_t _width, int32_t _height)
-        : size(sizeof(BMPInfoHeader)),
-          width(_width),
-          height(_height),
-          num_planes(1),
-          bits_per_pixel(32),
-          compression_method(3),        // BI_BITFIELDS
-          bitmap_size(_width*_height*4),
-          horizontal_resolution(2835),  // 72 dpi
-          vertical_resolution(2835),
-          num_palette_colors(0),
-          num_important_colors(0),
-          red_mask(0x00ff0000),
-          green_mask(0x0000ff00),
-          blue_mask(0x000000ff),
-          alpha_mask(0xff000000),
-          color_space(1),               // LCS_DEVICE_RGB
-          endpoints_red_x(0),
-          endpoints_red_y(0),
-          endpoints_red_z(0),
-          endpoints_green_x(0),
-          endpoints_green_y(0),
-          endpoints_green_z(0),
-          endpoints_blue_x(0),
-          endpoints_blue_y(0),
-          endpoints_blue_z(0),
-          gamma_red(0),
-          gamma_green(0),
-          gamma_blue(0)
-      {}
-    };
+      constexpr float scale = 255.0f / float((1u << Bits) - 1);
+      return uint8_t(scale * float(v & ((1u << Bits) - 1)));
+    }
 
-    struct FileHeader
+    inline void Put16(std::vector<uint8_t> &out, uint32_t v)
     {
-      BMPHeader bmp_header;
-      BMPInfoHeader bmp_info_header;
-      FileHeader(int32_t width, int32_t height)
-        : bmp_header(sizeof(FileHeader) + width*height*3, sizeof(FileHeader)),
-          bmp_info_header(width, height)
-      {}
-    };
+      out.push_back(uint8_t(v));
+      out.push_back(uint8_t(v >> 8));
+    }
 
-    #pragma pack(pop)
-  }
+    inline void Put32(std::vector<uint8_t> &out, uint32_t v)
+    {
+      for (int i = 0; i < 4; i++)
+        out.push_back(uint8_t(v >> (8 * i)));
+    }
 
+    constexpr uint32_t kFileHeaderSize = 14;
+    constexpr uint32_t kInfoHeaderSize = 108; // BITMAPV4HEADER
+    constexpr uint32_t kPixelOffset = kFileHeaderSize + kInfoHeaderSize;
+
+    inline void PutHeaders(std::vector<uint8_t> &out, int32_t width, int32_t height)
+    {
+      uint32_t pixelBytes = uint32_t(width) * uint32_t(height) * 4;
+      // BITMAPFILEHEADER
+      out.push_back('B');
+      out.push_back('M');
+      Put32(out, kPixelOffset + pixelBytes);  // file size
+      Put32(out, 0);                          // two reserved words
+      Put32(out, kPixelOffset);
+      // BITMAPV4HEADER
+      Put32(out, kInfoHeaderSize);
+      Put32(out, uint32_t(width));
+      Put32(out, uint32_t(height));           // positive: bottom row first
+      Put16(out, 1);                          // planes
+      Put16(out, 32);                         // bits per pixel
+      Put32(out, 3);                          // BI_BITFIELDS
+      Put32(out, pixelBytes);
+      Put32(out, 2835);                       // 72 dpi, in pixels per metre
+      Put32(out, 2835);
+      Put32(out, 0);                          // palette colours
+      Put32(out, 0);                          // important colours
+      Put32(out, 0x00ff0000);                 // red mask
+      Put32(out, 0x0000ff00);                 // green mask
+      Put32(out, 0x000000ff);                 // blue mask
+      Put32(out, 0xff000000);                 // alpha mask
+      Put32(out, 1);                          // LCS_DEVICE_RGB
+      for (int i = 0; i < 12; i++)            // endpoints and gamma: unused
+        Put32(out, 0);
+    }
+  } // bmp
+
+  // 8-bit R, G, B, A bytes.
   struct RGBA8
   {
     static constexpr unsigned bytes_per_pixel = 4;
-    static inline uint8_t GetRed(const uint8_t *pixel)
-    {
-      return pixel[0];
-    }
-    static inline uint8_t GetGreen(const uint8_t *pixel)
-    {
-      return pixel[1];
-    }
-    static inline uint8_t GetBlue(const uint8_t *pixel)
-    {
-      return pixel[2];
-    }
-    static inline uint8_t GetAlpha(const uint8_t *pixel)
-    {
-      return pixel[3];
-    }
+    static uint8_t GetRed(const uint8_t *p)   { return p[0]; }
+    static uint8_t GetGreen(const uint8_t *p) { return p[1]; }
+    static uint8_t GetBlue(const uint8_t *p)  { return p[2]; }
+    static uint8_t GetAlpha(const uint8_t *p) { return p[3]; }
   };
 
-  // Texture format 0: TRRR RRGG GGGB BBBB, T = contour bit
+  // Texel format 0: T RRRRR GGGGG BBBBB. With the contour bit honoured, T set
+  // means transparent; otherwise every texel is opaque.
   template <bool EnableContour>
   struct T1RGB5
   {
     static constexpr unsigned bytes_per_pixel = 2;
-    static inline uint8_t GetRed(const uint8_t *pixel)
+    static uint8_t GetRed(const uint8_t *p)   { return bmp::Expand<5>(bmp::Texel16(p) >> 10); }
+    static uint8_t GetGreen(const uint8_t *p) { return bmp::Expand<5>(bmp::Texel16(p) >> 5); }
+    static uint8_t GetBlue(const uint8_t *p)  { return bmp::Expand<5>(bmp::Texel16(p)); }
+    static uint8_t GetAlpha(const uint8_t *p)
     {
-      return uint8_t((255.0f / 31.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 10) & 0x1f));
-    }
-    static inline uint8_t GetGreen(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 31.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 5) & 0x1f));
-    }
-    static inline uint8_t GetBlue(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 31.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 0) & 0x1f));
-    }
-    static inline uint8_t GetAlpha(const uint8_t *pixel)
-    {
-      if (EnableContour)
-      {
-        bool t = (*reinterpret_cast<const uint16_t*>(pixel) >> 15) & 0x1;
-        return t ? uint8_t(0x00) : uint8_t(0xff); // T-bit indicates transparency
-      }
-      else
-      {
-        return 0xff;  // force opaque
-      }
+      if (!EnableContour)
+        return 0xff;
+      return (bmp::Texel16(p) & 0x8000) ? 0x00 : 0xff;
     }
   };
 
-using T1RGB5ContourEnabled = T1RGB5<true>;
-using T1RGB5ContourIgnored = T1RGB5<false>;
+  using T1RGB5ContourEnabled = T1RGB5<true>;
+  using T1RGB5ContourIgnored = T1RGB5<false>;
 
-  // Texture format 1: xxxx xxxx AAAA LLLL
-  struct A4L4Low
+  // Grey-scale texels: a 4-bit luminance and a 4-bit alpha at the given bit
+  // positions of the 16-bit word (formats 1-4).
+  template <unsigned LumShift, unsigned AlphaShift>
+  struct LumAlpha4
   {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xf));
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xf));
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xf));
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 4) & 0xf));
-      }
+    static constexpr unsigned bytes_per_pixel = 2;
+    static uint8_t Lum(const uint8_t *p)      { return bmp::Expand<4>(bmp::Texel16(p) >> LumShift); }
+    static uint8_t GetRed(const uint8_t *p)   { return Lum(p); }
+    static uint8_t GetGreen(const uint8_t *p) { return Lum(p); }
+    static uint8_t GetBlue(const uint8_t *p)  { return Lum(p); }
+    static uint8_t GetAlpha(const uint8_t *p) { return bmp::Expand<4>(bmp::Texel16(p) >> AlphaShift); }
   };
 
-  // Texture format 2: xxxx xxxx LLLL AAAA
-  struct L4A4Low
+  using A4L4Low = LumAlpha4<0, 4>;    // format 1: .... .... AAAA LLLL
+  using L4A4Low = LumAlpha4<4, 0>;    // format 2: .... .... LLLL AAAA
+  using A4L4High = LumAlpha4<8, 12>;  // format 3: AAAA LLLL .... ....
+  using L4A4High = LumAlpha4<12, 8>;  // format 4: LLLL AAAA .... ....
+
+  // 8-bit luminance in one byte of the word; 0xff is transparent (formats 5
+  // and 6).
+  template <unsigned Shift>
+  struct Lum8
   {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 4) & 0xf));
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 4) & 0xf));
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 4) & 0xf));
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xf));
-      }
+    static constexpr unsigned bytes_per_pixel = 2;
+    static uint8_t Lum(const uint8_t *p)      { return uint8_t(bmp::Texel16(p) >> Shift); }
+    static uint8_t GetRed(const uint8_t *p)   { return Lum(p); }
+    static uint8_t GetGreen(const uint8_t *p) { return Lum(p); }
+    static uint8_t GetBlue(const uint8_t *p)  { return Lum(p); }
+    static uint8_t GetAlpha(const uint8_t *p) { return Lum(p) == 0xff ? 0x00 : 0xff; }
   };
 
-  // Texture format 3: AAAA LLLL xxxx xxxx
-  struct A4L4High
-  {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xf));
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xf));
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xf));
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 12) & 0xf));
-      }
-  };
+  using L8Low = Lum8<0>;
+  using L8High = Lum8<8>;
 
-  // Texture format 4: LLLL AAAA xxxx xxxx
-  struct L4A4High
-  {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 12) & 0xf));
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 12) & 0xf));
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 12) & 0xf));
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xf));
-      }
-  };
-
-  // Texture format 5: xxxx xxxx LLLL LLLL, where L=0xff is transparent and L!=0xff is opaque
-  struct L8Low
-  {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xff);
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xff);
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xff);
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          uint8_t l = uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xff);
-          return l == 0xff ? 0 : 0xff;
-      }
-  };
-
-  // Texture format 6: LLLL LLLL xxxx xxxx, where L=0xff is transparent and L!=0xff is opaque
-  struct L8High
-  {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xff);
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xff);
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xff);
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          uint8_t l = uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xff);
-          return l == 0xff ? 0 : 0xff;
-      }
-  };
-
-  // Texture format 7: RRRR GGGG BBBB AAAA
+  // Texel format 7: RRRR GGGG BBBB AAAA.
   struct RGBA4
   {
     static constexpr unsigned bytes_per_pixel = 2;
-    static inline uint8_t GetRed(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 12) & 0xf));
-    }
-    static inline uint8_t GetGreen(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 8) & 0xf));
-    }
-    static inline uint8_t GetBlue(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 4) & 0xf));
-    }
-    static inline uint8_t GetAlpha(const uint8_t *pixel)
-    {
-      return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 0) & 0xf));
-    }
+    static uint8_t GetRed(const uint8_t *p)   { return bmp::Expand<4>(bmp::Texel16(p) >> 12); }
+    static uint8_t GetGreen(const uint8_t *p) { return bmp::Expand<4>(bmp::Texel16(p) >> 8); }
+    static uint8_t GetBlue(const uint8_t *p)  { return bmp::Expand<4>(bmp::Texel16(p) >> 4); }
+    static uint8_t GetAlpha(const uint8_t *p) { return bmp::Expand<4>(bmp::Texel16(p)); }
   };
 
-  // Texture format 8:  xxxx xxxx xxxx LLLL
-  // Texture format 9:  xxxx xxxx LLLL xxxx
-  // Texture format 10: xxxx LLLL xxxx xxxx
-  // Texture format 11: LLLL xxxx xxxx xxxx
+  // Texel formats 8-11: a 4-bit luminance in nibble Channel (0 = lowest);
+  // 0xf is transparent.
   template <int Channel>
   struct L4
   {
-      static constexpr unsigned bytes_per_pixel = 2;
-      static inline uint8_t GetRed(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> (Channel * 4)) & 0xf));
-      }
-      static inline uint8_t GetGreen(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> (Channel * 4)) & 0xf));
-      }
-      static inline uint8_t GetBlue(const uint8_t* pixel)
-      {
-          return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> (Channel * 4)) & 0xf));
-      }
-      static inline uint8_t GetAlpha(const uint8_t* pixel)
-      {
-          uint8_t l = (*reinterpret_cast<const uint16_t*>(pixel) >> (Channel * 4)) & 0xf;
-          return l == 0x0f ? 0x00 : 0xff;
-      }
+    static constexpr unsigned bytes_per_pixel = 2;
+    static unsigned Nibble(const uint8_t *p)  { return (bmp::Texel16(p) >> (4 * Channel)) & 0xf; }
+    static uint8_t GetRed(const uint8_t *p)   { return bmp::Expand<4>(Nibble(p)); }
+    static uint8_t GetGreen(const uint8_t *p) { return bmp::Expand<4>(Nibble(p)); }
+    static uint8_t GetBlue(const uint8_t *p)  { return bmp::Expand<4>(Nibble(p)); }
+    static uint8_t GetAlpha(const uint8_t *p) { return Nibble(p) == 0xf ? 0x00 : 0xff; }
   };
 
   using L4Channel0 = L4<0>;
@@ -371,55 +175,37 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   using L4Channel2 = L4<2>;
   using L4Channel3 = L4<3>;
 
+  // Writes a width x height surface (rows top to bottom in 'pixels') to
+  // file_name. A bitmap stores the bottom row first, so the rows are written
+  // in reverse unless flip_vertical is set (for a surface that is already
+  // bottom-up, such as an OpenGL read-back). Returns true on failure.
   template <class SurfaceFormat>
   static bool WriteSurfaceToBMP(const std::string &file_name, const uint8_t *pixels, int32_t width, int32_t height, bool flip_vertical)
   {
-    using namespace detail;
-    size_t file_size = sizeof(FileHeader) + width*height*4;
-    std::shared_ptr<uint8_t> file(new uint8_t[file_size], std::default_delete<uint8_t[]>());
-    FileHeader *header = new (file.get()) FileHeader(width, height);
-    uint8_t *bmp = file.get() + sizeof(*header);
-    if (!flip_vertical)
+    std::vector<uint8_t> out;
+    out.reserve(bmp::kPixelOffset + size_t(width) * size_t(height) * 4);
+    bmp::PutHeaders(out, width, height);
+    const size_t rowBytes = size_t(width) * SurfaceFormat::bytes_per_pixel;
+    for (int32_t i = 0; i < height; i++)
     {
-      for (int32_t y = height - 1; y >= 0; y--)
+      int32_t y = flip_vertical ? i : height - 1 - i;
+      const uint8_t *src = pixels + size_t(y) * rowBytes;
+      for (int32_t x = 0; x < width; x++, src += SurfaceFormat::bytes_per_pixel)
       {
-        const uint8_t *src = &pixels[y * width * SurfaceFormat::bytes_per_pixel];
-        for (int32_t x = 0; x < width; x++)
-        {
-          *bmp++ = SurfaceFormat::GetBlue(src);
-          *bmp++ = SurfaceFormat::GetGreen(src);
-          *bmp++ = SurfaceFormat::GetRed(src);
-          *bmp++ = SurfaceFormat::GetAlpha(src);
-          src += SurfaceFormat::bytes_per_pixel;
-        }
-      }
-    }
-    else
-    {
-      for (int32_t y = 0; y < height; y++)
-      {
-        const uint8_t *src = &pixels[y * width * SurfaceFormat::bytes_per_pixel];
-        for (int32_t x = 0; x < width; x++)
-        {
-          *bmp++ = SurfaceFormat::GetBlue(src);
-          *bmp++ = SurfaceFormat::GetGreen(src);
-          *bmp++ = SurfaceFormat::GetRed(src);
-          *bmp++ = SurfaceFormat::GetAlpha(src);
-          src += SurfaceFormat::bytes_per_pixel;
-        }
+        out.push_back(SurfaceFormat::GetBlue(src));
+        out.push_back(SurfaceFormat::GetGreen(src));
+        out.push_back(SurfaceFormat::GetRed(src));
+        out.push_back(SurfaceFormat::GetAlpha(src));
       }
     }
     FILE *fp = fopen(file_name.c_str(), "wb");
-    if (fp)
-    {
-      fwrite(file.get(), sizeof(uint8_t), file_size, fp);
-      fclose(fp);
-    }
-    else
+    if (!fp)
     {
       ErrorLog("Unable to open '%s' for writing.", file_name.c_str());
       return true;
     }
+    fwrite(out.data(), 1, out.size(), fp);
+    fclose(fp);
     return false;
   }
 } // Util

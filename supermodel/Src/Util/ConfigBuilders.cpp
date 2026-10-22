@@ -1,316 +1,235 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 
+#include "Util/ConfigBuilders.h"
 #include "Util/NewConfig.h"
 #include "OSD/Logger.h"
 #include "Pkgs/tinyxml2.h"
-#include <algorithm>
+#include <cstdio>
 #include <fstream>
-#include <queue>
+#include <map>
 #include <set>
-#include <cstdlib>
-#include <iostream>
 
 namespace Util
 {
   namespace Config
   {
-    static void PopulateFromXML(Util::Config::Node *config, const tinyxml2::XMLDocument &xml)
+    //
+    // XML
+    //
+
+    static void AddElement(Node *parent, const tinyxml2::XMLElement *element)
     {
-      using namespace tinyxml2;
-      std::queue<std::pair<const XMLElement *, Util::Config::Node *>> q;
+      const char *text = element->GetText();
+      Node &node = parent->Add(element->Name(), std::string(text ? text : ""));
+      for (const tinyxml2::XMLAttribute *a = element->FirstAttribute(); a; a = a->Next())
+        node.Add(a->Name(), a->Value());
+      for (const tinyxml2::XMLElement *child = element->FirstChildElement(); child; child = child->NextSiblingElement())
+        AddElement(&node, child);
+    }
 
-      // Push the top level of the XML tree
-      for (const XMLElement *e = xml.RootElement(); e != 0; e = e->NextSiblingElement())
-        q.push( { e, config } );
-
-      // Process the elements in order, pushing subsequent levels along with the
-      // config nodes to add them to
-      while (!q.empty())
-      {
-        const XMLElement *element = q.front().first;
-        Util::Config::Node *parent_node = q.front().second;
-        q.pop();
-
-        // Create a config entry for this XML element
-        Util::Config::Node *node = &parent_node->Add(element->Name(), element->GetText() ? std::string(element->GetText()) : std::string());
-
-        // Create entries for each attribute
-        for (const XMLAttribute *a = element->FirstAttribute(); a != 0; a = a->Next())
-          node->Add(a->Name(), a->Value());
-
-        // Push all child elements
-        for (const XMLElement *e = element->FirstChildElement(); e != 0; e = e->NextSiblingElement())
-          q.push( { e, node } );
-      }
+    static void AddDocument(Node *config, const tinyxml2::XMLDocument &doc)
+    {
+      for (const tinyxml2::XMLElement *e = doc.RootElement(); e; e = e->NextSiblingElement())
+        AddElement(config, e);
     }
 
     bool FromXML(Node *config, const std::string &text)
     {
       *config = Node("xml");
-      using namespace tinyxml2;
-      XMLDocument xml;
-      auto ret = xml.Parse(text.c_str());
-      if (ret != XML_SUCCESS)
+      tinyxml2::XMLDocument doc;
+      if (doc.Parse(text.c_str()) != tinyxml2::XML_SUCCESS)
       {
-        ErrorLog("Failed to parse XML (%s).", xml.ErrorName());
+        ErrorLog("Failed to parse XML (%s).", doc.ErrorName());
         return true;
       }
-      PopulateFromXML(config, xml);
+      AddDocument(config, doc);
       return false;
     }
 
     bool FromXMLFile(Node *config, const std::string &filename)
     {
       *config = Node("xml");
-      using namespace tinyxml2;
-      XMLDocument xml;
-      auto ret = xml.LoadFile(filename.c_str());
-      if (ret != XML_SUCCESS)
+      tinyxml2::XMLDocument doc;
+      if (doc.LoadFile(filename.c_str()) != tinyxml2::XML_SUCCESS)
       {
-        ErrorLog("Failed to parse %s (%s).", filename.c_str(), xml.ErrorName());
+        ErrorLog("Failed to parse %s (%s).", filename.c_str(), doc.ErrorName());
         return true;
       }
-      PopulateFromXML(config, xml);
+      AddDocument(config, doc);
       return false;
     }
 
-    static std::string StripComment(const std::string &line)
+    //
+    // INI
+    //
+
+    // The line up to the first ';' that is not between double quotes.
+    static std::string WithoutComment(const std::string &line)
     {
-      // Find first semicolon not enclosed in ""
-      bool inside_quotes = false;
-      for (auto it = line.begin(); it != line.end(); ++it)
+      bool quoted = false;
+      for (size_t i = 0; i < line.size(); i++)
       {
-        inside_quotes ^= (*it == '\"');
-        if (!inside_quotes && *it == ';')
-          return std::string(line.begin(), it);
+        if (line[i] == '"')
+          quoted = !quoted;
+        else if (line[i] == ';' && !quoted)
+          return line.substr(0, i);
       }
       return line;
     }
 
-    static bool ParseAssignment(Node *current_section, const std::string &filename, size_t line_num, const std::string &line, bool suppress_errors)
+    struct Setting
     {
-      bool parse_error = false;
+      std::string name;
+      std::string value;
+    };
 
-      size_t idx_equals = line.find_first_of('=');
-      if (idx_equals == std::string::npos)
-      {
-        if (!suppress_errors)
-          ErrorLog("%s:%d: Syntax error. No '=' found.", filename.c_str(), line_num);
-        return true;
-      }
-      std::string lvalue(TrimWhiteSpace(std::string(line.begin(), line.begin() + idx_equals)));
-      if (lvalue.empty())
-      {
-        if (!suppress_errors)
-          ErrorLog("%s:%d: Syntax error. Setting name missing before '='.", filename.c_str(), line_num);
-        return true;
-      }
-      // Get rvalue, which is allowed to be empty and strip off quotes if they
-      // exist. Only a single pair of quotes encasing the rvalue are permitted.
-      std::string rvalue(TrimWhiteSpace(std::string(line.begin() + idx_equals + 1, line.end())));
-      size_t idx_first_quote = rvalue.find_first_of('\"');
-      size_t idx_last_quote = rvalue.find_last_of('\"');
-      if (idx_first_quote == 0 && idx_last_quote == (rvalue.length() - 1) && idx_first_quote != idx_last_quote)
-        rvalue = std::string(rvalue.begin() + idx_first_quote + 1, rvalue.begin() + idx_last_quote);
-      if (std::count(rvalue.begin(), rvalue.end(), '\"') != 0)
-      {
-        if (!suppress_errors)
-          ErrorLog("%s:%d: Warning: Extraneous quotes present on line.", filename.c_str(), line_num);
-        parse_error = true;
-      }
-      // In INI files, we do not allow multiple settings with the same key. If
-      // a setting is specified multiple times, previous ones are overwritten.
-      current_section->Set(lvalue, rvalue);
-      return parse_error;
-    }
-
-    static void ParseAssignment(const std::set<Node *> &current_sections, const std::string &filename, size_t line_num, const std::string &line)
+    // Splits "name = value". Returns false (with a message) if the line is
+    // not a setting at all; 'warning' is set for stray quotes, which are
+    // reported but the setting is still taken.
+    static bool ReadSetting(const std::string &line, const std::string &filename, size_t line_num, bool quiet, Setting &out, bool &warning)
     {
-      bool suppress_errors = false;
-      for (auto section: current_sections)
+      warning = false;
+      size_t equals = line.find('=');
+      if (equals == std::string::npos)
       {
-        suppress_errors |= ParseAssignment(section, filename, line_num, line, suppress_errors);
+        if (!quiet)
+          ErrorLog("%s:%d: Syntax error. No '=' found.", filename.c_str(), int(line_num));
+        return false;
       }
+      out.name = TrimWhiteSpace(line.substr(0, equals));
+      if (out.name.empty())
+      {
+        if (!quiet)
+          ErrorLog("%s:%d: Syntax error. Setting name missing before '='.", filename.c_str(), int(line_num));
+        return false;
+      }
+      std::string value = TrimWhiteSpace(line.substr(equals + 1));
+      if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+        value = value.substr(1, value.size() - 2);
+      if (value.find('"') != std::string::npos)
+      {
+        if (!quiet)
+          ErrorLog("%s:%d: Warning: Extraneous quotes present on line.", filename.c_str(), int(line_num));
+        warning = true;
+      }
+      out.value = value;
+      return true;
     }
 
     bool FromINIFile(Node *config, const std::string &filename)
     {
-      std::ifstream file;
-      file.open(filename);
+      std::ifstream file(filename);
       if (file.fail())
       {
         ErrorLog("Unable to open '%s'. Configuration will not be loaded.", filename.c_str());
         return true;
       }
 
-      *config = Node("Global"); // the root is also the "Global" section
+      *config = Node("Global");
       Node &global = *config;
-      std::set<Node *> current_sections{ &global }; // default when no section specified
+      // The sections the current settings go to. A set (by address) so a
+      // section named twice in one header gets each setting once.
+      std::set<Node *> targets{ &global };
 
       size_t line_num = 1;
-      while (!file.eof())
+      for (;; line_num++)
       {
+        if (file.eof())
+          break;
         if (file.fail())
         {
-          ErrorLog("%s:%d: File read error. Configuration will be incomplete.");
+          ErrorLog("%s:%d: File read error. Configuration will be incomplete.", filename.c_str(), int(line_num));
           return true;
         }
-
         std::string line;
         std::getline(file, line);
-        line = StripComment(line);
-        line = TrimWhiteSpace(line);
+        line = TrimWhiteSpace(WithoutComment(line));
+        if (line.empty())
+          continue;
 
-        if (!line.empty())
+        if (line.front() == '[' && line.back() == ']')
         {
-          if (*line.begin() == '[' && *line.rbegin() == ']')
+          targets.clear();
+          for (const std::string &piece : Util::Format(line.substr(1, line.size() - 2)).Split(','))
           {
-            current_sections.clear();
-            std::string sections(line.begin() + 1, line.begin() + line.length() - 1);
-
-            // Handle multiple sections [ a,b,c ] by splitting on ',' and processing individually
-            std::vector<std::string> section_list = Util::Format(sections).Split(',');
-            for (const std::string &s: section_list)
-            {
-              // Check if section exists else create a new one
-              std::string section = TrimWhiteSpace(s);
-              Node *section_node = nullptr;
-              if (section.empty() || section == "Global") // empty section names (e.g., "[]") assigned to "[ Global ]"
-                section_node = &global;
-              else if (!global.TryGet(section))
-              {
-                Node &new_section = global.Add(section);
-                section_node = &new_section;
-              }
-              else
-                section_node = global.TryGet(section);
-
-              // Add to current sections
-              current_sections.insert(section_node);
-            }
+            std::string name = TrimWhiteSpace(piece);
+            Node *section;
+            if (name.empty() || name == "Global")
+              section = &global;
+            else if (Node *found = global.TryGet(name))
+              section = found;
+            else
+              section = &global.Add(name);
+            targets.insert(section);
           }
-          else
-          {
-            ParseAssignment(current_sections, filename, line_num, line);
-          }
+          continue;
         }
 
-        line_num++;
+        // A setting: the same for every current section. Once a problem has
+        // been reported for this line it is not reported again.
+        bool quiet = false;
+        for (Node *section : targets)
+        {
+          Setting setting;
+          bool warning;
+          if (ReadSetting(line, filename, line_num, quiet, setting, warning))
+          {
+            section->Set(setting.name, setting.value);
+            quiet |= warning;
+          }
+          else
+            quiet = true;
+        }
       }
-
       return false;
     }
 
-    /*
-     * Produces a new INI section by merging two existing sections.
-     *
-     * - Nodes from x and y with children are ignored as per INI semantics.
-     *   The presence of children indicates a section, not a setting.
-     * - Settings from y override settings in x if already present.
-     * - If multiple settings with the same key are present in either of the
-     *   source configs (which technically violates INI semantics), the last
-     *   ends up being used.
-     * - x's key is retained.
-     */
     void MergeINISections(Node *merged, const Node &x, const Node &y)
     {
-      *merged = Node(x.Key());  // result has same key as x
+      *merged = Node(x.Key());
 
-      std::map<std::string, std::shared_ptr<ValueRange>> mapX;
-      std::map<std::string, std::shared_ptr<ValueRange>> mapY;
+      // x's value range for each key (the last value-holding node with that
+      // key decides, even if it has no range).
+      std::map<std::string, std::shared_ptr<ValueRange>> ranges;
 
-      // First copy settings from section x
-      for (auto it = x.begin(); it != x.end(); ++it)
+      for (const Node &setting : x)
       {
-        if (it->IsLeaf())
-        {
-          // INI semantics: take care to only create a single setting per key
-          auto key = it->Key();
-          auto val = it->GetValue();
-
-          merged->Set(key, val);
-
-          //build new map from value ranges
-          if (val) {
-            mapX[key] = val->GetValueRange();
-          }
-        }
+        if (!setting.IsLeaf())
+          continue;
+        std::shared_ptr<GenericValue> value = setting.GetValue();
+        merged->Set(setting.Key(), value);
+        if (value)
+          ranges[setting.Key()] = value->GetValueRange();
       }
 
-      // Merge in settings from section y
-      for (auto it = y.begin(); it != y.end(); ++it)
+      for (const Node &setting : y)
       {
-        if (it->IsLeaf() && it->Exists()) {
-
-          auto key = it->Key();
-          auto val = it->GetValue();
-
-          merged->Set(key, val);
-
-          //build new map from value ranges
-          if (val) {
-            mapY[key] = val->GetValueRange();
-          }
-        }
+        if (setting.IsLeaf() && setting.Exists())
+          merged->Set(setting.Key(), setting.GetValue());
       }
 
-      // merge the value ranges if they exist for the keys
-      // this code is overly cumbersome 
-      for (auto& m : mapX) {
-          if (m.second) {
-
-            for (auto it = merged->begin(); it != merged->end(); ++it) {
-
-                auto key = it->Key();
-                auto val = it->GetValue();
-
-                if (m.first == key) {
-                    if (val) {
-                        val->SetValueRange(m.second);
-                    }
-                }
-            }
-          }
+      for (Node &setting : *merged)
+      {
+        auto range = ranges.find(setting.Key());
+        if (range != ranges.end() && range->second && setting.GetValue())
+          setting.GetValue()->SetValueRange(range->second);
       }
     }
 
     static void WriteSection(std::ofstream &file, const Node &section)
     {
-      file << "[ " << section.Key() << " ]" << std::endl;
-      file << std::endl;
-      for (auto it = section.begin(); it != section.end(); ++it)
+      file << "[ " << section.Key() << " ]" << std::endl << std::endl;
+      for (const Node &setting : section)
       {
-        if (it->IsLeaf()) {//TODO: check if value exists?
-            if (it->Empty()) continue;
-            file << it->Key() << " = " << it->ValueAs<std::string>() << std::endl;
-        }
+        if (setting.IsLeaf() && setting.Exists())
+          file << setting.Key() << " = " << setting.ValueAs<std::string>() << std::endl;
       }
       file << std::endl << std::endl;
     }
 
     void WriteINIFile(const std::string &filename, const Node &config, const std::string &header_comment)
     {
-      std::ofstream file;
-      file.open(filename);
+      std::ofstream file(filename);
       if (file.fail())
       {
         ErrorLog("Unable to write to '%s'. Configuration will not be saved.", filename.c_str());
@@ -319,10 +238,10 @@ namespace Util
       if (!header_comment.empty())
         file << header_comment << std::endl << std::endl;
       WriteSection(file, config);
-      for (auto it = config.begin(); it != config.end(); ++it)
+      for (const Node &section : config)
       {
-        if (it->HasChildren())
-          WriteSection(file, *it);
+        if (section.HasChildren())
+          WriteSection(file, section);
       }
       printf("Configuration successfully saved to '%s'.\n", filename.c_str());
       InfoLog("Configuration successfully saved to '%s'.", filename.c_str());

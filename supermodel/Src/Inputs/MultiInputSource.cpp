@@ -1,112 +1,64 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * MultiInputSource.cpp
- *
- * Implementation of CMultiInputSource.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 
 #include "MultiInputSource.h"
 
 #include "Supermodel.h"
 #include "Input.h"
 
-#include <vector>
-using namespace std;
-
-ESourceType CMultiInputSource::GetCombinedType(vector<CInputSource*> &sources)
+ESourceType CMultiInputSource::GetCombinedType(std::vector<CInputSource*> &sources)
 {
-	// Check if vector is empty
 	if (sources.empty())
 		return SourceEmpty;
-	// Otherwise, see whether all sources are switches, or if have a full- or half-axis present
-	bool allSwitches = true;
-	bool hasFullAxis = false;
-	bool hasHalfAxis = false;
-	for (vector<CInputSource*>::iterator it = sources.begin(); it != sources.end(); ++it)
+	bool full = false;
+	bool half = false;
+	bool other = false;
+	for (CInputSource *s : sources)
 	{
-		if ((*it)->type == SourceInvalid)
-			return SourceInvalid;  // An invalid source makes the whole lot invalid
-		else if ((*it)->type == SourceSwitch)
-			continue;
-		allSwitches = false;
-		if ((*it)->type == SourceFullAxis)
+		switch (s->type)
 		{
-			if (hasHalfAxis)
-				return SourceInvalid;  // A half-axis and full-axis combined makes the whole lot invalid
-			hasFullAxis = true;
+		case SourceInvalid:  return SourceInvalid;
+		case SourceSwitch:   break;
+		case SourceFullAxis: full = true; break;
+		case SourceHalfAxis: half = true; break;
+		default:             other = true; break;
 		}
-		else if ((*it)->type == SourceHalfAxis)
-		{
-			if (hasFullAxis)
-				return SourceInvalid;  // A half-axis and full-axis combined makes the whole lot invalid
-			hasHalfAxis = true;
-		}
+		if (full && half)
+			return SourceInvalid;
 	}
-	// Return resulting combined type
-	if      (allSwitches) return SourceSwitch;
-	else if (hasFullAxis) return SourceFullAxis;
-	else if (hasHalfAxis) return SourceHalfAxis;
-	else                  return SourceEmpty;
+	if (full)
+		return SourceFullAxis;
+	if (half)
+		return SourceHalfAxis;
+	return other ? SourceEmpty : SourceSwitch;
 }
 
-CMultiInputSource::CMultiInputSource() : CInputSource(SourceEmpty), m_isOr(true), m_numSrcs(0), m_srcArray(NULL) 
+CMultiInputSource::CMultiInputSource()
+	: CInputSource(SourceEmpty), m_isOr(true)
 {
-	//
 }
 
-CMultiInputSource::CMultiInputSource(bool isOr, vector<CInputSource*> &sources) : 
-	CInputSource(GetCombinedType(sources)), m_isOr(isOr), m_numSrcs(sources.size())
+CMultiInputSource::CMultiInputSource(bool isOr, std::vector<CInputSource*> &sources)
+	: CInputSource(GetCombinedType(sources)), m_isOr(isOr), m_parts(sources)
 {
-	m_srcArray = new CInputSource*[m_numSrcs];
-	copy(sources.begin(), sources.end(), m_srcArray);
 }
 
 CMultiInputSource::~CMultiInputSource()
 {
-	delete [] m_srcArray;
 }
 
 void CMultiInputSource::Acquire()
 {
 	CInputSource::Acquire();
-
 	if (m_acquired == 1)
-	{
-		// Acquire all sources
-		for (size_t i = 0; i < m_numSrcs; i++)
-			m_srcArray[i]->Acquire();
-	}
+		for (CInputSource *s : m_parts)
+			s->Acquire();
 }
 
 void CMultiInputSource::Release()
 {
 	if (m_acquired == 1)
-	{
-		// Release all sources
-		for (size_t i = 0; i < m_numSrcs; i++)
-			m_srcArray[i]->Release();
-	}
-
+		for (CInputSource *s : m_parts)
+			s->Release();
 	CInputSource::Release();
 }
 
@@ -114,95 +66,73 @@ bool CMultiInputSource::GetValueAsSwitch(bool &val) const
 {
 	if (m_isOr)
 	{
-		// Return value for first input that is active
-		for (size_t i = 0; i < m_numSrcs; i++)
-		{
-			if (m_srcArray[i]->GetValueAsSwitch(val))
+		for (CInputSource *s : m_parts)
+			if (s->GetValueAsSwitch(val))
 				return true;
-		}
 		return false;
 	}
-	else
-	{
-		// Check all inputs are active
-		for (size_t i = 0; i < m_numSrcs; i++)
-		{
-			if (!m_srcArray[i]->GetValueAsSwitch(val))
-				return false;
-		}
-		return m_numSrcs > 0;
-	}
+	for (CInputSource *s : m_parts)
+		if (!s->GetValueAsSwitch(val))
+			return false;
+	return !m_parts.empty();
 }
 
 bool CMultiInputSource::GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
 {
 	if (m_isOr)
 	{
-		// Return value for first input that is active
-		for (size_t i = 0; i < m_numSrcs; i++)
-		{
-			if (m_srcArray[i]->GetValueAsAnalog(val, minVal, offVal, maxVal))
+		for (CInputSource *s : m_parts)
+			if (s->GetValueAsAnalog(val, minVal, offVal, maxVal))
 				return true;
-		}
 		return false;
 	}
-	else
-	{
-		// Check all switch inputs are active
-		for (size_t i = 0; i < m_numSrcs; i++)
-		{
-			if (m_srcArray[i]->type == SourceSwitch && !m_srcArray[i]->GetValueAsAnalog(val, minVal, offVal, maxVal))
-				return false;
-		}
-		// If so, then return value for first non-switch input that is active
-		for (size_t i = 0; i < m_numSrcs; i++)
-		{
-			if (m_srcArray[i]->type != SourceSwitch && m_srcArray[i]->GetValueAsAnalog(val, minVal, offVal, maxVal))
-				return true;
-		}
-		// If non found, then value is only valid if not empty and all inputs are switches 
-		return m_numSrcs > 0 && type == SourceSwitch;
-	}
+	// Every switch must be held (each is read, in order, until one is not)...
+	for (CInputSource *s : m_parts)
+		if (s->type == SourceSwitch && !s->GetValueAsAnalog(val, minVal, offVal, maxVal))
+			return false;
+	// ...then the first moved axis gives the value.
+	for (CInputSource *s : m_parts)
+		if (s->type != SourceSwitch && s->GetValueAsAnalog(val, minVal, offVal, maxVal))
+			return true;
+	return !m_parts.empty() && type == SourceSwitch;
 }
 
 bool CMultiInputSource::SendForceFeedbackCmd(ForceFeedbackCmd ffCmd)
 {
-	bool result = false;
-	for (size_t i = 0; i < m_numSrcs; i++)
-		result |= m_srcArray[i]->SendForceFeedbackCmd(ffCmd);
-	return result;
+	bool taken = false;
+	for (CInputSource *s : m_parts)
+		taken |= s->SendForceFeedbackCmd(ffCmd);
+	return taken;
 }
 
-CNegInputSource::CNegInputSource(CInputSource *source) : CInputSource(source->type), m_source(source) 
+CNegInputSource::CNegInputSource(CInputSource *source)
+	: CInputSource(source->type), m_source(source)
 {
-	// Acquire source
+	// This reference lasts as long as the negation exists (it is not given
+	// back on the last Release, so the negated source outlives it).
 	m_source->Acquire();
 }
 
 void CNegInputSource::Acquire()
 {
 	CInputSource::Acquire();
-
-	// Acquire source
 	if (m_acquired == 1)
 		m_source->Acquire();
 }
 
 void CNegInputSource::Release()
 {
-	// Release source
 	if (m_acquired == 1)
 		m_source->Release();
-
 	CInputSource::Release();
 }
 
 bool CNegInputSource::GetValueAsSwitch(bool &val) const
 {
-	bool oldVal = val;
+	bool kept = val;
 	if (m_source->GetValueAsSwitch(val))
 	{
-		val = oldVal;
+		val = kept;
 		return false;
 	}
 	val = true;
@@ -211,10 +141,10 @@ bool CNegInputSource::GetValueAsSwitch(bool &val) const
 
 bool CNegInputSource::GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
 {
-	int oldVal = val;
+	int kept = val;
 	if (m_source->GetValueAsAnalog(val, minVal, offVal, maxVal))
 	{
-		val = oldVal;
+		val = kept;
 		return false;
 	}
 	val = maxVal;

@@ -1,30 +1,11 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// CInputSource: something an input reads from (a key, a mouse or joystick
+// axis, a button, a POV direction, or a combination of these). A source
+// answers as a switch (on/off) or as an analog value scaled to the range the
+// input asks for. Sources are reference counted with Acquire()/Release() and
+// delete themselves when the last reference goes.
 
-/*
- * InputSource.h
- *
- * Header file for CInputSource.
- */
- 
 #ifndef INCLUDED_INPUTSOURCE_H
 #define INCLUDED_INPUTSOURCE_H
 
@@ -32,79 +13,59 @@
 
 struct ForceFeedbackCmd;
 
-/*
- * Enumeration to represent different types of sources.
- */
+// What kind of values a source gives. Combinations of sources take the kind
+// of their parts (see CMultiInputSource::GetCombinedType).
 enum ESourceType
 {
-	SourceInvalid = -1,
-	SourceEmpty = 0,
-	SourceSwitch = 1,
-	SourceHalfAxis = 2,
-	SourceFullAxis = 3
+	SourceInvalid = -1,  // cannot be used (e.g. half and full axes mixed)
+	SourceEmpty = 0,     // never active
+	SourceSwitch = 1,    // key or button
+	SourceHalfAxis = 2,  // one direction of an axis
+	SourceFullAxis = 3   // a whole axis
 };
- 
-/*
- * Provides values to inputs, either in the form of a bool for switch inputs or an int value within a given range for analog/axis inputs.
- */
+
 class CInputSource
 {
 protected:
+	// Number of references held.
 	unsigned m_acquired;
 
 	CInputSource(ESourceType sourceType);
-	virtual ~CInputSource() {};
+	virtual ~CInputSource() {}
 
 public:
-	/*
-	 * The type of this source.
-	 */
 	const ESourceType type;
 
 	virtual void Acquire();
 
+	// Drops a reference; the source deletes itself on the last one.
 	virtual void Release();
 
-	//
-	// Static helper methods
-	//
-
-	/*
-	 * Clamps the given value to between the min and max values.
-	 */
+	// val limited to [minVal, maxVal].
 	static int Clamp(int val, int minVal, int maxVal);
 
-	/*
- 	 * Scales the given value, that falls within the stated 'from' range, to be between the given 'to' range.
-	 */
+	// Maps val linearly from [fromMinVal, fromMaxVal] to [toMinVal, toMaxVal]
+	// (each range's minimum is its rest value).
 	static int Scale(int val, int fromMinVal, int fromMaxVal, int toMinVal, int toMaxVal);
 
-	/*
-	 * Scales the given value, that falls within the stated 'from' range, to be between the given 'to' range.
-	 * The off values are supplied to avoid rounding errors and ensure that the scaled value has the correct off value when required.
-	 */
+	// Maps val from the 'from' range to the 'to' range, each with a rest
+	// ('off') value somewhere inside it: the part on each side of the rest
+	// value is mapped separately, so the rest value maps exactly to toOffVal.
+	// Either range may run backwards (max below min).
 	static int Scale(int val, int fromMinVal, int fromOffVal, int fromMaxVal, int toMinVal, int toOffVal, int toMaxVal);
 
-	/*
-	 * Returns true if the source is active (taken from GetValueAsSwitch).
-	 */
+	// True if the source is on (as a switch).
 	bool IsActive() const;
 
-	/*
-	 * Reads a boolean value for a switch input.
-	 * Returns true if the value was set.
-	 */
+	// If the source is on, sets val (to true) and returns true.
 	virtual bool GetValueAsSwitch(bool &val) const = 0;
 
-	/*
-	 * Reads an int value for an analog/axis input, guaranteeing that the value falls within the given range and has the correct off value when required.
-	 * Returns true if the value was set.
-	 */
+	// If the source is away from rest, sets val to its value in the given
+	// range and returns true.
 	virtual bool GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal) = 0;
 
-	/*
-	 * Sends a force feedback command to the input source.
-	 */
+	// Passes a force feedback command on to the device; false if it cannot
+	// take it.
 	virtual bool SendForceFeedbackCmd(ForceFeedbackCmd ffCmd);
 };
 

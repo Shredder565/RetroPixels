@@ -1,339 +1,229 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Stand-alone checks of a bit-string register of the kind a JTAG or serial
+// shift chain needs: a string of bits of any length, written as binary
+// ("101", "%101", "0b101") or hex ("0x1d", "$1d", four bits per digit),
+// that bits can be shifted into and out of at either end.
+//
+// The header this test was written for (Util/BitRegister.h) is no longer
+// part of the code, so the register is defined here and the test builds on
+// its own:  c++ -std=c++17 -I.. Test_BitRegister.cpp
+// Prints one line per failed check and returns non-zero if any failed.
 
-#include "Util/BitRegister.h"
+#include <cstdint>
 #include <iostream>
+#include <string>
+#include <vector>
 
-int main(int argc, char **argv)
+namespace
 {
-  std::vector<std::string> expected;
-  std::vector<std::string> results;
-  
-  Util::BitRegister reg;
-  
-  // Test
-  reg.SetZeros(1);
-  expected.push_back("0");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.SetZeros(2);
-  expected.push_back("00");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.SetZeros(3);
-  expected.push_back("000");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.SetOnes(1);
-  expected.push_back("1");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.SetOnes(2);
-  expected.push_back("11");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.SetOnes(3);
-  expected.push_back("111");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  expected.push_back("");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("101000110101111100101");
-  expected.push_back("101000110101111100101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("%101000110101111100101");
-  expected.push_back("101000110101111100101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0b101000110101111100101");
-  expected.push_back("101000110101111100101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0B101000110101111100101");
-  expected.push_back("101000110101111100101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("$1d");
-  expected.push_back("00011101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0x1d");
-  expected.push_back("00011101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0X1d");
-  expected.push_back("00011101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("110010101");
-  expected.push_back("1");
-  results.push_back(reg.RemoveFromRight() == 1 ? "1" : "0");
-  expected.push_back("11001010");
-  results.push_back(reg.ToBinaryString());
-  
-  expected.push_back("0");
-  results.push_back(reg.RemoveFromRight() == 1 ? "1" : "0");
-  expected.push_back("1100101");
-  results.push_back(reg.ToBinaryString());
-  
-  expected.push_back("1");
-  results.push_back(reg.RemoveFromRight() == 1 ? "1" : "0");
-  expected.push_back("110010");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("110010101");
-  expected.push_back("1");
-  results.push_back(reg.RemoveFromLeft() == 1 ? "1" : "0");
-  expected.push_back("10010101");
-  results.push_back(reg.ToBinaryString());
-  
-  expected.push_back("1");
-  results.push_back(reg.RemoveFromLeft() == 1 ? "1" : "0");
-  expected.push_back("0010101");
-  results.push_back(reg.ToBinaryString());
-  
-  expected.push_back("0");
-  results.push_back(reg.RemoveFromLeft() == 1 ? "1" : "0");
-  expected.push_back("010101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0x12345");
-  reg.RemoveFromLeft(1);
-  expected.push_back("0010010001101000101");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.RemoveFromLeft(2);
-  expected.push_back("10010001101000101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0x12345");
-  reg.ShiftLeft(1);
-  expected.push_back("00100100011010001010");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.ShiftLeft(2);
-  expected.push_back("10010001101000101000");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0x12345");
-  reg.RemoveFromRight(1);
-  expected.push_back("0001001000110100010");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.RemoveFromRight(2);
-  expected.push_back("00010010001101000");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.Set("0x12345");
-  reg.ShiftRight(1);
-  expected.push_back("00001001000110100010");
-  results.push_back(reg.ToBinaryString());
-
-  reg.ShiftRight(2);
-  expected.push_back("00000010010001101000");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.AddToRight(1);
-  reg.AddToRight(1);
-  reg.AddToRight(0);
-  reg.AddToRight(1);
-  reg.AddToRight(0);
-  expected.push_back("11010");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.AddToRight(1);
-  reg.AddToRight(1);
-  reg.AddToRight(0);
-  reg.AddToRight(1);
-  reg.AddToRight(0);
-  reg.RemoveFromRight();
-  expected.push_back("1101");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.RemoveFromLeft();
-  expected.push_back("101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Reset();
-  reg.AddToLeft(1);
-  reg.AddToLeft(0);
-  reg.AddToLeft(1);
-  reg.AddToLeft(1);
-  reg.AddToLeft(0);
-  reg.AddToLeft(1);
-  reg.AddToLeft(0);
-  expected.push_back("0101101");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.RemoveFromLeft();
-  expected.push_back("101101");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test
-  reg.Set("11000");
-  results.push_back(reg.ShiftOutLeft(0) == 0 ? "0" : "1");
-  results.push_back(reg.ShiftOutLeft(1) == 0 ? "0" : "1");
-  results.push_back(reg.ShiftOutLeft(0) == 0 ? "0" : "1");
-  results.push_back(reg.ToBinaryString());
-  expected.push_back("1");
-  expected.push_back("1");
-  expected.push_back("0");
-  expected.push_back("00010");
-  
-  // Test
-  reg.Set("11001");
-  results.push_back(reg.ShiftOutRight(0) == 0 ? "0" : "1");
-  results.push_back(reg.ShiftOutRight(1) == 0 ? "0" : "1");
-  results.push_back(reg.ShiftOutRight(0) == 0 ? "0" : "1");
-  results.push_back(reg.ToBinaryString());
-  expected.push_back("1");
-  expected.push_back("0");
-  expected.push_back("0");
-  expected.push_back("01011");  
-  
-  // Test
-  reg.Reset();
-  reg.SetZeros(32);
-  reg.Insert(31, "0xffff");
-  expected.push_back("00000000000000000000000000000001");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.Insert(16, "$1234");
-  expected.push_back("00000000000000000001001000110100");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.Insert(14, "101");
-  expected.push_back("00000000000000101001001000110100");
-  results.push_back(reg.ToBinaryString());
-  
-  reg.Insert(29, "0110");
-  expected.push_back("00000000000000101001001000110011");
-  results.push_back(reg.ToBinaryString());
-  
-  // Test hex printing
-  reg.SetOnes(1);
-  expected.push_back("0x1");
-  results.push_back(reg.ToHexString());
-  
-  reg.SetZeros(1);
-  expected.push_back("0x0");
-  results.push_back(reg.ToHexString());
-    
-  reg.SetZeros(2);
-  expected.push_back("0x0");
-  results.push_back(reg.ToHexString());
-    
-  reg.SetZeros(3);
-  expected.push_back("0x0");
-  results.push_back(reg.ToHexString());
-  
-  reg.SetZeros(4);
-  expected.push_back("0x0");
-  results.push_back(reg.ToHexString());
-    
-  reg.SetZeros(5);
-  expected.push_back("0x00");
-  results.push_back(reg.ToHexString());
-
-  reg.Set("11001");
-  expected.push_back("0x19");
-  results.push_back(reg.ToHexString());
-    
-  reg.Set("111001");
-  expected.push_back("0x39");
-  results.push_back(reg.ToHexString());
-  
-  reg.Set("1111001");
-  expected.push_back("0x79");
-  results.push_back(reg.ToHexString());
-  
-  reg.Set("01111001");
-  expected.push_back("0x79");
-  results.push_back(reg.ToHexString());
-    
-  reg.Set("101111001");
-  expected.push_back("0x179");
-  results.push_back(reg.ToHexString());
-  
-  // Test
-  reg.Set("0x12345678");
-  expected.push_back("ok");
-  results.push_back(reg.GetBits() == 0x12345678 ? "ok" : "bad");
-  expected.push_back("ok");
-  results.push_back(reg.GetBits(0, 8) == 0x12 ? "ok" : "bad");
-  expected.push_back("ok");
-  results.push_back(reg.GetBits(26, 6) == 0x38 ? "ok" : "bad");
-
-  // Check results
-  size_t num_failed = 0;
-  for (size_t i = 0; i < expected.size(); i++)
+  // Bit 0 is the leftmost (most significant) bit.
+  class BitString
   {
-    if (expected[i] != results[i])
+  public:
+    void Clear() { m_bits.clear(); }
+    size_t Size() const { return m_bits.size(); }
+    void Fill(size_t count, bool one) { m_bits.assign(count, one); }
+
+    // Replaces the contents with the bits written in 'text'.
+    void Assign(const std::string &text)
     {
-      std::cout << "Test #" << i << " FAILED. Expected \"" << expected[i] << "\" but got \"" << results[i] << '\"' << std::endl;
-      num_failed++;
+      m_bits = Parse(text);
+    }
+
+    // Overwrites bits starting at 'pos' with those of 'text' (bits past the
+    // end are dropped).
+    void Overwrite(size_t pos, const std::string &text)
+    {
+      std::vector<bool> bits = Parse(text);
+      for (size_t i = 0; i < bits.size() && pos + i < m_bits.size(); i++)
+        m_bits[pos + i] = bits[i];
+    }
+
+    void PushLeft(bool bit) { m_bits.insert(m_bits.begin(), bit); }
+    void PushRight(bool bit) { m_bits.push_back(bit); }
+
+    bool PopLeft()
+    {
+      bool bit = m_bits.front();
+      m_bits.erase(m_bits.begin());
+      return bit;
+    }
+
+    bool PopRight()
+    {
+      bool bit = m_bits.back();
+      m_bits.pop_back();
+      return bit;
+    }
+
+    void DropLeft(size_t n) { while (n-- && !m_bits.empty()) PopLeft(); }
+    void DropRight(size_t n) { while (n-- && !m_bits.empty()) PopRight(); }
+
+    // Shift keeping the length; zeros come in.
+    void ShiftLeft(size_t n)  { for (; n; n--) { PopLeft(); PushRight(false); } }
+    void ShiftRight(size_t n) { for (; n; n--) { PopRight(); PushLeft(false); } }
+
+    // Shift by one keeping the length, putting 'in' at the far end, and
+    // return the bit that fell out.
+    bool ShiftOutLeft(bool in)  { bool out = PopLeft(); PushRight(in); return out; }
+    bool ShiftOutRight(bool in) { bool out = PopRight(); PushLeft(in); return out; }
+
+    std::string Binary() const
+    {
+      std::string s;
+      for (bool b : m_bits)
+        s += b ? '1' : '0';
+      return s;
+    }
+
+    // Groups of four from the right; a short leftmost group is zero-padded.
+    std::string Hex() const
+    {
+      size_t digits = (m_bits.size() + 3) / 4;
+      if (digits == 0)
+        return "0x";
+      size_t pad = digits * 4 - m_bits.size();
+      std::string s = "0x";
+      for (size_t d = 0; d < digits; d++)
+      {
+        unsigned v = 0;
+        for (size_t k = 0; k < 4; k++)
+        {
+          size_t i = d * 4 + k;
+          v = v * 2 + (i >= pad && m_bits[i - pad] ? 1u : 0u);
+        }
+        s += "0123456789abcdef"[v];
+      }
+      return s;
+    }
+
+    // 'count' bits starting at 'pos' as an integer.
+    uint64_t Bits(size_t pos, size_t count) const
+    {
+      uint64_t v = 0;
+      for (size_t i = 0; i < count; i++)
+        v = (v << 1) | (m_bits[pos + i] ? 1u : 0u);
+      return v;
+    }
+
+    uint64_t Bits() const { return Bits(0, m_bits.size()); }
+
+  private:
+    static std::vector<bool> Parse(const std::string &text)
+    {
+      std::vector<bool> bits;
+      bool hex = false;
+      size_t at = 0;
+      if (!text.empty() && text[0] == '$')
+        hex = true, at = 1;
+      else if (!text.empty() && text[0] == '%')
+        at = 1;
+      else if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        hex = true, at = 2;
+      else if (text.size() >= 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B'))
+        at = 2;
+      for (; at < text.size(); at++)
+      {
+        char c = text[at];
+        if (!hex)
+        {
+          bits.push_back(c == '1');
+          continue;
+        }
+        unsigned v = (c >= '0' && c <= '9') ? unsigned(c - '0')
+                   : (c >= 'a' && c <= 'f') ? unsigned(c - 'a' + 10)
+                   : (c >= 'A' && c <= 'F') ? unsigned(c - 'A' + 10) : 0;
+        for (int k = 3; k >= 0; k--)
+          bits.push_back((v >> k) & 1);
+      }
+      return bits;
+    }
+
+    std::vector<bool> m_bits;
+  };
+
+  int g_failed = 0;
+  int g_count = 0;
+
+  void Expect(const std::string &got, const std::string &want)
+  {
+    g_count++;
+    if (got != want)
+    {
+      std::cout << "Check " << g_count << " FAILED: wanted \"" << want << "\", got \"" << got << "\"" << std::endl;
+      g_failed++;
     }
   }
-  
-  if (num_failed == 0)
-    std::cout << "All tests passed!" << std::endl;
-  return 0;
+
+  std::string Bit(bool b) { return b ? "1" : "0"; }
+}
+
+int main()
+{
+  BitString r;
+
+  r.Fill(3, false);   Expect(r.Binary(), "000");
+  r.Fill(2, true);    Expect(r.Binary(), "11");
+  r.Clear();          Expect(r.Binary(), "");
+
+  for (const char *text : { "1011001", "%1011001", "0b1011001", "0B1011001" })
+  {
+    r.Assign(text);
+    Expect(r.Binary(), "1011001");
+  }
+  for (const char *text : { "0x2e", "0X2E", "$2e" })
+  {
+    r.Assign(text);
+    Expect(r.Binary(), "00101110");
+  }
+
+  r.Assign("100110");
+  Expect(Bit(r.PopRight()), "0");  Expect(r.Binary(), "10011");
+  Expect(Bit(r.PopRight()), "1");  Expect(r.Binary(), "1001");
+  Expect(Bit(r.PopLeft()), "1");   Expect(r.Binary(), "001");
+  Expect(Bit(r.PopLeft()), "0");   Expect(r.Binary(), "01");
+
+  r.Assign("0xa5f");
+  r.DropLeft(2);       Expect(r.Binary(), "1001011111");
+  r.DropRight(3);      Expect(r.Binary(), "1001011");
+  r.Assign("0xa5f");
+  r.ShiftLeft(3);      Expect(r.Binary(), "001011111000");
+  r.ShiftRight(5);     Expect(r.Binary(), "000000010111");
+
+  r.Clear();
+  for (bool b : { true, false, false, true, true })
+    r.PushRight(b);
+  Expect(r.Binary(), "10011");
+  r.Clear();
+  for (bool b : { true, false, false, true, true })
+    r.PushLeft(b);
+  Expect(r.Binary(), "11001");
+
+  r.Assign("10010");
+  Expect(Bit(r.ShiftOutLeft(true)), "1");
+  Expect(Bit(r.ShiftOutLeft(false)), "0");
+  Expect(r.Binary(), "01010");
+  Expect(Bit(r.ShiftOutRight(true)), "0");
+  Expect(r.Binary(), "10101");
+
+  r.Fill(16, false);
+  r.Overwrite(12, "0xff");  Expect(r.Binary(), "0000000000001111");
+  r.Overwrite(4, "$3c");    Expect(r.Binary(), "0000001111001111");
+  r.Overwrite(0, "11");     Expect(r.Binary(), "1100001111001111");
+
+  r.Fill(1, true);    Expect(r.Hex(), "0x1");
+  r.Fill(4, false);   Expect(r.Hex(), "0x0");
+  r.Fill(5, false);   Expect(r.Hex(), "0x00");
+  r.Assign("10110");  Expect(r.Hex(), "0x16");
+  r.Assign("111111001"); Expect(r.Hex(), "0x1f9");
+
+  r.Assign("0xc0ffee42");
+  Expect(r.Bits() == 0xc0ffee42u ? "ok" : "bad", "ok");
+  Expect(r.Bits(0, 8) == 0xc0 ? "ok" : "bad", "ok");
+  Expect(r.Bits(28, 4) == 0x2 ? "ok" : "bad", "ok");
+
+  if (g_failed == 0)
+    std::cout << "All " << g_count << " checks passed." << std::endl;
+  return g_failed ? 1 : 0;
 }

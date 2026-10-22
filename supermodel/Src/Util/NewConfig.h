@@ -1,32 +1,30 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The configuration tree. Each Node has a key, an optional value (see
+// Util/GenericValue.h) and an ordered list of children. Paths name nested
+// nodes with '/', so node["a/b"] is child "b" of child "a".
+//
+// - Children keep the order they were added in; the same key may be added
+//   more than once, and lookups by key then find the most recently added.
+// - operator[] never fails: a path that is not there gives a "missing"
+//   placeholder (kept by the node, so the reference stays valid) on which
+//   ValueAsDefault() returns its default, Exists() is false and Value(),
+//   ValueAs() and SetValue() throw. Get() throws and TryGet() returns
+//   nullptr instead.
+// - An INI file is a tree whose root (key "Global") holds the global
+//   settings and one child per section (see Util/ConfigBuilders.h).
 
 #ifndef INCLUDED_UTIL_CONFIG_H
 #define INCLUDED_UTIL_CONFIG_H
 
 #include "Util/GenericValue.h"
+#include <iterator>
 #include <map>
 #include <memory>
-#include <exception>
-#include <iterator>
+#include <ostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace Util
 {
@@ -34,91 +32,64 @@ namespace Util
   {
     class Node
     {
-    private:
-      typedef std::shared_ptr<Node> ptr_t;
-      typedef std::shared_ptr<const Node> const_ptr_t;
-      const std::string m_key;                // this cannot be changed (maps depend on it)
-      std::shared_ptr<GenericValue> m_value;  // null pointer marks this node as an invalid, empty node
-      ptr_t m_next_sibling;
-      ptr_t m_first_child;
-      ptr_t m_last_child;
-      std::map<std::string, ptr_t> m_children;
-      mutable std::map<std::string, Node> m_missing_nodes;  // missing nodes from failed queries (must also be empty)
-      bool m_missing = false;
-
-      void Destroy()
-      {
-        m_value.reset();
-        m_next_sibling.reset();
-        m_first_child.reset();
-        m_last_child.reset();
-        m_children.clear();
-      }
-
-      void CheckEmptyOrMissing() const;
-      Node& MissingNode(const std::string& key) const;
-      Node &AddEmpty(const std::string &path);
-      void AddChild(Node &parent, ptr_t &node);
-      void DeepCopy(const Node &that);
-      void Swap(Node &rhs);
-      Node(); // prohibit accidental/unintentional creation of empty nodes
-
     public:
-
-      template <typename T>
-      class NodeIterator {
-      private:
-          std::shared_ptr<T> m_node;
-
+      // Walks a node's children in order.
+      template <typename NodeType>
+      class ChildIterator
+      {
       public:
-          NodeIterator(std::shared_ptr<T> node = nullptr)
-              : m_node(std::move(node)) {}
+        ChildIterator(std::shared_ptr<NodeType> node = nullptr)
+          : m_at(std::move(node))
+        {}
 
-          NodeIterator& operator++() 
-          {
-              m_node = std::static_pointer_cast<T>(m_node->m_next_sibling);
-              return *this;
-          }
+        ChildIterator &operator++()
+        {
+          m_at = m_at->m_next;
+          return *this;
+        }
 
-          NodeIterator operator++(int) 
-          {
-              NodeIterator temp = *this;
-              ++(*this);
-              return temp;
-          }
+        ChildIterator operator++(int)
+        {
+          ChildIterator before = *this;
+          ++*this;
+          return before;
+        }
 
-          T& operator*() const { return *m_node; }
-          T* operator->() const { return m_node.get(); }
+        NodeType &operator*() const { return *m_at; }
+        NodeType *operator->() const { return m_at.get(); }
+        bool operator==(const ChildIterator &other) const { return m_at == other.m_at; }
+        bool operator!=(const ChildIterator &other) const { return m_at != other.m_at; }
 
-          bool operator==(const NodeIterator& rhs) const { return m_node == rhs.m_node; }
-          bool operator!=(const NodeIterator& rhs) const { return m_node != rhs.m_node; }
+      private:
+        std::shared_ptr<NodeType> m_at;
       };
 
-      using iterator = NodeIterator<Node>;
-      using const_iterator = NodeIterator<const Node>;
+      using iterator = ChildIterator<Node>;
+      using const_iterator = ChildIterator<const Node>;
 
-      iterator begin() { return iterator(m_first_child); }
+      iterator begin() { return iterator(m_head); }
       iterator end() { return iterator(); }
+      const_iterator begin() const { return const_iterator(m_head); }
+      const_iterator end() const { return const_iterator(); }
 
-      const_iterator begin() const { return const_iterator(m_first_child); }
-      const_iterator end()   const { return const_iterator(); }
-
-      const inline std::string &Key() const
+      const std::string &Key() const
       {
         return m_key;
       }
 
-      inline std::shared_ptr<GenericValue> GetValue() const
+      std::shared_ptr<GenericValue> GetValue() const
       {
         return m_value;
       }
 
-      inline void Clear()
+      // Removes the value (the node itself stays).
+      void Clear()
       {
         m_value = nullptr;
       }
 
-      inline void SetValue(const std::shared_ptr<GenericValue> &value)
+      // Shares 'value' with whoever else holds it.
+      void SetValue(const std::shared_ptr<GenericValue> &value)
       {
         m_value = value;
       }
@@ -126,157 +97,149 @@ namespace Util
       template <typename T>
       const T &Value() const
       {
-        CheckEmptyOrMissing();
+        RequireValue();
         return m_value->Value<T>();
       }
 
       template <typename T>
       T ValueAs() const
       {
-        CheckEmptyOrMissing();
+        RequireValue();
         return m_value->ValueAs<T>();
       }
 
       template <typename T>
       T ValueAsDefault(const T &default_value) const
       {
-        if (Empty())
-          return default_value;
-        return m_value->ValueAs<T>();
+        return m_value ? m_value->ValueAs<T>() : default_value;
       }
 
-      // Set value of this node
+      // Stores 'value', in place if the node already holds a T (so a value
+      // shared with another node changes there too), otherwise as a new
+      // value of type T (which drops any value range).
       template <typename T>
-      inline void SetValue(const T &value)
+      void SetValue(const T &value)
       {
-        if (!m_missing)
-        {
-          if (!Empty() && m_value->Is<T>())
-            m_value->Set(value);
-          else
-            m_value = std::make_shared<ValueInstance<T>>(value);
-        }
-        else
+        if (m_missing)
           throw std::range_error(Util::Format() << "Node \"" << m_key << "\" does not exist");
+        if (m_value && m_value->Is<T>())
+          m_value->Set(value);
+        else
+          m_value = std::make_shared<ValueInstance<T>>(value);
       }
 
-      // char* is a troublesome case because we want to convert it to std::string
-      inline void SetValue(const char *value)
+      void SetValue(const char *value)
       {
         SetValue<std::string>(value);
       }
 
-      // Add a child node. Multiple nodes of the same key may be added but only
-      // when specified as leaves. For example, adding "foo/bar" twice will
-      // result in one "foo" with two "bar" children.
+      // Adds a node at 'path'. Missing parents along the path are created;
+      // existing ones are reused; the last part is always a new node, so the
+      // same leaf can be added more than once.
       template <typename T>
       Node &Add(const std::string &path, const T &value)
       {
-        Node &new_leaf_node = AddEmpty(path);
-        new_leaf_node.SetValue(value);
-        return new_leaf_node;
+        Node &leaf = AddEmpty(path);
+        leaf.SetValue(value);
+        return leaf;
       }
 
+      // Adds a node whose value is an empty string.
       Node &Add(const std::string &path)
       {
         return Add(path, std::string());
       }
 
-      // Set the value of the matching child node if it exists, else add new
+      // Sets the value at 'key' if that node exists, else adds it.
       template <typename T>
       void Set(const std::string &key, const T &value)
       {
-        Node *node = TryGet(key);
-        if (node)
-          node->SetValue(value);
+        if (Node *found = TryGet(key))
+          found->SetValue(value);
         else
           Add(key, value);
       }
 
-      // Set the value of the matching child node if it exists, else add new
+      // The same, and also gives the value its GUI group and range.
       template <typename T>
-      void Set(const std::string& key, const T& value, const std::string& group, T _min = 0, T _max = 0, const std::vector<T> &list = std::vector<T>{})
+      void Set(const std::string &key, const T &value, const std::string &group, T _min = 0, T _max = 0, const std::vector<T> &list = std::vector<T>{})
       {
-          Node* node = TryGet(key);
-          if (node) {
-              node->SetValue(value);
-          }
-          else {
-              Add(key, value);
-          }
-
-          // key should have been added above 
-          node = TryGet(key);
-
-          if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, const char*>) {
-              node->m_value->SetValueRange(std::make_shared<ValueRange>(group, list));
-          }
-          else {
-              node->m_value->SetValueRange(std::make_shared<ValueRange>(group, _min, _max, list));
-          }
+        Set(key, value);
+        Node *node = TryGet(key);
+        if constexpr (std::is_same<T, std::string>::value || std::is_same<T, const char *>::value)
+          node->m_value->SetValueRange(std::make_shared<ValueRange>(group, list));
+        else
+          node->m_value->SetValueRange(std::make_shared<ValueRange>(group, _min, _max, list));
       }
 
+      // Removes the value at 'key', adding a value-less node if needed.
       void SetEmpty(const std::string &key)
       {
-        Node *node = TryGet(key);
-        if (node)
-        {
-          node->Clear();
-        }
+        if (Node *found = TryGet(key))
+          found->Clear();
         else
-        {
           AddEmpty(key);
-        }
       }
 
-      // True if value is empty (does not exist)
-      inline bool Empty() const
-      {
-        return !m_value;
-      }
+      bool Empty() const { return !m_value; }
+      bool Exists() const { return !Empty(); }
+      bool IsLeaf() const { return m_byKey.empty(); }
+      bool HasChildren() const { return !IsLeaf(); }
 
-      // True if value exists (is not empty)
-      inline bool Exists() const
-      {
-        return !Empty();
-      }
-
-      // True if no keys under this node
-      inline bool IsLeaf() const
-      {
-        return m_children.empty();
-      }
-
-      // True if this node has keys
-      inline bool HasChildren() const
-      {
-        return !IsLeaf();
-      }
-
-      // Always succeeds -- failed lookups permanently create an empty node.
-      // Use with caution. Intended for hard-coded lookups.
+      // Never fails (see above).
       Node &operator[](const std::string &path);
-      const Node& operator[](const std::string& path) const;
+      const Node &operator[](const std::string &path) const;
 
-      // These throw if the node is missing
+      // Throw std::range_error if there is no such node.
       Node &Get(const std::string &path);
       const Node &Get(const std::string &path) const;
 
-      // This returns nullptr if node is missing
+      // nullptr if there is no such node.
       Node *TryGet(const std::string &path);
       const Node *TryGet(const std::string &path) const;
 
+      // Debug dump: one line per node, children indented by two spaces.
       void Serialize(std::ostream *os, size_t indent_level = 0) const;
       std::string ToString(size_t indent_level = 0) const;
+
+      // Copy assignment makes this node a deep copy of 'rhs' (and detaches
+      // it from its siblings); move assignment exchanges the two nodes'
+      // keys, values and children.
       Node &operator=(const Node &rhs);
-      Node& operator=(Node&& rhs) noexcept;
+      Node &operator=(Node &&rhs) noexcept;
+
       Node(const std::string &key);
       Node(const std::string &key, const std::string &value);
       Node(const Node &that);
-      Node(Node&& that) noexcept;
+      Node(Node &&that) noexcept;
       ~Node();
+
+    private:
+      using Ptr = std::shared_ptr<Node>;
+
+      Node(); // not for general use
+
+      void RequireValue() const;
+      Node &Placeholder(const std::string &key) const;
+      Node &AddEmpty(const std::string &path);
+      void Append(const Ptr &child);
+      void CopyFrom(const Node &that);
+      void Exchange(Node &other);
+
+      template <typename NodeType>
+      static NodeType *Find(NodeType *from, const std::string &path);
+
+      std::string m_key;
+      std::shared_ptr<GenericValue> m_value;          // null: no value
+      Ptr m_next;                                     // next sibling
+      Ptr m_head;                                     // first child
+      Ptr m_tail;                                     // last child
+      std::map<std::string, Ptr> m_byKey;             // latest child per key
+      mutable std::map<std::string, Node> m_placeholders; // for failed operator[] lookups
+      bool m_missing = false;                         // this is such a placeholder
     };
 
+    // Prints the tree to stdout as "key = value" lines.
     void PrintConfigTree(const Node &config, int indent_level = 0, int tab_stops = 2);
   } // Config
 } // Util

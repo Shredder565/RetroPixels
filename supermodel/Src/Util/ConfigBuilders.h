@@ -1,23 +1,7 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Building configuration trees (Util/NewConfig.h) from XML and INI files and
+// writing INI files back. The FromXXX functions return true on failure.
 
 #ifndef INCLUDED_UTIL_CONFIGBUILDERS_H
 #define INCLUDED_UTIL_CONFIGBUILDERS_H
@@ -30,10 +14,24 @@ namespace Util
   {
     class Node;
 
+    // The tree has key "xml"; every element becomes a node holding its text,
+    // with one child per attribute followed by one per child element.
     bool FromXML(Node *config, const std::string &text);
     bool FromXMLFile(Node *config, const std::string &filename);
+
+    // The root is the "Global" section; each [Section] is a child of it.
+    // "[A, B]" applies the following settings to both sections, and an empty
+    // name stands for Global. ';' starts a comment outside double quotes, and
+    // a value fully enclosed in double quotes has them removed.
     bool FromINIFile(Node *config, const std::string &filename);
+
+    // 'merged' becomes x's settings (leaf nodes) with y's overriding them
+    // (y's value-less nodes are skipped), keeping x's key. The values are
+    // shared with x and y, not copied; x's GUI value ranges are kept.
     void MergeINISections(Node *merged, const Node &x, const Node &y);
+
+    // Writes the header comment (if any), the root's settings as [ Global ]
+    // and then each section.
     void WriteINIFile(const std::string &filename, const Node &config, const std::string &header_comment);
   }
 }

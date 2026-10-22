@@ -1,229 +1,191 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Stand-alone checks of the configuration tree and its builders. Not part of
+// the emulator build; compile it on its own with Util/NewConfig.cpp,
+// Util/ConfigBuilders.cpp, Util/Format.cpp, Pkgs/tinyxml2.cpp and a logger.
+// Prints one line per check and returns non-zero if any failed.
 
 #include "Util/NewConfig.h"
 #include "Util/ConfigBuilders.h"
+#include <cstdio>
+#include <fstream>
+#include <functional>
 #include <iostream>
+#include <string>
+#include <vector>
 
-static void PrintTestResults(std::vector<std::pair<std::string, bool>> results)
+namespace
 {
-  std::cout << "TEST RESULTS" << std::endl;
-  std::cout << "------------" << std::endl;
-  for (auto v: results)
-    std::cout << v.first << ": " << (v.second ? "passed" : "FAILED") << std::endl;
+  int g_failures = 0;
+
+  void Check(const char *what, bool ok)
+  {
+    std::cout << (ok ? "ok      " : "FAILED  ") << what << std::endl;
+    if (!ok)
+      g_failures++;
+  }
+
+  bool Throws(const std::function<void()> &f)
+  {
+    try
+    {
+      f();
+    }
+    catch (const std::exception &)
+    {
+      return true;
+    }
+    return false;
+  }
 }
 
 int main()
 {
-  std::vector<std::pair<std::string, bool>> test_results;
+  using Util::Config::Node;
 
-  /*
-   * Creates a config tree corresponding to the following:
-   *
-   *  <game>
-   *    <name>scud</name>
-   *    <roms>
-   *      <crom>
-   *        <name>foo.bin</name>
-   *        <offset>0</offset>
-   *      </crom>
-   *      <crom>
-   *        <name>bar.bin</name>
-   *        <offset>2</offset>
-   *      </crom>
-   *    </roms>
-   *  </game>
-   */
-  Util::Config::Node root("global");
-  auto &game = root.Add("game");
-  game.Add<std::string>("name", "scud");
-  auto &roms = game.Add("roms");
-  auto &crom1 = roms.Add("crom");
-  crom1.Add<std::string>("name", "foo.bin");
-  crom1.Add<std::string>("offset", "0");
-  auto &crom2 = roms.Add("crom");
-  crom2.Add<std::string>("name", "bar.bin");
-  crom2.Add<std::string>("offset", "2");
-  
-  const char *expected_output =
-    "global=\"\"  children={ game }\n"
-    "  game=\"\"  children={ name roms }\n"
-    "    name=\"scud\"  children={ }\n"
-    "    roms=\"\"  children={ crom }\n"
-    "      crom=\"\"  children={ name offset }\n"
-    "        name=\"foo.bin\"  children={ }\n"
-    "        offset=\"0\"  children={ }\n"
-    "      crom=\"\"  children={ name offset }\n"
-    "        name=\"bar.bin\"  children={ }\n"
-    "        offset=\"2\"  children={ }\n";
-  std::cout << "Expected output:" << std::endl << std::endl << expected_output << std::endl;
-  std::cout << "Actual config tree:" << std::endl << std::endl;
-  root.Serialize(&std::cout);
-  std::cout << std::endl;
-  test_results.push_back({ "Manual", root.ToString() == expected_output });
-
-  // Expect second crom: bar.bin
-  std::cout << "game/roms/crom/name=" << root["game/roms/crom/name"].Value<std::string>() << " (expected: bar.bin)" << std::endl << std::endl;
-  test_results.push_back({ "Lookup", root["game/roms/crom/name"].Value<std::string>() == "bar.bin" });
-    
-  // Make a copy using copy constructor
-  std::cout << "Copy constructed:" << std::endl << std::endl;
-  Util::Config::Node copy(root);
-  copy.Serialize(&std::cout);
-  std::cout << std::endl;
-  test_results.push_back({ "Copy constructed", copy.ToString() == root.ToString() });
-  
-  // Make a deep copy using assignment operator, check equality, then modify a
-  // value and ensure it does not change in the copy
-  std::cout << "Copy by assignment:" << std::endl << std::endl;
-  Util::Config::Node copy2("foo", "bar");
-  copy2.Add<std::string>("x/y/z", "test");
-  copy2.Add<std::string>("dummy", "value");
-  std::cout << "Initially set to:" << std::endl;
-  copy2.Serialize(&std::cout);
-  copy2 = root;
-  std::cout << "Copy of \"global\":" << std::endl;
-  copy2.Serialize(&std::cout);
-  std::cout << std::endl;
-  bool copies_are_equivalent = copy2.ToString() == root.ToString();
-  copy2.Get("game/name").SetValue("vf3");
-  bool copies_are_unique = copy2["game/name"].Value<std::string>() == "vf3" && root["game/name"].Value<std::string>() == "scud";
-  test_results.push_back({ "Copy by assignment", copies_are_equivalent && copies_are_unique });
-
-  // Parse from XML
-  const char *xml =
-    "<game name=\"scud\">                                                           \n"
-    "  <roms>                                                                       \n"
-    "    <region name=\"crom\" stride=\"8\" byte_swap=\"true\">                     \n"
-    "      <file offset=\"0\" name=\"epr-19734.20\" crc32=\"0xBE897336\" />         \n"
-    "      <file offset=\"2\" name=\"epr-19733.19\" crc32=\"0x6565E29A\" />         \n"
-    "      <file offset=\"4\" name=\"epr-19732.18\" crc32=\"0x23E864BB\" />         \n"
-    "      <file offset=\"6\" name=\"epr-19731.17\" crc32=\"0x3EE6447E\" />         \n"
-    "    </region>                                                                  \n"
-    "    <region name=\"banked_crom\" stride=\"8\" byte_swap=\"true\">              \n"
-    "      <file offset=\"0x0000000\" name=\"mpr-20364.4\" crc32=\"0xA2A68EF2\" />  \n"
-    "      <file offset=\"0x0000002\" name=\"mpr-20363.3\" crc32=\"0x3E3CC6FF\" />  \n"
-    "      <file offset=\"0x0000004\" name=\"mpr-20362.2\" crc32=\"0xF7E60DFD\" />  \n"
-    "      <file offset=\"0x0000006\" name=\"mpr-20361.1\" crc32=\"0xDDB66C2F\" />  \n"
-    "    </region>                                                                  \n"
-    "  </roms>                                                                      \n"
-    "</game>                                                                        \n";
-  const char *expected_xml_config_tree =
-    "xml=\"\"  children={ game }\n"
-    "  game=\"\"  children={ name roms }\n"
-    "    name=\"scud\"  children={ }\n"
-    "    roms=\"\"  children={ region }\n"
-    "      region=\"\"  children={ byte_swap file name stride }\n"
-    "        name=\"crom\"  children={ }\n"
-    "        stride=\"8\"  children={ }\n"
-    "        byte_swap=\"true\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"0\"  children={ }\n"
-    "          name=\"epr-19734.20\"  children={ }\n"
-    "          crc32=\"0xBE897336\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"2\"  children={ }\n"
-    "          name=\"epr-19733.19\"  children={ }\n"
-    "          crc32=\"0x6565E29A\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"4\"  children={ }\n"
-    "          name=\"epr-19732.18\"  children={ }\n"
-    "          crc32=\"0x23E864BB\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"6\"  children={ }\n"
-    "          name=\"epr-19731.17\"  children={ }\n"
-    "          crc32=\"0x3EE6447E\"  children={ }\n"
-    "      region=\"\"  children={ byte_swap file name stride }\n"
-    "        name=\"banked_crom\"  children={ }\n"
-    "        stride=\"8\"  children={ }\n"
-    "        byte_swap=\"true\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"0x0000000\"  children={ }\n"
-    "          name=\"mpr-20364.4\"  children={ }\n"
-    "          crc32=\"0xA2A68EF2\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"0x0000002\"  children={ }\n"
-    "          name=\"mpr-20363.3\"  children={ }\n"
-    "          crc32=\"0x3E3CC6FF\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"0x0000004\"  children={ }\n"
-    "          name=\"mpr-20362.2\"  children={ }\n"
-    "          crc32=\"0xF7E60DFD\"  children={ }\n"
-    "        file=\"\"  children={ crc32 name offset }\n"
-    "          offset=\"0x0000006\"  children={ }\n"
-    "          name=\"mpr-20361.1\"  children={ }\n"
-    "          crc32=\"0xDDB66C2F\"  children={ }\n";
-  std::cout << "Expected output:" << std::endl << std::endl << expected_xml_config_tree << std::endl;
-  std::cout << "Actual config tree:" << std::endl << std::endl;
-  Util::Config::Node xml_config("xml");
-  Util::Config::FromXML(&xml_config, xml);
-  xml_config.Serialize(&std::cout);
-  std::cout << std::endl;
-  test_results.push_back({ "XML", xml_config.ToString() == expected_xml_config_tree });
-  
-  // Create a nested key
+  // A small tree built by hand, with a repeated key.
   {
-    Util::Config::Node config("global");
-    config.Add<std::string>("foo/bar/baz", "bart");
-    config.Serialize(&std::cout);
-    std::cout << std::endl;
-    test_results.push_back({ "Nested key 1", config["foo/bar/baz"].Value<std::string>() == "bart" });
-    config.Get("foo/bar/baz").Set<std::string>("x", "xx");
-    config.Get("foo/bar/baz").Set<std::string>("y/z", "zz");
-    config.Serialize(&std::cout);
-    std::cout << std::endl;
-    test_results.push_back({ "Nested key 2", config["foo/bar/baz/x"].Value<std::string>() == "xx" });
-    test_results.push_back({ "Nested key 3", config["foo/bar/baz/y/z"].Value<std::string>() == "zz" });
-    config.Add("a/b/c");
-    config.Get("a/b/c").SetValue<std::string>("d");
-    config.Serialize(&std::cout);
-    std::cout << std::endl;
-    test_results.push_back({ "Nested key 4", config["a/b/c"].Value<std::string>() == "d" });
+    Node root("cfg");
+    Node &unit = root.Add("unit");
+    unit.Add<std::string>("label", "alpha");
+    Node &parts = unit.Add("parts");
+    Node &p1 = parts.Add("part");
+    p1.Add<std::string>("id", "one");
+    Node &p2 = parts.Add("part");
+    p2.Add<std::string>("id", "two");
+    p2.Add<int>("size", 7);
+
+    const char *dump =
+      "cfg=\"\"  children={ unit }\n"
+      "  unit=\"\"  children={ label parts }\n"
+      "    label=\"alpha\"  children={ }\n"
+      "    parts=\"\"  children={ part }\n"
+      "      part=\"\"  children={ id }\n"
+      "        id=\"one\"  children={ }\n"
+      "      part=\"\"  children={ id size }\n"
+      "        id=\"two\"  children={ }\n"
+      "        size=\"7\"  children={ }\n";
+    Check("dump of a hand-built tree", root.ToString() == dump);
+    Check("a repeated key finds the latest node", root["unit/parts/part/id"].Value<std::string>() == "two");
+    int count = 0;
+    for (const Node &n : root["unit/parts"])
+      count += n.Key() == "part";
+    Check("iteration sees both repeated nodes", count == 2);
+
+    Node copy(root);
+    Check("copy construction copies everything", copy.ToString() == root.ToString());
+    Node other("x", "y");
+    other.Add<std::string>("q/r", "s");
+    other = root;
+    other.Get("unit/label").SetValue("beta");
+    Check("assignment makes an independent copy",
+          other["unit/label"].Value<std::string>() == "beta" && root["unit/label"].Value<std::string>() == "alpha");
   }
-  
-  // Multiple Set() calls should only create duplicates of the leaf node
+
+  // Missing nodes, defaults and conversions.
   {
-    const char *expected_config =
-      "global=\"\"  children={ a foo x }\n"
-      "  foo=\"\"  children={ bar }\n"
-      "    bar=\"\"  children={ }\n"
-      "    bar=\"\"  children={ }\n"
-      "  x=\"\"  children={ }\n"
-      "  x=\"\"  children={ }\n"
+    Node root("cfg");
+    root.Add<std::string>("hex", "0x1F");
+    root.Add<std::string>("neg", "-0x10");
+    root.Add<std::string>("flag", "On");
+    root.Add<std::string>("num", "42");
+    root.Add<float>("f", 2.5f);
+    Check("hex string as int", root["hex"].ValueAs<int>() == 31);
+    Check("negative hex string", root["neg"].ValueAs<int>() == -16);
+    Check("On as bool", root["flag"].ValueAs<bool>());
+    Check("decimal string as unsigned", root["num"].ValueAs<unsigned>() == 42);
+    Check("float as string", root["f"].ValueAs<std::string>() == "2.5");
+    Check("missing node gives the default", root["no/such"].ValueAsDefault<int>(5) == 5);
+    Check("missing node does not exist", !root["no/such"].Exists());
+    Check("missing node keeps the first missing key", root["no/such"].Key() == "no");
+    Check("ValueAs on a missing node throws", Throws([&]() { root["absent"].ValueAs<int>(); }));
+    Check("Get on a missing node throws", Throws([&]() { root.Get("absent"); }));
+    Check("TryGet on a missing node is null", root.TryGet("absent") == nullptr);
+    Check("Value of the wrong type throws", Throws([&]() { root["f"].Value<int>(); }));
+  }
+
+  // Add and Set on nested paths.
+  {
+    Node root("cfg");
+    root.Add("a/b");
+    root.Add("a/b");
+    root.Add("c");
+    root.Add("c");
+    const char *dump =
+      "cfg=\"\"  children={ a c }\n"
       "  a=\"\"  children={ b }\n"
-      "    b=\"\"  children={ c }\n"
-      "      c=\"\"  children={ }\n"
-      "      c=\"\"  children={ }\n";
-    Util::Config::Node config("global");
-    config.Add("foo/bar");
-    config.Add("foo/bar");
-    config.Add("x");
-    config.Add("x");
-    config.Add("a/b/c");
-    config.Add("a/b/c");
-    config.Serialize(&std::cout);
-    test_results.push_back({ "Duplicate leaf nodes", config.ToString() == expected_config });
+      "    b=\"\"  children={ }\n"
+      "    b=\"\"  children={ }\n"
+      "  c=\"\"  children={ }\n"
+      "  c=\"\"  children={ }\n";
+    Check("adding a path twice repeats only the leaf", root.ToString() == dump);
+    root.Set<std::string>("a/b", "set");
+    Check("Set changes the latest node", root["a/b"].Value<std::string>() == "set");
+    root.Set<int>("d/e", 3);
+    Check("Set adds a missing node", root["d/e"].Value<int>() == 3);
   }
 
-  PrintTestResults(test_results);
-  return 0;
+  // XML.
+  {
+    const char *xml =
+      "<top kind=\"k\">\n"
+      "  <item n=\"1\">first</item>\n"
+      "  <item n=\"2\"/>\n"
+      "</top>\n";
+    Node config("before");
+    bool failed = Util::Config::FromXML(&config, xml);
+    const char *dump =
+      "xml=\"\"  children={ top }\n"
+      "  top=\"\"  children={ item kind }\n"
+      "    kind=\"k\"  children={ }\n"
+      "    item=\"first\"  children={ n }\n"
+      "      n=\"1\"  children={ }\n"
+      "    item=\"\"  children={ n }\n"
+      "      n=\"2\"  children={ }\n";
+    Check("XML parses", !failed);
+    Check("XML tree: attributes, then child elements", config.ToString() == dump);
+  }
+
+  // INI round trip.
+  {
+    const char *path = "Test_Config.ini";
+    {
+      std::ofstream f(path);
+      f << "Early = 1\n"
+           "[ Global ]\n"
+           "Volume = \"50\" ; comment\n"
+           "[ one, two ]\n"
+           "Shared = yes\n"
+           "[ , three ]\n"
+           "Name = \"a;b\"\n";
+    }
+    Node ini("x");
+    bool failed = Util::Config::FromINIFile(&ini, path);
+    Check("INI parses", !failed);
+    Check("settings before any section are global", ini["Early"].ValueAs<int>() == 1);
+    Check("quotes and comments are removed", ini["Volume"].Value<std::string>() == "50");
+    Check("a setting goes to every listed section",
+          ini["one/Shared"].ValueAs<bool>() && ini["two/Shared"].ValueAs<bool>());
+    Check("an empty section name is Global, ';' in quotes is kept",
+          ini["Name"].Value<std::string>() == "a;b" && ini["three/Name"].Value<std::string>() == "a;b");
+
+    Node merged("m");
+    Util::Config::MergeINISections(&merged, ini, ini["one"]);
+    Check("merge keeps x's key and adds y's settings",
+          merged.Key() == "Global" && merged["Shared"].ValueAs<bool>() && merged["Volume"].ValueAs<int>() == 50);
+
+    // Values are written without quotes, so an unquoted ';' is a comment
+    // when the file is read again.
+    ini.Set<std::string>("Name", "a b");
+    Util::Config::WriteINIFile(path, ini, "; header");
+    Node again("y");
+    Util::Config::FromINIFile(&again, path);
+    Check("written INI reads back",
+          again["Early"].ValueAs<int>() == 1 && again["Name"].Value<std::string>() == "a b" &&
+          again["two/Shared"].Value<std::string>() == "yes" && again["three/Name"].Value<std::string>() == "a");
+    std::remove(path);
+  }
+
+  std::cout << (g_failures ? "Some checks FAILED" : "All checks passed") << std::endl;
+  return g_failures ? 1 : 0;
 }
-  
