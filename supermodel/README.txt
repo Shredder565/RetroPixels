@@ -6,15 +6,22 @@ Henson, Ian Curtis and the Supermodel team (https://github.com/trzy/Supermodel,
 http://www.supermodel3.com). RetroPixels uses it for its Supermodel tab, which
 plays Star Wars Trilogy Arcade.
 
-This folder holds RetroPixels' changes to Supermodel, not a copy of it:
+This folder holds RetroPixels' copy of Supermodel's emulator code, which is
+being rewritten as RetroPixels' own (docs/supermodel-original.md):
+
+  Src/          the emulator's code: upstream's Src/ at 24d2ffc with
+                RetroPixels' changes, replaced by original code file by file
 
   pins.sh       the upstream commit (24d2ffc, 2026-07-26, the same code as the
                 official "supermodel-0.3a-20260726-git-24d2ffc" Windows build)
                 and the exact SDL2, SDL2_net and zlib releases, each with its
                 SHA-256: the MinGW builds for Windows, the source tarballs of
                 the same SDL2 and SDL2_net releases for Linux
-  patches/      RetroPixels' changes, applied in order with "git apply"
-  build.sh      fetches the pinned commit, applies the patches and builds:
+  patches/      changes outside Src/ (a Makefile line, Docs/RetroPixels.txt),
+                applied with "git apply"
+  build.sh      fetches the pinned commit for the rest of the tree (Makefiles,
+                Config, Assets, Docs), applies the patches, puts Src/ in
+                place of upstream's and builds:
                   sh supermodel/build.sh check            patches apply?
                   sh supermodel/build.sh linux   out      Linux build (SDL2 and
                                                          SDL2_net built from source)
@@ -41,17 +48,17 @@ Supermodel/supermodel.
 Licence
 -------
 Supermodel is free software under the GNU General Public License, version 3
-or (at your option) any later version (COPYING). The patches are changes to
-Supermodel and are under the same licence; the result is a modified version
+or (at your option) any later version (COPYING). RetroPixels' changes are
+under the same licence; the result is a modified version
 of Supermodel, marked as such in Docs/RetroPixels.txt, in its log and help
 text, and in every changed place in the source ("RetroPixels"). The download
 includes the complete corresponding source (Supermodel-source.tar.gz).
 No ROMs, BIOS files or other game data are part of this folder, the build or
 the download.
 
-What the patches change
------------------------
-0002-flight-stick.patch: RP_FLIGHTSTICK ("curve=N,dead=N,smooth=N", curve
+What RetroPixels changes
+------------------------
+Flight stick (Src/Inputs/InputSystem.cpp): RP_FLIGHTSTICK ("curve=N,dead=N,smooth=N", curve
 and dead in percent and smooth in milliseconds, or "off"; RetroPixels sets
 it) makes a gamepad's thumbstick aim like a flight stick: the two axes of a
 stick are read together, with a round dead zone, the round gate stretched
@@ -60,7 +67,7 @@ to a square one (so the corners can be reached), a cubic response curve
 yoke's weight and spring (jitter doesn't jump the aim, and letting go
 glides back to the centre). Only full-range stick axes are shaped.
 
-0001-retropixels.patch:
+Other changes (Src/OSD and Src/Inputs, and patches/0001-retropixels.patch):
 - SUPERMODEL_HOME: when this environment variable names a folder, the
   player's own files go there: Config/Supermodel.ini, NVRAM/, Saves/ (save
   states), Log/Supermodel.log and Screenshots/. RetroPixels sets it to

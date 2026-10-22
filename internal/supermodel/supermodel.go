@@ -4,7 +4,7 @@
 // folder next to it, made from supermodel/ in this repository), finds and
 // checks the player's ROM set, writes Supermodel's settings for the game
 // and builds its command line. RetroPixels only starts Supermodel; the
-// changes made to Supermodel itself are in supermodel/patches.
+// changes made to Supermodel itself are in supermodel/Src.
 package supermodel
 
 import (

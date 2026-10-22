@@ -1,6 +1,7 @@
 #!/bin/sh
-# Builds RetroPixels' Supermodel (Sega Model 3 arcade emulator) from the
-# pinned upstream commit plus the patches in patches/ (see README.txt).
+# Builds RetroPixels' Supermodel (Sega Model 3 arcade emulator) from its
+# code in Src/ (RetroPixels' copy, being rewritten) and the rest of the
+# pinned upstream tree plus the patches in patches/ (see README.txt).
 #
 #   sh supermodel/build.sh fetch            get the source and apply the patches
 #   sh supermodel/build.sh linux   <outdir> build for Linux, with the pinned SDL2 and SDL2_net built from
@@ -46,6 +47,12 @@ fetch() {
 		log "applying $(basename "$p")"
 		git -C "$src" apply --whitespace=nowarn "$p"
 	done
+	# The emulator's code is RetroPixels' copy in supermodel/Src, which is
+	# being rewritten (docs/supermodel-original.md); upstream only gives the
+	# rest of the tree (Makefiles, Config, Assets, Docs).
+	rm -rf "$src/Src"
+	cp -R "$here/Src" "$src/Src"
+	git -C "$src" add -A
 }
 
 # download <url> <sha256> <file>
@@ -203,7 +210,7 @@ package() {
 		echo "Supermodel $version, modified for RetroPixels (see RetroPixels.txt)"
 		echo "Upstream: $SUPERMODEL_REPO commit $SUPERMODEL_COMMIT"
 		echo "Licence: GNU General Public License v3 or later (LICENSE.txt)"
-		echo "Source: Supermodel-source.tar.gz in this folder (upstream commit with RetroPixels' patches applied)"
+		echo "Source: Supermodel-source.tar.gz in this folder (RetroPixels' Src/ in the upstream tree, with the patches applied)"
 		[ "${3:-}" = linux ] && echo "Built on $(. /etc/os-release && echo "$PRETTY_NAME") with GCC $(gcc -dumpfullversion), SDL $SDL2_VERSION and SDL_net $SDL2_NET_VERSION (lib/, zlib licence), GLU from Mesa (lib/libGLU.so.1, SGI Free Software License B); needs glibc 2.35 or later and OpenGL"
 		[ "${3:-}" = windows ] && echo "Built with MinGW-w64 ($(x86_64-w64-mingw32-gcc-posix -dumpversion)), SDL $SDL2_VERSION, SDL_net $SDL2_NET_VERSION, zlib $ZLIB_VERSION (statically linked)"
 		echo "No games, ROMs or BIOS files are included."

@@ -4,8 +4,9 @@ RetroPixels' Supermodel tab plays one game: Star Wars Trilogy Arcade (Sega
 and LucasArts, 1998, Sega Model 3 Step 2.1). It runs on Supermodel, the
 Sega Model 3 emulator (https://github.com/trzy/Supermodel, GPL-3.0-or-later).
 RetroPixels builds it from upstream commit 24d2ffc, the commit of the
-official "supermodel-0.3a-20260726-git-24d2ffc" Windows build, plus the
-patches in `supermodel/patches/`.
+official "supermodel-0.3a-20260726-git-24d2ffc" Windows build, with the
+emulator code from `supermodel/Src/` (upstream's with RetroPixels' changes,
+being rewritten as original code: `docs/supermodel-original.md`).
 
 ## How Supermodel 0.3a-24d2ffc runs the game
 
@@ -52,7 +53,7 @@ patches in `supermodel/patches/`.
   program: started directly, it opens a console window next to the game
   window.
 
-## What RetroPixels changes (supermodel/patches/0001-retropixels.patch)
+## What RetroPixels changes (in supermodel/Src)
 
 - **Player folder.** `SUPERMODEL_HOME` (RetroPixels sets it to
   `%APPDATA%\RetroPixels\Supermodel`) holds Config, NVRAM, Saves, Screenshots
