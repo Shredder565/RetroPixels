@@ -1,0 +1,7 @@
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// Windows resources of the command-line tool: the same icon as PixelU-Wii.exe.
+
+#include "resource.h"
+
+IDI_ICON1 ICON "../DolphinQt/PixelU-Wii.ico"

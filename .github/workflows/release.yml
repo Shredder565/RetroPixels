@@ -1,0 +1,173 @@
+name: Release
+
+# Publishes a RetroPixels release by hand (Actions > Release > Run workflow),
+# only once the owner has approved the version. It builds the full Windows
+# download (bundle-test.yml with release: true: RetroPixels.exe and
+# RetroPixels-Native.exe with PixelU, PixelU-Wii, MAME and Supermodel), the
+# Android app, and the source, then makes the GitHub release v<appVersion>
+# from this commit with CHANGELOG.md's notes for that version.
+
+# Started by pushing a tag: release-v<version> publishes, and
+# release-dryrun-v<version> builds and checks everything without publishing.
+# (A workflow on a branch other than the default one can't be run by hand.
+# These tags don't start with "v", so ci.yml's tag release doesn't run; the
+# release's own v<version> tag is made by the publish step.)
+# It can also be started by a push to the work branch whose commit message
+# has "[release <version>]" or "[release-dryrun <version>]" (the agent that
+# builds RetroPixels can't push tags or run workflows by hand); any other push
+# skips it.
+on:
+  push:
+    tags: ["release-v*", "release-dryrun-v*"]
+    branches: [claude/wiiu-emulator-urpcen]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish; must match appVersion in main.go (e.g. 2.21.0)"
+        required: true
+      dry_run:
+        description: "Build and check everything, but don't publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, '[release')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - name: Which version
+        id: v
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          m=$(printf '%s\n' "$MSG" | sed -n 's/.*\[release-dryrun \([0-9.]*\)\].*/dryrun \1/p; s/.*\[release \([0-9.]*\)\].*/publish \1/p' | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ -n "$m" ]; then
+            echo "version=${m#* }" >> "$GITHUB_OUTPUT"
+            if [ "${m%% *}" = dryrun ]; then echo "dry_run=true" >> "$GITHUB_OUTPUT"; else echo "dry_run=false" >> "$GITHUB_OUTPUT"; fi
+            exit 0
+          fi
+          case "$GITHUB_REF_NAME" in
+            release-dryrun-v*) echo "version=${GITHUB_REF_NAME#release-dryrun-v}" >> "$GITHUB_OUTPUT"; echo "dry_run=true" >> "$GITHUB_OUTPUT" ;;
+            release-v*) echo "version=${GITHUB_REF_NAME#release-v}" >> "$GITHUB_OUTPUT"; echo "dry_run=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"; echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/checkout@v4
+      - name: Version matches and isn't released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ steps.v.outputs.version }}
+        run: |
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          [ "$v" = "$WANT" ] || { echo "::error::appVersion is $v, not $WANT"; exit 1; }
+          if [ "${{ steps.v.outputs.dry_run }}" != true ] && gh release view "v$v" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$v is already released"; exit 1
+          fi
+          grep -q "^## \[$v\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no [$v] section"; exit 1; }
+
+  windows:
+    needs: check
+    uses: ./.github/workflows/bundle-test.yml
+    with:
+      release: true
+
+  # RetroPixels for Android: the APK and the Android Studio project zip (as in ci.yml).
+  android:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build the APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Package
+        run: |
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          mkdir -p android-dist
+          cp android/app/build/outputs/apk/release/app-release.apk "android-dist/RetroPixels-$version.apk"
+          sh android/tools/make-studio-zip.sh android-dist
+          ls -la android-dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-Android-release
+          path: android-dist/
+
+  publish:
+    needs: [check, windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: RetroPixels-release
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: RetroPixels-Android-release
+          path: dist
+
+      - name: Source and notes
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          git archive --format=zip --prefix="RetroPixels-source-$v/" -o "dist/RetroPixels-source-$v.zip" HEAD
+          mame=$(ls dist/MAME-*-source.tar.gz | sed 's|dist/MAME-\(.*\)-source.tar.gz|\1|')
+          {
+            echo "## Download"
+            echo
+            echo "- **RetroPixels-$v.zip**: everything for Windows 10 / 11 (64-bit). Unzip it and run \`RetroPixels.exe\` (or \`RetroPixels-Native.exe\`). It has RetroPixels' engines in the folders next to the programs:"
+            echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
+            echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
+            echo "  - Supermodel, modified for RetroPixels, for Star Wars Trilogy Arcade (Sega Model 3; GPL-3.0-or-later, its exact source is inside)"
+            echo "- **RetroPixels.exe** and **RetroPixels-Native.exe**: the two programs on their own."
+            echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer)."
+            echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project."
+            echo "- **RetroPixels-source-$v.zip**: the full source code, including PixelU's, PixelU-Wii's and RetroPixels' Supermodel changes."
+            echo "- **MAME-$mame-source.tar.gz**: the built-in MAME's source, the MAME team's release unchanged."
+            echo
+            echo "The programs aren't code-signed yet, so SmartScreen may say \"Windows protected your PC\": click **More info**, then **Run anyway**. No games, keys, BIOS or firmware are included."
+            echo
+            echo "## What's new"
+            echo
+            awk -v h="## [$v]" 'index($0,h)==1{on=1;next} on&&/^## /{exit} on' CHANGELOG.md
+            echo
+            echo "Full history: [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/v$v/CHANGELOG.md)"
+          } > notes.md
+          rm -f dist/VERSION.txt
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -la dist
+          cat notes.md
+
+      - name: Publish the release
+        if: needs.check.outputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: RetroPixels ${{ needs.check.outputs.version }}
+          body_path: notes.md
+          make_latest: true
+          files: dist/*

@@ -1,11 +1,10 @@
 package main
 
-// One-click ffmpeg download (the Windows build from github.com/BtbN/FFmpeg-Builds),
-// checked against the release's published SHA-256 before it's used.
+// One-click ffmpeg download (the Windows or Linux build from
+// github.com/BtbN/FFmpeg-Builds, see internal/ffmpeg), checked against the
+// release's published SHA-256 before it's used.
 
 import (
-	"archive/zip"
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,14 +13,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"sync"
 	"time"
-)
 
-const (
-	ffRelease = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-	ffAsset   = "ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
+	"retropixels/internal/ffmpeg"
 )
 
 var (
@@ -33,17 +29,9 @@ var (
 	ffInstallF = installFFmpeg
 )
 
-// ffmpegInstallDirs: next to the app if possible, otherwise in the user's app data.
-func ffmpegInstallDirs() []string {
-	var dirs []string
-	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "ffmpeg"))
-	}
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		dirs = append(dirs, filepath.Join(la, "RetroPixels", "ffmpeg"))
-	}
-	return dirs
-}
+// ffmpegInstallDirs: next to the app if possible, otherwise in the user's
+// app data (%LOCALAPPDATA%\RetroPixels\ffmpeg, ~/.local/share/RetroPixels/ffmpeg).
+func ffmpegInstallDirs() []string { return ffmpeg.InstallDirs() }
 
 func ffStatus() map[string]any {
 	ffMu.Lock()
@@ -93,43 +81,30 @@ func startFFmpegInstall() {
 }
 
 func installFFmpeg() error {
+	asset := ffmpeg.Asset(runtime.GOOS, runtime.GOARCH)
+	if asset == "" {
+		return ffmpeg.ErrNoDownload
+	}
 	client := &http.Client{Timeout: 30 * time.Minute}
 	// 1. Expected checksum.
-	resp, err := client.Get(ffRelease + "checksums.sha256")
+	resp, err := client.Get(ffmpeg.Release + "checksums.sha256")
 	if err != nil {
 		return fmt.Errorf("couldn't reach GitHub: %v", err)
 	}
-	want := ""
-	sc := bufio.NewScanner(resp.Body)
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) == 2 && f[1] == ffAsset {
-			want = strings.ToLower(f[0])
-		}
-	}
+	want := ffmpeg.Checksum(resp.Body, asset)
 	resp.Body.Close()
-	if len(want) != 64 {
+	if want == "" {
 		return errors.New("couldn't find the ffmpeg checksum on GitHub")
 	}
 
 	// 2. Download to a temp file while hashing.
-	tmpDir := ""
-	for _, d := range ffmpegInstallDirs() {
-		if os.MkdirAll(d, 0o755) == nil {
-			if f, err := os.CreateTemp(d, "dl-*.tmp"); err == nil {
-				f.Close()
-				os.Remove(f.Name())
-				tmpDir = d
-				break
-			}
-		}
-	}
+	tmpDir := ffmpeg.WritableDir(ffmpegInstallDirs())
 	if tmpDir == "" {
 		return errors.New("no folder RetroPixels can write ffmpeg into")
 	}
-	zipPath := filepath.Join(tmpDir, "ffmpeg-download.zip.tmp")
-	defer os.Remove(zipPath)
-	resp, err = client.Get(ffRelease + ffAsset)
+	archive := filepath.Join(tmpDir, "ffmpeg-download"+ffmpeg.ArchiveExt(asset)+".tmp")
+	defer os.Remove(archive)
+	resp, err = client.Get(ffmpeg.Release + asset)
 	if err != nil {
 		return fmt.Errorf("download failed: %v", err)
 	}
@@ -140,7 +115,7 @@ func installFFmpeg() error {
 	ffMu.Lock()
 	ffTotal = resp.ContentLength
 	ffMu.Unlock()
-	out, err := os.Create(zipPath)
+	out, err := os.Create(archive)
 	if err != nil {
 		return err
 	}
@@ -156,45 +131,10 @@ func installFFmpeg() error {
 		return errors.New("the downloaded file didn't match its checksum, so it wasn't used — try again")
 	}
 
-	// 3. Pull ffmpeg.exe and the licence out of the zip.
+	// 3. Take ffmpeg (ffmpeg.exe) and the licence out of the download.
 	setFF("installing", nil)
-	zr, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return err
-	}
-	defer zr.Close()
-	found := false
-	for _, f := range zr.File {
-		base := filepath.Base(f.Name)
-		if (base == "ffmpeg.exe" && strings.Contains(f.Name, "/bin/")) || (base == "LICENSE.txt" && strings.Count(f.Name, "/") == 1) {
-			rc, err := f.Open()
-			if err != nil {
-				return err
-			}
-			dst := filepath.Join(tmpDir, base)
-			w, err := os.Create(dst + ".tmp")
-			if err != nil {
-				rc.Close()
-				return err
-			}
-			_, err = io.Copy(w, rc)
-			rc.Close()
-			w.Close()
-			if err != nil {
-				return err
-			}
-			if err := os.Rename(dst+".tmp", dst); err != nil {
-				return err
-			}
-			if base == "ffmpeg.exe" {
-				found = true
-			}
-		}
-	}
-	if !found {
-		return errors.New("ffmpeg.exe wasn't in the download")
-	}
-	return nil
+	_, err = ffmpeg.Extract(archive, asset, tmpDir)
+	return err
 }
 
 func registerFFmpegRoutes(mux *http.ServeMux) {

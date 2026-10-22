@@ -1,6 +1,9 @@
 package main
 
-// GameCube & Wii support through Dolphin.
+// GameCube & Wii support through PixelU's Wii / GameCube engine
+// (PixelU\wii\PixelU-Wii.exe, based on Dolphin, GPL-2.0+). It is Dolphin
+// with a new name, so its command line, settings files, docking and
+// recording are Dolphin's, as before.
 
 import (
 	"bufio"
@@ -22,6 +25,9 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"retropixels/internal/dolphin"
+	"retropixels/internal/pixelu"
 )
 
 // ---------------- disc identification ----------------
@@ -30,6 +36,7 @@ type discInfo struct {
 	Platform string // "GameCube", "Wii", "WiiWare"
 	ID       string // e.g. GMSE01
 	Title    string // name stored on the disc
+	DLC      bool   // a WiiWare add-on (.wad) that can't be started by itself
 }
 
 var (
@@ -146,69 +153,52 @@ func wadInfo(f *os.File, path string) (discInfo, bool) {
 	tmdOff := align(0x20) + align(certSize) + align(tikSize)
 	tid := make([]byte, 8)
 	f.ReadAt(tid, tmdOff+0x18C)
+	// Title IDs 00010005-xxxxxxxx are add-on content (DLC) for a game: it can
+	// only be installed, not started. Some dumps are named "(DLC)" too.
+	dlc := binary.BigEndian.Uint32(tid[0:4]) == 0x00010005 ||
+		strings.Contains(strings.ToLower(filepath.Base(path)), "(dlc)")
 	id := strings.TrimRight(string(tid[4:8]), "\x00")
 	name := cleanGameName(filepath.Base(path))
 	name = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(name, "WAD"), "-"))
-	return discInfo{Platform: "WiiWare", ID: id, Title: name}, true
+	return discInfo{Platform: "WiiWare", ID: id, Title: name, DLC: dlc}, true
 }
 
 var discExts = map[string]bool{".iso": true, ".gcm": true, ".ciso": true, ".wbfs": true, ".rvz": true, ".wia": true, ".gcz": true, ".wad": true}
 
 // ---------------- Dolphin location & folders ----------------
 
+// GameCube and Wii games play only in PixelU's Wii / GameCube engine
+// (PixelU\wii\PixelU-Wii.exe: Dolphin, GPL-2.0+, built from pixelu/wii),
+// found in the same PixelU folder as Wii U games use (internal/pixelu). A
+// Dolphin.exe installed separately isn't used for games any more.
+
+// wiiEngineLabel names the engine in recording messages.
+const wiiEngineLabel = "PixelU (Wii/GameCube)"
+
+// errNoWiiEngine: what to do when the engine isn't there.
+var errNoWiiEngine = errors.New("PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to " + exeFile("RetroPixels") +
+	" (it must have " + filepath.Join(pixelu.WiiDir, pixelu.WiiExeName) + " in it), then try again")
+
+// dolphinExe is PixelU's Wii / GameCube engine, or "".
 func dolphinExe() string {
 	cfgMu.Lock()
-	p := cfg.DolphinExe
+	chosen := cfg.PixelUExe
 	cfgMu.Unlock()
-	if p != "" {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
+	appDir := ""
+	if exe, err := os.Executable(); err == nil {
+		appDir = filepath.Dir(exe)
 	}
-	return ""
+	home, _ := os.UserHomeDir() // %USERPROFILE% on Windows
+	return pixelu.FindWiiExe(chosen, appDir, home)
 }
 
-// findDolphin looks near RetroPixels and your games folders, in Program Files,
-// and in the top folders of each drive.
-func findDolphin() string {
-	var roots []string
-	cfgMu.Lock()
-	for _, p := range cfg.DolphinFolders {
-		roots = append(roots, p, filepath.Dir(p))
+// dolphinExeName is the engine's file name, for telling it apart from other
+// programs (by its own name: Dolphin.exe isn't it).
+func dolphinExeName() string {
+	if exe := dolphinExe(); exe != "" {
+		return filepath.Base(exe)
 	}
-	cfgMu.Unlock()
-	if exe, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(exe), filepath.Dir(filepath.Dir(exe)))
-	}
-	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
-		if d := os.Getenv(env); d != "" {
-			roots = append(roots, d)
-		}
-	}
-	for d := 'C'; d <= 'Z'; d++ {
-		roots = append(roots, string(d)+`:\`)
-	}
-	found := ""
-	for _, r := range roots {
-		if _, err := os.Stat(r); err != nil {
-			continue
-		}
-		depth := 4
-		if len(r) <= 3 && !strings.EqualFold(r, `C:\`) {
-			depth = 5 // game drives often nest emulators a level deeper
-		}
-		walkLimited(r, depth, func(p string, d fs.DirEntry) bool {
-			if !d.IsDir() && strings.EqualFold(d.Name(), "Dolphin.exe") {
-				found = p
-				return false
-			}
-			return true
-		})
-		if found != "" {
-			return found
-		}
-	}
-	return ""
+	return pixelu.WiiExeName
 }
 
 var skipDirs = map[string]bool{"windows": true, "$recycle.bin": true, "system volume information": true, "programdata": true,
@@ -244,11 +234,18 @@ func dolphinFolders() []string {
 	return append([]string(nil), cfg.DolphinFolders...)
 }
 
-// guessDolphinFolders finds folders holding GameCube/Wii games near your other games.
+// guessDolphinFolders finds folders holding GameCube/Wii games near your
+// other games: near the Dolphin used before, else near PixelU's engine.
 func guessDolphinFolders() []string {
 	var roots []string
 	cfgMu.Lock()
-	if p := cfg.DolphinExe; p != "" {
+	p := cfg.DolphinExe
+	cfgMu.Unlock()
+	if p == "" {
+		p = dolphinExe()
+	}
+	cfgMu.Lock()
+	if p != "" {
 		// Widest first: the folder holding all your game collections, then narrower.
 		d := filepath.Dir(p)
 		var chain []string
@@ -320,12 +317,6 @@ func autoDetectDolphin() {
 	if done {
 		return
 	}
-	exe := findDolphin()
-	cfgMu.Lock()
-	if cfg.DolphinExe == "" {
-		cfg.DolphinExe = exe
-	}
-	cfgMu.Unlock()
 	folders := guessDolphinFolders()
 	cfgMu.Lock()
 	if len(cfg.DolphinFolders) == 0 {
@@ -461,7 +452,7 @@ func dolphinLibrary() []dolGame {
 			}
 			seen[strings.ToLower(p)] = true
 			name := dolDisplayName(filepath.Base(p), di)
-			if strings.HasSuffix(strings.ToLower(name), "(dlc)") || strings.Contains(strings.ToLower(filepath.Base(p)), "(dlc)") {
+			if di.DLC || strings.HasSuffix(strings.ToLower(name), "(dlc)") {
 				return true // add-on content isn't playable by itself
 			}
 			out = append(out, dolGame{Name: name, File: filepath.Base(p), Path: p, Platform: di.Platform, ID: di.ID,
@@ -475,29 +466,31 @@ func dolphinLibrary() []dolGame {
 
 // ---------------- Dolphin settings files ----------------
 
-// dolphinUserDir: portable "User" folder next to Dolphin.exe, else the usual Windows locations.
-func dolphinUserDir() string {
-	if t := os.Getenv("RETRO_DOLPHIN_USER"); t != "" {
-		return t
-	}
-	if exe := dolphinExe(); exe != "" {
-		dir := filepath.Dir(exe)
-		if _, err := os.Stat(filepath.Join(dir, "portable.txt")); err == nil {
-			return filepath.Join(dir, "User")
-		}
-	}
-	home, _ := os.UserHomeDir()
-	docs := filepath.Join(home, "Documents", "Dolphin Emulator")
-	if _, err := os.Stat(docs); err == nil {
-		return docs
-	}
-	if ad := os.Getenv("APPDATA"); ad != "" {
-		return filepath.Join(ad, "Dolphin Emulator")
-	}
-	return docs
-}
+// dolphinUserDir: the engine's portable "User" folder (PixelU\wii\User, as
+// portable.txt is next to PixelU-Wii.exe), else the usual places of an
+// installed Dolphin on this system (dolphin.UserDir).
+func dolphinUserDir() string { return dolphin.UserDir(dolphinExe()) }
 
-func dolphinIni(name string) string { return filepath.Join(dolphinUserDir(), "Config", name) }
+func dolphinIni(name string) string { return dolphin.ConfigFile(dolphinUserDir(), name) }
+
+// importOldDolphin brings the player's settings, memory cards and Wii saves
+// over from the Dolphin they used before (Documents\Dolphin Emulator, or the
+// old portable Dolphin's User folder) into the engine's User folder, the
+// first time only and never overwriting anything (pixelu.ImportDolphinUser).
+// It runs before anything in the engine's folder is written.
+func importOldDolphin() {
+	if dolphinExe() == "" {
+		return
+	}
+	user := dolphinUserDir()
+	cfgMu.Lock()
+	old := cfg.DolphinExe
+	cfgMu.Unlock()
+	if os.Getenv("RETRO_DOLPHIN_USER") != "" && os.Getenv("RETRO_OLD_DOLPHIN_USER") == "" {
+		return // tests with their own user folder
+	}
+	_, _ = pixelu.ImportDolphinUser(dolphin.LegacyUserDir(old), user)
+}
 
 // ini is a tiny order-preserving INI editor (Dolphin's files are simple).
 type ini struct{ lines []string }
@@ -725,8 +718,9 @@ func dolSettingsPayload() map[string]any {
 
 func saveDolSettings(changes map[string]any) error {
 	if dolphinRunning() {
-		return errors.New("Dolphin is open. Close it first — it saves its own settings when it closes")
+		return errors.New("PixelU (Wii/GameCube) is open. Close it first — it saves its own settings when it closes")
 	}
+	importOldDolphin() // so the old Dolphin's settings come over before these are added
 	files := map[string]*ini{}
 	for k, raw := range changes {
 		var d *dolSetting
@@ -763,7 +757,7 @@ func dolphinRunning() bool {
 	runMu.Lock()
 	r := running != nil && running.Kind == "dolphin"
 	runMu.Unlock()
-	return r || processRunning("Dolphin.exe")
+	return r || processRunning(dolphinExeName())
 }
 
 // dolphinDumpDir: where Dolphin saves frame and audio dumps (its "Dump"
@@ -777,10 +771,16 @@ func dolphinDumpDir() string {
 
 // ---------------- launching ----------------
 
+// errDLC: a WiiWare add-on was opened. It can't be started by itself; it
+// goes into the engine's Wii system memory once, then the game finds it.
+var errDLC = errors.New("this .wad is add-on content (DLC) for a WiiWare game, not a game you can start. " +
+	"To add it: click Open PixelU (Wii/GameCube) on the GameCube / Wii tab, then in PixelU use Tools > Install WAD... and choose this file once. " +
+	"Then start the game itself from the list")
+
 func launchDolphinGame(path string) error {
 	exe := dolphinExe()
 	if exe == "" {
-		return errors.New("Dolphin isn't set up yet — choose Dolphin.exe in the GameCube or Wii tab")
+		return errNoWiiEngine
 	}
 	var g *dolGame
 	for _, x := range dolphinLibrary() {
@@ -790,11 +790,17 @@ func launchDolphinGame(path string) error {
 		}
 	}
 	if g == nil {
+		if st, err := os.Stat(path); err == nil {
+			if di, ok := cachedIdentify(path, st); ok && di.DLC {
+				return errDLC
+			}
+		}
 		return errors.New("that game isn't in your GameCube / Wii games folders")
 	}
 	if dolphinRunning() {
-		return errors.New("Dolphin is already open. Close it first, then start the game here")
+		return errors.New("PixelU (Wii/GameCube) is already open. Close it first, then start the game here")
 	}
+	importOldDolphin()       // the first time: the old Dolphin's settings and saves
 	_ = setupXboxPads(false) // only fills in controllers that aren't set up yet
 	cfgMu.Lock()
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
@@ -827,9 +833,17 @@ func launchDolphinGame(path string) error {
 	var rec *recSession
 	if recordingWanted() {
 		rec = newRecSession(g.Name, dolphinDumpDir())
+		rec.Emu = wiiEngineLabel
 		args = append(args, dolphinRecordArgs(recQuality())...)
 	}
-	if err := startEmulator(exe, args, path, g.Name, "dolphin", "Dolphin", rec, onStart); err != nil {
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(exe) // portable: it keeps its data next to the .exe
+	if embed {
+		// PixelU-Wii then keeps its game screen off-screen until it's docked,
+		// so it never flashes up as a window of its own.
+		cmd.Env = append(os.Environ(), "PIXELU_EMBED=1")
+	}
+	if err := startProcess(cmd, path, g.Name, "dolphin", "PixelU", rec, onStart, nil); err != nil {
 		return err
 	}
 	clearManualWanted()
@@ -855,11 +869,12 @@ func dolphinEmbedOn() bool { return cfg.DolphinEmbed == nil || *cfg.DolphinEmbed
 func openDolphinUI() error {
 	exe := dolphinExe()
 	if exe == "" {
-		return errors.New("Dolphin isn't set up yet")
+		return errNoWiiEngine
 	}
 	if dolphinRunning() {
-		return errors.New("Dolphin is already open")
+		return errors.New("PixelU (Wii/GameCube) is already open")
 	}
+	importOldDolphin()
 	_ = setupXboxPads(false)
 	cmd := exec.Command(exe)
 	cmd.Dir = filepath.Dir(exe)
@@ -889,7 +904,7 @@ func dolStatus() map[string]any {
 	cfgMu.Unlock()
 	vol, muted := dolphinVolume()
 	return map[string]any{"exe": exe, "version": version, "folders": dolphinFolders(), "fullscreen": fs, "embed": embed,
-		"volume": vol, "muted": muted, "install": dolInstallStatus()}
+		"volume": vol, "muted": muted, "userDir": dolphinUserDir()}
 }
 
 func registerDolphinRoutes(mux *http.ServeMux) {
@@ -952,19 +967,6 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 		}
 		var err error
 		switch b.Action {
-		case "choose-exe":
-			var p string
-			p, err = pickFile("Choose Dolphin.exe", "Dolphin (Dolphin.exe)|Dolphin.exe|Programs (*.exe)|*.exe", filepath.Dir(dolphinExe()))
-			if err == nil && p != "" {
-				if !strings.EqualFold(filepath.Ext(p), ".exe") {
-					err = errors.New("that isn't a program (.exe)")
-				} else {
-					cfgMu.Lock()
-					cfg.DolphinExe = p
-					_ = saveConfigLocked()
-					cfgMu.Unlock()
-				}
-			}
 		case "add-folder":
 			var d string
 			d, err = pickFolder("Add a folder with GameCube or Wii games", "")
@@ -1014,14 +1016,19 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			err = stopEmbeddedGame()
 		case "setup-pads":
 			if dolphinRunning() {
-				err = errors.New("close Dolphin first")
+				err = errors.New("close PixelU (Wii/GameCube) first")
 			} else {
+				importOldDolphin()
 				err = setupXboxPads(true)
 			}
 		case "open-dolphin":
 			err = openDolphinUI()
 		case "open-config":
-			p := filepath.Join(dolphinUserDir(), "Config")
+			if dolphinExe() == "" {
+				err = errNoWiiEngine
+				break
+			}
+			p := dolphin.ConfigDir(dolphinUserDir())
 			os.MkdirAll(p, 0o755)
 			err = openFolder(p)
 		default:

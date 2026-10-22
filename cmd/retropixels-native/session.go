@@ -108,7 +108,7 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	for chip, b := range g.Firmware {
 		fw[chip] = b
 	}
-	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Dips: g.Dips, Firmware: fw})
+	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Path: g.Path, Dips: g.Dips, Firmware: fw})
 	if err != nil {
 		return nil, err
 	}
@@ -588,6 +588,12 @@ func (s *session) startRecording(ff, enc string) error {
 
 // startRecordingTo: with the quality and folder picked in the Record menu.
 func (s *session) startRecordingTo(ff, enc, quality, dir string) error {
+	return s.startRecordingMin(ff, enc, quality, dir, 0)
+}
+
+// startRecordingMin: a recording shorter than min seconds isn't kept (an
+// automatic one, when the game is closed straight away).
+func (s *session) startRecordingMin(ff, enc, quality, dir string, min float64) error {
 	return s.call(func() error {
 		if s.rec != nil {
 			return nil
@@ -597,6 +603,7 @@ func (s *session) startRecordingTo(ff, enc, quality, dir string) error {
 		if err != nil {
 			return err
 		}
+		r.minFrames = int64(min * s.fps)
 		s.rec = r
 		return nil
 	})

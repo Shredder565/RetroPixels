@@ -1,0 +1,83 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+
+// The emulated Wii remote, optionally with a Nunchuk and/or MotionPlus. Which extension
+// it reports is the profile's device type.
+
+#include "input/emulated/WPADController.h"
+
+class WiimoteController : public WPADController
+{
+public:
+	// mapping ids, stored in profiles
+	enum ButtonId
+	{
+		kButtonId_None,
+
+		kButtonId_A,
+		kButtonId_B,
+		kButtonId_1,
+		kButtonId_2,
+
+		kButtonId_Nunchuck_Z,
+		kButtonId_Nunchuck_C,
+
+		kButtonId_Plus,
+		kButtonId_Minus,
+
+		kButtonId_Up,
+		kButtonId_Down,
+		kButtonId_Left,
+		kButtonId_Right,
+
+		kButtonId_Nunchuck_Up,
+		kButtonId_Nunchuck_Down,
+		kButtonId_Nunchuck_Left,
+		kButtonId_Nunchuck_Right,
+
+		kButtonId_Home,
+
+		kButtonId_Max,
+	};
+
+	WiimoteController(size_t player_index);
+
+	Type type() const override { return Type::Wiimote; }
+	WPADDeviceType get_device_type() const override { return m_device_type; }
+	// also switches to that device's default data format
+	void set_device_type(WPADDeviceType device_type);
+
+	bool is_mpls_attached() override;
+
+	uint32 get_emulated_button_flag(uint32 id) const override { return s_get_emulated_button_flag(id); }
+	// kWPADButton_* bit of a mapping id (0 for the Nunchuk stick directions)
+	static uint32 s_get_emulated_button_flag(uint32 id);
+
+	size_t get_highest_mapping_id() const override { return kButtonId_Max; }
+	bool is_axis_mapping(uint64 mapping) const override { return mapping >= kButtonId_Nunchuck_Up && mapping <= kButtonId_Nunchuck_Right; }
+
+	bool set_default_mapping(const std::shared_ptr<ControllerBase>& controller) override;
+
+	// the Nunchuk stick; the remote itself has no second stick or analog triggers
+	glm::vec2 get_axis() const override;
+	glm::vec2 get_rotation() const override { return {}; }
+	glm::vec2 get_trigger() const override { return {}; }
+
+	void load(const pugi::xml_node& node) override;
+	void save(pugi::xml_node& node) override;
+
+	static std::string_view get_button_name(ButtonId id);
+
+	// navigation of the emulator's own menus: d-pad, confirm/back, start and home
+	bool is_up_down() const override { return is_mapping_down(kButtonId_Up); }
+	bool is_down_down() const override { return is_mapping_down(kButtonId_Down); }
+	bool is_left_down() const override { return is_mapping_down(kButtonId_Left); }
+	bool is_right_down() const override { return is_mapping_down(kButtonId_Right); }
+	bool is_a_down() const override { return is_mapping_down(kButtonId_A); }
+	bool is_b_down() const override { return is_mapping_down(kButtonId_B); }
+	bool is_start_down() const override { return is_mapping_down(kButtonId_Plus); }
+	bool is_home_down() const override { return is_mapping_down(kButtonId_Home); }
+
+private:
+	WPADDeviceType m_device_type = kWAPDevCore;
+};

@@ -1,0 +1,4 @@
+# Build trees (CMakePresets.json puts them here)
+/build/
+# Third-party sources, fetched by Externals/fetch.py
+/third_party/

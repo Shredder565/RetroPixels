@@ -30,6 +30,10 @@ type Settings struct {
 	apSettings // Archipelago: the original ROM for each game's patches (archipelago.go)
 	// GameCube / Wii through Dolphin (dolphin_settings.go)
 	Dolphin DolphinSettings `json:"dolphin"`
+	// Wii U through PixelU (pixelu_settings.go)
+	PixelU PixelUSettings `json:"pixelu"`
+	// Star Wars Trilogy Arcade through Supermodel (supermodel_settings.go)
+	Supermodel SupermodelSettings `json:"supermodel"`
 }
 
 const maxRecent = 10
@@ -77,6 +81,7 @@ func (s *Settings) normalize() {
 	if len(s.Recent) > maxRecent {
 		s.Recent = s.Recent[:maxRecent]
 	}
+	s.migrateAutoRecord()
 }
 
 func saveSettings(s Settings) error {

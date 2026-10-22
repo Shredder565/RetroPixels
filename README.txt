@@ -8,16 +8,40 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.20.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.21.0 (the number also shows next to the RetroPixels name in the app).
+For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
-Wii U (homebrew, new in 2.20.0),
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
 games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
 Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids
-Deluxe, Berzerk, Centipede, Vs. Castlevania), plus GameCube and
-Wii through Dolphin, and any other arcade game in MAME (any version of it).
+Deluxe, Berzerk, Centipede, Vs. Castlevania and more), plus Wii U games in
+PixelU (new in 2.21.0), GameCube and Wii in PixelU's GameCube / Wii engine
+(new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade in Supermodel
+(new in 2.21.0), and any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
+
+What's in the download (RetroPixels-2.21.0.zip)
+- RetroPixels.exe, and RetroPixels-Native.exe (the test build without a web
+  browser inside, see "RetroPixels Native" below).
+- The engines they play through, each in its own folder. Keep these folders
+  next to RetroPixels.exe:
+  * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
+    from Cemu's code and has been rewritten as RetroPixels' own code
+    (Mozilla Public License 2.0, LICENSE-MPL-2.0.txt).
+  * PixelU\wii\PixelU-Wii.exe: GameCube and Wii. It started from Dolphin and
+    has been rewritten as RetroPixels' own code (GPL-2.0-or-later, its
+    licence is in PixelU\wii).
+  * MAME: the MAME team's official release of MAME, unchanged (built in
+    since 2.17.0).
+  * Supermodel\supermodel.exe: Sega Model 3, for Star Wars Trilogy Arcade.
+    Supermodel by The Supermodel Team, modified for RetroPixels
+    (GPL-3.0-or-later; its exact source and the list of changes are in that
+    folder).
+- "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
+  RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
+- No games, keys, BIOS or firmware are included. Wii U and Wii games need
+  your own dumps and the keys from your own console (see below).
 
 First run
 - Windows may show "Windows protected your PC" because this program isn't
@@ -27,11 +51,10 @@ First run
   into the program, so they work offline. No BIOS files are needed.
 - Nintendo 64 runs inside RetroPixels.exe itself (it's too heavy for the
   page), so N64 games need the desktop app.
-- Wii U (new in 2.20.0) also runs inside RetroPixels.exe, on RetroPixels' own
-  Wii U emulator. It plays homebrew programs (.rpx) that draw with the
-  Wii U's simple screens (OSScreen); Wii U games don't play yet (they need
-  the graphics chip, which comes later). Try "RetroPixels Wii U demo.rpx"
-  from the download. No Nintendo keys, firmware or games are needed.
+- Wii U, GameCube, Wii, MAME and Star Wars Trilogy Arcade games play
+  through the engines in the folders next to RetroPixels.exe (see "What's
+  in the download"), shown inside the RetroPixels window. They need the
+  desktop app.
 
 What each system supports
 - NES: about 120 cartridge types (mappers), covering nearly all licensed
@@ -213,21 +236,58 @@ Archipelago (multiworld randomizers, new)
   for SNI, 43055-43059 for BizHawk) and never connects to the Archipelago
   server itself.
 
-GameCube & Wii (Dolphin)
-- No Dolphin yet? Click "Download Dolphin" in the GameCube tab: RetroPixels
-  downloads the latest official version from dolphin-emu.org into a "Dolphin"
-  folder next to RetroPixels.exe, and uses it from then on.
-- The "GameCube" and "Wii" tabs (the Wii tab includes WiiWare) find Dolphin
-  and your games automatically (it reads each disc, so PC and PS2 .iso files are skipped).
+Wii U (PixelU, new in 2.21.0)
+- Wii U games play in PixelU, RetroPixels' Wii U emulator, in the PixelU
+  folder of the download. Play the games you dumped from your own Wii U.
+  Encrypted discs (.wud / .wux) need their disc key, from your own console,
+  in keys.txt in the PixelU\portable folder.
+- Open the "Wii U" tab and click "Add games folder...". It lists .wua, .wud
+  and .wux files, Wii U .iso discs and unpacked games (a folder with
+  code\*.rpx). Games are played from where they are; nothing is copied.
+- Click a game (or D-pad + A) to play it. It plays inside the RetroPixels
+  window ("Play inside RetroPixels"; untick it for PixelU's own window), and
+  fullscreen with "Start games fullscreen". "Stop game" in the bar at the top
+  brings you back. The GamePad screen / TV screen button in that bar shows
+  the GamePad's screen; click or touch it to touch the GamePad.
+- Controls: an Xbox controller works right away as the GamePad. Keyboard:
+  WASD left stick, arrow keys D-pad, T F G H right stick, L / K / I / J =
+  A / B / X / Y, Q / O = L / R, E / U = ZL / ZR, Enter / Backspace =
+  Plus / Minus, Home = Home. Change them in PixelU itself ("Open PixelU",
+  then Options > Input settings), with its graphics settings and graphic
+  packs.
+- PixelU draws with Vulkan, which comes with your graphics driver. If it
+  doesn't work, RetroPixels says how to update the driver and offers to play
+  with OpenGL instead ("Use OpenGL instead of Vulkan" in the tab).
+- PixelU keeps its settings, saves and shader caches in its own folder.
+- To try it without a game, open "RetroPixels Wii U demo.rpx" from the
+  download in RetroPixels Native (Wii U > Open a Wii U game...).
+
+GameCube & Wii (PixelU's GameCube / Wii engine)
+- GameCube and Wii games play in PixelU's GameCube / Wii engine,
+  PixelU\wii\PixelU-Wii.exe in the download (new in 2.21.0: it replaces
+  Dolphin, so there's nothing to download). A Dolphin you installed yourself
+  isn't used for games any more; the first time a game starts, your Dolphin
+  settings, memory cards and Wii saves are copied over (nothing is
+  overwritten).
+- Wii games need the keys file from your own Wii, because Nintendo's keys
+  aren't included: the keys.bin that BootMii saves next to nand.bin when it
+  backs up the console, or the console's otp.bin. Put it in
+  PixelU\wii\User\Wii (RetroPixels Native asks for it before the first Wii
+  game and can find it on your PC). GameCube games don't need it.
+- The "GameCube" and "Wii" tabs (the Wii tab includes WiiWare) find your
+  games automatically (it reads each disc, so PC and PS2 .iso files are
+  skipped). WiiWare add-on (DLC) .wad files aren't listed; opening one says
+  how to install it.
 - Click a game (or D-pad + A) to play it. It plays right inside the RetroPixels
-  window (no separate Dolphin window), and with "Start games fullscreen" ticked
-  the RetroPixels window goes fullscreen. Use "Stop game" in the bar at the top
-  to come back to your library. Untick "Play inside RetroPixels" to have Dolphin
-  open in its own window as before. The first time,
+  window, and with "Start games fullscreen" ticked the RetroPixels window goes
+  fullscreen. Use "Stop game" in the bar at the top to come back to your
+  library. Untick "Play inside RetroPixels" to have the engine open in its
+  own window. The first time,
   your Xbox controller is set up as the GameCube controller and as a Wii Remote
-  + Nunchuk (Wii pointer = right stick, shake = RB). Your own Dolphin controller
+  + Nunchuk (Wii pointer = right stick, shake = RB). Your own controller
   settings are never replaced unless you click "Reset to Xbox layout".
-- Dolphin's main graphics settings are on the right of both tabs (they're shared).
+- The main graphics settings are on the right of both tabs (they're shared).
+  Save states: Shift+F1 saves, F1 loads.
 
 Arcade games in MAME (any version)
 - RetroPixels' own arcade emulators play the games listed above. Every other
@@ -268,36 +328,64 @@ Arcade games in MAME (any version)
 - The MAME list is kept in %APPDATA%\RetroPixels\mame.json and shared with
   RetroPixels Native.
 
+Star Wars Trilogy Arcade (Supermodel)
+- The "Supermodel" tab plays Star Wars Trilogy Arcade (Sega Model 3) on
+  Supermodel, which is in the Supermodel folder of the RetroPixels download
+  (Supermodel by The Supermodel Team, GPL-3.0, modified for RetroPixels: its
+  licence, source and the list of changes are in that folder).
+- You need your own ROM set: swtrilgya.zip or swtrilgy.zip. The first time
+  you open the tab, RetroPixels looks for it in your ROM folders, Downloads,
+  Desktop and Documents, then in the game folders on each drive, and
+  remembers it; or click "Choose the game file...".
+  A swtrilgya.zip that isn't merged needs swtrilgy.zip next to it.
+- Click the tile: the game starts playable, fullscreen, with the Xbox
+  controller (or inside RetroPixels with "Play inside RetroPixels").
+  Back + Start or Esc comes back.
+- Xbox controller ("Flight stick feel" on by default: steady near the
+  centre, full movement at the edge, corners reachable, and the aim glides
+  like the arcade yoke; "Smoothness" sets how much, Off to Heavy): left stick aims, RT or A fires, RB or B is the event
+  button (force), Start starts, Back inserts a coin, Back + Start leaves.
+  Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
+  F2 the game's test menu.
+- Settings, high scores and save states are kept in
+  %APPDATA%\RetroPixels\Supermodel.
+- RetroPixels Native plays it too: Arcade (MAME) > Star Wars Trilogy Arcade
+  (Supermodel), or open swtrilgy.zip / swtrilgya.zip (they start in
+  Supermodel, not MAME). Its settings are under Arcade (MAME) > Supermodel
+  settings.
+
 Recording games
-- GameCube and Wii games are recorded automatically as .mp4, from the start
-  of the game to the end (turn it off in the Recordings tab, or untick
-  "Record games automatically").
-- Dolphin itself saves the game's picture and sound while you play, and
+- Every game is recorded automatically as .mp4, from the start of the game
+  to the end: classic consoles, arcade, Wii U, GameCube, Wii, MAME and
+  Supermodel (one setting for all of them, on unless you turn it off in the
+  Recordings tab, or untick "Record games automatically").
+- For GameCube and Wii, the engine itself saves the game's picture and
+  sound while you play, and
   RetroPixels makes the .mp4 from them when the game ends. So the video shows
   only the game - no mouse pointer, no other windows, no black bars - with
   only the game's sound (not Discord, music, etc.), and it plays back smoothly
   even if the game slowed down for a moment.
 - Making the video takes a little while after a long game; "Saving the
   recording..." shows meanwhile. Keep RetroPixels open until it's done.
-  Dolphin's raw files (in its Dump folder) are big - about 15 GB an hour -
+  The engine's raw files (in its Dump folder) are big - about 15 GB an hour -
   and are deleted once the .mp4 is saved, so keep some free disk space.
 - Stop recording in the bar at the top stops the video at that point; Record
-  starts a new video from then on. Dolphin can only start saving a game as it
+  starts a new video from then on. The engine can only start saving a game as it
   starts, so with automatic recording off the button says "Record next game".
 - While recording, the bar at the top shows REC.
-- Videos are saved to Videos\RetroPixels. If something goes wrong, details
-  are in Videos\RetroPixels\logs\last-recording.log. Recording needs
-  Dolphin 5.0 or newer.
+- Videos are saved to Videos\RetroPixels (change it in the Recordings tab).
+  If something goes wrong, details are in
+  Videos\RetroPixels\logs\last-recording.log.
 - The first time, RetroPixels asks to download ffmpeg (a free video encoder,
   about 190 MB, from github.com/BtbN/FFmpeg-Builds). Click "Download ffmpeg"
   (if you don't, it's downloaded when a recorded game ends);
   it's checked against its published checksum and saved in an "ffmpeg" folder
   next to RetroPixels.exe. It uses your NVIDIA / AMD / Intel graphics card for
   encoding when it can. ffmpeg is GPL-licensed; its licence is saved with it.
-- Classic-console and arcade games: press ● Record above the game (or hold
-  the right stick down for a second). The video holds only the game's
-  picture at its own shape (no black bars, buttons or messages) and only the
-  game's sound. Those videos go to your Downloads folder.
+- Classic-console and arcade games: with automatic recording off, press
+  ● Record above the game (or hold the right stick down for a second). The
+  video holds only the game's picture at its own shape (no black bars,
+  buttons or messages) and only the game's sound.
 
 RetroPixels Native (test build)
 RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
@@ -307,8 +395,9 @@ Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
 Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The
 Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe,
-Berzerk, Centipede and Vs. Castlevania), and GameCube / Wii games through Dolphin: every system
-RetroPixels.exe plays. The two programs keep separate settings
+Berzerk, Centipede and Vs. Castlevania), Wii U and GameCube / Wii games
+through PixelU, MAME games and Star Wars Trilogy Arcade: every system
+RetroPixels.exe plays. RetroPixels Native is for Windows only. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .sfc, .smc, .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
@@ -319,6 +408,11 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   clone sets need a full (non-merged) set. Upright-cabinet games are shown
   upright.
   File > Recent games lists the last ten.
+- Double-clicking game files: RetroPixels Native tells Windows which game
+  files it opens, so it's offered in File Explorer's "Open with". Windows 11
+  still asks once per file type: pick RetroPixels Native and "Always"
+  (Options > Open game files with RetroPixels Native explains it). A game
+  opened while RetroPixels Native is running goes to that window.
 - Keys (the same as in RetroPixels.exe): arrow keys move. NES: X = A, Z = B,
   Enter = Start, Shift = Select. Atari 2600: Z, X or Space = Fire, Enter =
   Reset, Shift = Select, 1 / 2 = left / right difficulty switch, 3 = Colour /
@@ -421,19 +515,22 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Options > Controller rumble turns rumble off. Record > Quality, Change
   recordings folder and Recent recordings work as in RetroPixels.exe's
   Recordings tab. Help > Keys and shortcuts (F1) lists every key.
-- GameCube and Wii (through Dolphin): .iso .gcm .rvz .wbfs .ciso .gcz .wia
-  and WiiWare .wad. It uses the Dolphin RetroPixels.exe already found or
-  downloaded; if there is none, choose GameCube / Wii > Download the latest
-  Dolphin (from dolphin-emu.org), or Change Dolphin... to pick a Dolphin.exe.
-  GameCube / Wii > Library lists the games in your games folders (search,
+- Wii U (PixelU): Wii U > Open a Wii U game... (.wua .wud .wux .iso .rpx),
+  or drop the file on the window. The game plays inside this window;
+  Wii U > Show the GamePad screen switches to the GamePad's screen (touch it
+  with the mouse or a finger), and Wii U > Open PixelU sets up controllers
+  and graphics.
+- GameCube and Wii (PixelU's GameCube / Wii engine): .iso .gcm .rvz .wbfs
+  .ciso .gcz .wia and WiiWare .wad. Before the first Wii game it asks for
+  the keys file from your own Wii (keys.bin from BootMii's NAND backup, or
+  otp.bin), and can look for it on this PC. GameCube / Wii > Library lists the games in your games folders (search,
   filter, sort; double-click, Enter or controller A plays). Games inside a
   .zip or .7z must be unpacked first. The game plays inside the RetroPixels
   Native window, so OBS can capture it. F11 or Alt+Enter: fullscreen; Esc:
-  leave fullscreen; F9: start or stop recording; Alt+F4: stop the game. Games
-  are recorded automatically (turn it off in the GameCube / Wii menu); the
-  mp4 is saved when the game ends. The menu also has Game volume, Dolphin
-  settings (close Dolphin first), Set up Xbox controller and Controller
-  layout. Save states are Dolphin's: Shift+F1 saves, F1 loads.
+  leave fullscreen; F9: start or stop recording; Alt+F4: stop the game. The
+  mp4 is saved when the game ends. The menu also has Game volume, PixelU
+  settings, Set up Xbox controller and Controller layout. Save states are
+  the engine's: Shift+F1 saves, F1 loads.
 - Arcade games in MAME (any version): Arcade (MAME) > Library and MAME
   versions lists your MAME versions (Add MAME..., Find on this PC, or
   Download an official version), your ROM folders and your games, with the
@@ -442,8 +539,9 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   F11 / Alt+Enter: fullscreen, Esc: leave fullscreen, Arcade (MAME) > Stop
   game to come back. A zipped arcade game RetroPixels' own emulators don't
   have is offered to MAME when you open it.
-- Recording: F9 (or Record > Start recording, or hold the right stick down for
-  a second) starts and stops it. The video is only the game's picture and
+- Recording: every game is recorded automatically (Record > Record games
+  automatically, on by default). F9 (or Record > Start recording, or hold
+  the right stick down for a second) starts and stops it. The video is only the game's picture and
   sound - no window, menus or mouse pointer - saved as .mp4 in
   Videos\RetroPixels (Record > Open recordings folder). It uses the same
   ffmpeg as RetroPixels.exe; if there isn't one yet, it offers to download it.
@@ -491,8 +589,8 @@ hasn't been tried on a real phone yet, so tell us how it runs.
   sharp or smooth pixels, quit. Clicking the right stick saves a state, the
   left stick loads it; hold Tab on a keyboard to fast-forward. The game
   pauses and saves when you leave the app.
-- Not in the Android app: GameCube and Wii (Dolphin has its own Android
-  app), MAME, video recording (Android's screen recorder works) and
+- Not in the Android app: Wii U, GameCube and Wii games, MAME, Star Wars
+  Trilogy Arcade, video recording (Android's screen recorder works) and
   Archipelago server connections (use RetroPixels Native on a computer for
   those). Nintendo 64 may be slow on older phones.
 - Building it yourself: download RetroPixels-Android-Studio-<version>.zip,
@@ -507,7 +605,10 @@ Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
                  (%LOCALAPPDATA%\RetroPixels\BrowserProfile)
 - Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json)
-- Recordings:    Videos\RetroPixels (GameCube / Wii), Downloads (classic)
+- Recordings:    Videos\RetroPixels
+- Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)
+- GameCube / Wii: PixelU\wii\User (settings, memory cards, Wii saves and
+                 the Wii keys file in its Wii folder)
 
 
 Credits & licences
@@ -525,15 +626,31 @@ Credits & licences
   and measured hardware values are still facts others have published too.
   The DSP-3, DSP-4, ST010, ST011 and ST018 chip programs are never included;
   you supply your own.
+- The engines in the download's folders are separate programs with their
+  own licences (see "What's in the download"): PixelU (MPL-2.0) and
+  PixelU-Wii (GPL-2.0-or-later), which started from Cemu's and Dolphin's
+  code and have been rewritten as RetroPixels' own code (their source is in
+  the RetroPixels source, in pixelu and pixelu\wii;
+  docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
+  rewrite and list the third-party parts and the Dolphin data kept), the
+  built-in MAME and Supermodel. Thanks to the Cemu, Dolphin, MAME and
+  Supermodel teams.
+- RetroPixels' older Go Wii U emulator (from 2.20.0, no longer used by the
+  Wii U tab) is the exception in its own code: some of its files are Go
+  rewrites of code from Cemu (https://github.com/cemu-project/Cemu), the
+  Wii U emulator, used under the Mozilla Public License 2.0. Those files
+  stay under that licence (a copy is in wiiu/LICENSE-MPL-2.0.txt), say so at
+  the top, and name the Cemu files they come from. Their source is part of
+  the RetroPixels source attached to each release.
 - It works together with separate programs that keep their own licences and
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
     github.com/BtbN/FFmpeg-Builds. Its licence is saved next to it.
-  * Dolphin (GPL-2.0+): your own install, or the official release RetroPixels
-    downloads for you from dolphin-emu.org (unchanged; a note with its licence
-    and where to get its source is saved in its folder).
-    Launched by RetroPixels and shown inside its window. Dolphin's source code:
-    https://github.com/dolphin-emu/dolphin
+  * Supermodel (GPL-3.0-or-later, by The Supermodel Team): RetroPixels'
+    build in the Supermodel folder, modified for RetroPixels. The exact
+    source built is in Supermodel\Supermodel-source.tar.gz and the changes
+    are listed in Supermodel\RetroPixels.txt. Supermodel's source code:
+    https://github.com/trzy/Supermodel
   * MAME (GPL-2.0+, by the MAME team): the official release that comes in the
     MAME folder, your own installs, or official releases RetroPixels
     downloads for you from github.com/mamedev/mame (all unchanged; a note

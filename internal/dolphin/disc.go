@@ -27,6 +27,7 @@ type Disc struct {
 	Platform string // "GameCube", "Wii" or "WiiWare"
 	ID       string // e.g. GMSE01
 	Title    string // the name stored on the disc
+	DLC      bool   // a WiiWare add-on (.wad) that can't be started by itself
 }
 
 // Exts: the file types Dolphin plays, as the app lists them.
@@ -163,10 +164,14 @@ func wadInfo(f *os.File, path string) (Disc, bool) {
 	tmdOff := align(0x20) + align(certSize) + align(tikSize)
 	tid := make([]byte, 8)
 	f.ReadAt(tid, tmdOff+0x18C)
+	// Title IDs 00010005-xxxxxxxx are add-on content (DLC) for a game: it can
+	// only be installed, not started. Some dumps are named "(DLC)" too.
+	dlc := binary.BigEndian.Uint32(tid[0:4]) == 0x00010005 ||
+		strings.Contains(strings.ToLower(filepath.Base(path)), "(dlc)")
 	id := strings.TrimRight(string(tid[4:8]), "\x00")
 	name := CleanName(filepath.Base(path))
 	name = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(name, "WAD"), "-"))
-	return Disc{Platform: "WiiWare", ID: id, Title: name}, true
+	return Disc{Platform: "WiiWare", ID: id, Title: name, DLC: dlc}, true
 }
 
 // ---------------- names ----------------

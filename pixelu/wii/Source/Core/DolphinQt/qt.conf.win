@@ -1,0 +1,4 @@
+; Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+; Shipped as qt.conf next to PixelU-Wii.exe: Qt's plugins are in QtPlugins.
+[Paths]
+Plugins = ./QtPlugins

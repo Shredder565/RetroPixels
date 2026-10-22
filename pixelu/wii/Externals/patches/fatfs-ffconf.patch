@@ -1,0 +1,36 @@
+PixelU-Wii patch for FatFs R0.14b, ffconf.h: the options PixelU-Wii's code
+needs (Common/FatFsUtil.cpp builds and reads the SD card image,
+Core/IOS/Network/KD/VFF/VFFUtil.cpp the WiiConnect24 VFF files).
+
+  FF_USE_MKFS 1     f_mkfs(): a new SD card image is formatted.
+  FF_USE_LFN 2      long file names, with the working buffer on the stack
+                    (FatFsUtil.cpp supplies no ff_memalloc/ff_memfree).
+  FF_LFN_UNICODE 2  file names on the API are UTF-8, as everywhere else in
+                    PixelU-Wii.
+  FF_FS_RPATH 1     f_chdir(): the SD image is filled from and copied to a
+                    host folder one directory at a time.
+
+Everything else stays at the R0.14b defaults.
+
+--- a/source/ffconf.h
++++ b/source/ffconf.h
+@@ -32,3 +32,3 @@
+ 
+-#define FF_USE_MKFS		0
++#define FF_USE_MKFS		1
+ /* This option switches f_mkfs() function. (0:Disable or 1:Enable) */
+@@ -115,3 +115,3 @@
+ 
+-#define FF_USE_LFN		0
++#define FF_USE_LFN		2
+ #define FF_MAX_LFN		255
+@@ -135,3 +135,3 @@
+ 
+-#define FF_LFN_UNICODE	0
++#define FF_LFN_UNICODE	2
+ /* This option switches the character encoding on the API when LFN is enabled.
+@@ -155,3 +155,3 @@
+ 
+-#define FF_FS_RPATH		0
++#define FF_FS_RPATH		1
+ /* This option configures support for relative path.

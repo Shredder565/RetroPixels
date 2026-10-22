@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,9 @@ func TestGameArgs(t *testing.T) {
 	opts := ParseShowConfig(showConfig)
 	got := GameArgs("tmnt", `D:\roms;C:\mame\roms`, opts, LaunchOptions{Embed: true})
 	want := []string{"tmnt", "-rompath", `D:\roms;C:\mame\roms`, "-window", "-nomaximize", "-keyboardprovider", "win32", "-skip_gameinfo", "-joystick"}
+	if runtime.GOOS != "windows" { // SDL MAME: its own keyboard provider
+		want = []string{"tmnt", "-rompath", `D:\roms;C:\mame\roms`, "-window", "-nomaximize", "-skip_gameinfo", "-joystick"}
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("embedded:\n got %q\nwant %q", got, want)
 	}

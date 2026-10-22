@@ -185,7 +185,33 @@
   .plat { position: absolute; top: 8px; left: 8px; font-size: 10px; font-weight: 700; letter-spacing: .5px;
     padding: 2px 7px; border-radius: 999px; background: #000a; color: #fff; }
   .plat.GameCube { background: #4b3fa8; } .plat.Wii { background: #2b8cc4; } .plat.WiiWare { background: #1f7a6d; }
-  #gcSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  #wiiuTab .sw-tile:hover, #wiiuTab .sw-tile:focus-visible { border-color: #2fb4ff; }
+  #wiiuTab .toggle input:checked { background: #0b8fd6; }
+  .wiiu-btn { background: #0b8fd6; } .wiiu-btn:hover { background: #087cbc; }
+  .plat.WiiU { background: #0b8fd6; }
+  /* Supermodel (Sega Model 3): Star Wars Trilogy Arcade */
+  .tabs button[data-tab="supermodel"][aria-selected="true"] { border-bottom-color: #ffd54a; }
+  .sm-btn { background: #b8860b; } .sm-btn:hover { background: #9c7209; }
+  #smTab .toggle input:checked { background: #b8860b; }
+  #smTab .sw-tile:hover, #smTab .sw-tile:focus-visible { border-color: #ffd54a; }
+  #smTab .sw-tile:focus-visible { box-shadow: 0 0 0 3px #ffd54a55; }
+  .sm-grid { display: grid; grid-template-columns: minmax(0, 340px); gap: 12px; padding: 4px; }
+  .sm-art { aspect-ratio: 4 / 3; position: relative; overflow: hidden; display: grid; place-items: center; align-content: center;
+    gap: 4px; text-align: center; color: #ffd54a; background:
+      radial-gradient(1px 1px at 12% 18%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 78% 12%, #fff 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 33% 72%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 64% 84%, #fff 50%, transparent 51%),
+      radial-gradient(1px 1px at 88% 58%, #fff 50%, transparent 51%), radial-gradient(1.5px 1.5px at 52% 30%, #fff 50%, transparent 51%),
+      radial-gradient(1px 1px at 6% 90%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 92% 92%, #ccd 50%, transparent 51%),
+      radial-gradient(1px 1px at 24% 44%, #ccd 50%, transparent 51%), radial-gradient(1px 1px at 70% 46%, #ccd 50%, transparent 51%),
+      radial-gradient(ellipse at 50% 120%, #1d2a55 0%, #05060c 60%); }
+  .sm-art b { font-size: 44px; font-weight: 900; letter-spacing: 6px; line-height: .95; text-shadow: 0 0 18px #ffb30066, 0 2px 0 #7a5a00; }
+  .sm-art span { font-size: 15px; font-weight: 700; letter-spacing: 7px; color: #f3f3f3; }
+  .sm-art small { position: absolute; bottom: 8px; font-size: 10px; letter-spacing: 2px; color: #9aa3c7; }
+  .sm-play { position: absolute; inset: auto 10px 10px auto; background: #b8860b; color: #fff; border-radius: 999px;
+    padding: 4px 12px; font-size: 13px; font-weight: 700; }
+  .sm-rom { display: flex; gap: 10px; align-items: flex-start; }
+  .sm-rom small { overflow-wrap: anywhere; }
+  #gcSearch, #wiiuSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
   #swNow { margin-bottom: 14px; }
   /* GameCube / Wii game docked inside this window: the game fills everything below this bar. */
@@ -312,7 +338,7 @@
 </head>
 <body>
 <header>
-  <h1>RETRO<span>PIXELS</span> <small id="appVersion" class="muted" style="font-size:12px;font-weight:400;letter-spacing:0"></small></h1>
+  <h1>RETRO<span>PIXELS</span> <small id="appVersion" class="muted" style="font-size:12px;font-weight:400;letter-spacing:0"></small> <button class="btn ghost sm" id="desktopMenu" hidden style="margin-left:8px;vertical-align:middle;letter-spacing:0" title="Puts RetroPixels in your desktop's applications menu, with its icon, and offers it for game files in Open With"></button></h1>
   <div class="pad-status" title="Press any button on the controller if it isn't detected">
     <span class="dot" id="padDot"></span>
     <span id="padName">No controller — press any button on your Xbox controller</span>
@@ -324,7 +350,9 @@
     <button role="tab" data-tab="classic" aria-selected="true">Classic consoles</button>
     <button role="tab" data-tab="gc" aria-selected="false"><span style="color:#9b8cff">●</span> GameCube</button>
     <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
+    <button role="tab" data-tab="wiiu" aria-selected="false"><span style="color:#2fb4ff">●</span> Wii U</button>
     <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
+    <button role="tab" data-tab="supermodel" aria-selected="false"><span style="color:#ffd54a">●</span> Supermodel</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
   <div id="swNow" class="sw-now" hidden>
@@ -334,6 +362,7 @@
     <button class="btn ghost sm" id="swRecToggle" hidden>● Record</button>
     <span class="vol-ctl" id="swVol" hidden><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" data-volrange aria-label="Game volume"><output data-volout>100%</output></span>
     <span class="muted" id="swNowTime" style="font-variant-numeric:tabular-nums"></span>
+    <button class="btn ghost sm" id="swPadScreen" hidden title="Show the Wii U GamePad's screen. Click or touch it to use the touch screen. (Ctrl+Tab in the game does the same.)" aria-pressed="false">📱 GamePad screen</button>
     <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
       </div>
   <!-- ===================== Launcher ===================== -->
@@ -354,8 +383,8 @@
       <button class="sys" data-core="n64" aria-pressed="false">
         <strong>Nintendo 64</strong><small>.z64 .n64 .v64</small>
       </button>
-      <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U homebrew (.rpx). Games come in later versions.">
-        <strong>Wii U</strong><small>.rpx homebrew</small>
+      <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U games play in PixelU (based on Cemu). Opens the Wii U tab.">
+        <strong>Wii U</strong><small>.wua .wud .wux · PixelU</small>
       </button>
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
@@ -382,7 +411,7 @@
       <p style="margin-top:16px">
         <button class="btn" id="pickBtn">Choose game file…</button>
         <input type="file" id="fileInput" hidden
-               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.rpx,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip,.aplttp,.apsm,.apsmz3,.apsmw,.apkdl3,.apyi,.apeb,.apl2ac,.apsoe,.apdkc3,.apred,.apblue,.apsml2,.apemerald,.apmlss,.apygo06,.apbn3,.apcvcotm,.apmm2,.apmm3,.apff1,.aptloz,.apcv64">
+               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip,.aplttp,.apsm,.apsmz3,.apsmw,.apkdl3,.apyi,.apeb,.apl2ac,.apsoe,.apdkc3,.apred,.apblue,.apsml2,.apemerald,.apmlss,.apygo06,.apbn3,.apcvcotm,.apmm2,.apmm3,.apff1,.aptloz,.apcv64">
       </p>
       <p class="muted" id="sysHint" hidden>Classic arcade games. Load the game's .zip ROM set (keep it zipped).</p>
       <p class="muted" id="msg"></p>
@@ -475,7 +504,7 @@
     <section class="sw-sec">
       <h2 class="sw-h">Recordings</h2>
       <p class="muted sw-intro">RetroPixels records your GameCube and Wii games as .mp4 videos — just the game picture (black bars cropped off) and just the game's sound.
-        Classic-console games are recorded with the <b>● Record</b> button above the game instead (or by holding the right stick down), and save to your Downloads folder.</p>
+        Classic-console games are recorded with the <b>● Record</b> button above the game instead (or by holding the right stick down), and save to your recordings folder (Videos\RetroPixels unless you choose another).</p>
       <div id="recBody"></div>
     </section>
   </section>
@@ -483,22 +512,21 @@
   <!-- ===================== GameCube & Wii tab ===================== -->
   <section id="gcTab" hidden>
     <div id="gcBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">GameCube and Wii games play in <strong>Dolphin</strong> through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">GameCube and Wii games play in <strong>PixelU</strong> (Wii/GameCube engine based on Dolphin, GPL) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="gcDesktop" hidden>
-      <div class="sw-locked" id="gcLocked" hidden><b>Dolphin is open.</b> Settings changes are paused until you close it.</div>
+      <div class="sw-locked" id="gcLocked" hidden><b>PixelU (Wii/GameCube) is open.</b> Settings changes are paused until you close it.</div>
       <div class="gc-layout">
         <section class="sw-sec gc-lib">
           <h2 class="sw-h" id="gcTitle">GameCube library</h2>
           <div class="sw-setup">
-            <div class="sw-emu" id="gcEmu">Looking for Dolphin…</div>
+            <div class="sw-emu" id="gcEmu">Looking for PixelU…</div>
             <div class="sw-emu" id="gcFolders">Looking for games…</div>
           </div>
           <div class="sw-row" style="margin-top:6px">
-            <button class="btn ghost sm" id="gcChooseExe">Change Dolphin…</button>
             <button class="btn ghost sm" id="gcAddFolder">Add games folder…</button>
             <button class="btn ghost sm" id="gcRescan" title="Search again near your other games">Find games again</button>
-            <label class="sw-check" title="Games play inside this window instead of a separate Dolphin window"><input type="checkbox" id="gcEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check" title="Games play inside this window instead of a separate PixelU window"><input type="checkbox" id="gcEmbed"> Play inside RetroPixels</label>
             <label class="sw-check"><input type="checkbox" id="gcFull"> Start games fullscreen</label>
             <label class="sw-check"><input type="checkbox" id="gcAutoRec"> Record games automatically</label>
           </div>
@@ -515,7 +543,7 @@
           </div>
           <p class="muted" id="gcMsg" style="font-size:14px;margin:6px 0"></p>
           <div class="sw-grid" id="gcGrid"></div>
-          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play. Save states are in Dolphin (Shift+F1 to save, F1 to load).</p>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play. Save states are in PixelU (Shift+F1 to save, F1 to load).</p>
         </section>
         <aside class="gc-side">
           <section class="sw-sec">
@@ -528,16 +556,67 @@
               <span class="vol-ctl" id="gcVol"><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" id="gcVolRange" data-volrange><output data-volout>100%</output></span></div>
           </section>
           <section class="sw-sec">
-            <h2 class="sw-h" style="font-size:16px">Dolphin settings</h2>
+            <h2 class="sw-h" style="font-size:16px">PixelU settings</h2>
             <div id="gcSettings"></div>
             <div class="rs-bar" id="gcBar" hidden><span id="gcChanged"></span><button class="btn ghost sm" id="gcDiscard">Discard</button><button class="btn sm gc-btn" id="gcSave">Save</button></div>
           </section>
           <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">PixelU</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">GameCube and Wii games play in <b>PixelU</b> (Wii/GameCube engine based on <b>Dolphin</b>, GPL), RetroPixels' emulator. Dolphin is the open-source GameCube and Wii emulator (GPL-2.0+).
+              Your Dolphin controller settings, memory cards and Wii saves are copied over the first time a game starts (nothing is overwritten).</p>
             <div class="rg-btns">
-              <button class="btn ghost sm" id="gcOpenDolphin">Open Dolphin</button>
-              <button class="btn ghost sm" id="gcOpenConfig">Open Dolphin settings folder</button>
+              <button class="btn ghost sm" id="gcOpenDolphin">Open PixelU (Wii/GameCube)</button>
+              <button class="btn ghost sm" id="gcOpenConfig">Open its settings folder</button>
             </div>
-            <p class="muted" style="font-size:12px;margin:8px 0 0">Use Dolphin itself for memory cards, cheats and per-game settings.</p>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use PixelU itself for memory cards, cheats and per-game settings.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== Wii U (PixelU) tab ===================== -->
+  <section id="wiiuTab" hidden>
+    <div id="wiiuBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">Wii U games play in <strong>PixelU</strong> (RetroPixels' Wii U emulator, based on Cemu) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+    </div>
+    <div id="wiiuDesktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">Wii U library</h2>
+          <div class="sw-setup">
+            <div class="sw-emu" id="wiiuEmu">Looking for PixelU…</div>
+            <div class="sw-emu" id="wiiuFolders">Looking for games…</div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn ghost sm" id="wiiuChooseExe">Change PixelU…</button>
+            <button class="btn ghost sm" id="wiiuAddFolder">Add games folder…</button>
+            <label class="sw-check"><input type="checkbox" id="wiiuFull"> Start games fullscreen</label>
+            <label class="sw-check" title="Wii U games play inside this window. Turn it off to play in PixelU's own window"><input type="checkbox" id="wiiuEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check" title="Only for PCs where Vulkan doesn't work (an old graphics driver). OpenGL is slower"><input type="checkbox" id="wiiuGL"> Use OpenGL instead of Vulkan</label>
+            <label class="sw-check" title="Saves just the game's TV screen and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="wiiuRec"> Record games automatically (game screen only, high-quality .mp4)</label>
+          </div>
+          <div id="wiiuFFNote"></div>
+          <div class="sw-tools">
+            <input type="search" id="wiiuSearch" placeholder="Search games…" autocomplete="off">
+            <select id="wiiuSort" class="sw-select"><option value="az">A – Z</option><option value="played">Recently played</option><option value="added">Recently added</option></select>
+            <span class="muted" id="wiiuCount" style="font-size:13px"></span>
+          </div>
+          <p class="muted" id="wiiuMsg" style="font-size:14px;margin:6px 0"></p>
+          <div class="sw-grid" id="wiiuGrid"></div>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
+            Lists .wua, .wud and .wux files, Wii U .iso discs and unpacked games (a folder with <span data-path="code/*.rpx">code\*.rpx</span>). Games are played from where they are; nothing is copied.</p>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">PixelU</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">PixelU is RetroPixels' Wii U emulator, based on <b>Cemu</b> (the open-source Wii U emulator, MPL-2.0).
+              Its settings, saves and shader caches stay in its own folder.</p>
+            <div class="rg-btns">
+              <button class="btn sm wiiu-btn" id="wiiuOpenPixelU">Open PixelU</button>
+              <button class="btn ghost sm" id="wiiuOpenFolder">Open PixelU's folder</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use PixelU itself to set up controllers (Options → Input settings), graphics, graphic packs and online play.</p>
           </section>
         </aside>
       </div>
@@ -547,7 +626,7 @@
   <!-- ===================== Arcade (MAME) tab ===================== -->
   <section id="mameTab" hidden>
     <div id="mameBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Arcade games play in <strong>MAME</strong>, any version of it, through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">Arcade games play in <strong>MAME</strong>, any version of it, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="mameDesktop" hidden>
       <div class="gc-layout">
@@ -582,7 +661,7 @@
           </section>
           <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">Download a MAME version</h2>
-            <p class="muted" style="font-size:12px;margin:0 0 8px">Any official Windows release from the MAME team (github.com/mamedev/mame). Each version gets its own folder next to RetroPixels, so they don't replace each other.</p>
+            <p class="muted" style="font-size:12px;margin:0 0 8px" data-nonwin="The MAME team publishes ready-made builds for Windows only. On Linux, play with the MAME that comes with RetroPixels (built from the MAME team's official source) or your system's mame package (Add MAME… or Find MAME on this PC).">Any official Windows release from the MAME team (github.com/mamedev/mame). Each version gets its own folder next to RetroPixels, so they don't replace each other.</p>
             <div class="sw-row"><select id="mameRelSel" class="sw-select" style="flex:1"><option value="">Loading the list…</option></select>
               <button class="btn sm mame-btn" id="mameDl">Download</button></div>
             <div id="mameDlNote" style="margin-top:8px"></div>
@@ -593,6 +672,65 @@
               arrows to move, <span class="key">Ctrl</span> <span class="key">Alt</span> <span class="key">Space</span> buttons, <span class="key">Tab</span> MAME's menu,
               <span class="key">P</span> pause, <span class="key">Shift</span>+<span class="key">F7</span> / <span class="key">F7</span> save / load state, <span class="key">Esc</span> quit.
               Xbox controllers work too. Each MAME keeps its own settings and saves in its folder.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== Supermodel (Sega Model 3) tab ===================== -->
+  <section id="smTab" hidden>
+    <div id="smBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">Star Wars Trilogy Arcade plays in <strong>Supermodel</strong>, the Sega Model 3 arcade emulator, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+    </div>
+    <div id="smDesktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">Sega Model 3 in Supermodel</h2>
+          <p class="muted sw-intro" style="margin-top:0">Star Wars Trilogy Arcade (Sega, 1998) in Supermodel, the Sega Model 3 emulator. Click it to play.</p>
+          <div class="sm-grid" id="smGrid"></div>
+          <p class="muted" id="smMsg" style="font-size:14px;margin:8px 0"></p>
+          <div id="smNote"></div>
+          <div class="sw-setup" style="margin-top:8px">
+            <div class="sw-emu" id="smRom">Looking for the game…</div>
+            <div class="sw-emu" id="smEmu">Looking for Supermodel…</div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn sm sm-btn" id="smChooseRom">Choose the game file…</button>
+            <button class="btn ghost sm" id="smFindRom" title="Look for swtrilgya.zip / swtrilgy.zip in your ROM folders again">Look again</button>
+          </div>
+          <div class="sw-row">
+            <label class="sw-check" title="The game plays inside this window instead of fullscreen in Supermodel's own window"><input type="checkbox" id="smEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check"><input type="checkbox" id="smFull"> Start fullscreen</label>
+            <label class="sw-check" title="The 3D view fills a wide screen; the score and other 2D parts stay 4:3"><input type="checkbox" id="smWide"> Wide screen</label>
+            <label class="sw-check" title="The Xbox stick aims like the arcade's flight stick: steady and precise near the centre, full movement at the edge, and the corners reachable"><input type="checkbox" id="smFlight"> Flight stick feel</label>
+            <label class="sw-check" title="How much the aim glides, like the arcade yoke's weight and spring. More smoothing hides thumbstick jitter; less reacts faster">Smoothness
+              <select class="sw-select" id="smSmooth"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="heavy">Heavy</option></select></label>
+            <label class="sw-check" title="Push the stick up to dive and pull it back to climb, like the arcade's flight yoke"><input type="checkbox" id="smInvert"> Flight-style up / down</label>
+            <label class="sw-check" title="Saves the game's picture and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="smRec"> Record games automatically</label>
+          </div>
+          <div id="smFFNote"></div>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Playing</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 8px">Xbox controller: <b>left stick</b> flies (the arcade's flight yoke), <span class="key k-a">A</span> or <b>RT</b> fires,
+              <span class="key">B</span> or <b>RB</b> is the yoke's thumb button, <b>Start</b> starts, <b>Back</b> (View) adds a coin, <b>Back + Start</b> leaves the game.</p>
+            <p class="muted" style="font-size:13px;margin:0 0 8px">Keyboard: <span class="key">5</span> coin, <span class="key">1</span> start, arrow keys fly,
+              <span class="key">Ctrl</span> fire, <span class="key">Alt</span> thumb button, <span class="key">9</span> service, <span class="key">F2</span> test menu,
+              <span class="key">F5</span> / <span class="key">F7</span> save / load state, <span class="key">Alt</span>+<span class="key">P</span> pause, <span class="key">Esc</span> leaves.</p>
+            <p class="muted" style="font-size:12px;margin:0">Wait for the Darth Vader scene in the attract mode before adding coins: starting during the Sega logo can crash the game (a known Supermodel issue).</p>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Supermodel</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px"><b>Supermodel</b> is the open-source Sega Model 3 arcade emulator by the Supermodel team (GPL-3.0, github.com/trzy/Supermodel).
+              RetroPixels comes with its own build of it, with changes for playing inside RetroPixels (its source is in the Supermodel folder).
+              Your settings, high scores (NVRAM) and save states stay in RetroPixels' own folder.</p>
+            <div class="rg-btns">
+              <button class="btn ghost sm" id="smOpenSaves">Open the saves folder</button>
+              <button class="btn ghost sm" id="smOpenFolder">Open Supermodel's folder</button>
+              <button class="btn ghost sm" id="smChooseExe">Change Supermodel…</button>
+            </div>
           </section>
         </aside>
       </div>
@@ -674,7 +812,7 @@
     gb:   { label: "Game Boy / Color", exts: ["gb", "gbc"] },
     gba:  { label: "Game Boy Advance", exts: ["gba", "agb"] },
     n64:       { label: "Nintendo 64",  exts: ["z64", "n64", "v64"] },
-    wiiu:      { label: "Wii U",        exts: ["rpx"] },
+    wiiu:      { label: "Wii U",        exts: [] }, // played in PixelU (the Wii U tab); the old built-in core isn't used
     segaMD:    { label: "Sega Genesis", exts: ["md", "gen", "smd"] },
     sms:       { label: "Master System", exts: ["sms"] },
     atari2600: { label: "Atari 2600",   exts: ["a26"] },
@@ -715,11 +853,21 @@
     document.getElementById("sysHint").hidden = core !== "arcade";
   };
   sysButtons.forEach(b => b.addEventListener("click", () => {
+    if (b.dataset.core === "wiiu") { showTab("wiiu"); return; } // Wii U games play in PixelU
     selectCore(b.dataset.core);
   }));
 
   // ---------- Desktop app ----------
   const DESKTOP = window.RETRO_DESKTOP || null;
+  // The system the desktop app runs on ("windows" or "linux"): program names
+  // and paths in the page are worded for it (PixelU.exe and code\*.rpx on
+  // Windows, PixelU and code/*.rpx on Linux).
+  const OS = (DESKTOP && DESKTOP.os) || "windows";
+  const exeFile = n => OS === "windows" ? n + ".exe" : n;
+  const sysPath = p => OS === "windows" ? p.replace(/\//g, "\\") : p;
+  document.querySelectorAll("[data-exe]").forEach(e => { e.textContent = exeFile(e.dataset.exe); });
+  document.querySelectorAll("[data-path]").forEach(e => { e.textContent = sysPath(e.dataset.path); });
+  if (OS !== "windows") document.querySelectorAll("[data-nonwin]").forEach(e => { e.textContent = e.dataset.nonwin; });
   if (DESKTOP && DESKTOP.version) document.getElementById("appVersion").textContent = "v" + DESKTOP.version;
 
   const api = async (path, body) => {
@@ -729,13 +877,13 @@
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    if (!res.ok || data.error) { const err = new Error(data.error || `Request failed (${res.status})`); err.data = data; throw err; }
     return data;
   };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  // What's running (Dolphin) and the recorder's state, from the desktop app.
+  // What's running (PixelU or MAME) and the recorder's state, from the desktop app.
   let appStatus = null;
   function renderStatus(status) {
     appStatus = status;
@@ -744,13 +892,17 @@
     const embedded = !!(status.running && status.running.embedded);
     document.body.classList.toggle("dol-embedded", embedded);
     document.getElementById("swStopGame").hidden = !embedded;
+    const padBtn = document.getElementById("swPadScreen");
+    const wiiuEmbedded = embedded && status.running.kind === "pixelu";
+    if (padBtn.hidden && wiiuEmbedded) setPadScreen(false); // each game starts on the TV picture
+    padBtn.hidden = !wiiuEmbedded;
     const dolOn = !!(status.running && status.running.kind === "dolphin");
     const volBar = document.getElementById("swVol");
     if (dolOn && volBar.hidden) loadDolVolume();
     volBar.hidden = !dolOn;
     if (status.running) {
       document.getElementById("swNowName").textContent = status.running.name;
-      const emu = esc(status.running.emu || "Dolphin");
+      const emu = esc(status.running.emu || "PixelU");
       document.getElementById("swNowHint").innerHTML = embedded
         ? `${emu} · click the game to use the keyboard · Stop game to come back here`
         : `Playing in ${emu} · close the game window to come back here`;
@@ -761,8 +913,8 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
-    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii
+    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #smGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii / Wii U
     return status;
   }
 
@@ -771,6 +923,20 @@
   const DOL_BAR_PX = 48; // height of the game bar above a docked game (see body.dol-embedded #swNow)
   const sendEmbedArea = () => DESKTOP && api("/api/dol/embed", { top: DOL_BAR_PX, dpr: window.devicePixelRatio || 1 }).catch(() => {});
   window.addEventListener("resize", () => { if (document.body.classList.contains("dol-embedded")) sendEmbedArea(); });
+  // Wii U: the docked game shows the TV picture or the GamePad's screen (touch it with the mouse or a finger).
+  function setPadScreen(on) {
+    const btn = document.getElementById("swPadScreen");
+    btn.setAttribute("aria-pressed", String(on));
+    btn.textContent = on ? "📺 TV screen" : "📱 GamePad screen";
+    btn.title = on ? "Back to the TV picture." : "Show the Wii U GamePad's screen. Click or touch it to use the touch screen. (Ctrl+Tab in the game does the same.)";
+  }
+  document.getElementById("swPadScreen").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/pixelu/action", { action: "screen" });
+      setPadScreen(!!r.gamepad);
+      toast(r.gamepad ? "GamePad screen: click or touch it to use the touch screen" : "TV screen");
+    } catch (e) { toast(e.message, true); }
+  });
   document.getElementById("swStopGame").addEventListener("click", async () => {
     try {
       await api("/api/dol/action", { action: "stop-game" });
@@ -814,7 +980,7 @@
   });
 
   let recActiveSince = null, lastRecMsg = null, lastRecErr = null, lastRec = null;
-  let ffNoteShown = null;
+  let ffNoteShown = null, wiiuFFShown = null;
   // "Saving recording…" while the video is made after a game ends.
   const savingText = sv => sv.step === "ffmpeg"
     ? `Saving the recording of <b>${esc(sv.game)}</b> — downloading ffmpeg first…`
@@ -832,16 +998,25 @@
       if (needFF && !ffBusy) wireFFmpegPanel(note, () => api("/api/status").then(renderStatus).catch(() => {}));
     }
     document.getElementById("gcAutoRec").checked = !!rec.auto;
+    // The same ffmpeg prompt in the Wii U library, when Wii U recording is on.
+    const wiiuFF = wiiuStatus && wiiuStatus.record && !rec.ffmpeg;
+    const wkey = wiiuFF ? (ffBusy ? "busy" : rec.install && rec.install.state) : "none";
+    if (wkey !== wiiuFFShown || (wiiuFF && ffBusy)) {
+      wiiuFFShown = wkey;
+      const note = document.getElementById("wiiuFFNote");
+      note.innerHTML = wiiuFF ? ffmpegPanel(rec.install) : "";
+      if (wiiuFF && !ffBusy) wireFFmpegPanel(note, () => api("/api/status").then(renderStatus).catch(() => {}));
+    }
     const badge = document.getElementById("swRecBadge"), btn = document.getElementById("swRecToggle");
     lastRec = rec;
     badge.hidden = !rec.active;
     btn.hidden = !gameOn;
-    // Dolphin can only record a game from its start, so without recording on
+    // PixelU can only record a game from its start, so without recording on
     // when the game started, the button is for the next game.
     btn.textContent = rec.active ? "■ Stop recording" : rec.dumping ? "● Record" : rec.next ? "✓ Next game will be recorded" : "● Record next game";
     btn.title = rec.active ? "Stop recording. The video is saved when the game ends"
       : rec.dumping ? "Record from now on (saved as a separate video)"
-      : rec.next ? "Click to cancel" : "Dolphin can only record from the start of a game, so this records the next game you start";
+      : rec.next ? "Click to cancel" : "Games can only be recorded from their start, so this records the next game you start";
     recActiveSince = rec.active ? Date.parse(rec.active.started) : null;
     const sn = document.getElementById("gcRecNote");
     const snHTML = rec.saving ? `<div class="rec-note" style="background:#2a2312;border:1px solid var(--warn)">${savingText(rec.saving)}</div>` : "";
@@ -869,14 +1044,14 @@
   // Keep the "now playing" bar up to date while a desktop tab is open.
   let wasRunning = false, wasSaving = false;
   setInterval(async () => {
-    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden)) return;
+    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden && wiiuTab.hidden && smTab.hidden)) return;
     try {
       const st = await api("/api/status");
       const isRunning = !!st.running;
       renderStatus(st);
       if (wasRunning && !isRunning) {
         if (!mameTab.hidden) loadMame("ended"); else toast("Welcome back");
-        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings();
+        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); if (!wiiuTab.hidden) loadWiiU(); if (!smTab.hidden) loadSupermodel("ended");
       }
       else if (!recTab.hidden && (wasSaving || (st.rec && st.rec.saving))) loadRecordings(); // progress, then the new video
       wasSaving = !!(st.rec && st.rec.saving);
@@ -908,7 +1083,7 @@
     tiles[next].focus();
     tiles[next].scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
-  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && !gcTab.hidden };
+  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && (!gcTab.hidden || !wiiuTab.hidden || !smTab.hidden) };
 
   // ---------- Tabs ----------
   const tabsEl = document.getElementById("tabs");
@@ -916,6 +1091,8 @@
   const gcTab = document.getElementById("gcTab");
   const recTab = document.getElementById("recTab");
   const mameTab = document.getElementById("mameTab");
+  const wiiuTab = document.getElementById("wiiuTab");
+  const smTab = document.getElementById("smTab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -923,12 +1100,20 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "wiiu", "mame", "supermodel", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
     recTab.hidden = tab !== "recordings";
     mameTab.hidden = tab !== "mame";
+    wiiuTab.hidden = tab !== "wiiu";
+    smTab.hidden = tab !== "supermodel";
+    document.getElementById("smBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("smDesktop").hidden = !DESKTOP;
+    if (tab === "supermodel" && DESKTOP) loadSupermodel();
+    document.getElementById("wiiuBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("wiiuDesktop").hidden = !DESKTOP;
+    if (tab === "wiiu" && DESKTOP) loadWiiU();
     document.getElementById("mameBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("mameDesktop").hidden = !DESKTOP;
     if (tab === "mame" && DESKTOP) loadMame();
@@ -997,7 +1182,7 @@
       ${st.saving ? `<div class="rec-note" style="background:#2a2312;border:1px solid var(--warn)">${savingText(st.saving)}${st.queued ? ` (${st.queued} more waiting)` : ""}</div>` : ""}
       ${st.next && !st.dumping ? `<div class="rec-note ok">Your next GameCube or Wii game will be recorded.</div>` : ""}
       <div class="rs-group">
-        <div class="rs-row"><label><b>Record GameCube &amp; Wii games automatically</b><small>Records each game from start to finish. Stop recording from the bar at the top while playing. When this is off, use "Record next game" there.</small></label>
+        <div class="rs-row"><label><b>Record every game automatically</b><small>Every game, on every system, is recorded from start to finish (game screen and sound only). Stop recording from the bar at the top while playing. When this is off, use Record (F9) or "Record next game" there.</small></label>
           <label class="toggle"><input type="checkbox" id="recAuto" ${st.auto ? "checked" : ""}> ${st.auto ? "On" : "Off"}</label></div>
         <div class="rs-row"><label><b>Frame rate</b></label>
           <select class="sw-select" id="recFps"><option value="60" ${st.fps === 60 ? "selected" : ""}>60 FPS (smooth)</option><option value="30" ${st.fps === 30 ? "selected" : ""}>30 FPS (smaller files)</option></select></div>
@@ -1016,7 +1201,7 @@
             <small class="muted">${fmtSize(f.size)}</small><button class="btn ghost sm" data-play="${esc(f.name)}">Play</button></div>`).join("")
           : '<p class="muted" style="margin:0;font-size:14px">No recordings yet.</p>'}</div>
       </div>
-      <p class="muted" style="font-size:13px;margin:0">Dolphin saves the game's own picture and sound while you play, so videos show only the game —
+      <p class="muted" style="font-size:13px;margin:0">PixelU saves the game's own picture and sound while you play, so videos show only the game —
         no mouse pointer, other windows or black bars, and no Discord or other apps' sound — and play back smoothly even if the game slowed down.
         The video is made when the game ends (it takes a little while for long games).</p>`;
     const set = body => swAct(() => api("/api/rec/settings", body), "Recording settings saved").then(() => loadRecordings());
@@ -1079,7 +1264,7 @@
           <button class="linkbtn" data-open="${i}">Open folder</button>
           <button class="linkbtn danger" data-rmv="${i}">Remove</button></div></div>`).join("")
       : `<p class="muted" style="font-size:13px;margin:0">${st.finding ? "Looking for MAME on this PC…"
-          : 'No MAME yet. Download a version below, or click "Add MAME…" to choose a mame.exe you already have. You can add as many versions as you like.'}</p>`;
+          : `No MAME yet. Download a version below, or click "Add MAME…" to choose a ${exeFile("mame")} you already have. You can add as many versions as you like.`}</p>`;
     el.querySelectorAll("[data-def]").forEach(b => b.addEventListener("click", () => mameAction({ action: "set-default", exe: list[+b.dataset.def].exe }, "Default MAME changed")));
     el.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => mameAction({ action: "open-folder", exe: list[+b.dataset.open].exe })));
     el.querySelectorAll("[data-rmv]").forEach(b => b.addEventListener("click", () => {
@@ -1219,7 +1404,7 @@
     try { gotMame(await api("/api/mame/install", { version: v })); } catch (e) { toast(e.message, true); }
   });
 
-  // ---------- GameCube & Wii (Dolphin) ----------
+  // ---------- GameCube & Wii (PixelU's Wii/GameCube engine, based on Dolphin) ----------
   let gcGames = [], gcStatus = null, gcFilter = "all", gcSettings = [], gcChanges = {}, gcLocked = false;
   let gcPlatform = "gc"; // which tab is showing: "gc" or "wii"
   function setGCPlatform(p) {
@@ -1246,43 +1431,15 @@
     loadGCSettings();
   }
 
-  // One-click download of the official Dolphin when it isn't installed.
-  let dolPoll = null;
-  function renderDolInstall(inst) {
-    const el = document.getElementById("gcDolNote");
-    if (!inst) { el.innerHTML = ""; clearInterval(dolPoll); dolPoll = null; return; }
-    const busy = ["finding", "downloading", "installing"].includes(inst.state);
-    const pct = inst.total > 0 ? Math.min(100, Math.round(inst.got / inst.total * 100)) : 0;
-    const label = { finding: "Finding the latest version…",
-      downloading: `Downloading Dolphin ${esc(inst.version || "")}… ${pct}% (${fmtSize(inst.got)}${inst.total > 0 ? " of " + fmtSize(inst.total) : ""})`,
-      installing: "Unpacking…" }[inst.state] || "";
-    el.innerHTML = `<div class="rec-note ${inst.state === "error" ? "err" : ""}" style="${inst.state === "error" ? "" : "background:#1d1a33;border:1px solid #7b6cff"}">
-      <b>GameCube and Wii games need Dolphin</b>, a free emulator. RetroPixels can download the latest official version from dolphin-emu.org (a one-time download) into a "Dolphin" folder next to RetroPixels. Games still play inside this window.
-      ${inst.state === "error" ? `<br><span class="bad">${esc(inst.error)}</span>` : ""}
-      <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        ${busy ? `<div style="flex:1;min-width:200px;height:8px;background:#0e0f13;border-radius:99px;overflow:hidden"><div style="width:${pct}%;height:100%;background:#7b6cff"></div></div><span style="font-size:13px">${label}</span>`
-               : `<button class="btn sm gc-btn" data-doldl>${inst.state === "error" ? "Try again" : "Download Dolphin"}</button>`}
-      </div></div>`;
-    const b = el.querySelector("[data-doldl]");
-    if (b) b.addEventListener("click", async () => {
-      try { const r = await api("/api/dol/install", {}); renderDolInstall(r.install); } catch (e) { toast(e.message, true); }
-    });
-    if (busy && !dolPoll) dolPoll = setInterval(async () => {
-      try {
-        const r = await api("/api/dol/install");
-        if (r.exe) { clearInterval(dolPoll); dolPoll = null; toast("Dolphin is installed — pick a game to play"); loadGC(); return; }
-        renderDolInstall(r.install);
-        if (!["finding", "downloading", "installing"].includes(r.install.state)) { clearInterval(dolPoll); dolPoll = null; }
-      } catch (e) { /* keep trying */ }
-    }, 700);
-  }
-
   function renderGCSetup() {
     const st = gcStatus;
     document.getElementById("gcEmu").innerHTML = st.exe
-      ? `<span class="muted">Emulator</span><br><b>Dolphin</b> <small class="muted">${esc(st.version || "")}</small><br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Dolphin not found</b><br><small class="muted">Download it below, or click "Change Dolphin…" to pick your own Dolphin.exe</small>';
-    renderDolInstall(st.exe ? null : st.install);
+      ? `<span class="muted">Emulator</span><br><b>PixelU</b> <small class="muted">Wii/GameCube engine, based on Dolphin${st.version ? " · " + esc(st.version) : ""}</small><br><small class="muted">${esc(st.exe)}</small>`
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU's Wii/GameCube engine wasn't found</b><br><small class="muted">Put the PixelU folder next to ${exeFile("RetroPixels")} (it has ${sysPath("wii/" + exeFile("PixelU-Wii"))} inside), then come back to this tab</small>`;
+    document.getElementById("gcDolNote").innerHTML = st.exe ? "" :
+      `<div class="rec-note err">PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to ${exeFile("RetroPixels")}.</div>`;
+    document.getElementById("gcOpenDolphin").disabled = !st.exe;
+    document.getElementById("gcOpenConfig").disabled = !st.exe;
     const f = st.folders || [];
     const el = document.getElementById("gcFolders");
     el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
@@ -1416,12 +1573,12 @@
           <div><b>Nunchuk C / Z</b><span>LB / LT</span></div><div><b>− / + / Home</b><span>View / Menu / R3</span></div>
         </div></details>
       <button class="btn ghost sm" id="gcPadSetup" ${gcLocked ? "disabled" : ""}>${p.gc === "xbox" && p.wii === "xbox" ? "Reset to Xbox layout" : "Set up Xbox controller"}</button>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Set up automatically the first time a game starts. Fine-tune in Dolphin → Controllers.</p>`;
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Set up automatically the first time a game starts. Fine-tune in PixelU → Controllers.</p>`;
     el.querySelector("#gcPadSetup").addEventListener("click", async () => {
       if (p.gc === "custom" || p.wii === "custom") {
-        if (!confirm("Replace your current Dolphin controller set-up with the Xbox layout? (Your old settings file is backed up.)")) return;
+        if (!confirm("Replace your current PixelU controller set-up with the Xbox layout? (Your old settings file is backed up.)")) return;
       }
-      if (await gcAction({ action: "setup-pads" }, "Xbox controller set up in Dolphin")) loadGCSettings();
+      if (await gcAction({ action: "setup-pads" }, "Xbox controller set up in PixelU")) loadGCSettings();
     });
   }
 
@@ -1434,7 +1591,6 @@
       document.querySelectorAll("#gcFilter button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
       renderGCGrid();
     });
-    document.getElementById("gcChooseExe").addEventListener("click", () => gcAction({ action: "choose-exe" }));
     document.getElementById("gcAddFolder").addEventListener("click", async () => {
       toast("Choose the folder in the window that just opened");
       const before = (gcStatus && gcStatus.folders || []).length;
@@ -1448,15 +1604,282 @@
     document.getElementById("gcEmbed").addEventListener("change", e => gcAction({ action: "embed", on: e.target.checked }));
     document.getElementById("gcAutoRec").addEventListener("change", e =>
       swAct(() => api("/api/rec/settings", { auto: e.target.checked }), e.target.checked ? "Games will be recorded automatically" : "Automatic recording off"));
-    document.getElementById("gcOpenDolphin").addEventListener("click", () => gcAction({ action: "open-dolphin" }, "Opening Dolphin…"));
+    document.getElementById("gcOpenDolphin").addEventListener("click", () => gcAction({ action: "open-dolphin" }, "Opening PixelU…"));
     document.getElementById("gcOpenConfig").addEventListener("click", () => gcAction({ action: "open-config" }));
     document.getElementById("gcDiscard").addEventListener("click", () => { gcChanges = {}; renderGCSettings(); });
     document.getElementById("gcSave").addEventListener("click", async () => {
       try {
         const r = await api("/api/dol/settings", { changes: gcChanges });
-        gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("Dolphin settings saved");
+        gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("PixelU settings saved");
       } catch (e) { toast(e.message, true); }
     });
+  }
+
+  // ---------- Star Wars Trilogy Arcade in Supermodel ----------
+  let smStatus = null, smPoll = null, smProblemAt = null, smFFShown = null;
+  const smMsg = document.getElementById("smMsg");
+
+  async function loadSupermodel(afterGame) {
+    try {
+      gotSupermodel(await api("/api/supermodel/status"), afterGame);
+      api("/api/status").then(renderStatus).catch(() => {});
+    } catch (e) { smMsg.textContent = "Couldn't load the Supermodel tab: " + e.message; }
+  }
+  function gotSupermodel(st, afterGame) {
+    const prev = smProblemAt;
+    smStatus = st;
+    renderSupermodel();
+    const p = st.problem;
+    smProblemAt = p ? p.at : null;
+    if (p && p.at !== prev && afterGame) toast("Star Wars Trilogy Arcade didn't start: " + p.text, true);
+    if (st.finding && !smPoll) smPoll = setInterval(async () => {
+      if (smTab.hidden) return;
+      try { gotSupermodel(await api("/api/supermodel/status")); } catch (e) { /* keep trying */ }
+    }, 1000);
+    if (!st.finding && smPoll) { clearInterval(smPoll); smPoll = null; }
+  }
+
+  function renderSupermodel() {
+    const st = smStatus, c = st.check;
+    const ready = !!(st.exe && st.rom && c && c.ok);
+    const playing = !!(appStatus && appStatus.running);
+    const grid = document.getElementById("smGrid");
+    grid.innerHTML = "";
+    const b = document.createElement("button");
+    b.className = "sw-tile";
+    b.id = "smPlay";
+    b.disabled = playing;
+    b.title = ready ? "Play " + st.title : (st.rom || "");
+    b.setAttribute("aria-label", "Play Star Wars Trilogy Arcade");
+    b.innerHTML = `<span class="plat" style="background:#7a5a00">MODEL 3</span>
+      <div class="sm-art"><b>STAR WARS</b><span>TRILOGY ARCADE</span><small>SEGA · 1998</small>${ready ? '<span class="sm-play">▶ Play</span>' : ""}</div>
+      <div class="sw-info"><b>${esc(st.title)}</b>
+        <div class="sw-tags"><span class="sw-tag">Sega Model 3</span>${c && c.set ? `<span class="sw-tag">${esc(c.set)}</span>` : ""}${c && c.driveBoard ? '<span class="sw-tag">force feedback</span>' : ""}</div>
+        ${st.played && !st.played.startsWith("0001") ? `<small class="muted" style="font-size:11px">Played ${fmtTime(st.played)}</small>` : ""}
+      </div>`;
+    b.addEventListener("click", playSupermodel);
+    grid.appendChild(b);
+
+    // The game file
+    const romEl = document.getElementById("smRom");
+    if (st.rom && c) {
+      romEl.innerHTML = `<span class="muted">Game file</span><br>${c.ok
+        ? `<b style="color:var(--ok, #46a758)">✓ ${esc(c.set)}.zip</b> <small class="muted">ready to play</small>`
+        : `<b style="color:var(--warn)">✗ This file can't be played yet</b><br><small>${esc(c.problem || "")}</small>`}
+        <br><small class="muted">${esc(st.rom)}${c.parent ? " + " + esc(c.parent) : ""}</small>`;
+    } else {
+      romEl.innerHTML = `<span class="muted">Game file</span><br>${st.finding || !st.searched
+        ? "Looking for swtrilgya.zip in your ROM folders…"
+        : '<b style="color:var(--warn)">Not found yet</b><br><small class="muted">Click "Choose the game file…" and pick your Star Wars Trilogy Arcade ROM set (swtrilgya.zip or swtrilgy.zip, as for MAME). RetroPixels remembers it.</small>'}`;
+    }
+    const emuEl = document.getElementById("smEmu");
+    emuEl.innerHTML = st.exe
+      ? `<span class="muted">Emulator</span><br><b>Supermodel</b> <small class="muted">${esc(st.version || "")}</small>${st.patched ? "" : '<br><small style="color:var(--warn)">Not RetroPixels\' build: it plays in its own window, without recording</small>'}<br><small class="muted">${esc(st.exe)}</small>`
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">Supermodel not found</b><br><small class="muted">It comes in the RetroPixels download (the Supermodel folder next to ${exeFile("RetroPixels")}). Unpack the whole download, or click "Change Supermodel…"</small>`;
+    document.getElementById("smEmbed").checked = !!st.embed;
+    document.getElementById("smEmbed").disabled = st.exe && !st.patched;
+    document.getElementById("smFull").checked = !!st.fullscreen;
+    document.getElementById("smWide").checked = !!st.wide;
+    document.getElementById("smInvert").checked = !!st.invertY;
+    document.getElementById("smFlight").checked = !!st.flight;
+    document.getElementById("smFlight").disabled = st.exe && !st.patched;
+    document.getElementById("smSmooth").value = st.smooth || "medium";
+    document.getElementById("smSmooth").disabled = (st.exe && !st.patched) || !st.flight;
+    document.getElementById("smRec").checked = !!st.record;
+    document.getElementById("smOpenFolder").disabled = !st.exe;
+    document.getElementById("smFindRom").disabled = !!st.finding;
+    const p = st.problem;
+    document.getElementById("smNote").innerHTML = p
+      ? `<div class="rec-note" style="background:#2a1416;border:1px solid var(--danger)"><b>The game didn't start.</b> ${esc(p.text)}<br><small class="muted">Supermodel's log: ${esc(p.log || "")}</small></div>` : "";
+    // The ffmpeg download prompt, when recording is on.
+    const rec = lastRec, needFF = !!(st.record && rec && !rec.ffmpeg);
+    const ffBusy = rec && rec.install && ["downloading", "verifying", "installing"].includes(rec.install.state);
+    const key = needFF ? (ffBusy ? "busy" : rec.install && rec.install.state) : "none";
+    if (key !== smFFShown || (needFF && ffBusy)) {
+      smFFShown = key;
+      const note = document.getElementById("smFFNote");
+      note.innerHTML = needFF ? ffmpegPanel(rec.install) : "";
+      if (needFF && !ffBusy) wireFFmpegPanel(note, () => api("/api/status").then(renderStatus).catch(() => {}));
+    }
+  }
+
+  async function playSupermodel() {
+    smMsg.style.color = ""; smMsg.textContent = "";
+    const st = smStatus;
+    if (!st) return;
+    if (st.embed && st.patched) {
+      // Docked: this window goes fullscreen (must happen right in the click).
+      if (st.fullscreen && !document.fullscreenElement) {
+        document.documentElement.requestFullscreen().then(() => { dolWentFullscreen = true; }).catch(() => {});
+      }
+      sendEmbedArea();
+    }
+    try {
+      await api("/api/supermodel/play", {});
+      toast("Starting Star Wars Trilogy Arcade…");
+      setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
+      // A game that can't run closes Supermodel within moments: look again so the reason shows.
+      setTimeout(() => { if (!(appStatus && appStatus.running)) loadSupermodel("check"); }, 4000);
+    } catch (e) {
+      smMsg.style.color = "var(--danger)"; smMsg.textContent = e.message;
+      if (dolWentFullscreen && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); dolWentFullscreen = false; }
+    }
+  }
+
+  async function smAction(body, ok) {
+    try {
+      const r = await api("/api/supermodel/action", body);
+      gotSupermodel(r);
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); if (smStatus) renderSupermodel(); return null; }
+  }
+
+  if (DESKTOP) {
+    document.getElementById("smChooseRom").addEventListener("click", async () => {
+      toast("Choose the game file in the window that just opened");
+      const r = await smAction({ action: "choose-rom" });
+      if (r && r.check && r.check.ok) toast("Star Wars Trilogy Arcade is ready: click it to play");
+    });
+    document.getElementById("smFindRom").addEventListener("click", () => smAction({ action: "find-rom" }, "Looking for the game…"));
+    document.getElementById("smEmbed").addEventListener("change", e => smAction({ action: "embed", on: e.target.checked }));
+    document.getElementById("smFull").addEventListener("change", e => smAction({ action: "fullscreen", on: e.target.checked }));
+    document.getElementById("smWide").addEventListener("change", e => smAction({ action: "wide", on: e.target.checked }));
+    document.getElementById("smFlight").addEventListener("change", e => smAction({ action: "flight-stick", on: e.target.checked },
+      e.target.checked ? "The stick aims like a flight stick" : "The stick works as a plain thumbstick"));
+    document.getElementById("smSmooth").addEventListener("change", e => smAction({ action: "smoothness", value: e.target.value },
+      "Smoothness: " + e.target.options[e.target.selectedIndex].text));
+    document.getElementById("smInvert").addEventListener("change", e => smAction({ action: "invert-y", on: e.target.checked },
+      e.target.checked ? "Stick up dives, back climbs" : "Stick up climbs"));
+    document.getElementById("smRec").addEventListener("change", e => smAction({ action: "record", on: e.target.checked },
+      e.target.checked ? "Games will be recorded" : "Games won't be recorded"));
+    document.getElementById("smOpenSaves").addEventListener("click", () => smAction({ action: "open-saves" }));
+    document.getElementById("smOpenFolder").addEventListener("click", () => smAction({ action: "open-folder" }));
+    document.getElementById("smChooseExe").addEventListener("click", () => smAction({ action: "choose-exe" }));
+  }
+
+  // ---------- Wii U (PixelU) ----------
+  let wiiuGames = [], wiiuStatus = null;
+  const wiiuMsg = document.getElementById("wiiuMsg");
+
+  async function loadWiiU() {
+    try {
+      gotWiiU(await api("/api/pixelu/library"));
+      api("/api/status").then(renderStatus).catch(() => {});
+    } catch (e) { wiiuMsg.textContent = "Couldn't load your Wii U games: " + e.message; }
+  }
+  function gotWiiU(r) {
+    wiiuGames = r.games || []; wiiuStatus = r.status;
+    wiiuFFShown = null;
+    renderWiiUSetup(); renderWiiUGrid();
+  }
+
+  function renderWiiUSetup() {
+    const st = wiiuStatus;
+    document.getElementById("wiiuEmu").innerHTML = st.exe
+      ? `<span class="muted">Emulator</span><br><b>PixelU</b> <small class="muted">based on Cemu</small><br><small class="muted">${esc(st.exe)}</small>`
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU not found</b><br><small class="muted">Put the PixelU folder next to ${exeFile("RetroPixels")} (or keep it in Downloads), or click "Change PixelU…" to pick ${exeFile("PixelU")}</small>`;
+    const f = st.folders || [];
+    const el = document.getElementById("wiiuFolders");
+    el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
+      `<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><small style="flex:1;overflow-wrap:anywhere">${esc(d)}</small><button class="linkbtn danger" data-rm="${i}">Remove</button></div>`).join("")
+      : '<br><b style="color:var(--warn)">None yet</b>'}`;
+    el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => wiiuAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
+    document.getElementById("wiiuFull").checked = !!st.fullscreen;
+    document.getElementById("wiiuEmbed").checked = !!st.embed;
+    document.getElementById("wiiuGL").checked = !!st.opengl;
+    document.getElementById("wiiuRec").checked = !!st.record;
+    document.getElementById("wiiuOpenPixelU").disabled = !st.exe;
+    document.getElementById("wiiuOpenFolder").disabled = !st.exe;
+  }
+
+  function renderWiiUGrid() {
+    const q = document.getElementById("wiiuSearch").value.trim().toLowerCase();
+    const sort = document.getElementById("wiiuSort").value;
+    const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
+    let list = wiiuGames.filter(g => !q || g.name.toLowerCase().includes(q) || g.file.toLowerCase().includes(q));
+    if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
+    if (sort === "added") list = list.slice().sort((a, b) => t(b.added) - t(a.added));
+    document.getElementById("wiiuCount").textContent = `${wiiuGames.length} Wii U game${wiiuGames.length === 1 ? "" : "s"}`;
+    const grid = document.getElementById("wiiuGrid");
+    grid.innerHTML = "";
+    if (!wiiuGames.length) {
+      grid.innerHTML = `<p class="muted" style="grid-column:1/-1">${(wiiuStatus.folders || []).length
+        ? 'No Wii U games found in your games folders. Use "Add games folder…" if they\'re somewhere else.' : "Add the folder with your Wii U games."}</p>`;
+      return;
+    }
+    const playing = !!(appStatus && appStatus.running);
+    list.forEach(g => {
+      const b = document.createElement("button");
+      b.className = "sw-tile";
+      b.title = g.file;
+      b.disabled = playing;
+      b.innerHTML = `<span class="plat WiiU">WII U</span>
+        <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
+        <div class="sw-info"><b>${esc(g.name)}</b>
+          <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span>${g.kind !== "Folder" ? `<span class="sw-tag">${fmtSize(g.size)}</span>` : ""}</div>
+          ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
+        </div>`;
+      b.addEventListener("click", async () => {
+        wiiuMsg.style.color = ""; wiiuMsg.textContent = "";
+        if (wiiuStatus && wiiuStatus.embed) {
+          // Docked: this window goes fullscreen (must happen right in the click).
+          if (wiiuStatus.fullscreen && !document.fullscreenElement) {
+            document.documentElement.requestFullscreen().then(() => { dolWentFullscreen = true; }).catch(() => {});
+          }
+          sendEmbedArea();
+        }
+        const play = () => api("/api/pixelu/play", { path: g.path });
+        try {
+          await play().catch(async e => {
+            if (!(e.data && e.data.vulkan)) throw e;
+            // Vulkan doesn't work on this PC: offer OpenGL (slower, but it plays).
+            if (!confirm(`${e.message}\n\n${e.data.help}\n\nPlay Wii U games with OpenGL instead? (Slower, but it works. You can change this under Wii U settings.)`)) throw e;
+            await api("/api/pixelu/action", { action: "opengl", on: true });
+            document.getElementById("wiiuGL").checked = true;
+            return play();
+          });
+          toast(`Starting ${g.name} in PixelU…`);
+          setTimeout(() => api("/api/status").then(renderStatus).then(renderWiiUGrid).catch(() => {}), 800);
+        } catch (e) {
+          wiiuMsg.style.color = "var(--danger)"; wiiuMsg.textContent = e.message;
+          if (dolWentFullscreen && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); dolWentFullscreen = false; }
+        }
+      });
+      grid.appendChild(b);
+    });
+  }
+
+  async function wiiuAction(body, ok) {
+    try {
+      const r = await api("/api/pixelu/action", body);
+      if (r.games) gotWiiU(r);
+      if (ok) toast(ok);
+      api("/api/status").then(renderStatus).catch(() => {});
+      return r;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  if (DESKTOP) {
+    document.getElementById("wiiuSearch").addEventListener("input", renderWiiUGrid);
+    document.getElementById("wiiuSort").addEventListener("change", renderWiiUGrid);
+    document.getElementById("wiiuChooseExe").addEventListener("click", () => wiiuAction({ action: "choose-exe" }));
+    document.getElementById("wiiuAddFolder").addEventListener("click", async () => {
+      toast("Choose the folder in the window that just opened");
+      const before = (wiiuStatus && wiiuStatus.folders || []).length;
+      const r = await wiiuAction({ action: "add-folder" });
+      if (!r || (r.status.folders || []).length === before) return;
+      const n = (r.games || []).length;
+      toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no Wii U games were found in it");
+    });
+    document.getElementById("wiiuFull").addEventListener("change", e => wiiuAction({ action: "fullscreen", on: e.target.checked }));
+    document.getElementById("wiiuEmbed").addEventListener("change", e => wiiuAction({ action: "embed", on: e.target.checked }));
+    document.getElementById("wiiuGL").addEventListener("change", e => wiiuAction({ action: "opengl", on: e.target.checked },
+      e.target.checked ? "Wii U games will use OpenGL" : "Wii U games will use Vulkan"));
+    document.getElementById("wiiuRec").addEventListener("change", e => wiiuAction({ action: "record", on: e.target.checked },
+      e.target.checked ? "Every game will be recorded (game screen only, high quality)" : "Automatic recording off for every game"));
+    document.getElementById("wiiuOpenPixelU").addEventListener("click", () => wiiuAction({ action: "open-pixelu" }, "Opening PixelU…"));
+    document.getElementById("wiiuOpenFolder").addEventListener("click", () => wiiuAction({ action: "open-folder" }));
   }
 
   // Start on the tab used last time.
@@ -1692,36 +2115,55 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
   };
 
-  function startRecording() {
+  // "Record games automatically" (one setting for every system, on unless turned off in Recordings).
+  const autoRecordOn = () => !!DESKTOP && (!lastRec || lastRec.auto !== false);
+  let recSaved = null; // resolves once the last recording is saved
+
+  function startRecording(auto) {
     if (recorder) return;
     // Record only the game's picture: the player keeps a canvas with just the
     // game at its own shape (no black bars, buttons or messages).
     const canvas = player && player.recordingCanvas ? player.recordingCanvas() : null;
-    if (!canvas || !gameReady) { toast("Start a game before recording", true); return; }
+    if (!canvas || !gameReady) { if (!auto) toast("Start a game before recording", true); return; }
     recMime = pickMime();
-    if (!recMime) { toast("This browser can't record video — try Chrome or Edge", true); return; }
+    if (!recMime) { if (!auto) toast("This browser can't record video — try Chrome or Edge", true); return; }
 
     const stream = canvas.captureStream(60);
     audioTaps.forEach(t => t.node.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)));
 
     try {
-      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 160_000 });
+      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 12_000_000, audioBitsPerSecond: 192_000 });
     } catch (e) { toast("Couldn't start recording: " + e.message, true); recorder = null; return; }
 
     recChunks = [];
     recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
-    recorder.onstop = () => {
+    let doneSaving;
+    recSaved = new Promise(r => { doneSaving = r; });
+    recorder.onstop = async () => {
       if (player && player.stopRecordingCanvas) player.stopRecordingCanvas();
       const isMp4 = recMime.startsWith("video/mp4");
       const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
-      const name = gameName;
+      const file = `${gameName} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
+      recorder = null;
+      if (DESKTOP) {
+        // The desktop app keeps it in the recordings folder with the other recordings.
+        try {
+          const res = await fetch("/api/rec/upload?name=" + encodeURIComponent(file), {
+            method: "POST", headers: { "X-Retro-Token": DESKTOP.token, "Content-Type": "application/octet-stream" }, body: blob });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw new Error(data.error || `couldn't save it (${res.status})`);
+          toast(`Recording saved: ${data.file}`);
+          doneSaving();
+          return;
+        } catch (e) { toast("Recording: " + e.message + " — downloading it instead", true); }
+      }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `${name} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
+      a.download = file;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
       toast(isMp4 ? "Recording saved (.mp4)" : "Recording saved as .webm — this browser can't make .mp4", !isMp4);
-      recorder = null;
+      doneSaving();
     };
     recorder.start(1000);
     recStart = Date.now();
@@ -1733,16 +2175,18 @@
       const s = Math.floor((Date.now() - recStart) / 1000);
       recTime.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     }, 250);
-    toast(audioTaps.length ? "Recording…" : "Recording (no game audio detected yet)");
+    toast(auto ? "Recording this game (turn this off in Recordings)" : audioTaps.length ? "Recording…" : "Recording (no game audio detected yet)");
   }
 
   function stopRecording() {
-    if (!recorder) return;
+    if (!recorder) return Promise.resolve();
     clearInterval(recTick);
     recBtn.classList.remove("recording");
     recBtn.textContent = "● Record";
     recTimer.hidden = true;
+    const saved = recSaved || Promise.resolve();
     if (recorder.state !== "inactive") recorder.stop();
+    return saved;
   }
 
   const toggleRecording = () => (recorder ? stopRecording() : startRecording());
@@ -1985,6 +2429,7 @@
       screenshot: () => player.screenshotPNG(),
     };
     gameReady = true;
+    if (autoRecordOn()) setTimeout(() => { if (gameReady && !recorder) startRecording(true); }, 300);
     startArchipelago(core, rom, name);
     showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
@@ -2039,6 +2484,7 @@
     if (!confirm("Replace this game's battery save with that file? The game will restart.")) return;
     const data = new Uint8Array(await f.arrayBuffer());
     await sramOp("readwrite", s => s.put(data, gameKey));
+    await stopRecording();
     player.destroy();
     toast("Battery save imported — game restarted");
     startOwn(ownGame.core, ownGame.rom, ownGame.name, ownGame.coreOpts);
@@ -2104,6 +2550,10 @@
     if (["iso", "gcm", "ciso", "wbfs", "rvz", "wia", "gcz", "wad"].includes(ext)) {
       if (DESKTOP) { showTab(["wbfs", "wad"].includes(ext) ? "wii" : "gc"); toast("Those games play from this tab — add their folder if they aren't listed"); return; }
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
+    }
+    if (["wua", "wud", "wux", "rpx", "elf"].includes(ext)) {
+      if (DESKTOP) { showTab("wiiu"); toast("Wii U games play from this tab — add their folder if they aren't listed"); return; }
+      return fail(`"${file.name}" looks like a Wii U game. Those play in PixelU through the RetroPixels desktop app.`);
     }
     if (ext === "7z") return fail(`RetroPixels can't open .7z files. Unzip "${file.name}" first (or zip it as .zip).`);
     if (/^ap[a-z0-9]+$/.test(ext)) return openAPPatch(file);
@@ -2280,14 +2730,51 @@
     if (help.open) help.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 
-  document.getElementById("backBtn").addEventListener("click", () => {
-    if (recorder && !confirm("You're recording. Stop and discard the recording?")) return;
+  document.getElementById("backBtn").addEventListener("click", async () => {
+    if (recorder) { // keep the recording: save it, then go back
+      toast("Saving the recording…");
+      await Promise.race([stopRecording(), new Promise(r => setTimeout(r, 60000))]);
+    }
     location.reload();
   });
   document.getElementById("fsBtn").addEventListener("click", () => {
     const el = document.getElementById("game");
     (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
   });
+
+  // ---------- Linux desktop: applications menu, games opened from the file manager (desktop_linux.go) ----------
+  if (DESKTOP && OS === "linux") {
+    const menuBtn = document.getElementById("desktopMenu");
+    const showMenu = r => { menuBtn.hidden = false; menuBtn.dataset.on = r.installed ? "1" : ""; menuBtn.textContent = r.installed ? "Remove from the applications menu" : "Add RetroPixels to the applications menu"; };
+    api("/api/desktop/menu").then(showMenu).catch(() => {});
+    menuBtn.addEventListener("click", async () => {
+      const add = !menuBtn.dataset.on;
+      const r = await swAct(() => api("/api/desktop/menu", { action: add ? "add" : "remove" }), add ? "" : "RetroPixels was removed from the applications menu");
+      if (r) showMenu(r);
+      if (r && add) alert("RetroPixels is now in your applications menu, and it's offered for game files.\n\n" +
+        "To make double-clicking a game open it here: right-click a game in your file manager, choose Open With, pick RetroPixels and make it the default. " +
+        "Do this once for each kind of game file (.sfc, .nes, .iso and so on).\n\nIf you move the RetroPixels folder, start RetroPixels from its new place once.");
+    });
+    const openID = new URLSearchParams(location.search).get("open");
+    if (openID) (async () => {
+      history.replaceState(null, "", location.pathname);
+      try {
+        const g = await api("/api/desktop/open?id=" + encodeURIComponent(openID));
+        if (g.kind === "dolphin" || g.kind === "pixelu") {
+          showTab(g.kind === "pixelu" ? "wiiu" : g.wii ? "wii" : "gc");
+          sendEmbedArea();
+          await api(g.kind === "pixelu" ? "/api/pixelu/play" : "/api/dol/play", { path: g.path });
+          toast(`Starting ${g.name}…`);
+          setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
+          return;
+        }
+        const res = await fetch("/api/desktop/file?id=" + encodeURIComponent(openID), { headers: { "X-Retro-Token": DESKTOP.token } });
+        if (!res.ok) throw new Error(`Couldn't read ${g.name} (${res.status})`);
+        showTab("classic");
+        startGame(new File([await res.blob()], g.name));
+      } catch (e) { toast(e.message, true); }
+    })();
+  }
 })();
 </script>
 </body>

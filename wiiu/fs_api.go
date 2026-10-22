@@ -8,6 +8,7 @@ package wiiu
 // its callback run by the system.
 
 import (
+	"io"
 	"io/fs"
 	"path"
 	"strings"
@@ -25,6 +26,7 @@ const (
 	fsPermission  = 0xfffffff6 // -10
 	fsStorageFull = 0xfffffff4 // -12
 	fsMediaError  = 0xffffffef // -17
+	fsFatal       = 0xfffffc00 // -0x400
 )
 
 // FSA error codes
@@ -34,6 +36,9 @@ const (
 	fsaExists     = 0xfffcffea // -0x30016
 	fsaNotFound   = 0xfffcffe9 // -0x30017
 	fsaPermission = 0xfffcffe6 // -0x3001a
+	fsaBadBuffer  = 0xfffcffdd // -0x30023
+	fsaBadFile    = 0xfffcffda // -0x30026, not an open file
+	fsaBadDir     = 0xfffcffd9 // -0x30027, not an open folder
 	fsaNotFile    = 0xfffcffd8 // -0x30028
 	fsaNotDir     = 0xfffcffd7 // -0x30029
 )
@@ -44,6 +49,36 @@ type openFile struct {
 	Pos   uint32
 	Write bool
 	Dirty bool
+	// a file opened only for reading is read from src as the program asks
+	// (Data is unused): game files can be gigabytes
+	src    io.ReaderAt
+	srcLen int64
+	closer io.Closer
+}
+
+func (f *openFile) size() uint32 {
+	if f.src != nil {
+		return uint32(min(f.srcLen, 1<<32-1))
+	}
+	return uint32(len(f.Data))
+}
+
+// own reads the whole file into Data (to change it).
+func (f *openFile) own() {
+	if f.src == nil {
+		return
+	}
+	b := make([]byte, f.size())
+	f.src.ReadAt(b, 0)
+	f.Data, f.src = b, nil
+	f.release()
+}
+
+func (f *openFile) release() {
+	if f.closer != nil {
+		f.closer.Close()
+		f.closer = nil
+	}
 }
 
 type openDir struct {
@@ -85,22 +120,25 @@ func (m *Machine) fsOpen(p, mode string) (uint32, uint32) {
 	f := &openFile{Path: p}
 	switch {
 	case strings.HasPrefix(mode, "r"):
-		b, err := m.Files.ReadFile(p)
+		if _, dir, err := m.Files.Stat(p); err == nil && dir {
+			return 0, fsNotFile
+		}
+		src, n, closer, err := m.Files.OpenRead(p)
 		if err != nil {
-			if _, dir, err2 := m.Files.Stat(p); err2 == nil && dir {
-				return 0, fsNotFile
-			}
 			return 0, fsNotFound
 		}
-		f.Data = append([]byte(nil), b...)
+		f.src, f.srcLen, f.closer = src, n, closer
 		f.Write = strings.Contains(mode, "+")
+		if f.Write {
+			f.own()
+		}
 	case strings.HasPrefix(mode, "w"):
 		f.Write, f.Dirty = true, true
 	case strings.HasPrefix(mode, "a"):
 		if b, err := m.Files.ReadFile(p); err == nil {
 			f.Data = append([]byte(nil), b...)
 		}
-		f.Pos = uint32(len(f.Data))
+		f.Pos = f.size()
 		f.Write = true
 	default:
 		return 0, fsAccessError
@@ -118,6 +156,7 @@ func (m *Machine) fsClose(h uint32) uint32 {
 		return fsNotFound
 	}
 	delete(s.Files, h)
+	f.release()
 	if f.Dirty {
 		if err := m.Files.WriteFile(f.Path, f.Data); err != nil {
 			return fsAccessError
@@ -134,11 +173,21 @@ func (m *Machine) fsRead(h, buf, n uint32, pos int64) (uint32, uint32) {
 	if pos >= 0 {
 		f.Pos = uint32(pos)
 	}
-	if f.Pos >= uint32(len(f.Data)) {
+	if f.Pos >= f.size() {
 		return 0, fsOK
 	}
-	k := min(n, uint32(len(f.Data))-f.Pos)
-	m.Mem.WriteBytes(buf, f.Data[f.Pos:f.Pos+k])
+	k := min(n, f.size()-f.Pos)
+	if f.src != nil {
+		b := make([]byte, k)
+		got, err := f.src.ReadAt(b, int64(f.Pos))
+		if got < int(k) && err != nil && err != io.EOF {
+			return 0, fsMediaError
+		}
+		k = uint32(got)
+		m.Mem.WriteBytes(buf, b[:k])
+	} else {
+		m.Mem.WriteBytes(buf, f.Data[f.Pos:f.Pos+k])
+	}
 	f.Pos += k
 	return k, fsOK
 }
@@ -154,9 +203,10 @@ func (m *Machine) fsWrite(h, buf, n uint32, pos int64) (uint32, uint32) {
 	if pos >= 0 {
 		f.Pos = uint32(pos)
 	}
+	f.own()
 	end := f.Pos + n
-	if end > uint32(len(f.Data)) {
-		f.Data = append(f.Data, make([]byte, end-uint32(len(f.Data)))...)
+	if end > f.size() {
+		f.Data = append(f.Data, make([]byte, end-f.size())...)
 	}
 	m.Mem.ReadBytes(buf, f.Data[f.Pos:end])
 	f.Pos = end
@@ -168,12 +218,14 @@ func (m *Machine) fsWrite(h, buf, n uint32, pos int64) (uint32, uint32) {
 func (m *Machine) writeStat(a uint32, size int64, dir bool) {
 	mem := m.Mem
 	mem.Fill(a, 0, 0x64)
-	flags := uint32(0x0c000000) // quota, regular
+	flags := uint32(0x01000000) // a file
 	if dir {
-		flags = 0x80000000 | 0x0c000000
+		// a folder's size is 0 (only save folders have one): Hyrule Warriors
+		// reads a folder with a size as a file
+		flags, size = 0x80000000, 0
 	}
 	mem.Write32(a+0x00, flags)
-	mem.Write32(a+0x04, 0x666) // read / write for everyone
+	mem.Write32(a+0x04, 0x777) // everything allowed, as Cemu reports it
 	mem.Write32(a+0x10, uint32(size))
 	mem.Write32(a+0x14, uint32(size+0xfff)&^0xfff)
 	t := m.bootTime / (TimerHz / 1000000) // microseconds
@@ -205,7 +257,7 @@ func (m *Machine) fsOpenDir(p string) (uint32, uint32) {
 	return h, fsOK
 }
 
-// fsReadDir fills an FSDirectoryEntry (FSStat + 256-byte name)
+// fsReadDir fills an FSDirectoryEntry (FSStat + 128-byte name)
 func (m *Machine) fsReadDir(h, out uint32) uint32 {
 	d := m.fsInit().Dirs[h]
 	if d == nil {
@@ -217,13 +269,24 @@ func (m *Machine) fsReadDir(h, out uint32) uint32 {
 	e := d.Entries[d.Next]
 	d.Next++
 	m.writeStat(out, e.Size, e.Dir)
+	// FSDirectoryEntry is 0xE4 bytes: the name gets 128 of them
 	name := e.Name
-	if len(name) > 255 {
-		name = name[:255]
+	if len(name) > 127 {
+		name = name[:127]
 	}
-	m.Mem.Fill(out+0x64, 0, 256)
+	m.Mem.Fill(out+0x64, 0, 128)
 	m.Mem.WriteString(out+0x64, name)
 	return fsOK
+}
+
+// fsCwd is a client's working folder as the Get Cwd calls give it, ending
+// in a slash (as Cemu keeps it).
+func (m *Machine) fsCwd(client uint32) string {
+	cwd := m.fsInit().Cwd[client]
+	if !strings.HasSuffix(cwd, "/") {
+		cwd += "/"
+	}
+	return cwd
 }
 
 func errFS(err error) uint32 {
@@ -294,19 +357,22 @@ func (m *Machine) fsDone(cpu *CPU, client, block uint32, st uint32, asyncArg int
 	m.queueCallback(cpu.Core, cb, client, block, st, param)
 }
 
-// each command block's FSAsyncResult
-func (m *Machine) fsAsyncResult(block uint32) uint32 {
-	key := "fsres:" + itoa(block)
-	if a, ok := m.perThread[key]; ok {
-		return a
-	}
-	a := m.sysAlloc(0x28, 8)
-	if m.perThread == nil {
-		m.perThread = map[string]uint32{}
-	}
-	m.perThread[key] = a
-	return a
-}
+// An FSCmdBlock (0xA80 bytes) keeps its body at its first 64-byte boundary.
+// The body holds the command's FSAsyncResult, its priority and the
+// program's user data.
+const (
+	fsBodyStatus   = 0x93c
+	fsBodyAsync    = 0x96c // FSAsyncResult, 0x28 bytes
+	fsBodyUserData = 0x994
+	fsBodyPriority = 0x9e8 // a byte
+
+	fsCmdBlockReady = 0x0d900a21
+)
+
+func fsCmdBody(block uint32) uint32 { return (block + 0x3f) &^ 0x3f }
+
+// each command block's FSAsyncResult, inside the block as on the console
+func (m *Machine) fsAsyncResult(block uint32) uint32 { return fsCmdBody(block) + fsBodyAsync }
 
 // postMessage puts a message on a queue (from the system).
 func (m *Machine) postMessage(q, msg, a0, a1, a2 uint32) bool {
@@ -328,16 +394,46 @@ func (m *Machine) postMessage(q, msg, a0, a1, a2 uint32) bool {
 func init() {
 	c := "coreinit"
 	ok := func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) }
-	for _, n := range []string{"FSInit", "FSShutdown", "FSSetStateChangeNotification", "FSSetCmdPriority",
-		"FSCancelCommand", "FSCancelAllCommands", "FSSetUserData", "FSFlushQuota", "FSFlushQuotaAsync"} {
+	for _, n := range []string{"FSInit", "FSShutdown", "FSSetStateChangeNotification",
+		"FSCancelCommand", "FSCancelAllCommands"} {
 		reg(c, n, ok)
 	}
 	reg(c, "FSAddClient", func(m *Machine, cpu *CPU, t *Thread) { m.fsInit(); ret(cpu, 0) })
 	reg(c, "FSAddClientEx", func(m *Machine, cpu *CPU, t *Thread) { m.fsInit(); ret(cpu, 0) })
 	reg(c, "FSDelClient", ok)
-	reg(c, "FSInitCmdBlock", func(m *Machine, cpu *CPU, t *Thread) { m.Mem.Fill(arg(cpu, 0), 0, 0xa80) })
-	reg(c, "FSGetCmdPriority", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 16) })
-	reg(c, "FSGetUserData", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
+	reg(c, "FSInitCmdBlock", func(m *Machine, cpu *CPU, t *Thread) {
+		b := arg(cpu, 0)
+		if b == 0 {
+			return
+		}
+		m.Mem.Fill(b, 0, 0xa80)
+		m.Mem.Write32(fsCmdBody(b)+fsBodyStatus, fsCmdBlockReady)
+		m.Mem.Write8(fsCmdBody(b)+fsBodyPriority, 16)
+	})
+	// (block, priority 0..32)
+	reg(c, "FSSetCmdPriority", func(m *Machine, cpu *CPU, t *Thread) {
+		if b, p := arg(cpu, 0), arg(cpu, 1); b != 0 && p <= 32 {
+			m.Mem.Write8(fsCmdBody(b)+fsBodyPriority, uint8(p))
+			ret(cpu, 0)
+			return
+		}
+		ret(cpu, fsFatal)
+	})
+	reg(c, "FSGetCmdPriority", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, uint32(m.Mem.Read8(fsCmdBody(arg(cpu, 0))+fsBodyPriority)))
+	})
+	reg(c, "FSSetUserData", func(m *Machine, cpu *CPU, t *Thread) {
+		if b := arg(cpu, 0); b != 0 {
+			m.Mem.Write32(fsCmdBody(b)+fsBodyUserData, arg(cpu, 1))
+		}
+	})
+	reg(c, "FSGetUserData", func(m *Machine, cpu *CPU, t *Thread) {
+		if b := arg(cpu, 0); b != 0 {
+			ret(cpu, m.Mem.Read32(fsCmdBody(b)+fsBodyUserData))
+			return
+		}
+		ret(cpu, 0)
+	})
 	reg(c, "FSGetVolumeState", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) }) // ready
 	reg(c, "FSGetLastError", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(c, "FSGetLastErrorCodeForViewer", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
@@ -358,9 +454,10 @@ func init() {
 		return m.fsInit().abs(arg(cpu, 0), m.Mem.String(arg(cpu, i), 1024))
 	}
 	both("FSGetMountSource", 4, func(m *Machine, cpu *CPU) uint32 {
-		// (client, block, type, source, errMask): type 0 = the SD card
+		// (client, block, type, source, errMask): type 0 = the SD card;
+		// FS_STATUS_END when there's none (One Piece asks until it gets that)
 		if arg(cpu, 2) != 0 || !m.Files.Mounted("/vol/external01") {
-			return fsNotFound
+			return fsEnd
 		}
 		src := arg(cpu, 3)
 		m.Mem.Write32(src, 0)
@@ -371,9 +468,10 @@ func init() {
 		// (client, block, source, target, bytes, errMask)
 		target, n := arg(cpu, 3), arg(cpu, 4)
 		p := "/vol/external01"
-		if uint32(len(p)+1) <= n {
-			m.Mem.WriteString(target, p)
+		if uint32(len(p)+1) > n {
+			return fsFatal
 		}
+		m.Mem.WriteString(target, p)
 		return fsOK
 	})
 	both("FSUnmount", 3, func(m *Machine, cpu *CPU) uint32 { return fsOK })
@@ -447,7 +545,7 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		if f.Pos >= uint32(len(f.Data)) {
+		if f.Pos >= f.size() {
 			return fsEnd
 		}
 		return fsOK
@@ -457,7 +555,7 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		m.writeStat(arg(cpu, 3), int64(len(f.Data)), false)
+		m.writeStat(arg(cpu, 3), int64(f.size()), false)
 		return fsOK
 	})
 	both("FSGetStat", 4, func(m *Machine, cpu *CPU) uint32 { return m.fsStat(str(m, cpu, 2), arg(cpu, 3)) })
@@ -466,7 +564,8 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		if f.Pos < uint32(len(f.Data)) {
+		f.own()
+		if f.Pos < f.size() {
 			f.Data = f.Data[:f.Pos]
 			f.Dirty = true
 		}
@@ -517,10 +616,7 @@ func init() {
 		return fsOK
 	})
 	both("FSGetCwd", 4, func(m *Machine, cpu *CPU) uint32 {
-		cwd := m.fsInit().Cwd[arg(cpu, 0)]
-		if cwd == "" {
-			cwd = "/"
-		}
+		cwd := m.fsCwd(arg(cpu, 0))
 		if uint32(len(cwd)+1) > arg(cpu, 3) {
 			return fsAccessError
 		}
@@ -532,6 +628,15 @@ func init() {
 		return fsOK
 	})
 	both("FSChangeMode", 5, func(m *Machine, cpu *CPU) uint32 { return fsOK })
+	both("FSFlushQuota", 3, func(m *Machine, cpu *CPU) uint32 { return fsOK })
+	// (client, block, handle, size, count, errMask): makes room in the file;
+	// gives the count back, as Cemu does
+	both("FSAppendFile", 5, func(m *Machine, cpu *CPU) uint32 {
+		if m.fsInit().Files[arg(cpu, 2)] == nil {
+			return fsNotFound
+		}
+		return arg(cpu, 4)
+	})
 	both("FSGetDirSize", 4, func(m *Machine, cpu *CPU) uint32 {
 		m.Mem.Write64(arg(cpu, 3), 0)
 		return fsOK
@@ -612,13 +717,13 @@ func init() {
 			ret(cpu, fsaNotFound)
 			return
 		}
-		m.writeStat(arg(cpu, 2), int64(len(f.Data)), false)
+		m.writeStat(arg(cpu, 2), int64(f.size()), false)
 		ret(cpu, 0)
 	})
 	reg(c, "FSASetPosFile", func(m *Machine, cpu *CPU, t *Thread) {
 		f := m.fsInit().Files[arg(cpu, 1)]
 		if f == nil {
-			ret(cpu, fsaNotFound)
+			ret(cpu, fsaBadFile)
 			return
 		}
 		f.Pos = arg(cpu, 2)
@@ -627,7 +732,7 @@ func init() {
 	reg(c, "FSAGetPosFile", func(m *Machine, cpu *CPU, t *Thread) {
 		f := m.fsInit().Files[arg(cpu, 1)]
 		if f == nil {
-			ret(cpu, fsaNotFound)
+			ret(cpu, fsaBadFile)
 			return
 		}
 		m.Mem.Write32(arg(cpu, 2), f.Pos)
@@ -636,10 +741,10 @@ func init() {
 	reg(c, "FSAIsEof", func(m *Machine, cpu *CPU, t *Thread) {
 		f := m.fsInit().Files[arg(cpu, 1)]
 		if f == nil {
-			ret(cpu, fsaNotFound)
+			ret(cpu, fsaBadFile)
 			return
 		}
-		if f.Pos >= uint32(len(f.Data)) {
+		if f.Pos >= f.size() {
 			ret(cpu, fsaEndOfFile)
 			return
 		}
@@ -648,10 +753,11 @@ func init() {
 	reg(c, "FSATruncateFile", func(m *Machine, cpu *CPU, t *Thread) {
 		f := m.fsInit().Files[arg(cpu, 1)]
 		if f == nil {
-			ret(cpu, fsaNotFound)
+			ret(cpu, fsaBadFile)
 			return
 		}
-		if f.Pos < uint32(len(f.Data)) {
+		f.own()
+		if f.Pos < f.size() {
 			f.Data, f.Dirty = f.Data[:f.Pos], true
 		}
 		ret(cpu, 0)
@@ -694,12 +800,17 @@ func init() {
 		s.Cwd[arg(cpu, 0)] = fsaStr(m, cpu, 1)
 		ret(cpu, 0)
 	})
+	// (client, out, out size)
 	reg(c, "FSAGetCwd", func(m *Machine, cpu *CPU, t *Thread) {
-		cwd := m.fsInit().Cwd[arg(cpu, 0)]
-		if cwd == "" {
-			cwd = "/"
+		cwd, out, n := m.fsCwd(arg(cpu, 0)), arg(cpu, 1), arg(cpu, 2)
+		if out == 0 || n == 0 {
+			ret(cpu, fsaBadBuffer)
+			return
 		}
-		m.Mem.WriteString(arg(cpu, 1), cwd)
+		if uint32(len(cwd)) >= n {
+			cwd = cwd[:n-1]
+		}
+		m.Mem.WriteString(out, cwd)
 		ret(cpu, 0)
 	})
 	reg(c, "FSAGetFreeSpaceSize", func(m *Machine, cpu *CPU, t *Thread) {

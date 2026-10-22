@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"retropixels/internal/pixelu"
 )
 
 // Real header bytes from the user's files (first bytes at the offsets that matter).
@@ -66,17 +68,19 @@ func makeRoms(t *testing.T) string {
 func TestDolphinLibrary(t *testing.T) {
 	root := makeRoms(t)
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	// The Dolphin the player used before is never started, but its games
+	// folders are still found near it.
+	old := filepath.Join(root, "Wii", "- Wii", "Dolphin-x64", "Dolphin.exe")
 	cfgMu.Lock()
-	cfg = config{DolphinFolders: []string{filepath.Join(root, "Sonic Games")}}
+	cfg = config{DolphinExe: old}
 	cfgMu.Unlock()
-	exe := findDolphin()
-	if !strings.HasSuffix(exe, filepath.Join("Dolphin-x64", "Dolphin.exe")) {
-		t.Fatalf("findDolphin = %q", exe)
+	if exe := dolphinExe(); exe != "" {
+		t.Fatalf("dolphinExe = %q: a Dolphin.exe isn't PixelU's engine", exe)
 	}
-	cfgMu.Lock()
-	cfg.DolphinExe = exe
-	cfg.DolphinFolders = nil
-	cfgMu.Unlock()
+	if err := launchDolphinGame(filepath.Join(root, "Sonic Games", "Gamecube- Sonic Heroes .iso")); err != errNoWiiEngine {
+		t.Fatalf("launch without the engine: %v", err)
+	}
 	folders := guessDolphinFolders()
 	t.Logf("folders: %v", folders)
 	if len(folders) != 3 {
@@ -161,5 +165,92 @@ func TestDolphinIniAndPads(t *testing.T) {
 	}
 	if err := saveDolSettings(map[string]any{"res": float64(7)}); err == nil {
 		t.Error("accepted an invalid resolution")
+	}
+}
+
+// fakeEngine makes a PixelU folder holding the Wii / GameCube engine (a
+// shell script standing in for wii\PixelU-Wii.exe, PixelU-Wii on Linux, with portable.txt next
+// to it, as shipped) and chooses that folder's PixelU.exe.
+func fakeEngine(t *testing.T, script string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "PixelU")
+	os.MkdirAll(filepath.Join(dir, "wii"), 0o755)
+	os.WriteFile(filepath.Join(dir, pixelu.ExeName), []byte("x"), 0o755)
+	exe := filepath.Join(dir, "wii", pixelu.WiiExeName)
+	os.WriteFile(exe, []byte(script), 0o755)
+	os.WriteFile(filepath.Join(dir, "wii", "portable.txt"), nil, 0o644)
+	cfgMu.Lock()
+	cfg.PixelUExe = filepath.Join(dir, pixelu.ExeName)
+	cfgMu.Unlock()
+	return exe
+}
+
+// GameCube and Wii games start in PixelU's engine, with its own user folder,
+// and the player's old Dolphin settings come over the first time.
+func TestWiiEngineLaunchAndImport(t *testing.T) {
+	root := makeRoms(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("RETRO_DOLPHIN_USER", "")
+	old := t.TempDir() // the old Documents\Dolphin Emulator
+	t.Setenv("RETRO_OLD_DOLPHIN_USER", old)
+	os.MkdirAll(filepath.Join(old, "Config"), 0o755)
+	os.WriteFile(filepath.Join(old, "Config", "GCPadNew.ini"), []byte("[GCPad1]\r\nDevice = DInput/0/Keyboard Mouse\r\n"), 0o644)
+	os.WriteFile(filepath.Join(old, "Config", "GFX.ini"), []byte("[Settings]\r\nInternalResolution = 3\r\n"), 0o644)
+	os.MkdirAll(filepath.Join(old, "GC"), 0o755)
+	os.WriteFile(filepath.Join(old, "GC", "Card A.USA.raw"), []byte("card"), 0o644)
+	args := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_ARGS", args)
+	old2 := filepath.Join(root, "Wii", "- Wii", "Dolphin-x64", "Dolphin.exe")
+	cfgMu.Lock()
+	cfg = config{DolphinExe: old2, DolphinFolders: []string{filepath.Join(root, "- Mario Games")}}
+	cfgMu.Unlock()
+	exe := fakeEngine(t, "#!/bin/sh\necho \"$@\" > \"$FAKE_ARGS\"\n")
+	if got := dolphinExe(); got != exe {
+		t.Fatalf("dolphinExe = %q want %q", got, exe)
+	}
+	if dolphinExeName() != pixelu.WiiExeName {
+		t.Fatalf("exe name %q", dolphinExeName())
+	}
+	user := filepath.Join(filepath.Dir(exe), "User")
+	if dolphinUserDir() != user {
+		t.Fatalf("user folder %q", dolphinUserDir())
+	}
+	off := false
+	cfgMu.Lock()
+	cfg.AutoRecord = &off
+	cfgMu.Unlock()
+	games := dolphinLibrary()
+	if len(games) != 1 {
+		t.Fatalf("library %+v", games)
+	}
+	if err := launchDolphinGame(games[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t)
+	a, _ := os.ReadFile(args)
+	if !strings.HasPrefix(string(a), "-b -e "+games[0].Path+" -C Dolphin.DSP.Volume=100") {
+		t.Fatalf("args %q", a)
+	}
+	// The old controller set-up came over and was kept (not replaced with
+	// the Xbox layout); the Wii Remote, which had none, got the Xbox layout.
+	if padState("GCPadNew.ini", "GCPad1") != "custom" || padState("WiimoteNew.ini", "Wiimote1") != "xbox" {
+		t.Fatalf("pads: gc %s wii %s", padState("GCPadNew.ini", "GCPad1"), padState("WiimoteNew.ini", "Wiimote1"))
+	}
+	if v, _ := readIni(dolphinIni("GFX.ini")).Get("Settings", "InternalResolution"); v != "3" {
+		t.Errorf("GFX.ini not brought over: %q", v)
+	}
+	if b, _ := os.ReadFile(filepath.Join(user, "GC", "Card A.USA.raw")); string(b) != "card" {
+		t.Errorf("memory card: %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(old, "Config", "WiimoteNew.ini")); err == nil {
+		t.Error("wrote into the old Dolphin's folder")
+	}
+	// Only once: a later change in the old folder isn't copied again.
+	os.WriteFile(filepath.Join(old, "Config", "Hotkeys.ini"), []byte("x"), 0o644)
+	os.Remove(filepath.Join(user, "Config", "GFX.ini"))
+	importOldDolphin()
+	if _, err := os.Stat(filepath.Join(user, "Config", "GFX.ini")); err == nil {
+		t.Error("brought settings over a second time")
 	}
 }

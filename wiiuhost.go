@@ -175,12 +175,24 @@ func sendWiiUError(ws *wsConn, text string) {
 	_ = ws.WriteBinary(append([]byte{wiiuMsgError}, text...))
 }
 
+// closeCore lets go of the emulator and what it holds on the host (its
+// GPU device).
+func (s *wiiuSession) closeCore() {
+	if cl, ok := s.c.(interface{ Close() }); ok {
+		func() {
+			defer func() { recover() }()
+			cl.Close()
+		}()
+	}
+	s.c = nil
+}
+
 func (s *wiiuSession) safely(f func()) (ok bool) {
 	defer func() {
 		if e := recover(); e != nil {
 			log.Printf("wiiu: emulator stopped: %v\n%s", e, debug.Stack())
 			s.failed = fmt.Sprint(e)
-			s.c = nil
+			s.closeCore()
 			sendWiiUError(s.ws, "The Wii U emulator ran into a problem with this program and stopped ("+s.failed+").")
 			ok = false
 		}
@@ -191,7 +203,7 @@ func (s *wiiuSession) safely(f func()) (ok bool) {
 
 func (s *wiiuSession) run(rpx []byte, name string) {
 	defer close(s.done)
-	defer func() { s.c = nil }()
+	defer s.closeCore()
 	var err error
 	if !s.safely(func() { s.c, err = wiiucore.New(rpx, core.Options{SampleRate: s.rate, Name: name}) }) {
 		return

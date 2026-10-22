@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"retropixels/internal/pixelu"
 )
 
 var (
@@ -61,9 +63,15 @@ const (
 	wsExClientEdge    = 0x00000200
 	wsExStaticEdge    = 0x00020000
 	wsExAppWindow     = 0x00040000
+	wsExToolWindow    = 0x00000080
+
+	gwlpHwndParent = ^uintptr(7) // GWLP_HWNDPARENT (-8): a top-level window's owner
+	gwOwner        = 4
 
 	swpNoSize        = 0x0001
 	swpNoMove        = 0x0002
+	swpNoZOrder      = 0x0004
+	swpNoOwnerZOrder = 0x0200
 	swpNoActivate    = 0x0010
 	swpFrameChanged  = 0x0020
 	swpShowWindow    = 0x0040
@@ -254,10 +262,117 @@ func focusChild(child uintptr) {
 	}
 }
 
+// ---------------- docking as an owned window (PixelU's Wii U picture) ----------------
+//
+// PixelU draws the Wii U picture with Vulkan. The RetroPixels window is an
+// Edge/Chrome app window that draws itself with DirectComposition and has no
+// redirection surface (WS_EX_NOREDIRECTIONBITMAP), and a Vulkan picture in a
+// child window of it never shows: the page shows through instead. So PixelU's
+// window isn't made a child: it stays a frameless top-level window, owned by
+// the RetroPixels window (so it stays in front of it, hides when it's
+// minimized and has no taskbar button), and is kept over the page area.
+
+func dockOverlay(child, host uintptr) {
+	style, _, _ := pGetWindowLongPtrW.Call(child, gwlStyle)
+	style &^= wsChild | wsCaption | wsThickFrame | wsSysMenu | wsMinimizeBox | wsMaximizeBox | wsMaximize
+	style |= wsPopup | wsVisible | wsClipSiblings
+	pSetWindowLongPtrW.Call(child, gwlStyle, style)
+	ex, _, _ := pGetWindowLongPtrW.Call(child, gwlExStyle)
+	ex &^= wsExAppWindow | wsExTopmost | wsExDlgModalFrame | wsExWindowEdge | wsExClientEdge | wsExStaticEdge
+	ex |= wsExToolWindow
+	pSetWindowLongPtrW.Call(child, gwlExStyle, ex)
+	pSetWindowLongPtrW.Call(child, gwlpHwndParent, host) // owner, not parent
+	placeOverlay(child, host, true)
+	focusOverlay(child)
+}
+
+// placeOverlay keeps the game screen over the page area below the game bar,
+// in screen coordinates (it follows the RetroPixels window when it moves).
+func placeOverlay(child, host uintptr, force bool) {
+	if ic, _, _ := pIsIconic.Call(host); ic != 0 {
+		return // minimized: Windows hides owned windows with it
+	}
+	pr, ok := pageRect(host)
+	if !ok {
+		return
+	}
+	top := pr.T + int32(embedTop())
+	if top > pr.B-50 {
+		top = pr.B - 50
+	}
+	want := winRECT{pr.L, top, pr.R, pr.B}
+	pMapWindowPoints.Call(host, 0, uintptr(unsafe.Pointer(&want)), 2)
+	var cur winRECT
+	pGetWindowRect.Call(child, uintptr(unsafe.Pointer(&cur)))
+	if !force && cur == want {
+		return
+	}
+	flags := uintptr(swpNoActivate | swpNoZOrder | swpNoOwnerZOrder)
+	if force {
+		flags |= swpFrameChanged | swpShowWindow
+	}
+	pSetWindowPos.Call(child, 0, uintptr(want.L), uintptr(want.T),
+		uintptr(want.R-want.L), uintptr(want.B-want.T), flags)
+}
+
+// focusOverlay brings the game screen to the front with the keyboard. The
+// RetroPixels window is in front when a game is started, so its thread is
+// joined for a moment to be allowed to do that.
+func focusOverlay(child uintptr) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	me, _, _ := pGetCurrentThreadId.Call()
+	fg, _, _ := pGetForeground.Call()
+	if fg == 0 {
+		pSetForeground.Call(child)
+		return
+	}
+	them, _, _ := pGetWindowThreadProcessId.Call(fg, 0)
+	attached := false
+	if them != me {
+		r, _, _ := pAttachThreadInput.Call(me, them, 1)
+		attached = r != 0
+	}
+	pSetForeground.Call(child)
+	if attached {
+		pAttachThreadInput.Call(me, them, 0)
+	}
+}
+
+// isDocked says whether child is still docked to host (as a child window, or
+// as an owned window).
+func isDocked(child, host uintptr, overlay bool) bool {
+	if alive, _, _ := pIsWindow.Call(child); alive == 0 {
+		return false
+	}
+	if overlay {
+		owner, _, _ := pGetWindow.Call(child, gwOwner)
+		style, _, _ := pGetWindowLongPtrW.Call(child, gwlStyle)
+		return owner == host && style&wsChild == 0
+	}
+	parent, _, _ := pGetParent.Call(child)
+	return parent == host
+}
+
+// embedPixelU follows one PixelU (Wii U) run like embedDolphin, keeping its
+// game screen over the page as an owned window (see dockOverlay).
+func embedPixelU(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
+
+// embedSupermodel follows one Supermodel run like embedPixelU: its OpenGL
+// game window stays over the page as an owned window (a child of the
+// browser window wouldn't show), and Supermodel draws at the size it's given.
+func embedSupermodel(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
+
+// hostWindowPresent: the RetroPixels app window is open, so a game started
+// now gets docked into it.
+func hostWindowPresent() bool { return findHostWindow() != 0 }
+
 // embedDolphin follows one Dolphin run: docks its game screen into the
 // RetroPixels window, keeps it there, and makes sure Dolphin closes
 // completely once the game is stopped so the next game can start.
-func embedDolphin(pid int, exited <-chan struct{}) {
+func embedDolphin(pid int, exited <-chan struct{}) { embedWindow(pid, exited, false) }
+
+func embedWindow(pid int, exited <-chan struct{}, overlay bool) {
 	host := findHostWindow()
 	if host == 0 {
 		return // no RetroPixels window (e.g. opened in a normal browser): Dolphin stays in its own window
@@ -293,9 +408,7 @@ func embedDolphin(pid int, exited <-chan struct{}) {
 			return
 		}
 		if child != 0 {
-			alive, _, _ := pIsWindow.Call(child)
-			parent, _, _ := pGetParent.Call(child)
-			if alive != 0 && parent == host {
+			if isDocked(child, host, overlay) {
 				embedMu.Lock()
 				stopAt := embedStopAt
 				embedMu.Unlock()
@@ -304,7 +417,11 @@ func embedDolphin(pid int, exited <-chan struct{}) {
 					shutdownDolphin(pid, exited, 3*time.Second)
 					return
 				}
-				place(child, host, false)
+				if overlay {
+					placeOverlay(child, host, false)
+				} else {
+					place(child, host, false)
+				}
 				continue
 			}
 			// The game screen went away: the game was stopped, or Dolphin
@@ -324,7 +441,11 @@ func embedDolphin(pid int, exited <-chan struct{}) {
 			}
 			continue
 		}
-		dock(h, host)
+		if overlay {
+			dockOverlay(h, host)
+		} else {
+			dock(h, host)
+		}
 		child, lostAt = h, time.Time{}
 		embedMu.Lock()
 		embedHWND = h
@@ -386,4 +507,18 @@ func shutdownDolphin(pid int, exited <-chan struct{}, wait time.Duration) {
 			_ = p.Kill()
 		}
 	}
+}
+
+// pixeluScreen picks what the docked PixelU game shows (pixelu.SetScreen).
+func pixeluScreen(mode int) (bool, error) {
+	embedMu.Lock()
+	h := embedHWND
+	embedMu.Unlock()
+	runMu.Lock()
+	isPixelU := running != nil && running.Kind == "pixelu"
+	runMu.Unlock()
+	if h == 0 || !isPixelU {
+		return false, errors.New("no Wii U game is playing inside RetroPixels")
+	}
+	return pixelu.SetScreen(h, mode)
 }

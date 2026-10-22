@@ -1,0 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+
+// Legacy IOS device requests for HLE libraries (handles are the IOS_DEVICE_* values from
+// iosu_ioctl.h). Guest IOS_* calls use coreinit_IPC.h.
+typedef struct _ioBufferVector_t ioBufferVector_t;
+
+sint32 __depr__IOS_Open(char* path, uint32 mode);
+sint32 __depr__IOS_Ioctl(uint32 fd, uint32 request, void* inBuffer, uint32 inSize, void* outBuffer, uint32 outSize);
+sint32 __depr__IOS_Ioctlv(uint32 fd, uint32 request, uint32 countIn, uint32 countOut, ioBufferVector_t* ioBufferVectors);
+sint32 __depr__IOS_Close(uint32 fd);

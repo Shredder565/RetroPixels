@@ -67,7 +67,7 @@ RetroPixels window.
 | Game Boy / Color | `.gb` `.gbc` | MBC1–7, HuC1/3, MMM01, TAMA5, real-time clock |
 | Game Boy Advance | `.gba` | Solar, gyro, tilt and rumble cartridges |
 | Nintendo 64 | `.z64` `.n64` `.v64` | Runs natively inside `RetroPixels.exe` |
-| Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen homebrew on the TV and GamePad; games come later |
+| Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen and GX2 (3D) homebrew on the TV and GamePad, drawn on the graphics card with Direct3D 11 on Windows; commercial games come later |
 | Sega Genesis / Mega Drive | `.md` `.gen` `.smd` `.bin` | EEPROM saves, J-Cart, Realtec, SSF2 |
 | Sega Master System | `.sms` | |
 | Atari 2600 | `.a26` `.bin` | Nearly all bank-switching schemes, paddles |
@@ -215,9 +215,12 @@ See [CHANGELOG.md](CHANGELOG.md) for every release.
 ## Legal
 
 RetroPixels contains no copyrighted game code, BIOS or firmware. Its emulators are written from
-scratch. Game and system names are trademarks of their respective owners and are used only to
+scratch, except for parts of the Wii U emulator: some files in `wiiu/` are Go rewrites of code from
+[Cemu](https://github.com/cemu-project/Cemu). Those files are under the Mozilla Public License 2.0
+(see `wiiu/LICENSE-MPL-2.0.txt`), say so at the top, and name the Cemu files they come from.
+Thanks to the Cemu team. Game and system names are trademarks of their respective owners and are used only to
 describe compatibility. RetroPixels is not affiliated with or endorsed by Nintendo, Sega, Atari,
-Konami, Namco, Microsoft, the Dolphin project or the MAME team.
+Konami, Namco, Microsoft, the Dolphin project, the Cemu project or the MAME team.
 
 Screenshot: *Shattering Jaws*, a Genesis homebrew game by Mun (2016).
 

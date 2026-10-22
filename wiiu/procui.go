@@ -6,7 +6,8 @@ package wiiu
 
 // ProcUI is the program's foreground state.
 type ProcUI struct {
-	Exiting int // 0 = running; 1 = asked to quit; 2 = told it's exiting
+	Exiting int  // 0 = running; 1 = asked to quit; 2 = told it's exiting
+	Inited  bool // ProcUIInit called
 }
 
 const (
@@ -38,15 +39,28 @@ func init() {
 	}
 	reg(p, "ProcUIProcessMessages", status)
 	reg(p, "ProcUISubProcessMessages", status)
-	for _, n := range []string{"ProcUIInit", "ProcUIInitEx", "ProcUIRegisterCallback", "ProcUIRegisterBackgroundCallback",
-		"ProcUIShutdown", "ProcUIDrawDoneRelease", "ProcUISetMEM1Storage", "ProcUISetSaveCallback",
+	for _, n := range []string{"ProcUIInit", "ProcUIInitEx"} {
+		reg(p, n, func(m *Machine, cpu *CPU, t *Thread) {
+			m.procui.Inited = true
+			ret(cpu, 0)
+		})
+	}
+	reg(p, "ProcUIShutdown", func(m *Machine, cpu *CPU, t *Thread) {
+		m.procui.Inited = false
+		ret(cpu, 0)
+	})
+	for _, n := range []string{"ProcUIRegisterCallback", "ProcUIRegisterBackgroundCallback",
+		"ProcUIDrawDoneRelease", "ProcUISetMEM1Storage", "ProcUISetSaveCallback",
 		"ProcUISetBucketStorage", "ProcUIClearCallbacks", "ProcUISetCallbackStackSize", "ProcUIRegisterCallbackCore"} {
 		reg(p, n, func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	}
-	reg(p, "ProcUIIsRunning", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
+	reg(p, "ProcUIIsRunning", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.procui.Inited) })
 	reg(p, "ProcUIInForeground", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.procui.Exiting == 0) })
 	reg(p, "ProcUIInShutdown", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.procui.Exiting != 0) })
-	reg(p, "ProcUICalcMemorySize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
+	// (callbacks): 0x8C0 bytes each, and 4 thread stacks of 0x2000, as Cemu
+	reg(p, "ProcUICalcMemorySize", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, 0x8c0*arg(cpu, 0)+4*0x2000+100)
+	})
 
 	// leaving the program for another title (the menu, or the launcher that
 	// started it) ends it here
@@ -87,15 +101,4 @@ func init() {
 	reg(n, "__get_h_errno", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.threadBlock(t, "h_errno", 4)) })
 	reg(n, "inet_ntoa", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.cstrAlloc("0.0.0.0")) })
 	reg(n, "freeaddrinfo", func(m *Machine, cpu *CPU, t *Thread) {})
-
-	ac := "nn_ac"
-	for _, f := range []string{"ACInitialize", "ACFinalize", "Initialize__Q2_2nn2acFv", "Finalize__Q2_2nn2acFv"} {
-		reg(ac, f, func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	}
-	notConnected := func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0xa0323800) } // a "not connected" result
-	for _, f := range []string{"ACConnect", "ACConnectAsync", "ACGetAssignedAddress", "Connect__Q2_2nn2acFv",
-		"ConnectAsync__Q2_2nn2acFv", "GetAssignedAddress__Q2_2nn2acFPUl", "ACIsApplicationConnected",
-		"IsApplicationConnected__Q2_2nn2acFPb"} {
-		reg(ac, f, notConnected)
-	}
 }

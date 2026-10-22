@@ -17,6 +17,8 @@
 *.md
 !README.md
 !CHANGELOG.md
+!/docs/*.md
+!/pixelu/*.md
 !/.github/**/*.md
 *.sms
 *.a26
@@ -32,3 +34,7 @@
 .idea/
 .DS_Store
 Thumbs.db
+.claude/worktrees/
+
+# Supermodel build folder (supermodel/build.sh)
+/supermodel/build/

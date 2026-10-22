@@ -126,6 +126,17 @@ func prepareRom(in []byte) (rom []uint8, realSize int) {
 	return rom, len(in)
 }
 
+// branchHooks: whether the ROM's wait loops may be marked with A-line /
+// F-line opcodes (see m68k.CPU.BranchHooks). Only a ROM whose A-line and
+// F-line vectors go to the same place (its general error handler) gets this,
+// so a game that really uses either trap is left alone.
+func branchHooks(rom []uint8) bool {
+	be32 := func(a int) uint32 {
+		return uint32(rom[a])<<24 | uint32(rom[a+1])<<16 | uint32(rom[a+2])<<8 | uint32(rom[a+3])
+	}
+	return be32(0x28) == be32(0x2c)
+}
+
 // jsSpace: the characters JS's \s and trim() treat as white space, among
 // those a header byte can be.
 func jsSpace(r rune) bool {
@@ -253,6 +264,7 @@ func New(romIn []byte, opts core.Options) (core.Core, error) {
 	g.psg = sn76489.New()
 	g.cpu = m68k.New(bus{g})
 	g.cpu.TASWrites = false
+	g.cpu.BranchHooks = branchHooks(rom)
 	g.z80 = z80.New(zbus{g})
 
 	g.width, g.height = 320, 224

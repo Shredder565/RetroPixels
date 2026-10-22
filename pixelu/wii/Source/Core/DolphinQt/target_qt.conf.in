@@ -1,0 +1,27 @@
+; Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+; qt.conf for qtpaths.bat: where the bundled Qt keeps its parts, relative to
+; the Qt folder the build uses, so windeployqt can deploy from it.
+[Paths]
+Prefix=@DOLPHIN_QT_ROOT@
+Binaries=bin
+Libraries=lib
+LibraryExecutables=bin
+Plugins=plugins
+Headers=include
+QmlImports=qml
+Translations=translations
+Documentation=doc
+Examples=examples
+Tests=tests
+ArchData=.
+Data=.
+Settings=etc/xdg
+Sysroot=
+SysrootifyPrefix=false
+TargetSpec=@DOLPHIN_QT_TARGET_SPEC@
+HostPrefix=@DOLPHIN_QT_HOST_ROOT@
+HostData=@DOLPHIN_QT_HOST_ROOT@
+HostBinaries=bin
+HostLibraries=lib
+HostLibraryExecutables=bin
+HostSpec=

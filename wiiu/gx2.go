@@ -1,25 +1,36 @@
 package wiiu
 
-// gx2: the graphics library, driving the Latte GPU.
+// gx2: the graphics library.
 //
-// For now this covers what's needed to show a picture: setting up the TV and
-// GamePad scan buffers, clearing colour buffers, copying them to the scan
-// buffers, swapping and waiting for vsync. Drawing (shaders, textures,
-// vertex data) is the next milestone; draw calls are accepted and skipped.
+// GX2 drives the Latte GPU (latte.go) the way the real library does, by
+// writing PM4 command packets. The packets run straight away, or go into a
+// display list in memory when the program is recording one. This file has
+// the video output side (scan buffers, swaps, vsync) and the surface
+// helpers; gx2_state.go has the drawing state, shaders and draws.
 
 import "math"
 
 // GX2 is the graphics state.
 type GX2 struct {
 	Init bool
+	// GX2R's allocator (the program's functions; 0 = the default heap)
+	rAlloc, rFree uint32
 	// scan buffers of the TV (0) and GamePad (1)
 	Scan        [2]scanBuf
 	Swaps       uint32
 	Flips       uint32
 	Vsyncs      uint64
+	lastFlip    uint64 // system time of the last flip and vsync
+	lastVsync   uint64
 	Interval    uint32
 	pendingSwap bool
-	timestamp   uint64
+	// GX2SetEventCallback: function and data for each event type
+	// (0 start of pipe, 1 end of pipe, 2 vsync, 3 flip, 4 display list overrun)
+	events [5][2]uint32
+
+	// where each core's packets go (gx2_command.go)
+	cb       [3]gx2CmdBuf
+	mainCore int // the core GX2Init ran on
 }
 
 type scanBuf struct {
@@ -49,26 +60,11 @@ func tvModeDims(mode uint32) (uint32, uint32) {
 	return 1280, 720
 }
 
-// surface formats: bits per element (blocks for compressed formats)
-func formatBits(f uint32) uint32 {
-	switch f & 0x3f {
-	case 0x01, 0x02:
-		return 8
-	case 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c:
-		return 16
-	case 0x1c, 0x1d, 0x1e, 0x1f, 0x31, 0x34:
-		return 64
-	case 0x20:
-		return 96
-	case 0x21, 0x22, 0x23, 0x32, 0x33, 0x35:
-		return 128
+func (m *Machine) warnOnce(s string) {
+	if !m.warned[s] {
+		m.warned[s] = true
+		m.logf("%s", s)
 	}
-	return 32
-}
-
-func formatCompressed(f uint32) bool {
-	b := f & 0x3f
-	return b >= 0x31 && b <= 0x35
 }
 
 // GX2Surface fields
@@ -90,159 +86,99 @@ const (
 	surfAlign   = 0x38
 	surfPitch   = 0x3c
 	surfMipOffs = 0x40
+	surfEnd     = 0x74
 )
 
-// calcSurface fills in a surface's size, alignment and pitch.
-func (m *Machine) calcSurface(s uint32) {
-	mem := m.Mem
-	w := max(mem.Read32(s+surfWidth), 1)
-	h := max(mem.Read32(s+surfHeight), 1)
-	d := max(mem.Read32(s+surfDepth), 1)
-	mips := max(mem.Read32(s+surfMips), 1)
-	f := mem.Read32(s + surfFormat)
-	tile := mem.Read32(s + surfTile)
-	if tile == 0 {
-		tile = 4 // 2D tiled thin 1
-		if mem.Read32(s+surfDim) == 0 {
-			tile = 1 // 1D textures are linear
+type gx2Surface struct {
+	addr                                         uint32
+	dim, w, h, d, mips, format, aa, use, tile    uint32
+	image, mipmaps, swizzle, pitch, size, mipOff uint32
+}
+
+func (m *Machine) readSurface(s uint32) gx2Surface {
+	r := func(o uint32) uint32 { return m.Mem.Read32(s + o) }
+	return gx2Surface{addr: s, dim: r(surfDim), w: max(r(surfWidth), 1), h: max(r(surfHeight), 1), d: max(r(surfDepth), 1),
+		mips: max(r(surfMips), 1), format: r(surfFormat), aa: r(surfAA), use: r(surfUse), tile: r(surfTile),
+		image: r(surfImage), mipmaps: r(surfMipmaps), swizzle: r(surfSwizzle), pitch: r(surfPitch), size: r(surfSize)}
+}
+
+// defaultTile: what GX2_TILE_MODE_DEFAULT becomes
+func defaultTile(s *gx2Surface) uint32 {
+	switch s.tile {
+	case 0:
+		if s.dim == 0 || s.dim == 4 { // 1D textures are linear
+			return tileLinearAligned
 		}
-		mem.Write32(s+surfTile, tile)
+		return tile2DThin1
+	case tileLinearSpecial:
+		return tileLinearAligned
 	}
-	bits := formatBits(f)
-	if formatCompressed(f) {
+	return s.tile
+}
+
+func (s *gx2Surface) info() surfInfo {
+	return calcSurfInfo(s.dim, s.w, s.h, s.d, s.mips, s.format, s.aa, s.use, defaultTile(s))
+}
+
+// level gives the layout of mip level lvl, as GPU registers would see it.
+func (s *gx2Surface) level(lvl uint32) (surfLayout, uint32, uint32) {
+	info := s.info()
+	if int(lvl) >= len(info.Levels) {
+		lvl = uint32(len(info.Levels) - 1)
+	}
+	li := info.Levels[lvl]
+	base := s.image
+	if lvl > 0 {
+		base = s.mipmaps + li.Offset
+		if s.mipmaps == 0 {
+			base = s.image + alignUp(info.Size, info.Align) + li.Offset
+		}
+	}
+	pitch := li.Pitch
+	if lvl == 0 && s.pitch != 0 {
+		pitch = s.pitch
+	}
+	slices := s.d
+	if s.dim == 2 {
+		slices = max(s.d>>lvl, 1)
+	}
+	sw := uint32(0)
+	if isMacroTiled(li.Mode) {
+		sw = s.swizzle & 0x700
+	}
+	w, h := max(s.w>>lvl, 1), max(s.h>>lvl, 1)
+	if formatCompressed(s.format) {
 		w, h = (w+3)/4, (h+3)/4
 	}
-	align := uint32(0x800)
-	pitchAlign := uint32(32)
-	if tile <= 1 {
-		pitchAlign = max(64, 256*8/bits)
-		align = 0x100
+	return surfLayout{Base: base, Pitch: pitch, Height: li.Height, Slices: slices, BPP: formatBits(s.format), Mode: li.Mode,
+		Samples: 1 << (s.aa & 3), Depth: s.use&4 != 0, Swizzle: sw}, w, h
+}
+
+// calcSurface fills in a surface's size, alignment, pitch and mip offsets
+// (GX2CalcSurfaceSizeAndAlignment).
+func (m *Machine) calcSurface(addr uint32) {
+	s := m.readSurface(addr)
+	if s.tile == 0 {
+		m.Mem.Write32(addr+surfTile, defaultTile(&s))
+		s.tile = defaultTile(&s)
 	}
-	pitch := (w + pitchAlign - 1) &^ (pitchAlign - 1)
-	hh := (h + 7) &^ 7
-	size := pitch * hh * bits / 8 * d
-	size = (size + align - 1) &^ (align - 1)
-	mem.Write32(s+surfSize, size)
-	mem.Write32(s+surfAlign, align)
-	if formatCompressed(f) {
-		mem.Write32(s+surfPitch, pitch)
-	} else {
-		mem.Write32(s+surfPitch, pitch)
-	}
-	// the rest of the mip chain
+	info := s.info()
+	mem := m.Mem
+	mem.Write32(addr+surfSize, info.Size)
+	mem.Write32(addr+surfAlign, info.Align)
+	mem.Write32(addr+surfPitch, info.Pitch)
 	var mipSize uint32
-	mw, mh := w, h
-	for i := uint32(1); i < mips && i < 14; i++ {
-		mw, mh = max(mw/2, 1), max(mh/2, 1)
-		p := (mw + pitchAlign - 1) &^ (pitchAlign - 1)
-		n := p * ((mh + 7) &^ 7) * bits / 8 * d
-		n = (n + align - 1) &^ (align - 1)
-		if i < 13 {
-			mem.Write32(s+surfMipOffs+(i-1)*4, mipSize)
+	for i := 1; i < len(info.Levels); i++ {
+		l := info.Levels[i]
+		if i <= 13 {
+			mem.Write32(addr+surfMipOffs+uint32(i-1)*4, l.Offset)
 		}
-		mipSize += n
+		mipSize = l.Offset + l.Size
 	}
-	mem.Write32(s+surfMipSize, mipSize)
+	mem.Write32(addr+surfMipSize, mipSize)
 }
 
-// clearSurface fills a colour surface with one colour.
-func (m *Machine) clearSurface(s uint32, r, g, b, a float64) {
-	mem := m.Mem
-	img := mem.Read32(s + surfImage)
-	size := mem.Read32(s + surfSize)
-	if img == 0 || size == 0 {
-		return
-	}
-	f := mem.Read32(s+surfFormat) & 0x3f
-	u8 := func(v float64) byte { return byte(math.Round(math.Max(0, math.Min(1, v)) * 255)) }
-	var px []byte
-	switch formatBits(f) {
-	case 32:
-		if f == 0x19 { // R10G10B10A2
-			q := func(v float64, n float64) uint32 { return uint32(math.Round(math.Max(0, math.Min(1, v)) * n)) }
-			v := q(a, 3)<<30 | q(b, 1023)<<20 | q(g, 1023)<<10 | q(r, 1023)
-			px = []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
-		} else {
-			px = []byte{u8(r), u8(g), u8(b), u8(a)}
-		}
-	case 64:
-		h := func(v float64) []byte { x := f32toHalf(float32(v)); return []byte{byte(x), byte(x >> 8)} }
-		px = append(append(append(h(r), h(g)...), h(b)...), h(a)...)
-	case 16:
-		v := uint16(u8(r))>>3<<11 | uint16(u8(g))>>2<<5 | uint16(u8(b))>>3
-		px = []byte{byte(v), byte(v >> 8)}
-	default:
-		px = []byte{u8(r)}
-	}
-	buf := make([]byte, 4096)
-	for i := range buf {
-		buf[i] = px[i%len(px)]
-	}
-	for o := uint32(0); o < size; o += uint32(len(buf)) {
-		n := min(uint32(len(buf)), size-o)
-		mem.WriteBytes(img+o, buf[:n])
-	}
-}
-
-func f32toHalf(f float32) uint16 {
-	b := math.Float32bits(f)
-	sign := uint16(b>>16) & 0x8000
-	e := int(b>>23&0xff) - 127 + 15
-	mant := b & 0x7fffff
-	switch {
-	case e <= 0:
-		return sign
-	case e >= 31:
-		return sign | 0x7c00
-	}
-	return sign | uint16(e)<<10 | uint16(mant>>13)
-}
-
-// copyToScan copies a colour buffer into a scan buffer's back buffer.
-func (m *Machine) copyToScan(cb uint32, target uint32) {
-	i := 0
-	if target&4 != 0 || target == 4 {
-		i = 1
-	}
-	sb := &m.gx2.Scan[i]
-	if sb.Addr == 0 {
-		return
-	}
-	mem := m.Mem
-	img := mem.Read32(cb + surfImage)
-	w, h := mem.Read32(cb+surfWidth), mem.Read32(cb+surfHeight)
-	pitch := mem.Read32(cb + surfPitch)
-	tile := mem.Read32(cb + surfTile)
-	f := mem.Read32(cb+surfFormat) & 0x3f
-	if img == 0 || formatBits(f) != 32 {
-		return
-	}
-	frame := sb.W * sb.H * 4
-	dst := sb.Addr + sb.Back*frame
-	row := make([]byte, sb.W*4)
-	for y := uint32(0); y < sb.H; y++ {
-		sy := y * h / sb.H
-		for x := uint32(0); x < sb.W; x++ {
-			sx := x * w / sb.W
-			o := m.surfaceOffset(sx, sy, pitch, h, 4, tile)
-			v := mem.Read32(img + o)
-			if f == 0x19 {
-				// R10G10B10A2 (little-endian) to RGBA8
-				le := v>>24 | v>>8&0xff00 | v<<8&0xff0000 | v<<24
-				r, g, b := le&0x3ff, le>>10&0x3ff, le>>20&0x3ff
-				v = (r>>2)<<24 | (g>>2)<<16 | (b>>2)<<8 | 0xff
-			}
-			row[x*4], row[x*4+1], row[x*4+2], row[x*4+3] = byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
-		}
-		mem.WriteBytes(dst+y*sb.W*4, row)
-	}
-}
-
-// surfaceOffset: where pixel x, y is in a surface (tiled layouts come with
-// the GPU; for now surfaces are laid out by row)
-func (m *Machine) surfaceOffset(x, y, pitch, height, bpp, tile uint32) uint32 {
-	return (y*pitch + x) * bpp
-}
+func f32toHalf(f float32) uint16 { return f32ToHalf(f) }
 
 // scanShow puts a scan buffer's front buffer in the picture.
 func (m *Machine) scanShow(i int) {
@@ -258,15 +194,20 @@ func (m *Machine) scanShow(i int) {
 	frame := sb.W * sb.H * 4
 	src := sb.Addr + sb.Front*frame
 	row := make([]byte, sb.W*4)
-	srgb := sb.Format&0x400 != 0
-	_ = srgb
+	xs := make([]uint32, dw) // the scan buffer column of each screen column
+	for x := range xs {
+		xs[x] = uint32(x) * sb.W / dw * 4
+	}
 	for y := uint32(0); y < dh; y++ {
 		sy := y * sb.H / dh
-		m.Mem.ReadBytes(src+sy*sb.W*4, row)
+		r := m.Mem.Slice(src+sy*sb.W*4, len(row))
+		if r == nil {
+			m.Mem.ReadBytes(src+sy*sb.W*4, row)
+			r = row
+		}
 		d := dst[y*dw : y*dw+dw]
-		for x := uint32(0); x < dw; x++ {
-			sx := x * sb.W / dw
-			d[x] = uint32(row[sx*4])<<16 | uint32(row[sx*4+1])<<8 | uint32(row[sx*4+2])
+		for x, o := range xs {
+			d[x] = uint32(r[o])<<16 | uint32(r[o+1])<<8 | uint32(r[o+2])
 		}
 	}
 	if i == 0 {
@@ -278,19 +219,48 @@ func (m *Machine) scanShow(i int) {
 
 func (g *GX2) vsync(m *Machine) {
 	g.Vsyncs++
+	g.lastVsync = m.bootTime + m.Time()
+	m.gx2Event(2)
 	if g.pendingSwap {
 		g.pendingSwap = false
-		g.Flips++
+		// every swap asked for so far is on screen now (two in one frame
+		// show as one picture, but the counts must still meet)
+		g.Flips = g.Swaps
+		g.lastFlip = g.lastVsync
 		for i := range g.Scan {
 			m.scanShow(i)
 		}
 		m.wake(keyFlip)
+		m.gx2Event(3)
 	}
+}
+
+// gx2Event runs the program's callback for a GPU event, like the GPU's
+// interrupt does: on core 1, from the interrupt thread.
+func (m *Machine) gx2Event(kind int) {
+	if e := m.gx2.events[kind]; e[0] != 0 {
+		m.queueCallback(1, e[0], uint32(kind), e[1])
+	}
+}
+
+func argF32(c *CPU, i int) float32 { return float32(argF(c, i)) }
+
+// stackArg: integer argument i (from 0) of a call, past the eight that go
+// in registers
+func stackArg(m *Machine, c *CPU, i int) uint32 {
+	if i < 8 {
+		return arg(c, i)
+	}
+	return m.Mem.Read32(c.GPR[1] + 8 + uint32(i-8)*4)
 }
 
 func init() {
 	x := "gx2"
-	reg(x, "GX2Init", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Init = true })
+	reg(x, "GX2Init", func(m *Machine, cpu *CPU, t *Thread) {
+		m.gx2.Init = true
+		m.gx2.mainCore = cpu.Core
+		m.gx2DefaultState()
+	})
 	reg(x, "GX2Shutdown", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Init = false })
 	calcSize := func(dims func(uint32) (uint32, uint32)) hleFunc {
 		return func(m *Machine, cpu *CPU, t *Thread) {
@@ -322,10 +292,9 @@ func init() {
 	reg(x, "GX2SetDRCBuffer", setBuf(1, func(uint32) (uint32, uint32) { return DRCWidth, DRCHeight }))
 	reg(x, "GX2SetTVEnable", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Scan[0].Enabled = arg(cpu, 0) != 0 })
 	reg(x, "GX2SetDRCEnable", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Scan[1].Enabled = arg(cpu, 0) != 0 })
-	reg(x, "GX2SetTVScale", func(m *Machine, cpu *CPU, t *Thread) {})
-	reg(x, "GX2SetDRCScale", func(m *Machine, cpu *CPU, t *Thread) {})
-	reg(x, "GX2SetTVGamma", func(m *Machine, cpu *CPU, t *Thread) {})
-	reg(x, "GX2SetDRCGamma", func(m *Machine, cpu *CPU, t *Thread) {})
+	for _, n := range []string{"GX2SetTVScale", "GX2SetDRCScale", "GX2SetTVGamma", "GX2SetDRCGamma"} {
+		reg(x, n, func(m *Machine, cpu *CPU, t *Thread) {})
+	}
 	reg(x, "GX2GetSystemTVScanMode", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 3) }) // 720p
 	reg(x, "GX2GetSystemTVAspectRatio", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2GetSystemDRCScanMode", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
@@ -333,9 +302,6 @@ func init() {
 	reg(x, "GX2IsVideoOutReady", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2SetSwapInterval", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Interval = arg(cpu, 0) })
 	reg(x, "GX2GetSwapInterval", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.gx2.Interval) })
-	reg(x, "GX2CopyColorBufferToScanBuffer", func(m *Machine, cpu *CPU, t *Thread) {
-		m.copyToScan(arg(cpu, 0), arg(cpu, 1))
-	})
 	reg(x, "GX2SwapScanBuffers", func(m *Machine, cpu *CPU, t *Thread) {
 		for i := range m.gx2.Scan {
 			sb := &m.gx2.Scan[i]
@@ -376,20 +342,11 @@ func init() {
 			m.Mem.Write32(p, g.Flips)
 		}
 		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write64(p, m.bootTime+m.Time())
+			m.Mem.Write64(p, g.lastFlip)
 		}
 		if p := arg(cpu, 3); p != 0 {
-			m.Mem.Write64(p, m.bootTime+m.Time())
+			m.Mem.Write64(p, g.lastVsync)
 		}
-	})
-	reg(x, "GX2ClearColor", func(m *Machine, cpu *CPU, t *Thread) {
-		m.clearSurface(arg(cpu, 0), argF(cpu, 0), argF(cpu, 1), argF(cpu, 2), argF(cpu, 3))
-	})
-	reg(x, "GX2ClearBuffersEx", func(m *Machine, cpu *CPU, t *Thread) {
-		m.clearSurface(arg(cpu, 0), argF(cpu, 0), argF(cpu, 1), argF(cpu, 2), argF(cpu, 3))
-	})
-	reg(x, "GX2ClearBuffers", func(m *Machine, cpu *CPU, t *Thread) {
-		m.clearSurface(arg(cpu, 0), argF(cpu, 0), argF(cpu, 1), argF(cpu, 2), argF(cpu, 3))
 	})
 	reg(x, "GX2CalcSurfaceSizeAndAlignment", func(m *Machine, cpu *CPU, t *Thread) { m.calcSurface(arg(cpu, 0)) })
 	reg(x, "GX2CalcDepthBufferHiZInfo", func(m *Machine, cpu *CPU, t *Thread) {
@@ -408,67 +365,69 @@ func init() {
 			m.Mem.Write32(p, 0x800)
 		}
 	})
+	reg(x, "GX2SetSurfaceSwizzle", func(m *Machine, cpu *CPU, t *Thread) {
+		s := arg(cpu, 0)
+		v := m.Mem.Read32(s + surfSwizzle)
+		m.Mem.Write32(s+surfSwizzle, v&^0x700|(arg(cpu, 1)&7)<<8)
+	})
+	reg(x, "GX2GetSurfaceSwizzle", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, m.Mem.Read32(arg(cpu, 0)+surfSwizzle)>>8&7)
+	})
 	reg(x, "GX2DrawDone", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2WaitTimeStamp", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	ts := func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, m.bootTime+m.Time()) }
 	reg(x, "GX2GetRetiredTimeStamp", ts)
 	reg(x, "GX2GetLastSubmittedTimeStamp", ts)
+	// (u64 *out): the GPU's clock when it reaches this point
+	sample := func(m *Machine, cpu *CPU, t *Thread) {
+		if p := arg(cpu, 0); p != 0 {
+			m.Mem.Write64(p, m.bootTime+m.Time())
+		}
+	}
+	reg(x, "GX2SampleTopGPUCycle", sample)
+	reg(x, "GX2SampleBottomGPUCycle", sample)
 	reg(x, "GX2GetLastFrame", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2GetLastFrameGamma", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(x, "GX2GetMainCoreId", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2GetGPUTimeout", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 10000) })
 	reg(x, "GX2GetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2SetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2TempGetGPUVersion", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 2) })
-	reg(x, "GX2GetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, 0)
-		}
-		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write32(p, 0)
+	// (type, function, data)
+	reg(x, "GX2SetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
+		if k := arg(cpu, 0); k < uint32(len(m.gx2.events)) {
+			m.gx2.events[k] = [2]uint32{arg(cpu, 1), arg(cpu, 2)}
 		}
 	})
-	// the rest of the drawing API: accepted, drawn with the GPU milestone
-	for _, n := range []string{"GX2Flush", "GX2Invalidate", "GX2SetContextState", "GX2SetupContextStateEx",
-		"GX2SetupContextState", "GX2SetDefaultState", "GX2InitColorBufferRegs", "GX2InitDepthBufferRegs",
-		"GX2SetColorBuffer", "GX2SetDepthBuffer", "GX2SetViewport", "GX2SetScissor", "GX2SetClearDepthStencil",
-		"GX2ClearDepthStencilEx", "GX2ClearDepthStencil", "GX2SetFetchShader", "GX2SetVertexShader", "GX2SetPixelShader",
-		"GX2SetGeometryShader", "GX2SetShaderModeEx", "GX2SetShaderMode", "GX2SetAttribBuffer", "GX2SetVertexUniformReg",
-		"GX2SetPixelUniformReg", "GX2SetVertexUniformBlock", "GX2SetPixelUniformBlock", "GX2SetGeometryUniformBlock",
-		"GX2SetPixelTexture", "GX2SetVertexTexture", "GX2SetPixelSampler", "GX2SetVertexSampler", "GX2DrawEx",
-		"GX2DrawIndexedEx", "GX2DrawEx2", "GX2DrawIndexedEx2", "GX2DrawIndexedImmediateEx", "GX2SetColorControl",
-		"GX2SetBlendControl", "GX2SetDepthStencilControl", "GX2SetPolygonControl", "GX2SetCullOnlyControl",
-		"GX2SetAlphaTest", "GX2SetTargetChannelMasks", "GX2SetStencilMask", "GX2SetPrimitiveRestartIndex",
-		"GX2SetLineWidth", "GX2SetPointSize", "GX2SetPointLimits", "GX2SetBlendConstantColor", "GX2SetAlphaToMask",
-		"GX2SetPolygonOffset", "GX2SetRasterizerClipControl", "GX2SetRasterizerClipControlEx", "GX2SetSpecialState",
-		"GX2InitTextureRegs", "GX2InitSampler", "GX2InitSamplerClamping", "GX2InitSamplerLOD", "GX2InitSamplerXYFilter",
-		"GX2InitSamplerZMFilter", "GX2InitSamplerBorderType", "GX2InitSamplerDepthCompare", "GX2InitSamplerFilterAdjust",
-		"GX2InitSamplerLODAdjust", "GX2InitSamplerRoundingMode", "GX2BeginDisplayList", "GX2BeginDisplayListEx",
-		"GX2CallDisplayList", "GX2DirectCallDisplayList", "GX2CopyDisplayList", "GX2SetDRCConnectCallback",
-		"GX2SetEventCallback", "GX2SetDepthOnlyControl", "GX2SetStreamOutBuffer", "GX2SetStreamOutEnable",
+	reg(x, "GX2GetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
+		var e [2]uint32
+		if k := arg(cpu, 0); k < uint32(len(m.gx2.events)) {
+			e = m.gx2.events[k]
+		}
+		if p := arg(cpu, 1); p != 0 {
+			m.Mem.Write32(p, e[0])
+		}
+		if p := arg(cpu, 2); p != 0 {
+			m.Mem.Write32(p, e[1])
+		}
+	})
+	for _, n := range []string{"GX2SetDRCConnectCallback", "GX2SetGPUTimeout",
+		"GX2PrintGPUStatus", "GX2DebugTagUserString", "GX2NotifyMemAlloc", "GX2NotifyMemFree", "GX2Begin", "GX2End",
+		"GX2SetDRCConnectCallbackEx", "GX2SetTVBufferEx", "GX2SetAAMode", "GX2SetAAModeEx", "GX2SetAAMask",
+		"GX2ExpandDepthBuffer", "GX2ExpandAAColorBuffer", "GX2SetDepthBufferHiZEnable", "GX2SetShaderModeEx",
+		"GX2SetShaderMode", "GX2SetShaderModeEx2", "GX2SetStreamOutBuffer", "GX2SetStreamOutEnable",
 		"GX2SetStreamOutContext", "GX2SaveStreamOutContext", "GX2SetTessellation", "GX2SetMaxTessellationLevel",
-		"GX2SetMinTessellationLevel", "GX2CopySurface", "GX2CopySurfaceEx", "GX2ResolveAAColorBuffer",
-		"GX2ExpandDepthBuffer", "GX2ExpandAAColorBuffer", "GX2ConvertDepthBufferToTextureSurface", "GX2SetAAMode",
-		"GX2SetAAModeEx", "GX2SetAAMask", "GX2SetSurfaceSwizzle", "GX2SetupCompatibilityContextState",
-		"GX2SetGPUTimeout", "GX2PrintGPUStatus", "GX2DebugTagUserString", "GX2NotifyMemAlloc", "GX2NotifyMemFree",
-		"GX2InitFetchShaderEx", "GX2SetVertexUniformBlockTimeStamp", "GX2SetGeometryShaderInputRingBuffer",
-		"GX2SetGeometryShaderOutputRingBuffer", "GX2SetShaderModeEx2", "GX2SetDepthBufferHiZEnable",
-		"GX2SetColorBufferTarget", "GX2Begin", "GX2End", "GX2SetDRCConnectCallbackEx", "GX2SetTVBufferEx"} {
+		"GX2SetMinTessellationLevel", "GX2SetGeometryShaderInputRingBuffer", "GX2SetGeometryShaderOutputRingBuffer",
+		"GX2SetVertexUniformBlockTimeStamp", "GX2SetSpecialState", "GX2SetupCompatibilityContextState",
+		"GX2InitDepthBufferHiZEnable"} {
 		reg(x, n, func(m *Machine, cpu *CPU, t *Thread) {})
 	}
-	reg(x, "GX2EndDisplayList", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(x, "GX2GetCurrentDisplayList", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(x, "GX2GetDisplayListWriteStatus", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2CalcGeometryShaderInputRingBufferSize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x10000) })
 	reg(x, "GX2CalcGeometryShaderOutputRingBufferSize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x10000) })
-	reg(x, "GX2CalcFetchShaderSizeEx", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x100+arg(cpu, 0)*0x20) })
 	reg(x, "GX2GetVertexShaderGPRs", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 64) })
 	reg(x, "GX2GetPixelShaderGPRs", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 64) })
 	reg(x, "GX2GetGeometryShaderGPRs", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 64) })
 	reg(x, "GX2GetVertexShaderStackEntries", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 32) })
 	reg(x, "GX2GetPixelShaderStackEntries", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 32) })
 	reg(x, "GX2GetGeometryShaderStackEntries", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 32) })
-	reg(x, "GX2GetSurfaceSwizzle", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.Mem.Read32(arg(cpu, 0)+surfSwizzle)>>8&7)
-	})
+	_ = math.Pi
 }

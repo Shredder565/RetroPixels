@@ -1,0 +1,168 @@
+name: RetroPixels with PixelU (test build)
+
+# One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
+# built from this commit, with PixelU inside (the Wii U engine and the
+# GameCube / Wii engine, from their latest successful builds on this branch)
+# the built-in MAME and Supermodel (Sega Model 3, built from this commit by
+# supermodel.yml). A workflow artifact only: no release is made.
+# It runs on each push, and again when a PixelU engine build finishes (those
+# workflows start it, since workflow_run only works from the default branch).
+
+# release.yml calls it with release: true: then the version has no -testN,
+# VERSION.txt says it's a release, and the release files (the zip, the two
+# programs and the MAME source) go in the RetroPixels-release artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bundle-test-${{ inputs.release && 'release' || 'test' }}
+  cancel-in-progress: ${{ !inputs.release }}
+
+jobs:
+  # supermodel.exe from supermodel/ at this commit (upstream + RetroPixels' patches).
+  supermodel:
+    uses: ./.github/workflows/supermodel.yml
+
+  bundle:
+    needs: supermodel
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: claude/wiiu-emulator-urpcen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build RetroPixels
+        run: |
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          if [ "${{ inputs.release }}" != true ]; then v=$v-test${{ github.run_number }}; fi
+          echo "VER=$v" >> "$GITHUB_ENV"
+          echo "DIR=dist/RetroPixels-$v" >> "$GITHUB_ENV"
+          sh tools/make-winres.sh && sh tools/make-winres-native.sh
+          export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+          mkdir -p "dist/RetroPixels-$v"
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/RetroPixels.exe" .
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
+
+      # The newest successful builds of PixelU's two engines on this branch.
+      - name: PixelU (Wii U and GameCube / Wii engines)
+        run: |
+          get() { # workflow file, artifact name
+            id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$BRANCH" --status success -L 1 --json databaseId -q '.[0].databaseId')
+            [ -n "$id" ] || { echo "no successful run of $1"; exit 1; }
+            sha=$(gh run view -R "$GITHUB_REPOSITORY" "$id" --json headSha -q .headSha)
+            echo "$1: run $id ($sha)"
+            echo "$1 $id ${sha:0:7}" >> engines.txt
+            gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2"
+          }
+          get pixelu.yml PixelU-windows-x64
+          get pixelu-wii.yml PixelU-Wii-windows-x64
+          mkdir -p "$DIR/PixelU"
+          cp -r eng/PixelU-windows-x64/PixelU/. "$DIR/PixelU/"
+          cp -r eng/PixelU-Wii-windows-x64/PixelU/wii "$DIR/PixelU/wii"
+          test -f "$DIR/PixelU/PixelU.exe" && test -f "$DIR/PixelU/wii/PixelU-Wii.exe"
+
+      - name: Built-in MAME
+        id: mame
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Supermodel-windows-x64
+          path: eng/Supermodel-windows-x64
+
+      - name: Supermodel (Sega Model 3)
+        run: |
+          mkdir -p "$DIR/Supermodel"
+          cp -r eng/Supermodel-windows-x64/Supermodel/. "$DIR/Supermodel/"
+          test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/RetroPixels.txt"
+          test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/Supermodel-source.tar.gz"
+          . supermodel/pins.sh
+          echo "SM_COMMIT=${SUPERMODEL_COMMIT}" >> "$GITHUB_ENV"
+          echo "SM_REPO=${SUPERMODEL_REPO%.git}" >> "$GITHUB_ENV"
+
+      - name: Package
+        run: |
+          cp README.txt CHANGELOG.txt "$DIR/"
+          cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
+          cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
+          {
+            if [ "${{ inputs.release }}" = true ]; then
+              echo "RetroPixels $VER"
+              src="https://github.com/$GITHUB_REPOSITORY/tree/v$VER"
+            else
+              echo "RetroPixels $VER (test build, not a release)"
+              src="https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH"
+            fi
+            echo "Built $(date -u +%F) from branch $BRANCH ($(git rev-parse --short HEAD))"
+            echo
+            echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
+            echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
+            echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
+            echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
+            echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel\\LICENSE.txt"
+            echo "  Source: Supermodel\\Supermodel-source.tar.gz (the exact source built), upstream $SM_REPO/tree/$SM_COMMIT"
+            echo "  RetroPixels' changes: Supermodel\\RetroPixels.txt, and https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH/supermodel"
+            echo "Engine builds used:"
+            sed 's/^/  /' engines.txt
+            echo
+            echo "Source: $src"
+            echo "PixelU-Wii source is in pixelu/wii; docs/pixelu-wii-original.md explains the rewrite and lists the third-party parts and kept Dolphin data."
+            echo "No games, keys, BIOS or firmware are included."
+          } > "$DIR/VERSION.txt"
+          # No zip of our own: GitHub zips the artifact on download, so the
+          # folder is uploaded as it is and the download is one zip holding
+          # the RetroPixels-<ver> folder (not a zip inside a zip).
+          ls -la dist
+          cat "$DIR/VERSION.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-${{ env.VER }}
+          path: |
+            dist/
+            !dist/*.tar.gz
+          compression-level: 6
+          retention-days: 14
+
+      # Release only: the files release.yml publishes.
+      - name: Release files
+        if: inputs.release
+        run: |
+          mkdir -p release
+          (cd dist && zip -qr "../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
+          cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" release/
+          cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
+          cp "$DIR/VERSION.txt" release/VERSION.txt
+          ls -la release
+
+      - if: inputs.release
+        uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-release
+          path: release/
+          compression-level: 0
+          retention-days: 30

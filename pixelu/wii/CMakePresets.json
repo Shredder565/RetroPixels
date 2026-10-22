@@ -1,0 +1,28 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-x64-release",
+      "displayName": "PixelU-Wii: Windows x64, Release (Visual Studio 2026)",
+      "generator": "Visual Studio 18 2026",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "toolset": { "value": "v145", "strategy": "set" },
+      "toolchainFile": "${sourceDir}/CMake/PixelUWindowsToolchain.cmake",
+      "binaryDir": "${sourceDir}/build/windows-x64-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CONFIGURATION_TYPES": "Release"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-release",
+      "displayName": "PixelU-Wii: build Windows x64 Release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ]
+}

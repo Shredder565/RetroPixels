@@ -7,40 +7,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// AppFolder is the folder name RetroPixels.exe uses in %LOCALAPPDATA%, so
-// both programs share one Dolphin download.
+// AppFolder is the folder name RetroPixels.exe uses in %APPDATA% (its
+// config.json).
 const AppFolder = "RetroPixels"
-
-// InstallDirs: where the one-click download puts Dolphin, as RetroPixels.exe
-// does: a "Dolphin" folder next to the program if it can write there,
-// otherwise %LOCALAPPDATA%\RetroPixels\Dolphin.
-func InstallDirs() []string {
-	var dirs []string
-	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "Dolphin"))
-	}
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		dirs = append(dirs, filepath.Join(la, AppFolder, "Dolphin"))
-	}
-	return dirs
-}
-
-// Installed returns Dolphin.exe in one of InstallDirs, or "".
-func Installed() string {
-	for _, d := range InstallDirs() {
-		p := filepath.Join(d, "Dolphin.exe")
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
 
 var skipDirs = map[string]bool{"windows": true, "$recycle.bin": true, "system volume information": true, "programdata": true,
 	"node_modules": true, ".git": true, "appdata": true, "steamapps": true, "shadercache": true, "cache": true}
@@ -69,52 +45,7 @@ func WalkLimited(root string, depth int, fn func(string, fs.DirEntry) bool) {
 	walk(root, 1)
 }
 
-// FindExe looks for Dolphin.exe where RetroPixels.exe looks: the download
-// folders, near the games folders and the program, in Program Files, and in
-// the top folders of each drive. It can take a while (run it in the background).
-func FindExe(gameFolders []string) string {
-	if p := Installed(); p != "" {
-		return p
-	}
-	var roots []string
-	for _, p := range gameFolders {
-		roots = append(roots, p, filepath.Dir(p))
-	}
-	if exe, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(exe), filepath.Dir(filepath.Dir(exe)))
-	}
-	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
-		if d := os.Getenv(env); d != "" {
-			roots = append(roots, d)
-		}
-	}
-	for d := 'C'; d <= 'Z'; d++ {
-		roots = append(roots, string(d)+`:\`)
-	}
-	found := ""
-	for _, r := range roots {
-		if _, err := os.Stat(r); err != nil {
-			continue
-		}
-		depth := 4
-		if len(r) <= 3 && !strings.EqualFold(r, `C:\`) {
-			depth = 5 // game drives often nest emulators a level deeper
-		}
-		WalkLimited(r, depth, func(p string, d fs.DirEntry) bool {
-			if !d.IsDir() && strings.EqualFold(d.Name(), "Dolphin.exe") {
-				found = p
-				return false
-			}
-			return true
-		})
-		if found != "" {
-			return found
-		}
-	}
-	return ""
-}
-
-// GuessFolders finds folders holding GameCube / Wii games near Dolphin
+// GuessFolders finds folders holding GameCube / Wii games near an emulator
 // (people often keep emulators next to their games), widest first.
 func GuessFolders(exe string) []string {
 	var roots []string
@@ -183,7 +114,8 @@ func IsUnder(p string, roots []string) bool {
 	return false
 }
 
-// Version reads Dolphin's version from the build_info.txt next to it.
+// Version reads the engine's version from the build_info.txt next to it
+// (Dolphin builds have one).
 func Version(exe string) string {
 	if exe == "" {
 		return ""
@@ -263,7 +195,7 @@ func Library(folders []string, played map[string]time.Time) []Game {
 			}
 			seen[strings.ToLower(p)] = true
 			name := DisplayName(filepath.Base(p), di)
-			if IsAddOn(filepath.Base(p), name) {
+			if di.DLC || IsAddOn(filepath.Base(p), name) {
 				return true
 			}
 			out = append(out, Game{Name: name, File: filepath.Base(p), Path: p, Platform: di.Platform, ID: di.ID,
@@ -273,6 +205,17 @@ func Library(folders []string, played map[string]time.Time) []Game {
 	}
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	return out
+}
+
+// IsDLC tells whether path is a WiiWare add-on (.wad) that can only be
+// installed, not started.
+func IsDLC(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	di, ok := cachedIdentify(path, st)
+	return ok && (di.DLC || IsAddOn(filepath.Base(path), ""))
 }
 
 // GameFor identifies one game file (for a game opened directly, not from the library).
@@ -287,4 +230,85 @@ func GameFor(path string) (Game, bool) {
 	}
 	return Game{Name: DisplayName(filepath.Base(path), di), File: filepath.Base(path), Path: path, Platform: di.Platform,
 		ID: di.ID, Size: st.Size(), Added: st.ModTime()}, true
+}
+
+// ---------------- the player's own folders ----------------
+
+// xdgUserDirKeys: the user-dirs.dirs names of the player's folders.
+var xdgUserDirKeys = map[string]string{
+	"Downloads": "XDG_DOWNLOAD_DIR", "Desktop": "XDG_DESKTOP_DIR", "Documents": "XDG_DOCUMENTS_DIR",
+	"Videos": "XDG_VIDEOS_DIR", "Music": "XDG_MUSIC_DIR", "Pictures": "XDG_PICTURES_DIR",
+}
+
+// xdgConfigHome is $XDG_CONFIG_HOME, or home/.config when it's unset or not
+// an absolute path (as the XDG spec says).
+func xdgConfigHome(home string) string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(d) {
+		return d
+	}
+	return filepath.Join(home, ".config")
+}
+
+// xdgDataHome is $XDG_DATA_HOME, or home/.local/share.
+func xdgDataHome(home string) string {
+	if d := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(d) {
+		return d
+	}
+	return filepath.Join(home, ".local", "share")
+}
+
+// UserFolder is one of the player's own folders in home ("Downloads",
+// "Desktop", "Documents", "Videos", "Music" or "Pictures"). On Linux the
+// desktop can name it differently (in the player's language, or moved
+// somewhere else) in ~/.config/user-dirs.dirs; that one is used when it's
+// set there. On Windows it is always home\<name>.
+func UserFolder(home, name string) string {
+	return userFolderFor(runtime.GOOS, home, name)
+}
+
+func userFolderFor(goos, home, name string) string {
+	def := filepath.Join(home, name)
+	key, ok := xdgUserDirKeys[name]
+	if goos == "windows" || !ok || home == "" {
+		return def
+	}
+	f, err := os.Open(filepath.Join(xdgConfigHome(home), "user-dirs.dirs"))
+	if err != nil {
+		return def
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
+	for sc.Scan() {
+		k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if !ok || strings.TrimSpace(k) != key {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+			continue
+		}
+		v = v[1 : len(v)-1]
+		switch {
+		case v == "$HOME" || v == "$HOME/":
+			return home
+		case strings.HasPrefix(v, "$HOME/"):
+			return filepath.Join(home, filepath.FromSlash(v[len("$HOME/"):]))
+		case filepath.IsAbs(v):
+			return filepath.Clean(v)
+		}
+	}
+	return def
+}
+
+// DownloadDirs: where the player's downloads land: the desktop's Downloads
+// folder (UserFolder) first, then home/Downloads when that's another one.
+func DownloadDirs(home string) []string {
+	if home == "" {
+		return nil
+	}
+	out := []string{UserFolder(home, "Downloads")}
+	if d := filepath.Join(home, "Downloads"); filepath.Clean(d) != filepath.Clean(out[0]) {
+		out = append(out, d)
+	}
+	return out
 }

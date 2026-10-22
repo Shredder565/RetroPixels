@@ -2,28 +2,32 @@ package wiiu
 
 // Threads and the scheduler.
 //
-// Cafe OS runs programs on three cores; each OS thread has a priority (0 is
-// the highest, 31 the lowest) and a set of cores it may run on. Each core
-// runs its highest-priority ready thread, taking turns between threads of the
-// same priority. RetroPixels runs the three cores in turn, a slice of
+// Cafe OS runs programs on three cores; each OS thread has a priority (lower
+// runs first) and a set of cores it may run on. Each core runs its
+// highest-priority ready thread, taking turns between threads of the same
+// priority. RetroPixels runs the three cores in turn, a slice of
 // instructions at a time, all on one host thread, so the emulation is the
 // same every run (and save states are simple).
 //
 // Waiting works by running the library call again: a function that must wait
 // (see hle.go) blocks the thread on a key (usually the address of the mutex,
 // event, queue or thread waited for); waking the key makes its threads ready,
-// and each one runs its call again to see whether it can go on now.
+// and each one runs its call again. The call sees from Woken that it was
+// woken (an event or a condition doesn't wait again), from Granted that what
+// it waited for was handed to it (a mutex or a semaphore count), or checks
+// again whether it can go on now.
 
 import (
 	"sort"
+	"sync/atomic"
 )
 
 const (
 	thReady = iota
 	thWaiting
-	thSuspended // created but not started, or OSSuspendThread
-	thDone
-	thDormant // a default thread no one is running
+	thSuspended // ready, but its suspend count isn't 0 (a new thread starts so)
+	thDone      // ended but not joined yet
+	thDormant   // not running anything: a default thread, or a joined one
 )
 
 // thread attributes
@@ -35,24 +39,6 @@ const (
 	attrDetached    = 8
 )
 
-// OSThread fields RetroPixels keeps up to date in the program's structure
-const (
-	osThreadTag      = 0x320
-	osThreadState    = 0x324
-	osThreadAttr     = 0x325
-	osThreadID       = 0x326
-	osThreadSuspend  = 0x328
-	osThreadPriority = 0x32c
-	osThreadBasePrio = 0x330
-	osThreadExit     = 0x334
-	osThreadStackLo  = 0x394
-	osThreadStackHi  = 0x398
-	osThreadEntry    = 0x39c
-	osThreadSpecific = 0x5a0 // 16 values
-	osThreadName     = 0x5c0
-	osThreadSize     = 0x6a0
-)
-
 // Thread is an OS thread.
 type Thread struct {
 	ID       uint32
@@ -60,26 +46,32 @@ type Thread struct {
 	Ctx      Context
 	State    int
 	Suspend  int
-	Priority int
+	Priority int    // the priority it runs at: BasePrio, or 0 while it holds a spin lock
+	BasePrio int    // the priority set for it plus its type's base (see coreinit_threads.go)
+	Type     uint32 // driver, I/O or app thread
+	Boost    int    // spin locks it holds
 	Affinity uint32
 	Core     int // the core it last ran on (-1 = none)
 	Attr     uint32
 	Exit     uint32
-	Name     uint32
+	IntsOff  bool // interrupts are off: no other thread takes its core
 
 	WaitKey  uint64 // what it's waiting for (0 = nothing)
 	WakeAt   uint64 // time base value to wake at (0 = none)
+	WaitSeq  uint64 // when it started waiting, so waiters go first come, first served
 	Phase    int    // where a multi-step wait got to
 	Saved    uint32 // a value kept across a wait (a mutex count)
 	TimedOut bool   // woken by WakeAt rather than its key
+	Woken    bool   // woken by its key
+	Granted  bool   // handed what it waited for
+	GrantVal uint32 // the call's result, when Granted
 	Deadline uint64 // a timeout kept across a wait
 
-	LastRun  uint64 // for taking turns
-	Specific [16]uint32
-	Cleanup  uint32 // cleanup callback
-	Dealloc  uint32 // deallocator callback
-	Cancel   bool
-	TLS      map[uint32]uint32 // TLS block of each module
+	LastRun uint64 // for taking turns
+	Cleanup uint32 // cleanup callback
+	Dealloc uint32 // deallocator callback
+	Cancel  bool
+	TLS     map[uint32]uint32 // TLS block of each module
 
 	blocked bool // the current library call has to wait
 }
@@ -101,14 +93,18 @@ const (
 	keyFastMtx = 13 << 56
 	keyFastCnd = 14 << 56
 	keyGPU     = 15 << 56
+	keyAlarmQ  = 16 << 56
 )
+
+var waitSeq atomic.Uint64
 
 // block makes the current library call wait for key (and/or until wakeAt).
 func (t *Thread) block(key uint64, wakeAt uint64) {
 	t.State = thWaiting
 	t.WaitKey = key
 	t.WakeAt = wakeAt
-	t.TimedOut = false
+	t.WaitSeq = waitSeq.Add(1)
+	t.TimedOut, t.Woken, t.Granted = false, false, false
 	t.blocked = true
 }
 
@@ -117,8 +113,38 @@ func (t *Thread) yield() {
 	t.blocked = true
 }
 
+// doneWaiting forgets how the thread's last wait ended, once the call that
+// waited has gone on.
+func (t *Thread) doneWaiting() {
+	t.Phase = 0
+	t.TimedOut, t.Woken, t.Granted = false, false, false
+}
+
 func (m *Machine) threadAt(addr uint32) *Thread {
 	return m.threads[addr]
+}
+
+// ready ends t's wait.
+func (m *Machine) ready(t *Thread) {
+	t.State = thReady
+	if t.Suspend > 0 {
+		t.State = thSuspended
+	}
+	t.WaitKey = 0
+	t.WakeAt = 0
+	m.readied(t)
+}
+
+// readied notes that t can run now: if it should take the core from the
+// thread that's running, that happens when the current library call returns.
+func (m *Machine) readied(t *Thread) {
+	r := m.running
+	if r == nil || r == t || t.State != thReady || t.Priority < 0 {
+		return
+	}
+	if r.Core >= 0 && t.Affinity&(1<<r.Core) != 0 && t.Priority < r.Priority {
+		m.resched = true
+	}
 }
 
 // wake makes every thread waiting on key ready.
@@ -126,29 +152,28 @@ func (m *Machine) wake(key uint64) int {
 	n := 0
 	for _, t := range m.threadList {
 		if t.State == thWaiting && t.WaitKey == key {
-			t.State = thReady
-			t.WaitKey = 0
-			t.WakeAt = 0
+			m.ready(t)
+			t.Woken = true
 			n++
 		}
 	}
 	return n
 }
 
-// wakeOne wakes the highest-priority thread waiting on key.
+// wakeOne wakes the thread waiting on key that's first in line: the
+// highest-priority one, the first to wait of those.
 func (m *Machine) wakeOne(key uint64) *Thread {
 	var best *Thread
 	for _, t := range m.threadList {
 		if t.State == thWaiting && t.WaitKey == key {
-			if best == nil || t.Priority < best.Priority {
+			if best == nil || t.Priority < best.Priority || t.Priority == best.Priority && t.WaitSeq < best.WaitSeq {
 				best = t
 			}
 		}
 	}
 	if best != nil {
-		best.State = thReady
-		best.WaitKey = 0
-		best.WakeAt = 0
+		m.ready(best)
+		best.Woken = true
 	}
 	return best
 }
@@ -162,79 +187,21 @@ func (m *Machine) waiting(key uint64) bool {
 	return false
 }
 
-// newThread sets up a thread (suspended) for an OSThread at addr.
-func (m *Machine) newThread(addr, entry, argc, argv, stackTop, stackSize uint32, prio int, attr uint32) *Thread {
-	if old := m.threads[addr]; old != nil {
-		m.removeThread(old)
-	}
-	m.nextThreadID++
-	t := &Thread{ID: m.nextThreadID, Addr: addr, State: thSuspended, Suspend: 1, Priority: prio,
-		Attr: attr, Core: -1}
-	t.Affinity = attr & attrAffinityAny
-	if t.Affinity == 0 {
-		if cur := m.running; cur != nil && cur.Core >= 0 {
-			t.Affinity = 1 << cur.Core
-		} else {
-			t.Affinity = attrAffinityAny
+// activate puts t in the list of threads the scheduler looks at.
+func (m *Machine) activate(t *Thread) {
+	m.threads[t.Addr] = t
+	for _, x := range m.threadList {
+		if x == t {
+			return
 		}
 	}
-	t.Ctx.PC = entry
-	t.Ctx.GPR[1] = (stackTop - 8) &^ 7
-	m.Mem.Write32(t.Ctx.GPR[1], 0)
-	m.Mem.Write32(t.Ctx.GPR[1]+4, 0)
-	t.Ctx.GPR[3] = argc
-	t.Ctx.GPR[4] = argv
-	t.Ctx.LR = m.thunk("coreinit", "__RPThreadReturn")
-	if main := m.mainModule(); main != nil {
-		t.Ctx.GPR[2] = main.Info.SDA2Base
-		t.Ctx.GPR[13] = main.Info.SDABase
-	}
-	m.threads[addr] = t
 	m.threadList = append(m.threadList, t)
 	sort.Slice(m.threadList, func(i, j int) bool { return m.threadList[i].ID < m.threadList[j].ID })
-
-	mem := m.Mem
-	mem.Fill(addr, 0, osThreadSize)
-	mem.Write32(addr+osThreadTag, 0x74487244) // "tHrD"
-	mem.Write16(addr+osThreadID, uint16(t.ID))
-	mem.Write8(addr+osThreadAttr, uint8(attr))
-	mem.Write32(addr+osThreadStackHi, stackTop)
-	mem.Write32(addr+osThreadStackLo, stackTop-stackSize)
-	mem.Write32(addr+osThreadEntry, entry)
-	m.syncThread(t)
-	return t
 }
 
-// syncThread writes the thread's state into the program's OSThread.
-func (m *Machine) syncThread(t *Thread) {
-	mem := m.Mem
-	var st uint8
-	switch t.State {
-	case thReady:
-		st = 1
-		if m.running == t {
-			st = 2
-		}
-	case thWaiting:
-		st = 4
-	case thSuspended, thDormant:
-		st = 0
-		if t.State == thSuspended && t.Ctx.PC != 0 {
-			st = 1 // ready but suspended
-		}
-	case thDone:
-		st = 8
-	}
-	mem.Write8(t.Addr+osThreadState, st)
-	mem.Write32(t.Addr+osThreadSuspend, uint32(t.Suspend))
-	mem.Write32(t.Addr+osThreadPriority, uint32(t.Priority))
-	mem.Write32(t.Addr+osThreadBasePrio, uint32(t.Priority))
-	mem.Write32(t.Addr+osThreadExit, t.Exit)
-	mem.Write32(t.Addr+osThreadName, t.Name)
-}
-
+// removeThread takes t out of the scheduler's list (it stays known by its
+// address until another thread is made there).
 func (m *Machine) removeThread(t *Thread) {
-	delete(m.threads, t.Addr)
 	for i, x := range m.threadList {
 		if x == t {
 			m.threadList = append(m.threadList[:i], m.threadList[i+1:]...)
@@ -248,32 +215,16 @@ func (m *Machine) removeThread(t *Thread) {
 	}
 }
 
-// exitThread ends t with value v.
-func (m *Machine) exitThread(t *Thread, v uint32) {
-	t.State = thDone
-	t.Exit = v
-	t.WaitKey = 0
-	m.syncThread(t)
-	m.wake(keyJoin | uint64(t.Addr))
-	// release mutexes it still holds (the OS does this too)
-	for _, mx := range m.heldMutexes(t) {
-		m.Mem.Write32(mx+0x1c, 0)
-		m.Mem.Write32(mx+0x20, 0)
-		m.wake(keyMutex | uint64(mx))
-	}
-	if t == m.mainThread {
-		m.exitProgram(v)
-	}
-	if t.Attr&attrDetached != 0 && t.Dealloc == 0 {
-		m.removeThread(t)
-	}
+// runnable: t may run on core now.
+func (t *Thread) runnable(core int) bool {
+	return t.State == thReady && t.Suspend == 0 && t.Affinity&(1<<core) != 0
 }
 
 // pick chooses the thread core c runs next.
 func (m *Machine) pick(core int) *Thread {
 	var best *Thread
 	for _, t := range m.threadList {
-		if t.State != thReady || t.Affinity&(1<<core) == 0 {
+		if !t.runnable(core) {
 			continue
 		}
 		busy := false
@@ -297,13 +248,13 @@ func (m *Machine) pick(core int) *Thread {
 func (m *Machine) wakeTimers() {
 	for _, t := range m.threadList {
 		if t.State == thWaiting && t.WakeAt != 0 && m.tb >= t.WakeAt {
-			t.State = thReady
-			t.TimedOut = t.WaitKey != 0
-			t.WaitKey = 0
-			t.WakeAt = 0
+			timedOut := t.WaitKey != 0
+			m.ready(t)
+			t.TimedOut = timedOut
 		}
 	}
 	m.runAlarms()
+	m.audioTick()
 }
 
 // nextTimer is the earliest time a sleeping thread or alarm wakes (0 = none).
@@ -317,17 +268,8 @@ func (m *Machine) nextTimer() uint64 {
 	if a := m.nextAlarm(); a != 0 && (next == 0 || a < next) {
 		next = a
 	}
-	return next
-}
-
-// heldMutexes lists the mutexes t owns.
-func (m *Machine) heldMutexes(t *Thread) []uint32 {
-	var out []uint32
-	for a := range m.mutexes {
-		if m.Mem.Read32(a+0x1c) == t.Addr && m.Mem.Read32(a) == 0x6d557458 {
-			out = append(out, a)
-		}
+	if a := m.nextAudio(); a != 0 && (next == 0 || a < next) {
+		next = a
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
+	return next
 }

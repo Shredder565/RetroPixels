@@ -1,26 +1,15 @@
 package wiiu
 
 // coreinit: the core of Cafe OS that every program links with. This file has
-// startup and exit, the console, time, system information, atomics, the
-// dynamic loader and memory functions; coreinit_thread.go has threads and
-// synchronisation, and heaps.go the heaps behind the MEM* functions.
+// startup and exit, the console, time, atomics, the dynamic loader and memory
+// functions; coreinit_threads.go has threads, coreinit_sync.go
+// synchronisation, coreinit_alarm.go alarms, coreinit_sysinfo.go system
+// information and mem_*.go the heaps behind the MEM* functions.
 
 import (
 	"math/bits"
 	"time"
 )
-
-// the OSSystemInfo the program reads clock speeds from
-var systemInfoAddr uint32
-
-func (m *Machine) initSystemData() {
-	systemInfoAddr = m.sysAlloc(0x20, 32)
-	mem := m.Mem
-	mem.Write32(systemInfoAddr+0, BusHz)
-	mem.Write32(systemInfoAddr+4, CoreHz)
-	mem.Write64(systemInfoAddr+8, 0) // base time
-	m.bootTime = osTicksSince2000(time.Now())
-}
 
 // osTicksSince2000: Cafe OS time counts timer ticks from 2000-01-01.
 func osTicksSince2000(t time.Time) uint64 {
@@ -31,14 +20,15 @@ func osTicksSince2000(t time.Time) uint64 {
 func init() {
 	c := "coreinit"
 
-	// startup: the RPLs' entry points, then the program's
+	// startup: the heaps (and __preinit_user), the RPLs' entry points, then
+	// the program's
 	reg(c, "__RPStartup", func(m *Machine, cpu *CPU, t *Thread) {
-		for m.startStep < len(m.Modules)-1 {
-			mod := m.Modules[1+m.startStep]
-			m.startStep++
-			if mod.Entry == 0 {
-				continue
-			}
+		if !m.heaps.started {
+			cpu.LR = m.thunk("coreinit", "__RPStartup")
+			m.startHeaps(cpu, t)
+			return
+		}
+		if mod := m.nextInit(); mod != nil {
 			cpu.GPR[3] = m.moduleHandle(mod.Name)
 			cpu.GPR[4] = 1 // loading
 			cpu.LR = m.thunk("coreinit", "__RPStartup")
@@ -55,10 +45,6 @@ func init() {
 		cpu.LR = m.thunk("coreinit", "exit")
 		cpu.PC = main.Entry
 		m.jumped = true
-	})
-	reg(c, "__RPThreadReturn", func(m *Machine, cpu *CPU, t *Thread) {
-		m.exitThread(t, cpu.GPR[3])
-		t.yield()
 	})
 	exit := func(m *Machine, cpu *CPU, t *Thread) {
 		m.exitProgram(arg(cpu, 0))
@@ -131,7 +117,6 @@ func init() {
 	reg(c, "OSGetSystemTime", func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, m.Time()) })
 	reg(c, "OSGetTick", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(m.bootTime+m.Time())) })
 	reg(c, "OSGetSystemTick", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(m.Time())) })
-	reg(c, "OSGetSystemInfo", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, systemInfoAddr) })
 	reg(c, "OSTicksToCalendarTime", func(m *Machine, cpu *CPU, t *Thread) {
 		ticks := int64(arg64(cpu, 0))
 		out := arg(cpu, 2)
@@ -189,34 +174,6 @@ func init() {
 		m.Mem.Write32(arg(cpu, 1), m.argv)
 		ret(cpu, 1)
 	})
-	reg(c, "OSGetSharedData", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(c, "OSGetMemBound", func(m *Machine, cpu *CPU, t *Thread) {
-		var a, n uint32
-		switch arg(cpu, 0) {
-		case 1:
-			a, n = MEM1Base, MEM1Size
-		case 2:
-			hp := m.heaps.get(m.heaps.Base[arenaMEM2])
-			a, n = hp.Start, hp.Hi-hp.Start
-		default:
-			ret(cpu, 0xffffffff)
-			return
-		}
-		m.Mem.Write32(arg(cpu, 1), a)
-		m.Mem.Write32(arg(cpu, 2), n)
-		ret(cpu, 0)
-	})
-	fg := func(m *Machine, cpu *CPU, t *Thread) {
-		if a := arg(cpu, 0); a != 0 {
-			m.Mem.Write32(a, FGBase)
-		}
-		if a := arg(cpu, 1); a != 0 {
-			m.Mem.Write32(a, FGSize)
-		}
-		ret(cpu, 1)
-	}
-	reg(c, "OSGetForegroundBucket", fg)
-	reg(c, "OSGetForegroundBucketFreeArea", fg)
 	reg(c, "OSEffectiveToPhysical", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toPhysical(arg(cpu, 0))) })
 	reg(c, "OSPhysicalToEffectiveCached", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toEffective(arg(cpu, 0))) })
 	reg(c, "OSPhysicalToEffectiveUncached", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toEffective(arg(cpu, 0))) })
@@ -225,24 +182,13 @@ func init() {
 		retBool(cpu, m.Mem.Mapped(arg(cpu, 1)) && m.Mem.Mapped(arg(cpu, 1)+arg(cpu, 2)-1))
 	})
 
-	// interrupts (nothing interrupts a library call here)
-	reg(c, "OSDisableInterrupts", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, b2u(!m.intsOff[cpu.Core])); m.intsOff[cpu.Core] = true })
-	reg(c, "OSEnableInterrupts", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, b2u(!m.intsOff[cpu.Core]))
-		m.intsOff[cpu.Core] = false
-	})
-	reg(c, "OSRestoreInterrupts", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, b2u(!m.intsOff[cpu.Core]))
-		m.intsOff[cpu.Core] = arg(cpu, 0) == 0
-	})
-	reg(c, "OSIsInterruptEnabled", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, !m.intsOff[cpu.Core]) })
-
 	// cache and barriers (memory is always coherent here)
 	for _, n := range []string{"DCFlushRange", "DCFlushRangeNoSync", "DCStoreRange", "DCStoreRangeNoSync",
-		"DCInvalidateRange", "DCTouchRange", "ICInvalidateRange", "OSMemoryBarrier", "OSCoherencyBarrier",
+		"DCInvalidateRange", "DCTouchRange", "OSMemoryBarrier", "OSCoherencyBarrier",
 		"OSEnforceInorderIO", "DCFlushAll", "DCInvalidateAll"} {
 		reg(c, n, func(m *Machine, cpu *CPU, t *Thread) {})
 	}
+	reg(c, "ICInvalidateRange", func(m *Machine, cpu *CPU, t *Thread) { m.Mem.InvalidateCode(arg(cpu, 0), arg(cpu, 1)) })
 	reg(c, "DCZeroRange", func(m *Machine, cpu *CPU, t *Thread) {
 		a, n := arg(cpu, 0), arg(cpu, 1)
 		start := a &^ 31
@@ -380,6 +326,29 @@ func init() {
 			return
 		}
 		ret(cpu, 0)
+		// libraries loaded now run their entry points before the call returns
+		if len(m.initQueue) > 0 && t != nil {
+			if m.dynReturn == nil {
+				m.dynReturn = map[*Thread]uint32{}
+			}
+			m.dynReturn[t] = cpu.LR
+			cpu.PC = m.thunk("coreinit", "__RPDynLoadInit")
+			m.jumped = true
+		}
+	})
+	reg(c, "__RPDynLoadInit", func(m *Machine, cpu *CPU, t *Thread) {
+		if mod := m.nextInit(); mod != nil {
+			cpu.GPR[3] = m.moduleHandle(mod.Name)
+			cpu.GPR[4] = 1 // loading
+			cpu.LR = m.thunk("coreinit", "__RPDynLoadInit")
+			cpu.PC = mod.Entry
+			m.jumped = true
+			return
+		}
+		ret(cpu, 0)
+		cpu.PC = m.dynReturn[t]
+		delete(m.dynReturn, t)
+		m.jumped = true
 	})
 	reg(c, "OSDynLoad_AcquireContainingModule", func(m *Machine, cpu *CPU, t *Thread) {
 		addr := arg(cpu, 0)
@@ -603,11 +572,10 @@ func (m *Machine) acquireModule(name string) (uint32, uint32) {
 		return m.moduleHandle(lib), 0
 	}
 	// one of the title's own RPLs, loaded now
-	if b, err := m.Files.ReadCode(lib + ".rpl"); err == nil {
-		if _, err := m.loadModule(b, lib+".rpl", true); err != nil {
-			m.logf("couldn't load %s.rpl: %v", lib, err)
-			return 0, 0xbad10001
-		}
+	if mod, err := m.titleLibrary(lib); err != nil {
+		m.logf("%v", err)
+		return 0, 0xbad10001
+	} else if mod != nil {
 		return m.moduleHandle(lib), 0
 	}
 	m.logf("the program asked for the library %s, which RetroPixels doesn't have", name)
@@ -651,7 +619,7 @@ func (m *Machine) threadBlock(t *Thread, what string, size uint32) uint32 {
 	if a, ok := m.perThread[key]; ok {
 		return a
 	}
-	a := m.heaps.allocSystem(m, size, 16)
+	a := m.allocSystem(size, 16)
 	m.Mem.Fill(a, 0, size)
 	if m.perThread == nil {
 		m.perThread = map[string]uint32{}
@@ -676,7 +644,7 @@ func (m *Machine) tlsBlock(t *Thread, index uint32) uint32 {
 	if mod != nil && mod.TLSSize > 0 {
 		size = mod.TLSSize
 	}
-	a := m.heaps.allocSystem(m, size, 64)
+	a := m.allocSystem(size, 64)
 	m.Mem.Fill(a, 0, size)
 	if mod != nil && mod.TLSSize > 0 {
 		m.Mem.Move(a, mod.TLSAddr, mod.TLSSize)

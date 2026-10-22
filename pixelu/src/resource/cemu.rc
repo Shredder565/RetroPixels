@@ -1,0 +1,64 @@
+// Original resource script for RetroPixels (PixelU). Not derived from Cemu.
+// Windows resources of the PixelU executable: window icons, the version
+// block Explorer shows, and the icon font. The names and numbers are the ones
+// the code loads (resource.h, wxICON(...) in the wxWidgets windows).
+
+#include <winresrc.h>
+#include "resource/resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+// ---- icons ----
+// M_WND_ICON128 sorts first, so it is also the icon of PixelU.exe itself.
+M_WND_ICON128       ICON    "resource/pixelu.ico"
+M_WND_ICON16        ICON    "resource/pixelu16.ico"
+
+// Icons8 pictures for the other windows (see pixelu/THIRD_PARTY.md)
+X_INPUT_CONTROLLER  ICON    "resource/input/icons8-game-controller-24.ico"
+X_BOX               ICON    "resource/icons8_cardboard_box_filled.ico"
+X_SETTINGS          ICON    "resource/icons8_automatic_26_xQK_icon.ico"
+X_GAME_PROFILE      ICON    "resource/icons8-compose-filled-50.ico"
+X_HOTKEY_SETTINGS   ICON    "resource/icons8_hotkeys.ico"
+
+// ---- icon font for the imgui overlay (loaded by id) ----
+IDR_FONTAWESOME     RCDATA  "resource/fontawesome-webfont.ttf"
+
+// ---- version information ----
+#define PIXELU_RC_STR2(x) #x
+#define PIXELU_RC_STR(x) PIXELU_RC_STR2(x)
+#define PIXELU_RC_VERSION PIXELU_RC_STR(EMULATOR_VERSION_MAJOR) "." PIXELU_RC_STR(EMULATOR_VERSION_MINOR) "." PIXELU_RC_STR(EMULATOR_VERSION_PATCH) EMULATOR_VERSION_SUFFIX
+
+#ifdef _DEBUG
+#define PIXELU_RC_FLAGS VS_FF_DEBUG
+#else
+#define PIXELU_RC_FLAGS 0
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION     EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH, 0
+    PRODUCTVERSION  EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH, 0
+    FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+    FILEFLAGS       PIXELU_RC_FLAGS
+    FILEOS          VOS_NT_WINDOWS32
+    FILETYPE        VFT_APP
+    FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0" // U.S. English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "RetroPixels"
+            VALUE "FileDescription",  "PixelU - Wii U emulator for RetroPixels"
+            VALUE "FileVersion",      PIXELU_RC_VERSION
+            VALUE "InternalName",     "PixelU"
+            VALUE "LegalCopyright",   "RetroPixels project"
+            VALUE "OriginalFilename", "PixelU.exe"
+            VALUE "ProductName",      "PixelU"
+            VALUE "ProductVersion",   PIXELU_RC_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

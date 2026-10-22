@@ -74,9 +74,36 @@ type Module struct {
 	TextHi   uint32
 	DataLo   uint32
 	DataHi   uint32
+	LoadHi   uint32 // the end of its loader sections (at LoaderBase and up)
 	TLSAddr  uint32 // the TLS template
 	TLSSize  uint32
 	TLSIndex uint32
+
+	// room after the code for trampolines: far calls to imports go
+	// through one (a branch reaches only 32 MB)
+	trampNext, trampEnd uint32
+	tramps              map[uint32]uint32 // by target
+}
+
+// tramp returns a trampoline to target in the module's own room, or 0.
+func (mod *Module) tramp(mem *Memory, target uint32) uint32 {
+	if a, ok := mod.tramps[target]; ok {
+		return a
+	}
+	if mod.trampNext+16 > mod.trampEnd {
+		return 0
+	}
+	a := mod.trampNext
+	mod.trampNext += 16
+	mem.Write32(a, 0x3d800000|(target>>16))      // lis r12, hi
+	mem.Write32(a+4, 0x618c0000|(target&0xffff)) // ori r12, r12, lo
+	mem.Write32(a+8, 0x7d8903a6)                 // mtctr r12
+	mem.Write32(a+12, 0x4e800420)                // bctr
+	if mod.tramps == nil {
+		mod.tramps = map[uint32]uint32{}
+	}
+	mod.tramps[target] = a
+	return a
 }
 
 // Symbol is a named address in a module.
@@ -100,6 +127,13 @@ type LoadPlan struct {
 	TextAt   uint32
 	DataAt   uint32
 	LoadAt   uint32
+	// DataAlloc, when set, gives the memory for the data instead of DataAt
+	// (0 if there's none).
+	DataAlloc func(size uint32) uint32
+	// Placed, when set, is told about the module once its sections are in
+	// memory and its exports known, before its imports are resolved (which
+	// can load other modules, and they must go after this one).
+	Placed func(mod *Module)
 }
 
 func be32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
@@ -240,6 +274,17 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 			textBase = min(textBase, s.addr)
 		}
 	}
+	if plan.Relocate && plan.DataAlloc != nil && dataBase != ^uint32(0) {
+		var dataEnd uint32
+		for _, s := range secs {
+			if s.flags&shfAlloc != 0 && s.addr >= DataBase && s.addr < LoaderBase && s.typ != shtImports {
+				dataEnd = max(dataEnd, s.addr+s.size)
+			}
+		}
+		if plan.DataAt = plan.DataAlloc(dataEnd - dataBase); plan.DataAt == 0 {
+			return nil, fmt.Errorf("no memory for %s's data (%d KB)", name, (dataEnd-dataBase)>>10)
+		}
+	}
 	mod.TextLo, mod.DataLo = ^uint32(0), ^uint32(0)
 	for _, s := range secs {
 		if s.flags&shfAlloc == 0 || s.addr == 0 || s.typ == shtImports {
@@ -266,6 +311,7 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		end := s.newAddr + s.size
 		switch {
 		case s.addr >= LoaderBase:
+			mod.LoadHi = max(mod.LoadHi, end)
 		case s.addr >= DataBase:
 			mod.DataLo = min(mod.DataLo, s.newAddr)
 			mod.DataHi = max(mod.DataHi, end)
@@ -282,6 +328,23 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 	}
 	if mod.TextLo == ^uint32(0) {
 		mod.TextLo, mod.TextHi = 0, 0
+	} else {
+		// room for a trampoline per imported function, after the code
+		n := uint32(0)
+		for _, s := range secs {
+			if s.typ != shtSymtab || s.data == nil {
+				continue
+			}
+			for o := 0; o+16 <= len(s.data); o += 16 {
+				if x := int(be16(s.data[o+14:])); x > 0 && x < len(secs) && secs[x].typ == shtImports && secs[x].flags&shfExec != 0 {
+					n++
+				}
+			}
+		}
+		mod.trampNext = (mod.TextHi + 15) &^ 15
+		mod.trampEnd = mod.trampNext + n*16
+		mem.Fill(mod.trampNext, 0, n*16)
+		mod.TextHi = mod.trampEnd
 	}
 	if mod.DataLo == ^uint32(0) {
 		mod.DataLo, mod.DataHi = 0, 0
@@ -306,6 +369,23 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		if mod.Info.SDA2Base != 0 {
 			mod.Info.SDA2Base = moved(mod.Info.SDA2Base)
 		}
+	}
+
+	// exports
+	for _, s := range secs {
+		if s.typ != shtExports || len(s.data) < 8 {
+			continue
+		}
+		n := be32(s.data)
+		for k := uint32(0); k < n && 8+k*8+8 <= uint32(len(s.data)); k++ {
+			e := s.data[8+k*8:]
+			addr, noff := be32(e), be32(e[4:])&0x7fffffff
+			mod.Exports[cstr(s.data, noff)] = moved(addr)
+		}
+	}
+
+	if plan.Placed != nil {
+		plan.Placed(mod)
 	}
 
 	// imports
@@ -360,7 +440,9 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 			case y.shndx == shnAbs || int(y.shndx) >= len(secs):
 			default:
 				ts := secs[y.shndx]
-				if ts.typ == shtImports {
+				if ts.typ == shtImports && y.name == "" {
+					v = 0 // the section's own symbol
+				} else if ts.typ == shtImports {
 					a, err := imp.Import(ts.importLib, y.name, ts.importData)
 					if err != nil {
 						importErrs = append(importErrs, err.Error())
@@ -381,19 +463,6 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		return nil, errors.New(strings.Join(importErrs, "; "))
 	}
 	sort.Slice(mod.Symbols, func(i, j int) bool { return mod.Symbols[i].Addr < mod.Symbols[j].Addr })
-
-	// exports
-	for _, s := range secs {
-		if s.typ != shtExports || len(s.data) < 8 {
-			continue
-		}
-		n := be32(s.data)
-		for k := uint32(0); k < n && 8+k*8+8 <= uint32(len(s.data)); k++ {
-			e := s.data[8+k*8:]
-			addr, noff := be32(e), be32(e[4:])&0x7fffffff
-			mod.Exports[cstr(s.data, noff)] = moved(addr)
-		}
-	}
 
 	// relocations
 	for _, s := range secs {
@@ -446,10 +515,13 @@ func relocate(mem *Memory, mod *Module, typ, P, S, A uint32, tramp func(uint32) 
 	case 10: // REL24
 		d := int64(int32(v - P))
 		if d < -0x2000000 || d >= 0x2000000 {
-			if tramp == nil {
+			if tramp == nil && mod.trampEnd == 0 {
 				return fmt.Errorf("branch from %08X to %08X is out of range", P, v)
 			}
-			t := tramp(v)
+			t := mod.tramp(mem, v)
+			if (t == 0 || int64(int32(t-P)) < -0x2000000 || int64(int32(t-P)) >= 0x2000000) && tramp != nil {
+				t = tramp(v)
+			}
 			d = int64(int32(t - P))
 			if d < -0x2000000 || d >= 0x2000000 {
 				return fmt.Errorf("branch from %08X to %08X is out of range", P, v)

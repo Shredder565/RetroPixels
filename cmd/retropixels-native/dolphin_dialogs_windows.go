@@ -1,11 +1,13 @@
 package main
 
-// The "Dolphin settings" window: the Dolphin settings RetroPixels.exe offers
-// (graphics API, resolution, aspect ratio...), read from and written to
-// Dolphin's own files. Dolphin must be closed to change them: it writes its
-// own settings when it closes.
+// The "PixelU settings (Wii/GameCube)" window: the settings RetroPixels.exe
+// offers (graphics API, resolution, aspect ratio...), read from and written
+// to the engine's own files (Dolphin's, in PixelU\wii\User\Config). The
+// engine must be closed to change them: it writes its own settings when it
+// closes.
 
 import (
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -27,13 +29,14 @@ var (
 )
 
 type dolSettingsDlg struct {
-	a      *app
-	hwnd   uintptr
-	user   string
-	values map[string]string
-	extra  map[string]string // a value set in Dolphin itself that isn't one of the choices
-	ctls   []uintptr
-	locked bool
+	a       *app
+	hwnd    uintptr
+	user    string
+	values  map[string]string
+	extra   map[string]string // a value set in PixelU itself that isn't one of the choices
+	exeName string            // the engine's file name, to tell whether it's open
+	ctls    []uintptr
+	locked  bool
 }
 
 func (a *app) dolSettingsHwnd() uintptr {
@@ -56,10 +59,16 @@ func (a *app) openDolSettings() {
 		call(pRegisterClassExW, uintptr(unsafe.Pointer(&wc)))
 		dolSetClassDone = true
 	}
-	exe := a.settings.Dolphin.exe()
+	exe := a.dolExe()
+	if exe == "" {
+		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+		return
+	}
+	a.settings.Dolphin.importOld(exe) // the old Dolphin's settings first, the first time
 	d := &dolSettingsDlg{a: a, user: dolphin.UserDir(exe), extra: map[string]string{}}
 	d.values = dolphin.ReadSettings(d.user)
-	d.locked = a.dol.run != nil || dolphin.Running("Dolphin.exe")
+	d.exeName = filepath.Base(exe)
+	d.locked = a.dol.run != nil || dolphin.Running(d.exeName)
 	a.dol.sdlg = d
 	owner := a.hwnd
 	if a.dol.lib != nil {
@@ -76,7 +85,7 @@ func (a *app) openDolSettings() {
 	if y < 0 {
 		y = 0
 	}
-	d.hwnd = call(pCreateWindowExW, wsExDlgModalFrame|wsExControlParent, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(u16("Dolphin settings"))),
+	d.hwnd = call(pCreateWindowExW, wsExDlgModalFrame|wsExControlParent, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(u16("PixelU settings (Wii/GameCube)"))),
 		wsPopup|wsCaption|wsSysMenu|wsVisible|wsClipChildren, uintptr(x), uintptr(y), uintptr(w), uintptr(h), owner, 0, a.hinst, 0)
 	d.build()
 }
@@ -92,10 +101,10 @@ func (d *dolSettingsDlg) child(class, text string, style uint32, x, y, w, h, id 
 
 func (d *dolSettingsDlg) build() {
 	y := 14
-	top := "Dolphin's own settings, used for every game. Memory cards, cheats and per-game settings " +
-		"are in Dolphin itself (GameCube / Wii > Open Dolphin).\nSaved in " + d.user + "\\Config"
+	top := "PixelU's Wii/GameCube settings (engine based on Dolphin), used for every game. Memory cards, cheats and per-game settings " +
+		"are in PixelU itself (GameCube / Wii > Open PixelU).\nSaved in " + d.user + "\\Config"
 	if d.locked {
-		top = "Dolphin is open. Close it first: it saves its own settings when it closes."
+		top = "PixelU (Wii/GameCube) is open. Close it first: it saves its own settings when it closes."
 	}
 	d.child("STATIC", top, ssNoPrefix, 16, y, 556, 72, 0)
 	y += 80
@@ -119,7 +128,7 @@ func (d *dolSettingsDlg) build() {
 			}
 			if sel < 0 {
 				d.extra[s.ID] = cur
-				call(pSendMessageW, c, cbAddString, 0, uintptr(unsafe.Pointer(u16(cur+" (set in Dolphin)"))))
+				call(pSendMessageW, c, cbAddString, 0, uintptr(unsafe.Pointer(u16(cur+" (set in PixelU)"))))
 				sel = len(s.Options)
 			}
 			call(pSendMessageW, c, cbSetCurSel, uintptr(sel), 0)
@@ -147,8 +156,8 @@ func (d *dolSettingsDlg) build() {
 
 // save writes what changed.
 func (d *dolSettingsDlg) save() bool {
-	if d.a.dol.run != nil || dolphin.Running("Dolphin.exe") {
-		messageBox(d.hwnd, "Dolphin is open. Close it first: it saves its own settings when it closes.", "Dolphin settings", mbIconInfo)
+	if d.a.dol.run != nil || dolphin.Running(d.exeName) {
+		messageBox(d.hwnd, "PixelU (Wii/GameCube) is open. Close it first: it saves its own settings when it closes.", "PixelU settings", mbIconInfo)
 		return false
 	}
 	changes := map[string]string{}
@@ -177,10 +186,10 @@ func (d *dolSettingsDlg) save() bool {
 		return true
 	}
 	if err := dolphin.SaveSettings(d.user, changes); err != nil {
-		messageBox(d.hwnd, "Couldn't save Dolphin's settings: "+err.Error(), "Dolphin settings", mbIconWarning)
+		messageBox(d.hwnd, "Couldn't save PixelU's settings: "+err.Error(), "PixelU settings", mbIconWarning)
 		return false
 	}
-	d.a.showMessage("Dolphin settings saved")
+	d.a.showMessage("PixelU settings saved")
 	return true
 }
 

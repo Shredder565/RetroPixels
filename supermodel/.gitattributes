@@ -1,0 +1,2 @@
+# The patches keep upstream's Windows line endings byte for byte.
+*.patch -text

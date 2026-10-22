@@ -1,0 +1,1081 @@
+//go:build windows
+
+package wiiu
+
+// The Direct3D 11 backend: draws run on the host GPU with the shaders
+// latte_dxbc.go translates. Render targets and depth buffers live in host
+// textures while the GPU uses them, and go back to guest memory (tiled, in
+// the guest's format) when anything else reads that memory. Textures,
+// vertex buffers and constants are copied from guest memory as draws use
+// them, and kept until the memory is invalidated.
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"hash/maphash"
+	"slices"
+	"unsafe"
+
+	"retropixels/wiiu/d3d"
+)
+
+type d3dBackend struct {
+	g *Latte
+	d *d3d.Device
+	c d3d.Context
+
+	surfs   []*hostSurf
+	scanBuf []uint32  // scanPixels' result, reused
+	scanOf  *hostSurf // the surface scanBuf holds
+	texs    map[hostTexKey]*hostTex
+	bufs    map[[2]uint32]*hostBuf // vertex buffers and constant banks by (base, size)
+	shaders map[shaderKey][]*hostShader
+	states  map[string]d3d.Object
+	rectGSs map[int]d3d.Object // rectangle geometry shaders by parameter count
+
+	sysCB, fileCB [2]d3d.Resource // per stage (VS, PS)
+	ib            d3d.Resource
+	ibSize        int
+	ibOff, ibAt   int      // the ring's end, and where the last list starts
+	ibLast        []uint32 // the last index list uploaded
+	seed          maphash.Seed
+	err           string // why the last draw fell back
+	bound         d3dBound
+}
+
+// d3dBound is what's bound on the context, so draws only change what
+// differs (every call costs).
+type d3dBound struct {
+	vs, gs, ps         uintptr
+	blend, depth, rast uintptr
+	factor             [4]float32
+	ref                uint32
+	vp                 d3d.Viewport
+	sc                 d3d.Rect
+	rtvs               []uintptr
+	dsv                uintptr
+	topo               uint32
+	ib                 uintptr
+	cbs, srvs, samps   [2][]uintptr // per stage (VS, PS)
+	sys, file          [2][]byte    // the system and constant-file blocks last uploaded
+}
+
+// ptrs gives the objects' pointers.
+func ptrs[T interface{ Ptr() uintptr }](objs []T) []uintptr {
+	out := make([]uintptr, len(objs))
+	for i, o := range objs {
+		out[i] = o.Ptr()
+	}
+	return out
+}
+
+// newD3DBackend makes the backend on a new device (WARP if warp is set).
+func newD3DBackend(g *Latte, warp bool) (*d3dBackend, error) {
+	d, err := d3d.NewDevice(warp)
+	if err != nil {
+		return nil, err
+	}
+	b := &d3dBackend{g: g, d: d, c: d.Ctx, texs: map[hostTexKey]*hostTex{}, bufs: map[[2]uint32]*hostBuf{},
+		shaders: map[shaderKey][]*hostShader{}, states: map[string]d3d.Object{}, rectGSs: map[int]d3d.Object{}, seed: maphash.MakeSeed()}
+	for i := 0; i < 2; i++ {
+		if b.sysCB[i], err = b.dynBuffer(dxSysSize*16, d3d.BindConstantBuffer); err != nil {
+			return nil, err
+		}
+		if b.fileCB[i], err = b.dynBuffer(256*16, d3d.BindConstantBuffer); err != nil {
+			return nil, err
+		}
+	}
+	return b, nil
+}
+
+func (b *d3dBackend) dynBuffer(size int, bind uint32) (d3d.Resource, error) {
+	return b.d.CreateBuffer(&d3d.BufferDesc{ByteWidth: uint32(size), Usage: d3d.UsageDynamic, BindFlags: bind,
+		CPUAccess: d3d.CPUWrite}, nil)
+}
+
+// upload copies data into a dynamic buffer.
+func (b *d3dBackend) upload(r d3d.Resource, data []byte) {
+	m, err := b.c.Map(r, 0, d3d.MapWriteDiscard)
+	if err != nil {
+		return
+	}
+	copy(m.Bytes(len(data)), data)
+	b.c.Unmap(r, 0)
+}
+
+func (b *d3dBackend) close() {
+	b.flushAll()
+	for _, s := range b.surfs {
+		s.release()
+	}
+	for _, t := range b.texs {
+		t.release()
+	}
+	for _, v := range b.bufs {
+		v.release()
+	}
+	for _, l := range b.shaders {
+		for _, s := range l {
+			s.obj.Release()
+		}
+	}
+	for _, o := range b.states {
+		o.Release()
+	}
+	for _, o := range b.rectGSs {
+		o.Release()
+	}
+	for i := 0; i < 2; i++ {
+		b.sysCB[i].Release()
+		b.fileCB[i].Release()
+	}
+	b.ib.Release()
+	b.d.Close()
+}
+
+// ---- surfaces ----
+
+// hostSurf is one slice of a colour or depth buffer, held in a host
+// texture.
+type hostSurf struct {
+	depth   bool
+	lay     surfLayout
+	format  uint32 // colour format, or DB_DEPTH_INFO.FORMAT
+	kind    numKind
+	slice   uint32
+	lo, hi  uint32
+	w, h    uint32
+	hostFmt uint32
+	tex     d3d.Resource
+	staging d3d.Resource
+	view    d3d.View // render target or depth stencil view
+	dirty   bool     // the host has drawn into it since it was written back
+	scanned bool     // scanBuf holds it as it is now
+}
+
+func (s *hostSurf) release() {
+	s.view.Release()
+	s.tex.Release()
+	s.staging.Release()
+}
+
+func (s *hostSurf) same(depth bool, lay *surfLayout, format uint32, kind numKind, slice uint32) bool {
+	return s.depth == depth && s.lay == *lay && s.format == format && s.kind == kind && s.slice == slice
+}
+
+// surface gives the host copy of a surface, making it from guest memory
+// (and dropping copies it overlaps) if needed.
+func (b *d3dBackend) surface(depth bool, lay *surfLayout, format uint32, kind numKind, slice uint32) (*hostSurf, error) {
+	lo, hi := surfRange(lay, slice)
+	for _, s := range b.surfs {
+		if s.same(depth, lay, format, kind, slice) {
+			return s, nil
+		}
+	}
+	b.flush(lo, hi)
+	b.dropSurfs(lo, hi)
+	b.dropTextures(lo, hi)
+	s := &hostSurf{depth: depth, lay: *lay, format: format, kind: kind, slice: slice, lo: lo, hi: hi,
+		w: lay.Pitch, h: lay.Height}
+	var err error
+	if depth {
+		texFmt, dsvFmt, _, _ := hostDepthFormats(format)
+		s.hostFmt = texFmt
+		s.tex, err = b.d.CreateTexture2D(&d3d.Texture2DDesc{Width: s.w, Height: s.h, MipLevels: 1, ArraySize: 1,
+			Format: texFmt, SampleCount: 1, BindFlags: d3d.BindDepthStencil}, nil, 0)
+		if err == nil {
+			s.view, err = b.d.CreateDSV(s.tex, dsvFmt)
+		}
+	} else {
+		s.hostFmt = hostColorFormat(format, kind)
+		s.tex, err = b.d.CreateTexture2D(&d3d.Texture2DDesc{Width: s.w, Height: s.h, MipLevels: 1, ArraySize: 1,
+			Format: s.hostFmt, SampleCount: 1, BindFlags: d3d.BindRenderTarget | d3d.BindShaderResource}, nil, 0)
+		if err == nil {
+			s.view, err = b.d.CreateRTV(s.tex, s.hostFmt)
+		}
+	}
+	if err == nil {
+		s.staging, err = b.d.CreateTexture2D(&d3d.Texture2DDesc{Width: s.w, Height: s.h, MipLevels: 1, ArraySize: 1,
+			Format: s.hostFmt, SampleCount: 1, Usage: d3d.UsageStaging, CPUAccess: d3d.CPURead | d3d.CPUWrite}, nil, 0)
+	}
+	if err != nil {
+		s.release()
+		return nil, err
+	}
+	if err := b.load(s); err != nil {
+		s.release()
+		return nil, err
+	}
+	b.surfs = append(b.surfs, s)
+	return s, nil
+}
+
+// load copies a surface from guest memory to the host.
+func (b *d3dBackend) load(s *hostSurf) error {
+	g := b.g
+	m, err := b.c.Map(s.staging, 0, d3d.MapReadWrite)
+	if err != nil {
+		return err
+	}
+	data := m.Bytes(int(m.RowPitch) * int(s.h))
+	addrs := make([]uint32, s.w)
+	buf := make([]byte, 16)
+	if s.depth {
+		_, _, _, pb := hostDepthFormats(s.format)
+		db := dbDesc{lay: s.lay, format: s.format, slice: s.slice, ok: true}
+		for y := uint32(0); y < s.h; y++ {
+			s.lay.rowAddrs(0, y, s.slice, addrs)
+			row := data[y*m.RowPitch:]
+			for x, a := range addrs {
+				z, st := g.readDepth(&db, a)
+				hostDepthEncode(s.format, z, st, row[x*pb:])
+			}
+		}
+	} else {
+		pb := hostPixelBytes(s.hostFmt)
+		n := fmtBytes(s.format)
+		for y := uint32(0); y < s.h; y++ {
+			s.lay.rowAddrs(0, y, s.slice, addrs)
+			row := data[y*m.RowPitch:]
+			for x, a := range addrs {
+				v := g.readElem(&s.lay, s.format, s.kind, a, buf[:n])
+				hostEncode(s.hostFmt, v, row[x*pb:])
+			}
+		}
+	}
+	b.c.Unmap(s.staging, 0)
+	b.c.CopyResource(s.tex, s.staging)
+	return nil
+}
+
+// store writes a surface back to guest memory.
+func (b *d3dBackend) store(s *hostSurf) {
+	g := b.g
+	b.c.CopyResource(s.staging, s.tex)
+	m, err := b.c.Map(s.staging, 0, d3d.MapRead)
+	if err != nil {
+		return
+	}
+	data := m.Bytes(int(m.RowPitch) * int(s.h))
+	addrs := make([]uint32, s.w)
+	buf := make([]byte, 16)
+	if s.depth {
+		_, _, _, pb := hostDepthFormats(s.format)
+		db := dbDesc{lay: s.lay, format: s.format, slice: s.slice, ok: true}
+		for y := uint32(0); y < s.h; y++ {
+			s.lay.rowAddrs(0, y, s.slice, addrs)
+			row := data[y*m.RowPitch:]
+			for x, a := range addrs {
+				z, st := hostDepthDecode(s.format, row[x*pb:])
+				g.writeDepth(&db, a, z, st, true, true)
+			}
+		}
+	} else {
+		pb := hostPixelBytes(s.hostFmt)
+		n := fmtBytes(s.format)
+		// 8-bit RGBA is the same bytes on both sides
+		raw := s.format&0x3f == fmt8_8_8_8 && (s.hostFmt == d3d.FormatRGBA8Unorm && s.kind == kUnorm ||
+			s.hostFmt == d3d.FormatRGBA8UnormSRGB && s.kind == kSrgb)
+		for y := uint32(0); y < s.h; y++ {
+			s.lay.rowAddrs(0, y, s.slice, addrs)
+			row := data[y*m.RowPitch:]
+			if raw {
+				for x, a := range addrs {
+					g.mem.WriteBytes(a, row[x*4:x*4+4])
+				}
+				continue
+			}
+			for x, a := range addrs {
+				v := hostDecode(s.hostFmt, row[x*pb:])
+				encodeElem(s.format, s.kind, v, buf[:n])
+				g.mem.WriteBytes(a, buf[:n])
+			}
+		}
+	}
+	b.c.Unmap(s.staging, 0)
+	s.dirty = false
+}
+
+func (b *d3dBackend) scanPixels(cb *cbDesc) ([]uint32, uint32, uint32, bool) {
+	for _, s := range b.surfs {
+		if !s.same(false, &cb.lay, cb.format, cb.kind, cb.slice) {
+			continue
+		}
+		if !s.dirty {
+			return nil, 0, 0, false
+		}
+		if s.scanned && b.scanOf == s {
+			return b.scanBuf[:s.w*s.h], s.w, s.h, true
+		}
+		b.c.CopyResource(s.staging, s.tex)
+		m, err := b.c.Map(s.staging, 0, d3d.MapRead)
+		if err != nil {
+			return nil, 0, 0, false
+		}
+		data := m.Bytes(int(m.RowPitch) * int(s.h))
+		n := int(s.w * s.h)
+		if cap(b.scanBuf) < n {
+			b.scanBuf = make([]uint32, n)
+		}
+		px := b.scanBuf[:n]
+		pb := hostPixelBytes(s.hostFmt)
+		direct := s.hostFmt == d3d.FormatRGBA8Unorm || s.hostFmt == d3d.FormatRGBA8UnormSRGB
+		for y := uint32(0); y < s.h; y++ {
+			row := data[y*m.RowPitch:]
+			out := px[y*s.w : (y+1)*s.w]
+			for x := range out {
+				if direct {
+					p := row[x*4 : x*4+4]
+					out[x] = uint32(p[0])<<24 | uint32(p[1])<<16 | uint32(p[2])<<8 | uint32(p[3])
+					continue
+				}
+				v := hostDecode(s.hostFmt, row[x*pb:])
+				if s.kind == kSrgb {
+					for c := 0; c < 3; c++ {
+						v[c] = f2u(linearToSRGB(u2f(v[c])))
+					}
+				}
+				q := func(c int) uint32 { return uint32(clamp01(u2f(v[c]))*255 + 0.5) }
+				out[x] = q(0)<<24 | q(1)<<16 | q(2)<<8 | q(3)
+			}
+		}
+		b.c.Unmap(s.staging, 0)
+		s.scanned, b.scanOf = true, s
+		return px, s.w, s.h, true
+	}
+	return nil, 0, 0, false
+}
+
+func (b *d3dBackend) flush(lo, hi uint32) {
+	for _, s := range b.surfs {
+		if s.dirty && s.lo < hi && lo < s.hi {
+			b.store(s)
+		}
+	}
+}
+
+func (b *d3dBackend) flushAll() { b.flush(0, ^uint32(0)) }
+
+// dropSurfs forgets the host copies of surfaces in [lo, hi) (written back
+// first by the caller if they matter).
+func (b *d3dBackend) dropSurfs(lo, hi uint32) {
+	k := 0
+	for _, s := range b.surfs {
+		if s.lo < hi && lo < s.hi {
+			s.release()
+			continue
+		}
+		b.surfs[k] = s
+		k++
+	}
+	b.surfs = b.surfs[:k]
+}
+
+func (b *d3dBackend) invalidate(lo, hi uint32) {
+	b.dropSurfs(lo, hi)
+	b.dropTextures(lo, hi)
+	for k, v := range b.bufs {
+		if v.lo < hi && lo < v.hi {
+			v.release()
+			delete(b.bufs, k)
+		}
+	}
+}
+
+func (b *d3dBackend) clearColor(cb *cbDesc, c [4]float32) bool {
+	for _, s := range b.surfs {
+		if s.same(false, &cb.lay, cb.format, cb.kind, cb.slice) {
+			b.dropTextures(s.lo, s.hi)
+			b.c.ClearRenderTargetView(s.view, c)
+			s.dirty, s.scanned = true, false
+			return true
+		}
+	}
+	return false
+}
+
+func (b *d3dBackend) clearDepth(db *dbDesc, z float32, stencil, flags uint32) bool {
+	for _, s := range b.surfs {
+		if s.same(true, &db.lay, db.format, 0, db.slice) {
+			b.dropTextures(s.lo, s.hi)
+			b.c.ClearDepthStencilView(s.view, flags&3, z, uint8(stencil))
+			s.dirty, s.scanned = true, false
+			return true
+		}
+	}
+	return false
+}
+
+// ---- textures ----
+
+// hostTexKey: the resource words a texture is made from
+type hostTexKey struct{ w [6]uint32 }
+
+type hostTex struct {
+	lo, hi uint32
+	tex    d3d.Resource
+	srv    d3d.View
+}
+
+func (t *hostTex) release() {
+	t.srv.Release()
+	t.tex.Release()
+}
+
+func (b *d3dBackend) dropTextures(lo, hi uint32) {
+	for k, t := range b.texs {
+		if t.lo < hi && lo < t.hi {
+			t.release()
+			delete(b.texs, k)
+		}
+	}
+}
+
+// texKeyFor is what the shader translation needs to know of a texture.
+func texKeyFor(t *texDesc) dxTexKey {
+	if !t.valid {
+		return dxTexKey{}
+	}
+	k := dxTexKey{valid: true, dim: uint8(t.dim), intFmt: t.kind == kUint || t.kind == kSint}
+	for c := 0; c < 4; c++ {
+		k.sel[c] = uint8(t.dstSel[c])
+	}
+	return k
+}
+
+// texture gives the host copy of a texture.
+func (b *d3dBackend) texture(t *texDesc) (*hostTex, error) {
+	key := hostTexKey{}
+	copy(key.w[:], t.w[:6])
+	key.w[4] &^= 0x7ff << 16 // the swizzle is the shader's business
+	if h := b.texs[key]; h != nil {
+		return h, nil
+	}
+	switch t.dim {
+	case 0, 1, 2, 3, 4, 5, 7:
+	default:
+		return nil, fmt.Errorf("texture dimension %d", t.dim)
+	}
+	g := b.g
+	levels := t.lastLevel - t.baseLevel + 1
+	if t.lastLevel < t.baseLevel {
+		levels = 1
+	}
+	levels = min(levels, 14)
+	// the memory the levels came from: render targets there go back first
+	var decoded []*texLevel
+	for i := uint32(0); i < levels; i++ {
+		l := g.texLevel(t, t.baseLevel+i)
+		b.flush(l.lo, l.hi)
+		decoded = append(decoded, l)
+	}
+	// (decoding again if a flush changed the memory)
+	for i := range decoded {
+		decoded[i] = g.texLevel(t, t.baseLevel+uint32(i))
+	}
+	l0 := decoded[0]
+	intFmt := t.kind == kUint || t.kind == kSint
+	one := fmtDescs[t.format&0x3f].nc == 1 && !intFmt && l0.rgba8 == nil
+	format := uint32(d3d.FormatRGBA32Float)
+	pb := 16
+	switch {
+	case intFmt:
+		format = d3d.FormatRGBA32Uint
+	case l0.rgba8 != nil:
+		format, pb = d3d.FormatRGBA8Unorm, 4
+		if l0.srgb {
+			format = d3d.FormatRGBA8UnormSRGB
+		}
+	case one:
+		// one component (depth textures among them): R32F can be
+		// sampled with a comparison
+		format, pb = d3d.FormatR32Float, 4
+	}
+	slices := l0.d
+	switch t.dim {
+	case 3:
+		slices = 6 * max(l0.d/6, 1)
+	case 0, 1:
+		slices = 1
+	}
+	var tex d3d.Resource
+	var err error
+	dim := uint32(4) // the view's: TEXTURE2D
+	switch t.dim {
+	case 0, 4:
+		dim = 2 + b2u(t.dim == 4) // TEXTURE1D(ARRAY)
+		tex, err = b.d.CreateTexture1D(&d3d.Texture1DDesc{Width: l0.w, MipLevels: levels, ArraySize: slices,
+			Format: format, BindFlags: d3d.BindShaderResource})
+	case 2:
+		dim = 8 // TEXTURE3D
+		tex, err = b.d.CreateTexture3D(&d3d.Texture3DDesc{Width: l0.w, Height: l0.h, Depth: l0.d, MipLevels: levels,
+			Format: format, BindFlags: d3d.BindShaderResource})
+	default:
+		desc := &d3d.Texture2DDesc{Width: l0.w, Height: l0.h, MipLevels: levels, ArraySize: slices, Format: format,
+			SampleCount: 1, BindFlags: d3d.BindShaderResource}
+		switch t.dim {
+		case 3:
+			desc.Misc = 4 // TEXTURECUBE
+			dim = 9
+		case 5, 7:
+			dim = 5
+		}
+		tex, err = b.d.CreateTexture2D(desc, nil, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	h := &hostTex{lo: ^uint32(0), tex: tex}
+	// pack gives n texels of a level from texel off on
+	pack := func(l *texLevel, off, n int) []byte {
+		data := make([]byte, n*pb)
+		for p := 0; p < n; p++ {
+			o := data[p*pb:]
+			switch {
+			case l.rgba8 != nil:
+				binary.LittleEndian.PutUint32(o, l.rgba8[off+p])
+			case pb == 4:
+				binary.LittleEndian.PutUint32(o, l.vals[(off+p)*4])
+			default:
+				for c := 0; c < 4; c++ {
+					binary.LittleEndian.PutUint32(o[4*c:], l.vals[(off+p)*4+c])
+				}
+			}
+		}
+		return data
+	}
+	for i, l := range decoded {
+		h.lo, h.hi = min(h.lo, l.lo), max(h.hi, l.hi)
+		w, hh := max(l0.w>>i, 1), max(l0.h>>i, 1)
+		if t.dim == 0 || t.dim == 4 {
+			hh = 1
+		}
+		if l.w != w || l.h != hh {
+			continue
+		}
+		n := int(w * hh)
+		if t.dim == 2 {
+			// a 3D level: every slice at once
+			if l.d != max(l0.d>>i, 1) {
+				continue
+			}
+			b.c.UpdateSubresource(tex, uint32(i), pack(l, 0, n*int(l.d)), w*uint32(pb), uint32(n*pb))
+			continue
+		}
+		for z := uint32(0); z < min(l.d, slices); z++ {
+			b.c.UpdateSubresource(tex, uint32(i)+z*levels, pack(l, int(z)*n, n), w*uint32(pb), 0)
+		}
+	}
+	h.srv, err = b.d.CreateTexSRV(tex, format, dim, levels, slices)
+	if err != nil {
+		tex.Release()
+		return nil, err
+	}
+	b.texs[key] = h
+	return h, nil
+}
+
+// ---- buffers ----
+
+type hostBuf struct {
+	lo, hi uint32
+	hash   uint64
+	buf    d3d.Resource
+	srv    d3d.View
+}
+
+func (v *hostBuf) release() {
+	v.srv.Release()
+	v.buf.Release()
+}
+
+// smallBuf: buffers this size or smaller are checked for changes every
+// draw (bigger ones only change through invalidation).
+const smallBuf = 64 << 10
+
+// buffer gives a host copy of guest memory [base, base+size), as a vertex
+// buffer (a view of 32-bit words) or a constant buffer.
+func (b *d3dBackend) buffer(base, size uint32, cb bool) (*hostBuf, error) {
+	size = (size + 15) &^ 15
+	key := [2]uint32{base, size | b2u(cb)}
+	v := b.bufs[key]
+	if v != nil && size > smallBuf {
+		return v, nil
+	}
+	data := make([]byte, size)
+	b.g.mem.ReadBytes(base, data)
+	if cb {
+		// constants are big-endian words
+		for i := 0; i+3 < len(data); i += 4 {
+			data[i], data[i+1], data[i+2], data[i+3] = data[i+3], data[i+2], data[i+1], data[i]
+		}
+	}
+	if v != nil {
+		if v.hash == maphash.Bytes(b.seed, data) {
+			return v, nil
+		}
+		v.release()
+		delete(b.bufs, key)
+	}
+	b.flush(base, base+size)
+	bind := uint32(d3d.BindShaderResource)
+	if cb {
+		bind = d3d.BindConstantBuffer
+	}
+	buf, err := b.d.CreateBuffer(&d3d.BufferDesc{ByteWidth: size, BindFlags: bind}, data)
+	if err != nil {
+		return nil, err
+	}
+	v = &hostBuf{lo: base, hi: base + size, hash: maphash.Bytes(b.seed, data), buf: buf}
+	if !cb {
+		if v.srv, err = b.d.CreateBufferSRV(buf, d3d.FormatR32Uint, 0, size/4); err != nil {
+			buf.Release()
+			return nil, err
+		}
+	}
+	b.bufs[key] = v
+	return v, nil
+}
+
+// ---- shaders ----
+
+type shaderKey struct {
+	ps     bool
+	addr   uint32
+	fs     uint32
+	config string
+}
+
+type hostShader struct {
+	prog  *dxProgram
+	obj   d3d.Object
+	words map[uint32]uint32 // the program words it was made from
+}
+
+// shader gives the host shader for a program under cfg, translating it if
+// its code, configuration or the textures and buffers it depends on
+// changed.
+func (b *d3dBackend) shader(cfg *dxConfig, addr uint32) (*hostShader, error) {
+	g := b.g
+	key := shaderKey{ps: cfg.ps, addr: addr, fs: cfg.fsAddr, config: fmt.Sprintf("%v %v %d %#x %v %d %d %d %v %v %d %v",
+		cfg.ps, cfg.vtxSem, cfg.nParams, cfg.vte, cfg.psIn, cfg.posGPR, cfg.faceGPR, cfg.faceChan, cfg.faceBits,
+		cfg.alphaOn, cfg.alphaFunc, cfg.multiWrite)}
+outer:
+	for _, s := range b.shaders[key] {
+		for a, w := range s.words {
+			if g.read32(a) != w {
+				continue outer
+			}
+		}
+		for id, k := range s.prog.texDeps {
+			if cfg.texInfo(id) != k {
+				continue outer
+			}
+		}
+		for id, k := range s.prog.vbufDeps {
+			if cfg.vbufInfo(id) != k {
+				continue outer
+			}
+		}
+		return s, nil
+	}
+	words := map[uint32]uint32{}
+	c := *cfg
+	c.read32 = func(a uint32) uint32 {
+		w := g.read32(a)
+		words[a] = w
+		return w
+	}
+	p, err := translateDX(&c, addr)
+	if err != nil {
+		return nil, err
+	}
+	var obj d3d.Object
+	if cfg.ps {
+		obj, err = b.d.CreatePixelShader(p.code)
+	} else {
+		obj, err = b.d.CreateVertexShader(p.code)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if dxDumpShaders {
+		fmt.Printf("---- %s shader at %#x (%s)\n%s", map[bool]string{false: "vertex", true: "pixel"}[cfg.ps], addr, key.config, d3d.Disasm(p.code))
+	}
+	s := &hostShader{prog: p, obj: obj, words: words}
+	b.shaders[key] = append(b.shaders[key], s)
+	return s, nil
+}
+
+// ---- state objects ----
+
+func (b *d3dBackend) state(kind byte, desc unsafe.Pointer, size uintptr) (d3d.Object, error) {
+	k := string(kind) + string(unsafe.Slice((*byte)(desc), size))
+	if o, ok := b.states[k]; ok {
+		return o, nil
+	}
+	var o d3d.Object
+	var err error
+	switch kind {
+	case 'b':
+		o, err = b.d.CreateBlendState((*d3d.BlendDesc)(desc))
+	case 'd':
+		o, err = b.d.CreateDepthStencilState((*d3d.DepthStencilDesc)(desc))
+	case 'r':
+		o, err = b.d.CreateRasterizerState((*d3d.RasterizerDesc)(desc))
+	case 's':
+		o, err = b.d.CreateSamplerState((*d3d.SamplerDesc)(desc))
+	}
+	if err != nil {
+		return o, err
+	}
+	b.states[k] = o
+	return o, nil
+}
+
+// ---- the draw ----
+
+func (b *d3dBackend) fallback(f string, a ...any) bool {
+	b.err = fmt.Sprintf(f, a...)
+	b.g.warn("d3d: %s", b.err)
+	return false
+}
+
+func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32) bool {
+	g := b.g
+	if st.rop != 0xcc && st.rop != 0 {
+		return b.fallback("raster operation %#x", st.rop)
+	}
+	if st.clip>>22&1 != 0 {
+		return b.fallback("rasterizer off")
+	}
+	topo, idx, ok := hostIndices(prim, ids, st.mode>>19&1 != 0)
+	if !ok {
+		return b.fallback("primitive type %#x", prim)
+	}
+	rs, cullAll := hostRaster(st, g)
+	var gs d3d.Object
+	if prim == 0x11 {
+		// rectangles aren't culled; a geometry shader adds the fourth
+		// corner
+		rs.Cull, cullAll = d3d.CullNone, false
+		var err error
+		if gs, err = b.rectGS(int(st.nVSParam)); err != nil {
+			return b.fallback("rectangles: %v", err)
+		}
+	}
+	if cullAll && topo == d3d.TopologyTriangleList || len(idx) == 0 {
+		return true
+	}
+	// the stages' configurations
+	stageTex := func(stage int) func(uint32) dxTexKey {
+		return func(id uint32) dxTexKey {
+			t := texFromWords(g.resource(stageResBase[stage] + id))
+			return texKeyFor(&t)
+		}
+	}
+	vbufInfo := func(id uint32) dxFetchKey {
+		r := g.resource(stageResBase[stageVS] + id)
+		return dxFetchKey{stride: r[2] >> 8 & 0x7ff, word2: r[2]}
+	}
+	vcfg := &dxConfig{read32: g.read32, fsAddr: st.fs, texInfo: stageTex(stageVS), vbufInfo: vbufInfo,
+		nParams: int(st.nVSParam), vte: st.vte}
+	for i := uint32(0); i < 32; i++ {
+		vcfg.vtxSem[i] = g.reg(regSQ_VTX_SEMANTIC_0 + i*4)
+	}
+	pcfg := &dxConfig{ps: true, read32: g.read32, texInfo: stageTex(stagePS), vbufInfo: vbufInfo,
+		nParams: int(st.nVSParam), posGPR: st.posAddr, faceGPR: st.faceAddr, faceChan: st.faceChan,
+		faceBits: st.faceAllBits, alphaOn: st.alphaOn, alphaFunc: st.alphaFunc, multiWrite: st.multiWrite}
+	for _, in := range st.psInputs {
+		reg := -1
+		if in.param >= 0 {
+			reg = in.param + 1 // after the position
+		}
+		pcfg.psIn = append(pcfg.psIn, dxPSIn{reg: reg, def: in.def, flat: in.flat || st.flatAll, linear: in.linear})
+	}
+	vs, err := b.shader(vcfg, st.vs)
+	if err != nil {
+		return b.fallback("vertex shader: %v", err)
+	}
+	var ps *hostShader
+	if st.ps != 0 {
+		if ps, err = b.shader(pcfg, st.ps); err != nil {
+			return b.fallback("pixel shader: %v", err)
+		}
+	}
+	// targets
+	var rtvs []d3d.View
+	var drawn []*hostSurf
+	tw, th := uint32(1<<14), uint32(1<<14)
+	for i := 0; i < 8; i++ {
+		if !st.cbOn[i] {
+			rtvs = append(rtvs, d3d.View{})
+			continue
+		}
+		cb := &st.cbs[i]
+		s, err := b.surface(false, &cb.lay, cb.format, cb.kind, cb.slice)
+		if err != nil {
+			return b.fallback("colour buffer: %v", err)
+		}
+		rtvs = append(rtvs, s.view)
+		drawn = append(drawn, s)
+		tw, th = min(tw, s.w), min(th, s.h)
+	}
+	for len(rtvs) > 0 && rtvs[len(rtvs)-1].Nil() {
+		rtvs = rtvs[:len(rtvs)-1]
+	}
+	var dsv d3d.View
+	if st.db.ok && st.dbCtl&7 != 0 {
+		s, err := b.surface(true, &st.db.lay, st.db.format, 0, st.db.slice)
+		if err != nil {
+			return b.fallback("depth buffer: %v", err)
+		}
+		dsv = s.view
+		drawn = append(drawn, s)
+		tw, th = min(tw, s.w), min(th, s.h)
+	}
+	if len(drawn) == 0 {
+		return true
+	}
+	c := b.c
+	bd := &b.bound
+	// resources
+	bind := func(stage int, p *dxProgram, ps bool) bool {
+		var views []d3d.View
+		vb := 0
+		var sys [dxSysSize * 4]uint32
+		for _, r := range p.srv {
+			if r.vbuf {
+				res := g.resource(stageResBase[stage] + r.id)
+				size := res[1] + 1
+				v, err := b.buffer(res[0], size, false)
+				if err != nil {
+					return b.fallback("vertex buffer: %v", err)
+				}
+				views = append(views, v.srv)
+				sys[(dxSysBufSize+vb/4)*4+vb%4] = size
+				vb++
+				continue
+			}
+			t := texFromWords(g.resource(stageResBase[stage] + r.id))
+			h, err := b.texture(&t)
+			if err != nil {
+				return b.fallback("texture: %v", err)
+			}
+			views = append(views, h.srv)
+		}
+		var samps []d3d.Object
+		for _, id := range p.samplers {
+			s := g.sampler(stageSamplerBase[stage] + id&^dxSampCompare)
+			w0 := g.reg(regSQ_TEX_SAMPLER_WORD0_0 + (stageSamplerBase[stage]+id&^dxSampCompare)*12)
+			sd := hostSampler(&s, w0>>19&7, id&dxSampCompare != 0)
+			o, err := b.state('s', unsafe.Pointer(&sd), unsafe.Sizeof(sd))
+			if err != nil {
+				return b.fallback("sampler: %v", err)
+			}
+			samps = append(samps, o)
+		}
+		// constants: the system block, the constant file and the banks
+		e := &stageEnv{g: g, stage: stage}
+		sys[dxSysBool*4] = g.reg(regSQ_BOOL_CONST_0 + uint32(stage)*4)
+		sys[dxSysBool*4+1] = f2u(st.alphaRef)
+		for i := uint32(0); i < 32; i++ {
+			sys[dxSysLoop*4+i] = e.loopConst(i)
+		}
+		vp, vpz := hostViewport(st, float32(tw), float32(th))
+		for i := 0; i < 4; i++ {
+			sys[dxSysVport*4+i] = f2u(vp[i])
+		}
+		sys[dxSysVportZ*4], sys[dxSysVportZ*4+1] = f2u(vpz[0]), f2u(vpz[1])
+		sys[dxSysDraw*4+1] = g.reg(regSQ_VTX_BASE_VTX_LOC)
+		sys[dxSysDraw*4+2] = g.reg(regSQ_VTX_START_INST_LOC)
+		si := 0
+		if ps {
+			si = 1
+		}
+		raw := make([]byte, 0, 256*16)
+		for _, w := range sys {
+			raw = binary.LittleEndian.AppendUint32(raw, w)
+		}
+		if !bytes.Equal(raw, bd.sys[si]) {
+			b.upload(b.sysCB[si], raw)
+			bd.sys[si] = raw
+		}
+		raw = make([]byte, 0, 256*16)
+		for i := uint32(0); i < 256*4; i++ {
+			raw = binary.LittleEndian.AppendUint32(raw, e.cfile(i/4, i%4))
+		}
+		if !bytes.Equal(raw, bd.file[si]) {
+			b.upload(b.fileCB[si], raw)
+			bd.file[si] = raw
+		}
+		cbs := []d3d.Resource{b.sysCB[si], b.fileCB[si]}
+		for _, bank := range p.banks {
+			base := g.reg(kcacheRegs[stage]+bank*4) << 8
+			n := g.reg(sizeRegs[stage]+bank*4) * 256
+			if n == 0 || n > 64<<10 {
+				n = 64 << 10
+			}
+			v, err := b.buffer(base, n, true)
+			if err != nil {
+				return b.fallback("constant bank: %v", err)
+			}
+			cbs = append(cbs, v.buf)
+		}
+		// (slots past what this shader uses can keep what they had)
+		if p := ptrs(cbs); !prefixOf(p, bd.cbs[si]) {
+			if ps {
+				c.PSSetConstantBuffers(0, cbs...)
+			} else {
+				c.VSSetConstantBuffers(0, cbs...)
+			}
+			bd.cbs[si] = p
+		}
+		if p := ptrs(views); len(p) > 0 && !prefixOf(p, bd.srvs[si]) {
+			if ps {
+				c.PSSetShaderResources(0, views...)
+			} else {
+				c.VSSetShaderResources(0, views...)
+			}
+			bd.srvs[si] = p
+		}
+		if p := ptrs(samps); len(p) > 0 && !prefixOf(p, bd.samps[si]) {
+			if ps {
+				c.PSSetSamplers(0, samps...)
+			} else {
+				c.VSSetSamplers(0, samps...)
+			}
+			bd.samps[si] = p
+		}
+		return true
+	}
+	if !bind(stageVS, vs.prog, false) {
+		return false
+	}
+	if bd.vs != vs.obj.Ptr() {
+		c.VSSetShader(vs.obj)
+		bd.vs = vs.obj.Ptr()
+	}
+	if bd.gs != gs.Ptr() {
+		c.GSSetShader(gs)
+		bd.gs = gs.Ptr()
+	}
+	if ps != nil {
+		if !bind(stagePS, ps.prog, true) {
+			return false
+		}
+		if bd.ps != ps.obj.Ptr() {
+			c.PSSetShader(ps.obj)
+			bd.ps = ps.obj.Ptr()
+		}
+	} else if bd.ps != 0 {
+		c.PSSetShader(d3d.Object{})
+		bd.ps = 0
+	}
+	// state
+	bld, factor := hostBlend(st)
+	bo, err := b.state('b', unsafe.Pointer(&bld), unsafe.Sizeof(bld))
+	if err != nil {
+		return b.fallback("blend: %v", err)
+	}
+	if bd.blend != bo.Ptr() || bd.factor != factor {
+		c.OMSetBlendState(bo, factor, 0xffffffff)
+		bd.blend, bd.factor = bo.Ptr(), factor
+	}
+	dd, ref := hostDepthStencil(st)
+	if dsv.Nil() {
+		dd, ref = hostDepthStencil(&drawState{})
+	}
+	do, err := b.state('d', unsafe.Pointer(&dd), unsafe.Sizeof(dd))
+	if err != nil {
+		return b.fallback("depth: %v", err)
+	}
+	if bd.depth != do.Ptr() || bd.ref != ref {
+		c.OMSetDepthStencilState(do, ref)
+		bd.depth, bd.ref = do.Ptr(), ref
+	}
+	ro, err := b.state('r', unsafe.Pointer(&rs), unsafe.Sizeof(rs))
+	if err != nil {
+		return b.fallback("rasterizer: %v", err)
+	}
+	if bd.rast != ro.Ptr() {
+		c.RSSetState(ro)
+		bd.rast = ro.Ptr()
+	}
+	if vp := (d3d.Viewport{W: float32(tw), H: float32(th), MinZ: 0, MaxZ: 1}); vp != bd.vp {
+		c.RSSetViewports(vp)
+		bd.vp = vp
+	}
+	sc := st.sc
+	if r := (d3d.Rect{Left: sc[0], Top: sc[1], Right: min(sc[2], int32(tw)), Bottom: min(sc[3], int32(th))}); r != bd.sc {
+		c.RSSetScissorRects(r)
+		bd.sc = r
+	}
+	if p := ptrs(rtvs); !slices.Equal(p, bd.rtvs) || dsv.Ptr() != bd.dsv {
+		c.OMSetRenderTargets(rtvs, dsv)
+		bd.rtvs, bd.dsv = p, dsv.Ptr()
+	}
+	// indices: appended to a ring buffer (the same list as last time is
+	// used again)
+	need := len(idx) * 4
+	if need > b.ibSize {
+		b.ib.Release()
+		b.ibSize = max(need, 1<<20)
+		if b.ib, err = b.dynBuffer(b.ibSize, d3d.BindIndexBuffer); err != nil {
+			b.ibSize = 0
+			return b.fallback("index buffer: %v", err)
+		}
+		b.ibLast, b.ibOff, b.ibAt = nil, 0, 0
+	}
+	if !slices.Equal(idx, b.ibLast) {
+		mode := uint32(d3d.MapWriteNoOverwrite)
+		if b.ibOff+need > b.ibSize || b.ibLast == nil {
+			mode, b.ibOff = d3d.MapWriteDiscard, 0
+		}
+		m, err := c.Map(b.ib, 0, mode)
+		if err != nil {
+			return b.fallback("index buffer: %v", err)
+		}
+		copy(m.Bytes(b.ibOff + need)[b.ibOff:], unsafe.Slice((*byte)(unsafe.Pointer(&idx[0])), need))
+		c.Unmap(b.ib, 0)
+		b.ibLast, b.ibAt = append(b.ibLast[:0], idx...), b.ibOff
+		b.ibOff += need
+	}
+	if bd.ib != b.ib.Ptr() {
+		c.IASetIndexBuffer(b.ib, d3d.FormatR32Uint, 0)
+		bd.ib = b.ib.Ptr()
+	}
+	if bd.topo != topo {
+		c.IASetPrimitiveTopology(topo)
+		bd.topo = topo
+	}
+	c.DrawIndexedInstanced(uint32(len(idx)), insts, uint32(b.ibAt/4), 0, 0)
+	// what was drawn is newer on the host; textures made from it are old
+	for _, s := range drawn {
+		s.dirty, s.scanned = true, false
+		b.dropTextures(s.lo, s.hi)
+	}
+	return true
+}
+
+// prefixOf reports whether a is the start of b.
+func prefixOf(a, b []uintptr) bool { return len(a) <= len(b) && slices.Equal(a, b[:len(a)]) }
+
+// rectGS gives the rectangle geometry shader for n parameters.
+func (b *d3dBackend) rectGS(n int) (d3d.Object, error) {
+	if o, ok := b.rectGSs[n]; ok {
+		return o, nil
+	}
+	o, err := b.d.CreateGeometryShader(dxRectGS(n))
+	if err != nil {
+		return d3d.Object{}, err
+	}
+	b.rectGSs[n] = o
+	return o, nil
+}
+
+// dxDumpShaders prints every translated shader (for debugging).
+var dxDumpShaders bool
+
+var sizeRegs = [3]uint32{regSQ_ALU_CONST_BUFFER_SIZE_PS_0, regSQ_ALU_CONST_BUFFER_SIZE_VS_0, regSQ_ALU_CONST_BUFFER_SIZE_GS_0}

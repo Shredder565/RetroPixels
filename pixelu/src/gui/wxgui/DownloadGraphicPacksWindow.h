@@ -1,0 +1,66 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+
+#include <atomic>
+#include <curl/system.h>
+#include <thread>
+#include <string>
+#include <memory>
+
+#include <wx/dialog.h>
+#include <wx/timer.h>
+#include <wx/gauge.h>
+
+// Fetches the latest community graphic pack release and unpacks it into
+// graphicPacks/downloadedGraphicPacks (version.txt records which release is there).
+// The work runs on a thread while the dialog shows the stage and progress.
+class DownloadGraphicPacksWindow : public wxDialog
+{
+public:
+	DownloadGraphicPacksWindow(wxWindow* parent);
+	~DownloadGraphicPacksWindow();
+
+	const std::string& GetException() const;
+
+	// refuses (wxID_CANCEL) while a game runs; otherwise wxID_CANCEL only when the user cancelled
+	int ShowModal() override;
+	void OnClose(wxCloseEvent& event);
+
+	void OnUpdate(const wxTimerEvent& event);
+	void OnCancelButton(const wxCommandEvent& event);
+
+private:
+	void UpdateThread();
+
+	enum ThreadState_t
+	{
+		ThreadRunning,
+		ThreadCanceled,
+		ThreadError,
+		ThreadFinished,
+	};
+
+	enum DownloadStage_t
+	{
+		StageCheckVersion,
+		StageDownloading,
+		StageExtracting
+	};
+
+	std::atomic<ThreadState_t> m_threadState;
+	std::atomic<DownloadStage_t> m_stage;
+	std::atomic<double> m_extractionProgress;
+	std::string m_threadException;
+	std::thread m_thread;
+
+	DownloadStage_t m_currentStage; // the stage the title shows
+	wxGauge* m_processBar;
+	wxTimer* m_timer;
+
+	struct curlDownloadFileState_t;
+	std::unique_ptr<curlDownloadFileState_t> m_downloadState;
+
+	static size_t curlDownloadFile_writeData(void* ptr, size_t size, size_t nmemb, curlDownloadFileState_t* downloadState);
+	static int progress_callback(curlDownloadFileState_t* downloadState, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow);
+	static bool curlDownloadFile(const char* url, curlDownloadFileState_t* downloadState);
+};

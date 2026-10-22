@@ -1,0 +1,251 @@
+name: PixelU (Wii U) test build
+
+# Builds PixelU, RetroPixels' own Wii U emulator in pixelu/ (it began as a copy of Cemu),
+# for Windows (PixelU-windows-x64) and Linux (PixelU-linux-x64, with PixelU-linux.tar.gz inside so
+# the program keeps its exec bit). The results are workflow artifacts only: no release is made.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - "pixelu/**"
+      - ".gitmodules"
+      - ".github/workflows/pixelu.yml"
+
+permissions:
+  contents: read
+  actions: write # to start the RetroPixels bundle once this build is done
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/pixelu/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.29.0"
+
+      - name: Restore vcpkg package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+          restore-keys: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-
+
+      - name: Bootstrap vcpkg
+        working-directory: pixelu
+        run: ./dependencies/vcpkg/bootstrap-vcpkg.bat
+
+      - name: Configure
+        working-directory: pixelu
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Save vcpkg package cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+
+      - name: Build
+        working-directory: pixelu/build
+        run: cmake --build . --config release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          # Windows paths ignore case, so "PixelU" would be the pixelu source folder.
+          $out = "package/PixelU"
+          New-Item -ItemType Directory -Force "$out/portable" | Out-Null
+          Copy-Item pixelu/bin/PixelU_release.exe "$out/PixelU.exe"
+          Copy-Item -Recurse pixelu/bin/resources "$out/resources"
+          Copy-Item -Recurse pixelu/bin/gameProfiles "$out/gameProfiles"
+          Copy-Item pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          "PixelU keeps its settings, keys and saves in this folder." | Out-File "$out/portable/README.txt"
+          $sha = git rev-parse --short HEAD
+          "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicense: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
+
+      - name: List package contents
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -File package/PixelU | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
+          "Total: " + ((Get-ChildItem -Recurse -File package/PixelU | Measure-Object Length -Sum).Sum / 1MB) + " MB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-windows-x64
+          path: package
+          retention-days: 14
+
+      - name: Make the RetroPixels download with this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bundle-test.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"
+
+  # Linux x86-64 on the oldest supported base (glibc 2.35). vcpkg's x64-linux triplet links the
+  # libraries statically as on Windows; GTK 3, X11/XCB, Wayland, libGL and libvulkan come from the
+  # system (overlay ports in pixelu/dependencies/vcpkg_overlay_ports_linux), as on every desktop.
+  build-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    env:
+      # GCC 12: its libstdc++ is the one Ubuntu 22.04 and Debian 12 ship
+      CC: gcc-12
+      CXX: g++-12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.29.0"
+
+      - name: Install build packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            gcc-12 g++-12 ninja-build pkg-config nasm autoconf autoconf-archive automake libtool \
+            curl zip unzip tar \
+            libgtk-3-dev libsecret-1-dev libsystemd-dev libudev-dev libbluetooth-dev \
+            libpulse-dev libasound2-dev libpng-dev libglm-dev libgl-dev libegl-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxinerama-dev libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols
+
+      - name: Restore vcpkg package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-linux-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+          restore-keys: vcpkg-linux-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-
+
+      - name: Bootstrap vcpkg
+        working-directory: pixelu
+        run: ./dependencies/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Configure
+        working-directory: pixelu
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Save vcpkg package cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-linux-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+
+      - name: Build
+        # -k 0: keep going so one run reports every failing file, not just the first
+        run: cmake --build pixelu/build -- -k 0
+
+      - name: Package
+        run: |
+          out=package/PixelU
+          mkdir -p "$out/portable" dist
+          cp pixelu/bin/PixelU_release "$out/PixelU"
+          strip "$out/PixelU"
+          # libbluetooth (BlueZ, for Wii Remotes over Bluetooth) isn't on every
+          # desktop, so it goes in lib/ next to PixelU, found through RUNPATH.
+          sudo apt-get install -y -q --no-install-recommends patchelf
+          mkdir -p "$out/lib"
+          cp -L "$(ldconfig -p | sed -n 's/.*libbluetooth\.so\.3 (libc6,x86-64) => //p' | head -n 1)" "$out/lib/libbluetooth.so.3"
+          patchelf --set-rpath '$ORIGIN/lib' "$out/PixelU"
+          cp /usr/share/doc/libbluetooth3/copyright "$out/lib/libbluetooth-COPYRIGHT.txt"
+          echo "libbluetooth.so.3 is BlueZ's library from Ubuntu 22.04 (libbluetooth3, GPL-2.0-or-later); source: apt-get source bluez, or https://launchpad.net/ubuntu/+source/bluez" > "$out/lib/README.txt"
+          cp -r pixelu/bin/resources "$out/resources"
+          cp -r pixelu/bin/gameProfiles "$out/gameProfiles"
+          cp pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          echo "PixelU keeps its settings, keys and saves in this folder." > "$out/portable/README.txt"
+          {
+            echo "PixelU test build for Linux x86-64 (Wii U, based on Cemu; not a release)"
+            echo "Built $(date -u +%Y-%m-%d) on Ubuntu 22.04 from branch ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
+            echo "Needs glibc 2.35 or newer, GTK 3, X11 (or XWayland), and a Vulkan or OpenGL driver."
+            echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/pixelu"
+            echo "License: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu"
+          } > "$out/VERSION.txt"
+          tar -czf dist/PixelU-linux.tar.gz -C package PixelU
+          cp "$out/VERSION.txt" dist/VERSION.txt
+          tar -tzvf dist/PixelU-linux.tar.gz | sort -k3 -n -r | head -n 15
+          ls -l dist
+
+      # Every library PixelU needs must be on a stock desktop install, and no newer than Ubuntu 22.04's.
+      - name: Check libraries and the glibc floor
+        run: |
+          exe=package/PixelU/PixelU
+          ldd "$exe" | tee ldd.txt
+          if grep -q "not found" ldd.txt; then echo "::error::missing libraries"; exit 1; fi
+          glibc=$(objdump -T "$exe" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n 1)
+          glibcxx=$(objdump -T "$exe" | grep -o 'GLIBCXX_[0-9.]*' | sort -V | tail -n 1)
+          echo "needs $glibc, $glibcxx"
+          if [ "$(printf '%s\nGLIBC_2.35\n' "$glibc" | sort -V | tail -n 1)" != "GLIBC_2.35" ]; then
+            echo "::error::PixelU needs $glibc, newer than the glibc 2.35 floor"; exit 1
+          fi
+          if [ -n "$glibcxx" ] && [ "$(printf '%s\nGLIBCXX_3.4.30\n' "$glibcxx" | sort -V | tail -n 1)" != "GLIBCXX_3.4.30" ]; then
+            echo "::error::PixelU needs $glibcxx, newer than GCC 12's libstdc++ (Ubuntu 22.04)"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-linux-x64
+          path: dist
+          compression-level: 0
+          retention-days: 14
+
+      # Headless runs of RetroPixels' own demo (wiiu/testdata/demo.rpx, no Nintendo files) through the
+      # docking tests in internal/pixelu/screen_linux_test.go: hidden until docked, the screen switch,
+      # docking by WM_TRANSIENT_FOR and by --rp-parent, Stop by WM_DELETE_WINDOW and SIGTERM, and
+      # screenshots that must not be black. Vulkan on lavapipe may lack what PixelU needs, so Vulkan
+      # and OpenGL (llvmpipe) run separately and one of them has to pass.
+      - name: Install test packages
+        run: |
+          sudo apt-get install -y -q --no-install-recommends xvfb xauth mesa-vulkan-drivers libgl1-mesa-dri vulkan-tools imagemagick
+          xvfb-run -a vulkaninfo --summary || true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Demo with Vulkan (lavapipe)
+        id: vulkan
+        continue-on-error: true
+        run: sh pixelu/dist/linux/demo-test.sh vulkan
+
+      - name: Demo with OpenGL (llvmpipe)
+        id: opengl
+        continue-on-error: true
+        run: sh pixelu/dist/linux/demo-test.sh opengl
+
+      - name: Logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-linux-test-screens
+          path: shots
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: One of the demo runs passed
+        run: |
+          echo "Vulkan: ${{ steps.vulkan.outcome }}, OpenGL: ${{ steps.opengl.outcome }}"
+          test "${{ steps.vulkan.outcome }}" = success || test "${{ steps.opengl.outcome }}" = success
+
+      - name: Make the RetroPixels Linux download with this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bundle-linux.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"

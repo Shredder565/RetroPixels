@@ -4,31 +4,105 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.21.0  (2026-10-21)
+--------------------------------
+- The first release since 2.19.0. 2.20.0 was never published as a release,
+  so 2.21.0 includes its changes too (see 2.20.0 below), with one big
+  difference: Wii U games now play in PixelU.
+- One download for everything: RetroPixels-2.21.0.zip has RetroPixels.exe
+  and RetroPixels-Native.exe and, in folders next to them, the engines they
+  play through: PixelU\PixelU.exe (Wii U), PixelU\wii\PixelU-Wii.exe
+  (GameCube and Wii), MAME (built in, as since 2.17.0) and
+  Supermodel\supermodel.exe (Star Wars Trilogy Arcade). Unzip it and keep
+  the folders next to the programs. No games, keys, BIOS or firmware are
+  included.
+- New: Wii U games, in PixelU, RetroPixels' Wii U emulator. It started from
+  Cemu's code and has been rewritten as RetroPixels' own code; it is under
+  the Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). It plays the Wii U
+  games you dump from your own console, with your own keys: disc keys go in
+  keys.txt in the PixelU\portable folder. The Wii U tab lists .wua, .wud and
+  .wux files, Wii U .iso discs and unpacked games (a folder with code\*.rpx)
+  from your games folders.
+- Wii U games play inside the RetroPixels window (or in PixelU's own window,
+  and fullscreen if you like). The GamePad screen / TV screen button in the
+  bar above the game shows the GamePad's screen, which you touch with the
+  mouse or a finger. An Xbox controller and the keyboard work right away
+  (keyboard: WASD left stick, arrow keys D-pad, L / K / I / J =
+  A / B / X / Y, Q / O = L / R, E / U = ZL / ZR, Enter / Backspace =
+  Plus / Minus);
+  change them in PixelU's Options > Input settings. If Vulkan doesn't work
+  with your graphics driver, RetroPixels says how to update the driver and
+  offers to play with OpenGL instead.
+- GameCube and Wii now play in PixelU's GameCube / Wii engine
+  (PixelU\wii\PixelU-Wii.exe), which comes in the download, so there's no
+  Dolphin to download any more. It started from Dolphin and has been
+  rewritten as RetroPixels' own code; it is under GPL-2.0-or-later (its
+  licence is in PixelU\wii). Your Dolphin settings, memory cards and Wii
+  saves are copied over the first time a game starts (nothing is
+  overwritten).
+- Nintendo's keys aren't included: Wii discs, WiiWare and Wii SD card saves
+  need the keys file from your own Wii (the keys.bin BootMii saves with its
+  NAND backup, or the console's otp.bin). RetroPixels Native asks for it
+  before the first Wii game and can look for it on your PC; for
+  RetroPixels.exe, put it in PixelU\wii\User\Wii. GameCube games don't need
+  it. WiiWare add-on (DLC) .wad files are left out of the list, and opening
+  one says how to install it.
+- New: Star Wars Trilogy Arcade (Sega Model 3), in Supermodel by The
+  Supermodel Team, modified for RetroPixels (GPL-3.0-or-later; the exact
+  source and the list of changes are in the Supermodel folder). The new
+  Supermodel tab finds your swtrilgy.zip or swtrilgya.zip in your ROM
+  folders, Downloads, Desktop and Documents, then in the game folders on
+  each drive, and remembers it; or choose the file. Click the tile and the
+  game starts playable, fullscreen, with the Xbox controller. "Flight stick
+  feel" (on by default) makes the thumbstick aim like the arcade's yoke,
+  with a Smoothness setting (Off, Light, Medium, Heavy). Tick "Play inside
+  RetroPixels" to play it in the RetroPixels window.
+- RetroPixels Native plays Star Wars Trilogy Arcade too: Arcade (MAME) >
+  Star Wars Trilogy Arcade (Supermodel), or open swtrilgy.zip /
+  swtrilgya.zip, which now start in Supermodel instead of MAME (MAME can't
+  play it). Its settings are under Supermodel settings in the same menu.
+- RetroPixels Native: Wii U games (Wii U > Open a Wii U game...) and
+  GameCube / Wii games play in PixelU, docked inside its window, so OBS
+  captures them. While one plays, the controller no longer works the start
+  screen behind it.
+- RetroPixels Native registers itself for the game file types it plays, so
+  it shows in File Explorer's "Open with". Windows 11 still asks once per
+  file type: pick RetroPixels Native and "Always" (Options > Open game files
+  with RetroPixels Native explains it). A game opened while RetroPixels
+  Native is already running goes to that window.
+- Recording: one "Record games automatically" setting for every system, on
+  by default (turn it off in the Recordings tab, or in RetroPixels Native's
+  Record menu). Built-in systems, Wii U, GameCube / Wii, MAME and Supermodel
+  games are recorded from start to end, and the videos go to your recordings
+  folder (Videos\RetroPixels).
+- Sega Genesis / Mega Drive: the games from Sonic Classic Collection no
+  longer stay on a black screen, in RetroPixels.exe, RetroPixels Native and
+  RetroPixels for Android.
+- Linux: a Linux version is on the way and comes in a later version; 2.21.0
+  is for Windows (and Android). RetroPixels Native stays Windows-only.
+
 RetroPixels 2.20.0  (2026-10-17)
 --------------------------------
-- New: the Wii U, on RetroPixels' own Wii U emulator, written from scratch
-  in Go (Cemu's design was the guide, none of its code is used). This first
-  version plays Wii U homebrew programs (.rpx) that draw with the OS's own
-  screens (OSScreen), on the TV and the GamePad, in RetroPixels.exe and
-  RetroPixels Native. Games don't play yet: they need the Wii U's graphics
-  chip, which comes in a later version.
+- Never published as a release: these changes come with 2.21.0. Since
+  2.21.0, Wii U games play in PixelU instead (see 2.21.0); RetroPixels.exe's
+  Wii U tab and RetroPixels Native no longer use the emulator described
+  here, which stays in RetroPixels' source.
+- New: the Wii U, on RetroPixels' own Wii U emulator, written in Go. It
+  began as code written from scratch (Cemu's design was the guide); some of
+  its files were later rewritten from Cemu's code and are under the Mozilla
+  Public License 2.0, as each of them says. This first version played Wii U
+  homebrew programs (.rpx) that draw with the OS's own screens (OSScreen),
+  on the TV and the GamePad, in RetroPixels.exe and RetroPixels Native.
 - Inside: a PowerPC 750CL ("Espresso") processor with its paired-single
   maths, checked against the same test program built for a real CPU; the
-  .rpx / .rpl program loader; and RetroPixels' own versions of the Wii U's
-  system libraries: threads on three cores, locks, timers, memory heaps,
-  files (the SD card is /vol/external01), the GamePad's buttons and sticks,
-  and the app lifecycle.
-- Controls: Xbox B / A / Y / X = the GamePad's A / B / X / Y (the same
-  spots), LB / RB = L / R, LT / RT = ZL / ZR, Menu / View = Plus / Minus,
-  both sticks are the GamePad's. On the keyboard: X Z S A, Q W, 1 2,
-  Enter / Shift, H = Home, arrows = left stick, I J K L = D-pad, G switches
-  between the TV and the GamePad's screen.
+  .rpx / .rpl program loader; and versions of the Wii U's system libraries:
+  threads on three cores, locks, timers, memory heaps, files (the SD card is
+  /vol/external01), the GamePad's buttons and sticks, and the app lifecycle.
 - The download has "RetroPixels Wii U demo.rpx", a small homebrew program
-  made for RetroPixels, to try it with. No Nintendo keys, firmware or games
-  are included or needed.
-- Not yet: Wii U games (graphics, sound, disc and eShop formats), save
-  states for the Wii U. RetroPixels for Android can open .rpx files too,
-  but that hasn't been tried on a phone.
+  made for RetroPixels, to try it with (since 2.21.0 it opens in PixelU). No
+  Nintendo keys, firmware or games are included or needed for it.
+- RetroPixels for Android can open .rpx files with this emulator, but that
+  hasn't been tried on a phone.
 
 RetroPixels 2.19.0  (2026-10-17)
 --------------------------------

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -39,6 +40,7 @@ const (
 	cmdSharp       = 350
 	cmdSmooth      = 351
 	cmdMousePaddle = 360
+	cmdFileTypes   = 370
 	cmdRecord      = 400
 	cmdRecFolder   = 401
 	cmdAbout       = 500
@@ -96,20 +98,26 @@ type app struct {
 	encMu      sync.Mutex
 	encoders   map[string]string
 	ffDownload string // progress text while ffmpeg downloads
+	ffDeclined bool   // said No to downloading ffmpeg for automatic recording (asked once a run)
 
 	controls      *controlsDialog
 	mouseTracking bool
 
-	ui   *uiState  // the start screen, save state slots and the rest (ui_*_windows.go)
-	dol  dolState  // GameCube / Wii (dolphin_windows.go)
-	mame mameState // arcade games in MAME (mame_windows.go)
-	ap   apState   // Archipelago (archipelago_windows.go)
+	ui   *uiState    // the start screen, save state slots and the rest (ui_*_windows.go)
+	dol  dolState    // GameCube / Wii (dolphin_windows.go)
+	mame mameState   // arcade games in MAME (mame_windows.go)
+	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
+	sm   smState     // Star Wars Trilogy Arcade in Supermodel (supermodel_windows.go)
+	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
 var theApp *app
 
 func runApp() {
 	runtime.LockOSThread()
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") && handToRunningCopy(os.Args[1]) {
+		return // the RetroPixels Native already open plays it
+	}
 	// If the program ever crashes, the reason goes to crash.log next to the settings.
 	if os.MkdirAll(appDir(), 0o755) == nil {
 		if f, err := os.Create(filepath.Join(appDir(), "crash.log")); err == nil {
@@ -132,7 +140,7 @@ func runApp() {
 		a.snd = noSound{}
 	}
 
-	cls := u16("RetroPixelsNative")
+	cls := u16(mainClass)
 	icon := call(pLoadImageW, a.hinst, 1, 1, 0, 0, 0x40|0x8000) // IMAGE_ICON, LR_DEFAULTSIZE|LR_SHARED
 	small := call(pLoadImageW, a.hinst, 1, 1, 16, 16, 0x8000)   // LR_SHARED
 	wc := wndClassEx{
@@ -163,6 +171,7 @@ func runApp() {
 	call(pShowWindow, a.hwnd, swShow)
 	call(pUpdateWindow, a.hwnd)
 	call(pSetTimer, a.hwnd, timerTitle, 250, 0)
+	go registerFileTypes(false)
 	a.dolStartup()
 	a.apStartup()
 
@@ -241,6 +250,7 @@ func (a *app) buildMenu() {
 	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 	a.addDolphinMenu()
+	a.addPixelUMenu()
 	a.addMameMenu()
 
 	a.optMenu = call(pCreatePopupMenu)
@@ -263,6 +273,8 @@ func (a *app) buildMenu() {
 	appendMenu(a.optMenu, mfString, cmdSmooth, "Smoot&h pixels")
 	appendMenu(a.optMenu, mfSeparator, 0, "")
 	appendMenu(a.optMenu, mfString, cmdMousePaddle, "Mouse turns the &paddle (Atari 2600)")
+	appendMenu(a.optMenu, mfSeparator, 0, "")
+	appendMenu(a.optMenu, mfString, cmdFileTypes, "Open game files with RetroPixels &Native…")
 	a.uiOptionsMenu()
 	appendMenu(a.menu, mfPopup, a.optMenu, "&Options")
 
@@ -312,6 +324,8 @@ func (a *app) updateMenus() {
 	enableItem(a.menu, cmdRecord, on || a.recOn)
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
+	a.pixeluUpdateMenus()
+	a.supermodelUpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
@@ -355,8 +369,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmSize:
 		call(pInvalidateRect, hwnd, 0, 0)
-		a.dolResize()
-		a.mameResize()
+		a.dockResize()
 		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
@@ -378,6 +391,10 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.uiPopup(wp)
 		a.updateMenus()
 		return 0
+	case wmCopyData:
+		if a.copyDataOpen(lp) {
+			return 1
+		}
 	case wmDropFiles:
 		buf := make([]uint16, 32768)
 		n := call(pDragQueryFileW, wp, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
@@ -445,7 +462,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.mameBeforeClose() || a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.supermodelBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -594,7 +611,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.mamePaint(hdc) && !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.supermodelPaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -730,6 +747,8 @@ func (a *app) updateTitle() {
 	}
 	t += a.dolTitle()
 	t += a.mameTitle()
+	t += a.pixeluTitle()
+	t += a.supermodelTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -765,6 +784,8 @@ func (a *app) handleEvents() {
 			a.xin.stopRumble()
 			messageBox(a.hwnd, "The game stopped: "+e.detail+"\n\nYou can load a save state (F4), reset (Ctrl+R) or open another game.",
 				"RetroPixels Native", mbIconError)
+		case "open": // a game double-clicked while this window was open
+			a.openPath(e.detail)
 		case "pad-save":
 			a.command(cmdSaveState)
 		case "pad-load":
@@ -776,6 +797,9 @@ func (a *app) handleEvents() {
 		case "rec-done":
 			a.recSaving--
 			a.showMessage("Recording saved: " + filepath.Base(e.detail))
+		case "rec-dropped": // too short to keep
+			a.recSaving--
+			a.updateTitle()
 		case "rec-error":
 			a.recSaving--
 			a.updateTitle()
@@ -785,7 +809,12 @@ func (a *app) handleEvents() {
 			a.updateTitle()
 		case "ff-done":
 			a.ffDownload = ""
-			a.showMessage("ffmpeg is ready: press F9 to record")
+			if a.sess != nil && !a.recOn && a.settings.autoRecord() {
+				a.autoRecordBuiltIn()
+				a.showMessage("ffmpeg is ready: recording")
+			} else {
+				a.showMessage("ffmpeg is ready: press F9 to record")
+			}
 		case "ff-error":
 			a.ffDownload = ""
 			a.updateTitle()
@@ -794,6 +823,8 @@ func (a *app) handleEvents() {
 			a.uiEvent(e.name, e.detail)
 			a.dolEvent(e.name, e.detail)
 			a.mameEvent(e.name, e.detail)
+			a.pixeluEvent(e.name, e.detail)
+			a.supermodelEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -818,6 +849,8 @@ func (a *app) command(id int) {
 		if p := a.openDialog(); p != "" {
 			a.openPath(p)
 		}
+	case id == cmdFileTypes:
+		a.chooseFileTypes()
 	case id == cmdExit:
 		call(pPostMessageW, a.hwnd, wmClose, 0, 0)
 	case id == cmdCloseGame:
@@ -905,8 +938,12 @@ func (a *app) command(id int) {
 		a.dipCommand(id)
 	case id >= cmdDolFirst && id <= cmdDolLast:
 		a.dolCommand(id)
+	case id >= cmdPixelUFirst && id <= cmdPixelULast:
+		a.pixeluCommand(id)
 	case id >= cmdMameFirst && id <= cmdMameLast:
 		a.mameCommand(id)
+	case id >= cmdSMFirst && id <= cmdSMLast:
+		a.supermodelCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
 		a.apCommand(id)
 	case id == cmdAbout:
@@ -940,6 +977,12 @@ func (a *app) volume() float32 {
 
 func (a *app) openPath(path string) {
 	if a.mameOpenPath(path) {
+		return
+	}
+	if a.supermodelOpenPath(path) { // swtrilgy.zip / swtrilgya.zip (MAME can't play it)
+		return
+	}
+	if a.pixeluOpenPath(path) {
 		return
 	}
 	if a.dolOpenPath(path) {
@@ -1017,6 +1060,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.resizeToScale()
 	s.start()
 	a.apGameStarted(s)
+	a.autoRecordBuiltIn() // Record > Record games automatically
 	a.updateTitle()
 }
 
@@ -1088,11 +1132,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() {
-		return
-	}
-	if a.mame.run != nil {
-		a.showMessage("MAME games aren't recorded by RetroPixels: capture this window with OBS, or use MAME's own recording")
+	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() {
 		return
 	}
 	s := a.sess
@@ -1138,7 +1178,9 @@ func (a *app) finishRecording(r *recorder) {
 	go func() {
 		defer a.recWG.Done()
 		path, err := r.stop()
-		if err != nil {
+		if errors.Is(err, errRecTooShort) {
+			a.event("rec-dropped", "")
+		} else if err != nil {
 			a.event("rec-error", err.Error())
 		} else {
 			a.event("rec-done", path)

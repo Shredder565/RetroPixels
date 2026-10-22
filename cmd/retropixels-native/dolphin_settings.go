@@ -1,8 +1,11 @@
 package main
 
-// GameCube / Wii through Dolphin (internal/dolphin): the settings kept in
-// settings.json and the parts of the GameCube / Wii menu and library that
-// aren't Windows calls (dolphin_windows.go has those).
+// GameCube / Wii through PixelU's Wii / GameCube engine
+// (PixelU\wii\PixelU-Wii.exe, based on Dolphin, GPL-2.0+; found by
+// internal/pixelu, started and recorded by internal/dolphin, as it's Dolphin
+// with a new name): the settings kept in settings.json and the parts of the
+// GameCube / Wii menu and library that aren't Windows calls
+// (dolphin_windows.go has those).
 
 import (
 	"archive/zip"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	"retropixels/internal/dolphin"
+	"retropixels/internal/pixelu"
 	"retropixels/sevenzip"
 )
 
@@ -22,13 +26,15 @@ import (
 // RetroPixels.exe's defaults (fullscreen, inside the window, recorded,
 // volume 100%).
 type DolphinSettings struct {
+	// Exe: the Dolphin.exe used before PixelU's engine. It isn't started any
+	// more; it's only where the old settings and games folders are found.
 	Exe        string               `json:"exe,omitempty"`
 	Folders    []string             `json:"folders,omitempty"`
 	Played     map[string]time.Time `json:"played,omitempty"` // by lower-cased path
 	Fullscreen *bool                `json:"fullscreen,omitempty"`
 	Embed      *bool                `json:"playInWindow,omitempty"`
-	AutoRecord *bool                `json:"autoRecord,omitempty"`
-	Volume     *int                 `json:"volume,omitempty"` // 0..100
+	AutoRecord *bool                `json:"autoRecord,omitempty"` // old: now Settings.AutoRecord (read once, see migrateAutoRecord)
+	Volume     *int                 `json:"volume,omitempty"`     // 0..100
 	Muted      bool                 `json:"muted,omitempty"`
 	Detected   bool                 `json:"detected,omitempty"` // looked for Dolphin and games once
 	Filter     string               `json:"libraryFilter,omitempty"`
@@ -44,7 +50,6 @@ func boolOr(p *bool, def bool) bool {
 
 func (d *DolphinSettings) fullscreen() bool { return boolOr(d.Fullscreen, true) }
 func (d *DolphinSettings) embed() bool      { return boolOr(d.Embed, true) }
-func (d *DolphinSettings) autoRecord() bool { return boolOr(d.AutoRecord, true) }
 
 func (d *DolphinSettings) volume() int {
 	if d.Volume == nil || *d.Volume < 0 || *d.Volume > 100 {
@@ -85,14 +90,47 @@ func (d *DolphinSettings) markPlayed(path string, t time.Time) {
 	}
 }
 
-// exe: Dolphin.exe if it's still there, else one RetroPixels downloaded, else "".
-func (d *DolphinSettings) exe() string {
-	if d.Exe != "" {
-		if st, err := os.Stat(d.Exe); err == nil && !st.IsDir() {
-			return d.Exe
+// noEngine: what to do when the engine isn't there.
+const noEngine = "PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels.exe " +
+	"(it must have wii\\PixelU-Wii.exe in it), then try again."
+
+// exe: PixelU's Wii / GameCube engine, in the PixelU folder Wii U games use
+// (pixeluChosen is the PixelU.exe the player chose, if any), else "". A
+// Dolphin.exe, even the one in Exe, is never used for games.
+func (d *DolphinSettings) exe(pixeluChosen string) string {
+	appDir := ""
+	if e, err := os.Executable(); err == nil {
+		appDir = filepath.Dir(e)
+	}
+	home, _ := os.UserHomeDir()
+	return pixelu.FindWiiExe(pixeluChosen, appDir, home)
+}
+
+// oldExe: the Dolphin.exe used before, if it's still there.
+func (d *DolphinSettings) oldExe() string {
+	for _, p := range []string{d.Exe, readAppDolphin(appConfigPath()).Exe} {
+		if p == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
 		}
 	}
-	return dolphin.Installed()
+	return ""
+}
+
+// importOld brings the player's settings, memory cards and Wii saves over
+// from the Dolphin they used before into the engine's User folder, the first
+// time only and never overwriting anything (pixelu.ImportDolphinUser). It
+// runs before anything is written in the engine's folder.
+func (d *DolphinSettings) importOld(engine string) {
+	if engine == "" {
+		return
+	}
+	if os.Getenv("RETRO_DOLPHIN_USER") != "" && os.Getenv("RETRO_OLD_DOLPHIN_USER") == "" {
+		return // tests with their own user folder
+	}
+	_, _ = pixelu.ImportDolphinUser(dolphin.LegacyUserDir(d.oldExe()), dolphin.UserDir(engine))
 }
 
 // addFolder adds a games folder unless it's already listed. (A folder inside
@@ -146,17 +184,14 @@ func readAppDolphin(path string) appDolphin {
 	return a
 }
 
-// detectDolphin finds Dolphin and the games folders the first time (it can
-// take a while: run it in the background). It starts from what
-// RetroPixels.exe found, then looks around as RetroPixels.exe does.
-func detectDolphin(have DolphinSettings) (exe string, folders []string, played map[string]time.Time) {
+// detectDolphin finds the games folders the first time (it can take a
+// while: run it in the background), starting from what RetroPixels.exe
+// found, and the Dolphin used before (exe, only to find the old settings and
+// games). Games folders are otherwise guessed near that Dolphin, else near
+// PixelU's engine (engine).
+func detectDolphin(have DolphinSettings, engine string) (exe string, folders []string, played map[string]time.Time) {
 	app := readAppDolphin(appConfigPath())
-	exe = have.exe()
-	if exe == "" && app.Exe != "" {
-		if st, err := os.Stat(app.Exe); err == nil && !st.IsDir() {
-			exe = app.Exe
-		}
-	}
+	exe = have.oldExe()
 	folders = have.Folders
 	if len(folders) == 0 {
 		for _, f := range app.Folders {
@@ -165,11 +200,13 @@ func detectDolphin(have DolphinSettings) (exe string, folders []string, played m
 			}
 		}
 	}
-	if exe == "" {
-		exe = dolphin.FindExe(folders)
-	}
-	if len(folders) == 0 && exe != "" {
-		folders = dolphin.GuessFolders(exe)
+	if near := exe; len(folders) == 0 {
+		if near == "" {
+			near = engine
+		}
+		if near != "" {
+			folders = dolphin.GuessFolders(near)
+		}
 	}
 	played = map[string]time.Time{}
 	for _, r := range app.Recent {

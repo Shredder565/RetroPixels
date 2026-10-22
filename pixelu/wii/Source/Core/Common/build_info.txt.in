@@ -1,0 +1,10 @@
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+// Facts about this Windows build for an updater, one key=value per line.
+// PixelU-Wii is built without its updater, so nothing reads this today.
+// Oldest Windows releases the program runs on:
+OSMinimumVersionWin10=10.0.18362.0
+OSMinimumVersionWin11=10.0.22000.0
+// Product version of the Visual C++ runtime the program was built against
+// (that of vc_redist.x64.exe, which is what the installed runtime reports):
+VCToolsVersion=${VC_TOOLS_VERSION}
+VCToolsUpdateURL=https://aka.ms/vc14/vc_redist.x64.exe

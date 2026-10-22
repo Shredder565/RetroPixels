@@ -7,16 +7,20 @@
 // vpad, gx2 and the rest: hle.go and the files named after each library).
 // This is the approach Cemu and decaf-emu take too.
 //
-// What runs today: homebrew programs (.rpx) that draw with OSScreen, read the
-// GamePad and use threads, memory heaps and the other core OS services. The
-// GPU (GX2 / Latte) is the next big piece.
+// What runs today: homebrew programs (.rpx) that draw with OSScreen or GX2,
+// read the GamePad and use threads, memory heaps and the other core OS
+// services. The GPU (Latte) has a software renderer (latte_*.go) and, on
+// Windows, a Direct3D 11 backend that translates its shaders
+// (latte_dxbc*.go, latte_d3d_windows.go).
 package wiiu
 
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -69,6 +73,8 @@ type Machine struct {
 	heaps  *Heaps
 	screen *OSScreen
 	gx2    *GX2
+	gpu    *Latte
+	audio  *AX
 	pad    *GamePad
 	procui *ProcUI
 
@@ -82,15 +88,35 @@ type Machine struct {
 	jumped bool // a library call set PC itself
 	fs     *fsState
 
-	bootTime    uint64
-	rumbleUntil uint64
-	startStep   int
-	homeMenu    bool
-	intsOff     [3]bool
-	dynHandles  map[uint32]string
-	dynAlloc    uint32
-	dynFree     uint32
-	perThread   map[string]uint32
+	bootTime           uint64
+	rumbleUntil        uint64
+	initQueue          []*Module // loaded modules whose entry point hasn't run yet
+	dynReturn          map[*Thread]uint32
+	loading            map[string]bool // title libraries being loaded
+	homeMenu           bool
+	resched            bool // a thread that should take the running thread's core is ready
+	dynHandles         map[uint32]string
+	dynAlloc           uint32
+	fontAddr, fontSize uint32 // the system font, once a program asks
+	fontTried          bool
+	gpuNote            string               // why there's no host GPU
+	missing            []string             // functions called that aren't here yet
+	vmNext             uint32               // the next free virtual address (coreinit_vm.go)
+	vmMaps             map[uint32]uint32    // mapped virtual pages: their physical address
+	lcache             [3]lockedCache       // each core's locked cache
+	flockWord          uint32               // the C library's file lock (stubs_more.go)
+	hleCalls           []uint32             // how often each library call was made (for the log)
+	hleLast            uint32               // the latest library call (for the log)
+	recent             [recentCalls]callRec // the last library calls (diag.go)
+	recentPos          int
+	apertures          map[uint32]*aperture // open tiling apertures by handle
+	apAddrs            []uint32             // the last aperture surface's element addresses
+	apAddrsKey         apertureKey
+	nextAperture       uint32
+	zstreams           map[uint32]*zInflate   // zlib inflate streams by z_stream address
+	conts              map[uint32][]guestCont // by thread: what HLE functions do after calls into the program
+	dynFree            uint32
+	perThread          map[string]uint32
 
 	// Log gets the program's console output (OSReport) and RetroPixels'
 	// notes about it.
@@ -126,6 +152,9 @@ func newMachine(files *FileSystem) *Machine {
 	if m.Files == nil {
 		m.Files = NewFileSystem()
 	}
+	if jitSupported && os.Getenv("RETROPIXELS_WIIU_JIT") != "0" {
+		m.Mem.jit = newJIT(m.Mem)
+	}
 	m.Mem.Fault = func(addr uint32, write bool) {
 		c := m.runningCPU()
 		pc := uint32(0)
@@ -154,6 +183,7 @@ func newMachine(files *FileSystem) *Machine {
 	m.heaps = newHeaps()
 	m.screen = newOSScreen()
 	m.gx2 = newGX2()
+	m.gpu = newLatte(m)
 	m.pad = &GamePad{}
 	m.procui = &ProcUI{}
 	m.initSystemData()
@@ -244,7 +274,8 @@ func (m *Machine) load(rpx []byte, name string) error {
 	return nil
 }
 
-// loadModule loads an RPX or RPL. RPLs go after what's already loaded.
+// loadModule loads an RPX or RPL. RPLs go after what's already loaded
+// (including modules still loading, whose imports load this one).
 func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, error) {
 	plan := LoadPlan{}
 	if relocate {
@@ -254,28 +285,79 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		for _, mod := range m.Modules {
 			textEnd = max(textEnd, mod.TextHi)
 			dataEnd = max(dataEnd, mod.DataHi)
+			loadEnd = max(loadEnd, mod.LoadHi)
 		}
-		loadEnd += uint32(len(m.Modules)) * 0x100000
 		plan.TextAt = (textEnd + 0xfff) &^ 0xfff
 		plan.DataAt = (dataEnd + 0xfff) &^ 0xfff
-		plan.LoadAt = loadEnd
+		plan.LoadAt = (loadEnd + 0xffff) &^ 0xffff
+		if m.heaps.defaultHeap != 0 {
+			// MEM2 belongs to the heaps by now: the data goes in the
+			// default heap, as the loader's default allocator would put it
+			plan.DataAlloc = func(size uint32) uint32 { return m.expAlloc(m.heaps.defaultHeap, size, 0x1000) }
+		}
+	}
+	var placed *Module
+	plan.Placed = func(mod *Module) {
+		placed = mod
+		m.Modules = append(m.Modules, mod)
+		mod.TLSIndex = uint32(len(m.Modules))
 	}
 	mod, err := LoadRPL(m.Mem, b, name, plan, m, m.tramp)
 	if err != nil {
+		if placed != nil {
+			for i, x := range m.Modules {
+				if x == placed {
+					m.Modules = append(m.Modules[:i], m.Modules[i+1:]...)
+					break
+				}
+			}
+		}
 		if m.Err != nil {
 			return nil, m.Err
 		}
 		return nil, err
 	}
-	m.Modules = append(m.Modules, mod)
-	mod.TLSIndex = uint32(len(m.Modules))
-	if mod.DataHi > m.dataEnd {
+	if placed == nil { // (a loader without the callback)
+		m.Modules = append(m.Modules, mod)
+		mod.TLSIndex = uint32(len(m.Modules))
+	}
+	m.Mem.InvalidateCode(mod.TextLo, mod.TextHi-mod.TextLo)
+	// entry points run dependencies first: the order loads finish in
+	m.initQueue = append(m.initQueue, mod)
+	if plan.DataAlloc == nil && mod.DataHi > m.dataEnd {
 		m.dataEnd = mod.DataHi
 	}
 	if m.Err != nil {
 		return nil, m.Err
 	}
 	return mod, nil
+}
+
+// titleLibrary loads one of the title's own RPLs from its code folder, if
+// it has it (nil if not).
+func (m *Machine) titleLibrary(lib string) (*Module, error) {
+	b, err := m.Files.ReadCode(lib + ".rpl")
+	if err != nil {
+		return nil, nil
+	}
+	mod, err := m.loadModule(b, lib+".rpl", true)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't load %s.rpl: %v", lib, err)
+	}
+	return mod, nil
+}
+
+// nextInit takes the next module whose entry point should run (not the
+// main program's).
+func (m *Machine) nextInit() *Module {
+	for len(m.initQueue) > 0 {
+		mod := m.initQueue[0]
+		m.initQueue = m.initQueue[1:]
+		if mod != m.mainModule() && mod.Entry != 0 {
+			return mod
+		}
+	}
+	return nil
 }
 
 // startMain makes the heaps and the main thread.
@@ -294,12 +376,10 @@ func (m *Machine) startMain() {
 		if core == 1 {
 			size = stack
 		}
-		st := m.heaps.allocSystem(m, size, 64) + size
-		t := m.newThread(addr, 0, 0, 0, st, size, 16, 1<<core)
-		t.Attr = 1 << core
+		st := m.allocSystem(size, 64) + size
+		t := m.initThread(addr, 0, 0, 0, st, size, 16, 1<<core, threadApp)
+		m.activate(t)
 		m.defaultTh[core] = t
-		t.State = thDormant
-		t.Suspend = 0
 		if core == 1 {
 			// argv: the program's name
 			argv := m.sysAlloc(16, 8)
@@ -376,10 +456,10 @@ func (m *Machine) RunFrame() {
 func (m *Machine) runCore(core int) bool {
 	c := m.CPU[core]
 	t := m.current[core]
-	if t == nil || t.State != thReady {
+	if t == nil || !t.runnable(core) {
 		t = m.pick(core)
 		m.setCurrent(core, t)
-	} else if n := m.pick(core); n != nil && n.Priority <= t.Priority {
+	} else if n := m.pick(core); n != nil && n.Priority <= t.Priority && !t.IntsOff {
 		// a higher-priority thread, or one of the same priority's turn
 		if n.Priority < t.Priority || n.LastRun < t.LastRun {
 			t = n
@@ -401,7 +481,13 @@ func (m *Machine) runCore(core int) bool {
 			m.Err = m.crashReport(c, t)
 			break
 		}
-		if t.blocked || t.State != thReady || m.current[core] != t {
+		if t.blocked && t.IntsOff && t.runnable(core) && m.current[core] == t {
+			// spinning with interrupts off: keep the core, and let the
+			// other cores have their turns
+			t.blocked = false
+			break
+		}
+		if t.blocked || !t.runnable(core) || m.current[core] != t {
 			t.blocked = false
 			m.syncThread(t)
 			// another thread can use the rest of the slice
@@ -443,6 +529,8 @@ func (m *Machine) crashReport(c *CPU, t *Thread) error {
 		b.WriteString(" in " + s)
 	}
 	fmt.Fprintf(&b, "\nLR %08X%s", c.LR, m.where(c.LR))
+	m.logf("crash details:\n%s\n%s\n%s\nthe last library calls:\n%s", registers(c.Context),
+		m.CodeAt(c.Err.(*CPUError).PC), m.CodeAt(c.LR), m.RecentCalls())
 	return errors.New(b.String())
 }
 
@@ -460,8 +548,79 @@ func (m *Machine) ThreadsSummary() string {
 	ts := append([]*Thread(nil), m.threadList...)
 	sort.Slice(ts, func(i, j int) bool { return ts[i].ID < ts[j].ID })
 	for _, t := range ts {
-		fmt.Fprintf(&b, "thread %d %q state %d prio %d pc %08X%s wait %x\n", t.ID, m.Mem.String(t.Name, 64),
-			t.State, t.Priority, t.Ctx.PC, m.where(t.Ctx.PC), t.WaitKey)
+		fmt.Fprintf(&b, "thread %d %q state %d suspend %d prio %d pc %08X%s wait %x\n", t.ID,
+			m.Mem.String(m.Mem.Read32(t.Addr+osThreadName), 64), t.State, t.Suspend, t.BasePrio-typePriorityBase(t.Type), t.Ctx.PC,
+			m.where(t.Ctx.PC), t.WaitKey)
+		fmt.Fprintf(&b, "    called from %08X%s%s\n", t.Ctx.LR, m.where(t.Ctx.LR), m.backtrace(t.Ctx.GPR[1]))
+	}
+	return b.String()
+}
+
+// Stats is a one-line summary of how the program is getting on, for logs.
+func (m *Machine) Stats() string {
+	return fmt.Sprintf("frame %d, pictures shown %d, draws %d, renderer %s", m.Frame, m.gx2.Flips, m.gpu.Draws, m.Renderer())
+}
+
+// backtrace follows a thread's stack frames (the back chain at each
+// frame's start, the caller's return address 4 bytes into the next).
+func (m *Machine) backtrace(sp uint32) string {
+	var b strings.Builder
+	for i := 0; i < 6; i++ {
+		if sp == 0 || sp&3 != 0 || !m.Mem.Mapped(sp) {
+			break
+		}
+		next := m.Mem.Read32(sp)
+		if next <= sp || !m.Mem.Mapped(next) {
+			break
+		}
+		lr := m.Mem.Read32(next + 4)
+		fmt.Fprintf(&b, "\n      < %08X%s", lr, m.where(lr))
+		sp = next
+	}
+	return b.String()
+}
+
+// BusyCalls lists the library calls made most since the last time it was
+// asked, for the log: a program stuck in a loop shows what it's waiting on.
+func (m *Machine) BusyCalls() string {
+	type nc struct {
+		n    uint32
+		name string
+	}
+	var l []nc
+	for i, n := range m.hleCalls {
+		if n > 0 {
+			l = append(l, nc{n, m.hle[i].lib + "." + m.hle[i].name})
+			m.hleCalls[i] = 0
+		}
+	}
+	sort.Slice(l, func(i, j int) bool { return l[i].n > l[j].n })
+	if len(l) > 15 {
+		l = l[:15]
+	}
+	parts := make([]string, len(l))
+	for i, x := range l {
+		parts[i] = fmt.Sprintf("%s x%d", x.name, x.n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// LastCall is the latest library call made. It may be read while the
+// machine runs (for a watchdog), so it's only a hint.
+func (m *Machine) LastCall() string {
+	n := atomic.LoadUint32(&m.hleLast)
+	if int(n) >= len(m.hle) {
+		return "?"
+	}
+	return m.hle[n].lib + "." + m.hle[n].name
+}
+
+// CorePCs is where each core last stopped, as a hint for a watchdog (it may
+// be read while the machine runs).
+func (m *Machine) CorePCs() string {
+	var b strings.Builder
+	for i, c := range m.CPU {
+		fmt.Fprintf(&b, " core %d pc %08X lr %08X", i, c.PC, c.LR)
 	}
 	return b.String()
 }

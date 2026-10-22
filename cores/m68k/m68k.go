@@ -87,8 +87,13 @@ type CPU struct {
 	nmiSeen bool // level 7 is edge-triggered
 	// TASWrites: whether TAS writes its result back (the Genesis bus ignores the write).
 	TASWrites bool
-	op        uint32 // opcode being executed
-	opPC      uint32 // where it started
+	// BranchHooks: run an A-line or F-line opcode that has a backward short
+	// branch in its low 12 bits as that branch (Bcc.b), instead of trapping.
+	// Some re-released Genesis ROMs (the Sonic Classic Collection dumps) mark
+	// their wait loops this way for their own emulator.
+	BranchHooks bool
+	op          uint32 // opcode being executed
+	opPC        uint32 // where it started
 
 	table *[65536]opFunc
 }

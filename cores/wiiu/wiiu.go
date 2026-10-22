@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"retropixels/core"
 	machine "retropixels/wiiu"
@@ -34,13 +37,15 @@ const (
 
 // ControlsNote is shown in the Controls window.
 const ControlsNote = "Left stick and right stick = the GamePad's sticks. " +
-	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now; games come in later versions."
+	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now. For a game, open the .rpx in its code folder, " +
+	"a .wua, or the title.tmd of an encrypted title (with your console's common key in a keys.txt next to it or next to RetroPixels)."
 
 // WiiU is one running program.
 type WiiU struct {
 	m    *machine.Machine
 	rpx  []byte
 	name string
+	path string
 	rate int
 
 	buttons uint32
@@ -53,6 +58,11 @@ type WiiU struct {
 	w, h   int
 	audio  []float32
 	frac   float64
+	lastL  float32
+	lastR  float32
+
+	log   *gameLog
+	ended bool // the end (or crash) is in the log
 }
 
 // New starts a program (.rpx).
@@ -61,11 +71,16 @@ func New(rpx []byte, opts core.Options) (core.Core, error) {
 	if name == "" {
 		name = "game.rpx"
 	}
-	m, err := machine.New(rpx, name, nil)
+	c := &WiiU{rpx: rpx, name: name, path: opts.Path, rate: opts.SampleRate}
+	c.log = openLog(opts.Path)
+	m, err := c.start(opts.SRAM)
 	if err != nil {
+		c.log.printf("couldn't start the game: %v", err)
+		c.log.close()
 		return nil, err
 	}
-	c := &WiiU{m: m, rpx: rpx, name: name, rate: opts.SampleRate}
+	c.m = m
+	c.log.attach(m)
 	if c.rate <= 0 {
 		c.rate = 48000
 	}
@@ -103,7 +118,19 @@ func (c *WiiU) AnalogStick() bool { return true }
 // UsesRightStick: the right stick is the GamePad's.
 func (c *WiiU) UsesRightStick() bool { return true }
 
-func (c *WiiU) ControlsNote() string { return ControlsNote }
+func (c *WiiU) ControlsNote() string {
+	if c.m == nil {
+		return ControlsNote
+	}
+	note := ControlsNote + " Drawing with " + c.m.Renderer() + "."
+	if miss := c.m.Missing(); len(miss) > 0 {
+		if len(miss) > 12 {
+			miss = append(miss[:12:12], "...")
+		}
+		note += " Not in RetroPixels yet (this game called them): " + strings.Join(miss, ", ") + "."
+	}
+	return note
+}
 
 func (c *WiiU) Rumble() float32 {
 	if c.m.Rumble() {
@@ -153,15 +180,45 @@ func (c *WiiU) RunFrame() {
 	}
 	c.prev = c.buttons
 	c.m.SetGamePad(c.pad())
+	defer func() {
+		if r := recover(); r != nil {
+			c.log.printf("RetroPixels crashed: %v\r\n%s\r\n%s", r, c.m.Stats(), c.m.ThreadsSummary())
+			panic(r)
+		}
+	}()
+	c.log.begin(c.m.Frame)
 	c.m.RunFrame()
+	c.log.end()
+	c.log.frame(c.m)
+	if (c.m.Exited || c.m.Err != nil) && !c.ended {
+		c.ended = true
+		if c.m.Err != nil {
+			c.log.printf("the program stopped: %v", c.m.Err)
+		}
+		c.log.printf("[%s]\r\n%s", c.m.Stats(), c.m.ThreadsSummary())
+		c.log.printf("the last library calls:\r\n%s\r\n%s", c.m.RecentCalls(), c.m.StuckReport())
+	}
 	c.takePicture()
-	// silence, at the frame's share of the sample rate, so the sound card
-	// keeps the pace
-	c.frac += float64(c.rate) / machine.FPS
-	n := int(c.frac)
-	c.frac -= float64(n)
-	for i := 0; i < n; i++ {
-		c.audio = append(c.audio, 0, 0)
+	c.takeSound()
+}
+
+// takeSound converts the machine's 48 kHz sound to the output rate.
+func (c *WiiU) takeSound() {
+	in := c.m.TakeAudio()
+	if c.rate == 48000 {
+		c.audio = append(c.audio, in...)
+		return
+	}
+	step := 48000 / float64(c.rate)
+	for i := 0; i+1 < len(in); i += 2 {
+		l, r := in[i], in[i+1]
+		for c.frac < 1 {
+			t := float32(c.frac)
+			c.audio = append(c.audio, c.lastL+(l-c.lastL)*t, c.lastR+(r-c.lastR)*t)
+			c.frac += step
+		}
+		c.frac--
+		c.lastL, c.lastR = l, r
 	}
 }
 
@@ -188,6 +245,12 @@ func (c *WiiU) takePicture() {
 		msg = fmt.Sprintf("The program ended (exit code %d).", int32(c.m.ExitCode))
 	}
 	if msg != "" {
+		if miss := c.m.Missing(); len(miss) > 0 {
+			if len(miss) > 8 {
+				miss = append(miss[:8:8], "...")
+			}
+			msg += " It used things RetroPixels doesn't have yet: " + strings.Join(miss, ", ") + "."
+		}
 		machine.DrawText(c.screen[:w*h], w, h, machine.WrapText(msg, w/12-4))
 	}
 }
@@ -198,10 +261,57 @@ func (c *WiiU) TakeAudio() []float32 {
 	return a
 }
 
-// Reset starts the program again.
+// start makes the machine: a program in a title's code folder gets the
+// title's folders, and its saves come back from sram.
+func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
+	files := machine.TitleFolders(c.path)
+	if c.path != "" && strings.EqualFold(filepath.Ext(c.path), ".wua") {
+		rpx, name, f, err := machine.TitleFromWUA(c.path)
+		if err != nil {
+			return nil, err
+		}
+		c.rpx, c.name, files = rpx, name, f
+	} else if c.isNUS() {
+		// an encrypted title: its title.tmd was opened
+		var keyDirs []string
+		if exe, err := os.Executable(); err == nil {
+			keyDirs = append(keyDirs, filepath.Dir(exe))
+		}
+		rpx, name, f, err := machine.TitleFromNUS(filepath.Dir(c.path), keyDirs...)
+		if err != nil {
+			return nil, err
+		}
+		c.rpx, c.name, files = rpx, name, f
+	}
+	if files == nil {
+		files = machine.NewFileSystem()
+	}
+	if len(sram) > 0 {
+		if err := files.LoadSaveData(sram); err != nil {
+			return nil, err
+		}
+	}
+	m, err := machine.New(c.rpx, c.name, files)
+	if err != nil {
+		return nil, err
+	}
+	m.UseHostGPU()
+	return m, nil
+}
+
+// isNUS: the file opened is an encrypted title's title.tmd.
+func (c *WiiU) isNUS() bool {
+	return c.path != "" && strings.EqualFold(filepath.Ext(c.path), ".tmd")
+}
+
+// Reset starts the program again (with the saves it made).
 func (c *WiiU) Reset() {
-	if m, err := machine.New(c.rpx, c.name, nil); err == nil {
+	if m, err := c.start(c.SRAM()); err == nil {
+		c.m.Close()
 		c.m = m
+		c.ended = false
+		c.log.printf("reset")
+		c.log.attach(m)
 	}
 }
 
@@ -213,4 +323,11 @@ func (c *WiiU) LoadState([]byte) error {
 	return errors.New("save states aren't available for the Wii U yet")
 }
 
-func (c *WiiU) SRAM() []byte { return nil }
+// Close lets go of the host GPU.
+func (c *WiiU) Close() {
+	c.m.Close()
+	c.log.close()
+}
+
+// SRAM: the program's save files.
+func (c *WiiU) SRAM() []byte { return c.m.Files.SaveData() }

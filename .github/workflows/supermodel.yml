@@ -1,0 +1,187 @@
+name: Supermodel (Sega Model 3) build
+
+# Builds RetroPixels' Supermodel from supermodel/: the pinned upstream commit
+# with RetroPixels' patches (GPL-3.0). supermodel.exe is cross-built for
+# 64-bit Windows with MinGW-w64 on Ubuntu 24.04, against the SDL2, SDL2_net
+# and zlib releases pinned (with SHA-256) in supermodel/pins.sh. The Linux
+# build of the same source is made on Ubuntu 22.04 (glibc 2.35 and later),
+# with the pinned SDL2 and SDL2_net built from source and bundled in
+# Supermodel/lib, and started headless as a check. The results are workflow
+# artifacts only (Supermodel-windows-x64, Supermodel-linux-x64): no release
+# is made. bundle-test.yml calls this workflow to put Supermodel in the
+# RetroPixels test download, bundle-linux.yml (targets: linux) in the Linux
+# one.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      targets:
+        description: "Which builds to make: windows, linux or both"
+        type: string
+        default: "windows linux"
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - "supermodel/**"
+      - ".github/workflows/supermodel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    # inputs.targets is empty on push and workflow_dispatch: both builds.
+    if: contains(inputs.targets || 'windows linux', 'windows')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MinGW-w64
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64
+          dpkg -l | grep -E 'mingw-w64' | awk '{print $2, $3}'
+          x86_64-w64-mingw32-g++-posix --version | head -n 1
+
+      - name: Build supermodel.exe
+        run: sh supermodel/build.sh windows package
+
+      - name: Check the program
+        run: |
+          exe=package/Supermodel/supermodel.exe
+          test -s "$exe"
+          x86_64-w64-mingw32-objdump -p "$exe" > pe.txt
+          grep -q 'Subsystem.*Windows CUI' pe.txt
+          # Statically linked: only DLLs that come with Windows.
+          dlls=$(grep 'DLL Name' pe.txt | awk '{print tolower($3)}' | sort -u | tr '\n' ' ')
+          echo "imports: $dlls"
+          for d in $dlls; do
+            case "$d" in
+              advapi32.dll|gdi32.dll|glu32.dll|imm32.dll|iphlpapi.dll|kernel32.dll|msvcrt.dll|ole32.dll|oleaut32.dll|opengl32.dll|setupapi.dll|shell32.dll|user32.dll|version.dll|winmm.dll|ws2_32.dll) ;;
+              *) echo "unexpected DLL: $d"; exit 1 ;;
+            esac
+          done
+          # RetroPixels' changes are in it.
+          grep -a -q 'rp-record' "$exe"
+          grep -a -q 'SUPERMODEL_HOME' "$exe"
+          grep -a -q 'retropixels-1' "$exe"
+          test -f package/Supermodel/RetroPixels.txt
+          test -f package/Supermodel/Config/Games.xml
+          test -f package/Supermodel/LICENSE.txt
+          tar -tzf package/Supermodel/Supermodel-source.tar.gz | grep -q 'Supermodel/Src/OSD/RetroPixels.cpp'
+          cat package/Supermodel/VERSION.txt
+          ls -la package/Supermodel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Supermodel-windows-x64
+          path: package
+          retention-days: 14
+
+  # Supermodel for the Linux download: built on 22.04 so it runs on glibc
+  # 2.35 and later; SDL2, SDL2_net and GLU go in Supermodel/lib (found through
+  # RUNPATH $ORIGIN/lib), everything else it loads is on every desktop. The
+  # artifact holds Supermodel-linux.tar.gz (a zip loses the exec bits) and a
+  # copy of its VERSION.txt.
+  linux:
+    if: contains(inputs.targets || 'windows linux', 'linux')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only headers and build tools: SDL is built from the pinned source, and
+      # no SDL package is installed, so the checks below run on the bundled one.
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential cmake pkg-config \
+            libgl-dev libegl-dev libglu1-mesa-dev zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxxf86vm-dev libxss-dev libxfixes-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdrm-dev libgbm-dev \
+            libpulse-dev libpipewire-0.3-dev libasound2-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            xvfb xauth mesa-utils libgl1-mesa-dri
+          # (Shows if the runner image has an SDL of its own; the checks
+          # below make sure the bundled one is what's loaded.)
+          dpkg -l 'libsdl2*' 2>/dev/null | grep '^ii' || echo "no SDL package installed"
+          gcc --version | head -n 1
+          ldd --version | head -n 1
+
+      # The pinned SDL2 and SDL2_net, built once per pin (supermodel/build.sh
+      # checks each download's SHA-256 before building it).
+      - uses: actions/cache@v4
+        with:
+          path: supermodel/build/deps/linux
+          key: supermodel-linux-deps-ubuntu-22.04-${{ hashFiles('supermodel/pins.sh', 'supermodel/build.sh') }}
+
+      - name: Build for Linux
+        run: sh supermodel/build.sh linux linux-package
+
+      - name: Check the program
+        run: |
+          sm=linux-package/Supermodel
+          test -x "$sm/supermodel"
+          for f in libSDL2-2.0.so.0 libSDL2_net-2.0.so.0 libGLU.so.1 LICENSES/SDL2.txt LICENSES/SDL2_net.txt LICENSES/GLU.txt; do
+            test -s "$sm/lib/$f"
+          done
+          readelf -d "$sm/supermodel" | grep -q 'RUNPATH.*\[\$ORIGIN/lib\]'
+          # Nothing above glibc 2.35 (the oldest Linux the download is for).
+          max=$(objdump -T "$sm/supermodel" "$sm"/lib/*.so* | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
+          echo "newest glibc symbol: $max"
+          [ "$(printf '%s\n2.35\n' "$max" | sort -V | tail -n 1)" = 2.35 ]
+          # RetroPixels' changes are in it.
+          grep -a -q 'rp-record' "$sm/supermodel"
+          grep -a -q 'SUPERMODEL_HOME' "$sm/supermodel"
+          grep -a -q 'retropixels-1' "$sm/supermodel"
+          test -f "$sm/RetroPixels.txt" && test -f "$sm/Config/Games.xml" && test -f "$sm/LICENSE.txt"
+          tar -tzf "$sm/Supermodel-source.tar.gz" | grep -q 'Supermodel/Src/OSD/RetroPixels.cpp'
+          cat "$sm/VERSION.txt"
+          mkdir -p linux-artifact
+          tar -C linux-package -czf linux-artifact/Supermodel-linux.tar.gz Supermodel
+          cp "$sm/VERSION.txt" linux-artifact/VERSION.txt
+          ls -la linux-artifact
+
+      # The packed copy, unpacked somewhere else, as a player would.
+      - name: Start it headless
+        run: |
+          mkdir -p "$RUNNER_TEMP/try"
+          tar -xzf linux-artifact/Supermodel-linux.tar.gz -C "$RUNNER_TEMP/try"
+          cd "$RUNNER_TEMP/try/Supermodel"
+          ldd ./supermodel | tee ldd.txt
+          if grep -q 'not found' ldd.txt; then exit 1; fi
+          grep -Eq "libSDL2-2.0.so.0 => $PWD/(\./)?lib/" ldd.txt
+          grep -Eq "libSDL2_net-2.0.so.0 => $PWD/(\./)?lib/" ldd.txt
+          export SUPERMODEL_HOME="$RUNNER_TEMP/smhome"
+          ./supermodel -help | tee help.txt
+          grep -q -- '-rp-record' help.txt
+          grep -q -- '-desktop-res' help.txt
+          ./supermodel -print-games | grep -q 'swtrilgya'
+          # The player's own files go to SUPERMODEL_HOME.
+          test -f "$SUPERMODEL_HOME/Config/Supermodel.ini"
+          test -f "$SUPERMODEL_HOME/Log/Supermodel.log"
+          grep -q 'retropixels-1' "$SUPERMODEL_HOME/Log/Supermodel.log"
+          # OpenGL works under Xvfb with Mesa (llvmpipe), through the bundled SDL.
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1280x1024x24' ./supermodel -print-gl-info | tee gl.txt
+          grep -q 'Version' gl.txt
+          # No ROM set: it must say so, not crash.
+          set +e
+          xvfb-run -a ./supermodel "$RUNNER_TEMP/swtrilgya.zip" > norom.txt 2>&1
+          code=$?
+          set -e
+          cat norom.txt
+          [ "$code" -ne 0 ] && [ "$code" -lt 128 ]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Supermodel-linux-x64
+          path: linux-artifact
+          compression-level: 0
+          retention-days: 14
+
+      - name: RetroPixels' Supermodel code (Go)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: go test ./internal/supermodel/ . -run 'Supermodel|CheckROM|FindROM|GameArgs|INI|FindExe|Problem|Command'

@@ -1,0 +1,15 @@
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// Generated at build time from AchievementApprovedHash.h.in: the SHA-1 of the
+// Sys/ApprovedInis.json this build ships. RetroAchievements hardcore mode
+// trusts the per-game settings list only when its hash is this one.
+
+#pragma once
+
+#include <string_view>
+
+#include "Common/Crypto/SHA1.h"
+
+static constexpr std::string_view ACHIEVEMENT_APPROVED_LIST_FILENAME = "ApprovedInis.json";
+static constinit inline Common::SHA1::Digest ACHIEVEMENT_APPROVED_LIST_HASH =
+    Common::SHA1::StringToDigest("@ACHIEVEMENT_APPROVED_LIST_HASH@");

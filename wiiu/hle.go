@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 type hleFunc func(m *Machine, c *CPU, t *Thread)
@@ -80,20 +81,28 @@ func (m *Machine) thunk(lib, name string) uint32 {
 	m.hleIndex[key] = i
 	m.Mem.Write32(addr, 0x04000000|i)
 	m.Mem.Write32(addr+4, 0x4e800020) // blr (for disassemblers)
+	m.Mem.InvalidateCode(addr, 8)
 	return addr
 }
 
 // HasFunc reports whether RetroPixels has its own version of lib.name.
 func HasFunc(lib, name string) bool { return hleFuncs[libName(lib)][name] != nil }
 
+// Missing lists the library functions the program called that RetroPixels
+// doesn't have yet, in the order they were first called.
+func (m *Machine) Missing() []string { return m.missing }
+
 func unimplemented(lib, name string) hleFunc {
 	return func(m *Machine, c *CPU, t *Thread) {
 		key := lib + "." + name
 		if !m.warned[key] {
 			m.warned[key] = true
+			m.missing = append(m.missing, name)
 			m.logf("not yet in RetroPixels: %s (called from %08X)", key, c.LR)
 		}
-		c.GPR[3] = 0
+		if !strings.HasPrefix(name, "__ct__") {
+			c.GPR[3] = 0 // (a constructor hands back the object it made, already in r3)
+		}
 	}
 }
 
@@ -109,7 +118,9 @@ func (m *Machine) dataExport(lib, name string) uint32 {
 		if hleFuncs[lib][name] != nil {
 			def = hleDataDef{4, func(m *Machine, a uint32) { m.Mem.Write32(a, m.thunk(lib, name)) }}
 		} else {
-			m.logf("not yet in RetroPixels: data %s", key)
+			if !isSectionSym(name) {
+				m.logf("not yet in RetroPixels: data %s", key)
+			}
 			def = hleDataDef{0x100, nil}
 		}
 	}
@@ -128,7 +139,34 @@ func (m *Machine) Import(lib, name string, data bool) (uint32, error) {
 		if a, ok := mod.Exports[name]; ok {
 			return a, nil
 		}
+		if isSectionSym(name) {
+			return m.dataExport(lib, name), nil
+		}
 		return 0, fmt.Errorf("%s has no %s", lib, name)
+	}
+	// one of the title's own libraries
+	if hleFuncs[lib] == nil && hleData[lib] == nil && !knownLibs[lib] {
+		if m.loading[lib] {
+			return 0, fmt.Errorf("%s imports itself in a loop", lib)
+		}
+		if m.loading == nil {
+			m.loading = map[string]bool{}
+		}
+		m.loading[lib] = true
+		mod, err := m.titleLibrary(lib)
+		delete(m.loading, lib)
+		if err != nil {
+			return 0, err
+		}
+		if mod != nil {
+			if a, ok := mod.Exports[name]; ok {
+				return a, nil
+			}
+			if isSectionSym(name) {
+				return m.dataExport(lib, name), nil
+			}
+			return 0, fmt.Errorf("%s has no %s", lib, name)
+		}
 	}
 	if data {
 		return m.dataExport(lib, name), nil
@@ -143,6 +181,11 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 	}
 	e := &m.hle[n]
 	t := m.current[c.Core]
+	if int(n) >= len(m.hleCalls) {
+		m.hleCalls = append(m.hleCalls, make([]uint32, len(m.hle)-len(m.hleCalls))...)
+	}
+	m.hleCalls[n]++
+	atomic.StoreUint32(&m.hleLast, n)
 	if m.Trace != nil {
 		m.Trace(fmt.Sprintf("[%d] %s.%s(%08X %08X %08X %08X) from %08X", c.Core, e.lib, e.name,
 			c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6], c.LR))
@@ -150,11 +193,21 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 	if t != nil {
 		t.blocked = false
 	}
+	m.resched = false
+	args := [4]uint32{c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6]}
 	e.fn(m, c, t)
+	m.noteCall(n, c, args)
 	if t != nil && t.blocked {
 		c.PC -= 4 // run this call again when the thread wakes
 		c.Stop()
 		return
+	}
+	if t != nil {
+		t.doneWaiting()
+		if m.resched && m.current[c.Core] == t {
+			// a higher-priority thread for this core is ready: it runs now
+			m.preempt(c)
+		}
 	}
 	if m.jumped {
 		m.jumped = false
@@ -392,4 +445,55 @@ func (m *Machine) symbolize(addr uint32) string {
 		}
 	}
 	return ""
+}
+
+// guestCont is what an HLE function does after a call it made into the
+// program returns.
+type guestCont struct {
+	lr   uint32
+	then func(m *Machine, cpu *CPU, t *Thread, r3 uint32)
+}
+
+// callGuest, from inside an HLE function, calls the program's function fn
+// with args; when it returns, then runs with its result and the HLE
+// function returns to its caller (then may call callGuest again).
+func (m *Machine) callGuest(cpu *CPU, t *Thread, fn uint32, args []uint32, then func(m *Machine, cpu *CPU, t *Thread, r3 uint32)) {
+	if m.conts == nil {
+		m.conts = map[uint32][]guestCont{}
+	}
+	key := uint32(0xffff0000) + uint32(cpu.Core)
+	if t != nil {
+		key = t.Addr
+	}
+	m.conts[key] = append(m.conts[key], guestCont{lr: cpu.LR, then: then})
+	for i, a := range args {
+		cpu.GPR[3+i] = a
+	}
+	cpu.LR = m.thunk("coreinit", "__RPGuestReturn")
+	cpu.PC = fn
+	m.jumped = true
+}
+
+func init() {
+	reg("coreinit", "__RPGuestReturn", func(m *Machine, cpu *CPU, t *Thread) {
+		key := uint32(0xffff0000) + uint32(cpu.Core)
+		if t != nil {
+			key = t.Addr
+		}
+		l := m.conts[key]
+		if len(l) == 0 {
+			cpu.fail(0, "returned from a call RetroPixels didn't make")
+			return
+		}
+		c := l[len(l)-1]
+		m.conts[key] = l[:len(l)-1]
+		cpu.LR = c.lr
+		c.then(m, cpu, t, cpu.GPR[3])
+	})
+}
+
+// isSectionSym: a symbol naming an import section (.fimport_x, .dimport_x),
+// which RPLs refer to but nothing reads.
+func isSectionSym(name string) bool {
+	return strings.HasPrefix(name, ".fimport_") || strings.HasPrefix(name, ".dimport_")
 }

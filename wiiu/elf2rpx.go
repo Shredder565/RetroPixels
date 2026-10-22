@@ -9,6 +9,9 @@ package wiiu
 // code at 0x02000000, data at 0x10000000, and each library's imports in a
 // section named .fimport_<lib> (functions) or .dimport_<lib> (data) at
 // 0xC0000000 and up, starting with an 8-byte header and the library's name.
+// An RPL's exports go in .fexports (functions) and .dexports (data), also at
+// 0xC0000000 and up: a count, a word for the signature, then for each one
+// its address and the offset of its name from the section's start.
 
 import (
 	"bytes"
@@ -54,6 +57,9 @@ func ELFToRPX(elf []byte, stackSize uint32, compress bool) ([]byte, error) {
 			link: s.link, info: s.info, align: shAlign(i), entsize: s.entsize, data: s.data}
 		if strings.HasPrefix(s.name, ".fimport_") || strings.HasPrefix(s.name, ".dimport_") {
 			o.typ = shtImports
+		}
+		if s.name == ".fexports" || s.name == ".dexports" {
+			o.typ = shtExports
 		}
 		if o.flags&shfAlloc != 0 && o.addr != 0 && o.typ != shtImports {
 			end := o.addr + o.size

@@ -16,8 +16,6 @@ import (
 
 const (
 	idLibExe      = 1350
-	idLibDownload = 1351
-	idLibChange   = 1352
 	idLibFolders  = 1353
 	idLibAdd      = 1354
 	idLibRemove   = 1355
@@ -205,8 +203,6 @@ func (l *dolLibrary) child(class, text string, style uint32, exStyle uint32, id 
 
 func (l *dolLibrary) build() {
 	l.child("STATIC", "", ssNoPrefix, 0, idLibExe)
-	l.child("BUTTON", "Download Dolphin", bsPushButton|wsTabStop, 0, idLibDownload)
-	l.child("BUTTON", "Change Dolphin…", bsPushButton|wsTabStop, 0, idLibChange)
 	l.child("STATIC", "Games folders:", ssNoPrefix, 0, idLibFoldersL)
 	l.child("LISTBOX", "", lbsNotify|lbsNoIntegral|wsVScroll|wsBorder|wsTabStop, 0, idLibFolders)
 	l.child("BUTTON", "Add folder…", bsPushButton|wsTabStop, 0, idLibAdd)
@@ -238,7 +234,7 @@ func (l *dolLibrary) build() {
 		call(pSendMessageW, lv, lvmInsertColumnW, uintptr(i), uintptr(unsafe.Pointer(&col)))
 	}
 	l.child("STATIC", "Double-click a game, or press Enter (or A on the controller), to play it here. "+
-		"Save states are in Dolphin: Shift+F1 saves, F1 loads. Esc closes this window.", ssNoPrefix, 0, idLibHint)
+		"Save states are in PixelU: Shift+F1 saves, F1 loads. Esc closes this window.", ssNoPrefix, 0, idLibHint)
 	l.child("BUTTON", "Play", bsDefPushButton|wsTabStop, 0, idLibPlay)
 	l.child("BUTTON", "Close", bsPushButton|wsTabStop, 0, idLibClose)
 	l.fillFolders()
@@ -262,9 +258,7 @@ func (l *dolLibrary) layout() {
 	}
 	y := m
 	right := W - m - bw
-	put(idLibExe, m, y, right-m-gap-bw-gap, l.scale(42))
-	put(idLibDownload, right-bw-gap, y, bw, bh)
-	put(idLibChange, right, y, bw, bh)
+	put(idLibExe, m, y, W-2*m, l.scale(42))
 	y += l.scale(48)
 	put(idLibFoldersL, m, y, l.scale(200), l.scale(18))
 	y += l.scale(20)
@@ -287,38 +281,18 @@ func (l *dolLibrary) layout() {
 	put(idLibClose, W-m-l.scale(100), bottom, l.scale(100), bh)
 }
 
-// showStatus: Dolphin's line at the top.
+// showStatus: the engine's line at the top.
 func (l *dolLibrary) showStatus() {
-	a := l.a
-	exe := a.settings.Dolphin.exe()
-	a.dol.mu.Lock()
-	inst := a.dol.install
-	detecting := a.dol.detecting
-	a.dol.mu.Unlock()
-	var t string
-	switch {
-	case inst != nil:
-		t = dolInstallText(*inst) + "\nFrom dolphin-emu.org into a \"Dolphin\" folder next to RetroPixels (as RetroPixels.exe does)."
-	case exe != "":
-		v := dolphin.Version(exe)
-		if v == "" {
-			v = "Dolphin"
+	exe := l.a.dolExe()
+	t := "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL).\n" + noEngine
+	if exe != "" {
+		t = "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL)"
+		if v := dolphin.Version(exe); v != "" {
+			t += " · " + v
 		}
-		t = "Emulator: " + v + "\n" + exe
-	case detecting:
-		t = "Looking for Dolphin…"
-	default:
-		t = "Dolphin isn't set up yet. GameCube and Wii games need Dolphin, a free emulator: click Download Dolphin " +
-			"(the latest official version, from dolphin-emu.org), or Change Dolphin… to choose your own Dolphin.exe."
+		t += "\n" + exe
 	}
 	setWindowText(l.ctl[idLibExe], t)
-	enable := func(id int, on bool) { call(pEnableWindow, l.ctl[id], boolArg(on)) }
-	enable(idLibDownload, inst == nil && a.dol.run == nil)
-	if exe != "" {
-		setWindowText(l.ctl[idLibDownload], "Update Dolphin")
-	} else {
-		setWindowText(l.ctl[idLibDownload], "Download Dolphin")
-	}
 }
 
 func (l *dolLibrary) fillFolders() {
@@ -533,16 +507,6 @@ func dolLibProc(hwnd, m, wp, lp uintptr) uintptr {
 			l.play()
 		case idLibClose, 2: // IDCANCEL (Esc)
 			l.close()
-		case idLibDownload:
-			if code == bnClicked {
-				a.dolDownload("")
-				l.showStatus()
-			}
-		case idLibChange:
-			if code == bnClicked {
-				a.dolChooseExe()
-				l.showStatus()
-			}
 		case idLibAdd:
 			if code == bnClicked {
 				l.addFolder()
@@ -561,10 +525,14 @@ func dolLibProc(hwnd, m, wp, lp uintptr) uintptr {
 			}
 		case idLibRescan:
 			if code == bnClicked {
-				// Find games again: near Dolphin, as RetroPixels.exe's "Find games again".
-				exe := a.settings.Dolphin.exe()
+				// Find games again: near the Dolphin used before, else near
+				// PixelU's engine, as RetroPixels.exe's "Find games again".
+				exe := a.settings.Dolphin.oldExe()
 				if exe == "" {
-					a.showMessage("Set up Dolphin first, or use Add folder…")
+					exe = a.dolExe()
+				}
+				if exe == "" {
+					a.showMessage("Use Add folder… to add your games folder")
 					break
 				}
 				setWindowText(l.ctl[idLibCount], "Looking for games…")

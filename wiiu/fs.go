@@ -8,7 +8,9 @@ package wiiu
 // /vol/content/..., and homebrew reads the SD card as /vol/external01/....
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -109,6 +111,43 @@ func (f *FileSystem) ReadFile(p string) ([]byte, error) {
 		return nil, fs.ErrNotExist
 	}
 	return readFS(m, rel)
+}
+
+// OpenRead opens a file at a Wii U path for reading as it's needed: its
+// reader, size, and what to close when done (nil for nothing).
+func (f *FileSystem) OpenRead(p string) (io.ReaderAt, int64, io.Closer, error) {
+	p = cleanPath(p)
+	if b, ok := f.written[p]; ok {
+		return bytes.NewReader(b), int64(len(b)), nil, nil
+	}
+	m, rel, ok := f.resolve(p)
+	if !ok {
+		return nil, 0, nil, fs.ErrNotExist
+	}
+	h, err := m.Open(rel)
+	if err != nil {
+		real := findFold(m, rel)
+		if real == "" {
+			return nil, 0, nil, err
+		}
+		if h, err = m.Open(real); err != nil {
+			return nil, 0, nil, err
+		}
+	}
+	st, err := h.Stat()
+	if err != nil || st.IsDir() {
+		h.Close()
+		return nil, 0, nil, fs.ErrNotExist
+	}
+	if ra, ok := h.(io.ReaderAt); ok {
+		return ra, st.Size(), h, nil
+	}
+	b, err := io.ReadAll(h)
+	h.Close()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return bytes.NewReader(b), int64(len(b)), nil, nil
 }
 
 // readFS reads a file, matching its name without regard to case (Wii U
@@ -295,7 +334,159 @@ func (f *FileSystem) MakeDir(p string) error {
 	return nil
 }
 
+func (f *FileSystem) exists(p string) bool {
+	_, _, err := f.Stat(p)
+	return err == nil
+}
+
 // ReadCode reads a file of the title's code folder.
 func (f *FileSystem) ReadCode(name string) ([]byte, error) {
 	return f.ReadFile("/vol/code/" + name)
+}
+
+// Saves: the files and folders the program made under /vol/save, as one
+// blob for the app to keep (the core's SRAM), and back.
+
+const saveMagic = "RPWiiUSave1\n"
+
+// SaveData is the program's save files ("" if it has none).
+func (f *FileSystem) SaveData() []byte {
+	var paths []string
+	for p := range f.written {
+		if strings.HasPrefix(p, "/vol/save/") {
+			paths = append(paths, p)
+		}
+	}
+	for p := range f.dirs {
+		if strings.HasPrefix(p, "/vol/save/") {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
+	out := []byte(saveMagic)
+	put32 := func(v int) { out = append(out, byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) }
+	for _, p := range paths {
+		b, file := f.written[p]
+		if file {
+			out = append(out, 'F')
+		} else {
+			out = append(out, 'D')
+		}
+		put32(len(p))
+		out = append(out, p...)
+		put32(len(b))
+		out = append(out, b...)
+	}
+	return out
+}
+
+// LoadSaveData restores files SaveData made.
+func (f *FileSystem) LoadSaveData(b []byte) error {
+	if !strings.HasPrefix(string(b), saveMagic) {
+		return errors.New("that isn't Wii U save data")
+	}
+	b = b[len(saveMagic):]
+	get := func(n int) []byte {
+		if n < 0 || n > len(b) {
+			return nil
+		}
+		v := b[:n]
+		b = b[n:]
+		return v
+	}
+	get32 := func() int {
+		v := get(4)
+		if v == nil {
+			return -1
+		}
+		return int(v[0])<<24 | int(v[1])<<16 | int(v[2])<<8 | int(v[3])
+	}
+	for len(b) > 0 {
+		kind := get(1)
+		p := get(get32())
+		n := get32()
+		data := get(n)
+		if kind == nil || p == nil || data == nil && n != 0 {
+			return errors.New("the Wii U save data is cut short")
+		}
+		path := cleanPath(string(p))
+		if !strings.HasPrefix(path, "/vol/save/") {
+			continue
+		}
+		if kind[0] == 'F' {
+			f.written[path] = append([]byte(nil), data...)
+		} else {
+			f.dirs[path] = true
+		}
+	}
+	return nil
+}
+
+// TitleFolders: when the program at rpxPath sits in a title's code folder
+// (<title>/code/<name>.rpx), a file system with the title's code, content
+// and meta folders mounted (read-only) and its title id from code/app.xml;
+// otherwise nil.
+func TitleFolders(rpxPath string) *FileSystem {
+	if rpxPath == "" {
+		return nil
+	}
+	code := filepath.Dir(rpxPath)
+	if !strings.EqualFold(filepath.Base(code), "code") {
+		return nil
+	}
+	root := filepath.Dir(code)
+	f := NewFileSystem()
+	f.MountDir("/vol/code", code, false)
+	ents, _ := os.ReadDir(root)
+	for _, e := range ents {
+		name := strings.ToLower(e.Name())
+		if e.IsDir() && (name == "content" || name == "meta") {
+			f.MountDir("/vol/"+name, filepath.Join(root, e.Name()), false)
+		}
+	}
+	if b, err := f.ReadCode("app.xml"); err == nil {
+		if id, ok := xmlHex(b, "title_id"); ok {
+			f.TitleID = id
+		}
+	}
+	return f
+}
+
+// xmlHex reads a hex number element (<title_id ...>0005000010101D00</title_id>).
+func xmlHex(b []byte, tag string) (uint64, bool) {
+	s := string(b)
+	i := strings.Index(s, "<"+tag)
+	if i < 0 {
+		return 0, false
+	}
+	j := strings.IndexByte(s[i:], '>')
+	if j < 0 {
+		return 0, false
+	}
+	s = s[i+j+1:]
+	k := strings.IndexByte(s, '<')
+	if k < 0 {
+		return 0, false
+	}
+	var v uint64
+	digits := strings.TrimSpace(s[:k])
+	if digits == "" || len(digits) > 16 {
+		return 0, false
+	}
+	for _, c := range digits {
+		switch {
+		case c >= '0' && c <= '9':
+			v = v<<4 | uint64(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v<<4 | uint64(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			v = v<<4 | uint64(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }

@@ -10,17 +10,18 @@ import (
 	"time"
 
 	"retropixels/internal/dolphin"
+	"retropixels/internal/pixelu"
 )
 
 func TestDolphinSettingsDefaults(t *testing.T) {
 	var d DolphinSettings
-	if !d.fullscreen() || !d.embed() || !d.autoRecord() || d.volume() != 100 || d.Muted {
+	if !d.fullscreen() || !d.embed() || d.volume() != 100 || d.Muted {
 		t.Fatal("defaults differ from RetroPixels.exe's (fullscreen, in the window, recorded, 100%)")
 	}
 	off := false
-	d.Fullscreen, d.Embed, d.AutoRecord = &off, &off, &off
+	d.Fullscreen, d.Embed = &off, &off
 	d.setVolume(130)
-	if d.fullscreen() || d.embed() || d.autoRecord() || d.volume() != 100 {
+	if d.fullscreen() || d.embed() || d.volume() != 100 {
 		t.Fatal("switches")
 	}
 	d.setVolume(0)
@@ -70,10 +71,10 @@ func TestDolphinPlayedAndFolders(t *testing.T) {
 	}
 }
 
-// The first time, Dolphin and the games folders come from what
-// RetroPixels.exe already found, else from looking around.
+// The first time, the games folders (and the Dolphin used before, for its
+// old settings) come from what RetroPixels.exe already found, else from
+// looking around near that Dolphin or near PixelU's engine.
 func TestDetectDolphin(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", t.TempDir())
 	games := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "Dolphin-x64", "Dolphin.exe")
 	os.MkdirAll(filepath.Dir(exe), 0o755)
@@ -83,26 +84,78 @@ func TestDetectDolphin(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{"dolphinExe": exe, "dolphinFolders": []string{games, filepath.Join(games, "gone")},
 		"dolphinRecent": []map[string]any{{"path": `D:\Wii\Sports.wbfs`, "name": "Wii Sports", "lastPlayed": "2026-09-30T20:00:00Z"}}})
 	os.WriteFile(cfg, b, 0o644)
-	gotExe, folders, played := detectDolphin(DolphinSettings{})
+	gotExe, folders, played := detectDolphin(DolphinSettings{}, "")
 	if gotExe != exe || len(folders) != 1 || folders[0] != games || played[`d:\wii\sports.wbfs`].IsZero() {
 		t.Fatalf("from RetroPixels.exe: %q %v %v", gotExe, folders, played)
 	}
 	// What the native app already has wins.
 	mine := t.TempDir()
-	gotExe, folders, _ = detectDolphin(DolphinSettings{Exe: exe, Folders: []string{mine}})
+	gotExe, folders, _ = detectDolphin(DolphinSettings{Exe: exe, Folders: []string{mine}}, "")
 	if gotExe != exe || len(folders) != 1 || folders[0] != mine {
 		t.Fatalf("own settings: %q %v", gotExe, folders)
 	}
-	// A Dolphin that RetroPixels.exe downloaded is used even without its config.
+	// No Dolphin used before: games are looked for near PixelU's engine.
 	t.Setenv("RETRO_APP_CONFIG", filepath.Join(t.TempDir(), "none.json"))
-	dl := filepath.Join(os.Getenv("LOCALAPPDATA"), "RetroPixels", "Dolphin", "Dolphin.exe")
-	os.MkdirAll(filepath.Dir(dl), 0o755)
-	os.WriteFile(dl, []byte("x"), 0o644)
-	if gotExe, _, _ = detectDolphin(DolphinSettings{}); gotExe != dl {
-		t.Fatalf("downloaded Dolphin: %q", gotExe)
+	root := t.TempDir()
+	engine := filepath.Join(root, "Emus", "PixelU", "wii", "PixelU-Wii.exe")
+	os.MkdirAll(filepath.Dir(engine), 0o755)
+	os.WriteFile(engine, []byte("x"), 0o644)
+	gc := filepath.Join(root, "Emus", "GameCube")
+	os.MkdirAll(gc, 0o755)
+	hdr := make([]byte, 0x60)
+	copy(hdr, "GMSE01")
+	copy(hdr[0x1C:], []byte{0xC2, 0x33, 0x9F, 0x3D})
+	copy(hdr[0x20:], "Super Mario Sunshine")
+	os.WriteFile(filepath.Join(gc, "Sunshine.iso"), hdr, 0o644)
+	gotExe, folders, _ = detectDolphin(DolphinSettings{Exe: filepath.Join(root, "moved", "Dolphin.exe")}, engine)
+	if gotExe != "" || len(folders) != 1 || folders[0] != gc {
+		t.Fatalf("near the engine: %q %v", gotExe, folders)
 	}
-	if (&DolphinSettings{Exe: filepath.Join(t.TempDir(), "moved.exe")}).exe() != dl {
-		t.Error("a Dolphin.exe that's gone should fall back to the downloaded one")
+}
+
+// Games play only in PixelU's engine, found in the PixelU folder (never a
+// Dolphin.exe), and the old Dolphin's settings come over once.
+func TestDolphinEngine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	t.Setenv("RETRO_APP_CONFIG", filepath.Join(t.TempDir(), "none.json"))
+	old := filepath.Join(t.TempDir(), "Dolphin-x64", "Dolphin.exe")
+	os.MkdirAll(filepath.Join(filepath.Dir(old), "User", "Config"), 0o755)
+	os.WriteFile(old, []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(filepath.Dir(old), "portable.txt"), nil, 0o644)
+	os.WriteFile(filepath.Join(filepath.Dir(old), "User", "Config", "WiimoteNew.ini"), []byte("[Wiimote1]\r\nDevice = DInput/0/Keyboard Mouse\r\n"), 0o644)
+	d := DolphinSettings{Exe: old}
+	if got := d.exe(""); got != "" {
+		t.Fatalf("a Dolphin.exe was used: %q", got)
+	}
+	px := filepath.Join(t.TempDir(), "PixelU")
+	engine := filepath.Join(px, "wii", pixelu.WiiExeName)
+	os.MkdirAll(filepath.Dir(engine), 0o755)
+	os.WriteFile(filepath.Join(px, "PixelU.exe"), []byte("x"), 0o644)
+	os.WriteFile(engine, []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(px, "wii", "portable.txt"), nil, 0o644)
+	if got := d.exe(filepath.Join(px, "PixelU.exe")); got != engine {
+		t.Fatalf("engine = %q want %q", got, engine)
+	}
+	if !strings.Contains(noEngine, "Put the PixelU folder next to RetroPixels.exe") {
+		t.Error(noEngine)
+	}
+	user := dolphin.UserDir(engine)
+	if user != filepath.Join(px, "wii", "User") {
+		t.Fatalf("user folder %q", user)
+	}
+	t.Setenv("RETRO_DOLPHIN_USER", "")
+	t.Setenv("RETRO_OLD_DOLPHIN_USER", "")
+	d.importOld(engine)
+	if dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1") != "custom" {
+		t.Fatal("the old portable Dolphin's Wii Remote set-up didn't come over")
+	}
+	dolphin.SetupXboxPads(user, false) // as a game start does
+	if dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1") != "custom" || dolphin.PadState(user, "GCPadNew.ini", "GCPad1") != "xbox" {
+		t.Fatal("Xbox set-up after the import")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(old), "User", "Config", "GCPadNew.ini")); err == nil {
+		t.Error("wrote into the old Dolphin's folder")
 	}
 }
 

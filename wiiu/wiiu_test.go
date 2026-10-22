@@ -51,6 +51,38 @@ func TestThreads(t *testing.T) {
 	}
 }
 
+// TestSync: threads waiting on each other the way Cafe OS has them do.
+func TestSync(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSSuspendThread OSIsThreadSuspended OSIsThreadTerminated OSDetachThread OSSetThreadDeallocator",
+		"coreinit OSSetThreadCleanupCallback OSCreateThreadType OSGetThreadPriority OSExitThread OSDisableInterrupts",
+		"coreinit OSRestoreInterrupts OSInitSemaphore OSWaitSemaphore OSSignalSemaphore OSGetSemaphoreCount OSResetEvent",
+		"coreinit OSSignalEventAll OSWaitEventWithTimeout OSJamMessage OSPeekMessage OSInitSpinLock OSAcquireSpinLock",
+		"coreinit OSReleaseSpinLock OSInitThreadQueue OSSleepThread OSWakeupThread OSSetAlarmEx OSInitAlarmQueue",
+		"coreinit OSGetAlarmFromQueue OSGetSystemInfo OSInitRendezvous OSWaitRendezvous"}},
+		"synctest.c")
+	m, log := runRPX(t, rpx, 300)
+	for _, want := range []string{
+		"suspend 1 0 1 2 0 1 1 8 7 0",
+		"join 1 1 0 1 5 1 1 6 0 2",
+		"events 2 1 3 0 1 0 1",
+		"sem 0 1 3 0",
+		"mutex 20",
+		"mq 1234 4 0 1 1 9 2 0",
+		"prio 0 3 0 IA 31",
+		"spin 1",
+		"queue 7 run 1 1 5",
+		"alarm 1 0 1 1 0 0",
+		"rendezvous 0 2",
+		"sysinfo 248625000 1243125000 5 1",
+		"sync done",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s\nthreads:\n%s", want, log, m.ThreadsSummary())
+		}
+	}
+}
+
 func TestOSScreen(t *testing.T) {
 	m, err := New(buildRPX(t, false, "screen.c"), "screen.rpx", nil)
 	if err != nil {
@@ -136,5 +168,65 @@ func TestDemo(t *testing.T) {
 	}
 	if !m.Exited || !strings.Contains(log.String(), "demo ended") {
 		t.Fatalf("didn't end:\n%s", log.String())
+	}
+}
+
+// A program whose code is too far from the libraries for a direct branch.
+func TestFarCalls(t *testing.T) {
+	m, log := runRPX(t, buildRPX(t, true, "farcall.c"), 10)
+	if !strings.Contains(log, "far call works") || !m.Exited || m.ExitCode != 5 {
+		t.Fatalf("exited %v code %d err %v log:\n%s", m.Exited, m.ExitCode, m.Err, log)
+	}
+}
+
+func TestVirtualMemoryAndDMA(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSGetMapVirtAddrRange OSGetAvailPhysAddrRange OSAllocVirtAddr OSMapMemory OSQueryVirtAddr OSEffectiveToPhysical",
+		"dmae DMAECopyMem DMAEFillMem DMAEWaitDone DMAESemaphore"}}, "vmtest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{"vm: range a0000000+20000000 va a0000000 map 1 seen 12345678 back cafe query 1",
+		"dmae: 44332211 88776655 abcd abcd", "vm: phys 1 map 1 1 shared beef", "dmae: sem 1"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
+	}
+}
+
+func TestCoroutinesAndLockedCache(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSInitCoroutine OSSwitchCoroutine LCAlloc LCDealloc LCGetAllocatableSize LCEnableDMA LCLoadDMABlocks LCStoreDMABlocks"}},
+		"cotest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{"co: steps 33 local 7", "co: entry 1 1 r31 1", "lc: 4000 3000 4000 100 16"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
+	}
+}
+
+// The heaps, with the values Cafe OS's (and Cemu's) heap code gives.
+func TestHeaps(t *testing.T) {
+	rpx := buildModule(t, buildOpts{exports: []string{"__preinit_user"}, imports: []string{
+		"coreinit MEMCreateExpHeapEx MEMResizeForMBlockExpHeap MEMGetAllocatableSizeForExpHeapEx MEMGetTotalFreeSizeForExpHeap",
+		"coreinit MEMGetSizeForMBlockExpHeap MEMVisitAllocatedForExpHeap MEMFindContainHeap MEMFindParentHeap",
+		"coreinit MEMCreateFrmHeapEx MEMRecordStateForFrmHeap MEMFreeByStateToFrmHeap MEMGetAllocatableSizeForFrmHeapEx",
+		"coreinit MEMCreateUnitHeapEx MEMAllocFromUnitHeap MEMFreeToUnitHeap MEMCountFreeBlockForUnitHeap MEMCalcHeapSizeForUnitHeap",
+		"coreinit MEMInitBlockHeap MEMAllocFromBlockHeapEx MEMFreeToBlockHeap MEMGetTrackingLeftInBlockHeap",
+		"coreinit MEMGetTotalFreeSizeForBlockHeap MEMGetAllocatableSizeForBlockHeapEx",
+		"coreinit OSGetMemBound OSGetForegroundBucket OSGetForegroundBucketFreeArea"}}, "memtest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{
+		"exp: ff98 ff98 ff80 | 68 ff00 fd70 180 20 | 80 c0 fd64 fd38 | 3 1e0 1 | fdb0 ff98",
+		"nested: 1 1 1",
+		"frm: fb4 f00 | 4c 1 80 fc0 e40 | 1 fa4 0 fb4",
+		"unit: 14 60 a0 12 60 3e4",
+		"block: 1 0 f00 2 e00 e00 | 3 f00",
+		"bounds: f4000000 2000000 50000000 e0000000 4000000 e0000000 2800000",
+		"base: f4000000 e0000000 1 1ffffb4 27fffb4",
+		"preinit: 1 f4000000 e0000000 1 0",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
 	}
 }

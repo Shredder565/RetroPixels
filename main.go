@@ -2,8 +2,9 @@
 //
 // It serves the embedded page (and RetroPixels' own emulators) on a fixed local
 // port, so save states stored by the page stay put between runs, opens it in a
-// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii
-// and MAME (any version of it) for arcade games.
+// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii,
+// PixelU for Wii U, MAME (any version of it) for arcade games and Supermodel
+// for Star Wars Trilogy Arcade (Sega Model 3).
 package main
 
 import (
@@ -23,6 +24,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +37,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.20.0"
+	appVersion = "2.21.0"
 )
 
 var (
@@ -60,6 +62,8 @@ type config struct {
 	RecordQuality string `json:"recordQuality,omitempty"`
 	RecordDir     string `json:"recordDir,omitempty"`
 
+	// The Dolphin.exe used before PixelU's Wii / GameCube engine: no longer
+	// started, only read to find its old settings and games folders.
 	DolphinExe        string       `json:"dolphinExe,omitempty"`
 	DolphinFolders    []string     `json:"dolphinFolders,omitempty"`
 	DolphinRecent     []recentGame `json:"dolphinRecent,omitempty"`
@@ -68,6 +72,26 @@ type config struct {
 	DolphinDetected   bool         `json:"dolphinDetected,omitempty"`
 	DolphinVolume     *int         `json:"dolphinVolume,omitempty"` // 0–100, unset = 100
 	DolphinMuted      bool         `json:"dolphinMuted,omitempty"`
+
+	// Wii U games through PixelU (pixelu.go)
+	PixelUExe        string       `json:"pixeluExe,omitempty"`
+	PixelUFolders    []string     `json:"pixeluFolders,omitempty"`
+	PixelURecent     []recentGame `json:"pixeluRecent,omitempty"`
+	PixelUFullscreen *bool        `json:"pixeluFullscreen,omitempty"` // unset = on
+	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = on
+	PixelUOpenGL     bool         `json:"pixeluOpenGL,omitempty"`     // Vulkan doesn't work here: draw with OpenGL
+	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // old Wii U-only switch, no longer used (AutoRecord covers every game)
+
+	// Star Wars Trilogy Arcade in Supermodel (supermodel.go)
+	SupermodelExe        string    `json:"supermodelExe,omitempty"`        // chosen by the player; unset = the one next to RetroPixels
+	SupermodelROM        string    `json:"supermodelRom,omitempty"`        // the game's .zip, once found or chosen
+	SupermodelFullscreen *bool     `json:"supermodelFullscreen,omitempty"` // unset = on
+	SupermodelDock       *bool     `json:"supermodelDock,omitempty"`       // unset = off: fullscreen in its own window
+	SupermodelWide       bool      `json:"supermodelWide,omitempty"`       // 3D view fills a wide screen
+	SupermodelInvertY    bool      `json:"supermodelInvertY,omitempty"`    // stick up dives, like the arcade's flight yoke
+	SupermodelPadStick   *bool     `json:"supermodelPadStick,omitempty"`   // unset = off: the plain thumbstick, no flight stick feel
+	SupermodelSmooth     string    `json:"supermodelSmooth,omitempty"`     // flight stick smoothing: off, light, medium, heavy; unset = medium
+	SupermodelPlayed     time.Time `json:"supermodelPlayed,omitempty"`
 }
 
 var (
@@ -198,7 +222,7 @@ func newMux() *http.ServeMux {
 	indexHTML, _ := fs.ReadFile(sub, "index.html")
 	page := bytes.Replace(indexHTML,
 		[]byte("/*__RETRO_DESKTOP__*/"),
-		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: %q };`, token, appVersion)), 1)
+		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: %q, os: %q };`, token, appVersion, runtime.GOOS)), 1)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if !hostOK[r.Host] {
@@ -237,13 +261,15 @@ func newMux() *http.ServeMux {
 	registerRecorderRoutes(mux)
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
-	registerDolphinInstallRoutes(mux)
+	registerPixelURoutes(mux)
 	registerMameRoutes(mux)
+	registerSupermodelRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
 	registerWiiURoutes(mux)
 	registerArcadeRoutes(mux)
 	registerAPRoutes(mux)
+	registerDesktopRoutes(mux)
 	return mux
 }
 
@@ -264,7 +290,7 @@ func main() {
 
 	if alreadyRunning() {
 		// Bring up another window on the copy that's already running.
-		_ = openAppWindow(url, false)
+		_ = openAppWindow(url+desktopHandOff(os.Args[1:]), false)
 		return
 	}
 
@@ -290,7 +316,7 @@ func main() {
 	ap.start()
 
 	// Opens the window and blocks until it closes. Then the app exits.
-	if err := openAppWindow(url, true); err != nil {
+	if err := openAppWindow(url+desktopStart(os.Args[1:]), true); err != nil {
 		showError(err.Error())
 		os.Exit(1)
 	}

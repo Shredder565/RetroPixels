@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -579,6 +580,14 @@ func TestReal7Zip(t *testing.T) {
 	}
 	if sz == "" {
 		t.Skip("7-Zip not found (set SEVENZIP_7Z)")
+	}
+	// p7zip 16.02 (Ubuntu 22.04's 7z) has no ARM64 filter and keeps only
+	// whole seconds of a file's time; the test needs 7-Zip 21 or later.
+	banner, _ := exec.Command(sz).CombinedOutput()
+	if m := regexp.MustCompile(`7-Zip[^\n]*? (\d+)\.\d+`).FindSubmatch(banner); m != nil {
+		if v, _ := strconv.Atoi(string(m[1])); v < 21 {
+			t.Skipf("%s is 7-Zip %s; this test needs 7-Zip 21 or later (set SEVENZIP_7Z)", sz, m[1])
+		}
 	}
 	work := t.TempDir()
 	tree := filepath.Join(work, "Dolphin-x64")

@@ -140,7 +140,23 @@ func launchMameGame(path, exe string) error {
 	if err != nil {
 		return err
 	}
-	cmd, out := mame.Command(l.Install.Exe, l.Args...)
+	// Recording: MAME saves the game's own picture and sound (-aviwrite);
+	// the .mp4 is made from it when the game ends (needs ffmpeg only then).
+	args := l.Args
+	recDir := ""
+	if recordingWanted() {
+		base := filepath.Join(recordingsDir(), "temp")
+		os.MkdirAll(base, 0o755)
+		if d, err := os.MkdirTemp(base, "MAME-"); err == nil {
+			if ra := mame.RecordArgs(d, mame.OptionsOf(l.Install.Exe)); ra != nil {
+				args = append(append([]string(nil), args...), ra...)
+				recDir = d
+			} else {
+				os.Remove(d) // this MAME can't record itself
+			}
+		}
+	}
+	cmd, out := mame.Command(l.Install.Exe, args...)
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
 		onStart = embedDolphin // docks MAME's window the same way
@@ -149,7 +165,11 @@ func launchMameGame(path, exe string) error {
 	mameProblem = nil
 	mameMu.Unlock()
 	label := l.Install.Label()
+	mameExe := l.Install.Exe
 	onExit := func(err error, ran time.Duration) {
+		if recDir != "" {
+			go saveMameRecording(l.Name, recDir, mameExe)
+		}
 		if err == nil || ran > 20*time.Second {
 			return // it played (MAME may still end with an error code, e.g. when it's closed for us)
 		}
@@ -162,8 +182,12 @@ func launchMameGame(path, exe string) error {
 		mameMu.Unlock()
 	}
 	if err := startProcess(cmd, path, l.Name, "mame", label, nil, onStart, onExit); err != nil {
+		if recDir != "" {
+			os.RemoveAll(recDir)
+		}
 		return err
 	}
+	clearManualWanted()
 	_, err = mame.Update(func(c *mame.Config) { c.MarkPlayed(l.Short, time.Now()) })
 	mameMu.Lock()
 	for i := range mameGames {
@@ -175,7 +199,13 @@ func launchMameGame(path, exe string) error {
 	return err
 }
 
+// mameReleases lists the MAME team's ready-made releases (Windows only: on
+// Linux the list is empty, and the page says to use the built-in MAME or the
+// system's mame package).
 func mameReleases(refresh bool) ([]mame.Release, error) {
+	if !mame.DownloadsAvailable {
+		return []mame.Release{}, nil
+	}
 	mameMu.Lock()
 	if !refresh && mameRels != nil && time.Since(mameRelsAt) < time.Hour {
 		r := mameRels
@@ -195,6 +225,9 @@ func mameReleases(refresh bool) ([]mame.Release, error) {
 
 // startMameInstall downloads one official release in the background.
 func startMameInstall(version string) error {
+	if !mame.DownloadsAvailable {
+		return mame.ErrNoDownloads
+	}
 	rels, err := mameReleases(false)
 	if err != nil {
 		return err
@@ -311,7 +344,7 @@ func registerMameRoutes(mux *http.ServeMux) {
 				start = filepath.Dir(filepath.Dir(def.Exe))
 			}
 			var p string
-			p, err = pickFile("Choose a MAME (mame.exe) to add", "MAME (mame*.exe)|mame*.exe|Programs (*.exe)|*.exe", start)
+			p, err = pickFile("Choose a MAME ("+mame.ExeName+") to add", programFilter("MAME", mame.ExePattern), start)
 			if err == nil && p != "" {
 				_, err = mame.AddExe(p)
 				reload = true
@@ -368,4 +401,38 @@ func registerMameRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, mameLibraryPayload())
 	}))
+}
+
+// saveMameRecording makes the .mp4 from the AVIs MAME saved in dir once the
+// game has ended, in the recordings folder, then removes dir.
+func saveMameRecording(game, dir, exe string) {
+	recMu.Lock()
+	recQueued++
+	recMu.Unlock()
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	recMu.Lock()
+	recQueued--
+	recSaving = &saveState{Game: game, Step: "saving"}
+	recMu.Unlock()
+	defer func() { recMu.Lock(); recSaving = nil; recMu.Unlock() }()
+	defer os.RemoveAll(dir)
+	mame.KeepSnapshots(dir, exe) // F12 screenshots taken meanwhile
+	if len(mame.AVIs(dir)) == 0 {
+		return
+	}
+	ff := waitForFFmpeg(func(step string) { setSaving(func(st *saveState) { st.Step = step }) })
+	setSaving(func(st *saveState) { st.Step = "saving" })
+	out := uniqueOut(recordingsDir(), game, time.Now())
+	err := mame.Convert(ff, dir, out, func(p int) { setSaving(func(st *saveState) { st.Percent = p }) })
+	switch {
+	case errors.Is(err, mame.ErrTooShort):
+	case err != nil:
+		setRecError("The arcade recording of " + game + " couldn't be saved: " + err.Error())
+	default:
+		recMu.Lock()
+		recLastMsg = "Saved " + filepath.Base(out)
+		recLastErr = ""
+		recMu.Unlock()
+	}
 }

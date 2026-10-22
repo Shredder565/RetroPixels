@@ -1,12 +1,16 @@
 package main
 
-// Gameplay recording for games played in Dolphin.
+// Gameplay recording for games played in Dolphin, and in PixelU (Wii U).
 //
 // Dolphin itself saves the game's picture and sound while the game runs (its
 // "frame dump" and "audio dump"). That's only the game - no mouse pointer, no
 // other windows, no black bars - and it follows the game's own clock, so the
 // video is smooth however busy the PC is. When the game ends, RetroPixels
 // turns those raw files into one .mp4 with ffmpeg and deletes them.
+//
+// PixelU does the same (asked with --rp-record, see internal/pixelu): just
+// the TV picture as .mkv files in Frames and its sound as a .wav in Audio,
+// so the same steps make its video.
 
 import (
 	"errors"
@@ -18,11 +22,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"retropixels/internal/ffmpeg"
 )
 
 type crop struct{ X, Y, W, H int }
@@ -72,56 +79,17 @@ func recLogPath() string { return filepath.Join(recordingsDir(), "logs", "last-r
 
 // ---------------- ffmpeg ----------------
 
-func findFFmpeg() string {
-	exe, _ := os.Executable()
-	dir := filepath.Dir(exe)
-	cands := []string{
-		filepath.Join(dir, "ffmpeg", "ffmpeg.exe"),
-		filepath.Join(dir, "ffmpeg.exe"),
-		filepath.Join(dir, "ffmpeg", "bin", "ffmpeg.exe"),
-	}
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		cands = append(cands, filepath.Join(la, "RetroPixels", "ffmpeg", "ffmpeg.exe"))
-	}
-	for _, p := range cands {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	if p := os.Getenv("RETRO_FFMPEG"); p != "" {
-		return p
-	}
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return p
-	}
-	return ""
-}
+// findFFmpeg: ffmpeg next to the app (ffmpeg.exe on Windows, ffmpeg
+// elsewhere), in the folder it's downloaded to (%LOCALAPPDATA% or
+// ~/.local/share), RETRO_FFMPEG, then PATH. internal/ffmpeg has the list,
+// shared with RetroPixels Native.
+func findFFmpeg() string { return ffmpeg.Find() }
 
-var encoderOrder = []string{"h264_nvenc", "h264_amf", "h264_qsv", "libx264"}
+// encoderOrder: graphics-card encoders, best first, then the CPU's; on
+// Linux VAAPI (Intel and AMD graphics) right after NVIDIA's.
+var encoderOrder = ffmpeg.Order(runtime.GOOS)
 
-func encoderArgs(enc, quality string) []string {
-	q := map[string][3]string{ // high, balanced, small
-		"h264_nvenc": {"18", "21", "26"},
-		"h264_amf":   {"18", "22", "27"},
-		"h264_qsv":   {"18", "22", "27"},
-		"libx264":    {"18", "21", "26"},
-	}[enc]
-	v := q[1]
-	if quality == "high" {
-		v = q[0]
-	} else if quality == "small" {
-		v = q[2]
-	}
-	switch enc {
-	case "h264_nvenc":
-		return []string{"-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", v, "-b:v", "0", "-profile:v", "high"}
-	case "h264_amf":
-		return []string{"-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", v, "-qp_p", v}
-	case "h264_qsv":
-		return []string{"-c:v", "h264_qsv", "-preset", "medium", "-global_quality", v}
-	}
-	return []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", v}
-}
+func encoderArgs(enc, quality string) []string { return ffmpeg.EncoderArgs(enc, quality) }
 
 var (
 	encMu    sync.Mutex
@@ -138,10 +106,7 @@ func encoderWorks(ff, enc string) bool {
 	if v, ok := encFound[enc]; ok {
 		return v
 	}
-	args := append([]string{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=640x360:r=30:d=0.3"},
-		encoderArgs(enc, "balanced")...)
-	args = append(args, "-pix_fmt", "yuv420p", "-f", "null", "-")
-	cmd := hiddenCommand(ff, args...)
+	cmd := hiddenCommand(ff, ffmpeg.TestArgs(enc)...)
 	err := runWithTimeout(cmd, 15*time.Second)
 	encFound[enc] = err == nil
 	return err == nil
@@ -209,7 +174,7 @@ func dolphinRecordArgs(quality string) []string {
 // ---------------- Dolphin's dump files ----------------
 
 type dumpFiles struct {
-	Video []string // Dump\Frames\*.avi, in order (a new file starts when the picture size changes)
+	Video []string // Dump\Frames\*.avi (Dolphin) or *.mkv (PixelU), in order (a new file starts when the picture size changes)
 	DSP   []string // Dump\Audio\*dspdump*.wav: the game's sound
 	DTK   []string // Dump\Audio\*dtkdump*.wav: music streamed from the disc (GameCube)
 }
@@ -259,7 +224,7 @@ func findDumps(dir string, since time.Time) dumpFiles {
 		return out
 	}
 	return dumpFiles{
-		Video: pick("Frames", func(n string) bool { return strings.HasSuffix(n, ".avi") }),
+		Video: pick("Frames", func(n string) bool { return strings.HasSuffix(n, ".avi") || strings.HasSuffix(n, ".mkv") }),
 		DSP:   pick("Audio", func(n string) bool { return strings.HasSuffix(n, ".wav") && strings.Contains(n, "dspdump") }),
 		DTK:   pick("Audio", func(n string) bool { return strings.HasSuffix(n, ".wav") && strings.Contains(n, "dtkdump") }),
 	}
@@ -336,6 +301,10 @@ type recSession struct {
 	Launched time.Time
 	Ended    time.Time
 	dumpDir  string
+	Emu      string // "PixelU (Wii/GameCube)" or "PixelU" (Wii U): named in messages
+	Quality  string // "" = the Recordings setting
+	NoCrop   bool   // keep every pixel: the emulator saves only the game's own picture, without bars
+	ownDir   bool   // dumpDir was made for this game alone: removed once the video is made
 
 	mu         sync.Mutex
 	clips      []clip
@@ -377,10 +346,11 @@ func setRecError(msg string) {
 	recMu.Unlock()
 }
 
-// newRecSession: a game about to start with Dolphin saving it.
+// newRecSession: a game about to start with Dolphin saving it (PixelU sets
+// the other fields after).
 func newRecSession(game, dumpDir string) *recSession {
 	now := time.Now()
-	return &recSession{Game: game, Launched: now, dumpDir: dumpDir,
+	return &recSession{Game: game, Launched: now, dumpDir: dumpDir, Emu: wiiEngineLabel,
 		clips: []clip{{From: mark{Audio: 0, Wall: now, Edge: true}, Open: true}}}
 }
 
@@ -453,8 +423,8 @@ func (s *recSession) logf(f string, a ...any) {
 // startRecSession is called as the game starts.
 func startRecSession(s *recSession, args []string) {
 	os.MkdirAll(filepath.Dir(recLogPath()), 0o755)
-	os.WriteFile(recLogPath(), []byte(fmt.Sprintf("=== %s  %s\nDolphin saves the game to %s\nDolphin %s\n",
-		s.Launched.Format(time.RFC3339), s.Game, s.dumpDir, strings.Join(args, " "))), 0o644)
+	os.WriteFile(recLogPath(), []byte(fmt.Sprintf("=== %s  %s\n%s saves the game to %s\n%s %s\n",
+		s.Launched.Format(time.RFC3339), s.Game, s.Emu, s.dumpDir, s.Emu, strings.Join(args, " "))), 0o644)
 	recMu.Lock()
 	recCur, recLastErr, recLastMsg = s, "", ""
 	recMu.Unlock()
@@ -496,7 +466,7 @@ func (s *recSession) follow(done <-chan struct{}) {
 			s.firstVideo = time.Now()
 			warned := s.warned
 			s.mu.Unlock()
-			s.logf("Dolphin started saving the picture: %s", filepath.Base(d.Video[0]))
+			s.logf("%s started saving the picture: %s", s.Emu, filepath.Base(d.Video[0]))
 			if warned {
 				setRecError("")
 			}
@@ -506,12 +476,20 @@ func (s *recSession) follow(done <-chan struct{}) {
 			s.warned = true
 			s.mu.Unlock()
 			if first {
-				s.logf("No video from Dolphin yet in %s", filepath.Join(s.dumpDir, "Frames"))
-				setRecError("Dolphin hasn't started saving the game's picture, so this game may not be recorded. " +
-					"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + recLogPath())
+				s.logf("No video from %s yet in %s", s.Emu, filepath.Join(s.dumpDir, "Frames"))
+				setRecError(s.Emu + " hasn't started saving the game's picture, so this game may not be recorded. " +
+					s.upToDate() + " Details are in " + recLogPath())
 			}
 		}
 	}
+}
+
+// upToDate: which emulator version can save games.
+func (s *recSession) upToDate() string {
+	if s.Emu == "PixelU" {
+		return "A PixelU build that can record (made with RetroPixels' recording support) is needed."
+	}
+	return `The PixelU folder's Wii/GameCube engine (wii\PixelU-Wii.exe) should save it; try an up-to-date PixelU folder.`
 }
 
 // ---------------- making the video ----------------
@@ -606,10 +584,7 @@ func finalArgs(j finalJob, enc, quality string) []string {
 	if len(j.Video) > 1 {
 		labels += fmt.Sprintf("concat=n=%d:v=1:a=0,", len(j.Video))
 	}
-	pix := "yuv420p"
-	if enc == "h264_qsv" {
-		pix = "nv12"
-	}
+	pix := ffmpeg.PixFmt(enc) // for VAAPI also the upload to the graphics card
 	dur := j.To - j.From
 	g = append(g, fmt.Sprintf("%sfps=%s,trim=start=%s:end=%s,setpts=PTS-STARTPTS,format=%s[v]",
 		labels, ffNum(j.FPS), ffNum(j.From), ffNum(j.To), pix))
@@ -876,14 +851,17 @@ func (s *recSession) finish() {
 	recSaving = &saveState{Game: s.Game, Step: "saving"}
 	recMu.Unlock()
 	defer func() { recMu.Lock(); recSaving = nil; recMu.Unlock() }()
+	if s.ownDir {
+		defer os.RemoveAll(s.dumpDir) // runs last: after the raw files are removed
+	}
 
 	d := findDumps(s.dumpDir, s.Launched)
 	s.logf("\n=== game ended after %s\nvideo: %v\nsound: %v %v", s.Ended.Sub(s.Launched).Round(time.Second), d.Video, d.DSP, d.DTK)
 	if len(d.Video) == 0 {
 		d.remove()
 		if s.Ended.Sub(s.Launched) > 20*time.Second {
-			setRecError("Dolphin didn't save the game's picture, so nothing was recorded. " +
-				"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + recLogPath())
+			setRecError(s.Emu + " didn't save the game's picture, so nothing was recorded. " +
+				s.upToDate() + " Details are in " + recLogPath())
 		}
 		return
 	}
@@ -904,6 +882,9 @@ func (s *recSession) finish() {
 	videoLen := 0.0
 	for _, f := range d.Video {
 		v, err := probeSegment(ff, f)
+		if s.NoCrop {
+			v.Crop = nil
+		}
 		if err != nil || v.Dur < 0.05 {
 			s.logf("skipping %s: %v (%.2fs)", filepath.Base(f), err, v.Dur)
 			continue
@@ -913,7 +894,7 @@ func (s *recSession) finish() {
 		videoLen += v.Dur
 	}
 	if len(segs) == 0 {
-		setRecError("Dolphin's video for this game couldn't be read, so it wasn't saved. Details are in " + recLogPath())
+		setRecError(s.Emu + "'s video for this game couldn't be read, so it wasn't saved. Details are in " + recLogPath())
 		return
 	}
 	j := finalJob{Video: segs, DSP: d.DSP, DTK: d.DTK, DSPLen: wavTotal(d.DSP), DTKLen: wavTotal(d.DTK),
@@ -930,6 +911,9 @@ func (s *recSession) finish() {
 		return
 	}
 	quality := recQuality()
+	if s.Quality != "" {
+		quality = s.Quality
+	}
 	type part struct {
 		from, to float64
 		wall     time.Time
@@ -1055,6 +1039,10 @@ func listRecordings() []map[string]any {
 func recControl(action string) (string, error) {
 	runMu.Lock()
 	gameOn := running != nil
+	emu := "PixelU"
+	if gameOn && running.Emu != "" {
+		emu = running.Emu
+	}
 	runMu.Unlock()
 	recMu.Lock()
 	s := recCur
@@ -1066,10 +1054,10 @@ func recControl(action string) (string, error) {
 			s.resume()
 			return "Recording", nil
 		}
-		// Dolphin can only be told to save a game as it starts.
+		// Dolphin and PixelU can only be told to save a game as it starts.
 		setManualWanted(true)
 		if gameOn {
-			return "Recording will start when you start your next game (Dolphin can only record from the start of a game)", nil
+			return "Recording will start when you start your next game (" + emu + " can only record from the start of a game)", nil
 		}
 		return "Your next game will be recorded", nil
 	case "stop":
@@ -1086,6 +1074,20 @@ func recControl(action string) (string, error) {
 }
 
 func registerRecorderRoutes(mux *http.ServeMux) {
+	// A recording made in the page (the built-in systems record their own
+	// picture there) is saved in the recordings folder, next to the others.
+	mux.HandleFunc("/api/rec/upload", guard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			fail(w, errors.New("send the video with POST"))
+			return
+		}
+		p, err := saveUploadedRecording(r.URL.Query().Get("name"), http.MaxBytesReader(w, r.Body, 8<<30))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "file": filepath.Base(p), "dir": filepath.Dir(p)})
+	}))
 	mux.HandleFunc("/api/rec/status", guard(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": recStatus(), "recordings": listRecordings()})
 	}))
@@ -1169,4 +1171,52 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))
+}
+
+// saveUploadedRecording writes a video from the page into the recordings
+// folder as name (cleaned up; .mp4 or .webm), never over an existing file.
+func saveUploadedRecording(name string, body io.Reader) (string, error) {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext != ".mp4" && ext != ".webm" {
+		ext = ".mp4"
+	}
+	base := strings.TrimSuffix(filepath.Base(strings.ReplaceAll(name, "\\", "/")), filepath.Ext(name))
+	base = strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"/\\|?*`, r) {
+			return '_'
+		}
+		return r
+	}, base)
+	base = strings.Trim(strings.TrimSpace(base), ".")
+	if base == "" {
+		base = "Recording " + time.Now().Format("2006-01-02 15-04-05")
+	}
+	dir := recordingsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, base+ext)
+	for i := 2; ; i++ {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			break
+		}
+		p = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
+	}
+	tmp := p + ".saving" + ext
+	f, err := os.Create(tmp)
+	if err != nil {
+		return "", err
+	}
+	n, err := io.Copy(f, body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n == 0 {
+		err = errors.New("the recording was empty")
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return p, os.Rename(tmp, p)
 }

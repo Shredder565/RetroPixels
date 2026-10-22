@@ -32,6 +32,7 @@ type Context struct {
 	GQR   [8]uint32
 
 	ResAddr  uint32 // lwarx reservation
+	ResVal   uint32 // the word lwarx read: stwcx. fails if another core changed it since
 	ResValid bool
 }
 
@@ -81,19 +82,22 @@ func (c *CPU) fail(inst uint32, msg string) {
 
 // Run runs up to n instructions; it returns early when stopped.
 func (c *CPU) Run(n int) {
+	if c.Mem.jit != nil {
+		c.Mem.jit.run(c, n)
+		return
+	}
 	c.stop = false
 	m := c.Mem
 	for i := 0; i < n; i++ {
 		pc := c.PC
-		var inst uint32
-		if p := m.pages[pc>>pageBits]; p != nil {
-			o := pc & pageMask
-			inst = uint32(p[o])<<24 | uint32(p[o+1])<<16 | uint32(p[o+2])<<8 | uint32(p[o+3])
+		var d *decoded
+		if cp := m.code[pc>>pageBits]; cp != nil && cp[pc&pageMask>>2].fn != nil {
+			d = &cp[pc&pageMask>>2]
 		} else {
-			inst = m.Read32(pc)
+			d = c.decodeAt(pc)
 		}
 		c.PC = pc + 4
-		c.exec(inst)
+		d.fn(c, d.inst)
 		if c.stop {
 			c.Ran += uint64(i + 1)
 			return
@@ -280,12 +284,13 @@ func (c *CPU) exec(inst uint32) {
 		} else {
 			c.GPR[rd] = c.GPR[ra] + uimm<<16
 		}
-	case 16: // bc
+	case 16: // bc (LR is set whether or not it branches)
 		bd := uint32(int32(int16(inst & 0xfffc)))
-		if c.cond(rd, ra, true) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
+		taken := c.cond(rd, ra, true)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
 			if inst&2 != 0 {
 				c.PC = bd
 			} else {
@@ -430,10 +435,11 @@ func (c *CPU) exec19(inst uint32) {
 		c.setCRField(bt>>2, f)
 	case 16: // bclr
 		target := c.LR &^ 3
-		if c.cond(bt, ba, true) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
+		taken := c.cond(bt, ba, true)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
 			c.PC = target
 		}
 	case 33: // crnor
@@ -456,11 +462,13 @@ func (c *CPU) exec19(inst uint32) {
 	case 449: // cror
 		c.setCRBit(bt, c.crBit(ba) || c.crBit(bb))
 	case 528: // bcctr
-		if c.cond(bt, ba, false) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
-			c.PC = c.CTR &^ 3
+		target := c.CTR &^ 3
+		taken := c.cond(bt, ba, false)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
+			c.PC = target
 		}
 	default:
 		c.fail(inst, "unknown instruction")
@@ -692,7 +700,7 @@ func (c *CPU) exec31(inst uint32) {
 	case 20: // lwarx
 		ea := c.eaX(inst)
 		c.GPR[rd] = m.Read32(ea)
-		c.ResAddr, c.ResValid = ea, true
+		c.ResAddr, c.ResVal, c.ResValid = ea, c.GPR[rd], true
 	case 23: // lwzx
 		c.GPR[rd] = m.Read32(c.eaX(inst))
 	case 24: // slw
@@ -755,7 +763,9 @@ func (c *CPU) exec31(inst uint32) {
 	case 146: // mtmsr
 	case 150: // stwcx.
 		ea := c.eaX(inst)
-		ok := c.ResValid && c.ResAddr == ea
+		// The cores take turns here, so another core's store between this
+		// core's lwarx and stwcx. shows as a changed word.
+		ok := c.ResValid && c.ResAddr == ea && m.Read32(ea) == c.ResVal
 		c.ResValid = false
 		f := uint32(0)
 		if ok {
@@ -929,6 +939,7 @@ func (c *CPU) exec31(inst uint32) {
 			c.setCR0(r)
 		}
 	case 982: // icbi
+		m.InvalidateCode(c.eaX(inst)&^31, 32)
 	case 1014: // dcbz
 		ea := c.eaX(inst) &^ 31
 		m.Fill(ea, 0, 32)

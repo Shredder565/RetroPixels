@@ -6,15 +6,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 // ---------------- Dolphin's own folders ----------------
 
-// UserDir is Dolphin's "User" folder: the portable one next to Dolphin.exe
-// (when portable.txt is there), else Documents\Dolphin Emulator, else
-// %APPDATA%\Dolphin Emulator. RETRO_DOLPHIN_USER overrides it (tests).
-func UserDir(exe string) string {
+// UserDir is the engine's "User" folder: the portable one next to its
+// program (when portable.txt is there, as for PixelU\wii\PixelU-Wii.exe, and
+// PixelU/wii/PixelU-Wii on Linux), else where an installed Dolphin keeps
+// it: on Windows Documents\Dolphin Emulator, else %APPDATA%\Dolphin
+// Emulator; on Linux ~/.dolphin-emu when there is one, else
+// ~/.local/share/dolphin-emu (whose settings files are in
+// ~/.config/dolphin-emu, see ConfigDir). RETRO_DOLPHIN_USER overrides it
+// (tests).
+func UserDir(exe string) string { return userDirFor(runtime.GOOS, exe) }
+
+func userDirFor(goos, exe string) string {
 	if t := os.Getenv("RETRO_DOLPHIN_USER"); t != "" {
 		return t
 	}
@@ -25,6 +33,12 @@ func UserDir(exe string) string {
 		}
 	}
 	home, _ := os.UserHomeDir()
+	if goos != "windows" {
+		if old := filepath.Join(home, ".dolphin-emu"); isDir(old) {
+			return old
+		}
+		return filepath.Join(xdgDataHome(home), "dolphin-emu")
+	}
 	docs := filepath.Join(home, "Documents", "Dolphin Emulator")
 	if _, err := os.Stat(docs); err == nil {
 		return docs
@@ -35,8 +49,92 @@ func UserDir(exe string) string {
 	return docs
 }
 
+func isDir(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
+
+// flatpakDolphin is the Flathub Dolphin's own folder: its data/dolphin-emu
+// and config/dolphin-emu stand for ~/.local/share's and ~/.config's.
+func flatpakDolphin(home string) string {
+	return filepath.Join(home, ".var", "app", "org.DolphinEmu.dolphin-emu")
+}
+
+// LegacyUserDir is the user folder of the Dolphin the player used before
+// PixelU's Wii / GameCube engine, so their settings and saves can be
+// brought over: a portable Dolphin's User folder (oldExe with portable.txt
+// next to it), else, on Windows, Documents\Dolphin Emulator, else
+// %APPDATA%\Dolphin Emulator; on Linux ~/.dolphin-emu, else
+// ~/.local/share/dolphin-emu, else the Flathub Dolphin's
+// (~/.var/app/org.DolphinEmu.dolphin-emu/data/dolphin-emu). Its settings
+// files are in ConfigDir of it. "" when there is none.
+// RETRO_OLD_DOLPHIN_USER overrides it (tests).
+func LegacyUserDir(oldExe string) string { return legacyUserDirFor(runtime.GOOS, oldExe) }
+
+func legacyUserDirFor(goos, oldExe string) string {
+	if t := os.Getenv("RETRO_OLD_DOLPHIN_USER"); t != "" {
+		return t
+	}
+	if oldExe != "" {
+		dir := filepath.Dir(oldExe)
+		if _, err := os.Stat(filepath.Join(dir, "portable.txt")); err == nil && isDir(filepath.Join(dir, "User")) {
+			return filepath.Join(dir, "User")
+		}
+	}
+	if goos != "windows" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return ""
+		}
+		if d := filepath.Join(home, ".dolphin-emu"); isDir(d) {
+			return d
+		}
+		// An installed Dolphin's data folder, or its settings folder alone
+		// (the data folder only appears once something is saved).
+		for _, d := range [][2]string{
+			{filepath.Join(xdgDataHome(home), "dolphin-emu"), filepath.Join(xdgConfigHome(home), "dolphin-emu")},
+			{filepath.Join(flatpakDolphin(home), "data", "dolphin-emu"), filepath.Join(flatpakDolphin(home), "config", "dolphin-emu")},
+		} {
+			if isDir(d[0]) || isDir(d[1]) {
+				return d[0]
+			}
+		}
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if docs := filepath.Join(home, "Documents", "Dolphin Emulator"); isDir(docs) {
+			return docs
+		}
+	}
+	if ad := os.Getenv("APPDATA"); ad != "" && isDir(filepath.Join(ad, "Dolphin Emulator")) {
+		return filepath.Join(ad, "Dolphin Emulator")
+	}
+	return ""
+}
+
+// ConfigDir is the folder with a user folder's settings files: user\Config,
+// except for an installed Dolphin on Linux, which keeps them apart from its
+// data: ~/.local/share/dolphin-emu's are in ~/.config/dolphin-emu (and the
+// Flathub Dolphin's data/dolphin-emu's in its config/dolphin-emu).
+func ConfigDir(user string) string { return configDirFor(runtime.GOOS, user) }
+
+func configDirFor(goos, user string) string {
+	if goos != "windows" && user != "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			u := filepath.Clean(user)
+			if u == filepath.Join(xdgDataHome(home), "dolphin-emu") {
+				return filepath.Join(xdgConfigHome(home), "dolphin-emu")
+			}
+			if fp := flatpakDolphin(home); u == filepath.Join(fp, "data", "dolphin-emu") {
+				return filepath.Join(fp, "config", "dolphin-emu")
+			}
+		}
+	}
+	return filepath.Join(user, "Config")
+}
+
 // ConfigFile: one of Dolphin's settings files (Dolphin.ini, GFX.ini, ...).
-func ConfigFile(user, name string) string { return filepath.Join(user, "Config", name) }
+func ConfigFile(user, name string) string { return filepath.Join(ConfigDir(user), name) }
 
 // DumpDir: where Dolphin saves frame and audio dumps (its "Dump" folder,
 // unless a different one is chosen in Dolphin's Paths settings).

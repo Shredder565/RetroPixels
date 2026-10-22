@@ -1,0 +1,137 @@
+name: RetroPixels for Linux (test build)
+
+# The Linux download: RetroPixels built from this commit (static Go
+# program), Supermodel (Sega Model 3) built from this commit by
+# supermodel.yml, and each other engine from the latest successful Linux
+# build on this branch once its workflow makes one (PixelU, PixelU-Wii, MAME;
+# each is optional until then, and VERSION.txt says what is in it). Checked
+# (glibc 2.35 floor, bundled libraries) and smoke-tested under Xvfb by
+# tools/linux. The artifact RetroPixels-<ver>-linux-testN holds
+# RetroPixels-<ver>-linux-testN.tar.gz (a zip loses the exec bits) and a copy
+# of its VERSION.txt. A workflow artifact only: no release is made.
+# It runs on each push, and an engine's Linux build can start it again
+# (gh workflow run bundle-linux.yml), as they start bundle-test.yml.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bundle-linux
+  cancel-in-progress: true
+
+jobs:
+  # Supermodel-linux-x64 from supermodel/ at this commit.
+  supermodel:
+    uses: ./.github/workflows/supermodel.yml
+    with:
+      targets: linux
+
+  bundle:
+    needs: supermodel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      BRANCH: claude/wiiu-emulator-urpcen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # smoke.sh talks to the page through DevTools with Node's WebSocket.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends xvfb xauth x11-utils mesa-utils libgl1-mesa-dri libopengl0 libglx0 pulseaudio pulseaudio-utils
+          google-chrome --version
+          node --version
+          # A sound server with a null sink, so the per-game volume test
+          # (pactl sink inputs) runs against a real server.
+          pulseaudio -D --exit-idle-time=-1
+          pactl load-module module-null-sink
+          pactl info | grep -E 'Server (Name|Version)'
+
+      # internal/x11's tests start their own Xvfb; RETRO_X11_REQUIRE=1 makes
+      # them fail instead of skip when it is missing.
+      - name: Test
+        env:
+          RETRO_X11_REQUIRE: "1"
+        run: |
+          test -z "$(gofmt -l $(git ls-files '*.go'))"
+          go vet ./...
+          go test ./...
+          # Windows keeps building (vet for Windows has old unsafe.Pointer
+          # findings in winapi_windows.go, so it is not run here).
+          GOOS=windows GOARCH=amd64 go build ./...
+
+      - name: Version
+        run: |
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-linux-test${{ github.run_number }}
+          echo "VER=$v" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Supermodel-linux-x64
+          path: eng/Supermodel-linux-x64
+
+      # The newest successful Linux build of each other engine on this branch;
+      # until its workflow makes one, the engine is left out.
+      - name: Engines
+        run: |
+          echo "supermodel.yml: this run ($(git rev-parse --short HEAD))" > engines.txt
+          echo "-e supermodel=eng/Supermodel-linux-x64/Supermodel-linux.tar.gz" > engine-args.txt
+          test -f eng/Supermodel-linux-x64/Supermodel-linux.tar.gz
+          get() { # workflow file, artifact name, package.sh engine name
+            ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$BRANCH" --status success -L 10 --json databaseId -q '.[].databaseId' 2>/dev/null || true)
+            for id in $ids; do
+              if gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2" 2>/dev/null; then
+                sha=$(gh run view -R "$GITHUB_REPOSITORY" "$id" --json headSha -q .headSha)
+                tgz=$(find "eng/$2" -name '*.tar.gz' | head -n 1)
+                if [ -z "$tgz" ]; then
+                  echo "::warning::$2 from run $id has no .tar.gz; left out"
+                  return 0
+                fi
+                echo "$1: run $id (${sha:0:7})" | tee -a engines.txt
+                echo "-e $3=$tgz" >> engine-args.txt
+                return 0
+              fi
+              rm -rf "eng/$2"
+            done
+            echo "$1: no successful run with $2 on $BRANCH yet; left out" | tee -a engines.txt
+          }
+          get pixelu.yml PixelU-linux-x64 pixelu
+          get pixelu-wii.yml PixelU-Wii-linux-x64 pixelu-wii
+          get mame-linux.yml MAME-linux-x64 mame
+          cat engine-args.txt
+
+      - name: Package
+        env:
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          # shellcheck disable=SC2046
+          sh tools/linux/package.sh -v "$VER" -n engines.txt $(cat engine-args.txt) dist
+
+      - name: Smoke test (Xvfb)
+        run: sh tools/linux/smoke.sh "dist/RetroPixels-$VER.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-${{ env.VER }}
+          path: |
+            dist/RetroPixels-${{ env.VER }}.tar.gz
+            dist/VERSION.txt
+          compression-level: 0
+          retention-days: 14
