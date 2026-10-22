@@ -1,288 +1,184 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * BlockFile.cpp
- *
- * Block format container file management. Implementation of the CBlockFile
- * class.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// See BlockFile.h for the file layout. When writing, the size field of the
+// current block is filled in when the block is finished (by the next
+// NewBlock(), Close() or the destructor).
 
 #include "BlockFile.h"
 
-#include <cstdio>
 #include <cstring>
-#include <cstdint>
-#include "Supermodel.h"
+#include <vector>
 
-
-/******************************************************************************
- Output Functions
-******************************************************************************/
-
-void CBlockFile::ReadString(std::string *str, uint32_t length)
+namespace
 {
-  if (NULL == fp)
-    return;
-  str->clear();
-  //TODO: use fstream to get rid of this ugly hack
-  bool keep_loading = true;
-  for (uint32_t i = 0; i < length; i++)
+  const uint32_t kHeaderWords = 3 * sizeof(uint32_t);
+
+  bool ReadWord(std::FILE *f, uint32_t *out)
   {
-    char c;
-    fread(&c, sizeof(char), 1, fp);
-    if (keep_loading)
-    {
-      if (!c)
-        keep_loading = false;
-      else
-        *str += c;
-    }
+    return std::fread(out, sizeof(*out), 1, f) == 1;
   }
 }
 
-unsigned CBlockFile::ReadBytes(void *data, uint32_t numBytes)
-{
-  if (NULL == fp)
-    return 0;
-  return (uint32_t)fread(data, sizeof(uint8_t), numBytes, fp);
-}
-
-unsigned CBlockFile::ReadDWord(uint32_t *data)
-{
-  if (NULL == fp)
-    return 0;
-  fread(data, sizeof(uint32_t), 1, fp);
-  return 4;
-}
-  
-void CBlockFile::UpdateBlockSize(void)
-{
-  long int  curPos;
-  unsigned  newBlockSize;
-  
-  if (NULL == fp)
-    return;
-  curPos = ftell(fp);       // save current file position
-  fseek(fp, blockStartPos, SEEK_SET);
-  newBlockSize = curPos - blockStartPos;
-  fwrite(&newBlockSize, sizeof(uint32_t), 1, fp);
-  fseek(fp, curPos, SEEK_SET);  // go back
-}
-
-void CBlockFile::WriteByte(uint8_t data)
-{
-  if (NULL == fp)
-    return;
-  fwrite(&data, sizeof(uint8_t), 1, fp);
-  UpdateBlockSize();
-}
-
-void CBlockFile::WriteDWord(uint32_t data)
-{
-  if (NULL == fp)
-    return;
-  fwrite(&data, sizeof(uint32_t), 1, fp);
-  UpdateBlockSize();
-}
-
-void CBlockFile::WriteBytes(const void *data, uint32_t numBytes)
-{
-  if (NULL == fp)
-    return;
-  fwrite(data, sizeof(uint8_t), numBytes, fp);
-  UpdateBlockSize();
-}
-
-void CBlockFile::WriteBlockHeader(const std::string &name, const std::string &comment)
-{
-  if (NULL == fp)
-    return;
-  
-  // Record current block starting position
-  blockStartPos = ftell(fp);
-
-  // Write the total block length field
-  WriteDWord(0);  // will be automatically updated as we write the file
-  
-  // Write name and comment lengths
-  WriteDWord((uint32_t)name.size() + 1);
-  WriteDWord((uint32_t)comment.size() + 1);
-  Write(name);
-  Write(comment);
-  
-  // Record the start of the current data section
-  dataStartPos = ftell(fp);
-} 
-
-
-/******************************************************************************
- Block Format Container File Implementation
- 
- Files are just a consecutive array of blocks that must be searched.
- 
- Block Format
- ------------
- blockLength  (uint32_t)  Total length of block in bytes.
- nameLength   (uint32_t)  Length of name field including terminating 0 (up to
-              1025).
- commentLength  (uint32_t)  Same as above, but for comment string.
- name     ...     Name string (null-terminated, up to 1025 bytes).
- comment    ...     Comment string (same as above).
- data     ...     Raw data (blockLength - total header size).
-******************************************************************************/
-
-unsigned CBlockFile::Read(void *data, uint32_t numBytes)
-{
-  if (mode == 'r')
-    return ReadBytes(data, numBytes);
-  return 0;
-}
-
-unsigned CBlockFile::Read(bool *value)
-{
-  uint8_t byte;
-  unsigned numBytes = Read(&byte, sizeof(byte));
-  if (numBytes >  0)
-    *value = byte != 0;
-  return numBytes;
-}
-
-unsigned CBlockFile::Read(bool& value)
-{
-    return Read(&value);        // turn reference into pointer for above function
-}
-
-void CBlockFile::Write(const void *data, uint32_t numBytes)
-{
-  if (mode == 'w')
-    WriteBytes(data, numBytes);
-}
-
-void CBlockFile::Write(bool value)
-{
-  uint8_t byte = value ? 1 : 0;
-  Write(&byte, sizeof(byte));
-}
-
-void CBlockFile::Write(const std::string &str)
-{
-  if (mode == 'w')
-      WriteBytes(str.c_str(), (uint32_t)str.length() + 1);
-}
-
-void CBlockFile::NewBlock(const std::string &name, const std::string &comment)
-{
-  if (mode == 'w')
-    WriteBlockHeader(name, comment);
-}
-
-Result CBlockFile::FindBlock(const std::string &name)
-{
-  if (mode != 'r')
-    return Result::FAIL;
-    
-  fseek(fp, 0, SEEK_SET);
-  
-  long int  curPos = 0;
-  while (curPos < fileSize)
-  {
-    blockStartPos = curPos;
-    
-    // Read header
-    uint32_t block_length;
-    uint32_t name_length;
-    uint32_t comment_length;
-    curPos += ReadDWord(&block_length);
-    curPos += ReadDWord(&name_length);
-    curPos += ReadDWord(&comment_length);
-    std::string block_name;
-    ReadString(&block_name, name_length);
-    
-    // Is this the block we want?
-    if (block_name == name)
-    {
-      fseek(fp, blockStartPos + 12 + name_length + comment_length, SEEK_SET); // move to beginning of data
-      dataStartPos = ftell(fp);
-      return Result::OKAY;
-    }
-    
-    // Move to next block
-    fseek(fp, blockStartPos + block_length, SEEK_SET);
-    curPos = blockStartPos + block_length;
-    if (block_length == 0)  // this would never advance
-      break;
-  }
-  
-  return Result::FAIL;
-}
-
-Result CBlockFile::Create(const std::string &file, const std::string &headerName, const std::string &comment)
-{
-  fp = fopen(file.c_str(), "wb");
-  if (NULL == fp)
-    return Result::FAIL;
-  mode = 'w';
-  WriteBlockHeader(headerName, comment);
-  return Result::OKAY;
-}
-  
-Result CBlockFile::Load(const std::string &file)
-{
-  fp = fopen(file.c_str(), "rb");
-  if (NULL == fp)
-    return Result::FAIL;
-  mode = 'r';
-  
-  // TODO: is this a valid block file?
-  
-  // Get the file size
-  fseek(fp, 0, SEEK_END);
-  fileSize = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
-  
-  return Result::OKAY;
-}
-  
-void CBlockFile::Close(void)
-{
-  if (fp != nullptr)
-    fclose(fp);
-  fp = nullptr;
-  mode = 0;
-}
-
-CBlockFile::CBlockFile(void) :
-    fp(nullptr),
-    mode(0),
-    fileSize(0),
-    blockStartPos(0),
-    dataStartPos(0)
+CBlockFile::CBlockFile(void)
 {
 }
 
 CBlockFile::~CBlockFile(void)
 {
-  if (fp != nullptr) // in case user forgot
-    fclose(fp);
-  fp = nullptr;
-  mode = 0;
+  Close();
+}
+
+void CBlockFile::Put(const void *data, size_t size)
+{
+  if (m_file == nullptr || size == 0)
+    return;
+  size_t written = std::fwrite(data, 1, size, m_file);
+  m_blockSize += uint32_t(written);
+}
+
+void CBlockFile::StartBlock(const std::string &name, const std::string &comment)
+{
+  if (m_file == nullptr)
+    return;
+  m_blockStart = std::ftell(m_file);
+  m_blockSize = 0;
+  uint32_t header[3] = { 0, uint32_t(name.size() + 1), uint32_t(comment.size() + 1) };
+  Put(header, sizeof(header));
+  Put(name.c_str(), name.size() + 1);
+  Put(comment.c_str(), comment.size() + 1);
+}
+
+void CBlockFile::FinishBlock(void)
+{
+  if (m_file == nullptr || m_mode != Mode::Writing)
+    return;
+  long end = std::ftell(m_file);
+  std::fseek(m_file, m_blockStart, SEEK_SET);
+  std::fwrite(&m_blockSize, sizeof(m_blockSize), 1, m_file);
+  std::fseek(m_file, end, SEEK_SET);
+}
+
+unsigned CBlockFile::Read(void *data, uint32_t numBytes)
+{
+  if (m_mode != Mode::Reading || m_file == nullptr)
+    return 0;
+  return unsigned(std::fread(data, 1, numBytes, m_file));
+}
+
+unsigned CBlockFile::Read(bool *value)
+{
+  uint8_t byte = 0;
+  unsigned got = Read(&byte, 1);
+  if (got != 0)
+    *value = (byte != 0);
+  return got;
+}
+
+unsigned CBlockFile::Read(bool &value)
+{
+  return Read(&value);
+}
+
+void CBlockFile::Write(const void *data, uint32_t numBytes)
+{
+  if (m_mode == Mode::Writing)
+    Put(data, numBytes);
+}
+
+void CBlockFile::Write(bool value)
+{
+  uint8_t byte = value ? 1 : 0;
+  Write(&byte, 1);
+}
+
+void CBlockFile::Write(const std::string &str)
+{
+  if (m_mode == Mode::Writing)
+    Put(str.c_str(), str.size() + 1);
+}
+
+void CBlockFile::NewBlock(const std::string &name, const std::string &comment)
+{
+  if (m_mode != Mode::Writing)
+    return;
+  FinishBlock();
+  StartBlock(name, comment);
+}
+
+Result CBlockFile::FindBlock(const std::string &name)
+{
+  if (m_mode != Mode::Reading || m_file == nullptr)
+    return Result::FAIL;
+
+  long pos = 0;
+  std::vector<char> nameBuf;
+  std::fseek(m_file, 0, SEEK_SET);
+  while (pos < m_length)
+  {
+    uint32_t total, nameLen, commentLen;
+    if (!ReadWord(m_file, &total) || !ReadWord(m_file, &nameLen) || !ReadWord(m_file, &commentLen))
+      break;
+
+    // The stored name ends at its first zero byte (or at nameLen bytes).
+    // (A corrupt length can't make us read more than the file holds.)
+    long left = m_length - (pos + long(kHeaderWords));
+    size_t want = nameLen;
+    if (left < 0)
+      want = 0;
+    else if (want > size_t(left))
+      want = size_t(left);
+    nameBuf.assign(want, 0);
+    size_t got = want ? std::fread(nameBuf.data(), 1, want, m_file) : 0;
+    size_t end = 0;
+    while (end < got && nameBuf[end] != 0)
+      end++;
+    if (name.size() == end && std::memcmp(name.data(), nameBuf.data(), end) == 0)
+    {
+      std::fseek(m_file, pos + long(kHeaderWords) + long(nameLen) + long(commentLen), SEEK_SET);
+      m_blockStart = pos;
+      return Result::OKAY;
+    }
+
+    if (total == 0)   // a zero-sized block would never advance
+      break;
+    // On to the next block (a failed search leaves the file there).
+    pos += long(total);
+    std::fseek(m_file, pos, SEEK_SET);
+  }
+  return Result::FAIL;
+}
+
+Result CBlockFile::Create(const std::string &file, const std::string &headerName, const std::string &comment)
+{
+  Close();
+  m_file = std::fopen(file.c_str(), "wb");
+  if (m_file == nullptr)
+    return Result::FAIL;
+  m_mode = Mode::Writing;
+  StartBlock(headerName, comment);
+  return Result::OKAY;
+}
+
+Result CBlockFile::Load(const std::string &file)
+{
+  Close();
+  m_file = std::fopen(file.c_str(), "rb");
+  if (m_file == nullptr)
+    return Result::FAIL;
+  m_mode = Mode::Reading;
+  std::fseek(m_file, 0, SEEK_END);
+  m_length = std::ftell(m_file);
+  std::fseek(m_file, 0, SEEK_SET);
+  return Result::OKAY;
+}
+
+void CBlockFile::Close(void)
+{
+  if (m_file != nullptr)
+  {
+    FinishBlock();
+    std::fclose(m_file);
+  }
+  m_file = nullptr;
+  m_mode = Mode::Closed;
 }

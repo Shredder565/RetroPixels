@@ -1,389 +1,343 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2024 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * JTAG.cpp
- * 
- * Model 3's JTAG test access port (TAP). This is accessed through the system
- * register space and is connected to the Real3D chipset and possibly other
- * devices. Hence, it is emulated as an independent module.
- *
- * It is unclear which exact JTAG standard the device conforms to (and it 
- * probably doesn't matter), so we assume IEEE 1149.1-1990 here.
- * 
- * All of the video board ASICs and the 3D-RAM chips are JTAG-compatible; their
- * JTAG lines are daisy chained together. Usually only one device is accessed at
- * a time (the other devices are given the BYPASS instruction) but some
- * procedures such as reading ID codes and performing boundary scan tests call
- * for accessing most or all of the devices at once.
- * 
- * 3D-RAM chips are only used for boundary scan tests (currently unemulated).
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Devices are listed in chain order from TDI to TDO. On TCK rising edges the
+// controller captures or shifts and then moves to its next state; on
+// falling edges TDO is updated in the shift states and the Update states
+// latch the shifted value. ASIC instructions: 3 = IDCODE, 8 = MODEWORD
+// (32-bit read/write), anything else BYPASS. Their instruction register is
+// 5 bits (captures 00001); the 3D-RAMs' is 4 bits (captures 1001).
+//
+// Each device's shift register is saved as the 262-character binary string
+// (most significant bit first, zero terminated) that older save states hold.
 
 #include "JTAG.h"
 
 #include "Supermodel.h"
 #include "Real3D.h"
 
-bool CJTAGDevice::Shift(bool tdi)
+#include <string>
+
+namespace
 {
-    bool tdo = m_shiftReg[0];
-    m_shiftReg >>= 1;
-    m_shiftReg[m_shiftRegSize - 1] = tdi;
-    return tdo;
+  const uint8_t kIDCODE = 3;
+  const uint8_t kMODEWORD = 8;
+  const uint8_t k3DRAMBypass = 15;
+
+  // ID code of a Real3D ASIC: version in bits 31-28, part number 16Cx,
+  // manufacturer 057.
+  uint32_t ASICID(unsigned version, unsigned part)
+  {
+    return (uint32_t(version) << 28) | (uint32_t(0x16C0 + part) << 12) | 0x057;
+  }
+
+  uint32_t Low32(const std::bitset<262> &b)
+  {
+    uint32_t v = 0;
+    for (unsigned i = 0; i < 32; i++)
+      v |= uint32_t(b[i]) << i;
+    return v;
+  }
+
+  std::bitset<262> From32(uint32_t v)
+  {
+    std::bitset<262> b;
+    for (unsigned i = 0; i < 32; i++)
+      b[i] = (v >> i) & 1;
+    return b;
+  }
 }
 
-bool CJTAGDevice::ReadTDO()
+CJTAG::State CJTAG::Next(State s, bool tms)
 {
-    return m_shiftReg[0];
+  switch (s)
+  {
+  case State::TestLogicReset: return tms ? State::TestLogicReset : State::RunTestIdle;
+  case State::RunTestIdle:    return tms ? State::SelectDRScan : State::RunTestIdle;
+  case State::SelectDRScan:   return tms ? State::SelectIRScan : State::CaptureDR;
+  case State::CaptureDR:      return tms ? State::Exit1DR : State::ShiftDR;
+  case State::ShiftDR:        return tms ? State::Exit1DR : State::ShiftDR;
+  case State::Exit1DR:        return tms ? State::UpdateDR : State::PauseDR;
+  case State::PauseDR:        return tms ? State::Exit2DR : State::PauseDR;
+  case State::Exit2DR:        return tms ? State::UpdateDR : State::ShiftDR;
+  case State::UpdateDR:       return tms ? State::SelectDRScan : State::RunTestIdle;
+  case State::SelectIRScan:   return tms ? State::TestLogicReset : State::CaptureIR;
+  case State::CaptureIR:      return tms ? State::Exit1IR : State::ShiftIR;
+  case State::ShiftIR:        return tms ? State::Exit1IR : State::ShiftIR;
+  case State::Exit1IR:        return tms ? State::UpdateIR : State::PauseIR;
+  case State::PauseIR:        return tms ? State::Exit2IR : State::PauseIR;
+  case State::Exit2IR:        return tms ? State::UpdateIR : State::ShiftIR;
+  case State::UpdateIR:       return tms ? State::SelectDRScan : State::RunTestIdle;
+  }
+  return State::TestLogicReset;
 }
 
-void CJTAGDevice::SaveShiftRegister(CBlockFile* SaveState)
+void CJTAG::DeviceReset(Device &d)
 {
-    SaveState->Write(m_shiftReg.to_string());
+  if (d.isASIC)
+  {
+    d.ir = kIDCODE;
+    d.length = 32;
+    d.shift = From32(d.idCode);
+  }
+  else
+  {
+    d.ir = k3DRAMBypass;
+    d.length = 1;
+    d.shift.reset();
+  }
 }
 
-void CJTAGDevice::LoadShiftRegister(CBlockFile* SaveState)
+void CJTAG::DeviceCaptureIR(Device &d)
 {
-    char str[MAX_REGISTER_LENGTH + 1];      // add one char for null terminator
-    SaveState->Read(str, sizeof(str));
-    std::bitset<MAX_REGISTER_LENGTH> tempReg{ str };
-    m_shiftReg = tempReg;
+  if (d.isASIC)
+  {
+    d.length = 5;
+    d.shift = From32(0x01);
+  }
+  else
+  {
+    d.length = 4;
+    d.shift = From32(0x09);
+  }
 }
 
-void CASIC::SaveStateToBlock(CBlockFile* SaveState)
+void CJTAG::DeviceCaptureDR(Device &d)
 {
-    SaveShiftRegister(SaveState);
-    SaveState->Write(&m_shiftRegSize, sizeof(m_shiftRegSize));
-    SaveState->Write(&m_instructionReg, sizeof(m_instructionReg));
-    SaveState->Write(&m_idCode, sizeof(m_idCode));
-    SaveState->Write(&m_modeword, sizeof(m_modeword));
+  if (d.isASIC && d.ir == kIDCODE)
+  {
+    d.length = 32;
+    d.shift = From32(d.idCode);
+  }
+  else if (d.isASIC && d.ir == kMODEWORD)
+  {
+    d.length = 32;
+    d.shift = From32(d.modeword);
+  }
+  else
+  {
+    d.length = 1;     // BYPASS
+    d.shift.reset();
+  }
 }
 
-void CASIC::LoadStateFromBlock(CBlockFile* SaveState)
+void CJTAG::DeviceUpdateIR(Device &d)
 {
-    LoadShiftRegister(SaveState);
-    SaveState->Read(&m_shiftRegSize, sizeof(m_shiftRegSize));
-    SaveState->Read(&m_instructionReg, sizeof(m_instructionReg));
-    SaveState->Read(&m_idCode, sizeof(m_idCode));
-    SaveState->Read(&m_modeword, sizeof(m_modeword));
+  d.ir = uint8_t(Low32(d.shift));
 }
 
-void CASIC::CaptureDR()
+void CJTAG::DeviceUpdateDR(Device &d)
 {
-    switch (m_instructionReg)
-    {
-    case 3:                     // IDCODE
-        m_shiftRegSize = 32;
-        m_shiftReg = m_idCode;
-        break;
-    case 8:                     // MODEWORD
-        m_shiftRegSize = 32;
-        m_shiftReg = m_modeword;
-        break;
-    default:                    // BYPASS
-        m_shiftRegSize = 1;
-        m_shiftReg = 0;
-        break;
-    }
+  if (d.isASIC && d.ir == kMODEWORD)
+  {
+    d.modeword = Low32(d.shift);
+    m_real3D.WriteJTAGModeword(d.name, d.modeword);
+  }
 }
 
-void CASIC::CaptureIR()
+bool CJTAG::DeviceShift(Device &d, bool tdi)
 {
-    m_shiftRegSize = 5;
-    m_shiftReg = 1;
+  bool out = d.shift[0];
+  d.shift >>= 1;
+  if (d.length >= 1 && d.length <= kMaxBits)
+    d.shift[d.length - 1] = tdi;
+  return out;
 }
 
-void CASIC::UpdateDR()
+void CJTAG::SaveDevice(CBlockFile *f, const Device &d) const
 {
-    switch (m_instructionReg)
-    {
-    case 8:                     // MODEWORD
-        m_modeword = m_shiftReg.to_ulong();
-        m_real3D.WriteJTAGModeword(m_deviceName, m_modeword);
-        break;
-    default:
-        break;
-    }
+  f->Write(d.shift.to_string());
+  f->Write(&d.length, sizeof(d.length));
+  f->Write(&d.ir, sizeof(d.ir));
+  if (d.isASIC)
+  {
+    f->Write(&d.idCode, sizeof(d.idCode));
+    f->Write(&d.modeword, sizeof(d.modeword));
+  }
 }
 
-void CASIC::UpdateIR()
+void CJTAG::LoadDevice(CBlockFile *f, Device &d)
 {
-    m_instructionReg = (uint8_t)m_shiftReg.to_ulong();
+  char text[kMaxBits + 1] = {};
+  f->Read(text, sizeof(text));
+  size_t len = 0;
+  while (len < kMaxBits && text[len] != '\0')
+    len++;
+  d.shift.reset();
+  for (size_t i = 0; i < len; i++)    // the last character is bit 0
+    d.shift[i] = (text[len - 1 - i] == '1');
+
+  f->Read(&d.length, sizeof(d.length));
+  f->Read(&d.ir, sizeof(d.ir));
+  if (d.isASIC)
+  {
+    f->Read(&d.idCode, sizeof(d.idCode));
+    f->Read(&d.modeword, sizeof(d.modeword));
+  }
 }
 
-void CASIC::Reset()
+void CJTAG::SaveState(CBlockFile *SaveState)
 {
-    m_shiftRegSize = 32;
-    m_shiftReg = m_idCode;
-    m_instructionReg = 3;   // IDCODE
+  SaveState->NewBlock("JTAG2", __FILE__);
+  int32_t state = int32_t(m_state);
+  SaveState->Write(&state, sizeof(state));
+  SaveState->Write(&m_lastTck, sizeof(m_lastTck));
+  SaveState->Write(&m_tdo, sizeof(m_tdo));
+  SaveState->Write(&m_numDevices, sizeof(m_numDevices));
+  for (const Device &d : m_chain)
+    SaveDevice(SaveState, d);
 }
 
-CASIC::CASIC(CReal3D& real3D, CASIC::Name deviceName) :
-    m_real3D(real3D),
-    m_deviceName(deviceName)
+void CJTAG::LoadState(CBlockFile *LoadState)
 {
-
-}
-
-void C3DRAM::SaveStateToBlock(CBlockFile* SaveState)
-{
-    SaveShiftRegister(SaveState);
-    SaveState->Write(&m_shiftRegSize, sizeof(m_shiftRegSize));
-    SaveState->Write(&m_instructionReg, sizeof(m_instructionReg));
-}
-
-void C3DRAM::LoadStateFromBlock(CBlockFile* SaveState)
-{
-    LoadShiftRegister(SaveState);
-    SaveState->Read(&m_shiftRegSize, sizeof(m_shiftRegSize));
-    SaveState->Read(&m_instructionReg, sizeof(m_instructionReg));
-}
-
-void C3DRAM::CaptureDR()
-{
-    switch (m_instructionReg)
-    {
-    default:                // BYPASS
-        m_shiftRegSize = 1;
-        m_shiftReg = 0;
-        break;
-    }
-}
-
-void C3DRAM::CaptureIR()
-{
-    m_shiftRegSize = 4;
-    m_shiftReg = 0b1001;
-}
-
-void C3DRAM::UpdateDR()
-{
-    switch (m_instructionReg)
-    {
-        // no instructions implemented yet
-    }
-}
-
-void C3DRAM::UpdateIR()
-{
-    m_instructionReg = (uint8_t)m_shiftReg.to_ulong();
-}
-
-void C3DRAM::Reset()
-{
-    m_shiftRegSize = 1;
-    m_shiftReg = 0;
-    m_instructionReg = 15;  // BYPASS
-}
-
-// Finite state machine. Each state has two possible next states.
-const CJTAG::State CJTAG::s_fsm[][2] =
-{
-    // tms = 0				tms = 1
-    { State::RunTestIdle,	State::TestLogicReset },	// 0  Test-Logic/Reset
-    { State::RunTestIdle,	State::SelectDRScan },		// 1  Run-Test/Idle
-    { State::CaptureDR,		State::SelectIRScan },		// 2  Select-DR-Scan
-    { State::ShiftDR,		State::Exit1DR },			// 3  Capture-DR
-    { State::ShiftDR,		State::Exit1DR },			// 4  Shift-DR
-    { State::PauseDR,		State::UpdateDR },			// 5  Exit1-DR
-    { State::PauseDR,		State::Exit2DR },			// 6  Pause-DR
-    { State::ShiftDR,		State::UpdateDR },			// 7  Exit2-DR
-    { State::RunTestIdle,	State::SelectDRScan },		// 8  Update-DR
-    { State::CaptureIR,		State::TestLogicReset },	// 9  Select-IR-Scan
-    { State::ShiftIR,		State::Exit1IR },			// 10 Capture-IR
-    { State::ShiftIR,		State::Exit1IR },			// 11 Shift-IR
-    { State::PauseIR,		State::UpdateIR },			// 12 Exit1-IR
-    { State::PauseIR,		State::Exit2IR },			// 13 Pause-IR
-    { State::ShiftIR,		State::UpdateIR },			// 14 Exit2-IR
-    { State::RunTestIdle,	State::SelectDRScan }		// 15 Update-IR
-};
-
-void CJTAG::SaveState(CBlockFile* SaveState)
-{
-    SaveState->NewBlock("JTAG2", __FILE__);
-    SaveState->Write(&m_state, sizeof(m_state));
-    SaveState->Write(&m_lastTck, sizeof(m_lastTck));
-    SaveState->Write(&m_tdo, sizeof(m_tdo));
-    SaveState->Write(&m_numDevices, sizeof(m_numDevices));
-    for (auto& device : m_device)
-    {
-        device->SaveStateToBlock(SaveState);
-    }
-}
-
-void CJTAG::LoadState(CBlockFile* LoadState)
-{
-    if (Result::OKAY != LoadState->FindBlock("JTAG2"))
-    {
-        ErrorLog("Unable to load JTAG state. Save state file is corrupt.");
-        return;
-    }
-    LoadState->Read(&m_state, sizeof(m_state));
-    LoadState->Read(&m_lastTck, sizeof(m_lastTck));
-    LoadState->Read(&m_tdo, sizeof(m_tdo));
-    LoadState->Read(&m_numDevices, sizeof(m_numDevices));
-    for (auto& device : m_device)
-    {
-        device->LoadStateFromBlock(LoadState);
-    }
+  if (LoadState->FindBlock("JTAG2") != Result::OKAY)
+  {
+    ErrorLog("Unable to load JTAG state. Save state file is corrupt.");
+    return;
+  }
+  int32_t state = int32_t(m_state);
+  LoadState->Read(&state, sizeof(state));
+  m_state = State(state & 0xF);
+  LoadState->Read(&m_lastTck, sizeof(m_lastTck));
+  LoadState->Read(&m_tdo, sizeof(m_tdo));
+  LoadState->Read(&m_numDevices, sizeof(m_numDevices));
+  if (m_numDevices > kChainLength)
+    m_numDevices = kChainLength;
+  for (Device &d : m_chain)
+    LoadDevice(LoadState, d);
 }
 
 bool CJTAG::Read() const
 {
-    return m_tdo;
+  return m_tdo;
 }
 
 void CJTAG::Write(bool tck, bool tms, bool tdi, bool trst)
 {
-    if (!trst)
-    {
-        for (uint32_t i = 0; i < m_numDevices; i++)
-            m_device[i]->Reset();
-        return;
-    }
+  if (!trst)
+  {
+    // Asynchronous reset of the devices (the controller state is kept).
+    for (uint32_t i = 0; i < m_numDevices; i++)
+      DeviceReset(m_chain[i]);
+    return;
+  }
 
-    if (m_lastTck == tck)
-        return;
-    m_lastTck = tck;
+  if (tck == m_lastTck)
+    return;
+  m_lastTck = tck;
 
-    if (tck)
+  if (tck)
+  {
+    switch (m_state)
     {
-        switch (m_state)
-        {
-        case State::TestLogicReset:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                m_device[i]->Reset();
-            break;
-        case State::CaptureDR:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                m_device[i]->CaptureDR();
-            break;
-        case State::CaptureIR:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                m_device[i]->CaptureIR();
-            break;
-        case State::ShiftDR:
-        case State::ShiftIR:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                tdi = m_device[i]->Shift(tdi);
-            break;
-        default:
-            break;
-        }
+    case State::TestLogicReset:
+      for (uint32_t i = 0; i < m_numDevices; i++)
+        DeviceReset(m_chain[i]);
+      break;
+    case State::CaptureIR:
+      for (uint32_t i = 0; i < m_numDevices; i++)
+        DeviceCaptureIR(m_chain[i]);
+      break;
+    case State::CaptureDR:
+      for (uint32_t i = 0; i < m_numDevices; i++)
+        DeviceCaptureDR(m_chain[i]);
+      break;
+    case State::ShiftIR:
+    case State::ShiftDR:
+    {
+      bool bit = tdi;
+      for (uint32_t i = 0; i < m_numDevices; i++)
+        bit = DeviceShift(m_chain[i], bit);
+      break;
+    }
+    default:
+      break;
+    }
+    m_state = Next(m_state, tms);
+    return;
+  }
 
-        // Go to next state
-        m_state = s_fsm[static_cast<int>(m_state)][tms];
-    }
-    else
-    {
-        switch (m_state)
-        {
-        case State::ShiftDR:
-        case State::ShiftIR:
-            m_tdo = m_device[m_numDevices - 1]->ReadTDO();
-            break;
-        case State::UpdateDR:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                m_device[i]->UpdateDR();
-            break;
-        case State::UpdateIR:
-            for (uint32_t i = 0; i < m_numDevices; i++)
-                m_device[i]->UpdateIR();
-            break;
-        default:
-            break;
-        }
-    }
+  // Falling edge
+  switch (m_state)
+  {
+  case State::ShiftIR:
+  case State::ShiftDR:
+    if (m_numDevices != 0)
+      m_tdo = m_chain[m_numDevices - 1].shift[0];
+    break;
+  case State::UpdateIR:
+    for (uint32_t i = 0; i < m_numDevices; i++)
+      DeviceUpdateIR(m_chain[i]);
+    break;
+  case State::UpdateDR:
+    for (uint32_t i = 0; i < m_numDevices; i++)
+      DeviceUpdateDR(m_chain[i]);
+    break;
+  default:
+    break;
+  }
 }
 
 void CJTAG::Reset()
 {
-    m_state = State::TestLogicReset;
-    for (auto& device : m_device)
-        device->Reset();
-    DebugLog("JTAG reset\n");
+  m_state = State::TestLogicReset;
+  for (Device &d : m_chain)
+    DeviceReset(d);
 }
 
 void CJTAG::SetStepping(int stepping)
 {
-    switch (stepping)
-    {
-    case 0x21:
-        m_mercury.SetIDCode(0x416c3057);
-        m_venus.SetIDCode(0x316c4057);
-        m_earth0.SetIDCode(0x516c5057);
-        m_earth1.SetIDCode(0x516c5057);
-        m_mars00.SetIDCode(0x316c6057);
-        m_mars01.SetIDCode(0x316c6057);
-        m_mars10.SetIDCode(0x316c6057);
-        m_mars11.SetIDCode(0x316c6057);
-        m_jupiter.SetIDCode(0x516c7057);
-        m_numDevices = 17;
-        break;
-    case 0x20:
-        m_mercury.SetIDCode(0x416c3057);
-        m_venus.SetIDCode(0x316c4057);
-        m_earth0.SetIDCode(0x416c5057);
-        m_earth1.SetIDCode(0x416c5057);
-        m_mars00.SetIDCode(0x316c6057);
-        m_mars01.SetIDCode(0x316c6057);
-        m_mars10.SetIDCode(0x316c6057);
-        m_mars11.SetIDCode(0x316c6057);
-        m_jupiter.SetIDCode(0x416c7057);
-        m_numDevices = 17;
-        break;
-    case 0x15:
-        m_mercury.SetIDCode(0x316c3057);
-        m_venus.SetIDCode(0x216c4057);
-        m_earth0.SetIDCode(0x316c5057);
-        m_mars00.SetIDCode(0x216c6057);
-        m_mars01.SetIDCode(0x216c6057);
-        m_jupiter.SetIDCode(0x316c7057);
-        m_numDevices = 10;
-        break;
-    case 0x10:
-    default:
-        m_mercury.SetIDCode(0x216c3057);
-        m_venus.SetIDCode(0x116c4057);
-        m_earth0.SetIDCode(0x216c5057);
-        m_mars00.SetIDCode(0x116c6057);
-        m_mars01.SetIDCode(0x116c6057);
-        m_jupiter.SetIDCode(0x116c7057);
-        m_numDevices = 10;
-        break;
-    }
+  // ASIC versions per board revision: Mercury, Venus, Earth, Mars, Jupiter.
+  struct Versions
+  {
+    unsigned mercury, venus, earth, mars, jupiter;
+  };
+  Versions v;
+  bool step2;
+  switch (stepping)
+  {
+  case 0x21: v = { 4, 3, 5, 3, 5 }; step2 = true; break;
+  case 0x20: v = { 4, 3, 4, 3, 4 }; step2 = true; break;
+  case 0x15: v = { 3, 2, 3, 2, 3 }; step2 = false; break;
+  default:   v = { 2, 1, 2, 1, 1 }; step2 = false; break;   // 1.0
+  }
+
+  // Chain positions (see the constructor).
+  m_chain[0].idCode = ASICID(v.jupiter, 7);
+  m_chain[1].idCode = ASICID(v.mercury, 3);
+  m_chain[2].idCode = ASICID(v.venus, 4);
+  m_chain[3].idCode = ASICID(v.earth, 5);
+  m_chain[5].idCode = ASICID(v.mars, 6);
+  m_chain[6].idCode = ASICID(v.mars, 6);
+  if (step2)
+  {
+    // Second Earth and Mars pair, only on Step 2.x boards
+    m_chain[10].idCode = ASICID(v.earth, 5);
+    m_chain[12].idCode = ASICID(v.mars, 6);
+    m_chain[13].idCode = ASICID(v.mars, 6);
+  }
+  m_numDevices = step2 ? 17 : 10;
 }
 
-// Only the first ASIC of each type has its modeword written to the Real3D object
-CJTAG::CJTAG(CReal3D& real3D) :
-    m_mercury(real3D, CASIC::Name::Mercury),
-    m_venus(real3D, CASIC::Name::Venus),
-    m_earth0(real3D, CASIC::Name::Earth),
-    m_earth1(real3D, CASIC::Name::Dummy),
-    m_mars00(real3D, CASIC::Name::Mars),
-    m_mars01(real3D, CASIC::Name::Dummy),
-    m_mars10(real3D, CASIC::Name::Dummy),
-    m_mars11(real3D, CASIC::Name::Dummy),
-    m_jupiter(real3D, CASIC::Name::Jupiter)
+CJTAG::CJTAG(CReal3D &real3D)
+  : m_real3D(real3D)
 {
-    DebugLog("Built JTAG logic\n");
+  // Chain order from TDI: Jupiter, Mercury, Venus, Earth, 3D-RAM, Mars,
+  // Mars, three 3D-RAMs, then (Step 2.x) Earth, 3D-RAM, Mars, Mars and
+  // three 3D-RAMs. Only the first ASIC of each type configures the
+  // renderer.
+  const struct
+  {
+    unsigned pos;
+    CASIC::Name name;
+  } asics[] =
+  {
+    { 0, CASIC::Name::Jupiter }, { 1, CASIC::Name::Mercury }, { 2, CASIC::Name::Venus },
+    { 3, CASIC::Name::Earth }, { 5, CASIC::Name::Mars }, { 6, CASIC::Name::Dummy },
+    { 10, CASIC::Name::Dummy }, { 12, CASIC::Name::Dummy }, { 13, CASIC::Name::Dummy },
+  };
+  for (const auto &a : asics)
+  {
+    m_chain[a.pos].isASIC = true;
+    m_chain[a.pos].name = a.name;
+  }
 }

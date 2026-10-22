@@ -1,29 +1,12 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * MPC10x.h
- * 
- * Header file defining the CMPC10x class (Motorola MPC105 and MPC106).
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Motorola MPC105 (Step 1.x) / MPC106 (Step 2.x) PCI bridge and memory
+// controller, reduced to what the Model 3 uses: the CONFIG_ADDR/CONFIG_DATA
+// pair for PCI configuration cycles, and the bridge's own 256-byte register
+// file (PCI device 0).
+//
+// The register file is kept in the chip's own order: PCI configuration
+// space is little endian, so a 16-bit vendor ID 0x1057 is stored as 57 10.
 
 #ifndef INCLUDED_MPC10X_H
 #define INCLUDED_MPC10X_H
@@ -31,158 +14,50 @@
 #include "PCI.h"
 #include "BlockFile.h"
 
-/*
- * CMPC10x:
- *
- * MPC105 or MPC106 PCI/bridge/memory controller device.
- */
 class CMPC10x
 {
 public:
-	/*
-	 * SaveState(SaveState):
-	 *
-	 * Saves an image of the current device state.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to save state information to.
-	 */
-	void SaveState(CBlockFile *SaveState);
+  // Save state block "MPC10x": the 256 registers, then the selected bus,
+  // device, function and register (32 bits each).
+  void SaveState(CBlockFile *SaveState);
+  void LoadState(CBlockFile *SaveState);
 
-	/*
-	 * LoadState(SaveState):
-	 *
-	 * Loads and a state image.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to load state information from.
-	 */
-	void LoadState(CBlockFile *SaveState);
-		
-	/*
-	 * WritePCIConfigAddress(data):
-	 *
-	 * Writes to the PCI configuration space address (CONFIG_ADDR) register, 
-	 * which selects a PCI device and register. For now, only 32-bit accesses 
-	 * are supported.
-	 *
-	 * Parameters:
-	 *		data	Data to write.
-	 */
-	void WritePCIConfigAddress(UINT32 data);
+  // CONFIG_ADDR as the PowerPC writes it (byte reversed: the bridge sees
+  // a little endian word).
+  void WritePCIConfigAddress(UINT32 data);
 
-	/*
-	 * ReadPCIConfigData(bits, offset):
-	 *
-	 * Reads from the PCI configuration space data (CONFIG_DATA) register, 
-	 * which in turn calls upon the selected PCI device to return the data.
-	 *
-	 * Parameters:
-	 *		bits	Width of access (8, 16, or 32 only).
-	 *		offset	Byte offset within CONFIG_DATA, aligned to bit width of
-	 *				access. For bytes, can be 0, 1, 2, or 3, but for 16-bit
-	 *				words can only be 0 or 2. The offset is just the 
-	 *				CONFIG_DATA address ANDed with 0, 2, or 3 depending on the
-	 *				bit width (32, 16, or 8, respectively).
-	 *
-	 * Returns:
-	 *		Data from the PCI conifguration space of the presently selected 
-	 *		device. Bit width will be the same as specified by 'bits'.
-	 */
-	UINT32 ReadPCIConfigData(unsigned bits, unsigned offset) const;
+  // CONFIG_DATA. Device 0 is the bridge itself; others go to the PCI bus.
+  UINT32 ReadPCIConfigData(unsigned bits, unsigned offset) const;
+  void WritePCIConfigData(unsigned bits, unsigned offset, UINT32 data);
 
-	/*
-	 * WritePCIConfigData(bits, offset, data):
-	 *
-	 * Writes data (CONFIG_DATA) to the presently selected PCI device and
-	 * register. 
-	 *
-	 * Parameters:
-	 *		bits	Width of access (8, 16, or 32 only).
-	 *		offset	Byte offset within CONFIG_DATA, aligned to bit width of
-	 *				access.
-	 *		data	Data to write.
-	 */
-	void WritePCIConfigData(unsigned bits, unsigned offset, UINT32 data);
+  // Direct byte access to the register file (MPC105 at F8FFF0xx).
+  void WriteRegister(unsigned reg, UINT8 data);
 
-	/*
-	 * WriteRegister(reg, data):
-	 *
-	 * Writes to the MPC10x's internal registers.
-	 *
-	 * Parameters:
-	 *		reg		Register (0-255).
-	 *		data	Data to write.
-	 */
-	void WriteRegister(unsigned reg, UINT8 data);
+  void Reset(void);
+  void AttachPCIBus(CPCIBus *BusObjectPtr);
 
-	/*
-	 * Reset(void):
-	 *
-	 * Resets the device. 
-	 */
-	void Reset(void);
+  // 0x105 or 0x106 (anything else is taken as 0x105).
+  void SetModel(int modelNum);
+  int GetModel() const;
 
-	/*
-	 * AttachPCIBus(BusObjectPtr):
-	 *
-	 * Attaches a PCI bus object which will handle all PCI register accesses.
-	 * For now, only one bus is supported. The MPCI10x will automatically
-	 * handle any requests for device 0 (itself) without passing them on to the
-	 * PCI bus.
-	 *
-	 * Parameters:
-	 *		BusObjectPtr	A pointer to the PCI bus object.
-	 */
-	void AttachPCIBus(CPCIBus *BusObjectPtr);
+  void Init(void);
 
-	/*
-	 * SetModel(modelNum):
-	 *
-	 * Selects either MPC105 or MPC106 behavior. This will also reset the
-	 * device state by calling Reset(). This should be called prior to any
-	 * other emulation functions and after Init().
-	 *
-	 * Parameters:
-	 *		modelNum	Either 0x105 for MPC105 or 0x106 for MPC106. Defaults
-	 *					to MPC105 if unrecognized.
-	 */
-	void SetModel(int modelNum);
+  CMPC10x(void);
+  ~CMPC10x(void);
 
-  /*
-   * GetModel(void):
-   *
-   * Returns:
-   *    The PCI bridge model number, either 0x105 or 0x106.
-   */
-  int GetModel() const; 
-	 
-	/*
-	 * Init(void):
-	 *
-	 * One-time initialization of the context. Must be called prior to all
-	 * other members. By default, initializes to MPC105.
-	 */
-	void Init(void);
-	 
-	/*
-	 * CMPC10x(void):
-	 * ~CMPC10x(void):
-	 *
-	 * Constructor and destructor for MPC10x class.
-	 */
-	CMPC10x(void);
-	~CMPC10x(void);
-	
 private:
-	int			model;			// MPC105 = 0x105 (default), MPC106 = 0x106
-	CPCIBus		*PCIBus;		// the PCI bus to which this MPC10x is attached
-	UINT8		regs[256];		// internal registers
-	unsigned	pciBus;			// PCI bus component of PCI address setting (8 bits)
-	unsigned	pciDevice;		// PCI device component (5 bits)
-	unsigned	pciFunction;	// PCI function component (3 bits)
-	unsigned	pciReg;			// PCI register component (7 bits)
+  UINT8 &Reg(unsigned index) { return m_regs[index & 0xFF]; }
+  UINT8 Reg(unsigned index) const { return m_regs[index & 0xFF]; }
+  void Put32LE(unsigned index, UINT32 value);
+
+  int m_model = 0x105;
+  CPCIBus *m_bus = nullptr;
+  UINT8 m_regs[256] = {};
+  // CONFIG_ADDR fields
+  unsigned m_selBus = 0;
+  unsigned m_selDevice = 0;
+  unsigned m_selFunction = 0;
+  unsigned m_selRegister = 0;
 };
 
-
-#endif	// INCLUDED_MPC10X_H
+#endif // INCLUDED_MPC10X_H

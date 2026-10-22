@@ -1,29 +1,21 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * 93C46.h
- * 
- * Header file defining the C93C46 class: 93C46 EEPROM.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// 93C46 serial EEPROM: 64 words of 16 bits behind a three-wire interface
+// (chip select, clock, data in) plus a data out pin. The Model 3 reaches it
+// through the input bank register (F0040000) and reads DO back in bit 5 of
+// input bank 1. Commands are a start bit, a 2-bit opcode and a 6-bit
+// address (data follows for WRITE and WRAL):
+//
+//   1 10 aaaaaa          READ     words stream out MSB first from aaaaaa on
+//   1 01 aaaaaa d16      WRITE
+//   1 11 aaaaaa          ERASE    word := FFFF
+//   1 00 11xxxx          EWEN     (recognised after its first 5 bits)
+//   1 00 00xxxx          EWDS     (likewise)
+//   1 00 01xxxx d16      WRAL
+//   1 00 10xxxx          ERAL
+//
+// Writes and erases only take effect after EWEN. While idle, DO reads 0
+// ("busy") for a few reads after chip select drops, then 1 ("ready").
 
 #ifndef INCLUDED_93C46_H
 #define INCLUDED_93C46_H
@@ -31,99 +23,42 @@
 #include "BlockFile.h"
 #include "Types.h"
 
-/*
- * C93C46:
- *
- * 93C46 serial EEPROM.
- */
 class C93C46
 {
 public:
-	/*
-	 * SaveState(SaveState):
-	 *
-	 * Saves an image of the current device state.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to save state information to.
-	 */
-	void SaveState(CBlockFile *SaveState);
+  // Save state / NVRAM block "93C46".
+  void SaveState(CBlockFile *SaveState);
+  void LoadState(CBlockFile *SaveState);
 
-	/*
-	 * LoadState(SaveState):
-	 *
-	 * Loads and a state image.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to load state information from.
-	 */
-	void LoadState(CBlockFile *SaveState);
-	
-	/*
-	 * Clear(void):
-	 *
-	 * Clears the EEPROM contents by writing all 1's.
-	 */
-	void Clear(void);
-	
-	/*
-	 * Write(pinCS, pinCLK, pinDI):
-	 *
-	 * Write to the EEPROM. All inputs must be either 0 or 1 only!
-	 *
-	 * Parameters:
-	 *		pinCS	Chip select.
-	 *		pinCLK	Serial data clock.
-	 *		pinDI	Serial data input.
-	 */
-	void Write(unsigned pinCS, unsigned pinCLK, unsigned pinDI);
-	
-	/*
-	 * Read(void):
-	 *
-	 * Read from the EEPROM.
-	 *
-	 * Returns:
-	 *		The serial data output bit (either a 1 or 0).
-	 */
-	unsigned Read(void);
-	
-	/*
-	 * Reset(void):
-	 *
-	 * Resets the device, putting it into a locked state. Does not modify the
-	 * memory.
-	 */
-	void Reset(void);
-	
-	/*
-	 * Init(void):
-	 *
-	 * One-time initialization of the context. Must be called prior to all
-	 * other members.
-	 */
-	void Init(void);
-	 
-	/*
-	 * C93C46(void):
-	 * ~C93C46(void):
-	 *
-	 * Constructor and destructor.
-	 */
-	C93C46(void);
-	~C93C46(void);
-	
+  // Sets every word to FFFF (a blank chip).
+  void Clear(void);
+
+  // New levels on the CS, CLK and DI pins (nonzero = high).
+  void Write(unsigned pinCS, unsigned pinCLK, unsigned pinDI);
+
+  // The DO pin.
+  unsigned Read(void);
+
+  void Reset(void);
+  void Init(void);
+
+  C93C46(void);
+  ~C93C46(void);
+
 private:
-	UINT16		regs[64];	// memory: 64 16-bit registers
-	unsigned	CS, CLK, DI, DO;	// pins
-	UINT32		bitBufferOut;	// bits to be shifted out
-	UINT32		bitBufferIn;	// stores bits as they are shifted in
-	int			bitsOut;		// how many bits have been shifted out
-	bool		receiving;		// if true, accepting data, if false, sending data out (read commands)
-	unsigned	addr;			// latched address
-	int			busyCycles;		// when > 0, counts down delay cycles and indicates busy
-	bool		locked;			// whether the EEPROM is in a locked state
+  void OnClockRise(void);
+  void Decode(void);
+  void LoadOutputWord(void);
+
+  UINT16 m_mem[64];
+  unsigned m_cs = 0, m_clk = 0, m_di = 0, m_do = 0;
+  UINT32 m_out = 0;       // word being shifted out, next bit in bit 0
+  UINT32 m_in = 0;        // bits shifted in since CS went high
+  int m_outCount = 0;     // bits of m_out already sent
+  bool m_listening = true;  // false while a READ streams data out
+  unsigned m_addr = 0;
+  int m_busy = 0;         // reads left that report busy
+  bool m_protected = true;  // until EWEN
 };
 
-
-#endif	// INCLUDED_93C46_H
+#endif // INCLUDED_93C46_H

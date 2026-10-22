@@ -1,123 +1,89 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2016 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The security board's Sega 315-5881 protection chip. Games load an
+// encrypted (and optionally compressed) stream into security board RAM,
+// set a sub-key and read the plaintext back word by word through register
+// F01A001C. The cipher is the one documented by the MAME team's analysis
+// of the chip (also used on NAOMI M2 cartridges): a 16-bit block cipher
+// built from two 4-round Feistel networks, run in counter mode over the
+// RAM word address. Streams start with an 18-bit header (compressed flag,
+// then the size as two counts) and compressed streams are coded line by
+// line with fixed prefix-code trees.
 
-/*
- * Crypto.h
- *
- * Header file for security board encryption device. This code was taken from
- * MAME (http://mamedev.org).
- */
-
-// license:BSD-3-Clause
-// copyright-holders:David Haywood
-
-#pragma once
-
-#ifndef __SEGA315_5881_CRYPT__
-#define __SEGA315_5881_CRYPT__
+#ifndef INCLUDED_CRYPTO_H
+#define INCLUDED_CRYPTO_H
 
 #include <cstdint>
-#include <memory>
 #include <functional>
+#include <memory>
 
 class CBlockFile;
 
 class CCrypto
 {
 public:
-	// construction/destruction
-	CCrypto();
-	
+  CCrypto();
+
+  // Save state block "Sega 315-5881" (only for games with a security
+  // board, i.e. a nonzero key).
   void SaveState(CBlockFile *SaveState);
   void LoadState(CBlockFile *SaveState);
+
+  // The game's key (0 = no security board) and how to read a 16-bit word
+  // of security board RAM by word address.
   void Init(uint32_t encryptionKey, std::function<uint16_t(uint32_t)> ReadRAMCallback);
   void Reset();
 
+  // Next plaintext word. *base is set to the two bytes it came from.
+  // Returns FFFF when there is no security board.
+  uint16_t Decrypt(uint8_t **base);
 
-	uint16_t Decrypt(uint8_t **base);
-	void SetAddressLow(uint16_t data);
-	void SetAddressHigh(uint16_t data);
-	void SetSubKey(uint16_t data);
+  // Stream start address (word address, in two halves) and sub-key.
+  void SetAddressLow(uint16_t data);
+  void SetAddressHigh(uint16_t data);
+  void SetSubKey(uint16_t data);
 
-	std::function<uint16_t(uint32_t)> m_read;
-
-	/*
-	static void set_read_cb(device_t &device,sega_m2_read_delegate readcb)
-	{
-		sega_315_5881_crypt_device &dev = downcast<sega_315_5881_crypt_device &>(device);
-		dev.m_read = readcb;
-	}
-	*/
+  std::function<uint16_t(uint32_t)> m_read;
 
 private:
+  static constexpr int kOutBytes = 2;
+  static constexpr int kLineBytes = 512;
+  static constexpr uint32_t kCompressed = 0x20000;   // header flag
 
-	uint32_t key;
+  uint16_t DecryptBlock(uint16_t counter, uint16_t cipher) const;
+  void ScheduleSequenceKey();
+  uint16_t NextWord();
+  int NextBit();
+  void StartStream();
+  void FillOutput();
+  void FillLine();
 
-	std::unique_ptr<uint8_t[]> buffer;
-	std::unique_ptr<uint8_t[]> line_buffer;
-	std::unique_ptr<uint8_t[]> line_buffer_prev;
-	uint32_t prot_cur_address;
-	uint16_t subkey, dec_hist;
-	uint32_t dec_header;
+  uint32_t m_key = 0;
+  uint32_t m_gameKeyNet1[4] = {}, m_gameKeyNet2[4] = {};  // key schedule from the game key
+  uint32_t m_seqKeyNet1[4] = {}, m_seqKeyNet2[4] = {};    // ... with the sub-key added
 
-	bool enc_ready;
+  // Saved state
+  uint8_t m_out[kOutBytes] = {};
+  uint8_t m_lines[2][kLineBytes] = {};  // current and previous line
+  int m_curLine = 0;
+  uint32_t m_address = 0;
+  uint16_t m_subKey = 0;
+  bool m_ready = false;
+  uint16_t m_lastPlain = 0;     // previous block output (2-bit shift)
+  uint32_t m_header = 0;
+  int32_t m_outPos = 0;
+  int32_t m_linePos = 0;
+  int32_t m_lineSize = 0;
 
-	int buffer_pos, line_buffer_pos, line_buffer_size, buffer_bit, buffer_bit2;
-	uint8_t buffer2[2];
-	uint16_t buffer2a;
-
-	int block_size;
-	int block_pos;
-	int block_numlines;
-	int done_compression;
-
-	struct sbox {
-		uint8_t table[64];
-		int inputs[6];      // positions of the inputs bits, -1 means no input except from key
-		int outputs[2];     // positions of the output bits
-	};
-
-	static const sbox fn1_sboxes[4][4];
-	static const sbox fn2_sboxes[4][4];
-
-	static constexpr int FN1GK = 38;
-	static constexpr int FN2GK = 32;
-	static const int fn1_game_key_scheduling[FN1GK][2];
-	static const int fn2_game_key_scheduling[FN2GK][2];
-	static const int fn1_sequence_key_scheduling[20][2];
-	static const int fn2_sequence_key_scheduling[16];
-	static const int fn2_middle_result_scheduling[16];
-
-	static const uint8_t trees[9][2][32];
-
-	int feistel_function(int input, const struct sbox *sboxes, uint32_t subkeys);
-	uint16_t block_decrypt(uint32_t game_key, uint16_t sequence_key, uint16_t counter, uint16_t data);
-
-	uint16_t get_decrypted_16();
-	int get_compressed_bit();
-
-	void enc_start();
-	void enc_fill();
-	void line_fill();
-
+  // Not saved
+  int m_bitInByte = 0;          // next bit of the current byte, 7..0
+  int m_bitInWord = 15;         // bits taken from m_compWord, 15 = need a new word
+  uint16_t m_compWord = 0;
+  uint8_t m_compBytes[2] = {};
+  int m_blockPos = 0;
+  int m_blockSize = 0;
+  int m_blockLines = 0;
+  bool m_streamDone = false;
 };
 
-#endif
+#endif // INCLUDED_CRYPTO_H
