@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 200341 | 81.7% |
+| Original (RetroPixels) | 200350 | 81.7% |
 | Cemu, untouched | 0 | 0.0% |
 | Cemu, with PixelU changes | 0 | 0.0% |
 | PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
 | Third-party | 44933 | 18.3% |
-| **All** | **245274** | 100% |
+| **All** | **245283** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -134,7 +134,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nn_uds | 64 | 64 | original |
 | Cafe/OS/libs/nsyshid | 4944 | 4306 | mixed (87% original), 638 lines third-party |
 | Cafe/OS/libs/nsyskbd | 84 | 84 | original |
-| Cafe/OS/libs/nsysnet | 1374 | 1374 | original |
+| Cafe/OS/libs/nsysnet | 1387 | 1387 | original |
 | Cafe/OS/libs/ntag | 623 | 623 | original |
 | Cafe/OS/libs/padscore | 737 | 737 | original |
 | Cafe/OS/libs/proc_ui | 868 | 868 | original |
@@ -145,7 +145,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/TCL | 216 | 216 | original |
 | Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
-| Cafe/OS/RPL | 2501 | 2501 | original |
+| Cafe/OS/RPL | 2513 | 2513 | original |
 | Cafe/TitleList | 2310 | 2310 | original |
 | Cemu/DiscordPresence | 850 | 850 | original |
 | Cemu/ExpressionParser | 600 | 600 | original |
@@ -159,9 +159,9 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Common | 31535 | 3748 | mixed (12% original), 27787 lines third-party |
 | config | 2800 | 2800 | original |
 | gui/interface | 140 | 140 | original |
-| gui/wxgui (top level) | 12619 | 12619 | original |
+| gui/wxgui (top level) | 12617 | 12617 | original |
 | gui/wxgui/canvas | 294 | 294 | original |
-| gui/wxgui/components | 4014 | 4014 | original |
+| gui/wxgui/components | 4000 | 4000 | original |
 | gui/wxgui/debugger | 3204 | 3204 | original |
 | gui/wxgui/dialogs | 656 | 656 | original |
 | gui/wxgui/EmulatedUSBDevices | 771 | 771 | original |
