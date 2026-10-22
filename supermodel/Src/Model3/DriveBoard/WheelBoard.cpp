@@ -1,39 +1,32 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2021 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * WheelBoard.cpp
- *
- * Implementation of the CWheelBoard class: drive board (force feedback for wheel)
- * emulation.
- *
- * NOTE: Simulation does not yet work. Drive board ROMs are required.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The steering wheel drive board (see WheelBoard.h).
+//
+// Z80 ports (besides the common ones):
+//   in  20/21 DIP switches 1/2      24-27 ADC channels, one bit per read
+//       28 the PowerPC's command   2C encoder status (0: no error)
+//   out 20-23 display digits        24-27 start an ADC conversion
+//       29 reply to the PowerPC    2A motor data, 2E motor control
+//       1C-1F, 2D ignored
+// ADC channels: 1 nothing (0), 2 the wheel (0x80 until the board is
+// initialized, so its centering check passes), 3 cockpit bank (0x80), 4 nothing.
+//
+// Simulation (answering the PowerPC without the Z80) is unfinished and
+// never enabled; it follows the Scud Race command set.
 
 #include "WheelBoard.h"
-
 #include "Supermodel.h"
-#include <cstdio>
-#include <algorithm>
+
+namespace
+{
+  void SendEffect(CInput *input, EForceFeedback id, float force)
+  {
+    ForceFeedbackCmd cmd;
+    cmd.id = id;
+    cmd.force = force;
+    input->SendForceFeedbackCmd(cmd);
+  }
+}
 
 Game::DriveBoardType CWheelBoard::GetType(void) const
 {
@@ -42,666 +35,370 @@ Game::DriveBoardType CWheelBoard::GetType(void) const
 
 void CWheelBoard::Get7SegDisplays(UINT8 &seg1Digit1, UINT8 &seg1Digit2, UINT8 &seg2Digit1, UINT8 &seg2Digit2) const
 {
-  seg1Digit1 = m_seg1Digit1;
-  seg1Digit2 = m_seg1Digit2;
-  seg2Digit1 = m_seg2Digit1;
-  seg2Digit2 = m_seg2Digit2;
+  seg1Digit1 = m_digit[0];
+  seg1Digit2 = m_digit[1];
+  seg2Digit1 = m_digit[2];
+  seg2Digit2 = m_digit[3];
 }
 
+// After the common block: "WheelBoard" with simulated (bool), then (when
+// not simulated) DIP 1, DIP 2, ADC port (16 bits), ADC bit, the two
+// uncentering halves.
 void CWheelBoard::SaveState(CBlockFile *SaveState)
 {
   CDriveBoard::SaveState(SaveState);
-
   SaveState->NewBlock("WheelBoard", __FILE__);
-  SaveState->Write(m_simulated);
-  if (m_simulated)
-  {
-    // TODO - save board simulation state
-  }
-  else
-  {
-    // Save DIP switches and digit displays
-    SaveState->Write(m_dip1);
-    SaveState->Write(m_dip2);
-
-    SaveState->Write(m_adcPortRead);
-    SaveState->Write(m_adcPortBit);
-    SaveState->Write(m_uncenterVal1);
-    SaveState->Write(m_uncenterVal2);
-  }
+  SaveState->Write(m_simulate);
+  if (m_simulate)
+    return;
+  SaveState->Write(m_dipA);
+  SaveState->Write(m_dipB);
+  SaveState->Write(m_adcPort);
+  SaveState->Write(m_adcBitsLeft);
+  SaveState->Write(m_uncenter[0]);
+  SaveState->Write(m_uncenter[1]);
 }
 
 void CWheelBoard::LoadState(CBlockFile *SaveState)
 {
+  // This board's block is read first; without it nothing is loaded.
   if (SaveState->FindBlock("WheelBoard") != Result::OKAY)
-  {
     return;
-  }
 
   bool wasSimulated;
   SaveState->Read(&wasSimulated, sizeof(wasSimulated));
   if (wasSimulated)
   {
-    // Simulation has never existed
     ErrorLog("Save state contains unexpected data. Halting drive board emulation.");
-    Disable();
+    Halt();
     return;
   }
-  else
-  {
-    // Load DIP switches and digit displays
-    SaveState->Read(m_dip1);
-    SaveState->Read(m_dip2);
-
-    SaveState->Read(m_adcPortRead);
-    SaveState->Read(m_adcPortBit);
-    SaveState->Read(m_uncenterVal1);
-    SaveState->Read(m_uncenterVal2);
-  }
+  SaveState->Read(m_dipA);
+  SaveState->Read(m_dipB);
+  SaveState->Read(m_adcPort);
+  SaveState->Read(m_adcBitsLeft);
+  SaveState->Read(m_uncenter[0]);
+  SaveState->Read(m_uncenter[1]);
 
   CDriveBoard::LoadState(SaveState);
 }
 
-void CWheelBoard::Disable(void)
+void CWheelBoard::Halt(void)
 {
-  SendStopAll();
-  CDriveBoard::Disable();
+  StopEffects();
+  CDriveBoard::Halt();
 }
 
 void CWheelBoard::Reset(void)
 {
   CDriveBoard::Reset();
 
-  m_seg1Digit1 = 0xFF;
-  m_seg1Digit2 = 0xFF;
-  m_seg2Digit1 = 0xFF;
-  m_seg2Digit2 = 0xFF;
-
-  m_adcPortRead = 0;
-  m_adcPortBit = 0;
-  m_port42Out = 0;
-  m_port46Out = 0;
-  m_prev42Out = 0;
-  m_prev46Out = 0;
-
-  m_uncenterVal1 = 0;
-  m_uncenterVal2 = 0;
-
-  m_lastConstForce = 0;
-  m_lastSelfCenter = 0;
-  m_lastFriction = 0;
-  m_lastVibrate = 0;
-
-  m_simulated = false;  //TODO: make this run-time configurable when simulation mode is supported
+  for (UINT8 &d : m_digit)
+    d = 0xFF;
+  m_adcPort = 0;
+  m_adcBitsLeft = 0;
+  m_motorData = m_motorControl = 0;
+  m_lastMotorData = m_lastMotorControl = 0;
+  m_uncenter[0] = m_uncenter[1] = 0;
+  m_sentForce = 0;
+  m_sentCentering = 0;
+  m_sentFriction = 0;
+  m_sentVibration = 0;
+  m_simulate = false;
 
   if (!m_config["ForceFeedback"].ValueAsDefault<bool>(false))
-    Disable();
-
-  // Stop any effects that may still be playing
-  if (!IsDisabled())
-    SendStopAll();
+    Halt();
+  if (!Inactive())
+    StopEffects();   // anything still playing
 }
 
 UINT8 CWheelBoard::Read(void)
 {
-  if (IsDisabled())
-  {
+  if (Inactive())
     return 0xFF;
-  }
-
-  // TODO - simulate initialization sequence even when emulating to get rid of long pause at boot up (drive board can
-  // carry on booting whilst game starts)
-  if (m_simulated)
-    return SimulateRead();
-  else
-    return CDriveBoard::Read();
+  return m_simulate ? SimReply() : CDriveBoard::Read();
 }
 
 void CWheelBoard::Write(UINT8 data)
 {
-  if (IsDisabled())
-  {
+  if (Inactive())
     return;
-  }
-
-  //if (data >= 0x01 && data <= 0x0F ||
-  //  data >= 0x20 && data <= 0x2F ||
-  //  data >= 0x30 && data <= 0x3F ||
-  //  data >= 0x40 && data <= 0x4F ||
-  //  data >= 0x70 && data <= 0x7F)
-  //  DebugLog("DriveBoard.Write(%02X)\n", data);
-  if (m_simulated)
-    SimulateWrite(data);
+  if (m_simulate)
+    SimCommand(data);
   else
   {
     CDriveBoard::Write(data);
-    if (data == 0xCB)
-      m_initialized = false;
-  }
-}
-
-UINT8 CWheelBoard::SimulateRead(void)
-{
-  if (m_initialized)
-  {
-    switch (m_readMode)
-    {
-      case 0x0: return m_statusFlags;                    // Status flags
-      case 0x1: return m_dip1;                           // DIP switch 1 value
-      case 0x2: return m_dip2;                           // DIP switch 2 value
-      case 0x3: return m_wheelCenter;                    // Wheel center
-      case 0x4: return 0x80;                             // Cockpit banking center
-      case 0x5: return (UINT8)m_inputs->steering->value; // Wheel position
-      case 0x6: return 0x80;                             // Cockpit banking position
-      case 0x7: return m_echoVal;                        // Init status/echo test
-      default:  return 0xFF;
-    }
-  }
-  else
-  {
-    switch (m_initState / 5)
-    {
-      case 0:  return 0xCF;  // Initiate start
-      case 1:  return 0xCE;
-      case 2:  return 0xCD;
-      case 3:  return 0xCC;  // Centering wheel
-      default:
-        m_initialized = true;
-        return 0x80;
-    }
-  }
-}
-
-void CWheelBoard::SimulateWrite(UINT8 cmd)
-{
-  // Following are commands for Scud Race.  Daytona 2 has a compatible command set while Sega Rally 2 is completely different
-  // TODO - finish for Scud Race and Daytona 2
-  // TODO - implement for Sega Rally 2
-  UINT8 type = cmd>>4;
-  UINT8 val = cmd&0xF;
-
-  switch (type)
-  {
-  case 0: // 0x00-0F Play sequence
-    /* TODO */
-    break;
-  case 1: // 0x10-1F Set centering strength
-    if (val == 0)
-      // Disable auto-centering
-      // TODO - is 0x10 for disable?
-      SendSelfCenter(0);
-    else
-      // Enable auto-centering (0x1 = weakest, 0xF = strongest)
-      SendSelfCenter(val * 0x11);
-    break;
-  case 2: // 0x20-2F Friction strength
-    if (val == 0)
-      // Disable friction
-      // TODO - is 0x20 for disable?
-      SendFriction(0);
-    else
-      // Enable friction (0x1 = weakest, 0xF = strongest)
-      SendFriction(val * 0x11);
-    break;
-  case 3: // 0x30-3F Uncentering (vibrate)
-    if (val == 0)
-      // Disable uncentering
-      SendVibrate(0);
-    else
-      // Enable uncentering (0x1 = weakest, 0xF = strongest)
-      SendVibrate(val * 0x11);
-    break;
-  case 4: // 0x40-4F Play power-slide sequence
-    /* TODO */
-    break;
-  case 5: // 0x50-5F Rotate wheel right
-    SendConstantForce((val + 1) * 0x5);
-    break;
-  case 6: // 0x60-6F Rotate wheel left
-    SendConstantForce(-(val + 1) * 0x5);
-    break;
-  case 7: // 0x70-7F Set steering parameters
-    /* TODO */
-    break;
-  case 8: // 0x80-8F Test Mode
-    switch (val & 0x7)
-    {
-    case 0:  SendStopAll();                                    break;  // 0x80 Stop motor
-    case 1:  SendConstantForce(20);                            break;  // 0x81 Roll wheel right
-    case 2:  SendConstantForce(-20);                           break;  // 0x82 Roll wheel left
-    case 3:  /* Ignore - no clutch */                          break;  // 0x83 Clutch on
-    case 4:  /* Ignore - no clutch */                          break;  // 0x84 Clutch off
-    case 5:  m_wheelCenter = (UINT8)m_inputs->steering->value; break;  // 0x85 Set wheel center position
-    case 6:  /* Ignore */                                      break;  // 0x86 Set cockpit banking position
-    case 7:  /* Ignore */                                      break;  // 0x87 Lamp on/off
-    }
-  case 0x9: // 0x90-9F ??? Don't appear to have any effect with Scud Race ROM
-    /* TODO */
-    break;
-  case 0xA: // 0xA0-AF ??? Don't appear to have any effect with Scud Race ROM
-    /* TODO */
-    break;
-  case 0xB: // 0xB0-BF Invalid command (reserved for use by PPC to send cabinet type 0xB0 or 0xB1 during initialization)
-    /* Ignore */
-    break;
-  case 0xC: // 0xC0-CF Set board mode (0xCB = reset board)
-    SendStopAll();
-    if (val >= 0xB)
-    {
-      // Reset board
-      m_initialized = false;
-      m_initState = 0;
-    }
-    else
-      m_boardMode = val;
-    break;
-  case 0xD: // 0xD0-DF Set read mode
-    m_readMode = val & 0x7;
-    break;
-  case 0xE: // 0xE0-EF Invalid command
-    /* Ignore */
-    break;
-  case 0xF: // 0xF0-FF Echo test
-    m_echoVal = val;
-    break;
+    if (data == 0xCB)   // board reset
+      m_ready = false;
   }
 }
 
 void CWheelBoard::RunFrame(void)
 {
-  if (IsDisabled())
-  {
+  if (Inactive())
     return;
-  }
-
-  if (m_simulated)
-    SimulateFrame();
+  if (m_simulate)
+    SimTick();
   else
     CDriveBoard::RunFrame();
 }
 
-void CWheelBoard::SimulateFrame(void)
+
+/******************************************************************************
+ Simulation (unused)
+******************************************************************************/
+
+UINT8 CWheelBoard::SimReply(void)
 {
-  if (!m_initialized)
-    m_initState++;
-  // TODO - update m_statusFlags and play preset scripts according to board mode
+  if (!m_ready)
+  {
+    // Start-up: CF, CE, CD, CC (centering), five frames each, then 80.
+    static const UINT8 kStartup[] = { 0xCF, 0xCE, 0xCD, 0xCC };
+    if (m_startupFrames / 5 < 4)
+      return kStartup[m_startupFrames / 5];
+    m_ready = true;
+    return 0x80;
+  }
+  switch (m_simSelect)
+  {
+  case 0: return m_simStatus;
+  case 1: return m_dipA;
+  case 2: return m_dipB;
+  case 3: return m_simCenter;
+  case 5: return (UINT8)m_in->steering->value;
+  case 7: return m_simEcho;
+  case 4:            // cockpit bank center
+  case 6: return 0x80;   // cockpit bank position
+  default: return 0xFF;
+  }
+}
+
+void CWheelBoard::SimCommand(UINT8 cmd)
+{
+  const UINT8 val = cmd & 0xF;
+  switch (cmd >> 4)
+  {
+  case 0x1: SetCentering(val * 0x11); break;   // centering strength (0 off)
+  case 0x2: SetFriction(val * 0x11); break;     // friction (0 off)
+  case 0x3: SetVibration(val * 0x11); break;      // uncentering (0 off)
+  case 0x5: SetForce((val + 1) * 0x5); break;     // turn right
+  case 0x6: SetForce(-(val + 1) * 0x5); break;    // turn left
+  case 0x8:   // test mode
+    switch (val & 7)
+    {
+    case 0: StopEffects(); break;
+    case 1: SetForce(20); break;
+    case 2: SetForce(-20); break;
+    case 5: m_simCenter = (UINT8)m_in->steering->value; break;
+    default: break;   // clutch, cockpit, lamp: nothing to do
+    }
+    break;
+  case 0xC:   // board mode; CB-CF reset the board
+    StopEffects();
+    if (val >= 0xB)
+    {
+      m_ready = false;
+      m_startupFrames = 0;
+    }
+    else
+      m_simMode = val;
+    break;
+  case 0xD: m_simSelect = val & 7; break;
+  case 0xF: m_simEcho = val; break;
+  default: break;   // sequences, steering parameters, cabinet type: not simulated
+  }
+}
+
+void CWheelBoard::SimTick(void)
+{
+  if (!m_ready)
+    m_startupFrames++;
+}
+
+
+/******************************************************************************
+ Z80 ports
+******************************************************************************/
+
+UINT8 CWheelBoard::AdcValue(UINT32 port) const
+{
+  switch (port)
+  {
+  case 0x25: return m_ready ? (UINT8)m_in->steering->value : 0x80;
+  case 0x26: return 0x80;
+  default: return 0x00;   // 24, 27
+  }
 }
 
 UINT8 CWheelBoard::IORead8(UINT32 portNum)
 {
-  UINT8 adcVal;
-
   switch (portNum)
   {
-  case 0x20: // DIP 1 value
-    return m_dip1;
-  case 0x21: // DIP 2 value
-    return m_dip2;
-  case 0x24: // ADC channel 1 - Y analog axis for joystick
-  case 0x25: // ADC channel 2 - steering wheel position (0x00 = full left, 0x80 = center, 0xFF = full right) and X analog axis for joystick
-  case 0x26: // ADC channel 3 - cockpit bank position (deluxe cabinets) (0x00 = full left, 0x80 = center, 0xFF = full right)
-  case 0x27: // ADC channel 4 - not connected
-    if (portNum == m_adcPortRead && m_adcPortBit-- > 0)
-    {
-      switch (portNum)
-      {
-      case 0x24: // Y analog axis for joystick
-        adcVal = ReadADCChannel1();
-        break;
-      case 0x25: // Steering wheel for twin racing cabinets - TODO - check actual range of steering, suspect it is not really 0x00-0xFF
-        adcVal = ReadADCChannel2();
-        break;
-      case 0x26: // Cockpit bank position for deluxe racing cabinets
-        adcVal = ReadADCChannel3();
-        break;
-      case 0x27: // Not connected
-        adcVal = ReadADCChannel4();
-        break;
-      default:
-        DebugLog("Unhandled Z80 input on ADC port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
-        return 0xFF;
-      }
-      return (adcVal >> m_adcPortBit) & 0x01;
-    }
-    else
-    {
-      DebugLog("Unhandled Z80 input on ADC port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
-      return 0xFF;
-    }
-  case 0x28: // PPC command
-    return m_dataSent;
-  case 0x2c: // Encoder error reporting (kept at 0x00 for no error)
-    // Bit 1 0
-    //     0 0 = encoder okay, no error
-    //     0 1 = encoder error 1 - overcurrent error
-    //     1 0 = encoder error 2 - overheat error
-    //     1 1 = encoder error 3 - encoder error, reinitializes board
-    return 0x00;
-  default:
-    DebugLog("Unhandled Z80 input on port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
+  case 0x20: return m_dipA;
+  case 0x21: return m_dipB;
+  case 0x24: case 0x25: case 0x26: case 0x27:
+    // the conversion's bits, most significant first
+    if (portNum == m_adcPort && m_adcBitsLeft-- > 0)
+      return (AdcValue(portNum) >> m_adcBitsLeft) & 1;
     return 0xFF;
+  case 0x28: return m_command;
+  case 0x2C: return 0x00;
+  default: return 0xFF;
   }
 }
 
 void CWheelBoard::IOWrite8(UINT32 portNum, UINT8 data)
 {
   CDriveBoard::IOWrite8(portNum, data);
-
   switch (portNum)
   {
-  case 0x1c: // Unsure? - two bytes 0xFF, 0xFF sent at initialization only
-  case 0x1d: // Unsure? - two bytes 0x0F, 0x17 sent at initialization only
-  case 0x1e: // Unsure? - same as port 28
-  case 0x1f: // Unsure? - same as port 31
-    return;
-  case 0x20: // Left digit of 7-segment display 1
-    m_seg1Digit1 = data;
-    return;
-  case 0x21: // Right digit of 7-segment display 1
-    m_seg1Digit2 = data;
-    return;
-  case 0x22: // Left digit of 7-segment display 2
-    m_seg2Digit1 = data;
-    return;
-  case 0x23: // Right digit of 7-segment display 2
-    m_seg2Digit2 = data;
-    return;
-  case 0x24: // ADC channel 1 control
-  case 0x25: // ADC channel 2 control
-  case 0x26: // ADC channel 3 control
-  case 0x27: // ADC channel 4 control
-    m_adcPortRead = portNum;
-    m_adcPortBit = 8;
-    return;
-  case 0x29: // Reply for PPC
-    m_dataReceived = data;
+  case 0x20: case 0x21: case 0x22: case 0x23:
+    m_digit[portNum - 0x20] = data;
+    break;
+  case 0x24: case 0x25: case 0x26: case 0x27:
+    m_adcPort = (UINT16)portNum;
+    m_adcBitsLeft = 8;
+    break;
+  case 0x29:
+    m_reply = data;
     if (data == 0xCC)
-      m_initialized = true;
-    return;
-  case 0x2a: // Encoder motor data (x axis)
-    m_port42Out = data;
-    ProcessEncoderCmd();
-    return;
-  case 0x2d: // Clutch/lamp control (deluxe cabinets) ( or y axis)
-    return;
-  case 0x2e: // Encoder motor control
-    m_port46Out = data;
-    return;
+      m_ready = true;
+    break;
+  case 0x2A:
+    m_motorData = data;
+    MotorUpdate();
+    break;
+  case 0x2E:
+    m_motorControl = data;
+    break;
   default:
-    DebugLog("Unhandled Z80 output on port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
-    return;
+    break;
   }
 }
 
-void CWheelBoard::ProcessEncoderCmd(void)
+// Acts on the motor ports when either changed since last time. The control
+// byte selects what the data byte means.
+void CWheelBoard::MotorUpdate(void)
 {
-  if (m_prev42Out != m_port42Out || m_prev46Out != m_port46Out)
+  if (m_motorData == m_lastMotorData && m_motorControl == m_lastMotorControl)
+    return;
+
+  const UINT8 d = m_motorData;
+  switch (m_motorControl)
   {
-    //DebugLog("46 [%02X] / 42 [%02X]\n", m_port46Out, m_port42Out);
-    switch (m_port46Out)
+  case 0xFC:
+    if (d & 0x04)
     {
-      case 0xFB:
-        // TODO - friction?  Sent during power slide.  0xFF = strongest or 0x00?
-        //SendFriction(m_port42Out);
-        break;
-
-      case 0xFC:
-        // Centering / uncentering (vibrate)
-        // Bit 2 = on for centering, off for uncentering
-        if (m_port42Out&0x04)
-        {
-          // Centering
-          // Bit 7 = on for disable, off for enable
-          if (m_port42Out&0x80)
-          {
-            // Disable centering
-            SendSelfCenter(0);
-          }
-          else
-          {
-            // Bits 3-6 = centering strength 0x0-0xF.  This is scaled to range 0x0F-0xFF
-            UINT8 strength = ((m_port42Out&0x78)>>3) * 0x10 + 0xF;
-            SendSelfCenter(strength);
-          }
-        }
-        else
-        {
-          // Uncentering
-          // Bits 0-1 = data sequence number 0-3
-          UINT8 seqNum = m_port42Out&0x03;
-          // Bits 4-7 = data values
-          UINT16 data = (m_port42Out&0xF0)>>4;
-          switch (seqNum)
-          {
-            case 0: m_uncenterVal1 = data<<4; break;
-            case 1: m_uncenterVal1 |= data;   break;
-            case 2: m_uncenterVal2 = data<<4; break;
-            case 3: m_uncenterVal2 |= data;   break;
-          }
-          if (seqNum == 0 && m_uncenterVal1 == 0)
-          {
-            // Disable uncentering
-            SendVibrate(0);
-          }
-          else if (seqNum == 3 && m_uncenterVal1 > 0)
-          {
-            // Uncentering - unsure exactly how values sent map to strength or whether they specify some other attributes of effect
-            // For now just attempting to map them to a sensible value in range 0x00-0xFF
-            UINT8 strength = ((m_uncenterVal1>>1) - 7) * 0x50 + ((m_uncenterVal2>>1) - 5) * 0x10 + 0xF;
-            SendVibrate(strength);
-          }
-        }
-        break;
-
-      case 0xFD:
-        // TODO - unsure?  Sent as velocity changes, similar to self-centering
-        break;
-
-      case 0xFE:
-        // Apply constant force to wheel
-        // Value is: 0x80 = stop motor, 0x81-0xC0 = roll wheel left, 0x40-0x7F = roll wheel right, scale to range -0x80-0x7F
-        // Note: seems to often output 0x7F or 0x81 for stop motor, so narrowing wheel ranges to 0x40-0x7E and 0x82-0xC0
-        if (m_port42Out > 0x81)
-        {
-          if (m_port42Out <= 0xC0)
-            SendConstantForce(2 * (0x81 - m_port42Out));
-          else
-            SendConstantForce(-0x80);
-        }
-        else if (m_port42Out < 0x7F)
-        {
-          if (m_port42Out >= 0x40)
-            SendConstantForce(2 * (0x7F - m_port42Out));
-          else
-            SendConstantForce(0x7F);
-        }
-        else
-          SendConstantForce(0);
-        break;
-
-      case 0xFF:
-        // Stop all effects
-        if (m_port42Out == 0xFF)
-          SendStopAll();
-        break;
-
-      default:
-        //DebugLog("Unknown = 46 [%02X] / 42 [%02X]\n", m_port46Out, m_port42Out);
-        break;
+      // Centering: bit 7 off, else strength in bits 3-6 (to 0x0F-0xFF).
+      if (d & 0x80)
+        SetCentering(0);
+      else
+        SetCentering((UINT8)(((d & 0x78) >> 3) * 0x10 + 0xF));
     }
+    else
+    {
+      // Uncentering, in four nibbles (sequence number in bits 0-1, data
+      // in bits 4-7) making two bytes. The mapping to a strength is a guess.
+      const UINT8 nibble = (UINT8)((d & 0xF0) >> 4);
+      const int seq = d & 3;
+      if (seq == 0)
+        m_uncenter[0] = (UINT8)(nibble << 4);
+      else if (seq == 1)
+        m_uncenter[0] |= nibble;
+      else if (seq == 2)
+        m_uncenter[1] = (UINT8)(nibble << 4);
+      else
+        m_uncenter[1] |= nibble;
 
-    m_prev42Out = m_port42Out;
-    m_prev46Out = m_port46Out;
+      if (seq == 0 && m_uncenter[0] == 0)
+        SetVibration(0);
+      else if (seq == 3 && m_uncenter[0] > 0)
+        SetVibration((UINT8)(((m_uncenter[0] >> 1) - 7) * 0x50 + ((m_uncenter[1] >> 1) - 5) * 0x10 + 0xF));
+    }
+    break;
+
+  case 0xFE:
+    // Constant force: 0x80 stop (0x7F and 0x81 too, in practice);
+    // 0x82-0xC0 left, 0x40-0x7E right, beyond those the maximum.
+    if (d > 0x81)
+      SetForce(d <= 0xC0 ? (INT8)(2 * (0x81 - d)) : (INT8)-0x80);
+    else if (d < 0x7F)
+      SetForce(d >= 0x40 ? (INT8)(2 * (0x7F - d)) : (INT8)0x7F);
+    else
+      SetForce(0);
+    break;
+
+  case 0xFF:
+    if (d == 0xFF)
+      StopEffects();
+    break;
+
+  default:
+    break;   // (FB: friction during power slides?, FD: unknown)
   }
+
+  m_lastMotorData = m_motorData;
+  m_lastMotorControl = m_motorControl;
 }
 
 
-void CWheelBoard::SendStopAll(void)
+/******************************************************************************
+ Effects
+******************************************************************************/
+
+void CWheelBoard::StopEffects(void)
 {
-  //DebugLog(">> Stop All Effects\n");
-
-  ForceFeedbackCmd ffCmd{};
-  ffCmd.id = FFStop;
-
-  if (m_inputs) {
-      if (m_inputs->steering) {
-          m_inputs->steering->SendForceFeedbackCmd(ffCmd);
-      }
-  }
-  
-  m_lastConstForce = 0;
-  m_lastSelfCenter = 0;
-  m_lastFriction   = 0;
-  m_lastVibrate    = 0;
-}
-
-void CWheelBoard::SendConstantForce(INT8 val)
-{
-  if (val == m_lastConstForce)
-    return;
-  /*
-  if (val > 0)
+  if (m_in != nullptr && m_in->steering)
   {
-    DebugLog(">> Force Right %02X [%8s", val, "");
-    for (unsigned i = 0; i < 8; i++)
-      DebugLog(i == 0 || i <= (val + 1) / 16 ? ">" : " ");
-    DebugLog("]\n");
+    ForceFeedbackCmd cmd{};
+    cmd.id = FFStop;
+    m_in->steering->SendForceFeedbackCmd(cmd);
   }
-  else if (val < 0)
-  {
-    DebugLog(">> Force Left  %02X [", -val);
-    for (unsigned i = 0; i < 8; i++)
-      DebugLog(i == 7 || i >= (val + 128) / 16 ? "<" : " ");
-    DebugLog("%8s]\n", "");
-  }
-  else
-    DebugLog(">> Stop Force     [%16s]\n", "");
-  */
-
-  ForceFeedbackCmd ffCmd;
-  ffCmd.id = FFConstantForce;
-  ffCmd.force = (float)val / (val >= 0 ? 127.0f : 128.0f);
-
-  m_inputs->steering->SendForceFeedbackCmd(ffCmd);
-
-  m_lastConstForce = val;
+  m_sentForce = 0;
+  m_sentCentering = 0;
+  m_sentFriction = 0;
+  m_sentVibration = 0;
 }
 
-void CWheelBoard::SendSelfCenter(UINT8 val)
+void CWheelBoard::SetForce(INT8 val)
 {
-  if (val == m_lastSelfCenter)
+  if (val == m_sentForce)
     return;
-  /*
-  if (val == 0)
-    DebugLog(">> Stop Self-Center\n");
-  else
-    DebugLog(">> Self-Center %02X\n", val);
-  */
-
-  ForceFeedbackCmd ffCmd;
-  ffCmd.id = FFSelfCenter;
-  ffCmd.force = (float)val / 255.0f;
-
-  m_inputs->steering->SendForceFeedbackCmd(ffCmd);
-
-  m_lastSelfCenter = val;
+  SendEffect(m_in->steering.get(), FFConstantForce, (float)val / (val >= 0 ? 127.0f : 128.0f));
+  m_sentForce = val;
 }
 
-
-void CWheelBoard::SendFriction(UINT8 val)
+void CWheelBoard::SetCentering(UINT8 val)
 {
-  if (val == m_lastFriction)
+  if (val == m_sentCentering)
     return;
-  /*
-  if (val == 0)
-    DebugLog(">> Stop Friction\n");
-  else
-    DebugLog(">> Friction %02X\n", val);
-  */
-
-  ForceFeedbackCmd ffCmd;
-  ffCmd.id = FFFriction;
-  ffCmd.force = (float)val / 255.0f;
-  m_inputs->steering->SendForceFeedbackCmd(ffCmd);
-
-  m_lastFriction = val;
+  SendEffect(m_in->steering.get(), FFSelfCenter, (float)val / 255.0f);
+  m_sentCentering = val;
 }
 
-void CWheelBoard::SendVibrate(UINT8 val)
+void CWheelBoard::SetFriction(UINT8 val)
 {
-  if (val == m_lastVibrate)
+  if (val == m_sentFriction)
     return;
-  /*
-  if (val == 0)
-    DebugLog(">> Stop Vibrate\n");
-  else
-    DebugLog(">> Vibrate %02X\n", val);
-  */
-
-  ForceFeedbackCmd ffCmd;
-  ffCmd.id = FFVibrate;
-  ffCmd.force = (float)val / 255.0f;
-  m_inputs->steering->SendForceFeedbackCmd(ffCmd);
-
-  m_lastVibrate = val;
+  SendEffect(m_in->steering.get(), FFFriction, (float)val / 255.0f);
+  m_sentFriction = val;
 }
 
-uint8_t CWheelBoard::ReadADCChannel1() const
+void CWheelBoard::SetVibration(UINT8 val)
 {
-  return 0x00;
-}
-
-uint8_t CWheelBoard::ReadADCChannel2() const
-{
-  if (m_initialized)
-    return (UINT8)m_inputs->steering->value;
-  else
-    return 0x80; // If not initialized, return 0x80 so that wheel centering test does not fail
-}
-
-uint8_t CWheelBoard::ReadADCChannel3() const
-{
-  return 0x80;
-}
-
-uint8_t CWheelBoard::ReadADCChannel4() const
-{
-  return 0x00;
+  if (val == m_sentVibration)
+    return;
+  SendEffect(m_in->steering.get(), FFVibrate, (float)val / 255.0f);
+  m_sentVibration = val;
 }
 
 CWheelBoard::CWheelBoard(const Util::Config::Node &config)
   : CDriveBoard(config)
 {
-  m_dip1 = 0xCF;
-  m_dip2 = 0xFF;
-
-  m_seg1Digit1 = 0;
-  m_seg1Digit2 = 0;
-  m_seg2Digit1 = 0;
-  m_seg2Digit2 = 0;
-
-  m_adcPortRead = 0;
-  m_adcPortBit = 0;
-
-  m_port42Out = 0;
-  m_port46Out = 0;
-
-  m_prev42Out = 0;
-  m_prev46Out = 0;
-
-  m_uncenterVal1 = 0;
-  m_uncenterVal2 = 0;
-
-  // Feedback state
-  m_lastConstForce = 0;
-  m_lastSelfCenter = 0;
-  m_lastFriction = 0;
-  m_lastVibrate = 0;
-
-  DebugLog("Built Drive Board (wheel)\n");
+  m_dipA = 0xCF;
+  m_dipB = 0xFF;
 }
 
 CWheelBoard::~CWheelBoard(void)
 {
-
 }

@@ -1,85 +1,59 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * SCSPDSP.h
- * 
- * Header file for SCSP DSP emulation. Used only by SCSP.cpp; do not use
- * externally.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The effect DSP inside each SCSP (used only by SCSP.cpp).
+//
+// Every 44.1 kHz sample the DSP runs its microprogram (up to 128 steps of
+// four 16-bit words) once. Inputs are the 16 mixer sends (MIXS, fed by the
+// voices), memory/temporary registers and the two external inputs; outputs
+// are the 16 effect registers (EFREG), which the chip mixes back in with
+// each slot's EFSDL/EFPAN. Sound RAM serves as a ring buffer (delay line),
+// stored as 24-bit values packed to 16 bits (4-bit exponent, 11-bit
+// mantissa) unless a step says otherwise.
 
 #ifndef INCLUDED_SCSPDSP_H
 #define INCLUDED_SCSPDSP_H
 
 #include "Types.h"
 
-//#define DYNDSP
-
-//the DSP Context
-struct _SCSPDSP
+namespace ScspDsp
 {
-//Config
-	UINT16 *SCSPRAM;
-	UINT32 SCSPRAM_LENGTH;
-	unsigned int RBP;	//Ring buf pointer
-	unsigned int RBL;	//Delay ram (Ring buffer) size in words
+  // Words of the program area, laid out as on the chip's register map
+  // (0x700-0xBFF): 64 coefficients, 32 memory addresses, 128x4 microcode.
+  constexpr unsigned kCoefWords = 64;
+  constexpr unsigned kAddrWords = 32;
+  constexpr unsigned kCodeWords = 128 * 4;
+  constexpr unsigned kCoefBase = 0;
+  constexpr unsigned kAddrBase = kCoefBase + kCoefWords;
+  constexpr unsigned kCodeBase = kAddrBase + kAddrWords;
+  constexpr unsigned kProgramWords = kCodeBase + kCodeWords;
 
-//context	
-	
-	INT16 COEF[64];		//16 bit signed
-	UINT16 MADRS[32];	//offsets (in words), 16 bit
-	UINT16 MPRO[128*4];	//128 steps 64 bit
-	INT32 TEMP[128];	//TEMP regs,24 bit signed
-	INT32 MEMS[32];	//MEMS regs,24 bit signed
-	unsigned int DEC;
+  struct State
+  {
+    UINT16 *ram;             // the chip's sound RAM, as 16-bit words
+    unsigned ringBase;       // RBP: ring buffer start in 4 K-word units
+    unsigned ringWords;      // RBL decoded: ring buffer length in words
+    UINT16 program[kProgramWords];
+    INT32 temp[128];         // TEMP: 24-bit work registers (a ring of 128)
+    INT32 mems[32];          // MEMS: values read from memory
+    unsigned ringOffset;     // DEC: counts down once per sample
+    INT32 mixs[16];          // MIXS: voice sends, summed over a sample
+    INT16 exts[2];           // EXTS: external inputs (not connected on Model 3)
+    INT16 efreg[16];         // EFREG: effect outputs
+    bool idle;               // no program loaded yet
+    int steps;               // length of the loaded program
 
-//input
-	INT32 MIXS[16];	//MIXS, 24 bit signed
-	INT16 EXTS[2];	//External inputs (CDDA)	16 bit signed
+    INT16 *Coefficients() { return reinterpret_cast<INT16 *>(&program[kCoefBase]); }
+    UINT16 *Addresses() { return &program[kAddrBase]; }
+    UINT16 *Code() { return &program[kCodeBase]; }
+  };
 
-//output
-	INT16 EFREG[16];	//EFREG, 16 bit signed
-	
-	bool Stopped;
-	int LastStep;
-#ifdef DYNDSP
-	INT32 ACC;	//26 bit
-	INT32 SHIFTED;	//24 bit
-	INT32 X;	//24 bit
-	INT32 Y;	//13 bit
-	INT32 B;	//26 bit
-	INT32 INPUTS;	//24 bit
-	INT32 MEMVAL;
-	INT32 FRC_REG;	//13 bit
-	INT32 Y_REG;		//24 bit
-	UINT32 ADDR;
-	UINT32 ADRS_REG;	//13 bit
+  void Reset(State &dsp);
+  // Adds a voice's send to mixer input 'sel'.
+  void Send(State &dsp, INT32 value, int sel);
+  // Runs the program for one sample.
+  void RunSample(State &dsp);
+  // Called when the last microcode words are written: (re)starts the DSP.
+  void Start(State &dsp);
+}
 
-	void (*DoSteps)();
-#endif
-};
-
-void SCSPDSP_Init(_SCSPDSP *DSP);
-void SCSPDSP_SetSample(_SCSPDSP *DSP,INT32 sample,int SEL,int MXL);
-void SCSPDSP_Step(_SCSPDSP *DSP);
-void SCSPDSP_Start(_SCSPDSP *DSP);
-
-#endif	// INCLUDED_SCSPDSP_H
+#endif // INCLUDED_SCSPDSP_H

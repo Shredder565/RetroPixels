@@ -1,29 +1,10 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * SoundBoard.h
- * 
- * Header file defining the CSoundBoard class: Model 3 audio subsystem.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The Model 3 sound board: a 68000 with two SCSP sound chips (Sound/SCSP.h)
+// and their RAM, program and sample ROMs. The PowerPC talks to it through
+// the MIDI port; a Digital Sound Board (DSB.h), when the game has one,
+// receives the same bytes and its music is mixed into the front channels.
+// There is only one sound board (the 68000 core and the SCSPs are global).
 
 #ifndef INCLUDED_SOUNDBOARD_H
 #define INCLUDED_SOUNDBOARD_H
@@ -32,179 +13,57 @@
 #include "CPU/Bus.h"
 #include "Model3/DSB.h"
 
-/*
- * CSoundBoard:
- *
- * Model 3 sound board (68K CPU + 2 x SCSP).
- */
 class CSoundBoard: public IBus
 {
 public:
-	/*
-	 * Read8(addr):
-	 * Read16(addr):
-	 * Read32(addr):
-	 * Read64(addr):
-	 *
-	 * Read a byte, 16-bit word, or 32-bit long word from the 68K address 
-	 * space. 
-	 *
-	 * Parameters:
-	 *		addr	Address to read.
-	 *
-	 * Returns:
-	 *		Data at the address.
-	 */
-	UINT8 Read8(UINT32 addr);
-	UINT16 Read16(UINT32 addr);
-	UINT32 Read32(UINT32 addr);
+  // 68000 address space
+  UINT8 Read8(UINT32 addr);
+  UINT16 Read16(UINT32 addr);
+  UINT32 Read32(UINT32 addr);
+  void Write8(UINT32 addr, UINT8 data);
+  void Write16(UINT32 addr, UINT16 data);
+  void Write32(UINT32 addr, UINT32 data);
 
-	/*
-	 * Write8(addr, data):
-	 * Write16(addr, data):
-	 * Write32(addr, data):
-	 *
-	 * Write a byte, word, or long word to the 68K address space.
-	 *
-	 * Parameters:
-	 *		addr	Address to write.
-	 *		data	Data to write.
-	 */
-	void Write8(UINT32 addr, UINT8 data);
-	void Write16(UINT32 addr, UINT16 data);
-	void Write32(UINT32 addr, UINT32 data);
+  // A byte from the PowerPC (to the SCSP MIDI port and the DSB).
+  void WriteMIDIPort(UINT8 data);
 
-	/*
-	 * WriteMIDIPort(data):
-	 *
-	 * Writes to the sound board MIDI port.
-	 *
-	 * Parameters:
-	 *		data	Byte to write to MIDI port.
-	 */
-	void WriteMIDIPort(UINT8 data);
+  // Save states: block "Sound Board", then the 68000, SCSPs and DSB.
+  void SaveState(CBlockFile *SaveState);
+  void LoadState(CBlockFile *SaveState);
 
-	/*
-	 * SaveState(SaveState):
-	 *
-	 * Saves an image of the current device state.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to save state information to.
-	 */
-	void SaveState(CBlockFile *SaveState);
+  // Runs one frame (1/60 s) and outputs its audio; returns what the audio
+  // output returns (whether its buffer is full).
+  bool RunFrame(void);
+  void Reset(void);
 
-	/*
-	 * LoadState(SaveState):
-	 *
-	 * Loads and a state image.
-	 *
-	 * Parameters:
-	 *		SaveState	Block file to load state information from.
-	 */
-	void LoadState(CBlockFile *SaveState);
+  // Connects the Digital Sound Board (optional).
+  void AttachDSB(CDSB *DSBPtr);
 
-	/*
-	 * RunFrame(void):
-	 *
-	 * Runs the sound board for one frame, updating sound in the process.
-	 */
-	bool RunFrame(void);
+  M68KCtx *GetM68K(void);
+  CDSB *GetDSB(void);
 
-	/*
-	 * Reset(void):
-	 *
-	 * Resets the sound board.
-	 */
-	void Reset(void);
+  // Once, before anything else: the 68000 program ROM (512 KB) and the
+  // sample ROM (16 MB, banked into 0x800000-0xFFFFFF).
+  Result Init(const UINT8 *soundROMPtr, const UINT8 *sampleROMPtr);
 
-	/*
-	 * AttachDSB(CDSB *DSBPtr):
-	 *
-	 * Connects a Digital Sound Board. The sound board passes MIDI commands,
-	 * resets the board, and runs it each frame to generate audio. If there is
-	 * no DSB, this function does not need to be called.
-	 *
-	 * Parameters:
-	 *		DSBPtr	Pointer to DSB object.
-	 */
-	void AttachDSB(CDSB *DSBPtr);
-	
-	/*
-	 * GetMS68K(void):
-	 *
-	 * Returns a reference to the 68K CPU of the sound board.
-	 *
-	 * Returns:
-	 *		A pointer to the M68K context.
-	 */
-	M68KCtx *GetM68K(void);
+  // The configuration is kept by reference (it can change while running).
+  CSoundBoard(const Util::Config::Node &config);
+  ~CSoundBoard(void);
 
-	/*
-	 * GetDSB(void):
-	 * 
-	 * Returns a reference the Digital Sound Board (if attached).
-	 *
-	 * Returns:
-	 *		A pointer to the DSB object or NULL if not attached.
-	 */
-	CDSB *GetDSB(void);
-
-	/*
-	 * Init(soundROMPtr, sampleROMPtr):
-	 *
-	 * One-time initialization. Must be called prior to all other members.
-	 *
-	 * Parameters:
-	 *		soundROMPtr		Pointer to sound ROM (68K program).
-	 *		sampleROMPtr	Pointer to sample ROM.
-	 *
-	 * Returns:
-	 *		OKAY if successful, FAIL if unable to allocate memory. Prints own
-	 *		error messages.
-	 */
-	Result Init(const UINT8 *soundROMPtr, const UINT8 *sampleROMPtr);
-
-	/*
-	 * CSoundBoard(config):
-	 * ~CSoundBoard(void):
-	 *
-	 * Constructor and destructor.
-	 *
-   * Paramters:
-   *    config  Run-time configuration. The reference should be held because
-   *            this changes at run-time.
-	 */
-	CSoundBoard(const Util::Config::Node &config);
-	~CSoundBoard(void);
-	
 private:
-	// Private helper functions
-	void		UpdateROMBanks(void);
-	
-	// Config
-	const Util::Config::Node &m_config;
+  void SelectSampleBank(void);
 
-	// Digital Sound Board
-	CDSB		*DSB;
-	
-	// 68K context
-	M68KCtx		M68K;
-	
-	// Sound board memory
-	const UINT8	*soundROM;		// 68K program ROM (passed in from parent object)
-	const UINT8	*sampleROM;		// 68K sample ROM (passed in from parent object)
-	const UINT8	*sampleBank;	// sample ROM bank switching (points to high or low 8MB)
-	UINT8		*memoryPool;	// single allocated region for all sound board RAM
-	UINT8		*ram1, *ram2;	// SCSP1 and SCSP2 RAM
-	
-	// Registers
-	UINT8	ctrlReg;			// control register: ROM banking
-	
-	// Audio
-	float* audioFL, * audioFR;	// left and right front audio channels (1/60th second, 44.1 KHz)
-	float* audioRL, * audioRR;	// left and right rear audio channels (1/60th second, 44.1 KHz)
+  const Util::Config::Node &m_config;
+  CDSB *m_dsb = nullptr;
+  M68KCtx m_cpu;
+
+  const UINT8 *m_programROM = nullptr;
+  const UINT8 *m_sampleROM = nullptr;
+  const UINT8 *m_sampleWindow = nullptr;   // the 8 MB of sample ROM seen at 0x800000
+  UINT8 *m_memory = nullptr;               // RAM and audio buffers (one block, see SoundBoard.cpp)
+  UINT8 *m_ram[2] = { nullptr, nullptr };  // master and slave SCSP RAM, 1 MB each
+  float *m_audio[4] = { nullptr, nullptr, nullptr, nullptr };   // front L/R, rear L/R
+  UINT8 m_bankReg = 0;                     // 0x400001: bit 4 selects the upper sample bank
 };
 
-
-#endif	// INCLUDED_SOUNDBOARD_H
+#endif // INCLUDED_SOUNDBOARD_H

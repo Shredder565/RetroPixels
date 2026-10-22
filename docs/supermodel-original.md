@@ -62,10 +62,10 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 9304 | 4.1% |
-| Supermodel (with or without RetroPixels changes) | 72825 | 32.0% |
-| Third-party | 145172 | 63.9% |
-| **All** | **227301** | 100% |
+| Original (RetroPixels) | 14637 | 6.6% |
+| Supermodel (with or without RetroPixels changes) | 63480 | 28.4% |
+| Third-party | 145172 | 65.0% |
+| **All** | **223289** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -80,16 +80,16 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | Graphics/Legacy3D | 5553 | 0 | Supermodel |
 | Graphics/New3D | 6505 | 0 | Supermodel |
 | Inputs | 4263 | 4263 | original |
-| Model3 (top level) | 11602 | 2550 | mixed (22% original) |
-| Model3/DriveBoard | 3534 | 0 | Supermodel |
+| Model3 (top level) | 10474 | 3833 | mixed (37% original) |
+| Model3/DriveBoard | 1858 | 1858 | original |
 | Network | 2861 | 0 | Supermodel |
 | OSD (top level) | 2410 | 0 | Supermodel |
 | OSD/SDL | 6734 | 0 | Supermodel |
 | OSD/Unix | 166 | 0 | Supermodel |
 | OSD/Windows | 2930 | 0 | Supermodel |
 | Pkgs | 126021 | 0 | third-party |
-| Sound (top level) | 2986 | 0 | Supermodel |
-| Sound/MPEG | 414 | 0 | Supermodel |
+| Sound (top level) | 1882 | 1882 | original |
+| Sound/MPEG | 310 | 310 | original |
 | Util | 1949 | 1949 | original |
 <!-- table:end -->
 

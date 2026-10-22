@@ -1,31 +1,15 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2021 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * DriveBoard.h
- *
- * Header for the CDriveBoard (force feedback emulation) class.
- * Abstract base class defining the common interface for wheel, joystick, ski, bill board types.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Model 3 drive boards: the Z80 boards behind force feedback (wheel and
+// joystick), the ski pad's rumble and the billboard displays. CDriveBoard is
+// the common part (a Z80 with ROM, 8 KB of RAM, a CTC for its NMI timer and
+// a byte latch each way to the PowerPC) and, used on its own, the stand-in
+// for games without a drive board (never attached).
+//
+// Attached and disabled: a board is attached once, by Init() with a ROM.
+// Emulation runs only while it is attached and not disabled. Halt() stops
+// it for good when something goes wrong (an incompatible save state, say);
+// only Reset() clears that again, and only for an attached board.
 
 #ifndef INCLUDED_DRIVEBOARD_H
 #define INCLUDED_DRIVEBOARD_H
@@ -38,280 +22,102 @@
 #include "Game.h"
 #include "Z80CTC.h"
 
-/*
- * CDriveBoard
- */
 class CDriveBoard : public IBus
 {
 public:
-  /*
-   * GetType(void):
-   *
-   * Returns:
-   *    Drive board type.
-   */
   virtual Game::DriveBoardType GetType(void) const;
-
-  /*
-   * IsAttached(void):
-   *
-   * Returns:
-   *    True if the drive board is "attached" and should be emulated,
-   *    otherwise false.
-   */
+  // Whether the game has this board (and it should be emulated).
   virtual bool IsAttached(void) const;
-
-  /*
-   * IsSimulated(void):
-   *
-   * Returns:
-   *    True if the drive board is being simulated rather than actually
-   *    emulated, otherwise false.
-   */
+  // Whether it is simulated rather than run on its Z80.
   virtual bool IsSimulated(void) const;
 
-  /*
-   * GetDIPSwitches(dip1, dip2):
-   *
-   * Reads the two sets of DIP switches on the drive board.
-   *
-   * Parameters:
-   *    dip1  Reference of variable to store DIP switch 1 to.
-   *    dip2  DIP switch 2.
-   */
   virtual void GetDIPSwitches(UINT8 &dip1, UINT8 &dip2) const;
-  virtual void GetDIPSwitches(UINT8& dip1) const;
-
-  /*
-   * SetDIPSwitches(dip1, dip2):
-   *
-   * Sets the DIP switches.
-   *
-   * Parameters:
-   *    dip1  DIP switch 1 value.
-   *    dip2  DIP switch 2 value.
-   */
+  virtual void GetDIPSwitches(UINT8 &dip1) const;
   virtual void SetDIPSwitches(UINT8 dip1, UINT8 dip2);
   virtual void SetDIPSwitches(UINT8 dip1);
 
-  /*
-   * GetForceFeedbackStrength(void):
-   *
-   * Returns:
-   *    Strength of the force feedback based on drive board DIP switches (1-8).
-   */
+  // Force feedback strength 1-8 (DIP switch 1, bits 2-4, inverted).
   virtual unsigned GetForceFeedbackStrength(void) const;
-
-  /*
-   * SetForceFeedbackStrength(strength):
-   *
-   * Sets the force feedback strength (modifies the DIP switch setting).
-   *
-   * Parameters:
-   *    strength  A value ranging from 1 to 8.
-   */
   virtual void SetForceFeedbackStrength(unsigned strength);
 
-
-  /*
-   * GetZ80(void):
-   *
-   * Returns:
-   *    The Z80 object.
-   */
   virtual CZ80 *GetZ80(void);
 
-  /*
-   * SaveState(SaveState):
-   *
-   * Saves the drive board state.
-   *
-   * Parameters:
-   *    SaveState Block file to save state information to.
-   */
   virtual void SaveState(CBlockFile *SaveState);
-
-  /*
-   * LoadState(SaveState):
-   *
-   * Restores the drive board state.
-   *
-   * Parameters:
-   *    SaveState Block file to load save state information from.
-   */
   virtual void LoadState(CBlockFile *SaveState);
 
-  /*
-   * Init(romPtr):
-   *
-   * Initializes (and "attaches") the drive board. This should be called
-   * before other members.
-   *
-   * Parameters:
-   *    romPtr    Pointer to the drive board ROM (Z80 program).
-   *
-   * Returns:
-   *    FAIL if the drive board could not be initialized (prints own error
-   *    message), otherwise OKAY.
-   */
+  // Attaches the board with its Z80 program ROM (the data may be loaded
+  // later). Call once, before anything else.
   virtual Result Init(const UINT8 *romPtr);
-
-  /*
-   * Init(void):
-   *
-   * Initializes a dummy drive board in a detached state. This should be called
-   * before other members. This initializer is provided in case a CDriveBoard
-   * object or pointer is needed but no drive board actually exists.
-   */
+  // A board that is not attached (with a blank ROM).
   Result Init(void);
 
-  /*
-   * AttachInputs(InputsPtr, gameInputFlags):
-   *
-   * Attaches inputs to the drive board (for access to the steering wheel
-   * position).
-   *
-   * Parameters:
-   *    inputs      Pointer to the input object.
-   *    gameInputFlags  The current game's input flags.
-   */
   virtual void AttachInputs(CInputs *inputs, unsigned gameInputFlags);
-
   virtual void AttachOutputs(COutputs *outputs);
 
-  /*
-   * Reset(void):
-   *
-   * Resets the drive board.
-   */
   virtual void Reset(void);
 
-  /*
-   * Read():
-   *
-   * Reads data from the drive board.
-   *
-   * Returns:
-   *    Data read.
-   */
+  // The PowerPC's side: the board's reply, and a command for it.
   virtual UINT8 Read(void);
-
-  /*
-   * Write(data):
-   *
-   * Writes data to the drive board.
-   *
-   * Parameters:
-   *    data  Data to send.
-   */
   virtual void Write(UINT8 data);
 
-  /*
-   * RunFrame(void):
-   *
-   * Emulates a single frame's worth of time on the drive board.
-   */
+  // One video frame of the board's time.
   virtual void RunFrame(void);
 
-  /*
-     * CDriveBoard(config):
-     * ~CDriveBoard():
-     *
-     * Constructor and destructor. Memory is freed by destructor.
-     *
-     * Paramters:
-     *    config  Run-time configuration. The reference should be held because
-     *            this changes at run-time.
-     */
-  CDriveBoard(const Util::Config::Node& config);
+  // The configuration is held by reference (it changes while running).
+  CDriveBoard(const Util::Config::Node &config);
   virtual ~CDriveBoard(void);
 
-  /*
-   * Read8(addr):
-   * IORead8(portNum):
-   *
-   * Methods for reading from Z80's memory and IO space. Required by CBus.
-   *
-   * Parameters:
-   *    addr    Address in memory (0-0xFFFF).
-   *    portNum   Port address (0-255).
-   *
-   * Returns:
-   *    A byte of data from the address or port.
-   */
+  // Z80 bus
   virtual UINT8 Read8(UINT32 addr);
   virtual UINT8 IORead8(UINT32 portNum);
-
-  /*
-   * Write8(addr, data):
-   * IORead8(portNum, data):
-   *
-   * Methods for writing to Z80's memory and IO space. Required by CBus.
-   *
-   * Parameters:
-   *    addr    Address in memory (0-0xFFFF).
-   *    portNum   Port address (0-255).
-   *    data    Byte to write.
-   */
   virtual void Write8(UINT32 addr, UINT8 data);
   virtual void IOWrite8(UINT32 portNum, UINT8 data);
 
-
 protected:
+  // Stops emulation (boards override it to stop their effects first).
+  virtual void Halt(void);
+  // Not attached, or disabled.
+  bool Inactive(void) const;
+  // Z80 cycles in one video frame (57.524 Hz).
+  int CyclesPerFrame() const;
 
-  // Disable the drive board (without affecting attachment state). Used internally only to disable emulation.
-  virtual void Disable(void);
+  const Util::Config::Node &m_config;
+  bool m_present = false;
+  bool m_halted = true;           // until a Reset() of an attached board
+  bool m_simulate = false;
 
-  // Whether disabled and/or not attached -- used to determine whether to carry out emulation
-  bool IsDisabled(void) const;
+  // Saved state (do not change these types)
+  bool m_ready = false;       // the board has finished starting up
+  bool m_intEnabled = false;   // raise the Z80's INT every time slice
+  bool m_nmiEnabled = false;          // the CTC's channel 1 timer gives NMIs
+  UINT8 m_command = 0;              // last byte from the PowerPC
+  UINT8 m_reply = 0;                // byte for the PowerPC
+  UINT8 m_dipA = 0;
+  UINT8 m_dipB = 0;
+  int m_nmiCountdown = 0;           // Z80 cycles to the next NMI
 
-  // get the number of cycles for 1 render frame
-  int GetFramecycles() const;
+  // Simulation (boards that answer the PowerPC without running the Z80)
+  UINT8 m_startupFrames = 0;            // frames since the start-up sequence began
+  UINT8 m_simStatus = 0;
+  UINT8 m_simMode = 0;
+  UINT8 m_simSelect = 0;
+  UINT8 m_simCenter = 0;
+  UINT8 m_simEcho = 0;
 
+  const UINT8 *m_program = nullptr;     // Z80 program (0x0000-0x8FFF)
+  UINT8 *m_work = nullptr;           // 8 KB at 0xE000
+  const UINT8 *m_blankProgram = nullptr;
+  CZ80 m_cpu;
+  float m_clockMHz = 8.0f;          // MHz
+  Z80CTC m_ctc;
 
-  const Util::Config::Node& m_config;
+  CInputs *m_in = nullptr;
+  unsigned m_gameInputs = 0;
+  COutputs *m_out = nullptr;
 
-  bool m_attached;    // True if drive board is attached
-  bool m_disabled;    // True if emulation is internally disabled (e.g., by loading an incompatible save state). Can only be enabled once and if attached.
-  bool m_simulated;   // True if drive board should be simulated rather than emulated
-
-  // Emulation state
-  bool m_initialized;       // True if drive board has finished initialization
-  bool m_allowInterrupts;   // True if board has enabled interrupts
-  bool m_allowNMIInterupts; // True if board has enabled NMI interrupts
-
-  UINT8 m_dataSent;       // Last command sent by main board
-  UINT8 m_dataReceived;   // Data to send back to main board
-
-  UINT8 m_dip1;           // Value of DIP switch 1
-  UINT8 m_dip2;           // Value of DIP switch 2
-
-  // Simulation state
-  UINT8 m_initState;
-  UINT8 m_statusFlags;
-  UINT8 m_boardMode;
-  UINT8 m_readMode;
-  UINT8 m_wheelCenter;
-  UINT8 m_cockpitCenter;
-  UINT8 m_echoVal;
-
-  const UINT8* m_rom;     // 32k ROM
-  UINT8* m_ram;           // 8k RAM
-
-  const UINT8* m_dummyROM;
-
-  CZ80 m_z80;             // Z80 CPU
-  float m_z80Clock;       // Z80 clock frequency
-  bool m_z80NMI;          // Non Masquable Interrupt or Interrupt
-  Z80CTC m_z80CTC;          // z80 counter / timer circuit
-  int m_nmiTimerVal;
-
-  CInputs* m_inputs;
-  unsigned m_inputFlags;
-
-  COutputs* m_outputs;
-
-  
+private:
+  // The NMI period from the CTC's channel 1.
+  int NmiInterval();
 };
 
-#endif  // INCLUDED_DRIVEBOARD_H
+#endif // INCLUDED_DRIVEBOARD_H

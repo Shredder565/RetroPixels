@@ -1,69 +1,17 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2021 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * BillBoard.cpp
- *
- * Implementation of the CBillBoard class
- * emulation.
- *
- */
-
-/*
-** digits format
-**
-**       a
-**    -------
-**   |       |
-** f |       | b
-**   |   g   |
-**    -------
-**   |       |
-** e |       | c
-**   |       |
-**    -------
-**       d     (O) h
-**
-**   h g f e d c b a
-** msb             lsb
-**
-** 0 switch on
-** 1 switch off
-**
-**
-** lamps
-**   x x x x x x P2 P1
-** 0 switch on
-** 1 switch off
-**
-**/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The billboard (see BillBoard.h).
+//
+// Z80 ports:
+//   in  20 DIP switch 1 (0x80: segment test)   21 the PowerPC's command
+//       26 lamp status (FF)                    others FF
+//   out 22, 23 player 1 digits   24, 25 player 2 digits   26 lamps
+//       (each also becomes the reply to the PowerPC)
+//       28 03 enables the Z80's interrupt     2E 00 marks the board started
+// It has no CTC (ports 10-13 are not passed on).
 
 #include "BillBoard.h"
-
 #include "Supermodel.h"
-
-#include <cstdio>
-#include <algorithm>
-
 
 Game::DriveBoardType CBillBoard::GetType(void) const
 {
@@ -75,19 +23,19 @@ unsigned CBillBoard::GetForceFeedbackStrength() const
   return 0;
 }
 
-void CBillBoard::SetForceFeedbackStrength(unsigned strength)
+void CBillBoard::SetForceFeedbackStrength(unsigned)
 {
-
 }
 
-void CBillBoard::SaveState(CBlockFile* SaveState)
+// After the common block: "BillBoard" with DIP switch 1.
+void CBillBoard::SaveState(CBlockFile *SaveState)
 {
   CDriveBoard::SaveState(SaveState);
   SaveState->NewBlock("BillBoard", __FILE__);
-  SaveState->Write(&m_dip1, sizeof(m_dip1));
+  SaveState->Write(&m_dipA, sizeof(m_dipA));
 }
 
-void CBillBoard::LoadState(CBlockFile* SaveState)
+void CBillBoard::LoadState(CBlockFile *SaveState)
 {
   CDriveBoard::LoadState(SaveState);
   if (SaveState->FindBlock("BillBoard") != Result::OKAY)
@@ -95,99 +43,54 @@ void CBillBoard::LoadState(CBlockFile* SaveState)
     ErrorLog("Unable to load billboard state. Save state file is corrupt.");
     return;
   }
-  SaveState->Read(&m_dip1, sizeof(m_dip1));
+  SaveState->Read(&m_dipA, sizeof(m_dipA));
 }
 
-void CBillBoard::AttachInputs(CInputs* inputs, unsigned gameInputFlags)
+void CBillBoard::AttachInputs(CInputs *, unsigned)
 {
-
 }
 
 UINT8 CBillBoard::IORead8(UINT32 portNum)
 {
   switch (portNum)
   {
-  case 0x20:
-    // return the dipswitch
-    // 0x80 : test all segments
-    return m_dip1;
-  case 0x21:
-    //DebugLog("     Bill R portnum=%X  m_dataSent=%X\n", portNum, m_dataSent);
-    return m_dataSent;
-  case 0x26:
-    //DebugLog("          Bill R portnum=%X  m_dataSent=%X\n", portNum, m_dataSent);
-    // 0xf0 or 0x0f = no more test lamp
-    return 0xff;
-  default:
-    DebugLog("Unhandled Z80 input on port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
-    return 0xff;
+  case 0x20: return m_dipA;
+  case 0x21: return m_command;
+  default: return 0xFF;   // (26: no lamp test)
   }
 }
 
 void CBillBoard::IOWrite8(UINT32 portNum, UINT8 data)
 {
+  static const EOutputs kOutput[] = { OutputBill1, OutputBill2, OutputBill3, OutputBill4, OutputBill5 };
   switch (portNum)
   {
-  case 0x22: // P1 Digit 1
-    //DebugLog("Bill W 0x22 <- %X\n", data);
-    if (m_outputs != NULL)
-      m_outputs->SetValue(OutputBill1, data);
-    m_dataReceived = data;
-    break;
-  case 0x23: // P1 Digit 2
-    //DebugLog("Bill W 0x23 <- %X\n", data);
-    if (m_outputs != NULL)
-      m_outputs->SetValue(OutputBill2, data);
-    m_dataReceived = data;
-    break;
-  case 0x24: // P2 Digit 1
-    //DebugLog("Bill W 0x24 <- %X\n", data);
-    if (m_outputs != NULL)
-      m_outputs->SetValue(OutputBill3, data);
-    m_dataReceived = data;
-    break;
-  case 0x25: // P2 Digit 2
-    //DebugLog("Bill W 0x25 <- %X\n", data);
-    if (m_outputs != NULL)
-      m_outputs->SetValue(OutputBill4, data);
-    m_dataReceived = data;
-    break;
-  case 0x26: // lamp P1 P2
-    //DebugLog("Bill W 0x26 <- %X\n", data);
-    if (m_outputs != NULL)
-      m_outputs->SetValue(OutputBill5, data);
-    m_dataReceived = data;
+  case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
+    if (m_out != nullptr)
+      m_out->SetValue(kOutput[portNum - 0x22], data);
+    m_reply = data;
     break;
   case 0x28:
-    //DebugLog("Bill W 0x28 <- %X\n", data);
     if (data == 0x03)
-      m_allowInterrupts = true;
+      m_intEnabled = true;
     break;
-  case 0x2e:
-    //DebugLog("Bill W 0x2e <- %X\n", data);
+  case 0x2E:
     if (data == 0x00)
-      m_initialized = true;
-    return;
+      m_ready = true;
+    break;
   default:
-    DebugLog("Unhandled Z80 output on port %u (at PC = %04X)\n", portNum, m_z80.GetPC());
     break;
   }
 }
 
-
-
-CBillBoard::CBillBoard(const Util::Config::Node& config)
+CBillBoard::CBillBoard(const Util::Config::Node &config)
   : CDriveBoard(config)
 {
-  m_dip1 = 0x0f;
-  m_simulated = false;
-  m_z80Clock = 8.0f;
-  m_z80NMI = false;
-
-  DebugLog("Built Drive Board (billboard)\n");
+  m_dipA = 0x0F;
+  m_simulate = false;
+  m_clockMHz = 8.0f;
 }
 
 CBillBoard::~CBillBoard(void)
 {
-
 }
