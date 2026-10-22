@@ -451,6 +451,11 @@
         ack: (lv) => md.ack(lv),
       });
       this.cpu.tasWrites = false;
+      // Only a ROM whose A-line and F-line vectors share a handler (its
+      // general error handler) gets branch hooks, so a game that really uses
+      // either trap is left alone (see m68k.js).
+      const be32 = (a) => ((rom[a] << 24) | (rom[a + 1] << 16) | (rom[a + 2] << 8) | rom[a + 3]) >>> 0;
+      this.cpu.branchHooks = rom.length >= 0x30 && be32(0x28) === be32(0x2c);
       this.z80 = new global.RPZ80({
         read: (a) => md.zread(a), write: (a, v) => md.zwrite(a, v),
         in: () => 0xff, out: () => {}, vector: () => 0xff,

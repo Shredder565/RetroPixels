@@ -76,8 +76,8 @@ RetroPixels 2.21.0  (2026-10-21)
   games are recorded from start to end, and the videos go to your recordings
   folder (Videos\RetroPixels).
 - Sega Genesis / Mega Drive: the games from Sonic Classic Collection no
-  longer stay on a black screen, in RetroPixels Native and RetroPixels for
-  Android.
+  longer stay on a black screen, in RetroPixels.exe, RetroPixels Native and
+  RetroPixels for Android.
 - Linux: a Linux version is on the way and comes in a later version; 2.21.0
   is for Windows (and Android). RetroPixels Native stays Windows-only.
 

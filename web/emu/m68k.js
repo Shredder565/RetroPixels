@@ -250,6 +250,20 @@
     const T = new Array(65536);
     const illegal = (c, op) => {
       const top = op >> 12;
+      // branchHooks: some re-released Genesis ROMs (the Sonic Classic
+      // Collection dumps) mark their wait loops with an A-line or F-line
+      // opcode that holds a backward short branch (Bcc.b with its top nibble
+      // changed) for their own emulator. Run it as that branch instead of
+      // trapping into the error handler (as cores/m68k does).
+      if (c.branchHooks && (top === 0xa || top === 0xf) && ((op >> 8) & 0xf) !== 1) {
+        const d = ((op & 0xff) << 24) >> 24;
+        if (d < 0 && d !== -1) {
+          const b = 0x6000 | (op & 0x0fff);
+          c.op = b;
+          c.table[b](c, b);
+          return;
+        }
+      }
       c.illegal(top === 0xa ? 10 : top === 0xf ? 11 : 4);
     };
     for (let op = 0; op < 65536; op++) T[op] = decode(op) || illegal;

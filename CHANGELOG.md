@@ -15,7 +15,7 @@ All notable changes to RetroPixels. Newest first.
 - RetroPixels Native: Wii U games (Wii U > Open a Wii U game...) and GameCube / Wii games play in PixelU, docked inside its window, so OBS captures them. While one plays, the controller no longer works the start screen behind it.
 - RetroPixels Native registers itself for the game file types it plays, so it shows in File Explorer's "Open with". Windows 11 still asks once per file type: pick RetroPixels Native and "Always" (Options > Open game files with RetroPixels Native explains it). A game opened while RetroPixels Native is already running goes to that window.
 - Recording: one "Record games automatically" setting for every system, on by default (turn it off in the Recordings tab, or in RetroPixels Native's Record menu). Built-in systems, Wii U, GameCube / Wii, MAME and Supermodel games are recorded from start to end, and the videos go to your recordings folder (Videos\RetroPixels).
-- Sega Genesis / Mega Drive: the games from Sonic Classic Collection no longer stay on a black screen, in RetroPixels Native and RetroPixels for Android.
+- Sega Genesis / Mega Drive: the games from Sonic Classic Collection no longer stay on a black screen, in RetroPixels.exe, RetroPixels Native and RetroPixels for Android.
 - Linux: a Linux version is on the way and comes in a later version; 2.21.0 is for Windows (and Android). RetroPixels Native stays Windows-only.
 
 ## [2.20.0] - 2026-10-17
