@@ -1,294 +1,247 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2025 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The Supermodel.ini written on first start, and the default control
+// assignments, which DefaultConfig() (Main.cpp) uses too.
 
-/*
- * DefaultConfigFile.h
- *
- * Default Supermodel.ini.
- */
+#ifndef INCLUDED_DEFAULTCONFIGFILE_H
+#define INCLUDED_DEFAULTCONFIGFILE_H
 
- #ifndef INCLUDED_DEFAULTCONFIGFILE_H
- #define INCLUDED_DEFAULTCONFIGFILE_H
+#include <string>
 
- static const char s_defaultConfigFileContents[] =
- {
-    ";;\n"
-    ";; Supermodel Configuration File\n"
-    ";; Default settings.\n"
-    ";;\n"
-    "\n"
-    "\n"
-    ";\n"
-    "; Quick Overview\n"
-    "; --------------\n"
-    ";\n"
-    "; All settings are case sensitive.  Numbers must be integers.  Check your\n"
-    "; spelling carefully because invalid settings are silently ignored.  To verify\n"
-    "; that your settings are being parsed correctly, check the contents of\n"
-    "; Supermodel.log.\n"
-    ";\n"
-    "; Global options apply to all games.  To create configuration profiles for\n"
-    "; individual games, place settings under sections with the same name as the\n"
-    "; corresponding MAME ROM set, like so:\n"
-    ";\n"
-    ";       ; Scud Race\n"
-    ";       [ scud ]\n"
-    ";\n"
-    ";       SoundVolume = 50\n"
-    ";       MusicVolume = 200\n"
-    ";       ; ... etc. ...\n"
-    ";\n"
-    "; For a list of all valid settings, please consult README.txt.  Only default\n"
-    "; inputs are assigned here.\n"
-    ";\n"
-    "\n"
-    "\n"
-    "[ Global ]\n"
-    "\n"
-    "; Graphics\n"
-    "New3DEngine = true\n"
-    "QuadRendering = false\n"
-    "WideScreen = false\n"
-    "Stretch = false\n"
-    "WideBackground = false\n"
-    "Supersampling = 1\n"
-    "; CRT-like color adaption: 0=none, 1=ARI/D93 (recommended for all JP developed games),\n"
-    "; 2=PVM_20M2U/D93, 3=BT601_525/D93, 4=BT601_525/D65 (recommended for all US developed games)\n"
-    "; 5=BT601_625/D65 (recommended for all EUR/AUS developed games)\n"
-    "CRTcolors = 0\n"
-    "; Upscale filter used for the 2D layers: 0=none/sharp pixels, 1=biquintic,\n"
-    "; 2=bilinear, 3=bicubic\n"
-    "UpscaleMode = 2\n"
-    "\n"
-    "; Refresh rate (milliHertz accuracy). Actual Model 3 refresh rate is 57.524 Hz\n"
-    "; but this can cause judder so we use 60 Hz by default.\n"
-    "RefreshRate = 60.000\n"
-    "\n"
-    "; Legacy SCSP DSP implementation for games that do not play well with the newer\n"
-    "; one (e.g., Fighting Vipers 2)\n"
-    "LegacySoundDSP = false\n"
-    "\n"
-    "; Network board\n"
-    "Network = false\n"
-    "SimulateNet = true\n"
-    "PortIn = 1970\n"
-    "PortOut = 1971\n"
-    "AddressOut = \"127.0.0.1\"\n"
-    "\n"
-    "; Common\n"
-    "InputStart1 = \"KEY_1,JOY1_BUTTON9\"\n"
-    "InputStart2 = \"KEY_2,JOY2_BUTTON9\"\n"
-    "InputCoin1 = \"KEY_3,JOY1_BUTTON10\"\n"
-    "InputCoin2 = \"KEY_4,JOY2_BUTTON10\"\n"
-    "InputServiceA = \"KEY_5\"\n"
-    "InputServiceB = \"KEY_7\"\n"
-    "InputTestA = \"KEY_6\"\n"
-    "InputTestB = \"KEY_8\"\n"
-    "\n"
-    "; 4-way digital joysticks\n"
-    "InputJoyUp = \"KEY_UP,JOY1_UP\"\n"
-    "InputJoyDown = \"KEY_DOWN,JOY1_DOWN\"\n"
-    "InputJoyLeft = \"KEY_LEFT,JOY1_LEFT\"\n"
-    "InputJoyRight = \"KEY_RIGHT,JOY1_RIGHT\"\n"
-    "InputJoyUp2 = \"JOY2_UP\"\n"
-    "InputJoyDown2 = \"JOY2_DOWN\"\n"
-    "InputJoyLeft2 = \"JOY2_LEFT\"\n"
-    "InputJoyRight2 = \"JOY2_RIGHT\"\n"
-    "\n"
-    "; Fighting game buttons\n"
-    "InputPunch = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputKick = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputGuard = \"KEY_D,JOY1_BUTTON3\"\n"
-    "InputEscape = \"KEY_F,JOY1_BUTTON4\"\n"
-    "InputPunch2 = \"JOY2_BUTTON1\"\n"
-    "InputKick2 = \"JOY2_BUTTON2\"\n"
-    "InputGuard2 = \"JOY2_BUTTON3\"\n"
-    "InputEscape2 = \"JOY2_BUTTON4\"\n"
-    "\n"
-    "; Spikeout buttons\n"
-    "InputShift = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputBeat = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputCharge = \"KEY_D,JOY1_BUTTON3\"\n"
-    "InputJump = \"KEY_F,JOY1_BUTTON4\"\n"
-    "\n"
-    "; Virtua Striker buttons\n"
-    "InputShortPass = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputLongPass = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputShoot = \"KEY_D,JOY1_BUTTON3\"\n"
-    "InputShortPass2 = \"JOY2_BUTTON1\"\n"
-    "InputLongPass2 = \"JOY2_BUTTON2\"\n"
-    "InputShoot2 = \"JOY2_BUTTON3\"\n"
-    "\n"
-    "; Steering wheel\n"
-    "InputSteeringLeft = \"KEY_LEFT\"      ; digital, turn wheel left\n"
-    "InputSteeringRight = \"KEY_RIGHT\"    ; digital, turn wheel right\n"
-    "InputSteering = \"JOY1_XAXIS\"        ; analog, full steering range\n"
-    "\n"
-    "; Pedals\n"
-    "InputAccelerator = \"KEY_UP,JOY1_UP\"\n"
-    "InputBrake = \"KEY_DOWN,JOY1_DOWN\"\n"
-    "\n"
-    "; Up/down shifter manual transmission (all racers)\n"
-    "InputGearShiftUp = \"KEY_Y\"           ; sequential shift up\n"
-    "InputGearShiftDown = \"KEY_H\"         ; sequential shift down\n"
-    "\n"
-    "; 4-Speed manual transmission (Daytona 2, Sega Rally 2, Scud Race)\n"
-    "InputGearShift1 = \"KEY_Q,JOY1_BUTTON5\"\n"
-    "InputGearShift2 = \"KEY_W,JOY1_BUTTON6\"\n"
-    "InputGearShift3 = \"KEY_E,JOY1_BUTTON7\"\n"
-    "InputGearShift4 = \"KEY_R,JOY1_BUTTON8\"\n"
-    "InputGearShiftN = \"KEY_T\"\n"
-    "\n"
-    "; VR4 view change buttons (Daytona 2, Le Mans 24, Scud Race)\n"
-    "InputVR1 = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputVR2 = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputVR3 = \"KEY_D,JOY1_BUTTON3\"\n"
-    "InputVR4 = \"KEY_F,JOY1_BUTTON4\"\n"
-    "\n"
-    "; Single view change button (Dirt Devils, ECA, Harley-Davidson, Sega Rally 2)\n"
-    "InputViewChange = \"KEY_A,JOY1_BUTTON1\"\n"
-    "\n"
-    "; Handbrake (Sega Rally 2)\n"
-    "InputHandBrake = \"KEY_S,JOY1_BUTTON2\"\n"
-    "\n"
-    "; Harley-Davidson controls\n"
-    "InputRearBrake = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputMusicSelect = \"KEY_D,JOY1_BUTTON3\"\n"
-    "\n"
-    "; Virtual On macros\n"
-    "InputTwinJoyTurnLeft = \"KEY_Q,JOY1_RXAXIS_NEG\"\n"
-    "InputTwinJoyTurnRight = \"KEY_W,JOY1_RXAXIS_POS\"\n"
-    "InputTwinJoyForward = \"KEY_UP,JOY1_YAXIS_NEG\"\n"
-    "InputTwinJoyReverse = \"KEY_DOWN,JOY1_YAXIS_POS\"\n"
-    "InputTwinJoyStrafeLeft = \"KEY_LEFT,JOY1_XAXIS_NEG\"\n"
-    "InputTwinJoyStrafeRight = \"KEY_RIGHT,JOY1_XAXIS_POS\"\n"
-    "InputTwinJoyJump = \"KEY_E,JOY1_BUTTON1\"\n"
-    "InputTwinJoyCrouch = \"KEY_R,JOY1_BUTTON2\"\n"
-    "\n"
-    "; Virtual On individual joystick mapping\n"
-    "InputTwinJoyLeft1 = \"NONE\"\n"
-    "InputTwinJoyLeft2 = \"NONE\"\n"
-    "InputTwinJoyRight1 = \"NONE\"\n"
-    "InputTwinJoyRight2 = \"NONE\"\n"
-    "InputTwinJoyUp1 = \"NONE\"\n"
-    "InputTwinJoyUp2 = \"NONE\"\n"
-    "InputTwinJoyDown1 = \"NONE\"\n"
-    "InputTwinJoyDown2 = \"NONE\"\n"
-    "\n"
-    "; Virtual On buttons\n"
-    "InputTwinJoyShot1 = \"KEY_A,JOY1_BUTTON5\"\n"
-    "InputTwinJoyShot2 = \"KEY_S,JOY1_BUTTON6\"\n"
-    "InputTwinJoyTurbo1 = \"KEY_Z,JOY1_BUTTON7\"\n"
-    "InputTwinJoyTurbo2 = \"KEY_X,JOY1_BUTTON8\"\n"
-    "\n"
-    "; Analog joystick (Star Wars Trilogy)\n"
-    "InputAnalogJoyLeft = \"KEY_LEFT\"             ; digital, move left\n"
-    "InputAnalogJoyRight = \"KEY_RIGHT\"           ; digital, move right\n"
-    "InputAnalogJoyUp = \"KEY_UP\"                 ; digital, move up\n"
-    "InputAnalogJoyDown = \"KEY_DOWN\"             ; digital, move down\n"
-    "InputAnalogJoyX = \"JOY_XAXIS,MOUSE_XAXIS\"   ; analog, full X axis\n"
-    "InputAnalogJoyY = \"JOY_YAXIS,MOUSE_YAXIS\"   ; analog, full Y axis\n"
-    "InputAnalogJoyTrigger = \"KEY_A,JOY_BUTTON1,MOUSE_LEFT_BUTTON\"\n"
-    "InputAnalogJoyEvent = \"KEY_S,JOY_BUTTON2,MOUSE_RIGHT_BUTTON\"\n"
-    "InputAnalogJoyTrigger2 = \"KEY_D,JOY_BUTTON2\"\n"
-    "InputAnalogJoyEvent2 = \"NONE\"\n"
-    "\n"
-    "; Light guns (Lost World)\n"
-    "InputGunLeft = \"KEY_LEFT\"               ; digital, move gun left\n"
-    "InputGunRight = \"KEY_RIGHT\"             ; digital, move gun right\n"
-    "InputGunUp = \"KEY_UP\"                   ; digital, move gun up\n"
-    "InputGunDown = \"KEY_DOWN\"               ; digital, move gun down\n"
-    "InputGunX = \"MOUSE_XAXIS,JOY1_XAXIS\"    ; analog, full X axis\n"
-    "InputGunY = \"MOUSE_YAXIS,JOY1_YAXIS\"    ; analog, full Y axis\n"
-    "InputTrigger = \"KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON\"\n"
-    "InputOffscreen = \"KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON\"    ; point off-screen\n"
-    "InputAutoTrigger = 0                    ; automatic reload when off-screen\n"
-    "InputGunLeft2 = \"NONE\"\n"
-    "InputGunRight2 = \"NONE\"\n"
-    "InputGunUp2 = \"NONE\"\n"
-    "InputGunDown2 = \"NONE\"\n"
-    "InputGunX2 = \"JOY2_XAXIS\"\n"
-    "InputGunY2 = \"JOY2_YAXIS\"\n"
-    "InputTrigger2 = \"JOY2_BUTTON1\"\n"
-    "InputOffscreen2 = \"JOY2_BUTTON2\"\n"
-    "InputAutoTrigger2 = 0\n"
-    "\n"
-    "; Analog guns (Ocean Hunter, LA Machineguns)\n"
-    "InputAnalogGunLeft = \"KEY_LEFT\"               ; digital, move gun left\n"
-    "InputAnalogGunRight = \"KEY_RIGHT\"             ; digital, move gun right\n"
-    "InputAnalogGunUp = \"KEY_UP\"                   ; digital, move gun up\n"
-    "InputAnalogGunDown = \"KEY_DOWN\"               ; digital, move gun down\n"
-    "InputAnalogGunX = \"MOUSE_XAXIS,JOY1_XAXIS\"    ; analog, full X axis\n"
-    "InputAnalogGunY = \"MOUSE_YAXIS,JOY1_YAXIS\"    ; analog, full Y axis\n"
-    "InputAnalogTriggerLeft = \"KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON\"\n"
-    "InputAnalogTriggerRight = \"KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON\"\n"
-    "InputAnalogGunLeft2 = \"NONE\"\n"
-    "InputAnalogGunRight2 = \"NONE\"\n"
-    "InputAnalogGunUp2 = \"NONE\"\n"
-    "InputAnalogGunDown2 = \"NONE\"\n"
-    "InputAnalogGunX2 = \"NONE\"\n"
-    "InputAnalogGunY2 = \"NONE\"\n"
-    "InputAnalogTriggerLeft2 = \"NONE\"\n"
-    "InputAnalogTriggerRight2 = \"NONE\"\n"
-    "\n"
-    "; Ski Champ controls\n"
-    "InputSkiLeft = \"KEY_LEFT\"\n"
-    "InputSkiRight = \"KEY_RIGHT\"\n"
-    "InputSkiUp = \"KEY_UP\"\n"
-    "InputSkiDown = \"KEY_DOWN\"\n"
-    "InputSkiX = \"JOY1_XAXIS\"\n"
-    "InputSkiY = \"JOY1_YAXIS\"\n"
-    "InputSkiPollLeft = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputSkiPollRight = \"KEY_S,JOY1_BUTTON2\"\n"
-    "InputSkiSelect1 = \"KEY_Q,JOY1_BUTTON3\"\n"
-    "InputSkiSelect2 = \"KEY_W,JOY1_BUTTON4\"\n"
-    "InputSkiSelect3 = \"KEY_E,JOY1_BUTTON5\"\n"
-    "\n"
-    "; Magical Truck Adventure controls\n"
-    "InputMagicalLeverUp1 = \"KEY_UP\"\n"
-    "InputMagicalLeverDown1 = \"KEY_DOWN\"\n"
-    "InputMagicalLeverUp2 = \"NONE\"\n"
-    "InputMagicalLeverDown2 = \"NONE\"\n"
-    "InputMagicalLever1 = \"JOY1_YAXIS\"\n"
-    "InputMagicalLever2 = \"JOY2_YAXIS\"\n"
-    "InputMagicalPedal1 = \"KEY_A,JOY1_BUTTON1\"\n"
-    "InputMagicalPedal2 = \"KEY_S,JOY2_BUTTON1\"\n"
-    "\n"
-    "; Sega Bass Fishing / Get Bass controls\n"
-    "InputFishingRodLeft = \"KEY_LEFT\"\n"
-    "InputFishingRodRight = \"KEY_RIGHT\"\n"
-    "InputFishingRodUp = \"KEY_UP\"\n"
-    "InputFishingRodDown = \"KEY_DOWN\"\n"
-    "InputFishingStickLeft = \"KEY_A\"\n"
-    "InputFishingStickRight = \"KEY_D\"\n"
-    "InputFishingStickUp = \"KEY_W\"\n"
-    "InputFishingStickDown = \"KEY_S\"\n"
-    "InputFishingRodX = \"JOY1_XAXIS\"\n"
-    "InputFishingRodY = \"JOY1_YAXIS\"\n"
-    "InputFishingStickX = \"JOY1_RXAXIS\"\n"
-    "InputFishingStickY = \"JOY1_RYAXIS\"\n"
-    "InputFishingReel = \"KEY_SPACE,JOY1_ZAXIS_POS\"\n"
-    "InputFishingCast = \"KEY_Z,JOY1_BUTTON1\"\n"
-    "InputFishingSelect = \"KEY_X,JOY1_BUTTON2\"\n"
-    "InputFishingTension = \"KEY_T,JOY1_ZAXIS_NEG\"\n"
- };
+namespace DefaultSettings
+{
+  struct InputDefault
+  {
+    const char *name;      // the setting is "Input" + name
+    const char *mapping;   // KEY_..., JOY1_..., MOUSE_..., comma separated
+  };
 
- #endif  // INCLUDED_DEFAULTCONFIGFILE_H
+  inline const InputDefault kInputs[] =
+  {
+    // coins, start, service and test
+    { "Start1", "KEY_1,JOY1_BUTTON9" },
+    { "Start2", "KEY_2,JOY2_BUTTON9" },
+    { "Coin1", "KEY_3,JOY1_BUTTON10" },
+    { "Coin2", "KEY_4,JOY2_BUTTON10" },
+    { "ServiceA", "KEY_5" },
+    { "ServiceB", "KEY_7" },
+    { "TestA", "KEY_6" },
+    { "TestB", "KEY_8" },
+    // 4-way joysticks
+    { "JoyUp", "KEY_UP,JOY1_UP" },
+    { "JoyDown", "KEY_DOWN,JOY1_DOWN" },
+    { "JoyLeft", "KEY_LEFT,JOY1_LEFT" },
+    { "JoyRight", "KEY_RIGHT,JOY1_RIGHT" },
+    { "JoyUp2", "JOY2_UP" },
+    { "JoyDown2", "JOY2_DOWN" },
+    { "JoyLeft2", "JOY2_LEFT" },
+    { "JoyRight2", "JOY2_RIGHT" },
+    // fighting games
+    { "Punch", "KEY_A,JOY1_BUTTON1" },
+    { "Kick", "KEY_S,JOY1_BUTTON2" },
+    { "Guard", "KEY_D,JOY1_BUTTON3" },
+    { "Escape", "KEY_F,JOY1_BUTTON4" },
+    { "Punch2", "JOY2_BUTTON1" },
+    { "Kick2", "JOY2_BUTTON2" },
+    { "Guard2", "JOY2_BUTTON3" },
+    { "Escape2", "JOY2_BUTTON4" },
+    // Spikeout
+    { "Shift", "KEY_A,JOY1_BUTTON1" },
+    { "Beat", "KEY_S,JOY1_BUTTON2" },
+    { "Charge", "KEY_D,JOY1_BUTTON3" },
+    { "Jump", "KEY_F,JOY1_BUTTON4" },
+    // Virtua Striker
+    { "ShortPass", "KEY_A,JOY1_BUTTON1" },
+    { "LongPass", "KEY_S,JOY1_BUTTON2" },
+    { "Shoot", "KEY_D,JOY1_BUTTON3" },
+    { "ShortPass2", "JOY2_BUTTON1" },
+    { "LongPass2", "JOY2_BUTTON2" },
+    { "Shoot2", "JOY2_BUTTON3" },
+    // wheel and pedals
+    { "SteeringLeft", "KEY_LEFT" },
+    { "SteeringRight", "KEY_RIGHT" },
+    { "Steering", "JOY1_XAXIS" },
+    { "Accelerator", "KEY_UP,JOY1_UP" },
+    { "Brake", "KEY_DOWN,JOY1_DOWN" },
+    // gear shifts (sequential, then 4-speed)
+    { "GearShiftUp", "KEY_Y" },
+    { "GearShiftDown", "KEY_H" },
+    { "GearShift1", "KEY_Q,JOY1_BUTTON5" },
+    { "GearShift2", "KEY_W,JOY1_BUTTON6" },
+    { "GearShift3", "KEY_E,JOY1_BUTTON7" },
+    { "GearShift4", "KEY_R,JOY1_BUTTON8" },
+    { "GearShiftN", "KEY_T" },
+    // view buttons
+    { "VR1", "KEY_A,JOY1_BUTTON1" },
+    { "VR2", "KEY_S,JOY1_BUTTON2" },
+    { "VR3", "KEY_D,JOY1_BUTTON3" },
+    { "VR4", "KEY_F,JOY1_BUTTON4" },
+    { "ViewChange", "KEY_A,JOY1_BUTTON1" },
+    // Sega Rally 2 and Harley-Davidson extras
+    { "HandBrake", "KEY_S,JOY1_BUTTON2" },
+    { "RearBrake", "KEY_S,JOY1_BUTTON2" },
+    { "MusicSelect", "KEY_D,JOY1_BUTTON3" },
+    // Virtual On twin sticks
+    { "TwinJoyTurnLeft", "KEY_Q,JOY1_RXAXIS_NEG" },
+    { "TwinJoyTurnRight", "KEY_W,JOY1_RXAXIS_POS" },
+    { "TwinJoyForward", "KEY_UP,JOY1_YAXIS_NEG" },
+    { "TwinJoyReverse", "KEY_DOWN,JOY1_YAXIS_POS" },
+    { "TwinJoyStrafeLeft", "KEY_LEFT,JOY1_XAXIS_NEG" },
+    { "TwinJoyStrafeRight", "KEY_RIGHT,JOY1_XAXIS_POS" },
+    { "TwinJoyJump", "KEY_E,JOY1_BUTTON1" },
+    { "TwinJoyCrouch", "KEY_R,JOY1_BUTTON2" },
+    { "TwinJoyLeft1", "NONE" },
+    { "TwinJoyLeft2", "NONE" },
+    { "TwinJoyRight1", "NONE" },
+    { "TwinJoyRight2", "NONE" },
+    { "TwinJoyUp1", "NONE" },
+    { "TwinJoyUp2", "NONE" },
+    { "TwinJoyDown1", "NONE" },
+    { "TwinJoyDown2", "NONE" },
+    { "TwinJoyShot1", "KEY_A,JOY1_BUTTON5" },
+    { "TwinJoyShot2", "KEY_S,JOY1_BUTTON6" },
+    { "TwinJoyTurbo1", "KEY_Z,JOY1_BUTTON7" },
+    { "TwinJoyTurbo2", "KEY_X,JOY1_BUTTON8" },
+    // analog stick (Star Wars Trilogy)
+    { "AnalogJoyLeft", "KEY_LEFT" },
+    { "AnalogJoyRight", "KEY_RIGHT" },
+    { "AnalogJoyUp", "KEY_UP" },
+    { "AnalogJoyDown", "KEY_DOWN" },
+    { "AnalogJoyX", "JOY_XAXIS,MOUSE_XAXIS" },
+    { "AnalogJoyY", "JOY_YAXIS,MOUSE_YAXIS" },
+    { "AnalogJoyTrigger", "KEY_A,JOY_BUTTON1,MOUSE_LEFT_BUTTON" },
+    { "AnalogJoyEvent", "KEY_S,JOY_BUTTON2,MOUSE_RIGHT_BUTTON" },
+    { "AnalogJoyTrigger2", "KEY_D,JOY_BUTTON2" },
+    { "AnalogJoyEvent2", "NONE" },
+    // light guns (The Lost World)
+    { "GunLeft", "KEY_LEFT" },
+    { "GunRight", "KEY_RIGHT" },
+    { "GunUp", "KEY_UP" },
+    { "GunDown", "KEY_DOWN" },
+    { "GunX", "MOUSE_XAXIS,JOY1_XAXIS" },
+    { "GunY", "MOUSE_YAXIS,JOY1_YAXIS" },
+    { "Trigger", "KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON" },
+    { "Offscreen", "KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON" },
+    { "AutoTrigger", "0" },
+    { "GunLeft2", "NONE" },
+    { "GunRight2", "NONE" },
+    { "GunUp2", "NONE" },
+    { "GunDown2", "NONE" },
+    { "GunX2", "JOY2_XAXIS" },
+    { "GunY2", "JOY2_YAXIS" },
+    { "Trigger2", "JOY2_BUTTON1" },
+    { "Offscreen2", "JOY2_BUTTON2" },
+    { "AutoTrigger2", "0" },
+    // analog guns (Ocean Hunter, L.A. Machineguns)
+    { "AnalogGunLeft", "KEY_LEFT" },
+    { "AnalogGunRight", "KEY_RIGHT" },
+    { "AnalogGunUp", "KEY_UP" },
+    { "AnalogGunDown", "KEY_DOWN" },
+    { "AnalogGunX", "MOUSE_XAXIS,JOY1_XAXIS" },
+    { "AnalogGunY", "MOUSE_YAXIS,JOY1_YAXIS" },
+    { "AnalogTriggerLeft", "KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON" },
+    { "AnalogTriggerRight", "KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON" },
+    { "AnalogGunLeft2", "NONE" },
+    { "AnalogGunRight2", "NONE" },
+    { "AnalogGunUp2", "NONE" },
+    { "AnalogGunDown2", "NONE" },
+    { "AnalogGunX2", "NONE" },
+    { "AnalogGunY2", "NONE" },
+    { "AnalogTriggerLeft2", "NONE" },
+    { "AnalogTriggerRight2", "NONE" },
+    // Ski Champ
+    { "SkiLeft", "KEY_LEFT" },
+    { "SkiRight", "KEY_RIGHT" },
+    { "SkiUp", "KEY_UP" },
+    { "SkiDown", "KEY_DOWN" },
+    { "SkiX", "JOY1_XAXIS" },
+    { "SkiY", "JOY1_YAXIS" },
+    { "SkiPollLeft", "KEY_A,JOY1_BUTTON1" },
+    { "SkiPollRight", "KEY_S,JOY1_BUTTON2" },
+    { "SkiSelect1", "KEY_Q,JOY1_BUTTON3" },
+    { "SkiSelect2", "KEY_W,JOY1_BUTTON4" },
+    { "SkiSelect3", "KEY_E,JOY1_BUTTON5" },
+    // Magical Truck Adventure
+    { "MagicalLeverUp1", "KEY_UP" },
+    { "MagicalLeverDown1", "KEY_DOWN" },
+    { "MagicalLeverUp2", "NONE" },
+    { "MagicalLeverDown2", "NONE" },
+    { "MagicalLever1", "JOY1_YAXIS" },
+    { "MagicalLever2", "JOY2_YAXIS" },
+    { "MagicalPedal1", "KEY_A,JOY1_BUTTON1" },
+    { "MagicalPedal2", "KEY_S,JOY2_BUTTON1" },
+    // Sega Bass Fishing / Get Bass
+    { "FishingRodLeft", "KEY_LEFT" },
+    { "FishingRodRight", "KEY_RIGHT" },
+    { "FishingRodUp", "KEY_UP" },
+    { "FishingRodDown", "KEY_DOWN" },
+    { "FishingStickLeft", "KEY_A" },
+    { "FishingStickRight", "KEY_D" },
+    { "FishingStickUp", "KEY_W" },
+    { "FishingStickDown", "KEY_S" },
+    { "FishingRodX", "JOY1_XAXIS" },
+    { "FishingRodY", "JOY1_YAXIS" },
+    { "FishingStickX", "JOY1_RXAXIS" },
+    { "FishingStickY", "JOY1_RYAXIS" },
+    { "FishingReel", "KEY_SPACE,JOY1_ZAXIS_POS" },
+    { "FishingCast", "KEY_Z,JOY1_BUTTON1" },
+    { "FishingSelect", "KEY_X,JOY1_BUTTON2" },
+    { "FishingTension", "KEY_T,JOY1_ZAXIS_NEG" },
+  };
+
+  // The text of a new Supermodel.ini.
+  inline std::string IniText()
+  {
+    std::string text =
+      "; Supermodel.ini\n"
+      ";\n"
+      "; Settings for the Model 3 engine. Lines are \"Name = value\"; text after a\n"
+      "; ';' is a comment. Names must be spelled exactly, case included: a name the\n"
+      "; program doesn't know is ignored (Supermodel.log lists what was read).\n"
+      ";\n"
+      "; [ Global ] applies to every game. A section named after a ROM set applies\n"
+      "; to that game only and wins over Global, for example:\n"
+      ";\n"
+      ";   [ swtrilgy ]\n"
+      ";   MusicVolume = 150\n"
+      ";\n"
+      "; Command line options win over both.\n"
+      "\n"
+      "[ Global ]\n"
+      "\n"
+      "; Picture\n"
+      "New3DEngine = true\n"
+      "QuadRendering = false\n"
+      "WideScreen = false\n"
+      "Stretch = false\n"
+      "WideBackground = false\n"
+      "Supersampling = 1\n"
+      "; Colours as on an arcade monitor: 0 off, 1 ARI/D93 (Japanese games),\n"
+      "; 2 PVM_20M2U/D93, 3 BT601_525/D93, 4 BT601_525/D65 (American games),\n"
+      "; 5 BT601_625/D65 (European and Australian games)\n"
+      "CRTcolors = 0\n"
+      "; Smoothing of the scaled-up 2D layers: 0 none, 1 biquintic, 2 bilinear,\n"
+      "; 3 bicubic\n"
+      "UpscaleMode = 2\n"
+      "; Frames per second. The real board runs at 57.524; 60 moves more evenly on\n"
+      "; most monitors.\n"
+      "RefreshRate = 60.000\n"
+      "\n"
+      "; Sound: the older SCSP DSP, for games the current one plays wrongly\n"
+      "LegacySoundDSP = false\n"
+      "\n"
+      "; Linked cabinets (net board)\n"
+      "Network = false\n"
+      "SimulateNet = true\n"
+      "PortIn = 1970\n"
+      "PortOut = 1971\n"
+      "AddressOut = \"127.0.0.1\"\n"
+      "\n"
+      "; Controls\n";
+    for (const InputDefault &input : kInputs)
+      text += std::string("Input") + input.name + " = \"" + input.mapping + "\"\n";
+    return text;
+  }
+}
+
+#endif // INCLUDED_DEFAULTCONFIGFILE_H

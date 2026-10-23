@@ -1,625 +1,471 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 
-#include <thread>
 #include "Supermodel.h"
 #include "SimNetBoard.h"
-#include <OSD/Thread.h>
+#include "OSD/Thread.h"
 
- // these make 16-bit read/writes much neater
-#define RAM16 *(uint16_t*)&RAM
-#define CommRAM16 *(uint16_t*)&CommRAM
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
-static const uint64_t netGUID = 0x5bf177da34872;
-
-inline bool CSimNetBoard::IsGame(const char* gameName)
+namespace
 {
-	return (m_gameInfo.name == gameName) || (m_gameInfo.parent == gameName);
+  // Sent round the ring first: every machine must be running this build's
+  // protocol.
+  const uint64_t kLinkId = 0x5bf177da34872;
 }
 
-CSimNetBoard::CSimNetBoard(const Util::Config::Node& config) : m_config(config)
+CSimNetBoard::CSimNetBoard(const Util::Config::Node &config)
+  : m_config(config)
 {
 }
 
 CSimNetBoard::~CSimNetBoard(void)
 {
-	m_quit = true;
-
-	if (m_connectThread.joinable())
-		m_connectThread.join();
+  m_stop = true;
+  if (m_connector.joinable())
+    m_connector.join();
 }
 
-void CSimNetBoard::SaveState(CBlockFile* SaveState)
+// Nothing of the simulated board goes into save states.
+void CSimNetBoard::SaveState(CBlockFile *)
 {
-	
 }
 
-void CSimNetBoard::LoadState(CBlockFile* SaveState)
+void CSimNetBoard::LoadState(CBlockFile *)
 {
-
 }
 
-Result CSimNetBoard::Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr)
+bool CSimNetBoard::Is(const char *name) const
 {
-	RAM = netRAMPtr;
-	Buffer = netBufferPtr;
-
-	CommRAM = Buffer;
-	externalCommRAM = Buffer + 0x10000;
-
-	m_attached = m_gameInfo.netboard_present && m_config["Network"].ValueAs<bool>();
-
-	if (!m_attached)
-		return Result::OKAY;
-
-	if (IsGame("daytona2") || IsGame("harley") || IsGame("scud") || IsGame("srally2") ||
-		IsGame("skichamp") || IsGame("spikeout") || IsGame("spikeofe"))
-		m_gameType = GameType::one;
-	else if (IsGame("lemans24") || IsGame("von2") || IsGame("dirtdvls"))
-		m_gameType = GameType::two;
-	else
-		return ErrorLog("Game not recognized or supported");
-
-	m_state = State::start;
-
-	//netsocks
-	port_in = m_config["PortIn"].ValueAs<unsigned>();
-	port_out = m_config["PortOut"].ValueAs<unsigned>();
-	addr_out = m_config["AddressOut"].ValueAs<std::string>();
-
-	nets = std::make_unique<TCPSend>(addr_out, port_out);
-	netr = std::make_unique<TCPReceive>(port_in);
-
-	return Result::OKAY;
+  return m_game.name == name || m_game.parent == name;
 }
 
-void CSimNetBoard::RunFrame(void)
+uint16_t CSimNetBoard::Ram(unsigned offset) const
 {
-	if (!IsRunning())
-		return;
+  uint16_t v;
+  memcpy(&v, m_ram + offset, sizeof(v));
+  return v;
+}
 
-	switch (m_state)
-	{
-	case State::start:
-		if (!m_connected && !m_connectThread.joinable())
-			m_connectThread = std::thread(&CSimNetBoard::ConnectProc, this);
-		m_status0 = 0;
-		m_status1 = IsGame("dirtdvls") ? 0x4004 : 0xe000;
-		m_state = State::init;
-		break;
+void CSimNetBoard::SetShared(unsigned offset, uint16_t value)
+{
+  memcpy(m_local + offset, &value, sizeof(value));
+}
 
-	case State::init:
-		memset(CommRAM, 0, 0x20000);
-		if (m_gameType == GameType::one)
-		{
-			if (m_status0 & 0x8000)				// has main board changed this register?
-			{
-				m_IRQ2ack |= 0x01;				// simulate IRQ 2 ack
-				if (m_status0 == 0xf000)
-				{
-					// initialization complete
-					m_status1 = 0;
-					CommRAM16[0x72] = FLIPENDIAN16(0x1); // is this necessary?
-					m_state = State::testing;
-				}
-				m_status0 = 0;					// 0 should work for all init subroutines
-			}
-		}
-		else
-		{
-			// type 2 performs initialization on its own
-			m_status1 = 0;
-			m_state = State::testing;
-			m_counter = 0;
-		}
-		break;
+void CSimNetBoard::GetGame(const Game &game)
+{
+  m_game = game;
+}
 
-	case State::testing:
-		if (m_gameType == GameType::one)
-		{
-			m_status0 += 1; // type 1 games require this to be incremented every frame
+Result CSimNetBoard::Init(uint8_t *netRAMPtr, uint8_t *netBufferPtr)
+{
+  m_ram = netRAMPtr;
+  m_buffer = netBufferPtr;
+  m_local = m_buffer;
+  m_external = m_buffer + 0x10000;
 
-			if (!m_connected)
-				break;
+  m_attached = m_game.netboard_present && m_config["Network"].ValueAs<bool>();
+  if (!m_attached)
+    return Result::OKAY;
 
-			uint8_t numMachines, machineIndex;
+  static const char *const type1[] = { "daytona2", "harley", "scud", "srally2", "skichamp", "spikeout", "spikeofe" };
+  static const char *const type2[] = { "lemans24", "von2", "dirtdvls" };
+  auto any = [this](const char *const *names, size_t n)
+  {
+    return std::any_of(names, names + n, [this](const char *s) { return Is(s); });
+  };
+  if (any(type1, sizeof(type1) / sizeof(type1[0])))
+    m_type = GameType::one;
+  else if (any(type2, sizeof(type2) / sizeof(type2[0])))
+    m_type = GameType::two;
+  else
+    return ErrorLog("Game not recognized or supported");
 
-			if (RAM16[0x400] == 0)	// master
-			{
-				// flush receive buffer
-				while (netr->CheckDataAvailable())
-				{
-					netr->Receive();
-				}
-
-				// check all linked instances have the same GUID
-				nets->Send(&netGUID, sizeof(netGUID));
-				auto& recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				uint64_t testGUID;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-
-				// send the GUID for one more loop
-				nets->Send(&testGUID, sizeof(testGUID));
-				netr->Receive();
-				
-				if (testGUID != netGUID)
-				{
-					ErrorLog("unable to verify connection. Make sure all machines are using same build!");
-					m_state = State::error;
-					break;
-				}
-
-				// master has an index of zero
-				machineIndex = 0;
-				nets->Send(&machineIndex, sizeof(machineIndex));
-
-				// receive back the number of other linked machines
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				numMachines = recv_data[0];
-
-				// send the number of other linked machines
-				nets->Send(&numMachines, sizeof(numMachines));
-				netr->Receive();
-			}
-			else
-			{
-				// receive GUID from the previous machine and check it matches
-				auto& recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				uint64_t testGUID;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				// one more time, in case a later machine has a GUID mismatch
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				if (testGUID != netGUID)
-				{
-					ErrorLog("unable to verify connection. Make sure all machines are using same build!");
-					m_state = State::error;
-					break;
-				}
-
-				// receive the previous machine's index, increment it, send it to the next machine
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				machineIndex = recv_data[0] + 1;
-				nets->Send(&machineIndex, sizeof(machineIndex));
-
-				// receive the number of other linked machines and forward it on
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				numMachines = recv_data[0];
-				nets->Send(&numMachines, sizeof(numMachines));
-			}
-
-			// if there are no other linked machines, only continue if Supermodel is linked to itself
-			// there might be more than one machine set to master which would cause glitches
-			if ((numMachines == 0) && ((port_in != port_out) || (addr_out != "127.0.0.1")))
-			{
-				ErrorLog("no slave machines detected. Make sure only one machine is set to master!");
-				m_state = State::error;
-				break;
-			}
-
-			m_numMachines = numMachines + 1;
-
-			m_status0 = 0;		// supposed to cycle between 0 and 1 (also 2 for Daytona 2); doesn't seem to matter
-			m_status1 = 0x2021 + (numMachines * 0x20) + machineIndex;
-
-			CommRAM16[0x0] = RAM16[0x400];	// 0 if master, 1 if slave
-			CommRAM16[0x2] = numMachines;
-			CommRAM16[0x4] = machineIndex;
-
-			m_counter = 0;
-			CommRAM16[0x6] = 0;
-
-			m_segmentSize = RAM16[0x404];
-
-			// don't know if these are actually required, but it never hurts to include them
-			CommRAM16[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
-			CommRAM16[0xa] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize - 1);
-			CommRAM16[0xc] = FLIPENDIAN16(0x100);
-			CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize + 0x200);
-
-			m_state = State::ready;
-		}
-		else
-		{
-			if (!m_connected)
-				break;
-
-			// we have to track both playable and non-playable machines for type 2
-			struct
-			{
-				uint8_t total;
-				uint8_t playable;
-			} numMachines, machineIndex;
-
-			if (RAM16[0x200] == 0)	// master
-			{
-				// flush receive buffer
-				while (netr->CheckDataAvailable())
-					netr->Receive();
-
-				// check all linked instances have the same GUID
-				nets->Send(&netGUID, sizeof(netGUID));
-				auto& recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-
-				uint64_t testGUID;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-
-				// send the GUID for one more loop
-				nets->Send(&testGUID, sizeof(testGUID));
-				netr->Receive();
-
-				if (testGUID != netGUID)
-				{
-					ErrorLog("unable to verify connection. Make sure all machines are using same build!");
-					m_state = State::error;
-					break;
-				}
-
-				// master has indices set to zero
-				machineIndex.total = 0; machineIndex.playable = 0;
-				nets->Send(&machineIndex, sizeof(machineIndex));
-
-				// receive back the number of other linked machines
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&numMachines, recv_data.data(), recv_data.size());
-
-				// send the number of other linked machines
-				nets->Send(&numMachines, sizeof(numMachines));
-				netr->Receive();
-			}
-			else if (RAM16[0x200] < 0x8000)	// slave
-			{
-				// receive GUID from the previous machine and check it matches
-				auto& recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				uint64_t testGUID;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				// one more time, in case a later machine has a GUID mismatch
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				if (testGUID != netGUID)
-				{
-					ErrorLog("unable to verify connection. Make sure all machines are using same build!");
-					m_state = State::error;
-					break;
-				}
-
-				// receive the indices of the previous machine and increment them
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&machineIndex, recv_data.data(), recv_data.size());
-				machineIndex.total++; machineIndex.playable++;
-
-				// send our indices to the next machine
-				nets->Send(&machineIndex, sizeof(machineIndex));
-
-				// receive the number of machines
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&numMachines, recv_data.data(), recv_data.size());
-
-				// forward the number of machines
-				nets->Send(&numMachines, sizeof(numMachines));
-			}
-			else
-			{
-				// relay/satellite
-				
-				// receive GUID from the previous machine and check it matches
-				auto& recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				uint64_t testGUID;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				// one more time, in case a later machine has a GUID mismatch
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&testGUID, recv_data.data(), recv_data.size());
-				if (testGUID != netGUID)
-					testGUID = 0;
-				nets->Send(&testGUID, sizeof(testGUID));
-
-				if (testGUID != netGUID)
-				{
-					ErrorLog("unable to verify connection. Make sure all machines are using same build!");
-					m_state = State::error;
-					break;
-				}
-
-				// receive the indices of the previous machine; don't increment the playable index
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&machineIndex, recv_data.data(), recv_data.size());
-				machineIndex.total++;
-
-				// send our indices to the next machine
-				nets->Send(&machineIndex, sizeof(machineIndex));
-
-				// receive the number of machines
-				recv_data = netr->Receive();
-				if (recv_data.empty())
-					break;
-				memcpy(&numMachines, recv_data.data(), recv_data.size());
-
-				// forward the number of machines
-				nets->Send(&numMachines, sizeof(numMachines));
-
-				// indicate that this machine is a relay/satellite
-				if (!IsGame("dirtdvls"))
-					machineIndex.playable |= 0x80;
-			}
-
-			// if there are no other linked machines, only continue if Supermodel is linked to itself
-			// there might be more than one machine set to master which would cause glitches
-			if ((numMachines.total == 0) && ((port_in != port_out) || (addr_out != "127.0.0.1")))
-			{
-				ErrorLog("no slave machines detected. Make sure only one machine is set to master!");
-				if (IsGame("dirtdvls"))
-					m_status1 = 0x8085;	// seems like the netboard code writers really liked their CPU model numbers
-				m_state = State::error;
-				break;
-			}
-
-			m_numMachines = numMachines.total + 1;
-
-			m_status0 = 5;			// probably not necessary
-			if (IsGame("dirtdvls"))
-				m_status1 = (numMachines.playable << 4) | machineIndex.playable | 0x7400;
-			else
-				m_status1 = (numMachines.playable << 8) | machineIndex.playable;
-
-			CommRAM16[0x0] = RAM16[0x200];	// master/slave/relay status
-			CommRAM16[0x2] = (numMachines.playable << 8) | numMachines.total;
-			CommRAM16[0x4] = (machineIndex.playable << 8) | machineIndex.total;
-
-			m_counter = 0;
-			CommRAM16[0x6] = 0;
-
-			m_segmentSize = RAM16[0x204];
-
-			// don't know if these are actually required, but it never hurts to include them
-			CommRAM16[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
-			CommRAM16[0xa] = FLIPENDIAN16(RAM16[0x206]);
-			CommRAM16[0xc] = FLIPENDIAN16(0x100);
-			CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x206] + 0x80);
-
-			m_state = State::ready;
-		}
-		break;
-
-	case State::ready:
-		m_counter++;
-		CommRAM16[0x6] = FLIPENDIAN16(m_counter);
-		
-		// we only send what we need to; helps cut down on bandwidth
-		// each machine has to receive back its own data (TODO: copy this data manually?)
-		for (int i = 0; i < m_numMachines; i++)
-		{
-			nets->Send(CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
-			auto& recv_data = netr->Receive();
-			if (recv_data.empty())
-			{
-				// link broken - send an "empty" packet to alert other machines
-				nets->Send(nullptr, 0);
-				m_state = State::error;
-				if (m_gameType == GameType::one)
-					m_status1 = 0x40;			// send "link broken" message to mainboard
-				break;
-			}
-			memcpy(CommRAM + 0x100 + (i + 1) * m_segmentSize, recv_data.data(), recv_data.size());
-		}
-
-		// swap CommRAM banks
-		if (m_commbank)
-		{
-			m_commbank = false;
-			CommRAM = Buffer;
-			externalCommRAM = Buffer + 0x10000;
-		}
-		else
-		{
-			m_commbank = true;
-			CommRAM = Buffer + 0x10000;
-			externalCommRAM = Buffer;
-		}
-		
-		break;
-
-	case State::error:
-		// do nothing
-		break;
-	}
+  m_state = State::start;
+  m_portIn = uint16_t(m_config["PortIn"].ValueAs<unsigned>());
+  m_portOut = uint16_t(m_config["PortOut"].ValueAs<unsigned>());
+  m_addressOut = m_config["AddressOut"].ValueAs<std::string>();
+  m_send = std::make_unique<TCPSend>(m_addressOut, m_portOut);
+  m_receive = std::make_unique<TCPReceive>(m_portIn);
+  return Result::OKAY;
 }
 
 void CSimNetBoard::Reset(void)
 {
-	// if netboard was active, send an "empty" packet so the other machines don't get stuck waiting for data
-	if (m_state == State::ready)
-	{
-		nets->Send(nullptr, 0);
-		netr->Receive();
-	}
-
-	m_running = false;
-	m_state = State::start;
+  // Tell the others the link is going down, so nobody waits for us.
+  if (m_state == State::ready)
+  {
+    m_send->Send(nullptr, 0);
+    m_receive->Receive();
+  }
+  m_running = false;
+  m_state = State::start;
 }
 
 bool CSimNetBoard::IsAttached(void)
 {
-	return m_attached;
+  return m_attached;
 }
 
 bool CSimNetBoard::IsRunning(void)
 {
-	return m_attached && m_running;
+  return m_attached && m_running;
 }
 
-void CSimNetBoard::GetGame(const Game& gameInfo)
+// Runs on its own thread until both directions of the ring are up.
+void CSimNetBoard::Connect()
 {
-	m_gameInfo = gameInfo;
+  if (m_linked)
+    return;
+  printf("Connecting to %s:%i ..\n", m_addressOut.c_str(), m_portOut);
+  while (!m_send->Connect())
+  {
+    if (m_stop)
+      return;
+  }
+  while (!m_receive->Connected())
+  {
+    if (m_stop)
+      return;
+    CThread::Sleep(1);
+  }
+  printf("Successfully connected.\n");
+  m_linked = true;
 }
 
-void CSimNetBoard::ConnectProc(void)
+// The next message from the previous machine, as much of it as fits in dst.
+// False if the link broke.
+bool CSimNetBoard::Take(void *dst, size_t bytes)
 {
-	if (m_connected)
-		return;
+  const std::vector<char> &msg = m_receive->Receive();
+  if (msg.empty())
+    return false;
+  memcpy(dst, msg.data(), std::min(msg.size(), bytes));
+  return true;
+}
 
-	printf("Connecting to %s:%i ..\n", addr_out.c_str(), port_out);
+// The id goes twice round the ring; a machine that receives a wrong one
+// passes on 0, so on the second lap every machine learns whether all agree.
+CSimNetBoard::Step CSimNetBoard::CheckBuild(bool master)
+{
+  uint64_t id = 0;
+  if (master)
+  {
+    while (m_receive->CheckDataAvailable())
+      m_receive->Receive();     // left over from before
+    m_send->Send(&kLinkId, sizeof(kLinkId));
+    if (!Take(&id, sizeof(id)))
+      return Step::again;
+    if (id != kLinkId)
+      id = 0;
+    m_send->Send(&id, sizeof(id));
+    m_receive->Receive();
+  }
+  else
+  {
+    for (int lap = 0; lap < 2; lap++)
+    {
+      if (!Take(&id, sizeof(id)))
+        return Step::again;
+      if (id != kLinkId)
+        id = 0;
+      m_send->Send(&id, sizeof(id));
+    }
+  }
+  return id == kLinkId ? Step::done : Step::failed;
+}
 
-	// wait until TCPSend has connected to the next machine
-	while (!nets->Connect())
-	{
-		if (m_quit)
-			return;
-	}
+// The master sends index 0 round; each machine adds one and passes it on, so
+// what comes back to the master is the number of other machines, which then
+// goes round once more for everybody. Type 2 games count two things (all
+// machines, and those that can be played on) in two bytes; type 1 only one.
+CSimNetBoard::Step CSimNetBoard::CountMachines(bool master, size_t bytes, uint8_t *index, uint8_t *count, bool playable)
+{
+  if (master)
+  {
+    m_send->Send(index, int(bytes));
+    if (!Take(count, bytes))
+      return Step::again;
+    m_send->Send(count, int(bytes));
+    m_receive->Receive();
+    return Step::done;
+  }
+  if (!Take(index, bytes))
+    return Step::again;
+  index[0]++;
+  if (bytes > 1 && playable)
+    index[1]++;
+  m_send->Send(index, int(bytes));
+  if (!Take(count, bytes))
+    return Step::again;
+  m_send->Send(count, int(bytes));
+  return Step::done;
+}
 
-	// wait until TCPReceive has accepted a connection from the previous machine
-	while (!netr->Connected())
-	{
-		if (m_quit)
-			return;
-		CThread::Sleep(1);
-	}
+// No other machine answered. That is only right when this machine is linked
+// to itself; otherwise two machines are probably both set to master.
+bool CSimNetBoard::AloneByMistake(unsigned others) const
+{
+  return others == 0 && (m_portIn != m_portOut || m_addressOut != "127.0.0.1");
+}
 
-	printf("Successfully connected.\n");
+void CSimNetBoard::LinkType1()
+{
+  m_reg88++;    // these games want this to move every frame
+  if (!m_linked)
+    return;
 
-	m_connected = true;
+  const bool master = Ram(0x400) == 0;
+  Step step = CheckBuild(master);
+  if (step == Step::again)
+    return;
+  if (step == Step::failed)
+  {
+    ErrorLog("unable to verify connection. Make sure all machines are using same build!");
+    m_state = State::error;
+    return;
+  }
+
+  uint8_t index = 0, others = 0;
+  if (CountMachines(master, 1, &index, &others, true) == Step::again)
+    return;
+  if (AloneByMistake(others))
+  {
+    ErrorLog("no slave machines detected. Make sure only one machine is set to master!");
+    m_state = State::error;
+    return;
+  }
+
+  m_machines = uint8_t(others + 1);
+  m_reg88 = 0;
+  m_reg8a = uint16_t(0x2021 + others * 0x20 + index);
+
+  SetShared(0x0, Ram(0x400));
+  SetShared(0x2, others);
+  SetShared(0x4, index);
+  m_frame = 0;
+  SetShared(0x6, 0);
+
+  m_slice = Ram(0x404);
+  const int top = Ram(0x402);
+  SetShared(0x8, FLIPENDIAN16(uint16_t(0x100 + m_slice)));
+  SetShared(0xa, FLIPENDIAN16(uint16_t(top - m_slice - 1)));
+  SetShared(0xc, FLIPENDIAN16(0x100));
+  SetShared(0xe, FLIPENDIAN16(uint16_t(top - m_slice + 0x200)));
+  m_state = State::ready;
+}
+
+void CSimNetBoard::LinkType2()
+{
+  if (!m_linked)
+    return;
+
+  // 0 master, below 0x8000 a playable slave, otherwise a relay/satellite
+  const uint16_t role = Ram(0x200);
+  const bool master = role == 0;
+  const bool relay = role >= 0x8000;
+
+  Step step = CheckBuild(master);
+  if (step == Step::again)
+    return;
+  if (step == Step::failed)
+  {
+    ErrorLog("unable to verify connection. Make sure all machines are using same build!");
+    m_state = State::error;
+    return;
+  }
+
+  // byte 0: all machines, byte 1: playable ones
+  uint8_t index[2] = { 0, 0 }, others[2] = { 0, 0 };
+  if (CountMachines(master, 2, index, others, !relay) == Step::again)
+    return;
+  const bool dirt = Is("dirtdvls");
+  if (relay && !dirt)
+    index[1] |= 0x80;
+
+  if (AloneByMistake(others[0]))
+  {
+    ErrorLog("no slave machines detected. Make sure only one machine is set to master!");
+    if (dirt)
+      m_reg8a = 0x8085;
+    m_state = State::error;
+    return;
+  }
+
+  m_machines = uint8_t(others[0] + 1);
+  m_reg88 = 5;
+  if (dirt)
+    m_reg8a = uint16_t((others[1] << 4) | index[1] | 0x7400);
+  else
+    m_reg8a = uint16_t((others[1] << 8) | index[1]);
+
+  SetShared(0x0, role);
+  SetShared(0x2, uint16_t((others[1] << 8) | others[0]));
+  SetShared(0x4, uint16_t((index[1] << 8) | index[0]));
+  m_frame = 0;
+  SetShared(0x6, 0);
+
+  m_slice = Ram(0x204);
+  const int top = Ram(0x206);
+  SetShared(0x8, FLIPENDIAN16(uint16_t(0x100 + m_slice)));
+  SetShared(0xa, FLIPENDIAN16(uint16_t(top)));
+  SetShared(0xc, FLIPENDIAN16(0x100));
+  SetShared(0xe, FLIPENDIAN16(uint16_t(top + 0x80)));
+  m_state = State::ready;
+}
+
+// One frame of linked play: each machine's slice goes once round the ring
+// (we get our own back too), then the banks swap.
+void CSimNetBoard::Exchange()
+{
+  m_frame++;
+  SetShared(0x6, FLIPENDIAN16(m_frame));
+
+  for (int i = 0; i < m_machines; i++)
+  {
+    m_send->Send(m_local + 0x100 + i * m_slice, m_slice);
+    const std::vector<char> &msg = m_receive->Receive();
+    if (msg.empty())
+    {
+      m_send->Send(nullptr, 0);   // pass the bad news on
+      m_state = State::error;
+      if (m_type == GameType::one)
+        m_reg8a = 0x40;           // the main board shows "link broken"
+      break;
+    }
+    memcpy(m_local + 0x100 + (i + 1) * m_slice, msg.data(), msg.size());
+  }
+
+  m_bank = !m_bank;
+  m_local = m_buffer + (m_bank ? 0x10000 : 0);
+  m_external = m_buffer + (m_bank ? 0 : 0x10000);
+}
+
+void CSimNetBoard::RunFrame(void)
+{
+  if (!IsRunning())
+    return;
+
+  switch (m_state)
+  {
+  case State::start:
+    if (!m_linked && !m_connector.joinable())
+      m_connector = std::thread(&CSimNetBoard::Connect, this);
+    m_reg88 = 0;
+    m_reg8a = Is("dirtdvls") ? 0x4004 : 0xe000;
+    m_state = State::init;
+    break;
+
+  case State::init:
+    // 128 KB from the bank in use (when that is the upper bank this runs on
+    // into the board RAM that follows it in memory, as it always has).
+    memset(m_local, 0, 0x20000);
+    if (m_type == GameType::one)
+    {
+      // Each time the main board writes the register, acknowledge as IRQ 2
+      // would; 0xf000 means it is done.
+      if (m_reg88 & 0x8000)
+      {
+        m_reg00 |= 0x01;
+        if (m_reg88 == 0xf000)
+        {
+          m_reg8a = 0;
+          SetShared(0x72, FLIPENDIAN16(0x1));
+          m_state = State::testing;
+        }
+        m_reg88 = 0;
+      }
+    }
+    else
+    {
+      // type 2 games set themselves up
+      m_reg8a = 0;
+      m_state = State::testing;
+      m_frame = 0;
+    }
+    break;
+
+  case State::testing:
+    if (m_type == GameType::one)
+      LinkType1();
+    else
+      LinkType2();
+    break;
+
+  case State::ready:
+    Exchange();
+    break;
+
+  case State::error:
+    break;
+  }
 }
 
 uint8_t CSimNetBoard::ReadCommRAM8(unsigned addr)
 {
-	return externalCommRAM[addr];
+  return m_external[addr];
 }
 
 uint16_t CSimNetBoard::ReadCommRAM16(unsigned addr)
 {
-	return *(uint16_t*)&externalCommRAM[addr];
+  uint16_t v;
+  memcpy(&v, m_external + addr, sizeof(v));
+  return v;
 }
 
 uint32_t CSimNetBoard::ReadCommRAM32(unsigned addr)
 {
-	return *(uint32_t*)&externalCommRAM[addr];
+  uint32_t v;
+  memcpy(&v, m_external + addr, sizeof(v));
+  return v;
 }
 
 void CSimNetBoard::WriteCommRAM8(unsigned addr, uint8_t data)
 {
-	externalCommRAM[addr] = data;
+  m_external[addr] = data;
 }
 
 void CSimNetBoard::WriteCommRAM16(unsigned addr, uint16_t data)
 {
-	*(uint16_t*)&externalCommRAM[addr] = data;
+  memcpy(m_external + addr, &data, sizeof(data));
 }
 
 void CSimNetBoard::WriteCommRAM32(unsigned addr, uint32_t data)
 {
-	*(uint32_t*)&externalCommRAM[addr] = data;
+  memcpy(m_external + addr, &data, sizeof(data));
 }
 
 uint16_t CSimNetBoard::ReadIORegister(unsigned reg)
 {
-	if (!IsRunning())
-		return 0;
-
-	switch (reg)
-	{
-	case 0x00:
-		return m_IRQ2ack;
-	case 0x88:
-		return m_status0;
-	case 0x8a:
-		return m_status1;
-	default:
-		ErrorLog("read from unknown IO register 0x%02x", reg);
-		return 0;
-	}
+  if (!IsRunning())
+    return 0;
+  switch (reg)
+  {
+  case 0x00: return m_reg00;
+  case 0x88: return m_reg88;
+  case 0x8a: return m_reg8a;
+  default:
+    ErrorLog("read from unknown IO register 0x%02x", reg);
+    return 0;
+  }
 }
 
 void CSimNetBoard::WriteIORegister(unsigned reg, uint16_t data)
 {
-	switch (reg)
-	{
-	case 0x00:
-		m_IRQ2ack = data;
-		break;
-	case 0x88:
-		m_status0 = data;
-		break;
-	case 0x8a:
-		m_status1 = data;
-		break;
-	case 0xc0:
-		if (data == 0)
-			Reset();
-		m_running = (data != 0);
-		break;
-	default:
-		ErrorLog("write to unknown IO register 0x%02x", reg);
-	}
+  switch (reg)
+  {
+  case 0x00: m_reg00 = data; break;
+  case 0x88: m_reg88 = data; break;
+  case 0x8a: m_reg8a = data; break;
+  case 0xc0:
+    // 0 stops the board (and resets it), anything else starts it
+    if (data == 0)
+      Reset();
+    m_running = data != 0;
+    break;
+  default:
+    ErrorLog("write to unknown IO register 0x%02x", reg);
+    break;
+  }
 }

@@ -1,402 +1,299 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The loggers declared in Logger.h. A message is formatted into at most
+// kMaxLine-1 characters (prefix and line ending included), so one runaway
+// message can't flood a file.
 
 #include "OSD/Logger.h"
+#include "Util/Format.h"
+
+#include <algorithm>
 #include <set>
+#include <string>
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <syslog.h>
 #endif
 
+namespace
+{
+  constexpr size_t kMaxLine = 4096;
 
-// Logger object is used to redirect log messages appropriately
-static std::shared_ptr<CLogger> s_Logger;
+  std::shared_ptr<CLogger> s_logger;
 
+  // The message alone, cut like the line it goes into.
+  std::string Format(const char *fmt, va_list vl)
+  {
+    char buf[kMaxLine];
+    vsnprintf(buf, sizeof(buf), fmt, vl);
+    return buf;
+  }
+
+  // prefix + message (+ newline), cut to the line limit.
+  std::string MakeLine(const char *prefix, bool newline, const char *fmt, va_list vl)
+  {
+    std::string line(prefix);
+    line += Format(fmt, vl);
+    if (newline)
+      line += '\n';
+    if (line.size() > kMaxLine - 1)
+      line.resize(kMaxLine - 1);
+    return line;
+  }
+
+  const char *const kDebugPrefix = "[Debug] ";
+  const char *const kInfoPrefix = "[Info]  ";
+  const char *const kErrorPrefix = "[Error] ";
+}
 
 std::shared_ptr<CLogger> GetLogger()
 {
-  return s_Logger;
+  return s_logger;
 }
 
 void SetLogger(std::shared_ptr<CLogger> logger)
 {
-  s_Logger = logger;
+  s_logger = std::move(logger);
 }
 
 void DebugLog(const char *fmt, ...)
 {
-  if (!s_Logger)
+  if (!s_logger)
     return;
   va_list vl;
   va_start(vl, fmt);
-  s_Logger->DebugLog(fmt, vl);
+  s_logger->DebugLog(fmt, vl);
   va_end(vl);
 }
 
 void InfoLog(const char *fmt, ...)
 {
-  if (!s_Logger)
+  if (!s_logger)
     return;
   va_list vl;
   va_start(vl, fmt);
-  s_Logger->InfoLog(fmt, vl);
+  s_logger->InfoLog(fmt, vl);
   va_end(vl);
 }
 
 Result ErrorLog(const char *fmt, ...)
 {
-  if (!s_Logger)
-    return Result::FAIL;
-  va_list vl;
-  va_start(vl, fmt);
-  s_Logger->ErrorLog(fmt, vl);
-  va_end(vl);
-  return Result::FAIL;
-}
-
-static std::pair<Result, CLogger::LogLevel> GetLogLevel(const Util::Config::Node &config)
-{
-  const std::map<std::string, CLogger::LogLevel> logLevelByString
+  if (s_logger)
   {
-    { "debug", CLogger::LogLevel::Debug },
-    { "info", CLogger::LogLevel::Info },
-    { "error", CLogger::LogLevel::Error },
-    { "all", CLogger::LogLevel::All },
-  };
-
-  std::string logLevel = Util::ToLower(config["LogLevel"].ValueAsDefault<std::string>("info"));
-
-  auto it = logLevelByString.find(logLevel);
-  if (it != logLevelByString.end())
-  {
-    return std::pair<Result, CLogger::LogLevel>(Result::OKAY, it->second);
+    va_list vl;
+    va_start(vl, fmt);
+    s_logger->ErrorLog(fmt, vl);
+    va_end(vl);
   }
-
-  ErrorLog("Invalid log level: %s", logLevel.c_str());
-  return std::pair<Result, CLogger::LogLevel>(Result::FAIL, CLogger::LogLevel::Info);
+  return Result::FAIL;
 }
 
 std::shared_ptr<CLogger> CreateLogger(const Util::Config::Node &config)
 {
-  std::vector<std::shared_ptr<CLogger>> loggers;
-
-  // Get log level
-  auto logLevelResult = GetLogLevel(config);
-  if (logLevelResult.first != Result::OKAY)
+  // Threshold
+  std::string levelName = Util::ToLower(config["LogLevel"].ValueAsDefault<std::string>("info"));
+  CLogger::LogLevel level;
+  if (levelName == "all")
+    level = CLogger::LogLevel::All;
+  else if (levelName == "debug")
+    level = CLogger::LogLevel::Debug;
+  else if (levelName == "info")
+    level = CLogger::LogLevel::Info;
+  else if (levelName == "error")
+    level = CLogger::LogLevel::Error;
+  else
   {
+    ErrorLog("Invalid log level: %s", levelName.c_str());
     return std::shared_ptr<CLogger>();
   }
-  CLogger::LogLevel logLevel = logLevelResult.second;
 
-  // Console message logger always required
-  loggers.push_back(std::make_shared<CConsoleErrorLogger>());
-
-  // Parse other log outputs
-  std::string logOutputs = config["LogOutput"].ValueAsDefault<std::string>(std::string());
-  std::vector<std::string> outputs = Util::Format(logOutputs).Split(',');
-
-  std::set<std::string> supportedDestinations { "stdout", "stderr", "syslog" };
-  std::set<std::string> destinations; // log output destinations
-  std::set<std::string> filenames;    // anything that is not a known destination is assumed to be a file
-  for (auto& output: outputs)
+  // Outputs: a comma-separated list of stdout, stderr, syslog (any case)
+  // and file names (kept as written, without surrounding spaces).
+  bool toStdout = false, toStderr = false, toSyslog = false;
+  std::set<std::string> files;
+  std::string outputs = config["LogOutput"].ValueAsDefault<std::string>(std::string());
+  for (const std::string &item : Util::Format(outputs).Split(','))
   {
-    // Is this a known destination or a file?
-    std::string canonicalizedOutput = Util::TrimWhiteSpace(Util::ToLower(output));
-    if (supportedDestinations.count(canonicalizedOutput) > 0)
-    {
-      destinations.insert(canonicalizedOutput);
-    }
-    else if (!canonicalizedOutput.empty())
-    {
-      filenames.insert(Util::TrimWhiteSpace(output)); // trim whitespace but preserve capitalization of filenames
-    }
+    std::string name = Util::TrimWhiteSpace(item);
+    std::string lower = Util::ToLower(name);
+    if (lower == "stdout")
+      toStdout = true;
+    else if (lower == "stderr")
+      toStderr = true;
+    else if (lower == "syslog")
+      toSyslog = true;
+    else if (!name.empty())
+      files.insert(name);
   }
 
-  // File logger (if any files were specified)
-  std::vector<std::string> logFilenames(filenames.begin(), filenames.end());
-  std::vector<FILE *> systemFiles;
+  std::vector<std::shared_ptr<CLogger>> loggers;
+  loggers.push_back(std::make_shared<CConsoleErrorLogger>());   // errors always reach the console
 
-  if (destinations.count("stdout") > 0)
-  {
-    systemFiles.push_back(stdout);
-  }
+  std::vector<FILE *> streams;
+  if (toStdout)
+    streams.push_back(stdout);
+  if (toStderr)
+    streams.push_back(stderr);
+  if (!files.empty() || !streams.empty())
+    loggers.push_back(std::make_shared<CFileLogger>(level, std::vector<std::string>(files.begin(), files.end()), streams));
 
-  if (destinations.count("stderr") > 0)
-  {
-    systemFiles.push_back(stderr);
-  }
-
-  if (!logFilenames.empty() || !systemFiles.empty())
-  {
-    loggers.push_back(std::make_shared<CFileLogger>(logLevel, logFilenames, systemFiles));
-  }
-
-  // System logger
-  if (destinations.count("syslog") > 0)
-  {
-    loggers.push_back(std::make_shared<CSystemLogger>(logLevel));
-  }
+  if (toSyslog)
+    loggers.push_back(std::make_shared<CSystemLogger>(level));
 
   return std::make_shared<CMultiLogger>(loggers);
 }
 
-/*
- * CMultiLogger
- */
+// ------------------------------------------------------------ CMultiLogger
+
+CMultiLogger::CMultiLogger(std::vector<std::shared_ptr<CLogger>> loggers)
+  : m_loggers(std::move(loggers))
+{
+}
+
+// Each logger consumes the argument list, so each gets its own copy.
+#define FOR_EACH_LOGGER(call)                 \
+  for (auto &logger : m_loggers)              \
+  {                                           \
+    va_list copy;                             \
+    va_copy(copy, vl);                        \
+    logger->call(fmt, copy);                  \
+    va_end(copy);                             \
+  }
 
 void CMultiLogger::DebugLog(const char *fmt, va_list vl)
 {
-  for (auto &logger: m_loggers)
-  {
-    va_list vl_tmp;
-    va_copy(vl_tmp, vl);
-    logger->DebugLog(fmt, vl_tmp);
-    va_end(vl_tmp);
-  }
+  FOR_EACH_LOGGER(DebugLog)
 }
 
 void CMultiLogger::InfoLog(const char *fmt, va_list vl)
 {
-  for (auto &logger: m_loggers)
-  {
-    va_list vl_tmp;
-    va_copy(vl_tmp, vl);
-    logger->InfoLog(fmt, vl_tmp);
-    va_end(vl_tmp);
-  }
+  FOR_EACH_LOGGER(InfoLog)
 }
 
 void CMultiLogger::ErrorLog(const char *fmt, va_list vl)
 {
-  for (auto &logger: m_loggers)
-  {
-    va_list vl_tmp;
-    va_copy(vl_tmp, vl);
-    logger->ErrorLog(fmt, vl_tmp);
-    va_end(vl_tmp);
-  }
+  FOR_EACH_LOGGER(ErrorLog)
 }
 
-CMultiLogger::CMultiLogger(std::vector<std::shared_ptr<CLogger>> loggers)
-  : m_loggers(loggers)
+#undef FOR_EACH_LOGGER
+
+// ----------------------------------------------------- CConsoleErrorLogger
+
+// Debug and info text goes to the console only through a CFileLogger on
+// stdout or stderr.
+void CConsoleErrorLogger::DebugLog(const char *, va_list)
 {
 }
 
-/*
- * CConsoleErrorLogger
- */
-
-void CConsoleErrorLogger::DebugLog(const char *fmt, va_list vl)
+void CConsoleErrorLogger::InfoLog(const char *, va_list)
 {
-  // To view debug-level logging on the console, use a file logger writing
-  // to stdout
-}
-
-void CConsoleErrorLogger::InfoLog(const char *fmt, va_list vl)
-{
-  // To view info-level logging on the console, use a file logger writing
-  // to stdout
 }
 
 void CConsoleErrorLogger::ErrorLog(const char *fmt, va_list vl)
 {
-  char string[4096];
-  vsnprintf(string, sizeof(string), fmt, vl);
-  fprintf(stderr, "Error: %s\n", string);
+  std::string text = Format(fmt, vl);
+  fprintf(stderr, "Error: %s\n", text.c_str());
 }
 
-/*
- * CFileLogger
- */
+// ------------------------------------------------------------- CFileLogger
+
+CFileLogger::CFileLogger(CLogger::LogLevel level, const std::vector<std::string> &filenames)
+  : m_logLevel(level), m_logFilenames(filenames)
+{
+  OpenAll(std::ios::out);
+}
+
+CFileLogger::CFileLogger(CLogger::LogLevel level, const std::vector<std::string> &filenames, const std::vector<FILE *> &systemFiles)
+  : m_logLevel(level), m_logFilenames(filenames), m_systemFiles(systemFiles)
+{
+  OpenAll(std::ios::out);
+}
+
+// (Re)opens every log file; one that can't be opened is skipped until the
+// next time.
+void CFileLogger::OpenAll(std::ios_base::openmode mode)
+{
+  m_logFiles.clear();
+  for (const std::string &name : m_logFilenames)
+  {
+    std::ofstream f(name.c_str(), mode);
+    if (f.is_open() && f.good())
+      m_logFiles.push_back(std::move(f));
+  }
+}
+
+void CFileLogger::Emit(LogLevel level, const char *prefix, bool newline, bool flush, const char *fmt, va_list vl)
+{
+  if (m_logLevel > level)
+    return;
+  std::string line = MakeLine(prefix, newline, fmt, vl);
+  std::lock_guard<std::mutex> lock(m_mtx);
+  for (std::ofstream &f : m_logFiles)
+    f << line;
+  for (FILE *fp : m_systemFiles)
+    fputs(line.c_str(), fp);
+  // Closing and reopening puts the line on disk even if the program dies
+  // right after. Debug output is too frequent for that.
+  if (flush)
+    OpenAll(std::ios::app);
+}
 
 void CFileLogger::DebugLog(const char *fmt, va_list vl)
 {
-  if (m_logLevel > LogLevel::Debug)
-  {
-    return;
-  }
-
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Debug] %s", string1);
-
-  // Debug logging is so copious that we don't bother to guarantee it is saved
-  std::unique_lock<std::mutex> lock(m_mtx);
-  WriteToFiles(string2);
+  Emit(LogLevel::Debug, kDebugPrefix, false, false, fmt, vl);
 }
 
 void CFileLogger::InfoLog(const char *fmt, va_list vl)
 {
-  if (m_logLevel > LogLevel::Info)
-  {
-    return;
-  }
-
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Info]  %s\n", string1);
-
-  // Write to file, close, and reopen to ensure it was saved
-  std::unique_lock<std::mutex> lock(m_mtx);
-  WriteToFiles(string2);
-  ReopenFiles(std::ios::app);
+  Emit(LogLevel::Info, kInfoPrefix, true, true, fmt, vl);
 }
 
 void CFileLogger::ErrorLog(const char *fmt, va_list vl)
 {
-  if (m_logLevel > LogLevel::Error)
-  {
-    return;
-  }
-
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Error] %s\n", string1);
-
-  // Write to file, close, and reopen to ensure it was saved
-  std::unique_lock<std::mutex> lock(m_mtx);
-  WriteToFiles(string2);
-  ReopenFiles(std::ios::app);
+  Emit(LogLevel::Error, kErrorPrefix, true, true, fmt, vl);
 }
 
-void CFileLogger::ReopenFiles(std::ios_base::openmode mode)
+// ----------------------------------------------------------- CSystemLogger
+
+namespace
 {
-  // Close existing
-  for (std::ofstream &ofs: m_logFiles)
+  void ToSystemLog(int priority, const std::string &line)
   {
-    ofs.close();
-  }
-  m_logFiles.clear();
-
-  // (Re-)Open
-  for (const auto &filename: m_logFilenames)
-  {
-    std::ofstream ofs(filename.c_str(), mode);
-    if (ofs.is_open() && ofs.good())
-    {
-      m_logFiles.emplace_back(std::move(ofs));
-    }
-  }
-}
-
-void CFileLogger::WriteToFiles(const char *str)
-{
-  for (std::ofstream &ofs: m_logFiles)
-  {
-    ofs << str;
-  }
-
-  for (FILE *fp: m_systemFiles)
-  {
-    fputs(str, fp);
-  }
-}
-
-CFileLogger::CFileLogger(CLogger::LogLevel level, const std::vector<std::string> &filenames)
-  : m_logLevel(level),
-    m_logFilenames(filenames)
-{
-  ReopenFiles(std::ios::out);
-}
-
-CFileLogger::CFileLogger(CLogger::LogLevel level, const std::vector<std::string> &filenames, const std::vector<FILE *> &systemFiles)
-  : m_logLevel(level),
-    m_logFilenames(filenames),
-    m_systemFiles(systemFiles)
-{
-  ReopenFiles(std::ios::out);
-}
-
-/*
- * CSystemLogger
- */
-
-void CSystemLogger::DebugLog(const char *fmt, va_list vl)
-{
-  if (m_logLevel > LogLevel::Debug)
-  {
-    return;
-  }
-
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Debug] %s", string1);
-
 #ifdef _WIN32
-  OutputDebugString(string2);
+    (void) priority;
+    OutputDebugStringA(line.c_str());
 #else
-  syslog(LOG_DEBUG, "%s", string2);
+    syslog(priority, "%s", line.c_str());
 #endif
-}
-
-void CSystemLogger::InfoLog(const char *fmt, va_list vl)
-{
-  if (m_logLevel > LogLevel::Info)
-  {
-    return;
   }
 
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Info]  %s\n", string1);
-
 #ifdef _WIN32
-  OutputDebugString(string2);
+  constexpr int kSysDebug = 0, kSysInfo = 0, kSysError = 0;
 #else
-  syslog(LOG_INFO, "%s", string2);
-#endif
-}
-
-void CSystemLogger::ErrorLog(const char *fmt, va_list vl)
-{
-  if (m_logLevel > LogLevel::Error)
-  {
-    return;
-  }
-
-  char string1[4096];
-  char string2[4096];
-
-  vsnprintf(string1, sizeof(string1), fmt, vl);
-  snprintf(string2, sizeof(string2), "[Error] %s\n", string1);
-
-#ifdef _WIN32
-  OutputDebugString(string2);
-#else
-  syslog(LOG_ERR, "%s", string2);
+  constexpr int kSysDebug = LOG_DEBUG, kSysInfo = LOG_INFO, kSysError = LOG_ERR;
 #endif
 }
 
 CSystemLogger::CSystemLogger(CLogger::LogLevel level)
   : m_logLevel(level)
 {
+}
+
+void CSystemLogger::DebugLog(const char *fmt, va_list vl)
+{
+  if (m_logLevel <= LogLevel::Debug)
+    ToSystemLog(kSysDebug, MakeLine(kDebugPrefix, false, fmt, vl));
+}
+
+void CSystemLogger::InfoLog(const char *fmt, va_list vl)
+{
+  if (m_logLevel <= LogLevel::Info)
+    ToSystemLog(kSysInfo, MakeLine(kInfoPrefix, true, fmt, vl));
+}
+
+void CSystemLogger::ErrorLog(const char *fmt, va_list vl)
+{
+  if (m_logLevel <= LogLevel::Error)
+    ToSystemLog(kSysError, MakeLine(kErrorPrefix, true, fmt, vl));
 }

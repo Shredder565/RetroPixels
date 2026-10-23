@@ -1,97 +1,71 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * Thread.cpp
- *
- * SDL-based implementation of threading primitives.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// OSD/Thread.h on top of SDL's threads, semaphores, condition variables and
+// mutexes. Each object keeps the SDL handle as its opaque pointer.
 
 #include "Thread.h"
 
 #include "Supermodel.h"
 #include "SDLIncludes.h"
 
+namespace
+{
+  inline SDL_Thread *AsThread(void *p) { return static_cast<SDL_Thread *>(p); }
+  inline SDL_sem *AsSem(void *p) { return static_cast<SDL_sem *>(p); }
+  inline SDL_cond *AsCond(void *p) { return static_cast<SDL_cond *>(p); }
+  inline SDL_mutex *AsMutex(void *p) { return static_cast<SDL_mutex *>(p); }
+}
+
+// ---------------------------------------------------------------- CThread
+
 void CThread::Sleep(UINT32 ms)
 {
-	SDL_Delay(ms);
+  SDL_Delay(ms);
 }
 
 UINT32 CThread::GetTicks()
 {
-	return SDL_GetTicks();
+  return SDL_GetTicks();
 }
 
 CThread *CThread::CreateThread(const std::string &name, ThreadStart start, void *startParam)
 {
-	SDL_Thread *impl = SDL_CreateThread(start, name.c_str(), startParam);
-	if (impl == NULL)
-		return NULL;
-	return new CThread(name, impl);
+  SDL_Thread *t = SDL_CreateThread(start, name.c_str(), startParam);
+  return t ? new CThread(name, t) : nullptr;
 }
 
 CSemaphore *CThread::CreateSemaphore(UINT32 initVal)
 {
-	SDL_sem *impl = SDL_CreateSemaphore(initVal);
-	if (impl == NULL)
-		return NULL;
-	return new CSemaphore(impl);
+  SDL_sem *s = SDL_CreateSemaphore(initVal);
+  return s ? new CSemaphore(s) : nullptr;
 }
 
 CCondVar *CThread::CreateCondVar()
 {
-	SDL_cond *impl = SDL_CreateCond();
-	if (impl == NULL)
-		return NULL;
-	return new CCondVar(impl);
+  SDL_cond *c = SDL_CreateCond();
+  return c ? new CCondVar(c) : nullptr;
 }
 
 CMutex *CThread::CreateMutex()
 {
-	SDL_mutex *impl = SDL_CreateMutex();
-	if (impl == NULL)
-		return NULL;
-	return new CMutex(impl);
+  SDL_mutex *m = SDL_CreateMutex();
+  return m ? new CMutex(m) : nullptr;
 }
 
 const char *CThread::GetLastError()
 {
-	return SDL_GetError();
+  return SDL_GetError();
 }
 
 CThread::CThread(const std::string &name, void *impl)
-  : m_name(name),
-    m_impl(impl)
-
+  : m_name(name), m_impl(impl)
 {
-	//
 }
 
 CThread::~CThread()
 {
-  // User should have called Wait() before thread object is destroyed
-  if (nullptr != m_impl)
-  {
-    ErrorLog("Runaway thread error. A thread was not properly halted: %s\n", GetName().c_str());
-  }
+  if (m_impl != nullptr)
+    ErrorLog("Runaway thread error. A thread was not properly halted: %s\n", m_name.c_str());
 }
 
 const std::string &CThread::GetName() const
@@ -101,85 +75,88 @@ const std::string &CThread::GetName() const
 
 UINT32 CThread::GetId()
 {
-	return SDL_GetThreadID((SDL_Thread*)m_impl);
+  return SDL_GetThreadID(AsThread(m_impl));
 }
 
 int CThread::Wait()
 {
-	int status;
-	if (m_impl == NULL)
-		return -1;
-	SDL_WaitThread((SDL_Thread*)m_impl, &status);
-	m_impl = NULL;
-	return status;
+  if (m_impl == nullptr)
+    return -1;
+  int status = 0;
+  SDL_WaitThread(AsThread(m_impl), &status);
+  m_impl = nullptr;
+  return status;
 }
+
+// ------------------------------------------------------------- CSemaphore
 
 CSemaphore::CSemaphore(void *impl) : m_impl(impl)
 {
-	//
 }
 
 CSemaphore::~CSemaphore()
 {
-	SDL_DestroySemaphore((SDL_sem*)m_impl);
+  SDL_DestroySemaphore(AsSem(m_impl));
 }
 
 UINT32 CSemaphore::GetValue()
 {
-	return SDL_SemValue((SDL_sem*)m_impl);
+  return SDL_SemValue(AsSem(m_impl));
 }
 
 bool CSemaphore::Wait()
 {
-	return SDL_SemWait((SDL_sem*)m_impl) == 0;
+  return SDL_SemWait(AsSem(m_impl)) == 0;
 }
 
 bool CSemaphore::Post()
 {
-	return SDL_SemPost((SDL_sem*)m_impl) == 0;
+  return SDL_SemPost(AsSem(m_impl)) == 0;
 }
+
+// --------------------------------------------------------------- CCondVar
 
 CCondVar::CCondVar(void *impl) : m_impl(impl)
 {
-	//
 }
 
 CCondVar::~CCondVar()
 {
-	SDL_DestroyCond((SDL_cond*)m_impl);
+  SDL_DestroyCond(AsCond(m_impl));
 }
 
 bool CCondVar::Wait(CMutex *mutex)
 {
-	return SDL_CondWait((SDL_cond*)m_impl, (SDL_mutex*)mutex->m_impl) == 0;
+  return SDL_CondWait(AsCond(m_impl), AsMutex(mutex->m_impl)) == 0;
 }
 
 bool CCondVar::Signal()
 {
-	return SDL_CondSignal((SDL_cond*)m_impl) == 0;
+  return SDL_CondSignal(AsCond(m_impl)) == 0;
 }
 
 bool CCondVar::SignalAll()
 {
-	return SDL_CondBroadcast((SDL_cond*)m_impl) == 0;
+  return SDL_CondBroadcast(AsCond(m_impl)) == 0;
 }
+
+// ----------------------------------------------------------------- CMutex
 
 CMutex::CMutex(void *impl) : m_impl(impl)
 {
-	//
 }
 
 CMutex::~CMutex()
 {
-	SDL_DestroyMutex((SDL_mutex*)m_impl);
+  SDL_DestroyMutex(AsMutex(m_impl));
 }
 
 bool CMutex::Lock()
 {
-	return SDL_mutexP((SDL_mutex*)m_impl) == 0;
+  return SDL_LockMutex(AsMutex(m_impl)) == 0;
 }
 
 bool CMutex::Unlock()
 {
-	return SDL_mutexV((SDL_mutex*)m_impl) == 0;
+  return SDL_UnlockMutex(AsMutex(m_impl)) == 0;
 }

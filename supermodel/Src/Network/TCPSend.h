@@ -1,27 +1,12 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The sending half of a link between linked cabinets: a TCP connection to
+// the next machine in the ring. Each message goes out as a 4-byte length
+// (the sender's own byte order, as every Supermodel build does) followed by
+// that many bytes.
 
-#ifndef _TCPSEND_H_
-#define _TCPSEND_H_
+#ifndef INCLUDED_TCPSEND_H
+#define INCLUDED_TCPSEND_H
 
 #include <string>
 #include "SDLIncludes.h"
@@ -29,18 +14,21 @@
 class TCPSend
 {
 public:
-	TCPSend(std::string& ip, int port);
-	~TCPSend();
+  TCPSend(std::string &ip, int port);
+  ~TCPSend();
 
-	bool Send(const void* data, int length);
-	bool Connect();
-	bool Connected();
+  // Sends one message. False when not connected; a failed send drops the
+  // connection.
+  bool Send(const void *data, int length);
+
+  // Tries once to connect; true if connected.
+  bool Connect();
+  bool Connected();
+
 private:
-
-	std::string	m_ip;
-	int			m_port;
-	TCPsocket	m_socket;		// sdl socket
-
+  std::string m_ip;
+  int m_port;
+  TCPsocket m_socket;
 };
 
-#endif
+#endif // INCLUDED_TCPSEND_H

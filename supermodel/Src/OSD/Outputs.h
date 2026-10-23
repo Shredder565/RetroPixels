@@ -1,29 +1,9 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * Outputs.h
- *
- * Base class for outputs.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Cabinet outputs (lamps, the drive motor's raw value, billboard digits)
+// passed on to outside programs such as MAMEHooker. COutputs keeps each
+// output's value and tells the subclass when one changes; the subclasses
+// send it on (NetOutputs: TCP/UDP, WinOutputs: Windows messages).
 
 #ifndef INCLUDED_OUTPUTS_H
 #define INCLUDED_OUTPUTS_H
@@ -31,27 +11,24 @@
 #include "Game.h"
 #include "Types.h"
 
-/*
- * EOutputs enumeration of all available outputs.
- * Currently just contains the outputs for the driving games - more will need to be added for the other games.
- */
+// The outputs, numbered as the MAMEHooker protocol sees them (id = value + 1).
 enum EOutputs
 {
-	OutputUnknown = -1,
-	OutputPause = 0,
-	OutputLampStart,
-	OutputLampView1,
-	OutputLampView2,
-	OutputLampView3,
-	OutputLampView4,
-	OutputLampLeader,
-	OutputRawDrive,
-	OutputRawLamps,
-	OutputBill1,
-	OutputBill2,
-	OutputBill3,
-	OutputBill4,
-	OutputBill5
+  OutputUnknown = -1,
+  OutputPause = 0,
+  OutputLampStart,
+  OutputLampView1,
+  OutputLampView2,
+  OutputLampView3,
+  OutputLampView4,
+  OutputLampLeader,
+  OutputRawDrive,
+  OutputRawLamps,
+  OutputBill1,
+  OutputBill2,
+  OutputBill3,
+  OutputBill4,
+  OutputBill5
 };
 
 #define NUM_OUTPUTS 14
@@ -59,101 +36,42 @@ enum EOutputs
 class COutputs
 {
 public:
-	/*
-	 * GetOutputName(output):
-	 *
-	 * Returns the name of the given output as a string.
-	 */
-	static const char *GetOutputName(EOutputs output);
+  // An output's protocol name ("LampStart"...), or NULL for none.
+  static const char *GetOutputName(EOutputs output);
 
-	/*
-	 * GetOutputByName(name):
-	 *
-	 * Returns the output with the given name (if any).
-	 */
-	static EOutputs GetOutputByName(const char *name);
+  // The output with this name (any case), or OutputUnknown.
+  static EOutputs GetOutputByName(const char *name);
 
-	/*
-	 * ~COutputs():
-	 *
-	 * Destructor.
-	 */
-	virtual ~COutputs();
+  virtual ~COutputs();
 
-	/*
-     * Initialize():
-	 *
-	 * Initializes the outputs.  Must be called before the outputs are attached.
-	 * To be implemented by the subclass.
-	 */
-	virtual bool Initialize() = 0;
+  // Sets the outputs up before they are attached. False on failure.
+  virtual bool Initialize() = 0;
 
-	/*
-	 * Attached():
-	 *
-	 * Lets the outputs know they have been attached to the emulator.
-	 * To be implemented by the subclass.
-	 */
-	virtual void Attached() = 0;
+  // Called once the emulator has the outputs (and the game is known).
+  virtual void Attached() = 0;
 
-	/*
-	 * GetGame():
-	 *
-	 * Returns the currently running game.
-	 */
-	const Game &GetGame() const;
+  const Game &GetGame() const;
+  void SetGame(const Game &game);
 
-	/*
-	 * SetGame(game):
-	 *
-	 * Sets the currently running game.
-	 */
-	void SetGame(const Game &game);
+  UINT8 GetValue(EOutputs output) const;
 
-	/*
-	 * GetValue(output):
-	 *
-	 * Returns the current value of the given output.
-	 */
-	UINT8 GetValue(EOutputs output) const;
+  // Stores the value; the subclass hears about it the first time and
+  // whenever it changes.
+  void SetValue(EOutputs output, UINT8 value);
 
-	/*
-	 * SetValue(output, value):
-	 *
-	 * Sets the current value of the given output.
-	 */
-	void SetValue(EOutputs output, UINT8 value);
-
-	/* 
-	 * HasValue(EOutputs output)
-	 *
-	 * Returns if the value has been set at least once, 
-	 * meaning it is used by the game.
-	 */
-	bool HasValue(EOutputs output);
+  // True once the game has set this output at least once.
+  bool HasValue(EOutputs output);
 
 protected:
-	/*
-	 * COutputs():
-	 *
-	 * Constructor.
-	 */
-	COutputs();
+  COutputs();
 
-	/*
-	 * SendOutput():
-	 *
-	 * Called when an output's value changes so that the subclass can handle it appropriately.
-	 * To be implemented by the subclass.
-	 */
-	virtual void SendOutput(EOutputs output, UINT8 prevValue, UINT8 value) = 0;
+  // An output got a new value.
+  virtual void SendOutput(EOutputs output, UINT8 prevValue, UINT8 value) = 0;
 
 private:
-	static const char* s_outputNames[]; // Static array of output names
-
-	Game m_game;                  // Currently running game
-	bool m_first[NUM_OUTPUTS];    // For each output, true if an initial value has been set
-	UINT8 m_values[NUM_OUTPUTS];  // Current value of each output
+  Game m_game;
+  bool m_set[NUM_OUTPUTS];
+  UINT8 m_values[NUM_OUTPUTS];
 };
 
-#endif	// INCLUDED_OUTPUTS_H
+#endif // INCLUDED_OUTPUTS_H

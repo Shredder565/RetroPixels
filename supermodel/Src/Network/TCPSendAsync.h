@@ -1,61 +1,41 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// TCPSend with the sending done on a thread of its own: Send() queues the
+// message (length-prefixed, like TCPSend) and returns at once.
 
-#ifndef _TCPSENDASYNC_H_
-#define _TCPSENDASYNC_H_
+#ifndef INCLUDED_TCPSENDASYNC_H
+#define INCLUDED_TCPSENDASYNC_H
 
-#include <string>
-#include <vector>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
-#include <memory>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 #include "SDLIncludes.h"
 
 class TCPSendAsync
 {
 public:
-	TCPSendAsync(std::string& ip, int port);
-	~TCPSendAsync();
+  TCPSendAsync(std::string &ip, int port);
+  ~TCPSendAsync();
 
-	bool Send(const void* data, int length);
-	bool Connect();
-	bool Connected();
+  bool Send(const void *data, int length);
+  bool Connect();
+  bool Connected();
+
 private:
+  void SendLoop();
 
-	void SendThread();
-
-	std::string				m_ip;
-	int						m_port;
-	TCPsocket				m_socket;		// sdl socket
-	std::atomic<bool>		m_hasData;
-	std::condition_variable m_cv;
-	std::vector<char>		m_buffer;
-	std::mutex				m_mutex;
-	std::thread				m_sendThread;
-
-	std::vector<std::unique_ptr<char[]>> m_dataBuffers;	// each pointer is to an array of data. First word is the size of the data
-
+  std::string m_ip;
+  int m_port;
+  std::atomic<TCPsocket> m_socket;
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  std::deque<std::vector<char>> m_queue;
+  bool m_quit;
+  std::thread m_sendThread;
 };
 
-#endif
+#endif // INCLUDED_TCPSENDASYNC_H

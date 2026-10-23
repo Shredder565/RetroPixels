@@ -1,29 +1,7 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2022 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * FileSystemPaths.h
- *
- * Header file for OS-dependent Supermodel files locations.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Where the program's files live on this system. Each platform has its own
+// FileSystemPath.cpp (Windows/, Unix/).
 
 #ifndef INCLUDED_FILESYSTEMPATH_H
 #define INCLUDED_FILESYSTEMPATH_H
@@ -32,14 +10,20 @@
 
 namespace FileSystemPath
 {
-    // Filesystem path types. Data is where Games.xml and Music.xml are read
-    // from: the Config folder, unless SUPERMODEL_HOME moves the player's own
-    // files elsewhere (RetroPixels.h).
+    // Kinds of files. Data is where Games.xml and Music.xml are read from:
+    // the Config folder, unless SUPERMODEL_HOME moves the player's own files
+    // elsewhere (RetroPixels.h).
     enum PathType { Analysis, Config, Log, NVRAM, Saves, Screenshots, Assets, Data };
-    bool PathExists(std::string fileSystemPath); // Checks if a directory exists (returns true if exists, false if it doesn't)
-    int MakeDir(std::string dir); // Create a directory
-    std::string GetPath(PathType pathType);  // Generates a path to be used by Supermodel files
-}
 
+    // True if the folder exists.
+    bool PathExists(std::string fileSystemPath);
+
+    // Makes the folder if it isn't there; 0 on success.
+    int MakeDir(std::string dir);
+
+    // The folder for a kind of file, ending in a slash, or "" for the
+    // current folder.
+    std::string GetPath(PathType pathType);
+}
 
 #endif // INCLUDED_FILESYSTEMPATH_H

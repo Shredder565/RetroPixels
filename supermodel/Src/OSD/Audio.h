@@ -1,29 +1,9 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * Audio.h
- * 
- * Header file for OS-dependent audio playback interface.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Sound output to the host. The sound board hands over one frame of the
+// Model 3's four speaker channels at a time; the host side (SDL/Audio.cpp)
+// mixes them for the speakers the player has and keeps a short queue that
+// the sound card drains.
 
 #ifndef INCLUDED_AUDIO_H
 #define INCLUDED_AUDIO_H
@@ -34,30 +14,25 @@
 
 typedef void (*AudioCallbackFPtr)(void *data);
 
+// Called from the sound card's thread whenever the queue has room for more
+// frames (the emulator uses it to run its sound thread ahead).
 extern void SetAudioCallback(AudioCallbackFPtr callback, void *data);
 
+// While disabled the sound card plays silence (the queue keeps moving).
 extern void SetAudioEnabled(bool enabled);
+
+// How the game's cabinet wires its channels (Games.xml); call before OpenAudio.
 extern void SetAudioType(Game::AudioTypes type);
 
-/*
- * OpenAudio()
- *
- * Initializes the audio system.
- */
-extern Result OpenAudio(const Util::Config::Node& config);
+// Starts playback with the settings in config (NbSoundChannels, SoundFreq,
+// BalanceLeftRight, BalanceFrontRear).
+extern Result OpenAudio(const Util::Config::Node &config);
 
-/*
- * OutputAudio(unsigned numSamples, *INT16 leftBuffer, *INT16 rightBuffer)
- *
- * Sends a chunk of two-channel audio with the given number of samples to the audio system.
- */
-extern bool OutputAudio(unsigned numSamples, const float* leftFrontBuffer, const float* rightFrontBuffer, const float* leftRearBuffer, const float* rightRearBuffer, bool flipStereo);
+// Queues one frame of sound: numSamples samples for front left/right and rear
+// left/right. Returns true when the queue is close to full.
+extern bool OutputAudio(unsigned numSamples, const float *leftFrontBuffer, const float *rightFrontBuffer, const float *leftRearBuffer, const float *rightRearBuffer, bool flipStereo);
 
-/*
- * CloseAudio()
- *
- * Shuts down the audio system.
- */
+// Stops playback.
 extern void CloseAudio();
 
-#endif	// INCLUDED_AUDIO_H
+#endif // INCLUDED_AUDIO_H

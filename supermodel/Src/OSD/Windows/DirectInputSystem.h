@@ -1,29 +1,10 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * DirectInputSystem.h
- * 
- * Header file for DirectInput, XInput, and Raw Input input system.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Windows input. Keyboards and mice are read through DirectInput, which sees
+// one shared keyboard and mouse, or through Raw Input, which tells devices
+// apart (two light guns, for instance). Joysticks are read through
+// DirectInput; with XInput turned on, Xbox-style pads are read through XInput
+// instead, which reports the two triggers as separate axes.
 
 #ifndef INCLUDED_DIRECTINPUTSYSTEM_H
 #define INCLUDED_DIRECTINPUTSYSTEM_H
@@ -41,226 +22,141 @@
 #include <windows.h>
 #include <dinput.h>
 #include <XInput.h>
-#include <functional>
+
+#include <array>
+#include <string>
 #include <vector>
 
-#define NUM_DI_KEYS (sizeof(s_keyMap) / sizeof(DIKeyMapStruct))
-
-#define DI_EFFECTS_MAX DI_FFNOMINALMAX
-#define DI_EFFECTS_SCALE (DI_EFFECTS_MAX / 100)
-
-#define XI_VIBRATE_MAX 65535
-#define XI_VIBRATE_SCALE (XI_VIBRATE_MAX / 100)
-
-struct DIKeyMapStruct
-{
-	const char *keyName;
-	int diKey;
-};
-
-struct RawMseState
-{
-	LONG x;
-	LONG y;
-	LONG z;
-	LONG wheelDelta;
-	SHORT wheelDir;
-	USHORT buttons;
-};
-
-struct DIMseState
-{
-	LONG x;
-	LONG y;
-	LONG z;
-	SHORT wheelDir;
-	BYTE buttons[5];
-};
-
-struct DIJoyInfo
-{
-	// DirectInput details
-	GUID guid;
-	int dInputNum;
-	LPDIRECTINPUTEFFECT dInputEffects[NUM_JOY_AXES][NUM_FF_EFFECTS];
-
-	// XInput details
-	bool isXInput;  // True if joystick is XInput controller
-	int xInputNum;  // XInput controller number
-
-	// XInput force feedback state
-	WORD xiConstForceLeft;
-	WORD xiConstForceRight;
-	WORD xiVibrateBoth;
-};
-
-// RawInput API
-typedef /*WINUSERAPI*/ UINT (WINAPI *GetRawInputDeviceListPtr)(OUT PRAWINPUTDEVICELIST pRawInputDeviceList, IN OUT PUINT puiNumDevices, IN UINT cbSize);
-typedef /*WINUSERAPI*/ UINT (WINAPI *GetRawInputDeviceInfoPtr)(IN HANDLE hDevice, IN UINT uiCommand, OUT LPVOID pData, IN OUT PUINT pcbSize);
-typedef /*WINUSERAPI*/ bool (WINAPI *RegisterRawInputDevicesPtr)(IN PCRAWINPUTDEVICE pRawInputDevices, IN UINT uiNumDevices, IN UINT cbSize);
-typedef /*WINUSERAPI*/ UINT (WINAPI *GetRawInputDataPtr)(IN HRAWINPUT hRawInput, IN UINT uiCommand, OUT LPVOID pData, IN OUT PUINT pcbSize, IN UINT cbSizeHeader);
-
-// XInput API
-typedef /*WINUSERAPI*/ DWORD (WINAPI *XInputGetCapabilitiesPtr)(IN DWORD dwUserIndex, IN DWORD dwFlags, OUT PXINPUT_CAPABILITIES pCapabilities);
-typedef /*WINUSERAPI*/ DWORD (WINAPI *XInputGetStatePtr)(IN DWORD dwUserIndex, OUT PXINPUT_STATE pState);
-typedef /*WINUSERAPI*/ DWORD (WINAPI *XInputSetStatePtr)(IN DWORD dwUserIndex, IN PXINPUT_VIBRATION pVibration);
-
-/*
- * Input system that uses combination of DirectInput, XInput and RawInput APIs.
- */
 class CDirectInputSystem : public CInputSystem
 {
-private:
-  const Util::Config::Node &m_config;
+public:
+  // useRawInput: keyboards and mice through Raw Input (DirectInput when that
+  // finds nothing). useXInput: Xbox-style pads through XInput.
+  CDirectInputSystem(const Util::Config::Node &config, SDL_Window *window, bool useRawInput, bool useXInput);
+  ~CDirectInputSystem() override;
 
-	// Lookup table to map key names to DirectInput keycodes and Virtual keycodes
-	static DIKeyMapStruct s_keyMap[];
+  int GetNumKeyboards() const override;
+  int GetNumMice() const override;
+  int GetNumJoysticks() const override;
+  const KeyDetails *GetKeyDetails(int kbdNum) override;
+  const MouseDetails *GetMouseDetails(int mseNum) override;
+  const JoyDetails *GetJoyDetails(int joyNum) override;
 
-	static const char *ConstructName(bool useRawInput, bool useXInput);
-
-	bool m_useRawInput;
-	bool m_useXInput;
-	bool m_enableFFeedback;
-	
-	HWND m_hwnd;
-	DWORD m_screenW;
-	DWORD m_screenH;
-
-	bool m_initializedCOM;
-	bool m_activated;
-	SDL_Window *m_window = nullptr;
-	
-	// Function pointers for RawInput API
-	GetRawInputDeviceListPtr m_getRIDevListPtr;
-	GetRawInputDeviceInfoPtr m_getRIDevInfoPtr;
-	RegisterRawInputDevicesPtr m_regRIDevsPtr;
-	GetRawInputDataPtr m_getRIDataPtr;
-	
-	// Keyboard, mouse and joystick details
-	std::vector<KeyDetails> m_keyDetails;
-	std::vector<MouseDetails> m_mseDetails;
-	std::vector<JoyDetails> m_joyDetails;
-	
-	// RawInput keyboard and mice handles and states
-	std::vector<HANDLE> m_rawKeyboards;
-	std::vector<bool*> m_rawKeyStates;
-	std::vector<HANDLE> m_rawMice;
-	RawMseState m_combRawMseState;
-	std::vector<RawMseState> m_rawMseStates;
-
-	// Function pointers for XInput API
-	XInputGetCapabilitiesPtr m_xiGetCapabilitiesPtr;
-	XInputGetStatePtr m_xiGetStatePtr;
-	XInputSetStatePtr m_xiSetStatePtr;
-
-	// DirectInput pointers and details
-	LPDIRECTINPUT8 m_di8;
-	LPDIRECTINPUTDEVICE8 m_di8Keyboard;
-	LPDIRECTINPUTDEVICE8 m_di8Mouse;	
-	std::vector<LPDIRECTINPUTDEVICE8> m_di8Joysticks;
-	
-	// DirectInput keyboard and mouse states
-	BYTE m_diKeyState[256];
-	DIMseState m_diMseState;
-	
-	// DirectInput joystick infos and states
-	std::vector<DIJoyInfo> m_diJoyInfos;
-	std::vector<DIJOYSTATE2> m_diJoyStates;
-
-	bool GetRegString(HKEY regKey, const char *regPath, std::string &str);
-
-	bool GetRegDeviceName(const char *rawDevName, char *name);
-
-	void OpenKeyboardsAndMice();
-
-	void ActivateKeyboardsAndMice();
-
-	void PollKeyboardsAndMice();
-
-	void CloseKeyboardsAndMice();
-
-	void ResetMice();
-
-	void ProcessRawInput(HRAWINPUT hInput);
-
-	void OpenJoysticks();
-
-	void ActivateJoysticks();
-
-	void PollJoysticks();
-
-	void CloseJoysticks();
-
-	HRESULT CreateJoystickEffect(LPDIRECTINPUTDEVICE8 di8Joystick, int axisNum, ForceFeedbackCmd ffCmd, LPDIRECTINPUTEFFECT *di8Effect);
-
-	void LoadXInputDLL();
+  bool Poll() override;
+  void GrabMouse() override;
+  void UngrabMouse() override;
+  void SetMouseVisibility(bool visible) override;
 
 protected:
-	/*
-	 * Initializes the DirectInput input system.
-	 */
-	bool InitializeSystem();
+  bool InitializeSystem() override;
+  int GetKeyIndex(const char *keyName) override;
+  const char *GetKeyName(int keyIndex) override;
+  bool IsKeyPressed(int kbdNum, int keyIndex) const override;
+  int GetMouseAxisValue(int mseNum, int axisNum) const override;
+  int GetMouseWheelDir(int mseNum) const override;
+  bool IsMouseButPressed(int mseNum, int butNum) const override;
+  int GetJoyAxisValue(int joyNum, int axisNum) const override;
+  bool IsJoyPOVInDir(int joyNum, int povNum, int povDir) const override;
+  bool IsJoyButPressed(int joyNum, int butNum) const override;
+  bool ProcessForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCmd ffCmd) override;
+  bool ConfigMouseCentered() override;
+  CInputSource *CreateAnyMouseSource(EMousePart msePart) override;
 
-	int GetKeyIndex(const char *keyName);
+private:
+  // A mouse as the game sees it: position in window pixels, wheel position
+  // (-100 to 100), wheel movement since the last poll, and buttons as bits
+  // (0 left, 1 middle, 2 right, 3 and 4 the side buttons).
+  struct MouseState
+  {
+    LONG x = 0;
+    LONG y = 0;
+    LONG z = 0;
+    LONG wheelMoved = 0;
+    int wheelDir = 0;
+    unsigned buttons = 0;
+  };
 
-	const char *GetKeyName(int keyIndex);
+  struct RawKeyboard
+  {
+    HANDLE handle;
+    std::array<bool, 256> down;  // by DirectInput scan code
+  };
 
-	bool IsKeyPressed(int joyNum, int keyIndex) const;
+  struct RawMouse
+  {
+    HANDLE handle;
+    MouseState state;
+  };
 
-	int GetMouseAxisValue(int mseNum, int axisNum) const;
+  // One slot per force feedback effect kind (FFConstantForce .. FFVibrate).
+  using AxisEffects = std::array<LPDIRECTINPUTEFFECT, 4>;
 
-	int GetMouseWheelDir(int mseNum) const;
+  struct Pad
+  {
+    JoyDetails details;
+    DIJOYSTATE2 state;
+    bool xinput = false;
+    DWORD xinputSlot = 0;
+    LPDIRECTINPUTDEVICE8 device = nullptr;
+    std::array<AxisEffects, NUM_JOY_AXES> effects{};
+    // XInput motor speeds asked for by each kind of effect
+    WORD pushLeft = 0;
+    WORD pushRight = 0;
+    WORD shake = 0;
+  };
 
-	bool IsMouseButPressed(int mseNum, int butNum) const;
+  using XInputGetCapabilitiesFn = DWORD (WINAPI *)(DWORD, DWORD, XINPUT_CAPABILITIES *);
+  using XInputGetStateFn = DWORD (WINAPI *)(DWORD, XINPUT_STATE *);
+  using XInputSetStateFn = DWORD (WINAPI *)(DWORD, XINPUT_VIBRATION *);
 
-	int GetJoyAxisValue(int joyNum, int axisNum) const;
+  const Util::Config::Node &m_config;
+  SDL_Window *m_window;
+  HWND m_hwnd = nullptr;
+  bool m_useRawInput;
+  bool m_useXInput;
+  bool m_comStarted = false;
+  bool m_activated = false;
+  DWORD m_screenW = 0;
+  DWORD m_screenH = 0;
 
-	bool IsJoyPOVInDir(int joyNum, int povNum, int povDir) const;
+  // Raw Input
+  std::vector<RawKeyboard> m_rawKeyboards;
+  std::vector<RawMouse> m_rawMice;
+  std::vector<KeyDetails> m_keyDetails;
+  std::vector<MouseDetails> m_mouseDetails;
+  MouseState m_allMice;
+  std::vector<BYTE> m_rawBuffer;
 
-	bool IsJoyButPressed(int joyNum, int butNum) const;
+  // DirectInput
+  LPDIRECTINPUT8 m_di = nullptr;
+  LPDIRECTINPUTDEVICE8 m_diKeyboard = nullptr;
+  LPDIRECTINPUTDEVICE8 m_diMouse = nullptr;
+  BYTE m_diKeys[256] = {};
+  MouseState m_diMouseState;
 
-	bool ProcessForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCmd ffCmd);
+  // Joysticks, in DirectInput's order
+  std::vector<Pad> m_pads;
 
-	bool ConfigMouseCentered();
+  XInputGetCapabilitiesFn m_xiGetCapabilities = nullptr;
+  XInputGetStateFn m_xiGetState = nullptr;
+  XInputSetStateFn m_xiSetState = nullptr;
 
-	CInputSource *CreateAnyMouseSource(EMousePart msePart);
-
-public:
-	/*
-	 * Constructs a DirectInput/XInput/RawInput input system.  
-	 * If useRawInput is true then RawInput is used for keyboard and mice movements (allowing multiple devices, eg for dual lightguns in gun
-	 * games such as Lost World).  If false then DirectInput is used instead (which doesn't allow multiple devices).  In both cases,
-	 * DirectInput/XInput is used for reading joysticks.
-	 * If useXInput is true then XInput is used for reading XBox 360 game controllers (and/or XInput compatible joysticks) and DirectInput is used
-	 * for all other types of joystick.  If false, then DirectInput is used for reading all joysticks (including XBox 360 ones).
-	 * The advantage of using XInput for XBox 360 game controllers is that it allows the left and right triggers to be used simultaneously
-	 * (ie to brake and accelerate at the same time in order to power slide the car in Daytona USA 2).  Under DirectInput the triggers get mapped
-	 * to the same shared axis and so cannot be distinguished when pressed together.
-	 * If enableFFeedback is true then force feedback is enabled (for those joysticks which are force feedback capable).
-	 */
-	CDirectInputSystem(const Util::Config::Node &config, SDL_Window *window, bool useRawInput, bool useXInput);
-
-	~CDirectInputSystem();
-
-	int GetNumKeyboards() const;	
-
-	int GetNumMice() const;
-
-	int GetNumJoysticks() const;
-
-	const KeyDetails *GetKeyDetails(int kbdNum);
-
-	const MouseDetails *GetMouseDetails(int mseNum);
-
-	const JoyDetails *GetJoyDetails(int joyNum);
-
-	bool Poll();
-
-	void GrabMouse();
-
-	void UngrabMouse();
-
-	void SetMouseVisibility(bool visible);
+  void LoadXInput();
+  void OpenKeyboardsAndMice();
+  bool OpenRawDevices();
+  void OpenDirectInputKeyboardAndMouse();
+  void OpenJoysticks();
+  bool OpenDirectInputPad(const DIDEVICEINSTANCE &instance, int number, Pad &pad);
+  void Activate();
+  void RegisterRawInput(DWORD flags);
+  void PollKeyboardsAndMice();
+  void PollJoysticks();
+  void CloseKeyboardsAndMice();
+  void CloseJoysticks();
+  void SyncMiceToCursor();
+  void ReadRawInput(HRAWINPUT input);
+  bool RumbleXInput(Pad &pad, int axisNum, const ForceFeedbackCmd &cmd);
+  bool ForceDirectInput(Pad &pad, int axisNum, const ForceFeedbackCmd &cmd);
 };
 
-#endif	// INCLUDED_DIRECTINPUTSYSTEM_H
+#endif // INCLUDED_DIRECTINPUTSYSTEM_H

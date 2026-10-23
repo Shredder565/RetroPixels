@@ -1,30 +1,8 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * Thread.h
- * 
- * Header file for threading primitives.
- */
- 
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Threads and the things threads wait on, as the emulator's CPU, graphics
+// and sound threads use them. SDL/Thread.cpp implements them with SDL.
+
 #ifndef INCLUDED_THREADS_H
 #define INCLUDED_THREADS_H
 
@@ -36,207 +14,103 @@ class CSemaphore;
 class CMutex;
 class CCondVar;
 
+// A thread's body: gets the parameter given at creation, returns its status.
 typedef int (*ThreadStart)(void *startParam);
 
-/*
- * CThread
- * 
- * Class that represents an O/S thread.
- */
 class CThread
 {
-private:
-  const std::string m_name;
-	void *m_impl;
-
-	CThread(const std::string &name, void *impl);
-
 public:
-	/*
-	 * Sleep
-	 *
-	 * Sleeps for specified number of milliseconds.
-	 */
-	static void Sleep(UINT32 ms);
-	
-	/*
-	 * GetTicks
-	 *
-	 * Gets number of millseconds since beginning of program.
-	 */
-	static UINT32 GetTicks();
-	
-	/*
-   * CreateThread
-	 *
-	 * Creates a new thread with the given ThreadStart callback and start parameter.  The thread starts running immediately.
-	 */
-	static CThread *CreateThread(const std::string &name, ThreadStart start, void *startParam);
+  // Pauses the calling thread for ms milliseconds.
+  static void Sleep(UINT32 ms);
 
-	/* 
-	 * CreateSemaphore
-	 * 
-	 * Creates a new semaphore with the given initial starting value.
-	 */
-	static CSemaphore *CreateSemaphore(UINT32 initVal);
+  // Milliseconds since the program started.
+  static UINT32 GetTicks();
 
-	/* 
-	 * CreateCondVar
-	 *
-	 * Creates a new condition variable.
-	 */
-	static CCondVar *CreateCondVar();
+  // Starts a thread running start(startParam). NULL if it couldn't be made.
+  static CThread *CreateThread(const std::string &name, ThreadStart start, void *startParam);
 
-	/*
-	 * CreateMutex
-	 *
-	 * Creates a new mutex.
-	 */
-	static CMutex *CreateMutex();
-	
-	/*
-	 * GetLastError
-	 *
-	 * Returns the error message for the last error.
-	 */
-	static const char *GetLastError();
+  // Makers for the other objects; NULL on failure.
+  static CSemaphore *CreateSemaphore(UINT32 initVal);
+  static CCondVar *CreateCondVar();
+  static CMutex *CreateMutex();
 
-	/*
-	 * Thread destructor.
-	 */
-	~CThread();
+  // Text describing why the last call above failed.
+  static const char *GetLastError();
 
-	/*
-	 * GetName
-	 *
-	 * Returns the name of this thread.
-	 */
+  // Wait() must have been called first; an error is logged otherwise.
+  ~CThread();
+
   const std::string &GetName() const;
+  UINT32 GetId();
 
-	/*
-	 * GetId
-	 *
-	 * Returns the id of this thread.
-	 */
-	UINT32 GetId();
+  // Blocks until the thread has finished; returns its status (-1 if it was
+  // already waited for).
+  int Wait();
 
-	/*
-	 * Wait
-	 *
-	 * Waits until this thread has exited.
-	 */
-	int Wait();
+private:
+  CThread(const std::string &name, void *impl);
+
+  const std::string m_name;
+  void *m_impl;
 };
 
-/*
- * CSemaphore
- *
- * Class that represents a semaphore.
- */
 class CSemaphore
 {
-friend class CThread;
-
-private:
-	void *m_impl;
-	
-	CSemaphore(void *impl);
+  friend class CThread;
 
 public:
-	~CSemaphore();
+  ~CSemaphore();
 
-	/*
-	 * GetValue
-	 *
-	 * Returns the current value of this semaphore.
-	 */
-	UINT32 GetValue();
+  UINT32 GetValue();
 
-	/*
-	 * Wait
-	 *
-	 * Locks this semaphore and suspends the calling thread if its value is zero.
-	 */
-	bool Wait();
+  // Takes one count, waiting while there is none. False on error.
+  bool Wait();
 
-	/*
-	 * Post
-	 *
-	 * Unlocks this semaphore and resumes any threads that were blocked on it.
-	 */
-	bool Post();
+  // Gives one count back, waking a waiting thread. False on error.
+  bool Post();
+
+private:
+  CSemaphore(void *impl);
+
+  void *m_impl;
 };
 
-/*
- * CCondVar
- *
- * Class that represents a condition variable.
- */
 class CCondVar
 {
-friend class CThread;
-
-private:
-	void *m_impl;
-
-	CCondVar(void *impl);
+  friend class CThread;
 
 public:
-	~CCondVar();
+  ~CCondVar();
 
-	/*
-	 * Wait
-	 *
-	 * Waits on this condition variable and unlocks the provided mutex (which must be locked before calling this method).
-	 */
-	bool Wait(CMutex *mutex);
+  // Releases mutex (which the caller holds), waits to be signalled, then
+  // takes the mutex again.
+  bool Wait(CMutex *mutex);
 
-	/*
-	 * Signal
-	 *
-	 * Restarts a single thread that is waiting on this condition variable.
-	 */
-	bool Signal();
+  // Wakes one waiting thread / every waiting thread.
+  bool Signal();
+  bool SignalAll();
 
-	/*
-	 * SignalAll
-	 *
-	 * Restarts all threads that are waiting on this condition variable.
-	 */
-	bool SignalAll();
+private:
+  CCondVar(void *impl);
+
+  void *m_impl;
 };
 
-/*
- * CSemaphore
- *
- * Class that represents a mutex.
- */
 class CMutex
 {
-friend class CThread;
-friend class CCondVar;
-
-private:
-	void *m_impl;
-
-	CMutex(void *impl);
+  friend class CThread;
+  friend class CCondVar;
 
 public:
-	~CMutex();
+  ~CMutex();
 
-	/*
-	 * Lock
-	 *
-	 * Locks this mutex.  If it is already locked then the calling thread will suspend until it is unlocked.
-	 */
-	bool Lock();
+  bool Lock();
+  bool Unlock();
 
-	/*
-	 * Unlock
-	 *
-     * Unlocks this mutex.  
-	 */
-	bool Unlock();
+private:
+  CMutex(void *impl);
+
+  void *m_impl;
 };
 
-#endif	// INCLUDED_THREADS_H
+#endif // INCLUDED_THREADS_H

@@ -1,53 +1,44 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The receiving half of a link between linked cabinets: listens on a port
+// and accepts the previous machine's connection (on a background thread),
+// then reads the length-prefixed messages TCPSend sends.
 
-#ifndef _TCPRECEIVE_H_
-#define _TCPRECEIVE_H_
+#ifndef INCLUDED_TCPRECEIVE_H
+#define INCLUDED_TCPRECEIVE_H
 
-#include <thread>
 #include <atomic>
+#include <thread>
 #include <vector>
 #include "SDLIncludes.h"
 
 class TCPReceive
 {
 public:
-	TCPReceive(int port);
-	~TCPReceive();
+  TCPReceive(int port);
+  ~TCPReceive();
 
-	bool CheckDataAvailable(int timeoutMS = 0);		// timeoutMS -1 = wait forever until data arrives, 0 = no waiting, 1+ wait time in milliseconds
-	std::vector<char>& Receive();
-	bool Connected();
+  // True if a message is waiting. timeoutMS: 0 don't wait, -1 wait as long
+  // as it takes, otherwise the most milliseconds to wait.
+  bool CheckDataAvailable(int timeoutMS = 0);
+
+  // Blocks until the next message has arrived and returns it. Empty when
+  // there is no connection or it broke (it is then closed).
+  std::vector<char> &Receive();
+
+  bool Connected();
 
 private:
+  void AcceptLoop();
+  void Drop();
+  bool ReadAll(void *dst, int bytes);
 
-	void ListenFunc();
-
-	TCPsocket m_listenSocket;
-	std::atomic<TCPsocket> m_receiveSocket;
-	SDLNet_SocketSet m_socketSet;
-	std::thread m_listenThread;
-	std::atomic_bool m_running;
-	std::vector<char> m_recBuffer;
+  TCPsocket m_listenSocket;
+  std::atomic<TCPsocket> m_receiveSocket;
+  SDLNet_SocketSet m_socketSet;
+  std::thread m_listenThread;
+  std::atomic_bool m_running;
+  std::vector<char> m_recBuffer;
 };
 
-#endif
+#endif // INCLUDED_TCPRECEIVE_H

@@ -1,155 +1,112 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 
 #include "TCPReceive.h"
 #include "OSD/Logger.h"
 #include "OSD/Thread.h"
 
-#if defined(_DEBUG)
-#include <cstdio>
-#define DPRINTF DebugLog
-#else
-#define DPRINTF(a, ...)
-#endif
-
-TCPReceive::TCPReceive(int port) :
-	m_listenSocket(nullptr),
-	m_receiveSocket(nullptr),
-	m_socketSet(nullptr)
+TCPReceive::TCPReceive(int port)
+  : m_listenSocket(nullptr), m_receiveSocket(nullptr), m_socketSet(nullptr), m_running(false)
 {
-	SDLNet_Init();
+  SDLNet_Init();
+  m_socketSet = SDLNet_AllocSocketSet(1);
 
-	m_socketSet = SDLNet_AllocSocketSet(1);
-
-	IPaddress ip;
-	int result = SDLNet_ResolveHost(&ip, nullptr, port);
-
-	if (result == 0) {
-		m_listenSocket = SDLNet_TCP_Open(&ip);
-		if (m_listenSocket) {
-			m_running = true;
-			m_listenThread = std::thread(&TCPReceive::ListenFunc, this);
-		}
-	}
+  IPaddress address;
+  if (SDLNet_ResolveHost(&address, nullptr, Uint16(port)) != 0)
+    return;
+  m_listenSocket = SDLNet_TCP_Open(&address);
+  if (m_listenSocket == nullptr)
+    return;
+  m_running = true;
+  m_listenThread = std::thread(&TCPReceive::AcceptLoop, this);
 }
 
 TCPReceive::~TCPReceive()
 {
-	m_running = false;
-
-	if (m_listenThread.joinable()) {
-		m_listenThread.join();
-	}
-
-	if (m_listenSocket) {
-		SDLNet_TCP_Close(m_listenSocket);
-		m_listenSocket = nullptr;
-	}
-
-	if (m_receiveSocket) {
-		SDLNet_TCP_Close(m_receiveSocket);
-		m_receiveSocket = nullptr;
-	}
-
-	if (m_socketSet) {
-		SDLNet_FreeSocketSet(m_socketSet);
-		m_socketSet = nullptr;
-	}
-
-	SDLNet_Quit();
+  m_running = false;
+  if (m_listenThread.joinable())
+    m_listenThread.join();
+  if (m_listenSocket)
+    SDLNet_TCP_Close(m_listenSocket);
+  m_listenSocket = nullptr;
+  if (TCPsocket s = m_receiveSocket.exchange(nullptr))
+    SDLNet_TCP_Close(s);
+  if (m_socketSet)
+    SDLNet_FreeSocketSet(m_socketSet);
+  m_socketSet = nullptr;
+  SDLNet_Quit();
 }
 
-bool TCPReceive::CheckDataAvailable(int timeoutMS)
+// Waits for the previous machine to connect, one connection at a time; after
+// a connection drops, the next one is accepted.
+void TCPReceive::AcceptLoop()
 {
-	if (!m_receiveSocket) {
-		return false;
-	}
-
-	return SDLNet_CheckSockets(m_socketSet, timeoutMS) > 0;
-}
-
-std::vector<char>& TCPReceive::Receive()
-{
-	if (!m_receiveSocket) {
-		DPRINTF("Can't receive because no socket.\n");
-		m_recBuffer.clear();
-		return m_recBuffer;
-	}
-
-	int size = 0;
-	int result = SDLNet_TCP_Recv(m_receiveSocket, &size, sizeof(int));
-	DPRINTF("Received %i bytes\n", result);
-	if (result <= 0) {
-		SDLNet_TCP_Close(m_receiveSocket);
-		m_receiveSocket = nullptr;
-	}
-
-	// reserve our space
-	m_recBuffer.resize(size);
-
-	while (size) {
-
-		result = SDLNet_TCP_Recv(m_receiveSocket, m_recBuffer.data() + (m_recBuffer.size() - size), size);
-		DPRINTF("Received %i bytes\n", result);
-		if (result <= 0) {
-			SDLNet_TCP_Close(m_receiveSocket);
-			m_receiveSocket = nullptr;
-			break;
-		}
-
-		size -= result;
-	}
-
-	return m_recBuffer;
-}
-
-void TCPReceive::ListenFunc()
-{
-	while (m_running) {
-
-		CThread::Sleep(16);
-		if (m_receiveSocket) continue;
-
-		auto socket = SDLNet_TCP_Accept(m_listenSocket);
-
-		if (socket) {
-
-			// remove old socket if required from socket set
-			if (m_receiveSocket) {
-				SDLNet_DelSocket(m_socketSet, (SDLNet_GenericSocket)m_receiveSocket.load());
-			}
-
-			m_receiveSocket = socket;
-
-			SDLNet_AddSocket(m_socketSet, (SDLNet_GenericSocket)socket);
-
-			// add socket to socket set
-			DPRINTF("Accepted connection.\n");
-		}
-
-	}
+  while (m_running)
+  {
+    CThread::Sleep(16);
+    if (m_receiveSocket)
+      continue;
+    TCPsocket s = SDLNet_TCP_Accept(m_listenSocket);
+    if (s)
+    {
+      SDLNet_TCP_AddSocket(m_socketSet, s);
+      m_receiveSocket = s;
+    }
+  }
 }
 
 bool TCPReceive::Connected()
 {
-	return (m_receiveSocket != 0);
+  return m_receiveSocket != nullptr;
+}
+
+bool TCPReceive::CheckDataAvailable(int timeoutMS)
+{
+  if (!m_receiveSocket)
+    return false;
+  return SDLNet_CheckSockets(m_socketSet, Uint32(timeoutMS)) > 0;
+}
+
+void TCPReceive::Drop()
+{
+  if (TCPsocket s = m_receiveSocket.exchange(nullptr))
+  {
+    SDLNet_TCP_DelSocket(m_socketSet, s);
+    SDLNet_TCP_Close(s);
+  }
+}
+
+// Reads exactly bytes bytes; false (and the connection dropped) if it ends.
+bool TCPReceive::ReadAll(void *dst, int bytes)
+{
+  char *p = static_cast<char *>(dst);
+  while (bytes > 0)
+  {
+    TCPsocket s = m_receiveSocket;
+    int got = s ? SDLNet_TCP_Recv(s, p, bytes) : 0;
+    if (got <= 0)
+    {
+      Drop();
+      return false;
+    }
+    p += got;
+    bytes -= got;
+  }
+  return true;
+}
+
+std::vector<char> &TCPReceive::Receive()
+{
+  m_recBuffer.clear();
+  if (!m_receiveSocket)
+    return m_recBuffer;
+
+  int length = 0;
+  if (!ReadAll(&length, sizeof(length)) || length <= 0)
+    return m_recBuffer;
+
+  // If the link breaks part way, the message keeps its length: what arrived,
+  // then zeros.
+  m_recBuffer.resize(size_t(length));
+  ReadAll(m_recBuffer.data(), length);
+  return m_recBuffer;
 }
