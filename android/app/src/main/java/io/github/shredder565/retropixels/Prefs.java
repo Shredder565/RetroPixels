@@ -94,6 +94,24 @@ final class Prefs {
         p.edit().putString("orientation", o).apply();
     }
 
+    /** Record games automatically (on unless turned off), as RetroPixels.exe and RetroPixels Native. */
+    boolean autoRecord() {
+        return p.getBoolean("autoRecord", true);
+    }
+
+    void setAutoRecord(boolean v) {
+        p.edit().putBoolean("autoRecord", v).apply();
+    }
+
+    /** Android 7-9: storage access (for Movies/RetroPixels) was asked for once. */
+    boolean askedStorage() {
+        return p.getBoolean("askedStorage", false);
+    }
+
+    void setAskedStorage() {
+        p.edit().putBoolean("askedStorage", true).apply();
+    }
+
     /** The system for .bin files ("" = guess from the file), as the native app's File > Open .bin files as. */
     String binSystem() {
         return p.getString("bin", "");

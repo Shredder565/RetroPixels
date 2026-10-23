@@ -16,7 +16,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Settings: sound, pixels, the touch controls, rumble, the screen's way round, .bin files and the controls. */
+/** Settings: sound, pixels, the touch controls, rumble, recording, the screen's way round, .bin files and the controls. */
 public final class SettingsActivity extends Activity {
     static final String[] SYSTEM_IDS = {"nes", "snes", "gb", "gba", "n64", "segaMD", "sms", "atari2600", "atari7800", "arcade"};
     static final String[] SYSTEM_LABELS = {"NES", "Super Nintendo", "Game Boy / Color", "Game Boy Advance", "Nintendo 64", "Sega Genesis",
@@ -124,6 +124,13 @@ public final class SettingsActivity extends Activity {
         acts.add(new Runnable() {
             public void run() {
                 prefs.setRumble(!prefs.rumble());
+                refresh();
+            }
+        });
+        items.add("Record games automatically: " + (prefs.autoRecord() ? "on (to Movies/RetroPixels)" : "off"));
+        acts.add(new Runnable() {
+            public void run() {
+                prefs.setAutoRecord(!prefs.autoRecord());
                 refresh();
             }
         });

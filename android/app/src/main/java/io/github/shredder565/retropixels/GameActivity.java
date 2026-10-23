@@ -1,15 +1,18 @@
 package io.github.shredder565.retropixels;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.hardware.input.InputManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -59,7 +62,7 @@ public final class GameActivity extends Activity implements TouchControls.Listen
     static final String EXTRA_PATH = "path";
 
     private static final int REQ_FIRMWARE = 1, REQ_APBASE = 2, REQ_IMPORT_SRAM = 3, REQ_EXPORT_SRAM = 4, REQ_IMPORT_STATE = 5,
-            REQ_CONTROLS = 6;
+            REQ_CONTROLS = 6, REQ_STORAGE = 7;
 
     private Prefs prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -87,6 +90,11 @@ public final class GameActivity extends Activity implements TouchControls.Listen
     private AudioOut audio;
     private Vibrator phoneVibrator;
     private InputManager.InputDeviceListener deviceListener;
+
+    // recording (Settings > Record games automatically)
+    private final Object recLock = new Object();
+    private GameRecorder rec;
+    private volatile boolean recordWanted, recFailed;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -317,6 +325,8 @@ public final class GameActivity extends Activity implements TouchControls.Listen
         touch.setLook(prefs.touchOpacity(), prefs.touchSize(), prefs.touchVibrate());
         touch.setVisibility(touchWanted() ? View.VISIBLE : View.GONE);
         placePicture();
+        recordWanted = prefs.autoRecord();
+        askStorage();
         if (loopThread == null) {
             running = true;
             loopThread = new Thread(new Runnable() {
@@ -331,6 +341,14 @@ public final class GameActivity extends Activity implements TouchControls.Listen
     // ---------------- the game's thread ----------------
 
     private void loop() {
+        try {
+            play();
+        } finally {
+            stopRecording(false);
+        }
+    }
+
+    private void play() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
         double fps = Json.num(info, "fps", 60);
         Pacer pacer = new Pacer(fps, audio.bufferSeconds());
@@ -396,6 +414,7 @@ public final class GameActivity extends Activity implements TouchControls.Listen
                     continue;
                 }
                 audio.write(f.samples, f.sampleCount);
+                record(f, n, fastNow);
                 if (f.hasPicture) {
                     view.setFrame(f.pixels, f.width, f.height);
                 }
@@ -420,6 +439,74 @@ public final class GameActivity extends Activity implements TouchControls.Listen
             double wait = fastNow ? 1 / fps : Math.max(0.001, Math.min(0.004, pacer.untilNext()));
             LockSupport.parkNanos((long) (wait * 1e9));
         }
+    }
+
+    // ---------------- recording ----------------
+
+    /** Hands a run's picture and sound to the recording, starting one when there is none (the game's thread). */
+    private void record(Frame f, int frames, boolean fastNow) {
+        GameRecorder r;
+        synchronized (recLock) {
+            r = rec;
+            if (r != null && r.dead()) {
+                rec = r = null;
+            }
+            if (r == null && recordWanted && !recFailed && !background && !finishing && f.hasPicture) {
+                rec = r = GameRecorder.start(this, Json.str(info, "name", gameName), Json.num(info, "aspect", 4.0 / 3),
+                        Json.num(info, "fps", 60), audio.rate, recListener);
+            }
+        }
+        if (r != null) {
+            r.frame(f.hasPicture ? f.pixels : null, f.width, f.height, frames, fastNow, f.samples, f.sampleCount);
+        }
+    }
+
+    /** Ends the recording (the game closed or went to the background): the file is finished and saved. */
+    private void stopRecording(boolean announce) {
+        GameRecorder r;
+        synchronized (recLock) {
+            r = rec;
+            rec = null;
+        }
+        if (r != null) {
+            r.stop(announce);
+        }
+    }
+
+    private final GameRecorder.Listener recListener = new GameRecorder.Listener() {
+        public void failed(final String why) {
+            if (recFailed) {
+                return;
+            }
+            recFailed = true; // not tried again for this game: it plays on without
+            appToast("Recording stopped: " + why + ". The game plays on without it.");
+        }
+
+        public void saved(String where, boolean announce) {
+            if (announce) {
+                appToast("Recording saved in " + where);
+            }
+        }
+    };
+
+    /** A toast that still shows after this screen has closed. */
+    private void appToast(final String msg) {
+        final Context app = getApplicationContext();
+        ui.post(new Runnable() {
+            public void run() {
+                Toast.makeText(app, msg, Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    /** Android 7-9: the public Movies folder needs storage access, asked for once (without it, recordings go to the app's own Movies folder). */
+    private void askStorage() {
+        if (Build.VERSION.SDK_INT >= 29 || !recordWanted || prefs.askedStorage()
+                || checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        prefs.setAskedStorage();
+        requestPermissions(new String[] {Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
     }
 
     /** The controller that rumbles: the first controller's motor, else the phone's (with the touch controls). */
@@ -1095,6 +1182,7 @@ public final class GameActivity extends Activity implements TouchControls.Listen
     protected void onResume() {
         super.onResume();
         background = false;
+        recordWanted = prefs.autoRecord();
         immersive();
         if (info != null) {
             touch.setLook(prefs.touchOpacity(), prefs.touchSize(), prefs.touchVibrate());
@@ -1107,6 +1195,7 @@ public final class GameActivity extends Activity implements TouchControls.Listen
         super.onPause();
         background = true;
         pads.clear();
+        stopRecording(isFinishing()); // a playable file every time; a new one starts when the game comes back
         if (info != null) {
             command(Json.obj("cmd", "flush"), null, null); // the battery save, now
         }
@@ -1125,6 +1214,7 @@ public final class GameActivity extends Activity implements TouchControls.Listen
         super.onDestroy();
         finishing = true;
         running = false;
+        stopRecording(false);
         if (deviceListener != null) {
             ((InputManager) getSystemService(Context.INPUT_SERVICE)).unregisterInputDeviceListener(deviceListener);
         }
