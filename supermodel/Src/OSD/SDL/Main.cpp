@@ -6,7 +6,7 @@
 // save states, volume, full screen...).
 //
 // Build options: SUPERMODEL_WIN32 (Windows input systems and outputs),
-// SUPERMODEL_DEBUGGER (the console debugger), DEBUG (-gfx-state analysis).
+// DEBUG (-gfx-state analysis).
 
 #include <algorithm>
 #include <cmath>
@@ -39,7 +39,6 @@
 #include "GameLoader.h"
 #include "SDLInputSystem.h"
 #include "SDLIncludes.h"
-#include "Debugger/SupermodelDebugger.h"
 #include "Graphics/Legacy3D/Legacy3D.h"
 #include "Graphics/New3D/New3D.h"
 #include "Graphics/New3D/VBO.h"
@@ -586,9 +585,6 @@ namespace
 
   // Runs the game until the player quits. 0 when it ended normally.
   int RunGame(const Game &game, ROMSet *romSet, IEmulator *emulator, CInputs *inputs, COutputs *outputs
-#ifdef SUPERMODEL_DEBUGGER
-    , std::shared_ptr<Debugger::CDebugger> debugger
-#endif
     )
   {
     if (emulator->Init() != Result::OKAY)
@@ -671,14 +667,6 @@ namespace
     if (!firstState.empty())
       LoadState(emulator, firstState);
 
-#ifdef SUPERMODEL_DEBUGGER
-    std::shared_ptr<CLogger> previousLogger = GetLogger();
-    if (debugger)
-    {
-      SetLogger(debugger);
-      debugger->Attach();
-    }
-#endif
 
     bool quit = false;
     bool paused = false;
@@ -729,10 +717,6 @@ namespace
           whileStopped([&]()
           {
             emulator->Reset();
-#ifdef SUPERMODEL_DEBUGGER
-            if (debugger)
-              debugger->Reset();
-#endif
           });
           puts("Model 3 reset.");
         } },
@@ -783,10 +767,6 @@ namespace
           whileStopped([&]()
           {
             LoadState(emulator);
-#ifdef SUPERMODEL_DEBUGGER
-            if (debugger)
-              debugger->Reset();
-#endif
           });
         } },
       { inputs->uiMusicVolUp, always, [&]()
@@ -805,10 +785,6 @@ namespace
         } },
       { inputs->uiSoundVolUp, always, [&]() { StepVolume("SoundVolume", "Sound", true); } },
       { inputs->uiSoundVolDown, always, [&]() { StepVolume("SoundVolume", "Sound", false); } },
-#ifdef SUPERMODEL_DEBUGGER
-      { inputs->uiDumpInpState, always, [&]() { inputs->DumpState(&game); } },
-      { inputs->uiDumpTimings, always, [&]() { timings = !timings; } },
-#endif
       { inputs->uiSelectCrosshairs, [&]() { return lightGuns; }, [&]()
         {
           // none -> P1 -> P2 -> both -> none
@@ -841,22 +817,6 @@ namespace
         emulator->RunFrame();
 
       bool handleKeys = true;
-#ifdef SUPERMODEL_DEBUGGER
-      if (debugger)
-      {
-        debugger->Poll();
-        if (debugger->CheckExit())
-        {
-          quit = true;
-          handleKeys = false;
-        }
-        else if (debugger->CheckPause())
-        {
-          paused = true;
-          handleKeys = false;
-        }
-      }
-#endif
       if (handleKeys)
       {
         bool handled = false;
@@ -869,12 +829,7 @@ namespace
             break;
           }
         }
-#ifdef SUPERMODEL_DEBUGGER
-        if (!handled && debugger && inputs->uiEnterDebugger->Pressed())
-          debugger->ForceBreak(true);
-#else
         (void)handled;
-#endif
         if (failed)
           break;
       }
@@ -951,13 +906,6 @@ namespace
       return fail();
 
     emulator->PauseThreads();
-#ifdef SUPERMODEL_DEBUGGER
-    if (debugger)
-    {
-      debugger->Detach();
-      SetLogger(previousLogger);
-    }
-#endif
     SaveNVRAM(emulator);
     RetroPixels::Recorder::Stop();
     CloseAudio();
@@ -1256,10 +1204,6 @@ namespace
     heading("Debugging");
     option("-dump-memory", "Write the memory regions to files on exit");
     option("-dump-textures", "Write the textures to bitmaps on exit");
-#ifdef SUPERMODEL_DEBUGGER
-    option("-disable-debugger", "No debugger at all");
-    option("-enter-debugger", "Stop in the debugger at the start");
-#endif
 #ifdef DEBUG
     option("-gfx-state=<file>", "Graphics analysis of a save state (legacy 3D");
     more("engine; needs a GraphicsAnalysis folder)");
@@ -1277,8 +1221,6 @@ namespace
     bool printGLInfo = false;
     bool configInputs = false;
     bool printInputs = false;
-    bool noDebugger = false;
-    bool enterDebugger = false;
 #ifdef DEBUG
     std::string gfxState;
 #endif
@@ -1457,12 +1399,6 @@ namespace
         cl.configInputs = true;
       else if (arg == "-print-inputs")
         cl.printInputs = true;
-#ifdef SUPERMODEL_DEBUGGER
-      else if (arg == "-disable-debugger")
-        cl.noDebugger = true;
-      else if (arg == "-enter-debugger")
-        cl.enterDebugger = true;
-#endif
 #ifdef DEBUG
       else if (Is(arg, "-gfx-state"))
       {
@@ -1590,19 +1526,8 @@ namespace
       if (outputs && !outputs->Initialize())
         return ErrorLog("Unable to initialize outputs.\n"), 1;
 
-#ifdef SUPERMODEL_DEBUGGER
-      std::shared_ptr<Debugger::CSupermodelDebugger> debugger;
-      if (!cl.noDebugger)
-      {
-        debugger = std::make_shared<Debugger::CSupermodelDebugger>(dynamic_cast<CModel3 *>(emulator), inputs, logger);
-        if (cl.enterDebugger)
-          debugger->ForceBreak(true);
-      }
-      const int result = RunGame(game, &romSet, emulator, inputs, outputs, debugger);
-#else
       (void)logger;
       const int result = RunGame(game, &romSet, emulator, inputs, outputs);
-#endif
       delete emulator;
       return result;
     };

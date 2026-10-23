@@ -62,10 +62,10 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 37968 | 18.6% |
-| Supermodel (with or without RetroPixels changes) | 20476 | 10.1% |
-| Third-party | 145172 | 71.3% |
-| **All** | **203616** | 100% |
+| Original (RetroPixels) | 37893 | 20.2% |
+| Supermodel (with or without RetroPixels changes) | 4984 | 2.7% |
+| Third-party | 145172 | 77.2% |
+| **All** | **188049** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -74,8 +74,6 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | CPU/68K | 19423 | 272 | mixed (1% original), 19151 lines third-party |
 | CPU/PowerPC | 3190 | 3190 | original |
 | CPU/Z80 | 1304 | 1304 | original |
-| Debugger (top level) | 10744 | 0 | Supermodel |
-| Debugger/CPU | 4748 | 0 | Supermodel |
 | Graphics (top level) | 809 | 809 | original |
 | Graphics/Legacy3D | 2480 | 2480 | original |
 | Graphics/New3D | 4295 | 4295 | original |
@@ -84,7 +82,7 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | Model3/DriveBoard | 1858 | 1858 | original |
 | Network | 1580 | 1580 | original |
 | OSD (top level) | 1762 | 1762 | original |
-| OSD/SDL | 4165 | 4165 | original |
+| OSD/SDL | 4090 | 4090 | original |
 | OSD/Unix | 123 | 123 | original |
 | OSD/Windows | 1866 | 1866 | original |
 | Pkgs | 126021 | 0 | third-party |
@@ -107,3 +105,9 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
   trace lines identical), the decryption with 20,000 random keys/streams and
   save/load (2.0M output words identical in every case the old code handled
   without undefined behaviour); Windows and Linux builds start headless.
+- Debugger removed: `Src/Debugger` (the console debugger, built only with
+  `ENABLE_DEBUGGER=1`, which RetroPixels never uses) deleted, and the last
+  `SUPERMODEL_DEBUGGER` code taken out of `OSD/SDL/Main.cpp`. The batch logs
+  are in `docs/supermodel-log-SA.md` (CPU cores), `-SB` (board devices),
+  `-SC` (graphics), `-SD` (sound and drive boards), `-SE` (front end and
+  network) and `-SF` (inputs and utilities).
