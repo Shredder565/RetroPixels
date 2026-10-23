@@ -1,1163 +1,615 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * ppc.cpp
- *
- * PowerPC emulator main module. Written by Ville Linde for the original
- * Supermodel project.
- */
-
-/* IBM/Motorola PowerPC 4xx/6xx Emulator */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// ppc.cpp: PowerPC 603e interpreter for the Model 3's main CPU.
+//
+// The core is split over four files that are built as one unit (only this
+// file is compiled; it includes the others):
+//
+//   ppc.cpp     CPU state, special purpose registers, setup, save states and
+//               the register access functions declared in ppc.h
+//   ppc_ops.h   instruction field decoding and the condition/flag helpers
+//   ppc603.c    exceptions, time base and decrementer, the run loop
+//   ppc_ops.c   the instruction set (integer, branch, load/store, FPU)
+//
+// Timing model: every instruction takes one CPU cycle. The time base and the
+// decrementer count once every "timer ratio" CPU cycles (the 603e counts them
+// every 4 bus clocks; the Model 3 code adjusts the ratio every frame). The
+// count is not kept up to date instruction by instruction: each run slice
+// remembers where it started and the registers are brought up to date when
+// they are read or written and when the slice ends. A decrementer interrupt
+// is scheduled for the cycle on which the counter passes through zero.
+//
+// No MMU, caches or little-endian mode are emulated; the Model 3 software
+// does not need them. Instructions and conditions the core cannot handle
+// (invalid instruction words, unknown SPRs, little-endian mode, a jump
+// outside every fetch region) stop the CPU until the next reset.
 
 #include "ppc.h"
 
-#include <cstring>	// memset()
+#include <cfenv>
+#include <cmath>
+#include <cstring>
 #include "Supermodel.h"
 #include "CPU/Bus.h"
 
-// Typedefs that Supermodel no longer provides
-typedef unsigned int	UINT;
-
-// Model 3 context provides read/write handlers
-static class IBus	*Bus = NULL;	// pointer to Model 3 bus object (for access handlers)
-
-#ifdef SUPERMODEL_DEBUGGER
-// Pointer to current PPC debugger (if any)
-static class Debugger::CPPCDebug *PPCDebug = NULL;
+// The FPU instructions change the host rounding mode around each operation
+// when the guest selects a mode other than round-to-nearest, so the compiler
+// must not assume the default mode or fold operations across those calls.
+#if defined(_MSC_VER)
+#pragma float_control(precise, on)
+#pragma fenv_access(on)
+#elif defined(__clang__)
+#pragma STDC FENV_ACCESS ON
+#elif defined(__GNUC__)
+#pragma GCC optimize ("trapping-math,rounding-math")
+#else
+#pragma STDC FENV_ACCESS ON
 #endif
 
-void ppc603_exception(int exception);
-static void ppc603_check_interrupts(void);
+namespace {
 
-#define RD				((op >> 21) & 0x1F)
-#define RT				((op >> 21) & 0x1f)
-#define RS				((op >> 21) & 0x1f)
-#define RA				((op >> 16) & 0x1f)
-#define RB				((op >> 11) & 0x1f)
-#define RC				((op >> 6) & 0x1f)
+// Machine state register bits used by the core.
+constexpr UINT32 kMsrPow = 0x00040000;
+constexpr UINT32 kMsrIle = 0x00010000;
+constexpr UINT32 kMsrEe  = 0x00008000;
+constexpr UINT32 kMsrPr  = 0x00004000;
+constexpr UINT32 kMsrFp  = 0x00002000;
+constexpr UINT32 kMsrFe0 = 0x00000800;
+constexpr UINT32 kMsrSe  = 0x00000400;
+constexpr UINT32 kMsrBe  = 0x00000200;
+constexpr UINT32 kMsrFe1 = 0x00000100;
+constexpr UINT32 kMsrIp  = 0x00000040;
+constexpr UINT32 kMsrIr  = 0x00000020;
+constexpr UINT32 kMsrDr  = 0x00000010;
+constexpr UINT32 kMsrRi  = 0x00000002;
+constexpr UINT32 kMsrLe  = 0x00000001;
 
-#define MB				((op >> 6) & 0x1f)
-#define ME				((op >> 1) & 0x1f)
-#define SH				((op >> 11) & 0x1f)
-#define BO				((op >> 21) & 0x1f)
-#define BI				((op >> 16) & 0x1f)
-#define CRFD			((op >> 23) & 0x7)
-#define CRFA			((op >> 18) & 0x7)
-#define FXM				((op >> 12) & 0xff)
-#define SPR				(((op >> 16) & 0x1f) | ((op >> 6) & 0x3e0))
+// Fixed-point exception register bits.
+constexpr UINT32 kXerSo = 0x80000000;
+constexpr UINT32 kXerOv = 0x40000000;
+constexpr UINT32 kXerCa = 0x20000000;
 
-#define SIMM16			(INT32)(INT16)(op & 0xffff)
-#define UIMM16			(UINT32)(op & 0xffff)
+// Pending interrupt sources (bit mask).
+constexpr int kPendExternal    = 1;
+constexpr int kPendDecrementer = 2;
+constexpr int kPendSysMgmt     = 4;
 
-#define RCBIT			(op & 0x1)
-#define OEBIT			(op & 0x400)
-#define AABIT			(op & 0x2)
-#define LKBIT			(op & 0x1)
-
-#define REG(x)			(ppc.r[x])
-#define LR				(ppc.lr)
-#define CTR				(ppc.ctr)
-#define XER				(ppc.xer)
-#define CR(x)			(ppc.cr[x])
-#define MSR				(ppc.msr)
-#define SRR0			(ppc.srr0)
-#define SRR1			(ppc.srr1)
-#define SRR2			(ppc.srr2)
-#define SRR3			(ppc.srr3)
-#define EVPR			(ppc.evpr)
-#define EXIER			(ppc.exier)
-#define EXISR			(ppc.exisr)
-#define DEC				(ppc.dec)
-
-
-// Stuff added for the 6xx
-#define FPR(x)			(ppc.fpr[x])
-#define FM				((op >> 17) & 0xFF)
-#define SPRF			(((op >> 6) & 0x3E0) | ((op >> 16) & 0x1F))
-
-
-#define CHECK_SUPERVISOR()			\
-	if((ppc.msr & 0x4000) != 0){	\
-	}
-
-#define CHECK_FPU_AVAILABLE()		\
-	if((ppc.msr & 0x2000) == 0){	\
-	}
-
-static UINT32		ppc_field_xlat[256];
-
-
-
-#define FPSCR_FX		0x80000000
-#define FPSCR_FEX		0x40000000
-#define FPSCR_VX		0x20000000
-#define FPSCR_OX		0x10000000
-#define FPSCR_UX		0x08000000
-#define FPSCR_ZX		0x04000000
-#define FPSCR_XX		0x02000000
-
-
-
-#define BITMASK_0(n)	(UINT32)(((UINT64)1 << (n)) - 1)
-#define CRBIT(x)		((ppc.cr[(x) / 4] & (1 << (3 - ((x) % 4)))) ? 1 : 0)
-#define _BIT(n)			(1 << (n))
-#define GET_ROTATE_MASK(mb,me)		(ppc_rotate_mask[mb][me])
-#define ADD_CA(r,a,b)		((UINT32)(r) < (UINT32)(a))
-#define SUB_CA(r,a,b)		(!((UINT32)(a) < (UINT32)(b)))
-#define ADD_OV(r,a,b)		((~((a) ^ (b)) & ((a) ^ (r))) & 0x80000000)
-#define SUB_OV(r,a,b)		(( ((a) ^ (b)) & ((a) ^ (r))) & 0x80000000)
-
-#define XER_SO			0x80000000
-#define XER_OV			0x40000000
-#define XER_CA			0x20000000
-
-#define MSR_POW			0x00040000	/* Power Management Enable */
-#define MSR_WE			0x00040000
-#define MSR_CE			0x00020000
-#define MSR_ILE			0x00010000	/* Interrupt Little Endian Mode */
-#define MSR_EE			0x00008000	/* External Interrupt Enable */
-#define MSR_PR			0x00004000	/* Problem State */
-#define MSR_FP			0x00002000	/* Floating Point Available */
-#define MSR_ME			0x00001000	/* Machine Check Enable */
-#define MSR_FE0			0x00000800
-#define MSR_SE			0x00000400	/* Single Step Trace Enable */
-#define MSR_BE			0x00000200	/* Branch Trace Enable */
-#define MSR_DE			0x00000200
-#define MSR_FE1			0x00000100
-#define MSR_IP			0x00000040	/* Interrupt Prefix */
-#define MSR_IR			0x00000020	/* Instruction Relocate */
-#define MSR_DR			0x00000010	/* Data Relocate */
-#define MSR_PE			0x00000008
-#define MSR_PX			0x00000004
-#define MSR_RI			0x00000002	/* Recoverable Interrupt Enable */
-#define MSR_LE			0x00000001
-
-#define TSR_ENW			0x80000000
-#define TSR_WIS			0x40000000
-
-#define BYTE_REVERSE16(x)	((((x) >> 8) | ((x) << 8)) & 0xFFFF)
-#define BYTE_REVERSE32(x)	(((x) >> 24) | (((x) << 8) & 0x00FF0000) | (((x) >> 8) & 0x0000FF00) | ((x) << 24))
-
-typedef union {
-	UINT64	id;
-	double	fd;
-} FPR;
-
-typedef union {
-	UINT32 i;
-	float f;
-} FPR32;
-
-typedef struct {
-	UINT32 u;
-	UINT32 l;
-} BATENT;
-
-
-typedef struct {
-	bool	fatalError;	// if true, halt PowerPC until hard reset
-	
-	UINT32 r[32];
-	UINT32 pc;
-	UINT32 npc;
-
-	UINT32 *op;
-
-	UINT32 lr;
-	UINT32 ctr;
-	UINT32 xer;
-	UINT32 msr;
-	UINT8 cr[8];
-	UINT32 pvr;
-	UINT32 srr0;
-	UINT32 srr1;
-	UINT32 srr2;
-	UINT32 srr3;
-	UINT32 hid0;
-	UINT32 hid1;
-	UINT32 hid2;
-	UINT32 sdr1;
-	UINT32 sprg[4];
-
-	UINT32 dsisr;
-	UINT32 dar;
-	UINT32 ear;
-	UINT32 dmiss;
-	UINT32 dcmp;
-	UINT32 hash1;
-	UINT32 hash2;
-	UINT32 imiss;
-	UINT32 icmp;
-	UINT32 rpa;
-
-
-	BATENT ibat[4];
-	BATENT dbat[4];
-
-	UINT32 evpr;
-	UINT32 exier;
-	UINT32 exisr;
-	UINT32 bear;
-	UINT32 besr;
-	UINT32 iocr;
-	UINT32 br[8];
-	UINT32 iabr;
-	UINT32 esr;
-	UINT32 iccr;
-	UINT32 dccr;
-	UINT32 pit;
-	UINT32 pit_counter;
- 	UINT32 pit_int_enable;
-	UINT32 tsr;
-	UINT32 dbsr;
-	UINT32 sgr;
-	UINT32 pid;
-
-	int reserved;
-	UINT32 reserved_address;
-
-	int interrupt_pending;
-	int external_int;
-
-	UINT64 tb;		/* 56-bit timebase register */
-
-	int (*irq_callback)(int irqline);
-
-	PPC_FETCH_REGION	cur_fetch;
-	PPC_FETCH_REGION	* fetch;
-
-	// STUFF added for the 6xx series
-	UINT32 dec;
-	UINT32 fpscr;
-
-	FPR	fpr[32];
-	UINT32 sr[16];
-
-	// Timing related
-	int timer_ratio;
-	UINT32 timer_frac;
-	int tb_base_icount;
-	int dec_base_icount;
-	int dec_trigger_cycle;
-	
-	// Cycle related
-	UINT64 total_cycles;
-	int icount;
-	int cur_cycles;
-	int bus_freq_multiplier;
-	int cycles_per_second;
-
-#if HAS_PPC603
-	int is603;
-#endif
-#if HAS_PPC602
-	int is602;
-#endif
-} PPC_REGS;
-
-
-
-typedef struct {
-	int code;
-	int subcode;
-	void (* handler)(UINT32);
-} PPC_OPCODE;
-
-
-
-static PPC_REGS ppc;
-static UINT32 ppc_rotate_mask[32][32];
-
-static void ppc_change_pc(UINT32 newpc)
+// One block address translation register pair (upper word first, as saved).
+struct BatPair
 {
-	UINT32 offset	= newpc - ppc.cur_fetch.start;		//  unsigned wrap around can happen, that's defined behavour 
-	UINT32 range	= ppc.cur_fetch.end - ppc.cur_fetch.start;
+  UINT32 upper;
+  UINT32 lower;
+};
 
-	if (offset <= range)
-	{
-		ppc.op = &ppc.cur_fetch.ptr[offset / 4];
-		return;
-	}
+struct CpuState
+{
+  bool    stopped;          // hit something it cannot run: wait for reset
 
-	for(UINT32 i = 0; ppc.fetch[i].ptr != NULL; i++)
-	{
-		offset	= newpc - ppc.fetch[i].start;
-		range	= ppc.fetch[i].end - ppc.fetch[i].start;
+  // User registers
+  UINT32  gpr[32];
+  UINT64  fpr[32];          // raw IEEE double bits
+  UINT8   cr[8];            // condition register, one 4-bit field per entry
+  UINT32  lr;
+  UINT32  ctr;
+  UINT32  xer;
+  UINT32  fpscr;
 
-		if (offset <= range)
-		{
-			ppc.cur_fetch = ppc.fetch[i];
+  // Program counter: pc is the instruction being executed, nextPc the one
+  // after it (what an interrupt returns to). fetch points at nextPc's word.
+  UINT32  pc;
+  UINT32  nextPc;
+  UINT32  *fetch;
 
-			ppc.op = &ppc.cur_fetch.ptr[offset / 4];
-			return;
-		}
-	}
+  // Supervisor registers
+  UINT32  msr;
+  UINT32  pvr;
+  UINT32  srr0, srr1, srr2, srr3;
+  UINT32  hid0, hid1, hid2;
+  UINT32  sdr1;
+  UINT32  sprg[4];
+  UINT32  dsisr, dar, ear;
+  UINT32  dmiss, dcmp, hash1, hash2, imiss, icmp, rpa;   // 603 TLB miss registers
+  BatPair ibat[4];
+  BatPair dbat[4];
+  UINT32  iabr;
+  UINT32  sr[16];
 
-	DebugLog("Invalid PC %08X, previous PC %08X\n", newpc, ppc.pc);
-	ErrorLog("PowerPC is out of bounds. Halting emulation until reset.");
-	ppc.fatalError = true;
+  // Words of the save-state layout that belong to registers of other
+  // PowerPC families (4xx timers, bank and DMA registers). The 603e has none
+  // of them; they are only carried through save states.
+  UINT32  foreignA[14];
+  UINT32  foreignB[10];
+  int     foreignIrq;
+
+  // lwarx/stwcx. reservation
+  int     reserved;
+  UINT32  reservedAddr;
+
+  // Interrupts
+  int     pending;
+
+  // Time base and decrementer (see the timing note at the top)
+  UINT64  tb;
+  UINT32  dec;
+  UINT32  timerCarry;       // CPU cycles towards the next tick, between slices
+  int     timerRatio;       // CPU cycles per tick
+  int     tbMark;           // value of 'left' the time base was last synced to
+  int     decMark;          // same for the decrementer
+  int     decFireAt;        // 'left' value at which the decrementer passes zero
+
+  // Cycle accounting
+  UINT64  cyclesDone;       // cycles of the slices that have ended
+  int     left;             // cycles left in the running slice
+  int     sliceLength;      // length of the running slice
+  int     busMultiplier;    // core:bus ratio x2
+  int     clockHz;
+
+  // Instruction fetch
+  PPC_FETCH_REGION  lastRegion;
+  PPC_FETCH_REGION  *regions;
+};
+
+CpuState cpu;
+IBus *bus = nullptr;
+
+// PLL_CFG settings for each core:bus ratio (rows: ratio x2 = 1..12) and bus
+// clock (columns: 16, 20, 25, 33, 40, 50, 60, 66, 75 MHz), from the 603e,
+// 603ev and 603r hardware specifications. '.' marks a combination the part
+// does not support, which reads back as all ones.
+const char *const kPll603e[12] = {
+  ".........", "222111.0.", ".....c.c.", "555444...",
+  "...66....", "..88.....", ".ee......", "aaa......",
+  ".........", ".........", ".........", "........."
+};
+const char *const kPll603ev[12] = {
+  ".........", ".........", ".........", ".......44",
+  ".....6666", "....88888", "....eeee.", "...aaaa..",
+  "...777...", "..bbb....", "..999....", "..ddd...."
+};
+const char *const kPll603r[12] = {
+  ".........", ".........", ".........", "....55555",
+  "......666", ".....8888", ".....eeee", "....aaaaa",
+  "...77777.", "...bbbb..", "...999...", "..dddd..."
+};
+
+int PllSetting(const char *const table[12], int ratioX2, unsigned busIndex)
+{
+  if (ratioX2 < 1 || ratioX2 > 12 || busIndex >= 9)
+    return -1;
+  char c = table[ratioX2 - 1][busIndex];
+  if (c == '.')
+    return -1;
+  return (c <= '9') ? (c - '0') : (c - 'a' + 10);
 }
 
-static inline UINT8 READ8(UINT32 address)
+const int kBusHz[9] = { 16000000, 20000000, 25000000, 33000000, 40000000,
+                        50000000, 60000000, 66000000, 75000000 };
+
+void Stop(const char *why)
 {
-	return Bus->Read8(address);
+  ErrorLog("PowerPC: %s. Halting emulation until reset.", why);
+  cpu.stopped = true;
 }
 
-static inline UINT16 READ16(UINT32 address)
+// Points the fetch pointer at an address. The last region used is tried
+// first, then the region list in order.
+void FetchFrom(UINT32 addr)
 {
-	return Bus->Read16(address);
+  UINT32 offset = addr - cpu.lastRegion.start;
+  if (offset <= cpu.lastRegion.end - cpu.lastRegion.start)
+  {
+    cpu.fetch = cpu.lastRegion.ptr + offset / 4;
+    return;
+  }
+  for (PPC_FETCH_REGION *r = cpu.regions; r->ptr != NULL; r++)
+  {
+    offset = addr - r->start;
+    if (offset <= r->end - r->start)
+    {
+      cpu.lastRegion = *r;
+      cpu.fetch = r->ptr + offset / 4;
+      return;
+    }
+  }
+  DebugLog("PowerPC: no code at %08X (jumping from %08X)\n", addr, cpu.pc);
+  Stop("program counter left the mapped code");
 }
 
-static inline UINT32 READ32(UINT32 address)
+inline double FprValue(unsigned n)
 {
-	return Bus->Read32(address);
+  double d;
+  memcpy(&d, &cpu.fpr[n], sizeof(d));
+  return d;
 }
 
-static inline UINT64 READ64(UINT32 address)
+inline void SetFprValue(unsigned n, double d)
 {
-	return Bus->Read64(address);
+  memcpy(&cpu.fpr[n], &d, sizeof(d));
 }
 
-static inline void WRITE8(UINT32 address, UINT8 data)
+// Defined in ppc603.c
+void PollInterrupts();
+UINT64 ReadTimeBase();
+void WriteTimeBaseLow(UINT32 value);
+void WriteTimeBaseHigh(UINT32 value);
+UINT32 ReadDecrementer();
+void WriteDecrementer(UINT32 value);
+
+void SetMsr(UINT32 value)
 {
-	Bus->Write8(address,data);
+  if (value & (kMsrIle | kMsrLe))
+  {
+    DebugLog("PowerPC: MSR %08X selects little-endian mode\n", value);
+    Stop("little-endian mode is not emulated");
+  }
+  cpu.msr = value;
+  PollInterrupts();
 }
 
-static inline void WRITE16(UINT32 address, UINT16 data)
+UINT32 PackedCr()
 {
-	Bus->Write16(address,data);
+  UINT32 v = 0;
+  for (int i = 0; i < 8; i++)
+    v = (v << 4) | cpu.cr[i];
+  return v;
 }
 
-static inline void WRITE32(UINT32 address, UINT32 data)
+// Special purpose registers by number.
+enum : unsigned
 {
-	Bus->Write32(address,data);
+  kSprXer = 1, kSprLr = 8, kSprCtr = 9, kSprDsisr = 18, kSprDar = 19,
+  kSprDec = 22, kSprSdr1 = 25, kSprSrr0 = 26, kSprSrr1 = 27,
+  kSprTbl = 268, kSprTbu = 269, kSprSprg0 = 272, kSprEar = 282,
+  kSprTblWrite = 284, kSprTbuWrite = 285, kSprPvr = 287,
+  kSprBatFirst = 528, kSprBatLast = 543,
+  kSprDmiss = 976, kSprDcmp, kSprHash1, kSprHash2, kSprImiss, kSprIcmp, kSprRpa,
+  kSprHid0 = 1008, kSprHid1 = 1009, kSprIabr = 1010, kSprHid2 = 1011
+};
+
+// The register an SPR number names, for the plain storage registers (the
+// ones with no side effect on read or write). Null if none.
+UINT32 *PlainSpr(unsigned spr)
+{
+  if (spr >= kSprBatFirst && spr <= kSprBatLast)
+  {
+    unsigned i = spr - kSprBatFirst;
+    BatPair &b = (i < 8) ? cpu.ibat[(i & 7) >> 1] : cpu.dbat[(i & 7) >> 1];
+    return (i & 1) ? &b.lower : &b.upper;
+  }
+  if (spr >= kSprSprg0 && spr < kSprSprg0 + 4)
+    return &cpu.sprg[spr - kSprSprg0];
+  switch (spr)
+  {
+  case kSprXer:   return &cpu.xer;
+  case kSprLr:    return &cpu.lr;
+  case kSprCtr:   return &cpu.ctr;
+  case kSprDsisr: return &cpu.dsisr;
+  case kSprDar:   return &cpu.dar;
+  case kSprSdr1:  return &cpu.sdr1;
+  case kSprSrr0:  return &cpu.srr0;
+  case kSprSrr1:  return &cpu.srr1;
+  case kSprEar:   return &cpu.ear;
+  case kSprDmiss: return &cpu.dmiss;
+  case kSprDcmp:  return &cpu.dcmp;
+  case kSprHash1: return &cpu.hash1;
+  case kSprHash2: return &cpu.hash2;
+  case kSprImiss: return &cpu.imiss;
+  case kSprIcmp:  return &cpu.icmp;
+  case kSprRpa:   return &cpu.rpa;
+  case kSprHid0:  return &cpu.hid0;
+  case kSprHid1:  return &cpu.hid1;
+  case kSprHid2:  return &cpu.hid2;
+  default:        return nullptr;
+  }
 }
 
-static inline void WRITE64(UINT32 address, UINT64 data)
+UINT32 ReadSpr(unsigned spr)
 {
-	Bus->Write64(address,data);
+  if (UINT32 *reg = PlainSpr(spr))
+    return *reg;
+  switch (spr)
+  {
+  case kSprPvr:      return cpu.pvr;
+  case kSprDec:      return ReadDecrementer();
+  case kSprTblWrite: return (UINT32) ReadTimeBase();
+  case kSprTbuWrite: return (UINT32) (ReadTimeBase() >> 32);
+  default:
+    // Includes 268/269: the time base is read with mftb on the 603e.
+    DebugLog("PowerPC: mfspr %u at %08X\n", spr, cpu.pc);
+    Stop("read from an unknown special purpose register");
+    return 0;
+  }
 }
 
-
-/*********************************************************************/
-
-
-static inline void SET_CR0(INT32 rd)
+void WriteSpr(unsigned spr, UINT32 value)
 {
-	if( rd < 0 ) {
-		CR(0) = 0x8;
-	} else if( rd > 0 ) {
-		CR(0) = 0x4;
-	} else {
-		CR(0) = 0x2;
-	}
-
-	if( XER & XER_SO )
-		CR(0) |= 0x1;
+  if (UINT32 *reg = PlainSpr(spr))
+  {
+    *reg = value;
+    return;
+  }
+  switch (spr)
+  {
+  case kSprPvr:                   // read only
+    return;
+  case kSprIabr:
+    cpu.iabr = value;
+    return;
+  case kSprDec:
+    WriteDecrementer(value);
+    return;
+  case kSprTbl:
+  case kSprTblWrite:
+    WriteTimeBaseLow(value);
+    return;
+  case kSprTbu:
+  case kSprTbuWrite:
+    WriteTimeBaseHigh(value);
+    return;
+  default:
+    DebugLog("PowerPC: mtspr %u at %08X\n", spr, cpu.pc);
+    Stop("wrote to an unknown special purpose register");
+    return;
+  }
 }
 
-static inline void SET_CR1(void)
-{
-	CR(1) = (ppc.fpscr >> 28) & 0xf;
-}
+} // anonymous namespace
 
-static inline void SET_ADD_OV(UINT32 rd, UINT32 ra, UINT32 rb)
-{
-	if( ADD_OV(rd, ra, rb) )
-		XER |= XER_SO | XER_OV;
-	else
-		XER &= ~XER_OV;
-}
-
-static inline void SET_SUB_OV(UINT32 rd, UINT32 ra, UINT32 rb)
-{
-	if( SUB_OV(rd, ra, rb) )
-		XER |= XER_SO | XER_OV;
-	else
-		XER &= ~XER_OV;
-}
-
-static inline void SET_ADD_CA(UINT32 rd, UINT32 ra, UINT32 rb)
-{
-	if( ADD_CA(rd, ra, rb) )
-		XER |= XER_CA;
-	else
-		XER &= ~XER_CA;
-}
-
-static inline void SET_SUB_CA(UINT32 rd, UINT32 ra, UINT32 rb)
-{
-	if( SUB_CA(rd, ra, rb) )
-		XER |= XER_CA;
-	else
-		XER &= ~XER_CA;
-}
-
-static inline UINT32 check_condition_code(UINT32 bo, UINT32 bi)
-{
-	UINT32 bo0 = (bo & 0x10) ? 1 : 0;
-	UINT32 bo1 = (bo & 0x08) ? 1 : 0;
-	UINT32 bo2 = (bo & 0x04) ? 1 : 0;
-	UINT32 bo3 = (bo & 0x02) ? 1 : 0;
-
-	if (bo2 == 0)
-		--CTR;
-
-	UINT32 ctr_ok = bo2 | ((CTR != 0) ^ bo3);
-	UINT32 condition_ok = bo0 | (CRBIT(bi) ^ (bo1 ^ 0x1));
-
-	return ctr_ok & condition_ok;
-}
-
-static inline UINT64 ppc_read_timebase(void)
-{
-	int cycles = ppc.tb_base_icount - ppc.icount;
-
-	// Timebase is incremented according to timer ratio, so adjust value accordingly
-	return ppc.tb + (cycles / ppc.timer_ratio);
-}
-
-static inline void ppc_write_timebase_l(UINT32 tbl)
-{
-	UINT64 tb = ppc_read_timebase();
-
-	ppc.tb_base_icount = ppc.icount + ((ppc.tb_base_icount - ppc.icount) % ppc.timer_ratio);
-
-	ppc.tb = (tb&~0xffffffff)|tbl;
-}
-
-static inline void ppc_write_timebase_h(UINT32 tbh)
-{
-	UINT64 tb = ppc_read_timebase();
-
-	ppc.tb_base_icount = ppc.icount + ((ppc.tb_base_icount - ppc.icount) % ppc.timer_ratio);
-	
-	ppc.tb = (tb&0xffffffff)|((UINT64)(tbh) << 32);
-}
-
-static inline UINT32 read_decrementer(void)
-{
-	int cycles = ppc.dec_base_icount - ppc.icount;
-
-	// Decrementer is decremented at same rate as timebase, so adjust value accordingly
-	return DEC - (cycles / ppc.timer_ratio);
-}
-
-static inline void write_decrementer(UINT32 value)
-{
-	if (((value&0x80000000) && !(read_decrementer()&0x80000000)))
-	{
-		/* trigger interrupt */
-		ppc.interrupt_pending |= 0x2;
-		ppc603_check_interrupts();
-	}
-
-	ppc.dec_base_icount = ppc.icount + ((ppc.dec_base_icount - ppc.icount) % ppc.timer_ratio);
-	
-	DEC = value;
-
-	// Check if decrementer exception occurs during execution (exception occurs after decrementer
-	// has passed through zero)
-	if ((UINT32)(ppc.dec_base_icount / ppc.timer_ratio) > DEC)
-		ppc.dec_trigger_cycle = ppc.dec_base_icount - ((1 + DEC) * ppc.timer_ratio);
-	else
-		ppc.dec_trigger_cycle = 0x7fffffff;
-}
-
-/*********************************************************************/
-
-static inline void ppc_set_spr(int spr, UINT32 value)
-{
-	switch (spr)
-	{
-		case SPR_LR:		LR = value; return;
-		case SPR_CTR:		CTR = value; return;
-		case SPR_XER:		XER = value; return;
-		case SPR_SRR0:		ppc.srr0 = value; return;
-		case SPR_SRR1:		ppc.srr1 = value; return;
-		case SPR_SPRG0:		ppc.sprg[0] = value; return;
-		case SPR_SPRG1:		ppc.sprg[1] = value; return;
-		case SPR_SPRG2:		ppc.sprg[2] = value; return;
-		case SPR_SPRG3:		ppc.sprg[3] = value; return;
-		case SPR_PVR:		return;
-			
-		case SPR603E_DEC:
-			write_decrementer(value);
-			return;
-
-		case SPR603E_TBL_W:
-		case SPR603E_TBL_R: // special 603e case
-			ppc_write_timebase_l(value);
-			return;
-
-		case SPR603E_TBU_R:
-		case SPR603E_TBU_W: // special 603e case
-			ppc_write_timebase_h(value);
-			return;
-
-		case SPR603E_HID0:			ppc.hid0 = value; return;
-		case SPR603E_HID1:			ppc.hid1 = value; return;
-		case SPR603E_HID2:			ppc.hid2 = value; return;
-
-		case SPR603E_DSISR:			ppc.dsisr = value; return;
-		case SPR603E_DAR:			ppc.dar = value; return;
-		case SPR603E_EAR:			ppc.ear = value; return;
-		case SPR603E_DMISS:			ppc.dmiss = value; return;
-		case SPR603E_DCMP:			ppc.dcmp = value; return;
-		case SPR603E_HASH1:			ppc.hash1 = value; return;
-		case SPR603E_HASH2:			ppc.hash2 = value; return;
-		case SPR603E_IMISS:			ppc.imiss = value; return;
-		case SPR603E_ICMP:			ppc.icmp = value; return;
-		case SPR603E_RPA:			ppc.rpa = value; return;
-
-		case SPR603E_IBAT0L:		ppc.ibat[0].l = value; return;
-		case SPR603E_IBAT0U:		ppc.ibat[0].u = value; return;
-		case SPR603E_IBAT1L:		ppc.ibat[1].l = value; return;
-		case SPR603E_IBAT1U:		ppc.ibat[1].u = value; return;
-		case SPR603E_IBAT2L:		ppc.ibat[2].l = value; return;
-		case SPR603E_IBAT2U:		ppc.ibat[2].u = value; return;
-		case SPR603E_IBAT3L:		ppc.ibat[3].l = value; return;
-		case SPR603E_IBAT3U:		ppc.ibat[3].u = value; return;
-		case SPR603E_DBAT0L:		ppc.dbat[0].l = value; return;
-		case SPR603E_DBAT0U:		ppc.dbat[0].u = value; return;
-		case SPR603E_DBAT1L:		ppc.dbat[1].l = value; return;
-		case SPR603E_DBAT1U:		ppc.dbat[1].u = value; return;
-		case SPR603E_DBAT2L:		ppc.dbat[2].l = value; return;
-		case SPR603E_DBAT2U:		ppc.dbat[2].u = value; return;
-		case SPR603E_DBAT3L:		ppc.dbat[3].l = value; return;
-		case SPR603E_DBAT3U:		ppc.dbat[3].u = value; return;
-
-		case SPR603E_SDR1:
-			ppc.sdr1 = value;
-			return;
-
-		case SPR603E_IABR:			ppc.iabr = value; return;
-	}
-
-	ErrorLog("PowerPC wrote to an invalid register. Halting emulation until reset.");
-	DebugLog("ppc: set_spr: unknown spr %d (%03X) !\n", spr, spr);
-	ppc.fatalError = true;
-}
-
-static inline UINT32 ppc_get_spr(int spr)
-{
-	switch(spr)
-	{
-		case SPR_LR:		return LR;
-		case SPR_CTR:		return CTR;
-		case SPR_XER:		return XER;
-		case SPR_SRR0:		return ppc.srr0;
-		case SPR_SRR1:		return ppc.srr1;
-		case SPR_SPRG0:		return ppc.sprg[0];
-		case SPR_SPRG1:		return ppc.sprg[1];
-		case SPR_SPRG2:		return ppc.sprg[2];
-		case SPR_SPRG3:		return ppc.sprg[3];
-		case SPR_PVR:		return ppc.pvr;
-		case SPR603E_TBL_R:
-			DebugLog("ppc: get_spr: TBL_R\n");
-			break;
-
-		case SPR603E_TBU_R:
-			DebugLog("ppc: get_spr: TBU_R\n");
-			break;
-
-		case SPR603E_TBL_W:		return (UINT32)(ppc_read_timebase());
-		case SPR603E_TBU_W:		return (UINT32)(ppc_read_timebase() >> 32);
-		case SPR603E_HID0:		return ppc.hid0;
-		case SPR603E_HID1:		return ppc.hid1;
-		case SPR603E_HID2:		return ppc.hid2;
-		case SPR603E_DEC:		return read_decrementer();
-		case SPR603E_SDR1:		return ppc.sdr1;
-		case SPR603E_DSISR:		return ppc.dsisr;
-		case SPR603E_DAR:		return ppc.dar;
-		case SPR603E_EAR:		return ppc.ear;
-		case SPR603E_DMISS:		return ppc.dmiss;
-		case SPR603E_DCMP:		return ppc.dcmp;
-		case SPR603E_HASH1:		return ppc.hash1;
-		case SPR603E_HASH2:		return ppc.hash2;
-		case SPR603E_IMISS:		return ppc.imiss;
-		case SPR603E_ICMP:		return ppc.icmp;
-		case SPR603E_RPA:		return ppc.rpa;
-		case SPR603E_IBAT0L:	return ppc.ibat[0].l;
-		case SPR603E_IBAT0U:	return ppc.ibat[0].u;
-		case SPR603E_IBAT1L:	return ppc.ibat[1].l;
-		case SPR603E_IBAT1U:	return ppc.ibat[1].u;
-		case SPR603E_IBAT2L:	return ppc.ibat[2].l;
-		case SPR603E_IBAT2U:	return ppc.ibat[2].u;
-		case SPR603E_IBAT3L:	return ppc.ibat[3].l;
-		case SPR603E_IBAT3U:	return ppc.ibat[3].u;
-		case SPR603E_DBAT0L:	return ppc.dbat[0].l;
-		case SPR603E_DBAT0U:	return ppc.dbat[0].u;
-		case SPR603E_DBAT1L:	return ppc.dbat[1].l;
-		case SPR603E_DBAT1U:	return ppc.dbat[1].u;
-		case SPR603E_DBAT2L:	return ppc.dbat[2].l;
-		case SPR603E_DBAT2U:	return ppc.dbat[2].u;
-		case SPR603E_DBAT3L:	return ppc.dbat[3].l;
-		case SPR603E_DBAT3U:	return ppc.dbat[3].u;
-	}
-	
-	ErrorLog("PowerPC read from an invalid register. Halting emulation until reset.");
-	DebugLog("ppc: get_spr: unknown spr %d (%03X) !\n", spr, spr);
-	ppc.fatalError = true;
-	return 0;
-}
-
-static inline void ppc_set_msr(UINT32 value)
-{
-	if( value & (MSR_ILE | MSR_LE) )
-	{
-		ErrorLog("PowerPC entered an unemulated mode. Halting emulation until reset.");
-		DebugLog("ppc: set_msr: little_endian mode not supported !\n");
-		ppc.fatalError = true;
-	}
-
-	MSR = value;
-
-	ppc603_check_interrupts();
-}
-
-static inline UINT32 ppc_get_msr(void)
-{
-	return MSR;
-}
-
-static inline UINT32 ppc_get_cr(void)
-{
-	return CR(0) << 28 | CR(1) << 24 | CR(2) << 20 | CR(3) << 16 | CR(4) << 12 | CR(5) << 8 | CR(6) << 4 | CR(7);
-}
-
-/***********************************************************************/
-
-static void (* optable19[1024])(UINT32);
-static void (* optable31[1024])(UINT32);
-static void (* optable59[1024])(UINT32);
-static void (* optable63[1024])(UINT32);
-static void (* optable[64])(UINT32);
-
-#include "ppc603.c"
-
-/********************************************************************/
-
-#include "ppc_ops.c"
 #include "ppc_ops.h"
+#include "ppc603.c"
+#include "ppc_ops.c"
 
-/* Initialization and shutdown */
-
-void ppc_base_init(void)
-{
-	size_t i,j;
-
-	memset(&ppc, 0, sizeof(ppc));
-
-	for( i=0; i < 64; i++ ) {
-		optable[i] = ppc_invalid;
-	}
-	for( i=0; i < 1024; i++ ) {
-		optable19[i] = ppc_invalid;
-		optable31[i] = ppc_invalid;
-		optable59[i] = ppc_invalid;
-		optable63[i] = ppc_invalid;
-	}
-
-	/* Fill the opcode tables */
-	for( i=0; i < (sizeof(ppc_opcode_common) / sizeof(PPC_OPCODE)); i++ ) {
-
-		switch(ppc_opcode_common[i].code)
-		{
-			case 19:
-				optable19[ppc_opcode_common[i].subcode] = ppc_opcode_common[i].handler;
-				break;
-
-			case 31:
-				optable31[ppc_opcode_common[i].subcode] = ppc_opcode_common[i].handler;
-				break;
-
-			case 59:
-			case 63:
-				break;
-
-			default:
-				optable[ppc_opcode_common[i].code] = ppc_opcode_common[i].handler;
-		}
-
-	}
-
-	/* Calculate rotate mask table */
-	for( i=0; i < 32; i++ ) {
-		for( j=0; j < 32; j++ ) {
-			int mb = i;
-			int me = j;
-			UINT32 mask = ((UINT32)0xFFFFFFFF >> mb) ^ ((me >= 31) ? 0 : ((UINT32)0xFFFFFFFF >> (me + 1)));
-			if( mb > me )
-				mask = ~mask;
-
-			ppc_rotate_mask[i][j] = mask;
-		}
-	}
-}
+/******************************************************************************
+ Setup
+******************************************************************************/
 
 void ppc_init(const PPC_CONFIG *config)
 {
-	int pll_config = 0;
-	float multiplier;
-	int i ;
+  cpu = CpuState();
 
-	ppc_base_init() ;
+  cpu.pvr = config->pvr;
 
-	optable[48] = ppc_lfs;
-	optable[49] = ppc_lfsu;
-	optable[50] = ppc_lfd;
-	optable[51] = ppc_lfdu;
-	optable[52] = ppc_stfs;
-	optable[53] = ppc_stfsu;
-	optable[54] = ppc_stfd;
-	optable[55] = ppc_stfdu;
-	optable31[631] = ppc_lfdux;
-	optable31[599] = ppc_lfdx;
-	optable31[567] = ppc_lfsux;
-	optable31[535] = ppc_lfsx;
-	optable31[595] = ppc_mfsr;
-	optable31[659] = ppc_mfsrin;
-	optable31[371] = ppc_mftb;
-	optable31[210] = ppc_mtsr;
-	optable31[242] = ppc_mtsrin;
-	optable31[758] = ppc_dcba;
-	optable31[759] = ppc_stfdux;
-	optable31[727] = ppc_stfdx;
-	optable31[983] = ppc_stfiwx;
-	optable31[695] = ppc_stfsux;
-	optable31[663] = ppc_stfsx;
-	optable31[370] = ppc_tlbia;
-	optable31[306] = ppc_tlbie;
-	optable31[566] = ppc_tlbsync;
-	optable31[310] = ppc_eciwx;
-	optable31[438] = ppc_ecowx;
+  // Core:bus ratio from its two digits (0x25 = 2.5), kept as ratio x2.
+  float ratio = (float) ((config->bus_frequency_multiplier >> 4) & 0xF) +
+                (float) (config->bus_frequency_multiplier & 0xF) / 10.0f;
+  cpu.busMultiplier = (int) (ratio * 2);
 
-	optable63[264] = ppc_fabsx;
-	optable63[21] = ppc_faddx;
-	optable63[32] = ppc_fcmpo;
-	optable63[0] = ppc_fcmpu;
-	optable63[14] = ppc_fctiwx;
-	optable63[15] = ppc_fctiwzx;
-	optable63[18] = ppc_fdivx;
-	optable63[72] = ppc_fmrx;
-	optable63[136] = ppc_fnabsx;
-	optable63[40] = ppc_fnegx;
-	optable63[12] = ppc_frspx;
-	optable63[26] = ppc_frsqrtex;
-	optable63[22] = ppc_fsqrtx;
-	optable63[20] = ppc_fsubx;
-	optable63[583] = ppc_mffsx;
-	optable63[70] = ppc_mtfsb0x;
-	optable63[38] = ppc_mtfsb1x;
-	optable63[711] = ppc_mtfsfx;
-	optable63[134] = ppc_mtfsfix;
-	optable63[64] = ppc_mcrfs;
+  // The time base and decrementer tick every 4 bus clocks.
+  cpu.timerRatio = 2 * cpu.busMultiplier;
 
-	optable59[21] = ppc_faddsx;
-	optable59[18] = ppc_fdivsx;
-	optable59[24] = ppc_fresx;
-	optable59[22] = ppc_fsqrtsx;
-	optable59[20] = ppc_fsubsx;
+  unsigned busIndex = (unsigned) config->bus_frequency;
+  if (busIndex < 9)
+    cpu.clockHz = (int) (ratio * (float) kBusHz[busIndex]);
 
-	for(i = 0; i < 32; i++)
-	{
-		optable63[i * 32 | 29] = ppc_fmaddx;
-		optable63[i * 32 | 28] = ppc_fmsubx;
-		optable63[i * 32 | 25] = ppc_fmulx;
-		optable63[i * 32 | 31] = ppc_fnmaddx;
-		optable63[i * 32 | 30] = ppc_fnmsubx;
-		optable63[i * 32 | 23] = ppc_fselx;
+  // HID1 reports the PLL configuration the part was strapped with.
+  int pll = 0;
+  switch (config->pvr)
+  {
+  case PPC_MODEL_603E:  pll = PllSetting(kPll603e, cpu.busMultiplier, busIndex); break;
+  case PPC_MODEL_603EV: pll = PllSetting(kPll603ev, cpu.busMultiplier, busIndex); break;
+  case PPC_MODEL_603R:  pll = PllSetting(kPll603r, cpu.busMultiplier, busIndex); break;
+  default:              break;
+  }
+  cpu.hid1 = (UINT32) pll << 28;
+}
 
-		optable59[i * 32 | 29] = ppc_fmaddsx;
-		optable59[i * 32 | 28] = ppc_fmsubsx;
-		optable59[i * 32 | 25] = ppc_fmulsx;
-		optable59[i * 32 | 31] = ppc_fnmaddsx;
-		optable59[i * 32 | 30] = ppc_fnmsubsx;
-	}
+void ppc_attach_bus(IBus *BusPtr)
+{
+  bus = BusPtr;
+}
 
-	for(i = 0; i < 256; i++)
-	{
-		ppc_field_xlat[i] =
-			((i & 0x80) ? 0xF0000000 : 0) |
-			((i & 0x40) ? 0x0F000000 : 0) |
-			((i & 0x20) ? 0x00F00000 : 0) |
-			((i & 0x10) ? 0x000F0000 : 0) |
-			((i & 0x08) ? 0x0000F000 : 0) |
-			((i & 0x04) ? 0x00000F00 : 0) |
-			((i & 0x02) ? 0x000000F0 : 0) |
-			((i & 0x01) ? 0x0000000F : 0);
-	}
+void ppc_set_fetch(PPC_FETCH_REGION *fetch)
+{
+  cpu.regions = fetch;
+}
 
-	ppc.pvr = config->pvr;
-
-	multiplier = (float)((config->bus_frequency_multiplier >> 4) & 0xf) +
-				 (float)(config->bus_frequency_multiplier & 0xf) / 10.0f;
-	ppc.bus_freq_multiplier = (int)(multiplier * 2);
-
-	// tb and dec are incremented every four bus cycles, so calculate default timer ratio
-	ppc.timer_ratio = 2 * ppc.bus_freq_multiplier;  
-	
-	switch (config->bus_frequency)
-	{
-		case BUS_FREQUENCY_16MHZ: ppc.cycles_per_second = (int)(multiplier * 16000000); break;
-		case BUS_FREQUENCY_20MHZ: ppc.cycles_per_second = (int)(multiplier * 20000000); break;
-		case BUS_FREQUENCY_25MHZ: ppc.cycles_per_second = (int)(multiplier * 25000000); break;
-		case BUS_FREQUENCY_33MHZ: ppc.cycles_per_second = (int)(multiplier * 33000000); break;
-		case BUS_FREQUENCY_40MHZ: ppc.cycles_per_second = (int)(multiplier * 40000000); break;
-		case BUS_FREQUENCY_50MHZ: ppc.cycles_per_second = (int)(multiplier * 50000000); break;
-		case BUS_FREQUENCY_60MHZ: ppc.cycles_per_second = (int)(multiplier * 60000000); break;
-		case BUS_FREQUENCY_66MHZ: ppc.cycles_per_second = (int)(multiplier * 66000000); break;
-		case BUS_FREQUENCY_75MHZ: ppc.cycles_per_second = (int)(multiplier * 75000000); break;
-	}
-	
-	switch(config->pvr)
-	{
-		case PPC_MODEL_603E:	pll_config = mpc603e_pll_config[ppc.bus_freq_multiplier-1][config->bus_frequency]; break;
-		case PPC_MODEL_603EV:	pll_config = mpc603ev_pll_config[ppc.bus_freq_multiplier-1][config->bus_frequency]; break;
-		case PPC_MODEL_603R:	pll_config = mpc603r_pll_config[ppc.bus_freq_multiplier-1][config->bus_frequency]; break;
-		default: break;
-	}
-
-	if (pll_config == -1)
-	{
-		//ErrorLog("PPC: Invalid bus/multiplier combination (bus frequency = %d, multiplier = %1.1f)", config->bus_frequency, multiplier);
-	}
-
-	ppc.hid1 = pll_config << 28;
+void ppc_reset(void)
+{
+  cpu.stopped = false;
+  cpu.pc = 0xFFF00100;            // system reset vector, MSR[IP] set
+  cpu.nextPc = cpu.pc;
+  SetMsr(kMsrIp);
+  FetchFrom(cpu.pc);
+  cpu.hid0 = 1;
+  cpu.pending = 0;
+  cpu.tb = 0;
+  cpu.timerCarry = 0;
+  cpu.dec = 0xFFFFFFFF;
+  cpu.cyclesDone = 0;
+  cpu.sliceLength = 0;
+  cpu.left = 0;
 }
 
 void ppc_shutdown(void)
 {
-
 }
+
+/******************************************************************************
+ Running
+******************************************************************************/
 
 void ppc_set_irq_line(int irqline)
 {
-	if (irqline)
-	{
-		ppc.interrupt_pending |= 0x1;
-		ppc603_check_interrupts();
-	}
-	else
-	{
-		ppc.interrupt_pending &= ~0x1;
-	}
-}
-
-UINT32 ppc_get_pc(void)
-{
-	return ppc.pc;
-}
-
-void ppc_set_fetch(PPC_FETCH_REGION * fetch)
-{
-	ppc.fetch = fetch;
+  if (irqline)
+  {
+    cpu.pending |= kPendExternal;
+    PollInterrupts();
+  }
+  else
+    cpu.pending &= ~kPendExternal;
 }
 
 UINT64 ppc_total_cycles(void)
 {
-	return ppc.total_cycles + (UINT64)(ppc.cur_cycles - ppc.icount);
+  return cpu.cyclesDone + (UINT64) (cpu.sliceLength - cpu.left);
 }
 
-int ppc_get_cycles_per_sec()
+int ppc_get_cycles_per_sec(void)
 {
-	return ppc.cycles_per_second;
+  return cpu.clockHz;
 }
 
-int ppc_get_bus_freq_multipler()
+int ppc_get_bus_freq_multipler(void)
 {
-	return ppc.bus_freq_multiplier;
+  return cpu.busMultiplier;
+}
+
+int ppc_get_timer_ratio(void)
+{
+  return cpu.timerRatio;
 }
 
 void ppc_set_timer_ratio(int ratio)
 {
-	ppc.timer_ratio = ratio;
-}
-
-int ppc_get_timer_ratio()
-{
-	return ppc.timer_ratio;
+  cpu.timerRatio = ratio;
 }
 
 /******************************************************************************
- Supermodel Interface
+ Save states
+
+ Block "PowerPC". The layout is fixed (older save states must still load):
+ slice counters, the registers, then words for registers the 603e does not
+ have, the reservation, the time base and decrementer, the FPU and the
+ segment registers. All values are in host byte order.
 ******************************************************************************/
 
-void ppc_attach_bus(IBus *BusPtr)
+namespace {
+
+// Calls io(pointer, size) for each field of the block in order. The fetch
+// pointer is re-derived as soon as the next PC is known, before the rest of
+// the block, as earlier versions of the core did on loading.
+template <class Io, class AfterPc>
+void TransferState(Io io, AfterPc afterPc)
 {
-	Bus = BusPtr;
+  io(&cpu.left, sizeof(cpu.left));
+  io(&cpu.sliceLength, sizeof(cpu.sliceLength));
+  io(&cpu.cyclesDone, sizeof(cpu.cyclesDone));
+  io(cpu.gpr, sizeof(cpu.gpr));
+  io(&cpu.pc, sizeof(cpu.pc));
+  io(&cpu.nextPc, sizeof(cpu.nextPc));
+  afterPc();
+  for (UINT32 *w : { &cpu.lr, &cpu.ctr, &cpu.xer, &cpu.msr })
+    io(w, sizeof(*w));
+  io(cpu.cr, sizeof(cpu.cr));
+  for (UINT32 *w : { &cpu.pvr, &cpu.srr0, &cpu.srr1, &cpu.srr2, &cpu.srr3,
+                     &cpu.hid0, &cpu.hid1, &cpu.hid2, &cpu.sdr1 })
+    io(w, sizeof(*w));
+  io(cpu.sprg, sizeof(cpu.sprg));
+  for (UINT32 *w : { &cpu.dsisr, &cpu.dar, &cpu.ear, &cpu.dmiss, &cpu.dcmp,
+                     &cpu.hash1, &cpu.hash2, &cpu.imiss, &cpu.icmp, &cpu.rpa })
+    io(w, sizeof(*w));
+  io(cpu.ibat, sizeof(cpu.ibat));
+  io(cpu.dbat, sizeof(cpu.dbat));
+  io(cpu.foreignA, sizeof(cpu.foreignA));
+  io(&cpu.iabr, sizeof(cpu.iabr));
+  io(cpu.foreignB, sizeof(cpu.foreignB));
+  io(&cpu.reserved, sizeof(cpu.reserved));
+  io(&cpu.reservedAddr, sizeof(cpu.reservedAddr));
+  io(&cpu.foreignIrq, sizeof(cpu.foreignIrq));
+  io(&cpu.tb, sizeof(cpu.tb));
+  io(&cpu.dec, sizeof(cpu.dec));
+  io(&cpu.timerCarry, sizeof(cpu.timerCarry));
+  io(&cpu.fpscr, sizeof(cpu.fpscr));
+  io(cpu.fpr, sizeof(cpu.fpr));
+  io(cpu.sr, sizeof(cpu.sr));
 }
+
+} // anonymous namespace
 
 void ppc_save_state(CBlockFile *SaveState)
 {
-	SaveState->NewBlock("PowerPC", __FILE__);
-	
-	// Cycle counting
-	SaveState->Write(&ppc.icount, sizeof(ppc.icount));
-	SaveState->Write(&ppc.cur_cycles, sizeof(ppc.cur_cycles));
-	SaveState->Write(&ppc.total_cycles, sizeof(ppc.total_cycles));
-	
-	// Registers
-	SaveState->Write(ppc.r, sizeof(ppc.r));
-	SaveState->Write(&ppc.pc, sizeof(ppc.pc));
-	SaveState->Write(&ppc.npc, sizeof(ppc.npc));
-	SaveState->Write(&ppc.lr, sizeof(ppc.lr));
-	SaveState->Write(&ppc.ctr, sizeof(ppc.ctr));
-	SaveState->Write(&ppc.xer, sizeof(ppc.xer));
-	SaveState->Write(&ppc.msr, sizeof(ppc.msr));
-	SaveState->Write(ppc.cr, sizeof(ppc.cr));
-	SaveState->Write(&ppc.pvr, sizeof(ppc.pvr));
-	SaveState->Write(&ppc.srr0, sizeof(ppc.srr0));
-	SaveState->Write(&ppc.srr1, sizeof(ppc.srr1));
-	SaveState->Write(&ppc.srr2, sizeof(ppc.srr2));
-	SaveState->Write(&ppc.srr3, sizeof(ppc.srr3));
-	SaveState->Write(&ppc.hid0, sizeof(ppc.hid0));	
-	SaveState->Write(&ppc.hid1, sizeof(ppc.hid1));
-	SaveState->Write(&ppc.hid2, sizeof(ppc.hid2));
-	SaveState->Write(&ppc.sdr1, sizeof(ppc.sdr1));
-	SaveState->Write(ppc.sprg, sizeof(ppc.sprg));
-	SaveState->Write(&ppc.dsisr, sizeof(ppc.dsisr));
-	SaveState->Write(&ppc.dar, sizeof(ppc.dar));
-	SaveState->Write(&ppc.ear, sizeof(ppc.ear));
-	SaveState->Write(&ppc.dmiss, sizeof(ppc.dmiss));
-	SaveState->Write(&ppc.dcmp, sizeof(ppc.dcmp));
-	SaveState->Write(&ppc.hash1, sizeof(ppc.hash1));
-	SaveState->Write(&ppc.hash2, sizeof(ppc.hash2));
-	SaveState->Write(&ppc.imiss, sizeof(ppc.imiss));
-	SaveState->Write(&ppc.icmp, sizeof(ppc.icmp));
-	SaveState->Write(&ppc.rpa, sizeof(ppc.rpa));
-	SaveState->Write(ppc.ibat, sizeof(ppc.ibat));
-	SaveState->Write(ppc.dbat, sizeof(ppc.dbat));
-	
-	// These are probably PPC 4xx registers, but who cares, save 'em anyway!
-	SaveState->Write(&ppc.evpr, sizeof(ppc.evpr));
-	SaveState->Write(&ppc.exier, sizeof(ppc.exier));
-	SaveState->Write(&ppc.exisr, sizeof(ppc.exisr));
-	SaveState->Write(&ppc.bear, sizeof(ppc.bear));
-	SaveState->Write(&ppc.besr, sizeof(ppc.besr));
-	SaveState->Write(&ppc.iocr, sizeof(ppc.iocr));
-	SaveState->Write(ppc.br, sizeof(ppc.br));
-	SaveState->Write(&ppc.iabr, sizeof(ppc.iabr));
-	SaveState->Write(&ppc.esr, sizeof(ppc.esr));
-	SaveState->Write(&ppc.iccr, sizeof(ppc.iccr));
-	SaveState->Write(&ppc.dccr, sizeof(ppc.dccr));
-	SaveState->Write(&ppc.pit, sizeof(ppc.pit));
-	SaveState->Write(&ppc.pit_counter, sizeof(ppc.pit_counter));
-	SaveState->Write(&ppc.pit_int_enable, sizeof(ppc.pit_int_enable));
-	SaveState->Write(&ppc.tsr, sizeof(ppc.tsr));
-	SaveState->Write(&ppc.dbsr, sizeof(ppc.dbsr));
-	SaveState->Write(&ppc.sgr, sizeof(ppc.sgr));
-	SaveState->Write(&ppc.pid, sizeof(ppc.pid));
-	
-	SaveState->Write(&ppc.reserved, sizeof(ppc.reserved));
-	SaveState->Write(&ppc.reserved_address, sizeof(ppc.reserved_address));
-	SaveState->Write(&ppc.external_int, sizeof(ppc.external_int));
-	
-	SaveState->Write(&ppc.tb, sizeof(ppc.tb));
-	
-	SaveState->Write(&ppc.dec, sizeof(ppc.dec));
-	SaveState->Write(&ppc.timer_frac, sizeof(ppc.timer_frac));
-	SaveState->Write(&ppc.fpscr, sizeof(ppc.fpscr));
-	
-	SaveState->Write(ppc.fpr, sizeof(ppc.fpr));
-	SaveState->Write(ppc.sr, sizeof(ppc.sr));
+  SaveState->NewBlock("PowerPC", __FILE__);
+  TransferState([SaveState](void *p, size_t n) { SaveState->Write(p, (uint32_t) n); },
+                [] {});
 }
 
 void ppc_load_state(CBlockFile *SaveState)
-{	
-	if (Result::OKAY != SaveState->FindBlock("PowerPC"))
-	{
-		ErrorLog("Unable to load PowerPC state. Save state file is corrupt.");
-		return;
-	}
-	
-	// Timer and decrementer
-	SaveState->Read(&ppc.icount, sizeof(ppc.icount));
-	SaveState->Read(&ppc.cur_cycles, sizeof(ppc.cur_cycles));
-	SaveState->Read(&ppc.total_cycles, sizeof(ppc.total_cycles));
-	
-	// Registers
-	SaveState->Read(ppc.r, sizeof(ppc.r));
-	SaveState->Read(&ppc.pc, sizeof(ppc.pc));
-	SaveState->Read(&ppc.npc, sizeof(ppc.npc));
-	ppc_change_pc(ppc.npc);
-	SaveState->Read(&ppc.lr, sizeof(ppc.lr));
-	SaveState->Read(&ppc.ctr, sizeof(ppc.ctr));
-	SaveState->Read(&ppc.xer, sizeof(ppc.xer));
-	SaveState->Read(&ppc.msr, sizeof(ppc.msr));
-	SaveState->Read(ppc.cr, sizeof(ppc.cr));
-	SaveState->Read(&ppc.pvr, sizeof(ppc.pvr));
-	SaveState->Read(&ppc.srr0, sizeof(ppc.srr0));
-	SaveState->Read(&ppc.srr1, sizeof(ppc.srr1));
-	SaveState->Read(&ppc.srr2, sizeof(ppc.srr2));
-	SaveState->Read(&ppc.srr3, sizeof(ppc.srr3));
-	SaveState->Read(&ppc.hid0, sizeof(ppc.hid0));	
-	SaveState->Read(&ppc.hid1, sizeof(ppc.hid1));
-	SaveState->Read(&ppc.hid2, sizeof(ppc.hid2));
-	SaveState->Read(&ppc.sdr1, sizeof(ppc.sdr1));
-	SaveState->Read(ppc.sprg, sizeof(ppc.sprg));
-	SaveState->Read(&ppc.dsisr, sizeof(ppc.dsisr));
-	SaveState->Read(&ppc.dar, sizeof(ppc.dar));
-	SaveState->Read(&ppc.ear, sizeof(ppc.ear));
-	SaveState->Read(&ppc.dmiss, sizeof(ppc.dmiss));
-	SaveState->Read(&ppc.dcmp, sizeof(ppc.dcmp));
-	SaveState->Read(&ppc.hash1, sizeof(ppc.hash1));
-	SaveState->Read(&ppc.hash2, sizeof(ppc.hash2));
-	SaveState->Read(&ppc.imiss, sizeof(ppc.imiss));
-	SaveState->Read(&ppc.icmp, sizeof(ppc.icmp));
-	SaveState->Read(&ppc.rpa, sizeof(ppc.rpa));
-	SaveState->Read(ppc.ibat, sizeof(ppc.ibat));
-	SaveState->Read(ppc.dbat, sizeof(ppc.dbat));
-	
-	SaveState->Read(&ppc.evpr, sizeof(ppc.evpr));
-	SaveState->Read(&ppc.exier, sizeof(ppc.exier));
-	SaveState->Read(&ppc.exisr, sizeof(ppc.exisr));
-	SaveState->Read(&ppc.bear, sizeof(ppc.bear));
-	SaveState->Read(&ppc.besr, sizeof(ppc.besr));
-	SaveState->Read(&ppc.iocr, sizeof(ppc.iocr));
-	SaveState->Read(ppc.br, sizeof(ppc.br));
-	SaveState->Read(&ppc.iabr, sizeof(ppc.iabr));
-	SaveState->Read(&ppc.esr, sizeof(ppc.esr));
-	SaveState->Read(&ppc.iccr, sizeof(ppc.iccr));
-	SaveState->Read(&ppc.dccr, sizeof(ppc.dccr));
-	SaveState->Read(&ppc.pit, sizeof(ppc.pit));
-	SaveState->Read(&ppc.pit_counter, sizeof(ppc.pit_counter));
-	SaveState->Read(&ppc.pit_int_enable, sizeof(ppc.pit_int_enable));
-	SaveState->Read(&ppc.tsr, sizeof(ppc.tsr));
-	SaveState->Read(&ppc.dbsr, sizeof(ppc.dbsr));
-	SaveState->Read(&ppc.sgr, sizeof(ppc.sgr));
-	SaveState->Read(&ppc.pid, sizeof(ppc.pid));
-	
-	SaveState->Read(&ppc.reserved, sizeof(ppc.reserved));
-	SaveState->Read(&ppc.reserved_address, sizeof(ppc.reserved_address));
-	SaveState->Read(&ppc.external_int, sizeof(ppc.external_int));
-	
-	SaveState->Read(&ppc.tb, sizeof(ppc.tb));
-	
-	SaveState->Read(&ppc.dec, sizeof(ppc.dec));
-	SaveState->Read(&ppc.timer_frac, sizeof(ppc.timer_frac));
-	SaveState->Read(&ppc.fpscr, sizeof(ppc.fpscr));
-	
-	SaveState->Read(ppc.fpr, sizeof(ppc.fpr));
-	SaveState->Read(ppc.sr, sizeof(ppc.sr));
+{
+  if (Result::OKAY != SaveState->FindBlock("PowerPC"))
+  {
+    ErrorLog("Unable to load PowerPC state. Save state file is corrupt.");
+    return;
+  }
+  TransferState([SaveState](void *p, size_t n) { SaveState->Read(p, (uint32_t) n); },
+                [] { FetchFrom(cpu.nextPc); });
+}
+
+/******************************************************************************
+ Register access
+******************************************************************************/
+
+UINT32 ppc_get_pc(void)
+{
+  return cpu.pc;
+}
+
+void ppc_set_pc(UINT32 pc)
+{
+  cpu.pc = pc;
+  FetchFrom(pc);
+  cpu.nextPc = pc + 4;
 }
 
 UINT32 ppc_get_gpr(unsigned num)
 {
-	return ppc.r[num&31];
-}
-
-double ppc_get_fpr(unsigned num)
-{
-	return ppc.fpr[num&31].fd;
-}
-
-UINT32 ppc_get_lr(void)
-{
-	return ppc.lr;
-}
-	
-UINT32 ppc_read_spr(unsigned spr)
-{
-	return ppc_get_spr(spr);
-}
-
-UINT32 ppc_read_sr(unsigned num)
-{
-	return ppc.sr[num&15];
-}
-
-/******************************************************************************
- Debugger Interface
-******************************************************************************/
-
-#ifdef SUPERMODEL_DEBUGGER
-void ppc_attach_debugger(Debugger::CPPCDebug *PPCDebugPtr)
-{
-	if (PPCDebug != NULL)
-		ppc_detach_debugger();
-	PPCDebug = PPCDebugPtr;
-	Bus = PPCDebug->AttachBus(Bus);
-}
-
-void ppc_detach_debugger()
-{
-	if (PPCDebug == NULL)
-		return;
-	Bus = PPCDebug->DetachBus(); 
-	PPCDebug = NULL;
-}
-
-void ppc_break()
-{
-	if (PPCDebug != NULL)
-		PPCDebug->ForceBreak(true);
-}
-#else  // SUPERMODEL_DEBUGGER
-void ppc_break()
-{	
-	//
-}
-#endif // SUPERMODEL_DEBUGGER
-
-void ppc_set_pc(UINT32 pc)
-{
-	ppc.pc = pc;
-	ppc_change_pc(pc);
-	ppc.npc = pc + 4;
-}
-
-UINT8 ppc_get_cr(unsigned num)
-{
-	return ppc.cr[num&7];
-}
-
-void ppc_set_cr(unsigned num, UINT8 val)
-{
-	ppc.cr[num&7] = val;
+  return cpu.gpr[num & 31];
 }
 
 void ppc_set_gpr(unsigned num, UINT32 val)
 {
-	ppc.r[num&31] = val;
+  cpu.gpr[num & 31] = val;
+}
+
+double ppc_get_fpr(unsigned num)
+{
+  return FprValue(num & 31);
 }
 
 void ppc_set_fpr(unsigned num, double val)
 {
-	ppc.fpr[num&31].fd = val;
+  SetFprValue(num & 31, val);
+}
+
+UINT8 ppc_get_cr(unsigned num)
+{
+  return cpu.cr[num & 7];
+}
+
+void ppc_set_cr(unsigned num, UINT8 val)
+{
+  cpu.cr[num & 7] = val;
+}
+
+UINT32 ppc_get_lr(void)
+{
+  return cpu.lr;
+}
+
+UINT32 ppc_read_spr(unsigned spr)
+{
+  return ReadSpr(spr);
 }
 
 void ppc_write_spr(unsigned spr, UINT32 val)
 {
-	ppc_set_spr(spr, val);
+  WriteSpr(spr, val);
+}
+
+UINT32 ppc_read_sr(unsigned num)
+{
+  return cpu.sr[num & 15];
 }
 
 void ppc_write_sr(unsigned num, UINT32 val)
 {
-	ppc.sr[num&15] = val;
+  cpu.sr[num & 15] = val;
 }
 
-UINT32 ppc_read_msr()
+UINT32 ppc_read_msr(void)
 {
-	return ppc_get_msr();
+  return cpu.msr;
+}
+
+void ppc_break(void)
+{
 }

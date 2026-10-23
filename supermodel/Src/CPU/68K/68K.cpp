@@ -1,454 +1,187 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2022 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * 68K.cpp
- *
- * 68K CPU interface. This is presently just a wrapper for the Musashi 68K core
- * and therefore, only a single CPU is supported. In the future, we may want to
- * add in another 68K core (eg., Turbo68K, A68K, or a recompiler).
- *
- * To-Do List
- * ----------
- * - Registers may not completely describe the 68K state. Musashi also has
- *   additional CPU state information in the context that its MAME interface
- *   accesses (interrupts pending, halted status, etc.)
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// See 68K.h. Musashi holds the CPU registers itself; this file only keeps
+// the two things Musashi has no slot for (the bus and the acknowledge hook)
+// for the context that is currently loaded.
 
 #include "68K.h"
-
 #include "Supermodel.h"
-#include "Musashi/m68k.h"	// Musashi 68K core
-#include "Debugger/CPU/Musashi68KDebug.h"
 
-/******************************************************************************
- Internal Context
+namespace
+{
+  IBus *g_memory = nullptr;           // bus of the loaded context
+  int (*g_onAck)(int) = nullptr;      // acknowledge hook of the loaded context
 
- An active context must be mapped before calling M68K interface functions. Only
- the bus and IRQ handlers are copied here; the CPU context is passed directly
- to Musashi.
-******************************************************************************/
+  // Save-state word order after the three run-state words. Changing this
+  // breaks every existing save state.
+  constexpr m68k_register_t kSavedRegs[] =
+  {
+    M68K_REG_D0, M68K_REG_D1, M68K_REG_D2, M68K_REG_D3,
+    M68K_REG_D4, M68K_REG_D5, M68K_REG_D6, M68K_REG_D7,
+    M68K_REG_A0, M68K_REG_A1, M68K_REG_A2, M68K_REG_A3,
+    M68K_REG_A4, M68K_REG_A5, M68K_REG_A6, M68K_REG_A7,
+    M68K_REG_PC, M68K_REG_SR, M68K_REG_SP, M68K_REG_USP,
+    M68K_REG_ISP, M68K_REG_MSP, M68K_REG_SFC, M68K_REG_DFC,
+    M68K_REG_VBR, M68K_REG_CACR, M68K_REG_CAAR, M68K_REG_PREF_ADDR,
+    M68K_REG_PREF_DATA, M68K_REG_PPC, M68K_REG_IR,
+  };
+  constexpr size_t kRunWords = 3;     // int_level, int_cycles, stopped
+  constexpr size_t kStateWords = kRunWords + sizeof(kSavedRegs) / sizeof(kSavedRegs[0]);
+  static_assert(kStateWords == 34, "68K save-state block must stay 34 words");
 
-// Bus
-static IBus	*s_Bus = NULL;
+  // Musashi numbers D0..D7 and A0..A7 consecutively.
+  static_assert(M68K_REG_D7 == M68K_REG_D0 + 7 && M68K_REG_A0 == M68K_REG_D0 + 8 &&
+                M68K_REG_A7 == M68K_REG_D0 + 15, "unexpected Musashi register numbering");
 
-#ifdef SUPERMODEL_DEBUGGER
-// Debugger
-static Debugger::CMusashi68KDebug *s_Debug = NULL;
-#endif
+  m68k_register_t DataReg(int n)
+  {
+    return m68k_register_t(M68K_REG_D0 + ((n >= 0 && n < 8) ? n : 7));
+  }
 
-// IRQ callback
-static int	(*IRQAck)(int nIRQ) = NULL;
-
-#ifdef SUPERMODEL_DEBUGGER
-// Cycles remaining in timeslice
-static int s_lastCycles;
-#endif
-
-
-/******************************************************************************
- 68K Interface
-******************************************************************************/
-
-// CPU state
+  m68k_register_t AddrReg(int n)
+  {
+    return m68k_register_t(M68K_REG_A0 + ((n >= 0 && n < 8) ? n : 7));
+  }
+}
 
 UINT32 M68KGetARegister(int n)
 {
-	m68k_register_t	r;
-
-	switch (n)
-	{
-	case 0:		r = M68K_REG_A0; break;
-	case 1:		r = M68K_REG_A1; break;
-	case 2:		r = M68K_REG_A2; break;
-	case 3:		r = M68K_REG_A3; break;
-	case 4:		r = M68K_REG_A4; break;
-	case 5:		r = M68K_REG_A5; break;
-	case 6:		r = M68K_REG_A6; break;
-	case 7:		r = M68K_REG_A7; break;
-	default:	r = M68K_REG_A7; break;
-	}
-
-	return m68k_get_reg(NULL, r);
+  return m68k_get_reg(nullptr, AddrReg(n));
 }
 
 UINT32 M68KGetDRegister(int n)
 {
-	m68k_register_t	r;
+  return m68k_get_reg(nullptr, DataReg(n));
+}
 
-	switch (n)
-	{
-	case 0:		r = M68K_REG_D0; break;
-	case 1:		r = M68K_REG_D1; break;
-	case 2:		r = M68K_REG_D2; break;
-	case 3:		r = M68K_REG_D3; break;
-	case 4:		r = M68K_REG_D4; break;
-	case 5:		r = M68K_REG_D5; break;
-	case 6:		r = M68K_REG_D6; break;
-	case 7:		r = M68K_REG_D7; break;
-	default:	r = M68K_REG_D7; break;
-	}
+void M68KSetARegister(int n, UINT32 v)
+{
+  m68k_set_reg(AddrReg(n), v);
+}
 
-	return m68k_get_reg(NULL, r);
+void M68KSetDRegister(int n, UINT32 v)
+{
+  m68k_set_reg(DataReg(n), v);
 }
 
 UINT32 M68KGetPC(void)
 {
-	return m68k_get_reg(NULL, M68K_REG_PC);
+  return m68k_get_reg(nullptr, M68K_REG_PC);
 }
 
 void M68KSaveState(CBlockFile *StateFile, const char *name)
 {
-	StateFile->NewBlock(name, __FILE__);
+  UINT32 words[kStateWords];
 
-	/*
-	 * Rather than writing the context directly, the get/set register
-	 * functions are used, ensuring that all context members are packed/
-	 * unpacked correctly.
-	 *
-	 * Note: Some of these are undoubtedly 68010 or 68020 registers and not
-	 * really necessary. But if the layout is changed now, the save state
-	 * version has to be changed, so don't do it!
-	 */
+  m68ki_cpu_core core;
+  m68k_get_context(&core);
+  words[0] = core.int_level;
+  words[1] = core.int_cycles;
+  words[2] = core.stopped;
+  for (size_t i = 0; i < kStateWords - kRunWords; i++)
+    words[kRunWords + i] = m68k_get_reg(nullptr, kSavedRegs[i]);
 
-	UINT32			data[34];
-	m68ki_cpu_core	Ctx;
-
-	m68k_get_context(&Ctx);
-
-	data[0] = Ctx.int_level;
-	data[1] = Ctx.int_cycles;
-	data[2] = Ctx.stopped;
-	data[3] = m68k_get_reg(NULL, M68K_REG_D0);
-	data[4] = m68k_get_reg(NULL, M68K_REG_D1);
-	data[5] = m68k_get_reg(NULL, M68K_REG_D2);
-	data[6] = m68k_get_reg(NULL, M68K_REG_D3);
-	data[7] = m68k_get_reg(NULL, M68K_REG_D4);
-	data[8] = m68k_get_reg(NULL, M68K_REG_D5);
-	data[9] = m68k_get_reg(NULL, M68K_REG_D6);
-	data[10] = m68k_get_reg(NULL, M68K_REG_D7);
-	data[11] = m68k_get_reg(NULL, M68K_REG_A0);
-	data[12] = m68k_get_reg(NULL, M68K_REG_A1);
-	data[13] = m68k_get_reg(NULL, M68K_REG_A2);
-	data[14] = m68k_get_reg(NULL, M68K_REG_A3);
-	data[15] = m68k_get_reg(NULL, M68K_REG_A4);
-	data[16] = m68k_get_reg(NULL, M68K_REG_A5);
-	data[17] = m68k_get_reg(NULL, M68K_REG_A6);
-	data[18] = m68k_get_reg(NULL, M68K_REG_A7);
-	data[19] = m68k_get_reg(NULL, M68K_REG_PC);
-	data[20] = m68k_get_reg(NULL, M68K_REG_SR);
-	data[21] = m68k_get_reg(NULL, M68K_REG_SP);
-	data[22] = m68k_get_reg(NULL, M68K_REG_USP);
-	data[23] = m68k_get_reg(NULL, M68K_REG_ISP);
-	data[24] = m68k_get_reg(NULL, M68K_REG_MSP);
-	data[25] = m68k_get_reg(NULL, M68K_REG_SFC);
-	data[26] = m68k_get_reg(NULL, M68K_REG_DFC);
-	data[27] = m68k_get_reg(NULL, M68K_REG_VBR);
-	data[28] = m68k_get_reg(NULL, M68K_REG_CACR);
-	data[29] = m68k_get_reg(NULL, M68K_REG_CAAR);
-	data[30] = m68k_get_reg(NULL, M68K_REG_PREF_ADDR);
-	data[31] = m68k_get_reg(NULL, M68K_REG_PREF_DATA);
-	data[32] = m68k_get_reg(NULL, M68K_REG_PPC);
-	data[33] = m68k_get_reg(NULL, M68K_REG_IR);
-
-	StateFile->Write(data, sizeof(data));
+  StateFile->NewBlock(name, __FILE__);
+  StateFile->Write(words, sizeof(words));
 }
 
 void M68KLoadState(CBlockFile *StateFile, const char *name)
 {
-	if (Result::OKAY != StateFile->FindBlock(name))
-	{
-		ErrorLog("Unable to load 68K state. Save state file is corrupt.");
-		return;
-	}
+  if (StateFile->FindBlock(name) != Result::OKAY)
+  {
+    ErrorLog("68K state block '%s' is missing from the save state.", name);
+    return;
+  }
 
-	UINT32			data[34];
-	m68ki_cpu_core	Ctx;
+  UINT32 words[kStateWords];
+  StateFile->Read(words, sizeof(words));
 
-	StateFile->Read(data, sizeof(data));
+  // The interrupt and stop state goes in first so that the register writes
+  // below (SR in particular) see this CPU's pending interrupt level rather
+  // than whatever the previously loaded context had.
+  m68ki_cpu_core core;
+  m68k_get_context(&core);
+  core.int_level = words[0];
+  core.int_cycles = words[1];
+  core.stopped = words[2];
+  m68k_set_context(&core);
 
-	// These must be set first, to ensure another contexts' IRQs aren't active when PC is changed
-	m68k_get_context(&Ctx);
-	Ctx.int_level = data[0];
-	Ctx.int_cycles = data[1];
-	Ctx.stopped = data[2];
-	m68k_set_context(&Ctx);	// write them back to context
-	m68k_set_reg(M68K_REG_D0, data[3]);
-	m68k_set_reg(M68K_REG_D1, data[4]);
-	m68k_set_reg(M68K_REG_D2, data[5]);
-	m68k_set_reg(M68K_REG_D3, data[6]);
-	m68k_set_reg(M68K_REG_D4, data[7]);
-	m68k_set_reg(M68K_REG_D5, data[8]);
-	m68k_set_reg(M68K_REG_D6, data[9]);
-	m68k_set_reg(M68K_REG_D7, data[10]);
-	m68k_set_reg(M68K_REG_A0, data[11]);
-	m68k_set_reg(M68K_REG_A1, data[12]);
-	m68k_set_reg(M68K_REG_A2, data[13]);
-	m68k_set_reg(M68K_REG_A3, data[14]);
-	m68k_set_reg(M68K_REG_A4, data[15]);
-	m68k_set_reg(M68K_REG_A5, data[16]);
-	m68k_set_reg(M68K_REG_A6, data[17]);
-	m68k_set_reg(M68K_REG_A7, data[18]);
-	m68k_set_reg(M68K_REG_PC, data[19]);
-	m68k_set_reg(M68K_REG_SR, data[20]);
-	m68k_set_reg(M68K_REG_SP, data[21]);
-	m68k_set_reg(M68K_REG_USP, data[22]);
-	m68k_set_reg(M68K_REG_ISP, data[23]);
-	m68k_set_reg(M68K_REG_MSP, data[24]);
-	m68k_set_reg(M68K_REG_SFC, data[25]);
-	m68k_set_reg(M68K_REG_DFC, data[26]);
-	m68k_set_reg(M68K_REG_VBR, data[27]);
-	m68k_set_reg(M68K_REG_CACR, data[28]);
-	m68k_set_reg(M68K_REG_CAAR, data[29]);
-	m68k_set_reg(M68K_REG_PREF_ADDR, data[30]);
-	m68k_set_reg(M68K_REG_PREF_DATA, data[31]);
-	m68k_set_reg(M68K_REG_PPC, data[32]);
-	m68k_set_reg(M68K_REG_IR, data[33]);
+  for (size_t i = 0; i < kStateWords - kRunWords; i++)
+    m68k_set_reg(kSavedRegs[i], words[kRunWords + i]);
 }
-
-// Emulation functions
 
 void M68KSetIRQ(int irqLevel)
 {
-	m68k_set_irq(irqLevel);
+  m68k_set_irq(irqLevel);
 }
 
 int M68KRun(int numCycles)
 {
-#ifdef SUPERMODEL_DEBUGGER
-	if (s_Debug != NULL)
-	{
-		s_Debug->CPUActive();
-		s_lastCycles += numCycles;
-	}
-#endif // SUPERMODEL_DEBUGGER
-	int doneCycles = m68k_execute(numCycles);
-#ifdef SUPERMODEL_DEBUGGER
-	if (s_Debug != NULL)
-	{
-		s_Debug->CPUInactive();
-		s_lastCycles -= m68k_cycles_remaining();
-	}
-#endif // SUPERMODEL_DEBUGGER
-	return doneCycles;
+  return m68k_execute(numCycles);
 }
 
 void M68KReset(void)
 {
-	m68k_pulse_reset();
-#ifdef SUPERMODEL_DEBUGGER
-	s_lastCycles = 0;
-#endif
-	DebugLog("68K reset\n");
+  m68k_pulse_reset();
+  DebugLog("68K reset\n");
 }
-
-// Callback setup
 
 void M68KSetIRQCallback(int (*F)(int nIRQ))
 {
-	IRQAck = F;
+  g_onAck = F;
 }
 
 void M68KAttachBus(IBus *BusPtr)
 {
-	s_Bus = BusPtr;
-	DebugLog("Attached bus to 68K\n");
+  g_memory = BusPtr;
+  DebugLog("Attached bus to 68K\n");
 }
-
-// Context switching
 
 void M68KGetContext(M68KCtx *Dest)
 {
-	Dest->IRQAck = IRQAck;
-	Dest->Bus = s_Bus;
-#ifdef SUPERMODEL_DEBUGGER
-	Dest->Debug = s_Debug;
-#endif // SUPERMODEL_DEBUGGER
-	m68k_get_context(&(Dest->musashiCtx));
+  Dest->Bus = g_memory;
+  Dest->IRQAck = g_onAck;
+  m68k_get_context(&Dest->musashiCtx);
 }
 
 void M68KSetContext(M68KCtx *Src)
 {
-	IRQAck = Src->IRQAck;
-	s_Bus = Src->Bus;
-#ifdef SUPERMODEL_DEBUGGER
-	s_Debug = Src->Debug;
-#endif // SUPERMODEL_DEBUGGER
-	m68k_set_context(&(Src->musashiCtx));
+  g_memory = Src->Bus;
+  g_onAck = Src->IRQAck;
+  m68k_set_context(&Src->musashiCtx);
 }
-
-// One-time initialization
 
 Result M68KInit(void)
 {
-	m68k_init();
-	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-	m68k_set_int_ack_callback(M68KIRQCallback);
-	s_Bus = NULL;
-#ifdef SUPERMODEL_DEBUGGER
-	s_Debug = NULL;
-	m68k_set_instr_hook_callback(M68KDebugCallback);
-#endif // SUPERMODEL_DEBUGGER
-	DebugLog("Initialized 68K\n");
-	return Result::OKAY;
+  m68k_init();
+  m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+  m68k_set_int_ack_callback(M68KIRQCallback);
+  g_memory = nullptr;
+  DebugLog("Initialized 68K\n");
+  return Result::OKAY;
 }
-
-#ifdef SUPERMODEL_DEBUGGER
-UINT32 M68KGetRegister(M68KCtx *Src, unsigned reg)
-{
-	switch (reg)
-	{
-		case DBG68K_REG_PC: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_PC);
-		case DBG68K_REG_SR: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_SR);
-		case DBG68K_REG_SP: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_SP);
-		case DBG68K_REG_D0: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D0);
-		case DBG68K_REG_D1: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D1);
-		case DBG68K_REG_D2: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D2);
-		case DBG68K_REG_D3: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D3);
-		case DBG68K_REG_D4: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D4);
-		case DBG68K_REG_D5: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D5);
-		case DBG68K_REG_D6: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D6);
-		case DBG68K_REG_D7: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_D7);
-		case DBG68K_REG_A0: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A0);
-		case DBG68K_REG_A1: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A1);
-		case DBG68K_REG_A2: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A2);
-		case DBG68K_REG_A3: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A3);
-		case DBG68K_REG_A4: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A4);
-		case DBG68K_REG_A5: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A5);
-		case DBG68K_REG_A6: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A6);
-		case DBG68K_REG_A7: return m68k_get_reg(&(Src->musashiCtx), M68K_REG_A7);
-		default:            return 0;
-	}
-}
-
-UINT32 M68KSetRegister(M68KCtx *Src, unsigned reg, UINT32 val)
-{
-	switch (reg)
-	{
-		case DBG68K_REG_PC: m68k_set_reg(M68K_REG_PC, val); return true;
-		case DBG68K_REG_SR: m68k_set_reg(M68K_REG_SR, val); return true;
-		case DBG68K_REG_SP: m68k_set_reg(M68K_REG_SP, val); return true;
-		case DBG68K_REG_D0: m68k_set_reg(M68K_REG_D0, val); return true;
-		case DBG68K_REG_D1: m68k_set_reg(M68K_REG_D1, val); return true;
-		case DBG68K_REG_D2: m68k_set_reg(M68K_REG_D2, val); return true;
-		case DBG68K_REG_D3: m68k_set_reg(M68K_REG_D3, val); return true;
-		case DBG68K_REG_D4: m68k_set_reg(M68K_REG_D4, val); return true;
-		case DBG68K_REG_D5: m68k_set_reg(M68K_REG_D5, val); return true;
-		case DBG68K_REG_D6: m68k_set_reg(M68K_REG_D6, val); return true;
-		case DBG68K_REG_D7: m68k_set_reg(M68K_REG_D7, val); return true;
-		case DBG68K_REG_A0: m68k_set_reg(M68K_REG_A0, val); return true;
-		case DBG68K_REG_A1: m68k_set_reg(M68K_REG_A1, val); return true;
-		case DBG68K_REG_A2: m68k_set_reg(M68K_REG_A2, val); return true;
-		case DBG68K_REG_A3: m68k_set_reg(M68K_REG_A3, val); return true;
-		case DBG68K_REG_A4: m68k_set_reg(M68K_REG_A4, val); return true;
-		case DBG68K_REG_A5: m68k_set_reg(M68K_REG_A5, val); return true;
-		case DBG68K_REG_A6: m68k_set_reg(M68K_REG_A6, val); return true;
-		case DBG68K_REG_A7: m68k_set_reg(M68K_REG_A7, val); return true;
-		default:            return false;
-	}
-}
-#endif // SUPERMODEL_DEBUGGER
-
-/******************************************************************************
- Musashi 68K Handlers
-
- Musashi/m68kconf.h has been configured to call these directly.
-******************************************************************************/
 
 extern "C" {
 
-#ifdef SUPERMODEL_DEBUGGER
-void M68KDebugCallback()
-{
-	if (s_Debug != NULL)
-	{
-		UINT32 pc = m68k_get_reg(NULL, M68K_REG_PC);
-		UINT32 opcode = s_Bus->Read16(pc);
-		s_Debug->CPUExecute(pc, opcode, s_lastCycles - m68k_cycles_remaining());
-		s_lastCycles = m68k_cycles_remaining();
-	}
-}
-#endif // SUPERMODEL_DEBUGGER
-
 int M68KIRQCallback(int nIRQ)
 {
-#ifdef SUPERMODEL_DEBUGGER
-	if (s_Debug != NULL)
-	{
-		s_Debug->CPUException(25);
-		s_Debug->CPUInterrupt(nIRQ - 1);
-	}
-#endif // SUPERMODEL_DEBUGGER
-	if (NULL == IRQAck)	// no handler, use default behavior
-	{
-		m68k_set_irq(0);	// clear line
-		return M68K_IRQ_AUTOVECTOR;
-	}
-	else
-		return IRQAck(nIRQ);
+  if (g_onAck)
+    return g_onAck(nIRQ);
+  // Nobody to ask: treat it as autovectored and drop the line ourselves.
+  m68k_set_irq(0);
+  return M68K_IRQ_AUTOVECTOR;
 }
 
-unsigned int FASTCALL M68KFetch8(unsigned int a)
-{
-	return s_Bus->Read8(a);
-}
+// Instruction fetches and data accesses go to the same bus.
+unsigned int FASTCALL M68KFetch8(unsigned int a)  { return g_memory->Read8(a); }
+unsigned int FASTCALL M68KFetch16(unsigned int a) { return g_memory->Read16(a); }
+unsigned int FASTCALL M68KFetch32(unsigned int a) { return g_memory->Read32(a); }
+unsigned int FASTCALL M68KRead8(unsigned int a)   { return g_memory->Read8(a); }
+unsigned int FASTCALL M68KRead16(unsigned int a)  { return g_memory->Read16(a); }
+unsigned int FASTCALL M68KRead32(unsigned int a)  { return g_memory->Read32(a); }
 
-unsigned int FASTCALL M68KFetch16(unsigned int a)
-{
-	return s_Bus->Read16(a);
-}
+void FASTCALL M68KWrite8(unsigned int a, unsigned int d)  { g_memory->Write8(a, d); }
+void FASTCALL M68KWrite16(unsigned int a, unsigned int d) { g_memory->Write16(a, d); }
+void FASTCALL M68KWrite32(unsigned int a, unsigned int d) { g_memory->Write32(a, d); }
 
-unsigned int FASTCALL M68KFetch32(unsigned int a)
-{
-	return s_Bus->Read32(a);
 }
-
-unsigned int FASTCALL M68KRead8(unsigned int a)
-{
-	return s_Bus->Read8(a);
-}
-
-unsigned int FASTCALL M68KRead16(unsigned int a)
-{
-	return s_Bus->Read16(a);
-}
-
-unsigned int FASTCALL M68KRead32(unsigned int a)
-{
-	return s_Bus->Read32(a);
-}
-
-void FASTCALL M68KWrite8(unsigned int a, unsigned int d)
-{
-	s_Bus->Write8(a, d);
-}
-
-void FASTCALL M68KWrite16(unsigned int a, unsigned int d)
-{
-	s_Bus->Write16(a, d);
-}
-
-void FASTCALL M68KWrite32(unsigned int a, unsigned int d)
-{
-	s_Bus->Write32(a, d);
-}
-
-}	// extern "C"

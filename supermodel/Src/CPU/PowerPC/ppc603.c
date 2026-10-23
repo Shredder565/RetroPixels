@@ -1,356 +1,186 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// ppc603.c: 603e exceptions, the time base and decrementer, and the run
+// loop. Included by ppc.cpp only (it is C++ despite the name, which the
+// build lists keep).
 
-/*
- * ppc603.c
- *
- * PowerPC 603e functions. Included from ppc.cpp; do not compile separately.
- */
+namespace {
 
-void ppc603_exception(int exception)
+// Exception vector offsets (added to 0xFFF00000 when MSR[IP] is set).
+constexpr UINT32 kVecDataStorage   = 0x0300;
+constexpr UINT32 kVecInstStorage   = 0x0400;
+constexpr UINT32 kVecExternal      = 0x0500;
+constexpr UINT32 kVecProgram       = 0x0700;
+constexpr UINT32 kVecDecrementer   = 0x0900;
+constexpr UINT32 kVecSystemCall    = 0x0C00;
+constexpr UINT32 kVecSystemMgmt    = 0x1400;
+
+constexpr UINT32 kSrr1Trap = 0x00020000;    // program exception cause: trap
+
+// Enters an exception handler: SRR0 gets the return address, SRR1 the
+// saved MSR bits, and the MSR switches to supervisor mode with interrupts,
+// the FPU, tracing and translation off. MSR[LE] follows MSR[ILE].
+void EnterHandler(UINT32 vector, UINT32 returnAddr, UINT32 srr1Cause)
 {
-#ifdef SUPERMODEL_DEBUGGER
-		if (PPCDebug != NULL)
-			PPCDebug->CPUException(exception);
-#endif
-
-	switch( exception )
-	{
-		case EXCEPTION_IRQ:		/* External Interrupt */
-			if( ppc_get_msr() & MSR_EE ) {
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = msr & 0xff73;
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0500;
-				else
-					ppc.npc = 0x00000000 | 0x0500;
-
-				//MAME has this: ppc.interrupt_pending &= ~0x1;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_DECREMENTER:		/* Decrementer overflow exception */
-			if( ppc_get_msr() & MSR_EE ) {
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = msr & 0xff73;
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0900;
-				else
-					ppc.npc = 0x00000000 | 0x0900;
-
-				ppc.interrupt_pending &= ~0x2;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_TRAP:			/* Program exception / Trap */
-			{
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.pc;
-				SRR1 = (msr & 0xff73) | 0x20000;	/* 0x20000 = TRAP bit */
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0700;
-				else
-					ppc.npc = 0x00000000 | 0x0700;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_SYSTEM_CALL:		/* System call */
-			{
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = (msr & 0xff73);
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0c00;
-				else
-					ppc.npc = 0x00000000 | 0x0c00;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_SMI:
-			if( ppc_get_msr() & MSR_EE ) {
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = msr & 0xff73;
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x1400;
-				else
-					ppc.npc = 0x00000000 | 0x1400;
-
-				ppc.interrupt_pending &= ~0x4;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_DSI:
-			{
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = msr & 0xff73;
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0300;
-				else
-					ppc.npc = 0x00000000 | 0x0300;
-
-				ppc.interrupt_pending &= ~0x4;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		case EXCEPTION_ISI:
-			{
-				UINT32 msr = ppc_get_msr();
-
-				SRR0 = ppc.npc;
-				SRR1 = msr & 0xff73;
-
-				msr &= ~(MSR_POW | MSR_EE | MSR_PR | MSR_FP | MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI);
-				if( msr & MSR_ILE )
-					msr |= MSR_LE;
-				else
-					msr &= ~MSR_LE;
-				ppc_set_msr(msr);
-
-				if( msr & MSR_IP )
-					ppc.npc = 0xfff00000 | 0x0400;
-				else
-					ppc.npc = 0x00000000 | 0x0400;
-
-				ppc.interrupt_pending &= ~0x4;
-				ppc_change_pc(ppc.npc);
-			}
-			break;
-
-		default:
-			ErrorLog("PowerPC triggered an unknown exception. Emulation halted until reset.");
-			DebugLog("PowerPC triggered an unknown exception (%d).\n", exception);
-			ppc.fatalError = true;
-			break;
-	}
+  UINT32 msr = cpu.msr;
+  cpu.srr0 = returnAddr;
+  cpu.srr1 = (msr & 0xFF73) | srr1Cause;
+  msr &= ~(kMsrPow | kMsrEe | kMsrPr | kMsrFp | kMsrFe0 | kMsrSe | kMsrBe |
+           kMsrFe1 | kMsrIr | kMsrDr | kMsrRi);
+  msr = (msr & kMsrIle) ? (msr | kMsrLe) : (msr & ~kMsrLe);
+  SetMsr(msr);
+  cpu.nextPc = ((msr & kMsrIp) ? 0xFFF00000 : 0) | vector;
 }
 
-static void ppc603_check_interrupts(void)
+// Asynchronous interrupts: taken only while MSR[EE] is set, returning to
+// the next instruction. The external line stays pending until the board
+// drops it; the decrementer and SMI requests are consumed.
+void TakeAsync(UINT32 vector, int consumes)
 {
-	if (MSR & MSR_EE)
-	{
-		if (ppc.interrupt_pending != 0)
-		{
-			if (ppc.interrupt_pending & 0x1)
-			{
-				ppc603_exception(EXCEPTION_IRQ);
-			}
-			else if (ppc.interrupt_pending & 0x2)
-			{
-				ppc603_exception(EXCEPTION_DECREMENTER);
-			}
-			else if (ppc.interrupt_pending & 0x4)
-			{
-				ppc603_exception(EXCEPTION_SMI);
-			}
-		}
-	}
+  if (!(cpu.msr & kMsrEe))
+    return;
+  EnterHandler(vector, cpu.nextPc, 0);
+  cpu.pending &= ~consumes;
+  FetchFrom(cpu.nextPc);
 }
 
-void ppc_reset(void)
+void TakeTrap()
 {
-	ppc.fatalError = false;	// reset the fatal error flag
-	
-	ppc.pc = ppc.npc = 0xfff00100;
-
-	ppc_set_msr(0x40);
-	ppc_change_pc(ppc.pc);
-
-	ppc.hid0 = 1;
-
-	ppc.interrupt_pending = 0;
-
-	ppc.tb = 0;
-	ppc.timer_frac = 0;
-	DEC = 0xffffffff;
-	ppc.total_cycles = 0;
-	ppc.cur_cycles = 0;
-	ppc.icount = 0;
+  EnterHandler(kVecProgram, cpu.pc, kSrr1Trap);
+  FetchFrom(cpu.nextPc);
 }
+
+void TakeSystemCall()
+{
+  EnterHandler(kVecSystemCall, cpu.nextPc, 0);
+  FetchFrom(cpu.nextPc);
+}
+
+// Storage exceptions are never raised (no MMU) but are kept for
+// completeness.
+[[maybe_unused]] void TakeStorageFault(bool instruction)
+{
+  EnterHandler(instruction ? kVecInstStorage : kVecDataStorage, cpu.nextPc, 0);
+  cpu.pending &= ~kPendSysMgmt;
+  FetchFrom(cpu.nextPc);
+}
+
+// Takes the highest priority pending interrupt if interrupts are enabled.
+void PollInterrupts()
+{
+  if (!(cpu.msr & kMsrEe) || cpu.pending == 0)
+    return;
+  if (cpu.pending & kPendExternal)
+    TakeAsync(kVecExternal, 0);
+  else if (cpu.pending & kPendDecrementer)
+    TakeAsync(kVecDecrementer, kPendDecrementer);
+  else if (cpu.pending & kPendSysMgmt)
+    TakeAsync(kVecSystemMgmt, kPendSysMgmt);
+}
+
+// Ticks since a mark, in whole timer periods.
+inline int TicksSince(int mark)
+{
+  return (mark - cpu.left) / cpu.timerRatio;
+}
+
+// Moves a mark to the current cycle, keeping the part of a period that has
+// already gone by.
+inline int Resync(int mark)
+{
+  return cpu.left + (mark - cpu.left) % cpu.timerRatio;
+}
+
+UINT64 ReadTimeBase()
+{
+  return cpu.tb + TicksSince(cpu.tbMark);
+}
+
+// Writing TBL replaces the whole 64-bit time base with the 32-bit value
+// (TBU reads back as zero afterwards); the core has always behaved like this
+// and software running on it may depend on it.
+void WriteTimeBaseLow(UINT32 value)
+{
+  cpu.tbMark = Resync(cpu.tbMark);
+  cpu.tb = value;
+}
+
+void WriteTimeBaseHigh(UINT32 value)
+{
+  UINT64 now = ReadTimeBase();
+  cpu.tbMark = Resync(cpu.tbMark);
+  cpu.tb = (now & 0xFFFFFFFF) | ((UINT64) value << 32);
+}
+
+UINT32 ReadDecrementer()
+{
+  return cpu.dec - TicksSince(cpu.decMark);
+}
+
+// Works out on which cycle of the slice the decrementer passes through zero
+// (or that it does not in this slice).
+void ScheduleDecrementer()
+{
+  if ((UINT32) (cpu.decMark / cpu.timerRatio) > cpu.dec)
+    cpu.decFireAt = (int) ((UINT32) cpu.decMark - (1 + cpu.dec) * (UINT32) cpu.timerRatio);
+  else
+    cpu.decFireAt = 0x7FFFFFFF;
+}
+
+void WriteDecrementer(UINT32 value)
+{
+  // Writing a negative value to a non-negative decrementer requests the
+  // interrupt straight away, as the counter's sign bit going from 0 to 1
+  // does on the 603e.
+  if ((value & 0x80000000) && !(ReadDecrementer() & 0x80000000))
+  {
+    cpu.pending |= kPendDecrementer;
+    PollInterrupts();
+  }
+  cpu.decMark = Resync(cpu.decMark);
+  cpu.dec = value;
+  ScheduleDecrementer();
+}
+
+void ExecuteOne(UINT32 op);    // ppc_ops.c
+
+} // anonymous namespace
 
 int ppc_execute(int cycles)
 {
-	UINT32 opcode;
+  cpu.sliceLength = cycles;
+  cpu.left = cycles;
+  cpu.tbMark = cycles + cpu.timerCarry;
+  cpu.decMark = cycles + cpu.timerCarry;
+  ScheduleDecrementer();
 
-	ppc.cur_cycles = cycles;
-	ppc.icount = cycles;
-	ppc.tb_base_icount = cycles + ppc.timer_frac;
-	ppc.dec_base_icount = cycles + ppc.timer_frac;
+  FetchFrom(cpu.nextPc);
+  PollInterrupts();
 
-	// Check if decrementer exception occurs during execution (exception occurs after decrementer
-	// has passed through zero)
-	if ((UINT32)(ppc.dec_base_icount / ppc.timer_ratio) > DEC)
-		ppc.dec_trigger_cycle = ppc.dec_base_icount - ((1 + DEC) * ppc.timer_ratio);
-	else
-		ppc.dec_trigger_cycle = 0x7fffffff;
+  while (cpu.left > 0 && !cpu.stopped)
+  {
+    cpu.pc = cpu.nextPc;
+    UINT32 op = *cpu.fetch++;     // code words are stored in host order
+    cpu.nextPc = cpu.pc + 4;
+    ExecuteOne(op);
+    cpu.left--;
+    if (cpu.left == cpu.decFireAt)
+    {
+      cpu.pending |= kPendDecrementer;
+      PollInterrupts();
+    }
+  }
 
-	ppc_change_pc(ppc.npc);
+  // Bring the timers up to date and close the slice.
+  cpu.timerCarry = (cpu.tbMark - cpu.left) % cpu.timerRatio;
+  cpu.tb += TicksSince(cpu.tbMark);
+  cpu.dec -= TicksSince(cpu.decMark);
 
-	/*{
-		char string1[200];
-		char string2[200];
-		opcode = BSWAP32(*ppc.op);
-		DisassemblePowerPC(opcode, ppc.npc, string1, string2, sizeof(string2), true);
-		printf("%08X: %s %s\n", ppc.npc, string1, string2);
-	}*/
-
-	ppc603_check_interrupts();
-
-#ifdef SUPERMODEL_DEBUGGER
-	if (PPCDebug != NULL)
-		PPCDebug->CPUActive();
-#endif // SUPERMODEL_DEBUGGER
-
-	while( ppc.icount > 0 && !ppc.fatalError)
-	{
-		ppc.pc = ppc.npc;
-		
-		// Debug breakpoints
-		/*
-		if (ppc.pc == 0x9d40)
-		{
-			printf("%X R3=%08X R4=%08X\n", ppc.pc, REG(3), REG(4));			
-			
-		}
-		*/
-			
-		opcode = *ppc.op++;	// Supermodel byte reverses each aligned word (converting them to little endian) so they can be fetched directly
-		ppc.npc = ppc.pc + 4;
-
-#ifdef SUPERMODEL_DEBUGGER
-		if (PPCDebug != NULL)
-		{
-			while (PPCDebug->CPUExecute(ppc.pc, opcode, (PPCDebug->instrCount > 0 ? 1 : 0)))
-				opcode = *ppc.op++;
-		}
-#endif // SUPERMODEL_DEBUGGER
-
-		switch(opcode >> 26)
-		{
-			case 19:	optable19[(opcode >> 1) & 0x3ff](opcode); break;
-			case 31:	optable31[(opcode >> 1) & 0x3ff](opcode); break;
-			case 59:	optable59[(opcode >> 1) & 0x3ff](opcode); break;
-			case 63:	optable63[(opcode >> 1) & 0x3ff](opcode); break;
-			default:	optable[opcode >> 26](opcode); break;
-		}
-
-		ppc.icount--;
-		
-		if (ppc.icount == ppc.dec_trigger_cycle)
-		{
-			ppc.interrupt_pending |= 0x2;
-			ppc603_check_interrupts();
-		}
-
-		//ppc603_check_interrupts();
-	}
-
-#ifdef SUPERMODEL_DEBUGGER
-	if (PPCDebug != NULL)
-		PPCDebug->CPUInactive();
-#endif // SUPERMODEL_DEBUGGER
-
-	// Update timebase and decrementer.  Both are updated at same rate as specified by timer_ratio.
-	ppc.timer_frac = ((ppc.tb_base_icount - ppc.icount) % ppc.timer_ratio);
-	ppc.tb += ((ppc.tb_base_icount - ppc.icount) / ppc.timer_ratio);
-	DEC -= ((ppc.dec_base_icount - ppc.icount) / ppc.timer_ratio);
-	
-	/*
-	{
-		char string1[200];
-		char string2[200];
-		opcode = BSWAP32(*ppc.op);
-		DisassemblePowerPC(opcode, ppc.npc, string1, string2, sizeof(string2), true);
-		printf("%08X: %s %s\n", ppc.npc, string1, string2);
-	}
-	*/
-
-	int executed = cycles - ppc.icount;
-	ppc.total_cycles += executed;
-	ppc.cur_cycles = 0;
-	ppc.icount = 0;
-	ppc.tb_base_icount = 0;
-    ppc.dec_base_icount = 0;
-	return executed;
+  int ran = cycles - cpu.left;
+  cpu.cyclesDone += ran;
+  cpu.sliceLength = 0;
+  cpu.left = 0;
+  cpu.tbMark = 0;
+  cpu.decMark = 0;
+  return ran;
 }

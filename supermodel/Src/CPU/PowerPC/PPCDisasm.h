@@ -1,60 +1,24 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * PPCDisasm.h
- * 
- * Header file for PowerPC disassembler.
- */
- 
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// PPCDisasm.h: turns one PowerPC 603e instruction word into text.
+
 #ifndef INCLUDED_PPCDISASM_H
 #define INCLUDED_PPCDISASM_H
 
 #include "Types.h"
 
-/*
- * DisassemblePowerPC(op, vpc, mnem, oprs, simplify):
- *
- * Disassembles one PowerPC 603e instruction. 
- *
- * A non-zero return code indicates that the instruction could not be
- * recognized or that the operands to an instruction were invalid. To
- * determine which case occured, check if mnem[0] == '\0'. If it does not,
- * then the latter case happened.
- *
- * Arguments:
- *      op         Instruction word to disassemble.
- *      vpc        Current instruction address.
- *      mnem       Buffer to write instruction mnemonic to. If no
- *                 instruction was decoded, mnem[0] and oprs[0] will be set
- *                 to '\0'.
- *      oprs       Buffer to write any operands to.
- *      simplify   If non-zero, simplified forms of instructions will be
- *                 printed in certain cases.
- *
- * Returns:
- *      OKAY if successful, FAIL if the instruction was unrecognized or had an
- *      invalid form (see note above in function description.)
- */ 
+// Writes the mnemonic of instruction word `op` (found at address `vpc`) to
+// `mnem` and its operands to `oprs` (at most `oprs_size` bytes). With
+// `simplify`, common idioms are shown in their shorter forms (li, mr, nop,
+// bt/bf, ...).
+//
+// Returns OKAY for a valid instruction. FAIL means either that the word is
+// not an instruction (mnem and oprs are left empty) or that it is an
+// instruction in an invalid form, such as an update load whose base register
+// is also its target (mnem and oprs are still filled in).
+//
+// `mnem` must have room for at least 16 characters.
 extern Result DisassemblePowerPC(UINT32 op, UINT32 vpc, char *mnem, char *oprs, size_t oprs_size,
-                        	   bool simplify);
+                                 bool simplify);
 
-#endif	// INCLUDED_PPCDISASM_H
+#endif // INCLUDED_PPCDISASM_H

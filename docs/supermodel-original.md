@@ -62,18 +62,18 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 14637 | 6.6% |
-| Supermodel (with or without RetroPixels changes) | 63480 | 28.4% |
-| Third-party | 145172 | 65.0% |
-| **All** | **223289** | 100% |
+| Original (RetroPixels) | 19437 | 9.0% |
+| Supermodel (with or without RetroPixels changes) | 51907 | 24.0% |
+| Third-party | 145172 | 67.0% |
+| **All** | **216516** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | (top level) | 1671 | 542 | mixed (32% original) |
-| CPU (top level) | 110 | 0 | Supermodel |
-| CPU/68K | 19997 | 0 | Supermodel, 19151 lines third-party |
-| CPU/PowerPC | 6264 | 0 | Supermodel |
-| CPU/Z80 | 4353 | 0 | Supermodel |
+| CPU (top level) | 34 | 34 | original |
+| CPU/68K | 19423 | 272 | mixed (1% original), 19151 lines third-party |
+| CPU/PowerPC | 3190 | 3190 | original |
+| CPU/Z80 | 1304 | 1304 | original |
 | Debugger (top level) | 10744 | 0 | Supermodel |
 | Debugger/CPU | 4748 | 0 | Supermodel |
 | Graphics (top level) | 1486 | 0 | Supermodel |

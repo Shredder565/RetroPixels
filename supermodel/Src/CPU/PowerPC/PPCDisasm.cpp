@@ -1,35 +1,14 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// PPCDisasm.cpp: PowerPC 603e disassembler (used by the debugger), and with
+// -DSTANDALONE a small command line tool that disassembles a binary file.
+//
+// Instructions are found through lookup tables keyed by primary opcode and,
+// for the four extended groups (19, 31, 59, 63), by the 10-bit extended
+// opcode. Every bit of a word that is neither opcode nor an operand field of
+// the instruction must be zero, or the word is not recognised.
 
-/*
- * PPCDisasm.cpp
- *
- * PowerPC 603e disassembler from the original Supermodel project.
- * Copyright 2003 Bart Trzynadlowski, Ville Linde, and Stefano Teso.
- *
- * When possible, invalid forms of instructions are checked for. To the best
- * of my knowledge, all appropriate load/store instructions are checked. I'm
- * not sure whether any other kinds of instructions need checking.
- */
-
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -37,1223 +16,1028 @@
 #include <cstdlib>
 #endif
 #include "Supermodel.h"
+#include "CPU/PowerPC/PPCDisasm.h"
 
-#define DISASM_VERSION  "1.2"
-
-
-/******************************************************************************
- Instruction Descriptions
-
- The disassembler is primarily table-driven making it easily modifiable.
-******************************************************************************/
-
-/*
- * Masks
- *
- * These masks isolate fields in an instruction word.
- */
-#define M_LI    0x03fffffc
-#define M_AA    0x00000002
-#define M_LK    0x00000001
-#define M_BO    0x03e00000
-#define M_BI    0x001f0000
-#define M_BD    0x0000fffc
-#define M_RT    0x03e00000
-#define M_RA    0x001f0000
-#define M_RB    0x0000f800
-#define M_CRFD  0x03800000
-#define M_L     0x00200000
-#define M_TO    0x03e00000
-#define M_D     0x0000ffff
-#define M_SIMM  0x0000ffff
-#define M_UIMM  0x0000ffff
-#define M_NB    0x0000f800
-#define M_SR    0x000f0000
-#define M_SH    0x0000f800
-#define M_CRFS  0x001c0000
-#define M_IMM   0x0000f000
-#define M_CRBD  0x03e00000
-#define M_RC    0x00000001
-#define M_CRBA  0x001f0000
-#define M_CRBB  0x0000f800
-#define M_SPR   0x001FF800
-#define M_TBR   0x001FF800
-#define M_CRM   0x000FF000
-#define M_FM    0x01FE0000
-#define M_OE    0x00000400
-#define M_REGC  0x000007c0
-#define M_MB    0x000007c0
-#define M_ME    0x0000003e
-#define M_XO    0x000007fe
-
-/*
- * Field Defining Macros
- *
- * These macros generate instruction words with their associated fields filled
- * in with the passed value.
- */
-#define D_OP(op)  ((uint32_t(op) & 0x3f) << 26)
-#define D_XO(xo)  ((uint32_t(xo) & 0x3ff) << 1)
-#define D_RT(r)   ((uint32_t(r) & 0x1f) << (31 - 10))
-#define D_RA(r)   ((uint32_t(r) & 0x1f) << (31 - 15))
-#define D_UIMM(u) (uint32_t(u) & 0xffff)
-
-/*
- * Macros to Get Field Values
- *
- * These macros return the values of fields in an opcode. They all return
- * unsigned values and do not perform any sign extensions.
- */
-#define G_RT(op)    ((op & M_RT) >> (31 - 10))
-#define G_RA(op)    ((op & M_RA) >> (31 - 15))
-#define G_RB(op)    ((op & M_RB) >> (31 - 20))
-#define G_SIMM(op)  (op & M_SIMM)
-#define G_UIMM(op)  (op & M_UIMM)
-#define G_LI(op)    ((op & M_LI) >> 2)
-#define G_BO(op)    ((op & M_BO) >> (31 - 10))
-#define G_BI(op)    ((op & M_BI) >> (31 - 15))
-#define G_BD(op)    ((op & M_BD) >> 2)
-#define G_CRFD(op)  ((op & M_CRFD) >> (31 - 8))
-#define G_L(op)     ((op & M_L) >> (31 - 10))
-#define G_CRBD(op)  ((op & M_CRBD) >> (31 - 10))
-#define G_CRBA(op)  ((op & M_CRBA) >> (31 - 15))
-#define G_CRBB(op)  ((op & M_CRBB) >> (31 - 20))
-#define G_REGC(op)  ((op & M_REGC) >> (31 - 25))
-#define G_D(op)     (op & M_D)
-#define G_NB(op)    ((op & M_NB) >> (31 - 20))
-#define G_CRFS(op)  ((op & M_CRFS) >> (31 - 13))
-#define G_SPR(op)   ((op & M_SPR) >> (31 - 20))
-#define G_SR(op)    ((op & M_SR) >> (31 - 15))
-#define G_CRM(op)   ((op & M_CRM) >> (31 - 19))
-#define G_FM(op)    ((op & M_FM) >> (31 - 14))
-#define G_IMM(op)   ((op & M_IMM) >> (31 - 19))
-#define G_SH(op)    ((op & M_SH) >> (31 - 20))
-#define G_MB(op)    ((op & M_MB) >> (31 - 25))
-#define G_ME(op)    ((op & M_ME) >> 1)
-#define G_TO(op)    ((op & M_TO) >> (31 - 10))
-
-/*
- * Operand Formats
- *
- * These convey information on what operand fields are present and how they
- * ought to be printed.
- *
- * I'm fairly certain all of these are used, but that is not guaranteed.
- */
-enum
+namespace
 {
-    F_NONE,         // <no operands>
-    F_LI,           // LI*4+PC if AA=0 else LI*4
-    F_BCx,          // BO, BI, target_addr  used only by BCx
-    F_RT_RA_0_SIMM, // rT, rA|0, SIMM       rA|0 means if rA == 0, print 0
-    F_ADDIS,        // rT, rA, SIMM (printed as unsigned)   only used by ADDIS
-    F_RT_RA_SIMM,   // rT, rA, SIMM
-    F_RA_RT_UIMM,   // rA, rT, UIMM
-    F_CMP_SIMM,     // crfD, L, A, SIMM
-    F_CMP_UIMM,     // crfD, L, A, UIMM
-    F_RT_RA_0_RB,   // rT, rA|0, rB
-    F_RT_RA_RB,     // rT, rA, rB
-    F_RT_D_RA_0,    // rT, d(rA|0)
-    F_RT_D_RA,      // rT, d(rA)
-    F_RA_RT_RB,     // rA, rT, rB
-    F_FRT_D_RA_0,   // frT, d(RA|0)
-    F_FRT_D_RA,     // frT, d(RA)
-    F_FRT_RA_0_RB,  // frT, rA|0, rB
-    F_FRT_RA_RB,    // frT, rA, rB
-    F_TWI,          // TO, rA, SIMM         only used by TWI instruction
-    F_CMP,          // crfD, L, rA, rB
-    F_RA_RT,        // rA, rT
-    F_RA_0_RB,      // rA|0, rB
-    F_FRT_FRB,      // frT, frB
-    F_FCMP,         // crfD, frA, frB
-    F_CRFD_CRFS,    // crfD, crfS
-    F_MCRXR,        // crfD                 only used by MCRXR
-    F_RT,           // rT
-    F_MFSR,         // rT, SR               only used by MFSR
-    F_MTSR,         // SR, rT               only used by MTSR
-    F_MFFSx,        // frT                  only used by MFFSx
-    F_FCRBD,        // crbD                 FPSCR[crbD]
-    F_MTFSFIx,      // crfD, IMM            only used by MTFSFIx
-    F_RB,           // rB
-    F_TW,           // TO, rA, rB           only used by TW
-    F_RT_RA_0_NB,   // rT, rA|0, NB         print 32 if NB == 0
-    F_SRAWIx,       // rA, rT, SH           only used by SRAWIx
-    F_BO_BI,        // BO, BI
-    F_CRBD_CRBA_CRBB,   // crbD, crbA, crbB
-    F_RT_SPR,       // rT, SPR              and TBR
-    F_MTSPR,        // SPR, rT              only used by MTSPR
-    F_MTCRF,        // CRM, rT              only used by MTCRF
-    F_MTFSFx,       // FM, frB              only used by MTFSFx
-    F_RT_RA,        // rT, rA
-    F_FRT_FRA_FRC_FRB,  // frT, frA, frC, frB
-    F_FRT_FRA_FRB,  // frT, frA, frB
-    F_FRT_FRA_FRC,  // frT, frA, frC
-    F_RA_RT_SH_MB_ME,   // rA, rT, SH, MB, ME
-    F_RLWNMx,       // rT, rA, rB, MB, ME   only used by RLWNMx
-    F_RT_RB,        // rT, rB
+
+// Bit fields of an instruction word.
+constexpr uint32_t kFieldD     = 0x03E00000;   // rD / rS / frD / BO / TO / crbD
+constexpr uint32_t kFieldA     = 0x001F0000;   // rA / frA / BI / crbA
+constexpr uint32_t kFieldB     = 0x0000F800;   // rB / frB / crbB / SH / NB
+constexpr uint32_t kFieldC     = 0x000007C0;   // frC / MB
+constexpr uint32_t kFieldMe    = 0x0000003E;
+constexpr uint32_t kFieldImm   = 0x0000FFFF;
+constexpr uint32_t kFieldCrfD  = 0x03800000;
+constexpr uint32_t kFieldL     = 0x00200000;
+constexpr uint32_t kFieldCrfS  = 0x001C0000;
+constexpr uint32_t kFieldSr    = 0x000F0000;
+constexpr uint32_t kFieldU     = 0x0000F000;   // mtfsfi immediate
+constexpr uint32_t kFieldCrm   = 0x000FF000;
+constexpr uint32_t kFieldFm    = 0x01FE0000;
+constexpr uint32_t kFieldSpr   = 0x001FF800;
+constexpr uint32_t kFieldLi    = 0x03FFFFFC;
+constexpr uint32_t kFieldBd    = 0x0000FFFC;
+constexpr uint32_t kBitOe      = 0x00000400;
+constexpr uint32_t kBitRc      = 0x00000001;   // also LK
+constexpr uint32_t kBitAa      = 0x00000002;
+constexpr uint32_t kExtOpcode  = 0x000007FE;
+constexpr uint32_t kBelowOpcode = 0x03FFFFFF;
+
+inline unsigned Rd(uint32_t op)   { return (op >> 21) & 31; }
+inline unsigned Ra(uint32_t op)   { return (op >> 16) & 31; }
+inline unsigned Rb(uint32_t op)   { return (op >> 11) & 31; }
+inline unsigned Rc5(uint32_t op)  { return (op >> 6) & 31; }
+inline unsigned Me(uint32_t op)   { return (op >> 1) & 31; }
+inline unsigned CrfD(uint32_t op) { return (op >> 23) & 7; }
+inline unsigned CrfS(uint32_t op) { return (op >> 18) & 7; }
+inline unsigned LBit(uint32_t op) { return (op >> 21) & 1; }
+inline unsigned Imm(uint32_t op)  { return op & 0xFFFF; }
+inline uint32_t SignedImm(uint32_t op) { return (uint32_t) (int32_t) (int16_t) (op & 0xFFFF); }
+
+// How the operands are laid out (and, through LayoutFields, which bits of
+// the word belong to them).
+enum class Layout : uint8_t
+{
+  None,
+  Branch,         // target
+  CondBranch,     // BO, BI-or-crN[bit], target
+  BranchReg,      // BO, BI-or-crN[bit]
+  AddImm,         // rD, rA|0, simm
+  AddImmHigh,     // rD, rA|0, uimm (shown unsigned)
+  RegRegSimm,     // rD, rA, simm
+  LogicImm,       // rA, rS, uimm
+  CmpSimm,        // crfD, L, rA, simm
+  CmpUimm,        // crfD, L, rA, uimm
+  Trap,           // TO, rA, rB
+  TrapImm,        // TO, rA, simm
+  Cmp,            // crfD, L, rA, rB
+  RegRegReg,      // rD, rA, rB
+  RegReg0Reg,     // rD, rA|0, rB
+  LogicReg,       // rA, rS, rB
+  Unary,          // rD, rA
+  LogicUnary,     // rA, rS
+  Reg,            // rD
+  RegRegB,        // rD, rB
+  CacheOp,        // rA|0, rB
+  OnlyB,          // rB
+  Load,           // rD, d(rA|0)
+  LoadUpdate,     // rD, d(rA)
+  FLoad,          // frD, d(rA|0)
+  FLoadUpdate,    // frD, d(rA)
+  FIndexed,       // frD, rA|0, rB
+  FIndexedUpdate, // frD, rA, rB
+  StringImm,      // rD, rA|0, NB (0 means 32)
+  ShiftImm,       // rA, rS, SH
+  Rotate,         // rA, rS, SH, MB, ME
+  RotateReg,      // rA, rS, rB, MB, ME
+  CrLogic,        // crbD, crbA, crbB
+  CrField,        // crfD, crfS
+  CrFieldOnly,    // crfD
+  MoveFromSpr,    // rD, spr
+  MoveToSpr,      // spr, rS
+  MoveFromSr,     // rD, srN
+  MoveToSr,       // srN, rS
+  MoveToCr,       // CRM, rS
+  FUnary,         // frD, frB
+  FBinary,        // frD, frA, frB
+  FMul,           // frD, frA, frC
+  FMulAdd,        // frD, frA, frC, frB
+  FCompare,       // crfD, frA, frB
+  FMoveFromFpscr, // frD
+  FpscrBit,       // fpscr[bit]
+  FpscrField,     // crfD, imm
+  FpscrFields     // FM, frB
 };
 
-/*
- * Flags
- */
-#define FL_OE           (1 << 0)    // if there is an OE field
-#define FL_RC           (1 << 1)    // if there is an RC field
-#define FL_LK           (1 << 2)    // if there is an LK field
-#define FL_AA           (1 << 3)    // if there is an AA field
-#define FL_CHECK_RA_RT  (1 << 4)    // assert rA!=0 and rA!=rT
-#define FL_CHECK_RA     (1 << 5)    // assert rA!=0
-#define FL_CHECK_LSWI   (1 << 6)    // specific check for LSWI validity
-#define FL_CHECK_LSWX   (1 << 7)    // specific check for LSWX validity
-
-
-/*
- * Instruction Descriptor
- *
- * Describes the layout of an instruction.
- */
-typedef struct
+uint32_t LayoutFields(Layout layout)
 {
-    const char  *mnem;  // mnemonic
-    uint32_t    match;  // bit pattern of instruction after it has been masked
-    uint32_t    mask;   // mask of variable fields (AND with ~mask to compare w/
-                        // bit pattern to determine a match)
-    int         format; // operand format
-    unsigned    flags;  // flags
-} IDESCR;
+  switch (layout)
+  {
+  case Layout::None:           return 0;
+  case Layout::Branch:         return kFieldLi;
+  case Layout::CondBranch:     return kFieldD | kFieldA | kFieldBd;
+  case Layout::BranchReg:      return kFieldD | kFieldA;
+  case Layout::AddImm:
+  case Layout::AddImmHigh:
+  case Layout::RegRegSimm:
+  case Layout::LogicImm:
+  case Layout::TrapImm:
+  case Layout::Load:
+  case Layout::LoadUpdate:
+  case Layout::FLoad:
+  case Layout::FLoadUpdate:    return kFieldD | kFieldA | kFieldImm;
+  case Layout::CmpSimm:
+  case Layout::CmpUimm:        return kFieldCrfD | kFieldL | kFieldA | kFieldImm;
+  case Layout::Cmp:            return kFieldCrfD | kFieldL | kFieldA | kFieldB;
+  case Layout::Trap:
+  case Layout::RegRegReg:
+  case Layout::RegReg0Reg:
+  case Layout::LogicReg:
+  case Layout::FIndexed:
+  case Layout::FIndexedUpdate:
+  case Layout::StringImm:
+  case Layout::ShiftImm:
+  case Layout::CrLogic:
+  case Layout::FBinary:        return kFieldD | kFieldA | kFieldB;
+  case Layout::Unary:
+  case Layout::LogicUnary:     return kFieldD | kFieldA;
+  case Layout::Reg:
+  case Layout::FMoveFromFpscr:
+  case Layout::FpscrBit:       return kFieldD;
+  case Layout::RegRegB:
+  case Layout::FUnary:         return kFieldD | kFieldB;
+  case Layout::CacheOp:        return kFieldA | kFieldB;
+  case Layout::OnlyB:          return kFieldB;
+  case Layout::Rotate:
+  case Layout::RotateReg:      return kFieldD | kFieldA | kFieldB | kFieldC | kFieldMe;
+  case Layout::CrField:        return kFieldCrfD | kFieldCrfS;
+  case Layout::CrFieldOnly:    return kFieldCrfD;
+  case Layout::MoveFromSpr:
+  case Layout::MoveToSpr:      return kFieldD | kFieldSpr;
+  case Layout::MoveFromSr:
+  case Layout::MoveToSr:       return kFieldD | kFieldSr;
+  case Layout::MoveToCr:       return kFieldD | kFieldCrm;
+  case Layout::FMul:           return kFieldD | kFieldA | kFieldC;
+  case Layout::FMulAdd:        return kFieldD | kFieldA | kFieldB | kFieldC;
+  case Layout::FCompare:       return kFieldCrfD | kFieldA | kFieldB;
+  case Layout::FpscrField:     return kFieldCrfD | kFieldU;
+  case Layout::FpscrFields:    return kFieldFm | kFieldB;
+  }
+  return 0;
+}
 
-/*
- * Instruction Table
- *
- * Table of instruction descriptors which allows the disassembler to decode
- * and print instructions.
- */
-static const IDESCR itab[] =
+// Options of an instruction.
+enum : uint16_t
 {
-    { "add",    D_OP(31)|D_XO(266), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "addc",   D_OP(31)|D_XO(10),  M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "adde",   D_OP(31)|D_XO(138), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "addi",   D_OP(14),           M_RT|M_RA|M_SIMM,           F_RT_RA_0_SIMM, 0           },
-    { "addic",  D_OP(12),           M_RT|M_RA|M_SIMM,           F_RT_RA_SIMM,   0           },
-    { "addic.", D_OP(13),           M_RT|M_RA|M_SIMM,           F_RT_RA_SIMM,   0           },
-    { "addis",  D_OP(15),           M_RT|M_RA|M_SIMM,           F_ADDIS,        0           },
-    { "addme",  D_OP(31)|D_XO(234), M_RT|M_RA|M_OE|M_RC,        F_RT_RA,        FL_OE|FL_RC },
-    { "addze",  D_OP(31)|D_XO(202), M_RT|M_RA|M_OE|M_RC,        F_RT_RA,        FL_OE|FL_RC },
-    { "and",    D_OP(31)|D_XO(28),  M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "andc",   D_OP(31)|D_XO(60),  M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "andi.",  D_OP(28),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-    { "andis.", D_OP(29),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-    { "b",      D_OP(18),           M_LI|M_AA|M_LK,             F_LI,           FL_AA|FL_LK },
-    { "bc",     D_OP(16),           M_BO|M_BI|M_BD|M_AA|M_LK,   F_BCx,          FL_AA|FL_LK },
-    { "bcctr",  D_OP(19)|D_XO(528), M_BO|M_BI|M_LK,             F_BO_BI,        FL_LK       },
-    { "bclr",   D_OP(19)|D_XO(16),  M_BO|M_BI|M_LK,             F_BO_BI,        FL_LK       },
-    { "cmp",    D_OP(31)|D_XO(0),   M_CRFD|M_L|M_RA|M_RB,       F_CMP,          0           },
-    { "cmpi",   D_OP(11),           M_CRFD|M_L|M_RA|M_SIMM,     F_CMP_SIMM,     0           },
-    { "cmpl",   D_OP(31)|D_XO(32),  M_CRFD|M_L|M_RA|M_RB,       F_CMP,          0           },
-    { "cmpli",  D_OP(10),           M_CRFD|M_L|M_RA|M_UIMM,     F_CMP_UIMM,     0           },
-    { "cntlzw", D_OP(31)|D_XO(26),  M_RT|M_RA|M_RC,             F_RA_RT,        FL_RC       },
-    { "crand",  D_OP(19)|D_XO(257), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "crandc", D_OP(19)|D_XO(129), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "creqv",  D_OP(19)|D_XO(289), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "crnand", D_OP(19)|D_XO(225), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "crnor",  D_OP(19)|D_XO(33),  M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "cror",   D_OP(19)|D_XO(449), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "crorc",  D_OP(19)|D_XO(417), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "crxor",  D_OP(19)|D_XO(193), M_CRBD|M_CRBA|M_CRBB,       F_CRBD_CRBA_CRBB,   0       },
-    { "dcba",   D_OP(31)|D_XO(758), M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbf",   D_OP(31)|D_XO(86),  M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbi",   D_OP(31)|D_XO(470), M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbst",  D_OP(31)|D_XO(54),  M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbt",   D_OP(31)|D_XO(278), M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbtst", D_OP(31)|D_XO(246), M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "dcbz",   D_OP(31)|D_XO(1014),M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "divw",   D_OP(31)|D_XO(491), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "divwu",  D_OP(31)|D_XO(459), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "eciwx",  D_OP(31)|D_XO(310), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "ecowx",  D_OP(31)|D_XO(438), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "eieio",  D_OP(31)|D_XO(854), 0,                          F_NONE,         0           },
-    { "eqv",    D_OP(31)|D_XO(284), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "extsb",  D_OP(31)|D_XO(954), M_RT|M_RA|M_RC,             F_RA_RT,        FL_RC       },
-    { "extsh",  D_OP(31)|D_XO(922), M_RT|M_RA|M_RC,             F_RA_RT,        FL_RC       },
-    { "fabs",   D_OP(63)|D_XO(264), M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fadd",   D_OP(63)|D_XO(21),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "fadds",  D_OP(59)|D_XO(21),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "fcmpo",  D_OP(63)|D_XO(32),  M_CRFD|M_RA|M_RB,           F_FCMP,         0           },
-    { "fcmpu",  D_OP(63)|D_XO(0),   M_CRFD|M_RA|M_RB,           F_FCMP,         0           },
-    { "fctiw",  D_OP(63)|D_XO(14),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fctiwz", D_OP(63)|D_XO(15),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fdiv",   D_OP(63)|D_XO(18),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "fdivs",  D_OP(59)|D_XO(18),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "fmadd",  D_OP(63)|D_XO(29),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fmadds", D_OP(59)|D_XO(29),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fmr",    D_OP(63)|D_XO(72),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fmsub",  D_OP(63)|D_XO(28),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fmsubs", D_OP(59)|D_XO(28),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fmul",   D_OP(63)|D_XO(25),  M_RT|M_RA|M_REGC|M_RC,      F_FRT_FRA_FRC,  FL_RC       },
-    { "fmuls",  D_OP(59)|D_XO(25),  M_RT|M_RA|M_REGC|M_RC,      F_FRT_FRA_FRC,  FL_RC       },
-    { "fnabs",  D_OP(63)|D_XO(136), M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fneg",   D_OP(63)|D_XO(40),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fnmadd", D_OP(63)|D_XO(31),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fnmadds",D_OP(59)|D_XO(31),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fnmsub", D_OP(63)|D_XO(30),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fnmsubs",D_OP(59)|D_XO(30),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fres",   D_OP(59)|D_XO(24),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "frsp",   D_OP(63)|D_XO(12),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "frsqrte",D_OP(63)|D_XO(26),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fsel",   D_OP(63)|D_XO(23),  M_RT|M_RA|M_RB|M_REGC|M_RC, F_FRT_FRA_FRC_FRB,  FL_RC   },
-    { "fsqrt",  D_OP(63)|D_XO(22),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fsqrts", D_OP(59)|D_XO(22),  M_RT|M_RB|M_RC,             F_FRT_FRB,      FL_RC       },
-    { "fsub",   D_OP(63)|D_XO(20),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "fsubs",  D_OP(59)|D_XO(20),  M_RT|M_RA|M_RB|M_RC,        F_FRT_FRA_FRB,  FL_RC       },
-    { "icbi",   D_OP(31)|D_XO(982), M_RA|M_RB,                  F_RA_0_RB,      0           },
-    { "isync",  D_OP(19)|D_XO(150), 0,                          F_NONE,         0           },
-    { "lbz",    D_OP(34),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "lbzu",   D_OP(35),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA_RT },
-    { "lbzux",  D_OP(31)|D_XO(119), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA_RT },
-    { "lbzx",   D_OP(31)|D_XO(87),  M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lfd",    D_OP(50),           M_RT|M_RA|M_D,              F_FRT_D_RA_0,   0           },
-    { "lfdu",   D_OP(51),           M_RT|M_RA|M_D,              F_FRT_D_RA,     FL_CHECK_RA },
-    { "lfdux",  D_OP(31)|D_XO(631), M_RT|M_RA|M_RB,             F_FRT_RA_RB,    FL_CHECK_RA },
-    { "lfdx",   D_OP(31)|D_XO(599), M_RT|M_RA|M_RB,             F_FRT_RA_0_RB,  0           },
-    { "lfs",    D_OP(48),           M_RT|M_RA|M_D,              F_FRT_D_RA_0,   0           },
-    { "lfsu",   D_OP(49),           M_RT|M_RA|M_D,              F_FRT_D_RA,     FL_CHECK_RA },
-    { "lfsux",  D_OP(31)|D_XO(567), M_RT|M_RA|M_RB,             F_FRT_RA_RB,    FL_CHECK_RA },
-    { "lfsx",   D_OP(31)|D_XO(535), M_RT|M_RA|M_RB,             F_FRT_RA_0_RB,  0           },
-    { "lha",    D_OP(42),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "lhau",   D_OP(43),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA_RT },
-    { "lhaux",  D_OP(31)|D_XO(375), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA_RT },
-    { "lhax",   D_OP(31)|D_XO(343), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lhbrx",  D_OP(31)|D_XO(790), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lhz",    D_OP(40),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "lhzu",   D_OP(41),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA_RT },
-    { "lhzux",  D_OP(31)|D_XO(311), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA_RT },
-    { "lhzx",   D_OP(31)|D_XO(279), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lmw",    D_OP(46),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "lswi",   D_OP(31)|D_XO(597), M_RT|M_RA|M_NB,             F_RT_RA_0_NB,   FL_CHECK_LSWI },
-    { "lswx",   D_OP(31)|D_XO(533), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   FL_CHECK_LSWX },
-    { "lwarx",  D_OP(31)|D_XO(20),  M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lwbrx",  D_OP(31)|D_XO(534), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "lwz",    D_OP(32),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "lwzu",   D_OP(33),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA_RT },
-    { "lwzux",  D_OP(31)|D_XO(55),  M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA_RT },
-    { "lwzx",   D_OP(31)|D_XO(23),  M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "mcrf",   D_OP(19)|D_XO(0),   M_CRFD|M_CRFS,              F_CRFD_CRFS,    0           },
-    { "mcrfs",  D_OP(63)|D_XO(64),  M_CRFD|M_CRFS,              F_CRFD_CRFS,    0           },
-    { "mcrxr",  D_OP(31)|D_XO(512), M_CRFD,                     F_MCRXR,        0           },
-    { "mfcr",   D_OP(31)|D_XO(19),  M_RT,                       F_RT,           0           },
-    { "mffs",   D_OP(63)|D_XO(583), M_RT|M_RC,                  F_MFFSx,        FL_RC       },
-    { "mfmsr",  D_OP(31)|D_XO(83),  M_RT,                       F_RT,           0           },
-    { "mfspr",  D_OP(31)|D_XO(339), M_RT|M_SPR,                 F_RT_SPR,       0           },
-    { "mfsr",   D_OP(31)|D_XO(595), M_RT|M_SR,                  F_MFSR,         0           },
-    { "mfsrin", D_OP(31)|D_XO(659), M_RT|M_RB,                  F_RT_RB,        0           },
-    { "mftb",   D_OP(31)|D_XO(371), M_RT|M_TBR,                 F_RT_SPR,       0           },
-    { "mtcrf",  D_OP(31)|D_XO(144), M_RT|M_CRM,                 F_MTCRF,        0           },
-    { "mtfsb0", D_OP(63)|D_XO(70),  M_CRBD|M_RC,                F_FCRBD,        FL_RC       },
-    { "mtfsb1", D_OP(63)|D_XO(38),  M_CRBD|M_RC,                F_FCRBD,        FL_RC       },
-    { "mtfsf",  D_OP(63)|D_XO(711), M_FM|M_RB|M_RC,             F_MTFSFx,       FL_RC       },
-    { "mtfsfi", D_OP(63)|D_XO(134), M_CRFD|M_IMM|M_RC,          F_MTFSFIx,      FL_RC       },
-    { "mtmsr",  D_OP(31)|D_XO(146), M_RT,                       F_RT,           0           },
-    { "mtspr",  D_OP(31)|D_XO(467), M_RT|M_SPR,                 F_MTSPR,        0           },
-    { "mtsr",   D_OP(31)|D_XO(210), M_RT|M_SR,                  F_MTSR,         0           },
-    { "mtsrin", D_OP(31)|D_XO(242), M_RT|M_RB,                  F_RT_RB,        0           },
-    { "mulhw",  D_OP(31)|D_XO(75),  M_RT|M_RA|M_RB|M_RC,        F_RT_RA_RB,     FL_RC       },
-    { "mulhwu", D_OP(31)|D_XO(11),  M_RT|M_RA|M_RB|M_RC,        F_RT_RA_RB,     FL_RC       },
-    { "mulli",  D_OP(7),            M_RT|M_RA|M_SIMM,           F_RT_RA_SIMM,   0           },
-    { "mullw",  D_OP(31)|D_XO(235), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "nand",   D_OP(31)|D_XO(476), M_RA|M_RT|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "neg",    D_OP(31)|D_XO(104), M_RT|M_RA|M_OE|M_RC,        F_RT_RA,        FL_OE|FL_RC },
-    { "nor",    D_OP(31)|D_XO(124), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "or",     D_OP(31)|D_XO(444), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "orc",    D_OP(31)|D_XO(412), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "ori",    D_OP(24),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-    { "oris",   D_OP(25),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-    { "rfi",    D_OP(19)|D_XO(50),  0,                          F_NONE,         0           },
-    { "rlwimi", D_OP(20),           M_RT|M_RA|M_SH|M_MB|M_ME|M_RC,  F_RA_RT_SH_MB_ME,   FL_RC   },
-    { "rlwinm", D_OP(21),           M_RT|M_RA|M_SH|M_MB|M_ME|M_RC,  F_RA_RT_SH_MB_ME,   FL_RC   },
-    { "rlwnm",  D_OP(23),           M_RT|M_RA|M_RB|M_MB|M_ME|M_RC,  F_RLWNMx,   FL_RC       },
-    { "sc",     D_OP(17)|2,         0,                          F_NONE,         0           },
-    { "slw",    D_OP(31)|D_XO(24),  M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "sraw",   D_OP(31)|D_XO(792), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "srawi",  D_OP(31)|D_XO(824), M_RT|M_RA|M_SH|M_RC,        F_SRAWIx,       FL_RC       },
-    { "srw",    D_OP(31)|D_XO(536), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "stb",    D_OP(38),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "stbu",   D_OP(39),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA },
-    { "stbux",  D_OP(31)|D_XO(247), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA },
-    { "stbx",   D_OP(31)|D_XO(215), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "stfd",   D_OP(54),           M_RT|M_RA|M_D,              F_FRT_D_RA_0,   0           },
-    { "stfdu",  D_OP(55),           M_RT|M_RA|M_D,              F_FRT_D_RA,     FL_CHECK_RA },
-    { "stfdux", D_OP(31)|D_XO(759), M_RT|M_RA|M_RB,             F_FRT_RA_RB,    FL_CHECK_RA },
-    { "stfdx",  D_OP(31)|D_XO(727), M_RT|M_RA|M_RB,             F_FRT_RA_0_RB,  0           },
-    { "stfiwx", D_OP(31)|D_XO(983), M_RT|M_RA|M_RB,             F_FRT_RA_0_RB,  0           },
-    { "stfs",   D_OP(52),           M_RT|M_RA|M_D,              F_FRT_D_RA_0,   0           },
-    { "stfsu",  D_OP(53),           M_RT|M_RA|M_D,              F_FRT_D_RA,     FL_CHECK_RA },
-    { "stfsux", D_OP(31)|D_XO(695), M_RT|M_RA|M_RB,             F_FRT_RA_RB,    FL_CHECK_RA },
-    { "stfsx",  D_OP(31)|D_XO(663), M_RT|M_RA|M_RB,             F_FRT_RA_0_RB,  0           },
-    { "sth",    D_OP(44),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "sthbrx", D_OP(31)|D_XO(918), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "sthu",   D_OP(45),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA },
-    { "sthux",  D_OP(31)|D_XO(439), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA },
-    { "sthx",   D_OP(31)|D_XO(407), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "stmw",   D_OP(47),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "stswi",  D_OP(31)|D_XO(725), M_RT|M_RA|M_NB,             F_RT_RA_0_NB,   0           },
-    { "stswx",  D_OP(31)|D_XO(661), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "stw",    D_OP(36),           M_RT|M_RA|M_D,              F_RT_D_RA_0,    0           },
-    { "stwbrx", D_OP(31)|D_XO(662), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "stwcx.", D_OP(31)|D_XO(150)|1,   M_RT|M_RA|M_RB,         F_RT_RA_0_RB,   0           },
-    { "stwu",   D_OP(37),           M_RT|M_RA|M_D,              F_RT_D_RA,      FL_CHECK_RA },
-    { "stwux",  D_OP(31)|D_XO(183), M_RT|M_RA|M_RB,             F_RT_RA_RB,     FL_CHECK_RA },
-    { "stwx",   D_OP(31)|D_XO(151), M_RT|M_RA|M_RB,             F_RT_RA_0_RB,   0           },
-    { "subf",   D_OP(31)|D_XO(40),  M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "subfc",  D_OP(31)|D_XO(8),   M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "subfe",  D_OP(31)|D_XO(136), M_RT|M_RA|M_RB|M_OE|M_RC,   F_RT_RA_RB,     FL_OE|FL_RC },
-    { "subfic", D_OP(8),            M_RT|M_RA|M_SIMM,           F_RT_RA_SIMM,   0           },
-    { "subfme", D_OP(31)|D_XO(232), M_RT|M_RA|M_OE|M_RC,        F_RT_RA,        FL_OE|FL_RC },
-    { "subfze", D_OP(31)|D_XO(200), M_RT|M_RA|M_OE|M_RC,        F_RT_RA,        FL_OE|FL_RC },
-    { "sync",   D_OP(31)|D_XO(598), 0,                          F_NONE,         0           },
-    { "tlbia",  D_OP(31)|D_XO(370), 0,                          F_NONE,         0           },
-    { "tlbie",  D_OP(31)|D_XO(306), M_RB,                       F_RB,           0           },
-    { "tlbsync",D_OP(31)|D_XO(566), 0,                          F_NONE,         0           },
-    { "tw",     D_OP(31)|D_XO(4),   M_TO|M_RA|M_RB,             F_TW,           0           },
-    { "twi",    D_OP(3),            M_TO|M_RA|M_SIMM,           F_TWI,          0           },
-    { "xor",    D_OP(31)|D_XO(316), M_RT|M_RA|M_RB|M_RC,        F_RA_RT_RB,     FL_RC       },
-    { "xori",   D_OP(26),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-    { "xoris",  D_OP(27),           M_RT|M_RA|M_UIMM,           F_RA_RT_UIMM,   0           },
-
-    /*
-     * PowerPC 603e/EC603e-specific instructions
-     */
-
-    { "tlbld",  D_OP(31)|D_XO(978), M_RB,                       F_RB,           0           },
-    { "tlbli",  D_OP(31)|D_XO(1010),M_RB,                       F_RB,           0           }
+  kOptOe        = 1 << 0,   // has an OE bit ("o" suffix)
+  kOptRc        = 1 << 1,   // has an Rc bit ("." suffix)
+  kOptLk        = 1 << 2,   // has an LK bit ("l" suffix)
+  kOptAa        = 1 << 3,   // has an AA bit ("a" suffix)
+  kOptRcSet     = 1 << 4,   // the Rc bit must be 1 (stwcx.)
+  kOptExact     = 1 << 5,   // the word must be exactly opcode | 2 (sc)
+  kOptBaseNotRd = 1 << 6,   // invalid if rA is 0 or equals rD
+  kOptBaseNot0  = 1 << 7,   // invalid if rA is 0
+  kOptLswi      = 1 << 8,   // lswi register range check
+  kOptLswx      = 1 << 9    // lswx register check
 };
 
-
-/******************************************************************************
- Instruction Decoding and Disassembly Functions
-******************************************************************************/
-
-/*
- * CR Bits
- *
- * Use an index of BI&3 into this table to obtain the CR field bit name.
- */
-static const char *crbit[] = { "lt", "gt", "eq", "so" };
-
-/*
- * SPR():
- *
- * Decode the SPR (or TBR) field and append the register name to dest. If
- * no name is associated with the field value, the value itself is printed.
- */
-static void SPR(char *dest, unsigned spr_field)
+struct Insn
 {
-    unsigned  spr;
+  const char *name;
+  Layout layout;
+  uint16_t opts;
+};
 
-    /*
-     * Construct the SPR number -- SPR field is 2 5-bit fields
-     */
+struct Keyed
+{
+  unsigned key;
+  Insn insn;
+};
 
-    spr = (spr_field >> 5) & 0x1f;
-    spr |= (spr_field & 0x1f) << 5;
+constexpr uint16_t kOeRc = kOptOe | kOptRc;
 
-    /*
-     * Append the SPR name to the destination string using strcat()
-     */
+const Keyed kPrimary[] = {
+  {  3, { "twi",    Layout::TrapImm,     0 } },
+  {  7, { "mulli",  Layout::RegRegSimm,  0 } },
+  {  8, { "subfic", Layout::RegRegSimm,  0 } },
+  { 10, { "cmpli",  Layout::CmpUimm,     0 } },
+  { 11, { "cmpi",   Layout::CmpSimm,     0 } },
+  { 12, { "addic",  Layout::RegRegSimm,  0 } },
+  { 13, { "addic.", Layout::RegRegSimm,  0 } },
+  { 14, { "addi",   Layout::AddImm,      0 } },
+  { 15, { "addis",  Layout::AddImmHigh,  0 } },
+  { 16, { "bc",     Layout::CondBranch,  kOptAa | kOptLk } },
+  { 17, { "sc",     Layout::None,        kOptExact } },
+  { 18, { "b",      Layout::Branch,      kOptAa | kOptLk } },
+  { 20, { "rlwimi", Layout::Rotate,      kOptRc } },
+  { 21, { "rlwinm", Layout::Rotate,      kOptRc } },
+  { 23, { "rlwnm",  Layout::RotateReg,   kOptRc } },
+  { 24, { "ori",    Layout::LogicImm,    0 } },
+  { 25, { "oris",   Layout::LogicImm,    0 } },
+  { 26, { "xori",   Layout::LogicImm,    0 } },
+  { 27, { "xoris",  Layout::LogicImm,    0 } },
+  { 28, { "andi.",  Layout::LogicImm,    0 } },
+  { 29, { "andis.", Layout::LogicImm,    0 } },
+  { 32, { "lwz",    Layout::Load,        0 } },
+  { 33, { "lwzu",   Layout::LoadUpdate,  kOptBaseNotRd } },
+  { 34, { "lbz",    Layout::Load,        0 } },
+  { 35, { "lbzu",   Layout::LoadUpdate,  kOptBaseNotRd } },
+  { 36, { "stw",    Layout::Load,        0 } },
+  { 37, { "stwu",   Layout::LoadUpdate,  kOptBaseNot0 } },
+  { 38, { "stb",    Layout::Load,        0 } },
+  { 39, { "stbu",   Layout::LoadUpdate,  kOptBaseNot0 } },
+  { 40, { "lhz",    Layout::Load,        0 } },
+  { 41, { "lhzu",   Layout::LoadUpdate,  kOptBaseNotRd } },
+  { 42, { "lha",    Layout::Load,        0 } },
+  { 43, { "lhau",   Layout::LoadUpdate,  kOptBaseNotRd } },
+  { 44, { "sth",    Layout::Load,        0 } },
+  { 45, { "sthu",   Layout::LoadUpdate,  kOptBaseNot0 } },
+  { 46, { "lmw",    Layout::Load,        0 } },
+  { 47, { "stmw",   Layout::Load,        0 } },
+  { 48, { "lfs",    Layout::FLoad,       0 } },
+  { 49, { "lfsu",   Layout::FLoadUpdate, kOptBaseNot0 } },
+  { 50, { "lfd",    Layout::FLoad,       0 } },
+  { 51, { "lfdu",   Layout::FLoadUpdate, kOptBaseNot0 } },
+  { 52, { "stfs",   Layout::FLoad,       0 } },
+  { 53, { "stfsu",  Layout::FLoadUpdate, kOptBaseNot0 } },
+  { 54, { "stfd",   Layout::FLoad,       0 } },
+  { 55, { "stfdu",  Layout::FLoadUpdate, kOptBaseNot0 } },
+};
 
-    switch (spr)
+const Keyed kGroup19[] = {
+  {   0, { "mcrf",   Layout::CrField,   0 } },
+  {  16, { "bclr",   Layout::BranchReg, kOptLk } },
+  {  33, { "crnor",  Layout::CrLogic,   0 } },
+  {  50, { "rfi",    Layout::None,      0 } },
+  { 129, { "crandc", Layout::CrLogic,   0 } },
+  { 150, { "isync",  Layout::None,      0 } },
+  { 193, { "crxor",  Layout::CrLogic,   0 } },
+  { 225, { "crnand", Layout::CrLogic,   0 } },
+  { 257, { "crand",  Layout::CrLogic,   0 } },
+  { 289, { "creqv",  Layout::CrLogic,   0 } },
+  { 417, { "crorc",  Layout::CrLogic,   0 } },
+  { 449, { "cror",   Layout::CrLogic,   0 } },
+  { 528, { "bcctr",  Layout::BranchReg, kOptLk } },
+};
+
+const Keyed kGroup31[] = {
+  {    0, { "cmp",     Layout::Cmp,            0 } },
+  {    4, { "tw",      Layout::Trap,           0 } },
+  {    8, { "subfc",   Layout::RegRegReg,      kOeRc } },
+  {   10, { "addc",    Layout::RegRegReg,      kOeRc } },
+  {   11, { "mulhwu",  Layout::RegRegReg,      kOptRc } },
+  {   19, { "mfcr",    Layout::Reg,            0 } },
+  {   20, { "lwarx",   Layout::RegReg0Reg,     0 } },
+  {   23, { "lwzx",    Layout::RegReg0Reg,     0 } },
+  {   24, { "slw",     Layout::LogicReg,       kOptRc } },
+  {   26, { "cntlzw",  Layout::LogicUnary,     kOptRc } },
+  {   28, { "and",     Layout::LogicReg,       kOptRc } },
+  {   32, { "cmpl",    Layout::Cmp,            0 } },
+  {   40, { "subf",    Layout::RegRegReg,      kOeRc } },
+  {   54, { "dcbst",   Layout::CacheOp,        0 } },
+  {   55, { "lwzux",   Layout::RegRegReg,      kOptBaseNotRd } },
+  {   60, { "andc",    Layout::LogicReg,       kOptRc } },
+  {   75, { "mulhw",   Layout::RegRegReg,      kOptRc } },
+  {   83, { "mfmsr",   Layout::Reg,            0 } },
+  {   86, { "dcbf",    Layout::CacheOp,        0 } },
+  {   87, { "lbzx",    Layout::RegReg0Reg,     0 } },
+  {  104, { "neg",     Layout::Unary,          kOeRc } },
+  {  119, { "lbzux",   Layout::RegRegReg,      kOptBaseNotRd } },
+  {  124, { "nor",     Layout::LogicReg,       kOptRc } },
+  {  136, { "subfe",   Layout::RegRegReg,      kOeRc } },
+  {  138, { "adde",    Layout::RegRegReg,      kOeRc } },
+  {  144, { "mtcrf",   Layout::MoveToCr,       0 } },
+  {  146, { "mtmsr",   Layout::Reg,            0 } },
+  {  150, { "stwcx.",  Layout::RegReg0Reg,     kOptRcSet } },
+  {  151, { "stwx",    Layout::RegReg0Reg,     0 } },
+  {  183, { "stwux",   Layout::RegRegReg,      kOptBaseNot0 } },
+  {  200, { "subfze",  Layout::Unary,          kOeRc } },
+  {  202, { "addze",   Layout::Unary,          kOeRc } },
+  {  210, { "mtsr",    Layout::MoveToSr,       0 } },
+  {  215, { "stbx",    Layout::RegReg0Reg,     0 } },
+  {  232, { "subfme",  Layout::Unary,          kOeRc } },
+  {  234, { "addme",   Layout::Unary,          kOeRc } },
+  {  235, { "mullw",   Layout::RegRegReg,      kOeRc } },
+  {  242, { "mtsrin",  Layout::RegRegB,        0 } },
+  {  246, { "dcbtst",  Layout::CacheOp,        0 } },
+  {  247, { "stbux",   Layout::RegRegReg,      kOptBaseNot0 } },
+  {  266, { "add",     Layout::RegRegReg,      kOeRc } },
+  {  278, { "dcbt",    Layout::CacheOp,        0 } },
+  {  279, { "lhzx",    Layout::RegReg0Reg,     0 } },
+  {  284, { "eqv",     Layout::LogicReg,       kOptRc } },
+  {  306, { "tlbie",   Layout::OnlyB,          0 } },
+  {  310, { "eciwx",   Layout::RegReg0Reg,     0 } },
+  {  311, { "lhzux",   Layout::RegRegReg,      kOptBaseNotRd } },
+  {  316, { "xor",     Layout::LogicReg,       kOptRc } },
+  {  339, { "mfspr",   Layout::MoveFromSpr,    0 } },
+  {  343, { "lhax",    Layout::RegReg0Reg,     0 } },
+  {  370, { "tlbia",   Layout::None,           0 } },
+  {  371, { "mftb",    Layout::MoveFromSpr,    0 } },
+  {  375, { "lhaux",   Layout::RegRegReg,      kOptBaseNotRd } },
+  {  407, { "sthx",    Layout::RegReg0Reg,     0 } },
+  {  412, { "orc",     Layout::LogicReg,       kOptRc } },
+  {  438, { "ecowx",   Layout::RegReg0Reg,     0 } },
+  {  439, { "sthux",   Layout::RegRegReg,      kOptBaseNot0 } },
+  {  444, { "or",      Layout::LogicReg,       kOptRc } },
+  {  459, { "divwu",   Layout::RegRegReg,      kOeRc } },
+  {  467, { "mtspr",   Layout::MoveToSpr,      0 } },
+  {  470, { "dcbi",    Layout::CacheOp,        0 } },
+  {  476, { "nand",    Layout::LogicReg,       kOptRc } },
+  {  491, { "divw",    Layout::RegRegReg,      kOeRc } },
+  {  512, { "mcrxr",   Layout::CrFieldOnly,    0 } },
+  {  533, { "lswx",    Layout::RegReg0Reg,     kOptLswx } },
+  {  534, { "lwbrx",   Layout::RegReg0Reg,     0 } },
+  {  535, { "lfsx",    Layout::FIndexed,       0 } },
+  {  536, { "srw",     Layout::LogicReg,       kOptRc } },
+  {  566, { "tlbsync", Layout::None,           0 } },
+  {  567, { "lfsux",   Layout::FIndexedUpdate, kOptBaseNot0 } },
+  {  595, { "mfsr",    Layout::MoveFromSr,     0 } },
+  {  597, { "lswi",    Layout::StringImm,      kOptLswi } },
+  {  598, { "sync",    Layout::None,           0 } },
+  {  599, { "lfdx",    Layout::FIndexed,       0 } },
+  {  631, { "lfdux",   Layout::FIndexedUpdate, kOptBaseNot0 } },
+  {  659, { "mfsrin",  Layout::RegRegB,        0 } },
+  {  661, { "stswx",   Layout::RegReg0Reg,     0 } },
+  {  662, { "stwbrx",  Layout::RegReg0Reg,     0 } },
+  {  663, { "stfsx",   Layout::FIndexed,       0 } },
+  {  695, { "stfsux",  Layout::FIndexedUpdate, kOptBaseNot0 } },
+  {  725, { "stswi",   Layout::StringImm,      0 } },
+  {  727, { "stfdx",   Layout::FIndexed,       0 } },
+  {  758, { "dcba",    Layout::CacheOp,        0 } },
+  {  759, { "stfdux",  Layout::FIndexedUpdate, kOptBaseNot0 } },
+  {  790, { "lhbrx",   Layout::RegReg0Reg,     0 } },
+  {  792, { "sraw",    Layout::LogicReg,       kOptRc } },
+  {  824, { "srawi",   Layout::ShiftImm,       kOptRc } },
+  {  854, { "eieio",   Layout::None,           0 } },
+  {  918, { "sthbrx",  Layout::RegReg0Reg,     0 } },
+  {  922, { "extsh",   Layout::LogicUnary,     kOptRc } },
+  {  954, { "extsb",   Layout::LogicUnary,     kOptRc } },
+  {  978, { "tlbld",   Layout::OnlyB,          0 } },   // 603e only
+  {  982, { "icbi",    Layout::CacheOp,        0 } },
+  {  983, { "stfiwx",  Layout::FIndexed,       0 } },
+  { 1010, { "tlbli",   Layout::OnlyB,          0 } },   // 603e only
+  { 1014, { "dcbz",    Layout::CacheOp,        0 } },
+};
+
+const Keyed kGroup59[] = {
+  { 18, { "fdivs",   Layout::FBinary, kOptRc } },
+  { 20, { "fsubs",   Layout::FBinary, kOptRc } },
+  { 21, { "fadds",   Layout::FBinary, kOptRc } },
+  { 22, { "fsqrts",  Layout::FUnary,  kOptRc } },
+  { 24, { "fres",    Layout::FUnary,  kOptRc } },
+  { 25, { "fmuls",   Layout::FMul,    kOptRc } },
+  { 28, { "fmsubs",  Layout::FMulAdd, kOptRc } },
+  { 29, { "fmadds",  Layout::FMulAdd, kOptRc } },
+  { 30, { "fnmsubs", Layout::FMulAdd, kOptRc } },
+  { 31, { "fnmadds", Layout::FMulAdd, kOptRc } },
+};
+
+const Keyed kGroup63[] = {
+  {   0, { "fcmpu",   Layout::FCompare,       0 } },
+  {  12, { "frsp",    Layout::FUnary,         kOptRc } },
+  {  14, { "fctiw",   Layout::FUnary,         kOptRc } },
+  {  15, { "fctiwz",  Layout::FUnary,         kOptRc } },
+  {  18, { "fdiv",    Layout::FBinary,        kOptRc } },
+  {  20, { "fsub",    Layout::FBinary,        kOptRc } },
+  {  21, { "fadd",    Layout::FBinary,        kOptRc } },
+  {  22, { "fsqrt",   Layout::FUnary,         kOptRc } },
+  {  23, { "fsel",    Layout::FMulAdd,        kOptRc } },
+  {  25, { "fmul",    Layout::FMul,           kOptRc } },
+  {  26, { "frsqrte", Layout::FUnary,         kOptRc } },
+  {  28, { "fmsub",   Layout::FMulAdd,        kOptRc } },
+  {  29, { "fmadd",   Layout::FMulAdd,        kOptRc } },
+  {  30, { "fnmsub",  Layout::FMulAdd,        kOptRc } },
+  {  31, { "fnmadd",  Layout::FMulAdd,        kOptRc } },
+  {  32, { "fcmpo",   Layout::FCompare,       0 } },
+  {  38, { "mtfsb1",  Layout::FpscrBit,       kOptRc } },
+  {  40, { "fneg",    Layout::FUnary,         kOptRc } },
+  {  64, { "mcrfs",   Layout::CrField,        0 } },
+  {  70, { "mtfsb0",  Layout::FpscrBit,       kOptRc } },
+  {  72, { "fmr",     Layout::FUnary,         kOptRc } },
+  { 134, { "mtfsfi",  Layout::FpscrField,     kOptRc } },
+  { 136, { "fnabs",   Layout::FUnary,         kOptRc } },
+  { 264, { "fabs",    Layout::FUnary,         kOptRc } },
+  { 583, { "mffs",    Layout::FMoveFromFpscr, kOptRc } },
+  { 711, { "mtfsf",   Layout::FpscrFields,    kOptRc } },
+};
+
+// Lookup tables, filled once. An instruction with an OE bit is entered under
+// both values of it, and one whose frC field overlaps the extended opcode
+// (A-form) under every frC value.
+struct Tables
+{
+  const Insn *primary[64] = {};
+  const Insn *group19[1024] = {};
+  const Insn *group31[1024] = {};
+  const Insn *group59[1024] = {};
+  const Insn *group63[1024] = {};
+
+  template <size_t N>
+  static void Fill(const Insn **table, const Keyed (&list)[N])
+  {
+    for (const Keyed &k : list)
     {
-    case 1:     strcat(dest, "xer");    break;
-    case 8:     strcat(dest, "lr");     break;
-    case 9:     strcat(dest, "ctr");    break;
-    case 18:    strcat(dest, "dsisr");  break;
-    case 19:    strcat(dest, "dar");    break;
-    case 22:    strcat(dest, "dec");    break;
-    case 25:    strcat(dest, "sdr1");   break;
-    case 26:    strcat(dest, "srr0");   break;
-    case 27:    strcat(dest, "srr1");   break;
-    case 272:   strcat(dest, "sprg0");  break;
-    case 273:   strcat(dest, "sprg1");  break;
-    case 274:   strcat(dest, "sprg2");  break;
-    case 275:   strcat(dest, "sprg3");  break;
-    case 282:   strcat(dest, "ear");    break;
-    case 287:   strcat(dest, "pvr");    break;
-    case 528:   strcat(dest, "ibat0u"); break;
-    case 529:   strcat(dest, "ibat0l"); break;
-    case 530:   strcat(dest, "ibat1u"); break;
-    case 531:   strcat(dest, "ibat1l"); break;
-    case 532:   strcat(dest, "ibat2u"); break;
-    case 533:   strcat(dest, "ibat2l"); break;
-    case 534:   strcat(dest, "ibat3u"); break;
-    case 535:   strcat(dest, "ibat3l"); break;
-    case 536:   strcat(dest, "dbat0u"); break;
-    case 537:   strcat(dest, "dbat0l"); break;
-    case 538:   strcat(dest, "dbat1u"); break;
-    case 539:   strcat(dest, "dbat1l"); break;
-    case 540:   strcat(dest, "dbat2u"); break;
-    case 541:   strcat(dest, "dbat2l"); break;
-    case 542:   strcat(dest, "dbat3u"); break;
-    case 543:   strcat(dest, "dbat3l"); break;
-    case 1013:  strcat(dest, "dabr");   break;  // unsupported on 603e/EC603e
-
-    /*
-     * Some PowerPC implementations may implement MFTB and MFSPR identically,
-     * therefore TBR registers are also decoded here
-     */
-
-    case 268:   strcat(dest, "tbl");    break;
-    case 269:   strcat(dest, "tbu");    break;
-
-    /*
-     * PowerPC 603e/EC603e-specific registers
-     */
-
-    case 1008:  strcat(dest, "hid0");   break;
-    case 1009:  strcat(dest, "hid1");   break;
-    case 976:   strcat(dest, "dmiss");  break;
-    case 977:   strcat(dest, "dcmp");   break;
-    case 978:   strcat(dest, "hash2");  break;
-    case 979:   strcat(dest, "hash2");  break;
-    case 980:   strcat(dest, "imiss");  break;
-    case 981:   strcat(dest, "icmp");   break;
-    case 982:   strcat(dest, "rpa");    break;
-    case 1010:  strcat(dest, "iabr");   break;
-
-    default:    strcat(dest, std::to_string(spr).c_str());
-                break;
+      bool aForm = (LayoutFields(k.insn.layout) & kFieldC) != 0;
+      unsigned spread = aForm ? 32 : 1;
+      for (unsigned c = 0; c < spread; c++)
+      {
+        unsigned key = k.key | (c << 5);
+        table[key] = &k.insn;
+        if (k.insn.opts & kOptOe)
+          table[key | 0x200] = &k.insn;
+      }
     }
+  }
+
+  Tables()
+  {
+    for (const Keyed &k : kPrimary)
+      primary[k.key] = &k.insn;
+    Fill(group19, kGroup19);
+    Fill(group31, kGroup31);
+    Fill(group59, kGroup59);
+    Fill(group63, kGroup63);
+  }
+};
+
+const Insn *Find(uint32_t op)
+{
+  static const Tables tables;
+  unsigned ext = (op >> 1) & 0x3FF;
+  switch (op >> 26)
+  {
+  case 19: return tables.group19[ext];
+  case 31: return tables.group31[ext];
+  case 59: return tables.group59[ext];
+  case 63: return tables.group63[ext];
+  default: return tables.primary[op >> 26];
+  }
 }
 
-/*
- * DecodeSigned16():
- *
- * Predecodes the SIMM field for us. If do_unsigned, it is printed as an
- * unsigned 32-bit integer.
- */
-static void DecodeSigned16(char *outbuf, size_t outbuf_size, uint32_t op, bool do_unsigned)
+// True when all bits of op outside the opcode, the instruction's fields and
+// its option bits are zero (and the fixed bits sc and stwcx. need are set).
+bool FitsForm(uint32_t op, const Insn &insn)
 {
-    INT16   s;
-
-    s = G_SIMM(op);
-    if (do_unsigned)    // sign extend to unsigned 32-bits
-        snprintf(outbuf, outbuf_size, "0x%04X", (uint32_t) s);
-    else                // print as signed 16 bits
-    {
-        if (s < 0)
-            snprintf(outbuf, outbuf_size, "-0x%02X", -s);
-        else
-            snprintf(outbuf, outbuf_size, "0x%02X",s);
-    }
+  if (insn.opts & kOptExact)
+    return (op & kBelowOpcode) == kBitAa;
+  uint32_t used = LayoutFields(insn.layout);
+  unsigned primary = op >> 26;
+  if (primary == 19 || primary == 31 || primary == 59 || primary == 63)
+    used |= kExtOpcode;
+  if (insn.opts & (kOptRc | kOptLk))
+    used |= kBitRc;
+  if (insn.opts & kOptAa)
+    used |= kBitAa;
+  if (insn.opts & kOptRcSet)
+  {
+    if (!(op & kBitRc))
+      return false;
+    used |= kBitRc;
+  }
+  return (op & kBelowOpcode & ~used) == 0;
 }
 
-/*
- * Mask():
- *
- * Generate a mask from bit MB through ME (PPC-style backwards bit numbering.)
- */
-static uint32_t Mask(unsigned mb, unsigned me)
+// Small output buffer helper (truncates instead of overflowing).
+class Out
 {
-  uint32_t  i, mask;
+public:
+  Out(char *buf, size_t size) : buf_(buf), size_(size), len_(0)
+  {
+    if (size_)
+      buf_[0] = '\0';
+  }
 
-    mb &= 31;
-    me &= 31;
+  void Add(const char *fmt, ...) __attribute__((format(printf, 2, 3)))
+  {
+    if (len_ + 1 >= size_)
+      return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf_ + len_, size_ - len_, fmt, ap);
+    va_end(ap);
+    if (n > 0)
+      len_ = (len_ + (size_t) n < size_) ? len_ + (size_t) n : size_ - 1;
+  }
 
-    i = mb;
-    mask = 0;
-    while (1)
-    {
-        mask |= (1 << (31 - i));
-        if (i == me)
-            break;
-        i = (i + 1) & 31;
-    }
+private:
+  char *buf_;
+  size_t size_;
+  size_t len_;
+};
 
-    return mask;
+const char *const kCrBitName[4] = { "lt", "gt", "eq", "so" };
+
+// Names of the special purpose registers the 603e has (plus a few others
+// that may appear in code), by SPR number.
+const char *SprName(unsigned spr)
+{
+  switch (spr)
+  {
+  case 1:    return "xer";
+  case 8:    return "lr";
+  case 9:    return "ctr";
+  case 18:   return "dsisr";
+  case 19:   return "dar";
+  case 22:   return "dec";
+  case 25:   return "sdr1";
+  case 26:   return "srr0";
+  case 27:   return "srr1";
+  case 268:  return "tbl";
+  case 269:  return "tbu";
+  case 272:  return "sprg0";
+  case 273:  return "sprg1";
+  case 274:  return "sprg2";
+  case 275:  return "sprg3";
+  case 282:  return "ear";
+  case 287:  return "pvr";
+  case 976:  return "dmiss";
+  case 977:  return "dcmp";
+  case 978:  return "hash1";
+  case 979:  return "hash2";
+  case 980:  return "imiss";
+  case 981:  return "icmp";
+  case 982:  return "rpa";
+  case 1008: return "hid0";
+  case 1009: return "hid1";
+  case 1010: return "iabr";
+  case 1013: return "dabr";
+  default:   break;
+  }
+  if (spr >= 528 && spr <= 543)
+  {
+    static const char *const bats[16] = {
+      "ibat0u", "ibat0l", "ibat1u", "ibat1l", "ibat2u", "ibat2l", "ibat3u", "ibat3l",
+      "dbat0u", "dbat0l", "dbat1u", "dbat1l", "dbat2u", "dbat2l", "dbat3u", "dbat3l" };
+    return bats[spr - 528];
+  }
+  return nullptr;
 }
 
-/*
- * Check():
- *
- * Perform checks on the instruction as required by the flags. Returns 1 if
- * the instruction failed.
- */
-static Result Check(uint32_t op, unsigned flags)
+void AddSpr(Out &out, uint32_t op)
 {
-    unsigned  nb, rt, ra;
-
-    if (!flags) return Result::OKAY;  // nothing to check for!
-
-    rt = G_RT(op);
-    ra = G_RA(op);
-
-    if (flags & FL_CHECK_RA_RT) // invalid if rA==0 or rA==rT
-    {
-        if ((G_RA(op) == 0) || (G_RA(op) == G_RT(op)))
-            return Result::FAIL;
-    }
-
-    if (flags & FL_CHECK_RA)    // invalid if rA==0
-    {
-        if (G_RA(op) == 0)
-            return Result::FAIL;
-    }
-
-    if (flags & FL_CHECK_LSWI)
-    {
-        /*
-         * Check that rA is not in the range of registers to be loaded (even
-         * if rA == 0)
-         */
-
-        nb = G_NB(op);
-
-        if (ra >= rt && ra <= (rt + nb - 1))    return Result::FAIL;
-        if ((rt + nb - 1) > 31) // register wrap-around!
-        {
-            if (ra < ((rt + nb - 1) - 31))
-                return Result::FAIL;
-        }
-    }
-
-    if (flags & FL_CHECK_LSWX)
-    {
-        /*
-         * Check that rT != rA, rT != rB, and rD and rA both do not specify
-         * R0.
-         *
-         * We cannot check fully whether rA or rB are in the range of
-         * registers specified to be loaded because that depends on XER.
-         */
-
-        if (rt == ra || rt == G_RB(op) || ((rt == 0) && (ra == 0)))
-            return Result::FAIL;
-    }
-
-    return Result::OKAY;  // passed checks
+  // The SPR number is stored with its two 5-bit halves swapped.
+  unsigned field = (op >> 11) & 0x3FF;
+  unsigned spr = ((field & 31) << 5) | (field >> 5);
+  if (const char *name = SprName(spr))
+    out.Add("%s", name);
+  else
+    out.Add("%u", spr);
 }
 
-/*
- * Simplified():
- *
- * Handles all simplified instruction forms. Returns 1 if one was decoded,
- * otherwise 0 to indicate disassembly should carry on as normal.
- */
-static bool Simplified(uint32_t op, uint32_t vpc, char *signed16, char *mnem, char *oprs, size_t oprs_size)
+// A 16-bit signed immediate as shown in operands: sign then hex magnitude.
+void AddSigned16(Out &out, uint32_t op)
 {
-    uint32_t  value, disp;
+  int value = (int16_t) (op & 0xFFFF);
+  if (value < 0)
+    out.Add("-0x%02X", -value);
+  else
+    out.Add("0x%02X", value);
+}
 
-    value = G_SIMM(op); // value is fully sign-extended SIMM field
-    if (value & 0x8000)
-        value |= 0xffff0000;
+// A condition register bit given by a BI-style field.
+void AddCrBit(Out &out, unsigned bit)
+{
+  out.Add("cr%u[%s]", bit / 4, kCrBitName[bit & 3]);
+}
 
-    if (op == (D_OP(24)|D_RT(0)|D_RA(0)|D_UIMM(0)))
-        strcat(mnem, "nop");        // ori r0,r0,0 -> nop
-    else if ((op & ~(M_RT|M_RA|M_RB|M_RC)) == (D_OP(31)|D_XO(444)))
-    {
-        if (G_RT(op) == G_RB(op))
-        {
-            strcat(mnem, "mr");     // orx rA,rT,rT -> mrx rA,rT
-            if (op & M_RC)  strcat(mnem, ".");
-            snprintf(oprs, oprs_size, "r%d,r%d", G_RA(op), G_RT(op));
-        }
-        else
-            return false;
-    }
-    else if ((op & ~(M_RT|M_RA|M_RB|M_RC)) == (D_OP(31)|D_XO(124)))
-    {
-        if (G_RT(op) == G_RB(op))
-        {
-            strcat(mnem, "not");    // nor rA,rT,rT -> not rA,rT
-            if (op & M_RC)  strcat(mnem, ".");
-            snprintf(oprs, oprs_size, "r%d,r%d", G_RA(op), G_RT(op));
-        }
-        else
-            return false;
-    }
-    else if ((op & ~(M_RT|M_RA|M_SIMM)) == D_OP(14))
-    {
-        if (G_RA(op) == 0)
-        {
-            strcat(mnem, "li");     // addi rT,0,value -> li rT,value
-            snprintf(oprs, oprs_size, "r%d,0x%08X", G_RT(op), value);
-        }
-        else
-            return false;
-    }
-    else if ((op & ~(M_RT|M_RA|M_SIMM)) == D_OP(15))
-    {
-        if (G_RA(op) == 0)
-        {
-            strcat(mnem, "li"); // addis rT,0,value -> li rT,(value<<16)
-            snprintf(oprs, oprs_size, "r%d,0x%08X", G_RT(op), value << 16);
-        }
-        else
-        {
-            strcat(mnem, "addi");   // addis rT,rA,SIMM -> addi rT,rA,SIMM<<16
-            snprintf(oprs, oprs_size, "r%d,r%d,0x%08X", G_RT(op), G_RA(op), value << 16);
-        }
-    }
-    else if ((op & ~(M_RT|M_RA|M_UIMM)) == D_OP(29))
-    {
-        strcat(mnem, "andi.");  // andis. rA,rT,UIMM -> andi. rA,rT,UIMM<<16
-        snprintf(oprs, oprs_size, "r%d,r%d,0x%08X", G_RA(op), G_RT(op), G_UIMM(op) << 16);
-    }
-    else if ((op & ~(M_RT|M_RA|M_UIMM)) == D_OP(25))
-    {
-        strcat(mnem, "ori");    // oris rA,rT,UIMM -> ori rA,rT,UIMM<<16
-        snprintf(oprs, oprs_size, "r%d,r%d,0x%08X", G_RA(op), G_RT(op), G_UIMM(op) << 16);
-    }
-    else if ((op & ~(M_RT|M_RA|M_UIMM)) == D_OP(27))
-    {
-        strcat(mnem, "xori");   // xoris rA,rT,UIMM -> xori rA,rT,UIMM<<16
-        snprintf(oprs, oprs_size, "r%d,r%d,0x%08X", G_RA(op), G_RT(op), G_UIMM(op) << 16);
-    }
-    else if ((op & ~(M_RT|M_RA|M_SH|M_MB|M_ME|M_RC)) == D_OP(20))
-    {
-        value = Mask(G_MB(op), G_ME(op));
-        strcat(mnem, "rlwimi"); // rlwimi[.] rA,rT,SH,MB,ME -> rlwimi[.] rA,rT,SH,MASK
-        if (op & M_RC) strcat(mnem, ".");
-        snprintf(oprs, oprs_size, "r%d,r%d,%d,0x%08X", G_RA(op), G_RT(op), G_SH(op), value);
-    }
-    else if ((op & ~(M_RT|M_RA|M_SH|M_MB|M_ME|M_RC)) == D_OP(21))
-    {
-        value = Mask(G_MB(op), G_ME(op));
-        if (G_SH(op) == 0)      // rlwinm[.] rA,rT,0,MB,ME -> and[.] rA,rT,MASK
-        {
-            strcat(mnem, "and");
-          if (op & M_RC) strcat(mnem, ".");
-            snprintf(oprs, oprs_size, "r%d,r%d,0x%08X", G_RA(op), G_RT(op), value);
-        }
-        else                    // rlwinm[.] rA,rT,SH,MASK
-        {
-            strcat(mnem, "rlwinm");
-          if (op & M_RC) strcat(mnem, ".");
-            snprintf(oprs, oprs_size, "r%d,r%d,%d,0x%08X", G_RA(op), G_RT(op), G_SH(op), value);
-        }
-    }
-    else if ((op & ~(M_RT|M_RA|M_RB|M_MB|M_ME|M_RC)) == D_OP(23))
-    {
-        value = Mask(G_MB(op), G_ME(op));
-        strcat(mnem, "rlwnm");  // rlwnm[.] rA,rT,SH,MB,ME -> rlwnm[.] rA,rT,SH,MASK
-        if (op & M_RC) strcat(mnem, ".");
-        snprintf(oprs, oprs_size, "r%d,r%d,r%d,0x%08X", G_RA(op), G_RT(op), G_RB(op), value);
-    }
-    else if ((op & ~(M_BO|M_BI|M_BD|M_AA|M_LK)) == D_OP(16))
-    {
-        disp = G_BD(op) * 4;
-        if (disp & 0x00008000)
-            disp |= 0xffff0000;
+// The bits MB through ME (big-endian numbering, wrapping around).
+uint32_t RotateMask(unsigned mb, unsigned me)
+{
+  uint32_t fromMb = 0xFFFFFFFFu >> mb;
+  uint32_t toMe = 0xFFFFFFFFu << (31 - me);
+  return (mb <= me) ? (fromMb & toMe) : (fromMb | toMe);
+}
 
-        switch (G_BO(op))
-        {
-        case 0x04:  // branch if condition is false
-        case 0x05:
-        case 0x06:
-        case 0x07:
-            strcat(mnem, "bf");
-            break;
-        case 0x0c:
-        case 0x0d:
-        case 0x0e:
-        case 0x0f:
-            strcat(mnem, "bt");
-            break;
-        default:
-            return false;
-        }
+uint32_t BranchTarget(uint32_t op, uint32_t vpc, uint32_t disp)
+{
+  return disp + ((op & kBitAa) ? 0 : vpc);
+}
 
-        if (op & M_LK)  strcat(mnem, "l");
-        if (op & M_AA)  strcat(mnem, "a");
+uint32_t ShortDisp(uint32_t op)
+{
+  return (uint32_t) (int32_t) (int16_t) (op & 0xFFFC);
+}
 
-        snprintf(oprs, oprs_size, "cr%d[%s],0x%08X", G_BI(op) / 4, crbit[G_BI(op) & 3], disp + ((op & M_AA) ? 0 : vpc));
-    }
-    else if ((op & ~(M_RT|M_RA|M_RB|M_OE|M_RC)) == (D_OP(31)|D_XO(40)))
+void AddOperands(Out &out, uint32_t op, uint32_t vpc, Layout layout)
+{
+  const unsigned d = Rd(op), a = Ra(op), b = Rb(op), c = Rc5(op);
+  switch (layout)
+  {
+  case Layout::None:
+    break;
+  case Layout::Branch:
+  {
+    uint32_t disp = op & kFieldLi;
+    if (disp & 0x02000000)
+      disp |= 0xFC000000;
+    out.Add("0x%08X", BranchTarget(op, vpc, disp));
+    break;
+  }
+  case Layout::CondBranch:
+  case Layout::BranchReg:
+    // BO bit 0x10 means the condition is ignored: show BI as a number.
+    out.Add("0x%02X,", d);
+    if (d & 0x10)
+      out.Add("%u", a);
+    else
+      AddCrBit(out, a);
+    if (layout == Layout::CondBranch)
+      out.Add(",0x%08X", BranchTarget(op, vpc, ShortDisp(op)));
+    break;
+  case Layout::AddImm:
+    if (a)
+      out.Add("r%u,r%u,", d, a);
+    else
+      out.Add("r%u,0,", d);
+    AddSigned16(out, op);
+    break;
+  case Layout::AddImmHigh:
+    if (a)
+      out.Add("r%u,r%u,0x%04X", d, a, Imm(op));
+    else
+      out.Add("r%u,0,0x%04X", d, Imm(op));
+    break;
+  case Layout::RegRegSimm:
+    out.Add("r%u,r%u,", d, a);
+    AddSigned16(out, op);
+    break;
+  case Layout::LogicImm:
+    out.Add("r%u,r%u,0x%04X", a, d, Imm(op));
+    break;
+  case Layout::CmpSimm:
+    out.Add("cr%u,%u,r%u,", CrfD(op), LBit(op), a);
+    AddSigned16(out, op);
+    break;
+  case Layout::CmpUimm:
+    out.Add("cr%u,%u,r%u,0x%04X", CrfD(op), LBit(op), a, Imm(op));
+    break;
+  case Layout::Trap:
+    out.Add("%u,r%u,r%u", d, a, b);
+    break;
+  case Layout::TrapImm:
+    out.Add("%u,r%u,", d, a);
+    AddSigned16(out, op);
+    break;
+  case Layout::Cmp:
+    out.Add("cr%u,%u,r%u,r%u", CrfD(op), LBit(op), a, b);
+    break;
+  case Layout::RegRegReg:
+    out.Add("r%u,r%u,r%u", d, a, b);
+    break;
+  case Layout::RegReg0Reg:
+    if (a)
+      out.Add("r%u,r%u,r%u", d, a, b);
+    else
+      out.Add("r%u,0,r%u", d, b);
+    break;
+  case Layout::LogicReg:
+    out.Add("r%u,r%u,r%u", a, d, b);
+    break;
+  case Layout::Unary:
+    out.Add("r%u,r%u", d, a);
+    break;
+  case Layout::LogicUnary:
+    out.Add("r%u,r%u", a, d);
+    break;
+  case Layout::Reg:
+    out.Add("r%u", d);
+    break;
+  case Layout::RegRegB:
+    out.Add("r%u,r%u", d, b);
+    break;
+  case Layout::CacheOp:
+    if (a)
+      out.Add("r%u,r%u", a, b);
+    else
+      out.Add("0,r%u", b);
+    break;
+  case Layout::OnlyB:
+    out.Add("r%u", b);
+    break;
+  case Layout::Load:
+  case Layout::FLoad:
+  {
+    const char reg = (layout == Layout::Load) ? 'r' : 'f';
+    if (a)
     {
-        strcat(mnem, "sub");
-        if (op & M_OE) strcat(mnem, "o");
-        if (op & M_RC) strcat(mnem, ".");
-        snprintf(oprs, oprs_size, "r%d,r%d,r%d", G_RT(op), G_RB(op), G_RA(op));
-    }
-    else if ((op & ~(M_RT|M_RA|M_RB|M_OE|M_RC)) == (D_OP(31)|D_XO(8)))
-    {
-        strcat(mnem, "subc");
-        if (op & M_OE) strcat(mnem, "o");
-        if (op & M_RC) strcat(mnem, ".");
-    snprintf(oprs, oprs_size, "r%d,r%d,r%d", G_RT(op), G_RB(op), G_RA(op));
+      out.Add("%c%u,", reg, d);
+      AddSigned16(out, op);
+      out.Add("(r%u)", a);
     }
     else
-        return false;   // no match
+      out.Add("%c%u,0x%08X", reg, d, SignedImm(op));   // absolute address
+    break;
+  }
+  case Layout::LoadUpdate:
+  case Layout::FLoadUpdate:
+    out.Add("%c%u,", (layout == Layout::LoadUpdate) ? 'r' : 'f', d);
+    AddSigned16(out, op);
+    out.Add("(r%u)", a);
+    break;
+  case Layout::FIndexed:
+    if (a)
+      out.Add("f%u,r%u,r%u", d, a, b);
+    else
+      out.Add("f%u,0,r%u", d, b);
+    break;
+  case Layout::FIndexedUpdate:
+    out.Add("f%u,r%u,r%u", d, a, b);
+    break;
+  case Layout::StringImm:
+    if (a)
+      out.Add("r%u,r%u,%u", d, a, b ? b : 32);
+    else
+      out.Add("r%u,0,%u", d, b ? b : 32);
+    break;
+  case Layout::ShiftImm:
+    out.Add("r%u,r%u,%u", a, d, b);
+    break;
+  case Layout::Rotate:
+    out.Add("r%u,r%u,%u,%u,%u", a, d, b, c, Me(op));
+    break;
+  case Layout::RotateReg:
+    out.Add("r%u,r%u,r%u,%u,%u", a, d, b, c, Me(op));
+    break;
+  case Layout::CrLogic:
+    AddCrBit(out, d);
+    out.Add(",");
+    AddCrBit(out, a);
+    out.Add(",");
+    AddCrBit(out, b);
+    break;
+  case Layout::CrField:
+    out.Add("cr%u,cr%u", CrfD(op), CrfS(op));
+    break;
+  case Layout::CrFieldOnly:
+    out.Add("cr%u", CrfD(op));
+    break;
+  case Layout::MoveFromSpr:
+    out.Add("r%u,", d);
+    AddSpr(out, op);
+    break;
+  case Layout::MoveToSpr:
+    AddSpr(out, op);
+    out.Add(",r%u", d);
+    break;
+  case Layout::MoveFromSr:
+    out.Add("r%u,sr%u", d, (op >> 16) & 15);
+    break;
+  case Layout::MoveToSr:
+    out.Add("sr%u,r%u", (op >> 16) & 15, d);
+    break;
+  case Layout::MoveToCr:
+    out.Add("0x%02X,r%u", (op >> 12) & 0xFF, d);
+    break;
+  case Layout::FUnary:
+    out.Add("f%u,f%u", d, b);
+    break;
+  case Layout::FBinary:
+    out.Add("f%u,f%u,f%u", d, a, b);
+    break;
+  case Layout::FMul:
+    out.Add("f%u,f%u,f%u", d, a, c);
+    break;
+  case Layout::FMulAdd:
+    out.Add("f%u,f%u,f%u,f%u", d, a, c, b);
+    break;
+  case Layout::FCompare:
+    out.Add("cr%u,f%u,f%u", CrfD(op), a, b);
+    break;
+  case Layout::FMoveFromFpscr:
+    out.Add("f%u", d);
+    break;
+  case Layout::FpscrBit:
+    out.Add("fpscr[%u]", d);
+    break;
+  case Layout::FpscrField:
+    out.Add("cr%u,0x%X", CrfD(op), (op >> 12) & 15);
+    break;
+  case Layout::FpscrFields:
+    out.Add("0x%02X,f%u", (op >> 17) & 0xFF, b);
+    break;
+  }
+}
+
+// Register-usage rules that make a recognised instruction an invalid form.
+bool ValidForm(uint32_t op, uint16_t opts)
+{
+  const unsigned d = Rd(op), a = Ra(op);
+  if ((opts & kOptBaseNotRd) && (a == 0 || a == d))
+    return false;
+  if ((opts & kOptBaseNot0) && a == 0)
+    return false;
+  if (opts & kOptLswi)
+  {
+    // rA must not be among the registers loaded. The register count is
+    // taken from NB as written (so NB = 0 counts as no registers here).
+    unsigned last = d + Rb(op) - 1;
+    if (a >= d && a <= last)
+      return false;
+    if (last > 31 && a < last - 31)
+      return false;
+  }
+  if ((opts & kOptLswx) && (d == a || d == Rb(op) || (d == 0 && a == 0)))
+    return false;
   return true;
 }
 
-/*
- * DisassemblePowerPC(op, vpc, mnem, oprs, simplify):
- *
- * Disassembles one PowerPC 603e instruction.
- *
- * A non-zero return code indicates that the instruction could not be
- * recognized or that the operands to an instruction were invalid. To
- * determine which case occured, check if mnem[0] == '\0'. If it does not,
- * then the latter case happened.
- *
- * Arguments:
- *      op         Instruction word to disassemble.
- *      vpc        Current instruction address.
- *      mnem       Buffer to write instruction mnemonic to. If no
- *                 instruction was decoded, mnem[0] and oprs[0] will be set
- *                 to '\0'.
- *      oprs       Buffer to write any operands to.
- *      simplify   If non-zero, simplified forms of instructions will be
- *                 printed in certain cases.
- *
- * Returns:
- *      Zero if successful, non-zero if the instruction was unrecognized or
- *      had an invalid form (see note above in function description.)
- */
-Result DisassemblePowerPC(uint32_t op, uint32_t vpc, char *mnem, char *oprs, size_t oprs_size,
-                        bool simplify)
+// Shorter idioms, tried first when asked for. Returns false to fall back to
+// the plain form.
+bool Simplified(uint32_t op, uint32_t vpc, Out &mnem, Out &oprs)
 {
-    char    signed16[12];
-    uint32_t  disp;
+  const unsigned d = Rd(op), a = Ra(op), b = Rb(op);
+  const char *dot = (op & kBitRc) ? "." : "";
+  const unsigned primary = op >> 26;
+  const unsigned ext = (op >> 1) & 0x3FF;
 
-    mnem[0] = '\0'; // so we can use strcat()
-    oprs[0] = '\0';
+  if (op == 0x60000000)                            // ori r0,r0,0
+  {
+    mnem.Add("nop");
+    return true;
+  }
 
-    /*
-     * Decode signed 16-bit fields (SIMM and d) to spare us the work later
-     */
-
-    DecodeSigned16(signed16, sizeof(signed16), op, false);
-
-    /*
-     * Try simplified forms first, then real instructions
-     */
-
-    if (simplify)
+  switch (primary)
+  {
+  case 14:                                         // addi rD,0,v
+    if (a != 0)
+      return false;
+    mnem.Add("li");
+    oprs.Add("r%u,0x%08X", d, SignedImm(op));
+    return true;
+  case 15:                                         // addis
+    if (a == 0)
     {
-        if (Simplified(op, vpc, signed16, mnem, oprs, oprs_size))
-            return Result::OKAY;
+      mnem.Add("li");
+      oprs.Add("r%u,0x%08X", d, Imm(op) << 16);
     }
-
-    /*
-     * Search for the instruction in the list and print it if there's a match
-     */
-
-    for (size_t i = 0; i < sizeof(itab) / sizeof(IDESCR); i++)
+    else
     {
-        if ((op & ~itab[i].mask) == itab[i].match)  // check for match
-        {
-            /*
-             * Base mnemonic followed be O, ., L, A
-             */
-
-            strcat(mnem, itab[i].mnem);
-            if (itab[i].flags & FL_OE)  if (op & M_OE) strcat(mnem, "o");
-            if (itab[i].flags & FL_RC)  if (op & M_RC) strcat(mnem, ".");
-            if (itab[i].flags & FL_LK)  if (op & M_LK) strcat(mnem, "l");
-            if (itab[i].flags & FL_AA)  if (op & M_AA) strcat(mnem, "a");
-
-            /*
-             * Print operands
-             */
-
-            switch (itab[i].format)
-            {
-            case F_RT_RA_RB:
-                snprintf(oprs, oprs_size, "r%d,r%d,r%d", G_RT(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_RT_RA_0_SIMM:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,r%d,%s", G_RT(op), G_RA(op), signed16);
-                else
-                    snprintf(oprs, oprs_size, "r%d,0,%s", G_RT(op), signed16);
-                break;
-
-            case F_ADDIS:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,r%d,0x%04X", G_RT(op), G_RA(op), G_SIMM(op));
-                else
-                    snprintf(oprs, oprs_size, "r%d,0,0x%04X", G_RT(op), G_SIMM(op));
-                break;
-
-            case F_RT_RA_SIMM:
-                snprintf(oprs, oprs_size, "r%d,r%d,%s", G_RT(op), G_RA(op), signed16);
-                break;
-
-            case F_RT_RA:
-                snprintf(oprs, oprs_size, "r%d,r%d", G_RT(op), G_RA(op));
-                break;
-
-            case F_RA_RT_RB:
-                snprintf(oprs, oprs_size, "r%d,r%d,r%d", G_RA(op), G_RT(op), G_RB(op));
-                break;
-
-            case F_RA_RT_UIMM:
-                snprintf(oprs, oprs_size, "r%d,r%d,0x%04X", G_RA(op), G_RT(op), G_UIMM(op));
-                break;
-
-            case F_LI:
-                disp = G_LI(op) * 4;
-                if (disp & 0x02000000)  // sign extend
-                    disp |= 0xfc000000;
-                snprintf(oprs, oprs_size, "0x%08X", disp + ((op & M_AA) ? 0 : vpc));
-                break;
-
-            case F_BCx:
-                disp = G_BD(op) * 4;
-                if (disp & 0x00008000)
-                    disp |= 0xffff0000;
-
-                if (G_BO(op) & 0x10)    // BI is ignored (don't print CR bit)
-                    snprintf(oprs, oprs_size, "0x%02X,%d,0x%08X", G_BO(op), G_BI(op), disp + ((op & M_AA) ? 0 : vpc));
-                else                    // BI gives us the condition bit
-                    snprintf(oprs, oprs_size, "0x%02X,cr%d[%s],0x%08X", G_BO(op), G_BI(op) / 4, crbit[G_BI(op) & 3], disp + ((op & M_AA) ? 0 : vpc));
-                break;
-
-            case F_BO_BI:
-                if (G_BO(op) & 0x10)    // BI is ignored (don't print CR bit)
-                    snprintf(oprs, oprs_size, "0x%02X,%d", G_BO(op), G_BI(op));
-                else
-                    snprintf(oprs, oprs_size, "0x%02X,cr%d[%s]", G_BO(op), G_BI(op) / 4, crbit[G_BI(op) & 3]);
-                break;
-
-            case F_CMP:
-                snprintf(oprs, oprs_size, "cr%d,%d,r%d,r%d", G_CRFD(op), G_L(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_CMP_SIMM:
-                snprintf(oprs, oprs_size, "cr%d,%d,r%d,%s", G_CRFD(op), G_L(op), G_RA(op), signed16);
-                break;
-
-            case F_CMP_UIMM:
-                snprintf(oprs, oprs_size, "cr%d,%d,r%d,0x%04X", G_CRFD(op), G_L(op), G_RA(op), G_UIMM(op));
-                break;
-
-            case F_RA_RT:
-                snprintf(oprs, oprs_size, "r%d,r%d", G_RA(op), G_RT(op));
-                break;
-
-            case F_CRBD_CRBA_CRBB:
-                snprintf(oprs, oprs_size, "cr%d[%s],cr%d[%s],cr%d[%s]", G_CRBD(op) / 4, crbit[G_CRBD(op) & 3], G_CRBA(op) / 4, crbit[G_CRBA(op) & 3], G_CRBB(op) / 4, crbit[G_CRBB(op) & 3]);
-                break;
-
-            case F_RA_0_RB:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,r%d", G_RA(op), G_RB(op));
-                else
-                    snprintf(oprs, oprs_size, "0,r%d", G_RB(op));
-                break;
-
-            case F_RT_RA_0_RB:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,r%d,r%d", G_RT(op), G_RA(op), G_RB(op));
-                else
-                    snprintf(oprs, oprs_size, "r%d,0,r%d", G_RT(op), G_RB(op));
-                break;
-
-            case F_FRT_FRB:
-                snprintf(oprs, oprs_size, "f%d,f%d", G_RT(op), G_RB(op));
-                break;
-
-            case F_FRT_FRA_FRB:
-                snprintf(oprs, oprs_size, "f%d,f%d,f%d", G_RT(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_FCMP:
-                snprintf(oprs, oprs_size, "cr%d,f%d,f%d", G_CRFD(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_FRT_FRA_FRC_FRB:
-                snprintf(oprs, oprs_size, "f%d,f%d,f%d,f%d", G_RT(op), G_RA(op), G_REGC(op), G_RB(op));
-                break;
-
-            case F_FRT_FRA_FRC:
-                snprintf(oprs, oprs_size, "f%d,f%d,f%d", G_RT(op), G_RA(op), G_REGC(op));
-                break;
-
-            case F_RT_D_RA_0:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,%s(r%d)", G_RT(op), signed16, G_RA(op));
-                else
-                    snprintf(oprs, oprs_size, "r%d,0x%08X", G_RT(op), (uint32_t) ((INT16) G_D(op)));
-                break;
-
-            case F_RT_D_RA:
-                snprintf(oprs, oprs_size, "r%d,%s(r%d)", G_RT(op), signed16, G_RA(op));
-                break;
-
-            case F_FRT_D_RA_0:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "f%d,%s(r%d)", G_RT(op), signed16, G_RA(op));
-                else
-                    snprintf(oprs, oprs_size, "f%d,0x%08X", G_RT(op), (uint32_t) ((INT16) G_D(op)));
-                break;
-
-            case F_FRT_D_RA:
-                snprintf(oprs, oprs_size, "f%d,%s(r%d)", G_RT(op), signed16, G_RA(op));
-                break;
-
-            case F_FRT_RA_RB:
-                snprintf(oprs, oprs_size, "f%d,r%d,r%d", G_RT(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_FRT_RA_0_RB:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "f%d,r%d,r%d", G_RT(op), G_RA(op), G_RB(op));
-                else
-                    snprintf(oprs, oprs_size, "f%d,0,r%d", G_RT(op), G_RB(op));
-                break;
-
-            case F_RT_RA_0_NB:
-                if (G_RA(op))
-                    snprintf(oprs, oprs_size, "r%d,r%d,%d", G_RT(op), G_RA(op), G_NB(op) ? G_NB(op) : 32);
-                else
-                    snprintf(oprs, oprs_size, "r%d,0,%d", G_RT(op), G_NB(op) ? G_NB(op) : 32);
-                break;
-
-            case F_CRFD_CRFS:
-                snprintf(oprs, oprs_size, "cr%d,cr%d", G_CRFD(op), G_CRFS(op));
-                break;
-
-            case F_MCRXR:
-                snprintf(oprs, oprs_size, "cr%d", G_CRFD(op));
-                break;
-
-            case F_RT:
-                snprintf(oprs, oprs_size, "r%d", G_RT(op));
-                break;
-
-            case F_MFFSx:
-                snprintf(oprs, oprs_size, "f%d", G_RT(op));
-                break;
-
-            case F_FCRBD:
-                snprintf(oprs, oprs_size, "fpscr[%d]", G_CRBD(op));
-                break;
-
-            case F_RT_SPR:
-                snprintf(oprs, oprs_size, "r%d,", G_RT(op));
-                SPR(oprs, G_SPR(op));
-                break;
-
-            case F_MFSR:
-                snprintf(oprs, oprs_size, "r%d,sr%d", G_RT(op), G_SR(op));
-                break;
-
-            case F_MTCRF:
-                snprintf(oprs, oprs_size, "0x%02X,r%d", G_CRM(op), G_RT(op));
-                break;
-
-            case F_MTFSFx:
-                snprintf(oprs, oprs_size, "0x%02X,f%d", G_FM(op), G_RB(op));
-                break;
-
-            case F_MTFSFIx:
-                snprintf(oprs, oprs_size, "cr%d,0x%X", G_CRFD(op), G_IMM(op));
-                break;
-
-            case F_MTSPR:
-                SPR(oprs, G_SPR(op));
-                strcat(oprs, ",r");
-                strcat(oprs, std::to_string(G_RT(op)).c_str());
-                break;
-
-            case F_MTSR:
-                snprintf(oprs, oprs_size, "sr%d,r%d", G_SR(op), G_RT(op));
-                break;
-
-            case F_RT_RB:
-                snprintf(oprs, oprs_size, "r%d,r%d", G_RT(op), G_RB(op));
-                break;
-
-            case F_RA_RT_SH_MB_ME:
-                snprintf(oprs, oprs_size, "r%d,r%d,%d,%d,%d", G_RA(op), G_RT(op), G_SH(op), G_MB(op), G_ME(op));
-                break;
-
-            case F_RLWNMx:
-                snprintf(oprs, oprs_size, "r%d,r%d,r%d,%d,%d", G_RA(op), G_RT(op), G_RB(op), G_MB(op), G_ME(op));
-                break;
-
-            case F_SRAWIx:
-                snprintf(oprs, oprs_size, "r%d,r%d,%d", G_RA(op), G_RT(op), G_SH(op));
-                break;
-
-            case F_RB:
-                snprintf(oprs, oprs_size, "r%d", G_RB(op));
-                break;
-
-            case F_TW:
-                snprintf(oprs, oprs_size, "%d,r%d,r%d", G_TO(op), G_RA(op), G_RB(op));
-                break;
-
-            case F_TWI:
-                snprintf(oprs, oprs_size, "%d,r%d,%s", G_TO(op), G_RA(op), signed16);
-                break;
-
-            case F_NONE:
-            default:
-                break;
-            }
-
-            return Check(op, itab[i].flags);
-        }
+      mnem.Add("addi");
+      oprs.Add("r%u,r%u,0x%08X", d, a, Imm(op) << 16);
     }
-
-    return Result::FAIL;  // no match found
+    return true;
+  case 25: case 27: case 29:                       // oris, xoris, andis.
+    mnem.Add(primary == 25 ? "ori" : primary == 27 ? "xori" : "andi.");
+    oprs.Add("r%u,r%u,0x%08X", a, d, Imm(op) << 16);
+    return true;
+  case 20: case 21:                                // rlwimi, rlwinm: show the mask
+  {
+    uint32_t mask = RotateMask(Rc5(op), Me(op));
+    if (primary == 21 && b == 0)
+    {
+      mnem.Add("and%s", dot);
+      oprs.Add("r%u,r%u,0x%08X", a, d, mask);
+    }
+    else
+    {
+      mnem.Add("%s%s", primary == 20 ? "rlwimi" : "rlwinm", dot);
+      oprs.Add("r%u,r%u,%u,0x%08X", a, d, b, mask);
+    }
+    return true;
+  }
+  case 23:                                         // rlwnm
+    mnem.Add("rlwnm%s", dot);
+    oprs.Add("r%u,r%u,r%u,0x%08X", a, d, b, RotateMask(Rc5(op), Me(op)));
+    return true;
+  case 16:                                         // bc with a plain true/false test
+  {
+    const char *base;
+    if ((d & 0x1C) == 0x04)
+      base = "bf";
+    else if ((d & 0x1C) == 0x0C)
+      base = "bt";
+    else
+      return false;
+    mnem.Add("%s%s%s", base, (op & kBitRc) ? "l" : "", (op & kBitAa) ? "a" : "");
+    AddCrBit(oprs, a);
+    oprs.Add(",0x%08X", BranchTarget(op, vpc, ShortDisp(op)));
+    return true;
+  }
+  case 31:
+    if ((op & kBitOe) == 0 && (ext == 444 || ext == 124))   // or/nor rA,rS,rS
+    {
+      if (d != b)
+        return false;
+      mnem.Add("%s%s", ext == 444 ? "mr" : "not", dot);
+      oprs.Add("r%u,r%u", a, d);
+      return true;
+    }
+    if ((ext & 0x1FF) == 40 || (ext & 0x1FF) == 8)          // subf(c): operands swapped
+    {
+      mnem.Add("%s%s%s", (ext & 0x1FF) == 40 ? "sub" : "subc", (op & kBitOe) ? "o" : "", dot);
+      oprs.Add("r%u,r%u,r%u", d, b, a);
+      return true;
+    }
+    return false;
+  default:
+    return false;
+  }
 }
 
+} // anonymous namespace
+
+Result DisassemblePowerPC(UINT32 op, UINT32 vpc, char *mnem, char *oprs, size_t oprs_size, bool simplify)
+{
+  Out mnemOut(mnem, 16);
+  Out oprsOut(oprs, oprs_size);
+
+  if (simplify && Simplified(op, vpc, mnemOut, oprsOut))
+    return Result::OKAY;
+
+  const Insn *insn = Find(op);
+  if (!insn || !FitsForm(op, *insn))
+    return Result::FAIL;
+
+  mnemOut.Add("%s%s%s%s%s", insn->name,
+              ((insn->opts & kOptOe) && (op & kBitOe)) ? "o" : "",
+              ((insn->opts & kOptRc) && (op & kBitRc)) ? "." : "",
+              ((insn->opts & kOptLk) && (op & kBitRc)) ? "l" : "",
+              ((insn->opts & kOptAa) && (op & kBitAa)) ? "a" : "");
+  AddOperands(oprsOut, op, vpc, insn->layout);
+  return ValidForm(op, insn->opts) ? Result::OKAY : Result::FAIL;
+}
 
 /******************************************************************************
- Standalone Disassembler
-
- Define STANDALONE to build a command line-driven PowerPC disassembler.
+ Command line tool (built with -DSTANDALONE)
 ******************************************************************************/
 
 #ifdef STANDALONE
 
-static void PrintUsage(void)
+static void Usage()
 {
-    puts("ppcd Version " DISASM_VERSION " by Bart Trzynadlowski: PowerPC 603e Disassembler");
-    puts("Usage:    ppcd <file> [options]");
-    puts("Options:  -?,-h       Show this help text");
-    puts("          -s <offset> Start offset (hexadecimal)");
-    puts("          -l <num>    Number of instructions");
-    puts("          -o <addr>   Set origin (hexadecimal)");
-    puts("          -big        Big endian [Default]");
-    puts("          -little     Little endian");
-    puts("          -simple     Use simplified instruction forms [Default]");
-    puts("          -nosimple   Do not use simplified forms");
-    exit(0);
+  puts("ppcd: PowerPC 603e disassembler (RetroPixels)");
+  puts("usage: ppcd <file> [options]");
+  puts("  -s <hex>     offset in the file to start at (default 0)");
+  puts("  -l <count>   number of instructions (default: to the end of the file)");
+  puts("  -o <hex>     address of the first instruction (default: the start offset)");
+  puts("  -big         words are big-endian (default)");
+  puts("  -little      words are little-endian");
+  puts("  -simple      show simplified forms (default)");
+  puts("  -nosimple    show only the basic forms");
+  puts("  -h, -?       this text");
+  puts("Invalid forms are marked with *, unknown words with ?.");
 }
 
-/*
- * main(argc, argv):
- *
- * Standalone PowerPC disassembler.
- */
 int main(int argc, char **argv)
 {
-    char      mnem[16], oprs[48];
-    FILE      *fp;
-    uint8_t   *buffer;
-    unsigned  fsize, start = 0, len, org, file = 0;
-    uint32_t  op;
-    bool      len_specified = 0, org_specified = 0, little = 0, simple = 1;
-    char      *c;
+  const char *path = nullptr;
+  unsigned long start = 0, origin = 0, count = 0;
+  bool haveCount = false, haveOrigin = false, little = false, simple = true;
 
-
-    if (argc <= 1)
-        PrintUsage();
-
-    for (int i = 1; i < argc; i++)
+  for (int i = 1; i < argc; i++)
+  {
+    const char *arg = argv[i];
+    bool takesValue = !strcmp(arg, "-s") || !strcmp(arg, "-l") || !strcmp(arg, "-o");
+    if (takesValue && i + 1 >= argc)
     {
-        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "-?"))
-            PrintUsage();
-        else if (!strcmp(argv[i], "-s"))
-        {
-            ++i;
-            if (i >= argc)
-                fprintf(stderr, "ppcd: warning: no argument to %s\n", "-s");
-            else
-                start = strtoul(argv[i], &c, 16);
-        }
-        else if (!strcmp(argv[i], "-l"))
-        {
-            ++i;
-            if (i >= argc)
-                fprintf(stderr, "ppcd: warning: no argument to %s\n", "-l");
-            else
-            {
-                len = atoi(argv[i]);
-                len_specified = 1;
-            }
-        }
-        else if (!strcmp(argv[i], "-o"))
-        {
-            ++i;
-            if (i >= argc)
-                fprintf(stderr, "ppcd: warning: no argument to %s\n", "-o");
-            else
-            {
-                org = strtoul(argv[i], &c, 16);
-                org_specified = 1;
-            }
-        }
-        else if (!strcmp(argv[i], "-big"))
-            little = 0;
-        else if (!strcmp(argv[i], "-little"))
-            little = 1;
-        else if (!strcmp(argv[i], "-simple"))
-            simple = 1;
-        else if (!strcmp(argv[i], "-nosimple"))
-            simple = 0;
-        else
-            file = i;
+      fprintf(stderr, "ppcd: %s needs a value\n", arg);
+      return 1;
     }
-
-    if (!file)
+    if (!strcmp(arg, "-h") || !strcmp(arg, "-?"))
     {
-        fprintf(stderr, "ppcd: no input file specified\n");
-        exit(1);
+      Usage();
+      return 0;
     }
-
-    /*
-     * Load file
-     */
-
-    if ((fp = fopen(argv[file], "rb")) == NULL)
+    else if (!strcmp(arg, "-s"))
+      start = strtoul(argv[++i], nullptr, 16);
+    else if (!strcmp(arg, "-l"))
     {
-        fprintf(stderr, "ppcd: failed to open file: %s\n", argv[file]);
-        exit(1);
+      count = strtoul(argv[++i], nullptr, 10);
+      haveCount = true;
     }
-    fseek(fp, 0, SEEK_END);
-    fsize = ftell(fp);
-    rewind(fp);
-
-    if ((buffer = (uint8_t *) calloc(fsize, sizeof(uint8_t))) == NULL)
+    else if (!strcmp(arg, "-o"))
     {
-        fprintf(stderr, "ppcd: not enough memory to load input file: %s, %lu bytes\n", argv[file], (unsigned long) fsize);
-        fclose(fp);
-        exit(1);
+      origin = strtoul(argv[++i], nullptr, 16);
+      haveOrigin = true;
     }
-    fread(buffer, sizeof(uint8_t), fsize, fp);
-    fclose(fp);
-
-    if (!len_specified)
-        len = fsize - start;
+    else if (!strcmp(arg, "-big"))
+      little = false;
+    else if (!strcmp(arg, "-little"))
+      little = true;
+    else if (!strcmp(arg, "-simple"))
+      simple = true;
+    else if (!strcmp(arg, "-nosimple"))
+      simple = false;
     else
-        len *= 4;   // each instruction == 4 bytes
+      path = arg;
+  }
+  if (!path)
+  {
+    Usage();
+    return 1;
+  }
 
-    if (!org_specified)
-        org = start;
+  FILE *fp = fopen(path, "rb");
+  if (!fp)
+  {
+    fprintf(stderr, "ppcd: cannot open %s\n", path);
+    return 1;
+  }
+  if (start && fseek(fp, (long) start, SEEK_SET) != 0)
+  {
+    fprintf(stderr, "ppcd: cannot seek to 0x%lX in %s\n", start, path);
+    fclose(fp);
+    return 1;
+  }
 
-    /*
-     * Disassemble!
-     */
-
-    for (unsigned i = start; i < fsize && i < (start + len) && (i + 4) <= fsize; i += 4, org += 4)
-    {
-        if (!little)
-            op = (buffer[i] << 24) | (buffer[i + 1] << 16) |
-                 (buffer[i + 2] << 8) | buffer[i + 3];
-        else
-            op = (buffer[i + 3] << 24) | (buffer[i + 2] << 16) |
-                 (buffer[i + 1] << 8) | buffer[i + 0];
-
-        if (Result::OKAY == DisassemblePowerPC(op, org, mnem, oprs, sizeof(oprs), simple))
-        {
-            if (mnem[0] != '\0')    // invalid form
-                printf("0x%08X: 0x%08X\t%s*\t%s\n", org, op, mnem, oprs);
-            else
-                printf("0x%08X: 0x%08X\t?\n", org, op);
-        }
-        else
-            printf("0x%08X: 0x%08X\t%s\t%s\n", org, op, mnem, oprs);
-    }
-
-    free(buffer);
-
-    return 0;
+  UINT32 addr = (UINT32) (haveOrigin ? origin : start);
+  unsigned char word[4];
+  for (unsigned long n = 0; (!haveCount || n < count) && fread(word, 1, 4, fp) == 4; n++, addr += 4)
+  {
+    UINT32 op = little ? ((UINT32) word[3] << 24) | ((UINT32) word[2] << 16) | ((UINT32) word[1] << 8) | word[0]
+                       : ((UINT32) word[0] << 24) | ((UINT32) word[1] << 16) | ((UINT32) word[2] << 8) | word[3];
+    char mnem[16], oprs[64];
+    Result r = DisassemblePowerPC(op, addr, mnem, oprs, sizeof(oprs), simple);
+    if (r == Result::OKAY)
+      printf("0x%08X: 0x%08X\t%s\t%s\n", addr, op, mnem, oprs);
+    else if (mnem[0] != '\0')
+      printf("0x%08X: 0x%08X\t%s*\t%s\n", addr, op, mnem, oprs);
+    else
+      printf("0x%08X: 0x%08X\t?\n", addr, op);
+  }
+  fclose(fp);
+  return 0;
 }
 
-#endif
-
+#endif // STANDALONE
