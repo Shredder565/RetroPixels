@@ -1,694 +1,203 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2012 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * Shaders3D.h
- * 
- * Header file containing the 3D vertex and fragment shaders.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Shaders3D.h
+//
+// The Legacy3D GLSL 1.20 programs. The renderer looks up the uniforms and
+// attributes by these names; shaders loaded from files (VertexShader /
+// FragmentShader settings) must use them too, and should keep the fs*
+// varyings so a file shader can be paired with a built-in one. The files in
+// Shaders/ hold the same programs plus two simpler fragment variants.
 
 #ifndef INCLUDED_SHADERS3D_H
 #define INCLUDED_SHADERS3D_H
 
 namespace Legacy3D {
 
-// Vertex shader
-static constexpr char vertexShaderSource[] =
-{
-"/**\n"
-" ** Supermodel\n"
-" ** A Sega Model 3 Arcade Emulator.\n"
-" ** Copyright 2011-2012 Bart Trzynadlowski, Nik Henson \n"
-" **\n"
-" ** This file is part of Supermodel.\n"
-" **\n"
-" ** Supermodel is free software: you can redistribute it and/or modify it under\n"
-" ** the terms of the GNU General Public License as published by the Free \n"
-" ** Software Foundation, either version 3 of the License, or (at your option)\n"
-" ** any later version.\n"
-" **\n"
-" ** Supermodel is distributed in the hope that it will be useful, but WITHOUT\n"
-" ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or\n"
-" ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for\n"
-" ** more details.\n"
-" **\n"
-" ** You should have received a copy of the GNU General Public License along\n"
-" ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.\n"
-" **/\n"
-"  \n"
-"/*\n"
-" * Vertex.glsl\n"
-" *\n"
-" * Vertex shader for 3D rendering.\n"
-" */\n"
-" \n"
-"#version 120\n"
-"\n"
-"// Global uniforms\n"
-"uniform mat4  modelViewMatrix;   // model -> view space matrix\n"
-"uniform mat4  projectionMatrix;  // view space -> screen space matrix\n"
-"uniform vec3  lighting[2];       // lighting state (lighting[0] = sun direction, lighting[1].x,y = diffuse, ambient intensities from 0-1.0)\n"
-"uniform vec4  spotEllipse;       // spotlight ellipse position: .x=X position (normalized device coordinates), .y=Y position, .z=half-width, .w=half-height)\n"
-"uniform vec2  spotRange;         // spotlight Z range: .x=start (viewspace coordinates), .y=limit\n"
-"uniform vec3  spotColor;         // spotlight RGB color\n"
-"\n"
-"// Custom vertex attributes\n"
-"attribute vec4  subTexture;      // .x=texture X, .y=texture Y, .z=texture width, .w=texture height (all in texels)\n"
-"attribute vec4  texParams;       // .x=texture enable (if 1, else 0), .y=use transparency (if >=0), .z=U wrap mode (1=mirror, 0=repeat), .w=V wrap mode\n"
-"attribute float texFormat;       // T1RGB5 contour texture (if > 0)\n"
-"attribute float texMap;          // texture map number\n"
-"attribute float transLevel;      // translucence level, 0.0 (transparent) to 1.0 (opaque). if less than 1.0, replace alpha value\n"
-"attribute float lightEnable;     // lighting enabled (1.0) or luminous (0.0), drawn at full intensity\n"
-"attribute float specular;        // specular coefficient (0.0 if disabled)\n"
-"attribute float shininess;       // specular shininess\n"
-"attribute float fogIntensity;    // fog intensity (1.0, full fog effect, 0.0, no fog) \n"
-"\n"
-"// Custom outputs to fragment shader\n"
-"varying vec4   fsSubTexture;\n"
-"varying vec4   fsTexParams;\n"
-"varying float  fsTexFormat;\n"
-"varying float  fsTexMap;\n"
-"varying float  fsTransLevel;\n"
-"varying vec3   fsLightIntensity; // total light intensity for this vertex\n"
-"varying float  fsSpecularTerm;   // specular light term (additive)\n"
-"varying float  fsFogFactor;      // fog factor\n"
-"varying float  fsViewZ;\n"
-"\n"
-"// Gets the 3x3 matrix out of a 4x4 (because mat3(mat4matrix) does not work on ATI!)\n"
-"mat3 GetLinearPart( mat4 m )\n"
-"{\n"
-"  mat3 result;\n"
-"  \n"
-"  result[0][0] = m[0][0];\n"
-"  result[0][1] = m[0][1];\n"
-"  result[0][2] = m[0][2];\n"
-"\n"
-"  result[1][0] = m[1][0];\n"
-"  result[1][1] = m[1][1];\n"
-"  result[1][2] = m[1][2];\n"
-"  \n"
-"  result[2][0] = m[2][0];\n"
-"  result[2][1] = m[2][1];\n"
-"  result[2][2] = m[2][2];\n"
-"  \n"
-"  return result;\n"
-"}\n"
-"\n"
-"void main(void)\n"
-"{\n"
-"  vec3  viewVertex;  // vertex coordinates in view space\n"
-"  vec3  viewNormal;  // vertex normal in view space\n"
-"  vec3  sunVector;   // sun lighting vector (as reflecting away from vertex)\n"
-"  float sunFactor;   // sun light projection along vertex normal (0.0 to 1.0)\n"
-"  vec3  halfway;\n"
-"  float specFactor;\n"
-"  \n"
-"  // Transform vertex\n"
-"  gl_Position = projectionMatrix * modelViewMatrix * gl_Vertex;\n"
-"  viewVertex = vec3(modelViewMatrix * gl_Vertex);  \n"
-"  \n"
-"  /*\n"
-"   * Modulation\n"
-"   *\n"
-"    * Polygon color serves as material color (modulating the light intensity)\n"
-"   * for textured polygons. The fragment shader will ignore (overwrite) the\n"
-"   * the color passed to it if the fragment is textured. \n"
-"   *\n"
-"   * Untextured fragments must be set to the polygon color and the light\n"
-"   * intensity is initialized to 1.0 here. Alpha must be set to 1.0 because\n"
-"   * the fragment shader multiplies it by the polygon translucency setting. \n"
-"   *\n"
-"   * TO-DO: Does OpenGL set alpha to 1.0 by default if no alpha is specified\n"
-"   * for the vertex? If so, we can remove that line from here.\n"
-"   */\n"
-"\n"
-"  gl_FrontColor = gl_Color;  // untextured polygons will use this\n"
-"  gl_FrontColor.a = 1.0;  \n"
-"  fsLightIntensity = vec3(1.0,1.0,1.0);\n"
-"  if (texParams.x > 0.5)    // textured\n"
-"    fsLightIntensity *= gl_Color.rgb;\n"
-"    \n"
-"  /*\n"
-"    * Sun Light\n"
-"   *\n"
-"   * Parallel light source and ambient lighting are only applied for non-\n"
-"   * luminous polygons.\n"
-"    */\n"
-"  fsSpecularTerm = 0.0;\n"
-"  if (lightEnable > 0.5)  // not luminous\n"
-"  {\n"
-"    // Normal -> view space\n"
-"    viewNormal = normalize(GetLinearPart(modelViewMatrix)*gl_Normal);\n"
-"\n"
-"    // Real3D -> OpenGL view space convention (TO-DO: do this outside of shader)\n"
-"    sunVector = lighting[0]*vec3(1.0,-1.0,-1.0);\n"
-"\n"
-"    // Compute diffuse factor for sunlight\n"
-"    sunFactor = max(dot(sunVector,viewNormal),0.0);\n"
-"\n"
-"    // Total light intensity: sum of all components\n"
-"    fsLightIntensity *= min(1.0,(sunFactor*lighting[1].x+lighting[1].y));\n"
-"\n"
-"    /*\n"
-"     * Specular Lighting\n"
-"     *\n"
-"     * The specular term is treated similarly to the \"separate specular\n"
-"     * color\" functionality of OpenGL: it is added as a highlight in the\n"
-"     * fragment shader. This allows even black textures to be lit.\n"
-"     *\n"
-"     * TO-DO: Ambient intensity viewport parameter is known but what about\n"
-"     * the intensity of the specular term? Always applied with full \n"
-"     * intensity here but this is unlikely to be correct.\n"
-"     */\n"
-"     if (shininess >= 0.0)\n"
-"     {\n"
-"       // Standard specular lighting equation\n"
-"       if (sunFactor > 0.0)\n"
-"       {\n"
-"         vec3 V = normalize(-viewVertex);\n"
-"         vec3 H = normalize(sunVector+V);	// halfway vector\n"
-"         fsSpecularTerm = specular*pow(max(dot(viewNormal,H),0.0),shininess);\n"
-"\n"
-"         // Phong formula\n"
-"         // vec3 R = normalize(2.0*dot(sunVector,viewNormal)*viewNormal - sunVector);\n"
-"         // vec3 V = normalize(-viewVertex);\n"
-"         // fsSpecularTerm = lighting[1].x * specular * pow(max(dot(R,V),0.0),4.);\n"
-"\n"
-"         //\n"
-"         // This looks decent in Scud Race attract mode. It is directionally\n"
-"         // correct (highlights appear in the right places under the same\n"
-"         // conditions as the actual game). In game play, it no longer works.\n"
-"         // This is loosely based on the Model 2 formula, which is:\n"
-"         //\n"
-"         //    s = 2*dot(light, normal)*normal.z - light.z\n"
-"         //\n"
-"         // float dot1 = dot(sunVector, viewNormal);\n"
-"         // float s = dot1*viewNormal.z;\n"
-"         // fsSpecularTerm =specular * pow(max(s, 0.0), 2.);\n"
-"         //\n"
-"       }\n"
-"\n"
-"       /*\n"
-"       vec3 V = normalize(-viewVertex);\n"
-"       vec3 H = normalize(sunVector+V);	// halfway vector\n"
-"       float s = max(10.0,64.0-shininess);	// seems to look nice, but probably not correct\n"
-"       fsSpecularTerm = pow(max(dot(viewNormal,H),0.0),s);\n"
-"       if (sunFactor <= 0.0) fsSpecularTerm = 0.0;\n"
-"       */\n"
-"\n"
-"       // Faster approximation\n"
-"       //float temp = max(dot(viewNormal,H),0.0);\n"
-"       //float s = 64.0-shininess;\n"
-"       //fsSpecularTerm = temp/(s-temp*s+temp);\n"
-"\n"
-"       // Phong formula\n"
-"       //vec3 R = normalize(2.0*dot(sunVector,viewNormal)*viewNormal - sunVector);\n"
-"       //vec3 V = normalize(-viewVertex);\n"
-"       //float s = max(2.0,64.0-shininess);\n"
-"       //fsSpecularTerm = pow(max(dot(R,V),0.0),s);\n"
-"     }\n"
-"  }\n"
-"  \n"
-"  // Fog\n"
-"  float z = length(viewVertex);\n"
-"  fsFogFactor = fogIntensity*clamp(gl_Fog.start+z*gl_Fog.density, 0.0, 1.0);\n"
-"\n"
-"  // Pass viewspace Z coordinate (for spotlight)\n"
-"  fsViewZ = -viewVertex.z;  // convert Z from GL->Real3D convention (want +Z to be further into screen)\n"
-"\n"
-"  // Pass remaining parameters to fragment shader\n"
-"  gl_TexCoord[0] = gl_MultiTexCoord0;\n"
-"  fsSubTexture = subTexture;\n"
-"  fsTexParams = texParams;\n"
-"  fsTransLevel = transLevel;\n"
-"  fsTexFormat = texFormat;\n"
-"  fsTexMap = texMap;\n"
-"}\n"
-};
-	
-	
-// Fragment shader (single texture sheet)
-static constexpr char fragmentShaderSingleSheetSource[] = 
-{
-"/**\n"
-" ** Supermodel\n"
-" ** A Sega Model 3 Arcade Emulator.\n"
-" ** Copyright 2011-2012 Bart Trzynadlowski, Nik Henson \n"
-" **\n"
-" ** This file is part of Supermodel.\n"
-" **\n"
-" ** Supermodel is free software: you can redistribute it and/or modify it under\n"
-" ** the terms of the GNU General Public License as published by the Free \n"
-" ** Software Foundation, either version 3 of the License, or (at your option)\n"
-" ** any later version.\n"
-" **\n"
-" ** Supermodel is distributed in the hope that it will be useful, but WITHOUT\n"
-" ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or\n"
-" ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for\n"
-" ** more details.\n"
-" **\n"
-" ** You should have received a copy of the GNU General Public License along\n"
-" ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.\n"
-" **/\n"
-" \n"
-"/*\n"
-" * Fragment.glsl\n"
-" *\n"
-" * Fragment shader for 3D rendering.\n"
-" */\n"
-"\n"
-"#version 120\n"
-"\n"
-"// Global uniforms\n"
-"uniform sampler2D  textureMap; // complete texture map, 2048x2048 texels\n"
-"uniform vec4    spotEllipse;   // spotlight ellipse position: .x=X position (screen coordinates), .y=Y position, .z=half-width, .w=half-height)\n"
-"uniform vec2    spotRange;     // spotlight Z range: .x=start (viewspace coordinates), .y=limit\n"
-"uniform vec3    spotColor;     // spotlight RGB color\n"
-"uniform vec3    lighting[2];   // lighting state (lighting[0] = sun direction, lighting[1].x,y = diffuse, ambient intensities from 0-1.0)\n"
-"uniform float    mapSize;      // texture map size (2048,4096,6144 etc)\n"
-"\n"
-"// Inputs from vertex shader \n"
-"varying vec4    fsSubTexture;  // .x=texture X, .y=texture Y, .z=texture width, .w=texture height (all in texels)\n"
-"varying vec4    fsTexParams;   // .x=texture enable (if 1, else 0), .y=use transparency (if > 0), .z=U wrap mode (1=mirror, 0=repeat), .w=V wrap mode\n"
-"varying float    fsTexFormat;  // T1RGB5 contour texture (if > 0)\n"
-"varying float    fsTexMap;     // texture map number\n"
-"varying float    fsTransLevel; // translucence level, 0.0 (transparent) to 1.0 (opaque)\n"
-"varying vec3    fsLightIntensity;  // lighting intensity \n"
-"varying float    fsSpecularTerm;   // specular highlight\n"
-"varying float    fsFogFactor;  // fog factor\n"
-"varying float    fsViewZ;      // Z distance to fragment from viewpoint at origin\n"
-"\n"
-"/*\n"
-" * WrapTexelCoords():\n"
-" *\n"
-" * Computes the normalized OpenGL S,T coordinates within the 2048x2048 texture\n"
-" * sheet, taking into account wrapping behavior.\n"
-" *\n"
-" * Computing normalized OpenGL texture coordinates (0 to 1) within the \n"
-" * Real3D texture sheet:\n"
-" *\n"
-" * If the texture is not mirrored, we simply have to clamp the\n"
-" * coordinates to fit within the texture dimensions, add the texture\n"
-" * X, Y position to select the appropriate one, and normalize by 2048\n"
-" * (the dimensions of the Real3D texture sheet).\n"
-" *\n"
-" *    = [(u,v)%(w,h)+(x,y)]/(2048,2048)\n"
-" *\n"
-" * If mirroring is enabled, textures are mirrored every odd multiple of\n"
-" * the original texture. To detect whether we are in an odd multiple, \n"
-" * simply divide the coordinate by the texture dimension and check \n"
-" * whether the result is odd. Then, clamp the coordinates as before but\n"
-" * subtract from the last texel to mirror them:\n"
-" *\n"
-" *     = [M*((w-1,h-1)-(u,v)%(w,h)) + (1-M)*(u,v)%(w,h) + (x,y)]/(2048,2048)\n"
-" *    where M is 1.0 if the texture must be mirrored.\n"
-" *\n"
-" * As an optimization, this function computes TWO texture coordinates\n"
-" * simultaneously. The first is texCoord.xy, the second is in .zw. The other\n"
-" * parameters must have .xy = .zw.\n"
-" */\n"
-"vec4 WrapTexelCoords(vec4 texCoord, vec4 texOffset, vec4 texSize, vec4 mirrorEnable)\n"
-"{\n"
-"  vec4  clampedCoord, mirror, glTexCoord;\n"
-"  \n"
-"  clampedCoord = mod(texCoord,texSize);            // clamp coordinates to within texture size\n"
-"  mirror = mirrorEnable * mod(floor(texCoord/texSize),2.0);  // whether this texel needs to be mirrored\n"
-"\n"
-"  glTexCoord = (  mirror*(texSize-clampedCoord) +\n"
-"          (vec4(1.0,1.0,1.0,1.0)-mirror)*clampedCoord +\n"
-"          texOffset\n"
-"         ) / mapSize;\n"
-"  return glTexCoord;\n"
-"}\n"
-"\n"
-"/*\n"
-" * main():\n"
-" *\n"
-" * Fragment shader entry point.\n"
-" */\n"
-"\n"
-"void main(void)\n"
-"{  \n"
-"  vec4  uv_top, uv_bot, c[4];\n"
-"  vec2  r;\n"
-"  vec4  fragColor;\n"
-"  vec2  ellipse;\n"
-"  vec3  lightIntensity;\n"
-"  float  insideSpot;\n"
-"  int    x;\n"
-"  \n"
-"  // Get polygon color for untextured polygons (textured polygons will overwrite)\n"
-"  if (fsTexParams.x < 0.5)\n"
-"    fragColor = gl_Color;    \n"
-"  else\n"
-"  // Textured polygons: set fragment color to texel value\n"
-"  {      \n"
-"    /*\n"
-"     * Bilinear Filtering\n"
-"     *\n"
-"     * In order to get this working on ATI, the number of operations is\n"
-"     * reduced by putting everything into vec4s. uv_top holds the UV \n"
-"     * coordinates for the top two texels (.xy=left, .zw=right) and uv_bot\n"
-"     * is for the lower two.\n"
-"     */\n"
-"\n"
-"    // Compute fractional blending factor, r, and lower left corner of texel 0\n"
-"    uv_bot.xy = gl_TexCoord[0].st-vec2(0.5,0.5); // move into the lower left blending texel\n"
-"    r = uv_bot.xy-floor(uv_bot.xy);              // fractional part\n"
-"    uv_bot.xy = floor(uv_bot.xy);                // integral part\n"
-"    \n"
-"    // Compute texel coordinates\n"
-"    uv_bot.xy += vec2(0.5,0.5);  // offset to center of pixel (should not be needed but it fixes a lot of glitches, esp. on Nvidia)\n"
-"    uv_bot.zw = uv_bot.xy + vec2(1.0,0.0);      // compute coordinates of the other three neighbors\n"
-"    uv_top = uv_bot + vec4(0.0,1.0,0.0,1.0);\n"
-"\n"
-"    // Compute the properly wrapped texel coordinates\n"
-"    uv_top = WrapTexelCoords(uv_top,vec4(fsSubTexture.xy,fsSubTexture.xy),vec4(fsSubTexture.zw,fsSubTexture.zw), vec4(fsTexParams.zw,fsTexParams.zw));\n"
-"    uv_bot = WrapTexelCoords(uv_bot,vec4(fsSubTexture.xy,fsSubTexture.xy),vec4(fsSubTexture.zw,fsSubTexture.zw), vec4(fsTexParams.zw,fsTexParams.zw));\n"
-"\n"
-"    // Fetch the texels\n"
-"    c[0]=texture2D(textureMap,uv_bot.xy);  // bottom-left (base texel)\n"
-"    c[1]=texture2D(textureMap,uv_bot.zw);  // bottom-right\n"
-"    c[2]=texture2D(textureMap,uv_top.xy);  // top-left\n"
-"    c[3]=texture2D(textureMap,uv_top.zw);  // top-right\n"
-"\n"
-"    // Interpolate texels and blend result with material color to determine final (unlit) fragment color\n"
-"    // fragColor = (c[0]*(1.0-r.s)*(1.0-r.t) + c[1]*r.s*(1.0-r.t) + c[2]*(1.0-r.s)*r.t + c[3]*r.s*r.t);\n"
-"    // Faster method:\n"
-"    c[0] += (c[1]-c[0])*r.s;           // 2 alu\n"
-"    c[2] += (c[3]-c[2])*r.s;           // 2 alu\n"
-"    fragColor = c[0]+(c[2]-c[0])*r.t;  //2 alu\n"
-"\n"
-"    /*\n"
-"     * T1RGB5:\n"
-"     *\n"
-"     * The transparency bit determines whether to discard pixels (if set).\n"
-"     * What is unknown is how this bit behaves when interpolated. OpenGL\n"
-"     * processes it as an alpha value, so it might concievably be blended\n"
-"     * with neighbors. Here, an arbitrary threshold is chosen.\n"
-"     *\n"
-"     * To-do: blending could probably enabled and this would work even\n"
-"     * better with a hard threshold.\n"
-"     *\n"
-"     * Countour processing also seems to be enabled for RGBA4 textures.\n"
-"     * When the alpha value is 0.0 (or close), pixels are discarded \n"
-"     * entirely.\n"
-"     */\n"
-"    if (fsTexParams.y > 0.5)  // contour processing enabled\n"
-"    {\n"
-"      if (fragColor.a < 0.01)  // discard anything with alpha == 0\n"
-"        discard;\n"
-"    }\n"
-"    \n"
-"    // If contour texture and not discarded, force alpha to 1.0 because will later be modified by polygon translucency\n"
-"    if (fsTexFormat < 0.5)    // contour (T1RGB5) texture\n"
-"      fragColor.a = 1.0;\n"
-"  }\n"
-"\n"
-"  // Compute spotlight and apply lighting\n"
-"  ellipse = (gl_FragCoord.xy-spotEllipse.xy)/spotEllipse.zw;\n"
-"  insideSpot = dot(ellipse,ellipse);\n"
-"  if ((insideSpot <= 1.0) &&  (fsViewZ>=spotRange.x) && (fsViewZ<spotRange.y))\n"
-"    lightIntensity = fsLightIntensity+(1.0-insideSpot)*spotColor;\n"
-"  else\n"
-"    lightIntensity = fsLightIntensity;\n"
-"  fragColor.rgb *= lightIntensity;\n"
-"  fragColor.rgb += vec3(fsSpecularTerm,fsSpecularTerm,fsSpecularTerm);\n"
-"  \n"
-"  // Translucency (modulates existing alpha channel for RGBA4 texels)\n"
-"  fragColor.a *= fsTransLevel;\n"
-"\n"
-"  // Apply fog\n"
-"  fragColor.rgb = mix(fragColor.rgb, gl_Fog.color.rgb, fsFogFactor);\n"
-"\n"
-"  // Store final color\n"
-"  gl_FragColor = fragColor;\n"
-"}\n"
-};
+static constexpr char vertexShaderSource[] = R"glsl(
+#version 120
 
+// Legacy3D vertex shader: transform, sun light and fog per vertex.
 
-// Fragment shader (8 texture sheets)
-static constexpr char fragmentShaderMultiSheetSource[] = 
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+uniform vec3 lighting[2];        // [0] sun direction (Real3D view axes); [1].x sun level, [1].y ambient level
+
+attribute vec4 subTexture;       // texture x, y in its map, width, height (texels)
+attribute vec4 texParams;        // textured (1/0), contour test (>0), mirror U, mirror V
+attribute float texFormat;
+attribute float texMap;
+attribute float transLevel;
+attribute float lightEnable;
+attribute float specular;
+attribute float shininess;       // < 0: no highlight
+attribute float fogIntensity;
+
+varying vec4 fsSubTexture;
+varying vec4 fsTexParams;
+varying float fsTexFormat;
+varying float fsTexMap;
+varying float fsTransLevel;
+varying vec3 fsLightIntensity;
+varying float fsSpecularTerm;
+varying float fsFogFactor;
+varying float fsViewZ;           // depth into the screen, view units
+
+void main(void)
 {
-"/**\n"
-" ** Supermodel\n"
-" ** A Sega Model 3 Arcade Emulator.\n"
-" ** Copyright 2011-2012 Bart Trzynadlowski, Nik Henson \n"
-" **\n"
-" ** This file is part of Supermodel.\n"
-" **\n"
-" ** Supermodel is free software: you can redistribute it and/or modify it under\n"
-" ** the terms of the GNU General Public License as published by the Free \n"
-" ** Software Foundation, either version 3 of the License, or (at your option)\n"
-" ** any later version.\n"
-" **\n"
-" ** Supermodel is distributed in the hope that it will be useful, but WITHOUT\n"
-" ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or\n"
-" ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for\n"
-" ** more details.\n"
-" **\n"
-" ** You should have received a copy of the GNU General Public License along\n"
-" ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.\n"
-" **/\n"
-" \n"
-"/*\n"
-" * Fragment_MultiSheet.glsl\n"
-" *\n"
-" * Fragment shader for 3D rendering. Uses 8 texture sheets to decode the \n"
-" * different possible formats.\n"
-" */\n"
-"\n"
-"#version 120\n"
-"\n"
-"// Global uniforms\n"
-"uniform sampler2D  textureMap0;    // complete texture map (fmt 0), 2048x2048 texels\n"
-"uniform sampler2D  textureMap1;    // complete texture map (fmt 1), 2048x2048 texels\n"
-"uniform sampler2D  textureMap2;    // complete texture map (fmt 2), 2048x2048 texels\n"
-"uniform sampler2D  textureMap3;    // complete texture map (fmt 3), 2048x2048 texels\n"
-"uniform sampler2D  textureMap4;    // complete texture map (fmt 4), 2048x2048 texels\n"
-"uniform sampler2D  textureMap5;    // complete texture map (fmt 5), 2048x2048 texels\n"
-"uniform sampler2D  textureMap6;    // complete texture map (fmt 6), 2048x2048 texels\n"
-"uniform sampler2D  textureMap7;    // complete texture map (fmt 7), 2048x2048 texels\n"
-"uniform vec4       spotEllipse;    // spotlight ellipse position: .x=X position (screen coordinates), .y=Y position, .z=half-width, .w=half-height)\n"
-"uniform vec2       spotRange;      // spotlight Z range: .x=start (viewspace coordinates), .y=limit\n"
-"uniform vec3       spotColor;      // spotlight RGB color\n"
-"uniform vec3       lighting[2];    // lighting state (lighting[0] = sun direction, lighting[1].x,y = diffuse, ambient intensities from 0-1.0)\n"
-"uniform float      mapSize;        // texture map size (2048,4096,6144 etc)\n"
-"\n"
-"// Inputs from vertex shader \n"
-"varying vec4   fsSubTexture;       // .x=texture X, .y=texture Y, .z=texture width, .w=texture height (all in texels)\n"
-"varying vec4   fsTexParams;        // .x=texture enable (if 1, else 0), .y=use transparency (if > 0), .z=U wrap mode (1=mirror, 0=repeat), .w=V wrap mode\n"
-"varying float  fsTexFormat;        // T1RGB5 contour texture (if > 0)\n"
-"varying float  fsTexMap;           // texture map number\n"
-"varying float  fsTransLevel;       // translucence level, 0.0 (transparent) to 1.0 (opaque)\n"
-"varying vec3   fsLightIntensity;   // lighting intensity \n"
-"varying float  fsSpecularTerm;     // specular highlight\n"
-"varying float  fsFogFactor;        // fog factor\n"
-"varying float  fsViewZ;            // Z distance to fragment from viewpoint at origin\n"
-"\n"
-"/*\n"
-" * WrapTexelCoords():\n"
-" *\n"
-" * Computes the normalized OpenGL S,T coordinates within the 2048x2048 texture\n"
-" * sheet, taking into account wrapping behavior.\n"
-" *\n"
-" * Computing normalized OpenGL texture coordinates (0 to 1) within the \n"
-" * Real3D texture sheet:\n"
-" *\n"
-" * If the texture is not mirrored, we simply have to clamp the\n"
-" * coordinates to fit within the texture dimensions, add the texture\n"
-" * X, Y position to select the appropriate one, and normalize by 2048\n"
-" * (the dimensions of the Real3D texture sheet).\n"
-" *\n"
-" *    = [(u,v)%(w,h)+(x,y)]/(2048,2048)\n"
-" *\n"
-" * If mirroring is enabled, textures are mirrored every odd multiple of\n"
-" * the original texture. To detect whether we are in an odd multiple, \n"
-" * simply divide the coordinate by the texture dimension and check \n"
-" * whether the result is odd. Then, clamp the coordinates as before but\n"
-" * subtract from the last texel to mirror them:\n"
-" *\n"
-" *     = [M*((w-1,h-1)-(u,v)%(w,h)) + (1-M)*(u,v)%(w,h) + (x,y)]/(2048,2048)\n"
-" *    where M is 1.0 if the texture must be mirrored.\n"
-" *\n"
-" * As an optimization, this function computes TWO texture coordinates\n"
-" * simultaneously. The first is texCoord.xy, the second is in .zw. The other\n"
-" * parameters must have .xy = .zw.\n"
-" */\n"
-"vec4 WrapTexelCoords(vec4 texCoord, vec4 texOffset, vec4 texSize, vec4 mirrorEnable)\n"
-"{\n"
-"  vec4  clampedCoord, mirror, glTexCoord;\n"
-"  \n"
-"  clampedCoord = mod(texCoord,texSize);                      // clamp coordinates to within texture size\n"
-"  mirror = mirrorEnable * mod(floor(texCoord/texSize),2.0);  // whether this texel needs to be mirrored\n"
-"\n"
-"  glTexCoord = (  mirror*(texSize-clampedCoord) +\n"
-"          (vec4(1.0,1.0,1.0,1.0)-mirror)*clampedCoord +\n"
-"          texOffset\n"
-"         ) / mapSize;\n"
-"  return glTexCoord;\n"
-"}\n"
-"\n"
-"/*\n"
-" * main():\n"
-" *\n"
-" * Fragment shader entry point.\n"
-" */\n"
-"\n"
-"void main(void)\n"
-"{  \n"
-"  vec4  uv_top, uv_bot, c[4];\n"
-"  vec2  r;\n"
-"  vec4  fragColor;\n"
-"  vec2  ellipse;\n"
-"  vec3  lightIntensity;\n"
-"  float  insideSpot;\n"
-"  int    x;\n"
-"  \n"
-"  // Get polygon color for untextured polygons (textured polygons will overwrite)\n"
-"  if (fsTexParams.x < 0.5)\n"
-"    fragColor = gl_Color;    \n"
-"  else\n"
-"  // Textured polygons: set fragment color to texel value\n"
-"  {      \n"
-"    /*\n"
-"     * Bilinear Filtering\n"
-"     *\n"
-"     * In order to get this working on ATI, the number of operations is\n"
-"     * reduced by putting everything into vec4s. uv_top holds the UV \n"
-"     * coordinates for the top two texels (.xy=left, .zw=right) and uv_bot\n"
-"     * is for the lower two.\n"
-"     */\n"
-"\n"
-"    // Compute fractional blending factor, r, and lower left corner of texel 0\n"
-"    uv_bot.xy = gl_TexCoord[0].st-vec2(0.5,0.5); // move into the lower left blending texel \n"
-"    r = uv_bot.xy-floor(uv_bot.xy);              // fractional part\n"
-"    uv_bot.xy = floor(uv_bot.xy);                // integral part\n"
-"    \n"
-"    // Compute texel coordinates\n"
-"    uv_bot.xy += vec2(0.5,0.5);                  // offset to center of pixel (should not be needed but it fixes a lot of glitches, esp. on Nvidia)\n"
-"    uv_bot.zw = uv_bot.xy + vec2(1.0,0.0);       // compute coordinates of the other three neighbors\n"
-"    uv_top = uv_bot + vec4(0.0,1.0,0.0,1.0);\n"
-"\n"
-"    // Compute the properly wrapped texel coordinates\n"
-"    uv_top = WrapTexelCoords(uv_top,vec4(fsSubTexture.xy,fsSubTexture.xy),vec4(fsSubTexture.zw,fsSubTexture.zw), vec4(fsTexParams.zw,fsTexParams.zw));\n"
-"    uv_bot = WrapTexelCoords(uv_bot,vec4(fsSubTexture.xy,fsSubTexture.xy),vec4(fsSubTexture.zw,fsSubTexture.zw), vec4(fsTexParams.zw,fsTexParams.zw));\n"
-"\n"
-"    // Fetch the texels from the given texture map\n"
-"    if (fsTexMap < 0.5f)  {\n"
-"      c[0]=texture2D(textureMap0, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap0, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap0, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap0, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 1.5f) {\n"
-"      c[0]=texture2D(textureMap1, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap1, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap1, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap1, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 2.5f) {\n"
-"      c[0]=texture2D(textureMap2, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap2, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap2, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap2, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 3.5f) {\n"
-"      c[0]=texture2D(textureMap3, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap3, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap3, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap3, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 4.5f) {\n"
-"      c[0]=texture2D(textureMap4, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap4, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap4, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap4, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 5.5f) {\n"
-"      c[0]=texture2D(textureMap5, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap5, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap5, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap5, uv_top.zw);       // top-right\n"
-"    } else if (fsTexMap < 6.5f) {\n"
-"      c[0]=texture2D(textureMap6, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap6, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap6, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap6, uv_top.zw);       // top-right\n"
-"    } else {\n"
-"      c[0]=texture2D(textureMap7, uv_bot.xy);       // bottom-left (base texel)\n"
-"      c[1]=texture2D(textureMap7, uv_bot.zw);       // bottom-right\n"
-"      c[2]=texture2D(textureMap7, uv_top.xy);       // top-left\n"
-"      c[3]=texture2D(textureMap7, uv_top.zw);       // top-right\n"
-"    }                      \n"
-"\n"
-"    // Interpolate texels and blend result with material color to determine final (unlit) fragment color\n"
-"    // fragColor = (c[0]*(1.0-r.s)*(1.0-r.t) + c[1]*r.s*(1.0-r.t) + c[2]*(1.0-r.s)*r.t + c[3]*r.s*r.t);\n"
-"    // Faster method:\n"
-"    c[0] += (c[1]-c[0])*r.s;           // 2 alu\n"
-"    c[2] += (c[3]-c[2])*r.s;           // 2 alu\n"
-"    fragColor = c[0]+(c[2]-c[0])*r.t;  // 2 alu\n"
-"\n"
-"    /*\n"
-"     * T1RGB5:\n"
-"     *\n"
-"     * The transparency bit determines whether to discard pixels (if set).\n"
-"     * What is unknown is how this bit behaves when interpolated. OpenGL\n"
-"     * processes it as an alpha value, so it might concievably be blended\n"
-"     * with neighbors. Here, an arbitrary threshold is chosen.\n"
-"     *\n"
-"     * To-do: blending could probably enabled and this would work even\n"
-"     * better with a hard threshold.\n"
-"     *\n"
-"     * Countour processing also seems to be enabled for RGBA4 textures.\n"
-"     * When the alpha value is 0.0 (or close), pixels are discarded \n"
-"     * entirely.\n"
-"     */\n"
-"    if (fsTexParams.y > 0.5)  // contour processing enabled\n"
-"    {\n"
-"      if (fragColor.a < 0.01)  // discard anything with alpha == 0\n"
-"        discard;\n"
-"    }\n"
-"    \n"
-"    // If contour texture and not discarded, force alpha to 1.0 because will later be modified by polygon translucency\n"
-"    if (fsTexFormat < 0.5)    // contour (T1RGB5) texture map\n"
-"      fragColor.a = 1.0;\n"
-"  }\n"
-"\n"
-"  // Compute spotlight and apply lighting\n"
-"  ellipse = (gl_FragCoord.xy-spotEllipse.xy)/spotEllipse.zw;\n"
-"  insideSpot = dot(ellipse,ellipse);\n"
-"  if ((insideSpot <= 1.0) &&  (fsViewZ>=spotRange.x) && (fsViewZ<spotRange.y))\n"
-"    lightIntensity = fsLightIntensity+(1.0-insideSpot)*spotColor;\n"
-"  else\n"
-"    lightIntensity = fsLightIntensity;\n"
-"  fragColor.rgb *= lightIntensity;\n"
-"  fragColor.rgb += vec3(fsSpecularTerm,fsSpecularTerm,fsSpecularTerm);\n"
-"  \n"
-"  // Translucency (modulates existing alpha channel for RGBA4 texels)\n"
-"  fragColor.a *= fsTransLevel;\n"
-"\n"
-"  // Apply fog\n"
-"  fragColor.rgb = mix(fragColor.rgb, gl_Fog.color.rgb, fsFogFactor);\n"
-"\n"
-"  // Store final color\n"
-"  gl_FragColor = fragColor;\n"
-"}\n"
-};
+  vec3 eye = vec3(modelViewMatrix * gl_Vertex);
+  gl_Position = projectionMatrix * modelViewMatrix * gl_Vertex;
+
+  // Untextured polygons show their colour; textured ones use it to tint
+  // the light that reaches the texels.
+  gl_FrontColor = vec4(gl_Color.rgb, 1.0);
+  vec3 light = vec3(1.0);
+  if (texParams.x > 0.5)
+    light *= gl_Color.rgb;
+
+  float highlight = 0.0;
+  if (lightEnable > 0.5)
+  {
+    mat3 rotation = mat3(modelViewMatrix[0].xyz, modelViewMatrix[1].xyz, modelViewMatrix[2].xyz);
+    vec3 n = normalize(rotation * gl_Normal);
+    vec3 toSun = lighting[0] * vec3(1.0, -1.0, -1.0);
+    float facing = max(dot(toSun, n), 0.0);
+    light *= min(1.0, facing * lighting[1].x + lighting[1].y);
+    if (shininess >= 0.0 && facing > 0.0)
+    {
+      vec3 halfway = normalize(toSun + normalize(-eye));
+      highlight = specular * pow(max(dot(n, halfway), 0.0), shininess);
+    }
+  }
+  fsLightIntensity = light;
+  fsSpecularTerm = highlight;
+
+  fsFogFactor = fogIntensity * clamp(gl_Fog.start + length(eye) * gl_Fog.density, 0.0, 1.0);
+  fsViewZ = -eye.z;
+
+  gl_TexCoord[0] = gl_MultiTexCoord0;
+  fsSubTexture = subTexture;
+  fsTexParams = texParams;
+  fsTexFormat = texFormat;
+  fsTexMap = texMap;
+  fsTransLevel = transLevel;
+}
+)glsl";
+
+// Both fragment shaders are #version 120, these declarations, their own
+// FetchTexel() for the texture map(s), then the shared main().
+#define LEGACY3D_FRAGMENT_INPUTS R"glsl(
+uniform vec4 spotEllipse;        // centre x, y and half sizes, window pixels
+uniform vec2 spotRange;          // lit between these view depths
+uniform vec3 spotColor;
+uniform float mapSize;           // texture map edge in texels
+
+varying vec4 fsSubTexture;
+varying vec4 fsTexParams;
+varying float fsTexFormat;
+varying float fsTexMap;
+varying float fsTransLevel;
+varying vec3 fsLightIntensity;
+varying float fsSpecularTerm;
+varying float fsFogFactor;
+varying float fsViewZ;
+
+)glsl"
+
+#define LEGACY3D_FRAGMENT_MAIN R"glsl(
+// Two texel positions (xy and zw) inside the texture, repeated or mirrored,
+// as map coordinates.
+vec4 InTexture(vec4 texel)
+{
+  vec4 size = fsSubTexture.zwzw;
+  vec4 wrapped = mod(texel, size);
+  vec4 flip = fsTexParams.zwzw * mod(floor(texel / size), 2.0);
+  return (flip * (size - wrapped) + (vec4(1.0) - flip) * wrapped + fsSubTexture.xyxy) / mapSize;
+}
+
+vec4 Lerp(vec4 a, vec4 b, float t)
+{
+  return a + (b - a) * t;
+}
+
+void main(void)
+{
+  vec4 colour;
+  if (fsTexParams.x < 0.5)
+    colour = gl_Color;
+  else
+  {
+    // Bilinear filter by hand so that it wraps inside the texture.
+    vec2 base = gl_TexCoord[0].st - vec2(0.5);
+    vec2 frac = base - floor(base);
+    vec4 low = vec4(floor(base) + vec2(0.5), 0.0, 0.0);
+    low.zw = low.xy + vec2(1.0, 0.0);
+    vec4 high = low + vec4(0.0, 1.0, 0.0, 1.0);
+    low = InTexture(low);
+    high = InTexture(high);
+    vec4 bottom = Lerp(FetchTexel(low.xy), FetchTexel(low.zw), frac.s);
+    vec4 top = Lerp(FetchTexel(high.xy), FetchTexel(high.zw), frac.s);
+    colour = Lerp(bottom, top, frac.t);
+
+    if (fsTexParams.y > 0.5 && colour.a < 0.01)
+      discard;
+    if (fsTexFormat < 0.5)
+      colour.a = 1.0;   // T1RGB5: the T bit only cuts out
+  }
+
+  vec2 d = (gl_FragCoord.xy - spotEllipse.xy) / spotEllipse.zw;
+  float r2 = dot(d, d);
+  vec3 light = fsLightIntensity;
+  if (r2 <= 1.0 && fsViewZ >= spotRange.x && fsViewZ < spotRange.y)
+    light = fsLightIntensity + (1.0 - r2) * spotColor;
+  colour.rgb *= light;
+  colour.rgb += vec3(fsSpecularTerm);
+  colour.a *= fsTransLevel;
+  colour.rgb = mix(colour.rgb, gl_Fog.color.rgb, fsFogFactor);
+  gl_FragColor = colour;
+}
+)glsl"
+
+// One map holding every sheet.
+static constexpr char fragmentShaderSingleSheetSource[] = "#version 120\n" LEGACY3D_FRAGMENT_INPUTS R"glsl(
+// Legacy3D fragment shader, one texture map.
+
+uniform sampler2D textureMap;
+
+vec4 FetchTexel(vec2 at)
+{
+  return texture2D(textureMap, at);
+}
+)glsl" LEGACY3D_FRAGMENT_MAIN;
+
+// A map per sheet, picked by the texMap attribute.
+static constexpr char fragmentShaderMultiSheetSource[] = "#version 120\n" LEGACY3D_FRAGMENT_INPUTS R"glsl(
+// Legacy3D fragment shader, up to eight texture maps.
+
+uniform sampler2D textureMap0;
+uniform sampler2D textureMap1;
+uniform sampler2D textureMap2;
+uniform sampler2D textureMap3;
+uniform sampler2D textureMap4;
+uniform sampler2D textureMap5;
+uniform sampler2D textureMap6;
+uniform sampler2D textureMap7;
+
+vec4 FetchTexel(vec2 at)
+{
+  if (fsTexMap < 0.5) return texture2D(textureMap0, at);
+  if (fsTexMap < 1.5) return texture2D(textureMap1, at);
+  if (fsTexMap < 2.5) return texture2D(textureMap2, at);
+  if (fsTexMap < 3.5) return texture2D(textureMap3, at);
+  if (fsTexMap < 4.5) return texture2D(textureMap4, at);
+  if (fsTexMap < 5.5) return texture2D(textureMap5, at);
+  if (fsTexMap < 6.5) return texture2D(textureMap6, at);
+  return texture2D(textureMap7, at);
+}
+)glsl" LEGACY3D_FRAGMENT_MAIN;
+
+#undef LEGACY3D_FRAGMENT_INPUTS
+#undef LEGACY3D_FRAGMENT_MAIN
 
 } // Legacy3D
 
-#endif	// INCLUDED_SHADERS3D_H
+#endif  // INCLUDED_SHADERS3D_H

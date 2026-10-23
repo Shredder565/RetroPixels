@@ -1,150 +1,134 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// GLSLShader.cpp
+
 #include "GLSLShader.h"
+
+#include <algorithm>
 #include <cstdio>
+#include <string>
 
-GLSLShader::GLSLShader() 
+namespace
 {
-	Reset();
+  void PrintLog(GLuint object, bool isProgram)
+  {
+    GLint length = 0;
+    if (isProgram)
+      glGetProgramiv(object, GL_INFO_LOG_LENGTH, &length);
+    else
+      glGetShaderiv(object, GL_INFO_LOG_LENGTH, &length);
+    if (length <= 0)
+      return;
+    std::string text(size_t(length), '\0');
+    if (isProgram)
+      glGetProgramInfoLog(object, length, nullptr, &text[0]);
+    else
+      glGetShaderInfoLog(object, length, nullptr, &text[0]);
+    printf("%s\n", text.c_str());
+  }
 }
 
-GLSLShader::~GLSLShader() 
+GLSLShader::GLSLShader()
 {
-	UnloadShaders();
+  Clear();
 }
 
-GLSLShader::GLSLShader(GLSLShader&& other) noexcept
+GLSLShader::~GLSLShader()
 {
-	*this = std::move(other);
+  UnloadShaders();
 }
 
-GLSLShader& GLSLShader::operator=(GLSLShader&& other) noexcept
+GLSLShader::GLSLShader(GLSLShader &&other) noexcept
 {
-	if (this != &other) {
-		m_program = other.m_program;
-		m_vShader = other.m_vShader;
-		m_fShader = other.m_fShader;
-		uniformLocMap = other.uniformLocMap;
-		attribLocMap = other.attribLocMap;
-
-		std::copy(std::begin(other.uniformLoc), std::end(other.uniformLoc), std::begin(uniformLoc));
-		std::copy(std::begin(other.attribLoc), std::end(other.attribLoc), std::begin(attribLoc));
-
-		other.Reset();
-	}
-
-	return *this;
+  Clear();
+  TakeFrom(other);
 }
 
-bool GLSLShader::LoadShaders(const char* vertexShader, const char* fragmentShader) 
+GLSLShader &GLSLShader::operator=(GLSLShader &&other) noexcept
 {
-	m_program = glCreateProgram();
-	m_vShader = glCreateShader(GL_VERTEX_SHADER);
-	m_fShader = glCreateShader(GL_FRAGMENT_SHADER);
+  if (this != &other)
+    TakeFrom(other);
+  return *this;
+}
 
-	glShaderSource(m_vShader, 1, &vertexShader, NULL);
-	glShaderSource(m_fShader, 1, &fragmentShader, NULL);
+void GLSLShader::TakeFrom(GLSLShader &other)
+{
+  m_program = other.m_program;
+  m_vertex = other.m_vertex;
+  m_fragment = other.m_fragment;
+  uniformLocMap = other.uniformLocMap;
+  attribLocMap = other.attribLocMap;
+  std::copy(std::begin(other.uniformLoc), std::end(other.uniformLoc), uniformLoc);
+  std::copy(std::begin(other.attribLoc), std::end(other.attribLoc), attribLoc);
+  other.Clear();
+}
 
-	glCompileShader(m_vShader);
-	glCompileShader(m_fShader);
+void GLSLShader::Clear()
+{
+  m_program = m_vertex = m_fragment = 0;
+  std::fill(std::begin(uniformLoc), std::end(uniformLoc), -1);
+  std::fill(std::begin(attribLoc), std::end(attribLoc), -1);
+  uniformLocMap.clear();
+  attribLocMap.clear();
+}
 
-	glAttachShader(m_program, m_vShader);
-	glAttachShader(m_program, m_fShader);
+bool GLSLShader::LoadShaders(const char *vertexShader, const char *fragmentShader)
+{
+  m_program = glCreateProgram();
+  m_vertex = glCreateShader(GL_VERTEX_SHADER);
+  m_fragment = glCreateShader(GL_FRAGMENT_SHADER);
 
-	glLinkProgram(m_program);
+  glShaderSource(m_vertex, 1, &vertexShader, nullptr);
+  glShaderSource(m_fragment, 1, &fragmentShader, nullptr);
+  glCompileShader(m_vertex);
+  glCompileShader(m_fragment);
+  glAttachShader(m_program, m_vertex);
+  glAttachShader(m_program, m_fragment);
+  glLinkProgram(m_program);
 
-	PrintShaderInfoLog(m_vShader);
-	PrintShaderInfoLog(m_fShader);
-	PrintProgramInfoLog(m_program);
-
-	return true;
+  PrintLog(m_vertex, false);
+  PrintLog(m_fragment, false);
+  PrintLog(m_program, true);
+  return true;
 }
 
 void GLSLShader::UnloadShaders()
 {
-	if (m_program) {
-		glDeleteShader(m_vShader);
-		glDeleteShader(m_fShader);
-		glDeleteProgram(m_program);
-	}
-
-	m_vShader = 0;
-	m_fShader = 0;
-	m_program = 0;
+  if (m_program)
+  {
+    glDeleteShader(m_vertex);
+    glDeleteShader(m_fragment);
+    glDeleteProgram(m_program);
+  }
+  m_program = m_vertex = m_fragment = 0;
 }
 
-void GLSLShader::EnableShader() 
+void GLSLShader::EnableShader()
 {
-	glUseProgram(m_program);
+  glUseProgram(m_program);
 }
 
-void GLSLShader::DisableShader() 
+void GLSLShader::DisableShader()
 {
-	glUseProgram(0);
+  glUseProgram(0);
 }
 
-void GLSLShader::Reset()
+int GLSLShader::GetUniformLocation(const char *name)
 {
-	m_vShader = 0;
-	m_fShader = 0;
-	m_program = 0;
-
-	for (auto& i : uniformLoc) {
-		i = -1;
-	}
-
-	for (auto& i : attribLoc) {
-		i = -1;
-	}
-
-	uniformLocMap.clear();
-	attribLocMap.clear();
+  return glGetUniformLocation(m_program, name);
 }
 
-void GLSLShader::PrintShaderInfoLog(GLuint obj) 
+void GLSLShader::GetUniformLocationMap(const char *name)
 {
-	int infologLength = 0;
-	int charsWritten = 0;
-
-	glGetShaderiv(obj, GL_INFO_LOG_LENGTH, &infologLength);
-
-	if (infologLength > 0) {
-		char* infoLog = new char[infologLength];
-		glGetShaderInfoLog(obj, infologLength, &charsWritten, infoLog);
-		printf("%s\n", infoLog);
-		delete[] infoLog;
-	}
+  uniformLocMap[name] = GetUniformLocation(name);
 }
 
-void GLSLShader::PrintProgramInfoLog(GLuint obj) 
+int GLSLShader::GetAttributeLocation(const char *name)
 {
-	int infologLength = 0;
-	int charsWritten = 0;
-
-	glGetProgramiv(obj, GL_INFO_LOG_LENGTH, &infologLength);
-
-	if (infologLength > 0) {
-		char* infoLog = new char[infologLength];
-		glGetProgramInfoLog(obj, infologLength, &charsWritten, infoLog);
-		printf("%s\n", infoLog);
-		delete[] infoLog;
-	}
+  return glGetAttribLocation(m_program, name);
 }
 
-int GLSLShader::GetUniformLocation(const char* str)
+void GLSLShader::GetAttributeLocationMap(const char *name)
 {
-	return glGetUniformLocation(m_program, str);
-}
-
-void GLSLShader::GetUniformLocationMap(const char* str)
-{
-	uniformLocMap[str] = GetUniformLocation(str);
-}
-
-int GLSLShader::GetAttributeLocation(const char* str)
-{
-	return glGetAttribLocation(m_program, str);
-}
-
-void GLSLShader::GetAttributeLocationMap(const char* str)
-{
-	attribLocMap[str] = GetAttributeLocation(str);
+  attribLocMap[name] = GetAttributeLocation(name);
 }

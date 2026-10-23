@@ -1,339 +1,204 @@
-#include "Mat4.h"
-#include <cmath>
-#include <utility>
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Mat4.cpp
 
-#ifndef M_PI
-#define M_PI 3.1415926535897932384626433832795
-#endif
+#include "Mat4.h"
+
+#include <cmath>
+#include <cstring>
+#include <utility>
 
 namespace New3D {
 
+namespace
+{
+  constexpr double kPi = 3.14159265358979323846;
+
+  // Element (row, col) of a column-major matrix.
+  inline int At(int row, int col) { return col * 4 + row; }
+
+  void Identity(float m[16])
+  {
+    for (int i = 0; i < 16; i++)
+      m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+  }
+}
+
 Mat4::Mat4()
 {
-	LoadIdentity();
+  LoadIdentity();
 }
 
 void Mat4::LoadIdentity()
 {
-	float *m = currentMatrix;
-
-	m[0] = 1.f; m[4] = 0.f; m[8 ] = 0.f; m[12] = 0.f;
-	m[1] = 0.f; m[5] = 1.f; m[9 ] = 0.f; m[13] = 0.f;
-	m[2] = 0.f; m[6] = 0.f; m[10] = 1.f; m[14] = 0.f;
-	m[3] = 0.f; m[7] = 0.f; m[11] = 0.f; m[15] = 1.f;
+  Identity(currentMatrix);
 }
 
-void Mat4::MultiMatrices(const float a[16], const float b[16], float r[16]) 
+// out = a * b. out may be the same array as a: each output row only depends
+// on the same row of a, which is read before it is written.
+void Mat4::Multiply(const float a[16], const float b[16], float out[16])
 {
-#define A(row,col)  a[(col<<2)+row]
-#define B(row,col)  b[(col<<2)+row]
-#define P(row,col)  r[(col<<2)+row]
-
-	for (int i = 0; i < 4; i++) {
-		const float ai0 = A(i, 0), ai1 = A(i, 1), ai2 = A(i, 2), ai3 = A(i, 3);
-		P(i, 0) = ai0 * B(0, 0) + ai1 * B(1, 0) + ai2 * B(2, 0) + ai3 * B(3, 0);
-		P(i, 1) = ai0 * B(0, 1) + ai1 * B(1, 1) + ai2 * B(2, 1) + ai3 * B(3, 1);
-		P(i, 2) = ai0 * B(0, 2) + ai1 * B(1, 2) + ai2 * B(2, 2) + ai3 * B(3, 2);
-		P(i, 3) = ai0 * B(0, 3) + ai1 * B(1, 3) + ai2 * B(2, 3) + ai3 * B(3, 3);
-	}
-
-#undef A
-#undef B
-#undef p
+  for (int row = 0; row < 4; row++)
+  {
+    const float r0 = a[At(row, 0)];
+    const float r1 = a[At(row, 1)];
+    const float r2 = a[At(row, 2)];
+    const float r3 = a[At(row, 3)];
+    for (int col = 0; col < 4; col++)
+      out[At(row, col)] = r0 * b[At(0, col)] + r1 * b[At(1, col)] + r2 * b[At(2, col)] + r3 * b[At(3, col)];
+  }
 }
 
-void Mat4::Copy(const float in[16], float out[16])
+void Mat4::Apply(const float m[16])
 {
-	for (int i = 0; i<16; i++) {
-		out[i] = in[i];
-	}
+  Multiply(currentMatrix, m, currentMatrix);
 }
 
-void Mat4::Translate(float x, float y, float z) 
+void Mat4::Translate(float x, float y, float z)
 {
-	//==========
-	float m[16];
-	//==========
-
-	m[0] = 1.f;
-	m[1] = 0.f;
-	m[2] = 0.f;
-	m[3] = 0.f;
-
-	m[4] = 0.f;
-	m[5] = 1.f;
-	m[6] = 0.f;
-	m[7] = 0.f;
-
-	m[8] = 0.f;
-	m[9] = 0.f;
-	m[10] = 1.f;
-	m[11] = 0.f;
-
-	m[12] = x;
-	m[13] = y;
-	m[14] = z;
-	m[15] = 1.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  float m[16];
+  Identity(m);
+  m[12] = x;
+  m[13] = y;
+  m[14] = z;
+  Apply(m);
 }
 
-void Mat4::Scale(float x, float y, float z) 
+void Mat4::Scale(float x, float y, float z)
 {
-	//==========
-	float m[16];
-	//==========
-
-	m[0] = x;
-	m[1] = 0.f;
-	m[2] = 0.f;
-	m[3] = 0.f;
-
-	m[4] = 0.f;
-	m[5] = y;
-	m[6] = 0.f;
-	m[7] = 0.f;
-
-	m[8] = 0.f;
-	m[9] = 0.f;
-	m[10] = z;
-	m[11] = 0.f;
-
-	m[12] = 0.f;
-	m[13] = 0.f;
-	m[14] = 0.f;
-	m[15] = 1.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  float m[16];
+  Identity(m);
+  m[0] = x;
+  m[5] = y;
+  m[10] = z;
+  Apply(m);
 }
 
-void Mat4::Rotate(float angle, float x, float y, float z) 
+void Mat4::Rotate(float angleDegrees, float x, float y, float z)
 {
-	// normalise vector first
-	{
-		//========
-		float inv_len;
-		//========
+  const float inv = 1.0f / std::sqrt(x * x + y * y + z * z);
+  x *= inv;
+  y *= inv;
+  z *= inv;
 
-		inv_len = 1.f/std::sqrt(x * x + y * y + z * z);
-		
-		x *= inv_len;
-		y *= inv_len;
-		z *= inv_len;
-	}
+  const float rad = angleDegrees * float(kPi / 180.0);
+  const float c = std::cos(rad);
+  const float s = std::sin(rad);
+  const float t = 1.0f - c;
 
-	float c = std::cos(angle*(float)(M_PI / 180.0));
-	float s = std::sin(angle*(float)(M_PI / 180.0));
-
-	float m[16];
-	m[0] = (x*x) * (1.f - c) + c;
-	m[1] = (y*x) * (1.f - c) + (z*s);
-	m[2] = (x*z) * (1.f - c) - (y*s);
-	m[3] = 0.f;
-
-	m[4] = (x*y) * (1.f - c) - (z*s);
-	m[5] = (y*y) * (1.f - c) + c;
-	m[6] = (y*z) * (1.f - c) + (x*s);
-	m[7] = 0.f;
-
-	m[8] = (x*z) * (1.f - c) + (y*s);
-	m[9] = (y*z) * (1.f - c) - (x*s);
-	m[10] = (z*z) * (1.f - c) + c;
-	m[11] = 0.f;
-
-	m[12] = 0.f;
-	m[13] = 0.f;
-	m[14] = 0.f;
-	m[15] = 1.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  float m[16];
+  Identity(m);
+  m[At(0, 0)] = (x * x) * t + c;
+  m[At(1, 0)] = (y * x) * t + (z * s);
+  m[At(2, 0)] = (x * z) * t - (y * s);
+  m[At(0, 1)] = (x * y) * t - (z * s);
+  m[At(1, 1)] = (y * y) * t + c;
+  m[At(2, 1)] = (y * z) * t + (x * s);
+  m[At(0, 2)] = (x * z) * t + (y * s);
+  m[At(1, 2)] = (y * z) * t - (x * s);
+  m[At(2, 2)] = (z * z) * t + c;
+  Apply(m);
 }
 
 void Mat4::Frustum(float left, float right, float bottom, float top, float nearVal, float farVal)
 {
-	float x = 2.0F / (right - left);
-	float y = 2.0F / (top - bottom);
-	float a = (right + left) / (right - left);
-	float b = (top + bottom) / (top - bottom);
-	float c = -(farVal + nearVal) / (farVal - nearVal);
-	float d = -(2.0F * farVal * nearVal) / (farVal - nearVal);
-
-	float m[16];
-	m[0] = x;
-	m[1] = 0.f;
-	m[2] = 0.f;
-	m[3] = 0.f;
-
-	m[4] = 0.f;
-	m[5] = y;
-	m[6] = 0.f;
-	m[7] = 0.f;
-
-	m[8] = a;
-	m[9] = b;
-	m[10] = c;
-	m[11] = -1.f;
-
-	m[12] = 0.f;
-	m[13] = 0.f;
-	m[14] = d;
-	m[15] = 0.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  float m[16] = {};
+  m[0] = 2.0f / (right - left);
+  m[5] = 2.0f / (top - bottom);
+  m[8] = (right + left) / (right - left);
+  m[9] = (top + bottom) / (top - bottom);
+  m[10] = -(farVal + nearVal) / (farVal - nearVal);
+  m[11] = -1.0f;
+  m[14] = -(2.0f * farVal * nearVal) / (farVal - nearVal);
+  Apply(m);
 }
 
-void Mat4::FrustumRZ(float left, float right, float bottom, float top, float nearVal) 
+// Depth comes out as near / -z: 1 at the near plane, falling towards 0 at
+// infinity, for use with a "greater" depth test.
+void Mat4::FrustumRZ(float left, float right, float bottom, float top, float nearVal)
 {
-	float x = 2.0F / (right - left);
-	float y = 2.0F / (top - bottom);
-	float a = (right + left) / (right - left);
-	float b = (top + bottom) / (top - bottom);
-
-	float m[16];
-	m[0] = x;
-	m[1] = 0.f;
-	m[2] = 0.f;
-	m[3] = 0.f;
-
-	m[4] = 0.f;
-	m[5] = y;
-	m[6] = 0.f;
-	m[7] = 0.f;
-
-	m[8] = a;
-	m[9] = b;
-	m[10] = 0.f;
-	m[11] = -1.f;
-
-	m[12] = 0.f;
-	m[13] = 0.f;
-	m[14] = nearVal;
-	m[15] = 0.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  float m[16] = {};
+  m[0] = 2.0f / (right - left);
+  m[5] = 2.0f / (top - bottom);
+  m[8] = (right + left) / (right - left);
+  m[9] = (top + bottom) / (top - bottom);
+  m[11] = -1.0f;
+  m[14] = nearVal;
+  Apply(m);
 }
 
-void Mat4::Perspective(float fovy, float aspect, float zNear, float zFar)
+void Mat4::Perspective(float fovyDegrees, float aspect, float zNear, float zFar)
 {
-	float ymax = tanf(fovy * (float)(M_PI / 360.0));
-	float xmax = ymax * aspect;
-
-	Frustum(-xmax, xmax, -ymax, ymax, zNear, zFar);
+  const float halfHeight = std::tan(fovyDegrees * float(kPi / 360.0));
+  const float halfWidth = halfHeight * aspect;
+  Frustum(-halfWidth, halfWidth, -halfHeight, halfHeight, zNear, zFar);
 }
 
 void Mat4::Ortho(float left, float right, float bottom, float top, float nearVal, float farVal)
 {
-	float tx = -(right + left) / (right - left);
-	float ty = -(top + bottom) / (top - bottom);
-	float tz = -(farVal + nearVal) / (farVal - nearVal);
-
-	float m[16];
-	m[0] = 2.f/(right-left);
-	m[1] = 0.f;
-	m[2] = 0.f;
-	m[3] = 0.f;
-
-	m[4] = 0.f;
-	m[5] = 2.f/(top-bottom);
-	m[6] = 0.f;
-	m[7] = 0.f;
-
-	m[8] = 0.f;
-	m[9] = 0.f;
-	m[10] = -2.f/(farVal-nearVal);
-	m[11] = 0.f;
-
-	m[12] = tx;
-	m[13] = ty;
-	m[14] = tz;
-	m[15] = 1.f;
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
-}
-
-void Mat4::Transpose(float m[16]) 
-{
-	std::swap(m[1], m[4]);
-	std::swap(m[2], m[8]);
-	std::swap(m[3], m[12]);
-	std::swap(m[6], m[9]);
-	std::swap(m[7], m[13]);
-	std::swap(m[11], m[14]);
+  float m[16];
+  Identity(m);
+  m[0] = 2.0f / (right - left);
+  m[5] = 2.0f / (top - bottom);
+  m[10] = -2.0f / (farVal - nearVal);
+  m[12] = -(right + left) / (right - left);
+  m[13] = -(top + bottom) / (top - bottom);
+  m[14] = -(farVal + nearVal) / (farVal - nearVal);
+  Apply(m);
 }
 
 void Mat4::MultMatrix(const float *m)
 {
-	if (!m) {
-		return;
-	}
-
-	Mat4::MultiMatrices(currentMatrix, m, currentMatrix);
+  if (m)
+    Apply(m);
 }
 
 void Mat4::LoadMatrix(const float *m)
 {
-	if (!m) {
-		return; 
-	}
-
-	Mat4::Copy(m, currentMatrix);
+  if (m)
+    std::memcpy(currentMatrix, m, sizeof(currentMatrix));
 }
 
 void Mat4::LoadTransposeMatrix(const float *m)
 {
-	if (!m) {
-		return;
-	}
-
-	Mat4::LoadMatrix(m);
-	Mat4::Transpose(currentMatrix);
+  if (!m)
+    return;
+  for (int row = 0; row < 4; row++)
+    for (int col = 0; col < 4; col++)
+      currentMatrix[At(row, col)] = m[At(col, row)];
 }
 
 void Mat4::MultTransposeMatrix(const float *m)
 {
-	if (!m) {
-		return;
-	}
-
-	//=============
-	float copy[16];
-	//=============
-
-	Mat4::Copy(m, copy);
-	Mat4::Transpose(copy);
-	Mat4::MultMatrix(copy);
+  if (!m)
+    return;
+  float t[16];
+  for (int row = 0; row < 4; row++)
+    for (int col = 0; col < 4; col++)
+      t[At(row, col)] = m[At(col, row)];
+  Apply(t);
 }
 
 void Mat4::PushMatrix()
 {
-	//==============
-	Mat4Container m;
-	//==============
-
-	if (m_vMat4.size() > 128) {
-		return;	// check for overflow
-	}
-
-	Mat4::Copy(currentMatrix, m.mat);
-
-	m_vMat4.push_back(m);
+  if (m_saved.size() > 128)
+    return;
+  std::array<float, 16> copy;
+  std::memcpy(copy.data(), currentMatrix, sizeof(currentMatrix));
+  m_saved.push_back(copy);
 }
 
 void Mat4::PopMatrix()
 {
-	if (m_vMat4.empty()) {
-		return;	// check for underflow
-	}
-
-	Mat4::Copy(m_vMat4.back().mat, currentMatrix);
-
-	m_vMat4.pop_back();
+  if (m_saved.empty())
+    return;
+  std::memcpy(currentMatrix, m_saved.back().data(), sizeof(currentMatrix));
+  m_saved.pop_back();
 }
 
-// flush the matrix stack
 void Mat4::Release()
 {
-	m_vMat4.clear();
+  m_saved.clear();
 }
 
-}// New3D
+} // New3D

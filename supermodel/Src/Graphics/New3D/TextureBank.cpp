@@ -1,71 +1,74 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// TextureBank.cpp
+
 #include "TextureBank.h"
 
-New3D::TextureBank::TextureBank()
+namespace New3D {
+
+namespace
 {
-	glGenTextures(1, &m_texID);
-	glBindTexture(GL_TEXTURE_2D, m_texID);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-
-	int width = 2048;
-	int height = 1024;
-	int level = 0;
-
-	while (width>=1 && height>=1) {
-
-		glTexImage2D(GL_TEXTURE_2D, level, GL_R16UI, width, height, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, nullptr);	// allocate storage
-
-		width	= (width > 1) ? width / 2 : 1;
-		height	= (height > 1) ? height / 2 : 1;
-
-		level++;
-
-		if (width == 1 && height == 1) {
-			glTexImage2D(GL_TEXTURE_2D, level, GL_R16UI, width, height, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, nullptr);	// allocate storage
-			break;
-		}
-	}
-
-	m_numLevels = level;
+  // Where mip level n starts inside the sheet.
+  constexpr int kLevelX[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
+  constexpr int kLevelY[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023, 1023 };
 }
 
-New3D::TextureBank::~TextureBank()
+TextureBank::TextureBank()
 {
-	if (m_texID) {
-		glDeleteTextures(1, &m_texID);
-		m_texID = 0;
-	}
+  glGenTextures(1, &m_texture);
+  glBindTexture(GL_TEXTURE_2D, m_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+
+  // Full mip chain down to 1x1 (12 levels for 2048x1024). Levels 0-10 hold
+  // the sheet's mipmaps.
+  int w = 2048, h = 1024, level = 0;
+  for (;;)
+  {
+    glTexImage2D(GL_TEXTURE_2D, level, GL_R16UI, w, h, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, nullptr);
+    if (w == 1 && h == 1)
+      break;
+    w = (w > 1) ? w / 2 : 1;
+    h = (h > 1) ? h / 2 : 1;
+    level++;
+  }
+  m_levels = level;   // levels below the last (1x1) one
 }
 
-void New3D::TextureBank::AttachMemory(const UINT16* textureRam)
+TextureBank::~TextureBank()
 {
-	m_textureRam = textureRam;
+  if (m_texture)
+    glDeleteTextures(1, &m_texture);
+  m_texture = 0;
 }
 
-void New3D::TextureBank::Bind()
+void TextureBank::AttachMemory(const uint16_t *sheet)
 {
-	glBindTexture(GL_TEXTURE_2D, m_texID);
+  m_sheet = sheet;
 }
 
-void New3D::TextureBank::UploadTextures(int level, int x, int y, int width, int height)
+void TextureBank::Bind()
 {
-	glBindTexture(GL_TEXTURE_2D, m_texID);
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
-
-	static constexpr int mipXBase[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
-	static constexpr int mipYBase[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023 };
-
-	int subX = x - mipXBase[level];
-	int subY = y - mipYBase[level];
-
-	for (int i = 0; i < height; i++) {
-		glTexSubImage2D(GL_TEXTURE_2D, level, subX, subY + i, width, 1, GL_RED_INTEGER, GL_UNSIGNED_SHORT, m_textureRam + ((y + i) * 2048) + x);
-	}
+  glBindTexture(GL_TEXTURE_2D, m_texture);
 }
 
-int New3D::TextureBank::GetNumberOfLevels() const
+void TextureBank::UploadTextures(int level, int x, int y, int width, int height)
 {
-	return m_numLevels;
+  glBindTexture(GL_TEXTURE_2D, m_texture);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+  const int toX = x - kLevelX[level];
+  const int toY = y - kLevelY[level];
+  // One row at a time: rows that fall outside the level are rejected by GL
+  // on their own without losing the others.
+  for (int row = 0; row < height; row++)
+    glTexSubImage2D(GL_TEXTURE_2D, level, toX, toY + row, width, 1, GL_RED_INTEGER, GL_UNSIGNED_SHORT, m_sheet + size_t(y + row) * 2048 + x);
 }
+
+int TextureBank::GetNumberOfLevels() const
+{
+  return m_levels;
+}
+
+} // New3D

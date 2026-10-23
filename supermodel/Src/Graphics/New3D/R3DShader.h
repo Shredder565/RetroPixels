@@ -1,138 +1,91 @@
-#ifndef _R3DSHADER_H_
-#define _R3DSHADER_H_
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// R3DShader.h
+//
+// The shader program that draws Real3D polygons, and the uniform state for
+// viewports, models and draw groups. Uniforms are only re-sent when their
+// value changes within a pass; stencil state for layered polygons and the
+// line-of-sight bit is set here too.
+
+#ifndef INCLUDED_NEW3D_R3DSHADER_H
+#define INCLUDED_NEW3D_R3DSHADER_H
 
 #include <GL/glew.h>
-#include "Util/NewConfig.h"
-#include "Model.h"
+
 #include <map>
 #include <string>
+
+#include "Util/NewConfig.h"
+#include "Model.h"
 
 namespace New3D {
 
 class R3DShader
 {
 public:
-	R3DShader(const Util::Config::Node &config);
+  explicit R3DShader(const Util::Config::Node &config);
 
-	bool	LoadShader			(const char* vertexShader = nullptr, const char* fragmentShader = nullptr);
-	void	UnloadShader		();
-	void	SetMeshUniforms		(const Mesh* m);
-	void	SetModelStates		(const Model* model);
-	void	SetViewportUniforms	(const Viewport *vp);
-	void	Start				();
-	void	SetShader			(bool enable = true);
-	GLint	GetVertexAttribPos	(const std::string& attrib);
-	void	DiscardAlpha		(bool discard);				// use to remove alpha from texture alpha only polys for 1st pass
-	void	SetLayer			(Layer layer);
+  bool LoadShader();
+  void UnloadShader();
+
+  void SetShader(bool enable);          // enabling also forgets all cached uniform values
+  void SetViewportUniforms(const ViewportState *vp);
+  void SetModelStates(const ModelInstance *model);
+  void SetMeshUniforms(const DrawGroup *group);
+  void DiscardAlpha(bool opaquePass);   // texture-alpha polygons: opaque pass keeps solid texels only
+  void SetLayer(Layer layer);
+
+  GLint GetVertexAttribPos(const std::string &name);
 
 private:
+  enum class Stencil { lineOfSight, layered };
+  void ApplyStencil(Stencil mode);
+  void Forget();
+  GLint U(const char *name) const;
 
-	void PrintShaderResult(GLuint shader);
-	void PrintProgramResult(GLuint program);
+  const Util::Config::Node &m_config;
 
-	// run-time config
-	const Util::Config::Node &m_config;
+  GLuint m_program = 0;
+  GLuint m_vs = 0;
+  GLuint m_gs = 0;
+  GLuint m_fs = 0;
 
-	// shader IDs
-	GLuint m_shaderProgram;
-	GLuint m_vertexShader;
-	GLuint m_geoShader;
-	GLuint m_fragmentShader;
+  std::map<std::string, GLint> m_uniform;
+  std::map<std::string, GLint> m_attrib;
 
-	// mesh uniform locations
-	GLint m_locTextureBank[2];		// 2 banks
-	GLint m_locTexture1Enabled;		// base texture
-	GLint m_locTexture2Enabled;		// micro texture
-	GLint m_locTexturePage;
-	GLint m_locTextureAlpha;
-	GLint m_locAlphaTest;
-	GLint m_locMicroTexMinLOD;
-	GLint m_locMicroTexID;
-	GLint m_locBaseTexInfo;
-	GLint m_locBaseTexType;
-	GLint m_locTextureInverted;
-	GLint m_locTexWrapMode;
-	GLint m_locTranslatorMap;
-	GLint m_locColourLayer;
-	GLint m_locPolyAlpha;
+  // Uniform locations used for every draw.
+  struct
+  {
+    GLint sheet0, sheet1, texEnabled, microEnabled, microMinLOD, microID, texRect, texFormat;
+    GLint texInvert, texAlpha, contour, opaquePass, texWrap, texPage, outputLayer;
+    GLint fogIntensity, lit, shininess, specular, specularValue, fixedShading, smoothShading, translatorMap;
+    GLint modelScale, nodeAlpha, modelMat;
+    GLint fogDensity, fogStart, fogColour, fogAttenuation, fogAmbient, lighting, sunClamp, intensityClamp;
+    GLint spotShape, spotRange, spotColour, spotFogColour, projMat, hardwareStep, cota;
+  } m_loc;
 
-	// cached mesh values
-	bool	m_textured1;
-	bool	m_textured2;
-	bool	m_textureAlpha;		// use alpha in texture
-	bool	m_alphaTest;		// discard fragment based on alpha (ogl does this with fixed function)
-	float	m_fogIntensity;
-	bool	m_lightEnabled;
-	float	m_shininess;
-	float	m_specularValue;
-	bool	m_specularEnabled;
-	bool	m_fixedShading;
-	bool	m_smoothShading;
-	bool	m_translatorMap;
-	bool	m_polyAlpha;
-	int		m_texturePage;
+  // Values last sent in this pass (valid when m_known is set).
+  struct Sent
+  {
+    bool textured, micro, invert, texAlpha, contour, lit, specular, fixedShading, smoothShading, translatorMap;
+    bool layered, noLosReturn;
+    int page, microID, format, wrapU, wrapV;
+    int rect[4];
+    bool rectValid;
+    float microMinLOD, fogIntensity, shininess, specularValue;
+  } m_sent;
+  bool m_groupKnown = false;
 
-	bool	m_layered;
-	bool	m_noLosReturn;
-	float	m_microTexMinLOD;
-	int		m_microTexID;
-	int		m_baseTexInfo[4];
-	int		m_baseTexType;
-	int		m_texWrapMode[2];
-	bool	m_textureInverted;
+  bool m_modelKnown = false;
+  float m_sentScale = 1.0f;
+  float m_sentAlpha = 1.0f;
 
-	// cached model values
-	float	m_modelScale;
-	float	m_nodeAlpha;
-	int		m_transX;
-	int		m_transY;
-	int		m_transPage;
-
-	// are our cache values dirty
-	bool	m_dirtyMesh;
-	bool	m_dirtyModel;
-
-	// viewport uniform locations
-	GLint m_locFogIntensity;
-	GLint m_locFogDensity;
-	GLint m_locFogStart;
-	GLint m_locFogColour;
-	GLint m_locFogAttenuation;
-	GLint m_locFogAmbient;
-	GLint m_locProjMat;
-	GLint m_locCota;
-
-	// lighting / other
-	GLint m_locLighting;
-	GLint m_locLightEnabled;
-	GLint m_locSunClamp;
-	GLint m_locIntensityClamp;
-	GLint m_locShininess;
-	GLint m_locSpecularValue;
-	GLint m_locSpecularEnabled;
-	GLint m_locFixedShading;
-	GLint m_locSmoothShading;
-
-	GLint m_locSpotEllipse;
-	GLint m_locSpotRange;
-	GLint m_locSpotColor;
-	GLint m_locSpotFogColor;
-
-	// model uniforms
-	GLint m_locModelScale;
-	GLint m_locNodeAlpha;
-	GLint m_locModelMat;
-
-	// global uniforms
-	GLint m_locHardwareStep;
-	GLint m_locDiscardAlpha;
-
-	// vertex attribute position cache
-	std::map<std::string, GLint> m_vertexLocCache;
-
+  // Current model's texture offset and page flip.
+  int m_offsetX = 0;
+  int m_offsetY = 0;
+  int m_pageFlip = 0;
 };
-
 
 } // New3D
 
-#endif
+#endif  // INCLUDED_NEW3D_R3DSHADER_H

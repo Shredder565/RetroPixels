@@ -1,28 +1,32 @@
-#ifndef _FBO_H_
-#define _FBO_H_
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// FBO.h
+//
+// An off-screen frame buffer with one RGBA8 colour texture (linear
+// filtering, clamped edges), used as a render target that is later drawn
+// from.
+
+#ifndef INCLUDED_FBO_H
+#define INCLUDED_FBO_H
 
 #include <GL/glew.h>
 
 class FBO
 {
 public:
+  FBO() = default;
 
-	FBO();
-
-	bool	Create(int width, int height);
-	void	Destroy();
-	void	BindTexture();
-	void	Set();
-	void	Disable();
-	GLuint	GetFBOID();
-	GLuint	GetTextureID();
+  bool Create(int width, int height);   // true if the frame buffer is complete
+  void Destroy();
+  void BindTexture();                   // binds the colour texture to GL_TEXTURE_2D
+  void Set();                           // draw into this frame buffer
+  void Disable();                       // back to the default frame buffer
+  GLuint GetFBOID();
+  GLuint GetTextureID();
 
 private:
-
-	void	CreateTexture(int width, int height);
-
-	GLuint m_frameBufferID;
-	GLuint m_textureID;
+  GLuint m_fbo = 0;
+  GLuint m_colour = 0;
 };
 
-#endif
+#endif  // INCLUDED_FBO_H

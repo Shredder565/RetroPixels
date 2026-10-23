@@ -1,75 +1,53 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Model.cpp
+
 #include "Model.h"
 
 namespace New3D {
 
-NodeAttributes::NodeAttributes()
+namespace
 {
-	currentTexOffsetX		= 0;
-	currentTexOffsetY		= 0;
-	currentPage				= 0;
-	currentModelScale		= 1.0f;
-	currentModelAlpha		= 1.0;
-	currentDisableCulling	= false;
+  constexpr size_t kMaxSavedLevels = 128;
 }
 
-bool NodeAttributes::Push()
+NodeStateStack::NodeStateStack()
 {
-	//=============
-	NodeAttribs na;
-	//=============
-
-	// check for overflow
-	if (m_vecAttribs.size() >= 128) {
-		return false;
-	}
-
-	na.page				= currentPage;
-	na.texOffsetX		= currentTexOffsetX;
-	na.texOffsetY		= currentTexOffsetY;
-	na.modelScale		= currentModelScale;
-	na.modelAlpha		= currentModelAlpha;
-	na.disableCulling	= currentDisableCulling;
-
-	m_vecAttribs.emplace_back(na);
-
-	return true;
+  Reset();
 }
 
-bool NodeAttributes::Pop()
+bool NodeStateStack::Push()
 {
-	if (m_vecAttribs.empty()) {
-		return false;	// check for underflow
-	}
-
-	auto &last = m_vecAttribs.back();
-
-	currentPage				= last.page;
-	currentTexOffsetX		= last.texOffsetX;
-	currentTexOffsetY		= last.texOffsetY;
-	currentModelScale		= last.modelScale;
-	currentModelAlpha		= last.modelAlpha;
-	currentDisableCulling	= last.disableCulling;
-
-	m_vecAttribs.pop_back();
-
-	return true;
+  if (m_saved.size() >= kMaxSavedLevels)
+    return false;
+  m_saved.push_back({ texOffsetX, texOffsetY, page, modelScale, modelAlpha, disableCulling });
+  return true;
 }
 
-bool NodeAttributes::StackLimit() const
+bool NodeStateStack::Pop()
 {
-	return m_vecAttribs.size() >= 1024;
+  if (m_saved.empty())
+    return false;
+  const Saved &s = m_saved.back();
+  texOffsetX = s.texOffsetX;
+  texOffsetY = s.texOffsetY;
+  page = s.page;
+  modelScale = s.modelScale;
+  modelAlpha = s.modelAlpha;
+  disableCulling = s.disableCulling;
+  m_saved.pop_back();
+  return true;
 }
 
-void NodeAttributes::Reset()
+void NodeStateStack::Reset()
 {
-	currentPage				= 0;
-	currentTexOffsetX		= 0;
-	currentTexOffsetY		= 0;
-	currentModelScale		= 1.0f;
-	currentModelAlpha		= 1.0f;
-	currentDisableCulling	= false;
-
-	m_vecAttribs.clear();
+  texOffsetX = 0;
+  texOffsetY = 0;
+  page = 0;
+  modelScale = 1.0f;
+  modelAlpha = 1.0f;
+  disableCulling = false;
+  m_saved.clear();
 }
 
 } // New3D

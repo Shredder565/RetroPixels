@@ -1,58 +1,40 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2026 The Supermodel Team
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// R3DScrollFog.h
+//
+// Fills the current viewport with fog colour (with the spotlight-on-fog
+// glow), written straight into the 3D frame buffer. Its alpha decides how
+// much of the 2D background shows through.
 
-#ifndef _R3DSCROLLFOG_H_
-#define _R3DSCROLLFOG_H_
+#ifndef INCLUDED_NEW3D_R3DSCROLLFOG_H
+#define INCLUDED_NEW3D_R3DSCROLLFOG_H
 
 #include <GL/glew.h>
 
 namespace New3D {
 
-	class R3DScrollFog
-	{
-	public:
+class R3DScrollFog
+{
+public:
+  R3DScrollFog();
+  ~R3DScrollFog();
 
-		R3DScrollFog();
-		~R3DScrollFog();
+  // rgba: fog colour and coverage. attenuation: spotlight-on-fog strength,
+  // ambient: fog colour scale, spotRGB / spotEllipse: the spotlight.
+  void DrawScrollFog(float rgba[4], float attenuation, float ambient, float spotRGB[3], float spotEllipse[4]);
 
-		void DrawScrollFog(float rbga[4], float attenuation, float ambient, float spotRGB[3], float spotEllipse[4]);
+private:
+  GLuint m_program = 0;
+  GLuint m_vs = 0;
+  GLuint m_fs = 0;
+  GLint m_uColour = -1;
+  GLint m_uAttenuation = -1;
+  GLint m_uAmbient = -1;
+  GLint m_uSpotColour = -1;
+  GLint m_uSpotEllipse = -1;
+  GLuint m_vao = 0;
+};
 
-	private:
+} // New3D
 
-		void AllocResources();
-		void DeallocResources();
-
-		GLuint m_shaderProgram;
-		GLuint m_vertexShader;
-		GLuint m_fragmentShader;
-
-		GLint m_locFogColour;
-		GLint m_locFogAttenuation;
-		GLint m_locFogAmbient;
-		GLint m_locSpotFogColor;
-		GLint m_locSpotEllipse;
-
-		GLuint m_vao;
-	};
-
-}
-
-#endif
+#endif  // INCLUDED_NEW3D_R3DSCROLLFOG_H

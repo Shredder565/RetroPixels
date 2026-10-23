@@ -1,2 +1,7 @@
-Shader source files go here. Completed versions of the shader files should be
-copied into Src/Graphics/Shaders3D.h and Src/Graphics/Shaders2D.h.
+Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+
+Reference GLSL files. The renderers do not read this folder: the programs
+they use are built in (Legacy3D/Shaders3D.h, Graphics/Shaders2D.h). Vertex,
+Fragment and Fragment_MultiSheet are copies of the built-in Legacy3D
+programs; Fragment_NoSpotlight and Fragment_Flat are simpler variants. Any
+of them can be loaded with the VertexShader / FragmentShader settings.

@@ -1,33 +1,40 @@
-#pragma once
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// TextureBank.h
+//
+// One 2048x1024 sheet of Real3D texture RAM as an unsigned 16-bit integer
+// texture. The sheet's mipmaps live inside texture RAM itself (level n at a
+// fixed corner of the sheet); here each one is copied into the matching
+// OpenGL mip level so shaders can fetch texels directly. The shaders decode
+// the texel formats.
 
-#ifndef _TEXTUREBANK_H_
-#define _TEXTUREBANK_H_
+#ifndef INCLUDED_NEW3D_TEXTUREBANK_H
+#define INCLUDED_NEW3D_TEXTUREBANK_H
 
-#include "Types.h"
 #include <GL/glew.h>
-
-// texture banks are a fixed size
-// 2048x1024 pixels, each pixel is 16bits in size
+#include <cstdint>
 
 namespace New3D {
 
-	class TextureBank
-	{
-	public:
-		TextureBank();
-		~TextureBank();
+class TextureBank
+{
+public:
+  TextureBank();
+  ~TextureBank();
 
-		void AttachMemory(const UINT16* textureRam);
-		void Bind();
-		void UploadTextures(int level, int x, int y, int width, int height);
-		int GetNumberOfLevels() const;
+  void AttachMemory(const uint16_t *sheet);   // first texel of this sheet in texture RAM (2048 texels per row)
+  void Bind();
+  // Copies a rectangle given in texture RAM coordinates (x, y within the
+  // sheet) into mip level 'level'.
+  void UploadTextures(int level, int x, int y, int width, int height);
+  int GetNumberOfLevels() const;
 
-	private:
-		const UINT16* m_textureRam = nullptr;
-		GLuint m_texID = 0;
-		int m_numLevels = 0;
-	};
+private:
+  const uint16_t *m_sheet = nullptr;
+  GLuint m_texture = 0;
+  int m_levels = 0;
+};
 
-}
+} // New3D
 
-#endif
+#endif  // INCLUDED_NEW3D_TEXTUREBANK_H

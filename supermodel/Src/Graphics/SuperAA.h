@@ -1,32 +1,42 @@
-#pragma once
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// SuperAA.h
+//
+// Super-sampling and CRT colour output. With a factor N above 1 the frame
+// is drawn at N times the window size into an off-screen target, and Draw()
+// averages each NxN block into one window pixel. A CRT colour mode converts
+// the colours from an arcade monitor's gamut and gamma to sRGB on the way.
+// With N = 1 and no CRT colours it does nothing and the frame is drawn
+// straight to the window.
+
+#ifndef INCLUDED_SUPERAA_H
+#define INCLUDED_SUPERAA_H
 
 #include "Supermodel.h"
 #include "FBO.h"
 #include "New3D/GLSLShader.h"
 
-// This class just implements super sampling. Super sampling looks fantastic but is quite expensive.
-// 8x and beyond values can start to eat ridiculous amounts of memory / gpu time, for less and less noticable returns
-// 4x works and looks great
-// values such as 3 are also possible, that works out 9 samples per pixel
-// The algorithm is super simple, just add up all samples and divide by the number
-
 class SuperAA
 {
 public:
-	SuperAA(int aaValue, CRTcolor CRTcolors);
-	~SuperAA();
+  SuperAA(int aaValue, CRTcolor CRTcolors);
+  ~SuperAA();     // needs the GL context current
 
-	void Init(int width, int height);		// width & height are real window dimensions
-	void Draw();							// this is a no-op if AA is 1 and CRTcolors 0, since we'll be drawing straight on the back buffer anyway
+  void Init(int width, int height);   // window size in pixels
+  void Draw();                        // resolves the target into the window
 
-	GLuint GetTargetID();
+  GLuint GetTargetID();               // frame buffer to draw the frame into (0: the window)
 
 private:
-	FBO m_fbo;
-	GLSLShader m_shader;
-	const int m_aa;
-	const CRTcolor m_crtcolors;
-	GLuint m_vao;
-	int m_width;
-	int m_height;
+  bool Active() const;
+
+  FBO m_fbo;
+  GLSLShader m_shader;
+  const int m_aa;
+  const CRTcolor m_crtcolors;
+  GLuint m_vao = 0;
+  int m_width = 0;
+  int m_height = 0;
 };
+
+#endif  // INCLUDED_SUPERAA_H

@@ -1,543 +1,254 @@
- /**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson 
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
- 
-/*
- * Legacy3D.h
- * 
- * Header file defining the CLegacy3D class: Supermodel's original OpenGL 
- * Real3D graphics engine.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Legacy3D.h
+//
+// The older Real3D renderer: an OpenGL compatibility-profile engine that
+// walks the scene database with the GL matrix stack, turns each model into
+// triangles once (cached in vertex buffers per texture-offset state) and
+// draws the frame's model instances from two lists per cache, opaque first
+// and translucent second. Textures are decoded from texture RAM on demand
+// into one or more large GL texture maps, one 2048x2048 sheet per format.
 
 #ifndef INCLUDED_LEGACY3D_H
 #define INCLUDED_LEGACY3D_H
 
-#include "TextureRefs.h"
-#include "Graphics/IRender3D.h"
 #include <GL/glew.h>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
+#include "Graphics/IRender3D.h"
+#include "TextureRefs.h"
 #include "Util/NewConfig.h"
 #include "Types.h"
 
 namespace Legacy3D {
 
-/******************************************************************************
- Internal Definitions and Data Structures
-******************************************************************************/
-
-// Model caches sort models by alpha (translucency) state
-enum POLY_STATE
-{
-	POLY_STATE_NORMAL = 0,
-	POLY_STATE_ALPHA
-};
-
-struct Vertex
-{
-	GLfloat	x,y,z;	    // vertex
-	GLfloat	n[3];	      // normal X, Y, Z
-	GLfloat	u,v;	      // texture U, V coordinates (in texels, relative to selected texture)
-	GLfloat intensity;  // shading intensity (if using per-vertex fixed shading)
-};
-
-struct Poly
-{
-	Vertex			Vert[4];
-	GLfloat			n[3];		// polygon normal (used for backface culling and flat shading)
-	POLY_STATE		state;		// alpha or normal?
-	unsigned		numVerts;	// triangle (3) or quad (4)
-	const UINT32	*header;	// pointer to Real3D 7-word polygon header
-};
-
-/*
- * VBORef:
- *
- * Reference to model polygons stored in a VBO. Each reference has two sets of
- * vertices: normal and alpha. Copies of the model with different texture
- * offsets applied are searchable via the linked list of texture offset states.
- *
- * Technically, a model may contain a mix of layered and non-layered polygons
- * but we can't support that level of granularity in the current engine. The 
- * useStencil flag is set only when all polygons in a model are layered, and
- * also may be set when we detect that a polygon is likely to be used as a
- * shadow. On the actual hardware, these are not stenciled but are most likely
- * implemented with stipple masks. We cheat here to make shadows look nicer.
- */
-
-struct VBORef
-{
-	unsigned index[2];		// index of model polygons in VBO
-	unsigned numVerts[2]; // number of vertices
-	unsigned lutIdx;      // LUT index associated with this model (for fast LUT clearing)
-	
-	VBORef *nextTextureOffsetState; // linked list of models with different texture offset states
-	uint16_t textureOffsetState;    // texture offset data for this model
-	bool useStencil;                // whether to draw with stencil mask ("layered" polygons)
-	
-	CTextureRefs texRefs; // unique texture references contained in this model
-	
-	/*
-	 * Clear():
-	 *
-	 * Clears the VBORef by setting all fields to 0 and clearing the texture
-	 * references.
-	 */
-	inline void Clear(void)
-	{
-		texRefs.Clear();
-		lutIdx = 0;
-		textureOffsetState = 0;
-		nextTextureOffsetState = NULL;
-		useStencil = false;
-		for (int i = 0; i < 2; i++)
-		{
-			index[i] = 0;
-			numVerts[i] = 0;
-		}
-	}
-};
-
-// Display list items: model instances and viewport settings
-struct DisplayList
-{
-	// Viewport instance data
-	struct ViewportInstance
-	{
-		GLfloat	projectionMatrix[4*4];	// projection matrix
-		GLfloat	lightingParams[6];		  // lighting parameters (see RenderViewport() and vertex shader)
-		GLfloat	spotEllipse[4];			    // spotlight ellipse (see RenderViewport())
-		GLfloat	spotRange[2];			      // Z range
-		GLfloat	spotColor[3];			      // color
-		GLfloat fogParams[5];			      // fog parameters (...)
-		GLint		x, y;					          // viewport coordinates (scaled and in OpenGL format)
-		GLint		width, height;			    // viewport dimensions (scaled for display surface size)
-	};
-	
-	// Model instance data
-	struct ModelInstance
-	{
-		GLfloat		modelViewMatrix[4*4]; // model-view matrix
-		unsigned	index;					      // index in VBO
-		unsigned	numVerts;				      // number of vertices
-		GLint		  frontFace;				    // GL_CW (default), GL_CCW, or -GL_CW to indicate no culling
-		bool      useStencil;           // draw with stencil testing
-	};
-
-  bool isViewport;    // if true, this is a viewport node
-	union
-	{
-	  ModelInstance     Model;
-	  ViewportInstance  Viewport;
-	} Data;
-	DisplayList	*next;  // next display list item with the same state (alpha or non-alpha)
-};
-
-/*
- * ModelCache:
- *
- * A model cache tracks all models in a particular region (ie., VROM or polygon
- * RAM). It contains a look-up table to quickly obtain VBO indices. Be careful
- * when accessing the LUT, there are some special cases.
- *
- * If the model cache is marked dynamic, cached models may not necessarily be
- * retained. Clearing the model cache is also much faster. The LUT entry for 
- * the last model cached will be valid, but because the LUT may not be
- * cleared, one cannot assume a model exists because there is a LUT entry
- * pointing to it. Always use NeedToCache() to determine whether caching is
- * necessary before reading the LUT!
- */
-struct ModelCache
-{
-	// Cache type
-	bool		dynamic;
-	
-	// Vertex buffer object
-	unsigned	vboMaxOffset;	// size of VBO (in bytes)
-	unsigned	vboCurOffset;	// current offset in VBO (in bytes)
-	GLuint		vboID;			// OpenGL VBO handle
-	
-	// Local vertex buffers (enough for a single model)
-	unsigned	maxVertIdx;		// size of each local vertex buffer (in vertices)
-	unsigned	curVertIdx[2];	// current vertex index (in vertices)
-	GLfloat		*verts[2];
-	
-	// Array of cached models
-	unsigned	maxModels;	// maximum number of models
-	unsigned	numModels;	// current number stored
-	VBORef		*Models;
-	
-	/*
-	 * Look-Up Table:
-	 *
-	 * Can be accessed directly with a LUT index to determine the model index.
-	 * However, it should not be used to determine whether a model needs to be
-	 * cached. Use NeedToCache() instead. A valid index, for example, may still
-	 * have to be re-cached if the model cache is dynamic (polygon RAM).
-	 */
-	unsigned	lutSize;	// number of elements in LUT
-	INT16		*lut;		// stores indices into Models[] or -1 if not yet cached
-
-	// Display list
-	unsigned	maxListSize;	// maximum number of display list items
-	unsigned	listSize;		// number of items in display list
-	DisplayList	*List;			// holds all display list items
-	DisplayList	*ListHead[2];	// heads of linked lists for each state
-	DisplayList	*ListTail[2];	// current tail node for each state
-};
-
-struct TexSheet
-{
-	unsigned sheetNum;
-	unsigned mapNum;
-	unsigned xOffset;
-	unsigned yOffset;
-
-	/*
-	 * Texture Format Buffer
-	 *
-	 * Records the format that a texture (at a given location within the
-	 * texture sheet) is currently stored in. A negative value indicates the
-	 * texture has not been accessed and converted yet and non-negative values
-	 * correspond to the texture format bits in the polygon headers. They can
-	 * be used to determine whether a texture needs to be updated.
-	 */
-	int	 texWidth[2048/32][2048/32];
-	int	 texHeight[2048/32][2048/32];
-	INT8 texFormat[2048/32][2048/32];
-};
-
-/******************************************************************************
- CLegacy3D Classes
-******************************************************************************/
-
-/*
- * CLegacy3D:
- *
- * 3D renderer. Lots of work to do here :)
- */
 class CLegacy3D final : public IRender3D
 {
-	friend class CTextureRefs;
-
 public:
-	/*
-	 * RenderFrame(void):
-	 *
-	 * Renders the complete scene database. Must be called between BeginFrame() and
-	 * EndFrame(). This function traverses the scene database and builds up display 
-	 * lists.
-	 */
-	void RenderFrame(void);
-	
-	/*
-	 * BeginFrame(void):
-	 *
-	 * Prepare to render a new frame. Must be called once per frame prior to
-	 * drawing anything.
-	 */
-	void BeginFrame(void);
-	
-	/*
-	 * EndFrame(void):
-	 *
-	 * Signals the end of rendering for this frame. Must be called last during
-	 * the frame.
-	 */
-	void EndFrame(void);
-	
-	/*
-	 * UploadTextures(x, y, width, height):
-	 *
-	 * Signals that a portion of texture RAM has been updated.
-	 *
-	 * Parameters:
-	 *		x		X position within texture RAM.
-	 *		y		Y position within texture RAM.
-	 *		width	Width of texture data in texels.
-	 *		height	Height.
-	 */
-	void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height);
-	
-	/*
-	 * AttachMemory(cullingRAMLoPtr, cullingRAMHiPtr, polyRAMPtr, vromPtr,
-	 * 				textureRAMPtr):
-	 *
-	 * Attaches RAM and ROM areas. This must be done prior to any rendering
-	 * otherwise the program may crash with an access violation.
-	 *
-	 * Parameters:
-	 *		cullingRAMLoPtr		Pointer to low culling RAM (4 MB).
-	 *		cullingRAMHiPtr		Pointer to high culling RAM (1 MB).
-	 *		polyRAMPtr			Pointer to polygon RAM (4 MB).
-	 *		vromPtr				Pointer to video ROM (64 MB).
-	 *		textureRAMPtr		Pointer to texture RAM (8 MB).
-	 */
-	void AttachMemory(const UINT32 *cullingRAMLoPtr,
-					  const UINT32 *cullingRAMHiPtr, const UINT32 *polyRAMPtr,
-					  const UINT32 *vromPtr, const UINT16 *textureRAMPtr);
+  explicit CLegacy3D(const Util::Config::Node &config);
+  ~CLegacy3D() override;
 
-	/*
-	 * SetStepping(stepping):
-	 *
-	 * Sets the Model 3 hardware stepping, which also determines the Real3D
-	 * functionality. The default is Step 1.0. This should be called prior to 
-	 * any other emulation functions and after Init().
-	 *
-	 * Parameters:
-	 *    stepping  0x10 for Step 1.0, 0x15 for Step 1.5, 0x20 for Step 2.0, or
-	 *              0x21 for Step 2.1. Anything else defaults to 1.0.
-	 */
-	void SetStepping(int stepping);
-	
-	/*
-	 * Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes):
-	 *
-	 * One-time initialization of the context. Must be called before any other
-	 * members (meaning it should be called even before being attached to any
-	 * other objects that want to use it).
-	 *
-	 * External shader files are loaded according to configuration settings.
-	 *
-	 * Parameters:
-	 *		xOffset		X offset of the viewable area within OpenGL display 
-	 *                  surface, in pixels.
-	 *		yOffset		Y offset.
-	 *		xRes		Horizontal resolution of the viewable area.
-	 *		yRes		Vertical resolution.
-	 *		totalXRes	Horizontal resolution of the complete display area.
-	 *		totalYRes	Vertical resolution.
-	 *
-	 * Returns:
-	 *		OKAY is successful, otherwise FAILED if a non-recoverable error
-	 *		occurred. Any allocated memory will not be freed until the
-	 *		destructor is called. Prints own error messages.
-	 */
-	Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned aaTarget);
+  void RenderFrame(void) override;
+  void BeginFrame(void) override;
+  void EndFrame(void) override;
+  void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height) override;
+  void AttachMemory(const uint32_t *cullingRAMLoPtr, const uint32_t *cullingRAMHiPtr, const uint32_t *polyRAMPtr,
+                    const uint32_t *vromPtr, const uint16_t *textureRAMPtr) override;
+  void SetStepping(int stepping) override;
+  Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned aaTarget) override;
+  void SetSunClamp(bool enable) override;
+  void SetBlockCulling(bool enable) override;
+  float GetLosValue(int layer) override;
 
-	/*
-	* SetSunClamp(bool enable);
-	*
-	* Sets or unsets the clamped light model
-	*
-	* Parameters:
-	*		enable	Set clamp mode
-	*/
-	void SetSunClamp(bool enable);
-
-	/*
-	* SetBlockCulling(bool enable);
-	* 
-	* When enabled, clears screen to white and disables 3D rendering
-	* 
-	* Parameters:
-	*		enable	Set block culling
-	*/
-	void SetBlockCulling(bool enable);
-
-	/*
-	* GetLosValue(int layer);
-	*
-	* Gets the line of sight value for the priority layer
-	*
-	* Parameters:
-	*		layer	Priority layer to read from
-	*/
-	float GetLosValue(int layer);
-
-	/*
-	 * CLegacy3D(void):
-	 * ~CLegacy3D(void):
-	 *
-	 * Parameters:
-	 *    config  Configuration object.
-	 *
-	 * Constructor and destructor.
-	 */
-	CLegacy3D(const Util::Config::Node &config);
-	~CLegacy3D(void);
+  // Brings one texture rectangle of texture RAM into its sheet, unless the
+  // sheet already holds it in that format (used by CTextureRefs too).
+  void DecodeTexture(int format, int x, int y, int width, int height);
 
 private:
-	/*
-	 * Private Members
-	 */
+  enum Pass { kOpaque = 0, kTranslucent = 1 };
 
-	// Real3D address translation
-	const UINT32 *TranslateCullingAddress(UINT32 addr);
-	const UINT32 *TranslateModelAddress(UINT32 addr);
-	
-	// Model caching and display list management
-	void 			DrawDisplayList(ModelCache *Cache, POLY_STATE state);
-	Result 			AppendDisplayList(ModelCache *Cache, bool isViewport, const struct VBORef *Model);
-	void 			ClearDisplayList(ModelCache *Cache);
-	int				GetTextureBaseX(const Poly *P) const;
-	int				GetTextureBaseY(const Poly *P) const;
-	Result 			InsertPolygon(ModelCache *cache, const Poly *p);
-	void 			InsertVertex(ModelCache *cache, const Vertex *v, const Poly *p, float normFlip);
-	struct VBORef	*BeginModel(ModelCache *cache);
-	void			EndModel(ModelCache *cache, struct VBORef *Model, int lutIdx, UINT16 textureOffsetState, bool useStencil);
-	struct VBORef	*CacheModel(ModelCache *cache, int lutIdx, UINT16 textureOffsetState, const UINT32 *data);
-	struct VBORef	*LookUpModel(ModelCache *cache, int lutIdx, UINT16 textureOffsetState);
-	void 			ClearModelCache(ModelCache *cache);
-	Result 			CreateModelCache(ModelCache *cache, unsigned vboMaxVerts, unsigned localMaxVerts, unsigned maxNumModels, unsigned numLUTEntries, unsigned displayListSize, bool isDynamic);
-	void 			DestroyModelCache(ModelCache *cache);
-	
-	// Texture management
-	void DecodeTexture(int format, int x, int y, int width, int height);
-	
-	// Matrix stack
-	void	MultMatrix(UINT32 matrixOffset);
-	void 	InitMatrixStack(UINT32 matrixBaseAddr);
-	
-	// Scene database traversal
-	Result DrawModel(UINT32 modelAddr);
-	void DescendCullingNode(UINT32 addr);
-	void DescendPointerList(UINT32 addr);
-	void DescendNodePtr(UINT32 nodeAddr);
-	void RenderViewport(UINT32 addr, int pri, bool wideScreen);
-	
-	// In-frame error reporting
-	Result ErrorLocalVertexOverflow(void);
-	Result ErrorUnableToCacheModel(UINT32 modelAddr);
-	void ClearErrors(void);
+  // One triangle corner as stored in a vertex buffer.
+  struct GpuVertex
+  {
+    GLfloat pos[3];
+    GLfloat normal[3];
+    GLfloat colour[3];        // polygon colour (material colour when textured)
+    GLfloat uv[2];            // texel coordinates inside the texture
+    GLfloat subTexture[4];    // texture's x, y in its map, width, height
+    GLfloat texParams[4];     // textured, contour test (>0), mirror U, mirror V
+    GLfloat texFormat;
+    GLfloat texMap;
+    GLfloat transLevel;       // 1 opaque .. 0 invisible
+    GLfloat lightEnable;
+    GLfloat specular;
+    GLfloat shininess;        // < 0: no specular
+    GLfloat fogIntensity;
+  };
 
-	// init
-	Result SetupGLObjects();
-	
-	/*
-	 * Data
-	 */
-  
+  // A decoded polygon before it becomes triangles.
+  struct Corner
+  {
+    GLfloat x, y, z;
+    GLfloat n[3];
+    GLfloat u, v;
+    GLfloat shade;            // fixed shading level
+  };
+  struct Polygon
+  {
+    const uint32_t *header;   // the 7 header words
+    Corner corner[4];
+    GLfloat normal[3];
+    unsigned corners;
+    Pass pass;
+  };
+
+  // A model turned into triangles for one texture-offset state.
+  struct CachedModel
+  {
+    unsigned first[2];        // first vertex in the buffer, per pass
+    unsigned count[2];
+    uint32_t address;
+    uint16_t offsetState;
+    bool stencil;             // drawn with the stencil test (layered/shadow)
+    int older;                // same address, another offset state (-1: none)
+    CTextureRefs textures;    // static caches decode these on every draw
+  };
+
+  // What one item of a draw list records.
+  struct DrawItem
+  {
+    bool isViewport;
+    GLfloat matrix[16];       // projection (viewport) or modelview (model)
+    // viewport
+    GLfloat lighting[6];
+    GLfloat spotEllipse[4];
+    GLfloat spotRange[2];
+    GLfloat spotColour[3];
+    GLfloat fog[5];
+    GLint vpX, vpY, vpW, vpH;
+    // model
+    unsigned first, count;
+    GLint frontFace;          // GL_CW, GL_CCW or kNoCulling
+    bool stencil;
+    int next;                 // next item of the same pass (-1: end)
+  };
+
+  struct ModelCache
+  {
+    bool dynamic = false;     // polygon RAM: rebuilt every frame
+    GLuint vbo = 0;
+    size_t vboBytes = 0;
+    size_t vboUsed = 0;       // bytes taken (also by a model left unfinished)
+    std::vector<GpuVertex> building[2];
+    size_t buildingMax = 0;
+    std::vector<CachedModel> models;
+    size_t modelsMax = 0;
+    unsigned modelCount = 0;
+    std::unordered_map<uint32_t, int> newest;   // address -> latest model
+    std::vector<DrawItem> items;   // reserved to itemsMax, never more
+    size_t itemsMax = 0;
+    int head[2] = { -1, -1 }, tail[2] = { -1, -1 };
+  };
+
+  struct TexSheet
+  {
+    unsigned map;             // GL texture map holding the sheet
+    unsigned originX, originY;
+    // What was last decoded at each 32x32 tile corner (-1: nothing valid)
+    int format[64][64];
+    int width[64][64];
+    int height[64][64];
+  };
+
+  struct TexOffset
+  {
+    int x = 0, y = 0;         // added to the polygon's texture position
+    int bankFlip = 0;         // 1024 swaps the two 1024-line banks
+    uint16_t state = 0;       // the node word that set them (cache key)
+  };
+
+  static constexpr GLint kNoCulling = -GL_CW;
+
+  // Setup
+  Result CreateGLObjects();
+  Result CreateCache(ModelCache &cache, size_t vboVerts, size_t localVerts, size_t maxModels, size_t maxItems, bool dynamic);
+  void DestroyCache(ModelCache &cache);
+
+  // Memory
+  const uint32_t *CullingWord(uint32_t addr) const;
+  const uint32_t *ModelWords(uint32_t addr) const;
+
+  // Scene walk
+  void DrawViewportChain(int priority, bool wideScreen);
+  void DrawViewport(const uint32_t *vp, bool wideScreen);
+  void LoadCoordinateSystem(uint32_t matrixBase);
+  void ApplyMatrix(uint32_t index);
+  void VisitPointer(uint32_t ptr);
+  void VisitNode(uint32_t addr);
+  void VisitList(uint32_t addr);
+  Result DrawModel(uint32_t addr);
+  static bool UsesColourTable(const uint32_t *words);
+
+  // Model caching
+  CachedModel *FindModel(ModelCache &cache, uint32_t addr, uint16_t offsetState);
+  CachedModel *BuildModel(ModelCache &cache, uint32_t addr, uint16_t offsetState, const uint32_t *words);
+  Result AddPolygon(ModelCache &cache, const Polygon &poly);
+  void AddCorner(ModelCache &cache, const Corner &c, const Polygon &poly, float normalSign);
+  void FinishModel(ModelCache &cache, CachedModel &model, uint32_t addr, uint16_t offsetState, bool stencil);
+  GLint FrontFaceFor(const GLfloat modelView[16]) const;
+  void EmptyCache(ModelCache &cache);
+  int TexturePosX(const uint32_t *header) const;
+  int TexturePosY(const uint32_t *header) const;
+
+  // Draw lists
+  Result AddViewportItem(ModelCache &cache);
+  Result AddModelItems(ModelCache &cache, const CachedModel &model);
+  void Link(ModelCache &cache, int pass, int item);
+  void ClearItems(ModelCache &cache);
+  void DrawItems(ModelCache &cache, Pass pass);
+  void DrawAllLists();
+
+  // Errors (each reported at most once per frame)
+  Result ReportLocalOverflow();
+  Result ReportUncachable(uint32_t addr);
+  void ResetReports();
+
   const Util::Config::Node &m_config;
-	
-#ifdef DEBUG
-	// Debug
-	int m_debugHighlightPolyHeaderIdx = -1;
-	uint32_t m_debugHighlightPolyHeaderMask = 0;
-	int m_debugHighlightCullingNodeIdx = -1;
-	uint32_t m_debugHighlightCullingNodeMask = 0;
-	bool m_debugHighlightAll = false;
-#endif
-	
-	// Stepping
-	int		step;
-	int		offset;			// offset to subtract for words 3 and higher of culling nodes
-	GLfloat	vertexFactor;	// fixed-point conversion factor for vertices
-	
-	// Memory (passed from outside)
-	const UINT32	*cullingRAMLo;	// 4 MB
-	const UINT32	*cullingRAMHi;	// 1 MB
-	const UINT32	*polyRAM;		// 4 MB
-	const UINT32	*vrom;			// 64 MB
-	const UINT16	*textureRAM;	// 8 MB
-	
-	// Error reporting
-	unsigned	errorMsgFlags;	// tracks which errors have been printed this frame
-	
-	// Real3D Base Matrix Pointer
-	const float	*matrixBasePtr;
-	
-	// Current viewport parameters (updated as viewports are traversed)
-	GLfloat	lightingParams[6];
-	GLfloat	fogParams[5];
-	GLfloat	spotEllipse[4];
-	GLfloat	spotRange[2];
-	GLfloat	spotColor[3];
-	GLint	viewportX, viewportY;
-	GLint	viewportWidth, viewportHeight;
-	GLuint  m_aaTarget;
-	
-	// Scene graph processing
-	int		listDepth;	        // how many lists have we recursed into
-	int		stackDepth;	        // for debugging and error handling purposes
-	struct TextureOffset
-	{
-	  int x;          // x offset
-	  int y;          // y offset (wraps within 2048x1023 texel bank)
-	  int switchBank; // 0: use bank from polygon header, 1024: swap banks
-	  uint16_t state; // x, y, and bank states compromise a unique key
-	  TextureOffset(uint32_t data)
-	    : x(32 * ((data >> 7) & 0x7F)),
-	      y(32 * (data & 0x7F)),
-	      switchBank((data & 0x4000) >> 4),
-	      state(data & 0x7FFF)
-	  {}
-	  TextureOffset()
-	    : x(0),
-	      y(0),
-	      switchBank(false),
-	      state(0)
-	  {}
-	} m_textureOffset;
-	UINT32  m_colorTableAddr = 0x400; // address of color table in polygon RAM
-	
-	// Resolution and scaling factors (to support resolutions higher than 496x384) and offsets
-	GLfloat		xRatio, yRatio;
-	unsigned	xOffs, yOffs;
-	unsigned 	totalXRes, totalYRes;
-	
-	// Texture details
-	static int	defaultFmtToTexSheetNum[8];  // default mapping from Model3 texture format to texture sheet	
-	unsigned    numTexMaps;                  // total number of texture maps
-	GLuint		texMapIDs[9];                // GL texture IDs of texture maps
-	unsigned    numTexSheets;                // total number of texture sheets
-	TexSheet   *texSheets;                   // texture sheet objects
-	TexSheet   *fmtToTexSheet[8];            // final mapping from Model3 texture format to texture sheet
-	
-	// Shader programs and input data locations
-	GLuint	shaderProgram;			// shader program object
-	GLuint	vertexShader;			// vertex shader handle
-	GLuint	fragmentShader;			// fragment shader
-	GLint   textureMapLoc;          // location of "textureMap" uniform (if available)
-	GLint	textureMapLocs[8];		// location of "textureMap[0-7]" uniforms (if available)
-	GLint	modelViewMatrixLoc;		// uniform
-	GLint	projectionMatrixLoc;	// uniform
-	GLint	lightingLoc;			// uniform
-	GLint   mapSizeLoc;             // uniform
-	GLint	spotEllipseLoc;			// uniform
-	GLint	spotRangeLoc;			// uniform
-	GLint	spotColorLoc;			// uniform
-	GLint	subTextureLoc;			// attribute
-	GLint	texParamsLoc;			// attribute
-	GLint	texFormatLoc;			// attribute
-	GLint   texMapLoc;              // attribute
-	GLint	transLevelLoc;			// attribute
-	GLint	lightEnableLoc;			// attribute
-	GLint	specularLoc;			// attribute
-	GLint	shininessLoc;			// attribute
-	GLint	fogIntensityLoc;		// attribute
-	
-	// Model caching
-	ModelCache	VROMCache;	// VROM (static) models
-	ModelCache	PolyCache;	// polygon RAM (dynamic) models
-	
-	/*
- 	 * Texture Decode Buffer
- 	 *
- 	 * Textures are decoded and copied from texture RAM into this temporary buffer
- 	 * before being uploaded. Dimensions are 512x512.
- 	 */
-	GLfloat	*textureBuffer;	// RGBA8 format
 
-	// JTAG configuration settings
-	bool blockCulling;
+  // Stepping
+  int m_step = 0x10;
+  int m_nodeShift = 2;        // culling node words missing before word 3 on Step 1.0
+  GLfloat m_vertexScale = 1.0f / 128.0f;
+
+  // Real3D memory
+  const uint32_t *m_cullLo = nullptr;
+  const uint32_t *m_cullHi = nullptr;
+  const uint32_t *m_polyRAM = nullptr;
+  const uint32_t *m_vrom = nullptr;
+  const uint16_t *m_texRAM = nullptr;
+
+  // Screen placement
+  GLfloat m_scaleX = 1.0f, m_scaleY = 1.0f;
+  unsigned m_offsetX = 0, m_offsetY = 0;
+  unsigned m_totalW = 0, m_totalH = 0;
+  GLuint m_aaTarget = 0;
+
+  // Current viewport while walking
+  const float *m_matrices = nullptr;
+  GLfloat m_lighting[6] = {};
+  GLfloat m_spotEllipse[4] = {};
+  GLfloat m_spotRange[2] = {};
+  GLfloat m_spotColour[3] = {};
+  GLfloat m_fog[5] = {};
+  GLint m_vpX = 0, m_vpY = 0, m_vpW = 0, m_vpH = 0;
+  int m_nodeDepth = 0;
+  int m_listDepth = 0;
+  TexOffset m_texOffset;
+  uint32_t m_colourTable = 0x400;
+
+  // Textures
+  std::vector<GLfloat> m_decoded;   // RGBA, one rectangle at a time
+  unsigned m_mapCount = 0;
+  GLuint m_maps[9] = {};
+  std::vector<TexSheet> m_sheets;
+  TexSheet *m_sheetOfFormat[8] = {};
+
+  // Shader program and its inputs
+  GLuint m_program = 0, m_vertexShader = 0, m_fragmentShader = 0;
+  GLint m_uModelView = -1, m_uProjection = -1, m_uLighting = -1, m_uMapSize = -1;
+  GLint m_uSpotEllipse = -1, m_uSpotRange = -1, m_uSpotColour = -1;
+  GLint m_aSubTexture = -1, m_aTexParams = -1, m_aTexFormat = -1, m_aTexMap = -1, m_aTransLevel = -1;
+  GLint m_aLightEnable = -1, m_aSpecular = -1, m_aShininess = -1, m_aFogIntensity = -1;
+
+  ModelCache m_romCache;    // VROM models
+  ModelCache m_ramCache;    // polygon RAM models (and VROM models using its colour table)
+
+  unsigned m_reported = 0;
+  bool m_blockCulling = false;
 };
 
 } // Legacy3D
 
-#endif	// INCLUDED_LEGACY3D_H
+#endif  // INCLUDED_LEGACY3D_H

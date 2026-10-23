@@ -1,17 +1,27 @@
-#ifndef _TILEGENBUFFER_H_
-#define _TILEGENBUFFER_H_
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// TileGenBuffer.h
+//
+// One 2D layer image produced by the tile generator: 384 lines of 512 ABGR
+// pixels (only the first 496 of each line are visible). Zero is transparent.
+
+#ifndef INCLUDED_TILEGENBUFFER_H
+#define INCLUDED_TILEGENBUFFER_H
 
 #include "Types.h"
 #include <cstring>
 
 struct TileGenBuffer
 {
-	TileGenBuffer() : data{ 0 } {}
+  static constexpr int Width = 512;
+  static constexpr int Height = 384;
 
-	UINT32* GetLine(int number) { return data + (512 * number); };
-	void	Clear() { std::memset(data, 0, sizeof(data)); }
+  UINT32 data[Width * Height];
 
-	UINT32 data[512 * 384];
+  TileGenBuffer() { Clear(); }
+
+  UINT32 *GetLine(int number) { return &data[number * Width]; }
+  void Clear() { std::memset(data, 0, sizeof(data)); }
 };
 
-#endif
+#endif  // INCLUDED_TILEGENBUFFER_H

@@ -1,447 +1,315 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// R3DShader.cpp
+
 #include "R3DShader.h"
-#include "R3DShaderQuads.h"
 #include "R3DShaderTriangles.h"
+#include "R3DShaderQuads.h"
 #include "R3DShaderCommon.h"
 
-// having 2 sets of shaders to maintain is really less than ideal
-// but hopefully not too many breaking changes at this point
+#include <cstdio>
+#include <vector>
 
 namespace New3D {
 
+namespace
+{
+  GLuint Compile(GLenum type, const char *const *sources, GLsizei count)
+  {
+    GLuint id = glCreateShader(type);
+    glShaderSource(id, count, sources, nullptr);
+    glCompileShader(id);
+    GLint ok = GL_FALSE;
+    glGetShaderiv(id, GL_COMPILE_STATUS, &ok);
+    if (ok == GL_FALSE)
+    {
+      GLint length = 0;
+      glGetShaderiv(id, GL_INFO_LOG_LENGTH, &length);
+      if (length > 0)
+      {
+        std::vector<char> text(size_t(length) + 1, '\0');
+        glGetShaderInfoLog(id, length, nullptr, text.data());
+        printf("%s\n", text.data());
+      }
+    }
+    return id;
+  }
+
+  // Polygon stencil bits: bit 7 is set where a polygon that does not return
+  // line of sight was drawn; bits 0-6 count layered polygons.
+  constexpr GLuint kLosBit = 0x80;
+  constexpr GLuint kLayerBits = 0x7F;
+}
+
 R3DShader::R3DShader(const Util::Config::Node &config)
-	: m_config(config)
+  : m_config(config)
 {
-	m_shaderProgram		= 0;
-	m_vertexShader		= 0;
-	m_geoShader			= 0;
-	m_fragmentShader	= 0;
-
-	Start();	// reset attributes
+  Forget();
 }
 
-void R3DShader::Start()
+GLint R3DShader::U(const char *name) const
 {
-	m_textured1			= false;
-	m_textured2			= false;
-	m_textureAlpha		= false;		// use alpha in texture
-	m_alphaTest			= false;		// discard fragment based on alpha (ogl does this with fixed function)
-	m_lightEnabled		= false;
-	m_specularEnabled	= false;
-	m_layered			= false;
-	m_noLosReturn		= false;
-	m_textureInverted	= false;
-	m_fixedShading		= false;
-	m_smoothShading		= false;
-	m_translatorMap		= false;
-	m_modelScale		= 1.0f;
-	m_nodeAlpha			= 1.0f;
-	m_shininess			= 0;
-	m_specularValue		= 0;
-	m_microTexMinLOD	= 0;
-	m_fogIntensity		= 0.0f;
-	m_microTexID		= -1;
-	m_texturePage		= -1;
-
-	m_baseTexInfo[0]	= -1;
-	m_baseTexInfo[1]	= -1;
-	m_baseTexInfo[2]	= -1;
-	m_baseTexInfo[3]	= -1;
-
-	m_baseTexType		= -1;
-
-	m_transX			= -1;
-	m_transY			= -1;
-	m_transPage			= -1;
-
-	m_texWrapMode[0]	= 0;
-	m_texWrapMode[1]	= 0;
-
-	m_dirtyMesh			= true;			// dirty means all the above are dirty, ie first run
-	m_dirtyModel		= true;
+  return glGetUniformLocation(m_program, name);
 }
 
-bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
+bool R3DShader::LoadShader()
 {
-	bool quads = m_config["QuadRendering"].ValueAs<bool>();
+  const bool quads = m_config["QuadRendering"].ValueAs<bool>();
+  const char *vertexSrc = quads ? vertexShaderR3DQuads : vertexShaderR3D;
+  const char *fragmentSrc[2] = { quads ? fragmentShaderR3DQuads : fragmentShaderR3D, fragmentShaderR3DCommon };
 
-	const char* vShader = vertexShaderR3D;
-	const char* gShader = "";
-	const char* fShader = fragmentShaderR3D;
+  m_program = glCreateProgram();
+  m_vs = Compile(GL_VERTEX_SHADER, &vertexSrc, 1);
+  m_fs = Compile(GL_FRAGMENT_SHADER, fragmentSrc, 2);
+  if (quads)
+  {
+    m_gs = Compile(GL_GEOMETRY_SHADER, &geometryShaderR3DQuads, 1);
+    glAttachShader(m_program, m_gs);
+  }
+  glAttachShader(m_program, m_vs);
+  glAttachShader(m_program, m_fs);
+  glLinkProgram(m_program);
 
-	if (quads) {
-		vShader = vertexShaderR3DQuads;
-		gShader = geometryShaderR3DQuads;
-		fShader = fragmentShaderR3DQuads;
-	}
+  GLint linked = GL_FALSE;
+  glGetProgramiv(m_program, GL_LINK_STATUS, &linked);
+  if (linked == GL_FALSE)
+  {
+    GLint length = 0;
+    glGetProgramiv(m_program, GL_INFO_LOG_LENGTH, &length);
+    std::vector<char> text(size_t(length) + 1, '\0');
+    glGetProgramInfoLog(m_program, length, nullptr, text.data());
+    printf("%s\n", text.data());
+  }
 
-	m_shaderProgram		= glCreateProgram();
-	m_vertexShader		= glCreateShader(GL_VERTEX_SHADER);
-	m_fragmentShader	= glCreateShader(GL_FRAGMENT_SHADER);
-
-	const char* shaderArray[] = { fShader, fragmentShaderR3DCommon };
-
-	glShaderSource(m_vertexShader, 1, (const GLchar **)&vShader, nullptr);
-	glShaderSource(m_fragmentShader, (GLsizei)std::size(shaderArray), shaderArray, nullptr);
-
-	glCompileShader(m_vertexShader);
-	glCompileShader(m_fragmentShader);
-
-	if (quads) {
-		m_geoShader = glCreateShader(GL_GEOMETRY_SHADER);
-		glShaderSource(m_geoShader, 1, (const GLchar **)&gShader, nullptr);
-		glCompileShader(m_geoShader);
-		glAttachShader(m_shaderProgram, m_geoShader);
-		PrintShaderResult(m_geoShader);
-	}
-
-	PrintShaderResult(m_vertexShader);
-	PrintShaderResult(m_fragmentShader);
-
-	glAttachShader(m_shaderProgram, m_vertexShader);
-	glAttachShader(m_shaderProgram, m_fragmentShader);
-	glLinkProgram(m_shaderProgram);
-
-	PrintProgramResult(m_shaderProgram);
-
-	m_locTextureBank[0]		= glGetUniformLocation(m_shaderProgram, "textureBank[0]");
-	m_locTextureBank[1]		= glGetUniformLocation(m_shaderProgram, "textureBank[1]");
-	m_locTexturePage		= glGetUniformLocation(m_shaderProgram, "texturePage");
-	m_locTexture1Enabled	= glGetUniformLocation(m_shaderProgram, "textureEnabled");
-	m_locTexture2Enabled	= glGetUniformLocation(m_shaderProgram, "microTexture");
-	m_locTextureAlpha		= glGetUniformLocation(m_shaderProgram, "textureAlpha");
-	m_locAlphaTest			= glGetUniformLocation(m_shaderProgram, "alphaTest");
-	m_locMicroTexMinLOD		= glGetUniformLocation(m_shaderProgram, "microTextureMinLOD");
-	m_locMicroTexID			= glGetUniformLocation(m_shaderProgram, "microTextureID");
-	m_locBaseTexInfo		= glGetUniformLocation(m_shaderProgram, "baseTexInfo");
-	m_locBaseTexType		= glGetUniformLocation(m_shaderProgram, "baseTexType");
-	m_locTextureInverted	= glGetUniformLocation(m_shaderProgram, "textureInverted");
-	m_locTexWrapMode		= glGetUniformLocation(m_shaderProgram, "textureWrapMode");
-	m_locColourLayer		= glGetUniformLocation(m_shaderProgram, "colourLayer");
-	m_locPolyAlpha			= glGetUniformLocation(m_shaderProgram, "polyAlpha");
-
-	m_locFogIntensity		= glGetUniformLocation(m_shaderProgram, "fogIntensity");
-	m_locFogDensity			= glGetUniformLocation(m_shaderProgram, "fogDensity");
-	m_locFogStart			= glGetUniformLocation(m_shaderProgram, "fogStart");
-	m_locFogColour			= glGetUniformLocation(m_shaderProgram, "fogColour");
-	m_locFogAttenuation		= glGetUniformLocation(m_shaderProgram, "fogAttenuation");
-	m_locFogAmbient			= glGetUniformLocation(m_shaderProgram, "fogAmbient");
-
-	m_locLighting			= glGetUniformLocation(m_shaderProgram, "lighting");
-	m_locLightEnabled		= glGetUniformLocation(m_shaderProgram, "lightEnabled");
-	m_locSunClamp			= glGetUniformLocation(m_shaderProgram, "sunClamp");
-	m_locIntensityClamp		= glGetUniformLocation(m_shaderProgram, "intensityClamp");
-	m_locShininess			= glGetUniformLocation(m_shaderProgram, "shininess");
-	m_locSpecularValue		= glGetUniformLocation(m_shaderProgram, "specularValue");
-	m_locSpecularEnabled	= glGetUniformLocation(m_shaderProgram, "specularEnabled");
-	m_locFixedShading		= glGetUniformLocation(m_shaderProgram, "fixedShading");
-	m_locSmoothShading		= glGetUniformLocation(m_shaderProgram, "smoothShading");
-	m_locTranslatorMap		= glGetUniformLocation(m_shaderProgram, "translatorMap");
-
-	m_locSpotEllipse		= glGetUniformLocation(m_shaderProgram, "spotEllipse");
-	m_locSpotRange			= glGetUniformLocation(m_shaderProgram, "spotRange");
-	m_locSpotColor			= glGetUniformLocation(m_shaderProgram, "spotColor");
-	m_locSpotFogColor		= glGetUniformLocation(m_shaderProgram, "spotFogColor");
-	m_locModelScale			= glGetUniformLocation(m_shaderProgram, "modelScale");
-	m_locNodeAlpha			= glGetUniformLocation(m_shaderProgram, "nodeAlpha");
-
-	m_locProjMat			= glGetUniformLocation(m_shaderProgram, "projMat");
-	m_locModelMat			= glGetUniformLocation(m_shaderProgram, "modelMat");
-
-	m_locHardwareStep		= glGetUniformLocation(m_shaderProgram, "hardwareStep");
-	m_locDiscardAlpha		= glGetUniformLocation(m_shaderProgram, "discardAlpha");
-
-	m_locCota				= glGetUniformLocation(m_shaderProgram, "cota");
-
-	return true;
+  m_loc.sheet0 = U("uTexSheet[0]");
+  m_loc.sheet1 = U("uTexSheet[1]");
+  m_loc.texEnabled = U("uTexEnabled");
+  m_loc.microEnabled = U("uMicroEnabled");
+  m_loc.microMinLOD = U("uMicroMinLOD");
+  m_loc.microID = U("uMicroID");
+  m_loc.texRect = U("uTexRect");
+  m_loc.texFormat = U("uTexFormat");
+  m_loc.texInvert = U("uTexInvert");
+  m_loc.texAlpha = U("uTexAlpha");
+  m_loc.contour = U("uContour");
+  m_loc.opaquePass = U("uOpaquePass");
+  m_loc.texWrap = U("uTexWrap");
+  m_loc.texPage = U("uTexPage");
+  m_loc.outputLayer = U("uOutputLayer");
+  m_loc.fogIntensity = U("uFogIntensity");
+  m_loc.lit = U("uLit");
+  m_loc.shininess = U("uShininess");
+  m_loc.specular = U("uSpecular");
+  m_loc.specularValue = U("uSpecularValue");
+  m_loc.fixedShading = U("uFixedShading");
+  m_loc.smoothShading = U("uSmoothShading");
+  m_loc.translatorMap = U("uTranslatorMap");
+  m_loc.modelScale = U("uModelScale");
+  m_loc.nodeAlpha = U("uNodeAlpha");
+  m_loc.modelMat = U("uModelMat");
+  m_loc.fogDensity = U("uFogDensity");
+  m_loc.fogStart = U("uFogStart");
+  m_loc.fogColour = U("uFogColour");
+  m_loc.fogAttenuation = U("uFogAttenuation");
+  m_loc.fogAmbient = U("uFogAmbient");
+  m_loc.lighting = U("uLighting");
+  m_loc.sunClamp = U("uSunClamp");
+  m_loc.intensityClamp = U("uIntensityClamp");
+  m_loc.spotShape = U("uSpotShape");
+  m_loc.spotRange = U("uSpotRange");
+  m_loc.spotColour = U("uSpotColour");
+  m_loc.spotFogColour = U("uSpotFogColour");
+  m_loc.projMat = U("uProjMat");
+  m_loc.hardwareStep = U("uHardwareStep");
+  m_loc.cota = U("uCota");
+  return true;
 }
 
 void R3DShader::UnloadShader()
 {
-	// make sure no shader is bound
-	glUseProgram(0);
-
-	if (m_vertexShader) {
-		glDeleteShader(m_vertexShader);
-		m_vertexShader = 0;
-	}
-
-	if (m_geoShader) {
-		glDeleteShader(m_geoShader);
-		m_geoShader = 0;
-	}
-
-	if (m_fragmentShader) {
-		glDeleteShader(m_fragmentShader);
-		m_fragmentShader = 0;
-	}
-
-	if (m_shaderProgram) {
-		glDeleteProgram(m_shaderProgram);
-		m_shaderProgram = 0;
-	}
+  glUseProgram(0);
+  for (GLuint *s : { &m_vs, &m_gs, &m_fs })
+  {
+    if (*s)
+      glDeleteShader(*s);
+    *s = 0;
+  }
+  if (m_program)
+    glDeleteProgram(m_program);
+  m_program = 0;
 }
 
-GLint R3DShader::GetVertexAttribPos(const std::string& attrib)
+GLint R3DShader::GetVertexAttribPos(const std::string &name)
 {
-	if (m_vertexLocCache.count(attrib)==0) {
-		auto pos = glGetAttribLocation(m_shaderProgram, attrib.c_str());
-		m_vertexLocCache[attrib] = pos;
-	}
+  auto it = m_attrib.find(name);
+  if (it == m_attrib.end())
+    it = m_attrib.emplace(name, glGetAttribLocation(m_program, name.c_str())).first;
+  return it->second;
+}
 
-	return m_vertexLocCache[attrib];
+void R3DShader::Forget()
+{
+  m_groupKnown = false;
+  m_modelKnown = false;
+  m_sent.rectValid = false;
+  m_offsetX = m_offsetY = 0;
+  m_pageFlip = 0;
 }
 
 void R3DShader::SetShader(bool enable)
 {
-	if (enable) {
-		glUseProgram(m_shaderProgram);
-		Start();
-		DiscardAlpha(false);	// need some default
-	}
-	else {
-		glUseProgram(0);
-	}
+  if (!enable)
+  {
+    glUseProgram(0);
+    return;
+  }
+  glUseProgram(m_program);
+  Forget();
+  DiscardAlpha(false);
 }
 
-void R3DShader::SetMeshUniforms(const Mesh* m)
+void R3DShader::DiscardAlpha(bool opaquePass)
 {
-	if (m == nullptr) {
-		return;			// sanity check
-	}
-
-	if (m_dirtyMesh) {
-		glUniform1i(m_locTextureBank[0], 0);
-		glUniform1i(m_locTextureBank[1], 1);
-	}
-
-	if (m_dirtyMesh || m->textured != m_textured1) {
-		glUniform1i(m_locTexture1Enabled, m->textured);
-		m_textured1 = m->textured;
-	}
-
-	if (m_dirtyMesh || m->microTexture != m_textured2) {
-		glUniform1i(m_locTexture2Enabled, m->microTexture);
-		m_textured2 = m->microTexture;
-	}
-
-	if (m_dirtyMesh || (m->page ^ m_transPage) != m_texturePage) {
-		glUniform1i(m_locTexturePage, m->page ^ m_transPage);
-		m_texturePage = (m->page ^ m_transPage);
-	}
-
-	if (m_dirtyMesh || m->microTextureMinLOD != m_microTexMinLOD) {
-		glUniform1f(m_locMicroTexMinLOD, m->microTextureMinLOD);
-		m_microTexMinLOD = m->microTextureMinLOD;
-	}
-
-	if (m_dirtyMesh || m->microTextureID != m_microTexID) {
-		glUniform1i(m_locMicroTexID, m->microTextureID);
-		m_microTexID = m->microTextureID;
-	}
-
-	if (m_dirtyMesh || (m_baseTexInfo[0] != m->x || m_baseTexInfo[1] != m->y) || m_baseTexInfo[2] != m->width || m_baseTexInfo[3] != m->height) {
-
-		m_baseTexInfo[0] = m->x;
-		m_baseTexInfo[1] = m->y;
-		m_baseTexInfo[2] = m->width;
-		m_baseTexInfo[3] = m->height;
-
-		glUniform4i(m_locBaseTexInfo, (m->x + m_transX), (m->y + m_transY), m->width, m->height);
-	}
-
-	if (m_dirtyMesh || m_baseTexType != m->format) {
-		m_baseTexType = m->format;
-		glUniform1i(m_locBaseTexType,  m_baseTexType);
-	}
-
-	if (m_dirtyMesh || m->inverted != m_textureInverted) {
-		glUniform1i(m_locTextureInverted, m->inverted);
-		m_textureInverted = m->inverted;
-	}
-
-	if (m_dirtyMesh || m->alphaTest != m_alphaTest) {
-		glUniform1i(m_locAlphaTest, m->alphaTest);
-		m_alphaTest = m->alphaTest;
-	}
-
-	if (m_dirtyMesh || m->textureAlpha != m_textureAlpha) {
-		glUniform1i(m_locTextureAlpha, m->textureAlpha);
-		m_textureAlpha = m->textureAlpha;
-	}
-
-	if (m_dirtyMesh || m->fogIntensity != m_fogIntensity) {
-		glUniform1f(m_locFogIntensity, m->fogIntensity);
-		m_fogIntensity = m->fogIntensity;
-	}
-
-	if (m_dirtyMesh || m->lighting != m_lightEnabled) {
-		glUniform1i(m_locLightEnabled, m->lighting);
-		m_lightEnabled = m->lighting;
-	}
-
-	if (m_dirtyMesh || m->shininess != m_shininess) {
-		glUniform1f(m_locShininess, m->shininess);
-		m_shininess = m->shininess;
-	}
-
-	if (m_dirtyMesh || m->specular != m_specularEnabled) {
-		glUniform1i(m_locSpecularEnabled, m->specular);
-		m_specularEnabled = m->specular;
-	}
-
-	if (m_dirtyMesh || m->specularValue != m_specularValue) {
-		glUniform1f(m_locSpecularValue, m->specularValue);
-		m_specularValue = m->specularValue;
-	}
-
-	if (m_dirtyMesh || m->fixedShading != m_fixedShading) {
-		glUniform1i(m_locFixedShading, m->fixedShading);
-		m_fixedShading = m->fixedShading;
-	}
-
-	if (m_dirtyMesh || m->smoothShading != m_smoothShading) {
-		glUniform1i(m_locSmoothShading, m->smoothShading);
-		m_smoothShading = m->smoothShading;
-	}
-
-	if (m_dirtyMesh || m->translatorMap != m_translatorMap) {
-		glUniform1i(m_locTranslatorMap, m->translatorMap);
-		m_translatorMap = m->translatorMap;
-	}
-
-	if (m_dirtyMesh || m->polyAlpha != m_polyAlpha) {
-		glUniform1i(m_locPolyAlpha, m->polyAlpha);
-		m_polyAlpha = m->polyAlpha;
-	}
-
-	if (m_dirtyMesh || m->wrapModeU != m_texWrapMode[0] || m->wrapModeV != m_texWrapMode[1]) {
-		m_texWrapMode[0] = m->wrapModeU;
-		m_texWrapMode[1] = m->wrapModeV;
-		glUniform2iv(m_locTexWrapMode, 1, m_texWrapMode);
-	}
-
-	if (m_dirtyMesh || m->noLosReturn != m_noLosReturn) {
-		m_noLosReturn = m->noLosReturn;
-		glStencilFunc(GL_ALWAYS, m_noLosReturn << 7, 0b10000000);
-		glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-		glStencilMask(0b10000000);
-	}
-
-	if (m_dirtyMesh || m->layered != m_layered) {
-		m_layered = m->layered;
-		// i think it should just disable z write, but the polys I think must be written first
-		if (m_layered) {
-			glStencilFunc(GL_EQUAL, 0, 0b01111111);			// basically stencil test passes if the value is zero
-			glStencilOp(GL_KEEP, GL_INCR, GL_INCR);			// if the stencil test passes, we increment the value
-			glStencilMask(0b01111111);
-		}
-		else {
-			glStencilFunc(GL_ALWAYS, m_noLosReturn << 7, 0b10000000);
-			glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-			glStencilMask(0b10000000);
-		}
-	}
-
-	m_dirtyMesh = false;
-}
-
-void R3DShader::SetViewportUniforms(const Viewport *vp)
-{
-	//didn't bother caching these, they don't get frequently called anyway
-	glUniform1f(m_locFogDensity, vp->fogDensity);
-	glUniform1f(m_locFogStart, vp->fogStart);
-	glUniform3fv(m_locFogColour, 1, vp->fogColour);
-	glUniform1f(m_locFogAttenuation, vp->fogAttenuation);
-	glUniform1f(m_locFogAmbient, vp->fogAmbient);
-
-	glUniform3fv(m_locLighting, 2, vp->lightingParams);
-	glUniform1i(m_locSunClamp, vp->sunClamp);
-	glUniform1i(m_locIntensityClamp, vp->intensityClamp);
-	glUniform4fv(m_locSpotEllipse, 1, vp->spotEllipse);
-	glUniform2fv(m_locSpotRange, 1, vp->spotRange);
-	glUniform3fv(m_locSpotColor, 1, vp->spotColor);
-	glUniform3fv(m_locSpotFogColor, 1, vp->spotFogColor);
-
-	glUniformMatrix4fv(m_locProjMat, 1, GL_FALSE, vp->projectionMatrix);
-
-	glUniform1i(m_locHardwareStep, vp->hardwareStep);
-
-	glUniform1f(m_locCota, vp->cota);
-}
-
-void R3DShader::SetModelStates(const Model* model)
-{
-	if (m_dirtyModel || model->scale != m_modelScale) {
-		glUniform1f(m_locModelScale, model->scale);
-		m_modelScale = model->scale;
-	}
-
-	if (m_dirtyModel || model->alpha != m_nodeAlpha) {
-		glUniform1f(m_locNodeAlpha, model->alpha);
-		m_nodeAlpha = model->alpha;
-	}
-
-	m_transX = model->textureOffsetX;
-	m_transY = model->textureOffsetY;
-	m_transPage = model->page;
-
-	// reset texture values
-	for (auto& i : m_baseTexInfo) { i = -1; }
-
-	glUniformMatrix4fv(m_locModelMat, 1, GL_FALSE, model->modelMat);
-
-	m_dirtyModel = false;
-}
-
-void R3DShader::DiscardAlpha(bool discard)
-{
-	glUniform1i(m_locDiscardAlpha, discard);
+  glUniform1i(m_loc.opaquePass, opaquePass);
 }
 
 void R3DShader::SetLayer(Layer layer)
 {
-	glUniform1i(m_locColourLayer, (GLint)layer);
+  glUniform1i(m_loc.outputLayer, GLint(layer));
 }
 
-void R3DShader::PrintShaderResult(GLuint shader)
+void R3DShader::SetViewportUniforms(const ViewportState *vp)
 {
-	//===========
-	GLint result;
-	GLint length;
-	//===========
-
-	glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
-
-	if (result == GL_FALSE) {
-
-		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
-
-		if (length > 0) {
-			std::vector<char> msg(length);
-			glGetShaderInfoLog(shader, length, NULL, msg.data());
-			printf("%s\n", msg.data());
-		}
-	}
+  glUniform1f(m_loc.fogDensity, vp->fogDensity);
+  glUniform1f(m_loc.fogStart, vp->fogStart);
+  glUniform3fv(m_loc.fogColour, 1, vp->fogColour);
+  glUniform1f(m_loc.fogAttenuation, vp->fogAttenuation);
+  glUniform1f(m_loc.fogAmbient, vp->fogAmbient);
+  glUniform3fv(m_loc.lighting, 2, vp->lightingParams);
+  glUniform1i(m_loc.sunClamp, vp->sunClamp);
+  glUniform1i(m_loc.intensityClamp, vp->intensityClamp);
+  glUniform4fv(m_loc.spotShape, 1, vp->spotEllipse);
+  glUniform2fv(m_loc.spotRange, 1, vp->spotRange);
+  glUniform3fv(m_loc.spotColour, 1, vp->spotColor);
+  glUniform3fv(m_loc.spotFogColour, 1, vp->spotFogColor);
+  glUniformMatrix4fv(m_loc.projMat, 1, GL_FALSE, vp->projectionMatrix);
+  glUniform1i(m_loc.hardwareStep, vp->hardwareStep);
+  glUniform1f(m_loc.cota, vp->cota);
 }
 
-void R3DShader::PrintProgramResult(GLuint program)
+void R3DShader::SetModelStates(const ModelInstance *model)
 {
-	//===========
-	GLint result;
-	//===========
+  if (!m_modelKnown || model->scale != m_sentScale)
+  {
+    glUniform1f(m_loc.modelScale, model->scale);
+    m_sentScale = model->scale;
+  }
+  if (!m_modelKnown || model->alpha != m_sentAlpha)
+  {
+    glUniform1f(m_loc.nodeAlpha, model->alpha);
+    m_sentAlpha = model->alpha;
+  }
+  m_modelKnown = true;
 
-	glGetProgramiv(program, GL_LINK_STATUS, &result);
+  m_offsetX = model->textureOffsetX;
+  m_offsetY = model->textureOffsetY;
+  m_pageFlip = model->page;
+  m_sent.rectValid = false;   // the texture position depends on the model's offset
 
-	if (result == GL_FALSE) {
+  glUniformMatrix4fv(m_loc.modelMat, 1, GL_FALSE, model->modelMat);
+}
 
-		GLint maxLength = 0;
-		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &maxLength);
+void R3DShader::ApplyStencil(Stencil mode)
+{
+  if (mode == Stencil::layered)
+  {
+    // A layered polygon is drawn only where no layered polygon has been
+    // drawn yet at this pixel, and counts itself in.
+    glStencilFunc(GL_EQUAL, 0, kLayerBits);
+    glStencilOp(GL_KEEP, GL_INCR, GL_INCR);
+    glStencilMask(kLayerBits);
+  }
+  else
+  {
+    glStencilFunc(GL_ALWAYS, m_sent.noLosReturn ? kLosBit : 0, kLosBit);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    glStencilMask(kLosBit);
+  }
+}
 
-		//The maxLength includes the NULL character
-		std::vector<GLchar> infoLog(maxLength);
-		glGetProgramInfoLog(program, maxLength, &maxLength, infoLog.data());
-		printf("%s\n", infoLog.data());
-	}
+void R3DShader::SetMeshUniforms(const DrawGroup *g)
+{
+  if (g == nullptr)
+    return;
+
+  const bool all = !m_groupKnown;
+  Sent &s = m_sent;
+
+  auto sendBool = [&](GLint loc, bool value, bool &sent) {
+    if (all || value != sent) { glUniform1i(loc, value); sent = value; }
+  };
+  auto sendInt = [&](GLint loc, int value, int &sent) {
+    if (all || value != sent) { glUniform1i(loc, value); sent = value; }
+  };
+  auto sendFloat = [&](GLint loc, float value, float &sent) {
+    if (all || value != sent) { glUniform1f(loc, value); sent = value; }
+  };
+
+  if (all)
+  {
+    glUniform1i(m_loc.sheet0, 0);
+    glUniform1i(m_loc.sheet1, 1);
+  }
+
+  sendBool(m_loc.texEnabled, g->textured, s.textured);
+  sendBool(m_loc.microEnabled, g->microTexture, s.micro);
+  sendInt(m_loc.texPage, g->page ^ m_pageFlip, s.page);
+  sendFloat(m_loc.microMinLOD, g->microTextureMinLOD, s.microMinLOD);
+  sendInt(m_loc.microID, g->microTextureID, s.microID);
+
+  const int rect[4] = { g->x + m_offsetX, g->y + m_offsetY, g->width, g->height };
+  if (all || !s.rectValid || rect[0] != s.rect[0] || rect[1] != s.rect[1] || rect[2] != s.rect[2] || rect[3] != s.rect[3])
+  {
+    glUniform4i(m_loc.texRect, rect[0], rect[1], rect[2], rect[3]);
+    for (int i = 0; i < 4; i++)
+      s.rect[i] = rect[i];
+    s.rectValid = true;
+  }
+
+  sendInt(m_loc.texFormat, g->format, s.format);
+  sendBool(m_loc.texInvert, g->inverted, s.invert);
+  sendBool(m_loc.contour, g->alphaTest, s.contour);
+  sendBool(m_loc.texAlpha, g->textureAlpha, s.texAlpha);
+  sendFloat(m_loc.fogIntensity, g->fogIntensity, s.fogIntensity);
+  sendBool(m_loc.lit, g->lighting, s.lit);
+  sendFloat(m_loc.shininess, g->shininess, s.shininess);
+  sendBool(m_loc.specular, g->specular, s.specular);
+  sendFloat(m_loc.specularValue, g->specularValue, s.specularValue);
+  sendBool(m_loc.fixedShading, g->fixedShading, s.fixedShading);
+  sendBool(m_loc.smoothShading, g->smoothShading, s.smoothShading);
+  sendBool(m_loc.translatorMap, g->translatorMap, s.translatorMap);
+
+  if (all || g->wrapModeU != s.wrapU || g->wrapModeV != s.wrapV)
+  {
+    s.wrapU = g->wrapModeU;
+    s.wrapV = g->wrapModeV;
+    const GLint wrap[2] = { s.wrapU, s.wrapV };
+    glUniform2iv(m_loc.texWrap, 1, wrap);
+  }
+
+  // Stencil. A change of the layered flag picks the mode for it; a change
+  // of only the line-of-sight flag switches to line-of-sight mode, even
+  // when the group is layered.
+  const bool losChanged = all || g->noLosReturn != s.noLosReturn;
+  const bool layerChanged = all || g->layered != s.layered;
+  s.noLosReturn = g->noLosReturn;
+  s.layered = g->layered;
+  if (layerChanged)
+    ApplyStencil(s.layered ? Stencil::layered : Stencil::lineOfSight);
+  else if (losChanged)
+    ApplyStencil(Stencil::lineOfSight);
+
+  m_groupKnown = true;
 }
 
 } // New3D

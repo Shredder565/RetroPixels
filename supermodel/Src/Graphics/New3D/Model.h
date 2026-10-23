@@ -1,277 +1,202 @@
-#ifndef _MODEL_H_
-#define _MODEL_H_
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Model.h
+//
+// The data the New3D engine builds from the Real3D scene database each
+// frame: vertices as uploaded to the GPU, groups of polygons that share the
+// same render state, model instances and viewports.
 
-#include <vector>
+#ifndef INCLUDED_NEW3D_MODEL_H
+#define INCLUDED_NEW3D_MODEL_H
+
+#include <cstdint>
 #include <memory>
-#include <cstring>
-#include "Types.h"
+#include <vector>
+
 #include "Mat4.h"
 
 namespace New3D {
 
-struct Vertex					// half vertex
+// Per-vertex values decoded from a polygon.
+struct VertexBase
 {
-	float pos[4];
-	float normal[3];
-	float texcoords[2];
-	float fixedShade;
-
-	static bool Equal(const Vertex& p1, const Vertex& p2)
-	{
-		return (p1.pos[0] == p2.pos[0] &&
-			p1.pos[1] == p2.pos[1] &&
-			p1.pos[2] == p2.pos[2]);
-	}
-
-	static void Average(const Vertex& p1, const Vertex& p2, Vertex& p3)
-	{
-		p3.pos[3] = 1.0f;	//always 1
-		p3.fixedShade = (p1.fixedShade + p2.fixedShade) * 0.5f;
-
-		for (int i = 0; i < 3; i++)	{ p3.pos[i] = (p1.pos[i] + p2.pos[i]) * 0.5f; }
-		for (int i = 0; i < 3; i++)	{ p3.normal[i] = (p1.normal[i] + p2.normal[i]) * 0.5f; }
-		for (int i = 0; i < 2; i++)	{ p3.texcoords[i] = (p1.texcoords[i] + p2.texcoords[i]) * 0.5f; }
-	}
+  float pos[4];
+  float normal[3];
+  float texcoords[2];
+  float fixedShade;
 };
 
-struct R3DPoly
+// A decoded polygon (3 or 4 vertices).
+struct Poly
 {
-	Vertex v[4];			// just easier to have them as an array
-	float faceNormal[3];	// we need this to help work out poly winding, i assume the h/w uses this instead of calculating normals itself
-	UINT8 faceColour[4];	// per face colour
-	float textureNP;
-	int number = 4;
+  VertexBase v[4];
+  float faceNormal[3];
+  uint8_t faceColour[4];
+  float textureNP;
+  int count = 4;
 };
 
-struct FVertex				// full vertex including face attributes
+// A vertex as stored in the vertex buffer: the vertex plus its polygon's
+// face values. The attribute pointers are set from this layout.
+struct GPUVertex
 {
-	Vertex base;			// composition instead of inheritance keeps FVertex standard-layout, making offsetof well-defined
-	float faceNormal[3];
-	UINT8 faceColour[4];
-	float textureNP;
-
-	FVertex& operator=(const Vertex& vertex)
-	{
-		base = vertex;
-		return *this;
-	}
-
-	FVertex() {}
-	FVertex(const R3DPoly& r3dPoly, int index)
-	{
-		for (int i = 0; i < 4; i++) { faceColour[i] = r3dPoly.faceColour[i]; }
-		for (int i = 0; i < 3; i++) { faceNormal[i] = r3dPoly.faceNormal[i]; }
-		textureNP = r3dPoly.textureNP;
-
-		*this = r3dPoly.v[index];
-	}
-
-	FVertex(const R3DPoly& r3dPoly, int index1, int index2)		// average of 2 points
-	{
-		Vertex::Average(r3dPoly.v[index1], r3dPoly.v[index2], base);
-
-		// copy face attributes
-		for (int i = 0; i < 4; i++) { faceColour[i] = r3dPoly.faceColour[i]; }
-		for (int i = 0; i < 3; i++) { faceNormal[i] = r3dPoly.faceNormal[i]; }
-		textureNP = r3dPoly.textureNP;
-	}
-
-	static bool Equal(const FVertex& p1, const FVertex& p2)
-	{
-		return Vertex::Equal(p1.base, p2.base);
-	}
-
-	static void Average(const FVertex& p1, const FVertex& p2, FVertex& p3)
-	{
-		Vertex::Average(p1.base, p2.base, p3.base);
-		for (int i = 0; i < 4; i++) { p3.faceColour[i] = p1.faceColour[i]; }
-		for (int i = 0; i < 3; i++) { p3.faceNormal[i] = p1.faceNormal[i]; }
-	}
+  VertexBase base;
+  float faceNormal[3];
+  uint8_t faceColour[4];
+  float textureNP;
 };
 
-enum class Layer { colour, trans1, trans2, trans12 /*both 1&2*/, all, none };
+// Which pass a polygon is drawn in.
+enum class Layer { colour, trans1, trans2, trans12, all, none };
 
-struct Mesh
+// Polygons of one model that share a render state, and where their vertices
+// are in the vertex buffer.
+struct DrawGroup
 {
-	//helper funcs
-	bool Render(Layer layer, float nodeAlpha)
-	{
-		bool nAlpha = nodeAlpha < 1.0f;
+  enum TexWrapMode : int { repeat = 0, repeatClamp, mirror, mirrorClamp };
 
-		switch (layer)
-		{
-		case Layer::colour:
-			if (polyAlpha || nAlpha) {
-				return false;
-			}
-			break;
-		case Layer::trans1:
-			if ((!textureAlpha && !polyAlpha && !nAlpha) || transLSelect) {
-				return false;
-			}
-			break;
-		case Layer::trans2:
-			if ((!textureAlpha && !polyAlpha && !nAlpha) || !transLSelect) {
-				return false;
-			}
-			break;
-		default:					// not using these types
-			return false;
-		}
+  // Is this group drawn in the given pass? nodeAlpha is the model's fade.
+  bool DrawnIn(Layer layer, float nodeAlpha) const
+  {
+    const bool faded = nodeAlpha < 1.0f;
+    const bool seeThrough = textureAlpha || polyAlpha || faded;
+    switch (layer)
+    {
+    case Layer::colour: return !polyAlpha && !faded;
+    case Layer::trans1: return seeThrough && !transLSelect;
+    case Layer::trans2: return seeThrough && transLSelect;
+    default:            return false;
+    }
+  }
 
-		return true;
-	}
+  // texture
+  int format = 0;
+  int x = 0, y = 0;
+  int width = 0, height = 0;
+  int page = 0;
+  bool inverted = false;
+  TexWrapMode wrapModeU = repeat;
+  TexWrapMode wrapModeV = repeat;
+  bool microTexture = false;
+  int microTextureID = 0;
+  float microTextureMinLOD = 0.0f;
 
-	enum TexWrapMode : int { repeat = 0, repeatClamp, mirror, mirrorClamp };
+  // state
+  bool textured = false;
+  bool polyAlpha = false;       // polygon transparency below 100%
+  bool textureAlpha = false;    // texture alpha is used
+  bool alphaTest = false;       // contour (1-bit alpha) processing
+  bool layered = false;         // stencil layered polygon
+  bool highPriority = false;    // drawn over everything else in its priority
+  bool transLSelect = false;    // translucency layer 0 / 1
+  bool translatorMap = false;   // colours scaled by 16
+  bool noLosReturn = false;     // invisible to line-of-sight tests
 
-	// texture
-	int		format		= 0;
-	int		x			= 0;
-	int		y			= 0;
-	int		width		= 0;
-	int		height		= 0;
-	int		page		= 0;
-	bool	inverted	= false;
+  // lighting
+  bool fixedShading = false;
+  bool smoothShading = false;
+  bool lighting = false;
+  bool specular = false;
+  float shininess = 0.0f;
+  float specularValue = 0.0f;
+  float fogIntensity = 1.0f;
 
-	TexWrapMode wrapModeU = TexWrapMode::repeat;
-	TexWrapMode wrapModeV = TexWrapMode::repeat;
-
-	// microtexture
-	bool	microTexture		= false;
-	int		microTextureID		= 0;
-	float	microTextureMinLOD	= 0;
-
-	// attributes
-	bool textured		= false;
-	bool polyAlpha		= false;		// specified in the rgba colour
-	bool textureAlpha	= false;		// use alpha in texture
-	bool alphaTest		= false;		// discard fragment based on alpha (ogl does this with fixed function)
-	bool layered		= false;		// stencil poly
-	bool highPriority	= false;		// rendered over the top
-	bool transLSelect	= false;		// actually the transparency layer, false = layer 0, true = layer 1
-	bool translatorMap	= false;		// colours are multiplied by 16
-	bool noLosReturn	= false;		// line of sight test
-
-	// lighting
-	bool fixedShading	= false;
-	bool smoothShading	= false;
-	bool lighting		= false;
-	bool specular		= false;
-	float shininess		= 0;
-	float specularValue = 0;
-	
-	// fog
-	float fogIntensity = 1.0f;
-
-	// opengl resources
-	int vboOffset		= 0;			// this will be calculated later
-	int vertexCount		= 0;			// /3 for triangles /4 for quads
+  // vertex buffer range
+  int vboOffset = 0;
+  int vertexCount = 0;
 };
 
-struct SortingMesh : public Mesh		// This struct temporarily holds the model data, before it gets copied to the main buffer
+// A group under construction, with its vertices.
+struct BuildingGroup : public DrawGroup
 {
-	std::vector<FVertex> verts;
+  std::vector<GPUVertex> verts;
 };
 
-struct Model
+// One drawn model.
+struct ModelInstance
 {
-	std::shared_ptr<std::vector<Mesh>> meshes;	// this reason why this is a shared ptr to an array, is that multiple models might use the same meshes
-
-	//which memory are we in
-	bool dynamic = true;
-
-	// texture offsets for model
-	int textureOffsetX = 0;
-	int textureOffsetY = 0;
-	int page = 0;
-
-	//matrices
-	float modelMat[16];
-
-	//model scale step 1.5+
-	float scale = 1.0f;
-
-	//node transparency
-	float alpha = 1.0f;
+  std::shared_ptr<std::vector<DrawGroup>> groups;   // shared between instances of the same ROM model
+  bool dynamic = true;        // vertices are rebuilt every frame
+  int textureOffsetX = 0;
+  int textureOffsetY = 0;
+  int page = 0;
+  float modelMat[16];
+  float scale = 1.0f;         // Step 1.5+ model scale
+  float alpha = 1.0f;         // fade from LOD blending
 };
 
-struct Viewport
+struct ViewportState
 {
-	float	vpX;					// these are the original hardware values
-	float	vpY;
-	float	vpWidth;
-	float	vpHeight;
-	float	angle_left;
-	float	angle_right;
-	float	angle_top;
-	float	angle_bottom;
-	float	cota;
+  // hardware values
+  float vpX, vpY, vpWidth, vpHeight;
+  float angle_left, angle_right, angle_top, angle_bottom;
+  float cota;
 
-	Mat4	projectionMatrix;		// projection matrix, we will calc this later when we have scene near/far vals
+  Mat4 projectionMatrix;
 
-	float	lightingParams[6];		// lighting parameters (see RenderViewport() and vertex shader)
-	bool	sunClamp;				// unknown how this is set
-	bool	intensityClamp;			// unknown how this is set
-	float	spotEllipse[4];			// spotlight ellipse (see RenderViewport())
-	float	spotRange[2];			// Z range
-	float	spotColor[3];			// color
-	float	fogColour[3];
-	float	fogStart;
-	float	fogDensity;
-	float	fogAttenuation;
-	float	fogAmbient;
-	float	scrollFog;				// a transparency value that determines if fog is blended over the bottom 2D layer
-	int		losPosX, losPosY;		// line of sight position
-	int		x, y;					// viewport coordinates (scaled and in OpenGL format)
-	int		width, height;			// viewport dimensions (scaled for display surface size)
-	int		priority;				// priority
-	int		select;					// viewport select?
-	int		number;					// viewport number
-	float	spotFogColor[3];		// spotlight color on fog
-	float	scrollAtt;
+  // lighting: sun direction (3), sun intensity, ambient intensity, unused
+  float lightingParams[6];
+  bool sunClamp;
+  bool intensityClamp;
 
-	int		hardwareStep;			// not really a viewport param but will do here
+  // spotlight: window position x/y and half size x/y, then Z start / extent
+  float spotEllipse[4];
+  float spotRange[2];
+  float spotColor[3];
+  float spotFogColor[3];
+
+  float fogColour[3];
+  float fogStart;
+  float fogDensity;
+  float fogAttenuation;
+  float fogAmbient;
+  float scrollFog;            // how much fog covers the 2D background
+  float scrollAtt;
+
+  int losPosX, losPosY;       // line of sight test position (Model 3 pixels)
+
+  // OpenGL viewport
+  int x, y, width, height;
+
+  int priority;
+  int select;
+  int number;
+  int hardwareStep;
 };
 
-class NodeAttributes
+// Saved per-node values that children inherit. Holds at most 128 saved
+// levels; deeper pushes are not stored (pops then restore older levels).
+class NodeStateStack
 {
 public:
+  NodeStateStack();
+  bool Push();
+  bool Pop();
+  void Reset();
 
-	NodeAttributes();
-
-	bool Push();
-	bool Pop();
-	bool StackLimit() const;
-	void Reset();
-
-	int currentTexOffsetX;
-	int currentTexOffsetY;
-	int currentPage;
-	float currentModelScale;
-	float currentModelAlpha;
-	bool currentDisableCulling;
+  int texOffsetX;
+  int texOffsetY;
+  int page;
+  float modelScale;
+  float modelAlpha;
+  bool disableCulling;
 
 private:
-
-	struct NodeAttribs
-	{
-		int texOffsetX;
-		int texOffsetY;
-		int page;
-		float modelScale;
-		float modelAlpha;	// from culling node
-		bool disableCulling;
-	};
-	std::vector<NodeAttribs> m_vecAttribs;
+  struct Saved
+  {
+    int texOffsetX, texOffsetY, page;
+    float modelScale, modelAlpha;
+    bool disableCulling;
+  };
+  std::vector<Saved> m_saved;
 };
 
-struct Node
+struct ViewportNode
 {
-	Viewport viewport;
-	std::vector<Model> models;
+  ViewportState viewport;
+  std::vector<ModelInstance> models;
 };
 
 } // New3D
 
-
-#endif
+#endif  // INCLUDED_NEW3D_MODEL_H

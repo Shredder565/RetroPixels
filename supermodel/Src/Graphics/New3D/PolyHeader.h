@@ -1,165 +1,130 @@
-﻿#ifndef _POLY_HEADER_H_
-#define _POLY_HEADER_H_
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// PolyHeader.h
+//
+// Reads the 7-word header that starts every polygon of a Real3D model.
+// After the header come the polygon's new vertices, 4 words each (X, Y, Z
+// with the normal or shade in their low bytes, then U/V); vertices shared
+// with the previous polygon are not stored again.
+//
+// Word 0  bits 31-26 specular coefficient    bit 25 clockwise winding
+//         bits 9-8 discard flags             bit 7 specular enable
+//         bit 6 quad (else triangle)         bits 3-0 vertex N shared
+// Word 1  bits 31-8 normal X (2.22)          bit 7 edge-on translucency
+//         bit 6 UV scale (1: 16.0, 0: 13.3)  bit 5 fixed shading
+//         bit 4 double sided                 bit 3 smooth shading
+//         bit 2 last polygon                 bit 1 RGB colour (else table)
+//         bit 0 no line-of-sight return
+// Word 2  bits 31-8 normal Y                 bits 7-5 microtexture number
+//         bit 4 microtexture                 bits 3-2 microtexture min LOD
+//         bit 1 U mirror                     bit 0 V mirror
+// Word 3  bits 31-8 normal Z                 bit 7 U smooth, bit 6 V smooth
+//         bits 5-3 width, 2-0 height (32 << n texels)
+// Word 4  bits 31-8 RGB colour or colour table index (bits 19-8)
+//         bit 7 translator map               bit 6 texture page
+//         bits 4-0 texture X bits 6-2 (in 32-texel units)
+// Word 5  bits 31-8 texture NP               bit 7 texture X bit 1
+//         bits 4-0 texture Y (32-texel units)
+// Word 6  bit 31 contour (alpha test)        bits 30-24 translator map offset
+//         bit 23 opaque                      bits 22-18 transparency (0-32)
+//         bit 17 translucency layer select   bit 16 luminous (no lighting)
+//         bits 15-11 light modifier          bit 10 texture enable
+//         bits 9-7 texture format            bits 6-5 shininess
+//         bit 4 high priority                bit 3 layered
+//         bits 2-0 texture alpha mode
 
-#include "Types.h"
+#ifndef INCLUDED_NEW3D_POLYHEADER_H
+#define INCLUDED_NEW3D_POLYHEADER_H
+
+#include <cstdint>
 
 namespace New3D {
-
-/*
-Polygon Data
-
-0x00:
-xxxxxx-- -------- -------- --------		Specular
-------x- -------- -------- --------		Clockwise winding
--------x xxxxxxxx xxxxxx-- --------		Polygon number (not always present)
--------- -------- ------xx --------		Discard
--------- -------- -------- x-------		Enable specular
--------- -------- -------- -x------		0 = Triangle, 1 = Quad
--------- -------- -------- --x-----		Poly is points
--------- -------- -------- ---x----		Anti-aliasing
--------- -------- -------- ----x---		Vertex 3 shared from previous polygon
--------- -------- -------- -----x--		Vertex 2 shared from previous polygon
--------- -------- -------- ------x-		Vertex 1 shared from previous polygon
--------- -------- -------- -------x		Vertex 0 shared from previous polygon
-
-0x01: 
-xxxxxxxx xxxxxxxx xxxxxxxx--------		Polygon normal X coordinate(2.22 fixed point)
--------- -------- -------- x-------		Edge on translucency (i guess anti-aliasing) 
--------- -------- -------- -x------		UV scale (0 = 13.3, 1 = 16.0)
--------- -------- -------- --x-----		Fixed shading (seems to only be enabled if lighting is enabled)
--------- -------- -------- ---x----		1 = Double-sided polygon
--------- -------- -------- ----x---		1 = smooth shading, 0 = flat shading
--------- -------- -------- -----x--		If set, this is the last polygon
--------- -------- -------- ------x-		Poly color, 1 = RGB, 0 = color table
--------- -------- -------- -------x		No los return (line of sight)
-
-0x02: 
-xxxxxxxx xxxxxxxx xxxxxxxx --------		Polygon normal Y coordinate(2.22 fixed point)
--------- -------- -------- xxx-----		Microtexture texture number 0-7
--------- -------- -------- ---x----		Microtexture enabled
--------- -------- -------- ----xx--		Microtexture min lod
--------- -------- -------- ------x-		Texture U mirror enable
--------- -------- -------- -------x		Texture V mirror enable
-
-0x03: 
-xxxxxxxx xxxxxxxx xxxxxxxx --------		Polygon normal Z coordinate(2.22 fixed point)
--------- -------- -------- x-------		X wrap smoothing
--------- -------- -------- -x------		Y wrap smoothing
--------- -------- -------- --xxx---		Texture width(in 8 - pixel tiles)
--------- -------- -------- -----xxx		Texture height(in 8 - pixel tiles)
-
-0x04: 
-xxxxxxxx xxxxxxxx xxxxxxxx --------		Color (RGB888 or two 12-bit indexes, sensor color and color)
--------- -------- -------- x-------		Translator map enable (multiplies colour values by 16)
--------- -------- -------- -x------		Texture page
--------- -------- -------- ---xxxxx		Upper 5 bits of texture U coordinate
-
-0x05 : 
-xxxxxxxx xxxxxxxx xxxxxxxx --------		Texture NP
--------- -------- -------- x-------		Low bit of texture U coordinate
--------- -------- -------- ---xxxxx		Low 5 bits of texture V coordinate
-
-0x06: 
-x------- -------- -------- --------		Alpha testing / contour
--xxxxxxx -------- -------- --------		Translator map offset?
--------- xxxxxx-- -------- --------		Polygon transparency 0-32
--------- ------x- -------- --------		Translucency pattern select (stipple alpha) - not sure if used?
--------- -------x -------- --------		1 = disable lighting
--------- -------- xxxxx--- --------		Polygon light modifier(Amount that a luminous polygon will burn through fog. Valid range is 0.0 to 1.0. 0.0 is completely fogged; 1.0 has no fog.)
--------- -------- -----x-- --------		Texture enable
--------- -------- ------xx x-------		Texture format
--------- -------- -------- -xx-----		Shininess
--------- -------- -------- ---x----		High priority
--------- -------- -------- ----x---		Layered polygon
--------- -------- -------- -----xxx		Translucency mode
-*/
 
 class PolyHeader
 {
 public:
-	PolyHeader();
-	PolyHeader(UINT32* h);
+  PolyHeader() = default;
+  explicit PolyHeader(const uint32_t *words) : header(words) {}
+  PolyHeader &operator=(const uint32_t *words) { header = words; return *this; }
 
-	void operator =(const UINT32* h);
+  // Walking a model
+  const uint32_t *StartOfData() const { return header + 7; }
+  bool NextPoly();                  // false at the last polygon
+  int NumTrianglesTotal() const;    // whole model from here, quads counting 2
 
-	UINT32*	StartOfData();
-	bool	NextPoly();
-	int		NumPolysTotal();		// could be quads or triangles
-	int		NumTrianglesTotal();
+  // Word 0
+  bool SpecularEnabled() const { return Bit(0, 7); }
+  float SpecularValue() const { return float(header[0] >> 26) / 63.f; }
+  bool Discard() const { return (header[0] & 0x300) == 0x300; }
+  bool Discard1() const { return Bit(0, 9); }
+  bool Discard2() const { return Bit(0, 8); }
+  int NumVerts() const { return Bit(0, 6) ? 4 : 3; }
+  int NumSharedVerts() const;
+  bool SharedVertex(int n) const { return Bit(0, unsigned(n)); }
 
-	//header 0
-	bool	SpecularEnabled();
-	float	SpecularValue();
-	bool	Clockwise();
-	int		PolyNumber();
-	bool	Discard();				// both bits
-	bool	Discard1();				// bit 1 only
-	bool	Discard2();				// bit 2 only
-	int		NumVerts();
-	int		NumSharedVerts();
-	bool	SharedVertex(int vertex);
+  // Word 1
+  void FaceNormal(float n[3]) const;
+  float UVScale() const { return Bit(1, 6) ? 1.0f : (1.0f / 8.0f); }
+  bool DoubleSided() const { return Bit(1, 4); }
+  bool LastPoly() const { return Bit(1, 2); }
+  bool PolyColor() const { return Bit(1, 1); }
+  bool FixedShading() const { return Bit(1, 5); }
+  bool SmoothShading() const { return Bit(1, 3); }
+  bool NoLosReturn() const { return Bit(1, 0); }
 
-	//header 1
-	void	FaceNormal(float n[3]);
-	float	UVScale();
-	bool	DoubleSided();
-	bool	LastPoly();
-	bool	PolyColor();			// if false uses LUT from ram
-	bool	FixedShading();
-	bool	SmoothShading();
-	bool	NoLosReturn();			// no line of sight return	(still not exactly how sure this attribute is used yet)
-	bool	EdgeOnTranslucency();
+  // Word 2
+  bool TexUMirror() const { return Bit(2, 1); }
+  bool TexVMirror() const { return Bit(2, 0); }
+  bool MicroTexture() const { return Bit(2, 4); }
+  int MicroTextureID() const { return int((header[2] >> 5) & 7); }
+  int MicroTextureMinLOD() const { return int((header[2] >> 2) & 3); }
 
-	//header 2
-	bool	TexUMirror();
-	bool	TexVMirror();
-	bool	MicroTexture();
-	int		MicroTextureID();
-	int		MicroTextureMinLOD();
+  // Word 3
+  int TexWidth() const { return TexSize(header[3] >> 3); }
+  int TexHeight() const { return TexSize(header[3]); }
+  bool TexSmoothU() const { return Bit(3, 7); }
+  bool TexSmoothV() const { return Bit(3, 6); }
 
-	// header 3
-	int		TexWidth();
-	int		TexHeight();
-	bool	TexSmoothU();
-	bool	TexSmoothV();
+  // Word 4
+  int ColorIndex() const { return int((header[4] >> 8) & 0xFFF); }
+  bool TranslatorMap() const { return Bit(4, 7); }
+  int Page() const { return Bit(4, 6) ? 1 : 0; }
+  int X() const;
+  int Y() const { return int((32 * (header[5] & 0x1F)) & 2047); }
 
-	//header 4
-	void	Color(UINT8& r, UINT8& g, UINT8& b);
-	int		ColorIndex();
-	int		SensorColorIndex();
-	bool	TranslatorMap();
-	int		Page();
+  // Word 5
+  float TextureNP() const { return float(header[5] >> 8); }
 
-	// header 5
-	int		X();
-	int		Y();
-	float	TextureNP();
+  // Word 6
+  bool AlphaTest() const { return Bit(6, 31); }
+  int TranslatorMapOffset() const { return int((header[6] >> 24) & 0x7F); }
+  uint8_t Transparency() const;     // 0-255
+  bool PolyAlpha() const { return !Bit(6, 23); }
+  bool TranslucencyPatternSelect() const { return Bit(6, 17); }
+  bool LightEnabled() const { return !Bit(6, 16); }
+  float LightModifier() const { return float((header[6] >> 11) & 0x1F) * (1.0f / 16.0f); }
+  bool TexEnabled() const { return Bit(6, 10); }
+  int TexFormat() const { return int((header[6] >> 7) & 7); }
+  float Shininess() const { return float((header[6] >> 5) & 3); }
+  bool HighPriority() const { return Bit(6, 4); }
+  bool Layered() const { return Bit(6, 3); }
+  bool TextureAlpha() const { return (header[6] & 7) != 0; }
 
-	//header 6
-	bool	Layered();
-	bool	HighPriority();
-	float	Shininess();
-	int		TexFormat();
-	bool	TexEnabled();
-	bool	LightEnabled();
-	bool	AlphaTest();
-	UINT8	Transparency();			// 0-255
-	bool	PolyAlpha();
-	bool	TextureAlpha();
-	bool	Luminous();
-	float	LightModifier();
-	int		TranslatorMapOffset();
-	bool	TranslucencyPatternSelect();
+  // A key made of every header field that affects how a polygon is drawn;
+  // polygons with equal keys are drawn together.
+  uint64_t Hash() const;
 
-	// misc
-	UINT64	Hash();		// make a unique hash for sorting by state
+  const uint32_t *header = nullptr;
 
-
-	//=============
-	UINT32* header;
-	//=============
+private:
+  bool Bit(int word, unsigned bit) const { return ((header[word] >> bit) & 1) != 0; }
+  static int TexSize(uint32_t field)
+  {
+    uint32_t n = field & 7;
+    return 32 << (n >= 6 ? 0 : n);   // 6 and 7 are not valid sizes
+  }
 };
 
 } // New3D
 
-#endif
+#endif  // INCLUDED_NEW3D_POLYHEADER_H
