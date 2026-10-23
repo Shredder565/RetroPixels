@@ -1,30 +1,10 @@
-/**
- ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2021 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
- **
- ** This file is part of Supermodel.
- **
- ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free
- ** Software Foundation, either version 3 of the License, or (at your option)
- ** any later version.
- **
- ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
- ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- ** more details.
- **
- ** You should have received a copy of the GNU General Public License along
- ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
- **/
-
-/*
- * Model3.h
- *
- * Header file defining the CModel3 and CModel3Config classes.
- */
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// The Model 3 main board: the PowerPC's address space (RAM, CROM, the
+// Real3D, the tile generator, the I/O board, backup RAM, the security
+// board, the PCI bridge, SCSI and the net board) and the frame loop that
+// runs the PowerPC, the sound board, the drive board and the net board,
+// optionally on threads of their own.
 
 #ifndef INCLUDED_MODEL3_H
 #define INCLUDED_MODEL3_H
@@ -46,39 +26,35 @@
 #include "Graphics/SuperAA.h"
 #include "OSD/Thread.h"
 
-/*
- * FrameTimings
- *
- * Timings within a frame, for debugging purposes
- */
+// How long the parts of the last frame took, in milliseconds (for
+// -dump-timings and the debugger).
 struct FrameTimings
 {
-  UINT32 ppcTicks;
-  UINT32 syncSize;
+  UINT32 ppcTicks;      // PowerPC
+  UINT32 syncSize;      // bytes copied for the render thread
   UINT32 syncTicks;
   UINT32 renderTicks;
-  UINT32 sndTicks;
-  UINT32 drvTicks;
+  UINT32 sndTicks;      // sound board
+  UINT32 drvTicks;      // drive board
   UINT32 netTicks;
-  UINT32 frameTicks;
+  UINT32 frameTicks;    // the whole frame
   UINT64 frameId;
 };
 
-/*
- * CModel3:
- *
- * A complete Model 3 system.
- *
- * Inherits IBus in order to pass the address space handlers to devices that
- * may need them (CPU, DMA, etc.)
- *
- * NOTE: Currently NOT re-entrant due to a non-OOP PowerPC core. Do NOT create
- * create more than one CModel3 object!
- */
+// One emulated Model 3. The PowerPC core is global, so only one can exist.
 class CModel3: public IEmulator, public IBus, public IPCIDevice
 {
 public:
-  // IEmulator interface
+  explicit CModel3(Util::Config::Node &config);
+  ~CModel3(void);
+
+  // IEmulator
+  Result Init(void);
+  Result LoadGame(const Game &game, const ROMSet &rom_set);
+  const Game &GetGame(void) const;
+  void Reset(void);
+  void RunFrame(void);
+  void RenderFrame(void);
   bool PauseThreads(void);
   bool ResumeThreads(void);
   void SaveState(CBlockFile *SaveState);
@@ -86,22 +62,11 @@ public:
   void SaveNVRAM(CBlockFile *NVRAM);
   void LoadNVRAM(CBlockFile *NVRAM);
   void ClearNVRAM(void);
-  void RunFrame(void);
-  void RenderFrame(void);
-  void Reset(void);
-  const Game &GetGame(void) const;
   void AttachRenderers(CRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA);
   void AttachInputs(CInputs *InputsPtr);
   void AttachOutputs(COutputs *OutputsPtr);
-  Result Init(void);
-  // For Scripting tweaks
-  Util::Config::Node& GetConfig() { return this->m_config; }
 
-  // IPCIDevice interface
-  UINT32 ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset) const;
-  void WritePCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset, UINT32 data);
-
-  // IBus interface
+  // IBus: the PowerPC's view of memory
   UINT8 Read8(UINT32 addr);
   UINT16 Read16(UINT32 addr);
   UINT32 Read32(UINT32 addr);
@@ -111,215 +76,146 @@ public:
   void Write32(UINT32 addr, UINT32 data);
   void Write64(UINT32 addr, UINT64 data);
 
-  /*
-   * LoadGame(game, rom_set):
-   *
-   * Loads a game, copying in the provided ROMs and setting the hardware
-   * stepping.
-   *
-   * Parameters:
-   *    game      Game information.
-   *    rom_set   ROMs.
-   *
-   * Returns:
-   *    OKAY if successful, FAIL otherwise. Prints errors.
-   */
-  Result LoadGame(const Game &game, const ROMSet &rom_set);
+  // IPCIDevice: PCI device 16 (seen by Daytona USA 2)
+  UINT32 ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset) const;
+  void WritePCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset, UINT32 data);
 
-  /*
-   * GetSoundBoard(void):
-   *
-   * Returns a reference to the sound board.
-   *
-   * Returns:
-   *    Pointer to CSoundBoard object.
-   */
+  // The boards, for the debugger and the front end
   CSoundBoard *GetSoundBoard(void);
-
-  /*
-   * GetDriveBoard(void):
-   *
-   * Returns a reference to the drive board.
-
-   * Returns:
-   *    Pointer to CDriveBoard object.
-   */
   CDriveBoard *GetDriveBoard(void);
+  INetBoard *GetNetBoard(void);
+  Util::Config::Node &GetConfig() { return m_config; }
 
-  /*
-  * GetNetBoard(void):
-  *
-  * Returns a reference to the net board.
-
-  * Returns:
-  *    Pointer to CNetBoard or CSimNetBoard object.
-  */
-  INetBoard * GetNetBoard(void);
-
-  /*
-   * DumpTimings(void):
-   *
-   * Prints all timings for the most recent frame to the console, for debugging purposes.
-   */
   void DumpTimings(void);
-
-  /*
-   * GetTimings(void):
-   *
-   * Returns timings for the most recent frame, for debugging purposes.
-   */
   FrameTimings GetTimings(void);
 
-  /*
-   * CModel3(config):
-   * ~CModel3(void):
-   *
-   * Constructor and destructor for Model 3 class. Constructor performs a
-   * bare-bones initialization of object; does not perform any memory
-   * allocation or any actions that can fail. The destructor will deallocate
-   * memory and free resources used by the object (and its child objects).
-   *
-   * Paramters:
-   *    config  Run-time configuration. The reference should be held because
-   *            this changes at run-time.
-   */
-  CModel3(Util::Config::Node &config);
-  ~CModel3(void);
-
-  /*
-   * Private Property.
-   * Tresspassers will be shot! ;)
-   */
 private:
-  // Private member functions
-  UINT8     ReadInputs(unsigned reg);
-  void      WriteInputs(unsigned reg, UINT8 data);
-  uint16_t  ReadSecurityRAM(uint32_t addr);
-  UINT32    ReadSecurity(unsigned reg);
-  void      WriteSecurity(unsigned reg, UINT32 data);
-  void      SetCROMBank(unsigned idx);
-  UINT8     ReadSystemRegister(unsigned reg) const;
-  void      WriteSystemRegister(unsigned reg, UINT8 data);
+  // I/O board (F0040000): controls, EEPROM, lamps, drive board, ADC
+  UINT8 ReadIO(unsigned reg);
+  void WriteIO(unsigned reg, UINT8 data);
+  UINT8 ReadButtons(void);         // reg 04
+  UINT8 ReadGamePort1(void);       // reg 08
+  UINT8 ReadGamePort2(void);       // reg 0C
+  UINT8 ReadADC(void);             // reg 3C
+  void GunCommand(UINT8 command);  // reg 24
 
-  void RunMainBoardFrame(void);                       // Runs PPC main board for a frame
-  void SyncGPUs(void);                                // Sync's up GPUs in preparation for rendering - must be called when PPC is not running
-  bool RunSoundBoardFrame(void);                      // Runs sound board for a frame
-  void RunDriveBoardFrame(void);                      // Runs drive board for a frame
-  void RunNetBoardFrame(void);                        // Runs net board for a frame
+  // Security board (F01A0000) and its RAM, read by the decryption device
+  uint16_t ReadCryptRAM(uint32_t wordAddr);
+  UINT32 ReadSecurity(unsigned reg);
+  void WriteSecurity(unsigned reg, UINT32 data);
 
-  bool    StartThreads(void);                         // Starts all threads
-  bool    StopThreads(void);                          // Stops all threads
-  void    DeleteThreadObjects(void);                  // Deletes all threads and synchronization objects
+  // System registers (F0100000)
+  void SelectCROMBank(unsigned value);
+  UINT8 ReadSysReg(unsigned reg) const;
+  void WriteSysReg(unsigned reg, UINT8 data);
 
-  static int StartMainBoardThread(void *data);        // Callback to start PPC main board thread
-  static int StartSoundBoardThread(void *data);       // Callback to start sound board thread (unsync'd)
-  static int StartSoundBoardThreadSyncd(void *data);  // Callback to start sound board thread (sync'd)
-  static int StartDriveBoardThread(void *data);       // Callback to start drive board thread
+  // Step 1.x address C0xxxxxx: the net board when it runs, else SCSI
+  bool SCSIAtC0(void) const;
 
-  static void AudioCallback(void *data);              // Audio buffer callback
+  // A frame's work for each board
+  void RunMainBoardFrame(void);
+  void SyncGPUs(void);
+  bool RunSoundBoardFrame(void);
+  void RunDriveBoardFrame(void);
+  void RunNetBoardFrame(void);
 
-  bool    WakeSoundBoardThread(void);                 // Used by audio callback to wake sound board thread (when not sync'd with render thread)
-  int     RunMainBoardThread(void);                   // Runs PPC main board thread (sync'd in step with render thread)
-  int     RunSoundBoardThread(void);                  // Runs sound board thread (not sync'd in step with render thread, ie running at full speed)
-  int     RunSoundBoardThreadSyncd(void);             // Runs sound board thread (sync'd in step with render thread)
-  int     RunDriveBoardThread(void);                  // Runs drive board thread (sync'd in step with render thread)
+  // Threads
+  bool StartThreads(void);
+  bool StopThreads(void);
+  void DeleteThreadObjects(void);
+  bool WaitForThreads(void);       // with m_notifyLock held
+  bool ThreadError(const char *where);
+  int WaitForWork(CSemaphore *go, bool *running);
+  bool FinishWork(bool *running, bool *done);
+  int MainBoardThread(void);
+  int SoundBoardThread(void);      // paced by the audio callback
+  int DriveBoardThread(void);
+  bool WakeSoundBoardThread(void);
+  static int MainBoardThreadEntry(void *self);
+  static int SoundBoardThreadEntry(void *self);
+  static int DriveBoardThreadEntry(void *self);
+  static void AudioCallback(void *self);
 
-  // Runtime configuration
   Util::Config::Node &m_config;
   bool m_multiThreaded;
   bool m_gpuMultiThreaded;
 
-  // Game and hardware information
   Game m_game;
-  int m_stepping;
+  int m_stepping = 0;             // 0x10, 0x15, 0x20 or 0x21
 
-  // Game inputs and outputs
-  CInputs   *Inputs;
-  COutputs  *Outputs;
+  CInputs *m_inputs = nullptr;
+  COutputs *m_outputs = nullptr;
 
-  // Input registers (game controls)
-  UINT8   inputBank;
-  UINT8   serialFIFO1, serialFIFO2;
-  UINT8   gunReg;
-  int     adcChannel;
+  // I/O board state
+  UINT8 m_ioBank = 0;             // reg 00: bank select and EEPROM lines
+  UINT8 m_serial1 = 0;            // serial FIFO 1 and 2 (light guns)
+  UINT8 m_serial2 = 0;
+  UINT8 m_gunReg = 0;
+  int m_adcChannel = 0;
+  UINT8 m_ioOut[2] = { 0, 0 };    // regs 10 (drive board) and 14 (lamps)
+  UINT8 m_midiControl = 0;        // sound board MIDI control port
 
-  // MIDI port
-  UINT8   midiCtrlPort; // controls MIDI (SCSP) IRQ behavior
+  // Memory, one allocation (see the layout in Model3.cpp)
+  UINT8 *m_pool = nullptr;
+  UINT8 *m_ram = nullptr;         // 8 MB, stored as little-endian words
+  UINT8 *m_crom = nullptr;        // 8 MB fixed CROM, then 128 MB banked
+  UINT8 *m_vrom = nullptr;        // 64 MB, the Real3D's
+  UINT8 *m_soundROM = nullptr;    // 512 KB, 68K program
+  UINT8 *m_sampleROM = nullptr;   // 16 MB
+  UINT8 *m_dsbROM = nullptr;      // 128 KB, DSB program
+  UINT8 *m_mpegROM = nullptr;     // 16 MB, DSB music
+  UINT8 *m_backupRAM = nullptr;   // 128 KB, battery backed
+  UINT8 *m_securityRAM = nullptr; // 128 KB
+  UINT8 *m_driveROM = nullptr;    // 64 KB, drive board program
+  UINT8 *m_netRAM = nullptr;      // 64 KB
+  UINT8 *m_netBuffer = nullptr;   // 128 KB
 
-  // Emulated core Model 3 memory regions
-  UINT8   *memoryPool;  // single allocated region for all ROM and system RAM
-  UINT8   *ram;         // 8 MB PowerPC RAM
-  UINT8   *crom;        // 8+128 MB CROM (fixed CROM first, then 64MB of banked CROMs -- Daytona2 might need extra?)
-  UINT8   *vrom;        // 64 MB VROM (video ROM, visible only to Real3D)
-  UINT8   *soundROM;    // 512 KB sound ROM (68K program)
-  UINT8   *sampleROM;   // 8 MB samples (68K)
-  UINT8   *dsbROM;      // 128 KB DSB ROM (Z80 program)
-  UINT8   *mpegROM;     // 8 MB DSB MPEG ROM
-  UINT8   *backupRAM;   // 128 KB Backup RAM (battery backed)
-  UINT8   *securityRAM; // 128 KB Security Board RAM
-  UINT8   *driveROM;    // 32 KB drive board ROM (Z80 program) (optional)
-  UINT8   *netRAM;		// 64 KB RAM
-  UINT8	  *netBuffer;	// 128 KB buffer
-  UINT8   OutputRegister[2];   // Input/output register for driveboard and lamps
+  UINT8 *m_cromBank = nullptr;    // the banked CROM mapped at FF000000
+  unsigned m_cromBankReg = 0;
 
-  // Banked CROM
-  UINT8     *cromBank;    // currently mapped in CROM bank
-  unsigned  cromBankReg;  // the CROM bank register
+  bool m_securityFirstRead = true;
+  unsigned m_securityPtr = 0;     // kept for the save state layout
 
-  // Security device
-  bool      m_securityFirstRead = true;
-  unsigned  securityPtr;  // pointer to current offset in security data
+  PPC_FETCH_REGION m_fetch[3];
 
-  // PowerPC
-  PPC_FETCH_REGION  PPCFetchRegions[3];
+  // Threads
+  bool m_gpusReady = false;
+  bool m_threadsStarted = false;
+  bool m_pause = false;
+  bool m_stop = false;
+  CThread *m_mainThread = nullptr;
+  CThread *m_soundThread = nullptr;
+  CThread *m_driveThread = nullptr;
+  bool m_mainRunning = false, m_mainDone = false;
+  bool m_soundRunning = false, m_soundDone = false;
+  bool m_driveRunning = false, m_driveDone = false;
+  bool m_soundWake = false;
+  CSemaphore *m_mainGo = nullptr;
+  CSemaphore *m_driveGo = nullptr;
+  CMutex *m_soundWakeLock = nullptr;
+  CCondVar *m_soundWakeCond = nullptr;
+  CMutex *m_notifyLock = nullptr;
+  CCondVar *m_notifyCond = nullptr;
 
-  // Multiple threading
-  bool        gpusReady;           // True if GPUs are ready to render
-  bool        startedThreads;      // True if threads have been created and started
-  bool        pauseThreads;        // True if threads should pause
-  bool        stopThreads;         // True if threads should stop
-  bool        syncSndBrdThread;    // True if sound board thread should be sync'd in step with render thread
-  CThread     *ppcBrdThread;       // PPC main board thread
-  CThread     *sndBrdThread;       // Sound board thread
-  CThread     *drvBrdThread;       // Drive board thread
-  bool        ppcBrdThreadRunning; // Flag to indicate PPC main board thread is currently processing
-  bool        ppcBrdThreadDone;    // Flag to indicate PPC main board thread has finished processing
-  bool        sndBrdThreadRunning; // Flag to indicate sound board thread is currently processing
-  bool        sndBrdThreadDone;    // Flag to indicate sound board thread has finished processing
-  bool        sndBrdWakeNotify;    // Flag to indicate that sound board thread has been woken by audio callback (when not sync'd with render thread)
-  bool        drvBrdThreadRunning; // Flag to indicate drive board thread is currently processing
-  bool        drvBrdThreadDone;    // Flag to indicate drive board thread has finished processing
+  FrameTimings m_timings;
 
-  // Thread synchronization objects
-  CSemaphore  *ppcBrdThreadSync;
-  CSemaphore  *sndBrdThreadSync;
-  CMutex      *sndBrdNotifyLock;
-  CCondVar    *sndBrdNotifySync;
-  CSemaphore  *drvBrdThreadSync;
-  CMutex      *notifyLock;
-  CCondVar    *notifySync;
-
-  // Frame timings
-  FrameTimings timings;
-
-  // Other devices
-  CIRQ        IRQ;            // Model 3 IRQ controller
-  CMPC10x     PCIBridge;      // MPC10x PCI/bridge/memory controller
-  CPCIBus     PCIBus;         // Model 3's PCI bus
-  C53C810     SCSI;           // NCR 53C810 SCSI controller
-  CRTC72421   RTC;            // Epson RTC-72421 real-time clock
-  C93C46      EEPROM;         // 93C46 EEPROM
-  CTileGen    TileGen;        // Sega 2D tile generator
-  CReal3D     GPU;            // Real3D graphics hardware
-  CSoundBoard SoundBoard;     // Sound board
-  CDSB        *DSB;           // Digital Sound Board (type determined dynamically at load time)
-  CDriveBoard *DriveBoard;    // Drive board
-  CCrypto     m_cryptoDevice; // Encryption device
-  CJTAG       m_jtag;         // JTAG interface
-  SuperAA     *m_superAA;
-  INetBoard   *NetBoard;      // Net board
-  bool		    m_runNetBoard;
+  // Devices
+  CIRQ m_irq;
+  CMPC10x m_pciBridge;
+  CPCIBus m_pciBus;
+  C53C810 m_scsi;
+  CRTC72421 m_rtc;
+  C93C46 m_eeprom;
+  CTileGen m_tileGen;
+  CReal3D m_gpu;
+  CSoundBoard m_soundBoard;
+  CDSB *m_dsb = nullptr;
+  CDriveBoard *m_driveBoard = nullptr;
+  CCrypto m_crypto;
+  CJTAG m_jtag;
+  SuperAA *m_superAA = nullptr;
+  INetBoard *m_netBoard = nullptr;
+  bool m_runNetBoard = false;
 };
-
 
 #endif  // INCLUDED_MODEL3_H

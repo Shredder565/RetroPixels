@@ -62,14 +62,14 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 37893 | 20.2% |
-| Supermodel (with or without RetroPixels changes) | 4984 | 2.7% |
-| Third-party | 145172 | 77.2% |
-| **All** | **188049** | 100% |
+| Original (RetroPixels) | 41191 | 22.1% |
+| Supermodel (with or without RetroPixels changes) | 0 | 0.0% |
+| Third-party | 145172 | 77.9% |
+| **All** | **186363** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
-| (top level) | 1671 | 542 | mixed (32% original) |
+| (top level) | 1431 | 1431 | original |
 | CPU (top level) | 34 | 34 | original |
 | CPU/68K | 19423 | 272 | mixed (1% original), 19151 lines third-party |
 | CPU/PowerPC | 3190 | 3190 | original |
@@ -78,7 +78,7 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | Graphics/Legacy3D | 2480 | 2480 | original |
 | Graphics/New3D | 4295 | 4295 | original |
 | Inputs | 4263 | 4263 | original |
-| Model3 (top level) | 9139 | 5284 | mixed (58% original) |
+| Model3 (top level) | 7693 | 7693 | original |
 | Model3/DriveBoard | 1858 | 1858 | original |
 | Network | 1580 | 1580 | original |
 | OSD (top level) | 1762 | 1762 | original |

@@ -1,112 +1,90 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// Reads Config/Games.xml (each game's identity, hardware and ROM layout)
+// and loads a game's ROM regions from a zip file, using the parent set's
+// zip next to it for a clone whose own zip holds only its changed files.
+
 #ifndef INCLUDED_GAMELOADER_H
 #define INCLUDED_GAMELOADER_H
 
 #include "Util/NewConfig.h"
-#include "Pkgs/unzip.h"
 #include "Game.h"
 #include "ROMSet.h"
 #include <map>
+#include <memory>
 #include <set>
+#include <string>
+#include <vector>
 
 class GameLoader
 {
-private:
-  // Describes a file node in the game XML
-  struct File
-  {
-    typedef std::shared_ptr<File> ptr_t;
-    std::string filename;
-    uint32_t offset = 0;
-    uint32_t crc32 = 0;
-    bool has_crc32 = false;
-    static ptr_t Create(const GameLoader &loader, const Util::Config::Node &file_node);
-    bool Matches(const std::string &filename, uint32_t crc32) const;
-    bool operator==(const File &rhs) const;
-  };
-
-  // Describes a region node in the game XML
-  struct Region
-  {
-    typedef std::shared_ptr<Region> ptr_t;
-    std::string region_name;
-    uint32_t stride = 0;
-    uint32_t chunk_size = 0;
-    std::string byte_layout;
-    bool required = false;
-    std::vector<File::ptr_t> files;
-    static ptr_t Create(const GameLoader &loader, const Util::Config::Node &region_node);
-    bool AttribsMatch(const ptr_t &other) const;
-    bool FindFileIndexByOffset(size_t *idx, uint32_t offset) const;
-  };
-
-  // Game information from XML
-  std::map<std::string, Game> m_game_info_by_game;
-
-  // ROM patches by game and by region. Cannot place into Region because child
-  // sets do not inherit parent patches, which may complicate merging.
-  typedef std::map<std::string, std::vector<ROM::BigEndianPatch>> PatchesByRegion_t;
-  std::map<std::string, PatchesByRegion_t> m_patches_by_game;
-
-  // Parsed XML
-  typedef std::map<std::string, Region::ptr_t> RegionsByName_t;
-  std::map<std::string, RegionsByName_t> m_regions_by_game;         // all games as defined in XML
-  std::map<std::string, RegionsByName_t> m_regions_by_merged_game;  // only child sets merged w/ parents
-  std::string m_xml_filename;
-
-  // Single compressed file inside of a zip archive
-  struct ZippedFile
-  {
-    unzFile zf = nullptr;
-    std::string zipfilename;  // zip archive
-    std::string filename;     // file inside the zip archive
-    uint32_t uncompressed_size = 0;
-    uint32_t crc32 = 0;
-  };
-
-  // Multiple zip archives
-  struct ZipArchive
-  {
-    std::vector<std::string> zipfilenames;
-    std::vector<unzFile> zfs;
-    std::map<uint32_t, ZippedFile> files_by_crc;
-
-    ~ZipArchive()
-    {
-      for (auto &zf: zfs)
-      {
-        unzClose(zf);
-      }
-    }
-  };
-
-  bool LoadZipArchive(ZipArchive *zip, const std::string &zipfilename) const;
-  const ZippedFile *LookupFile(const File::ptr_t &file, const ZipArchive &zip) const;
-  bool FileExistsInZipArchive(const File::ptr_t &file, const ZipArchive &zip) const;
-  bool LoadZippedFile(std::shared_ptr<uint8_t> *buffer, uint32_t *file_size, const GameLoader::File::ptr_t &file, const ZipArchive &zip) const;
-  static bool MissingAttrib(const GameLoader &loader, const Util::Config::Node &node, const std::string &attribute);
-  bool LoadGamesFromXML(const Util::Config::Node &xml);
-  bool MergeChildrenWithParents();
-  void LogROMDefinition(const std::string &game_name, const RegionsByName_t &regions_by_name) const;
-  bool ParseXML(const Util::Config::Node &xml);
-  bool LoadDefinitionXML(const std::string &filename);
-  static void FindEquivalentFiles(std::set<File::ptr_t> *equivalent_files, const std::set<File::ptr_t> &a, const std::set<File::ptr_t> &b);
-  void IdentifyGamesInZipArchive(
-    std::set<std::string> *complete_games,
-    std::map<std::string, std::set<File::ptr_t>> *files_missing_by_game,
-    const ZipArchive &zip,
-    const std::map<std::string, RegionsByName_t> &regions_by_game) const;
-  bool ComputeRegionSize(uint32_t *region_size, const Region::ptr_t &region, const ZipArchive &zip) const;
-  void ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename) const;
-  bool LoadRegion(ROM *buffer, const GameLoader::Region::ptr_t &region, const ZipArchive &zip) const;
-  bool LoadROMs(ROMSet *rom_set, const std::string &game_name, const ZipArchive &zip) const;
-
 public:
-  GameLoader(const std::string &xml_file);
+  explicit GameLoader(const std::string &xml_file);
+
+  // Finds the game in the zip file and loads its ROMs. True on error.
   bool Load(Game *game, ROMSet *rom_set, const std::string &zipfilename) const;
+
   const std::map<std::string, Game> &GetGames() const
   {
-    return m_game_info_by_game;
+    return m_games;
   }
+
+private:
+  // <file name= offset= crc32=>
+  struct RomFile
+  {
+    std::string name;     // lower case
+    uint32_t offset = 0;
+    uint32_t crc = 0;
+    bool hasCrc = false;
+
+    // Whether a file with this name and CRC is this one (by CRC when we
+    // know ours, else by name).
+    bool Is(const std::string &otherName, uint32_t otherCrc) const;
+  };
+  using FileRef = std::shared_ptr<RomFile>;
+  using FileSet = std::set<FileRef>;
+
+  // <region name= stride= chunk_size= byte_layout|byte_swap= required=>
+  struct Region
+  {
+    std::string name;
+    uint32_t stride = 0;        // bytes between a file's chunks in the region
+    uint32_t chunk = 0;         // bytes a file contributes per stride
+    std::string layout;         // byte order within a stride, e.g. "1032"
+    bool required = true;
+    std::vector<FileRef> files;
+  };
+  using RegionRef = std::shared_ptr<Region>;
+  using Regions = std::map<std::string, RegionRef>;
+  using Patches = std::map<std::string, std::vector<ROM::BigEndianPatch>>;
+
+  class Archive;  // the opened zip file(s)
+
+  struct Scan     // what one zip holds of each game
+  {
+    std::set<std::string> complete;
+    std::map<std::string, FileSet> missing;
+  };
+
+  std::string m_xmlFile;
+  std::map<std::string, Game> m_games;
+  std::map<std::string, Regions> m_regions;   // as Games.xml defines them
+  std::map<std::string, Regions> m_merged;    // clones, with the parent's regions
+  std::map<std::string, Patches> m_patches;   // per game (clones don't inherit)
+
+  void ReadDefinitions(const std::string &filename);
+  bool ReadGames(const Util::Config::Node &xml);
+  bool NeedsAttribute(const Util::Config::Node &node, const char *name) const;
+  RegionRef NewRegion(const Util::Config::Node &node) const;
+  FileRef NewFile(const Util::Config::Node &node) const;
+  void ReadRoms(const std::string &game, const Util::Config::Node &roms);
+  bool MergeClones();
+
+  Scan ScanArchive(const Archive &zip, const std::map<std::string, Regions> &sets) const;
+  std::string PickGame(bool *needParent, const Archive &zip, const std::string &zipfilename) const;
+  bool LoadRegion(ROM *rom, const Region &region, const Archive &zip) const;
+  bool LoadRoms(ROMSet *romSet, const std::string &game, const Archive &zip) const;
 };
 
 #endif  // INCLUDED_GAMELOADER_H
