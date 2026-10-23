@@ -97,8 +97,28 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # The owner's signing key, from repository secrets (RP_KEYSTORE_BASE64:
+      # the .jks file in base64; RP_KEYSTORE_PASSWORD, RP_KEY_ALIAS,
+      # RP_KEY_PASSWORD). Without them the APK is signed with the runner's
+      # debug key, for testing only.
+      - name: Signing key
+        env:
+          KS: ${{ secrets.RP_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            printf '%s' "$KS" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            echo "RP_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+            echo "signing with the owner's key"
+          else
+            echo "::warning::no RP_KEYSTORE_BASE64 secret: the APK is signed with a debug key (testing only)"
+          fi
+
       - name: Build the APK
         working-directory: android
+        env:
+          RP_KEYSTORE_PASSWORD: ${{ secrets.RP_KEYSTORE_PASSWORD }}
+          RP_KEY_ALIAS: ${{ secrets.RP_KEY_ALIAS }}
+          RP_KEY_PASSWORD: ${{ secrets.RP_KEY_PASSWORD }}
         run: ./gradlew --no-daemon assembleRelease
 
       - name: Package

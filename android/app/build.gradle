@@ -49,27 +49,37 @@ android {
         versionName appVersion
     }
 
-    // One fixed key signs every build, debug and release, so an APK built in
-    // Android Studio, by CI or for the next update installs over the last
-    // one and keeps the saves. It is public on purpose (its passwords are
-    // here): it proves nothing about who built an APK, and is only there so
-    // updates install over each other.
+    // Signing. No key is kept in the source. A release is signed with the
+    // owner's own key when one is given, from environment variables (CI
+    // passes them from repository secrets) or from a properties file outside
+    // the source (~/.retropixels/signing.properties, or RP_SIGNING_PROPERTIES):
+    //   RP_KEYSTORE=/path/to/upload.jks  RP_KEYSTORE_PASSWORD=...
+    //   RP_KEY_ALIAS=...                 RP_KEY_PASSWORD=...
+    // Without one, it is signed with this computer's Android debug key (made
+    // by the Android tools in ~/.android), which is fine for testing but not
+    // for Google Play, and an APK signed with another key can't update it.
+    def signingProps = new Properties()
+    def propsFile = new File(System.getenv('RP_SIGNING_PROPERTIES') ?: (System.getProperty('user.home') + '/.retropixels/signing.properties'))
+    if (propsFile.isFile()) {
+        propsFile.withInputStream { signingProps.load(it) }
+    }
+    def signingValue = { String k -> System.getenv(k) ?: signingProps.getProperty(k) }
+    def ownKey = signingValue('RP_KEYSTORE')
     signingConfigs {
-        retropixelsPublic {
-            storeFile file('retropixels-public.keystore')
-            storePassword 'retropixels'
-            keyAlias 'retropixels'
-            keyPassword 'retropixels'
+        if (ownKey) {
+            ownerKey {
+                storeFile file(ownKey)
+                storePassword signingValue('RP_KEYSTORE_PASSWORD')
+                keyAlias signingValue('RP_KEY_ALIAS')
+                keyPassword signingValue('RP_KEY_PASSWORD')
+            }
         }
     }
 
     buildTypes {
-        debug {
-            signingConfig signingConfigs.retropixelsPublic
-        }
         release {
             minifyEnabled false
-            signingConfig signingConfigs.retropixelsPublic
+            signingConfig ownKey ? signingConfigs.ownerKey : signingConfigs.debug
         }
     }
 

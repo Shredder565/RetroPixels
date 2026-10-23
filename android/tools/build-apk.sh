@@ -3,8 +3,8 @@
 # Plugin, from the Android SDK's command-line tools alone (Ubuntu:
 # apt-get install android-sdk-platform-23 android-sdk-build-tools apksigner):
 # javac against Android 6's android.jar (so only calls every supported phone
-# has are used, unless guarded), dx, aapt, zipalign and apksigner with the
-# public key. A check that the app compiles and packs; Android Studio or
+# has are used, unless guarded), dx, aapt, zipalign and apksigner (the owner's key
+# from RP_KEYSTORE, else the debug key). A check that the app compiles and packs; Android Studio or
 # ./gradlew assembleRelease make the real build.
 #
 #   sh android/tools/build-apk.sh [out.apk]
@@ -56,8 +56,24 @@ done
 (cd "$work/apk" && aapt add "$work/unsigned.apk" classes.dex lib/*/librpengine.so > /dev/null)
 zipalign -f -p 4 "$work/unsigned.apk" "$work/aligned.apk"
 mkdir -p "$(dirname "$out")"
-apksigner sign --ks "$proj/app/retropixels-public.keystore" --ks-pass pass:retropixels --key-pass pass:retropixels \
-    --ks-key-alias retropixels --min-sdk-version 24 --out "$out" "$work/aligned.apk"
+# Signed with the owner's key when RP_KEYSTORE (and RP_KEYSTORE_PASSWORD,
+# RP_KEY_ALIAS, RP_KEY_PASSWORD) are set, else with this computer's Android
+# debug key (~/.android/debug.keystore, made here if missing): no key is kept
+# in the source.
+if [ -n "${RP_KEYSTORE:-}" ]; then
+    apksigner sign --ks "$RP_KEYSTORE" --ks-pass env:RP_KEYSTORE_PASSWORD --key-pass env:RP_KEY_PASSWORD \
+        --ks-key-alias "$RP_KEY_ALIAS" --min-sdk-version 24 --out "$out" "$work/aligned.apk"
+else
+    dbg="$HOME/.android/debug.keystore"
+    if [ ! -f "$dbg" ]; then
+        mkdir -p "$HOME/.android"
+        keytool -genkeypair -keystore "$dbg" -storepass android -keypass android -alias androiddebugkey \
+            -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 >/dev/null 2>&1
+    fi
+    echo "no RP_KEYSTORE: signing with the debug key $dbg (for testing only)"
+    apksigner sign --ks "$dbg" --ks-pass pass:android --key-pass pass:android \
+        --ks-key-alias androiddebugkey --min-sdk-version 24 --out "$out" "$work/aligned.apk"
+fi
 apksigner verify --min-sdk-version 24 "$out"
 echo "$out: $(wc -c < "$out") bytes"
 aapt dump badging "$out" | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|launchable-activity|native-code)"

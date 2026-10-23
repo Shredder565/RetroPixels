@@ -58,10 +58,11 @@ for every Android CPU. If Go (go.dev) is installed, the build rebuilds it from
 the Go sources in this folder (cmd/retropixels-android and the packages it
 uses); without Go it uses the ones already there.
 
-Every build is signed with the same public key (android/app/
-retropixels-public.keystore, its password is in app/build.gradle), so an APK
-built here installs over the one from the RetroPixels releases and keeps the
-saves. The key is public on purpose: it doesn't prove who built an APK.
+No signing key is included. Android Studio signs what it builds with your
+computer's debug key, which is fine for testing; to publish, sign with your
+own key (see the signing notes in app/build.gradle). An APK signed with a
+different key can't install over one already on the phone: export your
+battery saves first, uninstall, then install.
 
 No games, BIOS files or chip programs are included.
 NOTE
