@@ -150,7 +150,7 @@ func TestSupermodelFindsTheGameOnceAndPlaysIt(t *testing.T) {
 		t.Fatalf("args:\n got %q\nwant %q", got, want)
 	}
 	ini, err := os.ReadFile(filepath.Join(home, "Config", "Supermodel.ini"))
-	if err != nil || !strings.Contains(string(ini), `InputAnalogJoyX = "JOY1_XAXIS"`) {
+	if err != nil || !strings.Contains(string(ini), `InputAnalogJoyX = "JOY1_XAXIS,MOUSE_XAXIS"`) {
 		t.Fatalf("Supermodel.ini: %v\n%s", err, ini)
 	}
 	cfgMu.Lock()
