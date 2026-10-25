@@ -182,8 +182,8 @@ func TestINI(t *testing.T) {
 	for _, want := range []string{
 		iniMarker, "[ Global ]", `InputSystem = "` + InputSystem + `"`,
 		`InputStart1 = "KEY_1,JOY1_BUTTON8"`, `InputCoin1 = "KEY_5,KEY_3,JOY1_BUTTON7"`,
-		`InputAnalogJoyX = "JOY1_XAXIS"`, `InputAnalogJoyY = "JOY1_YAXIS"`,
-		`InputAnalogJoyTrigger = "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS"`,
+		`InputAnalogJoyX = "JOY1_XAXIS,MOUSE_XAXIS"`, `InputAnalogJoyY = "JOY1_YAXIS,MOUSE_YAXIS"`,
+		`InputAnalogJoyTrigger = "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS,MOUSE_LEFT_BUTTON"`, `InputAnalogJoyEvent = "KEY_LEFTALT,KEY_S,JOY1_BUTTON2,JOY1_BUTTON6,MOUSE_RIGHT_BUTTON"`,
 		`InputUIExit = "KEY_ESCAPE,JOY1_BUTTON7+JOY1_BUTTON8"`,
 		"[ swtrilgya ]", "[ swtrilgy ]", `MusicVolume = "70"`,
 	} {
@@ -194,7 +194,7 @@ func TestINI(t *testing.T) {
 	if !strings.HasPrefix(s, iniMarker) {
 		t.Error("the marker must be the first line")
 	}
-	if !strings.Contains(INI(Controls{InvertY: true}), `InputAnalogJoyY = "JOY1_YAXIS_INV"`) {
+	if !strings.Contains(INI(Controls{InvertY: true}), `InputAnalogJoyY = "JOY1_YAXIS_INV,MOUSE_YAXIS"`) {
 		t.Error("InvertY")
 	}
 	// Every key Supermodel reads is set once in the global section.

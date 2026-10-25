@@ -345,6 +345,9 @@ Star Wars Trilogy Arcade (Supermodel)
   centre, full movement at the edge, corners reachable, and the aim glides
   like the arcade yoke; "Smoothness" sets how much, Off to Heavy): left stick aims, RT or A fires, RB or B is the event
   button (force), Start starts, Back inserts a coin, Back + Start leaves.
+  The mouse works at the same time, nothing to switch on: point to aim,
+  left button fires, right button is the event button (whichever of the
+  mouse and the stick moved last steers).
   Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
   F2 the game's test menu.
 - Settings, high scores and save states are kept in

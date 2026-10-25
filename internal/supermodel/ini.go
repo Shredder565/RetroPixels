@@ -71,6 +71,13 @@ func FlightStickEnv(on bool, smoothness string) string {
 //	Start          start, Back (View) inserts a coin
 //	Back + Start   leave the game
 //
+// The mouse works at the same time as the controller, with nothing to
+// switch on: where the pointer is in the game's window is where the yoke
+// points (the middle is centre; "Flight-style up / down" doesn't flip
+// the mouse, so the aim always follows the pointer), the left button fires, the right button is
+// the event button and the middle button is the second trigger. Whichever
+// moved last steers.
+//
 // The keyboard, as in RetroPixels' MAME tab: 5 coin, 1 start, arrow keys
 // for the yoke, Ctrl or A to fire, Alt or S for the event button, 9
 // service, F2 test menu, Esc leaves.
@@ -101,16 +108,16 @@ func INI(c Controls) string {
 	w("InputAnalogJoyRight", "KEY_RIGHT")
 	w("InputAnalogJoyUp", "KEY_UP")
 	w("InputAnalogJoyDown", "KEY_DOWN")
-	w("InputAnalogJoyX", "JOY1_XAXIS")
-	w("InputAnalogJoyY", y)
+	w("InputAnalogJoyX", "JOY1_XAXIS,MOUSE_XAXIS")
+	w("InputAnalogJoyY", y+",MOUSE_YAXIS")
 	if c.FlightStick {
 		b.WriteString("; The stick's dead zone is RetroPixels' flight stick shaping's own (round).\n")
 		w("InputJoy1XDeadZone", "0")
 		w("InputJoy1YDeadZone", "0")
 	}
-	w("InputAnalogJoyTrigger", "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS")
-	w("InputAnalogJoyEvent", "KEY_LEFTALT,KEY_S,JOY1_BUTTON2,JOY1_BUTTON6")
-	w("InputAnalogJoyTrigger2", "KEY_D,JOY1_BUTTON3")
+	w("InputAnalogJoyTrigger", "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS,MOUSE_LEFT_BUTTON")
+	w("InputAnalogJoyEvent", "KEY_LEFTALT,KEY_S,JOY1_BUTTON2,JOY1_BUTTON6,MOUSE_RIGHT_BUTTON")
+	w("InputAnalogJoyTrigger2", "KEY_D,JOY1_BUTTON3,MOUSE_MIDDLE_BUTTON")
 	w("InputAnalogJoyEvent2", "KEY_F,JOY1_BUTTON5")
 	b.WriteString("\n; Supermodel's own keys (Esc, or Back + Start on the controller, leaves the game)\n")
 	w("InputUIExit", "KEY_ESCAPE,JOY1_BUTTON7+JOY1_BUTTON8")

@@ -4,6 +4,7 @@ All notable changes to RetroPixels. Newest first.
 
 ## [Unreleased]
 
+- Star Wars Trilogy Arcade: the mouse now works too, at the same time as the Xbox controller, with nothing to switch on: point to aim, left button fires, right button is the event button (force / lock-on), middle button the second trigger. Whichever you moved last steers, so a mouse left off to one side doesn't pull the aim while you play with the controller. In RetroPixels.exe and RetroPixels Native.
 - RetroPixels for Android records games too: Settings > Record games automatically, on by default, as on Windows. Each game is recorded from start to end, only the game's picture (scaled up sharp, without the touch controls) and its sound, made into an .mp4 by the phone's own encoder (Android 7 to 9 asks once for storage access; newer phones ask nothing). The videos go to Movies/RetroPixels, named "<game> <date time>.mp4"; going to the background or closing the game ends the video, and the game plays on if the phone can't record.
 
 ## [2.21.0] - 2026-10-21

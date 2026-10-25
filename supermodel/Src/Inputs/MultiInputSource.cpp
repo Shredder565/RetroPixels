@@ -33,13 +33,17 @@ ESourceType CMultiInputSource::GetCombinedType(std::vector<CInputSource*> &sourc
 }
 
 CMultiInputSource::CMultiInputSource()
-	: CInputSource(SourceEmpty), m_isOr(true)
+	: CInputSource(SourceEmpty), m_isOr(true), m_followLast(false), m_current(0)
 {
 }
 
 CMultiInputSource::CMultiInputSource(bool isOr, std::vector<CInputSource*> &sources)
-	: CInputSource(GetCombinedType(sources)), m_isOr(isOr), m_parts(sources)
+	: CInputSource(GetCombinedType(sources)), m_isOr(isOr), m_parts(sources), m_followLast(false), m_current(0)
 {
+	if (isOr && sources.size() > 1)
+		for (CInputSource *s : sources)
+			if (s->IsPointerAxis())
+				m_followLast = true;
 }
 
 CMultiInputSource::~CMultiInputSource()
@@ -79,6 +83,34 @@ bool CMultiInputSource::GetValueAsSwitch(bool &val) const
 
 bool CMultiInputSource::GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
 {
+	if (m_followLast)
+	{
+		// Read every part (at rest counts as offVal); the first part whose
+		// value changed since the last read becomes the one followed. Until
+		// one moves, the first part is followed.
+		bool first = m_lastValues.size() != m_parts.size();
+		if (first)
+			m_lastValues.assign(m_parts.size(), offVal);
+		std::vector<int> values(m_parts.size(), offVal);
+		std::vector<bool> active(m_parts.size(), false);
+		bool moved = false;
+		for (size_t i = 0; i < m_parts.size(); i++)
+		{
+			int v = offVal;
+			active[i] = m_parts[i]->GetValueAsAnalog(v, minVal, offVal, maxVal);
+			values[i] = active[i] ? v : offVal;
+			if (!first && !moved && values[i] != m_lastValues[i])
+			{
+				m_current = i;
+				moved = true;
+			}
+			m_lastValues[i] = values[i];
+		}
+		if (!active[m_current])
+			return false;
+		val = values[m_current];
+		return true;
+	}
 	if (m_isOr)
 	{
 		for (CInputSource *s : m_parts)

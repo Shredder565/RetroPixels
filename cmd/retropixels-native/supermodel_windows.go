@@ -167,6 +167,8 @@ func (a *app) supermodelCommand(id int) {
 
 const supermodelKeysText = "Xbox controller: the left stick is the flight yoke, RT or A fires, RB or B is the event button " +
 	"(force / lock-on), Back inserts a coin, Start starts, Back + Start leaves the game.\n\n" +
+	"Mouse, at the same time: point to aim, left button fires, right button = event button, middle button = second trigger " +
+	"(whichever of the mouse and the stick moved last steers).\n\n" +
 	"Keyboard: 5 = insert coin, 1 = start, arrow keys = yoke, Left Ctrl or A = fire, Left Alt or S = event button, " +
 	"F5 / F7 = save / load state, F6 = change slot, Alt+P = pause, Alt+R = reset, F2 = test menu, 9 = service, Esc = leave the game.\n\n" +
 	"Supermodel keeps the game's settings, high scores and save states in " + `%APPDATA%\RetroPixels\Supermodel` +
