@@ -1,8 +1,8 @@
 // Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 //
 // Fixed-size integer names and the success/failure result used across the
-// emulator. C files (the 68000 core) include this too, so it stays plain C
-// apart from the scoped enum, which only C++ gets.
+// emulator. It stays plain C apart from the scoped enum, which only C++
+// gets, so C code can include it too.
 
 #ifndef INCLUDED_TYPES_H
 #define INCLUDED_TYPES_H

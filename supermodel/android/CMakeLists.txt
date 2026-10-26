@@ -3,8 +3,7 @@
 # android runs this once per ABI with the NDK's toolchain file; see
 # docs/supermodel.md.
 #
-#   SM_TREE      the fetched tree (build.sh fetch): Src/ and the generated
-#                68000 core in obj/ (build.sh's musashi step)
+#   SM_SRC       the engine's code (default: supermodel/Src next to this)
 #   SM_SDL_SRC   the pinned SDL2 source (pins.sh SDL2_SRC_*)
 #   SM_VERSION   the version string save states and NVRAM carry
 #
@@ -14,13 +13,13 @@
 cmake_minimum_required(VERSION 3.18)
 project(supermodel_android C CXX)
 
-set(SM_TREE "" CACHE PATH "the fetched Supermodel tree (with Src/ and obj/)")
+set(SM_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../Src" CACHE PATH "the engine's code (supermodel/Src)")
 set(SM_SDL_SRC "" CACHE PATH "the pinned SDL2 source")
-set(SM_VERSION "0.3a-WIP" CACHE STRING "Supermodel's version string")
+set(SM_VERSION "rp-dev" CACHE STRING "the engine's version string")
 option(SM_HOST_GLES "build supermodel-gles for Linux instead" OFF)
 
-if(NOT EXISTS "${SM_TREE}/Src/OSD/SDL/Main.cpp" OR NOT EXISTS "${SM_TREE}/obj/m68kops.c")
-  message(FATAL_ERROR "SM_TREE must be the tree build.sh fetched, with obj/m68kops.c generated")
+if(NOT EXISTS "${SM_SRC}/OSD/SDL/Main.cpp")
+  message(FATAL_ERROR "SM_SRC must be supermodel/Src")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -29,9 +28,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(S "${SM_TREE}/Src")
+set(S "${SM_SRC}")
 
-# What the desktop Makefile builds (Makefiles/Rules.inc, SRC_FILES), less
+# What the desktop build compiles (supermodel/Makefile, SOURCES), less
 # GLEW, the settings window (Dear ImGui), networking (SDL_net), the legacy
 # 3D engine and the debugger; plus the OpenGL ES shader translation and, on
 # Android, OSD/Android.
@@ -45,7 +44,7 @@ set(SM_SOURCES
   Graphics/FBO.cpp Graphics/Render2D.cpp Graphics/SuperAA.cpp Graphics/GLES/GLES.cpp
   Model3/TileGen.cpp Model3/Model3.cpp CPU/PowerPC/ppc.cpp
   OSD/SDL/Main.cpp OSD/SDL/Audio.cpp OSD/SDL/Thread.cpp OSD/RetroPixels.cpp
-  Model3/SoundBoard.cpp Sound/SCSP.cpp Sound/SCSPDSP.cpp CPU/68K/68K.cpp
+  Model3/SoundBoard.cpp Sound/SCSP.cpp Sound/SCSPDSP.cpp CPU/68K/68K.cpp CPU/68K/M68000.cpp
   Model3/DSB.cpp CPU/Z80/Z80.cpp Model3/IRQ.cpp Model3/53C810.cpp Model3/PCI.cpp Model3/RTC72421.cpp
   Model3/DriveBoard/DriveBoard.cpp Model3/DriveBoard/WheelBoard.cpp Model3/DriveBoard/JoystickBoard.cpp
   Model3/DriveBoard/SkiBoard.cpp Model3/DriveBoard/BillBoard.cpp Model3/DriveBoard/Z80CTC.cpp
@@ -60,17 +59,9 @@ if(ANDROID)
 endif()
 list(TRANSFORM SM_SOURCES PREPEND "${S}/")
 
-set(SM_MUSASHI
-  "${S}/CPU/68K/Musashi/m68kcpu.c"
-  "${SM_TREE}/obj/m68kops.c" "${SM_TREE}/obj/m68kopac.c" "${SM_TREE}/obj/m68kopdm.c" "${SM_TREE}/obj/m68kopnz.c")
-set_source_files_properties(${SM_MUSASHI} PROPERTIES
-  COMPILE_DEFINITIONS "INLINE=static inline"
-  # sys/types.h first: bionic typedefs uint, which m68kcpu.h #defines
-  COMPILE_OPTIONS "-Wno-unused-variable;-include;sys/types.h")
-
 # Every source folder is on the include path, as with the Makefile; the
 # OpenGL ES stand-in for GLEW (Graphics/GLES/GL/glew.h) comes first.
-set(SM_INCLUDES "${S}/Graphics/GLES" "${SM_TREE}/obj" "${S}/CPU/68K/Musashi")
+set(SM_INCLUDES "${S}/Graphics/GLES" "${S}")
 foreach(f IN LISTS SM_SOURCES)
   get_filename_component(d "${f}" DIRECTORY)
   list(APPEND SM_INCLUDES "${d}")
@@ -82,7 +73,7 @@ set(SM_DEFINES SUPERMODEL_GLES SUPERMODEL_NO_NET SUPERMODEL_NO_GUI "SUPERMODEL_V
 if(SM_HOST_GLES)
   find_package(SDL2 REQUIRED)
   find_package(ZLIB REQUIRED)
-  add_executable(supermodel-gles ${SM_SOURCES} ${SM_MUSASHI})
+  add_executable(supermodel-gles ${SM_SOURCES})
   target_include_directories(supermodel-gles PRIVATE ${SM_INCLUDES} ${SDL2_INCLUDE_DIRS})
   target_compile_definitions(supermodel-gles PRIVATE ${SM_DEFINES})
   target_link_libraries(supermodel-gles PRIVATE ${SDL2_LIBRARIES} GLESv2 ZLIB::ZLIB pthread m)
@@ -107,7 +98,7 @@ set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory("${SM_SDL_SRC}" sdl EXCLUDE_FROM_ALL)
 
-add_library(supermodel SHARED ${SM_SOURCES} ${SM_MUSASHI})
+add_library(supermodel SHARED ${SM_SOURCES})
 target_include_directories(supermodel PRIVATE ${SM_INCLUDES})
 target_compile_definitions(supermodel PRIVATE ${SM_DEFINES})
 target_compile_options(supermodel PRIVATE -Wno-unused-parameter)

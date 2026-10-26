@@ -1,9 +1,9 @@
 #!/bin/sh
-# Builds RetroPixels' Supermodel (Sega Model 3 arcade emulator) from its
-# code in Src/ (RetroPixels' copy, being rewritten) and the rest of the
-# pinned upstream tree plus the patches in patches/ (see README.txt).
+# Builds RetroPixels' Model 3 engine (supermodel / supermodel.exe, the
+# Supermodel tab's Star Wars Trilogy Arcade) from RetroPixels' own code in
+# supermodel/Src with supermodel/Makefile (desktop) or supermodel/android
+# (Android), against the libraries pinned in pins.sh (see README.txt).
 #
-#   sh supermodel/build.sh fetch            get the source and apply the patches
 #   sh supermodel/build.sh linux   <outdir> build for Linux, with the pinned SDL2 and SDL2_net built from
 #                                           source and bundled in lib/ (needs cmake, GL/GLU, zlib and SDL's
 #                                           X11/Wayland/PulseAudio/ALSA dev packages; see supermodel.yml)
@@ -13,58 +13,30 @@
 #                                           ANDROID_NDK_HOME / ANDROID_NDK or the pinned one; see below
 #   sh supermodel/build.sh gles <outdir>    build supermodel-gles, the Android build's OpenGL ES renderer as a
 #                                           Linux program (system SDL2 and Mesa's GLES), for testing on a PC
-#   sh supermodel/build.sh check            only check the pins and that the patches apply
+#   sh supermodel/build.sh test             the 68000 wrapper test (the C++ core against the Go one:
+#                                           go test ./cores/m68k -run Supermodel)
 #
 # <outdir>/Supermodel gets the program and the files it needs next to it
-# (Config/Games.xml, Config/Music.xml, Assets/), its licence, what was
-# changed, and the source it was built from (Supermodel-source.tar.gz).
-# On Linux also lib/ with the bundled libraries (found through the
-# program's RUNPATH $ORIGIN/lib) and their licences in lib/LICENSES.
+# (Config/Games.xml, Assets/ with the crosshair pictures), RetroPixels'
+# LICENSE.txt and THIRD-PARTY-NOTICES.txt, and VERSION.txt. On Linux also
+# lib/ with the bundled libraries (found through the program's RUNPATH
+# $ORIGIN/lib) and their licences in lib/LICENSES.
 # SM_WORK sets the working folder (default: supermodel/build, not committed).
 #
 # android puts in <outdir>: jniLibs/<abi>/libsupermodel.so and libSDL2.so,
-# assets/supermodel/ (Config/Games.xml, Config/Music.xml, Assets/, the
-# licences and VERSION.txt) and java/org/libsdl/app/ (SDL's Android Java
-# code, from the same SDL source); the app's Gradle build uses that folder
+# assets/supermodel/ (Config/Games.xml, Assets/, the notices, SDL's licence
+# and VERSION.txt) and java/org/libsdl/app/ (SDL's Android Java code, from
+# the same SDL source); the app's Gradle build uses that folder
 # (android/app/src/main/supermodel).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/.." && pwd)
 . "$here/pins.sh"
 work=${SM_WORK:-$here/build}
-src="$work/src"
 jobs=$(nproc 2>/dev/null || echo 2)
 
 log() { printf '== %s\n' "$*"; }
-
-fetch() {
-	mkdir -p "$work"
-	if [ ! -d "$src/.git" ]; then
-		rm -rf "$src"
-		git init -q "$src"
-		git -C "$src" remote add origin "$SUPERMODEL_REPO"
-	fi
-	if [ "$(git -C "$src" rev-parse -q --verify HEAD 2>/dev/null || true)" != "$SUPERMODEL_COMMIT" ]; then
-		log "fetching Supermodel $SUPERMODEL_COMMIT"
-		git -C "$src" fetch -q --depth 1 origin "$SUPERMODEL_COMMIT"
-		git -C "$src" -c advice.detachedHead=false checkout -q -f FETCH_HEAD
-	fi
-	got=$(git -C "$src" rev-parse HEAD)
-	[ "$got" = "$SUPERMODEL_COMMIT" ] || { echo "got commit $got, wanted $SUPERMODEL_COMMIT" >&2; exit 1; }
-	# Start from the clean upstream commit each time, then patch.
-	git -C "$src" reset -q --hard
-	git -C "$src" clean -q -fdx -e obj -e obj64 -e bin -e bin64
-	for p in "$here"/patches/*.patch; do
-		log "applying $(basename "$p")"
-		git -C "$src" apply --whitespace=nowarn "$p"
-	done
-	# The emulator's code is RetroPixels' copy in supermodel/Src, which is
-	# being rewritten (docs/supermodel-original.md); upstream only gives the
-	# rest of the tree (Makefiles, Config, Assets, Docs).
-	rm -rf "$src/Src"
-	cp -R "$here/Src" "$src/Src"
-	git -C "$src" add -A
-}
 
 # download <url> <sha256> <file>
 download() {
@@ -75,16 +47,6 @@ download() {
 	curl -fsSL --retry 3 -o "$3.part" "$1"
 	echo "$2  $3.part" | sha256sum -c - >/dev/null || { echo "SHA-256 mismatch for $1" >&2; rm -f "$3.part"; exit 1; }
 	mv "$3.part" "$3"
-}
-
-# Pre-generates the 68K emulator's sources with the build machine's own C
-# compiler (the Makefile would build its generator for Windows and then
-# couldn't run it).
-musashi() {
-	obj="$src/$1"
-	mkdir -p "$obj"
-	cc -o "$obj/m68kmake.exe" "$src/Src/CPU/68K/Musashi/m68kmake.c"
-	(cd "$src" && "$obj/m68kmake.exe" "$1" Src/CPU/68K/Musashi/m68k_in.c >/dev/null)
 }
 
 windows_deps() {
@@ -113,10 +75,6 @@ windows_deps() {
 	# Windows headers named in another case than MinGW-w64's own (Windows
 	# file names ignore case, Linux ones don't).
 	echo '#include <xinput.h>' > "$prefix/include/XInput.h"
-	# The Makefile calls plain "windres".
-	mkdir -p "$deps/shim"
-	printf '#!/bin/sh\nexec x86_64-w64-mingw32-windres "$@"\n' > "$deps/shim/windres"
-	chmod +x "$deps/shim/windres"
 	rm -rf "$deps/x"
 	touch "$stamp"
 }
@@ -240,9 +198,28 @@ android_sdl() {
 	touch "$stamp"
 }
 
-# The version string the desktop builds carry (save states and NVRAM name it).
+# The version string (save states and NVRAM name it): rp-<commit date>-<commit>
+# of the RetroPixels source being built.
 sm_version() {
-	(cd "$src" && make -s -f Makefiles/Makefile.UNIX version 2>/dev/null) || echo "0.3a-git-$(git -C "$src" rev-parse --short HEAD)"
+	if v=$(git -C "$repo" log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null) &&
+		h=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null); then
+		echo "rp-$v-$h"
+	else
+		echo "rp-dev"
+	fi
+}
+
+# notices <folder>: RetroPixels' licence and the third-party notices.
+notices() {
+	cp "$repo/LICENSE.txt" "$repo/THIRD-PARTY-NOTICES.txt" "$1/"
+}
+
+# make_engine <target> [make settings]: builds with supermodel/Makefile into
+# $work/<target>.
+make_engine() {
+	t=$1
+	shift
+	make -C "$here" -j"$jobs" TARGET="$t" OUT="$work/$t" VERSION="$version" "$@"
 }
 
 # android_build <outdir>
@@ -252,7 +229,6 @@ android_build() {
 	command -v ninja >/dev/null && gen="-G Ninja"
 	mkdir -p "$1"
 	out=$(cd "$1" && pwd)
-	version=$(sm_version)
 	rm -rf "$out/jniLibs" "$out/assets" "$out/java"
 	for abi in ${SM_ANDROID_ABIS:-$ANDROID_ABIS}; do
 		b="$work/android-build/$abi"
@@ -262,7 +238,7 @@ android_build() {
 			-DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
 			-DANDROID_ABI="$abi" -DANDROID_PLATFORM="android-$ANDROID_MIN_SDK" -DANDROID_STL=c++_static \
 			-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
-			-DSM_TREE="$src" -DSM_SDL_SRC="$sdlsrc" -DSM_VERSION="$version" >"$work/android-cmake-$abi.log" ||
+			-DSM_SDL_SRC="$sdlsrc" -DSM_VERSION="$version" >"$work/android-cmake-$abi.log" ||
 			{ cat "$work/android-cmake-$abi.log"; exit 1; }
 		cmake --build "$b" -j"$jobs" --target supermodel SDL2
 		mkdir -p "$out/jniLibs/$abi"
@@ -271,28 +247,25 @@ android_build() {
 	done
 	a="$out/assets/supermodel"
 	mkdir -p "$a/Config" "$a/Assets"
-	cp "$src/Config/Games.xml" "$src/Config/Music.xml" "$a/Config/"
-	cp "$src/Assets/"*.bmp "$a/Assets/"
-	cp "$src/Docs/LICENSE.txt" "$a/LICENSE.txt"
-	cp "$src/Docs/RetroPixels.txt" "$a/RetroPixels.txt"
+	cp "$here/Config/Games.xml" "$a/Config/"
+	cp "$here/Assets/"*.bmp "$a/Assets/"
+	notices "$a"
 	cp "$sdlsrc/LICENSE.txt" "$a/SDL2-LICENSE.txt"
 	{
-		echo "Supermodel $version, modified for RetroPixels"
-		echo "Upstream: $SUPERMODEL_REPO commit $SUPERMODEL_COMMIT; RetroPixels' Src/ and patches from https://github.com/shredder565/retropixels (supermodel/)"
-		echo "Licence: GNU General Public License v3 or later (LICENSE.txt)"
+		echo "RetroPixels Model 3 engine (Supermodel for RetroPixels) $version"
+		echo "Copyright (c) 2025-2026 Shredder565. All rights reserved (LICENSE.txt); third-party components and their licences: THIRD-PARTY-NOTICES.txt"
 		echo "Built with the Android NDK ($(sed -n 's/^Pkg.Revision *= *//p' "$ndk/source.properties" 2>/dev/null)), SDL $SDL2_VERSION (SDL2-LICENSE.txt, zlib licence) and the NDK's zlib, for Android $ANDROID_MIN_SDK and later, OpenGL ES 3.2"
 		echo "No games, ROMs or BIOS files are included."
 	} > "$a/VERSION.txt"
 	mkdir -p "$out/java/org/libsdl/app"
 	cp "$sdlsrc/android-project/app/src/main/java/org/libsdl/app/"*.java "$out/java/org/libsdl/app/"
-	echo "$SDL2_SRC_SHA256 $SUPERMODEL_COMMIT $version" > "$out/.built"
+	echo "$SDL2_SRC_SHA256 $version" > "$out/.built"
 	log "Android libraries in $out"
 	find "$out/jniLibs" -name '*.so' -exec ls -la {} +
 }
 
-# package <program> <outdir>
+# package <program> <outdir> [linux|windows]
 package() {
-	# Absolute, because the source tarball is written from inside $src.
 	mkdir -p "$2"
 	out="$(cd "$2" && pwd)/Supermodel"
 	rm -rf "$out"
@@ -301,86 +274,66 @@ package() {
 	if [ "${3:-}" = linux ]; then
 		linux_libs "$1" "$out"
 	fi
-	cp "$src/Config/Games.xml" "$src/Config/Music.xml" "$out/Config/"
-	cp "$src/Assets/"*.bmp "$out/Assets/" 2>/dev/null || true
-	cp "$src/Docs/LICENSE.txt" "$out/LICENSE.txt"
-	cp "$src/Docs/README.txt" "$out/README.txt"
-	cp "$src/Docs/RetroPixels.txt" "$out/RetroPixels.txt"
-	version=$(cd "$src" && make -s -f Makefiles/Makefile.UNIX version 2>/dev/null || echo "0.3a-git-$(git rev-parse --short HEAD)")
+	cp "$here/Config/Games.xml" "$out/Config/"
+	cp "$here/Assets/"*.bmp "$out/Assets/"
+	notices "$out"
 	{
-		echo "Supermodel $version, modified for RetroPixels (see RetroPixels.txt)"
-		echo "Upstream: $SUPERMODEL_REPO commit $SUPERMODEL_COMMIT"
-		echo "Licence: GNU General Public License v3 or later (LICENSE.txt)"
-		echo "Source: Supermodel-source.tar.gz in this folder (RetroPixels' Src/ in the upstream tree, with the patches applied)"
+		echo "RetroPixels Model 3 engine (Supermodel for RetroPixels) $version"
+		echo "Copyright (c) 2025-2026 Shredder565. All rights reserved (LICENSE.txt); third-party components and their licences: THIRD-PARTY-NOTICES.txt"
 		[ "${3:-}" = linux ] && echo "Built on $(. /etc/os-release && echo "$PRETTY_NAME") with GCC $(gcc -dumpfullversion), SDL $SDL2_VERSION and SDL_net $SDL2_NET_VERSION (lib/, zlib licence), GLU from Mesa (lib/libGLU.so.1, SGI Free Software License B); needs glibc 2.35 or later and OpenGL"
 		[ "${3:-}" = windows ] && echo "Built with MinGW-w64 ($(x86_64-w64-mingw32-gcc-posix -dumpversion)), SDL $SDL2_VERSION, SDL_net $SDL2_NET_VERSION, zlib $ZLIB_VERSION (statically linked)"
 		echo "No games, ROMs or BIOS files are included."
 	} > "$out/VERSION.txt"
-	# The exact source of this build (GPL): upstream plus the patches, without
-	# the documentation pictures.
-	(cd "$src" && git ls-files --cached --others --exclude-standard | grep -v '^Docs/Images/' |
-		tar -czf "$out/Supermodel-source.tar.gz" --transform 's|^|Supermodel/|' -T -)
 	log "packaged into $out"
 	ls -la "$out"
 }
 
+version=$(sm_version)
 case "${1:-}" in
-check)
-	fetch
-	log "patches apply cleanly to $SUPERMODEL_COMMIT"
-	;;
-fetch)
-	fetch
-	;;
 linux)
 	[ $# -ge 2 ] || { echo "usage: $0 linux <outdir>" >&2; exit 2; }
-	fetch
 	linux_deps
-	musashi obj
 	prefix="$work/deps/linux"
-	log "building for Linux"
+	log "building for Linux ($version)"
 	# The pinned SDL from $prefix, found at run time in lib/ next to the
 	# program ($$ is make's $, the quotes keep the shell off $ORIGIN).
-	PATH="$prefix/bin:$PATH" make -C "$src" -s -f Makefiles/Makefile.UNIX -j"$jobs" \
-		PLATFORM_LDFLAGS="-L$prefix/lib -lSDL2 -lSDL2_net -lGL -lGLU -lz -lm -lstdc++ -lpthread -Wl,--enable-new-dtags,-rpath,'\$\$ORIGIN/lib'"
-	package "$src/bin/supermodel" "$2" linux
+	make_engine linux SDL2_CONFIG="$prefix/bin/sdl2-config" \
+		LIBS="-L$prefix/lib -lSDL2 -lSDL2_net -lGL -lGLU -lz -lm -lpthread -Wl,--enable-new-dtags,-rpath,'\$\$ORIGIN/lib'"
+	package "$work/linux/supermodel" "$2" linux
 	;;
 windows)
 	[ $# -ge 2 ] || { echo "usage: $0 windows <outdir>" >&2; exit 2; }
 	command -v x86_64-w64-mingw32-g++-posix >/dev/null || { echo "needs MinGW-w64 (apt install g++-mingw-w64-x86-64-posix)" >&2; exit 1; }
-	fetch
 	windows_deps
-	musashi obj64
 	prefix="$work/deps/x86_64-w64-mingw32"
-	log "building supermodel.exe for Windows"
-	PATH="$prefix/bin:$work/deps/shim:$PATH" make -C "$src" -s -f Makefiles/Makefile.Win32 -j"$jobs" \
-		CC="x86_64-w64-mingw32-gcc-posix -I$prefix/include" \
-		CXX="x86_64-w64-mingw32-g++-posix -I$prefix/include" \
-		LD="x86_64-w64-mingw32-g++-posix -L$prefix/lib"
-	exe="$src/bin64/supermodel.exe"
+	log "building supermodel.exe for Windows ($version)"
+	make_engine windows CROSS=x86_64-w64-mingw32- \
+		CC=x86_64-w64-mingw32-gcc-posix CXX=x86_64-w64-mingw32-g++-posix \
+		SDL2_CONFIG="$prefix/bin/sdl2-config" EXTRA_CFLAGS="-I$prefix/include" EXTRA_LDFLAGS="-L$prefix/lib"
+	exe="$work/windows/supermodel.exe"
 	x86_64-w64-mingw32-objdump -p "$exe" | grep -i "DLL Name" | sort
 	package "$exe" "$2" windows
 	;;
 android)
 	[ $# -ge 2 ] || { echo "usage: $0 android <outdir>" >&2; exit 2; }
-	fetch
-	musashi obj
 	android_ndk
 	android_sdl
 	android_build "$2"
 	;;
 gles)
 	[ $# -ge 2 ] || { echo "usage: $0 gles <outdir>" >&2; exit 2; }
-	fetch
-	musashi obj
+	mkdir -p "$work"
 	log "building supermodel-gles"
 	cmake -S "$here/android" -B "$work/gles-build" -DCMAKE_BUILD_TYPE=Release -DSM_HOST_GLES=ON \
-		-DSM_TREE="$src" -DSM_VERSION="$(sm_version)" >"$work/gles-cmake.log" || { cat "$work/gles-cmake.log"; exit 1; }
+		-DSM_VERSION="$version" >"$work/gles-cmake.log" 2>&1 || { cat "$work/gles-cmake.log"; exit 1; }
 	cmake --build "$work/gles-build" -j"$jobs"
 	package "$work/gles-build/supermodel-gles" "$2"
 	;;
+test)
+	make -C "$here/tests/m68k" OUT="$work/tests"
+	;;
 *)
-	sed -n '2,32p' "$0"
+	sed -n '2,31p' "$0"
 	exit 2
 	;;
 esac

@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RetroPixels' Model 3 engine: the games it knows (read by GameLoader.cpp).
+  Copyright (c) 2025-2026 Shredder565. All rights reserved.
+
+  RetroPixels plays one game, Star Wars Trilogy Arcade, in two versions:
+  swtrilgy (export, revision A) and swtrilgya (export), which differs only
+  in its four main program ROMs. The ROM file names and CRC-32s are those
+  of the MAME sets of the same names (internal/supermodel/roms.go has the
+  same list); a zip is matched by the CRC-32s.
+
+  Each <region> is one block of ROM the board sees, built from its files:
+  a file supplies chunk_size bytes at every stride bytes, starting at its
+  offset. byte_swap="true" turns the 68000/PowerPC words round (the dumps
+  are big-endian, the emulator keeps 16-bit words in host order).
+  required="false": the game starts without it.
+-->
+<games>
+
+  <game name="swtrilgy">
+    <identity>
+      <title>Star Wars Trilogy Arcade</title>
+      <version>Export, Revision A</version>
+      <manufacturer>Sega, LucasArts</manufacturer>
+      <year>1998</year>
+    </identity>
+    <hardware>
+      <stepping>2.1</stepping>
+      <mpeg_board>DSB2</mpeg_board>
+      <drive_board>Joystick</drive_board>
+      <encryption_key>0x31272A01</encryption_key>
+      <inputs>
+        <input type="common" />
+        <input type="analog_joystick" />
+      </inputs>
+    </hardware>
+    <roms>
+      <!-- PowerPC program, fixed part: four 16-bit ROMs side by side -->
+      <region name="crom" stride="8" chunk_size="2" byte_swap="true">
+        <file offset="0" name="epr-21382a.20" crc32="0x69BAF117" />
+        <file offset="2" name="epr-21381a.19" crc32="0x2DD34E28" />
+        <file offset="4" name="epr-21380a.18" crc32="0x780FB4E7" />
+        <file offset="6" name="epr-21379a.17" crc32="0x24DC1555" />
+      </region>
+      <!-- PowerPC program and data, banked: three banks of 16 MB -->
+      <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true">
+        <file offset="0x0000000" name="mpr-21342.04" crc32="0x339525CE" />
+        <file offset="0x0000002" name="mpr-21341.03" crc32="0xB2A269E4" />
+        <file offset="0x0000004" name="mpr-21340.02" crc32="0xAD36040E" />
+        <file offset="0x0000006" name="mpr-21339.01" crc32="0xC0CE5037" />
+        <file offset="0x1000000" name="mpr-21346.08" crc32="0xC8733594" />
+        <file offset="0x1000002" name="mpr-21345.07" crc32="0x6C183A21" />
+        <file offset="0x1000004" name="mpr-21344.06" crc32="0x87453D76" />
+        <file offset="0x1000006" name="mpr-21343.05" crc32="0x12552D07" />
+        <file offset="0x2000000" name="mpr-21350.12" crc32="0x486195E7" />
+        <file offset="0x2000002" name="mpr-21349.11" crc32="0x3D39454B" />
+        <file offset="0x2000004" name="mpr-21348.10" crc32="0x1F7CC5F5" />
+        <file offset="0x2000006" name="mpr-21347.09" crc32="0xECB6B934" />
+      </region>
+      <!-- Real3D textures: sixteen 16-bit ROMs side by side -->
+      <region name="vrom" stride="32" chunk_size="2">
+        <file offset="0"  name="mpr-21359.26" crc32="0x34EF4122" />
+        <file offset="2"  name="mpr-21360.27" crc32="0x2882B95E" />
+        <file offset="4"  name="mpr-21361.28" crc32="0x9B61C3C1" />
+        <file offset="6"  name="mpr-21362.29" crc32="0x01A92169" />
+        <file offset="8"  name="mpr-21363.30" crc32="0xE7D18FED" />
+        <file offset="10" name="mpr-21364.31" crc32="0xCB6A5468" />
+        <file offset="12" name="mpr-21365.32" crc32="0xAD5449D8" />
+        <file offset="14" name="mpr-21366.33" crc32="0xDEFB6B95" />
+        <file offset="16" name="mpr-21367.34" crc32="0xDFD51029" />
+        <file offset="18" name="mpr-21368.35" crc32="0xAE90FD21" />
+        <file offset="20" name="mpr-21369.36" crc32="0xBF17EEB4" />
+        <file offset="22" name="mpr-21370.37" crc32="0x2321592A" />
+        <file offset="24" name="mpr-21371.38" crc32="0xA68782FD" />
+        <file offset="26" name="mpr-21372.39" crc32="0xFC3F4E8B" />
+        <file offset="28" name="mpr-21373.40" crc32="0xB76AD261" />
+        <file offset="30" name="mpr-21374.41" crc32="0xAE6C4D28" />
+      </region>
+      <!-- sound board: the 68000's program and the SCSPs' samples -->
+      <region name="sound_program" stride="1" chunk_size="1" byte_swap="true">
+        <file offset="0" name="epr-21383.21" crc32="0x544D1E28" />
+      </region>
+      <region name="sound_samples" stride="1" chunk_size="1" byte_swap="true">
+        <file offset="0x000000" name="mpr-21355.22" crc32="0xC1B2D326" />
+        <file offset="0x400000" name="mpr-21357.24" crc32="0x02703FAB" />
+      </region>
+      <!-- digital sound board (DSB2): its 68000's program and the MPEG music -->
+      <region name="mpeg_program" stride="1" chunk_size="1" byte_swap="true">
+        <file offset="0" name="epr-21384.2" crc32="0x12FA4780" />
+      </region>
+      <region name="mpeg_music" stride="1" chunk_size="1">
+        <file offset="0x000000" name="mpr-21375.18" crc32="0x735157A9" />
+        <file offset="0x400000" name="mpr-21376.20" crc32="0xE635F81E" />
+        <file offset="0x800000" name="mpr-21377.22" crc32="0x720621F8" />
+        <file offset="0xC00000" name="mpr-21378.24" crc32="0x1FCF715E" />
+      </region>
+      <!-- force feedback joystick's Z80 program (not in every dump) -->
+      <region name="driveboard_program" stride="1" chunk_size="1" required="false">
+        <file offset="0" name="epr-21119.ic8" crc32="0x65082B14" />
+      </region>
+    </roms>
+  </game>
+
+  <!-- the first export version: only the fixed program ROMs differ -->
+  <game name="swtrilgya" parent="swtrilgy">
+    <identity>
+      <title>Star Wars Trilogy Arcade</title>
+      <version>Export</version>
+      <manufacturer>Sega, LucasArts</manufacturer>
+      <year>1998</year>
+    </identity>
+    <hardware>
+      <stepping>2.1</stepping>
+      <mpeg_board>DSB2</mpeg_board>
+      <drive_board>Joystick</drive_board>
+      <encryption_key>0x31272A01</encryption_key>
+      <inputs>
+        <input type="common" />
+        <input type="analog_joystick" />
+      </inputs>
+    </hardware>
+    <roms>
+      <region name="crom" stride="8" chunk_size="2" byte_swap="true">
+        <file offset="0" name="epr-21382.20" crc32="0x0B9C44A0" />
+        <file offset="2" name="epr-21381.19" crc32="0xBB5757BF" />
+        <file offset="4" name="epr-21380.18" crc32="0x49B182F2" />
+        <file offset="6" name="epr-21379.17" crc32="0x61AD51D9" />
+      </region>
+    </roms>
+  </game>
+
+</games>

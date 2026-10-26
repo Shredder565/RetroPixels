@@ -1,9 +1,10 @@
 name: Supermodel (Sega Model 3) build
 
-# Builds RetroPixels' Supermodel from supermodel/: the pinned upstream commit
-# with RetroPixels' patches (GPL-3.0). supermodel.exe is cross-built for
-# 64-bit Windows with MinGW-w64 on Ubuntu 24.04, against the SDL2, SDL2_net
-# and zlib releases pinned (with SHA-256) in supermodel/pins.sh. The Linux
+# Builds RetroPixels' Model 3 engine (Supermodel for RetroPixels) from
+# supermodel/: RetroPixels' own code in supermodel/Src, built with
+# supermodel/Makefile (no upstream Supermodel files). supermodel.exe is
+# cross-built for 64-bit Windows with MinGW-w64 on Ubuntu 24.04, against the
+# SDL2, SDL2_net and zlib releases pinned (with SHA-256) in supermodel/pins.sh. The Linux
 # build of the same source is made on Ubuntu 22.04 (glibc 2.35 and later),
 # with the pinned SDL2 and SDL2_net built from source and bundled in
 # Supermodel/lib, and started headless as a check. The results are workflow
@@ -24,6 +25,7 @@ on:
     branches: [claude/wiiu-emulator-urpcen]
     paths:
       - "supermodel/**"
+      - "cores/m68k/**"
       - ".github/workflows/supermodel.yml"
 
 permissions:
@@ -63,14 +65,16 @@ jobs:
               *) echo "unexpected DLL: $d"; exit 1 ;;
             esac
           done
-          # RetroPixels' changes are in it.
+          # RetroPixels' features are in it, and RetroPixels' own resources.
           grep -a -q 'rp-record' "$exe"
           grep -a -q 'SUPERMODEL_HOME' "$exe"
           grep -a -q 'retropixels-1' "$exe"
-          test -f package/Supermodel/RetroPixels.txt
-          test -f package/Supermodel/Config/Games.xml
-          test -f package/Supermodel/LICENSE.txt
-          tar -tzf package/Supermodel/Supermodel-source.tar.gz | grep -q 'Supermodel/Src/OSD/RetroPixels.cpp'
+          grep -a -q 'PerMonitorV2' "$exe"
+          grep -a -q 'Shredder565' "$exe"
+          if grep -a -q 'Supermodel Team' "$exe"; then echo "upstream's copyright line is in the program"; exit 1; fi
+          for f in Config/Games.xml Assets/p1crosshair.bmp Assets/p2crosshair.bmp LICENSE.txt THIRD-PARTY-NOTICES.txt; do
+            test -s "package/Supermodel/$f"
+          done
           cat package/Supermodel/VERSION.txt
           ls -la package/Supermodel
 
@@ -131,12 +135,14 @@ jobs:
           max=$(objdump -T "$sm/supermodel" "$sm"/lib/*.so* | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
           echo "newest glibc symbol: $max"
           [ "$(printf '%s\n2.35\n' "$max" | sort -V | tail -n 1)" = 2.35 ]
-          # RetroPixels' changes are in it.
+          # RetroPixels' features are in it.
           grep -a -q 'rp-record' "$sm/supermodel"
           grep -a -q 'SUPERMODEL_HOME' "$sm/supermodel"
           grep -a -q 'retropixels-1' "$sm/supermodel"
-          test -f "$sm/RetroPixels.txt" && test -f "$sm/Config/Games.xml" && test -f "$sm/LICENSE.txt"
-          tar -tzf "$sm/Supermodel-source.tar.gz" | grep -q 'Supermodel/Src/OSD/RetroPixels.cpp'
+          if grep -a -q 'Supermodel Team' "$sm/supermodel"; then echo "upstream's copyright line is in the program"; exit 1; fi
+          for f in Config/Games.xml Assets/p1crosshair.bmp Assets/p2crosshair.bmp LICENSE.txt THIRD-PARTY-NOTICES.txt; do
+            test -s "$sm/$f"
+          done
           cat "$sm/VERSION.txt"
           mkdir -p linux-artifact
           tar -C linux-package -czf linux-artifact/Supermodel-linux.tar.gz Supermodel
@@ -185,3 +191,5 @@ jobs:
         with:
           go-version: "1.24"
       - run: go test ./internal/supermodel/ . -run 'Supermodel|CheckROM|FindROM|GameArgs|INI|FindExe|Problem|Command'
+      # RetroPixels' C++ 68000 (the engine's sound CPU) against the Go one.
+      - run: go test ./cores/m68k/ -run Supermodel

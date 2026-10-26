@@ -1162,8 +1162,8 @@ namespace
 {
   void Title()
   {
-    puts("Supermodel: A Sega Model 3 Arcade Emulator (Version " SUPERMODEL_VERSION ")");
-    puts("Copyright 2003-2026 by The Supermodel Team");
+    puts("RetroPixels Model 3 engine (Supermodel for RetroPixels), version " SUPERMODEL_VERSION);
+    puts("Copyright (c) 2025-2026 Shredder565. All rights reserved. Third-party notices: THIRD-PARTY-NOTICES.txt");
   }
 
   void Help()

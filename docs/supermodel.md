@@ -1,12 +1,15 @@
 # Supermodel in RetroPixels (Star Wars Trilogy Arcade)
 
 RetroPixels' Supermodel tab plays one game: Star Wars Trilogy Arcade (Sega
-and LucasArts, 1998, Sega Model 3 Step 2.1). It runs on Supermodel, the
-Sega Model 3 emulator (https://github.com/trzy/Supermodel, GPL-3.0-or-later).
-RetroPixels builds it from upstream commit 24d2ffc, the commit of the
-official "supermodel-0.3a-20260726-git-24d2ffc" Windows build, with the
-emulator code from `supermodel/Src/` (upstream's with RetroPixels' changes,
-being rewritten as original code: `docs/supermodel-original.md`).
+and LucasArts, 1998, Sega Model 3 Step 2.1). It runs on RetroPixels' Model
+3 engine in the Supermodel folder. The engine began as Supermodel, the Sega
+Model 3 emulator (https://github.com/trzy/Supermodel), at upstream commit
+24d2ffc (the official "supermodel-0.3a-20260726-git-24d2ffc" Windows
+build), and has been rewritten as RetroPixels' own code
+(`docs/supermodel-original.md`); it is built from `supermodel/` alone
+(`supermodel/build.sh`, `supermodel/Makefile`). The description below of
+how the game runs was made on that upstream build, which the engine
+behaves like.
 
 ## How Supermodel 0.3a-24d2ffc runs the game
 
@@ -74,8 +77,8 @@ being rewritten as original code: `docs/supermodel-original.md`).
   resolution. A borderless window that is resized (when it's docked in
   RetroPixels) re-creates the renderers at the new size, so the picture is
   never stretched from a small framebuffer.
-- **Credits.** Docs/RetroPixels.txt is the GPL modification notice, and the
-  log shows the `retropixels-1` patch level.
+- **Credits.** The log shows the `retropixels-1` patch level; `-help`
+  shows RetroPixels' banner and version (`rp-<date>-<commit>`).
 
 ## RetroPixels' defaults for the game
 
@@ -161,8 +164,8 @@ controller (`JOY_`), the touch controls being one.
 
 - It is a CUI program and imports only DLLs that come with Windows.
 - It contains RetroPixels' changes.
-- The package includes the GPL text and `Supermodel-source.tar.gz` (the
-  exact source built).
+- It has no upstream copyright line, and the package has Games.xml, the
+  crosshair pictures, LICENSE.txt and THIRD-PARTY-NOTICES.txt.
 
 `bundle-test.yml` calls it and adds the package as `Supermodel\` next to
 `MAME\`, with a line in VERSION.txt.

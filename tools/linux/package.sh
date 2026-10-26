@@ -114,7 +114,7 @@ if have supermodel; then
 	src=$(engine_dir "$tmp/supermodel" supermodel)
 	mkdir -p "$dir/Supermodel"
 	cp -a "$src/." "$dir/Supermodel/"
-	for f in RetroPixels.txt LICENSE.txt Supermodel-source.tar.gz Config/Games.xml; do
+	for f in LICENSE.txt THIRD-PARTY-NOTICES.txt Config/Games.xml; do
 		[ -f "$dir/Supermodel/$f" ] || die "Supermodel/$f is missing"
 	done
 fi
@@ -185,8 +185,7 @@ repo=${REPO:-}
 		echo "- MAME: not in this build yet (its Linux build isn't ready); a MAME installed on the system can be used"
 	fi
 	if have supermodel; then
-		echo "- Supermodel/supermodel: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel/LICENSE.txt"
-		echo "  Source: Supermodel/Supermodel-source.tar.gz (the exact source built); RetroPixels' changes: Supermodel/RetroPixels.txt"
+		echo "- Supermodel/supermodel: Sega Model 3 (Star Wars Trilogy Arcade). RetroPixels' own Model 3 engine (Supermodel for RetroPixels), LICENSE.txt; its third-party parts in THIRD-PARTY-NOTICES.txt"
 		echo "  Bundled libraries in Supermodel/lib (SDL2, SDL2_net, GLU), their licences in Supermodel/lib/LICENSES"
 	else
 		echo "- Supermodel (Sega Model 3): not in this build"

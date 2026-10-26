@@ -36,5 +36,6 @@
 Thumbs.db
 .claude/worktrees/
 
-# Supermodel build folder (supermodel/build.sh)
+# Supermodel build folders (supermodel/build.sh, supermodel/Makefile, the 68000 tests)
 /supermodel/build/
+/supermodel/tests/m68k/build/

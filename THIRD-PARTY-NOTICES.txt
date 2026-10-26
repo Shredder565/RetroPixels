@@ -18,14 +18,12 @@ where the full text is. In the Windows and Linux downloads:
                                    CC0, curl, bzip2 and Bitstream Vera texts,
                                    and in Licenses\Externals each PixelU-Wii
                                    library's own licence file
-  Supermodel\LICENSE.txt           GNU GPL version 3 (Supermodel engine)
   Supermodel\lib\LICENSES\         (Linux) SDL2, SDL2_net and GLU licences
   MAME\MAME 0.xxx\COPYING,         MAME's licence (GPL-2.0-or-later as a
    docs\legal\                     whole) and its components' licences
 
 In the source code the same texts are in pixelu/LICENSE.txt (MPL-2.0),
-wiiu/LICENSE-MPL-2.0.txt, pixelu/wii/COPYING, pixelu/wii/LICENSES/ and
-supermodel/COPYING.
+wiiu/LICENSE-MPL-2.0.txt, pixelu/wii/COPYING and pixelu/wii/LICENSES/.
 
 No games, BIOS or firmware images, console keys or other copyrighted game
 content are included in RetroPixels.
@@ -223,26 +221,19 @@ short:
 4. RetroPixels' Model 3 engine (Supermodel folder)
 =============================================================================
 
-supermodel.exe (Linux: supermodel) plays Sega Model 3 games. It started as
-Supermodel (https://github.com/trzy/Supermodel, Copyright 2003-2026 The
-Supermodel Team, GNU GPL version 3 or later), and its emulator code has been
-rewritten as RetroPixels' own (docs/supermodel-original.md). It is still
-distributed under the GNU General Public License, version 3 or later
-(Supermodel\LICENSE.txt), with its complete corresponding source code
-(Supermodel\Supermodel-source.tar.gz), because it still contains or is
-built with the following GPL material:
+supermodel.exe (Linux: supermodel; Android: libsupermodel.so) plays Sega
+Model 3 games. It is RetroPixels' own software (LICENSE.txt): it began as a
+copy of Supermodel (https://github.com/trzy/Supermodel, The Supermodel
+Team, GNU GPL version 3 or later), and every part of that has since been
+replaced by code, build files, data and pictures written for RetroPixels
+(docs/supermodel-original.md), including its 68000 processor (RetroPixels'
+own, from its Go 68000 in cores/m68k), its Windows resources, its game list
+(Config/Games.xml) and its crosshair pictures. No Supermodel code or files
+are in it or shipped with it. Builds of it published before this change
+were distributed under the GPL with their source, and stay available under
+the GPL to those who received them.
 
-  - Musashi 68000 emulator, Supermodel's version (Src/CPU/68K/Musashi):
-    Copyright 1998-2001 Karl Stenerud; Supermodel changes Copyright 2011 Bart
-    Trzynadlowski, Nik Henson and 2003-2026 The Supermodel Team; GPL-3.0 or
-    later (permission was obtained from Karl Stenerud to apply the GPL).
-  - The Windows resource script and manifest
-    (Src/OSD/Windows/SupermodelResources.rc, SupermodelManifest.xml),
-    Supermodel's build files (Makefiles/), Config/Games.xml,
-    Config/Music.xml, Assets/*.bmp and Docs/: The Supermodel Team, GPL-3.0
-    or later.
-
-Other third-party code in it:
+The third-party code it uses is all under permissive licences:
 
   GLEW (The OpenGL Extension Wrangler Library), in Src/Pkgs:
     Copyright (C) 2008-2017, Nigel Stewart; Copyright (C) 2002-2008, Milan
@@ -572,8 +563,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 Mozilla Public License 2.0      LICENSE-MPL-2.0.txt
 GNU GPL 2.0                     PixelU\wii\license.txt
-GNU GPL 3.0                     Supermodel\LICENSE.txt,
-                                PixelU\wii\Licenses\GPL-3.0-only.txt
+GNU GPL 3.0                     PixelU\wii\Licenses\GPL-3.0-only.txt
 GNU LGPL 2.1                    PixelU\wii\Licenses\LGPL-2.1-or-later.txt
 GNU LGPL 3.0                    PixelU\wii\Licenses\LGPL-3.0-only.txt
 Apache License 2.0              PixelU\wii\Licenses\Apache-2.0.txt
