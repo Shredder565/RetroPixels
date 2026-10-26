@@ -65,7 +65,8 @@ set(SM_MUSASHI
   "${SM_TREE}/obj/m68kops.c" "${SM_TREE}/obj/m68kopac.c" "${SM_TREE}/obj/m68kopdm.c" "${SM_TREE}/obj/m68kopnz.c")
 set_source_files_properties(${SM_MUSASHI} PROPERTIES
   COMPILE_DEFINITIONS "INLINE=static inline"
-  COMPILE_OPTIONS "-Wno-unused-variable")
+  # sys/types.h first: bionic typedefs uint, which m68kcpu.h #defines
+  COMPILE_OPTIONS "-Wno-unused-variable;-include;sys/types.h")
 
 # Every source folder is on the include path, as with the Makefile; the
 # OpenGL ES stand-in for GLEW (Graphics/GLES/GL/glew.h) comes first.
