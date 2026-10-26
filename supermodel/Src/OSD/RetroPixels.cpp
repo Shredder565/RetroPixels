@@ -4,7 +4,9 @@
  * RetroPixels.cpp
  *
  * Additions made for RetroPixels: the player's own folder (SUPERMODEL_HOME)
- * and the game recorder (-rp-record). See RetroPixels.h.
+ * and the game recorder (-rp-record). See RetroPixels.h. RetroPixels for
+ * Android has its own recorder (OSD/Android/Android.cpp), so the ffmpeg one
+ * below isn't in that build.
  */
 
 #include "OSD/RetroPixels.h"
@@ -30,7 +32,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#else
+#elif !defined(__ANDROID__)
 #include <csignal>
 #include <fcntl.h>
 #include <spawn.h>
@@ -138,6 +140,7 @@ namespace RetroPixels
    Recorder
   ****************************************************************************/
 
+#ifndef __ANDROID__
   namespace Recorder
   {
     static constexpr int    kFPS = 60;               // Supermodel makes 735 samples (44100/60) of sound per frame
@@ -646,4 +649,5 @@ namespace RetroPixels
       InfoLog("Recorder: finished.");
     }
   }
+#endif // !__ANDROID__
 }

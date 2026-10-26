@@ -16,6 +16,10 @@
 #include "GLSLShader.h"
 #include "Model.h"
 
+#ifdef SUPERMODEL_GLES
+#include <cstdint>
+#endif
+
 namespace New3D {
 
 class R3DFrameBuffers
@@ -39,6 +43,15 @@ public:
 
   void Draw();
 
+#ifdef SUPERMODEL_GLES
+  // OpenGL ES can't glReadPixels depth or stencil, so there the depth and
+  // stencil buffer is a texture and this reads one pixel of it (window
+  // coordinates) through a small draw: the depth as stored (32-bit float)
+  // and the 8 stencil bits. Off the buffer both are 0, as glReadPixels
+  // leaves them on desktop OpenGL. All GL state is put back.
+  void ReadDepthStencil(int x, int y, float *depth, uint32_t *stencil);
+#endif
+
 private:
   GLuint m_fbo = 0;
   GLuint m_depth = 0;
@@ -52,6 +65,12 @@ private:
   GLSLShader m_copyShader;
   GLSLShader m_blendShader;
   GLuint m_vao = 0;
+
+#ifdef SUPERMODEL_GLES
+  GLSLShader m_probeShader;     // writes the depth or stencil value it is asked for
+  GLuint m_probeFbo = 0;        // 2x1 RGBA32UI: depth bits, stencil
+  GLuint m_probeTarget = 0;
+#endif
 };
 
 } // New3D

@@ -57,8 +57,13 @@
 #include "DriveBoard/WheelBoard.h"
 #include "Game.h"
 #include "ROMSet.h"
+#ifdef SUPERMODEL_NO_NET
+#include "Network/NoNetBoard.h"
+#include <SDL.h>   // message boxes; the network boards' headers bring it otherwise
+#else
 #include "Network/NetBoard.h"
 #include "Network/SimNetBoard.h"
+#endif
 #include "OSD/Audio.h"
 #include "OSD/Video.h"
 #include "Util/Format.h"
@@ -2007,10 +2012,14 @@ Result CModel3::Init(void)
   m_pciBus.AttachDevice(14, &m_scsi);
   m_pciBus.AttachDevice(16, this);
 
+#ifdef SUPERMODEL_NO_NET
+  m_netBoard = new CNoNetBoard();
+#else
   if (m_config["SimulateNet"].ValueAs<bool>())
     m_netBoard = new CSimNetBoard(m_config);
   else
     m_netBoard = new CNetBoard(m_config);
+#endif
 
   DebugLog("Initialized Model 3 (allocated %1.1f MB)\n", poolMB);
   return Result::OKAY;

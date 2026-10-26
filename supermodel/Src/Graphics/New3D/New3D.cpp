@@ -1171,7 +1171,13 @@ void CNew3D::ReadLineOfSight(int priority)
     const int py = int(m_yOffs) + int(float(384 - vp.losPosY) * m_yRatio);
 
     float pixel[2] = { 0.0f, 0.0f };    // stays 0 if the point is off the frame buffer
+#ifdef SUPERMODEL_GLES
+    uint32_t stencilBits = 0;
+    m_targets.ReadDepthStencil(px, py, &pixel[0], &stencilBits);
+    pixel[1] = AsFloat(stencilBits);
+#else
     glReadPixels(px, py, 1, 1, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, pixel);
+#endif
     const uint8_t stencil = uint8_t(AsBits(pixel[1]) & 0x80);   // bit 7: polygon with line-of-sight return
 
     uint32_t bits = AsBits(pixel[0] / kNear);

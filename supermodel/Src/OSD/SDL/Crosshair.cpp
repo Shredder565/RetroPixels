@@ -8,6 +8,10 @@
 #include <GL/glew.h>
 #include <algorithm>
 #include <vector>
+#ifdef SUPERMODEL_GLES
+#include <cstdint>
+#include <cstring>
+#endif
 #include "Inputs/Inputs.h"
 #include "Util/Format.h"
 
@@ -60,7 +64,17 @@ void main(void)
   void Upload(GLuint texture, SDL_Surface *image)
   {
     glBindTexture(GL_TEXTURE_2D, texture);
+#ifdef SUPERMODEL_GLES
+    // OpenGL ES takes no BGRA uploads: the same bytes (4 per pixel, as
+    // GL_BGRA reads them), with blue and red swapped.
+    std::vector<uint8_t> rgba(size_t(image->w) * size_t(image->h) * 4);
+    std::memcpy(rgba.data(), image->pixels, std::min(rgba.size(), size_t(image->pitch) * size_t(image->h)));
+    for (size_t i = 0; i < rgba.size(); i += 4)
+      std::swap(rgba[i], rgba[i + 2]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image->w, image->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image->w, image->h, 0, GL_BGRA, GL_UNSIGNED_BYTE, image->pixels);
+#endif
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   }

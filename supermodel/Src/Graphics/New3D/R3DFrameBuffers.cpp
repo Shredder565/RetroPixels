@@ -4,6 +4,10 @@
 
 #include "R3DFrameBuffers.h"
 
+#ifdef SUPERMODEL_GLES
+#include <cstring>
+#endif
+
 namespace New3D {
 
 namespace
@@ -62,6 +66,48 @@ void main(void)
     return id;
   }
 
+#ifdef SUPERMODEL_GLES
+  // OpenGL ES: one pixel of the depth/stencil texture, the depth (as its
+  // bits) or the stencil value, whichever uWhat asks for. The texture's
+  // DEPTH_STENCIL_TEXTURE_MODE is set to match before each draw.
+  const char *kProbeFS = R"glsl(
+#version 410 core
+uniform sampler2D uDepth;
+uniform usampler2D uStencil;
+uniform ivec2 uPixel;
+uniform int uWhat;
+layout(location = 0) out uvec4 result;
+void main(void)
+{
+  if (uWhat == 0)
+    result = uvec4(floatBitsToUint(texelFetch(uDepth, uPixel, 0).r), 0u, 0u, 0u);
+  else
+    result = uvec4(texelFetch(uStencil, uPixel, 0).r, 0u, 0u, 0u);
+}
+)glsl";
+
+  // Texture units the probe uses, well away from the renderers' own.
+  const GLenum kDepthUnit = 14;
+  const GLenum kStencilUnit = 15;
+
+  // The depth/stencil buffer as a texture, so it can be read (ES only).
+  GLuint MakeDepthStencilTexture(int width, int height)
+  {
+    GLuint id = 0;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH32F_STENCIL8, width, height);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, id, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return id;
+  }
+#endif
+
   GLuint MakeDepthStencil(int width, int height)
   {
     GLuint id = 0;
@@ -81,6 +127,29 @@ R3DFrameBuffers::R3DFrameBuffers()
   m_copyShader.LoadShaders(kScreenVS, kCopyFS);
   m_copyShader.uniformLoc[0] = m_copyShader.GetUniformLocation("layer0");
   glGenVertexArrays(1, &m_vao);
+
+#ifdef SUPERMODEL_GLES
+  m_probeShader.LoadShaders(kScreenVS, kProbeFS);
+  m_probeShader.uniformLoc[0] = m_probeShader.GetUniformLocation("uDepth");
+  m_probeShader.uniformLoc[1] = m_probeShader.GetUniformLocation("uStencil");
+  m_probeShader.uniformLoc[2] = m_probeShader.GetUniformLocation("uPixel");
+  m_probeShader.uniformLoc[3] = m_probeShader.GetUniformLocation("uWhat");
+  m_probeShader.EnableShader();
+  glUniform1i(m_probeShader.uniformLoc[0], GLint(kDepthUnit));
+  glUniform1i(m_probeShader.uniformLoc[1], GLint(kStencilUnit));
+  m_probeShader.DisableShader();
+
+  glGenTextures(1, &m_probeTarget);
+  glBindTexture(GL_TEXTURE_2D, m_probeTarget);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32UI, 2, 1);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glGenFramebuffers(1, &m_probeFbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, m_probeFbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_probeTarget, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#endif
 }
 
 R3DFrameBuffers::~R3DFrameBuffers()
@@ -91,6 +160,14 @@ R3DFrameBuffers::~R3DFrameBuffers()
   if (m_vao)
     glDeleteVertexArrays(1, &m_vao);
   m_vao = 0;
+#ifdef SUPERMODEL_GLES
+  m_probeShader.UnloadShaders();
+  if (m_probeFbo)
+    glDeleteFramebuffers(1, &m_probeFbo);
+  if (m_probeTarget)
+    glDeleteTextures(1, &m_probeTarget);
+  m_probeFbo = m_probeTarget = 0;
+#endif
 }
 
 Result R3DFrameBuffers::CreateFBO(int width, int height)
@@ -105,7 +182,11 @@ Result R3DFrameBuffers::CreateFBO(int width, int height)
   glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
   for (int i = 0; i < 3; i++)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, m_colour[i], 0);
+#ifdef SUPERMODEL_GLES
+  m_depth = MakeDepthStencilTexture(width, height);
+#else
   m_depth = MakeDepthStencil(width, height);
+#endif
   const bool mainComplete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 
   glGenFramebuffers(1, &m_saveFbo);
@@ -121,7 +202,11 @@ void R3DFrameBuffers::DestroyFBO()
   if (m_fbo)
   {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#ifdef SUPERMODEL_GLES
+    glDeleteTextures(1, &m_depth);
+#else
     glDeleteRenderbuffers(1, &m_depth);
+#endif
     glDeleteFramebuffers(1, &m_fbo);
   }
   if (m_saveFbo)
@@ -211,5 +296,90 @@ void R3DFrameBuffers::Draw()
   glDisable(GL_BLEND);
   glBindVertexArray(0);
 }
+
+#ifdef SUPERMODEL_GLES
+void R3DFrameBuffers::ReadDepthStencil(int x, int y, float *depth, uint32_t *stencil)
+{
+  *depth = 0.0f;
+  *stencil = 0;
+  if (!m_fbo || x < 0 || y < 0 || x >= m_width || y >= m_height)
+    return;
+
+  // What the draw below changes, to be put back.
+  GLint drawFbo = 0, readFbo = 0, program = 0, vao = 0, active = 0, packBuffer = 0;
+  GLint viewport[4] = { 0, 0, 0, 0 };
+  GLint unitTex[2] = { 0, 0 };
+  GLboolean mask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+  glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+  glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+  glGetIntegerv(GL_VIEWPORT, viewport);
+  glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+  const GLenum caps[] = { GL_DEPTH_TEST, GL_STENCIL_TEST, GL_BLEND, GL_SCISSOR_TEST, GL_CULL_FACE };
+  GLboolean enabled[5];
+  for (int i = 0; i < 5; i++)
+  {
+    enabled[i] = glIsEnabled(caps[i]);
+    glDisable(caps[i]);
+  }
+  glActiveTexture(GL_TEXTURE0 + kDepthUnit);
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &unitTex[0]);
+  glActiveTexture(GL_TEXTURE0 + kStencilUnit);
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &unitTex[1]);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, m_probeFbo);
+  const GLenum target = GL_COLOR_ATTACHMENT0;
+  glDrawBuffers(1, &target);
+  glBindVertexArray(m_vao);
+  m_probeShader.EnableShader();
+  glUniform2i(m_probeShader.uniformLoc[2], x, y);
+
+  // Depth into the first pixel, then stencil into the second: the texture
+  // is sampled as one or the other, never both in one draw.
+  for (int what = 0; what < 2; what++)
+  {
+    glActiveTexture(GL_TEXTURE0 + kDepthUnit);
+    glBindTexture(GL_TEXTURE_2D, what == 0 ? m_depth : 0);
+    glActiveTexture(GL_TEXTURE0 + kStencilUnit);
+    glBindTexture(GL_TEXTURE_2D, what == 1 ? m_depth : 0);
+    glActiveTexture(GL_TEXTURE0 + (what == 0 ? kDepthUnit : kStencilUnit));
+    glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, what == 0 ? GL_DEPTH_COMPONENT : GL_STENCIL_INDEX);
+    glUniform1i(m_probeShader.uniformLoc[3], what);
+    glViewport(what, 0, 1, 1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+  glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
+
+  GLuint pixels[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glReadPixels(0, 0, 2, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels);
+  std::memcpy(depth, &pixels[0], sizeof(float));
+  *stencil = pixels[4] & 0xFF;
+
+  // Put everything back.
+  glActiveTexture(GL_TEXTURE0 + kDepthUnit);
+  glBindTexture(GL_TEXTURE_2D, GLuint(unitTex[0]));
+  glActiveTexture(GL_TEXTURE0 + kStencilUnit);
+  glBindTexture(GL_TEXTURE_2D, GLuint(unitTex[1]));
+  glActiveTexture(GLenum(active));
+  glBindBuffer(GL_PIXEL_PACK_BUFFER, GLuint(packBuffer));
+  glUseProgram(GLuint(program));
+  glBindVertexArray(GLuint(vao));
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(drawFbo));
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(readFbo));
+  glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+  glColorMask(mask[0], mask[1], mask[2], mask[3]);
+  for (int i = 0; i < 5; i++)
+  {
+    if (enabled[i])
+      glEnable(caps[i]);
+  }
+}
+#endif
 
 } // New3D

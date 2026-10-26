@@ -27,3 +27,14 @@ SDL2_SRC_SHA256=ac356ea55e8b9dd0b2d1fa27da40ef7e238267ccf9324704850d5d47375b48ea
 
 SDL2_NET_SRC_URL=https://github.com/libsdl-org/SDL_net/releases/download/release-2.2.0/SDL2_net-2.2.0.tar.gz
 SDL2_NET_SRC_SHA256=4e4a891988316271974ff4e9585ed1ef729a123d22c08bd473129179dc857feb
+
+# RetroPixels for Android (build.sh android): the same SDL2 source as the
+# Linux build (SDL2_SRC_*, built for each ABI with SDL's own CMake files),
+# zlib from the NDK, and this NDK unless ANDROID_NDK_HOME / ANDROID_NDK names
+# one already installed (CI installs this one).
+ANDROID_NDK_VERSION=r27c
+ANDROID_NDK_REVISION=27.2.12479018
+ANDROID_NDK_URL=https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+ANDROID_NDK_SHA256=59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc
+ANDROID_MIN_SDK=24
+ANDROID_ABIS="arm64-v8a armeabi-v7a x86_64 x86"
