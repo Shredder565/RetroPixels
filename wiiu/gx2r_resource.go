@@ -1,70 +1,78 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/gx2/GX2_Resource.cpp
-// and GX2_Resource.h, rewritten in Go for RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// GX2R resource flags.
+// GX2R resource flags beyond the vertex/index/uniform bindings, buffer
+// alignment and size rules, and the GX2R wrappers that pass a GX2RBuffer's
+// memory on to the plain GX2 display list and stream-out calls.
+
 const (
 	gx2rBindShader     = 1 << 7
 	gx2rBindStreamOut  = 1 << 8
 	gx2rBindDisplayLst = 1 << 9
 	gx2rBindRingBuffer = 1 << 10
-	gx2rUsageCPURead   = 1 << 11
-	gx2rUsageCPUWrite  = 1 << 12
-	gx2rUsageGPURead   = 1 << 13
-	gx2rUsageGPUWrite  = 1 << 14
-	gx2rUsageMask      = gx2rUsageCPURead | gx2rUsageCPUWrite | gx2rUsageGPURead | gx2rUsageGPUWrite
-	gx2rFreeFlags      = 0x1f << 19 // the destroy call's flags passed on to the free callback
+
+	gx2rUsageCPURead  = 1 << 11
+	gx2rUsageCPUWrite = 1 << 12
+	gx2rUsageGPURead  = 1 << 13
+	gx2rUsageGPUWrite = 1 << 14
+	gx2rUsageMask     = gx2rUsageCPURead | gx2rUsageCPUWrite | gx2rUsageGPURead | gx2rUsageGPUWrite
+
+	// bits 19..23 of a destroy call's options are handed to the free callback
+	gx2rFreeFlags = 0x1f << 19
 )
 
-// gx2rBufferAlignment is GX2RGetBufferAlignment.
+// gx2rBufferAlignment is GX2RGetBufferAlignment. Buffers the shaders read
+// as uniform blocks or rings, and stream-out targets, need 256 bytes;
+// vertex, index and display list buffers 64; anything else 256.
 func gx2rBufferAlignment(flags uint32) uint32 {
-	switch {
-	case flags&(gx2rBindStreamOut|gx2rBindUniform|gx2rBindShader|gx2rBindRingBuffer) != 0:
-		return 0x100
-	case flags&(gx2rBindVertex|gx2rBindIndex|gx2rBindDisplayLst) != 0:
+	const (
+		big   = gx2rBindUniform | gx2rBindShader | gx2rBindStreamOut | gx2rBindRingBuffer
+		small = gx2rBindVertex | gx2rBindIndex | gx2rBindDisplayLst
+	)
+	if flags&big == 0 && flags&small != 0 {
 		return 0x40
 	}
 	return 0x100
 }
 
-// gx2rAllocSize is GX2RGetBufferAllocationSize: the size padded to 64 bytes.
-func gx2rAllocSize(m *Machine, b uint32) uint32 {
-	return (m.Mem.Read32(b+gx2rBufElem)*m.Mem.Read32(b+gx2rBufCount) + 0x3f) &^ 0x3f
+// gx2rBufferBytes is a GX2RBuffer's element size times its element count.
+func gx2rBufferBytes(m *Machine, buf uint32) uint32 {
+	return m.Mem.Read32(buf+gx2rBufElem) * m.Mem.Read32(buf+gx2rBufCount)
+}
+
+// gx2rAllocSize is GX2RGetBufferAllocationSize: the buffer's bytes rounded
+// up to a multiple of 64.
+func gx2rAllocSize(m *Machine, buf uint32) uint32 {
+	return (gx2rBufferBytes(m, buf) + 63) &^ 63
 }
 
 func init() {
-	x := "gx2"
-	// gx2Call runs a gx2 function with the given arguments.
-	gx2Call := func(m *Machine, cpu *CPU, t *Thread, name string, args ...uint32) {
-		for i, a := range args {
-			cpu.GPR[3+i] = a
-		}
-		hleFuncs["gx2"][name](m, cpu, t)
+	const x = "gx2"
+	// forward runs the gx2 function name with args in r3 onward.
+	forward := func(m *Machine, cpu *CPU, t *Thread, name string, args ...uint32) {
+		copy(cpu.GPR[3:], args)
+		hleFuncs[x][name](m, cpu, t)
 	}
+	data := func(m *Machine, buf uint32) uint32 { return m.Mem.Read32(buf + gx2rBufData) }
+
+	// (buffer, index)
 	reg(x, "GX2RSetStreamOutBuffer", func(m *Machine, cpu *CPU, t *Thread) {
-		gx2Call(m, cpu, t, "GX2SetStreamOutBuffer", arg(cpu, 0), arg(cpu, 1))
+		forward(m, cpu, t, "GX2SetStreamOutBuffer", arg(cpu, 0), arg(cpu, 1))
 	})
-	bufSize := func(m *Machine, b uint32) uint32 {
-		return m.Mem.Read32(b+gx2rBufElem) * m.Mem.Read32(b+gx2rBufCount)
-	}
-	// (buffer, ?, flags)
+	// (buffer, unused, options): the whole buffer becomes the display list
 	reg(x, "GX2RBeginDisplayListEx", func(m *Machine, cpu *CPU, t *Thread) {
-		b := arg(cpu, 0)
-		gx2Call(m, cpu, t, "GX2BeginDisplayList", m.Mem.Read32(b+gx2rBufData), bufSize(m, b))
+		buf := arg(cpu, 0)
+		forward(m, cpu, t, "GX2BeginDisplayList", data(m, buf), gx2rBufferBytes(m, buf))
 	})
 	reg(x, "GX2REndDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		gx2Call(m, cpu, t, "GX2EndDisplayList", m.Mem.Read32(arg(cpu, 0)+gx2rBufData))
+		forward(m, cpu, t, "GX2EndDisplayList", data(m, arg(cpu, 0)))
 	})
-	// (buffer, size)
+	// (buffer, bytes)
 	reg(x, "GX2RCallDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		gx2Call(m, cpu, t, "GX2CallDisplayList", m.Mem.Read32(arg(cpu, 0)+gx2rBufData), arg(cpu, 1))
+		forward(m, cpu, t, "GX2CallDisplayList", data(m, arg(cpu, 0)), arg(cpu, 1))
 	})
 	reg(x, "GX2RDirectCallDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		gx2Call(m, cpu, t, "GX2DirectCallDisplayList", m.Mem.Read32(arg(cpu, 0)+gx2rBufData), arg(cpu, 1))
+		forward(m, cpu, t, "GX2DirectCallDisplayList", data(m, arg(cpu, 0)), arg(cpu, 1))
 	})
 }

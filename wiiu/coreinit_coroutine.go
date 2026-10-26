@@ -79,5 +79,48 @@ func init() {
 		m.coLoad(cpu, co)
 		ret(cpu, v)
 	})
-	// OSSwitchCoroutine is in coreinit_coroutine_cemu.go
+
+	// OSSwitchCoroutine(from, to) saves the caller into from and resumes to.
+	// On hardware the function pushes a 0x10-byte frame holding r31 and the
+	// return address and has already loaded to into r31 when it saves, so
+	// from's saved r31 is to (Injustice: Gods Among Us relies on that).
+	// The resumed coroutine sees r3 = to and r4 = 1.
+	reg(c, "OSSwitchCoroutine", func(m *Machine, cpu *CPU, t *Thread) {
+		from, to := arg(cpu, 0), arg(cpu, 1)
+		frame := cpu.GPR[1] - 0x10
+		m.Mem.Write32(frame+0x0c, cpu.GPR[31])
+		m.Mem.Write32(frame+0x14, cpu.LR) // the caller's LR save slot
+		cpu.GPR[1] = frame
+		cpu.GPR[31] = to
+		m.coSave(cpu, from, m.thunk(c, "__RPSwitchCoroutineResume"))
+		m.coLoad(cpu, to)
+		cpu.GPR[3], cpu.GPR[4] = to, 1
+	})
+	// a coroutine left by OSSwitchCoroutine resumes here: pop the frame
+	reg(c, "__RPSwitchCoroutineResume", func(m *Machine, cpu *CPU, t *Thread) {
+		frame := cpu.GPR[1]
+		cpu.GPR[31] = m.Mem.Read32(frame + 0x0c)
+		cpu.LR = m.Mem.Read32(frame + 0x14)
+		cpu.GPR[1] = frame + 0x10
+	})
+
+	// OSSwitchFiberEx(a0, a1, a2, a3, entry, stackTop) calls entry(a0..a3) on
+	// another stack and returns its result on the original one. The old r1
+	// and LR are parked at the bottom of the new stack's first frame.
+	reg(c, "OSSwitchFiberEx", func(m *Machine, cpu *CPU, t *Thread) {
+		entry, top := arg(cpu, 4), arg(cpu, 5)
+		sp := (top - 0x10) &^ 0xf
+		m.Mem.Write32(sp+0x0, 0) // terminates the back chain
+		m.Mem.Write32(sp+0x8, cpu.GPR[1])
+		m.Mem.Write32(sp+0xc, cpu.LR)
+		cpu.GPR[1] = sp
+		cpu.LR = m.thunk(c, "__RPSwitchFiberReturn")
+		cpu.PC = entry
+		m.jumped = true
+	})
+	reg(c, "__RPSwitchFiberReturn", func(m *Machine, cpu *CPU, t *Thread) {
+		sp := cpu.GPR[1]
+		cpu.LR = m.Mem.Read32(sp + 0xc)
+		cpu.GPR[1] = m.Mem.Read32(sp + 0x8)
+	})
 }

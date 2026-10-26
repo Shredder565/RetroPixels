@@ -1,85 +1,94 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/snd_core/ax_voice.cpp,
-// ax_ist.cpp, ax_exports.cpp and ax.h, rewritten in Go for RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
+// AX voice allocation (AXAcquireVoice, AXFreeVoice), app frame callbacks,
+// the low-pass filter helper, and the AXVPB fields beyond those in ax.go.
+
 import "math"
 
-// More AXVPB fields, as Cemu lays them out.
+// AXVPB fields
 const (
-	axvDepop      = 0x2c
-	axvOffsets    = 0x34 // AXPBOFFSET: the program reads its voice's offsets here
-	axvCallbackEx = 0x48 // AXAcquireVoiceEx's callback
+	axvDepop      = 0x2c // nonzero: ramp the voice out to avoid a click
+	axvOffsets    = 0x34 // AXPBOFFSET { u16 format, u16 loop, loop, end, current, data }
+	axvCallbackEx = 0x48
 	axvDropReason = 0x4c
 
-	axPriorityMax = 32
-
+	axPriorityMax       = 32 // valid priorities are 1..31
 	axAppFrameCallbacks = 64
+
+	// AX results
+	axErrNullCallback = 0xffffffef // -17
+	axErrNotFound     = 0xfffffff0 // -16
+	axErrTooMany      = 0xfffffff1 // -15
 )
 
-// axSyncOffsets mirrors a voice's offsets into its AXVPB.
+// axSyncOffsets writes the voice's current offsets into its AXVPB, where
+// programs look for them.
 func (m *Machine) axSyncOffsets(v *axVoice) {
-	mem := m.Mem
 	p := v.addr + axvOffsets
-	mem.Write16(p, v.format)
-	mem.Write16(p+2, uint16(b2u(v.loop)))
-	mem.Write32(p+4, v.loopOff)
-	mem.Write32(p+8, v.endOff)
-	mem.Write32(p+12, v.cur)
-	mem.Write32(p+16, v.data)
+	mem := m.Mem
+	mem.Write16(p+0x0, v.format)
+	mem.Write16(p+0x2, uint16(b2u(v.loop)))
+	for i, w := range [4]uint32{v.loopOff, v.endOff, v.cur, v.data} {
+		mem.Write32(p+4+uint32(i)*4, w)
+	}
 }
 
-// axAcquire gives the program a voice, dropping a lower-priority one when
-// none is free. AXAcquireVoice's callback takes (voice); AXAcquireVoiceEx's
-// takes (voice, user, reason).
-func (m *Machine) axAcquire(cpu *CPU, priority, callback, callbackEx, user uint32) {
-	if priority == 0 || priority >= axPriorityMax {
+// axVictim picks the voice to hand out for a new one of priority prio: a
+// free voice when there is one, otherwise the voice with the lowest
+// priority below prio (nil when every voice outranks it).
+func (a *AX) axVictim(prio uint32) (v *axVoice, stolen bool) {
+	for i := range a.voices {
+		if !a.voices[i].used {
+			return &a.voices[i], false
+		}
+	}
+	for i := range a.voices {
+		c := &a.voices[i]
+		if c.priority < prio && (v == nil || c.priority < v.priority) {
+			v = c
+		}
+	}
+	return v, v != nil
+}
+
+// axAcquire is AXAcquireVoice / AXAcquireVoiceEx. When a voice has to be
+// taken from its owner, the owner's callbacks hear about it: the plain one
+// with (voice), the Ex one with (voice, user, reason 0).
+func (m *Machine) axAcquire(cpu *CPU, prio, cb, cbEx, user uint32) {
+	if prio == 0 || prio >= axPriorityMax {
 		ret(cpu, 0)
 		return
 	}
-	a := m.ax()
-	var pick *axVoice
-	for i := range a.voices {
-		if !a.voices[i].used {
-			pick = &a.voices[i]
-			break
-		}
+	v, stolen := m.ax().axVictim(prio)
+	if v == nil {
+		ret(cpu, 0)
+		return
 	}
 	mem := m.Mem
-	if pick == nil {
-		// drop the lowest-priority voice below this one
-		for i := range a.voices {
-			v := &a.voices[i]
-			if v.priority < priority && (pick == nil || v.priority < pick.priority) {
-				pick = v
-			}
+	if stolen {
+		if v.playing {
+			mem.Write32(v.addr+axvDepop, 1)
 		}
-		if pick == nil {
-			ret(cpu, 0)
-			return
-		}
-		if pick.playing {
-			mem.Write32(pick.addr+axvDepop, 1)
-		}
-		m.queueCallback(1, pick.callback, pick.addr)
-		mem.Write32(pick.addr+axvDropReason, 0)
-		m.queueCallback(1, pick.callbackEx, pick.addr, pick.user, 0)
+		m.queueCallback(1, v.callback, v.addr)
+		mem.Write32(v.addr+axvDropReason, 0)
+		m.queueCallback(1, v.callbackEx, v.addr, v.user, 0)
 	}
-	*pick = axVoice{addr: pick.addr, used: true, priority: priority, callback: callback, callbackEx: callbackEx,
-		user: user, ratio: 1, volume: 1}
-	mem.Write32(pick.addr+axvState, 0)
-	mem.Write32(pick.addr+axvPriority, priority)
-	mem.Write32(pick.addr+axvCallback, callback)
-	mem.Write32(pick.addr+axvUser, user)
-	mem.Write32(pick.addr+axvCallbackEx, callbackEx)
-	ret(cpu, pick.addr)
+	*v = axVoice{
+		addr: v.addr, used: true, priority: prio,
+		callback: cb, callbackEx: cbEx, user: user,
+		ratio: 1, volume: 1,
+	}
+	mem.Write32(v.addr+axvState, 0)
+	mem.Write32(v.addr+axvPriority, prio)
+	mem.Write32(v.addr+axvCallback, cb)
+	mem.Write32(v.addr+axvUser, user)
+	mem.Write32(v.addr+axvCallbackEx, cbEx)
+	ret(cpu, v.addr)
 }
 
-// axFree gives a voice back.
+// axFree is AXFreeVoice.
 func (m *Machine) axFree(v *axVoice) {
 	if !v.used {
 		return
@@ -89,76 +98,79 @@ func (m *Machine) axFree(v *axVoice) {
 		mem.Write32(v.addr+axvDepop, 1)
 	}
 	*v = axVoice{addr: v.addr}
-	mem.Write32(v.addr+axvState, 0)
-	mem.Write32(v.addr+axvPriority, 0)
-	mem.Write32(v.addr+axvCallback, 0)
-	mem.Write32(v.addr+axvCallbackEx, 0)
-}
-
-// axLpfCoefs is AXComputeLpfCoefs: a one-pole low-pass filter at freq Hz.
-func axLpfCoefs(freq uint32) (a0, b0 uint16) {
-	t1 := math.Cos(float64(float32(freq) / 32000 * 6.2831855))
-	t2 := 2 - t1
-	r := uint16(uint32((t2 - math.Sqrt(t2*t2-1)) * 32768))
-	return 0x7fff - r, r
-}
-
-// axSrcRatio is the voice's 16.16 sample rate ratio, at most 8.
-func axSrcRatio(f float64) float64 {
-	r := f * 65536
-	switch {
-	case r < 0 || math.IsNaN(r):
-		r = 0
-	case r > 0x80000:
-		r = 0x80000
+	for _, f := range [...]uint32{axvState, axvPriority, axvCallback, axvCallbackEx} {
+		mem.Write32(v.addr+f, 0)
 	}
-	return float64(int32(r)) / 65536
+}
+
+// axLpfCoefs is AXComputeLpfCoefs: the coefficients of a one-pole low-pass
+// filter with its cutoff at freq Hz (32 kHz sample rate), as 1.15 fixed
+// point a0 and b0 with a0 + b0 = 1.
+func axLpfCoefs(freq uint32) (a0, b0 uint16) {
+	w := float32(freq) / 32000 * float32(2*math.Pi)
+	k := 2 - math.Cos(float64(w))
+	pole := k - math.Sqrt(k*k-1)
+	b0 = uint16(uint32(pole * 32768))
+	return 0x7fff - b0, b0
+}
+
+// axSrcRatio converts a pitch ratio to the hardware's 16.16 fixed point
+// (0 to 8) and back.
+func axSrcRatio(f float64) float64 {
+	fixed := f * 65536
+	if !(fixed >= 0) { // also catches NaN
+		fixed = 0
+	}
+	fixed = min(fixed, 8*65536)
+	return float64(int32(fixed)) / 65536
 }
 
 func init() {
-	for _, s := range []string{"sndcore2", "snd_core"} {
-		reg(s, "AXAcquireVoice", func(m *Machine, cpu *CPU, t *Thread) {
+	for _, lib := range []string{"sndcore2", "snd_core"} {
+		// AXAcquireVoice(priority, callback, user)
+		reg(lib, "AXAcquireVoice", func(m *Machine, cpu *CPU, t *Thread) {
 			m.axAcquire(cpu, arg(cpu, 0), arg(cpu, 1), 0, arg(cpu, 2))
 		})
-		reg(s, "AXAcquireVoiceEx", func(m *Machine, cpu *CPU, t *Thread) {
+		// AXAcquireVoiceEx(priority, callbackEx, user)
+		reg(lib, "AXAcquireVoiceEx", func(m *Machine, cpu *CPU, t *Thread) {
 			m.axAcquire(cpu, arg(cpu, 0), 0, arg(cpu, 1), arg(cpu, 2))
 		})
-		reg(s, "AXFreeVoice", func(m *Machine, cpu *CPU, t *Thread) {
+		reg(lib, "AXFreeVoice", func(m *Machine, cpu *CPU, t *Thread) {
 			if v := m.axVoiceAt(arg(cpu, 0)); v != nil {
 				m.axFree(v)
 			}
 			ret(cpu, 0)
 		})
-		reg(s, "AXRegisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
-			fn := arg(cpu, 0)
-			a := m.ax()
-			switch {
-			case fn == 0:
-				ret(cpu, 0xffffffef) // -17
-			case len(a.appCBs) >= axAppFrameCallbacks:
-				ret(cpu, 0xfffffff1) // -15: full
-			default:
-				a.appCBs = append(a.appCBs, fn)
-				ret(cpu, 0)
-			}
-		})
-		reg(s, "AXDeregisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
-			fn := arg(cpu, 0)
-			a := m.ax()
+		reg(lib, "AXRegisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
+			fn, a := arg(cpu, 0), m.ax()
 			if fn == 0 {
-				ret(cpu, 0xffffffef)
+				ret(cpu, axErrNullCallback)
 				return
 			}
-			for i, f := range a.appCBs {
-				if f == fn {
+			if len(a.appCBs) >= axAppFrameCallbacks {
+				ret(cpu, axErrTooMany)
+				return
+			}
+			a.appCBs = append(a.appCBs, fn)
+			ret(cpu, 0)
+		})
+		reg(lib, "AXDeregisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
+			fn, a := arg(cpu, 0), m.ax()
+			if fn == 0 {
+				ret(cpu, axErrNullCallback)
+				return
+			}
+			for i := range a.appCBs {
+				if a.appCBs[i] == fn {
 					a.appCBs = append(a.appCBs[:i], a.appCBs[i+1:]...)
 					ret(cpu, 0)
 					return
 				}
 			}
-			ret(cpu, 0xfffffff0) // -16: not found
+			ret(cpu, axErrNotFound)
 		})
-		reg(s, "AXComputeLpfCoefs", func(m *Machine, cpu *CPU, t *Thread) {
+		// AXComputeLpfCoefs(freq, u16 *a0, u16 *b0)
+		reg(lib, "AXComputeLpfCoefs", func(m *Machine, cpu *CPU, t *Thread) {
 			a0, b0 := axLpfCoefs(arg(cpu, 0))
 			if p := arg(cpu, 1); p != 0 {
 				m.Mem.Write16(p, a0)

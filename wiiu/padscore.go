@@ -1,140 +1,161 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/padscore/padscore.cpp
-// and padscore.h, rewritten in Go for RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// padscore: Wii Remotes and Pro Controllers. None are connected, so every
-// channel answers "no controller" the way Cemu does without one.
+// padscore: the WPAD and KPAD interfaces for Wii Remotes, Nunchuks and Pro
+// Controllers. RetroPixels emulates only the GamePad, so every channel is
+// empty: reads return no samples, probes report no device, and a connect
+// callback, once registered, is told a single time that nothing is there.
 
 const (
-	wpadMaxChannels = 7
+	wpadChannels = 7
 
-	wpadErrNone         = 0
-	wpadErrNoController = 0xffffffff // -1
+	wpadOK           = 0
+	wpadNoController = 0xffffffff // WPAD_ERR_NO_CONTROLLER (-1)
+	wpadDevNotFound  = 253        // WPADExtensionType for "no device"
+	wpadBatteryFull  = 4
 
-	kpadErrNoSamples    = 0xffffffff // -1
-	kpadErrNoController = 0xfffffffe // -2
+	kpadNoController = 0xfffffffe // KPAD_ERROR_NO_CONTROLLER (-2)
 
-	wpadBatteryFull = 4
+	kpadUnifiedSize = 0x44 // KPADUnifiedWpadStatus
+	kpadUnifiedErr  = 0x29 // its WPADStatus err byte
 
-	kpadUnifiedStatusSize = 0x44
-	wpadStatusErr         = 0x29 // WPADStatus.err
+	kpadDefaultMax = 4
 )
 
-// wpadState is what the program has told padscore.
+// wpadState holds what the program registered with padscore.
 type wpadState struct {
-	connect   [wpadMaxChannels]uint32 // connect callbacks
-	told      [wpadMaxChannels]bool   // connect callback told "no controller"
-	sampling  [wpadMaxChannels]uint32
-	extension [wpadMaxChannels]uint32
-	maxCtl    uint32
+	onConnect  [wpadChannels]uint32
+	notified   [wpadChannels]bool // onConnect already heard "no controller"
+	onSample   [wpadChannels]uint32
+	onExtend   [wpadChannels]uint32
+	maxPlayers uint32
 }
 
-// swapCallback stores fn in s[ch] and returns the previous one.
-func swapCallback(s []uint32, ch, fn uint32) uint32 {
-	if ch >= uint32(len(s)) {
+// replace sets slot ch of list to fn and returns what was there (0 for a
+// channel out of range).
+func replace(list []uint32, ch, fn uint32) uint32 {
+	if int(ch) >= len(list) {
 		return 0
 	}
-	old := s[ch]
-	s[ch] = fn
-	return old
+	prev := list[ch]
+	list[ch] = fn
+	return prev
 }
 
 func init() {
-	p := "padscore"
-	for _, n := range []string{"KPADInit", "KPADInitEx", "KPADShutdown", "WPADInit", "WPADShutdown", "WPADEnableURCC",
-		"WPADEnableWiiRemote", "WPADSetAutoSleepTime", "KPADEnableDPD", "KPADDisableDPD", "WPADControlMotor",
-		"WPADDisconnect", "WPADSetPowerSaveMode", "KPADSetBtnRepeat", "KPADSetPosParam", "KPADSetHoriParam",
-		"KPADSetDistParam", "KPADSetAccParam", "WPADSetDataFormat", "WPADEnableMotor", "KPADEnableMpls",
-		"KPADDisableMpls", "KPADResetMpls", "WPADRegisterAllocator", "KPADSetMplsWorkarea"} {
-		reg(p, n, func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
+	const p = "padscore"
+	returns := func(v uint32) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, v) }
 	}
+	putIf := func(m *Machine, addr, v uint32) {
+		if addr != 0 {
+			m.Mem.Write32(addr, v)
+		}
+	}
+
+	// set-up and configuration calls with nothing to configure
+	for _, name := range []string{
+		"KPADInit", "KPADInitEx", "KPADShutdown", "WPADInit", "WPADShutdown",
+		"WPADEnableURCC", "WPADEnableWiiRemote", "WPADSetAutoSleepTime",
+		"KPADEnableDPD", "KPADDisableDPD", "WPADControlMotor", "WPADDisconnect",
+		"WPADSetPowerSaveMode", "KPADSetBtnRepeat", "KPADSetPosParam",
+		"KPADSetHoriParam", "KPADSetDistParam", "KPADSetAccParam",
+		"WPADSetDataFormat", "WPADEnableMotor", "KPADEnableMpls",
+		"KPADDisableMpls", "KPADResetMpls", "WPADRegisterAllocator",
+		"KPADSetMplsWorkarea", "WPADGetDataFormat",
+	} {
+		reg(p, name, returns(0))
+	}
+	reg(p, "WPADGetStatus", returns(1))
+	reg(p, "WPADIsMotorEnabled", returns(1))
+	reg(p, "WPADGetBatteryLevel", returns(wpadBatteryFull))
+	reg(p, "KPADGetMplsWorkSize", returns(0x5fe0))
+	for _, name := range []string{"WPADRead", "WPADControlDpd", "WPADGetInfo"} {
+		reg(p, name, returns(wpadNoController))
+	}
+
 	reg(p, "KPADSetMaxControllers", func(m *Machine, cpu *CPU, t *Thread) {
-		m.pad.wpad.maxCtl = arg(cpu, 0)
+		m.pad.wpad.maxPlayers = arg(cpu, 0)
 		ret(cpu, 0)
 	})
 	reg(p, "KPADGetMaxControllers", func(m *Machine, cpu *CPU, t *Thread) {
-		n := m.pad.wpad.maxCtl
+		n := m.pad.wpad.maxPlayers
 		if n == 0 {
-			n = 4
+			n = kpadDefaultMax
 		}
 		ret(cpu, n)
 	})
-	// the connect callback hears "no controller" once per channel
-	connect := func(m *Machine, cpu *CPU, t *Thread) {
+
+	// callback registration: (channel, fn) returning the old fn
+	setConnect := func(m *Machine, cpu *CPU, t *Thread) {
 		ch, fn := arg(cpu, 0), arg(cpu, 1)
 		w := &m.pad.wpad
-		ret(cpu, swapCallback(w.connect[:], ch, fn))
-		if ch < wpadMaxChannels && fn != 0 && !w.told[ch] {
-			w.told[ch] = true
-			m.queueCallback(cpu.Core, fn, ch, wpadErrNoController)
-		}
-	}
-	reg(p, "KPADSetConnectCallback", connect)
-	reg(p, "WPADSetConnectCallback", connect)
-	sampling := func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, swapCallback(m.pad.wpad.sampling[:], arg(cpu, 0), arg(cpu, 1)))
-	}
-	reg(p, "KPADSetSamplingCallback", sampling)
-	reg(p, "WPADSetSamplingCallback", sampling)
-	reg(p, "WPADSetExtensionCallback", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, swapCallback(m.pad.wpad.extension[:], arg(cpu, 0), arg(cpu, 1)))
-	})
-	reg(p, "WPADProbe", func(m *Machine, cpu *CPU, t *Thread) {
-		if a := arg(cpu, 1); a != 0 {
-			m.Mem.Write32(a, 253) // WPAD_DEV_NOT_FOUND
-		}
-		ret(cpu, wpadErrNoController)
-	})
-	kpadRead := func(m *Machine, cpu *CPU, errp uint32) {
-		if errp != 0 {
-			m.Mem.Write32(errp, kpadErrNoController)
-		}
-		ret(cpu, 0)
-	}
-	reg(p, "KPADRead", func(m *Machine, cpu *CPU, t *Thread) { kpadRead(m, cpu, 0) })
-	reg(p, "KPADReadEx", func(m *Machine, cpu *CPU, t *Thread) { kpadRead(m, cpu, arg(cpu, 3)) })
-	reg(p, "KPADGetUnifiedWpadStatus", func(m *Machine, cpu *CPU, t *Thread) {
-		ch, buf, n := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
-		if ch < wpadMaxChannels && buf != 0 && n != 0 {
-			m.Mem.Fill(buf, 0, n*kpadUnifiedStatusSize)
-			m.Mem.Write8(buf+wpadStatusErr, 0xff) // WPAD_ERR_NO_CONTROLLER
-		}
-		ret(cpu, 0)
-	})
-	reg(p, "WPADRead", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, wpadErrNoController) })
-	reg(p, "WPADGetStatus", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
-	reg(p, "WPADGetBatteryLevel", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, wpadBatteryFull) })
-	reg(p, "WPADGetDataFormat", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(p, "WPADIsMotorEnabled", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
-	reg(p, "WPADControlDpd", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, wpadErrNoController) })
-	reg(p, "KPADGetMplsWorkSize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x5fe0) })
-	reg(p, "WPADGetInfo", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, wpadErrNoController) })
-	reg(p, "WPADGetInfoAsync", func(m *Machine, cpu *CPU, t *Thread) {
-		m.queueCallback(cpu.Core, arg(cpu, 2), arg(cpu, 0), kpadErrNoController)
-		ret(cpu, wpadErrNoController)
-	})
-	reg(p, "WPADIsMplsAttached", func(m *Machine, cpu *CPU, t *Thread) {
-		ch, attached, cb := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
-		if ch >= 4 {
-			ret(cpu, wpadErrNoController)
+		ret(cpu, replace(w.onConnect[:], ch, fn))
+		if fn == 0 || ch >= wpadChannels || w.notified[ch] {
 			return
 		}
-		if attached != 0 {
-			m.Mem.Write32(attached, 0)
-		}
-		m.queueCallback(cpu.Core, cb, ch, wpadErrNoController)
-		ret(cpu, wpadErrNone)
+		w.notified[ch] = true
+		m.queueCallback(cpu.Core, fn, ch, wpadNoController)
+	}
+	reg(p, "KPADSetConnectCallback", setConnect)
+	reg(p, "WPADSetConnectCallback", setConnect)
+	setSampling := func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, replace(m.pad.wpad.onSample[:], arg(cpu, 0), arg(cpu, 1)))
+	}
+	reg(p, "KPADSetSamplingCallback", setSampling)
+	reg(p, "WPADSetSamplingCallback", setSampling)
+	reg(p, "WPADSetExtensionCallback", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, replace(m.pad.wpad.onExtend[:], arg(cpu, 0), arg(cpu, 1)))
 	})
+
+	// WPADProbe(channel, u32 *type)
+	reg(p, "WPADProbe", func(m *Machine, cpu *CPU, t *Thread) {
+		putIf(m, arg(cpu, 1), wpadDevNotFound)
+		ret(cpu, wpadNoController)
+	})
+	// KPADRead(channel, buf, n) and KPADReadEx(channel, buf, n, s32 *err):
+	// no samples
+	reg(p, "KPADRead", returns(0))
+	reg(p, "KPADReadEx", func(m *Machine, cpu *CPU, t *Thread) {
+		putIf(m, arg(cpu, 3), kpadNoController)
+		ret(cpu, 0)
+	})
+	// KPADGetUnifiedWpadStatus(channel, buf, n): n cleared records whose
+	// first one says "no controller"
+	reg(p, "KPADGetUnifiedWpadStatus", func(m *Machine, cpu *CPU, t *Thread) {
+		ch, buf, n := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
+		if ch < wpadChannels && buf != 0 && n > 0 {
+			m.Mem.Fill(buf, 0, n*kpadUnifiedSize)
+			m.Mem.Write8(buf+kpadUnifiedErr, 0xff)
+		}
+		ret(cpu, 0)
+	})
+	// WPADGetInfoAsync(channel, info, callback): callback(channel, error)
+	reg(p, "WPADGetInfoAsync", func(m *Machine, cpu *CPU, t *Thread) {
+		m.queueCallback(cpu.Core, arg(cpu, 2), arg(cpu, 0), kpadNoController)
+		ret(cpu, wpadNoController)
+	})
+	// WPADIsMplsAttached(channel, u32 *attached, callback): channels 0..3
+	// answer "not attached" and call back with the error
+	reg(p, "WPADIsMplsAttached", func(m *Machine, cpu *CPU, t *Thread) {
+		ch := arg(cpu, 0)
+		if ch >= 4 {
+			ret(cpu, wpadNoController)
+			return
+		}
+		putIf(m, arg(cpu, 1), 0)
+		m.queueCallback(cpu.Core, arg(cpu, 2), ch, wpadNoController)
+		ret(cpu, wpadOK)
+	})
+	// WPADGetAccGravityUnit(channel, type, u32 unit[3])
 	reg(p, "WPADGetAccGravityUnit", func(m *Machine, cpu *CPU, t *Thread) {
-		if a := arg(cpu, 2); a != 0 && arg(cpu, 0) < 4 {
-			for i := uint32(0); i < 3; i++ {
-				m.Mem.Write32(a+4*i, 99)
-			}
+		unit := arg(cpu, 2)
+		if unit == 0 || arg(cpu, 0) >= 4 {
+			return
+		}
+		for i := uint32(0); i < 3; i++ {
+			m.Mem.Write32(unit+i*4, 99)
 		}
 	})
 }

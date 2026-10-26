@@ -1,273 +1,342 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/
-// coreinit/coreinit_Alarm.cpp and coreinit_Alarm.h, rewritten in Go for
-// RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// coreinit: alarms. An alarm calls its handler (alarm, context) on the
-// callback thread of the core that set it when its time comes, again each
-// period for a periodic one. One set with an alarm queue (OSSetAlarmEx) goes
-// into the queue instead, for a thread to take with OSGetAlarmFromQueue.
+// coreinit alarms. When an alarm's time comes its handler(alarm, context)
+// runs on the callback thread of the core that set it; a periodic alarm
+// comes back every period. An alarm set with an alarm queue (the Ex calls)
+// is instead appended to that queue for a thread to collect with
+// OSGetAlarmFromQueue, and a periodic one is armed again only once it has
+// been collected.
+//
+// The emulator keeps one Alarm record per OSAlarm it has armed; the times in
+// those records are in time base ticks since boot, while the OSAlarm in
+// memory holds OSTime values (ticks since 2000).
 
 import "math"
 
-// OSAlarm fields
+// OSAlarm layout (0x58 bytes)
 const (
-	alarmTag      = 0x614c724d // "aLrM"
-	alarmHandler  = 0x0c
-	alarmGroup    = 0x10
-	alarmNext     = 0x18 // the time it fires next
-	alarmPrevLink = 0x20 // in its alarm queue
-	alarmNextLink = 0x24
-	alarmPeriod   = 0x28
-	alarmStart    = 0x30
-	alarmUserData = 0x38
-	alarmState    = 0x3c // RetroPixels' own: 1 set, 2 fired, 3 cancelled
-	alarmQueue    = 0x50
-	alarmContext  = 0x54
+	oaTag      = 0x00
+	oaName     = 0x04
+	oaHandler  = 0x0c
+	oaGroup    = 0x10
+	oaNextFire = 0x18 // u64 OSTime
+	oaQPrev    = 0x20 // links within its alarm queue
+	oaQNext    = 0x24
+	oaPeriod   = 0x28 // u64
+	oaStart    = 0x30 // u64
+	oaUserData = 0x38
+	oaState    = 0x3c // RetroPixels' use: see alarmArmed etc.
+	oaQueue    = 0x50
+	oaContext  = 0x54
+	oaBytes    = 0x58
 
-	// OSAlarmQueue fields
-	alarmQueueTag  = 0x614c6d51 // "aLmQ"
-	alarmQueueHead = 0x1c
-	alarmQueueTail = 0x20
+	oaMagic = 0x614c724d // "aLrM"
+
+	alarmArmed     = 1
+	alarmFired     = 2
+	alarmCancelled = 3
 )
 
-// Alarm is an OSAlarm that's been set.
+// OSAlarmQueue layout (0x24 bytes)
+const (
+	aqTag   = 0x00
+	aqName  = 0x04
+	aqSelf  = 0x14
+	aqFirst = 0x1c
+	aqLast  = 0x20
+	aqBytes = 0x24
+
+	aqMagic = 0x614c6d51 // "aLmQ"
+)
+
+// Alarm is the emulator's record of an armed OSAlarm.
 type Alarm struct {
-	Addr   uint32
-	Fire   uint64 // in time base ticks
-	Period uint64
-	Core   int
-	Active bool
+	addr   uint32
+	due    uint64 // time base ticks since boot
+	period uint64 // 0 for a one-shot alarm
+	core   int
+	armed  bool
 }
 
-func (m *Machine) alarm(a uint32) *Alarm {
-	for _, al := range m.alarms {
-		if al.Addr == a {
-			return al
+// alarmRecord finds the record for the OSAlarm at addr.
+func (m *Machine) alarmRecord(addr uint32) *Alarm {
+	for _, a := range m.alarms {
+		if a.addr == addr {
+			return a
 		}
 	}
 	return nil
 }
 
-func (m *Machine) createAlarm(a, name uint32) {
-	if al := m.alarm(a); al != nil {
-		al.Active = false
+// alarmWaitKey is what threads in OSWaitAlarm wait on.
+func alarmWaitKey(addr uint32) uint64 { return keyAlarm | uint64(addr) }
+
+// osAlarmInit is OSCreateAlarm(Ex). Re-creating an armed alarm disarms it.
+func (m *Machine) osAlarmInit(addr, name uint32) {
+	if a := m.alarmRecord(addr); a != nil {
+		a.armed = false
 	}
-	m.Mem.Fill(a, 0, 0x58)
-	m.Mem.Write32(a, alarmTag)
-	m.Mem.Write32(a+4, name)
+	m.Mem.Fill(addr, 0, oaBytes)
+	m.Mem.Write32(addr+oaTag, oaMagic)
+	m.Mem.Write32(addr+oaName, name)
 }
 
-// inAlarmQueue: a fired alarm waiting in its alarm queue.
-func (m *Machine) inAlarmQueue(a uint32) bool {
-	q := m.Mem.Read32(a + alarmQueue)
-	return q != 0 && (m.Mem.Read32(q+alarmQueueHead) == a || m.Mem.Read32(a+alarmPrevLink) != 0)
-}
+// ---- alarm queues ----
 
-func (m *Machine) appendAlarmToQueue(a uint32) {
+// queuedAlarm reports whether the alarm has fired into its queue and has
+// not been collected yet.
+func (m *Machine) queuedAlarm(addr uint32) bool {
 	mem := m.Mem
-	q := mem.Read32(a + alarmQueue)
-	tail := mem.Read32(q + alarmQueueTail)
-	mem.Write32(a+alarmPrevLink, tail)
-	mem.Write32(a+alarmNextLink, 0)
-	if tail != 0 {
-		mem.Write32(tail+alarmNextLink, a)
-	} else {
-		mem.Write32(q+alarmQueueHead, a)
+	q := mem.Read32(addr + oaQueue)
+	if q == 0 {
+		return false
 	}
-	mem.Write32(q+alarmQueueTail, a)
+	return mem.Read32(q+aqFirst) == addr || mem.Read32(addr+oaQPrev) != 0
+}
+
+func (m *Machine) alarmQueuePush(addr uint32) {
+	mem := m.Mem
+	q := mem.Read32(addr + oaQueue)
+	last := mem.Read32(q + aqLast)
+	mem.Write32(addr+oaQPrev, last)
+	mem.Write32(addr+oaQNext, 0)
+	if last == 0 {
+		mem.Write32(q+aqFirst, addr)
+	} else {
+		mem.Write32(last+oaQNext, addr)
+	}
+	mem.Write32(q+aqLast, addr)
 	m.wake(keyAlarmQ | uint64(q))
 }
 
-func (m *Machine) removeAlarmFromQueue(a uint32) {
+func (m *Machine) alarmQueueDrop(addr uint32) {
 	mem := m.Mem
-	q := mem.Read32(a + alarmQueue)
-	prev, next := mem.Read32(a+alarmPrevLink), mem.Read32(a+alarmNextLink)
-	if next != 0 {
-		mem.Write32(next+alarmPrevLink, prev)
+	q := mem.Read32(addr + oaQueue)
+	prev, next := mem.Read32(addr+oaQPrev), mem.Read32(addr+oaQNext)
+	if prev == 0 {
+		mem.Write32(q+aqFirst, next)
 	} else {
-		mem.Write32(q+alarmQueueTail, prev)
+		mem.Write32(prev+oaQNext, next)
 	}
-	if prev != 0 {
-		mem.Write32(prev+alarmNextLink, next)
+	if next == 0 {
+		mem.Write32(q+aqLast, prev)
 	} else {
-		mem.Write32(q+alarmQueueHead, next)
+		mem.Write32(next+oaQPrev, prev)
 	}
-	mem.Write32(a+alarmPrevLink, 0)
-	mem.Write32(a+alarmNextLink, 0)
+	mem.Write32(addr+oaQPrev, 0)
+	mem.Write32(addr+oaQNext, 0)
 }
 
-// setAlarm sets the alarm at a to fire at start (an OSTime), and then every
-// period if it's periodic: the first time is the next whole period after
-// start when that's gone by already.
-func (m *Machine) setAlarm(core int, a uint32, start, period uint64, periodic bool, handler, queue uint32) {
-	if m.inAlarmQueue(a) {
-		return // fired, and still waiting to be taken from its queue
+// ---- arming, firing, cancelling ----
+
+// armAlarm arms the OSAlarm at addr. first is an OSTime. A periodic alarm
+// whose first time has already passed starts at the next multiple of the
+// period after it. An alarm still sitting uncollected in its queue can't be
+// re-armed.
+func (m *Machine) armAlarm(core int, addr uint32, first, period uint64, periodic bool, handler, queue uint32) {
+	if m.queuedAlarm(addr) {
+		return
 	}
 	mem := m.Mem
-	next := start
-	if periodic {
+	when := first
+	if !periodic {
+		period = 0
+	} else {
 		if int64(period) <= 0 {
 			return
 		}
-		if now := m.bootTime + m.Time(); start < now {
-			next = start + ((now-start)/period+1)*period
+		if now := m.bootTime + m.Time(); first < now {
+			missed := (now-first)/period + 1
+			when = first + missed*period
 		}
-		mem.Write64(a+alarmStart, start)
-	} else {
-		period = 0
+		mem.Write64(addr+oaStart, first)
 	}
-	mem.Write64(a+alarmNext, next)
-	mem.Write64(a+alarmPeriod, period)
-	mem.Write32(a+alarmHandler, handler)
-	mem.Write32(a+alarmQueue, queue)
-	mem.Write32(a+alarmState, 1)
-	al := m.alarm(a)
-	if al == nil {
-		al = &Alarm{Addr: a}
-		m.alarms = append(m.alarms, al)
+	mem.Write64(addr+oaNextFire, when)
+	mem.Write64(addr+oaPeriod, period)
+	mem.Write32(addr+oaHandler, handler)
+	mem.Write32(addr+oaQueue, queue)
+	mem.Write32(addr+oaState, alarmArmed)
+
+	a := m.alarmRecord(addr)
+	if a == nil {
+		a = &Alarm{addr: addr}
+		m.alarms = append(m.alarms, a)
 	}
-	al.Fire = next - m.bootTime
-	if next < m.bootTime {
-		al.Fire = 0
+	a.due = 0
+	if when > m.bootTime {
+		a.due = when - m.bootTime
 	}
-	al.Period, al.Core, al.Active = period, core, true
+	a.period, a.core, a.armed = period, core, true
 	m.alarmThread(core)
 }
 
-func (m *Machine) cancelAlarm(a uint32) bool {
-	if al := m.alarm(a); al != nil && al.Active {
-		al.Active = false
-		m.Mem.Write32(a+alarmState, 3)
-		m.wake(keyAlarm | uint64(a))
+// disarmAlarm is OSCancelAlarm: it reports whether there was anything to
+// cancel (an armed alarm, or one waiting in its queue).
+func (m *Machine) disarmAlarm(addr uint32) bool {
+	if a := m.alarmRecord(addr); a != nil && a.armed {
+		a.armed = false
+		m.Mem.Write32(addr+oaState, alarmCancelled)
+		m.wake(alarmWaitKey(addr))
 		return true
 	}
-	if m.inAlarmQueue(a) {
-		m.removeAlarmFromQueue(a)
+	if m.queuedAlarm(addr) {
+		m.alarmQueueDrop(addr)
 		return true
 	}
 	return false
 }
 
-// runAlarms fires the alarms that are due (a periodic one once for each
-// period gone by).
+// fire handles one alarm whose time has come. It reports whether the alarm
+// stays armed (and may be due again already).
+func (m *Machine) fire(a *Alarm, now uint64) bool {
+	mem := m.Mem
+	addr := a.addr
+	if mem.Read32(addr+oaQueue) != 0 {
+		a.armed = false
+		mem.Write32(addr+oaContext, m.alarmContext)
+		m.alarmQueuePush(addr)
+		return false
+	}
+	m.queueCallback(a.core, mem.Read32(addr+oaHandler), addr, m.alarmContext)
+	if a.period == 0 {
+		a.armed = false
+		mem.Write32(addr+oaState, alarmFired)
+		m.wake(alarmWaitKey(addr))
+		return false
+	}
+	a.due += a.period
+	// hopelessly behind (the program was stalled): skip ahead rather than
+	// firing once for every missed period
+	if a.due+100*a.period < now {
+		a.due = now + a.period
+	}
+	mem.Write64(addr+oaNextFire, m.bootTime+a.due)
+	return true
+}
+
+// runAlarms fires every alarm that is due by the current time base.
 func (m *Machine) runAlarms() {
 	now := m.tb
-	for _, al := range m.alarms {
-		for al.Active && al.Fire <= now {
-			a := al.Addr
-			if m.Mem.Read32(a+alarmQueue) != 0 {
-				// it waits in its queue; a periodic one is set again once
-				// it's taken out
-				al.Active = false
-				m.Mem.Write32(a+alarmContext, m.alarmContext)
-				m.appendAlarmToQueue(a)
+	for _, a := range m.alarms {
+		for a.armed && a.due <= now {
+			if !m.fire(a, now) {
 				break
 			}
-			m.queueCallback(al.Core, m.Mem.Read32(a+alarmHandler), a, m.alarmContext)
-			if al.Period == 0 {
-				al.Active = false
-				m.Mem.Write32(a+alarmState, 2)
-				m.wake(keyAlarm | uint64(a))
-				break
-			}
-			al.Fire += al.Period
-			if al.Fire+100*al.Period < now {
-				al.Fire = now + al.Period // far behind: don't call it for every period missed
-			}
-			m.Mem.Write64(a+alarmNext, al.Fire+m.bootTime)
 		}
 	}
 }
 
+// nextAlarm is when the next armed alarm is due (at least 1), or 0 if none
+// is armed.
 func (m *Machine) nextAlarm() uint64 {
-	var next uint64 = math.MaxUint64
-	for _, al := range m.alarms {
-		if al.Active && al.Fire < next {
-			next = al.Fire
+	soonest := uint64(math.MaxUint64)
+	for _, a := range m.alarms {
+		if a.armed {
+			soonest = min(soonest, a.due)
 		}
 	}
-	if next == math.MaxUint64 {
+	if soonest == math.MaxUint64 {
 		return 0
 	}
-	return max(next, 1)
+	return max(soonest, 1)
 }
 
 func init() {
-	c := "coreinit"
+	const c = "coreinit"
 
-	reg(c, "OSCreateAlarm", func(m *Machine, cpu *CPU, t *Thread) { m.createAlarm(arg(cpu, 0), 0) })
-	reg(c, "OSCreateAlarmEx", func(m *Machine, cpu *CPU, t *Thread) { m.createAlarm(arg(cpu, 0), arg(cpu, 1)) })
-	// OSSetAlarm(alarm, delay, handler), OSSetAlarmEx(..., queue)
-	set := func(m *Machine, cpu *CPU, queue uint32) {
-		if delay := arg64(cpu, 2); int64(delay) > 0 {
-			m.setAlarm(cpu.Core, arg(cpu, 0), m.bootTime+m.Time()+delay, 0, false, arg(cpu, 4), queue)
+	reg(c, "OSCreateAlarm", func(m *Machine, cpu *CPU, t *Thread) { m.osAlarmInit(arg(cpu, 0), 0) })
+	reg(c, "OSCreateAlarmEx", func(m *Machine, cpu *CPU, t *Thread) { m.osAlarmInit(arg(cpu, 0), arg(cpu, 1)) })
+
+	// OSSetAlarm(alarm, u64 delay, handler) and OSSetAlarmEx(..., queue)
+	oneShot := func(withQueue bool) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			var queue uint32
+			if withQueue {
+				queue = arg(cpu, 5)
+			}
+			if delay := arg64(cpu, 2); int64(delay) > 0 {
+				when := m.bootTime + m.Time() + delay
+				m.armAlarm(cpu.Core, arg(cpu, 0), when, 0, false, arg(cpu, 4), queue)
+			}
+			ret(cpu, 1)
 		}
-		ret(cpu, 1)
 	}
-	reg(c, "OSSetAlarm", func(m *Machine, cpu *CPU, t *Thread) { set(m, cpu, 0) })
-	reg(c, "OSSetAlarmEx", func(m *Machine, cpu *CPU, t *Thread) { set(m, cpu, arg(cpu, 5)) })
-	// OSSetPeriodicAlarm(alarm, start, period, handler), OSSetPeriodicAlarmEx(..., queue)
-	setPeriodic := func(m *Machine, cpu *CPU, queue uint32) {
-		m.setAlarm(cpu.Core, arg(cpu, 0), arg64(cpu, 2), arg64(cpu, 4), true, arg(cpu, 6), queue)
-		ret(cpu, 1)
+	reg(c, "OSSetAlarm", oneShot(false))
+	reg(c, "OSSetAlarmEx", oneShot(true))
+
+	// OSSetPeriodicAlarm(alarm, u64 start, u64 period, handler) and
+	// OSSetPeriodicAlarmEx(..., queue)
+	periodic := func(withQueue bool) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			var queue uint32
+			if withQueue {
+				queue = arg(cpu, 7)
+			}
+			m.armAlarm(cpu.Core, arg(cpu, 0), arg64(cpu, 2), arg64(cpu, 4), true, arg(cpu, 6), queue)
+			ret(cpu, 1)
+		}
 	}
-	reg(c, "OSSetPeriodicAlarm", func(m *Machine, cpu *CPU, t *Thread) { setPeriodic(m, cpu, 0) })
-	reg(c, "OSSetPeriodicAlarmEx", func(m *Machine, cpu *CPU, t *Thread) { setPeriodic(m, cpu, arg(cpu, 7)) })
-	reg(c, "OSCancelAlarm", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.cancelAlarm(arg(cpu, 0))) })
+	reg(c, "OSSetPeriodicAlarm", periodic(false))
+	reg(c, "OSSetPeriodicAlarmEx", periodic(true))
+
+	reg(c, "OSCancelAlarm", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.disarmAlarm(arg(cpu, 0))) })
+	// OSCancelAlarms(group): every armed alarm tagged with group
 	reg(c, "OSCancelAlarms", func(m *Machine, cpu *CPU, t *Thread) {
 		group := arg(cpu, 0)
 		if group == 0 || group == 0xffffffff {
 			return
 		}
-		for _, al := range m.alarms {
-			if al.Active && m.Mem.Read32(al.Addr+alarmGroup) == group {
-				m.cancelAlarm(al.Addr)
+		for _, a := range m.alarms {
+			if a.armed && m.Mem.Read32(a.addr+oaGroup) == group {
+				m.disarmAlarm(a.addr)
 			}
 		}
 	})
-	reg(c, "OSSetAlarmUserData", func(m *Machine, cpu *CPU, t *Thread) { m.Mem.Write32(arg(cpu, 0)+alarmUserData, arg(cpu, 1)) })
-	reg(c, "OSGetAlarmUserData", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.Mem.Read32(arg(cpu, 0)+alarmUserData)) })
+	reg(c, "OSSetAlarmUserData", func(m *Machine, cpu *CPU, t *Thread) {
+		m.Mem.Write32(arg(cpu, 0)+oaUserData, arg(cpu, 1))
+	})
+	reg(c, "OSGetAlarmUserData", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, m.Mem.Read32(arg(cpu, 0)+oaUserData))
+	})
 	reg(c, "OSSetAlarmTag", func(m *Machine, cpu *CPU, t *Thread) {
 		if group := arg(cpu, 1); group != 0xffffffff {
-			m.Mem.Write32(arg(cpu, 0)+alarmGroup, group)
+			m.Mem.Write32(arg(cpu, 0)+oaGroup, group)
 		}
 	})
+	// OSWaitAlarm(alarm): blocks until the alarm fires (1) or is cancelled
+	// (0); 0 at once when it isn't armed
 	reg(c, "OSWaitAlarm", func(m *Machine, cpu *CPU, t *Thread) {
-		a := arg(cpu, 0)
+		addr := arg(cpu, 0)
 		if t.Woken {
-			ret(cpu, b2u(m.Mem.Read32(a+alarmState) != 3))
+			retBool(cpu, m.Mem.Read32(addr+oaState) != alarmCancelled)
 			return
 		}
-		al := m.alarm(a)
-		if al == nil || !al.Active {
+		if a := m.alarmRecord(addr); a == nil || !a.armed {
 			ret(cpu, 0)
 			return
 		}
-		t.block(keyAlarm|uint64(a), 0)
+		t.block(alarmWaitKey(addr), 0)
 	})
 
-	// alarm queues
 	initQueue := func(m *Machine, q, name uint32) {
-		m.Mem.Fill(q, 0, 0x24)
-		m.Mem.Write32(q, alarmQueueTag)
-		m.Mem.Write32(q+4, name)
-		m.Mem.Write32(q+0x14, q)
+		m.Mem.Fill(q, 0, aqBytes)
+		m.Mem.Write32(q+aqTag, aqMagic)
+		m.Mem.Write32(q+aqName, name)
+		m.Mem.Write32(q+aqSelf, q)
 	}
 	reg(c, "OSInitAlarmQueue", func(m *Machine, cpu *CPU, t *Thread) { initQueue(m, arg(cpu, 0), 0) })
 	reg(c, "OSInitAlarmQueueEx", func(m *Machine, cpu *CPU, t *Thread) { initQueue(m, arg(cpu, 0), arg(cpu, 1)) })
-	// OSGetAlarmFromQueue(queue, alarmOut, contextOut, noWait)
+	// OSGetAlarmFromQueue(queue, OSAlarm **alarm, void **context, noWait):
+	// takes the oldest fired alarm, blocking for one unless noWait. A
+	// periodic alarm is armed again as it is taken.
 	reg(c, "OSGetAlarmFromQueue", func(m *Machine, cpu *CPU, t *Thread) {
-		q, alarmOut, ctxOut, noWait := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3)
+		q, alarmOut, ctxOut, noWait := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3) != 0
 		mem := m.Mem
-		a := mem.Read32(q + alarmQueueHead)
-		if a == 0 {
-			if noWait == 0 {
+		addr := mem.Read32(q + aqFirst)
+		if addr == 0 {
+			if !noWait {
 				t.block(keyAlarmQ|uint64(q), 0)
 				return
 			}
@@ -276,12 +345,12 @@ func init() {
 			ret(cpu, 0)
 			return
 		}
-		m.removeAlarmFromQueue(a)
-		if period := mem.Read64(a + alarmPeriod); period != 0 {
-			m.setAlarm(cpu.Core, a, mem.Read64(a+alarmStart), period, true, mem.Read32(a+alarmHandler), q)
+		m.alarmQueueDrop(addr)
+		if period := mem.Read64(addr + oaPeriod); period != 0 {
+			m.armAlarm(cpu.Core, addr, mem.Read64(addr+oaStart), period, true, mem.Read32(addr+oaHandler), q)
 		}
-		mem.Write32(alarmOut, a)
-		mem.Write32(ctxOut, mem.Read32(a+alarmContext))
+		mem.Write32(alarmOut, addr)
+		mem.Write32(ctxOut, mem.Read32(addr+oaContext))
 		ret(cpu, 1)
 	})
 }

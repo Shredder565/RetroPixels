@@ -1,64 +1,69 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/vpad/vpad.cpp
-// and src/input/emulated/VPADController.cpp, rewritten in Go for RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// The GamePad's touch panel gives raw 12-bit coordinates that cover the
-// screen with a margin: x from 92 across 3883 steps, y from the bottom.
+// The GamePad touch panel reports raw 12-bit coordinates (0..4095) that are
+// larger than the screen: the visible area starts tpOffsetX in from the left
+// and spans tpScaleX steps across, and the y axis grows upward from
+// tpOffsetY above the bottom over tpScaleY steps. VPADGetTPCalibratedPoint
+// maps raw values onto a screen resolution.
+
 const (
 	tpOffsetX = 92
 	tpOffsetY = 254
 	tpScaleX  = 3883
 	tpScaleY  = 3694
 
+	tpRawMax = 4095
+
+	// VPADTouchData.validity
 	tpValid     = 0
-	tpInvalidXY = 3
+	tpInvalidXY = 3 // neither x nor y is valid
 )
 
-// vpadStatusSize is sizeof(VPADStatus).
+// vpadStatusSize is the size of a VPADStatus.
 const vpadStatusSize = 0xac
 
-// tpRaw turns a touch at fx, fy (0..1 across and down) into raw coordinates.
-func tpRaw(fx, fy float32) (uint16, uint16) {
-	fx = min(max(fx, 0), 1)
-	fy = min(max(fy, 0), 1)
-	return uint16(fx*tpScaleX + tpOffsetX), uint16(4095 - fy*tpScaleY - tpOffsetY)
+func unitClamp(v float32) float32 { return min(max(v, 0), 1) }
+
+// tpRaw gives the raw panel reading for a touch at (fx, fy), fractions of
+// the screen's width and height measured from the top left.
+func tpRaw(fx, fy float32) (x, y uint16) {
+	x = uint16(unitClamp(fx)*tpScaleX + tpOffsetX)
+	y = uint16(tpRawMax - tpOffsetY - unitClamp(fy)*tpScaleY)
+	return x, y
 }
 
-// tpToResolution turns raw coordinates into pixels on a w x h screen.
-func tpToResolution(x, y int32, w, h int32) (int32, int32) {
-	x -= tpOffsetX
-	y = 4095 - y - tpOffsetY
-	x = max(x, 0)
-	y = max(y, 0)
-	return int32(float64(x) / tpScaleX * float64(w)), int32(float64(y) / tpScaleY * float64(h))
+// tpToScreen maps a raw reading onto a w x h screen.
+func tpToScreen(rx, ry, w, h int32) (int32, int32) {
+	dx := max(rx-tpOffsetX, 0)
+	dy := max(tpRawMax-tpOffsetY-ry, 0)
+	sx := float64(dx) * float64(w) / tpScaleX
+	sy := float64(dy) * float64(h) / tpScaleY
+	return int32(sx), int32(sy)
 }
 
-// calibrateTouch copies a VPADTouchData from in to out with x and y in pixels.
+// calibrateTouch reads the VPADTouchData { s16 x, s16 y, u16 touched,
+// u16 validity } at in and writes it to out with x and y in pixels of a
+// w x h screen.
 func (m *Machine) calibrateTouch(out, in uint32, w, h int32) {
 	mem := m.Mem
-	x, y := int32(int16(mem.Read16(in))), int32(int16(mem.Read16(in+2)))
-	touch, valid := mem.Read16(in+4), mem.Read16(in+6)
-	cx, cy := tpToResolution(x, y, w, h)
-	mem.Write16(out, uint16(cx))
-	mem.Write16(out+2, uint16(cy))
-	mem.Write16(out+4, touch)
-	mem.Write16(out+6, valid)
+	rx := int32(int16(mem.Read16(in)))
+	ry := int32(int16(mem.Read16(in + 2)))
+	touched, validity := mem.Read16(in+4), mem.Read16(in+6)
+	sx, sy := tpToScreen(rx, ry, w, h)
+	mem.Write16(out, uint16(sx))
+	mem.Write16(out+2, uint16(sy))
+	mem.Write16(out+4, touched)
+	mem.Write16(out+6, validity)
 }
 
-// tpCalibrationResolution is the screen size for VPADGetTPCalibratedPointEx.
-func tpCalibrationResolution(r uint32) (int32, int32, bool) {
-	switch r {
-	case 0:
-		return 1920, 1080, true
-	case 1:
-		return 1280, 720, true
-	case 2:
-		return 854, 480, true
+// tpCalibrationResolution is the screen size behind each
+// VPADGetTPCalibratedPointEx resolution value.
+func tpCalibrationResolution(r uint32) (w, h int32, ok bool) {
+	sizes := [...][2]int32{{1920, 1080}, {1280, 720}, {854, 480}}
+	if r >= uint32(len(sizes)) {
+		return 0, 0, false
 	}
-	return 0, 0, false
+	return sizes[r][0], sizes[r][1], true
 }
