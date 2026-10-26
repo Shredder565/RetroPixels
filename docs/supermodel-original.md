@@ -1,27 +1,32 @@
 # Supermodel: replacing Supermodel's code with original code
 
 RetroPixels' Model 3 engine (`Supermodel\supermodel.exe`, used for Star Wars
-Trilogy Arcade) is built from Supermodel (The Supermodel Team, GPL-3.0-or-later)
-at commit 24d2ffc. The goal is the same as for PixelU (`docs/pixelu-original.md`)
-and PixelU-Wii (`docs/pixelu-wii-original.md`): replace Supermodel's code with
-RetroPixels' own one piece at a time, so every step leaves an emulator that
-builds, runs and keeps every feature, and at the end none of Supermodel's code
-is left.
+Trilogy Arcade) started as Supermodel (The Supermodel Team,
+GPL-3.0-or-later) at commit 24d2ffc. As for PixelU (`docs/pixelu-original.md`)
+and PixelU-Wii (`docs/pixelu-wii-original.md`), Supermodel's code was
+replaced with RetroPixels' own one piece at a time, each step leaving an
+emulator that builds, runs and keeps every feature. **That is finished:**
+every line of `supermodel/Src` outside `Pkgs/` (permissive third-party
+libraries) is original, and nothing from upstream is fetched, built or
+shipped (see `docs/licensing.md`).
 
 ## Layout
 
-- `supermodel/Src/` is the code being rewritten. It started (step S0) as
+- `supermodel/Src/` is the engine's code. It started (step S0) as
   upstream's `Src/` at 24d2ffc with RetroPixels' changes already applied (the
   old patches 0001 and 0002: the `-retropixels-home` folders, desktop-size
-  fullscreen, the flight-stick curve, dead zone and smoothing). It is kept
-  byte for byte, line endings included (`.gitattributes`: `-text`).
-- `supermodel/build.sh fetch` gets the pinned upstream tree for the rest
-  (Makefiles, Config/Games.xml, Assets, Docs), applies
-  `patches/0001-retropixels.patch` (now only the Makefile line for
-  `OSD/RetroPixels.cpp` and `Docs/RetroPixels.txt`), then replaces upstream's
-  `Src/` with ours.
-- Licence: the program stays GPL-3.0 and ships its exact source
-  (`Supermodel-source.tar.gz`) while any Supermodel code is left.
+  fullscreen, the flight-stick curve, dead zone and smoothing), and every
+  file has since been written again. Files are kept byte for byte, line
+  endings included (`.gitattributes`: `-text`).
+- `supermodel/Makefile` builds it for Linux and (MinGW-w64) Windows;
+  `supermodel/android/CMakeLists.txt` for Android and the OpenGL ES test
+  program. `supermodel/build.sh` runs them with the libraries pinned in
+  `pins.sh` and packages the result with RetroPixels' `Config/Games.xml`,
+  `Assets/` (crosshairs), `LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`.
+  Upstream's Makefiles, Games.xml, Music.xml, pictures, documents and
+  `patches/` are no longer used.
+- Licence: RetroPixels' own (`LICENSE.txt`). Builds published before were
+  GPL-3.0 with their source.
 
 ## Method
 
@@ -51,9 +56,10 @@ The rules are PixelU-Wii's:
    `--list Model3` lists one module's files.
 6. Never add ROMs, BIOS images or games.
 
-Third-party code (`Pkgs/`: GLEW, Dear ImGui, minizip, minimp3, TinyXML-2; and
-Musashi, the 68000 core) is neither Supermodel's nor ours. Musashi can later
-be replaced by RetroPixels' own 68000 core.
+Third-party code (`Pkgs/`: GLEW, Dear ImGui, minizip, minimp3, TinyXML-2) is
+neither Supermodel's nor ours, and is permissive. The 68000 core used to be
+third-party too (Supermodel's GPL fork of Musashi); it is now RetroPixels'
+own (log entry S68K below).
 
 ## Status
 
@@ -62,16 +68,16 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 42374 | 22.6% |
+| Original (RetroPixels) | 44306 | 26.0% |
 | Supermodel (with or without RetroPixels changes) | 0 | 0.0% |
-| Third-party | 145172 | 77.4% |
-| **All** | **187546** | 100% |
+| Third-party | 126021 | 74.0% |
+| **All** | **170327** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
-| (top level) | 1431 | 1431 | original |
+| (top level) | 1432 | 1432 | original |
 | CPU (top level) | 34 | 34 | original |
-| CPU/68K | 19423 | 272 | mixed (1% original), 19151 lines third-party |
+| CPU/68K | 2203 | 2203 | original |
 | CPU/PowerPC | 3190 | 3190 | original |
 | CPU/Z80 | 1304 | 1304 | original |
 | Graphics (top level) | 809 | 809 | original |
@@ -113,3 +119,22 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
   are in `docs/supermodel-log-SA.md` (CPU cores), `-SB` (board devices),
   `-SC` (graphics), `-SD` (sound and drive boards), `-SE` (front end and
   network) and `-SF` (inputs and utilities).
+- S68K (68000 and build): Musashi (`CPU/68K/Musashi`, Supermodel's GPL
+  fork, and its `m68kmake` generator) replaced by RetroPixels' own C++
+  68000, `CPU/68K/M68000.{h,cpp}`, written from RetroPixels' Go 68000
+  (`cores/m68k`), not from Musashi (which was read only for the entry
+  points `68K.cpp` called). `68K.cpp` keeps the `M68K*` API and the
+  34-word save-state block. Checked with `go test ./cores/m68k -run
+  Supermodel`: every opcode with 4 random operand sets (1M cases with
+  `RP_M68K_PEROP=16`) and 400 random 1000-4000-instruction programs with
+  exceptions and interrupts give identical registers, flags, cycles and bus
+  accesses in both cores, and `tests/m68k/wrapper.cpp` checks context
+  switching, interrupt acknowledge, STOP and save/load. At the same time
+  the build stopped using upstream: `supermodel/Makefile` and the Android
+  CMake list compile `Src/` directly, `build.sh` no longer fetches 24d2ffc
+  or applies patches, and RetroPixels' own Windows resource script and
+  manifest, version string (`rp-<date>-<commit>`), banner, `Games.xml`
+  (written afresh for swtrilgy and swtrilgya) and crosshair pictures
+  replace upstream's. The Windows, Linux and OpenGL ES builds compile and
+  link and the Linux one starts headless (`-help`, `-print-games`,
+  `-print-gl-info` under Xvfb).

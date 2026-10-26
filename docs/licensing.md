@@ -18,13 +18,10 @@ before selling, have a lawyer read it together with `LICENSE.txt` and
   1. the 19 Cemu-derived files in `wiiu/` (MPL-2.0), compiled into
      RetroPixels.exe, RetroPixels-Native.exe and the Android engine. They are
      being rewritten; until then their source must stay available;
-  2. the Model 3 engine (`Supermodel\supermodel.exe`) still contains GPL
-     code (the Musashi 68000 core and two small Windows resource files), so
-     it has to be shipped under the GPL with its source;
-  3. PixelU-Wii (`PixelU\wii\PixelU-Wii.exe`) is linked with GPL libraries
+  2. PixelU-Wii (`PixelU\wii\PixelU-Wii.exe`) is linked with GPL libraries
      (FFmpeg as configured, LZO, FreeSurround, a GPL header), so it has to be
      shipped under the GPL with its source;
-  4. smaller obligations: statically linked LGPL libraries (libusb in PixelU;
+  3. smaller obligations: statically linked LGPL libraries (libusb in PixelU;
      libusb, libiconv and the Bochs disassembler in PixelU-Wii), Cemu's
      MPL-2.0 game profiles and translations, and on Linux the GPL BlueZ
      library next to PixelU.
@@ -33,9 +30,12 @@ before selling, have a lawyer read it together with `LICENSE.txt` and
   the engines are separate programs that RetroPixels starts, and the GPL
   and MPL allow them to be sold alongside it ("aggregation"). What they
   require is that those parts are offered **with their source code and
-  under their own licence**, and that buyers are told so. Items 2 and 3
-  also mean RetroPixels' own code inside those two engines reaches buyers
-  under the GPL for as long as they are built this way.
+  under their own licence**, and that buyers are told so. Item 2 also
+  means RetroPixels' own code inside PixelU-Wii reaches buyers under the
+  GPL for as long as it is built this way.
+- **Done:** the Model 3 engine (`Supermodel\supermodel.exe`, and
+  `libsupermodel.so` in the Android app) no longer contains or ships any
+  GPL code or file (see below), so it can be sold closed like the rest.
 
 ## What belongs to whom
 
@@ -44,10 +44,10 @@ before selling, have a lawyer read it together with `LICENSE.txt` and
 | RetroPixels Go programs: `main.go` and `*.go` in the root, `cmd/`, `core/`, `cores/`, `n64/`, `internal/`, `sevenzip/`, `web/`, `tools/` | Shredder565 | Proprietary (`LICENSE.txt`) | Yes |
 | `wiiu/` (Go Wii U emulator), except the 19 files below | Shredder565 | Proprietary | Yes |
 | 19 files in `wiiu/` with an MPL header (`ax_voice.go`, `coreinit_alarm.go`, `coreinit_coroutine_cemu.go`, `coreinit_fg.go`, `coreinit_sync.go`, `coreinit_sysinfo.go`, `coreinit_threads.go`, `gx2_command.go`, `gx2r_resource.go`, `latte_cmd.go`, `mem_blockheap.go`, `mem_expheap.go`, `mem_frmheap.go`, `mem_heap.go`, `mem_unitheap.go`, `nn_ac.go`, `nn_fp.go`, `padscore.go`, `vpad_touch.go`) | Go ports of Cemu code | MPL-2.0 | **Being replaced.** Until then: allowed, but these files stay MPL and their source must be made available to buyers (MPL 3.2) |
-| Android app (`android/`) | Shredder565 | Proprietary | Yes (JUnit is test-only; the Gradle wrapper is a build tool). APKs built with Supermodel for Android (CI's are) also pack the Model 3 engine (`libsupermodel.so`, GPL as shipped, below) and SDL 2 (`libSDL2.so` and its Java code, zlib licence), with their licences in `assets/supermodel` |
+| Android app (`android/`) | Shredder565 | Proprietary | Yes (JUnit is test-only; the Gradle wrapper is a build tool). APKs built with Supermodel for Android (CI's are) also pack the Model 3 engine (`libsupermodel.so`, proprietary, below) and SDL 2 (`libSDL2.so` and its Java code, zlib licence), with the notices in `assets/supermodel` |
 | PixelU (`pixelu/src`, CMake files, art) | Shredder565 (every Cemu source file replaced) | Proprietary | Yes, see the PixelU notes below |
 | PixelU-Wii (`pixelu/wii/Source`, data, art) | Shredder565 (every Dolphin source file replaced) | Proprietary code, but the program as shipped is GPL | Only under the GPL until the GPL libraries go (below) |
-| Model 3 engine (`supermodel/Src`, except `Pkgs/` and `CPU/68K/Musashi`) | Shredder565 | Proprietary code, but the program as shipped is GPL | Only under the GPL until the GPL parts go (below) |
+| Model 3 engine (`supermodel/`: `Src` except `Pkgs/`, the Makefile, Android CMake list, `Config/Games.xml`, `Assets/`) | Shredder565 | Proprietary | Yes; its third-party code (`Src/Pkgs`, SDL, zlib, GLU) is permissive, notices only |
 | MAME (`MAME\` in the download) | MAME team | GPL-2.0-or-later | Separate program; may be bundled if its source is offered (it is, with each release) |
 
 Go modules: `go.mod` has no dependencies; RetroPixels uses only Go's
@@ -127,70 +127,43 @@ a closed sale:
 
 ### Model 3 engine (Supermodel folder)
 
-The emulator code in `supermodel/Src` is RetroPixels' own except `Pkgs/`
-and `CPU/68K/Musashi`. But `build.sh` still fetches upstream Supermodel at
-commit 24d2ffc, applies `patches/0001-retropixels.patch` and builds with
-upstream's Makefiles. Exactly what upstream (GPL-3.0) material ends up in or
-next to the built program:
+The engine started as Supermodel (GPL-3.0, The Supermodel Team) at commit
+24d2ffc and has been replaced piece by piece (`docs/supermodel-original.md`).
+Nothing of upstream is left in what is built or shipped:
 
-**Compiled into `supermodel.exe`:**
+- **Code:** everything in `supermodel/Src` is RetroPixels' own except
+  `Pkgs/` (GLEW and the Khronos headers, Dear ImGui, minizip, minimp3,
+  TinyXML-2: all permissive). The 68000 (sound board, DSB and net board
+  CPU) was Supermodel's GPL fork of Musashi; it is now RetroPixels' own C++
+  core, `Src/CPU/68K/M68000.cpp`, written from RetroPixels' Go 68000
+  (`cores/m68k`) and tested against it instruction by instruction
+  (`go test ./cores/m68k -run Supermodel`). Musashi and its generator are
+  deleted. The Windows resources (`Src/OSD/Windows/Supermodel.rc`,
+  `Supermodel.manifest`), the version string (`rp-<date>-<commit>`) and the
+  banner ("Copyright Shredder565") are RetroPixels' own.
+- **Build:** `supermodel/Makefile` (Linux and the MinGW-w64 Windows build)
+  and `supermodel/android/CMakeLists.txt` compile `supermodel/Src`
+  directly. `build.sh` no longer fetches upstream or applies patches;
+  `patches/`, `supermodel/COPYING` and the upstream pins are gone. It
+  only downloads SDL2, SDL2_net and zlib (pinned with SHA-256).
+- **Shipped next to it:** RetroPixels' `Config/Games.xml` (written afresh
+  for the two Star Wars Trilogy sets; the ROM names and CRC-32s are facts),
+  RetroPixels' crosshair pictures (`Assets/*.bmp`, drawn by
+  `tools/supermodel-crosshairs.py`), `LICENSE.txt`,
+  `THIRD-PARTY-NOTICES.txt` and `VERSION.txt`. No Music.xml (it is
+  optional), no upstream manual, licence or source archive.
 
-1. `Src/CPU/68K/Musashi/` (8 files: `m68k.h`, `m68k_in.c`, `m68kconf.h`,
-   `m68kcpu.c`, `m68kcpu.h`, `m68kctx.h`, `m68kdasm.c`, `m68kmake.c`, plus
-   the `m68kops.c/h` that `m68kmake` generates from `m68k_in.c`). This is
-   Supermodel's GPL-3.0 fork of Musashi 3.3, with Supermodel Team changes.
-   Musashi 3.3's own notice allows only non-commercial use; Supermodel uses
-   it under the GPL by permission. **This is the main blocker.** Not
-   counted as "Supermodel" by `tools/supermodel-original.py` (it is listed
-   as third-party), but its licence is GPL.
-2. `Src/OSD/Windows/SupermodelResources.rc` (2 lines) and
-   `Src/OSD/Windows/SupermodelManifest.xml` (8 lines, a DPI-awareness
-   manifest), byte for byte upstream's from step S0, compiled in by
-   `windres` on Windows. Trivial, but upstream's.
-3. The version string: upstream's `Makefiles/Rules.inc` defines
-   `SUPERMODEL_VERSION="0.3a-<date>-git-<hash>"`; and `OSD/SDL/Main.cpp`
-   still prints "Copyright 2003-2026 by The Supermodel Team" in its banner.
-   Not code, but it states upstream copyright in the binary.
+`tools/supermodel-original.py` counts every line in `supermodel/Src`
+outside `Pkgs/` as original. The third-party code the engine keeps (GLEW,
+Khronos headers, Dear ImGui, minizip, minimp3, TinyXML-2, SDL2, SDL2_net,
+zlib, MinGW-w64's winpthreads, Mesa GLU on Linux) is permissive and needs
+only the notices in `THIRD-PARTY-NOTICES.txt`.
 
-**Used to build it (not in the binary):** `Makefiles/Makefile.Win32`,
-`Makefile.UNIX`, `Options.inc`, `Rules.inc` (GPL build scripts; the patch
-adds `OSD/RetroPixels.cpp` to `Rules.inc`).
-
-**Shipped next to it:** `Config/Games.xml` and `Config/Music.xml` (GPL
-data by the Supermodel Team), `Assets/p1crosshair.bmp` and
-`p2crosshair.bmp` (upstream art), `LICENSE.txt` (upstream `Docs/LICENSE.txt`,
-GPL-3.0), `README.txt` (upstream's manual), `RetroPixels.txt` (from the
-patch; says the program is GPL), `VERSION.txt` (says GPL) and
-`Supermodel-source.tar.gz` (the whole upstream tree plus our `Src/`).
-
-**To make `supermodel.exe` contain no GPL code:**
-
-1. Replace Musashi with RetroPixels' own 68000 core in C++ (RetroPixels
-   already has its own 68000 core in Go, `cores/m68k`, to work from) behind
-   the existing `CPU/68K/68K.cpp` interface. (Upstream Musashi 4.x is MIT,
-   but Supermodel's fork has GPL changes such as `m68kctx.h`; using MIT
-   Musashi would mean redoing those changes independently.)
-2. Write RetroPixels' own `SupermodelResources.rc` and manifest.
-3. Change the banner in `OSD/SDL/Main.cpp` and set the version string
-   from RetroPixels' build.
-4. Replace upstream's Makefiles with RetroPixels' own build (a Makefile or
-   CMake list of `supermodel/Src`), and stop fetching upstream in
-   `build.sh` (and delete `patches/` and `pins.sh`'s `SUPERMODEL_*`).
-5. Ship RetroPixels' own game list instead of upstream's `Games.xml` and
-   `Music.xml` (only Star Wars Trilogy Arcade's entries are used; the ROM
-   names and checksums are facts, but write the file afresh), and own
-   crosshair pictures (or none).
-6. Package RetroPixels' `LICENSE.txt` and notices instead of
-   `Docs/LICENSE.txt`, `README.txt`, `RetroPixels.txt`,
-   `Supermodel-source.tar.gz` and the GPL line in `VERSION.txt`.
-7. Optionally rename the engine: "Supermodel" is the upstream project's
-   name.
-
-Until then it must keep shipping as GPL-3.0 with its source, which
-`build.sh` already does correctly. The third-party code it keeps after
-that (GLEW, Khronos headers, Dear ImGui, minizip, minimp3, TinyXML-2, SDL2,
-SDL2_net, zlib, MinGW-w64's winpthreads, Mesa GLU on Linux) is all
-permissive and needs only the notices.
+Builds published before this change were GPL-3.0 with their source; they
+stay available under the GPL to whoever received them (see "Remaining
+obligations" 4). The name "Supermodel" is still used for the folder,
+the program file and the tab; renaming it would avoid any suggestion that
+it is the upstream project (optional, not a licence matter).
 
 ### MAME, FFmpeg, Dolphin
 
@@ -209,8 +182,8 @@ permissive and needs only the notices.
 1. Keep `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` and `LICENSE-MPL-2.0.txt`
    in every download, and the Android app (it now packs the first two as
    assets). Consider showing them in an "About / Licences" screen.
-2. Offer the source of every GPL/MPL/LGPL part you ship: the Model 3 engine
-   and PixelU-Wii (whole programs, while GPL), the 19 `wiiu/` files, Cemu's
+2. Offer the source of every GPL/MPL/LGPL part you ship: PixelU-Wii (the
+   whole program, while GPL), the 19 `wiiu/` files, Cemu's
    data files, MAME, and relinkable objects (or DLLs) for the LGPL
    libraries. If the repository becomes private, publish these sources
    separately (for example a "third-party sources" zip on each release)
@@ -241,10 +214,8 @@ permissive and needs only the notices.
 The Android app is the Go engine and, in APKs built with Supermodel for
 Android (CI's are), the Model 3 engine for Star Wars Trilogy Arcade (no
 PixelU, PixelU-Wii or MAME). Its licensing is simple once the 19 `wiiu/` MPL
-files are replaced (until then, offer their source) and the Model 3 engine
-has no GPL parts left (until then an APK with it is shipped under the GPL
-for that library: offer its source, as for `supermodel.exe`, or build the
-Play APK without it). Other things to settle first:
+files are replaced (until then, offer their source); the Model 3 engine has
+no GPL parts left. Other things to settle first:
 
 - **Trademarks in the app and store listing.** The app's text names
   Nintendo, Game Boy, SNES, Wii, GameCube, Sega, Genesis, Atari, Xbox and

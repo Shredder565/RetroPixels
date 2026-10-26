@@ -37,9 +37,9 @@ What's in the download (RetroPixels-2.21.0.zip)
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
   * Supermodel\supermodel.exe: Sega Model 3, for Star Wars Trilogy Arcade.
-    Supermodel by The Supermodel Team, modified for RetroPixels
-    (GPL-3.0-or-later; its exact source and the list of changes are in that
-    folder).
+    RetroPixels' own Model 3 engine (it began as a copy of Supermodel and
+    has been rewritten as RetroPixels' own; THIRD-PARTY-NOTICES.txt lists
+    the third-party libraries in it).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - LICENSE.txt (RetroPixels' licence) and THIRD-PARTY-NOTICES.txt (the
@@ -334,9 +334,8 @@ Arcade games in MAME (any version)
 
 Star Wars Trilogy Arcade (Supermodel)
 - The "Supermodel" tab plays Star Wars Trilogy Arcade (Sega Model 3) on
-  Supermodel, which is in the Supermodel folder of the RetroPixels download
-  (Supermodel by The Supermodel Team, GPL-3.0, modified for RetroPixels: its
-  licence, source and the list of changes are in that folder).
+  RetroPixels' Model 3 engine, which is in the Supermodel folder of the
+  RetroPixels download.
 - You need your own ROM set: swtrilgya.zip or swtrilgy.zip. The first time
   you open the tab, RetroPixels looks for it in your ROM folders, Downloads,
   Desktop and Documents, then in the game folders on each drive, and
@@ -679,7 +678,9 @@ Credits & licences
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
   rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME and Supermodel. Thanks to the Cemu, Dolphin, MAME and
+  built-in MAME, and the Model 3 engine (Supermodel folder), which started
+  from Supermodel and is now entirely RetroPixels' own code
+  (docs/supermodel-original.md). Thanks to the Cemu, Dolphin, MAME and
   Supermodel teams.
 - RetroPixels' older Go Wii U emulator (from 2.20.0, no longer used by the
   Wii U tab) is the exception in its own code: some of its files are Go
@@ -692,11 +693,6 @@ Credits & licences
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
     github.com/BtbN/FFmpeg-Builds. Its licence is saved next to it.
-  * Supermodel (GPL-3.0-or-later, by The Supermodel Team): RetroPixels'
-    build in the Supermodel folder, modified for RetroPixels. The exact
-    source built is in Supermodel\Supermodel-source.tar.gz and the changes
-    are listed in Supermodel\RetroPixels.txt. Supermodel's source code:
-    https://github.com/trzy/Supermodel
   * MAME (GPL-2.0+, by the MAME team): the official release that comes in the
     MAME folder, your own installs, or official releases RetroPixels
     downloads for you from github.com/mamedev/mame (all unchanged; a note

@@ -98,11 +98,8 @@ jobs:
         run: |
           mkdir -p "$DIR/Supermodel"
           cp -r eng/Supermodel-windows-x64/Supermodel/. "$DIR/Supermodel/"
-          test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/RetroPixels.txt"
-          test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/Supermodel-source.tar.gz"
-          . supermodel/pins.sh
-          echo "SM_COMMIT=${SUPERMODEL_COMMIT}" >> "$GITHUB_ENV"
-          echo "SM_REPO=${SUPERMODEL_REPO%.git}" >> "$GITHUB_ENV"
+          test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/Config/Games.xml"
+          test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/THIRD-PARTY-NOTICES.txt"
 
       - name: Package
         run: |
@@ -125,9 +122,7 @@ jobs:
             echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start; Cemu's game profiles and translations are MPL-2.0, LICENSE-MPL-2.0.txt)"
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
-            echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel\\LICENSE.txt"
-            echo "  Source: Supermodel\\Supermodel-source.tar.gz (the exact source built), upstream $SM_REPO/tree/$SM_COMMIT"
-            echo "  RetroPixels' changes: Supermodel\\RetroPixels.txt, and https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH/supermodel"
+            echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). RetroPixels' own Model 3 engine (Supermodel for RetroPixels), LICENSE.txt; its third-party parts in THIRD-PARTY-NOTICES.txt"
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo
