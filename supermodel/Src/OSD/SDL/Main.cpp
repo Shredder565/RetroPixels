@@ -6,7 +6,10 @@
 // save states, volume, full screen...).
 //
 // Build options: SUPERMODEL_WIN32 (Windows input systems and outputs),
-// DEBUG (-gfx-state analysis).
+// DEBUG (-gfx-state analysis), SUPERMODEL_GLES (an OpenGL ES 3.2 context
+// and the new 3D engine only), SUPERMODEL_NO_NET (no network outputs),
+// SUPERMODEL_NO_GUI (no settings window), __ANDROID__ (RetroPixels for
+// Android: OSD/Android).
 
 #include <algorithm>
 #include <cmath>
@@ -25,7 +28,9 @@
 #include "DirectInputSystem.h"
 #include "WinOutputs.h"
 #endif
+#ifndef SUPERMODEL_NO_NET
 #include "NetOutputs.h"
+#endif
 
 #include "Supermodel.h"
 #include "Util/Format.h"
@@ -39,7 +44,9 @@
 #include "GameLoader.h"
 #include "SDLInputSystem.h"
 #include "SDLIncludes.h"
+#ifndef SUPERMODEL_GLES
 #include "Graphics/Legacy3D/Legacy3D.h"
+#endif
 #include "Graphics/New3D/New3D.h"
 #include "Graphics/New3D/VBO.h"
 #include "Graphics/SuperAA.h"
@@ -47,8 +54,13 @@
 #include "Model3/Model3.h"
 #include "Sound/MPEG/MpegAudio.h"
 #include "Crosshair.h"
+#ifndef SUPERMODEL_NO_GUI
 #include "Gui.h"
+#endif
 #include "Main.h"
+#ifdef __ANDROID__
+#include "OSD/Android/Android.h"
+#endif
 
 #ifdef DEBUG
 #include "Model3/Model3GraphicsState.h"
@@ -207,12 +219,20 @@ namespace
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, new3d ? 0 : 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, new3d ? 0 : 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#ifdef SUPERMODEL_GLES
+    (void)coreProfile;
+    (void)quads;
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+#else
     if (coreProfile)
     {
       SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
       SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
       SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, quads ? 5 : 1);
     }
+#endif
 
     const Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullScreen ? FullScreenFlag() : 0);
     s_screen.window = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, int(s_screen.width), int(s_screen.height), flags);
@@ -227,6 +247,9 @@ namespace
     SDL_GL_SetSwapInterval(s_config["VSync"].ValueAsDefault<bool>(false) ? 1 : 0);
     SDL_GL_MakeCurrent(s_screen.window, context);
 
+#ifdef SUPERMODEL_GLES
+    printf("GPU info: %s (OpenGL ES)\n\n", glGetString(GL_VERSION));
+#else
     const GLenum glew = glewInit();
     if (glew != GLEW_OK)
       return ErrorLog("OpenGL initialization failed: %s\n", glewGetErrorString(glew));
@@ -239,6 +262,7 @@ namespace
     if (profile & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT)
       printf("(compatibility profile)");
     printf("\n\n");
+#endif
 
     return Layout(keepAspect);
   }
@@ -670,10 +694,14 @@ namespace
     r.aa = new SuperAA(s_screen.supersampling, s_screen.colours);
     r.aa->Init(s_screen.fullWidth, s_screen.fullHeight);
     r.r2d = new CRender2D(s_config);
+#ifdef SUPERMODEL_GLES
+    r.r3d = new New3D::CNew3D(s_config, emulator->GetGame().name);
+#else
     if (s_config["New3DEngine"].ValueAs<bool>())
       r.r3d = new New3D::CNew3D(s_config, emulator->GetGame().name);
     else
       r.r3d = new Legacy3D::CLegacy3D(s_config);
+#endif
     r.upscale = UpscaleMode(s_config["UpscaleMode"].ValueAs<int>());
 
     auto fail = [&]()
@@ -1474,6 +1502,7 @@ namespace
     *outputs = nullptr;
     if (name == "none")
       return true;
+#ifndef SUPERMODEL_NO_NET
     if (name == "net")
     {
       CNetOutputs *net = new CNetOutputs();
@@ -1484,6 +1513,7 @@ namespace
       *outputs = net;
       return true;
     }
+#endif
 #ifdef SUPERMODEL_WIN32
     if (name == "win")
     {
@@ -1501,6 +1531,9 @@ namespace
       return ErrorLog("Unable to initialize SDL: %s\n", SDL_GetError()), 1;
     // so drivers don't scale the window's content
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
+#ifdef __ANDROID__
+    RetroPixels::Android::Start();   // hints, log files, the touch controls' pad
+#endif
 
     s_screen.supersampling = s_config["Supersampling"].ValueAs<int>();
     s_screen.colours = CRTcolor(s_config["CRTcolors"].ValueAs<int>());
@@ -1569,6 +1602,9 @@ namespace
     delete outputs;
     delete s_crosshair;
     CloseWindow();
+#ifdef __ANDROID__
+    RetroPixels::Android::Stop();
+#endif
     SDL_Quit();
     InfoLog(code ? "Program terminated due to an error." : "Program terminated normally.");
     return code;
@@ -1587,6 +1623,7 @@ int main(int argc, char **argv)
   if (cl.error)
     return 1;
 
+#ifndef SUPERMODEL_NO_GUI
   // No arguments at all: the settings window, which may pick a game.
   if (argc <= 1)
   {
@@ -1597,6 +1634,7 @@ int main(int argc, char **argv)
     if (cl.romFiles.empty())
       return 0;
   }
+#endif
 
   std::shared_ptr<CLogger> logger = CreateLogger(cl.config);
   if (!logger)
@@ -1660,6 +1698,11 @@ int main(int argc, char **argv)
       withGame = withCommandLine;
     Util::Config::MergeINISections(&s_config, withGame, cl.config);
   }
+#ifdef SUPERMODEL_GLES
+  // the only renderer these builds have, without the quad pipeline
+  s_config.Set("New3DEngine", true);
+  s_config.Set("QuadRendering", false);
+#endif
   LogSettings(s_config);
 
   return Run(cl, game, romSet, fileConfig, logger);
@@ -1677,7 +1720,17 @@ void EndFrameVideo()
     return;
   if (s_gunInputs)
     s_crosshair->Update(s_gameInputs, s_gunInputs, s_screen.x, s_screen.y, s_screen.width, s_screen.height);
+#ifdef __ANDROID__
+  // RetroPixels for Android records the game's picture (the whole window
+  // with wide screen on)
+  if (RetroPixels::Recorder::Active())
+  {
+    const bool wide = s_config["WideScreen"].ValueAs<bool>();
+    RetroPixels::Recorder::FrameArea(wide ? 0 : s_screen.x, s_screen.y, wide ? s_screen.fullWidth : s_screen.width, s_screen.height);
+  }
+#else
   if (RetroPixels::Recorder::Active())   // RetroPixels: the frame for the recording
     RetroPixels::Recorder::Frame(s_screen.fullWidth, s_screen.fullHeight);
+#endif
   SDL_GL_SwapWindow(s_screen.window);
 }

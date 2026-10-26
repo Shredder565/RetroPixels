@@ -77,6 +77,7 @@ final class GameRecorder {
     private final ArrayBlockingQueue<Pic> free = new ArrayBlockingQueue<Pic>(4);
     private volatile boolean stopping, dead;
     private volatile boolean announce;
+    private volatile Thread thread;
     private int queuedAudio; // sample pairs waiting (game thread)
     private final Object countLock = new Object();
 
@@ -123,8 +124,22 @@ final class GameRecorder {
             }
         }, "recorder");
         t.setPriority(Thread.NORM_PRIORITY - 1);
+        r.thread = t;
         t.start();
         return r;
+    }
+
+    /**
+     * Waits (at most ms) for the recording to be finished and saved after
+     * stop(): for Star Wars Trilogy Arcade, whose process ends with the game.
+     */
+    boolean awaitFinished(long ms) {
+        try {
+            thread.join(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return !thread.isAlive();
     }
 
     boolean dead() {

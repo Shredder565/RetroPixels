@@ -44,7 +44,7 @@ before selling, have a lawyer read it together with `LICENSE.txt` and
 | RetroPixels Go programs: `main.go` and `*.go` in the root, `cmd/`, `core/`, `cores/`, `n64/`, `internal/`, `sevenzip/`, `web/`, `tools/` | Shredder565 | Proprietary (`LICENSE.txt`) | Yes |
 | `wiiu/` (Go Wii U emulator), except the 19 files below | Shredder565 | Proprietary | Yes |
 | 19 files in `wiiu/` with an MPL header (`ax_voice.go`, `coreinit_alarm.go`, `coreinit_coroutine_cemu.go`, `coreinit_fg.go`, `coreinit_sync.go`, `coreinit_sysinfo.go`, `coreinit_threads.go`, `gx2_command.go`, `gx2r_resource.go`, `latte_cmd.go`, `mem_blockheap.go`, `mem_expheap.go`, `mem_frmheap.go`, `mem_heap.go`, `mem_unitheap.go`, `nn_ac.go`, `nn_fp.go`, `padscore.go`, `vpad_touch.go`) | Go ports of Cemu code | MPL-2.0 | **Being replaced.** Until then: allowed, but these files stay MPL and their source must be made available to buyers (MPL 3.2) |
-| Android app (`android/`) | Shredder565 | Proprietary | Yes (no libraries are packaged; JUnit is test-only; the Gradle wrapper is a build tool) |
+| Android app (`android/`) | Shredder565 | Proprietary | Yes (JUnit is test-only; the Gradle wrapper is a build tool). APKs built with Supermodel for Android (CI's are) also pack the Model 3 engine (`libsupermodel.so`, GPL as shipped, below) and SDL 2 (`libSDL2.so` and its Java code, zlib licence), with their licences in `assets/supermodel` |
 | PixelU (`pixelu/src`, CMake files, art) | Shredder565 (every Cemu source file replaced) | Proprietary | Yes, see the PixelU notes below |
 | PixelU-Wii (`pixelu/wii/Source`, data, art) | Shredder565 (every Dolphin source file replaced) | Proprietary code, but the program as shipped is GPL | Only under the GPL until the GPL libraries go (below) |
 | Model 3 engine (`supermodel/Src`, except `Pkgs/` and `CPU/68K/Musashi`) | Shredder565 | Proprietary code, but the program as shipped is GPL | Only under the GPL until the GPL parts go (below) |
@@ -238,9 +238,13 @@ permissive and needs only the notices.
 
 ## Before selling on Google Play
 
-The Android app is only the Go engine (no PixelU, PixelU-Wii, Model 3 engine
-or MAME), so its licensing is simple once the 19 `wiiu/` MPL files are
-replaced (until then, offer their source). Other things to settle first:
+The Android app is the Go engine and, in APKs built with Supermodel for
+Android (CI's are), the Model 3 engine for Star Wars Trilogy Arcade (no
+PixelU, PixelU-Wii or MAME). Its licensing is simple once the 19 `wiiu/` MPL
+files are replaced (until then, offer their source) and the Model 3 engine
+has no GPL parts left (until then an APK with it is shipped under the GPL
+for that library: offer its source, as for `supermodel.exe`, or build the
+Play APK without it). Other things to settle first:
 
 - **Trademarks in the app and store listing.** The app's text names
   Nintendo, Game Boy, SNES, Wii, GameCube, Sega, Genesis, Atari, Xbox and

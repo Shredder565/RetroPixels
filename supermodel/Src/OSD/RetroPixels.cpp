@@ -4,7 +4,9 @@
  * RetroPixels.cpp
  *
  * Additions made for RetroPixels: the player's own folder (SUPERMODEL_HOME)
- * and the game recorder (-rp-record). See RetroPixels.h.
+ * and the game recorder (-rp-record). See RetroPixels.h. RetroPixels for
+ * Android has its own recorder (OSD/Android/Android.cpp), so the ffmpeg one
+ * below isn't in that build.
  */
 
 #include "OSD/RetroPixels.h"
@@ -30,7 +32,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#else
+#elif !defined(__ANDROID__)
 #include <csignal>
 #include <fcntl.h>
 #include <spawn.h>
@@ -138,6 +140,7 @@ namespace RetroPixels
    Recorder
   ****************************************************************************/
 
+#ifndef __ANDROID__
   namespace Recorder
   {
     static constexpr int    kFPS = 60;               // Supermodel makes 735 samples (44100/60) of sound per frame
@@ -585,7 +588,8 @@ namespace RetroPixels
       f.height = s_rb.h[i];
       f.rgba.resize(size_t(f.width) * f.height * 4);
       glBindBuffer(GL_PIXEL_PACK_BUFFER, s_rb.pbo[i]);
-      if (const void *p = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY))
+      // (glMapBufferRange: OpenGL 3.0 and OpenGL ES 3.0 both have it)
+      if (const void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, GLsizeiptr(f.rgba.size()), GL_MAP_READ_BIT))
       {
         memcpy(f.rgba.data(), p, f.rgba.size());
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
@@ -769,4 +773,5 @@ namespace RetroPixels
       InfoLog("Recorder: finished.");
     }
   }
+#endif // !__ANDROID__
 }

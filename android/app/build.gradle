@@ -88,12 +88,25 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    // Star Wars Trilogy Arcade: RetroPixels' Supermodel for Android, when it
+    // has been built into src/main/supermodel (sh supermodel/build.sh android
+    // android/app/src/main/supermodel, which needs the Android NDK; CI does
+    // this): libsupermodel.so and libSDL2.so, Supermodel's Games.xml and
+    // assets, SDL's Java code, and the app's SupermodelActivity
+    // (src/supermodel/java). Without it the app builds without the game, and
+    // its screen says so.
+    if (file('src/main/supermodel/.built').isFile()) {
+        sourceSets.main.java.srcDirs += ['src/supermodel/java', 'src/main/supermodel/java']
+        sourceSets.main.jniLibs.srcDirs += ['src/main/supermodel/jniLibs']
+        sourceSets.main.assets.srcDirs += ['src/main/supermodel/assets']
+    }
+
     packaging {
         jniLibs {
             // the engine is run as a program, so it must be unpacked on install
             useLegacyPackaging = true
-            // Go programs, already stripped: nothing for the NDK's strip to do
-            keepDebugSymbols += ['**/librpengine.so']
+            // Go programs and Supermodel, already stripped: nothing for the NDK's strip to do
+            keepDebugSymbols += ['**/librpengine.so', '**/libsupermodel.so', '**/libSDL2.so']
         }
     }
 

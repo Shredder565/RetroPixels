@@ -47,6 +47,13 @@ namespace RetroPixels
     // Called with the GL context current, just before the frame is shown:
     // reads the whole window (width x height) and queues it for ffmpeg.
     void Frame(unsigned width, unsigned height);
+#ifdef __ANDROID__
+    // RetroPixels for Android (OSD/Android/Android.cpp): the game's picture,
+    // this part of the window (x, y from the bottom left, as in GL), scaled
+    // to 384 lines and handed to the app's recorder with the frame's sound.
+    // Start() and Frame() aren't used there; the app says when to record.
+    void FrameArea(unsigned x, unsigned y, unsigned width, unsigned height);
+#endif
     // One frame of sound, the same buffers OutputAudio() gets.
     void Audio(unsigned numSamples, const float *leftFront, const float *rightFront, const float *leftRear, const float *rightRear);
     // While paused, frames and sound aren't kept.

@@ -63,6 +63,21 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode"
             android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" />
 
+        <!-- Star Wars Trilogy Arcade (Sega Model 3): its own screen, and the game
+             itself, RetroPixels' Supermodel (libsupermodel.so, an SDL program),
+             in a process of its own that ends with the game. SupermodelActivity
+             is only in APKs built with Supermodel for Android
+             (supermodel/build.sh android; see app/build.gradle). -->
+        <activity android:name=".StarWarsActivity" android:exported="false" android:label="Star Wars Trilogy Arcade" />
+        <activity
+            android:name=".SupermodelActivity"
+            android:exported="false"
+            android:process=":supermodel"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" />
+
         <activity android:name=".SettingsActivity" android:exported="false" android:label="Settings" />
         <activity android:name=".RemapActivity" android:exported="false" android:label="Controls" />
         <activity android:name=".HelpActivity" android:exported="false" android:label="Help" />

@@ -8,6 +8,11 @@
 #                                           source and bundled in lib/ (needs cmake, GL/GLU, zlib and SDL's
 #                                           X11/Wayland/PulseAudio/ALSA dev packages; see supermodel.yml)
 #   sh supermodel/build.sh windows <outdir> cross-build supermodel.exe for 64-bit Windows with MinGW-w64
+#   sh supermodel/build.sh android <outdir> build libsupermodel.so and libSDL2.so for RetroPixels for Android
+#                                           (every ABI in ANDROID_ABIS, or SM_ANDROID_ABIS) with the NDK in
+#                                           ANDROID_NDK_HOME / ANDROID_NDK or the pinned one; see below
+#   sh supermodel/build.sh gles <outdir>    build supermodel-gles, the Android build's OpenGL ES renderer as a
+#                                           Linux program (system SDL2 and Mesa's GLES), for testing on a PC
 #   sh supermodel/build.sh check            only check the pins and that the patches apply
 #
 # <outdir>/Supermodel gets the program and the files it needs next to it
@@ -16,6 +21,12 @@
 # On Linux also lib/ with the bundled libraries (found through the
 # program's RUNPATH $ORIGIN/lib) and their licences in lib/LICENSES.
 # SM_WORK sets the working folder (default: supermodel/build, not committed).
+#
+# android puts in <outdir>: jniLibs/<abi>/libsupermodel.so and libSDL2.so,
+# assets/supermodel/ (Config/Games.xml, Config/Music.xml, Assets/, the
+# licences and VERSION.txt) and java/org/libsdl/app/ (SDL's Android Java
+# code, from the same SDL source); the app's Gradle build uses that folder
+# (android/app/src/main/supermodel).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -189,6 +200,96 @@ linux_libs() {
 	done
 }
 
+# The NDK: the one ANDROID_NDK_HOME or ANDROID_NDK names (its version is
+# shown; the pinned one is ANDROID_NDK_REVISION), else the pinned one,
+# downloaded into $work/deps. Sets $ndk.
+android_ndk() {
+	for d in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK:-}"; do
+		if [ -n "$d" ] && [ -f "$d/build/cmake/android.toolchain.cmake" ]; then
+			ndk=$d
+			rev=$(sed -n 's/^Pkg.Revision *= *//p' "$d/source.properties" 2>/dev/null || true)
+			log "using the NDK in $d (${rev:-version unknown})"
+			[ "$rev" = "$ANDROID_NDK_REVISION" ] || log "note: the pinned NDK is $ANDROID_NDK_VERSION ($ANDROID_NDK_REVISION)"
+			return
+		fi
+	done
+	deps="$work/deps"
+	ndk="$deps/android-ndk-$ANDROID_NDK_VERSION"
+	[ -f "$ndk/build/cmake/android.toolchain.cmake" ] && return
+	command -v unzip >/dev/null || { echo "needs unzip" >&2; exit 1; }
+	mkdir -p "$deps/dl"
+	download "$ANDROID_NDK_URL" "$ANDROID_NDK_SHA256" "$deps/dl/android-ndk-$ANDROID_NDK_VERSION.zip"
+	log "unpacking the NDK"
+	rm -rf "$ndk"
+	unzip -q "$deps/dl/android-ndk-$ANDROID_NDK_VERSION.zip" -d "$deps"
+	[ -f "$ndk/build/cmake/android.toolchain.cmake" ] || { echo "the NDK zip didn't hold $ndk" >&2; exit 1; }
+	rm -f "$deps/dl/android-ndk-$ANDROID_NDK_VERSION.zip"
+}
+
+# The pinned SDL2 source in $work/deps/android-sdl. Sets $sdlsrc.
+android_sdl() {
+	deps="$work/deps"
+	sdlsrc="$deps/android-sdl/SDL2-$SDL2_VERSION"
+	stamp="$deps/android-sdl/.pins-$SDL2_SRC_SHA256"
+	[ -f "$stamp" ] && return
+	mkdir -p "$deps/dl"
+	download "$SDL2_SRC_URL" "$SDL2_SRC_SHA256" "$deps/dl/SDL2-src.tar.gz"
+	rm -rf "$deps/android-sdl"
+	mkdir -p "$deps/android-sdl"
+	tar -xzf "$deps/dl/SDL2-src.tar.gz" -C "$deps/android-sdl"
+	touch "$stamp"
+}
+
+# The version string the desktop builds carry (save states and NVRAM name it).
+sm_version() {
+	(cd "$src" && make -s -f Makefiles/Makefile.UNIX version 2>/dev/null) || echo "0.3a-git-$(git -C "$src" rev-parse --short HEAD)"
+}
+
+# android_build <outdir>
+android_build() {
+	command -v cmake >/dev/null || { echo "needs cmake" >&2; exit 1; }
+	gen=
+	command -v ninja >/dev/null && gen="-G Ninja"
+	mkdir -p "$1"
+	out=$(cd "$1" && pwd)
+	version=$(sm_version)
+	rm -rf "$out/jniLibs" "$out/assets" "$out/java"
+	for abi in ${SM_ANDROID_ABIS:-$ANDROID_ABIS}; do
+		b="$work/android-build/$abi"
+		log "building for Android $abi"
+		# shellcheck disable=SC2086
+		cmake -S "$here/android" -B "$b" $gen -DCMAKE_BUILD_TYPE=Release \
+			-DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
+			-DANDROID_ABI="$abi" -DANDROID_PLATFORM="android-$ANDROID_MIN_SDK" -DANDROID_STL=c++_static \
+			-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+			-DSM_TREE="$src" -DSM_SDL_SRC="$sdlsrc" -DSM_VERSION="$version" >"$work/android-cmake-$abi.log" ||
+			{ cat "$work/android-cmake-$abi.log"; exit 1; }
+		cmake --build "$b" -j"$jobs" --target supermodel SDL2
+		mkdir -p "$out/jniLibs/$abi"
+		cp "$b/libsupermodel.so" "$out/jniLibs/$abi/"
+		cp "$(find "$b/sdl" -maxdepth 1 -name libSDL2.so | head -n 1)" "$out/jniLibs/$abi/libSDL2.so"
+	done
+	a="$out/assets/supermodel"
+	mkdir -p "$a/Config" "$a/Assets"
+	cp "$src/Config/Games.xml" "$src/Config/Music.xml" "$a/Config/"
+	cp "$src/Assets/"*.bmp "$a/Assets/"
+	cp "$src/Docs/LICENSE.txt" "$a/LICENSE.txt"
+	cp "$src/Docs/RetroPixels.txt" "$a/RetroPixels.txt"
+	cp "$sdlsrc/LICENSE.txt" "$a/SDL2-LICENSE.txt"
+	{
+		echo "Supermodel $version, modified for RetroPixels"
+		echo "Upstream: $SUPERMODEL_REPO commit $SUPERMODEL_COMMIT; RetroPixels' Src/ and patches from https://github.com/shredder565/retropixels (supermodel/)"
+		echo "Licence: GNU General Public License v3 or later (LICENSE.txt)"
+		echo "Built with the Android NDK ($(sed -n 's/^Pkg.Revision *= *//p' "$ndk/source.properties" 2>/dev/null)), SDL $SDL2_VERSION (SDL2-LICENSE.txt, zlib licence) and the NDK's zlib, for Android $ANDROID_MIN_SDK and later, OpenGL ES 3.2"
+		echo "No games, ROMs or BIOS files are included."
+	} > "$a/VERSION.txt"
+	mkdir -p "$out/java/org/libsdl/app"
+	cp "$sdlsrc/android-project/app/src/main/java/org/libsdl/app/"*.java "$out/java/org/libsdl/app/"
+	echo "$SDL2_SRC_SHA256 $SUPERMODEL_COMMIT $version" > "$out/.built"
+	log "Android libraries in $out"
+	find "$out/jniLibs" -name '*.so' -exec ls -la {} +
+}
+
 # package <program> <outdir>
 package() {
 	# Absolute, because the source tarball is written from inside $src.
@@ -260,8 +361,26 @@ windows)
 	x86_64-w64-mingw32-objdump -p "$exe" | grep -i "DLL Name" | sort
 	package "$exe" "$2" windows
 	;;
+android)
+	[ $# -ge 2 ] || { echo "usage: $0 android <outdir>" >&2; exit 2; }
+	fetch
+	musashi obj
+	android_ndk
+	android_sdl
+	android_build "$2"
+	;;
+gles)
+	[ $# -ge 2 ] || { echo "usage: $0 gles <outdir>" >&2; exit 2; }
+	fetch
+	musashi obj
+	log "building supermodel-gles"
+	cmake -S "$here/android" -B "$work/gles-build" -DCMAKE_BUILD_TYPE=Release -DSM_HOST_GLES=ON \
+		-DSM_TREE="$src" -DSM_VERSION="$(sm_version)" >"$work/gles-cmake.log" || { cat "$work/gles-cmake.log"; exit 1; }
+	cmake --build "$work/gles-build" -j"$jobs"
+	package "$work/gles-build/supermodel-gles" "$2"
+	;;
 *)
-	sed -n '2,20p' "$0"
+	sed -n '2,32p' "$0"
 	exit 2
 	;;
 esac

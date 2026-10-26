@@ -618,8 +618,20 @@ hasn't been tried on a real phone yet, so tell us how it runs.
   sharp or smooth pixels, quit. Clicking the right stick saves a state, the
   left stick loads it; hold Tab on a keyboard to fast-forward. The game
   pauses and saves when you leave the app.
-- Not in the Android app: Wii U, GameCube and Wii games, MAME, Star Wars
-  Trilogy Arcade, video recording (Android's screen recorder works) and
+- Star Wars Trilogy Arcade (Sega Model 3) has its own screen: tap Star
+  Wars Trilogy Arcade on the start screen, then Choose game file and pick
+  your own swtrilgy.zip or swtrilgya.zip (a split swtrilgya.zip needs
+  swtrilgy.zip too: pick both). No game files are included. Opening one of
+  these zips with Open game takes it there too. Play starts the game in
+  RetroPixels' Supermodel, built for Android with OpenGL ES 3.2; its
+  start-up runs unseen for 30 seconds, as on Windows, so it opens ready
+  for coins. Touch: drag on the left half to aim, FIRE and EVENT on the
+  right, COIN and START at the top. Controller: the left stick aims, A or
+  RT fires, B or RB is the event button, Back inserts a coin, Start starts;
+  the touch controls hide while a controller is used. Flight-style up /
+  down and Aim smoothing are on its screen. Games are recorded like the
+  others (Settings > Record games automatically). It needs a fast phone.
+- Not in the Android app: Wii U, GameCube and Wii games, MAME and
   Archipelago server connections (use RetroPixels Native on a computer for
   those). Nintendo 64 may be slow on older phones.
 - Building it yourself: download RetroPixels-Android-Studio-<version>.zip,

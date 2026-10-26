@@ -61,6 +61,11 @@ for every Android CPU. If Go (go.dev) is installed, the build rebuilds it from
 the Go sources in this folder (cmd/retropixels-android and the packages it
 uses); without Go it uses the ones already there.
 
+Star Wars Trilogy Arcade (RetroPixels' Supermodel for Android) is prebuilt
+in app/src/main/supermodel when this zip was made with it; to build it
+yourself, run sh supermodel/build.sh android android/app/src/main/supermodel
+from the RetroPixels sources (needs the Android NDK).
+
 No signing key is included. Android Studio signs what it builds with your
 computer's debug key, which is fine for testing; to publish, sign with your
 own key (see the signing notes in app/build.gradle). An APK signed with a

@@ -161,6 +161,14 @@ jobs:
           CGO_ENABLED: "0"
         run: go test ./cmd/retropixels-android/ ./internal/...
 
+      # Star Wars Trilogy Arcade: RetroPixels' Supermodel for Android
+      # (libsupermodel.so and libSDL2.so for the four Android CPUs, OpenGL ES
+      # 3.2) built with the runner's NDK (ANDROID_NDK_HOME; the pinned one is
+      # downloaded if there is none) into app/src/main/supermodel, where the
+      # app's Gradle build picks it up.
+      - name: Supermodel for Android
+        run: sh supermodel/build.sh android android/app/src/main/supermodel
+
       - name: Engine for this computer, for the app's Java tests
         env:
           CGO_ENABLED: "0"
@@ -206,6 +214,8 @@ jobs:
           sh android/tools/make-studio-zip.sh android-dist
           aapt=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -n 1)
           [ -z "$aapt" ] || "$aapt" dump badging "android-dist/RetroPixels-$version.apk" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)"
+          # Star Wars Trilogy Arcade is in it
+          unzip -l "android-dist/RetroPixels-$version.apk" | grep -E "lib/(arm64-v8a|armeabi-v7a|x86_64|x86)/libsupermodel.so|assets/supermodel/Config/Games.xml"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4

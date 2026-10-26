@@ -62,10 +62,10 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 41458 | 22.2% |
+| Original (RetroPixels) | 42374 | 22.6% |
 | Supermodel (with or without RetroPixels changes) | 0 | 0.0% |
-| Third-party | 145172 | 77.8% |
-| **All** | **186630** | 100% |
+| Third-party | 145172 | 77.4% |
+| **All** | **187546** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -75,14 +75,16 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | CPU/PowerPC | 3190 | 3190 | original |
 | CPU/Z80 | 1304 | 1304 | original |
 | Graphics (top level) | 809 | 809 | original |
+| Graphics/GLES | 129 | 129 | original |
 | Graphics/Legacy3D | 2544 | 2544 | original |
-| Graphics/New3D | 4295 | 4295 | original |
+| Graphics/New3D | 4490 | 4490 | original |
 | Inputs | 4309 | 4309 | original |
-| Model3 (top level) | 7693 | 7693 | original |
+| Model3 (top level) | 7702 | 7702 | original |
 | Model3/DriveBoard | 1858 | 1858 | original |
-| Network | 1580 | 1580 | original |
-| OSD (top level) | 1885 | 1885 | original |
-| OSD/SDL | 4124 | 4124 | original |
+| Network | 1614 | 1614 | original |
+| OSD (top level) | 1897 | 1897 | original |
+| OSD/Android | 468 | 468 | original |
+| OSD/SDL | 4193 | 4193 | original |
 | OSD/Unix | 123 | 123 | original |
 | OSD/Windows | 1866 | 1866 | original |
 | Pkgs | 126021 | 0 | third-party |

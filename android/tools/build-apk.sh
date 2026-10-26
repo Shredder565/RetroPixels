@@ -37,6 +37,29 @@ for abi in arm64-v8a armeabi-v7a x86_64 x86; do
 done
 
 src="$proj/app/src/main"
+# Star Wars Trilogy Arcade, when Supermodel for Android has been built into
+# app/src/main/supermodel (sh supermodel/build.sh android android/app/src/main/supermodel).
+# SDL's Java code in it needs Android 12's classes (API 31) or newer:
+# ANDROID_JAR_SDL, else the newest android.jar in the SDK.
+sm="$src/supermodel"
+smjava=
+smassets=
+if [ -f "$sm/.built" ]; then
+    smjar=${ANDROID_JAR_SDL:-$(ls "$sdk"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n 1)}
+    api=$(echo "$smjar" | sed -n 's|.*/android-\([0-9]*\)/android.jar$|\1|p')
+    if [ ! -x "$bt/d8" ]; then
+        # (dx can't turn SDL's Java 8 lambdas into Android 7's bytecode)
+        echo "without Supermodel for Android: SDL's Java code needs d8 (build-tools 28 or newer) in $bt"
+    elif [ -n "${ANDROID_JAR_SDL:-}" ] || [ "${api:-0}" -ge 31 ]; then
+        echo "with Supermodel for Android ($(cat "$sm/.built"))"
+        smjava="$proj/app/src/supermodel/java $sm/java"
+        smassets="-A $sm/assets"
+    else
+        echo "without Supermodel for Android: SDL's Java code needs an android.jar for API 31 or newer (set ANDROID_JAR_SDL)"
+    fi
+else
+    echo "without Supermodel for Android (Star Wars Trilogy Arcade can't be played in this APK)"
+fi
 # the manifest as the Gradle plugin would complete it
 sed -e 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android">|<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.shredder565.retropixels">|' \
     -e 's|<application|<application android:extractNativeLibs="true"|' "$src/AndroidManifest.xml" > "$work/AndroidManifest.xml"
@@ -45,15 +68,29 @@ mkdir -p "$work/gen" "$work/classes" "$work/apk"
 aapt package -f -m -J "$work/gen" -M "$work/AndroidManifest.xml" -S "$src/res" -I "$jar"
 find "$src/java" "$work/gen" -name '*.java' > "$work/sources"
 javac -nowarn -Xlint:-options -encoding UTF-8 -source 8 -target 8 -bootclasspath "$jar" -d "$work/classes" @"$work/sources"
-"$bt/dx" --dex --min-sdk-version=24 --output="$work/apk/classes.dex" "$work/classes"
-aapt package -f -M "$work/AndroidManifest.xml" -S "$src/res" -I "$jar" \
+if [ -n "$smjava" ]; then
+    # shellcheck disable=SC2086
+    find $smjava -name '*.java' > "$work/sm-sources"
+    javac -nowarn -Xlint:-options -encoding UTF-8 -source 8 -target 8 -cp "$smjar:$work/classes" -d "$work/classes" @"$work/sm-sources"
+fi
+if [ -n "$smjava" ]; then
+    (cd "$work/classes" && jar cf "$work/classes.jar" .)
+    "$bt/d8" --release --min-api 24 --lib "$smjar" --output "$work/apk" "$work/classes.jar"
+else
+    "$bt/dx" --dex --min-sdk-version=24 --output="$work/apk/classes.dex" "$work/classes"
+fi
+# shellcheck disable=SC2086
+aapt package -f -M "$work/AndroidManifest.xml" -S "$src/res" $smassets -I "$jar" \
     --min-sdk-version 24 --target-sdk-version 36 --version-code "$code" --version-name "$version" \
     -F "$work/unsigned.apk"
 for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     mkdir -p "$work/apk/lib/$abi"
     cp "$libs/$abi/librpengine.so" "$work/apk/lib/$abi/"
+    if [ -n "$smjava" ] && [ -d "$sm/jniLibs/$abi" ]; then
+        cp "$sm/jniLibs/$abi/"*.so "$work/apk/lib/$abi/"
+    fi
 done
-(cd "$work/apk" && aapt add "$work/unsigned.apk" classes.dex lib/*/librpengine.so > /dev/null)
+(cd "$work/apk" && aapt add "$work/unsigned.apk" classes.dex lib/*/*.so > /dev/null)
 zipalign -f -p 4 "$work/unsigned.apk" "$work/aligned.apk"
 mkdir -p "$(dirname "$out")"
 # Signed with the owner's key when RP_KEYSTORE (and RP_KEYSTORE_PASSWORD,
