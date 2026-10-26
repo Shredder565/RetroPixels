@@ -458,6 +458,8 @@ public:
     return true;
   }
 
+  bool IsPointerAxis() const { return m_axisNum == AXIS_X || m_axisNum == AXIS_Y; }
+
   bool GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
   {
     int v = Position(minVal, offVal, maxVal);

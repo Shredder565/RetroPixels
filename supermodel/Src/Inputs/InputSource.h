@@ -67,6 +67,10 @@ public:
 	// Passes a force feedback command on to the device; false if it cannot
 	// take it.
 	virtual bool SendForceFeedbackCmd(ForceFeedbackCmd ffCmd);
+
+	// True for a mouse pointer's X or Y axis, whose value is where the
+	// pointer is (so it is off centre even when nobody touches the mouse).
+	virtual bool IsPointerAxis() const { return false; }
 };
 
 #endif // INCLUDED_INPUTSOURCE_H

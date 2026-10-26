@@ -64,6 +64,12 @@ being rewritten as original code: `docs/supermodel-original.md`).
   (glReadPixels of the back buffer) and writes the sound as a WAV.
   RetroPixels' recorder then makes the usual .mp4 with the black bars
   cropped.
+- **Fast boot.** `-rp-fast-boot=N` runs the game's first N seconds (58
+  frames each) unthrottled, with nothing drawn or swapped, the sound muted
+  and the recording paused. RetroPixels passes 30 (`FastBootSeconds`), which
+  covers Star Wars' "WAIT SETUP THE FEEDBACK LEVER" calibration and the Sega
+  logo, so the game appears on its attract mode, past the point where
+  coins can crash it. Pause ends it early.
 - **Resolution.** `-desktop-res` makes fullscreen use the desktop's
   resolution. A borderless window that is resized (when it's docked in
   RetroPixels) re-creates the renderers at the new size, so the picture is
@@ -82,6 +88,12 @@ These live in `internal/supermodel/ini.go` and `GameArgs`.
   - Left stick: the yoke. "Invert stick Y" is an option.
   - RT or A: fire. RB or B: event button.
   - Start: start. Back: coin. Back + Start: leave.
+- **Mouse, at the same time as the controller.** The pointer's place in the
+  game window is the yoke's (centre = centre; not flipped by "Invert stick
+  Y"). Left button fire, right button event, middle button second trigger.
+  Whichever of the mouse and the stick moved last steers (a change in
+  `Src/Inputs/MultiInputSource.cpp`, used for "A,B" mappings that include a
+  mouse pointer axis).
 - **Keyboard (as on the MAME tab).** 5 coin, 1 start, arrow keys, Ctrl/A fire,
   Alt/S event, F2 test menu, 9 service, Esc leaves.
 - **Sound.** MusicVolume 70 for both sets.

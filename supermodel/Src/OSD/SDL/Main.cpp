@@ -98,6 +98,7 @@ namespace
   CCrosshair *s_crosshair = nullptr;
   CInputs *s_gunInputs = nullptr;     // set while a light gun game runs
   uint32_t s_gameInputs = 0;
+  bool s_fastBoot = false;            // RetroPixels: -rp-fast-boot is running (nothing drawn)
 
   bool UseDesktopSize()
   {
@@ -668,6 +669,27 @@ namespace
     const uint64_t perFrame = perSecond * 1000 / milliHz;
     uint64_t nextFrame = 0;
 
+    // RetroPixels: -rp-fast-boot=<seconds>. The game's first seconds (start-up
+    // checks such as Star Wars' feedback lever setup, and the logos) run as
+    // fast as the PC can, with nothing drawn, no sound and nothing recorded;
+    // the window stays black until the game is past them.
+    unsigned fastBootFrames = unsigned(s_config["RPFastBoot"].ValueAsDefault<int>(0)) * 58;   // 57.524 Hz
+    auto endFastBoot = [&]()
+    {
+      s_fastBoot = false;
+      fastBootFrames = 0;
+      SetAudioEnabled(true);
+      RetroPixels::Recorder::SetPaused(false);
+      nextFrame = 0;
+    };
+    if (fastBootFrames > 0)
+    {
+      s_fastBoot = true;
+      SetAudioEnabled(false);
+      RetroPixels::Recorder::SetPaused(true);
+    }
+
+
     Renderers r;
     r.aa = new SuperAA(s_screen.supersampling, s_screen.colours);
     r.aa->Init(s_screen.fullWidth, s_screen.fullHeight);
@@ -750,6 +772,8 @@ namespace
         } },
       { inputs->uiPause, always, [&]()
         {
+          if (s_fastBoot)
+            endFastBoot();
           paused = !paused;
           RetroPixels::Recorder::SetPaused(paused);
           if (paused)
@@ -839,6 +863,9 @@ namespace
       if (!inputs->Poll(&game, s_screen.x, s_screen.y, s_screen.width, s_screen.height))
         quit = true;
 
+      if (s_fastBoot && !paused && --fastBootFrames == 0)
+        endFastBoot();
+
       if (paused)
         emulator->RenderFrame();
       else
@@ -901,7 +928,7 @@ namespace
       }
 
       // frame limiting (always while paused)
-      if (paused || s_config["Throttle"].ValueAs<bool>())
+      if (!s_fastBoot && (paused || s_config["Throttle"].ValueAs<bool>()))
       {
         WaitUntil(nextFrame, perSecond);
         nextFrame = SDL_GetPerformanceCounter() + perFrame;
@@ -1070,6 +1097,7 @@ Util::Config::Node DefaultConfig()
   config.Set("DesktopResolution", false, "Video");   // RetroPixels
   text("RPRecordDir", "", "RetroPixels");            // RetroPixels: -rp-record
   text("RPFFmpeg", "", "RetroPixels");               // RetroPixels: -rp-ffmpeg
+  config.Set("RPFastBoot", 0, "RetroPixels", 0, 300);  // RetroPixels: -rp-fast-boot
   config.Set("VSync", true, "Video");
   config.Set("Throttle", true, "Video");
   config.Set("RefreshRate", 60.0f, "Video", 0.0f, 0.0f, { 57.5f, 60.f });
@@ -1226,6 +1254,8 @@ namespace
     option("-rp-record=<dir>", "Record picture and sound into <dir>");
     more("(Frames/*.mkv and Audio/*.wav; needs -rp-ffmpeg)");
     option("-rp-ffmpeg=<file>", "The ffmpeg program that encodes the recording");
+    option("-rp-fast-boot=<n>", "Run the first <n> seconds of the game at full speed,");
+    more("silent and with a black screen (skips the start-up checks)");
     option("SUPERMODEL_HOME=<dir>", "(environment) Keep Supermodel.ini, NVRAM, saves,");
     more("the log and screenshots in <dir>");
 
@@ -1415,6 +1445,8 @@ namespace
       }
       else if (Is(arg, "-ss"))
         number(arg, "Supersampling", 1, 8, "'-ss' requires an integer argument (e.g., '-ss=2').");
+      else if (Is(arg, "-rp-fast-boot"))   // RetroPixels
+        number(arg, "RPFastBoot", 0, 300, "'-rp-fast-boot' requires a number of seconds (e.g., '-rp-fast-boot=30').");
       else if (Is(arg, "-crtcolors"))
         number(arg, "CRTcolors", 0, 5, "'-crtcolors' requires an integer argument (e.g., '-crtcolors=1').");
       else if (Is(arg, "-upscalemode"))
@@ -1679,11 +1711,13 @@ int main(int argc, char **argv)
 // Called by the emulator around each frame it draws.
 bool BeginFrameVideo()
 {
-  return true;
+  return !s_fastBoot;
 }
 
 void EndFrameVideo()
 {
+  if (s_fastBoot)   // RetroPixels: nothing is shown during -rp-fast-boot
+    return;
   if (s_gunInputs)
     s_crosshair->Update(s_gameInputs, s_gunInputs, s_screen.x, s_screen.y, s_screen.width, s_screen.height);
 #ifdef __ANDROID__

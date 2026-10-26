@@ -345,6 +345,9 @@ Star Wars Trilogy Arcade (Supermodel)
   centre, full movement at the edge, corners reachable, and the aim glides
   like the arcade yoke; "Smoothness" sets how much, Off to Heavy): left stick aims, RT or A fires, RB or B is the event
   button (force), Start starts, Back inserts a coin, Back + Start leaves.
+  The mouse works at the same time, nothing to switch on: point to aim,
+  left button fires, right button is the event button (whichever of the
+  mouse and the stick moved last steers).
   Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
   F2 the game's test menu.
 - Settings, high scores and save states are kept in
@@ -563,10 +566,11 @@ games. It uses the same emulators, written for RetroPixels. It's new and
 hasn't been tried on a real phone yet, so tell us how it runs.
 - Installing: download RetroPixels-<version>.apk from the release onto the
   phone and open it. Android asks once to allow installing apps from your
-  browser or file manager; allow it, then Install. Every RetroPixels APK is
-  signed with the same public key, so a newer one installs over the old one
-  and keeps your saves. (The key is public on purpose: it only lets updates
-  install over each other and doesn't prove who built an APK.) Uninstalling
+  browser or file manager; allow it, then Install. RetroPixels APKs are signed
+  with the owner's own key (no key is in the source), so a newer release
+  installs over the last one and keeps your saves. Test APKs from GitHub
+  Actions may be signed with a different key and then can't install over a
+  release, or the other way round: uninstall first. Uninstalling
   removes the saves, so export battery saves you want to keep first
   (menu > Battery save > Export).
 - Playing: tap Open game and pick a game file (.nes .sfc .smc .gb .gbc .gba

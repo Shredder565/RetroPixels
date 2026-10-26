@@ -16,6 +16,13 @@ class CMultiInputSource : public CInputSource
 private:
 	bool m_isOr;                         // true: "A,B"; false: "A+B"
 	std::vector<CInputSource *> m_parts;
+	// "A,B" with a mouse pointer axis among the parts follows the part that
+	// moved last, so a pointer resting off centre doesn't hold the value
+	// while a stick is let go: each part's value at the last read, and the
+	// part that changed last.
+	bool m_followLast;
+	std::vector<int> m_lastValues;
+	size_t m_current;
 
 public:
 	// The kind of source a combination of these parts makes: empty if there
@@ -26,7 +33,8 @@ public:
 	// A source that is never active.
 	CMultiInputSource();
 
-	// isOr: the value is that of the first active part. Otherwise all switch
+	// isOr: the value is that of the first active part (with a mouse
+	// pointer axis among the parts: of the part that moved last). Otherwise all switch
 	// parts must be active, and the value is that of the first active
 	// non-switch part (or the switches' if there are only switches).
 	CMultiInputSource(bool isOr, std::vector<CInputSource*> &sources);

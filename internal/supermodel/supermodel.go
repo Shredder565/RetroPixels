@@ -8,6 +8,7 @@
 package supermodel
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,10 @@ type LaunchOptions struct {
 	Patched bool
 }
 
+// FastBootSeconds: how much of the game's start-up RetroPixels' build runs
+// at full speed, unseen and unheard (-rp-fast-boot).
+const FastBootSeconds = 30
+
 // GameArgs is Supermodel's command line for the game in rom.
 func GameArgs(rom string, o LaunchOptions) []string {
 	args := []string{rom}
@@ -119,6 +124,12 @@ func GameArgs(rom string, o LaunchOptions) []string {
 	// Xbox controllers by default (InputSystem: XInput on Windows, SDL's
 	// game controller support elsewhere; both number the buttons as INI does).
 	args = append(args, "-input-system="+InputSystem)
+	if o.Patched {
+		// Star Wars' start-up (the feedback lever setup and the Sega logo)
+		// runs at full speed behind a black screen: the game opens on its
+		// attract mode, past the point where adding coins can crash it.
+		args = append(args, fmt.Sprintf("-rp-fast-boot=%d", FastBootSeconds))
+	}
 	if o.Patched && o.RecordDir != "" && o.FFmpeg != "" {
 		args = append(args, "-rp-record="+o.RecordDir, "-rp-ffmpeg="+o.FFmpeg)
 	}

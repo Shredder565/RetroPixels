@@ -158,12 +158,12 @@ func TestGameArgs(t *testing.T) {
 	docked := GameArgs(rom, LaunchOptions{Embed: true, Hidden: true, ForceFeedback: true, Patched: true,
 		RecordDir: filepath.Join("C:", "rec"), FFmpeg: filepath.Join("C:", "ffmpeg.exe")})
 	want := []string{rom, "-window", "-borderless", "-window-pos=-20000,-20000", "-no-wide-screen", "-force-feedback",
-		"-input-system=" + InputSystem, "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
+		"-input-system=" + InputSystem, "-rp-fast-boot=30", "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
 	if !reflect.DeepEqual(docked, want) {
 		t.Fatalf("docked:\n got %q\nwant %q", docked, want)
 	}
 	full := GameArgs(rom, LaunchOptions{Fullscreen: true, WideScreen: true, Patched: true})
-	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=" + InputSystem}) {
+	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=" + InputSystem, "-rp-fast-boot=30"}) {
 		t.Fatalf("fullscreen: %q", full)
 	}
 	// The official build knows none of RetroPixels' options.
@@ -182,8 +182,8 @@ func TestINI(t *testing.T) {
 	for _, want := range []string{
 		iniMarker, "[ Global ]", `InputSystem = "` + InputSystem + `"`,
 		`InputStart1 = "KEY_1,JOY1_BUTTON8"`, `InputCoin1 = "KEY_5,KEY_3,JOY1_BUTTON7"`,
-		`InputAnalogJoyX = "JOY1_XAXIS"`, `InputAnalogJoyY = "JOY1_YAXIS"`,
-		`InputAnalogJoyTrigger = "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS"`,
+		`InputAnalogJoyX = "JOY1_XAXIS,MOUSE_XAXIS"`, `InputAnalogJoyY = "JOY1_YAXIS,MOUSE_YAXIS"`,
+		`InputAnalogJoyTrigger = "KEY_LEFTCTRL,KEY_A,JOY1_BUTTON1,JOY1_RZAXIS_POS,MOUSE_LEFT_BUTTON"`, `InputAnalogJoyEvent = "KEY_LEFTALT,KEY_S,JOY1_BUTTON2,JOY1_BUTTON6,MOUSE_RIGHT_BUTTON"`,
 		`InputUIExit = "KEY_ESCAPE,JOY1_BUTTON7+JOY1_BUTTON8"`,
 		"[ swtrilgya ]", "[ swtrilgy ]", `MusicVolume = "70"`,
 	} {
@@ -194,7 +194,7 @@ func TestINI(t *testing.T) {
 	if !strings.HasPrefix(s, iniMarker) {
 		t.Error("the marker must be the first line")
 	}
-	if !strings.Contains(INI(Controls{InvertY: true}), `InputAnalogJoyY = "JOY1_YAXIS_INV"`) {
+	if !strings.Contains(INI(Controls{InvertY: true}), `InputAnalogJoyY = "JOY1_YAXIS_INV,MOUSE_YAXIS"`) {
 		t.Error("InvertY")
 	}
 	// Every key Supermodel reads is set once in the global section.
