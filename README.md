@@ -224,4 +224,7 @@ Konami, Namco, Microsoft, the Dolphin project, the Cemu project or the MAME team
 
 Screenshot: *Shattering Jaws*, a Genesis homebrew game by Mun (2016).
 
-Copyright © 2026 RetroPixels. All rights reserved.
+Copyright © 2026 Shredder565. All rights reserved. RetroPixels is proprietary software: see
+[LICENSE.txt](LICENSE.txt). Third-party components keep their own licences, listed in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt); [docs/licensing.md](docs/licensing.md) explains
+what is whose.

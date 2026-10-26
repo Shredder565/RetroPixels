@@ -55,7 +55,7 @@ PixelU's:
    data written to memory. Fixing an obvious gap is fine; changing what
    working games see is not.
 4. Start the file with this header and **no** Dolphin copyright or SPDX line
-   (no licence has been chosen for original code yet):
+   (original code is RetroPixels' own, under LICENSE.txt; see docs/licensing.md):
 
    ```cpp
    // Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.

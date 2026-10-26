@@ -33,6 +33,9 @@ mkdir -p "$top"
 # the version, for the build without ../main.go
 printf 'version=%s\n' "$version" > "$top/android/version.properties"
 
+# RetroPixels' licence and the third-party notices (the build puts them in the app)
+cp "$repo/LICENSE.txt" "$repo/THIRD-PARTY-NOTICES.txt" "$top/"
+
 # the engine's Go sources: its packages' non-test files and go.mod
 cp "$repo/go.mod" "$top/"
 [ ! -f "$repo/go.sum" ] || cp "$repo/go.sum" "$top/"

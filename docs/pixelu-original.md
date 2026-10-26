@@ -24,8 +24,8 @@ For each file we replace:
    return values, same data written back. Fixing an obvious gap (for example a
    copy mode Cemu did not implement) is fine; changing what working games see
    is not.
-4. Start the file with this header and **no** MPL notice (no license has been
-   chosen for original code yet):
+4. Start the file with this header and **no** MPL notice (original code is
+   RetroPixels' own, under LICENSE.txt; see docs/licensing.md):
 
    ```cpp
    // Original code for RetroPixels (PixelU). Not derived from Cemu.

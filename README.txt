@@ -28,10 +28,12 @@ What's in the download (RetroPixels-2.21.0.zip)
   next to RetroPixels.exe:
   * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
     from Cemu's code and has been rewritten as RetroPixels' own code
-    (Mozilla Public License 2.0, LICENSE-MPL-2.0.txt).
+    (Cemu's game profiles and translations it still uses are under the
+    Mozilla Public License 2.0, LICENSE-MPL-2.0.txt).
   * PixelU\wii\PixelU-Wii.exe: GameCube and Wii. It started from Dolphin and
-    has been rewritten as RetroPixels' own code (GPL-2.0-or-later, its
-    licence is in PixelU\wii).
+    has been rewritten as RetroPixels' own code (still distributed under
+    the GPL because of the GPL libraries it is built with; its licence is
+    in PixelU\wii).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
   * Supermodel\supermodel.exe: Sega Model 3, for Star Wars Trilogy Arcade.
@@ -40,6 +42,8 @@ What's in the download (RetroPixels-2.21.0.zip)
     folder).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
+- LICENSE.txt (RetroPixels' licence) and THIRD-PARTY-NOTICES.txt (the
+  third-party components and their licences).
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
   your own dumps and the keys from your own console (see below).
 
@@ -616,6 +620,10 @@ Where things are kept
 
 
 Credits & licences
+- RetroPixels is Copyright Shredder565, all rights reserved: it is
+  proprietary software, licensed for personal use under LICENSE.txt.
+  Third-party components keep their own licences; THIRD-PARTY-NOTICES.txt
+  lists them with the notices they require.
 - RetroPixels' own code was written for this project and uses no copied code:
   the program, its screens, and its NES, Super Nintendo, Game Boy / Game Boy
   Color, Game Boy Advance, Nintendo 64, Sega Genesis, Atari 2600, Atari
@@ -631,8 +639,9 @@ Credits & licences
   The DSP-3, DSP-4, ST010, ST011 and ST018 chip programs are never included;
   you supply your own.
 - The engines in the download's folders are separate programs with their
-  own licences (see "What's in the download"): PixelU (MPL-2.0) and
-  PixelU-Wii (GPL-2.0-or-later), which started from Cemu's and Dolphin's
+  own licences (see "What's in the download" and THIRD-PARTY-NOTICES.txt):
+  PixelU (Cemu's data it uses: MPL-2.0) and PixelU-Wii (GPL as a whole,
+  because of the GPL libraries in it), which started from Cemu's and Dolphin's
   code and have been rewritten as RetroPixels' own code (their source is in
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the

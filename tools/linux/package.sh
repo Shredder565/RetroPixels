@@ -140,7 +140,7 @@ if have mame; then
 fi
 
 # ---- documents ----
-cp "$root/README.txt" "$root/CHANGELOG.txt" "$dir/"
+cp "$root/README.txt" "$root/CHANGELOG.txt" "$root/LICENSE.txt" "$root/THIRD-PARTY-NOTICES.txt" "$dir/"
 cp "$root/pixelu/LICENSE.txt" "$dir/LICENSE-MPL-2.0.txt"
 cp "$root/wiiu/testdata/demo.rpx" "$dir/RetroPixels Wii U demo.rpx"
 for f in RetroPixels.desktop retropixels.png; do
@@ -166,9 +166,11 @@ repo=${REPO:-}
 	echo "OpenGL, and zenity or kdialog for the file dialogs. Settings go to"
 	echo "~/.config/RetroPixels, the app window's data to ~/.local/share/RetroPixels."
 	echo
+	echo "RetroPixels is Copyright Shredder565, all rights reserved (LICENSE.txt). Third-party components keep their own licences (THIRD-PARTY-NOTICES.txt)."
+	echo
 	echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
 	if have pixelu; then
-		echo "- PixelU/PixelU: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
+		echo "- PixelU/PixelU: Wii U (original engine rewritten from a Cemu start; Cemu's game profiles and translations are MPL-2.0, LICENSE-MPL-2.0.txt)"
 	else
 		echo "- PixelU (Wii U): not in this build yet (its Linux build isn't ready)"
 	fi
