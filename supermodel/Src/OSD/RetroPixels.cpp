@@ -444,7 +444,7 @@ namespace RetroPixels
         "-an",
         // OpenGL reads the picture bottom row first
         "-vf", "vflip,crop=trunc(iw/2)*2:trunc(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "superfast", "-crf", "14", "-pix_fmt", "yuv420p",
         "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
         out,
       };
@@ -544,34 +544,25 @@ namespace RetroPixels
       s_paused = paused;
     }
 
-    void Frame(unsigned width, unsigned height)
-    {
-      {
-        std::lock_guard<std::mutex> lock(s_mutex);
-        if (!s_active || s_paused || s_failed || width == 0 || height == 0)
-          return;
-      }
-      // Read the finished frame from the window's back buffer, leaving the
-      // GL state as it was.
-      GLint readFBO = 0, packBuffer = 0, readBuffer = 0, packAlign = 4;
-      glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFBO);
-      glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
-      glGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
-      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-      glGetIntegerv(GL_READ_BUFFER, &readBuffer);
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-      glReadBuffer(GL_BACK);
-      glPixelStorei(GL_PACK_ALIGNMENT, 4);
-      VideoFrame f;
-      f.width = width;
-      f.height = height;
-      f.rgba.resize(size_t(width) * height * 4);
-      glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, f.rgba.data());
-      glPixelStorei(GL_PACK_ALIGNMENT, packAlign);
-      glReadBuffer(readBuffer);
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
-      glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+    // The picture is recorded at most kMaxRecordHeight high: a bigger window
+    // (a 1440p or 4K screen) is scaled down on the graphics card first, so
+    // reading it back and encoding it keep up with the game.
+    static constexpr unsigned kMaxRecordHeight = 1080;
+    static constexpr int kReadBuffers = 3;   // frames read back without waiting (one frame late)
 
+    struct Readback
+    {
+      GLuint fbo = 0, colour = 0;
+      unsigned fboW = 0, fboH = 0;
+      GLuint pbo[kReadBuffers] = {};
+      unsigned w[kReadBuffers] = {}, h[kReadBuffers] = {};
+      bool pending[kReadBuffers] = {};
+      int next = 0;
+    };
+    static Readback s_rb;
+
+    static void Queue(VideoFrame &&f)
+    {
       std::unique_lock<std::mutex> lock(s_mutex);
       // Wait for ffmpeg rather than drop a frame: the sound keeps every
       // frame's samples, so the two stay the same length.
@@ -581,6 +572,131 @@ namespace RetroPixels
       s_queue.push_back(std::move(f));
       lock.unlock();
       s_cv.notify_all();
+    }
+
+    // Copies the frame read into buffer i to the queue.
+    static void Collect(int i)
+    {
+      if (!s_rb.pending[i])
+        return;
+      s_rb.pending[i] = false;
+      VideoFrame f;
+      f.width = s_rb.w[i];
+      f.height = s_rb.h[i];
+      f.rgba.resize(size_t(f.width) * f.height * 4);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, s_rb.pbo[i]);
+      if (const void *p = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY))
+      {
+        memcpy(f.rgba.data(), p, f.rgba.size());
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+      }
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+      Queue(std::move(f));
+    }
+
+    // Queues the frames still being read, oldest first.
+    static void CollectAll()
+    {
+      if (s_rb.pbo[0] == 0)
+        return;
+      GLint packBuffer = 0;
+      glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+      for (int k = 0; k < kReadBuffers; k++)
+        Collect((s_rb.next + k) % kReadBuffers);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
+    }
+
+    static void FreeReadback()
+    {
+      if (s_rb.pbo[0])
+        glDeleteBuffers(kReadBuffers, s_rb.pbo);
+      if (s_rb.fbo)
+        glDeleteFramebuffers(1, &s_rb.fbo);
+      if (s_rb.colour)
+        glDeleteRenderbuffers(1, &s_rb.colour);
+      s_rb = Readback();
+    }
+
+    void Frame(unsigned width, unsigned height)
+    {
+      {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        if (!s_active || s_paused || s_failed || width == 0 || height == 0)
+          return;
+      }
+      // The recorded size: the window's, or scaled down to kMaxRecordHeight.
+      unsigned outW = width, outH = height;
+      if (height > kMaxRecordHeight)
+      {
+        outH = kMaxRecordHeight;
+        outW = unsigned(double(width) * outH / height + 0.5);
+        outW += outW & 1;
+      }
+
+      // Leave the GL state as it was.
+      GLint readFBO = 0, drawFBO = 0, packBuffer = 0, readBuffer = 0, packAlign = 4, renderbuffer = 0;
+      GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+      glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFBO);
+      glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFBO);
+      glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+      glGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
+      glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+      glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+
+      if (s_rb.pbo[0] == 0)
+        glGenBuffers(kReadBuffers, s_rb.pbo);
+
+      // The oldest buffer is reused: its frame (read kReadBuffers - 1
+      // frames ago, so long finished) goes to the queue first.
+      const int i = s_rb.next;
+      s_rb.next = (i + 1) % kReadBuffers;
+      Collect(i);
+
+      glReadBuffer(GL_BACK);
+      if (outW != width || outH != height)
+      {
+        if (s_rb.fbo == 0 || s_rb.fboW != outW || s_rb.fboH != outH)
+        {
+          if (s_rb.fbo == 0)
+          {
+            glGenFramebuffers(1, &s_rb.fbo);
+            glGenRenderbuffers(1, &s_rb.colour);
+          }
+          glBindRenderbuffer(GL_RENDERBUFFER, s_rb.colour);
+          glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, outW, outH);
+          glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_rb.fbo);
+          glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_rb.colour);
+          s_rb.fboW = outW;
+          s_rb.fboH = outH;
+        }
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_rb.fbo);
+        glBlitFramebuffer(0, 0, width, height, 0, 0, outW, outH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s_rb.fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+      }
+
+      // Read into the buffer without waiting; it's collected later.
+      glPixelStorei(GL_PACK_ALIGNMENT, 4);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, s_rb.pbo[i]);
+      const GLsizeiptr bytes = GLsizeiptr(outW) * outH * 4;
+      if (s_rb.w[i] != outW || s_rb.h[i] != outH)
+        glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+      glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+      s_rb.w[i] = outW;
+      s_rb.h[i] = outH;
+      s_rb.pending[i] = true;
+
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+      glReadBuffer(readBuffer);
+      glPixelStorei(GL_PACK_ALIGNMENT, packAlign);
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFBO);
+      glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+      if (scissor)
+        glEnable(GL_SCISSOR_TEST);
     }
 
     static int16_t Clamp16(float x)
@@ -625,6 +741,13 @@ namespace RetroPixels
         std::lock_guard<std::mutex> lock(s_mutex);
         if (!s_active)
           return;
+      }
+      // The last frames still being read back (the GL context is current
+      // here: Stop() is called from the thread that draws).
+      CollectAll();
+      FreeReadback();
+      {
+        std::lock_guard<std::mutex> lock(s_mutex);
         s_stopping = true;
       }
       s_cv.notify_all();
