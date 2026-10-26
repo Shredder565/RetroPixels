@@ -1,374 +1,397 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/coreinit/
-// coreinit_MEM_BlockHeap.cpp and coreinit_MEM_BlockHeap.h, rewritten in Go for
-// RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// Block heaps: the program gives the header, the range to manage and memory
-// for "tracks", one per free or used span, kept in address order. Spare
-// tracks wait in a list of their own; an allocation that splits a span needs
-// one or two.
+// Block heaps (MEMBlockHeap). The program supplies the header, the address
+// range to manage and memory for bookkeeping records ("tracks"). Each track
+// describes one span of the range, free or in use; the tracks of the range
+// form a doubly linked list in address order. Records not in use sit on a
+// singly linked spare list. Carving a block out of a free span needs up to
+// two spare records, for what's left in front of it and behind it.
 
+// MEMBlockHeap fields after the common header
 const (
-	// MEMBlockHeap, after MEMHeapBase
-	blkTrack     = 0x50 // the first track, in the header
-	blkHeadTrack = 0x64
-	blkTailTrack = 0x68
-	blkSpare     = 0x6c // spare tracks, linked by their next field
-	blkSpareLeft = 0x70
-	blkHeapSize  = 0x80
-
-	// a track
-	trkStart = 0x00
-	trkEnd   = 0x04 // the last byte
-	trkFree  = 0x08
-	trkPrev  = 0x0c
-	trkNext  = 0x10
-	trkSize  = 0x14
-
-	blkGroupHeader = 0x10 // before the tracks in memory given for them
+	bhBuiltin   = 0x50 // a track inside the header, used for the initial span
+	bhFirst     = 0x64 // the lowest span
+	bhLast      = 0x68 // the highest span
+	bhSpare     = 0x6c // spare tracks
+	bhSpareN    = 0x70 // how many
+	bhHeaderLen = 0x80
 )
 
-func (m *Machine) isBlockHeap(heap uint32) bool {
-	return heap != 0 && m.Mem.Read32(heap+heapMagic) == heapMagicBlock
+// a track (MEMBlockHeapTracking)
+const (
+	trStart = 0x00
+	trLast  = 0x04 // the span's final byte
+	trFree  = 0x08
+	trPrev  = 0x0c
+	trNext  = 0x10
+	trLen   = 0x14
+
+	trGroupHeader = 0x10 // memory added for tracks starts with this header
+)
+
+// span is a track read out of the program's memory.
+type span struct {
+	addr        uint32
+	start, last uint32
+	free        bool
+	prev, next  uint32
 }
 
-// initBlockHeap is MEMInitBlockHeap.
-func (m *Machine) initBlockHeap(heap, start, end, track, trackSize, flags uint32) uint32 {
-	if heap == 0 || start == 0 || end == 0 || start >= end {
+func (m *Machine) loadSpan(addr uint32) span {
+	mem := m.Mem
+	return span{
+		addr:  addr,
+		start: mem.Read32(addr + trStart),
+		last:  mem.Read32(addr + trLast),
+		free:  mem.Read32(addr+trFree) != 0,
+		prev:  mem.Read32(addr + trPrev),
+		next:  mem.Read32(addr + trNext),
+	}
+}
+
+func (m *Machine) storeSpan(s span) {
+	mem := m.Mem
+	mem.Write32(s.addr+trStart, s.start)
+	mem.Write32(s.addr+trLast, s.last)
+	var f uint32
+	if s.free {
+		f = 1
+	}
+	mem.Write32(s.addr+trFree, f)
+	mem.Write32(s.addr+trPrev, s.prev)
+	mem.Write32(s.addr+trNext, s.next)
+}
+
+func (s span) size() uint32 { return s.last - s.start + 1 }
+
+func (m *Machine) isBlockHeap(heap uint32) bool { return m.heapTagIs(heap, tagBlockHeap) }
+
+// initBlockHeap is MEMInitBlockHeap(heap, start, end, tracks, tracks size,
+// options).
+func (m *Machine) initBlockHeap(heap, start, end, tracks, tracksSize, options uint32) uint32 {
+	if heap == 0 || start == 0 || end == 0 || end <= start {
 		return 0
 	}
-	if trackSize == 0 {
-		track = 0
-	} else if track == 0 {
-		trackSize = 0
+	if tracks == 0 || tracksSize == 0 {
+		tracks, tracksSize = 0, 0
 	}
-	m.memInitHeapBase(heap, heapMagicBlock, start, end, flags)
-	mem := m.Mem
-	mem.Fill(heap+heapBaseSize, 0, blkHeapSize-heapBaseSize)
-	t := heap + blkTrack
-	mem.Write32(t+trkStart, start)
-	mem.Write32(t+trkEnd, end-1)
-	mem.Write32(t+trkFree, 1)
-	mem.Write32(heap+blkHeadTrack, t)
-	mem.Write32(heap+blkTailTrack, t)
-	if trackSize != 0 && m.blockAddTracking(heap, track, trackSize) != 0 {
-		m.memDestroyHeapBase(heap)
+	m.heapHeaderInit(heap, tagBlockHeap, start, end, options)
+	m.Mem.Fill(heap+hhSize, 0, bhHeaderLen-hhSize)
+	whole := span{addr: heap + bhBuiltin, start: start, last: end - 1, free: true}
+	m.storeSpan(whole)
+	m.Mem.Write32(heap+bhFirst, whole.addr)
+	m.Mem.Write32(heap+bhLast, whole.addr)
+	if tracks != 0 && m.addBlockTracks(heap, tracks, tracksSize) != 0 {
+		m.heapUnlink(heap)
 		return 0
 	}
 	return heap
 }
 
-func (m *Machine) blockAddTracking(heap, track, size uint32) int32 {
-	mem := m.Mem
+// addBlockTracks is MEMAddBlockHeapTracking: it carves mem into tracks and
+// puts them on the spare list. -4 when the memory can't hold any.
+func (m *Machine) addBlockTracks(heap, p, size uint32) int32 {
 	if !m.isBlockHeap(heap) {
 		return 0
 	}
-	if track == 0 || size <= blkGroupHeader+trkSize {
+	if p == 0 || size <= trGroupHeader+trLen {
 		return -4
 	}
-	n := (size - blkGroupHeader) / trkSize
-	mem.Write32(track, 0)
-	mem.Write32(track+4, 0)
-	mem.Write32(track+8, track+blkGroupHeader)
-	mem.Write32(track+12, n)
-	first := track + blkGroupHeader
-	mem.Write32(first+trkPrev, 0)
-	for i := uint32(0); i+1 < n; i++ {
-		t := first + i*trkSize
-		mem.Write32(t+trkNext, t+trkSize)
-		mem.Write32(t+trkSize+trkPrev, 0)
+	mem := m.Mem
+	n := (size - trGroupHeader) / trLen
+	first := p + trGroupHeader
+	// the group header: two zero words, then where the tracks are and how many
+	mem.Write32(p, 0)
+	mem.Write32(p+4, 0)
+	mem.Write32(p+8, first)
+	mem.Write32(p+12, n)
+	for i := n; i > 0; i-- {
+		m.spareTrack(heap, first+(i-1)*trLen)
 	}
-	mem.Write32(first+(n-1)*trkSize+trkNext, mem.Read32(heap+blkSpare))
-	mem.Write32(heap+blkSpare, first)
-	mem.Write32(heap+blkSpareLeft, mem.Read32(heap+blkSpareLeft)+n)
 	return 0
 }
 
-func (m *Machine) blockTakeSpare(heap uint32) uint32 {
+// spareTrack puts a record on the spare list.
+func (m *Machine) spareTrack(heap, tr uint32) {
 	mem := m.Mem
-	t := mem.Read32(heap + blkSpare)
-	mem.Write32(heap+blkSpare, mem.Read32(t+trkNext))
-	mem.Write32(t+trkNext, 0)
-	mem.Write32(heap+blkSpareLeft, mem.Read32(heap+blkSpareLeft)-1)
-	return t
+	mem.Write32(tr+trPrev, 0)
+	mem.Write32(tr+trNext, mem.Read32(heap+bhSpare))
+	mem.Write32(heap+bhSpare, tr)
+	mem.Write32(heap+bhSpareN, mem.Read32(heap+bhSpareN)+1)
 }
 
-func (m *Machine) blockReleaseSpare(heap, t uint32) {
+// takeTrack takes a record off the spare list.
+func (m *Machine) takeTrack(heap uint32) uint32 {
 	mem := m.Mem
-	mem.Write32(t+trkNext, mem.Read32(heap+blkSpare))
-	mem.Write32(heap+blkSpare, t)
-	mem.Write32(heap+blkSpareLeft, mem.Read32(heap+blkSpareLeft)+1)
+	tr := mem.Read32(heap + bhSpare)
+	mem.Write32(heap+bhSpare, mem.Read32(tr+trNext))
+	mem.Write32(heap+bhSpareN, mem.Read32(heap+bhSpareN)-1)
+	mem.Write32(tr+trNext, 0)
+	return tr
 }
 
-// blockAllocAt takes at..at+size-1 out of free track t, splitting off what's
-// left before and after; it fails without the spare tracks for that.
-func (m *Machine) blockAllocAt(heap, t, at, size uint32) bool {
+// relink points the neighbours of s (and the heap's ends) at s.
+func (m *Machine) relink(heap uint32, s span) {
 	mem := m.Mem
-	start, end := mem.Read32(t+trkStart), mem.Read32(t+trkEnd)
-	prefix, suffix := at-start, end+1-(at+size)
+	if s.prev == 0 {
+		mem.Write32(heap+bhFirst, s.addr)
+	} else {
+		mem.Write32(s.prev+trNext, s.addr)
+	}
+	if s.next == 0 {
+		mem.Write32(heap+bhLast, s.addr)
+	} else {
+		mem.Write32(s.next+trPrev, s.addr)
+	}
+}
+
+// carve marks [at, at+size) of the free span s as used. The pieces left on
+// either side become free spans of their own; without enough spare tracks
+// for them nothing changes and carve fails. Carved memory is zeroed.
+func (m *Machine) carve(heap uint32, s span, at, size uint32) bool {
+	front := at > s.start
+	back := at+size-1 < s.last
 	need := uint32(0)
-	if prefix > 0 {
+	if front {
 		need++
 	}
-	if suffix > 0 {
+	if back {
 		need++
 	}
-	if mem.Read32(heap+blkSpareLeft) < need {
+	if m.Mem.Read32(heap+bhSpareN) < need {
 		return false
 	}
-	prev := mem.Read32(t + trkPrev)
-	if prefix > 0 {
-		p := m.blockTakeSpare(heap)
-		mem.Write32(p+trkFree, 1)
-		mem.Write32(p+trkStart, start)
-		mem.Write32(p+trkEnd, at-1)
-		if mem.Read32(heap+blkHeadTrack) == t {
-			mem.Write32(heap+blkHeadTrack, p)
-		}
-		if prev != 0 {
-			mem.Write32(prev+trkNext, p)
-		}
-		mem.Write32(p+trkNext, t)
-		mem.Write32(p+trkPrev, prev)
-		prev = p
+	used := s
+	used.start, used.last, used.free = at, at+size-1, false
+	if front {
+		f := span{addr: m.takeTrack(heap), start: s.start, last: at - 1, free: true, prev: s.prev, next: used.addr}
+		m.storeSpan(f)
+		m.relink(heap, f)
+		used.prev = f.addr
 	}
-	mem.Write32(t+trkFree, 0)
-	mem.Write32(t+trkStart, at)
-	mem.Write32(t+trkEnd, at+size-1)
-	mem.Write32(t+trkPrev, prev)
-	if suffix > 0 {
-		s := m.blockTakeSpare(heap)
-		next := mem.Read32(t + trkNext)
-		mem.Write32(s+trkFree, 1)
-		mem.Write32(s+trkStart, at+size)
-		mem.Write32(s+trkEnd, end)
-		mem.Write32(s+trkPrev, t)
-		mem.Write32(s+trkNext, next)
-		if mem.Read32(heap+blkTailTrack) == t {
-			mem.Write32(heap+blkTailTrack, s)
-		}
-		if next != 0 {
-			mem.Write32(next+trkPrev, s)
-		}
-		mem.Write32(t+trkNext, s)
+	if back {
+		b := span{addr: m.takeTrack(heap), start: at + size, last: s.last, free: true, prev: used.addr, next: s.next}
+		m.storeSpan(b)
+		m.relink(heap, b)
+		used.next = b.addr
 	}
-	mem.Fill(at, 0, size)
+	m.storeSpan(used)
+	m.relink(heap, used)
+	m.Mem.Fill(at, 0, size)
 	return true
 }
 
-// blockAlloc is MEMAllocFromBlockHeapEx: a negative alignment allocates from
-// the back.
+// blockAlloc is MEMAllocFromBlockHeapEx; a negative alignment searches
+// from the top of the range down. The first free span that fits is used.
 func (m *Machine) blockAlloc(heap, size uint32, align int32) uint32 {
-	mem := m.Mem
-	if !m.isBlockHeap(heap) || size == 0 {
+	if size == 0 || !m.isBlockHeap(heap) {
 		return 0
 	}
-	if align == 0 {
-		align = 4
+	down := align < 0
+	a := uint64(align)
+	switch {
+	case align == 0:
+		a = 4
+	case down:
+		a = uint64(-int64(align))
 	}
-	fromTail := align < 0
-	if fromTail {
-		align = -align
+	tr := m.Mem.Read32(heap + bhFirst)
+	if down {
+		tr = m.Mem.Read32(heap + bhLast)
 	}
-	al := uint64(align)
-	t := mem.Read32(heap + blkHeadTrack)
-	if fromTail {
-		t = mem.Read32(heap + blkTailTrack)
-	}
-	for t != 0 {
-		if mem.Read32(t+trkFree) != 0 {
-			start, end := uint64(mem.Read32(t+trkStart)), uint64(mem.Read32(t+trkEnd))+1
-			if !fromTail {
-				if a := (start + al - 1) &^ (al - 1); a < end && end-a >= uint64(size) {
-					if m.blockAllocAt(heap, t, uint32(a), size) {
-						return uint32(a)
-					}
-					return 0
+	for tr != 0 {
+		s := m.loadSpan(tr)
+		if s.free {
+			lo, hi := uint64(s.start), uint64(s.last)+1
+			var at uint64
+			fits := false
+			if down {
+				if hi >= uint64(size) {
+					at = (hi - uint64(size)) &^ (a - 1)
+					fits = at >= lo
 				}
-			} else if end >= uint64(size) {
-				if a := (end - uint64(size)) &^ (al - 1); a >= start {
-					if m.blockAllocAt(heap, t, uint32(a), size) {
-						return uint32(a)
-					}
-					return 0
+			} else {
+				at = roundUp64(lo, a)
+				fits = at < hi && hi-at >= uint64(size)
+			}
+			if fits {
+				if m.carve(heap, s, uint32(at), size) {
+					return uint32(at)
 				}
+				return 0
 			}
 		}
-		if fromTail {
-			t = mem.Read32(t + trkPrev)
+		if down {
+			tr = s.prev
 		} else {
-			t = mem.Read32(t + trkNext)
+			tr = s.next
 		}
 	}
 	return 0
 }
 
-// blockAllocFixed is MEMAllocFromBlockHeapAt: exactly at..at+size-1.
-func (m *Machine) blockAllocFixed(heap, at, size uint32) uint32 {
-	mem := m.Mem
-	if !m.isBlockHeap(heap) || size == 0 {
+// blockAllocAt is MEMAllocFromBlockHeapAt: exactly [at, at+size).
+func (m *Machine) blockAllocAt(heap, at, size uint32) uint32 {
+	if size == 0 || !m.isBlockHeap(heap) {
 		return 0
 	}
-	for t := mem.Read32(heap + blkHeadTrack); t != 0; t = mem.Read32(t + trkNext) {
-		start, end := mem.Read32(t+trkStart), mem.Read32(t+trkEnd)
-		if at < start || at > end {
-			continue
-		}
-		if mem.Read32(t+trkFree) == 0 || uint64(at)+uint64(size)-1 > uint64(end) {
-			return 0
-		}
-		if m.blockAllocAt(heap, t, at, size) {
+	for tr := m.Mem.Read32(heap + bhFirst); tr != 0; {
+		s := m.loadSpan(tr)
+		if at >= s.start && at <= s.last {
+			if !s.free || uint64(at)+uint64(size)-1 > uint64(s.last) || !m.carve(heap, s, at, size) {
+				return 0
+			}
 			return at
 		}
-		return 0
+		tr = s.next
 	}
 	return 0
 }
 
-func (m *Machine) blockFind(heap, a uint32) uint32 {
+// spanAt finds the span starting exactly at p.
+func (m *Machine) spanAt(heap, p uint32) (span, bool) {
 	mem := m.Mem
-	if a < mem.Read32(heap+heapStart) || a > mem.Read32(heap+heapEnd) {
-		return 0
+	if p < mem.Read32(heap+hhFirst) || p > mem.Read32(heap+hhLimit) {
+		return span{}, false
 	}
-	for t := mem.Read32(heap + blkHeadTrack); t != 0; t = mem.Read32(t + trkNext) {
-		if mem.Read32(t+trkStart) == a {
-			return t
+	for tr := mem.Read32(heap + bhFirst); tr != 0; {
+		s := m.loadSpan(tr)
+		if s.start == p {
+			return s, true
 		}
+		tr = s.next
 	}
-	return 0
+	return span{}, false
 }
 
-// blockFree is MEMFreeToBlockHeap: the span is merged with free neighbours.
-func (m *Machine) blockFree(heap, a uint32) {
-	mem := m.Mem
+// absorb merges span b (which follows a) into a and recycles b's record.
+func (m *Machine) absorb(heap uint32, a, b span) span {
+	a.last, a.next = b.last, b.next
+	m.storeSpan(a)
+	m.relink(heap, a)
+	m.spareTrack(heap, b.addr)
+	return a
+}
+
+// blockFree is MEMFreeToBlockHeap: the span becomes free and joins any free
+// neighbour.
+func (m *Machine) blockFree(heap, p uint32) {
 	if !m.isBlockHeap(heap) {
 		return
 	}
-	t := m.blockFind(heap, a)
-	if t == 0 || mem.Read32(t+trkFree) != 0 {
+	s, ok := m.spanAt(heap, p)
+	if !ok || s.free {
 		return
 	}
-	mem.Write32(t+trkFree, 1)
-	if prev := mem.Read32(t + trkPrev); prev != 0 && mem.Read32(prev+trkFree) != 0 {
-		next := mem.Read32(t + trkNext)
-		mem.Write32(prev+trkEnd, mem.Read32(t+trkEnd))
-		mem.Write32(prev+trkNext, next)
-		if next != 0 {
-			mem.Write32(next+trkPrev, prev)
+	s.free = true
+	m.storeSpan(s)
+	if s.prev != 0 {
+		if before := m.loadSpan(s.prev); before.free {
+			s = m.absorb(heap, before, s)
 		}
-		if mem.Read32(heap+blkTailTrack) == t {
-			mem.Write32(heap+blkTailTrack, prev)
-		}
-		m.blockReleaseSpare(heap, t)
-		t = prev
 	}
-	if next := mem.Read32(t + trkNext); next != 0 && mem.Read32(next+trkFree) != 0 {
-		after := mem.Read32(next + trkNext)
-		mem.Write32(t+trkEnd, mem.Read32(next+trkEnd))
-		mem.Write32(t+trkNext, after)
-		if after != 0 {
-			mem.Write32(after+trkPrev, t)
+	if s.next != 0 {
+		if after := m.loadSpan(s.next); after.free {
+			m.absorb(heap, s, after)
 		}
-		if mem.Read32(heap+blkTailTrack) == next {
-			mem.Write32(heap+blkTailTrack, t)
-		}
-		m.blockReleaseSpare(heap, next)
 	}
 }
 
-func (m *Machine) blockAllocatable(heap uint32, align int32) uint32 {
-	mem := m.Mem
-	if align < 0 {
-		align = -align
-	} else if align == 0 {
-		align = 4
+// blockLargest is MEMGetAllocatableSizeForBlockHeapEx.
+func (m *Machine) blockLargest(heap uint32, align int32) uint32 {
+	a := uint64(4)
+	if align > 0 {
+		a = uint64(align)
+	} else if align < 0 {
+		a = uint64(-int64(align))
 	}
-	al := uint64(align)
 	var best uint32
-	for t := mem.Read32(heap + blkHeadTrack); t != 0; t = mem.Read32(t + trkNext) {
-		if mem.Read32(t+trkFree) == 0 {
-			continue
+	for tr := m.Mem.Read32(heap + bhFirst); tr != 0; {
+		s := m.loadSpan(tr)
+		if s.free {
+			at := (uint64(s.start) + a - 1) / a * a
+			if at <= uint64(s.last) {
+				best = max(best, uint32(uint64(s.last)+1-at))
+			}
 		}
-		start, end := uint64(mem.Read32(t+trkStart)), uint64(mem.Read32(t+trkEnd))
-		if a := (start + al - 1) / al * al; a <= end {
-			best = max(best, uint32(end+1-a))
-		}
+		tr = s.next
 	}
 	return best
 }
 
-func (m *Machine) blockTotalFree(heap uint32) uint32 {
-	mem := m.Mem
+// blockFreeTotal is MEMGetTotalFreeSizeForBlockHeap.
+func (m *Machine) blockFreeTotal(heap uint32) uint32 {
 	var n uint32
-	for t := mem.Read32(heap + blkHeadTrack); t != 0; t = mem.Read32(t + trkNext) {
-		if mem.Read32(t+trkFree) != 0 {
-			n += mem.Read32(t+trkEnd) - mem.Read32(t+trkStart) + 1
+	for tr := m.Mem.Read32(heap + bhFirst); tr != 0; {
+		s := m.loadSpan(tr)
+		if s.free {
+			n += s.size()
 		}
+		tr = s.next
 	}
 	return n
 }
 
 func init() {
 	c := "coreinit"
-	blockHeap := func(fn func(m *Machine, cpu *CPU, heap uint32)) hleFunc {
+	onBlock := func(fn func(m *Machine, cpu *CPU, heap uint32)) hleFunc {
 		return func(m *Machine, cpu *CPU, t *Thread) {
-			if h := arg(cpu, 0); m.isBlockHeap(h) {
-				fn(m, cpu, h)
+			heap := arg(cpu, 0)
+			if !m.isBlockHeap(heap) {
+				ret(cpu, 0)
 				return
 			}
-			ret(cpu, 0)
+			fn(m, cpu, heap)
 		}
 	}
 
-	// MEMInitBlockHeap(heap, start, end, track memory, its size, flags)
 	reg(c, "MEMInitBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.initBlockHeap(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3), arg(cpu, 4), arg(cpu, 5)))
 	})
-	reg(c, "MEMDestroyBlockHeap", blockHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		m.memDestroyHeapBase(heap)
-		m.Mem.Fill(heap, 0, blkHeapSize)
+	reg(c, "MEMDestroyBlockHeap", onBlock(func(m *Machine, cpu *CPU, heap uint32) {
+		m.heapUnlink(heap)
+		m.Mem.Fill(heap, 0, bhHeaderLen)
 		ret(cpu, heap)
 	}))
 	reg(c, "MEMAddBlockHeapTracking", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, uint32(m.blockAddTracking(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2))))
+		ret(cpu, uint32(m.addBlockTracks(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2))))
 	})
-	reg(c, "MEMGetTrackingLeftInBlockHeap", blockHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, m.Mem.Read32(heap+blkSpareLeft))
+	reg(c, "MEMGetTrackingLeftInBlockHeap", onBlock(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, m.Mem.Read32(heap+bhSpareN))
 	}))
 	reg(c, "MEMAllocFromBlockHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.blockAlloc(arg(cpu, 0), arg(cpu, 1), int32(arg(cpu, 2))))
 	})
 	reg(c, "MEMAllocFromBlockHeapAt", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.blockAllocFixed(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)))
+		ret(cpu, m.blockAllocAt(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)))
 	})
 	reg(c, "MEMFreeToBlockHeap", func(m *Machine, cpu *CPU, t *Thread) { m.blockFree(arg(cpu, 0), arg(cpu, 1)) })
-	reg(c, "MEMGetAllocatableSizeForBlockHeapEx", blockHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, m.blockAllocatable(heap, int32(arg(cpu, 1))))
+	reg(c, "MEMGetAllocatableSizeForBlockHeapEx", onBlock(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, m.blockLargest(heap, int32(arg(cpu, 1))))
 	}))
-	reg(c, "MEMGetTotalFreeSizeForBlockHeap", blockHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, m.blockTotalFree(heap))
+	reg(c, "MEMGetTotalFreeSizeForBlockHeap", onBlock(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, m.blockFreeTotal(heap))
 	}))
-	reg(c, "MEMGetSizeForMBlockBlockHeap", blockHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		if t := m.blockFind(heap, arg(cpu, 1)); t != 0 && m.Mem.Read32(t+trkFree) == 0 {
-			ret(cpu, m.Mem.Read32(t+trkEnd)-m.Mem.Read32(t+trkStart)+1)
+	reg(c, "MEMGetSizeForMBlockBlockHeap", onBlock(func(m *Machine, cpu *CPU, heap uint32) {
+		s, ok := m.spanAt(heap, arg(cpu, 1))
+		if !ok || s.free {
+			ret(cpu, 0)
 			return
 		}
-		ret(cpu, 0)
+		ret(cpu, s.size())
 	}))
 
 	reg(c, "MEMInitAllocatorForBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		m.initAllocator(arg(cpu, 0), "Block", arg(cpu, 1), arg(cpu, 2))
+		m.setAllocator(arg(cpu, 0), "Block", arg(cpu, 1), arg(cpu, 2))
 	})
 	reg(c, "__RPAllocatorBlockAlloc", func(m *Machine, cpu *CPU, t *Thread) {
-		a := arg(cpu, 0)
-		ret(cpu, m.blockAlloc(m.Mem.Read32(a+allocatorHeap), arg(cpu, 1), int32(m.Mem.Read32(a+allocatorParam))))
+		heap, align := m.allocatorHeapArg(arg(cpu, 0))
+		ret(cpu, m.blockAlloc(heap, arg(cpu, 1), align))
 	})
 	reg(c, "__RPAllocatorBlockFree", func(m *Machine, cpu *CPU, t *Thread) {
-		m.blockFree(m.Mem.Read32(arg(cpu, 0)+allocatorHeap), arg(cpu, 1))
+		heap, _ := m.allocatorHeapArg(arg(cpu, 0))
+		m.blockFree(heap, arg(cpu, 1))
 	})
 }

@@ -1,92 +1,89 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/coreinit/
-// coreinit_MEM_UnitHeap.cpp and coreinit_MEM_UnitHeap.h, rewritten in Go for
-// RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// Unit heaps: blocks of one size, the free ones linked through their first
-// word.
+// Unit heaps (MEMUnitHeap): a pool of equal-sized blocks. Free blocks form
+// a singly linked stack threaded through each block's first word.
 
+// MEMUnitHeap fields after the common header
 const (
-	// MEMUnitHeap, after MEMHeapBase
-	unitFirstFree = 0x40
-	unitBlockSize = 0x44
-	unitHeapSize  = 0x48
+	uhFreeTop = 0x40 // the free block handed out next, or 0
+	uhUnit    = 0x44 // block size, alignment included
+	uhSize    = 0x48
 )
 
-func (m *Machine) isUnitHeap(heap uint32) bool {
-	return heap != 0 && m.Mem.Read32(heap+heapMagic) == heapMagicUnit
+func (m *Machine) isUnitHeap(heap uint32) bool { return m.heapTagIs(heap, tagUnitHeap) }
+
+// unitStride is a block size rounded up to the alignment (at least 4).
+func unitStride(unit, align uint32) (uint32, uint32) {
+	if align < 4 {
+		align = 4
+	}
+	return (unit + align - 1) &^ (align - 1), align
 }
 
 // createUnitHeap is MEMCreateUnitHeapEx.
-func (m *Machine) createUnitHeap(start, size, block, align, flags uint32) uint32 {
-	if start == 0 {
+func (m *Machine) createUnitHeap(start, size, unit, align, options uint32) uint32 {
+	heap, end, ok := heapSpan(start, size, 0)
+	if !ok {
 		return 0
 	}
-	align = max(align, 4)
-	lo := (uint64(start) + 3) &^ 3
-	hi := (uint64(start) + uint64(size)) &^ 3
-	if lo > hi {
+	stride, align := unitStride(unit, align)
+	first := roundUp64(uint64(heap)+uhSize, uint64(align))
+	if stride == 0 || first > uint64(end) {
 		return 0
 	}
-	first := (lo + unitHeapSize + uint64(align) - 1) &^ (uint64(align) - 1)
-	if first > hi {
+	count := (uint64(end) - first) / uint64(stride)
+	if count == 0 {
 		return 0
 	}
-	block = (block + align - 1) &^ (align - 1)
-	if block == 0 {
-		return 0
-	}
-	n := uint32((hi - first) / uint64(block))
-	if n == 0 {
-		return 0
-	}
-	heap, a := uint32(lo), uint32(first)
-	m.memInitHeapBase(heap, heapMagicUnit, a, a+n*block, flags)
+	base := uint32(first)
+	limit := base + uint32(count)*stride
+	m.heapHeaderInit(heap, tagUnitHeap, base, limit, options)
 	mem := m.Mem
-	mem.Fill(heap+heapBaseSize, 0, unitHeapSize-heapBaseSize)
-	mem.Write32(heap+unitFirstFree, a)
-	mem.Write32(heap+unitBlockSize, block)
-	for i := uint32(0); i < n-1; i++ {
-		mem.Write32(a+i*block, a+(i+1)*block)
+	mem.Write32(heap+uhFreeTop, base)
+	mem.Write32(heap+uhUnit, stride)
+	// chain every block to the one after it; the last ends the chain
+	for b := base; b < limit; b += stride {
+		next := b + stride
+		if next >= limit {
+			next = 0
+		}
+		mem.Write32(b, next)
 	}
-	mem.Write32(a+(n-1)*block, 0)
 	return heap
 }
 
 func (m *Machine) unitAlloc(heap uint32) uint32 {
-	mem := m.Mem
 	if !m.isUnitHeap(heap) {
 		return 0
 	}
-	b := mem.Read32(heap + unitFirstFree)
+	mem := m.Mem
+	b := mem.Read32(heap + uhFreeTop)
 	if b == 0 {
 		return 0
 	}
-	mem.Write32(heap+unitFirstFree, mem.Read32(b))
-	size := mem.Read32(heap + unitBlockSize)
-	if f := m.heapFlagsOf(heap); f&heapOptClear != 0 {
-		mem.Fill(b, 0, size)
-	} else if f&heapOptFill != 0 {
-		m.heapFill(b, size, fillOnAlloc)
+	mem.Write32(heap+uhFreeTop, mem.Read32(b))
+	n := mem.Read32(heap + uhUnit)
+	switch opts := m.heapOptions(heap); {
+	case opts&memZeroAlloc != 0:
+		mem.Fill(b, 0, n)
+	case opts&memDebugFill != 0:
+		m.heapMark(b, n, markOnAlloc)
 	}
 	return b
 }
 
 func (m *Machine) unitFree(heap, p uint32) {
-	mem := m.Mem
-	if !m.isUnitHeap(heap) || p == 0 {
+	if p == 0 || !m.isUnitHeap(heap) {
 		return
 	}
-	if m.heapFlagsOf(heap)&heapOptFill != 0 {
-		m.heapFill(p, mem.Read32(heap+unitBlockSize), fillOnFree)
+	mem := m.Mem
+	if m.heapOptions(heap)&memDebugFill != 0 {
+		m.heapMark(p, mem.Read32(heap+uhUnit), markOnFree)
 	}
-	mem.Write32(p, mem.Read32(heap+unitFirstFree))
-	mem.Write32(heap+unitFirstFree, p)
+	mem.Write32(p, mem.Read32(heap+uhFreeTop))
+	mem.Write32(heap+uhFreeTop, p)
 }
 
 func init() {
@@ -100,18 +97,18 @@ func init() {
 			ret(cpu, 0)
 			return
 		}
-		m.memDestroyHeapBase(heap)
+		m.heapUnlink(heap)
 		ret(cpu, heap)
 	})
+	// (unit size, count, alignment): bytes a heap of count blocks needs
 	reg(c, "MEMCalcHeapSizeForUnitHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		block, n, align := arg(cpu, 0), arg(cpu, 1), max(arg(cpu, 2), 4)
-		block = (block + align - 1) &^ (align - 1)
-		ret(cpu, n*block+align-4+unitHeapSize)
+		stride, align := unitStride(arg(cpu, 0), arg(cpu, 2))
+		ret(cpu, uhSize+(align-4)+arg(cpu, 1)*stride)
 	})
 	reg(c, "MEMCountFreeBlockForUnitHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		var n uint32
-		if heap := arg(cpu, 0); m.isUnitHeap(heap) {
-			for b := m.Mem.Read32(heap + unitFirstFree); b != 0; b = m.Mem.Read32(b) {
+		heap, n := arg(cpu, 0), uint32(0)
+		if m.isUnitHeap(heap) {
+			for b := m.Mem.Read32(heap + uhFreeTop); b != 0; b = m.Mem.Read32(b) {
 				n++
 			}
 		}
@@ -121,12 +118,14 @@ func init() {
 	reg(c, "MEMFreeToUnitHeap", func(m *Machine, cpu *CPU, t *Thread) { m.unitFree(arg(cpu, 0), arg(cpu, 1)) })
 
 	reg(c, "MEMInitAllocatorForUnitHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		m.initAllocator(arg(cpu, 0), "Unit", arg(cpu, 1), 0)
+		m.setAllocator(arg(cpu, 0), "Unit", arg(cpu, 1), 0)
 	})
 	reg(c, "__RPAllocatorUnitAlloc", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.unitAlloc(m.Mem.Read32(arg(cpu, 0)+allocatorHeap)))
+		heap, _ := m.allocatorHeapArg(arg(cpu, 0))
+		ret(cpu, m.unitAlloc(heap))
 	})
 	reg(c, "__RPAllocatorUnitFree", func(m *Machine, cpu *CPU, t *Thread) {
-		m.unitFree(m.Mem.Read32(arg(cpu, 0)+allocatorHeap), arg(cpu, 1))
+		heap, _ := m.allocatorHeapArg(arg(cpu, 0))
+		m.unitFree(heap, arg(cpu, 1))
 	})
 }

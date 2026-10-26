@@ -1,464 +1,525 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/coreinit/
-// coreinit_MEM.cpp, coreinit_MEM.h, coreinit_SysHeap.cpp, coreinit_Memory.cpp
-// and coreinit_Init.cpp, rewritten in Go for RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// Memory heaps: what every kind of heap shares (coreinit's MEM* functions).
+// coreinit's MEM heaps: the part every kind of heap has in common, the
+// intrusive lists heaps are kept in, the base heaps, the system heap
+// RetroPixels allocates from, and allocators.
 //
-// A heap's header lives at its start in the program's memory, laid out as in
-// Cafe OS, since programs read and walk them. Every heap is linked into a
-// list: the list of the heap that contains it (each heap has a list of the
-// heaps made inside it), or, at the top, one of three lists by memory area
-// (MEM1, the foreground bucket, everything else).
+// Programs look inside heaps, so a heap lives in the program's memory with
+// the header Cafe OS gives it (the SDK's MEMHeapHeader), followed by the
+// fields of its kind. Each heap sits in a list: the child list of the heap
+// whose memory holds it, or, for a heap that isn't inside another one, one
+// of three lists by memory area (MEM1, the foreground bucket, the rest).
 //
-// The program's base heaps are a frame heap over MEM1, a frame heap over the
-// foreground bucket's free area and an expanded heap over the rest of MEM2
-// (the default heap). A program that exports __preinit_user gets to replace
-// them before anything else runs.
+// At start-up a program has three base heaps: a frame heap over MEM1, a
+// frame heap over the free part of the foreground bucket, and an expanded
+// heap over MEM2 after the loaded modules (the default heap). One that
+// exports __preinit_user may swap in heaps of its own before main.
 
+// heap tags, as they appear in memory
 const (
-	heapMagicUnit  = 0x554e5448 // "UNTH"
-	heapMagicBlock = 0x424c4b48 // "BLKH"
-	heapMagicFrame = 0x46524d48 // "FRMH"
-	heapMagicExp   = 0x45585048 // "EXPH"
-	heapMagicUser  = 0x55535248 // "USRH"
+	tagExpHeap   = 0x45585048 // "EXPH"
+	tagFrmHeap   = 0x46524d48 // "FRMH"
+	tagUnitHeap  = 0x554e5448 // "UNTH"
+	tagBlockHeap = 0x424c4b48 // "BLKH"
+	tagUserHeap  = 0x55535248 // "USRH"
+)
 
-	// MEMHeapBase
-	heapMagic     = 0x00
-	heapLink      = 0x04 // MEMLink in the containing list
-	heapChildList = 0x0c // MEMList of the heaps inside this one
-	heapStart     = 0x18
-	heapEnd       = 0x1c // one past the end
-	heapFlags     = 0x33 // (a byte)
-	heapBaseSize  = 0x34
+// MEMHeapHeader
+const (
+	hhTag      = 0x00
+	hhLink     = 0x04 // where the heap is linked into its list (MEMLink)
+	hhChildren = 0x0c // the heaps made inside this one (MEMList)
+	hhFirst    = 0x18 // the first byte the heap hands out
+	hhLimit    = 0x1c // one past the last
+	hhOptions  = 0x33 // a byte of MEM_HEAP_FLAG_*
+	hhSize     = 0x34
+)
 
-	heapOptClear = 1 << 0 // zero what's allocated
-	heapOptFill  = 1 << 1 // fill on create, alloc and free
-	heapOptLock  = 1 << 2 // thread-safe
+// MEM_HEAP_FLAG_*
+const (
+	memZeroAlloc = 1 << 0 // allocations come back zeroed
+	memDebugFill = 1 << 1 // memory is filled with a marker on create, alloc and free
+	memUseLock   = 1 << 2 // the heap may be used from several threads
+)
 
-	// MEMList: head, tail, u16 count, u16 offset of the MEMLink in objects
-	listHead   = 0x0
-	listTail   = 0x4
-	listCount  = 0x8
-	listOffset = 0xa
-	listSize   = 0xc
+// MEMList is { head, tail, u16 count, u16 offset of the link in each
+// object }; a MEMLink is { prev, next }.
+const (
+	mlHead    = 0x0
+	mlTail    = 0x4
+	mlCount   = 0x8
+	mlLinkOff = 0xa
+	mlBytes   = 0xc
 
-	// MEMLink
-	linkPrev = 0x0
-	linkNext = 0x4
+	lkPrev = 0x0
+	lkNext = 0x4
+)
 
-	// MEMAllocator: funcs { alloc, free }, heap, param1, param2
-	allocatorFuncs = 0x0
-	allocatorHeap  = 0x4
-	allocatorParam = 0x8
+// MEMAllocator: a pointer to its { alloc, free } functions, the heap, and
+// two words for the kind's own use.
+const (
+	maFuncs = 0x0
+	maHeap  = 0x4
+	maArg   = 0x8
+)
 
+// MEMArena values: base heaps are kept per arena.
+const (
 	arenaMEM1    = 0
 	arenaMEM2    = 1
 	arenaFG      = 8
 	arenaCount   = 9
 	arenaInvalid = 9
+)
 
-	fillOnCreate = 0
-	fillOnAlloc  = 1
-	fillOnFree   = 2
+// MEMHeapFillType: which of the three marker values a debug fill uses.
+const (
+	markOnCreate = 0
+	markOnAlloc  = 1
+	markOnFree   = 2
 )
 
 // Heaps is coreinit's heap bookkeeping.
 type Heaps struct {
-	lists       [3]uint32 // MEMLists in the system area: other memory, MEM1, foreground bucket
-	base        [arenaCount]uint32
-	fill        [3]uint32
-	defaultHeap uint32 // what MEMAllocFromDefaultHeap allocates from
-	system      uint32 // OSAllocFromSystem's heap, which RetroPixels uses too
-	mem2Lo      uint32 // start of MEM2 as OSGetMemBound gives it
-	preinit     uint32 // the three handles __preinit_user may change
-	allocFuncs  map[string]uint32
-	started     bool // the base heaps are set (__preinit_user has run)
+	areaLists   [3]uint32 // top-level MEMLists: the rest of memory, MEM1, the foreground bucket
+	arenas      [arenaCount]uint32
+	marks       [3]uint32 // the debug fill values
+	defaultHeap uint32    // the heap behind MEMAllocFromDefaultHeap
+	system      uint32    // the heap behind OSAllocFromSystem (RetroPixels uses it too)
+	mem2Start   uint32    // where the program's part of MEM2 starts
+	preinitArgs uint32    // the three heap handles __preinit_user gets pointers to
+	funcTables  map[string]uint32
+	started     bool // the base heaps are in place (after __preinit_user)
 }
 
 func newHeaps() *Heaps {
-	return &Heaps{fill: [3]uint32{0xc3c3c3c3, 0xf3f3f3f3, 0xd3d3d3d3}, allocFuncs: map[string]uint32{}}
+	h := &Heaps{funcTables: map[string]uint32{}}
+	h.marks = [3]uint32{0xc3c3c3c3, 0xf3f3f3f3, 0xd3d3d3d3}
+	return h
 }
 
-// setup makes the system heap and the default heaps, once the program is
-// loaded (MEM2 starts after its data).
+// setup makes the system heap and the base heaps once the program is loaded
+// (the program's MEM2 starts after the modules' data).
 func (h *Heaps) setup(m *Machine) {
-	l := m.sysAlloc(3*listSize, 4)
-	for i := range h.lists {
-		h.lists[i] = l + uint32(i)*listSize
-		m.memInitList(h.lists[i], heapLink)
+	lists := m.sysAlloc(uint32(len(h.areaLists))*mlBytes, 4)
+	for i := range h.areaLists {
+		h.areaLists[i] = lists + uint32(i)*mlBytes
+		m.list(h.areaLists[i]).init(hhLink)
 	}
-	h.mem2Lo = max((m.dataEnd+0xfff)&^0xfff, DataBase)
+	h.mem2Start = DataBase
+	if top := (m.dataEnd + 0xfff) &^ 0xfff; top > h.mem2Start {
+		h.mem2Start = top
+	}
 	m.initForegroundBucket()
-	h.system = m.createExpHeap(SysHeapBase, SysHeapSize, heapOptLock)
+	h.system = m.createExpHeap(SysHeapBase, SysHeapSize, memUseLock)
 
-	h.preinit = m.sysAlloc(12, 4)
-	a, n := m.memBound(1)
-	m.Mem.Write32(h.preinit, m.createFrmHeap(a, n, 0))
-	a, n = m.fgFreeArea()
-	m.Mem.Write32(h.preinit+4, m.createFrmHeap(a, n, 0))
-	a, n = m.memBound(2)
-	h.defaultHeap = m.createExpHeap(a, n, heapOptLock)
-	m.Mem.Write32(h.preinit+8, h.defaultHeap)
+	h.preinitArgs = m.sysAlloc(12, 4)
+	mem1, mem1Size := m.memBound(1)
+	m.Mem.Write32(h.preinitArgs, m.createFrmHeap(mem1, mem1Size, 0))
+	fg, fgSize := m.fgFreeArea()
+	m.Mem.Write32(h.preinitArgs+4, m.createFrmHeap(fg, fgSize, 0))
+	mem2, mem2Size := m.memBound(2)
+	h.defaultHeap = m.createExpHeap(mem2, mem2Size, memUseLock)
+	m.Mem.Write32(h.preinitArgs+8, h.defaultHeap)
 
 	m.dynAlloc = m.thunk("coreinit", "__RPDynLoadAlloc")
 	m.dynFree = m.thunk("coreinit", "__RPDynLoadFree")
 }
 
-// startHeaps runs the program's __preinit_user, if it has one, then makes
-// the heaps it left the base heaps, and allocates once through the loader's
-// allocator (Watch Dogs sets up its malloc then). It returns to cpu.LR.
+// startHeaps calls the program's __preinit_user (when it has one) with
+// pointers to the three base heap handles, makes whatever it left there the
+// base heaps, then allocates and frees once through the loader's allocator
+// (some programs set up their malloc on that first call). It ends by
+// returning to cpu.LR.
 func (m *Machine) startHeaps(cpu *CPU, t *Thread) {
 	h := m.heaps
 	h.started = true
-	dummy := func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
-		p := h.preinit
-		for i, arena := range []uint32{arenaMEM1, arenaFG, arenaMEM2} {
-			if hp := m.Mem.Read32(p + uint32(i)*4); hp != 0 {
-				m.memSetBaseHeapHandle(arena, hp)
+	slots := h.preinitArgs
+	adopt := func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
+		order := [3]uint32{arenaMEM1, arenaFG, arenaMEM2}
+		for i, arena := range order {
+			if heap := m.Mem.Read32(slots + uint32(i)*4); heap != 0 {
+				m.setBaseHeap(arena, heap)
 			}
 		}
-		out := m.sysAlloc(4, 4)
-		m.callGuest(cpu, t, m.dynAlloc, []uint32{0x500, 4, out}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
-			if a := m.Mem.Read32(out); a != 0 {
-				m.callGuest(cpu, t, m.dynFree, []uint32{a}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) {})
+		result := m.sysAlloc(4, 4)
+		m.callGuest(cpu, t, m.dynAlloc, []uint32{0x500, 4, result}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
+			p := m.Mem.Read32(result)
+			if p == 0 {
+				return
 			}
+			m.callGuest(cpu, t, m.dynFree, []uint32{p}, func(*Machine, *CPU, *Thread, uint32) {})
 		})
 	}
 	main := m.mainModule()
-	if fn, ok := main.Exports["__preinit_user"]; ok {
-		cpu.GPR[2] = main.Info.SDA2Base
-		cpu.GPR[13] = main.Info.SDABase
-		p := h.preinit
-		m.callGuest(cpu, t, fn, []uint32{p, p + 4, p + 8}, dummy)
+	entry, ok := main.Exports["__preinit_user"]
+	if !ok {
+		adopt(m, cpu, t, 0)
 		return
 	}
-	dummy(m, cpu, t, 0)
+	cpu.GPR[2], cpu.GPR[13] = main.Info.SDA2Base, main.Info.SDABase
+	m.callGuest(cpu, t, entry, []uint32{slots, slots + 4, slots + 8}, adopt)
 }
 
 // allocSystem takes memory for RetroPixels' own use from the system heap.
 func (m *Machine) allocSystem(size, align uint32) uint32 {
-	a := m.expAlloc(m.heaps.system, size, int32(align))
-	if a == 0 {
+	p := m.expAlloc(m.heaps.system, size, int32(align))
+	if p == 0 {
 		panic("wiiu: out of system memory")
 	}
-	return a
+	return p
 }
 
-func (m *Machine) freeSystem(a uint32) { m.expFree(m.heaps.system, a) }
+func (m *Machine) freeSystem(p uint32) { m.expFree(m.heaps.system, p) }
 
-// defaultHeapFunc is the function the program's MEMAllocFromDefaultHeap,
-// MEMAllocFromDefaultHeapEx or MEMFreeToDefaultHeap pointer points to (the
-// program may have pointed it at its own allocator).
+// defaultHeapFunc reads the function pointer coreinit exports under name
+// (MEMAllocFromDefaultHeap, MEMAllocFromDefaultHeapEx or
+// MEMFreeToDefaultHeap): the program may have pointed it at its own code.
 func (m *Machine) defaultHeapFunc(name string) uint32 {
 	return m.Mem.Read32(m.dataExport("coreinit", name))
 }
 
-// memBound is OSGetMemBound: MEM1, or MEM2 after the loaded modules.
-func (m *Machine) memBound(typ uint32) (addr, size uint32) {
-	switch typ {
-	case 1:
+// memBound is OSGetMemBound for MEM1 (1) or the program's MEM2 (2).
+func (m *Machine) memBound(which uint32) (addr, size uint32) {
+	if which == 1 {
 		return MEM1Base, MEM1Size
-	case 2:
-		return m.heaps.mem2Lo, MEM2End - m.heaps.mem2Lo
+	}
+	if which == 2 {
+		lo := m.heaps.mem2Start
+		return lo, MEM2End - lo
 	}
 	return 0, 0
 }
 
-// heap base
+// ---- the common heap header ----
 
-func (m *Machine) memInitHeapBase(heap, magic, start, end, flags uint32) {
+// heapHeaderInit writes the common header and links the heap into the list
+// it belongs in.
+func (m *Machine) heapHeaderInit(heap, tag, first, limit, options uint32) {
 	mem := m.Mem
-	mem.Fill(heap, 0, heapBaseSize)
-	mem.Write32(heap+heapMagic, magic)
-	mem.Write32(heap+heapStart, start)
-	mem.Write32(heap+heapEnd, end)
-	mem.Write8(heap+heapFlags, uint8(flags))
-	m.memInitList(heap+heapChildList, heapLink)
-	m.memAppendListObject(m.memListFor(heap), heap)
+	mem.Fill(heap, 0, hhSize)
+	mem.Write32(heap+hhTag, tag)
+	mem.Write32(heap+hhFirst, first)
+	mem.Write32(heap+hhLimit, limit)
+	mem.Write8(heap+hhOptions, uint8(options))
+	m.list(heap + hhChildren).init(hhLink)
+	m.list(m.parentListOf(heap)).append(heap)
 }
 
-func (m *Machine) memDestroyHeapBase(heap uint32) {
-	m.memRemoveListObject(m.memListFor(heap), heap)
+// heapUnlink takes a heap out of its list (destroying it).
+func (m *Machine) heapUnlink(heap uint32) {
+	m.list(m.parentListOf(heap)).remove(heap)
 }
 
-func (m *Machine) heapFlagsOf(heap uint32) uint32 { return uint32(m.Mem.Read8(heap + heapFlags)) }
+func (m *Machine) heapOptions(heap uint32) uint32 { return uint32(m.Mem.Read8(heap + hhOptions)) }
 
-// memFindIn finds the innermost heap in list (or below) whose memory holds a.
-func (m *Machine) memFindIn(list, a uint32) uint32 {
-	for hp := m.memNextListObject(list, 0); hp != 0; hp = m.memNextListObject(list, hp) {
-		if m.Mem.Read32(hp+heapStart) <= a && a < m.Mem.Read32(hp+heapEnd) {
-			if in := m.memFindIn(hp+heapChildList, a); in != 0 {
-				return in
-			}
-			return hp
+func (m *Machine) heapTagIs(heap, tag uint32) bool {
+	return heap != 0 && m.Mem.Read32(heap+hhTag) == tag
+}
+
+// heapMark fills n bytes at p with the debug fill value for kind.
+func (m *Machine) heapMark(p, n, kind uint32) {
+	m.Mem.Fill(p, uint8(m.heaps.marks[kind]), n)
+}
+
+// innermostHeap searches list (and the heaps inside each heap in it) for
+// the deepest heap whose range holds p.
+func (m *Machine) innermostHeap(list, p uint32) uint32 {
+	l := m.list(list)
+	for heap := l.next(0); heap != 0; heap = l.next(heap) {
+		if p < m.Mem.Read32(heap+hhFirst) || p >= m.Mem.Read32(heap+hhLimit) {
+			continue
 		}
+		if inner := m.innermostHeap(heap+hhChildren, p); inner != 0 {
+			return inner
+		}
+		return heap
 	}
 	return 0
 }
 
-// memAreaList is the top-level list for memory at a.
-func (m *Machine) memAreaList(a uint32) uint32 {
+// areaListOf is the top-level list for memory at p.
+func (m *Machine) areaListOf(p uint32) uint32 {
 	h := m.heaps
-	switch {
-	case a >= MEM1Base && a-MEM1Base < MEM1Size:
-		return h.lists[1]
-	case a >= FGBase && a-FGBase < FGSize:
-		return h.lists[2]
+	if p >= MEM1Base && p-MEM1Base < MEM1Size {
+		return h.areaLists[1]
 	}
-	return h.lists[0]
+	if p >= FGBase && p-FGBase < FGSize {
+		return h.areaLists[2]
+	}
+	return h.areaLists[0]
 }
 
-// memListFor is the list a heap at heap belongs in.
-func (m *Machine) memListFor(heap uint32) uint32 {
-	l := m.memAreaList(heap)
-	if in := m.memFindIn(l, heap); in != 0 {
-		return in + heapChildList
+// parentListOf is the list a heap at p goes in: the child list of the heap
+// holding p, or the area's list.
+func (m *Machine) parentListOf(p uint32) uint32 {
+	top := m.areaListOf(p)
+	if outer := m.innermostHeap(top, p); outer != 0 {
+		return outer + hhChildren
 	}
-	return l
+	return top
 }
 
-func (m *Machine) memFindContainHeap(a uint32) uint32 { return m.memFindIn(m.memAreaList(a), a) }
-
-func (m *Machine) memSetBaseHeapHandle(arena, heap uint32) uint32 {
-	h := m.heaps
+// setBaseHeap is MEMSetBaseHeapHandle: an arena's base heap is set once;
+// later calls change nothing and get the one already there.
+func (m *Machine) setBaseHeap(arena, heap uint32) uint32 {
 	if arena >= arenaCount {
 		return 0
 	}
-	if old := h.base[arena]; old != 0 {
-		return old
+	h := m.heaps
+	if cur := h.arenas[arena]; cur != 0 {
+		return cur
 	}
-	h.base[arena] = heap
+	h.arenas[arena] = heap
 	return 0
 }
 
-// heapFill fills n bytes at a with the fill value for when.
-func (m *Machine) heapFill(a, n, when uint32) {
-	m.Mem.Fill(a, uint8(m.heaps.fill[when]), n)
+// ---- MEMList ----
+
+// memList is a view of a MEMList in the program's memory.
+type memList struct {
+	mem  *Memory
+	addr uint32
 }
 
-// lists
+func (m *Machine) list(addr uint32) memList { return memList{m.Mem, addr} }
 
-func (m *Machine) memInitList(l, offset uint32) {
-	mem := m.Mem
-	mem.Write32(l+listHead, 0)
-	mem.Write32(l+listTail, 0)
-	mem.Write16(l+listCount, 0)
-	mem.Write16(l+listOffset, uint16(offset))
+func (l memList) init(linkOffset uint32) {
+	l.mem.Write32(l.addr+mlHead, 0)
+	l.mem.Write32(l.addr+mlTail, 0)
+	l.mem.Write16(l.addr+mlCount, 0)
+	l.mem.Write16(l.addr+mlLinkOff, uint16(linkOffset))
 }
 
-func (m *Machine) memLink(l, obj uint32) uint32 { return obj + uint32(m.Mem.Read16(l+listOffset)) }
+// link is the address of obj's MEMLink.
+func (l memList) link(obj uint32) uint32 { return obj + uint32(l.mem.Read16(l.addr+mlLinkOff)) }
 
-func (m *Machine) memSetSingleObject(l, obj uint32) {
-	mem := m.Mem
-	lk := m.memLink(l, obj)
-	mem.Write32(lk+linkPrev, 0)
-	mem.Write32(lk+linkNext, 0)
-	mem.Write16(l+listCount, mem.Read16(l+listCount)+1)
-	mem.Write32(l+listHead, obj)
-	mem.Write32(l+listTail, obj)
+func (l memList) head() uint32 { return l.mem.Read32(l.addr + mlHead) }
+func (l memList) tail() uint32 { return l.mem.Read32(l.addr + mlTail) }
+
+func (l memList) setLinks(obj, prev, next uint32) {
+	k := l.link(obj)
+	l.mem.Write32(k+lkPrev, prev)
+	l.mem.Write32(k+lkNext, next)
 }
 
-func (m *Machine) memAppendListObject(l, obj uint32) {
-	mem := m.Mem
-	tail := mem.Read32(l + listTail)
-	if mem.Read32(l+listHead) == 0 {
-		m.memSetSingleObject(l, obj)
+func (l memList) addCount(d int) {
+	l.mem.Write16(l.addr+mlCount, uint16(int(l.mem.Read16(l.addr+mlCount))+d))
+}
+
+// only makes obj the one object of an empty list.
+func (l memList) only(obj uint32) {
+	l.setLinks(obj, 0, 0)
+	l.addCount(1)
+	l.mem.Write32(l.addr+mlHead, obj)
+	l.mem.Write32(l.addr+mlTail, obj)
+}
+
+func (l memList) append(obj uint32) {
+	if l.head() == 0 {
+		l.only(obj)
 		return
 	}
-	mem.Write16(l+listCount, mem.Read16(l+listCount)+1)
-	lk := m.memLink(l, obj)
-	mem.Write32(lk+linkPrev, tail)
-	mem.Write32(lk+linkNext, 0)
-	mem.Write32(m.memLink(l, tail)+linkNext, obj)
-	mem.Write32(l+listTail, obj)
+	last := l.tail()
+	l.addCount(1)
+	l.setLinks(obj, last, 0)
+	l.mem.Write32(l.link(last)+lkNext, obj)
+	l.mem.Write32(l.addr+mlTail, obj)
 }
 
-func (m *Machine) memPrependListObject(l, obj uint32) {
-	mem := m.Mem
-	head := mem.Read32(l + listHead)
-	if head == 0 {
-		m.memSetSingleObject(l, obj)
+func (l memList) prepend(obj uint32) {
+	first := l.head()
+	if first == 0 {
+		l.only(obj)
 		return
 	}
-	mem.Write16(l+listCount, mem.Read16(l+listCount)+1)
-	lk := m.memLink(l, obj)
-	mem.Write32(lk+linkPrev, 0)
-	mem.Write32(lk+linkNext, head)
-	mem.Write32(m.memLink(l, head)+linkPrev, obj)
-	mem.Write32(l+listHead, obj)
+	l.addCount(1)
+	l.setLinks(obj, 0, first)
+	l.mem.Write32(l.link(first)+lkPrev, obj)
+	l.mem.Write32(l.addr+mlHead, obj)
 }
 
-// memInsertListObject puts obj before 'before' (at the end if that's 0).
-func (m *Machine) memInsertListObject(l, before, obj uint32) {
-	mem := m.Mem
+// insertBefore puts obj in front of at (at the end when at is 0).
+func (l memList) insertBefore(at, obj uint32) {
+	if at == 0 {
+		l.append(obj)
+		return
+	}
+	before := l.mem.Read32(l.link(at) + lkPrev)
 	if before == 0 {
-		m.memAppendListObject(l, obj)
+		l.prepend(obj)
 		return
 	}
-	prev := mem.Read32(m.memLink(l, before) + linkPrev)
-	if prev == 0 {
-		m.memPrependListObject(l, obj)
-		return
-	}
-	lk := m.memLink(l, obj)
-	mem.Write32(lk+linkPrev, prev)
-	mem.Write32(lk+linkNext, before)
-	mem.Write32(m.memLink(l, prev)+linkNext, obj)
-	mem.Write32(m.memLink(l, before)+linkPrev, obj)
-	mem.Write16(l+listCount, mem.Read16(l+listCount)+1)
+	l.setLinks(obj, before, at)
+	l.mem.Write32(l.link(before)+lkNext, obj)
+	l.mem.Write32(l.link(at)+lkPrev, obj)
+	l.addCount(1)
 }
 
-func (m *Machine) memRemoveListObject(l, obj uint32) {
-	mem := m.Mem
-	lk := m.memLink(l, obj)
-	prev, next := mem.Read32(lk+linkPrev), mem.Read32(lk+linkNext)
-	if prev != 0 {
-		mem.Write32(m.memLink(l, prev)+linkNext, next)
+func (l memList) remove(obj uint32) {
+	k := l.link(obj)
+	before, after := l.mem.Read32(k+lkPrev), l.mem.Read32(k+lkNext)
+	if before == 0 {
+		l.mem.Write32(l.addr+mlHead, after)
 	} else {
-		mem.Write32(l+listHead, next)
+		l.mem.Write32(l.link(before)+lkNext, after)
 	}
-	if next != 0 {
-		mem.Write32(m.memLink(l, next)+linkPrev, prev)
+	if after == 0 {
+		l.mem.Write32(l.addr+mlTail, before)
 	} else {
-		mem.Write32(l+listTail, prev)
+		l.mem.Write32(l.link(after)+lkPrev, before)
 	}
-	mem.Write32(lk+linkPrev, 0)
-	mem.Write32(lk+linkNext, 0)
-	mem.Write16(l+listCount, mem.Read16(l+listCount)-1)
+	l.setLinks(obj, 0, 0)
+	l.addCount(-1)
 }
 
-func (m *Machine) memNextListObject(l, obj uint32) uint32 {
+// next is the object after obj (the first when obj is 0); prev likewise.
+func (l memList) next(obj uint32) uint32 {
 	if obj == 0 {
-		return m.Mem.Read32(l + listHead)
+		return l.head()
 	}
-	return m.Mem.Read32(m.memLink(l, obj) + linkNext)
+	return l.mem.Read32(l.link(obj) + lkNext)
 }
 
-func (m *Machine) memPrevListObject(l, obj uint32) uint32 {
+func (l memList) prev(obj uint32) uint32 {
 	if obj == 0 {
-		return m.Mem.Read32(l + listTail)
+		return l.tail()
 	}
-	return m.Mem.Read32(m.memLink(l, obj) + linkPrev)
+	return l.mem.Read32(l.link(obj) + lkPrev)
 }
 
-// heapAlloc allocates from a heap of any kind, as an allocator would.
+// ---- allocators ----
+
+// heapAlloc allocates from a heap of any kind, the way its allocator would.
 func (m *Machine) heapAlloc(heap, size uint32, align int32) uint32 {
-	switch m.Mem.Read32(heap + heapMagic) {
-	case heapMagicExp:
+	switch m.Mem.Read32(heap + hhTag) {
+	case tagExpHeap:
 		return m.expAlloc(heap, size, align)
-	case heapMagicFrame:
+	case tagFrmHeap:
 		return m.frmAlloc(heap, size, align)
-	case heapMagicUnit:
+	case tagUnitHeap:
 		return m.unitAlloc(heap)
-	case heapMagicBlock:
+	case tagBlockHeap:
 		return m.blockAlloc(heap, size, align)
 	}
 	return 0
 }
 
-// allocatorFuncs is the { alloc, free } pair for allocators of a kind.
-func (m *Machine) allocatorFuncs(kind string) uint32 {
+// allocatorTable is the { alloc, free } function pair shared by the
+// allocators of one kind, made the first time it's needed.
+func (m *Machine) allocatorTable(kind string) uint32 {
 	h := m.heaps
-	if a, ok := h.allocFuncs[kind]; ok {
-		return a
+	if p, ok := h.funcTables[kind]; ok {
+		return p
 	}
-	a := m.sysAlloc(8, 8)
-	m.Mem.Write32(a, m.thunk("coreinit", "__RPAllocator"+kind+"Alloc"))
-	m.Mem.Write32(a+4, m.thunk("coreinit", "__RPAllocator"+kind+"Free"))
-	h.allocFuncs[kind] = a
-	return a
+	p := m.sysAlloc(8, 8)
+	m.Mem.Write32(p, m.thunk("coreinit", "__RPAllocator"+kind+"Alloc"))
+	m.Mem.Write32(p+4, m.thunk("coreinit", "__RPAllocator"+kind+"Free"))
+	h.funcTables[kind] = p
+	return p
 }
 
-func (m *Machine) initAllocator(a uint32, kind string, heap, param uint32) {
-	m.Mem.Write32(a+allocatorFuncs, m.allocatorFuncs(kind))
-	m.Mem.Write32(a+allocatorHeap, heap)
-	m.Mem.Write32(a+allocatorParam, param)
-	m.Mem.Write32(a+allocatorParam+4, 0)
+func (m *Machine) setAllocator(a uint32, kind string, heap, param uint32) {
+	mem := m.Mem
+	mem.Write32(a+maFuncs, m.allocatorTable(kind))
+	mem.Write32(a+maHeap, heap)
+	mem.Write32(a+maArg, param)
+	mem.Write32(a+maArg+4, 0)
+}
+
+// allocatorHeapArg reads the heap and the first parameter of the allocator
+// at a.
+func (m *Machine) allocatorHeapArg(a uint32) (heap uint32, param int32) {
+	return m.Mem.Read32(a + maHeap), int32(m.Mem.Read32(a + maArg))
 }
 
 func init() {
 	c := "coreinit"
 
+	// base heaps and fill values
 	reg(c, "MEMGetBaseHeapHandle", func(m *Machine, cpu *CPU, t *Thread) {
-		if a := arg(cpu, 0); a < arenaCount {
-			ret(cpu, m.heaps.base[a])
-			return
+		var heap uint32
+		if arena := arg(cpu, 0); arena < arenaCount {
+			heap = m.heaps.arenas[arena]
 		}
-		ret(cpu, 0)
+		ret(cpu, heap)
 	})
 	reg(c, "MEMSetBaseHeapHandle", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.memSetBaseHeapHandle(arg(cpu, 0), arg(cpu, 1)))
+		ret(cpu, m.setBaseHeap(arg(cpu, 0), arg(cpu, 1)))
 	})
 	reg(c, "MEMGetArena", func(m *Machine, cpu *CPU, t *Thread) {
-		for a, h := range m.heaps.base {
-			if h != 0 && h == arg(cpu, 0) {
-				ret(cpu, uint32(a))
-				return
-			}
-		}
-		ret(cpu, arenaInvalid)
-	})
-	reg(c, "MEMFindContainHeap", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.memFindContainHeap(arg(cpu, 0))) })
-	reg(c, "MEMFindParentHeap", func(m *Machine, cpu *CPU, t *Thread) {
 		heap := arg(cpu, 0)
-		l := m.memListFor(heap)
-		for _, top := range m.heaps.lists {
-			if l == top {
-				ret(cpu, 0)
-				return
+		arena := uint32(arenaInvalid)
+		for i := uint32(0); heap != 0 && i < arenaCount; i++ {
+			if m.heaps.arenas[i] == heap {
+				arena = i
+				break
 			}
 		}
-		ret(cpu, l-heapChildList)
+		ret(cpu, arena)
+	})
+	reg(c, "MEMFindContainHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		p := arg(cpu, 0)
+		ret(cpu, m.innermostHeap(m.areaListOf(p), p))
+	})
+	reg(c, "MEMFindParentHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		l := m.parentListOf(arg(cpu, 0))
+		parent := l - hhChildren
+		for _, top := range m.heaps.areaLists {
+			if top == l {
+				parent = 0
+			}
+		}
+		ret(cpu, parent)
 	})
 	reg(c, "MEMGetFillValForHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		if i := arg(cpu, 0); i < 3 {
-			ret(cpu, m.heaps.fill[i])
-			return
+		var v uint32
+		if kind := arg(cpu, 0); kind < uint32(len(m.heaps.marks)) {
+			v = m.heaps.marks[kind]
 		}
-		ret(cpu, 0)
+		ret(cpu, v)
 	})
 	reg(c, "MEMSetFillValForHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		if i := arg(cpu, 0); i < 3 {
-			ret(cpu, m.heaps.fill[i])
-			m.heaps.fill[i] = arg(cpu, 1)
+		kind := arg(cpu, 0)
+		if kind >= uint32(len(m.heaps.marks)) {
+			ret(cpu, 0)
 			return
 		}
-		ret(cpu, 0)
+		old := m.heaps.marks[kind]
+		m.heaps.marks[kind] = arg(cpu, 1)
+		ret(cpu, old)
 	})
+	// (memory, size): a heap the program manages itself, header only
 	reg(c, "MEMCreateUserHeapHandle", func(m *Machine, cpu *CPU, t *Thread) {
-		a, size := arg(cpu, 0), arg(cpu, 1)
-		m.memInitHeapBase(a, heapMagicUser, a+0x40, a+size, 0)
-		ret(cpu, a)
+		p, size := arg(cpu, 0), arg(cpu, 1)
+		m.heapHeaderInit(p, tagUserHeap, p+0x40, p+size, 0)
+		ret(cpu, p)
 	})
 	reg(c, "MEMDumpHeap", func(m *Machine, cpu *CPU, t *Thread) {})
 
 	// lists
-	reg(c, "MEMInitList", func(m *Machine, cpu *CPU, t *Thread) { m.memInitList(arg(cpu, 0), arg(cpu, 1)) })
-	reg(c, "MEMAppendListObject", func(m *Machine, cpu *CPU, t *Thread) { m.memAppendListObject(arg(cpu, 0), arg(cpu, 1)) })
-	reg(c, "MEMPrependListObject", func(m *Machine, cpu *CPU, t *Thread) { m.memPrependListObject(arg(cpu, 0), arg(cpu, 1)) })
+	reg(c, "MEMInitList", func(m *Machine, cpu *CPU, t *Thread) { m.list(arg(cpu, 0)).init(arg(cpu, 1)) })
+	reg(c, "MEMAppendListObject", func(m *Machine, cpu *CPU, t *Thread) { m.list(arg(cpu, 0)).append(arg(cpu, 1)) })
+	reg(c, "MEMPrependListObject", func(m *Machine, cpu *CPU, t *Thread) { m.list(arg(cpu, 0)).prepend(arg(cpu, 1)) })
 	reg(c, "MEMInsertListObject", func(m *Machine, cpu *CPU, t *Thread) {
-		m.memInsertListObject(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2))
+		m.list(arg(cpu, 0)).insertBefore(arg(cpu, 1), arg(cpu, 2))
 	})
-	reg(c, "MEMRemoveListObject", func(m *Machine, cpu *CPU, t *Thread) { m.memRemoveListObject(arg(cpu, 0), arg(cpu, 1)) })
-	reg(c, "MEMGetNextListObject", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.memNextListObject(arg(cpu, 0), arg(cpu, 1))) })
-	reg(c, "MEMGetPrevListObject", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.memPrevListObject(arg(cpu, 0), arg(cpu, 1))) })
+	reg(c, "MEMRemoveListObject", func(m *Machine, cpu *CPU, t *Thread) { m.list(arg(cpu, 0)).remove(arg(cpu, 1)) })
+	reg(c, "MEMGetNextListObject", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.list(arg(cpu, 0)).next(arg(cpu, 1))) })
+	reg(c, "MEMGetPrevListObject", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, m.list(arg(cpu, 0)).prev(arg(cpu, 1))) })
 	reg(c, "MEMGetNthListObject", func(m *Machine, cpu *CPU, t *Thread) {
-		l, n := arg(cpu, 0), arg(cpu, 1)
-		o := m.memNextListObject(l, 0)
-		for i := uint32(0); i < n && o != 0; i++ {
-			o = m.memNextListObject(l, o)
+		l, n := m.list(arg(cpu, 0)), arg(cpu, 1)
+		obj := l.head()
+		for ; n > 0 && obj != 0; n-- {
+			obj = l.next(obj)
 		}
-		ret(cpu, o)
+		ret(cpu, obj)
 	})
 
-	// the default heap: the program calls these through the function
-	// pointers of the same names, which it may change
+	// The default heap. Programs reach these through the exported function
+	// pointers of the same names, which they may point elsewhere.
 	reg(c, "MEMAllocFromDefaultHeap", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.expAlloc(m.heaps.defaultHeap, arg(cpu, 0), 0x40))
 	})
@@ -467,14 +528,14 @@ func init() {
 	})
 	reg(c, "MEMFreeToDefaultHeap", func(m *Machine, cpu *CPU, t *Thread) { m.expFree(m.heaps.defaultHeap, arg(cpu, 0)) })
 
-	// the loader's default allocator: (size, align, address out) through
-	// the default heap pointers
+	// The loader's own allocator, (size, align, where to put the address),
+	// which goes through the default heap pointers.
 	reg(c, "__RPDynLoadAlloc", func(m *Machine, cpu *CPU, t *Thread) {
-		out := arg(cpu, 2)
-		m.callGuest(cpu, t, m.defaultHeapFunc("MEMAllocFromDefaultHeapEx"), []uint32{arg(cpu, 0), arg(cpu, 1)},
-			func(m *Machine, cpu *CPU, t *Thread, a uint32) {
+		size, align, out := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
+		m.callGuest(cpu, t, m.defaultHeapFunc("MEMAllocFromDefaultHeapEx"), []uint32{size, align},
+			func(m *Machine, cpu *CPU, t *Thread, p uint32) {
 				if out != 0 {
-					m.Mem.Write32(out, a)
+					m.Mem.Write32(out, p)
 				}
 				ret(cpu, 0)
 			})
@@ -484,49 +545,50 @@ func init() {
 			func(m *Machine, cpu *CPU, t *Thread, _ uint32) { ret(cpu, 0) })
 	})
 
-	// the system heap
+	// the system heap and memory bounds
 	reg(c, "OSAllocFromSystem", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.expAlloc(m.heaps.system, arg(cpu, 0), int32(arg(cpu, 1))))
 	})
 	reg(c, "OSFreeToSystem", func(m *Machine, cpu *CPU, t *Thread) { m.freeSystem(arg(cpu, 0)) })
-
+	// (type, u32 *addr, u32 *size)
 	reg(c, "OSGetMemBound", func(m *Machine, cpu *CPU, t *Thread) {
-		a, n := m.memBound(arg(cpu, 0))
-		if n == 0 {
+		addr, size := m.memBound(arg(cpu, 0))
+		if size == 0 {
 			ret(cpu, 0xffffffff)
 			return
 		}
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, a)
-		}
-		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write32(p, n)
+		for i, v := range [2]uint32{addr, size} {
+			if p := arg(cpu, 1+i); p != 0 {
+				m.Mem.Write32(p, v)
+			}
 		}
 		ret(cpu, 0)
 	})
 
 	// allocators
 	reg(c, "MEMInitAllocatorForDefaultHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		m.initAllocator(arg(cpu, 0), "Default", m.heaps.base[arenaMEM2], 0)
+		m.setAllocator(arg(cpu, 0), "Default", m.heaps.arenas[arenaMEM2], 0)
 	})
-	reg(c, "__RPAllocatorDefaultAlloc", func(m *Machine, cpu *CPU, t *Thread) {
-		cpu.GPR[3] = cpu.GPR[4]
-		cpu.PC = m.defaultHeapFunc("MEMAllocFromDefaultHeap")
-		m.jumped = true
-	})
-	reg(c, "__RPAllocatorDefaultFree", func(m *Machine, cpu *CPU, t *Thread) {
-		cpu.GPR[3] = cpu.GPR[4]
-		cpu.PC = m.defaultHeapFunc("MEMFreeToDefaultHeap")
-		m.jumped = true
-	})
+	// the default allocator's functions get (allocator, size or pointer)
+	// and go on to the default heap pointers with the second argument
+	viaDefault := func(name string) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			cpu.GPR[3] = cpu.GPR[4]
+			cpu.PC = m.defaultHeapFunc(name)
+			m.jumped = true
+		}
+	}
+	reg(c, "__RPAllocatorDefaultAlloc", viaDefault("MEMAllocFromDefaultHeap"))
+	reg(c, "__RPAllocatorDefaultFree", viaDefault("MEMFreeToDefaultHeap"))
 	// MEMAllocFromAllocator(allocator, size) and MEMFreeToAllocator(allocator,
-	// p) go on to the allocator's functions
-	reg(c, "MEMAllocFromAllocator", func(m *Machine, cpu *CPU, t *Thread) {
-		cpu.PC = m.Mem.Read32(m.Mem.Read32(arg(cpu, 0) + allocatorFuncs))
-		m.jumped = true
-	})
-	reg(c, "MEMFreeToAllocator", func(m *Machine, cpu *CPU, t *Thread) {
-		cpu.PC = m.Mem.Read32(m.Mem.Read32(arg(cpu, 0)+allocatorFuncs) + 4)
-		m.jumped = true
-	})
+	// p) jump to the allocator's own functions with the same arguments
+	viaTable := func(slot uint32) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			table := m.Mem.Read32(arg(cpu, 0) + maFuncs)
+			cpu.PC = m.Mem.Read32(table + slot)
+			m.jumped = true
+		}
+	}
+	reg(c, "MEMAllocFromAllocator", viaTable(0))
+	reg(c, "MEMFreeToAllocator", viaTable(4))
 }

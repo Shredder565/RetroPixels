@@ -1,470 +1,485 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/coreinit/
-// coreinit_MEM_ExpHeap.cpp and coreinit_MEM_ExpHeap.h, rewritten in Go for
-// RetroPixels.
+// Original code for RetroPixels. Not derived from Cemu.
 
 package wiiu
 
-// Expanded heaps: malloc-like heaps that allocate from the front or (with a
-// negative alignment) the back. Every block, free or used, starts with a
-// 0x14-byte header; the heap keeps a chain of free blocks in address order
-// and a chain of used blocks in the order they were allocated.
+// Expanded heaps (MEMExpHeap): general-purpose heaps that hand out blocks
+// of any size from the bottom of the heap or, with a negative alignment,
+// from the top. Every block, free or allocated, is preceded by a 0x14-byte
+// header. Free blocks are kept in a list sorted by address; allocated blocks
+// in a list in the order they were made.
 
+// MEMExpHeap fields after the common header
 const (
-	// MEMExpHeap, after MEMHeapBase
-	expFreeChain = 0x40 // { head, tail }
-	expUsedChain = 0x48
-	expGroupID   = 0x50 // u16
-	expFields    = 0x52 // u16: bit 0 alloc mode (0 first fit, 1 nearest size), bit 1 keep alignment gaps as free blocks
-	expHeapSize  = 0x54
+	ehFree  = 0x40 // list of free blocks { first, last }
+	ehUsed  = 0x48 // list of allocated blocks
+	ehGroup = 0x50 // u16: group ID stamped into new blocks
+	ehAttr  = 0x52 // u16: bit 0 best-fit search, bit 1 keep alignment gaps as free blocks
+	ehSize  = 0x54
 
-	expModeNear    = 1
-	expAlignMargin = 2
+	ehBestFit  = 1 << 0
+	ehKeepGaps = 1 << 1
 
-	// a block's header
-	mbFields = 0x00 // bit 31 allocated from the tail, bits 8..30 alignment gap before the header, bits 0..7 group
-	mbSize   = 0x04 // of the data after the header
-	mbPrev   = 0x08
-	mbNext   = 0x0c
-	mbType   = 0x10 // u16
-	mbHeader = 0x14
-
-	mbFree = 0x4652 // "FR"
-	mbUsed = 0x5544 // "UD"
-
-	chainHead = 0
-	chainTail = 4
+	// block lists { first, last }
+	blFirst = 0
+	blLast  = 4
 )
 
-func (m *Machine) mbInit(start, end uint32, typ uint16) uint32 {
-	m.Mem.Fill(start, 0, mbHeader)
-	m.Mem.Write16(start+mbType, typ)
-	m.Mem.Write32(start+mbSize, end-(start+mbHeader))
-	return start
-}
+// block header (MEMExpHeapBlock)
+const (
+	ebAttr = 0x00 // bit 31 from the top, bits 8..30 padding in front of the header, bits 0..7 group
+	ebSize = 0x04 // bytes after the header
+	ebPrev = 0x08
+	ebNext = 0x0c
+	ebTag  = 0x10 // u16
+	ebLen  = 0x14
 
-func (m *Machine) mbEnd(b uint32) uint32 { return b + mbHeader + m.Mem.Read32(b+mbSize) }
+	ebFreeTag = 0x4652 // "FR"
+	ebUsedTag = 0x5544 // "UD"
 
-// mbRegion is all the memory a block takes, its alignment gap included.
-func (m *Machine) mbRegion(b uint32) (start, end uint32) {
-	gap := m.Mem.Read32(b+mbFields) >> 8 & 0x7fffff
-	return b - gap, m.mbEnd(b)
-}
+	ebMinFree = ebLen + 4 // the smallest leftover worth keeping as a free block
+)
 
-// mbRemove takes b out of a chain and returns the block before it.
-func (m *Machine) mbRemove(chain, b uint32) uint32 {
+// ---- block lists ----
+
+func (m *Machine) blkUnlink(list, b uint32) (before uint32) {
 	mem := m.Mem
-	prev, next := mem.Read32(b+mbPrev), mem.Read32(b+mbNext)
-	if prev != 0 {
-		mem.Write32(prev+mbNext, next)
+	before, after := mem.Read32(b+ebPrev), mem.Read32(b+ebNext)
+	if before == 0 {
+		mem.Write32(list+blFirst, after)
 	} else {
-		mem.Write32(chain+chainHead, next)
+		mem.Write32(before+ebNext, after)
 	}
-	if next != 0 {
-		mem.Write32(next+mbPrev, prev)
+	if after == 0 {
+		mem.Write32(list+blLast, before)
 	} else {
-		mem.Write32(chain+chainTail, prev)
+		mem.Write32(after+ebPrev, before)
 	}
-	return prev
+	return before
 }
 
-// mbInsert puts b into a chain after prev (first if prev is 0).
-func (m *Machine) mbInsert(chain, b, prev uint32) uint32 {
+// blkLinkAfter inserts b after `after` (at the front when after is 0).
+func (m *Machine) blkLinkAfter(list, after, b uint32) {
 	mem := m.Mem
-	mem.Write32(b+mbPrev, prev)
-	var next uint32
-	if prev != 0 {
-		next = mem.Read32(prev + mbNext)
-		mem.Write32(prev+mbNext, b)
+	var follow uint32
+	if after == 0 {
+		follow = mem.Read32(list + blFirst)
+		mem.Write32(list+blFirst, b)
 	} else {
-		next = mem.Read32(chain + chainHead)
-		mem.Write32(chain+chainHead, b)
+		follow = mem.Read32(after + ebNext)
+		mem.Write32(after+ebNext, b)
 	}
-	mem.Write32(b+mbNext, next)
-	if next != 0 {
-		mem.Write32(next+mbPrev, b)
+	mem.Write32(b+ebPrev, after)
+	mem.Write32(b+ebNext, follow)
+	if follow == 0 {
+		mem.Write32(list+blLast, b)
 	} else {
-		mem.Write32(chain+chainTail, b)
+		mem.Write32(follow+ebPrev, b)
 	}
-	return b
 }
 
-// expRecycle makes start..end a free block again, merged with the free
-// blocks on either side.
-func (m *Machine) expRecycle(heap, start, end uint32) bool {
+// ---- blocks ----
+
+// newBlock writes a fresh header at hdr for a block whose data runs up to
+// end.
+func (m *Machine) newBlock(hdr, end uint32, tag uint16) uint32 {
 	mem := m.Mem
-	chain := heap + expFreeChain
-	fill := m.heapFlagsOf(heap)&heapOptFill != 0
-	newStart, newEnd := start, end
-	var prev uint32
-	for b := mem.Read32(chain + chainHead); b != 0; b = mem.Read32(b + mbNext) {
-		if b >= start {
-			if b == end {
-				newEnd = m.mbEnd(b)
-				m.mbRemove(chain, b)
-				if fill {
-					m.heapFill(b, mbHeader, fillOnFree)
-				}
-			}
-			break
-		}
-		prev = b
-	}
-	if prev != 0 && m.mbEnd(prev) == start {
-		newStart = prev
-		prev = m.mbRemove(chain, prev)
-	}
-	if newEnd-newStart < mbHeader {
-		return false
-	}
-	if fill {
-		m.heapFill(start, end-start, fillOnFree)
-	}
-	m.mbInsert(chain, m.mbInit(newStart, newEnd, mbFree), prev)
-	return true
+	mem.Fill(hdr, 0, ebLen)
+	mem.Write32(hdr+ebSize, end-hdr-ebLen)
+	mem.Write16(hdr+ebTag, tag)
+	return hdr
 }
 
-// expTake allocates size bytes at at from free block fb.
-func (m *Machine) expTake(heap, fb, at, size uint32, fromTail bool) uint32 {
-	mem := m.Mem
-	chain := heap + expFreeChain
-	fields := uint32(mem.Read16(heap + expFields))
-	flags := m.heapFlagsOf(heap)
+func (m *Machine) blockData(b uint32) uint32 { return b + ebLen }
+func (m *Machine) blockEnd(b uint32) uint32  { return b + ebLen + m.Mem.Read32(b+ebSize) }
 
-	freeStart, _ := m.mbRegion(fb)
-	freeEnd := at - mbHeader
-	restStart, restEnd := at+size, m.mbEnd(fb)
-
-	prev := m.mbRemove(chain, fb)
-	if freeEnd-freeStart >= 0x18 && (fromTail || fields&expAlignMargin != 0) {
-		prev = m.mbInsert(chain, m.mbInit(freeStart, freeEnd, mbFree), prev)
-	} else {
-		freeEnd = freeStart
-	}
-	if restEnd-restStart >= 0x18 && (!fromTail || fields&expAlignMargin != 0) {
-		m.mbInsert(chain, m.mbInit(restStart, restEnd, mbFree), prev)
-	} else {
-		restStart = restEnd
-	}
-
-	if flags&heapOptClear != 0 {
-		mem.Fill(freeEnd, 0, restStart-freeEnd)
-	} else if flags&heapOptFill != 0 {
-		m.heapFill(freeEnd, restStart-freeEnd, fillOnAlloc)
-	}
-
-	b := m.mbInit(at-mbHeader, restStart, mbUsed)
-	f := (b-freeEnd)&0x7fffff<<8 | uint32(mem.Read16(heap+expGroupID))&0xff
-	if fromTail {
-		f |= 1 << 31
-	}
-	mem.Write32(b+mbFields, f)
-	m.mbInsert(heap+expUsedChain, b, mem.Read32(heap+expUsedChain+chainTail))
-	return at
+// blockFootprint is all the memory the block at b occupies, including the
+// padding recorded in front of its header.
+func (m *Machine) blockFootprint(b uint32) (lo, hi uint32) {
+	pad := m.Mem.Read32(b+ebAttr) >> 8 & 0x7fffff
+	return b - pad, m.blockEnd(b)
 }
 
-func (m *Machine) expAllocFromTail(heap, size, align uint32) uint32 {
-	mem := m.Mem
-	first := mem.Read16(heap+expFields)&expModeNear == 0
-	var found, at uint32
-	best := uint64(0xffffffff)
-	for b := mem.Read32(heap + expFreeChain + chainTail); b != 0; b = mem.Read32(b + mbPrev) {
-		data := uint64(b + mbHeader)
-		n := uint64(mem.Read32(b + mbSize))
-		if data+n < uint64(size) {
-			continue
-		}
-		a := (data + n - uint64(size)) &^ uint64(align-1)
-		if a < data || best <= n {
-			continue
-		}
-		found, at, best = b, uint32(a), n
-		if first || best == uint64(size) {
-			break
-		}
-	}
-	if found == 0 {
-		return 0
-	}
-	return m.expTake(heap, found, at, size, true)
-}
+// ---- the heap ----
 
-func (m *Machine) expAllocFromHead(heap, size, align uint32) uint32 {
-	mem := m.Mem
-	first := mem.Read16(heap+expFields)&expModeNear == 0
-	var found, at uint32
-	best := uint64(0xffffffff)
-	for b := mem.Read32(heap + expFreeChain + chainHead); b != 0; b = mem.Read32(b + mbNext) {
-		data := uint64(b + mbHeader)
-		a := (data + uint64(align-1)) &^ uint64(align-1)
-		n := uint64(mem.Read32(b + mbSize))
-		if n < a-data+uint64(size) || best <= n {
-			continue
-		}
-		found, at, best = b, uint32(a), n
-		if first || best == uint64(size) {
-			break
-		}
-	}
-	if found == 0 {
-		return 0
-	}
-	return m.expTake(heap, found, at, size, false)
-}
-
-func (m *Machine) isExpHeap(heap uint32) bool {
-	return heap != 0 && m.Mem.Read32(heap+heapMagic) == heapMagicExp
-}
+func (m *Machine) isExpHeap(heap uint32) bool { return m.heapTagIs(heap, tagExpHeap) }
 
 // createExpHeap is MEMCreateExpHeapEx.
-func (m *Machine) createExpHeap(start, size, flags uint32) uint32 {
-	if start == 0 {
+func (m *Machine) createExpHeap(start, size, options uint32) uint32 {
+	heap, end, ok := heapSpan(start, size, ehSize+ebLen+4)
+	if !ok {
 		return 0
 	}
-	lo := (uint64(start) + 3) &^ 3
-	hi := (uint64(start) + uint64(size)) &^ 3
-	if lo > hi || hi-lo < 0x6c {
-		return 0
-	}
-	heap, end := uint32(lo), uint32(hi)
-	m.memInitHeapBase(heap, heapMagicExp, heap+expHeapSize, end, flags)
+	m.heapHeaderInit(heap, tagExpHeap, heap+ehSize, end, options)
 	mem := m.Mem
-	mem.Fill(heap+heapBaseSize, 0, expHeapSize-heapBaseSize)
-	b := m.mbInit(heap+expHeapSize, end, mbFree)
-	mem.Write32(heap+expFreeChain+chainHead, b)
-	mem.Write32(heap+expFreeChain+chainTail, b)
+	mem.Fill(heap+hhSize, 0, ehSize-hhSize)
+	whole := m.newBlock(heap+ehSize, end, ebFreeTag)
+	mem.Write32(heap+ehFree+blFirst, whole)
+	mem.Write32(heap+ehFree+blLast, whole)
 	return heap
 }
 
-// expAlloc is MEMAllocFromExpHeapEx: a negative alignment allocates from the
-// back.
+// giveBack returns [lo, hi) to the free list, joined with any free block
+// that touches it on either side. It reports false (and changes nothing)
+// when the result would be too small to hold a header.
+func (m *Machine) giveBack(heap, lo, hi uint32) bool {
+	mem := m.Mem
+	free := heap + ehFree
+	debug := m.heapOptions(heap)&memDebugFill != 0
+
+	// find the free blocks just below and just above
+	var below, above uint32
+	for b := mem.Read32(free + blFirst); b != 0; b = mem.Read32(b + ebNext) {
+		if b >= lo {
+			above = b
+			break
+		}
+		below = b
+	}
+	newLo, newHi := lo, hi
+	if above != 0 && above == hi {
+		newHi = m.blockEnd(above)
+		m.blkUnlink(free, above)
+		if debug {
+			m.heapMark(above, ebLen, markOnFree)
+		}
+	}
+	after := below
+	if below != 0 && m.blockEnd(below) == lo {
+		newLo = below
+		after = m.blkUnlink(free, below)
+	}
+	if newHi-newLo < ebLen {
+		return false
+	}
+	if debug {
+		m.heapMark(lo, hi-lo, markOnFree)
+	}
+	m.blkLinkAfter(free, after, m.newBlock(newLo, newHi, ebFreeTag))
+	return true
+}
+
+// carveExp allocates size bytes of data at address at out of free block fb.
+func (m *Machine) carveExp(heap, fb, at, size uint32, top bool) uint32 {
+	mem := m.Mem
+	free := heap + ehFree
+	keepGaps := mem.Read16(heap+ehAttr)&ehKeepGaps != 0
+
+	lo, _ := m.blockFootprint(fb)
+	hi := m.blockEnd(fb)
+	hdr := at - ebLen
+	used0, used1 := lo, hi // what the new block will own
+
+	after := m.blkUnlink(free, fb)
+	// what's in front of the header
+	if hdr-lo >= ebMinFree && (top || keepGaps) {
+		m.blkLinkAfter(free, after, m.newBlock(lo, hdr, ebFreeTag))
+		after = lo
+		used0 = hdr
+	}
+	// what's behind the data
+	if tail := at + size; hi-tail >= ebMinFree && (!top || keepGaps) {
+		m.blkLinkAfter(free, after, m.newBlock(tail, hi, ebFreeTag))
+		used1 = tail
+	}
+
+	switch opts := m.heapOptions(heap); {
+	case opts&memZeroAlloc != 0:
+		mem.Fill(used0, 0, used1-used0)
+	case opts&memDebugFill != 0:
+		m.heapMark(used0, used1-used0, markOnAlloc)
+	}
+
+	b := m.newBlock(hdr, used1, ebUsedTag)
+	attr := (hdr-used0)&0x7fffff<<8 | uint32(mem.Read16(heap+ehGroup))&0xff
+	if top {
+		attr |= 1 << 31
+	}
+	mem.Write32(b+ebAttr, attr)
+	used := heap + ehUsed
+	m.blkLinkAfter(used, mem.Read32(used+blLast), b)
+	return at
+}
+
+// fitExp searches the free list for a block that can hold size bytes with
+// the alignment, from the bottom or the top. First fit, or the smallest
+// block that fits when the heap is in best-fit mode.
+func (m *Machine) fitExp(heap, size, align uint32, top bool) (block, at uint32) {
+	mem := m.Mem
+	bestFit := mem.Read16(heap+ehAttr)&ehBestFit != 0
+	a := uint64(align)
+	bestSize := uint64(1) << 32
+	b := mem.Read32(heap + ehFree + blFirst)
+	if top {
+		b = mem.Read32(heap + ehFree + blLast)
+	}
+	for b != 0 {
+		data := uint64(b + ebLen)
+		n := uint64(mem.Read32(b + ebSize))
+		var p uint64
+		ok := false
+		if top {
+			if data+n >= uint64(size) {
+				p = (data + n - uint64(size)) &^ (a - 1)
+				ok = p >= data
+			}
+		} else {
+			p = roundUp64(data, a)
+			ok = p-data+uint64(size) <= n
+		}
+		if ok && n < bestSize {
+			block, at, bestSize = b, uint32(p), n
+			if !bestFit || n == uint64(size) {
+				break
+			}
+		}
+		if top {
+			b = mem.Read32(b + ebPrev)
+		} else {
+			b = mem.Read32(b + ebNext)
+		}
+	}
+	return block, at
+}
+
+// expAlloc is MEMAllocFromExpHeapEx; a negative alignment allocates from
+// the top. A heap of another kind is handed to that kind's allocator.
 func (m *Machine) expAlloc(heap, size uint32, align int32) uint32 {
 	if !m.isExpHeap(heap) {
-		if heap != 0 {
-			return m.heapAlloc(heap, size, align)
+		if heap == 0 {
+			return 0
 		}
-		return 0
+		return m.heapAlloc(heap, size, align)
 	}
 	if align == 0 || size > 0xfffffffc {
 		return 0
 	}
-	if size == 0 {
-		size = 1
+	size = (max(size, 1) + 3) &^ 3
+	top := align < 0
+	a := uint32(align)
+	if top {
+		a = uint32(-int64(align))
 	}
-	size = (size + 3) &^ 3
-	if align < 0 {
-		return m.expAllocFromTail(heap, size, uint32(-align))
+	b, at := m.fitExp(heap, size, a, top)
+	if b == 0 {
+		return 0
 	}
-	return m.expAllocFromHead(heap, size, uint32(align))
+	return m.carveExp(heap, b, at, size, top)
 }
 
-// expUsed reports whether p is a block allocated from heap.
-func (m *Machine) expUsed(heap, p uint32) bool {
+// ownsExp reports whether p is the data of an allocated block of heap.
+func (m *Machine) ownsExp(heap, p uint32) bool {
 	mem := m.Mem
-	if p < mem.Read32(heap+heapStart)+mbHeader || p >= mem.Read32(heap+heapEnd) {
+	if p < mem.Read32(heap+hhFirst)+ebLen || p >= mem.Read32(heap+hhLimit) {
 		return false
 	}
-	return mem.Read16(p-mbHeader+mbType) == mbUsed
+	return mem.Read16(p-ebLen+ebTag) == ebUsedTag
 }
 
 // expFree is MEMFreeToExpHeap.
 func (m *Machine) expFree(heap, p uint32) {
-	if p == 0 || !m.isExpHeap(heap) || !m.expUsed(heap, p) {
+	if p == 0 || !m.isExpHeap(heap) || !m.ownsExp(heap, p) {
 		return
 	}
-	b := p - mbHeader
-	start, end := m.mbRegion(b)
-	m.mbRemove(heap+expUsedChain, b)
-	m.expRecycle(heap, start, end)
+	b := p - ebLen
+	lo, hi := m.blockFootprint(b)
+	m.blkUnlink(heap+ehUsed, b)
+	m.giveBack(heap, lo, hi)
 }
 
-// expResize is MEMResizeForMBlockExpHeap: the block's new size, or 0.
+// expResize is MEMResizeForMBlockExpHeap: the block grows into a free block
+// right behind it, or shrinks and frees its tail. It returns the block's
+// size afterwards, or 0 when it can't grow.
 func (m *Machine) expResize(heap, p, size uint32) uint32 {
-	mem := m.Mem
-	if !m.isExpHeap(heap) || !m.expUsed(heap, p) {
+	if !m.isExpHeap(heap) || !m.ownsExp(heap, p) {
 		return 0
 	}
-	b := p - mbHeader
+	mem := m.Mem
+	b := p - ebLen
 	size = (size + 3) &^ 3
-	old := mem.Read32(b + mbSize)
-	if size == old {
-		return old
+	cur := mem.Read32(b + ebSize)
+	switch {
+	case size == cur:
+		return cur
+	case size < cur:
+		end := m.blockEnd(b)
+		mem.Write32(b+ebSize, size)
+		if !m.giveBack(heap, p+size, end) {
+			mem.Write32(b+ebSize, cur)
+		}
+		return mem.Read32(b + ebSize)
 	}
-	flags := m.heapFlagsOf(heap)
-	chain := heap + expFreeChain
-	if size < old {
-		end := m.mbEnd(b)
-		mem.Write32(b+mbSize, size)
-		if !m.expRecycle(heap, p+size, end) {
-			mem.Write32(b+mbSize, old)
+
+	// growing: the next free block must start right at our end
+	end := m.blockEnd(b)
+	free := heap + ehFree
+	var next uint32
+	for fb := mem.Read32(free + blFirst); fb != 0; fb = mem.Read32(fb + ebNext) {
+		if fb == end {
+			next = fb
+			break
 		}
-		return mem.Read32(b + mbSize)
 	}
-	end := m.mbEnd(b)
-	for fb := mem.Read32(chain + chainHead); fb != 0; fb = mem.Read32(fb + mbNext) {
-		if fb != end {
-			continue
-		}
-		if uint64(size) > uint64(old)+uint64(mem.Read32(fb+mbSize))+mbHeader {
-			return 0
-		}
-		oldStart, rEnd := m.mbRegion(fb)
-		prev := m.mbRemove(chain, fb)
-		rStart := p + size
-		if rEnd-rStart < mbHeader {
-			rStart = rEnd
-		}
-		mem.Write32(b+mbSize, rStart-p)
-		if rEnd-rStart >= mbHeader {
-			m.mbInsert(chain, m.mbInit(rStart, rEnd, mbFree), prev)
-		}
-		if flags&heapOptClear != 0 {
-			mem.Fill(oldStart, 0, rStart-oldStart)
-		} else if flags&heapOptFill != 0 {
-			m.heapFill(oldStart, rStart-oldStart, fillOnAlloc)
-		}
-		return mem.Read32(b + mbSize)
+	if next == 0 || uint64(size) > uint64(cur)+ebLen+uint64(mem.Read32(next+ebSize)) {
+		return 0
 	}
-	return 0
+	gained, nextEnd := end, m.blockEnd(next)
+	after := m.blkUnlink(free, next)
+	newEnd := p + size
+	if nextEnd-newEnd >= ebLen {
+		m.blkLinkAfter(free, after, m.newBlock(newEnd, nextEnd, ebFreeTag))
+	} else {
+		newEnd = nextEnd
+	}
+	mem.Write32(b+ebSize, newEnd-p)
+	switch opts := m.heapOptions(heap); {
+	case opts&memZeroAlloc != 0:
+		mem.Fill(gained, 0, newEnd-gained)
+	case opts&memDebugFill != 0:
+		m.heapMark(gained, newEnd-gained, markOnAlloc)
+	}
+	return newEnd - p
 }
 
-func (m *Machine) expTotalFree(heap uint32) uint32 {
+// expFreeTotal is MEMGetTotalFreeSizeForExpHeap.
+func (m *Machine) expFreeTotal(heap uint32) uint32 {
 	var n uint32
-	for b := m.Mem.Read32(heap + expFreeChain + chainHead); b != 0; b = m.Mem.Read32(b + mbNext) {
-		n += m.Mem.Read32(b + mbSize)
+	for b := m.Mem.Read32(heap + ehFree + blFirst); b != 0; b = m.Mem.Read32(b + ebNext) {
+		n += m.Mem.Read32(b + ebSize)
 	}
 	return n
 }
 
-// expAllocatable is MEMGetAllocatableSizeForExpHeapEx: the largest block
-// that could be allocated with this alignment.
-func (m *Machine) expAllocatable(heap uint32, align int32) uint32 {
-	if align < 0 {
-		align = -align
+// expLargest is MEMGetAllocatableSizeForExpHeapEx: the biggest block the
+// alignment allows; among equal sizes, the one wasting least on alignment.
+func (m *Machine) expLargest(heap uint32, align int32) uint32 {
+	a := uint64(1)
+	if align > 0 {
+		a = uint64(align)
+	} else if align < 0 {
+		a = uint64(-int64(align))
 	}
-	al := uint64(max(align, 1))
-	var result uint32
-	smallestGap := uint32(0xffffffff)
-	for b := m.Mem.Read32(heap + expFreeChain + chainHead); b != 0; b = m.Mem.Read32(b + mbNext) {
-		data, end := uint64(b+mbHeader), uint64(m.mbEnd(b))
-		a := (data + al - 1) &^ (al - 1)
-		if a >= end {
+	var best, bestWaste uint32 = 0, 0xffffffff
+	for b := m.Mem.Read32(heap + ehFree + blFirst); b != 0; b = m.Mem.Read32(b + ebNext) {
+		data, end := uint64(b+ebLen), uint64(m.blockEnd(b))
+		p := roundUp64(data, a)
+		if p >= end {
 			continue
 		}
-		size, gap := uint32(end-a), uint32(a-data)
-		if size < result || size == result && smallestGap <= gap {
-			continue
+		n, waste := uint32(end-p), uint32(p-data)
+		if n > best || n == best && waste < bestWaste {
+			best, bestWaste = n, waste
 		}
-		smallestGap, result = gap, size
 	}
-	return result
+	return best
 }
 
-// expAdjust is MEMAdjustExpHeap: it gives back the free memory at the end.
-func (m *Machine) expAdjust(heap uint32) uint32 {
+// expTrim is MEMAdjustExpHeap: a free block at the very top of the heap is
+// cut off. It returns the heap's new size, or 0.
+func (m *Machine) expTrim(heap uint32) uint32 {
 	mem := m.Mem
-	tail := mem.Read32(heap + expFreeChain + chainTail)
-	if tail == 0 || m.mbEnd(tail) != mem.Read32(heap+heapEnd) {
+	last := mem.Read32(heap + ehFree + blLast)
+	if last == 0 || m.blockEnd(last) != mem.Read32(heap+hhLimit) {
 		return 0
 	}
-	m.mbRemove(heap+expFreeChain, tail)
-	end := mem.Read32(heap+heapEnd) - (mbHeader + mem.Read32(tail+mbSize))
-	mem.Write32(heap+heapEnd, end)
-	return end - heap
+	m.blkUnlink(heap+ehFree, last)
+	mem.Write32(heap+hhLimit, last)
+	return last - heap
 }
 
 func init() {
 	c := "coreinit"
-	expHeap := func(fn func(m *Machine, cpu *CPU, heap uint32)) hleFunc {
+	onExp := func(fn func(m *Machine, cpu *CPU, heap uint32)) hleFunc {
 		return func(m *Machine, cpu *CPU, t *Thread) {
-			if h := arg(cpu, 0); m.isExpHeap(h) {
-				fn(m, cpu, h)
+			heap := arg(cpu, 0)
+			if !m.isExpHeap(heap) {
+				ret(cpu, 0)
 				return
 			}
-			ret(cpu, 0)
+			fn(m, cpu, heap)
 		}
 	}
+	blockAttr := func(p uint32, m *Machine) uint32 { return m.Mem.Read32(p - ebLen + ebAttr) }
 
 	reg(c, "MEMCreateExpHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.createExpHeap(arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)&0xffff))
 	})
-	reg(c, "MEMDestroyExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		m.memDestroyHeapBase(heap)
+	reg(c, "MEMDestroyExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		m.heapUnlink(heap)
 		ret(cpu, heap)
 	}))
 	reg(c, "MEMAllocFromExpHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.expAlloc(arg(cpu, 0), arg(cpu, 1), int32(arg(cpu, 2))))
 	})
 	reg(c, "MEMFreeToExpHeap", func(m *Machine, cpu *CPU, t *Thread) { m.expFree(arg(cpu, 0), arg(cpu, 1)) })
-	reg(c, "MEMSetAllocModeForExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		f := m.Mem.Read16(heap + expFields)
-		ret(cpu, uint32(f&1))
-		m.Mem.Write16(heap+expFields, f&^1|uint16(arg(cpu, 1))&1)
+	reg(c, "MEMSetAllocModeForExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		attr := m.Mem.Read16(heap + ehAttr)
+		m.Mem.Write16(heap+ehAttr, attr&^ehBestFit|uint16(arg(cpu, 1))&ehBestFit)
+		ret(cpu, uint32(attr&ehBestFit))
 	}))
-	reg(c, "MEMGetAllocModeForExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, uint32(m.Mem.Read16(heap+expFields)&1))
+	reg(c, "MEMGetAllocModeForExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, uint32(m.Mem.Read16(heap+ehAttr)&ehBestFit))
 	}))
-	reg(c, "MEMAdjustExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) { ret(cpu, m.expAdjust(heap)) }))
-	reg(c, "MEMResizeForMBlockExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
+	reg(c, "MEMAdjustExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) { ret(cpu, m.expTrim(heap)) }))
+	reg(c, "MEMResizeForMBlockExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
 		ret(cpu, m.expResize(heap, arg(cpu, 1), arg(cpu, 2)))
 	}))
-	reg(c, "MEMGetTotalFreeSizeForExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) { ret(cpu, m.expTotalFree(heap)) }))
-	reg(c, "MEMGetAllocatableSizeForExpHeapEx", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, m.expAllocatable(heap, int32(arg(cpu, 1))))
+	reg(c, "MEMGetTotalFreeSizeForExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) { ret(cpu, m.expFreeTotal(heap)) }))
+	reg(c, "MEMGetAllocatableSizeForExpHeapEx", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, m.expLargest(heap, int32(arg(cpu, 1))))
 	}))
-	reg(c, "MEMSetGroupIDForExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, uint32(m.Mem.Read16(heap+expGroupID)))
-		m.Mem.Write16(heap+expGroupID, uint16(arg(cpu, 1)))
+	reg(c, "MEMSetGroupIDForExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		old := m.Mem.Read16(heap + ehGroup)
+		m.Mem.Write16(heap+ehGroup, uint16(arg(cpu, 1)))
+		ret(cpu, uint32(old))
 	}))
-	reg(c, "MEMGetGroupIDForExpHeap", expHeap(func(m *Machine, cpu *CPU, heap uint32) {
-		ret(cpu, uint32(m.Mem.Read16(heap+expGroupID)))
+	reg(c, "MEMGetGroupIDForExpHeap", onExp(func(m *Machine, cpu *CPU, heap uint32) {
+		ret(cpu, uint32(m.Mem.Read16(heap+ehGroup)))
 	}))
-	// MEMVisitAllocatedForExpHeap(heap, visitor, param) calls
-	// visitor(block, heap, param) for each allocated block
+	// (heap, visitor, user): visitor(data, heap, user) for every allocated
+	// block, oldest first
 	reg(c, "MEMVisitAllocatedForExpHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		heap, visitor, param := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
-		if !m.isExpHeap(heap) || visitor == 0 {
+		heap, visitor, user := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
+		if visitor == 0 || !m.isExpHeap(heap) {
 			return
 		}
-		var visit func(m *Machine, cpu *CPU, t *Thread, b uint32)
-		visit = func(m *Machine, cpu *CPU, t *Thread, b uint32) {
+		var step func(m *Machine, cpu *CPU, t *Thread, b uint32)
+		step = func(m *Machine, cpu *CPU, t *Thread, b uint32) {
 			if b == 0 {
 				ret(cpu, 0)
 				return
 			}
-			m.callGuest(cpu, t, visitor, []uint32{b + mbHeader, heap, param}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
-				visit(m, cpu, t, m.Mem.Read32(b+mbNext))
+			m.callGuest(cpu, t, visitor, []uint32{m.blockData(b), heap, user}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) {
+				step(m, cpu, t, m.Mem.Read32(b+ebNext))
 			})
 		}
-		visit(m, cpu, t, m.Mem.Read32(heap+expUsedChain+chainHead))
+		step(m, cpu, t, m.Mem.Read32(heap+ehUsed+blFirst))
 	})
 	reg(c, "MEMGetSizeForMBlockExpHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		if p := arg(cpu, 0); p != 0 {
-			ret(cpu, m.Mem.Read32(p-mbHeader+mbSize))
+		p := arg(cpu, 0)
+		if p == 0 {
+			ret(cpu, 0)
 			return
 		}
-		ret(cpu, 0)
+		ret(cpu, m.Mem.Read32(p-ebLen+ebSize))
 	})
 	reg(c, "MEMGetGroupIDForMBlockExpHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.Mem.Read32(arg(cpu, 0)-mbHeader+mbFields)&0xff)
+		ret(cpu, blockAttr(arg(cpu, 0), m)&0xff)
 	})
 	reg(c, "MEMGetAllocDirForMBlockExpHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, m.Mem.Read32(arg(cpu, 0)-mbHeader+mbFields)>>31)
+		ret(cpu, blockAttr(arg(cpu, 0), m)>>31)
 	})
 	reg(c, "MEMCheckExpHeap", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.isExpHeap(arg(cpu, 0))) })
 	reg(c, "MEMCheckForMBlockExpHeap", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 
 	reg(c, "MEMInitAllocatorForExpHeap", func(m *Machine, cpu *CPU, t *Thread) {
-		m.initAllocator(arg(cpu, 0), "Exp", arg(cpu, 1), arg(cpu, 2))
+		m.setAllocator(arg(cpu, 0), "Exp", arg(cpu, 1), arg(cpu, 2))
 	})
 	reg(c, "__RPAllocatorExpAlloc", func(m *Machine, cpu *CPU, t *Thread) {
-		a := arg(cpu, 0)
-		ret(cpu, m.expAlloc(m.Mem.Read32(a+allocatorHeap), arg(cpu, 1), int32(m.Mem.Read32(a+allocatorParam))))
+		heap, align := m.allocatorHeapArg(arg(cpu, 0))
+		ret(cpu, m.expAlloc(heap, arg(cpu, 1), align))
 	})
 	reg(c, "__RPAllocatorExpFree", func(m *Machine, cpu *CPU, t *Thread) {
-		m.expFree(m.Mem.Read32(arg(cpu, 0)+allocatorHeap), arg(cpu, 1))
+		heap, _ := m.allocatorHeapArg(arg(cpu, 0))
+		m.expFree(heap, arg(cpu, 1))
 	})
 }
