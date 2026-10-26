@@ -62,10 +62,10 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 41301 | 22.1% |
+| Original (RetroPixels) | 41335 | 22.2% |
 | Supermodel (with or without RetroPixels changes) | 0 | 0.0% |
-| Third-party | 145172 | 77.9% |
-| **All** | **186473** | 100% |
+| Third-party | 145172 | 77.8% |
+| **All** | **186507** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -82,7 +82,7 @@ Totals (lines in supermodel/Src, h/hpp/c/cpp/inc/glsl files):
 | Model3/DriveBoard | 1858 | 1858 | original |
 | Network | 1580 | 1580 | original |
 | OSD (top level) | 1762 | 1762 | original |
-| OSD/SDL | 4090 | 4090 | original |
+| OSD/SDL | 4124 | 4124 | original |
 | OSD/Unix | 123 | 123 | original |
 | OSD/Windows | 1866 | 1866 | original |
 | Pkgs | 126021 | 0 | third-party |

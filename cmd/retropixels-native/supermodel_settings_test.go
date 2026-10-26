@@ -64,7 +64,7 @@ func TestSupermodelPlan(t *testing.T) {
 	rom := `C:\ROMs\swtrilgy.zip`
 	var s SupermodelSettings
 	p := s.plan(rom, supermodel.Check{OK: true}, true, "", "")
-	want := []string{rom, "-fullscreen", "-desktop-res", "-no-wide-screen", "-input-system=" + supermodel.InputSystem}
+	want := []string{rom, "-fullscreen", "-desktop-res", "-no-wide-screen", "-input-system=" + supermodel.InputSystem, "-rp-fast-boot=30"}
 	if !slices.Equal(p.Args, want) || p.Embed {
 		t.Fatalf("default args = %q, want %q", p.Args, want)
 	}

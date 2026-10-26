@@ -145,7 +145,7 @@ func TestSupermodelFindsTheGameOnceAndPlaysIt(t *testing.T) {
 	}
 	waitIdle(t)
 	args, _ := os.ReadFile(argsFile)
-	want := rom + " -fullscreen -desktop-res -no-wide-screen -force-feedback -input-system=" + supermodel.InputSystem + "\nHOME=" + home
+	want := rom + " -fullscreen -desktop-res -no-wide-screen -force-feedback -input-system=" + supermodel.InputSystem + " -rp-fast-boot=30\nHOME=" + home
 	if got := strings.TrimSpace(string(args)); got != want {
 		t.Fatalf("args:\n got %q\nwant %q", got, want)
 	}

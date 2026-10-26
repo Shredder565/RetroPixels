@@ -158,12 +158,12 @@ func TestGameArgs(t *testing.T) {
 	docked := GameArgs(rom, LaunchOptions{Embed: true, Hidden: true, ForceFeedback: true, Patched: true,
 		RecordDir: filepath.Join("C:", "rec"), FFmpeg: filepath.Join("C:", "ffmpeg.exe")})
 	want := []string{rom, "-window", "-borderless", "-window-pos=-20000,-20000", "-no-wide-screen", "-force-feedback",
-		"-input-system=" + InputSystem, "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
+		"-input-system=" + InputSystem, "-rp-fast-boot=30", "-rp-record=" + filepath.Join("C:", "rec"), "-rp-ffmpeg=" + filepath.Join("C:", "ffmpeg.exe")}
 	if !reflect.DeepEqual(docked, want) {
 		t.Fatalf("docked:\n got %q\nwant %q", docked, want)
 	}
 	full := GameArgs(rom, LaunchOptions{Fullscreen: true, WideScreen: true, Patched: true})
-	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=" + InputSystem}) {
+	if !reflect.DeepEqual(full, []string{rom, "-fullscreen", "-desktop-res", "-wide-screen", "-input-system=" + InputSystem, "-rp-fast-boot=30"}) {
 		t.Fatalf("fullscreen: %q", full)
 	}
 	// The official build knows none of RetroPixels' options.

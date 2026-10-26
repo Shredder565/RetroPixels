@@ -64,6 +64,12 @@ being rewritten as original code: `docs/supermodel-original.md`).
   (glReadPixels of the back buffer) and writes the sound as a WAV.
   RetroPixels' recorder then makes the usual .mp4 with the black bars
   cropped.
+- **Fast boot.** `-rp-fast-boot=N` runs the game's first N seconds (58
+  frames each) unthrottled, with nothing drawn or swapped, the sound muted
+  and the recording paused. RetroPixels passes 30 (`FastBootSeconds`), which
+  covers Star Wars' "WAIT SETUP THE FEEDBACK LEVER" calibration and the Sega
+  logo, so the game appears on its attract mode, past the point where
+  coins can crash it. Pause ends it early.
 - **Resolution.** `-desktop-res` makes fullscreen use the desktop's
   resolution. A borderless window that is resized (when it's docked in
   RetroPixels) re-creates the renderers at the new size, so the picture is
