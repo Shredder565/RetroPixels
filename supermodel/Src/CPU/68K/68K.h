@@ -1,44 +1,30 @@
 // Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 //
-// Glue between the emulator and the Musashi 68000 core. Musashi keeps one
-// global CPU, so boards that own a 68K (sound board, DSB, net board) swap
-// their own state in and out with M68KSetContext() / M68KGetContext() around
-// each slice of execution. Everything below acts on whichever context is
-// currently loaded.
+// The emulator's 68000s (sound board, DSB, net board) all run on one
+// processor, RetroPixels' own core in M68000.h. Each board keeps its own
+// CPU in an M68KCtx and loads it with M68KSetContext() before running it,
+// then stores it back with M68KGetContext(). Everything below acts on
+// whichever context is currently loaded.
 
 #ifndef INCLUDED_68K_H
 #define INCLUDED_68K_H
 
-#include <cstring>
 #include "Types.h"
-#include "Musashi/m68k.h"
-#include "Musashi/m68kctx.h"
+#include "CPU/68K/M68000.h"
 #include "CPU/Bus.h"
 #include "BlockFile.h"
 
-// Musashi's memory hooks are plain C functions; no calling-convention tag.
-#undef FASTCALL
-#define FASTCALL
-
 // Values an interrupt-acknowledge callback may return besides a vector number.
-#define M68K_IRQ_AUTOVECTOR  M68K_INT_ACK_AUTOVECTOR
-#define M68K_IRQ_SPURIOUS    M68K_INT_ACK_SPURIOUS
+#define M68K_IRQ_AUTOVECTOR  kM68KAutoVector
+#define M68K_IRQ_SPURIOUS    kM68KSpurious
 
-// Everything one 68K needs to be parked while another one runs.
-typedef struct SM68KCtx
+// Everything one 68000 needs to be parked while another one runs.
+struct M68KCtx
 {
-  m68ki_cpu_core musashiCtx;   // the core's own registers and run state
-  IBus *Bus;                   // where its memory accesses go
-  int (*IRQAck)(int);          // interrupt-acknowledge hook, or null
-
-  SM68KCtx()
-    : Bus(nullptr), IRQAck(nullptr)
-  {
-    // A fresh context must start fully zeroed: Musashi reads fields of it
-    // during reset that it never initialises itself.
-    std::memset(&musashiCtx, 0, sizeof(musashiCtx));
-  }
-} M68KCtx;
+  M68000State cpu;             // registers and run state
+  IBus *Bus = nullptr;         // where its memory accesses go
+  int (*IRQAck)(int) = nullptr;  // interrupt-acknowledge hook, or null
+};
 
 // Register access on the loaded context. An index outside 0..7 reads
 // register 7.
@@ -57,29 +43,16 @@ extern void M68KSetIRQ(int irqLevel);     // drive the interrupt lines (0 = none
 extern int M68KRun(int numCycles);        // returns the cycles actually run
 extern void M68KReset(void);
 
-// Wiring for the loaded context.
+// Wiring for the loaded context. Without an acknowledge hook interrupts are
+// autovectored and the request is dropped when one is taken.
 extern void M68KSetIRQCallback(int (*F)(int nIRQ));
 extern void M68KAttachBus(IBus *BusPtr);
 
-// Called once at start-up, before any context is used.
+// Called before a context is first used.
 extern Result M68KInit(void);
 
 // Swapping the loaded CPU with a parked one.
 extern void M68KGetContext(M68KCtx *Dest);
 extern void M68KSetContext(M68KCtx *Src);
-
-// Entry points Musashi calls directly (see Musashi/m68kconf.h).
-extern "C" {
-extern int M68KIRQCallback(int nIRQ);
-unsigned int FASTCALL M68KFetch8(unsigned int a);
-unsigned int FASTCALL M68KFetch16(unsigned int a);
-unsigned int FASTCALL M68KFetch32(unsigned int a);
-unsigned int FASTCALL M68KRead8(unsigned int a);
-unsigned int FASTCALL M68KRead16(unsigned int a);
-unsigned int FASTCALL M68KRead32(unsigned int a);
-void FASTCALL M68KWrite8(unsigned int a, unsigned int d);
-void FASTCALL M68KWrite16(unsigned int a, unsigned int d);
-void FASTCALL M68KWrite32(unsigned int a, unsigned int d);
-}
 
 #endif  // INCLUDED_68K_H

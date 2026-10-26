@@ -1,0 +1,40 @@
+// Original code for RetroPixels (Supermodel). Not derived from Supermodel.
+//
+// supermodel.exe's Windows resources: the application manifest
+// (Supermodel.manifest) and the version information Explorer shows.
+// supermodel/Makefile compiles it with windres, after writing smversion.h,
+// which defines SM_VERSION_STR (the version string, quoted).
+
+#include <winver.h>
+#include "smversion.h"
+
+1 24 "Supermodel.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName",      "Shredder565"
+      VALUE "FileDescription",  "RetroPixels Model 3 engine"
+      VALUE "FileVersion",      SM_VERSION_STR
+      VALUE "InternalName",     "supermodel"
+      VALUE "LegalCopyright",   "Copyright (c) 2025-2026 Shredder565. All rights reserved."
+      VALUE "OriginalFilename", "supermodel.exe"
+      VALUE "ProductName",      "RetroPixels"
+      VALUE "ProductVersion",   SM_VERSION_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END

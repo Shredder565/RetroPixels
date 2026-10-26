@@ -1,85 +1,81 @@
 // Original code for RetroPixels (Supermodel). Not derived from Supermodel.
 //
-// See 68K.h. Musashi holds the CPU registers itself; this file only keeps
-// the two things Musashi has no slot for (the bus and the acknowledge hook)
-// for the context that is currently loaded.
+// See 68K.h. One M68000 does the work; a context is its state plus the bus
+// and acknowledge hook, copied in and out around each board's slice.
 
 #include "68K.h"
 #include "Supermodel.h"
 
 namespace
 {
-  IBus *g_memory = nullptr;           // bus of the loaded context
-  int (*g_onAck)(int) = nullptr;      // acknowledge hook of the loaded context
+  M68000 s_cpu;                       // the loaded context runs here
+  int (*s_onAck)(int) = nullptr;      // acknowledge hook of the loaded context
 
-  // Save-state word order after the three run-state words. Changing this
-  // breaks every existing save state.
-  constexpr m68k_register_t kSavedRegs[] =
+  int Acknowledge(void *, int level)
   {
-    M68K_REG_D0, M68K_REG_D1, M68K_REG_D2, M68K_REG_D3,
-    M68K_REG_D4, M68K_REG_D5, M68K_REG_D6, M68K_REG_D7,
-    M68K_REG_A0, M68K_REG_A1, M68K_REG_A2, M68K_REG_A3,
-    M68K_REG_A4, M68K_REG_A5, M68K_REG_A6, M68K_REG_A7,
-    M68K_REG_PC, M68K_REG_SR, M68K_REG_SP, M68K_REG_USP,
-    M68K_REG_ISP, M68K_REG_MSP, M68K_REG_SFC, M68K_REG_DFC,
-    M68K_REG_VBR, M68K_REG_CACR, M68K_REG_CAAR, M68K_REG_PREF_ADDR,
-    M68K_REG_PREF_DATA, M68K_REG_PPC, M68K_REG_IR,
-  };
-  constexpr size_t kRunWords = 3;     // int_level, int_cycles, stopped
-  constexpr size_t kStateWords = kRunWords + sizeof(kSavedRegs) / sizeof(kSavedRegs[0]);
-  static_assert(kStateWords == 34, "68K save-state block must stay 34 words");
-
-  // Musashi numbers D0..D7 and A0..A7 consecutively.
-  static_assert(M68K_REG_D7 == M68K_REG_D0 + 7 && M68K_REG_A0 == M68K_REG_D0 + 8 &&
-                M68K_REG_A7 == M68K_REG_D0 + 15, "unexpected Musashi register numbering");
-
-  m68k_register_t DataReg(int n)
-  {
-    return m68k_register_t(M68K_REG_D0 + ((n >= 0 && n < 8) ? n : 7));
+    if (s_onAck != nullptr)
+      return s_onAck(level);
+    // Nobody to ask: autovectored, and the request is dropped.
+    s_cpu.SetIRQ(0);
+    return M68K_IRQ_AUTOVECTOR;
   }
 
-  m68k_register_t AddrReg(int n)
+  // Save-state block: 34 words. 0: requested interrupt level << 8, 1: 0,
+  // 2: 1 while stopped, 3-10: D0-D7, 11-18: A0-A7, 19: PC, 20: SR, 21: the
+  // active stack pointer, 22: USP, 23: SSP, 24-31: 0 (registers of later
+  // 680x0s), 32: address of the last instruction, 33: its opcode. The
+  // layout is what existing save states hold; don't change it.
+  constexpr size_t kStateWords = 34;
+
+  int Clamp(int n)
   {
-    return m68k_register_t(M68K_REG_A0 + ((n >= 0 && n < 8) ? n : 7));
+    return (n >= 0 && n < 8) ? n : 7;
   }
 }
 
 UINT32 M68KGetARegister(int n)
 {
-  return m68k_get_reg(nullptr, AddrReg(n));
+  return s_cpu.st.a[Clamp(n)];
 }
 
 UINT32 M68KGetDRegister(int n)
 {
-  return m68k_get_reg(nullptr, DataReg(n));
+  return s_cpu.st.d[Clamp(n)];
 }
 
 void M68KSetARegister(int n, UINT32 v)
 {
-  m68k_set_reg(AddrReg(n), v);
+  s_cpu.st.a[Clamp(n)] = v;
 }
 
 void M68KSetDRegister(int n, UINT32 v)
 {
-  m68k_set_reg(DataReg(n), v);
+  s_cpu.st.d[Clamp(n)] = v;
 }
 
 UINT32 M68KGetPC(void)
 {
-  return m68k_get_reg(nullptr, M68K_REG_PC);
+  return s_cpu.st.pc;
 }
 
 void M68KSaveState(CBlockFile *StateFile, const char *name)
 {
-  UINT32 words[kStateWords];
-
-  m68ki_cpu_core core;
-  m68k_get_context(&core);
-  words[0] = core.int_level;
-  words[1] = core.int_cycles;
-  words[2] = core.stopped;
-  for (size_t i = 0; i < kStateWords - kRunWords; i++)
-    words[kRunWords + i] = m68k_get_reg(nullptr, kSavedRegs[i]);
+  const M68000State &st = s_cpu.st;
+  UINT32 words[kStateWords] = {};
+  words[0] = UINT32(st.irq) << 8;
+  words[2] = st.stopped ? 1 : 0;
+  for (int i = 0; i < 8; i++)
+  {
+    words[3 + i] = st.d[i];
+    words[11 + i] = st.a[i];
+  }
+  words[19] = st.pc;
+  words[20] = s_cpu.SR();
+  words[21] = st.a[7];
+  words[22] = st.s ? st.usp : st.a[7];
+  words[23] = st.s ? st.a[7] : st.ssp;
+  words[32] = st.opPC;
+  words[33] = st.op;
 
   StateFile->NewBlock(name, __FILE__);
   StateFile->Write(words, sizeof(words));
@@ -96,92 +92,81 @@ void M68KLoadState(CBlockFile *StateFile, const char *name)
   UINT32 words[kStateWords];
   StateFile->Read(words, sizeof(words));
 
-  // The interrupt and stop state goes in first so that the register writes
-  // below (SR in particular) see this CPU's pending interrupt level rather
-  // than whatever the previously loaded context had.
-  m68ki_cpu_core core;
-  m68k_get_context(&core);
-  core.int_level = words[0];
-  core.int_cycles = words[1];
-  core.stopped = words[2];
-  m68k_set_context(&core);
-
-  for (size_t i = 0; i < kStateWords - kRunWords; i++)
-    m68k_set_reg(kSavedRegs[i], words[kRunWords + i]);
+  M68000State &st = s_cpu.st;
+  st.irq = int((words[0] >> 8) & 7);
+  st.nmiSeen = st.irq == 7;
+  st.stopped = (words[2] & 1) != 0;
+  for (int i = 0; i < 8; i++)
+  {
+    st.d[i] = words[3 + i];
+    st.a[i] = words[11 + i];
+  }
+  st.pc = words[19];
+  const UINT32 sr = words[20];
+  st.t = (sr >> 15) & 1;
+  st.s = (sr >> 13) & 1;
+  st.ipl = (sr >> 8) & 7;
+  st.x = (sr >> 4) & 1;
+  st.n = (sr >> 3) & 1;
+  st.z = (sr >> 2) & 1;
+  st.v = (sr >> 1) & 1;
+  st.c = sr & 1;
+  st.a[7] = words[21];
+  if (st.s)
+    st.usp = words[22];
+  else
+    st.ssp = words[23];
+  st.opPC = words[32];
+  st.op = words[33] & 0xFFFF;
 }
 
 void M68KSetIRQ(int irqLevel)
 {
-  m68k_set_irq(irqLevel);
+  s_cpu.SetIRQ(irqLevel & 7);
 }
 
 int M68KRun(int numCycles)
 {
-  return m68k_execute(numCycles);
+  return int(s_cpu.Run(numCycles));
 }
 
 void M68KReset(void)
 {
-  m68k_pulse_reset();
+  s_cpu.Reset();
   DebugLog("68K reset\n");
 }
 
 void M68KSetIRQCallback(int (*F)(int nIRQ))
 {
-  g_onAck = F;
+  s_onAck = F;
 }
 
 void M68KAttachBus(IBus *BusPtr)
 {
-  g_memory = BusPtr;
+  s_cpu.bus = BusPtr;
   DebugLog("Attached bus to 68K\n");
 }
 
 void M68KGetContext(M68KCtx *Dest)
 {
-  Dest->Bus = g_memory;
-  Dest->IRQAck = g_onAck;
-  m68k_get_context(&Dest->musashiCtx);
+  Dest->cpu = s_cpu.st;
+  Dest->Bus = s_cpu.bus;
+  Dest->IRQAck = s_onAck;
 }
 
 void M68KSetContext(M68KCtx *Src)
 {
-  g_memory = Src->Bus;
-  g_onAck = Src->IRQAck;
-  m68k_set_context(&Src->musashiCtx);
+  s_cpu.st = Src->cpu;
+  s_cpu.bus = Src->Bus;
+  s_onAck = Src->IRQAck;
 }
 
 Result M68KInit(void)
 {
-  m68k_init();
-  m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-  m68k_set_int_ack_callback(M68KIRQCallback);
-  g_memory = nullptr;
+  s_cpu.st = M68000State();
+  s_cpu.ack = Acknowledge;
+  s_cpu.bus = nullptr;
+  s_onAck = nullptr;
   DebugLog("Initialized 68K\n");
   return Result::OKAY;
-}
-
-extern "C" {
-
-int M68KIRQCallback(int nIRQ)
-{
-  if (g_onAck)
-    return g_onAck(nIRQ);
-  // Nobody to ask: treat it as autovectored and drop the line ourselves.
-  m68k_set_irq(0);
-  return M68K_IRQ_AUTOVECTOR;
-}
-
-// Instruction fetches and data accesses go to the same bus.
-unsigned int FASTCALL M68KFetch8(unsigned int a)  { return g_memory->Read8(a); }
-unsigned int FASTCALL M68KFetch16(unsigned int a) { return g_memory->Read16(a); }
-unsigned int FASTCALL M68KFetch32(unsigned int a) { return g_memory->Read32(a); }
-unsigned int FASTCALL M68KRead8(unsigned int a)   { return g_memory->Read8(a); }
-unsigned int FASTCALL M68KRead16(unsigned int a)  { return g_memory->Read16(a); }
-unsigned int FASTCALL M68KRead32(unsigned int a)  { return g_memory->Read32(a); }
-
-void FASTCALL M68KWrite8(unsigned int a, unsigned int d)  { g_memory->Write8(a, d); }
-void FASTCALL M68KWrite16(unsigned int a, unsigned int d) { g_memory->Write16(a, d); }
-void FASTCALL M68KWrite32(unsigned int a, unsigned int d) { g_memory->Write32(a, d); }
-
 }

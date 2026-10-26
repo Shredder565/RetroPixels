@@ -1,9 +1,6 @@
-# Exactly what RetroPixels' Supermodel is built from (read by build.sh).
-# Every download is checked against its SHA-256 before it is used.
-
-# Supermodel itself: the upstream commit the patches in patches/ apply to.
-SUPERMODEL_REPO=https://github.com/trzy/Supermodel.git
-SUPERMODEL_COMMIT=24d2ffcfc7f14229337f05f4920fe26b56633d9d # 2026-07-26 "Fix initializer order (#325)", the 0.3a-20260726-git-24d2ffc build
+# The third-party libraries RetroPixels' Model 3 engine is built with (read
+# by build.sh); the engine itself is supermodel/Src. Every download is
+# checked against its SHA-256 before it is used.
 
 # Windows build (cross-compiled with MinGW-w64 on Ubuntu 24.04,
 # gcc-mingw-w64 13.2.0-6ubuntu1+26.1, posix threads):

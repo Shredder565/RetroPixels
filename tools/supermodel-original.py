@@ -23,8 +23,7 @@ DOC = os.path.join(ROOT, "docs", "supermodel-original.md")
 ORIGINAL_MARK = "Original code for RetroPixels (Supermodel). Not derived from Supermodel."
 EXTS = (".h", ".hpp", ".c", ".cpp", ".inc", ".glsl")
 THIRD_PARTY = (
-    "Pkgs/",  # GLEW and the Khronos GL headers, Dear ImGui, minizip, minimp3, TinyXML-2
-    "CPU/68K/Musashi/",  # Karl Stenerud's Musashi 68000 core (MIT)
+    "Pkgs/",  # GLEW and the Khronos GL headers, Dear ImGui, minizip, minimp3, TinyXML-2 (all permissive)
 )
 
 
