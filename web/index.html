@@ -209,6 +209,19 @@
   .sm-art small { position: absolute; bottom: 8px; font-size: 10px; letter-spacing: 2px; color: #9aa3c7; }
   .sm-play { position: absolute; inset: auto 10px 10px auto; background: #b8860b; color: #fff; border-radius: 999px;
     padding: 4px 12px; font-size: 13px; font-weight: 700; }
+  /* PlayStation 3 in the player's RPCS3 */
+  .tabs button[data-tab="ps3"][aria-selected="true"] { border-bottom-color: #4f8dff; }
+  .ps3-btn { background: #2456c6; } .ps3-btn:hover { background: #1d47a6; }
+  #ps3Tab .toggle input:checked { background: #2456c6; }
+  #ps3Tab .sw-tile:hover, #ps3Tab .sw-tile:focus-visible { border-color: #4f8dff; }
+  #ps3Tab .sw-tile:focus-visible { box-shadow: 0 0 0 3px #4f8dff55; }
+  .ps3-art { aspect-ratio: 16 / 9; display: grid; place-items: center; align-content: center; gap: 2px; text-align: center; color: #fff;
+    background: radial-gradient(ellipse at 50% 130%, #2456c6 0%, #0b1530 55%, #05070d 100%); position: relative; padding: 6px; }
+  .ps3-art b { font-size: 15px; font-weight: 800; line-height: 1.15; letter-spacing: .5px; text-shadow: 0 2px 8px #000a; }
+  .ps3-art small { font-size: 10px; letter-spacing: 2px; color: #9fb7e8; }
+  .ps3-art .sm-play { background: #2456c6; }
+  .ps3-warn { position: absolute; top: 8px; right: 8px; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: #8a5a00; color: #fff; }
+  .ps3-need { background: #2a2214; border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin: 8px 0; font-size: 14px; }
   .sm-rom { display: flex; gap: 10px; align-items: flex-start; }
   .sm-rom small { overflow-wrap: anywhere; }
   #gcSearch, #wiiuSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
@@ -353,6 +366,7 @@
     <button role="tab" data-tab="wiiu" aria-selected="false"><span style="color:#2fb4ff">●</span> Wii U</button>
     <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
     <button role="tab" data-tab="supermodel" aria-selected="false"><span style="color:#ffd54a">●</span> Supermodel</button>
+    <button role="tab" data-tab="ps3" aria-selected="false"><span style="color:#4f8dff">●</span> PS3</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
   <div id="swNow" class="sw-now" hidden>
@@ -738,6 +752,59 @@
     </div>
   </section>
 
+  <!-- ===================== PlayStation 3 (RPCS3) tab ===================== -->
+  <section id="ps3Tab" hidden>
+    <div id="ps3BrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">PlayStation 3 games play in your own <strong>RPCS3</strong> through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+    </div>
+    <div id="ps3Desktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">PlayStation 3 in RPCS3</h2>
+          <p class="muted sw-intro" style="margin-top:0">The games installed in your RPCS3. Click one to play.</p>
+          <div id="ps3Need"></div>
+          <div class="sw-grid" id="ps3Grid"></div>
+          <p class="muted" id="ps3Msg" style="font-size:14px;margin:8px 0"></p>
+          <div id="ps3Note"></div>
+          <div class="sw-setup" style="margin-top:8px">
+            <div class="sw-emu" id="ps3Emu">Looking for RPCS3…</div>
+            <div class="sw-emu" id="ps3Fw"></div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn sm ps3-btn" id="ps3InstallPkg" title="RPCS3 installs a PS3 game package (.pkg) of yours with its own installer">Install game (.pkg)…</button>
+            <button class="btn sm ps3-btn" id="ps3AddLicence" title="Copies your own licence file (.rap or .edat) for a PSN game into RPCS3's exdata folder, as RPCS3's own installer does">Add licence file…</button>
+            <button class="btn ghost sm" id="ps3InstallFw" title="RPCS3 installs the PS3 system software (PS3UPDAT.PUP) with its own installer">Install PS3 system software…</button>
+            <button class="btn ghost sm" id="ps3Rescan">Look again</button>
+          </div>
+          <div class="sw-row">
+            <label class="sw-check" title="The game plays inside this window instead of in RPCS3's own window"><input type="checkbox" id="ps3Embed"> Play inside RetroPixels</label>
+            <label class="sw-check"><input type="checkbox" id="ps3Full"> Start fullscreen</label>
+          </div>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Playing</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 8px">Xbox controller as player 1 (rumble on): <span class="key k-a">A</span> = ✕, <span class="key">B</span> = ○, <span class="key">X</span> = □, <span class="key">Y</span> = △,
+              <b>LB / RB</b> = L1 / R1, <b>LT / RT</b> = L2 / R2, <b>Back</b> = Select, <b>Start</b> = Start, <b>Guide</b> = PS button.</p>
+            <p class="muted" style="font-size:13px;margin:0 0 8px" id="ps3PadNote"></p>
+            <button class="btn ghost sm" id="ps3XboxPad" title="Sets player 1 in RPCS3 to the first Xbox controller (your file before is kept as Default.yml.bak)">Use the Xbox controller for player 1</button>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">PS3 games aren't recorded: RPCS3 can't save its picture for RetroPixels the way the other emulators do. OBS Studio can record RPCS3's window.</p>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">RPCS3</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px"><b>RPCS3</b> is the open-source PlayStation 3 emulator (GPL-2.0, rpcs3.net). RetroPixels starts the RPCS3 you have; it doesn't come with RetroPixels.
+              The PS3 system software, your games and their licences are your own files: RetroPixels never downloads them.</p>
+            <div class="rg-btns">
+              <button class="btn ghost sm" id="ps3ChooseFolder">Choose RPCS3 folder…</button>
+              <button class="btn ghost sm" id="ps3DefaultFolder" hidden>Find RPCS3 by itself</button>
+              <button class="btn ghost sm" id="ps3OpenFolder">Open RPCS3's folder</button>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
   <!-- ===================== Player ===================== -->
   <section id="playerWrap">
     <div id="playerBar">
@@ -914,8 +981,8 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #smGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
-    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii / Wii U
+    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #smGrid .sw-tile, #ps3Grid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame" && status.running.kind !== "rpcs3"); // recording is for GameCube / Wii / Wii U
     return status;
   }
 
@@ -1045,14 +1112,14 @@
   // Keep the "now playing" bar up to date while a desktop tab is open.
   let wasRunning = false, wasSaving = false;
   setInterval(async () => {
-    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden && wiiuTab.hidden && smTab.hidden)) return;
+    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden && wiiuTab.hidden && smTab.hidden && ps3Tab.hidden)) return;
     try {
       const st = await api("/api/status");
       const isRunning = !!st.running;
       renderStatus(st);
       if (wasRunning && !isRunning) {
         if (!mameTab.hidden) loadMame("ended"); else toast("Welcome back");
-        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); if (!wiiuTab.hidden) loadWiiU(); if (!smTab.hidden) loadSupermodel("ended");
+        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); if (!wiiuTab.hidden) loadWiiU(); if (!smTab.hidden) loadSupermodel("ended"); if (!ps3Tab.hidden) loadPS3("ended");
       }
       else if (!recTab.hidden && (wasSaving || (st.rec && st.rec.saving))) loadRecordings(); // progress, then the new video
       wasSaving = !!(st.rec && st.rec.saving);
@@ -1084,7 +1151,7 @@
     tiles[next].focus();
     tiles[next].scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
-  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && (!gcTab.hidden || !wiiuTab.hidden || !smTab.hidden) };
+  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && (!gcTab.hidden || !wiiuTab.hidden || !smTab.hidden || !ps3Tab.hidden) };
 
   // ---------- Tabs ----------
   const tabsEl = document.getElementById("tabs");
@@ -1094,6 +1161,7 @@
   const mameTab = document.getElementById("mameTab");
   const wiiuTab = document.getElementById("wiiuTab");
   const smTab = document.getElementById("smTab");
+  const ps3Tab = document.getElementById("ps3Tab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -1101,7 +1169,7 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "wiiu", "mame", "supermodel", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "wiiu", "mame", "supermodel", "ps3", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
@@ -1112,6 +1180,10 @@
     document.getElementById("smBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("smDesktop").hidden = !DESKTOP;
     if (tab === "supermodel" && DESKTOP) loadSupermodel();
+    ps3Tab.hidden = tab !== "ps3";
+    document.getElementById("ps3BrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("ps3Desktop").hidden = !DESKTOP;
+    if (tab === "ps3" && DESKTOP) loadPS3();
     document.getElementById("wiiuBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("wiiuDesktop").hidden = !DESKTOP;
     if (tab === "wiiu" && DESKTOP) loadWiiU();
@@ -1614,6 +1686,136 @@
         gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("PixelU settings saved");
       } catch (e) { toast(e.message, true); }
     });
+  }
+
+  // ---------- PlayStation 3 in RPCS3 ----------
+  let ps3Data = null, ps3Poll = null, ps3ProblemAt = null;
+  const ps3Msg = document.getElementById("ps3Msg");
+
+  async function loadPS3(afterGame) {
+    try {
+      gotPS3(await api("/api/ps3/status"), afterGame);
+      api("/api/status").then(renderStatus).catch(() => {});
+    } catch (e) { ps3Msg.textContent = "Couldn't load the PS3 tab: " + e.message; }
+  }
+  function gotPS3(st, afterGame) {
+    const prev = ps3ProblemAt;
+    ps3Data = st;
+    renderPS3();
+    const p = st.problem;
+    ps3ProblemAt = p ? p.at : null;
+    if (p && p.at !== prev && afterGame) toast(p.game + " didn't start: " + p.text, true);
+    const waiting = st.finding || !!st.busy;
+    if (waiting && !ps3Poll) ps3Poll = setInterval(async () => {
+      if (ps3Tab.hidden) return;
+      try { gotPS3(await api("/api/ps3/status")); } catch (e) { /* keep trying */ }
+    }, 1500);
+    if (!waiting && ps3Poll) { clearInterval(ps3Poll); ps3Poll = null; }
+  }
+
+  function renderPS3() {
+    const st = ps3Data, r = st.rpcs3 || {};
+    const games = r.games || [];
+    const playing = !!(appStatus && appStatus.running);
+    const grid = document.getElementById("ps3Grid");
+    grid.innerHTML = "";
+    for (const g of games) {
+      const lic = g.licence || {};
+      const ready = r.firmware && (!lic.needed || lic.found);
+      const b = document.createElement("button");
+      b.className = "sw-tile";
+      b.disabled = playing;
+      b.title = ready ? "Play " + g.title : (!r.firmware ? "The PS3 system software isn't installed in RPCS3" : "Needs its licence file: " + lic.contentId + ".rap or .edat");
+      b.innerHTML = `<div class="ps3-art"><b>${esc(g.title)}</b><small>${esc(g.titleId)}</small>
+          ${ready ? '<span class="sm-play">▶ Play</span>' : '<span class="ps3-warn">' + (!r.firmware ? "needs system software" : "needs licence") + "</span>"}</div>
+        <div class="sw-info"><b>${esc(g.title)}</b>
+          <div class="sw-tags"><span class="sw-tag">${g.disc ? "disc" : "installed"}</span>${g.version ? `<span class="sw-tag">v${esc(g.version)}</span>` : ""}${lic.needed ? `<span class="sw-tag">${lic.found ? "licence ✓" : "no licence"}</span>` : ""}</div>
+          ${g.played && !g.played.startsWith("0001") ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
+        </div>`;
+      b.addEventListener("click", () => playPS3(g));
+      grid.appendChild(b);
+    }
+    // What's missing, in plain words.
+    const need = [];
+    if (!r.exe) need.push(st.finding ? "Looking for RPCS3 on your drives…" : esc(st.notFound));
+    else {
+      if (!r.firmware) need.push(esc(st.firmwareMessage));
+      for (const g of games) {
+        const lic = g.licence || {};
+        if (lic.needed && !lic.found) need.push(`<b>${esc(g.title)}</b> needs its licence file <b>${esc(lic.contentId)}.rap</b> (or .edat). Click "Add licence file…" and choose your own licence file for it.`);
+      }
+      if (!games.length) need.push("No games are installed in RPCS3 yet. Click \"Install game (.pkg)…\" and choose your game's package, or install it with RPCS3's File > Install Packages/Raps/Edats.");
+    }
+    if (st.busy) need.unshift(`RPCS3 is installing <b>${esc(st.busy)}</b>: follow its window, then come back here.`);
+    if (st.busyError) need.unshift(esc(st.busyError));
+    document.getElementById("ps3Need").innerHTML = need.map(t => `<div class="ps3-need">${t}</div>`).join("");
+    document.getElementById("ps3Emu").innerHTML = r.exe
+      ? `<span class="muted">Emulator</span><br><b>RPCS3</b>${st.folder ? ' <small class="muted">(your chosen folder)</small>' : ""}<br><small class="muted">${esc(r.exe)}</small>`
+      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">RPCS3 not found</b><br><small class="muted">${st.folder ? "rpcs3.exe isn't in " + esc(st.folder) : 'Click "Choose RPCS3 folder…"'}</small>`;
+    document.getElementById("ps3Fw").innerHTML = !r.exe ? "" : r.firmware
+      ? `<span class="muted">PS3 system software</span><br><b style="color:var(--ok, #46a758)">✓ installed</b> <small class="muted">${esc(r.firmwareVersion || "")}</small>`
+      : `<span class="muted">PS3 system software</span><br><b style="color:var(--warn)">✗ not installed</b><br><small class="muted">RPCS3 needs PS3UPDAT.PUP installed</small>`;
+    document.getElementById("ps3PadNote").textContent = !r.exe ? "" : r.pad === "XInput" ? "Player 1: Xbox controller."
+      : r.pad ? "Player 1 uses " + r.pad + " in RPCS3's settings (your choice is kept)." : "Player 1 is set to the Xbox controller when the first game starts.";
+    document.getElementById("ps3XboxPad").disabled = !r.exe || r.pad === "XInput";
+    document.getElementById("ps3Embed").checked = !!st.embed;
+    document.getElementById("ps3Full").checked = !!st.fullscreen;
+    for (const id of ["ps3InstallPkg", "ps3AddLicence", "ps3InstallFw", "ps3OpenFolder"]) document.getElementById(id).disabled = !r.exe || !!st.busy;
+    document.getElementById("ps3DefaultFolder").hidden = !st.folder;
+    document.getElementById("ps3Rescan").disabled = !!st.finding;
+    const p = st.problem;
+    document.getElementById("ps3Note").innerHTML = p
+      ? `<div class="rec-note" style="background:#2a1416;border:1px solid var(--danger)"><b>${esc(p.game)} didn't start.</b> ${esc(p.text)}<br><small class="muted">RPCS3's log: ${esc(p.log || "")}</small></div>` : "";
+  }
+
+  async function playPS3(g) {
+    ps3Msg.style.color = ""; ps3Msg.textContent = "";
+    const st = ps3Data;
+    if (st.embed) {
+      // Docked: this window goes fullscreen (must happen right in the click).
+      if (st.fullscreen && !document.fullscreenElement) {
+        document.documentElement.requestFullscreen().then(() => { dolWentFullscreen = true; }).catch(() => {});
+      }
+      sendEmbedArea();
+    }
+    try {
+      await api("/api/ps3/play", { titleId: g.titleId });
+      toast("Starting " + g.title + "…");
+      setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
+      // A game that can't run closes RPCS3 within moments: look again so the reason shows.
+      setTimeout(() => { if (!(appStatus && appStatus.running)) loadPS3("check"); }, 5000);
+    } catch (e) {
+      ps3Msg.style.color = "var(--danger)"; ps3Msg.textContent = e.message;
+      if (dolWentFullscreen && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); dolWentFullscreen = false; }
+    }
+  }
+
+  async function ps3Action(body, ok) {
+    try {
+      const r = await api("/api/ps3/action", body);
+      gotPS3(r);
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); if (ps3Data) renderPS3(); return null; }
+  }
+
+  if (DESKTOP) {
+    document.getElementById("ps3InstallPkg").addEventListener("click", () => { toast("Choose the game package in the window that just opened"); ps3Action({ action: "install-pkg" }); });
+    document.getElementById("ps3AddLicence").addEventListener("click", async () => {
+      toast("Choose your licence file in the window that just opened");
+      const lics = d => JSON.stringify(((d && d.rpcs3 && d.rpcs3.games) || []).map(g => g.licence));
+      const before = lics(ps3Data);
+      const r = await ps3Action({ action: "add-licence" });
+      if (r && lics(r) !== before) toast("Licence added to RPCS3");
+    });
+    document.getElementById("ps3InstallFw").addEventListener("click", () => { toast("Choose PS3UPDAT.PUP in the window that just opened"); ps3Action({ action: "install-firmware" }); });
+    document.getElementById("ps3Rescan").addEventListener("click", () => ps3Action({ action: ps3Data && ps3Data.rpcs3 && ps3Data.rpcs3.exe ? "rescan" : "find" }));
+    document.getElementById("ps3Embed").addEventListener("change", e => ps3Action({ action: "embed", on: e.target.checked }));
+    document.getElementById("ps3Full").addEventListener("change", e => ps3Action({ action: "fullscreen", on: e.target.checked }));
+    document.getElementById("ps3XboxPad").addEventListener("click", () => ps3Action({ action: "xbox-pad" }, "Player 1 is the Xbox controller"));
+    document.getElementById("ps3ChooseFolder").addEventListener("click", () => ps3Action({ action: "choose-folder" }));
+    document.getElementById("ps3DefaultFolder").addEventListener("click", () => ps3Action({ action: "default-folder" }));
+    document.getElementById("ps3OpenFolder").addEventListener("click", () => ps3Action({ action: "open-folder" }));
   }
 
   // ---------- Star Wars Trilogy Arcade in Supermodel ----------

@@ -106,7 +106,7 @@ jobs:
 
       - name: Package
         run: |
-          cp README.txt CHANGELOG.txt "$DIR/"
+          cp README.txt CHANGELOG.txt LICENSE.txt THIRD-PARTY-NOTICES.txt "$DIR/"
           cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
           cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
           {
@@ -119,8 +119,10 @@ jobs:
             fi
             echo "Built $(date -u +%F) from branch $BRANCH ($(git rev-parse --short HEAD))"
             echo
+            echo "RetroPixels is Copyright Shredder565, all rights reserved (LICENSE.txt). Third-party components keep their own licences (THIRD-PARTY-NOTICES.txt)."
+            echo
             echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
-            echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
+            echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start; Cemu's game profiles and translations are MPL-2.0, LICENSE-MPL-2.0.txt)"
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel\\LICENSE.txt"

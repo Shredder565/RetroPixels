@@ -75,9 +75,16 @@ jobs:
           Copy-Item -Recurse pixelu/bin/resources "$out/resources"
           Copy-Item -Recurse pixelu/bin/gameProfiles "$out/gameProfiles"
           Copy-Item pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          # The licence files of the libraries built into PixelU (THIRD-PARTY-NOTICES.txt, section 2).
+          New-Item -ItemType Directory -Force "$out/Licenses/vcpkg" | Out-Null
+          Get-ChildItem -Path pixelu/build/vcpkg_installed/*/share/*/copyright -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "$out/Licenses/vcpkg/$($_.Directory.Name).txt" }
+          foreach ($d in "ZArchive", "cubeb", "imgui", "Vulkan-Headers", "ih264d") {
+            Get-ChildItem "pixelu/dependencies/$d" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(licen[cs]e|copying|notice)' } | ForEach-Object { Copy-Item $_.FullName "$out/Licenses/$d-$($_.Name)" }
+          }
+          "Licence files: " + (Get-ChildItem -Recurse -File "$out/Licenses").Count
           "PixelU keeps its settings, keys and saves in this folder." | Out-File "$out/portable/README.txt"
           $sha = git rev-parse --short HEAD
-          "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicense: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
+          "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicence: RetroPixels' own code, Copyright Shredder565, all rights reserved (see LICENSE.txt and THIRD-PARTY-NOTICES.txt in the RetroPixels download). Cemu's game profiles and translations: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Libraries: Licenses\. Started from Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
 
       - name: List package contents
         shell: pwsh
@@ -171,13 +178,27 @@ jobs:
           cp -r pixelu/bin/resources "$out/resources"
           cp -r pixelu/bin/gameProfiles "$out/gameProfiles"
           cp pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          # The licence files of the libraries built into PixelU (THIRD-PARTY-NOTICES.txt, section 2).
+          mkdir -p "$out/Licenses/vcpkg"
+          for f in pixelu/build/vcpkg_installed/*/share/*/copyright; do
+            if [ -f "$f" ]; then cp "$f" "$out/Licenses/vcpkg/$(basename "$(dirname "$f")").txt"; fi
+          done
+          for d in ZArchive cubeb imgui Vulkan-Headers ih264d gamemode; do
+            for f in pixelu/dependencies/$d/*; do
+              case $(basename "$f" | tr 'A-Z' 'a-z') in
+                licen[cs]e*|copying*|notice*) cp "$f" "$out/Licenses/$d-$(basename "$f")" ;;
+              esac
+            done
+          done
+          echo "licence files: $(find "$out/Licenses" -type f | wc -l)"
           echo "PixelU keeps its settings, keys and saves in this folder." > "$out/portable/README.txt"
           {
             echo "PixelU test build for Linux x86-64 (Wii U, based on Cemu; not a release)"
             echo "Built $(date -u +%Y-%m-%d) on Ubuntu 22.04 from branch ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
             echo "Needs glibc 2.35 or newer, GTK 3, X11 (or XWayland), and a Vulkan or OpenGL driver."
             echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/pixelu"
-            echo "License: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu"
+            echo "Licence: RetroPixels' own code, Copyright Shredder565, all rights reserved (see LICENSE.txt and THIRD-PARTY-NOTICES.txt in the RetroPixels download)."
+            echo "Cemu's game profiles and translations: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Libraries: Licenses/. Started from Cemu: https://github.com/cemu-project/Cemu"
           } > "$out/VERSION.txt"
           tar -czf dist/PixelU-linux.tar.gz -C package PixelU
           cp "$out/VERSION.txt" dist/VERSION.txt

@@ -1,0 +1,119 @@
+RetroPixels Software Licence
+============================
+
+Copyright (c) 2025-2026 Shredder565. All rights reserved.
+
+This licence covers RetroPixels' own software: the RetroPixels programs
+(RetroPixels.exe, RetroPixels-Native.exe, the Linux RetroPixels program and
+the RetroPixels app for Android, including its engine librpengine.so), the
+RetroPixels-authored code of its engines (PixelU, PixelU-Wii and RetroPixels'
+Model 3 engine in the Supermodel folder), and the source code, artwork,
+documentation and other material that Shredder565 owns and that comes with
+them (together, the "Software").
+
+It does NOT cover the third-party components that come with or are used by
+the Software. Each of those remains under its own licence, which is listed,
+together with the notices it requires, in THIRD-PARTY-NOTICES.txt. Nothing in
+this licence limits any right you have under those licences; where a
+third-party licence gives you rights in a component (for example the right
+to receive its source code, to modify it or to replace it), those rights
+apply to that component in full. In particular, the engines that are
+distributed under the GNU General Public License (see THIRD-PARTY-NOTICES.txt)
+are licensed to you under that licence for as long as that is stated there.
+
+
+1. Ownership
+
+The Software is licensed, not sold. Shredder565 keeps all rights, title and
+interest in the Software, including all copyrights and other intellectual
+property rights. Any rights not expressly granted in this licence are
+reserved.
+
+
+2. Licence granted to you
+
+If you obtained the Software from Shredder565 or an authorised store or
+reseller (for example by buying it), Shredder565 grants you a personal,
+non-exclusive, non-transferable, non-sublicensable, revocable licence to
+install and use the Software, for your own personal, non-commercial use, on
+devices that you own or control.
+
+You may make backup copies of the Software for your own use.
+
+
+3. Restrictions
+
+Except as expressly allowed by this licence, by a third-party licence that
+applies to a particular component, or by applicable law that cannot be
+excluded by agreement, you may not, without Shredder565's prior written
+permission:
+
+  a) copy, distribute, publish, sell, rent, lease, lend, sublicense or
+     otherwise make the Software, or any part of it, available to anyone
+     else, including by uploading it to a website, store or file-sharing
+     service;
+  b) modify, adapt, translate or create derivative works of the Software;
+  c) decompile, disassemble or reverse engineer the Software, except to the
+     extent that applicable law expressly permits it despite this
+     limitation;
+  d) remove, alter or obscure any copyright, trademark or licence notice in
+     the Software;
+  e) use the Software to provide a commercial service to others.
+
+Having access to the Software's source code (for example in a repository)
+does not give you any of these rights.
+
+
+4. Games and other content
+
+The Software does not include any games, BIOS or firmware images, console
+keys or other copyrighted content belonging to third parties. You are
+responsible for making sure that you have the right to use any content you
+use with the Software. "Nintendo", "Wii", "Wii U",
+"GameCube", "Game Boy", "Sega", "Genesis", "Atari", "Xbox" and other names
+of consoles, games and companies are trademarks of their respective owners;
+they are used only to describe compatibility, and RetroPixels is not
+affiliated with, endorsed by or sponsored by any of them.
+
+
+5. Termination
+
+This licence ends automatically if you break any of its terms. When it ends
+you must stop using the Software and delete all copies of it. Sections 1, 3,
+6 and 7 survive termination.
+
+
+6. No warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE AND
+NON-INFRINGEMENT. THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE
+SOFTWARE IS WITH YOU.
+
+
+7. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL
+SHREDDER565 BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, LOSS OF
+DATA, SAVES OR PROFITS, OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE), ARISING IN ANY WAY OUT OF THE USE OF OR
+INABILITY TO USE THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+Some jurisdictions do not allow the exclusion of certain warranties or the
+limitation of liability, so some of the above may not apply to you. Your
+statutory rights as a consumer are not affected.
+
+
+8. General
+
+If any part of this licence is found to be unenforceable, the rest of it
+remains in effect. The terms of the store you obtained the Software from
+(for example Google Play's terms of service) also apply, and where they give
+you more rights, those terms prevail to that extent.
+
+For permission to do anything this licence does not allow, contact
+Shredder565 (https://github.com/shredder565).

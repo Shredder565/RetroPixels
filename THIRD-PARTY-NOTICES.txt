@@ -1,0 +1,581 @@
+RetroPixels: third-party notices
+================================
+
+RetroPixels' own software is proprietary (LICENSE.txt). It includes, links
+or comes with the third-party components listed below. Each component
+remains under its own licence and copyright; LICENSE.txt does not change
+those licences, and nothing in LICENSE.txt restricts the rights they give
+you.
+
+Where a licence's full text is long it is not repeated here; this file says
+where the full text is. In the Windows and Linux downloads:
+
+  LICENSE-MPL-2.0.txt              Mozilla Public License 2.0
+  PixelU\wii\COPYING               PixelU-Wii's own notice (who owns what)
+  PixelU\wii\license.txt           GNU GPL version 2
+  PixelU\wii\Licenses\             Apache-2.0, GPL-2.0, GPL-3.0, LGPL-2.1,
+                                   LGPL-3.0, MPL-2.0, BSD, ISC, MIT, Zlib,
+                                   CC0, curl, bzip2 and Bitstream Vera texts,
+                                   and in Licenses\Externals each PixelU-Wii
+                                   library's own licence file
+  Supermodel\LICENSE.txt           GNU GPL version 3 (Supermodel engine)
+  Supermodel\lib\LICENSES\         (Linux) SDL2, SDL2_net and GLU licences
+  MAME\MAME 0.xxx\COPYING,         MAME's licence (GPL-2.0-or-later as a
+   docs\legal\                     whole) and its components' licences
+
+In the source code the same texts are in pixelu/LICENSE.txt (MPL-2.0),
+wiiu/LICENSE-MPL-2.0.txt, pixelu/wii/COPYING, pixelu/wii/LICENSES/ and
+supermodel/COPYING.
+
+No games, BIOS or firmware images, console keys or other copyrighted game
+content are included in RetroPixels.
+
+Contents
+  1. RetroPixels programs (RetroPixels, RetroPixels Native, the Android app)
+  2. PixelU (PixelU\PixelU.exe, Wii U engine)
+  3. PixelU-Wii (PixelU\wii\PixelU-Wii.exe, GameCube and Wii engine)
+  4. RetroPixels' Model 3 engine (Supermodel\supermodel.exe)
+  5. MAME (MAME\, arcade engine; a separate program)
+  6. Programs RetroPixels can download or use but does not include
+  7. Licence texts
+
+
+=============================================================================
+1. RetroPixels programs
+=============================================================================
+
+RetroPixels.exe, RetroPixels-Native.exe, the Linux "RetroPixels" program and
+the Android app's engine (librpengine.so) are written in Go. The Android
+app's own code uses only Android's built-in classes (no libraries are
+packaged into the app; JUnit is used for tests only).
+
+1.1 The Go runtime and standard library
+    Copyright 2009 The Go Authors. BSD-3-Clause; full text in section 7.1.
+
+1.2 fdlibm (Sun Microsystems), in cores/gba/jsmath.go and
+    cores/snes/jsmath.go (Math.pow, atan, atan2, sin and cos as V8
+    computes them):
+
+    Copyright (C) 1993-2004 by Sun Microsystems, Inc. All rights reserved.
+    Developed at SunSoft, a Sun Microsystems, Inc. business.
+    Permission to use, copy, modify, and distribute this software is freely
+    granted, provided that this notice is preserved.
+
+1.3 DejaVu Sans Mono / Bitstream Vera Sans Mono: the Wii U OSScreen text
+    font in wiiu/font.go is a bitmap drawn from DejaVu Sans Mono.
+    Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream
+    Vera is a trademark of Bitstream, Inc. DejaVu changes are in the public
+    domain. Bitstream Vera licence: section 7.4.
+
+1.4 Cemu (Mozilla Public License 2.0): these files of RetroPixels' Go Wii U
+    emulator (the wiiu package) are Go rewrites of code from Cemu
+    (https://github.com/cemu-project/Cemu, Copyright Cemu Project) and are
+    under the Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). They are
+    BEING REPLACED by original RetroPixels code; until then they are
+    compiled into RetroPixels.exe, RetroPixels-Native.exe and the Android
+    engine:
+
+      wiiu/ax_voice.go             wiiu/latte_cmd.go
+      wiiu/coreinit_alarm.go       wiiu/mem_blockheap.go
+      wiiu/coreinit_coroutine_cemu.go  wiiu/mem_expheap.go
+      wiiu/coreinit_fg.go          wiiu/mem_frmheap.go
+      wiiu/coreinit_sync.go        wiiu/mem_heap.go
+      wiiu/coreinit_sysinfo.go     wiiu/mem_unitheap.go
+      wiiu/coreinit_threads.go     wiiu/nn_ac.go
+      wiiu/gx2_command.go          wiiu/nn_fp.go
+      wiiu/gx2r_resource.go        wiiu/padscore.go
+                                   wiiu/vpad_touch.go
+
+    Source code of these files: they are available, in source form, from
+    https://github.com/shredder565/retropixels (folder wiiu) or on request
+    from Shredder565 at no more than the cost of distribution. You may use,
+    modify and distribute those files under the terms of the MPL 2.0.
+
+
+=============================================================================
+2. PixelU (Wii U engine)
+=============================================================================
+
+PixelU.exe is RetroPixels' Wii U engine. Its code was written for
+RetroPixels (it started from Cemu, and every Cemu source file has been
+replaced; pixelu/THIRD_PARTY.md and docs/pixelu-original.md in the source
+list the details). Third-party parts:
+
+2.1 Data that still comes from Cemu (Mozilla Public License 2.0,
+    Copyright Cemu Project, https://github.com/cemu-project/Cemu;
+    LICENSE-MPL-2.0.txt), shipped as separate files:
+      gameProfiles\default\*.ini        per-game settings
+      resources\<language>\cemu.mo      translations of the user interface
+    Their source form is in the RetroPixels source (pixelu/bin) and in
+    Cemu's repository.
+
+2.2 Code inside PixelU's source:
+    TinyXML-2 (Lee Thomason)                         zlib (section 7.3)
+    robin_hood hashing, Copyright (c) 2018-2020
+      Martin Ankerl                                  MIT (section 7.2)
+    ska::flat_hash_map, Copyright Malte Skarupke 2017 Boost Software
+                                                     License 1.0 (7.6)
+    MD5 (Alexander Peslyak)                          public domain
+    G.721 codec (Sun Microsystems): "This source code is a product of Sun
+      Microsystems, Inc. and is provided for unrestricted use. Users may
+      copy or modify this source code without charge."
+    date.h, Copyright (c) 2015-2017 Howard Hinnant,
+      (c) 2016 Adrian Colomitchi                     MIT (section 7.2)
+    fast_float, Copyright (c) 2021 The fast_float
+      authors                                        MIT (section 7.2)
+    Khronos OpenGL/EGL headers, Copyright (c) The
+      Khronos Group Inc.                             MIT / Apache-2.0
+    XAudio2 2.7 and DirectX SDK (June 2010) headers  Microsoft DirectX SDK
+                                                     terms
+    Font Awesome 4.7 (Dave Gandy)                    SIL OFL 1.1 (7.5)
+    Font Awesome 5 icon table (IconFontCppHeaders)   zlib (section 7.3)
+    Lato (Lukasz Dziedzic)                           SIL OFL 1.1 (7.5)
+    Noto Sans CJK (Google, Adobe), the shared fonts
+      in resources\sharedFonts                       SIL OFL 1.1 (7.5)
+    "More Perfect DOS VGA" bitmap font (OSScreen)    freeware; no licence
+                                                     text is known
+    Icons by Icons8 (https://icons8.com)             Icons8 licence,
+                                                     https://icons8.com/license
+
+2.3 Libraries in pixelu/dependencies (built into PixelU):
+    ZArchive (Exzap)                                 MIT-0
+    cubeb (Mozilla and contributors)                 ISC
+    Dear ImGui, Copyright (c) 2014-2025 Omar Cornut  MIT (section 7.2)
+    Vulkan-Headers (The Khronos Group Inc.)          Apache-2.0 or MIT
+    libavc H.264 decoder, Copyright (C) 2015 The
+      Android Open Source Project                    Apache-2.0
+    GameMode client (Feral Interactive), Linux only  BSD-3-Clause
+    xbyak_aarch64 (Fujitsu), ARM builds only         Apache-2.0
+
+2.4 Libraries built by vcpkg and linked statically into PixelU. Each
+    library's own copyright file is copied next to PixelU at build time
+    (PixelU\Licenses\vcpkg\<library>.txt):
+    wxWidgets 3.3            wxWindows Library Licence 3.1 (LGPL-2.0 with
+                             an exception allowing binaries to be
+                             distributed under the user's own terms)
+    SDL 3                    zlib
+    Boost                    Boost Software License 1.0 (section 7.6)
+    {fmt}                    MIT
+    curl                     curl licence (MIT/X style)
+    OpenSSL 3                Apache-2.0
+    zlib                     zlib
+    Zstandard                BSD-3-Clause (chosen of BSD-3-Clause / GPL-2.0)
+    libzip                   BSD-3-Clause
+    libpng                   PNG Reference Library License version 2
+    libtiff, libjpeg-turbo   libtiff licence; IJG licence and BSD-3-Clause
+    pugixml                  MIT
+    RapidJSON                MIT
+    GLM                      MIT
+    glslang                  BSD-3-Clause, MIT and Apache-2.0 (its
+                             generated parser carries the Bison exception)
+    libusb                   GNU LGPL 2.1 or later. libusb is linked
+                             statically into PixelU. As the LGPL requires,
+                             you may obtain libusb's source code
+                             (https://github.com/libusb/libusb) and, on
+                             request to Shredder565, the object files
+                             needed to relink PixelU with a modified
+                             libusb.
+    D-Bus (Linux only)       Academic Free License 2.1 (chosen of AFL-2.1 /
+                             GPL-2.0-or-later)
+    The Apache License 2.0 text is in PixelU\wii\Licenses\Apache-2.0.txt,
+    the LGPL 2.1 text in PixelU\wii\Licenses\LGPL-2.1-or-later.txt.
+
+2.5 Linux only: lib/libbluetooth.so.3 (BlueZ, GNU GPL 2.0 or later), shipped
+    next to PixelU for Wii Remotes over Bluetooth; its copyright file is
+    lib/libbluetooth-COPYRIGHT.txt, its source is Ubuntu 22.04's bluez
+    package.
+
+
+=============================================================================
+3. PixelU-Wii (GameCube and Wii engine)
+=============================================================================
+
+PixelU-Wii's own notice, PixelU\wii\COPYING, lists every part of it, its
+copyright and its licence, and PixelU\wii\Licenses\ holds the licence texts
+(Licenses\Externals\<project>\ holds each library's own licence file). In
+short:
+
+  - RetroPixels' own code and art (files marked "Original code for
+    RetroPixels (PixelU-Wii)"): Copyright Shredder565, see LICENSE.txt.
+  - PixelU-Wii.exe as distributed is linked with components under the GNU
+    GPL (FFmpeg configured with --enable-gpl --enable-version3, LZO,
+    FreeSurround, the TAP-Windows header) and is therefore distributed as
+    a whole under the GNU General Public License, version 3 (Dolphin's
+    "version 2 or later" terms allow this). Its complete source code is
+    available from https://github.com/shredder565/retropixels (folder
+    pixelu/wii) or on request from Shredder565.
+  - Sys data from Dolphin (Sys\GameSettings, Sys\ApprovedInis.json,
+    Languages, Sys\GC\dsp_rom.bin and dsp_coef.bin): GPL-2.0-or-later,
+    Copyright Dolphin Emulator Project.
+  - Qt 6 (DLLs, LGPL-3.0), SDL 3, SFML, zlib-ng, minizip-ng, ed25519,
+    libspng, LZ4, xxHash, picojson, Zstandard, MiniUPnPc, hidapi, FatFs,
+    cubeb, mbed TLS, SPIRV-Cross, glslang, Vulkan-Headers,
+    VulkanMemoryAllocator, Dear ImGui, ImPlot, fmt, ENet, pugixml,
+    tinygltf, watcher, cpp-ipc, cpp-optparse, discord-rpc, RapidJSON, expr,
+    rcheevos, Windows Implementation Libraries, curl, bzip2, liblzma, mGBA
+    (MPL-2.0), libusb, libiconv and the Bochs disassembler (LGPL-2.1),
+    OpenAL headers (LGPL-2.0), Khronos headers, Bitstream Vera Sans Mono,
+    GameTDB title lists, the Gecko code handler, and the Microsoft Visual
+    C++ runtime: as listed in PixelU\wii\COPYING.
+
+
+=============================================================================
+4. RetroPixels' Model 3 engine (Supermodel folder)
+=============================================================================
+
+supermodel.exe (Linux: supermodel) plays Sega Model 3 games. It started as
+Supermodel (https://github.com/trzy/Supermodel, Copyright 2003-2026 The
+Supermodel Team, GNU GPL version 3 or later), and its emulator code has been
+rewritten as RetroPixels' own (docs/supermodel-original.md). It is still
+distributed under the GNU General Public License, version 3 or later
+(Supermodel\LICENSE.txt), with its complete corresponding source code
+(Supermodel\Supermodel-source.tar.gz), because it still contains or is
+built with the following GPL material:
+
+  - Musashi 68000 emulator, Supermodel's version (Src/CPU/68K/Musashi):
+    Copyright 1998-2001 Karl Stenerud; Supermodel changes Copyright 2011 Bart
+    Trzynadlowski, Nik Henson and 2003-2026 The Supermodel Team; GPL-3.0 or
+    later (permission was obtained from Karl Stenerud to apply the GPL).
+  - The Windows resource script and manifest
+    (Src/OSD/Windows/SupermodelResources.rc, SupermodelManifest.xml),
+    Supermodel's build files (Makefiles/), Config/Games.xml,
+    Config/Music.xml, Assets/*.bmp and Docs/: The Supermodel Team, GPL-3.0
+    or later.
+
+Other third-party code in it:
+
+  GLEW (The OpenGL Extension Wrangler Library), in Src/Pkgs:
+    Copyright (C) 2008-2017, Nigel Stewart; Copyright (C) 2002-2008, Milan
+    Ikits; Copyright (C) 2002-2008, Marcelo E. Magallon; Copyright (C) 2002,
+    Lev Povalahev. All rights reserved.
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are
+    met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * The name of the author may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+    IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+    THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+    PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+    CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  GLEW's Mesa 3-D part: Copyright (C) 1999-2007 Brian Paul. All Rights
+    Reserved. MIT licence (section 7.2; "Brian Paul" in place of "the
+    authors or copyright holders").
+
+  Khronos OpenGL headers (in GLEW's headers): Copyright (c) 2007 The
+    Khronos Group Inc. MIT licence (section 7.2, applying to the
+    "Materials").
+
+  Dear ImGui 1.92, Copyright (c) 2014-2025 Omar Cornut. MIT (section 7.2).
+
+  minizip (Src/Pkgs/unzip.c, ioapi.c, crypt.h): Copyright (C) 1998-2010
+    Gilles Vollant, Copyright (C) 2007-2008 Even Rouault, Copyright (C)
+    2009-2010 Mathias Svensson. zlib licence (section 7.3).
+
+  minimp3 (lieff): dedicated to the public domain (CC0 1.0,
+    PixelU\wii\Licenses\CC0-1.0.txt).
+
+  TinyXML-2, original code by Lee Thomason (www.grinninglizard.com). zlib
+    licence (section 7.3).
+
+  SDL 2 and SDL_net 2, Copyright (C) 1997-2025 Sam Lantinga. zlib licence
+    (section 7.3). Windows: linked statically; Linux: Supermodel/lib.
+
+  zlib, Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler. zlib
+    licence (section 7.3). Windows: linked statically.
+
+  GLU (Linux only, Supermodel/lib/libGLU.so.1, from Mesa): SGI Free
+    Software License B, version 2.0 (Supermodel/lib/LICENSES/GLU.txt).
+
+  MinGW-w64 runtime (Windows build): winpthreads, Copyright (c) 2011-2016
+    mingw-w64 project, MIT licence (section 7.2); its pthread.h is
+    Copyright (c) 2010 Lockless Inc., BSD-3-Clause (section 7.1 with
+    "Lockless Inc." in place of "Google LLC"). The GCC runtime libraries
+    (libgcc, libstdc++) are used under the GCC Runtime Library Exception.
+
+
+=============================================================================
+5. MAME
+=============================================================================
+
+The MAME folder holds the MAME team's official MAME release, unchanged
+(https://www.mamedev.org/). MAME is a separate program that RetroPixels
+starts; it is Copyright Nicola Salmoria and the MAME team and is
+distributed as a whole under the GNU General Public License, version 2 or
+later, with parts under BSD-3-Clause and other licences (its COPYING file
+and docs\legal folder). MAME's source code for the version included is
+published with each RetroPixels release (MAME-<version>-source.tar.gz) and
+at https://github.com/mamedev/mame.
+
+
+=============================================================================
+6. Programs RetroPixels can download or use but does not include
+=============================================================================
+
+- FFmpeg (for recordings): not included. When you ask for it, RetroPixels
+  downloads an FFmpeg build from https://github.com/BtbN/FFmpeg-Builds
+  (GNU GPL) and saves that build's LICENSE.txt next to it. FFmpeg runs as a
+  separate program.
+- Dolphin: RetroPixels can start a Dolphin you installed yourself; it is
+  not included.
+
+
+=============================================================================
+7. Licence texts
+=============================================================================
+
+7.1 BSD-3-Clause (as used by Go: Copyright 2009 The Go Authors)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+7.2 MIT licence (with each component's copyright line above)
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+7.3 zlib licence (with each component's copyright line above)
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+
+7.4 Bitstream Vera Fonts licence
+
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera
+is a trademark of Bitstream, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of the fonts accompanying this license ("Fonts") and associated
+documentation files (the "Font Software"), to reproduce and distribute the
+Font Software, including without limitation the rights to use, copy,
+merge, publish, distribute, and/or sell copies of the Font Software, and
+to permit persons to whom the Font Software is furnished to do so, subject
+to the following conditions:
+
+The above copyright and trademark notices and this permission notice shall
+be included in all copies of one or more of the Font Software typefaces.
+
+The Font Software may be modified, altered, or added to, and in particular
+the designs of glyphs or characters in the Fonts may be modified and
+additional glyphs or characters may be added to the Fonts, only if the
+fonts are renamed to names not containing either the words "Bitstream" or
+the word "Vera".
+
+This License becomes null and void to the extent applicable to Fonts or
+Font Software that has been modified and is distributed under the
+"Bitstream Vera" names.
+
+The Font Software may be sold as part of a larger software package but no
+copy of one or more of the Font Software typefaces may be sold by itself.
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM
+OR THE GNOME FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR
+CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE THE FONT
+SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
+
+Except as contained in this notice, the names of Gnome, the Gnome
+Foundation, and Bitstream Inc., shall not be used in advertising or
+otherwise to promote the sale, use or other dealings in this Font Software
+without prior written authorization from the Gnome Foundation or Bitstream
+Inc., respectively. For further information, contact: fonts at gnome dot
+org.
+
+
+7.5 SIL Open Font License, version 1.1 (Font Awesome 4.7, Lato, Noto Sans
+    CJK)
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply to any
+document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may include
+source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical writer or
+other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components, in
+Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or in
+the appropriate machine-readable metadata fields within text or binary
+files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name
+as presented to the users.
+
+4) The name(s) of the Copyright Holder(s) and the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any Modified
+Version, except to acknowledge the contribution(s) of the Copyright
+Holder(s) and the Author(s) or with their explicit written permission.
+
+5) The Font Software, modified or unmodified, in part or in whole, must be
+distributed entirely under this license, and must not be distributed
+under any other license. The requirement for fonts to remain under this
+license does not apply to any document created using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are not
+met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER
+DEALINGS IN THE FONT SOFTWARE.
+
+Copyright lines: Font Awesome by Dave Gandy (http://fontawesome.io);
+Lato Copyright (c) 2010-2014 by tyPoland Lukasz Dziedzic with Reserved
+Font Name "Lato"; Noto Sans CJK Copyright 2014-2021 Adobe
+(http://www.adobe.com/), with Reserved Font Name "Source".
+
+
+7.6 Boost Software License, version 1.0
+
+Permission is hereby granted, free of charge, to any person or
+organization obtaining a copy of the software and accompanying
+documentation covered by this license (the "Software") to use, reproduce,
+display, distribute, execute, and transmit the Software, and to prepare
+derivative works of the Software, and to permit third-parties to whom the
+Software is furnished to do so, all subject to the following:
+
+The copyright notices in the Software and this entire statement, including
+the above license grant, this restriction and the following disclaimer,
+must be included in all copies of the Software, in whole or in part, and
+all derivative works of the Software, unless such copies or derivative
+works are solely in the form of machine-executable object code generated
+by a source language processor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
+FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+
+7.7 Longer licences (full texts alongside)
+
+Mozilla Public License 2.0      LICENSE-MPL-2.0.txt
+GNU GPL 2.0                     PixelU\wii\license.txt
+GNU GPL 3.0                     Supermodel\LICENSE.txt,
+                                PixelU\wii\Licenses\GPL-3.0-only.txt
+GNU LGPL 2.1                    PixelU\wii\Licenses\LGPL-2.1-or-later.txt
+GNU LGPL 3.0                    PixelU\wii\Licenses\LGPL-3.0-only.txt
+Apache License 2.0              PixelU\wii\Licenses\Apache-2.0.txt
+ISC, BSD-1/2-Clause, 0BSD,      PixelU\wii\Licenses\
+ CC0 1.0, curl, bzip2

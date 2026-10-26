@@ -212,3 +212,25 @@ tasks.register('buildEngine') {
 tasks.matching { it.name == 'preBuild' }.configureEach {
     dependsOn 'buildEngine'
 }
+
+// ---- licence files ----
+
+// RetroPixels' licence (../LICENSE.txt) and the third-party notices
+// (../THIRD-PARTY-NOTICES.txt) go into the app as assets, so every copy of
+// the app carries them. make-studio-zip.sh puts both next to the project.
+def licenceAssetsDir = layout.buildDirectory.dir('generated/licenceAssets').get().asFile
+
+tasks.register('licenceAssets', Copy) {
+    group = 'build'
+    description = 'Copies LICENSE.txt and THIRD-PARTY-NOTICES.txt into the app\'s assets.'
+    from(repoRoot) {
+        include 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt'
+    }
+    into licenceAssetsDir
+}
+
+android.sourceSets.main.assets.srcDir(licenceAssetsDir)
+
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn 'licenceAssets'
+}
