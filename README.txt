@@ -361,6 +361,27 @@ Star Wars Trilogy Arcade (Supermodel)
   Supermodel, not MAME). Its settings are under Arcade (MAME) > Supermodel
   settings.
 
+PlayStation 3 (RPCS3)
+- The "PS3" tab plays PlayStation 3 games in your own RPCS3 (the PS3
+  emulator, rpcs3.net, GPL-2.0). RetroPixels starts it; it doesn't come in
+  the RetroPixels download. RetroPixels finds it (or click "Choose RPCS3
+  folder...", which it then always uses).
+- You need, all your own files: the PS3 system software (PS3UPDAT.PUP:
+  "Install PS3 system software..." or RPCS3's File > Install Firmware),
+  your games ("Install game (.pkg)..." or RPCS3's File > Install
+  Packages/Raps/Edats), and for PSN games their licence file (.rap or
+  .edat, named after the game's content ID: "Add licence file..." copies it
+  into RPCS3's dev_hdd0\home\00000001\exdata). RetroPixels never
+  downloads or includes any of them. The tab says what a game still needs.
+- Click a game: it starts fullscreen in RPCS3's own window (or inside
+  RetroPixels with "Play inside RetroPixels"). The Xbox controller is
+  player 1 (A = Cross, B = Circle, X = Square, Y = Triangle, rumble on)
+  unless you set RPCS3's controls up yourself.
+- PS3 games aren't recorded (RPCS3 can't save its picture for RetroPixels;
+  OBS Studio can record its window).
+- RetroPixels Native: the PS3 menu does the same; drop a .pkg, .rap or
+  .edat on the window to install it or add it.
+
 Recording games
 - Every game is recorded automatically as .mp4, from the start of the game
   to the end: classic consoles, arcade, Wii U, GameCube, Wii, MAME and
