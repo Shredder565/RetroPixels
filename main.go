@@ -264,6 +264,7 @@ func newMux() *http.ServeMux {
 	registerPixelURoutes(mux)
 	registerMameRoutes(mux)
 	registerSupermodelRoutes(mux)
+	registerPS3Routes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
 	registerWiiURoutes(mux)
