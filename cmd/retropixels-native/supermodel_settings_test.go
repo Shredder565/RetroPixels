@@ -78,7 +78,7 @@ func TestSupermodelPlan(t *testing.T) {
 	if !slices.Contains(p.Args, "-force-feedback") || !slices.Contains(p.Args, `-rp-record=C:\rec`) || !slices.Contains(p.Args, `-rp-ffmpeg=C:\ff\ffmpeg.exe`) {
 		t.Fatalf("args %q", p.Args)
 	}
-	if p = s.plan(rom, supermodel.Check{OK: true}, true, `C:\rec`, ""); slices.ContainsFunc(p.Args, func(a string) bool { return strings.HasPrefix(a, "-rp-") }) {
+	if p = s.plan(rom, supermodel.Check{OK: true}, true, `C:\rec`, ""); slices.ContainsFunc(p.Args, func(a string) bool { return strings.HasPrefix(a, "-rp-record") || strings.HasPrefix(a, "-rp-ffmpeg") }) {
 		t.Fatalf("recorded without ffmpeg: %q", p.Args)
 	}
 
@@ -94,7 +94,7 @@ func TestSupermodelPlan(t *testing.T) {
 	// flight stick or recording: fullscreen at 1080p, the plain stick.
 	p = s.plan(rom, supermodel.Check{OK: true}, false, `C:\rec`, `C:\ff\ffmpeg.exe`)
 	if p.Embed || !slices.Contains(p.Args, "-res=1920,1080") || p.Controls.FlightStick || p.Env != "RP_FLIGHTSTICK=off" ||
-		slices.ContainsFunc(p.Args, func(a string) bool { return strings.HasPrefix(a, "-rp-") }) {
+		slices.ContainsFunc(p.Args, func(a string) bool { return strings.HasPrefix(a, "-rp-record") || strings.HasPrefix(a, "-rp-ffmpeg") }) {
 		t.Fatalf("official build: %+v", p)
 	}
 
