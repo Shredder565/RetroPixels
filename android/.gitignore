@@ -14,3 +14,5 @@ captures/
 app/src/main/jniLibs/
 # written into the project zip (main.go's appVersion is used when the sources are here)
 version.properties
+# Supermodel for Android (supermodel/build.sh android app/src/main/supermodel)
+app/src/main/supermodel/

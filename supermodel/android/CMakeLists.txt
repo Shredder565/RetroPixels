@@ -95,8 +95,9 @@ if(NOT EXISTS "${SM_SDL_SRC}/CMakeLists.txt")
   message(FATAL_ERROR "SM_SDL_SRC must be the SDL2 source")
 endif()
 
-# 16 KB pages (Android 15 devices), for SDL too
-string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-z,max-page-size=16384")
+# 16 KB pages (Android 15 devices), for SDL too; stripped (the app keeps
+# them as they are)
+string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-z,max-page-size=16384 -s")
 
 # SDL2 as the shared library SDLActivity loads. HIDAPI is built (SDL's Java
 # code calls into it) but turned off when the program starts.

@@ -129,6 +129,34 @@ These live in `internal/supermodel/ini.go` and `GameArgs`.
   `supermodel/pins.sh`, and the exe links statically.
 - `sh supermodel/build.sh linux OUT` is the Linux build CI starts headless.
 
+- `sh supermodel/build.sh android OUT` builds RetroPixels for Android's
+  copy (`supermodel/android/CMakeLists.txt`, once per ABI with the NDK in
+  `ANDROID_NDK_HOME`, else the pinned r27c): `libsupermodel.so` and the
+  pinned SDL2 as `libSDL2.so`, Games.xml / Music.xml / Assets, and SDL's
+  Java code. CI's android job builds it into
+  `android/app/src/main/supermodel`, where the app's Gradle build (and
+  `android/tools/build-apk.sh`) pick it up; without it the APK builds
+  without the game and its screen says so.
+- `sh supermodel/build.sh gles OUT` builds the same OpenGL ES code as a
+  Linux program (`supermodel-gles`, system SDL2 and Mesa's GLES) to test the
+  renderer on a PC.
+
+The Android build differs from the desktop one only behind build options:
+`SUPERMODEL_GLES` (an OpenGL ES 3.2 context; `Src/Graphics/GLES/GL/glew.h`
+stands in for GLEW, shaders become `#version 320 es`, line-of-sight depth and
+stencil are read through a small draw, the crosshair uploads RGBA; only the
+new 3D engine, without quad rendering), `SUPERMODEL_NO_NET` (no network
+board or outputs: `Network/NoNetBoard.h`), `SUPERMODEL_NO_GUI` (no settings
+window) and `__ANDROID__` (`Src/OSD/Android`: SDL's hints, the touch
+controls as a virtual game controller, the console log in `Log/`, and the
+recorder, which hands each frame's picture, read back without waiting, and
+its sound to the app's GameRecorder). The app (`StarWarsActivity`,
+`SupermodelActivity` in `android/app/src/supermodel`) starts it in a process
+of its own with `-fullscreen -desktop-res -no-wide-screen
+-input-system=sdlgamepad -rp-fast-boot=30` (and `-force-feedback` when the
+set has the drive board program), and writes a Supermodel.ini that maps any
+controller (`JOY_`), the touch controls being one.
+
 `.github/workflows/supermodel.yml` runs both builds and checks the exe:
 
 - It is a CUI program and imports only DLLs that come with Windows.
@@ -153,3 +181,9 @@ No ROM, BIOS or key is in the repository or the download.
     feedback-stick screen.
   - Resizing while docked keeps the picture sharp.
   - Recording makes an .mp4.
+- **Android:** CI's android job builds `libsupermodel.so` with the NDK
+  (not built where this was written: no NDK there; the same sources were
+  built as `supermodel-gles` and every shader program compiled and linked
+  under Mesa's OpenGL ES 3.2). Still to try on a phone with the ROM: the
+  game starts and runs at full speed, touch and controller aim, the
+  recording, and leaving with Back.

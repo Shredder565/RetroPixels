@@ -41,7 +41,7 @@ public final class StartActivity extends Activity {
         TextView title = Ui.heading(this, "RetroPixels " + Ui.version(this));
         col.addView(title);
         col.addView(Ui.text(this, "NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64, Genesis, Master System, "
-                + "Atari 2600, Atari 7800 and arcade games.", 14, Ui.DIM));
+                + "Atari 2600, Atari 7800 and arcade games, and Star Wars Trilogy Arcade (Sega Model 3).", 14, Ui.DIM));
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -62,6 +62,17 @@ public final class StartActivity extends Activity {
             }
         }));
         col.addView(row);
+
+        // Star Wars Trilogy Arcade has its own screen, as it has its own tab on Windows
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setPadding(0, 0, 0, Ui.dp(this, 12));
+        row2.addView(Ui.button(this, "Star Wars Trilogy Arcade", new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(StartActivity.this, StarWarsActivity.class));
+            }
+        }));
+        col.addView(row2);
 
         col.addView(Ui.text(this, "Recent games", 16, Ui.ACCENT));
         recentNone = Ui.text(this, "Games you open show here. Tap one to play it again; hold one to take it off the list.", 14, Ui.DIM);
@@ -167,10 +178,16 @@ public final class StartActivity extends Activity {
             public void run() {
                 try {
                     final File f = Library.importGame(StartActivity.this, u);
+                    // Star Wars Trilogy Arcade's ROM sets go to its own screen
+                    final String set = StarWarsActivity.adopt(StartActivity.this, f);
                     ui.post(new Runnable() {
                         public void run() {
                             pd.dismiss();
-                            play(f);
+                            if (!set.isEmpty()) {
+                                startActivity(new Intent(StartActivity.this, StarWarsActivity.class));
+                            } else {
+                                play(f);
+                            }
                         }
                     });
                 } catch (final IOException | RuntimeException e) {

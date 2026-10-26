@@ -588,7 +588,8 @@ namespace RetroPixels
       f.height = s_rb.h[i];
       f.rgba.resize(size_t(f.width) * f.height * 4);
       glBindBuffer(GL_PIXEL_PACK_BUFFER, s_rb.pbo[i]);
-      if (const void *p = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY))
+      // (glMapBufferRange: OpenGL 3.0 and OpenGL ES 3.0 both have it)
+      if (const void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, GLsizeiptr(f.rgba.size()), GL_MAP_READ_BIT))
       {
         memcpy(f.rgba.data(), p, f.rgba.size());
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
