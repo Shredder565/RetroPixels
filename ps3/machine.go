@@ -71,12 +71,13 @@ type Machine struct {
 	nextID  uint32
 	objects map[uint32]any
 
-	hle       []hleEntry
-	hleAddr   map[string]uint32 // system function name -> its OPD
-	Missing   map[string]int    // system functions called that RetroPixels doesn't have
-	sysNext   uint32            // RetroPixels' own area, bump allocated
-	retTramp  uint32            // address of the "guest function returned" call
-	exitTramp uint32            // thread entry's return address
+	hle         []hleEntry
+	hleAddr     map[string]uint32 // system function name -> its OPD
+	spursQueues map[uint32]uint32 // SPURS queue -> its entry size
+	Missing     map[string]int    // system functions called that RetroPixels doesn't have
+	sysNext     uint32            // RetroPixels' own area, bump allocated
+	retTramp    uint32            // address of the "guest function returned" call
+	exitTramp   uint32            // thread entry's return address
 
 	tb      uint64 // virtual time base
 	tbFrac  uint64
