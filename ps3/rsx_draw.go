@@ -518,7 +518,13 @@ func (m *Machine) rsxVP(d *rsxDraw, r *rsxState) {
 // rsxRenderEvery draws only every n-th frame (for quick test runs).
 var rsxRenderEvery, _ = strconv.Atoi(os.Getenv("PS3_RENDEREVERY"))
 
+// rsxRenderFrom (PS3_RENDERFROM=n) draws nothing before frame n (tests).
+var rsxRenderFrom, _ = strconv.Atoi(os.Getenv("PS3_RENDERFROM"))
+
 func (m *Machine) rsxSkip() bool {
+	if m.frame < uint64(rsxRenderFrom) {
+		return true
+	}
 	return rsxRenderEvery > 1 && (m.frame+1)%uint64(rsxRenderEvery) != 0 && (m.frame+2)%uint64(rsxRenderEvery) != 0
 }
 
