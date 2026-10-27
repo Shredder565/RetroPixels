@@ -1,11 +1,13 @@
 name: RetroPixels PS3 (test build)
 
-# A test build of RetroPixels with the PlayStation 3 core (it plays Teenage
-# Mutant Ninja Turtles: Turtles in Time Re-Shelled): RetroPixels-Native.exe
-# and RetroPixels.exe, built from this branch, with VERSION.txt. A workflow
-# artifact only (the download is one zip named with the version): no
-# release is made. The other engines (PixelU, MAME, Supermodel) aren't in
-# it: put the two programs next to them in a full RetroPixels folder.
+# A test build of RetroPixels for PlayStation 3 games (Teenage Mutant Ninja
+# Turtles: Turtles in Time Re-Shelled): RetroPixels-Native.exe and
+# RetroPixels.exe, built from this branch, with VERSION.txt, and the RPCS3
+# folder: the RPCS3 team's official Windows build, unchanged (GPL v2), which
+# plays PS3 games for now. A workflow artifact only (the download is one zip
+# named with the version): no release is made. The other engines (PixelU,
+# MAME, Supermodel) aren't in it: put the programs next to them in a full
+# RetroPixels folder.
 
 on:
   workflow_dispatch:
@@ -44,6 +46,37 @@ jobs:
           go build -trimpath -ldflags "-s -w -H windowsgui" -o "$dir/RetroPixels.exe" .
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "$dir/RetroPixels-Native.exe" ./cmd/retropixels-native
 
+      - name: RPCS3
+        env:
+          RPCS3_SHA: 9b3a878c189e4e688b6025de0d0ff659116dcade
+          RPCS3_NAME: rpcs3-v0.0.28-15417-9b3a878c_win64
+        run: |
+          base="https://github.com/RPCS3/rpcs3-binaries-win/releases/download/build-$RPCS3_SHA"
+          ok=""
+          for f in "$RPCS3_NAME.7z" "${RPCS3_NAME}_msvc.7z" "$RPCS3_NAME.zip"; do
+            if curl -fsSL --retry 3 -o "rpcs3-dl" "$base/$f"; then ok="$f"; break; fi
+          done
+          if [ -z "$ok" ]; then
+            echo "Release assets:"; curl -fsSL "https://api.github.com/repos/RPCS3/rpcs3-binaries-win/releases/tags/build-$RPCS3_SHA" | grep browser_download_url || true
+            exit 1
+          fi
+          echo "Got $ok"
+          mkdir -p "$DIR/RPCS3"
+          7z x -y -o"$DIR/RPCS3" rpcs3-dl > /dev/null
+          ls "$DIR/RPCS3" | head -30
+          test -f "$DIR/RPCS3/rpcs3.exe"
+          curl -fsSL -o "$DIR/RPCS3/LICENSE.txt" "https://raw.githubusercontent.com/RPCS3/rpcs3/$RPCS3_SHA/LICENSE"
+          {
+            echo "RPCS3 ${RPCS3_NAME#rpcs3-} (https://rpcs3.net), the open source PlayStation 3 emulator."
+            echo "This is the RPCS3 team's official Windows build ($ok), unchanged."
+            echo "RPCS3 is free software under the GNU General Public License, version 2 (LICENSE.txt)."
+            echo "Its source code: https://github.com/RPCS3/rpcs3/tree/$RPCS3_SHA"
+            echo
+            echo "RetroPixels-Native.exe starts PS3 games here. RPCS3 keeps its settings, the PS3 system"
+            echo "software and the installed games in this folder."
+          } > "$DIR/RPCS3/RETROPIXELS-BUILT-IN.txt"
+          rm rpcs3-dl
+
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt "$DIR/"
@@ -52,12 +85,14 @@ jobs:
             echo "Built $(date -u +%F) from branch ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
             echo
             echo "PlayStation 3 test build: RetroPixels-Native.exe plays Teenage Mutant Ninja Turtles:"
-            echo "Turtles in Time Re-Shelled with RetroPixels' own PS3 emulator."
-            echo "Open the game's .pkg (File > Open). The first time it's installed into RetroPixels' folder."
-            echo "You can also open the PARAM.SFO of the game installed already."
+            echo "Turtles in Time Re-Shelled in RPCS3 (the RPCS3 folder), docked in its window."
+            echo "Keep the RPCS3 folder next to RetroPixels-Native.exe."
+            echo "Open the game's .pkg (File > Open). The first time, RetroPixels asks for Sony's PS3 system"
+            echo "software (PS3UPDAT.PUP, free from playstation.com), then RPCS3 installs it and the game."
+            echo "You can also open the PARAM.SFO or EBOOT.BIN of a game installed already."
             echo
-            echo "This download holds only the two programs: the other engines (PixelU, MAME,"
-            echo "Supermodel) aren't in it. Put the programs in a full RetroPixels folder to keep them."
+            echo "This download holds the two programs and RPCS3: the other engines (PixelU, MAME,"
+            echo "Supermodel) aren't in it. Put them in a full RetroPixels folder to keep those."
             echo
             echo "Source: https://github.com/$GITHUB_REPOSITORY/tree/${GITHUB_REF_NAME}"
             echo "No games, keys, BIOS or firmware are included."

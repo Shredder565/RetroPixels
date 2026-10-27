@@ -348,7 +348,7 @@ func (a *app) supermodelPlay(rom string, c supermodel.Check) {
 		call(pSetForegroundWindow, a.hwnd)
 		return
 	}
-	if a.mameBusy() || a.pixeluBusy() {
+	if a.mameBusy() || a.pixeluBusy() || a.rpcs3Busy() {
 		return
 	}
 	if r := a.dol.run; r != nil {
@@ -453,7 +453,7 @@ func (a *app) supermodelEnded() {
 		return
 	}
 	a.sm.run = nil
-	if a.dol.run == nil && a.mame.run == nil && a.pu.run == nil {
+	if a.dol.run == nil && a.mame.run == nil && a.pu.run == nil && a.rp.run == nil {
 		a.dolUnhook()
 	}
 	if r.wentFull && a.fullscreen {

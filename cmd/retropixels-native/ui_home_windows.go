@@ -495,5 +495,5 @@ func (a *app) homeTick() {
 
 // engineRunning: a game is playing in PixelU, PixelU-Wii, MAME or Supermodel.
 func (a *app) engineRunning() bool {
-	return a.dol.run != nil || a.pu.run != nil || a.mame.run != nil || a.sm.run != nil
+	return a.dol.run != nil || a.pu.run != nil || a.mame.run != nil || a.sm.run != nil || a.rp.run != nil
 }

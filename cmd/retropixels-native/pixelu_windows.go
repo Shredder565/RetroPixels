@@ -194,7 +194,7 @@ func (a *app) pixeluBusy() bool {
 
 // pixeluPlay starts a game in PixelU.
 func (a *app) pixeluPlay(g pixelu.Game) {
-	if a.mameBusy() || a.supermodelBusy() {
+	if a.mameBusy() || a.supermodelBusy() || a.rpcs3Busy() {
 		return
 	}
 	if r := a.dol.run; r != nil {
@@ -291,7 +291,7 @@ func (a *app) pixeluEnded() {
 	}
 	a.pu.gamepad = false
 	a.pu.run = nil
-	if a.dol.run == nil && a.mame.run == nil && a.sm.run == nil {
+	if a.dol.run == nil && a.mame.run == nil && a.sm.run == nil && a.rp.run == nil {
 		a.dolUnhook()
 	}
 	if r.wentFull && a.fullscreen {
