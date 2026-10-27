@@ -40,6 +40,7 @@ var Systems = []System{
 	{"gba", "Game Boy Advance", []string{"gba", "agb"}, 0},
 	{"n64", "Nintendo 64", []string{"z64", "n64", "v64"}, 4.0 / 3},
 	{"wiiu", "Wii U", []string{"rpx", "tmd", "wua"}, 16.0 / 9},
+	{"ps3", "PlayStation 3", []string{"pkg", "sfo"}, 16.0 / 9},
 	{"segaMD", "Sega Genesis", []string{"md", "gen", "smd"}, 4.0 / 3},
 	{"sms", "Master System", []string{"sms"}, 4.0 / 3},
 	{"atari2600", "Atari 2600", []string{"a26"}, 4.0 / 3},
@@ -252,7 +253,7 @@ func Open(path string, o OpenOptions) (*Game, error) {
 		return nil, err
 	}
 	// a Wii U archive can be many gigabytes: it's read as the game asks
-	if st.Size() > MaxROM && ext != "zip" && ext != "7z" && ext != "wua" {
+	if st.Size() > MaxROM && ext != "zip" && ext != "7z" && ext != "wua" && ext != "pkg" {
 		return nil, fmt.Errorf("%q is too big to be a game for %s", name, ThisBuild)
 	}
 
@@ -324,7 +325,7 @@ func Open(path string, o OpenOptions) (*Game, error) {
 			return nil, fmt.Errorf("couldn't unpack %q: %v", name, err)
 		}
 		ext = ExtOf(e.Name)
-	} else if ext == "wua" {
+	} else if ext == "wua" || ext == "pkg" {
 		// a Wii U archive can be many gigabytes: the core reads it from the
 		// file as the game asks (it gets the path), so only its start is read
 		if g.ROM, err = readStart(path, 64); err != nil {

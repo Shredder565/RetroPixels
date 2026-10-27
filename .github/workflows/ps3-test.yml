@@ -1,0 +1,73 @@
+name: RetroPixels PS3 (test build)
+
+# A test build of RetroPixels with the PlayStation 3 core (it plays Teenage
+# Mutant Ninja Turtles: Turtles in Time Re-Shelled): RetroPixels-Native.exe
+# and RetroPixels.exe, built from this branch, with VERSION.txt. A workflow
+# artifact only (the download is one zip named with the version): no
+# release is made. The other engines (PixelU, MAME, Supermodel) aren't in
+# it: put the two programs next to them in a full RetroPixels folder.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/project-thread-k31krk]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ps3-test
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: |
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-ps3test${{ github.run_number }}
+          echo "VER=$v" >> "$GITHUB_ENV"
+          dir="dist/RetroPixels-$v"
+          echo "DIR=$dir" >> "$GITHUB_ENV"
+          sh tools/make-winres.sh && sh tools/make-winres-native.sh
+          export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+          mkdir -p "$dir"
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o "$dir/RetroPixels.exe" .
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "$dir/RetroPixels-Native.exe" ./cmd/retropixels-native
+
+      - name: Package
+        run: |
+          cp README.txt CHANGELOG.txt "$DIR/"
+          {
+            echo "RetroPixels $VER (test build, not a release)"
+            echo "Built $(date -u +%F) from branch ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
+            echo
+            echo "PlayStation 3 test build: RetroPixels-Native.exe plays Teenage Mutant Ninja Turtles:"
+            echo "Turtles in Time Re-Shelled with RetroPixels' own PS3 emulator."
+            echo "Open the game's .pkg (File > Open). The first time it's installed into RetroPixels' folder."
+            echo "You can also open the PARAM.SFO of the game installed already."
+            echo
+            echo "This download holds only the two programs: the other engines (PixelU, MAME,"
+            echo "Supermodel) aren't in it. Put the programs in a full RetroPixels folder to keep them."
+            echo
+            echo "Source: https://github.com/$GITHUB_REPOSITORY/tree/${GITHUB_REF_NAME}"
+            echo "No games, keys, BIOS or firmware are included."
+          } > "$DIR/VERSION.txt"
+          ls -la "$DIR"
+          cat "$DIR/VERSION.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-${{ env.VER }}
+          path: dist/
+          compression-level: 6
+          retention-days: 14

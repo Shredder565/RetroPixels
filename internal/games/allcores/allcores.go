@@ -16,6 +16,7 @@ import (
 	_ "retropixels/cores/konami/boards" // TMNT, Turtles in Time, The Simpsons (they register with the arcade core)
 	"retropixels/cores/n64"
 	"retropixels/cores/nes"
+	"retropixels/cores/ps3"
 	"retropixels/cores/sms"
 	"retropixels/cores/snes"
 	"retropixels/cores/wiiu"
@@ -102,6 +103,22 @@ func init() {
 	}
 	SystemButtons["wiiu"] = wiiu.Buttons
 	SystemNotes["wiiu"] = wiiu.ControlsNote
+
+	// The PlayStation 3: the Xbox pad's buttons in the same places (A =
+	// Cross, B = Circle, X = Square, Y = Triangle), LB / RB = L1 / R1, LT /
+	// RT = L2 / R2, Menu / View = Start / Select.
+	Makers["ps3"] = ps3.New
+	DefaultMaps["ps3"] = ControlMap{
+		"Cross": B([]int{PadA}, "x"), "Circle": B([]int{PadB}, "c"), "Square": B([]int{PadX}, "z"), "Triangle": B([]int{PadY}, "s"),
+		"L1": B([]int{PadLB}, "q"), "R1": B([]int{PadRB}, "w"), "L2": B([]int{PadLT}, "1"), "R2": B([]int{PadRT}, "2"),
+		"L3": B([]int{}), "R3": B([]int{}), // (the pad's L3 / R3 load and save states)
+		"Start": B([]int{PadMenu}, "enter"), "Select": B([]int{PadView}, "shift"),
+		"Up": B([]int{PadUp}, "i"), "Down": B([]int{PadDown}, "k"), "Left": B([]int{PadLeft}, "j"), "Right": B([]int{PadRight}, "l"),
+		"Stick Up": B([]int{}, "arrowup"), "Stick Down": B([]int{}, "arrowdown"),
+		"Stick Left": B([]int{}, "arrowleft"), "Stick Right": B([]int{}, "arrowright"),
+	}
+	SystemButtons["ps3"] = ps3.Buttons
+	SystemNotes["ps3"] = ps3.ControlsNote
 
 	// The Super Nintendo: the same button positions as the Xbox pad's diamond
 	// (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R.

@@ -231,7 +231,14 @@ func (m *Machine) readProgram(rel string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return DecryptSELF(b, m.klic)
+	elf, err := DecryptSELF(b, m.klic)
+	if err != nil && m.klic != nil {
+		// (the main program can have its own key, not the game's)
+		if e2, err2 := DecryptSELF(b, nil); err2 == nil {
+			return e2, nil
+		}
+	}
+	return elf, err
 }
 
 // klicensee finds the game's key (for its SPRX and EDAT files).
@@ -239,6 +246,11 @@ func (m *Machine) klicensee() error {
 	if b, err := os.ReadFile(filepath.Join(m.GameDir, "klicensee.bin")); err == nil && len(b) == 16 {
 		m.klic = b
 		return nil
+	}
+	// a game installed elsewhere (another emulator's folder): find the key
+	// as Install does, without writing into that folder
+	if k, err := FindGameKey(m.GameDir); err == nil {
+		m.klic = k
 	}
 	return nil
 }

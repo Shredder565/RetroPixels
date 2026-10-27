@@ -1091,3 +1091,19 @@ func (m *Machine) gpuWroteMem(a, n uint32) {
 		m.gpu.wroteRange(a, a+n)
 	}
 }
+
+// Close lets go of the host GPU (if the machine drew with one).
+func (m *Machine) Close() {
+	if m.gpu != nil {
+		m.gpu.dev.Close()
+		m.gpu = nil
+	}
+}
+
+// Renderer names what draws the pictures.
+func (m *Machine) Renderer() string {
+	if m.gpu != nil {
+		return "the graphics card"
+	}
+	return "the CPU (software)"
+}

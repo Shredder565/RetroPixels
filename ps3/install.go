@@ -24,14 +24,26 @@ func Install(pkgPath, dir string, progress func(done, total uint64)) error {
 	if err := p.Extract(dir, progress); err != nil {
 		return err
 	}
-	// the game's own key, for its modules and data files
+	k, err := FindGameKey(dir)
+	if err != nil {
+		return err
+	}
+	if k == nil {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(dir, "klicensee.bin"), k, 0o644)
+}
+
+// FindGameKey finds an installed game's key for its modules and data files
+// (nil if its data files have none).
+func FindGameKey(dir string) ([]byte, error) {
 	eboot, err := os.ReadFile(filepath.Join(dir, "USRDIR", "EBOOT.BIN"))
 	if err != nil {
-		return errors.New("the package has no USRDIR/EBOOT.BIN: it isn't a game")
+		return nil, errors.New("there's no USRDIR/EBOOT.BIN: it isn't a game")
 	}
 	elf, err := DecryptSELF(eboot, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ents, _ := os.ReadDir(filepath.Join(dir, "USRDIR"))
 	for _, e := range ents {
@@ -47,9 +59,9 @@ func Install(pkgPath, dir string, progress func(done, total uint64)) error {
 		ff.Close()
 		if string(b[:4]) == "NPD\x00" {
 			if k, ok := FindKlicensee(elf, b); ok {
-				return os.WriteFile(filepath.Join(dir, "klicensee.bin"), k, 0o644)
+				return k, nil
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }

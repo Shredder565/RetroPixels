@@ -26,6 +26,9 @@ type Options struct {
 	// player). A core that needs one it wasn't given returns an error naming
 	// it (snes.FirmwareError).
 	Firmware map[string][]byte
+	// DataDir: where the program keeps its own files (saves/, firmware/),
+	// for cores that install a game before playing it ("" = their own pick)
+	DataDir string
 }
 
 // Info describes a system's controls and picture.

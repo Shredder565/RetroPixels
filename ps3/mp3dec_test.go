@@ -8,15 +8,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// haveLAME: ffmpeg with the LAME MP3 encoder (the tests make MP3s with it)
+func haveLAME(t *testing.T) {
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+	if err != nil || !strings.Contains(string(out), "libmp3lame") {
+		t.Skip("no ffmpeg with libmp3lame")
+	}
+}
 
 // TestMP3AgainstFFmpeg encodes test sounds with ffmpeg (LAME) in many
 // formats, decodes them with ffmpeg and with our decoder, and compares.
 func TestMP3AgainstFFmpeg(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("no ffmpeg")
-	}
+	haveLAME(t)
 	dir := t.TempDir()
 	// a test sound: tones, sweeps, noise bursts and clicks (for short
 	// blocks), different in the two channels
@@ -143,9 +150,7 @@ func mp3Compare(got, want []float32, ch int) (float64, int) {
 // TestMP3StateSaveLoad: decoding with the state saved and restored between
 // frames (as the game's engine swaps streams) gives the same sound.
 func TestMP3StateSaveLoad(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("no ffmpeg")
-	}
+	haveLAME(t)
 	mp3 := filepath.Join(t.TempDir(), "t.mp3")
 	if out, err := exec.Command("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=500:duration=3",
 		"-af", "volume=0.5", "-ar", "44100", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "96k", "-write_xing", "0", mp3).CombinedOutput(); err != nil {
