@@ -47,7 +47,7 @@ func (m *Machine) now() time.Time {
 
 func init() {
 	sysc(1, func(m *Machine, t *Thread) { t.ret(1) }) // sys_process_getpid
-	sysc(22, func(m *Machine, t *Thread) { // sys_process_exit
+	sysc(22, func(m *Machine, t *Thread) {            // sys_process_exit
 		m.Logf("the game exited (%d)", t.argS(0))
 		m.Exited = true
 		m.cpu.Stop()
@@ -61,7 +61,7 @@ func init() {
 	// --- PPU threads
 	sysc(41, func(m *Machine, t *Thread) { m.threadExit(t, t.GPR[3]); m.cpu.Stop() })
 	sysc(43, func(m *Machine, t *Thread) { t.ret(0); m.cpu.Stop() }) // yield
-	sysc(44, func(m *Machine, t *Thread) { // join
+	sysc(44, func(m *Machine, t *Thread) {                           // join
 		id, vp := t.arg(0), t.arg(1)
 		o, ok := m.objects[id].(*Thread)
 		if !ok {

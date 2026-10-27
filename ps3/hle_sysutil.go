@@ -109,7 +109,7 @@ func init() {
 		m.Mem.Write8(s+8, 2) // 720p
 		m.Mem.Write8(s+9, 0) // progressive
 		m.Mem.Write8(s+10, 0)
-		m.Mem.Write8(s+11, 2) // 16:9
+		m.Mem.Write8(s+11, 2)  // 16:9
 		m.Mem.Write16(s+14, 1) // 59.94 Hz
 		t.ret(0)
 	})
@@ -158,10 +158,10 @@ func init() {
 		s := t.arg(2)
 		m.Mem.Fill(s, 0, 20)
 		m.Mem.Write8(s, 0)
-		m.Mem.Write8(s+12, 0)    // LPCM
-		m.Mem.Write8(s+13, 2)    // channels
-		m.Mem.Write8(s+14, 4)    // 48 kHz
-		m.Mem.Write32(s+16, 1)   // 2ch layout
+		m.Mem.Write8(s+12, 0)  // LPCM
+		m.Mem.Write8(s+13, 2)  // channels
+		m.Mem.Write8(s+14, 4)  // 48 kHz
+		m.Mem.Write32(s+16, 1) // 2ch layout
 		t.ret(0)
 	})
 	reg("cellAudioOutConfigure", func(m *Machine, t *Thread) { t.ret(0) })

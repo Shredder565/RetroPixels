@@ -124,16 +124,16 @@ func (m *Machine) linkImports(start, end uint32) {
 
 // prxModule is a loaded PRX.
 type prxModule struct {
-	id         uint32
-	name       string
-	base       uint32
-	size       uint32
-	toc        uint32
-	start      uint32 // module_start OPD
-	stop       uint32
-	started    bool
-	path       string
-	segs       []uint32 // each segment's address
+	id      uint32
+	name    string
+	base    uint32
+	size    uint32
+	toc     uint32
+	start   uint32 // module_start OPD
+	stop    uint32
+	started bool
+	path    string
+	segs    []uint32 // each segment's address
 }
 
 // loadPRX loads a PRX module (decrypted) at a free address.

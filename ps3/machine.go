@@ -69,15 +69,15 @@ type Machine struct {
 	nextID  uint32
 	objects map[uint32]any
 
-	hle      []hleEntry
-	hleAddr  map[string]uint32 // system function name -> its OPD
-	Missing  map[string]int    // system functions called that RetroPixels doesn't have
-	sysNext  uint32            // RetroPixels' own area, bump allocated
-	retTramp uint32            // address of the "guest function returned" call
-	exitTramp uint32           // thread entry's return address
+	hle       []hleEntry
+	hleAddr   map[string]uint32 // system function name -> its OPD
+	Missing   map[string]int    // system functions called that RetroPixels doesn't have
+	sysNext   uint32            // RetroPixels' own area, bump allocated
+	retTramp  uint32            // address of the "guest function returned" call
+	exitTramp uint32            // thread entry's return address
 
-	tb     uint64 // virtual time base
-	tbFrac uint64
+	tb      uint64 // virtual time base
+	tbFrac  uint64
 	nextVBL uint64
 	frame   uint64
 
@@ -87,25 +87,25 @@ type Machine struct {
 	klic    []byte
 	mainELF []byte
 
-	logw    io.Writer
-	tty     string
-	logN    int
-	Exited  bool
-	Err     error
+	logw   io.Writer
+	tty    string
+	logN   int
+	Exited bool
+	Err    error
 
-	proc procParam
+	proc                      procParam
 	tlsImage, tlsFile, tlsMem uint32
 
-	user  *allocator // sys_memory_allocate
-	mmap  *allocator // sys_mmapper
+	user   *allocator // sys_memory_allocate
+	mmap   *allocator // sys_mmapper
 	stacks *allocator
 
 	prx []*prxModule
 
-	fs   *fsState
-	gcm  *gcmState
-	sysu *sysutilState
-	pad  padState
+	fs    *fsState
+	gcm   *gcmState
+	sysu  *sysutilState
+	pad   padState
 	audio *audioState
 	spus  *spuState
 	spurs *spursState

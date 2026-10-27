@@ -48,13 +48,13 @@ func init() {
 	reg("cellPadGetInfo2", func(m *Machine, t *Thread) {
 		a := t.arg(0)
 		m.Mem.Fill(a, 0, 0x7c)
-		m.Mem.Write32(a, 7)  // max
+		m.Mem.Write32(a, 7)   // max
 		m.Mem.Write32(a+4, 1) // connected
 		m.Mem.Write32(a+8, 0)
-		m.Mem.Write32(a+12, 1)        // port 0 connected
-		m.Mem.Write32(a+12+28, 0)     // port setting
-		m.Mem.Write32(a+12+56, 0x7)   // capability: PS3 conformity, press, sensor
-		m.Mem.Write32(a+12+84, 0)     // standard
+		m.Mem.Write32(a+12, 1)      // port 0 connected
+		m.Mem.Write32(a+12+28, 0)   // port setting
+		m.Mem.Write32(a+12+56, 0x7) // capability: PS3 conformity, press, sensor
+		m.Mem.Write32(a+12+84, 0)   // standard
 		t.ret(0)
 	})
 	reg("cellPadGetData", func(m *Machine, t *Thread) { // (port, data*)
