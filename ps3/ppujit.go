@@ -83,7 +83,9 @@ type JIT struct {
 	dispatch uintptr
 
 	pages [numPages]*blockPage // Go's references to the block tables
-	table [numPages]uintptr    // what the code reads
+	// sites: for each page, the jumps (rel32 addresses) to each PC in it
+	sites [numPages]map[uint32][]uintptr
+	table [numPages]uintptr // what the code reads
 	// each page's compiled range (byte offsets), for writes to code
 	lo, hi [numPages]uint32
 
@@ -123,6 +125,7 @@ func (j *JIT) reset() {
 		}
 		j.table[i] = 0
 		j.pages[i] = nil
+		j.sites[i] = nil
 	}
 	// the byte shuffle tables (for the vector instructions), then the
 	// dispatcher
@@ -153,6 +156,39 @@ func (j *JIT) codeWritten(addr uint32, n int) {
 	j.table[i] = 0
 	j.pages[i] = nil
 	j.mem.setCode(i, false)
+	// jumps into the page's blocks go back to the dispatcher
+	for _, ss := range j.sites[i] {
+		for _, at := range ss {
+			j.patchRel(at, j.dispatch)
+		}
+	}
+	j.sites[i] = nil
+}
+
+// jitLinking chains blocks directly (PS3_NOLINK=1 turns it off).
+var jitLinking = os.Getenv("PS3_NOLINK") == ""
+
+// addSite notes a jump (its rel32 at at) to pc.
+func (j *JIT) addSite(pc uint32, at uintptr) {
+	i := pc >> pageBits
+	if j.sites[i] == nil {
+		j.sites[i] = map[uint32][]uintptr{}
+	}
+	j.sites[i][pc] = append(j.sites[i][pc], at)
+}
+
+// linkTo points the jumps to pc at its new block.
+func (j *JIT) linkTo(pc uint32, code uintptr) {
+	for _, at := range j.sites[pc>>pageBits][pc] {
+		j.patchRel(at, code)
+	}
+}
+
+// patchRel sets the rel32 at at to reach target.
+func (j *JIT) patchRel(at, target uintptr) {
+	rel := uint32(int32(int64(target) - int64(at+4)))
+	o := at - j.base
+	j.buf[o], j.buf[o+1], j.buf[o+2], j.buf[o+3] = byte(rel), byte(rel>>8), byte(rel>>16), byte(rel>>24)
 }
 
 func (j *JIT) lookup(pc uint32) uintptr {
@@ -277,7 +313,15 @@ func (j *JIT) compile(pc uint32) uintptr {
 		fmt.Fprintf(f, "%x %x %08x %d\n", code, code+uintptr(len(a.b)), pc, b.n)
 		f.Close()
 	}
+	if jitLinking {
+		for _, l := range b.links {
+			j.addSite(l.pc, code+uintptr(l.off))
+		}
+	}
 	j.setEntry(pc, code)
+	if jitLinking {
+		j.linkTo(pc, code)
+	}
 	i := pc >> pageBits
 	j.lo[i] = min(j.lo[i], pc&pageMask)
 	j.hi[i] = max(j.hi[i], pc&pageMask+uint32(4*b.n)+4)
@@ -300,6 +344,15 @@ type jitBlock struct {
 	cur   *jitSlow // the current instruction's slow path
 	pool  [][16]byte
 	refs  []poolRef
+	links []jitLink // jumps to other blocks
+}
+
+// jitLink is a jump at the end of a block to a known PC: its rel32 goes
+// straight to that PC's block once there is one, else to the dispatcher
+// (EAX holds the PC either way).
+type jitLink struct {
+	off int // of the rel32, in the block
+	pc  uint32
 }
 
 func (b *jitBlock) build() {
@@ -320,11 +373,12 @@ func (b *jitBlock) build() {
 		}
 		inst := mem.Read32(pc)
 		b.cur = &jitSlow{pc: pc}
-		mark, marks := a.pos(), len(b.refs)
+		mark, marks, links := a.pos(), len(b.refs), len(b.links)
 		ok, ends := b.inst(inst, pc)
 		if !ok {
 			a.b = a.b[:mark]
 			b.refs = b.refs[:marks]
+			b.links = b.links[:links]
 			stopped = true
 			break
 		}
@@ -350,7 +404,7 @@ func (b *jitBlock) build() {
 	if b.n == 0 {
 		// nothing compiled: straight to the interpreter
 		a.b = a.b[:0]
-		b.pool, b.refs = nil, nil
+		b.pool, b.refs, b.links = nil, nil, nil
 		a.movStoreImm(rBX, offPC, b.start)
 		a.movRI(rAX, jitExitInterp)
 		a.ret()
@@ -398,7 +452,14 @@ func (b *jitBlock) layPool() {
 // toPC ends the block going to a known PC.
 func (b *jitBlock) toPC(pc uint32) {
 	b.a.movRIKeepFlags(rAX, pc)
-	b.a.jmpAbs(b.j.dispatch)
+	b.links = append(b.links, jitLink{off: b.a.pos() + 1, pc: pc})
+	target := b.j.dispatch
+	if jitLinking {
+		if c := b.j.lookup(pc); c != 0 {
+			target = c
+		}
+	}
+	b.a.jmpAbs(target)
 }
 
 // slowIf jumps to the current instruction's interpreter exit on cc.
