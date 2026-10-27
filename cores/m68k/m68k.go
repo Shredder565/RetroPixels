@@ -37,6 +37,13 @@ type Acker interface {
 	Ack(level int) int
 }
 
+// LongBus is implemented by buses that answer long-word accesses
+// themselves, instead of as two word accesses (8 cycles either way).
+type LongBus interface {
+	LongRead(addr uint32) uint32
+	LongWrite(addr uint32, v uint32)
+}
+
 // Resetter is implemented by buses that want to see the RESET instruction.
 type Resetter interface {
 	Reset()
@@ -71,6 +78,7 @@ type CPU struct {
 	bus   Bus
 	acker Acker
 	reset Resetter
+	long  LongBus
 
 	D        [8]uint32
 	A        [8]uint32
@@ -111,6 +119,7 @@ func New(bus Bus) *CPU {
 	c := &CPU{bus: bus, table: theTable}
 	c.acker, _ = bus.(Acker)
 	c.reset, _ = bus.(Resetter)
+	c.long, _ = bus.(LongBus)
 	c.s, c.ipl = 1, 7
 	c.TASWrites = true
 	return c
@@ -149,12 +158,24 @@ func (c *CPU) SetSR(v uint32) {
 func (c *CPU) r8(a uint32) uint32  { c.Cycles += 4; return uint32(c.bus.Read8(a & 0xffffff)) }
 func (c *CPU) r16(a uint32) uint32 { c.Cycles += 4; return uint32(c.bus.Read16(a & 0xfffffe)) }
 func (c *CPU) r32(a uint32) uint32 {
+	if c.long != nil {
+		c.Cycles += 8
+		return c.long.LongRead(a & 0xfffffe)
+	}
 	hi := c.r16(a)
 	return hi<<16 | c.r16(a+2)
 }
 func (c *CPU) w8(a, v uint32)  { c.Cycles += 4; c.bus.Write8(a&0xffffff, uint8(v)) }
 func (c *CPU) w16(a, v uint32) { c.Cycles += 4; c.bus.Write16(a&0xfffffe, uint16(v)) }
-func (c *CPU) w32(a, v uint32) { c.w16(a, v>>16); c.w16(a+2, v&0xffff) }
+func (c *CPU) w32(a, v uint32) {
+	if c.long != nil {
+		c.Cycles += 8
+		c.long.LongWrite(a&0xfffffe, v)
+		return
+	}
+	c.w16(a, v>>16)
+	c.w16(a+2, v&0xffff)
+}
 func (c *CPU) rm(a uint32, sz int) uint32 {
 	switch sz {
 	case 1:

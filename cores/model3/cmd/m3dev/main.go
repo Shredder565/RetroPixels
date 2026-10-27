@@ -32,6 +32,8 @@ func main() {
 	bpN := flag.Int("bpn", 3, "times to print at the breakpoint")
 	bpFrom := flag.Int("bpfrom", 0, "only stop at the breakpoint from this frame on")
 	dumpRAM := flag.String("dumpram", "", "write RAM to this file at the end")
+	wavPath := flag.String("wav", "", "write the sound to this WAV file")
+	coinAt := flag.Int("coin", 0, "insert a coin at this frame, and press start 120 frames later")
 	flag.Parse()
 
 	zr, err := zip.OpenReader(*romPath)
@@ -130,14 +132,25 @@ func main() {
 			}
 		}
 	}
+	var wav []int16
 	t0 := time.Now()
 	for f := 1; f <= *frames; f++ {
 		curFrame = f
+		if *coinAt > 0 {
+			m.Inputs.Coin1 = f >= *coinAt && f < *coinAt+10
+			m.Inputs.Start1 = f >= *coinAt+120 && f < *coinAt+130
+			m.Inputs.Trigger = f >= *coinAt+400 && (f/20)%2 == 0
+		}
 		m.RunFrame()
 		if d := os.Getenv("M3_DUMP_FRAME"); d == fmt.Sprint(f) {
 			ram, vram := m.DebugMemory()
 			os.WriteFile("/tmp/claude-0/my_ram.bin", ram, 0o644)
 			os.WriteFile("/tmp/claude-0/my_vram.bin", vram, 0o644)
+		}
+		if *wavPath != "" {
+			for _, v := range m.Audio() {
+				wav = append(wav, int16(v*32767))
+			}
 		}
 		if err := m.Halted(); err != nil {
 			fmt.Println("frame", f, err)
@@ -158,6 +171,9 @@ func main() {
 			binary.BigEndian.PutUint32(ram[a:], c.Read32(uint32(a)))
 		}
 		os.WriteFile(*dumpRAM, ram, 0o644)
+	}
+	if *wavPath != "" {
+		writeWAV(*wavPath, wav)
 	}
 	if *disFrom != 0 {
 		dis(m, uint32(*disFrom), uint32(*disFrom)+uint32(*disN)*4)
@@ -188,4 +204,24 @@ func init() {
 			fmt.Printf("%08X: %08X  %s\n", a, op, ppc.Disasm(a, op))
 		}
 	}
+}
+
+func writeWAV(path string, s []int16) {
+	b := make([]byte, 44+2*len(s))
+	copy(b, "RIFF")
+	binary.LittleEndian.PutUint32(b[4:], uint32(36+2*len(s)))
+	copy(b[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(b[16:], 16)
+	binary.LittleEndian.PutUint16(b[20:], 1)
+	binary.LittleEndian.PutUint16(b[22:], 2)
+	binary.LittleEndian.PutUint32(b[24:], 44100)
+	binary.LittleEndian.PutUint32(b[28:], 44100*4)
+	binary.LittleEndian.PutUint16(b[32:], 4)
+	binary.LittleEndian.PutUint16(b[34:], 16)
+	copy(b[36:], "data")
+	binary.LittleEndian.PutUint32(b[40:], uint32(2*len(s)))
+	for i, v := range s {
+		binary.LittleEndian.PutUint16(b[44+2*i:], uint16(v))
+	}
+	os.WriteFile(path, b, 0o644)
 }

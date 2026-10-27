@@ -795,3 +795,7 @@ func (m *Machine) DebugTileRegs() [64]uint32 { return m.tg.regs }
 
 // DebugMemory returns main RAM and the tile generator's memory (for tools).
 func (m *Machine) DebugMemory() (ram, vram []byte) { return m.ram, m.tg.vram[:] }
+
+// Audio is the sound the last frame made: 44.1 kHz stereo, interleaved left
+// and right, roughly -1..1.
+func (m *Machine) Audio() []float32 { return m.sound.out }
