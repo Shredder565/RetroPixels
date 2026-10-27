@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"os"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,9 +79,29 @@ func TestBootLocal(t *testing.T) {
 	if m.gpu != nil {
 		t.Logf("GPU: %d draws, %d fell back to software", m.gpu.Draws, m.gpu.Fallbacks)
 	}
+	if jitInterpHist != nil {
+		type kv struct {
+			k string
+			v int
+		}
+		var l []kv
+		for k, v := range jitInterpHist {
+			l = append(l, kv{k, v})
+		}
+		sort.Slice(l, func(i, j int) bool { return l[i].v > l[j].v })
+		for i := 0; i < len(l) && i < 40; i++ {
+			t.Logf("interpreted %s: %d", l[i].k, l[i].v)
+		}
+	}
+	if j := m.cpu.jit; j != nil {
+		t.Logf("PPU recompiler: %d blocks, %d flushes, %d interpreted", j.Blocks, j.Flushes, j.Interp)
+	}
 	if m.spus != nil {
 		for _, s := range m.spus.threads {
 			t.Logf("SPU %s: %d instructions", s.name, s.c.Ran)
+			if j := s.c.jit; j != nil {
+				t.Logf("SPU recompiler: %d blocks, %d flushes, %d invalidated, %d interpreted", j.Blocks, j.Flushes, j.Invalidated, j.Interp)
+			}
 		}
 	}
 	t.Log("\n" + m.Threads())

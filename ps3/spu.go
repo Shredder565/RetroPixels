@@ -572,6 +572,7 @@ func (m *Machine) spuPutMem(s *spuThread, ea uint32, b []byte) {
 			switch {
 			case off < lsSize:
 				copy(o.c.LS[off:], b)
+				o.c.lsWrote(off, len(b))
 			case off == 0x5400C || off == 0x5C00C:
 				if len(b) >= 4 {
 					m.spuWriteSNR(o, map[uint32]int{0x5400C: 0, 0x5C00C: 1}[off], be32(b))
@@ -619,6 +620,7 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 		for i, x := range buf {
 			s.c.LS[(lsa+uint32(i))&lsMask] = x
 		}
+		s.c.lsWrote(lsa, int(size))
 	}
 }
 
@@ -639,6 +641,7 @@ func (m *Machine) spuMFC(s *spuThread, cmd uint32) {
 		}
 		m.Mem.ReadBytes(ea, s.resData[:])
 		copy(s.c.LS[s.lsa&lsMask&^127:], s.resData[:])
+		s.c.lsWrote(s.lsa&lsMask&^127, 128)
 		s.resAddr, s.resValid = ea, true
 		s.atomicStat, s.atomicValid = 4, true
 	case cmd == 0xB4: // PUTLLC
@@ -718,6 +721,7 @@ func (m *Machine) spuStart(g *spuGroup) {
 		for i := range c.LS {
 			c.LS[i] = 0
 		}
+		c.lsWrote(0, lsSize)
 		for _, sg := range s.segs {
 			switch sg.typ {
 			case 1: // copy
@@ -977,8 +981,10 @@ func init() {
 		switch t.arg(3) {
 		case 1:
 			s.c.LS[a] = byte(v)
+			s.c.lsWrote(a, 1)
 		case 2:
 			s.c.LS[a], s.c.LS[a+1] = byte(v>>8), byte(v)
+			s.c.lsWrote(a, 2)
 		case 4:
 			s.c.setLS32(a, uint32(v))
 		case 8:

@@ -84,8 +84,19 @@ func (c *PPU) fpCR1(i uint32) {
 	}
 }
 
-// setFPRF sets the FPSCR result flags for v.
+// setFPRF sets the FPSCR result flags for v (when FPSCR is next read).
 func (c *PPU) setFPRF(v float64) {
+	c.fpLast = math.Float64bits(v)
+	c.fpDirty = 1
+}
+
+// syncFPRF works out the FPSCR result flags if they're pending.
+func (s *PPUState) syncFPRF() {
+	if s.fpDirty == 0 {
+		return
+	}
+	s.fpDirty = 0
+	v := math.Float64frombits(s.fpLast)
 	var f uint32
 	switch {
 	case math.IsNaN(v):
@@ -113,7 +124,7 @@ func (c *PPU) setFPRF(v float64) {
 			f = 0x08
 		}
 	}
-	c.FPSCR = c.FPSCR&^(0x1f<<12) | f<<12
+	s.FPSCR = s.FPSCR&^(0x1f<<12) | f<<12
 }
 
 func (c *PPU) exec59(i uint32) {
@@ -192,6 +203,7 @@ func (c *PPU) exec63(i uint32) {
 		c.fpCR1(i)
 		return
 	}
+	c.syncFPRF()
 	switch i >> 1 & 0x3ff {
 	case 0, 32: // fcmpu, fcmpo
 		x, y := c.f(a), c.f(b)

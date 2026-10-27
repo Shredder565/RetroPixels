@@ -87,10 +87,10 @@ type hostSurf struct {
 	fmt         uint32 // RSX colour format, or depth format (1 Z16, 2 Z24S8)
 	depth       bool
 	tex         gpuHandle
-	host        uint32 // DXGI format
-	bpp         int    // host bytes a pixel
-	dirty       bool   // the GPU's copy is newer than memory
-	stale       bool   // memory is newer than the GPU's copy
+	host        uint32    // DXGI format
+	bpp         int       // host bytes a pixel
+	dirty       bool      // the GPU's copy is newer than memory
+	stale       bool      // memory is newer than the GPU's copy
 	asRGBA      gpuHandle // depth only: the A8R8G8B8 view (DepthToRGBA8)
 	asRGBAOK    bool
 }

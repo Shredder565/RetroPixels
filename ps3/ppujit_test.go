@@ -60,6 +60,7 @@ func TestJITMatchesInterpreter(t *testing.T) {
 		st.GPR[26] = uint64(rng.Intn(256))
 		for i := range st.FPR {
 			st.FPR[i] = randF64(rng)
+			st.VR[i] = Vec{rng.Uint32(), rng.Uint32(), rng.Uint32(), rng.Uint32()}
 		}
 		st.CR = rng.Uint32()
 		st.LR = jitTestCode + uint64(len(code)-1)*4
@@ -117,12 +118,20 @@ func jitRunPPU(useJIT bool, code []uint32, st PPUState, data []byte) (*PPUState,
 
 func ppuDiff(want, got *PPUState, wm, gm *Memory) string {
 	bad := ""
+	want.syncFPRF()
+	got.syncFPRF()
 	for i := range want.GPR {
 		if want.GPR[i] != got.GPR[i] {
 			bad += fmt.Sprintf("r%d = %016X, want %016X\n", i, got.GPR[i], want.GPR[i])
 		}
-		if want.FPR[i] != got.FPR[i] {
+		nan := func(v uint64) bool { return v&0x7ff0000000000000 == 0x7ff0000000000000 && v&0xfffffffffffff != 0 }
+		if want.FPR[i] != got.FPR[i] && !(nan(want.FPR[i]) && nan(got.FPR[i])) {
 			bad += fmt.Sprintf("f%d = %016X, want %016X\n", i, got.FPR[i], want.FPR[i])
+		}
+	}
+	for i := range want.VR {
+		if want.VR[i] != got.VR[i] {
+			bad += fmt.Sprintf("v%d = %08X, want %08X\n", i, got.VR[i], want.VR[i])
 		}
 	}
 	for _, r := range []struct {
@@ -188,7 +197,20 @@ func randPPUInst(rng *rand.Rand) uint32 {
 	x := func(rd, ra, rb, xo uint32, rc uint32) uint32 { return 31<<26 | rd<<21 | ra<<16 | rb<<11 | xo<<1 | rc }
 	src := func() uint32 { return r(32) }
 	rc := func() uint32 { return r(2) }
-	switch r(16) {
+	switch r(18) {
+	case 16, 17: // floating point arithmetic
+		f := func() uint32 { return r(32) }
+		if r(3) == 0 {
+			xos := []uint32{72, 40, 264, 136, 12, 15, 815, 846, 0, 32}
+			xo := xos[r(len(xos))]
+			if xo == 0 || xo == 32 {
+				return 63<<26 | r(8)<<23 | f()<<16 | f()<<11 | xo<<1
+			}
+			return 63<<26 | f()<<21 | f()<<11 | xo<<1
+		}
+		op := []uint32{59, 63}[r(2)]
+		xos := []uint32{18, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31}
+		return op<<26 | f()<<21 | f()<<16 | f()<<11 | f()<<6 | xos[r(len(xos))]<<1
 	case 0: // immediate arithmetic
 		ops := []uint32{7, 8, 12, 13, 14, 15}
 		return d(ops[r(len(ops))], dst(), src(), r(0x10000))
@@ -238,14 +260,14 @@ func randPPUInst(rng *rand.Rand) uint32 {
 		xo := xos[r(len(xos))]
 		return x(src(), dst(), src(), xo, rc())
 	case 12: // indexed loads
-		xos := []uint32{23, 55, 87, 119, 279, 311, 343, 375, 21, 53, 341, 373, 534, 532, 535, 567, 599, 631}
+		xos := []uint32{23, 55, 87, 119, 279, 311, 343, 375, 21, 53, 341, 373, 534, 532, 535, 567, 599, 631, 103, 359, 790}
 		xo := xos[r(len(xos))]
 		if r(2) == 0 {
 			return x(dst(), base(), 26, xo, 0)
 		}
 		return x(dst(), 0, base(), xo, 0)
 	case 13: // indexed stores
-		xos := []uint32{151, 183, 215, 247, 407, 439, 149, 181, 662, 660, 663, 695, 727, 759}
+		xos := []uint32{151, 183, 215, 247, 407, 439, 149, 181, 662, 660, 663, 695, 727, 759, 231, 487, 918}
 		xo := xos[r(len(xos))]
 		if r(2) == 0 {
 			return x(src(), base(), 26, xo, 0)

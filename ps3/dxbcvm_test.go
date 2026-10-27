@@ -516,4 +516,3 @@ func (vm *dxVM) loopEnd(pc int) int {
 	}
 	return len(vm.prog)
 }
-

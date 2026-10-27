@@ -78,3 +78,27 @@ TEXT ·spuJitCall(SB), NOSPLIT, $24-24
 	MOVQ R9, 24(SI)
 	MOVQ AX, ret+16(FP)
 	RET
+
+// func cpuHasAVX2() bool: AVX2, with the OS saving the AVX registers
+TEXT ·cpuHasAVX2(SB), NOSPLIT, $0-1
+	MOVL $1, AX
+	XORL CX, CX
+	CPUID
+	ANDL $0x18000000, CX
+	CMPL CX, $0x18000000
+	JNE noavx2
+	XORL CX, CX
+	XGETBV
+	ANDL $6, AX
+	CMPL AX, $6
+	JNE noavx2
+	MOVL $7, AX
+	XORL CX, CX
+	CPUID
+	ANDL $0x20, BX
+	JZ noavx2
+	MOVB $1, ret+0(FP)
+	RET
+noavx2:
+	MOVB $0, ret+0(FP)
+	RET

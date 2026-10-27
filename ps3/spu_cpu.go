@@ -5,6 +5,7 @@ package ps3
 // mailboxes, signals and events are channels, run in spu_mfc.go.
 
 import (
+	"encoding/binary"
 	"math"
 	"math/bits"
 	"os"
@@ -25,6 +26,9 @@ type SPUCore struct {
 	Err     error
 	stalled bool // waiting on a channel (retry the same instruction)
 
+	jit   *spuJIT // the recompiler (made on the first Run), or nil
+	noJIT bool    // interpreter only
+
 	// channel handlers (set by the owner)
 	RdCh    func(c *SPUCore, ch uint32) (uint32, bool) // false = wait
 	WrCh    func(c *SPUCore, ch uint32, v uint32) bool // false = wait
@@ -43,6 +47,14 @@ func (c *SPUCore) ls32(a uint32) uint32 {
 func (c *SPUCore) setLS32(a, v uint32) {
 	a &= lsMask &^ 3
 	c.LS[a], c.LS[a+1], c.LS[a+2], c.LS[a+3] = byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
+	c.lsWrote(a, 4)
+}
+
+// lsWrote tells the recompiler local store changed.
+func (c *SPUCore) lsWrote(a uint32, n int) {
+	if c.jit != nil {
+		c.jit.lsWrote(a, n)
+	}
 }
 
 func (c *SPUCore) lq(a uint32) Vec {
@@ -52,10 +64,11 @@ func (c *SPUCore) lq(a uint32) Vec {
 
 func (c *SPUCore) stq(a uint32, v Vec) {
 	a &= lsMask &^ 15
-	c.setLS32(a, v[0])
-	c.setLS32(a+4, v[1])
-	c.setLS32(a+8, v[2])
-	c.setLS32(a+12, v[3])
+	binary.BigEndian.PutUint32(c.LS[a:], v[0])
+	binary.BigEndian.PutUint32(c.LS[a+4:], v[1])
+	binary.BigEndian.PutUint32(c.LS[a+8:], v[2])
+	binary.BigEndian.PutUint32(c.LS[a+12:], v[3])
+	c.lsWrote(a, 16)
 }
 
 func (c *SPUCore) fail(msg string, w uint32) {
@@ -68,6 +81,13 @@ func (c *SPUCore) fail(msg string, w uint32) {
 // Run runs up to n instructions (less when the SPU stops or waits on a channel).
 func (c *SPUCore) Run(n int) int {
 	c.stop = false
+	if c.jit == nil && !c.noJIT {
+		c.jit = newSPUJIT()
+		c.noJIT = c.jit == nil
+	}
+	if c.jit != nil && spuHist == nil {
+		return c.jit.run(c, n)
+	}
 	ran := 0
 	for ran < n && !c.stop {
 		pc := c.PC & lsMask &^ 3

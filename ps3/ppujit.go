@@ -24,6 +24,8 @@ package ps3
 // to Go (RET) leaves the reason in EAX and the PC in the PPUState.
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"unsafe"
@@ -39,18 +41,33 @@ const (
 )
 
 var (
-	offGPR   = int32(unsafe.Offsetof(PPUState{}.GPR))
-	offFPR   = int32(unsafe.Offsetof(PPUState{}.FPR))
-	offVR    = int32(unsafe.Offsetof(PPUState{}.VR))
-	offCR    = int32(unsafe.Offsetof(PPUState{}.CR))
-	offLR    = int32(unsafe.Offsetof(PPUState{}.LR))
-	offCTR   = int32(unsafe.Offsetof(PPUState{}.CTR))
-	offXER   = int32(unsafe.Offsetof(PPUState{}.XER))
-	offFPSCR = int32(unsafe.Offsetof(PPUState{}.FPSCR))
-	offPC    = int32(unsafe.Offsetof(PPUState{}.PC))
+	offGPR     = int32(unsafe.Offsetof(PPUState{}.GPR))
+	offFPR     = int32(unsafe.Offsetof(PPUState{}.FPR))
+	offVR      = int32(unsafe.Offsetof(PPUState{}.VR))
+	offCR      = int32(unsafe.Offsetof(PPUState{}.CR))
+	offLR      = int32(unsafe.Offsetof(PPUState{}.LR))
+	offCTR     = int32(unsafe.Offsetof(PPUState{}.CTR))
+	offXER     = int32(unsafe.Offsetof(PPUState{}.XER))
+	offFPSCR   = int32(unsafe.Offsetof(PPUState{}.FPSCR))
+	offPC      = int32(unsafe.Offsetof(PPUState{}.PC))
+	offFpLast  = int32(unsafe.Offsetof(PPUState{}.fpLast))
+	offFpDirty = int32(unsafe.Offsetof(PPUState{}.fpDirty))
 )
 
+var jitFMA = jitSupported && cpuHasFMA()
+
+func fpr(r uint32) int32 { return offFPR + int32(r)*8 }
+
 func gpr(r uint32) int32 { return offGPR + int32(r)*8 }
+
+// jitInterpHist (PS3_JITHIST=1): what the recompilers leave to the
+// interpreters, by opcode (debugging).
+var jitInterpHist = func() map[string]int {
+	if os.Getenv("PS3_JITHIST") != "" {
+		return map[string]int{}
+	}
+	return nil
+}()
 
 // jitOff turns the recompiler off (PS3_NOJIT=1), for comparing.
 var jitOff = os.Getenv("PS3_NOJIT") != ""
@@ -107,11 +124,15 @@ func (j *JIT) reset() {
 		j.table[i] = 0
 		j.pages[i] = nil
 	}
-	j.used = 0
-	a := &x86{base: j.base}
+	// the byte swap of a vector's words (for lvx / stvx), then the
+	// dispatcher
+	for i := 0; i < 16; i++ {
+		j.buf[i] = byte(i ^ 3)
+	}
+	j.used = 16
+	a := &x86{base: j.base + 16}
 	j.emitDispatch(a)
-	j.place(a)
-	j.dispatch = j.base
+	j.dispatch = j.place(a)
 	j.Flushes++
 }
 
@@ -198,6 +219,18 @@ func (j *JIT) run(c *PPU, n int) {
 			if left <= 0 {
 				return
 			}
+			if jitInterpHist != nil {
+				w := c.Mem.Read32(c.PC)
+				k := fmt.Sprintf("ppu %d/%d", w>>26, w>>1&0x3ff)
+				if w>>26 == 4 {
+					if w&0x3f >= 32 {
+						k = fmt.Sprintf("ppu va%d", w&0x3f)
+					} else {
+						k = fmt.Sprintf("ppu vx%d", w&0x7ff)
+					}
+				}
+				jitInterpHist[k]++
+			}
 			c.step1()
 			j.Interp++
 			left--
@@ -271,7 +304,7 @@ func (b *jitBlock) build() {
 	a.imm32(0)
 
 	pc := b.start
-	done := false
+	done, stopped := false, false
 	for b.n < jitMaxBlock && !done {
 		if pc>>pageBits != b.start>>pageBits || mem.pages[pc>>pageBits] == nil {
 			break
@@ -282,6 +315,7 @@ func (b *jitBlock) build() {
 		ok, ends := b.inst(inst, pc)
 		if !ok {
 			a.b = a.b[:mark]
+			stopped = true
 			break
 		}
 		if len(b.cur.at) > 0 {
@@ -291,6 +325,10 @@ func (b *jitBlock) build() {
 		b.n++
 		pc += 4
 		done = ends
+	}
+	if !done && !stopped && b.n > 0 {
+		b.toPC(pc) // the block is as long as it gets: on to the next
+		done = true
 	}
 	if !done {
 		// the next instruction runs in the interpreter (or starts the
@@ -745,6 +783,8 @@ func (b *jitBlock) inst(inst, pc uint32) (ok, ends bool) {
 		}
 		b.eaD(ra, simm)
 		b.fpMem(op < 52, op&2 != 0, rd, ra, update)
+	case 59, 63:
+		return b.fpArith(inst), false
 	default:
 		return false, false
 	}
@@ -1397,9 +1437,253 @@ func (b *jitBlock) inst31(inst, pc uint32) (ok, ends bool) {
 		a.aluRI(aluAnd, rDX, ^mask)
 		a.aluRR(aluOr, rDX, rAX)
 		a.movStore(rBX, offCR, rDX)
+	case 103, 359, 231, 487: // lvx lvxl stvx stvxl
+		if !spuJitOK {
+			return false, false
+		}
+		b.eaX(ra, rb)
+		a.aluRI(aluAnd, rCX, ^uint32(15))
+		store := xo == 231 || xo == 487
+		b.hostAddr(16, store)
+		if store {
+			a.movdquLoad(0, rBX, offVR+16*int32(rd))
+		} else {
+			a.movdquLoadIdx(0, rDX, rAX)
+		}
+		at := a.xRip(0x66, ssePshufb, 0)
+		a.ripTo(at, 0, b.j.base)
+		if store {
+			a.movdquStoreIdx(rDX, rAX, 0)
+		} else {
+			a.movdquStore(rBX, offVR+16*int32(rd), 0)
+		}
+	case 790: // lhbrx
+		b.eaX(ra, rb)
+		b.hostAddr(2, false)
+		a.load16Idx(rAX, rDX, rAX)
+		a.movStore64(rBX, gpr(rd), rAX)
+	case 918: // sthbrx
+		b.eaX(ra, rb)
+		a.movLoad(r8, rBX, gpr(rd))
+		b.hostAddr(2, true)
+		a.store16Idx(rDX, rAX, r8)
 	case 54, 86, 246, 278, 470, 598, 854, 342, 374, 822: // cache hints, sync, eieio
 	default:
 		return false, false
 	}
 	return true, false
+}
+
+// fpResult: x0 is FPR d's new value, which also sets the FPSCR result
+// flags (pending: ppu_fpu.go's syncFPRF).
+func (b *jitBlock) fpResult(d uint32) {
+	a := b.a
+	a.movsdStore(rBX, fpr(d), 0)
+	a.movsdStore(rBX, offFpLast, 0)
+	a.movStoreImm(rBX, offFpDirty, 1)
+}
+
+// negX flips the sign of xmm x (clobbers RAX, xmm7).
+func (b *jitBlock) negX(x int) {
+	a := b.a
+	a.movRI64(rAX, 1<<63)
+	a.movqToX(7, rAX)
+	a.xorpd(x, 7)
+}
+
+// fpArith: the floating point arithmetic of primary opcodes 59 (single)
+// and 63 (double). The record forms (Rc) go to the interpreter.
+func (b *jitBlock) fpArith(inst uint32) bool {
+	a := b.a
+	op := inst >> 26
+	d, ra, rb, rc := inst>>21&31, inst>>16&31, inst>>11&31, inst>>6&31
+	if inst&1 != 0 {
+		return false
+	}
+	if op == 63 && inst&0x20 == 0 {
+		return b.fp63X(inst, d, ra, rb)
+	}
+	xo := inst >> 1 & 31
+	switch xo {
+	case 18, 20, 21, 25: // fdiv fsub fadd fmul
+		a.movsdLoad(0, rBX, fpr(ra))
+		if xo == 25 {
+			a.movsdLoad(1, rBX, fpr(rc))
+		} else {
+			a.movsdLoad(1, rBX, fpr(rb))
+		}
+		a.sd(map[uint32]byte{18: sseDiv, 20: sseSub, 21: sseAdd, 25: sseMul}[xo], 0, 1)
+	case 22: // fsqrt
+		a.movsdLoad(1, rBX, fpr(rb))
+		a.sd(sseSqrt, 0, 1)
+	case 24, 26: // fres (single), frsqrte (double)
+		if (xo == 24) != (op == 59) {
+			return false
+		}
+		a.movsdLoad(1, rBX, fpr(rb))
+		if xo == 26 {
+			a.sd(sseSqrt, 1, 1)
+		}
+		a.movRI64(rAX, math.Float64bits(1))
+		a.movqToX(0, rAX)
+		a.sd(sseDiv, 0, 1)
+	case 23: // fsel (double only): a >= 0 ? c : b
+		if op != 63 {
+			return false
+		}
+		a.movsdLoad(0, rBX, fpr(ra))
+		a.xorpd(1, 1)
+		a.ucomisd(0, 1)
+		a.movLoad64(rAX, rBX, fpr(rb))
+		a.movLoad64(rCX, rBX, fpr(rc))
+		a.cmovRR64(ccAE, rAX, rCX)
+		a.movStore64(rBX, fpr(d), rAX)
+		return true
+	case 28, 29, 30, 31: // fmsub fmadd fnmsub fnmadd: (-)(a*c +/- b)
+		if !jitFMA {
+			return false
+		}
+		a.movsdLoad(0, rBX, fpr(ra))
+		a.movsdLoad(1, rBX, fpr(rc))
+		a.movsdLoad(2, rBX, fpr(rb))
+		if xo == 28 || xo == 30 {
+			b.negX(2)
+		}
+		a.vfmadd213sd(0, 1, 2)
+		if xo >= 30 {
+			b.negX(0)
+		}
+	default:
+		return false
+	}
+	if op == 59 {
+		a.cvtsd2ss(0)
+		a.cvtss2sd(0)
+	}
+	b.fpResult(d)
+	return true
+}
+
+// fp63X: the X-form double instructions.
+func (b *jitBlock) fp63X(inst, d, ra, rb uint32) bool {
+	a := b.a
+	switch inst >> 1 & 0x3ff {
+	case 72, 40, 264, 136: // fmr fneg fabs fnabs
+		a.movLoad64(rAX, rBX, fpr(rb))
+		switch inst >> 1 & 0x3ff {
+		case 40:
+			a.movRI64(rCX, 1<<63)
+			a.aluRR64(aluXor, rAX, rCX)
+		case 264:
+			a.movRI64(rCX, 1<<63-1)
+			a.aluRR64(aluAnd, rAX, rCX)
+		case 136:
+			a.movRI64(rCX, 1<<63)
+			a.aluRR64(aluOr, rAX, rCX)
+		}
+		a.movStore64(rBX, fpr(d), rAX)
+	case 12: // frsp (NaNs in the interpreter, which keeps their payload)
+		a.movLoad64(rAX, rBX, fpr(rb))
+		a.movRR64(rCX, rAX)
+		a.shiftRI64(shShr, rCX, 52)
+		a.aluRI(aluAnd, rCX, 0x7ff)
+		a.aluRI(aluCmp, rCX, 0x7ff)
+		b.slowIf(ccE)
+		a.movqToX(0, rAX)
+		a.cvtsd2ss(0)
+		a.cvtss2sd(0)
+		b.fpResult(d)
+	case 15, 815: // fctiwz, fctidz (positive overflow in the interpreter)
+		a.movsdLoad(0, rBX, fpr(rb))
+		if inst>>1&0x3ff == 15 {
+			a.movRI64(rAX, math.Float64bits(2147483647))
+		} else {
+			a.movRI64(rAX, math.Float64bits(9.223372036854775807e18))
+		}
+		a.movqToX(1, rAX)
+		a.ucomisd(0, 1)
+		b.slowIf(ccAE)
+		if inst>>1&0x3ff == 15 {
+			a.cvttsd2si(rAX, 0) // (32-bit: NaN and too small give 0x80000000)
+			a.movRI64(rCX, 0xfff8000000000000)
+			a.aluRR64(aluOr, rAX, rCX)
+		} else {
+			a.byte1(0xf2)
+			a.rex(true, rAX, 0, 0)
+			a.byte1(0x0f, 0x2c)
+			a.modRR(rAX, 0) // cvttsd2si rax, xmm0
+		}
+		a.movStore64(rBX, fpr(d), rAX)
+	case 846: // fcfid
+		a.movLoad64(rAX, rBX, fpr(rb))
+		a.byte1(0xf2)
+		a.rex(true, 0, 0, rAX)
+		a.byte1(0x0f, 0x2a)
+		a.modRR(0, rAX) // cvtsi2sd xmm0, rax
+		b.fpResult(d)
+	case 0, 32: // fcmpu, fcmpo
+		b.fcmp(d>>2, ra, rb)
+	default:
+		return false
+	}
+	return true
+}
+
+// fcmp sets CR field f and FPSCR's FPCC from comparing FPRs ra and rb.
+func (b *jitBlock) fcmp(f, ra, rb uint32) {
+	a := b.a
+	// the pending result flags first: only their C bit stays
+	a.movLoad(rDX, rBX, offFPSCR)
+	a.aluMI(aluCmp, rBX, offFpDirty, 0)
+	clean := a.jcc(ccE)
+	a.movLoad64(rAX, rBX, offFpLast)
+	a.movRR64(rCX, rAX)
+	a.shiftRI64(shShl, rCX, 1) // without the sign
+	a.aluRR(aluXor, r8, r8)
+	// C: NaN (above infinity), -0, or denormal (nonzero, exponent 0)
+	a.movRI64(r10, 0xffe0000000000000)
+	a.aluRR64(aluCmp, rCX, r10)
+	a.setcc(ccA, r8)
+	a.movRI64(r10, 0x0020000000000000)
+	a.aluRR64(aluCmp, rCX, r10)
+	notTiny := a.jcc(ccAE)
+	a.testRR64(rCX, rCX)
+	a.setcc(ccNE, r10)
+	a.aluRR(aluOr, r8, r10)
+	a.testRR64(rAX, rAX)
+	a.setcc(ccS, r10)
+	a.aluRR(aluOr, r8, r10)
+	a.patch(notTiny)
+	a.aluRI(aluAnd, r8, 1)
+	a.shiftRI(shShl, r8, 16)
+	a.aluRI(aluAnd, rDX, ^uint32(0x10000))
+	a.aluRR(aluOr, rDX, r8)
+	a.movStoreImm(rBX, offFpDirty, 0)
+	a.patch(clean)
+	// the compare: FPCC = 8 <, 4 >, 2 =, 1 unordered
+	a.movsdLoad(0, rBX, fpr(ra))
+	a.movsdLoad(1, rBX, fpr(rb))
+	a.ucomisd(0, 1)
+	a.movRI(rCX, 1)
+	un := a.jcc(ccP)
+	a.movRI(rCX, 2)
+	eq := a.jcc(ccE)
+	a.movRI(rCX, 4)
+	gt := a.jcc(ccA)
+	a.movRI(rCX, 8)
+	a.patch(un)
+	a.patch(eq)
+	a.patch(gt)
+	a.aluRI(aluAnd, rDX, ^uint32(0xf<<12))
+	a.movRR(rAX, rCX)
+	a.shiftRI(shShl, rAX, 12)
+	a.aluRR(aluOr, rDX, rAX)
+	a.movStore(rBX, offFPSCR, rDX)
+	if sh := uint8(28 - 4*f); sh != 0 {
+		a.shiftRI(shShl, rCX, sh)
+	}
+	a.movLoad(rDX, rBX, offCR)
+	a.aluRI(aluAnd, rDX, ^(uint32(0xf) << (28 - 4*f)))
+	a.aluRR(aluOr, rDX, rCX)
+	a.movStore(rBX, offCR, rDX)
 }

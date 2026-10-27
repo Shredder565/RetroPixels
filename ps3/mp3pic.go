@@ -141,6 +141,7 @@ func (m *Machine) picCall(s *spuThread, n uint32) {
 	for k := 0; k < ch; k++ {
 		o := out + uint32(k)*picOutStride
 		clear(c.LS[o : o+pcm])
+		c.lsWrote(o, int(pcm))
 	}
 	c.setLS32(c.GPR[4][0]&lsMask, skip+uint32(flen))
 	c.setLS32(c.GPR[5][0]&lsMask, pcm)

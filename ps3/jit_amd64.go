@@ -17,3 +17,5 @@ func cpuHasFMA() bool
 func spuJitCall(entry uintptr, a *jitArgs) uint64
 
 func cpuHasSSE41() bool
+
+func cpuHasAVX2() bool

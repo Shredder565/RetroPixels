@@ -15,3 +15,5 @@ func cpuHasFMA() bool { return false }
 func spuJitCall(entry uintptr, a *jitArgs) uint64 { panic("no recompiler here") }
 
 func cpuHasSSE41() bool { return false }
+
+func cpuHasAVX2() bool { return false }

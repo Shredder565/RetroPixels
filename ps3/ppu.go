@@ -35,6 +35,11 @@ type PPUState struct {
 	VRSAVE uint32
 	PC     uint32
 
+	// the FPSCR result flags (FPRF) are worked out when FPSCR is read,
+	// from the last result (fpLast) if fpDirty
+	fpLast  uint64
+	fpDirty uint32
+
 	resAddr  uint32 // lwarx/ldarx reservation (128-byte line)
 	resVal   uint64
 	resValid bool

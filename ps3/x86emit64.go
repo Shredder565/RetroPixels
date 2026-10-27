@@ -63,3 +63,17 @@ func (a *x86) storeImm64(base int, disp int32, v uint64) {
 
 // test [base+disp] with a register, 64 bits
 func (a *x86) leaIdx(dst, base, index int) { a.opRMI(true, []byte{0x8d}, dst, base, index, 1, 0) }
+
+// vfmadd213sd dst, s1, s2: dst = dst*s1 + s2 (FMA3)
+func (a *x86) vfmadd213sd(dst, s1, s2 int) {
+	r := byte(0x80)
+	if dst&8 != 0 {
+		r = 0
+	}
+	bb := byte(0x20)
+	if s2&8 != 0 {
+		bb = 0
+	}
+	a.byte1(0xc4, r|0x40|bb|0x02, 0x80|byte(^s1&15)<<3|0x01, 0xa9)
+	a.modRR(dst, s2)
+}

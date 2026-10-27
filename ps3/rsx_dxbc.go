@@ -31,14 +31,14 @@ const (
 	dxFPTexBase = 1
 	dxFPTexSize = 6
 
-	dxH    = 48  // H registers follow R0..R47
-	dxCC   = 96  // CC0, CC1
-	dxD    = 98  // an instruction's result
-	dxS0   = 99  // sources, S0..S2
-	dxT    = 102 // scratch 102..105
-	dxCond = 106
-	dxWPos = 107
-	dxCnt  = 108 // loop counters, one per depth
+	dxH     = 48  // H registers follow R0..R47
+	dxCC    = 96  // CC0, CC1
+	dxD     = 98  // an instruction's result
+	dxS0    = 99  // sources, S0..S2
+	dxT     = 102 // scratch 102..105
+	dxCond  = 106
+	dxWPos  = 107
+	dxCnt   = 108 // loop counters, one per depth
 	dxTemps = dxCnt + 8
 
 	dxPosReg = 16 // the extra vertex output: (window z, 0, 0, 1/w)
@@ -60,11 +60,11 @@ type fpTr struct {
 	err   error
 }
 
-func dR(i int) d3d.Opnd                   { return d3d.R(i) }
-func dRC(i int, c uint32) d3d.Opnd        { return d3d.R(i).C(c) }
-func dW(i int, c uint32) d3d.Opnd         { return d3d.R(i).Mask(1 << c) }
-func dF(v ...float32) d3d.Opnd            { return d3d.ImmF(v...) }
-func dU(v ...uint32) d3d.Opnd             { return d3d.ImmU(v...) }
+func dR(i int) d3d.Opnd                      { return d3d.R(i) }
+func dRC(i int, c uint32) d3d.Opnd           { return d3d.R(i).C(c) }
+func dW(i int, c uint32) d3d.Opnd            { return d3d.R(i).Mask(1 << c) }
+func dF(v ...float32) d3d.Opnd               { return d3d.ImmF(v...) }
+func dU(v ...uint32) d3d.Opnd                { return d3d.ImmU(v...) }
 func (t *fpTr) ins(op uint32, o ...d3d.Opnd) { t.s.Ins(op, o...) }
 
 // translateFP makes the pixel shader for p.
@@ -231,7 +231,7 @@ func (t *fpTr) cond(in *fpInst) {
 
 // condMask puts testCond's per-component result in register r.
 func (t *fpTr) condMask(in *fpInst, r int) {
-	c := dR(dxCC + int(in.condReg&1)).Swz(uint32(in.condSwz[0]), uint32(in.condSwz[1]), uint32(in.condSwz[2]), uint32(in.condSwz[3]))
+	c := dR(dxCC+int(in.condReg&1)).Swz(uint32(in.condSwz[0]), uint32(in.condSwz[1]), uint32(in.condSwz[2]), uint32(in.condSwz[3]))
 	z := dF(0, 0, 0, 0)
 	switch in.cond {
 	case 1:
