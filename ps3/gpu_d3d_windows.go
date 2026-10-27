@@ -42,11 +42,15 @@ type d3dGPU struct {
 	cbSize  int
 }
 
-// UseD3D11 moves the machine's drawing onto the graphics card.
+// UseD3D11 moves the machine's drawing onto the graphics card (or, when
+// there's none that works, Windows' own fast software Direct3D, WARP).
 func (m *Machine) UseD3D11() error {
 	dev, err := newD3DGPU(false)
 	if err != nil {
-		return err
+		var err2 error
+		if dev, err2 = newD3DGPU(true); err2 != nil {
+			return fmt.Errorf("%v; WARP: %v", err, err2)
+		}
 	}
 	if err := m.UseHostGPU(dev); err != nil {
 		dev.Close()
