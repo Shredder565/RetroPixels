@@ -57,3 +57,33 @@ func TestGameTitleLocal(t *testing.T) {
 	}
 	t.Log(GameTitle(eboot))
 }
+
+func TestSetAudioRenderer(t *testing.T) {
+	in := "Video:\r\n  Renderer: Vulkan\r\nAudio:\r\n  Renderer: Cubeb\r\n  Audio Provider: CellAudio\r\n"
+	want := "Video:\r\n  Renderer: Vulkan\r\nAudio:\r\n  Renderer: XAudio2\r\n  Audio Provider: CellAudio\r\n"
+	if got := string(SetAudioRenderer([]byte(in), "XAudio2")); got != want {
+		t.Fatalf("got %q", got)
+	}
+	if got := string(SetAudioRenderer([]byte("Video:\n  Renderer: Vulkan\n"), "XAudio2")); got != "Video:\n  Renderer: Vulkan\nAudio:\n  Renderer: XAudio2\n" {
+		t.Fatalf("no audio section: %q", got)
+	}
+}
+
+func TestPrepareSettingsAudioOnce(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config", "config.yml")
+	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	os.WriteFile(cfg, []byte("Audio:\n  Renderer: Cubeb\n"), 0o644)
+	if err := PrepareSettings(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg)
+	if string(b) != "Audio:\n  Renderer: XAudio2\n" {
+		t.Fatalf("config %q", b)
+	}
+	os.WriteFile(cfg, []byte("Audio:\n  Renderer: Cubeb\n"), 0o644)
+	PrepareSettings(dir)
+	if b, _ := os.ReadFile(cfg); string(b) != "Audio:\n  Renderer: Cubeb\n" {
+		t.Fatalf("changed the user's choice: %q", b)
+	}
+}

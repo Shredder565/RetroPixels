@@ -174,17 +174,81 @@ func treeSize(dir string) int64 {
 // installs and its Stop game.
 const guiSettings = "[main_window]\r\ninfoBoxEnabledWelcome=false\r\ninfoBoxEnabledInstallPKG=false\r\ninfoBoxEnabledInstallPUP=false\r\nconfirmationBoxExitGame=false\r\nconfirmationBoxBootGame=false\r\n"
 
+// audioMark records that RetroPixels has set RPCS3's sound output once, so
+// a later change made in RPCS3 itself is kept.
+const audioMark = "RETROPIXELS-AUDIO.txt"
+
 // PrepareSettings writes those settings in RPCS3's folder dir the first
-// time (RPCS3's own settings stay as they are after that).
+// time (RPCS3's own settings stay as they are after that). It also moves
+// RPCS3's sound output from Cubeb to XAudio2 once: with Cubeb, RPCS3 crashed
+// (0xc0000005) when a game reopened the sound output.
 func PrepareSettings(dir string) error {
 	p := filepath.Join(dir, "GuiConfigs", "CurrentSettings.ini")
-	if _, err := os.Stat(p); err == nil {
+	if _, err := os.Stat(p); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(p, []byte(guiSettings), 0o644); err != nil {
+			return err
+		}
+	}
+	return prepareAudio(dir)
+}
+
+func prepareAudio(dir string) error {
+	mark := filepath.Join(dir, audioMark)
+	if _, err := os.Stat(mark); err == nil {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	cfg := filepath.Join(dir, "config", "config.yml")
+	b, err := os.ReadFile(cfg)
+	switch {
+	case os.IsNotExist(err):
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			return err
+		}
+		b = []byte("Audio:\n  Renderer: XAudio2\n")
+	case err != nil:
+		return err
+	default:
+		b = SetAudioRenderer(b, "XAudio2")
+	}
+	if err := os.WriteFile(cfg, b, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(guiSettings), 0o644)
+	return os.WriteFile(mark, []byte("RetroPixels set RPCS3's sound output to XAudio2 once. Change it in RPCS3 if you like; RetroPixels won't change it again.\r\n"), 0o644)
+}
+
+// SetAudioRenderer sets "Renderer:" in the Audio section of RPCS3's
+// config.yml text, adding the section if it's missing.
+func SetAudioRenderer(b []byte, renderer string) []byte {
+	nl := "\n"
+	if bytes.Contains(b, []byte("\r\n")) {
+		nl = "\r\n"
+	}
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	in := false
+	for i, l := range lines {
+		if len(l) > 0 && l[0] != ' ' {
+			in = strings.TrimSpace(l) == "Audio:"
+			continue
+		}
+		if in && strings.HasPrefix(l, "  Renderer:") {
+			lines[i] = "  Renderer: " + renderer
+			return []byte(strings.Join(lines, nl))
+		}
+	}
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "Audio:" && !strings.HasPrefix(l, " ") {
+			lines = append(lines[:i+1], append([]string{"  Renderer: " + renderer}, lines[i+1:]...)...)
+			return []byte(strings.Join(lines, nl))
+		}
+	}
+	s := strings.Join(lines, nl)
+	if s != "" && !strings.HasSuffix(s, nl) {
+		s += nl
+	}
+	return []byte(s + "Audio:" + nl + "  Renderer: " + renderer + nl)
 }
 
 // GameTitle reads the game's title from the PARAM.SFO beside its USRDIR.
