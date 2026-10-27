@@ -5,7 +5,10 @@ package ps3
 // notification, events, the decrementer) and the MFC, which moves data
 // between local store and main memory. DMA completes at once.
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 type spuSeg struct{ typ, ls, size, addr uint32 }
 
@@ -71,11 +74,11 @@ type spuThread struct {
 }
 
 type spuList struct {
-	put        bool
-	lsa, list  uint32
-	eah        uint32
-	left       uint32 // bytes of list left
-	tag        uint32
+	put       bool
+	lsa, list uint32
+	eah       uint32
+	left      uint32 // bytes of list left
+	tag       uint32
 }
 
 type spuState struct {
@@ -135,6 +138,9 @@ func (m *Machine) runSPUs(n uint64) int {
 		if !s.running || s.g.suspend {
 			continue
 		}
+		if spuProf != nil {
+			spuProf[s.c.PC]++
+		}
 		left := int(n)
 		for left > 0 && s.running {
 			r := s.c.Run(left)
@@ -156,6 +162,14 @@ func (m *Machine) runSPUs(n uint64) int {
 		}
 	}
 	return most
+}
+
+var spuProf map[uint32]int
+
+func init() {
+	if os.Getenv("PS3_SPUPROF") != "" {
+		spuProf = map[uint32]int{}
+	}
 }
 
 // ---- channels
@@ -528,7 +542,9 @@ func (m *Machine) spuPutMem(s *spuThread, ea uint32, b []byte) {
 	m.Mem.WriteBytes(ea, b)
 }
 
-func be32(b []byte) uint32 { return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]) }
+func be32(b []byte) uint32 {
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
 
 func (m *Machine) spuWriteSNR(s *spuThread, i int, v uint32) {
 	if s.snrCfg>>i&1 != 0 && s.snrValid[i] {
@@ -853,7 +869,7 @@ func init() {
 		t.ret(eSRCH)
 	})
 	sysc(176, func(m *Machine, t *Thread) { t.ret(0) }) // yield
-	sysc(177, func(m *Machine, t *Thread) { // terminate(id, value)
+	sysc(177, func(m *Machine, t *Thread) {             // terminate(id, value)
 		g, ok := m.objects[t.arg(0)].(*spuGroup)
 		if !ok {
 			t.ret(eSRCH)
