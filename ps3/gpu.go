@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math"
+	"os"
 
 	"retropixels/wiiu/d3d"
 )
@@ -54,6 +55,7 @@ type gpuDevice interface {
 	DepthToRGBA8(dst, src gpuHandle) error
 	Release(t gpuHandle)
 	CreatePS(code []byte) (gpuHandle, error)
+	CreateVS(code []byte) (gpuHandle, error)
 	ClearTarget(t gpuHandle, rgba [4]float32)
 	ClearDepth(t gpuHandle, flags uint32, depth float32, stencil uint8)
 	Draw(d *gpuDraw) error
@@ -74,10 +76,14 @@ type gpuDraw struct {
 	Raster        d3d.RasterizerDesc
 	PS            gpuHandle
 	PSConst       []float32
-	Tex           [16]gpuHandle
-	Samp          [16]d3d.SamplerDesc
-	Verts         []float32 // gpuVertRegs vec4s a vertex
-	Index         []uint32  // a triangle list
+	// VS (0: none) runs the vertex program on Verts, packed attributes;
+	// without it Verts holds each vertex's outputs (gpuVertRegs vec4s)
+	VS      gpuHandle
+	VSConst []float32
+	Tex     [16]gpuHandle
+	Samp    [16]d3d.SamplerDesc
+	Verts   []float32 // gpuVertRegs vec4s a vertex
+	Index   []uint32  // a triangle list
 }
 
 const gpuVertRegs = dxPosReg + 1
@@ -130,14 +136,20 @@ type gpuRenderer struct {
 	verts   []float32
 	index   []uint32
 	scratch map[[3]int]gpuHandle // temporary copies by (w, h, format)
+	vs      map[vpShaderKey]gpuHandle
+	vsConst []float32
+	vmap    map[uint32]int
 
 	Draws, Fallbacks int
-	lastErr          string
+	// per-frame costs (debugging): targets read back to memory, memory
+	// put into targets, textures made or changed, texture bytes checked
+	Readbacks, Uploads, TexChanges, TexChecked int
+	lastErr                                    string
 }
 
 // UseHostGPU makes the machine draw with dev.
 func (m *Machine) UseHostGPU(dev gpuDevice) error {
-	g := &gpuRenderer{m: m, dev: dev, texs: map[hostTexKey]*hostTex{}, ps: map[fpKey]gpuHandle{},
+	g := &gpuRenderer{m: m, dev: dev, texs: map[hostTexKey]*hostTex{}, ps: map[fpKey]gpuHandle{}, vs: map[vpShaderKey]gpuHandle{},
 		psErr: map[fpKey]error{}, seed: maphash.MakeSeed(), scratch: map[[3]int]gpuHandle{}}
 	h, err := dev.CreatePS(gpuClearPS())
 	if err != nil {
@@ -237,6 +249,7 @@ func (g *gpuRenderer) drop(s *hostSurf) {
 
 // upload copies memory into the host copy.
 func (g *gpuRenderer) upload(s *hostSurf) {
+	g.Uploads++
 	g.dev.UpdateTexture(s.tex, g.memToHost(s), s.w*s.bpp)
 	s.stale, s.dirty, s.asRGBAOK = false, false, false
 }
@@ -245,6 +258,10 @@ func (g *gpuRenderer) upload(s *hostSurf) {
 func (g *gpuRenderer) writeBack(s *hostSurf) {
 	if !s.dirty {
 		return
+	}
+	g.Readbacks++
+	if gpuStat {
+		g.m.Logf("GPU readback %08X %dx%d fmt %d depth %v", s.addr, s.w, s.h, s.fmt, s.depth)
 	}
 	data, pitch, err := g.dev.ReadTexture(s.tex)
 	if err != nil {
@@ -601,11 +618,13 @@ func (g *gpuRenderer) memTexture(t *rsxTexture) *hostTex {
 	}
 	raw := g.buf[:t.size]
 	g.m.Mem.ReadBytes(t.ea, raw)
+	g.TexChecked += t.size
 	hash := maphash.Bytes(g.seed, raw)
 	if ht != nil && ht.hash == hash {
 		ht.checked = g.frame
 		return ht
 	}
+	g.TexChanges++
 	tt := *t
 	tt.data = raw
 	format, data, pitch, pos, fill := hostTexData(&tt)
@@ -775,35 +794,14 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 	if col == nil {
 		return false
 	}
-	verts, vlist := m.rsxVertices(r, d)
-	idx := g.triangles(d.prim, vlist)
-	if len(idx) == 0 {
+	dr := &gpuDraw{Target: col.tex, W: w, H: h, PS: ps}
+	if !g.gpuVertices(r, d, dr, w, h) {
+		g.cpuVertices(r, d, dr, w, h)
+	}
+	if len(dr.Index) == 0 {
 		return true
 	}
-	// vertices: the position in Direct3D clip space, outputs 1-15, and
-	// (window z, 0, 0, 1/w)
-	sx, sy, sz := r.regF(0xA30), r.regF(0xA34), r.regF(0xA38)
-	ox, oy, oz := r.regF(0xA20), r.regF(0xA24), r.regF(0xA28)
-	vb := g.verts[:0]
-	for i := range verts {
-		o := &verts[i].out
-		x, y, z, wc := o[0][0], o[0][1], o[0][2], o[0][3]
-		vb = append(vb,
-			2*(x*sx+ox*wc)/float32(w)-wc,
-			wc-2*(y*sy+oy*wc)/float32(h),
-			z*sz+oz*wc,
-			wc)
-		for k := 1; k < 16; k++ {
-			vb = append(vb, o[k][0], o[k][1], o[k][2], o[k][3])
-		}
-		iw := 1 / wc
-		if wc == 0 {
-			iw = 1e6
-		}
-		vb = append(vb, z*iw*sz+oz, 0, 0, iw)
-	}
-	g.verts = vb
-	dr := &gpuDraw{Target: col.tex, W: w, H: h, PS: ps, Verts: vb, Index: idx}
+
 	var mrts [3]*hostSurf
 	for k := 0; k < s.nmrt; k++ {
 		mrts[k] = g.surface(s.mrt[k].addr, s.mrt[k].pitch, w, h, s.fmt, false)
@@ -924,6 +922,113 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 		dep.asRGBAOK = false
 	}
 	return true
+}
+
+// cpuVertices runs the vertex program on the CPU: the buffer holds each
+// vertex's outputs (the position in Direct3D clip space, outputs 1-15, and
+// (window z, 0, 0, 1/w)) for the pass-through vertex shader.
+func (g *gpuRenderer) cpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int) {
+	verts, vlist := g.m.rsxVertices(r, d)
+	dr.Index = g.triangles(d.prim, vlist)
+	if len(dr.Index) == 0 {
+		return
+	}
+	sx, sy, sz := r.regF(0xA30), r.regF(0xA34), r.regF(0xA38)
+	ox, oy, oz := r.regF(0xA20), r.regF(0xA24), r.regF(0xA28)
+	vb := g.verts[:0]
+	for i := range verts {
+		o := &verts[i].out
+		x, y, z, wc := o[0][0], o[0][1], o[0][2], o[0][3]
+		vb = append(vb,
+			2*(x*sx+ox*wc)/float32(w)-wc,
+			wc-2*(y*sy+oy*wc)/float32(h),
+			z*sz+oz*wc,
+			wc)
+		for k := 1; k < 16; k++ {
+			vb = append(vb, o[k][0], o[k][1], o[k][2], o[k][3])
+		}
+		iw := 1 / wc
+		if wc == 0 {
+			iw = 1e6
+		}
+		vb = append(vb, z*iw*sz+oz, 0, 0, iw)
+	}
+	g.verts = vb
+	dr.Verts = vb
+}
+
+// gpuNoVS (PS3_NOVS): transform every vertex on the CPU (debugging)
+var gpuNoVS = os.Getenv("PS3_NOVS") != ""
+
+// gpuVertices has the GPU run the vertex program (false: it can't, see
+// translateVP): the buffer holds each vertex's enabled attributes.
+func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int) bool {
+	if gpuNoVS || len(d.inline) > 0 {
+		return false
+	}
+	m := g.m
+	m.rsxVP(d, r)
+	pcs, hash, ok := d.vpTraced()
+	if !ok {
+		return false
+	}
+	inMask := r.reg(0x1FF0) & 0xffff
+	if inMask == 0 {
+		return false
+	}
+	key := vpShaderKey{hash: hash, slots: inMask}
+	vs, ok := g.vs[key]
+	if !ok {
+		code, err := translateVP(d.vpProg, pcs, inMask)
+		if err == nil {
+			vs, err = g.dev.CreateVS(code)
+		}
+		if err != nil {
+			g.m.Logf("GPU: vertex shader: %v (the CPU transforms these)", err)
+			vs = 0
+		}
+		g.vs[key] = vs
+	}
+	if vs == 0 {
+		return false
+	}
+	uniq, vlist := dedupe(m.rsxIndices(r, d), g.vcache())
+	dr.Index = g.triangles(d.prim, vlist)
+	if len(dr.Index) == 0 {
+		return true
+	}
+	vb := g.verts[:0]
+	for _, i := range uniq {
+		for a := 0; a < 16; a++ {
+			if inMask>>a&1 != 0 {
+				v := m.fetchAttr(r, d, a, i)
+				vb = append(vb, v[0], v[1], v[2], v[3])
+			}
+		}
+	}
+	g.verts = vb
+	dr.Verts = vb
+	dr.VS = vs
+	cb := g.vsConst[:0]
+	for i := 0; i < 468; i++ {
+		cb = append(cb, d.vc[i][0], d.vc[i][1], d.vc[i][2], d.vc[i][3])
+	}
+	cb = append(cb, make([]float32, 4*(vxConstVP-468))...)
+	cb = append(cb, r.regF(0xA30), r.regF(0xA34), r.regF(0xA38), 0,
+		r.regF(0xA20), r.regF(0xA24), r.regF(0xA28), 0,
+		float32(w), float32(h), 0, 0)
+	g.vsConst = cb
+	dr.VSConst = cb
+	return true
+}
+
+// vcache is an empty index map (kept between draws).
+func (g *gpuRenderer) vcache() map[uint32]int {
+	if g.vmap == nil {
+		g.vmap = map[uint32]int{}
+	}
+	clear(g.vmap)
+	return g.vmap
 }
 
 // triangles turns a primitive's vertex list into a triangle list, as
@@ -1121,7 +1226,21 @@ func (g *gpuRenderer) screen(addr, pitch uint32, w, h int, sc *Screen) bool {
 }
 
 // endFrame is called at each flip.
-func (g *gpuRenderer) endFrame() { g.frame++ }
+func (g *gpuRenderer) endFrame() {
+	if gpuStat {
+		g.m.Logf("GPU frame %d: %d draws, %d software, %d readbacks, %d uploads, %d textures changed, %d KB of textures checked",
+			g.frame, g.Draws, g.Fallbacks, g.Readbacks, g.Uploads, g.TexChanges, g.TexChecked>>10)
+		if vpStat {
+			g.m.Logf("VP: %d draws, %d vertices, %d instructions (at most)", vpStatDraws, vpStatVerts, vpStatInsts)
+			vpStatDraws, vpStatVerts, vpStatInsts = 0, 0, 0
+		}
+		g.Draws, g.Fallbacks, g.Readbacks, g.Uploads, g.TexChanges, g.TexChecked = 0, 0, 0, 0, 0, 0
+	}
+	g.frame++
+}
+
+// gpuStat (PS3_GPUSTAT): log what each frame cost the GPU renderer
+var gpuStat = os.Getenv("PS3_GPUSTAT") != ""
 
 // readMem / wroteMem keep memory and the GPU in step around the CPU-side
 // 2D engines.

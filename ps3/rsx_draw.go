@@ -8,7 +8,9 @@ package ps3
 import (
 	"math"
 	"os"
+	"runtime"
 	"strconv"
+	"sync"
 )
 
 type drawRange struct{ first, count uint32 }
@@ -29,6 +31,14 @@ type rsxDraw struct {
 	imm     [16]vec4
 
 	branchBits uint32
+	// the vertex program's trace for the GPU (see vpTrace), for vpGen,
+	// vpBase and branchBits
+	vpGen          int
+	trGen, trStart int
+	trBits         uint32
+	trPCs          []int
+	trHash         uint64
+	trOK, trDone   bool
 
 	fpCache map[uint32]*fpProg
 
@@ -546,6 +556,7 @@ func (m *Machine) rsxVP(d *rsxDraw, r *rsxState) {
 	}
 	d.vpBase = start
 	d.vpDirty = false
+	d.vpGen++
 }
 
 // rsxRenderEvery draws only every n-th frame (for quick test runs).
@@ -611,7 +622,88 @@ func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 func (m *Machine) rsxVertices(r *rsxState, d *rsxDraw) ([]rsxVertex, []int) {
 	m.rsxVP(d, r)
 	inMask := r.reg(0x1FF0)
-	// vertex indices
+	idx := m.rsxIndices(r, d)
+	// run the vertex program
+	var verts []rsxVertex
+	var x vpRun
+	cache := map[uint32]int{}
+	var vlist []int
+	if len(d.inline) > 0 {
+		verts, vlist = m.inlineVertices(r, d, inMask, &x)
+	} else {
+		var uniq []uint32
+		uniq, vlist = dedupe(idx, cache)
+		verts = make([]rsxVertex, len(uniq))
+		if vpStat {
+			vpStatVerts += len(uniq)
+			vpStatInsts += len(uniq) * len(d.vpProg[min(d.vpStart(), len(d.vpProg)):])
+			vpStatDraws++
+		}
+		run := func(from, to int, x *vpRun) {
+			for n := from; n < to; n++ {
+				var attrs [16]vec4
+				for a := 0; a < 16; a++ {
+					if inMask>>a&1 != 0 {
+						attrs[a] = m.fetchAttr(r, d, a, uniq[n])
+					}
+				}
+				d.runVP(d.vpProg, d.vpStart(), &attrs, x)
+				verts[n].out = x.out
+			}
+		}
+		// the vertices are independent: big draws use every core
+		workers := min(vpWorkers, len(uniq)/vpChunk)
+		if workers <= 1 {
+			run(0, len(uniq), &x)
+		} else {
+			// memory pages are made on first touch: make them here, not
+			// in several workers at once
+			lo, hi := uniq[0], uniq[0]
+			for _, i := range uniq {
+				lo, hi = min(lo, i), max(hi, i)
+			}
+			for a := 0; a < 16; a++ {
+				f := r.reg(0x1740 + 4*uint32(a))
+				if inMask>>a&1 == 0 || f>>4&0xf == 0 {
+					continue
+				}
+				stride := f >> 8 & 0xff
+				offReg := r.reg(0x1680 + 4*uint32(a))
+				off := offReg&0x7fffffff + r.reg(0x1738)
+				first := m.gcm.offsetToAddr(off+stride*lo, offReg>>31)
+				last := m.gcm.offsetToAddr(off+stride*hi+16, offReg>>31)
+				for p := first &^ pageMask; p <= last && p >= first&^pageMask; p += pageSize {
+					m.Mem.page(p)
+				}
+			}
+			var wg sync.WaitGroup
+			per := (len(uniq) + workers - 1) / workers
+			for w := 0; w < workers; w++ {
+				from, to := w*per, min(len(uniq), (w+1)*per)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					var x vpRun
+					run(from, to, &x)
+				}()
+			}
+			wg.Wait()
+		}
+	}
+	return verts, vlist
+}
+
+// vpWorkers run a big draw's vertex program at once, vpChunk vertices or
+// more each.
+var vpWorkers = max(1, min(runtime.NumCPU(), 8))
+
+const vpChunk = 128
+
+var vpStat = os.Getenv("PS3_VPSTAT") != ""
+var vpStatVerts, vpStatInsts, vpStatDraws int
+
+// rsxIndices lists the draw's vertex indices (0xffffffff: restart).
+func (m *Machine) rsxIndices(r *rsxState, d *rsxDraw) []uint32 {
 	var idx []uint32
 	if d.indexed {
 		ia := r.reg(0x181C)
@@ -644,42 +736,45 @@ func (m *Machine) rsxVertices(r *rsxState, d *rsxDraw) ([]rsxVertex, []int) {
 			}
 		}
 	}
-	// run the vertex program
-	var verts []rsxVertex
-	var x vpRun
-	cache := map[uint32]int{}
-	var vlist []int
-	if len(d.inline) > 0 {
-		verts, vlist = m.inlineVertices(r, d, inMask, &x)
-	} else {
-		for _, i := range idx {
-			if i == 0xffffffff {
-				vlist = append(vlist, -1)
-				continue
-			}
-			if k, ok := cache[i]; ok {
-				vlist = append(vlist, k)
-				continue
-			}
-			var attrs [16]vec4
-			for a := 0; a < 16; a++ {
-				if inMask>>a&1 != 0 {
-					attrs[a] = m.fetchAttr(r, d, a, i)
-				}
-			}
-			d.runVP(d.vpProg, d.vpStart(), &attrs, &x)
-			verts = append(verts, rsxVertex{out: x.out})
-			cache[i] = len(verts) - 1
-			vlist = append(vlist, len(verts)-1)
+	return idx
+}
+
+// dedupe gives the distinct indices and, for each index, its place among
+// them (-1 for a restart).
+func dedupe(idx []uint32, cache map[uint32]int) (uniq []uint32, vlist []int) {
+	for _, i := range idx {
+		if i == 0xffffffff {
+			vlist = append(vlist, -1)
+			continue
 		}
+		k, ok := cache[i]
+		if !ok {
+			k = len(uniq)
+			cache[i] = k
+			uniq = append(uniq, i)
+		}
+		vlist = append(vlist, k)
 	}
-	return verts, vlist
+	return
 }
 
 // drawHook, when set (debugging), is called after each draw.
 var drawHook func(m *Machine, r *rsxState, s *rsxSurface)
 
 func (d *rsxDraw) vpStart() int { return d.vpBase }
+
+// vpTraced traces the current vertex program (once for each program,
+// start and branch bits).
+func (d *rsxDraw) vpTraced() ([]int, uint64, bool) {
+	if !d.trDone || d.trGen != d.vpGen || d.trStart != d.vpBase || d.trBits != d.branchBits {
+		d.trDone, d.trGen, d.trStart, d.trBits = true, d.vpGen, d.vpBase, d.branchBits
+		d.trPCs, d.trOK = vpTrace(d.vpProg, d.vpBase, d.branchBits)
+		if d.trOK {
+			d.trHash = vpTraceHash(d.vp[:], d.trPCs)
+		}
+	}
+	return d.trPCs, d.trHash, d.trOK
+}
 
 // inlineVertices decodes INLINE_ARRAY data with the array formats.
 func (m *Machine) inlineVertices(r *rsxState, d *rsxDraw, inMask uint32, x *vpRun) ([]rsxVertex, []int) {

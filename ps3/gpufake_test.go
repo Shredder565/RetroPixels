@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync"
 
@@ -177,6 +178,8 @@ func (fg *fakeGPU) CreatePS(code []byte) (gpuHandle, error) {
 	return h, nil
 }
 
+func (fg *fakeGPU) CreateVS(code []byte) (gpuHandle, error) { return fg.CreatePS(code) }
+
 func (fg *fakeGPU) ClearTarget(h gpuHandle, rgba [4]float32) {
 	t := fg.tex[h]
 	c := vec4(rgba)
@@ -212,6 +215,9 @@ type fakeVert struct {
 // Draw rasterises the triangles the way Direct3D 11 does (pixel centres,
 // perspective-correct TEXCOORDs, the extra register screen-linear).
 func (fg *fakeGPU) Draw(d *gpuDraw) error {
+	if os.Getenv("PS3_NULLGPU") != "" { // draw nothing (to time the rest)
+		return nil
+	}
 	ps := fg.ps[d.PS]
 	if ps == nil {
 		return fmt.Errorf("no pixel shader")
@@ -233,6 +239,36 @@ func (fg *fakeGPU) Draw(d *gpuDraw) error {
 			copy(r[k][:], d.Verts[(int(i)*gpuVertRegs+k)*4:])
 		}
 		return r
+	}
+	if d.VS != 0 { // run the vertex shader
+		vcb := make([][4]uint32, (len(d.VSConst)+3)/4)
+		for i, v := range d.VSConst {
+			vcb[i/4][i%4] = math.Float32bits(v)
+		}
+		vm := &dxVM{prog: fg.ps[d.VS], r: make([][4]uint32, vxTemps), cb: vcb}
+		vm.ld = func(unit int, i uint32) [4]uint32 {
+			var v [4]uint32
+			for j := 0; j < 4; j++ {
+				if int(i)*4+j < len(d.Verts) {
+					v[j] = math.Float32bits(d.Verts[int(i)*4+j])
+				}
+			}
+			return v
+		}
+		cache := map[uint32][gpuVertRegs]vec4{}
+		vert = func(i uint32) [gpuVertRegs]vec4 {
+			if v, ok := cache[i]; ok {
+				return v
+			}
+			vm.in[0] = [4]uint32{i, 0, 0, 0}
+			vm.run()
+			var r [gpuVertRegs]vec4
+			for k := 0; k < gpuVertRegs; k++ {
+				r[k] = vec4{f(vm.out[k][0]), f(vm.out[k][1]), f(vm.out[k][2]), f(vm.out[k][3])}
+			}
+			cache[i] = r
+			return r
+		}
 	}
 	var tris [][3]fakeVert
 	for i := 0; i+2 < len(d.Index); i += 3 {
@@ -372,7 +408,7 @@ func (fg *fakeGPU) rows(d *gpuDraw, ps []dxOp, cb [][4]uint32, rt, ds *fakeTex, 
 				vm.r[k] = [4]uint32{}
 			}
 			vm.killed = false
-			vm.out = [8][4]uint32{}
+			vm.out = [24][4]uint32{}
 			vm.run()
 			if vm.killed {
 				continue

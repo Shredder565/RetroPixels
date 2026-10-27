@@ -37,7 +37,7 @@ type dxVM struct {
 	prog   []dxOp
 	r      [][4]uint32
 	in     [32][4]uint32
-	out    [8][4]uint32
+	out    [24][4]uint32
 	cb     [][4]uint32
 	sample func(unit int, u, v float32) [4]float32
 	ld     func(unit int, i uint32) [4]uint32

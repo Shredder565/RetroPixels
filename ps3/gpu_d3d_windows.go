@@ -40,6 +40,9 @@ type d3dGPU struct {
 	ibSize  int
 	cb      d3d.Resource
 	cbSize  int
+	vcb     d3d.Resource // the vertex shaders' constants
+	vcbSize int
+	vss     map[gpuHandle]d3d.Object
 }
 
 // UseD3D11 moves the machine's drawing onto the graphics card (or, when
@@ -64,7 +67,7 @@ func newD3DGPU(warp bool) (*d3dGPU, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &d3dGPU{d: d, c: d.Ctx, tex: map[gpuHandle]*d3dTex{}, ps: map[gpuHandle]d3d.Object{}, states: map[string]d3d.Object{}}
+	g := &d3dGPU{d: d, c: d.Ctx, tex: map[gpuHandle]*d3dTex{}, ps: map[gpuHandle]d3d.Object{}, vss: map[gpuHandle]d3d.Object{}, states: map[string]d3d.Object{}}
 	if g.vs, err = d.CreateVertexShader(gpuVSCode()); err != nil {
 		d.Close()
 		return nil, err
@@ -247,6 +250,16 @@ func (g *d3dGPU) CreatePS(code []byte) (gpuHandle, error) {
 	return h, nil
 }
 
+func (g *d3dGPU) CreateVS(code []byte) (gpuHandle, error) {
+	o, err := g.d.CreateVertexShader(code)
+	if err != nil {
+		return 0, err
+	}
+	h := g.handle()
+	g.vss[h] = o
+	return h, nil
+}
+
 func (g *d3dGPU) ClearTarget(h gpuHandle, rgba [4]float32) {
 	if t := g.tex[h]; t != nil && !t.rtv.Nil() {
 		g.c.ClearRenderTargetView(t.rtv, rgba)
@@ -382,6 +395,21 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 			return err
 		}
 	}
+	vs := g.vs
+	if dr.VS != 0 {
+		vs = g.vss[dr.VS]
+		if vs.Nil() {
+			return fmt.Errorf("no vertex shader")
+		}
+		if err := g.dynamic(&g.vcb, &g.vcbSize, len(dr.VSConst)*4, d3d.BindConstantBuffer); err != nil {
+			return err
+		}
+		buf := make([]float32, g.vcbSize/4)
+		copy(buf, dr.VSConst)
+		if err := g.put(g.vcb, unsafe.Pointer(&buf[0]), g.vcbSize); err != nil {
+			return err
+		}
+	}
 	// state objects
 	bd := d3d.BlendDesc{}
 	bd.Target[0] = dr.Blend
@@ -458,7 +486,10 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 	g.c.IASetInputLayout(d3d.Object{})
 	g.c.IASetPrimitiveTopology(d3d.TopologyTriangleList)
 	g.c.IASetIndexBuffer(g.ib, d3d.FormatR32Uint, 0)
-	g.c.VSSetShader(g.vs)
+	g.c.VSSetShader(vs)
+	if dr.VS != 0 {
+		g.c.VSSetConstantBuffers(0, g.vcb)
+	}
 	g.c.VSSetShaderResources(0, g.vbSRV)
 	g.c.GSSetShader(d3d.Object{})
 	g.c.PSSetShader(ps)
