@@ -5,9 +5,11 @@
 // renderer; and the sound boards (SCSP with its 68000, and the MPEG music
 // board).
 //
-// It is written from the hardware's behaviour. Supermodel (the Sega Model 3
-// emulator) was used only as a reference to compare pictures and sound
-// against; none of its code is used.
+// Most of it is written from the hardware's behaviour, with Supermodel (the
+// Sega Model 3 emulator) as the reference to compare pictures and sound
+// against. The sound chips (scsp.go) and the music board (dsb.go) follow
+// Supermodel's code and are GPL-3.0-or-later; NOTICE.txt lists every
+// third-party part and its licence.
 package model3
 
 import (
@@ -752,7 +754,7 @@ func (m *Machine) readInputs(r uint32) uint8 {
 	case 0x3C:
 		var adc [8]uint8
 		if m.game.Inputs == InputAnalogJoystick {
-			adc[0] = axis(in.StickY)
+			adc[0] = axis(-in.StickY) // stick up reads low (as Supermodel maps it)
 			adc[1] = axis(in.StickX)
 		}
 		d := adc[m.adcChannel&7]
@@ -798,3 +800,24 @@ func (m *Machine) DebugMemory() (ram, vram []byte) { return m.ram, m.tg.vram[:] 
 // Audio is the sound the last frame made: 44.1 kHz stereo, interleaved left
 // and right, roughly -1..1.
 func (m *Machine) Audio() []float32 { return m.sound.ready }
+
+// NVRAM is the battery-backed RAM followed by the EEPROM's 64 words (big
+// endian): what a game keeps between sessions.
+func (m *Machine) NVRAM() []byte {
+	out := append([]byte(nil), m.backupRAM...)
+	for _, w := range m.eeprom.Words {
+		out = binary.BigEndian.AppendUint16(out, w)
+	}
+	return out
+}
+
+// LoadNVRAM puts back what NVRAM returned.
+func (m *Machine) LoadNVRAM(b []byte) {
+	if len(b) != len(m.backupRAM)+len(m.eeprom.Words)*2 {
+		return
+	}
+	copy(m.backupRAM, b)
+	for i := range m.eeprom.Words {
+		m.eeprom.Words[i] = binary.BigEndian.Uint16(b[len(m.backupRAM)+i*2:])
+	}
+}

@@ -6,9 +6,12 @@ package model3
 // through their registers, and the master chip's timers and MIDI port
 // interrupt it.
 //
-// This follows the SCSP emulation used by Supermodel (written by ElSemi,
-// with fixes from MAME by R. Belmont and others), including its quirks, so
-// the games sound the way they do there. The chip RAM is kept in the 68000's
+// This is a Go port of Supermodel's SCSP emulation (Src/Sound/SCSP*.cpp,
+// written by ElSemi, with fixes from MAME by R. Belmont and others;
+// Copyright 2003-2026 The Supermodel Team), including its quirks, so the
+// games sound the way they do there. Like Supermodel, this file is under the
+// GNU General Public License, version 3 or (at your option) any later
+// version: see LICENSE-GPL-3.0.txt and NOTICE.txt. The chip RAM is kept in the 68000's
 // byte order (big endian).
 
 import (

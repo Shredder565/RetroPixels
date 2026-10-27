@@ -1110,7 +1110,24 @@ func (c *Core) RunFrame() {
 }
 
 func (c *Core) TakeAudio() []float32 { return c.board.TakeAudio() }
-func (c *Core) Reset()               { c.board.Reset() }
+
+// SetAnalog passes a controller's stick to boards with analog controls
+// (Model 3's Star Wars Trilogy yoke).
+func (c *Core) SetAnalog(player, axis int, v float32) {
+	if a, ok := c.board.(interface {
+		SetAnalog(player, axis int, v float32)
+	}); ok {
+		a.SetAnalog(player, axis, v)
+	}
+}
+
+// AnalogStick says the board reads the stick itself (so the stick doesn't
+// also press the d-pad).
+func (c *Core) AnalogStick() bool {
+	a, ok := c.board.(interface{ AnalogStick() bool })
+	return ok && a.AnalogStick()
+}
+func (c *Core) Reset() { c.board.Reset() }
 
 func (c *Core) SRAM() []byte {
 	if s, ok := c.board.(SRAMer); ok {

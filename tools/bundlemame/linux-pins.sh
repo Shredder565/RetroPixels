@@ -21,8 +21,8 @@ MAME_SUBTARGET=mame
 # built from their source tarballs as shared libraries and bundled in the
 # MAME folder's lib/ (MAME finds them by RPATH=$ORIGIN/lib). SDL loads X11,
 # Wayland, PulseAudio, PipeWire and ALSA itself when it starts, so the
-# bundled copy runs on any desktop. The same SDL2 release as Supermodel's
-# (supermodel/pins.sh).
+# bundled copy runs on any desktop. The SDL2 release RetroPixels' engines
+# were tested with.
 SDL2_VERSION=2.30.12
 SDL2_URL=https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12.tar.gz
 SDL2_SHA256=ac356ea55e8b9dd0b2d1fa27da40ef7e238267ccf9324704850d5d47375b48ea

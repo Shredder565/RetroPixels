@@ -3,8 +3,7 @@ name: RetroPixels with PixelU (test build)
 # One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
 # built from this commit, with PixelU inside (the Wii U engine and the
 # GameCube / Wii engine, from their latest successful builds on this branch)
-# the built-in MAME and Supermodel (Sega Model 3, built from this commit by
-# supermodel.yml). A workflow artifact only: no release is made.
+# and the built-in MAME. A workflow artifact only: no release is made.
 # It runs on each push, and again when a PixelU engine build finishes (those
 # workflows start it, since workflow_run only works from the default branch).
 
@@ -31,20 +30,15 @@ concurrency:
   cancel-in-progress: ${{ !inputs.release }}
 
 jobs:
-  # supermodel.exe from supermodel/ at this commit (upstream + RetroPixels' patches).
-  supermodel:
-    uses: ./.github/workflows/supermodel.yml
-
   bundle:
-    needs: supermodel
     runs-on: ubuntu-latest
     env:
       BRANCH: claude/wiiu-emulator-urpcen
       GH_TOKEN: ${{ github.token }}
     steps:
+      # The commit that started the run (a release can come from another
+      # branch than BRANCH, which is where the engine builds are taken from).
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BRANCH }}
 
       - uses: actions/setup-go@v5
         with:
@@ -89,25 +83,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: Supermodel-windows-x64
-          path: eng/Supermodel-windows-x64
-
-      - name: Supermodel (Sega Model 3)
-        run: |
-          mkdir -p "$DIR/Supermodel"
-          cp -r eng/Supermodel-windows-x64/Supermodel/. "$DIR/Supermodel/"
-          test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/RetroPixels.txt"
-          test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/Supermodel-source.tar.gz"
-          . supermodel/pins.sh
-          echo "SM_COMMIT=${SUPERMODEL_COMMIT}" >> "$GITHUB_ENV"
-          echo "SM_REPO=${SUPERMODEL_REPO%.git}" >> "$GITHUB_ENV"
-
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt "$DIR/"
           cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
+          cp cores/model3/LICENSE-GPL-3.0.txt "$DIR/LICENSE-GPL-3.0.txt"
+          cp cores/model3/NOTICE.txt "$DIR/NOTICE-Sega-Model-3.txt"
           cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
           {
             if [ "${{ inputs.release }}" = true ]; then
@@ -115,17 +96,16 @@ jobs:
               src="https://github.com/$GITHUB_REPOSITORY/tree/v$VER"
             else
               echo "RetroPixels $VER (test build, not a release)"
-              src="https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH"
+              src="https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME"
             fi
-            echo "Built $(date -u +%F) from branch $BRANCH ($(git rev-parse --short HEAD))"
+            echo "Built $(date -u +%F) from branch $GITHUB_REF_NAME ($(git rev-parse --short HEAD))"
             echo
             echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
             echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
-            echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel\\LICENSE.txt"
-            echo "  Source: Supermodel\\Supermodel-source.tar.gz (the exact source built), upstream $SM_REPO/tree/$SM_COMMIT"
-            echo "  RetroPixels' changes: Supermodel\\RetroPixels.txt, and https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH/supermodel"
+            echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
+            echo "  Its sound chips follow Supermodel's code (GPL-3.0-or-later, LICENSE-GPL-3.0.txt); NOTICE-Sega-Model-3.txt lists its third-party parts."
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo
@@ -153,7 +133,17 @@ jobs:
         if: inputs.release
         run: |
           mkdir -p release
-          (cd dist && zip -qr "../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
+          # Two downloads, one per program, each with the engines and VERSION.txt:
+          # RetroPixels-<ver>.zip (RetroPixels.exe, the browser-window app) and
+          # RetroPixels-Native-<ver>.zip (RetroPixels-Native.exe).
+          cp -r "$DIR" "dist/RetroPixels-Native-$VER"
+          rm "dist/RetroPixels-Native-$VER/RetroPixels.exe"
+          (cd dist && zip -qr "../release/RetroPixels-Native-$VER.zip" "RetroPixels-Native-$VER")
+          rm -r "dist/RetroPixels-Native-$VER"
+          mkdir -p dist/web-only && cp -r "$DIR" "dist/web-only/RetroPixels-$VER"
+          rm "dist/web-only/RetroPixels-$VER/RetroPixels-Native.exe"
+          (cd dist/web-only && zip -qr "../../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
+          rm -r dist/web-only
           cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" release/
           cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
           cp "$DIR/VERSION.txt" release/VERSION.txt

@@ -14,6 +14,11 @@ var debugSound = os.Getenv("M3_SOUNDDEBUG") != ""
 // its ROM. As in Supermodel, the 68000 gets each command byte with an
 // interrupt and has a 1 kHz timer interrupt; it starts and stops the music
 // by writing commands to the MPEG decoder, whose state machine is here.
+//
+// The command handling, volumes and stereo modes follow Supermodel's
+// Src/Model3/DSB.cpp (Copyright 2003-2026 The Supermodel Team), so this file
+// is under the GNU General Public License, version 3 or (at your option) any
+// later version: see LICENSE-GPL-3.0.txt and NOTICE.txt.
 
 const (
 	dsbHz          = 11000000

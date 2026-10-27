@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.21.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.22.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -17,15 +17,18 @@ games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
 Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids
 Deluxe, Berzerk, Centipede, Vs. Castlevania and more), plus Wii U games in
 PixelU (new in 2.21.0), GameCube and Wii in PixelU's GameCube / Wii engine
-(new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade in Supermodel
-(new in 2.21.0), and any other arcade game in MAME (any version of it).
+(new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade (Sega Model 3)
+on RetroPixels' own emulator (new in 2.22.0: nothing else to install), and
+any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
 
-What's in the download (RetroPixels-2.21.0.zip)
-- RetroPixels.exe, and RetroPixels-Native.exe (the test build without a web
-  browser inside, see "RetroPixels Native" below).
+What's in the download
+- Two downloads, one for each program: RetroPixels-2.22.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.22.0.zip has RetroPixels-Native.exe
+  (the version without a web browser inside, see "RetroPixels Native" below).
+  Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
-  next to RetroPixels.exe:
+  next to the program:
   * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
     from Cemu's code and has been rewritten as RetroPixels' own code
     (Mozilla Public License 2.0, LICENSE-MPL-2.0.txt).
@@ -34,10 +37,6 @@ What's in the download (RetroPixels-2.21.0.zip)
     licence is in PixelU\wii).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
-  * Supermodel\supermodel.exe: Sega Model 3, for Star Wars Trilogy Arcade.
-    Supermodel by The Supermodel Team, modified for RetroPixels
-    (GPL-3.0-or-later; its exact source and the list of changes are in that
-    folder).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
@@ -51,7 +50,7 @@ First run
   into the program, so they work offline. No BIOS files are needed.
 - Nintendo 64 runs inside RetroPixels.exe itself (it's too heavy for the
   page), so N64 games need the desktop app.
-- Wii U, GameCube, Wii, MAME and Star Wars Trilogy Arcade games play
+- Wii U, GameCube, Wii and MAME games play
   through the engines in the folders next to RetroPixels.exe (see "What's
   in the download"), shown inside the RetroPixels window. They need the
   desktop app.
@@ -174,6 +173,11 @@ What each system supports
   * Dragon Blaze (dragnblz.zip). Without the settings chip file RetroPixels
     makes a fresh one: the first start shows "EEP-ROM NG" for a moment while
     the game writes its default settings, then it plays.
+- Arcade, new in 2.22.0: Star Wars Trilogy Arcade (swtrilgy.zip or
+  swtrilgya.zip; Sega Model 3, 1998) on RetroPixels' own Sega Model 3
+  emulator, with its 3D board, sound board and MPEG music board. Nothing else
+  is installed or needed (Supermodel is no longer used). See "Star Wars
+  Trilogy Arcade" below.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
@@ -328,36 +332,28 @@ Arcade games in MAME (any version)
 - The MAME list is kept in %APPDATA%\RetroPixels\mame.json and shared with
   RetroPixels Native.
 
-Star Wars Trilogy Arcade (Supermodel)
-- The "Supermodel" tab plays Star Wars Trilogy Arcade (Sega Model 3) on
-  Supermodel, which is in the Supermodel folder of the RetroPixels download
-  (Supermodel by The Supermodel Team, GPL-3.0, modified for RetroPixels: its
-  licence, source and the list of changes are in that folder).
-- You need your own ROM set: swtrilgya.zip or swtrilgy.zip. The first time
-  you open the tab, RetroPixels looks for it in your ROM folders, Downloads,
-  Desktop and Documents, then in the game folders on each drive, and
-  remembers it; or click "Choose the game file...".
-  A swtrilgya.zip that isn't merged needs swtrilgy.zip next to it.
-- Click the tile: the game starts playable, fullscreen, with the Xbox
-  controller (or inside RetroPixels with "Play inside RetroPixels").
-  Back + Start or Esc comes back.
-- Xbox controller ("Flight stick feel" on by default: steady near the
-  centre, full movement at the edge, corners reachable, and the aim glides
-  like the arcade yoke; "Smoothness" sets how much, Off to Heavy): left stick aims, RT or A fires, RB or B is the event
-  button (force), Start starts, Back inserts a coin, Back + Start leaves.
-  Keyboard: 5 coin, 1 start, arrow keys, Ctrl fire, Alt event, Esc leaves,
-  F2 the game's test menu.
-- Settings, high scores and save states are kept in
-  %APPDATA%\RetroPixels\Supermodel.
-- RetroPixels Native plays it too: Arcade (MAME) > Star Wars Trilogy Arcade
-  (Supermodel), or open swtrilgy.zip / swtrilgya.zip (they start in
-  Supermodel, not MAME). Its settings are under Arcade (MAME) > Supermodel
-  settings.
+Star Wars Trilogy Arcade (Sega Model 3)
+- New in 2.22.0: it plays on RetroPixels' own Sega Model 3 emulator, built
+  into RetroPixels.exe and RetroPixels Native, like the other arcade games.
+  Nothing else needs to be installed: no Supermodel, on your PC or in the
+  RetroPixels folder.
+- You need your own ROM set: swtrilgy.zip or swtrilgya.zip (keep it zipped;
+  a swtrilgya.zip that isn't merged needs the files of swtrilgy.zip added
+  into it). Open it like any arcade game: drop it on the window, choose it
+  in the Arcade system, or in RetroPixels Native, File > Open game.
+- Controls: the Xbox controller's left stick aims (the arcade's flight
+  yoke), and the d-pad or arrow keys aim too (the aim moves further the
+  longer you hold them). Fire is the trigger, Button 1 is the yoke's thumb
+  button (the Force), plus Coin, Start (1P) and Service. Change them in
+  Controls like any arcade game.
+- High scores and the game's settings are kept like a battery save.
+  Save states aren't available for this game yet.
+- It needs a fast PC: the 3D board is drawn on the processor's cores.
 
 Recording games
 - Every game is recorded automatically as .mp4, from the start of the game
-  to the end: classic consoles, arcade, Wii U, GameCube, Wii, MAME and
-  Supermodel (one setting for all of them, on unless you turn it off in the
+  to the end: classic consoles, arcade, Wii U, GameCube, Wii and MAME
+  (one setting for all of them, on unless you turn it off in the
   Recordings tab, or untick "Record games automatically").
 - For GameCube and Wii, the engine itself saves the game's picture and
   sound while you play, and
@@ -633,8 +629,17 @@ Credits & licences
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
   rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME and Supermodel. Thanks to the Cemu, Dolphin, MAME and
-  Supermodel teams.
+  built-in MAME. Thanks to the Cemu, Dolphin and MAME teams.
+- The Sega Model 3 emulator (cores/model3, new in 2.22.0) is the other
+  exception: most of it is RetroPixels' own, checked against Supermodel
+  (https://github.com/trzy/Supermodel), but its sound chips (SCSP) are a Go
+  port of Supermodel's code and its MPEG music board follows Supermodel's,
+  both under GPL-3.0-or-later (Copyright The Supermodel Team; thanks to them
+  and to ElSemi), its decryption chip comes from MAME (BSD-3-Clause) and its
+  MP3 decoder from minimp3 (public domain). So the programs that include it
+  are distributed under GPL-3.0-or-later as a whole, with their full source
+  attached to each release. cores/model3/NOTICE.txt lists each part, and the
+  GPL's text is in cores/model3/LICENSE-GPL-3.0.txt.
 - RetroPixels' older Go Wii U emulator (from 2.20.0, no longer used by the
   Wii U tab) is the exception in its own code: some of its files are Go
   rewrites of code from Cemu (https://github.com/cemu-project/Cemu), the
@@ -646,11 +651,6 @@ Credits & licences
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
     github.com/BtbN/FFmpeg-Builds. Its licence is saved next to it.
-  * Supermodel (GPL-3.0-or-later, by The Supermodel Team): RetroPixels'
-    build in the Supermodel folder, modified for RetroPixels. The exact
-    source built is in Supermodel\Supermodel-source.tar.gz and the changes
-    are listed in Supermodel\RetroPixels.txt. Supermodel's source code:
-    https://github.com/trzy/Supermodel
   * MAME (GPL-2.0+, by the MAME team): the official release that comes in the
     MAME folder, your own installs, or official releases RetroPixels
     downloads for you from github.com/mamedev/mame (all unchanged; a note

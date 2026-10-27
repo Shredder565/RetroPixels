@@ -3,7 +3,7 @@ name: Release
 # Publishes a RetroPixels release by hand (Actions > Release > Run workflow),
 # only once the owner has approved the version. It builds the full Windows
 # download (bundle-test.yml with release: true: RetroPixels.exe and
-# RetroPixels-Native.exe with PixelU, PixelU-Wii, MAME and Supermodel), the
+# RetroPixels-Native.exe with PixelU, PixelU-Wii and MAME), the
 # Android app, and the source, then makes the GitHub release v<appVersion>
 # from this commit with CHANGELOG.md's notes for that version.
 
@@ -19,7 +19,7 @@ name: Release
 on:
   push:
     tags: ["release-v*", "release-dryrun-v*"]
-    branches: [claude/wiiu-emulator-urpcen]
+    branches: [claude/wiiu-emulator-urpcen, claude/project-thread-96w825]
   workflow_dispatch:
     inputs:
       version:
@@ -138,14 +138,14 @@ jobs:
           {
             echo "## Download"
             echo
-            echo "- **RetroPixels-$v.zip**: everything for Windows 10 / 11 (64-bit). Unzip it and run \`RetroPixels.exe\` (or \`RetroPixels-Native.exe\`). It has RetroPixels' engines in the folders next to the programs:"
+            echo "- **RetroPixels-$v.zip**: RetroPixels.exe (the app in a browser window) for Windows 10 / 11 (64-bit). **RetroPixels-Native-$v.zip**: RetroPixels-Native.exe (the Windows app). Unzip one and run its program. Each has RetroPixels' engines in the folders next to the program, and VERSION.txt:"
             echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
             echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
-            echo "  - Supermodel, modified for RetroPixels, for Star Wars Trilogy Arcade (Sega Model 3; GPL-3.0-or-later, its exact source is inside)"
+            echo "  - Star Wars Trilogy Arcade (Sega Model 3) plays in RetroPixels' own emulator, with nothing else to install"
             echo "- **RetroPixels.exe** and **RetroPixels-Native.exe**: the two programs on their own."
             echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer)."
             echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project."
-            echo "- **RetroPixels-source-$v.zip**: the full source code, including PixelU's, PixelU-Wii's and RetroPixels' Supermodel changes."
+            echo "- **RetroPixels-source-$v.zip**: the full source code, including PixelU's and PixelU-Wii's."
             echo "- **MAME-$mame-source.tar.gz**: the built-in MAME's source, the MAME team's release unchanged."
             echo
             echo "The programs aren't code-signed yet, so SmartScreen may say \"Windows protected your PC\": click **More info**, then **Run anyway**. No games, keys, BIOS or firmware are included."
