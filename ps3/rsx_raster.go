@@ -42,6 +42,7 @@ type rasterCtx struct {
 	bcol     vec4
 	cmask    uint32
 	out32    bool
+	fixedOut bool
 	cull     bool
 	cullFace uint32
 	frontCCW bool
@@ -128,6 +129,7 @@ func (m *Machine) rasterPrims(r *rsxState, d *rsxDraw, s *rsxSurface, verts []rs
 	c.bcol = vec4{float32(bc>>16&0xff) / 255, float32(bc>>8&0xff) / 255, float32(bc&0xff) / 255, float32(bc>>24) / 255}
 	c.cmask = colorMask(r.reg(0x324))
 	c.out32 = r.reg(0x1D60)&0x40 != 0
+	c.fixedOut = s.fmt != 11 && s.fmt != 12 && s.fmt != 13
 	c.cull = r.reg(0x183C) != 0
 	c.cullFace = r.reg(0x1830)
 	c.frontCCW = r.reg(0x1834) == 0x901
@@ -399,6 +401,9 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 			col := x.h[0]
 			if c.out32 {
 				col = x.r[0]
+			}
+			if c.fixedOut {
+				col = fpClamp(col, 4) // 8-bit targets take 0..1
 			}
 			if c.alphaT && !alphaPass(c.alphaFn, col[3], c.alphaRef) {
 				continue

@@ -269,6 +269,9 @@ func (m *Machine) readPixel(s *rsxSurface, a uint32) vec4 {
 	return vec4{float32(c>>16&0xff) / 255, float32(c>>8&0xff) / 255, float32(c&0xff) / 255, al}
 }
 
+// rgbaMask is each of R, G, B, A's bit in a colour mask (A 8, R 4, G 2, B 1).
+var rgbaMask = [4]uint32{4, 2, 1, 8}
+
 func u8c(x float32) uint32 {
 	if !(x > 0) {
 		return 0
@@ -300,14 +303,16 @@ func (m *Machine) writePixel(s *rsxSurface, a uint32, c vec4, mask uint32) {
 		return
 	case 11:
 		for i := 0; i < 4; i++ {
-			if mask>>(3-i)&1 != 0 {
+			if mask&rgbaMask[i] != 0 {
 				m.Mem.Write16(a+uint32(2*i), f32ToHalf(c[i]))
 			}
 		}
 		return
 	case 12:
 		for i := 0; i < 4; i++ {
-			m.Mem.Write32(a+uint32(4*i), math.Float32bits(c[i]))
+			if mask&rgbaMask[i] != 0 {
+				m.Mem.Write32(a+uint32(4*i), math.Float32bits(c[i]))
+			}
 		}
 		return
 	}
@@ -601,7 +606,13 @@ func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 		}
 	}
 	m.rasterPrims(r, d, &s, verts, vlist)
+	if drawHook != nil {
+		drawHook(m, r, &s)
+	}
 }
+
+// drawHook, when set (debugging), is called after each draw.
+var drawHook func(m *Machine, r *rsxState, s *rsxSurface)
 
 func (d *rsxDraw) vpStart() int { return d.vpBase }
 

@@ -16,7 +16,7 @@ type fpSrc struct {
 	swz  [4]uint8
 	neg  bool
 	abs  bool
-	sat  bool // precision modifier: saturate
+	prec uint8 // precision modifier: 2 clamp to ±2, 3 to ±1, 4 saturate
 	noop bool
 }
 
@@ -33,6 +33,7 @@ type fpInst struct {
 	bx2      bool
 	noDest   bool
 	sat      bool
+	prec     uint8 // destination precision: 1 half, 2 fixed ±2, 3 fixed ±1
 	scale    float32
 	cond     uint8 // exec_if bits (7 = always)
 	condSwz  [4]uint8
@@ -60,9 +61,12 @@ var fpScale = [8]float32{1, 2, 4, 8, 1, 0.5, 0.25, 0.125}
 func fpSwap(w uint32) uint32 { return bits.RotateLeft32(w, 16) }
 
 func decodeFPSrc(w uint32, abs bool, prec uint32) fpSrc {
-	s := fpSrc{typ: uint8(w & 3), tmp: uint8(w >> 2 & 0x3f), half: w>>8&1 != 0, neg: w>>17&1 != 0, abs: abs, sat: prec == 4}
+	s := fpSrc{typ: uint8(w & 3), tmp: uint8(w >> 2 & 0x3f), half: w>>8&1 != 0, neg: w>>17&1 != 0, abs: abs}
+	if prec >= 2 && prec <= 4 {
+		s.prec = uint8(prec)
+	}
 	s.swz = [4]uint8{uint8(w >> 9 & 3), uint8(w >> 11 & 3), uint8(w >> 13 & 3), uint8(w >> 15 & 3)}
-	s.noop = s.swz == [4]uint8{0, 1, 2, 3} && !s.neg && !s.abs && !s.sat
+	s.noop = s.swz == [4]uint8{0, 1, 2, 3} && !s.neg && !s.abs && s.prec == 0
 	return s
 }
 
@@ -88,6 +92,7 @@ func (m *Machine) decodeFP(a uint32) *fpProg {
 			bx2:     w[0]>>21&1 != 0,
 			noDest:  w[0]>>30&1 != 0,
 			sat:     w[0]>>31 != 0,
+			prec:    uint8(w[0] >> 22 & 3),
 			scale:   fpScale[w[2]>>28&7],
 			cond:    uint8(w[1] >> 18 & 7),
 			condReg: uint8(w[1] >> 31),
@@ -183,15 +188,15 @@ func (x *fpRun) read(in *fpInst, n int) vec4 {
 		return v
 	}
 	v = swizzle(v, s.swz)
-	if s.sat {
-		v = sat(v)
-	}
 	if s.abs {
 		for i := range v {
 			if v[i] < 0 {
 				v[i] = -v[i]
 			}
 		}
+	}
+	if s.prec != 0 {
+		v = fpClamp(v, s.prec)
 	}
 	if s.neg {
 		for i := range v {
@@ -220,6 +225,11 @@ func (x *fpRun) write(in *fpInst, v vec4) {
 	}
 	if in.sat {
 		v = sat(v)
+	} else if in.prec != 0 {
+		v = fpClamp(v, in.prec)
+	}
+	if in.dstHalf {
+		v = fpClamp(v, 1)
 	}
 	mask := in.mask
 	if in.cond != 7 {
@@ -239,6 +249,28 @@ func (x *fpRun) write(in *fpInst, v vec4) {
 	} else {
 		movMask(&x.r[in.dst&47], v, mask)
 	}
+}
+
+// fpClamp applies a precision: 1 half range, 2 fixed12 (±2), 3 fixed9
+// (±1), 4 saturate.
+func fpClamp(v vec4, prec uint8) vec4 {
+	lo, hi := float32(-65504), float32(65504)
+	switch prec {
+	case 2:
+		lo, hi = -2, 2
+	case 3:
+		lo, hi = -1, 1
+	case 4:
+		lo, hi = 0, 1
+	}
+	for i := range v {
+		if v[i] != v[i] {
+			v[i] = 0
+		} else {
+			v[i] = max(lo, min(hi, v[i]))
+		}
+	}
+	return v
 }
 
 func f32(x float64) float32 { return float32(x) }
