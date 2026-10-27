@@ -104,16 +104,17 @@ type Machine struct {
 
 	prx []*prxModule
 
-	fs    *fsState
-	gcm   *gcmState
-	sysu  *sysutilState
-	pad   padState
-	audio *audioState
-	spus  *spuState
-	sd    *sdScratch
-	gpu   *gpuRenderer // drawing on the host GPU (nil: software)
-	spurs *spursState
-	misc  map[string]any
+	fs             *fsState
+	gcm            *gcmState
+	sysu           *sysutilState
+	pad            padState
+	audio          *audioState
+	mp3, mp3Stereo mp3Dec // the music decoder (mp3pic.go)
+	spus           *spuState
+	sd             *sdScratch
+	gpu            *gpuRenderer // drawing on the host GPU (nil: software)
+	spurs          *spursState
+	misc           map[string]any
 
 	// OnFrame is called at each vblank (the shell takes the picture then)
 	OnFrame func()

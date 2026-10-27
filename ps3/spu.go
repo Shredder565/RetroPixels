@@ -597,6 +597,22 @@ func (m *Machine) spuWriteSNR(s *spuThread, i int, v uint32) {
 	s.snrValid[i] = true
 }
 
+// spuDMALog (PS3_SPUDMALOG): logs the first transfer to each 64 KB area
+var spuDMALog = func() map[string]int {
+	if os.Getenv("PS3_SPUDMALOG") != "" {
+		return map[string]int{}
+	}
+	return nil
+}()
+
+// spuDMALSA (PS3_SPUDMALSA=hex): logs transfers to 32 KB of local store from there
+var spuDMALSA = func() uint32 {
+	var v uint32
+	fmt.Sscanf(os.Getenv("PS3_SPUDMALSA"), "%x", &v)
+	return v
+}()
+var spuDMALSAn int
+
 func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 	if size == 0 {
 		return
@@ -605,6 +621,16 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 		size = 0x4000
 	}
 	lsa &= lsMask
+	if spuDMALSA != 0 && picCalls > 0 && lsa < spuDMALSA+0xc000 && spuDMALSA < lsa+size && spuDMALSAn < 200 {
+		spuDMALSAn++
+		m.Logf("SPU DMA LS %s put=%v ea %08X size %x lsa %05x pc %05x", s.name, put, ea, size, lsa, s.c.PC)
+	}
+	if spuDMALog != nil {
+		k := fmt.Sprintf("%s %v %04Xxxxx", s.name, put, ea>>16)
+		if spuDMALog[k]++; spuDMALog[k] == 1 {
+			m.Logf("SPU DMA %s put=%v ea %08X size %x lsa %05x pc %05x", s.name, put, ea, size, lsa, s.c.PC)
+		}
+	}
 	buf := make([]byte, size)
 	if put {
 		for i := range buf {

@@ -9,6 +9,9 @@ package ps3
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"math"
+	"os"
 	"strings"
 )
 
@@ -68,52 +71,28 @@ func virtualFile(path string) []byte {
 	return nil
 }
 
-// mp3FrameLen parses an MPEG audio frame header: the frame's length in
-// bytes, samples per channel and channel count (0 if it isn't one).
-func mp3FrameLen(h []byte) (n, samples, channels int) {
-	if len(h) < 4 || h[0] != 0xFF || h[1]&0xE0 != 0xE0 {
-		return 0, 0, 0
-	}
-	ver := h[1] >> 3 & 3 // 3 MPEG-1, 2 MPEG-2, 0 MPEG-2.5
-	layer := h[1] >> 1 & 3
-	bri := int(h[2] >> 4)
-	sri := int(h[2] >> 2 & 3)
-	pad := int(h[2] >> 1 & 1)
-	if ver == 1 || layer != 1 || bri == 0 || bri == 15 || sri == 3 {
-		return 0, 0, 0 // only Layer III
-	}
-	rates1 := [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}
-	rates2 := [...]int{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160}
-	srs := [...]int{44100, 48000, 32000}
-	sr := srs[sri]
-	channels = 2
-	if h[3]>>6 == 3 {
-		channels = 1
-	}
-	if ver == 3 {
-		return 144*rates1[bri]*1000/sr + pad, 1152, channels
-	}
-	if ver == 2 {
-		sr /= 2
-	} else {
-		sr /= 4
-	}
-	return 72*rates2[bri]*1000/sr + pad, 576, channels
-}
-
 const (
 	picOut       = 0x1000 // where in the plugin's memory a frame's PCM goes
 	picOutStride = 0x1000 // per channel
 )
 
+var picCalls int
+
+// mp3Dump (PS3_MP3DUMP=dir): each music stream's frames and sound
+var mp3Dump = os.Getenv("PS3_MP3DUMP")
+
+// mp3Sine (PS3_MP3SINE): the plugin makes a 1 kHz tone instead (debugging)
+var mp3Sine = os.Getenv("PS3_MP3SINE") != ""
+
 // picCall runs plugin function n (the SPU called into the plugin). The
 // engine calls function 0 to decode one frame:
 //
 //	r3 the frame (in local store), r4 -> bytes used, r5 -> PCM bytes made
-//	per channel, r6.. work areas the engine saves and restores per stream.
+//	per channel, r9 the stream's context (0x1380 bytes, which the engine
+//	saves and restores per stream).
 //
-// It returns where the PCM is (channels 0x1000 apart), 0 when there isn't a
-// whole frame, -1 on bad data. For now the PCM is silence (16-bit).
+// It returns where the PCM is (16-bit, channels 0x1000 apart), 0 when
+// there isn't a whole frame, -1 on bad data.
 func (m *Machine) picCall(s *spuThread, n uint32) {
 	c := s.c
 	base := (c.PC - 4 - 8*n) & lsMask
@@ -123,27 +102,80 @@ func (m *Machine) picCall(s *spuThread, n uint32) {
 		return
 	}
 	in := c.GPR[3][0] & lsMask
+	picCalls++
 	// find the next frame (skipping anything that isn't one)
 	skip := uint32(0)
-	var flen, samples, ch int
+	var hd mp3Header
+	ok := false
 	for ; skip < 4096; skip++ {
-		h := c.LS[(in+skip)&lsMask:]
-		if flen, samples, ch = mp3FrameLen(h[:min(4, len(h))]); flen > 0 {
+		var b [4]byte
+		for k := range b {
+			b[k] = c.LS[(in+skip+uint32(k))&lsMask]
+		}
+		if hd, ok = mp3ParseHeader(b[:]); ok {
 			break
 		}
 	}
-	if flen == 0 {
+	if !ok {
 		c.GPR[3] = splat(0xFFFFFFFF)
 		return
 	}
-	out := base + picOut
-	pcm := uint32(samples * 2)
-	for k := 0; k < ch; k++ {
-		o := out + uint32(k)*picOutStride
-		clear(c.LS[o : o+pcm])
-		c.lsWrote(o, int(pcm))
+	frame := make([]byte, hd.size)
+	for k := range frame {
+		frame[k] = c.LS[(in+skip+uint32(k))&lsMask]
 	}
-	c.setLS32(c.GPR[4][0]&lsMask, skip+uint32(flen))
-	c.setLS32(c.GPR[5][0]&lsMask, pcm)
+	ctx := c.GPR[9][0] & lsMask
+	d := &m.mp3
+	stereo := hd.channels == 2 || ctx+mp3StateSize > lsSize
+	if stereo {
+		d = &m.mp3Stereo // (no room in the context: one stereo stream at a time)
+	} else {
+		d.load(c.LS[ctx : ctx+mp3StateSize])
+	}
+	var pcm [2][1152]float32
+	_, samples, err := d.decode(frame, &pcm)
+	if !stereo {
+		d.save(c.LS[ctx : ctx+mp3StateSize])
+		c.lsWrote(ctx, mp3StateSize)
+	}
+	if err != nil {
+		c.GPR[3] = splat(0xFFFFFFFF)
+		return
+	}
+	if mp3Dump != "" && !stereo {
+		f, _ := os.OpenFile(fmt.Sprintf("%s/stream%d.raw", mp3Dump, d.id), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		b := make([]byte, 4*samples)
+		for i := 0; i < samples; i++ {
+			binary.LittleEndian.PutUint32(b[4*i:], math.Float32bits(pcm[0][i]))
+		}
+		f.Write(b)
+		f.Close()
+		f, _ = os.OpenFile(fmt.Sprintf("%s/stream%d.mp3", mp3Dump, d.id), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		f.Write(frame)
+		f.Close()
+	}
+	if mp3Sine {
+		f := 1000.0
+		if d.id%2 == 0 {
+			f = 1500
+		}
+		for i := 0; i < samples; i++ {
+			pcm[0][i] = 0.25 * float32(math.Sin(2*math.Pi*f*float64(d.sinePos)/float64(hd.rate)))
+			pcm[1][i] = pcm[0][i]
+			d.sinePos++
+		}
+	}
+	out := base + picOut
+	for k := 0; k < hd.channels; k++ {
+		o := out + uint32(k)*picOutStride
+		for i := 0; i < samples; i++ {
+			v := int16(max(-32768, min(32767, pcm[k][i]*32768)))
+			c.LS[o+2*uint32(i)] = byte(uint16(v) >> 8)
+			c.LS[o+2*uint32(i)+1] = byte(v)
+		}
+		c.lsWrote(o, 2*samples)
+	}
+	c.setLS32(c.GPR[4][0]&lsMask, skip+uint32(hd.size))
+	c.setLS32(c.GPR[5][0]&lsMask, uint32(2*samples))
 	c.GPR[3] = Vec{out, 0, 0, 0}
 }

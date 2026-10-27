@@ -1,6 +1,7 @@
 package ps3
 
 import (
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/png"
@@ -33,6 +34,12 @@ func TestBootLocal(t *testing.T) {
 		frames = n
 	}
 	input := parseInput(os.Getenv("PS3_INPUT"))
+	// PS3_WAV=<file>: the sound, as a 48 kHz stereo WAV file
+	var wav []byte
+	if p := os.Getenv("PS3_WAV"); p != "" {
+		wav = make([]byte, 44, 1<<24)
+		defer func() { writeWAV(p, wav) }()
+	}
 	for i := 0; i < frames; i++ {
 		var b uint32
 		for _, e := range input {
@@ -66,6 +73,12 @@ func TestBootLocal(t *testing.T) {
 		}
 		if m.Exited {
 			break
+		}
+		if wav != nil {
+			for _, v := range m.TakeAudio() {
+				x := int16(max(-1, min(1, v)) * 32767)
+				wav = append(wav, byte(x), byte(x>>8))
+			}
 		}
 		if every, _ := strconv.Atoi(os.Getenv("PS3_PNGEVERY")); every > 0 && (i+1)%every == 0 {
 			dir := os.Getenv("PS3_SHOTDIR")
@@ -206,4 +219,22 @@ func stubName(m *Machine, a uint32) string {
 		}
 	}
 	return "?"
+}
+
+func writeWAV(path string, b []byte) {
+	n := uint32(len(b) - 44)
+	le := binary.LittleEndian
+	copy(b, "RIFF")
+	le.PutUint32(b[4:], 36+n)
+	copy(b[8:], "WAVEfmt ")
+	le.PutUint32(b[16:], 16)
+	le.PutUint16(b[20:], 1)
+	le.PutUint16(b[22:], 2)
+	le.PutUint32(b[24:], 48000)
+	le.PutUint32(b[28:], 48000*4)
+	le.PutUint16(b[32:], 4)
+	le.PutUint16(b[34:], 16)
+	copy(b[36:], "data")
+	le.PutUint32(b[40:], n)
+	os.WriteFile(path, b, 0o644)
 }
