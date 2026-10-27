@@ -73,6 +73,24 @@ func TestBootLocal(t *testing.T) {
 		}
 		if err := m.RunFrame(); err != nil {
 			t.Log(err)
+			if os.Getenv("PS3_ERRDUMP") != "" {
+				for _, th := range m.threads {
+					if th.PC>>8 == 0x1a95 || th.Name == "PPU PhysX thread" {
+						t.Logf("%s: GPR %x", th.Name, th.GPR)
+						if th.PC>>8 == 0x1a95 {
+							x := m.Mem.Read32(m.Mem.Read32(uint32(th.GPR[22])+1048) + 236)
+							tab := m.Mem.Read32(uint32(th.GPR[2]) - 21760)
+							y := m.Mem.Read32(tab + (x<<2)&0x3ffffc)
+							vt := m.Mem.Read32(y)
+							t.Logf("handle %x obj %x vtable %x fn opd %x code %x", x, y, vt, m.Mem.Read32(vt+144), m.Mem.Read32(m.Mem.Read32(vt+144)))
+						}
+						a := uint32(th.GPR[16])
+						for k := uint32(0); k < 64; k += 8 {
+							t.Logf("%08x: %08x %08x", a+k, m.Mem.Read32(a+k), m.Mem.Read32(a+k+4))
+						}
+					}
+				}
+			}
 			break
 		}
 		if m.Exited {

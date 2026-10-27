@@ -6,6 +6,7 @@ package ps3
 // between local store and main memory. DMA completes at once.
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strconv"
@@ -31,6 +32,7 @@ type spuGroup struct {
 	runQueue *eventQueue
 	excQueue *eventQueue
 	suspend  bool
+	spurs    bool // the SPURS worker SPUs (hle_spurs.go)
 }
 
 type spuThread struct {
@@ -88,8 +90,6 @@ type spuState struct {
 	groups  []*spuGroup
 	threads []*spuThread
 }
-
-type spursState struct{}
 
 const (
 	spuEvLR = 0x400
@@ -446,6 +446,9 @@ func (m *Machine) spuIntrMbox(s *spuThread, v uint32) bool {
 }
 
 func (m *Machine) spuStop(s *spuThread, code uint32) bool {
+	if s.g.spurs && (code == spursSyscallStop || code == 0x101 || code == 0x102) {
+		return m.spursStop(s, code)
+	}
 	if code >= picStopBase && code < picStopBase+picFuncs {
 		m.picCall(s, code-picStopBase)
 		return true
@@ -621,6 +624,11 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 	if size > 0x4000 {
 		size = 0x4000
 	}
+	if size < 16 {
+		// small transfers: the data sits in local store at the same offset
+		// in its 16 bytes as in memory, whatever the low bits of the LSA
+		lsa = lsa&^15 | ea&15
+	}
 	lsa &= lsMask
 	if spuDMALSA != 0 && picCalls > 0 && lsa < spuDMALSA+0xc000 && spuDMALSA < lsa+size && spuDMALSAn < 200 {
 		spuDMALSAn++
@@ -635,6 +643,11 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 			if p.open && ea >= p.addr && ea < p.addr+p.channels*p.blocks*audioBlock*4 {
 				m.Logf("AUDDBG port%d put=%v off %x size %x readidx %d", i, put, ea-p.addr, size, m.Mem.Read64(p.index))
 			}
+		}
+	}
+	if s.g.spurs {
+		if tk := m.spurs.running[s]; tk != nil && tk.trace {
+			m.Logf("SPURS DMA put=%v ea %08X size %x lsa %05x pc %05x ls % x", put, ea, size, lsa, s.c.PC, s.c.LS[lsa&^15:][:16])
 		}
 	}
 	if spuDMALog != nil {
@@ -689,6 +702,11 @@ func (m *Machine) spuMFC(s *spuThread, cmd uint32) {
 		}
 		var cur [128]byte
 		m.Mem.ReadBytes(ea, cur[:])
+		if s.g.spurs {
+			if tk := m.spurs.running[s]; tk != nil && tk.trace {
+				m.Logf("SPURS PUTLLC ea %08X ok %v pc %05x", ea, s.resValid && s.resAddr == ea && cur == s.resData, s.c.PC)
+			}
+		}
 		if s.resValid && s.resAddr == ea && cur == s.resData {
 			m.Mem.WriteBytes(ea, s.c.LS[s.lsa&lsMask&^127:][:128])
 			s.atomicStat = 0
@@ -728,7 +746,9 @@ func (m *Machine) spuRunList(s *spuThread, l *spuList) {
 		l.list = (l.list + 8) & lsMask
 		l.left -= 8
 		n := sz & 0x7fff
-		m.spuTransfer(s, l.put, l.lsa, ea, n)
+		// a list element's place in local store takes its low 4 bits from
+		// the address in memory
+		m.spuTransfer(s, l.put, l.lsa&^15|ea&15, ea, n)
 		if n != 0 {
 			l.lsa = (l.lsa + (n+15)&^15) & lsMask
 		}
@@ -752,50 +772,88 @@ func (m *Machine) spuThreadByID(id uint32) *spuThread {
 
 func (m *Machine) spuStart(g *spuGroup) {
 	for _, s := range g.threads {
-		if s == nil {
-			continue
+		if s != nil {
+			m.spuReset(s)
 		}
-		c := s.c
-		for i := range c.LS {
-			c.LS[i] = 0
-		}
-		c.lsWrote(0, lsSize)
-		for _, sg := range s.segs {
-			switch sg.typ {
-			case 1: // copy
-				n := sg.size
-				if sg.ls+n > lsSize {
-					n = lsSize - sg.ls&lsMask
-				}
-				m.Mem.ReadBytes(sg.addr, c.LS[sg.ls&lsMask:][:n])
-			case 2: // fill
-				for a := sg.ls; a < sg.ls+sg.size && a+4 <= lsSize; a += 4 {
-					c.setLS32(a, sg.addr)
-				}
-			}
-		}
-		c.GPR = [128]Vec{}
-		for i, a := range s.args {
-			c.GPR[3+i] = Vec{uint32(a >> 32), uint32(a), 0, 0}
-		}
-		c.PC = s.entry
-		c.SRR0 = 0
-		c.Err = nil
-		s.inMbox = nil
-		s.outMboxN, s.outIntN = false, false
-		s.snr, s.snrValid = [2]uint32{}, [2]bool{}
-		s.evMask, s.evStat = 0, 0
-		s.decVal, s.decTB, s.decNeg = 0, m.tb, false
-		s.tagMask, s.atomicValid, s.resValid, s.stallStat = 0, false, false, 0
-		s.stalled = nil
-		s.exited = false
-		s.running = true
 	}
 	g.state = spuGRunning
 	g.cause, g.status = 0, 0
 	if g.runQueue != nil {
 		g.runQueue.push(event{spuGroupRunKey, uint64(g.id), 0, 0})
 	}
+}
+
+// spuReset loads s's segments into a cleared local store, sets its
+// arguments and entry point, clears its channels and starts it.
+func (m *Machine) spuReset(s *spuThread) {
+	c := s.c
+	m.spuImage(s.segs, c.LS)
+	c.lsWrote(0, lsSize)
+	m.spuResetState(s)
+}
+
+// spuImage lays segs out in ls (a whole local store), zeroing the rest.
+func (m *Machine) spuImage(segs []spuSeg, ls []byte) {
+	clear(ls)
+	for _, sg := range segs {
+		switch sg.typ {
+		case 1: // copy
+			n := sg.size
+			if sg.ls+n > lsSize {
+				n = lsSize - sg.ls&lsMask
+			}
+			m.Mem.ReadBytes(sg.addr, ls[sg.ls&lsMask:][:n])
+		case 2: // fill
+			for a := sg.ls; a < sg.ls+sg.size && a+4 <= lsSize; a += 4 {
+				binary.BigEndian.PutUint32(ls[a:], sg.addr)
+			}
+		}
+	}
+}
+
+// spuResetState sets s's arguments and entry point, clears its registers
+// and channels and starts it.
+func (m *Machine) spuResetState(s *spuThread) {
+	c := s.c
+	c.GPR = [128]Vec{}
+	for i, a := range s.args {
+		c.GPR[3+i] = Vec{uint32(a >> 32), uint32(a), 0, 0}
+	}
+	c.PC = s.entry
+	c.SRR0 = 0
+	c.Err = nil
+	s.inMbox = nil
+	s.outMboxN, s.outIntN = false, false
+	s.snr, s.snrValid = [2]uint32{}, [2]bool{}
+	s.evMask, s.evStat = 0, 0
+	s.decVal, s.decTB, s.decNeg = 0, m.tb, false
+	s.tagMask, s.atomicValid, s.resValid, s.stallStat = 0, false, false, 0
+	s.stalled = nil
+	s.exited = false
+	s.running = true
+}
+
+func (m *Machine) spuELFSegs(src uint32) (entry uint32, segs []spuSeg) {
+	entry = m.Mem.Read32(src + 0x18)
+	phoff := m.Mem.Read32(src + 0x1c)
+	phnum := uint32(m.Mem.Read16(src + 0x2c))
+	for i := uint32(0); i < phnum; i++ {
+		p := src + phoff + i*32
+		typ, off, va := m.Mem.Read32(p), m.Mem.Read32(p+4), m.Mem.Read32(p+8)
+		fs, ms := m.Mem.Read32(p+16), m.Mem.Read32(p+20)
+		switch typ {
+		case 1:
+			if fs > 0 {
+				segs = append(segs, spuSeg{1, va, fs, src + off})
+			}
+			if ms > fs {
+				segs = append(segs, spuSeg{2, va + fs, ms - fs, 0})
+			}
+		case 4:
+			segs = append(segs, spuSeg{4, 0, fs, src + off})
+		}
+	}
+	return entry, segs
 }
 
 func (m *Machine) newSPUThread(g *spuGroup, idx int, name string) *spuThread {
@@ -1244,26 +1302,7 @@ func init() {
 			t.ret(eNOEXEC)
 			return
 		}
-		entry := m.Mem.Read32(src + 0x18)
-		phoff := m.Mem.Read32(src + 0x1c)
-		phnum := uint32(m.Mem.Read16(src + 0x2c))
-		var segs []spuSeg
-		for i := uint32(0); i < phnum; i++ {
-			p := src + phoff + i*32
-			typ, off, va := m.Mem.Read32(p), m.Mem.Read32(p+4), m.Mem.Read32(p+8)
-			fs, ms := m.Mem.Read32(p+16), m.Mem.Read32(p+20)
-			switch typ {
-			case 1:
-				if fs > 0 {
-					segs = append(segs, spuSeg{1, va, fs, src + off})
-				}
-				if ms > fs {
-					segs = append(segs, spuSeg{2, va + fs, ms - fs, 0})
-				}
-			case 4:
-				segs = append(segs, spuSeg{4, 0, fs, src + off})
-			}
-		}
+		entry, segs := m.spuELFSegs(src)
 		arr := m.sysAlloc(uint32(len(segs))*24, 16)
 		for i, sg := range segs {
 			a := arr + uint32(i)*24
