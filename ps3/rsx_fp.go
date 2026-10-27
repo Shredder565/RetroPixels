@@ -54,6 +54,7 @@ type fpProg struct {
 	consts    int    // how many inline constants
 	shape     uint64 // hash of the instructions without their constants
 	size      uint32 // bytes, constants included
+	raw       []byte // those bytes (to tell when the program changes)
 	inputs    uint32 // bit per input register used
 	usesTex   uint32
 	usesDeriv bool

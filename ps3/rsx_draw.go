@@ -17,6 +17,7 @@ type drawRange struct{ first, count uint32 }
 
 type rsxDraw struct {
 	vp      [544 * 4]uint32
+	vpDec   [544 * 4]uint32 // vp as vpProg was decoded from
 	vpLoad  uint32
 	vpDirty bool
 	vpProg  []vpInst
@@ -493,49 +494,96 @@ type rsxVertex struct {
 
 // fetchAttr reads vertex attribute i for vertex index idx.
 func (m *Machine) fetchAttr(r *rsxState, d *rsxDraw, i int, idx uint32) vec4 {
+	f := m.attrSource(r, d, i)
+	return m.fetch(&f, idx)
+}
+
+// attrSrc is where one vertex attribute comes from in a draw.
+type attrSrc struct {
+	size, typ, stride, off, loc uint32
+	imm                         vec4
+}
+
+func (m *Machine) attrSource(r *rsxState, d *rsxDraw, i int) attrSrc {
 	f := r.reg(0x1740 + 4*uint32(i))
-	size := f >> 4 & 0xf
-	if size == 0 {
-		return d.imm[i]
-	}
-	typ := f & 0xf
-	stride := f >> 8 & 0xff
 	offReg := r.reg(0x1680 + 4*uint32(i))
-	loc := offReg >> 31
-	off := offReg&0x7fffffff + r.reg(0x1738)
-	if freq := f >> 16; freq != 0 && r.reg(0x1FC0)>>i&1 == 0 {
-		// per-instance divider: not used by draws here; treat as per vertex
+	// (a per-instance divider, f>>16, isn't used by draws here: every
+	// attribute is per vertex)
+	return attrSrc{
+		size:   f >> 4 & 0xf,
+		typ:    f & 0xf,
+		stride: f >> 8 & 0xff,
+		off:    offReg&0x7fffffff + r.reg(0x1738),
+		loc:    offReg >> 31,
+		imm:    d.imm[i],
 	}
-	a := m.gcm.offsetToAddr(off+stride*idx, loc)
+}
+
+// attrBytes is how many bytes an attribute of this type and size takes.
+func attrBytes(typ, size uint32) uint32 {
+	n := min(size, 4)
+	switch typ {
+	case 2:
+		return 4 * n
+	case 1, 3, 5:
+		return 2 * n
+	case 4, 7:
+		return n
+	case 6:
+		return 4
+	}
+	return 0
+}
+
+func (m *Machine) fetch(f *attrSrc, idx uint32) vec4 {
+	if f.size == 0 {
+		return f.imm
+	}
+	a := m.gcm.offsetToAddr(f.off+f.stride*idx, f.loc)
+	n := attrBytes(f.typ, f.size)
+	p := m.Mem.Ptr(a)
+	if uint32(len(p)) < n {
+		// across a page (or not mapped): byte by byte
+		var b [16]byte
+		for k := uint32(0); k < n; k++ {
+			b[k] = m.Mem.Read8(a + k)
+		}
+		p = b[:]
+	}
+	return decodeAttr(p, f.typ, f.size)
+}
+
+func decodeAttr(p []byte, typ, size uint32) vec4 {
 	v := vec4{0, 0, 0, 1}
+	n := int(min(size, 4))
 	switch typ {
 	case 2: // float
-		for c := uint32(0); c < size && c < 4; c++ {
-			v[c] = math.Float32frombits(m.Mem.Read32(a + 4*c))
+		for c := 0; c < n; c++ {
+			v[c] = math.Float32frombits(be32(p[4*c:]))
 		}
 	case 3: // half
-		for c := uint32(0); c < size && c < 4; c++ {
-			v[c] = halfToF32(m.Mem.Read16(a + 2*c))
+		for c := 0; c < n; c++ {
+			v[c] = halfToF32(be16(p[2*c:]))
 		}
 	case 1: // signed normalized 16
-		for c := uint32(0); c < size && c < 4; c++ {
-			x := float32(int16(m.Mem.Read16(a+2*c))) / 32767
+		for c := 0; c < n; c++ {
+			x := float32(int16(be16(p[2*c:]))) / 32767
 			v[c] = max(-1, x)
 		}
 	case 5: // signed 16
-		for c := uint32(0); c < size && c < 4; c++ {
-			v[c] = float32(int16(m.Mem.Read16(a + 2*c)))
+		for c := 0; c < n; c++ {
+			v[c] = float32(int16(be16(p[2*c:])))
 		}
 	case 4: // unsigned byte normalized
-		for c := uint32(0); c < size && c < 4; c++ {
-			v[c] = float32(m.Mem.Read8(a+c)) / 255
+		for c := 0; c < n; c++ {
+			v[c] = float32(p[c]) / 255
 		}
 	case 7: // unsigned byte
-		for c := uint32(0); c < size && c < 4; c++ {
-			v[c] = float32(m.Mem.Read8(a + c))
+		for c := 0; c < n; c++ {
+			v[c] = float32(p[c])
 		}
 	case 6: // CMP: 11/11/10 signed normalized
-		w := m.Mem.Read32(a)
+		w := be32(p)
 		v[0] = float32(int32(w<<21)>>21) / 1023
 		v[1] = float32(int32(w<<10)>>21) / 1023
 		v[2] = float32(int32(w)>>22) / 511
@@ -548,15 +596,27 @@ func (m *Machine) rsxVP(d *rsxDraw, r *rsxState) {
 	if !d.vpDirty && d.vpProg != nil && d.vpBase == start {
 		return
 	}
-	d.vpProg = d.vpProg[:0]
+	// decode only the instructions that changed since last time
+	full := len(d.vpProg) != 544
+	if full {
+		d.vpProg = make([]vpInst, 544)
+	}
+	changed := full
 	for i := 0; i < 544; i++ {
 		var w [4]uint32
 		copy(w[:], d.vp[i*4:i*4+4])
-		d.vpProg = append(d.vpProg, decodeVP(w))
+		if !full && w == [4]uint32(d.vpDec[i*4:i*4+4]) {
+			continue
+		}
+		copy(d.vpDec[i*4:i*4+4], w[:])
+		d.vpProg[i] = decodeVP(w)
+		changed = true
 	}
 	d.vpBase = start
 	d.vpDirty = false
-	d.vpGen++
+	if changed {
+		d.vpGen++
+	}
 }
 
 // rsxRenderEvery draws only every n-th frame (for quick test runs).
@@ -867,3 +927,59 @@ func (m *Machine) present(id uint32) {
 
 // Picture returns the last frame shown (nil before the first flip).
 func (m *Machine) Picture() *Screen { return m.screen }
+
+// dedupeBuf is dedupe's working memory, kept between draws.
+type dedupeBuf struct {
+	uniq  []uint32
+	vlist []int
+	slot  []int32  // index-lo -> place in uniq, valid where stamp = gen
+	stamp []uint32 //
+	gen   uint32
+	cache map[uint32]int
+}
+
+// dedupe is dedupe with a table instead of a map when the indices span
+// a small range (as they nearly always do).
+func (b *dedupeBuf) dedupe(idx []uint32) ([]uint32, []int) {
+	lo, hi := uint32(0xffffffff), uint32(0)
+	for _, i := range idx {
+		if i != 0xffffffff {
+			lo, hi = min(lo, i), max(hi, i)
+		}
+	}
+	uniq, vlist := b.uniq[:0], b.vlist[:0]
+	if lo > hi || hi-lo >= 1<<20 {
+		if b.cache == nil {
+			b.cache = map[uint32]int{}
+		}
+		clear(b.cache)
+		u, v := dedupe(idx, b.cache)
+		return u, v
+	}
+	span := int(hi-lo) + 1
+	if len(b.slot) < span {
+		b.slot = make([]int32, span)
+		b.stamp = make([]uint32, span)
+		b.gen = 0
+	}
+	b.gen++
+	if b.gen == 0 {
+		clear(b.stamp)
+		b.gen = 1
+	}
+	for _, i := range idx {
+		if i == 0xffffffff {
+			vlist = append(vlist, -1)
+			continue
+		}
+		j := i - lo
+		if b.stamp[j] != b.gen {
+			b.stamp[j] = b.gen
+			b.slot[j] = int32(len(uniq))
+			uniq = append(uniq, i)
+		}
+		vlist = append(vlist, int(b.slot[j]))
+	}
+	b.uniq, b.vlist = uniq, vlist
+	return uniq, vlist
+}

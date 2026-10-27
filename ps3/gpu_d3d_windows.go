@@ -7,6 +7,7 @@ package ps3
 import (
 	"fmt"
 	"math"
+	"slices"
 	"unsafe"
 
 	"retropixels/wiiu/d3d"
@@ -42,7 +43,10 @@ type d3dGPU struct {
 	cbSize  int
 	vcb     d3d.Resource // the vertex shaders' constants
 	vcbSize int
-	vss     map[gpuHandle]d3d.Object
+	// the constants last put in cb and vcb (unchanged ones aren't sent again)
+	lastCB, lastVCB          d3d.Resource
+	lastPSConst, lastVSConst []float32
+	vss                      map[gpuHandle]d3d.Object
 	// the picture read a frame late (ReadTextureLate): two staging
 	// textures, the one copied to last, and whether it holds a picture
 	late     [2]d3d.Resource
@@ -372,6 +376,13 @@ func (g *d3dGPU) dynamic(buf *d3d.Resource, size *int, n int, bind uint32) error
 		return nil
 	}
 	buf.Release()
+	// a new buffer may reuse the old one's address: forget what was in it
+	if buf == &g.cb {
+		g.lastCB = d3d.Resource{}
+	}
+	if buf == &g.vcb {
+		g.lastVCB = d3d.Resource{}
+	}
 	sz := max(n, 1<<16)
 	if bind == d3d.BindConstantBuffer {
 		sz = (n + 15) &^ 15
@@ -454,10 +465,13 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 			return err
 		}
 		// the buffer may be bigger than the constants: fill the rest with 0
-		buf := make([]float32, g.cbSize/4)
-		copy(buf, dr.PSConst)
-		if err := g.put(g.cb, unsafe.Pointer(&buf[0]), g.cbSize); err != nil {
-			return err
+		if g.cb != g.lastCB || !slices.Equal(g.lastPSConst, dr.PSConst) {
+			buf := make([]float32, g.cbSize/4)
+			copy(buf, dr.PSConst)
+			if err := g.put(g.cb, unsafe.Pointer(&buf[0]), g.cbSize); err != nil {
+				return err
+			}
+			g.lastCB, g.lastPSConst = g.cb, append(g.lastPSConst[:0], dr.PSConst...)
 		}
 	}
 	vs := g.vs
@@ -469,10 +483,13 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 		if err := g.dynamic(&g.vcb, &g.vcbSize, len(dr.VSConst)*4, d3d.BindConstantBuffer); err != nil {
 			return err
 		}
-		buf := make([]float32, g.vcbSize/4)
-		copy(buf, dr.VSConst)
-		if err := g.put(g.vcb, unsafe.Pointer(&buf[0]), g.vcbSize); err != nil {
-			return err
+		if g.vcb != g.lastVCB || !slices.Equal(g.lastVSConst, dr.VSConst) {
+			buf := make([]float32, g.vcbSize/4)
+			copy(buf, dr.VSConst)
+			if err := g.put(g.vcb, unsafe.Pointer(&buf[0]), g.vcbSize); err != nil {
+				return err
+			}
+			g.lastVCB, g.lastVSConst = g.vcb, append(g.lastVSConst[:0], dr.VSConst...)
 		}
 	}
 	// state objects

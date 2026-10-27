@@ -14,10 +14,13 @@ package ps3
 // Direct3D's clip space.
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash/maphash"
 	"math"
+	"math/bits"
 	"os"
+	"slices"
 
 	"retropixels/wiiu/d3d"
 )
@@ -142,7 +145,7 @@ type gpuRenderer struct {
 	scratch map[[3]int]gpuHandle // temporary copies by (w, h, format)
 	vs      map[vpShaderKey]gpuHandle
 	vsConst []float32
-	vmap    map[uint32]int
+	dd      dedupeBuf
 
 	Draws, Fallbacks int
 	// per-frame costs (debugging): targets read back to memory, memory
@@ -617,17 +620,17 @@ func (g *gpuRenderer) memTexture(t *rsxTexture) *hostTex {
 	if ht != nil && ht.checked == g.frame {
 		return ht
 	}
+	g.TexChecked += t.size
+	hash := g.hashMem(t.ea, t.size)
+	if ht != nil && ht.hash == hash {
+		ht.checked = g.frame
+		return ht
+	}
 	if cap(g.buf) < t.size {
 		g.buf = make([]byte, t.size)
 	}
 	raw := g.buf[:t.size]
 	g.m.Mem.ReadBytes(t.ea, raw)
-	g.TexChecked += t.size
-	hash := maphash.Bytes(g.seed, raw)
-	if ht != nil && ht.hash == hash {
-		ht.checked = g.frame
-		return ht
-	}
 	g.TexChanges++
 	tt := *t
 	tt.data = raw
@@ -649,6 +652,27 @@ func (g *gpuRenderer) memTexture(t *rsxTexture) *hostTex {
 	}
 	ht.pos, ht.fill, ht.hash, ht.checked = pos, fill, hash, g.frame
 	return ht
+}
+
+// hashMem hashes n bytes of memory at addr where they lie (no copy).
+func (g *gpuRenderer) hashMem(addr uint32, n int) uint64 {
+	var h maphash.Hash
+	h.SetSeed(g.seed)
+	var zero [256]byte
+	for n > 0 {
+		p := g.m.Mem.Ptr(addr)
+		k := min(n, pageSize-int(addr&pageMask))
+		if p == nil {
+			for z := k; z > 0; z -= min(z, len(zero)) {
+				h.Write(zero[:min(z, len(zero))])
+			}
+		} else {
+			h.Write(p[:k])
+		}
+		n -= k
+		addr += uint32(k)
+	}
+	return h.Sum64()
 }
 
 // hostTexData converts a texture's texels (t.data) for the host: the
@@ -996,18 +1020,24 @@ func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int
 	if vs == 0 {
 		return false
 	}
-	uniq, vlist := dedupe(m.rsxIndices(r, d), g.vcache())
+	uniq, vlist := g.dd.dedupe(m.rsxIndices(r, d))
 	dr.Index = g.triangles(d.prim, vlist)
 	if len(dr.Index) == 0 {
 		return true
 	}
-	vb := g.verts[:0]
+	var srcs [16]attrSrc
+	ns := 0
+	for a := 0; a < 16; a++ {
+		if inMask>>a&1 != 0 {
+			srcs[ns] = m.attrSource(r, d, a)
+			ns++
+		}
+	}
+	vb := slices.Grow(g.verts[:0], 4*ns*len(uniq))
 	for _, i := range uniq {
-		for a := 0; a < 16; a++ {
-			if inMask>>a&1 != 0 {
-				v := m.fetchAttr(r, d, a, i)
-				vb = append(vb, v[0], v[1], v[2], v[3])
-			}
+		for k := range srcs[:ns] {
+			v := m.fetch(&srcs[k], i)
+			vb = append(vb, v[0], v[1], v[2], v[3])
 		}
 	}
 	g.verts = vb
@@ -1024,15 +1054,6 @@ func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int
 	g.vsConst = cb
 	dr.VSConst = cb
 	return true
-}
-
-// vcache is an empty index map (kept between draws).
-func (g *gpuRenderer) vcache() map[uint32]int {
-	if g.vmap == nil {
-		g.vmap = map[uint32]int{}
-	}
-	clear(g.vmap)
-	return g.vmap
 }
 
 // triangles turns a primitive's vertex list into a triangle list, as
@@ -1215,13 +1236,17 @@ func (g *gpuRenderer) screen(addr, pitch uint32, w, h int, sc *Screen) bool {
 		}
 		swap := s.fmt == 14 || s.fmt == 15 || s.fmt == 16
 		for y := 0; y < h; y++ {
-			row := data[y*p:]
-			for x := 0; x < w; x++ {
-				r, gg, b := uint32(row[4*x]), uint32(row[4*x+1]), uint32(row[4*x+2])
-				if swap {
-					r, b = b, r
+			row := data[y*p : y*p+4*w]
+			out := sc.Pix[y*w : y*w+w]
+			// each texel read as a little-endian word is A<<24|B<<16|G<<8|R
+			if swap {
+				for x := range out {
+					out[x] = binary.LittleEndian.Uint32(row[4*x:]) & 0xffffff
 				}
-				sc.Pix[y*w+x] = r<<16 | gg<<8 | b
+			} else {
+				for x := range out {
+					out[x] = bits.ReverseBytes32(binary.LittleEndian.Uint32(row[4*x:])) >> 8
+				}
 			}
 		}
 		return true

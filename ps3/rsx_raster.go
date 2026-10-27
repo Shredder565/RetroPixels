@@ -5,6 +5,7 @@ package ps3
 // program, alpha/depth tests, blending and the colour mask.
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -68,6 +69,8 @@ func (m *Machine) loadFP(r *rsxState, d *rsxDraw) *fpProg {
 		return p
 	}
 	p := m.decodeFP(a)
+	p.raw = make([]byte, p.size)
+	m.Mem.ReadBytes(a, p.raw)
 	d.fpCache[key] = p
 	if fpCaptureDir != "" {
 		buf := make([]byte, p.size)
@@ -79,17 +82,19 @@ func (m *Machine) loadFP(r *rsxState, d *rsxDraw) *fpProg {
 
 // fpCheck tells whether a cached program still matches memory.
 func (d *rsxDraw) fpCheck(m *Machine, a uint32, p *fpProg) bool {
-	if len(p.inst) == 0 {
+	if len(p.inst) == 0 || len(p.raw) == 0 {
 		return false
 	}
-	q := m.decodeFP(a)
-	if len(q.inst) != len(p.inst) {
-		return false
-	}
-	for i := range q.inst {
-		if q.inst[i] != p.inst[i] {
+	// the same bytes decode the same (the program ends inside them)
+	raw := p.raw
+	for len(raw) > 0 {
+		q := m.Mem.Ptr(a)
+		n := min(len(raw), len(q))
+		if n == 0 || !bytes.Equal(q[:n], raw[:n]) {
 			return false
 		}
+		raw = raw[n:]
+		a += uint32(n)
 	}
 	return true
 }

@@ -28,6 +28,8 @@ type fakeGPU struct {
 	tex  map[gpuHandle]*fakeTex
 	ps   map[gpuHandle][]dxOp
 	next gpuHandle
+
+	nullBuf []byte
 }
 
 func newFakeGPU() *fakeGPU {
@@ -104,6 +106,15 @@ func (fg *fakeGPU) UpdateTexture(h gpuHandle, data []byte, pitch int) {
 
 func (fg *fakeGPU) ReadTexture(h gpuHandle) ([]byte, int, error) {
 	t := fg.tex[h]
+	if fakeNull { // what a real readback costs: one copy
+		n := 4 * t.w * t.h
+		if len(fg.nullBuf) < n {
+			fg.nullBuf = make([]byte, n)
+		}
+		out := make([]byte, n)
+		copy(out, fg.nullBuf)
+		return out, 4 * t.w, nil
+	}
 	bpp := 4
 	switch t.format {
 	case d3d.FormatRGBA16Float:
@@ -160,6 +171,9 @@ func (fg *fakeGPU) CopyTexture(dst, src gpuHandle) {
 }
 
 func (fg *fakeGPU) DepthToRGBA8(dst, src gpuHandle) error {
+	if fakeNull {
+		return nil
+	}
 	d, s := fg.tex[dst], fg.tex[src]
 	for i := range s.z {
 		v := uint32(math.Round(float64(s.z[i]) * 0xffffff))
@@ -183,6 +197,9 @@ func (fg *fakeGPU) CreatePS(code []byte) (gpuHandle, error) {
 func (fg *fakeGPU) CreateVS(code []byte) (gpuHandle, error) { return fg.CreatePS(code) }
 
 func (fg *fakeGPU) ClearTarget(h gpuHandle, rgba [4]float32) {
+	if fakeNull {
+		return
+	}
 	t := fg.tex[h]
 	c := vec4(rgba)
 	if t.format == d3d.FormatRGBA8Unorm {
@@ -196,6 +213,9 @@ func (fg *fakeGPU) ClearTarget(h gpuHandle, rgba [4]float32) {
 }
 
 func (fg *fakeGPU) ClearDepth(h gpuHandle, flags uint32, depth float32, stencil uint8) {
+	if fakeNull {
+		return
+	}
 	t := fg.tex[h]
 	for i := range t.z {
 		if flags&d3d.ClearDepth != 0 {
@@ -217,7 +237,7 @@ type fakeVert struct {
 // Draw rasterises the triangles the way Direct3D 11 does (pixel centres,
 // perspective-correct TEXCOORDs, the extra register screen-linear).
 func (fg *fakeGPU) Draw(d *gpuDraw) error {
-	if os.Getenv("PS3_NULLGPU") != "" { // draw nothing (to time the rest)
+	if fakeNull { // draw nothing (to time the rest)
 		return nil
 	}
 	ps := fg.ps[d.PS]
@@ -567,3 +587,6 @@ func fakeWrap(i, n int, mode uint32) (int, bool) {
 	}
 	return wrapCoord(i, n, 3)
 }
+
+// fakeNull (PS3_NULLGPU): the stand-in GPU does no work, to time the rest
+var fakeNull = os.Getenv("PS3_NULLGPU") != ""
