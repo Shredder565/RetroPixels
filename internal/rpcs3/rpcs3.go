@@ -174,14 +174,37 @@ func treeSize(dir string) int64 {
 // installs and its Stop game.
 const guiSettings = "[main_window]\r\ninfoBoxEnabledWelcome=false\r\ninfoBoxEnabledInstallPKG=false\r\ninfoBoxEnabledInstallPUP=false\r\nconfirmationBoxExitGame=false\r\nconfirmationBoxBootGame=false\r\n"
 
-// audioMark records that RetroPixels has set RPCS3's sound output once, so
-// a later change made in RPCS3 itself is kept.
-const audioMark = "RETROPIXELS-AUDIO.txt"
+// settingsMark lists the RPCS3 settings RetroPixels has set, one per line,
+// so each is set once and a later change made in RPCS3 itself is kept.
+const settingsMark = "RETROPIXELS-SETTINGS.txt"
 
-// PrepareSettings writes those settings in RPCS3's folder dir the first
-// time (RPCS3's own settings stay as they are after that). It also moves
-// RPCS3's sound output from Cubeb to XAudio2 once: with Cubeb, RPCS3 crashed
-// (0xc0000005) when a game reopened the sound output.
+// setting is one line of RPCS3's config.yml that RetroPixels sets once.
+type setting struct{ section, key, value string }
+
+// settings RetroPixels sets in RPCS3's config.yml:
+//   - XAudio2 sound output: with Cubeb, RPCS3 crashed (0xc0000005) when a
+//     game reopened its sound output.
+//   - On Ryzen 9000 (Zen 5), which this RPCS3 build doesn't know, its
+//     recompilers fell back to a "generic" CPU and RPCS3 crashed a few
+//     seconds into the game. They're told to build for Zen 3 instead, which
+//     Zen 5 runs.
+func settings() []setting {
+	s := []setting{{"Audio", "Renderer", "XAudio2"}}
+	if zen5() {
+		s = append(s, setting{"Core", "Use LLVM CPU", "znver3"})
+	}
+	return s
+}
+
+// zen5 tells whether this PC has an AMD family 0x1A (Zen 5) processor.
+func zen5() bool {
+	id := os.Getenv("PROCESSOR_IDENTIFIER") // e.g. "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD"
+	return strings.Contains(id, "AuthenticAMD") && strings.Contains(id, "Family 26 ")
+}
+
+// PrepareSettings writes those GUI settings in RPCS3's folder dir the first
+// time (RPCS3's own settings stay as they are after that), and sets each of
+// settings() once in its config.yml.
 func PrepareSettings(dir string) error {
 	p := filepath.Join(dir, "GuiConfigs", "CurrentSettings.ini")
 	if _, err := os.Stat(p); err != nil {
@@ -192,63 +215,77 @@ func PrepareSettings(dir string) error {
 			return err
 		}
 	}
-	return prepareAudio(dir)
+	return prepareConfig(dir, settings())
 }
 
-func prepareAudio(dir string) error {
-	mark := filepath.Join(dir, audioMark)
-	if _, err := os.Stat(mark); err == nil {
-		return nil
+func prepareConfig(dir string, want []setting) error {
+	markPath := filepath.Join(dir, settingsMark)
+	mark, _ := os.ReadFile(markPath)
+	done := map[string]bool{}
+	for _, l := range strings.Split(strings.ReplaceAll(string(mark), "\r\n", "\n"), "\n") {
+		done[l] = true
 	}
 	cfg := filepath.Join(dir, "config", "config.yml")
 	b, err := os.ReadFile(cfg)
-	switch {
-	case os.IsNotExist(err):
-		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
-			return err
-		}
-		b = []byte("Audio:\n  Renderer: XAudio2\n")
-	case err != nil:
+	if err != nil && !os.IsNotExist(err) {
 		return err
-	default:
-		b = SetAudioRenderer(b, "XAudio2")
+	}
+	changed := false
+	for _, s := range want {
+		line := s.section + "/" + s.key
+		if done[line] {
+			continue
+		}
+		b = SetConfig(b, s.section, s.key, s.value)
+		mark = append(mark, line+"\r\n"...)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		return err
 	}
 	if err := os.WriteFile(cfg, b, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(mark, []byte("RetroPixels set RPCS3's sound output to XAudio2 once. Change it in RPCS3 if you like; RetroPixels won't change it again.\r\n"), 0o644)
+	return os.WriteFile(markPath, mark, 0o644)
 }
 
-// SetAudioRenderer sets "Renderer:" in the Audio section of RPCS3's
-// config.yml text, adding the section if it's missing.
-func SetAudioRenderer(b []byte, renderer string) []byte {
+// SetConfig sets "key: value" in section of RPCS3's config.yml text, adding
+// the key or the section if missing.
+func SetConfig(b []byte, section, key, value string) []byte {
 	nl := "\n"
 	if bytes.Contains(b, []byte("\r\n")) {
 		nl = "\r\n"
 	}
-	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
-	in := false
+	text := strings.ReplaceAll(string(b), "\r\n", "\n")
+	text = strings.TrimSuffix(text, "\n")
+	var lines []string
+	if text != "" {
+		lines = strings.Split(text, "\n")
+	}
+	entry := "  " + key + ": " + value
+	in, head := false, -1
 	for i, l := range lines {
 		if len(l) > 0 && l[0] != ' ' {
-			in = strings.TrimSpace(l) == "Audio:"
+			in = strings.TrimSpace(l) == section+":"
+			if in {
+				head = i
+			}
 			continue
 		}
-		if in && strings.HasPrefix(l, "  Renderer:") {
-			lines[i] = "  Renderer: " + renderer
-			return []byte(strings.Join(lines, nl))
+		if in && strings.HasPrefix(l, "  "+key+":") {
+			lines[i] = entry
+			return []byte(strings.Join(lines, nl) + nl)
 		}
 	}
-	for i, l := range lines {
-		if strings.TrimSpace(l) == "Audio:" && !strings.HasPrefix(l, " ") {
-			lines = append(lines[:i+1], append([]string{"  Renderer: " + renderer}, lines[i+1:]...)...)
-			return []byte(strings.Join(lines, nl))
-		}
+	if head >= 0 {
+		lines = append(lines[:head+1], append([]string{entry}, lines[head+1:]...)...)
+	} else {
+		lines = append(lines, section+":", entry)
 	}
-	s := strings.Join(lines, nl)
-	if s != "" && !strings.HasSuffix(s, nl) {
-		s += nl
-	}
-	return []byte(s + "Audio:" + nl + "  Renderer: " + renderer + nl)
+	return []byte(strings.Join(lines, nl) + nl)
 }
 
 // GameTitle reads the game's title from the PARAM.SFO beside its USRDIR.

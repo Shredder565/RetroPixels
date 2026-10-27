@@ -58,32 +58,52 @@ func TestGameTitleLocal(t *testing.T) {
 	t.Log(GameTitle(eboot))
 }
 
-func TestSetAudioRenderer(t *testing.T) {
-	in := "Video:\r\n  Renderer: Vulkan\r\nAudio:\r\n  Renderer: Cubeb\r\n  Audio Provider: CellAudio\r\n"
-	want := "Video:\r\n  Renderer: Vulkan\r\nAudio:\r\n  Renderer: XAudio2\r\n  Audio Provider: CellAudio\r\n"
-	if got := string(SetAudioRenderer([]byte(in), "XAudio2")); got != want {
+func TestSetConfig(t *testing.T) {
+	in := "Core:\r\n  Use LLVM CPU: \"\"\r\nAudio:\r\n  Renderer: Cubeb\r\n  Audio Provider: CellAudio\r\n"
+	got := string(SetConfig([]byte(in), "Audio", "Renderer", "XAudio2"))
+	got = string(SetConfig([]byte(got), "Core", "Use LLVM CPU", "znver3"))
+	want := "Core:\r\n  Use LLVM CPU: znver3\r\nAudio:\r\n  Renderer: XAudio2\r\n  Audio Provider: CellAudio\r\n"
+	if got != want {
 		t.Fatalf("got %q", got)
 	}
-	if got := string(SetAudioRenderer([]byte("Video:\n  Renderer: Vulkan\n"), "XAudio2")); got != "Video:\n  Renderer: Vulkan\nAudio:\n  Renderer: XAudio2\n" {
+	if got := string(SetConfig([]byte("Video:\n  Renderer: Vulkan\n"), "Audio", "Renderer", "XAudio2")); got != "Video:\n  Renderer: Vulkan\nAudio:\n  Renderer: XAudio2\n" {
 		t.Fatalf("no audio section: %q", got)
+	}
+	if got := string(SetConfig(nil, "Audio", "Renderer", "XAudio2")); got != "Audio:\n  Renderer: XAudio2\n" {
+		t.Fatalf("empty: %q", got)
 	}
 }
 
-func TestPrepareSettingsAudioOnce(t *testing.T) {
+func TestPrepareConfigOnce(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config", "config.yml")
 	os.MkdirAll(filepath.Dir(cfg), 0o755)
 	os.WriteFile(cfg, []byte("Audio:\n  Renderer: Cubeb\n"), 0o644)
-	if err := PrepareSettings(dir); err != nil {
+	want := []setting{{"Audio", "Renderer", "XAudio2"}}
+	if err := prepareConfig(dir, want); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg)
-	if string(b) != "Audio:\n  Renderer: XAudio2\n" {
+	if b, _ := os.ReadFile(cfg); string(b) != "Audio:\n  Renderer: XAudio2\n" {
 		t.Fatalf("config %q", b)
 	}
 	os.WriteFile(cfg, []byte("Audio:\n  Renderer: Cubeb\n"), 0o644)
-	PrepareSettings(dir)
+	prepareConfig(dir, want)
 	if b, _ := os.ReadFile(cfg); string(b) != "Audio:\n  Renderer: Cubeb\n" {
 		t.Fatalf("changed the user's choice: %q", b)
+	}
+	prepareConfig(dir, append(want, setting{"Core", "Use LLVM CPU", "znver3"}))
+	if b, _ := os.ReadFile(cfg); string(b) != "Audio:\n  Renderer: Cubeb\nCore:\n  Use LLVM CPU: znver3\n" {
+		t.Fatalf("new setting: %q", b)
+	}
+}
+
+func TestZen5(t *testing.T) {
+	t.Setenv("PROCESSOR_IDENTIFIER", "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD")
+	if !zen5() {
+		t.Fatal("Ryzen 9 9950X not seen as Zen 5")
+	}
+	t.Setenv("PROCESSOR_IDENTIFIER", "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD")
+	if zen5() {
+		t.Fatal("Zen 4 seen as Zen 5")
 	}
 }
