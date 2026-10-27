@@ -90,7 +90,14 @@ type JIT struct {
 	lo, hi [numPages]uint32
 
 	Blocks, Flushes, Translated, Interp int // counters for tests and tuning
+
+	// PS3_BLOCKPROF: how many times each compiled block ran
+	profCount []uint64
+	profPC    []uint32
+	profN     []uint32
 }
+
+var jitBlockProf = os.Getenv("PS3_BLOCKPROF") != ""
 
 // jitArgs is what jitCall loads into the fixed registers.
 type jitArgs struct {
@@ -111,6 +118,9 @@ func newJIT(mem *Memory) *JIT {
 		return nil
 	}
 	j := &JIT{mem: mem, buf: buf, base: uintptr(unsafe.Pointer(&buf[0]))}
+	if jitBlockProf {
+		j.profCount = make([]uint64, 0, 1<<22)
+	}
 	mem.codeWrite = j.codeWritten
 	j.reset()
 	runtime.SetFinalizer(j, func(j *JIT) { jitFree(j.buf) })
@@ -336,15 +346,16 @@ type jitSlow struct {
 }
 
 type jitBlock struct {
-	a     *x86
-	j     *JIT
-	start uint32
-	n     int // instructions in the block so far
-	slow  []*jitSlow
-	cur   *jitSlow // the current instruction's slow path
-	pool  [][16]byte
-	refs  []poolRef
-	links []jitLink // jumps to other blocks
+	a      *x86
+	j      *JIT
+	start  uint32
+	n      int // instructions in the block so far
+	slow   []*jitSlow
+	cur    *jitSlow // the current instruction's slow path
+	pool   [][16]byte
+	refs   []poolRef
+	links  []jitLink // jumps to other blocks
+	profAt int       // 1 + the block's index in the profile, or 0
 }
 
 // jitLink is a jump at the end of a block to a known PC: its rel32 goes
@@ -364,6 +375,16 @@ func (b *jitBlock) build() {
 	a.byte1(0x49, 0x81, 0xe9) // sub r9, imm32
 	lenAt := a.pos()
 	a.imm32(0)
+	if jitBlockProf && len(b.j.profCount) < cap(b.j.profCount) {
+		// count the block's runs (profiling)
+		k := len(b.j.profCount)
+		b.j.profCount = b.j.profCount[:k+1]
+		b.j.profPC = append(b.j.profPC, b.start)
+		b.j.profN = append(b.j.profN, 0)
+		b.profAt = k + 1
+		a.movRI64(rAX, uint64(uintptr(unsafe.Pointer(&b.j.profCount[k]))))
+		a.aluMI64(aluAdd, rAX, 0, 1)
+	}
 
 	pc := b.start
 	done, stopped := false, false
@@ -411,6 +432,9 @@ func (b *jitBlock) build() {
 		return
 	}
 	b.j.Translated += b.n
+	if b.profAt > 0 {
+		b.j.profN[b.profAt-1] = uint32(b.n)
+	}
 	n := uint32(b.n)
 	a.b[lenAt], a.b[lenAt+1], a.b[lenAt+2], a.b[lenAt+3] = byte(n), byte(n>>8), byte(n>>16), byte(n>>24)
 	// out of line: the budget exit and the slow paths

@@ -29,6 +29,7 @@ func TestBootLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lastMachine = m
 	frames := 600
 	if n, err := strconv.Atoi(os.Getenv("PS3_FRAMES")); err == nil {
 		frames = n
@@ -56,6 +57,9 @@ func TestBootLocal(t *testing.T) {
 		}
 		if from, err := strconv.Atoi(os.Getenv("PS3_PROFFROM")); err == nil && i == from {
 			// PS3_PROFFROM=<frame>: CPU profile from that frame to the end
+			if j := m.cpu.jit; j != nil {
+				clear(j.profCount)
+			}
 			pf, _ := os.Create(os.Getenv("PS3_PROFOUT"))
 			pprof.StartCPUProfile(pf)
 			defer pprof.StopCPUProfile()
