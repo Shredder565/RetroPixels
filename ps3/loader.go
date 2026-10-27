@@ -228,9 +228,18 @@ func (m *Machine) loadPRX(b []byte, path string) (*prxModule, error) {
 	mi := mod.segs[0] + uint32(p0.paddr-p0.off)
 	mod.name = m.Mem.String(mi+4, 28)
 	mod.toc = m.Mem.Read32(mi + 32)
-	expStart, expEnd := m.Mem.Read32(mi+36)+mod.segs[0], m.Mem.Read32(mi+40)+mod.segs[0]
-	impStart, impEnd := m.Mem.Read32(mi+44)+mod.segs[0], m.Mem.Read32(mi+48)+mod.segs[0]
+	// the table addresses are segment offsets, or addresses when a
+	// relocation has fixed them already
+	rel := func(v uint32) uint32 {
+		if v >= mod.base && v < mod.base+mod.size {
+			return v
+		}
+		return v + mod.segs[0]
+	}
+	expStart, expEnd := rel(m.Mem.Read32(mi+36)), rel(m.Mem.Read32(mi+40))
+	impStart, impEnd := rel(m.Mem.Read32(mi+44)), rel(m.Mem.Read32(mi+48))
 	_ = segOff
+	m.Logf("module %s: info %08X toc %08X exports %08X-%08X imports %08X-%08X", mod.name, mi, mod.toc, expStart, expEnd, impStart, impEnd)
 	// exports were relocated already? The table addresses in module info
 	// are segment offsets; entries inside are relocated addresses.
 	for a := expStart; a < expEnd; {

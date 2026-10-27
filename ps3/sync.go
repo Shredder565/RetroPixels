@@ -487,7 +487,10 @@ func init() {
 	})
 }
 
-const eNOTCONN = 0x80010017
+const (
+	eNOTCONN = 0x80010016
+	eISCONN  = 0x80010015
+)
 
 func (q *eventQueue) push(e event) uint32 {
 	if len(q.events) >= q.size {

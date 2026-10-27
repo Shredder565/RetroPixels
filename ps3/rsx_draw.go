@@ -27,7 +27,7 @@ func (m *Machine) present(id uint32) {
 		return
 	}
 	sc := m.screen
-	if sc.W != int(w) || sc.H != int(h) {
+	if sc == nil || sc.W != int(w) || sc.H != int(h) {
 		sc = &Screen{W: int(w), H: int(h), Pix: make([]uint32, w*h)}
 		m.screen = sc
 	}

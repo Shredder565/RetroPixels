@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 )
@@ -154,6 +155,9 @@ func New(opts Options) (*Machine, error) {
 		}
 		if m.Err == nil {
 			m.Err = fmt.Errorf("bad memory %s at %08X (PC %08X, LR %08X)", w, addr, m.cpu.PC-4, uint32(m.cpu.LR))
+			if os.Getenv("PS3_DEBUG") != "" {
+				m.Logf("fault from:\n%s", debug.Stack())
+			}
 		}
 		m.cpu.Stop()
 	}
@@ -429,7 +433,15 @@ func (m *Machine) runUntil(target uint64) {
 	for m.tb < target && m.Err == nil && !m.Exited {
 		t := m.pick()
 		if t == nil {
-			// everyone waits: jump to the next timeout (or the target)
+			// no PPU thread can run: let the SPUs work, else jump to the
+			// next timeout (or the target)
+			if !m.spuIdle() {
+				if ran := m.runSPUs(quantum); ran > 0 {
+					m.advance(uint64(ran))
+					m.rsxRun()
+					continue
+				}
+			}
 			next := target
 			for _, th := range m.threads {
 				if th.state == thBlocked && th.wakeAt != 0 && th.wakeAt < next {
@@ -440,9 +452,6 @@ func (m *Machine) runUntil(target uint64) {
 				m.tb = next
 			}
 			m.checkTimeouts()
-			if m.spuIdle() {
-				continue
-			}
 			continue
 		}
 		m.cur = t
