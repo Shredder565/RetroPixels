@@ -20,7 +20,9 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"runtime"
 	"slices"
+	"sync"
 
 	"retropixels/wiiu/d3d"
 )
@@ -146,6 +148,9 @@ type gpuRenderer struct {
 	vs      map[vpShaderKey]gpuHandle
 	vsConst []float32
 	dd      dedupeBuf
+	runs    map[vtxKey]*vtxRun
+	// vertex runs fetched / reused (for PS3_GPUSTAT)
+	RunsFetched, RunsReused int
 
 	Draws, Fallbacks int
 	// per-frame costs (debugging): targets read back to memory, memory
@@ -1020,11 +1025,7 @@ func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int
 	if vs == 0 {
 		return false
 	}
-	uniq, vlist := g.dd.dedupe(m.rsxIndices(r, d))
-	dr.Index = g.triangles(d.prim, vlist)
-	if len(dr.Index) == 0 {
-		return true
-	}
+	idx := m.rsxIndices(r, d)
 	var srcs [16]attrSrc
 	ns := 0
 	for a := 0; a < 16; a++ {
@@ -1033,15 +1034,25 @@ func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int
 			ns++
 		}
 	}
-	vb := slices.Grow(g.verts[:0], 4*ns*len(uniq))
-	for _, i := range uniq {
-		for k := range srcs[:ns] {
-			v := m.fetch(&srcs[k], i)
-			vb = append(vb, v[0], v[1], v[2], v[3])
+	if verts, vlist, ok := g.rangeVertices(idx, srcs[:ns]); ok {
+		dr.Index = g.triangles(d.prim, vlist)
+		dr.Verts = verts
+	} else {
+		uniq, vlist := g.dd.dedupe(idx)
+		dr.Index = g.triangles(d.prim, vlist)
+		vb := slices.Grow(g.verts[:0], 4*ns*len(uniq))
+		for _, i := range uniq {
+			for k := range srcs[:ns] {
+				v := m.fetch(&srcs[k], i)
+				vb = append(vb, v[0], v[1], v[2], v[3])
+			}
 		}
+		g.verts = vb
+		dr.Verts = vb
 	}
-	g.verts = vb
-	dr.Verts = vb
+	if len(dr.Index) == 0 {
+		return true
+	}
 	dr.VS = vs
 	cb := g.vsConst[:0]
 	for i := 0; i < 468; i++ {
@@ -1054,6 +1065,116 @@ func (g *gpuRenderer) gpuVertices(r *rsxState, d *rsxDraw, dr *gpuDraw, w, h int
 	g.vsConst = cb
 	dr.VSConst = cb
 	return true
+}
+
+// vtxKey names a run of vertices: where each attribute comes from and
+// the first and last index.
+type vtxKey struct {
+	src    [16]attrKey
+	n      int
+	lo, hi uint32
+}
+
+type attrKey struct {
+	size, typ, stride, off, loc uint32
+	imm                         [4]uint32
+}
+
+// vtxRun is a run's vertices as last fetched, and the hash of the
+// memory they came from.
+type vtxRun struct {
+	hash  uint64
+	verts []float32
+	used  uint64 // frame
+}
+
+// rangeVertices fetches the vertices from the lowest index to the highest
+// (when the indices use most of them), reusing the last fetch when the
+// memory they come from hasn't changed. vlist is idx made relative to
+// the first.
+func (g *gpuRenderer) rangeVertices(idx []uint32, srcs []attrSrc) ([]float32, []int, bool) {
+	m := g.m
+	lo, hi := uint32(0xffffffff), uint32(0)
+	for _, i := range idx {
+		if i != 0xffffffff {
+			lo, hi = min(lo, i), max(hi, i)
+		}
+	}
+	if lo > hi || int(hi-lo) > 2*len(idx)+64 || hi-lo >= 1<<20 {
+		return nil, nil, false
+	}
+	key := vtxKey{n: len(srcs), lo: lo, hi: hi}
+	var h maphash.Hash
+	h.SetSeed(g.seed)
+	for k := range srcs {
+		f := &srcs[k]
+		key.src[k] = attrKey{f.size, f.typ, f.stride, f.off, f.loc,
+			[4]uint32{math.Float32bits(f.imm[0]), math.Float32bits(f.imm[1]), math.Float32bits(f.imm[2]), math.Float32bits(f.imm[3])}}
+		if f.size == 0 {
+			continue
+		}
+		a0 := m.gcm.offsetToAddr(f.off+f.stride*lo, f.loc)
+		a1 := m.gcm.offsetToAddr(f.off+f.stride*hi, f.loc)
+		if a1-a0 != f.stride*(hi-lo) {
+			return nil, nil, false // not in one piece
+		}
+		n := int(a1-a0) + int(attrBytes(f.typ, f.size))
+		for n > 0 {
+			p := m.Mem.Ptr(a0)
+			c := min(n, pageSize-int(a0&pageMask))
+			if p == nil {
+				return nil, nil, false
+			}
+			h.Write(p[:c])
+			n -= c
+			a0 += uint32(c)
+		}
+	}
+	sum := h.Sum64()
+	vlist := g.dd.vlist[:0]
+	for _, i := range idx {
+		if i == 0xffffffff {
+			vlist = append(vlist, -1)
+		} else {
+			vlist = append(vlist, int(i-lo))
+		}
+	}
+	g.dd.vlist = vlist
+	if g.runs == nil {
+		g.runs = map[vtxKey]*vtxRun{}
+	}
+	run := g.runs[key]
+	if run == nil {
+		run = &vtxRun{}
+		g.runs[key] = run
+	} else if run.hash == sum && run.verts != nil {
+		run.used = g.frame
+		g.RunsReused++
+		return run.verts, vlist, true
+	}
+	ns := len(srcs)
+	nv := int(hi-lo) + 1
+	vb := run.verts[:0]
+	vb = slices.Grow(vb, 4*ns*nv)[:4*ns*nv]
+	for k := range srcs {
+		f := &srcs[k]
+		for v := 0; v < nv; v++ {
+			x := m.fetch(f, lo+uint32(v))
+			copy(vb[4*(v*ns+k):], x[:])
+		}
+	}
+	run.hash, run.verts, run.used = sum, vb, g.frame
+	g.RunsFetched++
+	return vb, vlist, true
+}
+
+// dropRuns forgets runs not drawn for a while.
+func (g *gpuRenderer) dropRuns() {
+	for k, r := range g.runs {
+		if g.frame-r.used > 300 {
+			delete(g.runs, k)
+		}
+	}
 }
 
 // triangles turns a primitive's vertex list into a triangle list, as
@@ -1235,35 +1356,64 @@ func (g *gpuRenderer) screen(addr, pitch uint32, w, h int, sc *Screen) bool {
 			return false
 		}
 		swap := s.fmt == 14 || s.fmt == 15 || s.fmt == 16
-		for y := 0; y < h; y++ {
-			row := data[y*p : y*p+4*w]
-			out := sc.Pix[y*w : y*w+w]
-			// each texel read as a little-endian word is A<<24|B<<16|G<<8|R
-			if swap {
-				for x := range out {
-					out[x] = binary.LittleEndian.Uint32(row[4*x:]) & 0xffffff
-				}
-			} else {
-				for x := range out {
-					out[x] = bits.ReverseBytes32(binary.LittleEndian.Uint32(row[4*x:])) >> 8
-				}
-			}
-		}
+		parallelRows(h, func(y0, y1 int) { convertRows(data, p, sc.Pix, w, y0, y1, swap) })
 		return true
 	}
 	return false
 }
 
+// parallelRows runs f over bands of rows [0, h) on several cores.
+func parallelRows(h int, f func(y0, y1 int)) {
+	n := min(runtime.NumCPU(), 4, max(1, h/64))
+	if n <= 1 {
+		f(0, h)
+		return
+	}
+	var wg sync.WaitGroup
+	for k := 0; k < n; k++ {
+		y0, y1 := h*k/n, h*(k+1)/n
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f(y0, y1)
+		}()
+	}
+	wg.Wait()
+}
+
+// convertRows turns rows y0..y1 of an RGBA8 (or BGRA8 when swap) picture
+// into 0RGB words.
+func convertRows(data []byte, p int, pix []uint32, w, y0, y1 int, swap bool) {
+	for y := y0; y < y1; y++ {
+		row := data[y*p : y*p+4*w]
+		out := pix[y*w : y*w+w]
+		// each texel read as a little-endian word is A<<24|B<<16|G<<8|R
+		if swap {
+			for x := range out {
+				out[x] = binary.LittleEndian.Uint32(row[4*x:]) & 0xffffff
+			}
+		} else {
+			for x := range out {
+				out[x] = bits.ReverseBytes32(binary.LittleEndian.Uint32(row[4*x:])) >> 8
+			}
+		}
+	}
+}
+
 // endFrame is called at each flip.
 func (g *gpuRenderer) endFrame() {
 	if gpuStat {
-		g.m.Logf("GPU frame %d: %d draws, %d software, %d readbacks, %d uploads, %d textures changed, %d KB of textures checked",
-			g.frame, g.Draws, g.Fallbacks, g.Readbacks, g.Uploads, g.TexChanges, g.TexChecked>>10)
+		g.m.Logf("GPU frame %d: %d draws, %d software, %d readbacks, %d uploads, %d textures changed, %d KB of textures checked, vertex runs %d fetched %d reused",
+			g.frame, g.Draws, g.Fallbacks, g.Readbacks, g.Uploads, g.TexChanges, g.TexChecked>>10, g.RunsFetched, g.RunsReused)
 		if vpStat {
 			g.m.Logf("VP: %d draws, %d vertices, %d instructions (at most)", vpStatDraws, vpStatVerts, vpStatInsts)
 			vpStatDraws, vpStatVerts, vpStatInsts = 0, 0, 0
 		}
 		g.Draws, g.Fallbacks, g.Readbacks, g.Uploads, g.TexChanges, g.TexChecked = 0, 0, 0, 0, 0, 0
+		g.RunsFetched, g.RunsReused = 0, 0
+	}
+	if g.frame%60 == 0 {
+		g.dropRuns()
 	}
 	g.frame++
 }

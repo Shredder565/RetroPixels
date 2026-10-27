@@ -496,6 +496,9 @@ func (m *Machine) runUntil(target uint64) {
 		before := m.cpu.Ran
 		m.cpu.Run(n)
 		ran := m.cpu.Ran - before
+		if sliceHook != nil {
+			sliceHook(m, t, ran)
+		}
 		m.advance(ran)
 		if m.cpu.Err != nil && m.Err == nil {
 			m.Err = m.cpu.Err
@@ -507,6 +510,9 @@ func (m *Machine) runUntil(target uint64) {
 		m.rsxRun()
 	}
 }
+
+// sliceHook, when set (profiling), is called after each thread's turn.
+var sliceHook func(m *Machine, t *Thread, ran uint64)
 
 func (m *Machine) advance(instrs uint64) {
 	m.tbFrac += instrs * TBFreq
