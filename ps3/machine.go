@@ -111,6 +111,7 @@ type Machine struct {
 	audio *audioState
 	spus  *spuState
 	sd    *sdScratch
+	gpu   *gpuRenderer // drawing on the host GPU (nil: software)
 	spurs *spursState
 	misc  map[string]any
 

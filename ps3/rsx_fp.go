@@ -41,6 +41,7 @@ type fpInst struct {
 	condSet  uint8 // which CC set_cond writes
 	src      [3]fpSrc
 	constant vec4
+	cidx     int // which of the program's constants (-1 none)
 	// flow control
 	elseAt, endAt int
 	loopStart     int
@@ -50,6 +51,9 @@ type fpInst struct {
 
 type fpProg struct {
 	inst      []fpInst
+	consts    int    // how many inline constants
+	shape     uint64 // hash of the instructions without their constants
+	size      uint32 // bytes, constants included
 	inputs    uint32 // bit per input register used
 	usesTex   uint32
 	usesDeriv bool
@@ -71,14 +75,23 @@ func decodeFPSrc(w uint32, abs bool, prec uint32) fpSrc {
 }
 
 // decodeFP reads a fragment program at a (stops at the end bit).
-func (m *Machine) decodeFP(a uint32) *fpProg {
+func (m *Machine) decodeFP(a uint32) *fpProg { return decodeFPFrom(m.Mem.Read32, a) }
+
+func decodeFPFrom(read32 func(uint32) uint32, a uint32) *fpProg {
 	p := &fpProg{}
+	start := a
+	slotOf := map[int]int{} // 16-byte slot -> instruction index
+	slot := 0
+	h := uint64(14695981039346656037)
 	for i := 0; i < 4096; i++ {
 		var w [4]uint32
 		for k := range w {
-			w[k] = fpSwap(m.Mem.Read32(a + uint32(k)*4))
+			w[k] = fpSwap(read32(a + uint32(k)*4))
+			h = (h ^ uint64(w[k])) * 1099511628211
 		}
 		a += 16
+		slotOf[slot] = len(p.inst)
+		slot++
 		in := fpInst{
 			op:      uint8(w[0]>>24&0x3f) | uint8(w[2]>>31)<<6,
 			flow:    w[2]>>31 != 0,
@@ -99,6 +112,7 @@ func (m *Machine) decodeFP(a uint32) *fpProg {
 			condSet: uint8(w[1] >> 30 & 1),
 		}
 		in.condSwz = [4]uint8{uint8(w[1] >> 21 & 3), uint8(w[1] >> 23 & 3), uint8(w[1] >> 25 & 3), uint8(w[1] >> 27 & 3)}
+		in.cidx = -1
 		if in.flow {
 			in.elseAt = int(w[2]&0x7fffffff) >> 2
 			in.endAt = int(w[3] >> 2)
@@ -126,9 +140,12 @@ func (m *Machine) decodeFP(a uint32) *fpProg {
 		}
 		if hasConst {
 			for k := range in.constant {
-				in.constant[k] = math.Float32frombits(fpSwap(m.Mem.Read32(a + uint32(k)*4)))
+				in.constant[k] = math.Float32frombits(fpSwap(read32(a + uint32(k)*4)))
 			}
 			a += 16
+			slot++
+			in.cidx = p.consts
+			p.consts++
 		}
 		switch in.op {
 		case 0x17, 0x18, 0x19, 0x2f, 0x31:
@@ -143,6 +160,21 @@ func (m *Machine) decodeFP(a uint32) *fpProg {
 			break
 		}
 	}
+	// branch targets are 16-byte slots (constants count): make them
+	// instruction indices
+	at := func(sl int) int {
+		if i, ok := slotOf[sl]; ok {
+			return i
+		}
+		return len(p.inst)
+	}
+	for i := range p.inst {
+		if in := &p.inst[i]; in.flow {
+			in.elseAt, in.endAt = at(in.elseAt), at(in.endAt)
+		}
+	}
+	p.shape = h
+	p.size = a - start
 	return p
 }
 
@@ -190,9 +222,7 @@ func (x *fpRun) read(in *fpInst, n int) vec4 {
 	v = swizzle(v, s.swz)
 	if s.abs {
 		for i := range v {
-			if v[i] < 0 {
-				v[i] = -v[i]
-			}
+			v[i] = math.Float32frombits(math.Float32bits(v[i]) &^ 0x80000000)
 		}
 	}
 	if s.prec != 0 {
@@ -277,20 +307,31 @@ func f32(x float64) float32 { return float32(x) }
 
 // runFP runs the program for one pixel; tex samples texture unit t.
 func (p *fpProg) run(x *fpRun, tex func(unit uint8, c vec4, bias float32, lod float32, useLod bool) vec4) {
+	// open blocks: ifs (and their elses) and loops, innermost last
+	type block struct {
+		loop          bool
+		inIf          bool // running the if part (skip the else part)
+		elseAt, endAt int
+		start, count  int
+	}
+	var st []block
 	ip := 0
-	testAt, jumpTo := -1, -1
-	loopStart, loopEnd, counter := -1, -1, 0
 	for steps := 0; ip >= 0 && ip < len(p.inst) && steps < 65536; steps++ {
-		if ip == testAt {
-			ip = jumpTo
-			testAt, jumpTo = -1, -1
-			continue
-		} else if ip == loopEnd {
-			if counter > 0 {
-				counter--
-				ip = loopStart
-			} else {
-				loopEnd, loopStart = -1, -1
+		if n := len(st); n > 0 {
+			b := &st[n-1]
+			if !b.loop && b.inIf && ip == b.elseAt && b.elseAt < b.endAt {
+				ip = b.endAt
+				st = st[:n-1]
+				continue
+			}
+			if ip == b.endAt {
+				if b.loop && b.count > 0 {
+					b.count--
+					ip = b.start
+				} else {
+					st = st[:n-1]
+					continue
+				}
 			}
 		}
 		in := &p.inst[ip]
@@ -302,25 +343,38 @@ func (p *fpProg) run(x *fpRun, tex func(unit uint8, c vec4, bias float32, lod fl
 					return
 				}
 			case 0x42: // IFE
+				end := in.endAt
+				if end < ip {
+					end = len(p.inst)
+				}
 				if x.condOK(in) {
-					if in.elseAt < in.endAt {
-						testAt, jumpTo = in.elseAt, in.endAt
-					}
-				} else {
+					st = append(st, block{inIf: true, elseAt: in.elseAt, endAt: end})
+				} else if in.elseAt < end {
 					ip = in.elseAt
+					st = append(st, block{elseAt: in.elseAt, endAt: end})
+				} else {
+					ip = end
 				}
 			case 0x43, 0x44: // LOOP, REP
+				end := in.endAt
+				if end < ip {
+					end = len(p.inst)
+				}
 				if x.condOK(in) && in.loopEnd > in.loopStart {
-					counter = (in.loopEnd - in.loopStart - 1) / max(in.loopInc, 1)
-					loopStart = ip
-					loopEnd = in.endAt
+					st = append(st, block{loop: true, endAt: end, start: ip,
+						count: (in.loopEnd - in.loopStart - 1) / max(in.loopInc, 1)})
 				} else {
-					ip = in.endAt
+					ip = end
 				}
 			case 0x40: // BRK
-				if x.condOK(in) && loopEnd > 0 {
-					ip = loopEnd
-					counter = 0
+				if x.condOK(in) {
+					for k := len(st) - 1; k >= 0; k-- {
+						if st[k].loop {
+							ip = st[k].endAt
+							st = st[:k]
+							break
+						}
+					}
 				}
 			}
 			if in.end {
@@ -492,8 +546,8 @@ func (p *fpProg) run(x *fpRun, tex func(unit uint8, c vec4, bias float32, lod fl
 				v = cmpVec(s0, s1, func(a, b float32) bool { return a != b })
 			case 0x0f:
 				v = cmpVec(s0, s1, func(a, b float32) bool { return a == b })
-			case 0x26: // POW
-				s := f32(math.Pow(float64(s0[0]), float64(s1[0])))
+			case 0x26: // POW, as the hardware does it: 2^(y*log2(x))
+				s := f32(math.Exp2(float64(float32(float64(s1[0]) * float64(f32(math.Log2(float64(s0[0]))))))))
 				v = vec4{s, s, s, s}
 			case 0x3a: // DIV
 				for i := range v {
@@ -561,23 +615,35 @@ func f32ToHalf(v float32) uint16 {
 	b := math.Float32bits(v)
 	s := uint16(b>>16) & 0x8000
 	e := int(b>>23&0xff) - 127 + 15
-	f := b & 0x7fffff
+	m := b & 0x7fffff
 	switch {
 	case b&0x7fffffff == 0:
 		return s
 	case int(b>>23&0xff) == 255:
-		if f != 0 {
+		if m != 0 {
 			return s | 0x7e00
 		}
 		return s | 0x7c00
 	case e >= 31:
-		return s | 0x7bff
+		return s | 0x7c00
 	case e <= 0:
 		if e < -10 {
 			return s
 		}
-		f |= 0x800000
-		return s | uint16(f>>uint(14-e))
+		m |= 0x800000
+		sh := uint(14 - e)
+		h := m >> sh
+		rem := m & (1<<sh - 1)
+		half := uint32(1) << (sh - 1)
+		if rem > half || rem == half && h&1 != 0 {
+			h++
+		}
+		return s | uint16(h)
 	}
-	return s | uint16(e)<<10 | uint16(f>>13)
+	h := uint32(e)<<10 | m>>13
+	rem := m & 0x1fff
+	if rem > 0x1000 || rem == 0x1000 && h&1 != 0 {
+		h++
+	}
+	return s | uint16(h)
 }

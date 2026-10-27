@@ -60,6 +60,9 @@ func (m *Machine) rsxBlitMethod(r *rsxState, d *rsxDraw, sub, reg, v uint32) {
 				return
 			}
 			x, y := b.outX+i, b.outY
+			if m.gpu != nil {
+				m.gpuWroteMem(m.dmaAddr(b.dstDMA, b.dstOff+uint32(y)*b.pitchOut+uint32(x)*4), 4)
+			}
 			switch b.dstFormat {
 			case 4: // R5G6B5
 				a := m.dmaAddr(b.dstDMA, b.dstOff+uint32(y)*b.pitchOut+uint32(x)*2)
@@ -113,6 +116,12 @@ func (m *Machine) rsxMemCopy(b *blitState) {
 		return
 	}
 	buf := make([]byte, b.mmLen)
+	if m.gpu != nil && b.mmN > 0 {
+		src := m.dmaAddr(b.mmSrcDMA, b.mmIn)
+		dst := m.dmaAddr(b.mmDstDMA, b.mmOut)
+		m.gpuReadMem(src, b.mmPitchIn*(b.mmN-1)+b.mmLen)
+		defer m.gpuWroteMem(dst, b.mmPitchOut*(b.mmN-1)+b.mmLen)
+	}
 	for i := uint32(0); i < b.mmN; i++ {
 		src := m.dmaAddr(b.mmSrcDMA, b.mmIn+i*b.mmPitchIn)
 		dst := m.dmaAddr(b.mmDstDMA, b.mmOut+i*b.mmPitchOut)
@@ -149,6 +158,11 @@ func (m *Machine) rsxScaledImage(b *blitState) {
 	src := m.dmaAddr(b.srcDMA, b.inOff)
 	if src == 0 {
 		return
+	}
+	if m.gpu != nil {
+		m.gpuReadMem(src, pitch*b.inH)
+		da := m.dmaAddr(b.dstDMA, b.dstOff)
+		defer m.gpuWroteMem(da, b.pitchOut*uint32(max(b.outY+b.outH, b.clipY+b.clipH)))
 	}
 	fx, fy := float64(b.inX)/16, float64(b.inY)/16
 	if b.inOrigin == 1 { // centre

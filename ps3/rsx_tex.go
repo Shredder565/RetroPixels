@@ -25,6 +25,8 @@ type rsxTexture struct {
 	bpp        int // bytes per texel (0 for DXT)
 	cube, dim3 bool
 	pix        []uint32 // decoded A8R8G8B8, w*h (for 8-bit formats)
+	ea         uint32   // where the texels are
+	size       int      // and how many bytes
 }
 
 // decode8 turns 8-bit-per-channel formats into plain ARGB pixels.
@@ -149,6 +151,20 @@ func texBpp(f uint32) int {
 
 // loadTexture reads fragment texture unit i's registers and snapshots it.
 func (m *Machine) loadTexture(r *rsxState, i int) rsxTexture {
+	t := m.textureRegs(r, i)
+	if t.size == 0 {
+		return t
+	}
+	t.data = make([]byte, t.size)
+	m.Mem.ReadBytes(t.ea, t.data)
+	t.ok = true
+	t.decode8()
+	return t
+}
+
+// textureRegs reads unit i's registers: everything but the texels (size 0
+// when there's nothing to read).
+func (m *Machine) textureRegs(r *rsxState, i int) rsxTexture {
 	base := uint32(0x1A00 + 0x20*i)
 	reg := func(a uint32) uint32 { return r.regs[a/4] }
 	format := reg(base + 4)
@@ -200,13 +216,10 @@ func (m *Machine) loadTexture(r *rsxState, i int) rsxTexture {
 		size = (1 << t.log2w) * (1 << t.log2h) * t.bpp
 	}
 	ea := m.gcm.offsetToAddr(off, loc)
-	if ea == 0 || !m.Mem.Mapped(ea) {
+	if ea == 0 || !m.Mem.Mapped(ea) || !m.Mem.Mapped(ea+uint32(size)-1) {
 		return t
 	}
-	t.data = make([]byte, size)
-	m.Mem.ReadBytes(ea, t.data)
-	t.ok = true
-	t.decode8()
+	t.ea, t.size = ea, size
 	return t
 }
 

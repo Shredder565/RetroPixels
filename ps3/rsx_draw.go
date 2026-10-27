@@ -365,6 +365,10 @@ func colorMask(v uint32) uint32 {
 }
 
 func (m *Machine) rsxClear(r *rsxState, v uint32) {
+	if m.gpu != nil {
+		m.gpu.clear(r, v)
+		return
+	}
 	if m.rsxSkip() {
 		return
 	}
@@ -525,13 +529,44 @@ func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 	if m.rsxSkip() {
 		return
 	}
-	if r.reg(0x1E98) != 0 && r.reg(0x1E98)>>24 == 0 && false {
-		return
+	if m.gpu != nil {
+		if m.gpu.draw(r, d) {
+			return
+		}
+		// the software renderer draws it: give it memory as the GPU has it
+		m.gpu.Fallbacks++
+		m.gpu.syncRange(0, 0xffffffff, nil)
+		defer func() {
+			s := m.surface(r)
+			m.gpu.wroteRange(s.addr, s.addr+s.pitch*uint32(s.y+s.h))
+			if s.zAddr != 0 {
+				m.gpu.wroteRange(s.zAddr, s.zAddr+s.zPitch*uint32(s.y+s.h))
+			}
+		}()
 	}
 	s := m.surface(r)
 	if !s.ok {
 		return
 	}
+	verts, vlist := m.rsxVertices(r, d)
+	if rsxTrace {
+		m.Logf("RSX draw prim %d, %d vertices, surface %08X %dx%d fmt %d, fp %08X", d.prim, len(vlist), s.addr, s.w, s.h, s.fmt, r.reg(0x8E4))
+		for i, v := range verts {
+			if i >= 4 {
+				break
+			}
+			m.Logf("  v%d pos %v col %v tex0 %v", i, v.out[0], v.out[1], v.out[7])
+		}
+	}
+	m.rasterPrims(r, d, &s, verts, vlist)
+	if drawHook != nil {
+		drawHook(m, r, &s)
+	}
+}
+
+// rsxVertices runs the vertex program on the draw's vertices: the
+// vertices, and the list of them in draw order (-1 = primitive restart).
+func (m *Machine) rsxVertices(r *rsxState, d *rsxDraw) ([]rsxVertex, []int) {
 	m.rsxVP(d, r)
 	inMask := r.reg(0x1FF0)
 	// vertex indices
@@ -596,19 +631,7 @@ func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 			vlist = append(vlist, len(verts)-1)
 		}
 	}
-	if rsxTrace {
-		m.Logf("RSX draw prim %d, %d vertices, surface %08X %dx%d fmt %d, fp %08X", d.prim, len(vlist), s.addr, s.w, s.h, s.fmt, r.reg(0x8E4))
-		for i, v := range verts {
-			if i >= 4 {
-				break
-			}
-			m.Logf("  v%d pos %v col %v tex0 %v", i, v.out[0], v.out[1], v.out[7])
-		}
-	}
-	m.rasterPrims(r, d, &s, verts, vlist)
-	if drawHook != nil {
-		drawHook(m, r, &s)
-	}
+	return verts, vlist
 }
 
 // drawHook, when set (debugging), is called after each draw.
@@ -688,6 +711,12 @@ func (m *Machine) present(id uint32) {
 	if sc == nil || sc.W != int(w) || sc.H != int(h) {
 		sc = &Screen{W: int(w), H: int(h), Pix: make([]uint32, w*h)}
 		m.screen = sc
+	}
+	if m.gpu != nil {
+		m.gpu.endFrame()
+		if m.gpu.screen(RSXBase+off, pitch, int(w), int(h), sc) {
+			return
+		}
 	}
 	row := make([]byte, w*4)
 	for y := uint32(0); y < h; y++ {

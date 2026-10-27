@@ -5,7 +5,9 @@ package ps3
 // program, alpha/depth tests, blending and the colour mask.
 
 import (
+	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync"
 )
@@ -65,6 +67,11 @@ func (m *Machine) loadFP(r *rsxState, d *rsxDraw) *fpProg {
 	}
 	p := m.decodeFP(a)
 	d.fpCache[key] = p
+	if fpCaptureDir != "" {
+		buf := make([]byte, p.size)
+		m.Mem.ReadBytes(a, buf)
+		os.WriteFile(fmt.Sprintf("%s/fp_%016x.bin", fpCaptureDir, p.shape), buf, 0o644)
+	}
 	return p
 }
 
@@ -84,6 +91,10 @@ func (d *rsxDraw) fpCheck(m *Machine, a uint32, p *fpProg) bool {
 	}
 	return true
 }
+
+// fpCaptureDir (PS3_FPCAPTURE) collects every fragment program the game
+// uses, for the shader translation tests.
+var fpCaptureDir = os.Getenv("PS3_FPCAPTURE")
 
 // FP input register -> VP output register
 var fpInputToVP = [16]int{-1, 1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 6, -1, -1}
@@ -114,7 +125,7 @@ func (m *Machine) rasterPrims(r *rsxState, d *rsxDraw, s *rsxSurface, verts []rs
 		c.x1, c.y1 = min(c.x1, int(sh&0xffff)+sw), min(c.y1, int(sv&0xffff)+shh)
 	}
 	c.depth = r.reg(0xA74) != 0 && s.zAddr != 0 && s.zPitch >= 16 && s.zFmt != 0
-	c.depthW = r.reg(0xA70) != 0 && s.zAddr != 0 && s.zPitch >= 16 && s.zFmt != 0
+	c.depthW = r.reg(0xA70) != 0 && r.reg(0xA74) != 0 && s.zAddr != 0 && s.zPitch >= 16 && s.zFmt != 0
 	c.depthFn = r.reg(0xA6C)
 	c.z16 = s.zFmt == 1
 	c.alphaT = r.reg(0x304) != 0

@@ -153,7 +153,7 @@ func testCond(c vec4, mode uint8) [4]bool {
 
 func sat(v vec4) vec4 {
 	for i, x := range v {
-		if x < 0 || x != x {
+		if !(x > 0) { // NaN and -0 too
 			v[i] = 0
 		} else if x > 1 {
 			v[i] = 1

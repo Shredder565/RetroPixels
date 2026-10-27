@@ -38,6 +38,12 @@ func TestBootLocal(t *testing.T) {
 			}
 		}
 		m.SetPad(b, 0, 0, 0, 0)
+		if from, err := strconv.Atoi(os.Getenv("PS3_FAKEGPU")); err == nil && i == from {
+			// PS3_FAKEGPU=<frame>: draw on the stand-in GPU from that frame
+			if err := m.UseHostGPU(newFakeGPU()); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if err := m.RunFrame(); err != nil {
 			t.Log(err)
 			break
@@ -54,6 +60,9 @@ func TestBootLocal(t *testing.T) {
 		}
 	}
 	t.Logf("frames %d, instructions %d", m.Frame(), m.cpu.Ran)
+	if m.gpu != nil {
+		t.Logf("GPU: %d draws, %d fell back to software", m.gpu.Draws, m.gpu.Fallbacks)
+	}
 	if m.spus != nil {
 		for _, s := range m.spus.threads {
 			t.Logf("SPU %s: %d instructions", s.name, s.c.Ran)
