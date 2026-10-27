@@ -150,6 +150,8 @@ func u8round(x float32) uint32 {
 	return uint32(x*255 + 0.5)
 }
 
+func (fg *fakeGPU) ReadTextureLate(h gpuHandle) ([]byte, int, error) { return fg.ReadTexture(h) }
+
 func (fg *fakeGPU) CopyTexture(dst, src gpuHandle) {
 	d, s := fg.tex[dst], fg.tex[src]
 	copy(d.px, s.px)

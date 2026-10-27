@@ -43,6 +43,14 @@ type d3dGPU struct {
 	vcb     d3d.Resource // the vertex shaders' constants
 	vcbSize int
 	vss     map[gpuHandle]d3d.Object
+	// the picture read a frame late (ReadTextureLate): two staging
+	// textures, the one copied to last, and whether it holds a picture
+	late     [2]d3d.Resource
+	lateW    int
+	lateH    int
+	lateFmt  uint32
+	lateCur  int
+	lateFull bool
 }
 
 // UseD3D11 moves the machine's drawing onto the graphics card (or, when
@@ -218,6 +226,49 @@ func (g *d3dGPU) ReadTexture(h gpuHandle) ([]byte, int, error) {
 		copy(out[y*n:(y+1)*n], src[y*int(m.RowPitch):])
 	}
 	g.c.Unmap(t.staging, 0)
+	return out, n, nil
+}
+
+// ReadTextureLate starts copying texture h and returns the copy started
+// at the call before (so the CPU doesn't wait for this frame's drawing);
+// the first time, h itself.
+func (g *d3dGPU) ReadTextureLate(h gpuHandle) ([]byte, int, error) {
+	t := g.tex[h]
+	if t == nil || t.kind == gpuTexPlain || t.bpp == 0 {
+		return nil, 0, fmt.Errorf("not a target")
+	}
+	if g.late[0].Nil() || g.lateW != t.w || g.lateH != t.h || g.lateFmt != t.format {
+		for i := range g.late {
+			g.late[i].Release()
+			var err error
+			g.late[i], err = g.d.CreateTexture2D(&d3d.Texture2DDesc{Width: uint32(t.w), Height: uint32(t.h), MipLevels: 1,
+				ArraySize: 1, Format: t.format, SampleCount: 1, Usage: d3d.UsageStaging, CPUAccess: d3d.CPURead}, nil, 0)
+			if err != nil {
+				g.late[0].Release()
+				g.late[1].Release()
+				return g.ReadTexture(h)
+			}
+		}
+		g.lateW, g.lateH, g.lateFmt, g.lateFull = t.w, t.h, t.format, false
+	}
+	prev := g.lateCur
+	g.lateCur ^= 1
+	g.c.CopyResource(g.late[g.lateCur], t.res)
+	if !g.lateFull {
+		g.lateFull = true
+		prev = g.lateCur // nothing older: this frame's
+	}
+	m, err := g.c.Map(g.late[prev], 0, d3d.MapRead)
+	if err != nil {
+		return nil, 0, err
+	}
+	n := t.w * t.bpp
+	out := make([]byte, n*t.h)
+	src := m.Bytes(int(m.RowPitch) * t.h)
+	for y := 0; y < t.h; y++ {
+		copy(out[y*n:(y+1)*n], src[y*int(m.RowPitch):])
+	}
+	g.c.Unmap(g.late[prev], 0)
 	return out, n, nil
 }
 

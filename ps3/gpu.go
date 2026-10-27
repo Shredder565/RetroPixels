@@ -48,6 +48,10 @@ type gpuDevice interface {
 	// ReadTexture copies a texture back (for depth: the same layout as
 	// CreateTexture takes).
 	ReadTexture(t gpuHandle) (data []byte, pitch int, err error)
+	// ReadTextureLate is ReadTexture a frame late: it starts reading t and
+	// returns what the call before read (the first time, t), so showing
+	// the picture doesn't wait for the GPU to finish drawing it.
+	ReadTextureLate(t gpuHandle) (data []byte, pitch int, err error)
 	CopyTexture(dst, src gpuHandle)
 	// DepthToRGBA8 fills an RGBA8 target from a 24-bit depth texture: the
 	// texel bytes (r, g, b, a) = depth bits 15-8, 7-0, 0, 23-16 (the
@@ -1204,7 +1208,7 @@ func (g *gpuRenderer) screen(addr, pitch uint32, w, h int, sc *Screen) bool {
 		if !s.dirty {
 			return false // memory is as new
 		}
-		data, p, err := g.dev.ReadTexture(s.tex)
+		data, p, err := g.dev.ReadTextureLate(s.tex)
 		if err != nil {
 			g.fail("reading the picture: %v", err)
 			return false
