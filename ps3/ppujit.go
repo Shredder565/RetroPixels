@@ -124,13 +124,11 @@ func (j *JIT) reset() {
 		j.table[i] = 0
 		j.pages[i] = nil
 	}
-	// the byte swap of a vector's words (for lvx / stvx), then the
+	// the byte shuffle tables (for the vector instructions), then the
 	// dispatcher
-	for i := 0; i < 16; i++ {
-		j.buf[i] = byte(i ^ 3)
-	}
-	j.used = 16
-	a := &x86{base: j.base + 16}
+	copy(j.buf, shufTables())
+	j.used = (tabSize + 15) &^ 15
+	a := &x86{base: j.base + uintptr(j.used)}
 	j.emitDispatch(a)
 	j.dispatch = j.place(a)
 	j.Flushes++
@@ -257,6 +255,9 @@ func (c *PPU) step1() {
 	c.Ran++
 }
 
+// ppuJitLog (PS3_PPUJITLOG=dir): every block compiled, for debugging
+var ppuJitLog = os.Getenv("PS3_PPUJITLOG")
+
 // compile translates the block at pc and returns its entry point.
 func (j *JIT) compile(pc uint32) uintptr {
 	if j.used > len(j.buf)-1<<20 {
@@ -270,6 +271,12 @@ func (j *JIT) compile(pc uint32) uintptr {
 		return j.compile(pc)
 	}
 	code := j.place(a)
+	if ppuJitLog != "" {
+		os.WriteFile(fmt.Sprintf("%s/%x.bin", ppuJitLog, code), a.b, 0o644)
+		f, _ := os.OpenFile(ppuJitLog+"/index.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		fmt.Fprintf(f, "%x %x %08x %d\n", code, code+uintptr(len(a.b)), pc, b.n)
+		f.Close()
+	}
 	j.setEntry(pc, code)
 	i := pc >> pageBits
 	j.lo[i] = min(j.lo[i], pc&pageMask)
@@ -291,6 +298,8 @@ type jitBlock struct {
 	n     int // instructions in the block so far
 	slow  []*jitSlow
 	cur   *jitSlow // the current instruction's slow path
+	pool  [][16]byte
+	refs  []poolRef
 }
 
 func (b *jitBlock) build() {
@@ -311,10 +320,11 @@ func (b *jitBlock) build() {
 		}
 		inst := mem.Read32(pc)
 		b.cur = &jitSlow{pc: pc}
-		mark := a.pos()
+		mark, marks := a.pos(), len(b.refs)
 		ok, ends := b.inst(inst, pc)
 		if !ok {
 			a.b = a.b[:mark]
+			b.refs = b.refs[:marks]
 			stopped = true
 			break
 		}
@@ -340,6 +350,7 @@ func (b *jitBlock) build() {
 	if b.n == 0 {
 		// nothing compiled: straight to the interpreter
 		a.b = a.b[:0]
+		b.pool, b.refs = nil, nil
 		a.movStoreImm(rBX, offPC, b.start)
 		a.movRI(rAX, jitExitInterp)
 		a.ret()
@@ -362,6 +373,25 @@ func (b *jitBlock) build() {
 		a.movStoreImm(rBX, offPC, s.pc)
 		a.movRI(rAX, jitExitInterp)
 		a.ret()
+	}
+	b.layPool()
+}
+
+// layPool puts the block's constants after its code, 16-byte aligned.
+func (b *jitBlock) layPool() {
+	a := b.a
+	if len(b.pool) == 0 {
+		return
+	}
+	for len(a.b)%16 != 0 {
+		a.byte1(0xcc)
+	}
+	at := len(a.b)
+	for _, v := range b.pool {
+		a.byte1(v[:]...)
+	}
+	for _, r := range b.refs {
+		a.ripTo(r.at, r.immLen, a.base+uintptr(at+16*r.idx))
 	}
 }
 
@@ -579,6 +609,11 @@ func (b *jitBlock) inst(inst, pc uint32) (ok, ends bool) {
 	rc := inst&1 != 0
 
 	switch op {
+	case 4:
+		if !spuJitOK {
+			return false, false
+		}
+		return b.vmx(inst), false
 	case 7: // mulli
 		a.movLoad64(rAX, rBX, gpr(ra))
 		a.imulRRI64(rAX, rAX, int32(simm))
@@ -1457,6 +1492,17 @@ func (b *jitBlock) inst31(inst, pc uint32) (ok, ends bool) {
 		} else {
 			a.movdquStore(rBX, offVR+16*int32(rd), 0)
 		}
+	case 519, 775, 551, 807: // lvlx lvlxl lvrx lvrxl
+		if !spuJitOK {
+			return false, false
+		}
+		b.lvlrx(xo == 551 || xo == 807, rd, ra, rb)
+	case 983: // stfiwx
+		b.eaX(ra, rb)
+		a.movLoad(r8, rBX, fpr(rd))
+		a.bswap(r8)
+		b.hostAddr(4, true)
+		a.store32Idx(rDX, rAX, r8)
 	case 790: // lhbrx
 		b.eaX(ra, rb)
 		b.hostAddr(2, false)

@@ -38,6 +38,12 @@ func TestJITMatchesInterpreter(t *testing.T) {
 			code[at] = randPPUBranch(rng, at, len(code), lk)
 		}
 		code = append(code, 0x44000002) // sc: the end
+		ppuTestFused = false
+		for _, w := range code {
+			if w>>26 == 4 && (w&0x3f == 46 || w&0x3f == 47) {
+				ppuTestFused = true
+			}
+		}
 
 		data := make([]byte, 0x10000)
 		rng.Read(data)
@@ -60,7 +66,9 @@ func TestJITMatchesInterpreter(t *testing.T) {
 		st.GPR[26] = uint64(rng.Intn(256))
 		for i := range st.FPR {
 			st.FPR[i] = randF64(rng)
-			st.VR[i] = Vec{rng.Uint32(), rng.Uint32(), rng.Uint32(), rng.Uint32()}
+			for k := range st.VR[i] {
+				st.VR[i][k] = randSPUWord(rng)
+			}
 		}
 		st.CR = rng.Uint32()
 		st.LR = jitTestCode + uint64(len(code)-1)*4
@@ -87,6 +95,11 @@ func TestJITMatchesInterpreter(t *testing.T) {
 }
 
 var testJIT *JIT
+
+// ppuTestFused: the block has vector multiply-adds, which can differ in the
+// last bit (the interpreter rounds twice) or in which NaN they return, and
+// that spreads through the vector registers; TestPPUJITFused checks them.
+var ppuTestFused bool
 
 func jitRunPPU(useJIT bool, code []uint32, st PPUState, data []byte) (*PPUState, *Memory, *JIT) {
 	mem := NewMemory()
@@ -130,7 +143,15 @@ func ppuDiff(want, got *PPUState, wm, gm *Memory) string {
 		}
 	}
 	for i := range want.VR {
-		if want.VR[i] != got.VR[i] {
+		same := true
+		for k := range want.VR[i] {
+			x, y := want.VR[i][k], got.VR[i][k]
+			nan := func(v uint32) bool { return v&0x7f800000 == 0x7f800000 && v&0x7fffff != 0 }
+			if x != y && !(nan(x) && nan(y)) && !ppuTestFused {
+				same = false
+			}
+		}
+		if !same {
 			bad += fmt.Sprintf("v%d = %08X, want %08X\n", i, got.VR[i], want.VR[i])
 		}
 	}
@@ -138,7 +159,8 @@ func ppuDiff(want, got *PPUState, wm, gm *Memory) string {
 		name      string
 		got, want uint64
 	}{{"CR", uint64(got.CR), uint64(want.CR)}, {"LR", got.LR, want.LR}, {"CTR", got.CTR, want.CTR},
-		{"XER", got.XER, want.XER}, {"PC", uint64(got.PC), uint64(want.PC)}, {"FPSCR", uint64(got.FPSCR), uint64(want.FPSCR)}} {
+		{"XER", got.XER, want.XER}, {"PC", uint64(got.PC), uint64(want.PC)}, {"FPSCR", uint64(got.FPSCR), uint64(want.FPSCR)},
+		{"VSCR", uint64(got.VSCR), uint64(want.VSCR)}} {
 		if r.got != r.want {
 			bad += fmt.Sprintf("%s = %X, want %X\n", r.name, r.got, r.want)
 		}
@@ -197,7 +219,21 @@ func randPPUInst(rng *rand.Rand) uint32 {
 	x := func(rd, ra, rb, xo uint32, rc uint32) uint32 { return 31<<26 | rd<<21 | ra<<16 | rb<<11 | xo<<1 | rc }
 	src := func() uint32 { return r(32) }
 	rc := func() uint32 { return r(2) }
-	switch r(18) {
+	switch r(21) {
+	case 18, 19, 20: // vector
+		v := func() uint32 { return r(32) }
+		switch r(4) {
+		case 0: // VA forms
+			xo := []uint32{42, 43, 44, 46, 47}[r(5)]
+			return 4<<26 | v()<<21 | v()<<16 | v()<<11 | v()<<6 | xo
+		case 1: // compares
+			xos := []uint32{134, 902, 646, 70, 838, 582, 6, 774, 518, 198, 454, 710}
+			return 4<<26 | v()<<21 | v()<<16 | v()<<11 | r(2)<<10 | xos[r(len(xos))]
+		default:
+			xos := []uint32{0, 64, 128, 1024, 1088, 1152, 1028, 1092, 1156, 1220, 1284, 130, 386, 642, 898,
+				10, 74, 266, 652, 588, 524, 908, 844, 780, 140, 396, 12, 268, 76, 332, 388, 644, 900, 132, 842, 970}
+			return 4<<26 | v()<<21 | v()<<16 | v()<<11 | xos[r(len(xos))]
+		}
 	case 16, 17: // floating point arithmetic
 		f := func() uint32 { return r(32) }
 		if r(3) == 0 {
@@ -260,14 +296,14 @@ func randPPUInst(rng *rand.Rand) uint32 {
 		xo := xos[r(len(xos))]
 		return x(src(), dst(), src(), xo, rc())
 	case 12: // indexed loads
-		xos := []uint32{23, 55, 87, 119, 279, 311, 343, 375, 21, 53, 341, 373, 534, 532, 535, 567, 599, 631, 103, 359, 790}
+		xos := []uint32{23, 55, 87, 119, 279, 311, 343, 375, 21, 53, 341, 373, 534, 532, 535, 567, 599, 631, 103, 359, 790, 519, 551, 775, 807}
 		xo := xos[r(len(xos))]
 		if r(2) == 0 {
 			return x(dst(), base(), 26, xo, 0)
 		}
 		return x(dst(), 0, base(), xo, 0)
 	case 13: // indexed stores
-		xos := []uint32{151, 183, 215, 247, 407, 439, 149, 181, 662, 660, 663, 695, 727, 759, 231, 487, 918}
+		xos := []uint32{151, 183, 215, 247, 407, 439, 149, 181, 662, 660, 663, 695, 727, 759, 231, 487, 918, 983}
 		xo := xos[r(len(xos))]
 		if r(2) == 0 {
 			return x(src(), base(), 26, xo, 0)
@@ -294,5 +330,33 @@ func randPPUInst(rng *rand.Rand) uint32 {
 		}
 		xos := []uint32{33, 129, 193, 225, 257, 289, 417, 449}
 		return 19<<26 | r(32)<<21 | r(32)<<16 | r(32)<<11 | xos[r(len(xos))]<<1
+	}
+}
+
+func TestPPUJITFused(t *testing.T) {
+	if !jitSupported || !spuJitFMA {
+		t.Skip("no FMA")
+	}
+	rng := rand.New(rand.NewSource(7))
+	for trial := 0; trial < 5000; trial++ {
+		w := uint32(4<<26 | 3<<21 | uint32(rng.Intn(32))<<16 | uint32(rng.Intn(32))<<11 | uint32(rng.Intn(32))<<6 | uint32(46+rng.Intn(2)))
+		code := []uint32{w, 0x44000002}
+		var st PPUState
+		for i := range st.VR {
+			for k := range st.VR[i] {
+				st.VR[i][k] = randSPUWord(rng)
+			}
+		}
+		st.PC = jitTestCode
+		data := make([]byte, 0x10000)
+		want, _, _ := jitRunPPU(false, code, st, data)
+		got, _, _ := jitRunPPU(true, code, st, data)
+		for k := 0; k < 4; k++ {
+			x, y := want.VR[3][k], got.VR[3][k]
+			nan := func(v uint32) bool { return v&0x7f800000 == 0x7f800000 && v&0x7fffff != 0 }
+			if x != y && x-y+1 > 2 && !(nan(x) && nan(y)) {
+				t.Fatalf("%08x: lane %d = %08X, want %08X", w, k, y, x)
+			}
+		}
 	}
 }

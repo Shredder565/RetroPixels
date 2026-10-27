@@ -93,24 +93,16 @@ func newSPUJIT() *spuJIT {
 	return j
 }
 
-// hostPos is where SPU byte i of a register is in its xmm register.
-func hostPos(i int) int { return i ^ 3 }
-
-func (j *spuJIT) reset() {
-	clear(j.table[:])
-	clear(j.code[:])
-	for i := range j.lineBlocks {
-		j.lineBlocks[i] = j.lineBlocks[i][:0]
-	}
-	j.used = 0
-	// the tables
+// shufTables makes the tables (tabBswap...) for byte shuffles of
+// big-endian vectors held as host words.
+func shufTables() []byte {
 	t := make([]byte, tabSize)
 	for i := 0; i < 16; i++ {
 		t[tabBswap+i] = byte(i ^ 3)
 	}
 	for n := 0; n < 32; n++ {
 		for jj := 0; jj < 16; jj++ {
-			i := hostPos(jj) // the SPU byte at host position jj
+			i := hostPos(jj) // the vector byte at host position jj
 			if n < 16 {
 				t[tabRotqby+16*n+jj] = byte(hostPos((i + n) & 15))
 			}
@@ -133,6 +125,20 @@ func (j *spuJIT) reset() {
 			}
 		}
 	}
+	return t
+}
+
+// hostPos is where SPU byte i of a register is in its xmm register.
+func hostPos(i int) int { return i ^ 3 }
+
+func (j *spuJIT) reset() {
+	clear(j.table[:])
+	clear(j.code[:])
+	for i := range j.lineBlocks {
+		j.lineBlocks[i] = j.lineBlocks[i][:0]
+	}
+	j.used = 0
+	t := shufTables()
 	copy(j.buf, t)
 	j.tabs = j.base
 	j.used = (tabSize + 15) &^ 15
@@ -293,10 +299,11 @@ func (b *spuBlock) build() {
 	for b.n < jitMaxBlock && !done && pc < lsSize {
 		w := binary.BigEndian.Uint32(b.c.LS[pc:])
 		b.cur = &jitSlow{pc: pc}
-		mark := a.pos()
+		mark, marks := a.pos(), len(b.refs)
 		ok, ends := b.inst(w, pc)
 		if !ok {
 			a.b = a.b[:mark]
+			b.refs = b.refs[:marks]
 			stopped = true
 			break
 		}
