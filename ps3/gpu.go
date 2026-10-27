@@ -62,10 +62,10 @@ type gpuDevice interface {
 
 // gpuDraw is one draw call.
 type gpuDraw struct {
-	Target, Depth gpuHandle // 0: none
-	MRT           [3]gpuHandle         // more colour targets (0: none)
+	Target, Depth gpuHandle    // 0: none
+	MRT           [3]gpuHandle // more colour targets (0: none)
 	MRTBlend      [3]d3d.BlendTarget
-	W, H          int       // the targets' size (the viewport covers them)
+	W, H          int // the targets' size (the viewport covers them)
 	Scissor       d3d.Rect
 	Blend         d3d.BlendTarget
 	BlendFactor   [4]float32
