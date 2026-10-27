@@ -38,3 +38,4 @@ Thumbs.db
 
 # Supermodel build folder (supermodel/build.sh)
 /supermodel/build/
+*.test

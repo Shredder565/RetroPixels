@@ -8,6 +8,7 @@ package ps3
 import (
 	"math"
 	"os"
+	"strconv"
 )
 
 type drawRange struct{ first, count uint32 }
@@ -359,6 +360,9 @@ func colorMask(v uint32) uint32 {
 }
 
 func (m *Machine) rsxClear(r *rsxState, v uint32) {
+	if m.rsxSkip() {
+		return
+	}
 	s := m.surface(r)
 	x0, y0, x1, y1 := s.x, s.y, s.x+s.w, s.y+s.h
 	sh, sv := r.reg(0x8C0), r.reg(0x8C4)
@@ -502,8 +506,18 @@ func (m *Machine) rsxVP(d *rsxDraw, r *rsxState) {
 	d.vpDirty = false
 }
 
+// rsxRenderEvery draws only every n-th frame (for quick test runs).
+var rsxRenderEvery, _ = strconv.Atoi(os.Getenv("PS3_RENDEREVERY"))
+
+func (m *Machine) rsxSkip() bool {
+	return rsxRenderEvery > 1 && (m.frame+1)%uint64(rsxRenderEvery) != 0 && (m.frame+2)%uint64(rsxRenderEvery) != 0
+}
+
 func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 	if len(d.ranges) == 0 && len(d.inline) == 0 {
+		return
+	}
+	if m.rsxSkip() {
 		return
 	}
 	if r.reg(0x1E98) != 0 && r.reg(0x1E98)>>24 == 0 && false {

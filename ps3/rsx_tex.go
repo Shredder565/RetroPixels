@@ -24,6 +24,81 @@ type rsxTexture struct {
 	border     vec4
 	bpp        int // bytes per texel (0 for DXT)
 	cube, dim3 bool
+	pix        []uint32 // decoded A8R8G8B8, w*h (for 8-bit formats)
+}
+
+// decode8 turns 8-bit-per-channel formats into plain ARGB pixels.
+func (t *rsxTexture) decode8() {
+	switch t.fmt {
+	case texW16F, texW32F, texX32F, texY16X16F, texY16X16, texX16, texD24S8, texD24S8F, texD16, texD16F:
+		return
+	}
+	t.pix = make([]uint32, t.w*t.h)
+	if t.fmt == texA8R8G8B8 && t.remap == 0xAAE4 {
+		for y := 0; y < t.h; y++ {
+			for x := 0; x < t.w; x++ {
+				var o int
+				if t.linear {
+					o = y*t.pitch + x*4
+				} else {
+					o = swizzleOffset(x, y, t.log2w, t.log2h) * 4
+				}
+				if o+4 <= len(t.data) {
+					t.pix[y*t.w+x] = be32(t.data[o:])
+				}
+			}
+		}
+		return
+	}
+	for y := 0; y < t.h; y++ {
+		for x := 0; x < t.w; x++ {
+			c := t.texel(x, y)
+			if t.remap != 0xAAE4 && t.remap != 0 {
+				var out [4]float32
+				for ch := 0; ch < 4; ch++ {
+					switch t.remap >> (8 + 2*ch) & 3 {
+					case 0:
+						out[ch] = 0
+					case 1:
+						out[ch] = 1
+					default:
+						out[ch] = c[t.remap>>(2*ch)&3]
+					}
+				}
+				c = out
+			}
+			t.pix[y*t.w+x] = u8c(c[0])<<24 | u8c(c[1])<<16 | u8c(c[2])<<8 | u8c(c[3])
+		}
+	}
+}
+
+func (t *rsxTexture) fetch8(x, y int) uint32 {
+	xx, ok1 := wrapCoord(x, t.w, t.wrapS)
+	yy, ok2 := wrapCoord(y, t.h, t.wrapT)
+	if !ok1 || !ok2 {
+		b := t.border
+		return u8c(b[3])<<24 | u8c(b[0])<<16 | u8c(b[1])<<8 | u8c(b[2])
+	}
+	return t.pix[yy*t.w+xx]
+}
+
+func (t *rsxTexture) sample8(u, v float32) vec4 {
+	const k = 1.0 / 255
+	if t.magLinear || t.minLinear {
+		u -= 0.5
+		v -= 0.5
+		fu, fv := float32(math.Floor(float64(u))), float32(math.Floor(float64(v)))
+		x0, y0 := int(fu), int(fv)
+		fx, fy := u-fu, v-fv
+		a, b, c, d := t.fetch8(x0, y0), t.fetch8(x0+1, y0), t.fetch8(x0, y0+1), t.fetch8(x0+1, y0+1)
+		w00, w10, w01, w11 := (1-fx)*(1-fy), fx*(1-fy), (1-fx)*fy, fx*fy
+		ch := func(sh uint) float32 {
+			return (float32(a>>sh&0xff)*w00 + float32(b>>sh&0xff)*w10 + float32(c>>sh&0xff)*w01 + float32(d>>sh&0xff)*w11) * k
+		}
+		return vec4{ch(16), ch(8), ch(0), ch(24)}
+	}
+	p := t.fetch8(int(math.Floor(float64(u))), int(math.Floor(float64(v))))
+	return vec4{float32(p>>16&0xff) * k, float32(p>>8&0xff) * k, float32(p&0xff) * k, float32(p>>24) * k}
 }
 
 const (
@@ -131,6 +206,7 @@ func (m *Machine) loadTexture(r *rsxState, i int) rsxTexture {
 	t.data = make([]byte, size)
 	m.Mem.ReadBytes(ea, t.data)
 	t.ok = true
+	t.decode8()
 	return t
 }
 
@@ -372,6 +448,9 @@ func (t *rsxTexture) sample(s, tt float32) vec4 {
 	if !t.unnorm {
 		u *= float32(t.w)
 		v *= float32(t.h)
+	}
+	if t.pix != nil {
+		return t.sample8(u, v)
 	}
 	var argb [4]float32
 	if t.magLinear || t.minLinear {

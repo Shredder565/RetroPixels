@@ -4,7 +4,11 @@ package ps3
 // triangle setup with perspective-correct attributes, the fragment
 // program, alpha/depth tests, blending and the colour mask.
 
-import "math"
+import (
+	"math"
+	"runtime"
+	"sync"
+)
 
 type rasterVert struct {
 	x, y, z float32 // window
@@ -275,6 +279,45 @@ func (c *rasterCtx) drawTri(a, b, d *rasterVert, area float32) {
 		return
 	}
 	inv := 1 / area
+	rows := maxY - minY + 1
+	if rows*(maxX-minX+1) < 16384 || rows < 8 {
+		c.pix += c.drawRows(a, b, d, inv, minY, maxY, minX, maxX)
+		return
+	}
+	// big triangles: bands of rows in parallel (pixels don't overlap)
+	s := c.s
+	for py := minY; py <= maxY; py++ {
+		row := s.addr + uint32(py)*s.pitch
+		c.m.Mem.Ptr(row + uint32(minX)*c.bpp)
+		c.m.Mem.Ptr(row + uint32(maxX)*c.bpp)
+		if c.depth || c.depthW {
+			zr := s.zAddr + uint32(py)*s.zPitch
+			c.m.Mem.Ptr(zr + uint32(minX)*4)
+			c.m.Mem.Ptr(zr + uint32(maxX)*4)
+		}
+	}
+	n := rasterWorkers
+	var wg sync.WaitGroup
+	counts := make([]int, n)
+	for i := 0; i < n; i++ {
+		y0 := minY + rows*i/n
+		y1 := minY + rows*(i+1)/n - 1
+		wg.Add(1)
+		go func(i, y0, y1 int) {
+			defer wg.Done()
+			counts[i] = c.drawRows(a, b, d, inv, y0, y1, minX, maxX)
+		}(i, y0, y1)
+	}
+	wg.Wait()
+	for _, k := range counts {
+		c.pix += k
+	}
+}
+
+var rasterWorkers = max(1, min(runtime.NumCPU(), 8))
+
+func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX, maxX int) int {
+	pix := 0
 	var inputs [16]vec4
 	var x fpRun
 	x.in = &inputs
@@ -375,9 +418,10 @@ func (c *rasterCtx) drawTri(a, b, d *rasterVert, area float32) {
 				col = c.blendPix(col, dst)
 			}
 			c.m.writePixel(s, pa, col, c.cmask)
-			c.pix++
+			pix++
 		}
 	}
+	return pix
 }
 
 func (c *rasterCtx) sample(unit uint8, co vec4, bias, lod float32, useLod bool) vec4 {
