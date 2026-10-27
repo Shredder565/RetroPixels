@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
+	"sort"
 	"time"
 
 	"retropixels/cores/model3"
@@ -34,7 +36,13 @@ func main() {
 	dumpRAM := flag.String("dumpram", "", "write RAM to this file at the end")
 	wavPath := flag.String("wav", "", "write the sound to this WAV file")
 	coinAt := flag.Int("coin", 0, "insert a coin at this frame, and press start 120 frames later")
+	cpuProf := flag.String("cpuprofile", "", "write a CPU profile here")
 	flag.Parse()
+	if *cpuProf != "" {
+		f, _ := os.Create(*cpuProf)
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 
 	zr, err := zip.OpenReader(*romPath)
 	if err != nil {
@@ -67,6 +75,11 @@ func main() {
 		panic(err)
 	}
 	c := m.CPU()
+	// the clock chip follows the emulated time, so runs repeat exactly
+	m.Now = func() time.Time {
+		return time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).Add(time.Duration(float64(curFrame) / 57.52416 * float64(time.Second)))
+	}
+	c.NoIdleSkip = os.Getenv("M3_NOIDLE") != ""
 	if *trace != "" {
 		tf, err := os.ReadFile(*trace)
 		if err != nil {
@@ -133,7 +146,18 @@ func main() {
 		}
 	}
 	var wav []int16
+	pcHist := map[uint32]int{}
+	histFrom, histTo := 0, 0
+	fmt.Sscanf(os.Getenv("M3_PCHIST"), "%d,%d", &histFrom, &histTo)
+	if histTo > 0 {
+		c.Trace = func(c *ppc.CPU, pc, op uint32) {
+			if curFrame >= histFrom && curFrame < histTo {
+				pcHist[pc]++
+			}
+		}
+	}
 	t0 := time.Now()
+	tLast := t0
 	for f := 1; f <= *frames; f++ {
 		curFrame = f
 		if *coinAt > 0 {
@@ -156,6 +180,10 @@ func main() {
 			fmt.Println("frame", f, err)
 			break
 		}
+		if f%300 == 0 {
+			fmt.Printf("frame %d %.1f fps\n", f, 300/time.Since(tLast).Seconds())
+			tLast = time.Now()
+		}
 		if *out != "" && f%*every == 0 {
 			os.MkdirAll(*out, 0o755)
 			save(filepath.Join(*out, fmt.Sprintf("f%06d.png", f)), m.Picture[:])
@@ -171,6 +199,23 @@ func main() {
 			binary.BigEndian.PutUint32(ram[a:], c.Read32(uint32(a)))
 		}
 		os.WriteFile(*dumpRAM, ram, 0o644)
+	}
+	if histTo > 0 {
+		type kv struct {
+			pc uint32
+			n  int
+		}
+		var l []kv
+		total := 0
+		for k, v := range pcHist {
+			l = append(l, kv{k, v})
+			total += v
+		}
+		sort.Slice(l, func(i, j int) bool { return l[i].n > l[j].n })
+		fmt.Println("instructions", total)
+		for i := 0; i < 40 && i < len(l); i++ {
+			fmt.Printf("%08X %6.2f%% %s\n", l[i].pc, 100*float64(l[i].n)/float64(total), ppc.Disasm(l[i].pc, c.Read32(l[i].pc)))
+		}
 	}
 	if *wavPath != "" {
 		writeWAV(*wavPath, wav)

@@ -2,6 +2,7 @@ package model3
 
 import (
 	"math"
+	"math/bits"
 	"runtime"
 	"sync"
 )
@@ -79,13 +80,14 @@ func newRenderer(g *real3D) *renderer {
 	r.col, r.t1, r.t2 = make([]rgba, n), make([]rgba, n), make([]rgba, n)
 	r.depth, r.depthCopy = make([]float32, n), make([]float32, n)
 	r.sten, r.stenCopy = make([]uint8, n), make([]uint8, n)
-	r.bands = min(runtime.NumCPU(), 8)
+	r.bands = min(4*runtime.NumCPU(), 48)
 	texLUTOnce.Do(buildTexLUT)
 	return r
 }
 
-// draw renders the scene in the Real3D's memories.
-func (r *renderer) draw() {
+// draw renders the scene in the Real3D's memories and merges it with the
+// tile layers into dst (see composite).
+func (r *renderer) draw(bottom, top, dst []uint32) {
 	r.gpu.los = r.losBack
 	r.losBack = [4]float32{}
 	r.white = r.gpu.blockCulling
@@ -111,6 +113,8 @@ func (r *renderer) draw() {
 		go func() {
 			defer wg.Done()
 			r.drawBand(y0, y1)
+			i0, i1 := y0*screenW, y1*screenW
+			r.composite(bottom[i0:i1], top[i0:i1], dst[i0:i1], i0)
 		}()
 	}
 	wg.Wait()
@@ -695,8 +699,17 @@ func buildTexLUT() {
 	}
 }
 
-func floorf(x float32) float32 { return float32(math.Floor(float64(x))) }
-func fract(x float32) float32  { return x - floorf(x) }
+func floorf(x float32) float32 {
+	if x > -1<<30 && x < 1<<30 {
+		f := float32(int32(x))
+		if f > x {
+			f--
+		}
+		return f
+	}
+	return float32(math.Floor(float64(x)))
+}
+func fract(x float32) float32 { return x - floorf(x) }
 
 // texLoc: the two texels to blend along one axis, and the weight of the second
 func texLoc(mode, size int, u float32) (int, int, float32) {
@@ -705,11 +718,8 @@ func texLoc(mode, size int, u float32) (int, int, float32) {
 	case 0:
 		u = u*fs - 0.5
 		f := floorf(u)
-		i0 := int(f) % size
-		if i0 < 0 {
-			i0 += size
-		}
-		return i0, (i0 + 1) % size, u - f
+		i0 := int(f) & (size - 1)
+		return i0, (i0 + 1) & (size - 1), u - f
 	case 1:
 		u = fract(u)
 	default:
@@ -788,15 +798,34 @@ var (
 	microX = [8]int{0, 0, 128, 128, 0, 0, 128, 128}
 	microY = [8]int{0, 128, 0, 128, 256, 384, 256, 384}
 	microS = [4]float32{2, 4, 16, 256}
+
+	microInvScale = [4]float32{1, 0.5, 0.25, 0.125}
 )
+
+// fastLog2 is log2(x) to float32 precision, for picking mipmap levels.
+func fastLog2(x float32) float32 {
+	b := math.Float32bits(x)
+	if !(x > 0) || x > math.MaxFloat32 || b>>23&0xFF == 0 {
+		return float32(math.Log2(float64(x)))
+	}
+	e := float64(int32(b>>23&0xFF) - 127)
+	m := float64(math.Float32frombits(b&0x7FFFFF | 0x3F800000))
+	if m > math.Sqrt2 {
+		m *= 0.5
+		e++
+	}
+	t := (m - 1) / (m + 1)
+	t2 := t * t
+	return float32(e + t*(2.8853900817779268+t2*(0.9617966939259756+t2*(0.5770780163555853+t2*(0.4121985831111324+t2*0.3205988979753252)))))
+}
 
 // sample: the texture colour at texel coordinates (u, v), z units from the eye
 func (r *renderer) sample(dc *drawConst, u, v, z, lodBase float32) rgba {
 	a := dc.a
 	lut := &texLUT[a.format]
 	nu, nv := u/float32(a.w), v/float32(a.h)
-	lod := float32(-math.Log2(float64(lodBase)) + 2*math.Log2(float64(z)))
-	levels := float32(math.Floor(math.Log2(float64(min(a.w, a.h))))) - 1
+	lod := fastLog2(z * z / lodBase)
+	levels := float32(bits.Len(uint(min(a.w, a.h)))-1) - 1
 	fl := lod
 	if fl != fl || fl < 0 {
 		fl = 0
@@ -814,7 +843,7 @@ func (r *renderer) sample(dc *drawConst, u, v, z, lodBase float32) rgba {
 	} else if a.micro && lod < 0 {
 		s := microS[int(a.microMinLOD)]
 		c2 := r.bilinear(lut, (dc.page+1)&1, 0, microX[a.microID], microY[a.microID], 128, 128, 0, 0, u*s/128, v*s/128, a.alphaTest)
-		bl := min(-lod*float32(math.Exp2(-float64(a.microMinLOD)))*0.5, 0.5)
+		bl := min(-lod*microInvScale[int(a.microMinLOD)&3]*0.5, 0.5)
 		for k := 0; k < 4; k++ {
 			c[k] += (c2[k] - c[k]) * bl
 		}
@@ -828,20 +857,21 @@ func (r *renderer) sample(dc *drawConst, u, v, z, lodBase float32) rgba {
 // ---------------------------------------------------------------- output
 
 // composite merges the bottom tile layers, the 3D picture and the top tile
-// layers into dst (0xRRGGBB).
-func (r *renderer) composite(bottom, top, dst []uint32) {
+// layers into dst (0xRRGGBB); the slices start at pixel off.
+func (r *renderer) composite(bottom, top, dst []uint32, off int) {
+	col, t1s, t2s := r.col[off:off+len(dst)], r.t1[off:off+len(dst)], r.t2[off:off+len(dst)]
 	for i := range dst {
 		var br, bg, bb float32
 		if b := bottom[i]; b != 0 {
 			br, bg, bb = byteF[b>>16&0xFF], byteF[b>>8&0xFF], byteF[b&0xFF]
 		}
-		c := &r.col[i]
+		c := &col[i]
 		if c[3] != 0 {
 			br += (c[0] - br) * c[3]
 			bg += (c[1] - bg) * c[3]
 			bb += (c[2] - bb) * c[3]
 		}
-		t1, t2 := &r.t1[i], &r.t2[i]
+		t1, t2 := &t1s[i], &t2s[i]
 		var t rgba
 		switch {
 		case t1[3]*t2[3] > 0:

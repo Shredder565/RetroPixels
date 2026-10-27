@@ -137,6 +137,9 @@ type CPU struct {
 
 	Bus Bus
 
+	notIdle    map[uint32]bool // branches whose loops aren't idle loops
+	NoIdleSkip bool            // run idle loops in full (for testing)
+
 	// Trace, when set, is called before each instruction (for debugging).
 	Trace func(c *CPU, pc, op uint32)
 }
@@ -180,6 +183,7 @@ func (c *CPU) Reset() {
 
 // FlushCode forgets every decoded instruction.
 func (c *CPU) FlushCode() {
+	c.notIdle = nil
 	clear(c.ramOps)
 	clear(c.romOps)
 }

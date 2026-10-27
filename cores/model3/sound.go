@@ -1,6 +1,10 @@
 package model3
 
-import "retropixels/cores/m68k"
+import (
+	"sync"
+
+	"retropixels/cores/m68k"
+)
 
 // The sound board: a 68000 at 11.2896 MHz with two SCSP sound chips, each
 // with 1 MB of RAM, and banked sample ROM. The main board talks to it only
@@ -29,6 +33,15 @@ type soundBoard struct {
 	out     []float32
 	rear    []float32
 	outFrac float64
+
+	// The board runs a frame behind the main board, on its own goroutine:
+	// the MIDI bytes the main board writes in a frame are queued, and handed
+	// over (as Supermodel hands them over after the main board's frame) when
+	// the frame ends.
+	midiQ   []uint8
+	running []uint8
+	ready   []float32 // the finished frame's sound
+	busy    sync.WaitGroup
 }
 
 func newSoundBoard(r *ROMs, g *GameDef) *soundBoard {
@@ -54,6 +67,9 @@ func newSoundBoard(r *ROMs, g *GameDef) *soundBoard {
 }
 
 func (s *soundBoard) reset() {
+	s.busy.Wait()
+	s.midiQ = s.midiQ[:0]
+	s.ready = s.ready[:0]
 	for i := range s.ram1 {
 		s.ram1[i] = 0
 		s.ram2[i] = 0
@@ -73,12 +89,29 @@ func (s *soundBoard) reset() {
 	s.outFrac = 0
 }
 
-func (s *soundBoard) writeMIDI(v uint8) {
-	s.scsp.midiIn(v)
-	if s.dsb != nil {
-		s.dsb.sendCommand(v)
-	}
+func (s *soundBoard) writeMIDI(v uint8) { s.midiQ = append(s.midiQ, v) }
+
+// endFrame hands the frame's MIDI bytes to the board and starts its next
+// frame running; the sound of the frame before is then in ready.
+func (s *soundBoard) endFrame() {
+	s.busy.Wait()
+	s.ready = append(s.ready[:0], s.out...)
+	s.running, s.midiQ = s.midiQ, s.running[:0]
+	s.busy.Add(1)
+	go func() {
+		defer s.busy.Done()
+		for _, v := range s.running {
+			s.scsp.midiIn(v)
+			if s.dsb != nil {
+				s.dsb.sendCommand(v)
+			}
+		}
+		s.runFrame()
+	}()
 }
+
+// wait waits for the frame running on the board's goroutine.
+func (s *soundBoard) wait() { s.busy.Wait() }
 
 // runFrame makes one video frame's worth of sound (the board runs at its
 // own 44.1 kHz; the frame is 1/57.524 s).

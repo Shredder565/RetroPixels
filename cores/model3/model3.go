@@ -225,7 +225,7 @@ func (m *Machine) RunFrame() {
 	m.gpusReady = true
 
 	m.compose()
-	m.sound.runFrame()
+	m.sound.endFrame()
 	m.drive.runFrame()
 	m.frame++
 }
@@ -234,8 +234,7 @@ func (m *Machine) RunFrame() {
 // tile layers.
 func (m *Machine) compose() {
 	m.gpu.frameReady = false
-	m.render.draw()
-	m.render.composite(m.tg.bottom[:], m.tg.top[:], m.Picture[:])
+	m.render.draw(m.tg.bottom[:], m.tg.top[:], m.Picture[:])
 }
 
 // ---------------------------------------------------------------- bus
@@ -798,4 +797,4 @@ func (m *Machine) DebugMemory() (ram, vram []byte) { return m.ram, m.tg.vram[:] 
 
 // Audio is the sound the last frame made: 44.1 kHz stereo, interleaved left
 // and right, roughly -1..1.
-func (m *Machine) Audio() []float32 { return m.sound.out }
+func (m *Machine) Audio() []float32 { return m.sound.ready }
