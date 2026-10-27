@@ -612,6 +612,7 @@ var spuDMALSA = func() uint32 {
 	return v
 }()
 var spuDMALSAn int
+var dbgAud = os.Getenv("PS3_AUDDBG") != ""
 
 func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 	if size == 0 {
@@ -624,6 +625,17 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 	if spuDMALSA != 0 && picCalls > 0 && lsa < spuDMALSA+0xc000 && spuDMALSA < lsa+size && spuDMALSAn < 200 {
 		spuDMALSAn++
 		m.Logf("SPU DMA LS %s put=%v ea %08X size %x lsa %05x pc %05x", s.name, put, ea, size, lsa, s.c.PC)
+	}
+	if a := m.audio; dbgAud && a != nil && a.inited {
+		if ea < a.indices+64 && a.indices < ea+size {
+			m.Logf("AUDDBG idx get=%v ea %08X size %x pc %05x", !put, ea, size, s.c.PC)
+		}
+		for i := range a.ports {
+			p := &a.ports[i]
+			if p.open && ea >= p.addr && ea < p.addr+p.channels*p.blocks*audioBlock*4 {
+				m.Logf("AUDDBG port%d put=%v off %x size %x readidx %d", i, put, ea-p.addr, size, m.Mem.Read64(p.index))
+			}
+		}
 	}
 	if spuDMALog != nil {
 		k := fmt.Sprintf("%s %v %04Xxxxx", s.name, put, ea>>16)

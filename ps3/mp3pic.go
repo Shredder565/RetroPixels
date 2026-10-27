@@ -153,6 +153,9 @@ func (m *Machine) picCall(s *spuThread, n uint32) {
 		f, _ = os.OpenFile(fmt.Sprintf("%s/stream%d.mp3", mp3Dump, d.id), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		f.Write(frame)
 		f.Close()
+		f, _ = os.OpenFile(fmt.Sprintf("%s/stream%d.txt", mp3Dump, d.id), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		fmt.Fprintf(f, "%.4f %d\n", float64(m.tb)/TBFreq, samples)
+		f.Close()
 	}
 	if mp3Sine {
 		f := 1000.0

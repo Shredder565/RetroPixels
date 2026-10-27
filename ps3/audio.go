@@ -174,7 +174,7 @@ func (m *Machine) audioTick() {
 			}
 			// the block has been played: clear it, move on
 			m.Mem.Fill(blk, 0, p.channels*audioBlock*4)
-			m.Mem.Write64(p.index, idx+1)
+			m.Mem.Write64(p.index, (idx+1)%uint64(p.blocks))
 		}
 		if audioDebug {
 			if a.dbgBlocks++; a.dbgBlocks%188 == 0 {
