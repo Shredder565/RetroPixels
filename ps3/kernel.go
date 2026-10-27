@@ -26,7 +26,7 @@ func (m *Machine) syscall(c *PPU) {
 		t.GPR[3] = eNOSYS
 		return
 	}
-	if traceSyscalls {
+	if traceSyscalls && m.tb >= traceFrom {
 		m.Logf("syscall %d(%x, %x, %x, %x) at %08X", n, t.GPR[3], t.GPR[4], t.GPR[5], t.GPR[6], c.PC-4)
 	}
 	fn(m, t)
@@ -35,7 +35,7 @@ func (m *Machine) syscall(c *PPU) {
 	}
 }
 
-var traceSyscalls = false
+var traceSyscalls = traceHLE
 
 // startTime is the clock the game sees at the start (real time then
 // virtual time after).

@@ -116,6 +116,13 @@ func findCase(p string) string {
 
 func (fs *fsState) open(path string, flags uint32) (uint32, uint32) {
 	m := fs.m
+	if data := virtualFile(path); data != nil {
+		fd := fs.nextFD
+		fs.nextFD++
+		fs.files[fd] = &fsFile{path: path, r: bytes.NewReader(data), size: int64(len(data))}
+		m.Logf("open %s -> fd %d (RetroPixels' own, %d bytes)", path, fd, len(data))
+		return fd, 0
+	}
 	hp := m.hostPath(path)
 	if hp == "" {
 		m.Logf("open %s: not a place RetroPixels has", path)
@@ -278,6 +285,10 @@ func (m *Machine) writeStat(a uint32, isDir bool, size int64, mtime int64) {
 
 func (fs *fsState) stat(path string, a uint32) uint32 {
 	m := fs.m
+	if data := virtualFile(path); data != nil {
+		m.writeStat(a, false, int64(len(data)), 0)
+		return 0
+	}
 	hp := m.hostPath(path)
 	if hp == "" {
 		return eNOENT

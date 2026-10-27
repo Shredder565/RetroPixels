@@ -52,6 +52,7 @@ type Thread struct {
 	frames    []guestFrame // HLE code waiting for a guest function to return
 	tls       uint32
 	waitWhat  string
+	lwWant    uint32 // the lwmutex it's waiting to (re)acquire
 }
 
 type guestFrame struct {
@@ -109,6 +110,7 @@ type Machine struct {
 	pad   padState
 	audio *audioState
 	spus  *spuState
+	sd    *sdScratch
 	spurs *spursState
 	misc  map[string]any
 
@@ -195,6 +197,20 @@ func New(opts Options) (*Machine, error) {
 			fmt.Sscanf(a, "%x", &v)
 			m.cpu.Watch[v] = func(c *PPU) {
 				m.Logf("WATCH %08X: r3 %x r4 %x r5 %x r6 %x LR %08X", c.PC, c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6], uint32(c.LR))
+			}
+		}
+	}
+	if w := os.Getenv("PS3_MEMWATCH"); w != "" { // debugging: log writes to an address
+		var a, size uint32 = 0, 4
+		fmt.Sscanf(w, "%x:%x", &a, &size)
+		m.Mem.hooked[a>>pageBits] = true
+		m.Mem.Hook = func(addr uint32, n int) {
+			if addr < a+size && a < addr+uint32(n) {
+				name := ""
+				if m.cur != nil {
+					name = m.cur.Name
+				}
+				m.Logf("MEMWATCH write %d bytes at %08X by %s PC %08X LR %08X", n, addr, name, m.cpu.PC-4, uint32(m.cpu.LR))
 			}
 		}
 	}

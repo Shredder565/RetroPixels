@@ -320,7 +320,9 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 	pix := 0
 	var inputs [16]vec4
 	var x fpRun
-	x.in = &inputs
+	var fin [16]vec4
+	x.in = &fin
+	samp := c.sample
 	s := c.s
 	for py := minY; py <= maxY; py++ {
 		fy := float32(py) + 0.5
@@ -374,7 +376,7 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 					inputs[k][j] = (w0*a.attr[k][j] + w1*b.attr[k][j] + w2*d.attr[k][j]) * rw
 				}
 			}
-			var fin [16]vec4
+			fin = [16]vec4{}
 			for in := 1; in < 14; in++ {
 				if c.fp.inputs>>in&1 != 0 && fpInputToVP[in] >= 0 {
 					fin[in] = inputs[fpInputToVP[in]]
@@ -384,14 +386,13 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 				fin[0] = vec4{fx, fy, z, iw}
 			}
 			fin[14] = vec4{1, 1, 1, 1}
-			x.in = &fin
 			x.killed = false
 			for i := range x.r[:4] {
 				x.r[i] = vec4{}
 				x.h[i] = vec4{}
 			}
 			x.cc = [2]vec4{}
-			c.fp.run(&x, c.sample)
+			c.fp.run(&x, samp)
 			if x.killed {
 				continue
 			}

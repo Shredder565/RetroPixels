@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"strconv"
 )
 
 type hleFunc func(m *Machine, t *Thread)
@@ -108,8 +109,9 @@ func (m *Machine) hleCall(c *PPU, n uint32) {
 		t.GPR[3] = 0
 		return
 	}
-	if traceHLE {
+	if traceHLE && m.tb >= traceFrom {
 		m.Logf("%s(%x, %x, %x, %x) from %08X", e.name, t.GPR[3], t.GPR[4], t.GPR[5], t.GPR[6], uint32(t.LR)-4)
+		defer func() { m.Logf("  %s -> %x", e.name, uint32(t.GPR[3])) }()
 	}
 	e.fn(m, t)
 	if t.state != thReady {
@@ -117,7 +119,12 @@ func (m *Machine) hleCall(c *PPU, n uint32) {
 	}
 }
 
+// PS3_TRACE=<seconds> logs each system function call from then on.
 var traceHLE = os.Getenv("PS3_TRACE") != ""
+var traceFrom = func() uint64 {
+	f, _ := strconv.ParseFloat(os.Getenv("PS3_TRACE"), 64)
+	return uint64(f * TBFreq)
+}()
 
 func hex32(v uint32) string {
 	const d = "0123456789ABCDEF"

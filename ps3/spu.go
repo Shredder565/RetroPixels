@@ -8,6 +8,7 @@ package ps3
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type spuSeg struct{ typ, ls, size, addr uint32 }
@@ -48,6 +49,8 @@ type spuThread struct {
 	exited     bool
 
 	inMbox            []uint32
+	spin              int  // empty channel polls in a row
+	polled            bool // stopped polling (so it's idle, not busy)
 	outMbox, outIntr  uint32
 	outMboxN, outIntN bool
 	snr               [2]uint32
@@ -138,14 +141,19 @@ func (m *Machine) runSPUs(n uint64) int {
 		if !s.running || s.g.suspend {
 			continue
 		}
-		if spuProf != nil {
-			spuProf[s.c.PC]++
-		}
 		left := int(n)
+		s.polled = false
 		for left > 0 && s.running {
 			r := s.c.Run(left)
+			if spuProf != nil {
+				k := s.c.PC
+				if s.c.stalled {
+					k |= 0x80000000
+				}
+				spuProf[k] += r
+			}
 			left -= r
-			if r > most {
+			if r > most && !s.polled {
 				most = r
 			}
 			if s.c.Err != nil {
@@ -165,6 +173,12 @@ func (m *Machine) runSPUs(n uint64) int {
 }
 
 var spuProf map[uint32]int
+
+// PS3_SPUWATCH=<ls address>: log DMA reads that land on it (debugging).
+var spuWatch = func() uint32 {
+	v, _ := strconv.ParseUint(os.Getenv("PS3_SPUWATCH"), 16, 32)
+	return uint32(v)
+}()
 
 func init() {
 	if os.Getenv("PS3_SPUPROF") != "" {
@@ -266,7 +280,30 @@ func (m *Machine) spuRdCh(s *spuThread, ch uint32) (uint32, bool) {
 	return 0, true
 }
 
+// spuChCount answers rchcnt. A thread that keeps finding nothing on an
+// input channel is polling: after spinPolls empty reads it waits (the
+// instruction is retried later) so the time goes to the other threads.
 func (m *Machine) spuChCount(s *spuThread, ch uint32) uint32 {
+	n := m.spuChCount1(s, ch)
+	switch ch {
+	case 0, 3, 4, 24, 25, 27, 29:
+		if n == 0 {
+			s.spin++
+			if s.spin >= spinPolls {
+				s.spin = 0
+				s.c.stalled = true
+				s.polled = true
+			}
+		} else {
+			s.spin = 0
+		}
+	}
+	return n
+}
+
+const spinPolls = 32
+
+func (m *Machine) spuChCount1(s *spuThread, ch uint32) uint32 {
 	switch ch {
 	case 0:
 		if s.events(m) != 0 {
@@ -409,6 +446,10 @@ func (m *Machine) spuIntrMbox(s *spuThread, v uint32) bool {
 }
 
 func (m *Machine) spuStop(s *spuThread, code uint32) bool {
+	if code >= picStopBase && code < picStopBase+picFuncs {
+		m.picCall(s, code-picStopBase)
+		return true
+	}
 	switch code {
 	case 0x100: // yield
 		return true
@@ -500,7 +541,7 @@ func (m *Machine) spuBad(s *spuThread, ea uint32, n int) bool {
 	if m.Mem.Mapped(ea) && m.Mem.Mapped(ea+uint32(n)-1) {
 		return false
 	}
-	s.c.fail(fmt.Sprintf("DMA at %08X (%x bytes, lsa %05x)", ea, n, s.lsa), 0)
+	s.c.fail(fmt.Sprintf("DMA at %08X (%x bytes, lsa %05x, lr %05x, sp %05x)", ea, n, s.lsa, s.c.GPR[0][0], s.c.GPR[1][0]), 0)
 	return true
 }
 
@@ -571,6 +612,10 @@ func (m *Machine) spuTransfer(s *spuThread, put bool, lsa, ea, size uint32) {
 		m.spuPutMem(s, ea, buf)
 	} else {
 		m.spuGetMem(s, ea, buf)
+		if spuWatch != 0 && lsa <= spuWatch && spuWatch < lsa+size {
+			m.Logf("SPU %s: get %x bytes from %08X to %05x (pc %05x lr %05x): watched word %08x", s.name, size, ea, lsa, s.c.PC, s.c.GPR[0][0],
+				uint32(buf[spuWatch-lsa])<<24|uint32(buf[spuWatch-lsa+1])<<16|uint32(buf[spuWatch-lsa+2])<<8|uint32(buf[spuWatch-lsa+3]))
+		}
 		for i, x := range buf {
 			s.c.LS[(lsa+uint32(i))&lsMask] = x
 		}

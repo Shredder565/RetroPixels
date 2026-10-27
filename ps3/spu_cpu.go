@@ -553,7 +553,11 @@ func (c *SPUCore) exec11(w, rT, rA, rB uint32) {
 		g[rT] = Vec{v, 0, 0, 0}
 		return
 	case 0x00f: // rchcnt
-		g[rT] = Vec{c.ChCount(c, rA), 0, 0, 0}
+		v := c.ChCount(c, rA)
+		if c.stalled { // a polling loop with nothing to read: wait instead
+			return
+		}
+		g[rT] = Vec{v, 0, 0, 0}
 		return
 	case 0x10d: // wrch
 		if !c.WrCh(c, rA, g[rT][0]) {

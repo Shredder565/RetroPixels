@@ -577,6 +577,12 @@ func init() {
 			}
 			return
 		}
+		for _, w := range m.threads {
+			if w.state == thBlocked && w.lwWant == mu {
+				t.ret(eBUSY) // threads are waiting for it
+				return
+			}
+		}
 		m.Mem.Write32(mu, lwDead)
 		t.ret(0)
 	})
@@ -610,7 +616,14 @@ func init() {
 			return
 		}
 		t.ret(0)
-		m.blockTimeout(t, fmt.Sprintf("lwmutex %08X (owner %x)", mu, o), usToTB(t.arg64(1)), func() bool { return m.lwTryLock(t, mu) }, func() { t.ret(eTIMEDOUT) })
+		t.lwWant = mu
+		m.blockTimeout(t, fmt.Sprintf("lwmutex %08X (owner %x)", mu, o), usToTB(t.arg64(1)), func() bool {
+			if m.lwTryLock(t, mu) {
+				t.lwWant = 0
+				return true
+			}
+			return false
+		}, func() { t.lwWant = 0; t.ret(eTIMEDOUT) })
 	}
 	reg("sys_lwmutex_lock", func(m *Machine, t *Thread) { lock(m, t, false) })
 	reg("sys_lwmutex_trylock", func(m *Machine, t *Thread) { lock(m, t, true) })
@@ -660,9 +673,11 @@ func init() {
 		m.Mem.Write32(mu+12, 0)
 		w := &lwcondWaiter{t: t}
 		*ws = append(*ws, w)
+		t.lwWant = mu
 		reacquire := func() bool {
 			if m.lwTryLock(t, mu) {
 				m.Mem.Write32(mu+12, count)
+				t.lwWant = 0
 				return true
 			}
 			return false
