@@ -181,6 +181,10 @@ type rsxSurface struct {
 	zFmt          uint32
 	x, y, w, h    int // clip
 	ok            bool
+	// more colour targets drawn at once (B, C, D after A): the fragment
+	// program's R2/H4, R3/H6, R4/H8 go to them
+	mrt  [3]struct{ addr, pitch uint32 }
+	nmrt int
 }
 
 func (m *Machine) dmaAddr(ctx, off uint32) uint32 {
@@ -205,6 +209,25 @@ func (m *Machine) surface(r *rsxState) rsxSurface {
 	}
 	if target != 0 {
 		s.addr = m.dmaAddr(ctx, off)
+	}
+	if target&0x10 != 0 && s.addr != 0 { // A and more
+		n := 1
+		switch target & 0xf {
+		case 7:
+			n = 2
+		case 0xf:
+			n = 3
+		}
+		regs := [3][3]uint32{{0x18C, 0x218, 0x21C}, {0x1B4, 0x288, 0x280}, {0x1B8, 0x28C, 0x284}}
+		for k := 0; k < n; k++ {
+			a := m.dmaAddr(r.reg(regs[k][0]), r.reg(regs[k][1]))
+			p := r.reg(regs[k][2])
+			if p < 16 {
+				break
+			}
+			s.mrt[k].addr, s.mrt[k].pitch = a, p
+			s.nmrt = k + 1
+		}
 	}
 	s.zAddr = m.dmaAddr(r.reg(0x198), r.reg(0x214))
 	s.zPitch = r.reg(0x22C)
@@ -399,18 +422,28 @@ func (m *Machine) rsxClear(r *rsxState, v uint32) {
 			mask |= 1
 		}
 		bpp := surfBpp(s.fmt)
-		if bpp == 4 && mask == 0xf && (s.fmt == 8 || s.fmt == 4 || s.fmt == 5) {
-			row := make([]byte, (x1-x0)*4)
-			for i := 0; i < len(row); i += 4 {
-				row[i], row[i+1], row[i+2], row[i+3] = byte(c>>24), byte(c>>16), byte(c>>8), byte(c)
-			}
-			for y := y0; y < y1; y++ {
-				m.Mem.WriteBytes(s.addr+uint32(y)*s.pitch+uint32(x0)*4, row)
-			}
-		} else {
-			for y := y0; y < y1; y++ {
-				for x := x0; x < x1; x++ {
-					m.writePixel(&s, s.addr+uint32(y)*s.pitch+uint32(x)*bpp, col, mask)
+		// every colour target being drawn is cleared
+		addrs := []uint32{s.addr}
+		pitches := []uint32{s.pitch}
+		for k := 0; k < s.nmrt; k++ {
+			addrs = append(addrs, s.mrt[k].addr)
+			pitches = append(pitches, s.mrt[k].pitch)
+		}
+		for t, base := range addrs {
+			pitch := pitches[t]
+			if bpp == 4 && mask == 0xf && (s.fmt == 8 || s.fmt == 4 || s.fmt == 5) {
+				row := make([]byte, (x1-x0)*4)
+				for i := 0; i < len(row); i += 4 {
+					row[i], row[i+1], row[i+2], row[i+3] = byte(c>>24), byte(c>>16), byte(c>>8), byte(c)
+				}
+				for y := y0; y < y1; y++ {
+					m.Mem.WriteBytes(base+uint32(y)*pitch+uint32(x0)*4, row)
+				}
+			} else {
+				for y := y0; y < y1; y++ {
+					for x := x0; x < x1; x++ {
+						m.writePixel(&s, base+uint32(y)*pitch+uint32(x)*bpp, col, mask)
+					}
 				}
 			}
 		}
@@ -545,6 +578,9 @@ func (m *Machine) rsxFlushDraw(r *rsxState, d *rsxDraw) {
 		defer func() {
 			s := m.surface(r)
 			m.gpu.wroteRange(s.addr, s.addr+s.pitch*uint32(s.y+s.h))
+			for k := 0; k < s.nmrt; k++ {
+				m.gpu.wroteRange(s.mrt[k].addr, s.mrt[k].addr+s.mrt[k].pitch*uint32(s.y+s.h))
+			}
 			if s.zAddr != 0 {
 				m.gpu.wroteRange(s.zAddr, s.zAddr+s.zPitch*uint32(s.y+s.h))
 			}

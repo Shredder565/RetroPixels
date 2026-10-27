@@ -63,6 +63,8 @@ type gpuDevice interface {
 // gpuDraw is one draw call.
 type gpuDraw struct {
 	Target, Depth gpuHandle // 0: none
+	MRT           [3]gpuHandle         // more colour targets (0: none)
+	MRTBlend      [3]d3d.BlendTarget
 	W, H          int       // the targets' size (the viewport covers them)
 	Scissor       d3d.Rect
 	Blend         d3d.BlendTarget
@@ -739,11 +741,17 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 	cmask := colorMask(r.reg(0x324))
 	depthT := r.reg(0xA74) != 0
 	depthW := r.reg(0xA70) != 0
-	if cmask == 0 && !(depthT && depthW) {
+	var mrtMask [3]uint32
+	anyMask := cmask
+	for k := 0; k < s.nmrt; k++ {
+		mrtMask[k] = r.reg(0x370) >> (4 * (k + 1)) & 0xf
+		anyMask |= mrtMask[k]
+	}
+	if anyMask == 0 && !(depthT && depthW) {
 		return true
 	}
 	alphaT := r.reg(0x304) != 0
-	key := fpKey{shape: fp.shape, out32: r.reg(0x1D60)&0x40 != 0, fixedOut: s.fmt != 11 && s.fmt != 12 && s.fmt != 13}
+	key := fpKey{shape: fp.shape, out32: r.reg(0x1D60)&0x40 != 0, fixedOut: s.fmt != 11 && s.fmt != 12 && s.fmt != 13, mrt: uint8(s.nmrt)}
 	if alphaT {
 		key.alphaFn = r.reg(0x308)
 	}
@@ -796,6 +804,14 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 	}
 	g.verts = vb
 	dr := &gpuDraw{Target: col.tex, W: w, H: h, PS: ps, Verts: vb, Index: idx}
+	var mrts [3]*hostSurf
+	for k := 0; k < s.nmrt; k++ {
+		mrts[k] = g.surface(s.mrt[k].addr, s.mrt[k].pitch, w, h, s.fmt, false)
+		if mrts[k] == nil {
+			return false
+		}
+		dr.MRT[k] = mrts[k].tex
+	}
 	if dep != nil {
 		dr.Depth = dep.tex
 	}
@@ -828,6 +844,23 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 	} else {
 		bt.Src, bt.Dst, bt.Op = d3d.BlendOne, d3d.BlendZero, d3d.BlendOpAdd
 		bt.SrcAlpha, bt.DstAlpha, bt.OpAlpha = d3d.BlendOne, d3d.BlendZero, d3d.BlendOpAdd
+	}
+	for k := 0; k < s.nmrt; k++ {
+		mb := *bt
+		if r.reg(0x36C)>>(k+1)&1 == 0 {
+			mb.Enable = 0
+			mb.Src, mb.Dst, mb.Op = d3d.BlendOne, d3d.BlendZero, d3d.BlendOpAdd
+			mb.SrcAlpha, mb.DstAlpha, mb.OpAlpha = d3d.BlendOne, d3d.BlendZero, d3d.BlendOpAdd
+		} else if mb.Enable == 0 {
+			sf, df := r.reg(0x314), r.reg(0x318)
+			eq := r.reg(0x320)
+			mb.Enable = 1
+			mb.Src, mb.Dst, mb.Op = glFactor(sf&0xffff), glFactor(df&0xffff), blendOp(eq&0xffff)
+			mb.SrcAlpha, mb.DstAlpha, mb.OpAlpha = alphaFactor(glFactor(sf>>16)), alphaFactor(glFactor(df>>16)), blendOp(eq>>16)
+		}
+		mm := mrtMask[k]
+		mb.WriteMask = uint8(mm>>2&1 | mm>>1&1<<1 | mm&1<<2 | mm>>3&1<<3)
+		dr.MRTBlend[k] = mb
 	}
 	// depth
 	ds := &dr.DepthState
@@ -879,6 +912,12 @@ func (g *gpuRenderer) draw(r *rsxState, d *rsxDraw) bool {
 	if cmask != 0 {
 		col.dirty = true
 		col.stale = false
+	}
+	for k := 0; k < s.nmrt; k++ {
+		if mrtMask[k] != 0 {
+			mrts[k].dirty = true
+			mrts[k].stale = false
+		}
 	}
 	if dep != nil && depthT && depthW {
 		dep.dirty = true
@@ -996,6 +1035,12 @@ func (g *gpuRenderer) clear(r *rsxState, v uint32) {
 		if col != nil && mask == 15 {
 			g.dev.ClearTarget(col.tex, rgba)
 			col.dirty, col.stale = true, false
+			for k := 0; k < s.nmrt; k++ { // every target being drawn is cleared
+				if mt := g.surface(s.mrt[k].addr, s.mrt[k].pitch, w, h, s.fmt, false); mt != nil {
+					g.dev.ClearTarget(mt.tex, rgba)
+					mt.dirty, mt.stale = true, false
+				}
+			}
 			mask = 0
 		}
 		if zflags != 0 {

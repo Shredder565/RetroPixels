@@ -50,6 +50,7 @@ type fpKey struct {
 	out32    bool
 	fixedOut bool   // the target holds 0..1 (alpha is clamped for the test)
 	alphaFn  uint32 // 0 = no alpha test
+	mrt      uint8  // more colour targets (R2/H4, R3/H6, R4/H8 to SV_Target1..3)
 }
 
 type fpTr struct {
@@ -122,6 +123,10 @@ func (t *fpTr) declare() {
 	}
 	s.Out = []d3d.Sig{{Name: "SV_Target", SV: d3d.SVTarget, Mask: 15}}
 	s.DclOutput(0, 15)
+	for k := 1; k <= int(t.k.mrt); k++ {
+		s.Out = append(s.Out, d3d.Sig{Name: "SV_Target", Index: uint32(k), Reg: uint32(k), SV: d3d.SVTarget, Mask: 15})
+		s.DclOutput(k, 15)
+	}
 }
 
 // gpuPSInSig: the position, then outputs 1..15 and the extra register.
@@ -414,6 +419,17 @@ func (t *fpTr) output() {
 		}
 	}
 	t.ins(d3d.OpMov, d3d.Out(0).Mask(15), col)
+	for k := 1; k <= int(t.k.mrt); k++ {
+		c := dR(1 + k) // R2, R3, R4
+		if !t.k.out32 {
+			c = dR(dxH + 2 + 2*k) // H4, H6, H8
+		}
+		if t.k.fixedOut {
+			t.ins(d3d.OpMov|d3d.Sat, d3d.Out(k).Mask(15), c)
+		} else {
+			t.ins(d3d.OpMov, d3d.Out(k).Mask(15), c)
+		}
+	}
 }
 
 // op translates one arithmetic or texture instruction.

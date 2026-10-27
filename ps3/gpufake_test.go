@@ -372,7 +372,7 @@ func (fg *fakeGPU) rows(d *gpuDraw, ps []dxOp, cb [][4]uint32, rt, ds *fakeTex, 
 				vm.r[k] = [4]uint32{}
 			}
 			vm.killed = false
-			vm.out[0] = [4]uint32{}
+			vm.out = [8][4]uint32{}
 			vm.run()
 			if vm.killed {
 				continue
@@ -380,30 +380,39 @@ func (fg *fakeGPU) rows(d *gpuDraw, ps []dxOp, cb [][4]uint32, rt, ds *fakeTex, 
 			if ds != nil && d.DepthState.DepthEnable != 0 && d.DepthState.DepthWriteMask != 0 {
 				ds.z[i] = z
 			}
-			if rt == nil || d.Blend.WriteMask == 0 {
-				continue
-			}
-			src := vec4{f(vm.out[0][0]), f(vm.out[0][1]), f(vm.out[0][2]), f(vm.out[0][3])}
-			unorm := rt.format == d3d.FormatRGBA8Unorm
-			if unorm {
-				src = sat(src)
-			}
-			dst := rt.px[i]
-			col := src
-			if d.Blend.Enable != 0 {
-				col = fakeBlend(&d.Blend, src, dst, vec4(d.BlendFactor))
-			}
-			if unorm {
-				for k := range col {
-					col[k] = float32(u8round(col[k])) / 255
+			for t := 0; t < 4; t++ {
+				rt, bl := rt, &d.Blend
+				if t > 0 {
+					if d.MRT[t-1] == 0 {
+						break
+					}
+					rt, bl = fg.tex[d.MRT[t-1]], &d.MRTBlend[t-1]
 				}
-			}
-			for k := 0; k < 4; k++ {
-				if d.Blend.WriteMask>>k&1 != 0 {
-					dst[k] = col[k]
+				if rt == nil || bl.WriteMask == 0 {
+					continue
 				}
+				src := vec4{f(vm.out[t][0]), f(vm.out[t][1]), f(vm.out[t][2]), f(vm.out[t][3])}
+				unorm := rt.format == d3d.FormatRGBA8Unorm
+				if unorm {
+					src = sat(src)
+				}
+				dst := rt.px[i]
+				col := src
+				if bl.Enable != 0 {
+					col = fakeBlend(bl, src, dst, vec4(d.BlendFactor))
+				}
+				if unorm {
+					for k := range col {
+						col[k] = float32(u8round(col[k])) / 255
+					}
+				}
+				for k := 0; k < 4; k++ {
+					if bl.WriteMask>>k&1 != 0 {
+						dst[k] = col[k]
+					}
+				}
+				rt.px[i] = dst
 			}
-			rt.px[i] = dst
 		}
 	}
 }

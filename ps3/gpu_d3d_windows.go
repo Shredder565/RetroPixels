@@ -385,6 +385,12 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 	// state objects
 	bd := d3d.BlendDesc{}
 	bd.Target[0] = dr.Blend
+	for k := range dr.MRT {
+		if dr.MRT[k] != 0 {
+			bd.Independent = 1
+			bd.Target[1+k] = dr.MRTBlend[k]
+		}
+	}
 	bo, err := g.state('b', unsafe.Pointer(&bd), unsafe.Sizeof(bd))
 	if err != nil {
 		return err
@@ -431,6 +437,13 @@ func (g *d3dGPU) Draw(dr *gpuDraw) error {
 	var rtvs []d3d.View
 	if t := g.tex[dr.Target]; t != nil {
 		rtvs = []d3d.View{t.rtv}
+		for k := range dr.MRT {
+			if mt := g.tex[dr.MRT[k]]; mt != nil && dr.MRT[k] != 0 {
+				rtvs = append(rtvs, mt.rtv)
+			} else {
+				break
+			}
+		}
 	}
 	var dsv d3d.View
 	if t := g.tex[dr.Depth]; t != nil {

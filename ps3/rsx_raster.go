@@ -43,6 +43,8 @@ type rasterCtx struct {
 	eqC, eqA uint32
 	bcol     vec4
 	cmask    uint32
+	mrtBlend [3]bool
+	mrtMask  [3]uint32
 	out32    bool
 	fixedOut bool
 	cull     bool
@@ -139,12 +141,20 @@ func (m *Machine) rasterPrims(r *rsxState, d *rsxDraw, s *rsxSurface, verts []rs
 	bc := r.reg(0x31C)
 	c.bcol = vec4{float32(bc>>16&0xff) / 255, float32(bc>>8&0xff) / 255, float32(bc&0xff) / 255, float32(bc>>24) / 255}
 	c.cmask = colorMask(r.reg(0x324))
+	for k := 0; k < s.nmrt; k++ {
+		c.mrtBlend[k] = r.reg(0x36C)>>(k+1)&1 != 0
+		c.mrtMask[k] = r.reg(0x370) >> (4 * (k + 1)) & 0xf
+	}
 	c.out32 = r.reg(0x1D60)&0x40 != 0
 	c.fixedOut = s.fmt != 11 && s.fmt != 12 && s.fmt != 13
 	c.cull = r.reg(0x183C) != 0
 	c.cullFace = r.reg(0x1830)
 	c.frontCCW = r.reg(0x1834) == 0x901
-	if c.cmask == 0 && !c.depthW {
+	anyMask := c.cmask
+	for k := 0; k < s.nmrt; k++ {
+		anyMask |= c.mrtMask[k]
+	}
+	if anyMask == 0 && !c.depthW {
 		return
 	}
 	// viewport
@@ -400,8 +410,10 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 			}
 			fin[14] = vec4{1, 1, 1, 1}
 			x.killed = false
-			for i := range x.r[:4] {
+			for i := range x.r[:5] {
 				x.r[i] = vec4{}
+			}
+			for i := range x.h[:9] {
 				x.h[i] = vec4{}
 			}
 			x.cc = [2]vec4{}
@@ -425,6 +437,23 @@ func (c *rasterCtx) drawRows(a, b, d *rasterVert, inv float32, minY, maxY, minX,
 				} else {
 					c.m.Mem.Write32(zaddr, znew|zold&0xff)
 				}
+			}
+			for k := 0; k < s.nmrt; k++ {
+				if c.mrtMask[k] == 0 {
+					continue
+				}
+				col := x.h[4+2*k]
+				if c.out32 {
+					col = x.r[2+k]
+				}
+				if c.fixedOut {
+					col = fpClamp(col, 4)
+				}
+				pa := s.mrt[k].addr + uint32(py)*s.mrt[k].pitch + uint32(px)*c.bpp
+				if c.mrtBlend[k] {
+					col = c.blendPix(col, c.m.readPixel(s, pa))
+				}
+				c.m.writePixel(s, pa, col, c.mrtMask[k])
 			}
 			if c.cmask == 0 {
 				continue

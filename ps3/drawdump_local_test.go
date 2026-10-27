@@ -32,9 +32,11 @@ func init() {
 		texs := ""
 		for i := uint32(0); i < 16; i++ {
 			if r.reg(0x1A0C+0x20*i)>>31 != 0 { // enabled
-				texs += fmt.Sprintf(" t%d:fmt%02x %dx%d", i, r.reg(0x1A04+0x20*i)>>8&0xff, r.reg(0x1A18+0x20*i)>>16, r.reg(0x1A18+0x20*i)&0xffff)
+				texs += fmt.Sprintf(" t%d:fmt%02x@%08X %dx%d", i, r.reg(0x1A04+0x20*i)>>8&0xff, m.textureRegs(r, int(i)).ea, r.reg(0x1A18+0x20*i)>>16, r.reg(0x1A18+0x20*i)&0xffff)
 			}
 		}
+		m.Logf("MRT %d: target %x B %x/%x/%x C %x/%x/%x D %x/%x/%x blendMRT %x maskMRT %x 1d60 %x", n, r.reg(0x220), r.reg(0x18C), r.reg(0x218), r.reg(0x21C),
+			r.reg(0x1B4), r.reg(0x280), r.reg(0x288), r.reg(0x1B8), r.reg(0x284), r.reg(0x28C), r.reg(0x36C), r.reg(0x370), r.reg(0x1D60))
 		m.Logf("DRAW %d: surface %08X fmt %d %dx%d z %08X | blend %x src %08x dst %08x eq %08x | depth %x func %x mask %x | alpha %x | cmask %08x | fp %08X ctl %08x |%s",
 			n, s.addr, s.fmt, s.w, s.h, s.zAddr, r.reg(0x310), r.reg(0x314), r.reg(0x318), r.reg(0x320),
 			r.reg(0xA74), r.reg(0xA6C), r.reg(0xA70), r.reg(0x304), r.reg(0x324), r.reg(0x8E4), r.reg(0x1D60), texs)
