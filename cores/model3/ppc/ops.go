@@ -173,7 +173,7 @@ func init() {
 			if op&1 != 0 {
 				c.LR = c.PC
 			} else if t < c.PC-4 && c.PC-4-t <= 4*8 && rD(op)&4 != 0 && c.idleLoop(t, c.PC-4) {
-				c.skipIdle(int((c.PC-t)/4))
+				c.skipIdle(int((c.PC - t) / 4))
 			}
 			c.PC = t
 		} else if op&1 != 0 {
