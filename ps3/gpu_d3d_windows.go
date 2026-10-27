@@ -196,7 +196,7 @@ func (g *d3dGPU) UpdateTexture(h gpuHandle, data []byte, pitch int) {
 		g.c.UpdateSubresource(t.res, 0, data, uint32(pitch), 0)
 		return
 	}
-	m, err := g.c.Map(t.staging, 0, d3d.MapWrite)
+	m, err := g.mapRes(t.staging, 0, d3d.MapWrite)
 	if err != nil {
 		return
 	}
@@ -215,7 +215,7 @@ func (g *d3dGPU) ReadTexture(h gpuHandle) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("not a target")
 	}
 	g.c.CopyResource(t.staging, t.res)
-	m, err := g.c.Map(t.staging, 0, d3d.MapRead)
+	m, err := g.mapRes(t.staging, 0, d3d.MapRead)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -258,7 +258,7 @@ func (g *d3dGPU) ReadTextureLate(h gpuHandle) ([]byte, int, error) {
 		g.lateFull = true
 		prev = g.lateCur // nothing older: this frame's
 	}
-	m, err := g.c.Map(g.late[prev], 0, d3d.MapRead)
+	m, err := g.mapRes(g.late[prev], 0, d3d.MapRead)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -400,8 +400,22 @@ func (g *d3dGPU) dynamic(buf *d3d.Resource, size *int, n int, bind uint32) error
 	return nil
 }
 
+// mapRes maps a resource, refusing a mapping with no memory (which a
+// driver can give back and still say it worked).
+func (g *d3dGPU) mapRes(r d3d.Resource, sub, typ uint32) (d3d.Mapped, error) {
+	m, err := g.c.Map(r, sub, typ)
+	if err != nil {
+		return m, err
+	}
+	if m.Data == 0 {
+		g.c.Unmap(r, sub)
+		return m, fmt.Errorf("the graphics card gave no memory to map")
+	}
+	return m, nil
+}
+
 func (g *d3dGPU) put(buf d3d.Resource, p unsafe.Pointer, n int) error {
-	m, err := g.c.Map(buf, 0, d3d.MapWriteDiscard)
+	m, err := g.mapRes(buf, 0, d3d.MapWriteDiscard)
 	if err != nil {
 		return err
 	}

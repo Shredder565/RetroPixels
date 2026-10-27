@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -286,7 +287,7 @@ func (c *PS3) RunFrame() {
 				if r := recover(); r != nil {
 					c.fatal = fmt.Sprintf("RetroPixels crashed: %v", r)
 					if c.logf != nil {
-						fmt.Fprintf(c.logf, "%s\r\n%s\r\n", c.fatal, c.m.Threads())
+						fmt.Fprintf(c.logf, "%s\r\n%s\r\n%s\r\n", c.fatal, c.m.Threads(), debug.Stack())
 					}
 				}
 			}()
