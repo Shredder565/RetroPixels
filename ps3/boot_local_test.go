@@ -5,9 +5,11 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // PS3_GAME=<installed folder> go test -run BootLocal -v
@@ -43,6 +45,19 @@ func TestBootLocal(t *testing.T) {
 			if err := m.UseHostGPU(newFakeGPU()); err != nil {
 				t.Fatal(err)
 			}
+		}
+		if from, err := strconv.Atoi(os.Getenv("PS3_PROFFROM")); err == nil && i == from {
+			// PS3_PROFFROM=<frame>: CPU profile from that frame to the end
+			pf, _ := os.Create(os.Getenv("PS3_PROFOUT"))
+			pprof.StartCPUProfile(pf)
+			defer pprof.StopCPUProfile()
+			profStart, profRan, profFrame := time.Now(), m.cpu.Ran, m.Frame()
+			defer func() {
+				d := time.Since(profStart)
+				n := m.Frame() - profFrame
+				t.Logf("profiled %d frames in %v: %.1f fps, %.1f M PPU instructions a second",
+					n, d, float64(n)/d.Seconds(), float64(m.cpu.Ran-profRan)/d.Seconds()/1e6)
+			}()
 		}
 		if err := m.RunFrame(); err != nil {
 			t.Log(err)
@@ -94,6 +109,15 @@ func TestBootLocal(t *testing.T) {
 		if n > 0 {
 			t.Logf("SPU pc %05x: %d", pc, n)
 		}
+	}
+	if spuHist != nil {
+		var sb strings.Builder
+		for pc, n := range spuHist {
+			if n > 0 {
+				fmt.Fprintf(&sb, "%05x %d\n", pc, n)
+			}
+		}
+		os.WriteFile(os.Getenv("PS3_SPUHIST"), []byte(sb.String()), 0o644)
 	}
 	for k, v := range m.Missing {
 		t.Logf("missing %s x%d", k, v)

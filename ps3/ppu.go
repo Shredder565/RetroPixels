@@ -65,6 +65,8 @@ type PPU struct {
 
 	// Watch: debugging, functions called when the PC reaches an address
 	Watch map[uint32]func(c *PPU)
+
+	jit *JIT // the recompiler, or nil
 }
 
 // Stop makes Run return after the current instruction.
@@ -91,6 +93,10 @@ func (c *PPU) fail(inst uint32, msg string) {
 // Run runs up to n instructions; it returns early when an instruction stops it.
 func (c *PPU) Run(n int) {
 	c.stop = false
+	if c.jit != nil && c.Watch == nil {
+		c.jit.run(c, n)
+		return
+	}
 	m := c.Mem
 	for i := 0; i < n; i++ {
 		pc := c.PC

@@ -148,6 +148,7 @@ func New(opts Options) (*Machine, error) {
 		misc:    map[string]any{},
 	}
 	m.cpu = &PPU{Mem: m.Mem}
+	m.cpu.jit = newJIT(m.Mem)
 	m.cpu.HLE = m.hleCall
 	m.cpu.Syscall = m.syscall
 	m.cpu.TB = func() uint64 { return m.tb }
@@ -204,7 +205,7 @@ func New(opts Options) (*Machine, error) {
 	if w := os.Getenv("PS3_MEMWATCH"); w != "" { // debugging: log writes to an address
 		var a, size uint32 = 0, 4
 		fmt.Sscanf(w, "%x:%x", &a, &size)
-		m.Mem.hooked[a>>pageBits] = true
+		m.Mem.Watch(a >> pageBits)
 		m.Mem.Hook = func(addr uint32, n int) {
 			if addr < a+size && a < addr+uint32(n) {
 				name := ""

@@ -7,6 +7,7 @@ package ps3
 import (
 	"math"
 	"math/bits"
+	"os"
 )
 
 const lsSize = 0x40000
@@ -73,6 +74,9 @@ func (c *SPUCore) Run(n int) int {
 		w := uint32(c.LS[pc])<<24 | uint32(c.LS[pc+1])<<16 | uint32(c.LS[pc+2])<<8 | uint32(c.LS[pc+3])
 		c.PC = pc + 4
 		c.stalled = false
+		if spuHist != nil {
+			spuHist[pc]++
+		}
 		c.exec(w)
 		if c.stalled {
 			c.PC = pc
@@ -84,6 +88,15 @@ func (c *SPUCore) Run(n int) int {
 	c.Ran += uint64(ran)
 	return ran
 }
+
+// spuHist (PS3_SPUHIST=1): instructions run at each local store address
+// (debugging).
+var spuHist = func() []uint64 {
+	if os.Getenv("PS3_SPUHIST") == "" {
+		return nil
+	}
+	return make([]uint64, lsSize)
+}()
 
 func i7(w uint32) int32    { return int32(w<<11) >> 25 }
 func i10(w uint32) int32   { return int32(w<<8) >> 22 }
