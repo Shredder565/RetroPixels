@@ -1138,7 +1138,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() {
+	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() || a.rpcs3ToggleRecording() {
 		return
 	}
 	s := a.sess

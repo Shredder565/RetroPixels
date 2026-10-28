@@ -31,6 +31,8 @@ type rpRun struct {
 	name    string
 	err     error // how RPCS3 ended (set before exited closes)
 	started time.Time
+	rec     *extRec // nil: not recorded
+	recOn   bool    // RPCS3 was told to start recording (UI thread)
 }
 
 // rpState is the app's RPCS3 part (UI thread only).
@@ -161,36 +163,121 @@ func rpcs3Install(exe string, args []string, watch string, done func() bool) err
 	return nil
 }
 
-// rpcs3Play starts the game at eboot in RPCS3, docked in this window.
+// rpcs3Play starts the game at eboot in RPCS3, docked in this window. With
+// Record > Record games automatically on, RPCS3 records it (see
+// rpcs3StartRecording) and the video is made when it ends.
 func (a *app) rpcs3Play(exe, eboot string) {
 	a.closeGame()
-	cmd := rpcs3.Command(exe, rpcs3.PlayArgs(eboot)...)
-	if err := cmd.Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start RPCS3: "+err.Error(), "RetroPixels Native", mbIconWarning)
-		return
-	}
+	dir := filepath.Dir(exe)
 	name := "the PS3 game"
 	if t := rpcs3.GameTitle(eboot); t != "" {
 		name = t
 	}
-	r := &rpRun{extRun: newExtRun(cmd.Process.Pid), eboot: eboot, name: name, started: time.Now()}
+	var rec *extRec
+	if a.settings.autoRecord() && a.recFFmpeg(false, false) {
+		if d, err := engineRecDir(filepath.Join(a.settings.recDir(), "temp"), "RPCS3-"); err != nil {
+			a.showMessage("Not recording: " + err.Error())
+		} else if err := rpcs3.SetRecording(dir, true); err != nil {
+			removeDir(d)
+			a.showMessage("Not recording: couldn't set RPCS3 up to record: " + err.Error())
+		} else {
+			rec = a.newExtRec(name, d)
+		}
+	}
+	if rec == nil {
+		rpcs3.SetRecording(dir, false) // no sound files piling up in RPCS3's folder
+	}
+	cmd := rpcs3.Command(exe, rpcs3.PlayArgs(eboot)...)
+	if err := cmd.Start(); err != nil {
+		if rec != nil {
+			a.extRecDropped(rec)
+		}
+		messageBox(a.hwnd, "Couldn't start RPCS3: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		return
+	}
+	r := &rpRun{extRun: newExtRun(cmd.Process.Pid), eboot: eboot, name: name, started: time.Now(), rec: rec}
 	a.rp.run = r
 	go func() {
 		r.err = cmd.Wait()
 		close(r.exited)
 		a.event("rpcs3-exited", "")
+		if rec != nil {
+			ran := time.Since(r.started).Seconds()
+			a.extSave(rec, func(ff string, progress func(int)) error {
+				return rpcs3Save(ff, a.encoder(ff), dir, r.started, ran, rec.out, progress)
+			})
+		}
 	}()
 	go a.dockWatch(&r.extRun, 5*time.Minute, "rpcs3") // the first start compiles the game for a while
 	call(pInvalidateRect, a.hwnd, 0, 0)
 	a.updateTitle()
 }
 
-// rpcs3Stop ends the game the way RPCS3's own close button does.
+// rpcs3Stop ends the game the way RPCS3's own close button does. A
+// recording is stopped first, so RPCS3 finishes its video file.
 func (a *app) rpcs3Stop() {
-	if r := a.rp.run; r != nil {
-		r.stop()
-		a.showMessage("Stopping the game…")
+	r := a.rp.run
+	if r == nil {
+		return
 	}
+	a.showMessage("Stopping the game…")
+	if !r.recOn || r.stopAt.Load() != 0 {
+		r.stop()
+		return
+	}
+	r.stopAt.Store(time.Now().UnixNano())
+	rpcs3RecordKey(r.child.Load())
+	go func() {
+		select {
+		case <-r.exited:
+		case <-time.After(1500 * time.Millisecond):
+			r.stop()
+		}
+	}()
+}
+
+// rpcs3StartRecording presses RPCS3's Start/Stop Recording key (F11) in the
+// game's window, a moment after it shows up.
+func (a *app) rpcs3StartRecording(r *rpRun) {
+	if r.rec == nil || r.recOn || r.stopAt.Load() != 0 {
+		return
+	}
+	r.recOn = true
+	go func() {
+		select {
+		case <-r.exited:
+			return
+		case <-time.After(time.Second):
+		}
+		if r.stopAt.Load() == 0 {
+			rpcs3RecordKey(r.child.Load())
+		}
+	}()
+	a.updateTitle()
+}
+
+// rpcs3RecordKey sends F11 to RPCS3's game window w.
+func rpcs3RecordKey(w uintptr) {
+	if w == 0 {
+		return
+	}
+	const vkF11, scanF11 = 0x7A, 0x57
+	call(pPostMessageW, w, wmKeyDown, vkF11, 1|scanF11<<16)
+	call(pPostMessageW, w, wmKeyUp, vkF11, 1|scanF11<<16|0xC0000000)
+}
+
+// rpcs3ToggleRecording is F9 / Record while a game plays in RPCS3.
+func (a *app) rpcs3ToggleRecording() bool {
+	r := a.rp.run
+	if r == nil {
+		return false
+	}
+	if r.rec != nil {
+		a.showMessage("Recording: the video is saved when the game ends")
+	} else {
+		a.showMessage("PS3 games are recorded from their start: turn on Record > Record games automatically")
+	}
+	return true
 }
 
 // rpcs3Busy: a game is on in RPCS3 (so another external game can't start). It says so.
@@ -284,6 +371,9 @@ func (a *app) rpcs3Event(name, detail string) {
 		}
 	case "rpcs3-docked":
 		a.dolHook() // F11 / Alt+Enter / Esc reach this window while RPCS3 has the keyboard
+		if r := a.rp.run; r != nil {
+			a.rpcs3StartRecording(r)
+		}
 		call(pInvalidateRect, a.hwnd, 0, 0)
 		a.updateTitle()
 	case "rpcs3-nodock":
@@ -304,6 +394,8 @@ func (a *app) rpcs3Title() string {
 	t := " - " + r.name + " (RPCS3)"
 	if r.child.Load() == 0 {
 		t += " - Starting…"
+	} else if r.recOn {
+		t += recTitle(r.rec.started)
 	}
 	return t
 }

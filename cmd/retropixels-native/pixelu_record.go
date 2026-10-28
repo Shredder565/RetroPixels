@@ -181,6 +181,12 @@ func pixeluSave(ff, enc, dir, out string, ranFor float64, progress func(int)) er
 	for _, s := range sound {
 		soundLen += dolphin.WavSeconds(s)
 	}
+	return encodeSave(ff, enc, clips, sound, videoLen, soundLen, out, progress)
+}
+
+// encodeSave makes out from the picture clips and sound files with ffmpeg
+// ff (encoder enc first, then the CPU's if that fails); see pixeluSaveArgs.
+func encodeSave(ff, enc string, clips []mame.Clip, sound []string, videoLen, soundLen float64, out string, progress func(int)) error {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return errors.New("couldn't make the recordings folder: " + err.Error())
 	}

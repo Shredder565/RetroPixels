@@ -1,7 +1,7 @@
 package main
 
 // Record > Record games automatically: every game, whichever system plays
-// it (RetroPixels' own emulators, GameCube / Wii, Wii U, MAME), is recorded
+// it (RetroPixels' own emulators, GameCube / Wii, Wii U, MAME, PS3 in RPCS3), is recorded
 // from its start, as RetroPixels.exe does. Turned off, F9 still records
 // RetroPixels' own games, and GameCube / Wii's "Record the next game" stays.
 
