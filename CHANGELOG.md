@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.25.0] - 2026-10-28
+
+- Star Wars Trilogy Arcade: the space background no longer glitches in the Return of the Jedi Death Star battle. Pieces of the planet Endor flashed across the stars for a frame at a time whenever its huge surface passed close by the camera; the 3D renderer now clips polygons at a margin around the screen, so they stay where they belong.
+- Star Wars Trilogy Arcade: no more thin dotted line across the screen during explosion flashes and other full-screen effects. Neighbouring triangles now meet exactly, with no gap between them.
+
 ## [2.24.0] - 2026-10-28
 
 - Star Wars Trilogy Arcade: C-3PO shows up again in Echo Base, and the big blue shape that covered the Millennium Falcon hangar is gone. The game copies some of its 3D data (C-3PO among it) straight from its program ROM, and the emulator was reading those copies from the wrong part of the ROM. Checked frame by frame against Supermodel.
