@@ -202,12 +202,18 @@ func (r *ppu) write(reg int, val uint8) {
 	case 0x18:
 		a := r.vramAddrMapped()
 		r.vram[a] = r.vram[a]&0xff00 | uint16(v)
+		if r.s.tr != nil {
+			r.s.tr.vram(a * 2)
+		}
 		if r.vmain&0x80 == 0 {
 			r.vinc()
 		}
 	case 0x19:
 		a := r.vramAddrMapped()
 		r.vram[a] = r.vram[a]&0xff | uint16(v)<<8
+		if r.s.tr != nil {
+			r.s.tr.vram(a*2 + 1)
+		}
 		if r.vmain&0x80 != 0 {
 			r.vinc()
 		}
@@ -226,7 +232,13 @@ func (r *ppu) write(reg int, val uint8) {
 	case 0x22:
 		if r.cgLatch < 0 {
 			r.cgLatch = v
+			if r.s.tr != nil {
+				r.s.tr.cgLo()
+			}
 		} else {
+			if r.s.tr != nil {
+				r.s.tr.cgHi(r.cgaddr)
+			}
 			r.cgram[r.cgaddr] = uint16((r.cgLatch | v<<8) & 0x7fff)
 			r.cgaddr = (r.cgaddr + 1) & 0xff
 			r.cgLatch = -1

@@ -712,6 +712,10 @@
         <button class="btn ghost sm" id="sramExport">Download battery save</button>
         <input type="file" id="sramInput" hidden accept=".sav,.srm,.sram,.bin">
       </div>
+      <div id="snesDbgRow" style="margin-top:10px" hidden>
+        <label class="toggle"><input type="checkbox" id="snesDbgOn"> Open the SNES Debugger with SNES games</label>
+        <span id="snesDbgStatus" class="muted"></span>
+      </div>
     </section>
   </section>
 </main>
@@ -2180,7 +2184,9 @@
       for (const s of ["emu/host.js", ...OWN[core]]) await loadScript(s);
       const sram = await sramOp("readonly", s => s.get(gameKey)).catch(() => null);
       player = new window.RPPlayer({
-        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(), coreOpts,
+        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(),
+        // the SNES Debugger notes the game's transfers from the very start
+        coreOpts: core === "snes" && DESKTOP && snesDbgOn() ? Object.assign({ trace: true }, coreOpts || {}) : coreOpts,
         onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
         // 4-player arcade games get the 1-4 picker above the game instead of a button in the game's bar
         seatInBar: core !== "arcade", onSeat: n => markSeat(n),
@@ -2201,6 +2207,7 @@
     gameReady = true;
     if (autoRecordOn()) setTimeout(() => { if (gameReady && !recorder) startRecording(true); }, 300);
     startArchipelago(core, rom, name);
+    startSnesDebug(core, rom, name);
     showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
     if (core === "arcade") showArcadeSettings(player.core);
@@ -2454,6 +2461,34 @@
         go(rom);
       } catch (e) { out.textContent = e.message; out.className = "bad"; }
     });
+  }
+
+  // ---------- RetroPixels SNES Debugger ----------
+  // A separate program (RetroPixels-SNES-Debugger.exe, next to RetroPixels.exe) that opens with
+  // SNES games: it saves VRAM, CGRAM and the DMA transfers when asked, finds where a background's
+  // graphics are in the ROM, and swaps them for a picture. emu/snes_debug.js does this page's part.
+  var snesDbg = null;
+  function snesDbgOn() { try { return localStorage.getItem("rp:snesDebugger") !== "off"; } catch (e) { return true; } }
+  async function startSnesDebug(core, rom, name) {
+    const row = document.getElementById("snesDbgRow");
+    row.hidden = !(DESKTOP && core === "snes");
+    if (row.hidden) return;
+    const box = document.getElementById("snesDbgOn"), status = document.getElementById("snesDbgStatus");
+    box.checked = snesDbgOn();
+    box.onchange = () => {
+      try { localStorage.setItem("rp:snesDebugger", box.checked ? "on" : "off"); } catch (e) { /* no storage */ }
+      status.textContent = box.checked ? "— opens next time a SNES game starts" : "";
+    };
+    if (snesDbg) { snesDbg.close(); snesDbg = null; }
+    if (!box.checked || !player) return;
+    try {
+      await loadScript("emu/snes_debug.js");
+      snesDbg = window.RPSNESDebug.attach(player, {
+        rom, name, token: DESKTOP.token,
+        onStatus: st => { status.textContent = st.error ? "— couldn't start: " + st.error : st.debugger === false ? "— RetroPixels-SNES-Debugger.exe isn't next to RetroPixels.exe" : "— on"; },
+        onCapture: () => toast("SNES Debugger: capture saved"),
+      });
+    } catch (e) { console.warn("SNES Debugger:", e); }
   }
 
   async function startArchipelago(core, rom, name) {

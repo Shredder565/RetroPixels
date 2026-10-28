@@ -258,6 +258,7 @@ func newMux() *http.ServeMux {
 	registerWiiURoutes(mux)
 	registerArcadeRoutes(mux)
 	registerAPRoutes(mux)
+	registerSNESDebugRoutes(mux)
 	registerDesktopRoutes(mux)
 	return mux
 }
