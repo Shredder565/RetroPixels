@@ -215,7 +215,10 @@ func PrepareSettings(dir string) error {
 			return err
 		}
 	}
-	return prepareConfig(dir, settings())
+	if err := prepareConfig(dir, settings()); err != nil {
+		return err
+	}
+	return preparePads(dir)
 }
 
 func prepareConfig(dir string, want []setting) error {

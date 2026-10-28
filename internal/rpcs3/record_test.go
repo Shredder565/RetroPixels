@@ -54,3 +54,24 @@ func TestFindRecordingAndRepair(t *testing.T) {
 		t.Fatal("video not removed")
 	}
 }
+
+func TestPreparePads(t *testing.T) {
+	dir := t.TempDir()
+	if err := PrepareSettings(dir); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "config", "input_configs", "global", "Default.yml")
+	b, err := os.ReadFile(p)
+	if err != nil || !strings.Contains(string(b), "Player 1 Input:\n  Handler: XInput\n  Device: \"XInput Pad #1\"\n  Config:\n") ||
+		!strings.Contains(string(b), "    Cross: A\n") {
+		t.Fatalf("pads %q %v", b, err)
+	}
+	os.WriteFile(p, []byte("mine"), 0o644)
+	PrepareSettings(dir)
+	if b, _ := os.ReadFile(p); string(b) != "mine" {
+		t.Fatal("changed the player's own controller setup")
+	}
+	if m, _ := os.ReadFile(filepath.Join(dir, settingsMark)); !strings.Contains(string(m), "Audio/Renderer") {
+		t.Fatalf("mark %q", m)
+	}
+}
