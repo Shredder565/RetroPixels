@@ -59,6 +59,17 @@ jobs:
           go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/RetroPixels.exe" .
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
 
+      # The RetroPixels SNES Debugger (Rust), next to the two programs: they
+      # start it when a SNES game starts (docs/snes-debugger.md).
+      - name: SNES Debugger
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
+          rustup target add x86_64-pc-windows-gnu
+          cd tools/snes-debugger
+          cargo test --no-default-features
+          cargo build --release --target x86_64-pc-windows-gnu
+          cp target/x86_64-pc-windows-gnu/release/retropixels-snes-debugger.exe "../../$DIR/RetroPixels-SNES-Debugger.exe"
+
       # The newest successful builds of PixelU's two engines on this branch.
       - name: PixelU (Wii U and GameCube / Wii engines)
         run: |
@@ -105,6 +116,7 @@ jobs:
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
+            echo "RetroPixels-SNES-Debugger.exe opens with SNES games: it captures VRAM, palettes and DMA transfers and swaps backgrounds (docs/snes-debugger.md in the source)."
             echo "  Its sound chips follow Supermodel's code (GPL-3.0-or-later, LICENSE-GPL-3.0.txt); NOTICE-Sega-Model-3.txt lists its third-party parts."
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
@@ -144,7 +156,7 @@ jobs:
           rm "dist/web-only/RetroPixels-$VER/RetroPixels-Native.exe"
           (cd dist/web-only && zip -qr "../../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
           rm -r dist/web-only
-          cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" release/
+          cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" "$DIR/RetroPixels-SNES-Debugger.exe" release/
           cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
           cp "$DIR/VERSION.txt" release/VERSION.txt
           ls -la release

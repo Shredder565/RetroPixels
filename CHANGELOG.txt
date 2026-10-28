@@ -4,6 +4,24 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.26.0  (2026-10-28)
+--------------------------------
+- New: the RetroPixels SNES Debugger (RetroPixels-SNES-Debugger.exe, in the
+  download next to the programs). It opens alongside RetroPixels when a
+  SNES game starts (turn that off below the game in RetroPixels.exe, or in
+  RetroPixels Native's Options menu).
+- Press "Capture now" at the moment you want: it saves VRAM, the palettes,
+  work RAM and every DMA transfer the game made, with where each byte came
+  from.
+- Each background layer is drawn as the game has it, with where its tiles,
+  tilemap and palettes are in the ROM (file offset and SNES address).
+- Swap a background for your own PNG picture: it's reduced to the SNES's
+  colour limits and written to the ROM. When it needs more tiles than the
+  game had, they move to free ROM space and the game is repointed to them.
+  Save the patched ROM and play it in RetroPixels.
+- Works on title screens and fixed backdrops; compressed graphics and
+  scrolling level maps can't be swapped in place yet.
+
 RetroPixels 2.25.0  (2026-10-28)
 --------------------------------
 - Star Wars Trilogy Arcade: the space background no longer glitches in the

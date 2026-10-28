@@ -2,6 +2,15 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.26.0] - 2026-10-28
+
+- New: the RetroPixels SNES Debugger (RetroPixels-SNES-Debugger.exe, in the download next to the programs). It opens alongside RetroPixels.exe and RetroPixels Native when a SNES game starts (turn that off below the game in RetroPixels.exe, or in RetroPixels Native's Options menu).
+- Capture: press "Capture now" (or "Capture in 5 s") at the moment you want, the first level say. It saves VRAM, CGRAM (palettes), OAM, WRAM, the PPU registers, and every DMA transfer the game made since it started, with its source address, size, destination, and the code that set it up. For every byte of VRAM, CGRAM and WRAM it also knows which transfer (or which CPU instruction) wrote it, and where from. Both SNES emulators (RetroPixels.exe's and RetroPixels Native's) make the same captures.
+- Analysis: for each background layer it shows the whole tilemap drawn as the game has it, the layer's tile size, colour depth, tilemap and tile addresses, and where its tilemap, tiles and palettes are in the ROM: file offset and SNES address, through WRAM when the game copies them there first, or found by searching the ROM when the game's code wrote them. Graphics the game decompresses are pointed out with the code that unpacks them.
+- Background swap: choose a PNG and the debugger puts it in the layer: scaled to the tilemap, reduced to the SNES's palette limits (new palettes for the picture, written to the ROM, or the game's own colours; optional dithering), cut into tiles with repeats and flipped repeats shared, and written back to the ROM addresses the tiles, tilemap and palettes came from. When the picture needs more tiles than the game had, the tiles move to free ROM space with room for more and the game's DMA transfer is repointed (its source address, bank and size, in the code or in a pointer table), or similar tiles are merged. The checksum is updated; your original ROM file isn't changed.
+- It also works from a terminal: RetroPixels-SNES-Debugger.exe capture / analyze / export / swap. docs/snes-debugger.md explains the capture files and how the swap works.
+- Limits: compressed graphics and scrolling level maps can't be swapped in place (title screens and fixed backdrops can); Mode 7 layers are shown but not swapped yet.
+
 ## [2.25.0] - 2026-10-28
 
 - Star Wars Trilogy Arcade: the space background no longer glitches in the Return of the Jedi Death Star battle. Pieces of the planet Endor flashed across the stars for a frame at a time whenever its huge surface passed close by the camera; the 3D renderer now clips polygons at a margin around the screen, so they stay where they belong.
