@@ -107,7 +107,6 @@ type app struct {
 	dol  dolState    // GameCube / Wii (dolphin_windows.go)
 	mame mameState   // arcade games in MAME (mame_windows.go)
 	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
-	sm   smState     // Star Wars Trilogy Arcade in Supermodel (supermodel_windows.go)
 	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
@@ -325,7 +324,6 @@ func (a *app) updateMenus() {
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
 	a.pixeluUpdateMenus()
-	a.supermodelUpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
@@ -438,6 +436,8 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.homeMouseLeave()
 		if a.sess != nil {
 			a.sess.mouseX.Store(math.Float32bits(float32(math.NaN())))
+			a.sess.mouseY.Store(math.Float32bits(float32(math.NaN())))
+			a.sess.mouseBtns.Store(0)
 		}
 	case wmLButtonDown, wmLButtonUp:
 		if a.sess == nil && uint32(m) == wmLButtonDown {
@@ -446,6 +446,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		if a.sess != nil && a.settings.MousePaddle {
 			a.sess.mouseFire.Store(uint32(m) == wmLButtonDown)
 		}
+		a.mouseButton(0, uint32(m) == wmLButtonDown)
+	case wmRButtonDown, wmRButtonUp:
+		a.mouseButton(1, uint32(m) == wmRButtonDown)
 	case wmTimer:
 		if wp == timerTitle {
 			a.updateTitle()
@@ -462,7 +465,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.mameBeforeClose() || a.supermodelBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -561,9 +564,28 @@ func (a *app) keyUp(vk int) bool {
 	return vk != vkMenu && vk != vkF10
 }
 
+// mouseButton: a mouse button over the window, for games that aim with
+// the mouse.
+func (a *app) mouseButton(bit uint, down bool) {
+	s := a.sess
+	if s == nil || !s.mouseAim {
+		return
+	}
+	for {
+		old := s.mouseBtns.Load()
+		v := old &^ (1 << bit)
+		if down {
+			v |= 1 << bit
+		}
+		if s.mouseBtns.CompareAndSwap(old, v) {
+			return
+		}
+	}
+}
+
 func (a *app) mouseMove(x, y int) {
 	s := a.sess
-	if s == nil || !a.settings.MousePaddle {
+	if s == nil || (!a.settings.MousePaddle && !s.mouseAim) {
 		return
 	}
 	if !a.mouseTracking {
@@ -579,14 +601,11 @@ func (a *app) mouseMove(x, y int) {
 	if r.W <= 0 {
 		return
 	}
-	v := float32(x-r.X)/float32(r.W)*2 - 1
-	if v < -1 {
-		v = -1
+	clamp := func(v float32) float32 { return max(-1, min(1, v)) }
+	s.mouseX.Store(math.Float32bits(clamp(float32(x-r.X)/float32(r.W)*2 - 1)))
+	if r.H > 0 {
+		s.mouseY.Store(math.Float32bits(clamp(float32(y-r.Y)/float32(r.H)*2 - 1)))
 	}
-	if v > 1 {
-		v = 1
-	}
-	s.mouseX.Store(math.Float32bits(v))
 }
 
 // ---------------- drawing ----------------
@@ -611,7 +630,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.mamePaint(hdc) && !a.supermodelPaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -748,7 +767,6 @@ func (a *app) updateTitle() {
 	t += a.dolTitle()
 	t += a.mameTitle()
 	t += a.pixeluTitle()
-	t += a.supermodelTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -824,7 +842,6 @@ func (a *app) handleEvents() {
 			a.dolEvent(e.name, e.detail)
 			a.mameEvent(e.name, e.detail)
 			a.pixeluEvent(e.name, e.detail)
-			a.supermodelEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -942,8 +959,6 @@ func (a *app) command(id int) {
 		a.pixeluCommand(id)
 	case id >= cmdMameFirst && id <= cmdMameLast:
 		a.mameCommand(id)
-	case id >= cmdSMFirst && id <= cmdSMLast:
-		a.supermodelCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
 		a.apCommand(id)
 	case id == cmdAbout:
@@ -977,9 +992,6 @@ func (a *app) volume() float32 {
 
 func (a *app) openPath(path string) {
 	if a.mameOpenPath(path) {
-		return
-	}
-	if a.supermodelOpenPath(path) { // swtrilgy.zip / swtrilgya.zip (MAME can't play it)
 		return
 	}
 	if a.pixeluOpenPath(path) {
@@ -1132,7 +1144,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() {
+	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() {
 		return
 	}
 	s := a.sess

@@ -78,7 +78,6 @@ func (a *app) addMameMenu() {
 	appendMenu(m, mfString, cmdMameLibrary, "&Library and MAME versions…")
 	appendMenu(m, mfString, cmdMameOpen, "&Open a game file in MAME…")
 	appendMenu(m, mfString, cmdMameStop, "&Stop game")
-	a.addSupermodelMenu(m) // Star Wars Trilogy Arcade, which MAME can't play
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdMameEmbed, "Play inside this &window")
 	appendMenu(m, mfString, cmdMameKeys, "MAME's &keys")
@@ -376,10 +375,10 @@ func (a *app) mamePlayPath(path, exe string) {
 
 // mamePlay starts a game in its MAME.
 func (a *app) mamePlay(g mame.Game, exe string) {
-	if isSupermodelGame(g.Path) {
-		// Star Wars Trilogy Arcade (Sega Model 3): MAME can't play it, Supermodel does.
+	if isNativeArcadeOnly(g.Path) {
+		// Star Wars Trilogy Arcade (Sega Model 3): RetroPixels plays it itself.
 		if a.mame.run == nil {
-			a.supermodelPlayPath(g.Path)
+			a.openPath(g.Path)
 			return
 		}
 	}
@@ -401,7 +400,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		messageBox(a.hwnd, "A GameCube / Wii game is playing. Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
-	if a.pixeluBusy() || a.supermodelBusy() {
+	if a.pixeluBusy() {
 		return
 	}
 	c := mame.Load()
@@ -679,5 +678,5 @@ func (a *app) mamePaint(hdc uintptr) bool {
 // mameIdleNote: a line for the start screen.
 func mameIdleNote() string {
 	return "\nAny other arcade game plays in MAME, in any MAME version you add: Arcade (MAME) > Library." +
-		"\nStar Wars Trilogy Arcade (swtrilgy.zip) plays in Supermodel: Arcade (MAME) > Star Wars Trilogy Arcade."
+		"\nStar Wars Trilogy Arcade (swtrilgy.zip) plays right here: File > Open game, then its .zip."
 }

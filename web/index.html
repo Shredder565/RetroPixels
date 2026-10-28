@@ -189,28 +189,6 @@
   #wiiuTab .toggle input:checked { background: #0b8fd6; }
   .wiiu-btn { background: #0b8fd6; } .wiiu-btn:hover { background: #087cbc; }
   .plat.WiiU { background: #0b8fd6; }
-  /* Supermodel (Sega Model 3): Star Wars Trilogy Arcade */
-  .tabs button[data-tab="supermodel"][aria-selected="true"] { border-bottom-color: #ffd54a; }
-  .sm-btn { background: #b8860b; } .sm-btn:hover { background: #9c7209; }
-  #smTab .toggle input:checked { background: #b8860b; }
-  #smTab .sw-tile:hover, #smTab .sw-tile:focus-visible { border-color: #ffd54a; }
-  #smTab .sw-tile:focus-visible { box-shadow: 0 0 0 3px #ffd54a55; }
-  .sm-grid { display: grid; grid-template-columns: minmax(0, 340px); gap: 12px; padding: 4px; }
-  .sm-art { aspect-ratio: 4 / 3; position: relative; overflow: hidden; display: grid; place-items: center; align-content: center;
-    gap: 4px; text-align: center; color: #ffd54a; background:
-      radial-gradient(1px 1px at 12% 18%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 78% 12%, #fff 50%, transparent 51%),
-      radial-gradient(1.5px 1.5px at 33% 72%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 64% 84%, #fff 50%, transparent 51%),
-      radial-gradient(1px 1px at 88% 58%, #fff 50%, transparent 51%), radial-gradient(1.5px 1.5px at 52% 30%, #fff 50%, transparent 51%),
-      radial-gradient(1px 1px at 6% 90%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 92% 92%, #ccd 50%, transparent 51%),
-      radial-gradient(1px 1px at 24% 44%, #ccd 50%, transparent 51%), radial-gradient(1px 1px at 70% 46%, #ccd 50%, transparent 51%),
-      radial-gradient(ellipse at 50% 120%, #1d2a55 0%, #05060c 60%); }
-  .sm-art b { font-size: 44px; font-weight: 900; letter-spacing: 6px; line-height: .95; text-shadow: 0 0 18px #ffb30066, 0 2px 0 #7a5a00; }
-  .sm-art span { font-size: 15px; font-weight: 700; letter-spacing: 7px; color: #f3f3f3; }
-  .sm-art small { position: absolute; bottom: 8px; font-size: 10px; letter-spacing: 2px; color: #9aa3c7; }
-  .sm-play { position: absolute; inset: auto 10px 10px auto; background: #b8860b; color: #fff; border-radius: 999px;
-    padding: 4px 12px; font-size: 13px; font-weight: 700; }
-  .sm-rom { display: flex; gap: 10px; align-items: flex-start; }
-  .sm-rom small { overflow-wrap: anywhere; }
   #gcSearch, #wiiuSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
   #swNow { margin-bottom: 14px; }
@@ -352,7 +330,6 @@
     <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
     <button role="tab" data-tab="wiiu" aria-selected="false"><span style="color:#2fb4ff">●</span> Wii U</button>
     <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
-    <button role="tab" data-tab="supermodel" aria-selected="false"><span style="color:#ffd54a">●</span> Supermodel</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
   <div id="swNow" class="sw-now" hidden>
@@ -678,65 +655,6 @@
     </div>
   </section>
 
-  <!-- ===================== Supermodel (Sega Model 3) tab ===================== -->
-  <section id="smTab" hidden>
-    <div id="smBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Star Wars Trilogy Arcade plays in <strong>Supermodel</strong>, the Sega Model 3 arcade emulator, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
-    </div>
-    <div id="smDesktop" hidden>
-      <div class="gc-layout">
-        <section class="sw-sec gc-lib">
-          <h2 class="sw-h">Sega Model 3 in Supermodel</h2>
-          <p class="muted sw-intro" style="margin-top:0">Star Wars Trilogy Arcade (Sega, 1998) in Supermodel, the Sega Model 3 emulator. Click it to play.</p>
-          <div class="sm-grid" id="smGrid"></div>
-          <p class="muted" id="smMsg" style="font-size:14px;margin:8px 0"></p>
-          <div id="smNote"></div>
-          <div class="sw-setup" style="margin-top:8px">
-            <div class="sw-emu" id="smRom">Looking for the game…</div>
-            <div class="sw-emu" id="smEmu">Looking for Supermodel…</div>
-          </div>
-          <div class="sw-row" style="margin-top:6px">
-            <button class="btn sm sm-btn" id="smChooseRom">Choose the game file…</button>
-            <button class="btn ghost sm" id="smFindRom" title="Look for swtrilgya.zip / swtrilgy.zip in your ROM folders again">Look again</button>
-          </div>
-          <div class="sw-row">
-            <label class="sw-check" title="The game plays inside this window instead of fullscreen in Supermodel's own window"><input type="checkbox" id="smEmbed"> Play inside RetroPixels</label>
-            <label class="sw-check"><input type="checkbox" id="smFull"> Start fullscreen</label>
-            <label class="sw-check" title="The 3D view fills a wide screen; the score and other 2D parts stay 4:3"><input type="checkbox" id="smWide"> Wide screen</label>
-            <label class="sw-check" title="The Xbox stick aims like the arcade's flight stick: steady and precise near the centre, full movement at the edge, and the corners reachable"><input type="checkbox" id="smFlight"> Flight stick feel</label>
-            <label class="sw-check" title="How much the aim glides, like the arcade yoke's weight and spring. More smoothing hides thumbstick jitter; less reacts faster">Smoothness
-              <select class="sw-select" id="smSmooth"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="heavy">Heavy</option></select></label>
-            <label class="sw-check" title="Push the stick up to dive and pull it back to climb, like the arcade's flight yoke"><input type="checkbox" id="smInvert"> Flight-style up / down</label>
-            <label class="sw-check" title="Saves the game's picture and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="smRec"> Record games automatically</label>
-          </div>
-          <div id="smFFNote"></div>
-        </section>
-        <aside class="gc-side">
-          <section class="sw-sec">
-            <h2 class="sw-h" style="font-size:16px">Playing</h2>
-            <p class="muted" style="font-size:13px;margin:0 0 8px">Xbox controller: <b>left stick</b> flies (the arcade's flight yoke), <span class="key k-a">A</span> or <b>RT</b> fires,
-              <span class="key">B</span> or <b>RB</b> is the yoke's thumb button, <b>Start</b> starts, <b>Back</b> (View) adds a coin, <b>Back + Start</b> leaves the game.</p>
-            <p class="muted" style="font-size:13px;margin:0 0 8px">Keyboard: <span class="key">5</span> coin, <span class="key">1</span> start, arrow keys fly,
-              <span class="key">Ctrl</span> fire, <span class="key">Alt</span> thumb button, <span class="key">9</span> service, <span class="key">F2</span> test menu,
-              <span class="key">F5</span> / <span class="key">F7</span> save / load state, <span class="key">Alt</span>+<span class="key">P</span> pause, <span class="key">Esc</span> leaves.</p>
-            <p class="muted" style="font-size:12px;margin:0">Wait for the Darth Vader scene in the attract mode before adding coins: starting during the Sega logo can crash the game (a known Supermodel issue).</p>
-          </section>
-          <section class="sw-sec">
-            <h2 class="sw-h" style="font-size:16px">Supermodel</h2>
-            <p class="muted" style="font-size:13px;margin:0 0 10px"><b>Supermodel</b> is the open-source Sega Model 3 arcade emulator by the Supermodel team (GPL-3.0, github.com/trzy/Supermodel).
-              RetroPixels comes with its own build of it, with changes for playing inside RetroPixels (its source is in the Supermodel folder).
-              Your settings, high scores (NVRAM) and save states stay in RetroPixels' own folder.</p>
-            <div class="rg-btns">
-              <button class="btn ghost sm" id="smOpenSaves">Open the saves folder</button>
-              <button class="btn ghost sm" id="smOpenFolder">Open Supermodel's folder</button>
-              <button class="btn ghost sm" id="smChooseExe">Change Supermodel…</button>
-            </div>
-          </section>
-        </aside>
-      </div>
-    </div>
-  </section>
-
   <!-- ===================== Player ===================== -->
   <section id="playerWrap">
     <div id="playerBar">
@@ -913,7 +831,7 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #smGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
     renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii / Wii U
     return status;
   }
@@ -1044,14 +962,14 @@
   // Keep the "now playing" bar up to date while a desktop tab is open.
   let wasRunning = false, wasSaving = false;
   setInterval(async () => {
-    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden && wiiuTab.hidden && smTab.hidden)) return;
+    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden && wiiuTab.hidden)) return;
     try {
       const st = await api("/api/status");
       const isRunning = !!st.running;
       renderStatus(st);
       if (wasRunning && !isRunning) {
         if (!mameTab.hidden) loadMame("ended"); else toast("Welcome back");
-        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); if (!wiiuTab.hidden) loadWiiU(); if (!smTab.hidden) loadSupermodel("ended");
+        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); if (!wiiuTab.hidden) loadWiiU();
       }
       else if (!recTab.hidden && (wasSaving || (st.rec && st.rec.saving))) loadRecordings(); // progress, then the new video
       wasSaving = !!(st.rec && st.rec.saving);
@@ -1083,7 +1001,7 @@
     tiles[next].focus();
     tiles[next].scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
-  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && (!gcTab.hidden || !wiiuTab.hidden || !smTab.hidden) };
+  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && (!gcTab.hidden || !wiiuTab.hidden) };
 
   // ---------- Tabs ----------
   const tabsEl = document.getElementById("tabs");
@@ -1092,7 +1010,6 @@
   const recTab = document.getElementById("recTab");
   const mameTab = document.getElementById("mameTab");
   const wiiuTab = document.getElementById("wiiuTab");
-  const smTab = document.getElementById("smTab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -1100,17 +1017,13 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "wiiu", "mame", "supermodel", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "wiiu", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
     recTab.hidden = tab !== "recordings";
     mameTab.hidden = tab !== "mame";
     wiiuTab.hidden = tab !== "wiiu";
-    smTab.hidden = tab !== "supermodel";
-    document.getElementById("smBrowserOnly").hidden = !!DESKTOP;
-    document.getElementById("smDesktop").hidden = !DESKTOP;
-    if (tab === "supermodel" && DESKTOP) loadSupermodel();
     document.getElementById("wiiuBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("wiiuDesktop").hidden = !DESKTOP;
     if (tab === "wiiu" && DESKTOP) loadWiiU();
@@ -1613,149 +1526,6 @@
         gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("PixelU settings saved");
       } catch (e) { toast(e.message, true); }
     });
-  }
-
-  // ---------- Star Wars Trilogy Arcade in Supermodel ----------
-  let smStatus = null, smPoll = null, smProblemAt = null, smFFShown = null;
-  const smMsg = document.getElementById("smMsg");
-
-  async function loadSupermodel(afterGame) {
-    try {
-      gotSupermodel(await api("/api/supermodel/status"), afterGame);
-      api("/api/status").then(renderStatus).catch(() => {});
-    } catch (e) { smMsg.textContent = "Couldn't load the Supermodel tab: " + e.message; }
-  }
-  function gotSupermodel(st, afterGame) {
-    const prev = smProblemAt;
-    smStatus = st;
-    renderSupermodel();
-    const p = st.problem;
-    smProblemAt = p ? p.at : null;
-    if (p && p.at !== prev && afterGame) toast("Star Wars Trilogy Arcade didn't start: " + p.text, true);
-    if (st.finding && !smPoll) smPoll = setInterval(async () => {
-      if (smTab.hidden) return;
-      try { gotSupermodel(await api("/api/supermodel/status")); } catch (e) { /* keep trying */ }
-    }, 1000);
-    if (!st.finding && smPoll) { clearInterval(smPoll); smPoll = null; }
-  }
-
-  function renderSupermodel() {
-    const st = smStatus, c = st.check;
-    const ready = !!(st.exe && st.rom && c && c.ok);
-    const playing = !!(appStatus && appStatus.running);
-    const grid = document.getElementById("smGrid");
-    grid.innerHTML = "";
-    const b = document.createElement("button");
-    b.className = "sw-tile";
-    b.id = "smPlay";
-    b.disabled = playing;
-    b.title = ready ? "Play " + st.title : (st.rom || "");
-    b.setAttribute("aria-label", "Play Star Wars Trilogy Arcade");
-    b.innerHTML = `<span class="plat" style="background:#7a5a00">MODEL 3</span>
-      <div class="sm-art"><b>STAR WARS</b><span>TRILOGY ARCADE</span><small>SEGA · 1998</small>${ready ? '<span class="sm-play">▶ Play</span>' : ""}</div>
-      <div class="sw-info"><b>${esc(st.title)}</b>
-        <div class="sw-tags"><span class="sw-tag">Sega Model 3</span>${c && c.set ? `<span class="sw-tag">${esc(c.set)}</span>` : ""}${c && c.driveBoard ? '<span class="sw-tag">force feedback</span>' : ""}</div>
-        ${st.played && !st.played.startsWith("0001") ? `<small class="muted" style="font-size:11px">Played ${fmtTime(st.played)}</small>` : ""}
-      </div>`;
-    b.addEventListener("click", playSupermodel);
-    grid.appendChild(b);
-
-    // The game file
-    const romEl = document.getElementById("smRom");
-    if (st.rom && c) {
-      romEl.innerHTML = `<span class="muted">Game file</span><br>${c.ok
-        ? `<b style="color:var(--ok, #46a758)">✓ ${esc(c.set)}.zip</b> <small class="muted">ready to play</small>`
-        : `<b style="color:var(--warn)">✗ This file can't be played yet</b><br><small>${esc(c.problem || "")}</small>`}
-        <br><small class="muted">${esc(st.rom)}${c.parent ? " + " + esc(c.parent) : ""}</small>`;
-    } else {
-      romEl.innerHTML = `<span class="muted">Game file</span><br>${st.finding || !st.searched
-        ? "Looking for swtrilgya.zip in your ROM folders…"
-        : '<b style="color:var(--warn)">Not found yet</b><br><small class="muted">Click "Choose the game file…" and pick your Star Wars Trilogy Arcade ROM set (swtrilgya.zip or swtrilgy.zip, as for MAME). RetroPixels remembers it.</small>'}`;
-    }
-    const emuEl = document.getElementById("smEmu");
-    emuEl.innerHTML = st.exe
-      ? `<span class="muted">Emulator</span><br><b>Supermodel</b> <small class="muted">${esc(st.version || "")}</small>${st.patched ? "" : '<br><small style="color:var(--warn)">Not RetroPixels\' build: it plays in its own window, without recording</small>'}<br><small class="muted">${esc(st.exe)}</small>`
-      : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">Supermodel not found</b><br><small class="muted">It comes in the RetroPixels download (the Supermodel folder next to ${exeFile("RetroPixels")}). Unpack the whole download, or click "Change Supermodel…"</small>`;
-    document.getElementById("smEmbed").checked = !!st.embed;
-    document.getElementById("smEmbed").disabled = st.exe && !st.patched;
-    document.getElementById("smFull").checked = !!st.fullscreen;
-    document.getElementById("smWide").checked = !!st.wide;
-    document.getElementById("smInvert").checked = !!st.invertY;
-    document.getElementById("smFlight").checked = !!st.flight;
-    document.getElementById("smFlight").disabled = st.exe && !st.patched;
-    document.getElementById("smSmooth").value = st.smooth || "medium";
-    document.getElementById("smSmooth").disabled = (st.exe && !st.patched) || !st.flight;
-    document.getElementById("smRec").checked = !!st.record;
-    document.getElementById("smOpenFolder").disabled = !st.exe;
-    document.getElementById("smFindRom").disabled = !!st.finding;
-    const p = st.problem;
-    document.getElementById("smNote").innerHTML = p
-      ? `<div class="rec-note" style="background:#2a1416;border:1px solid var(--danger)"><b>The game didn't start.</b> ${esc(p.text)}<br><small class="muted">Supermodel's log: ${esc(p.log || "")}</small></div>` : "";
-    // The ffmpeg download prompt, when recording is on.
-    const rec = lastRec, needFF = !!(st.record && rec && !rec.ffmpeg);
-    const ffBusy = rec && rec.install && ["downloading", "verifying", "installing"].includes(rec.install.state);
-    const key = needFF ? (ffBusy ? "busy" : rec.install && rec.install.state) : "none";
-    if (key !== smFFShown || (needFF && ffBusy)) {
-      smFFShown = key;
-      const note = document.getElementById("smFFNote");
-      note.innerHTML = needFF ? ffmpegPanel(rec.install) : "";
-      if (needFF && !ffBusy) wireFFmpegPanel(note, () => api("/api/status").then(renderStatus).catch(() => {}));
-    }
-  }
-
-  async function playSupermodel() {
-    smMsg.style.color = ""; smMsg.textContent = "";
-    const st = smStatus;
-    if (!st) return;
-    if (st.embed && st.patched) {
-      // Docked: this window goes fullscreen (must happen right in the click).
-      if (st.fullscreen && !document.fullscreenElement) {
-        document.documentElement.requestFullscreen().then(() => { dolWentFullscreen = true; }).catch(() => {});
-      }
-      sendEmbedArea();
-    }
-    try {
-      await api("/api/supermodel/play", {});
-      toast("Starting Star Wars Trilogy Arcade…");
-      setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
-      // A game that can't run closes Supermodel within moments: look again so the reason shows.
-      setTimeout(() => { if (!(appStatus && appStatus.running)) loadSupermodel("check"); }, 4000);
-    } catch (e) {
-      smMsg.style.color = "var(--danger)"; smMsg.textContent = e.message;
-      if (dolWentFullscreen && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); dolWentFullscreen = false; }
-    }
-  }
-
-  async function smAction(body, ok) {
-    try {
-      const r = await api("/api/supermodel/action", body);
-      gotSupermodel(r);
-      if (ok) toast(ok);
-      return r;
-    } catch (e) { toast(e.message, true); if (smStatus) renderSupermodel(); return null; }
-  }
-
-  if (DESKTOP) {
-    document.getElementById("smChooseRom").addEventListener("click", async () => {
-      toast("Choose the game file in the window that just opened");
-      const r = await smAction({ action: "choose-rom" });
-      if (r && r.check && r.check.ok) toast("Star Wars Trilogy Arcade is ready: click it to play");
-    });
-    document.getElementById("smFindRom").addEventListener("click", () => smAction({ action: "find-rom" }, "Looking for the game…"));
-    document.getElementById("smEmbed").addEventListener("change", e => smAction({ action: "embed", on: e.target.checked }));
-    document.getElementById("smFull").addEventListener("change", e => smAction({ action: "fullscreen", on: e.target.checked }));
-    document.getElementById("smWide").addEventListener("change", e => smAction({ action: "wide", on: e.target.checked }));
-    document.getElementById("smFlight").addEventListener("change", e => smAction({ action: "flight-stick", on: e.target.checked },
-      e.target.checked ? "The stick aims like a flight stick" : "The stick works as a plain thumbstick"));
-    document.getElementById("smSmooth").addEventListener("change", e => smAction({ action: "smoothness", value: e.target.value },
-      "Smoothness: " + e.target.options[e.target.selectedIndex].text));
-    document.getElementById("smInvert").addEventListener("change", e => smAction({ action: "invert-y", on: e.target.checked },
-      e.target.checked ? "Stick up dives, back climbs" : "Stick up climbs"));
-    document.getElementById("smRec").addEventListener("change", e => smAction({ action: "record", on: e.target.checked },
-      e.target.checked ? "Games will be recorded" : "Games won't be recorded"));
-    document.getElementById("smOpenSaves").addEventListener("click", () => smAction({ action: "open-saves" }));
-    document.getElementById("smOpenFolder").addEventListener("click", () => smAction({ action: "open-folder" }));
-    document.getElementById("smChooseExe").addEventListener("click", () => smAction({ action: "choose-exe" }));
   }
 
   // ---------- Wii U (PixelU) ----------

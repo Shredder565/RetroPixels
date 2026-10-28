@@ -1,5 +1,9 @@
 # RetroPixels for Linux: plan
 
+> Since 2.22.0 Supermodel is gone: Star Wars Trilogy Arcade plays on
+> RetroPixels' own Sega Model 3 emulator (cores/model3), so the Supermodel
+> rows below (L1a, L6, the docking overlay) no longer apply.
+
 The project owner asked for "a linux version" of RetroPixels with every
 feature kept (2026-10-20). This file is the survey of what is Windows-only
 today, the target, the batches that get there, and how each batch is

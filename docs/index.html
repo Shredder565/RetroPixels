@@ -112,7 +112,7 @@
         View on GitHub
       </a>
     </div>
-    <div class="meta">Version 2.21.0 · Windows 10 / 11 · 64-bit · No games, keys or BIOS included · Linux comes later</div>
+    <div class="meta">Version 2.23.0 · Windows 10 / 11 · 64-bit · No games, keys or BIOS included · Linux comes later</div>
   </div>
   <div class="shot"><img src="images/playing.png" alt="RetroPixels playing a Genesis homebrew game" width="1280" height="800"></div>
   <div style="height:40px"></div>
@@ -122,12 +122,12 @@
   <h2 id="features">Features</h2>
   <div class="features">
     <div class="box"><h3>One window for every system</h3><p>Drop a game on the window. Zipped games open directly and the system is detected for you.</p></div>
-    <div class="box"><h3>Written from scratch</h3><p>Every CPU, graphics chip, sound chip and arcade board of the built-in systems is RetroPixels' own code. Works offline, no BIOS files needed.</p></div>
+    <div class="box"><h3>Written from scratch</h3><p>Every CPU, graphics chip, sound chip and arcade board of the built-in systems is RetroPixels' own code, except the Sega Model 3 sound chips, which follow Supermodel's (GPL-3.0). Works offline, no BIOS files needed.</p></div>
     <div class="box"><h3>Xbox controllers, up to four players</h3><p>Plug in and play, remap any button, and pick which player you are in 4-player games.</p></div>
     <div class="box"><h3>Records just the game</h3><p>Every game is recorded automatically, on every system. Videos contain only the game picture and sound. No borders, cursor, black bars or other windows.</p></div>
     <div class="box"><h3>Saves handled for you</h3><p>Battery saves are kept automatically. Save states with undo, and imports from other emulators.</p></div>
     <div class="box"><h3>Wii U, GameCube and Wii</h3><p>PixelU, RetroPixels' own Wii U and GameCube / Wii engines, come in the download and play inside the same window. Use your own game dumps and your own console's keys.</p></div>
-    <div class="box"><h3>Star Wars Trilogy Arcade</h3><p>Sega Model 3 in Supermodel, modified for RetroPixels: it finds your ROM set and starts fullscreen with the Xbox controller, with a flight stick feel for the thumbstick.</p></div>
+    <div class="box"><h3>Star Wars Trilogy Arcade</h3><p>Sega Model 3 on RetroPixels' own emulator, built in: the 3D board, sound board and MPEG music, with the Xbox stick as the flight yoke (flight stick feel) or the mouse. Nothing else to install.</p></div>
     <div class="box"><h3>MAME built in, any version</h3><p>The download comes with the MAME team's official release of MAME, unchanged. Add as many other MAME versions as you like, and RetroPixels checks which one plays each game.</p></div>
   </div>
 
@@ -147,7 +147,7 @@
       <tr><td>Atari 2600 / 7800</td><td><code>.a26</code> <code>.a78</code> <code>.bin</code></td><td>Nearly all bank-switching schemes, paddles, POKEY</td></tr>
       <tr><td>Arcade</td><td><code>.zip</code> ROM sets</td><td>Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze</td></tr>
       <tr><td>GameCube / Wii</td><td><code>.iso</code> <code>.rvz</code> <code>.wbfs</code> and more</td><td>New: PixelU's GameCube / Wii engine (GPL-2.0-or-later), in the download. Wii games need your own Wii's keys file</td></tr>
-      <tr><td>Sega Model 3</td><td><code>.zip</code> ROM set</td><td>New: Star Wars Trilogy Arcade in Supermodel (GPL-3.0-or-later), in the download</td></tr>
+      <tr><td>Sega Model 3</td><td><code>.zip</code> ROM set</td><td>New in 2.22.0: Star Wars Trilogy Arcade on RetroPixels' own Sega Model 3 emulator, built in (no Supermodel needed)</td></tr>
       <tr><td>Arcade (MAME)</td><td><code>.zip</code> <code>.7z</code> ROM sets</td><td>Through MAME: built in, or any other version, chosen per game</td></tr>
     </tbody>
   </table>
@@ -155,8 +155,8 @@
 
   <h2 id="start">Getting started</h2>
   <ol>
-    <li>Download <code>RetroPixels-x.y.z.zip</code> from the <a href="https://github.com/Shredder565/RetroPixels/releases/latest">latest release</a> and unzip it.</li>
-    <li>Run <code>RetroPixels.exe</code> (or <code>RetroPixels-Native.exe</code>). Keep the PixelU, MAME and Supermodel folders next to it.</li>
+    <li>Download <code>RetroPixels-x.y.z.zip</code> (or <code>RetroPixels-Native-x.y.z.zip</code>) from the <a href="https://github.com/Shredder565/RetroPixels/releases/latest">latest release</a> and unzip it.</li>
+    <li>Run <code>RetroPixels.exe</code> (or <code>RetroPixels-Native.exe</code>). Keep the PixelU and MAME folders next to it.</li>
     <li>Drop a game you own onto the window.</li>
   </ol>
   <div class="note"><strong>Note</strong>The program isn't code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Click <em>More info</em>, then <em>Run anyway</em>.</div>

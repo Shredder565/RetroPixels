@@ -2,6 +2,21 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.23.0] - 2026-10-28
+
+- Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside the Xbox controller, in RetroPixels.exe and RetroPixels Native. Whichever you moved last aims: the mouse points where it is over the picture, the left button fires and the right button is the yoke's thumb button.
+- Star Wars Trilogy Arcade: the flight stick feel from RetroPixels' Supermodel build is back, now in RetroPixels' own emulator and on by default: a round dead zone, the thumbstick's round gate stretched so the corners are reachable, a response curve for steady aim near the centre, and smoothing like the yoke's weight and spring. The game's machine settings have "Flight stick feel" (On / Off), "Flight stick smoothness" (Off, Light, Medium, Heavy) and "Stick up / down" (up climbs, or up dives like a flight yoke).
+- RetroPixels.exe: Star Wars Trilogy Arcade now reads the controller's stick as an analog stick (2.22.0 only had the stick's directions there).
+
+## [2.22.0] - 2026-10-27
+
+- Star Wars Trilogy Arcade (Sega Model 3) now plays on RetroPixels' own Sega Model 3 emulator, built into RetroPixels.exe and RetroPixels Native, like the other arcade games. Supermodel is no longer needed or included: nothing to install on your PC or keep in the RetroPixels folder. Open swtrilgy.zip or swtrilgya.zip like any arcade game.
+- The emulator has the Model 3 main board (PowerPC 603e), the Real3D 3D board drawn on the processor's cores, the tile layers, the sound board (two SCSP sound chips with their 68000) and the MPEG music board. Pictures and sound were checked against Supermodel frame by frame.
+- Controls: the Xbox controller's left stick aims like the arcade's flight yoke; the d-pad and arrow keys aim too, further the longer you hold them. Fire, Button 1 (the yoke's thumb button), Coin, Start and Service can be changed in Controls. High scores and settings are kept like a battery save. Save states aren't available for this game yet.
+- Licences: the Model 3 sound chips are a Go port of Supermodel's code and the music board follows Supermodel's, both GPL-3.0-or-later, so RetroPixels' programs are now distributed under GPL-3.0-or-later as a whole, with their full source attached to each release. cores/model3/NOTICE.txt lists each third-party part.
+- The Supermodel tab, RetroPixels Native's Supermodel menu and settings, and the Supermodel folder are gone.
+- Two downloads, one per program: RetroPixels-2.22.0.zip (RetroPixels.exe) and RetroPixels-Native-2.22.0.zip (RetroPixels-Native.exe), each with the engines and VERSION.txt.
+
 ## [2.21.0] - 2026-10-21
 
 - The first release since 2.19.0. 2.20.0 was never published as a release, so 2.21.0 includes its changes too (its notes are under 2.20.0 in the full change log), with one big difference: Wii U games now play in PixelU.

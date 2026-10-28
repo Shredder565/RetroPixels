@@ -12,7 +12,7 @@ package main
 //
 //   - child mode (PixelU-Wii, MAME): the box is a child window of the
 //     browser's app window, so the game moves, stacks and minimizes with it.
-//   - overlay mode (PixelU, Supermodel, as on Windows): the box is a
+//   - overlay mode (PixelU, as on Windows): the box is a
 //     frameless top-level window, transient for the app window (kept above
 //     it, no task bar entry), moved along with the page.
 //
@@ -512,9 +512,6 @@ func (s *dockSession) events() {
 // embedPixelU follows one PixelU (Wii U) run, its game screen over the page
 // as an overlay (as on Windows).
 func embedPixelU(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
-
-// embedSupermodel follows one Supermodel run like embedPixelU.
-func embedSupermodel(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
 
 // embedDolphin follows one PixelU-Wii (or MAME) run: docks its game screen
 // into the RetroPixels window as a child window, keeps it there, and makes

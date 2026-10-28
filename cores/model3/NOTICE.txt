@@ -1,0 +1,54 @@
+RetroPixels' Sega Model 3 emulator (cores/model3) - third-party parts
+=====================================================================
+
+Most of this package was written for RetroPixels from the hardware's
+behaviour, with Supermodel (https://github.com/trzy/Supermodel, the Sega
+Model 3 emulator by The Supermodel Team) as the reference its pictures and
+sound were compared against. These parts follow other projects' code
+closely and keep those projects' licences:
+
+- scsp.go: the Yamaha SCSP sound chips. A Go port of Supermodel's SCSP
+  emulation (Src/Sound/SCSP.cpp, SCSPDSP.cpp, SCSPLFO.cpp; written by ElSemi,
+  with fixes from MAME by R. Belmont and others), Copyright 2003-2026 The
+  Supermodel Team. GPL-3.0-or-later: see LICENSE-GPL-3.0.txt.
+- dsb.go: the MPEG music board (DSB2). Its command handling, volume and
+  stereo modes follow Supermodel's Src/Model3/DSB.cpp. GPL-3.0-or-later:
+  see LICENSE-GPL-3.0.txt.
+- crypto.go, crypto_tables.go: the Sega 315-5881 decryption, from MAME's
+  sega315_5881 emulation (Andreas Naive, Olivier Galibert, David Haywood),
+  BSD-3-Clause (text below).
+- mpeg.go: the MPEG Layer I/II decoder, a port of minimp3 by Lion
+  (lieff), released into the public domain (CC0).
+
+Because scsp.go and dsb.go are GPL-3.0-or-later, the RetroPixels programs
+that include this emulator (RetroPixels.exe, RetroPixels Native and
+RetroPixels for Android) are distributed under GPL-3.0-or-later as a whole;
+their full source is attached to each release.
+
+BSD-3-Clause (MAME's sega315_5881 files)
+----------------------------------------
+Copyright (c) Andreas Naive, Olivier Galibert, David Haywood
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from this
+   software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

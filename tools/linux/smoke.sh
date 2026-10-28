@@ -7,7 +7,6 @@
 # pointed inside it (nothing is written to the real ~/.config or
 # ~/.local), checks that:
 #   - every program and library in it finds what it loads (ldd);
-#   - Supermodel, when it is in it, starts (-help, -print-games, OpenGL);
 #   - ./RetroPixels starts, answers /ping and opens its window: a
 #     Chromium-based browser in --app mode on the page, with its profile in
 #     $XDG_DATA_HOME/RetroPixels/BrowserProfile;
@@ -99,21 +98,6 @@ find "$dir" -type f -name '*.so*' | while IFS= read -r f; do
 	fi
 done
 [ ! -s "$t/missing" ] || fail "missing libraries for: $(tr '\n' ' ' <"$t/missing")"
-
-if [ -x "$dir/Supermodel/supermodel" ]; then
-	log "Supermodel"
-	(
-		cd "$dir/Supermodel"
-		export SUPERMODEL_HOME="$t/smhome"
-		./supermodel -help >"$t/sm-help.txt"
-		grep -q -- '-rp-record' "$t/sm-help.txt"
-		./supermodel -print-games | grep -q swtrilgya
-		grep -q 'retropixels-1' "$SUPERMODEL_HOME/Log/Supermodel.log"
-		LIBGL_ALWAYS_SOFTWARE=1 ./supermodel -print-gl-info >"$t/sm-gl.txt" 2>&1
-		grep -q 'Version' "$t/sm-gl.txt"
-	) || fail "Supermodel doesn't start"
-	head -n 3 "$t/sm-gl.txt"
-fi
 
 # The browser wrapper: logs each start, adds the DevTools port (written by
 # the browser to DevToolsActivePort in its profile) and, as root (in a

@@ -454,7 +454,7 @@ func TestDockChild(t *testing.T) {
 	})
 }
 
-// TestDockOverlay: a PixelU/Supermodel stand-in in a frameless transient
+// TestDockOverlay: a PixelU stand-in in a frameless transient
 // window over the page, following the app window, hidden while it is.
 func TestDockOverlay(t *testing.T) {
 	bothWMs(t, func(t *testing.T, withWM bool) {
@@ -563,7 +563,7 @@ func TestDockMarkedUnmapped(t *testing.T) {
 	if w := gameScreen(c, eng.pid()); w != eng.win {
 		t.Fatalf("gameScreen = %x, want the marked %x", w, eng.win)
 	}
-	s := startSession(eng, embedSupermodel)
+	s := startSession(eng, embedPixelU)
 	eng.expect(t, "reparent")
 	eng.expect(t, "map")
 	waitUntil(t, "mapped in the box", func() bool { return viewable(c, eng.win) && isBox(c, parentOf(c, eng.win)) })

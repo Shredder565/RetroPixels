@@ -10,15 +10,14 @@ import (
 	"testing"
 
 	"retropixels/internal/pixelu"
-	"retropixels/internal/supermodel"
 )
 
 // On Linux the engines are named without .exe, the "choose a program"
 // dialog looks for that name (and all files), and a chosen program must be
 // marked as executable.
 func TestEngineNamesLinux(t *testing.T) {
-	if exeFile("RetroPixels") != "RetroPixels" || pixelu.ExeName != "PixelU" || supermodel.ExeName != "supermodel" {
-		t.Fatalf("names: %q %q %q", exeFile("RetroPixels"), pixelu.ExeName, supermodel.ExeName)
+	if exeFile("RetroPixels") != "RetroPixels" || pixelu.ExeName != "PixelU" {
+		t.Fatalf("names: %q %q", exeFile("RetroPixels"), pixelu.ExeName)
 	}
 	if f := programFilter("PixelU", pixelu.ExeName); f != "PixelU (PixelU)|PixelU" {
 		t.Errorf("filter %q", f)

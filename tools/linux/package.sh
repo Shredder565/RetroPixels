@@ -6,7 +6,7 @@
 # OUTDIR/RetroPixels-VERSION/ gets the same layout as the Windows download:
 #   RetroPixels (RetroPixels Native is Windows-only),
 #   PixelU/PixelU, PixelU/wii/PixelU-Wii, MAME/MAME 0.xxx/mame,
-#   Supermodel/supermodel, README.txt, CHANGELOG.txt, licences, VERSION.txt,
+#   README.txt, CHANGELOG.txt, licences, VERSION.txt,
 #   RetroPixels.desktop and retropixels.png (once tools/linux has them),
 # and is packed as OUTDIR/RetroPixels-VERSION.tar.gz (a workflow artifact
 # zip loses the executable bits, a tar.gz keeps them), with a copy of
@@ -15,12 +15,11 @@
 #   -v VERSION       e.g. 2.21.0-linux-test12 (default: main.go's appVersion
 #                    followed by -linux-dev)
 #   -e ENGINE=PATH   an engine's Linux build, a .tar.gz or a folder, for
-#                    ENGINE supermodel, pixelu, pixelu-wii or mame. Each is
+#                    ENGINE pixelu, pixelu-wii or mame. Each is
 #                    optional: what isn't given is left out and VERSION.txt
-#                    says so. For supermodel, pixelu and pixelu-wii the
-#                    folder holding the program (supermodel, PixelU,
-#                    PixelU-Wii) is found inside and becomes Supermodel/,
-#                    PixelU/ and PixelU/wii/. For mame the contents go into
+#                    says so. For pixelu and pixelu-wii the folder holding
+#                    the program (PixelU, PixelU-Wii) is found inside and
+#                    becomes PixelU/ and PixelU/wii/. For mame the contents go into
 #                    MAME/ as they are (MAME 0.xxx/mame, laid out by
 #                    tools/bundlemame).
 #   -n NOTES         a text file whose lines are listed in VERSION.txt under
@@ -52,8 +51,8 @@ while getopts v:e:n: opt; do
 		name=${OPTARG%%=*}
 		path=${OPTARG#*=}
 		case "$name" in
-		supermodel | pixelu | pixelu-wii | mame) ;;
-		*) die "unknown engine $name (supermodel, pixelu, pixelu-wii or mame)" ;;
+		pixelu | pixelu-wii | mame) ;;
+		*) die "unknown engine $name (pixelu, pixelu-wii or mame)" ;;
 		esac
 		[ "$name" != "$OPTARG" ] && [ -e "$path" ] || die "-e $OPTARG: no such file or folder"
 		engines="$engines $name=$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
@@ -108,16 +107,6 @@ engine_dir() {
 have() { case " $engines " in *" $1="*) return 0 ;; esac; return 1; }
 path_of() { for e in $engines; do [ "${e%%=*}" = "$1" ] && echo "${e#*=}"; done; }
 
-if have supermodel; then
-	log "Supermodel"
-	unpack "$(path_of supermodel)" "$tmp/supermodel"
-	src=$(engine_dir "$tmp/supermodel" supermodel)
-	mkdir -p "$dir/Supermodel"
-	cp -a "$src/." "$dir/Supermodel/"
-	for f in RetroPixels.txt LICENSE.txt Supermodel-source.tar.gz Config/Games.xml; do
-		[ -f "$dir/Supermodel/$f" ] || die "Supermodel/$f is missing"
-	done
-fi
 if have pixelu; then
 	log "PixelU"
 	unpack "$(path_of pixelu)" "$tmp/pixelu"
@@ -142,6 +131,8 @@ fi
 # ---- documents ----
 cp "$root/README.txt" "$root/CHANGELOG.txt" "$dir/"
 cp "$root/pixelu/LICENSE.txt" "$dir/LICENSE-MPL-2.0.txt"
+cp "$root/cores/model3/LICENSE-GPL-3.0.txt" "$dir/LICENSE-GPL-3.0.txt"
+cp "$root/cores/model3/NOTICE.txt" "$dir/NOTICE-Sega-Model-3.txt"
 cp "$root/wiiu/testdata/demo.rpx" "$dir/RetroPixels Wii U demo.rpx"
 for f in RetroPixels.desktop retropixels.png; do
 	if [ -f "$root/tools/linux/$f" ]; then
@@ -182,13 +173,7 @@ repo=${REPO:-}
 	else
 		echo "- MAME: not in this build yet (its Linux build isn't ready); a MAME installed on the system can be used"
 	fi
-	if have supermodel; then
-		echo "- Supermodel/supermodel: Sega Model 3 (Star Wars Trilogy Arcade). Supermodel by The Supermodel Team, modified for RetroPixels; GPL-3.0-or-later, Supermodel/LICENSE.txt"
-		echo "  Source: Supermodel/Supermodel-source.tar.gz (the exact source built); RetroPixels' changes: Supermodel/RetroPixels.txt"
-		echo "  Bundled libraries in Supermodel/lib (SDL2, SDL2_net, GLU), their licences in Supermodel/lib/LICENSES"
-	else
-		echo "- Supermodel (Sega Model 3): not in this build"
-	fi
+	echo "- Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed"
 	echo "- RetroPixels Native is Windows-only and is not part of the Linux download"
 	if [ -n "$notes" ] && [ -s "$notes" ]; then
 		echo "Engine builds used:"
@@ -211,7 +196,7 @@ while IFS= read -r f; do
 		echo "$f" >>"$tmp/elf"
 	fi
 done <"$tmp/files"
-for p in RetroPixels Supermodel/supermodel PixelU/PixelU PixelU/wii/PixelU-Wii; do
+for p in RetroPixels PixelU/PixelU PixelU/wii/PixelU-Wii; do
 	if [ -f "$dir/$p" ] && [ ! -x "$dir/$p" ]; then
 		die "$p is not executable"
 	fi

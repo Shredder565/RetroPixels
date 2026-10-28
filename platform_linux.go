@@ -115,7 +115,7 @@ func useXWayland() bool {
 }
 
 // xwaylandEnv makes the engines' toolkits pick X11: Qt (PixelU-Wii), GTK
-// (PixelU's wxWidgets UI, zenity), SDL 2 (Supermodel, MAME) and SDL 3.
+// (PixelU's wxWidgets UI, zenity), SDL 2 (MAME) and SDL 3.
 var xwaylandEnv = [][2]string{
 	{"QT_QPA_PLATFORM", "xcb"},
 	{"GDK_BACKEND", "x11"},

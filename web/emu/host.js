@@ -236,6 +236,8 @@
       if (this.core.aspect) this.info = Object.assign({}, this.info, { aspect: this.core.aspect });
       // ...and how many controllers it reads (arcade games for 3 or 4 players)
       if (this.core.players > (this.info.players || 1)) this.info = Object.assign({}, this.info, { players: this.core.players });
+      // ...and whether it reads the stick itself (then the stick doesn't also press the D-pad)
+      if (this.core.analogStick) this.info = Object.assign({}, this.info, { analogStick: true });
       // Games for 3 or 4 players get a button that picks which player the keyboard and
       // first controller play as (the other controllers move round with it).
       this.seat = 0;
@@ -275,6 +277,33 @@
           <button data-a="shot" title="Save a screenshot">📷</button>
         </div>`;
       this.canvas = root.querySelector("canvas");
+      // Games that aim with the mouse (Star Wars Trilogy): where the pointer is over the
+      // picture (-1..1) and which buttons are held. It works alongside the controller.
+      this.mouse = { x: NaN, y: NaN, b: 0 };
+      const aims = () => !!(this.core && this.core.setMouse);
+      const mousePos = (e) => {
+        const r = this.canvas.getBoundingClientRect();
+        const aspect = this.info.aspect || (this.core && this.core.width && this.core.width / this.core.height) || 4 / 3;
+        let dw = r.width, dh = r.width / aspect;
+        if (dh > r.height) { dh = r.height; dw = r.height * aspect; }
+        if (dw <= 0 || dh <= 0) return;
+        const clamp = (v) => Math.max(-1, Math.min(1, v));
+        this.mouse.x = clamp((e.clientX - r.left - (r.width - dw) / 2) / dw * 2 - 1);
+        this.mouse.y = clamp((e.clientY - r.top - (r.height - dh) / 2) / dh * 2 - 1);
+      };
+      this.canvas.addEventListener("mousemove", (e) => { if (aims()) mousePos(e); });
+      this.canvas.addEventListener("mousedown", (e) => {
+        if (!aims()) return;
+        mousePos(e);
+        if (e.button === 0) this.mouse.b |= 1;
+        if (e.button === 2) this.mouse.b |= 2;
+      });
+      this.canvas.addEventListener("mouseup", (e) => {
+        if (e.button === 0) this.mouse.b &= ~1;
+        if (e.button === 2) this.mouse.b &= ~2;
+      });
+      this.canvas.addEventListener("mouseleave", () => { this.mouse.x = NaN; this.mouse.y = NaN; this.mouse.b = 0; });
+      this.canvas.addEventListener("contextmenu", (e) => { if (aims()) e.preventDefault(); });
       this.ctx2d = this.canvas.getContext("2d", { alpha: false });
       this.msgEl = root.querySelector(".rp-msg");
       this.opts.container.innerHTML = "";
@@ -390,6 +419,7 @@
           this.core.setAnalog(who, ax[0] || 0, ax[1] || 0, ax[2] || 0, ax[3] || 0);
         }
       }
+      if (this.core.setMouse) this.core.setMouse(this.mouse.x, this.mouse.y, this.mouse.b);
     }
 
     // ---- main loop ----

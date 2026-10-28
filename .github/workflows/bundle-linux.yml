@@ -1,8 +1,7 @@
 name: RetroPixels for Linux (test build)
 
 # The Linux download: RetroPixels built from this commit (static Go
-# program), Supermodel (Sega Model 3) built from this commit by
-# supermodel.yml, and each other engine from the latest successful Linux
+# program, with Sega Model 3 built in), and each engine from the latest successful Linux
 # build on this branch once its workflow makes one (PixelU, PixelU-Wii, MAME;
 # each is optional until then, and VERSION.txt says what is in it). Checked
 # (glibc 2.35 floor, bundled libraries) and smoke-tested under Xvfb by
@@ -26,14 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Supermodel-linux-x64 from supermodel/ at this commit.
-  supermodel:
-    uses: ./.github/workflows/supermodel.yml
-    with:
-      targets: linux
-
   bundle:
-    needs: supermodel
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
@@ -81,18 +73,12 @@ jobs:
           v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-linux-test${{ github.run_number }}
           echo "VER=$v" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: Supermodel-linux-x64
-          path: eng/Supermodel-linux-x64
-
-      # The newest successful Linux build of each other engine on this branch;
+      # The newest successful Linux build of each engine on this branch;
       # until its workflow makes one, the engine is left out.
       - name: Engines
         run: |
-          echo "supermodel.yml: this run ($(git rev-parse --short HEAD))" > engines.txt
-          echo "-e supermodel=eng/Supermodel-linux-x64/Supermodel-linux.tar.gz" > engine-args.txt
-          test -f eng/Supermodel-linux-x64/Supermodel-linux.tar.gz
+          : > engines.txt
+          : > engine-args.txt
           get() { # workflow file, artifact name, package.sh engine name
             ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$BRANCH" --status success -L 10 --json databaseId -q '.[].databaseId' 2>/dev/null || true)
             for id in $ids; do
