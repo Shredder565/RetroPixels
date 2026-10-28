@@ -31,3 +31,18 @@ func ps3GameLabel(g rpcs3.Game) string {
 	}
 	return label
 }
+
+// ps3InUseLabel is the PS3 > Play menu's line saying which RPCS3 is in use.
+func ps3InUseLabel(st rpcs3.Status) string {
+	switch st.Source {
+	case rpcs3.SourceBundled:
+		v := strings.TrimPrefix(st.Version, "RPCS3 ")
+		if v != "" {
+			v = " " + v
+		}
+		return "Using the RPCS3" + v + " that comes with RetroPixels"
+	case rpcs3.SourceChosen:
+		return "Using your chosen RPCS3: " + strings.ReplaceAll(st.Root, "&", "&&")
+	}
+	return "Using your own RPCS3: " + strings.ReplaceAll(st.Root, "&", "&&")
+}

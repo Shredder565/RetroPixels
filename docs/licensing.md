@@ -49,6 +49,7 @@ before selling, have a lawyer read it together with `LICENSE.txt` and
 | PixelU-Wii (`pixelu/wii/Source`, data, art) | Shredder565 (every Dolphin source file replaced) | Proprietary code, but the program as shipped is GPL | Only under the GPL until the GPL libraries go (below) |
 | Model 3 engine (`supermodel/`: `Src` except `Pkgs/`, the Makefile, Android CMake list, `Config/Games.xml`, `Assets/`) | Shredder565 | Proprietary | Yes; its third-party code (`Src/Pkgs`, SDL, zlib, GLU) is permissive, notices only |
 | MAME (`MAME\` in the download) | MAME team | GPL-2.0-or-later | Separate program; may be bundled if its source is offered (it is, with each release) |
+| RPCS3 (`RPCS3\` in the Windows download) | RPCS3 team | GPL-2.0 | Separate program that RetroPixels launches (not linked), like MAME; bundled unchanged with its licence and a pointer to its source |
 
 Go modules: `go.mod` has no dependencies; RetroPixels uses only Go's
 standard library (BSD-3-Clause, notice in `THIRD-PARTY-NOTICES.txt`). Two
@@ -165,7 +166,7 @@ obligations" 4). The name "Supermodel" is still used for the folder,
 the program file and the tab; renaming it would avoid any suggestion that
 it is the upstream project (optional, not a licence matter).
 
-### MAME, FFmpeg, Dolphin
+### MAME, RPCS3, FFmpeg, Dolphin
 
 - **MAME** is bundled unchanged in the Windows and Linux downloads. It is a
   separate GPL-2.0+ program that RetroPixels starts, so bundling it is
@@ -173,6 +174,19 @@ it is the upstream project (optional, not a licence matter).
   licence goes with it (its own `COPYING`/`docs\legal`) and its source is
   offered (the release attaches `MAME-<version>-source.tar.gz`; keep doing
   that, or a written offer, for every paid download).
+- **RPCS3** (PlayStation 3) is bundled unchanged in the Windows download
+  (`RPCS3\`): the RPCS3 team's official Windows build from
+  `RPCS3/rpcs3-binaries-win`, pinned by release tag and SHA-256 in
+  `.github/workflows/bundle-test.yml`. Like MAME it is a separate GPL-2.0
+  program that RetroPixels only starts with a command line (never linked),
+  so it is mere aggregation. The download carries its licence
+  (`RPCS3\LICENSE.txt`, from the same RPCS3 commit) and `RPCS3\SOURCE.txt`
+  naming the matching commit of `github.com/RPCS3/rpcs3`. To be safe for a
+  paid or commercial download, also attach RPCS3's full source for that
+  commit (with its `3rdparty` submodules) to the release, or a written
+  offer, as is done for MAME: a link to upstream alone is GPL-2.0 section
+  3(c), which is meant for non-commercial distribution. No PS3 firmware,
+  keys, licences or games are ever bundled.
 - **FFmpeg** is not bundled with RetroPixels: it is downloaded on request
   from BtbN's GPL builds and run as a separate program. Fine.
 - **Dolphin** is only used from the user's own install. Fine.
@@ -184,7 +198,7 @@ it is the upstream project (optional, not a licence matter).
    assets). Consider showing them in an "About / Licences" screen.
 2. Offer the source of every GPL/MPL/LGPL part you ship: PixelU-Wii (the
    whole program, while GPL), the 19 `wiiu/` files, Cemu's
-   data files, MAME, and relinkable objects (or DLLs) for the LGPL
+   data files, MAME, RPCS3, and relinkable objects (or DLLs) for the LGPL
    libraries. If the repository becomes private, publish these sources
    separately (for example a "third-party sources" zip on each release)
    instead of the whole RetroPixels source.

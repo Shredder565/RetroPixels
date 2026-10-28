@@ -51,7 +51,7 @@ func setupFakePS3(t *testing.T) (root, argsFile string, g rpcs3.Game) {
 	argsFile = filepath.Join(t.TempDir(), "args")
 	cfgFile := filepath.Join(t.TempDir(), "rpcs3.json")
 	off := false
-	for k, v := range map[string]string{"RETRO_RPCS3_CONFIG": cfgFile, "FAKE_ARGS": argsFile, "FAKE_FAIL": "", "FAKE_PLAY": "1"} {
+	for k, v := range map[string]string{"RETRO_RPCS3_CONFIG": cfgFile, "RETRO_RPCS3_HOME": filepath.Join(t.TempDir(), "home"), "FAKE_ARGS": argsFile, "FAKE_FAIL": "", "FAKE_PLAY": "1"} {
 		t.Setenv(k, v)
 	}
 	if _, err := rpcs3.Update(func(c *rpcs3.Config) { c.Folder, c.Embed = root, &off }); err != nil {
@@ -70,7 +70,7 @@ func setupFakePS3(t *testing.T) (root, argsFile string, g rpcs3.Game) {
 func TestPS3PlaysAnInstalledGame(t *testing.T) {
 	root, argsFile, g := setupFakePS3(t)
 	st := ps3Status()["rpcs3"].(rpcs3.Status)
-	if st.Exe != filepath.Join(root, rpcs3.ExeName) || !st.Firmware || st.Games[0].Licence.OK() {
+	if st.Exe != filepath.Join(root, rpcs3.ExeName) || st.Source != rpcs3.SourceChosen || !st.Firmware || st.Games[0].Licence.OK() {
 		t.Fatalf("status: %+v", st)
 	}
 	// Without its licence the game doesn't start, and the reason names the file.

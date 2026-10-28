@@ -1750,7 +1750,7 @@
     if (st.busyError) need.unshift(esc(st.busyError));
     document.getElementById("ps3Need").innerHTML = need.map(t => `<div class="ps3-need">${t}</div>`).join("");
     document.getElementById("ps3Emu").innerHTML = r.exe
-      ? `<span class="muted">Emulator</span><br><b>RPCS3</b>${st.folder ? ' <small class="muted">(your chosen folder)</small>' : ""}<br><small class="muted">${esc(r.exe)}</small>`
+      ? `<span class="muted">Emulator</span><br><b>RPCS3</b> <small class="muted">(${r.source === "bundled" ? "comes with RetroPixels" + (r.version ? ": " + esc(r.version.replace(/^RPCS3 /, "")) : "") : r.source === "chosen" ? "your chosen folder" : "your own"})</small><br><small class="muted">${esc(r.exe)}</small>${r.source === "bundled" && st.finding ? '<br><small class="muted">Looking for your own RPCS3 on your drives…</small>' : ""}`
       : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">RPCS3 not found</b><br><small class="muted">${st.folder ? "rpcs3.exe isn't in " + esc(st.folder) : 'Click "Choose RPCS3 folder…"'}</small>`;
     document.getElementById("ps3Fw").innerHTML = !r.exe ? "" : r.firmware
       ? `<span class="muted">PS3 system software</span><br><b style="color:var(--ok, #46a758)">✓ installed</b> <small class="muted">${esc(r.firmwareVersion || "")}</small>`

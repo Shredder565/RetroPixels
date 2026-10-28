@@ -27,3 +27,12 @@ func TestPS3GameLabel(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+func TestPS3InUseLabel(t *testing.T) {
+	if got := ps3InUseLabel(rpcs3.Status{Source: rpcs3.SourceBundled, Version: "RPCS3 0.0.43-20267 (ff91404b)"}); got != "Using the RPCS3 0.0.43-20267 (ff91404b) that comes with RetroPixels" {
+		t.Error(got)
+	}
+	if got := ps3InUseLabel(rpcs3.Status{Source: rpcs3.SourceYours, Root: `D:\PS3 & more\rpcs3`}); got != `Using your own RPCS3: D:\PS3 && more\rpcs3` {
+		t.Error(got)
+	}
+}

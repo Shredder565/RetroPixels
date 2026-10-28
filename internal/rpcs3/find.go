@@ -1,8 +1,9 @@
 package rpcs3
 
-// Finding RPCS3: the folder the player chose, then the folders RetroPixels
-// knows the player keeps it in (KnownDirs), then a search of each drive's
-// game and emulator folders.
+// Finding RPCS3: the folder the player chose, then the player's own RPCS3
+// (the folders RetroPixels knows the player keeps it in, KnownDirs, and a
+// search of each drive's game and emulator folders), then the RPCS3 that
+// comes with RetroPixels (bundled.go).
 
 import (
 	"os"
@@ -38,33 +39,70 @@ func ExeIn(dir string) string {
 // for its program exe.
 func Root(exe string) string { return filepath.Dir(exe) }
 
+// Where the RPCS3 in use comes from (Status.Source).
+const (
+	SourceChosen  = "chosen"  // the folder the player chose
+	SourceYours   = "yours"   // the player's own RPCS3, found where they keep it or on the drives
+	SourceBundled = "bundled" // the RPCS3 that comes with RetroPixels, run from BundledHome
+)
+
 // FindExe returns RPCS3's program: in the folder the player chose (which
-// overrides everything else), else the one found before (remembered), else
-// in the known folders (KnownDirs, on Windows), else in RetroPixels'
-// folder's RPCS3 folder (appDir). "" when none of those has it; Search
-// then looks through the drives.
+// overrides everything else), else the player's own RPCS3 (the one found
+// on the drives before, remembered; the known folders, KnownDirs, on
+// Windows; an RPCS3 folder of their own next to RetroPixels, appDir),
+// else the RPCS3 that comes with RetroPixels, copied to BundledHome
+// (BundledExe). "" when none of those has it; Search then looks through
+// the drives.
 func FindExe(chosenDir, remembered, appDir string) string {
+	exe, _ := WhichExe(chosenDir, remembered, appDir)
+	return exe
+}
+
+// WhichExe is FindExe and where that RPCS3 comes from (SourceChosen,
+// SourceYours or SourceBundled; "" when there's none).
+func WhichExe(chosenDir, remembered, appDir string) (exe, source string) {
 	if chosenDir != "" {
-		return ExeIn(chosenDir) // the player's choice: nothing else is used
+		// The player's choice: nothing else is used. If they chose a
+		// RetroPixels download's RPCS3 folder, its lasting copy is run.
+		if IsBundle(chosenDir) && ExeIn(chosenDir) != "" && !sameDir(chosenDir, BundledHome()) {
+			p, _, err := InstallBundled(chosenDir, BundledHome())
+			if err != nil && IsBundle(BundledHome()) {
+				p = ExeIn(BundledHome())
+			}
+			if p == "" {
+				return "", ""
+			}
+			return p, SourceBundled
+		}
+		if p := ExeIn(chosenDir); p != "" {
+			if IsBundle(chosenDir) {
+				return p, SourceBundled
+			}
+			return p, SourceChosen
+		}
+		return "", ""
 	}
-	if remembered != "" && isFile(remembered) {
-		return remembered
+	if remembered != "" && isFile(remembered) && !IsBundle(Root(remembered)) {
+		return remembered, SourceYours
 	}
 	if runtime.GOOS == "windows" {
 		for _, d := range KnownDirs {
 			if p := ExeIn(d); p != "" {
-				return p
+				return p, SourceYours
 			}
 		}
 	}
 	if appDir != "" {
 		for _, d := range []string{filepath.Join(appDir, "RPCS3"), filepath.Join(appDir, "rpcs3")} {
-			if p := ExeIn(d); p != "" {
-				return p
+			if p := ExeIn(d); p != "" && !IsBundle(d) {
+				return p, SourceYours
 			}
 		}
 	}
-	return ""
+	if p := BundledExe(appDir); p != "" {
+		return p, SourceBundled
+	}
+	return "", ""
 }
 
 // searchWords: folder names worth going into when looking for RPCS3 on a
@@ -101,7 +139,8 @@ func Search(roots []string) string {
 		if found != "" {
 			return
 		}
-		if p := ExeIn(dir); p != "" {
+		if p := ExeIn(dir); p != "" && !IsBundle(dir) {
+			// (RetroPixels' bundled copy is not the player's own)
 			found = p
 			return
 		}

@@ -8,8 +8,8 @@ name: Supermodel (Sega Model 3) build
 # build of the same source is made on Ubuntu 22.04 (glibc 2.35 and later),
 # with the pinned SDL2 and SDL2_net built from source and bundled in
 # Supermodel/lib, and started headless as a check. The results are workflow
-# artifacts only (Supermodel-windows-x64, Supermodel-linux-x64): no release
-# is made. bundle-test.yml calls this workflow to put Supermodel in the
+# artifacts only (Supermodel-windows-x64, Supermodel-linux-x64, kept for a
+# day): no release is made. bundle-test.yml calls this workflow to put Supermodel in the
 # RetroPixels test download, bundle-linux.yml (targets: linux) in the Linux
 # one.
 
@@ -82,7 +82,9 @@ jobs:
         with:
           name: Supermodel-windows-x64
           path: package
-          retention-days: 14
+          # An intermediate build: bundle-test.yml puts it in the RetroPixels
+          # download and deletes it; a day is enough for a run of its own.
+          retention-days: 1
 
   # Supermodel for the Linux download: built on 22.04 so it runs on glibc
   # 2.35 and later; SDL2, SDL2_net and GLU go in Supermodel/lib (found through
@@ -184,7 +186,8 @@ jobs:
           name: Supermodel-linux-x64
           path: linux-artifact
           compression-level: 0
-          retention-days: 14
+          # Intermediate: bundle-linux.yml packages it and deletes it.
+          retention-days: 1
 
       - name: RetroPixels' Supermodel code (Go)
         uses: actions/setup-go@v5

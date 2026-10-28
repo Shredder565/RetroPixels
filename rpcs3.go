@@ -1,8 +1,9 @@
 package main
 
-// PlayStation 3 games in the player's own RPCS3 (internal/rpcs3): the PS3
+// PlayStation 3 games in RPCS3 (internal/rpcs3): the PS3
 // tab. RPCS3 is found in the folder the player chose, or where they keep it,
-// or on their drives; its installed games (and the disc games it knows) are
+// or on their drives, else the RPCS3 that comes with RetroPixels is used
+// (from %APPDATA%\RetroPixels\RPCS3); its installed games (and the disc games it knows) are
 // listed, and clicking one starts it through startProcess: one game at a
 // time, fullscreen in RPCS3's own window or docked inside the RetroPixels
 // window, with no RPCS3 game list. The tab says what's missing before a
@@ -71,8 +72,8 @@ func ps3Find(force bool) {
 func ps3Status() map[string]any {
 	c := rpcs3.Load()
 	st := rpcs3.Look(c, ps3AppDir())
-	if st.Exe == "" && c.Folder == "" {
-		ps3Find(false) // the first time the tab opens
+	if c.NeedsSearch(st) {
+		ps3Find(false) // the first time the tab opens (and once while only the bundled RPCS3 is in use)
 	}
 	ps3Mu.Lock()
 	defer ps3Mu.Unlock()

@@ -1,6 +1,7 @@
-// Package rpcs3 plays PlayStation 3 games in the player's own RPCS3
-// (https://rpcs3.net, GPL-2.0), the way RetroPixels plays arcade games in
-// the player's own MAME: it finds rpcs3.exe, lists the games installed in
+// Package rpcs3 plays PlayStation 3 games in RPCS3 (https://rpcs3.net,
+// GPL-2.0), a separate program RetroPixels starts the way it starts MAME:
+// the player's own, or the official build that comes in the Windows
+// download, run from a lasting copy (bundled.go). It finds rpcs3.exe, lists the games installed in
 // it (dev_hdd0\game) and the disc games it knows (games.yml), checks that
 // the PS3 system software and each game's licence are there, sets an Xbox
 // controller up as player 1, and builds RPCS3's command line.

@@ -21,6 +21,8 @@ where the full text is. In the Windows and Linux downloads:
   Supermodel\lib\LICENSES\         (Linux) SDL2, SDL2_net and GLU licences
   MAME\MAME 0.xxx\COPYING,         MAME's licence (GPL-2.0-or-later as a
    docs\legal\                     whole) and its components' licences
+  RPCS3\LICENSE.txt,               (Windows) RPCS3's licence (GNU GPL
+   RPCS3\SOURCE.txt                version 2) and where its source is
 
 In the source code the same texts are in pixelu/LICENSE.txt (MPL-2.0),
 wiiu/LICENSE-MPL-2.0.txt, pixelu/wii/COPYING and pixelu/wii/LICENSES/.
@@ -33,7 +35,8 @@ Contents
   2. PixelU (PixelU\PixelU.exe, Wii U engine)
   3. PixelU-Wii (PixelU\wii\PixelU-Wii.exe, GameCube and Wii engine)
   4. RetroPixels' Model 3 engine (Supermodel\supermodel.exe)
-  5. MAME (MAME\, arcade engine; a separate program)
+  5. MAME (MAME\, arcade engine) and RPCS3 (RPCS3\, PlayStation 3
+     emulator): separate programs
   6. Programs RetroPixels can download or use but does not include
   7. Licence texts
 
@@ -298,8 +301,10 @@ The third-party code it uses is all under permissive licences:
 
 
 =============================================================================
-5. MAME
+5. MAME and RPCS3 (separate programs)
 =============================================================================
+
+5.1 MAME
 
 The MAME folder holds the MAME team's official MAME release, unchanged
 (https://www.mamedev.org/). MAME is a separate program that RetroPixels
@@ -309,6 +314,26 @@ later, with parts under BSD-3-Clause and other licences (its COPYING file
 and docs\legal folder). MAME's source code for the version included is
 published with each RetroPixels release (MAME-<version>-source.tar.gz) and
 at https://github.com/mamedev/mame.
+
+5.2 RPCS3
+
+The RPCS3 folder in the Windows download holds an official Windows build of
+RPCS3, the PlayStation 3 emulator (https://rpcs3.net), unchanged, as the
+RPCS3 team publishes it at https://github.com/RPCS3/rpcs3-binaries-win
+(the build is named in RPCS3\RETROPIXELS-BUNDLED.txt). RPCS3 is Copyright
+the RPCS3 team and contributors and is licensed under the GNU General
+Public License, version 2 (RPCS3\LICENSE.txt). It is a separate program
+that RetroPixels starts with a command line; RetroPixels is not linked
+with it. On first use RetroPixels copies it to %APPDATA%\RetroPixels\RPCS3
+and runs it from there. RPCS3's own build also contains Qt 6 (LGPL-3.0,
+as separate DLLs), FFmpeg (LGPL) and OpenCV (Apache-2.0) libraries and
+other third-party code, under their own licences; see RPCS3's source.
+The source code of the RPCS3 included is the matching commit of
+https://github.com/RPCS3/rpcs3, named in RPCS3\SOURCE.txt, with its
+3rdparty submodules.
+
+No PlayStation 3 system software (firmware), keys, licences or games come
+with RetroPixels or with its RPCS3: you install your own.
 
 
 =============================================================================

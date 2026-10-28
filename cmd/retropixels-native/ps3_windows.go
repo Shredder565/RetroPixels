@@ -3,7 +3,9 @@ package main
 // PlayStation 3 games in the player's own RPCS3, as RetroPixels.exe's PS3
 // tab plays them (internal/rpcs3): the same RPCS3 (the folder chosen with
 // PS3 > Choose RPCS3 folder…, else where the player keeps it, else found on
-// the drives; kept in %APPDATA%\RetroPixels\rpcs3.json for both programs),
+// the drives, else the RPCS3 that comes with RetroPixels, run from
+// %APPDATA%\RetroPixels\RPCS3; kept in %APPDATA%\RetroPixels\rpcs3.json for
+// both programs),
 // the same games (installed in RPCS3, and its disc games), the same
 // command line. By default a game is fullscreen in RPCS3's own window; Play
 // inside this window docks it here (dock_windows.go) instead. The Xbox
@@ -95,7 +97,7 @@ func (a *app) addPS3Menu() {
 	appendMenu(m, mfString, cmdPS3OpenFolder, "&Open RPCS3's folder")
 	appendMenu(m, mfString, cmdPS3Status, "What RPCS3 &needs…")
 	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString|mfGrayed, 0, "Games play in your own RPCS3 (PS3 emulator, GPL)")
+	appendMenu(m, mfString|mfGrayed, 0, "Games play in RPCS3 (PS3 emulator, GPL): yours, or the one that comes with RetroPixels")
 	appendMenu(a.menu, mfPopup, m, "PS&3")
 }
 
@@ -104,13 +106,18 @@ func (a *app) addPS3Menu() {
 func (a *app) ps3Look() (rpcs3.Config, rpcs3.Status) {
 	c := rpcs3.Load()
 	st := rpcs3.Look(c, ps3AppDir())
-	if st.Exe == "" && c.Folder == "" && !a.ps3.finding && !a.ps3.searched {
+	if c.NeedsSearch(st) && !a.ps3.finding && !a.ps3.searched {
+		// Not found, or only the RPCS3 that comes with RetroPixels: the
+		// player's own (with their system software and games) comes first.
 		a.ps3.finding = true
 		go func() {
 			p := rpcs3.Search(dolphin.WiiKeysScanRoots())
-			if p != "" {
-				rpcs3.Update(func(c *rpcs3.Config) { c.Exe, c.Detected = p, true })
-			}
+			rpcs3.Update(func(c *rpcs3.Config) {
+				if p != "" {
+					c.Exe = p
+				}
+				c.Detected = true
+			})
 			a.event("ps3-found", p)
 		}()
 	}
@@ -141,6 +148,10 @@ func (a *app) ps3UpdateMenus() {
 			flags |= mfGrayed
 		}
 		appendMenu(m, flags, uintptr(cmdPS3Game0+i), ps3GameLabel(g))
+	}
+	if st.Exe != "" {
+		appendMenu(m, mfSeparator, 0, "")
+		appendMenu(m, mfString|mfGrayed, 0, ps3InUseLabel(st))
 	}
 	found := st.Exe != ""
 	idle := a.ps3.run == nil && a.ps3.installing == ""
@@ -237,7 +248,7 @@ func (a *app) ps3StatusText() string {
 		return rpcs3.NotFoundMessage
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "RPCS3: %s\n\n", st.Exe)
+	fmt.Fprintf(&b, "RPCS3 in use: %s\n%s\n\n", st.InUse, st.Exe)
 	if st.Firmware {
 		fmt.Fprintf(&b, "PS3 system software: installed %s\n", st.FirmwareVersion)
 	} else {

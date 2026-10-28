@@ -270,6 +270,7 @@ func TestXboxPadAsPlayer1(t *testing.T) {
 }
 
 func TestFindExe(t *testing.T) {
+	t.Setenv("RETRO_RPCS3_HOME", filepath.Join(t.TempDir(), "home"))
 	root := fakeRPCS3(t, false)
 	exe := filepath.Join(root, ExeName)
 	other := fakeRPCS3(t, false)

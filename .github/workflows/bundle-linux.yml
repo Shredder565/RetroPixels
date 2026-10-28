@@ -17,9 +17,11 @@ on:
   push:
     branches: [claude/wiiu-emulator-urpcen]
 
+# actions: write lets the bundle job delete this run's intermediate
+# Supermodel-linux-x64 artifact once it's packaged.
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 concurrency:
   group: bundle-linux
@@ -135,3 +137,13 @@ jobs:
             dist/VERSION.txt
           compression-level: 0
           retention-days: 14
+
+      # One download per run: Supermodel-linux-x64 is inside the tarball now.
+      - name: Remove the intermediate artifacts
+        run: |
+          for name in Supermodel-linux-x64 Supermodel-windows-x64; do
+            ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$name\") | .id")
+            for id in $ids; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" && echo "removed $name ($id)" || echo "::warning::couldn't remove $name ($id); it expires in a day"
+            done
+          done
