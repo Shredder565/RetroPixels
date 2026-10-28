@@ -469,7 +469,17 @@ func TestListenersLoopbackOnly(t *testing.T) {
 		ln.Close()
 		return p
 	}
-	h := NewHub(free(), free())
+	// An SNI port and a BizHawk base whose BizHawkPorts don't include the
+	// SNI port (else a BizHawk listener could answer on it).
+	ports := func() (int, int) {
+		for {
+			sni, base := free(), free()
+			if sni < base || sni >= base+BizHawkPorts {
+				return sni, base
+			}
+		}
+	}
+	h := NewHub(ports())
 	h.Start(true)
 	waitFor := func(what string, f func(Status) bool) Status {
 		for i := 0; i < 300; i++ {
@@ -517,7 +527,7 @@ func TestListenersLoopbackOnly(t *testing.T) {
 	}
 
 	// without sni, only the BizHawk ports are served
-	h2 := NewHub(free(), free())
+	h2 := NewHub(ports())
 	h2.Start(false)
 	h2.SetGame(&Game{Core: "gb", System: "GB"}, tg)
 	waitFor2 := func() Status {
