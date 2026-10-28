@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.24.0] - 2026-10-28
+
+- Star Wars Trilogy Arcade: C-3PO shows up again in Echo Base, and the big blue shape that covered the Millennium Falcon hangar is gone. The game copies some of its 3D data (C-3PO among it) straight from its program ROM, and the emulator was reading those copies from the wrong part of the ROM. Checked frame by frame against Supermodel.
+
 ## [2.23.0] - 2026-10-28
 
 - Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside the Xbox controller, in RetroPixels.exe and RetroPixels Native. Whichever you moved last aims: the mouse points where it is over the picture, the left button fires and the right button is the yoke's thumb button.

@@ -4,6 +4,14 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.24.0  (2026-10-28)
+--------------------------------
+- Star Wars Trilogy Arcade: C-3PO shows up again in Echo Base, and the big
+  blue shape that covered the Millennium Falcon hangar is gone. The game
+  copies some of its 3D data (C-3PO among it) straight from its program
+  ROM, and the emulator was reading those copies from the wrong part of the
+  ROM. Checked frame by frame against Supermodel.
+
 RetroPixels 2.23.0  (2026-10-28)
 --------------------------------
 - Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside
