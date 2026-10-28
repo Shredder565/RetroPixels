@@ -176,7 +176,7 @@ const guiSettings = "[main_window]\r\ninfoBoxEnabledWelcome=false\r\ninfoBoxEnab
 
 // settingsMark lists the RPCS3 settings RetroPixels has set, one per line,
 // so each is set once and a later change made in RPCS3 itself is kept.
-const settingsMark = "RETROPIXELS-SETTINGS.txt"
+const settingsMark = "RETROPIXELS-CONFIG.txt"
 
 // setting is one line of RPCS3's config.yml that RetroPixels sets once.
 type setting struct{ section, key, value string }
@@ -225,7 +225,7 @@ func prepareConfig(dir string, want []setting) error {
 	for _, l := range strings.Split(strings.ReplaceAll(string(mark), "\r\n", "\n"), "\n") {
 		done[l] = true
 	}
-	cfg := filepath.Join(dir, "config", "config.yml")
+	cfg := ConfigFile(dir)
 	b, err := os.ReadFile(cfg)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -243,14 +243,15 @@ func prepareConfig(dir string, want []setting) error {
 	if !changed {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
-		return err
-	}
 	if err := os.WriteFile(cfg, b, 0o644); err != nil {
 		return err
 	}
 	return os.WriteFile(markPath, mark, 0o644)
 }
+
+// ConfigFile is RPCS3's main settings file in its folder dir. It sits in
+// the folder itself; the other settings files are in dir/config.
+func ConfigFile(dir string) string { return filepath.Join(dir, "config.yml") }
 
 // SetConfig sets "key: value" in section of RPCS3's config.yml text, adding
 // the key or the section if missing.

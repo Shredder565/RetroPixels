@@ -76,8 +76,7 @@ func TestSetConfig(t *testing.T) {
 
 func TestPrepareConfigOnce(t *testing.T) {
 	dir := t.TempDir()
-	cfg := filepath.Join(dir, "config", "config.yml")
-	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	cfg := ConfigFile(dir)
 	os.WriteFile(cfg, []byte("Audio:\n  Renderer: Cubeb\n"), 0o644)
 	want := []setting{{"Audio", "Renderer", "XAudio2"}}
 	if err := prepareConfig(dir, want); err != nil {
