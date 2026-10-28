@@ -1070,6 +1070,11 @@ func (a *app) startGame(g *loadedGame, path string) {
 	saveSettings(a.settings)
 	s.present() // the first picture, and its size for the window
 	a.resizeToScale()
+	if g.System == "snes" && a.settings.snesDebugger() {
+		if err := s.attachSNESDebugger(true); err != nil {
+			a.showMessage("The SNES Debugger couldn't start: " + err.Error())
+		}
+	}
 	s.start()
 	a.apGameStarted(s)
 	a.autoRecordBuiltIn() // Record > Record games automatically

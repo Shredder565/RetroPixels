@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: SNES Debugger tests
+        run: cd tools/snes-debugger && cargo test --no-default-features
+
       - name: Program icon and version details
         run: sh tools/make-winres.sh && sh tools/make-winres-native.sh
 

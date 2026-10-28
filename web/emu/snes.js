@@ -366,8 +366,8 @@
         case 0x15: this.vmain = v; return;
         case 0x16: this.vaddr = (this.vaddr & 0xff00) | v; this.vlatch = this.vram[this.vramAddrMapped()]; return;
         case 0x17: this.vaddr = (this.vaddr & 0xff) | (v << 8); this.vlatch = this.vram[this.vramAddrMapped()]; return;
-        case 0x18: { const a = this.vramAddrMapped(); this.vram[a] = (this.vram[a] & 0xff00) | v; if (!(this.vmain & 0x80)) this.vinc(); return; }
-        case 0x19: { const a = this.vramAddrMapped(); this.vram[a] = (this.vram[a] & 0xff) | (v << 8); if (this.vmain & 0x80) this.vinc(); return; }
+        case 0x18: { const a = this.vramAddrMapped(); this.vram[a] = (this.vram[a] & 0xff00) | v; if (this.snes.tr) this.snes.tr.vram(a * 2); if (!(this.vmain & 0x80)) this.vinc(); return; }
+        case 0x19: { const a = this.vramAddrMapped(); this.vram[a] = (this.vram[a] & 0xff) | (v << 8); if (this.snes.tr) this.snes.tr.vram(a * 2 + 1); if (this.vmain & 0x80) this.vinc(); return; }
         case 0x1a: this.m7sel = v; return;
         case 0x1b: case 0x1c: case 0x1d: case 0x1e: case 0x1f: case 0x20: {
           const k = r - 0x1b;
@@ -378,8 +378,8 @@
         }
         case 0x21: this.cgaddr = v; this.cgLatch = -1; this.cgReadHigh = false; return;
         case 0x22:
-          if (this.cgLatch < 0) this.cgLatch = v;
-          else { this.cgram[this.cgaddr] = (this.cgLatch | (v << 8)) & 0x7fff; this.cgaddr = (this.cgaddr + 1) & 0xff; this.cgLatch = -1; }
+          if (this.cgLatch < 0) { this.cgLatch = v; if (this.snes.tr) this.snes.tr.cgLo(); }
+          else { if (this.snes.tr) this.snes.tr.cgHi(this.cgaddr); this.cgram[this.cgaddr] = (this.cgLatch | (v << 8)) & 0x7fff; this.cgaddr = (this.cgaddr + 1) & 0xff; this.cgLatch = -1; }
           return;
         case 0x23: this.wsel[0] = v; return;
         case 0x24: this.wsel[1] = v; return;
@@ -762,6 +762,88 @@
   const PATTERN = [[0], [0, 1], [0, 0], [0, 0, 1, 1], [0, 1, 2, 3], [0, 1, 0, 1], [0, 0], [0, 0, 1, 1]];
   const BUTTONS = ["R", "L", "X", "A", "Right", "Left", "Down", "Up", "Start", "Select", "Y", "B"];
 
+  // ===================================================================
+  // Debug tracer (RetroPixels SNES Debugger): off unless enableTrace() is
+  // called. It notes who wrote each byte of VRAM, CGRAM and WRAM (a DMA
+  // transfer or the CPU at an address) and where a DMA read it from, so the
+  // debugger can find the ROM addresses a background came from. The Go port
+  // (cores/snes/trace.go) keeps the same records.
+  // Writer codes: >= 0 the DMA record's id, -1 never written, -3 HDMA,
+  // -4 a DMA not kept (too many records), <= -16 the CPU: -16 - its PC.
+  // ===================================================================
+  const TRACE_MAX = 65536;
+  class Tracer {
+    constructor(snes) {
+      this.s = snes; this.frame = 0;
+      this.vramSrc = new Int32Array(0x10000).fill(-1); this.vramFrom = new Int32Array(0x10000).fill(-1);
+      this.cgSrc = new Int32Array(512).fill(-1); this.cgFrom = new Int32Array(512).fill(-1);
+      this.wramSrc = new Int32Array(0x20000).fill(-1); this.wramFrom = new Int32Array(0x20000).fill(-1);
+      this.regPc = new Int32Array(128).fill(-1);
+      this.recs = []; this.keys = new Map();
+      this.inDma = false; this.cur = -1; this.from = -1; this.inHdma = false;
+      this.cgLoSrc = -1; this.cgLoFrom = -1;
+    }
+    writer() { return this.inDma ? this.cur : this.inHdma ? -3 : -16 - this.s.cpu.getPC(); }
+    src() { return this.inDma ? this.from : -1; }
+    vram(byteAddr) { this.vramSrc[byteAddr] = this.writer(); this.vramFrom[byteAddr] = this.src(); }
+    cgLo() { this.cgLoSrc = this.writer(); this.cgLoFrom = this.src(); }
+    cgHi(word) { const b = word * 2; this.cgSrc[b] = this.cgLoSrc; this.cgFrom[b] = this.cgLoFrom; this.cgSrc[b + 1] = this.writer(); this.cgFrom[b + 1] = this.src(); }
+    wram(a) { this.wramSrc[a] = this.writer(); this.wramFrom[a] = this.src(); }
+    reg(r) { this.regPc[r] = this.s.cpu.getPC(); }
+    dmaBegin(ch, ctrl, bbad, src, size) {
+      const s = this.s, p = s.ppu, pc = s.cpu.getPC();
+      const span = [1, 2, 2, 4, 4, 4, 2, 4][ctrl & 7], hits = (lo, hi) => bbad <= hi && bbad + span - 1 >= lo;
+      const vaddr = hits(0x18, 0x19) ? p.vramAddrMapped() : -1, vmain = vaddr >= 0 ? p.vmain : -1;
+      const cg = hits(0x22, 0x22) ? p.cgaddr : -1, wm = hits(0x80, 0x80) ? s.wmadd : -1;
+      const key = `${ch},${ctrl},${bbad},${src},${size},${vaddr},${vmain},${cg},${wm},${pc}`;
+      let id = this.keys.get(key);
+      if (id === undefined) {
+        if (this.recs.length >= TRACE_MAX) id = -4;
+        else {
+          id = this.recs.length;
+          const rp = []; for (let r = 0; r < 7; r++) rp.push(this.regPc[ch * 16 + r]);
+          this.recs.push({ id, ch, ctrl, bbad, src, size, vaddr, vmain, cgaddr: cg, wmadd: wm, pc, regPc: rp, first: this.frame, last: this.frame, count: 0, line: s.line });
+          this.keys.set(key, id);
+        }
+      }
+      if (id >= 0) { const r = this.recs[id]; r.last = this.frame; r.count++; }
+      this.inDma = true; this.cur = id; this.from = -1;
+    }
+    dmaEnd() { this.inDma = false; this.cur = -1; this.from = -1; }
+    // the console was reset: its memory starts again
+    forget() { for (const a of [this.vramSrc, this.vramFrom, this.cgSrc, this.cgFrom, this.wramSrc, this.wramFrom, this.regPc]) a.fill(-1); }
+    // Everything the debugger saves for one moment of the game.
+    capture() {
+      const s = this.s, p = s.ppu, c = s.cart;
+      const used = new Set();
+      for (const arr of [this.vramSrc, this.cgSrc, this.wramSrc]) for (let i = 0; i < arr.length; i++) if (arr[i] >= 0) used.add(arr[i]);
+      // ...and the latest transfers, which say what the game does each frame
+      const recent = this.recs.slice().sort((a, b) => b.last - a.last || b.id - a.id).slice(0, 512);
+      for (const r of recent) used.add(r.id);
+      const records = [...used].sort((a, b) => a - b).map((i) => this.recs[i]);
+      const regs = s.cpu.regs();
+      const meta = {
+        format: "retropixels-snes-capture", version: 1,
+        frame: this.frame, line: s.line, title: c.title, map: c.map, romSize: c.size, headerAt: c.headerAt, chip: c.chip,
+        cpu: { a: regs.a, x: regs.x, y: regs.y, s: regs.s, d: regs.d, dbr: regs.dbr, pc: (regs.pbr << 16) | regs.pc, p: regs.p, e: regs.e ? 1 : 0 },
+        ppu: {
+          inidisp: p.inidisp, obsel: p.obsel, bgmode: p.bgmode, mosaic: p.mosaic, bgsc: [...p.bgsc], bgnba: [...p.bgnba], hofs: [...p.hofs], vofs: [...p.vofs],
+          vmain: p.vmain, vaddr: p.vaddr, m7sel: p.m7sel, m7: [...p.m7], m7hofs: p.m7hofs, m7vofs: p.m7vofs, cgaddr: p.cgaddr,
+          wsel: [...p.wsel], wh: [...p.wh], wbglog: p.wbglog, wobjlog: p.wobjlog, tm: p.tm, ts: p.ts, tmw: p.tmw, tsw: p.tsw,
+          cgwsel: p.cgwsel, cgadsub: p.cgadsub, fixed: p.fixed, setini: p.setini,
+        },
+        dmaRegs: [...s.dma], hdmaen: s.hdmaen, nmitimen: s.nmitimen, records,
+      };
+      const b = (a) => new Uint8Array(a.buffer.slice(a.byteOffset, a.byteOffset + a.byteLength));
+      const files = {
+        "vram.bin": b(p.vram), "cgram.bin": b(p.cgram), "oam.bin": b(p.oam), "wram.bin": b(s.wram),
+        "vram_src.bin": b(this.vramSrc), "vram_from.bin": b(this.vramFrom), "cgram_src.bin": b(this.cgSrc), "cgram_from.bin": b(this.cgFrom),
+        "wram_src.bin": b(this.wramSrc), "wram_from.bin": b(this.wramFrom),
+      };
+      return { meta, files };
+    }
+  }
+
   class SNES {
     constructor(romIn, opts) {
       opts = opts || {};
@@ -790,6 +872,7 @@
       // SA-1 chip (snes_sa1.js): takes over the cartridge bus and runs alongside the CPU
       this.sa1 = chip === "SA-1" ? new global.RPSA1(this) : null;
       this.dma = new Uint8Array(0x80);
+      this.tr = null; // debug tracer (enableTrace)
       this.hdma = [0, 1, 2, 3, 4, 5, 6, 7].map(() => ({ active: false, doTransfer: false, line: 0, addr: 0, ind: 0 }));
       this.input = [0, 0];
       this.width = 256; this.height = 224;
@@ -798,9 +881,11 @@
       this.clock = 0;
       if (chip === "Super FX") this.gsu = new global.RPSuperFX(this.cart, this, opts.sram); // [Super FX]
       this.reset();
+      if (opts.trace) this.enableTrace(); // RetroPixels SNES Debugger, from the first frame
     }
     reset() {
       this.wram.fill(0x55);
+      if (this.tr) this.tr.forget();
       this.apu.reset(); this.ppu.reset();
       this.dma.fill(0xff);
       this.clock = 0; this.line = 0; this.lineStart = 0; this.frameStart = 0;
@@ -826,7 +911,7 @@
         if (r >= 0) { this.cost = (bank & 0x80) && (off & 0x8000 || bank >= 0xc0) && (this.memsel & 1) ? 6 : 8; return r; }
       }
       if (!(bank & 0x40)) {
-        if (off < 0x2000) { this.cost = 8; if (write) { this.wram[off] = v; return 0; } return this.wram[off]; }
+        if (off < 0x2000) { this.cost = 8; if (write) { this.wram[off] = v; if (this.tr) this.tr.wram(off); return 0; } return this.wram[off]; }
         if (off < 0x4000) {
           this.cost = 6;
           if (this.gsu && off >= 0x3000 && off < 0x3500) { if (write) { this.gsu.regWrite(off, v); return 0; } return this.gsu.regRead(off); } // [Super FX]
@@ -840,7 +925,7 @@
       } else if (bank === 0x7e || bank === 0x7f) {
         this.cost = 8;
         const a = ((bank & 1) << 16) | off;
-        if (write) { this.wram[a] = v; return 0; }
+        if (write) { this.wram[a] = v; if (this.tr) this.tr.wram(a); return 0; }
         return this.wram[a];
       } else this.cost = bank >= 0xc0 && (this.memsel & 1) ? 6 : 8;
       if (this.gsu) { // [Super FX] cartridge ROM / RAM through the chip
@@ -869,7 +954,7 @@
       if (r < 0x34) { this.ppu.write(r, v); return; }
       if (r >= 0x40 && r < 0x80) { this.syncApu(); this.apu.portIn[r & 3] = v; return; }
       switch (r) {
-        case 0x80: this.wram[this.wmadd] = v; this.wmadd = (this.wmadd + 1) & 0x1ffff; return;
+        case 0x80: this.wram[this.wmadd] = v; if (this.tr) this.tr.wram(this.wmadd); this.wmadd = (this.wmadd + 1) & 0x1ffff; return;
         case 0x81: this.wmadd = (this.wmadd & 0x1ff00) | v; return;
         case 0x82: this.wmadd = (this.wmadd & 0x100ff) | (v << 8); return;
         case 0x83: this.wmadd = (this.wmadd & 0xffff) | ((v & 1) << 16); return;
@@ -914,7 +999,7 @@
       return this.mdr;
     }
     writeIO(off, v) {
-      if (off >= 0x4300 && off < 0x4380) { this.dma[off - 0x4300] = v; return; }
+      if (off >= 0x4300 && off < 0x4380) { this.dma[off - 0x4300] = v; if (this.tr) this.tr.reg(off - 0x4300); return; }
       switch (off) {
         case 0x4200: {
           const was = this.nmitimen;
@@ -958,16 +1043,20 @@
         this.clock += 8;
         // [chips] a coprocessor may supply the data itself (S-DD1 decompression)
         const feed = this.coproc && this.coproc.dmaFeed && !(ctrl & 0x80) ? this.coproc.dmaFeed(ch, (a1b << 16) | a1t, count) : null;
+        const tr = this.tr;
+        if (tr) tr.dmaBegin(ch, ctrl, bbad, (a1b << 16) | a1t, count);
         let i = 0;
         while (count > 0) {
           const b = (bbad + pat[i % pat.length]) & 0xff;
           const a = (a1b << 16) | a1t;
+          if (tr && !(ctrl & 0x80) && !feed) tr.from = a;
           if (ctrl & 0x80) this.pokeA(a, this.readB(b));
           else this.writeB(b, feed ? feed() : this.peekA(a));
           this.clock += 8;
           a1t = (a1t + step) & 0xffff;
           count--; i++;
         }
+        if (tr) tr.dmaEnd();
         d[o + 2] = a1t & 0xff; d[o + 3] = a1t >> 8;
         d[o + 5] = 0; d[o + 6] = 0;
       }
@@ -1001,6 +1090,7 @@
     hdmaLine() {
       const d = this.dma;
       let any = false;
+      if (this.tr) this.tr.inHdma = true;
       for (let ch = 0; ch < 8; ch++) {
         const h = this.hdma[ch];
         if (!(this.hdmaen & (1 << ch)) || !h.active) continue;
@@ -1024,6 +1114,7 @@
         d[o + 8] = h.addr & 0xff; d[o + 9] = h.addr >> 8; d[o + 10] = h.line;
       }
       if (any) this.clock += 18;
+      if (this.tr) this.tr.inHdma = false;
     }
 
     // ---------- running ----------
@@ -1081,6 +1172,7 @@
         this.hblank = false;
       }
       this.frameStart += LINE * this.lines;
+      if (this.tr) this.tr.frame++;
       this.syncApu();
       this.height = visible;
       if (ppu.hiresUsed) { this.width = 512; this.screen = ppu.frame512; } else { this.width = 256; this.screen = ppu.frame256; }
@@ -1105,6 +1197,10 @@
       a.nSamples = 0;
       return out.slice(0, k);
     }
+    // RetroPixels SNES Debugger: start noting who writes VRAM, CGRAM and WRAM.
+    enableTrace() { if (!this.tr) this.tr = new Tracer(this); }
+    // What the debugger saves: { meta (capture.json), files (name -> bytes) }.
+    debugCapture() { return this.tr ? this.tr.capture() : null; }
     getSRAM() {
       if (this.gsu) return this.gsu.getSRAM(); // [Super FX]
       if (this.coproc && this.coproc.getSRAM) return this.coproc.getSRAM(); // [chips]

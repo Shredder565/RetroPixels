@@ -241,10 +241,21 @@ func (m *Machine) compose() {
 
 // ---------------------------------------------------------------- bus
 
+// cromAt: the program ROM from address a (0xFFxxxxxx) on. The fixed ROM sits
+// at the top of memory and the banked ROM below it, as the processor sees
+// them. Bus masters such as the Real3D's DMA read both: Star Wars Trilogy
+// copies some 3D data (C-3PO's, for one) straight from the fixed ROM.
+func (m *Machine) cromAt(a uint32) []byte {
+	if base := uint32(0x100000000 - uint64(len(m.crom))); a >= base {
+		return m.crom[a-base:]
+	}
+	return m.bankedCROM[m.cromBank+a&0x7FFFFF:]
+}
+
 func (m *Machine) Read8(a uint32) uint8 {
 	switch a >> 24 {
 	case 0xFF:
-		return m.bankedCROM[m.cromBank+a&0x7FFFFF]
+		return m.cromAt(a)[0]
 	case 0xC2:
 		return m.dmaRead8(a & 0xFF)
 	case 0xC1, 0xF9:
@@ -284,7 +295,7 @@ func (m *Machine) Read8(a uint32) uint8 {
 func (m *Machine) Read16(a uint32) uint16 {
 	switch a >> 24 {
 	case 0xFF:
-		return binary.BigEndian.Uint16(m.bankedCROM[m.cromBank+a&0x7FFFFF:])
+		return binary.BigEndian.Uint16(m.cromAt(a))
 	case 0xF0, 0xFE:
 		switch a >> 16 & 0xFF {
 		case 0x0C, 0x0D:
@@ -308,7 +319,7 @@ func (m *Machine) Read16(a uint32) uint16 {
 func (m *Machine) Read32(a uint32) uint32 {
 	switch a >> 24 {
 	case 0xFF:
-		return binary.BigEndian.Uint32(m.bankedCROM[m.cromBank+a&0x7FFFFF:])
+		return binary.BigEndian.Uint32(m.cromAt(a))
 	case 0x84:
 		return bswap32(m.gpu.readReg(a & 0x3F))
 	case 0xC2:

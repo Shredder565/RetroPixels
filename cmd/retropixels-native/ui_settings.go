@@ -10,6 +10,8 @@ type uiSettings struct {
 	RecDir     string `json:"recordDir,omitempty"`     // Record > Change recordings folder; "" = Videos\RetroPixels
 	// Record > Record games automatically, for every system (unset: on).
 	AutoRecord *bool `json:"autoRecord,omitempty"`
+	// Options > Open the SNES Debugger with SNES games (unset: on).
+	SNESDebugger *bool `json:"snesDebugger,omitempty"`
 }
 
 // autoRecord: every game is recorded from its start.

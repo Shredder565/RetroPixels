@@ -1,0 +1,37 @@
+[package]
+name = "retropixels-snes-debugger"
+version = "1.0.0"
+edition = "2021"
+description = "RetroPixels SNES Debugger: finds where a SNES background's graphics, tilemap and palette are in the ROM, and swaps them for a picture"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "snesdbg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "retropixels-snes-debugger"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:rfd"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.17"
+eframe = { version = "0.31", optional = true, default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rfd = { version = "0.15", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
