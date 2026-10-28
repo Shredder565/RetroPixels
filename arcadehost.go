@@ -86,6 +86,10 @@ type arcadeBoardJSON struct {
 	DipsJS  []map[string]any `json:"dips"`
 	Players int              `json:"players"`
 	Games   []arcadeGameJSON `json:"games"`
+	// the board reads the stick itself / aims with the mouse (ticks then
+	// carry them, see arcTick)
+	AnalogStick bool `json:"analogStick,omitempty"`
+	MouseAim    bool `json:"mouseAim,omitempty"`
 }
 
 type arcadeFileJSON struct {
@@ -141,7 +145,8 @@ func remoteArcadeBoards() []arcadeBoardJSON {
 			continue
 		}
 		bj := arcadeBoardJSON{ID: "go-" + b.ID, Title: b.Title, Width: b.Width, Height: b.Height, FPS: b.FPS,
-			Buttons: b.Buttons, DipsJS: dipsJS(b.Dips), Players: or(b.Players, 2)}
+			Buttons: b.Buttons, DipsJS: dipsJS(b.Dips), Players: or(b.Players, 2),
+			AnalogStick: b.AnalogStick, MouseAim: b.MouseAim}
 		if bj.Buttons == nil {
 			bj.Buttons = arcade.DefaultButtons
 		}
@@ -196,6 +201,13 @@ func remoteArcadeBoards() []arcadeBoardJSON {
 type arcTick struct {
 	frames int
 	pads   []uint32
+	// boards with AnalogStick or MouseAim: player 1's stick (-1..1, up
+	// negative), the mouse over the picture (-1..1, down positive, NaN when
+	// off it) and its buttons (bit 0 left, bit 1 right)
+	extra          bool
+	stickX, stickY float32
+	mouseX, mouseY float32
+	mouseButtons   uint32
 }
 
 type arcReset struct{}
@@ -401,6 +413,12 @@ func serveArcade(ws *wsConn) {
 				for i := 0; i < n && 3+i*4+4 <= len(msg); i++ {
 					t.pads = append(t.pads, binary.LittleEndian.Uint32(msg[3+i*4:]))
 				}
+				if x := msg[min(len(msg), 3+n*4):]; len(x) >= 20 {
+					f := func(o int) float32 { return math.Float32frombits(binary.LittleEndian.Uint32(x[o:])) }
+					t.extra = true
+					t.stickX, t.stickY, t.mouseX, t.mouseY = f(0), f(4), f(8), f(12)
+					t.mouseButtons = binary.LittleEndian.Uint32(x[16:])
+				}
 				c = t
 			}
 		case arcMsgReset:
@@ -506,6 +524,11 @@ func (s *arcSession) tick(t arcTick) {
 				b = t.pads[p]
 			}
 			s.c.SetInput(p, b)
+		}
+		if t.extra {
+			s.c.SetAnalog(0, 0, t.stickX)
+			s.c.SetAnalog(0, 1, t.stickY)
+			s.c.SetMouse(t.mouseX, t.mouseY, t.mouseButtons)
 		}
 		for i := 0; i < t.frames; i++ {
 			s.c.RunFrame()

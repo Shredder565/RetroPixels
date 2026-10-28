@@ -51,6 +51,9 @@ type session struct {
 	// cores that read the left stick themselves (the N64's analog stick):
 	// it doesn't work their D-pad
 	analogStick bool
+	// cores that aim with the mouse (Star Wars Trilogy): the mouse always
+	// works for them, alongside the controller, with no setting to turn on
+	mouseAim bool
 
 	cmds chan func()
 	done chan struct{}
@@ -61,7 +64,9 @@ type session struct {
 	mouseX                        atomic.Uint32 // float32 bits, -1..1, or NaN when not over the picture
 	mousePaddle                   atomic.Bool
 	mouseFire                     atomic.Bool
-	seat                          atomic.Int32 // the player the keyboard and first controller play as (seat.go)
+	mouseY                        atomic.Uint32 // float32 bits, -1..1 (down positive), or NaN (mouseAim cores)
+	mouseBtns                     atomic.Uint32 // bit 0 left, bit 1 right (mouseAim cores)
+	seat                          atomic.Int32  // the player the keyboard and first controller play as (seat.go)
 
 	keysMu sync.Mutex
 	keys   map[string]bool
@@ -121,6 +126,9 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	if a, ok := c.(interface{ AnalogStick() bool }); ok {
 		s.analogStick = a.AnalogStick()
 	}
+	if m, ok := c.(interface{ MouseAim() bool }); ok {
+		s.mouseAim = m.MouseAim()
+	}
 	if n, ok := c.(interface{ ControlsNote() string }); ok {
 		s.note = n.ControlsNote()
 	}
@@ -128,6 +136,7 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	s.aspect = pictureAspect(s.info.Aspect, g.System, c.Width(), c.Height())
 	s.volume.Store(math.Float32bits(0.8))
 	s.mouseX.Store(math.Float32bits(float32(math.NaN())))
+	s.mouseY.Store(math.Float32bits(float32(math.NaN())))
 	if sr := c.SRAM(); sr != nil {
 		s.lastSRAM = append([]byte{}, sr...)
 	}
@@ -422,7 +431,7 @@ func (s *session) readInput() {
 			if pad != nil {
 				ax = pad.Axes
 			}
-			if p == 0 && s.mousePaddle.Load() {
+			if p == 0 && s.mousePaddle.Load() && !s.mouseAim {
 				if mx := math.Float32frombits(s.mouseX.Load()); !math.IsNaN(float64(mx)) {
 					ax[0] = mx
 				}
@@ -431,6 +440,11 @@ func (s *session) readInput() {
 				an.SetAnalog(who, i, v)
 			}
 		}
+	}
+	if m, ok := s.core.(interface {
+		SetMouse(x, y float32, buttons uint32)
+	}); ok && s.mouseAim {
+		m.SetMouse(math.Float32frombits(s.mouseX.Load()), math.Float32frombits(s.mouseY.Load()), s.mouseBtns.Load())
 	}
 	s.keysMu.Unlock()
 	s.padHotkeys(firstPad(pads))

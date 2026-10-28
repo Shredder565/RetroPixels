@@ -2,6 +2,12 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.23.0] - 2026-10-28
+
+- Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside the Xbox controller, in RetroPixels.exe and RetroPixels Native. Whichever you moved last aims: the mouse points where it is over the picture, the left button fires and the right button is the yoke's thumb button.
+- Star Wars Trilogy Arcade: the flight stick feel from RetroPixels' Supermodel build is back, now in RetroPixels' own emulator and on by default: a round dead zone, the thumbstick's round gate stretched so the corners are reachable, a response curve for steady aim near the centre, and smoothing like the yoke's weight and spring. The game's machine settings have "Flight stick feel" (On / Off), "Flight stick smoothness" (Off, Light, Medium, Heavy) and "Stick up / down" (up climbs, or up dives like a flight yoke).
+- RetroPixels.exe: Star Wars Trilogy Arcade now reads the controller's stick as an analog stick (2.22.0 only had the stick's directions there).
+
 ## [2.22.0] - 2026-10-27
 
 - Star Wars Trilogy Arcade (Sega Model 3) now plays on RetroPixels' own Sega Model 3 emulator, built into RetroPixels.exe and RetroPixels Native, like the other arcade games. Supermodel is no longer needed or included: nothing to install on your PC or keep in the RetroPixels folder. Open swtrilgy.zip or swtrilgya.zip like any arcade game.

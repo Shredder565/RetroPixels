@@ -436,6 +436,8 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.homeMouseLeave()
 		if a.sess != nil {
 			a.sess.mouseX.Store(math.Float32bits(float32(math.NaN())))
+			a.sess.mouseY.Store(math.Float32bits(float32(math.NaN())))
+			a.sess.mouseBtns.Store(0)
 		}
 	case wmLButtonDown, wmLButtonUp:
 		if a.sess == nil && uint32(m) == wmLButtonDown {
@@ -444,6 +446,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		if a.sess != nil && a.settings.MousePaddle {
 			a.sess.mouseFire.Store(uint32(m) == wmLButtonDown)
 		}
+		a.mouseButton(0, uint32(m) == wmLButtonDown)
+	case wmRButtonDown, wmRButtonUp:
+		a.mouseButton(1, uint32(m) == wmRButtonDown)
 	case wmTimer:
 		if wp == timerTitle {
 			a.updateTitle()
@@ -559,9 +564,28 @@ func (a *app) keyUp(vk int) bool {
 	return vk != vkMenu && vk != vkF10
 }
 
+// mouseButton: a mouse button over the window, for games that aim with
+// the mouse.
+func (a *app) mouseButton(bit uint, down bool) {
+	s := a.sess
+	if s == nil || !s.mouseAim {
+		return
+	}
+	for {
+		old := s.mouseBtns.Load()
+		v := old &^ (1 << bit)
+		if down {
+			v |= 1 << bit
+		}
+		if s.mouseBtns.CompareAndSwap(old, v) {
+			return
+		}
+	}
+}
+
 func (a *app) mouseMove(x, y int) {
 	s := a.sess
-	if s == nil || !a.settings.MousePaddle {
+	if s == nil || (!a.settings.MousePaddle && !s.mouseAim) {
 		return
 	}
 	if !a.mouseTracking {
@@ -577,14 +601,11 @@ func (a *app) mouseMove(x, y int) {
 	if r.W <= 0 {
 		return
 	}
-	v := float32(x-r.X)/float32(r.W)*2 - 1
-	if v < -1 {
-		v = -1
+	clamp := func(v float32) float32 { return max(-1, min(1, v)) }
+	s.mouseX.Store(math.Float32bits(clamp(float32(x-r.X)/float32(r.W)*2 - 1)))
+	if r.H > 0 {
+		s.mouseY.Store(math.Float32bits(clamp(float32(y-r.Y)/float32(r.H)*2 - 1)))
 	}
-	if v > 1 {
-		v = 1
-	}
-	s.mouseX.Store(math.Float32bits(v))
 }
 
 // ---------------- drawing ----------------

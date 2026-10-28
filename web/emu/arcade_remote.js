@@ -46,6 +46,7 @@
         this.sram = opts.sram ? new Uint8Array(opts.sram) : null;
         this.sound = []; this.ahead = 0; this.error = null; this.session = null;
         this.pads = [0, 0, 0, 0];
+        this.stick = [0, 0]; this.mouse = [NaN, NaN, 0]; // player 1's stick and the mouse (boards that read them)
         this.ready = new Promise((resolve, reject) => { this.onReady = resolve; this.onFail = reject; });
         this.ready.catch(() => {});
 
@@ -108,6 +109,11 @@
         }
       }
 
+      // player 1's left stick (-1..1, up negative), for boards that read it
+      setAnalog(p, x, y) { if (p === 0) this.stick = [x || 0, y || 0]; }
+      // the mouse over the picture (-1..1, down positive, NaN when off it), buttons bit 0 left, bit 1 right
+      setMouse(x, y, buttons) { this.mouse = [x, y, buttons >>> 0]; }
+
       runFrame() {
         if (this.error) throw this.error;
         if (this.ws.readyState !== 1 || !this.session || this.ahead >= MAX_AHEAD) return; // the emulator is busy: wait
@@ -116,9 +122,15 @@
           this.sentDips = d;
           this.ws.send(new Blob([new Uint8Array([DIPS]), enc.encode(d)]));
         }
-        const t = new Uint8Array(3 + 16), dv = new DataView(t.buffer);
+        const extra = def.analogStick || def.mouseAim;
+        const t = new Uint8Array(3 + 16 + (extra ? 20 : 0)), dv = new DataView(t.buffer);
         t[0] = TICK; t[1] = 1; t[2] = 4;
         for (let p = 0; p < 4; p++) dv.setUint32(3 + p * 4, this.pads[p], true);
+        if (extra) {
+          dv.setFloat32(19, this.stick[0], true); dv.setFloat32(23, this.stick[1], true);
+          dv.setFloat32(27, this.mouse[0], true); dv.setFloat32(31, this.mouse[1], true);
+          dv.setUint32(35, this.mouse[2], true);
+        }
         this.ws.send(t);
         this.ahead++;
       }
@@ -169,6 +181,7 @@
     Object.assign(RemoteBoard, {
       id: def.id, title: def.title, width: def.width, height: def.height, rotate: 0, fps: def.fps,
       buttons: def.buttons, dips: def.dips, players: def.players, games: def.games, remote: true,
+      analogStick: !!def.analogStick, mouseAim: !!def.mouseAim,
     });
     return RemoteBoard;
   }

@@ -337,6 +337,12 @@
       this.board = new Board(game, useFiles, { sampleRate: opts.sampleRate || 48000, dips: this.dipValues, sram: opts.sram || null, zipName });
       // boards that run inside RetroPixels.exe (arcade_remote.js) say when they're ready
       if (this.board.ready) this.ready = this.board.ready;
+      // boards that read the controller's stick themselves, or aim with the mouse (Star Wars Trilogy)
+      if (Board.analogStick && this.board.setAnalog) {
+        this.analogStick = true;
+        this.setAnalog = (p, x, y, rx, ry) => this.board.setAnalog(p, x, y, rx, ry);
+      }
+      if (Board.mouseAim && this.board.setMouse) this.setMouse = (x, y, buttons) => this.board.setMouse(x, y, buttons);
       this.bw = game.width || Board.width; this.bh = game.height || Board.height;
       this.rot = ((game.rotate !== undefined ? game.rotate : Board.rotate) || 0) % 360;
       const side = this.rot === 90 || this.rot === 270;

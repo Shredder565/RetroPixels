@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.22.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.23.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -23,8 +23,8 @@ any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.22.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.22.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.23.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.23.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -341,11 +341,21 @@ Star Wars Trilogy Arcade (Sega Model 3)
   a swtrilgya.zip that isn't merged needs the files of swtrilgy.zip added
   into it). Open it like any arcade game: drop it on the window, choose it
   in the Arcade system, or in RetroPixels Native, File > Open game.
-- Controls: the Xbox controller's left stick aims (the arcade's flight
-  yoke), and the d-pad or arrow keys aim too (the aim moves further the
-  longer you hold them). Fire is the trigger, Button 1 is the yoke's thumb
-  button (the Force), plus Coin, Start (1P) and Service. Change them in
-  Controls like any arcade game.
+- Controls: the mouse and the Xbox controller both work, with nothing to
+  turn on, and whichever you moved last aims. The mouse aims where it points
+  over the picture; the left button fires, the right button is the yoke's
+  thumb button (the Force). The controller's left stick aims like the
+  arcade's flight yoke, and the d-pad or arrow keys aim too (further the
+  longer you hold them). Fire is the trigger, Button 1 is the thumb button,
+  plus Coin, Start (1P) and Service. Change them in Controls like any
+  arcade game.
+- Flight stick feel (new in 2.23.0, on by default, as with Supermodel in
+  2.21.0): the thumbstick aims like the arcade's yoke, steady and precise
+  near the centre, full movement at the edge, the corners reachable, and
+  the aim glides like the yoke's weight and spring. Change it in the game's
+  machine settings: "Flight stick feel" (On / Off), "Flight stick
+  smoothness" (Off, Light, Medium, Heavy) and "Stick up / down" (up climbs,
+  or up dives like a flight yoke).
 - High scores and the game's settings are kept like a battery save.
   Save states aren't available for this game yet.
 - It needs a fast PC: the 3D board is drawn on the processor's cores.

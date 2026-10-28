@@ -146,6 +146,10 @@ type BoardDef struct {
 	Characters []string // who players 1-4 play as (4-player cabinets)
 	Games      []Game
 	New        func(g *Game, files Files, opts Opts) (Board, error)
+
+	// For RetroPixels.exe's page: the board reads the controller's stick
+	// itself (SetAnalog) and aims with the mouse (SetMouse).
+	AnalogStick, MouseAim bool
 }
 
 // ---------------------------------------------------------------- registry
@@ -1118,6 +1122,23 @@ func (c *Core) SetAnalog(player, axis int, v float32) {
 		SetAnalog(player, axis int, v float32)
 	}); ok {
 		a.SetAnalog(player, axis, v)
+	}
+}
+
+// MouseAim says the board aims with the mouse (Model 3's Star Wars Trilogy).
+func (c *Core) MouseAim() bool {
+	m, ok := c.board.(interface{ MouseAim() bool })
+	return ok && m.MouseAim()
+}
+
+// SetMouse passes the mouse to boards that aim with it: x, y -1..1 over the
+// picture (right and down positive, NaN when off it), buttons bit 0 left,
+// bit 1 right.
+func (c *Core) SetMouse(x, y float32, buttons uint32) {
+	if m, ok := c.board.(interface {
+		SetMouse(x, y float32, buttons uint32)
+	}); ok {
+		m.SetMouse(x, y, buttons)
 	}
 }
 
