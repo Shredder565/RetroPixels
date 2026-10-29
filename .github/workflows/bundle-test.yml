@@ -3,9 +3,8 @@ name: RetroPixels with PixelU (test build)
 # One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
 # built from this commit, with PixelU inside (the Wii U engine and the
 # GameCube / Wii engine, from their latest successful builds on this branch)
-# the built-in MAME, Supermodel (Sega Model 3, built from this commit by
-# supermodel.yml) and RPCS3 (PlayStation 3, the RPCS3 team's official
-# Windows build, pinned below). A workflow artifact only: no release is made.
+# the built-in MAME and Supermodel (Sega Model 3, built from this commit by
+# supermodel.yml). A workflow artifact only: no release is made.
 # The run shows only that one download: the Supermodel build it was made
 # from (an artifact of this run) is deleted once it's in the bundle.
 # It runs on each push, and again when a PixelU engine build finishes (those
@@ -109,58 +108,6 @@ jobs:
           test -f "$DIR/Supermodel/supermodel.exe" && test -f "$DIR/Supermodel/Config/Games.xml"
           test -f "$DIR/Supermodel/LICENSE.txt" && test -f "$DIR/Supermodel/THIRD-PARTY-NOTICES.txt"
 
-      # RPCS3, the RPCS3 team's official Windows build, unchanged, from their
-      # own releases (RPCS3/rpcs3-binaries-win; the tag is build-<the RPCS3
-      # commit>), pinned and checked by SHA-256 so the bundle is reproducible.
-      # Its GPL-2.0 licence comes from the same RPCS3 commit. RetroPixels
-      # copies it to %APPDATA%\RetroPixels\RPCS3 and runs it from there
-      # (internal/rpcs3/bundled.go). No PS3 firmware, keys, licences or games.
-      # To update: a newer release's tag, file name, version and both hashes.
-      - name: RPCS3 (PlayStation 3)
-        env:
-          RPCS3_VERSION: 0.0.43-20267
-          RPCS3_COMMIT: ff91404b7ce1dad03fa022c1f2ab5cf885c97f64
-          RPCS3_FILE: rpcs3-v0.0.43-20267-ff91404b_win64_msvc.7z
-          RPCS3_SHA256: dae7c9cd019945099bbe3a83f95b9f96b07d7cb8d488bcc9325c83d097497ece
-          RPCS3_LICENSE_SHA256: 39db8f9acf036595a2566ea3fe560bc7bd65d8749f088e0f4a4ef2f8a6cb4b34
-        run: |
-          tag="build-$RPCS3_COMMIT"
-          curl -fsSL --retry 3 -o rpcs3.7z "https://github.com/RPCS3/rpcs3-binaries-win/releases/download/$tag/$RPCS3_FILE"
-          echo "$RPCS3_SHA256  rpcs3.7z" | sha256sum -c -
-          curl -fsSL --retry 3 -o rpcs3-LICENSE "https://raw.githubusercontent.com/RPCS3/rpcs3/$RPCS3_COMMIT/LICENSE"
-          echo "$RPCS3_LICENSE_SHA256  rpcs3-LICENSE" | sha256sum -c -
-          mkdir -p "$DIR/RPCS3"
-          7z x -y -bd -o"$DIR/RPCS3" rpcs3.7z > /dev/null
-          rm rpcs3.7z
-          test -f "$DIR/RPCS3/rpcs3.exe" && test -f "$DIR/RPCS3/Qt6Core.dll"
-          # Never the player's things: no system software, keys, licences or games.
-          for d in dev_hdd0 dev_hdd1 dev_flash dev_flash2 dev_flash3 dev_usb000 dev_bdvd; do
-            if [ -e "$DIR/RPCS3/$d" ]; then echo "::error::the RPCS3 build has $d"; exit 1; fi
-          done
-          bad=$(find "$DIR/RPCS3" -type f \( -iname '*.pup' -o -iname '*.rap' -o -iname '*.edat' -o -iname '*.rif' -o -iname 'act.dat' -o -iname 'idps*' -o -iname '*.pkg' -o -iname 'eboot.bin' \))
-          if [ -n "$bad" ]; then echo "::error::the RPCS3 build has $bad"; exit 1; fi
-          cp rpcs3-LICENSE "$DIR/RPCS3/LICENSE.txt"
-          {
-            echo "RPCS3 $RPCS3_VERSION, the RPCS3 team's official Windows build, unchanged."
-            echo "RPCS3 is free software under the GNU General Public License, version 2 (LICENSE.txt)."
-            echo
-            echo "Its source code is commit $RPCS3_COMMIT of RPCS3:"
-            echo "  https://github.com/RPCS3/rpcs3/tree/$RPCS3_COMMIT"
-            echo "  (git clone https://github.com/RPCS3/rpcs3, then in it: git checkout $RPCS3_COMMIT and git submodule update --init --recursive)"
-            echo "This build: https://github.com/RPCS3/rpcs3-binaries-win/releases/tag/$tag ($RPCS3_FILE, SHA-256 $RPCS3_SHA256)"
-            echo
-            echo "RetroPixels starts RPCS3 as a separate program; it is not part of RetroPixels and RetroPixels does not change it."
-            echo "No PlayStation 3 system software, keys, licences or games are included."
-          } > "$DIR/RPCS3/SOURCE.txt"
-          # RetroPixels' marker: this is its bundled copy (first line: the build).
-          {
-            echo "RPCS3 $RPCS3_VERSION (${RPCS3_COMMIT:0:8})"
-            echo "https://github.com/RPCS3/rpcs3-binaries-win/releases/tag/$tag"
-            echo "$RPCS3_FILE sha256 $RPCS3_SHA256"
-            echo "RetroPixels copies this folder to %APPDATA%\RetroPixels\RPCS3 and runs it from there; it never runs it from here."
-          } > "$DIR/RPCS3/RETROPIXELS-BUNDLED.txt"
-          echo "RPCS3 $RPCS3_VERSION (RPCS3/rpcs3-binaries-win $tag)" >> engines.txt
-
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt LICENSE.txt THIRD-PARTY-NOTICES.txt "$DIR/"
@@ -183,7 +130,6 @@ jobs:
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "- Supermodel\\supermodel.exe: Sega Model 3 (Star Wars Trilogy Arcade). RetroPixels' own Model 3 engine (Supermodel for RetroPixels), LICENSE.txt; its third-party parts in THIRD-PARTY-NOTICES.txt"
-            echo "- RPCS3\\rpcs3.exe: PlayStation 3 (the RPCS3 team's official build, unchanged, GPL-2.0, RPCS3\\LICENSE.txt; its source: RPCS3\\SOURCE.txt). RetroPixels runs it from %APPDATA%\\RetroPixels\\RPCS3"
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo

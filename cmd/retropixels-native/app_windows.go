@@ -108,7 +108,6 @@ type app struct {
 	mame mameState   // arcade games in MAME (mame_windows.go)
 	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
 	sm   smState     // Star Wars Trilogy Arcade in Supermodel (supermodel_windows.go)
-	ps3  ps3State    // PlayStation 3 games in the player's RPCS3 (ps3_windows.go)
 	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
@@ -253,7 +252,6 @@ func (a *app) buildMenu() {
 	a.addDolphinMenu()
 	a.addPixelUMenu()
 	a.addMameMenu()
-	a.addPS3Menu()
 
 	a.optMenu = call(pCreatePopupMenu)
 	appendMenu(a.optMenu, mfString, cmdControls, "&Controls…")
@@ -328,7 +326,6 @@ func (a *app) updateMenus() {
 	a.dolUpdateMenus()
 	a.pixeluUpdateMenus()
 	a.supermodelUpdateMenus()
-	a.ps3UpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
@@ -465,7 +462,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.mameBeforeClose() || a.supermodelBeforeClose() || a.ps3BeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.supermodelBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -614,7 +611,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.mamePaint(hdc) && !a.supermodelPaint(hdc) && !a.ps3Paint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.supermodelPaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -752,7 +749,6 @@ func (a *app) updateTitle() {
 	t += a.mameTitle()
 	t += a.pixeluTitle()
 	t += a.supermodelTitle()
-	t += a.ps3Title()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -829,7 +825,6 @@ func (a *app) handleEvents() {
 			a.mameEvent(e.name, e.detail)
 			a.pixeluEvent(e.name, e.detail)
 			a.supermodelEvent(e.name, e.detail)
-			a.ps3Event(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -949,8 +944,6 @@ func (a *app) command(id int) {
 		a.mameCommand(id)
 	case id >= cmdSMFirst && id <= cmdSMLast:
 		a.supermodelCommand(id)
-	case id >= cmdPS3First && id <= cmdPS3Last:
-		a.ps3Command(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
 		a.apCommand(id)
 	case id == cmdAbout:
@@ -987,9 +980,6 @@ func (a *app) openPath(path string) {
 		return
 	}
 	if a.supermodelOpenPath(path) { // swtrilgy.zip / swtrilgya.zip (MAME can't play it)
-		return
-	}
-	if a.ps3OpenPath(path) { // a PS3 package or licence file goes to RPCS3
 		return
 	}
 	if a.pixeluOpenPath(path) {
@@ -1142,7 +1132,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() || a.ps3ToggleRecording() {
+	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() || a.supermodelToggleRecording() {
 		return
 	}
 	s := a.sess

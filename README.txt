@@ -40,10 +40,6 @@ What's in the download (RetroPixels-2.21.0.zip)
     RetroPixels' own Model 3 engine (it began as a copy of Supermodel and
     has been rewritten as RetroPixels' own; THIRD-PARTY-NOTICES.txt lists
     the third-party libraries in it).
-  * RPCS3\rpcs3.exe: PlayStation 3. The RPCS3 team's official Windows
-    build of RPCS3 (rpcs3.net), unchanged: a separate program under the
-    GNU GPL version 2 (RPCS3\LICENSE.txt; RPCS3\SOURCE.txt says where its
-    source is). No PS3 system software or games come with it.
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - LICENSE.txt (RetroPixels' licence) and THIRD-PARTY-NOTICES.txt (the
@@ -363,36 +359,6 @@ Star Wars Trilogy Arcade (Supermodel)
   (Supermodel), or open swtrilgy.zip / swtrilgya.zip (they start in
   Supermodel, not MAME). Its settings are under Arcade (MAME) > Supermodel
   settings.
-
-PlayStation 3 (RPCS3)
-- The "PS3" tab plays PlayStation 3 games in RPCS3 (the PS3 emulator,
-  rpcs3.net, GPL-2.0). RetroPixels starts it. It uses, in this order: the
-  folder you chose with "Choose RPCS3 folder...", your own RPCS3 if you
-  have one (RetroPixels finds it on your drives), else the RPCS3 that comes
-  in the RetroPixels download (the RPCS3 folder). The tab says which one
-  is in use.
-- The RPCS3 that comes with RetroPixels isn't run from the download
-  folder: the first time, RetroPixels copies it to
-  %APPDATA%\RetroPixels\RPCS3 and runs it from there, because RPCS3 keeps
-  your system software, installed games, licences and settings in its own
-  folder and the download folder is replaced when you update. A newer
-  RetroPixels replaces only RPCS3's program files there (never dev_hdd0,
-  dev_flash, dev_usb000, config or games.yml).
-- You need, all your own files: the PS3 system software (PS3UPDAT.PUP:
-  "Install PS3 system software..." or RPCS3's File > Install Firmware),
-  your games ("Install game (.pkg)..." or RPCS3's File > Install
-  Packages/Raps/Edats), and for PSN games their licence file (.rap or
-  .edat, named after the game's content ID: "Add licence file..." copies it
-  into RPCS3's dev_hdd0\home\00000001\exdata). RetroPixels never
-  downloads or includes any of them. The tab says what a game still needs.
-- Click a game: it starts fullscreen in RPCS3's own window (or inside
-  RetroPixels with "Play inside RetroPixels"). The Xbox controller is
-  player 1 (A = Cross, B = Circle, X = Square, Y = Triangle, rumble on)
-  unless you set RPCS3's controls up yourself.
-- PS3 games aren't recorded (RPCS3 can't save its picture for RetroPixels;
-  OBS Studio can record its window).
-- RetroPixels Native: the PS3 menu does the same; drop a .pkg, .rap or
-  .edat on the window to install it or add it.
 
 Recording games
 - Every game is recorded automatically as .mp4, from the start of the game

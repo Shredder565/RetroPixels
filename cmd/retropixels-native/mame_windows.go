@@ -401,7 +401,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		messageBox(a.hwnd, "A GameCube / Wii game is playing. Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
-	if a.pixeluBusy() || a.supermodelBusy() || a.ps3Busy() {
+	if a.pixeluBusy() || a.supermodelBusy() {
 		return
 	}
 	c := mame.Load()

@@ -3,8 +3,7 @@ name: Release
 # Publishes a RetroPixels release by hand (Actions > Release > Run workflow),
 # only once the owner has approved the version. It builds the full Windows
 # download (bundle-test.yml with release: true: RetroPixels.exe and
-# RetroPixels-Native.exe with PixelU, PixelU-Wii, MAME, Supermodel and
-# RPCS3), the
+# RetroPixels-Native.exe with PixelU, PixelU-Wii, MAME and Supermodel), the
 # Android app, and the source, then makes the GitHub release v<appVersion>
 # from this commit with CHANGELOG.md's notes for that version.
 
@@ -165,7 +164,6 @@ jobs:
             echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
             echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
             echo "  - RetroPixels' own Model 3 engine (Supermodel folder) for Star Wars Trilogy Arcade (Sega Model 3)"
-            echo "  - RPCS3 (RPCS3 folder), the RPCS3 team's official Windows build, unchanged, for PlayStation 3 (GPL-2.0; RPCS3\\SOURCE.txt names its source commit). RetroPixels runs it from %APPDATA%\\RetroPixels\\RPCS3, so your PS3 system software and games stay when you update"
             echo "- **RetroPixels.exe** and **RetroPixels-Native.exe**: the two programs on their own."
             echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer)."
             echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project."
