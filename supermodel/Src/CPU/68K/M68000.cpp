@@ -1705,7 +1705,7 @@ void M68000::AddSub(uint32_t op, bool isAdd)
 void M68000::CmpEor(uint32_t op)
 {
   const int rx = (op >> 9) & 7, opmode = (op >> 6) & 7, mode = (op >> 3) & 7, reg = op & 7;
-  const int sz = kSizeField[opmode & 3];
+  const int sz = (opmode & 3) == 3 ? 4 : kSizeField[opmode & 3];   // (CMPA's opmodes 3 and 7 have their own size)
   switch (Map().kind[op])
   {
   case CMPA:
