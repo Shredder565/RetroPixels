@@ -132,6 +132,12 @@ func runApp() {
 	if pSetProcessDpiAwarenessCx.Find() == nil {
 		call(pSetProcessDpiAwarenessCx, ^uintptr(3)) // PER_MONITOR_AWARE_V2 (also in the manifest)
 	}
+	// The engines' game screens are docked into this window. Windows refuses
+	// that for a window whose DPI awareness differs from ours unless the
+	// host window allows mixed DPI content; it's made on this thread.
+	if pSetThreadDpiHostingBehavior.Find() == nil {
+		call(pSetThreadDpiHostingBehavior, 1) // DPI_HOSTING_BEHAVIOR_MIXED
+	}
 	call(pTimeBeginPeriod, 1)
 
 	if w := openWaveOut(sampleRate); w != nil {

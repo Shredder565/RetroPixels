@@ -6,6 +6,7 @@ package main
 // internal/dolphin (GameWindow, Dock, Place, Close, Shutdown).
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 // emulator's run (dolRun, mameRun, pixeluRun) embeds one.
 type extRun struct {
 	pid    int
+	image  string         // the emulator's .exe name: its game screen may belong to another process of it
 	exited chan struct{}  // closed once the emulator has ended
 	child  atomic.Uintptr // the emulator's window while it's docked here
 	stopAt atomic.Int64   // when Stop game was asked (Unix ns)
@@ -50,12 +52,16 @@ func (a *app) dockWatch(r *extRun, wait time.Duration, ev string) {
 	host := a.hwnd
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
-	deadline := time.Now().Add(wait)
+	start := time.Now()
+	deadline := start.Add(wait)
 	var child uintptr
 	var lostAt time.Time
+	lg := newDockLog(ev, r)
+	defer lg.close()
 	for {
 		select {
 		case <-r.exited:
+			lg.printf("the emulator ended")
 			return
 		case <-tick.C:
 		}
@@ -70,23 +76,50 @@ func (a *app) dockWatch(r *extRun, wait time.Duration, ev string) {
 			}
 			// The window went away: the game was stopped, or the emulator
 			// made a new one (e.g. it switched fullscreen), docked below.
+			lg.printf("window %#x is no longer docked", child)
+			lg.windows()
 			child, lostAt = 0, time.Now()
 			r.child.Store(0)
 		}
 		h := dolphin.GameWindow(r.pid)
+		if h == 0 && r.image != "" && time.Since(start) > 2*time.Second {
+			// Not in the process that was started: another process of the
+			// same emulator may hold the game screen.
+			for _, pid := range dolphin.PIDsOf(r.image) {
+				if pid != r.pid {
+					if h = dolphin.GameWindow(pid); h != 0 {
+						lg.printf("game screen found in another %s process (%d)", r.image, pid)
+						break
+					}
+				}
+			}
+		}
+		lg.every(time.Second)
 		if h == 0 {
 			if !lostAt.IsZero() && time.Since(lostAt) > 3*time.Second {
 				// The game ended but the emulator is still running in the background.
+				lg.printf("no window for 3 s after the game screen went: closing the emulator")
 				dolphin.Shutdown(r.pid, r.exited, 5*time.Second)
 				return
 			}
 			if lostAt.IsZero() && time.Now().After(deadline) {
+				lg.printf("no game screen within %v", wait)
+				lg.windows()
 				a.event(ev+"-nodock", "")
 				return
 			}
 			continue
 		}
-		dolphin.Dock(h, host)
+		ok, err := dolphin.Dock(h, host)
+		lg.printf("docking window %#x: docked=%v err=%v", h, ok, err)
+		if !ok {
+			lg.windows()
+			if !lg.warned {
+				lg.warned = true
+				a.event(ev+"-dockfail", fmt.Sprint(err))
+			}
+			continue // tried again on the next tick
+		}
 		a.dockPlace(h, true)
 		call(pSetForegroundWindow, host)
 		dolphin.Focus(h)

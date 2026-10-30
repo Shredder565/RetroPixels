@@ -384,6 +384,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	}
 	r := &dolRun{extRun: newExtRun(cmd.Process.Pid), game: g, exe: exe, rec: rec, started: time.Now(),
 		embed: opts.Embed, volKick: make(chan struct{}, 1)}
+	r.image = filepath.Base(exe)
 	a.dol.run = r
 	a.dol.nextGame = false
 	a.dol.recWarn = ""
@@ -600,6 +601,8 @@ func (a *app) dolEvent(name, detail string) {
 	case "dol-nodock":
 		a.updateTitle()
 		call(pInvalidateRect, a.hwnd, 0, 0)
+	case "dol-dockfail":
+		a.showMessage("Windows wouldn't let the game into this window (" + detail + "). Still trying; details are in dock-dol.log")
 	case "dol-key":
 		switch detail {
 		case "fullscreen":

@@ -7,6 +7,7 @@ package dolphin
 // Closing it ends the game the same way Dolphin's own close button does.
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"sync"
@@ -22,6 +23,7 @@ var (
 	pIsWindowVisible          = modUser32.NewProc("IsWindowVisible")
 	pIsIconic                 = modUser32.NewProc("IsIconic")
 	pGetClassNameW            = modUser32.NewProc("GetClassNameW")
+	pGetWindowTextW           = modUser32.NewProc("GetWindowTextW")
 	pGetWindowRect            = modUser32.NewProc("GetWindowRect")
 	pGetWindowLongPtrW        = modUser32.NewProc("GetWindowLongPtrW")
 	pSetWindowLongPtrW        = modUser32.NewProc("SetWindowLongPtrW")
@@ -57,6 +59,7 @@ const (
 	wsExClientEdge    = 0x00000200
 	wsExStaticEdge    = 0x00020000
 	wsExAppWindow     = 0x00040000
+	wsExToolWindow    = 0x00000080
 
 	swpNoActivate      = 0x0010
 	swpFrameChanged    = 0x0020
@@ -101,7 +104,10 @@ func className(hwnd uintptr) string {
 }
 
 // GameWindow returns Dolphin's largest visible top-level window. In batch
-// mode with "render to main window" off, that's the game screen.
+// mode with "render to main window" off, that's the game screen. PixelU-Wii,
+// started to be docked, parks its game screen off-screen at (-32000, -32000)
+// until it's docked, so a window waiting there is taken first, whatever its
+// size: it's the game screen even when another window of it is bigger.
 func GameWindow(pid int) uintptr {
 	var best uintptr
 	var bestArea int32
@@ -114,6 +120,9 @@ func GameWindow(pid int) uintptr {
 		}
 		var r rect
 		pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&r)))
+		if r.L == parkingSpot && r.T == parkingSpot && r.R > r.L && r.B > r.T {
+			return h
+		}
 		if a := (r.R - r.L) * (r.B - r.T); a > bestArea {
 			best, bestArea = h, a
 		}
@@ -124,8 +133,12 @@ func GameWindow(pid int) uintptr {
 	return best
 }
 
-// Dock turns child into a frameless child window of host.
-func Dock(child, host uintptr) {
+// parkingSpot is where PixelU-Wii keeps its game screen until it's docked.
+const parkingSpot = -32000
+
+// Dock turns child into a frameless child window of host, and tells whether
+// it now is one (err says why not).
+func Dock(child, host uintptr) (bool, error) {
 	style, _, _ := pGetWindowLongPtrW.Call(child, gwlStyle)
 	style &^= wsPopup | wsCaption | wsThickFrame | wsSysMenu | wsMinimizeBox | wsMaximizeBox | wsMaximize
 	style |= wsChild | wsVisible | wsClipSiblings
@@ -133,7 +146,39 @@ func Dock(child, host uintptr) {
 	ex, _, _ := pGetWindowLongPtrW.Call(child, gwlExStyle)
 	ex &^= wsExAppWindow | wsExTopmost | wsExDlgModalFrame | wsExWindowEdge | wsExClientEdge | wsExStaticEdge
 	pSetWindowLongPtrW.Call(child, gwlExStyle, ex)
-	pSetParent.Call(child, host)
+	r, _, err := pSetParent.Call(child, host)
+	if Docked(child, host) {
+		return true, nil
+	}
+	if r != 0 {
+		err = nil
+	}
+	return false, err
+}
+
+// DescribeWindows lists a process's top-level windows (hidden ones too) for
+// a log: handle, class, title, place, size, and whether it's visible,
+// minimised or a tool window.
+func DescribeWindows(pid int) []string {
+	var out []string
+	for _, h := range windowsOf(pid, true) {
+		var r rect
+		pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&r)))
+		vis, _, _ := pIsWindowVisible.Call(h)
+		ic, _, _ := pIsIconic.Call(h)
+		ex, _, _ := pGetWindowLongPtrW.Call(h, gwlExStyle)
+		st, _, _ := pGetWindowLongPtrW.Call(h, gwlStyle)
+		parent, _, _ := pGetParent.Call(h)
+		out = append(out, fmt.Sprintf("%#x class=%q title=%q at %d,%d size %dx%d visible=%v minimised=%v tool=%v style=%#x ex=%#x parent=%#x",
+			h, className(h), windowText(h), r.L, r.T, r.R-r.L, r.B-r.T, vis != 0, ic != 0, ex&wsExToolWindow != 0, st, ex, parent))
+	}
+	return out
+}
+
+func windowText(h uintptr) string {
+	buf := make([]uint16, 256)
+	n, _, _ := pGetWindowTextW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return syscall.UTF16ToString(buf[:n])
 }
 
 // Docked tells whether child is still a live window docked in host.
