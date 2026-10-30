@@ -435,15 +435,21 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 	// ffmpeg is only needed to make the .mp4 once the game ends.
 	var rec *extRec
 	args := l.Args
-	if a.settings.autoRecord() && a.recFFmpeg(false, false) {
-		base := filepath.Join(a.settings.recDir(), "temp")
-		os.MkdirAll(base, 0o755)
-		if dir, err := os.MkdirTemp(base, "MAME-"); err == nil {
-			if ra := mame.RecordArgs(dir, mame.OptionsOf(l.Install.Exe)); ra != nil {
+	recWhy := "" // why an automatic recording isn't being made
+	if a.settings.autoRecord() {
+		if !a.recFFmpeg(false, false) {
+			recWhy = "ffmpeg isn't there"
+		} else {
+			base := filepath.Join(a.settings.recDir(), "temp")
+			os.MkdirAll(base, 0o755)
+			if dir, err := os.MkdirTemp(base, "MAME-"); err != nil {
+				recWhy = "the recordings folder can't be written (" + err.Error() + ")"
+			} else if ra := mame.RecordArgs(dir, mame.OptionsOf(l.Install.Exe)); ra == nil {
+				os.Remove(dir)
+				recWhy = l.Install.Label() + " can't record games"
+			} else {
 				args = append(append([]string(nil), args...), ra...)
 				rec = a.newExtRec(g.Name, dir)
-			} else {
-				os.Remove(dir)
 			}
 		}
 	}
@@ -490,6 +496,12 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 	}
 	call(pInvalidateRect, a.hwnd, 0, 0)
 	a.updateTitle()
+	switch {
+	case rec != nil:
+		a.showMessage("Recording: the video is saved when the game ends")
+	case recWhy != "":
+		a.showMessage("Not recording this game: " + recWhy)
+	}
 }
 
 // mameStop ends the game the way MAME's own close button does (high

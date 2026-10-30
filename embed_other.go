@@ -13,6 +13,8 @@ func embedPixelU(pid int, exited <-chan struct{}) {}
 
 func embedSupermodel(pid int, exited <-chan struct{}) {}
 
+func embedMAME(pid int, exited <-chan struct{}) {}
+
 func hostWindowPresent() bool { return false }
 
 func embeddedWindow(pid int) uintptr { return 0 }

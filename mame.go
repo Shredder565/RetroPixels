@@ -159,7 +159,7 @@ func launchMameGame(path, exe string) error {
 	cmd, out := mame.Command(l.Install.Exe, args...)
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
-		onStart = embedDolphin // docks MAME's window the same way
+		onStart = embedMAME // docks MAME's window over the page
 	}
 	mameMu.Lock()
 	mameProblem = nil

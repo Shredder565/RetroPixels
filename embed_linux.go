@@ -513,6 +513,10 @@ func (s *dockSession) events() {
 // as an overlay (as on Windows).
 func embedPixelU(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
 
+// embedMAME follows one MAME run: on Linux MAME's window docks as a child,
+// as Dolphin's does.
+func embedMAME(pid int, exited <-chan struct{}) { embedWindow(pid, exited, false) }
+
 // embedSupermodel follows one Supermodel run like embedPixelU.
 func embedSupermodel(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
 

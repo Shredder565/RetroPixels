@@ -363,6 +363,11 @@ func embedPixelU(pid int, exited <-chan struct{}) { embedWindow(pid, exited, tru
 // browser window wouldn't show), and Supermodel draws at the size it's given.
 func embedSupermodel(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
 
+// embedMAME follows one MAME run like embedPixelU: MAME's Direct3D picture
+// doesn't show in a child window of the browser window (the page shows
+// through, white), so its window stays over the page as an owned window.
+func embedMAME(pid int, exited <-chan struct{}) { embedWindow(pid, exited, true) }
+
 // hostWindowPresent: the RetroPixels app window is open, so a game started
 // now gets docked into it.
 func hostWindowPresent() bool { return findHostWindow() != 0 }
