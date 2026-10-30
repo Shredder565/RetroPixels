@@ -38,6 +38,15 @@ var (
 // supermodelHome is the player's Supermodel folder (SUPERMODEL_HOME).
 func supermodelHome() string { return supermodel.Home(configDir()) }
 
+// supermodelOwnExe is the Supermodel that comes with RetroPixels, if it's there.
+func supermodelOwnExe() string {
+	appDir := ""
+	if exe, err := os.Executable(); err == nil {
+		appDir = filepath.Dir(exe)
+	}
+	return supermodel.OwnExe(appDir)
+}
+
 func supermodelExe() string {
 	cfgMu.Lock()
 	chosen := cfg.SupermodelExe
@@ -292,7 +301,7 @@ func supermodelStatus() map[string]any {
 	rom, c := supermodelROM()
 	cfgMu.Lock()
 	st := map[string]any{"fullscreen": supermodelFullscreenOn(), "embed": supermodelEmbedOn(), "wide": cfg.SupermodelWide,
-		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "smooth": supermodel.SmoothnessName(cfg.SupermodelSmooth), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != ""}
+		"invertY": cfg.SupermodelInvertY, "flight": supermodelFlightOn(), "smooth": supermodel.SmoothnessName(cfg.SupermodelSmooth), "record": pixeluRecordOn(), "played": cfg.SupermodelPlayed, "chosenExe": cfg.SupermodelExe != "", "ownExe": supermodelOwnExe() != ""}
 	cfgMu.Unlock()
 	smMu.Lock()
 	st["finding"], st["searched"], st["problem"] = smFinding, smSearched, smProblem

@@ -1677,6 +1677,8 @@
     emuEl.innerHTML = st.exe
       ? `<span class="muted">Emulator</span><br><b>Supermodel</b> <small class="muted">${esc(st.version || "")}</small>${st.patched ? "" : '<br><small style="color:var(--warn)">Not RetroPixels\' build: it plays in its own window, without recording</small>'}<br><small class="muted">${esc(st.exe)}</small>`
       : `<span class="muted">Emulator</span><br><b style="color:var(--warn)">Supermodel not found</b><br><small class="muted">It comes in the RetroPixels download (the Supermodel folder next to ${exeFile("RetroPixels")}). Unpack the whole download, or click "Change Supermodel…"</small>`;
+    // RetroPixels' own Supermodel is always used when it's there: nothing to change then.
+    document.getElementById("smChooseExe").hidden = !!st.ownExe;
     document.getElementById("smEmbed").checked = !!st.embed;
     document.getElementById("smEmbed").disabled = st.exe && !st.patched;
     document.getElementById("smFull").checked = !!st.fullscreen;

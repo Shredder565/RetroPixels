@@ -103,6 +103,7 @@ func (a *app) supermodelUpdateMenus() {
 	r := a.sm.run
 	enableItem(a.menu, cmdSMPlay, r == nil && !a.sm.finding)
 	enableItem(a.menu, cmdSMStop, r != nil)
+	enableItem(a.menu, cmdSMChangeExe, a.supermodelOwnExe() == "") // RetroPixels' own is always used when it's there
 	checkItem(a.menu, cmdSMFullscreen, s.fullscreen())
 	checkItem(a.menu, cmdSMEmbed, s.embed())
 	checkItem(a.menu, cmdSMWide, s.Wide)
@@ -182,6 +183,15 @@ func (a *app) supermodelExe() string {
 	}
 	home, _ := os.UserHomeDir()
 	return supermodel.FindExe(a.settings.Supermodel.Exe, appDir, home)
+}
+
+// supermodelOwnExe is the Supermodel that comes with RetroPixels, if it's there.
+func (a *app) supermodelOwnExe() string {
+	appDir := ""
+	if exe, err := os.Executable(); err == nil {
+		appDir = filepath.Dir(exe)
+	}
+	return supermodel.OwnExe(appDir)
 }
 
 func (a *app) supermodelChooseExe() string {

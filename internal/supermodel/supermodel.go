@@ -30,20 +30,20 @@ func isFile(p string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// FindExe returns Supermodel's program: the one chosen by the player if it
-// still exists, else the one that came with RetroPixels
-// (appDir\Supermodel\supermodel.exe), else the newest official download
-// unpacked into Downloads (home\Downloads\supermodel*\supermodel.exe; on
-// Linux supermodel, in the desktop's Downloads folder or ~/Downloads). ""
-// if there is none.
+// FindExe returns Supermodel's program: RetroPixels' own build, which comes
+// in the RetroPixels download (appDir\Supermodel\supermodel.exe), whenever
+// it's there, so no separate Supermodel is needed and a Supermodel the
+// player has elsewhere is never used instead. Only without it (RetroPixels
+// run from outside its download): the one chosen by the player if it still
+// exists, else the newest official download unpacked into Downloads
+// (home\Downloads\supermodel*\supermodel.exe; on Linux supermodel, in the
+// desktop's Downloads folder or ~/Downloads). "" if there is none.
 func FindExe(chosen, appDir, home string) string {
+	if p := OwnExe(appDir); p != "" {
+		return p
+	}
 	if chosen != "" && isFile(chosen) {
 		return chosen
-	}
-	if appDir != "" {
-		if p := filepath.Join(appDir, "Supermodel", ExeName); isFile(p) {
-			return p
-		}
 	}
 	if home == "" {
 		return ""
@@ -62,6 +62,18 @@ func FindExe(chosen, appDir, home string) string {
 		}
 	}
 	return best
+}
+
+// OwnExe is the Supermodel that comes with RetroPixels (appDir\Supermodel),
+// or "" when it isn't there.
+func OwnExe(appDir string) string {
+	if appDir == "" {
+		return ""
+	}
+	if p := filepath.Join(appDir, "Supermodel", ExeName); isFile(p) {
+		return p
+	}
+	return ""
 }
 
 // Patched tells RetroPixels' own build of Supermodel from another one (such

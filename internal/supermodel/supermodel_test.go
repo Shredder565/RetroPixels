@@ -249,9 +249,14 @@ func TestFindExe(t *testing.T) {
 	if got := FindExe("", app, home); got != own {
 		t.Fatalf("the one next to RetroPixels comes first: %q", got)
 	}
-	if got := FindExe(dl, app, home); got != dl {
-		t.Fatalf("the chosen one: %q", got)
+	if got := FindExe(dl, app, home); got != own {
+		t.Fatalf("RetroPixels' own build wins over a chosen one: %q", got)
 	}
+	os.Remove(own)
+	if got := FindExe(dl, app, home); got != dl {
+		t.Fatalf("the chosen one, without RetroPixels' own: %q", got)
+	}
+	os.WriteFile(own, nil, 0o755)
 	if got := FindExe(filepath.Join(app, "gone.exe"), app, home); got != own {
 		t.Fatalf("a chosen one that's gone: %q", got)
 	}
