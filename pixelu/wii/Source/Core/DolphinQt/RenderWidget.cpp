@@ -601,8 +601,9 @@ bool RenderWidget::IsEmbedMode()
 #endif
 }
 
-// Docked means RetroPixels has adopted the window: it is a child window, or its parent is
-// something other than the desktop.
+// Docked means RetroPixels has adopted the window: it is a child window, its parent is
+// something other than the desktop, or RetroPixels made itself its owner (it then keeps the
+// window floating over its own, where screen recorders can still capture it).
 bool RenderWidget::IsDockedByHost() const
 {
 #ifdef _WIN32
@@ -612,7 +613,8 @@ bool RenderWidget::IsDockedByHost() const
   if (hwnd == nullptr)
     return false;
   const bool child_style = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0;
-  return child_style || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow();
+  return child_style || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow() ||
+         GetWindow(hwnd, GW_OWNER) != nullptr;
 #elif defined(__linux__)
   // Docked means our parent is RetroPixels' dock window (it carries _RETROPIXELS_DOCK).
   return IsEmbedMode() && QtUtils::X11Docking::IsDocked(internalWinId());

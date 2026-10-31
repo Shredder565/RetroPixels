@@ -377,6 +377,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pInvalidateRect, hwnd, 0, 0)
 		a.dockResize()
 		return 0
+	case wmMove: // a game window floating over this one moves with it
+		a.dockResize()
+		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
 		mm.MinTrackSize = point{240, 200}

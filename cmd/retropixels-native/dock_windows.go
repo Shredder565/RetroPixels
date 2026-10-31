@@ -18,6 +18,7 @@ import (
 type extRun struct {
 	pid    int
 	image  string         // the emulator's .exe name: its game screen may belong to another process of it
+	over   bool           // its window floats over this one (owned) rather than inside it (a child), so OBS can capture it
 	exited chan struct{}  // closed once the emulator has ended
 	child  atomic.Uintptr // the emulator's window while it's docked here
 	stopAt atomic.Int64   // when Stop game was asked (Unix ns)
@@ -66,7 +67,7 @@ func (a *app) dockWatch(r *extRun, wait time.Duration, ev string) {
 		case <-tick.C:
 		}
 		if child != 0 {
-			if dolphin.Docked(child, host) {
+			if a.dockedHere(r, child) {
 				if r.stoppingFor(8 * time.Second) {
 					dolphin.Shutdown(r.pid, r.exited, 3*time.Second) // Stop game was asked but the emulator didn't react
 					return
@@ -110,8 +111,14 @@ func (a *app) dockWatch(r *extRun, wait time.Duration, ev string) {
 			}
 			continue
 		}
-		ok, err := dolphin.Dock(h, host)
-		lg.printf("docking window %#x: docked=%v err=%v", h, ok, err)
+		var ok bool
+		var err error
+		if r.over {
+			ok = dolphin.DockOver(h, host)
+		} else {
+			ok, err = dolphin.Dock(h, host)
+		}
+		lg.printf("docking window %#x (floating over: %v): docked=%v err=%v", h, r.over, ok, err)
 		if !ok {
 			lg.windows()
 			if !lg.warned {
@@ -121,19 +128,37 @@ func (a *app) dockWatch(r *extRun, wait time.Duration, ev string) {
 			continue // tried again on the next tick
 		}
 		a.dockPlace(h, true)
-		call(pSetForegroundWindow, host)
-		dolphin.Focus(h)
+		if r.over {
+			dolphin.FocusOver(h)
+		} else {
+			call(pSetForegroundWindow, host)
+			dolphin.Focus(h)
+		}
 		child, lostAt = h, time.Time{}
 		r.child.Store(h)
 		a.event(ev+"-docked", "")
 	}
 }
 
-// dockPlace fits a docked window to this window.
+// dockedHere: the emulator's window is still docked here (inside, or
+// floating over this window).
+func (a *app) dockedHere(r *extRun, child uintptr) bool {
+	if r.over {
+		return dolphin.DockedOver(child, a.hwnd)
+	}
+	return dolphin.Docked(child, a.hwnd)
+}
+
+// dockPlace fits a docked window to this window (over it, for one floating
+// over it).
 func (a *app) dockPlace(child uintptr, force bool) {
 	cr := clientRect(a.hwnd)
 	if cr.Right > 0 && cr.Bottom > 0 {
-		dolphin.Place(child, a.hwnd, 0, 0, cr.Right, cr.Bottom, force)
+		if dolphin.DockedOver(child, a.hwnd) {
+			dolphin.PlaceOver(child, a.hwnd, 0, 0, cr.Right, cr.Bottom, force)
+		} else {
+			dolphin.Place(child, a.hwnd, 0, 0, cr.Right, cr.Bottom, force)
+		}
 	}
 }
 

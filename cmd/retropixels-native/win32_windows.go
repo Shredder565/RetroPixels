@@ -116,6 +116,7 @@ const (
 	wmCreate         = 0x0001
 	wmDestroy        = 0x0002
 	wmSize           = 0x0005
+	wmMove           = 0x0003
 	wmActivate       = 0x0006
 	wmSetFocus       = 0x0007
 	wmKillFocus      = 0x0008

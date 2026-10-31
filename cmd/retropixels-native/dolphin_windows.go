@@ -385,6 +385,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	r := &dolRun{extRun: newExtRun(cmd.Process.Pid), game: g, exe: exe, rec: rec, started: time.Now(),
 		embed: opts.Embed, volKick: make(chan struct{}, 1)}
 	r.image = filepath.Base(exe)
+	r.over = true // floats over this window, so OBS can capture the game
 	a.dol.run = r
 	a.dol.nextGame = false
 	a.dol.recWarn = ""

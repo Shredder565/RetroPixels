@@ -24,6 +24,9 @@ var (
 	pIsIconic                 = modUser32.NewProc("IsIconic")
 	pGetClassNameW            = modUser32.NewProc("GetClassNameW")
 	pGetWindowTextW           = modUser32.NewProc("GetWindowTextW")
+	pGetWindow                = modUser32.NewProc("GetWindow")
+	pClientToScreen           = modUser32.NewProc("ClientToScreen")
+	pSetForegroundWindow      = modUser32.NewProc("SetForegroundWindow")
 	pGetWindowRect            = modUser32.NewProc("GetWindowRect")
 	pGetWindowLongPtrW        = modUser32.NewProc("GetWindowLongPtrW")
 	pSetWindowLongPtrW        = modUser32.NewProc("SetWindowLongPtrW")
@@ -60,6 +63,11 @@ const (
 	wsExStaticEdge    = 0x00020000
 	wsExAppWindow     = 0x00040000
 	wsExToolWindow    = 0x00000080
+
+	gwlpHwndParent   = ^uintptr(7) // GWLP_HWNDPARENT (-8): a top-level window's owner
+	gwOwner          = 4
+	swpNoZOrder      = 0x0004
+	swpNoOwnerZOrder = 0x0200
 
 	swpNoActivate      = 0x0010
 	swpFrameChanged    = 0x0020
@@ -179,6 +187,74 @@ func windowText(h uintptr) string {
 	buf := make([]uint16, 256)
 	n, _, _ := pGetWindowTextW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	return syscall.UTF16ToString(buf[:n])
+}
+
+// DockOver keeps child as a frameless top-level window owned by host,
+// instead of a child window: it stays in front of host, hides when host is
+// minimised and has no taskbar button, but it's still a window of its own,
+// which screen recorders such as OBS can capture (they leave out a child
+// window of another program). PlaceOver puts it over host. It tells whether
+// child is now owned by host.
+func DockOver(child, host uintptr) bool {
+	style, _, _ := pGetWindowLongPtrW.Call(child, gwlStyle)
+	style &^= wsChild | wsCaption | wsThickFrame | wsSysMenu | wsMinimizeBox | wsMaximizeBox | wsMaximize
+	style |= wsPopup | wsVisible | wsClipSiblings
+	pSetWindowLongPtrW.Call(child, gwlStyle, style)
+	ex, _, _ := pGetWindowLongPtrW.Call(child, gwlExStyle)
+	// not a tool window either: OBS doesn't list those
+	ex &^= wsExAppWindow | wsExToolWindow | wsExTopmost | wsExDlgModalFrame | wsExWindowEdge | wsExClientEdge | wsExStaticEdge
+	pSetWindowLongPtrW.Call(child, gwlExStyle, ex)
+	pSetWindowLongPtrW.Call(child, gwlpHwndParent, host) // owner, not parent
+	return DockedOver(child, host)
+}
+
+// DockedOver tells whether child is still a live window owned by host.
+func DockedOver(child, host uintptr) bool {
+	if child == 0 {
+		return false
+	}
+	alive, _, _ := pIsWindow.Call(child)
+	owner, _, _ := pGetWindow.Call(child, gwOwner)
+	return alive != 0 && owner == host
+}
+
+// PlaceOver puts a window docked with DockOver at x, y (in host's client
+// area), w × h, on screen. Nothing happens when it's already there, unless
+// force; nothing while host is minimised (Windows hides it with host).
+func PlaceOver(child, host uintptr, x, y, w, h int32, force bool) {
+	if ic, _, _ := pIsIconic.Call(host); ic != 0 {
+		return
+	}
+	pt := [2]int32{x, y}
+	pClientToScreen.Call(host, uintptr(unsafe.Pointer(&pt)))
+	want := rect{pt[0], pt[1], pt[0] + w, pt[1] + h}
+	var cur rect
+	pGetWindowRect.Call(child, uintptr(unsafe.Pointer(&cur)))
+	if !force && cur == want {
+		return
+	}
+	flags := uintptr(swpNoActivate | swpNoZOrder | swpNoOwnerZOrder | swpAsyncWindowPos)
+	if force {
+		flags |= swpFrameChanged | swpShowWindow
+	}
+	pSetWindowPos.Call(child, 0, uintptr(want.L), uintptr(want.T), uintptr(w), uintptr(h), flags)
+}
+
+// FocusOver gives a window docked with DockOver the keyboard.
+func FocusOver(child uintptr) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	me, _, _ := pGetCurrentThreadId.Call()
+	them, _, _ := pGetWindowThreadProcessId.Call(child, 0)
+	attached := false
+	if them != me {
+		r, _, _ := pAttachThreadInput.Call(me, them, 1)
+		attached = r != 0
+	}
+	pSetForegroundWindow.Call(child)
+	if attached {
+		pAttachThreadInput.Call(me, them, 0)
+	}
 }
 
 // Docked tells whether child is still a live window docked in host.
