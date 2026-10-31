@@ -34,6 +34,8 @@ type Settings struct {
 	PixelU PixelUSettings `json:"pixelu"`
 	// Star Wars Trilogy Arcade through Supermodel (supermodel_settings.go)
 	Supermodel SupermodelSettings `json:"supermodel"`
+	// streaming to YouTube (stream_settings.go)
+	Stream StreamSettings `json:"stream"`
 }
 
 const maxRecent = 10

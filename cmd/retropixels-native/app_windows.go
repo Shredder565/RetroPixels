@@ -103,12 +103,13 @@ type app struct {
 	controls      *controlsDialog
 	mouseTracking bool
 
-	ui   *uiState    // the start screen, save state slots and the rest (ui_*_windows.go)
-	dol  dolState    // GameCube / Wii (dolphin_windows.go)
-	mame mameState   // arcade games in MAME (mame_windows.go)
-	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
-	sm   smState     // Star Wars Trilogy Arcade in Supermodel (supermodel_windows.go)
-	ap   apState     // Archipelago (archipelago_windows.go)
+	ui     *uiState    // the start screen, save state slots and the rest (ui_*_windows.go)
+	dol    dolState    // GameCube / Wii (dolphin_windows.go)
+	mame   mameState   // arcade games in MAME (mame_windows.go)
+	pu     pixeluState // Wii U games in PixelU (pixelu_windows.go)
+	sm     smState     // Star Wars Trilogy Arcade in Supermodel (supermodel_windows.go)
+	ap     apState     // Archipelago (archipelago_windows.go)
+	stream streamState // live streaming to YouTube (stream_windows.go)
 }
 
 var theApp *app
@@ -201,7 +202,7 @@ func runApp() {
 		if a.controls != nil && a.controls.capturing(&m) {
 			continue
 		}
-		if a.dolDialogMessage(&m) || a.mameDialogMessage(&m) {
+		if a.dolDialogMessage(&m) || a.mameDialogMessage(&m) || a.streamDialogMessage(&m) {
 			continue
 		}
 		call(pTranslateMessage, uintptr(unsafe.Pointer(&m)))
@@ -289,6 +290,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.recMenu, mfString, cmdRecFolder, "&Open recordings folder")
 	a.uiRecordMenu()
 	appendMenu(a.menu, mfPopup, a.recMenu, "&Record")
+	a.addStreamMenu()
 
 	help := call(pCreatePopupMenu)
 	a.uiHelpMenu(help)
@@ -334,6 +336,7 @@ func (a *app) updateMenus() {
 	a.supermodelUpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
+	a.streamUpdateMenus()
 }
 
 func (a *app) fillRecent() {
@@ -376,9 +379,11 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmSize:
 		call(pInvalidateRect, hwnd, 0, 0)
 		a.dockResize()
+		a.streamAreaChanged()
 		return 0
 	case wmMove: // a game window floating over this one moves with it
 		a.dockResize()
+		a.streamAreaChanged()
 		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
@@ -474,6 +479,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		if a.mameBeforeClose() || a.supermodelBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
+		a.streamStop(false)
 		a.closeGame()
 		saveSettings(a.settings)
 		call(pDestroyWindow, hwnd)
@@ -506,6 +512,9 @@ func (a *app) keyDown(m uint32, vk int, lp uintptr) bool {
 	if keyDown(vkControl) {
 		if !repeat {
 			switch vk {
+			case vkF9:
+				a.streamToggle()
+				return true
 			case 'O':
 				a.command(cmdOpen)
 			case 'Z':
@@ -758,6 +767,7 @@ func (a *app) updateTitle() {
 	t += a.mameTitle()
 	t += a.pixeluTitle()
 	t += a.supermodelTitle()
+	t += a.streamTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -835,6 +845,7 @@ func (a *app) handleEvents() {
 			a.pixeluEvent(e.name, e.detail)
 			a.supermodelEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
+			a.streamEvent(e.name, e.detail)
 		}
 	}
 }
@@ -951,6 +962,8 @@ func (a *app) command(id int) {
 		a.pixeluCommand(id)
 	case id >= cmdMameFirst && id <= cmdMameLast:
 		a.mameCommand(id)
+	case id >= cmdStreamFirst && id <= cmdStreamLast:
+		a.streamCommand(id)
 	case id >= cmdSMFirst && id <= cmdSMLast:
 		a.supermodelCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
