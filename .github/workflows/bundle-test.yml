@@ -57,6 +57,11 @@ jobs:
         with:
           go-version: "1.24"
 
+      # The GBA maths test compares against V8's results: the same Node as ci.yml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Test
         run: go test ./...
 
