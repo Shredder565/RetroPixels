@@ -15,6 +15,10 @@ type LaunchOptions struct {
 	// screens, and take the keyboard from window messages (which reach a
 	// docked window) rather than raw input (which goes to the window in front).
 	Embed bool
+	// Seat: the player (1 to 4) the keyboard and first controller play as;
+	// SeatDir is where the controller file that does that is written.
+	Seat    int
+	SeatDir string
 }
 
 // RomPath is MAME's ROM search path for a game: the game's own folder, your
@@ -66,6 +70,17 @@ func GameArgs(short, rompath string, opts Options, o LaunchOptions) []string {
 	}
 	if has("joystick") {
 		args = append(args, "-joystick") // Xbox controllers
+	}
+	if has("joystickprovider") && runtime.GOOS == "windows" {
+		args = append(args, "-joystickprovider", "winhybrid") // Xbox controllers through XInput, others through DirectInput
+	}
+	if has("background_input") && o.Embed {
+		// Docked, MAME's window isn't the one in front, and MAME would ignore
+		// the controller: it's always read.
+		args = append(args, "-background_input")
+	}
+	if o.Seat > 1 {
+		args = append(args, SeatArgs(o.Seat, o.SeatDir, opts)...)
 	}
 	return args
 }

@@ -51,6 +51,38 @@ type Config struct {
 	// the built-in MAMEs (and their ROM folder) listed already, so
 	// removing one sticks
 	BuiltInSeen []string `json:"builtInSeen,omitempty"`
+	// Seat: which player (1 to 4) the keyboard and Xbox controller play as;
+	// 0 means player 1. SeatFor: the same for one game, by its lower-cased
+	// short name.
+	Seat    int            `json:"player,omitempty"`
+	SeatFor map[string]int `json:"gamePlayer,omitempty"`
+}
+
+// SeatOf: the player (1 to 4) the player plays a game (its short name) as.
+func (c Config) SeatOf(short string) int {
+	if n := c.SeatFor[strings.ToLower(short)]; n >= 1 && n <= MaxSeats {
+		return n
+	}
+	if c.Seat >= 1 && c.Seat <= MaxSeats {
+		return c.Seat
+	}
+	return 1
+}
+
+// SetSeat makes the player play as player n (1 to 4): for one game (short)
+// or, with short "", for every game that has no choice of its own.
+func (c *Config) SetSeat(short string, n int) {
+	if n < 1 || n > MaxSeats {
+		n = 1
+	}
+	if short == "" {
+		c.Seat = n
+		return
+	}
+	if c.SeatFor == nil {
+		c.SeatFor = map[string]int{}
+	}
+	c.SeatFor[strings.ToLower(short)] = n
 }
 
 // EmbedOn: games play inside the RetroPixels window (the default).

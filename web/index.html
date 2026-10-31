@@ -639,6 +639,8 @@
             <button class="btn ghost sm" id="mameAddFolder">Add ROM folder…</button>
             <button class="btn ghost sm" id="mameRescan" title="Look through the ROM folders again">Look again</button>
             <label class="sw-check" title="Games play inside this window instead of MAME's own window"><input type="checkbox" id="mameEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check" title="The keyboard and Xbox controller play as this player (from the next game)">Play as
+              <select id="mameSeat"><option value="1">Player 1</option><option value="2">Player 2</option><option value="3">Player 3</option><option value="4">Player 4</option></select></label>
           </div>
           <div class="sw-setup" style="margin-top:8px"><div class="sw-emu" id="mameFolders">Looking for games…</div></div>
           <div id="mameNote"></div>
@@ -1273,6 +1275,7 @@
         mameAction({ action: "remove-exe", exe: list[+b.dataset.rmv].exe });
     }));
     document.getElementById("mameEmbed").checked = !!st.embed;
+    document.getElementById("mameSeat").value = String(st.seat || 1);
     document.getElementById("mameFind").disabled = !!st.finding;
   }
 
@@ -1395,6 +1398,7 @@
   document.getElementById("mameAddFolder").addEventListener("click", () => mameAction({ action: "add-folder" }));
   document.getElementById("mameRescan").addEventListener("click", () => mameAction({ action: "rescan" }));
   document.getElementById("mameEmbed").addEventListener("change", e => mameAction({ action: "embed", on: e.target.checked }));
+  document.getElementById("mameSeat").addEventListener("change", e => mameAction({ action: "seat", seat: +e.target.value }));
   document.getElementById("mameOpenFile").addEventListener("click", async () => {
     if (mameData && mameData.status.embed) sendEmbedArea();
     if (await mameAction({ action: "open-file" })) mameStarted();

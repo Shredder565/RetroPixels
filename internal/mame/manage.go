@@ -88,6 +88,12 @@ func Plan(c Config, path, exe string, o LaunchOptions) (Launch, error) {
 	if n := KnownNames(in)[short]; n != "" {
 		name = n
 	}
+	if o.Seat == 0 {
+		o.Seat = c.SeatOf(short)
+	}
+	if o.SeatDir == "" {
+		o.SeatDir = SeatDir()
+	}
 	args := GameArgs(short, RomPath(in.Exe, filepath.Dir(path), c.Folders), OptionsOf(in.Exe), o)
 	return Launch{Install: in, Short: short, Name: name, Args: args}, nil
 }

@@ -34,6 +34,7 @@ const (
 	cmdMameDownload = 1805
 	cmdMameOpen     = 1806
 	cmdMameKeys     = 1807
+	cmdMameSeat1    = 1810 // + 0..3: play as player 1 to 4
 	cmdMameFirst    = 1800
 	cmdMameLast     = 1849
 )
@@ -81,6 +82,11 @@ func (a *app) addMameMenu() {
 	a.addSupermodelMenu(m) // Star Wars Trilogy Arcade, which MAME can't play
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdMameEmbed, "Play inside this &window")
+	seat := call(pCreatePopupMenu)
+	for i := 0; i < mame.MaxSeats; i++ {
+		appendMenu(seat, mfString, uintptr(cmdMameSeat1+i), fmt.Sprintf("Player &%d", i+1))
+	}
+	appendMenu(m, mfPopup, seat, "Play as &player")
 	appendMenu(m, mfString, cmdMameKeys, "MAME's &keys")
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdMameAddExe, "&Add a MAME you have…")
@@ -95,6 +101,7 @@ func (a *app) mameUpdateMenus() {
 	enableItem(a.menu, cmdMameStop, r != nil)
 	enableItem(a.menu, cmdMameOpen, r == nil)
 	checkItem(a.menu, cmdMameEmbed, c.EmbedOn())
+	call(pCheckMenuRadioItem, a.menu, cmdMameSeat1, cmdMameSeat1+mame.MaxSeats-1, uintptr(cmdMameSeat1+c.SeatOf("")-1), mfByCommand)
 	a.mame.mu.Lock()
 	finding := a.mame.finding
 	a.mame.mu.Unlock()
@@ -130,6 +137,15 @@ func (a *app) mameCommand(id int) {
 		a.showMessage("Looking for MAME on this PC…")
 	case cmdMameKeys:
 		messageBox(a.hwnd, mameKeysText, "MAME's keys", mbIconInfo)
+	default:
+		if n := id - cmdMameSeat1 + 1; n >= 1 && n <= mame.MaxSeats {
+			mame.Update(func(c *mame.Config) { c.SetSeat("", n) })
+			msg := fmt.Sprintf("The keyboard and Xbox controller play as player %d", n)
+			if a.mame.run != nil {
+				msg += " from the next game"
+			}
+			a.showMessage(msg)
+		}
 	}
 }
 

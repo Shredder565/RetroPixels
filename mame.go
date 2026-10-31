@@ -99,7 +99,7 @@ func mameStatus() map[string]any {
 	if mameInst != nil {
 		inst = *mameInst
 	}
-	return map[string]any{"installs": installs, "default": def.Exe, "folders": c.Folders, "embed": c.EmbedOn(),
+	return map[string]any{"installs": installs, "default": def.Exe, "folders": c.Folders, "embed": c.EmbedOn(), "seat": c.SeatOf(""),
 		"gameVersion": games, "install": inst, "finding": mameFinding, "detected": c.Detected, "problem": mameProblem}
 }
 
@@ -331,6 +331,7 @@ func registerMameRoutes(mux *http.ServeMux) {
 			Folder string `json:"folder"`
 			Short  string `json:"short"`
 			On     bool   `json:"on"`
+			Seat   int    `json:"seat"`
 		}
 		if !readBody(w, r, &b) {
 			return
@@ -379,6 +380,8 @@ func registerMameRoutes(mux *http.ServeMux) {
 			reload = true
 		case "embed":
 			_, err = mame.Update(func(c *mame.Config) { v := b.On; c.Embed = &v })
+		case "seat": // the player the keyboard and Xbox controller play as, from the next game
+			_, err = mame.Update(func(c *mame.Config) { c.SetSeat("", b.Seat) })
 		case "open-file":
 			var p string
 			p, err = pickFile("Choose an arcade game (MAME ROM set)", "MAME ROM sets (*.zip;*.7z)|*.zip;*.7z", "")
