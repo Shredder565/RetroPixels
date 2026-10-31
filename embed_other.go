@@ -26,3 +26,5 @@ func stopEmbeddedGame() error { return errors.New("no game is playing inside Ret
 func pixeluScreen(mode int) (bool, error) {
 	return false, errors.New("no Wii U game is playing inside RetroPixels")
 }
+
+func embeddedGameWindow() uintptr { return 0 }

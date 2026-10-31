@@ -961,6 +961,7 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			Action string `json:"action"`
 			Folder string `json:"folder"`
 			On     bool   `json:"on"`
+			Slot   int    `json:"slot"` // save-state, load-state: 1 to 10
 		}
 		if !readBody(w, r, &b) {
 			return
@@ -1014,6 +1015,8 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			cfgMu.Unlock()
 		case "stop-game":
 			err = stopEmbeddedGame()
+		case "save-state", "load-state":
+			err = dolStateAction(b.Action == "save-state", b.Slot)
 		case "setup-pads":
 			if dolphinRunning() {
 				err = errors.New("close PixelU (Wii/GameCube) first")
@@ -1052,4 +1055,20 @@ func zlibInflate(b []byte, n int) []byte {
 	out := make([]byte, n)
 	k, _ := io.ReadFull(r, out)
 	return out[:k]
+}
+
+// dolStateAction saves the GameCube / Wii game that's playing to a slot, or
+// loads one: PixelU-Wii keeps the states (in its own StateSaves folder) and
+// shows "Saved State to Slot N" on the game.
+func dolStateAction(save bool, slot int) error {
+	runMu.Lock()
+	on := running != nil && running.Kind == "dolphin"
+	runMu.Unlock()
+	if !on {
+		return dolphin.ErrNoGameScreen
+	}
+	if save {
+		return dolphin.SaveState(dolphinExeName(), 0, embeddedGameWindow(), slot)
+	}
+	return dolphin.LoadState(dolphinExeName(), 0, embeddedGameWindow(), slot)
 }

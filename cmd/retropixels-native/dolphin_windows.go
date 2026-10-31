@@ -193,6 +193,10 @@ func (a *app) dolUpdateMenus() {
 		}
 	}
 	enableItem(a.menu, cmdDolStop, r != nil)
+	if r != nil { // save states go to PixelU (dolState)
+		enableItem(a.menu, cmdSaveState, true)
+		enableItem(a.menu, cmdLoadState, true)
+	}
 	auto := a.settings.autoRecord()
 	enableItem(a.menu, cmdDolRecNext, !auto)
 	checkItem(a.menu, cmdDolRecNext, !auto && a.dol.nextGame)
@@ -387,6 +391,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	r.image = filepath.Base(exe)
 	r.over = true // floats over this window, so OBS can capture the game
 	a.dol.run = r
+	dolKeys.states.Store(true)
 	a.dol.nextGame = false
 	a.dol.recWarn = ""
 	go func() {
@@ -442,6 +447,7 @@ func (a *app) dolEnded() {
 		return
 	}
 	a.dol.run = nil
+	dolKeys.states.Store(false)
 	a.dolUnhook()
 	if r.wentFull && a.fullscreen {
 		a.toggleFullscreen()
@@ -627,6 +633,12 @@ func (a *app) dolEvent(name, detail string) {
 			}
 		case "close":
 			call(pPostMessageW, a.hwnd, wmClose, 0, 0)
+		case "save":
+			a.command(cmdSaveState)
+		case "load":
+			a.command(cmdLoadState)
+		case "slot":
+			a.command(cmdNextSlot)
 		}
 		dolKeys.full.Store(a.fullscreen)
 	case "dol-rec-warn":
@@ -776,17 +788,35 @@ type kbdLL struct {
 }
 
 var (
-	dpGetCurrentThreadId = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentThreadId")
-	dpPostThreadMessageW = user32.NewProc("PostThreadMessageW")
-	dpGetAsyncKeyState   = user32.NewProc("GetAsyncKeyState")
+	dpGetCurrentThreadId       = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentThreadId")
+	dpPostThreadMessageW       = user32.NewProc("PostThreadMessageW")
+	dpGetAsyncKeyState         = user32.NewProc("GetAsyncKeyState")
+	dpGetWindow                = user32.NewProc("GetWindow")
+	dpGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
 
 	dolKeys struct {
 		hwnd   atomic.Uintptr // this window while a game screen is docked, else 0
 		full   atomic.Bool    // this window is fullscreen
+		states atomic.Bool    // F2 / F4 / F3 are save states (a GameCube / Wii game)
 		thread atomic.Uint32  // the hook's thread
 		held   map[uint32]bool
 	}
 )
+
+// dolKeysFor: the keys are this window's (h) while it or a game screen
+// floating over it (a window it owns) has the keyboard.
+func dolKeysFor(h uintptr) bool {
+	fg := call(dpGetForegroundWindow)
+	if fg == h {
+		return true
+	}
+	if fg == 0 || call(dpGetWindow, fg, 4 /* GW_OWNER */) != h {
+		return false
+	}
+	var pid uint32 // not this program's own dialogs: another program's window
+	call(dpGetWindowThreadProcessId, fg, uintptr(unsafe.Pointer(&pid)))
+	return pid != 0 && pid != uint32(os.Getpid())
+}
 
 // dolHook turns the keys on (started once, then kept).
 func (a *app) dolHook() {
@@ -824,7 +854,7 @@ func dolStopKeys() {
 }
 
 func dolKeyHook(code, wp, lp uintptr) uintptr {
-	if h := dolKeys.hwnd.Load(); int32(code) == 0 && h != 0 && call(dpGetForegroundWindow) == h {
+	if h := dolKeys.hwnd.Load(); int32(code) == 0 && h != 0 && dolKeysFor(h) {
 		k := *(**kbdLL)(unsafe.Pointer(&lp)) // lp points at Windows' KBDLLHOOKSTRUCT
 		down := wp == wmKeyDown || wp == wmSysKeyDown
 		if !down && dolKeys.held[k.VkCode] {
@@ -844,6 +874,12 @@ func dolKeyHook(code, wp, lp uintptr) uintptr {
 			act = "record"
 		case k.VkCode == vkF4 && alt: // the game screen would take it
 			act = "close"
+		case k.VkCode == vkF2 && dolKeys.states.Load():
+			act = "save"
+		case k.VkCode == vkF4 && dolKeys.states.Load():
+			act = "load"
+		case k.VkCode == vkF3 && dolKeys.states.Load():
+			act = "slot"
 		}
 		if act != "" && down {
 			if !dolKeys.held[k.VkCode] {
@@ -913,7 +949,7 @@ func (a *app) dolShowLayout() {
 		"Wii Remote + Nunchuk: "+label[dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")]+"\n\n"+
 		dolphin.PadLayout+"\n\n"+
 		"The controller is set up automatically the first time a game starts; fine-tune it in PixelU > Controllers "+
-		"(GameCube / Wii > Open PixelU). Save states are in PixelU: Shift+F1 saves, F1 loads.",
+		"(GameCube / Wii > Open PixelU). Save states: F2 saves, F4 loads, F3 picks the slot (Game menu).",
 		"Controller layout", mbIconInfo)
 }
 
@@ -947,4 +983,33 @@ func windowString(hwnd uintptr) string {
 	buf := make([]uint16, n+1)
 	call(dpGetWindowTextW, hwnd, uintptr(unsafe.Pointer(&buf[0])), n+1)
 	return syscall.UTF16ToString(buf)
+}
+
+// dolState saves the GameCube / Wii game to the chosen slot, or loads it
+// (Game > Save state / Load state, F2 / F4). PixelU keeps the states and
+// shows "Saved State to Slot N" on the game.
+func (a *app) dolState(save bool) {
+	r := a.dol.run
+	if r == nil {
+		return
+	}
+	slot := a.curSlot()%slotCount + 1
+	image := r.image
+	if image == "" {
+		image = filepath.Base(r.exe)
+	}
+	var err error
+	if save {
+		err = dolphin.SaveState(image, r.pid, r.child.Load(), slot)
+	} else {
+		err = dolphin.LoadState(image, r.pid, r.child.Load(), slot)
+	}
+	switch {
+	case err != nil:
+		a.showMessage("Couldn't reach the game: " + err.Error())
+	case save:
+		a.showMessage(fmt.Sprintf("Saving to slot %d", slot))
+	default:
+		a.showMessage(fmt.Sprintf("Loading slot %d", slot))
+	}
 }

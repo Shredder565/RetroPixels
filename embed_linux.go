@@ -719,3 +719,6 @@ func pixeluScreen(mode int) (bool, error) {
 	}
 	return pixelu.SetScreen(uintptr(w), mode)
 }
+
+// embeddedGameWindow: Windows only (save states use it there).
+func embeddedGameWindow() uintptr { return 0 }

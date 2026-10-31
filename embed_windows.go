@@ -527,3 +527,10 @@ func pixeluScreen(mode int) (bool, error) {
 	}
 	return pixelu.SetScreen(h, mode)
 }
+
+// embeddedGameWindow is the game screen docked in the RetroPixels window, or 0.
+func embeddedGameWindow() uintptr {
+	embedMu.Lock()
+	defer embedMu.Unlock()
+	return embedHWND
+}

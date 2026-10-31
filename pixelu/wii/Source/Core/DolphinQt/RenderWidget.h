@@ -20,6 +20,8 @@ public:
   explicit RenderWidget(QWidget* parent = nullptr);
 
   bool event(QEvent* event) override;
+  // PixelU: RetroPixels' save and load state requests (Windows), see RenderWidget.cpp.
+  bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) override;
   void showFullScreen();
   QPaintEngine* paintEngine() const override;
   bool IsCursorLocked() const { return m_cursor_locked; }

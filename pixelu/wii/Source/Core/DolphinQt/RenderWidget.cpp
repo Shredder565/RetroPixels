@@ -393,6 +393,34 @@ void RenderWidget::ReportSizeIfChanged(QSize logical_size)
   emit SizeChanged(width, height);
 }
 
+// RetroPixels asks for a save state or a load by posting the registered message
+// "PixelU.HostCommand" to this window: wParam 1 saves, 2 loads, lParam is the slot (1 to 10).
+// It only reaches the game screen of a game that is playing.
+bool RenderWidget::nativeEvent(const QByteArray& event_type, void* message, qintptr* result)
+{
+#ifdef _WIN32
+  static const UINT host_command = RegisterWindowMessageW(L"PixelU.HostCommand");
+  const MSG* msg = static_cast<const MSG*>(message);
+  if (host_command != 0 && msg != nullptr && msg->message == host_command)
+  {
+    const int slot = static_cast<int>(msg->lParam);
+    auto& system = TheSystem();
+    const Core::State state = Core::GetState(system);
+    if (slot >= 1 && slot <= 10 &&
+        (state == Core::State::Running || state == Core::State::Paused))
+    {
+      if (msg->wParam == 1)
+        State::Save(system, static_cast<u32>(slot));
+      else if (msg->wParam == 2)
+        State::Load(system, static_cast<u32>(slot));
+    }
+    *result = 1;
+    return true;
+  }
+#endif
+  return QWidget::nativeEvent(event_type, message, result);
+}
+
 bool RenderWidget::event(QEvent* event)
 {
   ForwardToOverlay(event);

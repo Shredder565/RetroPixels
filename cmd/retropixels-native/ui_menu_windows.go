@@ -160,6 +160,11 @@ func (a *app) uiPopup(m uintptr) {
 				appendMenu(m, mfString, uintptr(cmdSlot0+i), "&"+slotLabel(i, si, now))
 			}
 			call(pCheckMenuRadioItem, m, cmdSlot0, cmdSlot0+slotCount-1, uintptr(cmdSlot0+a.curSlot()), mfByCommand)
+		} else if a.dol.run != nil { // GameCube / Wii: PixelU keeps the states, by slot
+			for i := 0; i < slotCount; i++ {
+				appendMenu(m, mfString, uintptr(cmdSlot0+i), fmt.Sprintf("&Slot %d", i+1))
+			}
+			call(pCheckMenuRadioItem, m, cmdSlot0, cmdSlot0+slotCount-1, uintptr(cmdSlot0+a.curSlot()), mfByCommand)
 		} else {
 			for i := 0; i < slotCount; i++ {
 				appendMenu(m, mfString|mfGrayed, uintptr(cmdSlot0+i), fmt.Sprintf("Slot %d", i+1))
@@ -168,8 +173,8 @@ func (a *app) uiPopup(m uintptr) {
 		appendMenu(m, mfSeparator, 0, "")
 		appendMenu(m, mfString, cmdNextSlot, "&Next slot\tF3")
 		appendMenu(m, mfString, cmdPrevSlot, "&Previous slot\tShift+F3")
-		enableItem(m, cmdNextSlot, a.sess != nil)
-		enableItem(m, cmdPrevSlot, a.sess != nil)
+		enableItem(m, cmdNextSlot, a.sess != nil || a.dol.run != nil)
+		enableItem(m, cmdPrevSlot, a.sess != nil || a.dol.run != nil)
 	case u.recRecentMenu:
 		for call(pGetMenuItemCount, m) > 0 {
 			call(pDeleteMenu, m, 0, mfByPosition)
@@ -306,6 +311,8 @@ func (a *app) setSlot(i int) {
 			msg += " (empty)"
 		}
 		a.showMessage(msg)
+	} else {
+		a.showMessage(fmt.Sprintf("Slot %d selected", a.ui.slot+1))
 	}
 	if a.ui.states != nil {
 		a.ui.states.refresh()
@@ -468,11 +475,11 @@ func (a *app) uiCommand(id int) {
 	switch {
 	case id == cmdStatesWin && s != nil:
 		a.openStates()
-	case id == cmdNextSlot && s != nil:
+	case id == cmdNextSlot && (s != nil || a.dol.run != nil):
 		a.setSlot(a.curSlot() + 1)
-	case id == cmdPrevSlot && s != nil:
+	case id == cmdPrevSlot && (s != nil || a.dol.run != nil):
 		a.setSlot(a.curSlot() - 1)
-	case id >= cmdSlot0 && id < cmdSlot0+slotCount && s != nil:
+	case id >= cmdSlot0 && id < cmdSlot0+slotCount && (s != nil || a.dol.run != nil):
 		a.setSlot(id - cmdSlot0)
 	case id == cmdImportState && s != nil:
 		a.importStateFile(a.hwnd, "")

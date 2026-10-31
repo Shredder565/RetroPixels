@@ -363,6 +363,11 @@
     <span class="vol-ctl" id="swVol" hidden><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" data-volrange aria-label="Game volume"><output data-volout>100%</output></span>
     <span class="muted" id="swNowTime" style="font-variant-numeric:tabular-nums"></span>
     <button class="btn ghost sm" id="swPadScreen" hidden title="Show the Wii U GamePad's screen. Click or touch it to use the touch screen. (Ctrl+Tab in the game does the same.)" aria-pressed="false">📱 GamePad screen</button>
+    <span id="swStates" hidden style="display:inline-flex;gap:6px;align-items:center">
+      <select id="swSlot" class="sm" aria-label="Save state slot" title="Save state slot"></select>
+      <button class="btn ghost sm" id="swSaveState" title="Save the game to this slot">💾 Save state</button>
+      <button class="btn ghost sm" id="swLoadState" title="Load this slot">📂 Load state</button>
+    </span>
     <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
       </div>
   <!-- ===================== Launcher ===================== -->
@@ -900,6 +905,7 @@
     if (padBtn.hidden && wiiuEmbedded) setPadScreen(false); // each game starts on the TV picture
     padBtn.hidden = !wiiuEmbedded;
     const dolOn = !!(status.running && status.running.kind === "dolphin");
+    document.getElementById("swStates").hidden = !dolOn || OS !== "windows";
     const volBar = document.getElementById("swVol");
     if (dolOn && volBar.hidden) loadDolVolume();
     volBar.hidden = !dolOn;
@@ -940,6 +946,22 @@
       toast(r.gamepad ? "GamePad screen: click or touch it to use the touch screen" : "TV screen");
     } catch (e) { toast(e.message, true); }
   });
+  // GameCube / Wii save states: PixelU keeps them, by slot (1 to 10), and shows "Saved State to Slot N" on the game.
+  (() => {
+    const sel = document.getElementById("swSlot");
+    for (let i = 1; i <= 10; i++) sel.add(new Option("Slot " + i, String(i)));
+    try { sel.value = localStorage.getItem("dolStateSlot") || "1"; } catch { sel.value = "1"; }
+    sel.addEventListener("change", () => { try { localStorage.setItem("dolStateSlot", sel.value); } catch {} });
+    const send = async save => {
+      const slot = Number(sel.value) || 1;
+      try {
+        await api("/api/dol/action", { action: save ? "save-state" : "load-state", slot });
+        toast(save ? `Saving to slot ${slot}` : `Loading slot ${slot}`);
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("swSaveState").addEventListener("click", () => send(true));
+    document.getElementById("swLoadState").addEventListener("click", () => send(false));
+  })();
   document.getElementById("swStopGame").addEventListener("click", async () => {
     try {
       await api("/api/dol/action", { action: "stop-game" });

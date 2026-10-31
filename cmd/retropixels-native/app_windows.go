@@ -897,6 +897,8 @@ func (a *app) command(id int) {
 	case id == cmdFast && s != nil:
 		s.fast.Store(!s.fast.Load())
 		a.updateTitle()
+	case (id == cmdSaveState || id == cmdLoadState) && s == nil && a.dol.run != nil:
+		a.dolState(id == cmdSaveState)
 	case id == cmdSaveState && s != nil:
 		a.saveToSlot()
 	case id == cmdLoadState && s != nil:

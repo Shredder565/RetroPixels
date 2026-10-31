@@ -234,7 +234,7 @@ func (l *dolLibrary) build() {
 		call(pSendMessageW, lv, lvmInsertColumnW, uintptr(i), uintptr(unsafe.Pointer(&col)))
 	}
 	l.child("STATIC", "Double-click a game, or press Enter (or A on the controller), to play it here. "+
-		"Save states are in PixelU: Shift+F1 saves, F1 loads. Esc closes this window.", ssNoPrefix, 0, idLibHint)
+		"In a game, F2 saves a state, F4 loads it and F3 picks the slot. Esc closes this window.", ssNoPrefix, 0, idLibHint)
 	l.child("BUTTON", "Play", bsDefPushButton|wsTabStop, 0, idLibPlay)
 	l.child("BUTTON", "Close", bsPushButton|wsTabStop, 0, idLibClose)
 	l.fillFolders()
