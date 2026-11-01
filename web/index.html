@@ -367,6 +367,7 @@
       <select id="swSlot" class="sm" aria-label="Save state slot" title="Save state slot"></select>
       <button class="btn ghost sm" id="swSaveState" title="Save the game to this slot">💾 Save state</button>
       <button class="btn ghost sm" id="swLoadState" title="Load this slot">📂 Load state</button>
+      <button class="btn ghost sm" id="swPause" title="Pause the game, or resume it (P)">⏯ Pause</button>
     </span>
     <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
       </div>
@@ -961,6 +962,19 @@
     };
     document.getElementById("swSaveState").addEventListener("click", () => send(true));
     document.getElementById("swLoadState").addEventListener("click", () => send(false));
+    // Pause: P in the game is PixelU's own pause key; the button and P here reach it from the page.
+    const pause = async () => {
+      try { await api("/api/dol/action", { action: "pause" }); toast("Pause / resume"); } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("swPause").addEventListener("click", pause);
+    document.addEventListener("keydown", e => {
+      if (e.repeat || e.ctrlKey || e.altKey || e.metaKey || (e.key !== "p" && e.key !== "P")) return;
+      if (document.getElementById("swStates").hidden) return; // no GameCube / Wii game playing
+      const t = e.target;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      e.preventDefault();
+      pause();
+    });
   })();
   document.getElementById("swStopGame").addEventListener("click", async () => {
     try {

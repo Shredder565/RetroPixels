@@ -394,7 +394,8 @@ void RenderWidget::ReportSizeIfChanged(QSize logical_size)
 }
 
 // RetroPixels asks for a save state or a load by posting the registered message
-// "PixelU.HostCommand" to this window: wParam 1 saves, 2 loads, lParam is the slot (1 to 10).
+// "PixelU.HostCommand" to this window: wParam 1 saves, 2 loads, lParam is the slot (1 to 10);
+// wParam 3 pauses the game, or resumes it if it is paused.
 // It only reaches the game screen of a game that is playing.
 bool RenderWidget::nativeEvent(const QByteArray& event_type, void* message, qintptr* result)
 {
@@ -406,8 +407,13 @@ bool RenderWidget::nativeEvent(const QByteArray& event_type, void* message, qint
     const int slot = static_cast<int>(msg->lParam);
     auto& system = TheSystem();
     const Core::State state = Core::GetState(system);
-    if (slot >= 1 && slot <= 10 &&
-        (state == Core::State::Running || state == Core::State::Paused))
+    if (msg->wParam == 3 && (state == Core::State::Running || state == Core::State::Paused))
+    {
+      Core::SetState(system, state == Core::State::Paused ? Core::State::Running :
+                                                            Core::State::Paused);
+    }
+    else if (slot >= 1 && slot <= 10 &&
+             (state == Core::State::Running || state == Core::State::Paused))
     {
       if (msg->wParam == 1)
         State::Save(system, static_cast<u32>(slot));

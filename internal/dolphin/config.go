@@ -295,6 +295,7 @@ func PadState(user, file, section string) string {
 // Without force it only fills in controllers that aren't set up yet (what
 // happens before each game).
 func SetupXboxPads(user string, force bool) error {
+	_ = PauseOnP(user)
 	gc := ReadINI(ConfigFile(user, "GCPadNew.ini"))
 	if force || PadState(user, "GCPadNew.ini", "GCPad1") == "none" {
 		for _, kv := range GCPadMap {
@@ -320,6 +321,23 @@ func SetupXboxPads(user string, force bool) error {
 		return d.Save(ConfigFile(user, "Dolphin.ini"))
 	}
 	return nil
+}
+
+// PauseHotkey is PixelU-Wii's pause key: P, like RetroPixels' other
+// systems, and F10, Dolphin's own.
+const PauseHotkey = "`P` | `F10`"
+
+// PauseOnP makes P pause the game in hotkeys that are still Dolphin's
+// default (F10). A pause key the player chose is left alone, and without a
+// Hotkeys.ini PixelU-Wii's own defaults already have P.
+func PauseOnP(user string) error {
+	path := ConfigFile(user, "Hotkeys.ini")
+	f := ReadINI(path)
+	if v, ok := f.Get("Hotkeys", "General/Toggle Pause"); !ok || v != "F10" {
+		return nil
+	}
+	f.Set("Hotkeys", "General/Toggle Pause", PauseHotkey)
+	return f.Save(path)
 }
 
 // ---------------- Dolphin settings ----------------

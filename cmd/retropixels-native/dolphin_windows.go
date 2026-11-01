@@ -68,6 +68,7 @@ type dolRun struct {
 	started  time.Time
 	embed    bool
 	wentFull bool // this window went fullscreen for the game
+	paused   bool // paused with P / Game > Pause (as far as this window knows)
 	volKick  chan struct{}
 }
 
@@ -193,9 +194,13 @@ func (a *app) dolUpdateMenus() {
 		}
 	}
 	enableItem(a.menu, cmdDolStop, r != nil)
-	if r != nil { // save states go to PixelU (dolState)
+	if r != nil { // save states and pause go to PixelU (dolState, dolPause)
 		enableItem(a.menu, cmdSaveState, true)
 		enableItem(a.menu, cmdLoadState, true)
+		enableItem(a.menu, cmdPause, true)
+		if r.paused {
+			renameItem(a.menu, cmdPause, "&Resume\tP")
+		}
 	}
 	auto := a.settings.autoRecord()
 	enableItem(a.menu, cmdDolRecNext, !auto)
@@ -639,6 +644,8 @@ func (a *app) dolEvent(name, detail string) {
 			a.command(cmdLoadState)
 		case "slot":
 			a.command(cmdNextSlot)
+		case "pause":
+			a.command(cmdPause)
 		}
 		dolKeys.full.Store(a.fullscreen)
 	case "dol-rec-warn":
@@ -880,6 +887,9 @@ func dolKeyHook(code, wp, lp uintptr) uintptr {
 			act = "load"
 		case k.VkCode == vkF3 && dolKeys.states.Load():
 			act = "slot"
+		case k.VkCode == 'P' && dolKeys.states.Load() && !alt &&
+			call(dpGetAsyncKeyState, 0x11 /* VK_CONTROL */)&0x8000 == 0:
+			act = "pause" // taken here, so the game screen doesn't pause it a second time
 		}
 		if act != "" && down {
 			if !dolKeys.held[k.VkCode] {
@@ -1011,5 +1021,27 @@ func (a *app) dolState(save bool) {
 		a.showMessage(fmt.Sprintf("Saving to slot %d", slot))
 	default:
 		a.showMessage(fmt.Sprintf("Loading slot %d", slot))
+	}
+}
+
+// dolPause pauses the GameCube / Wii game, or resumes it (P, Game > Pause).
+func (a *app) dolPause() {
+	r := a.dol.run
+	if r == nil {
+		return
+	}
+	image := r.image
+	if image == "" {
+		image = filepath.Base(r.exe)
+	}
+	if err := dolphin.TogglePause(image, r.pid, r.child.Load()); err != nil {
+		a.showMessage("Couldn't reach the game: " + err.Error())
+		return
+	}
+	r.paused = !r.paused
+	if r.paused {
+		a.showMessage("Paused (P resumes)")
+	} else {
+		a.showMessage("Resumed")
 	}
 }

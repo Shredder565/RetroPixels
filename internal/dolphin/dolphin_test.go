@@ -367,3 +367,33 @@ func TestWADAddOnByTitleID(t *testing.T) {
 		t.Errorf("the game should be recognised")
 	}
 }
+
+func TestPauseOnP(t *testing.T) {
+	user := t.TempDir()
+	path := ConfigFile(user, "Hotkeys.ini")
+
+	// No Hotkeys.ini: PixelU-Wii's defaults already have P, nothing to write.
+	if err := PauseOnP(user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("wrote a Hotkeys.ini when there was none")
+	}
+
+	// Dolphin's default F10 becomes P or F10.
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte("[Hotkeys]\r\nDevice = DInput/0/Keyboard Mouse\r\nGeneral/Toggle Pause = F10\r\n"), 0o644)
+	if err := PauseOnP(user); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ReadINI(path).Get("Hotkeys", "General/Toggle Pause"); v != PauseHotkey {
+		t.Fatalf("pause key is %q, want %q", v, PauseHotkey)
+	}
+
+	// A key the player chose stays.
+	os.WriteFile(path, []byte("[Hotkeys]\r\nGeneral/Toggle Pause = `Space`\r\n"), 0o644)
+	PauseOnP(user)
+	if v, _ := ReadINI(path).Get("Hotkeys", "General/Toggle Pause"); v != "`Space`" {
+		t.Fatalf("changed the player's pause key to %q", v)
+	}
+}

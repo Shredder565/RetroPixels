@@ -6,9 +6,9 @@ import (
 	"unsafe"
 )
 
-// Save states: PixelU-Wii's game screen takes the registered window message
-// "PixelU.HostCommand" (wParam 1 saves, 2 loads, lParam is the slot) from
-// RetroPixels, while a game plays.
+// Save states and pause: PixelU-Wii's game screen takes the registered window
+// message "PixelU.HostCommand" (wParam 1 saves, 2 loads, lParam is the slot;
+// 3 pauses or resumes) from RetroPixels, while a game plays.
 
 var pRegisterWindowMessageW = modUser32.NewProc("RegisterWindowMessageW")
 
@@ -31,6 +31,11 @@ func LoadState(image string, pid int, docked uintptr, slot int) error {
 	return stateCommand(image, pid, docked, 2, slot)
 }
 
+// TogglePause pauses the game, or resumes it if it's paused.
+func TogglePause(image string, pid int, docked uintptr) error {
+	return stateCommand(image, pid, docked, 3, 0)
+}
+
 func stateCommand(image string, pid int, docked uintptr, op uintptr, slot int) error {
 	var pids []int
 	if pid > 0 {
@@ -39,7 +44,7 @@ func stateCommand(image string, pid int, docked uintptr, op uintptr, slot int) e
 	if image != "" {
 		pids = append(pids, PIDsOf(image)...)
 	}
-	if slot < 1 || slot > StateSlots {
+	if op != 3 && (slot < 1 || slot > StateSlots) {
 		return errors.New("save state slots go from 1 to 10")
 	}
 	msg, _, _ := pRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("PixelU.HostCommand"))))

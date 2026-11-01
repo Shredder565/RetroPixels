@@ -802,6 +802,7 @@ func launchDolphinGame(path string) error {
 	}
 	importOldDolphin()       // the first time: the old Dolphin's settings and saves
 	_ = setupXboxPads(false) // only fills in controllers that aren't set up yet
+	_ = dolphin.PauseOnP(dolphinUserDir())
 	cfgMu.Lock()
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
 	embed := dolphinEmbedOn()
@@ -1017,6 +1018,8 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			err = stopEmbeddedGame()
 		case "save-state", "load-state":
 			err = dolStateAction(b.Action == "save-state", b.Slot)
+		case "pause":
+			err = dolPauseAction()
 		case "setup-pads":
 			if dolphinRunning() {
 				err = errors.New("close PixelU (Wii/GameCube) first")
@@ -1055,6 +1058,19 @@ func zlibInflate(b []byte, n int) []byte {
 	out := make([]byte, n)
 	k, _ := io.ReadFull(r, out)
 	return out[:k]
+}
+
+// dolPauseAction pauses the GameCube / Wii game that's playing, or resumes
+// it (the game bar's Pause button, and P while the RetroPixels page has the
+// keyboard; P in the game itself is PixelU-Wii's own pause key).
+func dolPauseAction() error {
+	runMu.Lock()
+	on := running != nil && running.Kind == "dolphin"
+	runMu.Unlock()
+	if !on {
+		return dolphin.ErrNoGameScreen
+	}
+	return dolphin.TogglePause(dolphinExeName(), 0, embeddedGameWindow())
 }
 
 // dolStateAction saves the GameCube / Wii game that's playing to a slot, or

@@ -400,7 +400,8 @@ void HotkeyManager::LoadDefaults(const ControllerInterface& ciface)
 
   // General, debugging and Wii Remote connection keys.
   bind(HK_OPEN, Chord({"Ctrl", "O"}));
-  bind(HK_PLAY_PAUSE, "F10");
+  // PixelU: P pauses and resumes, like RetroPixels' other systems (F10 too, as in Dolphin).
+  bind(HK_PLAY_PAUSE, "`P` | `F10`");
   bind(HK_STOP, KEY_ESCAPE);
   bind(HK_FULLSCREEN, Chord({"Alt", KEY_ENTER}));
 #ifdef USE_RETRO_ACHIEVEMENTS

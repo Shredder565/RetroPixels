@@ -15,5 +15,10 @@ var errStatesHere = errors.New("save and load state for GameCube and Wii are in 
 // SaveState: on Windows only for now.
 func SaveState(image string, pid int, docked uintptr, slot int) error { return errStatesHere }
 
+// TogglePause: P in the game pauses it here.
+func TogglePause(image string, pid int, docked uintptr) error {
+	return errors.New("press P in the game to pause it")
+}
+
 // LoadState: on Windows only for now.
 func LoadState(image string, pid int, docked uintptr, slot int) error { return errStatesHere }
