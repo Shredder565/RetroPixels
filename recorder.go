@@ -310,6 +310,7 @@ type recSession struct {
 	clips      []clip
 	firstVideo time.Time // when Dolphin's first video file appeared
 	warned     bool
+	files      *dumpFiles // a leftover recording's own files (else they're found in dumpDir)
 }
 
 var (
@@ -856,6 +857,9 @@ func (s *recSession) finish() {
 	}
 
 	d := findDumps(s.dumpDir, s.Launched)
+	if s.files != nil {
+		d = *s.files
+	}
 	s.logf("\n=== game ended after %s\nvideo: %v\nsound: %v %v", s.Ended.Sub(s.Launched).Round(time.Second), d.Video, d.DSP, d.DTK)
 	if len(d.Video) == 0 {
 		d.remove()

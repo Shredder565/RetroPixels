@@ -1088,3 +1088,37 @@ func dolStateAction(save bool, slot int) error {
 	}
 	return dolphin.LoadState(dolphinExeName(), 0, embeddedGameWindow(), slot)
 }
+
+// finishLeftoverRecordings makes the videos for GameCube / Wii recordings
+// that were never saved: RetroPixels was closed while the game played, or
+// didn't see the game end. PixelU-Wii's files for them are still in its dump
+// folder (RetroPixels Native, which shares PixelU, does the same).
+func finishLeftoverRecordings() {
+	time.Sleep(10 * time.Second) // let the app start first
+	if dolphinExe() == "" || dolphinRunning() {
+		return // a game is playing (here or in Native): leave its files alone
+	}
+	left := dolphin.FindLeftovers(dolphinDumpDir(), 2*time.Minute)
+	if len(left) == 0 {
+		return
+	}
+	names := map[string]string{}
+	for _, g := range dolphinLibrary() {
+		if g.ID != "" {
+			names[strings.ToUpper(g.ID)] = g.Name
+		}
+	}
+	for _, l := range left {
+		name := names[strings.ToUpper(l.GameID)]
+		if name == "" {
+			name = l.GameID
+		}
+		files := dumpFiles{Video: l.Files.Video, DSP: l.Files.DSP, DTK: l.Files.DTK}
+		s := &recSession{Game: name, Launched: l.Started, Ended: l.Last, dumpDir: dolphinDumpDir(), Emu: wiiEngineLabel,
+			files: &files, firstVideo: l.Started,
+			clips: []clip{{From: mark{Audio: 0, Wall: l.Started, Edge: true}, To: mark{Audio: -1, Wall: l.Last, Edge: true}}}}
+		s.logf("\n=== %s  %s: finishing a recording that wasn't saved (RetroPixels was closed, or missed the game's end)",
+			time.Now().Format(time.RFC3339), name)
+		s.finish()
+	}
+}

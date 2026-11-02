@@ -165,6 +165,7 @@ type Recording struct {
 	clips      []clip
 	firstVideo time.Time // when Dolphin's first video file appeared
 	warned     bool
+	files      *Dumps // a leftover recording's own files (else they're found in DumpDir)
 }
 
 // NewRecording: a game about to start with Dolphin saving it, recorded from
@@ -673,6 +674,9 @@ func (r *Recording) Save(o SaveOptions) ([]string, error) {
 		}
 	}
 	d := FindDumps(r.DumpDir, r.Launched)
+	if r.files != nil {
+		d = *r.files
+	}
 	r.logf("\n=== game ended after %s\nvideo: %v\nsound: %v %v", r.Ended.Sub(r.Launched).Round(time.Second), d.Video, d.DSP, d.DTK)
 	if len(d.Video) == 0 {
 		d.Remove()

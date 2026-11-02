@@ -121,6 +121,47 @@ func (a *app) dolStartup() {
 	if !d.Detected {
 		a.dolDetect()
 	}
+	a.dolLeftovers()
+}
+
+// dolLeftovers finishes recordings this app (or RetroPixels.exe, which shares
+// PixelU) didn't get to save: it was closed while the game played, or missed
+// the game's end. PixelU's files for them are still in its dump folder.
+func (a *app) dolLeftovers() {
+	exe := a.dolExe()
+	if exe == "" {
+		return
+	}
+	dumpDir := dolphin.DumpDir(dolphin.UserDir(exe))
+	dir := a.settings.recDir()
+	folders := append([]string(nil), a.settings.Dolphin.Folders...)
+	go func() {
+		time.Sleep(10 * time.Second) // let the window settle first
+		if dolphin.Running(filepath.Base(exe)) {
+			return // a game is playing (here or in RetroPixels.exe): leave its files alone
+		}
+		left := dolphin.FindLeftovers(dumpDir, 2*time.Minute)
+		if len(left) == 0 {
+			return
+		}
+		names := map[string]string{}
+		for _, g := range dolphin.Library(folders, nil) {
+			if g.ID != "" {
+				names[strings.ToUpper(g.ID)] = g.Name
+			}
+		}
+		for _, l := range left {
+			name := names[strings.ToUpper(l.GameID)]
+			if name == "" {
+				name = l.GameID
+			}
+			rec := dolphin.LeftoverRecording(l, name, filepath.Join(recordingsDir(), "logs", "last-recording.log"))
+			a.dol.mu.Lock()
+			a.dol.pending++
+			a.dol.mu.Unlock()
+			a.dolSave(rec, dir)
+		}
+	}()
 }
 
 func (a *app) dolDetect() {
