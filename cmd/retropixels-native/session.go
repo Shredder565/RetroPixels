@@ -92,6 +92,8 @@ type session struct {
 	guard     soundGuard
 	// an Archipelago client's LOCK holds the game still until then (archipelago.go)
 	apHoldUntil time.Time
+	// the RetroPixels SNES Debugger's session (snesdbg.go), or nil
+	dbg *snesDbgState
 
 	// RETRO_NATIVE_STATS=<file>: frames per second and queued sound, every 2 s (for testing)
 	stats      *os.File
@@ -234,6 +236,7 @@ func (s *session) usesKey(k string) bool {
 func (s *session) loop() {
 	runtime.LockOSThread()
 	defer close(s.done)
+	defer s.endSNESDebugger()
 	if s.stats != nil {
 		defer s.stats.Close()
 	}
@@ -255,6 +258,9 @@ func (s *session) loop() {
 		now := time.Now()
 		dt := now.Sub(last).Seconds()
 		last = now
+		if s.failed == nil {
+			s.pollSNESDebugger(now)
+		}
 		wait := 16 * time.Millisecond
 		if s.paused.Load() || s.modal.Load() || s.failed != nil || s.apHeld(now) {
 			s.pacer.reset()

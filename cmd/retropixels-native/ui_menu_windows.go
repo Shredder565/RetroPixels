@@ -37,6 +37,7 @@ const (
 	cmdKeysHelp    = 1480
 	cmdReadme      = 1481
 	cmdRecRecent0  = 1500 // ..1509
+	cmdSNESDebug   = 1490
 
 	vkF1  = 0x70
 	vkF3  = 0x72
@@ -120,6 +121,7 @@ func (a *app) uiGameMenu() {
 // uiOptionsMenu: at the end of Options.
 func (a *app) uiOptionsMenu() {
 	appendMenu(a.optMenu, mfString, cmdRumble, "Controller &rumble")
+	appendMenu(a.optMenu, mfString, cmdSNESDebug, "Open the S&NES Debugger with SNES games")
 }
 
 // uiRecordMenu: after Open recordings folder.
@@ -198,6 +200,7 @@ func (a *app) uiUpdateMenus() {
 	enableItem(a.menu, cmdSramImport, sram)
 	enableItem(a.menu, cmdSramExport, sram)
 	checkItem(a.menu, cmdRumble, !a.settings.RumbleOff)
+	checkItem(a.menu, cmdSNESDebug, a.settings.snesDebugger())
 	bi := 0
 	for i, id := range binChoices {
 		if id == binSystem {
@@ -493,6 +496,15 @@ func (a *app) uiCommand(id int) {
 		d := screenshotsDir()
 		os.MkdirAll(d, 0o755)
 		shellOpen(d)
+	case id == cmdSNESDebug:
+		on := !a.settings.snesDebugger()
+		a.settings.SNESDebugger = &on
+		saveSettings(a.settings)
+		if on {
+			a.showMessage("The SNES Debugger opens with the next SNES game")
+		} else {
+			a.showMessage("The SNES Debugger won't open with SNES games")
+		}
 	case id == cmdRumble:
 		a.settings.RumbleOff = !a.settings.RumbleOff
 		saveSettings(a.settings)
