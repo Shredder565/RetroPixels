@@ -78,13 +78,20 @@ jobs:
       # The newest successful builds of PixelU's two engines on this branch.
       - name: PixelU (Wii U and GameCube / Wii engines)
         run: |
+          # The engines built from the commit's own branch come first (when
+          # BRANCH's builds have expired, they're rebuilt there by hand).
           get() { # workflow file, artifact name
-            id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$BRANCH" --status success -L 1 --json databaseId -q '.[0].databaseId')
-            [ -n "$id" ] || { echo "no successful run of $1"; exit 1; }
-            sha=$(gh run view -R "$GITHUB_REPOSITORY" "$id" --json headSha -q .headSha)
-            echo "$1: run $id ($sha)"
-            echo "$1 $id ${sha:0:7}" >> engines.txt
-            gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2"
+            for b in "$GITHUB_REF_NAME" "$BRANCH"; do
+              id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$b" --status success -L 1 --json databaseId -q '.[0].databaseId')
+              [ -n "$id" ] || continue
+              rm -rf "eng/$2"
+              gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2" || continue
+              sha=$(gh run view -R "$GITHUB_REPOSITORY" "$id" --json headSha -q .headSha)
+              echo "$1: run $id on $b ($sha)"
+              echo "$1 $id ${sha:0:7}" >> engines.txt
+              return 0
+            done
+            echo "no successful run of $1 with its build still there"; exit 1
           }
           get pixelu.yml PixelU-windows-x64
           get pixelu-wii.yml PixelU-Wii-windows-x64
