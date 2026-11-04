@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.24.0] - 2026-11-04
+
+- GameCube and Wii: games now play at 3× resolution (1K / 1080p) by default instead of the native 480p, and the resolution you choose stays: RetroPixels keeps it in %APPDATA%\RetroPixels\gamecube-resolution.txt (shared by RetroPixels.exe and RetroPixels Native) and puts it into PixelU's GameCube / Wii settings before every game, so it's no longer lost when you unzip a new version into a new folder. A higher resolution you had already set is kept. Change it in the GameCube / Wii graphics settings (RetroPixels Native: GameCube / Wii > PixelU settings).
+
 ## [2.23.0] - 2026-10-28
 
 - Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside the Xbox controller, in RetroPixels.exe and RetroPixels Native. Whichever you moved last aims: the mouse points where it is over the picture, the left button fires and the right button is the yoke's thumb button.

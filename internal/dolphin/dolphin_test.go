@@ -199,6 +199,7 @@ func TestNames(t *testing.T) {
 
 func TestPadsAndSettings(t *testing.T) {
 	user := t.TempDir()
+	t.Setenv("RETRO_GC_RES_FILE", filepath.Join(t.TempDir(), "res.txt"))
 	ini := func(n string) string { return ConfigFile(user, n) }
 	if err := SetupXboxPads(user, false); err != nil {
 		t.Fatal(err)
@@ -230,7 +231,8 @@ func TestPadsAndSettings(t *testing.T) {
 	}
 
 	os.WriteFile(ini("GFX.ini"), []byte("[Settings]\r\nInternalResolution = 1\r\nShaderCompilationMode = 2\r\n[Hardware]\r\nVSync = False\r\n"), 0o644)
-	if v := ReadSettings(user); v["res"] != "1" || v["vsync"] != "False" || v["backend"] != "Vulkan" || v["confirmstop"] != "True" {
+	// Native in GFX.ini and nothing chosen in RetroPixels yet: games play at 1K (3×).
+	if v := ReadSettings(user); v["res"] != DefaultResolution || v["vsync"] != "False" || v["backend"] != "Vulkan" || v["confirmstop"] != "True" {
 		t.Fatalf("read: %v", v)
 	}
 	if err := SaveSettings(user, map[string]string{"res": "3", "aspect": "2", "vsync": "true", "widehack": "True", "backend": "D3D12"}); err != nil {
@@ -365,5 +367,42 @@ func TestWADAddOnByTitleID(t *testing.T) {
 	}
 	if _, ok := GameFor(game); !ok {
 		t.Errorf("the game should be recognised")
+	}
+}
+
+// The chosen resolution is kept outside the engine's folder, so a new
+// RetroPixels folder (a new engine User folder) still plays at it.
+func TestKeptResolution(t *testing.T) {
+	t.Setenv("RETRO_GC_RES_FILE", filepath.Join(t.TempDir(), "RetroPixels", "gamecube-resolution.txt"))
+	gfx := func(user string) string {
+		v, _ := ReadINI(ConfigFile(user, "GFX.ini")).Get("Settings", "InternalResolution")
+		return v
+	}
+	// Nothing chosen and nothing set: 1K (3×).
+	fresh := t.TempDir()
+	if err := ApplyResolution(fresh); err != nil || gfx(fresh) != "3" {
+		t.Fatalf("default: %q %v", gfx(fresh), err)
+	}
+	// Nothing chosen, but a higher one already set in the engine: kept.
+	old := t.TempDir()
+	os.MkdirAll(ConfigDir(old), 0o755)
+	os.WriteFile(ConfigFile(old, "GFX.ini"), []byte("[Settings]\r\nInternalResolution = 6\r\nMSAA = 4\r\n"), 0o644)
+	if KeptResolution(old) != "6" {
+		t.Fatalf("existing 6×: %s", KeptResolution(old))
+	}
+	// Chosen in RetroPixels: every engine folder gets it before a game, even
+	// when the engine itself was changed back to native, and nothing else changes.
+	if err := SaveSettings(old, map[string]string{"res": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(ConfigFile(old, "GFX.ini"), []byte("[Settings]\r\nInternalResolution = 1\r\nMSAA = 4\r\n"), 0o644)
+	newer := t.TempDir()
+	for _, u := range []string{old, newer} {
+		if err := ApplyResolution(u); err != nil || gfx(u) != "2" || ReadSettings(u)["res"] != "2" {
+			t.Errorf("%s: %q %v", u, gfx(u), err)
+		}
+	}
+	if v, _ := ReadINI(ConfigFile(old, "GFX.ini")).Get("Settings", "MSAA"); v != "4" {
+		t.Errorf("other settings changed: MSAA %q", v)
 	}
 }

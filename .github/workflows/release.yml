@@ -19,7 +19,7 @@ name: Release
 on:
   push:
     tags: ["release-v*", "release-dryrun-v*"]
-    branches: [claude/wiiu-emulator-urpcen, claude/project-thread-96w825]
+    branches: [claude/wiiu-emulator-urpcen, claude/project-thread-96w825, claude/project-thread-g487p6]
   workflow_dispatch:
     inputs:
       version:
