@@ -49,6 +49,11 @@ RetroPixels window.
 - **Cartridge hardware** emulated in software: SNES Super FX, SA-1, DSP-1/2, Cx4, S-DD1, SPC7110;
   about 120 NES mappers and the Famicom sound chips; Game Boy MBC1–7, HuC1/3, TAMA5; GBA sensor
   carts; Atari 2600 bank-switching including DPC+ and the Supercharger.
+- **SNES Debugger** (`RetroPixels-SNES-Debugger.exe`, new in 2.26.0). Opens alongside SNES games,
+  captures VRAM, CGRAM, WRAM and every DMA transfer with its ROM source, finds where a background's
+  tiles, tilemap and palettes are in the ROM, and swaps the background for your own picture
+  (colour reduction to the SNES's palettes, relocation to free ROM space and repointing when the
+  new tiles don't fit). See [docs/snes-debugger.md](docs/snes-debugger.md).
 - **Archipelago multiworld randomizers.** Open an Archipelago patch file and play; the Archipelago
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
@@ -194,6 +199,8 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | `wiiu/` | Wii U emulator (PowerPC 750CL, RPX loader, system libraries), run natively |
 | `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels Native: the Win32 app and the native emulators |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
+| `tools/snes-debugger/` | The SNES Debugger (Rust): capture analysis, background swap, its window |
+| `internal/snesdbg/` | The folder RetroPixels and the SNES Debugger share (sessions, capture requests) |
 | `docs/` | Project website (GitHub Pages) |
 
 ## Support development

@@ -10,10 +10,12 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
 	"sort"
+	"strings"
 	"time"
 
 	"retropixels/cores/model3"
@@ -28,6 +30,7 @@ func main() {
 	trace := flag.String("trace", "", "reference trace to compare with")
 	out := flag.String("out", "", "folder for pictures")
 	every := flag.Int("every", 60, "save a picture every n frames")
+	from := flag.Int("from", 0, "save pictures from this frame on")
 	disFrom := flag.Uint64("dis", 0, "disassemble from this address after running")
 	disN := flag.Int("disn", 64, "instructions to disassemble")
 	bp := flag.Uint64("bp", 0, "print registers when the processor reaches this address")
@@ -156,6 +159,14 @@ func main() {
 			}
 		}
 	}
+	// M3_STICKX=from,to,adc,...: the stick's X (as the ADC reads it) over frames
+	var stickX []int
+	for _, p := range strings.Split(os.Getenv("M3_STICKX"), ",") {
+		var v int
+		if _, err := fmt.Sscan(p, &v); err == nil {
+			stickX = append(stickX, v)
+		}
+	}
 	t0 := time.Now()
 	tLast := t0
 	for f := 1; f <= *frames; f++ {
@@ -163,9 +174,47 @@ func main() {
 		if *coinAt > 0 {
 			m.Inputs.Coin1 = f >= *coinAt && f < *coinAt+10
 			m.Inputs.Start1 = f >= *coinAt+120 && f < *coinAt+130
-			m.Inputs.Trigger = f >= *coinAt+400 && (f/20)%2 == 0
+			trigAt := *coinAt + 400
+			if v := os.Getenv("M3_TRIGAT"); v != "" {
+				fmt.Sscan(v, &trigAt)
+			}
+			m.Inputs.Trigger = f >= trigAt && (f/20)%2 == 0
+			if os.Getenv("M3_EVENT") != "" {
+				m.Inputs.Event = f >= trigAt && (f/30)%2 == 1
+			}
+		}
+		m.Inputs.StickX, m.Inputs.StickY = 0, 0
+		if sw := os.Getenv("M3_SWEEPFROM"); sw != "" {
+			// M3_SWEEPFROM=frame: sweep the stick around the screen from then on
+			var from int
+			fmt.Sscan(sw, &from)
+			if f >= from {
+				m.Inputs.StickX = float32(0.85 * math.Sin(float64(f)/37))
+				m.Inputs.StickY = float32(0.6 * math.Sin(float64(f)/53))
+			}
+		}
+		for i := 0; i+2 < len(stickX); i += 3 {
+			if f >= stickX[i] && f < stickX[i+1] {
+				m.Inputs.StickX = float32(stickX[i+2]-0x80) / 127
+			}
+		}
+		if pk := os.Getenv("M3_POKE"); pk != "" {
+			// M3_POKE=addr:value,... writes RAM bytes before each frame
+			ram, _ := m.DebugMemory()
+			for _, e := range strings.Split(pk, ",") {
+				var a, v int
+				if _, err := fmt.Sscanf(e, "%x:%x", &a, &v); err == nil && a < len(ram) {
+					ram[a] = byte(v)
+				}
+			}
 		}
 		m.RunFrame()
+		for _, d := range strings.Split(os.Getenv("M3_DUMPS"), ",") {
+			if d == fmt.Sprint(f) {
+				ram, _ := m.DebugMemory()
+				os.WriteFile(fmt.Sprintf("/tmp/claude-0/ram_%d.bin", f), ram, 0o644)
+			}
+		}
 		if d := os.Getenv("M3_DUMP_FRAME"); d == fmt.Sprint(f) {
 			ram, vram := m.DebugMemory()
 			os.WriteFile("/tmp/claude-0/my_ram.bin", ram, 0o644)
@@ -184,7 +233,7 @@ func main() {
 			fmt.Printf("frame %d %.1f fps\n", f, 300/time.Since(tLast).Seconds())
 			tLast = time.Now()
 		}
-		if *out != "" && f%*every == 0 {
+		if *out != "" && f >= *from && f%*every == 0 {
 			os.MkdirAll(*out, 0o755)
 			save(filepath.Join(*out, fmt.Sprintf("f%06d.png", f)), m.Picture[:])
 			if os.Getenv("M3_TGREGS") != "" {

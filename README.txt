@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.23.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.27.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -23,8 +23,8 @@ any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.23.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.23.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.27.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.27.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -290,7 +290,13 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   your Xbox controller is set up as the GameCube controller and as a Wii Remote
   + Nunchuk (Wii pointer = right stick, shake = RB). Your own controller
   settings are never replaced unless you click "Reset to Xbox layout".
-- The main graphics settings are on the right of both tabs (they're shared).
+- The main graphics settings are on the right of both tabs (they're shared;
+  in RetroPixels Native: GameCube / Wii > PixelU settings).
+- Resolution: games play at 3x (1K / 1080p) unless you choose another one
+  (new in 2.27.0). The one you choose is kept for every game and also after
+  you update RetroPixels to a new folder: it's saved in
+  %APPDATA%\RetroPixels\gamecube-resolution.txt and put into the engine's
+  settings before each game. If you had already set a higher one, that's kept.
   Save states: Shift+F1 saves, F1 loads.
 
 Arcade games in MAME (any version)
@@ -359,6 +365,30 @@ Star Wars Trilogy Arcade (Sega Model 3)
 - High scores and the game's settings are kept like a battery save.
   Save states aren't available for this game yet.
 - It needs a fast PC: the 3D board is drawn on the processor's cores.
+
+RetroPixels SNES Debugger (new in 2.26.0)
+- RetroPixels-SNES-Debugger.exe comes in the download, next to the
+  programs. It opens by itself when a SNES game starts, in RetroPixels.exe
+  and RetroPixels Native. Turn that off below the game in RetroPixels.exe,
+  or in RetroPixels Native's Options menu ("Open the SNES Debugger with SNES
+  games").
+- Play to the screen you want (the first level, say) and press "Capture
+  now" (or "Capture in 5 s", then go back to the game). It saves the video
+  memory (VRAM), the colours (CGRAM), work RAM and every DMA transfer the
+  game made, with its ROM source address.
+- Pick a background layer (BG1-BG4): the debugger draws it as the game has
+  it and says where its tiles, tilemap and palettes are in the ROM (file
+  offset and SNES address, and which transfer and code loaded them).
+- "Choose picture..." (a PNG), "Make preview", "Save patched ROM...": your
+  picture goes in that layer, reduced to the SNES's colour limits (new
+  palettes, or the game's own colours), and the patched ROM plays in
+  RetroPixels. When the picture needs more tiles than the game had room
+  for, they move to free space in the ROM and the game's transfer is
+  repointed there (or similar tiles are merged).
+- It works on what the ROM holds as it is: title screens and fixed
+  backdrops. Compressed graphics and scrolling level maps can't be swapped
+  in place (it says so). Your original ROM file is never changed.
+- docs/snes-debugger.md in the source explains the files and how it works.
 
 Recording games
 - Every game is recorded automatically as .mp4, from the start of the game
@@ -610,7 +640,8 @@ hasn't been tried on a real phone yet, so tell us how it runs.
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
                  (%LOCALAPPDATA%\RetroPixels\BrowserProfile)
-- Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json)
+- Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json;
+                 GameCube / Wii resolution: gamecube-resolution.txt)
 - Recordings:    Videos\RetroPixels
 - Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)
 - GameCube / Wii: PixelU\wii\User (settings, memory cards, Wii saves and

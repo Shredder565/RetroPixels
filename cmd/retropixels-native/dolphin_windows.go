@@ -355,6 +355,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	user := dolphin.UserDir(exe)
 	d.importOld(exe)                       // the first time: the old Dolphin's settings and saves
 	_ = dolphin.SetupXboxPads(user, false) // only fills in controllers that aren't set up yet
+	_ = dolphin.ApplyResolution(user)      // the chosen resolution (1K by default), kept across versions
 	if a.dolNeedsWiiKeys(g, user) {        // Wii games need the keys file from the player's own Wii
 		return
 	}
