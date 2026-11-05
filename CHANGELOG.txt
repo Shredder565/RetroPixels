@@ -4,6 +4,18 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.31.0  (2026-11-05)
+--------------------------------
+- PixelDS (RetroPixels' own emulator) now runs its first 3DS programs:
+  3DS homebrew (.3dsx) that draws straight to the screen. Drop a .3dsx
+  onto PixelDS.exe to try it.
+- In: the 3DS's ARM11 processor (with floating point), its memory, threads
+  and the system services programs use (screens, buttons, circle pad,
+  touch screen, SD card, save data).
+- 3DS keys: arrows = circle pad, I/J/K/L = D-pad, E = ZL, R = ZR.
+- Not yet: 3DS 3D graphics, sound, and game cards (.3ds, .cci, .cxi,
+  .cia); the 3DS / DS tab still plays 3DS games in Azahar until then.
+
 RetroPixels 2.30.0  (2026-11-05)
 --------------------------------
 - PixelDS (RetroPixels' own DS emulator) now draws 3D graphics, so 3D DS

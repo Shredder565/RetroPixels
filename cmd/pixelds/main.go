@@ -2,11 +2,12 @@
 // (package cores/pixelds) in its own window. The 3DS / DS tab of
 // RetroPixels.exe and RetroPixels-Native.exe starts it with a game:
 //
-//	PixelDS.exe [-f | -w] game.nds
+//	PixelDS.exe [-f | -w] game.nds   (or a 3DS program, game.3dsx)
 //
 // -f starts fullscreen, -w in a window. The game's save sits next to it
 // (game.sav, as melonDS keeps it, so saves made there carry over); save
-// states go to the RetroPixels folder in the user's settings.
+// states go to the RetroPixels folder in the user's settings, and so do
+// the 3DS's SD card and 3DS save data.
 //
 // For tests (and on systems without the window):
 //
@@ -132,7 +133,28 @@ func open(path string) (*pixelds.Emulator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return pixelds.Open(name, data, pixelds.Options{SampleRate: sampleRate, Save: readSave(path)})
+	o := pixelds.Options{SampleRate: sampleRate}
+	if sys, _ := pixelds.Detect(name, data); sys == pixelds.ThreeDS {
+		o.SDCard, o.SaveDir = threeDSFolders(path)
+	} else {
+		o.Save = readSave(path)
+	}
+	return pixelds.Open(name, data, o)
+}
+
+// threeDSFolders: the 3DS's SD card (shared by all 3DS programs) and the
+// game's own save data, in the RetroPixels folder of the user's settings.
+func threeDSFolders(game string) (sd, save string) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	base := strings.TrimSuffix(filepath.Base(game), filepath.Ext(game))
+	root := filepath.Join(dir, "RetroPixels", "PixelDS", "3DS")
+	sd, save = filepath.Join(root, "sdmc"), filepath.Join(root, "saves", base)
+	os.MkdirAll(sd, 0o755)
+	os.MkdirAll(save, 0o755)
+	return sd, save
 }
 
 func buttonBit(name string) uint32 {
@@ -204,6 +226,10 @@ func headless(path string) error {
 		}
 		e.RunFrame()
 		e.TakeAudio()
+		if err := e.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "PixelDS: the game stopped at frame %d: %v\n", f, err)
+			break
+		}
 	}
 	el := time.Since(start)
 	fmt.Printf("%s (%s): %d frames in %v (%.1f fps)\n", e.Title(), e.GameCode(), *frames, el.Round(time.Millisecond), float64(*frames)/el.Seconds())

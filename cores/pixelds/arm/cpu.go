@@ -103,8 +103,14 @@ type CPU struct {
 	Undefined func(op uint32, thumb bool) bool
 
 	VectorBase uint32 // 0 or 0xFFFF0000
-	IRQLine    bool   // the interrupt controller's output
-	Halted     bool   // waiting for an interrupt; the machine wakes it
+	// SVCLow: ARM-state SWI numbers come from the low byte (the 3DS's
+	// SVC convention) instead of bits 16-23 (the DS BIOS's).
+	SVCLow bool
+	// Unaligned: word loads at unaligned addresses read the four bytes
+	// there (ARMv6 with unaligned access on) instead of rotating.
+	Unaligned bool
+	IRQLine   bool // the interrupt controller's output
+	Halted    bool // waiting for an interrupt; the machine wakes it
 
 	Cycles int64 // cycles run so far
 	// Cost: cycles each instruction takes before its extra cycles (1; the

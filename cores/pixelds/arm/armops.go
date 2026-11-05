@@ -372,7 +372,13 @@ func armBranch(c *CPU, op uint32) {
 	c.Cycles += 2
 }
 
-func armSWI(c *CPU, op uint32) { c.swi(op >> 16 & 0xff) }
+func armSWI(c *CPU, op uint32) {
+	if c.SVCLow {
+		c.swi(op & 0xff)
+		return
+	}
+	c.swi(op >> 16 & 0xff)
+}
 
 func armBKPT(c *CPU, op uint32) {
 	if c.Arch < V5TE {
@@ -580,6 +586,9 @@ func armSwap(c *CPU, op uint32) {
 
 // load32 is an LDR: unaligned addresses rotate the word.
 func (c *CPU) load32(a uint32) uint32 {
+	if c.Unaligned {
+		return c.Bus.Read32(a)
+	}
 	return bits.RotateLeft32(c.Bus.Read32(a), -int(a&3)*8)
 }
 

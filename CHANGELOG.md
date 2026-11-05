@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.31.0] - 2026-11-05
+
+- PixelDS takes its first step into the 3DS: it now runs 3DS homebrew programs (.3dsx) that draw straight to the screen. Drop a .3dsx file onto PixelDS.exe (or start `PixelDS.exe game.3dsx`). Like the rest of PixelDS it's RetroPixels' own new code.
+- What's in: the 3DS's ARM11 processor with its media instructions and floating-point unit (checked against 20,000 reference cases), the 3DS's memory, and its system software done at a high level: threads with priorities, events, mutexes, semaphores, timers, the address arbiter, shared memory, and the system services programs talk to (srv, APT, GSP for the screens, HID for buttons, the circle pad and the touch screen, FS for the SD card and save data, CFG, PTM).
+- 3DS controls in PixelDS: arrows (or a controller's left stick) move the circle pad, I / J / K / L are the D-pad, E = ZL, R = ZR (LT / RT on a controller), and the rest as for DS games. The 3DS's SD card and save data are kept in %APPDATA%\RetroPixels\PixelDS\3DS.
+- Not yet: 3DS 3D graphics (the PICA200), sound, and game cards and installed titles (.3ds, .cci, .cxi, .cia). Those come next, so the 3DS / DS tab still plays 3DS games in Azahar for now.
+
 ## [2.30.0] - 2026-11-05
 
 - PixelDS, RetroPixels' own DS emulator, now draws 3D graphics, so 3D DS games play in it too. It's RetroPixels' own new code, like the rest of PixelDS.

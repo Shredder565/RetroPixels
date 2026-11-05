@@ -335,6 +335,46 @@ var keyMap = map[uintptr]uint32{
 	0x25: pixelds.BtnLeft, 0x26: pixelds.BtnUp, 0x27: pixelds.BtnRight, 0x28: pixelds.BtnDown,
 	'X': pixelds.BtnA, 'Z': pixelds.BtnB, 'S': pixelds.BtnX, 'A': pixelds.BtnY,
 	'Q': pixelds.BtnL, 'W': pixelds.BtnR, 0x0D: pixelds.BtnStart, 0x10: pixelds.BtnSelect, 0x08: pixelds.BtnSelect,
+	'E': pixelds.BtnZL, 'R': pixelds.BtnZR,
+	'I': dpadUp, 'K': dpadDown, 'J': dpadLeft, 'L': dpadRight,
+}
+
+// On the 3DS the arrow keys move the circle pad and I, J, K, L press the
+// D-pad (on the DS they are the D-pad too).
+const (
+	dpadUp = 1 << (20 + iota)
+	dpadDown
+	dpadLeft
+	dpadRight
+)
+
+// split3DS turns the keyboard's bits into the buttons and the circle pad.
+func split3DS(bits uint32) (uint32, float64, float64) {
+	var x, y float64
+	if bits&pixelds.BtnLeft != 0 {
+		x--
+	}
+	if bits&pixelds.BtnRight != 0 {
+		x++
+	}
+	if bits&pixelds.BtnUp != 0 {
+		y++
+	}
+	if bits&pixelds.BtnDown != 0 {
+		y--
+	}
+	return bits &^ (pixelds.BtnLeft | pixelds.BtnRight | pixelds.BtnUp | pixelds.BtnDown), x, y
+}
+
+// dpadKeys: I, J, K, L as the D-pad.
+func dpadKeys(bits uint32) uint32 {
+	out := bits &^ (dpadUp | dpadDown | dpadLeft | dpadRight)
+	for _, p := range [][2]uint32{{dpadUp, pixelds.BtnUp}, {dpadDown, pixelds.BtnDown}, {dpadLeft, pixelds.BtnLeft}, {dpadRight, pixelds.BtnRight}} {
+		if bits&p[0] != 0 {
+			out |= p[1]
+		}
+	}
+	return out
 }
 
 func runWindow(path string) bool {
@@ -344,7 +384,7 @@ func runWindow(path string) bool {
 	}
 	call(pTimeBeginPeriod, 1)
 	if path == "" {
-		messageBox(0, "PixelDS plays DS games (and 3DS games in a later version).\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
+		messageBox(0, "PixelDS plays DS games and 3DS homebrew (.3dsx); 3DS game cards come in a later version.\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
 		return true
 	}
 	emu, err := open(path)
@@ -463,9 +503,9 @@ func (a *app) mouse(lp uintptr, down bool) {
 	if w <= 0 || h <= 0 {
 		return
 	}
-	sx := (mx - x) * a.fw / w
+	sx := (mx-x)*a.fw/w - a.emu.BottomX()
 	sy := (my-y)*a.fh/h - a.fh/2
-	if down && (sy < 0 || sx < 0 || sx >= a.fw) && !a.mouseDown.Load() {
+	if down && (sy < 0 || sx < 0 || sx >= a.emu.BottomWidth()) && !a.mouseDown.Load() {
 		return
 	}
 	a.mouseX.Store(int32(sx))
@@ -622,7 +662,8 @@ func (a *app) run() {
 	next := time.Now()
 	lastSave := time.Now()
 	saveDirty := false
-	var cx, cy float64 = 128, 96 // the controller's stylus pointer
+	cx, cy := float64(e.BottomWidth()/2), float64(e.TopHeight()/2) // the controller's stylus pointer
+	errShown := false
 	pcm := make([]int16, 0, 4096)
 	titleTick := time.Now()
 	flush := func() {
@@ -649,6 +690,7 @@ func (a *app) run() {
 				if ne, err := open(a.path); err == nil {
 					e = ne
 					a.emu = ne
+					errShown = false
 				}
 			} else {
 				f(e)
@@ -657,6 +699,12 @@ func (a *app) run() {
 		default:
 		}
 		bits := a.keys.Load()
+		three := e.HasCirclePad()
+		var padX, padY float64
+		if three {
+			bits, padX, padY = split3DS(bits)
+		}
+		bits = dpadKeys(bits)
 		touchDown, tx, ty := a.mouseDown.Load(), int(a.mouseX.Load()), int(a.mouseY.Load())
 		if st, ok := pd.read(); ok {
 			b := st.Buttons
@@ -669,7 +717,18 @@ func (a *app) run() {
 				}
 			}
 			const dead = 12000
-			if st.LX < -dead {
+			if three {
+				// the left stick is the circle pad; the triggers ZL and ZR
+				if math.Abs(float64(st.LX)) > 4000 || math.Abs(float64(st.LY)) > 4000 {
+					padX, padY = float64(st.LX)/32767, float64(st.LY)/32767
+				}
+				if st.LT > 100 {
+					bits |= pixelds.BtnZL
+				}
+				if st.RT > 100 {
+					bits |= pixelds.BtnZR
+				}
+			} else if st.LX < -dead {
 				bits |= pixelds.BtnLeft
 			}
 			if st.LX > dead {
@@ -689,14 +748,19 @@ func (a *app) run() {
 			if math.Abs(ry) > 0.25 {
 				cy += ry * 4
 			}
-			cx, cy = math.Max(0, math.Min(255, cx)), math.Max(0, math.Min(191, cy))
-			if st.RT > 100 || b&0x0080 != 0 {
+			cx, cy = math.Max(0, math.Min(float64(e.BottomWidth()-1), cx)), math.Max(0, math.Min(float64(e.TopHeight()-1), cy))
+			if (!three && st.RT > 100) || b&0x0080 != 0 {
 				touchDown, tx, ty = true, int(cx), int(cy)
 			}
 		}
 		e.SetButtons(bits)
+		e.SetCirclePad(padX, padY)
 		e.Touch(tx, ty, touchDown)
 		e.RunFrame()
+		if err := e.Err(); err != nil && !errShown {
+			errShown = true
+			go messageBox(a.hwnd, "The game stopped: "+err.Error()+"\n\nPixelDS's 3DS side is still being built, so some programs need parts it doesn't have yet.", "PixelDS "+pixelds.Version, mbIconError)
+		}
 		au := e.TakeAudio()
 		if snd != nil {
 			pcm = pcm[:0]

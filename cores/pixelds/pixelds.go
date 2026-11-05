@@ -6,7 +6,8 @@
 // stereo sound, the game's save and save states. The machines themselves:
 //
 //	nds   the Nintendo DS (ARM946E-S + ARM7TDMI, cores/pixelds/arm)
-//	n3ds  the Nintendo 3DS (added stage by stage; see Open)
+//	ctr   the Nintendo 3DS (ARM11 MPCore, with the system software done at
+//	      a high level; added stage by stage, see Open)
 //
 // cmd/pixelds is the program (PixelDS.exe) that the 3DS / DS tab of both
 // RetroPixels apps starts.
@@ -24,10 +25,10 @@ import (
 )
 
 // Version of PixelDS (follows RetroPixels' version).
-const Version = "2.29.0"
+const Version = "2.31.0"
 
-// Buttons in input bit order (both machines).
-var Buttons = nds.Buttons
+// Buttons in input bit order (both machines; ZL and ZR are the 3DS's).
+var Buttons = append(append([]string(nil), nds.Buttons...), "ZL", "ZR")
 
 // Button bits.
 const (
@@ -44,6 +45,8 @@ const (
 	BtnX
 	BtnY
 	BtnLid
+	BtnZL
+	BtnZR
 )
 
 // System is which handheld a game is for.
@@ -74,7 +77,11 @@ type machine interface {
 	LoadState([]byte) error
 	Title() string
 	GameCode() string
+	Err() error
 }
+
+// circlePad is the 3DS's analog stick.
+type circlePad interface{ setCircle(x, y float64) }
 
 // Emulator is one running game.
 type Emulator struct {
@@ -82,6 +89,8 @@ type Emulator struct {
 	m      machine
 	fps    float64
 	w, h   int
+
+	bottomX, bottomW int // where the bottom screen is in the picture
 }
 
 // Options for Open.
@@ -90,7 +99,9 @@ type Options struct {
 	Save       []byte           // the game's save, or nil
 	Now        func() time.Time // the clock (time.Now when nil)
 	Firmware   []byte           // a DS firmware image to use (optional)
-	UserName   string           // the name games see (DS)
+	UserName   string           // the name games see
+	SDCard     string           // the 3DS's SD card folder
+	SaveDir    string           // the 3DS game's save data folder
 }
 
 // Detect tells which handheld a game file is for, from its contents (and
@@ -123,9 +134,6 @@ func looksDS(d []byte) bool {
 	return a9s > 0 && a7s > 0 && int64(a9o)+int64(a9s) <= int64(len(d)) && int64(a7o)+int64(a7s) <= int64(len(d))
 }
 
-// ErrNot3DSYet: the 3DS machine isn't in this version yet.
-var ErrNot3DSYet = errors.New("3DS games aren't playable in PixelDS yet: this version plays DS games, and 3DS support is being added in the next stages")
-
 // Open starts a game.
 func Open(name string, data []byte, o Options) (*Emulator, error) {
 	sys, err := Detect(name, data)
@@ -133,13 +141,13 @@ func Open(name string, data []byte, o Options) (*Emulator, error) {
 		return nil, err
 	}
 	if sys == ThreeDS {
-		return nil, ErrNot3DSYet
+		return open3DS(name, data, o)
 	}
 	m, err := nds.New(data, nds.Options{SampleRate: o.SampleRate, Save: o.Save, Now: o.Now, Firmware: o.Firmware, UserName: o.UserName})
 	if err != nil {
 		return nil, err
 	}
-	return &Emulator{System: DS, m: m, fps: nds.FPS, w: nds.ScreenW, h: nds.ScreenH * 2}, nil
+	return &Emulator{System: DS, m: dsMachine{m}, fps: nds.FPS, w: nds.ScreenW, h: nds.ScreenH * 2, bottomW: nds.ScreenW}, nil
 }
 
 func (e *Emulator) FPS() float64           { return e.fps }
@@ -157,6 +165,30 @@ func (e *Emulator) GameCode() string       { return e.m.GameCode() }
 // TopHeight is the height of the top screen in the picture (the bottom
 // screen, the touch screen, is below it).
 func (e *Emulator) TopHeight() int { return e.h / 2 }
+
+// dsMachine: the DS runs whatever it's given, so it never stops.
+type dsMachine struct{ *nds.Machine }
+
+func (dsMachine) Err() error { return nil }
+
+// BottomX and BottomWidth: where the bottom screen sits across the
+// picture (the 3DS's is narrower than its top screen, and centred).
+func (e *Emulator) BottomX() int     { return e.bottomX }
+func (e *Emulator) BottomWidth() int { return e.bottomW }
+
+// HasCirclePad: the game's handheld has an analog stick (the 3DS).
+func (e *Emulator) HasCirclePad() bool { _, ok := e.m.(circlePad); return ok }
+
+// SetCirclePad moves the 3DS's circle pad (x right, y up, -1 to 1).
+func (e *Emulator) SetCirclePad(x, y float64) {
+	if c, ok := e.m.(circlePad); ok {
+		c.setCircle(max(-1, min(1, x)), max(-1, min(1, y)))
+	}
+}
+
+// Err is why the game stopped, if it did (the 3DS side stops on what it
+// can't run yet, and says what).
+func (e *Emulator) Err() error { return e.m.Err() }
 
 // Touch puts the stylus at (x, y) of the bottom screen, in its pixels, or
 // lifts it.
