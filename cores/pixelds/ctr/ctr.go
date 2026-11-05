@@ -28,28 +28,31 @@ type Options struct {
 
 // Machine is a 3DS running one application.
 type Machine struct {
-	opts     Options
-	cpu      *arm.CPU
-	mem      *memory
-	kern     *kernel
-	svcs     *services
-	apt      *aptState
-	gsp      *gspState
-	hid      *hidState
-	gpu      *gpu
-	lcd      [2]lcdScreen
-	frame    []uint32
-	keys     uint32
-	circle   [2]int
-	touchOn  bool
-	touchX   int
-	touchY   int
-	romfs    []byte
-	title    string
-	exited   bool
-	err      error
-	logged   int
-	frameEnd int64
+	opts    Options
+	cpu     *arm.CPU
+	mem     *memory
+	kern    *kernel
+	svcs    *services
+	apt     *aptState
+	gsp     *gspState
+	hid     *hidState
+	gpu     *gpu
+	lcd     [2]lcdScreen
+	frame   []uint32
+	keys    uint32
+	circle  [2]int
+	touchOn bool
+	touchX  int
+	touchY  int
+	romfs   []byte
+	title   string
+	// a game's program ID and product code (CTR-P-XXXX)
+	programID   uint64
+	productCode string
+	exited      bool
+	err         error
+	logged      int
+	frameEnd    int64
 }
 
 // ErrExited: the program ended.
@@ -221,6 +224,14 @@ func (m *Machine) SetTouch(on bool, x, y int) {
 
 // Title is the program's name.
 func (m *Machine) Title() string { return m.title }
+
+// ProductCode is a game's code (CTR-P-XXXX), or "3DSX" for homebrew.
+func (m *Machine) ProductCode() string {
+	if m.productCode == "" {
+		return "3DSX"
+	}
+	return m.productCode
+}
 
 // Err is why the machine stopped, if it did.
 func (m *Machine) Err() error { return m.err }

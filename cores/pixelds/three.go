@@ -16,10 +16,14 @@ type threeDS struct {
 }
 
 func open3DS(name string, data []byte, o Options) (*Emulator, error) {
-	if len(data) < 4 || string(data[:4]) != "3DSX" {
-		return nil, errors.New("this kind of 3DS game isn't playable in PixelDS yet: this version runs 3DS homebrew (.3dsx files); game cards and installed titles (.3ds, .cci, .cxi, .cia) come in a later version")
+	opts := ctr.Options{SDCard: o.SDCard, SaveData: o.SaveDir, UserName: o.UserName, Log: o.Log}
+	var m *ctr.Machine
+	var err error
+	if len(data) >= 4 && string(data[:4]) == "3DSX" {
+		m, err = ctr.Load3DSX(data, opts)
+	} else {
+		m, err = ctr.Load3DS(data, opts)
 	}
-	m, err := ctr.Load3DSX(data, ctr.Options{SDCard: o.SDCard, SaveData: o.SaveDir, UserName: o.UserName})
 	if err != nil {
 		return nil, err
 	}
@@ -60,5 +64,5 @@ func (t *threeDS) LoadState([]byte) error {
 	return errors.New("save states aren't in PixelDS's 3DS side yet")
 }
 func (t *threeDS) Title() string    { return t.m.Title() }
-func (t *threeDS) GameCode() string { return "3DSX" }
+func (t *threeDS) GameCode() string { return t.m.ProductCode() }
 func (t *threeDS) Err() error       { return t.m.Err() }

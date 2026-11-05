@@ -102,6 +102,7 @@ type Options struct {
 	UserName   string           // the name games see
 	SDCard     string           // the 3DS's SD card folder
 	SaveDir    string           // the 3DS game's save data folder
+	Log        func(string)     // what the 3DS side reports (optional)
 }
 
 // Detect tells which handheld a game file is for, from its contents (and

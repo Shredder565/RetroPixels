@@ -42,6 +42,7 @@ var (
 	shot       = flag.String("shot", "", "with -frames: write the last picture here (PNG)")
 	press      = flag.String("press", "", "with -frames: buttons to press, as Name@frame,... (held 6 frames)")
 	touch      = flag.String("touch", "", "with -frames: touches, as x:y@frame,... (held 6 frames)")
+	showLog    = flag.Bool("log", false, "with -frames: print what the 3DS side reports")
 )
 
 const sampleRate = 48000
@@ -59,7 +60,7 @@ func loadGame(path string) (string, []byte, error) {
 		}
 		for _, f := range zr.File {
 			switch strings.ToLower(filepath.Ext(f.Name)) {
-			case ".nds", ".srl", ".dsi", ".3ds", ".cci", ".cxi", ".3dsx":
+			case ".nds", ".srl", ".dsi", ".3ds", ".cci", ".cxi", ".3dsx", ".cia":
 				rc, err := f.Open()
 				if err != nil {
 					return "", nil, err
@@ -136,10 +137,33 @@ func open(path string) (*pixelds.Emulator, error) {
 	o := pixelds.Options{SampleRate: sampleRate}
 	if sys, _ := pixelds.Detect(name, data); sys == pixelds.ThreeDS {
 		o.SDCard, o.SaveDir = threeDSFolders(path)
+		o.Log = threeDSLog()
 	} else {
 		o.Save = readSave(path)
 	}
 	return pixelds.Open(name, data, o)
+}
+
+// threeDSLog: what the 3DS side reports goes to the terminal with -log,
+// else to PixelDS\3DS\log.txt in the user's settings (for bug reports).
+func threeDSLog() func(string) {
+	if *frames > 0 {
+		if !*showLog {
+			return nil
+		}
+		return func(s string) { fmt.Fprintln(os.Stderr, s) }
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil
+	}
+	p := filepath.Join(dir, "RetroPixels", "PixelDS", "3DS")
+	os.MkdirAll(p, 0o755)
+	f, err := os.Create(filepath.Join(p, "log.txt"))
+	if err != nil {
+		return nil
+	}
+	return func(s string) { fmt.Fprintln(f, time.Now().Format("15:04:05.000"), s) }
 }
 
 // threeDSFolders: the 3DS's SD card (shared by all 3DS programs) and the

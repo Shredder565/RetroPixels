@@ -11,4 +11,5 @@ arm-none-eabi-objcopy -O binary -j .text ctrtest.elf ctrtest.bin
 BSS=$(arm-none-eabi-size -A ctrtest.elf | awk '$1==".bss"{print $2}')
 mkdir -p ../../../cores/pixelds/ctr/testdata
 python3 mk3dsx.py ctrtest.bin "$BSS" ../../../cores/pixelds/ctr/testdata/ctrtest.3dsx
+python3 mkcxi.py ctrtest.bin "$BSS" ../../../cores/pixelds/ctr/testdata/ctrtest.cxi
 rm -f *.o ctrtest.elf ctrtest.bin
