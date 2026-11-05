@@ -13,7 +13,7 @@ func TestPlace(t *testing.T) {
 	zp := filepath.Join(dir, "a.zip")
 	f, _ := os.Create(zp)
 	zw := zip.NewWriter(f)
-	for _, n := range []string{"azahar-windows-msys2-2126.2/azahar.exe", "azahar-windows-msys2-2126.2/Qt6Core.dll", "azahar-windows-msys2-2126.2\\plugins\\x.dll"} {
+	for _, n := range []string{"azahar-windows-msys2-2126.2\\plugins\\", "azahar-windows-msys2-2126.2/azahar.exe", "azahar-windows-msys2-2126.2/Qt6Core.dll", "azahar-windows-msys2-2126.2\\plugins\\x.dll"} {
 		w, _ := zw.Create(n)
 		w.Write([]byte("x"))
 	}
