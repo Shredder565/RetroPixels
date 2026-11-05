@@ -84,8 +84,8 @@ func (v *aptService) handle(c *ipc) {
 		c.push(1)
 	case 0x0043: // NotifyToWait
 	case 0x0044: // GetSharedFont -> address, handle
-		c.push(0)
-		c.handles(0)
+		c.push(sharedFontAddr)
+		c.handles(c.m.sharedFont())
 	case 0x004b: // AppletUtility
 		c.push(0)
 	case 0x004f: // SetAppCpuTimeLimit

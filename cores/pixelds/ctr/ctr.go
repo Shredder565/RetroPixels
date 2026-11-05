@@ -48,6 +48,7 @@ type Machine struct {
 	title   string
 	// a game's program ID and product code (CTR-P-XXXX)
 	programID   uint64
+	fontHandle  uint32
 	productCode string
 	exited      bool
 	err         error
