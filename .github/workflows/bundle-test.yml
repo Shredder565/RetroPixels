@@ -65,6 +65,7 @@ jobs:
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
           mkdir -p "dist/RetroPixels-$v/PixelDS"
           go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/PixelDS/PixelDS.exe" ./cmd/pixelds
+          cp tools/pixelds/sysfont/LICENSE-DejaVu.txt "dist/RetroPixels-$v/PixelDS/"  # PixelDS's 3DS system font is drawn from DejaVu Sans
 
       # The RetroPixels SNES Debugger (Rust), next to the two programs: they
       # start it when a SNES game starts (docs/snes-debugger.md).
