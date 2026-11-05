@@ -1,6 +1,10 @@
 package ctr
 
-import "math"
+import (
+	"math"
+	"runtime"
+	"sync"
+)
 
 // The PICA200's rasterizer: clipping in clip space, the viewport,
 // culling, triangle setup with perspective-correct interpolation, the
@@ -110,7 +114,13 @@ type rasterState struct {
 	cFmt, dFmt    uint32
 	cBpp, dBpp    int
 	tex           [3]texUnit
+	tevPass       [6]bool
+	tcUsed        uint32 // texture coordinates read: bit 0-2
+	tevConst      [6][4]uint8
 	light         *lightState
+	fog, fogFlip  bool
+	fogColor      [3]float32
+	fogLUT        *[128]uint32
 	tex2UsesTC1   bool
 	tev           [6][5]uint32
 	bufInit       [4]uint8
@@ -197,14 +207,48 @@ func (g *gpu) drawState() *rasterState {
 	if texCfg>>3&1 != 0 {
 		g.warn("procedural textures")
 	}
+	var texUsed uint32
 	for i, base := range [6]uint32{0xc0, 0xc8, 0xd0, 0xd8, 0xf0, 0xf8} {
-		copy(s.tev[i][:], r[base:base+5])
+		t := &s.tev[i]
+		copy(t[:], r[base:base+5])
+		k := t[3]
+		s.tevConst[i] = [4]uint8{uint8(k), uint8(k >> 8), uint8(k >> 16), uint8(k >> 24)}
+		s.tevPass[i] = t[0]&0xf == 0xf && t[0]>>16&0xf == 0xf && t[1]&0xf == 0 && t[1]>>12&7 == 0 &&
+			t[2]&0xf == 0 && t[2]>>16&0xf == 0 && t[4]&3 == 0 && t[4]>>16&3 == 0
+		if !s.tevPass[i] {
+			for k := 0; k < 3; k++ {
+				texUsed |= 1 << (t[0] >> (4 * k) & 0xf)
+				texUsed |= 1 << (t[0] >> (16 + 4*k) & 0xf)
+			}
+		}
+	}
+	if s.light != nil && s.light.bumpMode != 0 {
+		texUsed |= 1 << (3 + s.light.bumpTex)
+	}
+	for i := range s.tex {
+		if texUsed>>(3+i)&1 == 0 {
+			s.tex[i].on = false
+		}
+		if s.tex[i].on {
+			if i == 2 && s.tex2UsesTC1 {
+				s.tcUsed |= 2
+			} else {
+				s.tcUsed |= 1 << i
+			}
+		}
 	}
 	bc := r[0x0fd]
 	s.bufInit = [4]uint8{uint8(bc), uint8(bc >> 8), uint8(bc >> 16), uint8(bc >> 24)}
 	s.bufUpdate = r[0x0e0] >> 8 & 0xff
-	if r[0x0e0]&7 != 0 {
-		g.warn("fog and gas")
+	switch r[0x0e0] & 7 {
+	case 5:
+		s.fog = true
+		s.fogFlip = r[0x0e0]>>16&1 != 0
+		fc := r[0x0e1]
+		s.fogColor = [3]float32{float32(fc & 0xff), float32(fc >> 8 & 0xff), float32(fc >> 16 & 0xff)}
+		s.fogLUT = &g.fogLUT
+	case 7:
+		g.warn("gas rendering")
 	}
 	s.cull = r[0x040] & 3
 	s.scissorMode = r[0x065] & 3
@@ -303,44 +347,92 @@ func (g *gpu) raster(s *rasterState, v0, v1, v2 *gpuVertex) {
 	tl1 := topLeft(v2.sx, v2.sy, v0.sx, v0.sy)
 	tl2 := topLeft(v0.sx, v0.sy, v1.sx, v1.sy)
 	inv := 1 / area
-	var f fragment
-	for y := minY; y <= maxY; y++ {
-		py := float32(y) + 0.5
-		for x := minX; x <= maxX; x++ {
-			px := float32(x) + 0.5
-			w0 := edge(v1.sx, v1.sy, v2.sx, v2.sy, px, py)
-			w1 := edge(v2.sx, v2.sy, v0.sx, v0.sy, px, py)
-			w2 := edge(v0.sx, v0.sy, v1.sx, v1.sy, px, py)
-			if w0 < 0 || w1 < 0 || w2 < 0 || w0 == 0 && !tl0 || w1 == 0 && !tl1 || w2 == 0 && !tl2 {
-				continue
+	rows := func(y0, y1 int) {
+		var f fragment
+		for y := y0; y <= y1; y++ {
+			py := float32(y) + 0.5
+			// the span of this line inside all three edges (one pixel
+			// wider each side; the exact test below decides)
+			xs, xe := minX, maxX
+			for _, e := range [3][4]float32{{v1.sx, v1.sy, v2.sx, v2.sy}, {v2.sx, v2.sy, v0.sx, v0.sy}, {v0.sx, v0.sy, v1.sx, v1.sy}} {
+				a := -(e[3] - e[1])
+				c := edge(e[0], e[1], e[2], e[3], float32(minX)+0.5, py)
+				if a == 0 {
+					if c < 0 {
+						xs, xe = 1, 0
+					}
+					continue
+				}
+				root := float64(float32(minX) + 0.5 - c/a)
+				if a > 0 {
+					xs = max(xs, int(math.Ceil(root-0.5))-1)
+				} else {
+					xe = min(xe, int(math.Floor(root-0.5))+1)
+				}
 			}
-			if s.scissorMode == 1 && x >= s.scX0 && x <= s.scX1 && y >= s.scY0 && y <= s.scY1 {
-				continue
+			for x := xs; x <= xe; x++ {
+				px := float32(x) + 0.5
+				w0 := edge(v1.sx, v1.sy, v2.sx, v2.sy, px, py)
+				w1 := edge(v2.sx, v2.sy, v0.sx, v0.sy, px, py)
+				w2 := edge(v0.sx, v0.sy, v1.sx, v1.sy, px, py)
+				if w0 < 0 || w1 < 0 || w2 < 0 || w0 == 0 && !tl0 || w1 == 0 && !tl1 || w2 == 0 && !tl2 {
+					continue
+				}
+				if s.scissorMode == 1 && x >= s.scX0 && x <= s.scX1 && y >= s.scY0 && y <= s.scY1 {
+					continue
+				}
+				b0, b1, b2 := w0*inv, w1*inv, w2*inv
+				p0, p1, p2 := b0*v0.invW, b1*v1.invW, b2*v2.invW
+				ps := 1 / (p0 + p1 + p2)
+				p0, p1, p2 = p0*ps, p1*ps, p2*ps
+				a0, a1, a2 := &v0.a, &v1.a, &v2.a
+				z := v0.sz*b0 + v1.sz*b1 + v2.sz*b2
+				depth := z*s.zScale + s.zOff
+				if s.wBuffer {
+					depth = (a0[2]*p0+a1[2]*p1+a2[2]*p2)*s.zScale + s.zOff*(a0[3]*p0+a1[3]*p1+a2[3]*p2)
+				}
+				f.depth = max(0, min(1, depth))
+				for c := 0; c < 4; c++ {
+					k := semColor + c
+					f.color[c] = uint8(max(0, min(1, a0[k]*p0+a1[k]*p1+a2[k]*p2))*255 + 0.5)
+				}
+				for t, k := range [3]int{semTC0, semTC1, semTC2} {
+					if s.tcUsed>>t&1 != 0 {
+						f.tc[t] = [2]float32{a0[k]*p0 + a1[k]*p1 + a2[k]*p2, a0[k+1]*p0 + a1[k+1]*p1 + a2[k+1]*p2}
+					}
+				}
+				if s.tex[0].project {
+					f.tc0w = a0[semTC0W]*p0 + a1[semTC0W]*p1 + a2[semTC0W]*p2
+				}
+				if s.light != nil {
+					for c := 0; c < 4; c++ {
+						k := semQuat + c
+						f.quat[c] = a0[k]*p0 + a1[k]*p1 + a2[k]*p2
+					}
+					for c := 0; c < 3; c++ {
+						k := semView + c
+						f.view[c] = a0[k]*p0 + a1[k]*p1 + a2[k]*p2
+					}
+				}
+				g.fragment(s, x, y, &f)
 			}
-			b0, b1, b2 := w0*inv, w1*inv, w2*inv
-			p0, p1, p2 := b0*v0.invW, b1*v1.invW, b2*v2.invW
-			ps := 1 / (p0 + p1 + p2)
-			p0, p1, p2 = p0*ps, p1*ps, p2*ps
-			at := func(k int) float32 { return v0.a[k]*p0 + v1.a[k]*p1 + v2.a[k]*p2 }
-			z := v0.sz*b0 + v1.sz*b1 + v2.sz*b2
-			depth := z*s.zScale + s.zOff
-			if s.wBuffer {
-				depth = (at(2)*s.zScale + s.zOff*at(3))
-			}
-			f.depth = max(0, min(1, depth))
-			for c := 0; c < 4; c++ {
-				f.color[c] = uint8(max(0, min(1, at(semColor+c)))*255 + 0.5)
-			}
-			f.tc[0] = [2]float32{at(semTC0), at(semTC0 + 1)}
-			f.tc[1] = [2]float32{at(semTC1), at(semTC1 + 1)}
-			f.tc[2] = [2]float32{at(semTC2), at(semTC2 + 1)}
-			f.tc0w = at(semTC0W)
-			if s.light != nil {
-				f.quat = [4]float32{at(semQuat), at(semQuat + 1), at(semQuat + 2), at(semQuat + 3)}
-				f.view = v3{at(semView), at(semView + 1), at(semView + 2)}
-			}
-			g.fragment(s, x, y, &f)
 		}
+	}
+	// big triangles are drawn in bands of lines on several cores
+	n := min(runtime.NumCPU(), 8)
+	if h := maxY - minY + 1; n > 1 && h >= 2*n && h*(maxX-minX+1) >= 8192 {
+		var wg sync.WaitGroup
+		for b := 0; b < n; b++ {
+			y0, y1 := minY+h*b/n, minY+h*(b+1)/n-1
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rows(y0, y1)
+			}()
+		}
+		wg.Wait()
+	} else {
+		rows(minY, maxY)
 	}
 }
 
@@ -617,61 +709,49 @@ func (g *gpu) fragment(s *rasterState, x, y int, f *fragment) {
 	if s.light != nil {
 		lp, ls = s.light.shade(f.quat, f.view, &tex)
 	}
-	var prev, buf [4]uint8
+	var in [16][4]uint8 // the combiners' inputs by source number
+	in[0], in[1], in[2] = f.color, lp, ls
+	in[3], in[4], in[5] = tex[0], tex[1], tex[2]
+	var prev [4]uint8
 	next := s.bufInit
 	for i := range s.tev {
 		st := &s.tev[i]
-		srcReg, opReg, cmb, konst, scale := st[0], st[1], st[2], st[3], st[4]
-		get := func(src uint32) [4]uint8 {
-			switch src {
-			case 0:
-				return f.color
-			case 1:
-				return lp
-			case 2:
-				return ls
-			case 3, 4, 5:
-				return tex[src-3]
-			case 0xd:
-				return buf
-			case 0xe:
-				return [4]uint8{uint8(konst), uint8(konst >> 8), uint8(konst >> 16), uint8(konst >> 24)}
-			case 0xf:
-				return prev
+		out := prev
+		if !s.tevPass[i] {
+			srcReg, opReg, cmb, scale := st[0], st[1], st[2], st[4]
+			in[0xe] = s.tevConst[i]
+			in[0xf] = prev
+			var cin [3][3]int
+			var ain [3]int
+			for k := uint32(0); k < 3; k++ {
+				cin[k] = colorMod(opReg>>(4*k)&0xf, in[srcReg>>(4*k)&0xf])
+				ain[k] = alphaMod(opReg>>(12+4*k)&7, in[srcReg>>(16+4*k)&0xf])
 			}
-			return [4]uint8{} // fragment lighting and procedural textures aren't drawn yet
-		}
-		var cin [3][3]int
-		var ain [3]int
-		for k := uint32(0); k < 3; k++ {
-			cin[k] = colorMod(opReg>>(4*k)&0xf, get(srcReg>>(4*k)&0xf))
-			ain[k] = alphaMod(opReg>>(12+4*k)&7, get(srcReg>>(16+4*k)&0xf))
-		}
-		cop, aop := cmb&0xf, cmb>>16&0xf
-		var out [4]uint8
-		cs, as := int(1)<<(scale&3), int(1)<<(scale>>16&3)
-		if cop == 6 || cop == 7 { // dot3
-			d := ((cin[0][0]*2-255)*(cin[1][0]*2-255) + (cin[0][1]*2-255)*(cin[1][1]*2-255) + (cin[0][2]*2-255)*(cin[1][2]*2-255) + 128) >> 8
-			d = clamp255(d * cs)
-			out[0], out[1], out[2] = uint8(d), uint8(d), uint8(d)
-			if cop == 7 {
-				out[3] = uint8(d)
-			}
-		} else {
-			for c := 0; c < 3; c++ {
-				out[c] = uint8(clamp255(combine(cop, cin[0][c], cin[1][c], cin[2][c]) * cs))
-			}
-		}
-		if cop != 7 {
-			if aop == 6 || aop == 7 {
-				d := ((ain[0]*2-255)*(ain[1]*2-255)*3 + 128) >> 8
-				out[3] = uint8(clamp255(d * as))
+			cop, aop := cmb&0xf, cmb>>16&0xf
+			cs, as := int(1)<<(scale&3), int(1)<<(scale>>16&3)
+			if cop == 6 || cop == 7 { // dot3
+				d := ((cin[0][0]*2-255)*(cin[1][0]*2-255) + (cin[0][1]*2-255)*(cin[1][1]*2-255) + (cin[0][2]*2-255)*(cin[1][2]*2-255) + 128) >> 8
+				d = clamp255(d * cs)
+				out[0], out[1], out[2] = uint8(d), uint8(d), uint8(d)
+				if cop == 7 {
+					out[3] = uint8(d)
+				}
 			} else {
-				out[3] = uint8(clamp255(combine(aop, ain[0], ain[1], ain[2]) * as))
+				for c := 0; c < 3; c++ {
+					out[c] = uint8(clamp255(combine(cop, cin[0][c], cin[1][c], cin[2][c]) * cs))
+				}
+			}
+			if cop != 7 {
+				if aop == 6 || aop == 7 {
+					d := ((ain[0]*2-255)*(ain[1]*2-255)*3 + 128) >> 8
+					out[3] = uint8(clamp255(d * as))
+				} else {
+					out[3] = uint8(clamp255(combine(aop, ain[0], ain[1], ain[2]) * as))
+				}
 			}
 		}
 		prev = out
-		buf = next
+		in[0xd] = next // the buffer, one stage behind
 		if i < 4 {
 			if s.bufUpdate>>i&1 != 0 {
 				next[0], next[1], next[2] = out[0], out[1], out[2]
@@ -682,6 +762,20 @@ func (g *gpu) fragment(s *rasterState, x, y int, f *fragment) {
 		}
 	}
 	col := prev
+	if s.fog {
+		z := f.depth
+		if s.fogFlip {
+			z = 1 - z
+		}
+		fi := z * 128
+		i := max(0, min(127, int(fi)))
+		e := s.fogLUT[i]
+		k := float32(e>>13&0x7ff)/2047 + float32(int32(e<<19)>>19)/2047*(fi-float32(i))
+		k = max(0, min(1, k))
+		for c := 0; c < 3; c++ {
+			col[c] = uint8(k*float32(col[c]) + (1-k)*s.fogColor[c] + 0.5)
+		}
+	}
 	if s.alphaTest && !testFunc(s.alphaFunc, int(col[3]), int(s.alphaRef)) {
 		return
 	}

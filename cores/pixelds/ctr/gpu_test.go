@@ -27,12 +27,12 @@ type gpuRig struct {
 func newRig(t *testing.T, w, h int) *gpuRig {
 	m := newMachine(Options{})
 	r := &gpuRig{t: t, m: m, g: m.gpu, w: w, h: h}
-	pa, err := m.mem.allocLinear(0x40000)
+	pa, err := m.mem.allocLinear(0x100000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.fb = pa
-	r.vb = r.fb + 0x20000
+	r.vb = r.fb + 0x80000
 	g := r.g
 	set := func(id, v uint32) { g.writeReg(id, v, 0xffffffff) }
 	// framebuffer: RGBA8, w×h
@@ -155,7 +155,7 @@ func TestGPUTriangle(t *testing.T) {
 func TestGPUTexture(t *testing.T) {
 	r := newRig(t, 32, 32)
 	// an 8×8 RGBA8 texture: left half white, right half black, top row red
-	tex := r.fb + 0x10000
+	tex := r.fb + 0x90000
 	tb := r.m.mem.physSlice(tex, 8*8*4)
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
@@ -276,5 +276,23 @@ func TestLighting(t *testing.T) {
 			t.Errorf("light at 60°: %x, want %x", prim, want)
 			break
 		}
+	}
+}
+
+func BenchmarkFullscreenQuad(b *testing.B) {
+	r := newRig(&testing.T{}, 240, 400)
+	r.set(0x080, 1)
+	r.set(0x082, 8|8<<16)
+	r.set(0x083, 2)
+	r.set(0x085, (r.fb+0x90000)>>3)
+	r.set(0x0c0, 3|3<<16)
+	r.vertices(
+		-1, -1, -0.5, 1, 1, 1, 1, 1, 0, 0, 0, 0,
+		1, -1, -0.5, 1, 1, 1, 1, 1, 1, 0, 0, 0,
+		-1, 1, -0.5, 1, 1, 1, 1, 1, 0, 1, 0, 0,
+		1, 1, -0.5, 1, 1, 1, 1, 1, 1, 1, 0, 0,
+	)
+	for i := 0; i < b.N; i++ {
+		r.draw(1, 4)
 	}
 }

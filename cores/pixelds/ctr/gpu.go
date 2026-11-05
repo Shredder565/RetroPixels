@@ -21,6 +21,8 @@ type gpu struct {
 	immVertex [16]vec4
 
 	luts           [24][256]uint32
+	fogLUT         [128]uint32
+	fogIdx         uint32
 	lutIdx, lutSel uint32
 
 	asm      assembler
@@ -77,6 +79,11 @@ func (g *gpu) writeReg(id, v, mask uint32) {
 		g.jumpTo = g.reg[0x23a+ch] << 3
 		g.jumpSize = g.reg[0x238+ch] << 3
 		g.jumped = true
+	case id == 0x0e6:
+		g.fogIdx = v & 0x7f
+	case id >= 0x0e8 && id <= 0x0ef:
+		g.fogLUT[g.fogIdx&0x7f] = v
+		g.fogIdx++
 	case id == 0x1c5:
 		g.lutIdx, g.lutSel = v&0xff, v>>8&0x1f
 	case id >= 0x1c8 && id <= 0x1cf:
