@@ -8,24 +8,10 @@ import (
 // dsp::DSP, the sound processor's service. Games load the DSP's program,
 // ask it (through the audio pipe) where its shared structures are in DSP
 // memory, and then exchange an audio frame with it every 160 samples
-// (about 4.9 ms), signalled through an interrupt event. This version
-// answers all of that so games run; it doesn't mix sound yet.
+// (about 4.9 ms), signalled through an interrupt event. The mixing
+// itself is in dspaudio.go.
 
-const (
-	dspRegion0 = 0x1ff50000 // the two copies of the shared structures
-	dspRegion1 = 0x1ff70000
-	dspFrame   = int64(cpuHz) * 160 * 1000 / 32728498 // ticks per audio frame
-)
-
-// Where the shared structures are, as DSP word addresses (0x8000 is the
-// start of a region), in the order the audio pipe reports them: frame
-// counter, source configurations, source statuses, ADPCM coefficients,
-// DSP configuration, DSP status, final samples, intermediate mix samples,
-// compressor, debug, and five more.
-var dspStructs = [15]uint16{
-	0x8000, 0x8010, 0x9000, 0x9200, 0x9400, 0x9500, 0x9600, 0x9800,
-	0xa400, 0xa500, 0xa600, 0xaa00, 0xae00, 0xb200, 0xb600,
-}
+const dspFrame = int64(cpuHz) * 160 * 1000 / 32728498 // ticks per audio frame
 
 type dspService struct {
 	m         *Machine
@@ -116,8 +102,8 @@ func (d *dspService) signal(irq, ch uint32) {
 	}
 }
 
-// startFrames starts the audio frames: each one advances the frame
-// counter in one of the two regions and tells the game.
+// startFrames starts the audio frames: each one mixes a frame and tells
+// the game.
 func (d *dspService) startFrames() {
 	if d.started {
 		return
@@ -128,14 +114,7 @@ func (d *dspService) startFrames() {
 			return
 		}
 		d.frame++
-		region := uint32(dspRegion0)
-		if d.frame&1 != 0 {
-			region = dspRegion1
-		}
-		pa := region - 0x1ff00000 + dspBase
-		if p := d.m.mem.physSlice(pa, 2); p != nil {
-			binary.LittleEndian.PutUint16(p, d.frame)
-		}
+		d.m.audio.frame()
 		d.signal(2, 2)
 	})
 }

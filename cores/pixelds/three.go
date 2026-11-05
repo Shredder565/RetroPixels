@@ -16,7 +16,7 @@ type threeDS struct {
 }
 
 func open3DS(name string, data []byte, o Options) (*Emulator, error) {
-	opts := ctr.Options{SDCard: o.SDCard, SaveData: o.SaveDir, UserName: o.UserName, Log: o.Log}
+	opts := ctr.Options{SDCard: o.SDCard, SaveData: o.SaveDir, UserName: o.UserName, Log: o.Log, SampleRate: o.SampleRate}
 	var m *ctr.Machine
 	var err error
 	if len(data) >= 4 && string(data[:4]) == "3DSX" {

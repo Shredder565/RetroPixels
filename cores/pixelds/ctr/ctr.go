@@ -24,6 +24,8 @@ type Options struct {
 	SaveData string // folder for this game's save data
 	UserName string
 	Log      func(string)
+
+	SampleRate int // the sound's output rate (48000 when 0)
 }
 
 // Machine is a 3DS running one application.
@@ -32,6 +34,7 @@ type Machine struct {
 	cpu     *arm.CPU
 	mem     *memory
 	kern    *kernel
+	audio   *audio
 	svcs    *services
 	apt     *aptState
 	gsp     *gspState
@@ -100,6 +103,7 @@ func newMachine(opts Options) *Machine {
 	m.kern = newKernel(m)
 	m.svcs = newServices(m)
 	m.gpu = newGPU(m)
+	m.audio = newAudio(m, opts.SampleRate)
 	m.cpu.SWI = func(n uint32) bool {
 		m.kern.svc(n)
 		return true
@@ -237,7 +241,7 @@ func (m *Machine) ProductCode() string {
 // Err is why the machine stopped, if it did.
 func (m *Machine) Err() error { return m.err }
 
-// TakeAudio returns the sound made since the last call (none yet).
-func (m *Machine) TakeAudio() []float32 { return nil }
+// TakeAudio returns the stereo sound made since the last call.
+func (m *Machine) TakeAudio() []float32 { return m.audio.take() }
 
 func mathFloat32bits(f float32) uint32 { return math.Float32bits(f) }
