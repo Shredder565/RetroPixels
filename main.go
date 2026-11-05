@@ -37,7 +37,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.28.0"
+	appVersion = "2.29.0"
 )
 
 var (
@@ -87,6 +87,7 @@ type config struct {
 	HandheldFolders    []string          `json:"handheldFolders,omitempty"`
 	HandheldRecent     []recentGame      `json:"handheldRecent,omitempty"`
 	HandheldFullscreen *bool             `json:"handheldFullscreen,omitempty"` // unset = on
+	HandheldDSEngine   string            `json:"handheldDSEngine,omitempty"`   // "pixelds" (default) or "melonds"
 
 }
 

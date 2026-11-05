@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-// One tab, two engines: a 3DS game starts in Azahar, a DS game in melonDS.
+// One tab: a 3DS game starts in Azahar, a DS game in PixelDS (or melonDS,
+// when PixelDS isn't there or the player picks it).
 func TestHandheldLaunchPicksEngine(t *testing.T) {
 	dir := t.TempDir()
 	games := filepath.Join(dir, "games")
@@ -25,11 +26,11 @@ func TestHandheldLaunchPicksEngine(t *testing.T) {
 		os.WriteFile(p, []byte("#!/bin/sh\necho \""+name+" $*\" >> \"$FAKE_ARGS\"\n"), 0o755)
 		return p
 	}
-	az, mel := fake("azahar"), fake("melonDS")
+	az, mel, pds := fake("azahar"), fake("melonDS"), fake("PixelDS")
 	t.Setenv("FAKE_ARGS", argsFile)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfgMu.Lock()
-	cfg = config{HandheldExe: map[string]string{"azahar": az, "melonds": mel}, HandheldFolders: []string{games}}
+	cfg = config{HandheldExe: map[string]string{"azahar": az, "melonds": mel, "pixelds": pds}, HandheldFolders: []string{games}}
 	cfgMu.Unlock()
 
 	if lib := handheldLibrary(); len(lib) != 2 {
@@ -43,15 +44,22 @@ func TestHandheldLaunchPicksEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitIdle(t)
+	cfgMu.Lock()
+	cfg.HandheldDSEngine = "melonds"
+	cfgMu.Unlock()
+	if err := launchHandheldGame(gd); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t)
 	b, _ := os.ReadFile(argsFile)
-	want := "azahar -f " + g3 + "\nmelonDS -f " + gd
+	want := "azahar -f " + g3 + "\nPixelDS -f " + gd + "\nmelonDS -f " + gd
 	if got := strings.TrimSpace(string(b)); got != want {
 		t.Errorf("args:\n%s\nwant:\n%s", got, want)
 	}
 	cfgMu.Lock()
 	n := len(cfg.HandheldRecent)
 	cfgMu.Unlock()
-	if n != 2 {
+	if n != 2 { // the DS game twice is one recent game
 		t.Errorf("recent: %d", n)
 	}
 }

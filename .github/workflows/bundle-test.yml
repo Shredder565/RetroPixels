@@ -63,6 +63,8 @@ jobs:
           mkdir -p "dist/RetroPixels-$v"
           go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/RetroPixels.exe" .
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
+          mkdir -p "dist/RetroPixels-$v/PixelDS"
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/PixelDS/PixelDS.exe" ./cmd/pixelds
 
       # The RetroPixels SNES Debugger (Rust), next to the two programs: they
       # start it when a SNES game starts (docs/snes-debugger.md).
@@ -135,8 +137,9 @@ jobs:
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "- Azahar\\azahar.exe: Nintendo 3DS games (Azahar ${{ steps.handheld.outputs.azahar }}, the official release, GPL-2.0-or-later)"
-            echo "- melonDS\\melonDS.exe: Nintendo DS games (melonDS ${{ steps.handheld.outputs.melonds }}, the official release, GPL-3.0-or-later)"
-            echo "  The 3DS / DS tab sends each game to the emulator for its system (Azahar plays only the 3DS)."
+            echo "- PixelDS\\PixelDS.exe: Nintendo DS games (RetroPixels' own DS emulator, new code written for RetroPixels; 3D graphics still to come)"
+            echo "- melonDS\\melonDS.exe: Nintendo DS games too, if you pick it in the 3DS / DS tab (melonDS ${{ steps.handheld.outputs.melonds }}, the official release, GPL-3.0-or-later)"
+            echo "  The 3DS / DS tab sends 3DS games to Azahar and DS games to PixelDS (or melonDS if you choose it)."
             echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
             echo "RetroPixels-SNES-Debugger.exe opens with SNES games: it captures VRAM, palettes and DMA transfers and swaps backgrounds (docs/snes-debugger.md in the source)."
             echo "  Its sound chips follow Supermodel's code (GPL-3.0-or-later, LICENSE-GPL-3.0.txt); NOTICE-Sega-Model-3.txt lists its third-party parts."

@@ -1,8 +1,9 @@
 package main
 
 // 3DS and DS games, as RetroPixels.exe's 3DS / DS tab plays them
-// (internal/handheld): a 3DS game opens in Azahar, a DS game in melonDS,
-// both in their own window (fullscreen by default). The player only picks
+// (internal/handheld): a DS game opens in PixelDS, RetroPixels' own DS and
+// 3DS emulator (or melonDS, if the player picks it), a 3DS game in Azahar
+// until PixelDS plays them, each in its own window (fullscreen by default). The player only picks
 // "Open a 3DS or DS game…": the emulator follows from the file.
 
 import (
@@ -25,6 +26,10 @@ const (
 	cmdHHOpenMelonDS  = 1954
 	cmdHHChangeAzahar = 1955
 	cmdHHChangeMelon  = 1956
+	cmdHHUsePixelDS   = 1957
+	cmdHHUseMelonDS   = 1958
+	cmdHHOpenPixelDS  = 1959
+	cmdHHChangePixel  = 1960
 	cmdHHFirst        = 1950
 	cmdHHLast         = 1969
 )
@@ -49,8 +54,12 @@ func (a *app) addHandheldMenu() {
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdHHFullscreen, "Start games &fullscreen")
 	appendMenu(m, mfSeparator, 0, "")
+	appendMenu(m, mfString, cmdHHUsePixelDS, "DS games play in &PixelDS (RetroPixels' own)")
+	appendMenu(m, mfString, cmdHHUseMelonDS, "DS games play in me&lonDS")
+	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdHHOpenAzahar, "Open &Azahar (3DS: controls, graphics, installed games)")
 	appendMenu(m, mfString, cmdHHOpenMelonDS, "Open &melonDS (DS: controls, screen layout)")
+	appendMenu(m, mfString, cmdHHChangePixel, "Change PixelDS…")
 	appendMenu(m, mfString, cmdHHChangeAzahar, "Change Azahar…")
 	appendMenu(m, mfString, cmdHHChangeMelon, "Change melonDS…")
 	appendMenu(a.menu, mfPopup, m, "&3DS / DS")
@@ -60,6 +69,9 @@ func (a *app) hhUpdateMenus() {
 	r := a.hh.run
 	enableItem(a.menu, cmdHHStop, r != nil)
 	checkItem(a.menu, cmdHHFullscreen, a.settings.Handheld.fullscreen())
+	melon := a.settings.Handheld.DSEngine == handheld.MelonDS.ID
+	checkItem(a.menu, cmdHHUsePixelDS, !melon)
+	checkItem(a.menu, cmdHHUseMelonDS, melon)
 	enableItem(a.menu, cmdHHOpenAzahar, r == nil && a.hhExe(handheld.Azahar) != "")
 	enableItem(a.menu, cmdHHOpenMelonDS, r == nil && a.hhExe(handheld.MelonDS) != "")
 }
@@ -102,6 +114,15 @@ func (a *app) hhCommand(id int) {
 		if err := handheld.Command(exe).Start(); err != nil {
 			messageBox(a.hwnd, "Couldn't start "+e.Name+": "+err.Error(), "RetroPixels Native", mbIconWarning)
 		}
+	case cmdHHUsePixelDS, cmdHHUseMelonDS:
+		h.DSEngine = handheld.PixelDS.ID
+		if id == cmdHHUseMelonDS {
+			h.DSEngine = handheld.MelonDS.ID
+		}
+		saveSettings(a.settings)
+		a.hhUpdateMenus()
+	case cmdHHChangePixel:
+		a.hhChooseExe(handheld.PixelDS)
 	case cmdHHChangeAzahar:
 		a.hhChooseExe(handheld.Azahar)
 	case cmdHHChangeMelon:
@@ -169,12 +190,17 @@ func (a *app) hhPlay(g handheld.Game) {
 		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
-	e := handheld.EngineFor(g.System)
+	e := handheld.EngineChoice(g.System, a.settings.Handheld.DSEngine)
 	exe := a.hhExe(e)
+	if exe == "" { // the other DS emulator, if it's there
+		if alt, ok := handheld.Alternative(e); ok && a.hhExe(alt) != "" {
+			e, exe = alt, a.hhExe(alt)
+		}
+	}
 	if exe == "" {
 		sys := "3DS games play in Azahar"
 		if g.System == handheld.SystemDS {
-			sys = "DS games play in melonDS"
+			sys = "DS games play in " + e.Name
 		}
 		if messageBox(a.hwnd, sys+", and it wasn't found: keep its "+e.Dir+" folder from the RetroPixels download next to RetroPixels.\n\nChoose "+e.Exes[0]+" now?",
 			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {

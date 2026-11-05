@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.29.0] - 2026-11-05
+
+- New: PixelDS, RetroPixels' own Nintendo DS emulator, in the PixelDS folder next to the programs. It's new code written for RetroPixels (no melonDS or other emulator code in it), and the 3DS / DS tab now plays DS games in it. It's the first step towards one RetroPixels emulator for both the DS and the 3DS.
+- What PixelDS does now: both DS processors (ARM9 and ARM7, checked against 20,000 reference cases), its own built-in BIOS (no BIOS or firmware files needed), both 2D graphics engines (backgrounds, sprites, windows, blending, brightness), the sound chip, buttons, the touch screen, the clock, game saves (EEPROM, flash and FRAM, found automatically, kept as `game.sav` next to the game like melonDS does) and save states.
+- Not yet: DS 3D graphics. 3D games start, but their 3D parts are blank for now. Pick melonDS for those: the tab has "DS games play in: PixelDS / melonDS", and RetroPixels Native's 3DS / DS menu has the same choice. 3D comes next, then 3DS games in the same emulator.
+- PixelDS controls: arrows, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Shift = Select; the mouse is the stylus on the bottom screen. Xbox controllers work (the right stick moves a stylus pointer, RT or R3 touches). F5 saves a state, F8 loads it, F6 / F7 pick the slot, F11 or Alt+Enter toggles fullscreen, Ctrl+R restarts.
+- melonDS stays in the download as the other choice for DS games, and Azahar still plays 3DS games.
+
 ## [2.28.0] - 2026-11-05
 
 - New: the 3DS / DS tab, for Nintendo 3DS and Nintendo DS games in one library. Add the folder with your games and click one to play. 3DS games play in Azahar (the open-source 3DS emulator, GPL-2.0-or-later) and DS games play in melonDS (the open-source DS emulator, GPL-3.0-or-later). Azahar plays only 3DS games, so RetroPixels sends each game to the emulator for its system: you just pick the game.

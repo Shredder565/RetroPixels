@@ -1,8 +1,9 @@
 package main
 
 // The 3DS / DS tab: Nintendo 3DS and DS games in one library, played in the
-// two open-source emulators that come in the download (internal/handheld):
-// Azahar for 3DS games and melonDS for DS games. Each game goes to the
+// emulators that come in the download (internal/handheld): PixelDS,
+// RetroPixels' own, for DS games (or melonDS, if the player picks it), and
+// Azahar for 3DS games until PixelDS plays them. Each game goes to the
 // emulator for its system, so the player only sees one tab. The games play
 // in the emulator's own window (fullscreen by default).
 
@@ -58,15 +59,41 @@ func handheldRunning(e handheld.Engine) bool {
 	return false
 }
 
-// launchHandheldGame starts a 3DS game in Azahar or a DS game in melonDS. A
-// .cia is installed into Azahar instead.
+// handheldDSEngine: the player's choice for DS games ("" = PixelDS).
+// Call with cfgMu held.
+func handheldDSEngine() string {
+	if cfg.HandheldDSEngine == handheld.MelonDS.ID {
+		return handheld.MelonDS.ID
+	}
+	return handheld.PixelDS.ID
+}
+
+// handheldEngineFor: the emulator for a game's system, the other DS
+// emulator when the chosen one isn't there.
+func handheldEngineFor(system string) (handheld.Engine, string) {
+	cfgMu.Lock()
+	choice := handheldDSEngine()
+	cfgMu.Unlock()
+	e := handheld.EngineChoice(system, choice)
+	exe := handheldExe(e)
+	if exe == "" {
+		if alt, ok := handheld.Alternative(e); ok {
+			if altExe := handheldExe(alt); altExe != "" {
+				return alt, altExe
+			}
+		}
+	}
+	return e, exe
+}
+
+// launchHandheldGame starts a DS game in PixelDS (or melonDS) and a 3DS game
+// in Azahar. A .cia is installed into Azahar instead.
 func launchHandheldGame(path string) error {
 	g, ok := handheld.GameFor(path)
 	if !ok {
 		return errors.New("that isn't a 3DS or DS game")
 	}
-	e := handheld.EngineFor(g.System)
-	exe := handheldExe(e)
+	e, exe := handheldEngineFor(g.System)
 	if exe == "" {
 		return errors.New(e.Name + " wasn't found. Keep its " + e.Dir + " folder next to " + exeFile("RetroPixels") +
 			" (it comes in the RetroPixels download), or choose " + e.Exes[0] + " in the 3DS / DS tab")
@@ -103,8 +130,9 @@ func launchHandheldGame(path string) error {
 
 func handheldStatus() map[string]any {
 	cfgMu.Lock()
-	st := map[string]any{"folders": append([]string{}, cfg.HandheldFolders...), "fullscreen": handheldFullscreenOn()}
+	st := map[string]any{"folders": append([]string{}, cfg.HandheldFolders...), "fullscreen": handheldFullscreenOn(), "dsEngine": handheldDSEngine()}
 	cfgMu.Unlock()
+	st["pixelds"] = handheldExe(handheld.PixelDS)
 	st["azahar"] = handheldExe(handheld.Azahar)
 	st["melonds"] = handheldExe(handheld.MelonDS)
 	return st
@@ -197,6 +225,12 @@ func registerHandheldRoutes(mux *http.ServeMux) {
 		case "fullscreen":
 			v := b.On
 			set(func() { cfg.HandheldFullscreen = &v })
+		case "ds-engine": // which emulator plays DS games: PixelDS or melonDS
+			if !okEngine || e.System != handheld.SystemDS {
+				err = errors.New("unknown emulator")
+				break
+			}
+			set(func() { cfg.HandheldDSEngine = e.ID })
 		case "open-emu": // the emulator by itself, for its settings (controls, graphics, BIOS)
 			if !okEngine {
 				err = errors.New("unknown emulator")

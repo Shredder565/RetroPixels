@@ -367,8 +367,8 @@
       <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U games play in PixelU (based on Cemu). Opens the Wii U tab.">
         <strong>Wii U</strong><small>.wua .wud .wux · PixelU</small>
       </button>
-      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo 3DS and DS games play in Azahar and melonDS. Opens the 3DS / DS tab.">
-        <strong>3DS / DS</strong><small>.3ds .cia .nds · Azahar, melonDS</small>
+      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo DS games play in PixelDS, RetroPixels' own DS emulator, and 3DS games in Azahar. Opens the 3DS / DS tab.">
+        <strong>3DS / DS</strong><small>.3ds .cia .nds · PixelDS, Azahar</small>
       </button>
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
@@ -607,10 +607,10 @@
     </div>
   </section>
 
-  <!-- ===================== 3DS / DS tab (Azahar and melonDS) ===================== -->
+  <!-- ===================== 3DS / DS tab (PixelDS, Azahar and melonDS) ===================== -->
   <section id="hhTab" hidden>
     <div id="hhBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Nintendo 3DS and DS games play in <strong>Azahar</strong> (3DS) and <strong>melonDS</strong> (DS) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+      <p style="margin:0">Nintendo DS games play in <strong>PixelDS</strong>, RetroPixels' own DS emulator, and 3DS games in <strong>Azahar</strong>, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="hhDesktop" hidden>
       <div class="gc-layout">
@@ -649,8 +649,22 @@
             <p class="muted" style="font-size:12px;margin:8px 0 0">Use Azahar itself for controls (Emulation → Configure → Controls), graphics and the two screens' layout.</p>
           </section>
           <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">PixelDS (DS)</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">DS games play in <b>PixelDS</b>, RetroPixels' own DS emulator, written from scratch for RetroPixels. It needs no BIOS or firmware files. 3D graphics are still being built, so 3D games show only their 2D parts for now; switch them to melonDS below.</p>
+            <div class="sw-emu" id="hhPixel" style="margin-bottom:8px"></div>
+            <div class="rg-btns">
+              <button class="btn ghost sm" data-hh-folder="pixelds">Open its folder</button>
+              <button class="btn ghost sm" data-hh-choose="pixelds">Change…</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Keys: arrows, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Shift = Select. The mouse is the stylus on the bottom screen. F5 / F8 save and load a state, F11 fullscreen. Xbox controllers work too (right stick and RT for the stylus).</p>
+            <div class="sw-row" style="margin-top:10px">
+              <label class="muted" style="font-size:13px" for="hhDSEngine">DS games play in</label>
+              <select id="hhDSEngine" class="sw-select"><option value="pixelds">PixelDS</option><option value="melonds">melonDS</option></select>
+            </div>
+          </section>
+          <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">melonDS (DS)</h2>
-            <p class="muted" style="font-size:13px;margin:0 0 10px">DS games play in <b>melonDS</b>, the open-source DS emulator (GPL-3.0-or-later), which comes in the RetroPixels download. Azahar doesn't play DS games, so RetroPixels sends them here.</p>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">DS games play in <b>melonDS</b>, the open-source DS emulator (GPL-3.0-or-later), which comes in the RetroPixels download. Pick it above to play DS games here instead of PixelDS, for example 3D games until PixelDS draws 3D.</p>
             <div class="sw-emu" id="hhMelon" style="margin-bottom:8px"></div>
             <div class="rg-btns">
               <button class="btn sm hh-btn" data-hh-open="melonds">Open melonDS</button>
@@ -840,7 +854,7 @@
   };
   sysButtons.forEach(b => b.addEventListener("click", () => {
     if (b.dataset.core === "wiiu") { showTab("wiiu"); return; } // Wii U games play in PixelU
-    if (b.dataset.core === "handheld") { showTab("handheld"); return; } // 3DS / DS games play in Azahar and melonDS
+    if (b.dataset.core === "handheld") { showTab("handheld"); return; } // 3DS / DS games play in PixelDS and Azahar
     selectCore(b.dataset.core);
   }));
 
@@ -1726,7 +1740,7 @@
     document.getElementById("wiiuOpenFolder").addEventListener("click", () => wiiuAction({ action: "open-folder" }));
   }
 
-  // ---------- 3DS / DS (Azahar and melonDS) ----------
+  // ---------- 3DS / DS (PixelDS, Azahar and melonDS) ----------
   let hhGames = [], hhStatus = null;
   const hhMsg = document.getElementById("hhMsg");
 
@@ -1745,8 +1759,11 @@
       : `<b style="color:var(--warn)">${name} wasn't found</b><br><small class="muted">Keep the ${dir} folder from the RetroPixels download next to ${exeFile("RetroPixels")}, or click "Change…" to pick ${exeFile(prog)}</small>`;
     document.getElementById("hhAzahar").innerHTML = emu(st.azahar, "Azahar", "Azahar", "azahar");
     document.getElementById("hhMelon").innerHTML = emu(st.melonds, "melonDS", "melonDS", "melonDS");
+    document.getElementById("hhPixel").innerHTML = emu(st.pixelds, "PixelDS", "PixelDS", "PixelDS");
+    const dsName = hhDSName();
+    document.getElementById("hhDSEngine").value = st.dsEngine === "melonds" ? "melonds" : "pixelds";
     document.getElementById("hhEmu").innerHTML = `<span class="muted">Emulators</span><br>` +
-      `<b>3DS:</b> ${st.azahar ? "Azahar" : '<span style="color:var(--warn)">Azahar not found</span>'} &nbsp; <b>DS:</b> ${st.melonds ? "melonDS" : '<span style="color:var(--warn)">melonDS not found</span>'}` +
+      `<b>3DS:</b> ${st.azahar ? "Azahar" : '<span style="color:var(--warn)">Azahar not found</span>'} &nbsp; <b>DS:</b> ${st[dsName.toLowerCase()] ? dsName : `<span style="color:var(--warn)">${dsName} not found</span>`}` +
       `<br><small class="muted">Each game opens in the emulator for its system</small>`;
     const f = st.folders || [];
     const el = document.getElementById("hhFolders");
@@ -1757,6 +1774,8 @@
     document.getElementById("hhFull").checked = !!st.fullscreen;
     document.querySelectorAll("[data-hh-open],[data-hh-folder]").forEach(b => { b.disabled = !st[b.dataset.hhOpen || b.dataset.hhFolder]; });
   }
+
+  function hhDSName() { return hhStatus && hhStatus.dsEngine === "melonds" ? "melonDS" : "PixelDS"; }
 
   function renderHHGrid() {
     const q = document.getElementById("hhSearch").value.trim().toLowerCase();
@@ -1777,7 +1796,7 @@
     }
     const playing = !!(appStatus && appStatus.running);
     list.forEach(g => {
-      const is3 = g.system === "3ds", emu = is3 ? "Azahar" : "melonDS";
+      const is3 = g.system === "3ds", emu = is3 ? "Azahar" : hhDSName();
       const b = document.createElement("button");
       b.className = "sw-tile";
       b.title = `${g.file}\nPlays in ${emu}`;
@@ -1821,6 +1840,7 @@
       const n = (r.games || []).length;
       toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no 3DS or DS games were found in it");
     });
+    document.getElementById("hhDSEngine").addEventListener("change", e => hhAction({ action: "ds-engine", engine: e.target.value }, `DS games now play in ${e.target.value === "melonds" ? "melonDS" : "PixelDS"}`));
     document.getElementById("hhFull").addEventListener("change", e => hhAction({ action: "fullscreen", on: e.target.checked }));
     document.querySelectorAll("[data-hh-open]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-emu", engine: b.dataset.hhOpen }, "Opening…")));
     document.querySelectorAll("[data-hh-folder]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-folder", engine: b.dataset.hhFolder })));
@@ -2501,7 +2521,7 @@
     }
     if (["3ds", "cci", "cxi", "3dsx", "cia", "zcci", "zcxi", "z3dsx", "zcia", "nds", "dsi", "srl"].includes(ext)) {
       if (DESKTOP) { showTab("handheld"); toast("3DS and DS games play from this tab — add their folder if they aren't listed"); return; }
-      return fail(`"${file.name}" looks like a 3DS or DS game. Those play in Azahar and melonDS through the RetroPixels desktop app.`);
+      return fail(`"${file.name}" looks like a 3DS or DS game. Those play in PixelDS and Azahar through the RetroPixels desktop app.`);
     }
     if (["wua", "wud", "wux", "rpx", "elf"].includes(ext)) {
       if (DESKTOP) { showTab("wiiu"); toast("Wii U games play from this tab — add their folder if they aren't listed"); return; }

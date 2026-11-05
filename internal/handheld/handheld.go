@@ -1,10 +1,14 @@
 // Package handheld is RetroPixels' 3DS / DS tab: one library for Nintendo 3DS
-// and Nintendo DS games, played in two open-source emulators that come in
-// the RetroPixels download, next to the programs:
+// and Nintendo DS games, played in the emulators that come in the
+// RetroPixels download, next to the programs:
 //
-//   - Azahar (Azahar\azahar.exe, GPL-2.0-or-later) for 3DS games. Azahar
-//     plays only the 3DS.
-//   - melonDS (melonDS\melonDS.exe, GPL-3.0-or-later) for DS and DSi games.
+//   - PixelDS (PixelDS\PixelDS.exe), RetroPixels' own DS and 3DS emulator
+//     (cores/pixelds, cmd/pixelds). It plays DS games now; 3DS games come
+//     to it stage by stage, and then it replaces the two below.
+//   - Azahar (Azahar\azahar.exe, GPL-2.0-or-later) for 3DS games until
+//     PixelDS plays them.
+//   - melonDS (melonDS\melonDS.exe, GPL-3.0-or-later), which DS games can
+//     still be sent to instead of PixelDS while PixelDS is new.
 //
 // The player sees one tab and one list: each game goes to the emulator for
 // its system. RetroPixels.exe and RetroPixels Native both use this package.
@@ -44,26 +48,53 @@ var (
 	// Azahar plays 3DS games.
 	Azahar = Engine{ID: "azahar", Name: "Azahar", Dir: "Azahar", Exes: exeNames("azahar", "azahar-qt", "citra-qt"),
 		System: System3DS, Licence: "GPL-2.0-or-later"}
-	// MelonDS plays DS (and DSi) games.
+	// MelonDS plays DS (and DSi) games when the player picks it over PixelDS.
 	MelonDS = Engine{ID: "melonds", Name: "melonDS", Dir: "melonDS", Exes: exeNames("melonDS"),
 		System: SystemDS, Licence: "GPL-3.0-or-later"}
+	// PixelDS is RetroPixels' own DS (and, as it grows, 3DS) emulator.
+	PixelDS = Engine{ID: "pixelds", Name: "PixelDS", Dir: "PixelDS", Exes: exeNames("PixelDS"),
+		System: SystemDS, Licence: "RetroPixels' own"}
 )
 
-// EngineFor is the emulator that plays a system's games.
+// EngineFor is the emulator that plays a system's games by default:
+// PixelDS for DS games, Azahar for 3DS games.
 func EngineFor(system string) Engine {
 	if system == SystemDS {
-		return MelonDS
+		return PixelDS
 	}
 	return Azahar
 }
 
-// EngineByID: "azahar" or "melonds".
+// EngineChoice is the emulator for a system's games when the player has
+// chosen one for DS games ("pixelds" or "melonds"; "" = PixelDS).
+func EngineChoice(system, dsEngine string) Engine {
+	if system == SystemDS && strings.EqualFold(dsEngine, MelonDS.ID) {
+		return MelonDS
+	}
+	return EngineFor(system)
+}
+
+// Alternative is the other DS emulator, used when the chosen one isn't
+// there (false for 3DS games).
+func Alternative(e Engine) (Engine, bool) {
+	switch e.ID {
+	case PixelDS.ID:
+		return MelonDS, true
+	case MelonDS.ID:
+		return PixelDS, true
+	}
+	return Engine{}, false
+}
+
+// EngineByID: "pixelds", "azahar" or "melonds".
 func EngineByID(id string) (Engine, bool) {
 	switch strings.ToLower(id) {
 	case Azahar.ID:
 		return Azahar, true
 	case MelonDS.ID:
 		return MelonDS, true
+	case PixelDS.ID:
+		return PixelDS, true
 	}
 	return Engine{}, false
 }
@@ -221,8 +252,8 @@ func Library(folders []string, played map[string]time.Time) []Game {
 
 // ---------------- launching ----------------
 
-// GameArgs is the emulator's command line for a game. Both take -f for
-// fullscreen and the game file last. A .cia is installed into Azahar
+// GameArgs is the emulator's command line for a game. All three take -f
+// for fullscreen and the game file last. A .cia is installed into Azahar
 // instead (-i): Azahar then lists it in its own game list.
 func GameArgs(g Game, fullscreen bool) []string {
 	if g.Install {

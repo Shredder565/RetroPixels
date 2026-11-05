@@ -38,7 +38,7 @@ func TestLibraryBothSystems(t *testing.T) {
 	if mk.System != System3DS || EngineFor(mk.System).ID != "azahar" {
 		t.Errorf("3DS game: %+v", mk)
 	}
-	if ds.System != SystemDS || EngineFor(ds.System).ID != "melonds" {
+	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "melonds" {
 		t.Errorf("DS game: %+v", ds)
 	}
 	if !cia.Install || cia.System != System3DS {

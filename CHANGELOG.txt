@@ -4,6 +4,22 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.29.0  (2026-11-05)
+--------------------------------
+- New: PixelDS, RetroPixels' own Nintendo DS emulator (PixelDS folder next
+  to the programs), new code written for RetroPixels. The 3DS / DS tab now
+  plays DS games in it. First step towards one emulator for DS and 3DS.
+- It has both DS processors, its own BIOS (no BIOS or firmware files
+  needed), 2D graphics, sound, buttons, touch screen, clock, saves (kept as
+  game.sav next to the game) and save states.
+- Not yet: 3D graphics, so 3D games show only their 2D parts. Choose
+  melonDS for them: "DS games play in" in the tab, or the 3DS / DS menu in
+  RetroPixels Native.
+- Keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start, Shift=Select,
+  mouse = stylus. F5/F8 save/load state, F11 fullscreen. Xbox controllers
+  work (right stick + RT for the stylus).
+- melonDS stays as the other DS choice; Azahar still plays 3DS games.
+
 RetroPixels 2.28.0  (2026-11-05)
 --------------------------------
 - New: the 3DS / DS tab, for Nintendo 3DS and DS games in one library.
