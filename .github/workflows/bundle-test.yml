@@ -79,10 +79,11 @@ jobs:
       - name: PixelU (Wii U and GameCube / Wii engines)
         run: |
           # The engines built from the commit's own branch come first (when
-          # BRANCH's builds have expired, they're rebuilt there by hand).
+          # BRANCH's builds have expired, they're rebuilt there by hand), then
+          # the newest successful build on any branch ("" = any).
           get() { # workflow file, artifact name
-            for b in "$GITHUB_REF_NAME" "$BRANCH"; do
-              id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$b" --status success -L 1 --json databaseId -q '.[0].databaseId')
+            for b in "$GITHUB_REF_NAME" "$BRANCH" ""; do
+              id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" ${b:+--branch "$b"} --status success -L 1 --json databaseId -q '.[0].databaseId')
               [ -n "$id" ] || continue
               rm -rf "eng/$2"
               gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2" || continue
