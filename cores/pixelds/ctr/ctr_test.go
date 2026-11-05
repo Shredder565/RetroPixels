@@ -44,13 +44,17 @@ func TestProgram(t *testing.T) {
 		t.Errorf("buttons: %x, want %x", got, KeyA|KeyStart)
 	}
 
+	if res(12) != 1 {
+		t.Errorf("GPU: result %d, want 1", res(12))
+	}
+	// the GPU's triangle fills the bottom-right half of the top screen
 	fr := m.Frame()
 	px := func(x, y int) uint32 { return fr[y*TopW+x] & 0xffffff }
-	if got := px(0, 0); got != 0x000000 {
-		t.Errorf("top-left of the top screen: %06x, want 000000", got)
+	if got := px(390, 230); got != 0x0080ff {
+		t.Errorf("inside the GPU's triangle: %06x, want 0080ff", got)
 	}
-	if got := px(399, 239); got != 0xffff00 {
-		t.Errorf("bottom-right of the top screen: %06x, want ffff00", got)
+	if got := px(10, 10); got != 0 {
+		t.Errorf("outside the GPU's triangle: %06x, want 000000", got)
 	}
 	if got := px(200, 360); got != 0x2040ff {
 		t.Errorf("bottom screen: %06x, want 2040ff", got)

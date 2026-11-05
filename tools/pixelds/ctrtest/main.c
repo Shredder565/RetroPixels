@@ -51,6 +51,108 @@ static void present(u32 screen, u32 fb, u32 stride, u32 format) {
 
 float fsq(float x);
 
+// GPU command lists
+static u32 *gpucmd, gpun;
+static void w(u32 reg, u32 v) {
+	gpucmd[gpun++] = v;
+	gpucmd[gpun++] = reg | 0xf << 16;
+}
+
+// submits a GX command through GSP's queue in shared memory
+static void gxSubmit(const u32 *cmd) {
+	volatile u32 *q = gspShm + 0x800 / 4;
+	u32 hdr = q[0];
+	u32 idx = hdr & 0xff, n = hdr >> 8 & 0xff;
+	u32 slot = (idx + n) % 15;
+	for (int i = 0; i < 8; i++) q[(0x20 + slot * 0x20) / 4 + i] = cmd[i];
+	q[0] = (hdr & ~0xff00u) | (n + 1) << 8;
+	u32 *c = cmdbuf();
+	c[0] = 0x000c0000; // TriggerCmdReqQueue
+	svc_SendSyncRequest(gsp, 0, 0, 0, 0, 0);
+}
+
+static u32 phys(void *p) { return (u32)p + 0x0c000000; } // linear heap
+
+// drawGPU draws a triangle into a 240x400 colour buffer with the PICA200
+// and copies it to dst (the top screen, RGB8).
+static int drawGPU(u8 *heap, u8 *dst) {
+	u32 *fb = (u32 *)heap;           // 240x400 RGBA8, tiled
+	float *vb = (float *)(heap + 0x60000);
+	gpucmd = (u32 *)(heap + 0x61000);
+	gpun = 0;
+	static const float tri[] = {
+		-1, -1, -0.5f, 1, 0, 0.5f, 1, 1,
+		1, -1, -0.5f, 1, 0, 0.5f, 1, 1,
+		-1, 1, -0.5f, 1, 0, 0.5f, 1, 1,
+	};
+	for (int i = 0; i < 24; i++) vb[i] = tri[i];
+	// shader: o0 = v0, o1 = v1
+	w(0x2cb, 0);
+	w(0x2cc, 0x13u << 26 | 0 << 21 | 0 << 12);
+	w(0x2cc, 0x13u << 26 | 1 << 21 | 1 << 12);
+	w(0x2cc, 0x22u << 26);
+	w(0x2d5, 0);
+	w(0x2d6, 0x6c36f);
+	w(0x2ba, 0);
+	w(0x2bd, 3);
+	w(0x04f, 2);
+	w(0x050, 0x03020100);
+	w(0x051, 0x0b0a0908);
+	// vertex arrays: position and colour, four floats each
+	w(0x200, phys(vb) >> 3);
+	w(0x201, 0xff);
+	w(0x202, 1u << 28);
+	w(0x203, 0);
+	w(0x204, 0x10);
+	w(0x205, 2u << 28 | 32 << 16);
+	w(0x2b9, 1);
+	w(0x2bb, 0x10);
+	// viewport 240x400, colour buffer
+	w(0x041, 0x45e000);
+	w(0x043, 0x469000);
+	w(0x068, 0);
+	w(0x040, 0);
+	w(0x117, 0);
+	w(0x116, 3);
+	w(0x11c, 0);
+	w(0x11d, phys(fb) >> 3);
+	w(0x11e, 240 | 399 << 12 | 1 << 24);
+	w(0x112, 0xf);
+	w(0x113, 0xf);
+	w(0x114, 0);
+	w(0x115, 0);
+	w(0x107, 0xf00);
+	w(0x100, 0);
+	w(0x102, 3);
+	// combiners: the vertex colour
+	w(0x080, 0);
+	w(0x0e0, 0);
+	w(0x0c0, 0);
+	w(0x0c1, 0);
+	w(0x0c2, 0);
+	w(0x0c4, 0);
+	static const u32 stages[] = {0xc8, 0xd0, 0xd8, 0xf0, 0xf8};
+	for (int i = 0; i < 5; i++) {
+		w(stages[i], 0x000f000f);
+		w(stages[i] + 1, 0);
+		w(stages[i] + 2, 0);
+		w(stages[i] + 4, 0);
+	}
+	// draw
+	w(0x25e, 0);
+	w(0x228, 3);
+	w(0x22a, 0);
+	w(0x22e, 1);
+	w(0x010, 0x12345678);
+	if (gpun & 3) w(0x000, 0); // the list is 16-byte aligned
+	u32 cmd[8] = {0x01, (u32)gpucmd, gpun * 4, 0, 0, 0, 0, 0};
+	gxSubmit(cmd);
+	// display transfer: tiled RGBA8 -> linear RGB8
+	u32 dt[8] = {0x03, (u32)fb, (u32)dst, 240 | 400 << 16, 240 | 400 << 16, 0 << 8 | 1 << 12, 0, 0};
+	gxSubmit(dt);
+	return 1;
+}
+
 int main(void) {
 	u32 *c;
 	struct regs r;
@@ -163,6 +265,14 @@ int main(void) {
 	u32 handles[2] = {threadEvent, r.r1};
 	r = svc_WaitSynchronizationN(0, (u32)handles, 2, 0, 0xffffffff, 0);
 	results[10] = r.r0 == 0 && r.r1 == 1;
+
+	// the GPU draws a triangle onto the top screen
+	r = svc_ControlMemory(0x10003, 0, 0, 0x80000, 3, 0);
+	if (r.r0 == 0) {
+		u8 *gtop = (u8 *)r.r1 + 0x62000; // 240x400 RGB8
+		results[12] = drawGPU((u8 *)r.r1, gtop);
+		present(0, (u32)gtop, 240 * 3, 1);
+	}
 
 	results[31] = 0xd04e;
 	for (;;) {
