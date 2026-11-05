@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.31.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.32.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator, new in 2.29.0; 3DS games in Azahar).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.31.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.31.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.32.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.32.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -43,7 +43,8 @@ What's in the download
     unchanged (GPL-2.0-or-later). New in 2.28.0.
   * PixelDS\PixelDS.exe: Nintendo DS games. RetroPixels' own DS emulator,
     new code written for RetroPixels. New in 2.29.0; 3D graphics
-    since 2.30.0; 3DS homebrew (.3dsx) since 2.31.0.
+    since 2.30.0; 3DS homebrew (.3dsx) since 2.31.0; 3DS games
+    (experimental, pick it in the tab) since 2.32.0.
   * melonDS\melonDS.exe: Nintendo DS games too, if you choose it in the
     3DS / DS tab. melonDS's official release, unchanged (GPL-3.0-or-later).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
@@ -311,9 +312,11 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
 3DS and DS (PixelDS, Azahar and melonDS)
 - The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
   "Add games folder..." and pick the folder with them, then click a game.
-- 3DS games play in Azahar. DS games play in PixelDS, RetroPixels' own DS
-  emulator (new in 2.29.0), or in melonDS if you choose it under "DS games
-  play in". RetroPixels sends each game to the emulator for its system.
+- 3DS games play in Azahar, or in PixelDS if you choose it under "3DS
+  games play in" (experimental, new in 2.32.0: no sound yet). DS games play
+  in PixelDS, RetroPixels' own DS emulator (new in 2.29.0), or in melonDS if
+  you choose it under "DS games play in". RetroPixels sends each game to
+  the emulator for its system.
   All three come in the download (the PixelDS, Azahar and melonDS folders);
   keep them next to RetroPixels.exe.
 - PixelDS needs no BIOS or firmware files. It plays DS games with 2D
@@ -327,7 +330,10 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
 - 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
   They must be decrypted dumps (Azahar doesn't play encrypted ones). A .cia
   is installed into Azahar when you click it; then open Azahar and play it
-  from its game list.
+  from its game list. PixelDS plays a .cia directly. PixelDS's 3DS keys:
+  arrows = circle pad, I/J/K/L = D-pad, E = ZL, R = ZR, the rest as for
+  DS games; its 3DS SD card, saves and log.txt are in
+  %APPDATA%\RetroPixels\PixelDS\3DS.
 - DS files: .nds, .dsi, .srl. DS games play without a BIOS. DSi games need
   your own DSi BIOS and NAND files (melonDS: Config > Emu settings).
 - Games start fullscreen in the emulator's own window; untick "Start games

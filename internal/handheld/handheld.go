@@ -65,22 +65,31 @@ func EngineFor(system string) Engine {
 	return Azahar
 }
 
-// EngineChoice is the emulator for a system's games when the player has
-// chosen one for DS games ("pixelds" or "melonds"; "" = PixelDS).
-func EngineChoice(system, dsEngine string) Engine {
-	if system == SystemDS && strings.EqualFold(dsEngine, MelonDS.ID) {
+// EngineChoice is the emulator for a system's games given the player's
+// choice for that system: "pixelds" or "melonds" for DS games ("" =
+// PixelDS), "azahar" or "pixelds" for 3DS games ("" = Azahar; PixelDS's
+// 3DS side is new).
+func EngineChoice(system, choice string) Engine {
+	if system == SystemDS && strings.EqualFold(choice, MelonDS.ID) {
 		return MelonDS
+	}
+	if system == System3DS && strings.EqualFold(choice, PixelDS.ID) {
+		return PixelDS
 	}
 	return EngineFor(system)
 }
 
-// Alternative is the other DS emulator, used when the chosen one isn't
-// there (false for 3DS games).
-func Alternative(e Engine) (Engine, bool) {
-	switch e.ID {
-	case PixelDS.ID:
+// Alternative is the other emulator for a system's games, used when the
+// chosen one isn't there.
+func Alternative(system string, e Engine) (Engine, bool) {
+	switch {
+	case system == SystemDS && e.ID == PixelDS.ID:
 		return MelonDS, true
-	case MelonDS.ID:
+	case system == SystemDS && e.ID == MelonDS.ID:
+		return PixelDS, true
+	case system == System3DS && e.ID == PixelDS.ID:
+		return Azahar, true
+	case system == System3DS && e.ID == Azahar.ID:
 		return PixelDS, true
 	}
 	return Engine{}, false
@@ -253,10 +262,11 @@ func Library(folders []string, played map[string]time.Time) []Game {
 // ---------------- launching ----------------
 
 // GameArgs is the emulator's command line for a game. All three take -f
-// for fullscreen and the game file last. A .cia is installed into Azahar
-// instead (-i): Azahar then lists it in its own game list.
-func GameArgs(g Game, fullscreen bool) []string {
-	if g.Install {
+// for fullscreen and the game file last. In Azahar a .cia is installed
+// instead (-i): Azahar then lists it in its own game list; PixelDS plays
+// a .cia like any other game.
+func GameArgs(e Engine, g Game, fullscreen bool) []string {
+	if g.Install && e.ID == Azahar.ID {
 		return []string{"-i", g.Path}
 	}
 	var args []string

@@ -384,7 +384,7 @@ func runWindow(path string) bool {
 	}
 	call(pTimeBeginPeriod, 1)
 	if path == "" {
-		messageBox(0, "PixelDS plays DS games and 3DS homebrew (.3dsx); 3DS game cards come in a later version.\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
+		messageBox(0, "PixelDS plays DS games, and decrypted 3DS games and homebrew as an experiment (no 3DS sound yet).\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
 		return true
 	}
 	emu, err := open(path)

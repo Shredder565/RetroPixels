@@ -2,6 +2,12 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.32.0] - 2026-11-05
+
+- PixelDS now plays 3DS games, as an experiment: decrypted .3ds, .cci, .cxi and .cia files, with 3D graphics. Choose it in the 3DS / DS tab under "3DS games play in: PixelDS (experimental)" (RetroPixels Native: 3DS / DS menu). Azahar stays the default for 3DS games until PixelDS plays them as well, so nothing changes unless you pick it. A .cia plays straight away in PixelDS (no installing).
+- New in PixelDS's 3DS side: the PICA200 graphics chip (vertex shaders, clipping, textures in every format including ETC1, the six colour combiners, per-pixel lighting with its lookup tables, fog, blending, stencil and depth), drawn on several processor cores; loading games (game card images, CIAs, compressed code, the game's RomFS); a system font for games' text (built from DejaVu Sans, as PixelDS can't include Nintendo's); the sound processor's start-up so games' sound code runs; and more of the system calls the official SDK uses.
+- Not yet in PixelDS for 3DS games: sound, games that load code modules (CROs), geometry shaders, procedural textures, save states, and games still need decrypting. If a 3DS game doesn't start, %APPDATA%\RetroPixels\PixelDS\3DS\log.txt says where it stopped; switch the tab back to Azahar to play it.
+
 ## [2.31.0] - 2026-11-05
 
 - PixelDS takes its first step into the 3DS: it now runs 3DS homebrew programs (.3dsx) that draw straight to the screen. Drop a .3dsx file onto PixelDS.exe (or start `PixelDS.exe game.3dsx`). Like the rest of PixelDS it's RetroPixels' own new code.

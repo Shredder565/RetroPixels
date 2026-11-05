@@ -38,7 +38,8 @@ func TestLibraryBothSystems(t *testing.T) {
 	if mk.System != System3DS || EngineFor(mk.System).ID != "azahar" {
 		t.Errorf("3DS game: %+v", mk)
 	}
-	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "melonds" {
+	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "melonds" ||
+		EngineChoice(mk.System, "pixelds").ID != "pixelds" || EngineChoice(mk.System, "").ID != "azahar" {
 		t.Errorf("DS game: %+v", ds)
 	}
 	if !cia.Install || cia.System != System3DS {
@@ -61,9 +62,13 @@ func TestGameArgs(t *testing.T) {
 		{Game{Path: "c.cia", System: System3DS, Install: true}, true, []string{"-i", "c.cia"}},
 	}
 	for _, c := range cases {
-		if got := GameArgs(c.g, c.full); !reflect.DeepEqual(got, c.want) {
+		if got := GameArgs(EngineFor(c.g.System), c.g, c.full); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("GameArgs(%s, %v) = %q, want %q", c.g.Path, c.full, got, c.want)
 		}
+	}
+	// PixelDS plays a .cia instead of installing it
+	if got := GameArgs(PixelDS, Game{Path: "c.cia", System: System3DS, Install: true}, true); !reflect.DeepEqual(got, []string{"-f", "c.cia"}) {
+		t.Errorf("a .cia in PixelDS: %q", got)
 	}
 }
 

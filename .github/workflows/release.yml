@@ -143,7 +143,7 @@ jobs:
             echo "- **RetroPixels-$v.zip**: RetroPixels.exe (the app in a browser window) for Windows 10 / 11 (64-bit). **RetroPixels-Native-$v.zip**: RetroPixels-Native.exe (the Windows app). Unzip one and run its program. Each has RetroPixels' engines in the folders next to the program, and VERSION.txt:"
             echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
             echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
-            echo "  - PixelDS: RetroPixels' own Nintendo DS emulator, new code: DS games (2D and 3D) and its first 3DS programs (.3dsx homebrew)"
+            echo "  - PixelDS: RetroPixels' own Nintendo DS emulator, new code: DS games (2D and 3D), and 3DS games as an experiment (pick it in the 3DS / DS tab)"
             echo "  - Azahar $az (Nintendo 3DS, GPL-2.0-or-later) and melonDS $mel (Nintendo DS, GPL-3.0-or-later, kept as a choice for DS games), their official releases, for the 3DS / DS tab"
             echo "  - Star Wars Trilogy Arcade (Sega Model 3) plays in RetroPixels' own emulator, with nothing else to install"
             echo "  - RetroPixels-SNES-Debugger.exe, which opens with SNES games: captures VRAM, palettes and DMA transfers, finds a background's data in the ROM and swaps it for a picture"

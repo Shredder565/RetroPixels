@@ -4,6 +4,19 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.32.0  (2026-11-05)
+--------------------------------
+- PixelDS now plays 3DS games as an experiment: decrypted .3ds, .cci,
+  .cxi and .cia files, with 3D graphics. Pick "3DS games play in: PixelDS
+  (experimental)" in the 3DS / DS tab (RetroPixels Native: 3DS / DS menu).
+  Azahar stays the default for 3DS games.
+- In: the 3DS's graphics chip (shaders, textures, lighting, fog), game
+  loading, a system font for games' text, and the sound processor's
+  start-up (no sound yet).
+- Not yet: sound, games with code modules (CROs), save states. If a game
+  doesn't start, PixelDS\3DS\log.txt in %APPDATA%\RetroPixels says why;
+  switch back to Azahar to play it.
+
 RetroPixels 2.31.0  (2026-11-05)
 --------------------------------
 - PixelDS (RetroPixels' own emulator) now runs its first 3DS programs:

@@ -9,8 +9,9 @@ import (
 	"testing"
 )
 
-// One tab: a 3DS game starts in Azahar, a DS game in PixelDS (or melonDS,
-// when PixelDS isn't there or the player picks it).
+// One tab: a 3DS game starts in Azahar (or PixelDS when the player picks
+// it), a DS game in PixelDS (or melonDS, when PixelDS isn't there or the
+// player picks it).
 func TestHandheldLaunchPicksEngine(t *testing.T) {
 	dir := t.TempDir()
 	games := filepath.Join(dir, "games")
@@ -51,8 +52,15 @@ func TestHandheldLaunchPicksEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitIdle(t)
+	cfgMu.Lock()
+	cfg.Handheld3DSEngine = "pixelds"
+	cfgMu.Unlock()
+	if err := launchHandheldGame(g3); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t)
 	b, _ := os.ReadFile(argsFile)
-	want := "azahar -f " + g3 + "\nPixelDS -f " + gd + "\nmelonDS -f " + gd
+	want := "azahar -f " + g3 + "\nPixelDS -f " + gd + "\nmelonDS -f " + gd + "\nPixelDS -f " + g3
 	if got := strings.TrimSpace(string(b)); got != want {
 		t.Errorf("args:\n%s\nwant:\n%s", got, want)
 	}

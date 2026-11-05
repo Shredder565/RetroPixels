@@ -634,7 +634,7 @@
           <div class="sw-grid" id="hhGrid"></div>
           <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
             Lists 3DS games (.3ds, .cci, .cxi, .3dsx and their compressed .z versions, and .cia) and DS games (.nds, .dsi, .srl). 3DS games must be decrypted, as Azahar needs them.
-            A .cia is installed into Azahar when you click it; then play it from Azahar's game list. Games are played from where they are; nothing is copied.</p>
+            A .cia is installed into Azahar when you click it; then play it from Azahar's game list (PixelDS plays a .cia directly). Games are played from where they are; nothing is copied.</p>
         </section>
         <aside class="gc-side">
           <section class="sw-sec">
@@ -661,6 +661,11 @@
               <label class="muted" style="font-size:13px" for="hhDSEngine">DS games play in</label>
               <select id="hhDSEngine" class="sw-select"><option value="pixelds">PixelDS</option><option value="melonds">melonDS</option></select>
             </div>
+            <div class="sw-row" style="margin-top:6px">
+              <label class="muted" style="font-size:13px" for="hh3DSEngine">3DS games play in</label>
+              <select id="hh3DSEngine" class="sw-select"><option value="azahar">Azahar</option><option value="pixelds">PixelDS (experimental)</option></select>
+            </div>
+            <p class="muted" style="font-size:12px;margin:6px 0 0">PixelDS's 3DS side is new: it plays decrypted .3ds, .cci, .cxi and .cia files and homebrew, without sound yet. 3DS keys: arrows = circle pad, I / J / K / L = D-pad, E = ZL, R = ZR.</p>
           </section>
           <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">melonDS (DS)</h2>
@@ -1760,10 +1765,11 @@
     document.getElementById("hhAzahar").innerHTML = emu(st.azahar, "Azahar", "Azahar", "azahar");
     document.getElementById("hhMelon").innerHTML = emu(st.melonds, "melonDS", "melonDS", "melonDS");
     document.getElementById("hhPixel").innerHTML = emu(st.pixelds, "PixelDS", "PixelDS", "PixelDS");
-    const dsName = hhDSName();
+    const dsName = hhDSName(), n3 = hh3DSName();
     document.getElementById("hhDSEngine").value = st.dsEngine === "melonds" ? "melonds" : "pixelds";
+    document.getElementById("hh3DSEngine").value = st.threeDSEngine === "pixelds" ? "pixelds" : "azahar";
     document.getElementById("hhEmu").innerHTML = `<span class="muted">Emulators</span><br>` +
-      `<b>3DS:</b> ${st.azahar ? "Azahar" : '<span style="color:var(--warn)">Azahar not found</span>'} &nbsp; <b>DS:</b> ${st[dsName.toLowerCase()] ? dsName : `<span style="color:var(--warn)">${dsName} not found</span>`}` +
+      `<b>3DS:</b> ${st[n3.toLowerCase()] ? n3 : `<span style="color:var(--warn)">${n3} not found</span>`} &nbsp; <b>DS:</b> ${st[dsName.toLowerCase()] ? dsName : `<span style="color:var(--warn)">${dsName} not found</span>`}` +
       `<br><small class="muted">Each game opens in the emulator for its system</small>`;
     const f = st.folders || [];
     const el = document.getElementById("hhFolders");
@@ -1776,6 +1782,7 @@
   }
 
   function hhDSName() { return hhStatus && hhStatus.dsEngine === "melonds" ? "melonDS" : "PixelDS"; }
+  function hh3DSName() { return hhStatus && hhStatus.threeDSEngine === "pixelds" ? "PixelDS" : "Azahar"; }
 
   function renderHHGrid() {
     const q = document.getElementById("hhSearch").value.trim().toLowerCase();
@@ -1796,7 +1803,7 @@
     }
     const playing = !!(appStatus && appStatus.running);
     list.forEach(g => {
-      const is3 = g.system === "3ds", emu = is3 ? "Azahar" : hhDSName();
+      const is3 = g.system === "3ds", emu = is3 ? hh3DSName() : hhDSName();
       const b = document.createElement("button");
       b.className = "sw-tile";
       b.title = `${g.file}\nPlays in ${emu}`;
@@ -1804,14 +1811,14 @@
       b.innerHTML = `<span class="plat ${is3 ? "N3DS" : "NDS"}">${is3 ? "3DS" : "DS"}</span>
         <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
         <div class="sw-info"><b>${esc(g.name)}</b>
-          <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span><span class="sw-tag">${fmtSize(g.size)}</span>${g.install ? '<span class="sw-tag">Install</span>' : ""}</div>
+          <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span><span class="sw-tag">${fmtSize(g.size)}</span>${g.install && emu === "Azahar" ? '<span class="sw-tag">Install</span>' : ""}</div>
           ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
         </div>`;
       b.addEventListener("click", async () => {
         hhMsg.style.color = ""; hhMsg.textContent = "";
         try {
           await api("/api/handheld/play", { path: g.path });
-          toast(g.install ? `Installing ${g.name} into Azahar… then play it from Azahar's game list` : `Starting ${g.name} in ${emu}…`);
+          toast(g.install && emu === "Azahar" ? `Installing ${g.name} into Azahar… then play it from Azahar's game list` : `Starting ${g.name} in ${emu}…`);
           setTimeout(() => api("/api/status").then(renderStatus).then(renderHHGrid).catch(() => {}), 800);
         } catch (e) { hhMsg.style.color = "var(--danger)"; hhMsg.textContent = e.message; }
       });
@@ -1840,6 +1847,7 @@
       const n = (r.games || []).length;
       toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no 3DS or DS games were found in it");
     });
+    document.getElementById("hh3DSEngine").addEventListener("change", e => hhAction({ action: "3ds-engine", engine: e.target.value }, `3DS games now play in ${e.target.value === "pixelds" ? "PixelDS" : "Azahar"}`));
     document.getElementById("hhDSEngine").addEventListener("change", e => hhAction({ action: "ds-engine", engine: e.target.value }, `DS games now play in ${e.target.value === "melonds" ? "melonDS" : "PixelDS"}`));
     document.getElementById("hhFull").addEventListener("change", e => hhAction({ action: "fullscreen", on: e.target.checked }));
     document.querySelectorAll("[data-hh-open]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-emu", engine: b.dataset.hhOpen }, "Opening…")));

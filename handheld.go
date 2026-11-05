@@ -68,16 +68,28 @@ func handheldDSEngine() string {
 	return handheld.PixelDS.ID
 }
 
+// handheld3DSEngine: the player's choice for 3DS games ("" = Azahar).
+// Call with cfgMu held.
+func handheld3DSEngine() string {
+	if cfg.Handheld3DSEngine == handheld.PixelDS.ID {
+		return handheld.PixelDS.ID
+	}
+	return handheld.Azahar.ID
+}
+
 // handheldEngineFor: the emulator for a game's system, the other DS
 // emulator when the chosen one isn't there.
 func handheldEngineFor(system string) (handheld.Engine, string) {
 	cfgMu.Lock()
 	choice := handheldDSEngine()
+	if system == handheld.System3DS {
+		choice = handheld3DSEngine()
+	}
 	cfgMu.Unlock()
 	e := handheld.EngineChoice(system, choice)
 	exe := handheldExe(e)
 	if exe == "" {
-		if alt, ok := handheld.Alternative(e); ok {
+		if alt, ok := handheld.Alternative(system, e); ok {
 			if altExe := handheldExe(alt); altExe != "" {
 				return alt, altExe
 			}
@@ -105,10 +117,10 @@ func launchHandheldGame(path string) error {
 	fs := handheldFullscreenOn()
 	cfgMu.Unlock()
 	label := e.Name
-	if g.Install {
+	if g.Install && e.ID == handheld.Azahar.ID {
 		label = e.Name + " (installing)"
 	}
-	if err := startEmulator(exe, handheld.GameArgs(g, fs), path, g.Name, "handheld", label, nil, nil); err != nil {
+	if err := startEmulator(exe, handheld.GameArgs(e, g, fs), path, g.Name, "handheld", label, nil, nil); err != nil {
 		return err
 	}
 	cfgMu.Lock()
@@ -130,7 +142,7 @@ func launchHandheldGame(path string) error {
 
 func handheldStatus() map[string]any {
 	cfgMu.Lock()
-	st := map[string]any{"folders": append([]string{}, cfg.HandheldFolders...), "fullscreen": handheldFullscreenOn(), "dsEngine": handheldDSEngine()}
+	st := map[string]any{"folders": append([]string{}, cfg.HandheldFolders...), "fullscreen": handheldFullscreenOn(), "dsEngine": handheldDSEngine(), "threeDSEngine": handheld3DSEngine()}
 	cfgMu.Unlock()
 	st["pixelds"] = handheldExe(handheld.PixelDS)
 	st["azahar"] = handheldExe(handheld.Azahar)
@@ -231,6 +243,12 @@ func registerHandheldRoutes(mux *http.ServeMux) {
 				break
 			}
 			set(func() { cfg.HandheldDSEngine = e.ID })
+		case "3ds-engine": // which emulator plays 3DS games: Azahar or PixelDS
+			if !okEngine || e.ID == handheld.MelonDS.ID {
+				err = errors.New("unknown emulator")
+				break
+			}
+			set(func() { cfg.Handheld3DSEngine = e.ID })
 		case "open-emu": // the emulator by itself, for its settings (controls, graphics, BIOS)
 			if !okEngine {
 				err = errors.New("unknown emulator")

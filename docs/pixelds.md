@@ -27,7 +27,12 @@ the behaviour of other emulators were used as references only.
   the system services reached over IPC (`services.go`: srv, `apt.go`,
   `gsp.go` for the screens and the GX command queue, `hid.go`, `fs.go`,
   `cfg.go`); the .3dsx loader (`load3dsx.go`); and the start of the
-  PICA200 (`gpu.go`). `ctr_test.go` runs `tools/pixelds/ctrtest`, our own
+  PICA200: `gpu.go` (registers, command lists, vertex loading),
+  `shader.go` (the vertex shader processor), `raster.go` (clipping,
+  rasterizer, textures, colour combiners, per-pixel tests and blending) and
+  `lighting.go`; `loadncch.go` loads games, `font.go` builds the system
+  font from `sysfont.bin` (from `tools/pixelds/sysfont`), `dsp.go` is the
+  sound processor's service. `ctr_test.go` runs `tools/pixelds/ctrtest`, our own
   3DS program that calls the kernel and services directly and checks each
   answer.
 - `cores/pixelds/arm`: also the ARM11's ARMv6 media instructions
@@ -62,6 +67,9 @@ others are as for DS games, and the mouse is the stylus.
    capture (done). Anti-aliasing is still to do.
 3. 2.31.0: the 3DS's ARM11 and system software (high-level kernel and
    services); 3DS homebrew that draws straight to the screen runs (done).
-4. The PICA200 GPU (3DS 3D graphics).
-5. Game cards and installed titles (.3ds, .cci, .cxi, .cia), the DSP
-   (sound) and the remaining services. Then Azahar leaves the download.
+4. 2.32.0: the PICA200 GPU (shaders, textures, combiners, lighting,
+   fog), loading decrypted games (.3ds, .cci, .cxi, .cia), a system font
+   built from DejaVu Sans, the DSP's start-up, and the choice to play 3DS
+   games in PixelDS from the tab (done).
+5. Code modules (ldr:ro), sound (DSP audio), geometry shaders, save
+   states, and fixes from real games. Then Azahar leaves the download.
