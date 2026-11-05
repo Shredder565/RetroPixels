@@ -97,15 +97,18 @@ func (vp viewport) project(v *gpuVertex) {
 // ---------------- the draw state ----------------
 
 type texUnit struct {
-	on      bool
-	data    []byte
-	w, h    int
-	format  uint32
-	wrapS   uint32
-	wrapT   uint32
-	linear  bool
-	border  [4]uint8
-	project bool
+	on          bool
+	data        []byte
+	w, h        int
+	format      uint32
+	wrapS       uint32
+	wrapT       uint32
+	linear      bool
+	border      [4]uint8
+	typ         uint32    // unit 0: 0 2D, 1 cube, 2 shadow, 3 projected, 4 shadow cube
+	faces       [6][]byte // cube maps: +x, -x, +y, -y, +z, -z
+	shadowOrtho bool
+	shadowBias  int32
 }
 
 type rasterState struct {
@@ -114,6 +117,7 @@ type rasterState struct {
 	cFmt, dFmt    uint32
 	cBpp, dBpp    int
 	tex           [3]texUnit
+	pt            *procTex
 	tevPass       [6]bool
 	tcUsed        uint32 // texture coordinates read: bit 0-2
 	tevConst      [6][4]uint8
@@ -186,11 +190,13 @@ func (g *gpu) drawState() *rasterState {
 		var tfmt uint32
 		if i == 0 {
 			tfmt = r[0x08e] & 0xf
-			if p>>28&7 == 1 {
-				t.project = true
-			} else if p>>28&7 != 0 {
-				g.warn("cube, shadow and projected textures")
+			t.typ = p >> 28 & 7
+			if t.typ == 5 { // off
+				t.on = false
+				continue
 			}
+			sh := r[0x08b]
+			t.shadowOrtho, t.shadowBias = sh&1 != 0, int32(sh>>1&0x7fffff)
 		} else {
 			tfmt = r[base+5] & 0xf
 		}
@@ -202,10 +208,22 @@ func (g *gpu) drawState() *rasterState {
 		if t.data == nil || t.w == 0 || t.h == 0 {
 			t.on = false
 		}
+		if i == 0 && (t.typ == 1 || t.typ == 4) {
+			main := r[0x085]
+			for f := range t.faces {
+				a := main
+				if f > 0 {
+					a = main&^0x3fffff | r[0x085+uint32(f)]&0x3fffff
+				}
+				if t.faces[f] = mem.physSlice(a<<3, uint32(size)); t.faces[f] == nil {
+					t.on = false
+				}
+			}
+		}
 	}
 	s.light = g.lightState()
-	if texCfg>>3&1 != 0 {
-		g.warn("procedural textures")
+	if texCfg>>10&1 != 0 {
+		s.pt = g.procTexState()
 	}
 	var texUsed uint32
 	for i, base := range [6]uint32{0xc0, 0xc8, 0xd0, 0xd8, 0xf0, 0xf8} {
@@ -224,6 +242,13 @@ func (g *gpu) drawState() *rasterState {
 	}
 	if s.light != nil && s.light.bumpMode != 0 {
 		texUsed |= 1 << (3 + s.light.bumpTex)
+	}
+	if s.pt != nil {
+		if texUsed>>6&1 == 0 {
+			s.pt = nil
+		} else {
+			s.tcUsed |= 1 << s.pt.coord
+		}
 	}
 	for i := range s.tex {
 		if texUsed>>(3+i)&1 == 0 {
@@ -401,7 +426,7 @@ func (g *gpu) raster(s *rasterState, v0, v1, v2 *gpuVertex) {
 						f.tc[t] = [2]float32{a0[k]*p0 + a1[k]*p1 + a2[k]*p2, a0[k+1]*p0 + a1[k+1]*p1 + a2[k+1]*p2}
 					}
 				}
-				if s.tex[0].project {
+				if s.tex[0].on && s.tex[0].typ != 0 {
 					f.tc0w = a0[semTC0W]*p0 + a1[semTC0W]*p1 + a2[semTC0W]*p2
 				}
 				if s.light != nil {
@@ -474,7 +499,9 @@ func wrap(i, size int, mode uint32) (int, bool) {
 	return max(0, min(size-1, i)), true
 }
 
-func (t *texUnit) texel(x, y int) [4]uint8 {
+func (t *texUnit) texel(x, y int) [4]uint8 { return t.texelIn(t.data, x, y) }
+
+func (t *texUnit) texelIn(d []byte, x, y int) [4]uint8 {
 	xs, ok1 := wrap(x, t.w, t.wrapS)
 	ys, ok2 := wrap(y, t.h, t.wrapT)
 	if !ok1 || !ok2 {
@@ -482,9 +509,9 @@ func (t *texUnit) texel(x, y int) [4]uint8 {
 	}
 	ym := t.h - 1 - ys
 	if t.format >= 12 {
-		return etc1Texel(t.data, xs, ym, t.w, t.format == 13)
+		return etc1Texel(d, xs, ym, t.w, t.format == 13)
 	}
-	return decodeTexel(t.data, t.format, int(tiledOffset(uint32(xs), uint32(ym), uint32(t.w))))
+	return decodeTexel(d, t.format, int(tiledOffset(uint32(xs), uint32(ym), uint32(t.w))))
 }
 
 func ex5(v uint32) uint8 { return uint8(v<<3 | v>>2) }
@@ -596,16 +623,18 @@ func etc1Texel(d []byte, x, y, w int, alpha bool) [4]uint8 {
 	return out
 }
 
-func (t *texUnit) sample(u, v float32) [4]uint8 {
+func (t *texUnit) sample(u, v float32) [4]uint8 { return t.sampleIn(t.data, u, v) }
+
+func (t *texUnit) sampleIn(d []byte, u, v float32) [4]uint8 {
 	s, tt := u*float32(t.w), v*float32(t.h)
 	if !t.linear {
-		return t.texel(int(math.Floor(float64(s))), int(math.Floor(float64(tt))))
+		return t.texelIn(d, int(math.Floor(float64(s))), int(math.Floor(float64(tt))))
 	}
 	s, tt = s-0.5, tt-0.5
 	x0, y0 := int(math.Floor(float64(s))), int(math.Floor(float64(tt)))
 	fx, fy := s-float32(x0), tt-float32(y0)
-	c00, c10 := t.texel(x0, y0), t.texel(x0+1, y0)
-	c01, c11 := t.texel(x0, y0+1), t.texel(x0+1, y0+1)
+	c00, c10 := t.texelIn(d, x0, y0), t.texelIn(d, x0+1, y0)
+	c01, c11 := t.texelIn(d, x0, y0+1), t.texelIn(d, x0+1, y0+1)
 	var out [4]uint8
 	for c := 0; c < 4; c++ {
 		top := float32(c00[c])*(1-fx) + float32(c10[c])*fx
@@ -700,10 +729,16 @@ func (g *gpu) fragment(s *rasterState, x, y int, f *fragment) {
 		if i == 2 && s.tex2UsesTC1 {
 			tc = f.tc[1]
 		}
-		if i == 0 && t.project && f.tc0w != 0 {
-			tc[0], tc[1] = tc[0]/f.tc0w, tc[1]/f.tc0w
+		if i == 0 && t.typ != 0 {
+			tex[0] = t.sampleSpecial(tc[0], tc[1], f.tc0w)
+			continue
 		}
 		tex[i] = t.sample(tc[0], tc[1])
+	}
+	var tex3 [4]uint8
+	if s.pt != nil {
+		tc := f.tc[s.pt.coord]
+		tex3 = s.pt.sample(tc[0], tc[1])
 	}
 	var lp, ls [4]uint8
 	if s.light != nil {
@@ -711,7 +746,7 @@ func (g *gpu) fragment(s *rasterState, x, y int, f *fragment) {
 	}
 	var in [16][4]uint8 // the combiners' inputs by source number
 	in[0], in[1], in[2] = f.color, lp, ls
-	in[3], in[4], in[5] = tex[0], tex[1], tex[2]
+	in[3], in[4], in[5], in[6] = tex[0], tex[1], tex[2], tex3
 	var prev [4]uint8
 	next := s.bufInit
 	for i := range s.tev {

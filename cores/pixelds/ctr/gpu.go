@@ -26,6 +26,7 @@ type gpu struct {
 	lutIdx, lutSel uint32
 
 	asm      assembler
+	proctex  procTexTables
 	gsp      gsPipeline
 	warned   map[string]bool
 	jumpTo   uint32
@@ -80,6 +81,10 @@ func (g *gpu) writeReg(id, v, mask uint32) {
 		g.jumpTo = g.reg[0x23a+ch] << 3
 		g.jumpSize = g.reg[0x238+ch] << 3
 		g.jumped = true
+	case id == 0x0af:
+		g.proctex.idx, g.proctex.sel = v&0xff, v>>8&0xf
+	case id >= 0x0b0 && id <= 0x0b7:
+		g.proctex.write(v)
 	case id == 0x0e6:
 		g.fogIdx = v & 0x7f
 	case id >= 0x0e8 && id <= 0x0ef:
