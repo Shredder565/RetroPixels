@@ -55,7 +55,7 @@ func newServices(m *Machine) *services {
 		newGSP(m), newHID(m, "hid:USER"), newHID(m, "hid:SPVR"),
 		newFS(m, "fs:USER"), newCFG(m, "cfg:u"), newCFG(m, "cfg:s"), newCFG(m, "cfg:i"),
 		&ptmService{"ptm:u"}, &ptmService{"ptm:sysm"},
-		newDSP(m),
+		newDSP(m), &roService{m: m},
 	} {
 		s.byName[v.name()] = v
 	}
