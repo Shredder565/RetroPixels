@@ -26,6 +26,7 @@ type gpu struct {
 	lutIdx, lutSel uint32
 
 	asm      assembler
+	gsp      gsPipeline
 	warned   map[string]bool
 	jumpTo   uint32
 	jumpSize uint32
@@ -215,8 +216,15 @@ const (
 
 func (g *gpu) numAttribs() int { return int(g.reg[0x202]>>28) + 1 }
 
-// shade runs the vertex shader on the attributes and maps its outputs.
-func (g *gpu) shade(attrs *[16]vec4) gpuVertex {
+// vsOutputs is a vertex shader's outputs: the output registers it
+// writes (its output mask), packed in order.
+type vsOutputs struct {
+	r [16]vec4
+	n int
+}
+
+// runVS runs the vertex shader on the attributes.
+func (g *gpu) runVS(attrs *[16]vec4) vsOutputs {
 	var u shaderUnit
 	n := int(g.reg[0x2b9]&0xf) + 1
 	vmap := uint64(g.reg[0x2bb]) | uint64(g.reg[0x2bc])<<32
@@ -224,25 +232,40 @@ func (g *gpu) shade(attrs *[16]vec4) gpuVertex {
 		u.in[vmap>>(4*k)&0xf] = attrs[k]
 	}
 	u.run(&g.vs)
+	return packOutputs(&u, g.reg[0x2bd])
+}
+
+func packOutputs(u *shaderUnit, mask uint32) vsOutputs {
+	var o vsOutputs
+	for r := 0; r < 16; r++ {
+		if mask>>r&1 != 0 {
+			o.r[o.n] = u.out[r]
+			o.n++
+		}
+	}
+	return o
+}
+
+// vertex gives packed outputs their meanings (the output map).
+func (g *gpu) vertex(o *vsOutputs) gpuVertex {
 	var v gpuVertex
 	v.a[semPos+3] = 1
-	outMask := g.reg[0x2bd]
-	nOut := int(g.reg[0x04f] & 7)
-	k := 0
-	for r := 0; r < 16 && k < nOut; r++ {
-		if outMask>>r&1 == 0 {
-			continue
-		}
+	nOut := min(int(g.reg[0x04f]&7), o.n)
+	for k := 0; k < nOut; k++ {
 		sem := g.reg[0x050+k]
 		for c := 0; c < 4; c++ {
-			s := sem >> (8 * c) & 0x1f
-			if s < 24 {
-				v.a[s] = u.out[r][c]
+			if s := sem >> (8 * c) & 0x1f; s < 24 {
+				v.a[s] = o.r[k][c]
 			}
 		}
-		k++
 	}
 	return v
+}
+
+// shade runs the vertex shader on the attributes and maps its outputs.
+func (g *gpu) shade(attrs *[16]vec4) gpuVertex {
+	o := g.runVS(attrs)
+	return g.vertex(&o)
 }
 
 func (g *gpu) immediateVertex() {
@@ -325,8 +348,9 @@ func (g *gpu) loadVertex(idx uint32, attrs *[16]vec4) {
 // draw runs a DrawArrays (or DrawElements with indexed).
 func (g *gpu) draw(indexed bool) {
 	g.draws++
-	if g.reg[0x229]&3 != 0 || g.reg[0x244]&1 != 0 && g.reg[0x229]&2 != 0 {
-		g.warn("the geometry shader")
+	useGS := g.reg[0x229]&3 == 2
+	if useGS {
+		g.gsStart()
 	}
 	count := g.reg[0x228]
 	first := g.reg[0x22a]
@@ -335,7 +359,7 @@ func (g *gpu) draw(indexed bool) {
 	big := ib>>31 != 0
 	g.asm.reset()
 	g.asm.mode = g.reg[0x25e] >> 8 & 3
-	cache := map[uint32]gpuVertex{}
+	cache := map[uint32]vsOutputs{}
 	var attrs [16]vec4
 	for i := uint32(0); i < count; i++ {
 		idx := first + i
@@ -353,16 +377,24 @@ func (g *gpu) draw(indexed bool) {
 				}
 				idx = uint32(p[0])
 			}
-			if v, ok := cache[idx]; ok {
-				g.asm.add(v, g.triangle)
-				continue
+		}
+		if useGS && g.gsp.wantCount {
+			g.gsCount(idx)
+			continue
+		}
+		o, ok := cache[idx]
+		if !ok || !indexed {
+			g.loadVertex(idx, &attrs)
+			o = g.runVS(&attrs)
+			if indexed {
+				cache[idx] = o
 			}
 		}
-		g.loadVertex(idx, &attrs)
-		v := g.shade(&attrs)
-		if indexed {
-			cache[idx] = v
+		if useGS {
+			g.gsSubmit(&o)
+			continue
 		}
+		v := g.vertex(&o)
 		g.asm.add(v, g.triangle)
 	}
 }
