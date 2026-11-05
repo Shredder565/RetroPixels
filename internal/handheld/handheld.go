@@ -59,7 +59,7 @@ var (
 // EngineFor is the emulator that plays a system's games by default:
 // PixelDS for DS games, Azahar for 3DS games.
 func EngineFor(system string) Engine {
-	if system == SystemDS {
+	if system == SystemDS || system == System3DS {
 		return PixelDS
 	}
 	return Azahar
@@ -67,14 +67,13 @@ func EngineFor(system string) Engine {
 
 // EngineChoice is the emulator for a system's games given the player's
 // choice for that system: "pixelds" or "melonds" for DS games ("" =
-// PixelDS), "azahar" or "pixelds" for 3DS games ("" = Azahar; PixelDS's
-// 3DS side is new).
+// PixelDS), "pixelds" or "azahar" for 3DS games ("" = PixelDS).
 func EngineChoice(system, choice string) Engine {
 	if system == SystemDS && strings.EqualFold(choice, MelonDS.ID) {
 		return MelonDS
 	}
-	if system == System3DS && strings.EqualFold(choice, PixelDS.ID) {
-		return PixelDS
+	if system == System3DS && strings.EqualFold(choice, Azahar.ID) {
+		return Azahar
 	}
 	return EngineFor(system)
 }

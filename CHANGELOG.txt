@@ -4,6 +4,15 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.34.0  (2026-11-05)
+--------------------------------
+- 3DS games play in PixelDS by default now, like DS games. Azahar and
+  melonDS stay in the download if you pick them in the 3DS / DS tab.
+- 3DS and DS games in PixelDS are recorded automatically, like other games.
+- The Xbox controller is ready for DS and 3DS games (left stick = circle
+  pad on the 3DS, LT / RT = ZL / ZR; right stick and R3 = stylus).
+- PixelDS checked to be all original code (no melonDS or Azahar code).
+
 RetroPixels 2.33.0  (2026-11-05)
 --------------------------------
 - PixelDS 3DS games have sound now (the 3DS sound processor's voices,

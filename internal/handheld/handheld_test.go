@@ -35,11 +35,11 @@ func TestLibraryBothSystems(t *testing.T) {
 		byName[g.Name] = g
 	}
 	mk, ds, cia := byName["Mario Kart 7"], byName["New Super Mario Bros."], byName["Pokemon Y"]
-	if mk.System != System3DS || EngineFor(mk.System).ID != "azahar" {
+	if mk.System != System3DS || EngineFor(mk.System).ID != "pixelds" {
 		t.Errorf("3DS game: %+v", mk)
 	}
 	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "melonds" ||
-		EngineChoice(mk.System, "pixelds").ID != "pixelds" || EngineChoice(mk.System, "").ID != "azahar" {
+		EngineChoice(mk.System, "azahar").ID != "azahar" || EngineChoice(mk.System, "").ID != "pixelds" {
 		t.Errorf("DS game: %+v", ds)
 	}
 	if !cia.Install || cia.System != System3DS {
@@ -62,7 +62,11 @@ func TestGameArgs(t *testing.T) {
 		{Game{Path: "c.cia", System: System3DS, Install: true}, true, []string{"-i", "c.cia"}},
 	}
 	for _, c := range cases {
-		if got := GameArgs(EngineFor(c.g.System), c.g, c.full); !reflect.DeepEqual(got, c.want) {
+		e := EngineFor(c.g.System)
+		if c.g.System == System3DS {
+			e = Azahar
+		}
+		if got := GameArgs(e, c.g, c.full); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("GameArgs(%s, %v) = %q, want %q", c.g.Path, c.full, got, c.want)
 		}
 	}

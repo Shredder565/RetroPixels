@@ -25,11 +25,20 @@ const (
 // in the order the audio pipe reports them: frame counter, voice
 // configurations, voice statuses, ADPCM coefficients, mixer
 // configuration, DSP status, final samples, aux bus samples, compressor
-// table, debug, and five more the games don't need from us.
-var dspStructs = [15]uint16{
-	0xbfff, 0x9e92, 0x8680, 0xa792, 0x9430, 0x8400, 0x8540, 0x9492,
-	0x8710, 0x8410, 0xa912, 0xaa12, 0xaad2, 0xac52, 0xac5c,
-}
+// table, debug, and five more the games don't need from us. Games use the
+// addresses the pipe gives them, so PixelDS lays the structures out its
+// own way: one after another from the region's start, by their sizes in
+// words.
+var dspStructs = func() (a [15]uint16) {
+	sizes := [15]uint16{1, 24 * 96, 24 * 6, 24 * 16, 0x80, 0x10, 160 * 2, 2 * 4 * 160 * 2,
+		0xd20, 0x130, 0x100, 0xc0, 0x180, 0x10, 0x13a3}
+	at := uint16(0x8000)
+	for i, n := range sizes {
+		a[i] = at
+		at = (at + n + 0xf) &^ 0xf
+	}
+	return
+}()
 
 // byte offsets in a region
 func structOff(i int) int { return int(dspStructs[i]-0x8000) * 2 }

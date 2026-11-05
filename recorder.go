@@ -489,6 +489,9 @@ func (s *recSession) upToDate() string {
 	if s.Emu == "PixelU" {
 		return "A PixelU build that can record (made with RetroPixels' recording support) is needed."
 	}
+	if s.Emu == "PixelDS" {
+		return "The PixelDS folder from RetroPixels 2.34.0 or later records games; try an up-to-date PixelDS folder."
+	}
 	return `The PixelU folder's Wii/GameCube engine (wii\PixelU-Wii.exe) should save it; try an up-to-date PixelU folder.`
 }
 

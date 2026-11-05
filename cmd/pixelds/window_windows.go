@@ -665,6 +665,8 @@ func (a *app) run() {
 	cx, cy := float64(e.BottomWidth()/2), float64(e.TopHeight()/2) // the controller's stylus pointer
 	errShown := false
 	pcm := make([]int16, 0, 4096)
+	rec := newRecorder(e)
+	defer rec.stop(sampleRate)
 	titleTick := time.Now()
 	flush := func() {
 		if saveDirty {
@@ -728,17 +730,23 @@ func (a *app) run() {
 				if st.RT > 100 {
 					bits |= pixelds.BtnZR
 				}
-			} else if st.LX < -dead {
-				bits |= pixelds.BtnLeft
-			}
-			if st.LX > dead {
-				bits |= pixelds.BtnRight
-			}
-			if st.LY > dead {
-				bits |= pixelds.BtnUp
-			}
-			if st.LY < -dead {
-				bits |= pixelds.BtnDown
+			} else {
+				// DS: the left stick is the D-pad too, and the triggers L and R
+				if st.LX < -dead {
+					bits |= pixelds.BtnLeft
+				}
+				if st.LX > dead {
+					bits |= pixelds.BtnRight
+				}
+				if st.LY > dead {
+					bits |= pixelds.BtnUp
+				}
+				if st.LY < -dead {
+					bits |= pixelds.BtnDown
+				}
+				if st.LT > 100 {
+					bits |= pixelds.BtnL
+				}
 			}
 			// the right stick moves a stylus pointer; RT or R3 touches
 			rx, ry := float64(st.RX)/32767, -float64(st.RY)/32767
@@ -762,6 +770,7 @@ func (a *app) run() {
 			go messageBox(a.hwnd, "The game stopped: "+err.Error()+"\n\nPixelDS's 3DS side is still being built, so some programs need parts it doesn't have yet.", "PixelDS "+pixelds.Version, mbIconError)
 		}
 		au := e.TakeAudio()
+		rec.frame(e.Screen(), au, e.FPS(), sampleRate)
 		if snd != nil {
 			pcm = pcm[:0]
 			for _, s := range au {

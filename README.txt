@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.33.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.34.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -20,13 +20,13 @@ PixelU (new in 2.21.0), GameCube and Wii in PixelU's GameCube / Wii engine
 (new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade (Sega Model 3)
 on RetroPixels' own emulator (new in 2.22.0: nothing else to install), and
 any other arcade game in MAME (any version of it), and Nintendo 3DS and DS
-games in the 3DS / DS tab (DS games in PixelDS, RetroPixels' own DS
-emulator, new in 2.29.0; 3DS games in Azahar).
+games in the 3DS / DS tab (both in PixelDS, RetroPixels' own DS and 3DS
+emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.33.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.33.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.34.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.34.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -312,11 +312,11 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
 3DS and DS (PixelDS, Azahar and melonDS)
 - The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
   "Add games folder..." and pick the folder with them, then click a game.
-- 3DS games play in Azahar, or in PixelDS if you choose it under "3DS
-  games play in" (experimental, new in 2.32.0, with sound since 2.33.0). DS games play
-  in PixelDS, RetroPixels' own DS emulator (new in 2.29.0), or in melonDS if
-  you choose it under "DS games play in". RetroPixels sends each game to
-  the emulator for its system.
+- 3DS and DS games play in PixelDS, RetroPixels' own emulator for both
+  (DS since 2.29.0, 3DS since 2.32.0 and by default since 2.34.0). PixelDS
+  is new code written for RetroPixels, with no code from melonDS, Azahar or
+  any other emulator (docs/pixelds.md). If a game doesn't play right, pick
+  Azahar under "3DS games play in" or melonDS under "DS games play in".
   All three come in the download (the PixelDS, Azahar and melonDS folders);
   keep them next to RetroPixels.exe.
 - PixelDS needs no BIOS or firmware files. It plays DS games with 2D
@@ -325,8 +325,11 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   PixelDS keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start,
   Shift=Select, the mouse is the stylus. F5 saves a state, F8 loads it,
   F6/F7 pick the slot, F11 or Alt+Enter is fullscreen, Ctrl+R restarts.
-  Xbox controllers work; the right stick moves a stylus pointer and RT
-  touches. Saves are game.sav next to the game, the same as melonDS.
+  An Xbox controller works straight away, for DS and 3DS games: A / B /
+  X / Y by position (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R,
+  Back = Select, Menu = Start, the D-pad and left stick the D-pad (on the
+  3DS the left stick is the circle pad and LT / RT are ZL / ZR); the right
+  stick moves a stylus pointer and RT (DS) or R3 touches. Saves are game.sav next to the game, the same as melonDS.
 - 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
   They must be decrypted dumps (Azahar doesn't play encrypted ones). A .cia
   is installed into Azahar when you click it; then open Azahar and play it
@@ -338,12 +341,16 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   your own DSi BIOS and NAND files (melonDS: Config > Emu settings).
 - Games start fullscreen in the emulator's own window; untick "Start games
   fullscreen" to play in a window. Close the emulator to come back.
-- Controls, graphics and screen layout are set in each emulator: "Open
+- Azahar and melonDS (if you choose them) are set up in their own
+  windows: "Open
   Azahar" (Emulation > Configure > Controls) and "Open melonDS" (Config >
   Input and hotkeys). Their settings and saves stay in your user folder
   (%APPDATA%\Azahar, and melonDS's own settings; DS saves sit next to the game).
 - RetroPixels Native: the 3DS / DS menu does the same.
-- Recording isn't available for 3DS and DS games yet.
+- Recording (new in 2.34.0): with "Record games automatically" on (the
+  default), 3DS and DS games played in PixelDS are recorded from their
+  start, as other games are; the .mp4 is saved in the Recordings folder
+  when the game ends. Recording needs ffmpeg (RetroPixels downloads it).
 
 Arcade games in MAME (any version)
 - RetroPixels' own arcade emulators play the games listed above. Every other

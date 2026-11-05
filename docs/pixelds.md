@@ -74,5 +74,7 @@ others are as for DS games, and the mouse is the stylus.
 5. 2.33.0: code modules (ldr:ro), sound (the DSP's voices, filters and
    mixers), geometry shaders, cube, shadow, projected and procedural
    textures (done).
-6. Save states for 3DS games and fixes from real games. Then Azahar
-   leaves the download.
+6. 2.34.0: PixelDS is the default for 3DS games; games are recorded
+   (-record / -ffmpeg, given by RetroPixels); the Xbox controller's left
+   stick is only the circle pad on the 3DS, and LT is L on the DS (done).
+7. Save states for 3DS games and fixes from real games.

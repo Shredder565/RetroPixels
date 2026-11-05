@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.34.0] - 2026-11-05
+
+- 3DS games now play in PixelDS by default, like DS games: one RetroPixels emulator for both. Azahar (3DS) and melonDS (DS) are still in the download if you pick them in the 3DS / DS tab; a player who chose Azahar keeps it.
+- 3DS and DS games in PixelDS are recorded automatically (with "Record games automatically" on, the default), in RetroPixels.exe and RetroPixels Native: PixelDS saves the game's own picture and sound as it runs, and the .mp4 is made when the game ends.
+- The Xbox controller is ready for DS and 3DS games out of the box: A / B / X / Y by position, LB / RB = L / R, Back = Select, Menu = Start; on the 3DS the left stick is the circle pad (no longer the D-pad as well) and LT / RT are ZL / ZR; on the DS LT is L too. The right stick moves the stylus; RT (DS) or R3 touches.
+- Checked that PixelDS is all original code: no code from melonDS, Azahar or any other emulator. The 3DS sound processor's shared memory is now laid out PixelDS's own way.
+
 ## [2.33.0] - 2026-11-05
 
 - PixelDS 3DS games now have sound: the 3DS sound processor's 24 voices (8-bit, 16-bit and ADPCM samples, looping and streamed), their filters and the three mixers, played through RetroPixels' sound output.

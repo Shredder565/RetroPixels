@@ -43,6 +43,8 @@ var (
 	press      = flag.String("press", "", "with -frames: buttons to press, as Name@frame,... (held 6 frames)")
 	touch      = flag.String("touch", "", "with -frames: touches, as x:y@frame,... (held 6 frames)")
 	showLog    = flag.Bool("log", false, "with -frames: print what the 3DS side reports")
+	recordDir  = flag.String("record", "", "record the game into this folder (Frames and Audio), with -ffmpeg")
+	ffmpegPath = flag.String("ffmpeg", "", "the ffmpeg program -record uses")
 )
 
 const sampleRate = 48000
@@ -229,6 +231,8 @@ func headless(path string) error {
 		return err
 	}
 	presses, touches := parseTimed(*press, false), parseTimed(*touch, true)
+	rec := newRecorder(e)
+	defer rec.stop(sampleRate)
 	start := time.Now()
 	for f := 0; f < *frames; f++ {
 		var bits uint32
@@ -249,7 +253,7 @@ func headless(path string) error {
 			e.Touch(0, 0, false)
 		}
 		e.RunFrame()
-		e.TakeAudio()
+		rec.frame(e.Screen(), e.TakeAudio(), e.FPS(), sampleRate)
 		if err := e.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "PixelDS: the game stopped at frame %d: %v\n", f, err)
 			break

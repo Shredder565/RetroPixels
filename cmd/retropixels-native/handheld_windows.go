@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"retropixels/internal/dolphin"
+	"retropixels/internal/ffmpeg"
 	"retropixels/internal/handheld"
 )
 
@@ -76,7 +78,7 @@ func (a *app) hhUpdateMenus() {
 	melon := a.settings.Handheld.DSEngine == handheld.MelonDS.ID
 	checkItem(a.menu, cmdHHUsePixelDS, !melon)
 	checkItem(a.menu, cmdHHUseMelonDS, melon)
-	pixel3 := a.settings.Handheld.ThreeDSEngine == handheld.PixelDS.ID
+	pixel3 := a.settings.Handheld.ThreeDSEngine != handheld.Azahar.ID
 	checkItem(a.menu, cmdHH3DSAzahar, !pixel3)
 	checkItem(a.menu, cmdHH3DSPixelDS, pixel3)
 	enableItem(a.menu, cmdHHOpenAzahar, r == nil && a.hhExe(handheld.Azahar) != "")
@@ -231,8 +233,25 @@ func (a *app) hhPlay(g handheld.Game) {
 		}
 	}
 	a.closeGame()
-	cmd := handheld.Command(exe, handheld.GameArgs(e, g, a.settings.Handheld.fullscreen())...)
+	args := handheld.GameArgs(e, g, a.settings.Handheld.fullscreen())
+	// Recorded from the start: PixelDS saves the game (encoding with
+	// ffmpeg) while it runs, and the video is made when it ends.
+	var rec *extRec
+	var ff string
+	if e.ID == handheld.PixelDS.ID && a.settings.autoRecord() && a.recFFmpeg(true, false) {
+		if dir, err := engineRecDir(filepath.Join(a.settings.recDir(), "temp"), "PixelDS-"); err != nil {
+			a.showMessage("Not recording: " + err.Error())
+		} else {
+			ff = ffmpeg.Find()
+			args = append([]string{"-record", dir, "-ffmpeg", ff}, args...)
+			rec = a.newExtRec(g.Name, dir)
+		}
+	}
+	cmd := handheld.Command(exe, args...)
 	if err := cmd.Start(); err != nil {
+		if rec != nil {
+			a.extRecDropped(rec)
+		}
 		messageBox(a.hwnd, "Couldn't start "+e.Name+": "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
@@ -242,6 +261,12 @@ func (a *app) hhPlay(g handheld.Game) {
 		cmd.Wait()
 		close(r.exited)
 		a.event("handheld-exited", "")
+		if rec != nil {
+			enc := a.encoder(ff)
+			a.extSave(rec, func(ff string, progress func(int)) error {
+				return pixeluSave(ff, enc, rec.dir, rec.out, time.Since(rec.started).Seconds(), progress)
+			})
+		}
 	}()
 	a.settings.addRecent(g.Path)
 	a.settings.LastFolder = filepath.Dir(g.Path)

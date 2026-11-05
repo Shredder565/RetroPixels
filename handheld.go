@@ -68,13 +68,13 @@ func handheldDSEngine() string {
 	return handheld.PixelDS.ID
 }
 
-// handheld3DSEngine: the player's choice for 3DS games ("" = Azahar).
+// handheld3DSEngine: the player's choice for 3DS games ("" = PixelDS).
 // Call with cfgMu held.
 func handheld3DSEngine() string {
-	if cfg.Handheld3DSEngine == handheld.PixelDS.ID {
-		return handheld.PixelDS.ID
+	if cfg.Handheld3DSEngine == handheld.Azahar.ID {
+		return handheld.Azahar.ID
 	}
-	return handheld.Azahar.ID
+	return handheld.PixelDS.ID
 }
 
 // handheldEngineFor: the emulator for a game's system, the other DS
@@ -120,8 +120,25 @@ func launchHandheldGame(path string) error {
 	if g.Install && e.ID == handheld.Azahar.ID {
 		label = e.Name + " (installing)"
 	}
-	if err := startEmulator(exe, handheld.GameArgs(e, g, fs), path, g.Name, "handheld", label, nil, nil); err != nil {
+	args := handheld.GameArgs(e, g, fs)
+	// PixelDS records the game itself when RetroPixels records games
+	var rec *recSession
+	if e.ID == handheld.PixelDS.ID && (autoRecordOn() || manualWanted()) {
+		var err error
+		var recArgs []string
+		if rec, recArgs, err = pixeldsRecording(g.Name); err != nil {
+			return err
+		}
+		args = append(recArgs, args...)
+	}
+	if err := startEmulator(exe, args, path, g.Name, "handheld", label, rec, nil); err != nil {
+		if rec != nil {
+			os.RemoveAll(rec.dumpDir)
+		}
 		return err
+	}
+	if rec != nil {
+		clearManualWanted()
 	}
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
@@ -280,4 +297,31 @@ func registerHandheldRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "games": handheldLibrary(), "status": handheldStatus()})
 	}))
+}
+
+// pixeldsRecording sets up a recording of the 3DS or DS game about to
+// start in PixelDS: a folder of its own for PixelDS's picture and sound
+// (it encodes the picture with ffmpeg while the game runs). Without
+// ffmpeg the game isn't recorded and ffmpeg is downloaded for next time.
+func pixeldsRecording(name string) (*recSession, []string, error) {
+	ff := findFFmpeg()
+	if ff == "" {
+		startFFmpegInstall()
+		setRecError("Recording needs ffmpeg, which is downloading now (see the Recordings tab), so this game isn't being recorded. " +
+			"3DS and DS games are recorded from the next one you start once it's ready.")
+		return nil, nil, nil
+	}
+	tmp := filepath.Join(recordingsDir(), "temp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return nil, nil, errors.New("couldn't make the recordings folder: " + err.Error())
+	}
+	dir, err := os.MkdirTemp(tmp, "PixelDS-")
+	if err != nil {
+		return nil, nil, errors.New("couldn't make the recordings folder: " + err.Error())
+	}
+	os.MkdirAll(filepath.Join(dir, "Frames"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "Audio"), 0o755)
+	rec := newRecSession(name, dir)
+	rec.Emu, rec.Quality, rec.NoCrop, rec.ownDir = "PixelDS", "high", true, true
+	return rec, []string{"-record", dir, "-ffmpeg", ff}, nil
 }

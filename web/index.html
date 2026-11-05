@@ -367,8 +367,8 @@
       <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U games play in PixelU (based on Cemu). Opens the Wii U tab.">
         <strong>Wii U</strong><small>.wua .wud .wux · PixelU</small>
       </button>
-      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo DS games play in PixelDS, RetroPixels' own DS emulator, and 3DS games in Azahar. Opens the 3DS / DS tab.">
-        <strong>3DS / DS</strong><small>.3ds .cia .nds · PixelDS, Azahar</small>
+      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo DS and 3DS games play in PixelDS, RetroPixels' own emulator. Opens the 3DS / DS tab.">
+        <strong>3DS / DS</strong><small>.3ds .cia .nds · PixelDS</small>
       </button>
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
@@ -610,7 +610,7 @@
   <!-- ===================== 3DS / DS tab (PixelDS, Azahar and melonDS) ===================== -->
   <section id="hhTab" hidden>
     <div id="hhBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">Nintendo DS games play in <strong>PixelDS</strong>, RetroPixels' own DS emulator, and 3DS games in <strong>Azahar</strong>, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+      <p style="margin:0">Nintendo DS and 3DS games play in <strong>PixelDS</strong>, RetroPixels' own emulator (Azahar and melonDS are there too if you pick them), through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
     </div>
     <div id="hhDesktop" hidden>
       <div class="gc-layout">
@@ -633,13 +633,13 @@
           <p class="muted" id="hhMsg" style="font-size:14px;margin:6px 0"></p>
           <div class="sw-grid" id="hhGrid"></div>
           <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
-            Lists 3DS games (.3ds, .cci, .cxi, .3dsx and their compressed .z versions, and .cia) and DS games (.nds, .dsi, .srl). 3DS games must be decrypted, as Azahar needs them.
-            A .cia is installed into Azahar when you click it; then play it from Azahar's game list (PixelDS plays a .cia directly). Games are played from where they are; nothing is copied.</p>
+            Lists 3DS games (.3ds, .cci, .cxi, .3dsx and their compressed .z versions, and .cia) and DS games (.nds, .dsi, .srl). 3DS games must be decrypted.
+            PixelDS plays a .cia directly; with Azahar chosen, a .cia is installed into Azahar when you click it. Games are played from where they are; nothing is copied.</p>
         </section>
         <aside class="gc-side">
           <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">Azahar (3DS)</h2>
-            <p class="muted" style="font-size:13px;margin:0 0 10px">3DS games play in <b>Azahar</b>, the open-source 3DS emulator (GPL-2.0-or-later), which comes in the RetroPixels download.</p>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">If you choose it for 3DS games, they play in <b>Azahar</b>, the open-source 3DS emulator (GPL-2.0-or-later), which comes in the RetroPixels download.</p>
             <div class="sw-emu" id="hhAzahar" style="margin-bottom:8px"></div>
             <div class="rg-btns">
               <button class="btn sm hh-btn" data-hh-open="azahar">Open Azahar</button>
@@ -663,9 +663,9 @@
             </div>
             <div class="sw-row" style="margin-top:6px">
               <label class="muted" style="font-size:13px" for="hh3DSEngine">3DS games play in</label>
-              <select id="hh3DSEngine" class="sw-select"><option value="azahar">Azahar</option><option value="pixelds">PixelDS (experimental)</option></select>
+              <select id="hh3DSEngine" class="sw-select"><option value="pixelds">PixelDS</option><option value="azahar">Azahar</option></select>
             </div>
-            <p class="muted" style="font-size:12px;margin:6px 0 0">PixelDS's 3DS side is new: it plays decrypted .3ds, .cci, .cxi and .cia files and homebrew, with sound. 3DS keys: arrows = circle pad, I / J / K / L = D-pad, E = ZL, R = ZR.</p>
+            <p class="muted" style="font-size:12px;margin:6px 0 0">PixelDS plays decrypted .3ds, .cci, .cxi and .cia files and homebrew, with sound. An Xbox controller works straight away: A / B / X / Y as on the 3DS (B / A / Y / X by position), bumpers L and R, triggers ZL and ZR, left stick the circle pad, right stick moves the stylus and R3 touches. 3DS keys: arrows = circle pad, I / J / K / L = D-pad, E = ZL, R = ZR.</p>
           </section>
           <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">melonDS (DS)</h2>
@@ -1767,7 +1767,7 @@
     document.getElementById("hhPixel").innerHTML = emu(st.pixelds, "PixelDS", "PixelDS", "PixelDS");
     const dsName = hhDSName(), n3 = hh3DSName();
     document.getElementById("hhDSEngine").value = st.dsEngine === "melonds" ? "melonds" : "pixelds";
-    document.getElementById("hh3DSEngine").value = st.threeDSEngine === "pixelds" ? "pixelds" : "azahar";
+    document.getElementById("hh3DSEngine").value = st.threeDSEngine === "azahar" ? "azahar" : "pixelds";
     document.getElementById("hhEmu").innerHTML = `<span class="muted">Emulators</span><br>` +
       `<b>3DS:</b> ${st[n3.toLowerCase()] ? n3 : `<span style="color:var(--warn)">${n3} not found</span>`} &nbsp; <b>DS:</b> ${st[dsName.toLowerCase()] ? dsName : `<span style="color:var(--warn)">${dsName} not found</span>`}` +
       `<br><small class="muted">Each game opens in the emulator for its system</small>`;
