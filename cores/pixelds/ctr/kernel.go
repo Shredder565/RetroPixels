@@ -155,7 +155,7 @@ type kernel struct {
 	timers  []*timer
 	// things the machine does at regular times (the DSP's audio frames)
 	periodic []*periodicTask
-	log     func(string, ...any)
+	log      func(string, ...any)
 }
 
 func newKernel(m *Machine) *kernel {
