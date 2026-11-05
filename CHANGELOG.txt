@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.33.0  (2026-11-05)
+--------------------------------
+- PixelDS 3DS games have sound now (the 3DS sound processor's voices,
+  filters and mixers).
+- 3DS games that load code modules (CROs) while running start in PixelDS.
+- More 3DS graphics: geometry shaders, cube maps, shadow maps, projected
+  and procedural textures.
+- Still to come: save states for 3DS games, and fixes from real games.
+  Azahar stays the default for 3DS games.
+
 RetroPixels 2.32.0  (2026-11-05)
 --------------------------------
 - PixelDS now plays 3DS games as an experiment: decrypted .3ds, .cci,

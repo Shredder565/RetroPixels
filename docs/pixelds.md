@@ -71,5 +71,8 @@ others are as for DS games, and the mouse is the stylus.
    fog), loading decrypted games (.3ds, .cci, .cxi, .cia), a system font
    built from DejaVu Sans, the DSP's start-up, and the choice to play 3DS
    games in PixelDS from the tab (done).
-5. Code modules (ldr:ro), sound (DSP audio), geometry shaders, save
-   states, and fixes from real games. Then Azahar leaves the download.
+5. 2.33.0: code modules (ldr:ro), sound (the DSP's voices, filters and
+   mixers), geometry shaders, cube, shadow, projected and procedural
+   textures (done).
+6. Save states for 3DS games and fixes from real games. Then Azahar
+   leaves the download.

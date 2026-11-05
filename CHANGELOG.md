@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.33.0] - 2026-11-05
+
+- PixelDS 3DS games now have sound: the 3DS sound processor's 24 voices (8-bit, 16-bit and ADPCM samples, looping and streamed), their filters and the three mixers, played through RetroPixels' sound output.
+- 3DS games that load code modules (CRO files) while running now start in PixelDS: the ldr:ro service loads, links and unloads them.
+- PixelDS's 3DS graphics gained geometry shaders, cube maps, shadow maps, projected textures and procedural textures (and texture unit 0's kind is now read correctly).
+- Still to come for 3DS games in PixelDS: save states, encrypted games, and fixes from real games. Azahar stays the default until then.
+
 ## [2.32.0] - 2026-11-05
 
 - PixelDS now plays 3DS games, as an experiment: decrypted .3ds, .cci, .cxi and .cia files, with 3D graphics. Choose it in the 3DS / DS tab under "3DS games play in: PixelDS (experimental)" (RetroPixels Native: 3DS / DS menu). Azahar stays the default for 3DS games until PixelDS plays them as well, so nothing changes unless you pick it. A .cia plays straight away in PixelDS (no installing).

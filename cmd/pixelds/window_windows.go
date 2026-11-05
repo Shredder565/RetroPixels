@@ -384,7 +384,7 @@ func runWindow(path string) bool {
 	}
 	call(pTimeBeginPeriod, 1)
 	if path == "" {
-		messageBox(0, "PixelDS plays DS games, and decrypted 3DS games and homebrew as an experiment (no 3DS sound yet).\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
+		messageBox(0, "PixelDS plays DS games, and decrypted 3DS games and homebrew as an experiment.\n\nStart a game from the 3DS / DS tab in RetroPixels, or drop a game file onto PixelDS.exe.", "PixelDS "+pixelds.Version, 0x40)
 		return true
 	}
 	emu, err := open(path)
@@ -783,9 +783,10 @@ func (a *app) run() {
 			titleTick = time.Now()
 			call(pPostMessageW, a.hwnd, wmApp, 0, 0)
 		}
-		// pacing: the sound queue when there's sound, else the clock
+		// pacing: the sound queue when there's sound, else the clock (a 3DS
+		// game makes no sound until it starts its sound processor)
 		next = next.Add(frameDur)
-		if snd != nil {
+		if snd != nil && len(au) > 0 {
 			for snd.queued() > sampleRate/12 {
 				time.Sleep(2 * time.Millisecond)
 			}

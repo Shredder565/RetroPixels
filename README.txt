@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.32.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.33.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator, new in 2.29.0; 3DS games in Azahar).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.32.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.32.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.33.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.33.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -313,7 +313,7 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
 - The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
   "Add games folder..." and pick the folder with them, then click a game.
 - 3DS games play in Azahar, or in PixelDS if you choose it under "3DS
-  games play in" (experimental, new in 2.32.0: no sound yet). DS games play
+  games play in" (experimental, new in 2.32.0, with sound since 2.33.0). DS games play
   in PixelDS, RetroPixels' own DS emulator (new in 2.29.0), or in melonDS if
   you choose it under "DS games play in". RetroPixels sends each game to
   the emulator for its system.
