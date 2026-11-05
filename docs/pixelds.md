@@ -16,7 +16,10 @@ the behaviour of other emulators were used as references only.
   IPC, interrupts, the cartridge and its save chip, SPI (firmware, touch
   screen, power), the clock, both 2D engines, the sound chip, a built-in BIOS
   (`bios.go`, plus small ARM stubs from `tools/pixelds/biosstub.py`) and save
-  states. `gpu3d.go` is a placeholder until the 3D engine lands.
+  states. `gpu3d.go` is the 3D geometry engine (matrices, lighting,
+  clipping, polygon lists), `render3d.go` the 3D rasterizer (textures,
+  depth, translucency, toon and highlight, shadows, edge marking, fog) and
+  `capture.go` display capture.
 - `cores/pixelds/pixelds.go`: the front shared by DS and (later) 3DS games.
 - `cmd/pixelds`: PixelDS.exe, the window, keyboard, controller and sound.
 - `tools/pixelds/selftest`: a small homebrew DS program (our own code, built
@@ -35,7 +38,7 @@ Save states are in `%APPDATA%\RetroPixels\PixelDS\states`.
 ## Plan
 
 1. 2.29.0: DS games with 2D graphics, sound, touch, saves (done).
-2. DS 3D graphics: the geometry engine and the rasterizer, then display
-   capture.
+2. 2.30.0: DS 3D graphics (geometry engine and rasterizer) and display
+   capture (done). Anti-aliasing is still to do.
 3. 3DS games in the same emulator: the ARM11, the 3DS system software
    (high-level), and the PICA200 GPU. Then Azahar leaves the download.

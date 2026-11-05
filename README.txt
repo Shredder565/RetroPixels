@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.29.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.30.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator, new in 2.29.0; 3DS games in Azahar).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.29.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.29.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.30.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.30.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -42,7 +42,8 @@ What's in the download
   * Azahar\azahar.exe: Nintendo 3DS games. Azahar's official release,
     unchanged (GPL-2.0-or-later). New in 2.28.0.
   * PixelDS\PixelDS.exe: Nintendo DS games. RetroPixels' own DS emulator,
-    new code written for RetroPixels. New in 2.29.0 (3D graphics to come).
+    new code written for RetroPixels. New in 2.29.0; 3D graphics
+    since 2.30.0.
   * melonDS\melonDS.exe: Nintendo DS games too, if you choose it in the
     3DS / DS tab. melonDS's official release, unchanged (GPL-3.0-or-later).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
@@ -316,8 +317,8 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   All three come in the download (the PixelDS, Azahar and melonDS folders);
   keep them next to RetroPixels.exe.
 - PixelDS needs no BIOS or firmware files. It plays DS games with 2D
-  graphics, sound, touch, saves and save states; 3D graphics aren't done
-  yet, so 3D games show only their 2D parts: choose melonDS for those.
+  and 3D graphics (3D new in 2.30.0), sound, touch, saves and save states.
+  If a game doesn't play right in it, choose melonDS for DS games.
   PixelDS keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start,
   Shift=Select, the mouse is the stylus. F5 saves a state, F8 loads it,
   F6/F7 pick the slot, F11 or Alt+Enter is fullscreen, Ctrl+R restarts.

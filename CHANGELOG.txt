@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.30.0  (2026-11-05)
+--------------------------------
+- PixelDS (RetroPixels' own DS emulator) now draws 3D graphics, so 3D DS
+  games play in it too.
+- All the DS's 3D features: matrices, lights, textures (all seven formats),
+  toon and highlight shading, translucency, shadows, wireframe, edge
+  marking, fog and the rear-plane bitmap. Anti-aliasing isn't done yet.
+- Display capture works, for games that show 3D on both screens or use
+  motion blur.
+
 RetroPixels 2.29.0  (2026-11-05)
 --------------------------------
 - New: PixelDS, RetroPixels' own Nintendo DS emulator (PixelDS folder next

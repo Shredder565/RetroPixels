@@ -24,6 +24,7 @@ type engine2D struct {
 	masterBright     uint16
 
 	out [256]uint32
+	raw [256]uint32 // the line as 15-bit colours before master brightness (for display capture)
 
 	// line buffers
 	bg      [4][256]uint32 // bit 31: opaque; low 15 bits colour
@@ -183,15 +184,17 @@ func (e *engine2D) renderLine(y int) {
 	case 0:
 		for i := range line {
 			line[i] = 0xffffff
+			e.raw[i] = 0x7fff
 		}
 		e.advanceAffine()
 		return
 	case 2: // a VRAM bank shown directly
 		bank := e.m.vram.banks[e.dispcnt>>18&3]
 		for x := 0; x < 256; x++ {
-			line[x] = rgb(uint32(binary.LittleEndian.Uint16(bank[(y*256+x)*2:])))
+			c := uint32(binary.LittleEndian.Uint16(bank[(y*256+x)*2:])) & 0x7fff
+			e.raw[x] = c
+			line[x] = rgb(c)
 		}
-		e.composeCapture(y)
 		e.brightness()
 		e.advanceAffine()
 		return
@@ -211,9 +214,6 @@ func (e *engine2D) advanceAffine() {
 		e.curY[i] += int32(e.pd[i])
 	}
 }
-
-// composeCapture: display capture isn't done yet.
-func (e *engine2D) composeCapture(y int) {}
 
 func (e *engine2D) brightness() {
 	mb := e.masterBright
@@ -744,6 +744,7 @@ func (e *engine2D) renderNormal(y int) {
 				c = darken(topC, ey)
 			}
 		}
+		e.raw[x] = c
 		e.out[x] = rgb(c)
 	}
 }

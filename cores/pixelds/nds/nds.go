@@ -370,6 +370,9 @@ func (m *Machine) lineEvent() {
 		if m.vcount < visibleLines {
 			m.gpuA.renderLine(m.vcount)
 			m.gpuB.renderLine(m.vcount)
+			if m.capturing {
+				m.captureLine(m.vcount)
+			}
 			m.finishLine(m.vcount)
 			m.dmaEvent9(dmaHBlank)
 		}
@@ -383,6 +386,7 @@ func (m *Machine) lineEvent() {
 	}
 	// a new line
 	m.hblankDone = false
+	m.gpu3d.checkIRQ()
 	m.lineStart += lineCycles
 	m.nextLineEvent = m.lineStart + hblankStart
 	m.dispstat9 &^= 2

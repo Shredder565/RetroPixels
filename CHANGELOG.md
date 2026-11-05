@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.30.0] - 2026-11-05
+
+- PixelDS, RetroPixels' own DS emulator, now draws 3D graphics, so 3D DS games play in it too. It's RetroPixels' own new code, like the rest of PixelDS.
+- What's in: all the DS's 3D commands (matrices and their stacks, vertices, normals and four lights with the shininess table, texture coordinate transforms, box, position and vector tests), clipping, front and back face culling, all seven texture formats (including 4×4 compressed), repeat and flip, modulation, decal, toon and highlight shading, translucency with blending and sorting, alpha test, shadow polygons, wireframe, edge marking, fog, the rear-plane bitmap, and Z or W depth.
+- Display capture works too, which games use to show 3D on both screens at once and for motion blur.
+- The 3D picture is drawn on several processor cores at once to keep busy scenes at full speed.
+- Not yet: anti-aliasing (edges are drawn sharp).
+
 ## [2.29.0] - 2026-11-05
 
 - New: PixelDS, RetroPixels' own Nintendo DS emulator, in the PixelDS folder next to the programs. It's new code written for RetroPixels (no melonDS or other emulator code in it), and the 3DS / DS tab now plays DS games in it. It's the first step towards one RetroPixels emulator for both the DS and the 3DS.

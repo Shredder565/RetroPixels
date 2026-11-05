@@ -137,7 +137,7 @@ jobs:
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "- Azahar\\azahar.exe: Nintendo 3DS games (Azahar ${{ steps.handheld.outputs.azahar }}, the official release, GPL-2.0-or-later)"
-            echo "- PixelDS\\PixelDS.exe: Nintendo DS games (RetroPixels' own DS emulator, new code written for RetroPixels; 3D graphics still to come)"
+            echo "- PixelDS\\PixelDS.exe: Nintendo DS games (RetroPixels' own DS emulator, new code written for RetroPixels, 2D and 3D)"
             echo "- melonDS\\melonDS.exe: Nintendo DS games too, if you pick it in the 3DS / DS tab (melonDS ${{ steps.handheld.outputs.melonds }}, the official release, GPL-3.0-or-later)"
             echo "  The 3DS / DS tab sends 3DS games to Azahar and DS games to PixelDS (or melonDS if you choose it)."
             echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
