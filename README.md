@@ -79,7 +79,7 @@ RetroPixels window.
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
 | Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze |
 | GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
-| Nintendo 3DS / DS | `.3ds` `.cci` `.cxi` `.3dsx` `.cia` · `.nds` `.dsi` | One 3DS / DS tab. DS and 3DS games play in PixelDS, RetroPixels' own emulator for both (all new code; DS since 2.29.0, 3DS by default since 2.34.0), recorded automatically and with the Xbox controller ready; since 2.34.1 it is the only DS / 3DS emulator in the download |
+| Nintendo 3DS / DS | `.3ds` `.cci` `.cxi` `.3dsx` `.cia` · `.nds` `.dsi` | One 3DS / DS tab. DS and 3DS games play in PixelDS, RetroPixels' own emulator for both (all new code; DS since 2.29.0, 3DS by default since 2.34.0), recorded automatically and with the Xbox controller ready; since 2.34.1 it is the only DS / 3DS emulator in the download; since 2.35.0 DS 3D can be drawn at up to 4× (F2) with texture packs, and F9 makes one from the game (Mario restyled in modern colours) |
 | Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME: built in, or any other version, chosen per game |
 
 ¹ DSP-3, DSP-4, ST010, ST011 and ST018 run a program stored inside the chip. RetroPixels asks for

@@ -32,6 +32,12 @@ type engine2D struct {
 	obj     [256]uint32 // bit 31 opaque, bit 30 semi-transparent, bits 16-19 bitmap alpha+1
 	objPrio [256]uint8
 	objWin  [256]bool
+
+	// how each pixel used the 3D picture, for drawing it at a higher
+	// resolution (hires.go)
+	hiOp  [256]uint8
+	hiSec [256]uint32 // the layer below the 3D picture
+	hiArg [256]uint32
 }
 
 const opaque = 1 << 31
@@ -178,6 +184,9 @@ func (e *engine2D) renderLine(y int) {
 	}
 	if e.dispcnt&0x80 != 0 { // forced blank
 		mode = 0
+	}
+	if mode != 1 {
+		e.hiOp = [256]uint8{}
 	}
 	line := e.out[:]
 	switch mode {
@@ -723,25 +732,41 @@ func (e *engine2D) renderNormal(y int) {
 			}
 		}
 		c := topC
+		e.hiOp[x], e.hiSec[x] = hiNone, secC
+		if top == 0 && is3D {
+			e.hiOp[x] = hi3D
+		}
 		switch {
 		case top == 4 && objV&(1<<30) != 0 && t2&(1<<second) != 0:
 			c = blend(topC, secC, eva, evb)
 		case top == 4 && objV>>16&31 != 0 && t2&(1<<second) != 0:
 			a := objV>>16&31 - 1
 			c = blend(topC, secC, a+1, 16-a)
-		case top == 0 && is3D && e.alpha3d[x] < 31 && t2&(1<<second) != 0:
+		case top == 0 && is3D && t2&(1<<second) != 0:
+			// The 3D layer over a second target always blends by its own
+			// alpha, never by EVA/EVB (opaque 3D pixels stay as they are).
 			a := uint32(e.alpha3d[x])
 			c = blend3D(topC, secC, a)
+			e.hiOp[x] = hiBlend3D
 		case mask&32 != 0 && t1&(1<<top) != 0:
 			switch eff {
 			case 1:
 				if t2&(1<<second) != 0 {
 					c = blend(topC, secC, eva, evb)
+					if e.hiOp[x] != hiNone {
+						e.hiOp[x], e.hiArg[x] = hiBlend, eva|evb<<8
+					}
 				}
 			case 2:
 				c = brighten(topC, ey)
+				if e.hiOp[x] != hiNone {
+					e.hiOp[x], e.hiArg[x] = hiBrighten, ey
+				}
 			case 3:
 				c = darken(topC, ey)
+				if e.hiOp[x] != hiNone {
+					e.hiOp[x], e.hiArg[x] = hiDarken, ey
+				}
 			}
 		}
 		e.raw[x] = c

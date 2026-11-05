@@ -43,6 +43,8 @@ What's in the download
     emulator, all new code written for RetroPixels. New in 2.29.0; 3D
     graphics since 2.30.0; 3DS games since 2.32.0. Since 2.34.1 it is the
     only DS / 3DS emulator in the download (Azahar and melonDS are gone).
+    Since 2.35.0: DS 3D at up to 4x (F2) and texture packs (F9 makes one
+    from the game, F10 turns it on / off, F3 dumps the game's textures).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need

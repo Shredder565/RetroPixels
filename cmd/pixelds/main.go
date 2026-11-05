@@ -14,6 +14,9 @@
 //	pixelds -frames N [-shot out.png] [-press A@60,Start@120] game.nds
 //
 // runs N frames without a window and writes the last picture.
+//
+// DS games can draw 3D at a higher resolution (-scale, F2) and use texture
+// packs; -make-texpack makes one from the game (see textures.go).
 package main
 
 import (
@@ -230,6 +233,9 @@ func headless(path string) error {
 	if err != nil {
 		return err
 	}
+	if msg := setupTextures(e, false); msg != "" {
+		fmt.Println(msg)
+	}
 	presses, touches := parseTimed(*press, false), parseTimed(*touch, true)
 	rec := newRecorder(e)
 	defer rec.stop(sampleRate)
@@ -264,10 +270,14 @@ func headless(path string) error {
 	if e.SaveChanged() {
 		writeSave(path, e.Save())
 	}
+	if *dumpFlag != "" {
+		fmt.Printf("%d textures in %s\n", e.TexturesDumped(), *dumpFlag)
+	}
 	if *shot != "" {
-		img := image.NewRGBA(image.Rect(0, 0, e.Width(), e.Height()))
-		for i, c := range e.Screen() {
-			img.Set(i%e.Width(), i/e.Width(), color.RGBA{uint8(c >> 16), uint8(c >> 8), uint8(c), 255})
+		px, w, h := e.Display()
+		img := image.NewRGBA(image.Rect(0, 0, w, h))
+		for i, c := range px {
+			img.Set(i%w, i/w, color.RGBA{uint8(c >> 16), uint8(c >> 8), uint8(c), 255})
 		}
 		f, err := os.Create(*shot)
 		if err != nil {
@@ -293,6 +303,13 @@ func main() {
 		return
 	}
 	path := flag.Arg(0)
+	if *makePack {
+		if err := makeTexturePack(path); err != nil {
+			fmt.Fprintln(os.Stderr, "PixelDS:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *frames > 0 {
 		if err := headless(path); err != nil {
 			fmt.Fprintln(os.Stderr, "PixelDS:", err)

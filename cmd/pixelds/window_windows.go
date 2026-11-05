@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -308,8 +310,9 @@ type app struct {
 
 	mu      sync.Mutex
 	emu     *pixelds.Emulator
-	frame   []uint32
-	fw, fh  int
+	frame   []uint32 // the picture shown, dw×dh (bigger than the screens at a higher 3D resolution)
+	fw, fh  int      // the screens' own size
+	dw, dh  int
 	bmi     bitmapInfoHeader
 	title   string
 	flash   string
@@ -327,6 +330,10 @@ type app struct {
 	savedStyle uintptr
 	savedRect  winRect
 	slot       int
+
+	packOn  bool // the texture pack is on (the game's thread only)
+	dumping bool
+	making  atomic.Bool
 }
 
 var theApp *app
@@ -393,9 +400,12 @@ func runWindow(path string) bool {
 		os.Exit(1)
 	}
 	a := &app{path: path, emu: emu, cmds: make(chan func(*pixelds.Emulator), 16), quit: make(chan struct{}), done: make(chan struct{})}
+	texMsg := setupTextures(emu, true)
+	a.packOn = strings.HasPrefix(texMsg, "texture pack")
 	a.fw, a.fh = emu.Width(), emu.Height()
-	a.frame = make([]uint32, a.fw*a.fh)
-	a.bmi = bitmapInfoHeader{Size: 40, Width: int32(a.fw), Height: -int32(a.fh), Planes: 1, BitCount: 32}
+	_, a.dw, a.dh = emu.Display()
+	a.frame = make([]uint32, a.dw*a.dh)
+	a.bmi = bitmapInfoHeader{Size: 40, Width: int32(a.dw), Height: -int32(a.dh), Planes: 1, BitCount: 32}
 	a.title = emu.Title()
 	a.mouseX.Store(-1)
 	theApp = a
@@ -415,6 +425,9 @@ func runWindow(path string) bool {
 		a.toggleFullscreen()
 	}
 	a.updateTitle()
+	if texMsg != "" {
+		a.say(texMsg)
+	}
 	go a.run()
 
 	var m msg
@@ -433,7 +446,7 @@ func (a *app) updateTitle() {
 	if a.flash != "" && time.Since(a.flashAt) < 3*time.Second {
 		t += " - " + a.flash
 	} else {
-		t += fmt.Sprintf(" - F5 save state, F8 load (slot %d, F6/F7 to change), F11 fullscreen, Ctrl+R restart", a.slot+1)
+		t += fmt.Sprintf(" - F5 save state, F8 load (slot %d, F6/F7 to change), F2 3D resolution, F9 make texture pack, F10 pack on/off, F11 fullscreen, Ctrl+R restart", a.slot+1)
 	}
 	call(pSetWindowTextW, a.hwnd, uintptr(unsafe.Pointer(u16(t))))
 }
@@ -471,7 +484,7 @@ func (a *app) paint(hdc uintptr) {
 	bar(x+w, y, cw-x-w, h)
 	call(pSetStretchBltMode, hdc, colorOnColor)
 	a.mu.Lock()
-	call(pStretchDIBits, hdc, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 0, 0, uintptr(a.fw), uintptr(a.fh),
+	call(pStretchDIBits, hdc, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 0, 0, uintptr(a.dw), uintptr(a.dh),
 		uintptr(unsafe.Pointer(&a.frame[0])), uintptr(unsafe.Pointer(&a.bmi)), dibRGBColors, srcCopy)
 	a.mu.Unlock()
 }
@@ -596,6 +609,18 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 			a.slot = (a.slot + 1) % 10
 			a.say(fmt.Sprintf("state slot %d", a.slot+1))
 			return 0
+		case wp == 0x71: // F2
+			a.textureCmd('2')
+			return 0
+		case wp == 0x72: // F3
+			a.textureCmd('3')
+			return 0
+		case wp == 0x78: // F9
+			a.textureCmd('9')
+			return 0
+		case wp == 0x79: // F10
+			a.textureCmd('0')
+			return 0
 		case ctrl && wp == 'R':
 			a.cmds <- nil // restart
 			return 0
@@ -693,6 +718,8 @@ func (a *app) run() {
 					e = ne
 					a.emu = ne
 					errShown = false
+					a.packOn = strings.HasPrefix(setupTextures(ne, true), "texture pack")
+					a.dumping = false
 				}
 			} else {
 				f(e)
@@ -778,8 +805,14 @@ func (a *app) run() {
 			}
 			snd.write(pcm)
 		}
+		px, dw, dh := e.Display()
 		a.mu.Lock()
-		copy(a.frame, e.Screen())
+		if dw != a.dw || dh != a.dh {
+			a.dw, a.dh = dw, dh
+			a.frame = make([]uint32, dw*dh)
+			a.bmi.Width, a.bmi.Height = int32(dw), -int32(dh)
+		}
+		copy(a.frame, px)
 		a.mu.Unlock()
 		call(pInvalidateRect, a.hwnd, 0, 0)
 		if e.SaveChanged() {
@@ -804,6 +837,93 @@ func (a *app) run() {
 			time.Sleep(d)
 		} else if d < -250*time.Millisecond {
 			next = time.Now()
+		}
+	}
+}
+
+// tell shows a message in the title bar (from any thread).
+func (a *app) tell(s string) {
+	a.mu.Lock()
+	a.pending = s
+	a.mu.Unlock()
+	call(pPostMessageW, a.hwnd, wmApp, 0, 1)
+}
+
+// textureCmd: F2 the 3D resolution, F3 dumping textures, F9 making the
+// automatic texture pack, F10 the pack on or off (DS games).
+func (a *app) textureCmd(key byte) {
+	a.cmds <- func(e *pixelds.Emulator) {
+		if e.System != pixelds.DS {
+			a.tell("texture packs and the 3D resolution are for DS games")
+			return
+		}
+		dir := packDir(e.GameCode())
+		switch key {
+		case '2':
+			n := e.RenderScale()%4 + 1
+			e.SetRenderScale(n)
+			saveScale(n)
+			a.tell(fmt.Sprintf("3D resolution %d× (F2 to change)", n))
+		case '3':
+			a.dumping = !a.dumping
+			if a.dumping {
+				d := filepath.Join(dir, "dump")
+				if err := e.DumpTextures(d); err != nil {
+					a.dumping = false
+					a.tell("can't dump textures: " + err.Error())
+					return
+				}
+				a.tell("dumping textures into " + d)
+			} else {
+				n := e.TexturesDumped()
+				e.DumpTextures("")
+				a.tell(fmt.Sprintf("stopped dumping textures (%d in the dump folder)", n))
+			}
+		case '0':
+			if !a.packOn {
+				n, err := e.LoadTexturePack(dir)
+				if err != nil || n == 0 {
+					a.tell("no texture pack for this game yet: F9 makes one")
+					return
+				}
+				a.packOn = true
+				a.tell(fmt.Sprintf("texture pack on (%d pictures)", n))
+			} else {
+				a.packOn = false
+				e.EnableTexturePack(false)
+				a.tell("texture pack off")
+			}
+		case '9':
+			if !a.making.CompareAndSwap(false, true) {
+				a.tell("already making the texture pack")
+				return
+			}
+			a.tell("making the texture pack...")
+			code := e.GameCode()
+			go func() {
+				defer a.making.Store(false)
+				_, data, err := loadGame(a.path)
+				if err != nil {
+					a.tell("couldn't make the texture pack: " + err.Error())
+					return
+				}
+				o := packOptions(filepath.Join(packDir(code), "auto"))
+				o.DumpDir = filepath.Join(packDir(code), "dump")
+				r, err := pixelds.MakeTexturePack(data, o)
+				if err != nil {
+					a.tell("couldn't make the texture pack: " + err.Error())
+					return
+				}
+				a.cmds <- func(e *pixelds.Emulator) {
+					n, err := e.LoadTexturePack(packDir(code))
+					if err != nil {
+						a.tell("couldn't load the texture pack: " + err.Error())
+						return
+					}
+					a.packOn = true
+					a.tell(fmt.Sprintf("texture pack made: %d pictures, %d of them restyled characters (F10 on / off)", n, r.Characters))
+				}
+			}()
 		}
 	}
 }
