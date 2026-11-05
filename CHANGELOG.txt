@@ -4,6 +4,26 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.28.0  (2026-11-05)
+--------------------------------
+- New: the 3DS / DS tab, for Nintendo 3DS and DS games in one library.
+  Add the folder with your games and click one to play. 3DS games play in
+  Azahar (open-source 3DS emulator, GPL-2.0-or-later) and DS games in
+  melonDS (open-source DS emulator, GPL-3.0-or-later). Azahar plays only
+  3DS games, so RetroPixels sends each game to the right emulator for you.
+- Both come in the download, in the Azahar and melonDS folders next to the
+  programs (official releases, unchanged: Azahar 2126.2, melonDS 1.1).
+  Nothing else to install. Their source is attached to the release.
+- 3DS: .3ds, .cci, .cxi, .3dsx (and compressed .z versions) and .cia; the
+  games must be decrypted. A .cia is installed into Azahar when clicked,
+  then played from Azahar's game list. DS: .nds, .dsi, .srl; no BIOS needed
+  (DSi games need your own DSi BIOS and NAND in melonDS).
+- Games start fullscreen in the emulator's own window. Set up controls in
+  each emulator ("Open Azahar" / "Open melonDS" in the tab).
+- RetroPixels Native: new 3DS / DS menu; 3DS and DS files opened or dropped
+  on its window start in the right emulator.
+- Recording isn't available for 3DS and DS games yet.
+
 RetroPixels 2.27.0  (2026-11-04)
 --------------------------------
 - GameCube and Wii: games now play at 3x resolution (1K / 1080p) by

@@ -107,6 +107,7 @@ type app struct {
 	dol  dolState    // GameCube / Wii (dolphin_windows.go)
 	mame mameState   // arcade games in MAME (mame_windows.go)
 	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
+	hh   hhState     // 3DS and DS games in Azahar and melonDS (handheld_windows.go)
 	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
@@ -250,6 +251,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 	a.addDolphinMenu()
 	a.addPixelUMenu()
+	a.addHandheldMenu()
 	a.addMameMenu()
 
 	a.optMenu = call(pCreatePopupMenu)
@@ -324,6 +326,7 @@ func (a *app) updateMenus() {
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
 	a.pixeluUpdateMenus()
+	a.hhUpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
@@ -465,7 +468,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.mameBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.pixeluBeforeClose() || a.hhBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -630,7 +633,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.mamePaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.pixeluPaint(hdc) && !a.hhPaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -767,6 +770,7 @@ func (a *app) updateTitle() {
 	t += a.dolTitle()
 	t += a.mameTitle()
 	t += a.pixeluTitle()
+	t += a.hhTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -842,6 +846,7 @@ func (a *app) handleEvents() {
 			a.dolEvent(e.name, e.detail)
 			a.mameEvent(e.name, e.detail)
 			a.pixeluEvent(e.name, e.detail)
+			a.hhEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -957,6 +962,8 @@ func (a *app) command(id int) {
 		a.dolCommand(id)
 	case id >= cmdPixelUFirst && id <= cmdPixelULast:
 		a.pixeluCommand(id)
+	case id >= cmdHHFirst && id <= cmdHHLast:
+		a.hhCommand(id)
 	case id >= cmdMameFirst && id <= cmdMameLast:
 		a.mameCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
@@ -995,6 +1002,9 @@ func (a *app) openPath(path string) {
 		return
 	}
 	if a.pixeluOpenPath(path) {
+		return
+	}
+	if a.hhOpenPath(path) {
 		return
 	}
 	if a.dolOpenPath(path) {

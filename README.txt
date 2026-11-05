@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.27.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.28.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -19,12 +19,13 @@ Deluxe, Berzerk, Centipede, Vs. Castlevania and more), plus Wii U games in
 PixelU (new in 2.21.0), GameCube and Wii in PixelU's GameCube / Wii engine
 (new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade (Sega Model 3)
 on RetroPixels' own emulator (new in 2.22.0: nothing else to install), and
-any other arcade game in MAME (any version of it).
+any other arcade game in MAME (any version of it), and Nintendo 3DS and DS
+games in the 3DS / DS tab (new in 2.28.0, in Azahar and melonDS).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.27.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.27.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.28.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.28.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -37,6 +38,10 @@ What's in the download
     licence is in PixelU\wii).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
+  * Azahar\azahar.exe: Nintendo 3DS games. Azahar's official release,
+    unchanged (GPL-2.0-or-later). New in 2.28.0.
+  * melonDS\melonDS.exe: Nintendo DS games. melonDS's official release,
+    unchanged (GPL-3.0-or-later). New in 2.28.0.
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
@@ -298,6 +303,28 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   %APPDATA%\RetroPixels\gamecube-resolution.txt and put into the engine's
   settings before each game. If you had already set a higher one, that's kept.
   Save states: Shift+F1 saves, F1 loads.
+
+3DS and DS (Azahar and melonDS, new in 2.28.0)
+- The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
+  "Add games folder..." and pick the folder with them, then click a game.
+- 3DS games play in Azahar, DS games in melonDS. Azahar is a 3DS emulator
+  only, so RetroPixels sends each game to the emulator for its system; you
+  don't have to choose. Both come in the download (the Azahar and melonDS
+  folders); keep them next to RetroPixels.exe.
+- 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
+  They must be decrypted dumps (Azahar doesn't play encrypted ones). A .cia
+  is installed into Azahar when you click it; then open Azahar and play it
+  from its game list.
+- DS files: .nds, .dsi, .srl. DS games play without a BIOS. DSi games need
+  your own DSi BIOS and NAND files (melonDS: Config > Emu settings).
+- Games start fullscreen in the emulator's own window; untick "Start games
+  fullscreen" to play in a window. Close the emulator to come back.
+- Controls, graphics and screen layout are set in each emulator: "Open
+  Azahar" (Emulation > Configure > Controls) and "Open melonDS" (Config >
+  Input and hotkeys). Their settings and saves stay in your user folder
+  (%APPDATA%\Azahar, and melonDS's own settings; DS saves sit next to the game).
+- RetroPixels Native: the 3DS / DS menu does the same.
+- Recording isn't available for 3DS and DS games yet.
 
 Arcade games in MAME (any version)
 - RetroPixels' own arcade emulators play the games listed above. Every other
@@ -670,7 +697,10 @@ Credits & licences
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
   rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME. Thanks to the Cemu, Dolphin and MAME teams.
+  built-in MAME, Azahar (GPL-2.0-or-later, https://github.com/azahar-emu/azahar)
+  and melonDS (GPL-3.0-or-later, https://github.com/melonDS-emu/melonDS),
+  both unchanged, with their source attached to each release. Thanks to the
+  Cemu, Dolphin, MAME, Azahar and melonDS teams.
 - The Sega Model 3 emulator (cores/model3, new in 2.22.0) is the other
   exception: most of it is RetroPixels' own, checked against Supermodel
   (https://github.com/trzy/Supermodel), but its sound chips (SCSP) are a Go

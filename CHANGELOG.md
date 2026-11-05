@@ -2,6 +2,15 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.28.0] - 2026-11-05
+
+- New: the 3DS / DS tab, for Nintendo 3DS and Nintendo DS games in one library. Add the folder with your games and click one to play. 3DS games play in Azahar (the open-source 3DS emulator, GPL-2.0-or-later) and DS games play in melonDS (the open-source DS emulator, GPL-3.0-or-later). Azahar plays only 3DS games, so RetroPixels sends each game to the emulator for its system: you just pick the game.
+- Both emulators come in the download, in the Azahar and melonDS folders next to the programs (their official Windows releases, unchanged: Azahar 2126.2 and melonDS 1.1). Nothing else to install. Their source code is attached to the release.
+- The tab lists .3ds, .cci, .cxi, .3dsx (and their compressed .z versions) and .cia files for the 3DS, and .nds, .dsi and .srl files for the DS. 3DS games must be decrypted, as Azahar needs. Clicking a .cia installs it into Azahar; then play it from Azahar's game list. DS games play without a BIOS; DSi games need your own DSi BIOS and NAND files in melonDS.
+- Games start fullscreen in the emulator's own window (untick "Start games fullscreen" to play in a window). Set up controls in each emulator: the tab's "Open Azahar" and "Open melonDS" buttons open them.
+- RetroPixels Native: the new 3DS / DS menu opens a 3DS or DS game in the right emulator, and 3DS and DS files opened or dropped on its window start there too.
+- Recording isn't available for 3DS and DS games yet.
+
 ## [2.27.0] - 2026-11-04
 
 - GameCube and Wii: games now play at 3× resolution (1K / 1080p) by default instead of the native 480p, and the resolution you choose stays: RetroPixels keeps it in %APPDATA%\RetroPixels\gamecube-resolution.txt (shared by RetroPixels.exe and RetroPixels Native) and puts it into PixelU's GameCube / Wii settings before every game, so it's no longer lost when you unzip a new version into a new folder. A higher resolution you had already set is kept. Change it in the GameCube / Wii graphics settings (RetroPixels Native: GameCube / Wii > PixelU settings).

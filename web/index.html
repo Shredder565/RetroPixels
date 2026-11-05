@@ -189,7 +189,10 @@
   #wiiuTab .toggle input:checked { background: #0b8fd6; }
   .wiiu-btn { background: #0b8fd6; } .wiiu-btn:hover { background: #087cbc; }
   .plat.WiiU { background: #0b8fd6; }
-  #gcSearch, #wiiuSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  .plat.N3DS { background: #c4262e; } .plat.NDS { background: #6b6f78; }
+  .btn.hh-btn { background: #c4262e; } .btn.hh-btn:hover { background: #a81f26; }
+  .tabs button[data-tab="handheld"][aria-selected="true"] { border-bottom-color: #d8343c; }
+  #gcSearch, #wiiuSearch, #hhSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
   #swNow { margin-bottom: 14px; }
   /* GameCube / Wii game docked inside this window: the game fills everything below this bar. */
@@ -329,6 +332,7 @@
     <button role="tab" data-tab="gc" aria-selected="false"><span style="color:#9b8cff">●</span> GameCube</button>
     <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
     <button role="tab" data-tab="wiiu" aria-selected="false"><span style="color:#2fb4ff">●</span> Wii U</button>
+    <button role="tab" data-tab="handheld" aria-selected="false"><span style="color:#ff5a62">●</span> 3DS / DS</button>
     <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
@@ -362,6 +366,9 @@
       </button>
       <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U games play in PixelU (based on Cemu). Opens the Wii U tab.">
         <strong>Wii U</strong><small>.wua .wud .wux · PixelU</small>
+      </button>
+      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo 3DS and DS games play in Azahar and melonDS. Opens the 3DS / DS tab.">
+        <strong>3DS / DS</strong><small>.3ds .cia .nds · Azahar, melonDS</small>
       </button>
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
@@ -600,6 +607,63 @@
     </div>
   </section>
 
+  <!-- ===================== 3DS / DS tab (Azahar and melonDS) ===================== -->
+  <section id="hhTab" hidden>
+    <div id="hhBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">Nintendo 3DS and DS games play in <strong>Azahar</strong> (3DS) and <strong>melonDS</strong> (DS) through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+    </div>
+    <div id="hhDesktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">3DS and DS library</h2>
+          <div class="sw-setup">
+            <div class="sw-emu" id="hhEmu">Looking for the emulators…</div>
+            <div class="sw-emu" id="hhFolders">Looking for games…</div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn ghost sm" id="hhAddFolder">Add games folder…</button>
+            <label class="sw-check"><input type="checkbox" id="hhFull"> Start games fullscreen</label>
+          </div>
+          <div class="sw-tools">
+            <input type="search" id="hhSearch" placeholder="Search games…" autocomplete="off">
+            <select id="hhShow" class="sw-select"><option value="">3DS and DS</option><option value="3ds">3DS only</option><option value="ds">DS only</option></select>
+            <select id="hhSort" class="sw-select"><option value="az">A – Z</option><option value="played">Recently played</option><option value="added">Recently added</option></select>
+            <span class="muted" id="hhCount" style="font-size:13px"></span>
+          </div>
+          <p class="muted" id="hhMsg" style="font-size:14px;margin:6px 0"></p>
+          <div class="sw-grid" id="hhGrid"></div>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
+            Lists 3DS games (.3ds, .cci, .cxi, .3dsx and their compressed .z versions, and .cia) and DS games (.nds, .dsi, .srl). 3DS games must be decrypted, as Azahar needs them.
+            A .cia is installed into Azahar when you click it; then play it from Azahar's game list. Games are played from where they are; nothing is copied.</p>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Azahar (3DS)</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">3DS games play in <b>Azahar</b>, the open-source 3DS emulator (GPL-2.0-or-later), which comes in the RetroPixels download.</p>
+            <div class="sw-emu" id="hhAzahar" style="margin-bottom:8px"></div>
+            <div class="rg-btns">
+              <button class="btn sm hh-btn" data-hh-open="azahar">Open Azahar</button>
+              <button class="btn ghost sm" data-hh-folder="azahar">Open its folder</button>
+              <button class="btn ghost sm" data-hh-choose="azahar">Change…</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use Azahar itself for controls (Emulation → Configure → Controls), graphics and the two screens' layout.</p>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">melonDS (DS)</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">DS games play in <b>melonDS</b>, the open-source DS emulator (GPL-3.0-or-later), which comes in the RetroPixels download. Azahar doesn't play DS games, so RetroPixels sends them here.</p>
+            <div class="sw-emu" id="hhMelon" style="margin-bottom:8px"></div>
+            <div class="rg-btns">
+              <button class="btn sm hh-btn" data-hh-open="melonds">Open melonDS</button>
+              <button class="btn ghost sm" data-hh-folder="melonds">Open its folder</button>
+              <button class="btn ghost sm" data-hh-choose="melonds">Change…</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use melonDS itself for controls (Config → Input and hotkeys) and screen layout. It plays DS games without a BIOS; DSi games need your own DSi BIOS and NAND files (Config → Emu settings).</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
   <!-- ===================== Arcade (MAME) tab ===================== -->
   <section id="mameTab" hidden>
     <div id="mameBrowserOnly" class="sw-sec" hidden>
@@ -776,6 +840,7 @@
   };
   sysButtons.forEach(b => b.addEventListener("click", () => {
     if (b.dataset.core === "wiiu") { showTab("wiiu"); return; } // Wii U games play in PixelU
+    if (b.dataset.core === "handheld") { showTab("handheld"); return; } // 3DS / DS games play in Azahar and melonDS
     selectCore(b.dataset.core);
   }));
 
@@ -835,8 +900,8 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
-    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii / Wii U
+    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #hhGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame" && status.running.kind !== "handheld"); // recording is for GameCube / Wii / Wii U
     return status;
   }
 
@@ -1014,6 +1079,7 @@
   const recTab = document.getElementById("recTab");
   const mameTab = document.getElementById("mameTab");
   const wiiuTab = document.getElementById("wiiuTab");
+  const hhTab = document.getElementById("hhTab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -1021,13 +1087,17 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "wiiu", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "wiiu", "handheld", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
     recTab.hidden = tab !== "recordings";
     mameTab.hidden = tab !== "mame";
     wiiuTab.hidden = tab !== "wiiu";
+    hhTab.hidden = tab !== "handheld";
+    document.getElementById("hhBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("hhDesktop").hidden = !DESKTOP;
+    if (tab === "handheld" && DESKTOP) loadHH();
     document.getElementById("wiiuBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("wiiuDesktop").hidden = !DESKTOP;
     if (tab === "wiiu" && DESKTOP) loadWiiU();
@@ -1654,6 +1724,107 @@
       e.target.checked ? "Every game will be recorded (game screen only, high quality)" : "Automatic recording off for every game"));
     document.getElementById("wiiuOpenPixelU").addEventListener("click", () => wiiuAction({ action: "open-pixelu" }, "Opening PixelU…"));
     document.getElementById("wiiuOpenFolder").addEventListener("click", () => wiiuAction({ action: "open-folder" }));
+  }
+
+  // ---------- 3DS / DS (Azahar and melonDS) ----------
+  let hhGames = [], hhStatus = null;
+  const hhMsg = document.getElementById("hhMsg");
+
+  async function loadHH() {
+    try {
+      gotHH(await api("/api/handheld/library"));
+      api("/api/status").then(renderStatus).catch(() => {});
+    } catch (e) { hhMsg.textContent = "Couldn't load your 3DS and DS games: " + e.message; }
+  }
+  function gotHH(r) { hhGames = r.games || []; hhStatus = r.status; renderHHSetup(); renderHHGrid(); }
+
+  function renderHHSetup() {
+    const st = hhStatus;
+    const emu = (exe, name, dir, prog) => exe
+      ? `<small class="muted" style="overflow-wrap:anywhere">${esc(exe)}</small>`
+      : `<b style="color:var(--warn)">${name} wasn't found</b><br><small class="muted">Keep the ${dir} folder from the RetroPixels download next to ${exeFile("RetroPixels")}, or click "Change…" to pick ${exeFile(prog)}</small>`;
+    document.getElementById("hhAzahar").innerHTML = emu(st.azahar, "Azahar", "Azahar", "azahar");
+    document.getElementById("hhMelon").innerHTML = emu(st.melonds, "melonDS", "melonDS", "melonDS");
+    document.getElementById("hhEmu").innerHTML = `<span class="muted">Emulators</span><br>` +
+      `<b>3DS:</b> ${st.azahar ? "Azahar" : '<span style="color:var(--warn)">Azahar not found</span>'} &nbsp; <b>DS:</b> ${st.melonds ? "melonDS" : '<span style="color:var(--warn)">melonDS not found</span>'}` +
+      `<br><small class="muted">Each game opens in the emulator for its system</small>`;
+    const f = st.folders || [];
+    const el = document.getElementById("hhFolders");
+    el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
+      `<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><small style="flex:1;overflow-wrap:anywhere">${esc(d)}</small><button class="linkbtn danger" data-rm="${i}">Remove</button></div>`).join("")
+      : '<br><b style="color:var(--warn)">None yet</b>'}`;
+    el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => hhAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
+    document.getElementById("hhFull").checked = !!st.fullscreen;
+    document.querySelectorAll("[data-hh-open],[data-hh-folder]").forEach(b => { b.disabled = !st[b.dataset.hhOpen || b.dataset.hhFolder]; });
+  }
+
+  function renderHHGrid() {
+    const q = document.getElementById("hhSearch").value.trim().toLowerCase();
+    const show = document.getElementById("hhShow").value;
+    const sort = document.getElementById("hhSort").value;
+    const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
+    let list = hhGames.filter(g => (!show || g.system === show) && (!q || g.name.toLowerCase().includes(q) || g.file.toLowerCase().includes(q)));
+    if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
+    if (sort === "added") list = list.slice().sort((a, b) => t(b.added) - t(a.added));
+    const n3 = hhGames.filter(g => g.system === "3ds").length, nd = hhGames.length - n3;
+    document.getElementById("hhCount").textContent = `${n3} 3DS · ${nd} DS`;
+    const grid = document.getElementById("hhGrid");
+    grid.innerHTML = "";
+    if (!hhGames.length) {
+      grid.innerHTML = `<p class="muted" style="grid-column:1/-1">${(hhStatus.folders || []).length
+        ? 'No 3DS or DS games found in your games folders. Use "Add games folder…" if they\'re somewhere else.' : "Add the folder with your 3DS and DS games."}</p>`;
+      return;
+    }
+    const playing = !!(appStatus && appStatus.running);
+    list.forEach(g => {
+      const is3 = g.system === "3ds", emu = is3 ? "Azahar" : "melonDS";
+      const b = document.createElement("button");
+      b.className = "sw-tile";
+      b.title = `${g.file}\nPlays in ${emu}`;
+      b.disabled = playing;
+      b.innerHTML = `<span class="plat ${is3 ? "N3DS" : "NDS"}">${is3 ? "3DS" : "DS"}</span>
+        <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
+        <div class="sw-info"><b>${esc(g.name)}</b>
+          <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span><span class="sw-tag">${fmtSize(g.size)}</span>${g.install ? '<span class="sw-tag">Install</span>' : ""}</div>
+          ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
+        </div>`;
+      b.addEventListener("click", async () => {
+        hhMsg.style.color = ""; hhMsg.textContent = "";
+        try {
+          await api("/api/handheld/play", { path: g.path });
+          toast(g.install ? `Installing ${g.name} into Azahar… then play it from Azahar's game list` : `Starting ${g.name} in ${emu}…`);
+          setTimeout(() => api("/api/status").then(renderStatus).then(renderHHGrid).catch(() => {}), 800);
+        } catch (e) { hhMsg.style.color = "var(--danger)"; hhMsg.textContent = e.message; }
+      });
+      grid.appendChild(b);
+    });
+  }
+
+  async function hhAction(body, ok) {
+    try {
+      const r = await api("/api/handheld/action", body);
+      if (r.games) gotHH(r);
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  if (DESKTOP) {
+    document.getElementById("hhSearch").addEventListener("input", renderHHGrid);
+    document.getElementById("hhShow").addEventListener("change", renderHHGrid);
+    document.getElementById("hhSort").addEventListener("change", renderHHGrid);
+    document.getElementById("hhAddFolder").addEventListener("click", async () => {
+      toast("Choose the folder in the window that just opened");
+      const before = (hhStatus && hhStatus.folders || []).length;
+      const r = await hhAction({ action: "add-folder" });
+      if (!r || (r.status.folders || []).length === before) return;
+      const n = (r.games || []).length;
+      toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no 3DS or DS games were found in it");
+    });
+    document.getElementById("hhFull").addEventListener("change", e => hhAction({ action: "fullscreen", on: e.target.checked }));
+    document.querySelectorAll("[data-hh-open]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-emu", engine: b.dataset.hhOpen }, "Opening…")));
+    document.querySelectorAll("[data-hh-folder]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-folder", engine: b.dataset.hhFolder })));
+    document.querySelectorAll("[data-hh-choose]").forEach(b => b.addEventListener("click", () => hhAction({ action: "choose-exe", engine: b.dataset.hhChoose })));
   }
 
   // Start on the tab used last time.
@@ -2327,6 +2498,10 @@
     if (["iso", "gcm", "ciso", "wbfs", "rvz", "wia", "gcz", "wad"].includes(ext)) {
       if (DESKTOP) { showTab(["wbfs", "wad"].includes(ext) ? "wii" : "gc"); toast("Those games play from this tab — add their folder if they aren't listed"); return; }
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
+    }
+    if (["3ds", "cci", "cxi", "3dsx", "cia", "zcci", "zcxi", "z3dsx", "zcia", "nds", "dsi", "srl"].includes(ext)) {
+      if (DESKTOP) { showTab("handheld"); toast("3DS and DS games play from this tab — add their folder if they aren't listed"); return; }
+      return fail(`"${file.name}" looks like a 3DS or DS game. Those play in Azahar and melonDS through the RetroPixels desktop app.`);
     }
     if (["wua", "wud", "wux", "rpx", "elf"].includes(ext)) {
       if (DESKTOP) { showTab("wiiu"); toast("Wii U games play from this tab — add their folder if they aren't listed"); return; }

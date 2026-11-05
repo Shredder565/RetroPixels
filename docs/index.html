@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RetroPixels</title>
-<meta name="description" content="RetroPixels plays classic console, Wii U, GameCube, Wii and arcade games on Windows, with everything in one download.">
+<meta name="description" content="RetroPixels plays classic console, Wii U, GameCube, Wii, 3DS, DS and arcade games on Windows, with everything in one download.">
 <meta property="og:title" content="RetroPixels">
-<meta property="og:description" content="Classic consoles, Wii U, GameCube, Wii and arcade games for Windows, all in one download.">
+<meta property="og:description" content="Classic consoles, Wii U, GameCube, Wii, 3DS, DS and arcade games for Windows, all in one download.">
 <meta property="og:image" content="images/playing.png">
 <link rel="icon" type="image/png" href="images/icon.png">
 <style>
@@ -101,7 +101,7 @@
 <section class="hero">
   <div class="inner">
     <h1>RetroPixels</h1>
-    <p class="lead">Classic consoles, Wii U, GameCube, Wii and arcade games for Windows, all in one download.</p>
+    <p class="lead">Classic consoles, Wii U, GameCube, Wii, 3DS, DS and arcade games for Windows, all in one download.</p>
     <div class="actions">
       <a class="btn primary" href="https://github.com/Shredder565/RetroPixels/releases/latest">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14ZM7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.969a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.78a.749.749 0 1 1 1.06-1.06l1.97 1.969Z"/></svg>
@@ -112,7 +112,7 @@
         View on GitHub
       </a>
     </div>
-    <div class="meta">Version 2.27.0 · Windows 10 / 11 · 64-bit · No games, keys or BIOS included · Linux comes later</div>
+    <div class="meta">Version 2.28.0 · Windows 10 / 11 · 64-bit · No games, keys or BIOS included · Linux comes later</div>
   </div>
   <div class="shot"><img src="images/playing.png" alt="RetroPixels playing a Genesis homebrew game" width="1280" height="800"></div>
   <div style="height:40px"></div>
@@ -127,6 +127,7 @@
     <div class="box"><h3>Records just the game</h3><p>Every game is recorded automatically, on every system. Videos contain only the game picture and sound. No borders, cursor, black bars or other windows.</p></div>
     <div class="box"><h3>Saves handled for you</h3><p>Battery saves are kept automatically. Save states with undo, and imports from other emulators.</p></div>
     <div class="box"><h3>Wii U, GameCube and Wii</h3><p>PixelU, RetroPixels' own Wii U and GameCube / Wii engines, come in the download and play inside the same window. Use your own game dumps and your own console's keys.</p></div>
+    <div class="box"><h3>3DS and DS, one tab</h3><p>New: Nintendo 3DS and DS games in one list. 3DS games play in Azahar and DS games in melonDS, both in the download; RetroPixels picks the right one for each game.</p></div>
     <div class="box"><h3>Star Wars Trilogy Arcade</h3><p>Sega Model 3 on RetroPixels' own emulator, built in: the 3D board, sound board and MPEG music, with the Xbox stick as the flight yoke (flight stick feel) or the mouse. Nothing else to install.</p></div>
     <div class="box"><h3>SNES Debugger</h3><p>Opens alongside SNES games: captures video memory, palettes and DMA transfers, shows where each background's graphics are in the ROM, and swaps a background for your own picture.</p></div>
     <div class="box"><h3>MAME built in, any version</h3><p>The download comes with the MAME team's official release of MAME, unchanged. Add as many other MAME versions as you like, and RetroPixels checks which one plays each game.</p></div>
@@ -149,6 +150,7 @@
       <tr><td>Arcade</td><td><code>.zip</code> ROM sets</td><td>Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze</td></tr>
       <tr><td>GameCube / Wii</td><td><code>.iso</code> <code>.rvz</code> <code>.wbfs</code> and more</td><td>New: PixelU's GameCube / Wii engine (GPL-2.0-or-later), in the download. Wii games need your own Wii's keys file</td></tr>
       <tr><td>Sega Model 3</td><td><code>.zip</code> ROM set</td><td>New in 2.22.0: Star Wars Trilogy Arcade on RetroPixels' own Sega Model 3 emulator, built in (no Supermodel needed)</td></tr>
+      <tr><td>Nintendo 3DS / DS</td><td><code>.3ds</code> <code>.cia</code> <code>.cxi</code> <code>.nds</code> <code>.dsi</code></td><td>New in 2.28.0: one 3DS / DS tab. 3DS games play in Azahar (GPL-2.0-or-later), DS games in melonDS (GPL-3.0-or-later), both in the download</td></tr>
       <tr><td>Arcade (MAME)</td><td><code>.zip</code> <code>.7z</code> ROM sets</td><td>Through MAME: built in, or any other version, chosen per game</td></tr>
     </tbody>
   </table>
@@ -157,7 +159,7 @@
   <h2 id="start">Getting started</h2>
   <ol>
     <li>Download <code>RetroPixels-x.y.z.zip</code> (or <code>RetroPixels-Native-x.y.z.zip</code>) from the <a href="https://github.com/Shredder565/RetroPixels/releases/latest">latest release</a> and unzip it.</li>
-    <li>Run <code>RetroPixels.exe</code> (or <code>RetroPixels-Native.exe</code>). Keep the PixelU and MAME folders next to it.</li>
+    <li>Run <code>RetroPixels.exe</code> (or <code>RetroPixels-Native.exe</code>). Keep the PixelU, MAME, Azahar and melonDS folders next to it.</li>
     <li>Drop a game you own onto the window.</li>
   </ol>
   <div class="note"><strong>Note</strong>The program isn't code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Click <em>More info</em>, then <em>Run anyway</em>.</div>

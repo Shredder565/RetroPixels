@@ -106,6 +106,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
 
+      # The 3DS / DS tab's emulators: Azahar (3DS) and melonDS (DS), their
+      # official Windows releases, pinned and checked in tools/bundlehandheld.
+      - name: Azahar and melonDS (3DS / DS)
+        id: handheld
+        run: go run ./tools/bundlehandheld -dir "$DIR" -source handheld-src
+
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt "$DIR/"
@@ -127,6 +133,9 @@ jobs:
             echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
             echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
+            echo "- Azahar\\azahar.exe: Nintendo 3DS games (Azahar ${{ steps.handheld.outputs.azahar }}, the official release, GPL-2.0-or-later)"
+            echo "- melonDS\\melonDS.exe: Nintendo DS games (melonDS ${{ steps.handheld.outputs.melonds }}, the official release, GPL-3.0-or-later)"
+            echo "  The 3DS / DS tab sends each game to the emulator for its system (Azahar plays only the 3DS)."
             echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
             echo "RetroPixels-SNES-Debugger.exe opens with SNES games: it captures VRAM, palettes and DMA transfers and swaps backgrounds (docs/snes-debugger.md in the source)."
             echo "  Its sound chips follow Supermodel's code (GPL-3.0-or-later, LICENSE-GPL-3.0.txt); NOTICE-Sega-Model-3.txt lists its third-party parts."
@@ -170,6 +179,7 @@ jobs:
           rm -r dist/web-only
           cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" "$DIR/RetroPixels-SNES-Debugger.exe" release/
           cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
+          cp handheld-src/* release/
           cp "$DIR/VERSION.txt" release/VERSION.txt
           ls -la release
 

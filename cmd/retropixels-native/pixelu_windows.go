@@ -194,7 +194,7 @@ func (a *app) pixeluBusy() bool {
 
 // pixeluPlay starts a game in PixelU.
 func (a *app) pixeluPlay(g pixelu.Game) {
-	if a.mameBusy() {
+	if a.mameBusy() || a.hhBusy() {
 		return
 	}
 	if r := a.dol.run; r != nil {

@@ -327,7 +327,7 @@ func (a *app) dolOpenPath(path string) bool {
 
 // dolPlay starts a game (stopping the one playing first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
-	if a.mameBusy() || a.pixeluBusy() {
+	if a.mameBusy() || a.pixeluBusy() || a.hhBusy() {
 		return
 	}
 	if r := a.dol.run; r != nil {

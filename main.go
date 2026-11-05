@@ -37,7 +37,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.27.0"
+	appVersion = "2.28.0"
 )
 
 var (
@@ -81,6 +81,12 @@ type config struct {
 	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = on
 	PixelUOpenGL     bool         `json:"pixeluOpenGL,omitempty"`     // Vulkan doesn't work here: draw with OpenGL
 	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // old Wii U-only switch, no longer used (AutoRecord covers every game)
+
+	// 3DS and DS games through Azahar and melonDS (handheld.go)
+	HandheldExe        map[string]string `json:"handheldExe,omitempty"` // engine ID -> chosen program
+	HandheldFolders    []string          `json:"handheldFolders,omitempty"`
+	HandheldRecent     []recentGame      `json:"handheldRecent,omitempty"`
+	HandheldFullscreen *bool             `json:"handheldFullscreen,omitempty"` // unset = on
 
 }
 
@@ -252,6 +258,7 @@ func newMux() *http.ServeMux {
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
 	registerPixelURoutes(mux)
+	registerHandheldRoutes(mux)
 	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
