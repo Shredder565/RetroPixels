@@ -198,7 +198,7 @@ func (a *app) hhPlay(g handheld.Game) {
 		if rec != nil {
 			enc := a.encoder(ff)
 			a.extSave(rec, func(ff string, progress func(int)) error {
-				return pixeluSave(ff, enc, rec.dir, rec.out, time.Since(rec.started).Seconds(), progress)
+				return pixeluSave(ff, enc, rec.dir, rec.out, time.Since(rec.started).Seconds(), progress, pixeldsSaveOpts)
 			})
 		}
 	}()

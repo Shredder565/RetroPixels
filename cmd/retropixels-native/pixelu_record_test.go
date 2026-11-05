@@ -12,7 +12,7 @@ import (
 
 func TestPixelUSaveArgs(t *testing.T) {
 	v := []mame.Clip{{Path: `T\Frames\pixelu_framedump0.mkv`, W: 1920, H: 1080, Dur: 60}}
-	got := strings.Join(pixeluSaveArgs(v, []string{`T\Audio\pixelu_dspdump.wav`}, 60, 60.5, "libx264", "out.mp4"), " ")
+	got := strings.Join(pixeluSaveArgs(v, []string{`T\Audio\pixelu_dspdump.wav`}, 60, 60.5, "libx264", "out.mp4", saveOpts{}), " ")
 	for _, want := range []string{
 		`-i T\Frames\pixelu_framedump0.mkv -ignore_length 1 -i T\Audio\pixelu_dspdump.wav`,
 		"[0:v:0]setsar=1[v0];[v0]format=yuv420p[v]",
@@ -25,7 +25,7 @@ func TestPixelUSaveArgs(t *testing.T) {
 	}
 	// two picture sizes, no sound
 	v = append(v, mame.Clip{Path: "b.mkv", W: 1280, H: 720, Dur: 10})
-	got = strings.Join(pixeluSaveArgs(v, nil, 70, 0, "h264_qsv", "out.mp4"), " ")
+	got = strings.Join(pixeluSaveArgs(v, nil, 70, 0, "h264_qsv", "out.mp4", saveOpts{}), " ")
 	if !strings.Contains(got, "[1:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080") ||
 		!strings.Contains(got, "[v0][v1]concat=n=2:v=1:a=0,format=nv12[v]") || strings.Contains(got, "[a]") {
 		t.Errorf("two parts:\n%s", got)

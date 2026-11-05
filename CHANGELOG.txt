@@ -4,6 +4,12 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.34.2  (2026-11-05)
+--------------------------------
+- PixelDS recordings are high-quality .mp4 files by default: saved
+  losslessly while you play, then scaled up with crisp pixels to 1080p or
+  more (DS 768x1152, 3DS 1200x1440), near-lossless H.264, 256 kbps sound.
+
 RetroPixels 2.34.1  (2026-11-05)
 --------------------------------
 - PixelDS is now the only DS and 3DS emulator: Azahar and melonDS are no

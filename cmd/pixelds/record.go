@@ -62,9 +62,10 @@ func startRecording(dir, ff string, w, h int, fps float64, rate int) (*recorder,
 	cmd := exec.Command(ff, "-hide_banner", "-loglevel", "warning", "-y",
 		"-f", "rawvideo", "-pix_fmt", "bgr0", "-video_size", fmt.Sprintf("%dx%d", w, h),
 		"-framerate", strconv.FormatFloat(fps, 'f', 4, 64), "-i", "pipe:0", "-an",
-		// twice the size with sharp pixels, so the small screens stay crisp
-		"-vf", "scale=iw*2:ih*2:flags=neighbor,format=yuv420p",
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p",
+		// lossless at the screens' own size, full colour (4:4:4): RetroPixels
+		// scales it up with crisp pixels when it makes the .mp4, so the
+		// picture is only compressed once
+		"-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv444p",
 		filepath.Join(dir, "Frames", "pixelds_framedump0.mkv"))
 	hideConsole(cmd)
 	in, err := cmd.StdinPipe()

@@ -98,4 +98,9 @@ func TestPixelDSRecordEndToEnd(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("want 1 recording, got %v", files)
 	}
+	// high quality: the DS's 256×384 screens scaled ×3 with crisp pixels
+	v, err := probeSegment(findFFmpeg(), files[0])
+	if err != nil || v.W != 768 || v.H != 1152 {
+		t.Errorf("recording is %dx%d (%v), want 768x1152", v.W, v.H, err)
+	}
 }

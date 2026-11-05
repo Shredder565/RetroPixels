@@ -337,6 +337,10 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   default), 3DS and DS games played in PixelDS are recorded from their
   start, as other games are; the .mp4 is saved in the Recordings folder
   when the game ends. Recording needs ffmpeg (RetroPixels downloads it).
+  Since 2.34.2 these recordings are high quality by default: PixelDS saves
+  the screens losslessly while you play, and the .mp4 is scaled up with
+  crisp pixels to 1080p or more (DS 768x1152, 3DS 1200x1440), H.264 at
+  near-lossless quality with 256 kbps AAC sound.
 
 Arcade games in MAME (any version)
 - RetroPixels' own arcade emulators play the games listed above. Every other

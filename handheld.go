@@ -270,6 +270,8 @@ func pixeldsRecording(name string) (*recSession, []string, error) {
 	os.MkdirAll(filepath.Join(dir, "Frames"), 0o755)
 	os.MkdirAll(filepath.Join(dir, "Audio"), 0o755)
 	rec := newRecSession(name, dir)
-	rec.Emu, rec.Quality, rec.NoCrop, rec.ownDir = "PixelDS", "high", true, true
+	// PixelDS's screens are small pixel pictures: the .mp4 is made at the
+	// best quality and scaled up to 1080p or more with crisp pixels.
+	rec.Emu, rec.Quality, rec.NoCrop, rec.Sharp, rec.ownDir = "PixelDS", "best", true, true, true
 	return rec, []string{"-record", dir, "-ffmpeg", ff}, nil
 }

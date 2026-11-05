@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.34.2] - 2026-11-05
+
+- PixelDS recordings are now high-quality .mp4 files by default. PixelDS saves the DS / 3DS screens losslessly (full colour) while you play, and the .mp4 is made once, scaled up with crisp square pixels to 1080p or more (DS games 768×1152, 3DS games 1200×1440), H.264 at near-lossless quality (CRF 14 or the graphics card's equivalent) with 256 kbps AAC sound. Before, the picture was compressed twice and kept at only twice the screens' size.
+
 ## [2.34.1] - 2026-11-05
 
 - PixelDS is now the only DS and 3DS emulator in RetroPixels: Azahar and melonDS are no longer in the download, and their choices are gone from the 3DS / DS tab and RetroPixels Native's 3DS / DS menu. Every DS and 3DS game plays in PixelDS. A setting from an older version that picked Azahar or melonDS is ignored.
