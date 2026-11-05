@@ -123,7 +123,25 @@ func place(zipPath, tmp, dst string, exes []string) error {
 	}
 	root, err := findExeDir(tmp, exes)
 	if err != nil {
-		return err
+		// Some releases wrap the program in another archive: unpack the
+		// zips inside and look again.
+		inner, _ := filepath.Glob(filepath.Join(tmp, "*.zip"))
+		more, _ := filepath.Glob(filepath.Join(tmp, "*", "*.zip"))
+		for _, z := range append(inner, more...) {
+			if uerr := unzip(z, strings.TrimSuffix(z, ".zip")+"-unzipped"); uerr != nil {
+				return uerr
+			}
+		}
+		if root, err = findExeDir(tmp, exes); err != nil {
+			var list []string
+			filepath.WalkDir(tmp, func(p string, d os.DirEntry, _ error) error {
+				if d != nil && !d.IsDir() && len(list) < 60 {
+					list = append(list, strings.TrimPrefix(p, tmp))
+				}
+				return nil
+			})
+			return fmt.Errorf("%w; the download has: %s", err, strings.Join(list, ", "))
+		}
 	}
 	os.RemoveAll(dst)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
