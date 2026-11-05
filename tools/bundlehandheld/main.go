@@ -186,7 +186,8 @@ func unzip(zipPath, dst string) error {
 	}
 	defer zr.Close()
 	for _, f := range zr.File {
-		name := filepath.FromSlash(f.Name)
+		// Some Windows zips (Azahar's) separate folders with "\\".
+		name := filepath.FromSlash(strings.ReplaceAll(f.Name, "\\", "/"))
 		if !filepath.IsLocal(name) {
 			return fmt.Errorf("unsafe path in the zip: %q", f.Name)
 		}
