@@ -279,6 +279,50 @@ func (k *kernel) svc(n uint32) {
 		r[0] = rcOK
 	case 0x7c: // KernelSetState
 		r[0] = rcOK
+	case 0x0d, 0x0f: // GetThreadAffinityMask, GetThreadIdealProcessor
+		r[0], r[1] = rcOK, 1
+	case 0x0e, 0x10: // SetThreadAffinityMask, SetThreadIdealProcessor
+		r[0] = rcOK
+	case 0x11: // GetCurrentProcessorNumber
+		r[0] = 0
+	case 0x29: // GetHandleInfo(handle, type) -> value
+		r[0], r[1], r[2] = rcOK, 1, 0
+	case 0x36: // GetProcessIdOfThread(thread) -> process id
+		r[0], r[1] = rcOK, 0x28
+	case 0x52, 0x53, 0x54: // Invalidate / Store / FlushProcessDataCache
+		r[0] = rcOK
+	case 0x7d: // QueryProcessMemory(process, addr)
+		k.queryMemory(r[3])
+	case 0x26: // SignalAndWait(timeout low, signal, handles, count, all, timeout high)
+		switch e := k.get(r[1]).(type) {
+		case *timer:
+			e.set = true
+		case *event:
+			e.set = true
+		case *semaphore:
+			if e.count < e.max {
+				e.count++
+			}
+		case *mutex:
+			if e.owner == k.cur && e.count > 0 {
+				e.count--
+				if e.count == 0 {
+					e.owner = nil
+				}
+			}
+		}
+		n := r[3]
+		var objs []waitable
+		for i := uint32(0); i < n && i < 64; i++ {
+			o, ok := k.get(k.mem.Read32(r[2] + 4*i)).(waitable)
+			if !ok {
+				r[0] = rcInvalidHandle
+				return
+			}
+			objs = append(objs, o)
+		}
+		k.updateNoSwitch()
+		k.wait(objs, r[4] != 0, int64(uint64(r[0])|uint64(r[5])<<32), true)
 	default:
 		k.log("SVC %02x not done (pc %08x)", n, c.PC())
 		r[0] = rcNotImpl

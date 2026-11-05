@@ -153,6 +153,8 @@ type kernel struct {
 	nextTID uint32
 	tlsUsed [64]bool
 	timers  []*timer
+	// things the machine does at regular times (the DSP's audio frames)
+	periodic []*periodicTask
 	log     func(string, ...any)
 }
 
@@ -339,9 +341,25 @@ func (k *kernel) update() {
 	k.reschedule(false)
 }
 
+type periodicTask struct {
+	at, interval int64
+	fn           func()
+}
+
+// every runs fn every interval ticks from now on.
+func (k *kernel) every(interval int64, fn func()) {
+	k.periodic = append(k.periodic, &periodicTask{at: k.now() + interval, interval: interval, fn: fn})
+}
+
 // tick handles timeouts and timers at the current time.
 func (k *kernel) tick() {
 	now := k.now()
+	for _, p := range k.periodic {
+		for p.at <= now {
+			p.at += p.interval
+			p.fn()
+		}
+	}
 	for _, tm := range k.timers {
 		if tm.at >= 0 && tm.at <= now {
 			tm.set = true
@@ -384,6 +402,9 @@ func (k *kernel) updateNoSwitch() {
 // nextEvent is the tick of the next timeout or timer.
 func (k *kernel) nextEvent() int64 {
 	n := int64(1) << 62
+	for _, p := range k.periodic {
+		n = min(n, p.at)
+	}
 	for _, tm := range k.timers {
 		if tm.at >= 0 && tm.at < n {
 			n = tm.at

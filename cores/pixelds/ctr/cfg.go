@@ -111,4 +111,3 @@ func (v *ptmService) handle(c *ipc) {
 }
 
 // DSP (dsp::DSP): sound. Not done yet: games run silent.
-func newDSP(m *Machine) service { return &stubService{n: "dsp::DSP", m: m} }
