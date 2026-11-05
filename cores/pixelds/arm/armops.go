@@ -80,7 +80,7 @@ func decodeARM(hi, lo uint32) func(*CPU, uint32) {
 	case 5:
 		return armBranch
 	case 6:
-		return armUndef // LDC/STC (the ARM11's VFP comes through Undefined)
+		return armLDC // LDC/STC: the ARM11's VFP loads and stores
 	case 7:
 		if hi&0x10 != 0 {
 			return armSWI
@@ -88,7 +88,7 @@ func decodeARM(hi, lo uint32) func(*CPU, uint32) {
 		if lo&1 != 0 {
 			return armCoproc
 		}
-		return armUndef
+		return armCDP
 	}
 	return armUndef
 }
@@ -816,8 +816,32 @@ func armBlock(c *CPU, op uint32) {
 
 // ---------------- coprocessors ----------------
 
+func armLDC(c *CPU, op uint32) {
+	if c.Arch < V6K || !isVFP(op) {
+		c.undefined(op)
+		return
+	}
+	if op&0x0fe00000 == 0x0c400000 { // MCRR / MRRC
+		c.vfpTwoReg(op)
+		return
+	}
+	c.vfpLoadStore(op)
+}
+
+func armCDP(c *CPU, op uint32) {
+	if c.Arch < V6K || !isVFP(op) {
+		c.undefined(op)
+		return
+	}
+	c.vfpDataProc(op)
+}
+
 func armCoproc(c *CPU, op uint32) {
 	cp := op >> 8 & 15
+	if c.Arch >= V6K && (cp == 10 || cp == 11) {
+		c.vfpTransfer(op)
+		return
+	}
 	if cp != 15 || c.CP15 == nil {
 		c.undefined(op)
 		return

@@ -111,6 +111,8 @@ type CPU struct {
 	// DS's ARM9 uses 2, its cached core running at twice the bus clock)
 	Cost int64
 
+	fp vfp // the ARM11's floating-point unit
+
 	exclusive     bool // an LDREX's reservation (ARM11)
 	exclusiveAddr uint32
 	next          uint32 // address of the next instruction
@@ -365,16 +367,19 @@ type State struct {
 	Halted, IRQLine          bool
 	Cycles                   int64
 	VectorBase               uint32
+	VFP                      [32]uint32
+	FPSCR, FPEXC             uint32
 }
 
 func (c *CPU) SaveState() State {
-	return State{c.R, c.CPSR, c.SPSR, c.bankSP, c.bankLR, c.bankSPSR, c.fiqRegs, c.usrRegs, c.next, c.Halted, c.IRQLine, c.Cycles, c.VectorBase}
+	return State{c.R, c.CPSR, c.SPSR, c.bankSP, c.bankLR, c.bankSPSR, c.fiqRegs, c.usrRegs, c.next, c.Halted, c.IRQLine, c.Cycles, c.VectorBase, c.fp.S, c.fp.FPSCR, c.fp.FPEXC}
 }
 
 func (c *CPU) LoadState(s State) {
 	c.R, c.CPSR, c.SPSR = s.R, s.CPSR, s.SPSR
 	c.bankSP, c.bankLR, c.bankSPSR, c.fiqRegs, c.usrRegs = s.BankSP, s.BankLR, s.BankSPSR, s.FIQRegs, s.UsrRegs
 	c.next, c.Halted, c.IRQLine, c.Cycles, c.VectorBase = s.Next, s.Halted, s.IRQLine, s.Cycles, s.VectorBase
+	c.fp.S, c.fp.FPSCR, c.fp.FPEXC = s.VFP, s.FPSCR, s.FPEXC
 }
 
 // EnterSWI takes the software interrupt exception but continues at addr (a
