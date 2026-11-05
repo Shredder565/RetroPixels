@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.33.1] - 2026-11-05
+
+- Fixed: opening RetroPixels.exe no longer pops up Microsoft Edge's "We're now syncing your data across your browsers". The RetroPixels window uses its own Edge profile, and Edge was signing that profile in with your Windows account and turning on sync. RetroPixels now starts that window with sync and automatic sign-in turned off. Your own Edge and its sync aren't touched. RetroPixels-Native.exe never showed it.
+
 ## [2.33.0] - 2026-11-05
 
 - PixelDS 3DS games now have sound: the 3DS sound processor's 24 voices (8-bit, 16-bit and ADPCM samples, looping and streamed), their filters and the three mixers, played through RetroPixels' sound output.

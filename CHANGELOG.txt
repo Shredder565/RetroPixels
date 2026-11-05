@@ -4,6 +4,12 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.33.1  (2026-11-05)
+--------------------------------
+- Fixed: RetroPixels.exe no longer pops up Edge's "We're now syncing your
+  data across your browsers" when it opens. Its window now starts with
+  sync and automatic sign-in turned off. Your own Edge isn't touched.
+
 RetroPixels 2.33.0  (2026-11-05)
 --------------------------------
 - PixelDS 3DS games have sound now (the 3DS sound processor's voices,

@@ -99,6 +99,7 @@ func appWindowArgs(url, profile string) []string {
 		"--class="+appName, // the window's WM_CLASS, so the desktop file's icon is used; embed_linux.go finds the window by it
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--disable-sync", // the app window's own profile never signs in or syncs
 		"--window-size=1280,900",
 		"--autoplay-policy=no-user-gesture-required",
 		"--disable-features=Translate",
