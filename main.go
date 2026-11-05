@@ -37,7 +37,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.34.0"
+	appVersion = "2.34.1"
 )
 
 var (
@@ -82,13 +82,11 @@ type config struct {
 	PixelUOpenGL     bool         `json:"pixeluOpenGL,omitempty"`     // Vulkan doesn't work here: draw with OpenGL
 	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // old Wii U-only switch, no longer used (AutoRecord covers every game)
 
-	// 3DS and DS games through Azahar and melonDS (handheld.go)
+	// 3DS and DS games through PixelDS (handheld.go)
 	HandheldExe        map[string]string `json:"handheldExe,omitempty"` // engine ID -> chosen program
 	HandheldFolders    []string          `json:"handheldFolders,omitempty"`
 	HandheldRecent     []recentGame      `json:"handheldRecent,omitempty"`
 	HandheldFullscreen *bool             `json:"handheldFullscreen,omitempty"` // unset = on
-	HandheldDSEngine   string            `json:"handheldDSEngine,omitempty"`   // "pixelds" (default) or "melonds"
-	Handheld3DSEngine  string            `json:"handheld3DSEngine,omitempty"`  // "pixelds" (default) or "azahar"
 
 }
 

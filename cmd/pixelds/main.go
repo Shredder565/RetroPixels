@@ -5,7 +5,7 @@
 //	PixelDS.exe [-f | -w] game.nds   (or a 3DS program, game.3dsx)
 //
 // -f starts fullscreen, -w in a window. The game's save sits next to it
-// (game.sav, as melonDS keeps it, so saves made there carry over); save
+// (game.sav); save
 // states go to the RetroPixels folder in the user's settings, and so do
 // the 3DS's SD card and 3DS save data.
 //

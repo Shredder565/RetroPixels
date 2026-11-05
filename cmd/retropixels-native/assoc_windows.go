@@ -76,7 +76,7 @@ func assocExts() []string {
 	for _, e := range []string{".wua", ".wud", ".wux", ".rpx"} { // Wii U (PixelU)
 		add(e)
 	}
-	for _, e := range handheld.Extensions() { // 3DS (Azahar) and DS (melonDS)
+	for _, e := range handheld.Extensions() { // 3DS and DS games (PixelDS)
 		add(e)
 	}
 	sort.Strings(out)

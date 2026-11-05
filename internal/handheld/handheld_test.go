@@ -38,8 +38,8 @@ func TestLibraryBothSystems(t *testing.T) {
 	if mk.System != System3DS || EngineFor(mk.System).ID != "pixelds" {
 		t.Errorf("3DS game: %+v", mk)
 	}
-	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "melonds" ||
-		EngineChoice(mk.System, "azahar").ID != "azahar" || EngineChoice(mk.System, "").ID != "pixelds" {
+	if ds.System != SystemDS || EngineFor(ds.System).ID != "pixelds" || EngineChoice(ds.System, "melonds").ID != "pixelds" ||
+		EngineChoice(mk.System, "azahar").ID != "pixelds" || EngineChoice(mk.System, "").ID != "pixelds" {
 		t.Errorf("DS game: %+v", ds)
 	}
 	if !cia.Install || cia.System != System3DS {
@@ -58,47 +58,39 @@ func TestGameArgs(t *testing.T) {
 		{g3, true, []string{"-f", "a.3ds"}},
 		{g3, false, []string{"-w", "a.3ds"}},
 		{gd, true, []string{"-f", "b.nds"}},
-		{gd, false, []string{"b.nds"}},
-		{Game{Path: "c.cia", System: System3DS, Install: true}, true, []string{"-i", "c.cia"}},
+		{gd, false, []string{"-w", "b.nds"}},
+		{Game{Path: "c.cia", System: System3DS, Install: true}, true, []string{"-f", "c.cia"}},
 	}
 	for _, c := range cases {
-		e := EngineFor(c.g.System)
-		if c.g.System == System3DS {
-			e = Azahar
-		}
-		if got := GameArgs(e, c.g, c.full); !reflect.DeepEqual(got, c.want) {
+		if got := GameArgs(PixelDS, c.g, c.full); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("GameArgs(%s, %v) = %q, want %q", c.g.Path, c.full, got, c.want)
 		}
 	}
-	// PixelDS plays a .cia instead of installing it
-	if got := GameArgs(PixelDS, Game{Path: "c.cia", System: System3DS, Install: true}, true); !reflect.DeepEqual(got, []string{"-f", "c.cia"}) {
-		t.Errorf("a .cia in PixelDS: %q", got)
-	}
 }
 
-// The engines are found in their folders next to RetroPixels, or unpacked
-// in Downloads.
+// PixelDS is found in its folder next to RetroPixels, or unpacked in
+// Downloads.
 func TestFindExe(t *testing.T) {
 	root := t.TempDir()
 	app := filepath.Join(root, "RetroPixels")
 	home := filepath.Join(root, "home")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	if got := Azahar.FindExe("", app, home); got != "" {
+	if got := PixelDS.FindExe("", app, home); got != "" {
 		t.Fatalf("found %q in an empty folder", got)
 	}
-	az := filepath.Join(app, "Azahar", Azahar.Exes[0])
-	write(t, az)
-	if got := Azahar.FindExe("", app, home); got != az {
-		t.Errorf("Azahar = %q", got)
-	}
-	dl := filepath.Join(home, "Downloads", "melonDS-1.1-windows-x86_64", MelonDS.Exes[0])
+	dl := filepath.Join(home, "Downloads", "PixelDS-2.34-windows", PixelDS.Exes[0])
 	write(t, dl)
-	if got := MelonDS.FindExe("", app, home); got != dl {
-		t.Errorf("melonDS in Downloads = %q", got)
+	if got := PixelDS.FindExe("", app, home); got != dl {
+		t.Errorf("PixelDS in Downloads = %q", got)
 	}
-	chosen := filepath.Join(root, "elsewhere", MelonDS.Exes[0])
+	pd := filepath.Join(app, "PixelDS", PixelDS.Exes[0])
+	write(t, pd)
+	if got := PixelDS.FindExe("", app, home); got != pd {
+		t.Errorf("PixelDS = %q", got)
+	}
+	chosen := filepath.Join(root, "elsewhere", PixelDS.Exes[0])
 	write(t, chosen)
-	if got := MelonDS.FindExe(chosen, app, home); got != chosen {
+	if got := PixelDS.FindExe(chosen, app, home); got != chosen {
 		t.Errorf("chosen = %q", got)
 	}
 }

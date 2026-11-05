@@ -39,14 +39,10 @@ What's in the download
     licence is in PixelU\wii).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
-  * Azahar\azahar.exe: Nintendo 3DS games. Azahar's official release,
-    unchanged (GPL-2.0-or-later). New in 2.28.0.
-  * PixelDS\PixelDS.exe: Nintendo DS games. RetroPixels' own DS emulator,
-    new code written for RetroPixels. New in 2.29.0; 3D graphics
-    since 2.30.0; 3DS homebrew (.3dsx) since 2.31.0; 3DS games
-    (experimental, pick it in the tab) since 2.32.0.
-  * melonDS\melonDS.exe: Nintendo DS games too, if you choose it in the
-    3DS / DS tab. melonDS's official release, unchanged (GPL-3.0-or-later).
+  * PixelDS\PixelDS.exe: Nintendo DS and 3DS games. RetroPixels' own
+    emulator, all new code written for RetroPixels. New in 2.29.0; 3D
+    graphics since 2.30.0; 3DS games since 2.32.0. Since 2.34.1 it is the
+    only DS / 3DS emulator in the download (Azahar and melonDS are gone).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
@@ -309,19 +305,16 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   settings before each game. If you had already set a higher one, that's kept.
   Save states: Shift+F1 saves, F1 loads.
 
-3DS and DS (PixelDS, Azahar and melonDS)
+3DS and DS (PixelDS)
 - The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
   "Add games folder..." and pick the folder with them, then click a game.
 - 3DS and DS games play in PixelDS, RetroPixels' own emulator for both
   (DS since 2.29.0, 3DS since 2.32.0 and by default since 2.34.0). PixelDS
   is new code written for RetroPixels, with no code from melonDS, Azahar or
-  any other emulator (docs/pixelds.md). If a game doesn't play right, pick
-  Azahar under "3DS games play in" or melonDS under "DS games play in".
-  All three come in the download (the PixelDS, Azahar and melonDS folders);
-  keep them next to RetroPixels.exe.
+  any other emulator (docs/pixelds.md), and it is the only DS / 3DS
+  emulator in the download. Keep the PixelDS folder next to RetroPixels.exe.
 - PixelDS needs no BIOS or firmware files. It plays DS games with 2D
   and 3D graphics (3D new in 2.30.0), sound, touch, saves and save states.
-  If a game doesn't play right in it, choose melonDS for DS games.
   PixelDS keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start,
   Shift=Select, the mouse is the stylus. F5 saves a state, F8 loads it,
   F6/F7 pick the slot, F11 or Alt+Enter is fullscreen, Ctrl+R restarts.
@@ -329,23 +322,16 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   X / Y by position (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R,
   Back = Select, Menu = Start, the D-pad and left stick the D-pad (on the
   3DS the left stick is the circle pad and LT / RT are ZL / ZR); the right
-  stick moves a stylus pointer and RT (DS) or R3 touches. Saves are game.sav next to the game, the same as melonDS.
+  stick moves a stylus pointer and RT (DS) or R3 touches. Saves are game.sav next to the game.
 - 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
-  They must be decrypted dumps (Azahar doesn't play encrypted ones). A .cia
-  is installed into Azahar when you click it; then open Azahar and play it
-  from its game list. PixelDS plays a .cia directly. PixelDS's 3DS keys:
+  They must be decrypted dumps. PixelDS plays a .cia directly, with no
+  installing. PixelDS's 3DS keys:
   arrows = circle pad, I/J/K/L = D-pad, E = ZL, R = ZR, the rest as for
   DS games; its 3DS SD card, saves and log.txt are in
   %APPDATA%\RetroPixels\PixelDS\3DS.
-- DS files: .nds, .dsi, .srl. DS games play without a BIOS. DSi games need
-  your own DSi BIOS and NAND files (melonDS: Config > Emu settings).
-- Games start fullscreen in the emulator's own window; untick "Start games
-  fullscreen" to play in a window. Close the emulator to come back.
-- Azahar and melonDS (if you choose them) are set up in their own
-  windows: "Open
-  Azahar" (Emulation > Configure > Controls) and "Open melonDS" (Config >
-  Input and hotkeys). Their settings and saves stay in your user folder
-  (%APPDATA%\Azahar, and melonDS's own settings; DS saves sit next to the game).
+- DS files: .nds, .dsi, .srl. DS games play without a BIOS.
+- Games start fullscreen in PixelDS's own window; untick "Start games
+  fullscreen" to play in a window. Close PixelDS to come back.
 - RetroPixels Native: the 3DS / DS menu does the same.
 - Recording (new in 2.34.0): with "Record games automatically" on (the
   default), 3DS and DS games played in PixelDS are recorded from their
@@ -723,12 +709,11 @@ Credits & licences
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
   rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME, Azahar (GPL-2.0-or-later, https://github.com/azahar-emu/azahar)
-  and melonDS (GPL-3.0-or-later, https://github.com/melonDS-emu/melonDS),
-  both unchanged, with their source attached to each release. PixelDS
+  built-in MAME, unchanged, with its source attached to each release. PixelDS
   (cores/pixelds, new in 2.29.0) is RetroPixels' own code, written new
   without any melonDS or Azahar code (docs/pixelds.md). Thanks to the
-  Cemu, Dolphin, MAME, Azahar and melonDS teams.
+  Cemu, Dolphin and MAME teams, and to the DS and 3DS emulator authors
+  whose public documentation of the hardware PixelDS was checked against.
 - The Sega Model 3 emulator (cores/model3, new in 2.22.0) is the other
   exception: most of it is RetroPixels' own, checked against Supermodel
   (https://github.com/trzy/Supermodel), but its sound chips (SCSP) are a Go

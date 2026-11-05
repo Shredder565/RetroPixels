@@ -135,16 +135,13 @@ jobs:
           v="${{ needs.check.outputs.version }}"
           git archive --format=zip --prefix="RetroPixels-source-$v/" -o "dist/RetroPixels-source-$v.zip" HEAD
           mame=$(ls dist/MAME-*-source.tar.gz | sed 's|dist/MAME-\(.*\)-source.tar.gz|\1|')
-          az=$(ls dist/Azahar-*-source.tar.xz | sed 's|dist/Azahar-\(.*\)-source.tar.xz|\1|')
-          mel=$(ls dist/melonDS-*-source.tar.gz | sed 's|dist/melonDS-\(.*\)-source.tar.gz|\1|')
           {
             echo "## Download"
             echo
             echo "- **RetroPixels-$v.zip**: RetroPixels.exe (the app in a browser window) for Windows 10 / 11 (64-bit). **RetroPixels-Native-$v.zip**: RetroPixels-Native.exe (the Windows app). Unzip one and run its program. Each has RetroPixels' engines in the folders next to the program, and VERSION.txt:"
             echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
             echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
-            echo "  - PixelDS: RetroPixels' own Nintendo DS emulator, new code: DS games (2D and 3D), and 3DS games as an experiment (pick it in the 3DS / DS tab)"
-            echo "  - Azahar $az (Nintendo 3DS, GPL-2.0-or-later) and melonDS $mel (Nintendo DS, GPL-3.0-or-later, kept as a choice for DS games), their official releases, for the 3DS / DS tab"
+            echo "  - PixelDS: RetroPixels' own DS and 3DS emulator, all new code, for DS and 3DS games (2D and 3D)"
             echo "  - Star Wars Trilogy Arcade (Sega Model 3) plays in RetroPixels' own emulator, with nothing else to install"
             echo "  - RetroPixels-SNES-Debugger.exe, which opens with SNES games: captures VRAM, palettes and DMA transfers, finds a background's data in the ROM and swaps it for a picture"
             echo "- **RetroPixels.exe** and **RetroPixels-Native.exe**: the two programs on their own; **RetroPixels-SNES-Debugger.exe**: the SNES Debugger on its own."
@@ -152,7 +149,6 @@ jobs:
             echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project."
             echo "- **RetroPixels-source-$v.zip**: the full source code, including PixelU's, PixelU-Wii's and PixelDS's."
             echo "- **MAME-$mame-source.tar.gz**: the built-in MAME's source, the MAME team's release unchanged."
-            echo "- **Azahar-$az-source.tar.xz** and **melonDS-$mel-source.tar.gz**: the source of the bundled Azahar and melonDS releases, unchanged."
             echo
             echo "The programs aren't code-signed yet, so SmartScreen may say \"Windows protected your PC\": click **More info**, then **Run anyway**. No games, keys, BIOS or firmware are included."
             echo

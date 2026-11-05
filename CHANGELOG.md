@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.34.1] - 2026-11-05
+
+- PixelDS is now the only DS and 3DS emulator in RetroPixels: Azahar and melonDS are no longer in the download, and their choices are gone from the 3DS / DS tab and RetroPixels Native's 3DS / DS menu. Every DS and 3DS game plays in PixelDS. A setting from an older version that picked Azahar or melonDS is ignored.
+- The release no longer attaches Azahar's or melonDS's source, since neither is included.
+
 ## [2.34.0] - 2026-11-05
 
 - 3DS games now play in PixelDS by default, like DS games: one RetroPixels emulator for both. Azahar (3DS) and melonDS (DS) are still in the download if you pick them in the 3DS / DS tab; a player who chose Azahar keeps it.

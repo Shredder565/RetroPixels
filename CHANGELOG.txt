@@ -4,6 +4,12 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.34.1  (2026-11-05)
+--------------------------------
+- PixelDS is now the only DS and 3DS emulator: Azahar and melonDS are no
+  longer in the download or in the 3DS / DS tab and menu. Every DS and 3DS
+  game plays in PixelDS.
+
 RetroPixels 2.34.0  (2026-11-05)
 --------------------------------
 - 3DS games play in PixelDS by default now, like DS games. Azahar and

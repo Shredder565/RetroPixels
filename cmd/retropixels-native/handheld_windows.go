@@ -1,10 +1,9 @@
 package main
 
 // 3DS and DS games, as RetroPixels.exe's 3DS / DS tab plays them
-// (internal/handheld): a DS game opens in PixelDS, RetroPixels' own DS and
-// 3DS emulator (or melonDS, if the player picks it), a 3DS game in Azahar
-// until PixelDS plays them, each in its own window (fullscreen by default). The player only picks
-// "Open a 3DS or DS game…": the emulator follows from the file.
+// (internal/handheld): both open in PixelDS, RetroPixels' own DS and 3DS
+// emulator, in its own window (fullscreen by default). The player only picks
+// "Open a 3DS or DS game…".
 
 import (
 	"fmt"
@@ -21,24 +20,15 @@ import (
 
 // Menu commands 1950–1969.
 const (
-	cmdHHOpenGame     = 1950
-	cmdHHFullscreen   = 1951
-	cmdHHStop         = 1952
-	cmdHHOpenAzahar   = 1953
-	cmdHHOpenMelonDS  = 1954
-	cmdHHChangeAzahar = 1955
-	cmdHHChangeMelon  = 1956
-	cmdHHUsePixelDS   = 1957
-	cmdHHUseMelonDS   = 1958
-	cmdHHOpenPixelDS  = 1959
-	cmdHHChangePixel  = 1960
-	cmdHH3DSAzahar    = 1961
-	cmdHH3DSPixelDS   = 1962
-	cmdHHFirst        = 1950
-	cmdHHLast         = 1969
+	cmdHHOpenGame    = 1950
+	cmdHHFullscreen  = 1951
+	cmdHHStop        = 1952
+	cmdHHChangePixel = 1960
+	cmdHHFirst       = 1950
+	cmdHHLast        = 1969
 )
 
-// hhRun is one game playing in Azahar or melonDS.
+// hhRun is one game playing in PixelDS.
 type hhRun struct {
 	extRun
 	game   handheld.Game
@@ -58,16 +48,7 @@ func (a *app) addHandheldMenu() {
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdHHFullscreen, "Start games &fullscreen")
 	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString, cmdHHUsePixelDS, "DS games play in &PixelDS (RetroPixels' own)")
-	appendMenu(m, mfString, cmdHHUseMelonDS, "DS games play in me&lonDS")
-	appendMenu(m, mfString, cmdHH3DSAzahar, "3DS games play in A&zahar")
-	appendMenu(m, mfString, cmdHH3DSPixelDS, "3DS games play in PixelDS (e&xperimental)")
-	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString, cmdHHOpenAzahar, "Open &Azahar (3DS: controls, graphics, installed games)")
-	appendMenu(m, mfString, cmdHHOpenMelonDS, "Open &melonDS (DS: controls, screen layout)")
 	appendMenu(m, mfString, cmdHHChangePixel, "Change PixelDS…")
-	appendMenu(m, mfString, cmdHHChangeAzahar, "Change Azahar…")
-	appendMenu(m, mfString, cmdHHChangeMelon, "Change melonDS…")
 	appendMenu(a.menu, mfPopup, m, "&3DS / DS")
 }
 
@@ -75,14 +56,6 @@ func (a *app) hhUpdateMenus() {
 	r := a.hh.run
 	enableItem(a.menu, cmdHHStop, r != nil)
 	checkItem(a.menu, cmdHHFullscreen, a.settings.Handheld.fullscreen())
-	melon := a.settings.Handheld.DSEngine == handheld.MelonDS.ID
-	checkItem(a.menu, cmdHHUsePixelDS, !melon)
-	checkItem(a.menu, cmdHHUseMelonDS, melon)
-	pixel3 := a.settings.Handheld.ThreeDSEngine != handheld.Azahar.ID
-	checkItem(a.menu, cmdHH3DSAzahar, !pixel3)
-	checkItem(a.menu, cmdHH3DSPixelDS, pixel3)
-	enableItem(a.menu, cmdHHOpenAzahar, r == nil && a.hhExe(handheld.Azahar) != "")
-	enableItem(a.menu, cmdHHOpenMelonDS, r == nil && a.hhExe(handheld.MelonDS) != "")
 }
 
 func hhFilter() string {
@@ -111,38 +84,8 @@ func (a *app) hhCommand(id int) {
 		v := !h.fullscreen()
 		h.Fullscreen = &v
 		saveSettings(a.settings)
-	case cmdHHOpenAzahar, cmdHHOpenMelonDS:
-		e := handheld.Azahar
-		if id == cmdHHOpenMelonDS {
-			e = handheld.MelonDS
-		}
-		exe := a.hhExe(e)
-		if exe == "" || a.hh.run != nil {
-			return
-		}
-		if err := handheld.Command(exe).Start(); err != nil {
-			messageBox(a.hwnd, "Couldn't start "+e.Name+": "+err.Error(), "RetroPixels Native", mbIconWarning)
-		}
-	case cmdHHUsePixelDS, cmdHHUseMelonDS:
-		h.DSEngine = handheld.PixelDS.ID
-		if id == cmdHHUseMelonDS {
-			h.DSEngine = handheld.MelonDS.ID
-		}
-		saveSettings(a.settings)
-		a.hhUpdateMenus()
-	case cmdHH3DSAzahar, cmdHH3DSPixelDS:
-		h.ThreeDSEngine = handheld.Azahar.ID
-		if id == cmdHH3DSPixelDS {
-			h.ThreeDSEngine = handheld.PixelDS.ID
-		}
-		saveSettings(a.settings)
-		a.hhUpdateMenus()
 	case cmdHHChangePixel:
 		a.hhChooseExe(handheld.PixelDS)
-	case cmdHHChangeAzahar:
-		a.hhChooseExe(handheld.Azahar)
-	case cmdHHChangeMelon:
-		a.hhChooseExe(handheld.MelonDS)
 	}
 }
 
@@ -206,19 +149,10 @@ func (a *app) hhPlay(g handheld.Game) {
 		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
-	e := handheld.EngineChoice(g.System, a.settings.Handheld.choice(g.System))
+	e := handheld.EngineFor(g.System)
 	exe := a.hhExe(e)
-	if exe == "" { // the other emulator for the system, if it's there
-		if alt, ok := handheld.Alternative(g.System, e); ok && a.hhExe(alt) != "" {
-			e, exe = alt, a.hhExe(alt)
-		}
-	}
 	if exe == "" {
-		sys := "3DS games play in " + e.Name
-		if g.System == handheld.SystemDS {
-			sys = "DS games play in " + e.Name
-		}
-		if messageBox(a.hwnd, sys+", and it wasn't found: keep its "+e.Dir+" folder from the RetroPixels download next to RetroPixels.\n\nChoose "+e.Exes[0]+" now?",
+		if messageBox(a.hwnd, "3DS and DS games play in "+e.Name+", and it wasn't found: keep its "+e.Dir+" folder from the RetroPixels download next to RetroPixels.\n\nChoose "+e.Exes[0]+" now?",
 			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
 			return
 		}
@@ -312,9 +246,6 @@ func (a *app) hhTitle() string {
 	if r == nil {
 		return ""
 	}
-	if r.game.Install {
-		return " - Installing " + r.game.Name + " into Azahar"
-	}
 	return " - " + r.game.Name + " (" + strings.ToUpper(r.game.System) + ", " + r.engine.Name + ")"
 }
 
@@ -328,9 +259,6 @@ func (a *app) hhPaint(hdc uintptr) bool {
 	cr := clientRect(a.hwnd)
 	call(pFillRect, hdc, uintptr(unsafe.Pointer(&cr)), call(pGetStockObject, blackBrush))
 	text := r.game.Name + " is playing in " + r.engine.Name + "'s own window.\n\nClose the game there (or 3DS / DS > Stop game) to come back."
-	if r.game.Install {
-		text = "Installing " + r.game.Name + " into Azahar.\n\nWhen it's done, open Azahar (3DS / DS > Open Azahar) and play it from Azahar's game list."
-	}
 	call(pSetBkMode, hdc, transparent)
 	old := call(pSelectObject, hdc, a.font)
 	call(pSetTextColor, hdc, 0xa09088)

@@ -55,7 +55,7 @@ func findNCCH(f []byte) ([]byte, error) {
 			if sigSize != 0 {
 				rec := t + 4 + sigSize + (0x40-(4+sigSize)%0x40)%0x40 + 0xc4 + 0x900
 				if rec+0x10 <= uint64(len(f)) && binary.BigEndian.Uint16(f[rec+6:])&1 != 0 {
-					return nil, errors.New("this CIA is encrypted: PixelDS needs decrypted games (as Azahar does)")
+					return nil, errors.New("this CIA is encrypted: PixelDS needs decrypted games")
 				}
 			}
 		}
@@ -78,7 +78,7 @@ func loadNCCH(n []byte, opts Options) (*Machine, error) {
 	flags := n[0x188:0x190]
 	unit := uint64(mediaUnit) << flags[6]
 	if flags[7]&4 == 0 {
-		return nil, errors.New("this game is encrypted: PixelDS needs decrypted games (as Azahar does)")
+		return nil, errors.New("this game is encrypted: PixelDS needs decrypted games")
 	}
 	if flags[5]&2 == 0 {
 		return nil, errors.New("this file has no program in it (it's data, an update or DLC)")

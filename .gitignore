@@ -36,3 +36,4 @@
 .DS_Store
 Thumbs.db
 .claude/worktrees/
+cores/pixelds/nds/testdata/*.sav

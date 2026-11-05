@@ -51,7 +51,7 @@ the behaviour of other emulators were used as references only.
     PixelDS.exe [-f] program.3dsx          a 3DS homebrew program
     PixelDS.exe -w -frames 600 -shot a.png game.nds   run without a window
 
-Saves are `game.sav` next to the game (the same file melonDS uses), or under
+Saves are `game.sav` next to the game, or under
 `%APPDATA%\RetroPixels\PixelDS\saves` when that folder can't be written.
 Save states are in `%APPDATA%\RetroPixels\PixelDS\states`. The 3DS's SD
 card and 3DS save data are in `%APPDATA%\RetroPixels\PixelDS\3DS`.

@@ -107,7 +107,7 @@ type app struct {
 	dol  dolState    // GameCube / Wii (dolphin_windows.go)
 	mame mameState   // arcade games in MAME (mame_windows.go)
 	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
-	hh   hhState     // 3DS and DS games in Azahar and melonDS (handheld_windows.go)
+	hh   hhState     // 3DS and DS games in PixelDS (handheld_windows.go)
 	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
