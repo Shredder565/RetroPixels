@@ -37,7 +37,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.36.1"
+	appVersion = "2.37.0"
 )
 
 var (

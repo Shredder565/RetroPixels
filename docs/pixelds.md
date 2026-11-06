@@ -55,7 +55,9 @@ Saves are `game.sav` next to the game, or under
 `%APPDATA%\RetroPixels\PixelDS\saves` when that folder can't be written.
 Save states (DS and 3DS games, ten slots each) are in
 `%APPDATA%\RetroPixels\PixelDS\states`; the window's menu bar has them
-(Save states) and Pause (Game; P or a controller's left-stick click). A
+(Save states) and Pause (Game; P or a controller's left-stick click), and
+buttons above the screens do Pause, Save state, Load state and Stop
+recording. A
 3DS state is the whole machine, saved by `cores/pixelds/snap`, which
 walks the machine's Go values and loads them into a newly opened copy of
 the game (the game's own files aren't stored in it). The 3DS's SD

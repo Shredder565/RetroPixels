@@ -62,6 +62,16 @@ var (
 	pSetMenu                  = user32.NewProc("SetMenu")
 	pCheckMenuItem            = user32.NewProc("CheckMenuItem")
 	pModifyMenuW              = user32.NewProc("ModifyMenuW")
+	pEnableWindow             = user32.NewProc("EnableWindow")
+	pSetFocus                 = user32.NewProc("SetFocus")
+	pSendMessageW             = user32.NewProc("SendMessageW")
+	pSetTimer                 = user32.NewProc("SetTimer")
+	pKillTimer                = user32.NewProc("KillTimer")
+	pFillRect                 = user32.NewProc("FillRect")
+	pGetSysColorBrush         = user32.NewProc("GetSysColorBrush")
+	pGetDpiForWindow          = user32.NewProc("GetDpiForWindow")
+	pMoveWindow               = user32.NewProc("MoveWindow")
+	pGetStockObject           = gdi32.NewProc("GetStockObject")
 	pStretchDIBits            = gdi32.NewProc("StretchDIBits")
 	pSetStretchBltMode        = gdi32.NewProc("SetStretchBltMode")
 	pPatBlt                   = gdi32.NewProc("PatBlt")
@@ -96,6 +106,16 @@ const (
 	wmLButtonUp   = 0x0202
 	wmApp         = 0x8000
 	wmCommand     = 0x0111
+	wmTimer       = 0x0113
+	wmSetFont     = 0x0030
+
+	wsChild        = 0x40000000
+	wsClipChildren = 0x02000000
+	swHide         = 0
+	swShowNA       = 8
+	defaultGUIFont = 17
+	colorBtnFace   = 15
+	barTimer       = 1
 
 	mfString    = 0x0000
 	mfPopup     = 0x0010
@@ -346,6 +366,12 @@ type app struct {
 	menu       uintptr
 	paused     atomic.Bool
 
+	// the button bar: Pause, Save state, Load state, Stop recording
+	buttons  []uintptr
+	barShown bool         // in fullscreen the bar shows over the picture when the mouse moves
+	recState atomic.Int32 // recOff, recOn or recStopped
+	stopRec  atomic.Bool  // the Stop recording button was pressed
+
 	packOn  bool // the texture pack is on (the game's thread only)
 	dumping bool
 	making  atomic.Bool
@@ -359,8 +385,115 @@ const (
 	cmdExit
 	cmdSaveState
 	cmdLoadState
-	cmdSlot0 // cmdSlot0 + n: state slot n
+	cmdStopRec
+	cmdSlot0 = 200 // cmdSlot0 + n: state slot n
 )
+
+// what the recording is doing
+const (
+	recOff = iota // not recording (RetroPixels didn't ask for it)
+	recOn
+	recStopped
+)
+
+func (a *app) dpi() int {
+	if pGetDpiForWindow.Find() == nil {
+		if d := int(call(pGetDpiForWindow, a.hwnd)); d > 0 {
+			return d
+		}
+	}
+	return 96
+}
+
+// barH: the height the button bar takes above the picture (none in
+// fullscreen, where it shows over the picture instead).
+func (a *app) barH() int {
+	if a.fullscreen {
+		return 0
+	}
+	return 36 * a.dpi() / 96
+}
+
+// makeButtons: real buttons above the screens.
+func (a *app) makeButtons() {
+	inst := call(pGetModuleHandleW, 0)
+	font := call(pGetStockObject, defaultGUIFont)
+	for _, b := range []struct {
+		id   int
+		text string
+	}{{cmdPause, "Pause"}, {cmdSaveState, "Save state"}, {cmdLoadState, "Load state"}, {cmdStopRec, "Stop recording"}} {
+		h := call(pCreateWindowExW, 0, uintptr(unsafe.Pointer(u16("BUTTON"))), uintptr(unsafe.Pointer(u16(b.text))),
+			wsChild|wsVisible, 0, 0, 10, 10, a.hwnd, uintptr(b.id), inst, 0)
+		call(pSendMessageW, h, wmSetFont, font, 1)
+		a.buttons = append(a.buttons, h)
+	}
+	a.barShown = true
+	a.layoutButtons()
+	a.updateButtons()
+}
+
+func (a *app) layoutButtons() {
+	d := a.dpi()
+	x, gap, bh := 6*d/96, 6*d/96, 28*d/96
+	widths := []int{90, 100, 100, 130}
+	for i, h := range a.buttons {
+		w := widths[i] * d / 96
+		call(pMoveWindow, h, uintptr(x), uintptr(4*d/96), uintptr(w), uintptr(bh), 1)
+		x += w + gap
+	}
+}
+
+// showBar shows or hides the buttons (fullscreen hides them until the
+// mouse moves).
+func (a *app) showBar(on bool) {
+	if on == a.barShown {
+		return
+	}
+	a.barShown = on
+	for _, h := range a.buttons {
+		if on {
+			call(pShowWindow, h, swShowNA)
+		} else {
+			call(pShowWindow, h, swHide)
+		}
+	}
+	call(pInvalidateRect, a.hwnd, 0, 0)
+}
+
+// updateButtons: Pause or Resume, and what the recording button can do.
+func (a *app) updateButtons() {
+	if len(a.buttons) < 4 {
+		return
+	}
+	pause := "Pause"
+	if a.paused.Load() {
+		pause = "Resume"
+	}
+	call(pSetWindowTextW, a.buttons[0], uintptr(unsafe.Pointer(u16(pause))))
+	rec, on := "Not recording", false
+	switch a.recState.Load() {
+	case recOn:
+		rec, on = "Stop recording", true
+	case recStopped:
+		rec = "Recording stopped"
+	}
+	call(pSetWindowTextW, a.buttons[3], uintptr(unsafe.Pointer(u16(rec))))
+	en := uintptr(0)
+	if on {
+		en = 1
+	}
+	call(pEnableWindow, a.buttons[3], en)
+}
+
+// stopRecording ends the recording now; the video is made from what was
+// recorded when the game closes.
+func (a *app) stopRecording() {
+	if a.recState.Load() != recOn {
+		return
+	}
+	a.stopRec.Store(true)
+	a.say("recording stopped: the video is saved when you close the game")
+}
 
 const stateSlots = 10
 
@@ -374,6 +507,7 @@ func (a *app) makeMenu() {
 	game := call(pCreatePopupMenu)
 	add(game, cmdPause, "&Pause\tP")
 	add(game, cmdRestart, "&Restart\tCtrl+R")
+	add(game, cmdStopRec, "Stop re&cording")
 	sep(game)
 	add(game, cmdFullscreen, "&Fullscreen\tF11")
 	sep(game)
@@ -428,6 +562,7 @@ func (a *app) togglePause() {
 	a.paused.Store(p)
 	a.keys.Store(0)
 	a.updateMenu()
+	a.updateButtons()
 	if p {
 		a.say("paused (P to resume)")
 	} else {
@@ -514,11 +649,12 @@ func runWindow(path string) bool {
 		Cursor: call(pLoadCursorW, 0, idcArrow), Icon: call(pLoadIconW, inst, 1), ClassName: u16("PixelDS")}
 	call(pRegisterClassExW, uintptr(unsafe.Pointer(&cls)))
 	// the window: the screens at twice their size
-	r := winRect{0, 0, int32(a.fw * 2), int32(a.fh * 2)}
+	r := winRect{0, 0, int32(a.fw * 2), int32(a.fh*2 + 36)}                          // the screens and the button bar
 	call(pAdjustWindowRectEx, uintptr(unsafe.Pointer(&r)), wsOverlappedWindow, 1, 0) // with the menu bar
 	a.hwnd = call(pCreateWindowExW, 0, uintptr(unsafe.Pointer(u16("PixelDS"))), uintptr(unsafe.Pointer(u16("PixelDS"))),
-		wsOverlappedWindow|wsVisible, cwUseDefault, cwUseDefault, uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 0, 0, inst, 0)
+		wsOverlappedWindow|wsVisible|wsClipChildren, cwUseDefault, cwUseDefault, uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 0, 0, inst, 0)
 	a.makeMenu()
+	a.makeButtons()
 	call(pShowWindow, a.hwnd, swShow)
 	call(pSetForegroundWindow, a.hwnd)
 	if *fullscreen && !*windowed {
@@ -563,12 +699,13 @@ func (a *app) say(s string) {
 func (a *app) picture() (x, y, w, h int) {
 	var cr winRect
 	call(pGetClientRect, a.hwnd, uintptr(unsafe.Pointer(&cr)))
-	cw, ch := int(cr.Right), int(cr.Bottom)
+	top := a.barH()
+	cw, ch := int(cr.Right), int(cr.Bottom)-top
 	w, h = cw, cw*a.fh/a.fw
 	if h > ch {
 		h, w = ch, ch*a.fw/a.fh
 	}
-	return (cw - w) / 2, (ch - h) / 2, w, h
+	return (cw - w) / 2, top + (ch-h)/2, w, h
 }
 
 func (a *app) paint(hdc uintptr) {
@@ -581,7 +718,12 @@ func (a *app) paint(hdc uintptr) {
 			call(pPatBlt, hdc, uintptr(x), uintptr(y), uintptr(w), uintptr(h), blackness)
 		}
 	}
-	bar(0, 0, cw, y)
+	top := a.barH()
+	if top > 0 {
+		br := winRect{0, 0, int32(cw), int32(top)}
+		call(pFillRect, hdc, uintptr(unsafe.Pointer(&br)), call(pGetSysColorBrush, colorBtnFace))
+	}
+	bar(0, top, cw, y-top)
 	bar(0, y+h, cw, ch-y-h)
 	bar(0, y, x, h)
 	bar(x+w, y, cw-x-w, h)
@@ -604,12 +746,15 @@ func (a *app) toggleFullscreen() {
 		r := mi.Monitor
 		call(pSetWindowPos, a.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpFrameChanged|swpNoOwnerZOrder)
 		a.fullscreen = true
+		a.showBar(false)
 	} else {
 		call(pSetWindowLongPtrW, a.hwnd, gwlStyle, a.savedStyle)
 		call(pSetMenu, a.hwnd, a.menu)
 		r := a.savedRect
 		call(pSetWindowPos, a.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpFrameChanged|swpNoOwnerZOrder|swpNoZOrder)
 		a.fullscreen = false
+		call(pKillTimer, a.hwnd, barTimer)
+		a.showBar(true)
 	}
 	call(pInvalidateRect, a.hwnd, 0, 0)
 }
@@ -752,6 +897,10 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.mouse(lp, true)
 		return 0
 	case wmMouseMove:
+		if a.fullscreen && !a.mouseDown.Load() {
+			a.showBar(true)
+			call(pSetTimer, hwnd, barTimer, 3000, 0)
+		}
 		if a.mouseDown.Load() {
 			a.mouse(lp, true)
 		}
@@ -760,8 +909,21 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pReleaseCapture)
 		a.mouseDown.Store(false)
 		return 0
+	case wmTimer:
+		if wp == barTimer {
+			call(pKillTimer, hwnd, barTimer)
+			if a.fullscreen {
+				a.showBar(false)
+			}
+		}
+		return 0
 	case wmCommand:
+		if lp != 0 { // a button: give the keys back to the game
+			call(pSetFocus, hwnd)
+		}
 		switch id := int(wp & 0xffff); {
+		case id == cmdStopRec:
+			a.stopRecording()
 		case id == cmdPause:
 			a.togglePause()
 		case id == cmdRestart:
@@ -779,6 +941,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		}
 		return 0
 	case wmApp:
+		a.updateButtons()
 		a.mu.Lock()
 		p := a.pending
 		a.pending = ""
@@ -818,7 +981,11 @@ func (a *app) run() {
 	l3Held := false
 	pcm := make([]int16, 0, 4096)
 	rec := newRecorder(e)
-	defer rec.stop(sampleRate)
+	defer func() { rec.stop(sampleRate) }()
+	if rec != nil {
+		a.recState.Store(recOn)
+		call(pPostMessageW, a.hwnd, wmApp, 0, 0)
+	}
 	titleTick := time.Now()
 	flush := func() {
 		if saveDirty {
@@ -853,6 +1020,12 @@ func (a *app) run() {
 			}
 			continue
 		default:
+		}
+		if a.stopRec.Swap(false) && rec != nil {
+			rec.stop(sampleRate)
+			rec = nil
+			a.recState.Store(recStopped)
+			call(pPostMessageW, a.hwnd, wmApp, 0, 0)
 		}
 		if a.paused.Load() {
 			// paused: the game, its sound and the recording all wait; the

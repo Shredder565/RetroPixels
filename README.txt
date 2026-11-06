@@ -326,7 +326,10 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   2.36.0). While a game is paused nothing runs: no sound, and the
   recording leaves the pause out. A controller's left-stick click pauses
   too. Recordings hold only the game's own sound, never other sounds
-  from your PC.
+  from your PC. Since 2.37.0 the window also has buttons above the
+  screens: Pause, Save state, Load state and Stop recording (in
+  fullscreen they appear when you move the mouse). Stop recording ends
+  the recording at once; the video is saved when you close the game.
   An Xbox controller works straight away, for DS and 3DS games: A / B /
   X / Y by position (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R,
   Back = Select, Menu = Start, the D-pad and left stick the D-pad (on the

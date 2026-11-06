@@ -4,6 +4,13 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.37.0  (2026-11-06)
+--------------------------------
+- PixelDS has buttons above the screens: Pause, Save state, Load state
+  and Stop recording (in fullscreen they show when the mouse moves).
+- Stop recording ends the recording now; the video is saved when the
+  game closes.
+
 RetroPixels 2.36.1  (2026-11-06)
 --------------------------------
 - Fixed: RetroPixels.exe's taskbar button showed the Edge icon. It shows

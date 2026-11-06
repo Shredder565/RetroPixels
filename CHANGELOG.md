@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.37.0] - 2026-11-06
+
+- PixelDS's window has real buttons above the screens: Pause (Resume while paused), Save state, Load state and Stop recording. In fullscreen they show over the picture when you move the mouse and hide again after three seconds.
+- Stop recording ends the game's recording straight away (it's in the Game menu too); the video of what was recorded is saved when you close the game. The button says "Not recording" when the game isn't being recorded.
+
 ## [2.36.1] - 2026-11-06
 
 - Fixed: RetroPixels.exe's taskbar button showed the Microsoft Edge icon. RetroPixels draws its window with Edge, and the taskbar grouped that window with Edge. The window now has RetroPixels' own taskbar identity, so its taskbar button shows the RetroPixels icon (and pinning it pins RetroPixels.exe). RetroPixels-Native.exe always showed its own icon.

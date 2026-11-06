@@ -25,7 +25,7 @@ import (
 )
 
 // Version of PixelDS (follows RetroPixels' version).
-const Version = "2.36.0"
+const Version = "2.37.0"
 
 // Buttons in input bit order (both machines; ZL and ZR are the 3DS's).
 var Buttons = append(append([]string(nil), nds.Buttons...), "ZL", "ZR")
