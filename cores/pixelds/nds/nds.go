@@ -106,7 +106,8 @@ type Machine struct {
 	dispCapCnt     uint32
 	capturing      bool
 
-	frame []uint32 // 256x384: top screen then bottom screen
+	frame   []uint32 // 256x384: top screen then bottom screen
+	frameHi []uint32 // the same at the 3D render scale (hires.go)
 
 	header []byte
 	title  string
@@ -463,6 +464,10 @@ func (m *Machine) finishLine(y int) {
 			m.frame[y*ScreenW+i] = 0
 			m.frame[(ScreenH+y)*ScreenW+i] = 0
 		}
+	}
+	if m.frameHi != nil {
+		m.finishLineHi(top, y, 0, m.powcnt1&1 == 0)
+		m.finishLineHi(bottom, y, ScreenH, m.powcnt1&1 == 0)
 	}
 }
 

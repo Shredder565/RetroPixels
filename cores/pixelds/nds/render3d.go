@@ -59,6 +59,7 @@ func (g *gpu3D) renderFrame() {
 	vw := float64(vp[2] - vp[0] + 1)
 	vh := float64(vp[3] - vp[1] + 1)
 	top := float64(191 - vp[3])
+	sc := float64(g.sc)
 	for i := range s.Render {
 		p := &s.Render[i]
 		it := item{p: p, ymin: math.Inf(1), ymax: math.Inf(-1)}
@@ -69,8 +70,8 @@ func (g *gpu3D) renderFrame() {
 			}
 			iw := 1 / w
 			sv := scrVtx{
-				x:  (v.X*iw+1)*vw/2 + float64(vp[0]),
-				y:  (1-v.Y*iw)*vh/2 + top,
+				x:  ((v.X*iw+1)*vw/2 + float64(vp[0])) * sc,
+				y:  ((1-v.Y*iw)*vh/2 + top) * sc,
 				iw: iw,
 				r:  v.R * iw, g: v.G * iw, b: v.B * iw,
 				s: v.S * iw, t: v.T * iw,
@@ -109,12 +110,12 @@ func (g *gpu3D) renderFrame() {
 	if bands > 8 {
 		bands = 8
 	}
-	if len(items) < 32 {
+	if len(items) < 32 && g.sc == 1 {
 		bands = 1
 	}
 	var wg sync.WaitGroup
 	for b := 0; b < bands; b++ {
-		lo, hi := 192*b/bands, 192*(b+1)/bands
+		lo, hi := g.H*b/bands, g.H*(b+1)/bands
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -126,7 +127,7 @@ func (g *gpu3D) renderFrame() {
 				}
 				isMask := it.p.Attr>>4&3 == 3 && it.p.Attr>>24&63 == 0
 				if isMask && !lastShadowMask {
-					for k := lo * 256; k < hi*256; k++ {
+					for k := lo * g.W; k < hi*g.W; k++ {
 						g.stencil[k] = false
 					}
 				}
@@ -142,8 +143,17 @@ func (g *gpu3D) renderFrame() {
 	if dc&(1<<7) != 0 {
 		g.fog()
 	}
-	for i, c := range g.color {
-		g.out[i] = c
+	if g.sc == 1 {
+		copy(g.out[:], g.color)
+		return
+	}
+	copy(g.hi, g.color)
+	// the DS-resolution picture: the middle of each block
+	for y := 0; y < 192; y++ {
+		row := (y*g.sc + g.sc/2) * g.W
+		for x := 0; x < 256; x++ {
+			g.out[y*256+x] = g.color[row+x*g.sc+g.sc/2]
+		}
 	}
 }
 
@@ -160,12 +170,12 @@ func (g *gpu3D) clearPlanes() {
 		off := g.reg16(0x04000356)
 		ox, oy := int(off&0xff), int(off>>8)
 		tex := g.m.vram.tex
-		for y := 0; y < 192; y++ {
-			for x := 0; x < 256; x++ {
-				a := uint32(((y+oy)&0xff)*256+(x+ox)&0xff) * 2
+		for y := 0; y < g.H; y++ {
+			for x := 0; x < g.W; x++ {
+				a := uint32(((y/g.sc+oy)&0xff)*256+(x/g.sc+ox)&0xff) * 2
 				c := uint32(tex.read16(0x40000 + a))
 				d := uint32(tex.read16(0x60000 + a))
-				i := y*256 + x
+				i := y*g.W + x
 				al := uint32(0)
 				if c&0x8000 != 0 {
 					al = 31
@@ -249,6 +259,9 @@ func (g *gpu3D) drawPoly(p *Polygon, vs []scrVtx, trans, wbuf bool, lo, hi int) 
 	var tx texSampler
 	if texOn {
 		tx = g.sampler(p.Tex, p.Pal)
+		if g.tex.active() {
+			tx.rep = g.lookup(p.Tex, p.Pal)
+		}
 	}
 	var left, right scrVtx
 	for y := max(y0, lo); y < min(y1, hi); y++ {
@@ -299,7 +312,7 @@ func (g *gpu3D) drawPoly(p *Polygon, vs []scrVtx, trans, wbuf bool, lo, hi int) 
 		}
 		span := right.x - left.x
 		for x := xs; x < xe; x++ {
-			if x < 0 || x >= 256 {
+			if x < 0 || x >= g.W {
 				continue
 			}
 			edge := x == xs || x == xe-1 || y == y0 || y == y1-1
@@ -322,7 +335,7 @@ func (g *gpu3D) drawPoly(p *Polygon, vs []scrVtx, trans, wbuf bool, lo, hi int) 
 			} else {
 				z = clampDepth(left.z + (right.z-left.z)*t)
 			}
-			i := y*256 + x
+			i := y*g.W + x
 			dz := g.depth[i]
 			pass := z < dz
 			if equal {
@@ -457,9 +470,9 @@ func lerpS(a, b *scrVtx, t float64) scrVtx {
 func (g *gpu3D) edgeMark() {
 	clearID := uint32(g.reg16(0x04000352)) >> 8 & 63
 	cd := uint32(g.reg16(0x04000354)&0x7fff) * 0x200
-	for y := 0; y < 192; y++ {
-		for x := 0; x < 256; x++ {
-			i := y*256 + x
+	for y := 0; y < g.H; y++ {
+		for x := 0; x < g.W; x++ {
+			i := y*g.W + x
 			at := g.attr[i]
 			if at&pxEdge == 0 || g.color[i]>>16&31 == 0 {
 				continue
@@ -469,8 +482,8 @@ func (g *gpu3D) edgeMark() {
 			mark := false
 			check := func(nx, ny int) {
 				nid, nd := clearID, cd
-				if nx >= 0 && nx < 256 && ny >= 0 && ny < 192 {
-					j := ny*256 + nx
+				if nx >= 0 && nx < g.W && ny >= 0 && ny < g.H {
+					j := ny*g.W + nx
 					nid, nd = g.attr[j]&pxOpaqueID, g.depth[j]
 				}
 				if nid != id && d < nd {
@@ -550,6 +563,7 @@ type texSampler struct {
 	repS, repT   bool
 	flipS, flipT bool
 	color0Trans  bool
+	rep          *texRep // a texture pack's picture
 }
 
 func (g *gpu3D) sampler(tp, pltt uint32) texSampler {
@@ -590,6 +604,9 @@ func wrap(v, n int, rep, flip bool) int {
 // at returns the texel at texture coordinates s, t (texels × 16): its
 // colour and alpha (0-31).
 func (ts *texSampler) at(sf, tf float64) (uint16, int) {
+	if ts.rep != nil {
+		return ts.rep.at(ts, sf, tf)
+	}
 	s := wrap(int(math.Floor(sf/16)), ts.w, ts.repS, ts.flipS)
 	t := wrap(int(math.Floor(tf/16)), ts.h, ts.repT, ts.flipT)
 	tex, pal := ts.g.m.vram.tex, ts.g.m.vram.texpal

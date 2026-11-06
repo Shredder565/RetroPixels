@@ -108,12 +108,32 @@ type gpu3D struct {
 	s         g3dState
 	busyUntil int64
 
-	// the picture (render3d.go)
-	color   [256 * 192]uint32 // bits 0-14 colour, 16-20 alpha
-	depth   [256 * 192]uint32
-	attr    [256 * 192]uint32 // see render3d.go
-	stencil [256 * 192]bool
-	out     [256 * 192]uint32
+	// the picture (render3d.go), drawn at sc times the DS's resolution
+	// (W×H pixels); out is always the DS's own 256×192 (what the 2D engine
+	// and display capture see), hi the whole picture when sc > 1
+	sc, W, H int
+	color    []uint32 // bits 0-14 colour, 16-20 alpha
+	depth    []uint32
+	attr     []uint32 // see render3d.go
+	stencil  []bool
+	out      [256 * 192]uint32
+	hi       []uint32
+
+	tex texCache // texture packs (texpack.go)
+}
+
+// setScale draws the 3D picture at n times the DS's resolution.
+func (g *gpu3D) setScale(n int) {
+	n = max(1, min(n, 8))
+	g.sc, g.W, g.H = n, 256*n, 192*n
+	g.color = make([]uint32, g.W*g.H)
+	g.depth = make([]uint32, g.W*g.H)
+	g.attr = make([]uint32, g.W*g.H)
+	g.stencil = make([]bool, g.W*g.H)
+	g.hi = nil
+	if n > 1 {
+		g.hi = make([]uint32, g.W*g.H)
+	}
 }
 
 func newGPU3D(m *Machine) *gpu3D {
@@ -121,6 +141,7 @@ func newGPU3D(m *Machine) *gpu3D {
 	g.s.Proj, g.s.Pos, g.s.Vec, g.s.Tx = identity, identity, identity, identity
 	g.s.Clip = identity
 	g.s.Viewport = [4]int{0, 0, 255, 191}
+	g.setScale(1)
 	return g
 }
 
@@ -186,7 +207,7 @@ func (g *gpu3D) write32(a, v uint32) {
 		g.write16(a, uint16(v))
 		g.write16(a+2, uint16(v>>16))
 		return
-	case a == 0x04000400:
+	case a >= 0x04000400 && a < 0x04000440: // GXFIFO and its mirrors (games write it with STM)
 		g.fifoWrite(v)
 		return
 	case a >= 0x04000440 && a < 0x04000600:
@@ -468,7 +489,8 @@ func (g *gpu3D) exec(c uint8, p []uint32) {
 	case 0x27:
 		g.vertex(s.LastV[0], s16(p[0]), s16(p[0]>>16))
 	case 0x28:
-		g.vertex(int64(int16(s.LastV[0]+s10(p[0])<<3)), int64(int16(s.LastV[1]+s10(p[0]>>10)<<3)), int64(int16(s.LastV[2]+s10(p[0]>>20)<<3)))
+		// the differences are in the vertex's own 1/4096 units (±0.125)
+		g.vertex(int64(int16(s.LastV[0]+s10(p[0]))), int64(int16(s.LastV[1]+s10(p[0]>>10))), int64(int16(s.LastV[2]+s10(p[0]>>20))))
 	case 0x29:
 		s.PolyAttr = p[0]
 	case 0x2a:

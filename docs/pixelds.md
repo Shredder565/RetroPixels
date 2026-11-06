@@ -65,6 +65,34 @@ card and 3DS save data are in `%APPDATA%\RetroPixels\PixelDS\3DS`.
 I / J / K / L the D-pad, E = ZL, R = ZR (LT / RT on a controller); the
 others are as for DS games, and the mouse is the stylus.
 
+## Texture packs and the 3D resolution (DS games)
+
+- `nds/texdecode.go` decodes a texture the way the 3D engine reads it and
+  names it by a hash of its format, size and decoded texels (FNV-1a, 16 hex
+  digits). `nds/texpack.go` looks each texture up in the loaded pack (cached
+  until texture VRAM is remapped), dumps textures, and samples a pack's
+  picture in place of the texture (any size; its alpha, or the texture's
+  own see-through texels when the picture has none).
+- `nds/hires.go` and `render3d.go`: the 3D engine draws at 1-8 times the
+  DS's 256×192. The 2D engine records how each pixel used the 3D layer
+  (plain, blended by 3D alpha, by EVA/EVB, brightened or darkened), and the
+  big picture applies the same to the detailed 3D pixels; 2D layers are the
+  DS's pixels enlarged. Display capture and the 2D engine still see 256×192.
+- `cores/pixelds/texpack`: makes a pack from the game file: the DS file
+  system, LZ77, NARC archives, and the TEX0 (textures, palettes) and MDL0
+  (which palette each material uses) blocks of BMD0 / BTX0 files. Each
+  texture is enlarged with Catmull-Rom filtering; the characters' (by model
+  file name, "mario" by default) are restyled first (`modern`). Textures
+  dumped while playing that are a character's picture with other colours
+  (a power-up's palette) are restyled too.
+
+Packs live in `%APPDATA%\RetroPixels\PixelDS\textures\<game code>`, the
+automatic one in its `auto` folder (other pictures win over it), dumps in
+`dump`. Keys: F2 3D resolution, F3 dump on / off, F9 make the automatic
+pack, F10 pack on / off. Command line: `-scale N`, `-textures DIR|off`,
+`-dump-textures DIR`, and `-make-texpack [-style modern|hd] [-chars
+mario,luigi] [-pack-scale 4] [-only-chars] [-out DIR] game.nds`.
+
 ## Plan
 
 1. 2.29.0: DS games with 2D graphics, sound, touch, saves (done).
@@ -82,6 +110,8 @@ others are as for DS games, and the mouse is the stylus.
 6. 2.34.0: PixelDS is the default for 3DS games; games are recorded
    (-record / -ffmpeg, given by RetroPixels); the Xbox controller's left
    stick is only the circle pad on the 3DS, and LT is L on the DS (done).
-7. 2.35.0: save states for 3DS games; a menu bar with Pause and the save
+7. 2.35.0: DS texture packs (dump, load, an automatic pack made from the
+   game) and DS 3D at up to 4× the resolution (done).
+8. 2.36.0: save states for 3DS games; a menu bar with Pause and the save
    states (done).
-8. Fixes from real games.
+9. Fixes from real games.

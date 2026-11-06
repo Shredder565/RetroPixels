@@ -2,12 +2,22 @@
 
 All notable changes to RetroPixels. Newest first.
 
-## [2.35.0] - 2026-11-06
+## [2.36.0] - 2026-11-06
 
 - PixelDS has save states for 3DS games too (DS games had them already): F5 saves, F8 loads, F6 / F7 pick one of ten slots. A 3DS state holds the whole machine (processor, memory, threads, services, graphics and sound state) and loads into a freshly opened copy of the game, so play carries on exactly as it was; files the game had open are opened again.
 - PixelDS's window has a menu bar: Game (Pause, Restart, Fullscreen, Exit) and Save states (Save, Load, and the slot, ticked). It hides in fullscreen.
 - Pause: P (or the Pause key, the menu, or a controller's left-stick click) pauses and resumes. While paused nothing runs: no sound, and the recording leaves the pause out, so the video and its sound stay together.
+- This version also has 2.35.0's texture packs and 2.34.2's high-quality recordings together (2.35.0 was built without 2.34.2's recording change).
 - Recordings hold only the game's own sound: PixelDS writes the sound it makes itself, never other sounds from the PC.
+
+## [2.35.0] - 2026-11-05
+
+- Texture packs for DS games in PixelDS. A pack is a folder of pictures that replace the game's 3D textures, found by a hash of each texture, like other emulators' packs: put it in %APPDATA%\RetroPixels\PixelDS\textures\<game code> (New Super Mario Bros. is A2DE) and it loads when the game starts. F10 turns it on and off.
+- PixelDS can make a texture pack by itself: press F9 while playing (or run `PixelDS.exe -make-texpack game.nds`). It reads every 3D model and texture file in the game, enlarges each texture 4× with smooth filtering, and restyles Mario's textures in the colours of today's Mario games (a deeper red with softer shadows, a brighter royal blue, gold buttons, softer browns and more natural skin, with a faint cloth weave). For New Super Mario Bros. that is 912 pictures, 66 of them Mario's, in about 20 seconds. `-chars` picks other characters, `-style hd` only enlarges.
+- F3 dumps the textures a game draws into the pack's dump folder, to paint your own; pictures you put in the pack folder win over the automatic ones. Pressing F9 again after dumping also restyles Mario's textures in colours the game sets while playing (a power-up's), found by matching the picture.
+- DS 3D can be drawn at 2×, 3× or 4× the DS's resolution: F2 changes it (remembered), or `-scale`. The 3D picture gets the extra detail (and the texture packs' bigger pictures show), the 2D layers stay the DS's own pixels, and the game itself still sees the DS's picture, so it plays the same.
+- Fixed in PixelDS's DS 3D: models drew washed out over the background in games that blend the 3D layer (New Super Mario Bros.' Mario and Peach were half see-through); 3D commands sent to the geometry FIFO's mirror addresses were lost (games send them with STM), which broke models; and VTX_DIFF moved vertices 8 times too far.
+- What a texture pack can't do: change a model's shape (Mario keeps the DS model; a "newer model" look is only its paint and colours), or touch 2D graphics (New Super Mario Bros.' levels, blocks and most enemies are 2D sprites and tiles). Mario on screen is about 20 pixels tall at 1×, so the enlarged textures show best at 3× or 4×.
 
 ## [2.34.2] - 2026-11-05
 

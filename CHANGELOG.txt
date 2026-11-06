@@ -4,7 +4,7 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
-RetroPixels 2.35.0  (2026-11-06)
+RetroPixels 2.36.0  (2026-11-06)
 --------------------------------
 - PixelDS: save states for 3DS games too (F5 save, F8 load, F6/F7 slot).
 - PixelDS's window has a menu bar: Game (Pause, Restart, Fullscreen) and
@@ -12,6 +12,19 @@ RetroPixels 2.35.0  (2026-11-06)
 - Pause with P, the Pause key, the menu or a controller's left-stick
   click; the recording leaves the pause out.
 - Recordings hold only the game's own sound.
+
+RetroPixels 2.35.0  (2026-11-05)
+--------------------------------
+- Texture packs for DS games in PixelDS: pictures that replace a game's
+  3D textures, in %APPDATA%\RetroPixels\PixelDS\textures\<game code>.
+  F10 turns the pack on and off.
+- F9 makes a texture pack from the game by itself: every 3D texture
+  enlarged 4x, and Mario restyled in today's Mario colours. F3 dumps the
+  game's textures to paint your own.
+- DS 3D at 2x, 3x or 4x the DS's resolution (F2, remembered).
+- Fixed: washed-out 3D models over the background, lost 3D commands and
+  broken models (New Super Mario Bros.' world map).
+- Texture packs change textures, not models, and not 2D graphics.
 
 RetroPixels 2.34.2  (2026-11-05)
 --------------------------------
