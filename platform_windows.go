@@ -71,9 +71,13 @@ func openAppWindow(url string, wait bool) error {
 		"--user-data-dir="+profile,
 		"--no-first-run",
 		"--no-default-browser-check",
+		// The app window has its own browser profile. Without these, Edge signs
+		// that profile in with the Windows account on its own and pops up
+		// "We're now syncing your data across your browsers".
+		"--disable-sync",
 		"--window-size=1280,900",
 		"--autoplay-policy=no-user-gesture-required",
-		"--disable-features=Translate,msEdgeSidebarV2,msUndersideButton",
+		"--disable-features=Translate,msEdgeSidebarV2,msUndersideButton,msImplicitSignin",
 	)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("couldn't open the %s window: %v", appName, err)

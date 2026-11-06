@@ -4,6 +4,13 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.36.1  (2026-11-06)
+--------------------------------
+- Fixed: RetroPixels.exe's taskbar button showed the Edge icon. It shows
+  the RetroPixels icon now.
+- Fixed again (from 2.33.1, left out of 2.34.0 to 2.36.0): no more Edge
+  "We're now syncing your data across your browsers" popup on launch.
+
 RetroPixels 2.36.0  (2026-11-06)
 --------------------------------
 - PixelDS: save states for 3DS games too (F5 save, F8 load, F6/F7 slot).
@@ -46,6 +53,11 @@ RetroPixels 2.34.0  (2026-11-05)
 - The Xbox controller is ready for DS and 3DS games (left stick = circle
   pad on the 3DS, LT / RT = ZL / ZR; right stick and R3 = stylus).
 - PixelDS checked to be all original code (no melonDS or Azahar code).
+
+RetroPixels 2.33.1  (2026-11-05)
+--------------------------------
+- Fixed: RetroPixels.exe no longer pops up Edge's "We're now syncing your
+  data across your browsers" when it opens.
 
 RetroPixels 2.33.0  (2026-11-05)
 --------------------------------

@@ -92,7 +92,7 @@ your own dump of it the first time and remembers it.
 3. Drop a game onto the window, or click **Choose game file…**.
 
 **Requirements:** Windows 10 or 11, 64-bit, with Microsoft Edge (built into Windows; RetroPixels
-uses it to draw its window). For recording, RetroPixels downloads ffmpeg the first time it is needed.
+uses it to draw its window, in its own Edge profile with sync and sign-in turned off, so it doesn't sync anything; the window and its taskbar button show the RetroPixels icon). For recording, RetroPixels downloads ffmpeg the first time it is needed.
 
 > [!NOTE]
 > The executable is not code-signed yet, so Windows SmartScreen may show *"Windows protected your PC"*.

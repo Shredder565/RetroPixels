@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.36.1] - 2026-11-06
+
+- Fixed: RetroPixels.exe's taskbar button showed the Microsoft Edge icon. RetroPixels draws its window with Edge, and the taskbar grouped that window with Edge. The window now has RetroPixels' own taskbar identity, so its taskbar button shows the RetroPixels icon (and pinning it pins RetroPixels.exe). RetroPixels-Native.exe always showed its own icon.
+- Fixed again: opening RetroPixels.exe no longer pops up Microsoft Edge's "We're now syncing your data across your browsers". This fix from 2.33.1 had been left out of 2.34.0 to 2.36.0. The RetroPixels window starts with Edge's sync and automatic sign-in turned off; your own Edge isn't touched.
+
 ## [2.36.0] - 2026-11-06
 
 - PixelDS has save states for 3DS games too (DS games had them already): F5 saves, F8 loads, F6 / F7 pick one of ten slots. A 3DS state holds the whole machine (processor, memory, threads, services, graphics and sound state) and loads into a freshly opened copy of the game, so play carries on exactly as it was; files the game had open are opened again.
@@ -34,6 +39,10 @@ All notable changes to RetroPixels. Newest first.
 - 3DS and DS games in PixelDS are recorded automatically (with "Record games automatically" on, the default), in RetroPixels.exe and RetroPixels Native: PixelDS saves the game's own picture and sound as it runs, and the .mp4 is made when the game ends.
 - The Xbox controller is ready for DS and 3DS games out of the box: A / B / X / Y by position, LB / RB = L / R, Back = Select, Menu = Start; on the 3DS the left stick is the circle pad (no longer the D-pad as well) and LT / RT are ZL / ZR; on the DS LT is L too. The right stick moves the stylus; RT (DS) or R3 touches.
 - Checked that PixelDS is all original code: no code from melonDS, Azahar or any other emulator. The 3DS sound processor's shared memory is now laid out PixelDS's own way.
+
+## [2.33.1] - 2026-11-05
+
+- Fixed: opening RetroPixels.exe no longer pops up Microsoft Edge's "We're now syncing your data across your browsers". The RetroPixels window starts with Edge's sync and automatic sign-in turned off.
 
 ## [2.33.0] - 2026-11-05
 
