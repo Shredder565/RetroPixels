@@ -30,7 +30,7 @@ type Options struct {
 
 // Machine is a 3DS running one application.
 type Machine struct {
-	opts    Options
+	opts    Options `snap:"-"`
 	cpu     *arm.CPU
 	mem     *memory
 	kern    *kernel

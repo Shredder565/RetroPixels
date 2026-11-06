@@ -1,8 +1,6 @@
 package pixelds
 
 import (
-	"errors"
-
 	"retropixels/cores/pixelds/ctr"
 )
 
@@ -13,21 +11,24 @@ type threeDS struct {
 	m      *ctr.Machine
 	keys   uint32
 	cx, cy int
+	// load makes the machine again from the game file (a save state is
+	// loaded into a new machine)
+	load func() (*ctr.Machine, error)
 }
 
 func open3DS(name string, data []byte, o Options) (*Emulator, error) {
 	opts := ctr.Options{SDCard: o.SDCard, SaveData: o.SaveDir, UserName: o.UserName, Log: o.Log, SampleRate: o.SampleRate}
-	var m *ctr.Machine
-	var err error
-	if len(data) >= 4 && string(data[:4]) == "3DSX" {
-		m, err = ctr.Load3DSX(data, opts)
-	} else {
-		m, err = ctr.Load3DS(data, opts)
+	load := func() (*ctr.Machine, error) {
+		if len(data) >= 4 && string(data[:4]) == "3DSX" {
+			return ctr.Load3DSX(data, opts)
+		}
+		return ctr.Load3DS(data, opts)
 	}
+	m, err := load()
 	if err != nil {
 		return nil, err
 	}
-	return &Emulator{System: ThreeDS, m: &threeDS{m: m}, fps: ctr.FPS, w: ctr.TopW, h: ctr.ScreenH * 2,
+	return &Emulator{System: ThreeDS, m: &threeDS{m: m, load: load}, fps: ctr.FPS, w: ctr.TopW, h: ctr.ScreenH * 2,
 		bottomX: (ctr.TopW - ctr.BottomW) / 2, bottomW: ctr.BottomW}, nil
 }
 
@@ -57,11 +58,20 @@ func (t *threeDS) SetTouch(x, y int, down bool) { t.m.SetTouch(down, x, y) }
 func (t *threeDS) TakeAudio() []float32         { return t.m.TakeAudio() }
 func (t *threeDS) Save() []byte                 { return nil }
 func (t *threeDS) SaveChanged() bool            { return false }
-func (t *threeDS) SaveState() ([]byte, error) {
-	return nil, errors.New("save states aren't in PixelDS's 3DS side yet")
-}
-func (t *threeDS) LoadState([]byte) error {
-	return errors.New("save states aren't in PixelDS's 3DS side yet")
+func (t *threeDS) SaveState() ([]byte, error)   { return t.m.SaveState() }
+
+// LoadState loads the state into a new machine, and plays on from it.
+func (t *threeDS) LoadState(b []byte) error {
+	m, err := t.load()
+	if err != nil {
+		return err
+	}
+	if err := m.LoadState(b); err != nil {
+		return err
+	}
+	t.m = m
+	t.m.SetKeys(t.keys, t.cx, t.cy)
+	return nil
 }
 func (t *threeDS) Title() string    { return t.m.Title() }
 func (t *threeDS) GameCode() string { return t.m.ProductCode() }

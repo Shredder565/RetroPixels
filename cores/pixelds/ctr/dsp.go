@@ -109,12 +109,15 @@ func (d *dspService) startFrames() {
 		return
 	}
 	d.started = true
-	d.m.kern.every(dspFrame, func() {
-		if !d.running {
-			return
-		}
-		d.frame++
-		d.m.audio.frame()
-		d.signal(2, 2)
-	})
+	d.m.kern.every(dspFrame, d)
+}
+
+// tick is one audio frame: mix it and tell the game.
+func (d *dspService) tick() {
+	if !d.running {
+		return
+	}
+	d.frame++
+	d.m.audio.frame()
+	d.signal(2, 2)
 }

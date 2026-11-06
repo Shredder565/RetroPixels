@@ -54,6 +54,12 @@ var (
 	pReleaseCapture           = user32.NewProc("ReleaseCapture")
 	pGetKeyState              = user32.NewProc("GetKeyState")
 	pSetProcessDpiAwarenessCx = user32.NewProc("SetProcessDpiAwarenessContext")
+	pCreateMenu               = user32.NewProc("CreateMenu")
+	pCreatePopupMenu          = user32.NewProc("CreatePopupMenu")
+	pAppendMenuW              = user32.NewProc("AppendMenuW")
+	pSetMenu                  = user32.NewProc("SetMenu")
+	pCheckMenuItem            = user32.NewProc("CheckMenuItem")
+	pModifyMenuW              = user32.NewProc("ModifyMenuW")
 	pStretchDIBits            = gdi32.NewProc("StretchDIBits")
 	pSetStretchBltMode        = gdi32.NewProc("SetStretchBltMode")
 	pPatBlt                   = gdi32.NewProc("PatBlt")
@@ -87,6 +93,13 @@ const (
 	wmLButtonDown = 0x0201
 	wmLButtonUp   = 0x0202
 	wmApp         = 0x8000
+	wmCommand     = 0x0111
+
+	mfString    = 0x0000
+	mfPopup     = 0x0010
+	mfSeparator = 0x0800
+	mfChecked   = 0x0008
+	mfByCommand = 0x0000
 
 	swShow                  = 5
 	swpNoZOrder             = 0x0004
@@ -327,6 +340,92 @@ type app struct {
 	savedStyle uintptr
 	savedRect  winRect
 	slot       int
+	menu       uintptr
+	paused     atomic.Bool
+}
+
+// Menu commands.
+const (
+	cmdPause = 100 + iota
+	cmdRestart
+	cmdFullscreen
+	cmdExit
+	cmdSaveState
+	cmdLoadState
+	cmdSlot0 // cmdSlot0 + n: state slot n
+)
+
+const stateSlots = 10
+
+// makeMenu: the menu bar, with save states and pause where they can be seen.
+func (a *app) makeMenu() {
+	bar := call(pCreateMenu)
+	add := func(m uintptr, id int, text string) {
+		call(pAppendMenuW, m, mfString, uintptr(id), uintptr(unsafe.Pointer(u16(text))))
+	}
+	sep := func(m uintptr) { call(pAppendMenuW, m, mfSeparator, 0, 0) }
+	game := call(pCreatePopupMenu)
+	add(game, cmdPause, "&Pause\tP")
+	add(game, cmdRestart, "&Restart\tCtrl+R")
+	sep(game)
+	add(game, cmdFullscreen, "&Fullscreen\tF11")
+	sep(game)
+	add(game, cmdExit, "E&xit")
+	st := call(pCreatePopupMenu)
+	add(st, cmdSaveState, "&Save state\tF5")
+	add(st, cmdLoadState, "&Load state\tF8")
+	sep(st)
+	for i := 0; i < stateSlots; i++ {
+		add(st, cmdSlot0+i, fmt.Sprintf("Slot &%d", (i+1)%10))
+	}
+	call(pAppendMenuW, bar, mfPopup, game, uintptr(unsafe.Pointer(u16("&Game"))))
+	call(pAppendMenuW, bar, mfPopup, st, uintptr(unsafe.Pointer(u16("&Save states"))))
+	a.menu = bar
+	call(pSetMenu, a.hwnd, bar)
+	a.updateMenu()
+}
+
+// updateMenu ticks the pause item and the chosen slot, and names the slot
+// in the save and load items.
+func (a *app) updateMenu() {
+	if a.menu == 0 {
+		return
+	}
+	check := func(id int, on bool) {
+		f := uintptr(mfByCommand)
+		if on {
+			f |= mfChecked
+		}
+		call(pCheckMenuItem, a.menu, uintptr(id), f)
+	}
+	check(cmdPause, a.paused.Load())
+	for i := 0; i < stateSlots; i++ {
+		check(cmdSlot0+i, i == a.slot)
+	}
+	call(pModifyMenuW, a.menu, cmdSaveState, mfByCommand|mfString, cmdSaveState,
+		uintptr(unsafe.Pointer(u16(fmt.Sprintf("&Save state (slot %d)\tF5", a.slot+1)))))
+	call(pModifyMenuW, a.menu, cmdLoadState, mfByCommand|mfString, cmdLoadState,
+		uintptr(unsafe.Pointer(u16(fmt.Sprintf("&Load state (slot %d)\tF8", a.slot+1)))))
+}
+
+func (a *app) setSlot(n int) {
+	a.slot = (n%stateSlots + stateSlots) % stateSlots
+	a.updateMenu()
+	a.say(fmt.Sprintf("state slot %d", a.slot+1))
+}
+
+// togglePause pauses or resumes the game: while paused nothing runs, so
+// there is no sound and the recording leaves the pause out.
+func (a *app) togglePause() {
+	p := !a.paused.Load()
+	a.paused.Store(p)
+	a.keys.Store(0)
+	a.updateMenu()
+	if p {
+		a.say("paused (P to resume)")
+	} else {
+		a.say("resumed")
+	}
 }
 
 var theApp *app
@@ -406,9 +505,10 @@ func runWindow(path string) bool {
 	call(pRegisterClassExW, uintptr(unsafe.Pointer(&cls)))
 	// the window: the screens at twice their size
 	r := winRect{0, 0, int32(a.fw * 2), int32(a.fh * 2)}
-	call(pAdjustWindowRectEx, uintptr(unsafe.Pointer(&r)), wsOverlappedWindow, 0, 0)
+	call(pAdjustWindowRectEx, uintptr(unsafe.Pointer(&r)), wsOverlappedWindow, 1, 0) // with the menu bar
 	a.hwnd = call(pCreateWindowExW, 0, uintptr(unsafe.Pointer(u16("PixelDS"))), uintptr(unsafe.Pointer(u16("PixelDS"))),
 		wsOverlappedWindow|wsVisible, cwUseDefault, cwUseDefault, uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 0, 0, inst, 0)
+	a.makeMenu()
 	call(pShowWindow, a.hwnd, swShow)
 	call(pSetForegroundWindow, a.hwnd)
 	if *fullscreen && !*windowed {
@@ -430,10 +530,13 @@ func runWindow(path string) bool {
 
 func (a *app) updateTitle() {
 	t := "PixelDS " + pixelds.Version + " - " + a.title
+	if a.paused.Load() {
+		t += " - PAUSED"
+	}
 	if a.flash != "" && time.Since(a.flashAt) < 3*time.Second {
 		t += " - " + a.flash
 	} else {
-		t += fmt.Sprintf(" - F5 save state, F8 load (slot %d, F6/F7 to change), F11 fullscreen, Ctrl+R restart", a.slot+1)
+		t += fmt.Sprintf(" - P pause, F5 save state, F8 load (slot %d, F6/F7 to change), F11 fullscreen", a.slot+1)
 	}
 	call(pSetWindowTextW, a.hwnd, uintptr(unsafe.Pointer(u16(t))))
 }
@@ -483,12 +586,14 @@ func (a *app) toggleFullscreen() {
 		mon := call(pMonitorFromWindow, a.hwnd, monitorDefaultToNearest)
 		mi := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
 		call(pGetMonitorInfoW, mon, uintptr(unsafe.Pointer(&mi)))
+		call(pSetMenu, a.hwnd, 0)
 		call(pSetWindowLongPtrW, a.hwnd, gwlStyle, a.savedStyle&^wsOverlappedWindow|wsPopup|wsVisible)
 		r := mi.Monitor
 		call(pSetWindowPos, a.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpFrameChanged|swpNoOwnerZOrder)
 		a.fullscreen = true
 	} else {
 		call(pSetWindowLongPtrW, a.hwnd, gwlStyle, a.savedStyle)
+		call(pSetMenu, a.hwnd, a.menu)
 		r := a.savedRect
 		call(pSetWindowPos, a.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpFrameChanged|swpNoOwnerZOrder|swpNoZOrder)
 		a.fullscreen = false
@@ -542,7 +647,9 @@ func (a *app) stateCmd(save bool) {
 		}
 		a.mu.Lock()
 		a.pending = msgText
+		copy(a.frame, e.Screen()) // shows the loaded state even while paused
 		a.mu.Unlock()
+		call(pInvalidateRect, a.hwnd, 0, 0)
 		call(pPostMessageW, a.hwnd, wmApp, 0, 1)
 	}
 }
@@ -589,12 +696,13 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 			a.stateCmd(false)
 			return 0
 		case wp == 0x75: // F6
-			a.slot = (a.slot + 9) % 10
-			a.say(fmt.Sprintf("state slot %d", a.slot+1))
+			a.setSlot(a.slot - 1)
 			return 0
 		case wp == 0x76: // F7
-			a.slot = (a.slot + 1) % 10
-			a.say(fmt.Sprintf("state slot %d", a.slot+1))
+			a.setSlot(a.slot + 1)
+			return 0
+		case wp == 'P' || wp == 0x13: // P, Pause
+			a.togglePause()
 			return 0
 		case ctrl && wp == 'R':
 			a.cmds <- nil // restart
@@ -626,6 +734,24 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmLButtonUp:
 		call(pReleaseCapture)
 		a.mouseDown.Store(false)
+		return 0
+	case wmCommand:
+		switch id := int(wp & 0xffff); {
+		case id == cmdPause:
+			a.togglePause()
+		case id == cmdRestart:
+			a.cmds <- nil
+		case id == cmdFullscreen:
+			a.toggleFullscreen()
+		case id == cmdExit:
+			call(pPostMessageW, hwnd, wmClose, 0, 0)
+		case id == cmdSaveState:
+			a.stateCmd(true)
+		case id == cmdLoadState:
+			a.stateCmd(false)
+		case id >= cmdSlot0 && id < cmdSlot0+stateSlots:
+			a.setSlot(id - cmdSlot0)
+		}
 		return 0
 	case wmApp:
 		a.mu.Lock()
@@ -664,6 +790,7 @@ func (a *app) run() {
 	saveDirty := false
 	cx, cy := float64(e.BottomWidth()/2), float64(e.TopHeight()/2) // the controller's stylus pointer
 	errShown := false
+	l3Held := false
 	pcm := make([]int16, 0, 4096)
 	rec := newRecorder(e)
 	defer rec.stop(sampleRate)
@@ -700,6 +827,20 @@ func (a *app) run() {
 			continue
 		default:
 		}
+		if a.paused.Load() {
+			// paused: the game, its sound and the recording all wait; the
+			// controller's left-stick click resumes
+			if st, ok := pd.read(); ok {
+				l3 := st.Buttons&0x0040 != 0
+				if l3 && !l3Held {
+					call(pPostMessageW, a.hwnd, wmCommand, cmdPause, 0)
+				}
+				l3Held = l3
+			}
+			time.Sleep(15 * time.Millisecond)
+			next = time.Now()
+			continue
+		}
 		bits := a.keys.Load()
 		three := e.HasCirclePad()
 		var padX, padY float64
@@ -710,6 +851,12 @@ func (a *app) run() {
 		touchDown, tx, ty := a.mouseDown.Load(), int(a.mouseX.Load()), int(a.mouseY.Load())
 		if st, ok := pd.read(); ok {
 			b := st.Buttons
+			// the left-stick click pauses
+			l3 := b&0x0040 != 0
+			if l3 && !l3Held {
+				call(pPostMessageW, a.hwnd, wmCommand, cmdPause, 0)
+			}
+			l3Held = l3
 			m := map[uint16]uint32{0x1000: pixelds.BtnB, 0x2000: pixelds.BtnA, 0x4000: pixelds.BtnY, 0x8000: pixelds.BtnX,
 				0x0100: pixelds.BtnL, 0x0200: pixelds.BtnR, 0x0010: pixelds.BtnStart, 0x0020: pixelds.BtnSelect,
 				0x0001: pixelds.BtnUp, 0x0002: pixelds.BtnDown, 0x0004: pixelds.BtnLeft, 0x0008: pixelds.BtnRight}

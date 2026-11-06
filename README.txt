@@ -317,12 +317,20 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   and 3D graphics (3D new in 2.30.0), sound, touch, saves and save states.
   PixelDS keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start,
   Shift=Select, the mouse is the stylus. F5 saves a state, F8 loads it,
-  F6/F7 pick the slot, F11 or Alt+Enter is fullscreen, Ctrl+R restarts.
+  F6/F7 pick the slot (ten per game), P pauses and resumes, F11 or
+  Alt+Enter is fullscreen, Ctrl+R restarts. The same are in PixelDS's
+  menu bar (Game: Pause, Restart, Fullscreen; Save states: Save, Load
+  and the slot). Save states work for DS and 3DS games (3DS since
+  2.35.0). While a game is paused nothing runs: no sound, and the
+  recording leaves the pause out. A controller's left-stick click pauses
+  too. Recordings hold only the game's own sound, never other sounds
+  from your PC.
   An Xbox controller works straight away, for DS and 3DS games: A / B /
   X / Y by position (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R,
   Back = Select, Menu = Start, the D-pad and left stick the D-pad (on the
   3DS the left stick is the circle pad and LT / RT are ZL / ZR); the right
-  stick moves a stylus pointer and RT (DS) or R3 touches. Saves are game.sav next to the game.
+  stick moves a stylus pointer and RT (DS) or R3 touches, and the
+  left-stick click (L3) pauses. Saves are game.sav next to the game.
 - 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
   They must be decrypted dumps. PixelDS plays a .cia directly, with no
   installing. PixelDS's 3DS keys:

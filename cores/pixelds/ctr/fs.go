@@ -30,14 +30,17 @@ type archive struct {
 
 type fsFile struct {
 	path  string
-	romfs []byte // a RomFS file's data, or nil
-	f     *os.File
+	romfs []byte   // a RomFS file's data, or nil
+	f     *os.File `snap:"-"` // reopened from host and mode after a save state loads
+	host  string
+	mode  int
 }
 
 func (f *fsFile) name() string { return "file " + f.path }
 
 type fsDir struct {
-	entries []os.DirEntry
+	entries []os.DirEntry `snap:"-"` // read again from host after a save state loads
+	host    string
 	pos     int
 }
 
@@ -126,7 +129,7 @@ func (v *fsService) openFile(a *archive, path string, flags uint32) (*fsFile, ui
 	if err != nil {
 		return nil, rcFSNotFound
 	}
-	return &fsFile{path: path, f: f}, rcOK
+	return &fsFile{path: path, f: f, host: hp, mode: mode &^ os.O_CREATE}, rcOK
 }
 
 func (v *fsService) handle(c *ipc) {
@@ -227,7 +230,7 @@ func (v *fsService) handle(c *ipc) {
 			c.handles(0)
 			return
 		}
-		c.handles(k.add(&session{svc: &dirService{m: m, d: &fsDir{entries: es}}}))
+		c.handles(k.add(&session{svc: &dirService{m: m, d: &fsDir{entries: es, host: a.host(p)}}}))
 	case 0x0814: // GetSdmcArchiveResource -> sector size, cluster size, total, free clusters
 		c.push(512, 0x8000, 0x100000, 0x80000)
 	case 0x0817, 0x0818: // IsSdmcDetected, IsSdmcWritable
@@ -312,6 +315,7 @@ func (v *fileService) handle(c *ipc) {
 		if f.f != nil {
 			f.f.Close()
 			f.f = nil
+			f.host = "" // closed: not reopened by a save state
 		}
 	case 0x0809: // Flush
 		if f.f != nil {

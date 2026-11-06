@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.35.0] - 2026-11-06
+
+- PixelDS has save states for 3DS games too (DS games had them already): F5 saves, F8 loads, F6 / F7 pick one of ten slots. A 3DS state holds the whole machine (processor, memory, threads, services, graphics and sound state) and loads into a freshly opened copy of the game, so play carries on exactly as it was; files the game had open are opened again.
+- PixelDS's window has a menu bar: Game (Pause, Restart, Fullscreen, Exit) and Save states (Save, Load, and the slot, ticked). It hides in fullscreen.
+- Pause: P (or the Pause key, the menu, or a controller's left-stick click) pauses and resumes. While paused nothing runs: no sound, and the recording leaves the pause out, so the video and its sound stay together.
+- Recordings hold only the game's own sound: PixelDS writes the sound it makes itself, never other sounds from the PC.
+
 ## [2.34.2] - 2026-11-05
 
 - PixelDS recordings are now high-quality .mp4 files by default. PixelDS saves the DS / 3DS screens losslessly (full colour) while you play, and the .mp4 is made once, scaled up with crisp square pixels to 1080p or more (DS games 768×1152, 3DS games 1200×1440), H.264 at near-lossless quality (CRF 14 or the graphics card's equivalent) with 256 kbps AAC sound. Before, the picture was compressed twice and kept at only twice the screens' size.

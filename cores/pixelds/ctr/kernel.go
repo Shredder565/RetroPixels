@@ -341,14 +341,23 @@ func (k *kernel) update() {
 	k.reschedule(false)
 }
 
+// periodicTask is something the machine does at regular times: the DSP's
+// audio frames. It names its owner rather than holding a function, so it
+// can be kept in a save state.
 type periodicTask struct {
 	at, interval int64
-	fn           func()
+	dsp          *dspService
 }
 
-// every runs fn every interval ticks from now on.
-func (k *kernel) every(interval int64, fn func()) {
-	k.periodic = append(k.periodic, &periodicTask{at: k.now() + interval, interval: interval, fn: fn})
+// every runs the DSP's frame every interval ticks from now on.
+func (k *kernel) every(interval int64, d *dspService) {
+	k.periodic = append(k.periodic, &periodicTask{at: k.now() + interval, interval: interval, dsp: d})
+}
+
+func (p *periodicTask) run() {
+	if p.dsp != nil {
+		p.dsp.tick()
+	}
 }
 
 // tick handles timeouts and timers at the current time.
@@ -357,7 +366,7 @@ func (k *kernel) tick() {
 	for _, p := range k.periodic {
 		for p.at <= now {
 			p.at += p.interval
-			p.fn()
+			p.run()
 		}
 	}
 	for _, tm := range k.timers {

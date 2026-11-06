@@ -39,7 +39,7 @@ const (
 // virtual address space, kept as a table of 4 KB pages.
 type memory struct {
 	fcram, vram, dsp []byte
-	pages            [1 << 20][]byte // virtual page → its 4 KB of physical memory
+	pages            [1 << 20][]byte `snap:"-"` // virtual page → its 4 KB of physical memory (rebuilt from phys)
 	phys             [1 << 20]uint32 // virtual page → physical address (0: none)
 	used             []bool          // FCRAM pages in use (application region)
 	linearNext       uint32          // next free linear heap offset

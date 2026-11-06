@@ -53,7 +53,12 @@ the behaviour of other emulators were used as references only.
 
 Saves are `game.sav` next to the game, or under
 `%APPDATA%\RetroPixels\PixelDS\saves` when that folder can't be written.
-Save states are in `%APPDATA%\RetroPixels\PixelDS\states`. The 3DS's SD
+Save states (DS and 3DS games, ten slots each) are in
+`%APPDATA%\RetroPixels\PixelDS\states`; the window's menu bar has them
+(Save states) and Pause (Game; P or a controller's left-stick click). A
+3DS state is the whole machine, saved by `cores/pixelds/snap`, which
+walks the machine's Go values and loads them into a newly opened copy of
+the game (the game's own files aren't stored in it). The 3DS's SD
 card and 3DS save data are in `%APPDATA%\RetroPixels\PixelDS\3DS`.
 
 3DS keys: arrows (or a controller's left stick) are the circle pad,
@@ -77,4 +82,6 @@ others are as for DS games, and the mouse is the stylus.
 6. 2.34.0: PixelDS is the default for 3DS games; games are recorded
    (-record / -ffmpeg, given by RetroPixels); the Xbox controller's left
    stick is only the circle pad on the 3DS, and LT is L on the DS (done).
-7. Save states for 3DS games and fixes from real games.
+7. 2.35.0: save states for 3DS games; a menu bar with Pause and the save
+   states (done).
+8. Fixes from real games.
