@@ -58,6 +58,12 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Box art in every library** (new in 2.38.0). Add a games folder and the GameCube, Wii, Wii U,
+  3DS / DS and arcade libraries show each game's cover instead of its initials: your own picture
+  next to the game first (same file name, `.png` / `.jpg` / `.webp`, or in a `boxart` or `covers`
+  folder beside it), else downloaded once from GameTDB (by the ID in the game file),
+  libretro-thumbnails (by name) or the Arcade Database (by MAME name) and kept in
+  `%LOCALAPPDATA%\RetroPixels\boxart`.
 - **Any arcade game in any version of MAME, with MAME built in.** The download comes with the MAME
   team's official Windows release of MAME, unchanged. Add as many other MAME versions as you like
   (your own `mame.exe`, found on your PC, or any official release downloaded from inside the app).
@@ -193,6 +199,7 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | Path | What it is |
 | --- | --- |
 | `main.go`, `*.go` | Windows app: app window, Dolphin and MAME integration, recording, settings |
+| `internal/boxart/` | Box art for the libraries: pictures next to the games, GameTDB, libretro-thumbnails and the Arcade Database, cached; shared by both apps |
 | `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps |
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |

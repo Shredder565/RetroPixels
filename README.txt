@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.36.1 (the number also shows next to the RetroPixels name in the app).
+Version 2.38.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.36.1.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.36.1.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.38.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.38.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -49,6 +49,21 @@ What's in the download
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
   your own dumps and the keys from your own console (see below).
+
+Box art in the libraries (new in 2.38.0)
+- The GameCube, Wii, Wii U and 3DS / DS tabs show each game's cover, and
+  the Arcade (MAME) list a small one beside each game. Games with no art
+  anywhere keep their initials.
+- Your own pictures come first: put one next to the game with the game's
+  file name (Metroid Prime (USA).iso -> Metroid Prime (USA).png, or .jpg,
+  .jpeg, .webp, .gif), or in a "boxart", "covers", "images" or
+  "media\boxart" folder beside the game. An unpacked Wii U game can have
+  cover.png in its title folder.
+- Otherwise the cover is downloaded once from GameTDB (by the ID read from
+  the game file), libretro-thumbnails (RetroArch's box art, by name) or,
+  for arcade games, the Arcade Database (by MAME name), shrunk and kept in
+  %LOCALAPPDATA%\RetroPixels\boxart. After that it works offline.
+- "Find games again" / "Look again" also look again for missing covers.
 
 First run
 - Windows may show "Windows protected your PC" because this program isn't
@@ -699,6 +714,8 @@ Where things are kept
 - Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json;
                  GameCube / Wii resolution: gamecube-resolution.txt)
 - Recordings:    Videos\RetroPixels
+- Box art:       %LOCALAPPDATA%\RetroPixels\boxart (covers downloaded
+                 for the libraries; delete it to fetch them again)
 - Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)
 - GameCube / Wii: PixelU\wii\User (settings, memory cards, Wii saves and
                  the Wii keys file in its Wii folder)

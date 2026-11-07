@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"retropixels/internal/boxart"
 	"retropixels/internal/mame"
 )
 
@@ -59,6 +60,12 @@ type mameLibrary struct {
 	withList []string       // the "Play with" choices' exes ("" = default)
 	padPrev  PadState
 	padHeld  time.Time
+	covers   *coverList // the games' box art
+}
+
+// mameCover: what box art is looked for with.
+func mameCover(g mame.Game) boxart.Game {
+	return boxart.Game{System: boxart.Arcade, Path: g.Path, Name: g.Name, Short: g.Short}
 }
 
 func (a *app) openMameLibrary() {
@@ -158,6 +165,7 @@ func (l *mameLibrary) build() {
 	call(pSendMessageW, s, emSetCueBanner, 1, uintptr(unsafe.Pointer(u16("Search games…"))))
 	l.child("STATIC", "", ssNoPrefix, 0, idMameCount)
 	lv := l.child("SysListView32", "", lvsReport|lvsSingleSel|lvsShowSelAlways|wsTabStop, 0x200, idMameList)
+	l.covers = newCoverList(lv, l.scale(36), l.scale(48))
 	l.columns(lv, []struct {
 		name string
 		w    int
@@ -371,7 +379,7 @@ func (l *mameLibrary) fill() {
 	now := time.Now()
 	selIx := -1
 	for i, g := range l.shown {
-		it := lvItem{Mask: 1, Item: int32(i), Text: u16(g.Name)}
+		it := lvItem{Mask: 1 | 2, Item: int32(i), Text: u16(g.Name), Image: l.covers.image(mameCover(g))} // text and cover
 		call(pSendMessageW, lv, lvmInsertItemW, 0, uintptr(unsafe.Pointer(&it)))
 		ver := "—"
 		if st := c.Status(g); st.Label != "" {
@@ -664,6 +672,14 @@ func mameLibProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmTimer:
 		if wp == timerMamePad {
 			l.pollPad()
+			l.covers.askVisible(len(l.shown), func(i int) boxart.Game { return mameCover(l.shown[i]) })
+			l.covers.poll(func(k string, img int32) {
+				for i, g := range l.shown {
+					if coverKey(mameCover(g)) == k {
+						l.covers.setRow(i, img)
+					}
+				}
+			})
 		}
 		return 0
 	case wmClose:

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"retropixels/internal/boxart"
 	"retropixels/internal/dolphin"
 )
 
@@ -129,6 +130,16 @@ type dolLibrary struct {
 	padHeld  time.Time // when up / down started being held (for repeat)
 	filterIx int
 	sortIx   int
+	covers   *coverList // the games' box art
+}
+
+// dolCover: what box art is looked for with.
+func dolCover(g dolphin.Game) boxart.Game {
+	sys := boxart.Wii
+	if g.Platform == "GameCube" {
+		sys = boxart.GameCube
+	}
+	return boxart.Game{System: sys, Path: g.Path, Name: g.Name, ID: g.ID}
 }
 
 func (a *app) openDolLibrary() {
@@ -223,6 +234,7 @@ func (l *dolLibrary) build() {
 	l.child("STATIC", "", ssNoPrefix, 0, idLibCount)
 	lv := l.child("SysListView32", "", lvsReport|lvsSingleSel|lvsShowSelAlways|wsTabStop, 0x200, idLibList)
 	call(pSendMessageW, lv, lvmSetExStyle, 0x20|0x10000, 0x20|0x10000) // full-row select, double-buffered
+	l.covers = newCoverList(lv, l.scale(36), l.scale(48))
 	for i, c := range []struct {
 		name string
 		w    int
@@ -338,7 +350,7 @@ func (l *dolLibrary) fill() {
 	now := time.Now()
 	selIx := -1
 	for i, g := range l.shown {
-		it := lvItem{Mask: 1, Item: int32(i), Text: u16(g.Name)}
+		it := lvItem{Mask: 1 | 2, Item: int32(i), Text: u16(g.Name), Image: l.covers.image(dolCover(g))} // text and cover
 		call(pSendMessageW, lv, lvmInsertItemW, 0, uintptr(unsafe.Pointer(&it)))
 		for col, text := range []string{g.Platform, g.ID, fmtSize(g.Size), fmtPlayed(g.Played, now)} {
 			sub := lvItem{Mask: 1, Item: int32(i), SubItem: int32(col + 1), Text: u16(text)}
@@ -536,6 +548,7 @@ func dolLibProc(hwnd, m, wp, lp uintptr) uintptr {
 					break
 				}
 				setWindowText(l.ctl[idLibCount], "Looking for games…")
+				l.covers.forget()
 				for _, f := range dolphin.GuessFolders(exe) {
 					a.settings.Dolphin.addFolder(f)
 				}
@@ -576,6 +589,14 @@ func dolLibProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmTimer:
 		if wp == timerLibPad {
 			l.pollPad()
+			l.covers.askVisible(len(l.shown), func(i int) boxart.Game { return dolCover(l.shown[i]) })
+			l.covers.poll(func(k string, img int32) {
+				for i, g := range l.shown {
+					if coverKey(dolCover(g)) == k {
+						l.covers.setRow(i, img)
+					}
+				}
+			})
 		}
 		return 0
 	case wmClose:

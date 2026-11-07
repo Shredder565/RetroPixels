@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.38.0] - 2026-11-07
+
+- Box art in the libraries. When you add a games folder, each game's tile in the GameCube, Wii, Wii U and 3DS / DS tabs shows the game's cover instead of its initials, and the Arcade (MAME) list shows a small cover beside each game. The initials stay only for games with no art anywhere.
+- Where the art comes from: first a picture next to the game (the game's file name with .png, .jpg, .jpeg, .webp or .gif, or the same name in a boxart, covers, images or media\boxart folder beside it; an unpacked Wii U game's own cover.png / boxart.png). Then online: GameTDB by the game's ID (read from the game file: the disc ID, the DS / 3DS game code, the Wii U product code), libretro-thumbnails (RetroArch's box art) by the game's name, and for arcade games the Arcade Database by MAME name. An unpacked Wii U game with nothing online shows its own icon.
+- Covers are downloaded once, shrunk and kept in %LOCALAPPDATA%\RetroPixels\boxart, so the library opens with them straight away next time and works offline. Covers load as their tiles scroll into view, a few at a time. "Find games again" (GameCube / Wii) and "Look again" (MAME) also look again for covers that weren't found.
+- RetroPixels Native: the GameCube / Wii library and the Arcade (MAME) library show each game's cover beside its name too.
+
 ## [2.37.0] - 2026-11-06
 
 - PixelDS's window has real buttons above the screens: Pause (Resume while paused), Save state, Load state and Stop recording. In fullscreen they show over the picture when you move the mouse and hide again after three seconds.

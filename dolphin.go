@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode"
 
+	"retropixels/internal/boxart"
 	"retropixels/internal/dolphin"
 	"retropixels/internal/pixelu"
 )
@@ -1001,6 +1002,7 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			_ = saveConfigLocked()
 			cfgMu.Unlock()
 		case "rescan":
+			boxart.Forget() // look for missing covers again too
 			cfgMu.Lock()
 			cfg.DolphinFolders = nil
 			cfgMu.Unlock()

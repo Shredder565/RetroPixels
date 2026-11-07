@@ -4,6 +4,17 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.38.0  (2026-11-07)
+--------------------------------
+- Box art: the GameCube, Wii, Wii U and 3DS / DS libraries show each
+  game's cover instead of its initials, and the arcade list shows a small
+  cover beside each game (RetroPixels Native's libraries too).
+- A picture next to the game is used first (same name as the game file,
+  .png / .jpg / .webp, or in a boxart or covers folder beside it); else the
+  cover is downloaded once from GameTDB, libretro-thumbnails or the Arcade
+  Database and kept in %LOCALAPPDATA%\RetroPixels\boxart.
+- Initials show only for games with no art anywhere.
+
 RetroPixels 2.37.0  (2026-11-06)
 --------------------------------
 - PixelDS has buttons above the screens: Pause, Save state, Load state
