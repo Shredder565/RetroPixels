@@ -246,9 +246,9 @@ func (a *app) buildMenu() {
 	appendMenu(a.gameMenu, mfString, cmdUndoLoad, "&Undo load\tCtrl+Z")
 	a.uiGameMenu()
 	a.addDipMenu()
-	a.addSeatMenu()
 	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
+	a.addSeatMenu()
 	a.addDolphinMenu()
 	a.addPixelUMenu()
 	a.addHandheldMenu()
@@ -1075,6 +1075,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.frameMu.Unlock()
 	a.sess = s
 	a.restoreSeat(s)
+	defer a.seatHint(s)
 	a.settings.addRecent(path)
 	a.settings.LastFolder = filepath.Dir(path)
 	saveSettings(a.settings)

@@ -2,9 +2,10 @@ package main
 
 import "strings"
 
-// The Game menu's Player menu (seat.go): "Player 1 (Leonardo)" ...
-// "Player 4 (Raphael)" in arcade games for 3 or 4 players. No keys of its
-// own (the number keys are the games' Start and Coin keys).
+// The Player menu on the menu bar (seat.go): "Player 1 (Leonardo)" ...
+// "Player 4 (Raphael)" in arcade games for 3 or 4 players. F7 / Shift+F7
+// and a flick of the controller's right stick up go round the players (the
+// number keys are the games' Start and Coin keys).
 
 const cmdSeat0 = 1200 // ..1203
 
@@ -12,7 +13,30 @@ const seatMenuLabel = "Pla&yer"
 
 func (a *app) addSeatMenu() {
 	a.seatMenu = call(pCreatePopupMenu)
-	appendMenu(a.gameMenu, mfPopup, a.seatMenu, seatMenuLabel)
+	appendMenu(a.menu, mfPopup, a.seatMenu, seatMenuLabel)
+}
+
+// nextSeat goes round the players (d = 1 or -1): F7 / Shift+F7 and the
+// right stick flicked up.
+func (a *app) nextSeat(d int) {
+	s := a.sess
+	if s == nil {
+		return
+	}
+	n := s.seats()
+	if n == 0 {
+		a.showMessage("Choosing a player is for arcade games for 3 or 4 players")
+		return
+	}
+	a.pickSeat((int(s.seat.Load()) + d + n) % n)
+}
+
+// seatHint: a 3- or 4-player game says who you are and how to change it.
+func (a *app) seatHint(s *session) {
+	if a.sess != s || s.seats() == 0 {
+		return
+	}
+	a.showMessage(s.seatMessage(int(s.seat.Load())) + " - Player menu, F7 or right stick up to change")
 }
 
 // fillSeats builds the menu as it opens, the current player ticked.

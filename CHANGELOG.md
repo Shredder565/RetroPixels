@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.39.1] - 2026-11-07
+
+- RetroPixels Native: no more "Couldn't load the state" popups. Clicking the controller's left stick (Load state) by accident with an empty slot, or a state that can't be loaded, now shows a short note in the title bar and the game carries on.
+- RetroPixels Native: choosing one of four players is easy to find again. The Player menu is on the menu bar (it was tucked inside the Game menu), F7 / Shift+F7 and a flick of the controller's right stick up go round the players, and 3- and 4-player arcade games (TMNT, Turtles in Time, The Simpsons, Double Dragon 3) say who you are when they start.
+
 ## [2.39.0] - 2026-11-07
 
 - Any arcade ROM set plays, whichever MAME version it was made for. RetroPixels now recognises a set by its files' CRCs instead of its name, with a history of every arcade game's chip files in every MAME version from 0.171 to 0.289, built into both programs (made from MAME's own source code).
