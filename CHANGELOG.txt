@@ -4,6 +4,23 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.39.0  (2026-11-07)
+--------------------------------
+- Any arcade ROM set plays, whichever MAME version it was made for: sets
+  are recognised by their files' CRCs, not their names, using a history of
+  every arcade game's chip files in every MAME version from 0.171 to 0.289
+  (built in, made from MAME's own source code).
+- Renamed zips and files are recognised and listed under the game's name.
+- Merged, split and non-merged sets: missing parent and BIOS files are
+  taken from any zip in your ROM folders. The set MAME needs is put
+  together in %LOCALAPPDATA%\RetroPixels\MAME sets; your zips are never
+  changed.
+- A set made for another MAME version starts in a MAME you have that
+  accepts it, or RetroPixels downloads the official MAME version that does
+  and starts the game when it's ready (RetroPixels Native asks first).
+- A set no MAME version can play says which files are missing (name and
+  CRC) and the closest MAME version; the library shows it beside the game.
+
 RetroPixels 2.38.0  (2026-11-07)
 --------------------------------
 - Box art: the GameCube, Wii, Wii U and 3DS / DS libraries show each

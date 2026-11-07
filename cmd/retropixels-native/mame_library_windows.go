@@ -394,6 +394,13 @@ func (l *mameLibrary) fill() {
 				ver = "✓ " + ver
 			case mame.Bad:
 				ver = "✗ " + ver + ": won't start"
+				if st.Fix != "" {
+					// RetroPixels can fix the set (or says what's missing)
+					ver = "✗ " + st.Fix
+					if strings.HasPrefix(st.Fix, "Plays") {
+						ver = "✓ " + st.Fix
+					}
+				}
 				if len(st.PlaysIn) > 0 {
 					ver += "; plays in " + strings.Join(st.PlaysIn, ", ")
 				}

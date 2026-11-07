@@ -12,6 +12,7 @@ package main
 // mameEvent, ...); the library window is in mame_library_windows.go.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,7 +56,8 @@ type mameState struct {
 	run     *mameRun // UI thread only, like the rest unless noted
 	menu    uintptr
 	lib     *mameLibrary
-	problem string // why the last game didn't start, for the library
+	problem string     // why the last game didn't start, for the library
+	after   *mame.Game // the game to start when the MAME being downloaded is ready
 
 	mu       sync.Mutex // the rest is shared with background work
 	games    []mame.Game
@@ -249,6 +251,25 @@ func (a *app) mameDownload(rel mame.Release) {
 	}()
 }
 
+// mameDownloadVersion downloads one MAME version (from a background
+// goroutine: it looks the release up first).
+func (a *app) mameDownloadVersion(version string) {
+	rels, err := mame.NewInstaller().Releases()
+	if err == nil {
+		for _, r := range rels {
+			if r.Version == version {
+				a.mame.mu.Lock()
+				a.mame.rels, a.mame.relsErr = rels, ""
+				a.mame.mu.Unlock()
+				a.event("mame-download", version)
+				return
+			}
+		}
+		err = errors.New("it isn't among the official Windows downloads")
+	}
+	a.event("mame-install-error", "MAME "+version+" couldn't be downloaded: "+err.Error())
+}
+
 func mameInstallText(p mame.Progress) string {
 	switch p.State {
 	case "downloading":
@@ -422,6 +443,18 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 	}
 	embed := c.EmbedOn()
 	l, err := mame.Plan(c, g.Path, exe, mame.LaunchOptions{Embed: embed})
+	var nd *mame.NeedDownload
+	if errors.As(err, &nd) {
+		// the set plays in a MAME version that isn't here yet: download it
+		// and start the game when it's ready
+		if messageBox(a.hwnd, fmt.Sprintf("%s plays in MAME %s, which isn't on this PC yet.\n\nDownload MAME %s now (the MAME team's official release) and start the game when it's ready?", nd.Game, nd.Version, nd.Version),
+			"RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+			game := g
+			a.mame.after = &game
+			go a.mameDownloadVersion(nd.Version)
+		}
+		return
+	}
 	if err != nil {
 		messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
 		return
@@ -578,6 +611,16 @@ func (a *app) mameEvent(name, detail string) {
 	case "mame-nodock":
 		a.updateTitle()
 		call(pInvalidateRect, a.hwnd, 0, 0)
+	case "mame-download": // mameDownloadVersion found the release
+		a.mame.mu.Lock()
+		rels := a.mame.rels
+		a.mame.mu.Unlock()
+		for _, r := range rels {
+			if r.Version == detail {
+				a.mameDownload(r)
+				break
+			}
+		}
 	case "mame-open":
 		if !a.dol.closeAfter {
 			a.openPath(detail)
@@ -614,7 +657,12 @@ func (a *app) mameEvent(name, detail string) {
 		if name == "mame-installed" {
 			a.showMessage(detail + " is ready")
 			a.mameReload()
+			if g := a.mame.after; g != nil {
+				a.mame.after = nil
+				a.mamePlay(*g, "")
+			}
 		} else {
+			a.mame.after = nil
 			messageBox(a.hwnd, detail, "RetroPixels Native", mbIconWarning)
 		}
 		if a.mame.lib != nil {

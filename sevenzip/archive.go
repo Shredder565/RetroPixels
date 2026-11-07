@@ -970,3 +970,7 @@ func (e *exactReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// CRC is the file's CRC-32 as the archive records it (ok is false when it
+// doesn't record one).
+func (f File) CRC() (crc uint32, ok bool) { return f.crc, f.hasCRC }

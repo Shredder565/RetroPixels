@@ -2,6 +2,15 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.39.0] - 2026-11-07
+
+- Any arcade ROM set plays, whichever MAME version it was made for. RetroPixels now recognises a set by its files' CRCs instead of its name, with a history of every arcade game's chip files in every MAME version from 0.171 to 0.289, built into both programs (made from MAME's own source code).
+- Renamed sets and files: a zip called "Mortal Kombat (rev 4).zip", or files named differently from MAME's names, are recognised and listed under the game's real name in the Arcade (MAME) library.
+- Merged, split and non-merged sets: a clone whose files are partly in its parent's zip, or a game that needs a BIOS (Neo Geo and the like) kept in another zip, gets those files from any zip in your ROM folders. RetroPixels puts the set together the way the chosen MAME wants it, in %LOCALAPPDATA%\RetroPixels\MAME sets, and plays it from there. Your own zips are never changed.
+- Sets made for an older (or newer) MAME: RetroPixels works out which MAME versions accept the set as it is and starts the game in one you have. If none of yours does but an official release does, RetroPixels.exe downloads that MAME version and starts the game when it's ready; RetroPixels Native asks first, then does the same. A set that is really a different version of the game (for example 1942.zip holding the 1942a files, or WWF WrestleFest's US set) now plays as that version.
+- A set that no MAME version can play says why: the game it is, the closest MAME version, and the exact files missing (name and CRC), with the parent set to look for. The library shows it beside the game ("Can't play: 1 file missing"), and also "Plays in MAME 0.xxx (as 1942a)" or "Plays in MAME 0.xxx, downloaded when you start it" for sets RetroPixels can fix.
+- When the history picks a BIOS other than the default (because that's the one you have), MAME is started with it.
+
 ## [2.38.0] - 2026-11-07
 
 - Box art in the libraries. When you add a games folder, each game's tile in the GameCube, Wii, Wii U and 3DS / DS tabs shows the game's cover instead of its initials, and the Arcade (MAME) list shows a small cover beside each game. The initials stay only for games with no art anywhere.

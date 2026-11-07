@@ -58,6 +58,12 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Any arcade ROM set** (new in 2.39.0). Sets are recognised by their files' CRCs, not their
+  names, with a built-in history of every arcade game's chip files in every MAME version from
+  0.171 on. Renamed, merged, split and older sets play: parent and BIOS files are gathered from
+  your other zips, the set is put together for MAME in `%LOCALAPPDATA%\RetroPixels\MAME sets`
+  (your zips are never changed), the game starts in a MAME version that accepts it (downloaded
+  if needed), and a set nothing can play says exactly which files are missing.
 - **Box art in every library** (new in 2.38.0). Add a games folder and the GameCube, Wii, Wii U,
   3DS / DS and arcade libraries show each game's cover instead of its initials: your own picture
   next to the game first (same file name, `.png` / `.jpg` / `.webp`, or in a `boxart` or `covers`
@@ -200,7 +206,8 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | --- | --- |
 | `main.go`, `*.go` | Windows app: app window, Dolphin and MAME integration, recording, settings |
 | `internal/boxart/` | Box art for the libraries: pictures next to the games, GameTDB, libretro-thumbnails and the Arcade Database, cached; shared by both apps |
-| `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps |
+| `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps; `setfix.go` recognises any ROM set and puts it together for the right MAME version |
+| `internal/romdb/` | The ROM history: every arcade machine's chip files and CRCs in every MAME version since 0.171 (`history.bin`, made by `tools/romhistory` from MAME's source) |
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |

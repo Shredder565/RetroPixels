@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.38.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.39.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.38.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.38.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.39.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.39.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -49,6 +49,22 @@ What's in the download
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
   your own dumps and the keys from your own console (see below).
+
+Any arcade ROM set (new in 2.39.0)
+- RetroPixels recognises a ROM set by its files (their CRCs), not by its
+  name, using a built-in history of every arcade game's chip files in every
+  MAME version from 0.171 on. Renamed zips show under the game's name.
+- Clones split from their parent, and games that need a BIOS (Neo Geo...),
+  get the missing files from any zip in your ROM folders. The set MAME
+  needs is put together in %LOCALAPPDATA%\RetroPixels\MAME sets; your own
+  zips are never changed.
+- A set made for another MAME version starts in a MAME you have that
+  accepts it. If none does, RetroPixels downloads the official MAME version
+  that does and starts the game when it's ready (RetroPixels Native asks
+  first).
+- If no MAME version can play a set, RetroPixels says which files are
+  missing (name and CRC) and the closest version. The Arcade (MAME) library
+  shows this beside the game.
 
 Box art in the libraries (new in 2.38.0)
 - The GameCube, Wii, Wii U and 3DS / DS tabs show each game's cover, and
@@ -714,6 +730,8 @@ Where things are kept
 - Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json;
                  GameCube / Wii resolution: gamecube-resolution.txt)
 - Recordings:    Videos\RetroPixels
+- MAME sets:     %LOCALAPPDATA%\RetroPixels\MAME sets (ROM sets put
+                 together for MAME from your zips; safe to delete)
 - Box art:       %LOCALAPPDATA%\RetroPixels\boxart (covers downloaded
                  for the libraries; delete it to fetch them again)
 - Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)

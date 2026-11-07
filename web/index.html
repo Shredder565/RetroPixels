@@ -1347,7 +1347,7 @@
       row.className = "mame-row";
       row.innerHTML = `${artTile("arcade", g, "mame-art")}<div class="mame-name" title="${esc(g.path)}"><b>${esc(g.name)}</b>
           <small>${esc(g.short)} · ${fmtSize(g.size)}${t(g.played) ? ` · played ${fmtTime(g.played)}` : ""}</small>
-          ${g.note ? `<small class="mame-check ${g.plays.result === "good" ? "ok" : "no"}">${g.plays.result === "good" ? "✓" : "✗"} ${esc(g.note)}</small>` : ""}</div>
+          ${g.note ? (ok => `<small class="mame-check ${ok ? "ok" : "no"}">${ok ? "✓" : "✗"} ${esc(g.note)}</small>`)(g.plays.result === "good" || /^Plays/.test(g.plays.fix || "")) : ""}</div>
         <select class="sw-select" data-ver aria-label="MAME version for ${esc(g.name)}" ${(st.installs || []).length ? "" : "disabled"}>${mameVersionOptions(own[g.short] || "")}</select>
         <button class="btn sm mame-btn" data-play ${playing ? "disabled" : ""}>Play</button>`;
       row.querySelector("[data-ver]").addEventListener("change", e => mameAction({ action: "set-game", short: g.short, exe: e.target.value },
@@ -1363,7 +1363,13 @@
     mameMsg.style.color = ""; mameMsg.textContent = "";
     if (mameData && mameData.status.embed) sendEmbedArea();
     try {
-      await api("/api/mame/play", { path: g.path });
+      const r = await api("/api/mame/play", { path: g.path });
+      if (r && r.note) {
+        // e.g. the MAME version this set needs is being downloaded first
+        mameMsg.textContent = r.note;
+        loadMame();
+        return;
+      }
       toast(`Starting ${g.name}…`);
       mameStarted();
     } catch (e) { mameMsg.style.color = "var(--danger)"; mameMsg.textContent = e.message; }

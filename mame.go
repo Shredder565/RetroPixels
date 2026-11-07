@@ -6,6 +6,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ var (
 	mameRels    []mame.Release
 	mameRelsAt  time.Time
 	mameProblem map[string]any // why the last game didn't start
+	mameAfter   string         // the game to start when the MAME being downloaded is ready
 )
 
 // mameReload scans the ROM folders again in the background (asking each new
@@ -126,6 +128,12 @@ func mameLibraryPayload() map[string]any {
 	return map[string]any{"games": rows, "loaded": loaded, "loading": loading, "checking": checking, "status": st}
 }
 
+// mameNotice is news about a game that isn't starting yet (not a failure):
+// the MAME version it needs is being downloaded first.
+type mameNotice string
+
+func (n mameNotice) Error() string { return string(n) }
+
 // launchMameGame starts a ROM set in its MAME (exe overrides the game's own
 // pick for this time only).
 func launchMameGame(path, exe string) error {
@@ -138,6 +146,18 @@ func launchMameGame(path, exe string) error {
 	c := mame.Load()
 	embed := c.EmbedOn()
 	l, err := mame.Plan(c, path, exe, mame.LaunchOptions{Embed: embed})
+	var nd *mame.NeedDownload
+	if errors.As(err, &nd) {
+		// the set plays in a MAME version that isn't here yet: download it,
+		// then start the game
+		if derr := startMameInstall(nd.Version); derr != nil {
+			return fmt.Errorf("%s plays in MAME %s, which isn't on this PC yet, and it couldn't be downloaded: %v", nd.Game, nd.Version, derr)
+		}
+		mameMu.Lock()
+		mameAfter = path
+		mameMu.Unlock()
+		return mameNotice(fmt.Sprintf("%s plays in MAME %s, which isn't on this PC yet. RetroPixels is downloading it now (the MAME team's official release); the game starts by itself when it's ready.", nd.Game, nd.Version))
+	}
 	if err != nil {
 		return err
 	}
@@ -261,6 +281,7 @@ func startMameInstall(version string) error {
 		defer mameMu.Unlock()
 		if err != nil {
 			mameInst = &mame.Progress{State: "error", Version: rel.Version, Error: err.Error()}
+			mameAfter = ""
 			return
 		}
 		mameInst = &mame.Progress{State: "done", Version: rel.Version}
@@ -270,6 +291,16 @@ func startMameInstall(version string) error {
 		}
 		mame.Update(func(c *mame.Config) { c.Add(mame.Install{Exe: exe, Version: ver}) })
 		go mameReload()
+		if after := mameAfter; after != "" {
+			mameAfter = ""
+			go func() {
+				if err := launchMameGame(after, ""); err != nil {
+					mameMu.Lock()
+					mameProblem = map[string]any{"game": filepath.Base(after), "version": "MAME " + ver, "text": err.Error(), "at": time.Now()}
+					mameMu.Unlock()
+				}
+			}()
+		}
 	}()
 	return nil
 }
@@ -297,6 +328,11 @@ func registerMameRoutes(mux *http.ServeMux) {
 			return
 		}
 		if err := launchMameGame(b.Path, b.Exe); err != nil {
+			var n mameNotice
+			if errors.As(err, &n) {
+				writeJSON(w, 200, map[string]any{"ok": true, "note": string(n)})
+				return
+			}
 			fail(w, err)
 			return
 		}
