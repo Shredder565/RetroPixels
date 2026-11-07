@@ -61,9 +61,9 @@ RetroPixels window.
 - **Six more arcade classics on RetroPixels' own emulation** (2.40.0): Ms. Pac-Man, Jr. Pac-Man,
   Popeye, Kangaroo, Mario Bros. and Kung-Fu Master play without MAME, checked frame by frame
   against MAME.
-- **Choose your player in RetroPixels Native** (2.39.1). The Player menu is on the menu bar for
-  3- and 4-player arcade games, F7 / Shift+F7 or the controller's right stick flicked up go round
-  the players, and an accidental Load state with an empty slot is a note in the title bar, not a popup.
+- **Choose your player** (2.39.1, RetroPixels.exe since 2.40.1). The Player menu (Native) or the
+  "Choose your player" buttons for 3- and 4-player arcade games, F7 / Shift+F7 or the controller's
+  right stick flicked up go round the players in both programs, and an accidental Load state with an empty slot is a note in the title bar, not a popup.
 - **Any arcade ROM set** (new in 2.39.0). Sets are recognised by their files' CRCs, not their
   names, with a built-in history of every arcade game's chip files in every MAME version from
   0.171 on. Renamed, merged, split and older sets play: parent and BIOS files are gathered from

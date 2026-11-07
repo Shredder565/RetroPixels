@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.40.1] - 2026-11-07
+
+- RetroPixels.exe gets 2.39.1's player switching too: F7 / Shift+F7 and a flick of the controller's right stick up go round the players in 3- and 4-player arcade games (TMNT, Turtles in Time, The Simpsons, Double Dragon 3), also in fullscreen where the "Choose your player" buttons are hidden, and the game says which player you are when it starts. Both programs now have the same player picker, shortcuts and quiet Load state (an empty slot is a short note, never a popup).
+
 ## [2.40.0] - 2026-11-07
 
 - Six more arcade games run on RetroPixels' own emulation, so they play in both programs without MAME: Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo, Mario Bros. and Kung-Fu Master (also its Japanese version, Spartan X). Each was played side by side with MAME 0.264 with the same controls: the pictures match frame for frame, and the sound (music, Mario's footsteps and skids, Kung-Fu Master's voices) is close to MAME's.

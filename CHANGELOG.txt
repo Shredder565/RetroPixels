@@ -4,6 +4,14 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.40.1  (2026-11-07)
+--------------------------------
+- RetroPixels.exe gets 2.39.1's player switching too: F7 / Shift+F7 and
+  a flick of the controller's right stick up go round the players in 3-
+  and 4-player arcade games, also in fullscreen, and the game says which
+  player you are when it starts. Both programs now have the same player
+  picker, shortcuts and quiet Load state (no popups).
+
 RetroPixels 2.40.0  (2026-11-07)
 --------------------------------
 - Six more arcade games run on RetroPixels' own emulation, so they play in

@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.40.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.40.1 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.40.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.40.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.40.1.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.40.1.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -178,7 +178,9 @@ What each system supports
   (1 Leonardo, 2 Michelangelo, 3 Donatello, 4 Raphael; or 1 Marge, 2 Homer,
   3 Bart, 4 Lisa): click one to play as that character with your keyboard
   and first controller. Other controllers move round with it. The choice is
-  remembered for each game. Nintendo 64 and Genesis games have the same
+  remembered for each game. F7 / Shift+F7 or a flick of the controller's
+  right stick up goes to the next / previous player (since 2.40.1, as in
+  RetroPixels Native), handy in fullscreen. Nintendo 64 and Genesis games have the same
   choice as a "👤 Player 1" button in the bar under the game.
 - Arcade, more boards (new in 2.18.0), each on RetroPixels' own emulation:
   * 1941: Counter Attack (1941.zip; Capcom CP System, with RetroPixels' own
