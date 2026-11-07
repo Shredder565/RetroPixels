@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.39.1 (the number also shows next to the RetroPixels name in the app).
+Version 2.40.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.39.1.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.39.1.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.40.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.40.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -212,6 +212,14 @@ What each system supports
   * Dragon Blaze (dragnblz.zip). Without the settings chip file RetroPixels
     makes a fresh one: the first start shows "EEP-ROM NG" for a moment while
     the game writes its default settings, then it plays.
+- Arcade, new in 2.40.0, each on RetroPixels' own emulation (no MAME needed):
+  * Ms. Pac-Man (mspacman.zip) and Jr. Pac-Man (jrpacman.zip).
+  * Popeye (popeye.zip).
+  * Kangaroo (kangaroo.zip).
+  * Mario Bros. (mario.zip), with its sound processor and the walking and
+    skid sounds.
+  * Kung-Fu Master (kungfum.zip) and Spartan X (spartanx.zip), with the
+    board's ADPCM voices.
 - Arcade, new in 2.22.0: Star Wars Trilogy Arcade (swtrilgy.zip or
   swtrilgya.zip; Sega Model 3, 1998) on RetroPixels' own Sega Model 3
   emulator, with its 3D board, sound board and MPEG music board. Nothing else

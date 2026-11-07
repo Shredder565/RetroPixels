@@ -58,6 +58,9 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Six more arcade classics on RetroPixels' own emulation** (2.40.0): Ms. Pac-Man, Jr. Pac-Man,
+  Popeye, Kangaroo, Mario Bros. and Kung-Fu Master play without MAME, checked frame by frame
+  against MAME.
 - **Choose your player in RetroPixels Native** (2.39.1). The Player menu is on the menu bar for
   3- and 4-player arcade games, F7 / Shift+F7 or the controller's right stick flicked up go round
   the players, and an accidental Load state with an empty slot is a note in the title bar, not a popup.
@@ -92,7 +95,7 @@ RetroPixels window.
 | Sega Master System | `.sms` | |
 | Atari 2600 | `.a26` `.bin` | Nearly all bank-switching schemes, paddles |
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
-| Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze |
+| Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze, Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo, Mario Bros., Kung-Fu Master |
 | GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
 | Nintendo 3DS / DS | `.3ds` `.cci` `.cxi` `.3dsx` `.cia` · `.nds` `.dsi` | One 3DS / DS tab. DS and 3DS games play in PixelDS, RetroPixels' own emulator for both (all new code; DS since 2.29.0, 3DS by default since 2.34.0), recorded automatically and with the Xbox controller ready; since 2.34.1 it is the only DS / 3DS emulator in the download; since 2.35.0 DS 3D can be drawn at up to 4× (F2) with texture packs, and F9 makes one from the game (Mario restyled in modern colours) |
 | Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME: built in, or any other version, chosen per game |

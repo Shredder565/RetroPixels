@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.40.0] - 2026-11-07
+
+- Six more arcade games run on RetroPixels' own emulation, so they play in both programs without MAME: Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo, Mario Bros. and Kung-Fu Master (also its Japanese version, Spartan X). Each was played side by side with MAME 0.264 with the same controls: the pictures match frame for frame, and the sound (music, Mario's footsteps and skids, Kung-Fu Master's voices) is close to MAME's.
+- A Ms. Pac-Man set is now always played as Ms. Pac-Man (it used to be taken for Pac-Man, whose files it shares).
+
 ## [2.39.1] - 2026-11-07
 
 - RetroPixels Native: no more "Couldn't load the state" popups. Clicking the controller's left stick (Load state) by accident with an empty slot, or a state that can't be loaded, now shows a short note in the title bar and the game carries on.

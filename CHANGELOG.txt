@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.40.0  (2026-11-07)
+--------------------------------
+- Six more arcade games run on RetroPixels' own emulation, so they play in
+  both programs without MAME: Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo,
+  Mario Bros. and Kung-Fu Master (also Spartan X). Each was played side by
+  side with MAME 0.264 with the same controls: the pictures match frame for
+  frame, and the sound is close to MAME's.
+- A Ms. Pac-Man set is now always played as Ms. Pac-Man (it used to be taken
+  for Pac-Man, whose files it shares).
+
 RetroPixels 2.39.1  (2026-11-07)
 --------------------------------
 - RetroPixels Native: no more "Couldn't load the state" popups. Clicking
