@@ -58,6 +58,9 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Choose your player in RetroPixels Native** (2.39.1). The Player menu is on the menu bar for
+  3- and 4-player arcade games, F7 / Shift+F7 or the controller's right stick flicked up go round
+  the players, and an accidental Load state with an empty slot is a note in the title bar, not a popup.
 - **Any arcade ROM set** (new in 2.39.0). Sets are recognised by their files' CRCs, not their
   names, with a built-in history of every arcade game's chip files in every MAME version from
   0.171 on. Renamed, merged, split and older sets play: parent and BIOS files are gathered from

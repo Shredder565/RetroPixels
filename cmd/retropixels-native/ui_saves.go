@@ -103,7 +103,7 @@ func (s *session) loadSlot(slot int) error {
 		file, err := os.ReadFile(slotPath(s.game.System, s.game.Name, slot))
 		if os.IsNotExist(err) {
 			if slot == 0 {
-				return errors.New("there's no save state for this game yet (Game > Save state, or F2)")
+				return errors.New("there's no save state for this game yet (F2 saves one)")
 			}
 			return fmt.Errorf("slot %d is empty", slot+1)
 		}

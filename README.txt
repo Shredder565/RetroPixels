@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.39.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.39.1 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.39.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.39.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.39.1.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.39.1.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -581,10 +581,15 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   (controller: Menu), Start 2P = 2, Coin 2 = 6, Service = 9, Button 1 /
   Attack = Z (controller A), Button 2 / Jump = X (B), Button 3 = A (X),
   Button 4 = S (Y); arrows or the left stick move.
-- Arcade Player menu: in TMNT, Turtles in Time and The Simpsons, Game > Player
-  picks who you play: Player 1 (Leonardo) to Player 4 (Raphael), or Marge,
-  Homer, Bart and Lisa. The keyboard and first controller play as that player
+- Arcade Player menu: in TMNT, Turtles in Time, The Simpsons and Double
+  Dragon 3, the Player menu on the menu bar picks who you play: Player 1
+  (Leonardo) to Player 4 (Raphael), or Marge, Homer, Bart and Lisa. F7 /
+  Shift+F7 or a flick of the controller's right stick up goes to the next /
+  previous player (since 2.39.1), and the title bar says who you are when
+  the game starts. The keyboard and first controller play as that player
   and the other controllers move round with it. It is remembered per game.
+- Load state (F4, or the controller's left stick click) with nothing saved
+  in the slot says so in the title bar instead of a popup (since 2.39.1).
 - Arcade machine settings: Game > Machine settings changes the board's DIP
   switches (coins, lives, difficulty and so on). They are kept per game; press
   Reset (Ctrl+R) after changing one. Turtles in Time and The Simpsons keep

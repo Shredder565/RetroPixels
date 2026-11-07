@@ -42,6 +42,7 @@ const (
 	vkF1  = 0x70
 	vkF3  = 0x72
 	vkF6  = 0x75
+	vkF7  = 0x76
 	vkF12 = 0x7B
 )
 
@@ -236,7 +237,7 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 	}
 	if repeat {
 		switch vk {
-		case vkF1, vkF3, vkF6, vkF12:
+		case vkF1, vkF3, vkF6, vkF7, vkF12:
 			return true
 		}
 		return false
@@ -252,6 +253,12 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 		}
 	case vkF6:
 		a.command(cmdStatesWin)
+	case vkF7:
+		if keyDown(vkShift) {
+			a.nextSeat(-1)
+		} else {
+			a.nextSeat(1)
+		}
 	case vkF12:
 		a.command(cmdScreenshot)
 	default:
@@ -265,6 +272,8 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 // uiEvent: events from the game's thread the window doesn't handle itself.
 func (a *app) uiEvent(name, detail string) {
 	switch name {
+	case "pad-seat":
+		a.nextSeat(1)
 	case "pad-slot":
 		if detail == "-1" {
 			a.command(cmdPrevSlot)
@@ -338,7 +347,9 @@ func (a *app) loadFromSlot() {
 	}
 	slot := a.curSlot()
 	if err := s.loadSlot(slot); err != nil {
-		messageBox(a.hwnd, "Couldn't load the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		// a note in the title bar, not a popup: the controller's left stick
+		// click loads too, and is easy to press by accident mid-game
+		a.showMessage("No state loaded: " + err.Error())
 		return
 	}
 	a.showMessage(fmt.Sprintf("Loaded slot %d (Ctrl+Z undoes it)", slot+1))
@@ -586,6 +597,7 @@ const keysHelp = "Keyboard\n" +
 	"F4\tLoad state\n" +
 	"F3 / Shift+F3\tNext / previous save state slot\n" +
 	"F6\tSave states window (all four slots)\n" +
+	"F7 / Shift+F7\tNext / previous player (arcade games for 3 or 4 players)\n" +
 	"Ctrl+Z\tUndo the last load\n" +
 	"F9\tStart / stop recording\n" +
 	"F12\tScreenshot (only the game's picture)\n" +
@@ -600,6 +612,7 @@ const keysHelp = "Keyboard\n" +
 	"Left stick click (L3)\tLoad state\n" +
 	"Right stick left / right\tChange slot\n" +
 	"Right stick down (1 s)\tStart / stop recording\n" +
+	"Right stick up\tNext player (arcade games for 3 or 4 players)\n" +
 	"Nintendo 64: View + D-pad left / right changes the slot, View + D-pad down records.\n" +
 	"\nOn the start screen, the arrow keys or the D-pad pick a recent game and Enter or A starts it.\n" +
 	"\nEach system's buttons are in Options > Controls (change them there)."

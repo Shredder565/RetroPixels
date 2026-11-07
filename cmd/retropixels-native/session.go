@@ -84,7 +84,8 @@ type session struct {
 	prevPad   PadState
 	rsDownAt  time.Time
 	rsFired   bool
-	rsxDir    int // the right stick pushed left (-1) or right (1): changes the save state slot
+	rsxDir    int  // the right stick pushed left (-1) or right (1): changes the save state slot
+	rsUp      bool // the right stick pushed up: the next player (seat.go)
 	rumbleLvl float32
 	rumbleAt  time.Time
 	failed    error
@@ -505,6 +506,12 @@ func (s *session) padHotkeys(p PadState) {
 	if p.Buttons[padL3] && !s.prevPad.Buttons[padL3] {
 		s.host.event("pad-load", "")
 	}
+	// flick the right stick up: the next player in 3- and 4-player arcade games
+	up := p.Axes[3] < -0.7 && !s.rightStick && s.game.System != "n64"
+	if up && !s.rsUp && s.seats() > 0 {
+		s.host.event("pad-seat", "")
+	}
+	s.rsUp = up
 	if p.Axes[3] > 0.7 && !s.rightStick { // (tilt games use the right stick themselves)
 		if s.rsDownAt.IsZero() {
 			s.rsDownAt = time.Now()
