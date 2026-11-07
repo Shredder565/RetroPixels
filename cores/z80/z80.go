@@ -123,6 +123,10 @@ func (c *CPU) Reset() {
 // NMI makes a non-maskable interrupt happen before the next instruction.
 func (c *CPU) NMI() { c.nmiPending = true }
 
+// IReg is the I register (some boards wire it to the address bus during
+// refresh and use it as an output).
+func (c *CPU) IReg() uint8 { return uint8(c.iv) }
+
 // Halted tells whether the processor is stopped in a HALT instruction.
 func (c *CPU) Halted() bool { return c.halted }
 

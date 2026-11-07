@@ -154,7 +154,7 @@ func compareRun(t *testing.T, node string, ts *testSet, frames int, seed uint64,
 		if goErr == nil {
 			t.Fatalf("the JS core refused the set (%s) but the Go core took it", msg)
 		}
-		if goErr.Error() != msg {
+		if goErr.Error() != msg && !sameRefusal(goErr.Error(), msg) {
 			t.Fatalf("messages differ:\n go: %s\n js: %s", goErr, msg)
 		}
 		res.refused = msg
@@ -349,4 +349,15 @@ func TestMatchesJS(t *testing.T) {
 		})
 	}
 	t.Logf("total: %d frames, %d samples compared", total, totalSamples)
+}
+
+// sameRefusal: the Go core lists the Go-only games (Ms. Pac-Man, Jr. Pac-Man)
+// too, after the web page's.
+func sameRefusal(goMsg, jsMsg string) bool {
+	const tail = ". Load the game's"
+	gi, ji := strings.Index(goMsg, tail), strings.Index(jsMsg, tail)
+	if gi < 0 || ji < 0 || goMsg[gi:] != jsMsg[ji:] {
+		return false
+	}
+	return strings.HasPrefix(goMsg[:gi], jsMsg[:ji]+", ")
 }
