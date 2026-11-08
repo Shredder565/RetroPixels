@@ -476,8 +476,8 @@
         <h2 style="margin-top:18px">Save state &amp; recording shortcuts</h2>
         <table>
           <tbody>
-            <tr><td>Click right stick <span class="key">R3</span></td><td>Save to current slot</td><td><span class="key">F2</span></td></tr>
-            <tr><td>Click left stick <span class="key">L3</span></td><td>Load current slot</td><td><span class="key">F4</span></td></tr>
+            <tr><td>Click and hold right stick <span class="key">R3</span></td><td>Save to current slot</td><td><span class="key">F2</span></td></tr>
+            <tr><td>Click and hold left stick <span class="key">L3</span></td><td>Load current slot</td><td><span class="key">F4</span></td></tr>
             <tr><td>Right stick ← / →</td><td>Change slot</td><td><span class="key">F3</span></td></tr>
             <tr><td>Right stick ↓ (hold 1 sec)</td><td>Start / stop recording</td><td><span class="key">F9</span></td></tr>
             <tr><td>Right stick ↑</td><td>Next player (arcade games for 3 or 4 players)</td><td><span class="key">F7</span></td></tr>
@@ -766,7 +766,7 @@
       </div>
       <div class="slots" id="slots"></div>
       <p class="muted" style="font-size:13px;margin:12px 0 0">
-        Save states are kept in this browser, separately for each game. Controller: click the right stick to save, click the left stick to load, flick the right stick left/right to change slot.
+        Save states are kept in this browser, separately for each game. Controller: click and hold the right stick to save, click and hold the left stick to load, flick the right stick left/right to change slot.
         In-game battery saves still work as normal.
       </p>
       <div id="sramTools" class="rg-btns" style="margin-top:10px" hidden>
@@ -2225,7 +2225,18 @@
     : "Controller connected: " + id.replace(/\(.*?\)/g, "").trim().slice(0, 40);
   const firstPad = () => [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean) || null;
 
-  const prev = { l3: false, r3: false, rsx: 0 };
+  const prev = { l3c: {}, r3c: {}, rsx: 0 };
+  // stickClick: true once per hold, when the click has been down 350 ms with the stick in the middle all along
+  const STICK_CLICK_HOLD = 350, STICK_CLICK_CENTER = 0.5;
+  const stickMoved = (x, y) => Math.abs(x || 0) > STICK_CLICK_CENTER || Math.abs(y || 0) > STICK_CLICK_CENTER;
+  function stickClick(c, down, moved, now) {
+    if (!down) { c.at = 0; c.fired = false; return false; }
+    if (c.fired) return false;
+    if (moved) { c.fired = true; return false; }
+    if (!c.at) { c.at = now; return false; }
+    if (now - c.at >= STICK_CLICK_HOLD) { c.fired = true; return true; }
+    return false;
+  }
   const poll = () => {
     const gp = firstPad();
     if (gp) {
@@ -2268,10 +2279,12 @@
 
       // Save-state shortcuts (in game)
       if (gameKey && gameReady) {
-        const r3 = pressed(11), l3 = pressed(10);
-        if (r3 && !prev.r3) saveSlot(currentSlot);
-        if (l3 && !prev.l3) loadSlot(currentSlot);
-        prev.r3 = r3; prev.l3 = l3;
+        // A stick click counts only when held for a moment with that stick in the middle: a hard flick
+        // (left then right quickly) often clicks the stick by accident, which used to load a state and
+        // jump the game back to wherever it was saved. (The same rule is in RetroPixels Native.)
+        const now = performance.now();
+        if (stickClick(prev.r3c, pressed(11), stickMoved(ax[2], ax[3]), now)) saveSlot(currentSlot);
+        if (stickClick(prev.l3c, pressed(10), stickMoved(ax[0], ax[1]), now)) loadSlot(currentSlot);
         if (ownGame && ownGame.core === "n64") {
           // N64: View + D-pad left/right = slot, View + D-pad down = record
           const view = pressed(8);

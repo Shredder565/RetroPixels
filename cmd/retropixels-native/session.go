@@ -86,6 +86,7 @@ type session struct {
 	rsFired   bool
 	rsxDir    int  // the right stick pushed left (-1) or right (1): changes the save state slot
 	rsUp      bool // the right stick pushed up: the next player (seat.go)
+	l3, r3    stickClick
 	rumbleLvl float32
 	rumbleAt  time.Time
 	failed    error
@@ -466,7 +467,7 @@ func (s *session) buttonBit(name string) uint32 {
 	return 0
 }
 
-// padHotkeys: click the right stick to save, the left stick to load, flick
+// padHotkeys: click and hold the right stick to save, the left stick to load, flick
 // it left or right to change the save state slot, hold it down for a second
 // to start or stop recording (as in the web version). The N64 uses its right
 // stick for the C buttons, so there View + D-pad left / right changes the
@@ -500,10 +501,13 @@ func (s *session) padHotkeys(p PadState) {
 		}
 		s.rsxDir = dir
 	}
-	if p.Buttons[padR3] && !s.prevPad.Buttons[padR3] {
+	// the stick clicks: held for a moment with the stick in the middle
+	// (stickclick.go), so a click while moving doesn't load a state
+	now := time.Now()
+	if s.r3.step(p.Buttons[padR3], stickMoved(p.Axes[2], p.Axes[3]), now) {
 		s.host.event("pad-save", "")
 	}
-	if p.Buttons[padL3] && !s.prevPad.Buttons[padL3] {
+	if s.l3.step(p.Buttons[padL3], stickMoved(p.Axes[0], p.Axes[1]), now) {
 		s.host.event("pad-load", "")
 	}
 	// flick the right stick up: the next player in 3- and 4-player arcade games

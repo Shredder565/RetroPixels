@@ -4,6 +4,17 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.41.1  (2026-11-08)
+--------------------------------
+- Fixed: pushing the controller's stick hard left then right could throw
+  Turtles in Time back to its intro. A hard flick often clicks the stick by
+  accident, and the left-stick click is Load state. Now, in both programs, a
+  stick click only saves (R3) or loads (L3) when held for about a third of a
+  second with the stick in the middle; a quick click, or one while moving,
+  does nothing. Every game gets the fix, X-Men included.
+- TMNT, Turtles in Time and The Simpsons: X on the controller (A on the
+  keyboard) attacks too, in both programs ("Button 3" in Controls).
+
 RetroPixels 2.41.0  (2026-11-08)
 --------------------------------
 - X-Men (Konami, 1992) plays on RetroPixels' own emulation in both

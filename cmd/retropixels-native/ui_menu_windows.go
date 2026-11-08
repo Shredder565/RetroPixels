@@ -609,8 +609,8 @@ const keysHelp = "Keyboard\n" +
 	"Ctrl+O\tOpen a game\n" +
 	"F11, Alt+Enter\tFullscreen (Esc leaves it)\n" +
 	"\nXbox controller\n" +
-	"Right stick click (R3)\tSave state\n" +
-	"Left stick click (L3)\tLoad state\n" +
+	"Right stick click, held (R3)\tSave state\n" +
+	"Left stick click, held (L3)\tLoad state\n" +
 	"Right stick left / right\tChange slot\n" +
 	"Right stick down (1 s)\tStart / stop recording\n" +
 	"Right stick up\tNext player (arcade games for 3 or 4 players)\n" +

@@ -147,7 +147,7 @@
     playerByte(p) {
       const i = this.inputs[p] || {};
       let v = (i.Left ? 1 : 0) | (i.Right ? 2 : 0) | (i.Up ? 4 : 0) | (i.Down ? 8 : 0) |
-        (i["Button 1"] ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0);
+        (i["Button 1"] || i["Button 3"] ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0); // Button 3 (X): attack too
       if (i["Start (1P)"] || (p === 1 && this.inputs[0]["Start (2P)"])) v |= 0x80;
       return ~v & 0xff;
     }
@@ -372,7 +372,7 @@
   SimpsonsBoard.players = 4;
   // who each player's controls play as on the 4-player cabinet (for the page's player picker)
   SimpsonsBoard.characters = ["Marge", "Homer", "Bart", "Lisa"];
-  SimpsonsBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"];
+  SimpsonsBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)", "Start (2P)", "Service"];
   SimpsonsBoard.dips = [];
 
   const SHARED = [

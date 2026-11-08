@@ -58,7 +58,10 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
-- **X-Men on RetroPixels' own emulation** (new in 2.41.0): Konami's 4- and 2-player X-Men play
+- **Safer controller save states** (new in 2.41.1): the stick clicks (R3 save, L3 load) count only
+  when held for a moment with the stick in the middle, so a hard left-right flick can no longer load
+  a state and throw TMNT 2 back to its intro. X attacks too in TMNT, Turtles in Time and The Simpsons.
+- **X-Men on RetroPixels' own emulation** (2.41.0): Konami's 4- and 2-player X-Men play
   without MAME in both programs, with "Choose your player", checked frame by frame against MAME.
 - **Six more arcade classics on RetroPixels' own emulation** (2.40.0): Ms. Pac-Man, Jr. Pac-Man,
   Popeye, Kangaroo, Mario Bros. and Kung-Fu Master play without MAME, checked frame by frame

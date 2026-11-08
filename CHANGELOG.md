@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.41.1] - 2026-11-08
+
+- Fixed: in Turtles in Time (and any game), pushing the controller's stick hard left then right could throw the game back to its intro in a jump cut. A hard flick often clicks the stick by accident, and the left-stick click is Load state, so it loaded the state saved earlier (and a right-stick click could save over one). The game itself was fine: played for over 12,000 frames of left / right mashing (with both pressed at once too), TMNT, Turtles in Time and The Simpsons never reset. Now, in both programs, a stick click only saves or loads when it is held for about a third of a second with the stick in the middle; a quick click, or a click while moving, does nothing. X-Men and every other game get the same fix.
+- TMNT, Turtles in Time and The Simpsons: X on the controller (A on the keyboard) attacks too, as A does, in both programs. It's "Button 3" in Controls if you want it on something else.
+
 ## [2.41.0] - 2026-11-08
 
 - X-Men (Konami, 1992) plays on RetroPixels' own emulation in both programs, without MAME: the 4-player sets (xmen, xmenu, xmenua, xmenj, xmenja, xmena, xmenaa) and the 2-player ones (xmen2pe, xmen2pu, xmen2pj, xmen2pa). New: RetroPixels' own K054539 sound chip. Played side by side with MAME 0.264 with the same controls, 15,000 frames (boot, ROM check, attract and play) match MAME pixel for pixel, and the music and effects match MAME's.

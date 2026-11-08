@@ -145,7 +145,7 @@ func (d *controlsDialog) build() {
 		y += 30
 	}
 	note := "Click Change, then press a controller button or a key. Esc cancels. " +
-		"The left stick moves too. Clicking the sticks (L3 / R3) loads and saves states; " +
+		"The left stick moves too. Clicking and holding the sticks (L3 / R3) loads and saves states; " +
 		"hold the right stick down for a second to start or stop recording."
 	if s := d.a.sess; s != nil && s.game.System == d.sys && s.note != "" {
 		note = "Click Change, then press a controller button or a key. Esc cancels. " + s.note

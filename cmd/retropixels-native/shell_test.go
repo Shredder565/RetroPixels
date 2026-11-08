@@ -560,14 +560,14 @@ func TestSessionPadHotkeys(t *testing.T) {
 	defer s.stop()
 	h.mu.Lock()
 	h.padSt[2].Connected = true
-	h.padSt[2].Buttons[padR3] = true
+	h.padSt[2].Buttons[padR3] = true // (stick clicks are held: stickclick.go)
 	h.mu.Unlock()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	h.mu.Lock()
 	h.padSt[2].Buttons[padR3] = false
 	h.padSt[2].Buttons[padL3] = true
 	h.mu.Unlock()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	h.mu.Lock()
 	h.padSt[2].Buttons[padL3] = false
 	h.padSt[2].Axes[3] = 1

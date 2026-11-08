@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.41.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.41.1 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.41.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.41.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.41.1.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.41.1.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -179,7 +179,9 @@ What each system supports
   and high scores in the board's EEPROM (saved like a battery save) and have
   no DIP switches: hold Service + Start on the first controller to open the
   game's own test menu. In TMNT (4-player cabinet) a player joins by pressing
-  Attack; Start does the same.
+  Attack; Start does the same. In TMNT, Turtles in Time and The Simpsons,
+  Attack is A or X on the controller (Z or A on the keyboard), Jump is B / X
+  (since 2.41.1).
   4-player arcade games show "Choose your player" buttons above the game
   (1 Leonardo, 2 Michelangelo, 3 Donatello, 4 Raphael; or 1 Marge, 2 Homer,
   3 Bart, 4 Lisa): click one to play as that character with your keyboard
@@ -243,6 +245,12 @@ Playing classic games
   and 📷 screenshot.
 - Atari 2600 paddle games (Kaboom!, Warlords, Super Breakout…) are detected
   automatically: steer with the left stick, fire with A.
+- Save states on the controller: click and hold the right stick (R3) to save
+  and the left stick (L3) to load, with the stick in the middle; flick the
+  right stick left / right to change slot. Since 2.41.1 a quick stick click,
+  or one while you move with the stick, does nothing, so a hard flick can't
+  load a state by accident (it used to jump the game back to wherever the
+  state was saved).
 - Battery saves (Pokémon, Zelda…) are kept automatically. Under Save states
   you can import a .sav / .srm from another emulator or download yours.
 - Save states made with an older RetroPixels (or with the previous Super

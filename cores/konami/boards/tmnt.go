@@ -379,7 +379,7 @@ func (b *tmnt) playerByte(p int) int {
 	if i["Down"] {
 		v |= 8
 	}
-	if i["Button 1"] || start {
+	if i["Button 1"] || i["Button 3"] || start { // Button 3 (X): attack too
 		v |= 0x10
 	}
 	if i["Button 2"] {
@@ -923,7 +923,7 @@ func init() {
 	arcade.Register(&arcade.BoardDef{
 		ID: "tmnt", Title: "Konami TMNT", Width: tmntW, Height: tmntH, Rotate: 0, FPS: tmntFPS, Players: 4,
 		Characters: []string{"Leonardo", "Michelangelo", "Donatello", "Raphael"},
-		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Coin 2", "Service"},
+		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)", "Start (2P)", "Coin 2", "Service"},
 		Dips:       tmntDips, Games: tmntGames(), New: newTMNT,
 	})
 }
