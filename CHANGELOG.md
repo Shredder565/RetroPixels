@@ -2,6 +2,12 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.41.0] - 2026-11-08
+
+- X-Men (Konami, 1992) plays on RetroPixels' own emulation in both programs, without MAME: the 4-player sets (xmen, xmenu, xmenua, xmenj, xmenja, xmena, xmenaa) and the 2-player ones (xmen2pe, xmen2pu, xmen2pj, xmen2pa). New: RetroPixels' own K054539 sound chip. Played side by side with MAME 0.264 with the same controls, 15,000 frames (boot, ROM check, attract and play) match MAME pixel for pixel, and the music and effects match MAME's.
+- X-Men has "Choose your player" in both programs (it's a 4-player cabinet; you then pick Cyclops, Colossus, Wolverine, Storm, Nightcrawler or Dazzler in the game). Started from the Arcade (MAME) list it plays in RetroPixels' own emulation too. Attack = A / Z, Jump = B / X, Mutant power = X / A.
+- A set without the EEPROM file (xmen_ubb.nv and so on) sets its EEPROM up by itself on the first start ("EEPROM INITIALIZE COMPLETE"), then plays.
+
 ## [2.40.2] - 2026-11-08
 
 - RetroPixels Native: a "Choose your player" window when a 3- or 4-player arcade game starts (TMNT, Turtles in Time, The Simpsons, Double Dragon 3), with a tile per character, like RetroPixels.exe's buttons. Click a tile, press 1-4, or use the arrows / D-pad and Enter / A.

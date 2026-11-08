@@ -61,7 +61,7 @@ func (s *session) seatMessage(n int) string {
 }
 
 // isSeatArcade: a set RetroPixels plays itself on a 3- or 4-player cabinet
-// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3 ...), where it has
+// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3, X-Men ...), where it has
 // the "Choose your player" choice MAME doesn't. Started from the Arcade
 // (MAME) list, these play in RetroPixels' own emulation.
 func isSeatArcade(path string) bool {

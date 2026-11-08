@@ -4,6 +4,20 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.41.0  (2026-11-08)
+--------------------------------
+- X-Men (Konami, 1992) plays on RetroPixels' own emulation in both
+  programs, without MAME: the 4-player sets (xmen, xmenu, xmenua, xmenj,
+  xmenja, xmena, xmenaa) and the 2-player ones (xmen2pe, xmen2pu,
+  xmen2pj, xmen2pa), with RetroPixels' own K054539 sound chip. Checked
+  against MAME 0.264: 15,000 frames match pixel for pixel, and the music
+  and effects match.
+- X-Men has "Choose your player" in both programs (4-player cabinet; you
+  then pick your X-Man in the game), also when started from the Arcade
+  (MAME) list. Attack = A / Z, Jump = B / X, Mutant power = X / A.
+- A set without its EEPROM file sets the EEPROM up by itself on the first
+  start, then plays.
+
 RetroPixels 2.40.2  (2026-11-08)
 --------------------------------
 - RetroPixels Native: a "Choose your player" window when a 3- or 4-player

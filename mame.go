@@ -119,7 +119,7 @@ type mameRow struct {
 }
 
 // seatArcade: a set RetroPixels plays itself on a 3- or 4-player cabinet
-// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3 ...).
+// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3, X-Men ...).
 func seatArcade(path string) bool {
 	name := strings.ToLower(filepath.Base(strings.ReplaceAll(path, `\`, "/")))
 	return arcade.PlayersOf(strings.TrimSuffix(strings.TrimSuffix(name, ".zip"), ".7z")) >= 3

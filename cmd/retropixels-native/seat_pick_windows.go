@@ -1,7 +1,7 @@
 package main
 
 // The "Choose your player" window: when an arcade game for 3 or 4 players
-// starts (TMNT, Turtles in Time, The Simpsons, Double Dragon 3), a small
+// starts (TMNT, Turtles in Time, The Simpsons, Double Dragon 3, X-Men), a small
 // window over the game shows one tile per player, like the web page's
 // "Choose your player" buttons. Click a tile, press 1-4, or move with the
 // arrow keys / the controller's D-pad or stick and press Enter / A. Esc or
