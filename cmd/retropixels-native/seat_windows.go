@@ -31,14 +31,6 @@ func (a *app) nextSeat(d int) {
 	a.pickSeat((int(s.seat.Load()) + d + n) % n)
 }
 
-// seatHint: a 3- or 4-player game says who you are and how to change it.
-func (a *app) seatHint(s *session) {
-	if a.sess != s || s.seats() == 0 {
-		return
-	}
-	a.showMessage(s.seatMessage(int(s.seat.Load())) + " - Player menu, F7 or right stick up to change")
-}
-
 // fillSeats builds the menu as it opens, the current player ticked.
 func (a *app) fillSeats() {
 	for call(pGetMenuItemCount, a.seatMenu) > 0 {

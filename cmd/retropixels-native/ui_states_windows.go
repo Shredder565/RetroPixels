@@ -193,6 +193,9 @@ func (d *statesDialog) close() {
 
 // uiCloseGame: the game is closing (closeGame): the Save states window goes too.
 func (a *app) uiCloseGame() {
+	if a.ui != nil {
+		a.closeSeatPicker()
+	}
 	if a.ui != nil && a.ui.states != nil {
 		a.ui.states.close()
 	}

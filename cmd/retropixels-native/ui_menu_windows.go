@@ -66,7 +66,8 @@ type uiState struct {
 	slotMenu, battMenu, binMenu, qualMenu, recRecentMenu uintptr
 	recList                                              []string
 
-	states *statesDialog
+	states   *statesDialog
+	seatPick *seatPicker
 }
 
 func newUIState() *uiState { return &uiState{hover: -1, sel: -1} }

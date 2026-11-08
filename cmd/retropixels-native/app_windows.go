@@ -1075,7 +1075,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.frameMu.Unlock()
 	a.sess = s
 	a.restoreSeat(s)
-	defer a.seatHint(s)
+	defer a.showSeatPicker(s) // "Choose your player" for 3- and 4-player arcade games
 	a.settings.addRecent(path)
 	a.settings.LastFolder = filepath.Dir(path)
 	saveSettings(a.settings)

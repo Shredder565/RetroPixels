@@ -209,6 +209,23 @@ func AllGames() []Entry {
 	return out
 }
 
+// PlayersOf: how many players the game with this set name has (0: not one
+// of RetroPixels' own arcade games). 3 or 4 means a "Choose your player" choice.
+func PlayersOf(id string) int {
+	for _, e := range AllGames() {
+		if e.Game.ID == id {
+			if e.Game.Players != 0 {
+				return e.Game.Players
+			}
+			if e.Board.Players != 0 {
+				return e.Board.Players
+			}
+			return 2
+		}
+	}
+	return 0
+}
+
 // SupportedText: "Pac-Man (pacman.zip), Galaxian (galaxian.zip), ...".
 func SupportedText() string {
 	seen := map[string]bool{}

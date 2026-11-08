@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.40.2  (2026-11-08)
+--------------------------------
+- RetroPixels Native: a "Choose your player" window when a 3- or 4-player
+  arcade game starts (TMNT, Turtles in Time, The Simpsons, Double Dragon
+  3), a tile per character. Click one, press 1-4, or use the arrows /
+  D-pad and Enter / A.
+- Both programs: these games started from the Arcade (MAME) list now play
+  in RetroPixels' own emulation, which has the player choice (MAME has
+  none). Other games in the list still play in MAME.
+
 RetroPixels 2.40.1  (2026-11-07)
 --------------------------------
 - RetroPixels.exe gets 2.39.1's player switching too: F7 / Shift+F7 and

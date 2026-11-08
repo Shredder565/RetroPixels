@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"retropixels/cores/arcade"
 	"retropixels/internal/boxart"
 	"retropixels/internal/mame"
 )
@@ -112,6 +113,16 @@ type mameRow struct {
 	mame.Game
 	Plays mame.GameStatus `json:"plays"`
 	Note  string          `json:"note"`
+	// Own: a 3- or 4-player game RetroPixels plays itself, where it has the
+	// "Choose your player" buttons MAME doesn't: the page plays it
+	Own bool `json:"own,omitempty"`
+}
+
+// seatArcade: a set RetroPixels plays itself on a 3- or 4-player cabinet
+// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3 ...).
+func seatArcade(path string) bool {
+	name := strings.ToLower(filepath.Base(strings.ReplaceAll(path, `\`, "/")))
+	return arcade.PlayersOf(strings.TrimSuffix(strings.TrimSuffix(name, ".zip"), ".7z")) >= 3
 }
 
 func mameLibraryPayload() map[string]any {
@@ -123,7 +134,7 @@ func mameLibraryPayload() map[string]any {
 	rows := make([]mameRow, 0, len(games))
 	for _, g := range games {
 		s := c.Status(g)
-		rows = append(rows, mameRow{Game: g, Plays: s, Note: s.Text()})
+		rows = append(rows, mameRow{Game: g, Plays: s, Note: s.Text(), Own: seatArcade(g.Path)})
 	}
 	return map[string]any{"games": rows, "loaded": loaded, "loading": loading, "checking": checking, "status": st}
 }
@@ -318,6 +329,38 @@ func registerMameRoutes(mux *http.ServeMux) {
 			}
 		}
 		writeJSON(w, 200, mameLibraryPayload())
+	}))
+	// The set itself, for a 3- or 4-player game in the library that the page
+	// plays with its own emulation (mameRow.Own).
+	mux.HandleFunc("/api/mame/own", guard(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Query().Get("path")
+		known := false
+		mameMu.Lock()
+		for _, g := range mameGames {
+			if strings.EqualFold(g.Path, p) {
+				known = true
+				break
+			}
+		}
+		mameMu.Unlock()
+		if !known || !seatArcade(p) {
+			http.NotFound(w, r)
+			return
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil || !st.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeContent(w, r, "", st.ModTime(), f)
 	}))
 	mux.HandleFunc("/api/mame/play", guard(func(w http.ResponseWriter, r *http.Request) {
 		var b struct {

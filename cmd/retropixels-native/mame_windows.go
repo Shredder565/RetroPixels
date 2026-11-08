@@ -58,6 +58,7 @@ type mameState struct {
 	lib     *mameLibrary
 	problem string     // why the last game didn't start, for the library
 	after   *mame.Game // the game to start when the MAME being downloaded is ready
+	inMame  bool       // the next mamePlay goes to MAME even for a game RetroPixels plays itself
 
 	mu       sync.Mutex // the rest is shared with background work
 	games    []mame.Game
@@ -367,6 +368,7 @@ func (a *app) mameOfferArcade(path string, why error) bool {
 	}
 	msg := fmt.Sprintf("%v\n\nPlay %q in %s instead?", why, filepath.Base(path), in.Label())
 	if messageBox(a.hwnd, msg, "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		a.mame.inMame = true // RetroPixels' own emulation couldn't: really MAME
 		a.mamePlayPath(path, "")
 	}
 	return true
@@ -396,6 +398,13 @@ func (a *app) mamePlayPath(path, exe string) {
 
 // mamePlay starts a game in its MAME.
 func (a *app) mamePlay(g mame.Game, exe string) {
+	if isSeatArcade(g.Path) && a.mame.run == nil && !a.mame.inMame {
+		// a 3- or 4-player game RetroPixels plays itself: there it has the
+		// "Choose your player" choice (MAME doesn't)
+		a.openPath(g.Path)
+		return
+	}
+	a.mame.inMame = false
 	if isNativeArcadeOnly(g.Path) {
 		// Star Wars Trilogy Arcade (Sega Model 3): RetroPixels plays it itself.
 		if a.mame.run == nil {

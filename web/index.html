@@ -1362,6 +1362,17 @@
 
   async function playMame(g) {
     mameMsg.style.color = ""; mameMsg.textContent = "";
+    if (g.own) {
+      // a 3- or 4-player game RetroPixels plays itself: here it has the
+      // "Choose your player" buttons, which MAME doesn't
+      try {
+        const res = await fetch("/api/mame/own?path=" + encodeURIComponent(g.path), { headers: { "X-Retro-Token": DESKTOP.token } });
+        if (!res.ok) throw new Error(`Couldn't read ${g.name} (${res.status})`);
+        showTab("classic");
+        startGame(new File([await res.blob()], g.path.split(/[\\/]/).pop()));
+      } catch (e) { mameMsg.style.color = "var(--danger)"; mameMsg.textContent = e.message; }
+      return;
+    }
     if (mameData && mameData.status.embed) sendEmbedArea();
     try {
       const r = await api("/api/mame/play", { path: g.path });

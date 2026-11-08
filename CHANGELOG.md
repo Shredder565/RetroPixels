@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.40.2] - 2026-11-08
+
+- RetroPixels Native: a "Choose your player" window when a 3- or 4-player arcade game starts (TMNT, Turtles in Time, The Simpsons, Double Dragon 3), with a tile per character, like RetroPixels.exe's buttons. Click a tile, press 1-4, or use the arrows / D-pad and Enter / A.
+- Both programs: these games started from the Arcade (MAME) list now play in RetroPixels' own emulation, which has the player choice; in MAME there was no way to choose. Other games in the list still play in MAME.
+
 ## [2.40.1] - 2026-11-07
 
 - RetroPixels.exe gets 2.39.1's player switching too: F7 / Shift+F7 and a flick of the controller's right stick up go round the players in 3- and 4-player arcade games (TMNT, Turtles in Time, The Simpsons, Double Dragon 3), also in fullscreen where the "Choose your player" buttons are hidden, and the game says which player you are when it starts. Both programs now have the same player picker, shortcuts and quiet Load state (an empty slot is a short note, never a popup).

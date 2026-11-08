@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.40.1 (the number also shows next to the RetroPixels name in the app).
+Version 2.40.2 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -25,8 +25,8 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.40.1.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.40.1.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.40.2.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.40.2.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -591,6 +591,12 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   (controller: Menu), Start 2P = 2, Coin 2 = 6, Service = 9, Button 1 /
   Attack = Z (controller A), Button 2 / Jump = X (B), Button 3 = A (X),
   Button 4 = S (Y); arrows or the left stick move.
+- Choose your player (new in 2.40.2): when TMNT, Turtles in Time, The
+  Simpsons or Double Dragon 3 starts, a "Choose your player" window shows
+  one tile per player (Leonardo, Michelangelo, Donatello, Raphael...). Click
+  one, press 1-4, or use the arrows / D-pad and Enter / A; Esc or B keeps
+  last time's. These games play in RetroPixels' own emulation even when
+  started from the Arcade (MAME) list, since MAME has no player choice.
 - Arcade Player menu: in TMNT, Turtles in Time, The Simpsons and Double
   Dragon 3, the Player menu on the menu bar picks who you play: Player 1
   (Leonardo) to Player 4 (Raphael), or Marge, Homer, Bart and Lisa. F7 /
