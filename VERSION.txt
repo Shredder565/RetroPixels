@@ -1,2 +1,2 @@
-RetroPixels 2.41.1
-Released 2026-11-08
+RetroPixels 2.41.2
+Released 2026-11-09

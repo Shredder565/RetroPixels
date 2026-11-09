@@ -103,6 +103,7 @@
     // Arcade: Coin = View / 5, Start = Menu / 1 (the keys arcade players know), first button = Xbox A.
     arcade: { Coin: { pad: [8], keys: ["5", "c"] }, "Coin 2": { pad: [], keys: ["6"] }, "Start (1P)": { pad: [9], keys: ["1", "enter"] },
       "Start (2P)": { pad: [], keys: ["2"] }, Fire: { pad: [0], keys: ["z"] }, Jump: { pad: [0], keys: ["z"] },
+      Punch: { pad: [0, 2], keys: ["z", "a"] },
       "Button 1": { pad: [0], keys: ["z"] }, "Button 2": { pad: [1], keys: ["x"] }, "Button 3": { pad: [2], keys: ["a"] },
       "Button 4": { pad: [3], keys: ["s"] }, Service: { pad: [], keys: ["9"] } },
   };

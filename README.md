@@ -58,7 +58,9 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
-- **Safer controller save states** (new in 2.41.1): the stick clicks (R3 save, L3 load) count only
+- **Punch works in Popeye and Kangaroo** (new in 2.41.2): A or X on the controller, Z or A on the
+  keyboard, in both programs.
+- **Safer controller save states** (2.41.1): the stick clicks (R3 save, L3 load) count only
   when held for a moment with the stick in the middle, so a hard left-right flick can no longer load
   a state and throw TMNT 2 back to its intro. X attacks too in TMNT, Turtles in Time and The Simpsons.
 - **X-Men on RetroPixels' own emulation** (2.41.0): Konami's 4- and 2-player X-Men play

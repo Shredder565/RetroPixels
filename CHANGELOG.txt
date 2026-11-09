@@ -4,6 +4,12 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.41.2  (2026-11-09)
+--------------------------------
+- Fixed: the punch button did nothing in Popeye and Kangaroo, in both
+  programs (Punch had no default key or controller button). Punch is now
+  A or X on the controller, Z or A on the keyboard ("Punch" in Controls).
+
 RetroPixels 2.41.1  (2026-11-08)
 --------------------------------
 - Fixed: pushing the controller's stick hard left then right could throw

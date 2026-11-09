@@ -45,7 +45,7 @@ import (
 
 // ButtonNames are the control names boards may use (RPArcade.BUTTON_NAMES);
 // the player's controller and keyboard defaults are set up for these.
-var ButtonNames = []string{"Up", "Down", "Left", "Right", "Fire", "Jump", "Button 1", "Button 2", "Button 3", "Button 4",
+var ButtonNames = []string{"Up", "Down", "Left", "Right", "Fire", "Jump", "Punch", "Button 1", "Button 2", "Button 3", "Button 4",
 	"Coin", "Coin 2", "Start (1P)", "Start (2P)", "Service"}
 
 // DefaultButtons are the buttons of a board that doesn't list its own.

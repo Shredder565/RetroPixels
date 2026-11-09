@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.41.2] - 2026-11-09
+
+- Fixed: the punch button did nothing in Popeye and Kangaroo, in both programs. Their "Punch" control had no default key or controller button, so pressing A / Z sent nothing to the game. Punch is now A or X on the controller and Z or A on the keyboard (change it under "Punch" in Controls). Checked with Popeye: Popeye punches with keyboard Z, controller A and controller X. A new test makes sure every arcade game's controls have a default key in both programs.
+
 ## [2.41.1] - 2026-11-08
 
 - Fixed: in Turtles in Time (and any game), pushing the controller's stick hard left then right could throw the game back to its intro in a jump cut. A hard flick often clicks the stick by accident, and the left-stick click is Load state, so it loaded the state saved earlier (and a right-stick click could save over one). The game itself was fine: played for over 12,000 frames of left / right mashing (with both pressed at once too), TMNT, Turtles in Time and The Simpsons never reset. Now, in both programs, a stick click only saves or loads when it is held for about a third of a second with the stick in the middle; a quick click, or a click while moving, does nothing. X-Men and every other game get the same fix.
