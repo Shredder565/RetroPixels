@@ -542,3 +542,38 @@ func TestSaveUploadedRecording(t *testing.T) {
 		t.Errorf("left behind: %v", left)
 	}
 }
+
+// A page recording sent a second at a time ends up as one file.
+func TestRecordingInParts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RETRO_REC_DIR", dir)
+	cfgMu.Lock()
+	saved := cfg.RecordDir
+	cfg.RecordDir = ""
+	cfgMu.Unlock()
+	defer func() { cfgMu.Lock(); cfg.RecordDir = saved; cfgMu.Unlock() }()
+	id := "0123456789abcdef01234567"
+	for _, part := range []string{"head", "-one", "-two"} {
+		if err := appendRecordingPart(id, strings.NewReader(part)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := finishRecordingPart(id, "Super Mario Bros. - 2026.webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "head-one-two" || filepath.Base(p) != "Super Mario Bros. - 2026.webm" {
+		t.Errorf("%q: %q", p, b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.part")); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+	for _, bad := range []string{"", "short", `..\..\x12345678`, "ABCDEFGH12345678"} {
+		if err := appendRecordingPart(bad, strings.NewReader("x")); err == nil {
+			t.Errorf("id %q was taken", bad)
+		}
+	}
+	if _, err := finishRecordingPart("fedcba9876543210", "x.mp4"); err == nil {
+		t.Error("finishing a recording that never started should fail")
+	}
+}

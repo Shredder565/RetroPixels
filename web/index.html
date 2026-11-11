@@ -2145,15 +2145,52 @@
     } catch (e) { toast("Couldn't start recording: " + e.message, true); recorder = null; return; }
 
     recChunks = [];
-    recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+    // The desktop app gets the video a piece at a time while it records (every
+    // second), so a long game doesn't keep the whole video in memory: that
+    // slowed the page down until the game froze. Pieces wait in recChunks
+    // until the app has them; the browser (no app) keeps them all as before.
+    const recId = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, "0")).join("");
+    let recSent = 0, recSending = null;
+    const sendParts = () => {
+      if (!DESKTOP || recSending) return recSending || Promise.resolve();
+      recSending = (async () => {
+        while (recChunks.length) {
+          const ok = await fetch("/api/rec/part?id=" + recId, { method: "POST",
+            headers: { "X-Retro-Token": DESKTOP.token, "Content-Type": "application/octet-stream" }, body: recChunks[0] })
+            .then(r => r.ok).catch(() => false);
+          if (!ok) break; // kept, tried again with the next piece
+          recChunks.shift();
+          recSent++;
+        }
+        recSending = null;
+      })();
+      return recSending;
+    };
+    recorder.ondataavailable = e => { if (e.data && e.data.size) { recChunks.push(e.data); sendParts(); } };
     let doneSaving;
     recSaved = new Promise(r => { doneSaving = r; });
     recorder.onstop = async () => {
       if (player && player.stopRecordingCanvas) player.stopRecordingCanvas();
       const isMp4 = recMime.startsWith("video/mp4");
-      const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
       const file = `${gameName} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
       recorder = null;
+      if (DESKTOP && recSent > 0) {
+        await sendParts();
+        if (recChunks.length) await sendParts(); // once more for the last piece
+        try {
+          if (recChunks.length) throw new Error("couldn't save the end of it");
+          const res = await fetch("/api/rec/finish?id=" + recId + "&name=" + encodeURIComponent(file), {
+            method: "POST", headers: { "X-Retro-Token": DESKTOP.token } });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw new Error(data.error || `couldn't save it (${res.status})`);
+          toast(`Recording saved: ${data.file}`);
+        } catch (e) { toast("Recording: " + e.message, true); }
+        recChunks = [];
+        doneSaving();
+        return;
+      }
+      const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
+      recChunks = [];
       if (DESKTOP) {
         // The desktop app keeps it in the recordings folder with the other recordings.
         try {

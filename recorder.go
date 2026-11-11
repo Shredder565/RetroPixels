@@ -1097,6 +1097,29 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "file": filepath.Base(p), "dir": filepath.Dir(p)})
 	}))
+	mux.HandleFunc("/api/rec/part", guard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			fail(w, errors.New("send the video with POST"))
+			return
+		}
+		if err := appendRecordingPart(r.URL.Query().Get("id"), http.MaxBytesReader(w, r.Body, 1<<30)); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+	}))
+	mux.HandleFunc("/api/rec/finish", guard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			fail(w, errors.New("finish with POST"))
+			return
+		}
+		p, err := finishRecordingPart(r.URL.Query().Get("id"), r.URL.Query().Get("name"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "file": filepath.Base(p), "dir": filepath.Dir(p)})
+	}))
 	mux.HandleFunc("/api/rec/status", guard(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": recStatus(), "recordings": listRecordings()})
 	}))
@@ -1184,7 +1207,9 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 
 // saveUploadedRecording writes a video from the page into the recordings
 // folder as name (cleaned up; .mp4 or .webm), never over an existing file.
-func saveUploadedRecording(name string, body io.Reader) (string, error) {
+// uploadTarget: where a recording named name (from the page) is kept in the
+// recordings folder, under a name not used yet.
+func uploadTarget(name string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(name))
 	if ext != ".mp4" && ext != ".webm" {
 		ext = ".mp4"
@@ -1211,6 +1236,62 @@ func saveUploadedRecording(name string, body io.Reader) (string, error) {
 		}
 		p = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
 	}
+	return p, nil
+}
+
+// A recording in the page is sent in pieces while it records (every second),
+// so a long game doesn't pile the whole video up in memory: that slowed the
+// page down until the game froze. The pieces go into one file, named by the
+// page's id for the recording, and finishRecordingPart gives it its name.
+func recPartPath(id string) (string, error) {
+	if len(id) < 8 || len(id) > 40 || strings.Trim(id, "0123456789abcdefghijklmnopqrstuvwxyz") != "" {
+		return "", errors.New("bad recording id")
+	}
+	dir := recordingsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "recording-"+id+".part"), nil
+}
+
+func appendRecordingPart(id string, body io.Reader) error {
+	p, err := recPartPath(id)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+func finishRecordingPart(id, name string) (string, error) {
+	part, err := recPartPath(id)
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(part); err != nil || st.Size() == 0 {
+		os.Remove(part)
+		return "", errors.New("the recording was empty")
+	}
+	p, err := uploadTarget(name)
+	if err != nil {
+		return "", err
+	}
+	return p, os.Rename(part, p)
+}
+
+func saveUploadedRecording(name string, body io.Reader) (string, error) {
+	p, err := uploadTarget(name)
+	if err != nil {
+		return "", err
+	}
+	ext := filepath.Ext(p)
 	tmp := p + ".saving" + ext
 	f, err := os.Create(tmp)
 	if err != nil {

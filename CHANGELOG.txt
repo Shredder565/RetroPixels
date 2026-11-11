@@ -4,6 +4,15 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.41.3  (2026-11-11)
+--------------------------------
+- Fixed: a game could freeze mid-play while "Record games automatically"
+  was on (Super Mario Bros. / Duck Hunt in RetroPixels Native). The game
+  waited whenever ffmpeg fell behind; now it never waits, and those
+  moments are left out of the video with their sound.
+- RetroPixels.exe: recordings are saved a second at a time while you play
+  instead of being kept in memory, so long games no longer slow down.
+
 RetroPixels 2.41.2  (2026-11-09)
 --------------------------------
 - Fixed: the punch button did nothing in Popeye and Kangaroo, in both

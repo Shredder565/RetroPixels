@@ -58,7 +58,9 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
-- **Punch works in Popeye and Kangaroo** (new in 2.41.2): A or X on the controller, Z or A on the
+- **No more freezes while recording** (new in 2.41.3): a game no longer stops mid-play when the
+  automatic recording falls behind, in both programs.
+- **Punch works in Popeye and Kangaroo** (2.41.2): A or X on the controller, Z or A on the
   keyboard, in both programs.
 - **Safer controller save states** (2.41.1): the stick clicks (R3 save, L3 load) count only
   when held for a moment with the stick in the middle, so a hard left-right flick can no longer load

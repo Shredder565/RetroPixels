@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.41.3] - 2026-11-11
+
+- Fixed: a game could freeze mid-play (reported in Super Mario Bros. / Duck Hunt in RetroPixels Native) while "Record games automatically" was on. RetroPixels Native's recording handed each picture to ffmpeg and waited when ffmpeg was more than three seconds behind (a busy PC, a slow encoder or a graphics driver hiccup), so the game stopped for as long as ffmpeg was stuck. Now the game never waits: while ffmpeg catches up, those moments are left out of the video along with their sound, so picture and sound stay together. If ffmpeg stops responding, the recording is ended after two minutes instead of waiting for ever. Super Mario Bros. / Duck Hunt itself played 20 minutes of running, jumping, saving and loading states without a freeze.
+- RetroPixels.exe: a recording is now saved to the recordings folder a second at a time while you play, instead of being kept in memory until the game ends, which made long games slow down and could freeze them.
+
 ## [2.41.2] - 2026-11-09
 
 - Fixed: the punch button did nothing in Popeye and Kangaroo, in both programs. Their "Punch" control had no default key or controller button, so pressing A / Z sent nothing to the game. Punch is now A or X on the controller and Z or A on the keyboard (change it under "Punch" in Controls). Checked with Popeye: Popeye punches with keyboard Z, controller A and controller X. A new test makes sure every arcade game's controls have a default key in both programs.

@@ -65,6 +65,8 @@ type recorder struct {
 	scaled     []uint32
 	log        *tailBuf
 	nframes    int64 // pictures recorded
+	dropped    int64 // pictures left out because ffmpeg was behind
+	skipSound  bool  // the last picture was left out: leave its sound out too
 	minFrames  int64 // fewer than this: the recording isn't kept
 
 	mu  sync.Mutex
@@ -152,9 +154,19 @@ func (r *recorder) failed() error {
 	return r.err
 }
 
-// frame adds one picture (called once per emulated frame).
+// frame adds one picture (called once per emulated frame, on the game's
+// thread). It never waits for ffmpeg: when ffmpeg falls behind (a slow
+// encoder, the PC busy, a graphics driver hiccup) and its queue is full, the
+// picture is left out, with its sound, so the video and sound stay together.
+// Waiting here used to freeze the game for as long as ffmpeg was stuck.
 func (r *recorder) frame(pix []uint32, w, h int) {
+	r.skipSound = false
 	if r.failed() != nil || w <= 0 || h <= 0 || len(pix) < w*h {
+		return
+	}
+	if len(r.frames) == cap(r.frames) {
+		r.dropped++
+		r.skipSound = true
 		return
 	}
 	if w != r.w || h != r.h {
@@ -176,13 +188,18 @@ func (r *recorder) frame(pix []uint32, w, h int) {
 	for i, p := range pix[:r.w*r.h] {
 		binary.LittleEndian.PutUint32(buf[i*4:], p)
 	}
-	r.frames <- buf
-	r.nframes++
+	select {
+	case r.frames <- buf:
+		r.nframes++
+	default: // filled up meanwhile (only the writer takes from it, so rare)
+		r.dropped++
+		r.skipSound = true
+	}
 }
 
 // audio adds the frame's sound (as the core made it, before the volume).
 func (r *recorder) audio(samples []float32, stereo bool) {
-	if r.failed() != nil || len(samples) == 0 {
+	if r.failed() != nil || len(samples) == 0 || r.skipSound {
 		return
 	}
 	r.pcm = toPCM(r.pcm, samples, stereo, 1)
@@ -202,7 +219,13 @@ func (r *recorder) audio(samples []float32, stereo bool) {
 // game's thread.
 func (r *recorder) stop() (string, error) {
 	close(r.frames)
-	<-r.writerDone
+	select {
+	case <-r.writerDone:
+	case <-time.After(2 * time.Minute): // ffmpeg stuck: don't wait for ever
+		r.fail(errors.New("ffmpeg stopped responding"))
+		r.cmd.Process.Kill()
+		<-r.writerDone
+	}
 	werr := r.cmd.Wait()
 	// the .wav header gets its real length now
 	if _, err := r.wav.Seek(0, io.SeekStart); err == nil {
