@@ -12,6 +12,9 @@ type uiSettings struct {
 	AutoRecord *bool `json:"autoRecord,omitempty"`
 	// Options > Open the SNES Debugger with SNES games (unset: on).
 	SNESDebugger *bool `json:"snesDebugger,omitempty"`
+	// the start screen's tab, and its libraries' order (A to Z, or recently played first)
+	HomeTab        int  `json:"homeTab,omitempty"`
+	HomeSortPlayed bool `json:"homeSortPlayed,omitempty"`
 }
 
 // autoRecord: every game is recorded from its start.

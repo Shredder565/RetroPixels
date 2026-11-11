@@ -2,6 +2,13 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.42.0] - 2026-11-11
+
+- RetroPixels is now one program: **RetroPixels-Native.exe**. RetroPixels.exe (the app in a built-in web browser) is removed, with its code, its web page and the Linux test build that was made from it. The download is RetroPixels-Native-2.42.0.zip. RetroPixels Native already plays every system RetroPixels.exe played, and its settings and saves are untouched.
+- RetroPixels Native looks like RetroPixels.exe did. The start screen has the same header and the same tabs: **Classic consoles** (the twelve system cards, the drop target, recent games and the live controller check), **GameCube**, **Wii**, **Wii U**, **3DS / DS** and **Arcade (MAME)** as grids of your games with their box art (or coloured initials), each with Add games folder, Find games again and A to Z / recently played, and **Recordings**. Click a game to play it, or use the arrow keys / D-pad and Enter / A; Ctrl+Tab or LB / RB change tabs; the mouse wheel scrolls. Clicking a system card opens a game for that system (for the Genesis and the Ataris it also says which system .bin files are for, as in RetroPixels.exe).
+- The Wii U and 3DS / DS tabs are new in RetroPixels Native: add your games folders there and your games are listed, as RetroPixels.exe's tabs did.
+- A dark title bar, dark menus and a dark menu bar, in RetroPixels' colours. The window opens bigger on the start screen so the tabs and libraries have room. The program calls itself RetroPixels everywhere (title bar, messages, About).
+
 ## [2.41.3] - 2026-11-11
 
 - Fixed: a game could freeze mid-play (reported in Super Mario Bros. / Duck Hunt in RetroPixels Native) while "Record games automatically" was on. RetroPixels Native's recording handed each picture to ffmpeg and waited when ffmpeg was more than three seconds behind (a busy PC, a slow encoder or a graphics driver hiccup), so the game stopped for as long as ffmpeg was stuck. Now the game never waits: while ffmpeg catches up, those moments are left out of the video along with their sound, so picture and sound stay together. If ffmpeg stops responding, the recording is ended after two minutes instead of waiting for ever. Super Mario Bros. / Duck Hunt itself played 20 minutes of running, jumping, saving and loading states without a freeze.

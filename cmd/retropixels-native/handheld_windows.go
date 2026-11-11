@@ -73,7 +73,7 @@ func (a *app) hhCommand(id int) {
 	case cmdHHOpenGame:
 		path := a.fileDialog("Open a 3DS or DS game", hhFilter(), a.settings.LastFolder)
 		if path != "" && !a.hhOpenPath(path) {
-			messageBox(a.hwnd, filepath.Base(path)+" isn't a 3DS or DS game.", "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, filepath.Base(path)+" isn't a 3DS or DS game.", "RetroPixels", mbIconWarning)
 		}
 	case cmdHHStop:
 		if r := a.hh.run; r != nil {
@@ -109,7 +109,7 @@ func (a *app) hhChooseExe(e handheld.Engine) string {
 		return ""
 	}
 	if !strings.EqualFold(filepath.Ext(p), ".exe") {
-		messageBox(a.hwnd, "That isn't a program (.exe).", "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "That isn't a program (.exe).", "RetroPixels", mbIconWarning)
 		return ""
 	}
 	if a.settings.Handheld.Exe == nil {
@@ -131,7 +131,7 @@ func (a *app) hhOpenPath(path string) bool {
 		if strings.EqualFold(r.game.Path, path) {
 			return true
 		}
-		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			a.hh.pendingOpen = path
 			r.stop()
 		}
@@ -146,14 +146,14 @@ func (a *app) hhPlay(g handheld.Game) {
 		return
 	}
 	if r := a.dol.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels", mbIconInfo)
 		return
 	}
 	e := handheld.EngineFor(g.System)
 	exe := a.hhExe(e)
 	if exe == "" {
 		if messageBox(a.hwnd, "3DS and DS games play in "+e.Name+", and it wasn't found: keep its "+e.Dir+" folder from the RetroPixels download next to RetroPixels.\n\nChoose "+e.Exes[0]+" now?",
-			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+			"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 			return
 		}
 		if exe = a.hhChooseExe(e); exe == "" {
@@ -162,7 +162,7 @@ func (a *app) hhPlay(g handheld.Game) {
 	}
 	for _, n := range append([]string{filepath.Base(exe)}, e.Exes...) {
 		if dolphin.Running(n) {
-			messageBox(a.hwnd, e.Name+" is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
+			messageBox(a.hwnd, e.Name+" is already open. Close it first, then start the game here.", "RetroPixels", mbIconInfo)
 			return
 		}
 	}
@@ -186,7 +186,7 @@ func (a *app) hhPlay(g handheld.Game) {
 		if rec != nil {
 			a.extRecDropped(rec)
 		}
-		messageBox(a.hwnd, "Couldn't start "+e.Name+": "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start "+e.Name+": "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	r := &hhRun{extRun: newExtRun(cmd.Process.Pid), game: g, engine: e}
@@ -212,7 +212,7 @@ func (a *app) hhPlay(g handheld.Game) {
 // hhBusy: a 3DS or DS game is on. It says so.
 func (a *app) hhBusy() bool {
 	if r := a.hh.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in "+r.engine.Name+". Stop it first (3DS / DS > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in "+r.engine.Name+". Stop it first (3DS / DS > Stop game).", "RetroPixels", mbIconInfo)
 		return true
 	}
 	return false

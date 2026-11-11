@@ -34,7 +34,7 @@ type apState struct {
 // the BizHawk ports only while a game runs.
 func (a *app) apStartup() {
 	h := apbridge.NewHub(apbridge.BizHawkFirstPort, apbridge.SNIPort)
-	h.Name = "RetroPixels Native " + version
+	h.Name = "RetroPixels " + version
 	h.OnChange = func() { a.event("ap-status", "") }
 	a.ap.hub = h
 	h.Start(available("snes"))
@@ -145,7 +145,7 @@ func (a *app) openAPPatch(path string) {
 		if _, ok := err.(errNotYet); ok {
 			icon = mbIconInfo
 		}
-		messageBox(a.hwnd, err.Error(), "RetroPixels Native", icon)
+		messageBox(a.hwnd, err.Error(), "RetroPixels", icon)
 		return
 	}
 	name := filepath.Base(path)
@@ -158,7 +158,7 @@ func (a *app) openAPPatch(path string) {
 				return
 			}
 			if !apWrongBase(err) {
-				messageBox(a.hwnd, fmt.Sprintf("Couldn't make the game from %q: %v", name, err), "RetroPixels Native", mbIconWarning)
+				messageBox(a.hwnd, fmt.Sprintf("Couldn't make the game from %q: %v", name, err), "RetroPixels", mbIconWarning)
 				return
 			}
 		}
@@ -190,7 +190,7 @@ func (a *app) openAPPatch(path string) {
 				}
 				continue
 			}
-			messageBox(a.hwnd, fmt.Sprintf("Couldn't make the game from %q: %v", name, err), "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, fmt.Sprintf("Couldn't make the game from %q: %v", name, err), "RetroPixels", mbIconWarning)
 			return
 		}
 		a.settings.setAPBase(p, bp)
@@ -206,7 +206,7 @@ func (a *app) apOpenPath(path string) bool {
 		return false
 	}
 	if _, err := os.Stat(path); err != nil {
-		messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, err.Error(), "RetroPixels", mbIconWarning)
 		return true
 	}
 	a.openAPPatch(path)

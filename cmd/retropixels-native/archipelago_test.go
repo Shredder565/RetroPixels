@@ -100,7 +100,7 @@ func TestAPPatchFiles(t *testing.T) {
 	if snesMaker != nil {
 		coreMakers["snes"] = snesMaker
 	}
-	if snesErr == nil || !strings.Contains(snesErr.Error(), "Super Nintendo games are coming in a later test build") {
+	if snesErr == nil || !strings.Contains(snesErr.Error(), "Super Nintendo games are coming in a later version") {
 		t.Fatalf("SNES patch: %v", snesErr)
 	}
 	// a patch whose game needs its own code

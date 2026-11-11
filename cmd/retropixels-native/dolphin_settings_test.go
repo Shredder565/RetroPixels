@@ -137,7 +137,7 @@ func TestDolphinEngine(t *testing.T) {
 	if got := d.exe(filepath.Join(px, "PixelU.exe")); got != engine {
 		t.Fatalf("engine = %q want %q", got, engine)
 	}
-	if !strings.Contains(noEngine, "Put the PixelU folder next to RetroPixels.exe") {
+	if !strings.Contains(noEngine, "Put the PixelU folder next to RetroPixels-Native.exe") {
 		t.Error(noEngine)
 	}
 	user := dolphin.UserDir(engine)

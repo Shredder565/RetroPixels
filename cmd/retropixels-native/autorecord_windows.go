@@ -46,10 +46,10 @@ func (a *app) recFFmpeg(needNow, manual bool) bool {
 	if a.ffDeclined && !manual {
 		return false
 	}
-	if messageBox(a.hwnd, "Recording needs ffmpeg, a free video program (about 200 MB, from github.com/BtbN/FFmpeg-Builds; "+
-		"RetroPixels.exe uses the same one).\n\nDownload it now? (No: play without recording this time. "+
+	if messageBox(a.hwnd, "Recording needs ffmpeg, a free video program (about 200 MB, from github.com/BtbN/FFmpeg-Builds)."+
+		"\n\nDownload it now? (No: play without recording this time. "+
 		"Record > Record games automatically turns automatic recording off.)",
-		"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+		"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 		if !manual {
 			a.ffDeclined = true // not asked again until RetroPixels Native is started again
 		}

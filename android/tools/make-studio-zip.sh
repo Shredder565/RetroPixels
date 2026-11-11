@@ -12,8 +12,8 @@ go=${GO:-go}
 outdir=${1:-.}
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
-version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/main.go")
-[ -n "$version" ] || { echo "no appVersion in main.go" >&2; exit 1; }
+version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/version.go")
+[ -n "$version" ] || { echo "no appVersion in version.go" >&2; exit 1; }
 for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     [ -f "$repo/android/app/src/main/jniLibs/$abi/librpengine.so" ] || {
         echo "the engine for $abi isn't built: run sh android/tools/build-engines.sh first" >&2
@@ -30,7 +30,7 @@ mkdir -p "$top"
 # the project, without what a build or Android Studio leaves behind
 (cd "$repo" && tar -cf - --exclude=build --exclude=.gradle --exclude=.idea --exclude=.kotlin --exclude='*.iml' \
     --exclude=local.properties --exclude=.cxx --exclude=captures android) | (cd "$top" && tar -xf -)
-# the version, for the build without ../main.go
+# the version, for the build without ../version.go
 printf 'version=%s\n' "$version" > "$top/android/version.properties"
 
 # the engine's Go sources: its packages' non-test files and go.mod

@@ -90,7 +90,7 @@ jobs:
       # Binaries/Sys is assembled by the build (pixelu/wii/Data/Sys plus the
       # short third-party list in pixelu/wii/CMake/PixelUAssembleSys.cmake),
       # and COPYING and Licenses come from pixelu/wii. No commit or tag is
-      # needed: PixelU-Wii's version comes from RetroPixels (main.go and its
+      # needed: PixelU-Wii's version comes from RetroPixels (version.go and its
       # git commit, Source/Core/Common/PixelUWiiVersion.cmake).
 
       - uses: actions/setup-python@v5
@@ -259,7 +259,7 @@ jobs:
           "PixelU Wii keeps its settings, saves and caches in the User folder next to PixelU-Wii.exe." | Out-File -Encoding utf8 "$out/portable.txt"
           $sha = git rev-parse --short HEAD
           $dsha = git -C $env:DOLPHIN_DIR rev-parse --short HEAD
-          $ver = (Select-String -Path main.go -Pattern 'appVersion\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $ver = (Select-String -Path version.go -Pattern 'appVersion\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
@@ -342,7 +342,7 @@ jobs:
     # third-party Sys files. tools/pixelu-wii-linux-deploy.sh puts Qt next to
     # the program (lib/, QtPlugins/, $ORIGIN rpath). The artifact
     # PixelU-Wii-linux-x64 holds PixelU-Wii-linux.tar.gz (a tar keeps the exec
-    # bits) with PixelU/wii/PixelU-Wii inside; bundle-linux.yml picks it up.
+    # bits) with PixelU/wii/PixelU-Wii inside.
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     env:
@@ -549,7 +549,7 @@ jobs:
           echo "PixelU Wii keeps its settings, saves and caches in the User folder next to PixelU-Wii." > "$out/portable.txt"
           sha=$(git rev-parse --short HEAD)
           dsha=$(git -C "$DOLPHIN_DIR" rev-parse --short HEAD)
-          ver=$(sed -n 's/.*appVersion *= *"\([^"]*\)".*/\1/p' main.go | head -n 1)
+          ver=$(sed -n 's/.*appVersion *= *"\([^"]*\)".*/\1/p' version.go | head -n 1)
           {
             echo "PixelU Wii $ver test build for Linux x86-64 (GameCube and Wii, based on Dolphin; not a release)"
             echo "Built $(date -u +%Y-%m-%d) from branch claude/wiiu-emulator-urpcen ($sha) on Ubuntu 22.04 (glibc 2.35 or newer needed)"
@@ -695,8 +695,3 @@ jobs:
           path: PixelU-Wii-linux.tar.gz
           compression-level: 0
           retention-days: 14
-
-      - name: Make the RetroPixels Linux download with this build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run bundle-linux.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"

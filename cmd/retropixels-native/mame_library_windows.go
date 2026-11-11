@@ -543,7 +543,7 @@ func (l *mameLibrary) command(id, code int, lp uintptr) {
 			a.showMessage(in.Label() + " is the default now")
 		} else {
 			if messageBox(l.hwnd, "Remove "+in.Label()+" from RetroPixels? Its files stay where they are.\n\n"+in.Exe,
-				"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+				"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 				break
 			}
 			mame.Update(func(c *mame.Config) { c.Remove(in.Exe) })

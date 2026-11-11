@@ -4,6 +4,18 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.42.0  (2026-11-11)
+--------------------------------
+- RetroPixels is now one program, RetroPixels-Native.exe. RetroPixels.exe
+  (the app in a built-in web browser) is removed, with the Linux test build
+  made from it. The download is RetroPixels-Native-2.42.0.zip.
+- RetroPixels Native looks like RetroPixels.exe did: the same tabs
+  (Classic consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME),
+  Recordings), the system cards, and the libraries as grids of box art.
+  Click a game, or use the D-pad and A; LB / RB or Ctrl+Tab change tabs.
+- New Wii U and 3DS / DS libraries: add your games folders in those tabs.
+- Dark title bar and menus, and a bigger window on the start screen.
+
 RetroPixels 2.41.3  (2026-11-11)
 --------------------------------
 - Fixed: a game could freeze mid-play while "Record games automatically"

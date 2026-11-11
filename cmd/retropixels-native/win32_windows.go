@@ -140,6 +140,7 @@ const (
 	wmRButtonDown    = 0x0204
 	wmRButtonUp      = 0x0205
 	wmMouseLeave     = 0x02A3
+	wmMouseWheel     = 0x020A
 	wmDropFiles      = 0x0233
 	wmDpiChanged     = 0x02E0
 	wmApp            = 0x8000

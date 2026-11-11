@@ -26,7 +26,7 @@
   <img src="docs/images/playing.png" alt="RetroPixels playing a Genesis homebrew game" width="820">
 </p>
 
-RetroPixels is a single Windows program that plays games from eleven classic systems and a set of
+RetroPixels is a single Windows program, `RetroPixels-Native.exe`, that plays games from eleven classic systems and a set of
 arcade boards. Every emulator in it (the CPUs, graphics and sound chips, cartridge hardware and the
 arcade boards) is RetroPixels' own code. It runs offline and needs no BIOS files for the built-in
 systems. GameCube and Wii games play through [Dolphin](https://dolphin-emu.org/), shown inside the
@@ -36,8 +36,11 @@ RetroPixels window.
 
 ## Features
 
-- **One window for everything.** Drop a game file on the window; zipped games open directly and the
-  system is detected from the file.
+- **One program, one window** (2.42.0). `RetroPixels-Native.exe` is RetroPixels; the old
+  `RetroPixels.exe` (the app in a built-in web browser) is gone. Its start screen has the tabs
+  RetroPixels.exe had: Classic consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME) and Recordings,
+  with the system cards and every library as a grid of box art. Drop a game file on the window;
+  zipped games open directly and the system is detected from the file.
 - **Xbox controllers work out of the box**, with per-system button remapping, rumble and analog
   sticks where the game uses them. Up to four players.
 - **Choose your player** in 4-player arcade games: play as Leonardo, Michelangelo, Donatello or Raphael,
@@ -99,7 +102,7 @@ RetroPixels window.
 | Super Nintendo | `.sfc` `.smc` `.fig` `.swc` | Super FX, SA-1, DSP-1–4, Cx4, S-DD1, SPC7110, ST010/011/018 ¹ |
 | Game Boy / Color | `.gb` `.gbc` | MBC1–7, HuC1/3, MMM01, TAMA5, real-time clock |
 | Game Boy Advance | `.gba` | Solar, gyro, tilt and rumble cartridges |
-| Nintendo 64 | `.z64` `.n64` `.v64` | Runs natively inside `RetroPixels.exe` |
+| Nintendo 64 | `.z64` `.n64` `.v64` | Runs natively inside RetroPixels |
 | Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen and GX2 (3D) homebrew on the TV and GamePad, drawn on the graphics card with Direct3D 11 on Windows; commercial games come later |
 | Sega Genesis / Mega Drive | `.md` `.gen` `.smd` `.bin` | EEPROM saves, J-Cart, Realtec, SSF2 |
 | Sega Master System | `.sms` | |
@@ -115,12 +118,11 @@ your own dump of it the first time and remembers it.
 
 ## Getting started
 
-1. Download `RetroPixels-x.y.z.zip` from the [latest release](../../releases/latest) and unzip it.
-2. Run `RetroPixels.exe`.
-3. Drop a game onto the window, or click **Choose game file…**.
+1. Download `RetroPixels-Native-x.y.z.zip` from the [latest release](../../releases/latest) and unzip it.
+2. Run `RetroPixels-Native.exe`.
+3. Drop a game onto the window, or click **Choose game file…**, a system card, or a game in one of the library tabs.
 
-**Requirements:** Windows 10 or 11, 64-bit, with Microsoft Edge (built into Windows; RetroPixels
-uses it to draw its window, in its own Edge profile with sync and sign-in turned off, so it doesn't sync anything; the window and its taskbar button show the RetroPixels icon). For recording, RetroPixels downloads ffmpeg the first time it is needed.
+**Requirements:** Windows 10 or 11, 64-bit. No web browser is used. For recording, RetroPixels downloads ffmpeg the first time it is needed.
 
 > [!NOTE]
 > The executable is not code-signed yet, so Windows SmartScreen may show *"Windows protected your PC"*.
@@ -170,7 +172,7 @@ patched or rewritten. Its source code for that exact release is attached to each
 (`MAME-<version>-source.tar.gz`). It shows as **MAME 0.xxx (built in)** and is the default when you
 have no other MAME. Put your ROM sets in `MAME\roms`, or add your own ROM folder.
 
-1. Open the **Arcade (MAME)** tab (in RetroPixels Native: the **Arcade (MAME)** menu > Library).
+1. Open the **Arcade (MAME)** tab (**Library and MAME versions…** there manages the MAME versions).
 2. Add MAME: **Add MAME…** for a `mame.exe` you have (any version), **Find MAME on this PC**, or
    pick a version under **Download a MAME version**. Downloads are the MAME team's official Windows
    releases from [github.com/mamedev/mame](https://github.com/mamedev/mame/releases), checked
@@ -189,13 +191,13 @@ have no other MAME. Put your ROM sets in `MAME\roms`, or add your own ROM folder
 
 MAME keeps its own settings, saves and save states in its folder; RetroPixels doesn't change them.
 
-## RetroPixels Native (test build)
+## RetroPixels Native
 
 RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
 Window Capture records it with any capture method. Each release includes the current test build as
-`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **every system RetroPixels.exe plays**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **Wii U** (homebrew), **arcade** and **GameCube / Wii** (through Dolphin) games so far, with a start screen, four save-state slots and screenshots,
+`RetroPixels-Native.exe`; since 2.42.0 it is the only RetroPixels program, and it looks like `RetroPixels.exe` did. It plays **every system RetroPixels.exe played**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **Wii U** (homebrew), **arcade** and **GameCube / Wii** (through Dolphin) games so far, with a start screen, four save-state slots and screenshots,
 using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
-systems follow in later test builds; until then, `RetroPixels.exe` plays everything.
+RetroPixels.exe's code, its web page and the Linux test build made from it were removed in 2.42.0; `web/emu/` stays as the reference the native emulators are checked against.
 
 ## RetroPixels for Android
 
@@ -203,32 +205,32 @@ Each release includes **RetroPixels-<version>.apk** for Android 7 or newer, play
 
 ## Building from source
 
-RetroPixels is a Go program with an embedded web front end; no C toolchain is required.
+RetroPixels is a Go program (a Win32 window, no web front end); no C toolchain is required.
 
 ```sh
 git clone https://github.com/Shredder565/RetroPixels.git
 cd RetroPixels
 go test ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-  go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
+  go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)" \
+  -o RetroPixels-Native.exe ./cmd/retropixels-native
 ```
 
-Requires Go 1.24 or newer. The program icon and file details come from `rsrc_windows_amd64.syso`;
-after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. When the version in `main.go` changes on `main` (or a tag such as `v2.7.0` is pushed), GitHub Actions builds the program and publishes the release with the .exe, the zip and the source code.
+Requires Go 1.24 or newer. The program icon and file details come from `cmd/retropixels-native/rsrc_windows_amd64.syso`;
+after changing `winres/icon.ico` or the version, run `sh tools/make-winres-native.sh`. When the version (`appVersion` in `version.go`) changes on `main` (or a tag such as `v2.7.0` is pushed), GitHub Actions builds the program and publishes the release with the .exe, the zip and the source code.
 
 ### Project layout
 
 | Path | What it is |
 | --- | --- |
-| `main.go`, `*.go` | Windows app: app window, Dolphin and MAME integration, recording, settings |
-| `internal/boxart/` | Box art for the libraries: pictures next to the games, GameTDB, libretro-thumbnails and the Arcade Database, cached; shared by both apps |
-| `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps; `setfix.go` recognises any ROM set and puts it together for the right MAME version |
+| `version.go` | The version number (`appVersion`) the builds, the release and the Android app use |
+| `internal/boxart/` | Box art for the libraries: pictures next to the games, GameTDB, libretro-thumbnails and the Arcade Database, cached; shared with the Android app |
+| `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared with the Android app; `setfix.go` recognises any ROM set and puts it together for the right MAME version |
 | `internal/romdb/` | The ROM history: every arcade machine's chip files and CRCs in every MAME version since 0.171 (`history.bin`, made by `tools/romhistory` from MAME's source) |
-| `web/index.html` | The app's interface |
-| `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
+| `web/emu/` | The original JavaScript emulators, kept as the reference the Go cores are tested against frame by frame |
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |
 | `wiiu/` | Wii U emulator (PowerPC 750CL, RPX loader, system libraries), run natively |
-| `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels Native: the Win32 app and the native emulators |
+| `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels: the Win32 app (start screen and tabs in `ui_home_windows.go` and `ui_tabs_windows.go`) and the emulators |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
 | `tools/snes-debugger/` | The SNES Debugger (Rust): capture analysis, background swap, its window |
 | `internal/snesdbg/` | The folder RetroPixels and the SNES Debugger share (sessions, capture requests) |

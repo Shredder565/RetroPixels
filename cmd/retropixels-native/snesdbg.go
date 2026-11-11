@@ -37,7 +37,7 @@ func (s *session) attachSNESDebugger(launch bool) error {
 		return nil
 	}
 	tr.EnableTrace()
-	ds, err := snesdbg.Start(s.game.ROM, s.game.Name, "", "RetroPixels Native", launch)
+	ds, err := snesdbg.Start(s.game.ROM, s.game.Name, "", "RetroPixels", launch)
 	if err != nil {
 		return err
 	}

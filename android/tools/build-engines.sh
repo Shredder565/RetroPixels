@@ -10,7 +10,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 go=${GO:-go}
-version=${1:-$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/main.go" 2>/dev/null || true)}
+version=${1:-$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/version.go" 2>/dev/null || true)}
 [ -n "$version" ] || version=$(sed -n 's/^version=//p' "$repo/android/version.properties" 2>/dev/null || true)
 [ -n "$version" ] || version=dev
 out="$repo/android/app/src/main/jniLibs"
