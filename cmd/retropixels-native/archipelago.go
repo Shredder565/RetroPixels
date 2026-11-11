@@ -281,7 +281,7 @@ func apHelpText(g *loadedGame, st apbridge.Status, served bool) string {
 		b.WriteString(apStatusText(sys, st) + "\n\n")
 	}
 	if g == nil || !served {
-		b.WriteString("RetroPixels Native works with Archipelago multiworld randomizers. Open your patch file " +
+		b.WriteString("RetroPixels works with Archipelago multiworld randomizers. Open your patch file " +
 			"(for example AP_..._P1_Name.apred, .apemerald) with File > Open game or drop it on the window. " +
 			"The first time, RetroPixels asks for the original ROM the game's Archipelago setup guide names " +
 			"and keeps it for the next patch.\n\n" +

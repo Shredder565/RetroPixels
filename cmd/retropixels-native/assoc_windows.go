@@ -152,13 +152,13 @@ func registerFileTypes(force bool) {
 	regSetString(cls+assocProgID, "", "RetroPixels game")
 	regSetString(cls+assocProgID, "FriendlyTypeName", "RetroPixels game")
 	regSetString(cls+assocProgID+`\DefaultIcon`, "", icon)
-	regSetString(cls+assocProgID+`\shell\open`, "FriendlyAppName", "RetroPixels Native")
+	regSetString(cls+assocProgID+`\shell\open`, "FriendlyAppName", "RetroPixels")
 	regSetString(cls+assocProgID+`\shell\open\command`, "", cmd)
 	regSetString(cls+assocProgID+`\RetroPixelsTypes`, "", stamp)
 
-	regSetString(app, "FriendlyAppName", "RetroPixels Native")
+	regSetString(app, "FriendlyAppName", "RetroPixels")
 	regSetString(app+`\DefaultIcon`, "", icon)
-	regSetString(app+`\shell\open`, "FriendlyAppName", "RetroPixels Native")
+	regSetString(app+`\shell\open`, "FriendlyAppName", "RetroPixels")
 	regSetString(app+`\shell\open\command`, "", cmd)
 	for _, e := range exts {
 		regSetEmpty(app+`\SupportedTypes`, e)
@@ -170,11 +170,11 @@ func registerFileTypes(force bool) {
 // chooseFileTypes: Options > Open game files with RetroPixels Native.
 func (a *app) chooseFileTypes() {
 	registerFileTypes(true)
-	messageBox(a.hwnd, "RetroPixels Native is now offered for game files.\n\n"+
+	messageBox(a.hwnd, "RetroPixels is now offered for game files.\n\n"+
 		"To make double-clicking a game open it here: right-click a game in File Explorer, choose Open with > Choose another app, "+
-		"pick RetroPixels Native and tick \"Always\". Do this once for each kind of game file (.md, .sfc, .nes and so on).\n\n"+
+		"pick RetroPixels and tick \"Always\". Do this once for each kind of game file (.md, .sfc, .nes and so on).\n\n"+
 		"New RetroPixels builds take over automatically when you first start them.",
-		"RetroPixels Native", mbIconInfo)
+		"RetroPixels", mbIconInfo)
 }
 
 // handToRunningCopy: when RetroPixels Native is already open, give it the game

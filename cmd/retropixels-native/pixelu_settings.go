@@ -4,7 +4,11 @@ package main
 // settings.json and how a game is launched. pixelu_windows.go has the menu
 // and the window.
 
-import "retropixels/internal/pixelu"
+import (
+	"time"
+
+	"retropixels/internal/pixelu"
+)
 
 // PixelUSettings: settings.json's "pixelu" part. Unset switches take
 // RetroPixels.exe's defaults (fullscreen, inside the window).
@@ -13,6 +17,9 @@ type PixelUSettings struct {
 	Fullscreen *bool  `json:"fullscreen,omitempty"`
 	Embed      *bool  `json:"playInWindow,omitempty"`
 	OpenGL     bool   `json:"openGL,omitempty"` // Vulkan doesn't work on this PC: draw with OpenGL
+	// the Wii U tab's games folders, and when each game (lower-case path) was last played
+	Folders []string             `json:"folders,omitempty"`
+	Played  map[string]time.Time `json:"played,omitempty"`
 }
 
 func (p *PixelUSettings) fullscreen() bool { return boolOr(p.Fullscreen, true) }

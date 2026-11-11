@@ -1,15 +1,14 @@
 name: RetroPixels with PixelU (test build)
 
-# One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
-# built from this commit, with PixelU inside (the Wii U engine and the
+# One download with everything: RetroPixels-Native.exe, built from this commit, with PixelU inside (the Wii U engine and the
 # GameCube / Wii engine, from their latest successful builds on this branch)
 # and the built-in MAME. A workflow artifact only: no release is made.
 # It runs on each push, and again when a PixelU engine build finishes (those
 # workflows start it, since workflow_run only works from the default branch).
 
 # release.yml calls it with release: true: then the version has no -testN,
-# VERSION.txt says it's a release, and the release files (the zip, the two
-# programs and the MAME source) go in the RetroPixels-release artifact.
+# VERSION.txt says it's a release, and the release files (the zip, the
+# program and the MAME source) go in the RetroPixels-release artifact.
 
 on:
   workflow_dispatch:
@@ -54,21 +53,20 @@ jobs:
 
       - name: Build RetroPixels
         run: |
-          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           if [ "${{ inputs.release }}" != true ]; then v=$v-test${{ github.run_number }}; fi
           echo "VER=$v" >> "$GITHUB_ENV"
           echo "DIR=dist/RetroPixels-$v" >> "$GITHUB_ENV"
-          sh tools/make-winres.sh && sh tools/make-winres-native.sh
+          sh tools/make-winres-native.sh
           export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
           mkdir -p "dist/RetroPixels-$v"
-          go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/RetroPixels.exe" .
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
           mkdir -p "dist/RetroPixels-$v/PixelDS"
           go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/PixelDS/PixelDS.exe" ./cmd/pixelds
           cp tools/pixelds/sysfont/LICENSE-DejaVu.txt "dist/RetroPixels-$v/PixelDS/"  # PixelDS's 3DS system font is drawn from DejaVu Sans
 
-      # The RetroPixels SNES Debugger (Rust), next to the two programs: they
-      # start it when a SNES game starts (docs/snes-debugger.md).
+      # The RetroPixels SNES Debugger (Rust), next to the program: it
+      # starts it when a SNES game starts (docs/snes-debugger.md).
       - name: SNES Debugger
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
@@ -162,18 +160,12 @@ jobs:
         if: inputs.release
         run: |
           mkdir -p release
-          # Two downloads, one per program, each with the engines and VERSION.txt:
-          # RetroPixels-<ver>.zip (RetroPixels.exe, the browser-window app) and
-          # RetroPixels-Native-<ver>.zip (RetroPixels-Native.exe).
+          # The download, RetroPixels-Native-<ver>.zip: RetroPixels-Native.exe
+          # with the engines and VERSION.txt.
           cp -r "$DIR" "dist/RetroPixels-Native-$VER"
-          rm "dist/RetroPixels-Native-$VER/RetroPixels.exe"
           (cd dist && zip -qr "../release/RetroPixels-Native-$VER.zip" "RetroPixels-Native-$VER")
           rm -r "dist/RetroPixels-Native-$VER"
-          mkdir -p dist/web-only && cp -r "$DIR" "dist/web-only/RetroPixels-$VER"
-          rm "dist/web-only/RetroPixels-$VER/RetroPixels-Native.exe"
-          (cd dist/web-only && zip -qr "../../release/RetroPixels-$VER.zip" "RetroPixels-$VER")
-          rm -r dist/web-only
-          cp "$DIR/RetroPixels.exe" "$DIR/RetroPixels-Native.exe" "$DIR/RetroPixels-SNES-Debugger.exe" release/
+          cp "$DIR/RetroPixels-Native.exe" "$DIR/RetroPixels-SNES-Debugger.exe" release/
           cp dist/mame-source.tar.gz "release/MAME-${{ steps.mame.outputs.version }}-source.tar.gz"
           cp "$DIR/VERSION.txt" release/VERSION.txt
           ls -la release

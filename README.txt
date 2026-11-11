@@ -1,15 +1,22 @@
 RetroPixels
 ============
 
-Double-click RetroPixels.exe to start. It opens in its own window.
+Double-click RetroPixels-Native.exe to start. It opens in its own window.
+
+Since 2.42.0 RetroPixels is one program, RetroPixels-Native.exe: the old
+RetroPixels.exe (the app shown in a built-in web browser) is gone, and
+RetroPixels-Native.exe looks like it did, with the same tabs (Classic
+consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME), Recordings), the
+system cards and the libraries as grids of box art. Where this file still
+says RetroPixels.exe, it means RetroPixels-Native.exe.
 
 Used RetroConsole before? Your settings, save states, recordings and save
 backups move over to RetroPixels automatically the first time it starts.
-Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
+Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.41.3 (the number also shows next to the RetroPixels name in the app).
-For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
+Version 2.42.0 (the number also shows next to the RetroPixels name in the app).
+For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -25,10 +32,9 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.41.3.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.41.3.zip has RetroPixels-Native.exe
-  (the version without a web browser inside, see "RetroPixels Native" below).
-  Each has VERSION.txt with its version number.
+- RetroPixels-Native-2.42.0.zip has RetroPixels-Native.exe (no web
+  browser inside, see "RetroPixels Native" below) and VERSION.txt with its
+  version number.
 - The engines they play through, each in its own folder. Keep these folders
   next to the program:
   * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
@@ -534,18 +540,23 @@ Recording games
   video holds only the game's picture at its own shape (no black bars,
   buttons or messages) and only the game's sound.
 
-RetroPixels Native (test build)
-RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
-a web browser inside, so OBS Studio's Window Capture works with any capture
-method (or use Display Capture). This test build plays Super Nintendo, NES, Atari 2600,
+RetroPixels Native
+RetroPixels-Native.exe is RetroPixels rebuilt without a web browser inside,
+so OBS Studio's Window Capture works with any capture method (or use Display
+Capture). Since 2.42.0 it is the only RetroPixels program. Its start screen
+has RetroPixels.exe's tabs: Classic consoles (click a system card to open a
+game for it), GameCube, Wii, Wii U, 3DS / DS and Arcade (MAME), each a grid
+of your games with box art (Add games folder..., then click a game, or use
+the D-pad and A; LB / RB or Ctrl+Tab change tabs), and Recordings. It plays Super Nintendo, NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
 Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The
 Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe,
 Berzerk, Centipede and Vs. Castlevania), Wii U and GameCube / Wii games
 through PixelU, MAME games and Star Wars Trilogy Arcade: every system
-RetroPixels.exe plays. RetroPixels Native is for Windows only. The two programs keep separate settings
-and saves, so trying the test build changes nothing in RetroPixels.exe.
+RetroPixels.exe played. RetroPixels Native is for Windows only. Its settings
+and saves are in %APPDATA%\RetroPixels Native (RetroPixels.exe's were kept
+apart and are left where they were).
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .sfc, .smc, .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
   .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.

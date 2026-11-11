@@ -318,7 +318,7 @@ func (a *app) mameAddExe(owner uintptr) {
 	}
 	in, err := mame.AddExe(p)
 	if err != nil {
-		messageBox(owner, "Couldn't add it: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(owner, "Couldn't add it: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage(in.Label() + " added")
@@ -345,7 +345,7 @@ func (a *app) mameOpenPath(path string) bool {
 	if r == nil {
 		return false
 	}
-	if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+	if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 		a.mameStop()
 		go func() {
 			<-r.exited
@@ -367,7 +367,7 @@ func (a *app) mameOfferArcade(path string, why error) bool {
 		return false
 	}
 	msg := fmt.Sprintf("%v\n\nPlay %q in %s instead?", why, filepath.Base(path), in.Label())
-	if messageBox(a.hwnd, msg, "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+	if messageBox(a.hwnd, msg, "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 		a.mame.inMame = true // RetroPixels' own emulation couldn't: really MAME
 		a.mamePlayPath(path, "")
 	}
@@ -377,7 +377,7 @@ func (a *app) mameOfferArcade(path string, why error) bool {
 // mameBusy: a MAME game is on (so GameCube / Wii can't start). It says so.
 func (a *app) mameBusy() bool {
 	if r := a.mame.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in "+r.label+". Stop it first (Arcade (MAME) > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in "+r.label+". Stop it first (Arcade (MAME) > Stop game).", "RetroPixels", mbIconInfo)
 		return true
 	}
 	return false
@@ -417,7 +417,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 			call(pSetForegroundWindow, a.hwnd)
 			return
 		}
-		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and start %s?", r.game.Name, g.Name), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and start %s?", r.game.Name, g.Name), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			a.mameStop()
 			go func() {
 				<-r.exited
@@ -427,7 +427,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		return
 	}
 	if a.dol.run != nil {
-		messageBox(a.hwnd, "A GameCube / Wii game is playing. Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, "A GameCube / Wii game is playing. Stop it first (GameCube / Wii > Stop game).", "RetroPixels", mbIconInfo)
 		return
 	}
 	if a.pixeluBusy() || a.hhBusy() {
@@ -437,7 +437,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 	if len(c.Installs) == 0 {
 		switch messageBox(a.hwnd, "Arcade games play in MAME, a free emulator, and no MAME is set up yet.\n\n"+
 			"Yes: choose a mame.exe you already have (any version).\n"+
-			"No: open the library to download an official MAME version.", "RetroPixels Native", 3 /* MB_YESNOCANCEL */ |mbIconInfo) {
+			"No: open the library to download an official MAME version.", "RetroPixels", 3 /* MB_YESNOCANCEL */ |mbIconInfo) {
 		case idYes:
 			a.mameAddExe(a.hwnd)
 			if c = mame.Load(); len(c.Installs) == 0 {
@@ -457,7 +457,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		// the set plays in a MAME version that isn't here yet: download it
 		// and start the game when it's ready
 		if messageBox(a.hwnd, fmt.Sprintf("%s plays in MAME %s, which isn't on this PC yet.\n\nDownload MAME %s now (the MAME team's official release) and start the game when it's ready?", nd.Game, nd.Version, nd.Version),
-			"RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+			"RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			game := g
 			a.mame.after = &game
 			go a.mameDownloadVersion(nd.Version)
@@ -465,7 +465,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		return
 	}
 	if err != nil {
-		messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	if g.Name == g.Short && l.Name != "" {
@@ -493,7 +493,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		if rec != nil {
 			a.extRecDropped(rec)
 		}
-		messageBox(a.hwnd, "Couldn't start "+l.Install.Label()+": "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start "+l.Install.Label()+": "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	r := &mameRun{extRun: newExtRun(cmd.Process.Pid), game: g, label: l.Install.Label(), out: out,
@@ -569,7 +569,7 @@ func (a *app) mameEnded() {
 				a.mame.lib.showProblem()
 			}
 			messageBox(a.hwnd, r.game.Name+" didn't start in "+r.label+".\n\n"+why+
-				"\n\nPick another MAME version for it in Arcade (MAME) > Library.", "RetroPixels Native", mbIconWarning)
+				"\n\nPick another MAME version for it in Arcade (MAME) > Library.", "RetroPixels", mbIconWarning)
 		}
 	}
 	a.dolMaybeClose() // closes the window if that was asked (once recordings are saved)
@@ -672,7 +672,7 @@ func (a *app) mameEvent(name, detail string) {
 			}
 		} else {
 			a.mame.after = nil
-			messageBox(a.hwnd, detail, "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, detail, "RetroPixels", mbIconWarning)
 		}
 		if a.mame.lib != nil {
 			a.mame.lib.showVersions()

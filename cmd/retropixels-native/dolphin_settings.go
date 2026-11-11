@@ -91,7 +91,7 @@ func (d *DolphinSettings) markPlayed(path string, t time.Time) {
 }
 
 // noEngine: what to do when the engine isn't there.
-const noEngine = "PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels.exe " +
+const noEngine = "PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels-Native.exe " +
 	"(it must have wii\\PixelU-Wii.exe in it), then try again."
 
 // exe: PixelU's Wii / GameCube engine, in the PixelU folder Wii U games use

@@ -19,7 +19,7 @@ out=${1:-$proj/app/build/local/RetroPixels.apk}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/main.go" 2>/dev/null || true)
+version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' "$repo/version.go" 2>/dev/null || true)
 if [ -z "$version" ] && [ -f "$proj/version.properties" ]; then
     version=$(sed -n 's/^version=//p' "$proj/version.properties")
 fi

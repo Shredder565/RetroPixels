@@ -253,7 +253,7 @@ func (a *app) dolCommand(id int) {
 	case id == cmdDolOpenConfig:
 		exe := a.dolExe()
 		if exe == "" {
-			messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+			messageBox(a.hwnd, noEngine, "RetroPixels", mbIconInfo)
 			return
 		}
 		d.importOld(exe)
@@ -289,12 +289,12 @@ func (a *app) dolOpenPath(path string) bool {
 			if inner := discInArchive(path); inner != "" {
 				messageBox(a.hwnd, fmt.Sprintf("%q holds a GameCube or Wii game (%s).\n\nPixelU can't play games from inside a %s file. "+
 					"Unpack it first, then open the %s file (or add its folder in GameCube / Wii > Library).",
-					filepath.Base(path), inner, ext, strings.ToLower(filepath.Ext(inner))), "RetroPixels Native", mbIconInfo)
+					filepath.Base(path), inner, ext, strings.ToLower(filepath.Ext(inner))), "RetroPixels", mbIconInfo)
 				return true
 			}
 		}
 		if r := a.dol.run; r != nil {
-			if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+			if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 				a.dol.pendingOpen = path
 				a.dolStop()
 			}
@@ -305,16 +305,16 @@ func (a *app) dolOpenPath(path string) bool {
 	if dolphin.IsDLC(path) {
 		messageBox(a.hwnd, fmt.Sprintf("%q is add-on content (DLC) for a WiiWare game, not a game you can start.\n\n"+
 			"To add it: GameCube / Wii > Open PixelU (Wii/GameCube), then in PixelU use Tools > Install WAD... and choose this file once. "+
-			"Then start the game itself.", filepath.Base(path)), "RetroPixels Native", mbIconInfo)
+			"Then start the game itself.", filepath.Base(path)), "RetroPixels", mbIconInfo)
 		return true
 	}
 	g, ok := dolphin.GameFor(path)
 	if !ok {
 		if _, err := os.Stat(path); err != nil {
-			messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, err.Error(), "RetroPixels", mbIconWarning)
 		} else {
 			messageBox(a.hwnd, fmt.Sprintf("%q isn't a GameCube or Wii game RetroPixels recognises (Wii U and PC or PlayStation discs aren't).",
-				filepath.Base(path)), "RetroPixels Native", mbIconWarning)
+				filepath.Base(path)), "RetroPixels", mbIconWarning)
 		}
 		return true
 	}
@@ -335,7 +335,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 			call(pSetForegroundWindow, a.hwnd)
 			return
 		}
-		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and start %s?", r.game.Name, g.Name), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and start %s?", r.game.Name, g.Name), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			a.dol.pendingOpen = g.Path
 			a.dolStop()
 		}
@@ -345,11 +345,11 @@ func (a *app) dolPlay(g dolphin.Game) {
 	exe := a.dolExe()
 	if exe == "" {
 		messageBox(a.hwnd, "GameCube and Wii games play in PixelU (Wii/GameCube engine based on Dolphin, GPL).\n\n"+noEngine,
-			"RetroPixels Native", mbIconInfo)
+			"RetroPixels", mbIconInfo)
 		return
 	}
 	if dolphin.Running(filepath.Base(exe)) {
-		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open. Close it first, then start the game here.", "RetroPixels", mbIconInfo)
 		return
 	}
 	user := dolphin.UserDir(exe)
@@ -380,7 +380,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 		rec = dolphin.NewRecording(g.Name, dolphin.DumpDir(user), filepath.Join(recordingsDir(), "logs", "last-recording.log"))
 	}
 	if err := cmd.Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	r := &dolRun{extRun: newExtRun(cmd.Process.Pid), game: g, exe: exe, rec: rec, started: time.Now(),
@@ -564,8 +564,8 @@ func (a *app) dolHoldWindow() bool {
 		game = "your GameCube / Wii game"
 	}
 	switch messageBox(a.hwnd, fmt.Sprintf("The recording of %s is still being saved (%d%%).\n\n"+
-		"Yes: close RetroPixels Native by itself once it's saved.\nNo: close now (the recording is lost).", game, pc),
-		"RetroPixels Native", 3 /* MB_YESNOCANCEL */ |mbIconInfo) {
+		"Yes: close RetroPixels by itself once it's saved.\nNo: close now (the recording is lost).", game, pc),
+		"RetroPixels", 3 /* MB_YESNOCANCEL */ |mbIconInfo) {
 	case idYes:
 		a.dol.closeAfter = true
 		a.showMessage("Closing once the recording is saved…")
@@ -636,13 +636,13 @@ func (a *app) dolEvent(name, detail string) {
 	case "dol-save-error":
 		a.updateTitle()
 		if !a.dol.closeAfter {
-			messageBox(a.hwnd, "GameCube / Wii recording: "+detail, "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, "GameCube / Wii recording: "+detail, "RetroPixels", mbIconWarning)
 		}
 		a.dolMaybeClose()
 	case "ext-save-error": // a Wii U or MAME recording
 		a.updateTitle()
 		if !a.dol.closeAfter {
-			messageBox(a.hwnd, "The recording couldn't be saved: "+detail, "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, "The recording couldn't be saved: "+detail, "RetroPixels", mbIconWarning)
 		}
 		a.dolMaybeClose()
 	case "dol-need-ffmpeg":
@@ -861,41 +861,41 @@ func (a *app) dolExe() string { return a.settings.Dolphin.exe(a.settings.PixelU.
 func (a *app) dolOpenEmulator() {
 	exe := a.dolExe()
 	if exe == "" {
-		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, noEngine, "RetroPixels", mbIconInfo)
 		return
 	}
 	if dolphin.Running(filepath.Base(exe)) {
-		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open.", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open.", "RetroPixels", mbIconInfo)
 		return
 	}
 	a.settings.Dolphin.importOld(exe)
 	_ = dolphin.SetupXboxPads(dolphin.UserDir(exe), false)
 	if err := dolphin.Command(exe).Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels", mbIconWarning)
 	}
 }
 
 func (a *app) dolSetupPads() {
 	exe := a.dolExe()
 	if exe == "" {
-		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, noEngine, "RetroPixels", mbIconInfo)
 		return
 	}
 	user := dolphin.UserDir(exe)
 	if a.dol.run != nil || dolphin.Running(filepath.Base(exe)) {
-		messageBox(a.hwnd, "Close PixelU (Wii/GameCube) first: it saves its own settings when it closes.", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, "Close PixelU (Wii/GameCube) first: it saves its own settings when it closes.", "RetroPixels", mbIconInfo)
 		return
 	}
 	a.settings.Dolphin.importOld(exe)
 	gc, wii := dolphin.PadState(user, "GCPadNew.ini", "GCPad1"), dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")
 	if gc == "custom" || wii == "custom" {
 		if messageBox(a.hwnd, "Replace your current PixelU controller set-up with the Xbox layout? (Your old settings file is backed up.)",
-			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+			"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 			return
 		}
 	}
 	if err := dolphin.SetupXboxPads(user, true); err != nil {
-		messageBox(a.hwnd, "Couldn't set up the controller: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't set up the controller: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("Xbox controller set up in PixelU")

@@ -58,6 +58,9 @@ type uiState struct {
 	padA           bool
 	navDir         int
 	navAt          time.Time
+	padLB, padRB   bool
+	tab            int       // the start screen's tab (ui_tabs_windows.go)
+	libs           *homeLibs // its libraries
 
 	// the save state slot F2 / F4 use, for the game in slotGame
 	slot     int
@@ -87,6 +90,10 @@ func (a *app) initUI() {
 	a.ui.bold = font(15, 600)
 	a.ui.med = font(19, 600)
 	call(pSetTimer, a.hwnd, timerHome, 50, 0)
+	if t := a.settings.HomeTab; t > 0 && t < numTabs {
+		a.ui.tab = t
+	}
+	a.tabOpened()
 }
 
 // ---------------- menus ----------------
@@ -332,7 +339,7 @@ func (a *app) saveToSlot() {
 	}
 	slot := a.curSlot()
 	if err := s.saveSlot(slot); err != nil {
-		messageBox(a.hwnd, "Couldn't save the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the state: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage(fmt.Sprintf("Saved to slot %d", slot+1))
@@ -383,7 +390,7 @@ func (a *app) importStateFile(owner uintptr, path string) {
 		err = s.importState(data)
 	}
 	if err != nil {
-		messageBox(owner, "Couldn't load that file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(owner, "Couldn't load that file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("State file loaded - save it to a slot to keep it (Ctrl+Z undoes it)")
@@ -422,13 +429,13 @@ func (a *app) importBattery(path string) {
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		messageBox(a.hwnd, "Couldn't read that file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't read that file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	g := s.game
 	a.closeGame() // (writes the game's own battery save first, so it can be kept as .bak)
 	if err := importSRAM(g.System, g.Name, data); err != nil {
-		messageBox(a.hwnd, "Couldn't import the battery save: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't import the battery save: "+err.Error(), "RetroPixels", mbIconWarning)
 	}
 	a.openPath(g.Path)
 	if a.sess != nil {
@@ -451,7 +458,7 @@ func (a *app) exportBattery() {
 		return
 	}
 	if err := writeFileAtomic(p, data); err != nil {
-		messageBox(a.hwnd, "Couldn't save the file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("Battery save exported: " + filepath.Base(p))
@@ -574,7 +581,7 @@ func (a *app) screenshot() {
 	a.frameMu.Unlock()
 	p, err := saveScreenshot(screenshotsDir(), s.game.Name, pix, w, h, aspect, time.Now())
 	if err != nil {
-		messageBox(a.hwnd, "Couldn't save the screenshot: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the screenshot: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("Screenshot saved: " + filepath.Base(p))

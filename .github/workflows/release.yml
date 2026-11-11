@@ -2,8 +2,8 @@ name: Release
 
 # Publishes a RetroPixels release by hand (Actions > Release > Run workflow),
 # only once the owner has approved the version. It builds the full Windows
-# download (bundle-test.yml with release: true: RetroPixels.exe and
-# RetroPixels-Native.exe with PixelU, PixelU-Wii and MAME), the
+# download (bundle-test.yml with release: true: RetroPixels-Native.exe with
+# PixelU, PixelU-Wii, PixelDS and MAME), the
 # Android app, and the source, then makes the GitHub release v<appVersion>
 # from this commit with CHANGELOG.md's notes for that version.
 
@@ -19,11 +19,11 @@ name: Release
 on:
   push:
     tags: ["release-v*", "release-dryrun-v*"]
-    branches: [claude/wiiu-emulator-urpcen, claude/project-thread-96w825, claude/project-thread-u8pp5c, claude/project-thread-g487p6, claude/project-thread-visvpn, claude/project-thread-mmcdqb, claude/project-thread-3c6ty8, claude/project-thread-r5loz4, claude/project-thread-qto5ef, claude/project-thread-ly9kil, claude/project-thread-tukwx4, claude/project-thread-goriba, claude/project-thread-6sns8r, claude/project-thread-hwktfq, claude/project-thread-1nu167]
+    branches: [claude/wiiu-emulator-urpcen, claude/project-thread-96w825, claude/project-thread-u8pp5c, claude/project-thread-g487p6, claude/project-thread-visvpn, claude/project-thread-mmcdqb, claude/project-thread-3c6ty8, claude/project-thread-r5loz4, claude/project-thread-qto5ef, claude/project-thread-ly9kil, claude/project-thread-tukwx4, claude/project-thread-goriba, claude/project-thread-6sns8r, claude/project-thread-hwktfq, claude/project-thread-1nu167, claude/project-thread-jkdgwp]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish; must match appVersion in main.go (e.g. 2.21.0)"
+        description: "Version to publish; must match appVersion in version.go (e.g. 2.21.0)"
         required: true
       dry_run:
         description: "Build and check everything, but don't publish"
@@ -68,7 +68,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WANT: ${{ steps.v.outputs.version }}
         run: |
-          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           [ "$v" = "$WANT" ] || { echo "::error::appVersion is $v, not $WANT"; exit 1; }
           if [ "${{ steps.v.outputs.dry_run }}" != true ] && gh release view "v$v" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::v$v is already released"; exit 1
@@ -103,7 +103,7 @@ jobs:
 
       - name: Package
         run: |
-          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           mkdir -p android-dist
           cp android/app/build/outputs/apk/release/app-release.apk "android-dist/RetroPixels-$version.apk"
           sh android/tools/make-studio-zip.sh android-dist
@@ -138,13 +138,13 @@ jobs:
           {
             echo "## Download"
             echo
-            echo "- **RetroPixels-$v.zip**: RetroPixels.exe (the app in a browser window) for Windows 10 / 11 (64-bit). **RetroPixels-Native-$v.zip**: RetroPixels-Native.exe (the Windows app). Unzip one and run its program. Each has RetroPixels' engines in the folders next to the program, and VERSION.txt:"
+            echo "- **RetroPixels-Native-$v.zip**: RetroPixels-Native.exe, the Windows app, for Windows 10 / 11 (64-bit). Unzip it and run RetroPixels-Native.exe. RetroPixels' engines are in the folders next to the program, with VERSION.txt:"
             echo "  - PixelU: the Wii U (MPL-2.0) and, in PixelU\\\\wii, the GameCube and Wii (GPL-2.0-or-later)"
             echo "  - MAME $mame, the MAME team's official release, for arcade games (GPL-2.0-or-later)"
             echo "  - PixelDS: RetroPixels' own DS and 3DS emulator, all new code, for DS and 3DS games (2D and 3D)"
             echo "  - Star Wars Trilogy Arcade (Sega Model 3) plays in RetroPixels' own emulator, with nothing else to install"
             echo "  - RetroPixels-SNES-Debugger.exe, which opens with SNES games: captures VRAM, palettes and DMA transfers, finds a background's data in the ROM and swaps it for a picture"
-            echo "- **RetroPixels.exe** and **RetroPixels-Native.exe**: the two programs on their own; **RetroPixels-SNES-Debugger.exe**: the SNES Debugger on its own."
+            echo "- **RetroPixels-Native.exe**: the program on its own; **RetroPixels-SNES-Debugger.exe**: the SNES Debugger on its own."
             echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer)."
             echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project."
             echo "- **RetroPixels-source-$v.zip**: the full source code, including PixelU's, PixelU-Wii's and PixelDS's."
