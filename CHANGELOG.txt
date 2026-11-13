@@ -4,6 +4,208 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.38.0  (2026-11-07)
+--------------------------------
+- Box art: the GameCube, Wii, Wii U and 3DS / DS libraries show each
+  game's cover instead of its initials, and the arcade list shows a small
+  cover beside each game (RetroPixels Native's libraries too).
+- A picture next to the game is used first (same name as the game file,
+  .png / .jpg / .webp, or in a boxart or covers folder beside it); else the
+  cover is downloaded once from GameTDB, libretro-thumbnails or the Arcade
+  Database and kept in %LOCALAPPDATA%\RetroPixels\boxart.
+- Initials show only for games with no art anywhere.
+
+RetroPixels 2.37.0  (2026-11-06)
+--------------------------------
+- PixelDS has buttons above the screens: Pause, Save state, Load state
+  and Stop recording (in fullscreen they show when the mouse moves).
+- Stop recording ends the recording now; the video is saved when the
+  game closes.
+
+RetroPixels 2.36.1  (2026-11-06)
+--------------------------------
+- Fixed: RetroPixels.exe's taskbar button showed the Edge icon. It shows
+  the RetroPixels icon now.
+- Fixed again (from 2.33.1, left out of 2.34.0 to 2.36.0): no more Edge
+  "We're now syncing your data across your browsers" popup on launch.
+
+RetroPixels 2.36.0  (2026-11-06)
+--------------------------------
+- PixelDS: save states for 3DS games too (F5 save, F8 load, F6/F7 slot).
+- PixelDS's window has a menu bar: Game (Pause, Restart, Fullscreen) and
+  Save states (Save, Load, slot).
+- Pause with P, the Pause key, the menu or a controller's left-stick
+  click; the recording leaves the pause out.
+- Recordings hold only the game's own sound.
+
+RetroPixels 2.35.0  (2026-11-05)
+--------------------------------
+- Texture packs for DS games in PixelDS: pictures that replace a game's
+  3D textures, in %APPDATA%\RetroPixels\PixelDS\textures\<game code>.
+  F10 turns the pack on and off.
+- F9 makes a texture pack from the game by itself: every 3D texture
+  enlarged 4x, and Mario restyled in today's Mario colours. F3 dumps the
+  game's textures to paint your own.
+- DS 3D at 2x, 3x or 4x the DS's resolution (F2, remembered).
+- Fixed: washed-out 3D models over the background, lost 3D commands and
+  broken models (New Super Mario Bros.' world map).
+- Texture packs change textures, not models, and not 2D graphics.
+
+RetroPixels 2.34.2  (2026-11-05)
+--------------------------------
+- PixelDS recordings are high-quality .mp4 files by default: saved
+  losslessly while you play, then scaled up with crisp pixels to 1080p or
+  more (DS 768x1152, 3DS 1200x1440), near-lossless H.264, 256 kbps sound.
+
+RetroPixels 2.34.1  (2026-11-05)
+--------------------------------
+- PixelDS is now the only DS and 3DS emulator: Azahar and melonDS are no
+  longer in the download or in the 3DS / DS tab and menu. Every DS and 3DS
+  game plays in PixelDS.
+
+RetroPixels 2.34.0  (2026-11-05)
+--------------------------------
+- 3DS games play in PixelDS by default now, like DS games. Azahar and
+  melonDS stay in the download if you pick them in the 3DS / DS tab.
+- 3DS and DS games in PixelDS are recorded automatically, like other games.
+- The Xbox controller is ready for DS and 3DS games (left stick = circle
+  pad on the 3DS, LT / RT = ZL / ZR; right stick and R3 = stylus).
+- PixelDS checked to be all original code (no melonDS or Azahar code).
+
+RetroPixels 2.33.1  (2026-11-05)
+--------------------------------
+- Fixed: RetroPixels.exe no longer pops up Edge's "We're now syncing your
+  data across your browsers" when it opens.
+
+RetroPixels 2.33.0  (2026-11-05)
+--------------------------------
+- PixelDS 3DS games have sound now (the 3DS sound processor's voices,
+  filters and mixers).
+- 3DS games that load code modules (CROs) while running start in PixelDS.
+- More 3DS graphics: geometry shaders, cube maps, shadow maps, projected
+  and procedural textures.
+- Still to come: save states for 3DS games, and fixes from real games.
+  Azahar stays the default for 3DS games.
+
+RetroPixels 2.32.0  (2026-11-05)
+--------------------------------
+- PixelDS now plays 3DS games as an experiment: decrypted .3ds, .cci,
+  .cxi and .cia files, with 3D graphics. Pick "3DS games play in: PixelDS
+  (experimental)" in the 3DS / DS tab (RetroPixels Native: 3DS / DS menu).
+  Azahar stays the default for 3DS games.
+- In: the 3DS's graphics chip (shaders, textures, lighting, fog), game
+  loading, a system font for games' text, and the sound processor's
+  start-up (no sound yet).
+- Not yet: sound, games with code modules (CROs), save states. If a game
+  doesn't start, PixelDS\3DS\log.txt in %APPDATA%\RetroPixels says why;
+  switch back to Azahar to play it.
+
+RetroPixels 2.31.0  (2026-11-05)
+--------------------------------
+- PixelDS (RetroPixels' own emulator) now runs its first 3DS programs:
+  3DS homebrew (.3dsx) that draws straight to the screen. Drop a .3dsx
+  onto PixelDS.exe to try it.
+- In: the 3DS's ARM11 processor (with floating point), its memory, threads
+  and the system services programs use (screens, buttons, circle pad,
+  touch screen, SD card, save data).
+- 3DS keys: arrows = circle pad, I/J/K/L = D-pad, E = ZL, R = ZR.
+- Not yet: 3DS 3D graphics, sound, and game cards (.3ds, .cci, .cxi,
+  .cia); the 3DS / DS tab still plays 3DS games in Azahar until then.
+
+RetroPixels 2.30.0  (2026-11-05)
+--------------------------------
+- PixelDS (RetroPixels' own DS emulator) now draws 3D graphics, so 3D DS
+  games play in it too.
+- All the DS's 3D features: matrices, lights, textures (all seven formats),
+  toon and highlight shading, translucency, shadows, wireframe, edge
+  marking, fog and the rear-plane bitmap. Anti-aliasing isn't done yet.
+- Display capture works, for games that show 3D on both screens or use
+  motion blur.
+
+RetroPixels 2.29.0  (2026-11-05)
+--------------------------------
+- New: PixelDS, RetroPixels' own Nintendo DS emulator (PixelDS folder next
+  to the programs), new code written for RetroPixels. The 3DS / DS tab now
+  plays DS games in it. First step towards one emulator for DS and 3DS.
+- It has both DS processors, its own BIOS (no BIOS or firmware files
+  needed), 2D graphics, sound, buttons, touch screen, clock, saves (kept as
+  game.sav next to the game) and save states.
+- Not yet: 3D graphics, so 3D games show only their 2D parts. Choose
+  melonDS for them: "DS games play in" in the tab, or the 3DS / DS menu in
+  RetroPixels Native.
+- Keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start, Shift=Select,
+  mouse = stylus. F5/F8 save/load state, F11 fullscreen. Xbox controllers
+  work (right stick + RT for the stylus).
+- melonDS stays as the other DS choice; Azahar still plays 3DS games.
+
+RetroPixels 2.28.0  (2026-11-05)
+--------------------------------
+- New: the 3DS / DS tab, for Nintendo 3DS and DS games in one library.
+  Add the folder with your games and click one to play. 3DS games play in
+  Azahar (open-source 3DS emulator, GPL-2.0-or-later) and DS games in
+  melonDS (open-source DS emulator, GPL-3.0-or-later). Azahar plays only
+  3DS games, so RetroPixels sends each game to the right emulator for you.
+- Both come in the download, in the Azahar and melonDS folders next to the
+  programs (official releases, unchanged: Azahar 2126.2, melonDS 1.1).
+  Nothing else to install. Their source is attached to the release.
+- 3DS: .3ds, .cci, .cxi, .3dsx (and compressed .z versions) and .cia; the
+  games must be decrypted. A .cia is installed into Azahar when clicked,
+  then played from Azahar's game list. DS: .nds, .dsi, .srl; no BIOS needed
+  (DSi games need your own DSi BIOS and NAND in melonDS).
+- Games start fullscreen in the emulator's own window. Set up controls in
+  each emulator ("Open Azahar" / "Open melonDS" in the tab).
+- RetroPixels Native: new 3DS / DS menu; 3DS and DS files opened or dropped
+  on its window start in the right emulator.
+- Recording isn't available for 3DS and DS games yet.
+
+RetroPixels 2.27.0  (2026-11-04)
+--------------------------------
+- GameCube and Wii: games now play at 3x resolution (1K / 1080p) by
+  default instead of the native 480p, and the resolution you choose stays.
+  RetroPixels keeps it in %APPDATA%\RetroPixels\gamecube-resolution.txt
+  (shared by RetroPixels.exe and RetroPixels Native) and puts it into
+  PixelU's GameCube / Wii settings before every game, so it's no longer
+  lost when you unzip a new version into a new folder. A higher resolution
+  you had already set is kept. Change it in the GameCube / Wii graphics
+  settings (RetroPixels Native: GameCube / Wii > PixelU settings).
+
+RetroPixels 2.26.0  (2026-10-28)
+--------------------------------
+- New: the RetroPixels SNES Debugger (RetroPixels-SNES-Debugger.exe, in the
+  download next to the programs). It opens alongside RetroPixels when a
+  SNES game starts (turn that off below the game in RetroPixels.exe, or in
+  RetroPixels Native's Options menu).
+- Press "Capture now" at the moment you want: it saves VRAM, the palettes,
+  work RAM and every DMA transfer the game made, with where each byte came
+  from.
+- Each background layer is drawn as the game has it, with where its tiles,
+  tilemap and palettes are in the ROM (file offset and SNES address).
+- Swap a background for your own PNG picture: it's reduced to the SNES's
+  colour limits and written to the ROM. When it needs more tiles than the
+  game had, they move to free ROM space and the game is repointed to them.
+  Save the patched ROM and play it in RetroPixels.
+- Works on title screens and fixed backdrops; compressed graphics and
+  scrolling level maps can't be swapped in place yet.
+
+RetroPixels 2.25.0  (2026-10-28)
+--------------------------------
+- Star Wars Trilogy Arcade: the space background no longer glitches in the
+  Return of the Jedi Death Star battle. Pieces of the planet Endor flashed
+  across the stars for a frame at a time whenever its huge surface passed
+  close by the camera; the 3D renderer now clips polygons at a margin around
+  the screen, so they stay where they belong.
+- Star Wars Trilogy Arcade: no more thin dotted line across the screen during
+  explosion flashes and other full-screen effects. Neighbouring triangles now
+  meet exactly, with no gap between them.
+
+RetroPixels 2.24.0  (2026-10-28)
+--------------------------------
+- Star Wars Trilogy Arcade: C-3PO shows up again in Echo Base, and the big
+  blue shape that covered the Millennium Falcon hangar is gone. The game
+  copies some of its 3D data (C-3PO among it) straight from its program
+  ROM, and the emulator was reading those copies from the wrong part of the
+  ROM. Checked frame by frame against Supermodel.
+
 RetroPixels 2.23.0  (2026-10-28)
 --------------------------------
 - Star Wars Trilogy Arcade: the mouse aims and fires by default, alongside

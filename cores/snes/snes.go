@@ -53,6 +53,7 @@ type SNES struct {
 
 	clock, cost            int
 	dma                    [0x80]uint8
+	tr                     *tracer // debug tracer (EnableTrace), nil when off
 	hdma                   [8]hdmaCh
 	input                  [2]int
 	width, height          int
@@ -155,6 +156,9 @@ func (s *SNES) Reset() {
 	for i := range s.wram {
 		s.wram[i] = 0x55
 	}
+	if s.tr != nil {
+		s.tr.forget()
+	}
 	s.apu.reset()
 	s.ppu.reset()
 	for i := range s.dma {
@@ -211,6 +215,9 @@ func (s *SNES) decode(addr int, write bool, v uint8) uint8 {
 			s.cost = 8
 			if write {
 				s.wram[off] = v
+				if s.tr != nil {
+					s.tr.wram(off)
+				}
 				return 0
 			}
 			return s.wram[off]
@@ -267,6 +274,9 @@ func (s *SNES) decode(addr int, write bool, v uint8) uint8 {
 		a := (bank&1)<<16 | off
 		if write {
 			s.wram[a] = v
+			if s.tr != nil {
+				s.tr.wram(a)
+			}
 			return 0
 		}
 		return s.wram[a]
@@ -347,6 +357,9 @@ func (s *SNES) writeB(r int, v uint8) {
 	switch r {
 	case 0x80:
 		s.wram[s.wmadd] = v
+		if s.tr != nil {
+			s.tr.wram(s.wmadd)
+		}
 		s.wmadd = (s.wmadd + 1) & 0x1ffff
 	case 0x81:
 		s.wmadd = s.wmadd&0x1ff00 | int(v)
@@ -447,6 +460,9 @@ func (s *SNES) writeIO(off int, val uint8) {
 	v := int(val)
 	if off >= 0x4300 && off < 0x4380 {
 		s.dma[off-0x4300] = val
+		if s.tr != nil {
+			s.tr.reg(off - 0x4300)
+		}
 		return
 	}
 	switch off {
@@ -530,10 +546,17 @@ func (s *SNES) runDma(mask int) {
 		if f, ok := s.coproc.(dmaFeeder); ok && s.coproc != nil && ctrl&0x80 == 0 {
 			feed = f.dmaFeed(ch, a1b<<16|a1t, count)
 		}
+		tr := s.tr
+		if tr != nil {
+			tr.dmaBegin(ch, ctrl, bbad, a1b<<16|a1t, count)
+		}
 		i := 0
 		for count > 0 {
 			b := (bbad + pat[i%len(pat)]) & 0xff
 			a := a1b<<16 | a1t
+			if tr != nil && ctrl&0x80 == 0 && feed == nil {
+				tr.from = a
+			}
 			if ctrl&0x80 != 0 {
 				s.pokeA(a, s.readB(b))
 			} else if feed != nil {
@@ -545,6 +568,9 @@ func (s *SNES) runDma(mask int) {
 			a1t = (a1t + step) & 0xffff
 			count--
 			i++
+		}
+		if tr != nil {
+			tr.dmaEnd()
 		}
 		d[o+2], d[o+3] = uint8(a1t), uint8(a1t>>8)
 		d[o+5], d[o+6] = 0, 0
@@ -585,6 +611,10 @@ func (s *SNES) hdmaLoad(ch int) {
 func (s *SNES) hdmaLine() {
 	d := &s.dma
 	any := false
+	if s.tr != nil {
+		s.tr.inHdma = true
+		defer func() { s.tr.inHdma = false }()
+	}
 	for ch := 0; ch < 8; ch++ {
 		h := &s.hdma[ch]
 		if s.hdmaen&(1<<ch) == 0 || !h.active {
@@ -729,6 +759,9 @@ func (s *SNES) RunFrame() {
 		s.hblank = false
 	}
 	s.frameStart += lineClocks * s.lines
+	if s.tr != nil {
+		s.tr.frame++
+	}
 	s.syncApu()
 	s.height = visible
 	if p.hiresUsed {

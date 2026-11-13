@@ -35,7 +35,7 @@ func TestBrowserPlatformArgs(t *testing.T) {
 		t.Errorf("Wayland desktop: %q", a)
 	}
 	args := appWindowArgs("http://127.0.0.1:47821/", "/p")
-	if args[0] != "--ozone-platform=x11" || !slices.Contains(args, "--class=RetroPixels") || !slices.Contains(args, "--app=http://127.0.0.1:47821/") {
+	if args[0] != "--ozone-platform=x11" || !slices.Contains(args, "--class=RetroPixels") || !slices.Contains(args, "--app=http://127.0.0.1:47821/") || !slices.Contains(args, "--disable-sync") {
 		t.Errorf("app window args %q", args)
 	}
 	t.Setenv("RETROPIXELS_WAYLAND", "native")

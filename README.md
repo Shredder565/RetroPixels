@@ -49,10 +49,21 @@ RetroPixels window.
 - **Cartridge hardware** emulated in software: SNES Super FX, SA-1, DSP-1/2, Cx4, S-DD1, SPC7110;
   about 120 NES mappers and the Famicom sound chips; Game Boy MBC1–7, HuC1/3, TAMA5; GBA sensor
   carts; Atari 2600 bank-switching including DPC+ and the Supercharger.
+- **SNES Debugger** (`RetroPixels-SNES-Debugger.exe`, new in 2.26.0). Opens alongside SNES games,
+  captures VRAM, CGRAM, WRAM and every DMA transfer with its ROM source, finds where a background's
+  tiles, tilemap and palettes are in the ROM, and swaps the background for your own picture
+  (colour reduction to the SNES's palettes, relocation to free ROM space and repointing when the
+  new tiles don't fit). See [docs/snes-debugger.md](docs/snes-debugger.md).
 - **Archipelago multiworld randomizers.** Open an Archipelago patch file and play; the Archipelago
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Box art in every library** (new in 2.38.0). Add a games folder and the GameCube, Wii, Wii U,
+  3DS / DS and arcade libraries show each game's cover instead of its initials: your own picture
+  next to the game first (same file name, `.png` / `.jpg` / `.webp`, or in a `boxart` or `covers`
+  folder beside it), else downloaded once from GameTDB (by the ID in the game file),
+  libretro-thumbnails (by name) or the Arcade Database (by MAME name) and kept in
+  `%LOCALAPPDATA%\RetroPixels\boxart`.
 - **Any arcade game in any version of MAME, with MAME built in.** The download comes with the MAME
   team's official Windows release of MAME, unchanged. Add as many other MAME versions as you like
   (your own `mame.exe`, found on your PC, or any official release downloaded from inside the app).
@@ -74,6 +85,7 @@ RetroPixels window.
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
 | Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze |
 | GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
+| Nintendo 3DS / DS | `.3ds` `.cci` `.cxi` `.3dsx` `.cia` · `.nds` `.dsi` | One 3DS / DS tab. DS and 3DS games play in PixelDS, RetroPixels' own emulator for both (all new code; DS since 2.29.0, 3DS by default since 2.34.0), recorded automatically and with the Xbox controller ready; since 2.34.1 it is the only DS / 3DS emulator in the download; since 2.35.0 DS 3D can be drawn at up to 4× (F2) with texture packs, and F9 makes one from the game (Mario restyled in modern colours) |
 | Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME: built in, or any other version, chosen per game |
 
 ¹ DSP-3, DSP-4, ST010, ST011 and ST018 run a program stored inside the chip. RetroPixels asks for
@@ -86,7 +98,7 @@ your own dump of it the first time and remembers it.
 3. Drop a game onto the window, or click **Choose game file…**.
 
 **Requirements:** Windows 10 or 11, 64-bit, with Microsoft Edge (built into Windows; RetroPixels
-uses it to draw its window). For recording, RetroPixels downloads ffmpeg the first time it is needed.
+uses it to draw its window, in its own Edge profile with sync and sign-in turned off, so it doesn't sync anything; the window and its taskbar button show the RetroPixels icon). For recording, RetroPixels downloads ffmpeg the first time it is needed.
 
 > [!NOTE]
 > The executable is not code-signed yet, so Windows SmartScreen may show *"Windows protected your PC"*.
@@ -187,6 +199,7 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | Path | What it is |
 | --- | --- |
 | `main.go`, `*.go` | Windows app: app window, Dolphin and MAME integration, recording, settings |
+| `internal/boxart/` | Box art for the libraries: pictures next to the games, GameTDB, libretro-thumbnails and the Arcade Database, cached; shared by both apps |
 | `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps |
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
@@ -194,6 +207,8 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | `wiiu/` | Wii U emulator (PowerPC 750CL, RPX loader, system libraries), run natively |
 | `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels Native: the Win32 app and the native emulators |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
+| `tools/snes-debugger/` | The SNES Debugger (Rust): capture analysis, background swap, its window |
+| `internal/snesdbg/` | The folder RetroPixels and the SNES Debugger share (sessions, capture requests) |
 | `docs/` | Project website (GitHub Pages) |
 
 ## Support development

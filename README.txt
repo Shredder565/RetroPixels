@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.23.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.38.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -19,12 +19,14 @@ Deluxe, Berzerk, Centipede, Vs. Castlevania and more), plus Wii U games in
 PixelU (new in 2.21.0), GameCube and Wii in PixelU's GameCube / Wii engine
 (new in 2.21.0, instead of Dolphin), Star Wars Trilogy Arcade (Sega Model 3)
 on RetroPixels' own emulator (new in 2.22.0: nothing else to install), and
-any other arcade game in MAME (any version of it).
+any other arcade game in MAME (any version of it), and Nintendo 3DS and DS
+games in the 3DS / DS tab (both in PixelDS, RetroPixels' own DS and 3DS
+emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.23.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.23.0.zip has RetroPixels-Native.exe
+- Two downloads, one for each program: RetroPixels-2.38.0.zip has
+  RetroPixels.exe, and RetroPixels-Native-2.38.0.zip has RetroPixels-Native.exe
   (the version without a web browser inside, see "RetroPixels Native" below).
   Each has VERSION.txt with its version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -37,10 +39,31 @@ What's in the download
     licence is in PixelU\wii).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
+  * PixelDS\PixelDS.exe: Nintendo DS and 3DS games. RetroPixels' own
+    emulator, all new code written for RetroPixels. New in 2.29.0; 3D
+    graphics since 2.30.0; 3DS games since 2.32.0. Since 2.34.1 it is the
+    only DS / 3DS emulator in the download (Azahar and melonDS are gone).
+    Since 2.35.0: DS 3D at up to 4x (F2) and texture packs (F9 makes one
+    from the game, F10 turns it on / off, F3 dumps the game's textures).
 - "RetroPixels Wii U demo.rpx", a small Wii U homebrew program made for
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
   your own dumps and the keys from your own console (see below).
+
+Box art in the libraries (new in 2.38.0)
+- The GameCube, Wii, Wii U and 3DS / DS tabs show each game's cover, and
+  the Arcade (MAME) list a small one beside each game. Games with no art
+  anywhere keep their initials.
+- Your own pictures come first: put one next to the game with the game's
+  file name (Metroid Prime (USA).iso -> Metroid Prime (USA).png, or .jpg,
+  .jpeg, .webp, .gif), or in a "boxart", "covers", "images" or
+  "media\boxart" folder beside the game. An unpacked Wii U game can have
+  cover.png in its title folder.
+- Otherwise the cover is downloaded once from GameTDB (by the ID read from
+  the game file), libretro-thumbnails (RetroArch's box art, by name) or,
+  for arcade games, the Arcade Database (by MAME name), shrunk and kept in
+  %LOCALAPPDATA%\RetroPixels\boxart. After that it works offline.
+- "Find games again" / "Look again" also look again for missing covers.
 
 First run
 - Windows may show "Windows protected your PC" because this program isn't
@@ -290,8 +313,62 @@ GameCube & Wii (PixelU's GameCube / Wii engine)
   your Xbox controller is set up as the GameCube controller and as a Wii Remote
   + Nunchuk (Wii pointer = right stick, shake = RB). Your own controller
   settings are never replaced unless you click "Reset to Xbox layout".
-- The main graphics settings are on the right of both tabs (they're shared).
+- The main graphics settings are on the right of both tabs (they're shared;
+  in RetroPixels Native: GameCube / Wii > PixelU settings).
+- Resolution: games play at 3x (1K / 1080p) unless you choose another one
+  (new in 2.27.0). The one you choose is kept for every game and also after
+  you update RetroPixels to a new folder: it's saved in
+  %APPDATA%\RetroPixels\gamecube-resolution.txt and put into the engine's
+  settings before each game. If you had already set a higher one, that's kept.
   Save states: Shift+F1 saves, F1 loads.
+
+3DS and DS (PixelDS)
+- The 3DS / DS tab holds your Nintendo 3DS and DS games in one list. Click
+  "Add games folder..." and pick the folder with them, then click a game.
+- 3DS and DS games play in PixelDS, RetroPixels' own emulator for both
+  (DS since 2.29.0, 3DS since 2.32.0 and by default since 2.34.0). PixelDS
+  is new code written for RetroPixels, with no code from melonDS, Azahar or
+  any other emulator (docs/pixelds.md), and it is the only DS / 3DS
+  emulator in the download. Keep the PixelDS folder next to RetroPixels.exe.
+- PixelDS needs no BIOS or firmware files. It plays DS games with 2D
+  and 3D graphics (3D new in 2.30.0), sound, touch, saves and save states.
+  PixelDS keys: arrows, X=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=Start,
+  Shift=Select, the mouse is the stylus. F5 saves a state, F8 loads it,
+  F6/F7 pick the slot (ten per game), P pauses and resumes, F11 or
+  Alt+Enter is fullscreen, Ctrl+R restarts. The same are in PixelDS's
+  menu bar (Game: Pause, Restart, Fullscreen; Save states: Save, Load
+  and the slot). Save states work for DS and 3DS games (3DS since
+  2.36.0). While a game is paused nothing runs: no sound, and the
+  recording leaves the pause out. A controller's left-stick click pauses
+  too. Recordings hold only the game's own sound, never other sounds
+  from your PC. Since 2.37.0 the window also has buttons above the
+  screens: Pause, Save state, Load state and Stop recording (in
+  fullscreen they appear when you move the mouse). Stop recording ends
+  the recording at once; the video is saved when you close the game.
+  An Xbox controller works straight away, for DS and 3DS games: A / B /
+  X / Y by position (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R,
+  Back = Select, Menu = Start, the D-pad and left stick the D-pad (on the
+  3DS the left stick is the circle pad and LT / RT are ZL / ZR); the right
+  stick moves a stylus pointer and RT (DS) or R3 touches, and the
+  left-stick click (L3) pauses. Saves are game.sav next to the game.
+- 3DS files: .3ds, .cci, .cxi, .3dsx (and .zcci, .zcxi, .z3dsx) and .cia.
+  They must be decrypted dumps. PixelDS plays a .cia directly, with no
+  installing. PixelDS's 3DS keys:
+  arrows = circle pad, I/J/K/L = D-pad, E = ZL, R = ZR, the rest as for
+  DS games; its 3DS SD card, saves and log.txt are in
+  %APPDATA%\RetroPixels\PixelDS\3DS.
+- DS files: .nds, .dsi, .srl. DS games play without a BIOS.
+- Games start fullscreen in PixelDS's own window; untick "Start games
+  fullscreen" to play in a window. Close PixelDS to come back.
+- RetroPixels Native: the 3DS / DS menu does the same.
+- Recording (new in 2.34.0): with "Record games automatically" on (the
+  default), 3DS and DS games played in PixelDS are recorded from their
+  start, as other games are; the .mp4 is saved in the Recordings folder
+  when the game ends. Recording needs ffmpeg (RetroPixels downloads it).
+  Since 2.34.2 these recordings are high quality by default: PixelDS saves
+  the screens losslessly while you play, and the .mp4 is scaled up with
+  crisp pixels to 1080p or more (DS 768x1152, 3DS 1200x1440), H.264 at
+  near-lossless quality with 256 kbps AAC sound.
 
 Arcade games in MAME (any version)
 - RetroPixels' own arcade emulators play the games listed above. Every other
@@ -359,6 +436,30 @@ Star Wars Trilogy Arcade (Sega Model 3)
 - High scores and the game's settings are kept like a battery save.
   Save states aren't available for this game yet.
 - It needs a fast PC: the 3D board is drawn on the processor's cores.
+
+RetroPixels SNES Debugger (new in 2.26.0)
+- RetroPixels-SNES-Debugger.exe comes in the download, next to the
+  programs. It opens by itself when a SNES game starts, in RetroPixels.exe
+  and RetroPixels Native. Turn that off below the game in RetroPixels.exe,
+  or in RetroPixels Native's Options menu ("Open the SNES Debugger with SNES
+  games").
+- Play to the screen you want (the first level, say) and press "Capture
+  now" (or "Capture in 5 s", then go back to the game). It saves the video
+  memory (VRAM), the colours (CGRAM), work RAM and every DMA transfer the
+  game made, with its ROM source address.
+- Pick a background layer (BG1-BG4): the debugger draws it as the game has
+  it and says where its tiles, tilemap and palettes are in the ROM (file
+  offset and SNES address, and which transfer and code loaded them).
+- "Choose picture..." (a PNG), "Make preview", "Save patched ROM...": your
+  picture goes in that layer, reduced to the SNES's colour limits (new
+  palettes, or the game's own colours), and the patched ROM plays in
+  RetroPixels. When the picture needs more tiles than the game had room
+  for, they move to free space in the ROM and the game's transfer is
+  repointed there (or similar tiles are merged).
+- It works on what the ROM holds as it is: title screens and fixed
+  backdrops. Compressed graphics and scrolling level maps can't be swapped
+  in place (it says so). Your original ROM file is never changed.
+- docs/snes-debugger.md in the source explains the files and how it works.
 
 Recording games
 - Every game is recorded automatically as .mp4, from the start of the game
@@ -610,8 +711,11 @@ hasn't been tried on a real phone yet, so tell us how it runs.
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
                  (%LOCALAPPDATA%\RetroPixels\BrowserProfile)
-- Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json)
+- Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json;
+                 GameCube / Wii resolution: gamecube-resolution.txt)
 - Recordings:    Videos\RetroPixels
+- Box art:       %LOCALAPPDATA%\RetroPixels\boxart (covers downloaded
+                 for the libraries; delete it to fetch them again)
 - Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)
 - GameCube / Wii: PixelU\wii\User (settings, memory cards, Wii saves and
                  the Wii keys file in its Wii folder)
@@ -639,7 +743,11 @@ Credits & licences
   the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
   rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME. Thanks to the Cemu, Dolphin and MAME teams.
+  built-in MAME, unchanged, with its source attached to each release. PixelDS
+  (cores/pixelds, new in 2.29.0) is RetroPixels' own code, written new
+  without any melonDS or Azahar code (docs/pixelds.md). Thanks to the
+  Cemu, Dolphin and MAME teams, and to the DS and 3DS emulator authors
+  whose public documentation of the hardware PixelDS was checked against.
 - The Sega Model 3 emulator (cores/model3, new in 2.22.0) is the other
   exception: most of it is RetroPixels' own, checked against Supermodel
   (https://github.com/trzy/Supermodel), but its sound chips (SCSP) are a Go

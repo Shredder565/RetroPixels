@@ -351,8 +351,7 @@ func opts(pairs ...string) []Option {
 var Settings = []Setting{
 	{"Dolphin.ini", "Core", "GFXBackend", "backend", "Graphics API", "",
 		opts("Vulkan", "Vulkan (recommended)", "D3D12", "Direct3D 12", "D3D", "Direct3D 11", "OGL", "OpenGL"), "Vulkan"},
-	{"GFX.ini", "Settings", "InternalResolution", "res", "Resolution", "Higher is sharper; 3× suits a 1080p screen, 6× a 4K one.",
-		opts("1", "Native (480p)", "2", "2× (720p)", "3", "3× (1080p)", "4", "4× (1440p)", "5", "5×", "6", "6× (4K)", "8", "8× (5K)"), "1"},
+	{"GFX.ini", "Settings", "InternalResolution", "res", "Resolution", ResolutionHelp, ResolutionOptions, DefaultResolution},
 	{"GFX.ini", "Settings", "AspectRatio", "aspect", "Aspect ratio", "",
 		opts("0", "Auto (what the game uses)", "1", "Force 16:9", "2", "Force 4:3", "3", "Stretch to window"), "0"},
 	{"GFX.ini", "Settings", "wideScreenHack", "widehack", "Widescreen hack", "Shows more of the scene in 16:9. Can cause glitches in some games.", nil, "False"},
@@ -396,6 +395,7 @@ func ReadSettings(user string) map[string]string {
 		}
 		out[s.ID] = v
 	}
+	out["res"] = KeptResolution(user) // what games start at (see resolution.go)
 	return out
 }
 
@@ -420,6 +420,9 @@ func SaveSettings(user string, changes map[string]string) error {
 			}
 		} else {
 			ok := v == cur[id]
+			if raw, has := ReadINI(ConfigFile(user, s.File)).Get(s.Section, s.Key); has && raw == v {
+				ok = true // a value set in the engine itself
+			}
 			for _, o := range s.Options {
 				ok = ok || o.Value == v
 			}
@@ -436,6 +439,9 @@ func SaveSettings(user string, changes map[string]string) error {
 		if err := f.Save(ConfigFile(user, name)); err != nil {
 			return err
 		}
+	}
+	if v, ok := changes["res"]; ok {
+		return KeepResolution(v)
 	}
 	return nil
 }

@@ -58,8 +58,16 @@
   .sw-tile:hover, .sw-tile:focus-visible { border-color: #ff5a5f; outline: none; transform: translateY(-2px); }
   .sw-tile:focus-visible { box-shadow: 0 0 0 3px #ff5a5f55; }
   .sw-tile[disabled] { opacity: .5; cursor: default; transform: none; }
-  .sw-art { aspect-ratio: 1; display: grid; place-items: center; font-size: 34px; font-weight: 800;
+  .sw-art { aspect-ratio: 3 / 4; display: grid; place-items: center; font-size: 34px; font-weight: 800;
     letter-spacing: 1px; color: #fff; text-shadow: 0 2px 8px #0006; }
+  /* A game's box art (the initials show until it comes, and when there's none). */
+  .sw-art.has-art, .mame-art.has-art { position: relative; overflow: hidden; background: #0e0f13 !important; }
+  .has-art img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .has-art .art-blur { object-fit: cover; filter: blur(12px) brightness(.5); transform: scale(1.2); }
+  .has-art .art-img { object-fit: contain; animation: art-in .25s ease-out; }
+  @keyframes art-in { from { opacity: 0; } }
+  .mame-art { flex: none; width: 42px; height: 56px; border-radius: 6px; display: grid; place-items: center;
+    font-size: 14px; font-weight: 800; color: #fff; text-shadow: 0 1px 4px #0006; }
   .sw-info { padding: 8px 10px 10px; display: grid; gap: 4px; }
   .sw-info b { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; }
@@ -94,7 +102,7 @@
   .rg-item { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; }
   .rg-head { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; padding: 10px 12px;
     cursor: pointer; width: 100%; background: none; border: 0; color: var(--text); font: inherit; text-align: left; }
-  .rg-head .sw-art { width: 44px; border-radius: 8px; font-size: 15px; }
+  .rg-head .sw-art { width: 44px; aspect-ratio: 1; border-radius: 8px; font-size: 15px; }
   .rg-head b { display: block; }
   .rg-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .rg-body { border-top: 1px solid var(--line); padding: 12px 14px 14px; display: grid; gap: 14px; }
@@ -182,14 +190,17 @@
   #gcTab[data-platform="wii"] .seg button[aria-pressed="true"], #gcTab[data-platform="wii"] .toggle input:checked { background: #2b8cc4; }
   #gcTab[data-platform="wii"] .sw-tile:hover, #gcTab[data-platform="wii"] .sw-tile:focus-visible { border-color: #5fc3ff; }
   #gcTab .toggle input:checked { background: #6a5acd; }
-  .plat { position: absolute; top: 8px; left: 8px; font-size: 10px; font-weight: 700; letter-spacing: .5px;
+  .plat { position: absolute; z-index: 2; top: 8px; left: 8px; font-size: 10px; font-weight: 700; letter-spacing: .5px;
     padding: 2px 7px; border-radius: 999px; background: #000a; color: #fff; }
   .plat.GameCube { background: #4b3fa8; } .plat.Wii { background: #2b8cc4; } .plat.WiiWare { background: #1f7a6d; }
   #wiiuTab .sw-tile:hover, #wiiuTab .sw-tile:focus-visible { border-color: #2fb4ff; }
   #wiiuTab .toggle input:checked { background: #0b8fd6; }
   .wiiu-btn { background: #0b8fd6; } .wiiu-btn:hover { background: #087cbc; }
   .plat.WiiU { background: #0b8fd6; }
-  #gcSearch, #wiiuSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  .plat.N3DS { background: #c4262e; } .plat.NDS { background: #6b6f78; }
+  .btn.hh-btn { background: #c4262e; } .btn.hh-btn:hover { background: #a81f26; }
+  .tabs button[data-tab="handheld"][aria-selected="true"] { border-bottom-color: #d8343c; }
+  #gcSearch, #wiiuSearch, #hhSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
   #swNow { margin-bottom: 14px; }
   /* GameCube / Wii game docked inside this window: the game fills everything below this bar. */
@@ -329,6 +340,7 @@
     <button role="tab" data-tab="gc" aria-selected="false"><span style="color:#9b8cff">●</span> GameCube</button>
     <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
     <button role="tab" data-tab="wiiu" aria-selected="false"><span style="color:#2fb4ff">●</span> Wii U</button>
+    <button role="tab" data-tab="handheld" aria-selected="false"><span style="color:#ff5a62">●</span> 3DS / DS</button>
     <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
@@ -362,6 +374,9 @@
       </button>
       <button class="sys" data-core="wiiu" aria-pressed="false" title="Wii U games play in PixelU (based on Cemu). Opens the Wii U tab.">
         <strong>Wii U</strong><small>.wua .wud .wux · PixelU</small>
+      </button>
+      <button class="sys" data-core="handheld" aria-pressed="false" title="Nintendo DS and 3DS games play in PixelDS, RetroPixels' own emulator. Opens the 3DS / DS tab.">
+        <strong>3DS / DS</strong><small>.3ds .cia .nds · PixelDS</small>
       </button>
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
@@ -600,6 +615,52 @@
     </div>
   </section>
 
+  <!-- ===================== 3DS / DS tab (PixelDS) ===================== -->
+  <section id="hhTab" hidden>
+    <div id="hhBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">Nintendo DS and 3DS games play in <strong>PixelDS</strong>, RetroPixels' own emulator, through the RetroPixels desktop app (<span data-exe="RetroPixels">RetroPixels.exe</span>).</p>
+    </div>
+    <div id="hhDesktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">3DS and DS library</h2>
+          <div class="sw-setup">
+            <div class="sw-emu" id="hhEmu">Looking for the emulators…</div>
+            <div class="sw-emu" id="hhFolders">Looking for games…</div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn ghost sm" id="hhAddFolder">Add games folder…</button>
+            <label class="sw-check"><input type="checkbox" id="hhFull"> Start games fullscreen</label>
+          </div>
+          <div class="sw-tools">
+            <input type="search" id="hhSearch" placeholder="Search games…" autocomplete="off">
+            <select id="hhShow" class="sw-select"><option value="">3DS and DS</option><option value="3ds">3DS only</option><option value="ds">DS only</option></select>
+            <select id="hhSort" class="sw-select"><option value="az">A – Z</option><option value="played">Recently played</option><option value="added">Recently added</option></select>
+            <span class="muted" id="hhCount" style="font-size:13px"></span>
+          </div>
+          <p class="muted" id="hhMsg" style="font-size:14px;margin:6px 0"></p>
+          <div class="sw-grid" id="hhGrid"></div>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play.
+            Lists 3DS games (.3ds, .cci, .cxi, .3dsx and their compressed .z versions, and .cia) and DS games (.nds, .dsi, .srl). 3DS games must be decrypted.
+            PixelDS plays a .cia directly. Games are played from where they are; nothing is copied.</p>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">PixelDS (DS and 3DS)</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">DS and 3DS games play in <b>PixelDS</b>, RetroPixels' own emulator, written from scratch for RetroPixels. It needs no BIOS or firmware files and draws both 2D and 3D graphics.</p>
+            <div class="sw-emu" id="hhPixel" style="margin-bottom:8px"></div>
+            <div class="rg-btns">
+              <button class="btn ghost sm" data-hh-folder="pixelds">Open its folder</button>
+              <button class="btn ghost sm" data-hh-choose="pixelds">Change…</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Keys: arrows, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Shift = Select. The mouse is the stylus on the bottom screen. F5 / F8 save and load a state (DS and 3DS), P pauses, F11 fullscreen; PixelDS's window has Pause, Save state, Load state and Stop recording buttons too. Xbox controllers work too (right stick and RT for the stylus, left-stick click pauses). Recordings hold only the game's own sound.</p>
+            <p class="muted" style="font-size:12px;margin:6px 0 0">PixelDS plays decrypted .3ds, .cci, .cxi and .cia files and homebrew, with sound. An Xbox controller works straight away: A / B / X / Y as on the 3DS (B / A / Y / X by position), bumpers L and R, triggers ZL and ZR, left stick the circle pad, right stick moves the stylus and R3 touches. 3DS keys: arrows = circle pad, I / J / K / L = D-pad, E = ZL, R = ZR.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
   <!-- ===================== Arcade (MAME) tab ===================== -->
   <section id="mameTab" hidden>
     <div id="mameBrowserOnly" class="sw-sec" hidden>
@@ -712,6 +773,10 @@
         <button class="btn ghost sm" id="sramExport">Download battery save</button>
         <input type="file" id="sramInput" hidden accept=".sav,.srm,.sram,.bin">
       </div>
+      <div id="snesDbgRow" style="margin-top:10px" hidden>
+        <label class="toggle"><input type="checkbox" id="snesDbgOn"> Open the SNES Debugger with SNES games</label>
+        <span id="snesDbgStatus" class="muted"></span>
+      </div>
     </section>
   </section>
 </main>
@@ -772,6 +837,7 @@
   };
   sysButtons.forEach(b => b.addEventListener("click", () => {
     if (b.dataset.core === "wiiu") { showTab("wiiu"); return; } // Wii U games play in PixelU
+    if (b.dataset.core === "handheld") { showTab("handheld"); return; } // 3DS / DS games play in PixelDS
     selectCore(b.dataset.core);
   }));
 
@@ -831,8 +897,8 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
-    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii / Wii U
+    document.querySelectorAll("#gcGrid .sw-tile, #wiiuGrid .sw-tile, #hhGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame" && status.running.kind !== "handheld"); // recording is for GameCube / Wii / Wii U
     return status;
   }
 
@@ -957,6 +1023,51 @@
   };
   const initials = name => name.replace(/[^\p{L}\p{N} ]/gu, "").split(" ").filter(Boolean)
     .filter(w => !/^(the|of|and|a)$/i.test(w)).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+  // Box art: each tile asks RetroPixels for its game's cover as it scrolls into view
+  // (a picture next to the game, else GameTDB / libretro-thumbnails, kept in a cache),
+  // and keeps the initials when there's none.
+  const artURLs = new Map();   // query -> picture URL, or null when the game has none
+  const artWaiting = [];
+  let artRunning = 0;
+  const artSeen = "IntersectionObserver" in window ? new IntersectionObserver(es => es.forEach(e => {
+    if (e.isIntersecting) { artSeen.unobserve(e.target); artWaiting.push(e.target); pumpArt(); }
+  }), { rootMargin: "400px" }) : null;
+  const artQuery = (system, g) => new URLSearchParams({ system, path: g.path || "", name: g.name || "", id: g.id || "", short: g.short || "" }).toString();
+  const artImgs = url => `<img class="art-blur" alt="" src="${url}"><img class="art-img" alt="" src="${url}">`;
+  function artTile(system, g, cls = "sw-art") {
+    const q = artQuery(system, g), url = artURLs.get(q);
+    if (url) return `<div class="${cls} has-art">${artImgs(url)}</div>`;
+    return `<div class="${cls}" style="background:${tileColor(g.name)}"${url === null ? "" : ` data-art="${esc(q)}"`}>${esc(initials(g.name))}</div>`;
+  }
+  function hookArt(root) {
+    if (!DESKTOP) return;
+    root.querySelectorAll("[data-art]").forEach(el => { if (artSeen) artSeen.observe(el); else artWaiting.push(el); });
+    pumpArt();
+  }
+  function showArt(q) {
+    const url = artURLs.get(q);
+    document.querySelectorAll("[data-art]").forEach(el => {
+      if (el.dataset.art !== q) return;
+      if (artSeen) artSeen.unobserve(el);
+      el.removeAttribute("data-art");
+      if (url) { el.classList.add("has-art"); el.innerHTML = artImgs(url); }
+    });
+  }
+  function pumpArt() {
+    while (artRunning < 4 && artWaiting.length) {
+      const el = artWaiting.shift(), q = el.dataset.art;
+      if (!q || !el.isConnected) continue;
+      if (artURLs.has(q)) { showArt(q); continue; }
+      artRunning++;
+      fetch("/api/art?" + q, { headers: { "X-Retro-Token": DESKTOP.token } })
+        .then(r => r.ok ? r.blob() : (r.status === 404 ? null : Promise.reject()))
+        .then(b => { artURLs.set(q, b ? URL.createObjectURL(b) : null); showArt(q); })
+        .catch(() => {}) // not reached: tried again next time the list is shown
+        .finally(() => { artRunning--; pumpArt(); });
+    }
+  }
+  // "Find games again" / "Look again": games without art are looked for again.
+  const forgetMissingArt = () => { for (const [q, url] of artURLs) if (url === null) artURLs.delete(q); };
   const fmtSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? Math.round(b / 1e6) + " MB" : b > 0 ? Math.max(1, Math.round(b / 1e3)) + " KB" : "0";
 
   // Keep the "now playing" bar up to date while a desktop tab is open.
@@ -1010,6 +1121,7 @@
   const recTab = document.getElementById("recTab");
   const mameTab = document.getElementById("mameTab");
   const wiiuTab = document.getElementById("wiiuTab");
+  const hhTab = document.getElementById("hhTab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -1017,13 +1129,17 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "wiiu", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "wiiu", "handheld", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
     recTab.hidden = tab !== "recordings";
     mameTab.hidden = tab !== "mame";
     wiiuTab.hidden = tab !== "wiiu";
+    hhTab.hidden = tab !== "handheld";
+    document.getElementById("hhBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("hhDesktop").hidden = !DESKTOP;
+    if (tab === "handheld" && DESKTOP) loadHH();
     document.getElementById("wiiuBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("wiiuDesktop").hidden = !DESKTOP;
     if (tab === "wiiu" && DESKTOP) loadWiiU();
@@ -1229,7 +1345,7 @@
     list.slice(0, 600).forEach(g => {
       const row = document.createElement("div");
       row.className = "mame-row";
-      row.innerHTML = `<div class="mame-name" title="${esc(g.path)}"><b>${esc(g.name)}</b>
+      row.innerHTML = `${artTile("arcade", g, "mame-art")}<div class="mame-name" title="${esc(g.path)}"><b>${esc(g.name)}</b>
           <small>${esc(g.short)} · ${fmtSize(g.size)}${t(g.played) ? ` · played ${fmtTime(g.played)}` : ""}</small>
           ${g.note ? `<small class="mame-check ${g.plays.result === "good" ? "ok" : "no"}">${g.plays.result === "good" ? "✓" : "✗"} ${esc(g.note)}</small>` : ""}</div>
         <select class="sw-select" data-ver aria-label="MAME version for ${esc(g.name)}" ${(st.installs || []).length ? "" : "disabled"}>${mameVersionOptions(own[g.short] || "")}</select>
@@ -1239,6 +1355,7 @@
       row.querySelector("[data-play]").addEventListener("click", () => playMame(g));
       el.appendChild(row);
     });
+    hookArt(el);
     if (list.length > 600) el.insertAdjacentHTML("beforeend", `<p class="muted" style="font-size:13px">${list.length - 600} more: search to find them.</p>`);
   }
 
@@ -1305,7 +1422,7 @@
   document.getElementById("mameAddExe").addEventListener("click", () => mameAction({ action: "add-exe" }));
   document.getElementById("mameFind").addEventListener("click", () => mameAction({ action: "find" }, "Looking for MAME on this PC…"));
   document.getElementById("mameAddFolder").addEventListener("click", () => mameAction({ action: "add-folder" }));
-  document.getElementById("mameRescan").addEventListener("click", () => mameAction({ action: "rescan" }));
+  document.getElementById("mameRescan").addEventListener("click", () => { forgetMissingArt(); mameAction({ action: "rescan" }); });
   document.getElementById("mameEmbed").addEventListener("change", e => mameAction({ action: "embed", on: e.target.checked }));
   document.getElementById("mameOpenFile").addEventListener("click", async () => {
     if (mameData && mameData.status.embed) sendEmbedArea();
@@ -1391,7 +1508,7 @@
       b.title = g.file;
       b.disabled = playing;
       b.innerHTML = `<span class="plat ${esc(g.platform)}">${g.platform === "GameCube" ? "GC" : esc(g.platform.toUpperCase())}</span>
-        <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
+        ${artTile(g.platform === "GameCube" ? "gamecube" : "wii", g)}
         <div class="sw-info"><b>${esc(g.name)}</b>
           <div class="sw-tags">${g.id ? `<span class="sw-tag">${esc(g.id)}</span>` : ""}<span class="sw-tag">${fmtSize(g.size)}</span></div>
           ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
@@ -1416,6 +1533,7 @@
       });
       grid.appendChild(b);
     });
+    hookArt(grid);
   }
 
   async function gcAction(body, ok) {
@@ -1512,7 +1630,7 @@
       const n = (r.games || []).length;
       toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no GameCube or Wii games were found in it");
     });
-    document.getElementById("gcRescan").addEventListener("click", () => gcAction({ action: "rescan" }, "Searched for GameCube & Wii games"));
+    document.getElementById("gcRescan").addEventListener("click", () => { forgetMissingArt(); gcAction({ action: "rescan" }, "Searched for GameCube & Wii games"); });
     document.getElementById("gcFull").addEventListener("change", e => gcAction({ action: "fullscreen", on: e.target.checked }));
     document.getElementById("gcEmbed").addEventListener("change", e => gcAction({ action: "embed", on: e.target.checked }));
     document.getElementById("gcAutoRec").addEventListener("change", e =>
@@ -1585,7 +1703,7 @@
       b.title = g.file;
       b.disabled = playing;
       b.innerHTML = `<span class="plat WiiU">WII U</span>
-        <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
+        ${artTile("wiiu", g)}
         <div class="sw-info"><b>${esc(g.name)}</b>
           <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span>${g.kind !== "Folder" ? `<span class="sw-tag">${fmtSize(g.size)}</span>` : ""}</div>
           ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
@@ -1618,6 +1736,7 @@
       });
       grid.appendChild(b);
     });
+    hookArt(grid);
   }
 
   async function wiiuAction(body, ok) {
@@ -1650,6 +1769,108 @@
       e.target.checked ? "Every game will be recorded (game screen only, high quality)" : "Automatic recording off for every game"));
     document.getElementById("wiiuOpenPixelU").addEventListener("click", () => wiiuAction({ action: "open-pixelu" }, "Opening PixelU…"));
     document.getElementById("wiiuOpenFolder").addEventListener("click", () => wiiuAction({ action: "open-folder" }));
+  }
+
+  // ---------- 3DS / DS (PixelDS) ----------
+  let hhGames = [], hhStatus = null;
+  const hhMsg = document.getElementById("hhMsg");
+
+  async function loadHH() {
+    try {
+      gotHH(await api("/api/handheld/library"));
+      api("/api/status").then(renderStatus).catch(() => {});
+    } catch (e) { hhMsg.textContent = "Couldn't load your 3DS and DS games: " + e.message; }
+  }
+  function gotHH(r) { hhGames = r.games || []; hhStatus = r.status; renderHHSetup(); renderHHGrid(); }
+
+  function renderHHSetup() {
+    const st = hhStatus;
+    const emu = (exe, name, dir, prog) => exe
+      ? `<small class="muted" style="overflow-wrap:anywhere">${esc(exe)}</small>`
+      : `<b style="color:var(--warn)">${name} wasn't found</b><br><small class="muted">Keep the ${dir} folder from the RetroPixels download next to ${exeFile("RetroPixels")}, or click "Change…" to pick ${exeFile(prog)}</small>`;
+    document.getElementById("hhPixel").innerHTML = emu(st.pixelds, "PixelDS", "PixelDS", "PixelDS");
+    document.getElementById("hhEmu").innerHTML = `<span class="muted">Emulator</span><br>` +
+      (st.pixelds ? "<b>PixelDS</b>" : `<span style="color:var(--warn)">PixelDS not found</span>`) +
+      `<br><small class="muted">3DS and DS games both open in PixelDS</small>`;
+    const f = st.folders || [];
+    const el = document.getElementById("hhFolders");
+    el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
+      `<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><small style="flex:1;overflow-wrap:anywhere">${esc(d)}</small><button class="linkbtn danger" data-rm="${i}">Remove</button></div>`).join("")
+      : '<br><b style="color:var(--warn)">None yet</b>'}`;
+    el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => hhAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
+    document.getElementById("hhFull").checked = !!st.fullscreen;
+    document.querySelectorAll("[data-hh-open],[data-hh-folder]").forEach(b => { b.disabled = !st[b.dataset.hhOpen || b.dataset.hhFolder]; });
+  }
+
+
+  function renderHHGrid() {
+    const q = document.getElementById("hhSearch").value.trim().toLowerCase();
+    const show = document.getElementById("hhShow").value;
+    const sort = document.getElementById("hhSort").value;
+    const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
+    let list = hhGames.filter(g => (!show || g.system === show) && (!q || g.name.toLowerCase().includes(q) || g.file.toLowerCase().includes(q)));
+    if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
+    if (sort === "added") list = list.slice().sort((a, b) => t(b.added) - t(a.added));
+    const n3 = hhGames.filter(g => g.system === "3ds").length, nd = hhGames.length - n3;
+    document.getElementById("hhCount").textContent = `${n3} 3DS · ${nd} DS`;
+    const grid = document.getElementById("hhGrid");
+    grid.innerHTML = "";
+    if (!hhGames.length) {
+      grid.innerHTML = `<p class="muted" style="grid-column:1/-1">${(hhStatus.folders || []).length
+        ? 'No 3DS or DS games found in your games folders. Use "Add games folder…" if they\'re somewhere else.' : "Add the folder with your 3DS and DS games."}</p>`;
+      return;
+    }
+    const playing = !!(appStatus && appStatus.running);
+    list.forEach(g => {
+      const is3 = g.system === "3ds", emu = "PixelDS";
+      const b = document.createElement("button");
+      b.className = "sw-tile";
+      b.title = `${g.file}\nPlays in ${emu}`;
+      b.disabled = playing;
+      b.innerHTML = `<span class="plat ${is3 ? "N3DS" : "NDS"}">${is3 ? "3DS" : "DS"}</span>
+        ${artTile(is3 ? "3ds" : "ds", g)}
+        <div class="sw-info"><b>${esc(g.name)}</b>
+          <div class="sw-tags"><span class="sw-tag">${esc(g.kind)}</span><span class="sw-tag">${fmtSize(g.size)}</span></div>
+          ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
+        </div>`;
+      b.addEventListener("click", async () => {
+        hhMsg.style.color = ""; hhMsg.textContent = "";
+        try {
+          await api("/api/handheld/play", { path: g.path });
+          toast(`Starting ${g.name} in ${emu}…`);
+          setTimeout(() => api("/api/status").then(renderStatus).then(renderHHGrid).catch(() => {}), 800);
+        } catch (e) { hhMsg.style.color = "var(--danger)"; hhMsg.textContent = e.message; }
+      });
+      grid.appendChild(b);
+    });
+    hookArt(grid);
+  }
+
+  async function hhAction(body, ok) {
+    try {
+      const r = await api("/api/handheld/action", body);
+      if (r.games) gotHH(r);
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  if (DESKTOP) {
+    document.getElementById("hhSearch").addEventListener("input", renderHHGrid);
+    document.getElementById("hhShow").addEventListener("change", renderHHGrid);
+    document.getElementById("hhSort").addEventListener("change", renderHHGrid);
+    document.getElementById("hhAddFolder").addEventListener("click", async () => {
+      toast("Choose the folder in the window that just opened");
+      const before = (hhStatus && hhStatus.folders || []).length;
+      const r = await hhAction({ action: "add-folder" });
+      if (!r || (r.status.folders || []).length === before) return;
+      const n = (r.games || []).length;
+      toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no 3DS or DS games were found in it");
+    });
+    document.getElementById("hhFull").addEventListener("change", e => hhAction({ action: "fullscreen", on: e.target.checked }));
+    document.querySelectorAll("[data-hh-open]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-emu", engine: b.dataset.hhOpen }, "Opening…")));
+    document.querySelectorAll("[data-hh-folder]").forEach(b => b.addEventListener("click", () => hhAction({ action: "open-folder", engine: b.dataset.hhFolder })));
+    document.querySelectorAll("[data-hh-choose]").forEach(b => b.addEventListener("click", () => hhAction({ action: "choose-exe", engine: b.dataset.hhChoose })));
   }
 
   // Start on the tab used last time.
@@ -2180,7 +2401,9 @@
       for (const s of ["emu/host.js", ...OWN[core]]) await loadScript(s);
       const sram = await sramOp("readonly", s => s.get(gameKey)).catch(() => null);
       player = new window.RPPlayer({
-        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(), coreOpts,
+        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(),
+        // the SNES Debugger notes the game's transfers from the very start
+        coreOpts: core === "snes" && DESKTOP && snesDbgOn() ? Object.assign({ trace: true }, coreOpts || {}) : coreOpts,
         onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
         // 4-player arcade games get the 1-4 picker above the game instead of a button in the game's bar
         seatInBar: core !== "arcade", onSeat: n => markSeat(n),
@@ -2201,6 +2424,7 @@
     gameReady = true;
     if (autoRecordOn()) setTimeout(() => { if (gameReady && !recorder) startRecording(true); }, 300);
     startArchipelago(core, rom, name);
+    startSnesDebug(core, rom, name);
     showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
     if (core === "arcade") showArcadeSettings(player.core);
@@ -2320,6 +2544,10 @@
     if (["iso", "gcm", "ciso", "wbfs", "rvz", "wia", "gcz", "wad"].includes(ext)) {
       if (DESKTOP) { showTab(["wbfs", "wad"].includes(ext) ? "wii" : "gc"); toast("Those games play from this tab — add their folder if they aren't listed"); return; }
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
+    }
+    if (["3ds", "cci", "cxi", "3dsx", "cia", "zcci", "zcxi", "z3dsx", "zcia", "nds", "dsi", "srl"].includes(ext)) {
+      if (DESKTOP) { showTab("handheld"); toast("3DS and DS games play from this tab — add their folder if they aren't listed"); return; }
+      return fail(`"${file.name}" looks like a 3DS or DS game. Those play in PixelDS through the RetroPixels desktop app.`);
     }
     if (["wua", "wud", "wux", "rpx", "elf"].includes(ext)) {
       if (DESKTOP) { showTab("wiiu"); toast("Wii U games play from this tab — add their folder if they aren't listed"); return; }
@@ -2454,6 +2682,34 @@
         go(rom);
       } catch (e) { out.textContent = e.message; out.className = "bad"; }
     });
+  }
+
+  // ---------- RetroPixels SNES Debugger ----------
+  // A separate program (RetroPixels-SNES-Debugger.exe, next to RetroPixels.exe) that opens with
+  // SNES games: it saves VRAM, CGRAM and the DMA transfers when asked, finds where a background's
+  // graphics are in the ROM, and swaps them for a picture. emu/snes_debug.js does this page's part.
+  var snesDbg = null;
+  function snesDbgOn() { try { return localStorage.getItem("rp:snesDebugger") !== "off"; } catch (e) { return true; } }
+  async function startSnesDebug(core, rom, name) {
+    const row = document.getElementById("snesDbgRow");
+    row.hidden = !(DESKTOP && core === "snes");
+    if (row.hidden) return;
+    const box = document.getElementById("snesDbgOn"), status = document.getElementById("snesDbgStatus");
+    box.checked = snesDbgOn();
+    box.onchange = () => {
+      try { localStorage.setItem("rp:snesDebugger", box.checked ? "on" : "off"); } catch (e) { /* no storage */ }
+      status.textContent = box.checked ? "— opens next time a SNES game starts" : "";
+    };
+    if (snesDbg) { snesDbg.close(); snesDbg = null; }
+    if (!box.checked || !player) return;
+    try {
+      await loadScript("emu/snes_debug.js");
+      snesDbg = window.RPSNESDebug.attach(player, {
+        rom, name, token: DESKTOP.token,
+        onStatus: st => { status.textContent = st.error ? "— couldn't start: " + st.error : st.debugger === false ? "— RetroPixels-SNES-Debugger.exe isn't next to RetroPixels.exe" : "— on"; },
+        onCapture: () => toast("SNES Debugger: capture saved"),
+      });
+    } catch (e) { console.warn("SNES Debugger:", e); }
   }
 
   async function startArchipelago(core, rom, name) {

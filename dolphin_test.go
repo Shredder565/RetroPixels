@@ -127,6 +127,7 @@ func TestDolphinNames(t *testing.T) {
 
 func TestDolphinIniAndPads(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("RETRO_GC_RES_FILE", filepath.Join(t.TempDir(), "res.txt"))
 	os.Setenv("RETRO_DOLPHIN_USER", dir)
 	defer os.Unsetenv("RETRO_DOLPHIN_USER")
 	if err := setupXboxPads(false); err != nil {

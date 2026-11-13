@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode"
 
+	"retropixels/internal/boxart"
 	"retropixels/internal/dolphin"
 	"retropixels/internal/pixelu"
 )
@@ -661,8 +662,8 @@ var dolSchema = []dolSetting{
 	{"Dolphin.ini", "Core", "GFXBackend", setting{Key: "backend", Label: "Graphics API", Type: "select",
 		Options: sel("Vulkan", "Vulkan (recommended)", "D3D12", "Direct3D 12", "D3D", "Direct3D 11", "OGL", "OpenGL"), Value: "Vulkan"}},
 	{"GFX.ini", "Settings", "InternalResolution", setting{Key: "res", Label: "Resolution", Type: "select",
-		Options: sel(1, "Native (480p)", 2, "2× (720p)", 3, "3× (1080p)", 4, "4× (1440p)", 5, "5×", 6, "6× (4K)", 8, "8× (5K)"), Value: int64(1),
-		Help: "Higher is sharper; 3× suits a 1080p screen, 6× a 4K one."}},
+		Options: sel(1, "Native (480p)", 2, "2× (720p)", 3, "3× (1K / 1080p)", 4, "4× (1440p)", 5, "5×", 6, "6× (4K)", 8, "8× (5K)"), Value: int64(3),
+		Help: dolphin.ResolutionHelp}},
 	{"GFX.ini", "Settings", "AspectRatio", setting{Key: "aspect", Label: "Aspect ratio", Type: "select",
 		Options: sel(0, "Auto (what the game uses)", 1, "Force 16:9", 2, "Force 4:3", 3, "Stretch to window"), Value: int64(0)}},
 	{"GFX.ini", "Settings", "wideScreenHack", setting{Key: "widehack", Label: "Widescreen hack", Type: "bool", Value: false,
@@ -708,6 +709,9 @@ func dolSettingsPayload() map[string]any {
 		if raw, ok := get(d.File).Get(d.Section, d.Key); ok {
 			s.Value = iniToValue(s, raw)
 		}
+		if s.Key == "res" { // what games start at, kept across versions (internal/dolphin/resolution.go)
+			s.Value = iniToValue(s, dolphin.KeptResolution(dolphinUserDir()))
+		}
 		s.Present = true
 		out = append(out, s)
 	}
@@ -744,6 +748,11 @@ func saveDolSettings(changes map[string]any) error {
 			str = map[bool]string{true: "True", false: "False"}[b]
 		}
 		files[d.File].Set(d.Section, d.Key, str)
+		if k == "res" {
+			if err := dolphin.KeepResolution(str); err != nil {
+				return err
+			}
+		}
 	}
 	for name, f := range files {
 		if err := f.Save(dolphinIni(name)); err != nil {
@@ -800,8 +809,9 @@ func launchDolphinGame(path string) error {
 	if dolphinRunning() {
 		return errors.New("PixelU (Wii/GameCube) is already open. Close it first, then start the game here")
 	}
-	importOldDolphin()       // the first time: the old Dolphin's settings and saves
-	_ = setupXboxPads(false) // only fills in controllers that aren't set up yet
+	importOldDolphin()                            // the first time: the old Dolphin's settings and saves
+	_ = setupXboxPads(false)                      // only fills in controllers that aren't set up yet
+	_ = dolphin.ApplyResolution(dolphinUserDir()) // the chosen resolution (1K by default), kept across versions
 	cfgMu.Lock()
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
 	embed := dolphinEmbedOn()
@@ -992,6 +1002,7 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			_ = saveConfigLocked()
 			cfgMu.Unlock()
 		case "rescan":
+			boxart.Forget() // look for missing covers again too
 			cfgMu.Lock()
 			cfg.DolphinFolders = nil
 			cfgMu.Unlock()

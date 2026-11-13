@@ -71,7 +71,7 @@ func pixeluDumps(dir string) (video, sound []string) {
 // parts joined at the first part's size, and the sound lined up with the
 // picture by their lengths (PixelU's sound starts a moment before its
 // first picture; both end when the game closes).
-func pixeluSaveArgs(video []mame.Clip, sound []string, videoLen, soundLen float64, enc, out string) []string {
+func pixeluSaveArgs(video []mame.Clip, sound []string, videoLen, soundLen float64, enc, out string, o saveOpts) []string {
 	args := []string{"-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"}
 	for _, v := range video {
 		args = append(args, "-i", v.Path)
@@ -97,7 +97,11 @@ func pixeluSaveArgs(video []mame.Clip, sound []string, videoLen, soundLen float6
 	if len(video) > 1 {
 		labels += fmt.Sprintf("concat=n=%d:v=1:a=0,", len(video))
 	}
-	g = append(g, labels+"format="+pix+"[v]")
+	sharp := ""
+	if o.Sharp {
+		sharp = ffmpeg.SharpFilter(W, H)
+	}
+	g = append(g, labels+sharp+"format="+pix+"[v]")
 	withSound := len(sound) > 0 && soundLen > 0
 	if withSound {
 		ls := ""
@@ -121,9 +125,13 @@ func pixeluSaveArgs(video []mame.Clip, sound []string, videoLen, soundLen float6
 	if withSound {
 		args = append(args, "-map", "[a]")
 	}
-	args = append(args, ffmpeg.EncoderArgs(enc, "high")...)
+	q := o.Quality
+	if q == "" {
+		q = "high"
+	}
+	args = append(args, ffmpeg.EncoderArgs(enc, q)...)
 	if withSound {
-		args = append(args, "-c:a", "aac", "-b:a", "192k")
+		args = append(args, ffmpeg.AudioArgs(q)...)
 	}
 	return append(args, "-movflags", "+faststart", out)
 }
@@ -159,7 +167,21 @@ var errNoPicture = errors.New("PixelU didn't save the game's picture, so nothing
 // pixeluSave makes out from PixelU's files in dir with ffmpeg ff (encoder
 // enc first, then the CPU's if that fails). The files are left for the
 // caller to delete. errRecTooShort: nothing worth keeping.
-func pixeluSave(ff, enc, dir, out string, ranFor float64, progress func(int)) error {
+// saveOpts: how pixeluSave makes the .mp4. The zero value is PixelU's:
+// "high" quality at the picture's own size.
+type saveOpts struct {
+	Quality string // "" = "high"
+	Sharp   bool   // scale a small pixel picture up to 1080p or more, crisp
+}
+
+// pixeldsSaveOpts: PixelDS's small screens at the best quality, scaled up.
+var pixeldsSaveOpts = saveOpts{Quality: "best", Sharp: true}
+
+func pixeluSave(ff, enc, dir, out string, ranFor float64, progress func(int), opts ...saveOpts) error {
+	var o saveOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	video, sound := pixeluDumps(dir)
 	var clips []mame.Clip
 	videoLen := 0.0
@@ -191,7 +213,7 @@ func pixeluSave(ff, enc, dir, out string, ranFor float64, progress func(int)) er
 	}
 	var lastErr error
 	for _, e := range encs {
-		cmd := ffmpeg.LowPriority(ffmpeg.Hidden(ff, pixeluSaveArgs(clips, sound, videoLen, soundLen, e, part)...))
+		cmd := ffmpeg.LowPriority(ffmpeg.Hidden(ff, pixeluSaveArgs(clips, sound, videoLen, soundLen, e, part, o)...))
 		log := &tailBuf{}
 		cmd.Stderr = log
 		stdout, err := cmd.StdoutPipe()

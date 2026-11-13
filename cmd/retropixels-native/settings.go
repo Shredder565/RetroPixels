@@ -32,6 +32,8 @@ type Settings struct {
 	Dolphin DolphinSettings `json:"dolphin"`
 	// Wii U through PixelU (pixelu_settings.go)
 	PixelU PixelUSettings `json:"pixelu"`
+	// 3DS and DS through PixelDS (handheld_settings.go)
+	Handheld HandheldSettings `json:"handheld"`
 }
 
 const maxRecent = 10

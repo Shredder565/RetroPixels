@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"retropixels/internal/boxart"
 	"retropixels/internal/mame"
 )
 
@@ -376,6 +377,7 @@ func registerMameRoutes(mux *http.ServeMux) {
 		case "find":
 			mameDetect()
 		case "rescan":
+			boxart.Forget() // look for missing covers again too
 			reload = true
 		case "embed":
 			_, err = mame.Update(func(c *mame.Config) { v := b.On; c.Embed = &v })

@@ -228,27 +228,51 @@ func lerpV(a, b *cvert, t float32) cvert {
 	return cvert{a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t, a.u + (b.u-a.u)*t, a.v + (b.v-a.v)*t, a.s + (b.s-a.s)*t}
 }
 
-func (r *renderer) clipAndAdd(vp *viewport, base *tri, in [3]cvert, list *[]tri) {
-	var poly [4]cvert
-	n := 0
-	const zc = -nearPlane
-	for i := 0; i < 3; i++ {
-		a, b := &in[i], &in[(i+1)%3]
-		ain, bin := a.z <= zc, b.z <= zc
-		if ain {
-			poly[n] = *a
-			n++
+// guardBand: how far past the edges of the screen, in screen widths, a
+// polygon may reach before it is clipped. Without it a big polygon that passes
+// close by the eye (the planet in Star Wars Trilogy's Death Star battle)
+// projects to coordinates in the billions, where float precision runs out and
+// the triangle smears across the screen.
+const guardBand = 4
+
+// clipPlane cuts a polygon down to where dist(v) <= 0.
+func clipPlane(in []cvert, out []cvert, dist func(*cvert) float32) []cvert {
+	out = out[:0]
+	for i := range in {
+		a, b := &in[i], &in[(i+1)%len(in)]
+		da, db := dist(a), dist(b)
+		if da <= 0 {
+			out = append(out, *a)
 		}
-		if ain != bin {
-			poly[n] = lerpV(a, b, (zc-a.z)/(b.z-a.z))
-			n++
+		if (da <= 0) != (db <= 0) {
+			out = append(out, lerpV(a, b, da/(da-db)))
 		}
 	}
+	return out
+}
+
+func (r *renderer) clipAndAdd(vp *viewport, base *tri, in [3]cvert, list *[]tri) {
+	var bufA, bufB [9]cvert
+	poly := clipPlane(in[:], bufA[:0], func(c *cvert) float32 { return c.z + nearPlane })
+	// the side planes, in clip space: x_clip = px*x + pa*z, w = -z
+	if len(poly) >= 3 {
+		poly = clipPlane(poly, bufB[:0], func(c *cvert) float32 { return (vp.px*c.x + vp.pa*c.z) + guardBand*c.z })
+	}
+	if len(poly) >= 3 {
+		poly = clipPlane(poly, bufA[:0], func(c *cvert) float32 { return -(vp.px*c.x + vp.pa*c.z) + guardBand*c.z })
+	}
+	if len(poly) >= 3 {
+		poly = clipPlane(poly, bufB[:0], func(c *cvert) float32 { return (vp.py*c.y + vp.pb*c.z) + guardBand*c.z })
+	}
+	if len(poly) >= 3 {
+		poly = clipPlane(poly, bufA[:0], func(c *cvert) float32 { return -(vp.py*c.y + vp.pb*c.z) + guardBand*c.z })
+	}
+	n := len(poly)
 	if n < 3 {
 		return
 	}
 	type sv struct{ x, y, iw, u, v, s float32 }
-	var p [4]sv
+	var p [9]sv
 	for i := 0; i < n; i++ {
 		c := &poly[i]
 		iw := 1 / -c.z
@@ -486,8 +510,12 @@ func (r *renderer) raster(t *tri, layer int, b0, b1 int) {
 			if yi == yj {
 				continue
 			}
-			lo, hi := min(yi, yj), max(yi, yj)
-			if yc < lo || yc >= hi {
+			// walk each edge top to bottom, so two triangles sharing it
+			// find exactly the same crossing and leave no gap between them
+			if yi > yj {
+				xi, yi, xj, yj = xj, yj, xi, yi
+			}
+			if yc < yi || yc >= yj {
 				continue
 			}
 			x := xi + (yc-yi)*(xj-xi)/(yj-yi)

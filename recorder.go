@@ -304,6 +304,7 @@ type recSession struct {
 	Emu      string // "PixelU (Wii/GameCube)" or "PixelU" (Wii U): named in messages
 	Quality  string // "" = the Recordings setting
 	NoCrop   bool   // keep every pixel: the emulator saves only the game's own picture, without bars
+	Sharp    bool   // a small pixel picture (PixelDS): scaled up to 1080p or more with crisp pixels
 	ownDir   bool   // dumpDir was made for this game alone: removed once the video is made
 
 	mu         sync.Mutex
@@ -489,6 +490,9 @@ func (s *recSession) upToDate() string {
 	if s.Emu == "PixelU" {
 		return "A PixelU build that can record (made with RetroPixels' recording support) is needed."
 	}
+	if s.Emu == "PixelDS" {
+		return "The PixelDS folder from RetroPixels 2.34.0 or later records games; try an up-to-date PixelDS folder."
+	}
 	return `The PixelU folder's Wii/GameCube engine (wii\PixelU-Wii.exe) should save it; try an up-to-date PixelU folder.`
 }
 
@@ -534,6 +538,7 @@ type finalJob struct {
 	From, To       float64 // part of the video to keep, in seconds
 	FPS            float64
 	Out            string
+	Sharp          bool // scale up to 1080p or more with crisp pixels (ffmpeg.SharpFilter)
 }
 
 func ffNum(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) }
@@ -586,8 +591,12 @@ func finalArgs(j finalJob, enc, quality string) []string {
 	}
 	pix := ffmpeg.PixFmt(enc) // for VAAPI also the upload to the graphics card
 	dur := j.To - j.From
-	g = append(g, fmt.Sprintf("%sfps=%s,trim=start=%s:end=%s,setpts=PTS-STARTPTS,format=%s[v]",
-		labels, ffNum(j.FPS), ffNum(j.From), ffNum(j.To), pix))
+	sharp := ""
+	if j.Sharp {
+		sharp = ffmpeg.SharpFilter(W, H)
+	}
+	g = append(g, fmt.Sprintf("%sfps=%s,trim=start=%s:end=%s,setpts=PTS-STARTPTS,%sformat=%s[v]",
+		labels, ffNum(j.FPS), ffNum(j.From), ffNum(j.To), sharp, pix))
 
 	// Sound: both kinds started together, so both get the same shift.
 	clock := j.DSPLen
@@ -643,7 +652,7 @@ func finalArgs(j finalJob, enc, quality string) []string {
 	args = append(args, encoderArgs(enc, quality)...)
 	args = append(args, "-g", fmt.Sprint(int(math.Round(j.FPS*2))))
 	if len(mix) > 0 {
-		args = append(args, "-c:a", "aac", "-b:a", "192k")
+		args = append(args, ffmpeg.AudioArgs(quality)...)
 	}
 	return append(args, "-movflags", "+faststart", j.Out)
 }
@@ -898,7 +907,7 @@ func (s *recSession) finish() {
 		return
 	}
 	j := finalJob{Video: segs, DSP: d.DSP, DTK: d.DTK, DSPLen: wavTotal(d.DSP), DTKLen: wavTotal(d.DTK),
-		FPS: outputFPS(segs[0].FPS, recFPS())}
+		FPS: outputFPS(segs[0].FPS, recFPS()), Sharp: s.Sharp}
 	audioLen := j.DSPLen
 	if audioLen <= 0 {
 		audioLen = j.DTKLen

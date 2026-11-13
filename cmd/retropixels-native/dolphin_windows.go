@@ -327,7 +327,7 @@ func (a *app) dolOpenPath(path string) bool {
 
 // dolPlay starts a game (stopping the one playing first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
-	if a.mameBusy() || a.pixeluBusy() {
+	if a.mameBusy() || a.pixeluBusy() || a.hhBusy() {
 		return
 	}
 	if r := a.dol.run; r != nil {
@@ -355,6 +355,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	user := dolphin.UserDir(exe)
 	d.importOld(exe)                       // the first time: the old Dolphin's settings and saves
 	_ = dolphin.SetupXboxPads(user, false) // only fills in controllers that aren't set up yet
+	_ = dolphin.ApplyResolution(user)      // the chosen resolution (1K by default), kept across versions
 	if a.dolNeedsWiiKeys(g, user) {        // Wii games need the keys file from the player's own Wii
 		return
 	}

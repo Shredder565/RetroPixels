@@ -173,6 +173,9 @@ func EncoderArgs(enc, quality string) []string {
 		"h264_vaapi": {"18", "22", "27"},
 		"libx264":    {"18", "21", "26"},
 	}[enc]
+	if quality == "best" {
+		return bestArgs(enc)
+	}
 	v := q[1]
 	if quality == "high" {
 		v = q[0]
@@ -192,6 +195,49 @@ func EncoderArgs(enc, quality string) []string {
 		return []string{"-vaapi_device", VAAPIDevice(), "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", v, "-profile:v", "high"}
 	}
 	return []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", v}
+}
+
+// bestArgs: the "best" quality, for small, sharp pictures (PixelDS's DS
+// and 3DS screens) where every pixel edge shows: near-lossless H.264.
+func bestArgs(enc string) []string {
+	switch enc {
+	case "h264_nvenc":
+		return []string{"-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "14", "-b:v", "0", "-profile:v", "high"}
+	case "h264_amf":
+		return []string{"-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "14", "-qp_p", "14"}
+	case "h264_qsv":
+		return []string{"-c:v", "h264_qsv", "-preset", "slow", "-global_quality", "14"}
+	case "h264_vaapi":
+		return []string{"-vaapi_device", VAAPIDevice(), "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", "14", "-profile:v", "high"}
+	}
+	return []string{"-c:v", "libx264", "-preset", "medium", "-crf", "14", "-profile:v", "high"}
+}
+
+// AudioArgs: the .mp4's sound (AAC), at a higher bitrate for "best".
+func AudioArgs(quality string) []string {
+	if quality == "best" {
+		return []string{"-c:a", "aac", "-b:a", "256k"}
+	}
+	return []string{"-c:a", "aac", "-b:a", "192k"}
+}
+
+// SharpScale is the whole-number factor that brings a picture h pixels
+// tall to at least 1080 pixels (1 if it already is).
+func SharpScale(h int) int {
+	if h <= 0 || h >= 1080 {
+		return 1
+	}
+	return (1080 + h - 1) / h
+}
+
+// SharpFilter is the filter that scales a small picture up by SharpScale
+// with square, crisp pixels (nearest neighbour), or "" if none is needed.
+func SharpFilter(w, h int) string {
+	k := SharpScale(h)
+	if k == 1 {
+		return ""
+	}
+	return fmt.Sprintf("scale=%d:%d:flags=neighbor,", w*k, h*k)
 }
 
 var (
