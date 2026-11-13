@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"retropixels/core"
+	"retropixels/internal/walkthrough"
 )
 
 // The game running: its core, driven on its own thread (so menus, dialogs
@@ -96,6 +97,10 @@ type session struct {
 	apHoldUntil time.Time
 	// the RetroPixels SNES Debugger's session (snesdbg.go), or nil
 	dbg *snesDbgState
+	// walkthrough mode (walkthrough.go): the game's guide, or nil
+	guide   *walkthrough.Guide
+	walkOn  atomic.Bool
+	walkBuf []uint32
 
 	// RETRO_NATIVE_STATS=<file>: frames per second and queued sound, every 2 s (for testing)
 	stats      *os.File
@@ -375,7 +380,7 @@ func (s *session) present() {
 	w, h := s.core.Width(), s.core.Height()
 	pix := s.core.Screen()
 	if w > 0 && h > 0 && len(pix) >= w*h {
-		s.host.present(pix[:w*h], w, h)
+		s.host.present(s.walkthroughFrame(pix[:w*h], w, h), w, h)
 	}
 }
 

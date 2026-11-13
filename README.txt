@@ -15,7 +15,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.42.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.43.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -31,8 +31,14 @@ games in the 3DS / DS tab (both in PixelDS, RetroPixels' own DS and 3DS
 emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
+Walkthrough mode (new in 2.43.0, Metroid on the NES so far): press F8 while
+playing (or Game > Walkthrough arrow) and a panel at the bottom of the
+picture names your next goal, with an arrow pointing the way to it. It reads
+where Samus is and what she has from the game's memory, so it moves on to the
+next goal by itself. Press F8 again to turn it off.
+
 What's in the download
-- RetroPixels-Native-2.42.0.zip has RetroPixels-Native.exe (no web
+- RetroPixels-Native-2.43.0.zip has RetroPixels-Native.exe (no web
   browser inside, see "RetroPixels Native" below) and VERSION.txt with its
   version number.
 - The engines they play through, each in its own folder. Keep these folders
