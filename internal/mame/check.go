@@ -188,6 +188,8 @@ type GameStatus struct {
 	Label   string   `json:"label"`             // that MAME's name
 	Result  string   `json:"result"`            // Good, Bad or "" (not checked)
 	PlaysIn []string `json:"playsIn,omitempty"` // every version known to play it
+	// for a set no MAME here plays as it is: what RetroPixels does about it
+	Fix string `json:"fix,omitempty"`
 }
 
 // Status says which MAME a game starts in and whether it's known to play.
@@ -201,6 +203,9 @@ func (c Config) Status(g Game) GameStatus {
 			s.PlaysIn = append(s.PlaysIn, in.Label())
 		}
 	}
+	if s.Result == Bad && len(s.PlaysIn) == 0 {
+		s.Fix = c.fixText(g)
+	}
 	return s
 }
 
@@ -211,6 +216,8 @@ func (s GameStatus) Text() string {
 		return ""
 	case s.Result == Good:
 		return "Plays in " + s.Label
+	case s.Fix != "":
+		return s.Fix
 	case s.Result == Bad && len(s.PlaysIn) > 0:
 		return "Won't start in " + s.Label + ": plays in " + strings.Join(s.PlaysIn, ", ")
 	case s.Result == Bad:

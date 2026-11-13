@@ -261,7 +261,7 @@
       // The 4-player cabinet has no start buttons: a player joins by pressing attack, so Start
       // presses attack as well (and the bit 7 line, for the 2-player versions).
       return ~((i.Left ? 1 : 0) | (i.Right ? 2 : 0) | (i.Up ? 4 : 0) | (i.Down ? 8 : 0) |
-        (i["Button 1"] || start ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0) | (start ? 0x80 : 0)) & 0xff;
+        (i["Button 1"] || i["Button 3"] || start ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0) | (start ? 0x80 : 0)) & 0xff;
     }
     coinByte() {
       const p = this.inputs, p1 = p[0] || {};
@@ -502,7 +502,7 @@
   TMNTBoard.players = 4;
   // who each player's controls play as on the 4-player cabinet (for the page's player picker)
   TMNTBoard.characters = ["Leonardo", "Michelangelo", "Donatello", "Raphael"];
-  TMNTBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Coin 2", "Service"];
+  TMNTBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)", "Start (2P)", "Coin 2", "Service"];
   TMNTBoard.dips = [
     { id: "coinage", label: "Coins", default: 0xff, options: [{ label: "1 coin, 1 credit", value: 0xff }, { label: "1 coin, 2 credits", value: 0xee },
       { label: "2 coins, 1 credit", value: 0x22 }, { label: "Free play", value: 0x00 }] },

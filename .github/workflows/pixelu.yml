@@ -244,8 +244,3 @@ jobs:
         run: |
           echo "Vulkan: ${{ steps.vulkan.outcome }}, OpenGL: ${{ steps.opengl.outcome }}"
           test "${{ steps.vulkan.outcome }}" = success || test "${{ steps.opengl.outcome }}" = success
-
-      - name: Make the RetroPixels Linux download with this build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run bundle-linux.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"

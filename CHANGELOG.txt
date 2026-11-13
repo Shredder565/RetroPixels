@@ -4,6 +4,115 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.42.0  (2026-11-11)
+--------------------------------
+- RetroPixels is now one program, RetroPixels-Native.exe. RetroPixels.exe
+  (the app in a built-in web browser) is removed, with the Linux test build
+  made from it. The download is RetroPixels-Native-2.42.0.zip.
+- RetroPixels Native looks like RetroPixels.exe did: the same tabs
+  (Classic consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME),
+  Recordings), the system cards, and the libraries as grids of box art.
+  Click a game, or use the D-pad and A; LB / RB or Ctrl+Tab change tabs.
+- New Wii U and 3DS / DS libraries: add your games folders in those tabs.
+- Dark title bar and menus, and a bigger window on the start screen.
+
+RetroPixels 2.41.3  (2026-11-11)
+--------------------------------
+- Fixed: a game could freeze mid-play while "Record games automatically"
+  was on (Super Mario Bros. / Duck Hunt in RetroPixels Native). The game
+  waited whenever ffmpeg fell behind; now it never waits, and those
+  moments are left out of the video with their sound.
+- RetroPixels.exe: recordings are saved a second at a time while you play
+  instead of being kept in memory, so long games no longer slow down.
+
+RetroPixels 2.41.2  (2026-11-09)
+--------------------------------
+- Fixed: the punch button did nothing in Popeye and Kangaroo, in both
+  programs (Punch had no default key or controller button). Punch is now
+  A or X on the controller, Z or A on the keyboard ("Punch" in Controls).
+
+RetroPixels 2.41.1  (2026-11-08)
+--------------------------------
+- Fixed: pushing the controller's stick hard left then right could throw
+  Turtles in Time back to its intro. A hard flick often clicks the stick by
+  accident, and the left-stick click is Load state. Now, in both programs, a
+  stick click only saves (R3) or loads (L3) when held for about a third of a
+  second with the stick in the middle; a quick click, or one while moving,
+  does nothing. Every game gets the fix, X-Men included.
+- TMNT, Turtles in Time and The Simpsons: X on the controller (A on the
+  keyboard) attacks too, in both programs ("Button 3" in Controls).
+
+RetroPixels 2.41.0  (2026-11-08)
+--------------------------------
+- X-Men (Konami, 1992) plays on RetroPixels' own emulation in both
+  programs, without MAME: the 4-player sets (xmen, xmenu, xmenua, xmenj,
+  xmenja, xmena, xmenaa) and the 2-player ones (xmen2pe, xmen2pu,
+  xmen2pj, xmen2pa), with RetroPixels' own K054539 sound chip. Checked
+  against MAME 0.264: 15,000 frames match pixel for pixel, and the music
+  and effects match.
+- X-Men has "Choose your player" in both programs (4-player cabinet; you
+  then pick your X-Man in the game), also when started from the Arcade
+  (MAME) list. Attack = A / Z, Jump = B / X, Mutant power = X / A.
+- A set without its EEPROM file sets the EEPROM up by itself on the first
+  start, then plays.
+
+RetroPixels 2.40.2  (2026-11-08)
+--------------------------------
+- RetroPixels Native: a "Choose your player" window when a 3- or 4-player
+  arcade game starts (TMNT, Turtles in Time, The Simpsons, Double Dragon
+  3), a tile per character. Click one, press 1-4, or use the arrows /
+  D-pad and Enter / A.
+- Both programs: these games started from the Arcade (MAME) list now play
+  in RetroPixels' own emulation, which has the player choice (MAME has
+  none). Other games in the list still play in MAME.
+
+RetroPixels 2.40.1  (2026-11-07)
+--------------------------------
+- RetroPixels.exe gets 2.39.1's player switching too: F7 / Shift+F7 and
+  a flick of the controller's right stick up go round the players in 3-
+  and 4-player arcade games, also in fullscreen, and the game says which
+  player you are when it starts. Both programs now have the same player
+  picker, shortcuts and quiet Load state (no popups).
+
+RetroPixels 2.40.0  (2026-11-07)
+--------------------------------
+- Six more arcade games run on RetroPixels' own emulation, so they play in
+  both programs without MAME: Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo,
+  Mario Bros. and Kung-Fu Master (also Spartan X). Each was played side by
+  side with MAME 0.264 with the same controls: the pictures match frame for
+  frame, and the sound is close to MAME's.
+- A Ms. Pac-Man set is now always played as Ms. Pac-Man (it used to be taken
+  for Pac-Man, whose files it shares).
+
+RetroPixels 2.39.1  (2026-11-07)
+--------------------------------
+- RetroPixels Native: no more "Couldn't load the state" popups. Clicking
+  the controller's left stick (Load state) by accident with an empty slot,
+  or a state that can't be loaded, now shows a short note in the title bar
+  and the game carries on.
+- RetroPixels Native: choosing one of four players is easy to find again.
+  The Player menu is on the menu bar (it was inside the Game menu), F7 /
+  Shift+F7 and a flick of the controller's right stick up go round the
+  players, and a 3- or 4-player arcade game says who you are when it
+  starts (TMNT, Turtles in Time, The Simpsons, Double Dragon 3).
+
+RetroPixels 2.39.0  (2026-11-07)
+--------------------------------
+- Any arcade ROM set plays, whichever MAME version it was made for: sets
+  are recognised by their files' CRCs, not their names, using a history of
+  every arcade game's chip files in every MAME version from 0.171 to 0.289
+  (built in, made from MAME's own source code).
+- Renamed zips and files are recognised and listed under the game's name.
+- Merged, split and non-merged sets: missing parent and BIOS files are
+  taken from any zip in your ROM folders. The set MAME needs is put
+  together in %LOCALAPPDATA%\RetroPixels\MAME sets; your zips are never
+  changed.
+- A set made for another MAME version starts in a MAME you have that
+  accepts it, or RetroPixels downloads the official MAME version that does
+  and starts the game when it's ready (RetroPixels Native asks first).
+- A set no MAME version can play says which files are missing (name and
+  CRC) and the closest MAME version; the library shows it beside the game.
+
 RetroPixels 2.38.0  (2026-11-07)
 --------------------------------
 - Box art: the GameCube, Wii, Wii U and 3DS / DS libraries show each

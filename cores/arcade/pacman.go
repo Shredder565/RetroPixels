@@ -43,6 +43,15 @@ type pacman struct {
 	vector                           int
 	irqLine                          bool
 	watchdog, cycles, frame          int
+
+	kind       int    // pmPac, pmMs, pmJr (mspacman.go)
+	bank       int    // Ms. Pac-Man: which ROM bank the processor sees
+	prom, drom []byte // Ms. Pac-Man: the Pac-Man and Ms. Pac-Man banks
+	jvram      [0x800]uint8
+	jram       [0x800]uint8
+	latch2     [8]uint8
+	scroll     uint8
+	jpens      [512]uint32
 }
 
 type pacmanBus struct{ b *pacman }
@@ -61,15 +70,34 @@ func (x pacmanBus) Ack()          { x.b.irqLine = false; x.b.cpu.IRQ = false }
 func (x pacmanBus) Vector() uint8 { return uint8(x.b.vector) }
 
 func newPacman(g *Game, files Files, opts Opts) (Board, error) {
-	b := &pacman{game: g, dips: opts.Dips}
-	b.rom = Region(g, files, "cpu", 0x4000)
-	b.tilesRom = Region(g, files, "tiles", 0x1000)
-	b.spritesRom = Region(g, files, "sprites", 0x1000)
-	b.colourProm = Region(g, files, "colour", 32)
+	return newPacmanKind(g, files, opts, pmPac)
+}
+
+func newPacmanKind(g *Game, files Files, opts Opts, kind int) (Board, error) {
+	b := &pacman{game: g, dips: opts.Dips, kind: kind}
+	gfx := 0x1000
+	switch kind {
+	case pmPac:
+		b.rom = Region(g, files, "cpu", 0x4000)
+	case pmMs:
+		b.prom, b.drom = msDecode(Region(g, files, "cpu", 0x10000))
+		b.bank = 1
+	case pmJr:
+		b.rom = Region(g, files, "cpu", 0x10000)
+		jrDecrypt(b.rom)
+		gfx = 0x2000
+	}
+	b.tilesRom = Region(g, files, "tiles", gfx)
+	b.spritesRom = Region(g, files, "sprites", gfx)
 	b.lookupProm = Region(g, files, "lookup", 256)
 	b.waveProm = Region(g, files, "wave", 256)
 	b.decodeGraphics()
-	b.decodeColours()
+	if kind == pmJr {
+		b.jrColours(Region(g, files, "pal-lo", 256), Region(g, files, "pal-hi", 256))
+	} else {
+		b.colourProm = Region(g, files, "colour", 32)
+		b.decodeColours()
+	}
 	b.screen = make([]uint32, pmW*pmH)
 	b.out = NewResampler(pmSoundHz, float64(opts.SampleRate))
 	b.p1, b.p2 = Pad{}, Pad{}
@@ -82,6 +110,7 @@ func (b *pacman) Reset() {
 	b.cpu.Reset()
 	b.vram, b.cram, b.ram = [0x400]uint8{}, [0x400]uint8{}, [0x400]uint8{}
 	b.spritePos, b.latch, b.snd, b.acc = [16]uint8{}, [8]uint8{}, [32]uint8{}, [3]uint32{}
+	b.jvram, b.jram, b.latch2, b.scroll = [0x800]uint8{}, [0x800]uint8{}, [8]uint8{}, 0
 	b.vector, b.irqLine = 0xff, false
 	b.cpu.IRQ = false
 	b.watchdog, b.cycles, b.frame = 0, 0, 0
@@ -96,16 +125,17 @@ func (b *pacman) decodeGraphics() {
 		n := x & 3
 		return ((v>>(7-n))&1)<<1 | (v>>(3-n))&1
 	}
-	b.tiles = make([]uint8, 256*64)
-	for t := 0; t < 256; t++ {
+	nt, ns := len(b.tilesRom)/16, len(b.spritesRom)/64
+	b.tiles = make([]uint8, nt*64)
+	for t := 0; t < nt; t++ {
 		for y := 0; y < 8; y++ {
 			for x := 0; x < 8; x++ {
 				b.tiles[t*64+y*8+x] = px(b.tilesRom, t*16, x, y, []int{8, 0})
 			}
 		}
 	}
-	b.sprites = make([]uint8, 64*256)
-	for s := 0; s < 64; s++ {
+	b.sprites = make([]uint8, ns*256)
+	for s := 0; s < ns; s++ {
 		for y := 0; y < 16; y++ {
 			for x := 0; x < 16; x++ {
 				half := 0
@@ -167,6 +197,9 @@ func (b *pacman) render() {
 		pal := int(b.ram[0x3f1+n*2]&0x3f) << 2
 		sx := 272 - int(b.spritePos[n*2+1])
 		sy := int(b.spritePos[n*2]) - 31
+		if n < 3 && b.kind != pmPac {
+			sy++ // MAME's placement of the first three sprites
+		}
 		base := (attr >> 2) * 256
 		fx, fy := 0, 0
 		if attr&1 != 0 {
@@ -230,10 +263,21 @@ func (b *pacman) soundSample() {
 func (b *pacman) TakeAudio() []float32 { return b.out.Take() }
 
 func (b *pacman) read(a int) uint8 {
+	switch b.kind {
+	case pmMs:
+		return b.msRead(a)
+	case pmJr:
+		return b.jrRead(a)
+	}
 	a &= 0x7fff
 	if a < 0x4000 {
 		return b.rom[a]
 	}
+	return b.pmIO(a)
+}
+
+// pmIO: reads from 4000-7fff.
+func (b *pacman) pmIO(a int) uint8 {
 	if a < 0x5000 {
 		switch a & 0xc00 {
 		case 0x000:
@@ -259,6 +303,18 @@ func (b *pacman) read(a int) uint8 {
 }
 
 func (b *pacman) write(a int, v uint8) {
+	switch b.kind {
+	case pmMs:
+		b.msWrite(a, v)
+		return
+	case pmJr:
+		b.jrWrite(a, v)
+		return
+	}
+	b.pmWrite(a, v)
+}
+
+func (b *pacman) pmWrite(a int, v uint8) {
 	a &= 0x7fff
 	if a < 0x4000 {
 		return
@@ -375,7 +431,11 @@ func (b *pacman) readIn1() uint8 {
 
 func (b *pacman) readDsw() uint8 {
 	d := b.dips
-	return uint8(d["coins"]&3 | (d["lives"]&3)<<2 | (d["bonus"]&3)<<4 | (d["difficulty"]&1)<<6 | (d["names"]&1)<<7)
+	names := d["names"] & 1
+	if b.kind != pmPac {
+		names = 1 // unused
+	}
+	return uint8(d["coins"]&3 | (d["lives"]&3)<<2 | (d["bonus"]&3)<<4 | (d["difficulty"]&1)<<6 | names<<7)
 }
 
 func (b *pacman) SetInput(p []Pad) {
@@ -392,7 +452,11 @@ func (b *pacman) RunFrame() {
 	cpu := b.cpu
 	for line := 0; line < pmLines; line++ {
 		if line == pmShown {
-			b.render()
+			if b.kind == pmJr {
+				b.jrRender()
+			} else {
+				b.render()
+			}
 			if b.latch[0]&1 != 0 {
 				b.irqLine = true
 				cpu.IRQ = true
@@ -429,6 +493,15 @@ func (b *pacman) SaveState() ([]byte, error) {
 	w.Ints([]int{b.vector, b.watchdog, b.cycles, b.frame})
 	w.Bool(b.irqLine)
 	b.out.AppendState(w)
+	switch b.kind {
+	case pmMs:
+		w.Ints([]int{b.bank})
+	case pmJr:
+		w.Bytes(b.jvram[:])
+		w.Bytes(b.jram[:])
+		w.Bytes(b.latch2[:])
+		w.Bytes([]uint8{b.scroll})
+	}
 	return w.B, nil
 }
 
@@ -452,7 +525,24 @@ func (b *pacman) LoadState(s []byte) error {
 	b.cpu.IRQ = b.irqLine
 	b.out.LoadState(r)
 	b.out.Clear()
-	b.render()
+	switch b.kind {
+	case pmMs:
+		k := make([]int, 1)
+		r.Ints(k)
+		b.bank = k[0]
+	case pmJr:
+		r.Bytes(b.jvram[:])
+		r.Bytes(b.jram[:])
+		r.Bytes(b.latch2[:])
+		sc := make([]uint8, 1)
+		r.Bytes(sc)
+		b.scroll = sc[0]
+	}
+	if b.kind == pmJr {
+		b.jrRender()
+	} else {
+		b.render()
+	}
 	return r.Done()
 }
 

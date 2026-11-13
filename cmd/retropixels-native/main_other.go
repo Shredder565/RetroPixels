@@ -8,6 +8,6 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "RetroPixels Native "+version+" is a Windows program.")
+	fmt.Fprintln(os.Stderr, "RetroPixels "+version+" is a Windows program.")
 	os.Exit(1)
 }

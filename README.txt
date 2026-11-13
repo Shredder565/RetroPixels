@@ -1,15 +1,22 @@
 RetroPixels
 ============
 
-Double-click RetroPixels.exe to start. It opens in its own window.
+Double-click RetroPixels-Native.exe to start. It opens in its own window.
+
+Since 2.42.0 RetroPixels is one program, RetroPixels-Native.exe: the old
+RetroPixels.exe (the app shown in a built-in web browser) is gone, and
+RetroPixels-Native.exe looks like it did, with the same tabs (Classic
+consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME), Recordings), the
+system cards and the libraries as grids of box art. Where this file still
+says RetroPixels.exe, it means RetroPixels-Native.exe.
 
 Used RetroConsole before? Your settings, save states, recordings and save
 backups move over to RetroPixels automatically the first time it starts.
-Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
+Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.38.0 (the number also shows next to the RetroPixels name in the app).
-For Windows 10 / 11 (64-bit). A Linux version comes in a later version.
+Version 2.42.0 (the number also shows next to the RetroPixels name in the app).
+For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -25,10 +32,9 @@ emulator: DS since 2.29.0, 3DS by default since 2.34.0).
 Your Xbox controller works automatically.
 
 What's in the download
-- Two downloads, one for each program: RetroPixels-2.38.0.zip has
-  RetroPixels.exe, and RetroPixels-Native-2.38.0.zip has RetroPixels-Native.exe
-  (the version without a web browser inside, see "RetroPixels Native" below).
-  Each has VERSION.txt with its version number.
+- RetroPixels-Native-2.42.0.zip has RetroPixels-Native.exe (no web
+  browser inside, see "RetroPixels Native" below) and VERSION.txt with its
+  version number.
 - The engines they play through, each in its own folder. Keep these folders
   next to the program:
   * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
@@ -49,6 +55,22 @@ What's in the download
   RetroPixels, README.txt, CHANGELOG.txt and VERSION.txt.
 - No games, keys, BIOS or firmware are included. Wii U and Wii games need
   your own dumps and the keys from your own console (see below).
+
+Any arcade ROM set (new in 2.39.0)
+- RetroPixels recognises a ROM set by its files (their CRCs), not by its
+  name, using a built-in history of every arcade game's chip files in every
+  MAME version from 0.171 on. Renamed zips show under the game's name.
+- Clones split from their parent, and games that need a BIOS (Neo Geo...),
+  get the missing files from any zip in your ROM folders. The set MAME
+  needs is put together in %LOCALAPPDATA%\RetroPixels\MAME sets; your own
+  zips are never changed.
+- A set made for another MAME version starts in a MAME you have that
+  accepts it. If none does, RetroPixels downloads the official MAME version
+  that does and starts the game when it's ready (RetroPixels Native asks
+  first).
+- If no MAME version can play a set, RetroPixels says which files are
+  missing (name and CRC) and the closest version. The Arcade (MAME) library
+  shows this beside the game.
 
 Box art in the libraries (new in 2.38.0)
 - The GameCube, Wii, Wii U and 3DS / DS tabs show each game's cover, and
@@ -149,6 +171,12 @@ What each system supports
     tmnt22pu, tmht22pe, tmht24pe, tmnt22pj, tmnt24pj).
   * The Simpsons (simpsons.zip; also simpsons4pe, simpsons2p, simpsons2pa,
     simpsons2pj).
+  * X-Men (xmen.zip; also xmenu, xmenua, xmenj, xmenja, xmena, xmenaa and
+    the 2-player xmen2pe, xmen2pu, xmen2pj, xmen2pa), new in 2.41.0, with
+    RetroPixels' own K054539 sound chip. Attack = A / Z, Jump = B / X,
+    Mutant power = X / A. Coin, then press Start (or a button) to pick your
+    X-Man. Settings live in the board's EEPROM; a set without its .nv file
+    sets the EEPROM up by itself the first time.
   These run on RetroPixels' own 68000, Konami-2 and Z80 processors and its own
   versions of Konami's graphics and sound chips (YM2151, K007232, uPD7759,
   K053260...). If your set names its chip files differently, keep the zip
@@ -157,12 +185,16 @@ What each system supports
   and high scores in the board's EEPROM (saved like a battery save) and have
   no DIP switches: hold Service + Start on the first controller to open the
   game's own test menu. In TMNT (4-player cabinet) a player joins by pressing
-  Attack; Start does the same.
+  Attack; Start does the same. In TMNT, Turtles in Time and The Simpsons,
+  Attack is A or X on the controller (Z or A on the keyboard), Jump is B / X
+  (since 2.41.1).
   4-player arcade games show "Choose your player" buttons above the game
   (1 Leonardo, 2 Michelangelo, 3 Donatello, 4 Raphael; or 1 Marge, 2 Homer,
   3 Bart, 4 Lisa): click one to play as that character with your keyboard
   and first controller. Other controllers move round with it. The choice is
-  remembered for each game. Nintendo 64 and Genesis games have the same
+  remembered for each game. F7 / Shift+F7 or a flick of the controller's
+  right stick up goes to the next / previous player (since 2.40.1, as in
+  RetroPixels Native), handy in fullscreen. Nintendo 64 and Genesis games have the same
   choice as a "👤 Player 1" button in the bar under the game.
 - Arcade, more boards (new in 2.18.0), each on RetroPixels' own emulation:
   * 1941: Counter Attack (1941.zip; Capcom CP System, with RetroPixels' own
@@ -196,6 +228,14 @@ What each system supports
   * Dragon Blaze (dragnblz.zip). Without the settings chip file RetroPixels
     makes a fresh one: the first start shows "EEP-ROM NG" for a moment while
     the game writes its default settings, then it plays.
+- Arcade, new in 2.40.0, each on RetroPixels' own emulation (no MAME needed):
+  * Ms. Pac-Man (mspacman.zip) and Jr. Pac-Man (jrpacman.zip).
+  * Popeye (popeye.zip) and Kangaroo (kangaroo.zip). Punch is A or X on
+    the controller, Z or A on the keyboard ("Punch" in Controls).
+  * Mario Bros. (mario.zip), with its sound processor and the walking and
+    skid sounds.
+  * Kung-Fu Master (kungfum.zip) and Spartan X (spartanx.zip), with the
+    board's ADPCM voices.
 - Arcade, new in 2.22.0: Star Wars Trilogy Arcade (swtrilgy.zip or
   swtrilgya.zip; Sega Model 3, 1998) on RetroPixels' own Sega Model 3
   emulator, with its 3D board, sound board and MPEG music board. Nothing else
@@ -211,6 +251,12 @@ Playing classic games
   and 📷 screenshot.
 - Atari 2600 paddle games (Kaboom!, Warlords, Super Breakout…) are detected
   automatically: steer with the left stick, fire with A.
+- Save states on the controller: click and hold the right stick (R3) to save
+  and the left stick (L3) to load, with the stick in the middle; flick the
+  right stick left / right to change slot. Since 2.41.1 a quick stick click,
+  or one while you move with the stick, does nothing, so a hard flick can't
+  load a state by accident (it used to jump the game back to wherever the
+  state was saved).
 - Battery saves (Pokémon, Zelda…) are kept automatically. Under Save states
   you can import a .sav / .srm from another emulator or download yours.
 - Save states made with an older RetroPixels (or with the previous Super
@@ -494,18 +540,23 @@ Recording games
   video holds only the game's picture at its own shape (no black bars,
   buttons or messages) and only the game's sound.
 
-RetroPixels Native (test build)
-RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
-a web browser inside, so OBS Studio's Window Capture works with any capture
-method (or use Display Capture). This test build plays Super Nintendo, NES, Atari 2600,
+RetroPixels Native
+RetroPixels-Native.exe is RetroPixels rebuilt without a web browser inside,
+so OBS Studio's Window Capture works with any capture method (or use Display
+Capture). Since 2.42.0 it is the only RetroPixels program. Its start screen
+has RetroPixels.exe's tabs: Classic consoles (click a system card to open a
+game for it), GameCube, Wii, Wii U, 3DS / DS and Arcade (MAME), each a grid
+of your games with box art (Add games folder..., then click a game, or use
+the D-pad and A; LB / RB or Ctrl+Tab change tabs), and Recordings. It plays Super Nintendo, NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
 Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The
 Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe,
 Berzerk, Centipede and Vs. Castlevania), Wii U and GameCube / Wii games
 through PixelU, MAME games and Star Wars Trilogy Arcade: every system
-RetroPixels.exe plays. RetroPixels Native is for Windows only. The two programs keep separate settings
-and saves, so trying the test build changes nothing in RetroPixels.exe.
+RetroPixels.exe played. RetroPixels Native is for Windows only. Its settings
+and saves are in %APPDATA%\RetroPixels Native (RetroPixels.exe's were kept
+apart and are left where they were).
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .sfc, .smc, .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
   .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.
@@ -565,10 +616,21 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   (controller: Menu), Start 2P = 2, Coin 2 = 6, Service = 9, Button 1 /
   Attack = Z (controller A), Button 2 / Jump = X (B), Button 3 = A (X),
   Button 4 = S (Y); arrows or the left stick move.
-- Arcade Player menu: in TMNT, Turtles in Time and The Simpsons, Game > Player
-  picks who you play: Player 1 (Leonardo) to Player 4 (Raphael), or Marge,
-  Homer, Bart and Lisa. The keyboard and first controller play as that player
+- Choose your player (new in 2.40.2): when TMNT, Turtles in Time, The
+  Simpsons or Double Dragon 3 starts, a "Choose your player" window shows
+  one tile per player (Leonardo, Michelangelo, Donatello, Raphael...). Click
+  one, press 1-4, or use the arrows / D-pad and Enter / A; Esc or B keeps
+  last time's. These games play in RetroPixels' own emulation even when
+  started from the Arcade (MAME) list, since MAME has no player choice.
+- Arcade Player menu: in TMNT, Turtles in Time, The Simpsons and Double
+  Dragon 3, the Player menu on the menu bar picks who you play: Player 1
+  (Leonardo) to Player 4 (Raphael), or Marge, Homer, Bart and Lisa. F7 /
+  Shift+F7 or a flick of the controller's right stick up goes to the next /
+  previous player (since 2.39.1), and the title bar says who you are when
+  the game starts. The keyboard and first controller play as that player
   and the other controllers move round with it. It is remembered per game.
+- Load state (F4, or the controller's left stick click) with nothing saved
+  in the slot says so in the title bar instead of a popup (since 2.39.1).
 - Arcade machine settings: Game > Machine settings changes the board's DIP
   switches (coins, lives, difficulty and so on). They are kept per game; press
   Reset (Ctrl+R) after changing one. Turtles in Time and The Simpsons keep
@@ -714,6 +776,8 @@ Where things are kept
 - Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json;
                  GameCube / Wii resolution: gamecube-resolution.txt)
 - Recordings:    Videos\RetroPixels
+- MAME sets:     %LOCALAPPDATA%\RetroPixels\MAME sets (ROM sets put
+                 together for MAME from your zips; safe to delete)
 - Box art:       %LOCALAPPDATA%\RetroPixels\boxart (covers downloaded
                  for the libraries; delete it to fetch them again)
 - Wii U:         PixelU\portable (PixelU's settings, saves and keys.txt)

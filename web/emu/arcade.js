@@ -95,7 +95,7 @@
   if (!RPArcade.boards) RPArcade.boards = [];
 
   // Control names boards may use (the player's controller/keyboard defaults are set up for these).
-  RPArcade.BUTTON_NAMES = ["Up", "Down", "Left", "Right", "Fire", "Jump", "Button 1", "Button 2", "Button 3", "Button 4",
+  RPArcade.BUTTON_NAMES = ["Up", "Down", "Left", "Right", "Fire", "Jump", "Punch", "Button 1", "Button 2", "Button 3", "Button 4",
     "Coin", "Coin 2", "Start (1P)", "Start (2P)", "Service"];
 
   RPArcade.rgb = (r, g, b) => (0xff000000 | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0;

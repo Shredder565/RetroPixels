@@ -6,7 +6,13 @@ package main
 // other controllers move round with it, so controller p plays as player
 // (p + seat) mod players. Kept per game in settings.json.
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"retropixels/cores/arcade"
+)
 
 // characterCore is a core that names its players' characters (the arcade
 // core; nil names for a game without them).
@@ -52,4 +58,14 @@ func (s *session) seatOf(p, players int) int {
 // seatMessage: the title bar's "You are player 2 (Michelangelo)".
 func (s *session) seatMessage(n int) string {
 	return "You are p" + s.seatName(n)[1:]
+}
+
+// isSeatArcade: a set RetroPixels plays itself on a 3- or 4-player cabinet
+// (TMNT, Turtles in Time, The Simpsons, Double Dragon 3, X-Men ...), where it has
+// the "Choose your player" choice MAME doesn't. Started from the Arcade
+// (MAME) list, these play in RetroPixels' own emulation.
+func isSeatArcade(path string) bool {
+	name := strings.ToLower(filepath.Base(strings.ReplaceAll(path, `\`, "/")))
+	short := strings.TrimSuffix(strings.TrimSuffix(name, ".zip"), ".7z")
+	return arcade.PlayersOf(short) >= 3
 }

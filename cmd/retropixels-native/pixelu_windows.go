@@ -84,7 +84,7 @@ func (a *app) pixeluCommand(id int) {
 		path := a.fileDialog("Open a Wii U game",
 			"Wii U games (*.wua *.wud *.wux *.iso *.rpx *.elf)\x00*.wua;*.wud;*.wux;*.iso;*.rpx;*.elf\x00All files\x00*.*\x00\x00", a.settings.LastFolder)
 		if path != "" && !a.pixeluOpenPath(path) {
-			messageBox(a.hwnd, filepath.Base(path)+" isn't a Wii U game PixelU can open.", "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, filepath.Base(path)+" isn't a Wii U game PixelU can open.", "RetroPixels", mbIconWarning)
 		}
 	case cmdPixelUStop:
 		a.pixeluStop()
@@ -92,7 +92,7 @@ func (a *app) pixeluCommand(id int) {
 		if r := a.pu.run; r != nil {
 			pad, err := pixelu.SetScreen(r.child.Load(), pixelu.ScreenSwitch)
 			if err != nil {
-				messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
+				messageBox(a.hwnd, err.Error(), "RetroPixels", mbIconWarning)
 				return
 			}
 			a.pu.gamepad = pad
@@ -120,11 +120,11 @@ func (a *app) pixeluCommand(id int) {
 			return
 		}
 		if dolphin.Running(pixelu.ExeName) {
-			messageBox(a.hwnd, "PixelU is already open.", "RetroPixels Native", mbIconInfo)
+			messageBox(a.hwnd, "PixelU is already open.", "RetroPixels", mbIconInfo)
 			return
 		}
 		if err := pixelu.Command(exe).Start(); err != nil {
-			messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels", mbIconWarning)
 		}
 	case cmdPixelUChangeExe:
 		a.pixeluChooseExe()
@@ -150,7 +150,7 @@ func (a *app) pixeluChooseExe() string {
 		return ""
 	}
 	if !strings.EqualFold(filepath.Ext(p), ".exe") {
-		messageBox(a.hwnd, "That isn't a program (.exe).", "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "That isn't a program (.exe).", "RetroPixels", mbIconWarning)
 		return ""
 	}
 	a.settings.PixelU.Exe = p
@@ -169,7 +169,7 @@ func (a *app) pixeluOpenPath(path string) bool {
 			call(pSetForegroundWindow, a.hwnd)
 			return true
 		}
-		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		if messageBox(a.hwnd, fmt.Sprintf("Stop %s and open %q?", r.game.Name, filepath.Base(path)), "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			a.pu.pendingOpen = path
 			a.pixeluStop()
 		}
@@ -186,7 +186,7 @@ func (a *app) pixeluOpenPath(path string) bool {
 // pixeluBusy: a Wii U game is on (so another external game can't start). It says so.
 func (a *app) pixeluBusy() bool {
 	if r := a.pu.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in PixelU. Stop it first (Wii U > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in PixelU. Stop it first (Wii U > Stop game).", "RetroPixels", mbIconInfo)
 		return true
 	}
 	return false
@@ -198,14 +198,14 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 		return
 	}
 	if r := a.dol.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels", mbIconInfo)
 		return
 	}
 	exe := a.pixeluExe()
 	if exe == "" {
 		if messageBox(a.hwnd, "Wii U games play in PixelU (RetroPixels' Wii U emulator, based on Cemu), and it wasn't found: "+
 			"put its PixelU folder next to RetroPixels, or keep it in your Downloads folder.\n\nChoose PixelU.exe now?",
-			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+			"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 			return
 		}
 		if exe = a.pixeluChooseExe(); exe == "" {
@@ -213,14 +213,14 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 		}
 	}
 	if dolphin.Running(pixelu.ExeName) || dolphin.Running(filepath.Base(exe)) {
-		messageBox(a.hwnd, "PixelU is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, "PixelU is already open. Close it first, then start the game here.", "RetroPixels", mbIconInfo)
 		return
 	}
 	p := &a.settings.PixelU
 	if !p.OpenGL {
 		if err := pixelu.CheckVulkan(); err != nil {
 			if messageBox(a.hwnd, "Wii U games need Vulkan, which isn't working on this PC: "+err.Error()+".\n\n"+pixelu.VulkanHelp+
-				"\n\nPlay Wii U games with OpenGL instead? (Slower, but it works.)", "RetroPixels Native", mbYesNo|mbIconWarning) != idYes {
+				"\n\nPlay Wii U games with OpenGL instead? (Slower, but it works.)", "RetroPixels", mbYesNo|mbIconWarning) != idYes {
 				return
 			}
 			p.OpenGL = true
@@ -244,7 +244,7 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 		if rec != nil {
 			a.extRecDropped(rec)
 		}
-		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	r := &pixeluRun{extRun: newExtRun(cmd.Process.Pid), game: g, embed: opts.Embed, rec: rec}

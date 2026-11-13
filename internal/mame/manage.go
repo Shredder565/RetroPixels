@@ -67,6 +67,10 @@ type Launch struct {
 	Short   string
 	Name    string
 	Args    []string
+	// Built is the set RetroPixels put together for this game ("" = the
+	// archive is played as it is)
+	Built string
+	bios  string
 }
 
 // Plan works out which MAME plays a ROM set and its command line. exe
@@ -82,6 +86,15 @@ func Plan(c Config, path, exe string, o LaunchOptions) (Launch, error) {
 	}
 	if _, err := os.Stat(in.Exe); err != nil {
 		return Launch{}, fmt.Errorf("%s isn't at %s any more. Add it again, or pick another version", in.Label(), in.Exe)
+	}
+	if l, handled, err := planAnySet(c, path, exe, in); handled {
+		if err == nil {
+			l.Args = GameArgs(l.Short, l.Args[0], OptionsOf(l.Install.Exe), o)
+			if l.bios != "" {
+				l.Args = append(l.Args, "-bios", l.bios)
+			}
+		}
+		return l, err
 	}
 	short := ShortName(path)
 	name := short
@@ -99,3 +112,84 @@ var ErrNoMAME = func() error {
 	}
 	return errors.New("MAME isn't set up yet: add a MAME you have (its mame.exe), or download one")
 }()
+
+// NeedDownload: the set plays only in a MAME version that isn't on this PC
+// yet; Version is the newest official release that accepts it.
+type NeedDownload struct {
+	Version string
+	Game    string // the game's full name
+}
+
+func (e *NeedDownload) Error() string {
+	return fmt.Sprintf("%s plays in MAME %s, which isn't on this PC yet. Download MAME %s (MAME tab > Download) and the game will start in it.", e.Game, e.Version, e.Version)
+}
+
+// planAnySet plays a set the MAME it's in can't play as it is: recognised by
+// its files (see setfix.go), in a MAME version that accepts it, from a set put
+// together for it when needed. handled is false when the set is played the
+// usual way (its MAME is known to accept it, or the history doesn't know it).
+// The returned Launch's Args holds only the ROM path (Plan adds the rest).
+func planAnySet(c Config, path, exe string, best Install) (Launch, bool, error) {
+	g := Game{Short: ShortName(path), Path: path}
+	if Checked(best, g) == Good {
+		return Launch{}, false, nil
+	}
+	db := History()
+	if db == nil {
+		return Launch{}, false, nil
+	}
+	installs := c.Installs
+	if exe != "" {
+		installs = []Install{best} // the version picked for this time only
+	}
+	var poolCache Pool
+	pool := func() Pool {
+		if poolCache == nil {
+			poolCache = NewPool(c.Folders, path)
+		}
+		return poolCache
+	}
+	downloadable := func(v string) bool {
+		return DownloadsAvailable && exe == "" && CompareVersions(v, "0.171") >= 0
+	}
+	res, known := ResolveLazy(db, path, installs, best.Exe, pool, downloadable)
+	if !known {
+		return Launch{}, false, nil
+	}
+	title := res.Machine.Desc
+	if title == "" {
+		title = res.Machine.Name
+	}
+	switch {
+	case res.Install != nil:
+		if miss := res.AddDevices(pool); len(miss) > 0 {
+			return Launch{}, true, errors.New(DevicesText(title, miss))
+		}
+		in := *res.Install
+		l := Launch{Install: in, Short: res.Machine.Name, Name: title, bios: res.Bios}
+		dirs := c.Folders
+		gameDir := filepath.Dir(path)
+		if !res.AsIs {
+			built, err := res.Build(filepath.Join(SetsDir(), "MAME "+in.Version))
+			if err != nil {
+				return Launch{}, true, fmt.Errorf("couldn't put the set for %s together: %v", title, err)
+			}
+			l.Built = built
+			// the put-together set comes first, then your folders (for
+			// files only MAME's own devices list)
+			dirs = append([]string{gameDir}, dirs...)
+			gameDir = filepath.Dir(built)
+		}
+		l.Args = []string{RomPath(in.Exe, gameDir, dirs)}
+		return l, true, nil
+	case res.Download != "":
+		return Launch{}, true, &NeedDownload{Version: res.Download, Game: title}
+	default:
+		// named as the game and not known to fail: let MAME try it (the
+		// history can list a file or two MAME doesn't ask for)
+		if g.Short == res.Machine.Name && Checked(best, g) != Bad {
+			return Launch{}, false, nil
+		}
+		return Launch{}, true, errors.New(res.MissingText())
+	}
+}

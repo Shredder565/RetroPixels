@@ -146,3 +146,11 @@ func TestKonamiGames(t *testing.T) {
 		t.Errorf("not registered: %v", want)
 	}
 }
+
+func TestIsSeatArcade(t *testing.T) {
+	for p, want := range map[string]bool{`E:\roms\tmnt.zip`: true, "tmnt2.zip": true, "simpsons.7z": true, "pacman.zip": false, "nope.zip": false} {
+		if got := isSeatArcade(p); got != want {
+			t.Errorf("%s: %v", p, got)
+		}
+	}
+}

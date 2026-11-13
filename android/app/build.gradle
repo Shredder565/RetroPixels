@@ -6,12 +6,12 @@ plugins {
     id 'com.android.application'
 }
 
-// ---- the version: appVersion in ../main.go (the RetroPixels sources), else version.properties ----
+// ---- the version: appVersion in ../version.go (the RetroPixels sources), else version.properties ----
 
 def repoRoot = rootProject.file('..')
 
 def readVersion = {
-    def mainGo = new File(repoRoot, 'main.go')
+    def mainGo = new File(repoRoot, 'version.go')
     if (mainGo.isFile()) {
         def m = mainGo.getText('UTF-8') =~ /appVersion\s*=\s*"([^"]+)"/
         if (m.find()) {

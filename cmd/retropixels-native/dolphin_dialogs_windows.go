@@ -61,7 +61,7 @@ func (a *app) openDolSettings() {
 	}
 	exe := a.dolExe()
 	if exe == "" {
-		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, noEngine, "RetroPixels", mbIconInfo)
 		return
 	}
 	a.settings.Dolphin.importOld(exe) // the old Dolphin's settings first, the first time

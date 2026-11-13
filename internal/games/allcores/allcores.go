@@ -124,7 +124,8 @@ func init() {
 	Makers["arcade"] = arcade.New
 	DefaultMaps["arcade"] = ControlMap{"Coin": B([]int{8}, "5", "c"), "Coin 2": B([]int{}, "6"),
 		"Start (1P)": B([]int{9}, "1", "enter"), "Start (2P)": B([]int{}, "2"),
-		"Fire": B([]int{0}, "z"), "Jump": B([]int{0}, "z"), "Button 1": B([]int{0}, "z"), "Button 2": B([]int{1}, "x"),
+		"Fire": B([]int{0}, "z"), "Jump": B([]int{0}, "z"),
+		"Punch": B([]int{0, 2}, "z", "a"), "Button 1": B([]int{0}, "z"), "Button 2": B([]int{1}, "x"),
 		"Button 3": B([]int{2}, "a"), "Button 4": B([]int{3}, "s"), "Service": B([]int{}, "9")}
 	// every control a board may use, so all of them can be changed before a game is open
 	SystemButtons["arcade"] = arcade.ButtonNames

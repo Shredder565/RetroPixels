@@ -37,7 +37,7 @@ jobs:
         run: cd tools/snes-debugger && cargo test --no-default-features
 
       - name: Program icon and version details
-        run: sh tools/make-winres.sh && sh tools/make-winres-native.sh
+        run: sh tools/make-winres-native.sh
 
       - name: Build Windows executable
         env:
@@ -45,8 +45,7 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: "0"
         run: |
-          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
-          go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o RetroPixels-Native.exe ./cmd/retropixels-native
 
       # MAME comes in the download: the MAME team's official Windows release,
@@ -57,7 +56,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           go run ./tools/bundlemame -dir "dist/RetroPixels-$version/MAME" -source dist/mame-source.tar.gz
           v=$(sed -n 's/^version=//p' "$GITHUB_OUTPUT" | tail -n 1)
           mv dist/mame-source.tar.gz "dist/MAME-$v-source.tar.gz"
@@ -66,10 +65,10 @@ jobs:
       - name: Package
         id: pkg
         run: |
-          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           dir="RetroPixels-$version"
           mkdir -p "dist/$dir"
-          cp RetroPixels.exe RetroPixels-Native.exe README.txt VERSION.txt CHANGELOG.txt "dist/$dir/"
+          cp RetroPixels-Native.exe README.txt VERSION.txt CHANGELOG.txt "dist/$dir/"
           cp wiiu/testdata/demo.rpx "dist/$dir/RetroPixels Wii U demo.rpx"
           (cd dist && zip -qr "$dir.zip" "$dir")
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -105,9 +104,8 @@ jobs:
           {
             echo "## Download"
             echo
-            echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION, CHANGELOG and a Wii U demo program), with MAME ${{ steps.mame.outputs.version }} built in for arcade games. Unzip and run \`RetroPixels.exe\`."
-            echo "- **RetroPixels.exe**: the program on its own."
-            echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system, plus Archipelago)."
+            echo "- **RetroPixels-$v.zip**: the app (RetroPixels-Native.exe, with README, VERSION, CHANGELOG and a Wii U demo program), with MAME ${{ steps.mame.outputs.version }} built in for arcade games. Unzip and run \`RetroPixels-Native.exe\`."
+            echo "- **RetroPixels-Native.exe**: the program on its own."
             echo "- **RetroPixels-source-$v.zip**: the full source code."
             echo "- **MAME-${{ steps.mame.outputs.version }}-source.tar.gz**: the source code of the built-in MAME. It's the MAME team's official release ${{ steps.mame.outputs.tag }}, unchanged (https://github.com/mamedev/mame/releases/tag/${{ steps.mame.outputs.tag }}, SHA-256 ${{ steps.mame.outputs.sha256 }}), licensed under the GPL, version 2 or later."
             echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer; open it on the phone to install)."
@@ -122,8 +120,8 @@ jobs:
             echo "Full history: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)"
           } > dist/notes.md
           git archive --format=zip --prefix="RetroPixels-source-$v/" -o "dist/RetroPixels-source-$v.zip" HEAD
-          cp RetroPixels.exe RetroPixels-Native.exe dist/
-          (cd dist && sha256sum RetroPixels-*.zip RetroPixels.exe RetroPixels-Native.exe MAME-*-source.tar.gz > SHA256SUMS.txt)
+          cp RetroPixels-Native.exe dist/
+          (cd dist && sha256sum RetroPixels-*.zip RetroPixels-Native.exe MAME-*-source.tar.gz > SHA256SUMS.txt)
 
       - name: Publish release
         if: steps.rel.outputs.publish == 'true'
@@ -136,7 +134,6 @@ jobs:
           make_latest: true
           files: |
             dist/RetroPixels-${{ steps.pkg.outputs.version }}.zip
-            dist/RetroPixels.exe
             dist/RetroPixels-Native.exe
             dist/RetroPixels-source-${{ steps.pkg.outputs.version }}.zip
             dist/MAME-${{ steps.mame.outputs.version }}-source.tar.gz
@@ -183,7 +180,7 @@ jobs:
       - name: Package
         id: pkg
         run: |
-          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' version.go)
           mkdir -p android-dist
           cp android/app/build/outputs/apk/release/app-release.apk "android-dist/RetroPixels-$version.apk"
           sh android/tools/make-studio-zip.sh android-dist

@@ -150,7 +150,12 @@ func Library(folders []string, names map[string]string, played map[string]time.T
 			}
 			full, known := names[short]
 			if len(names) > 0 && !known {
-				return
+				// a set under another name: recognised by its files
+				m := Recognise(p)
+				if m == nil {
+					return
+				}
+				full = m.Desc
 			}
 			seen[short] = true
 			g := Game{Short: short, Name: full, Path: p, Played: played[short]}

@@ -394,6 +394,13 @@ func (l *mameLibrary) fill() {
 				ver = "✓ " + ver
 			case mame.Bad:
 				ver = "✗ " + ver + ": won't start"
+				if st.Fix != "" {
+					// RetroPixels can fix the set (or says what's missing)
+					ver = "✗ " + st.Fix
+					if strings.HasPrefix(st.Fix, "Plays") {
+						ver = "✓ " + st.Fix
+					}
+				}
 				if len(st.PlaysIn) > 0 {
 					ver += "; plays in " + strings.Join(st.PlaysIn, ", ")
 				}
@@ -536,7 +543,7 @@ func (l *mameLibrary) command(id, code int, lp uintptr) {
 			a.showMessage(in.Label() + " is the default now")
 		} else {
 			if messageBox(l.hwnd, "Remove "+in.Label()+" from RetroPixels? Its files stay where they are.\n\n"+in.Exe,
-				"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
+				"RetroPixels", mbYesNo|mbIconInfo) != idYes {
 				break
 			}
 			mame.Update(func(c *mame.Config) { c.Remove(in.Exe) })

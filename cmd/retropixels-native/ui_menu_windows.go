@@ -42,6 +42,7 @@ const (
 	vkF1  = 0x70
 	vkF3  = 0x72
 	vkF6  = 0x75
+	vkF7  = 0x76
 	vkF12 = 0x7B
 )
 
@@ -57,6 +58,9 @@ type uiState struct {
 	padA           bool
 	navDir         int
 	navAt          time.Time
+	padLB, padRB   bool
+	tab            int       // the start screen's tab (ui_tabs_windows.go)
+	libs           *homeLibs // its libraries
 
 	// the save state slot F2 / F4 use, for the game in slotGame
 	slot     int
@@ -65,7 +69,8 @@ type uiState struct {
 	slotMenu, battMenu, binMenu, qualMenu, recRecentMenu uintptr
 	recList                                              []string
 
-	states *statesDialog
+	states   *statesDialog
+	seatPick *seatPicker
 }
 
 func newUIState() *uiState { return &uiState{hover: -1, sel: -1} }
@@ -85,6 +90,10 @@ func (a *app) initUI() {
 	a.ui.bold = font(15, 600)
 	a.ui.med = font(19, 600)
 	call(pSetTimer, a.hwnd, timerHome, 50, 0)
+	if t := a.settings.HomeTab; t > 0 && t < numTabs {
+		a.ui.tab = t
+	}
+	a.tabOpened()
 }
 
 // ---------------- menus ----------------
@@ -236,7 +245,7 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 	}
 	if repeat {
 		switch vk {
-		case vkF1, vkF3, vkF6, vkF12:
+		case vkF1, vkF3, vkF6, vkF7, vkF12:
 			return true
 		}
 		return false
@@ -252,6 +261,12 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 		}
 	case vkF6:
 		a.command(cmdStatesWin)
+	case vkF7:
+		if keyDown(vkShift) {
+			a.nextSeat(-1)
+		} else {
+			a.nextSeat(1)
+		}
 	case vkF12:
 		a.command(cmdScreenshot)
 	default:
@@ -265,6 +280,8 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 // uiEvent: events from the game's thread the window doesn't handle itself.
 func (a *app) uiEvent(name, detail string) {
 	switch name {
+	case "pad-seat":
+		a.nextSeat(1)
 	case "pad-slot":
 		if detail == "-1" {
 			a.command(cmdPrevSlot)
@@ -322,7 +339,7 @@ func (a *app) saveToSlot() {
 	}
 	slot := a.curSlot()
 	if err := s.saveSlot(slot); err != nil {
-		messageBox(a.hwnd, "Couldn't save the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the state: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage(fmt.Sprintf("Saved to slot %d", slot+1))
@@ -338,7 +355,9 @@ func (a *app) loadFromSlot() {
 	}
 	slot := a.curSlot()
 	if err := s.loadSlot(slot); err != nil {
-		messageBox(a.hwnd, "Couldn't load the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		// a note in the title bar, not a popup: the controller's left stick
+		// click loads too, and is easy to press by accident mid-game
+		a.showMessage("No state loaded: " + err.Error())
 		return
 	}
 	a.showMessage(fmt.Sprintf("Loaded slot %d (Ctrl+Z undoes it)", slot+1))
@@ -371,7 +390,7 @@ func (a *app) importStateFile(owner uintptr, path string) {
 		err = s.importState(data)
 	}
 	if err != nil {
-		messageBox(owner, "Couldn't load that file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(owner, "Couldn't load that file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("State file loaded - save it to a slot to keep it (Ctrl+Z undoes it)")
@@ -410,13 +429,13 @@ func (a *app) importBattery(path string) {
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		messageBox(a.hwnd, "Couldn't read that file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't read that file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	g := s.game
 	a.closeGame() // (writes the game's own battery save first, so it can be kept as .bak)
 	if err := importSRAM(g.System, g.Name, data); err != nil {
-		messageBox(a.hwnd, "Couldn't import the battery save: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't import the battery save: "+err.Error(), "RetroPixels", mbIconWarning)
 	}
 	a.openPath(g.Path)
 	if a.sess != nil {
@@ -439,7 +458,7 @@ func (a *app) exportBattery() {
 		return
 	}
 	if err := writeFileAtomic(p, data); err != nil {
-		messageBox(a.hwnd, "Couldn't save the file: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the file: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("Battery save exported: " + filepath.Base(p))
@@ -562,7 +581,7 @@ func (a *app) screenshot() {
 	a.frameMu.Unlock()
 	p, err := saveScreenshot(screenshotsDir(), s.game.Name, pix, w, h, aspect, time.Now())
 	if err != nil {
-		messageBox(a.hwnd, "Couldn't save the screenshot: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't save the screenshot: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.showMessage("Screenshot saved: " + filepath.Base(p))
@@ -586,6 +605,7 @@ const keysHelp = "Keyboard\n" +
 	"F4\tLoad state\n" +
 	"F3 / Shift+F3\tNext / previous save state slot\n" +
 	"F6\tSave states window (all four slots)\n" +
+	"F7 / Shift+F7\tNext / previous player (arcade games for 3 or 4 players)\n" +
 	"Ctrl+Z\tUndo the last load\n" +
 	"F9\tStart / stop recording\n" +
 	"F12\tScreenshot (only the game's picture)\n" +
@@ -596,10 +616,11 @@ const keysHelp = "Keyboard\n" +
 	"Ctrl+O\tOpen a game\n" +
 	"F11, Alt+Enter\tFullscreen (Esc leaves it)\n" +
 	"\nXbox controller\n" +
-	"Right stick click (R3)\tSave state\n" +
-	"Left stick click (L3)\tLoad state\n" +
+	"Right stick click, held (R3)\tSave state\n" +
+	"Left stick click, held (L3)\tLoad state\n" +
 	"Right stick left / right\tChange slot\n" +
 	"Right stick down (1 s)\tStart / stop recording\n" +
+	"Right stick up\tNext player (arcade games for 3 or 4 players)\n" +
 	"Nintendo 64: View + D-pad left / right changes the slot, View + D-pad down records.\n" +
 	"\nOn the start screen, the arrow keys or the D-pad pick a recent game and Enter or A starts it.\n" +
 	"\nEach system's buttons are in Options > Controls (change them there)."

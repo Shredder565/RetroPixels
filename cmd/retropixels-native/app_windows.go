@@ -102,6 +102,7 @@ type app struct {
 
 	controls      *controlsDialog
 	mouseTracking bool
+	scrollToTile  bool // the start screen brings the selected game into view
 
 	ui   *uiState    // the start screen, save state slots and the rest (ui_*_windows.go)
 	dol  dolState    // GameCube / Wii (dolphin_windows.go)
@@ -153,18 +154,20 @@ func runApp() {
 	}
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	if call(pRegisterClassExW, uintptr(unsafe.Pointer(&wc))) == 0 {
-		messageBox(0, "Couldn't start: the window could not be made.", "RetroPixels Native", mbIconError)
+		messageBox(0, "Couldn't start: the window could not be made.", "RetroPixels", mbIconError)
 		return
 	}
 	a.buildMenu()
+	darkStart()
 	a.hwnd = call(pCreateWindowExW, wsExAcceptFiles, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(u16(a.baseTitle()))),
 		wsOverlappedWindow|wsClipChildren, cwUseDefault, cwUseDefault, 960, 720, 0, a.menu, a.hinst, 0)
 	if a.hwnd == 0 {
-		messageBox(0, "Couldn't start: the window could not be made.", "RetroPixels Native", mbIconError)
+		messageBox(0, "Couldn't start: the window could not be made.", "RetroPixels", mbIconError)
 		return
 	}
 	a.makeFonts()
 	a.initUI()
+	darkWindow(a.hwnd, a.menu)
 	a.aspect = 4.0 / 3
 	a.resizeToScale()
 	call(pDragAcceptFiles, a.hwnd, 1)
@@ -246,9 +249,9 @@ func (a *app) buildMenu() {
 	appendMenu(a.gameMenu, mfString, cmdUndoLoad, "&Undo load\tCtrl+Z")
 	a.uiGameMenu()
 	a.addDipMenu()
-	a.addSeatMenu()
 	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
+	a.addSeatMenu()
 	a.addDolphinMenu()
 	a.addPixelUMenu()
 	a.addHandheldMenu()
@@ -275,7 +278,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.optMenu, mfSeparator, 0, "")
 	appendMenu(a.optMenu, mfString, cmdMousePaddle, "Mouse turns the &paddle (Atari 2600)")
 	appendMenu(a.optMenu, mfSeparator, 0, "")
-	appendMenu(a.optMenu, mfString, cmdFileTypes, "Open game files with RetroPixels &Native…")
+	appendMenu(a.optMenu, mfString, cmdFileTypes, "Open game files with &RetroPixels…")
 	a.uiOptionsMenu()
 	appendMenu(a.menu, mfPopup, a.optMenu, "&Options")
 
@@ -288,7 +291,7 @@ func (a *app) buildMenu() {
 	help := call(pCreatePopupMenu)
 	a.uiHelpMenu(help)
 	a.apHelpMenu(help)
-	appendMenu(help, mfString, cmdAbout, "&About RetroPixels Native")
+	appendMenu(help, mfString, cmdAbout, "&About RetroPixels")
 	appendMenu(a.menu, mfPopup, help, "&Help")
 }
 
@@ -450,6 +453,27 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 			a.sess.mouseFire.Store(uint32(m) == wmLButtonDown)
 		}
 		a.mouseButton(0, uint32(m) == wmLButtonDown)
+	case wmMeasureItem:
+		if a.darkMeasure(lp) {
+			return 1
+		}
+	case wmDrawItem:
+		if a.darkDraw(lp) {
+			return 1
+		}
+	case wmMenuChar:
+		if r, ok := a.darkMenuChar(wp, lp); ok {
+			return r
+		}
+	case wmNcPaint, wmNcActivate:
+		r := call(pDefWindowProcW, hwnd, m, wp, lp)
+		a.darkMenuLine()
+		return r
+	case wmMouseWheel:
+		if a.sess == nil && !a.engineRunning() {
+			a.homeWheel(hiword(wp))
+			return 0
+		}
 	case wmRButtonDown, wmRButtonUp:
 		a.mouseButton(1, uint32(m) == wmRButtonDown)
 	case wmTimer:
@@ -509,6 +533,10 @@ func (a *app) keyDown(m uint32, vk int, lp uintptr) bool {
 				a.command(cmdUndoLoad)
 			case 'R':
 				a.command(cmdReset)
+			case vkTab:
+				if a.sess == nil {
+					a.homeKey(vkTab)
+				}
 			}
 		}
 		return true
@@ -695,6 +723,16 @@ func (a *app) resizeToScale() {
 	}
 	bw, bh := baseSize(h, aspect)
 	w, hh := bw*a.settings.Scale, bh*a.settings.Scale
+	if a.sess == nil && !a.engineRunning() { // the start screen: room for its tabs and libraries
+		dpi := a.dpi()
+		w, hh = max(w, 1100*dpi/96), max(hh, 800*dpi/96)
+		mi := monitorInfo{}
+		mi.Size = uint32(unsafe.Sizeof(mi))
+		if call(pGetMonitorInfoW, call(pMonitorFromWindow, a.hwnd, monitorDefaultToNearest), uintptr(unsafe.Pointer(&mi))) != 0 {
+			w = min(w, int(mi.Work.Right-mi.Work.Left)-40*dpi/96)
+			hh = min(hh, int(mi.Work.Bottom-mi.Work.Top)-100*dpi/96)
+		}
+	}
 	for pass := 0; pass < 2; pass++ {
 		wr, cr := windowRect(a.hwnd), clientRect(a.hwnd)
 		fw := int(wr.Right-wr.Left) - int(cr.Right) + w
@@ -738,7 +776,7 @@ func (a *app) toggleFullscreen() {
 
 // ---------------- title ----------------
 
-func (a *app) baseTitle() string { return "RetroPixels Native " + version }
+func (a *app) baseTitle() string { return "RetroPixels " + version }
 
 func (a *app) showMessage(text string) {
 	a.flash, a.flashUntil = text, time.Now().Add(2500*time.Millisecond)
@@ -805,7 +843,7 @@ func (a *app) handleEvents() {
 		case "failed":
 			a.xin.stopRumble()
 			messageBox(a.hwnd, "The game stopped: "+e.detail+"\n\nYou can load a save state (F4), reset (Ctrl+R) or open another game.",
-				"RetroPixels Native", mbIconError)
+				"RetroPixels", mbIconError)
 		case "open": // a game double-clicked while this window was open
 			a.openPath(e.detail)
 		case "pad-save":
@@ -825,7 +863,7 @@ func (a *app) handleEvents() {
 		case "rec-error":
 			a.recSaving--
 			a.updateTitle()
-			messageBox(a.hwnd, "The recording couldn't be saved: "+e.detail, "RetroPixels Native", mbIconError)
+			messageBox(a.hwnd, "The recording couldn't be saved: "+e.detail, "RetroPixels", mbIconError)
 		case "ff-progress":
 			a.ffDownload = e.detail
 			a.updateTitle()
@@ -840,9 +878,10 @@ func (a *app) handleEvents() {
 		case "ff-error":
 			a.ffDownload = ""
 			a.updateTitle()
-			messageBox(a.hwnd, "ffmpeg couldn't be downloaded: "+e.detail, "RetroPixels Native", mbIconError)
+			messageBox(a.hwnd, "ffmpeg couldn't be downloaded: "+e.detail, "RetroPixels", mbIconError)
 		default:
 			a.uiEvent(e.name, e.detail)
+			a.tabsEvent(e.name)
 			a.dolEvent(e.name, e.detail)
 			a.mameEvent(e.name, e.detail)
 			a.pixeluEvent(e.name, e.detail)
@@ -969,13 +1008,13 @@ func (a *app) command(id int) {
 	case id == cmdAPStatus || id == cmdAPHelp:
 		a.apCommand(id)
 	case id == cmdAbout:
-		messageBox(a.hwnd, "RetroPixels Native "+version+"\n\n"+
-			"A test build of RetroPixels without a web browser inside, so OBS Studio can capture it "+
+		messageBox(a.hwnd, "RetroPixels "+version+"\n\n"+
+			"A native Windows program with no web browser inside, so OBS Studio can capture it "+
 			"(Window Capture or Game Capture).\n\n"+
-			"Plays "+availableLabels()+" games with RetroPixels' own emulators. "+
-			"For the other systems, keep using RetroPixels.exe for now.\n\n"+
+			"Plays "+availableLabels()+" games with RetroPixels' own emulators, GameCube, Wii and Wii U in PixelU, "+
+			"3DS and DS in PixelDS, and every other arcade game in MAME.\n\n"+
 			"Settings and saves: "+appDir()+"\nRecordings: "+a.settings.recDir()+"\nScreenshots: "+screenshotsDir(),
-			"About RetroPixels Native", mbIconInfo)
+			"About RetroPixels", mbIconInfo)
 	default:
 		a.uiCommand(id)
 	}
@@ -1022,7 +1061,7 @@ func (a *app) openPath(path string) {
 		if _, ok := err.(errNotYet); ok {
 			icon = mbIconInfo
 		}
-		messageBox(a.hwnd, err.Error(), "RetroPixels Native", icon)
+		messageBox(a.hwnd, err.Error(), "RetroPixels", icon)
 		return
 	}
 	a.startGame(g, path)
@@ -1040,7 +1079,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 		if !ok {
 			break
 		}
-		if messageBox(a.hwnd, msg, "RetroPixels Native", mbOkCancel|mbIconInfo) != idOk {
+		if messageBox(a.hwnd, msg, "RetroPixels", mbOkCancel|mbIconInfo) != idOk {
 			return
 		}
 		p := a.fileDialog("Choose the "+chip+" chip's program ("+file+")",
@@ -1050,7 +1089,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 		}
 		b, rerr := os.ReadFile(p)
 		if rerr != nil {
-			messageBox(a.hwnd, rerr.Error(), "RetroPixels Native", mbIconWarning)
+			messageBox(a.hwnd, rerr.Error(), "RetroPixels", mbIconWarning)
 			continue
 		}
 		if g.Firmware == nil {
@@ -1059,12 +1098,12 @@ func (a *app) startGame(g *loadedGame, path string) {
 		g.Firmware[chip] = b
 		if s, err = newSession(g, a, a.snd, a.settings.controlMap(g.System)); err == nil {
 			if werr := saveFirmware(chip, b); werr != nil {
-				messageBox(a.hwnd, "The chip program works, but couldn't be kept for next time: "+werr.Error(), "RetroPixels Native", mbIconWarning)
+				messageBox(a.hwnd, "The chip program works, but couldn't be kept for next time: "+werr.Error(), "RetroPixels", mbIconWarning)
 			}
 		}
 	}
 	if err != nil {
-		messageBox(a.hwnd, fmt.Sprintf("Couldn't start %q: %v", filepath.Base(path), err), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, fmt.Sprintf("Couldn't start %q: %v", filepath.Base(path), err), "RetroPixels", mbIconWarning)
 		return
 	}
 	s.volume.Store(math.Float32bits(a.volume()))
@@ -1075,6 +1114,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.frameMu.Unlock()
 	a.sess = s
 	a.restoreSeat(s)
+	defer a.showSeatPicker(s) // "Choose your player" for 3- and 4-player arcade games
 	a.settings.addRecent(path)
 	a.settings.LastFolder = filepath.Dir(path)
 	saveSettings(a.settings)
@@ -1181,14 +1221,14 @@ func (a *app) toggleRecording() {
 	}
 	ff := ffmpeg.Find()
 	if ff == "" {
-		if messageBox(a.hwnd, "Recording needs ffmpeg, a free video program (about 200 MB, from github.com/BtbN/FFmpeg-Builds; "+
-			"RetroPixels.exe uses the same one).\n\nDownload it now?", "RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
+		if messageBox(a.hwnd, "Recording needs ffmpeg, a free video program (about 200 MB, from github.com/BtbN/FFmpeg-Builds)."+
+			"\n\nDownload it now?", "RetroPixels", mbYesNo|mbIconInfo) == idYes {
 			a.downloadFFmpeg()
 		}
 		return
 	}
 	if err := s.startRecordingTo(ff, a.encoder(ff), a.settings.recQuality(), a.settings.recDir()); err != nil {
-		messageBox(a.hwnd, "Couldn't start recording: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start recording: "+err.Error(), "RetroPixels", mbIconWarning)
 		return
 	}
 	a.recOn, a.recStart = true, time.Now()

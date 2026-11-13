@@ -181,6 +181,9 @@ func (b *simpsons) playerByte(p int) int {
 			v |= 1 << k
 		}
 	}
+	if i["Button 3"] { // X: attack too
+		v |= 0x10
+	}
 	if i["Start (1P)"] || (p == 1 && b.pad(0)["Start (2P)"]) {
 		v |= 0x80
 	}
@@ -596,7 +599,7 @@ func init() {
 	arcade.Register(&arcade.BoardDef{
 		ID: "simpsons", Title: "Konami The Simpsons", Width: simW, Height: simH, Rotate: 0, FPS: simFPS, Players: 4,
 		Characters: []string{"Marge", "Homer", "Bart", "Lisa"},
-		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"},
+		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)", "Start (2P)", "Service"},
 		Dips:       []arcade.Dip{}, Games: simpsonsGames(), New: newSimpsons,
 	})
 }

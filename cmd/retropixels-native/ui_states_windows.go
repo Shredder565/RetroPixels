@@ -109,8 +109,8 @@ func (d *statesDialog) build() {
 		d.buttons[i][2] = d.child("BUTTON", "Export…", bsPushButton|wsTabStop, x, y+34, 82, 28, idStSave0+i*4+2)
 		d.buttons[i][3] = d.child("BUTTON", "Delete", bsPushButton|wsTabStop, x+90, y+34, 82, 28, idStSave0+i*4+3)
 	}
-	note := "F2 saves to the chosen slot, F4 loads it, F3 picks the next slot. Controller: click the right stick to save, " +
-		"the left stick to load, flick the right stick left or right to change slot. The game's own battery saves keep working as normal."
+	note := "F2 saves to the chosen slot, F4 loads it, F3 picks the next slot. Controller: click and hold the right stick to save, " +
+		"the left stick to load (a quick click while moving doesn't count), flick the right stick left or right to change slot. The game's own battery saves keep working as normal."
 	d.child("STATIC", note, ssNoPrefix, stPad, stFooterTop, cw-2*stPad-110, 64, 0)
 	d.child("BUTTON", "Close", bsPushButton|wsTabStop, cw-stPad-90, stFooterTop+30, 90, 28, idStClose)
 }
@@ -193,6 +193,9 @@ func (d *statesDialog) close() {
 
 // uiCloseGame: the game is closing (closeGame): the Save states window goes too.
 func (a *app) uiCloseGame() {
+	if a.ui != nil {
+		a.closeSeatPicker()
+	}
 	if a.ui != nil && a.ui.states != nil {
 		a.ui.states.close()
 	}

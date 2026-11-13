@@ -73,8 +73,8 @@ func gameNameOf(path string) string { return games.GameNameOf(path) }
 type errNotYet struct{ what string }
 
 func (e errNotYet) Error() string {
-	return e.what + " coming in a later test build; use RetroPixels.exe for now.\n\n" +
-		"This test build plays " + availableLabels() + " games."
+	return e.what + " coming in a later version.\n\n" +
+		"This version plays " + availableLabels() + " games."
 }
 
 // loadedGame is a game file opened and recognised.

@@ -45,7 +45,7 @@ import (
 
 // ButtonNames are the control names boards may use (RPArcade.BUTTON_NAMES);
 // the player's controller and keyboard defaults are set up for these.
-var ButtonNames = []string{"Up", "Down", "Left", "Right", "Fire", "Jump", "Button 1", "Button 2", "Button 3", "Button 4",
+var ButtonNames = []string{"Up", "Down", "Left", "Right", "Fire", "Jump", "Punch", "Button 1", "Button 2", "Button 3", "Button 4",
 	"Coin", "Coin 2", "Start (1P)", "Start (2P)", "Service"}
 
 // DefaultButtons are the buttons of a board that doesn't list its own.
@@ -207,6 +207,23 @@ func AllGames() []Entry {
 		}
 	}
 	return out
+}
+
+// PlayersOf: how many players the game with this set name has (0: not one
+// of RetroPixels' own arcade games). 3 or 4 means a "Choose your player" choice.
+func PlayersOf(id string) int {
+	for _, e := range AllGames() {
+		if e.Game.ID == id {
+			if e.Game.Players != 0 {
+				return e.Game.Players
+			}
+			if e.Board.Players != 0 {
+				return e.Board.Players
+			}
+			return 2
+		}
+	}
+	return 0
 }
 
 // SupportedText: "Pac-Man (pacman.zip), Galaxian (galaxian.zip), ...".

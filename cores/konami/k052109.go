@@ -25,6 +25,9 @@ type K052109 struct {
 	DX, DY       [3]int
 	Rmrd         bool // the board's ROM-read line
 	RomRead      func(off int, k *K052109) int
+	// AddrMap: register 0x1c00 bit 6 keeps the colour RAM's bits 2-3 (the
+	// banks are then not put in them), as MAME's newer K052109 does (X-Men).
+	AddrMap bool
 
 	tCode  [2048]int
 	tColor [2048]uint16
@@ -140,7 +143,9 @@ func (k *K052109) buildLayer(layer int) {
 			code |= int(ram[0x4000+base+i]) << 8
 		}
 		bankFull := k.BankReg((attr >> 2) & 3)
-		attr = (attr & 0xf3) | ((bankFull & 3) << 2)
+		if !k.AddrMap || ram[0x1c00]&0x40 == 0 {
+			attr = (attr & 0xf3) | ((bankFull & 3) << 2)
+		}
 		t.Layer, t.Bank, t.Code, t.Color, t.Pri = layer, bankFull>>2, code, attr, 0
 		t.FlipX = flipCtl&2 != 0 && attr&1 != 0
 		t.FlipY = flipCtl&4 != 0 && attr&2 != 0

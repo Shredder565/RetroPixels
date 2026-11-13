@@ -365,10 +365,13 @@ func (b *tmnt2) pad(p int) arcade.Pad {
 func (b *tmnt2) playerByte(p int) int {
 	i := b.pad(p)
 	v := 0
-	for k, n := range []string{"Left", "Right", "Up", "Down", "Button 1", "Button 2", "Button 3"} {
+	for k, n := range []string{"Left", "Right", "Up", "Down", "Button 1", "Button 2"} {
 		if i[n] {
 			v |= 1 << k
 		}
+	}
+	if i["Button 3"] { // X: attack too
+		v |= 0x10
 	}
 	if i["Start (1P)"] || (p == 1 && b.pad(0)["Start (2P)"]) {
 		v |= 0x80
@@ -928,7 +931,7 @@ func init() {
 	arcade.Register(&arcade.BoardDef{
 		ID: "tmnt2", Title: "Konami TMNT2 (Turtles in Time)", Width: t2W, Height: t2H, Rotate: 0, FPS: t2FPS, Players: 4,
 		Characters: []string{"Leonardo", "Michelangelo", "Donatello", "Raphael"},
-		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"},
+		Buttons:    []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)", "Start (2P)", "Service"},
 		Dips:       []arcade.Dip{}, Games: tmnt2Games(), New: newTMNT2,
 	})
 }
