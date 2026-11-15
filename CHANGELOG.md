@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.44.0] - 2026-11-15
+
+- Fixed: a bright line down the left edge of the picture in NES games, reported in **Super Mario Bros. 3** (a sky blue strip, 8 pixels wide, that ran right down through the black status bar). Many NES games, SMB3 among them, tell the console to hide the leftmost 8 pixels of the background because their scrolling leaves junk there; the console then fills that column with the backdrop colour, which a TV's overscan hides off the edge of the screen. RetroPixels showed the whole picture, so the column showed. It is now black, like the border round the picture; sprites the game draws there still show, and games that use the full width are unchanged. Also in VS. System arcade games, which use the same picture chip. A new test checks the column.
+
+## [2.43.0] - 2026-11-13
+
+- New: **walkthrough mode**, starting with **Metroid** (NES). Press **F8** (or Game > Walkthrough arrow) and a panel at the bottom of the picture names your next goal ("GET THE MORPH BALL", "GET MISSILES", ... "DEFEAT KRAID", "DESTROY MOTHER BRAIN") with a yellow arrow pointing the way. RetroPixels reads where Samus is (area, room, position), what she has (Morph Ball, bombs, beams, suits, missiles) and which bosses are beaten straight from the game's memory while you play, so the goal moves on by itself as you pick things up, in any order. Between rooms the arrow follows a route worked out from the game's own map and door data (corridors left and right, shafts up and down, through doors); in the goal's room it points at the item itself; in another area it leads you to the right elevator and tells you to ride it. The game itself is not changed, and recordings and screenshots stay as the game drew them. F8 again turns it off; the choice is remembered. Opening Metroid with the arrow off shows a reminder that it's there. Checked by playing the real cartridge: a test player that does nothing but follow the arrow walks from the start to the Morph Ball, and the arrow then turns towards the missiles.
+
 ## [2.42.0] - 2026-11-11
 
 - RetroPixels is now one program: **RetroPixels-Native.exe**. RetroPixels.exe (the app in a built-in web browser) is removed, with its code, its web page and the Linux test build that was made from it. The download is RetroPixels-Native-2.42.0.zip. RetroPixels Native already plays every system RetroPixels.exe played, and its settings and saves are untouched.

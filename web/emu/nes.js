@@ -898,6 +898,12 @@
           break;
         }
       }
+      if (x < 8 && !(mask & 2) && (mask & 8) && color === 0) {
+        // Left 8 background pixels hidden by the game: black, not the backdrop
+        // (as cores/nes/ppu.go; the sky blue line down SMB3's left edge).
+        this.screen[y * 256 + x] = 0xff000000;
+        return;
+      }
       let c = this.palRam[this.palIndex(0x3f00 | color)];
       if (mask & 1) c &= 0x30; // greyscale
       this.screen[y * 256 + x] = PALETTE[((mask >> 5) & 7) * 64 + c];

@@ -4,6 +4,28 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.44.0  (2026-11-15)
+--------------------------------
+- Fixed: a bright line down the left edge of the picture in NES games,
+  reported in Super Mario Bros. 3 (a sky blue strip, 8 pixels wide, right
+  down through the black status bar). Many NES games hide the leftmost 8
+  pixels of the background because their scrolling leaves junk there, and
+  the console fills that column with the backdrop colour, which a TV hides
+  off the edge of the screen. That column is now black, like the border
+  round the picture. Sprites drawn there still show, and games that use the
+  full width are unchanged.
+
+RetroPixels 2.43.0  (2026-11-13)
+--------------------------------
+- New: walkthrough mode, starting with Metroid (NES). Press F8 (or Game >
+  Walkthrough arrow) and a panel at the bottom of the picture names your
+  next goal (Morph Ball, missiles, bombs, ... Kraid, Ridley, Mother Brain)
+  with an arrow pointing the way. RetroPixels reads where Samus is, what
+  she has and which bosses are beaten from the game's memory, so the goal
+  moves on by itself. The arrow follows the game's own map and doors, points
+  at the item in its room, and leads you to the right elevator for another
+  area. The game itself is not changed. F8 again turns it off.
+
 RetroPixels 2.42.0  (2026-11-11)
 --------------------------------
 - RetroPixels is now one program, RetroPixels-Native.exe. RetroPixels.exe

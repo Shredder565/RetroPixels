@@ -1113,6 +1113,10 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.frame = nil
 	a.frameMu.Unlock()
 	a.sess = s
+	s.setupWalkthrough(a.settings.Walkthrough)
+	if s.hasWalkthrough() && !a.settings.Walkthrough {
+		a.showMessage("This game has a walkthrough: press F8 for an arrow to the next goal")
+	}
 	a.restoreSeat(s)
 	defer a.showSeatPicker(s) // "Choose your player" for 3- and 4-player arcade games
 	a.settings.addRecent(path)

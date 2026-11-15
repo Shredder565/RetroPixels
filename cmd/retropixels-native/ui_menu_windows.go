@@ -38,11 +38,13 @@ const (
 	cmdReadme      = 1481
 	cmdRecRecent0  = 1500 // ..1509
 	cmdSNESDebug   = 1490
+	cmdWalkthrough = 1491
 
 	vkF1  = 0x70
 	vkF3  = 0x72
 	vkF6  = 0x75
 	vkF7  = 0x76
+	vkF8  = 0x77
 	vkF12 = 0x7B
 )
 
@@ -125,6 +127,7 @@ func (a *app) uiGameMenu() {
 	appendMenu(a.ui.battMenu, mfString, cmdSramExport, "&Export battery save…")
 	appendMenu(a.gameMenu, mfPopup, a.ui.battMenu, "&Battery save")
 	appendMenu(a.gameMenu, mfString, cmdScreenshot, "Screens&hot\tF12")
+	appendMenu(a.gameMenu, mfString, cmdWalkthrough, "&Walkthrough arrow (Metroid)\tF8")
 }
 
 // uiOptionsMenu: at the end of Options.
@@ -210,6 +213,8 @@ func (a *app) uiUpdateMenus() {
 	enableItem(a.menu, cmdSramExport, sram)
 	checkItem(a.menu, cmdRumble, !a.settings.RumbleOff)
 	checkItem(a.menu, cmdSNESDebug, a.settings.snesDebugger())
+	enableItem(a.menu, cmdWalkthrough, s.hasWalkthrough())
+	checkItem(a.menu, cmdWalkthrough, a.settings.Walkthrough)
 	bi := 0
 	for i, id := range binChoices {
 		if id == binSystem {
@@ -245,7 +250,7 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 	}
 	if repeat {
 		switch vk {
-		case vkF1, vkF3, vkF6, vkF7, vkF12:
+		case vkF1, vkF3, vkF6, vkF7, vkF8, vkF12:
 			return true
 		}
 		return false
@@ -267,6 +272,8 @@ func (a *app) uiKeyDown(vk int, repeat bool) bool {
 		} else {
 			a.nextSeat(1)
 		}
+	case vkF8:
+		a.command(cmdWalkthrough)
 	case vkF12:
 		a.command(cmdScreenshot)
 	default:
@@ -515,6 +522,8 @@ func (a *app) uiCommand(id int) {
 		d := screenshotsDir()
 		os.MkdirAll(d, 0o755)
 		shellOpen(d)
+	case id == cmdWalkthrough && s != nil:
+		a.toggleWalkthrough(s)
 	case id == cmdSNESDebug:
 		on := !a.settings.snesDebugger()
 		a.settings.SNESDebugger = &on
@@ -609,6 +618,7 @@ const keysHelp = "Keyboard\n" +
 	"Ctrl+Z\tUndo the last load\n" +
 	"F9\tStart / stop recording\n" +
 	"F12\tScreenshot (only the game's picture)\n" +
+	"F8\tWalkthrough arrow: points the way to the next goal (Metroid)\n" +
 	"P\tPause\n" +
 	"M\tMute\n" +
 	"Tab (hold)\tFast forward\n" +
@@ -624,3 +634,21 @@ const keysHelp = "Keyboard\n" +
 	"Nintendo 64: View + D-pad left / right changes the slot, View + D-pad down records.\n" +
 	"\nOn the start screen, the arrow keys or the D-pad pick a recent game and Enter or A starts it.\n" +
 	"\nEach system's buttons are in Options > Controls (change them there)."
+
+// toggleWalkthrough: Game > Walkthrough arrow (F8).
+func (a *app) toggleWalkthrough(s *session) {
+	if !s.hasWalkthrough() {
+		a.showMessage("There's no walkthrough for this game yet (only Metroid so far)")
+		return
+	}
+	on := !a.settings.Walkthrough
+	a.settings.Walkthrough = on
+	saveSettings(a.settings)
+	s.walkOn.Store(on)
+	s.do(s.present) // show it (or take it away) even while paused
+	if on {
+		a.showMessage("Walkthrough arrow on: follow it to the next goal")
+	} else {
+		a.showMessage("Walkthrough arrow off")
+	}
+}

@@ -41,6 +41,10 @@ RetroPixels window.
   RetroPixels.exe had: Classic consoles, GameCube, Wii, Wii U, 3DS / DS, Arcade (MAME) and Recordings,
   with the system cards and every library as a grid of box art. Drop a game file on the window;
   zipped games open directly and the system is detected from the file.
+- **Walkthrough mode** (2.43.0, Metroid on the NES so far). Press **F8** and an arrow at the bottom
+  of the picture points the way to your next goal, with the goal named next to it. It reads where
+  you are and what you've collected from the game's memory as you play, and moves on to the next
+  goal by itself. See `internal/walkthrough`.
 - **Xbox controllers work out of the box**, with per-system button remapping, rumble and analog
   sticks where the game uses them. Up to four players.
 - **Choose your player** in 4-player arcade games: play as Leonardo, Michelangelo, Donatello or Raphael,

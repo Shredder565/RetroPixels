@@ -12,6 +12,8 @@ type uiSettings struct {
 	AutoRecord *bool `json:"autoRecord,omitempty"`
 	// Options > Open the SNES Debugger with SNES games (unset: on).
 	SNESDebugger *bool `json:"snesDebugger,omitempty"`
+	// Game > Walkthrough arrow (F8), for games with a walkthrough (Metroid)
+	Walkthrough bool `json:"walkthrough,omitempty"`
 	// the start screen's tab, and its libraries' order (A to Z, or recently played first)
 	HomeTab        int  `json:"homeTab,omitempty"`
 	HomeSortPlayed bool `json:"homeSortPlayed,omitempty"`
