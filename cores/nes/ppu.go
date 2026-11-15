@@ -563,6 +563,16 @@ func (p *ppu) pixel(x, y int) {
 			}
 		}
 	}
+	if x < 8 && mask&2 == 0 && mask&8 != 0 && color == 0 {
+		// The game has hidden the background's left 8 pixels (PPUMASK bit 1
+		// clear), so the PPU fills them with the backdrop colour. A TV's
+		// overscan hides that column, but on a PC screen it shows as a bright
+		// strip down the left edge (the sky blue line in Super Mario Bros. 3).
+		// Show it black instead, as the border round the picture is; sprites
+		// the game draws there still show.
+		p.screen[y*256+x] = 0 // black, in the palette's 0x00RRGGBB form
+		return
+	}
 	c := int(p.palRam[palIndex(0x3f00|color)])
 	if mask&1 != 0 {
 		c &= 0x30 // greyscale
