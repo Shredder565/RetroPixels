@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"retropixels/internal/games"
 )
@@ -140,9 +143,76 @@ func (s *Settings) setControlMap(sys string, m ControlMap) {
 // ---------------- saves ----------------
 
 // Where saves are kept, and how: internal/games's Store (shared with the
-// Android app's engine), in %APPDATA%\RetroPixels Native.
+// Android app's engine), in %APPDATA%\RetroPixels Native, with the saves
+// themselves in the folder the player chose (File > Change saves folder).
 
-func store() games.Store { return games.Store{Dir: appDir()} }
+func store() games.Store {
+	d, _ := savesFolder.Load().(string)
+	return games.Store{Dir: appDir(), Saves: d}
+}
+
+// savesFolder: the saves folder the player chose ("" = <appDir>\saves). Saves
+// are written from the game's goroutine too, so it's kept apart from Settings.
+var savesFolder atomic.Value
+
+// useSavesFolder makes dir the saves folder from now on ("" = the default).
+func useSavesFolder(dir string) { savesFolder.Store(dir) }
+
+// savesRoot: the folder that holds every system's saves.
+func savesRoot() string { return store().SavesRoot() }
+
+// copySaves copies every save and save state in from to the same place
+// under to, leaving the originals and never replacing a file already in to.
+// It tells how many files were copied.
+func copySaves(from, to string) (int, error) {
+	if from == "" || to == "" || samePath(from, to) {
+		return 0, nil
+	}
+	n := 0
+	err := filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if p == from && errors.Is(err, fs.ErrNotExist) {
+				return filepath.SkipAll // no saves yet
+			}
+			return err
+		}
+		if d.IsDir() {
+			if p != from && samePath(p, to) {
+				return filepath.SkipDir // the new folder is inside the old one
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(from, p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(to, rel)
+		if _, err := os.Stat(dst); err == nil {
+			return nil // keep the one already there
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(dst, data); err != nil {
+			return err
+		}
+		n++
+		return nil
+	})
+	return n, err
+}
+
+// samePath: a and b name the same folder (Windows paths ignore case).
+func samePath(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
 
 // safeName makes a game's name usable as a Windows file name.
 func safeName(s string) string { return games.SafeName(s) }

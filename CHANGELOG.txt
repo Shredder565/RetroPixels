@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.45.0  (2026-11-15)
+--------------------------------
+- New: choose where saves go. File > Change saves folder... puts battery
+  saves and save states in any folder you pick (another drive, a synced
+  folder) instead of %APPDATA%\RetroPixels Native\saves. RetroPixels offers
+  to copy the saves you already have; the originals stay where they were
+  and a save already in the new folder is never replaced. File > Use the
+  default saves folder goes back. If you never change it, nothing changes.
+  GameCube / Wii, Wii U, 3DS / DS and MAME keep their own saves, as before.
+
 RetroPixels 2.44.0  (2026-11-15)
 --------------------------------
 - Fixed: a bright line down the left edge of the picture in NES games,

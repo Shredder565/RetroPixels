@@ -1,2 +1,2 @@
-RetroPixels 2.44.0
+RetroPixels 2.45.0
 Released 2026-11-15

@@ -52,7 +52,9 @@ RetroPixels window.
 - **Recording that captures only the game.** Videos contain just the game picture and sound, with
   no window borders, cursor, black bars or other apps.
 - **Saves handled for you.** Battery saves are kept automatically; save states with undo; import
-  `.sav` / `.srm` files from other emulators.
+  `.sav` / `.srm` files from other emulators. New in 2.45.0: **File > Change saves folder…** puts
+  battery saves and save states in any folder you pick (another drive, a synced folder), and offers
+  to copy the saves you already have.
 - **Cartridge hardware** emulated in software: SNES Super FX, SA-1, DSP-1/2, Cx4, S-DD1, SPC7110;
   about 120 NES mappers and the Famicom sound chips; Game Boy MBC1–7, HuC1/3, TAMA5; GBA sensor
   carts; Atari 2600 bank-switching including DPC+ and the Supercharger.

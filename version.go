@@ -3,4 +3,4 @@
 // The program itself is cmd/retropixels-native (RetroPixels-Native.exe).
 package retropixels
 
-const appVersion = "2.44.0"
+const appVersion = "2.45.0"

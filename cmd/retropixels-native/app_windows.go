@@ -128,6 +128,7 @@ func runApp() {
 	}
 	a := &app{settings: loadSettings(), xin: newXInput(), encoders: map[string]string{}, ui: newUIState()}
 	theApp = a
+	useSavesFolder(a.settings.SavesDir)
 	a.smooth = a.settings.Smooth
 	a.hinst = call(pGetModuleHandleW, 0)
 	if pSetProcessDpiAwarenessCx.Find() == nil {
@@ -1013,7 +1014,7 @@ func (a *app) command(id int) {
 			"(Window Capture or Game Capture).\n\n"+
 			"Plays "+availableLabels()+" games with RetroPixels' own emulators, GameCube, Wii and Wii U in PixelU, "+
 			"3DS and DS in PixelDS, and every other arcade game in MAME.\n\n"+
-			"Settings and saves: "+appDir()+"\nRecordings: "+a.settings.recDir()+"\nScreenshots: "+screenshotsDir(),
+			"Settings: "+appDir()+"\nSaves and save states: "+savesRoot()+"\nRecordings: "+a.settings.recDir()+"\nScreenshots: "+screenshotsDir(),
 			"About RetroPixels", mbIconInfo)
 	default:
 		a.uiCommand(id)

@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.45.0] - 2026-11-15
+
+- New: **choose where saves go**. **File > Change saves folder…** puts battery saves and save states (all four slots and their pictures) in any folder you pick, such as another drive or a cloud-synced folder, instead of `%APPDATA%\RetroPixels Native\saves`. If you already have saves, RetroPixels offers to copy them to the new folder: the originals stay where they were, and a save already in the new folder is never replaced. **File > Use the default saves folder** goes back. The choice is kept in settings.json (`savesFolder`); leave it alone and nothing changes. Open saves folder, Import state file and Help > About follow the chosen folder. GameCube / Wii, Wii U, 3DS / DS and MAME keep their own saves in their own folders, as before. New tests check the paths, the setting and the copy.
+
 ## [2.44.0] - 2026-11-15
 
 - Fixed: a bright line down the left edge of the picture in NES games, reported in **Super Mario Bros. 3** (a sky blue strip, 8 pixels wide, that ran right down through the black status bar). Many NES games, SMB3 among them, tell the console to hide the leftmost 8 pixels of the background because their scrolling leaves junk there; the console then fills that column with the backdrop colour, which a TV's overscan hides off the edge of the screen. RetroPixels showed the whole picture, so the column showed. It is now black, like the border round the picture; sprites the game draws there still show, and games that use the full width are unchanged. Also in VS. System arcade games, which use the same picture chip. A new test checks the column.
