@@ -19,7 +19,21 @@ import (
 //	<Dir>/saves/<system>/<game>.slotN.state        slots 2-4
 //	<Dir>/saves/<system>/<game>...state.png        each slot's picture
 //	<Dir>/firmware/<chip>                          a cartridge chip's program
-type Store struct{ Dir string }
+//
+// Saves, when set, is the folder the player chose for saves and save
+// states: <Saves>/<system>/<game>.sav and so on, in place of <Dir>/saves.
+type Store struct {
+	Dir   string
+	Saves string
+}
+
+// SavesRoot: the folder that holds every system's saves.
+func (st Store) SavesRoot() string {
+	if st.Saves != "" {
+		return st.Saves
+	}
+	return filepath.Join(st.Dir, "saves")
+}
 
 var unsafeName = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]+`)
 
@@ -43,7 +57,7 @@ func SafeName(s string) string {
 // SlotCount: four save state slots, as the web page.
 const SlotCount = 4
 
-func (st Store) SavesDir(sys string) string { return filepath.Join(st.Dir, "saves", sys) }
+func (st Store) SavesDir(sys string) string { return filepath.Join(st.SavesRoot(), sys) }
 
 // SRAMPath: saves/<system>/<game>.sav
 func (st Store) SRAMPath(sys, game string) string {

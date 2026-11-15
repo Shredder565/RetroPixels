@@ -15,7 +15,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.44.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.45.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -38,7 +38,7 @@ where Samus is and what she has from the game's memory, so it moves on to the
 next goal by itself. Press F8 again to turn it off.
 
 What's in the download
-- RetroPixels-Native-2.44.0.zip has RetroPixels-Native.exe (no web
+- RetroPixels-Native-2.45.0.zip has RetroPixels-Native.exe (no web
   browser inside, see "RetroPixels Native" below) and VERSION.txt with its
   version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -265,6 +265,14 @@ Playing classic games
   state was saved).
 - Battery saves (Pokémon, Zelda…) are kept automatically. Under Save states
   you can import a .sav / .srm from another emulator or download yours.
+- Choose where saves go (new in 2.45.0): File > Change saves folder... puts
+  battery saves and save states in any folder you like, such as another
+  drive or a cloud-synced folder. RetroPixels offers to copy the saves you
+  already have there (the old files are left where they were, and a save
+  already in the new folder is never replaced). File > Use the default saves
+  folder goes back to %APPDATA%\RetroPixels Native\saves. GameCube / Wii,
+  Wii U, 3DS / DS and MAME keep their own saves in their own folders, as
+  before.
 - Save states made with an older RetroPixels (or with the previous Super
   Nintendo / Game Boy Advance / Genesis engine) can't be loaded by the new
   emulators; in-game saves can be brought over with "Import battery save…"
@@ -561,8 +569,9 @@ Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe,
 Berzerk, Centipede and Vs. Castlevania), Wii U and GameCube / Wii games
 through PixelU, MAME games and Star Wars Trilogy Arcade: every system
 RetroPixels.exe played. RetroPixels Native is for Windows only. Its settings
-and saves are in %APPDATA%\RetroPixels Native (RetroPixels.exe's were kept
-apart and are left where they were).
+and saves are in %APPDATA%\RetroPixels Native, unless you chose another saves
+folder with File > Change saves folder (RetroPixels.exe's were kept apart and
+are left where they were).
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .sfc, .smc, .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
   .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.

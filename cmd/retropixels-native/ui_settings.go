@@ -8,6 +8,8 @@ type uiSettings struct {
 	RumbleOff  bool   `json:"rumbleOff,omitempty"`     // Options > Controller rumble unticked
 	RecQuality string `json:"recordQuality,omitempty"` // "high", "balanced" (the default) or "small"
 	RecDir     string `json:"recordDir,omitempty"`     // Record > Change recordings folder; "" = Videos\RetroPixels
+	// File > Change saves folder: battery saves and save states; "" = the saves folder next to settings.json
+	SavesDir string `json:"savesFolder,omitempty"`
 	// Record > Record games automatically, for every system (unset: on).
 	AutoRecord *bool `json:"autoRecord,omitempty"`
 	// Options > Open the SNES Debugger with SNES games (unset: on).

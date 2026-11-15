@@ -8,12 +8,14 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 	"unsafe"
 
+	"retropixels/internal/games"
 	"retropixels/internal/oldname"
 )
 
@@ -26,6 +28,8 @@ const (
 	cmdSramImport  = 1420
 	cmdSramExport  = 1421
 	cmdSavesFolder = 1422
+	cmdSavesDir    = 1423
+	cmdSavesReset  = 1424
 	cmdScreenshot  = 1430
 	cmdShotFolder  = 1431
 	cmdRumble      = 1440
@@ -113,6 +117,8 @@ func (a *app) uiFileMenu() {
 	appendMenu(a.fileMenu, mfSeparator, 0, "")
 	appendMenu(a.fileMenu, mfPopup, a.ui.binMenu, "Open .&bin files as")
 	appendMenu(a.fileMenu, mfString, cmdSavesFolder, "Open &saves folder")
+	appendMenu(a.fileMenu, mfString, cmdSavesDir, "Change saves fol&der…")
+	appendMenu(a.fileMenu, mfString, cmdSavesReset, "Use the default saves folder")
 }
 
 // uiGameMenu: after Undo load.
@@ -231,8 +237,66 @@ func (a *app) uiUpdateMenus() {
 	}
 	call(pCheckMenuRadioItem, a.menu, cmdRecQ0, uintptr(cmdRecQ0+len(recQualities)-1), uintptr(cmdRecQ0+qi), mfByCommand)
 	enableItem(a.menu, cmdRecDirReset, a.settings.RecDir != "")
+	enableItem(a.menu, cmdSavesReset, a.settings.SavesDir != "")
 	checkItem(a.menu, cmdRecAuto, a.settings.autoRecord())
 	enableItem(a.menu, cmdReadme, readmePath() != "")
+}
+
+// setSavesFolder makes dir the folder for battery saves and save states
+// ("" = the default, next to settings.json), offering to copy the saves
+// already made to it. The old files stay where they were.
+func (a *app) setSavesFolder(dir string) {
+	old := savesRoot()
+	def := games.Store{Dir: appDir()}.SavesRoot()
+	if dir != "" && samePath(dir, def) {
+		dir = "" // the default folder, chosen by hand
+	}
+	shown := dir
+	if shown == "" {
+		shown = def
+	}
+	if samePath(shown, old) {
+		a.showMessage("Saves already go to " + shown)
+		return
+	}
+	if err := os.MkdirAll(shown, 0o755); err != nil {
+		messageBox(a.hwnd, "Couldn't use that folder for saves:\n\n"+err.Error(), "RetroPixels", mbIconInfo)
+		return
+	}
+	copied := 0
+	if hasFiles(old) && messageBox(a.hwnd, "Copy your saves and save states to the new folder?\n\n"+
+		"From: "+old+"\nTo: "+shown+"\n\n"+
+		"Files already in the new folder are kept, and the old ones stay where they are.",
+		"RetroPixels", mbYesNo|mbIconInfo) == idYes {
+		n, err := copySaves(old, shown)
+		if err != nil {
+			messageBox(a.hwnd, fmt.Sprintf("Copied %d files, then stopped:\n\n%v\n\nSaves still go to %s.", n, err, old), "RetroPixels", mbIconInfo)
+			return
+		}
+		copied = n
+	}
+	a.settings.SavesDir = dir
+	useSavesFolder(dir)
+	saveSettings(a.settings)
+	msg := "Saves and save states go to " + shown
+	if copied > 0 {
+		msg += fmt.Sprintf(" (%d files copied)", copied)
+	}
+	a.showMessage(msg)
+	call(pInvalidateRect, a.hwnd, 0, 0)
+}
+
+// hasFiles: dir holds at least one file, in it or a folder inside it.
+func hasFiles(dir string) bool {
+	found := false
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // ---------------- keys ----------------
@@ -509,8 +573,14 @@ func (a *app) uiCommand(id int) {
 		a.importBattery("")
 	case id == cmdSramExport && s != nil:
 		a.exportBattery()
+	case id == cmdSavesDir:
+		if d := pickFolder(a.hwnd, "Choose the folder for saves and save states", savesRoot()); d != "" {
+			a.setSavesFolder(d)
+		}
+	case id == cmdSavesReset:
+		a.setSavesFolder("")
 	case id == cmdSavesFolder:
-		d := filepath.Join(appDir(), "saves")
+		d := savesRoot()
 		if s != nil {
 			d = savesDir(s.game.System)
 		}
