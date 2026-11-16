@@ -265,7 +265,6 @@ include_directories(Source/Core)
 # The order matters a little: definitions and include folders added here reach
 # the libraries added after them.
 
-add_subdirectory(Externals/Bochs_disasm)
 add_subdirectory(Externals/cpp-optparse)
 add_subdirectory(Externals/fmt EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/imgui)

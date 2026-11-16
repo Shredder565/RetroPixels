@@ -127,8 +127,6 @@ time into Licenses\Externals\<project>\.
   liblzma (XZ Utils)                   0BSD / public domain
   mGBA                                 MPL-2.0
   libusb                               LGPL-2.1-or-later
-  libiconv                             LGPL-2.1-or-later
-  Bochs disassembler                   LGPL-2.1-or-later
   OpenAL headers                       LGPL-2.0-or-later (LGPL-2.1-or-later.txt
                                        covers the later versions)
   Khronos OpenGL headers               MIT

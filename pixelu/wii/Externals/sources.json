@@ -1,10 +1,6 @@
 {
   "about": "PixelU-Wii's third-party sources, each from its own upstream project at the version Dolphin 2609a used. fetch.py puts them in pixelu/wii/third_party/<dest>; Externals/<name>/CMakeLists.txt builds them. Git entries are pinned by commit id, archives by SHA-256. Patches are PixelU-Wii's own, in Externals/patches (see the README there).",
   "sources": [
-    {"name": "bochs-disasm", "version": "Bochs svn r12420", "license": "LGPL-2.1-or-later",
-     "git": "https://github.com/bochs-emu/Bochs.git", "commit": "94864fb9bc81411b3f88e2de14fd29c66fa48d63",
-     "paths": ["bochs/disasm", "bochs/COPYING"], "dest": "Bochs_disasm/bochs",
-     "patches": ["bochs-disasm-adc-imm32.patch"]},
     {"name": "bzip2", "version": "1.1.0-dev", "license": "bzip2-1.0.6",
      "git": "https://gitlab.com/bzip2/bzip2.git", "commit": "6a8690fc8d26c815e798c588f796eabe9d684cf0",
      "dest": "bzip2/bzip2"},

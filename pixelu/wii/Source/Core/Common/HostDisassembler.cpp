@@ -11,8 +11,6 @@
 #if defined(HAVE_LLVM)
 #include <llvm-c/Disassembler.h>
 #include <llvm-c/Target.h>
-#elif defined(_M_X86_64)
-#include <disasm.h>  // Bochs
 #endif
 
 namespace
@@ -96,29 +94,6 @@ private:
   std::size_t m_fixed_size;
 };
 
-#elif defined(_M_X86_64)
-// The bundled Bochs x86 disassembler, in Intel syntax.
-class BochsDisassembler final : public HostDisassembler
-{
-public:
-  BochsDisassembler() { m_disasm.set_syntax_intel(); }
-
-private:
-  std::size_t Disassemble(const u8* begin, const u8* end, std::ostream& stream) override
-  {
-    std::size_t count = 0;
-    for (const u8* at = begin; at < end; count++)
-    {
-      char text[256];
-      const unsigned size = m_disasm.disasm64(0, reinterpret_cast<bx_address>(at), at, text);
-      fmt::println(stream, "{}\t{}", fmt::ptr(at), text);
-      at += size;
-    }
-    return count;
-  }
-
-  disassembler m_disasm;
-};
 #endif
 }  // namespace
 
@@ -129,9 +104,6 @@ std::unique_ptr<HostDisassembler> HostDisassembler::Factory(Platform arch)
     return std::make_unique<LLVMDisassembler>("x86_64-none-unknown", "", 0);
   if (arch == Platform::aarch64)
     return std::make_unique<LLVMDisassembler>("aarch64-none-unknown", "cortex-a57", 4);
-#elif defined(_M_X86_64)
-  if (arch == Platform::x86_64)
-    return std::make_unique<BochsDisassembler>();
 #else
   (void)arch;
 #endif

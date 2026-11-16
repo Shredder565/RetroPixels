@@ -94,7 +94,6 @@ target_link_libraries(common
     FatFs
     spng::spng
     watcher
-    bdisasm
 )
 
 if(WIN32)
@@ -110,7 +109,7 @@ if(USE_UPNP)
 endif()
 
 # Host-code disassembly in the debugger uses LLVM when its CMake package is
-# installed; otherwise Bochs' disassembler (bdisasm, above) does it.
+# installed; otherwise the debugger shows the host code's bytes in hex.
 if(ENABLE_LLVM)
   find_package(LLVM CONFIG)
   if(LLVM_FOUND)
