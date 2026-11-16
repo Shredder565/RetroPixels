@@ -7,6 +7,10 @@
 #
 # Sys is PixelU-Wii's own Data/Sys (pictures, theme, shaders, controller profiles, Wii NAND
 # defaults, IPL fonts) plus the few files below that are still taken from the Dolphin checkout.
+# None of those is Dolphin's own or GPL: they are GameTDB's title lists, the Bitstream Vera
+# font and the MIT-licensed Gecko code handler, which Dolphin's tree happens to carry.
+# Dolphin's per-game settings, translations and DSP ROM replacement are no longer shipped
+# (release 2.46.0).
 # Everything else in that checkout's Data/Sys is left out on purpose (Dolphin's themes and
 # shaders, graphics mods, the debugger's symbol database, its NAND files and fonts), so a new
 # file there never ships by accident.
@@ -24,10 +28,6 @@ endforeach()
 
 # What is still taken from the Dolphin checkout (relative to its Data/Sys; globs allowed).
 set(from_third_party
-  # Kept unchanged by the owner's decision (2026-10-21): per-game settings, their
-  # RetroAchievements hashes.
-  "GameSettings"
-  "ApprovedInis.json"
   # GameTDB game title lists (third-party data, credited in COPYING).
   "wiitdb-*.txt"
   "triforcetdb-*.txt"
@@ -36,10 +36,6 @@ set(from_third_party
   "Resources/OSD_Font_VeraMono_Copyright.txt"
   # Gecko code handler (third-party, MIT; credited in COPYING).
   "codehandler.bin"
-  # Free DSP ROM replacement written by the Dolphin team (only used for DSP LLE without the
-  # user's own dumps; see docs/b2-log.txt for why it is still Dolphin's).
-  "GC/dsp_rom.bin"
-  "GC/dsp_coef.bin"
 )
 
 file(REMOVE_RECURSE "${OUT}")

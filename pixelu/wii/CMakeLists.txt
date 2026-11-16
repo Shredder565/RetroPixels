@@ -7,9 +7,9 @@
 # with versions, commits and checksums, is Externals/sources.json); Externals/
 # holds PixelU's build files for them. Qt comes from upstream too: Qt's official
 # build (installed with aqtinstall); see .github/workflows/pixelu-wii.yml.
-# Only the game settings (Data/Sys/GameSettings, ApprovedInis.json) and the
-# translations (Languages/po) still come from a checkout of Dolphin 2609a's
-# repository, by default a sparse one in dolphin/.
+# A few third-party Sys files that are not Dolphin's own (GameTDB's title lists,
+# the Bitstream Vera OSD font, the MIT Gecko code handler) are still taken from a
+# checkout of Dolphin 2609a's repository, by default a sparse one in dolphin/.
 #
 # Supported: Windows x64 with MSVC (Visual Studio 2026), and Linux x86-64 with
 # GCC 12+ (glibc 2.35 and newer; Clang 19+ should work too); see CMakePresets.json.
@@ -40,12 +40,12 @@ endif()
 set(PIXELU_WII_QT_DIR "${qt_default}" CACHE PATH
   "Qt 6.8.3 (the official MSVC x64 or Linux gcc_64 build, as aqtinstall installs it)")
 set(PIXELU_WII_DOLPHIN_DATA "${PROJECT_SOURCE_DIR}/dolphin" CACHE PATH
-  "Folder with Dolphin 2609a's Data/Sys/GameSettings, Data/Sys/ApprovedInis.json and Languages/po")
+  "Folder with Dolphin 2609a's Data/Sys (for the GameTDB lists, OSD font and Gecko code handler)")
 
 foreach(dir "${PIXELU_WII_THIRD_PARTY}/fmt/fmt" "${PIXELU_WII_DOLPHIN_DATA}/Data/Sys")
   if(NOT EXISTS "${dir}")
-    message(FATAL_ERROR "${dir} is missing. Run Externals/fetch.py and fetch Dolphin's game "
-      "settings and translations (see .github/workflows/pixelu-wii.yml), or point "
+    message(FATAL_ERROR "${dir} is missing. Run Externals/fetch.py and fetch the third-party Sys "
+      "files (see .github/workflows/pixelu-wii.yml), or point "
       "PIXELU_WII_THIRD_PARTY / PIXELU_WII_DOLPHIN_DATA somewhere else.")
   endif()
 endforeach()

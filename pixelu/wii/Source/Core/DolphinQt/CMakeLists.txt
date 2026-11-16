@@ -318,30 +318,5 @@ add_custom_command(TARGET dolphin-emu POST_BUILD
   VERBATIM)
 endif()
 
-# Translations: each Languages/po/<lang>.po is compiled to
-# Binaries/Languages/<lang>/dolphin-emu.mo with GNU gettext's msgfmt (found on
-# PATH, or given as -DGETTEXT_MSGFMT_EXECUTABLE=...; the workflow installs
-# MSYS2's gettext-tools). Without msgfmt there are no translations.
-find_package(Gettext)
-if(GETTEXT_MSGFMT_EXECUTABLE)
-  message(STATUS "msgfmt: ${GETTEXT_MSGFMT_EXECUTABLE}")
-endif()
-if(GETTEXT_MSGFMT_EXECUTABLE)
-  set(po_dir "${PIXELU_WII_DOLPHIN_DATA}/Languages/po")
-  set(pot_file "${po_dir}/dolphin-emu.pot")
-  file(GLOB po_files "${po_dir}/*.po")
-  target_sources(dolphin-emu PRIVATE "${pot_file}" ${po_files})
-  source_group("Localization" FILES ${po_files})
-  source_group("Localization\\\\Generated" FILES "${pot_file}")
-  foreach(po IN LISTS po_files)
-    get_filename_component(lang "${po}" NAME_WE)
-    set(mo "${bin_dir}/Languages/${lang}/dolphin-emu.mo")
-    add_custom_command(OUTPUT "${mo}"
-      COMMAND "${CMAKE_COMMAND}" -E make_directory "${bin_dir}/Languages/${lang}"
-      COMMAND "${GETTEXT_MSGFMT_EXECUTABLE}" -o "${mo}" "${po}"
-      DEPENDS "${po}"
-      VERBATIM)
-    target_sources(dolphin-emu PRIVATE "${mo}")
-    source_group("Localization\\\\Generated" FILES "${mo}")
-  endforeach()
-endif()
+# No translations are shipped: Dolphin's (GPL) were dropped in release 2.46.0, so the
+# program is in English.

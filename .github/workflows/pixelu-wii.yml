@@ -8,9 +8,8 @@ name: PixelU Wii (GameCube / Wii) test build
 # build (aqtinstall). From Dolphin
 # 2609a's repository (GPL-2.0-or-later; the commit is the one the
 # pixelu/wii/dolphin submodule pins) it takes, in a sparse checkout, only the
-# translations (Languages/po) and the few Sys files that are not PixelU-Wii's
-# own (GameSettings, ApprovedInis.json, the GameTDB title lists, the OSD font,
-# the Gecko code handler and the DSP ROMs; the list is in
+# few third-party Sys files that are neither PixelU-Wii's nor Dolphin's own
+# (the GameTDB title lists, the OSD font and the Gecko code handler; the list is in
 # pixelu/wii/CMake/PixelUAssembleSys.cmake). It is its own program
 # (PixelU-Wii.exe), separate from PixelU's Wii U part, and is packaged as the
 # PixelU\wii\ folder.
@@ -56,17 +55,16 @@ jobs:
         with:
           submodules: false
 
-      - name: Fetch Dolphin's game settings, Sys files and translations (sparse)
+      - name: Fetch the third-party Sys files from Dolphin's tree (sparse)
         shell: pwsh
         run: |
           # Only what pixelu/wii/CMake/PixelUAssembleSys.cmake takes from
-          # Dolphin's Data/Sys, plus Languages/po: no source, no Externals.
+          # Dolphin's Data/Sys: no source, no Externals.
           # The commit is the one the pixelu/wii/dolphin submodule pins.
           $sha = (git ls-tree HEAD $env:DOLPHIN_DIR).Split()[2]
           $list = (Get-Content -Raw pixelu/wii/CMake/PixelUAssembleSys.cmake) -replace '(?m)#.*$', ''
           $block = [regex]::Match($list, 'set\(from_third_party(.*?)\n\)', 'Singleline').Groups[1].Value
           $paths = @([regex]::Matches($block, '"([^"]+)"') | ForEach-Object { "/Data/Sys/" + $_.Groups[1].Value })
-          $paths += "/Languages/po/"
           "Dolphin $env:DOLPHIN_TAG at $sha, sparse paths:"; $paths
           New-Item -ItemType Directory -Force $env:DOLPHIN_DIR | Out-Null
           git -C $env:DOLPHIN_DIR init -q
@@ -133,16 +131,6 @@ jobs:
           }
           & "$qt/bin/qtpaths.exe" --qt-query QT_VERSION
 
-      # MSYS2 gives GNU gettext's msgfmt for the translations (Dolphin's
-      # prebuilt msgfmt.exe is no longer used).
-      - uses: msys2/setup-msys2@v2
-        id: msys2
-        with:
-          msystem: MSYS
-          update: false
-          path-type: inherit
-          install: mingw-w64-x86_64-gettext-tools
-
       - uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: "4.2.x"
@@ -152,11 +140,8 @@ jobs:
         shell: pwsh
         run: |
           # Updater and analytics are off by default in PixelU-Wii's CMake.
-          $msgfmt = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "mingw64\bin\msgfmt.exe"
-          if (-not (Test-Path $msgfmt)) { Write-Error "msgfmt not found at $msgfmt"; exit 1 }
-          & $msgfmt --version | Select-Object -First 1
           cmake --version
-          cmake --preset windows-x64-release "-DGETTEXT_MSGFMT_EXECUTABLE=$msgfmt"
+          cmake --preset windows-x64-release
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Build
@@ -219,7 +204,7 @@ jobs:
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
-            "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $env:QT_VERSION official build); translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
+            "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $env:QT_VERSION official build); the third-party Sys files from Dolphin's tree at $env:DOLPHIN_TAG ($dsha)"
             "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses\"
@@ -251,7 +236,6 @@ jobs:
               Write-Error "$k is not PixelU-Wii's own ($($same[$k]))"; exit 1
             }
           }
-          if (-not (Test-Path "$out/Sys/GameSettings")) { Write-Error "missing Sys/GameSettings"; exit 1 }
           # Every Sys file is PixelU-Wii's own or on the third-party list, with the
           # right bytes; none of the dropped Dolphin files (other themes and shaders,
           # GraphicMods, totaldb.dsy, its WC24 files and fonts) is there; every
@@ -293,7 +277,7 @@ jobs:
     # ubuntu-22.04 so glibc 2.35 is the oldest it needs, with GCC 12 (C++23;
     # its libstdc++ is the one Ubuntu 22.04 and Debian 12 ship). Same sources
     # as the Windows job: the third-party libraries from sources.json, Qt
-    # 6.8.3's official linux_gcc_64 build (aqtinstall), and the sparse Dolphin checkout for translations and the
+    # 6.8.3's official linux_gcc_64 build (aqtinstall), and the sparse Dolphin checkout for the
     # third-party Sys files. tools/pixelu-wii-linux-deploy.sh puts Qt next to
     # the program (lib/, QtPlugins/, $ORIGIN rpath). The artifact
     # PixelU-Wii-linux-x64 holds PixelU-Wii-linux.tar.gz (a tar keeps the exec
@@ -316,11 +300,11 @@ jobs:
         run: |
           sudo apt-get update -q
           # Build: compiler, X11/XInput2/xcb, PulseAudio/ALSA and EGL headers (L5a-L5c),
-          # gettext's msgfmt for the translations, patchelf for the deploy.
+          # patchelf for the deploy.
           # Run: what Qt's xcb plugin needs (some of it is bundled by the deploy script),
           # Xvfb, openbox, xdotool, PulseAudio, Mesa's llvmpipe and lavapipe.
           sudo apt-get install -y -q --no-install-recommends \
-            gcc-12 g++-12 ninja-build pkg-config gettext patchelf \
+            gcc-12 g++-12 ninja-build pkg-config patchelf \
             libudev-dev libx11-dev libxi-dev libxcb1-dev libpulse-dev libasound2-dev libegl-dev libgl-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-util1 \
             libxcb-xinput0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-randr0 libxcb-shape0 libxcb-sync1 \
@@ -331,10 +315,10 @@ jobs:
           gcc-12 --version | head -n 1
           ldd --version | head -n 1
 
-      - name: Fetch Dolphin's game settings, Sys files and translations (sparse)
+      - name: Fetch the third-party Sys files from Dolphin's tree (sparse)
         run: |
           # As in the Windows job: only what PixelUAssembleSys.cmake takes from Dolphin's
-          # Data/Sys, plus Languages/po, at the commit the pixelu/wii/dolphin submodule pins.
+          # Data/Sys, at the commit the pixelu/wii/dolphin submodule pins.
           set -euo pipefail
           sha=$(git ls-tree HEAD "$DOLPHIN_DIR" | awk '{ print $3 }')
           mapfile -t paths < <(python3 - << 'EOF'
@@ -344,7 +328,6 @@ jobs:
           block = re.search(r"set\(from_third_party(.*?)\n\)", text, re.S).group(1)
           for name in re.findall(r'"([^"]+)"', block):
               print("/Data/Sys/" + name)
-          print("/Languages/po/")
           EOF
           )
           echo "Dolphin $DOLPHIN_TAG at $sha, sparse paths:"; printf '  %s\n' "${paths[@]}"
@@ -478,7 +461,7 @@ jobs:
           {
             echo "PixelU Wii $ver test build for Linux x86-64 (GameCube and Wii, based on Dolphin; not a release)"
             echo "Built $(date -u +%Y-%m-%d) from branch claude/wiiu-emulator-urpcen ($sha) on Ubuntu 22.04 (glibc 2.35 or newer needed)"
-            echo "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $QT_VERSION official build); translations and the third-party Sys files from Dolphin $DOLPHIN_TAG ($dsha)"
+            echo "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $QT_VERSION official build); the third-party Sys files from Dolphin's tree at $DOLPHIN_TAG ($dsha)"
             echo "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             echo "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             echo "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses/"
@@ -494,7 +477,7 @@ jobs:
           echo "Sys: $(find "$out/Sys" -type f | wc -l) files"
           du -sh "$out"
           cat "$out/VERSION.txt"
-          for f in PixelU-Wii lib/libQt6Core.so.6 lib/libQt6Gui.so.6 lib/libQt6Widgets.so.6 qt.conf portable.txt COPYING Sys/GC Sys/Wii Sys/GameSettings QtPlugins/platforms/libqxcb.so; do
+          for f in PixelU-Wii lib/libQt6Core.so.6 lib/libQt6Gui.so.6 lib/libQt6Widgets.so.6 qt.conf portable.txt COPYING Sys/GC Sys/Wii QtPlugins/platforms/libqxcb.so; do
             [ -e "$out/$f" ] || { echo "::error::missing $f"; exit 1; }
           done
           [ -x "$out/PixelU-Wii" ] || { echo "::error::PixelU-Wii is not executable"; exit 1; }
