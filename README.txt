@@ -15,7 +15,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.45.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.46.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -38,17 +38,17 @@ where Samus is and what she has from the game's memory, so it moves on to the
 next goal by itself. Press F8 again to turn it off.
 
 What's in the download
-- RetroPixels-Native-2.45.0.zip has RetroPixels-Native.exe (no web
+- RetroPixels-Native-2.46.0.zip has RetroPixels-Native.exe (no web
   browser inside, see "RetroPixels Native" below) and VERSION.txt with its
   version number.
 - The engines they play through, each in its own folder. Keep these folders
   next to the program:
   * PixelU\PixelU.exe: the Wii U. RetroPixels' Wii U emulator; it started
-    from Cemu's code and has been rewritten as RetroPixels' own code
-    (Mozilla Public License 2.0, LICENSE-MPL-2.0.txt).
+    from Cemu's code and has been rewritten as RetroPixels' own code.
   * PixelU\wii\PixelU-Wii.exe: GameCube and Wii. It started from Dolphin and
-    has been rewritten as RetroPixels' own code (GPL-2.0-or-later, its
-    licence is in PixelU\wii).
+    has been rewritten as RetroPixels' own code. Since 2.46.0 it has its own
+    game window instead of Qt, and no GPL or LGPL parts (PixelU\wii\COPYING
+    lists the third-party libraries it uses).
   * MAME: the MAME team's official release of MAME, unchanged (built in
     since 2.17.0).
   * PixelDS\PixelDS.exe: Nintendo DS and 3DS games. RetroPixels' own
@@ -815,35 +815,31 @@ Credits & licences
   and measured hardware values are still facts others have published too.
   The DSP-3, DSP-4, ST010, ST011 and ST018 chip programs are never included;
   you supply your own.
-- The engines in the download's folders are separate programs with their
-  own licences (see "What's in the download"): PixelU (MPL-2.0) and
-  PixelU-Wii (GPL-2.0-or-later), which started from Cemu's and Dolphin's
-  code and have been rewritten as RetroPixels' own code (their source is in
-  the RetroPixels source, in pixelu and pixelu\wii;
+- The engines in the download's folders are separate programs (see "What's
+  in the download"). PixelU and PixelU-Wii started from Cemu's and Dolphin's
+  code and have been rewritten as RetroPixels' own code; since 2.46.0 no
+  Cemu or Dolphin code, and no GPL or LGPL library, is left in them. Their
+  source is in the RetroPixels source, in pixelu and pixelu\wii;
   docs/pixelu-original.md and docs/pixelu-wii-original.md explain the
-  rewrite and list the third-party parts and the Dolphin data kept), the
-  built-in MAME, unchanged, with its source attached to each release. PixelDS
+  rewrite, and pixelu\THIRD_PARTY.md and pixelu\wii\COPYING list the
+  third-party libraries, fonts and data they use under those projects' own
+  (permissive) licences. The rewrites were done by people who had read the
+  original code, so they are not "clean room" rewrites;
+  tools/verbatim-audit.py checks that no code was copied. The built-in MAME
+  is unchanged, with its source attached to each release. PixelDS
   (cores/pixelds, new in 2.29.0) is RetroPixels' own code, written new
   without any melonDS or Azahar code (docs/pixelds.md). Thanks to the
   Cemu, Dolphin and MAME teams, and to the DS and 3DS emulator authors
   whose public documentation of the hardware PixelDS was checked against.
-- The Sega Model 3 emulator (cores/model3, new in 2.22.0) is the other
-  exception: most of it is RetroPixels' own, checked against Supermodel
-  (https://github.com/trzy/Supermodel), but its sound chips (SCSP) are a Go
-  port of Supermodel's code and its MPEG music board follows Supermodel's,
-  both under GPL-3.0-or-later (Copyright The Supermodel Team; thanks to them
-  and to ElSemi), its decryption chip comes from MAME (BSD-3-Clause) and its
-  MP3 decoder from minimp3 (public domain). So the programs that include it
-  are distributed under GPL-3.0-or-later as a whole, with their full source
-  attached to each release. cores/model3/NOTICE.txt lists each part, and the
-  GPL's text is in cores/model3/LICENSE-GPL-3.0.txt.
-- RetroPixels' older Go Wii U emulator (from 2.20.0, no longer used by the
-  Wii U tab) is the exception in its own code: some of its files are Go
-  rewrites of code from Cemu (https://github.com/cemu-project/Cemu), the
-  Wii U emulator, used under the Mozilla Public License 2.0. Those files
-  stay under that licence (a copy is in wiiu/LICENSE-MPL-2.0.txt), say so at
-  the top, and name the Cemu files they come from. Their source is part of
-  the RetroPixels source attached to each release.
+- The Sega Model 3 emulator (cores/model3, new in 2.22.0) is RetroPixels'
+  own, checked against Supermodel (https://github.com/trzy/Supermodel; thanks
+  to The Supermodel Team and to ElSemi). Since 2.46.0 its sound chips, music
+  board and MP3 decoder are RetroPixels' own code too (they used to follow
+  Supermodel's GPL code and minimp3). One part is MAME's: its decryption
+  chip (BSD-3-Clause, cores/model3/NOTICE.txt).
+- RetroPixels' older Go Wii U emulator (wiiu, from 2.20.0, no longer used by
+  the Wii U tab) had some Go rewrites of Cemu files under the Mozilla Public
+  License 2.0; since 2.46.0 those are RetroPixels' own code as well.
 - It works together with separate programs that keep their own licences and
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from

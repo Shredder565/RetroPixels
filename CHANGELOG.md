@@ -2,6 +2,20 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.46.0] - 2026-11-16
+
+- **Everything in RetroPixels apart from MAME is now RetroPixels' own code.** The last pieces that came from other projects have been rewritten or removed:
+  - **Sega Model 3**: the sound chips (SCSP), the music board and its MPEG decoder are new code. They used to follow Supermodel's GPL code and minimp3. On Star Wars Trilogy the new sound chip matches the old one's loudness, and its volume envelopes track it at 0.99 or better; the music plays as before.
+  - **GBA and SNES**: the math helpers that came from Sun's fdlibm now use Go's own math.
+  - **Wii U (the Go emulator in `wiiu/`)**: the 19 files rewritten from Cemu's code are now RetroPixels' own; a Wii U homebrew test gives identical pictures and sound.
+  - **PixelU (Wii U engine)**: its XML reader, MD5, hash maps, date and number parsing and G.721 sound encoder are now RetroPixels' own code instead of small bundled libraries.
+  - **PixelU-Wii (GameCube / Wii engine)**: LZO, the FreeSurround surround decoder, FFmpeg, libusb, the Bochs disassembler, the OpenAL headers and Qt are gone. Our own code now does save-state and netplay compression, Dolby Pro Logic II surround, frame dumps (Motion JPEG AVI; RetroPixels re-encodes recordings as before) and the GameCube controller adapter for Wii U. Dolphin's per-game settings, translations and free DSP ROMs are no longer shipped.
+- **PixelU-Wii has its own game window.** The Qt menus and dialogs are replaced by a plain window of RetroPixels' own that RetroPixels docks, as before. Hotkeys keep working (Esc stops, Alt+Enter or F11 for fullscreen, F1 / Shift+F1 load and save states, plus pause, reset, screenshots, volume, speed and resolution keys from Hotkeys.ini).
+- New: **GameCube / Wii > Install a WiiWare game or add-on (WAD)…**, and opening a WiiWare add-on now offers to install it. This replaces PixelU-Wii's Tools > Install WAD.
+- No longer available, because they lived in PixelU-Wii's Qt window: its per-button controller mapping screen (edit GCPadNew.ini / WiimoteNew.ini in its settings folder instead), cheat and memory card managers, per-game properties, NAND tools, netplay, the debugger and its translations (English only). Real Wii Remote Bluetooth and USB passthrough are removed; the GameCube controller adapter for Wii U still works, through RetroPixels' own USB code (not yet tested on hardware). Games that needed Dolphin's built-in per-game fixes may need them set by hand.
+- The README's Legal section, the download's notes and PixelU-Wii's COPYING now say who owns what: MAME stays GPL and ships as its own program; everything else is RetroPixels' own code plus permissively licensed libraries, fonts and data.
+- Also fixed: the PixelU and PixelU-Wii test builds (a missing XML function and the version lookup that broke when main.go went away in 2.42.0).
+
 ## [2.45.0] - 2026-11-15
 
 - New: **choose where saves go**. **File > Change saves folder…** puts battery saves and save states (all four slots and their pictures) in any folder you pick, such as another drive or a cloud-synced folder, instead of `%APPDATA%\RetroPixels Native\saves`. If you already have saves, RetroPixels offers to copy them to the new folder: the originals stay where they were, and a save already in the new folder is never replaced. **File > Use the default saves folder** goes back. The choice is kept in settings.json (`savesFolder`); leave it alone and nothing changes. Open saves folder, Import state file and Help > About follow the chosen folder. GameCube / Wii, Wii U, 3DS / DS and MAME keep their own saves in their own folders, as before. New tests check the paths, the setting and the copy.

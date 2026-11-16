@@ -4,6 +4,27 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.46.0  (2026-11-16)
+--------------------------------
+- Everything in RetroPixels apart from MAME is now RetroPixels' own code.
+  Rewritten: the Sega Model 3 sound chips, music board and MP3 decoder
+  (they followed Supermodel's GPL code), the GBA and SNES math helpers, the
+  Cemu-based files of the Go Wii U emulator, and the small libraries in
+  PixelU (Wii U). Removed from PixelU-Wii (GameCube / Wii): LZO,
+  FreeSurround, FFmpeg, libusb, the Bochs disassembler, OpenAL and Qt; our
+  own code does their jobs.
+- PixelU-Wii has its own game window instead of Qt's menus and dialogs.
+  RetroPixels docks it as before; Esc, Alt+Enter / F11 and F1 / Shift+F1
+  (load / save state) still work.
+- New: GameCube / Wii > Install a WiiWare game or add-on (WAD)..., and
+  opening an add-on offers to install it.
+- No longer available (they were in PixelU-Wii's Qt window): its button
+  mapping screen (edit GCPadNew.ini / WiimoteNew.ini instead), cheat and
+  memory card managers, per-game properties, NAND tools, netplay, the
+  debugger and translations. Real Wii Remote Bluetooth and USB passthrough
+  are removed; the GameCube controller adapter still works. Games that
+  needed Dolphin's per-game fixes may need them set by hand.
+
 RetroPixels 2.45.0  (2026-11-15)
 --------------------------------
 - New: choose where saves go. File > Change saves folder... puts battery
