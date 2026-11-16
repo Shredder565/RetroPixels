@@ -235,7 +235,8 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           $user = "$env:RUNNER_TEMP\window-user"
           # The software renderer draws without a GPU; the window is PixelU-Wii's own.
-          $p = Start-Process -FilePath "$out\PixelU-Wii.exe" -PassThru -ArgumentList `
+          $err = "$env:RUNNER_TEMP\window-stderr.txt"
+          $p = Start-Process -FilePath "$out\PixelU-Wii.exe" -PassThru -RedirectStandardError $err -ArgumentList `
                  "-b", "-u", "`"$user`"", "-v", "`"Software Renderer`"", "-C", "`"Dolphin.DSP.Backend=No Audio Output`"", "-e", "`"$dol`""
           $hwnd = 0
           for ($i = 0; $i -lt 60 -and $hwnd -eq 0; $i++) {
@@ -244,7 +245,16 @@ jobs:
             $p.Refresh(); $hwnd = $p.MainWindowHandle
           }
           if ($hwnd -eq 0) { Stop-Process -Id $p.Id -Force; Write-Error "no game window appeared"; exit 1 }
-          "game window: 0x{0:X} '{1}'" -f [int64]$hwnd, $p.MainWindowTitle
+          Start-Sleep -Seconds 1
+          $p.Refresh()
+          "game window: 0x{0:X} '{1}'" -f [int64]$p.MainWindowHandle, $p.MainWindowTitle
+          # The messages PixelU-Wii printed (warnings and errors would also be in message boxes).
+          Get-Content $err -ErrorAction SilentlyContinue
+          Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);'
+          $cls = New-Object System.Text.StringBuilder 256
+          [void][W.U]::GetClassName($p.MainWindowHandle, $cls, 256)
+          "window class: $cls"
+          if ("$cls" -ne "PixelU-Wii") { Stop-Process -Id $p.Id -Force; Write-Error "the main window is not the game window (a message box?)"; exit 1 }
           Start-Sleep -Seconds 5
           if ($p.HasExited) { Write-Error "PixelU-Wii ended while running (exit code $($p.ExitCode))"; exit 1 }
           # RetroPixels stops a game with WM_CLOSE to its window.

@@ -125,6 +125,10 @@ const char* StyleName(Common::MsgType style)
 
 bool PrintAlert(const char* caption, const char* text, bool yes_no, Common::MsgType style)
 {
+  // Every message goes to stderr (RetroPixels' log, the checks); on Windows, warnings and
+  // errors are also shown in a message box.
+  std::fprintf(stderr, "%s: %s: %s\n", StyleName(style), caption, text);
+  std::fflush(stderr);
 #ifdef _WIN32
   // Information stays out of the way; warnings and errors need someone to see them.
   if (style != Common::MsgType::Information)
@@ -138,9 +142,8 @@ bool PrintAlert(const char* caption, const char* text, bool yes_no, Common::MsgT
     return !yes_no || answer == IDYES;
   }
 #endif
-  std::fprintf(stderr, "%s: %s: %s%s\n", StyleName(style), caption, text,
-               yes_no ? " [answered yes]" : "");
-  std::fflush(stderr);
+  if (yes_no)
+    std::fputs("[answered yes]\n", stderr);
   return true;
 }
 
