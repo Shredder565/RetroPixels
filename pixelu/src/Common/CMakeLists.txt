@@ -36,8 +36,7 @@ if(WIN32)
 	pixelu_add_folder(CemuCommon ExceptionHandler ExceptionHandler_win32.cpp)
 else()
 	pixelu_add_folder(CemuCommon unix
-		date.h
-		fast_float.h
+		parse_float.h
 		FileStream_unix.cpp
 		FileStream_unix.h
 		platform.cpp

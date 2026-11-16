@@ -1,96 +1,41 @@
-/*
- * This source code is a product of Sun Microsystems, Inc. and is provided
- * for unrestricted use.  Users may copy or modify this source code without
- * charge.
- *
- * SUN SOURCE CODE IS PROVIDED AS IS WITH NO WARRANTIES OF ANY KIND INCLUDING
- * THE WARRANTIES OF DESIGN, MERCHANTIBILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE, OR ARISING FROM A COURSE OF DEALING, USAGE OR TRADE PRACTICE.
- *
- * Sun source code is provided with no support and without any obligation on
- * the part of Sun Microsystems, Inc. to assist in its use, correction,
- * modification or enhancement.
- *
- * SUN MICROSYSTEMS, INC. SHALL HAVE NO LIABILITY WITH RESPECT TO THE
- * INFRINGEMENT OF COPYRIGHTS, TRADE SECRETS OR ANY PATENTS BY THIS SOFTWARE
- * OR ANY PART THEREOF.
- *
- * In no event will Sun Microsystems, Inc. be liable for any lost revenue
- * or profits or other special, indirect and consequential damages, even if
- * Sun has been advised of the possibility of such damages.
- *
- * Sun Microsystems, Inc.
- * 2550 Garcia Avenue
- * Mountain View, California  94043
- */
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 
-/*
- * g72x.h
- *
- * Header file for CCITT conversion routines.
- *
- */
-#ifndef _G72X_H
-#define _G72X_H
+#include <cstdint>
 
-/*
- * The following is the definition of the state structure
- * used by the G.721/G.723 encoder and decoder to preserve their internal
- * state between successive calls.  The meanings of the majority
- * of the state structure fields are explained in detail in the
- * CCITT Recommendation G.721.  The field names are essentially identical
- * to variable names in the bit level description of the coding algorithm
- * included in this Recommendation.
- */
-struct g72x_state {
-    long yl;   /* Locked or steady state step size multiplier. */
-    short yu;  /* Unlocked or non-steady state step size multiplier. */
-    short dms; /* Short term energy estimate. */
-    short dml; /* Long term energy estimate. */
-    short ap;  /* Linear weighting coefficient of 'yl' and 'yu'. */
+// A G.721 (32 kbit/s ADPCM) encoder, written from the block descriptions in
+// ITU-T Recommendation G.726. It turns 16-bit linear samples into 4-bit
+// codes, which is what the Xbox 360 Skylanders portal's speaker plays.
+class G721Encoder
+{
+  public:
+	G721Encoder() { Reset(); }
+	void Reset();
+	// Encode takes one 16-bit sample and returns its 4-bit code.
+	int Encode(int16_t sample);
 
-    short a[2];  /* Coefficients of pole portion of prediction filter. */
-    short b[6];  /* Coefficients of zero portion of prediction filter. */
-    short pk[2]; /*
-                  * Signs of previous two samples of a partially
-                  * reconstructed signal.
-                  */
-    short dq[6]; /*
-                  * Previous 6 samples of the quantized difference
-                  * signal represented in an internal floating point
-                  * format.
-                  */
-    short sr[2]; /*
-                  * Previous 2 samples of the quantized difference
-                  * signal represented in an internal floating point
-                  * format.
-                  */
-    char td;     /* delayed tone detect, new in 1988 version */
+  private:
+	// a number in the codec's 11-bit floating format: sign, 4-bit exponent,
+	// 6-bit mantissa (the history of DQ and SR)
+	struct Float11
+	{
+		bool negative;
+		int exponent;
+		int mantissa;
+	};
+	static Float11 ToFloat11(int magnitude, bool negative);
+	static int FloatMultiply(int coefficient, const Float11& value);
+	int ScaleFactor() const;
+	void Adapt(int code, int y, int dq, int sr, int dqsez);
+
+	int32_t m_yl;	  // locked scale factor, 6 more fraction bits
+	int m_yu;		  // unlocked scale factor
+	int m_dms, m_dml; // short and long term averages of F(I)
+	int m_ap;		  // speed control
+	int m_a[2];		  // pole predictor coefficients
+	int m_b[6];		  // zero predictor coefficients
+	bool m_pk[2];	  // signs of the last two partial reconstructions
+	Float11 m_dq[6];  // last six quantized differences
+	Float11 m_sr[2];  // last two reconstructed samples
+	bool m_tone;	  // tone detected (TD)
 };
-
-/* External function definitions. */
-
-void g72x_init_state(struct g72x_state*);
-int g721_encoder(int sample, struct g72x_state* state_ptr);
-int g721_decoder(int code, struct g72x_state* state_ptr);
-
-
-int quantize(int d, int y, short* table, int size);
-int reconstruct(int, int, int);
-void
-
-    update(int code_size,
-                  int y,
-                  int wi,
-                  int fi,
-                  int dq,
-                  int sr,
-                  int dqsez,
-                  struct g72x_state* state_ptr);
-
-int predictor_zero(struct g72x_state* state_ptr);
-
-int predictor_pole(struct g72x_state* state_ptr);
-int step_size(struct g72x_state* state_ptr);
-#endif /* !_G72X_H */
-

@@ -12,13 +12,6 @@
 #include "Common/FileStream.h"
 #include "util/helpers/Semaphore.h"
 
-#if BOOST_OS_LINUX
-// older libstdc++ versions lack the C++20 calendar types, use the reference implementation
-#include "Common/unix/date.h"
-namespace chrono_d = date;
-#else
-namespace chrono_d = std::chrono;
-#endif
 
 namespace iosu
 {
@@ -38,18 +31,41 @@ namespace iosu
 				fs::create_directories(DataFilePath("."), ec);
 			}
 
-			// days are counted from 2000-01-01
-			const chrono_d::sys_days kEpoch{ chrono_d::year(2000) / chrono_d::January / chrono_d::day(1) };
+			// days are counted from 2000-01-01, which is day 10957 of the Unix clock
+			constexpr sint64 kEpochUnixDay = 10957;
 
 			uint16 TodayDayNumber()
 			{
-				const chrono_d::sys_days today = chrono_d::floor<chrono_d::days>(std::chrono::system_clock::now());
-				return (uint16)(today - kEpoch).count();
+				const sint64 seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+				const sint64 unixDay = seconds >= 0 ? seconds / 86400 : (seconds - 86399) / 86400;
+				return (uint16)(unixDay - kEpochUnixDay);
 			}
 
-			chrono_d::year_month_day DayNumberToDate(uint16 day)
+			struct CivilDate
 			{
-				return chrono_d::year_month_day(kEpoch + chrono_d::days(day));
+				int year;
+				unsigned month; // 1-12
+				unsigned day;	// 1-31
+			};
+
+			bool IsLeapYear(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+			CivilDate DayNumberToDate(uint16 dayNumber)
+			{
+				static constexpr unsigned kMonthDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+				CivilDate date{2000, 1, 1};
+				unsigned left = dayNumber;
+				while (left >= (IsLeapYear(date.year) ? 366u : 365u))
+					left -= IsLeapYear(date.year++) ? 366 : 365;
+				for (;; date.month++)
+				{
+					const unsigned inMonth = kMonthDays[date.month - 1] + (date.month == 2 && IsLeapYear(date.year) ? 1 : 0);
+					if (left < inMonth)
+						break;
+					left -= inMonth;
+				}
+				date.day = 1 + left;
+				return date;
 			}
 
 			/* ---- PlayStats.dat ---- */
@@ -431,10 +447,10 @@ namespace iosu
 			if (g_stats.Lookup(titleId, minutes, lastDay))
 			{
 				stat.numMinutesPlayed = minutes;
-				const chrono_d::year_month_day date = DayNumberToDate(lastDay);
-				stat.last_played.year = (int)date.year();
-				stat.last_played.month = (unsigned int)date.month() - 1; // zero based month
-				stat.last_played.day = (unsigned int)date.day();
+				const CivilDate date = DayNumberToDate(lastDay);
+				stat.last_played.year = date.year;
+				stat.last_played.month = date.month - 1; // zero based month
+				stat.last_played.day = date.day;
 			}
 			// merge in play time recorded by older versions in the settings file
 			std::lock_guard lock(GetConfig().game_cache_entries_mutex);

@@ -32,7 +32,7 @@ namespace nsyshid
 
 	private:
 		std::shared_ptr<backend::libusb::DeviceLibusb> m_portal;
-		g72x_state m_encoder{};
+		G721Encoder m_encoder;
 	};
 #endif
 } // namespace nsyshid

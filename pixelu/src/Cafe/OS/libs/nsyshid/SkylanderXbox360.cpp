@@ -10,7 +10,7 @@ namespace nsyshid
 	SkylanderXbox360PortalLibusb::SkylanderXbox360PortalLibusb(std::shared_ptr<backend::libusb::DeviceLibusb> usbPortal)
 		: EmulatedHidDevice(0x1430, 0x0150), m_portal(std::move(usbPortal))
 	{
-		g72x_init_state(&m_encoder);
+		m_encoder.Reset();
 	}
 
 	bool SkylanderXbox360PortalLibusb::Open()
@@ -45,7 +45,7 @@ namespace nsyshid
 	bool SkylanderXbox360PortalLibusb::SetReport(uint8 reportType, uint8 reportId, uint8* data, uint32 length)
 	{
 		if (length >= 2 && data[0] == 'M' && data[1] == 0x01) // speaker on
-			g72x_init_state(&m_encoder);
+			m_encoder.Reset();
 
 		std::vector<uint8> report(sizeof(XBOX_DATA_HEADER) + length);
 		memcpy(report.data(), XBOX_DATA_HEADER, sizeof(XBOX_DATA_HEADER));
@@ -65,8 +65,8 @@ namespace nsyshid
 			const uint8* s = data + i * 4;
 			const sint16 first = (sint16)(s[0] | (s[1] << 8));
 			const sint16 second = (sint16)(s[2] | (s[3] << 8));
-			const uint8 lo = (uint8)(g721_encoder(first, &m_encoder) & 0x0F);
-			const uint8 hi = (uint8)(g721_encoder(second, &m_encoder) & 0x0F);
+			const uint8 lo = (uint8)(m_encoder.Encode(first) & 0x0F);
+			const uint8 hi = (uint8)(m_encoder.Encode(second) & 0x0F);
 			report[sizeof(XBOX_AUDIO_DATA_HEADER) + i] = (uint8)((hi << 4) | lo);
 		}
 		sint32 sent = 0;

@@ -10,7 +10,7 @@
 #include "util/math/vector3.h"
 
 #ifdef __clang__
-#include "Common/unix/fast_float.h"
+#include "Common/unix/parse_float.h"
 #endif
 
 // range adaptor for iterating a container backwards in a range-based for
@@ -156,7 +156,7 @@ T ConvertString(std::string_view str)
 		ltrim(str, "+");
 		T value;
 #ifdef __clang__
-		if (fast_float::from_chars(str.data(), str.data() + str.size(), value).ec == std::errc())
+		if (ParseFloatChars(str.data(), str.data() + str.size(), value).ec == std::errc())
 			return value;
 #else
 		if (std::from_chars(str.data(), str.data() + str.size(), value).ec == std::errc())

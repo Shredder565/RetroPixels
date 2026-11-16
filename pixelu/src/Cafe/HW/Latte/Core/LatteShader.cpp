@@ -15,8 +15,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/GameProfile/GameProfile.h"
-#include "util/containers/flat_hash_map.hpp"
-#include "util/containers/robin_hood.h"
+#include <unordered_map>
 #include "util/helpers/StateHasher.h"
 #include "util/helpers/StringBuf.h"
 
@@ -88,7 +87,7 @@ namespace
 		mix = memo.mix;
 	}
 
-	using ShaderTable = ska::flat_hash_map<uint64, LatteDecompilerShader*>;
+	using ShaderTable = std::unordered_map<uint64, LatteDecompilerShader*>;
 	ShaderTable s_vsTable(512);
 	ShaderTable s_gsTable(512);
 	ShaderTable s_psTable(512);
@@ -467,7 +466,7 @@ namespace
 		size_t operator()(uint64 v) const noexcept { return (size_t)v; }
 	};
 
-	robin_hood::unordered_flat_map<uint64, StateEntry, IdentityHash> s_stateCache;
+	std::unordered_map<uint64, StateEntry, IdentityHash> s_stateCache;
 	std::vector<uint64> s_stateKeys; // walked a few entries per frame to expire unused ones
 	size_t s_stateSweepPos = 0;
 

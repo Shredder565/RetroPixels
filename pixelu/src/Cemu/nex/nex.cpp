@@ -494,17 +494,10 @@ namespace
 	// key that protects the ticket: md5 of the password, hashed again 65000 + (pid % 1024) - 1 times
 	void DeriveTicketKey(const char* password, uint32 pid, uint8 key[16])
 	{
-		MD5_CTX ctx;
-		MD5_Init(&ctx);
-		MD5_Update(&ctx, password, (unsigned long)strlen(password));
-		MD5_Final(key, &ctx);
+		MD5Hash::Of(password, strlen(password), key);
 		const uint32 rounds = 65000 + (pid % 1024) - 1;
 		for (uint32 i = 0; i < rounds; i++)
-		{
-			MD5_Init(&ctx);
-			MD5_Update(&ctx, key, 16);
-			MD5_Final(key, &ctx);
-		}
+			MD5Hash::Of(key, 16, key);
 	}
 
 	nexService* ConnectSecure(prudpAuthServerInfo* info, const char* accessKey, const char* nexToken)
