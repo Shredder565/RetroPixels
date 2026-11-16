@@ -1,6 +1,7 @@
 package model3
 
 import (
+	"os"
 	"sync"
 
 	"retropixels/cores/m68k"
@@ -134,7 +135,7 @@ func (s *soundBoard) runFrame() {
 		s.cycleGoal += soundCyclesPerSmp
 		s.cpu.Run(s.cycleGoal)
 	}
-	if s.dsb != nil {
+	if s.dsb != nil && os.Getenv("M3_NODSB") == "" {
 		s.dsb.runFrame(s.out, n) // the music goes to the front speakers
 	}
 	// Supermodel mixes front and rear for two speakers at half volume each
