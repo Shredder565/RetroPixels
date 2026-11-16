@@ -420,6 +420,17 @@ namespace rpxml
 		return in.fail() ? otherwise : v;
 	}
 
+	double XMLElement::ToDouble(const char* s, double otherwise)
+	{
+		if (!s)
+			return otherwise;
+		std::istringstream in(s);
+		in.imbue(std::locale::classic());
+		double v;
+		in >> std::ws >> v;
+		return in.fail() ? otherwise : v;
+	}
+
 	int64_t XMLElement::ToInt64(const char* s, int64_t otherwise)
 	{
 		if (!s)

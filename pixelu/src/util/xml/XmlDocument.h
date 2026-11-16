@@ -81,6 +81,7 @@ namespace rpxml
 
 		bool BoolText(bool otherwise) const { return ToBool(GetText(), otherwise); }
 		float FloatText(float otherwise) const { return ToFloat(GetText(), otherwise); }
+		double DoubleText(double otherwise) const { return ToDouble(GetText(), otherwise); }
 		int IntText(int otherwise) const { return (int)ToInt64(GetText(), otherwise); }
 		unsigned UnsignedText(unsigned otherwise) const { return (unsigned)ToUInt64(GetText(), otherwise); }
 		int64_t Int64Text(int64_t otherwise) const { return ToInt64(GetText(), otherwise); }
@@ -98,6 +99,7 @@ namespace rpxml
 
 		static bool ToBool(const char* s, bool otherwise);
 		static float ToFloat(const char* s, float otherwise);
+		static double ToDouble(const char* s, double otherwise);
 		static int64_t ToInt64(const char* s, int64_t otherwise);
 		static uint64_t ToUInt64(const char* s, uint64_t otherwise);
 		static std::string Format(bool v) { return v ? "true" : "false"; }

@@ -2,7 +2,7 @@
 #
 # PixelU-Wii's version header, Common/scmrev.h, made from scmrev.h.in.
 #
-# PixelU-Wii carries RetroPixels' version (appVersion in RetroPixels' main.go,
+# PixelU-Wii carries RetroPixels' version (appVersion in RetroPixels' version.go,
 # found by walking up from the build tree) and RetroPixels' git commit and
 # branch. Nothing here reads the Dolphin submodule's tags.
 #
@@ -12,8 +12,8 @@
 # (cmake -P) it writes the header.
 #
 # Cache settings (all optional):
-#   PIXELU_WII_VERSION   use this version instead of the one in main.go
-#   PIXELU_WII_ROOT      the RetroPixels checkout (the folder with main.go)
+#   PIXELU_WII_VERSION   use this version instead of the one in version.go
+#   PIXELU_WII_ROOT      the RetroPixels checkout (the folder with version.go)
 
 # Servers that know only Dolphin releases see this version (in the HTTP user
 # agent and the RetroAchievements integration): it is what PixelU-Wii builds
@@ -23,13 +23,15 @@ set(PIXELU_WII_COMPAT_VERSION_DEFAULT "2609a-pixelu")
 function(pixelu_wii_find_root start out)
   set(dir "${start}")
   while(TRUE)
-    if(EXISTS "${dir}/main.go")
-      file(STRINGS "${dir}/main.go" hit REGEX "appVersion[ \t]*=[ \t]*\"")
-      if(hit)
-        set(${out} "${dir}" PARENT_SCOPE)
-        return()
+    foreach(name version.go main.go)
+      if(EXISTS "${dir}/${name}")
+        file(STRINGS "${dir}/${name}" hit REGEX "appVersion[ \t]*=[ \t]*\"")
+        if(hit)
+          set(${out} "${dir}" PARENT_SCOPE)
+          return()
+        endif()
       endif()
-    endif()
+    endforeach()
     get_filename_component(parent "${dir}" DIRECTORY)
     if(parent STREQUAL dir)
       set(${out} "" PARENT_SCOPE)
@@ -41,21 +43,27 @@ endfunction()
 
 function(pixelu_wii_read_version root out)
   set(${out} "" PARENT_SCOPE)
-  if(root AND EXISTS "${root}/main.go")
-    file(STRINGS "${root}/main.go" hit REGEX "appVersion[ \t]*=[ \t]*\"[^\"]+\"")
-    if(hit)
-      list(GET hit 0 first)
-      string(REGEX REPLACE ".*appVersion[ \t]*=[ \t]*\"([^\"]+)\".*" "\\1" ver "${first}")
-      set(${out} "${ver}" PARENT_SCOPE)
-    endif()
+  if(NOT root)
+    return()
   endif()
+  foreach(name version.go main.go)
+    if(EXISTS "${root}/${name}")
+      file(STRINGS "${root}/${name}" hit REGEX "appVersion[ \t]*=[ \t]*\"[^\"]+\"")
+      if(hit)
+        list(GET hit 0 first)
+        string(REGEX REPLACE ".*appVersion[ \t]*=[ \t]*\"([^\"]+)\".*" "\\1" ver "${first}")
+        set(${out} "${ver}" PARENT_SCOPE)
+        return()
+      endif()
+    endif()
+  endforeach()
 endfunction()
 
 if(NOT CMAKE_SCRIPT_MODE_FILE)
   # ---- configure time: work out the inputs and add the target ----
   if(NOT PIXELU_WII_ROOT)
     pixelu_wii_find_root("${CMAKE_SOURCE_DIR}" found_root)
-    set(PIXELU_WII_ROOT "${found_root}" CACHE PATH "RetroPixels checkout (the folder with main.go)")
+    set(PIXELU_WII_ROOT "${found_root}" CACHE PATH "RetroPixels checkout (the folder with version.go)")
   endif()
   set(PIXELU_WII_VERSION "" CACHE STRING "PixelU-Wii version; empty = RetroPixels' appVersion")
   if(PIXELU_WII_VERSION)
@@ -65,7 +73,7 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
   endif()
   if(NOT pixelu_wii_ver)
     message(FATAL_ERROR "PixelU-Wii: no version. Set PIXELU_WII_ROOT to the RetroPixels checkout "
-                        "(the folder with main.go) or PIXELU_WII_VERSION.")
+                        "(the folder with version.go) or PIXELU_WII_VERSION.")
   endif()
   message(STATUS "PixelU-Wii version ${pixelu_wii_ver} (from ${PIXELU_WII_ROOT})")
 
