@@ -68,7 +68,10 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** in PixelU-Wii, RetroPixels' own engine, with a library, volume control and
   automatic recording. New in 2.46.0: it has its own game window (no Qt) and installs WiiWare
-  games and add-ons (GameCube / Wii > Install a WiiWare game or add-on).
+  games and add-ons (GameCube / Wii > Install a WiiWare game or add-on). New in 2.47.0:
+  **GameCube / Wii > Map controller buttons…** sets every button of GameCube controllers 1–4 and
+  Wii Remotes 1–4 (with Nunchuk or Classic Controller) by pressing it, on an Xbox controller or the
+  keyboard and mouse.
 - **No more freezes while recording** (new in 2.41.3): a game no longer stops mid-play when the
   automatic recording falls behind, in both programs.
 - **Punch works in Popeye and Kangaroo** (2.41.2): A or X on the controller, Z or A on the

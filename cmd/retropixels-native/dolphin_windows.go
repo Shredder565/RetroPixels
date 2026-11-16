@@ -41,6 +41,7 @@ const (
 	cmdDolMute       = 1321
 	cmdDolRecNext    = 1323
 	cmdDolLayout     = 1324
+	cmdDolPadMap     = 1325
 	cmdDolFirst      = 1300
 	cmdDolLast       = 1399
 
@@ -99,6 +100,7 @@ type dolState struct {
 	lib  *dolLibrary
 	sdlg *dolSettingsDlg
 	kdlg *wiiKeysDlg // the "keys file" step before a Wii game
+	pdlg *dolPadMapDlg
 }
 
 type dolFound struct {
@@ -165,6 +167,7 @@ func (a *app) addDolphinMenu() {
 	appendMenu(m, mfString, cmdDolEmbed, "Play inside this &window")
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdDolSettings, "&PixelU settings…")
+	appendMenu(m, mfString, cmdDolPadMap, "&Map controller buttons…")
 	appendMenu(m, mfString, cmdDolPads, "Set up &Xbox controller")
 	appendMenu(m, mfString, cmdDolLayout, "&Controller layout")
 	appendMenu(m, mfSeparator, 0, "")
@@ -204,6 +207,7 @@ func (a *app) dolUpdateMenus() {
 	enableItem(a.menu, cmdDolOpenEmu, has && r == nil)
 	enableItem(a.menu, cmdDolOpenConfig, has)
 	enableItem(a.menu, cmdDolPads, has && r == nil)
+	enableItem(a.menu, cmdDolPadMap, has)
 }
 
 func (a *app) dolCommand(id int) {
@@ -248,6 +252,8 @@ func (a *app) dolCommand(id int) {
 		a.dolSetupPads()
 	case id == cmdDolLayout:
 		a.dolShowLayout()
+	case id == cmdDolPadMap:
+		a.openDolPadMap()
 	case id == cmdDolOpenEmu:
 		a.dolInstallWAD("")
 	case id == cmdDolOpenConfig:
@@ -922,8 +928,8 @@ func (a *app) dolShowLayout() {
 	messageBox(a.hwnd, "GameCube controller (port 1): "+label[dolphin.PadState(user, "GCPadNew.ini", "GCPad1")]+"\n"+
 		"Wii Remote + Nunchuk: "+label[dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")]+"\n\n"+
 		dolphin.PadLayout+"\n\n"+
-		"The controller is set up automatically the first time a game starts. To change single buttons, edit GCPadNew.ini "+
-		"or WiimoteNew.ini (GameCube / Wii > Open PixelU's settings folder) while no game is running. "+
+		"The controller is set up automatically the first time a game starts. To change single buttons, or to play with "+
+		"the keyboard or another controller, use GameCube / Wii > Map controller buttons. "+
 		"Save states are in PixelU: Shift+F1 saves, F1 loads.",
 		"Controller layout", mbIconInfo)
 }

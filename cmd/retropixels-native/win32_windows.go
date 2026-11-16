@@ -60,6 +60,7 @@ var (
 	pEnableWindow             = user32.NewProc("EnableWindow")
 	pSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
 	pSetFocus                 = user32.NewProc("SetFocus")
+	pGetFocus                 = user32.NewProc("GetFocus")
 	pSetTimer                 = user32.NewProc("SetTimer")
 	pKillTimer                = user32.NewProc("KillTimer")
 	pFillRect                 = user32.NewProc("FillRect")
