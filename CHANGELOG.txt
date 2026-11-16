@@ -4,6 +4,12 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.46.1  (2026-11-16)
+--------------------------------
+- Fixed: the download's notes for PixelU (the Wii U engine) still called it
+  "based on Cemu" and came with the MPL licence text. They now say it is
+  RetroPixels' own code and list its third-party parts (THIRD_PARTY.md).
+
 RetroPixels 2.46.0  (2026-11-16)
 --------------------------------
 - Everything in RetroPixels apart from MAME is now RetroPixels' own code.

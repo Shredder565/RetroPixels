@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.46.1] - 2026-11-16
+
+- Fixed: the download's notes for PixelU (the Wii U engine) still called it "based on Cemu" and came with the Mozilla Public License text. They now say it is RetroPixels' own code and list the third-party pictures, fonts and code it uses (THIRD_PARTY.md).
+
 ## [2.46.0] - 2026-11-16
 
 - **Everything in RetroPixels apart from MAME is now RetroPixels' own code.** The last pieces that came from other projects have been rewritten or removed:
