@@ -120,7 +120,6 @@ void ForceDeterminismSettings(Config::Layer& layer, const NetPlay::NetSettings& 
   layer.Set(Config::SESSION_USE_FMA, host.use_fma);
 
   // Real Bluetooth adapters can't be synchronised.
-  layer.Set(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED, false);
 }
 
 // With strict sync, the rendering options that can change emulated results are forced as well.

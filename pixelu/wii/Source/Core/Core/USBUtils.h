@@ -9,8 +9,6 @@
 
 #include "Common/CommonTypes.h"
 
-struct libusb_device_descriptor;
-
 namespace USBUtils
 {
 // A USB vendor/product ID pair.
@@ -33,12 +31,5 @@ struct DeviceInfo
 // Finds a human-readable name for a device, from a built-in list of Wii peripherals or the
 // operating system.
 std::optional<std::string> GetDeviceNameFromVIDPID(u16 vid, u16 pid);
-
-// The connected USB devices accepted by `filter`.
-std::vector<DeviceInfo>
-ListDevices(const std::function<bool(const struct libusb_device_descriptor&)>& filter =
-                [](const struct libusb_device_descriptor&) { return true; });
-std::vector<DeviceInfo> ListDevices(const std::function<bool(const DeviceInfo&)>& filter =
-                                        [](const DeviceInfo&) { return true; });
 
 }  // namespace USBUtils

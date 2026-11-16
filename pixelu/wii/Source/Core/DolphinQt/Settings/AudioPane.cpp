@@ -365,12 +365,11 @@ void AudioPane::RefreshRoutingState()
   if (m_routing_box == nullptr)
     return;
 
-  // Routing needs Cubeb, speaker data, no Bluetooth passthrough, and no running game.
+  // Routing needs Cubeb, speaker data and no running game.
   const bool running = Core::GetState(Core::System::GetInstance()) != Core::State::Uninitialized;
   const bool cubeb = Config::Get(Config::MAIN_AUDIO_BACKEND) == BACKEND_CUBEB;
   const bool speaker_data = Config::Get(Config::MAIN_WIIMOTE_ENABLE_SPEAKER);
-  const bool passthrough = Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED);
-  const bool usable = !running && cubeb && speaker_data && !passthrough;
+  const bool usable = !running && cubeb && speaker_data;
 
   m_routing->setEnabled(usable);
   const bool routing = usable && m_routing->isChecked();

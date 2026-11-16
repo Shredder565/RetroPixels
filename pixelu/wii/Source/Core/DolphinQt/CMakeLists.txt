@@ -142,7 +142,7 @@ pixelu_add_sources(dolphin-emu
     BroadbandAdapterSettingsDialog.cpp BroadbandAdapterSettingsDialog.h GameCubePane.cpp
     GameCubePane.h GeneralPane.cpp GeneralPane.h InterfacePane.cpp InterfacePane.h
     OnScreenDisplayPane.cpp OnScreenDisplayPane.h PathPane.cpp PathPane.h TriforcePane.cpp
-    TriforcePane.h USBDevicePicker.cpp USBDevicePicker.h WiiPane.cpp WiiPane.h
+    TriforcePane.h WiiPane.cpp WiiPane.h
   IN SkylanderPortal
     SkylanderModifyDialog.cpp SkylanderModifyDialog.h SkylanderPortalWindow.cpp
     SkylanderPortalWindow.h

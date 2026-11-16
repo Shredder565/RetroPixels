@@ -686,11 +686,8 @@ void WiimoteScanner::ThreadFunc()
     {
       auto& system = Core::System::GetInstance();
       const bool core_running = Core::GetState(system) != Core::State::Uninitialized;
-      if (Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED) ||
-          (core_running && !system.IsWii()))
-      {
+      if (core_running && !system.IsWii())
         continue;
-      }
 
       if (CalculateWantedWiimotes() == 0 && CalculateWantedBB() == 0)
         continue;

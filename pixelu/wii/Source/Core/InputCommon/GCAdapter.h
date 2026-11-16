@@ -27,7 +27,7 @@ GCPadStatus Input(int chan);
 // Sets the motor of port `chan`.
 void Output(int chan, u8 rumble_command);
 // Whether the adapter is open. When it failed to open, returns false and sets *error_message to
-// libusb's description of the error; otherwise sets it to null.
+// a description of the problem; otherwise sets it to null.
 bool IsDetected(const char** error_message);
 // Whether a pad is plugged into port `chan`.
 bool DeviceConnected(int chan);

@@ -10,10 +10,6 @@
 #include <thread>
 #include <utility>
 
-#ifdef __LIBUSB__
-#include <libusb.h>
-#endif
-
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/Thread.h"
@@ -25,10 +21,8 @@
 #include "Core/IOS/USB/Emulated/Skylanders/Skylander.h"
 #include "Core/IOS/USB/Emulated/WiiSpeak.h"
 #include "Core/IOS/USB/Host.h"
-#include "Core/IOS/USB/LibusbDevice.h"
 #include "Core/NetPlayProto.h"
 #include "Core/System.h"
-#include "Core/USBUtils.h"
 
 namespace IOS::HLE
 {
@@ -65,31 +59,6 @@ void AddEmulatedAccessories(USBScanner::DeviceMap* devices)
   }
 }
 
-#ifdef __LIBUSB__
-// Santroller firmware (open-source controller firmware used for guitars and drums) works out
-// which console it is plugged into by watching how the host talks to it. A PC host gives no such
-// hint, so the device is told to switch to its Wii mode with a class request on interface 2.
-void SwitchSantrollerToWiiMode(libusb_device* device)
-{
-  libusb_device_handle* handle = nullptr;
-  if (libusb_open(device, &handle) != LIBUSB_SUCCESS)
-    return;
-
-#ifdef __linux__
-  libusb_set_auto_detach_kernel_driver(handle, true);
-  libusb_claim_interface(handle, 2);
-#endif
-  constexpr u8 request_type =
-      u8(+LIBUSB_ENDPOINT_IN | +LIBUSB_REQUEST_TYPE_CLASS | +LIBUSB_RECIPIENT_INTERFACE);
-  libusb_control_transfer(handle, request_type, 0x01, 0x03f2, 2, nullptr, 0x11, 5000);
-  libusb_close(handle);
-}
-
-bool IsSantroller(const libusb_device_descriptor& descriptor)
-{
-  return descriptor.idVendor == 0x1209 && descriptor.idProduct == 0x2882;
-}
-#endif
 }  // namespace
 
 USBScanner::~USBScanner()
@@ -199,29 +168,6 @@ bool USBScanner::Rescan()
 bool USBScanner::CollectDevices(DeviceMap* devices) const
 {
   AddEmulatedAccessories(devices);
-
-#ifdef __LIBUSB__
-  if (Core::WantsDeterminism())
-    return true;
-
-  const auto whitelist = Config::GetUSBDeviceWhitelist();
-  if (whitelist.empty() || !m_context.IsValid())
-    return true;
-
-  const int result = m_context.GetDeviceList([&](libusb_device* host_device) {
-    libusb_device_descriptor descriptor;
-    libusb_get_device_descriptor(host_device, &descriptor);
-    if (IsSantroller(descriptor))
-      SwitchSantrollerToWiiMode(host_device);
-
-    if (whitelist.contains(USBUtils::DeviceInfo{descriptor.idVendor, descriptor.idProduct}))
-      Insert(devices, std::make_unique<USB::LibusbDevice>(host_device, descriptor));
-    // Keep going through the whole list.
-    return true;
-  });
-  if (result != LIBUSB_SUCCESS)
-    WARN_LOG_FMT(IOS_USB, "Could not list the host USB devices: {}", LibusbUtils::ErrorWrap(result));
-#endif
   return true;
 }
 

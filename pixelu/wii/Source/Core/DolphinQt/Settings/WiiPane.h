@@ -17,8 +17,7 @@ class QListWidget;
 class QPushButton;
 class QVBoxLayout;
 
-// "Wii" settings page: SYSCONF options, the emulated SD card, the USB passthrough whitelist and
-// Wii Remote settings.
+// "Wii" settings page: SYSCONF options, the emulated SD card and Wii Remote settings.
 class WiiPane : public QWidget
 {
   Q_OBJECT
@@ -28,15 +27,10 @@ public:
 private:
   QGroupBox* BuildSystemGroup();
   QGroupBox* BuildSDCardGroup();
-  QGroupBox* BuildPassthroughGroup();
   QGroupBox* BuildRemoteGroup();
   void WireUp();
 
   void LockForEmulation(bool running);
-  void RefreshRemoveButton();
-  void RefreshPassthroughList();
-  void AddPassthroughDevice();
-  void RemovePassthroughDevice();
 
   void PickSDImage();
   void PickSDSyncFolder();
@@ -57,11 +51,6 @@ private:
   ConfigUserPath* m_sd_folder_path;
   QPushButton* m_sd_pack;
   QPushButton* m_sd_unpack;
-
-  // USB passthrough
-  QListWidget* m_passthrough_list;
-  QPushButton* m_passthrough_add;
-  QPushButton* m_passthrough_remove;
 
   // Wii Remote
   ConfigChoiceMap<u32>* m_sensor_bar_position;

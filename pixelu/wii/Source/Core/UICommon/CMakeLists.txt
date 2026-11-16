@@ -20,12 +20,7 @@ target_link_libraries(uicommon
     pugixml
   PRIVATE
     fmt::fmt
-    bdisasm
 )
-
-if(TARGET LibUSB::LibUSB)
-  target_link_libraries(uicommon PRIVATE LibUSB::LibUSB)
-endif()
 
 if(USE_DISCORD_PRESENCE)
   target_compile_definitions(uicommon PRIVATE USE_DISCORD_PRESENCE)

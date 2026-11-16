@@ -297,9 +297,6 @@ if(ENABLE_CUBEB)
   add_definitions(-DHAVE_CUBEB)
 endif()
 
-add_subdirectory(Externals/libusb EXCLUDE_FROM_ALL)
-add_definitions(-D__LIBUSB__)
-
 if(ENABLE_SDL)
   add_subdirectory(Externals/SDL EXCLUDE_FROM_ALL)
   add_definitions(-DHAVE_SDL3)
