@@ -24,6 +24,8 @@ RetroPixels 2.46.0  (2026-11-16)
   debugger and translations. Real Wii Remote Bluetooth and USB passthrough
   are removed; the GameCube controller adapter still works. Games that
   needed Dolphin's per-game fixes may need them set by hand.
+- PixelU-Wii now also prints every warning and error to standard error,
+  so they can be logged as well as shown.
 
 RetroPixels 2.45.0  (2026-11-15)
 --------------------------------

@@ -14,6 +14,7 @@ All notable changes to RetroPixels. Newest first.
 - New: **GameCube / Wii > Install a WiiWare game or add-on (WAD)…**, and opening a WiiWare add-on now offers to install it. This replaces PixelU-Wii's Tools > Install WAD.
 - No longer available, because they lived in PixelU-Wii's Qt window: its per-button controller mapping screen (edit GCPadNew.ini / WiimoteNew.ini in its settings folder instead), cheat and memory card managers, per-game properties, NAND tools, netplay, the debugger and its translations (English only). Real Wii Remote Bluetooth and USB passthrough are removed; the GameCube controller adapter for Wii U still works, through RetroPixels' own USB code (not yet tested on hardware). Games that needed Dolphin's built-in per-game fixes may need them set by hand.
 - The README's Legal section, the download's notes and PixelU-Wii's COPYING now say who owns what: MAME stays GPL and ships as its own program; everything else is RetroPixels' own code plus permissively licensed libraries, fonts and data.
+- PixelU-Wii now also prints every warning and error to standard error, so they can be logged as well as shown in a message box.
 - Also fixed: the PixelU and PixelU-Wii test builds (a missing XML function and the version lookup that broke when main.go went away in 2.42.0).
 
 ## [2.45.0] - 2026-11-15
