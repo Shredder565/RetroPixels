@@ -79,5 +79,5 @@ func init() {
 		m.coLoad(cpu, co)
 		ret(cpu, v)
 	})
-	// OSSwitchCoroutine is in coreinit_coroutine_cemu.go
+	// OSSwitchCoroutine is in coreinit_switch.go
 }

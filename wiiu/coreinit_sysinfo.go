@@ -1,32 +1,30 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/
-// coreinit/coreinit_SystemInfo.cpp and coreinit_SystemInfo.h, rewritten in
-// Go for RetroPixels.
-
 package wiiu
 
-// coreinit: OSGetSystemInfo.
+// coreinit's OSGetSystemInfo: a pointer to a block describing the machine,
+// laid out as the SDK's OSSystemInfo (see wut's coreinit/systeminfo.h):
+//
+//	0x00 u32 bus clock (Hz)       0x04 u32 core clock (Hz)
+//	0x08 u64 time base at boot    0x10 u32 L2 cache size of cores 0, 1, 2
+//	0x1c u32 core clock / bus clock
 
 import "time"
 
-// the OSSystemInfo the program reads clock speeds from:
-// { u32 busClock; u32 coreClock; u64 baseTime; u32 l2CacheSize[3]; u32 cpuRatio }
 var systemInfoAddr uint32
+
+// the Espresso's three cores have 512 KB, 2 MB and 512 KB of L2 cache
+var l2Sizes = [3]uint32{512 << 10, 2 << 20, 512 << 10}
 
 func (m *Machine) initSystemData() {
 	m.bootTime = osTicksSince2000(time.Now())
-	systemInfoAddr = m.sysAlloc(0x20, 32)
-	mem := m.Mem
-	mem.Write32(systemInfoAddr+0x00, BusHz)
-	mem.Write32(systemInfoAddr+0x04, CoreHz)
-	mem.Write64(systemInfoAddr+0x08, m.bootTime) // OSGetTime at time base 0
-	mem.Write32(systemInfoAddr+0x10, 512*1024)
-	mem.Write32(systemInfoAddr+0x14, 2*1024*1024)
-	mem.Write32(systemInfoAddr+0x18, 512*1024)
-	mem.Write32(systemInfoAddr+0x1c, CoreHz/BusHz)
+	a := m.sysAlloc(0x20, 32)
+	systemInfoAddr = a
+	m.Mem.Write32(a, BusHz)
+	m.Mem.Write32(a+4, CoreHz)
+	m.Mem.Write64(a+8, m.bootTime)
+	for i, n := range l2Sizes {
+		m.Mem.Write32(a+0x10+4*uint32(i), n)
+	}
+	m.Mem.Write32(a+0x1c, CoreHz/BusHz)
 }
 
 func init() {
