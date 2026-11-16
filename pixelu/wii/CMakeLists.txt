@@ -5,9 +5,8 @@
 # libraries built from their own sources. Externals/fetch.py fetches those
 # sources from each library's own upstream project into third_party/ (the list,
 # with versions, commits and checksums, is Externals/sources.json); Externals/
-# holds PixelU's build files for them. Qt and FFmpeg come from upstream too:
-# Qt's official build (installed with aqtinstall) and FFmpeg built from its
-# source (Externals/FFmpeg/build-ffmpeg.sh); see .github/workflows/pixelu-wii.yml.
+# holds PixelU's build files for them. Qt comes from upstream too: Qt's official
+# build (installed with aqtinstall); see .github/workflows/pixelu-wii.yml.
 # Only the game settings (Data/Sys/GameSettings, ApprovedInis.json) and the
 # translations (Languages/po) still come from a checkout of Dolphin 2609a's
 # repository, by default a sparse one in dolphin/.
@@ -40,8 +39,6 @@ else()
 endif()
 set(PIXELU_WII_QT_DIR "${qt_default}" CACHE PATH
   "Qt 6.8.3 (the official MSVC x64 or Linux gcc_64 build, as aqtinstall installs it)")
-set(PIXELU_WII_FFMPEG_DIR "${PIXELU_WII_THIRD_PARTY}/FFmpeg/x64" CACHE PATH
-  "FFmpeg static libraries and headers (what Externals/FFmpeg/build-ffmpeg.sh installs)")
 set(PIXELU_WII_DOLPHIN_DATA "${PROJECT_SOURCE_DIR}/dolphin" CACHE PATH
   "Folder with Dolphin 2609a's Data/Sys/GameSettings, Data/Sys/ApprovedInis.json and Languages/po")
 
@@ -85,7 +82,6 @@ option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ON)
 option(ENABLE_SDL "SDL controller input" ON)
 option(ENABLE_LLVM "Use LLVM, when its CMake package is found, for the debugger's host disassembly" ON)
 option(ENABLE_LTO "Link-time optimisation" OFF)
-option(ENCODE_FRAMEDUMPS "Frame dumps encoded with FFmpeg" ON)
 option(USE_UPNP "UPnP port forwarding for netplay" ON)
 option(USE_DISCORD_PRESENCE "Discord Rich Presence" ON)
 option(USE_MGBA "Game Boy Advance link emulation with mGBA" ON)
@@ -258,21 +254,6 @@ find_package(Threads)
 find_package(OpenGL)
 if(OPENGL_GL)
   include_directories(${OPENGL_INCLUDE_DIR})
-endif()
-
-if(ENCODE_FRAMEDUMPS)
-  set(FFMPEG_DIR "${PIXELU_WII_FFMPEG_DIR}")
-  find_package(FFmpeg COMPONENTS avcodec avformat avutil swresample swscale)
-  if(FFmpeg_FOUND)
-    message(STATUS "FFmpeg found: frame dumps are encoded")
-    add_definitions(-DHAVE_FFMPEG)
-    if(WIN32)
-      # FFmpeg's static libraries call into bcrypt (random numbers in libavutil).
-      set_property(TARGET FFmpeg::avutil APPEND PROPERTY INTERFACE_LINK_LIBRARIES "Bcrypt.lib")
-    endif()
-  else()
-    message(STATUS "FFmpeg not found: no frame dump encoding")
-  endif()
 endif()
 
 # PixelU-Wii's headers come before every third-party folder.

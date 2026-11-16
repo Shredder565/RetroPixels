@@ -90,9 +90,6 @@ time into Licenses\Externals\<project>\.
   -----------------------------------  ----------------------------------------
   Qt 6 (Qt6*.dll, QtPlugins)           LGPL-3.0-only (LGPL-3.0-only.txt,
                                        GPL-3.0-only.txt)
-  FFmpeg (avcodec, avformat, avutil,   GPL-3.0-or-later as configured (GPL and
-   swresample, swscale; static          version 3 parts on; GPL-3.0-only.txt and
-   libraries in PixelU-Wii.exe)         Licenses\Externals\FFmpeg)
   SDL 3                                Zlib
   SFML (network)                       Zlib
   zlib-ng                              Zlib
@@ -141,11 +138,7 @@ time into Licenses\Externals\<project>\.
                                        Studio redistributable files)
 
 Qt is shipped as DLLs (the Qt Company's official 6.8.3 MSVC build), so it can
-be replaced with another build of the same version. FFmpeg is built from
-FFmpeg's own source (pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh) and linked
-statically; with FFmpeg's GPL version 3 parts in it, the executable as
-distributed is under GPL version 3, which the "or any later version" terms
-above allow. Every third-party source is fetched from its own project
+be replaced with another build of the same version. Every third-party source is fetched from its own project
 (pixelu/wii/Externals/sources.json); expr, which has no upstream for the
 version used, is kept in pixelu/wii/Externals.
 

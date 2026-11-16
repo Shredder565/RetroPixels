@@ -13,7 +13,7 @@
 #include "Common/MathUtil.h"
 #include "Common/Thread.h"
 
-#include "VideoCommon/FrameDumpFFMpeg.h"
+#include "VideoCommon/FrameDumpAVI.h"
 #include "VideoCommon/VideoEvents.h"
 
 class AbstractStagingTexture;
@@ -56,8 +56,8 @@ private:
 
   // Worker thread side.
   void WorkerLoop();
-  bool BeginDump(bool use_ffmpeg, const FrameData& frame);
-  void WriteFrame(bool use_ffmpeg, const FrameData& frame);
+  bool BeginDump(bool as_video, const FrameData& frame);
+  void WriteFrame(bool as_video, const FrameData& frame);
   std::string ImagePath() const;
 
   std::thread m_worker;
@@ -82,7 +82,7 @@ private:
   // Number of the next PNG written when dumping frames as images.
   u32 m_image_number = 0;
 
-  FFMpegFrameDump m_ffmpeg_dump;
+  AVIFrameDump m_video_dump;
 
   Common::Flag m_want_screenshot;
   std::mutex m_screenshot_mutex;

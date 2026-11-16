@@ -3,12 +3,13 @@
 #pragma once
 
 #include <ctime>
-#include <limits>
 #include <memory>
+#include <vector>
 
 #include "Common/CommonTypes.h"
+#include "Common/IOFile.h"
+#include "VideoCommon/JpegEncoder.h"
 
-struct FrameDumpContext;
 class PointerWrap;
 
 // Emulation state captured when a frame is rendered, travelling with the frame to the dump
@@ -32,14 +33,14 @@ struct FrameData
   FrameState state;
 };
 
-// Encodes frames into a video file with FFmpeg (libavformat / libavcodec / libswscale).
-// A new file is started whenever the resolution or the refresh rate changes, or after a
-// savestate is loaded.
-class FFMpegFrameDump
+// Writes frames as Motion JPEG in AVI files (our own JPEG encoder and AVI writer). A new file
+// is started whenever the resolution or the refresh rate changes, after a savestate is loaded,
+// and before a file would pass the AVI 1.0 size limit.
+class AVIFrameDump
 {
 public:
-  FFMpegFrameDump();
-  ~FFMpegFrameDump();
+  AVIFrameDump();
+  ~AVIFrameDump();
 
   bool Start(int w, int h, u64 start_ticks);
   void AddFrame(const FrameData&);
@@ -49,15 +50,17 @@ public:
   FrameState FetchState(u64 ticks, int frame_number) const;
 
 private:
-  bool OpenSegment(int w, int h, u64 start_ticks, u32 savestate_index);
-  bool CreateSegmentFile();
+  struct Segment;
+
+  bool OpenSegment(int w, int h, u64 start_ticks, u32 savestate_index, int rate_num,
+                   int rate_den);
   void CloseSegment();
   void RestartIfNeeded(const FrameData&);
-  void DrainEncoder();
+  void WriteChunk(const u8* data, u32 size, bool key_frame);
 
-#if defined(HAVE_FFMPEG)
-  std::unique_ptr<FrameDumpContext> m_context;
-#endif
+  std::unique_ptr<Segment> m_segment;
+  VideoCommon::JpegEncoder m_encoder;
+  std::vector<u8> m_jpeg;
 
   // Bumped by every savestate load; frames carry it so a load starts a new file.
   u32 m_savestate_index = 0;
@@ -65,17 +68,4 @@ private:
   // File naming: the time dumping started and the number of the current file.
   std::time_t m_start_time = {};
   u32 m_file_index = 0;
-
-  // Largest time base denominator the current codec accepts (MPEG-4 is limited to 16 bits).
-  int64_t m_max_denominator = std::numeric_limits<s64>::max();
 };
-
-#if !defined(HAVE_FFMPEG)
-inline FFMpegFrameDump::FFMpegFrameDump() = default;
-inline FFMpegFrameDump::~FFMpegFrameDump() = default;
-
-inline FrameState FFMpegFrameDump::FetchState(u64, int) const
-{
-  return {};
-}
-#endif

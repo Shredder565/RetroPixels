@@ -59,8 +59,9 @@ func dumpBitrate(quality string) int {
 // RecordArgs: Dolphin settings for one run that make it save the game's
 // picture and sound.
 //
-// The picture is saved as MPEG-4 in an .avi at a high bitrate: that's
-// Dolphin's own default and is quick to encode, so it doesn't slow the game.
+// The picture is saved in an .avi: PixelU-Wii writes Motion JPEG with its own
+// encoder (the codec and bitrate settings are for builds before 2.46.0, which
+// encoded MPEG-4 with FFmpeg). Both are quick to encode, so they don't slow the game.
 // It's saved at the size the game is shown on screen, which is exactly the
 // game picture without the black bars around it.
 func RecordArgs(quality string) []string {

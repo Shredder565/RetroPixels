@@ -5,7 +5,7 @@ name: PixelU Wii (GameCube / Wii) test build
 # (pixelu/wii/Source, docs/pixelu-wii-original.md). Third-party libraries
 # come from their own upstream projects: the sources listed (with commits and
 # checksums) in pixelu/wii/Externals/sources.json, Qt's official 6.8.3 MSVC
-# build (aqtinstall) and FFmpeg built here from its source. From Dolphin
+# build (aqtinstall). From Dolphin
 # 2609a's repository (GPL-2.0-or-later; the commit is the one the
 # pixelu/wii/dolphin submodule pins) it takes, in a sparse checkout, only the
 # translations (Languages/po) and the few Sys files that are not PixelU-Wii's
@@ -133,55 +133,15 @@ jobs:
           }
           & "$qt/bin/qtpaths.exe" --qt-query QT_VERSION
 
-      # MSYS2 gives make and nasm for FFmpeg's build and GNU gettext's msgfmt
-      # for the translations (Dolphin's prebuilt msgfmt.exe is no longer used).
+      # MSYS2 gives GNU gettext's msgfmt for the translations (Dolphin's
+      # prebuilt msgfmt.exe is no longer used).
       - uses: msys2/setup-msys2@v2
         id: msys2
         with:
           msystem: MSYS
           update: false
           path-type: inherit
-          install: make diffutils mingw-w64-x86_64-nasm mingw-w64-x86_64-gettext-tools
-
-      # FFmpeg: static libraries built from FFmpeg's source at the commit of
-      # Dolphin's ext-win-ffmpeg (N-106414-g28d011516b) with the same
-      # configuration (Externals/FFmpeg/build-ffmpeg.sh). Cached between runs.
-      - uses: actions/cache@v4
-        id: ffmpeg-cache
-        with:
-          path: pixelu/wii/third_party/FFmpeg/x64
-          key: ffmpeg-${{ hashFiles('pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh', 'pixelu/wii/Externals/sources.json') }}
-
-      - name: Fetch FFmpeg's source
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          python pixelu/wii/Externals/fetch.py --group ffmpeg
-          if ($LASTEXITCODE) { exit 1 }
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        with:
-          arch: x64
-
-      - name: Build FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        run: |
-          export PATH="/mingw64/bin:$PATH"
-          nasm -v
-          bash pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh pixelu/wii/third_party/FFmpeg/ffmpeg pixelu/wii/third_party/FFmpeg/x64
-
-      - name: Check FFmpeg
-        shell: pwsh
-        run: |
-          $ff = "pixelu/wii/third_party/FFmpeg/x64"
-          Get-Content "$ff/BUILD-INFO.txt"
-          foreach ($l in "avcodec", "avformat", "avutil", "swresample", "swscale") {
-            if (-not (Test-Path "$ff/lib/$l.lib")) { Write-Error "FFmpeg: missing lib/$l.lib"; exit 1 }
-            if (-not (Test-Path "$ff/include/lib$l/$l.h")) { Write-Error "FFmpeg: missing include/lib$l/$l.h"; exit 1 }
-          }
-          if (-not (Select-String -Quiet -Path "$ff/include/libavutil/ffversion.h" -Pattern 'N-106414-g28d011516b')) { Write-Error "FFmpeg: not N-106414-g28d011516b"; exit 1 }
+          install: mingw-w64-x86_64-gettext-tools
 
       - uses: jwlawson/actions-setup-cmake@v2
         with:
@@ -231,16 +191,12 @@ jobs:
           Copy-Item -Recurse pixelu/wii/LICENSES "$out/Licenses"
           # Each third-party project's own licence files (with its copyright
           # lines) go to Licenses/Externals/<project>/: the fetched ones in
-          # pixelu/wii/third_party (FFmpeg's from its installed libraries, as
-          # its source is only there when it was rebuilt) and the two kept in
-          # pixelu/wii/Externals (FreeSurround's licence is in its file
-          # headers; its README.txt says where it comes from).
+          # pixelu/wii/third_party and the one kept in pixelu/wii/Externals.
           $pattern = '^(licen[cs]e|copying|copyright|notice|unlicense)([._-].*)?$|copyright'
           $ext_dirs = 0
-          $projects = @(Get-ChildItem -Directory pixelu/wii/third_party) + @(Get-Item pixelu/wii/Externals/expr, pixelu/wii/Externals/FreeSurround)
+          $projects = @(Get-ChildItem -Directory pixelu/wii/third_party) + @(Get-Item pixelu/wii/Externals/expr)
           foreach ($ext in $projects) {
-            $found = @(Get-ChildItem -Recurse -File -Depth 2 $ext.FullName | Where-Object { $_.Name -match $pattern -and $_.FullName -notmatch '[\\/]FFmpeg[\\/]ffmpeg[\\/]' })
-            if ($ext.Name -eq "FreeSurround") { $found = @(Get-Item "$($ext.FullName)/README.txt") }
+            $found = @(Get-ChildItem -Recurse -File -Depth 2 $ext.FullName | Where-Object { $_.Name -match $pattern })
             foreach ($f in $found) {
               $dst = Join-Path "$out/Licenses/Externals/$($ext.Name)" ([IO.Path]::GetRelativePath($ext.FullName, $f.FullName))
               New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
@@ -263,7 +219,7 @@ jobs:
           @(
             "PixelU Wii $ver test build (GameCube and Wii, based on Dolphin; not a release)"
             "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
-            "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $env:QT_VERSION official build; FFmpeg built from source); translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
+            "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $env:QT_VERSION official build); translations and the third-party Sys files from Dolphin $env:DOLPHIN_TAG ($dsha)"
             "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses\"
@@ -337,8 +293,7 @@ jobs:
     # ubuntu-22.04 so glibc 2.35 is the oldest it needs, with GCC 12 (C++23;
     # its libstdc++ is the one Ubuntu 22.04 and Debian 12 ship). Same sources
     # as the Windows job: the third-party libraries from sources.json, Qt
-    # 6.8.3's official linux_gcc_64 build (aqtinstall), FFmpeg built from its
-    # source, and the sparse Dolphin checkout for translations and the
+    # 6.8.3's official linux_gcc_64 build (aqtinstall), and the sparse Dolphin checkout for translations and the
     # third-party Sys files. tools/pixelu-wii-linux-deploy.sh puts Qt next to
     # the program (lib/, QtPlugins/, $ORIGIN rpath). The artifact
     # PixelU-Wii-linux-x64 holds PixelU-Wii-linux.tar.gz (a tar keeps the exec
@@ -352,7 +307,6 @@ jobs:
       QT_ARCH: "linux_gcc_64"
       AQT_VERSION: "3.3.0"
       BUILD: "pixelu/wii/build/linux-x64-release"
-      FFMPEG_OUT: "pixelu/wii/third_party/FFmpeg/linux-x64"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -362,11 +316,11 @@ jobs:
         run: |
           sudo apt-get update -q
           # Build: compiler, X11/XInput2/xcb, PulseAudio/ALSA and EGL headers (L5a-L5c),
-          # nasm for FFmpeg, gettext's msgfmt for the translations, patchelf for the deploy.
+          # gettext's msgfmt for the translations, patchelf for the deploy.
           # Run: what Qt's xcb plugin needs (some of it is bundled by the deploy script),
           # Xvfb, openbox, xdotool, PulseAudio, Mesa's llvmpipe and lavapipe.
           sudo apt-get install -y -q --no-install-recommends \
-            gcc-12 g++-12 ninja-build pkg-config nasm gettext patchelf \
+            gcc-12 g++-12 ninja-build pkg-config gettext patchelf \
             libudev-dev libx11-dev libxi-dev libxcb1-dev libpulse-dev libasound2-dev libegl-dev libgl-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-util1 \
             libxcb-xinput0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-randr0 libxcb-shape0 libxcb-sync1 \
@@ -449,30 +403,6 @@ jobs:
             echo "::error::Qt's libraries do not resolve"; exit 1
           fi
 
-      # FFmpeg for frame dumps (RetroPixels' recording): static libraries built
-      # from the same FFmpeg source and configuration as the Windows job
-      # (Externals/FFmpeg/build-ffmpeg.sh), here with the host's GCC.
-      - uses: actions/cache@v4
-        id: ffmpeg-cache
-        with:
-          path: ${{ env.FFMPEG_OUT }}
-          key: ffmpeg-linux-ubuntu22.04-${{ hashFiles('pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh', 'pixelu/wii/Externals/sources.json') }}
-
-      - name: Build FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: |
-          python pixelu/wii/Externals/fetch.py --group ffmpeg
-          PIXELU_FFMPEG_HOST_TEST=1 bash pixelu/wii/Externals/FFmpeg/build-ffmpeg.sh pixelu/wii/third_party/FFmpeg/ffmpeg "$FFMPEG_OUT"
-
-      - name: Check FFmpeg
-        run: |
-          cat "$FFMPEG_OUT/BUILD-INFO.txt"
-          for l in avcodec avformat avutil swresample swscale; do
-            [ -f "$FFMPEG_OUT/lib/lib$l.a" ] || { echo "::error::FFmpeg: missing lib/lib$l.a"; exit 1; }
-            [ -f "$FFMPEG_OUT/include/lib$l/$l.h" ] || { echo "::error::FFmpeg: missing include/lib$l/$l.h"; exit 1; }
-          done
-          grep -q 'N-106414-g28d011516b' "$FFMPEG_OUT/include/libavutil/ffversion.h" || { echo "::error::FFmpeg: not N-106414-g28d011516b"; exit 1; }
-
       - uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: "4.2.x"
@@ -483,9 +413,8 @@ jobs:
           # No LLVM: the debugger's host disassembly would link the runner's libLLVM.
           cmake -S pixelu/wii -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DENABLE_LLVM=OFF \
-            -DPIXELU_WII_FFMPEG_DIR="$PWD/$FFMPEG_OUT" 2>&1 | tee "$RUNNER_TEMP/configure.txt"
+            2>&1 | tee "$RUNNER_TEMP/configure.txt"
           test "${PIPESTATUS[0]}" = 0
-          grep -q 'FFmpeg found: frame dumps are encoded' "$RUNNER_TEMP/configure.txt" || { echo "::error::FFmpeg was not found"; exit 1; }
           grep -q "Qt $QT_VERSION" "$RUNNER_TEMP/configure.txt" || { echo "::error::not configured with Qt $QT_VERSION"; exit 1; }
 
       - name: Build
@@ -528,14 +457,10 @@ jobs:
           # Each third-party project's own licence files go to Licenses/Externals/<project>/
           # (the same rule as the Windows job; Qt's are there too).
           ext_dirs=0
-          for ext in pixelu/wii/third_party/*/ pixelu/wii/Externals/expr/ pixelu/wii/Externals/FreeSurround/; do
+          for ext in pixelu/wii/third_party/*/ pixelu/wii/Externals/expr/; do
             ext=${ext%/}
             name=$(basename "$ext")
-            if [ "$name" = FreeSurround ]; then
-              found="$ext/README.txt"
-            else
-              found=$(find "$ext" -maxdepth 3 -type f -not -path '*/FFmpeg/ffmpeg/*' | grep -iE '/((licen[cs]e|copying|copyright|notice|unlicense)([._-][^/]*)?|[^/]*copyright[^/]*)$' || true)
-            fi
+            found=$(find "$ext" -maxdepth 3 -type f | grep -iE '/((licen[cs]e|copying|copyright|notice|unlicense)([._-][^/]*)?|[^/]*copyright[^/]*)$' || true)
             if [ -z "$found" ]; then echo "no licence file found in $name"; continue; fi
             while IFS= read -r f; do
               dst="$out/Licenses/Externals/$name/${f#"$ext"/}"
@@ -553,7 +478,7 @@ jobs:
           {
             echo "PixelU Wii $ver test build for Linux x86-64 (GameCube and Wii, based on Dolphin; not a release)"
             echo "Built $(date -u +%Y-%m-%d) from branch claude/wiiu-emulator-urpcen ($sha) on Ubuntu 22.04 (glibc 2.35 or newer needed)"
-            echo "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $QT_VERSION official build; FFmpeg built from source); translations and the third-party Sys files from Dolphin $DOLPHIN_TAG ($dsha)"
+            echo "Built with PixelU-Wii's own CMake; third-party libraries from their own projects (pixelu/wii/Externals/sources.json; Qt $QT_VERSION official build); translations and the third-party Sys files from Dolphin $DOLPHIN_TAG ($dsha)"
             echo "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
             echo "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
             echo "Copyright and licences: COPYING (the program as a whole: GNU GPL version 2 or later, license.txt); licence texts in Licenses/"
