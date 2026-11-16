@@ -13,6 +13,7 @@
 #include "Common/Thread.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/Config/UISettings.h"
 #include "Core/Core.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HotkeyManager.h"
