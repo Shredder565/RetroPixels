@@ -1,0 +1,8 @@
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// Windows resources of PixelU-Wii.exe: its icon (drawn by pixelu/wii/art/make_art.py). Explorer,
+// the taskbar and the game window show the first icon resource, IDI_ICON1.
+
+#define IDI_ICON1 101
+
+IDI_ICON1 ICON "PixelU-Wii.ico"

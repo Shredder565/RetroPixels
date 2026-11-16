@@ -155,7 +155,7 @@ pixelu_add_sources(dolphin-emu
     TASSlider.h TASSpinBox.cpp TASSpinBox.h WiiTASInputWindow.cpp WiiTASInputWindow.h
 )
 set_target_properties(dolphin-emu PROPERTIES
-  OUTPUT_NAME PixelU-Wii
+  OUTPUT_NAME PixelU-Wii-Qt
   DEBUG_POSTFIX D
   WIN32_EXECUTABLE TRUE
 )
@@ -216,15 +216,6 @@ else()
     target_link_libraries(dolphin-emu PRIVATE X11::xcb)
     target_compile_definitions(dolphin-emu PRIVATE PIXELU_QT_X11=1)
 
-    # pixelu-wii-dock-check: plays RetroPixels' part and checks the game window (plain,
-    # docked, given up). Xlib only; not built unless asked for (ninja pixelu-wii-dock-check).
-    add_executable(pixelu-wii-dock-check EXCLUDE_FROM_ALL)
-    pixelu_add_sources(pixelu-wii-dock-check
-      IN LinuxCheck
-        DockCheck.cpp
-    )
-    set_target_properties(pixelu-wii-dock-check PROPERTIES AUTOMOC OFF AUTORCC OFF)
-    target_link_libraries(pixelu-wii-dock-check PRIVATE X11::X11)
   endif()
 endif()
 

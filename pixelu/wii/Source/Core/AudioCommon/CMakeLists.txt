@@ -1,12 +1,11 @@
-# AudioCommon: audio output (cubeb, WASAPI, OpenAL, null), the mixer, Dolby Pro
+# AudioCommon: audio output (cubeb, WASAPI, null), the mixer, Dolby Pro
 # Logic II decoding (our own matrix decoder), and audio dumping.
 # Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-# OpenALStream loads openal32.dll when it is used, so it needs only the headers.
 pixelu_library(audiocommon
   IN .
     AudioCommon.cpp AudioCommon.h CubebStream.h Enums.h Mixer.cpp Mixer.h NullSoundStream.cpp
-    NullSoundStream.h OpenALStream.cpp OpenALStream.h SurroundDecoder.cpp SurroundDecoder.h
+    NullSoundStream.h SurroundDecoder.cpp SurroundDecoder.h
     WASAPIStream.cpp WASAPIStream.h WaveFile.cpp WaveFile.h
 )
 

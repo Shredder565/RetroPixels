@@ -7,7 +7,7 @@
 //
 //   MODE     plain    PixelU-Wii as an ordinary window: it appears, shows the game, and
 //                     SIGINT ends it (exit status 0).
-//            nogui    the same for dolphin-emu-nogui -p x11 (PROGRAM is then that program).
+//            nogui    the same with -p x11 (PixelU-Wii's own X11 window; the one PixelU-Wii uses).
 //            dock     PIXELU_EMBED=1: the game window waits marked (_RETROPIXELS_EMBED) and
 //                     not viewable (no flash on the desktop, not in the window manager's
 //                     list), is docked into a window carrying _RETROPIXELS_DOCK exactly as
@@ -17,7 +17,7 @@
 //            rp-embed the same with --rp-embed on the command line instead of PIXELU_EMBED.
 //            give-up  PIXELU_EMBED=1 and nobody docks it: after the deadline it is an ordinary
 //                     viewable window, unmarked; SIGTERM ends it with status 0.
-//   PROGRAM  PixelU-Wii (the Qt program), or dolphin-emu-nogui for MODE nogui
+//   PROGRAM  PixelU-Wii (dock, rp-embed and give-up were written for the earlier Qt program)
 //   DOL      a test program (tools/pixelu-wii-test-dol.py: the screen turns green 0xC0)
 //   USERDIR  PixelU-Wii's user folder for the run (-u)
 //   BACKEND  the video backend, OGL (default) or Vulkan

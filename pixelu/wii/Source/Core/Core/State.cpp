@@ -52,7 +52,6 @@
 
 #include "UICommon/UICommon.h"
 
-#include "VideoCommon/FrameDumpFFMpeg.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/VideoBackendBase.h"
 

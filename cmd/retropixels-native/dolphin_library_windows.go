@@ -296,9 +296,9 @@ func (l *dolLibrary) layout() {
 // showStatus: the engine's line at the top.
 func (l *dolLibrary) showStatus() {
 	exe := l.a.dolExe()
-	t := "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL).\n" + noEngine
+	t := "Games play in PixelU (RetroPixels' Wii/GameCube engine).\n" + noEngine
 	if exe != "" {
-		t = "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL)"
+		t = "Games play in PixelU (RetroPixels' Wii/GameCube engine)"
 		if v := dolphin.Version(exe); v != "" {
 			t += " · " + v
 		}

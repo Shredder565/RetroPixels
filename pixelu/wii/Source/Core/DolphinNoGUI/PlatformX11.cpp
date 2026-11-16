@@ -3,7 +3,8 @@
 // The X11 platform of dolphin-emu-nogui: one plain window the game is drawn into (also under
 // XWayland). The video backends and the keyboard/mouse backend get {X11, Display*, window}.
 // Closing the window (the window manager's close button, or WM_DELETE_WINDOW from RetroPixels)
-// stops the game; F11 and Alt+Return toggle fullscreen through the window manager.
+// stops the game; F11 and Alt+Return toggle fullscreen through the window manager. Started with
+// --rp-embed (PIXELU_EMBED=1), the window carries _RETROPIXELS_EMBED for RetroPixels to dock it.
 
 #include "DolphinNoGUI/Platform.h"
 
@@ -11,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -48,6 +50,7 @@ public:
   void JobsQueued() override;
   void SetTitle(std::string_view title) override;
   void RequestWindowSize(int width, int height) override;
+  void ToggleFullscreen() override;
 
 private:
   Atom Intern(const char* name) const { return XInternAtom(m_display, name, False); }
@@ -55,7 +58,7 @@ private:
   void HideCursor();
   void HandleEvent(XEvent& event);
   void ApplyPending();
-  void ToggleFullscreen();
+  void FlipFullscreen();
   void WaitForWork();
 
   Display* m_display = nullptr;
@@ -73,6 +76,7 @@ private:
   std::mutex m_pending_mutex;
   std::optional<std::string> m_pending_title;
   std::optional<std::pair<int, int>> m_pending_size;
+  bool m_pending_fullscreen_flip = false;
 };
 
 X11Platform::~X11Platform()
@@ -141,6 +145,15 @@ bool X11Platform::Init()
                     static_cast<int>(std::strlen(host.data())));
   }
 
+  // Started by RetroPixels to be docked: the mark it looks for.
+  const char* const embed = std::getenv("PIXELU_EMBED");
+  if (embed != nullptr && embed[0] == '1')
+  {
+    const long one = 1;
+    XChangeProperty(m_display, m_window, Intern("_RETROPIXELS_EMBED"), XA_CARDINAL, 32,
+                    PropModeReplace, reinterpret_cast<const unsigned char*>(&one), 1);
+  }
+
   m_wm_protocols = Intern("WM_PROTOCOLS");
   m_wm_delete = Intern("WM_DELETE_WINDOW");
   XSetWMProtocols(m_display, m_window, &m_wm_delete, 1);
@@ -197,7 +210,7 @@ void X11Platform::HideCursor()
   XFreePixmap(m_display, pixmap);
 }
 
-void X11Platform::ToggleFullscreen()
+void X11Platform::FlipFullscreen()
 {
   // EWMH: a _NET_WM_STATE client message to the root window, 2 = toggle.
   XEvent event{};
@@ -243,7 +256,7 @@ void X11Platform::HandleEvent(XEvent& event)
     const KeySym key = XLookupKeysym(&event.xkey, 0);
     const bool alt = (event.xkey.state & Mod1Mask) != 0;
     if (key == XK_F11 || (alt && key == XK_Return))
-      ToggleFullscreen();
+      FlipFullscreen();
     break;
   }
 
@@ -256,17 +269,21 @@ void X11Platform::ApplyPending()
 {
   std::optional<std::string> title;
   std::optional<std::pair<int, int>> size;
+  bool flip = false;
   {
     std::lock_guard lock(m_pending_mutex);
     title.swap(m_pending_title);
     size.swap(m_pending_size);
+    std::swap(flip, m_pending_fullscreen_flip);
   }
+  if (flip)
+    FlipFullscreen();
   if (title)
     SetUtf8Title(*title);
   if (size && !m_fullscreen && Config::Get(Config::MAIN_RENDER_WINDOW_AUTOSIZE))
     XResizeWindow(m_display, m_window, static_cast<unsigned>(size->first),
                   static_cast<unsigned>(size->second));
-  if (title || size)
+  if (title || size || flip)
     XFlush(m_display);
 }
 
@@ -342,6 +359,14 @@ void X11Platform::RequestWindowSize(int width, int height)
   {
     std::lock_guard lock(m_pending_mutex);
     m_pending_size = std::make_pair(width, height);
+  }
+  JobsQueued();
+}
+void X11Platform::ToggleFullscreen()
+{
+  {
+    std::lock_guard lock(m_pending_mutex);
+    m_pending_fullscreen_flip = !m_pending_fullscreen_flip;
   }
   JobsQueued();
 }

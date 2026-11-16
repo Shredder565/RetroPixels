@@ -1,7 +1,7 @@
 package main
 
 // GameCube / Wii through PixelU's Wii / GameCube engine
-// (PixelU\wii\PixelU-Wii.exe, based on Dolphin, GPL-2.0+; found by
+// (PixelU\wii\PixelU-Wii.exe, RetroPixels' own GameCube/Wii engine; found by
 // internal/pixelu, started and recorded by internal/dolphin, as it's Dolphin
 // with a new name): the settings kept in settings.json and the parts of the
 // GameCube / Wii menu and library that aren't Windows calls

@@ -5,8 +5,9 @@
 # libraries built from their own sources. Externals/fetch.py fetches those
 # sources from each library's own upstream project into third_party/ (the list,
 # with versions, commits and checksums, is Externals/sources.json); Externals/
-# holds PixelU's build files for them. Qt comes from upstream too: Qt's official
-# build (installed with aqtinstall); see .github/workflows/pixelu-wii.yml.
+# holds PixelU's build files for them. The program's window is its own (Win32 or
+# X11, Source/Core/DolphinNoGUI); no GUI toolkit is used. The older Qt interface
+# (Source/Core/DolphinQt) is not built or shipped unless ENABLE_QT is turned on.
 # A few third-party Sys files that are not Dolphin's own (GameTDB's title lists,
 # the Bitstream Vera OSD font, the MIT Gecko code handler) are still taken from a
 # checkout of Dolphin 2609a's repository, by default a sparse one in dolphin/.
@@ -73,8 +74,9 @@ else()
   set(on_linux ON)
 endif()
 
-option(ENABLE_QT "Build the Qt program (PixelU-Wii.exe)" ON)
-option(ENABLE_NOGUI "Build dolphin-emu-nogui, the program without a user interface" ${on_linux})
+option(ENABLE_NOGUI "Build PixelU-Wii, the program (its own game window, no GUI toolkit)" ON)
+# The earlier Qt interface: not shipped, and it needs Qt 6.8.3 (PIXELU_WII_QT_DIR).
+option(ENABLE_QT "Also build the earlier Qt interface (PixelU-Wii-Qt)" OFF)
 option(ENABLE_CLI_TOOL "Also configure the dolphin-tool command-line program" ON)
 option(ENABLE_VULKAN "Vulkan video backend" ON)
 # cubeb: WASAPI/WinMM on Windows, PulseAudio/ALSA on Linux (Externals/cubeb).
@@ -138,7 +140,7 @@ add_definitions(-D_ARCH_64=1 -D_M_X86_64=1)
 # Build settings for everything (PixelU-Wii and the third-party libraries)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT dolphin-emu)
+set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT pixelu-wii)
 
 # The program and its DLLs go to <build>/Binaries, PDB files to <build>/pdb; the
 # $<1:...> keeps multi-configuration generators from adding a Release/ folder.
@@ -323,7 +325,7 @@ if(USE_MGBA)
 endif()
 
 # Header-only pieces.
-include_directories("${THIRD}/wil/include" "${THIRD}/OpenAL/openal-soft/include/AL" "${THIRD}/picojson/picojson")
+include_directories("${THIRD}/wil/include" "${THIRD}/picojson/picojson")
 
 add_subdirectory(Externals/expr)
 add_subdirectory(Externals/FatFs)

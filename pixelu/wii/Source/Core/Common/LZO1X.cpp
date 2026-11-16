@@ -112,8 +112,8 @@ public:
     }
     else
     {
-      const u32 far = static_cast<u32>(distance - 16384);
-      const u32 high = (far >> 14) << 3;
+      const u32 m4_offset = static_cast<u32>(distance - 16384);
+      const u32 high = (m4_offset >> 14) << 3;
       if (length <= 9)
       {
         Byte(0x10 | high | u32(length - 2));
@@ -123,7 +123,7 @@ public:
         Byte(0x10 | high);
         Extended(length - 9);
       }
-      field = far & 0x3fff;
+      field = m4_offset & 0x3fff;
     }
     m_s_bits = Size();
     Byte(field << 2);
@@ -293,18 +293,18 @@ bool Decompress(const u8* in, std::size_t length, u8* out, std::size_t capacity,
     }
     else
     {
-      const bool near = op >= 32;
-      const u32 field_bits = near ? (op & 31) : (op & 7);
+      const bool is_m3 = op >= 32;
+      const u32 field_bits = is_m3 ? (op & 31) : (op & 7);
       if (field_bits != 0)
         count = 2 + field_bits;
-      else if (!extended(near ? 33 : 9, &count))
+      else if (!extended(is_m3 ? 33 : 9, &count))
         return false;
       u32 lo, hi;
       if (!read(&lo) || !read(&hi))
         return false;
       const std::size_t field = (lo >> 2) | (std::size_t(hi) << 6);
       s_bits = lo & 3;
-      if (near)
+      if (is_m3)
       {
         distance = field + 1;
       }
