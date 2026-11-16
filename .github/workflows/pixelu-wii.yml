@@ -234,10 +234,12 @@ jobs:
           python tools/pixelu-wii-test-dol.py $dol
           if ($LASTEXITCODE) { exit 1 }
           $user = "$env:RUNNER_TEMP\window-user"
-          # The software renderer draws without a GPU; the window is PixelU-Wii's own.
+          # The runner has no GPU and Windows' own OpenGL is 1.1, so the software renderer (which
+          # presents through OpenGL) cannot start here: the Null backend runs the game in
+          # PixelU-Wii's own window without drawing. Linux checks the drawing (Mesa).
           $err = "$env:RUNNER_TEMP\window-stderr.txt"
           $p = Start-Process -FilePath "$out\PixelU-Wii.exe" -PassThru -RedirectStandardError $err -ArgumentList `
-                 "-b", "-u", "`"$user`"", "-v", "`"Software Renderer`"", "-C", "`"Dolphin.DSP.Backend=No Audio Output`"", "-e", "`"$dol`""
+                 "-b", "-u", "`"$user`"", "-v", "Null", "-C", "`"Dolphin.DSP.Backend=No Audio Output`"", "-e", "`"$dol`""
           $hwnd = 0
           for ($i = 0; $i -lt 60 -and $hwnd -eq 0; $i++) {
             Start-Sleep -Milliseconds 500
