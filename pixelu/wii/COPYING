@@ -134,10 +134,8 @@ time into Licenses\Externals\<project>\.
   Bochs disassembler                   LGPL-2.1-or-later
   OpenAL headers                       LGPL-2.0-or-later (LGPL-2.1-or-later.txt
                                        covers the later versions)
-  LZO                                  GPL-2.0-or-later
   FreeSurround                         GPL-2.0-or-later
   Khronos OpenGL headers               MIT
-  TAP-Windows header (OpenVPN)         GPL-2.0 (header only)
   Bitstream Vera Sans Mono             Bitstream-Vera (Sys\Resources\
    (Sys\Resources\OSD_Font.ttf)         OSD_Font_VeraMono_Copyright.txt)
   Microsoft Visual C++ runtime DLLs    Microsoft's redistribution terms (Visual
