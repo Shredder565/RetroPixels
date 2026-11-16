@@ -39,8 +39,8 @@ func dspSat(v float64) float64 {
 func dspFix(v float64) float64  { return dspSat(math.Trunc(v)) }
 func dspFrac(v float64) float64 { return v / 32768 }
 
-func dsin(a int) float64 { return dspSat(jsRound(32768 * jsSin(float64(s16(a))*dspTurn))) }
-func dcos(a int) float64 { return dspSat(jsRound(32768 * jsCos(float64(s16(a))*dspTurn))) }
+func dsin(a int) float64 { return dspSat(jsRound(32768 * math.Sin(float64(s16(a))*dspTurn))) }
+func dcos(a int) float64 { return dspSat(jsRound(32768 * math.Cos(float64(s16(a))*dspTurn))) }
 
 // pow2 is 2 ** x.
 func pow2(x float64) float64 {
@@ -55,7 +55,7 @@ func dspInv(c, e int) []float64 {
 		return []float64{0x7fff, 0x2f}
 	}
 	r := 1 / (dspFrac(float64(c)) * pow2(float64(e)))
-	ex := math.Ceil(jsLog2(math.Abs(r)))
+	ex := math.Ceil(math.Log2(math.Abs(r)))
 	m := r / pow2(ex)
 	if m < 0 && m >= -0.5 {
 		m *= 2
@@ -111,9 +111,9 @@ func (d *dsp1Core) reset() {
 }
 
 func (d *dsp1Core) attitude(M *[9]int16, m, az, ay, ax int) {
-	sz, cz := jsSin(float64(az)*dspTurn), jsCos(float64(az)*dspTurn)
-	sy, cy := jsSin(float64(ay)*dspTurn), jsCos(float64(ay)*dspTurn)
-	sx, cx := jsSin(float64(ax)*dspTurn), jsCos(float64(ax)*dspTurn)
+	sz, cz := math.Sin(float64(az)*dspTurn), math.Cos(float64(az)*dspTurn)
+	sy, cy := math.Sin(float64(ay)*dspTurn), math.Cos(float64(ay)*dspTurn)
+	sx, cx := math.Sin(float64(ax)*dspTurn), math.Cos(float64(ax)*dspTurn)
 	h := float64(m) / 2
 	rows := [9]float64{
 		cz * cy, -sz * cy, sy,
@@ -147,8 +147,8 @@ func dspTurnPt(a, x, y int) (int, int) {
 }
 
 func (d *dsp1Core) gyrate(zr, xr, yr, u, f, l int) []float64 {
-	sy, cy := jsSin(float64(yr)*dspTurn), jsCos(float64(yr)*dspTurn)
-	cx, tx := jsCos(float64(xr)*dspTurn), jsTan(float64(xr)*dspTurn)
+	sy, cy := math.Sin(float64(yr)*dspTurn), math.Cos(float64(yr)*dspTurn)
+	cx, tx := math.Cos(float64(xr)*dspTurn), math.Tan(float64(xr)*dspTurn)
 	w := float64(u)*cy - float64(f)*sy
 	var dz float64
 	switch {
@@ -181,15 +181,15 @@ func (d *dsp1Core) parameter(fx, fy, fz, lfe, les, aas, azs int) []float64 {
 	const limit = 0x38c0
 	az := max(-limit, min(limit, s16(azs)))
 	over := float64(s16(azs)-az) * dspTurn
-	sZ := jsSin(float64(az) * dspTurn)
-	cZ := jsCos(float64(az)*dspTurn) * jsCos(over)
+	sZ := math.Sin(float64(az) * dspTurn)
+	cZ := math.Cos(float64(az)*dspTurn) * math.Cos(over)
 	vof := 0.0
 	if over != 0 {
-		vof = dspFix(float64(les) * jsSin(over))
+		vof = dspFix(float64(les) * math.Sin(over))
 	}
 	t := 0.0
 	if cZ != 0 {
-		t = ez / jsCos(float64(az)*dspTurn)
+		t = ez / math.Cos(float64(az)*dspTurn)
 	}
 	p.cx = s16f(math.Trunc(ex + t*sZ*sA))
 	p.cy = s16f(math.Trunc(ey - t*sZ*cA))
