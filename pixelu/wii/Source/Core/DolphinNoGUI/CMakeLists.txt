@@ -49,3 +49,24 @@ elseif(ENABLE_X11)
 endif()
 
 pixelu_use_pch(pixelu-wii)
+
+########################################
+# The runnable folder (build/Binaries): next to the program go Sys and the licence files.
+
+set(bin_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
+# Sys is PixelU-Wii's own Data/Sys plus a short list of third-party files
+# (CMake/PixelUAssembleSys.cmake), assembled fresh on every build.
+add_custom_command(TARGET pixelu-wii POST_BUILD
+  COMMAND "${CMAKE_COMMAND}"
+          "-DTHIRD_PARTY_SYS=${PIXELU_WII_DOLPHIN_DATA}/Data/Sys"
+          "-DOWN_SYS=${PROJECT_SOURCE_DIR}/Data/Sys"
+          "-DOUT=${bin_dir}/Sys"
+          -P "${PIXELU_WII_CMAKE_DIR}/PixelUAssembleSys.cmake"
+  COMMENT "Assembling Binaries/Sys"
+  VERBATIM)
+pixelu_after_build_link(pixelu-wii "${PROJECT_SOURCE_DIR}/COPYING" "${bin_dir}/COPYING")
+pixelu_after_build_link(pixelu-wii "${PROJECT_SOURCE_DIR}/LICENSES" "${bin_dir}/Licenses")
+if(ENABLE_AUTOUPDATE)
+  pixelu_after_build_link(pixelu-wii "${CMAKE_BINARY_DIR}/build_info.txt" "${bin_dir}/build_info.txt")
+endif()
