@@ -3,6 +3,7 @@ name: PixelU (Wii U) test build
 # Builds PixelU, RetroPixels' own Wii U emulator in pixelu/ (it began as a copy of Cemu),
 # for Windows (PixelU-windows-x64) and Linux (PixelU-linux-x64, with PixelU-linux.tar.gz inside so
 # the program keeps its exec bit). The results are workflow artifacts only: no release is made.
+# Each package carries VERSION.txt and THIRD_PARTY.md (the third-party parts and their licences).
 
 on:
   workflow_dispatch:
