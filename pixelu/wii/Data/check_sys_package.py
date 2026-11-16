@@ -35,9 +35,10 @@ COMMON_PATHS = os.path.join(WII, "Source", "Core", "Common", "CommonPaths.h")
 NAMED_SHADERS = ["Shaders/default_pre_post_process.glsl", "Shaders/Anaglyph/dubois.glsl",
                  "Shaders/Passive/horizontal.glsl"]
 
-# Files the program reads from Sys, wherever they come from.
+# Files the program reads from Sys, wherever they come from. (No DSP ROMs: the DSP LLE engine
+# reads the user's own dumps from User/GC; and no GameSettings, which are not shipped.)
 REQUIRED = NAMED_SHADERS + [
-    "GC/font_western.bin", "GC/font_japanese.bin", "GC/dsp_rom.bin", "GC/dsp_coef.bin",
+    "GC/font_western.bin", "GC/font_japanese.bin",
     "Wii/shared2/wc24/nwc24msg.cfg", "Wii/shared2/wc24/nwc24dl.bin", "codehandler.bin",
     "Resources/OSD_Font.ttf", "ApprovedInis.json", "wiitdb-en.txt", "triforcetdb-en.txt",
 ]
@@ -126,8 +127,6 @@ def main():
     for rel in REQUIRED:
         if rel not in have:
             errors.append("%s is missing (the program reads it)" % rel)
-    if not any(r.startswith("GameSettings/") for r in have):
-        errors.append("GameSettings is missing")
 
     theme = default_theme()
     for name in sorted(theme_icon_names()):
