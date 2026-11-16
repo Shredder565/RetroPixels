@@ -309,7 +309,6 @@ add_subdirectory(Externals/zlib-ng EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/minizip-ng EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/lz4 EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/libspng EXCLUDE_FROM_ALL)
-add_subdirectory(Externals/FreeSurround)
 add_subdirectory(Externals/ed25519)
 include_directories("${THIRD}/ed25519/ed25519/src")
 

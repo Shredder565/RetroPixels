@@ -4,17 +4,15 @@
 
 #include <array>
 #include <cstddef>
-#include <memory>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/FixedSizeQueue.h"
 
-class DPL2FSDecoder;
-
 namespace AudioCommon
 {
-// Turns stereo s16 frames into 5.1 float frames with FreeSurround's Dolby Pro Logic II decoder.
-// Output channel order is FL, FR, FC, LFE, BL, BR.
+// Turns matrix-encoded stereo s16 frames (as games write for Dolby Pro Logic II) into 5.1 float
+// frames with a passive matrix decoder. Output channel order is FL, FR, FC, LFE, BL, BR.
 class SurroundDecoder
 {
 public:
@@ -29,11 +27,25 @@ public:
   void Clear();
 
 private:
-  u32 m_block_frames;
-  std::unique_ptr<DPL2FSDecoder> m_decoder;
+  // Second-order low-pass filter (for the LFE channel).
+  struct LowPass
+  {
+    float b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    float Step(float x);
+    void Reset() { x1 = x2 = y1 = y2 = 0; }
+  };
 
-  // One block of stereo input converted to float.
-  std::array<float, 32768> m_block_input{};
+  void DecodeFrame(float left, float right);
+
+  u32 m_block_frames;
+  LowPass m_lfe_filter;
+
+  // The surround channels lag the front by a few milliseconds, which keeps sounds in front
+  // where the matrix leaks some front sound into the back.
+  std::vector<float> m_delay_left;
+  std::vector<float> m_delay_right;
+  size_t m_delay_pos = 0;
 
   // Decoded 5.1 samples waiting to be received.
   Common::FixedSizeQueue<float, 32768> m_ready;
