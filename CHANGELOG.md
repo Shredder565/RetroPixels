@@ -2,6 +2,16 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.47.0] - 2026-11-16
+
+- New: **GameCube / Wii > Map controller buttons…**, a button mapping window of RetroPixels' own that replaces the one that went away with PixelU-Wii's Qt window in 2.46.0. No more editing GCPadNew.ini or WiimoteNew.ini by hand.
+  - Pick **GameCube controller 1–4** or **Wii Remote 1–4**, what is plugged in (a standard controller, nothing, or the GameCube controller adapter for Wii U; an emulated Wii Remote or nothing) and, for a Wii Remote, its **Nunchuk** or **Classic Controller**.
+  - **Play it with** an Xbox controller (1–4) or the **keyboard and mouse**. Switching between them fills in a ready-made layout for that device: the Xbox layout RetroPixels already sets up, or a keyboard one (the mouse points the Wii Remote).
+  - Every button, stick direction, trigger, the Wii Remote's pointer, shake, tilt and swing, and rumble is listed with what works it, in plain words ("LT", "Left stick up", "Space"). Pick one, click **Press to set** (or double-click it) and press the button, move the stick or press the key (on the keyboard and mouse, clicking a mouse button works too); the next button is picked for you. Esc cancels. A key can work a button of a controller set to an Xbox controller, and the other way round.
+  - The **Mapped to** box shows the engine's own wording and can be typed in, for things like `` `Button A`|`Button B` `` (either one).
+  - **Default layout** and **Clear all**; **Save** writes only the buttons the window shows, so dead zones and other settings in those files stay as they were, and the first change still keeps a copy of the original file. PixelU-Wii must be closed to save, as for PixelU settings.
+- Controller layout now points to the new window instead of the .ini files.
+
 ## [2.46.1] - 2026-11-16
 
 - Fixed: the download's notes for PixelU (the Wii U engine) still called it "based on Cemu" and came with the Mozilla Public License text. They now say it is RetroPixels' own code and list the third-party pictures, fonts and code it uses (THIRD_PARTY.md).

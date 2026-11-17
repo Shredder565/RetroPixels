@@ -15,7 +15,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels-Native.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.46.1 (the number also shows next to the RetroPixels name in the app).
+Version 2.47.0 (the number also shows next to the RetroPixels name in the app).
 For Windows 10 / 11 (64-bit).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
@@ -38,7 +38,7 @@ where Samus is and what she has from the game's memory, so it moves on to the
 next goal by itself. Press F8 again to turn it off.
 
 What's in the download
-- RetroPixels-Native-2.46.1.zip has RetroPixels-Native.exe (no web
+- RetroPixels-Native-2.47.0.zip has RetroPixels-Native.exe (no web
   browser inside, see "RetroPixels Native" below) and VERSION.txt with its
   version number.
 - The engines they play through, each in its own folder. Keep these folders
@@ -713,8 +713,13 @@ are left where they were).
   Native window, so OBS can capture it. F11 or Alt+Enter: fullscreen; Esc:
   leave fullscreen; F9: start or stop recording; Alt+F4: stop the game. The
   mp4 is saved when the game ends. The menu also has Game volume, PixelU
-  settings, Set up Xbox controller and Controller layout. Save states are
-  the engine's: Shift+F1 saves, F1 loads.
+  settings, Map controller buttons, Set up Xbox controller and Controller
+  layout. Map controller buttons... sets every button of GameCube
+  controllers 1-4 and Wii Remotes 1-4 (with a Nunchuk or Classic
+  Controller): pick a button, click Press to set and press the controller
+  button, move the stick or press the key. Each controller can play on an
+  Xbox controller or the keyboard and mouse. Save states are the engine's:
+  Shift+F1 saves, F1 loads.
 - Arcade games in MAME (any version): Arcade (MAME) > Library and MAME
   versions lists your MAME versions (Add MAME..., Find on this PC, or
   Download an official version), your ROM folders and your games, with the

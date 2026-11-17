@@ -4,6 +4,18 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.47.0  (2026-11-16)
+--------------------------------
+- New: GameCube / Wii > Map controller buttons..., RetroPixels' own button
+  mapping window for GameCube controllers 1-4 and Wii Remotes 1-4 (with a
+  Nunchuk or Classic Controller). It replaces the mapping screen that went
+  away with PixelU-Wii's Qt window: no more editing GCPadNew.ini or
+  WiimoteNew.ini by hand. Choose what is plugged in and whether it plays on
+  an Xbox controller or the keyboard and mouse, then pick a button, click
+  Press to set and press the button, move the stick or press the key.
+  Default layout, Clear all, and a box to type the engine's own wording.
+  Save keeps dead zones and other settings in those files.
+
 RetroPixels 2.46.1  (2026-11-16)
 --------------------------------
 - Fixed: the download's notes for PixelU (the Wii U engine) still called it

@@ -616,7 +616,10 @@ func (a *app) dolDialogMessage(m *msg) bool {
 		call(pSendMessageW, s, 0x00B1 /* EM_SETSEL */, 0x7fffffff, 0x7fffffff)
 		m.Hwnd = s
 	}
-	for _, h := range []uintptr{a.dolLibHwnd(), a.dolSettingsHwnd()} {
+	if d := a.dol.pdlg; d != nil && d.capturing(m) {
+		return true
+	}
+	for _, h := range []uintptr{a.dolLibHwnd(), a.dolSettingsHwnd(), a.dolPadMapHwnd()} {
 		if h != 0 && (m.Hwnd == h || call(pGetAncestor, m.Hwnd, 2 /* GA_ROOT */) == h) {
 			return call(pIsDialogMessageW, h, uintptr(unsafe.Pointer(m))) != 0
 		}
