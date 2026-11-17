@@ -1,16 +1,22 @@
 // Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// dolphin-emu-nogui: PixelU-Wii without a user interface. It boots what the command line names
-// (the same options as the Qt program, minus the GUI ones), runs it until the game ends or the
-// process gets SIGINT/SIGTERM, and exits. Messages that would be dialog boxes go to standard
-// error and are answered "yes".
+// PixelU-Wii: boots what the command line names, shows it in a window of its own (or none, with
+// -p headless), runs it until the game ends, the window is closed or the process is told to
+// stop, and exits. RetroPixels starts it this way and docks the window into its own; settings
+// come from PixelU-Wii's .ini files, which RetroPixels writes, and from -C overrides. Questions
+// are answered "yes"; on Windows, messages show as message boxes, elsewhere on standard error.
 //
-//     dolphin-emu-nogui [-u USERDIR] [-v Null] [-p headless|x11] [-e] FILE
+//     PixelU-Wii [-u USERDIR] [-C System.Section.Key=Value]... [-p PLATFORM] [-e] FILE
+//
+//     PixelU-Wii [-u USERDIR] --install-wad FILE   (installs a WAD, such as WiiWare DLC, and exits)
+//
+// -b, -c, -d and -l (options of the earlier program) are accepted and have no effect.
 
 #include <atomic>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <list>
 #include <memory>
 #include <optional>
@@ -19,17 +25,26 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <signal.h>
+#endif
 
 #include <OptionParser.h>
 
 #include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 #include "Common/MsgHandler.h"
+#include "Common/StringUtil.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
 #include "Core/Core.h"
 #include "Core/Host.h"
 #include "Core/System.h"
+#include "Core/WiiUtils.h"
+#include "DolphinNoGUI/Hotkeys.h"
 #include "DolphinNoGUI/Platform.h"
 #include "UICommon/CommandLineParse.h"
 #include "UICommon/UICommon.h"
@@ -52,6 +67,32 @@ void OnStopSignal(int)
     s_platform->RequestShutdown();
 }
 
+#ifdef _WIN32
+BOOL WINAPI OnConsoleEvent(DWORD)
+{
+  OnStopSignal(0);
+  return TRUE;
+}
+
+void InstallStopSignals()
+{
+  // Ctrl+C, Ctrl+Break and closing the console, when there is one.
+  SetConsoleCtrlHandler(OnConsoleEvent, TRUE);
+}
+
+// A GUI-subsystem program has no console. Started from one (cmd, PowerShell) without redirected
+// output, it borrows that console so messages and --help show up there.
+void AttachToParentConsole()
+{
+  const auto usable = [](HANDLE h) { return h != nullptr && h != INVALID_HANDLE_VALUE; };
+  if (usable(GetStdHandle(STD_OUTPUT_HANDLE)) || usable(GetStdHandle(STD_ERROR_HANDLE)))
+    return;
+  if (AttachConsole(ATTACH_PARENT_PROCESS) == FALSE)
+    return;
+  static_cast<void>(std::freopen("CONOUT$", "w", stdout));
+  static_cast<void>(std::freopen("CONOUT$", "w", stderr));
+}
+#else
 void InstallStopSignals()
 {
   struct sigaction action = {};
@@ -64,6 +105,7 @@ void InstallStopSignals()
   // A closed terminal or pipe is not a reason to crash.
   std::signal(SIGPIPE, SIG_IGN);
 }
+#endif
 
 const char* StyleName(Common::MsgType style)
 {
@@ -83,22 +125,73 @@ const char* StyleName(Common::MsgType style)
 
 bool PrintAlert(const char* caption, const char* text, bool yes_no, Common::MsgType style)
 {
-  std::fprintf(stderr, "%s: %s: %s%s\n", StyleName(style), caption, text,
-               yes_no ? " [answered yes]" : "");
+  // Every message goes to stderr (RetroPixels' log, the checks); on Windows, warnings and
+  // errors are also shown in a message box.
+  std::fprintf(stderr, "%s: %s: %s\n", StyleName(style), caption, text);
   std::fflush(stderr);
+#ifdef _WIN32
+  // Information stays out of the way; warnings and errors need someone to see them.
+  if (style != Common::MsgType::Information)
+  {
+    UINT flags = MB_TOPMOST | (yes_no ? MB_YESNO : MB_OK);
+    flags |= style == Common::MsgType::Critical ? MB_ICONERROR :
+             style == Common::MsgType::Question ? MB_ICONQUESTION :
+                                                  MB_ICONWARNING;
+    const int answer = MessageBoxW(nullptr, UTF8ToWString(text).c_str(),
+                                   UTF8ToWString(caption).c_str(), flags);
+    return !yes_no || answer == IDYES;
+  }
+#endif
+  if (yes_no)
+    std::fputs("[answered yes]\n", stderr);
   return true;
+}
+
+// The window platform this system has, when it can show a window now.
+std::string DefaultPlatform()
+{
+#if defined(_WIN32)
+  return "win32";
+#elif defined(PIXELU_NOGUI_X11)
+  // Under Wayland this is XWayland, where RetroPixels can dock the window.
+  const char* const display = std::getenv("DISPLAY");
+  return display != nullptr && display[0] != '\0' ? "x11" : "headless";
+#else
+  return "headless";
+#endif
 }
 
 std::unique_ptr<Platform> CreatePlatform(const std::string& name)
 {
-  if (name.empty() || name == "headless")
+  if (name == "headless")
     return Platform::CreateHeadless();
+#ifdef _WIN32
+  if (name == "win32")
+    return Platform::CreateWin32();
+#endif
 #ifdef PIXELU_NOGUI_X11
   if (name == "x11")
     return Platform::CreateX11();
 #endif
   return nullptr;
 }
+
+#ifndef _WIN32
+// RetroPixels asks for a window it can dock with --rp-embed (not an option of the parser).
+void TakeEmbedFlag(int* argc, char* argv[])
+{
+  int kept = 1;
+  for (int i = 1; i < *argc; ++i)
+  {
+    if (std::strcmp(argv[i], "--rp-embed") == 0)
+      setenv("PIXELU_EMBED", "1", 1);
+    else
+      argv[kept++] = argv[i];
+  }
+  argv[kept] = nullptr;
+  *argc = kept;
+}
+#endif
 
 // What the command line asks to boot, or nullptr (with a message printed) if nothing usable.
 std::unique_ptr<BootParameters> ReadBoot(const optparse::Values& options,
@@ -246,22 +339,38 @@ std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core
   return nullptr;
 }
 
-int main(int argc, char* argv[])
+namespace
 {
+int Run(int argc, char* argv[])
+{
+#ifndef _WIN32
+  TakeEmbedFlag(&argc, argv);
+#endif
+  // The GUI options are accepted so that command lines written for the earlier program work.
   const auto parser =
-      CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
-#ifdef PIXELU_NOGUI_X11
+      CommandLineParse::CreateParser(CommandLineParse::ParserOptions::IncludeGUIOptions);
+#if defined(_WIN32)
+  parser->add_option("-p", "--platform")
+      .action("store")
+      .choices({"headless", "win32"})
+      .help("Where the emulator runs: win32 (a window, the default) or headless (no window)");
+#elif defined(PIXELU_NOGUI_X11)
   parser->add_option("-p", "--platform")
       .action("store")
       .choices({"headless", "x11"})
-      .help("Where the emulator runs: headless (no window, the default) or x11 (a window on "
-            "$DISPLAY)");
+      .help("Where the emulator runs: x11 (a window on $DISPLAY, the default when it is set) or "
+            "headless (no window)");
 #else
   parser->add_option("-p", "--platform")
       .action("store")
       .choices({"headless"})
       .help("Where the emulator runs: headless (no window, the default)");
 #endif
+  parser->add_option("--install-wad")
+      .dest("install_wad")
+      .action("store")
+      .metavar("<file>")
+      .help("Install a WAD file (a WiiWare title or its add-on content) into the Wii NAND and exit");
   // optparse prints its own message for a bad command line and then throws the exit status.
   const optparse::Values* parsed = nullptr;
   try
@@ -275,8 +384,23 @@ int main(int argc, char* argv[])
   const optparse::Values& options = *parsed;
   const std::vector<std::string> args = parser->args();
 
-  const std::string platform_name =
-      options.is_set("platform") ? static_cast<const char*>(options.get("platform")) : "";
+  if (options.is_set("install_wad"))
+  {
+    const std::string wad = static_cast<const char*>(options.get("install_wad"));
+    Common::RegisterMsgAlertHandler(PrintAlert);
+    UICommon::SetUserDirectory(
+        options.is_set("user") ? static_cast<const char*>(options.get("user")) : "");
+    UICommon::CreateDirectories();
+    UICommon::Init();
+    const bool installed = WiiUtils::InstallWAD(wad);
+    UICommon::Shutdown();
+    std::fprintf(stderr, installed ? "Installed %s\n" : "Could not install %s\n", wad.c_str());
+    return installed ? 0 : 1;
+  }
+
+  const std::string platform_name = options.is_set("platform") ?
+                                        static_cast<const char*>(options.get("platform")) :
+                                        DefaultPlatform();
   std::unique_ptr<Platform> platform = CreatePlatform(platform_name);
   if (!platform)
   {
@@ -317,7 +441,20 @@ int main(int argc, char* argv[])
     }
     else
     {
-      platform->MainLoop();
+      const bool inhibit = Config::Get(Config::MAIN_DISABLE_SCREENSAVER);
+      if (inhibit)
+        UICommon::InhibitScreenSaver(true);
+      {
+        Hotkeys hotkeys({.toggle_fullscreen = [&platform] { platform->ToggleFullscreen(); },
+                         .stop =
+                             [&platform] {
+                               platform->RequestShutdown();
+                               platform->JobsQueued();
+                             }});
+        platform->MainLoop();
+      }
+      if (inhibit)
+        UICommon::InhibitScreenSaver(false);
     }
 
     Core::Shutdown(system);
@@ -328,3 +465,24 @@ int main(int argc, char* argv[])
   UICommon::Shutdown();
   return status;
 }
+}  // namespace
+
+#ifdef _WIN32
+// Windows entry point (a GUI program: no console window): a UTF-8 argv from the wide command line.
+int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int)
+{
+  AttachToParentConsole();
+  std::vector<std::string> arguments = Common::CommandLineToUtf8Argv(GetCommandLineW());
+  std::vector<char*> argv;
+  argv.reserve(arguments.size() + 1);
+  for (std::string& argument : arguments)
+    argv.push_back(argument.data());
+  argv.push_back(nullptr);
+  return Run(static_cast<int>(arguments.size()), argv.data());
+}
+#else
+int main(int argc, char* argv[])
+{
+  return Run(argc, argv);
+}
+#endif

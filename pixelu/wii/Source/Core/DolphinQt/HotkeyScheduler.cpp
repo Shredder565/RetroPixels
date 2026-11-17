@@ -418,10 +418,6 @@ void HotkeyScheduler::HandleSessionHotkeys(Core::System& system)
   };
   EmitPressed(NETPLAY_AND_MOVIES);
 
-  // A passed-through Bluetooth adapter gets the sync button as long as the hotkey is held.
-  if (const auto real_bluetooth = WiiUtils::GetBluetoothRealDevice())
-    real_bluetooth->UpdateSyncButtonState(Held(HK_TRIGGER_SYNC_BUTTON));
-
   if (Config::IsDebuggingEnabled())
     HandleDebuggerHotkeys();
 

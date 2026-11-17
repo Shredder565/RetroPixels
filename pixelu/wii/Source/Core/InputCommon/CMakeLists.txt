@@ -6,6 +6,7 @@
 pixelu_library(inputcommon
   IN .
     DynamicInputTextureManager.cpp DynamicInputTextureManager.h GCAdapter.cpp GCAdapter.h
+    GCAdapterUSB.cpp GCAdapterUSB.h
     ImageOperations.cpp ImageOperations.h InputConfig.cpp InputConfig.h InputProfile.cpp
     InputProfile.h
   IN ControlReference
@@ -38,7 +39,6 @@ pixelu_library(inputcommon
 target_link_libraries(inputcommon
   PUBLIC
     common
-    LibUSB::LibUSB
   PRIVATE
     fmt::fmt
     sfml-network
@@ -46,6 +46,8 @@ target_link_libraries(inputcommon
 )
 
 if(WIN32)
+  # WinUSB and SetupAPI: the GameCube adapter (GCAdapterUSB.cpp).
+  target_link_libraries(inputcommon PRIVATE winusb.lib setupapi.lib)
   pixelu_add_sources(inputcommon
     IN ControllerInterface/DInput
       DInput.cpp DInput.h DInput8.h DInputJoystick.cpp DInputJoystick.h DInputKeyboardMouse.cpp

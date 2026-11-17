@@ -10,14 +10,12 @@
 #include "Common/Common.h"
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
-#include "Core/USBUtils.h"
 #include "DiscIO/Enums.h"
 
 // Audio backend names as stored in [DSP] Backend. Two are shown translated.
 #define BACKEND_NULLSOUND _trans("No Audio Output")
 #define BACKEND_ALSA "ALSA"
 #define BACKEND_CUBEB "Cubeb"
-#define BACKEND_OPENAL "OpenAL"
 #define BACKEND_PULSEAUDIO "Pulse"
 #define BACKEND_OPENSLES "OpenSLES"
 #define BACKEND_WASAPI _trans("WASAPI (Exclusive Mode)")
@@ -362,20 +360,6 @@ extern const Info<bool> MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
-
-// [BluetoothPassthrough]
-
-extern const Info<bool> MAIN_BLUETOOTH_PASSTHROUGH_ENABLED;
-extern const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_VID;
-extern const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_PID;
-extern const Info<std::string> MAIN_BLUETOOTH_PASSTHROUGH_LINK_KEYS;
-
-// [USBPassthrough]
-
-extern const Info<bool> MAIN_USB_PASSTHROUGH_DISGUISE_PLAYSTATION_AS_WII;
-extern const Info<std::string> MAIN_USB_PASSTHROUGH_DEVICES;
-std::set<USBUtils::DeviceInfo> GetUSBDeviceWhitelist();
-void SetUSBDeviceWhitelist(const std::set<USBUtils::DeviceInfo>& devices);
 
 // [EmulatedUSBDevices]
 

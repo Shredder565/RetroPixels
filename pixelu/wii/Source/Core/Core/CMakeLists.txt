@@ -11,7 +11,7 @@ pixelu_library(core
     CPUThreadConfigCallback.h DolphinAnalytics.cpp DolphinAnalytics.h DSPEmulator.cpp
     DSPEmulator.h FreeLookManager.cpp FreeLookManager.h GeckoCode.cpp GeckoCode.h
     GeckoCodeConfig.cpp GeckoCodeConfig.h Host.h HotkeyManager.cpp HotkeyManager.h
-    LibusbUtils.cpp LibusbUtils.h MemTools.cpp MemTools.h Movie.cpp Movie.h NetPlayClient.cpp
+    MemTools.cpp MemTools.h Movie.cpp Movie.h NetPlayClient.cpp
     NetPlayClient.h NetPlayCommon.cpp NetPlayCommon.h NetPlayServer.cpp NetPlayServer.h
     NetworkCaptureLogger.cpp NetworkCaptureLogger.h PatchEngine.cpp PatchEngine.h State.cpp
     State.h SyncIdentifier.h SysConf.cpp SysConf.h System.cpp System.h TimePlayed.cpp
@@ -151,7 +151,7 @@ pixelu_library(core
     Common.cpp Common.h Host.cpp Host.h USB_KBD.cpp USB_KBD.h USBScanner.cpp USBScanner.h
     USBV0.cpp USBV0.h USBV4.cpp USBV4.h USBV5.cpp USBV5.h
   IN IOS/USB/Bluetooth
-    BTBase.cpp BTBase.h BTEmu.cpp BTEmu.h BTStub.cpp BTStub.h hci.h l2cap.h WiimoteDevice.cpp
+    BTBase.cpp BTBase.h BTEmu.cpp BTEmu.h hci.h l2cap.h WiimoteDevice.cpp
     WiimoteDevice.h WiimoteHIDAttr.cpp WiimoteHIDAttr.h
   IN IOS/USB/Emulated
     Infinity.cpp Infinity.h LogitechMic.cpp LogitechMic.h Microphone.cpp Microphone.h
@@ -238,7 +238,6 @@ target_link_libraries(core
   PRIVATE
     FatFs
     fmt::fmt
-    LZO::LZO
     LZ4::LZ4
     ZLIB::ZLIB
 )
@@ -251,18 +250,6 @@ if(ENABLE_CUBEB)
   pixelu_add_sources(core
     IN HW/EXI
       EXI_DeviceMic.cpp EXI_DeviceMic.h
-  )
-endif()
-
-if(TARGET LibUSB::LibUSB)
-  # Real USB devices and Bluetooth adapters passed through to the Wii.
-  target_link_libraries(core PUBLIC LibUSB::LibUSB)
-  pixelu_add_sources(core
-    IN IOS/USB
-      LibusbDevice.cpp LibusbDevice.h
-    IN IOS/USB/Bluetooth
-      BTReal.cpp BTReal.h LibUSBBluetoothAdapter.cpp LibUSBBluetoothAdapter.h
-      RealtekFirmwareLoader.cpp RealtekFirmwareLoader.h
   )
 endif()
 

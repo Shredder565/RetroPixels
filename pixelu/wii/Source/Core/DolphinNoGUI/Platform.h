@@ -39,9 +39,17 @@ public:
   // Any thread.
   virtual void RequestWindowSize(int width, int height) {}
 
+  // Switches the window between fullscreen and windowed (the fullscreen hotkey). Any thread.
+  virtual void ToggleFullscreen() {}
+
   // The headless platform: nothing on screen, for the Null video backend, the software renderer's
   // frame dumps, tests and servers.
   static std::unique_ptr<Platform> CreateHeadless();
+
+#ifdef _WIN32
+  // A window of its own (PlatformWin32.cpp), which RetroPixels can dock.
+  static std::unique_ptr<Platform> CreateWin32();
+#endif
 
 #ifdef PIXELU_NOGUI_X11
   // A window on the X server in $DISPLAY (PlatformX11.cpp).

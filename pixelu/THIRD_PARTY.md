@@ -22,17 +22,13 @@ made from `web/icon-512.png`.
 
 ## Code inside `src/`
 
+Since 2.46.0 the XML reader, MD5, the hash maps, date and number parsing
+and the G.721 encoder are RetroPixels' own. What is left here:
+
 | What | Where | Licence |
 |---|---|---|
-| TinyXML-2 (Lee Thomason) | `src/util/tinyxml2/` | zlib |
-| robin_hood hashing (Martin Ankerl) | `src/util/containers/robin_hood.h` | MIT |
-| ska::flat_hash_map (Malte Skarupke) | `src/util/containers/flat_hash_map.hpp` | Boost Software License 1.0 |
-| MD5 (Alexander Peslyak) | `src/util/crypto/md5.*` | public domain |
 | XAudio2 2.7 headers (Microsoft DirectX SDK) | `src/audio/xaudio2_7/` | Microsoft DirectX SDK terms |
-| date.h (Howard Hinnant and others) | `src/Common/unix/date.h` | MIT |
-| fast_float (Daniel Lemire and others) | `src/Common/unix/fast_float.h` | Apache-2.0 or MIT |
 | Khronos OpenGL/EGL headers | `src/Common/GLInclude/` (`glext.h`, `wglext.h`, `glxext.h`, `egl.h`, `khrplatform.h`) | MIT / Apache-2.0 |
-| G.721 codec (Sun Microsystems) | `src/Cafe/OS/libs/nsyshid/g721/` | Sun's unrestricted-use notice |
 
 ## Libraries in `dependencies/` and `cmake/`
 

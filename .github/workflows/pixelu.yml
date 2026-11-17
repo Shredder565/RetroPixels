@@ -3,6 +3,7 @@ name: PixelU (Wii U) test build
 # Builds PixelU, RetroPixels' own Wii U emulator in pixelu/ (it began as a copy of Cemu),
 # for Windows (PixelU-windows-x64) and Linux (PixelU-linux-x64, with PixelU-linux.tar.gz inside so
 # the program keeps its exec bit). The results are workflow artifacts only: no release is made.
+# Each package carries VERSION.txt and THIRD_PARTY.md (the third-party parts and their licences).
 
 on:
   workflow_dispatch:
@@ -74,10 +75,10 @@ jobs:
           Copy-Item pixelu/bin/PixelU_release.exe "$out/PixelU.exe"
           Copy-Item -Recurse pixelu/bin/resources "$out/resources"
           Copy-Item -Recurse pixelu/bin/gameProfiles "$out/gameProfiles"
-          Copy-Item pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          Copy-Item pixelu/THIRD_PARTY.md "$out/THIRD_PARTY.md"
           "PixelU keeps its settings, keys and saves in this folder." | Out-File "$out/portable/README.txt"
           $sha = git rev-parse --short HEAD
-          "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicense: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
+          "PixelU test build (Wii U; RetroPixels' own code; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nPixelU began as a copy of Cemu; no Cemu code is left. Third-party pictures, fonts and code it uses, with their licences: THIRD_PARTY.md" | Out-File "$out/VERSION.txt"
 
       - name: List package contents
         shell: pwsh
@@ -170,14 +171,14 @@ jobs:
           echo "libbluetooth.so.3 is BlueZ's library from Ubuntu 22.04 (libbluetooth3, GPL-2.0-or-later); source: apt-get source bluez, or https://launchpad.net/ubuntu/+source/bluez" > "$out/lib/README.txt"
           cp -r pixelu/bin/resources "$out/resources"
           cp -r pixelu/bin/gameProfiles "$out/gameProfiles"
-          cp pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          cp pixelu/THIRD_PARTY.md "$out/THIRD_PARTY.md"
           echo "PixelU keeps its settings, keys and saves in this folder." > "$out/portable/README.txt"
           {
-            echo "PixelU test build for Linux x86-64 (Wii U, based on Cemu; not a release)"
+            echo "PixelU test build for Linux x86-64 (Wii U; RetroPixels' own code; not a release)"
             echo "Built $(date -u +%Y-%m-%d) on Ubuntu 22.04 from branch ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
             echo "Needs glibc 2.35 or newer, GTK 3, X11 (or XWayland), and a Vulkan or OpenGL driver."
             echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/pixelu"
-            echo "License: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu"
+            echo "PixelU began as a copy of Cemu; no Cemu code is left. Third-party pictures, fonts and code it uses, with their licences: THIRD_PARTY.md"
           } > "$out/VERSION.txt"
           tar -czf dist/PixelU-linux.tar.gz -C package PixelU
           cp "$out/VERSION.txt" dist/VERSION.txt

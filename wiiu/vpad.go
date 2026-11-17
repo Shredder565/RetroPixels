@@ -123,10 +123,10 @@ func init() {
 	})
 	reg(v, "VPADGetTPCalibrationParam", func(m *Machine, cpu *CPU, t *Thread) {
 		if a := arg(cpu, 1); a != 0 {
-			m.Mem.Write16(a, tpOffsetX)
-			m.Mem.Write16(a+2, tpOffsetY)
-			m.Mem.WriteF32(a+4, 1280.0/tpScaleX)
-			m.Mem.WriteF32(a+8, 720.0/tpScaleY)
+			m.Mem.Write16(a, touchBorder)
+			m.Mem.Write16(a+2, touchBorder)
+			m.Mem.WriteF32(a+4, 1280.0/touchSpan)
+			m.Mem.WriteF32(a+8, 720.0/touchSpan)
 		}
 	})
 	for _, n := range []string{"VPADSetTPCalibrationParam", "VPADSetSamplingCallback",
@@ -203,9 +203,9 @@ func (m *Machine) writeVPADStatus(a uint32) {
 			mem.Write16(a+o, tx)
 			mem.Write16(a+o+2, ty)
 			mem.Write16(a+o+4, 1)
-			mem.Write16(a+o+6, tpValid)
+			mem.Write16(a+o+6, touchValid)
 		} else {
-			mem.Write16(a+o+6, tpInvalidXY)
+			mem.Write16(a+o+6, touchInvalidXY)
 		}
 	}
 	mem.Write8(a+0xa0, 0xff) // volume slider

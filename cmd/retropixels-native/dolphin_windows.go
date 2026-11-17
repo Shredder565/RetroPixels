@@ -1,7 +1,7 @@
 package main
 
 // GameCube and Wii games, played in PixelU's Wii / GameCube engine
-// (PixelU\wii\PixelU-Wii.exe, based on Dolphin, GPL-2.0+) with its picture
+// (PixelU\wii\PixelU-Wii.exe, RetroPixels' own GameCube/Wii engine) with its picture
 // docked inside the RetroPixels Native window (so OBS captures this window),
 // as RetroPixels.exe does: the same engine (in the PixelU folder Wii U games
 // use), the same command line, controller set-up, volume control and
@@ -148,7 +148,7 @@ func (a *app) dolDetect() {
 func (a *app) addDolphinMenu() {
 	m := call(pCreatePopupMenu)
 	a.dol.menu = m
-	appendMenu(m, mfString|mfGrayed, 0, "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL)")
+	appendMenu(m, mfString|mfGrayed, 0, "Games play in PixelU, RetroPixels' Wii/GameCube engine")
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdDolLibrary, "&Library…")
 	appendMenu(m, mfString, cmdDolStop, "&Stop game")
@@ -168,7 +168,7 @@ func (a *app) addDolphinMenu() {
 	appendMenu(m, mfString, cmdDolPads, "Set up &Xbox controller")
 	appendMenu(m, mfString, cmdDolLayout, "&Controller layout")
 	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString, cmdDolOpenEmu, "&Open PixelU (Wii/GameCube)")
+	appendMenu(m, mfString, cmdDolOpenEmu, "&Install a WiiWare game or add-on (WAD)…")
 	appendMenu(m, mfString, cmdDolOpenConfig, "Open PixelU's Wii/GameCube settings f&older")
 	appendMenu(a.menu, mfPopup, m, "GameCube / &Wii")
 }
@@ -249,7 +249,7 @@ func (a *app) dolCommand(id int) {
 	case id == cmdDolLayout:
 		a.dolShowLayout()
 	case id == cmdDolOpenEmu:
-		a.dolOpenEmulator()
+		a.dolInstallWAD("")
 	case id == cmdDolOpenConfig:
 		exe := a.dolExe()
 		if exe == "" {
@@ -303,9 +303,11 @@ func (a *app) dolOpenPath(path string) bool {
 		return false
 	}
 	if dolphin.IsDLC(path) {
-		messageBox(a.hwnd, fmt.Sprintf("%q is add-on content (DLC) for a WiiWare game, not a game you can start.\n\n"+
-			"To add it: GameCube / Wii > Open PixelU (Wii/GameCube), then in PixelU use Tools > Install WAD... and choose this file once. "+
-			"Then start the game itself.", filepath.Base(path)), "RetroPixels", mbIconInfo)
+		if messageBox(a.hwnd, fmt.Sprintf("%q is add-on content (DLC) for a WiiWare game, not a game you can start.\n\n"+
+			"Install it into PixelU now? It only needs installing once; then start the game itself.", filepath.Base(path)),
+			"RetroPixels", mbYesNo|mbIconInfo) == idYes {
+			a.dolInstallWAD(path)
+		}
 		return true
 	}
 	g, ok := dolphin.GameFor(path)
@@ -344,7 +346,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	d := &a.settings.Dolphin
 	exe := a.dolExe()
 	if exe == "" {
-		messageBox(a.hwnd, "GameCube and Wii games play in PixelU (Wii/GameCube engine based on Dolphin, GPL).\n\n"+noEngine,
+		messageBox(a.hwnd, "GameCube and Wii games play in PixelU (RetroPixels' Wii/GameCube engine).\n\n"+noEngine,
 			"RetroPixels", mbIconInfo)
 		return
 	}
@@ -750,7 +752,7 @@ func (a *app) dolPaint(hdc uintptr) bool {
 
 // dolIdleNote: a line for the start screen.
 func dolIdleNote() string {
-	return "\nGameCube and Wii games (" + strings.Join(dolphinExts(), " ") + ") play in PixelU (Wii/GameCube engine based on Dolphin, GPL): GameCube / Wii > Library."
+	return "\nGameCube and Wii games (" + strings.Join(dolphinExts(), " ") + ") play in PixelU (RetroPixels' Wii/GameCube engine): GameCube / Wii > Library."
 }
 
 // ---------------- keys while the engine has the keyboard ----------------
@@ -858,21 +860,34 @@ func dolKeyHook(code, wp, lp uintptr) uintptr {
 // dolExe is PixelU's Wii / GameCube engine, or "".
 func (a *app) dolExe() string { return a.settings.Dolphin.exe(a.settings.PixelU.Exe) }
 
-func (a *app) dolOpenEmulator() {
+// dolInstallWAD installs a WAD (a WiiWare game or its add-on content) into
+// PixelU's Wii storage with PixelU-Wii --install-wad; path "" asks for one.
+func (a *app) dolInstallWAD(path string) {
 	exe := a.dolExe()
 	if exe == "" {
 		messageBox(a.hwnd, noEngine, "RetroPixels", mbIconInfo)
 		return
 	}
-	if dolphin.Running(filepath.Base(exe)) {
-		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open.", "RetroPixels", mbIconInfo)
+	if a.dol.run != nil || dolphin.Running(filepath.Base(exe)) {
+		messageBox(a.hwnd, "Stop the game first: PixelU can't install while a game is running.", "RetroPixels", mbIconInfo)
 		return
 	}
-	a.settings.Dolphin.importOld(exe)
-	_ = dolphin.SetupXboxPads(dolphin.UserDir(exe), false)
-	if err := dolphin.Command(exe).Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels", mbIconWarning)
+	if path == "" {
+		path = a.fileDialog("Install a WiiWare game or add-on", "WAD files (*.wad)\x00*.wad\x00All files\x00*.*\x00", a.settings.LastFolder)
+		if path == "" {
+			return
+		}
 	}
+	out, err := dolphin.Command(exe, "--install-wad", path).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		messageBox(a.hwnd, "Couldn't install "+filepath.Base(path)+":\n"+msg, "RetroPixels", mbIconWarning)
+		return
+	}
+	a.showMessage("Installed " + filepath.Base(path) + " in PixelU")
 }
 
 func (a *app) dolSetupPads() {
@@ -907,8 +922,9 @@ func (a *app) dolShowLayout() {
 	messageBox(a.hwnd, "GameCube controller (port 1): "+label[dolphin.PadState(user, "GCPadNew.ini", "GCPad1")]+"\n"+
 		"Wii Remote + Nunchuk: "+label[dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")]+"\n\n"+
 		dolphin.PadLayout+"\n\n"+
-		"The controller is set up automatically the first time a game starts; fine-tune it in PixelU > Controllers "+
-		"(GameCube / Wii > Open PixelU). Save states are in PixelU: Shift+F1 saves, F1 loads.",
+		"The controller is set up automatically the first time a game starts. To change single buttons, edit GCPadNew.ini "+
+		"or WiimoteNew.ini (GameCube / Wii > Open PixelU's settings folder) while no game is running. "+
+		"Save states are in PixelU: Shift+F1 saves, F1 loads.",
 		"Controller layout", mbIconInfo)
 }
 

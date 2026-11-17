@@ -111,8 +111,6 @@ jobs:
       - name: Package
         run: |
           cp README.txt CHANGELOG.txt "$DIR/"
-          cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
-          cp cores/model3/LICENSE-GPL-3.0.txt "$DIR/LICENSE-GPL-3.0.txt"
           cp cores/model3/NOTICE.txt "$DIR/NOTICE-Sega-Model-3.txt"
           cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
           {
@@ -126,18 +124,18 @@ jobs:
             echo "Built $(date -u +%F) from branch $GITHUB_REF_NAME ($(git rev-parse --short HEAD))"
             echo
             echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
-            echo "- PixelU\\PixelU.exe: Wii U (original engine rewritten from a Cemu start, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
-            echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (original engine rewritten from a Dolphin start, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
+            echo "- PixelU\\PixelU.exe: Wii U (RetroPixels' own engine, rewritten from a Cemu start; its third-party parts are listed in pixelu/THIRD_PARTY.md in the source)"
+            echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (RetroPixels' own engine, rewritten from a Dolphin start; PixelU\\wii\\COPYING lists its third-party parts)"
             echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
             echo "- PixelDS\\PixelDS.exe: Nintendo DS and 3DS games, 2D and 3D (RetroPixels' own emulator, all new code; no other DS or 3DS emulator is included)"
             echo "Sega Model 3 (Star Wars Trilogy Arcade) plays in RetroPixels' own emulator: nothing else is needed."
+            echo "  NOTICE-Sega-Model-3.txt lists its one third-party part (the 315-5881 decryption, from MAME, BSD-3-Clause)."
             echo "RetroPixels-SNES-Debugger.exe opens with SNES games: it captures VRAM, palettes and DMA transfers and swaps backgrounds (docs/snes-debugger.md in the source)."
-            echo "  Its sound chips follow Supermodel's code (GPL-3.0-or-later, LICENSE-GPL-3.0.txt); NOTICE-Sega-Model-3.txt lists its third-party parts."
             echo "Engine builds used:"
             sed 's/^/  /' engines.txt
             echo
             echo "Source: $src"
-            echo "PixelU-Wii source is in pixelu/wii; docs/pixelu-wii-original.md explains the rewrite and lists the third-party parts and kept Dolphin data."
+            echo "PixelU-Wii source is in pixelu/wii; docs/pixelu-wii-original.md explains the rewrite."
             echo "No games, keys, BIOS or firmware are included."
           } > "$DIR/VERSION.txt"
           # No zip of our own: GitHub zips the artifact on download, so the

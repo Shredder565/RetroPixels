@@ -52,9 +52,7 @@ private:
   ConfigBool* m_dump_mip_textures;
   ConfigBool* m_dump_base_textures;
 
-  ConfigBool* m_dump_use_lossless;
   ConfigChoice* m_frame_dumps_resolution_type;
-  ConfigInteger* m_dump_bitrate;
   ConfigInteger* m_png_compression_level;
 
   ConfigBool* m_enable_prog_scan;

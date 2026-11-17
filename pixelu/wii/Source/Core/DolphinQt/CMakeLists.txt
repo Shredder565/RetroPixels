@@ -142,7 +142,7 @@ pixelu_add_sources(dolphin-emu
     BroadbandAdapterSettingsDialog.cpp BroadbandAdapterSettingsDialog.h GameCubePane.cpp
     GameCubePane.h GeneralPane.cpp GeneralPane.h InterfacePane.cpp InterfacePane.h
     OnScreenDisplayPane.cpp OnScreenDisplayPane.h PathPane.cpp PathPane.h TriforcePane.cpp
-    TriforcePane.h USBDevicePicker.cpp USBDevicePicker.h WiiPane.cpp WiiPane.h
+    TriforcePane.h WiiPane.cpp WiiPane.h
   IN SkylanderPortal
     SkylanderModifyDialog.cpp SkylanderModifyDialog.h SkylanderPortalWindow.cpp
     SkylanderPortalWindow.h
@@ -155,7 +155,7 @@ pixelu_add_sources(dolphin-emu
     TASSlider.h TASSpinBox.cpp TASSpinBox.h WiiTASInputWindow.cpp WiiTASInputWindow.h
 )
 set_target_properties(dolphin-emu PROPERTIES
-  OUTPUT_NAME PixelU-Wii
+  OUTPUT_NAME PixelU-Wii-Qt
   DEBUG_POSTFIX D
   WIN32_EXECUTABLE TRUE
 )
@@ -216,15 +216,6 @@ else()
     target_link_libraries(dolphin-emu PRIVATE X11::xcb)
     target_compile_definitions(dolphin-emu PRIVATE PIXELU_QT_X11=1)
 
-    # pixelu-wii-dock-check: plays RetroPixels' part and checks the game window (plain,
-    # docked, given up). Xlib only; not built unless asked for (ninja pixelu-wii-dock-check).
-    add_executable(pixelu-wii-dock-check EXCLUDE_FROM_ALL)
-    pixelu_add_sources(pixelu-wii-dock-check
-      IN LinuxCheck
-        DockCheck.cpp
-    )
-    set_target_properties(pixelu-wii-dock-check PROPERTIES AUTOMOC OFF AUTORCC OFF)
-    target_link_libraries(pixelu-wii-dock-check PRIVATE X11::X11)
   endif()
 endif()
 
@@ -318,30 +309,5 @@ add_custom_command(TARGET dolphin-emu POST_BUILD
   VERBATIM)
 endif()
 
-# Translations: each Languages/po/<lang>.po is compiled to
-# Binaries/Languages/<lang>/dolphin-emu.mo with GNU gettext's msgfmt (found on
-# PATH, or given as -DGETTEXT_MSGFMT_EXECUTABLE=...; the workflow installs
-# MSYS2's gettext-tools). Without msgfmt there are no translations.
-find_package(Gettext)
-if(GETTEXT_MSGFMT_EXECUTABLE)
-  message(STATUS "msgfmt: ${GETTEXT_MSGFMT_EXECUTABLE}")
-endif()
-if(GETTEXT_MSGFMT_EXECUTABLE)
-  set(po_dir "${PIXELU_WII_DOLPHIN_DATA}/Languages/po")
-  set(pot_file "${po_dir}/dolphin-emu.pot")
-  file(GLOB po_files "${po_dir}/*.po")
-  target_sources(dolphin-emu PRIVATE "${pot_file}" ${po_files})
-  source_group("Localization" FILES ${po_files})
-  source_group("Localization\\\\Generated" FILES "${pot_file}")
-  foreach(po IN LISTS po_files)
-    get_filename_component(lang "${po}" NAME_WE)
-    set(mo "${bin_dir}/Languages/${lang}/dolphin-emu.mo")
-    add_custom_command(OUTPUT "${mo}"
-      COMMAND "${CMAKE_COMMAND}" -E make_directory "${bin_dir}/Languages/${lang}"
-      COMMAND "${GETTEXT_MSGFMT_EXECUTABLE}" -o "${mo}" "${po}"
-      DEPENDS "${po}"
-      VERBATIM)
-    target_sources(dolphin-emu PRIVATE "${mo}")
-    source_group("Localization\\\\Generated" FILES "${mo}")
-  endforeach()
-endif()
+# No translations are shipped: Dolphin's (GPL) were dropped in release 2.46.0, so the
+# program is in English.

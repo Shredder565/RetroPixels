@@ -45,7 +45,6 @@
 #include "Core/IOS/SDIO/SDIOSlot0.h"
 #include "Core/IOS/STM/STM.h"
 #include "Core/IOS/USB/Bluetooth/BTEmu.h"
-#include "Core/IOS/USB/Bluetooth/BTReal.h"
 #include "Core/IOS/USB/OH0/OH0.h"
 #include "Core/IOS/USB/OH0/OH0Device.h"
 #include "Core/IOS/USB/USB_HID/HIDv4.h"
@@ -566,13 +565,9 @@ void EmulationKernel::AddStaticDevices()
   // Emulator-only interface for homebrew.
   AddDevice(std::make_unique<DolphinDevice>(*this, "/dev/dolphin"));
 
-  // Bluetooth (OH1): the bus node is a stub, the Wii Remote adapter is real or emulated.
+  // Bluetooth (OH1): the bus node is a stub, the Wii Remote adapter is emulated.
   AddDevice(std::make_unique<DeviceStub>(*this, "/dev/usb/oh1"));
-  constexpr const char* bt_path = "/dev/usb/oh1/57e/305";
-  if (Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
-    AddDevice(std::make_unique<BluetoothRealDevice>(*this, bt_path));
-  else
-    AddDevice(std::make_unique<BluetoothEmuDevice>(*this, bt_path));
+  AddDevice(std::make_unique<BluetoothEmuDevice>(*this, "/dev/usb/oh1/57e/305"));
 
   AddDevice(std::make_unique<STMImmediateDevice>(*this, "/dev/stm/immediate"));
   AddDevice(std::make_unique<STMEventHookDevice>(*this, "/dev/stm/eventhook"));

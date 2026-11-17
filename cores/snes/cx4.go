@@ -9,8 +9,8 @@ var cx4Sin, cx4Cos [512]int
 
 func init() {
 	for i := range 512 {
-		cx4Sin[i] = int(int16(jsRound(32767 * jsSin(2*math.Pi*float64(i)/512))))
-		cx4Cos[i] = int(int16(jsRound(32767 * jsCos(2*math.Pi*float64(i)/512))))
+		cx4Sin[i] = int(int16(jsRound(32767 * math.Sin(2*math.Pi*float64(i)/512))))
+		cx4Cos[i] = int(int16(jsRound(32767 * math.Cos(2*math.Pi*float64(i)/512))))
 	}
 }
 
@@ -145,7 +145,7 @@ func (c *cx4) run(fn int) {
 		}
 	case 0x0d:
 		x, y, want := c.s16at(0x1f80), c.s16at(0x1f83), c.s16at(0x1f86)
-		l := jsHypot(float64(x), float64(y))
+		l := math.Hypot(float64(x), float64(y))
 		k := 0.0
 		if l != 0 {
 			k = float64(want) / l
@@ -164,7 +164,7 @@ func (c *cx4) run(fn int) {
 		}
 	case 0x15:
 		x, y := c.s16at(0x1f80), c.s16at(0x1f83)
-		c.put16(0x1f80, int(math.Trunc(jsHypot(float64(x), float64(y)))))
+		c.put16(0x1f80, int(math.Trunc(math.Hypot(float64(x), float64(y)))))
 	case 0x1f:
 		x, y := c.s16at(0x1f80), c.s16at(0x1f83)
 		var a int
@@ -175,7 +175,7 @@ func (c *cx4) run(fn int) {
 				a = 384
 			}
 		} else {
-			a = int(math.Trunc(jsAtan(float64(y)/float64(x)) * 256 / math.Pi))
+			a = int(math.Trunc(math.Atan(float64(y)/float64(x)) * 256 / math.Pi))
 			if x < 0 {
 				a += 256
 			}
@@ -336,7 +336,7 @@ func (c *cx4) turn3D(xi, yi, zi, ax, ay, az, scale int, persp bool) (int, int) {
 	}
 	rot := func(a int, p, q float64) (float64, float64) {
 		t := float64(-a) * cx4Rad
-		co, si := jsCos(t), jsSin(t)
+		co, si := math.Cos(t), math.Sin(t)
 		return p*co - q*si, p*si + q*co
 	}
 	y, z = rot(ax, y, z)

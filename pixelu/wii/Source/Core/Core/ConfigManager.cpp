@@ -333,8 +333,7 @@ void SConfig::OnESTitleChanged()
   Core::System& system = Core::System::GetInstance();
   Pad::LoadConfig();
   Keyboard::LoadConfig();
-  // With Bluetooth passthrough the Wii Remotes are real ones.
-  if (system.IsWii() && !Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
+  if (system.IsWii())
     Wiimote::LoadConfig();
 
   ReloadTextures(system);
@@ -361,7 +360,7 @@ void SConfig::ReloadTextures(Core::System& system)
 {
   Pad::GenerateDynamicInputTextures();
   Keyboard::GenerateDynamicInputTextures();
-  if (system.IsWii() && !Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
+  if (system.IsWii())
     Wiimote::GenerateDynamicInputTextures();
 
   HiresTexture::Update();

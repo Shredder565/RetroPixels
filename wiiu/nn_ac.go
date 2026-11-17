@@ -1,96 +1,82 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/nn_ac/nn_ac.cpp,
-// rewritten in Go for RetroPixels.
-
 package wiiu
 
-// nn_ac, the network connection. Cemu always reports a connection; here
-// there is none, but every out-parameter is still written the way Cemu
-// writes it, so programs never read what was on their stack.
+// nn_ac, the network connection manager. RetroPixels has no network for
+// games, so connecting fails and every status says "not connected". Every
+// out-parameter is still filled in, so a game never reads leftovers from its
+// own stack.
 
 const (
-	acNotConnected = 0xa0323800 // a failure nn::Result from nn_ac
-	acStatusFailed = 0xffffffff // AC_STATUS_FAILED
+	acErrNoConnection = 0xa0323800 // nn::Result: nn_ac, not connected
+	acStatusFailed    = 0xffffffff
 )
 
 func init() {
-	ac := "nn_ac"
-	ok := func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) }
-	for _, f := range []string{"ACInitialize", "ACFinalize", "Initialize__Q2_2nn2acFv", "Finalize__Q2_2nn2acFv"} {
-		reg(ac, f, ok)
+	const lib = "nn_ac"
+	result := func(v uint32) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, v) }
 	}
-	fail := func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, acNotConnected) }
-	for _, f := range []string{"ACConnect", "ACConnectAsync", "Connect__Q2_2nn2acFv", "ConnectAsync__Q2_2nn2acFv"} {
-		reg(ac, f, fail)
-	}
-	// out32 and out8 write v where argument i points, if it points anywhere
-	out32 := func(m *Machine, cpu *CPU, i int, v uint32) {
-		if p := arg(cpu, i); p != 0 {
+	// put stores v (of the given width in bytes) where argument i points
+	put := func(m *Machine, cpu *CPU, i, width int, v uint32) {
+		p := arg(cpu, i)
+		if p == 0 {
+			return
+		}
+		if width == 1 {
+			m.Mem.Write8(p, uint8(v))
+		} else {
 			m.Mem.Write32(p, v)
 		}
 	}
-	out8 := func(m *Machine, cpu *CPU, i int, v uint8) {
-		if p := arg(cpu, i); p != 0 {
-			m.Mem.Write8(p, v)
+	// fills returns a function that fills in out-parameters (argument
+	// index, width, value) and returns r
+	type out struct {
+		arg, width int
+		v          uint32
+	}
+	fills := func(r uint32, outs ...out) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			for _, o := range outs {
+				put(m, cpu, o.arg, o.width, o.v)
+			}
+			ret(cpu, r)
 		}
 	}
-	// (bool *): not connected
-	reg(ac, "IsApplicationConnected__Q2_2nn2acFPb", func(m *Machine, cpu *CPU, t *Thread) {
-		out8(m, cpu, 0, 0)
-		ret(cpu, 0)
-	})
-	// (u32 *)
-	reg(ac, "ACIsApplicationConnected", func(m *Machine, cpu *CPU, t *Thread) {
-		out32(m, cpu, 0, 0)
-		ret(cpu, 0)
-	})
-	// (bool *connected, u32 *apType)
-	reg(ac, "IsSystemConnected__Q2_2nn2acFPbPQ3_2nn2ac6ApType", func(m *Machine, cpu *CPU, t *Thread) {
-		out8(m, cpu, 0, 0)
-		out32(m, cpu, 1, 0)
-		ret(cpu, 0)
-	})
-	// (config id, bool *)
-	reg(ac, "IsConfigExisting__Q2_2nn2acFQ3_2nn2ac11ConfigIdNumPb", func(m *Machine, cpu *CPU, t *Thread) {
-		out8(m, cpu, 1, 0)
-		ret(cpu, 0)
-	})
-	status := func(m *Machine, cpu *CPU, t *Thread) {
-		out32(m, cpu, 0, acStatusFailed)
-		ret(cpu, 0)
+
+	for _, n := range []string{"ACInitialize", "ACFinalize", "Initialize__Q2_2nn2acFv", "Finalize__Q2_2nn2acFv"} {
+		reg(lib, n, result(0))
 	}
-	for _, f := range []string{"GetConnectStatus__Q2_2nn2acFPQ3_2nn2ac6Status", "GetStatus__Q2_2nn2acFPQ3_2nn2ac6Status",
+	for _, n := range []string{"ACConnect", "ACConnectAsync", "Connect__Q2_2nn2acFv", "ConnectAsync__Q2_2nn2acFv"} {
+		reg(lib, n, result(acErrNoConnection))
+	}
+	reg(lib, "IsApplicationConnected__Q2_2nn2acFPb", fills(0, out{0, 1, 0}))
+	reg(lib, "ACIsApplicationConnected", fills(0, out{0, 4, 0}))
+	reg(lib, "IsSystemConnected__Q2_2nn2acFPbPQ3_2nn2ac6ApType", fills(0, out{0, 1, 0}, out{1, 4, 0}))
+	reg(lib, "IsConfigExisting__Q2_2nn2acFQ3_2nn2ac11ConfigIdNumPb", fills(0, out{1, 1, 0}))
+	for _, n := range []string{"GetConnectStatus__Q2_2nn2acFPQ3_2nn2ac6Status", "GetStatus__Q2_2nn2acFPQ3_2nn2ac6Status",
 		"ACGetConnectStatus", "ACGetStatus"} {
-		reg(ac, f, status)
+		reg(lib, n, fills(0, out{0, 4, acStatusFailed}))
 	}
-	// (nn::Result *): the last connect failed
-	reg(ac, "GetConnectResult__Q2_2nn2acFPQ2_2nn6Result", func(m *Machine, cpu *CPU, t *Thread) {
-		out32(m, cpu, 0, acNotConnected)
-		ret(cpu, 0)
-	})
-	reg(ac, "GetLastErrorCode__Q2_2nn2acFPUi", func(m *Machine, cpu *CPU, t *Thread) {
-		out32(m, cpu, 0, 0)
-		ret(cpu, 0)
-	})
-	// (u32 *): no address
-	addr := func(m *Machine, cpu *CPU, t *Thread) {
-		out32(m, cpu, 0, 0)
-		ret(cpu, acNotConnected)
+	reg(lib, "GetConnectResult__Q2_2nn2acFPQ2_2nn6Result", fills(0, out{0, 4, acErrNoConnection}))
+	reg(lib, "GetLastErrorCode__Q2_2nn2acFPUi", fills(0, out{0, 4, 0}))
+	for _, n := range []string{"ACGetAssignedAddress", "GetAssignedAddress__Q2_2nn2acFPUl", "GetAssignedSubnet__Q2_2nn2acFPUl"} {
+		reg(lib, n, fills(acErrNoConnection, out{0, 4, 0}))
 	}
-	for _, f := range []string{"ACGetAssignedAddress", "GetAssignedAddress__Q2_2nn2acFPUl",
-		"GetAssignedSubnet__Q2_2nn2acFPUl"} {
-		reg(ac, f, addr)
-	}
-	// (nn::Result *)
-	reg(ac, "ACIsSuccess", func(m *Machine, cpu *CPU, t *Thread) {
+
+	// ACIsSuccess / ACIsFailure(nn::Result *): a result is a failure when
+	// its top bit is set
+	failed := func(m *Machine, cpu *CPU) (bool, bool) {
 		p := arg(cpu, 0)
-		retBool(cpu, p != 0 && m.Mem.Read32(p)&0x80000000 == 0)
+		if p == 0 {
+			return false, false
+		}
+		return m.Mem.Read32(p)&0x80000000 != 0, true
+	}
+	reg(lib, "ACIsSuccess", func(m *Machine, cpu *CPU, t *Thread) {
+		f, ok := failed(m, cpu)
+		retBool(cpu, ok && !f)
 	})
-	reg(ac, "ACIsFailure", func(m *Machine, cpu *CPU, t *Thread) {
-		p := arg(cpu, 0)
-		retBool(cpu, p != 0 && m.Mem.Read32(p)&0x80000000 != 0)
+	reg(lib, "ACIsFailure", func(m *Machine, cpu *CPU, t *Thread) {
+		f, ok := failed(m, cpu)
+		retBool(cpu, ok && f)
 	})
 }

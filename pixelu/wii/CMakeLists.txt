@@ -5,12 +5,12 @@
 # libraries built from their own sources. Externals/fetch.py fetches those
 # sources from each library's own upstream project into third_party/ (the list,
 # with versions, commits and checksums, is Externals/sources.json); Externals/
-# holds PixelU's build files for them. Qt and FFmpeg come from upstream too:
-# Qt's official build (installed with aqtinstall) and FFmpeg built from its
-# source (Externals/FFmpeg/build-ffmpeg.sh); see .github/workflows/pixelu-wii.yml.
-# Only the game settings (Data/Sys/GameSettings, ApprovedInis.json) and the
-# translations (Languages/po) still come from a checkout of Dolphin 2609a's
-# repository, by default a sparse one in dolphin/.
+# holds PixelU's build files for them. The program's window is its own (Win32 or
+# X11, Source/Core/DolphinNoGUI); no GUI toolkit is used. The older Qt interface
+# (Source/Core/DolphinQt) is not built or shipped unless ENABLE_QT is turned on.
+# A few third-party Sys files that are not Dolphin's own (GameTDB's title lists,
+# the Bitstream Vera OSD font, the MIT Gecko code handler) are still taken from a
+# checkout of Dolphin 2609a's repository, by default a sparse one in dolphin/.
 #
 # Supported: Windows x64 with MSVC (Visual Studio 2026), and Linux x86-64 with
 # GCC 12+ (glibc 2.35 and newer; Clang 19+ should work too); see CMakePresets.json.
@@ -40,15 +40,13 @@ else()
 endif()
 set(PIXELU_WII_QT_DIR "${qt_default}" CACHE PATH
   "Qt 6.8.3 (the official MSVC x64 or Linux gcc_64 build, as aqtinstall installs it)")
-set(PIXELU_WII_FFMPEG_DIR "${PIXELU_WII_THIRD_PARTY}/FFmpeg/x64" CACHE PATH
-  "FFmpeg static libraries and headers (what Externals/FFmpeg/build-ffmpeg.sh installs)")
 set(PIXELU_WII_DOLPHIN_DATA "${PROJECT_SOURCE_DIR}/dolphin" CACHE PATH
-  "Folder with Dolphin 2609a's Data/Sys/GameSettings, Data/Sys/ApprovedInis.json and Languages/po")
+  "Folder with Dolphin 2609a's Data/Sys (for the GameTDB lists, OSD font and Gecko code handler)")
 
 foreach(dir "${PIXELU_WII_THIRD_PARTY}/fmt/fmt" "${PIXELU_WII_DOLPHIN_DATA}/Data/Sys")
   if(NOT EXISTS "${dir}")
-    message(FATAL_ERROR "${dir} is missing. Run Externals/fetch.py and fetch Dolphin's game "
-      "settings and translations (see .github/workflows/pixelu-wii.yml), or point "
+    message(FATAL_ERROR "${dir} is missing. Run Externals/fetch.py and fetch the third-party Sys "
+      "files (see .github/workflows/pixelu-wii.yml), or point "
       "PIXELU_WII_THIRD_PARTY / PIXELU_WII_DOLPHIN_DATA somewhere else.")
   endif()
 endforeach()
@@ -76,8 +74,9 @@ else()
   set(on_linux ON)
 endif()
 
-option(ENABLE_QT "Build the Qt program (PixelU-Wii.exe)" ON)
-option(ENABLE_NOGUI "Build dolphin-emu-nogui, the program without a user interface" ${on_linux})
+option(ENABLE_NOGUI "Build PixelU-Wii, the program (its own game window, no GUI toolkit)" ON)
+# The earlier Qt interface: not shipped, and it needs Qt 6.8.3 (PIXELU_WII_QT_DIR).
+option(ENABLE_QT "Also build the earlier Qt interface (PixelU-Wii-Qt)" OFF)
 option(ENABLE_CLI_TOOL "Also configure the dolphin-tool command-line program" ON)
 option(ENABLE_VULKAN "Vulkan video backend" ON)
 # cubeb: WASAPI/WinMM on Windows, PulseAudio/ALSA on Linux (Externals/cubeb).
@@ -85,7 +84,6 @@ option(ENABLE_CUBEB "Cubeb sound backend and microphone input" ON)
 option(ENABLE_SDL "SDL controller input" ON)
 option(ENABLE_LLVM "Use LLVM, when its CMake package is found, for the debugger's host disassembly" ON)
 option(ENABLE_LTO "Link-time optimisation" OFF)
-option(ENCODE_FRAMEDUMPS "Frame dumps encoded with FFmpeg" ON)
 option(USE_UPNP "UPnP port forwarding for netplay" ON)
 option(USE_DISCORD_PRESENCE "Discord Rich Presence" ON)
 option(USE_MGBA "Game Boy Advance link emulation with mGBA" ON)
@@ -142,7 +140,7 @@ add_definitions(-D_ARCH_64=1 -D_M_X86_64=1)
 # Build settings for everything (PixelU-Wii and the third-party libraries)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT dolphin-emu)
+set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT pixelu-wii)
 
 # The program and its DLLs go to <build>/Binaries, PDB files to <build>/pdb; the
 # $<1:...> keeps multi-configuration generators from adding a Release/ folder.
@@ -260,21 +258,6 @@ if(OPENGL_GL)
   include_directories(${OPENGL_INCLUDE_DIR})
 endif()
 
-if(ENCODE_FRAMEDUMPS)
-  set(FFMPEG_DIR "${PIXELU_WII_FFMPEG_DIR}")
-  find_package(FFmpeg COMPONENTS avcodec avformat avutil swresample swscale)
-  if(FFmpeg_FOUND)
-    message(STATUS "FFmpeg found: frame dumps are encoded")
-    add_definitions(-DHAVE_FFMPEG)
-    if(WIN32)
-      # FFmpeg's static libraries call into bcrypt (random numbers in libavutil).
-      set_property(TARGET FFmpeg::avutil APPEND PROPERTY INTERFACE_LINK_LIBRARIES "Bcrypt.lib")
-    endif()
-  else()
-    message(STATUS "FFmpeg not found: no frame dump encoding")
-  endif()
-endif()
-
 # PixelU-Wii's headers come before every third-party folder.
 include_directories(Source/Core)
 
@@ -284,7 +267,6 @@ include_directories(Source/Core)
 # The order matters a little: definitions and include folders added here reach
 # the libraries added after them.
 
-add_subdirectory(Externals/Bochs_disasm)
 add_subdirectory(Externals/cpp-optparse)
 add_subdirectory(Externals/fmt EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/imgui)
@@ -307,10 +289,8 @@ add_subdirectory(Externals/liblzma EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/zstd EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/zlib-ng EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/minizip-ng EXCLUDE_FROM_ALL)
-add_subdirectory(Externals/LZO EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/lz4 EXCLUDE_FROM_ALL)
 add_subdirectory(Externals/libspng EXCLUDE_FROM_ALL)
-add_subdirectory(Externals/FreeSurround)
 add_subdirectory(Externals/ed25519)
 include_directories("${THIRD}/ed25519/ed25519/src")
 
@@ -318,9 +298,6 @@ if(ENABLE_CUBEB)
   add_subdirectory(Externals/cubeb EXCLUDE_FROM_ALL)
   add_definitions(-DHAVE_CUBEB)
 endif()
-
-add_subdirectory(Externals/libusb EXCLUDE_FROM_ALL)
-add_definitions(-D__LIBUSB__)
 
 if(ENABLE_SDL)
   add_subdirectory(Externals/SDL EXCLUDE_FROM_ALL)
@@ -348,7 +325,7 @@ if(USE_MGBA)
 endif()
 
 # Header-only pieces.
-include_directories("${THIRD}/wil/include" "${THIRD}/OpenAL/openal-soft/include/AL" "${THIRD}/picojson/picojson")
+include_directories("${THIRD}/wil/include" "${THIRD}/picojson/picojson")
 
 add_subdirectory(Externals/expr)
 add_subdirectory(Externals/FatFs)

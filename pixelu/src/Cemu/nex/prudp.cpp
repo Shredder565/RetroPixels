@@ -356,10 +356,7 @@ prudpClient::prudpClient(uint32 dstIp, uint16 dstPort, const char* key)
 	for (const char* c = key; *c; c++)
 		keySum += (uint8)*c;
 	m_settings.checksumBase = keySum;
-	MD5_CTX md5;
-	MD5_Init(&md5);
-	MD5_Update(&md5, key, (int)strlen(key));
-	MD5_Final(m_settings.accessKeyDigest, &md5);
+	MD5Hash::Of(key, strlen(key), m_settings.accessKeyDigest);
 	RC4_initCtx(&m_settings.rc4Client, "CD&ML");
 	RC4_initCtx(&m_settings.rc4Server, "CD&ML");
 	SendHandshake();

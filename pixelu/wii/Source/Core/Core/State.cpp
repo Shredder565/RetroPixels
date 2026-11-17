@@ -20,7 +20,6 @@
 #include <fmt/std.h>
 
 #include <lz4.h>
-#include <lzo/lzo1x.h>
 
 #include "Common/Buffer.h"
 #include "Common/ChunkFile.h"
@@ -28,6 +27,7 @@
 #include "Common/Contains.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
+#include "Common/LZO1X.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
@@ -52,7 +52,6 @@
 
 #include "UICommon/UICommon.h"
 
-#include "VideoCommon/FrameDumpFFMpeg.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/VideoBackendBase.h"
 
@@ -108,7 +107,7 @@ const std::map<u32, std::pair<std::string, std::string>> s_old_versions = {
 // Legacy LZO states: the first compressed block is read into this buffer. Its
 // size is the LZO worst case for a 128 KiB input block.
 constexpr u32 LZO_BLOCK_SIZE = 128 * 1024u;
-constexpr u32 LZO_SCRATCH_SIZE = LZO_BLOCK_SIZE + LZO_BLOCK_SIZE / 16 + 64 + 3;
+constexpr u32 LZO_SCRATCH_SIZE = static_cast<u32>(Common::LZO1X::WorstCase(LZO_BLOCK_SIZE));
 unsigned char s_lzo_scratch[LZO_SCRATCH_SIZE];
 
 // Header times count seconds from 38 (365-day) years after 1970, which keeps
@@ -489,8 +488,8 @@ void CaptureAndQueue(Core::System& system, std::string filename)
 // first LZO block; decompress that block to get them.
 bool ReadVersionFromLZO(StateHeader& header, File::IOFile& file)
 {
-  lzo_uint32 packed_size = 0;
-  lzo_uint unpacked_size = 0;
+  u32 packed_size = 0;
+  std::size_t unpacked_size = 0;
   Common::UniqueBuffer<u8> block(header.legacy_header.lzo_size);
 
   if (!file.ReadArray(&packed_size, 1))
@@ -499,13 +498,12 @@ bool ReadVersionFromLZO(StateHeader& header, File::IOFile& file)
   if (packed_size > LZO_SCRATCH_SIZE || !file.ReadBytes(s_lzo_scratch, packed_size))
     return false;
 
-  const int result =
-      lzo1x_decompress(s_lzo_scratch, packed_size, block.data(), &unpacked_size, nullptr);
-  if (result != LZO_E_OK)
+  if (!Common::LZO1X::Decompress(s_lzo_scratch, packed_size, block.data(), block.size(),
+                                 &unpacked_size))
   {
-    PanicAlertFmtT("Internal LZO Error - decompression failed ({0}) ({1}) \nUnable to "
+    PanicAlertFmtT("Internal LZO Error - decompression failed ({0}) \nUnable to "
                    "retrieve outdated savestate version info.",
-                   result, unpacked_size);
+                   unpacked_size);
     return false;
   }
 

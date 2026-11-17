@@ -3,6 +3,8 @@ package snes
 // The Sony S-DSP sound generator: a port of web/emu/sdsp.js. One call to
 // sample() makes one 32 kHz stereo sample.
 
+import "math"
+
 var (
 	dspRate, dspOffset [32]int
 	dspKern            [256 * 4]int
@@ -25,7 +27,7 @@ func init() {
 		d := [4]float64{1 + t, t, 1 - t, 2 - t}
 		var w [4]float64
 		for k := range d {
-			w[k] = jsExp(-(d[k] * d[k]) / (2 * sigma * sigma))
+			w[k] = math.Exp(-(d[k] * d[k]) / (2 * sigma * sigma))
 		}
 		sum := w[0] + w[1] + w[2] + w[3]
 		acc := 0

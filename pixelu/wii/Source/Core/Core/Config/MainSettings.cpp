@@ -30,7 +30,6 @@
 #include "Core/IOS/Network/Socket.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
-#include "Core/USBUtils.h"
 #include "DiscIO/Enums.h"
 #include "VideoCommon/VideoBackendBase.h"
 
@@ -534,48 +533,6 @@ const Info<bool> MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF{MainKey("Debug", "JitSystem
 const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF{MainKey("Debug", "JitBranchOff"), false};
 const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF{MainKey("Debug", "JitRegisterCacheOff"), false};
 const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING{MainKey("Debug", "JitEnableProfiling"), false};
-
-// [BluetoothPassthrough]
-
-const Info<bool> MAIN_BLUETOOTH_PASSTHROUGH_ENABLED{MainKey("BluetoothPassthrough", "Enabled"),
-                                                    false};
-const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_VID{MainKey("BluetoothPassthrough", "VID"), -1};
-const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_PID{MainKey("BluetoothPassthrough", "PID"), -1};
-const Info<std::string> MAIN_BLUETOOTH_PASSTHROUGH_LINK_KEYS{
-    MainKey("BluetoothPassthrough", "LinkKeys"), ""};
-
-// [USBPassthrough]
-
-const Info<bool> MAIN_USB_PASSTHROUGH_DISGUISE_PLAYSTATION_AS_WII{
-    MainKey("USBPassthrough", "DisguisePlayStationAsWii"), true};
-const Info<std::string> MAIN_USB_PASSTHROUGH_DEVICES{MainKey("USBPassthrough", "Devices"), ""};
-
-// The device list is stored as a comma-separated list of "VID:PID" entries.
-std::set<USBUtils::DeviceInfo> GetUSBDeviceWhitelist()
-{
-  std::set<USBUtils::DeviceInfo> devices;
-  const std::string stored = Config::Get(Config::MAIN_USB_PASSTHROUGH_DEVICES);
-  for (const std::string& entry : SplitString(stored, ','))
-  {
-    if (const auto device = USBUtils::DeviceInfo::FromString(entry))
-      devices.insert(*device);
-  }
-  return devices;
-}
-
-void SetUSBDeviceWhitelist(const std::set<USBUtils::DeviceInfo>& devices)
-{
-  std::string joined;
-  bool first = true;
-  for (const USBUtils::DeviceInfo& device : devices)
-  {
-    if (!first)
-      joined += ',';
-    joined += device.ToString();
-    first = false;
-  }
-  Config::SetBase(Config::MAIN_USB_PASSTHROUGH_DEVICES, joined);
-}
 
 // [EmulatedUSBDevices]
 

@@ -4,12 +4,12 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
 #include "Common/CommonTypes.h"
 #include "Core/IOS/ES/Formats.h"
-#include "Core/IOS/USB/Bluetooth/BTReal.h"
 
 // Wii NAND helpers: installing and removing titles, system updates, NAND
 // checks, and access to the emulated Bluetooth device.
@@ -109,8 +109,6 @@ NANDCheckResult CheckNAND(IOS::HLE::Kernel& ios);
 bool RepairNAND(IOS::HLE::Kernel& ios);
 
 // The running Wii's emulated Bluetooth device, or nullptr when no Wii software
-// runs or passthrough is on. Call only from the CPU thread.
+// runs. Call only from the CPU thread.
 std::shared_ptr<IOS::HLE::BluetoothEmuDevice> GetBluetoothEmuDevice();
-// The passthrough counterpart of GetBluetoothEmuDevice.
-std::shared_ptr<IOS::HLE::BluetoothRealDevice> GetBluetoothRealDevice();
 }  // namespace WiiUtils

@@ -82,7 +82,7 @@ void FrameDumper::DumpCurrentFrame(const AbstractTexture* src_texture,
     return;
 
   m_readback->CopyFromTexture(source, region, 0, 0, m_readback->GetRect());
-  m_pending_state = m_ffmpeg_dump.FetchState(ticks, frame_number);
+  m_pending_state = m_video_dump.FetchState(ticks, frame_number);
   m_have_capture = true;
 }
 
@@ -205,15 +205,7 @@ void FrameDumper::WorkerLoop()
 {
   Common::SetCurrentThreadName("FrameDumping");
 
-  bool use_ffmpeg = !Config::Get(Config::GFX_DUMP_FRAMES_AS_IMAGES);
-#if !defined(HAVE_FFMPEG)
-  if (use_ffmpeg)
-  {
-    WARN_LOG_FMT(VIDEO, "FrameDump: Dolphin was not compiled with FFmpeg, using fallback option. "
-                        "Frames will be saved as PNG images instead.");
-    use_ffmpeg = false;
-  }
-#endif
+  const bool as_video = !Config::Get(Config::GFX_DUMP_FRAMES_AS_IMAGES);
 
   bool dumping = false;
   for (;;)
@@ -236,39 +228,30 @@ void FrameDumper::WorkerLoop()
     {
       if (!dumping)
       {
-        dumping = BeginDump(use_ffmpeg, frame);
+        dumping = BeginDump(as_video, frame);
         // Turn the option back off when the dump could not be started.
         if (!dumping)
           Config::SetCurrent(Config::MAIN_MOVIE_DUMP_FRAMES, false);
       }
       if (dumping)
-        WriteFrame(use_ffmpeg, frame);
+        WriteFrame(as_video, frame);
     }
 
     m_work_done.Set();
   }
 
   // Image dumps need no finishing step; a video file has to be closed.
-  if (dumping && use_ffmpeg)
-  {
-#if defined(HAVE_FFMPEG)
-    m_ffmpeg_dump.Stop();
-#endif
-  }
+  if (dumping && as_video)
+    m_video_dump.Stop();
 }
 
-bool FrameDumper::BeginDump(bool use_ffmpeg, const FrameData& frame)
+bool FrameDumper::BeginDump(bool as_video, const FrameData& frame)
 {
-  if (use_ffmpeg)
+  if (as_video)
   {
-#if defined(HAVE_FFMPEG)
     // A dump that begins with the first frame is timed from boot, keeping audio in sync.
     const u64 first_ticks = frame.state.frame_number != 0 ? frame.state.ticks : 0;
-    return m_ffmpeg_dump.Start(frame.width, frame.height, first_ticks);
-#else
-    (void)frame;
-    return false;
-#endif
+    return m_video_dump.Start(frame.width, frame.height, first_ticks);
   }
 
   m_image_number = 1;
@@ -282,13 +265,11 @@ bool FrameDumper::BeginDump(bool use_ffmpeg, const FrameData& frame)
   return AskYesNoFmtT("Frame dump image(s) '{0}' already exists. Overwrite?", first);
 }
 
-void FrameDumper::WriteFrame(bool use_ffmpeg, const FrameData& frame)
+void FrameDumper::WriteFrame(bool as_video, const FrameData& frame)
 {
-  if (use_ffmpeg)
+  if (as_video)
   {
-#if defined(HAVE_FFMPEG)
-    m_ffmpeg_dump.AddFrame(frame);
-#endif
+    m_video_dump.AddFrame(frame);
     return;
   }
 
@@ -324,9 +305,5 @@ int FrameDumper::GetRequiredResolutionLeastCommonMultiple() const
 
 void FrameDumper::DoState(PointerWrap& p)
 {
-#if defined(HAVE_FFMPEG)
-  m_ffmpeg_dump.DoState(p);
-#else
-  (void)p;
-#endif
+  m_video_dump.DoState(p);
 }

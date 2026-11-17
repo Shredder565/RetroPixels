@@ -26,19 +26,12 @@ FORK_COMMIT = "a798c44"  # "Add PixelU: Wii U emulator forked from Cemu (MPL-2.0
 ORIGINAL_MARK = "Original code for RetroPixels (PixelU). Not derived from Cemu."
 EXTS = (".h", ".hpp", ".c", ".cpp", ".mm", ".S")
 THIRD_PARTY = (
-    "util/tinyxml2/",
-    "util/containers/robin_hood.h",
-    "util/containers/flat_hash_map.hpp",
-    "util/crypto/md5.",
     "audio/xaudio2_7/",
-    "Common/unix/date.h",
-    "Common/unix/fast_float.h",
     "Common/GLInclude/egl.h",
     "Common/GLInclude/glext.h",
     "Common/GLInclude/glxext.h",
     "Common/GLInclude/khrplatform.h",
     "Common/GLInclude/wglext.h",
-    "Cafe/OS/libs/nsyshid/g721/",
     # font data, not code: Lato Medium (SIL OFL 1.1), the 'More Perfect DOS VGA'
     # bitmap font, and the generated Font Awesome 5 icon table (zlib licence)
     "resource/CafeDefaultFont.cpp",

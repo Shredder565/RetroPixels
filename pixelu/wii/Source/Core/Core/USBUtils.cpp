@@ -17,9 +17,6 @@
 #ifdef HAVE_LIBUDEV
 #include <libudev.h>
 #endif
-#ifdef __LIBUSB__
-#include <libusb.h>
-#endif
 #ifdef _WIN32
 #include <cfgmgr32.h>
 #include <devpkey.h>
@@ -37,7 +34,6 @@
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/ScopeGuard.h"
-#include "Core/LibusbUtils.h"
 
 namespace USBUtils
 {
@@ -191,38 +187,6 @@ std::optional<std::string> NameFromConfigManager(u16 vid, u16 pid)
 }
 #endif
 
-// Opening devices through libusb can crash Windows with some Bluetooth miniport drivers
-// (those built on BthUsb.sys, such as Qualcomm Atheros' btfilter.sys and Intel's ibtusb.sys), so
-// this lookup is not used there.
-#if defined(__LIBUSB__) && !defined(_WIN32)
-// Reads the product string from the device itself.
-std::optional<std::string> NameFromDevice(u16 vid, u16 pid)
-{
-  LibusbUtils::Context context;
-  if (!context.IsValid())
-    return std::nullopt;
-
-  std::optional<std::string> name;
-  context.GetDeviceList([&](libusb_device* device) {
-    libusb_device_descriptor descriptor{};
-    if (libusb_get_device_descriptor(device, &descriptor) != LIBUSB_SUCCESS)
-      return true;
-    if (descriptor.idVendor != vid || descriptor.idProduct != pid)
-      return true;
-
-    // The first matching device decides.
-    if (descriptor.iProduct == 0)
-      return false;
-    libusb_device_handle* handle = nullptr;
-    if (libusb_open(device, &handle) != LIBUSB_SUCCESS)
-      return false;
-    name = LibusbUtils::GetStringDescriptor(handle, descriptor.iProduct);
-    libusb_close(handle);
-    return false;
-  });
-  return name;
-}
-#endif
 }  // namespace
 
 std::optional<DeviceInfo> DeviceInfo::FromString(const std::string& str)
@@ -274,9 +238,6 @@ std::optional<std::string> GetDeviceNameFromVIDPID(u16 vid, u16 pid)
 #ifdef _WIN32
       &NameFromConfigManager,
 #endif
-#if defined(__LIBUSB__) && !defined(_WIN32)
-      &NameFromDevice,
-#endif
   };
 
   for (const Lookup lookup : lookups)
@@ -287,32 +248,4 @@ std::optional<std::string> GetDeviceNameFromVIDPID(u16 vid, u16 pid)
   return std::nullopt;
 }
 
-#ifdef __LIBUSB__
-std::vector<DeviceInfo>
-ListDevices(const std::function<bool(const libusb_device_descriptor&)>& filter)
-{
-  LibusbUtils::Context context;
-  if (!context.IsValid())
-    return {};
-
-  std::vector<DeviceInfo> devices;
-  const int result = context.GetDeviceList([&](libusb_device* device) {
-    libusb_device_descriptor descriptor;
-    if (libusb_get_device_descriptor(device, &descriptor) == LIBUSB_SUCCESS && filter(descriptor))
-      devices.push_back(DeviceInfo{descriptor.idVendor, descriptor.idProduct});
-    return true;
-  });
-  if (result != LIBUSB_SUCCESS)
-    WARN_LOG_FMT(CORE, "Failed to get device list: {}", LibusbUtils::ErrorWrap(result));
-
-  return devices;
-}
-
-std::vector<DeviceInfo> ListDevices(const std::function<bool(const DeviceInfo&)>& filter)
-{
-  return ListDevices([&](const libusb_device_descriptor& descriptor) {
-    return filter(DeviceInfo{descriptor.idVendor, descriptor.idProduct});
-  });
-}
-#endif
 }  // namespace USBUtils

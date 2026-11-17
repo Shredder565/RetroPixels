@@ -37,7 +37,6 @@
 #include "Core/IOS/FS/FileSystem.h"
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/USB/Bluetooth/BTEmu.h"
-#include "Core/IOS/USB/Bluetooth/BTReal.h"
 #include "Core/IOS/Uids.h"
 #include "Core/SysConf.h"
 #include "Core/System.h"
@@ -999,15 +998,6 @@ bool RepairNAND(IOS::HLE::Kernel& ios)
 
 std::shared_ptr<IOS::HLE::BluetoothEmuDevice> GetBluetoothEmuDevice()
 {
-  if (Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
-    return nullptr;
   return std::static_pointer_cast<IOS::HLE::BluetoothEmuDevice>(FindBluetoothDevice());
-}
-
-std::shared_ptr<IOS::HLE::BluetoothRealDevice> GetBluetoothRealDevice()
-{
-  if (!Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
-    return nullptr;
-  return std::static_pointer_cast<IOS::HLE::BluetoothRealDevice>(FindBluetoothDevice());
 }
 }  // namespace WiiUtils

@@ -7,11 +7,9 @@ pixelu_add_folder(CemuUtil boost bluetooth.h)
 pixelu_add_folder(CemuUtil bootSound BootSoundReader.cpp BootSoundReader.h)
 pixelu_add_folder(CemuUtil ChunkedHeap ChunkedHeap.h)
 pixelu_add_folder(CemuUtil containers
-	flat_hash_map.hpp
 	IntervalBucketContainer.h
 	LookupTableL3.h
 	RangeStore.h
-	robin_hood.h
 	SmallBitset.h
 )
 pixelu_add_folder(CemuUtil crypto
@@ -60,7 +58,7 @@ pixelu_add_folder(CemuUtil MemMapper MemMapper.h)
 pixelu_add_folder(CemuUtil ScreenSaver ScreenSaver.h)
 pixelu_add_folder(CemuUtil SystemInfo SystemInfo.cpp SystemInfo.h)
 pixelu_add_folder(CemuUtil ThreadPool ThreadPool.h)
-pixelu_add_folder(CemuUtil tinyxml2 tinyxml2.cpp tinyxml2.h)
+pixelu_add_folder(CemuUtil xml XmlDocument.cpp XmlDocument.h)
 pixelu_add_folder(CemuUtil VirtualHeap VirtualHeap.cpp VirtualHeap.h)
 pixelu_add_folder(CemuUtil Zir/Core
 	IR.cpp

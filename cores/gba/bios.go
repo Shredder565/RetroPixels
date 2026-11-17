@@ -160,7 +160,7 @@ func (g *GBA) swi(n uint32) bool {
 		r[0] = uint32(arcTan(r[0]))
 	case 0x0a: // ArcTan2(x, y)
 		x, y := float64(int16(r[0])), float64(int16(r[1]))
-		a := jsAtan2(y, x)
+		a := math.Atan2(y, x)
 		if a < 0 {
 			a += 2 * math.Pi
 		}
@@ -333,7 +333,7 @@ func (g *GBA) swi(n uint32) bool {
 	case 0x1f: // MidiKey2Freq
 		freq := g.rd32(r[0] + 4)
 		e := (180 - float64(int32(r[1])) - float64(int32(r[2]))/256) / 12
-		r[0] = uint32(toInt32(math.Floor(float64(freq) / jsPow(2, e))))
+		r[0] = uint32(toInt32(math.Floor(float64(freq) / math.Pow(2, e))))
 	case 0x25: // MultiBoot: no link cable here, report failure
 		r[0] = 1
 	case 0x26: // HardReset: start the cartridge again from the top
@@ -391,7 +391,7 @@ func (g *GBA) writeOut(dst uint32, b []byte, vram16 bool) {
 // the angle comes back with a full circle as 0x10000.
 func arcTan(v uint32) int32 {
 	x := float64(int16(v))
-	return int32(math.Floor(jsAtan(x/0x4000) * 0x8000 / math.Pi))
+	return int32(math.Floor(math.Atan(x/0x4000) * 0x8000 / math.Pi))
 }
 
 func lz77(g *GBA, src uint32) []byte {

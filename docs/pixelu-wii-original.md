@@ -1,5 +1,12 @@
 # PixelU-Wii: replacing Dolphin code with original code
 
+> **Status (2.46.0): done.** No Dolphin source, build file or data file is left, and no GPL or
+> LGPL library is linked: LZO, FreeSurround, FFmpeg, libusb, Bochs, OpenAL and Qt were replaced
+> by RetroPixels' own code or removed. The program is `Source/Core/DolphinNoGUI` (its own Win32 /
+> X11 game window and hotkeys); the older Qt interface (`Source/Core/DolphinQt`) is no longer
+> built or shipped (`ENABLE_QT`, off by default). `pixelu/wii/COPYING` lists the third-party
+> libraries and data that remain. The notes below are the history of how it got there.
+
 PixelU-Wii (PixelU's GameCube and Wii engine, `PixelU\wii\PixelU-Wii.exe`)
 is built from Dolphin 2609a (GPL-2.0-or-later). The goal is the same as for
 PixelU's Wii U part (`docs/pixelu-original.md`): replace Dolphin's code with

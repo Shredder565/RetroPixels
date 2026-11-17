@@ -12,7 +12,6 @@
 #include "AudioCommon/CubebStream.h"
 #include "AudioCommon/Mixer.h"
 #include "AudioCommon/NullSoundStream.h"
-#include "AudioCommon/OpenALStream.h"
 #include "AudioCommon/WASAPIStream.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
@@ -33,8 +32,6 @@ std::unique_ptr<SoundStream> MakeBackend(std::string_view name)
 {
   if (name == BACKEND_CUBEB)
     return CubebStream::IsValid() ? std::make_unique<CubebStream>() : nullptr;
-  if (name == BACKEND_OPENAL)
-    return OpenALStream::IsValid() ? std::make_unique<OpenALStream>() : nullptr;
   if (name == BACKEND_NULLSOUND)
     return std::make_unique<NullSound>();
   if (name == BACKEND_WASAPI)
@@ -119,8 +116,6 @@ std::vector<std::string> GetSoundBackends()
   std::vector<std::string> names{BACKEND_NULLSOUND};
   if (CubebStream::IsValid())
     names.emplace_back(BACKEND_CUBEB);
-  if (OpenALStream::IsValid())
-    names.emplace_back(BACKEND_OPENAL);
   if (WASAPIStream::IsValid())
     names.emplace_back(BACKEND_WASAPI);
   return names;
@@ -128,18 +123,18 @@ std::vector<std::string> GetSoundBackends()
 
 bool SupportsDPL2Decoder(std::string_view backend)
 {
-  return backend == BACKEND_OPENAL || backend == BACKEND_CUBEB || backend == BACKEND_PULSEAUDIO;
+  return backend == BACKEND_CUBEB || backend == BACKEND_PULSEAUDIO;
 }
 
 bool SupportsLatencyControl(std::string_view backend)
 {
-  return backend == BACKEND_OPENAL || backend == BACKEND_WASAPI;
+  return backend == BACKEND_WASAPI;
 }
 
 bool SupportsVolumeChanges(std::string_view backend)
 {
   // Only these backends implement SetVolume.
-  return backend == BACKEND_CUBEB || backend == BACKEND_OPENAL || backend == BACKEND_WASAPI;
+  return backend == BACKEND_CUBEB || backend == BACKEND_WASAPI;
 }
 
 void UpdateSoundStream(Core::System& system)

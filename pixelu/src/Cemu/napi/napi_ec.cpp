@@ -91,11 +91,10 @@ namespace NAPI
 		// device tokens are sent as "WT-" followed by their MD5 in lowercase hex
 		std::string WrapDeviceToken(std::string_view deviceToken)
 		{
-			MD5_CTX ctx;
+			MD5Hash ctx;
 			uint8 digest[16];
-			MD5_Init(&ctx);
-			MD5_Update(&ctx, deviceToken.data(), (unsigned long)deviceToken.size());
-			MD5_Final(digest, &ctx);
+			ctx.Update(deviceToken.data(), deviceToken.size());
+			ctx.Final(digest);
 			std::string text = "WT-";
 			for (uint8 b : digest)
 				fmt::format_to(std::back_inserter(text), "{:02x}", b);

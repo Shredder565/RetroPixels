@@ -12,8 +12,7 @@
 #include "Cafe/HW/Latte/Core/LatteRecorder.h"
 #include "util/math/vector2.h"
 #include "util/helpers/Semaphore.h"
-#include "util/containers/flat_hash_map.hpp"
-#include "util/containers/robin_hood.h"
+#include <unordered_map>
 
 // optional packed formats, probed once at device creation
 struct VkSupportedFormatInfo_t
@@ -82,7 +81,7 @@ public:
 	{
 		size_t operator()(const uint64& k) const noexcept { return k; }
 	};
-	using DescriptorSetCache = ska::flat_hash_map<uint64, VkDescriptorSetInfo*, direct_hash<uint64>>;
+	using DescriptorSetCache = std::unordered_map<uint64, VkDescriptorSetInfo*, direct_hash<uint64>>;
 
 	FORCE_INLINE DescriptorSetCache& GetDescriptorSetCache(LatteConst::ShaderType shaderType)
 	{
@@ -287,7 +286,7 @@ public:
 	VkDescriptorSet backbufferBlit_createDescriptorSet(VkDescriptorSetLayout descriptor_set_layout, LatteTextureViewVk* texViewVk, bool useLinearTexFilter);
 
 	// minimal state hash -> full state hash -> pipeline
-	robin_hood::unordered_flat_map<uint64, robin_hood::unordered_flat_map<uint64, PipelineInfo*> > m_pipeline_info_cache;
+	std::unordered_map<uint64, std::unordered_map<uint64, PipelineInfo*>> m_pipeline_info_cache;
 	void draw_debugPipelineHashState();
 	PipelineInfo* draw_getCachedPipeline();
 

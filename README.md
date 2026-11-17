@@ -29,7 +29,8 @@
 RetroPixels is a single Windows program, `RetroPixels-Native.exe`, that plays games from eleven classic systems and a set of
 arcade boards. Every emulator in it (the CPUs, graphics and sound chips, cartridge hardware and the
 arcade boards) is RetroPixels' own code. It runs offline and needs no BIOS files for the built-in
-systems. GameCube and Wii games play through [Dolphin](https://dolphin-emu.org/), shown inside the
+systems. GameCube and Wii games play in PixelU-Wii, RetroPixels' own GameCube / Wii engine (it
+started from [Dolphin](https://dolphin-emu.org/) and has been rewritten), shown inside the
 RetroPixels window.
 
 > RetroPixels does not include any games, ROMs, BIOS or firmware. Use copies of games you own.
@@ -65,8 +66,9 @@ RetroPixels window.
   new tiles don't fit). See [docs/snes-debugger.md](docs/snes-debugger.md).
 - **Archipelago multiworld randomizers.** Open an Archipelago patch file and play; the Archipelago
   SNI Client and BizHawk Client connect to RetroPixels directly.
-- **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
-  control and automatic recording.
+- **GameCube and Wii** in PixelU-Wii, RetroPixels' own engine, with a library, volume control and
+  automatic recording. New in 2.46.0: it has its own game window (no Qt) and installs WiiWare
+  games and add-ons (GameCube / Wii > Install a WiiWare game or add-on).
 - **No more freezes while recording** (new in 2.41.3): a game no longer stops mid-play when the
   automatic recording falls behind, in both programs.
 - **Punch works in Popeye and Kangaroo** (2.41.2): A or X on the controller, Z or A on the
@@ -115,7 +117,7 @@ RetroPixels window.
 | Atari 2600 | `.a26` `.bin` | Nearly all bank-switching schemes, paddles |
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
 | Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede, Vs. Castlevania, Donkey Kong Jr., Donkey Kong 3, Galaga, Dig Dug, Double Dragon, Double Dragon II, Double Dragon 3, The Real Ghostbusters, Dragon Blaze, Ms. Pac-Man, Jr. Pac-Man, Popeye, Kangaroo, Mario Bros., Kung-Fu Master, X-Men |
-| GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
+| GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | In PixelU-Wii, RetroPixels' own GameCube / Wii engine |
 | Nintendo 3DS / DS | `.3ds` `.cci` `.cxi` `.3dsx` `.cia` · `.nds` `.dsi` | One 3DS / DS tab. DS and 3DS games play in PixelDS, RetroPixels' own emulator for both (all new code; DS since 2.29.0, 3DS by default since 2.34.0), recorded automatically and with the Xbox controller ready; since 2.34.1 it is the only DS / 3DS emulator in the download; since 2.35.0 DS 3D can be drawn at up to 4× (F2) with texture packs, and F9 makes one from the game (Mario restyled in modern colours) |
 | Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME: built in, or any other version, chosen per game |
 
@@ -201,7 +203,7 @@ MAME keeps its own settings, saves and save states in its folder; RetroPixels do
 
 RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
 Window Capture records it with any capture method. Each release includes the current test build as
-`RetroPixels-Native.exe`; since 2.42.0 it is the only RetroPixels program, and it looks like `RetroPixels.exe` did. It plays **every system RetroPixels.exe played**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **Wii U** (homebrew), **arcade** and **GameCube / Wii** (through Dolphin) games so far, with a start screen, four save-state slots and screenshots,
+`RetroPixels-Native.exe`; since 2.42.0 it is the only RetroPixels program, and it looks like `RetroPixels.exe` did. It plays **every system RetroPixels.exe played**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **Wii U** (homebrew), **arcade** and **GameCube / Wii** (in PixelU-Wii) games so far, with a start screen, four save-state slots and screenshots,
 using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
 RetroPixels.exe's code, its web page and the Linux test build made from it were removed in 2.42.0; `web/emu/` stays as the reference the native emulators are checked against.
 
@@ -260,13 +262,35 @@ See [CHANGELOG.md](CHANGELOG.md) for every release.
 
 ## Legal
 
-RetroPixels contains no copyrighted game code, BIOS or firmware. Its emulators are written from
-scratch, except for parts of the Wii U emulator: some files in `wiiu/` are Go rewrites of code from
-[Cemu](https://github.com/cemu-project/Cemu). Those files are under the Mozilla Public License 2.0
-(see `wiiu/LICENSE-MPL-2.0.txt`), say so at the top, and name the Cemu files they come from.
-Thanks to the Cemu team. Game and system names are trademarks of their respective owners and are used only to
-describe compatibility. RetroPixels is not affiliated with or endorsed by Nintendo, Sega, Atari,
-Konami, Namco, Microsoft, the Dolphin project, the Cemu project or the MAME team.
+RetroPixels contains no copyrighted game code, BIOS or firmware. Apart from MAME, every emulator in
+RetroPixels is its own code:
+
+- The classic-console, arcade, Sega Model 3, N64 and PixelDS (DS / 3DS) emulators were written for
+  RetroPixels. Since 2.46.0 this includes the Model 3 sound chips and music board (they used to
+  follow [Supermodel](https://github.com/trzy/Supermodel)'s GPL code), its MP3 decoder and the GBA
+  and SNES math helpers.
+- PixelU (Wii U, `pixelu/`) started from [Cemu](https://github.com/cemu-project/Cemu) and PixelU-Wii
+  (GameCube / Wii, `pixelu/wii/`) from [Dolphin](https://dolphin-emu.org/). Both have been rewritten
+  file by file; since 2.46.0 no Cemu or Dolphin code is left, PixelU-Wii has its own game window
+  instead of Qt, and neither links any GPL or LGPL library. The older Go Wii U emulator (`wiiu/`) no
+  longer has Cemu-based files either.
+- The rewrites were written by people who had read the original code, so they are not "clean room"
+  rewrites. `tools/verbatim-audit.py` checks that no code was copied.
+
+What is not RetroPixels' own:
+
+- **MAME** (GPL-2.0-or-later) ships unchanged as its own program in the MAME folder, with its source
+  attached to each release. The Model 3 decryption (`cores/model3/crypto.go`) also comes from MAME,
+  under BSD-3-Clause (`cores/model3/NOTICE.txt`).
+- **Libraries, fonts and data** used under their own, permissive licences (MIT, BSD, Zlib, ISC,
+  Apache-2.0, MPL-2.0 for mGBA, SIL OFL for fonts): listed in `pixelu/THIRD_PARTY.md`,
+  `pixelu/wii/COPYING` and `cores/model3/NOTICE.txt`.
+- **ffmpeg**, used for recordings, is not shipped: RetroPixels downloads it on request.
+
+Thanks to the Cemu, Dolphin, Supermodel and MAME teams. Game and system names are trademarks of
+their respective owners and are used only to describe compatibility. RetroPixels is not affiliated
+with or endorsed by Nintendo, Sega, Atari, Konami, Namco, Microsoft, the Dolphin project, the Cemu
+project or the MAME team.
 
 Screenshot: *Shattering Jaws*, a Genesis homebrew game by Mun (2016).
 

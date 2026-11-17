@@ -14,7 +14,7 @@ pixelu_library(common
     Functional.h GekkoDisassembler.cpp GekkoDisassembler.h Hash.cpp Hash.h HookableEvent.h
     HostDisassembler.cpp HostDisassembler.h HttpRequest.cpp HttpRequest.h
     Image.cpp Image.h IniFile.cpp IniFile.h Inline.h IOFile.cpp IOFile.h JitRegister.cpp
-    JitRegister.h JsonUtil.cpp JsonUtil.h Lazy.h LinearDiskCache.h
+    JitRegister.h JsonUtil.cpp JsonUtil.h Lazy.h LinearDiskCache.h LZO1X.cpp LZO1X.h
     MathUtil.h Matrix.cpp Matrix.h MemArena.h MemoryUtil.cpp MemoryUtil.h
     MinizipUtil.h MsgHandler.cpp MsgHandler.h Mutex.h NandPaths.cpp NandPaths.h Network.cpp
     Network.h OneShotEvent.h PcapFile.cpp PcapFile.h Profiler.cpp Profiler.h Projection.h
@@ -94,7 +94,6 @@ target_link_libraries(common
     FatFs
     spng::spng
     watcher
-    bdisasm
 )
 
 if(WIN32)
@@ -110,7 +109,7 @@ if(USE_UPNP)
 endif()
 
 # Host-code disassembly in the debugger uses LLVM when its CMake package is
-# installed; otherwise Bochs' disassembler (bdisasm, above) does it.
+# installed; otherwise the debugger shows the host code's bytes in hex.
 if(ENABLE_LLVM)
   find_package(LLVM CONFIG)
   if(LLVM_FOUND)

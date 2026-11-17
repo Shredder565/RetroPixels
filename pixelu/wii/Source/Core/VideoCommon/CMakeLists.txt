@@ -13,7 +13,8 @@ pixelu_library(videocommon
     ConstantManager.h Constants.h CPMemory.cpp CPMemory.h CPUCull.cpp CPUCull.h CPUCullImpl.h
     DriverDetails.cpp DriverDetails.h EFBInterface.cpp EFBInterface.h Fifo.cpp Fifo.h
     FramebufferManager.cpp FramebufferManager.h FramebufferShaderGen.cpp FramebufferShaderGen.h
-    FrameDumper.cpp FrameDumper.h FrameDumpFFMpeg.h FreeLookCamera.cpp FreeLookCamera.h
+    FrameDumpAVI.cpp FrameDumpAVI.h FrameDumper.cpp FrameDumper.h FreeLookCamera.cpp FreeLookCamera.h
+    JpegEncoder.cpp JpegEncoder.h
     GeometryShaderGen.cpp GeometryShaderGen.h GeometryShaderManager.cpp GeometryShaderManager.h
     HiresTextures.cpp HiresTextures.h IndexGenerator.cpp IndexGenerator.h LightingShaderGen.cpp
     LightingShaderGen.h LookUpTables.h NativeVertexFormat.h NetPlayChatUI.cpp NetPlayChatUI.h
@@ -80,20 +81,5 @@ target_link_libraries(videocommon
     glslang::SPIRV
     tinygltf
 )
-
-if(FFmpeg_FOUND)
-  # Frame dumps encoded to video.
-  pixelu_add_sources(videocommon
-    IN .
-      FrameDumpFFMpeg.cpp
-  )
-  target_link_libraries(videocommon PRIVATE
-    FFmpeg::avcodec
-    FFmpeg::avformat
-    FFmpeg::avutil
-    FFmpeg::swresample
-    FFmpeg::swscale
-  )
-endif()
 
 pixelu_use_pch(videocommon)

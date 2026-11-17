@@ -1,82 +1,50 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can
-// obtain one at https://mozilla.org/MPL/2.0/.
-//
-// Based on Cemu (https://github.com/cemu-project/Cemu), src/Cafe/OS/libs/coreinit/
-// coreinit_FG.cpp, rewritten in Go for RetroPixels.
-
 package wiiu
 
-// The foreground bucket: 64 MB the program in the foreground shares with
-// the system. Only its first area is free for the program; the others hold
-// the OS's copy data (the clipboard and title switch parameters), the
-// transition audio, frame storage and a save area.
+// The foreground bucket: 64 MB at FGBase shared by the foreground program
+// and the system. The program may use the first 40 MB as it likes; the rest
+// is split into areas the system keeps for itself (copy data such as the
+// clipboard, title switch parameters, transition sound and pictures), ending
+// with a 4 KB save area.
 
-const (
-	fgAreaFree = 0
-	fgAreaSave = 6
+const fgFreeSize = 40 << 20
 
-	fgFreeSize = 0x02800000
-)
+// the system's save area, the last 4 KB of the bucket
+const fgSaveArea = FGBase + FGSize - 0x1000
 
-// the areas: id, offset, size
-var fgAreas = [...][3]uint32{
-	{0, 0, 0x2800000},
-	{7, 0x2800000, 0x400000},
-	{1, 0x2c00000, 0x900000},
-	{2, 0x3500000, 0x3c0000},
-	{3, 0x38c0000, 0x1c0000},
-	{4, 0x3a80000, 0x3c0000},
-	{5, 0x3e40000, 0x1bf000},
-	{6, 0x3fff000, 0x1000},
-}
+func (m *Machine) fgFreeArea() (addr, size uint32) { return FGBase, fgFreeSize }
 
-func fgArea(id uint32) uint32 {
-	for _, a := range fgAreas {
-		if a[0] == id {
-			return FGBase + a[1]
-		}
-	}
-	return 0
-}
-
-func (m *Machine) fgFreeArea() (addr, size uint32) { return fgArea(fgAreaFree), fgFreeSize }
-
-// initForegroundBucket marks the save area as set up (the bucket starts out
-// zeroed, as fresh memory is).
+// initForegroundBucket marks the save area as set up: the bucket starts out
+// zeroed, as fresh memory is, apart from the area's "Save" tag and its
+// ready flags.
 func (m *Machine) initForegroundBucket() {
-	save := fgArea(fgAreaSave)
-	m.Mem.Write32(save, 0x53617665) // "Save"
-	m.Mem.Write32(save+8, m.Mem.Read32(save+8)|0x300)
+	m.Mem.Write32(fgSaveArea, 0x53617665) // "Save"
+	m.Mem.Write32(fgSaveArea+8, m.Mem.Read32(fgSaveArea+8)|0x300)
 }
 
 func init() {
-	c := "coreinit"
-	// OSGetForegroundBucket(address out, size out): the whole bucket
-	reg(c, "OSGetForegroundBucket", func(m *Machine, cpu *CPU, t *Thread) {
-		if p := arg(cpu, 0); p != 0 {
-			m.Mem.Write32(p, FGBase)
+	const lib = "coreinit"
+	// both calls write an address and a size where their arguments point
+	// (when they point anywhere) and return true
+	give := func(area func(m *Machine) (uint32, uint32)) hleFunc {
+		return func(m *Machine, cpu *CPU, t *Thread) {
+			a, n := area(m)
+			for i, v := range [2]uint32{a, n} {
+				if p := arg(cpu, i); p != 0 {
+					m.Mem.Write32(p, v)
+				}
+			}
+			ret(cpu, 1)
 		}
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, FGSize)
-		}
-		ret(cpu, 1)
-	})
-	// OSGetForegroundBucketFreeArea: the part the program may use
-	reg(c, "OSGetForegroundBucketFreeArea", func(m *Machine, cpu *CPU, t *Thread) {
-		a, n := m.fgFreeArea()
-		if p := arg(cpu, 0); p != 0 {
-			m.Mem.Write32(p, a)
-		}
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, n)
-		}
-		ret(cpu, 1)
-	})
-	// OSCopyFromClipboard(buffer, size in/out): the clipboard is empty
-	reg(c, "OSCopyFromClipboard", func(m *Machine, cpu *CPU, t *Thread) {
+	}
+	reg(lib, "OSGetForegroundBucket", give(func(*Machine) (uint32, uint32) { return FGBase, FGSize }))
+	reg(lib, "OSGetForegroundBucketFreeArea", give((*Machine).fgFreeArea))
+
+	// OSCopyFromClipboard(buffer, size in/out): nothing is ever on the
+	// clipboard. Asking for the size alone (no buffer, size 0) answers
+	// false; otherwise the size comes back 0.
+	reg(lib, "OSCopyFromClipboard", func(m *Machine, cpu *CPU, t *Thread) {
 		buf, size := arg(cpu, 0), arg(cpu, 1)
-		if size == 0 || m.Mem.Read32(size) == 0 && buf == 0 {
+		if size == 0 || buf == 0 && m.Mem.Read32(size) == 0 {
 			ret(cpu, 0)
 			return
 		}

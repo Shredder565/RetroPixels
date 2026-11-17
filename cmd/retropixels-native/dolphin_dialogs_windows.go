@@ -101,8 +101,8 @@ func (d *dolSettingsDlg) child(class, text string, style uint32, x, y, w, h, id 
 
 func (d *dolSettingsDlg) build() {
 	y := 14
-	top := "PixelU's Wii/GameCube settings (engine based on Dolphin), used for every game. Memory cards, cheats and per-game settings " +
-		"are in PixelU itself (GameCube / Wii > Open PixelU).\nSaved in " + d.user + "\\Config"
+	top := "PixelU's Wii/GameCube settings, used for every game. Memory cards and saves are kept by PixelU itself; " +
+		"cheats and per-game settings are .ini files in its GameSettings folder.\nSaved in " + d.user + "\\Config"
 	if d.locked {
 		top = "PixelU (Wii/GameCube) is open. Close it first: it saves its own settings when it closes."
 	}

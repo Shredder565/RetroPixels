@@ -5,7 +5,7 @@
 #include "iosu_ioctl.h"
 #include "iosu_mcp.h"
 #include "Cafe/OS/libs/nn_common.h"
-#include "util/tinyxml2/tinyxml2.h"
+#include "util/xml/XmlDocument.h"
 #include "config/CemuConfig.h"
 #include "Cafe/TitleList/GameInfo.h"
 #include "util/helpers/helpers.h"

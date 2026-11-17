@@ -15,7 +15,7 @@
 #include <fmt/format.h>
 
 #ifdef __clang__
-#include "Common/unix/fast_float.h"
+#include "Common/unix/parse_float.h"
 #endif
 
 // Arithmetic expression evaluator used by graphic packs (rules.txt values,
@@ -231,11 +231,7 @@ private:
 	static std::from_chars_result ParseDouble(const char* first, const char* last, double& out)
 	{
 #ifdef __clang__
-		const fast_float::from_chars_result r = fast_float::from_chars(first, last, out);
-		std::from_chars_result conv;
-		conv.ptr = r.ptr;
-		conv.ec = r.ec;
-		return conv;
+		return ParseFloatChars(first, last, out);
 #else
 		return std::from_chars(first, last, out);
 #endif

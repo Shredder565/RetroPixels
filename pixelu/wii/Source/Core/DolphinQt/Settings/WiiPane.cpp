@@ -25,7 +25,6 @@
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/Core.h"
 #include "Core/System.h"
-#include "Core/USBUtils.h"
 
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
 #include "DolphinQt/Config/ConfigControls/ConfigChoice.h"
@@ -37,7 +36,6 @@
 #include "DolphinQt/QtUtils/ParallelProgressDialog.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
 #include "DolphinQt/Settings.h"
-#include "DolphinQt/Settings/USBDevicePicker.h"
 
 namespace
 {
@@ -85,12 +83,9 @@ WiiPane::WiiPane(QWidget* parent) : QWidget(parent)
   auto* page = new QVBoxLayout{this};
   page->addWidget(BuildSystemGroup());
   page->addWidget(BuildSDCardGroup());
-  page->addWidget(BuildPassthroughGroup());
   page->addWidget(BuildRemoteGroup());
 
-  RefreshPassthroughList();
   WireUp();
-  RefreshRemoveButton();
   LockForEmulation(!Core::IsUninitialized(Core::System::GetInstance()));
 }
 
@@ -199,26 +194,6 @@ QGroupBox* WiiPane::BuildSDCardGroup()
   return box;
 }
 
-QGroupBox* WiiPane::BuildPassthroughGroup()
-{
-  m_passthrough_list = new QtUtils::MinimumSizeHintWidget<QListWidget>;
-  m_passthrough_add = new NonDefaultQPushButton(tr("Add..."));
-  m_passthrough_remove = new NonDefaultQPushButton(tr("Remove"));
-
-  auto* buttons = new QHBoxLayout;
-  buttons->addStretch();
-  buttons->addWidget(m_passthrough_add);
-  buttons->addWidget(m_passthrough_remove);
-
-  auto* column = new QVBoxLayout;
-  column->addWidget(m_passthrough_list);
-  column->addLayout(buttons);
-
-  auto* box = new QGroupBox(tr("Whitelisted USB Passthrough Devices"));
-  box->setLayout(column);
-  return box;
-}
-
 QGroupBox* WiiPane::BuildRemoteGroup()
 {
   auto* box = new QGroupBox(tr("Wii Remote Settings"));
@@ -253,11 +228,6 @@ QGroupBox* WiiPane::BuildRemoteGroup()
 void WiiPane::WireUp()
 {
   auto& settings = Settings::Instance();
-  connect(&settings, &Settings::ConfigChanged, this, &WiiPane::RefreshPassthroughList);
-  connect(m_passthrough_list, &QListWidget::itemClicked, this, &WiiPane::RefreshRemoveButton);
-  connect(m_passthrough_add, &QPushButton::clicked, this, &WiiPane::AddPassthroughDevice);
-  connect(m_passthrough_remove, &QPushButton::clicked, this, &WiiPane::RemovePassthroughDevice);
-
   connect(&settings, &Settings::EmulationStateChanged, this,
           [this](Core::State state) { LockForEmulation(state != Core::State::Uninitialized); });
 }
@@ -279,60 +249,6 @@ void WiiPane::LockForEmulation(bool running)
                                            m_wiilink};
   for (QWidget* widget : boot_only)
     widget->setEnabled(!running);
-}
-
-void WiiPane::RefreshRemoveButton()
-{
-  m_passthrough_remove->setEnabled(m_passthrough_list->currentIndex().isValid());
-}
-
-void WiiPane::RefreshPassthroughList()
-{
-  m_passthrough_list->clear();
-  for (const USBUtils::DeviceInfo& device : Config::GetUSBDeviceWhitelist())
-  {
-    auto* entry =
-        new QListWidgetItem(QString::fromStdString(device.ToDisplayString()), m_passthrough_list);
-    entry->setData(Qt::UserRole, QVariant::fromValue(device));
-  }
-  RefreshRemoveButton();
-}
-
-void WiiPane::AddPassthroughDevice()
-{
-  auto allowed = Config::GetUSBDeviceWhitelist();
-  const auto not_yet_allowed = [&allowed](const USBUtils::DeviceInfo& candidate) {
-    return !allowed.contains(candidate);
-  };
-
-  const std::optional<USBUtils::DeviceInfo> picked =
-      USBDevicePicker::Run(this, tr("Add New USB Device"), not_yet_allowed);
-  if (!picked.has_value())
-    return;
-
-  if (allowed.contains(*picked))
-  {
-    ModalMessageBox::critical(this, tr("USB Whitelist Error"),
-                              tr("This USB device is already whitelisted."));
-    return;
-  }
-
-  allowed.emplace(*picked);
-  Config::SetUSBDeviceWhitelist(allowed);
-  RefreshPassthroughList();
-}
-
-void WiiPane::RemovePassthroughDevice()
-{
-  const QListWidgetItem* selected = m_passthrough_list->currentItem();
-  if (selected == nullptr)
-    return;
-
-  const auto device = selected->data(Qt::UserRole).value<USBUtils::DeviceInfo>();
-  auto allowed = Config::GetUSBDeviceWhitelist();
-  allowed.erase(device);
-  Config::SetUSBDeviceWhitelist(allowed);
-  RefreshPassthroughList();
 }
 
 void WiiPane::PickSDImage()

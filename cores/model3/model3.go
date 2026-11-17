@@ -7,9 +7,9 @@
 //
 // Most of it is written from the hardware's behaviour, with Supermodel (the
 // Sega Model 3 emulator) as the reference to compare pictures and sound
-// against. The sound chips (scsp.go) and the music board (dsb.go) follow
-// Supermodel's code and are GPL-3.0-or-later; NOTICE.txt lists every
-// third-party part and its licence.
+// against. The only code from another project is the 315-5881 decryption
+// (crypto.go, crypto_tables.go), which comes from MAME under the BSD-3-Clause
+// licence; NOTICE.txt has its terms.
 package model3
 
 import (

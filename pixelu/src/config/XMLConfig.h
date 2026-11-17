@@ -1,7 +1,7 @@
 // Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-#include "util/tinyxml2/tinyxml2.h"
+#include "util/xml/XmlDocument.h"
 #include "Common/FileStream.h"
 #include "config/ConfigValue.h"
 
@@ -19,10 +19,10 @@
 // Reading and writing of the XML settings files (settings.xml,
 // network_services.xml, the debugger files).
 //
-// XMLConfigParser is a cursor on one element of a tinyxml2 document; the root
+// XMLConfigParser is a cursor on one element of an XML document; the root
 // cursor stands for the document itself. Values are stored as element text or
 // as attributes. The C++ type of the default value picks the conversion:
-//   bool, float, sint32, uint32, sint64   tinyxml2's text/attribute parsers
+//   bool, float, sint32, uint32, sint64   the XML reader's text/attribute parsers
 //   uint64                                stored and parsed as sint64
 //   enums                                 their underlying integer type
 //   const char*, std::string              the text as is (element text also
@@ -34,11 +34,11 @@ class XMLConfigParser
 {
 public:
 	// cursor on the document itself
-	XMLConfigParser(tinyxml2::XMLDocument* document)
+	XMLConfigParser(rpxml::XMLDocument* document)
 		: m_document(document), m_current_element(nullptr), m_is_root(true) {}
 
 private:
-	XMLConfigParser(tinyxml2::XMLDocument* document, tinyxml2::XMLElement* element)
+	XMLConfigParser(rpxml::XMLDocument* document, rpxml::XMLElement* element)
 		: m_document(document), m_current_element(element), m_is_root(false) {}
 
 	template<typename T>
@@ -46,12 +46,12 @@ private:
 
 	// note: a cursor without an element (root, or a child that does not exist)
 	// looks among the top level elements of the document
-	tinyxml2::XMLElement* Child(const char* name) const
+	rpxml::XMLElement* Child(const char* name) const
 	{
 		return m_current_element ? m_current_element->FirstChildElement(name) : m_document->FirstChildElement(name);
 	}
 
-	void Append(tinyxml2::XMLElement* element) const
+	void Append(rpxml::XMLElement* element) const
 	{
 		if (m_current_element)
 			m_current_element->InsertEndChild(element);
@@ -83,7 +83,7 @@ public:
 		}
 		else
 		{
-			const tinyxml2::XMLElement* element = Child(name);
+			const rpxml::XMLElement* element = Child(name);
 			if (!element)
 				return default_value;
 			if constexpr (std::is_same_v<T, bool>)
@@ -129,7 +129,7 @@ public:
 	std::array<TType, TSize>& get(const char* name, std::array<TType, TSize>& arr)
 	{
 		arr = {};
-		const tinyxml2::XMLElement* element = Child(name);
+		const rpxml::XMLElement* element = Child(name);
 		if (!element)
 			return arr;
 		const char* text = element->GetText();
@@ -161,7 +161,7 @@ public:
 		}
 		else
 		{
-			const tinyxml2::XMLElement* element = m_current_element;
+			const rpxml::XMLElement* element = m_current_element;
 			if (!element)
 				return default_value;
 			if constexpr (std::is_same_v<T, bool>)
@@ -231,7 +231,7 @@ public:
 		hex.reserve(TSize * 2);
 		for (const TType& v : value)
 			hex += fmt::format("{:02x}", v);
-		tinyxml2::XMLElement* element = m_document->NewElement(name);
+		rpxml::XMLElement* element = m_document->NewElement(name);
 		element->SetText(hex.c_str());
 		Append(element);
 	}
@@ -239,7 +239,7 @@ public:
 	template<typename T>
 	void set(const char* name, T value)
 	{
-		tinyxml2::XMLElement* element = m_document->NewElement(name);
+		rpxml::XMLElement* element = m_document->NewElement(name);
 		if constexpr (std::is_enum_v<T>)
 			element->SetText(fmt::format("{}", static_cast<std::underlying_type_t<T>>(value)).c_str());
 		else
@@ -267,7 +267,7 @@ public:
 
 	// ---- navigation ----
 
-	tinyxml2::XMLElement* GetCurrentElement() const { return m_current_element; }
+	rpxml::XMLElement* GetCurrentElement() const { return m_current_element; }
 
 	// first child with this name (the cursor is invalid when there is none)
 	XMLConfigParser get(const char* name) const
@@ -278,7 +278,7 @@ public:
 	// next sibling of previous with this name
 	XMLConfigParser get(const char* name, const XMLConfigParser& previous)
 	{
-		tinyxml2::XMLElement* next = previous.m_current_element ? previous.m_current_element->NextSiblingElement(name)
+		rpxml::XMLElement* next = previous.m_current_element ? previous.m_current_element->NextSiblingElement(name)
 															   : previous.m_document->NextSiblingElement(name);
 		return {m_document, next};
 	}
@@ -286,7 +286,7 @@ public:
 	// new child element
 	XMLConfigParser set(const char* name) const
 	{
-		tinyxml2::XMLElement* element = m_document->NewElement(name);
+		rpxml::XMLElement* element = m_document->NewElement(name);
 		Append(element);
 		return {m_document, element};
 	}
@@ -325,8 +325,8 @@ public:
 	}
 
 private:
-	tinyxml2::XMLDocument* m_document;
-	tinyxml2::XMLElement* m_current_element;
+	rpxml::XMLDocument* m_document;
+	rpxml::XMLElement* m_current_element;
 	bool m_is_root;
 };
 
@@ -370,9 +370,9 @@ public:
 			file->readData(content.data(), content.size());
 		}
 
-		tinyxml2::XMLDocument doc;
-		const tinyxml2::XMLError result = doc.Parse((const char*)content.data(), content.size());
-		if (result != tinyxml2::XML_SUCCESS)
+		rpxml::XMLDocument doc;
+		const rpxml::XMLError result = doc.Parse((const char*)content.data(), content.size());
+		if (result != rpxml::XML_SUCCESS)
 		{
 			cemuLog_logDebug(LogType::Force, "XMLConfig: parse error {} in \"{}\"", (int)result, boost::nowide::narrow(filename));
 			return false;
@@ -413,15 +413,15 @@ public:
 			return false;
 		}
 
-		tinyxml2::XMLDocument doc;
+		rpxml::XMLDocument doc;
 		doc.InsertFirstChild(doc.NewDeclaration());
 		XMLConfigParser root(&doc);
 		XMLConfigParser sectionParent = m_instance.Save(root);
 		for (const ChildXMLConfigParser& child : m_childConfigParsers)
 			child.first(sectionParent);
 
-		const tinyxml2::XMLError result = doc.SaveFile(out);
-		if (result != tinyxml2::XML_SUCCESS)
+		const rpxml::XMLError result = doc.SaveFile(out);
+		if (result != rpxml::XML_SUCCESS)
 			cemuLog_logDebug(LogType::Force, "XMLConfig: write error {} for \"{}\"", (int)result, boost::nowide::narrow(filename));
 		fflush(out);
 		fclose(out);
@@ -433,7 +433,7 @@ public:
 			fs::remove(tempName, ec);
 		}
 		// note: success means the document was written, a failed rename only gets logged
-		return result == tinyxml2::XML_SUCCESS;
+		return result == rpxml::XML_SUCCESS;
 	}
 
 	[[nodiscard]] const std::wstring& GetFilename() const { return m_filename; }

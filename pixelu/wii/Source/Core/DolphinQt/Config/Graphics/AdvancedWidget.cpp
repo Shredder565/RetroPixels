@@ -157,18 +157,6 @@ QGroupBox* AdvancedWidget::BuildFrameDumpGroup()
   grid->addWidget(new QLabel(tr("Resolution Type:")), 0, 0);
   grid->addWidget(m_frame_dumps_resolution_type, 0, 1);
 
-#if defined(HAVE_FFMPEG)
-  // Video dumps: a lossless codec, or a bitrate for the lossy one.
-  m_dump_use_lossless =
-      new ConfigBool(tr("Use Lossless Codec (Ut Video)"), Config::GFX_USE_LOSSLESS, m_game_layer);
-  m_dump_bitrate = new ConfigInteger(0, 1000000, Config::GFX_BITRATE_KBPS, m_game_layer, 1000);
-  m_dump_bitrate->setEnabled(!m_dump_use_lossless->isChecked());
-
-  grid->addWidget(m_dump_use_lossless, 1, 0);
-  grid->addWidget(new QLabel(tr("Bitrate (kbps):")), 2, 0);
-  grid->addWidget(m_dump_bitrate, 2, 1);
-#endif
-
   grid->addWidget(new QLabel(tr("PNG Compression Level:")), 3, 0);
   m_png_compression_level->SetTitle(tr("PNG Compression Level"));
   grid->addWidget(m_png_compression_level, 3, 1);
@@ -273,10 +261,6 @@ void AdvancedWidget::LinkDependentOptions()
           [](bool on) { emit Settings::Instance().EnableGfxModsChanged(on); });
   connect(m_crop_custom, &QCheckBox::toggled, this,
           [this](bool on) { m_crop_custom_box->setDisabled(!on); });
-#if defined(HAVE_FFMPEG)
-  connect(m_dump_use_lossless, &QCheckBox::toggled, this,
-          [this](bool on) { m_dump_bitrate->setEnabled(!on); });
-#endif
 }
 
 void AdvancedWidget::OnBackendChanged()
@@ -363,12 +347,6 @@ void AdvancedWidget::SetDescriptions()
       "possible input for external editing software.<br><br>"
       "<dolphin_emphasis>If unsure, leave this at \"Aspect Ratio Corrected Internal "
       "Resolution\".</dolphin_emphasis>");
-#if defined(HAVE_FFMPEG)
-  static const char lossless_help[] = QT_TR_NOOP(
-      "Encodes frame dumps using the Ut Video codec. If this option is unchecked, a lossy Xvid "
-      "codec will be used.<br><br>"
-      "<dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>");
-#endif
   static const char png_level_help[] = QT_TR_NOOP(
       "Specifies the zlib compression level to use when saving PNG images (both for screenshots "
       "and framedumping).<br><br>"
@@ -466,9 +444,6 @@ void AdvancedWidget::SetDescriptions()
   m_disable_vram_copies->SetDescription(tr(vram_copies_help));
   m_enable_graphics_mods->SetDescription(tr(graphics_mods_help));
   m_frame_dumps_resolution_type->SetDescription(tr(resolution_type_help));
-#ifdef HAVE_FFMPEG
-  m_dump_use_lossless->SetDescription(tr(lossless_help));
-#endif
   m_png_compression_level->SetDescription(tr(png_level_help));
   m_enable_prog_scan->SetDescription(tr(prog_scan_help));
   m_backend_multithreading->SetDescription(tr(multithreading_help));

@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include <tchar.h>
 
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"

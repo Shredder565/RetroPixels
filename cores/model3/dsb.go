@@ -9,50 +9,74 @@ import (
 
 var debugSound = os.Getenv("M3_SOUNDDEBUG") != ""
 
-// The Digital Sound Board, type 2: a 68000 at 11 MHz that hears the same
-// MIDI bytes as the sound board and plays MPEG Layer II music (32 kHz) from
-// its ROM. As in Supermodel, the 68000 gets each command byte with an
-// interrupt and has a 1 kHz timer interrupt; it starts and stops the music
-// by writing commands to the MPEG decoder, whose state machine is here.
+// The Digital Sound Board, type 2: an 11 MHz 68000 with 128 KB of program
+// ROM and 128 KB of RAM that hears the same MIDI bytes as the sound board and
+// plays 32 kHz MPEG Layer II music from up to 16 MB of ROM through an MPEG
+// decoder chip.
 //
-// The command handling, volumes and stereo modes follow Supermodel's
-// Src/Model3/DSB.cpp (Copyright 2003-2026 The Supermodel Team), so this file
-// is under the GNU General Public License, version 3 or (at your option) any
-// later version: see LICENSE-GPL-3.0.txt and NOTICE.txt.
+// The 68000 reads each command byte (level 1 interrupt) from 0xC00001 and
+// has a 1 kHz tick (level 2). It drives the decoder by writing command
+// bytes, some followed by arguments, to 0xE00003: set the start or end
+// address (three bytes each), play, stop, the left and right volumes and the
+// stereo routing.
+//
+// Written for RetroPixels from the board's documented layout and the
+// commands its program sends.
 
 const (
-	dsbHz          = 11000000
-	dsbTimerPeriod = dsbHz / 1000
-	dsbMPEGRate    = 32000
+	dsbHz       = 11000000
+	dsbTickEach = dsbHz / 1000
+	dsbMusicHz  = 32000
 )
 
-const (
-	mpegIdle = iota
-	mpegGot14
-	mpeg14_0
-	mpeg14_1
-	mpegGot24
-	mpeg24_0
-	mpeg24_1
-	mpegGot74
-	mpegGotA0
-	mpegGotA1
-	mpegGotA3
-	mpegGotA4
-	mpegGotA5
-	mpegGotA7
-	mpegGotB0
-	mpegGotB1
-	mpegGotB2
-	mpegGotB4
-	mpegGotB5
-	mpegGotB6
-)
+// what the decoder does with a command and its arguments
+type dsbCmd struct {
+	args int
+	do   func(d *dsb2, a []uint8)
+}
+
+var dsbCmds = func() map[uint8]dsbCmd {
+	m := map[uint8]dsbCmd{}
+	both := func(c uint8, cmd dsbCmd) { m[c], m[c|1] = cmd, cmd }
+	addr := func(a []uint8) uint32 { return uint32(a[0])<<16 | uint32(a[1])<<8 | uint32(a[2]) }
+	both(0x14, dsbCmd{3, func(d *dsb2, a []uint8) { // start address
+		d.start = addr(a)
+		if d.playing { // a new loop start for the playing tune
+			d.loopFrom(d.start, d.end, true)
+		}
+	}})
+	both(0x24, dsbCmd{3, func(d *dsb2, a []uint8) { // end address
+		d.end = addr(a)
+		d.route = routeStereo
+	}})
+	both(0x74, dsbCmd{0, func(d *dsb2, _ []uint8) { d.play() }})
+	both(0x84, dsbCmd{0, func(d *dsb2, _ []uint8) { d.stop() }})
+	m[0xa4] = dsbCmd{1, func(d *dsb2, a []uint8) {
+		if a[0] == 0x75 {
+			d.play()
+		}
+	}}
+	m[0xb4] = dsbCmd{1, func(d *dsb2, a []uint8) {
+		if a[0] == 0x96 {
+			d.stop()
+		}
+	}}
+	m[0xa0] = dsbCmd{1, func(d *dsb2, a []uint8) { d.setRoute(a[0], routeLeft) }}
+	m[0xb1] = dsbCmd{1, func(d *dsb2, a []uint8) { d.setRoute(a[0], routeRight) }}
+	left := dsbCmd{1, func(d *dsb2, a []uint8) { d.vol[0] = a[0] }}
+	right := dsbCmd{1, func(d *dsb2, a []uint8) { d.vol[1] = a[0] }}
+	m[0xb0], m[0xb6] = left, left
+	m[0xa1], m[0xa7] = right, right
+	for _, c := range []uint8{0xa3, 0xa5, 0xb2, 0xb5} { // one argument, no effect here
+		m[c] = dsbCmd{1, func(*dsb2, []uint8) {}}
+	}
+	return m
+}()
 
 const (
-	stereoBoth = iota
-	stereoMonoLeft
-	stereoMonoRight
+	routeStereo = iota
+	routeLeft   // both speakers play the left channel
+	routeRight  // both play the right
 )
 
 type dsb2 struct {
@@ -61,36 +85,35 @@ type dsb2 struct {
 	mpeg []byte
 	ram  []byte
 
-	fifo         [256]uint8
-	fifoW, fifoR uint8
-	cmdLatch     uint8
+	cmdQ   []uint8 // MIDI bytes waiting for the 68000
+	cmdNow uint8
 
-	mpegState          int
-	mpegStart, mpegEnd uint32
-	playing            bool
-	volume             [2]uint8
-	stereo             int
+	// the decoder's command input
+	cmd     *dsbCmd
+	args    []uint8
+	start   uint32
+	end     uint32
+	playing bool
+	vol     [2]uint8
+	route   int
 
-	cyclesThisFrame int64
-	nextTimer       int64
-	frameFrac       float64
+	cycles   int64 // ahead of (positive) or behind the frame
+	nextTick int64
+	frameAcc float64
 
-	// the music decoder (Supermodel's MpegDec)
-	dec        mpegDecoder
-	decStart   int // where the playing data starts and ends in the ROM
-	decEnd     int
-	decPos     int // absolute position in the ROM
-	decLoop    bool
-	decStopped bool
-	decLoaded  bool
-	pcm        [mpegMaxSamplesPerFrm]int16
-	pcmN       int // samples per channel in pcm
-	pcmPos     int
-	pcmCh      int
-
-	// resampler from 32 kHz to 44.1 kHz
-	prevL, prevR, nextL, nextR int16
-	frac                       float64
+	// the music
+	dec      mpegDecoder
+	loopA    int // the stretch of ROM being played, and whether it loops
+	loopB    int
+	loop     bool
+	at       int
+	silent   bool
+	pcm      [mpegMaxSamplesPerFrm]int16
+	pcmLen   int // samples per channel
+	pcmAt    int
+	pcmCh    int
+	resample float64
+	cur, nxt [2]int16
 }
 
 func newDSB2(prog, mpeg []byte) *dsb2 {
@@ -105,279 +128,190 @@ func newDSB2(prog, mpeg []byte) *dsb2 {
 }
 
 func (d *dsb2) reset() {
-	for i := range d.ram {
-		d.ram[i] = 0
-	}
-	d.decStopped = true
-	d.prevL, d.prevR, d.nextL, d.nextR = 0, 0, 0, 0
-	d.frac = 0
-	d.fifo = [256]uint8{}
-	d.fifoW, d.fifoR = 0, 0
-	d.mpegState = mpegIdle
-	d.mpegStart, d.mpegEnd = 0, 0
+	clear(d.ram)
+	d.cmdQ = d.cmdQ[:0]
+	d.cmd, d.args = nil, d.args[:0]
+	d.start, d.end = 0, 0
 	d.playing = false
-	d.volume = [2]uint8{0xFF, 0xFF}
-	d.stereo = stereoBoth
+	d.vol = [2]uint8{0xff, 0xff}
+	d.route = routeStereo
+	d.silent = true
+	d.pcmLen, d.pcmAt = 0, 0
+	d.resample = 0
+	d.cur, d.nxt = [2]int16{}, [2]int16{}
 	d.cpu.SetIRQ(0)
 	d.cpu.Cycles = 0
 	d.cpu.Reset()
-	d.cyclesThisFrame = 0
-	d.nextTimer = dsbTimerPeriod
-	d.frameFrac = 0
+	d.cycles = 0
+	d.nextTick = dsbTickEach
+	d.frameAcc = 0
 }
 
 func (d *dsb2) sendCommand(v uint8) {
 	if debugSound {
 		fmt.Printf("cmd %02X pc %06X\n", v, d.cpu.PC)
 	}
-	d.fifo[d.fifoW] = v
-	d.fifoW++
+	d.cmdQ = append(d.cmdQ, v)
 }
 
-// run runs the 68000 for n cycles and returns the cycles it took.
-func (d *dsb2) run(n int64) int64 {
-	start := d.cpu.Cycles
-	d.cpu.Run(start + n)
-	return d.cpu.Cycles - start
+// runFor runs the 68000 for about n cycles and returns how many it ran.
+func (d *dsb2) runFor(n int64) int64 {
+	from := d.cpu.Cycles
+	d.cpu.Run(from + n)
+	return d.cpu.Cycles - from
 }
 
-// runFrame runs the board for one video frame and mixes n samples (44.1
-// kHz) of music into out (interleaved left, right).
+// runFrame runs the board for one video frame and adds n samples (44.1 kHz)
+// of music to out (interleaved left, right).
 func (d *dsb2) runFrame(out []float32, n int) {
-	for d.fifoR != d.fifoW {
-		d.cmdLatch = d.fifo[d.fifoR]
-		d.fifoR++
+	// each command byte interrupts the 68000, which takes it at once
+	for _, v := range d.cmdQ {
+		d.cmdNow = v
 		d.cpu.SetIRQ(1)
-		d.cyclesThisFrame += d.run(500)
+		d.cycles += d.runFor(500)
 	}
-	d.frameFrac += dsbHz / 57.52416
-	period := int64(d.frameFrac)
-	d.frameFrac -= float64(period)
-	for d.cyclesThisFrame < period {
-		if d.cyclesThisFrame >= d.nextTimer {
+	d.cmdQ = d.cmdQ[:0]
+	d.frameAcc += dsbHz / 57.52416
+	frame := int64(d.frameAcc)
+	d.frameAcc -= float64(frame)
+	for d.cycles < frame {
+		if d.cycles >= d.nextTick {
 			d.cpu.SetIRQ(2)
-			d.nextTimer += dsbTimerPeriod
+			d.nextTick += dsbTickEach
 		}
-		end := d.nextTimer
-		if period < end {
-			end = period
-		}
-		d.cyclesThisFrame += d.run(end - d.cyclesThisFrame)
+		d.cycles += d.runFor(min(d.nextTick, frame) - d.cycles)
 	}
-	d.cyclesThisFrame -= period
-	d.nextTimer -= period
+	d.cycles -= frame
+	d.nextTick -= frame
+	d.mix(out, n)
+}
 
-	var volL, volR float32
-	src := d.stereo
-	switch src {
-	case stereoMonoLeft:
-		volL, volR = float32(d.volume[0]), float32(d.volume[0])
-	case stereoMonoRight:
-		volL, volR = float32(d.volume[1]), float32(d.volume[1])
-	default:
-		volL, volR = float32(d.volume[0]), float32(d.volume[1])
+// mix adds n output samples of the music, resampled from 32 kHz, with the
+// volumes and routing the program set.
+func (d *dsb2) mix(out []float32, n int) {
+	gl, gr := float32(d.vol[0])/255, float32(d.vol[1])/255
+	switch d.route {
+	case routeLeft:
+		gr = gl
+	case routeRight:
+		gl = gr
 	}
-	volL /= 255
-	volR /= 255
-	const step = float64(dsbMPEGRate) / soundRate
 	for i := 0; i < n; i++ {
-		f := float32(d.frac)
-		l := float32(d.prevL)*(1-f) + float32(d.nextL)*f
-		r := float32(d.prevR)*(1-f) + float32(d.nextR)*f
-		switch src {
-		case stereoMonoLeft:
+		f := float32(d.resample)
+		l := float32(d.cur[0]) + (float32(d.nxt[0])-float32(d.cur[0]))*f
+		r := float32(d.cur[1]) + (float32(d.nxt[1])-float32(d.cur[1]))*f
+		switch d.route {
+		case routeLeft:
 			r = l
-		case stereoMonoRight:
+		case routeRight:
 			l = r
 		}
-		out[2*i] += l * volL
-		out[2*i+1] += r * volR
-		d.frac += step
-		for d.frac >= 1 {
-			d.frac--
-			d.prevL, d.prevR = d.nextL, d.nextR
-			d.nextL, d.nextR = d.decodeSample()
+		out[2*i] += l * gl
+		out[2*i+1] += r * gr
+		d.resample += float64(dsbMusicHz) / soundRate
+		for d.resample >= 1 {
+			d.resample--
+			d.cur = d.nxt
+			d.nxt = d.nextSample()
 		}
 	}
 }
 
-// ---------------------------------------------------------------- music
+// ---- the decoder chip ----
 
-func (d *dsb2) setMemory(start, end uint32, loop bool) {
+func (d *dsb2) setRoute(v uint8, mono int) {
+	if v != 0 {
+		d.route = mono
+	} else {
+		d.route = routeStereo
+	}
+}
+
+func (d *dsb2) play() {
+	if debugSound {
+		fmt.Printf("DSB play %06X-%06X\n", d.start, d.end)
+	}
+	d.playing = true
 	d.dec.init()
-	d.decStart = int(start)
-	d.decEnd = int(end)
-	d.decPos = d.decStart
-	d.pcmN, d.pcmPos = 0, 0
-	d.decLoop = loop
-	d.decStopped = false
-	d.decLoaded = true
+	d.loopA, d.loopB, d.loop = int(d.start), int(d.end), false
+	d.at = d.loopA
+	d.pcmLen, d.pcmAt = 0, 0
+	d.silent = false
 }
 
-// updateMemory changes where the music loops back to, keeping the place it
-// is playing.
-func (d *dsb2) updateMemory(start uint32, length uint32, loop bool) {
-	d.decStart = int(start)
-	d.decEnd = int(start) + int(int32(length))
-	d.decLoop = loop
+func (d *dsb2) stop() {
+	d.playing = false
+	d.silent = true
 }
 
-func (d *dsb2) endOfBuffer() bool { return d.decPos >= d.decEnd-mpegHdrSize }
+// loopFrom sets the stretch the tune loops over, without moving where it is.
+func (d *dsb2) loopFrom(a, b uint32, loop bool) {
+	d.loopA, d.loopB, d.loop = int(a), int(b), loop
+}
 
-// decodeSample gives the next 32 kHz stereo sample of the music.
-func (d *dsb2) decodeSample() (int16, int16) {
-	if d.decStopped || !d.decLoaded {
-		return 0, 0
+// writeDecoder takes a byte the 68000 writes to the decoder.
+func (d *dsb2) writeDecoder(b uint8) {
+	if debugSound {
+		fmt.Printf("decoder %02X\n", b)
 	}
-	for tries := 0; d.pcmPos >= d.pcmN; tries++ {
-		if tries > 4 {
-			return 0, 0
+	if d.cmd == nil {
+		c, ok := dsbCmds[b]
+		if !ok {
+			return
 		}
-		end := d.decEnd
-		if end > len(d.mpeg) {
-			end = len(d.mpeg)
+		d.cmd, d.args = &c, d.args[:0]
+	} else {
+		d.args = append(d.args, b)
+	}
+	if len(d.args) == d.cmd.args {
+		c := d.cmd
+		d.cmd = nil
+		c.do(d, d.args)
+	}
+}
+
+// nextSample is the music's next 32 kHz sample pair.
+func (d *dsb2) nextSample() [2]int16 {
+	if d.silent {
+		return [2]int16{}
+	}
+	for tries := 0; d.pcmAt >= d.pcmLen; tries++ {
+		if tries > 4 {
+			return [2]int16{}
 		}
 		var data []byte
-		if d.decPos >= 0 && d.decPos < end {
-			data = d.mpeg[d.decPos:end]
+		if end := min(d.loopB, len(d.mpeg)); d.at >= 0 && d.at < end {
+			data = d.mpeg[d.at:end]
 		}
 		n, used, ch := d.dec.decodeFrame(data, d.pcm[:])
-		d.decPos += used
-		d.pcmN, d.pcmPos, d.pcmCh = n, 0, ch
-		if d.endOfBuffer() || (n == 0 && used == 0) {
-			if d.decLoop {
-				d.decPos = d.decStart
-			} else if d.pcmN == 0 {
-				d.decStopped = true
-				return 0, 0
+		d.at += used
+		d.pcmLen, d.pcmAt, d.pcmCh = n, 0, ch
+		if d.at >= d.loopB-mpegHdrSize || (n == 0 && used == 0) {
+			switch {
+			case d.loop:
+				d.at = d.loopA
+			case n == 0:
+				d.silent = true
+				return [2]int16{}
 			}
 		}
 	}
-	i := d.pcmPos * d.pcmCh
-	d.pcmPos++
-	return d.pcm[i], d.pcm[i+d.pcmCh-1]
+	i := d.pcmAt * d.pcmCh
+	d.pcmAt++
+	return [2]int16{d.pcm[i], d.pcm[i+d.pcmCh-1]}
 }
 
-func (d *dsb2) writeMPEGFIFO(b uint8) {
-	if debugSound {
-		fmt.Printf("fifo %02X state %d\n", b, d.mpegState)
-	}
-	startPlay := func() {
-		if debugSound {
-			fmt.Printf("DSB play %06X-%06X\n", d.mpegStart, d.mpegEnd)
-		}
-		d.playing = true
-		d.setMemory(d.mpegStart, d.mpegEnd, false)
-	}
-	switch d.mpegState {
-	case mpegIdle:
-		switch b {
-		case 0x14, 0x15:
-			d.mpegState = mpegGot14
-		case 0x24, 0x25:
-			d.mpegState = mpegGot24
-		case 0x74, 0x75:
-			startPlay()
-			d.mpegState = mpegIdle
-		case 0x84, 0x85:
-			d.decStopped = true
-			d.playing = false
-		case 0xa0:
-			d.mpegState = mpegGotA0
-		case 0xa1:
-			d.mpegState = mpegGotA1
-		case 0xa3:
-			d.mpegState = mpegGotA3
-		case 0xa4:
-			d.mpegState = mpegGotA4
-		case 0xa5:
-			d.mpegState = mpegGotA5
-		case 0xa7:
-			d.mpegState = mpegGotA7
-		case 0xb0:
-			d.mpegState = mpegGotB0
-		case 0xb1:
-			d.mpegState = mpegGotB1
-		case 0xb2:
-			d.mpegState = mpegGotB2
-		case 0xb4:
-			d.mpegState = mpegGotB4
-		case 0xb5:
-			d.mpegState = mpegGotB5
-		case 0xb6:
-			d.mpegState = mpegGotB6
-		}
-	case mpegGot14:
-		d.mpegStart = d.mpegStart&0x00FFFF | uint32(b)<<16
-		d.mpegState++
-	case mpeg14_0:
-		d.mpegStart = d.mpegStart&0xFF00FF | uint32(b)<<8
-		d.mpegState++
-	case mpeg14_1:
-		d.mpegStart = d.mpegStart&0xFFFF00 | uint32(b)
-		d.mpegState = mpegIdle
-		if d.playing {
-			d.updateMemory(d.mpegStart, d.mpegEnd-d.mpegStart, true)
-		}
-	case mpegGot24:
-		d.mpegEnd = d.mpegEnd&0x00FFFF | uint32(b)<<16
-		d.mpegState++
-	case mpeg24_0:
-		d.mpegEnd = d.mpegEnd&0xFF00FF | uint32(b)<<8
-		d.mpegState++
-	case mpeg24_1:
-		d.mpegEnd = d.mpegEnd&0xFFFF00 | uint32(b)
-		d.stereo = stereoBoth
-		d.mpegState = mpegIdle
-	case mpegGotA0:
-		if b != 0 {
-			d.stereo = stereoMonoLeft
-		} else {
-			d.stereo = stereoBoth
-		}
-		d.mpegState = mpegIdle
-	case mpegGotA4:
-		d.mpegState = mpegIdle
-		if b == 0x75 {
-			startPlay()
-		}
-	case mpegGotB1:
-		if b != 0 {
-			d.stereo = stereoMonoRight
-		} else {
-			d.stereo = stereoBoth
-		}
-		d.mpegState = mpegIdle
-	case mpegGotB4:
-		d.mpegState = mpegIdle
-		if b == 0x96 {
-			d.decStopped = true
-			d.playing = false
-		}
-	case mpegGotB6, mpegGotB0:
-		d.volume[0] = b
-		d.mpegState = mpegIdle
-	case mpegGotA7, mpegGotA1:
-		d.volume[1] = b
-		d.mpegState = mpegIdle
-	case mpegGotA5, mpegGotB5, mpegGotB2, mpegGotA3:
-		d.mpegState = mpegIdle
-	}
-}
-
-// ---------------------------------------------------------------- 68000 bus
+// ---- the 68000's bus ----
 
 func (d *dsb2) Read8(a uint32) uint8 {
 	switch {
 	case a < 0x20000:
 		return d.prog[a]
 	case a == 0xc00001:
-		return d.cmdLatch
-	case a == 0xc00003: // command valid
+		return d.cmdNow
+	case a == 0xc00003, a == 0xe80001: // a command is there; the decoder is ready
 		return 1
-	case a == 0xe80001: // MPEG decoder status
-		return 1
-	case a >= 0xf00000 && a < 0xf10000:
+	case a >= 0xf00000 && a < 0xf20000:
 		return d.ram[a&0x1ffff]
 	}
 	return 0
@@ -398,7 +332,7 @@ func (d *dsb2) Write8(a uint32, v uint8) {
 	case a >= 0xf00000 && a < 0xf20000:
 		d.ram[a&0x1ffff] = v
 	case a == 0xe00003:
-		d.writeMPEGFIFO(v)
+		d.writeDecoder(v)
 	}
 }
 
@@ -409,7 +343,7 @@ func (d *dsb2) Write16(a uint32, v uint16) {
 	}
 }
 
-// Ack: the interrupts use the autovectors and are dropped when taken.
+// Ack: the interrupts are autovectored and end when taken.
 func (d *dsb2) Ack(level int) int {
 	d.cpu.SetIRQ(0)
 	return -1

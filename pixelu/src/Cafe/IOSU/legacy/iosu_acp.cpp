@@ -4,7 +4,7 @@
 #include "iosu_ioctl.h"
 #include "iosu_acp.h"
 #include "Cafe/OS/libs/nn_common.h"
-#include "util/tinyxml2/tinyxml2.h"
+#include "util/xml/XmlDocument.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/nn_save/nn_save.h"
 #include "util/helpers/helpers.h"
@@ -74,9 +74,9 @@ namespace iosu
 		// the long name, short name and publisher strings exist once per language
 		const char* const kMetaLanguages[12] = { "ja", "en", "fr", "de", "it", "es", "zhs", "ko", "nl", "pt", "ru", "zht" };
 
-		void ReadNumber(tinyxml2::XMLElement* menu, const char* tag, MetaField kind, void* dst)
+		void ReadNumber(rpxml::XMLElement* menu, const char* tag, MetaField kind, void* dst)
 		{
-			tinyxml2::XMLElement* el = menu->FirstChildElement(tag);
+			rpxml::XMLElement* el = menu->FirstChildElement(tag);
 			if (!el)
 				return;
 			const char* text = el->GetText();
@@ -94,9 +94,9 @@ namespace iosu
 				*(uint32be*)dst = v;
 		}
 
-		void ReadText(tinyxml2::XMLElement* menu, const char* tag, char* dst, size_t capacity)
+		void ReadText(rpxml::XMLElement* menu, const char* tag, char* dst, size_t capacity)
 		{
-			tinyxml2::XMLElement* el = menu->FirstChildElement(tag);
+			rpxml::XMLElement* el = menu->FirstChildElement(tag);
 			if (!el)
 				return;
 			const char* text = el->GetText();
@@ -110,9 +110,9 @@ namespace iosu
 		void ParseMetaXml(const uint8* xmlData, uint32 xmlSize, acpMetaXml_t* out)
 		{
 			memset(out, 0, sizeof(acpMetaXml_t));
-			tinyxml2::XMLDocument doc;
+			rpxml::XMLDocument doc;
 			doc.Parse((const char*)xmlData, xmlSize);
-			tinyxml2::XMLElement* menu = doc.FirstChildElement("menu");
+			rpxml::XMLElement* menu = doc.FirstChildElement("menu");
 			if (!menu)
 				return;
 			uint8* base = (uint8*)out;
@@ -464,16 +464,16 @@ namespace iosu
 			if (!content || content->empty())
 				return NN_RESULT_SUCCESS;
 
-			tinyxml2::XMLDocument doc;
-			tinyxml2::XMLError err = doc.Parse((const char*)content->data(), content->size());
-			if (err != tinyxml2::XML_SUCCESS && err != tinyxml2::XML_ERROR_EMPTY_DOCUMENT)
+			rpxml::XMLDocument doc;
+			rpxml::XMLError err = doc.Parse((const char*)content->data(), content->size());
+			if (err != rpxml::XML_SUCCESS && err != rpxml::XML_ERROR_EMPTY_DOCUMENT)
 				return NN_RESULT_SUCCESS;
 
-			tinyxml2::XMLNode* first = doc.FirstChild();
+			rpxml::XMLNode* first = doc.FirstChild();
 			if (!first || !first->ToDeclaration())
 				doc.InsertFirstChild(doc.NewDeclaration());
 
-			tinyxml2::XMLElement* info = doc.FirstChildElement("info");
+			rpxml::XMLElement* info = doc.FirstChildElement("info");
 			if (!info)
 				info = doc.InsertEndChild(doc.NewElement("info"))->ToElement();
 
@@ -481,13 +481,13 @@ namespace iosu
 			char stamp[32];
 			snprintf(stamp, sizeof(stamp), "%" PRIx64, NowSeconds());
 
-			tinyxml2::XMLElement* account = info->FirstChildElement("account");
+			rpxml::XMLElement* account = info->FirstChildElement("account");
 			while (account && !account->Attribute("persistentId", idText.c_str()))
 				account = account->NextSiblingElement("account");
 
 			if (account)
 			{
-				tinyxml2::XMLElement* ts = account->FirstChildElement("timestamp");
+				rpxml::XMLElement* ts = account->FirstChildElement("timestamp");
 				if (ts)
 					ts->SetText(stamp);
 				else
@@ -497,13 +497,13 @@ namespace iosu
 			{
 				account = doc.NewElement("account");
 				account->SetAttribute("persistentId", idText.c_str());
-				tinyxml2::XMLElement* ts = doc.NewElement("timestamp");
+				rpxml::XMLElement* ts = doc.NewElement("timestamp");
 				ts->SetText(stamp);
 				account->InsertFirstChild(ts);
 				info->InsertFirstChild(account);
 			}
 
-			tinyxml2::XMLPrinter printer;
+			rpxml::XMLPrinter printer;
 			doc.Print(&printer);
 			if (FileStream* out = FileStream::createFile2(file))
 			{

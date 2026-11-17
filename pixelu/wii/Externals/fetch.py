@@ -9,13 +9,12 @@ which of PixelU-Wii's patches (Externals/patches) are applied to it. Nothing
 is taken from Dolphin's repositories.
 
     python fetch.py [--dest DIR] [--only NAME,...] [--jobs N] [--keep-git]
-    python fetch.py --group ffmpeg    # the entries of one group (see below)
+    python fetch.py --group NAME      # the entries of one group (see below)
     python fetch.py --list            # the table, nothing fetched
     python fetch.py --check           # verify an existing third-party folder
 
-Entries with a "group" are only fetched when that group is asked for: FFmpeg's
-source is only needed to build FFmpeg (Externals/FFmpeg/build-ffmpeg.sh),
-not by the CMake build, which uses the built libraries.
+Entries with a "group" are only fetched when that group is asked for (for
+sources that the CMake build itself does not use).
 
 The default DIR is pixelu/wii/third_party, which is what the CMake build reads
 (PIXELU_WII_THIRD_PARTY). A library whose folder already holds the same

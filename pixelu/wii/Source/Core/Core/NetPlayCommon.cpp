@@ -6,11 +6,11 @@
 #include <functional>
 
 #include <fmt/format.h>
-#include <lzo/lzo1x.h>
 
 #include "Common/FileUtil.h"
 #include "Common/HttpRequest.h"
 #include "Common/IOFile.h"
+#include "Common/LZO1X.h"
 #include "Common/MsgHandler.h"
 #include "Common/SFMLHelper.h"
 #include "InputCommon/GCPadStatus.h"
@@ -19,10 +19,9 @@ namespace NetPlay
 {
 namespace
 {
-// Uncompressed bytes per chunk, and the worst-case size of one compressed chunk (LZO1X can grow
-// incompressible input by 1/16 plus a few bytes).
+// Uncompressed bytes per chunk, and the worst-case size of one compressed chunk.
 constexpr u32 kChunkSize = 64 * 1024;
-constexpr u32 kMaxCompressedChunk = kChunkSize + kChunkSize / 16 + 64 + 3;
+constexpr u32 kMaxCompressedChunk = static_cast<u32>(Common::LZO1X::WorstCase(kChunkSize));
 
 // Fills the buffer with the next `length` input bytes; returns false on a read error.
 using ChunkSource = std::function<bool(u64 offset, u32 length, const u8** data)>;
@@ -35,7 +34,6 @@ bool CompressInto(sf::Packet& packet, u64 total, const ChunkSource& source)
     return true;
 
   std::vector<u8> compressed(kMaxCompressedChunk);
-  std::vector<u8> work_memory(LZO1X_1_MEM_COMPRESS);
 
   u64 offset = 0;
   while (offset < total)
@@ -45,16 +43,11 @@ bool CompressInto(sf::Packet& packet, u64 total, const ChunkSource& source)
     if (!source(offset, length, &input))
       return false;
 
-    lzo_uint compressed_length = 0;
-    if (lzo1x_1_compress(input, length, compressed.data(), &compressed_length,
-                         work_memory.data()) != LZO_E_OK)
-    {
-      PanicAlertFmtT("Internal LZO Error - compression failed");
-      return false;
-    }
+    const std::size_t compressed_length =
+        Common::LZO1X::Compress(input, length, compressed.data());
 
     packet << static_cast<u32>(compressed_length);
-    for (lzo_uint i = 0; i < compressed_length; ++i)
+    for (std::size_t i = 0; i < compressed_length; ++i)
       packet << compressed[i];
 
     offset += length;
@@ -100,9 +93,9 @@ ChunkResult DecompressFrom(sf::Packet& packet, u64 total, u64* produced, const C
     for (u32 i = 0; i < compressed_length; ++i)
       packet >> compressed[i];
 
-    lzo_uint chunk_length = chunk.size();
-    if (lzo1x_decompress_safe(compressed.data(), compressed_length, chunk.data(), &chunk_length,
-                              nullptr) != LZO_E_OK)
+    std::size_t chunk_length = 0;
+    if (!Common::LZO1X::Decompress(compressed.data(), compressed_length, chunk.data(),
+                                   chunk.size(), &chunk_length))
     {
       PanicAlertFmtT("Internal LZO Error - decompression failed");
       return ChunkResult::Failed;
